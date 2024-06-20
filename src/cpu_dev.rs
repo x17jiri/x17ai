@@ -3,7 +3,8 @@
 
 use crate::buffer::Buffer;
 use crate::device::{DType, Device};
-use crate::shape::Shape;
+use crate::shape::{Shape, MAX_LOCAL_DIMS};
+use smallvec::SmallVec;
 
 #[repr(C)]
 struct CPUBuffer {
@@ -16,7 +17,7 @@ struct CPUDevice_f32;
 impl CPUDevice_f32 {
 	type UnaryKernel = fn(in_: f32) -> f32;
 
-	fn unary_impl(
+	fn inplace_unary_impl(
 		i_ptr: *const f32,
 		i_dim: &[Dim],
 		o_prt: *mut f32,
