@@ -59,8 +59,13 @@ impl CPUDevice_f32 {
 	//--------------
 
 	fn unary(buf: *mut Buffer, shape: &Shape, kernel: Self::UnaryKernel) -> BufferPtr {
-		let (output_shape, elems, input_contiguous) = shape.make_contiguous();
+		let (out_shape, elems, input_contiguous) = shape.to_contiguous();
 		let output = Self::new_buffer(elems);
+		if input_contiguous {
+			// TODO
+		} else {
+			let dims = Shape::merge_dims(&[&shape, &out_shape]);
+		}
 	}
 
 	fn exp(_self: &Device, buf: *mut Buffer, shape: &Shape) -> BufferPtr {

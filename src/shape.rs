@@ -12,7 +12,7 @@ pub const MAX_LOCAL_DIMS: usize = 4;
 #[derive(Debug, Clone, Copy)]
 pub struct Dim {
 	pub len: usize,
-	pub stride: isize, // Note: stride can be negative, so it is signed.
+	pub stride: usize,
 }
 
 #[derive(Clone)]
@@ -48,30 +48,38 @@ impl Shape {
 		let mut dim_vec = [dim; MAX_LOCAL_DIMS];
 
 		// Total number of elements in the dimensions processed so far
-		let mut elems: usize = 1;
+		let mut elems = 1;
 
 		// Total number of elements in the dimensions processed so far,
 		// ignoring zero length dimensions.
-		let mut nonzero_elems: usize = 1;
+		let mut nonzero_elems: isize = 1;
 
 		for i in (0..ndim).rev() {
-			let D = dims[i];
+			let len = dims[i];
 
-			dim_vec[i].len = D;
-			dim_vec[i].stride = elems as isize;
-			elems *= D;
+			dim_vec[i].len = len;
+			dim_vec[i].stride = elems;
+			elems *= len;
 
 			// Check that if we ignore zero length dimensions, the number of elements
-			// does not overflow.
-			if likely(D > 0) {
-				let Some(e) = nonzero_elems.checked_mul(D).and_then(|n| n.try_into().ok()) else {
-					cold_path();
-					return Err(Error::TooManyElems);
+			// does not overflow. This is done to make sure our calculations would not overflow
+			// even if we had the same dimensions but in different order.
+			if likely(len > 0) {
+				let len: Option<isize> = len.try_into().ok();
+				let mul = len.and_then(|len| nonzero_elems.checked_mul(len));
+				match mul {
+					Some(mul) => {
+						nonzero_elems = mul;
+					},
+					None => {
+						cold_path();
+						return Err(Error::TooManyElems);
+					},
 				};
-				nonzero_elems = e;
 			}
 		}
 
+		debug_assert!(ndim <= u8::MAX as usize);
 		Ok(Shape {
 			__off: 0,
 			__ndim: ndim as u8,
@@ -84,7 +92,7 @@ impl Shape {
 	// The ordering of strides is the same as in the original shape.
 	// The second return value is the total number of elements in the shape.
 	// The third return value is true if the shape was already contiguous.
-	pub fn make_contiguous(&self) -> (Shape, usize, bool) {
+	pub fn to_contiguous(&self) -> (Shape, usize, bool) {
 		let mut new_shape = self.clone();
 		new_shape.__off = 0;
 
@@ -94,7 +102,9 @@ impl Shape {
 		let mut contiguous = true;
 		for i in perm.iter() {
 			let dim = &mut new_shape.__dims[*i as usize];
-			contiguous = dim.stride == elems;
+
+			// Note: We don't need `contiguous = contiguous && (dim.stride == elems);`
+			contiguous = (dim.stride == elems);
 			dim.stride = elems;
 			elems *= dim.len;
 		}
@@ -102,12 +112,17 @@ impl Shape {
 		(new_shape, elems as usize, contiguous)
 	}
 
-	pub fn merge_dims(&self) -> SmallVec<[Dim; MAX_LOCAL_DIMS]> {
-		let dims = self.dims();
-		let perm = self.perm();
+	pub fn merge_dims<const N: usize>(shapes: &[&Shape; N]) -> SmallVec<[[Dim; N]; MAX_LOCAL_DIMS]> {
+		let perm: [&[u8]; N];
+		let dims: [&[Dim]; N];
+
+		for n in 0..N {
+			perm[n] = shapes[n].perm();
+			dims[n] = shapes[n].dims();
+		}
 
 		let mut result = SmallVec::new();
-		if unlikely(perm.len() == 0) {
+		if N == 0 || unlikely(perm[0].len() == 0) {
 			return result;
 		}
 
@@ -117,11 +132,13 @@ impl Shape {
 		let mut prev_dim = result.last_mut().unwrap();
 
 		for i in perm[1..].iter() {
-			let dim = dims[*i as usize];
+			let mut dim = dims[*i as usize];
 
 			if dim.stride == prev_dim.len * prev_dim.stride {
+				// If possible, merge the new dimension with the previous one
 				prev_dim.len *= dim.len;
 			} else {
+				// Otherwise, add the new dimension to the result
 				result.push(dim);
 				prev_dim = result.last_mut().unwrap();
 			}
