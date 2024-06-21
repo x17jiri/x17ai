@@ -19,3 +19,4 @@ newline_style = "Unix"
 overflow_delimited_expr = true
 use_field_init_shorthand = true
 condense_wildcard_suffixes = true
+struct_lit_single_line = true

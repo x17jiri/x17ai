@@ -3,3 +3,6 @@ name = "x17ai" # the name of the package
 version = "0.1.0"    # the current version, obeying semver
 authors = ["Jiri <jiri.bobek@gmail.com>"]
 edition = "2021"
+
+[dependencies]
+smallvec = "1.7.0"

@@ -4,6 +4,14 @@
 #![feature(core_intrinsics)]
 #![feature(inherent_associated_types)]
 
+#[cold]
+fn cold_path() {}
+
+pub enum Error {
+	TooManyDims,
+	TooManyElems,
+}
+
 mod buffer;
 mod cpu_dev;
 mod device;
