@@ -116,33 +116,6 @@ impl Shape {
 	}
 }
 
-// Check if the number of dimensions is the same for all shapes.
-// Instead of bool, this returns either Some or None to allow using it with operator `?`.
-fn __check_ndim<const N: usize>(shapes: &[&Shape; N], ndim: usize) -> Option<()> {
-	// Note: The value of the `ndim` param comes from shape 0, so we don't need to check it.
-	for n in 1..N {
-		if unlikely(shapes[n].ndim() != ndim) {
-			return None;
-		}
-	}
-	Some(())
-}
-
-fn __extract_len_strides<const N: usize>(
-	shapes: &[&Shape; N],
-	dim: usize,
-) -> Option<(usize, [isize; N])> {
-	let len = shapes[0].dims()[dim].len;
-	let mut strides = [0; N];
-	for n in 0..N {
-		if unlikely(shapes[n].dims()[dim].len != len) {
-			return None;
-		}
-		strides[n] = shapes[n].dims()[dim].stride;
-	}
-	Some((len, strides))
-}
-
 pub fn prep_op<const N: usize>(inputs: [&Shape; N]) -> Option<(Shape, Traversal<N>, usize)> {
 	assert!(N > 0);
 	let mut out_shape = inputs[0].clone();
@@ -150,7 +123,12 @@ pub fn prep_op<const N: usize>(inputs: [&Shape; N]) -> Option<(Shape, Traversal<
 	let perm = out_shape.perm();
 	let mut traversal = Traversal::new(inputs);
 
-	__check_ndim(&inputs, ndim)?;
+	// Check if the number of dimensions is the same for all inputs
+	for n in 1..N {
+		if unlikely(inputs[n].ndim() != ndim) {
+			return None;
+		}
+	}
 
 	// If input shapes are 0-dimensional, i.e., scalar,
 	// return a 1-dimensional shape with 1 element
@@ -165,6 +143,7 @@ pub fn prep_op<const N: usize>(inputs: [&Shape; N]) -> Option<(Shape, Traversal<
 		let dim = perm[perm_index] as usize;
 		let len = out_shape.dims()[dim].len;
 
+		// Set the stride of the output shape so that it is contiguous
 		if likely(out_shape.dims()[dim].stride >= 0) {
 			out_shape.dims()[dim].stride = elems;
 		} else {
@@ -173,7 +152,16 @@ pub fn prep_op<const N: usize>(inputs: [&Shape; N]) -> Option<(Shape, Traversal<
 		}
 		elems *= len;
 
-		let (len, strides) = __extract_len_strides(&inputs, dim)?;
+		// Collect the strides of the input shapes
+		let mut strides = [0; N];
+		for n in 0..N {
+			if unlikely(inputs[n].dims()[dim].len != len) {
+				return None;
+			}
+			strides[n] = inputs[n].dims()[dim].stride;
+		}
+
+		// Push the dimension to the traversal
 		traversal.push_or_merge(len, strides);
 	}
 
@@ -188,22 +176,6 @@ pub struct LenAndStrides<const N: usize> {
 pub struct Traversal<const N: usize> {
 	off: [isize; N],
 	dims: SmallVec<[LenAndStrides; MAX_LOCAL_DIMS]>,
-}
-
-// if abs(a) == abs(b), return 0
-// otherwise, return value != 0
-fn __abs_ne(a: isize, b: isize) -> isize {
-	// contiguous if: a.abs() == b.abs()
-	// contiguous if: (a == b) || (a == -b)
-	// contiguous if: (a - b == 0) || (a + b == 0)
-	// NOT contiguous if: (a - b != 0) && (a + b != 0)
-	// NOT contiguous if: (a - b) & (a + b) != 0
-}
-
-// if a and b have the same sign, returns value >= 0
-// otherwise, returns value < 0
-fn __same_sign(a: isize, b: isize) -> isize {
-	a ^ b
 }
 
 impl<const N: usize> Traversal<N> {
@@ -229,31 +201,40 @@ impl<const N: usize> Traversal<N> {
 
 		let prev = self.dims.last().unwrap();
 
-		let mut not_contiguous = 0;
-		let mut same_sign = 0;
+		let mut contiguous = true;
+		let mut same_sign = true;
 		for i in 0..N {
 			// Check if dim and prev are contiguous
-			let contiguous =
-				strides[i].unsigned_abs() == (prev.strides[i] * prev.len as isize).unsigned_abs();
-			not_contiguous |= __abs_ne(strides[i], prev.strides[i] * prev.len as isize);
+			let real_stride = strides[i].unsigned_abs();
+			let expected_stride = (prev.strides[i] * prev.len as isize).unsigned_abs();
+			contiguous &= real_stride == expected_stride;
 
 			// Check if all strides for dim have the same sign
-			same_sign |= __same_sign(prev.strides[0], prev.strides[i]);
-			same_sign |= __same_sign(strides[0], strides[i]);
+			same_sign &= prev.strides[0] ^ prev.strides[i] >= 0;
+			same_sign &= strides[0] ^ strides[i] >= 0;
 		}
 
-		if not_contiguous != 0 || same_sign < 0 {
-			return None;
+		if contiguous & same_sign {
+			Some(prev)
+		} else {
+			None
 		}
-
-		Some(prev)
 	}
 
 	pub fn push_or_merge(&self, len: usize, strides: [isize; N]) {
-		if let Some(dim) = self.dim_to_merge(len, strides) {
-			// TODO - handle negative strides - need to adjust off
+		if let Some(prev_dim) = self.dim_to_merge(len, strides) {
+			if prev_dim.strides[0] < 0 {
+				for i in 0..N {
+					self.off[i] += (prev_dim.len as isize - 1) * prev_dim.strides[i];
+				}
+			}
+			if strides[0] < 0 {
+				for i in 0..N {
+					self.off[i] += (len as isize - 1) * strides[i];
+				}
+			}
 
-			dim.len *= len;
+			prev_dim.len *= len;
 		} else {
 			self.push_dim(len, strides);
 		}

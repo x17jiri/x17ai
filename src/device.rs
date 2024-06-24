@@ -2,6 +2,7 @@
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
 use crate::buffer::Buffer;
+use std::rc::Rc;
 
 #[repr(u16)]
 #[derive(Debug, Clone, Copy)]
