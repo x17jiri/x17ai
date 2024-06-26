@@ -2,7 +2,7 @@
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
 use crate::buffer::Buffer;
-use std::rc::Rc;
+use crate::shape::Shape;
 
 #[repr(u16)]
 #[derive(Debug, Clone, Copy)]
@@ -12,13 +12,16 @@ pub enum DType {
 	Uint,
 }
 
-pub struct MasterDevice;
-
 pub struct Device {
-	dtype: DType,
-	type_bits: usize,
-	type_shift: usize,
-	master: *const MasterDevice,
+	pub drop_buffer: fn(buf: *mut Buffer),
 
-	zero_: fn(self_: &Self, buf: *mut Buffer, shape: &Shape),
+	pub name: String,
+}
+
+pub struct VMT {
+	pub dtype: DType,
+	pub type_bits: usize,
+	pub dev: *const Device,
+
+	pub zero_: fn(self_: &Self, buf: &mut Buffer, shape: &Shape),
 }

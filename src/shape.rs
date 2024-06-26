@@ -15,7 +15,7 @@ pub struct Dim {
 	pub stride: isize, // Negative stride means the dimension is reversed
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Shape {
 	__off: isize,
 	__ndim: u8,

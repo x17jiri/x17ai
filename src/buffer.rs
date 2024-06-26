@@ -2,36 +2,33 @@
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
 use crate::device::Device;
-
-use std::alloc::Layout;
+use std::cell::RefCell;
 
 pub struct Buffer {
-	rc_minus_one: usize,
-	layout: Layout,
+	rc_minus_one: isize,
+	dev: std::rc::Rc<Device>
 }
 
+#[derive(Debug)]
 pub struct BufferPtr {
 	ptr: *mut Buffer,
-	dev: *const Device,
 }
 
 impl Clone for BufferPtr {
 	fn clone(&self) -> Self {
 		unsafe { (*self.ptr).rc_minus_one += 1 };
-		BufferPtr {
-			ptr: self.ptr,
-			dev: self.dev,
-		}
+		BufferPtr { ptr: self.ptr }
 	}
 }
 
 impl Drop for BufferPtr {
 	fn drop(&mut self) {
 		unsafe {
-			if (*self.ptr).rc_minus_one == 0 {
-				(*self.dev).free(self.ptr);
-			} else {
-				(*self.ptr).rc_minus_one -= 1;
+			let rc = (*self.ptr).rc_minus_one;
+			(*self.ptr).rc_minus_one = rc - 1;
+			if rc == 0 {
+				let drop_buffer = (*self.ptr).dev.drop_buffer;
+				drop_buffer(self.ptr);
 			}
 		}
 	}

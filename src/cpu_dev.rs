@@ -2,26 +2,64 @@
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
 use crate::buffer::Buffer;
-use crate::device::{BufferPtr, DType, Device};
+use crate::device::{BufferPtr, DType, Device, VMT};
 use crate::shape::{Dim, Shape, MAX_LOCAL_DIMS};
 use smallvec::SmallVec;
 use std::intrinsics::{likely, unlikely};
+use std::mem::MaybeUninit;
+use std::rc::Rc;
+use std::cell::UnsafeCell;
+
+type BufferItem = UnsafeCell<MaybeUninit<u64>>;
 
 #[repr(C)]
 struct CPUBuffer {
 	base: Buffer,
-	data: *mut u8,
+	elems: usize,
 }
 
-struct CPUDevice_f32;
+fn drop_buffer(buf: *mut Buffer) {
+	unsafe {
+		let buf = &mut *(buf as *mut CPUBuffer);
+		let layout = std::alloc::Layout::new::<CPUBuffer>();
+		let data = std::alloc::Layout::array::<BufferItem>(buf.elems).unwrap_unchecked();
+		let (layout, _) = layout.extend(data).unwrap_unchecked();
+		std::alloc::dealloc(buf as *mut CPUBuffer as *mut u8, layout);
+	}
+}
+
+pub fn new_cpu_device(name: String) -> Rc<Device> {
+	Rc::new(Device { drop_buffer, name })
+}
+
+#[allow(non_camel_case_types)]
+struct CPU_VMT_f32 {
+	base: VMT,
+
+	// How much do I need to L-shift an element offset to get a byte offset
+	shift: usize,
+}
 
 // Note: Functions that end with underscore work in-place, modifying the input buffer.
 
-impl CPUDevice_f32 {
+impl CPU_VMT_f32 {
 	type NullaryKernel = fn() -> f32;
 	type UnaryKernel = fn(in_: f32) -> f32;
 
 	//--------------
+
+	pub fn new_vmt(dev: *const Device) -> TODO {
+		let vmt = CPU_VMT_f32 {
+			base: VMT {
+				dtype: DType::Float,
+				type_bits: 32,
+				dev,
+				zero_: Self::zero_,
+			},
+			shift: 2,
+		};
+		&vmt.base as *const VMT
+	}
 
 	fn new_buffer(elems: usize) -> BufferPtr {
 		// TODO
