@@ -17,7 +17,7 @@ pub struct Dim {
 
 #[derive(Clone, Debug)]
 pub struct Shape {
-	__off: isize,
+	__off: usize,
 	__ndim: u8,
 	__dims: [Dim; MAX_LOCAL_DIMS],
 
@@ -111,7 +111,7 @@ impl Shape {
 		}
 	}
 
-	pub fn off(&self) -> isize {
+	pub fn off(&self) -> usize {
 		self.__off
 	}
 }
@@ -174,7 +174,7 @@ pub struct LenAndStrides<const N: usize> {
 }
 
 pub struct Traversal<const N: usize> {
-	off: [isize; N],
+	off: [usize; N],
 	dims: SmallVec<[LenAndStrides; MAX_LOCAL_DIMS]>,
 }
 

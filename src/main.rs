@@ -12,9 +12,7 @@ pub enum Error {
 	TooManyElems,
 }
 
-mod buffer;
 mod cpu_dev;
-mod device;
 mod shape;
-mod x17ai;
 mod tensor;
+mod x17ai;
