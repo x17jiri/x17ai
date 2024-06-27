@@ -17,7 +17,7 @@ pub struct Dim {
 
 #[derive(Clone, Debug)]
 pub struct Shape {
-	__off: usize,
+	__off: isize,
 	__ndim: u8,
 	__dims: [Dim; MAX_LOCAL_DIMS],
 
@@ -111,7 +111,15 @@ impl Shape {
 		}
 	}
 
-	pub fn off(&self) -> usize {
+	pub fn mut_dims(&mut self) -> &mut [Dim] {
+		unsafe {
+			let n = self.__ndim as usize;
+			let ptr = self.__dims.as_mut_ptr();
+			std::slice::from_raw_parts_mut(ptr, n)
+		}
+	}
+
+	pub fn off(&self) -> isize {
 		self.__off
 	}
 }
@@ -145,12 +153,12 @@ pub fn prep_op<const N: usize>(inputs: [&Shape; N]) -> Option<(Shape, Traversal<
 
 		// Set the stride of the output shape so that it is contiguous
 		if likely(out_shape.dims()[dim].stride >= 0) {
-			out_shape.dims()[dim].stride = elems;
+			out_shape.mut_dims()[dim].stride = elems;
 		} else {
-			out_shape.dims()[dim].stride = -elems;
+			out_shape.mut_dims()[dim].stride = -elems;
 			out_shape.__off += ((len as isize) - 1) * elems;
 		}
-		elems *= len;
+		elems *= len as isize;
 
 		// Collect the strides of the input shapes
 		let mut strides = [0; N];
@@ -169,13 +177,13 @@ pub fn prep_op<const N: usize>(inputs: [&Shape; N]) -> Option<(Shape, Traversal<
 }
 
 pub struct LenAndStrides<const N: usize> {
-	len: usize,
-	strides: [isize; N],
+	pub len: usize,
+	pub strides: [isize; N],
 }
 
 pub struct Traversal<const N: usize> {
-	off: [usize; N],
-	dims: SmallVec<[LenAndStrides; MAX_LOCAL_DIMS]>,
+	pub off: [isize; N],
+	pub dims: SmallVec<[LenAndStrides<N>; MAX_LOCAL_DIMS]>,
 }
 
 impl<const N: usize> Traversal<N> {

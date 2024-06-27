@@ -10,9 +10,9 @@ use std::rc::Rc;
 
 #[derive(Debug, Clone, Copy)]
 pub enum DType {
-	Float,
-	Int,
-	Uint,
+	Float(u8),
+	Int(u8),
+	Uint(u8),
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -20,9 +20,8 @@ pub enum DType {
 
 pub trait Device {
 	fn name(&self) -> &str;
-	fn dtype(&self) -> (DType, usize); // (dtype, type_bits)
 
-	fn new_buffer(self: Rc<dyn Device>, elems: usize) -> Rc<dyn Buffer>;
+	fn new_buffer(self: Rc<Self>, dtype: DType, elems: usize) -> Option<Rc<dyn Buffer>>;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -30,7 +29,8 @@ pub trait Device {
 
 pub trait Buffer {
 	fn device(&self) -> Rc<dyn Device>;
-	fn dtype(&self) -> (DType, usize); // (dtype, type_bits)
+
+	fn dtype(&self) -> DType;
 
 	fn zero_(&self, shape: &Shape);
 }
@@ -38,7 +38,7 @@ pub trait Buffer {
 //--------------------------------------------------------------------------------------------------
 // Tensor
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Tensor {
 	buf: Rc<dyn Buffer>,
 	shape: Shape,
@@ -49,3 +49,5 @@ impl Tensor {
 		self.buf.zero_(&self.shape);
 	}
 }
+
+//--------------------------------------------------------------------------------------------------
