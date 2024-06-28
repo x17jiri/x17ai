@@ -3,6 +3,8 @@
 
 use crate::shape::Shape;
 
+use std::fmt;
+use std::ops::Index;
 use std::rc::Rc;
 
 //--------------------------------------------------------------------------------------------------
@@ -33,6 +35,18 @@ pub trait Buffer {
 	fn dtype(&self) -> DType;
 
 	fn zero_(&self, shape: &Shape);
+
+	// requirement:
+	//     index.len() == shape.ndim() - 1
+	// This takes indexes for all except the last dimension and
+	// prints values in the last dimension.
+	fn __format(
+		&self,
+		f: &mut fmt::Formatter,
+		off: isize,
+		len: usize,
+		stride: isize,
+	) -> fmt::Result;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -40,8 +54,8 @@ pub trait Buffer {
 
 #[derive(Clone)]
 pub struct Tensor {
-	buf: Rc<dyn Buffer>,
-	shape: Shape,
+	pub buf: Rc<dyn Buffer>,
+	pub shape: Shape,
 }
 
 impl Tensor {

@@ -4,16 +4,17 @@
 use crate::shape::{prep_op, LenAndStrides, Shape};
 use crate::tensor::{Buffer, DType, Device};
 use std::cell::{Cell, RefCell, UnsafeCell};
+use std::fmt;
 use std::intrinsics::{likely, unlikely};
 use std::mem::MaybeUninit;
 use std::rc::Rc;
 
-struct CPUDevice {
+pub struct CPUDevice {
 	name: String,
 }
 
 impl CPUDevice {
-	fn new(name: String) -> Rc<CPUDevice> {
+	pub fn new(name: String) -> Rc<CPUDevice> {
 		Rc::<CPUDevice>::new(CPUDevice { name })
 	}
 }
@@ -36,19 +37,19 @@ mod impl_f32 {
 
 	pub struct CPUBufferF32 {
 		dev: Rc<CPUDevice>,
-		data: Box<[f32]>,
+		data: Box<[Cell<f32>]>,
 	}
 
 	impl CPUBufferF32 {
 		pub fn new(dev: Rc<CPUDevice>, elems: usize) -> Rc<CPUBufferF32> {
 			Rc::<CPUBufferF32>::new(CPUBufferF32 {
 				dev,
-				data: vec![0.0; elems].into_boxed_slice(),
+				data: vec![Cell::new(f32::default() + (17 as f32)); elems].into_boxed_slice(),
 			})
 		}
 
-		pub fn data(&self) -> *mut f32 {
-			self.data.as_mut_ptr()
+		pub fn data(&self) -> *const Cell<f32> {
+			self.data.as_ptr()
 		}
 	}
 
@@ -64,27 +65,58 @@ mod impl_f32 {
 		fn zero_(&self, shape: &Shape) {
 			nullary_(self.data(), shape, || f32::default());
 		}
+
+		fn __format(
+			&self,
+			f: &mut fmt::Formatter,
+			off: isize,
+			len: usize,
+			stride: isize,
+		) -> std::fmt::Result {
+			let mut ptr = unsafe { self.data().offset(off) };
+			for i in 0..len {
+				if i > 0 {
+					write!(f, ", ")?;
+				}
+				let val = unsafe { (*ptr).get() };
+				write!(f, "{}", val)?;
+
+				ptr = unsafe { ptr.offset(stride) };
+			}
+			Ok(())
+		}
 	}
 
 	//-- nullary operations
 
 	type NullaryKernel = fn() -> f32;
 
-	fn nullary_impl_(buf: *mut f32, off: isize, dim: &[LenAndStrides<1>], kernel: NullaryKernel) {
+	fn nullary_impl_(
+		buf: *const Cell<f32>,
+		off: isize,
+		dim: &[LenAndStrides<1>],
+		kernel: NullaryKernel,
+	) {
 		if dim.len() == 1 {
-			let mut ptr = unsafe { buf.offset(off) };
-			for _ in 0..dim[0].len {
-				unsafe {
-					ptr.write(kernel());
+			unsafe {
+				let mut ptr = buf.offset(off);
+				for _ in 0..dim[0].len {
+					let cell = &*ptr;
+					cell.set(kernel());
+
 					ptr = ptr.offset(dim[0].strides[0]);
 				}
 			}
-		} else if dim.len() > 1 {
-			// TODO
+		} else if likely(dim.len() > 1) {
+			let mut off = off;
+			for _ in 0..dim[0].len {
+				nullary_impl_(buf, off, &dim[1..], kernel);
+				off += dim[0].strides[0];
+			}
 		}
 	}
 
-	fn nullary_(buf: *mut f32, shape: &Shape, kernel: NullaryKernel) {
+	fn nullary_(buf: *const Cell<f32>, shape: &Shape, kernel: NullaryKernel) {
 		let (_, t, _) = prep_op([shape]).unwrap();
 		nullary_impl_(buf, t.off[0], t.dims.as_slice(), kernel);
 	}

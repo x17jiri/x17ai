@@ -1,0 +1,14 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+//			"type": "cppdbg",
+            "request": "launch",
+            "name": "Debug",
+            "program": "${workspaceFolder}/target/debug/x17ai",
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

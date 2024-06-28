@@ -111,6 +111,20 @@ impl Shape {
 		}
 	}
 
+	pub fn __prep_op_data(&mut self) -> (usize, &mut isize, &mut [Dim], &[u8]) {
+		unsafe {
+			let ndim = self.__ndim as usize;
+			let dims = self.__dims.as_mut_ptr();
+			let perm = self.__perm.as_ptr().add(MAX_LOCAL_DIMS - ndim);
+			(
+				ndim,
+				&mut self.__off,
+				std::slice::from_raw_parts_mut(dims, ndim),
+				std::slice::from_raw_parts(perm, ndim),
+			)
+		}
+	}
+
 	pub fn mut_dims(&mut self) -> &mut [Dim] {
 		unsafe {
 			let n = self.__ndim as usize;
@@ -127,8 +141,7 @@ impl Shape {
 pub fn prep_op<const N: usize>(inputs: [&Shape; N]) -> Option<(Shape, Traversal<N>, usize)> {
 	assert!(N > 0);
 	let mut out_shape = inputs[0].clone();
-	let ndim = out_shape.ndim();
-	let perm = out_shape.perm();
+	let (ndim, off, dims, perm) = out_shape.__prep_op_data();
 	let mut traversal = Traversal::new(inputs);
 
 	// Check if the number of dimensions is the same for all inputs
@@ -149,14 +162,14 @@ pub fn prep_op<const N: usize>(inputs: [&Shape; N]) -> Option<(Shape, Traversal<
 
 	for perm_index in 0..ndim {
 		let dim = perm[perm_index] as usize;
-		let len = out_shape.dims()[dim].len;
+		let len = dims[dim].len;
 
 		// Set the stride of the output shape so that it is contiguous
-		if likely(out_shape.dims()[dim].stride >= 0) {
-			out_shape.mut_dims()[dim].stride = elems;
+		if likely(dims[dim].stride >= 0) {
+			dims[dim].stride = elems;
 		} else {
-			out_shape.mut_dims()[dim].stride = -elems;
-			out_shape.__off += ((len as isize) - 1) * elems;
+			dims[dim].stride = -elems;
+			*off += ((len as isize) - 1) * elems;
 		}
 		elems *= len as isize;
 
@@ -202,12 +215,16 @@ impl<const N: usize> Traversal<N> {
 		self.dims.push(LenAndStrides { len, strides });
 	}
 
-	pub fn dim_to_merge(&self, len: usize, strides: [isize; N]) -> Option<&LenAndStrides<N>> {
+	pub fn dim_to_merge(
+		&mut self,
+		len: usize,
+		strides: [isize; N],
+	) -> Option<&mut LenAndStrides<N>> {
 		if self.dims.is_empty() {
 			return None;
 		}
 
-		let prev = self.dims.last().unwrap();
+		let prev = self.dims.last_mut().unwrap();
 
 		let mut contiguous = true;
 		let mut same_sign = true;
@@ -229,20 +246,22 @@ impl<const N: usize> Traversal<N> {
 		}
 	}
 
-	pub fn push_or_merge(&self, len: usize, strides: [isize; N]) {
+	pub fn push_or_merge(&mut self, len: usize, strides: [isize; N]) {
+		let mut off = self.off;
 		if let Some(prev_dim) = self.dim_to_merge(len, strides) {
 			if prev_dim.strides[0] < 0 {
 				for i in 0..N {
-					self.off[i] += (prev_dim.len as isize - 1) * prev_dim.strides[i];
+					off[i] += (prev_dim.len as isize - 1) * prev_dim.strides[i];
 				}
 			}
 			if strides[0] < 0 {
 				for i in 0..N {
-					self.off[i] += (len as isize - 1) * strides[i];
+					off[i] += (len as isize - 1) * strides[i];
 				}
 			}
 
 			prev_dim.len *= len;
+			self.off = off;
 		} else {
 			self.push_dim(len, strides);
 		}

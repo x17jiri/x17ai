@@ -1,3 +1,10 @@
 {
-	"CodeGPT.apiKey": "CodeGPT Plus Beta"
+	"CodeGPT.apiKey": "CodeGPT Plus Beta",
+	"[rust]": {
+		"editor.defaultFormatter": "rust-lang.rust-analyzer",
+	},
+	"workbench.colorCustomizations": {
+		"editorInlayHint.foreground": "#aaaabb",
+		"editorInlayHint.background": "#fafafa"
+	}
 }
