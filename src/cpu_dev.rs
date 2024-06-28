@@ -1,7 +1,7 @@
 // Copyright 2024 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
-use crate::shape::{prep_op, LenAndStrides, Shape};
+use crate::shape::{prep_op, Shape, TraversalDim};
 use crate::tensor::{Buffer, DType, Device};
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::fmt;
@@ -42,10 +42,14 @@ mod impl_f32 {
 
 	impl CPUBufferF32 {
 		pub fn new(dev: Rc<CPUDevice>, elems: usize) -> Rc<CPUBufferF32> {
-			Rc::<CPUBufferF32>::new(CPUBufferF32 {
+			let mut result = Rc::<CPUBufferF32>::new(CPUBufferF32 {
 				dev,
-				data: vec![Cell::new(f32::default() + (17 as f32)); elems].into_boxed_slice(),
-			})
+				data: vec![Cell::new(f32::default()); elems].into_boxed_slice(),
+			});
+			for i in 0..elems {
+				result.data[i].set(i as f32);
+			}
+			result
 		}
 
 		pub fn data(&self) -> *const Cell<f32> {
@@ -94,31 +98,33 @@ mod impl_f32 {
 	fn nullary_impl_(
 		buf: *const Cell<f32>,
 		off: isize,
-		dim: &[LenAndStrides<1>],
+		dims: &[TraversalDim<1>],
 		kernel: NullaryKernel,
 	) {
-		if dim.len() == 1 {
+		if dims.len() == 1 {
 			unsafe {
 				let mut ptr = buf.offset(off);
-				for _ in 0..dim[0].len {
+				for _ in 0..dims[0].len {
 					let cell = &*ptr;
 					cell.set(kernel());
 
-					ptr = ptr.offset(dim[0].strides[0]);
+					ptr = ptr.offset(dims[0].in_strides[0]);
 				}
 			}
-		} else if likely(dim.len() > 1) {
+		} else if likely(dims.len() > 1) {
 			let mut off = off;
-			for _ in 0..dim[0].len {
-				nullary_impl_(buf, off, &dim[1..], kernel);
-				off += dim[0].strides[0];
+			let dim = dims.last().unwrap();
+			let dims = &dims[..dims.len() - 1];
+			for _ in 0..dim.len {
+				nullary_impl_(buf, off, &dims, kernel);
+				off += dim.in_strides[0];
 			}
 		}
 	}
 
 	fn nullary_(buf: *const Cell<f32>, shape: &Shape, kernel: NullaryKernel) {
-		let t = prep_op([shape]).unwrap();
-		nullary_impl_(buf, t.off[0], t.dims.as_slice(), kernel);
+		let (t, _) = prep_op([shape]).unwrap();
+		nullary_impl_(buf, t.in_off[0], t.dims.as_slice(), kernel);
 	}
 
 	/*

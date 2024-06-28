@@ -62,6 +62,12 @@ impl Tensor {
 	pub fn zero_(&self) {
 		self.buf.zero_(&self.shape);
 	}
+	pub fn slice<R: std::ops::RangeBounds<usize>>(&self, dim: usize, range: R) -> Tensor {
+		Tensor {
+			buf: self.buf.clone(),
+			shape: self.shape.slice(dim, range),
+		}
+	}
 }
 
 //--------------------------------------------------------------------------------------------------

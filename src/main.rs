@@ -29,8 +29,14 @@ fn main() {
 	let shape = Shape::new(&[7, 3]).unwrap();
 	let mut tensor = tensor::Tensor { buf, shape };
 	println!("init = {}", tensor);
-	tensor.shape.transpose(0,1);
+	tensor.shape.transpose(0, 1);
 	println!("transposed = {}", tensor);
-	tensor.zero_();
-	println!("zeroed = {}", tensor);
+	let tensor2 = tensor.slice(1, ..3);
+	let tensor3 = tensor.slice(0, 1..2);
+	println!("sliced2 = {}", tensor2);
+	println!("sliced3 = {}", tensor3);
+	tensor3.zero_();
+	println!("zeroed1 = {}", tensor);
+	println!("zeroed2 = {}", tensor2);
+	println!("zeroed3 = {}", tensor3);
 }
