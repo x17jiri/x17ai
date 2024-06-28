@@ -117,7 +117,7 @@ mod impl_f32 {
 	}
 
 	fn nullary_(buf: *const Cell<f32>, shape: &Shape, kernel: NullaryKernel) {
-		let (_, t, _) = prep_op([shape]).unwrap();
+		let t = prep_op([shape]).unwrap();
 		nullary_impl_(buf, t.off[0], t.dims.as_slice(), kernel);
 	}
 

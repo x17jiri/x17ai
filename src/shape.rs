@@ -99,6 +99,14 @@ impl Shape {
 		}
 	}
 
+	pub fn perm_mut(&mut self) -> &mut [u8] {
+		unsafe {
+			let n = self.__ndim as usize;
+			let ptr = self.__perm.as_mut_ptr().add(MAX_LOCAL_DIMS - n);
+			std::slice::from_raw_parts_mut(ptr, n)
+		}
+	}
+
 	pub fn ndim(&self) -> usize {
 		self.__ndim as usize
 	}
@@ -111,21 +119,7 @@ impl Shape {
 		}
 	}
 
-	pub fn __prep_op_data(&mut self) -> (usize, &mut isize, &mut [Dim], &[u8]) {
-		unsafe {
-			let ndim = self.__ndim as usize;
-			let dims = self.__dims.as_mut_ptr();
-			let perm = self.__perm.as_ptr().add(MAX_LOCAL_DIMS - ndim);
-			(
-				ndim,
-				&mut self.__off,
-				std::slice::from_raw_parts_mut(dims, ndim),
-				std::slice::from_raw_parts(perm, ndim),
-			)
-		}
-	}
-
-	pub fn mut_dims(&mut self) -> &mut [Dim] {
+	pub fn dims_mut(&mut self) -> &mut [Dim] {
 		unsafe {
 			let n = self.__ndim as usize;
 			let ptr = self.__dims.as_mut_ptr();
@@ -136,12 +130,35 @@ impl Shape {
 	pub fn off(&self) -> isize {
 		self.__off
 	}
+
+	// Transposes the shape by swapping dimensions dim1 and dim2.
+	// Complexity: O(ndim)
+	pub fn transpose(&mut self, dim1: usize, dim2: usize) {
+		let ndim = self.ndim();
+		debug_assert!(dim1 < ndim);
+		debug_assert!(dim2 < ndim);
+
+		self.dims_mut().swap(dim1, dim2);
+
+		let perm = self.perm_mut();
+		let mut p1 = 0;
+		let mut p2 = 0;
+		for i in 0..ndim {
+			if perm[i] as usize == dim1 {
+				p1 = i;
+			}
+			if perm[i] as usize == dim2 {
+				p2 = i;
+			}
+		}
+		perm.swap(p1, p2);
+	}
 }
 
-pub fn prep_op<const N: usize>(inputs: [&Shape; N]) -> Option<(Shape, Traversal<N>, usize)> {
+pub fn prep_op<const N: usize>(inputs: [&Shape; N]) -> Option<Traversal<N>> {
 	assert!(N > 0);
-	let mut out_shape = inputs[0].clone();
-	let (ndim, off, dims, perm) = out_shape.__prep_op_data();
+	let ndim = inputs[0].ndim();
+	let perm = inputs[0].perm();
 	let mut traversal = Traversal::new(inputs);
 
 	// Check if the number of dimensions is the same for all inputs
@@ -154,41 +171,39 @@ pub fn prep_op<const N: usize>(inputs: [&Shape; N]) -> Option<(Shape, Traversal<
 	// If input shapes are 0-dimensional, i.e., scalar,
 	// return a 1-dimensional shape with 1 element
 	if unlikely(ndim == 0) {
-		traversal.push_dim(1, [1; N]);
-		return Some((out_shape, traversal, 1));
+		traversal.push_dim(1, 1, [1; N]);
+		return Some(traversal);
 	}
 
-	let mut elems = 1;
-
 	for perm_index in 0..ndim {
-		let dim = perm[perm_index] as usize;
-		let len = dims[dim].len;
+		let i = perm[perm_index] as usize;
+		let dim = inputs[0].dims()[i];
 
 		// Set the stride of the output shape so that it is contiguous
-		if likely(dims[dim].stride >= 0) {
-			dims[dim].stride = elems;
+		let out_stride = if likely(dim.stride >= 0) {
+			traversal.elems as isize
 		} else {
-			dims[dim].stride = -elems;
-			*off += ((len as isize) - 1) * elems;
-		}
-		elems *= len as isize;
+			traversal.out_off += ((dim.len as isize) - 1) * (traversal.elems as isize);
+			-(traversal.elems as isize)
+		};
 
 		// Collect the strides of the input shapes
 		let mut strides = [0; N];
 		for n in 0..N {
-			if unlikely(inputs[n].dims()[dim].len != len) {
+			if unlikely(inputs[n].dims()[i].len != dim.len) {
 				return None;
 			}
-			strides[n] = inputs[n].dims()[dim].stride;
+			strides[n] = inputs[n].dims()[i].stride;
 		}
 
 		// Push the dimension to the traversal
-		traversal.push_or_merge(len, strides);
+		traversal.push_or_merge(dim.len, strides);
 	}
 
-	Some((out_shape, traversal, elems as usize))
+	Some(traversal)
 }
 
+#[derive(Clone, Copy, Debug)]
 pub struct LenAndStrides<const N: usize> {
 	pub len: usize,
 	pub strides: [isize; N],
@@ -196,6 +211,7 @@ pub struct LenAndStrides<const N: usize> {
 
 pub struct Traversal<const N: usize> {
 	pub off: [isize; N],
+	pub elems: usize,
 	pub dims: SmallVec<[LenAndStrides<N>; MAX_LOCAL_DIMS]>,
 }
 
@@ -207,63 +223,58 @@ impl<const N: usize> Traversal<N> {
 		}
 		Traversal {
 			off,
+			elems: 1,
 			dims: SmallVec::new(),
 		}
 	}
 
-	pub fn push_dim(&mut self, len: usize, strides: [isize; N]) {
-		self.dims.push(LenAndStrides { len, strides });
-	}
-
-	pub fn dim_to_merge(
-		&mut self,
-		len: usize,
-		strides: [isize; N],
-	) -> Option<&mut LenAndStrides<N>> {
-		if self.dims.is_empty() {
-			return None;
-		}
-
-		let prev = self.dims.last_mut().unwrap();
-
-		let mut contiguous = true;
-		let mut same_sign = true;
+	pub fn can_merge(&self, prev: LenAndStrides<N>, next: LenAndStrides<N>) -> bool {
+		let mut can = true;
 		for i in 0..N {
 			// Check if dim and prev are contiguous
-			let real_stride = strides[i].unsigned_abs();
+			let real_stride = next.strides[i].unsigned_abs();
 			let expected_stride = (prev.strides[i] * prev.len as isize).unsigned_abs();
-			contiguous &= real_stride == expected_stride;
+			let contiguous = real_stride == expected_stride;
 
 			// Check if all strides for dim have the same sign
-			same_sign &= prev.strides[0] ^ prev.strides[i] >= 0;
-			same_sign &= strides[0] ^ strides[i] >= 0;
-		}
+			let prev_same_sign = prev.strides[0] ^ prev.strides[i] >= 0;
+			let next_same_sign = next.strides[0] ^ next.strides[i] >= 0;
 
-		if contiguous & same_sign {
-			Some(prev)
-		} else {
-			None
+			can &= contiguous & prev_same_sign & next_same_sign;
 		}
+		can
 	}
 
 	pub fn push_or_merge(&mut self, len: usize, strides: [isize; N]) {
-		let mut off = self.off;
-		if let Some(prev_dim) = self.dim_to_merge(len, strides) {
-			if prev_dim.strides[0] < 0 {
-				for i in 0..N {
-					off[i] += (prev_dim.len as isize - 1) * prev_dim.strides[i];
+		if !self.dims.is_empty() {
+			let prev = *self.dims.last().unwrap();
+			let next = LenAndStrides { len, strides };
+			if self.can_merge(prev, next) {
+				if prev.strides[0] < 0 {
+					for i in 0..N {
+						self.off[i] += (prev.len as isize - 1) * prev.strides[i];
+					}
 				}
-			}
-			if strides[0] < 0 {
-				for i in 0..N {
-					off[i] += (len as isize - 1) * strides[i];
+				if next.strides[0] < 0 {
+					for i in 0..N {
+						self.off[i] += (len as isize - 1) * strides[i];
+					}
 				}
-			}
 
-			prev_dim.len *= len;
-			self.off = off;
-		} else {
-			self.push_dim(len, strides);
+				let mut merged = prev;
+				merged.len *= len;
+				*self.dims.last_mut().unwrap() = merged;
+				return;
+			}
 		}
+
+		// can't merge, push a new dimension
+		self.push_dim(len, strides);
 	}
+
+	pub fn push_dim(&mut self, len: usize, strides: [isize; N]) {
+		self.elems *= len;
+		self.dims.push(LenAndStrides { len, out_stride, strides });
+	}
+
 }

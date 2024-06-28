@@ -27,8 +27,10 @@ fn main() {
 	let dev = CPUDevice::new("CPU".to_string());
 	let buf = dev.new_buffer(DType::Float(32), 21).unwrap();
 	let shape = Shape::new(&[7, 3]).unwrap();
-	let tensor = tensor::Tensor { buf, shape };
+	let mut tensor = tensor::Tensor { buf, shape };
 	println!("init = {}", tensor);
+	tensor.shape.transpose(0,1);
+	println!("transposed = {}", tensor);
 	tensor.zero_();
 	println!("zeroed = {}", tensor);
 }
