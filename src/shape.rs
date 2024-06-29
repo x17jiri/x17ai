@@ -193,14 +193,6 @@ pub fn prep_op<const N: usize>(inputs: [&Shape; N]) -> Option<(Traversal<N>, Sha
 	let mut traversal = Traversal::new(inputs);
 	let mut out_shape = inputs[0].clone();
 
-	// If input shapes are 0-dimensional, i.e., scalar,
-	// return a 1-dimensional shape with 1 element
-	if unlikely(ndim == 0) {
-		traversal.push_dim(1, [1; N]);
-		out_shape.__off = 0;
-		return Some((traversal, out_shape));
-	}
-
 	for perm_index in 0..ndim {
 		let i = perm[perm_index] as usize;
 		let dim = inputs[0].dims()[i];
@@ -223,6 +215,7 @@ pub fn prep_op<const N: usize>(inputs: [&Shape; N]) -> Option<(Traversal<N>, Sha
 		traversal.push_dim(dim.len, strides);
 	}
 
+	traversal.finalize();
 	out_shape.__off = traversal.out_off;
 	Some((traversal, out_shape))
 }
@@ -283,6 +276,10 @@ impl<const N: usize> Traversal<N> {
 	}
 
 	pub fn push_dim(&mut self, len: usize, mut in_strides: [isize; N]) {
+		if len == 1 {
+			return;
+		}
+
 		// Prepare the new dimension
 		// Make sure that out_stride >= 0 and in_strides[0] >= 0
 		let out_stride = self.elems as isize;
@@ -316,5 +313,16 @@ impl<const N: usize> Traversal<N> {
 
 		// Can't merge, push the new dimension
 		self.dims.push(next);
+	}
+
+	pub fn finalize(&mut self) {
+		// If we have no dimensions, add a dummy dimension
+		if self.dims.is_empty() {
+			self.dims.push(TraversalDim {
+				len: 1,
+				out_stride: 1,
+				in_strides: [1; N],
+			});
+		}
 	}
 }

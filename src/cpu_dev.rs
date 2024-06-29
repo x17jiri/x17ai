@@ -26,7 +26,7 @@ impl Device for CPUDevice {
 
 	fn new_buffer(self: Rc<Self>, dtype: DType, elems: usize) -> Option<Rc<dyn Buffer>> {
 		match dtype {
-			DType::Float(32) => Some(impl_f32::CPUBufferF32::new(self, elems)),
+			DType::Float(32) => Some(impl_f32::CPUBufferF32::new(self, elems)?),
 			_ => None,
 		}
 	}
@@ -41,19 +41,37 @@ mod impl_f32 {
 	}
 
 	impl CPUBufferF32 {
-		pub fn new(dev: Rc<CPUDevice>, elems: usize) -> Rc<CPUBufferF32> {
-			let mut result = Rc::<CPUBufferF32>::new(CPUBufferF32 {
-				dev,
-				data: vec![Cell::new(f32::default()); elems].into_boxed_slice(),
-			});
+		pub fn new(dev: Rc<CPUDevice>, elems: usize) -> Option<Rc<CPUBufferF32>> {
+			let layout = std::alloc::Layout::array::<Cell<f32>>(elems).ok()?;
+			let result = unsafe {
+				let data = std::alloc::alloc(layout) as *mut Cell<f32>;
+				if data.is_null() {
+					return None;
+				}
+				let data = std::slice::from_raw_parts_mut(data, elems);
+				let data = Box::from_raw(data);
+				Rc::<CPUBufferF32>::new(CPUBufferF32 { dev, data })
+			};
+			//			/***************************************************************************
 			for i in 0..elems {
 				result.data[i].set(i as f32);
 			}
-			result
+			//			***************************************************************************/
+			Some(result)
 		}
 
 		pub fn data(&self) -> *const Cell<f32> {
 			self.data.as_ptr()
+		}
+
+		pub fn zero_kernel(buf: *const Cell<f32>, len: usize, stride: isize) {
+			let mut ptr = buf;
+			for _ in 0..len {
+				unsafe {
+					(*ptr).set(f32::default());
+					ptr = ptr.offset(stride);
+				}
+			}
 		}
 	}
 
@@ -67,7 +85,7 @@ mod impl_f32 {
 		}
 
 		fn zero_(&self, shape: &Shape) {
-			nullary_(self.data(), shape, || f32::default());
+			nullary_(self.data(), shape, CPUBufferF32::zero_kernel);
 		}
 
 		fn __format(
@@ -93,7 +111,7 @@ mod impl_f32 {
 
 	//-- nullary operations
 
-	type NullaryKernel = fn() -> f32;
+	type NullaryKernel = fn(buf: *const Cell<f32>, len: usize, stride: isize);
 
 	fn nullary_impl_(
 		buf: *const Cell<f32>,
@@ -102,15 +120,9 @@ mod impl_f32 {
 		kernel: NullaryKernel,
 	) {
 		if dims.len() == 1 {
-			unsafe {
-				let mut ptr = buf.offset(off);
-				for _ in 0..dims[0].len {
-					let cell = &*ptr;
-					cell.set(kernel());
-
-					ptr = ptr.offset(dims[0].in_strides[0]);
-				}
-			}
+			let dim = dims[0];
+			let buf = unsafe { buf.offset(off) };
+			kernel(buf, dim.len, dim.in_strides[0]);
 		} else if likely(dims.len() > 1) {
 			let mut off = off;
 			let dim = dims.last().unwrap();
