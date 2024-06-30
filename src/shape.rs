@@ -35,7 +35,7 @@ impl Shape {
 	// The memory layout of the shape is:
 	//     [[0, 1, 2],
 	//      [3, 4, 5]]
-	pub fn new(dims: &[usize]) -> Result<Shape, Error> {
+	pub fn new(dims: &[usize]) -> Result<(Shape, usize), Error> {
 		// Having more than MAX_LOCAL_DIMS dimensions is not implemented yet
 		let ndim = dims.len();
 		if ndim > MAX_LOCAL_DIMS {
@@ -80,12 +80,15 @@ impl Shape {
 		}
 
 		debug_assert!(ndim <= u8::MAX as usize);
-		Ok(Shape {
-			__off: 0,
-			__ndim: ndim as u8,
-			__dims: dim_vec,
-			__perm: [3, 2, 1, 0],
-		})
+		Ok((
+			Shape {
+				__off: 0,
+				__ndim: ndim as u8,
+				__dims: dim_vec,
+				__perm: [3, 2, 1, 0],
+			},
+			elems as usize,
+		))
 	}
 
 	// Returns the permutation of dimensions that sorts them

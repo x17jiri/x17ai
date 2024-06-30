@@ -63,9 +63,24 @@ pub struct Tensor {
 }
 
 impl Tensor {
+	pub fn new_zeros(dev: Rc<dyn Device>, dtype: DType, dims: &[usize]) -> Tensor {
+		let (shape, elems) = Shape::new(dims).ok().unwrap();
+		let buf = dev.new_uninit(dtype, elems).unwrap();
+		buf.zero_(&shape);
+		Tensor { buf, shape }
+	}
+
+	pub fn new_randn(dev: Rc<dyn Device>, dtype: DType, dims: &[usize], rng: &mut Rng) -> Tensor {
+		let (shape, elems) = Shape::new(dims).ok().unwrap();
+		let buf = dev.new_uninit(dtype, elems).unwrap();
+		buf.randn_all_(rng);
+		Tensor { buf, shape }
+	}
+
 	pub fn zero_(&self) {
 		self.buf.zero_(&self.shape);
 	}
+
 	pub fn slice<R: std::ops::RangeBounds<usize>>(&self, dim: usize, range: R) -> Tensor {
 		Tensor {
 			buf: self.buf.clone(),

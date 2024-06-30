@@ -12,11 +12,18 @@ pub struct Rng {
 	state: [u32; STATE_WORDS],
 	block: [u32; STATE_WORDS],
 	pos: usize,
-	saved_norm: Option<f64>,
 }
 
 impl Rng {
-	pub fn new(key: &[u32; 8], iv: &[u32; 2]) -> Self {
+	pub fn new_default() -> Self {
+		#[rustfmt::skip]
+		Self::new_with_seed(&[
+			0x_0a69_ee79, 0x_fb23_8e49, 0x_9bf9_a072, 0x_00da_bd56,
+			0x_0420_fb57, 0x_7d06_2de2, 0x_2b40_4131, 0x_4ed7_e569,
+		])
+	}
+	pub fn new_with_seed(key: &[u32; 8]) -> Self {
+		let iv = [0x_1ada_b14a, 0x_4c3d_51fd]; // just some arbitrary constants
 		#[rustfmt::skip]
 		Rng {
 			state: [
@@ -27,10 +34,10 @@ impl Rng {
 			],
 			block: [0; STATE_WORDS],
 			pos: 0,
-			saved_norm: None,
 		}
 	}
 
+	// generates a block of random numbers
 	pub fn get_block(&mut self) -> [u32; STATE_WORDS] {
 		let mut result = self.state;
 
@@ -60,69 +67,7 @@ impl Rng {
 		result
 	}
 
-	pub fn get_u32(&mut self) -> u32 {
-		if self.pos == 0 {
-			self.block = self.get_block();
-			self.pos = STATE_WORDS;
-		}
-
-		self.pos -= 1;
-		self.block[self.pos]
-	}
-
-	// converts u32 to a float in the range [0.0, 1.0)
-	pub fn uniform(val: u32) -> f64 {
-		let mantissa = (val as u64) << (52 - 32);
-		let exp = (1023 as u64) << 52;
-
-		f64::from_bits(mantissa | exp) - 1.0
-	}
-
-	// converts u32 to a float in the range (-1.0, 1.0)
-	pub fn signed_uniform(val: u32) -> f64 {
-		let val = val as u64;
-
-		let sign = (val & 0x_8000_0000) << 32;
-		let mantissa = val << (52 - 31);
-		let exp = (1023 as u64) << 52;
-		let val = sign | mantissa | exp;
-
-		// At this point, the value is in the range (-2.0, -1.0] union [1.0, 2.0)
-		// If val < 0, result = val + 1 = val - sign(val)
-		// If val > 0, result = val - 1 = val - sign(val)
-		let one = (1023 as u64) << 52;
-		let sign = sign | one;
-
-		let val = f64::from_bits(val);
-		let sign = f64::from_bits(sign);
-
-		val - sign
-	}
-
-	pub fn get_normal(&mut self) -> f64 {
-		if let Some(val) = self.saved_norm {
-			self.saved_norm = None;
-			return val;
-		}
-
-		let eps = 1.0 / 4294967296.0;
-		loop {
-			let x = Self::signed_uniform(self.get_u32());
-			let y = Self::signed_uniform(self.get_u32());
-			let r2 = (x * x) + (y * y);
-			if r2 < eps || r2 > 1.0 {
-				continue;
-			}
-
-			let mult = (-2.0 * r2.ln() / r2).sqrt();
-			let z0 = x * mult;
-			let z1 = y * mult;
-
-			self.saved_norm = Some(z1);
-			return z0;
-		}
-	}
-
+	// internal function used by get_block()
 	#[inline(always)]
 	fn quarter_round(a: usize, b: usize, c: usize, d: usize, state: &mut [u32; STATE_WORDS]) {
 		state[a] = state[a].wrapping_add(state[b]);
@@ -140,5 +85,40 @@ impl Rng {
 		state[c] = state[c].wrapping_add(state[d]);
 		state[b] ^= state[c];
 		state[b] = state[b].rotate_left(7);
+	}
+
+	// generates a random u32 with uniform distribution
+	pub fn get_u32(&mut self) -> u32 {
+		if self.pos == 0 {
+			self.block = self.get_block();
+			self.pos = STATE_WORDS;
+		}
+
+		self.pos -= 1;
+		self.block[self.pos]
+	}
+
+	// generates a float in the range [0.0, 1.0) with uniform distribution
+	pub fn get_uniform(&mut self) -> f64 {
+		let lo = self.get_u32() as u64;
+		let hi = self.get_u32() as u64;
+		let val = (hi << 32) | lo;
+
+		(val as f64) * (1.0 / (4294967296.0 * 4294967296.0))
+	}
+
+	// generates a float with normal distribution with mean 0 and variance 1
+	pub fn get_normal(&mut self) -> f64 {
+		let x = 1.0 - self.get_uniform(); // (0.0, 1.0]
+		let y = self.get_uniform(); // [0.0, 1.0)
+
+		// box mueller transform
+		let r = (-2.0 * x.ln()).sqrt();
+		let theta = std::f64::consts::TAU * y;
+		let z0 = r * theta.cos();
+		let z1 = r * theta.sin();
+
+		// combine the two values so we don't have to store one
+		(z0 + z1) * std::f64::consts::FRAC_1_SQRT_2
 	}
 }

@@ -43,13 +43,6 @@ mod impl_f32 {
 
 	impl CPUBufferF32 {
 		pub fn new(dev: Rc<CPUDevice>, elems: usize) -> Option<Rc<CPUBufferF32>> {
-			/*
-			// round elems up to the nearest multiple of BLOCK_SIZE
-			let bytes = elems * std::mem::size_of::<f32>();
-			let blocks = (bytes + BLOCK_SIZE - 1) / BLOCK_SIZE;
-			let elems = blocks * (BLOCK_SIZE / std::mem::size_of::<f32>());
-			*/
-
 			let layout = std::alloc::Layout::array::<Cell<f32>>(elems).ok()?;
 			let result = unsafe {
 				let data = std::alloc::alloc(layout) as *mut Cell<f32>;
@@ -66,12 +59,36 @@ mod impl_f32 {
 		pub fn data(&self) -> *const Cell<f32> {
 			self.data.as_ptr()
 		}
+	}
 
-		pub fn zero_kernel(buf: *const Cell<f32>, len: usize, stride: isize) {
+	trait NullaryKernel {
+		fn run(&mut self, buf: *const Cell<f32>, len: usize, stride: isize);
+	}
+
+	struct ZeroKernel;
+
+	impl NullaryKernel for ZeroKernel {
+		fn run(&mut self, buf: *const Cell<f32>, len: usize, stride: isize) {
 			let mut ptr = buf;
 			for _ in 0..len {
 				unsafe {
 					(*ptr).set(f32::default());
+					ptr = ptr.offset(stride);
+				}
+			}
+		}
+	}
+
+	struct RandKernel<'a> {
+		rng: &'a mut Rng,
+	}
+
+	impl<'a> NullaryKernel for RandKernel<'a> {
+		fn run(&mut self, buf: *const Cell<f32>, len: usize, stride: isize) {
+			let mut ptr = buf;
+			for _ in 0..len {
+				unsafe {
+					(*ptr).set(self.rng.get_normal() as f32);
 					ptr = ptr.offset(stride);
 				}
 			}
@@ -91,15 +108,23 @@ mod impl_f32 {
 			let buf = self.data.as_ptr();
 			let len = self.data.len();
 			let stride = 1;
-			CPUBufferF32::zero_kernel(buf, len, stride);
+
+			let mut kernel = ZeroKernel;
+			kernel.run(buf, len, stride);
 		}
 
 		fn randn_all_(&self, rng: &mut Rng) {
-			unimplemented!("randn_all_");
+			let buf = self.data.as_ptr();
+			let len = self.data.len();
+			let stride = 1;
+
+			let mut kernel = RandKernel { rng };
+			kernel.run(buf, len, stride);
 		}
 
 		fn zero_(&self, shape: &Shape) {
-			nullary_(self.data(), shape, CPUBufferF32::zero_kernel);
+			let mut kernel = ZeroKernel;
+			nullary_(self.data(), shape, &mut kernel);
 		}
 
 		fn __format(
@@ -125,18 +150,16 @@ mod impl_f32 {
 
 	//-- nullary operations
 
-	type NullaryKernel = fn(buf: *const Cell<f32>, len: usize, stride: isize);
-
 	fn nullary_impl_(
 		buf: *const Cell<f32>,
 		off: isize,
 		dims: &[TraversalDim<1>],
-		kernel: NullaryKernel,
+		kernel: &mut dyn NullaryKernel,
 	) {
 		if dims.len() == 1 {
 			let dim = dims[0];
 			let buf = unsafe { buf.offset(off) };
-			kernel(buf, dim.len, dim.in_strides[0]);
+			kernel.run(buf, dim.len, dim.in_strides[0]);
 		} else if likely(dims.len() > 1) {
 			let mut off = off;
 			let dim = dims.last().unwrap();
@@ -148,7 +171,7 @@ mod impl_f32 {
 		}
 	}
 
-	fn nullary_(buf: *const Cell<f32>, shape: &Shape, kernel: NullaryKernel) {
+	fn nullary_(buf: *const Cell<f32>, shape: &Shape, kernel: &mut dyn NullaryKernel) {
 		let (t, _) = prep_op([shape]).unwrap();
 		nullary_impl_(buf, t.in_off[0], t.dims.as_slice(), kernel);
 	}
