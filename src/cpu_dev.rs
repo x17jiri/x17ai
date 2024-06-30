@@ -1,6 +1,7 @@
 // Copyright 2024 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
+use crate::rand::Rng;
 use crate::shape::{prep_op, Shape, TraversalDim};
 use crate::tensor::{Buffer, DType, Device};
 use std::cell::{Cell, RefCell, UnsafeCell};
@@ -24,7 +25,7 @@ impl Device for CPUDevice {
 		&self.name
 	}
 
-	fn new_buffer(self: Rc<Self>, dtype: DType, elems: usize) -> Option<Rc<dyn Buffer>> {
+	fn new_uninit(self: Rc<Self>, dtype: DType, elems: usize) -> Option<Rc<dyn Buffer>> {
 		match dtype {
 			DType::Float(32) => Some(impl_f32::CPUBufferF32::new(self, elems)?),
 			_ => None,
@@ -42,6 +43,13 @@ mod impl_f32 {
 
 	impl CPUBufferF32 {
 		pub fn new(dev: Rc<CPUDevice>, elems: usize) -> Option<Rc<CPUBufferF32>> {
+			/*
+			// round elems up to the nearest multiple of BLOCK_SIZE
+			let bytes = elems * std::mem::size_of::<f32>();
+			let blocks = (bytes + BLOCK_SIZE - 1) / BLOCK_SIZE;
+			let elems = blocks * (BLOCK_SIZE / std::mem::size_of::<f32>());
+			*/
+
 			let layout = std::alloc::Layout::array::<Cell<f32>>(elems).ok()?;
 			let result = unsafe {
 				let data = std::alloc::alloc(layout) as *mut Cell<f32>;
@@ -52,11 +60,6 @@ mod impl_f32 {
 				let data = Box::from_raw(data);
 				Rc::<CPUBufferF32>::new(CPUBufferF32 { dev, data })
 			};
-			//			/***************************************************************************
-			for i in 0..elems {
-				result.data[i].set(i as f32);
-			}
-			//			***************************************************************************/
 			Some(result)
 		}
 
@@ -82,6 +85,17 @@ mod impl_f32 {
 
 		fn dtype(&self) -> DType {
 			DType::Float(32)
+		}
+
+		fn zero_all_(&self) {
+			let buf = self.data.as_ptr();
+			let len = self.data.len();
+			let stride = 1;
+			CPUBufferF32::zero_kernel(buf, len, stride);
+		}
+
+		fn randn_all_(&self, rng: &mut Rng) {
+			unimplemented!("randn_all_");
 		}
 
 		fn zero_(&self, shape: &Shape) {

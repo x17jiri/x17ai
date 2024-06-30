@@ -1,6 +1,7 @@
 // Copyright 2024 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
+use crate::rand::Rng;
 use crate::shape::Shape;
 
 use std::fmt;
@@ -23,7 +24,7 @@ pub enum DType {
 pub trait Device {
 	fn name(&self) -> &str;
 
-	fn new_buffer(self: Rc<Self>, dtype: DType, elems: usize) -> Option<Rc<dyn Buffer>>;
+	fn new_uninit(self: Rc<Self>, dtype: DType, elems: usize) -> Option<Rc<dyn Buffer>>;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -33,6 +34,9 @@ pub trait Buffer {
 	fn device(&self) -> Rc<dyn Device>;
 
 	fn dtype(&self) -> DType;
+
+	fn zero_all_(&self);
+	fn randn_all_(&self, rng: &mut Rng);
 
 	fn zero_(&self, shape: &Shape);
 

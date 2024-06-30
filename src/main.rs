@@ -3,6 +3,7 @@
 
 #![feature(core_intrinsics)]
 #![feature(inherent_associated_types)]
+#![feature(stmt_expr_attributes)]
 
 #[cold]
 fn cold_path() {}
@@ -15,6 +16,7 @@ pub enum Error {
 
 mod cpu_dev;
 mod format;
+mod rand;
 mod shape;
 mod tensor;
 mod x17ai;
@@ -24,8 +26,49 @@ use crate::shape::Shape;
 use crate::tensor::{DType, Device};
 
 fn main() {
+	let mut rng = rand::Rng::new(&[0; 8], &[0; 2]);
+
+	let mut x = vec![0.0; 100_000_000];
+	for i in 0..x.len() {
+		x[i] = rng.get_normal();
+	}
+
+	// compute the mean
+	let mut sum = 0.0;
+	for i in 0..x.len() {
+		sum += x[i];
+	}
+	let mean = sum / x.len() as f64;
+
+	// compute the variance
+	let mut sum = 0.0;
+	for i in 0..x.len() {
+		let diff = x[i] - mean;
+		sum += diff * diff;
+	}
+	let variance = sum / x.len() as f64;
+
+	let mut min: f64 = 0.0;
+	let mut max: f64 = 0.0;
+	for i in 0..x.len() {
+		if x[i] < min {
+			min = x[i];
+		}
+		if x[i] > max {
+			max = x[i];
+		}
+	}
+
+	println!("mean = {}", mean);
+	println!("variance = {}", variance);
+	println!("min = {}", min);
+	println!("max = {}", max);
+
+	return;
+
 	let dev = CPUDevice::new("CPU".to_string());
-	let buf = dev.new_buffer(DType::Float(32), 35).unwrap();
+	let buf = dev.new_uninit(DType::Float(32), 35).unwrap();
+	buf.randn_all_(&mut rng);
 	let shape = Shape::new(&[7, 5]).unwrap();
 	let mut tensor = tensor::Tensor { buf, shape };
 	println!("init = {}", tensor);
