@@ -7,6 +7,7 @@ use crate::shape::Shape;
 use std::fmt;
 use std::ops::Index;
 use std::rc::Rc;
+use std::any::Any;
 
 //--------------------------------------------------------------------------------------------------
 // DType
@@ -45,6 +46,8 @@ pub trait Buffer {
 
 	fn sum(&self, shape: &Shape) -> Tensor;
 	fn max(&self, shape: &Shape) -> Tensor;
+
+	fn add(&self, shape: &Shape, other: &Tensor) -> Tensor;
 
 	// requirement:
 	//     index.len() == shape.ndim() - 1
@@ -107,6 +110,12 @@ impl Tensor {
 
 	pub fn max(&self) -> Tensor {
 		self.buf.max(&self.shape)
+	}
+
+	//-- binary operations
+
+	pub fn add(&self, other: &Tensor) -> Tensor {
+		self.buf.add(&self.shape, other)
 	}
 
 	//--

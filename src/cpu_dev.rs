@@ -247,6 +247,32 @@ mod impl_f32 {
 				sum
 			}
 		}
+
+		//-- binary operations
+
+		fn binary(
+			&self,
+			in1: &Tensor,
+			in2: &Tensor,
+			kernel: &mut dyn BinaryKernel,
+		) -> Tensor {
+			let (t, out_shape) = prep_op([in1.shape(), in2.shape()]).unwrap();
+			let out_buf = Self::new(self.dev.clone(), t.elems).unwrap();
+			self.binary_impl(
+				in1.buf().data(),
+				t.in_off[0],
+				in2.buf().data(),
+				t.in_off[1],
+				out_buf.data(),
+				t.out_off,
+				t.dims.as_slice(),
+				kernel,
+			);
+			Tensor {
+				buf: out_buf,
+				shape: out_shape,
+			}
+		}
 	}
 
 	trait NullaryKernel {
@@ -353,6 +379,46 @@ mod impl_f32 {
 				}
 			}
 			max
+		}
+	}
+
+	trait BinaryKernel {
+		fn run(
+			&mut self,
+			in1: *const Cell<f32>,
+			in2: *const Cell<f32>,
+			out: *const Cell<f32>,
+			len: usize,
+			in1_stride: isize,
+			in2_stride: isize,
+			out_stride: isize,
+		);
+	}
+
+	struct AddKernel;
+
+	impl BinaryKernel for AddKernel {
+		fn run(
+			&mut self,
+			in1: *const Cell<f32>,
+			in2: *const Cell<f32>,
+			out: *const Cell<f32>,
+			len: usize,
+			in1_stride: isize,
+			in2_stride: isize,
+			out_stride: isize,
+		) {
+			let mut in1_ptr = in1;
+			let mut in2_ptr = in2;
+			let mut out_ptr = out;
+			for _ in 0..len {
+				unsafe {
+					(*out_ptr).set((*in1_ptr).get() + (*in2_ptr).get());
+					in1_ptr = in1_ptr.offset(in1_stride);
+					in2_ptr = in2_ptr.offset(in2_stride);
+					out_ptr = out_ptr.offset(out_stride);
+				}
+			}
 		}
 	}
 }
