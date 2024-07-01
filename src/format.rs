@@ -6,6 +6,10 @@ use crate::tensor::*;
 
 use std::fmt;
 
+fn fmt_0d(tensor: &Tensor, f: &mut fmt::Formatter, off: isize) -> fmt::Result {
+	tensor.buf.__format(f, off, 1, 1)
+}
+
 fn fmt_1d(tensor: &Tensor, f: &mut fmt::Formatter, off: isize) -> fmt::Result {
 	write!(f, "[")?;
 	let ndim = tensor.shape.ndim();
@@ -32,10 +36,7 @@ impl fmt::Display for Tensor {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		let ndim = self.shape.ndim();
 		match ndim {
-			0 => {
-				// Scalar
-				unimplemented!("Scalar");
-			},
+			0 => fmt_0d(self, f, self.shape.off()),
 			1 => fmt_1d(self, f, self.shape.off()),
 			2 => fmt_2d(self, f, self.shape.off()),
 			_ => {

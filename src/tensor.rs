@@ -39,6 +39,12 @@ pub trait Buffer {
 	fn randn_all_(&self, rng: &mut Rng);
 
 	fn zero_(&self, shape: &Shape);
+	fn randn_(&self, shape: &Shape, rng: &mut Rng);
+
+	fn exp(&self, shape: &Shape) -> Tensor;
+
+	fn sum(&self, shape: &Shape) -> Tensor;
+	fn max(&self, shape: &Shape) -> Tensor;
 
 	// requirement:
 	//     index.len() == shape.ndim() - 1
@@ -77,9 +83,33 @@ impl Tensor {
 		Tensor { buf, shape }
 	}
 
+	//-- nullary operations
+
 	pub fn zero_(&self) {
 		self.buf.zero_(&self.shape);
 	}
+
+	pub fn randn_(&self, rng: &mut Rng) {
+		self.buf.randn_(&self.shape, rng);
+	}
+
+	//-- unary operations
+
+	pub fn exp(&self) -> Tensor {
+		self.buf.exp(&self.shape)
+	}
+
+	//-- reduction operations
+
+	pub fn sum(&self) -> Tensor {
+		self.buf.sum(&self.shape)
+	}
+
+	pub fn max(&self) -> Tensor {
+		self.buf.max(&self.shape)
+	}
+
+	//--
 
 	pub fn slice<R: std::ops::RangeBounds<usize>>(&self, dim: usize, range: R) -> Tensor {
 		Tensor {

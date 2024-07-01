@@ -27,45 +27,7 @@ use crate::tensor::{DType, Device, Tensor};
 
 fn main() {
 	let mut rng = rand::Rng::new_default();
-	/*
-		let mut x = vec![0.0; 1_000_000_000];
-		for i in 0..x.len() {
-			x[i] = rng.get_normal();
-		}
 
-		// compute the mean
-		let mut sum = 0.0;
-		for i in 0..x.len() {
-			sum += x[i];
-		}
-		let mean = sum / x.len() as f64;
-
-		// compute the variance
-		let mut sum = 0.0;
-		for i in 0..x.len() {
-			let diff = x[i] - mean;
-			sum += diff * diff;
-		}
-		let variance = sum / x.len() as f64;
-
-		let mut min: f64 = 0.0;
-		let mut max: f64 = 0.0;
-		for i in 0..x.len() {
-			if x[i] < min {
-				min = x[i];
-			}
-			if x[i] > max {
-				max = x[i];
-			}
-		}
-
-		println!("mean = {}", mean);
-		println!("variance = {}", variance);
-		println!("min = {}", min);
-		println!("max = {}", max);
-
-		return;
-	*/
 	let dev = CPUDevice::new("CPU".to_string());
 	let mut tensor = Tensor::new_randn(dev.clone(), DType::Float(32), &[7, 5], &mut rng);
 	println!("init = {}", tensor);
@@ -79,4 +41,12 @@ fn main() {
 	println!("zeroed1 = {}", tensor);
 	println!("zeroed2 = {}", tensor2);
 	println!("zeroed3 = {}", tensor3);
+	let tensor4 = tensor2.exp();
+	println!("exp = {}", tensor4);
+
+	let tensor_max = tensor4.max();
+	println!("max = {}", tensor_max);
+
+	let tensor_sum = tensor4.sum();
+	println!("sum = {}", tensor_sum);
 }

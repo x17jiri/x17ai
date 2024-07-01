@@ -201,9 +201,10 @@ pub fn prep_op<const N: usize>(inputs: [&Shape; N]) -> Option<(Traversal<N>, Sha
 		let dim = inputs[0].dims()[i];
 
 		// Set the stride of the output shape so that it is contiguous
-		const USIZE_BITS: usize = std::mem::size_of::<usize>() * 8;
-		let sign = dim.stride >> (USIZE_BITS - 1);
-		out_shape.dims_mut()[i].stride = sign * (traversal.elems as isize);
+		out_shape.dims_mut()[i].stride = traversal.elems as isize;
+		if unlikely(dim.stride < 0) {
+			out_shape.dims_mut()[i].stride *= -1;
+		}
 
 		// Collect the strides of the input shapes
 		let mut strides = [0; N];
