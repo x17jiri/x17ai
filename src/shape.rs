@@ -26,6 +26,15 @@ pub struct Shape {
 }
 
 impl Shape {
+	pub fn new_scalar() -> Shape {
+		Shape {
+			__off: 0,
+			__ndim: 0,
+			__dims: [Dim { len: 1, stride: 1 }; MAX_LOCAL_DIMS],
+			__perm: [3, 2, 1, 0],
+		}
+	}
+
 	// Creates a new shape with the given dimension sizes.
 	// Strides are initialized so that the shape is contiguous,
 	// the first dimension has the largest stride, and the last

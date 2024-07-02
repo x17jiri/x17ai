@@ -4,6 +4,7 @@
 #![feature(core_intrinsics)]
 #![feature(inherent_associated_types)]
 #![feature(stmt_expr_attributes)]
+#![warn(clippy::cast_lossless)]
 
 #[cold]
 fn cold_path() {}

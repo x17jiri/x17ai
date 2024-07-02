@@ -2,12 +2,12 @@
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
 use crate::rand::Rng;
-use crate::shape::{prep_op, Shape, TraversalDim};
+use crate::shape::{prep_op, Shape, Traversal, TraversalDim};
 use crate::tensor::{Buffer, DType, Device, Tensor};
+use std::any::*;
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::fmt;
 use std::intrinsics::{likely, unlikely};
-use std::mem::MaybeUninit;
 use std::rc::Rc;
 
 pub struct CPUDevice {
@@ -27,7 +27,7 @@ impl Device for CPUDevice {
 
 	fn new_uninit(self: Rc<Self>, dtype: DType, elems: usize) -> Option<Rc<dyn Buffer>> {
 		match dtype {
-			DType::Float(32) => Some(impl_f32::CPUBufferF32::new(self, elems)?),
+			DType::Float(32) => Some(impl_f32::CPUBufferF32::new_uninit(self, elems)?),
 			_ => None,
 		}
 	}
@@ -35,6 +35,44 @@ impl Device for CPUDevice {
 
 mod impl_f32 {
 	use super::*;
+
+	struct KernelInput {
+		ptr: *const Cell<f32>,
+		stride: isize,
+	}
+
+	impl KernelInput {
+		fn new(ptr: *const Cell<f32>, stride: isize) -> KernelInput {
+			KernelInput { ptr, stride }
+		}
+
+		fn get(&mut self) -> f32 {
+			let val;
+			unsafe {
+				val = (*self.ptr).get();
+				self.ptr = self.ptr.offset(self.stride);
+			}
+			val
+		}
+	}
+
+	struct KernelOutput {
+		ptr: *const Cell<f32>,
+		stride: isize,
+	}
+
+	impl KernelOutput {
+		fn new(ptr: *const Cell<f32>, stride: isize) -> KernelOutput {
+			KernelOutput { ptr, stride }
+		}
+
+		fn set(&mut self, val: f32) {
+			unsafe {
+				(*self.ptr).set(val);
+				self.ptr = self.ptr.offset(self.stride);
+			}
+		}
+	}
 
 	pub struct CPUBufferF32 {
 		dev: Rc<CPUDevice>,
@@ -53,56 +91,55 @@ mod impl_f32 {
 		//-- nullary operations working on the entire buffer
 
 		fn zero_all_(&self) {
-			let mut kernel = ZeroKernel;
-			kernel.run(self.data.as_ptr(), self.data.len(), 1);
+			self.nullary_all_(&mut ZeroKernel);
 		}
 
 		fn randn_all_(&self, rng: &mut Rng) {
-			let mut kernel = RandKernel { rng };
-			kernel.run(self.data.as_ptr(), self.data.len(), 1);
+			self.nullary_all_(&mut RandKernel { rng });
 		}
 
 		//-- unary operations
 
-		fn zero_(&self, shape: &Shape) {
-			let mut kernel = ZeroKernel;
-			self.nullary_(shape, &mut kernel);
+		fn zero_(&self, traversal: Traversal<1>) {
+			self.nullary_(traversal, &mut ZeroKernel);
 		}
 
-		fn randn_(&self, shape: &Shape, rng: &mut Rng) {
-			let mut kernel = RandKernel { rng };
-			self.nullary_(shape, &mut kernel);
+		fn randn_(&self, traversal: Traversal<1>, rng: &mut Rng) {
+			self.nullary_(traversal, &mut RandKernel { rng });
 		}
 
 		//-- unary operations
 
-		fn exp(&self, shape: &Shape) -> Tensor {
-			let mut kernel = ExpKernel;
-			self.unary(shape, &mut kernel)
+		fn exp(&self, traversal: Traversal<1>) -> Rc<dyn Buffer> {
+			self.unary(traversal, &mut ExpKernel)
 		}
 
 		//-- reduction operations
 
-		fn sum(&self, shape: &Shape) -> Tensor {
-			let mut kernel = SumKernel;
-			self.reduction(shape, &mut kernel)
+		fn sum(&self, traversal: Traversal<1>) -> Rc<dyn Buffer> {
+			self.reduction(traversal, &mut SumKernel)
 		}
 
-		fn max(&self, shape: &Shape) -> Tensor {
-			let mut kernel = MaxKernel;
-			self.reduction(shape, &mut kernel)
+		fn max(&self, traversal: Traversal<1>) -> Rc<dyn Buffer> {
+			self.reduction(traversal, &mut MaxKernel)
+		}
+
+		//-- binary operations
+
+		fn add(&self, other: &dyn Buffer, traversal: Traversal<2>) -> Rc<dyn Buffer> {
+			self.binary(other, traversal, &mut AddKernel)
 		}
 
 		//-- formatting
 
-		fn __format(
+		fn format(
 			&self,
 			f: &mut fmt::Formatter,
 			off: isize,
 			len: usize,
 			stride: isize,
 		) -> std::fmt::Result {
-			let mut ptr = unsafe { self.data().offset(off) };
+			let mut ptr = unsafe { self.data.as_ptr().offset(off) };
 			for i in 0..len {
 				if i > 0 {
 					write!(f, ", ")?;
@@ -117,7 +154,7 @@ mod impl_f32 {
 	}
 
 	impl CPUBufferF32 {
-		pub fn new(dev: Rc<CPUDevice>, elems: usize) -> Option<Rc<CPUBufferF32>> {
+		pub fn new_uninit(dev: Rc<CPUDevice>, elems: usize) -> Option<Rc<CPUBufferF32>> {
 			let layout = std::alloc::Layout::array::<Cell<f32>>(elems).ok()?;
 			let result = unsafe {
 				let data = std::alloc::alloc(layout) as *mut Cell<f32>;
@@ -131,164 +168,192 @@ mod impl_f32 {
 			Some(result)
 		}
 
-		pub fn data(&self) -> *const Cell<f32> {
-			self.data.as_ptr()
+		fn ptr(&self, off: isize) -> *const Cell<f32> {
+			unsafe { self.data.as_ptr().offset(off) }
+		}
+
+		//-- nullary operations working on the entire buffer
+
+		fn nullary_all_(&self, kernel: &mut dyn NullaryKernel) {
+			kernel.run(self.data.len(), KernelOutput::new(self.ptr(0), 1));
 		}
 
 		//-- nullary operations
 
-		fn nullary_(&self, shape: &Shape, kernel: &mut dyn NullaryKernel) {
-			let (t, _) = prep_op([shape]).unwrap();
-			self.nullary_impl_(self.data(), t.in_off[0], t.dims.as_slice(), kernel);
+		fn nullary_(&self, traversal: Traversal<1>, kernel: &mut dyn NullaryKernel) {
+			self.nullary_impl_(
+				self.ptr(traversal.in_off[0]),
+				traversal.dims.as_slice(),
+				kernel,
+			);
 		}
 
 		fn nullary_impl_(
 			&self,
-			buf: *const Cell<f32>,
-			off: isize,
+			mut ptr: *const Cell<f32>,
 			dims: &[TraversalDim<1>],
 			kernel: &mut dyn NullaryKernel,
 		) {
 			if dims.len() == 1 {
 				let dim = dims[0];
-				let buf = unsafe { buf.offset(off) };
-				kernel.run(buf, dim.len, dim.in_strides[0]);
+				kernel.run(dim.len, KernelOutput::new(ptr, dim.in_strides[0]));
 			} else if likely(dims.len() > 1) {
-				let mut off = off;
 				let dim = dims.last().unwrap();
 				let dims = &dims[..dims.len() - 1];
 				for _ in 0..dim.len {
-					self.nullary_impl_(buf, off, &dims, kernel);
-					off += dim.in_strides[0];
+					self.nullary_impl_(ptr, &dims, kernel);
+					unsafe {
+						ptr = ptr.offset(dim.in_strides[0]);
+					}
 				}
 			}
 		}
 
 		//-- unary operations
 
-		fn unary(&self, shape: &Shape, kernel: &mut dyn UnaryKernel) -> Tensor {
-			let (t, out_shape) = prep_op([shape]).unwrap();
-			let out_buf = Self::new(self.dev.clone(), t.elems).unwrap();
+		fn unary(&self, traversal: Traversal<1>, kernel: &mut dyn UnaryKernel) -> Rc<dyn Buffer> {
+			let out_buf = Self::new_uninit(self.dev.clone(), traversal.elems).unwrap();
 			self.unary_impl(
-				self.data(),
-				t.in_off[0],
-				out_buf.data(),
-				t.out_off,
-				t.dims.as_slice(),
+				self.ptr(traversal.in_off[0]),
+				out_buf.ptr(traversal.out_off),
+				traversal.dims.as_slice(),
 				kernel,
 			);
-			Tensor {
-				buf: out_buf,
-				shape: out_shape,
-			}
+			out_buf
 		}
 
 		fn unary_impl(
 			&self,
-			in_buf: *const Cell<f32>,
-			in_off: isize,
-			out_buf: *const Cell<f32>,
-			out_off: isize,
+			mut a: *const Cell<f32>,
+			mut o: *const Cell<f32>,
 			dims: &[TraversalDim<1>],
 			kernel: &mut dyn UnaryKernel,
 		) {
 			if dims.len() == 1 {
 				let dim = dims[0];
-				let in_buf = unsafe { in_buf.offset(in_off) };
-				let out_buf = unsafe { out_buf.offset(out_off) };
-				kernel.run(in_buf, out_buf, dim.len, dim.in_strides[0], dim.out_stride);
+				kernel.run(
+					dim.len,
+					KernelInput::new(a, dim.in_strides[0]),
+					KernelOutput::new(o, dim.out_stride),
+				);
 			} else {
-				let mut in_off = in_off;
-				let mut out_off = out_off;
 				let dim = dims.last().unwrap();
 				let dims = &dims[..dims.len() - 1];
 				for _ in 0..dim.len {
-					self.unary_impl(in_buf, in_off, out_buf, out_off, dims, kernel);
-					in_off += dim.in_strides[0];
-					out_off += dim.out_stride;
+					self.unary_impl(a, o, dims, kernel);
+					unsafe {
+						a = a.offset(dim.in_strides[0]);
+						o = o.offset(dim.out_stride);
+					}
 				}
 			}
 		}
 
 		//-- reduction operations
 
-		fn reduction(&self, shape: &Shape, kernel: &mut dyn ReductionKernel) -> Tensor {
-			let (t, _) = prep_op([shape]).unwrap();
-			let (out_shape, _) = Shape::new(&[]).unwrap();
-			let out_buf = Self::new(self.dev.clone(), 1).unwrap();
-			let sum = self.reduction_impl(self.data(), t.in_off[0], t.dims.as_slice(), kernel);
-			unsafe { (*out_buf.data()).set(sum) };
-			Tensor {
-				buf: out_buf,
-				shape: out_shape,
-			}
+		fn reduction(
+			&self,
+			traversal: Traversal<1>,
+			kernel: &mut dyn ReductionKernel,
+		) -> Rc<dyn Buffer> {
+			let out_buf = Self::new_uninit(self.dev.clone(), 1).unwrap();
+			let val = self.reduction_impl(
+				self.ptr(traversal.in_off[0]),
+				traversal.dims.as_slice(),
+				kernel,
+			);
+			unsafe { (*out_buf.ptr(0)).set(val) };
+			out_buf
 		}
 
 		fn reduction_impl(
 			&self,
-			buf: *const Cell<f32>,
-			off: isize,
+			mut a: *const Cell<f32>,
 			dims: &[TraversalDim<1>],
 			kernel: &mut dyn ReductionKernel,
 		) -> f32 {
+			let mut sum = 0.0;
 			if dims.len() == 1 {
 				let dim = dims[0];
-				let buf = unsafe { buf.offset(off) };
-				kernel.run(buf, dim.len, dim.in_strides[0])
+				sum = kernel.run(dim.len, KernelInput::new(a, dim.in_strides[0]))
 			} else {
-				let mut off = off;
 				let dim = dims.last().unwrap();
 				let dims = &dims[..dims.len() - 1];
-				let mut sum = 0.0;
 				for _ in 0..dim.len {
-					sum += self.reduction_impl(buf, off, dims, kernel);
-					off += dim.in_strides[0];
+					sum += self.reduction_impl(a, dims, kernel);
+					unsafe {
+						a = a.offset(dim.in_strides[0]);
+					}
 				}
-				sum
 			}
+			sum
 		}
 
 		//-- binary operations
 
 		fn binary(
 			&self,
-			in1: &Tensor,
-			in2: &Tensor,
+			other: &dyn Buffer,
+			traversal: Traversal<2>,
 			kernel: &mut dyn BinaryKernel,
-		) -> Tensor {
-			let (t, out_shape) = prep_op([in1.shape(), in2.shape()]).unwrap();
-			let out_buf = Self::new(self.dev.clone(), t.elems).unwrap();
+		) -> Rc<dyn Buffer> {
+			debug_assert!(self.type_id() == other.type_id());
+			let other = other as *const dyn Buffer;
+			let other = other as *const CPUBufferF32;
+			let other = unsafe { &*other };
+
+			let out_buf = Self::new_uninit(self.dev.clone(), t.elems).unwrap();
 			self.binary_impl(
-				in1.buf().data(),
-				t.in_off[0],
-				in2.buf().data(),
-				t.in_off[1],
-				out_buf.data(),
-				t.out_off,
-				t.dims.as_slice(),
+				self.ptr(traversal.in_off[0]),
+				other.ptr(traversal.in_off[1]),
+				out_buf.ptr(traversal.out_off),
+				traversal.dims.as_slice(),
 				kernel,
 			);
-			Tensor {
-				buf: out_buf,
-				shape: out_shape,
+			out_buf
+		}
+
+		fn binary_impl(
+			&self,
+			mut a: *const Cell<f32>,
+			mut b: *const Cell<f32>,
+			mut o: *const Cell<f32>,
+			dims: &[TraversalDim<2>],
+			kernel: &mut dyn BinaryKernel,
+		) {
+			if dims.len() == 1 {
+				let dim = dims[0];
+				kernel.run(
+					dim.len,
+					KernelInput::new(a, dim.in_strides[0]),
+					KernelInput::new(b, dim.in_strides[1]),
+					KernelOutput::new(o, dim.out_stride),
+				);
+			} else {
+				let dim = dims.last().unwrap();
+				let dims = &dims[..dims.len() - 1];
+				for _ in 0..dim.len {
+					self.binary_impl(a, b, o, dims, kernel);
+					unsafe {
+						a = a.offset(dim.in_strides[0]);
+						b = b.offset(dim.in_strides[1]);
+						o = o.offset(dim.out_stride);
+					}
+				}
 			}
 		}
 	}
 
 	trait NullaryKernel {
-		fn run(&mut self, buf: *const Cell<f32>, len: usize, stride: isize);
+		fn run(&mut self, len: usize, o: KernelOutput);
 	}
 
 	struct ZeroKernel;
 
 	impl NullaryKernel for ZeroKernel {
-		fn run(&mut self, buf: *const Cell<f32>, len: usize, stride: isize) {
-			let mut ptr = buf;
+		fn run(&mut self, len: usize, mut o: KernelOutput) {
 			for _ in 0..len {
-				unsafe {
-					(*ptr).set(f32::default());
-					ptr = ptr.offset(stride);
-				}
+				o.set(Default::default());
 			}
 		}
 	}
@@ -298,66 +363,38 @@ mod impl_f32 {
 	}
 
 	impl<'a> NullaryKernel for RandKernel<'a> {
-		fn run(&mut self, buf: *const Cell<f32>, len: usize, stride: isize) {
-			let mut ptr = buf;
+		fn run(&mut self, len: usize, mut o: KernelOutput) {
 			for _ in 0..len {
-				unsafe {
-					(*ptr).set(self.rng.get_normal() as f32);
-					ptr = ptr.offset(stride);
-				}
+				o.set(self.rng.get_normal() as f32);
 			}
 		}
 	}
 
 	trait UnaryKernel {
-		fn run(
-			&mut self,
-			in_: *const Cell<f32>,
-			out: *const Cell<f32>,
-			len: usize,
-			in_stride: isize,
-			out_stride: isize,
-		);
+		fn run(&mut self, len: usize, a: KernelInput, o: KernelOutput);
 	}
 
 	struct ExpKernel;
 
 	impl UnaryKernel for ExpKernel {
-		fn run(
-			&mut self,
-			in_: *const Cell<f32>,
-			out: *const Cell<f32>,
-			len: usize,
-			in_stride: isize,
-			out_stride: isize,
-		) {
-			let mut in_ptr = in_;
-			let mut out_ptr = out;
+		fn run(&mut self, len: usize, mut a: KernelInput, mut o: KernelOutput) {
 			for _ in 0..len {
-				unsafe {
-					(*out_ptr).set((*in_ptr).get().exp());
-					in_ptr = in_ptr.offset(in_stride);
-					out_ptr = out_ptr.offset(out_stride);
-				}
+				o.set(a.get().exp());
 			}
 		}
 	}
 
 	trait ReductionKernel {
-		fn run(&mut self, buf: *const Cell<f32>, len: usize, stride: isize) -> f32;
+		fn run(&mut self, len: usize, a: KernelInput) -> f32;
 	}
 
 	struct SumKernel;
 
 	impl ReductionKernel for SumKernel {
-		fn run(&mut self, buf: *const Cell<f32>, len: usize, stride: isize) -> f32 {
-			let mut ptr = buf;
-			let mut sum = 0.0;
+		fn run(&mut self, len: usize, mut a: KernelInput) -> f32 {
+			let mut sum = Default::default();
 			for _ in 0..len {
-				unsafe {
-					sum += (*ptr).get();
-					ptr = ptr.offset(stride);
-				}
+				sum += a.get();
 			}
 			sum
 		}
@@ -366,58 +403,25 @@ mod impl_f32 {
 	struct MaxKernel;
 
 	impl ReductionKernel for MaxKernel {
-		fn run(&mut self, buf: *const Cell<f32>, len: usize, stride: isize) -> f32 {
-			let mut ptr = buf;
-			let mut max = f32::NEG_INFINITY;
+		fn run(&mut self, len: usize, mut a: KernelInput) -> f32 {
+			let mut max = f32::NEG_INFINITY; // TODO - this will not work for integers
 			for _ in 0..len {
-				unsafe {
-					let val = (*ptr).get();
-					if val > max {
-						max = val;
-					}
-					ptr = ptr.offset(stride);
-				}
+				max = f32::max(max, a.get());
 			}
 			max
 		}
 	}
 
 	trait BinaryKernel {
-		fn run(
-			&mut self,
-			in1: *const Cell<f32>,
-			in2: *const Cell<f32>,
-			out: *const Cell<f32>,
-			len: usize,
-			in1_stride: isize,
-			in2_stride: isize,
-			out_stride: isize,
-		);
+		fn run(&mut self, len: usize, a: KernelInput, b: KernelInput, o: KernelOutput);
 	}
 
 	struct AddKernel;
 
 	impl BinaryKernel for AddKernel {
-		fn run(
-			&mut self,
-			in1: *const Cell<f32>,
-			in2: *const Cell<f32>,
-			out: *const Cell<f32>,
-			len: usize,
-			in1_stride: isize,
-			in2_stride: isize,
-			out_stride: isize,
-		) {
-			let mut in1_ptr = in1;
-			let mut in2_ptr = in2;
-			let mut out_ptr = out;
+		fn run(&mut self, len: usize, mut a: KernelInput, mut b: KernelInput, mut o: KernelOutput) {
 			for _ in 0..len {
-				unsafe {
-					(*out_ptr).set((*in1_ptr).get() + (*in2_ptr).get());
-					in1_ptr = in1_ptr.offset(in1_stride);
-					in2_ptr = in2_ptr.offset(in2_stride);
-					out_ptr = out_ptr.offset(out_stride);
-				}
+				o.set(a.get() + b.get());
 			}
 		}
 	}

@@ -2,12 +2,12 @@
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
 use crate::rand::Rng;
-use crate::shape::Shape;
+use crate::shape::{prep_op, Shape, Traversal};
 
+use std::any::*;
 use std::fmt;
 use std::ops::Index;
 use std::rc::Rc;
-use std::any::Any;
 
 //--------------------------------------------------------------------------------------------------
 // DType
@@ -39,27 +39,17 @@ pub trait Buffer {
 	fn zero_all_(&self);
 	fn randn_all_(&self, rng: &mut Rng);
 
-	fn zero_(&self, shape: &Shape);
-	fn randn_(&self, shape: &Shape, rng: &mut Rng);
+	fn zero_(&self, traversal: Traversal<1>);
+	fn randn_(&self, traversal: Traversal<1>, rng: &mut Rng);
 
-	fn exp(&self, shape: &Shape) -> Tensor;
+	fn exp(&self, traversal: Traversal<1>) -> Rc<dyn Buffer>;
 
-	fn sum(&self, shape: &Shape) -> Tensor;
-	fn max(&self, shape: &Shape) -> Tensor;
+	fn sum(&self, traversal: Traversal<1>) -> Rc<dyn Buffer>;
+	fn max(&self, traversal: Traversal<1>) -> Rc<dyn Buffer>;
 
-	fn add(&self, shape: &Shape, other: &Tensor) -> Tensor;
+	fn add(&self, other: &dyn Buffer, traversal: Traversal<2>) -> Rc<dyn Buffer>;
 
-	// requirement:
-	//     index.len() == shape.ndim() - 1
-	// This takes indexes for all except the last dimension and
-	// prints values in the last dimension.
-	fn __format(
-		&self,
-		f: &mut fmt::Formatter,
-		off: isize,
-		len: usize,
-		stride: isize,
-	) -> fmt::Result;
+	fn format(&self, f: &mut fmt::Formatter, off: isize, len: usize, stride: isize) -> fmt::Result;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -88,37 +78,88 @@ impl Tensor {
 
 	//-- nullary operations
 
+	fn __prep_nullary(&self) -> Traversal<1> {
+		let t = prep_op([&self.shape]);
+		debug_assert!(t.is_some());
+		let (traversal, _) = unsafe { t.unwrap_unchecked() };
+		traversal
+	}
+
 	pub fn zero_(&self) {
-		self.buf.zero_(&self.shape);
+		let traversal = self.__prep_nullary();
+		self.buf.zero_(traversal);
 	}
 
 	pub fn randn_(&self, rng: &mut Rng) {
-		self.buf.randn_(&self.shape, rng);
+		let traversal = self.__prep_nullary();
+		self.buf.randn_(traversal, rng);
 	}
 
 	//-- unary operations
 
+	fn __prep_unary(&self) -> (Traversal<1>, Shape) {
+		let t = prep_op([&self.shape]);
+		debug_assert!(t.is_some());
+		unsafe { t.unwrap_unchecked() }
+	}
+
 	pub fn exp(&self) -> Tensor {
-		self.buf.exp(&self.shape)
+		let (traversal, out_shape) = self.__prep_unary();
+		let out_buf = self.buf.exp(traversal);
+		Tensor {
+			buf: out_buf,
+			shape: out_shape,
+		}
 	}
 
 	//-- reduction operations
 
+	fn __prep_reduction(&self) -> Traversal<1> {
+		let t = prep_op([&self.shape]);
+		debug_assert!(t.is_some());
+		let (traversal, _) = unsafe { t.unwrap_unchecked() };
+		traversal
+	}
+
 	pub fn sum(&self) -> Tensor {
-		self.buf.sum(&self.shape)
+		let traversal = self.__prep_reduction();
+		let out_buf = self.buf.sum(traversal);
+		Tensor {
+			buf: out_buf,
+			shape: Shape::new_scalar(),
+		}
 	}
 
 	pub fn max(&self) -> Tensor {
-		self.buf.max(&self.shape)
+		let traversal = self.__prep_reduction();
+		let out_buf = self.buf.max(traversal);
+		Tensor {
+			buf: out_buf,
+			shape: Shape::new_scalar(),
+		}
 	}
 
 	//-- binary operations
 
-	pub fn add(&self, other: &Tensor) -> Tensor {
-		self.buf.add(&self.shape, other)
+	fn __prep_binary(&self, other: &Tensor) -> (Traversal<2>, Shape) {
+		if self.buf.type_id() != other.buf.type_id() {
+			panic!("Tensor types do not match");
+		}
+		let t = prep_op([&self.shape, &other.shape]);
+		debug_assert!(t.is_some());
+		unsafe { t.unwrap_unchecked() }
 	}
 
-	//--
+	pub fn add(&self, other: &Tensor) -> Tensor {
+		let (traversal, out_shape) = self.__prep_binary(other);
+		let out_buf = self.buf.add(other.buf.as_ref(), traversal);
+		Tensor {
+			buf: out_buf,
+			shape: out_shape,
+		}
+	}
+
+	//-- slicing
 
 	pub fn slice<R: std::ops::RangeBounds<usize>>(&self, dim: usize, range: R) -> Tensor {
 		Tensor {
