@@ -7,7 +7,7 @@ use crate::tensor::*;
 use std::fmt;
 
 fn fmt_0d(tensor: &Tensor, f: &mut fmt::Formatter, off: isize) -> fmt::Result {
-	tensor.buf.__format(f, off, 1, 1)
+	tensor.buf.format(f, off, 1, 1)
 }
 
 fn fmt_1d(tensor: &Tensor, f: &mut fmt::Formatter, off: isize) -> fmt::Result {
@@ -15,7 +15,7 @@ fn fmt_1d(tensor: &Tensor, f: &mut fmt::Formatter, off: isize) -> fmt::Result {
 	let ndim = tensor.shape.ndim();
 	let len = tensor.shape.dims()[ndim - 1].len;
 	let stride = tensor.shape.dims()[ndim - 1].stride;
-	tensor.buf.__format(f, off, len, stride)?;
+	tensor.buf.format(f, off, len, stride)?;
 	write!(f, "]")
 }
 

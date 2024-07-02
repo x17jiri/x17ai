@@ -233,6 +233,14 @@ pub fn prep_op<const N: usize>(inputs: [&Shape; N]) -> Option<(Traversal<N>, Sha
 	Some((traversal, out_shape))
 }
 
+pub fn prep_op_1(input: &Shape) -> (Traversal<1>, Shape) {
+	unsafe {
+		// SAFETY: prep_op() will fail if inputs are not compatible
+		// and we are passing only one input
+		prep_op([&input]).unwrap_unchecked()
+	}
+}
+
 //--------------------------------------------------------------------------------------------------
 
 // We always make sure that:
@@ -250,7 +258,7 @@ pub struct Traversal<const N: usize> {
 	pub out_off: isize,
 	pub in_off: [isize; N],
 	pub elems: usize,
-	pub dims: SmallVec<[TraversalDim<N>; MAX_LOCAL_DIMS]>,
+	dims: SmallVec<[TraversalDim<N>; MAX_LOCAL_DIMS]>,
 }
 
 impl<const N: usize> Traversal<N> {
@@ -265,6 +273,10 @@ impl<const N: usize> Traversal<N> {
 			elems: 1,
 			dims: SmallVec::new(),
 		}
+	}
+
+	pub fn dims(&self) -> &[TraversalDim<N>] {
+		self.dims.as_slice()
 	}
 
 	fn can_merge(&self, prev: TraversalDim<N>, next: TraversalDim<N>) -> bool {
@@ -306,11 +318,7 @@ impl<const N: usize> Traversal<N> {
 			}
 		}
 		self.elems *= len;
-		let next = TraversalDim {
-			len,
-			out_stride,
-			in_strides,
-		};
+		let next = TraversalDim { len, out_stride, in_strides };
 
 		// If there already are dimensions, try to merge the new dimension with the last one
 		if !self.dims.is_empty() {
@@ -336,6 +344,54 @@ impl<const N: usize> Traversal<N> {
 				out_stride: 1,
 				in_strides: [1; N],
 			});
+		}
+	}
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct MatMul {
+	pub a_rows: usize,
+	pub a_cols: usize,
+	pub b_cols: usize,
+
+	pub a_off: isize,
+	pub b_off: isize,
+
+	pub a_row_stride: isize,
+	pub a_col_stride: isize,
+
+	pub b_row_stride: isize,
+	pub b_col_stride: isize,
+}
+
+impl MatMul {
+	pub fn new(a: &Shape, b: &Shape) -> MatMul {
+		if a.ndim() != 2 || b.ndim() != 2 {
+			panic!("MatMul requires 2D tensors");
+		}
+
+		let a_row_dim = a.dims()[0];
+		let a_col_dim = a.dims()[1];
+		let b_row_dim = b.dims()[0];
+		let b_col_dim = b.dims()[1];
+
+		if a_col_dim.len != b_row_dim.len {
+			panic!("MatMul shapes do not match");
+		}
+
+		MatMul {
+			a_rows: a_row_dim.len,
+			a_cols: a_col_dim.len,
+			b_cols: b_col_dim.len,
+
+			a_off: a.__off,
+			b_off: b.__off,
+
+			a_row_stride: a_row_dim.stride,
+			a_col_stride: a_col_dim.stride,
+
+			b_row_stride: b_row_dim.stride,
+			b_col_stride: b_col_dim.stride,
 		}
 	}
 }

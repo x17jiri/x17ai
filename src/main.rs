@@ -20,7 +20,6 @@ mod format;
 mod rand;
 mod shape;
 mod tensor;
-mod x17ai;
 
 use crate::cpu_dev::CPUDevice;
 use crate::shape::Shape;
