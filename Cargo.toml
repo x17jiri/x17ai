@@ -9,3 +9,5 @@ opt-level = 3
 
 [dependencies]
 smallvec = "1.7.0"
+inkwell = { version = "0.4.0", features = ["llvm17-0"] }
+llvm-sys = "181"

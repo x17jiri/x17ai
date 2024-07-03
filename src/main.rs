@@ -16,11 +16,24 @@ pub enum Error {
 }
 
 mod cpu_dev;
+mod expr;
 mod format;
 mod rand;
 mod shape;
 mod tensor;
 
+use expr::*;
+use std::rc::Rc;
+
+fn main() {
+	let dev: Rc<dyn Device>;
+
+	let e = randn(Shape::new(&[7, 5]), DType::Float(32));
+	let x = exp(e);
+	let t = dev.eval(x);
+}
+
+/*
 use crate::cpu_dev::CPUDevice;
 use crate::shape::Shape;
 use crate::tensor::{DType, Device, Tensor};
@@ -50,3 +63,4 @@ fn main() {
 	let tensor_sum = tensor4.sum();
 	println!("sum = {}", tensor_sum);
 }
+*/
