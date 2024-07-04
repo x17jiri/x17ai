@@ -26,7 +26,7 @@ use expr::*;
 use std::rc::Rc;
 
 fn main() {
-	let dev: Rc<dyn Device>;
+	let dev: Rc<dyn Device> = expr::CPUDevice::new("CPU".to_string());
 
 	let e = randn(Shape::new(&[7, 5]), DType::Float(32));
 	let x = exp(e);
