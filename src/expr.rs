@@ -2,6 +2,7 @@
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
 use smallvec::SmallVec;
+use std::cell::Cell;
 use std::rc::Rc;
 
 #[derive(Debug, PartialEq, Clone)]
@@ -48,6 +49,16 @@ pub enum DType {
 	Float(u8),
 	Int(u8),
 	Uint(u8),
+}
+
+impl DType {
+	pub fn bits(&self) -> usize {
+		match self {
+			DType::Float(b) => *b as usize,
+			DType::Int(b) => *b as usize,
+			DType::Uint(b) => *b as usize,
+		}
+	}
 }
 
 pub struct Expr {
@@ -191,4 +202,54 @@ pub fn sum<A: ExprLike>(a: A) -> Rc<Expr> {
 
 pub fn max<A: ExprLike>(a: A) -> Rc<Expr> {
 	reduction_op(a, ReductionOp::Max)
+}
+
+pub struct CPUDevice {
+	name: String,
+}
+
+struct CPUTensorData {
+	data: Box<[Cell<u64>]>,
+}
+
+impl CPUDevice {
+	// create a new CPU device
+	pub fn new(name: String) -> Rc<CPUDevice> {
+		Rc::<CPUDevice>::new(CPUDevice { name })
+	}
+
+	// create a new uninitialized Tensor
+	unsafe fn new_uninit(self: Rc<Self>, dtype: DType, elems: usize) -> Rc<Tensor<CPUTensorData>> {
+		let Some(bits) = elems
+			.checked_mul(dtype.bits())
+			.and_then(|bits| bits.checked_add(63))
+		else {
+			panic!("Too many elements");
+		};
+		let words = bits / 64;
+
+		let layout = std::alloc::Layout::array::<Cell<u64>>(words).unwrap();
+		let data = std::alloc::alloc(layout) as *mut Cell<u64>;
+		if data.is_null() {
+			panic!("Memory allocation failed");
+		}
+		let data = std::slice::from_raw_parts_mut(data, words);
+		let data = Box::from_raw(data);
+		Rc::<Tensor<CPUTensorData>>::new(Tensor {
+			shape: Shape::new_scalar(),
+			dtype,
+			device: self,
+			data: CPUTensorData { data },
+		})
+	}
+}
+
+impl Device for CPUDevice {
+	fn name(&self) -> &str {
+		&self.name
+	}
+
+	fn eval(&self, expr: Rc<Expr>) -> Rc<Tensor> {
+		// TODO
+	}
 }
