@@ -110,6 +110,7 @@ pub enum LeafExpr {
 	Read(Rc<Tensor<dyn TensorData>>),
 }
 
+#[derive(Debug)]
 pub enum UnaryOp {
 	Exp,
 }
@@ -130,6 +131,7 @@ pub struct BinaryExpr {
 	pub op: BinaryOp,
 }
 
+#[derive(Debug)]
 pub enum ReductionOp {
 	Sum,
 	Max,
@@ -306,6 +308,51 @@ impl CPUDevice {
 		roots.into_iter().collect()
 	}
 
+	fn gen_expr(&self, expr: &Expr) -> String {
+		// TODO - check if expr is a `root`
+		// if so, we should reuse it's output buffer instead of creating a new one
+
+		match &expr.kind {
+			ExprKind::Leaf(LeafExpr::IntConst(c)) => format!("{}", c),
+			ExprKind::Leaf(LeafExpr::UintConst(c)) => format!("{}", c),
+			ExprKind::Leaf(LeafExpr::FloatConst(c)) => format!("{}", c),
+			ExprKind::Leaf(LeafExpr::Randn()) => {
+				format!("RANDN_TODO")
+			},
+			ExprKind::Leaf(LeafExpr::Read(t)) => {
+				format!("READ_TENSOR_TODO")
+			},
+			ExprKind::Unary(un) => {
+				let a = self.gen_expr(&un.a);
+				match un.op {
+					UnaryOp::Exp => format!("exp({})", a),
+				}
+			},
+			ExprKind::Binary(bin) => {
+				let a = self.gen_expr(&bin.a);
+				let b = self.gen_expr(&bin.b);
+				match bin.op {
+					BinaryOp::Add => format!("add({}, {})", a, b),
+				}
+			},
+			_ => {
+				panic!("Unsupported expression");
+			},
+		}
+	}
+
+	fn gen_assign(&self, expr: &Expr, indent: Indent, output: String) -> String {
+		match &expr.kind {
+			ExprKind::Reduction(r) => {
+				unimplemented!("Reduction");
+			},
+			_ => {
+				let expr = self.gen_expr(expr);
+				format!("{}{} = {};\n", indent, output, expr)
+			},
+		}
+	}
+
 	fn gen_kernels(&self, roots: HashSet<*const Expr>) -> Vec<CPUKernel> {
 		let mut result = Vec::new();
 		for root in roots {
@@ -337,42 +384,9 @@ impl CPUDevice {
 					.write_fmt(format_args!("{}*i_{}", strides[dim], dim))
 					.unwrap();
 			}
-			code.write_fmt(format_args!(
-				"{}\tout_ptr = output + {};\n",
-				Indent(ndim),
-				index
-			))
-			.unwrap();
-			/*
-			match &root.kind {
-				ExprKind::Leaf(LeafExpr::Randn()) => {
-					let code = format!("randn({})", root.shape.elems());
-					kernels.push(CPUKernel { name: "randn".to_string(), code });
-				},
-				ExprKind::Unary(u) => {
-					let code = match u.op {
-						UnaryOp::Exp => format!("exp({})", u.a.shape.elems()),
-					};
-					kernels.push(CPUKernel { name: "exp".to_string(), code });
-				},
-				ExprKind::Binary(b) => {
-					let code = match b.op {
-						BinaryOp::Add => {
-							format!("add({}, {})", b.a.shape.elems(), b.b.shape.elems())
-						},
-					};
-					kernels.push(CPUKernel { name: "add".to_string(), code });
-				},
-				ExprKind::Reduction(r) => {
-					let code = match r.op {
-						ReductionOp::Sum => format!("sum({})", r.a.shape.elems()),
-						ReductionOp::Max => format!("max({})", r.a.shape.elems()),
-					};
-					kernels.push(CPUKernel { name: "sum".to_string(), code });
-				},
-				_ => {},
-			}
-			*/
+
+			let output = format!("out_ptr[{}]", index);
+			code.push_str(&self.gen_assign(root, Indent(ndim + 1), output));
 
 			for dim in (0..ndim).rev() {
 				for _ in 0..dim {
