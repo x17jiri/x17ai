@@ -3,7 +3,7 @@
 
 use core::fmt;
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::rc::Rc;
 
@@ -271,134 +271,6 @@ impl CPUDevice {
 		let slice = std::slice::from_raw_parts_mut(mem, words);
 		CPUTensorData { data: Box::from_raw(slice) }
 	}
-
-	fn find_kernel_roots(&self, expr: Rc<Expr>) -> HashSet<*const Expr> {
-		let mut roots: HashSet<*const Expr> = HashSet::new();
-		let mut processed: HashSet<*const Expr> = HashSet::new();
-		let mut to_process: Vec<*const Expr> = Vec::new();
-
-		to_process.push(Rc::as_ptr(&expr));
-		roots.insert(Rc::as_ptr(&expr));
-		while !to_process.is_empty() {
-			let e = to_process.pop().unwrap();
-			if processed.contains(&e) {
-				roots.insert(e);
-				continue;
-			}
-			processed.insert(e);
-
-			// SAFETY: as long as `expr` is not dropped, the pointers are valid
-			let e = unsafe { &*e };
-
-			match &e.kind {
-				ExprKind::Leaf(_) => {},
-				ExprKind::Unary(u) => {
-					to_process.push(&*u.a);
-				},
-				ExprKind::Binary(b) => {
-					to_process.push(&*b.a);
-					to_process.push(&*b.b);
-				},
-				ExprKind::Reduction(r) => {
-					to_process.push(&*r.a);
-					roots.insert(&*e);
-				},
-			}
-		}
-		roots.into_iter().collect()
-	}
-
-	fn gen_expr(&self, expr: &Expr) -> String {
-		// TODO - check if expr is a `root`
-		// if so, we should reuse it's output buffer instead of creating a new one
-
-		match &expr.kind {
-			ExprKind::Leaf(LeafExpr::IntConst(c)) => format!("{}", c),
-			ExprKind::Leaf(LeafExpr::UintConst(c)) => format!("{}", c),
-			ExprKind::Leaf(LeafExpr::FloatConst(c)) => format!("{}", c),
-			ExprKind::Leaf(LeafExpr::Randn()) => {
-				format!("RANDN_TODO")
-			},
-			ExprKind::Leaf(LeafExpr::Read(t)) => {
-				format!("READ_TENSOR_TODO")
-			},
-			ExprKind::Unary(un) => {
-				let a = self.gen_expr(&un.a);
-				match un.op {
-					UnaryOp::Exp => format!("exp({})", a),
-				}
-			},
-			ExprKind::Binary(bin) => {
-				let a = self.gen_expr(&bin.a);
-				let b = self.gen_expr(&bin.b);
-				match bin.op {
-					BinaryOp::Add => format!("add({}, {})", a, b),
-				}
-			},
-			_ => {
-				panic!("Unsupported expression");
-			},
-		}
-	}
-
-	fn gen_assign(&self, expr: &Expr, indent: Indent, output: String) -> String {
-		match &expr.kind {
-			ExprKind::Reduction(r) => {
-				unimplemented!("Reduction");
-			},
-			_ => {
-				let expr = self.gen_expr(expr);
-				format!("{}{} = {};\n", indent, output, expr)
-			},
-		}
-	}
-
-	fn gen_kernels(&self, roots: HashSet<*const Expr>) -> Vec<CPUKernel> {
-		let mut result = Vec::new();
-		for root in roots {
-			// SAFETY: as long as `expr` is not dropped, the pointers are valid
-			let root = unsafe { &*root };
-			let name = format!("kernel_{}", result.len());
-			let shape = root.shape.as_ref();
-
-			let ndim = shape.ndim();
-			let dims = shape.dims();
-			let strides = shape.strides();
-
-			let mut code = String::new();
-			let mut index = String::new();
-			for dim in 0..ndim {
-				code.write_fmt(format_args!(
-					"{}\tfor (std::size_t i_{} = 0; i_{} < {}; ++i_{}) {{\n",
-					Indent(dim),
-					dim,
-					dim,
-					dims[dim],
-					dim
-				))
-				.unwrap();
-				if !index.is_empty() {
-					index.push_str(" + ");
-				}
-				index
-					.write_fmt(format_args!("{}*i_{}", strides[dim], dim))
-					.unwrap();
-			}
-
-			let output = format!("out_ptr[{}]", index);
-			code.push_str(&self.gen_assign(root, Indent(ndim + 1), output));
-
-			for dim in (0..ndim).rev() {
-				for _ in 0..dim {
-					code.push('\t');
-				}
-				code.write_fmt(format_args!("\t}}\n")).unwrap();
-			}
-
-			result.push(CPUKernel { name, code });
-		}
-		result
-	}
 }
 
 impl Device for CPUDevice {
@@ -411,11 +283,176 @@ impl Device for CPUDevice {
 		let elems = expr.shape.elems();
 		let buffer = unsafe { CPUDevice::new_uninit(expr.dtype.bits(), elems) };
 		*/
-		let roots = self.find_kernel_roots(expr.clone());
-		let kernels = self.gen_kernels(roots);
+		let compiler = CPUCompiler::new(expr);
+		let kernels = compiler.gen_kernels();
 		for kernel in kernels {
 			println!("{}:\n{}", kernel.name, kernel.code);
 		}
 		unimplemented!();
+	}
+}
+
+struct CPUCompiler {
+	expr: Rc<Expr>,
+
+	// as long as `expr` is not dropped, the pointers are valid
+	roots: HashMap<*const Expr, usize>,
+	roots_postorder: Vec<*const Expr>,
+	processed: HashSet<*const Expr>,
+}
+
+impl CPUCompiler {
+	pub fn new(expr: Rc<Expr>) -> Self {
+		let e = expr.as_ref() as *const Expr;
+		let mut s = CPUCompiler {
+			expr,
+			roots: HashMap::new(),
+			roots_postorder: Vec::new(),
+			processed: HashSet::new(),
+		};
+		let added = s.find_kernel_roots(unsafe { &*e });
+		if !added {
+			s.roots.insert(e, 0);
+			s.roots_postorder.push(e);
+		}
+		s
+	}
+
+	// returns true if `expr` was added as a root
+	fn find_kernel_roots(&mut self, expr: &Expr) -> bool {
+		let e = expr as *const Expr;
+		if self.processed.contains(&e) {
+			return false;
+		}
+		self.processed.insert(e);
+
+		match &expr.kind {
+			// randn always needs its own kernel
+			ExprKind::Leaf(LeafExpr::Randn()) => {
+				self.roots.insert(e, self.roots_postorder.len());
+				self.roots_postorder.push(e);
+				true
+			},
+			ExprKind::Leaf(_) => {
+				// do nothing
+				false
+			},
+			ExprKind::Unary(u) => {
+				self.find_kernel_roots(&*u.a);
+				false
+			},
+			ExprKind::Binary(b) => {
+				self.find_kernel_roots(&*b.a);
+				self.find_kernel_roots(&*b.b);
+				false
+			},
+			ExprKind::Reduction(r) => {
+				self.find_kernel_roots(&*r.a);
+				self.roots.insert(e, self.roots_postorder.len());
+				self.roots_postorder.push(e);
+				true
+			},
+		}
+	}
+
+	fn gen_kernels(&self) -> Vec<CPUKernel> {
+		let mut result = Vec::new();
+		for root in 0..self.roots_postorder.len() {
+			let name = format!("kernel_{}", root);
+
+			// SAFETY: as long as `expr` is not dropped, the pointers are valid
+			let root = unsafe { &*self.roots_postorder[root] };
+
+			if let ExprKind::Leaf(LeafExpr::Randn()) = &root.kind {
+				result.push(CPUKernel { name, code: format!("RANDN_TODO;\n") });
+				continue;
+			}
+
+			result.push(CPUKernel { name, code: self.gen_root_expr(root) });
+		}
+		result
+	}
+
+	fn gen_root_expr(&self, root: &Expr) -> String {
+		let shape = root.shape.as_ref();
+
+		let ndim = shape.ndim();
+		let dims = shape.dims();
+		let strides = shape.strides();
+
+		let mut code = String::new();
+		let mut index = String::new();
+		for dim in 0..ndim {
+			write!(
+				code,
+				"{}\tfor (std::size_t i_{} = 0; i_{} < {}; ++i_{}) {{\n",
+				Indent(dim),
+				dim,
+				dim,
+				dims[dim],
+				dim
+			);
+			if !index.is_empty() {
+				index.push_str(" + ");
+			}
+			write!(index, "{}*i_{}", strides[dim], dim);
+		}
+
+		let output = format!("out_ptr[{}]", index);
+
+		match &root.kind {
+			ExprKind::Leaf(LeafExpr::Randn()) => {
+				unreachable!("Randn should have been handled by gen_kernels()")
+			},
+			ExprKind::Reduction(r) => {
+				unimplemented!("Reduction");
+			},
+			_ => {
+				let val = self.gen_expr(root, root);
+				write!(code, "{}{} = {};\n", Indent(ndim + 1), output, val);
+			},
+		}
+
+		for dim in (0..ndim).rev() {
+			for _ in 0..dim {
+				code.push('\t');
+			}
+			write!(code, "\t}}\n");
+		}
+
+		code
+	}
+
+	fn gen_expr(&self, root: &Expr, expr: &Expr) -> String {
+		if (root as *const Expr) != (expr as *const Expr)
+			&& let Some(kernel_index) = self.roots.get(&(expr as *const Expr))
+		{
+			return format!("kernel_{}", kernel_index);
+		}
+
+		match &expr.kind {
+			ExprKind::Leaf(LeafExpr::IntConst(c)) => format!("{}", c),
+			ExprKind::Leaf(LeafExpr::UintConst(c)) => format!("{}", c),
+			ExprKind::Leaf(LeafExpr::FloatConst(c)) => format!("{}", c),
+			ExprKind::Leaf(LeafExpr::Read(t)) => {
+				format!("READ_TENSOR_TODO")
+			},
+			ExprKind::Unary(un) => {
+				let a = self.gen_expr(root, &un.a);
+				match un.op {
+					UnaryOp::Exp => format!("exp({})", a),
+				}
+			},
+			ExprKind::Binary(bin) => {
+				let a = self.gen_expr(root, &bin.a);
+				let b = self.gen_expr(root, &bin.b);
+				match bin.op {
+					BinaryOp::Add => format!("add({}, {})", a, b),
+				}
+			},
+			_ => {
+				panic!("Unsupported expression");
+			},
+		}
 	}
 }

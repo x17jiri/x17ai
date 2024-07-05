@@ -5,6 +5,7 @@
 #![feature(inherent_associated_types)]
 #![feature(stmt_expr_attributes)]
 #![warn(clippy::cast_lossless)]
+#![feature(let_chains)]
 
 #[cold]
 fn cold_path() {}
