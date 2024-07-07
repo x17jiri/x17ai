@@ -33,6 +33,12 @@ impl Shape {
 		Rc::new(Self { __dims: dims.to_vec() })
 	}
 
+	pub fn new_transposed(&self, x1: usize, x2: usize) -> Rc<Self> {
+		let mut new_dims = self.__dims.clone();
+		new_dims.swap(x1, x2);
+		Rc::new(Self { __dims: new_dims })
+	}
+
 	pub fn ndim(&self) -> usize {
 		self.__dims.len()
 	}
@@ -100,6 +106,8 @@ pub enum ExprKind {
 	Unary(UnaryExpr),
 	Binary(BinaryExpr),
 	Reduction(ReductionExpr),
+	MatMul(MatMulExpr),
+	Transpose(TransposeExpr),
 }
 
 pub enum LeafExpr {
@@ -171,6 +179,18 @@ pub struct ReductionExpr {
 	pub a: Rc<Expr>,
 	pub op: ReductionOp,
 	//	pub axis: isize,
+}
+
+pub struct MatMulExpr {
+	pub a: Rc<Expr>,
+	pub b: Rc<Expr>,
+}
+
+// swaps dimensions x1 and x2
+pub struct TransposeExpr {
+	pub a: Rc<Expr>,
+	pub x1: usize,
+	pub x2: usize,
 }
 
 pub fn zeros(shape: Rc<Shape>, dtype: DType) -> Rc<Expr> {
@@ -264,6 +284,39 @@ pub fn max<A: ExprLike>(a: A) -> Rc<Expr> {
 	reduction_op(a, ReductionOp::Max)
 }
 
+pub fn matmul<A: ExprLike, B: ExprLike>(a: A, b: B) -> Rc<Expr> {
+	let a = a.get();
+	let b = b.get();
+	if a.shape.ndim() != 2 || b.shape.ndim() != 2 {
+		panic!("MatMul requires 2D tensors");
+	}
+	let a_rows = a.shape.dims()[0];
+	let a_cols = a.shape.dims()[1];
+	let b_rows = b.shape.dims()[0];
+	let b_cols = b.shape.dims()[1];
+	if a_cols != b_rows {
+		panic!("MatMul shapes do not match");
+	}
+	Rc::new(Expr {
+		shape: Shape::new(&[a_rows, b_cols]),
+		dtype: a.dtype,
+		kind: ExprKind::MatMul(MatMulExpr { a, b }),
+	})
+}
+
+pub fn transpose<A: ExprLike>(a: A, x1: usize, x2: usize) -> Rc<Expr> {
+	let a = a.get();
+	let ndim = a.shape.ndim();
+	if x1 >= ndim || x2 >= ndim {
+		panic!("Invalid dimensions");
+	}
+	Rc::new(Expr {
+		shape: a.shape.new_transposed(x1, x2),
+		dtype: a.dtype,
+		kind: ExprKind::Transpose(TransposeExpr { a, x1, x2 }),
+	})
+}
+
 pub struct CPUDevice {
 	name: String,
 }
@@ -277,11 +330,13 @@ struct CPUKernel {
 	code: String,
 }
 
+#[derive(Debug, Clone)]
 struct DimIndex {
 	i: String,
 	stride: String,
 }
 
+#[derive(Debug, Clone)]
 struct Index {
 	dims: Vec<DimIndex>,
 }
@@ -405,6 +460,16 @@ impl CPUCompiler {
 				self.find_kernel_roots(&*r.a);
 				self.roots.insert(e, -1);
 			},
+			ExprKind::MatMul(m) => {
+				self.roots.insert(m.a.as_ref() as *const Expr, -1);
+				self.roots.insert(m.b.as_ref() as *const Expr, -1);
+				self.find_kernel_roots(&*m.a);
+				self.find_kernel_roots(&*m.b);
+				self.roots.insert(e, -1);
+			},
+			ExprKind::Transpose(t) => {
+				self.find_kernel_roots(&*t.a);
+			},
 		}
 	}
 
@@ -436,6 +501,20 @@ impl CPUCompiler {
 			ExprKind::Reduction(r) => {
 				let a = self.find_postorder(&*r.a, parent_inputs);
 				format!("{}({})", r.op.symbol(), a)
+			},
+			ExprKind::MatMul(m) => {
+				let a = self.find_postorder(&*m.a, parent_inputs);
+				let b = self.find_postorder(&*m.b, parent_inputs);
+				format!("matmul({},{})", a, b)
+			},
+			ExprKind::Transpose(t) => {
+				let a = self.find_postorder(&*t.a, parent_inputs);
+				format!(
+					"transpose({},{},{})",
+					a,
+					std::cmp::min(t.x1, t.x2),
+					std::cmp::max(t.x1, t.x2)
+				)
 			},
 		}
 	}
@@ -491,17 +570,17 @@ impl CPUCompiler {
 			let ndim = root.shape.ndim();
 			let mut code = format!("void {}(\n", name);
 			for i in 0..ndim {
-				write!(code, "\tstd::size_t const dim_{},\n", i);
+				write!(code, "\tuintptr_t const dim_{},\n", i);
 			}
 			for i in 0..inputs.len() {
 				write!(code, "\tfloat const *const kernel_{},\n", inputs[i]);
 			}
 			write!(code, "\tfloat *const out_ptr\n) {{\n");
-			write!(code, "\tstd::size_t elems = 1;\n");
+			write!(code, "\tuintptr_t elems = 1;\n");
 			for i in (0..ndim).rev() {
 				write!(
 					code,
-					"\tstd::size_t const stride_{} = elems; elems *= dim_{};\n",
+					"\tuintptr_t const stride_{} = elems; elems *= dim_{};\n",
 					i, i
 				);
 			}
@@ -522,7 +601,7 @@ impl CPUCompiler {
 		let mut index = Index::new();
 		for dim in 0..ndim {
 			#[rustfmt::skip] write!(
-				code, "{}\tfor (std::size_t i_{} = 0; i_{} < dim_{}; ++i_{}) {{\n",
+				code, "{}\tfor (uintptr_t i_{} = 0; i_{} < dim_{}; ++i_{}) {{\n",
 				Indent(dim), dim, dim, dim, dim
 			);
 			index.dims.push(DimIndex {
@@ -539,6 +618,9 @@ impl CPUCompiler {
 			},
 			ExprKind::Reduction(r) => {
 				unimplemented!("Reduction");
+			},
+			ExprKind::MatMul(m) => {
+				unimplemented!("MatMul");
 			},
 			_ => {
 				let val = self.gen_expr(root, root, &index);
@@ -564,9 +646,9 @@ impl CPUCompiler {
 		}
 
 		match &expr.kind {
-			ExprKind::Leaf(LeafExpr::IntConst(c)) => format!("{}", c),
-			ExprKind::Leaf(LeafExpr::UintConst(c)) => format!("{}", c),
-			ExprKind::Leaf(LeafExpr::FloatConst(c)) => format!("{}", c),
+			ExprKind::Leaf(LeafExpr::IntConst(c)) => format!("int({})", c),
+			ExprKind::Leaf(LeafExpr::UintConst(c)) => format!("uint({})", c),
+			ExprKind::Leaf(LeafExpr::FloatConst(c)) => format!("float({})", c),
 			ExprKind::Leaf(LeafExpr::Read(t)) => {
 				format!("READ_TENSOR_TODO")
 			},
@@ -580,8 +662,17 @@ impl CPUCompiler {
 				let a = self.gen_expr(root, &bin.a, index);
 				let b = self.gen_expr(root, &bin.b, index);
 				match bin.op {
-					BinaryOp::Add => format!("add({}, {})", a, b),
+					BinaryOp::Add => format!("({} + {})", a, b),
 				}
+			},
+			ExprKind::Transpose(t) => {
+				let mut new_index = index.clone();
+				let dim1 = std::ptr::addr_of_mut!(new_index.dims[t.x1]);
+				let dim2 = std::ptr::addr_of_mut!(new_index.dims[t.x2]);
+				let stride1 = unsafe { &mut (*dim1).stride };
+				let stride2 = unsafe { &mut (*dim2).stride };
+				std::mem::swap(stride1, stride2);
+				self.gen_expr(root, &t.a, &new_index)
 			},
 			_ => {
 				panic!("Unsupported expression");

@@ -30,8 +30,14 @@ fn main() {
 	let dev: Rc<dyn Device> = expr::CPUDevice::new("CPU".to_string());
 
 	let e = randn(Shape::new(&[7, 5]), DType::Float(32));
-	let x = exp(e);
-	let t = dev.eval(x);
+	let x = exp(e.clone());
+	let z = zeros(Shape::new(&[7, 5]), DType::Float(32));
+	let y = add(x.clone(), z);
+	let mm = matmul(x, transpose(y, 0, 1));
+
+	let qq = transpose(e, 0, 1);
+
+	let t = dev.eval(qq);
 }
 
 /*
