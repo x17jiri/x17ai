@@ -115,6 +115,14 @@ pub enum UnaryOp {
 	Exp,
 }
 
+impl UnaryOp {
+	pub fn symbol(&self) -> &'static str {
+		match self {
+			UnaryOp::Exp => "exp",
+		}
+	}
+}
+
 pub struct UnaryExpr {
 	pub a: Rc<Expr>,
 	pub op: UnaryOp,
@@ -123,6 +131,19 @@ pub struct UnaryExpr {
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum BinaryOp {
 	Add,
+}
+
+impl BinaryOp {
+	pub fn symbol(&self) -> &'static str {
+		match self {
+			BinaryOp::Add => "+",
+		}
+	}
+	pub fn is_commutative(&self) -> bool {
+		match self {
+			BinaryOp::Add => true,
+		}
+	}
 }
 
 pub struct BinaryExpr {
@@ -135,6 +156,15 @@ pub struct BinaryExpr {
 pub enum ReductionOp {
 	Sum,
 	Max,
+}
+
+impl ReductionOp {
+	pub fn symbol(&self) -> &'static str {
+		match self {
+			ReductionOp::Sum => "SUM",
+			ReductionOp::Max => "MAX",
+		}
+	}
 }
 
 pub struct ReductionExpr {
@@ -325,7 +355,7 @@ struct CPUCompiler {
 
 	// as long as `expr` is not dropped, the pointers are valid
 	roots: HashMap<*const Expr, isize>,
-	roots_postorder: Vec<(*const Expr, Vec<usize>)>,
+	roots_postorder: Vec<(*const Expr, String, Vec<usize>)>, // (expr, key, inputs)
 	processed: HashSet<*const Expr>,
 }
 
@@ -338,8 +368,13 @@ impl CPUCompiler {
 			roots_postorder: Vec::new(),
 			processed: HashSet::new(),
 		};
+
 		s.find_kernel_roots(unsafe { &*e });
 		s.roots.insert(e, -1);
+
+		let mut parent_inputs = Vec::new();
+		s.find_postorder(e, &mut parent_inputs);
+
 		s
 	}
 
@@ -353,10 +388,10 @@ impl CPUCompiler {
 
 		match &expr.kind {
 			// randn always needs its own kernel
-			ExprKind::Leaf(LeafExpr::Randn()) => {
+			ExprKind::Leaf(LeafExpr::Randn()) | ExprKind::Leaf(LeafExpr::Read(..)) => {
 				self.roots.insert(e, -1);
 			},
-			ExprKind::Leaf(_) => {
+			ExprKind::Leaf(..) => {
 				// do nothing
 			},
 			ExprKind::Unary(u) => {
@@ -373,48 +408,78 @@ impl CPUCompiler {
 		}
 	}
 
-	fn find_postorder(&mut self, expr: &Expr, inputs: &mut Vec<usize>) {
-		let e = expr as *const Expr;
-		if let Some(t) = self.roots.get(&e)
-			&& *t >= 0
-		{
-			inputs.push(*t as usize);
-			return;
-		}
-
+	fn trav_children(&mut self, expr: &Expr, parent_inputs: &mut Vec<usize>) -> String {
 		match &expr.kind {
-			// randn always needs its own kernel
-			ExprKind::Leaf(LeafExpr::Randn()) => {
-				self.roots.insert(e, self.roots_postorder.len());
-				inputs.push(self.roots_postorder.len());
-				self.roots_postorder.push((e, Vec::new()));
+			ExprKind::Leaf(LeafExpr::IntConst(c)) => format!("int({})", c),
+			ExprKind::Leaf(LeafExpr::UintConst(c)) => format!("uint({})", c),
+			ExprKind::Leaf(LeafExpr::FloatConst(c)) => format!("float({})", c),
+			ExprKind::Unary(un) => {
+				let a = self.find_postorder(&*un.a, parent_inputs);
+				format!("{}({})", un.op.symbol(), a)
 			},
-			ExprKind::Leaf(_) => {
-				// do nothing
+			ExprKind::Binary(bin) => {
+				let i = parent_inputs.len();
+				let mut a = self.find_postorder(&*bin.a, parent_inputs);
+				let j = parent_inputs.len();
+				let mut b = self.find_postorder(&*bin.b, parent_inputs);
+				if bin.op.is_commutative() && a > b {
+					// swap a, b
+					std::mem::swap(&mut a, &mut b);
+					// swap inputs
+					parent_inputs[i..].rotate_left(j - i);
+				}
+				format!("{}{}{}", a, bin.op.symbol(), b)
 			},
-			ExprKind::Unary(u) => {
-				self.find_kernel_roots(&*u.a, inputs);
-			},
-			ExprKind::Binary(b) => {
-				self.find_kernel_roots(&*b.a, inputs);
-				self.find_kernel_roots(&*b.b, inputs);
+			ExprKind::Leaf(LeafExpr::Randn()) | ExprKind::Leaf(LeafExpr::Read(..)) => {
+				"i".to_string()
 			},
 			ExprKind::Reduction(r) => {
-				let mut nested_inputs = Vec::new();
-				self.find_kernel_roots(&*r.a, &mut nested_inputs);
-				self.roots.insert(e, self.roots_postorder.len());
-				inputs.push(self.roots_postorder.len());
-				self.roots_postorder.push((e, nested_inputs));
+				let a = self.find_postorder(&*r.a, parent_inputs);
+				format!("{}({})", r.op.symbol(), a)
 			},
+		}
+	}
+
+	fn find_postorder(&mut self, expr: *const Expr, parent_inputs: &mut Vec<usize>) -> String {
+		let expr_ptr = expr;
+		let expr = unsafe { &*expr_ptr };
+
+		// Check if `expr` is in the `roots` set
+		if let Some(entry) = self.roots.get(&expr_ptr) {
+			// `expr` is a root. The value stored in `entry` is:
+			// - negative if not yet processed, or
+			// - an index into `roots_postorder` if already processed
+			let index = *entry;
+			if index >= 0 {
+				// already processed - just add `expr` as a an input to the parent
+				parent_inputs.push(index as usize);
+			} else {
+				// not yet processed - process it
+				let mut my_inputs = Vec::new();
+
+				let key = self.trav_children(expr, &mut my_inputs);
+
+				parent_inputs.push(self.roots_postorder.len());
+				self.roots.insert(expr, self.roots_postorder.len() as isize);
+				self.roots_postorder.push((expr, key, my_inputs));
+			}
+
+			"i".to_string()
+		} else {
+			// `expr` is NOT a root - process its children
+			let key = self.trav_children(expr, parent_inputs);
+			key
 		}
 	}
 
 	fn gen_kernels(&self) -> Vec<CPUKernel> {
 		let mut result = Vec::new();
-		for root in 0..self.roots_postorder.len() {
-			let name = format!("kernel_{}", root);
+		for kernel_index in 0..self.roots_postorder.len() {
+			let (root, _key, inputs) = &self.roots_postorder[kernel_index];
+			// TODO - use `key` to try to find the kernel in the cache
 
-			let (root, inputs) = &self.roots_postorder[root];
+			let name = format!("kernel_{}", kernel_index);
+
 			// SAFETY: as long as `expr` is not dropped, the pointers are valid
 			let root = unsafe { &**root };
 
