@@ -50,17 +50,6 @@ impl Shape {
 	pub fn elems(&self) -> usize {
 		self.__dims.iter().product()
 	}
-
-	pub fn strides(&self) -> Vec<usize> {
-		let mut strides = self.__dims.clone();
-		let mut stride = 1;
-		for i in (0..strides.len()).rev() {
-			let t = strides[i];
-			strides[i] = stride;
-			stride *= t;
-		}
-		strides
-	}
 }
 
 pub trait Device {
@@ -178,7 +167,8 @@ impl ReductionOp {
 pub struct ReductionExpr {
 	pub a: Rc<Expr>,
 	pub op: ReductionOp,
-	//	pub axis: isize,
+
+	pub dims_to_collapse: Vec<usize>,
 }
 
 pub struct MatMulExpr {
@@ -267,21 +257,22 @@ pub fn add<A: ExprLike, B: ExprLike>(a: A, b: B) -> Rc<Expr> {
 	binary_op(a, b, BinaryOp::Add)
 }
 
-fn reduction_op<A: ExprLike>(a: A, op: ReductionOp) -> Rc<Expr> {
+fn reduction_op<A: ExprLike>(a: A, op: ReductionOp, mut dims: Vec<usize>) -> Rc<Expr> {
 	let a = a.get();
+	dims.sort_unstable();
 	Rc::new(Expr {
 		shape: Shape::new_scalar(),
 		dtype: a.dtype,
-		kind: ExprKind::Reduction(ReductionExpr { a, op }),
+		kind: ExprKind::Reduction(ReductionExpr { a, op, dims_to_collapse: dims }),
 	})
 }
 
-pub fn sum<A: ExprLike>(a: A) -> Rc<Expr> {
-	reduction_op(a, ReductionOp::Sum)
+pub fn sum<A: ExprLike>(a: A, dims: Vec<usize>) -> Rc<Expr> {
+	reduction_op(a, ReductionOp::Sum, dims)
 }
 
-pub fn max<A: ExprLike>(a: A) -> Rc<Expr> {
-	reduction_op(a, ReductionOp::Max)
+pub fn max<A: ExprLike>(a: A, dims: Vec<usize>) -> Rc<Expr> {
+	reduction_op(a, ReductionOp::Max, dims)
 }
 
 pub fn matmul<A: ExprLike, B: ExprLike>(a: A, b: B) -> Rc<Expr> {
@@ -328,35 +319,31 @@ struct CPUTensorData {
 struct CPUKernel {
 	name: String,
 	code: String,
-}
-
-#[derive(Debug, Clone)]
-struct DimIndex {
-	i: String,
-	stride: String,
+	ndim: usize,
+	param_count: usize,
 }
 
 #[derive(Debug, Clone)]
 struct Index {
-	dims: Vec<DimIndex>,
+	perm: Vec<usize>,
+	code: String,
 }
 
 impl Index {
-	fn new() -> Self {
-		Index { dims: Vec::new() }
-	}
-}
+	fn new(perm: Vec<usize>) -> Self {
+		let mut code = String::new();
 
-impl fmt::Display for Index {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		for i in 0..self.dims.len() {
-			let dim = &self.dims[i];
+		for i in 0..perm.len() {
 			if i != 0 {
-				write!(f, " + ")?;
+				code.push_str(" + ");
 			}
-			write!(f, "{}*{}", dim.stride, dim.i)?;
+			write!(code, "i_{}", perm[i]).unwrap();
+			for j in i + 1..perm.len() {
+				write!(code, "*dim_{}", perm[j]).unwrap();
+			}
 		}
-		Ok(())
+
+		Index { perm, code }
 	}
 }
 
@@ -461,8 +448,11 @@ impl CPUCompiler {
 				self.roots.insert(e, -1);
 			},
 			ExprKind::MatMul(m) => {
+				// TODO - we mark both inputs as roots,
+				// which will make the common idiom `x * w.T` inefficient
 				self.roots.insert(m.a.as_ref() as *const Expr, -1);
 				self.roots.insert(m.b.as_ref() as *const Expr, -1);
+
 				self.find_kernel_roots(&*m.a);
 				self.find_kernel_roots(&*m.b);
 				self.roots.insert(e, -1);
@@ -561,13 +551,19 @@ impl CPUCompiler {
 
 			// SAFETY: as long as `expr` is not dropped, the pointers are valid
 			let root = unsafe { &**root };
+			let ndim = root.shape.ndim();
 
 			if let ExprKind::Leaf(LeafExpr::Randn()) = &root.kind {
-				result.push(CPUKernel { name, code: format!("RANDN_TODO;\n") });
+				debug_assert!(inputs.is_empty());
+				result.push(CPUKernel {
+					name,
+					code: format!("RANDN_TODO;\n"),
+					ndim,
+					param_count: 0,
+				});
 				continue;
 			}
 
-			let ndim = root.shape.ndim();
 			let mut code = format!("void {}(\n", name);
 			for i in 0..ndim {
 				write!(code, "\tuintptr_t const dim_{},\n", i);
@@ -576,57 +572,49 @@ impl CPUCompiler {
 				write!(code, "\tfloat const *const kernel_{},\n", inputs[i]);
 			}
 			write!(code, "\tfloat *const out_ptr\n) {{\n");
-			write!(code, "\tuintptr_t elems = 1;\n");
-			for i in (0..ndim).rev() {
-				write!(
-					code,
-					"\tuintptr_t const stride_{} = elems; elems *= dim_{};\n",
-					i, i
-				);
-			}
-			code.push_str(self.gen_root_expr(root).as_str());
+
+			code.push_str(
+				match &root.kind {
+					ExprKind::Reduction(red) => self.gen_kernel_reduction(root, red),
+					ExprKind::MatMul(..) => self.gen_kernel_matmul(root),
+					_ => self.gen_kernel_pointwise(root),
+				}
+				.as_str(),
+			);
+
 			code.push_str("}\n");
 
-			result.push(CPUKernel { name, code });
+			result.push(CPUKernel {
+				name,
+				code,
+				ndim,
+				param_count: inputs.len(),
+			});
 		}
 		result
 	}
 
-	fn gen_root_expr(&self, root: &Expr) -> String {
+	fn gen_kernel_pointwise(&self, root: &Expr) -> String {
 		let shape = root.shape.as_ref();
-
 		let ndim = shape.ndim();
 
 		let mut code = String::new();
-		let mut index = Index::new();
+		let index = Index::new((0..ndim).collect());
+		write!(code, "\t// pointwise kernel\n");
 		for dim in 0..ndim {
 			#[rustfmt::skip] write!(
 				code, "{}\tfor (uintptr_t i_{} = 0; i_{} < dim_{}; ++i_{}) {{\n",
 				Indent(dim), dim, dim, dim, dim
 			);
-			index.dims.push(DimIndex {
-				i: format!("i_{}", dim),
-				stride: format!("stride_{}", dim),
-			});
 		}
 
-		let output = format!("out_ptr[{}]", index);
-
-		match &root.kind {
-			ExprKind::Leaf(LeafExpr::Randn()) => {
-				unreachable!("Randn should have been handled by gen_kernels()")
-			},
-			ExprKind::Reduction(r) => {
-				unimplemented!("Reduction");
-			},
-			ExprKind::MatMul(m) => {
-				unimplemented!("MatMul");
-			},
-			_ => {
-				let val = self.gen_expr(root, root, &index);
-				write!(code, "{}{} = {};\n", Indent(ndim + 1), output, val);
-			},
-		}
+		self.gen_root_expr(
+			&mut code,
+			Indent(ndim + 1),
+			root,
+			&index,
+			format!("out_ptr[{}]", index.code),
+		);
 
 		for dim in (0..ndim).rev() {
 			for _ in 0..dim {
@@ -638,11 +626,99 @@ impl CPUCompiler {
 		code
 	}
 
+	fn gen_kernel_reduction(&self, root: &Expr, red: &ReductionExpr) -> String {
+		let shape = root.shape.as_ref();
+		let ndim = shape.ndim();
+
+		let mut code = String::new();
+		let index = Index::new((0..ndim).collect());
+		write!(code, "\t// reduction kernel\n");
+
+		let mut loop_cnt = 0;
+		for dim in 0..ndim {
+			// TODO - use binary_search()? ndim will usually be very small, so contains() may be faster
+			if red.dims_to_collapse.contains(&dim) {
+				continue;
+			}
+			#[rustfmt::skip] write!(
+				code, "{}\tfor (uintptr_t i_{} = 0; i_{} < dim_{}; ++i_{}) {{\n",
+				Indent(loop_cnt), dim, dim, dim, dim
+			);
+			loop_cnt += 1;
+		}
+
+		let outer_loops = loop_cnt;
+		write!(code, "{}\tfloat value = 0.0;\n", Indent(loop_cnt));
+
+		for dim in 0..ndim {
+			// TODO - use binary_search()? ndim will usually be very small, so contains() may be faster
+			if !red.dims_to_collapse.contains(&dim) {
+				continue;
+			}
+			#[rustfmt::skip] write!(
+				code, "{}\tfor (uintptr_t i_{} = 0; i_{} < dim_{}; ++i_{}) {{\n",
+				Indent(loop_cnt), dim, dim, dim, dim
+			);
+			loop_cnt += 1;
+		}
+
+		self.gen_root_expr(
+			&mut code,
+			Indent(loop_cnt + 1),
+			red.a.as_ref(),
+			&index,
+			"value".to_string(),
+		);
+
+		for dim in (0..outer_loops).rev() {
+			write!(code, "{}\t}}\n", Indent(loop_cnt));
+			loop_cnt -= 1;
+		}
+
+		write!(code, "out_ptr[{}] = value;", index.code);
+
+		for dim in (outer_loops..ndim).rev() {
+			write!(code, "{}\t}}\n", Indent(loop_cnt));
+			loop_cnt -= 1;
+		}
+
+		code
+	}
+
+	fn gen_kernel_matmul(&self, root: &Expr) -> String {
+		unimplemented!("gen_kernel_matmul");
+	}
+
+	fn gen_root_expr(
+		&self,
+		code: &mut String,
+		indent: Indent,
+		root: &Expr,
+		index: &Index,
+		outvar: String,
+	) {
+		match &root.kind {
+			ExprKind::Leaf(LeafExpr::Randn()) => {
+				unreachable!("Randn should have been handled by gen_kernels()")
+			},
+			ExprKind::Reduction(r) => {
+				unimplemented!("Reduction");
+			},
+			ExprKind::MatMul(m) => {
+				unimplemented!("MatMul");
+			},
+			_ => {
+				let val = self.gen_expr(root, root, index);
+				write!(code, "{}{} = {};\n", indent, outvar, val);
+			},
+		}
+	}
+
 	fn gen_expr(&self, root: &Expr, expr: &Expr, index: &Index) -> String {
 		if (root as *const Expr) != (expr as *const Expr)
 			&& let Some(kernel_index) = self.roots.get(&(expr as *const Expr))
 		{
-			return format!("kernel_{}[{}]", kernel_index, index);
+			return format!("kernel_{}[{}]", kernel_index, index.code);
 		}
 
 		match &expr.kind {
@@ -666,12 +742,9 @@ impl CPUCompiler {
 				}
 			},
 			ExprKind::Transpose(t) => {
-				let mut new_index = index.clone();
-				let dim1 = std::ptr::addr_of_mut!(new_index.dims[t.x1]);
-				let dim2 = std::ptr::addr_of_mut!(new_index.dims[t.x2]);
-				let stride1 = unsafe { &mut (*dim1).stride };
-				let stride2 = unsafe { &mut (*dim2).stride };
-				std::mem::swap(stride1, stride2);
+				let mut new_perm = index.perm.clone();
+				new_perm.swap(t.x1, t.x2);
+				let new_index = Index::new(new_perm);
 				self.gen_expr(root, &t.a, &new_index)
 			},
 			_ => {

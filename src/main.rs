@@ -37,7 +37,11 @@ fn main() {
 
 	let qq = transpose(e, 0, 1);
 
-	let t = dev.eval(qq);
+	//	let t = dev.eval(qq);
+
+	//let d3 = randn(Shape::new(&[3, 9, 7]), DType::Float(32));
+	let d3 = zeros(Shape::new(&[3, 9, 7]), DType::Float(32));
+	let t = dev.eval(sum(d3, vec![1]));
 }
 
 /*
