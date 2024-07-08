@@ -520,7 +520,13 @@ impl CPUCompiler {
 			},
 			ExprKind::Reduction(r) => {
 				let a = self.find_postorder(&*r.a, parent_inputs);
-				format!("{}_{}({})", r.op.symbol(), expr.dtype, a)
+				let mut cache_key = String::new();
+				write!(cache_key, "{}_{}{{", r.op.symbol(), expr.dtype);
+				for dim in &r.dims_to_collapse {
+					write!(cache_key, "{},", dim);
+				}
+				write!(cache_key, "}}({})", a);
+				cache_key
 			},
 			ExprKind::MatMul(m) => {
 				let a = self.find_postorder(&*m.a, parent_inputs);
