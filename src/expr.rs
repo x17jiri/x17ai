@@ -39,6 +39,17 @@ impl Shape {
 		Rc::new(Self { __dims: new_dims })
 	}
 
+	pub fn new_reduced(&self, dims_to_collapse: &[usize]) -> Rc<Self> {
+		let mut new_dims = self.__dims.clone();
+		for dim in dims_to_collapse {
+			if *dim >= new_dims.len() {
+				panic!("Invalid dimension");
+			}
+			new_dims[*dim] = 1;
+		}
+		Rc::new(Self { __dims: new_dims })
+	}
+
 	pub fn ndim(&self) -> usize {
 		self.__dims.len()
 	}
@@ -80,6 +91,16 @@ impl DType {
 			DType::Float(b) => *b as usize,
 			DType::Int(b) => *b as usize,
 			DType::Uint(b) => *b as usize,
+		}
+	}
+}
+
+impl fmt::Display for DType {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		match self {
+			DType::Float(b) => write!(f, "f{}", b),
+			DType::Int(b) => write!(f, "i{}", b),
+			DType::Uint(b) => write!(f, "u{}", b),
 		}
 	}
 }
@@ -257,13 +278,13 @@ pub fn add<A: ExprLike, B: ExprLike>(a: A, b: B) -> Rc<Expr> {
 	binary_op(a, b, BinaryOp::Add)
 }
 
-fn reduction_op<A: ExprLike>(a: A, op: ReductionOp, mut dims: Vec<usize>) -> Rc<Expr> {
+fn reduction_op<A: ExprLike>(a: A, op: ReductionOp, mut dims_to_collapse: Vec<usize>) -> Rc<Expr> {
 	let a = a.get();
-	dims.sort_unstable();
+	dims_to_collapse.sort_unstable();
 	Rc::new(Expr {
-		shape: a.shape.clone(), // TODO - collapse dims in shape
+		shape: a.shape.new_reduced(&dims_to_collapse),
 		dtype: a.dtype,
-		kind: ExprKind::Reduction(ReductionExpr { a, op, dims_to_collapse: dims }),
+		kind: ExprKind::Reduction(ReductionExpr { a, op, dims_to_collapse }),
 	})
 }
 
@@ -310,6 +331,7 @@ pub fn transpose<A: ExprLike>(a: A, x1: usize, x2: usize) -> Rc<Expr> {
 
 pub struct CPUDevice {
 	name: String,
+	kernel_cache: HashMap<String, Rc<CPUKernel>>,
 }
 
 struct CPUTensorData {
@@ -350,7 +372,7 @@ impl Index {
 impl CPUDevice {
 	// create a new CPU device
 	pub fn new(name: String) -> Rc<CPUDevice> {
-		Rc::<CPUDevice>::new(CPUDevice { name })
+		Rc::<CPUDevice>::new(CPUDevice { name, kernel_cache: HashMap::new() })
 	}
 
 	// create a new uninitialized Tensor
@@ -392,13 +414,19 @@ impl Device for CPUDevice {
 	}
 }
 
+struct PostorderItem {
+	inputs: Vec<usize>,
+}
+
 struct CPUCompiler {
 	expr: Rc<Expr>,
 
 	// as long as `expr` is not dropped, the pointers are valid
 	roots: HashMap<*const Expr, isize>,
-	roots_postorder: Vec<(*const Expr, String, Vec<usize>)>, // (expr, key, inputs)
+	roots_postorder: Vec<(*const Expr, String, Vec<usize>)>, // (expr, cache_key, inputs)
 	processed: HashSet<*const Expr>,
+
+	swapped_operands: HashSet<*const Expr>,
 }
 
 impl CPUCompiler {
@@ -409,6 +437,7 @@ impl CPUCompiler {
 			roots: HashMap::new(),
 			roots_postorder: Vec::new(),
 			processed: HashSet::new(),
+			swapped_operands: HashSet::new(),
 		};
 
 		s.find_kernel_roots(unsafe { &*e });
@@ -465,12 +494,12 @@ impl CPUCompiler {
 
 	fn trav_children(&mut self, expr: &Expr, parent_inputs: &mut Vec<usize>) -> String {
 		match &expr.kind {
-			ExprKind::Leaf(LeafExpr::IntConst(c)) => format!("int({})", c),
-			ExprKind::Leaf(LeafExpr::UintConst(c)) => format!("uint({})", c),
-			ExprKind::Leaf(LeafExpr::FloatConst(c)) => format!("float({})", c),
+			ExprKind::Leaf(LeafExpr::IntConst(c)) => format!("{}({})", expr.dtype, c),
+			ExprKind::Leaf(LeafExpr::UintConst(c)) => format!("{}({})", expr.dtype, c),
+			ExprKind::Leaf(LeafExpr::FloatConst(c)) => format!("{}({})", expr.dtype, c),
 			ExprKind::Unary(un) => {
 				let a = self.find_postorder(&*un.a, parent_inputs);
-				format!("{}({})", un.op.symbol(), a)
+				format!("{}_{}({})", un.op.symbol(), expr.dtype, a)
 			},
 			ExprKind::Binary(bin) => {
 				let i = parent_inputs.len();
@@ -482,20 +511,21 @@ impl CPUCompiler {
 					std::mem::swap(&mut a, &mut b);
 					// swap inputs
 					parent_inputs[i..].rotate_left(j - i);
+					self.swapped_operands.insert(expr);
 				}
 				format!("{}{}{}", a, bin.op.symbol(), b)
 			},
 			ExprKind::Leaf(LeafExpr::Randn()) | ExprKind::Leaf(LeafExpr::Read(..)) => {
-				"i".to_string()
+				format!("i_{}", expr.dtype)
 			},
 			ExprKind::Reduction(r) => {
 				let a = self.find_postorder(&*r.a, parent_inputs);
-				format!("{}({})", r.op.symbol(), a)
+				format!("{}_{}({})", r.op.symbol(), expr.dtype, a)
 			},
 			ExprKind::MatMul(m) => {
 				let a = self.find_postorder(&*m.a, parent_inputs);
 				let b = self.find_postorder(&*m.b, parent_inputs);
-				format!("matmul({},{})", a, b)
+				format!("matmul_{}({},{})", expr.dtype, a, b)
 			},
 			ExprKind::Transpose(t) => {
 				let a = self.find_postorder(&*t.a, parent_inputs);
@@ -526,26 +556,26 @@ impl CPUCompiler {
 				// not yet processed - process it
 				let mut my_inputs = Vec::new();
 
-				let key = self.trav_children(expr, &mut my_inputs);
+				let cache_key = self.trav_children(expr, &mut my_inputs);
 
 				parent_inputs.push(self.roots_postorder.len());
 				self.roots.insert(expr, self.roots_postorder.len() as isize);
-				self.roots_postorder.push((expr, key, my_inputs));
+				self.roots_postorder.push((expr, cache_key, my_inputs));
 			}
 
-			"i".to_string()
+			format!("i_{}", expr.dtype)
 		} else {
 			// `expr` is NOT a root - process its children
-			let key = self.trav_children(expr, parent_inputs);
-			key
+			let cache_key = self.trav_children(expr, parent_inputs);
+			cache_key
 		}
 	}
 
 	fn gen_kernels(&self) -> Vec<CPUKernel> {
 		let mut result = Vec::new();
 		for kernel_index in 0..self.roots_postorder.len() {
-			let (root, _key, inputs) = &self.roots_postorder[kernel_index];
-			// TODO - use `key` to try to find the kernel in the cache
+			let (root, cache_key, inputs) = &self.roots_postorder[kernel_index];
+			// TODO - use `cache_key` to try to find the kernel in the cache
 
 			let name = format!("kernel_{}", kernel_index);
 
@@ -564,12 +594,18 @@ impl CPUCompiler {
 				continue;
 			}
 
-			let mut code = format!("void {}(\n", name);
+			let mut code = String::new();
+			write!(code, "// cache key: `{}`\n", cache_key);
+			write!(code, "void {}(\n", name);
 			for i in 0..ndim {
 				write!(code, "\tuintptr_t const dim_{},\n", i);
 			}
 			for i in 0..inputs.len() {
-				write!(code, "\tfloat const *const kernel_{},\n", inputs[i]);
+				write!(
+					code,
+					"\tfloat const *const param_{}, // kernel_{}\n",
+					i, inputs[i]
+				);
 			}
 			write!(code, "\tfloat *const out_ptr\n) {{\n");
 
@@ -608,12 +644,13 @@ impl CPUCompiler {
 			);
 		}
 
-		self.gen_root_expr(
-			&mut code,
+		let val = self.gen_expr(root, root, &index);
+		write!(
+			code,
+			"{}out_ptr[{}] = {};\n",
 			Indent(ndim + 1),
-			root,
-			&index,
-			format!("out_ptr[{}]", index.code),
+			index.code,
+			val
 		);
 
 		for dim in (0..ndim).rev() {
@@ -648,6 +685,7 @@ impl CPUCompiler {
 		}
 
 		let outer_loops = loop_cnt;
+		// TODO: `0.0` is only correct for `sum`
 		write!(code, "{}\tfloat value = 0.0;\n", Indent(loop_cnt));
 
 		for dim in 0..ndim {
@@ -662,17 +700,23 @@ impl CPUCompiler {
 			loop_cnt += 1;
 		}
 
-		self.gen_root_expr(
-			&mut code,
-			Indent(loop_cnt + 1),
-			red.a.as_ref(),
-			&index,
-			"value".to_string(),
-		);
+		let val = self.gen_expr(root, &red.a, &index);
+		// TODO: `+=` is only correct for `sum`
+		write!(code, "{}value += {};\n", Indent(loop_cnt + 1), val);
 
-		for dim in (outer_loops..ndim).rev() {
+		for _ in (outer_loops..ndim).rev() {
 			loop_cnt -= 1;
 			write!(code, "{}\t}}\n", Indent(loop_cnt));
+		}
+
+		for i in &red.dims_to_collapse {
+			write!(
+				code,
+				"{}\tuintptr_t dim_{} = 1; uintptr_t i_{} = 0;\n",
+				Indent(outer_loops),
+				i,
+				i
+			);
 		}
 
 		write!(
@@ -682,7 +726,7 @@ impl CPUCompiler {
 			index.code
 		);
 
-		for dim in (0..outer_loops).rev() {
+		for _ in (0..outer_loops).rev() {
 			loop_cnt -= 1;
 			write!(code, "{}\t}}\n", Indent(loop_cnt));
 		}
@@ -692,31 +736,6 @@ impl CPUCompiler {
 
 	fn gen_kernel_matmul(&self, root: &Expr) -> String {
 		unimplemented!("gen_kernel_matmul");
-	}
-
-	fn gen_root_expr(
-		&self,
-		code: &mut String,
-		indent: Indent,
-		root: &Expr,
-		index: &Index,
-		outvar: String,
-	) {
-		match &root.kind {
-			ExprKind::Leaf(LeafExpr::Randn()) => {
-				unreachable!("Randn should have been handled by gen_kernels()")
-			},
-			ExprKind::Reduction(r) => {
-				unimplemented!("Reduction");
-			},
-			ExprKind::MatMul(m) => {
-				unimplemented!("MatMul");
-			},
-			_ => {
-				let val = self.gen_expr(root, root, index);
-				write!(code, "{}{} = {};\n", indent, outvar, val);
-			},
-		}
 	}
 
 	fn gen_expr(&self, root: &Expr, expr: &Expr, index: &Index) -> String {
@@ -740,8 +759,16 @@ impl CPUCompiler {
 				}
 			},
 			ExprKind::Binary(bin) => {
-				let a = self.gen_expr(root, &bin.a, index);
-				let b = self.gen_expr(root, &bin.b, index);
+				let a;
+				let b;
+				if bin.op.is_commutative() && self.swapped_operands.contains(&(expr as *const Expr))
+				{
+					a = self.gen_expr(root, &bin.a, index);
+					b = self.gen_expr(root, &bin.b, index);
+				} else {
+					a = self.gen_expr(root, &bin.b, index);
+					b = self.gen_expr(root, &bin.a, index);
+				}
 				match bin.op {
 					BinaryOp::Add => format!("({} + {})", a, b),
 				}
