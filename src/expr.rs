@@ -261,7 +261,7 @@ fn reduction_op<A: ExprLike>(a: A, op: ReductionOp, mut dims: Vec<usize>) -> Rc<
 	let a = a.get();
 	dims.sort_unstable();
 	Rc::new(Expr {
-		shape: Shape::new_scalar(),
+		shape: a.shape.clone(), // TODO - collapse dims in shape
 		dtype: a.dtype,
 		kind: ExprKind::Reduction(ReductionExpr { a, op, dims_to_collapse: dims }),
 	})
@@ -670,16 +670,21 @@ impl CPUCompiler {
 			"value".to_string(),
 		);
 
-		for dim in (0..outer_loops).rev() {
-			write!(code, "{}\t}}\n", Indent(loop_cnt));
+		for dim in (outer_loops..ndim).rev() {
 			loop_cnt -= 1;
+			write!(code, "{}\t}}\n", Indent(loop_cnt));
 		}
 
-		write!(code, "out_ptr[{}] = value;", index.code);
+		write!(
+			code,
+			"{}\tout_ptr[{}] = value;\n",
+			Indent(loop_cnt),
+			index.code
+		);
 
-		for dim in (outer_loops..ndim).rev() {
-			write!(code, "{}\t}}\n", Indent(loop_cnt));
+		for dim in (0..outer_loops).rev() {
 			loop_cnt -= 1;
+			write!(code, "{}\t}}\n", Indent(loop_cnt));
 		}
 
 		code
