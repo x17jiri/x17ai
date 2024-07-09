@@ -16,6 +16,8 @@ use std::fmt::Write;
 use std::path::Path;
 use std::rc::Rc;
 
+use crate::rand::Rng;
+
 pub struct Indent(usize);
 
 impl fmt::Display for Indent {
@@ -82,6 +84,8 @@ pub trait Device {
 	fn name(&self) -> &str;
 
 	fn eval(&self, expr: Rc<Expr>) -> Rc<Tensor>;
+
+	fn owns(&self, tensor: &Tensor) -> bool;
 }
 
 pub trait TensorData {}
@@ -349,10 +353,20 @@ pub struct CPUDevice {
 	kernel_cache: HashMap<String, Rc<CPUKernel>>,
 	tempdir: tempfile::TempDir,
 	kernel_counter: usize,
+	rng: Rng,
 }
 
 struct CPUTensorData {
-	data: Box<[Cell<u64>]>,
+	__data: Box<[Cell<u64>]>,
+}
+
+impl CPUTensorData {
+	fn cast<T>(&self) -> &[Cell<T>] {
+		let bytes = self.__data.len() * std::mem::size_of::<u64>();
+		let elems = bytes / std::mem::size_of::<T>();
+		let ptr = self.__data.as_ptr() as *const Cell<T>;
+		unsafe { std::slice::from_raw_parts(ptr, elems) }
+	}
 }
 
 type CPUKernelFunc =
@@ -366,7 +380,7 @@ struct CPUKernel {
 }
 
 impl CPUKernel {
-	fn new(code: &str, tempdir: &Path) -> Self {
+	fn new(code: &str, ndim: usize, param_count: usize, tempdir: &Path) -> Self {
 		let c_file = tempdir.join("kernel.c");
 		std::fs::write(&c_file, code).unwrap();
 
@@ -382,13 +396,11 @@ impl CPUKernel {
 			.output()
 			.expect("Failed to compile kernel");
 
-		unsafe {
-			let lib = libloading::Library::new(so_file).unwrap();
-			let func = lib.get(b"kernel").unwrap();
-			let func = func.into_raw();
+		let lib = unsafe { libloading::Library::new(so_file).unwrap() };
+		let func: libloading::Symbol<CPUKernelFunc> = unsafe { lib.get(b"kernel").unwrap() };
+		let func: RawSymbol<CPUKernelFunc> = unsafe { func.into_raw() };
 
-			// TODO
-		}
+		Self { ndim, param_count, lib, func }
 	}
 }
 
@@ -424,6 +436,7 @@ impl CPUDevice {
 			kernel_cache: HashMap::new(),
 			tempdir: tempfile::tempdir().unwrap(),
 			kernel_counter: 0,
+			rng: Rng::new_default(),
 		})
 	}
 
@@ -443,10 +456,10 @@ impl CPUDevice {
 			panic!("Memory allocation failed");
 		}
 		let slice = std::slice::from_raw_parts_mut(mem, words);
-		CPUTensorData { data: Box::from_raw(slice) }
+		CPUTensorData { __data: Box::from_raw(slice) }
 	}
 
-	fn gen_kernel(&self, item: &PostorderItem) -> CPUKernel {
+	fn gen_kernel(&self, sequence: &ComputeSequence, item: &PostorderItem) -> CPUKernel {
 		let root = item.expr;
 		let inputs = item.inputs;
 		let ndim = root.shape.ndim();
@@ -454,42 +467,31 @@ impl CPUDevice {
 		let mut code = String::new();
 		write!(code, "// cache key: `{}`\n", item.cache_key);
 		write!(code, "void kernel(\n");
-		for i in 0..ndim {
-			write!(code, "\tuintptr_t const dim_{},\n", i);
-		}
-		for i in 0..inputs.len() {
-			write!(
-				code,
-				"\tfloat const *const param_{}, // kernel_{}\n",
-				i, inputs[i]
-			);
-		}
-		write!(code, "\tfloat *const out_ptr\n) {{\n");
+		write!(code, "\tuintptr_t const dim[],\n");
+		write!(code, "\tfloat const *param[],\n");
+		write!(code, "\tfloat output[]\n");
+		write!(code, ") {{\n");
 
-		code.push_str(
-			match &root.kind {
-				ExprKind::Reduction(red) => self.gen_kernel_reduction(root, red),
-				ExprKind::MatMul(..) => self.gen_kernel_matmul(root),
-				_ => self.gen_kernel_pointwise(root),
-			}
-			.as_str(),
-		);
-
-		code.push_str("}\n");
-
-		CPUKernel {
-			code,
-			ndim,
-			param_count: inputs.len(),
-			func: None,
+		match &root.kind {
+			ExprKind::Reduction(red) => {
+				self.gen_kernel_reduction(&mut code, sequence, root, red);
+			},
+			ExprKind::MatMul(..) => {
+				self.gen_kernel_matmul(&mut code, sequence, root);
+			},
+			_ => {
+				self.gen_kernel_pointwise(&mut code, sequence, root);
+			},
 		}
+
+		write!(code, "}}\n");
+
+		CPUKernel::new(&code, ndim, inputs.len(), self.tempdir.path())
 	}
 
-	fn gen_kernel_pointwise(&self, root: &Expr) -> String {
-		let shape = root.shape.as_ref();
-		let ndim = shape.ndim();
+	fn gen_kernel_pointwise(&self, code: &mut String, sequence: &ComputeSequence, root: &Expr) {
+		let ndim = root.shape.ndim();
 
-		let mut code = String::new();
 		let index = Index::new((0..ndim).collect());
 		write!(code, "\t// pointwise kernel\n");
 		for dim in 0..ndim {
@@ -499,10 +501,10 @@ impl CPUDevice {
 			);
 		}
 
-		let val = self.gen_expr(root, root, &index);
+		let val = self.gen_expr(sequence, root, root, &index);
 		write!(
 			code,
-			"{}out_ptr[{}] = {};\n",
+			"{}output[{}] = {};\n",
 			Indent(ndim + 1),
 			index.code,
 			val
@@ -514,15 +516,17 @@ impl CPUDevice {
 			}
 			write!(code, "\t}}\n");
 		}
-
-		code
 	}
 
-	fn gen_kernel_reduction(&self, root: &Expr, red: &ReductionExpr) -> String {
-		let shape = root.shape.as_ref();
-		let ndim = shape.ndim();
+	fn gen_kernel_reduction(
+		&self,
+		code: &mut String,
+		sequence: &ComputeSequence,
+		root: &Expr,
+		red: &ReductionExpr,
+	) {
+		let ndim = root.shape.ndim();
 
-		let mut code = String::new();
 		let index = Index::new((0..ndim).collect());
 		write!(code, "\t// reduction kernel\n");
 
@@ -555,7 +559,7 @@ impl CPUDevice {
 			loop_cnt += 1;
 		}
 
-		let val = self.gen_expr(root, &red.a, &index);
+		let val = self.gen_expr(sequence, root, &red.a, &index);
 		// TODO: `+=` is only correct for `sum`
 		write!(code, "{}value += {};\n", Indent(loop_cnt + 1), val);
 
@@ -585,17 +589,21 @@ impl CPUDevice {
 			loop_cnt -= 1;
 			write!(code, "{}\t}}\n", Indent(loop_cnt));
 		}
-
-		code
 	}
 
-	fn gen_kernel_matmul(&self, root: &Expr) -> String {
+	fn gen_kernel_matmul(&self, _code: &mut String, _sequence: &ComputeSequence, _root: &Expr) {
 		unimplemented!("gen_kernel_matmul");
 	}
 
-	fn gen_expr(&self, root: &Expr, expr: &Expr, index: &Index) -> String {
+	fn gen_expr(
+		&self,
+		sequence: &ComputeSequence,
+		root: &Expr,
+		expr: &Expr,
+		index: &Index,
+	) -> String {
 		if (root as *const Expr) != (expr as *const Expr)
-			&& let Some(kernel_index) = self.roots.get(&(expr as *const Expr))
+			&& let Some(kernel_index) = sequence.index_of(expr)
 		{
 			return format!("kernel_{}[{}]", kernel_index, index.code);
 		}
@@ -608,7 +616,7 @@ impl CPUDevice {
 				format!("READ_TENSOR_TODO")
 			},
 			ExprKind::Unary(un) => {
-				let a = self.gen_expr(root, &un.a, index);
+				let a = self.gen_expr(sequence, root, &un.a, index);
 				match un.op {
 					UnaryOp::Exp => format!("exp({})", a),
 				}
@@ -616,13 +624,12 @@ impl CPUDevice {
 			ExprKind::Binary(bin) => {
 				let a;
 				let b;
-				if bin.op.is_commutative() && self.swapped_operands.contains(&(expr as *const Expr))
-				{
-					a = self.gen_expr(root, &bin.a, index);
-					b = self.gen_expr(root, &bin.b, index);
+				if bin.op.is_commutative() && sequence.has_swapped_operands(expr) {
+					a = self.gen_expr(sequence, root, &bin.a, index);
+					b = self.gen_expr(sequence, root, &bin.b, index);
 				} else {
-					a = self.gen_expr(root, &bin.b, index);
-					b = self.gen_expr(root, &bin.a, index);
+					a = self.gen_expr(sequence, root, &bin.b, index);
+					b = self.gen_expr(sequence, root, &bin.a, index);
 				}
 				match bin.op {
 					BinaryOp::Add => format!("({} + {})", a, b),
@@ -632,11 +639,17 @@ impl CPUDevice {
 				let mut new_perm = index.perm.clone();
 				new_perm.swap(t.x1, t.x2);
 				let new_index = Index::new(new_perm);
-				self.gen_expr(root, &t.a, &new_index)
+				self.gen_expr(sequence, root, &t.a, &new_index)
 			},
 			_ => {
 				panic!("Unsupported expression");
 			},
+		}
+	}
+
+	fn randn(&mut self, data: &mut CPUTensorData) {
+		for i in data.cast::<f32>() {
+			i.set(self.rng.get_normal() as f32);
 		}
 	}
 }
@@ -650,14 +663,23 @@ impl Device for CPUDevice {
 		let sequence = ComputeSequence::new(expr);
 		let mut buffers: Vec<CPUTensorData> = Vec::with_capacity(sequence.len());
 		let mut rc_buffers: Vec<(usize, *const CPUTensorData)> = Vec::with_capacity(sequence.len());
-		for (index, item) in sequence.iter().enumerate() {
+		for item in sequence.iter() {
 			let expr = item.expr;
-			match expr.kind {
+			match &expr.kind {
 				ExprKind::Leaf(LeafExpr::Randn()) => {
-					unimplemented!("eval randn");
+					let rc = item.ref_count;
+					match expr.dtype {
+						DType::Float(32) => {
+							buffers.push(unsafe { CPUDevice::new_uninit(32, expr.shape.elems()) });
+							rc_buffers.push((rc, buffers.last().unwrap() as *const CPUTensorData));
+
+							self.randn(buffers.last_mut().unwrap());
+						},
+						_ => panic!("Unsupported dtype for randn"),
+					};
 				},
 				ExprKind::Leaf(LeafExpr::Read(tensor)) => {
-					if (tensor.device.as_ref() as *const dyn Device) != (self as *const CPUDevice) {
+					if !self.owns(&tensor) {
 						unimplemented!("TODO: copy tensor from another device");
 					}
 					buffers.push(CPUTensorData { data: Vec::new().into_boxed_slice() });
@@ -667,17 +689,22 @@ impl Device for CPUDevice {
 				},
 				_ => {
 					let rc = item.ref_count;
-					let buf =
-						unsafe { CPUDevice::new_uninit(expr.dtype.bits(), expr.shape.elems()) };
-					rc_buffers.push((rc, &buf));
+					buffers.push(unsafe {
+						CPUDevice::new_uninit(expr.dtype.bits(), expr.shape.elems())
+					});
+					rc_buffers.push((rc, buffers.last().unwrap() as *const CPUTensorData));
 
 					// TODO - try to find the kernel in the cache
-					let kernel = self.gen_kernel(&item);
+					let kernel = self.gen_kernel(&sequence, &item);
 				},
 			}
 		}
 
 		unimplemented!("take last tensor in data and return it")
+	}
+
+	fn owns(&self, tensor: &Tensor) -> bool {
+		(tensor.device.as_ref() as *const dyn Device) == (self as *const CPUDevice)
 	}
 }
 
@@ -900,5 +927,15 @@ impl ComputeSequence {
 			let cache_key = self.traverse_children(expr, parent_inputs);
 			cache_key
 		}
+	}
+
+	pub fn index_of(&self, expr: &Expr) -> Option<usize> {
+		let expr = expr as *const Expr;
+		self.roots.get(&expr).copied().map(|i| i as usize)
+	}
+
+	pub fn has_swapped_operands(&self, expr: &Expr) -> bool {
+		let expr = expr as *const Expr;
+		self.swapped_operands.contains(&expr)
 	}
 }
