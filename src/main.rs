@@ -26,6 +26,25 @@ mod tensor;
 use expr::*;
 use std::rc::Rc;
 
+trait Trait {}
+
+struct X {
+	x: bool,
+}
+
+impl Trait for X {}
+
+struct Y<T: ?Sized> {
+	a: usize,
+	b: T,
+}
+
+fn main1() {
+	let a: Rc<dyn Trait> = Rc::new(X { x: true });
+
+	let b: Rc<Y<dyn Trait>> = Rc::new(Y::<X> { a: 4, b: X { x: true } });
+	println!("hello")
+}
 fn main() {
 	let dev: Rc<dyn Device> = expr::CPUDevice::new("CPU".to_string());
 

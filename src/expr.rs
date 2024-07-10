@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as FmtWrite;
 use std::io::Write as IoWrite;
 use std::path::Path;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use crate::rand::Rng;
 
@@ -84,7 +84,7 @@ impl Shape {
 pub trait Device {
 	fn name(&self) -> &str;
 
-	fn eval(&self, expr: Rc<Expr>) -> Rc<Tensor>;
+	fn eval(self: Rc<Self>, expr: Rc<Expr>) -> Rc<Tensor>;
 
 	fn owns(&self, tensor: &Tensor) -> bool;
 }
@@ -370,6 +370,8 @@ impl CPUTensorData {
 	}
 }
 
+impl TensorData for CPUTensorData {}
+
 type CPUKernelFunc =
 	unsafe extern "C" fn(dims: *const usize, inputs: *const *const f32, output: *mut f32) -> ();
 
@@ -392,15 +394,21 @@ impl CPUKernel {
 		std::io::stdout().flush().unwrap();
 		std::io::stderr().flush().unwrap();
 
-		let mut child = std::process::Command::new("clang")
-			.arg("-O3")
-			.arg("-shared")
-			.arg("-o")
-			.arg(so_file.as_os_str())
-			.arg(cpp_file.as_os_str())
-			.current_dir(tempdir)
-			.spawn()
-			.expect("Failed to spawn clang");
+		let mut child =
+			std::process::Command::new("/home/spock/sw/llvm-project-2/llvm-build/bin/clang")
+				.arg("-std=c++17")
+				.arg("-Wall")
+				.arg("-Wextra")
+				.arg("-g")
+				.arg("-ggdb")
+				.arg("-O3")
+				.arg("-shared")
+				.arg("-o")
+				.arg(so_file.as_os_str())
+				.arg(cpp_file.as_os_str())
+				.current_dir(tempdir)
+				.spawn()
+				.expect("Failed to spawn clang");
 
 		let ok = child.wait().expect("Failed to compile kernel").success();
 		if !ok {
@@ -712,7 +720,7 @@ impl Device for CPUDevice {
 		&self.name
 	}
 
-	fn eval(&self, expr: Rc<Expr>) -> Rc<Tensor> {
+	fn eval(self: Rc<CPUDevice>, expr: Rc<Expr>) -> Rc<Tensor> {
 		let sequence = ComputeSequence::new(expr);
 		let mut buffers: Vec<CPUTensorData> = Vec::with_capacity(sequence.len());
 		let mut rc_buffers: Vec<(usize, *const CPUTensorData)> = Vec::with_capacity(sequence.len());
@@ -724,7 +732,9 @@ impl Device for CPUDevice {
 					match expr.dtype {
 						DType::Float(32) => {
 							buffers.push(unsafe { CPUDevice::new_uninit(32, expr.shape.elems()) });
-							rc_buffers.push((rc, buffers.last().unwrap() as *const CPUTensorData));
+
+							let new_buf = buffers.last().unwrap() as *const CPUTensorData;
+							rc_buffers.push((rc, new_buf));
 
 							self.randn(buffers.last_mut().unwrap());
 						},
@@ -736,9 +746,13 @@ impl Device for CPUDevice {
 						unimplemented!("TODO: copy tensor from another device");
 					}
 					buffers.push(CPUTensorData { __data: Vec::new().into_boxed_slice() });
+
+					let tensor_data = &tensor.data;
+					let tensor_data = tensor_data as *const dyn TensorData;
+					let tensor_data = tensor_data as *const CPUTensorData;
+
 					let rc = usize::MAX;
-					let buf = buffers.last().unwrap() as *const CPUTensorData;
-					rc_buffers.push((rc, buf));
+					rc_buffers.push((rc, tensor_data));
 				},
 				_ => {
 					let rc = item.ref_count;
@@ -749,11 +763,44 @@ impl Device for CPUDevice {
 
 					// TODO - try to find the kernel in the cache
 					let kernel = self.gen_kernel(&sequence, &item);
+
+					let dims = expr.shape.dims();
+					let dims = dims.as_ptr();
+
+					let inputs = item
+						.inputs
+						.iter()
+						.map(|i| {
+							let tensor_data = unsafe { &*rc_buffers[*i].1 };
+							let tensor_data = tensor_data.cast::<f32>();
+							let tensor_data = tensor_data.as_ptr();
+							tensor_data as *const f32
+						})
+						.collect::<Vec<_>>();
+					let inputs = inputs.as_ptr();
+
+					let output = buffers.last().unwrap();
+					let output = output.cast::<f32>();
+					let output = output.as_ptr();
+					let output = output as *mut f32;
+
+					unsafe {
+						(kernel.func)(dims, inputs, output);
+					}
+
+					// TODO - decrement ref counts of inputs
 				},
 			}
 		}
 
-		unimplemented!("take last tensor in data and return it")
+		let result = Rc::new(Tensor::<CPUTensorData> {
+			shape: sequence.expr.shape.clone(),
+			dtype: sequence.expr.dtype,
+			device: self,
+			data: buffers.pop().unwrap(),
+		});
+
+		result
 	}
 
 	fn owns(&self, tensor: &Tensor) -> bool {
