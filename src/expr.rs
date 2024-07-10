@@ -12,7 +12,8 @@ use libloading::os::windows::Symbol as RawSymbol;
 use core::fmt;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
-use std::fmt::Write;
+use std::fmt::Write as FmtWrite;
+use std::io::Write as IoWrite;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -353,7 +354,7 @@ pub struct CPUDevice {
 	kernel_cache: HashMap<String, Rc<CPUKernel>>,
 	tempdir: tempfile::TempDir,
 	kernel_counter: usize,
-	rng: Rng,
+	rng: Cell<Rng>,
 }
 
 struct CPUTensorData {
@@ -370,7 +371,7 @@ impl CPUTensorData {
 }
 
 type CPUKernelFunc =
-	unsafe extern "C" fn(dims: *const usize, params: *const *const f32, out_ptr: *mut f32) -> ();
+	unsafe extern "C" fn(dims: *const usize, inputs: *const *const f32, output: *mut f32) -> ();
 
 struct CPUKernel {
 	ndim: usize,
@@ -381,20 +382,30 @@ struct CPUKernel {
 
 impl CPUKernel {
 	fn new(code: &str, ndim: usize, param_count: usize, tempdir: &Path) -> Self {
-		let c_file = tempdir.join("kernel.c");
-		std::fs::write(&c_file, code).unwrap();
+		println!("compiling kernel:\n{}", code);
+
+		let cpp_file = tempdir.join("kernel.cpp");
+		std::fs::write(&cpp_file, code).unwrap();
 
 		let so_file = tempdir.join("kernel.so");
 
-		std::process::Command::new("clang")
+		std::io::stdout().flush().unwrap();
+		std::io::stderr().flush().unwrap();
+
+		let mut child = std::process::Command::new("clang")
 			.arg("-O3")
 			.arg("-shared")
 			.arg("-o")
 			.arg(so_file.as_os_str())
-			.arg(c_file.as_os_str())
+			.arg(cpp_file.as_os_str())
 			.current_dir(tempdir)
-			.output()
-			.expect("Failed to compile kernel");
+			.spawn()
+			.expect("Failed to spawn clang");
+
+		let ok = child.wait().expect("Failed to compile kernel").success();
+		if !ok {
+			panic!("Failed to compile kernel");
+		}
 
 		let lib = unsafe { libloading::Library::new(so_file).unwrap() };
 		let func: libloading::Symbol<CPUKernelFunc> = unsafe { lib.get(b"kernel").unwrap() };
@@ -436,7 +447,7 @@ impl CPUDevice {
 			kernel_cache: HashMap::new(),
 			tempdir: tempfile::tempdir().unwrap(),
 			kernel_counter: 0,
-			rng: Rng::new_default(),
+			rng: Cell::new(Rng::new_default()),
 		})
 	}
 
@@ -465,12 +476,42 @@ impl CPUDevice {
 		let ndim = root.shape.ndim();
 
 		let mut code = String::new();
-		write!(code, "// cache key: `{}`\n", item.cache_key);
-		write!(code, "void kernel(\n");
-		write!(code, "\tuintptr_t const dim[],\n");
-		write!(code, "\tfloat const *param[],\n");
-		write!(code, "\tfloat output[]\n");
-		write!(code, ") {{\n");
+		writeln!(code, "#include <cstdint>");
+		writeln!(code);
+		writeln!(code, "using Index = uintptr_t;");
+		writeln!(code, "using Count = uintptr_t;");
+		writeln!(code);
+		writeln!(code, "using f32 = float;");
+		writeln!(code, "using f64 = double;");
+		writeln!(code);
+		writeln!(code, "// cache key: `{}`", item.cache_key);
+		writeln!(code, "extern \"C\" void kernel(");
+		writeln!(
+			code,
+			"\tCount const *dims, // array of {} dimension sizes",
+			ndim
+		);
+		writeln!(
+			code,
+			"\tvoid const * const *inputs, // array of {} input tensors",
+			inputs.len()
+		);
+		writeln!(code, "\t{} *output // output tensor", root.dtype);
+		writeln!(code, ") {{");
+
+		for i in 0..ndim {
+			writeln!(code, "\tCount const dim_{} = dims[{}];", i, i);
+		}
+		writeln!(code);
+		for i in 0..inputs.len() {
+			let dtype = sequence.item_dtype(i);
+			writeln!(
+				code,
+				"\t{} const * const input_{} = reinterpret_cast<{} const *>(inputs[{}]);",
+				dtype, i, dtype, i
+			);
+		}
+		writeln!(code);
 
 		match &root.kind {
 			ExprKind::Reduction(red) => {
@@ -484,7 +525,7 @@ impl CPUDevice {
 			},
 		}
 
-		write!(code, "}}\n");
+		writeln!(code, "}}");
 
 		CPUKernel::new(&code, ndim, inputs.len(), self.tempdir.path())
 	}
@@ -493,28 +534,24 @@ impl CPUDevice {
 		let ndim = root.shape.ndim();
 
 		let index = Index::new((0..ndim).collect());
-		write!(code, "\t// pointwise kernel\n");
+		writeln!(code, "\t// pointwise kernel");
 		for dim in 0..ndim {
-			#[rustfmt::skip] write!(
-				code, "{}\tfor (uintptr_t i_{} = 0; i_{} < dim_{}; ++i_{}) {{\n",
+			#[rustfmt::skip] writeln!(
+				code, "{}\tfor (Index i_{} = 0; i_{} < dim_{}; ++i_{}) {{",
 				Indent(dim), dim, dim, dim, dim
 			);
 		}
 
-		let val = self.gen_expr(sequence, root, root, &index);
-		write!(
-			code,
-			"{}output[{}] = {};\n",
-			Indent(ndim + 1),
-			index.code,
-			val
-		);
+		write!(code, "{}\toutput = ", Indent(ndim));
+		let mut input_counter = 0;
+		self.gen_expr(code, sequence, root, root, &index, &mut input_counter);
+		writeln!(code, ";");
 
 		for dim in (0..ndim).rev() {
 			for _ in 0..dim {
 				code.push('\t');
 			}
-			write!(code, "\t}}\n");
+			writeln!(code, "\t}}");
 		}
 	}
 
@@ -528,7 +565,7 @@ impl CPUDevice {
 		let ndim = root.shape.ndim();
 
 		let index = Index::new((0..ndim).collect());
-		write!(code, "\t// reduction kernel\n");
+		writeln!(code, "\t// reduction kernel");
 
 		let mut loop_cnt = 0;
 		for dim in 0..ndim {
@@ -536,8 +573,8 @@ impl CPUDevice {
 			if red.dims_to_collapse.contains(&dim) {
 				continue;
 			}
-			#[rustfmt::skip] write!(
-				code, "{}\tfor (uintptr_t i_{} = 0; i_{} < dim_{}; ++i_{}) {{\n",
+			#[rustfmt::skip] writeln!(
+				code, "{}\tfor (Index i_{} = 0; i_{} < dim_{}; ++i_{}) {{",
 				Indent(loop_cnt), dim, dim, dim, dim
 			);
 			loop_cnt += 1;
@@ -545,49 +582,57 @@ impl CPUDevice {
 
 		let outer_loops = loop_cnt;
 		// TODO: `0.0` is only correct for `sum`
-		write!(code, "{}\tfloat value = 0.0;\n", Indent(loop_cnt));
+		writeln!(
+			code,
+			"{}\t{} value = {}(0);",
+			Indent(loop_cnt),
+			root.dtype,
+			root.dtype
+		);
 
 		for dim in 0..ndim {
 			// TODO - use binary_search()? ndim will usually be very small, so contains() may be faster
 			if !red.dims_to_collapse.contains(&dim) {
 				continue;
 			}
-			#[rustfmt::skip] write!(
-				code, "{}\tfor (uintptr_t i_{} = 0; i_{} < dim_{}; ++i_{}) {{\n",
+			#[rustfmt::skip] writeln!(
+				code, "{}\tfor (Index i_{} = 0; i_{} < dim_{}; ++i_{}) {{",
 				Indent(loop_cnt), dim, dim, dim, dim
 			);
 			loop_cnt += 1;
 		}
 
-		let val = self.gen_expr(sequence, root, &red.a, &index);
 		// TODO: `+=` is only correct for `sum`
-		write!(code, "{}value += {};\n", Indent(loop_cnt + 1), val);
+		write!(code, "{}\tvalue += ", Indent(loop_cnt));
+		let mut input_counter = 0;
+		self.gen_expr(code, sequence, root, &red.a, &index, &mut input_counter);
+		writeln!(code, ";");
 
 		for _ in (outer_loops..ndim).rev() {
 			loop_cnt -= 1;
-			write!(code, "{}\t}}\n", Indent(loop_cnt));
+			writeln!(code, "{}\t}}", Indent(loop_cnt));
 		}
 
 		for i in &red.dims_to_collapse {
-			write!(
+			writeln!(
 				code,
-				"{}\tuintptr_t dim_{} = 1; uintptr_t i_{} = 0;\n",
+				"{}\tCount dim_{} = 1; Index i_{} = 0;",
 				Indent(outer_loops),
 				i,
 				i
 			);
 		}
 
-		write!(
+		writeln!(
 			code,
-			"{}\tout_ptr[{}] = value;\n",
+			"{}\toutput[{}] = value;",
 			Indent(loop_cnt),
 			index.code
 		);
 
 		for _ in (0..outer_loops).rev() {
 			loop_cnt -= 1;
-			write!(code, "{}\t}}\n", Indent(loop_cnt));
+			writeln!(code, "{}\t}}", Indent(loop_cnt));
 		}
 	}
 
@@ -597,49 +642,55 @@ impl CPUDevice {
 
 	fn gen_expr(
 		&self,
+		code: &mut String,
 		sequence: &ComputeSequence,
 		root: &Expr,
 		expr: &Expr,
 		index: &Index,
-	) -> String {
-		if (root as *const Expr) != (expr as *const Expr)
-			&& let Some(kernel_index) = sequence.index_of(expr)
-		{
-			return format!("kernel_{}[{}]", kernel_index, index.code);
+		input_counter: &mut usize,
+	) {
+		if (root as *const Expr) != (expr as *const Expr) && sequence.is_root(expr) {
+			write!(code, "input_{}[{}]", input_counter, index.code).unwrap();
+			*input_counter += 1;
+			return;
 		}
 
 		match &expr.kind {
-			ExprKind::Leaf(LeafExpr::IntConst(c)) => format!("int({})", c),
-			ExprKind::Leaf(LeafExpr::UintConst(c)) => format!("uint({})", c),
-			ExprKind::Leaf(LeafExpr::FloatConst(c)) => format!("float({})", c),
+			ExprKind::Leaf(LeafExpr::IntConst(c)) => {
+				write!(code, "{}({})", expr.dtype, c).unwrap();
+			},
+			ExprKind::Leaf(LeafExpr::UintConst(c)) => {
+				write!(code, "{}({})", expr.dtype, c).unwrap();
+			},
+			ExprKind::Leaf(LeafExpr::FloatConst(c)) => {
+				write!(code, "{}({})", expr.dtype, c).unwrap();
+			},
 			ExprKind::Leaf(LeafExpr::Read(t)) => {
-				format!("READ_TENSOR_TODO")
+				write!(code, "READ_TENSOR_TODO").unwrap();
 			},
 			ExprKind::Unary(un) => {
-				let a = self.gen_expr(sequence, root, &un.a, index);
-				match un.op {
-					UnaryOp::Exp => format!("exp({})", a),
-				}
+				write!(code, "{}(", un.op.symbol()).unwrap();
+				self.gen_expr(code, sequence, root, &un.a, index, input_counter);
+				write!(code, ")").unwrap();
 			},
 			ExprKind::Binary(bin) => {
-				let a;
-				let b;
+				write!(code, "(").unwrap();
 				if bin.op.is_commutative() && sequence.has_swapped_operands(expr) {
-					a = self.gen_expr(sequence, root, &bin.a, index);
-					b = self.gen_expr(sequence, root, &bin.b, index);
+					self.gen_expr(code, sequence, root, &bin.a, index, input_counter);
+					write!(code, " {} ", bin.op.symbol()).unwrap();
+					self.gen_expr(code, sequence, root, &bin.b, index, input_counter);
 				} else {
-					a = self.gen_expr(sequence, root, &bin.b, index);
-					b = self.gen_expr(sequence, root, &bin.a, index);
+					self.gen_expr(code, sequence, root, &bin.b, index, input_counter);
+					write!(code, " {} ", bin.op.symbol()).unwrap();
+					self.gen_expr(code, sequence, root, &bin.a, index, input_counter);
 				}
-				match bin.op {
-					BinaryOp::Add => format!("({} + {})", a, b),
-				}
+				write!(code, ")").unwrap();
 			},
 			ExprKind::Transpose(t) => {
 				let mut new_perm = index.perm.clone();
 				new_perm.swap(t.x1, t.x2);
 				let new_index = Index::new(new_perm);
-				self.gen_expr(sequence, root, &t.a, &new_index)
+				self.gen_expr(code, sequence, root, &t.a, &new_index, input_counter)
 			},
 			_ => {
 				panic!("Unsupported expression");
@@ -647,9 +698,11 @@ impl CPUDevice {
 		}
 	}
 
-	fn randn(&mut self, data: &mut CPUTensorData) {
+	fn randn(&self, data: &mut CPUTensorData) {
 		for i in data.cast::<f32>() {
-			i.set(self.rng.get_normal() as f32);
+			let rng = self.rng.as_ptr();
+			let rng = unsafe { &mut *rng };
+			i.set(rng.get_normal() as f32);
 		}
 	}
 }
@@ -682,7 +735,7 @@ impl Device for CPUDevice {
 					if !self.owns(&tensor) {
 						unimplemented!("TODO: copy tensor from another device");
 					}
-					buffers.push(CPUTensorData { data: Vec::new().into_boxed_slice() });
+					buffers.push(CPUTensorData { __data: Vec::new().into_boxed_slice() });
 					let rc = usize::MAX;
 					let buf = buffers.last().unwrap() as *const CPUTensorData;
 					rc_buffers.push((rc, buf));
@@ -784,6 +837,11 @@ impl ComputeSequence {
 		result.find_postorder(e, &mut parent_inputs);
 
 		result
+	}
+
+	pub fn item_dtype(&self, index: usize) -> DType {
+		let item = &self.postorder[index];
+		unsafe { (*item.expr).dtype }
 	}
 
 	pub fn len(&self) -> usize {
@@ -929,9 +987,9 @@ impl ComputeSequence {
 		}
 	}
 
-	pub fn index_of(&self, expr: &Expr) -> Option<usize> {
+	pub fn is_root(&self, expr: &Expr) -> bool {
 		let expr = expr as *const Expr;
-		self.roots.get(&expr).copied().map(|i| i as usize)
+		self.roots.contains_key(&expr)
 	}
 
 	pub fn has_swapped_operands(&self, expr: &Expr) -> bool {
