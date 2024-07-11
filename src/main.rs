@@ -47,20 +47,27 @@ fn main1() {
 }
 fn main() {
 	let dev: Rc<dyn Device> = expr::CPUDevice::new("CPU".to_string());
+	/*
+		let e = randn(Shape::new(&[7, 5]), DType::Float(32));
+		let x = exp(e.clone());
+		let z = zeros(Shape::new(&[7, 5]), DType::Float(32));
+		let y = add(x.clone(), z);
+		let mm = matmul(x, transpose(y, 0, 1));
 
-	let e = randn(Shape::new(&[7, 5]), DType::Float(32));
-	let x = exp(e.clone());
-	let z = zeros(Shape::new(&[7, 5]), DType::Float(32));
-	let y = add(x.clone(), z);
-	let mm = matmul(x, transpose(y, 0, 1));
+		let qq = transpose(e, 0, 1);
 
-	let qq = transpose(e, 0, 1);
+		//	let t = dev.eval(qq);
 
-	//	let t = dev.eval(qq);
+		let d3 = randn(Shape::new(&[3, 9, 7]), DType::Float(32));
+		//let d3 = zeros(Shape::new(&[3, 9, 7]), DType::Float(32));
+		let t = dev.eval(sum(d3, &[1]));
+	*/
 
-	let d3 = randn(Shape::new(&[3, 9, 7]), DType::Float(32));
-	//let d3 = zeros(Shape::new(&[3, 9, 7]), DType::Float(32));
-	let t = dev.eval(sum(d3, vec![1]));
+	let x = randn(Shape::new(&[7, 5]), DType::Float(32));
+	let sum = sum(mul(x.clone(), x.clone()), &[1]);
+	//	let scale =
+	let norm = div(x, sum);
+	let t = dev.eval(norm);
 }
 
 /*

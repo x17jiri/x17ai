@@ -9,6 +9,7 @@ use libloading::os::unix::Symbol as RawSymbol;
 #[cfg(windows)]
 use libloading::os::windows::Symbol as RawSymbol;
 
+use bit_set::BitSet;
 use core::fmt;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -56,9 +57,9 @@ impl Shape {
 		Rc::new(Self { __dims: new_dims, __elems: self.__elems })
 	}
 
-	pub fn new_reduced(&self, dims_to_collapse: &[usize]) -> Rc<Self> {
+	pub fn new_reduced(&self, dims_to_reduce: &[usize]) -> Rc<Self> {
 		let mut new_dims = self.__dims.clone();
-		for dim in dims_to_collapse {
+		for dim in dims_to_reduce {
 			if *dim >= new_dims.len() {
 				panic!("Invalid dimension");
 			}
@@ -161,12 +162,14 @@ impl fmt::Display for ConstExpr {
 #[derive(Debug)]
 pub enum UnaryOp {
 	Exp,
+	Sqrt,
 }
 
 impl UnaryOp {
 	pub fn symbol(&self) -> &'static str {
 		match self {
 			UnaryOp::Exp => "exp",
+			UnaryOp::Sqrt => "sqrt",
 		}
 	}
 }
@@ -179,17 +182,25 @@ pub struct UnaryExpr {
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum BinaryOp {
 	Add,
+	Sub,
+	Mul,
+	Div,
 }
 
 impl BinaryOp {
 	pub fn symbol(&self) -> &'static str {
 		match self {
 			BinaryOp::Add => "+",
+			BinaryOp::Sub => "-",
+			BinaryOp::Mul => "*",
+			BinaryOp::Div => "/",
 		}
 	}
 	pub fn is_commutative(&self) -> bool {
 		match self {
 			BinaryOp::Add => true,
+			BinaryOp::Mul => true,
+			_ => false,
 		}
 	}
 }
@@ -221,7 +232,10 @@ pub struct ReductionExpr {
 	pub a: Rc<Expr>,
 	pub op: ReductionOp,
 
-	pub dims_to_collapse: Vec<usize>,
+	// TODO - BitSet always allocate memory.
+	// We could probably use a single `usize` to store the bits.
+	// The number of dimensions is usually very small.
+	pub dims_to_reduce: BitSet,
 }
 
 pub struct MatMulExpr {
@@ -238,19 +252,15 @@ pub struct TransposeExpr {
 
 pub fn zeros(shape: Rc<Shape>, dtype: DType) -> Rc<Expr> {
 	let c = match dtype {
-		DType::Float(_) => LeafExpr::FloatConst(0.0),
-		DType::Int(_) => LeafExpr::IntConst(0),
-		DType::Uint(_) => LeafExpr::UintConst(0),
+		DType::Float(_) => ConstExpr::Float(0.0),
+		DType::Int(_) => ConstExpr::Int(0),
+		DType::Uint(_) => ConstExpr::Uint(0),
 	};
-	Rc::new(Expr { shape, dtype, kind: ExprKind::Leaf(c) })
+	Rc::new(Expr { shape, dtype, kind: ExprKind::Const(c) })
 }
 
 pub fn randn(shape: Rc<Shape>, dtype: DType) -> Rc<Expr> {
-	Rc::new(Expr {
-		shape,
-		dtype,
-		kind: ExprKind::Leaf(LeafExpr::Randn()),
-	})
+	Rc::new(Expr { shape, dtype, kind: ExprKind::Randn() })
 }
 
 pub trait ExprLike {
@@ -268,7 +278,7 @@ impl ExprLike for Rc<Tensor> {
 		Rc::new(Expr {
 			shape: self.shape.clone(),
 			dtype: self.dtype,
-			kind: ExprKind::Leaf(LeafExpr::Read(self)),
+			kind: ExprKind::Read(self),
 		})
 	}
 }
@@ -288,6 +298,10 @@ pub fn unary_op<A: ExprLike>(a: A, op: UnaryOp) -> Rc<Expr> {
 
 pub fn exp<A: ExprLike>(a: A) -> Rc<Expr> {
 	unary_op(a, UnaryOp::Exp)
+}
+
+pub fn sqrt<A: ExprLike>(a: A) -> Rc<Expr> {
+	unary_op(a, UnaryOp::Sqrt)
 }
 
 fn binary_op<A: ExprLike, B: ExprLike>(a: A, b: B, op: BinaryOp) -> Rc<Expr> {
@@ -310,22 +324,37 @@ pub fn add<A: ExprLike, B: ExprLike>(a: A, b: B) -> Rc<Expr> {
 	binary_op(a, b, BinaryOp::Add)
 }
 
-fn reduction_op<A: ExprLike>(a: A, op: ReductionOp, mut dims_to_collapse: Vec<usize>) -> Rc<Expr> {
+pub fn sub<A: ExprLike, B: ExprLike>(a: A, b: B) -> Rc<Expr> {
+	binary_op(a, b, BinaryOp::Sub)
+}
+
+pub fn mul<A: ExprLike, B: ExprLike>(a: A, b: B) -> Rc<Expr> {
+	binary_op(a, b, BinaryOp::Mul)
+}
+
+pub fn div<A: ExprLike, B: ExprLike>(a: A, b: B) -> Rc<Expr> {
+	binary_op(a, b, BinaryOp::Div)
+}
+
+fn reduction_op<A: ExprLike>(a: A, op: ReductionOp, dims_to_reduce: &[usize]) -> Rc<Expr> {
 	let a = a.get();
-	dims_to_collapse.sort_unstable();
+	let mut bitset = BitSet::with_capacity(a.shape.ndim());
+	for dim in dims_to_reduce {
+		bitset.insert(*dim);
+	}
 	Rc::new(Expr {
-		shape: a.shape.new_reduced(&dims_to_collapse),
+		shape: a.shape.new_reduced(dims_to_reduce),
 		dtype: a.dtype,
-		kind: ExprKind::Reduction(ReductionExpr { a, op, dims_to_collapse }),
+		kind: ExprKind::Reduction(ReductionExpr { a, op, dims_to_reduce: bitset }),
 	})
 }
 
-pub fn sum<A: ExprLike>(a: A, dims: Vec<usize>) -> Rc<Expr> {
-	reduction_op(a, ReductionOp::Sum, dims)
+pub fn sum<A: ExprLike>(a: A, dims_to_reduce: &[usize]) -> Rc<Expr> {
+	reduction_op(a, ReductionOp::Sum, dims_to_reduce)
 }
 
-pub fn max<A: ExprLike>(a: A, dims: Vec<usize>) -> Rc<Expr> {
-	reduction_op(a, ReductionOp::Max, dims)
+pub fn max<A: ExprLike>(a: A, dims_to_reduce: &[usize]) -> Rc<Expr> {
+	reduction_op(a, ReductionOp::Max, dims_to_reduce)
 }
 
 pub fn matmul<A: ExprLike, B: ExprLike>(a: A, b: B) -> Rc<Expr> {
@@ -589,7 +618,7 @@ impl CPUDevice {
 		let mut loop_cnt = 0;
 		for dim in 0..ndim {
 			// TODO - use binary_search()? ndim will usually be very small, so contains() may be faster
-			if red.dims_to_collapse.contains(&dim) {
+			if red.dims_to_reduce.contains(dim) {
 				continue;
 			}
 			#[rustfmt::skip] writeln!(
@@ -611,7 +640,7 @@ impl CPUDevice {
 
 		for dim in 0..ndim {
 			// TODO - use binary_search()? ndim will usually be very small, so contains() may be faster
-			if !red.dims_to_collapse.contains(&dim) {
+			if !red.dims_to_reduce.contains(dim) {
 				continue;
 			}
 			#[rustfmt::skip] writeln!(
@@ -632,7 +661,7 @@ impl CPUDevice {
 			writeln!(code, "{}\t}}", Indent(loop_cnt));
 		}
 
-		for i in &red.dims_to_collapse {
+		for i in &red.dims_to_reduce {
 			writeln!(
 				code,
 				"{}\tCount dim_{} = 1; Index i_{} = 0;",
@@ -675,16 +704,10 @@ impl CPUDevice {
 		}
 
 		match &expr.kind {
-			ExprKind::Leaf(LeafExpr::IntConst(c)) => {
+			ExprKind::Const(c) => {
 				write!(code, "{}({})", expr.dtype, c).unwrap();
 			},
-			ExprKind::Leaf(LeafExpr::UintConst(c)) => {
-				write!(code, "{}({})", expr.dtype, c).unwrap();
-			},
-			ExprKind::Leaf(LeafExpr::FloatConst(c)) => {
-				write!(code, "{}({})", expr.dtype, c).unwrap();
-			},
-			ExprKind::Leaf(LeafExpr::Read(t)) => {
+			ExprKind::Read(t) => {
 				write!(code, "READ_TENSOR_TODO").unwrap();
 			},
 			ExprKind::Unary(un) => {
@@ -738,7 +761,20 @@ impl Device for CPUDevice {
 		for item in sequence.iter() {
 			let expr = item.expr;
 			match &expr.kind {
-				ExprKind::Leaf(LeafExpr::Randn()) => {
+				ExprKind::Read(tensor) => {
+					if !self.owns(&tensor) {
+						unimplemented!("TODO: copy tensor from another device");
+					}
+					buffers.push(CPUTensorData { __data: Vec::new().into_boxed_slice() });
+
+					let tensor_data = &tensor.data;
+					let tensor_data = tensor_data as *const dyn TensorData;
+					let tensor_data = tensor_data as *const CPUTensorData;
+
+					let rc = usize::MAX;
+					rc_buffers.push((rc, tensor_data));
+				},
+				ExprKind::Randn() => {
 					let rc = item.ref_count;
 					match expr.dtype {
 						DType::Float(32) => {
@@ -751,19 +787,6 @@ impl Device for CPUDevice {
 						},
 						_ => panic!("Unsupported dtype for randn"),
 					};
-				},
-				ExprKind::Leaf(LeafExpr::Read(tensor)) => {
-					if !self.owns(&tensor) {
-						unimplemented!("TODO: copy tensor from another device");
-					}
-					buffers.push(CPUTensorData { __data: Vec::new().into_boxed_slice() });
-
-					let tensor_data = &tensor.data;
-					let tensor_data = tensor_data as *const dyn TensorData;
-					let tensor_data = tensor_data as *const CPUTensorData;
-
-					let rc = usize::MAX;
-					rc_buffers.push((rc, tensor_data));
 				},
 				_ => {
 					let rc = item.ref_count;
