@@ -132,7 +132,9 @@ pub struct Expr {
 }
 
 pub enum ExprKind {
-	Leaf(LeafExpr),
+	Read(Rc<Tensor<dyn TensorData>>),
+	Randn(),
+	Const(ConstExpr),
 	Unary(UnaryExpr),
 	Binary(BinaryExpr),
 	Reduction(ReductionExpr),
@@ -140,12 +142,20 @@ pub enum ExprKind {
 	Transpose(TransposeExpr),
 }
 
-pub enum LeafExpr {
-	IntConst(i64),
-	UintConst(u64),
-	FloatConst(f64),
-	Randn(),
-	Read(Rc<Tensor<dyn TensorData>>),
+pub enum ConstExpr {
+	Int(i64),
+	Uint(u64),
+	Float(f64),
+}
+
+impl fmt::Display for ConstExpr {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		match self {
+			ConstExpr::Int(c) => write!(f, "{}", c),
+			ConstExpr::Uint(c) => write!(f, "{}", c),
+			ConstExpr::Float(c) => write!(f, "{}", c),
+		}
+	}
 }
 
 #[derive(Debug)]
@@ -909,11 +919,10 @@ impl ComputeSequence {
 		self.processed.insert(e);
 
 		match &expr.kind {
-			// randn always needs its own kernel
-			ExprKind::Leaf(LeafExpr::Randn()) | ExprKind::Leaf(LeafExpr::Read(..)) => {
+			ExprKind::Read(..) | ExprKind::Randn() => {
 				self.roots.insert(e, -1);
 			},
-			ExprKind::Leaf(..) => {
+			ExprKind::Const(..) => {
 				// do nothing
 			},
 			ExprKind::Unary(u) => {
@@ -925,16 +934,18 @@ impl ComputeSequence {
 			},
 			ExprKind::Reduction(r) => {
 				self.find_kernel_roots(&*r.a);
+
+				self.roots.insert(r.a.as_ref() as *const Expr, -1);
 				self.roots.insert(e, -1);
 			},
 			ExprKind::MatMul(m) => {
+				self.find_kernel_roots(&*m.a);
+				self.find_kernel_roots(&*m.b);
+
 				// TODO - we mark both inputs as roots,
 				// which will make the common idiom `x * w.T` inefficient
 				self.roots.insert(m.a.as_ref() as *const Expr, -1);
 				self.roots.insert(m.b.as_ref() as *const Expr, -1);
-
-				self.find_kernel_roots(&*m.a);
-				self.find_kernel_roots(&*m.b);
 				self.roots.insert(e, -1);
 			},
 			ExprKind::Transpose(t) => {
@@ -945,9 +956,11 @@ impl ComputeSequence {
 
 	fn traverse_children(&mut self, expr: &Expr, parent_inputs: &mut Vec<usize>) -> String {
 		match &expr.kind {
-			ExprKind::Leaf(LeafExpr::IntConst(c)) => format!("{}({})", expr.dtype, c),
-			ExprKind::Leaf(LeafExpr::UintConst(c)) => format!("{}({})", expr.dtype, c),
-			ExprKind::Leaf(LeafExpr::FloatConst(c)) => format!("{}({})", expr.dtype, c),
+			ExprKind::Read(..) | ExprKind::Randn() => {
+				// Read and Randn are handled separately, so their cache_key is never used
+				String::new()
+			},
+			ExprKind::Const(c) => format!("{}({})", expr.dtype, c),
 			ExprKind::Unary(un) => {
 				let a = self.find_postorder(&*un.a, parent_inputs);
 				format!("{}_{}({})", un.op.symbol(), expr.dtype, a)
@@ -966,23 +979,18 @@ impl ComputeSequence {
 				}
 				format!("{}{}{}", a, bin.op.symbol(), b)
 			},
-			ExprKind::Leaf(LeafExpr::Randn()) | ExprKind::Leaf(LeafExpr::Read(..)) => {
-				format!("i_{}", expr.dtype)
-			},
 			ExprKind::Reduction(r) => {
-				let a = self.find_postorder(&*r.a, parent_inputs);
-				let mut cache_key = String::new();
-				write!(cache_key, "{}_{}{{", r.op.symbol(), expr.dtype);
-				for dim in &r.dims_to_collapse {
-					write!(cache_key, "{},", dim);
-				}
-				write!(cache_key, "}}({})", a);
-				cache_key
+				self.find_postorder(&*r.a, parent_inputs);
+
+				// Reductions are handled separately, so their cache_key is never used
+				String::new()
 			},
 			ExprKind::MatMul(m) => {
-				let a = self.find_postorder(&*m.a, parent_inputs);
-				let b = self.find_postorder(&*m.b, parent_inputs);
-				format!("matmul_{}({},{})", expr.dtype, a, b)
+				self.find_postorder(&*m.a, parent_inputs);
+				self.find_postorder(&*m.b, parent_inputs);
+
+				// MatMuls are handled separately, so their cache_key is never used
+				String::new()
 			},
 			ExprKind::Transpose(t) => {
 				let a = self.find_postorder(&*t.a, parent_inputs);
@@ -1007,7 +1015,7 @@ impl ComputeSequence {
 			// - an index into `postorder` if already processed
 			let index = *entry;
 			if index >= 0 {
-				// already processed - just add `expr` as a an input to the parent
+				// already processed - just add `expr` as an input to the parent
 				self.postorder[index as usize].ref_count += 1;
 				parent_inputs.push(index as usize);
 			} else {
