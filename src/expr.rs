@@ -194,6 +194,7 @@ pub struct BinaryExpr {
 pub enum ReductionOp {
 	Sum,
 	Max,
+	Min,
 }
 
 impl ReductionOp {
@@ -201,6 +202,7 @@ impl ReductionOp {
 		match self {
 			ReductionOp::Sum => "SUM",
 			ReductionOp::Max => "MAX",
+			ReductionOp::Min => "MIN",
 		}
 	}
 }
@@ -398,7 +400,6 @@ impl CPUKernel {
 			std::process::Command::new("/home/spock/sw/llvm-project-2/llvm-build/bin/clang")
 				.arg("-std=c++17")
 				.arg("-Wall")
-				.arg("-Wextra")
 				.arg("-g")
 				.arg("-ggdb")
 				.arg("-O3")
