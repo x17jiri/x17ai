@@ -65,8 +65,9 @@ fn main() {
 
 	let x = randn(Shape::new(&[7, 5]), DType::Float(32));
 	let sum = sum(mul(x.clone(), x.clone()), &[1]);
-	//	let scale =
-	let norm = div(x, sum);
+	let q = sqrt(sum);
+	let scale = div(ones(Shape::new(&[7, 1]), DType::Float(32)), q);
+	let norm = mul(x, scale);
 	let t = dev.eval(norm);
 }
 

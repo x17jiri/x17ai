@@ -80,6 +80,18 @@ impl Shape {
 	pub fn elems(&self) -> usize {
 		self.__elems
 	}
+
+	pub fn can_broadcast(&self, other: &Self) -> bool {
+		let ndim = std::cmp::min(self.ndim(), other.ndim());
+		let me = &self.__dims[self.ndim() - ndim..];
+		let you = &other.__dims[other.ndim() - ndim..];
+		for i in 0..ndim {
+			if me[i] != 1 && you[i] != 1 && me[i] != you[i] {
+				return false;
+			}
+		}
+		true
+	}
 }
 
 pub trait Device {
@@ -259,6 +271,15 @@ pub fn zeros(shape: Rc<Shape>, dtype: DType) -> Rc<Expr> {
 	Rc::new(Expr { shape, dtype, kind: ExprKind::Const(c) })
 }
 
+pub fn ones(shape: Rc<Shape>, dtype: DType) -> Rc<Expr> {
+	let c = match dtype {
+		DType::Float(_) => ConstExpr::Float(1.0),
+		DType::Int(_) => ConstExpr::Int(1),
+		DType::Uint(_) => ConstExpr::Uint(1),
+	};
+	Rc::new(Expr { shape, dtype, kind: ExprKind::Const(c) })
+}
+
 pub fn randn(shape: Rc<Shape>, dtype: DType) -> Rc<Expr> {
 	Rc::new(Expr { shape, dtype, kind: ExprKind::Randn() })
 }
@@ -287,12 +308,12 @@ pub fn unary_op<A: ExprLike>(a: A, op: UnaryOp) -> Rc<Expr> {
 	let a = a.get();
 	match a.dtype {
 		DType::Float(_) => {},
-		_ => panic!("exp() requires a float input"),
+		_ => panic!("{}() requires a float input", op.symbol()),
 	}
 	Rc::new(Expr {
 		shape: a.shape.clone(),
 		dtype: a.dtype,
-		kind: ExprKind::Unary(UnaryExpr { a, op: UnaryOp::Exp }),
+		kind: ExprKind::Unary(UnaryExpr { a, op }),
 	})
 }
 
@@ -307,7 +328,7 @@ pub fn sqrt<A: ExprLike>(a: A) -> Rc<Expr> {
 fn binary_op<A: ExprLike, B: ExprLike>(a: A, b: B, op: BinaryOp) -> Rc<Expr> {
 	let a = a.get();
 	let b = b.get();
-	if a.shape != b.shape {
+	if !a.shape.can_broadcast(&b.shape) {
 		panic!("{:?} requires shapes to match", op);
 	}
 	if a.dtype != b.dtype {
@@ -525,12 +546,37 @@ impl CPUDevice {
 
 		let mut code = String::new();
 		writeln!(code, "#include <cstdint>");
+		writeln!(code, "#include <cmath>");
 		writeln!(code);
 		writeln!(code, "using Index = uintptr_t;");
 		writeln!(code, "using Count = uintptr_t;");
 		writeln!(code);
 		writeln!(code, "using f32 = float;");
 		writeln!(code, "using f64 = double;");
+		writeln!(code);
+		writeln!(code, "inline f32 exp_f32(f32 x) {{ return expf(x); }}");
+		writeln!(code, "inline f64 exp_f64(f64 x) {{ return exp(x); }}");
+		writeln!(code);
+		writeln!(code, "inline f32 sqrt_f32(f32 x) {{ return sqrtf(x); }}");
+		writeln!(code, "inline f64 sqrt_f64(f64 x) {{ return sqrt(x); }}");
+		writeln!(code);
+		writeln!(
+			code,
+			"inline f32 max_f32(f32 x, f32 y) {{ return fmaxf(x, y); }}"
+		);
+		writeln!(
+			code,
+			"inline f64 max_f64(f64 x, f64 y) {{ return fmax(x, y); }}"
+		);
+		writeln!(code);
+		writeln!(
+			code,
+			"inline f32 min_f32(f32 x, f32 y) {{ return fminf(x, y); }}"
+		);
+		writeln!(
+			code,
+			"inline f64 min_f64(f64 x, f64 y) {{ return fmin(x, y); }}"
+		);
 		writeln!(code);
 		writeln!(code, "// cache key: `{}`", item.cache_key);
 		writeln!(code, "extern \"C\" void kernel(");
@@ -590,10 +636,18 @@ impl CPUDevice {
 			);
 		}
 
-		write!(code, "{}\toutput = ", Indent(ndim));
+		write!(code, "{}\toutput[{}] = ", Indent(ndim), index.code);
 		let mut input_counter = 0;
-		self.gen_expr(code, sequence, root, root, &index, &mut input_counter);
-		writeln!(code, ";");
+		self.gen_expr(
+			code,
+			ndim + 1,
+			sequence,
+			root,
+			root,
+			&index,
+			&mut input_counter,
+		);
+		writeln!(code, "{}\t;", Indent(ndim));
 
 		for dim in (0..ndim).rev() {
 			for _ in 0..dim {
@@ -650,11 +704,40 @@ impl CPUDevice {
 			loop_cnt += 1;
 		}
 
-		// TODO: `+=` is only correct for `sum`
-		write!(code, "{}\tvalue += ", Indent(loop_cnt));
+		write!(code, "{}\t{} t = ", Indent(loop_cnt), root.dtype);
 		let mut input_counter = 0;
-		self.gen_expr(code, sequence, root, &red.a, &index, &mut input_counter);
-		writeln!(code, ";");
+		self.gen_expr(
+			code,
+			loop_cnt + 1,
+			sequence,
+			root,
+			&red.a,
+			&index,
+			&mut input_counter,
+		);
+		writeln!(code, "{}\t;", Indent(loop_cnt));
+		writeln!(code);
+		match red.op {
+			ReductionOp::Sum => {
+				writeln!(code, "{}\tvalue += t;", Indent(loop_cnt));
+			},
+			ReductionOp::Max => {
+				writeln!(
+					code,
+					"{}\tvalue = max_{}(value, t);",
+					Indent(loop_cnt),
+					root.dtype
+				);
+			},
+			ReductionOp::Min => {
+				writeln!(
+					code,
+					"{}\tvalue = min_{}(value, t);",
+					Indent(loop_cnt),
+					root.dtype
+				);
+			},
+		}
 
 		for _ in (outer_loops..ndim).rev() {
 			loop_cnt -= 1;
@@ -691,6 +774,7 @@ impl CPUDevice {
 	fn gen_expr(
 		&self,
 		code: &mut String,
+		indent: usize,
 		sequence: &ComputeSequence,
 		root: &Expr,
 		expr: &Expr,
@@ -698,41 +782,93 @@ impl CPUDevice {
 		input_counter: &mut usize,
 	) {
 		if (root as *const Expr) != (expr as *const Expr) && sequence.is_root(expr) {
-			write!(code, "input_{}[{}]", input_counter, index.code).unwrap();
+			writeln!(code, "input_{}[{}]", input_counter, index.code).unwrap();
 			*input_counter += 1;
 			return;
 		}
 
 		match &expr.kind {
 			ExprKind::Const(c) => {
-				write!(code, "{}({})", expr.dtype, c).unwrap();
+				writeln!(code, "{}({})", expr.dtype, c).unwrap();
 			},
 			ExprKind::Read(t) => {
-				write!(code, "READ_TENSOR_TODO").unwrap();
+				writeln!(code, "READ_TENSOR_TODO").unwrap();
 			},
 			ExprKind::Unary(un) => {
-				write!(code, "{}(", un.op.symbol()).unwrap();
-				self.gen_expr(code, sequence, root, &un.a, index, input_counter);
-				write!(code, ")").unwrap();
+				writeln!(code, "{}_{}(", un.op.symbol(), expr.dtype).unwrap();
+				write!(code, "{}", Indent(indent + 1)).unwrap();
+				self.gen_expr(
+					code,
+					indent + 1,
+					sequence,
+					root,
+					&un.a,
+					index,
+					input_counter,
+				);
+				writeln!(code, "{})", Indent(indent)).unwrap();
 			},
 			ExprKind::Binary(bin) => {
-				write!(code, "(").unwrap();
+				writeln!(code, "(").unwrap();
+				write!(code, "{}", Indent(indent + 1)).unwrap();
 				if bin.op.is_commutative() && sequence.has_swapped_operands(expr) {
-					self.gen_expr(code, sequence, root, &bin.a, index, input_counter);
-					write!(code, " {} ", bin.op.symbol()).unwrap();
-					self.gen_expr(code, sequence, root, &bin.b, index, input_counter);
+					self.gen_expr(
+						code,
+						indent + 1,
+						sequence,
+						root,
+						&bin.b,
+						index,
+						input_counter,
+					);
+					writeln!(code, "{}{}", Indent(indent), bin.op.symbol()).unwrap();
+					write!(code, "{}", Indent(indent + 1)).unwrap();
+					self.gen_expr(
+						code,
+						indent + 1,
+						sequence,
+						root,
+						&bin.a,
+						index,
+						input_counter,
+					);
 				} else {
-					self.gen_expr(code, sequence, root, &bin.b, index, input_counter);
-					write!(code, " {} ", bin.op.symbol()).unwrap();
-					self.gen_expr(code, sequence, root, &bin.a, index, input_counter);
+					self.gen_expr(
+						code,
+						indent + 1,
+						sequence,
+						root,
+						&bin.a,
+						index,
+						input_counter,
+					);
+					writeln!(code, "{}{}", Indent(indent), bin.op.symbol()).unwrap();
+					write!(code, "{}", Indent(indent + 1)).unwrap();
+					self.gen_expr(
+						code,
+						indent + 1,
+						sequence,
+						root,
+						&bin.b,
+						index,
+						input_counter,
+					);
 				}
-				write!(code, ")").unwrap();
+				writeln!(code, "{})", Indent(indent)).unwrap();
 			},
 			ExprKind::Transpose(t) => {
 				let mut new_perm = index.perm.clone();
 				new_perm.swap(t.x1, t.x2);
 				let new_index = Index::new(new_perm);
-				self.gen_expr(code, sequence, root, &t.a, &new_index, input_counter)
+				self.gen_expr(
+					code,
+					indent + 1,
+					sequence,
+					root,
+					&t.a,
+					&new_index,
+					input_counter,
+				)
 			},
 			_ => {
 				panic!("Unsupported expression");
@@ -986,7 +1122,7 @@ impl ComputeSequence {
 			ExprKind::Const(c) => format!("{}({})", expr.dtype, c),
 			ExprKind::Unary(un) => {
 				let a = self.find_postorder(&*un.a, parent_inputs);
-				format!("{}_{}({})", un.op.symbol(), expr.dtype, a)
+				format!("{}({})", un.op.symbol(), a)
 			},
 			ExprKind::Binary(bin) => {
 				let i = parent_inputs.len();
@@ -1000,7 +1136,7 @@ impl ComputeSequence {
 					parent_inputs[i..].rotate_left(j - i);
 					self.swapped_operands.insert(expr);
 				}
-				format!("{}{}{}", a, bin.op.symbol(), b)
+				format!("({}{}{})", a, bin.op.symbol(), b)
 			},
 			ExprKind::Reduction(r) => {
 				self.find_postorder(&*r.a, parent_inputs);
@@ -1018,7 +1154,7 @@ impl ComputeSequence {
 			ExprKind::Transpose(t) => {
 				let a = self.find_postorder(&*t.a, parent_inputs);
 				format!(
-					"transpose({},{},{})",
+					"T({},{},{})",
 					a,
 					std::cmp::min(t.x1, t.x2),
 					std::cmp::max(t.x1, t.x2)
@@ -1058,7 +1194,7 @@ impl ComputeSequence {
 				});
 			}
 
-			format!("i_{}", expr.dtype)
+			format!("{}", expr.dtype)
 		} else {
 			// `expr` is NOT a root - process its children
 			let cache_key = self.traverse_children(expr, parent_inputs);
