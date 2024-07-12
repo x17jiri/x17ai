@@ -63,12 +63,18 @@ fn main() {
 		let t = dev.eval(sum(d3, &[1]));
 	*/
 
-	let x = randn(Shape::new(&[7, 5]), DType::Float(32));
+	let x = randn(Shape::new(&[3, 2]), DType::Float(32));
+	let x = dev.clone().eval(x);
+	let xx = x.clone();
+
 	let sum = sum(mul(x.clone(), x.clone()), &[1]);
 	let q = sqrt(sum);
-	let scale = div(ones(Shape::new(&[7, 1]), DType::Float(32)), q);
+	let scale = div(ones(Shape::new(&[3, 2]), DType::Float(32)), q);
 	let norm = mul(x, scale);
 	let t = dev.eval(norm);
+
+	println!("x = {}", xx);
+	println!("t = {}", t);
 }
 
 /*

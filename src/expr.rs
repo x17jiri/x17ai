@@ -100,6 +100,15 @@ pub trait Device {
 	fn eval(self: Rc<Self>, expr: Rc<Expr>) -> Rc<Tensor>;
 
 	fn owns(&self, tensor: &Tensor) -> bool;
+
+	fn format(
+		&self,
+		f: &mut fmt::Formatter,
+		tensor: &Tensor,
+		off: usize,
+		len: usize,
+		stride: isize,
+	) -> fmt::Result;
 }
 
 pub trait TensorData {}
@@ -451,25 +460,24 @@ impl CPUKernel {
 		let cpp_file = tempdir.join("kernel.cpp");
 		std::fs::write(&cpp_file, code).unwrap();
 
-		let so_file = tempdir.join("kernel.so");
+		let so_file = tempdir.join("kernel.dll");
 
 		std::io::stdout().flush().unwrap();
 		std::io::stderr().flush().unwrap();
 
-		let mut child =
-			std::process::Command::new("/home/spock/sw/llvm-project-2/llvm-build/bin/clang")
-				.arg("-std=c++17")
-				.arg("-Wall")
-				.arg("-g")
-				.arg("-ggdb")
-				.arg("-O3")
-				.arg("-shared")
-				.arg("-o")
-				.arg(so_file.as_os_str())
-				.arg(cpp_file.as_os_str())
-				.current_dir(tempdir)
-				.spawn()
-				.expect("Failed to spawn clang");
+		let mut child = std::process::Command::new("c:/data/sw/clang/build11/Release/bin/clang")
+			.arg("-std=c++17")
+			.arg("-Wall")
+			.arg("-g")
+			.arg("-ggdb")
+			.arg("-O3")
+			.arg("-shared")
+			.arg("-o")
+			.arg(so_file.as_os_str())
+			.arg(cpp_file.as_os_str())
+			.current_dir(tempdir)
+			.spawn()
+			.expect("Failed to spawn clang");
 
 		let ok = child.wait().expect("Failed to compile kernel").success();
 		if !ok {
@@ -539,73 +547,77 @@ impl CPUDevice {
 		CPUTensorData { __data: Box::from_raw(slice) }
 	}
 
-	fn gen_kernel(&self, sequence: &ComputeSequence, item: &PostorderItem) -> CPUKernel {
+	fn gen_kernel(
+		&self,
+		sequence: &ComputeSequence,
+		item: &PostorderItem,
+	) -> Result<CPUKernel, std::fmt::Error> {
 		let root = item.expr;
 		let inputs = item.inputs;
 		let ndim = root.shape.ndim();
 
 		let mut code = String::new();
-		writeln!(code, "#include <cstdint>");
-		writeln!(code, "#include <cmath>");
-		writeln!(code);
-		writeln!(code, "using Index = uintptr_t;");
-		writeln!(code, "using Count = uintptr_t;");
-		writeln!(code);
-		writeln!(code, "using f32 = float;");
-		writeln!(code, "using f64 = double;");
-		writeln!(code);
-		writeln!(code, "inline f32 exp_f32(f32 x) {{ return expf(x); }}");
-		writeln!(code, "inline f64 exp_f64(f64 x) {{ return exp(x); }}");
-		writeln!(code);
-		writeln!(code, "inline f32 sqrt_f32(f32 x) {{ return sqrtf(x); }}");
-		writeln!(code, "inline f64 sqrt_f64(f64 x) {{ return sqrt(x); }}");
-		writeln!(code);
+		writeln!(code, "#include <cstdint>")?;
+		writeln!(code, "#include <cmath>")?;
+		writeln!(code)?;
+		writeln!(code, "using Index = uintptr_t;")?;
+		writeln!(code, "using Count = uintptr_t;")?;
+		writeln!(code)?;
+		writeln!(code, "using f32 = float;")?;
+		writeln!(code, "using f64 = double;")?;
+		writeln!(code)?;
+		writeln!(code, "inline f32 exp_f32(f32 x) {{ return expf(x); }}")?;
+		writeln!(code, "inline f64 exp_f64(f64 x) {{ return exp(x); }}")?;
+		writeln!(code)?;
+		writeln!(code, "inline f32 sqrt_f32(f32 x) {{ return sqrtf(x); }}")?;
+		writeln!(code, "inline f64 sqrt_f64(f64 x) {{ return sqrt(x); }}")?;
+		writeln!(code)?;
 		writeln!(
 			code,
 			"inline f32 max_f32(f32 x, f32 y) {{ return fmaxf(x, y); }}"
-		);
+		)?;
 		writeln!(
 			code,
 			"inline f64 max_f64(f64 x, f64 y) {{ return fmax(x, y); }}"
-		);
-		writeln!(code);
+		)?;
+		writeln!(code)?;
 		writeln!(
 			code,
 			"inline f32 min_f32(f32 x, f32 y) {{ return fminf(x, y); }}"
-		);
+		)?;
 		writeln!(
 			code,
 			"inline f64 min_f64(f64 x, f64 y) {{ return fmin(x, y); }}"
-		);
-		writeln!(code);
-		writeln!(code, "// cache key: `{}`", item.cache_key);
-		writeln!(code, "extern \"C\" void kernel(");
+		)?;
+		writeln!(code)?;
+		writeln!(code, "// cache key: `{}`", item.cache_key)?;
+		writeln!(code, "extern \"C\" __declspec(dllexport) void kernel(")?;
 		writeln!(
 			code,
 			"\tCount const *dims, // array of {} dimension sizes",
 			ndim
-		);
+		)?;
 		writeln!(
 			code,
 			"\tvoid const * const *inputs, // array of {} input tensors",
 			inputs.len()
-		);
-		writeln!(code, "\t{} *output // output tensor", root.dtype);
-		writeln!(code, ") {{");
+		)?;
+		writeln!(code, "\t{} *output // output tensor", root.dtype)?;
+		writeln!(code, ") {{")?;
 
 		for i in 0..ndim {
-			writeln!(code, "\tCount const dim_{} = dims[{}];", i, i);
+			writeln!(code, "\tCount const dim_{} = dims[{}];", i, i)?;
 		}
-		writeln!(code);
+		writeln!(code)?;
 		for i in 0..inputs.len() {
 			let dtype = sequence.item_dtype(i);
 			writeln!(
 				code,
 				"\t{} const * const input_{} = reinterpret_cast<{} const *>(inputs[{}]);",
 				dtype, i, dtype, i
-			);
+			)?;
 		}
-		writeln!(code);
+		writeln!(code)?;
 
 		match &root.kind {
 			ExprKind::Reduction(red) => {
@@ -621,7 +633,12 @@ impl CPUDevice {
 
 		writeln!(code, "}}");
 
-		CPUKernel::new(&code, ndim, inputs.len(), self.tempdir.path())
+		Ok(CPUKernel::new(
+			&code,
+			ndim,
+			inputs.len(),
+			self.tempdir.path(),
+		))
 	}
 
 	fn gen_kernel_pointwise(&self, code: &mut String, sequence: &ComputeSequence, root: &Expr) {
@@ -780,23 +797,23 @@ impl CPUDevice {
 		expr: &Expr,
 		index: &Index,
 		input_counter: &mut usize,
-	) {
+	) -> Result<(), std::fmt::Error> {
 		if (root as *const Expr) != (expr as *const Expr) && sequence.is_root(expr) {
-			writeln!(code, "input_{}[{}]", input_counter, index.code).unwrap();
+			writeln!(code, "input_{}[{}]", input_counter, index.code)?;
 			*input_counter += 1;
-			return;
+			return Ok(());
 		}
 
 		match &expr.kind {
 			ExprKind::Const(c) => {
-				writeln!(code, "{}({})", expr.dtype, c).unwrap();
+				writeln!(code, "{}({})", expr.dtype, c)?;
 			},
 			ExprKind::Read(t) => {
-				writeln!(code, "READ_TENSOR_TODO").unwrap();
+				writeln!(code, "READ_TENSOR_TODO")?;
 			},
 			ExprKind::Unary(un) => {
-				writeln!(code, "{}_{}(", un.op.symbol(), expr.dtype).unwrap();
-				write!(code, "{}", Indent(indent + 1)).unwrap();
+				writeln!(code, "{}_{}(", un.op.symbol(), expr.dtype)?;
+				write!(code, "{}", Indent(indent + 1))?;
 				self.gen_expr(
 					code,
 					indent + 1,
@@ -805,12 +822,12 @@ impl CPUDevice {
 					&un.a,
 					index,
 					input_counter,
-				);
-				writeln!(code, "{})", Indent(indent)).unwrap();
+				)?;
+				writeln!(code, "{})", Indent(indent))?;
 			},
 			ExprKind::Binary(bin) => {
-				writeln!(code, "(").unwrap();
-				write!(code, "{}", Indent(indent + 1)).unwrap();
+				writeln!(code, "(")?;
+				write!(code, "{}", Indent(indent + 1))?;
 				if bin.op.is_commutative() && sequence.has_swapped_operands(expr) {
 					self.gen_expr(
 						code,
@@ -820,9 +837,9 @@ impl CPUDevice {
 						&bin.b,
 						index,
 						input_counter,
-					);
-					writeln!(code, "{}{}", Indent(indent), bin.op.symbol()).unwrap();
-					write!(code, "{}", Indent(indent + 1)).unwrap();
+					)?;
+					writeln!(code, "{}{}", Indent(indent), bin.op.symbol())?;
+					write!(code, "{}", Indent(indent + 1))?;
 					self.gen_expr(
 						code,
 						indent + 1,
@@ -831,7 +848,7 @@ impl CPUDevice {
 						&bin.a,
 						index,
 						input_counter,
-					);
+					)?;
 				} else {
 					self.gen_expr(
 						code,
@@ -841,9 +858,9 @@ impl CPUDevice {
 						&bin.a,
 						index,
 						input_counter,
-					);
-					writeln!(code, "{}{}", Indent(indent), bin.op.symbol()).unwrap();
-					write!(code, "{}", Indent(indent + 1)).unwrap();
+					)?;
+					writeln!(code, "{}{}", Indent(indent), bin.op.symbol())?;
+					write!(code, "{}", Indent(indent + 1))?;
 					self.gen_expr(
 						code,
 						indent + 1,
@@ -852,9 +869,9 @@ impl CPUDevice {
 						&bin.b,
 						index,
 						input_counter,
-					);
+					)?;
 				}
-				writeln!(code, "{})", Indent(indent)).unwrap();
+				writeln!(code, "{})", Indent(indent))?;
 			},
 			ExprKind::Transpose(t) => {
 				let mut new_perm = index.perm.clone();
@@ -868,12 +885,13 @@ impl CPUDevice {
 					&t.a,
 					&new_index,
 					input_counter,
-				)
+				)?;
 			},
 			_ => {
 				panic!("Unsupported expression");
 			},
 		}
+		Ok(())
 	}
 
 	fn randn(&self, data: &mut CPUTensorData) {
@@ -932,7 +950,7 @@ impl Device for CPUDevice {
 					rc_buffers.push((rc, buffers.last().unwrap() as *const CPUTensorData));
 
 					// TODO - try to find the kernel in the cache
-					let kernel = self.gen_kernel(&sequence, &item);
+					let kernel = self.gen_kernel(&sequence, &item).unwrap();
 
 					let dims = expr.shape.dims();
 					let dims = dims.as_ptr();
@@ -975,6 +993,33 @@ impl Device for CPUDevice {
 
 	fn owns(&self, tensor: &Tensor) -> bool {
 		(tensor.device.as_ref() as *const dyn Device) == (self as *const CPUDevice)
+	}
+
+	fn format(
+		&self,
+		f: &mut fmt::Formatter,
+		tensor: &Tensor,
+		off: usize,
+		len: usize,
+		stride: isize,
+	) -> fmt::Result {
+		let tensor = tensor as *const Tensor;
+		let tensor = tensor as *const Tensor<CPUTensorData>;
+		let tensor = unsafe { &*tensor };
+		match tensor.dtype {
+			DType::Float(32) => {
+				let data = tensor.data.cast::<f32>();
+				for i in 0..len {
+					if i != 0 {
+						write!(f, ", ")?;
+					}
+					let p = (off as isize) + (i as isize) * stride;
+					write!(f, "{:.6}", data[p as usize].get())?;
+				}
+			},
+			_ => unimplemented!(),
+		}
+		Ok(())
 	}
 }
 
@@ -1210,5 +1255,44 @@ impl ComputeSequence {
 	pub fn has_swapped_operands(&self, expr: &Expr) -> bool {
 		let expr = expr as *const Expr;
 		self.swapped_operands.contains(&expr)
+	}
+}
+
+fn fmt_0d(tensor: &Tensor, f: &mut fmt::Formatter, off: usize) -> fmt::Result {
+	tensor.device.format(f, tensor, off, 1, 1)
+}
+
+fn fmt_1d(tensor: &Tensor, f: &mut fmt::Formatter, off: usize) -> fmt::Result {
+	write!(f, "[")?;
+	let ndim = tensor.shape.ndim();
+	let len = tensor.shape.dims()[ndim - 1];
+	tensor.device.format(f, tensor, off, len, 1)?;
+	write!(f, "]")
+}
+
+fn fmt_2d(tensor: &Tensor, f: &mut fmt::Formatter, off: usize) -> fmt::Result {
+	writeln!(f, "[")?;
+	let ndim = tensor.shape.ndim();
+	let len = tensor.shape.dims()[ndim - 2];
+	let stride = tensor.shape.dims()[ndim - 1];
+	for i in 0..len {
+		write!(f, "\t")?;
+		fmt_1d(tensor, f, off + i * stride)?;
+		writeln!(f, ",")?;
+	}
+	write!(f, "]")
+}
+
+impl fmt::Display for Tensor {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		let ndim = self.shape.ndim();
+		match ndim {
+			0 => fmt_0d(self, f, 0),
+			1 => fmt_1d(self, f, 0),
+			2 => fmt_2d(self, f, 0),
+			_ => {
+				unimplemented!("Tensor with {} dimensions", ndim);
+			},
+		}
 	}
 }
