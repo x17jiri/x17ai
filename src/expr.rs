@@ -460,24 +460,26 @@ impl CPUKernel {
 		let cpp_file = tempdir.join("kernel.cpp");
 		std::fs::write(&cpp_file, code).unwrap();
 
-		let so_file = tempdir.join("kernel.dll");
+		let so_file = tempdir.join("kernel.so");
 
 		std::io::stdout().flush().unwrap();
 		std::io::stderr().flush().unwrap();
 
-		let mut child = std::process::Command::new("c:/data/sw/clang/build11/Release/bin/clang")
-			.arg("-std=c++17")
-			.arg("-Wall")
-			.arg("-g")
-			.arg("-ggdb")
-			.arg("-O3")
-			.arg("-shared")
-			.arg("-o")
-			.arg(so_file.as_os_str())
-			.arg(cpp_file.as_os_str())
-			.current_dir(tempdir)
-			.spawn()
-			.expect("Failed to spawn clang");
+		let mut child =
+			std::process::Command::new("/home/spock/sw/llvm-project-2/llvm-build/bin/clang")
+				//		let mut child = std::process::Command::new("c:/data/sw/clang/build11/Release/bin/clang")
+				.arg("-std=c++17")
+				.arg("-Wall")
+				.arg("-g")
+				.arg("-ggdb")
+				.arg("-O3")
+				.arg("-shared")
+				.arg("-o")
+				.arg(so_file.as_os_str())
+				.arg(cpp_file.as_os_str())
+				.current_dir(tempdir)
+				.spawn()
+				.expect("Failed to spawn clang");
 
 		let ok = child.wait().expect("Failed to compile kernel").success();
 		if !ok {
@@ -559,6 +561,7 @@ impl CPUDevice {
 		let mut code = String::new();
 		writeln!(code, "#include <cstdint>")?;
 		writeln!(code, "#include <cmath>")?;
+		writeln!(code, "#include <stdio.h> // stdio")?;
 		writeln!(code)?;
 		writeln!(code, "using Index = uintptr_t;")?;
 		writeln!(code, "using Count = uintptr_t;")?;
@@ -591,7 +594,7 @@ impl CPUDevice {
 		)?;
 		writeln!(code)?;
 		writeln!(code, "// cache key: `{}`", item.cache_key)?;
-		writeln!(code, "extern \"C\" __declspec(dllexport) void kernel(")?;
+		writeln!(code, "extern \"C\" /*__declspec(dllexport)*/ void kernel(")?;
 		writeln!(
 			code,
 			"\tCount const *dims, // array of {} dimension sizes",
@@ -604,9 +607,19 @@ impl CPUDevice {
 		)?;
 		writeln!(code, "\t{} *output // output tensor", root.dtype)?;
 		writeln!(code, ") {{")?;
+		writeln!(
+			code,
+			"\tprintf(\"running kernel: {}\\n\"); // stdio",
+			item.cache_key
+		)?;
 
 		for i in 0..ndim {
 			writeln!(code, "\tCount const dim_{} = dims[{}];", i, i)?;
+			writeln!(
+				code,
+				"\tprintf(\"dim_{} = %lu\\n\", dim_{}); // stdio",
+				i, i
+			)?;
 		}
 		writeln!(code)?;
 		for i in 0..inputs.len() {

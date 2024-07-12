@@ -69,7 +69,7 @@ fn main() {
 
 	let sum = sum(mul(x.clone(), x.clone()), &[1]);
 	let q = sqrt(sum);
-	let scale = div(ones(Shape::new(&[3, 2]), DType::Float(32)), q);
+	let scale = div(ones(Shape::new(&[3, 1]), DType::Float(32)), q);
 	let norm = mul(x, scale);
 	let t = dev.eval(norm);
 
