@@ -67,13 +67,28 @@ fn main() {
 	let x = dev.clone().eval(x);
 	let xx = x.clone();
 
-	let sum = sum(mul(x.clone(), x.clone()), &[1]);
+	let m = mul(x.clone(), x.clone());
+	let mm = dev.clone().eval(m.clone());
+	let sum = sum(m, &[1]);
+	let ss = dev.clone().eval(sum.clone());
 	let q = sqrt(sum);
-	let scale = div(ones(Shape::new(&[3, 1]), DType::Float(32)), q);
+	let qq = dev.clone().eval(q.clone());
+
+	let scale = div(
+		fill(
+			Shape::new(&[3, 1]),
+			DType::Float(32),
+			ConstExpr::Float((2.0_f64).sqrt()),
+		),
+		q,
+	);
 	let norm = mul(x, scale);
 	let t = dev.eval(norm);
 
 	println!("x = {}", xx);
+	println!("m = {}", mm);
+	println!("sum = {}", ss);
+	println!("q = {}", qq);
 	println!("t = {}", t);
 }
 

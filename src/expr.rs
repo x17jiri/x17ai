@@ -338,13 +338,8 @@ pub fn zeros(shape: Rc<Shape>, dtype: DType) -> Rc<Expr> {
 	Rc::new(Expr { shape, dtype, kind: ExprKind::Const(c) })
 }
 
-pub fn ones(shape: Rc<Shape>, dtype: DType) -> Rc<Expr> {
-	let c = match dtype {
-		DType::Float(_) => ConstExpr::Float(1.0),
-		DType::Int(_) => ConstExpr::Int(1),
-		DType::Uint(_) => ConstExpr::Uint(1),
-	};
-	Rc::new(Expr { shape, dtype, kind: ExprKind::Const(c) })
+pub fn fill(shape: Rc<Shape>, dtype: DType, val: ConstExpr) -> Rc<Expr> {
+	Rc::new(Expr { shape, dtype, kind: ExprKind::Const(val) })
 }
 
 pub fn randn(shape: Rc<Shape>, dtype: DType) -> Rc<Expr> {
@@ -1098,7 +1093,15 @@ impl Device for CPUDevice {
 						_ => panic!("Unsupported dtype for randn"),
 					};
 				},
-				_ => {
+				ExprKind::MatMul(..) => {
+					unimplemented!("MatMul")
+				},
+				ExprKind::Const(..)
+				| ExprKind::Unary(..)
+				| ExprKind::Binary(..)
+				| ExprKind::Reduction(..)
+				| ExprKind::Transpose(..)
+				| ExprKind::Broadcast(..) => {
 					let rc = item.ref_count;
 					buffers.push(unsafe {
 						CPUDevice::new_uninit(expr.dtype.bits(), expr.shape.elems())
@@ -1108,7 +1111,11 @@ impl Device for CPUDevice {
 					// TODO - try to find the kernel in the cache
 					let kernel = self.gen_kernel(&sequence, &item).unwrap();
 
-					let dims = expr.shape.dims();
+					// TODO - for reduce kernel, the dims should be dims of the input
+					let dims = match &expr.kind {
+						ExprKind::Reduction(red) => red.a.shape.dims(),
+						_ => expr.shape.dims(),
+					};
 					let dims = dims.as_ptr();
 
 					let inputs = item
@@ -1313,6 +1320,8 @@ impl ComputeSequence {
 			},
 			ExprKind::Broadcast(b) => {
 				self.find_kernel_roots(&*b.a);
+
+				self.roots.insert(b.a.as_ref() as *const Expr, -1);
 			},
 		}
 	}
