@@ -38,6 +38,12 @@ pub struct Shape {
 	__elems: usize,
 }
 
+pub enum BroadcastType {
+	Error,
+	NoBroadcast,
+	Broadcast(bool, bool, Rc<Shape>),
+}
+
 impl Shape {
 	pub fn new_scalar() -> Rc<Self> {
 		Rc::new(Self {
@@ -81,16 +87,63 @@ impl Shape {
 		self.__elems
 	}
 
-	pub fn can_broadcast(&self, other: &Self) -> bool {
+	pub fn broadcast_type(&self, other: &Self) -> BroadcastType {
 		let ndim = std::cmp::min(self.ndim(), other.ndim());
-		let me = &self.__dims[self.ndim() - ndim..];
-		let you = &other.__dims[other.ndim() - ndim..];
+		let a = &self.__dims[self.ndim() - ndim..];
+		let b = &other.__dims[other.ndim() - ndim..];
+		let mut a_broadcast = false;
+		let mut b_broadcast = false;
 		for i in 0..ndim {
-			if me[i] != 1 && you[i] != 1 && me[i] != you[i] {
-				return false;
+			if a[i] != b[i] {
+				if a[i] == 1 {
+					a_broadcast = true;
+				} else if b[i] == 1 {
+					b_broadcast = true;
+				} else {
+					return BroadcastType::Error;
+				}
 			}
 		}
-		true
+		if a_broadcast || b_broadcast {
+			let ndim = self.ndim().max(other.ndim());
+
+			// Number of dimensions of len 1 to add to each shape
+			let a1 = ndim - self.ndim();
+			let b1 = ndim - other.ndim();
+
+			let mut new_shape = vec![0; ndim];
+			let mut new_elems = 1;
+			for i in 0..ndim {
+				let a_dim = if i < a1 { 1 } else { self.__dims[i - a1] };
+				let b_dim = if i < b1 { 1 } else { other.__dims[i - b1] };
+				new_shape[i] = std::cmp::max(a_dim, b_dim);
+				new_elems *= new_shape[i]; // TODO - check for overflow
+			}
+
+			BroadcastType::Broadcast(
+				a_broadcast,
+				b_broadcast,
+				Rc::new(Self {
+					__dims: new_shape.into_boxed_slice(),
+					__elems: new_elems,
+				}),
+			)
+		} else {
+			BroadcastType::NoBroadcast
+		}
+	}
+}
+
+impl fmt::Display for Shape {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "[")?;
+		for i in 0..self.__dims.len() {
+			if i != 0 {
+				write!(f, ", ")?;
+			}
+			write!(f, "{}", self.__dims[i])?;
+		}
+		write!(f, "]")
 	}
 }
 
@@ -162,6 +215,7 @@ pub enum ExprKind {
 	Reduction(ReductionExpr),
 	MatMul(MatMulExpr),
 	Transpose(TransposeExpr),
+	Broadcast(BroadcastExpr),
 }
 
 pub enum ConstExpr {
@@ -271,6 +325,10 @@ pub struct TransposeExpr {
 	pub x2: usize,
 }
 
+pub struct BroadcastExpr {
+	pub a: Rc<Expr>,
+}
+
 pub fn zeros(shape: Rc<Shape>, dtype: DType) -> Rc<Expr> {
 	let c = match dtype {
 		DType::Float(_) => ConstExpr::Float(0.0),
@@ -335,13 +393,30 @@ pub fn sqrt<A: ExprLike>(a: A) -> Rc<Expr> {
 }
 
 fn binary_op<A: ExprLike, B: ExprLike>(a: A, b: B, op: BinaryOp) -> Rc<Expr> {
-	let a = a.get();
-	let b = b.get();
-	if !a.shape.can_broadcast(&b.shape) {
-		panic!("{:?} requires shapes to match", op);
-	}
+	let mut a = a.get();
+	let mut b = b.get();
 	if a.dtype != b.dtype {
 		panic!("{:?} requires dtypes to match", op);
+	}
+	match a.shape.broadcast_type(&b.shape) {
+		BroadcastType::Error => panic!("{:?} requires shapes to match", op),
+		BroadcastType::NoBroadcast => {},
+		BroadcastType::Broadcast(a_broadcast, b_broadcast, new_shape) => {
+			if a_broadcast {
+				a = Rc::new(Expr {
+					shape: new_shape.clone(),
+					dtype: a.dtype,
+					kind: ExprKind::Broadcast(BroadcastExpr { a }),
+				});
+			}
+			if b_broadcast {
+				b = Rc::new(Expr {
+					shape: new_shape,
+					dtype: b.dtype,
+					kind: ExprKind::Broadcast(BroadcastExpr { a: b }),
+				});
+			}
+		},
 	}
 	Rc::new(Expr {
 		shape: a.shape.clone(),
@@ -496,25 +571,83 @@ impl CPUKernel {
 
 #[derive(Debug, Clone)]
 struct Index {
+	indexes: Vec<String>,
+	dims: Vec<String>,
 	perm: Vec<usize>,
 	code: String,
 }
 
 impl Index {
-	fn new(perm: Vec<usize>) -> Self {
-		let mut code = String::new();
+	fn __new(indexes: Vec<String>, dims: Vec<String>, perm: Vec<usize>) -> Self {
+		let ndim = perm.len();
 
-		for i in 0..perm.len() {
+		let mut code = String::new();
+		for i in 0..ndim {
 			if i != 0 {
 				code.push_str(" + ");
 			}
-			write!(code, "i_{}", perm[i]).unwrap();
-			for j in i + 1..perm.len() {
-				write!(code, "*dim_{}", perm[j]).unwrap();
+			code.push_str(indexes[perm[i]].as_str());
+			for j in i + 1..ndim {
+				write!(code, "*{}", dims[perm[j]]).unwrap();
 			}
 		}
 
-		Index { perm, code }
+		Index { indexes, dims, perm, code }
+	}
+
+	fn new(ndim: usize) -> Self {
+		let mut indexes = Vec::new();
+		let mut dims = Vec::new();
+
+		for i in 0..ndim {
+			indexes.push(format!("i_{}", i));
+			dims.push(format!("dim_{}", i));
+		}
+
+		Self::__new(indexes, dims, (0..ndim).collect())
+	}
+
+	fn new_perm(parent: &Index, perm: &[usize]) -> Self {
+		let mut new_perm = vec![0; perm.len()];
+		for i in 0..perm.len() {
+			new_perm[i] = perm[parent.perm[i]];
+		}
+
+		Self::__new(parent.indexes.clone(), parent.dims.clone(), new_perm)
+	}
+
+	fn new_transposed(parent: &Index, x1: usize, x2: usize) -> Self {
+		let mut perm = (0..parent.perm.len()).collect::<Vec<usize>>();
+		perm.swap(x1, x2);
+		Self::new_perm(parent, &perm)
+	}
+
+	fn new_broadcast(parent: &Index, from_shape: &Shape, to_shape: &Shape) -> Self {
+		debug_assert!(to_shape.ndim() >= from_shape.ndim());
+
+		// how many 1s to add to the front of the from_shape
+		let prefix = to_shape.ndim() - from_shape.ndim();
+
+		let mut indexes = Vec::new();
+		let mut dims = Vec::new();
+
+		for i in 0..to_shape.ndim() {
+			let dim = if i < prefix {
+				1
+			} else {
+				from_shape.dims()[i - prefix]
+			};
+
+			if dim == 1 {
+				indexes.push("0".to_string());
+				dims.push("1".to_string());
+			} else {
+				indexes.push(format!("i_{}", i - prefix));
+				dims.push(format!("dim_{}", i - prefix));
+			}
+		}
+
+		Self::__new(indexes, dims, parent.perm.clone())
 	}
 }
 
@@ -657,7 +790,7 @@ impl CPUDevice {
 	fn gen_kernel_pointwise(&self, code: &mut String, sequence: &ComputeSequence, root: &Expr) {
 		let ndim = root.shape.ndim();
 
-		let index = Index::new((0..ndim).collect());
+		let index = Index::new(ndim);
 		writeln!(code, "\t// pointwise kernel");
 		for dim in 0..ndim {
 			#[rustfmt::skip] writeln!(
@@ -696,7 +829,7 @@ impl CPUDevice {
 	) {
 		let ndim = root.shape.ndim();
 
-		let index = Index::new((0..ndim).collect());
+		let index = Index::new(ndim);
 		writeln!(code, "\t// reduction kernel");
 
 		let mut loop_cnt = 0;
@@ -887,9 +1020,7 @@ impl CPUDevice {
 				writeln!(code, "{})", Indent(indent))?;
 			},
 			ExprKind::Transpose(t) => {
-				let mut new_perm = index.perm.clone();
-				new_perm.swap(t.x1, t.x2);
-				let new_index = Index::new(new_perm);
+				let new_index = Index::new_transposed(index, t.x1, t.x2);
 				self.gen_expr(
 					code,
 					indent + 1,
@@ -900,7 +1031,19 @@ impl CPUDevice {
 					input_counter,
 				)?;
 			},
-			_ => {
+			ExprKind::Broadcast(b) => {
+				let new_index = Index::new_broadcast(index, &b.a.shape, &root.shape);
+				self.gen_expr(
+					code,
+					indent + 1,
+					sequence,
+					root,
+					&b.a,
+					&new_index,
+					input_counter,
+				)?;
+			},
+			ExprKind::Randn() | ExprKind::Reduction(..) | ExprKind::MatMul(..) => {
 				panic!("Unsupported expression");
 			},
 		}
@@ -1168,6 +1311,9 @@ impl ComputeSequence {
 			ExprKind::Transpose(t) => {
 				self.find_kernel_roots(&*t.a);
 			},
+			ExprKind::Broadcast(b) => {
+				self.find_kernel_roots(&*b.a);
+			},
 		}
 	}
 
@@ -1217,6 +1363,10 @@ impl ComputeSequence {
 					std::cmp::min(t.x1, t.x2),
 					std::cmp::max(t.x1, t.x2)
 				)
+			},
+			ExprKind::Broadcast(br) => {
+				let a = self.find_postorder(&*br.a, parent_inputs);
+				format!("B({},{},{})", a, expr.shape, br.a.shape)
 			},
 		}
 	}
