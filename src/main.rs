@@ -16,37 +16,29 @@ pub enum Error {
 	TooManyElems,
 }
 
-mod cpu_dev;
+mod compute_seq;
+mod cpu;
+mod device;
+mod dtype;
 mod expr;
 mod format;
 mod rand;
 mod shape;
 mod tensor;
 
-use expr::*;
+use crate::compute_seq::*;
+use crate::cpu::*;
+use crate::device::*;
+use crate::dtype::*;
+use crate::expr::*;
+use crate::format::*;
+use crate::rand::*;
+use crate::shape::*;
+use crate::tensor::*;
 use std::rc::Rc;
 
-trait Trait {}
-
-struct X {
-	x: bool,
-}
-
-impl Trait for X {}
-
-struct Y<T: ?Sized> {
-	a: usize,
-	b: T,
-}
-
-fn main1() {
-	let a: Rc<dyn Trait> = Rc::new(X { x: true });
-
-	let b: Rc<Y<dyn Trait>> = Rc::new(Y::<X> { a: 4, b: X { x: true } });
-	println!("hello")
-}
 fn main() {
-	let dev: Rc<dyn Device> = expr::CPUDevice::new("CPU".to_string());
+	let dev: Rc<dyn Device> = CPUDevice::new("CPU".to_string());
 	/*
 		let e = randn(Shape::new(&[7, 5]), DType::Float(32));
 		let x = exp(e.clone());

@@ -1,47 +1,55 @@
 // Copyright 2024 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
-use crate::shape::Shape;
-use crate::tensor::*;
-
 use std::fmt;
 
-fn fmt_0d(tensor: &Tensor, f: &mut fmt::Formatter, off: isize) -> fmt::Result {
-	tensor.buf.format(f, off, 1, 1)
-}
+#[derive(Clone, Copy)]
+pub struct Indent(usize);
 
-fn fmt_1d(tensor: &Tensor, f: &mut fmt::Formatter, off: isize) -> fmt::Result {
-	write!(f, "[")?;
-	let ndim = tensor.shape.ndim();
-	let len = tensor.shape.dims()[ndim - 1].len;
-	let stride = tensor.shape.dims()[ndim - 1].stride;
-	tensor.buf.format(f, off, len, stride)?;
-	write!(f, "]")
-}
-
-fn fmt_2d(tensor: &Tensor, f: &mut fmt::Formatter, off: isize) -> fmt::Result {
-	writeln!(f, "[")?;
-	let ndim = tensor.shape.ndim();
-	let len = tensor.shape.dims()[ndim - 2].len;
-	let stride = tensor.shape.dims()[ndim - 2].stride;
-	for i in 0..len {
-		write!(f, "\t")?;
-		fmt_1d(tensor, f, off + (i as isize) * stride)?;
-		writeln!(f, ",")?;
+impl Indent {
+	pub fn new(val: usize) -> Self {
+		Self(val)
 	}
-	write!(f, "]")
 }
 
-impl fmt::Display for Tensor {
+// operator +
+impl std::ops::Add<usize> for Indent {
+	type Output = Self;
+
+	fn add(self, rhs: usize) -> Self::Output {
+		Self(self.0 + rhs)
+	}
+}
+
+// operator +=
+impl std::ops::AddAssign<usize> for Indent {
+	fn add_assign(&mut self, rhs: usize) {
+		self.0 += rhs;
+	}
+}
+
+// operator -
+impl std::ops::Sub<usize> for Indent {
+	type Output = Self;
+
+	fn sub(self, rhs: usize) -> Self::Output {
+		Self(self.0 - rhs)
+	}
+}
+
+// operator -=
+impl std::ops::SubAssign<usize> for Indent {
+	fn sub_assign(&mut self, rhs: usize) {
+		self.0 -= rhs;
+	}
+}
+
+// fmt::Display for Indent
+impl fmt::Display for Indent {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		let ndim = self.shape.ndim();
-		match ndim {
-			0 => fmt_0d(self, f, self.shape.off()),
-			1 => fmt_1d(self, f, self.shape.off()),
-			2 => fmt_2d(self, f, self.shape.off()),
-			_ => {
-				unimplemented!("Tensor with {} dimensions", ndim);
-			},
+		for _ in 0..self.0 {
+			write!(f, "\t")?;
 		}
+		Ok(())
 	}
 }
