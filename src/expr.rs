@@ -150,7 +150,7 @@ impl fmt::Display for Shape {
 pub trait Device {
 	fn name(&self) -> &str;
 
-	fn eval(self: Rc<Self>, expr: Rc<Expr>) -> Rc<Tensor>;
+	fn eval(self: Rc<Self>, expr: Rc<Expr>, dotfile: Option<&str>) -> Rc<Tensor>;
 
 	fn owns(&self, tensor: &Tensor) -> bool;
 
@@ -206,6 +206,94 @@ pub struct Expr {
 	pub kind: ExprKind,
 }
 
+impl Expr {
+	fn __draw(&self, file: &mut std::fs::File, roots: Option<&HashMap<*const Expr, isize>>) {
+		let color = if let Some(roots) = roots
+			&& roots.contains_key(&(self as *const Expr))
+		{
+			", fillcolor=lightblue, style=filled"
+		} else {
+			""
+		};
+		// using node pointers as IDs
+		match self.kind {
+			ExprKind::Read(ref tensor) => {
+				writeln!(file, "\t\"{:p}\" [label=\"in\"{}]", self, color);
+			},
+			ExprKind::Randn() => {
+				writeln!(file, "\t\"{:p}\" [label=\"randn\"{}]", self, color);
+			},
+			ExprKind::Const(ref c) => {
+				writeln!(file, "\t\"{:p}\" [label=\"const({})\"{}]", self, c, color);
+			},
+			ExprKind::Unary(ref u) => {
+				writeln!(
+					file,
+					"\t\"{:p}\" [label=\"{}\"{}]",
+					self,
+					u.op.symbol(),
+					color
+				);
+				writeln!(file, "\t\"{:p}\" -> \"{:p}\"", u.a, self);
+				u.a.__draw(file, roots);
+			},
+			ExprKind::Binary(ref b) => {
+				writeln!(
+					file,
+					"\t\"{:p}\" [label=\"{}\"{}]",
+					self,
+					b.op.symbol(),
+					color
+				);
+				writeln!(file, "\t\"{:p}\" -> \"{:p}\"", b.a, self);
+				writeln!(file, "\t\"{:p}\" -> \"{:p}\"", b.b, self);
+				b.a.__draw(file, roots);
+				b.b.__draw(file, roots);
+			},
+			ExprKind::Reduction(ref r) => {
+				writeln!(
+					file,
+					"\t\"{:p}\" [label=\"{}\"{}]",
+					self,
+					r.op.symbol(),
+					color
+				);
+				writeln!(file, "\t\"{:p}\" -> \"{:p}\"", r.a, self);
+				r.a.__draw(file, roots);
+			},
+			ExprKind::MatMul(ref m) => {
+				writeln!(file, "\t\"{:p}\" [label=\"MatMul\"{}]", self, color);
+				writeln!(file, "\t\"{:p}\" -> \"{:p}\"", m.a, self);
+				writeln!(file, "\t\"{:p}\" -> \"{:p}\"", m.b, self);
+				m.a.__draw(file, roots);
+				m.b.__draw(file, roots);
+			},
+			ExprKind::Transpose(ref t) => {
+				writeln!(
+					file,
+					"\t\"{:p}\" [label=\"Transpose {} x {}\"{}]",
+					self, t.x1, t.x2, color
+				);
+				writeln!(file, "\t\"{:p}\" -> \"{:p}\"", t.a, self);
+				t.a.__draw(file, roots);
+			},
+			ExprKind::Broadcast(ref b) => {
+				writeln!(file, "\t\"{:p}\" [label=\"Broadcast\"{}]", self, color);
+				writeln!(file, "\t\"{:p}\" -> \"{:p}\"", b.a, self);
+				b.a.__draw(file, roots);
+			},
+		}
+	}
+
+	pub fn draw(&self, filename: &str, roots: Option<&HashMap<*const Expr, isize>>) {
+		let mut file = std::fs::File::create(filename).unwrap();
+		writeln!(file, "digraph G {{").unwrap();
+		writeln!(file, "\trankdir=BT").unwrap();
+		self.__draw(&mut file, roots);
+		writeln!(file, "}}").unwrap();
+	}
+}
+
 pub enum ExprKind {
 	Read(Rc<Tensor<dyn TensorData>>),
 	Randn(),
@@ -218,6 +306,9 @@ pub enum ExprKind {
 	Broadcast(BroadcastExpr),
 }
 
+// TODO
+// - the way we currently handle ConstExpr means that we'll generate a new kernel for each constant.
+// Think about the pros and cons and if we should pass constants as kernel params.
 pub enum ConstExpr {
 	Int(i64),
 	Uint(u64),
@@ -1059,8 +1150,13 @@ impl Device for CPUDevice {
 		&self.name
 	}
 
-	fn eval(self: Rc<CPUDevice>, expr: Rc<Expr>) -> Rc<Tensor> {
-		let sequence = ComputeSequence::new(expr);
+	fn eval(self: Rc<CPUDevice>, expr: Rc<Expr>, dotfile: Option<&str>) -> Rc<Tensor> {
+		let sequence = ComputeSequence::new(expr.clone());
+
+		if let Some(dotfile) = dotfile {
+			expr.draw(dotfile, Some(&sequence.roots));
+		}
+
 		let mut buffers: Vec<CPUTensorData> = Vec::with_capacity(sequence.len());
 		let mut rc_buffers: Vec<(usize, *const CPUTensorData)> = Vec::with_capacity(sequence.len());
 		for item in sequence.iter() {
@@ -1111,7 +1207,7 @@ impl Device for CPUDevice {
 					// TODO - try to find the kernel in the cache
 					let kernel = self.gen_kernel(&sequence, &item).unwrap();
 
-					// TODO - for reduce kernel, the dims should be dims of the input
+					// For reduce kernel, the dims should be dims of the input
 					let dims = match &expr.kind {
 						ExprKind::Reduction(red) => red.a.shape.dims(),
 						_ => expr.shape.dims(),
@@ -1139,7 +1235,13 @@ impl Device for CPUDevice {
 						(kernel.func)(dims, inputs, output);
 					}
 
-					// TODO - decrement ref counts of inputs
+					for i in item.inputs.iter() {
+						let (rc, _) = &mut rc_buffers[*i];
+						*rc -= 1;
+						if *rc == 0 {
+							buffers[*i].__data = Vec::new().into_boxed_slice();
+						}
+					}
 				},
 			}
 		}

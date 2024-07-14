@@ -64,26 +64,25 @@ fn main() {
 	*/
 
 	let x = randn(Shape::new(&[3, 2]), DType::Float(32));
-	let x = dev.clone().eval(x);
+	let x = dev.clone().eval(x, Some("x.dot"));
 	let xx = x.clone();
 
 	let m = mul(x.clone(), x.clone());
-	let mm = dev.clone().eval(m.clone());
+	let mm = dev.clone().eval(m.clone(), Some("m.dot"));
 	let sum = sum(m, &[1]);
-	let ss = dev.clone().eval(sum.clone());
-	let q = sqrt(sum);
-	let qq = dev.clone().eval(q.clone());
+	let ss = dev.clone().eval(sum.clone(), Some("sum.dot"));
+	let q = sqrt(mul(
+		sum,
+		fill(Shape::new(&[3, 1]), DType::Float(32), ConstExpr::Float(0.5)),
+	));
+	let qq = dev.clone().eval(q.clone(), Some("q.dot"));
 
 	let scale = div(
-		fill(
-			Shape::new(&[3, 1]),
-			DType::Float(32),
-			ConstExpr::Float((2.0_f64).sqrt()),
-		),
+		fill(Shape::new(&[3, 1]), DType::Float(32), ConstExpr::Float(1.0)),
 		q,
 	);
 	let norm = mul(x, scale);
-	let t = dev.eval(norm);
+	let t = dev.eval(norm.clone(), Some("t.dot"));
 
 	println!("x = {}", xx);
 	println!("m = {}", mm);
