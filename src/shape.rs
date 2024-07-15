@@ -2,6 +2,7 @@
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
 use core::fmt;
+use std::intrinsics::{likely, unlikely};
 use std::rc::Rc;
 
 #[derive(Debug, PartialEq, Clone)]
@@ -26,8 +27,20 @@ impl Shape {
 	}
 
 	pub fn new(dims: &[usize]) -> Rc<Self> {
+		Self::from_iter(dims.iter())
+	}
+
+	pub fn from_iter<'a, D: Iterator<Item = &'a usize> + ExactSizeIterator<Item = &'a usize>>(
+		dims: D,
+	) -> Rc<Self> {
+		let ndim = dims.len();
+		let mut vec = vec![0; ndim];
+		for i in dims.enumerate() {
+			vec[i.0] = *i.1;
+		}
+		let dims = vec.into_boxed_slice();
 		let elems = dims.iter().product();
-		Rc::new(Self { __dims: dims.into(), __elems: elems })
+		Rc::new(Self { __dims: dims, __elems: elems })
 	}
 
 	pub fn new_transposed(&self, x1: usize, x2: usize) -> Rc<Self> {
@@ -36,13 +49,19 @@ impl Shape {
 		Rc::new(Self { __dims: new_dims, __elems: self.__elems })
 	}
 
-	pub fn new_reduced(&self, dims_to_reduce: &[usize]) -> Rc<Self> {
+	pub fn new_reduced(&self, dims_to_reduce: &[isize]) -> Rc<Self> {
 		let mut new_dims = self.__dims.clone();
+		let ndim = new_dims.len();
 		for dim in dims_to_reduce {
-			if *dim >= new_dims.len() {
+			let dim = if *dim >= 0 {
+				*dim as usize
+			} else {
+				ndim.wrapping_sub(dim.wrapping_neg() as usize)
+			};
+			if unlikely(dim >= ndim) {
 				panic!("Invalid dimension");
 			}
-			new_dims[*dim] = 1;
+			new_dims[dim] = 1;
 		}
 		let elems = new_dims.iter().product();
 		Rc::new(Self { __dims: new_dims, __elems: elems })
@@ -56,53 +75,96 @@ impl Shape {
 		&self.__dims
 	}
 
+	fn __fix_dim_index(&self, i: isize) -> Option<usize> {
+		let ndim = self.ndim();
+		let i = if i >= 0 {
+			i as usize
+		} else {
+			ndim - ((-i) as usize)
+		};
+		if unlikely(i >= ndim) { None } else { Some(i) }
+	}
+
+	pub fn dim(&self, i: isize) -> usize {
+		if let Some(i) = self.__fix_dim_index(i) {
+			self.__dims[i]
+		} else {
+			1
+		}
+	}
+
 	pub fn elems(&self) -> usize {
 		self.__elems
 	}
 
 	pub fn broadcast_type(&self, other: &Self) -> BroadcastType {
-		let ndim = std::cmp::min(self.ndim(), other.ndim());
-		let a = &self.__dims[self.ndim() - ndim..];
-		let b = &other.__dims[other.ndim() - ndim..];
+		if self.__dims == other.__dims {
+			return BroadcastType::NoBroadcast;
+		}
+		let a_ndim = self.ndim();
+		let b_ndim = other.ndim();
+		let a_dims = &self.__dims;
+		let b_dims = &other.__dims;
+
+		let ndim = a_ndim.max(b_ndim);
+		let a_prefix = ndim - a_ndim;
+		let b_prefix = ndim - b_ndim;
+
+		let mut dims = vec![0; ndim];
+		let mut elems = 1;
 		let mut a_broadcast = false;
 		let mut b_broadcast = false;
+
 		for i in 0..ndim {
-			if a[i] != b[i] {
-				if a[i] == 1 {
+			let a_dim = if i < a_prefix {
+				1
+			} else {
+				a_dims[i - a_prefix]
+			};
+
+			let b_dim = if i < b_prefix {
+				1
+			} else {
+				b_dims[i - b_prefix]
+			};
+
+			if a_dim != b_dim {
+				if a_dim == 1 {
 					a_broadcast = true;
-				} else if b[i] == 1 {
+					dims[i] = b_dim;
+				} else if b_dim == 1 {
 					b_broadcast = true;
+					dims[i] = a_dim;
 				} else {
 					return BroadcastType::Error;
 				}
+			} else {
+				dims[i] = a_dim;
 			}
+
+			// TODO - check for overflow
+			elems *= dims[i];
 		}
-		if a_broadcast || b_broadcast {
-			let ndim = self.ndim().max(other.ndim());
 
-			// Number of dimensions of len 1 to add to each shape
-			let a1 = ndim - self.ndim();
-			let b1 = ndim - other.ndim();
+		BroadcastType::Broadcast(
+			a_broadcast,
+			b_broadcast,
+			Rc::new(Self {
+				__dims: dims.into_boxed_slice(),
+				__elems: elems,
+			}),
+		)
+	}
+}
 
-			let mut new_shape = vec![0; ndim];
-			let mut new_elems = 1;
-			for i in 0..ndim {
-				let a_dim = if i < a1 { 1 } else { self.__dims[i - a1] };
-				let b_dim = if i < b1 { 1 } else { other.__dims[i - b1] };
-				new_shape[i] = std::cmp::max(a_dim, b_dim);
-				new_elems *= new_shape[i]; // TODO - check for overflow
-			}
+impl std::ops::Index<isize> for Shape {
+	type Output = usize;
 
-			BroadcastType::Broadcast(
-				a_broadcast,
-				b_broadcast,
-				Rc::new(Self {
-					__dims: new_shape.into_boxed_slice(),
-					__elems: new_elems,
-				}),
-			)
+	fn index(&self, i: isize) -> &usize {
+		if let Some(i) = self.__fix_dim_index(i) {
+			&self.__dims[i]
 		} else {
-			BroadcastType::NoBroadcast
+			&1
 		}
 	}
 }

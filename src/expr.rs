@@ -7,6 +7,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::Write as FmtWrite;
+use std::intrinsics::{likely, unlikely};
 use std::io::Write as IoWrite;
 use std::rc::Rc;
 
@@ -35,7 +36,7 @@ impl Expr {
 		};
 		// using node pointers as IDs
 		match self.kind {
-			ExprKind::Read(..) => {
+			ExprKind::Input(..) => {
 				writeln!(file, "\t\"{}\" [label=\"in\"{}]", my_id, color);
 			},
 			ExprKind::Randn() => {
@@ -128,7 +129,7 @@ impl Expr {
 }
 
 pub enum ExprKind {
-	Read(Rc<Tensor<dyn TensorData>>),
+	Input(Rc<Tensor<dyn TensorData>>),
 	Randn(),
 	Const(ConstExpr),
 	Unary(UnaryExpr),
@@ -270,28 +271,15 @@ pub fn randn(shape: Rc<Shape>, dtype: DType) -> Rc<Expr> {
 	Rc::new(Expr { shape, dtype, kind: ExprKind::Randn() })
 }
 
-pub trait ExprLike {
-	fn get(self) -> Rc<Expr>;
+pub fn input(tensor: Rc<Tensor<dyn TensorData>>) -> Rc<Expr> {
+	Rc::new(Expr {
+		shape: tensor.shape.clone(),
+		dtype: tensor.dtype,
+		kind: ExprKind::Input(tensor),
+	})
 }
 
-impl ExprLike for Rc<Expr> {
-	fn get(self) -> Rc<Expr> {
-		self
-	}
-}
-
-impl ExprLike for Rc<Tensor> {
-	fn get(self) -> Rc<Expr> {
-		Rc::new(Expr {
-			shape: self.shape.clone(),
-			dtype: self.dtype,
-			kind: ExprKind::Read(self),
-		})
-	}
-}
-
-pub fn unary_op<A: ExprLike>(a: A, op: UnaryOp) -> Rc<Expr> {
-	let a = a.get();
+pub fn unary_op(a: Rc<Expr>, op: UnaryOp) -> Rc<Expr> {
 	match a.dtype {
 		DType::Float(_) => {},
 		_ => panic!("{}() requires a float input", op.symbol()),
@@ -303,17 +291,19 @@ pub fn unary_op<A: ExprLike>(a: A, op: UnaryOp) -> Rc<Expr> {
 	})
 }
 
-pub fn exp<A: ExprLike>(a: A) -> Rc<Expr> {
+pub fn exp(a: Rc<Expr>) -> Rc<Expr> {
 	unary_op(a, UnaryOp::Exp)
 }
 
-pub fn sqrt<A: ExprLike>(a: A) -> Rc<Expr> {
+pub fn sqrt(a: Rc<Expr>) -> Rc<Expr> {
 	unary_op(a, UnaryOp::Sqrt)
 }
 
-fn binary_op<A: ExprLike, B: ExprLike>(a: A, b: B, op: BinaryOp) -> Rc<Expr> {
-	let mut a = a.get();
-	let mut b = b.get();
+pub fn sqr(a: Rc<Expr>) -> Rc<Expr> {
+	mul(a.clone(), a)
+}
+
+fn binary_op(mut a: Rc<Expr>, mut b: Rc<Expr>, op: BinaryOp) -> Rc<Expr> {
 	if a.dtype != b.dtype {
 		panic!("{:?} requires dtypes to match", op);
 	}
@@ -344,46 +334,56 @@ fn binary_op<A: ExprLike, B: ExprLike>(a: A, b: B, op: BinaryOp) -> Rc<Expr> {
 	})
 }
 
-pub fn add<A: ExprLike, B: ExprLike>(a: A, b: B) -> Rc<Expr> {
+pub fn add(a: Rc<Expr>, b: Rc<Expr>) -> Rc<Expr> {
 	binary_op(a, b, BinaryOp::Add)
 }
 
-pub fn sub<A: ExprLike, B: ExprLike>(a: A, b: B) -> Rc<Expr> {
+pub fn sub(a: Rc<Expr>, b: Rc<Expr>) -> Rc<Expr> {
 	binary_op(a, b, BinaryOp::Sub)
 }
 
-pub fn mul<A: ExprLike, B: ExprLike>(a: A, b: B) -> Rc<Expr> {
+pub fn mul(a: Rc<Expr>, b: Rc<Expr>) -> Rc<Expr> {
 	binary_op(a, b, BinaryOp::Mul)
 }
 
-pub fn div<A: ExprLike, B: ExprLike>(a: A, b: B) -> Rc<Expr> {
+pub fn div(a: Rc<Expr>, b: Rc<Expr>) -> Rc<Expr> {
 	binary_op(a, b, BinaryOp::Div)
 }
 
-fn reduce_op<A: ExprLike>(a: A, op: ReduceOp, dims_to_reduce: &[usize]) -> Rc<Expr> {
-	let a = a.get();
+fn reduce_op(a: Rc<Expr>, op: ReduceOp, dims_to_reduce: &[isize]) -> Rc<Expr> {
+	// NOTE: This will also check if the dimensions are valid
+	let new_shape = a.shape.new_reduced(dims_to_reduce);
+
 	let mut bitset = BitSet::with_capacity(a.shape.ndim());
+	let ndim = a.shape.ndim();
 	for dim in dims_to_reduce {
-		bitset.insert(*dim);
+		let dim = if *dim >= 0 {
+			*dim as usize
+		} else {
+			ndim - ((-dim) as usize)
+		};
+		bitset.insert(dim);
 	}
 	Rc::new(Expr {
-		shape: a.shape.new_reduced(dims_to_reduce),
+		shape: new_shape,
 		dtype: a.dtype,
 		kind: ExprKind::Reduce(ReduceExpr { a, op, dims_to_reduce: bitset }),
 	})
 }
 
-pub fn sum<A: ExprLike>(a: A, dims_to_reduce: &[usize]) -> Rc<Expr> {
+pub fn sum(a: Rc<Expr>, dims_to_reduce: &[isize]) -> Rc<Expr> {
 	reduce_op(a, ReduceOp::Sum, dims_to_reduce)
 }
 
-pub fn max<A: ExprLike>(a: A, dims_to_reduce: &[usize]) -> Rc<Expr> {
+pub fn max(a: Rc<Expr>, dims_to_reduce: &[isize]) -> Rc<Expr> {
 	reduce_op(a, ReduceOp::Max, dims_to_reduce)
 }
 
-pub fn matmul<A: ExprLike, B: ExprLike>(a: A, b: B) -> Rc<Expr> {
-	let a = a.get();
-	let b = b.get();
+pub fn min(a: Rc<Expr>, dims_to_reduce: &[isize]) -> Rc<Expr> {
+	reduce_op(a, ReduceOp::Min, dims_to_reduce)
+}
+
+pub fn matmul(a: Rc<Expr>, b: Rc<Expr>) -> Rc<Expr> {
 	if a.shape.ndim() != 2 || b.shape.ndim() != 2 {
 		panic!("MatMul requires 2D tensors");
 	}
@@ -401,8 +401,7 @@ pub fn matmul<A: ExprLike, B: ExprLike>(a: A, b: B) -> Rc<Expr> {
 	})
 }
 
-pub fn transpose<A: ExprLike>(a: A, x1: usize, x2: usize) -> Rc<Expr> {
-	let a = a.get();
+pub fn transpose(a: Rc<Expr>, x1: usize, x2: usize) -> Rc<Expr> {
 	let ndim = a.shape.ndim();
 	if x1 >= ndim || x2 >= ndim {
 		panic!("Invalid dimensions");

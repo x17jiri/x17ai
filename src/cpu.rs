@@ -477,7 +477,7 @@ impl CPUDevice {
 			ExprKind::Const(c) => {
 				writeln!(code, "{}({})", expr.dtype, c)?;
 			},
-			ExprKind::Read(..) => {
+			ExprKind::Input(..) => {
 				writeln!(code, "READ_TENSOR_TODO")?;
 			},
 			ExprKind::Unary(un) => {
@@ -599,7 +599,7 @@ impl Device for CPUDevice {
 		for item in sequence.iter() {
 			let expr = item.expr;
 			match &expr.kind {
-				ExprKind::Read(tensor) => {
+				ExprKind::Input(tensor) => {
 					if !self.owns(&tensor) {
 						unimplemented!("TODO: copy tensor from another device");
 					}

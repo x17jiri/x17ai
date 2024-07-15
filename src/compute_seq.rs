@@ -27,7 +27,7 @@ pub struct ComputeSequence {
 	// as long as we don't drop it, all pointers to sub-expressions are valid.
 	roots: HashMap<*const Expr, isize>,
 	postorder: Vec<_PostorderItem>,
-	processed: HashSet<*const Expr>,
+	processed: HashMap<*const Expr, bool>,
 
 	swapped_operands: HashSet<*const Expr>,
 }
@@ -71,7 +71,7 @@ impl ComputeSequence {
 			expr,
 			roots: HashMap::new(),
 			postorder: Vec::new(),
-			processed: HashSet::new(),
+			processed: HashMap::new(),
 			swapped_operands: HashSet::new(),
 		};
 
@@ -101,33 +101,43 @@ impl ComputeSequence {
 		self.into_iter()
 	}
 
-	fn find_kernel_roots(&mut self, expr: &Expr) {
+	// returns true if expr is constant
+	fn find_kernel_roots(&mut self, expr: &Expr) -> bool {
 		let e = expr as *const Expr;
-		if self.processed.contains(&e) {
+		if let Some(is_const) = self.processed.get(&e)
+			&& !is_const
+		{
 			self.roots.insert(e, -1);
-			return;
+			return false;
 		}
-		self.processed.insert(e);
 
-		match &expr.kind {
-			ExprKind::Read(..) | ExprKind::Randn() => {
+		let is_const = match &expr.kind {
+			ExprKind::Input(..) | ExprKind::Randn() => {
 				self.roots.insert(e, -1);
+				false
 			},
 			ExprKind::Const(..) => {
 				// do nothing
+				true
 			},
 			ExprKind::Unary(u) => {
-				self.find_kernel_roots(&*u.a);
+				let a_const = self.find_kernel_roots(&*u.a);
+				a_const
 			},
 			ExprKind::Binary(b) => {
-				self.find_kernel_roots(&*b.a);
-				self.find_kernel_roots(&*b.b);
+				let a_const = self.find_kernel_roots(&*b.a);
+				let b_const = self.find_kernel_roots(&*b.b);
+				a_const && b_const
 			},
 			ExprKind::Reduce(r) => {
 				self.find_kernel_roots(&*r.a);
 
 				self.roots.insert(r.a.as_ref() as *const Expr, -1);
 				self.roots.insert(e, -1);
+
+				// Reduction is always marked as a root, so from the point of view of the parent,
+				// it is not constant
+				false
 			},
 			ExprKind::MatMul(m) => {
 				self.find_kernel_roots(&*m.a);
@@ -138,22 +148,35 @@ impl ComputeSequence {
 				self.roots.insert(m.a.as_ref() as *const Expr, -1);
 				self.roots.insert(m.b.as_ref() as *const Expr, -1);
 				self.roots.insert(e, -1);
+
+				// MatMul is always marked as a root, so from the point of view of the parent,
+				// it is not constant
+				false
 			},
 			ExprKind::Transpose(t) => {
-				self.find_kernel_roots(&*t.a);
+				let a_const = self.find_kernel_roots(&*t.a);
+				a_const
 			},
 			ExprKind::Broadcast(b) => {
-				self.find_kernel_roots(&*b.a);
-
-				self.roots.insert(b.a.as_ref() as *const Expr, -1);
+				// When we broadcast an expression, the calculation will be repeated several times.
+				// We will do it only if the expression is constant.
+				// If it's not, mark the expression as a root so that it is calculated only once.
+				let a_const = self.find_kernel_roots(&*b.a);
+				if !a_const {
+					self.roots.insert(b.a.as_ref() as *const Expr, -1);
+				}
+				a_const
 			},
-		}
+		};
+
+		self.processed.insert(e, is_const);
+		is_const
 	}
 
 	fn traverse_children(&mut self, expr: &Expr, parent_inputs: &mut Vec<usize>) -> String {
 		match &expr.kind {
-			ExprKind::Read(..) | ExprKind::Randn() => {
-				// Read and Randn are handled separately, so their cache_key is never used
+			ExprKind::Input(..) | ExprKind::Randn() => {
+				// Input and Randn are handled separately, so their cache_key is never used
 				String::new()
 			},
 			ExprKind::Const(c) => format!("{}({})", expr.dtype, c),

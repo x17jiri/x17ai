@@ -37,6 +37,34 @@ use crate::shape::*;
 use crate::tensor::*;
 use std::rc::Rc;
 
+fn rms_norm(input: Rc<Expr>) -> Rc<Expr> {
+	let squared = sqr(input.clone());
+	let sum = sum(squared, &[-1]);
+	let n = fill(
+		sum.shape.clone(),
+		input.dtype,
+		ConstExpr::Float(input.shape[-1] as f64),
+	);
+	let scale = sqrt(div(n, sum));
+	mul(input, scale)
+}
+
+fn linear(input: Rc<Expr>, weights: Rc<Expr>) -> Rc<Expr> {
+	let i_shape = input.shape.dims();
+	let ndim = i_shape.len();
+	let mut vec = vec![0; ndim + 1];
+	for i in 0..ndim - 1 {
+		vec[i] = i_shape[i];
+	}
+	vec[ndim - 1] = 1;
+	vec[ndim] = i_shape[ndim - 1];
+	let i_shape = Shape::new(&vec);
+
+	// TODO - use i_shape
+
+	matmul(input, weights)
+}
+
 fn main() {
 	let dev: Rc<dyn Device> = CPUDevice::new("CPU".to_string());
 	/*
@@ -54,13 +82,14 @@ fn main() {
 		//let d3 = zeros(Shape::new(&[3, 9, 7]), DType::Float(32));
 		let t = dev.eval(sum(d3, &[1]));
 	*/
-
-	let x = randn(Shape::new(&[3, 2]), DType::Float(32));
-	let x = dev.clone().eval(x, Some("x.dot"));
+	/*
+	let r = randn(Shape::new(&[3, 2]), DType::Float(32));
+	let x = dev.clone().eval(r, None);
 	let xx = x.clone();
 
 	let m = mul(x.clone(), x.clone());
 	let mm = dev.clone().eval(m.clone(), Some("m.dot"));
+
 	let sum = sum(m, &[1]);
 	let ss = dev.clone().eval(sum.clone(), Some("sum.dot"));
 	let q = sqrt(mul(
@@ -81,6 +110,16 @@ fn main() {
 	println!("sum = {}", ss);
 	println!("q = {}", qq);
 	println!("t = {}", t);
+	*/
+
+	let r = randn(Shape::new(&[2, 5]), DType::Float(32));
+	let rr = dev.clone().eval(r.clone(), None);
+
+	let t = rms_norm(input(rr.clone()));
+	let tt = dev.eval(t.clone(), Some("t.dot"));
+
+	println!("r = {}", rr);
+	println!("t = {}", tt);
 }
 
 /*
