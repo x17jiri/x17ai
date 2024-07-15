@@ -1,11 +1,14 @@
 // Copyright 2024 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
+#![allow(incomplete_features)]
+#![allow(internal_features)]
 #![feature(core_intrinsics)]
 #![feature(inherent_associated_types)]
 #![feature(stmt_expr_attributes)]
 #![warn(clippy::cast_lossless)]
 #![feature(let_chains)]
+#![allow(unused_imports)] // TODO - remove when project stabilizes
 
 #[cold]
 fn cold_path() {}
@@ -60,7 +63,7 @@ fn linear(input: Rc<Expr>, weights: Rc<Expr>) -> Rc<Expr> {
 	vec[ndim] = i_shape[ndim - 1];
 	let i_shape = Shape::new(&vec);
 
-	// TODO - use i_shape
+	let input = simple_reshape(input, i_shape);
 
 	matmul(input, weights)
 }
@@ -116,10 +119,18 @@ fn main() {
 	let rr = dev.clone().eval(r.clone(), None);
 
 	let t = rms_norm(input(rr.clone()));
-	let tt = dev.eval(t.clone(), Some("t.dot"));
+	let tt = dev.clone().eval(t.clone(), Some("t.dot"));
 
 	println!("r = {}", rr);
 	println!("t = {}", tt);
+
+	let x = randn(Shape::new(&[5]), DType::Float(32));
+	let w = randn(Shape::new(&[5, 3]), DType::Float(32));
+	let t2 = linear(x, w);
+
+	let tt2 = dev.eval(t2.clone(), Some("t2.dot"));
+
+	println!("t2 = {}", tt2);
 }
 
 /*

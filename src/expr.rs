@@ -113,6 +113,13 @@ impl Expr {
 
 				writeln!(file, "\t\"{}\" -> \"{}\"", a_id, my_id);
 			},
+			ExprKind::SimpleReshape(ref s) => {
+				writeln!(file, "\t\"{}\" [label=\"SimpleReshape\"{}]", my_id, color);
+
+				let a_id = s.a.__draw(file, id, roots);
+
+				writeln!(file, "\t\"{}\" -> \"{}\"", a_id, my_id);
+			},
 		}
 
 		my_id
@@ -138,6 +145,7 @@ pub enum ExprKind {
 	MatMul(MatMulExpr),
 	Transpose(TransposeExpr),
 	Broadcast(BroadcastExpr),
+	SimpleReshape(SimpleReshapeExpr),
 }
 
 // TODO
@@ -251,6 +259,11 @@ pub struct TransposeExpr {
 }
 
 pub struct BroadcastExpr {
+	pub a: Rc<Expr>,
+}
+
+// A reshape is "simple" if it only adds or removes dimensions of size 1
+pub struct SimpleReshapeExpr {
 	pub a: Rc<Expr>,
 }
 
@@ -410,5 +423,23 @@ pub fn transpose(a: Rc<Expr>, x1: usize, x2: usize) -> Rc<Expr> {
 		shape: a.shape.new_transposed(x1, x2),
 		dtype: a.dtype,
 		kind: ExprKind::Transpose(TransposeExpr { a, x1, x2 }),
+	})
+}
+
+pub fn simple_reshape(a: Rc<Expr>, new_shape: Rc<Shape>) -> Rc<Expr> {
+	let i_shape = a.shape.dims();
+	let o_shape = new_shape.dims();
+
+	// check that o_shape only adds or removes dimensions of size 1
+	let i = i_shape.iter().filter(|&&x| x != 1);
+	let o = o_shape.iter().filter(|&&x| x != 1);
+	if unlikely(i.ne(o)) {
+		panic!("Requested reshape is not simple");
+	}
+
+	Rc::new(Expr {
+		shape: new_shape,
+		dtype: a.dtype,
+		kind: ExprKind::SimpleReshape(SimpleReshapeExpr { a }),
 	})
 }

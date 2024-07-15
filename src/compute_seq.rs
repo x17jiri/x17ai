@@ -167,6 +167,10 @@ impl ComputeSequence {
 				}
 				a_const
 			},
+			ExprKind::SimpleReshape(sr) => {
+				let a_const = self.find_kernel_roots(&*sr.a);
+				a_const
+			},
 		};
 
 		self.processed.insert(e, is_const);
@@ -223,6 +227,10 @@ impl ComputeSequence {
 			ExprKind::Broadcast(br) => {
 				let a = self.find_postorder(&*br.a, parent_inputs);
 				format!("B({},{},{})", a, expr.shape, br.a.shape)
+			},
+			ExprKind::SimpleReshape(sr) => {
+				let a = self.find_postorder(&*sr.a, parent_inputs);
+				format!("R({},{},{})", a, expr.shape, sr.a.shape)
 			},
 		}
 	}

@@ -27,20 +27,35 @@ impl Shape {
 	}
 
 	pub fn new(dims: &[usize]) -> Rc<Self> {
-		Self::from_iter(dims.iter())
+		Self::from_iter(dims.iter().copied())
 	}
 
-	pub fn from_iter<'a, D: Iterator<Item = &'a usize> + ExactSizeIterator<Item = &'a usize>>(
+	pub fn from_iter<'a, D: Iterator<Item = usize> + ExactSizeIterator<Item = usize>>(
 		dims: D,
 	) -> Rc<Self> {
 		let ndim = dims.len();
-		let mut vec = vec![0; ndim];
-		for i in dims.enumerate() {
-			vec[i.0] = *i.1;
+		let mut elems: usize = 1;
+		let mut vec = Vec::<usize>::with_capacity(ndim);
+		for (i, dim) in dims.enumerate() {
+			unsafe {
+				let p = vec.as_mut_ptr();
+				let p = p.add(i);
+				std::ptr::write(p, dim);
+			}
+
+			if let Some(e) = elems.checked_mul(dim) {
+				elems = e;
+			} else {
+				panic!("Too many elements");
+			}
 		}
-		let dims = vec.into_boxed_slice();
-		let elems = dims.iter().product();
-		Rc::new(Self { __dims: dims, __elems: elems })
+		unsafe {
+			vec.set_len(ndim);
+		}
+		Rc::new(Self {
+			__dims: vec.into_boxed_slice(),
+			__elems: elems,
+		})
 	}
 
 	pub fn new_transposed(&self, x1: usize, x2: usize) -> Rc<Self> {
@@ -111,7 +126,7 @@ impl Shape {
 		let b_prefix = ndim - b_ndim;
 
 		let mut dims = vec![0; ndim];
-		let mut elems = 1;
+		let mut elems: usize = 1;
 		let mut a_broadcast = false;
 		let mut b_broadcast = false;
 
@@ -142,8 +157,11 @@ impl Shape {
 				dims[i] = a_dim;
 			}
 
-			// TODO - check for overflow
-			elems *= dims[i];
+			if let Some(e) = elems.checked_mul(dims[i]) {
+				elems = e;
+			} else {
+				return BroadcastType::Error;
+			}
 		}
 
 		BroadcastType::Broadcast(

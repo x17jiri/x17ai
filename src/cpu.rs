@@ -546,7 +546,7 @@ impl CPUDevice {
 				let new_index = Index::new_transposed(index, t.x1, t.x2);
 				self.gen_expr(
 					code,
-					indent + 1,
+					indent,
 					sequence,
 					root,
 					&t.a,
@@ -558,13 +558,16 @@ impl CPUDevice {
 				let new_index = Index::new_broadcast(index, &b.a.shape, &root.shape);
 				self.gen_expr(
 					code,
-					indent + 1,
+					indent,
 					sequence,
 					root,
 					&b.a,
 					&new_index,
 					input_counter,
 				)?;
+			},
+			ExprKind::SimpleReshape(sr) => {
+				self.gen_expr(code, indent, sequence, root, &sr.a, index, input_counter)?;
 			},
 			ExprKind::Randn() | ExprKind::Reduce(..) | ExprKind::MatMul(..) => {
 				panic!("Unsupported expression");
@@ -634,6 +637,7 @@ impl Device for CPUDevice {
 				| ExprKind::Binary(..)
 				| ExprKind::Reduce(..)
 				| ExprKind::Transpose(..)
+				| ExprKind::SimpleReshape(..)
 				| ExprKind::Broadcast(..) => {
 					let rc = item.ref_count;
 					buffers.push(unsafe {
