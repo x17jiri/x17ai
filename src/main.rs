@@ -53,6 +53,7 @@ fn rms_norm(input: Rc<Expr>) -> Rc<Expr> {
 }
 
 fn linear(input: Rc<Expr>, weights: Rc<Expr>) -> Rc<Expr> {
+	/*
 	let i_shape = input.shape.dims();
 	let ndim = i_shape.len();
 	let mut vec = vec![0; ndim + 1];
@@ -65,7 +66,11 @@ fn linear(input: Rc<Expr>, weights: Rc<Expr>) -> Rc<Expr> {
 
 	let input = simple_reshape(input, i_shape);
 
-	matmul(input, weights)
+	matmul(input, weights)*/
+
+	let m = mul(input.clone(), weights.clone());
+	let sum = sum(m, &[-1]);
+	sum
 }
 
 fn main() {
@@ -124,8 +129,8 @@ fn main() {
 	println!("r = {}", rr);
 	println!("t = {}", tt);
 
-	let x = randn(Shape::new(&[5]), DType::Float(32));
-	let w = randn(Shape::new(&[5, 3]), DType::Float(32));
+	let x = randn(Shape::new(&[1, 5]), DType::Float(32));
+	let w = randn(Shape::new(&[3, 5]), DType::Float(32));
 	let t2 = linear(x, w);
 
 	let tt2 = dev.eval(t2.clone(), Some("t2.dot"));
