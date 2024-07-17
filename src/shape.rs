@@ -30,6 +30,16 @@ impl Shape {
 		Self::from_iter(dims.iter().copied())
 	}
 
+	pub fn split(&self, i: isize) -> (&[usize], &[usize]) {
+		let ndim = self.ndim();
+		let i = if i < 0 { (ndim as isize) + i } else { i };
+		let i = i as usize;
+		if i > ndim {
+			panic!("Invalid dimension");
+		}
+		(&self.__dims[..i], &self.__dims[i..])
+	}
+
 	pub fn from_iter<'a, D: Iterator<Item = usize> + ExactSizeIterator<Item = usize>>(
 		dims: D,
 	) -> Rc<Self> {
@@ -92,20 +102,12 @@ impl Shape {
 
 	fn __fix_dim_index(&self, i: isize) -> Option<usize> {
 		let ndim = self.ndim();
-		let i = if i >= 0 {
-			i as usize
-		} else {
-			ndim - ((-i) as usize)
-		};
+		let i = if i >= 0 { i as usize } else { ndim - ((-i) as usize) };
 		if unlikely(i >= ndim) { None } else { Some(i) }
 	}
 
 	pub fn dim(&self, i: isize) -> usize {
-		if let Some(i) = self.__fix_dim_index(i) {
-			self.__dims[i]
-		} else {
-			1
-		}
+		if let Some(i) = self.__fix_dim_index(i) { self.__dims[i] } else { 1 }
 	}
 
 	pub fn elems(&self) -> usize {
@@ -131,17 +133,9 @@ impl Shape {
 		let mut b_broadcast = false;
 
 		for i in 0..ndim {
-			let a_dim = if i < a_prefix {
-				1
-			} else {
-				a_dims[i - a_prefix]
-			};
+			let a_dim = if i < a_prefix { 1 } else { a_dims[i - a_prefix] };
 
-			let b_dim = if i < b_prefix {
-				1
-			} else {
-				b_dims[i - b_prefix]
-			};
+			let b_dim = if i < b_prefix { 1 } else { b_dims[i - b_prefix] };
 
 			if a_dim != b_dim {
 				if a_dim == 1 {
@@ -179,11 +173,7 @@ impl std::ops::Index<isize> for Shape {
 	type Output = usize;
 
 	fn index(&self, i: isize) -> &usize {
-		if let Some(i) = self.__fix_dim_index(i) {
-			&self.__dims[i]
-		} else {
-			&1
-		}
+		if let Some(i) = self.__fix_dim_index(i) { &self.__dims[i] } else { &1 }
 	}
 }
 

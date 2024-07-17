@@ -4,28 +4,39 @@
 use std::fmt;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
-pub enum DType {
-	Float(u8),
-	Int(u8),
-	Uint(u8),
+pub struct DType {
+	pub kind: DTypeKind,
+	pub bits: u8,
 }
 
 impl DType {
-	pub fn bits(&self) -> usize {
-		match self {
-			DType::Float(b) => *b as usize,
-			DType::Int(b) => *b as usize,
-			DType::Uint(b) => *b as usize,
-		}
+	pub fn is_float(&self) -> bool {
+		self.kind == DTypeKind::Float
 	}
+
+	pub fn bytes(&self) -> usize {
+		(self.bits as usize) / 8
+	}
+
+	pub fn f32() -> Self {
+		Self { kind: DTypeKind::Float, bits: 32 }
+	}
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum DTypeKind {
+	Float,
+	Int,
+	Uint,
 }
 
 impl fmt::Display for DType {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		match self {
-			DType::Float(b) => write!(f, "f{}", b),
-			DType::Int(b) => write!(f, "i{}", b),
-			DType::Uint(b) => write!(f, "u{}", b),
-		}
+		let kind = match self.kind {
+			DTypeKind::Float => "f",
+			DTypeKind::Int => "i",
+			DTypeKind::Uint => "u",
+		};
+		write!(f, "{}{}", kind, self.bits)
 	}
 }
