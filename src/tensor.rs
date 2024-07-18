@@ -3,7 +3,7 @@
 
 use crate::*;
 use std::fmt;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 pub struct Tensor {
 	pub shape: Rc<Shape>,

@@ -3,6 +3,8 @@
 
 use std::fmt;
 
+pub const MAX_DTYPE_ALIGN: usize = 8; // 64-bit
+
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct DType {
 	pub kind: DTypeKind,
@@ -14,8 +16,22 @@ impl DType {
 		self.kind == DTypeKind::Float
 	}
 
+	pub fn bits(&self) -> usize {
+		self.bits as usize
+	}
+
+	// NOTE: We don't support types with size 0.
+	// However, this function will return 0 if the type uses 1, 2 or 4 bits.
 	pub fn bytes(&self) -> usize {
 		(self.bits as usize) / 8
+	}
+
+	pub fn array_bytes(&self, elems: usize) -> Option<usize> {
+		debug_assert!(self.bits.is_power_of_two());
+		if self.bits < 8 {
+			unimplemented!("TODO: bitfields");
+		}
+		self.bytes().checked_mul(elems)
 	}
 
 	pub fn f32() -> Self {

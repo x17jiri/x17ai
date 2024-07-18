@@ -4,9 +4,14 @@
 use crate::*;
 use smallvec::{smallvec, SmallVec};
 
-pub struct UnaryOp {}
+pub struct UnaryExpr {}
 
-pub struct BinaryOp {}
+pub struct BinaryExpr {}
+
+pub struct ReduceExpr {
+	pub params: ReduceParams,
+	pub forward: ReduceForward,
+}
 
 pub struct ReduceParams {
 	pub batch_size: usize,
@@ -22,19 +27,27 @@ pub struct Expr {
 	pub inputs: SmallVec<[Rc<Expr>; 2]>,
 }
 
+pub struct InputExpr {
+	pub buffer: Rc<dyn Buffer>,
+	pub byte_offset: usize,
+}
+
 pub enum ExprKind {
-	Input(Rc<Tensor>),
-	Unary(UnaryOp),
-	Binary(BinaryOp),
-	Reduce(ReduceParams, ReduceForward),
-	// TODO - may need new kind for matmul because its inpus can't alias with output
+	Input(InputExpr),
+	Unary(UnaryExpr),
+	Binary(BinaryExpr),
+	Reduce(ReduceExpr),
+	// MatMul(MatMulExpr),
 }
 
 impl Expr {
-	pub fn new_input(tensor: Rc<Tensor>) -> Self {
+	pub fn input(tensor: Tensor) -> Self {
 		Self {
-			kind: ExprKind::Input(tensor),
-			shape: tensor.shape.clone(),
+			kind: ExprKind::Input(InputExpr {
+				buffer: tensor.buffer,
+				byte_offset: tensor.byte_offset,
+			}),
+			shape: tensor.shape,
 			dtype: tensor.dtype,
 			inputs: SmallVec::new(),
 		}

@@ -19,6 +19,7 @@ pub enum Error {
 	TooManyElems,
 }
 
+mod alloc;
 mod buffer;
 mod cpu;
 mod device;
@@ -29,6 +30,7 @@ mod rand;
 mod shape;
 mod tensor;
 
+use crate::alloc::*;
 use crate::buffer::*;
 use crate::cpu::*;
 use crate::device::*;

@@ -5,9 +5,7 @@ use crate::*;
 use std::fmt;
 
 pub trait Buffer {
-	fn new_tensor(&self, shape: Rc<Shape>, dtype: DType) -> Tensor;
-
-	fn owns(&self, tensor: &Tensor) -> bool;
+	fn capacity(&self) -> usize;
 
 	fn zeros_(&self, tensor: &Tensor);
 	fn randn_(&self, tensor: &Tensor);
