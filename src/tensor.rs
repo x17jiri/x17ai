@@ -5,6 +5,7 @@ use crate::*;
 use std::fmt;
 use std::rc::{Rc, Weak};
 
+#[derive(Clone)]
 pub struct Tensor {
 	pub shape: Rc<Shape>,
 	pub dtype: DType,
@@ -13,9 +14,14 @@ pub struct Tensor {
 }
 
 impl Tensor {
+	pub fn as_expr(&self) -> Rc<Expr> {
+		Expr::new_input(self.clone())
+	}
+
 	pub fn zeros_(&self) {
 		self.buffer.zeros_(self);
 	}
+
 	pub fn randn_(&self) {
 		self.buffer.randn_(self);
 	}

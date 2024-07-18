@@ -27,8 +27,11 @@ impl Device for CPUDevice {
 
 	fn new_buffer(self: Rc<Self>, size_bytes: usize, name: String) -> Rc<dyn Buffer> {
 		Rc::new(CPUBuffer {
+			base: BufferBase {
+				device: self.clone(),
+				capacity: size_bytes,
+			},
 			name,
-			device: self.clone(),
 			memory: vec![Cell::new(0); size_bytes].into_boxed_slice(),
 		})
 	}
@@ -59,13 +62,25 @@ impl<'a, T> Iterator for BatchTraversal<'a, T> {
 	}
 }
 
+#[repr(C)] // make sure the addr of base == the addr of the struct
 pub struct CPUBuffer {
+	base: BufferBase,
 	name: String,
-	device: Rc<CPUDevice>,
 	memory: Box<[Cell<u8>]>,
 }
 
 impl CPUBuffer {
+	fn device(&self) -> &CPUDevice {
+		let dev = self.base.device.as_ref();
+		let dev = dev as *const dyn Device;
+		let dev = dev as *const CPUDevice;
+		unsafe { &*dev }
+	}
+
+	fn is_on_my_device(&self, tensor: &Tensor) -> bool {
+		is_buf_owned_by_device(tensor.buffer.as_ref(), self.base.device.as_ref())
+	}
+
 	fn cast<T>(&self, byte_offset: usize, elems: usize) -> &[Cell<T>] {
 		let ptr = self.memory.as_ptr().wrapping_add(byte_offset);
 		let ptr = ptr as *const Cell<T>;
@@ -97,7 +112,7 @@ impl CPUBuffer {
 
 	fn randn_f32_(&self, byte_offset: usize, elems: usize) {
 		let data = self.cast::<f32>(byte_offset, elems);
-		let mut rng = self.device.rng.borrow_mut();
+		let mut rng = self.device().rng.borrow_mut();
 		for val in data {
 			val.set(rng.get_normal() as f32);
 		}
@@ -156,14 +171,8 @@ impl CPUBuffer {
 }
 
 impl Buffer for CPUBuffer {
-	fn owns(&self, tensor: &Tensor) -> bool {
-		let buf = tensor.buffer.as_ref() as *const dyn Buffer as *const u8;
-		let slf = self as *const dyn Buffer as *const u8;
-		buf == slf
-	}
-
 	fn zeros_(&self, tensor: &Tensor) {
-		debug_assert!(self.owns(tensor));
+		debug_assert!(self.is_on_my_device(tensor));
 
 		match tensor.dtype {
 			DType { kind: DTypeKind::Float, bits: 32 } => {
@@ -174,7 +183,7 @@ impl Buffer for CPUBuffer {
 	}
 
 	fn randn_(&self, tensor: &Tensor) {
-		debug_assert!(self.owns(tensor));
+		debug_assert!(self.is_on_my_device(tensor));
 
 		match tensor.dtype {
 			DType { kind: DTypeKind::Float, bits: 32 } => {
@@ -185,8 +194,8 @@ impl Buffer for CPUBuffer {
 	}
 
 	fn rms_norm(&self, input: &Tensor, output: &Tensor, params: &ReduceParams) {
-		debug_assert!(self.owns(input));
-		debug_assert!(self.owns(output));
+		debug_assert!(self.is_on_my_device(input));
+		debug_assert!(self.is_on_my_device(output));
 		debug_assert!(input.shape == output.shape);
 		debug_assert!(input.dtype == output.dtype);
 		let (batch_dims, input_dim) = input.shape.split(-1);
