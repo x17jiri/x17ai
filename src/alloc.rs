@@ -4,7 +4,7 @@
 use crate::*;
 
 pub trait Allocator {
-	fn new_tensor(&mut self, dtype: DType, shape: Rc<Shape>) -> Tensor;
+	fn new_tensor(&mut self, shape: Rc<Shape>, dtype: DType) -> Tensor;
 }
 
 pub struct BumpAllocator {
@@ -21,7 +21,7 @@ impl BumpAllocator {
 }
 
 impl Allocator for BumpAllocator {
-	fn new_tensor(&mut self, dtype: DType, shape: Rc<Shape>) -> Tensor {
+	fn new_tensor(&mut self, shape: Rc<Shape>, dtype: DType) -> Tensor {
 		const MAX_BYTES: usize = (isize::MAX as usize) & !(MAX_DTYPE_ALIGN - 1);
 		let bytes = match dtype.array_bytes(shape.elems()) {
 			Some(b) if b <= MAX_BYTES => b,
@@ -43,5 +43,43 @@ impl Allocator for BumpAllocator {
 			buffer: self.buffer.clone(),
 			byte_offset,
 		}
+	}
+}
+
+pub struct ScopedTensor<'a> {
+	pub tensor: Tensor,
+	pub byte_size: usize,
+	pub allocator: &'a ScopedAllocator,
+}
+
+impl<'a> ScopedTensor<'a> {
+	pub fn get(&self) -> &Tensor {
+		&self.tensor
+	}
+}
+
+impl<'a> Drop for ScopedTensor<'a> {
+	fn drop(&mut self) {
+		self.allocator.bump_allocator.offset -= self.byte_size;
+		assert!(self.allocator.bump_allocator.offset == self.tensor.byte_offset);
+	}
+}
+
+pub struct ScopedAllocator {
+	pub bump_allocator: BumpAllocator,
+}
+
+impl ScopedAllocator {
+	pub fn new(buffer: Rc<dyn Buffer>) -> Self {
+		Self {
+			bump_allocator: BumpAllocator::new(buffer),
+		}
+	}
+
+	pub fn new_tensor(&self, shape: Rc<Shape>, dtype: DType) -> ScopedTensor {
+		let offset = self.bump_allocator.offset;
+		let tensor = self.bump_allocator.new_tensor(shape, dtype);
+		let byte_size = self.bump_allocator.offset - offset;
+		ScopedTensor { tensor, byte_size, allocator: self }
 	}
 }

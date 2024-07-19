@@ -30,6 +30,10 @@ impl Shape {
 		Self::from_iter(dims.iter().copied())
 	}
 
+	pub fn reshape(&self, from_dim: isize, replacement: &[usize]) -> Rc<Shape> {
+		// TODO
+	}
+
 	pub fn split(&self, i: isize) -> (&[usize], &[usize]) {
 		let ndim = self.ndim();
 		let i = if i < 0 { (ndim as isize) + i } else { i };

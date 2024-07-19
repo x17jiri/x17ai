@@ -83,6 +83,8 @@ pub fn softmax(expr: Rc<Expr>) -> Rc<Expr> {
 
 pub fn m_dot_v(m: Rc<Expr>, v: Rc<Expr>) -> Rc<Expr> {
 	// TODO
+	// NOTE: batch of matrix * vector multiplications
+	// can be done with a single matrix-matrix multiplication
 }
 
 pub fn m_dot_m(m1: Rc<Expr>, m2: Rc<Expr>) -> Rc<Expr> {
@@ -97,7 +99,7 @@ pub fn m_dot_mt(m1: Rc<Expr>, m2: Rc<Expr>) -> Rc<Expr> {
 	// TODO
 }
 
-pub fn silu_glu(a: Rc<Expr>) -> Rc<Expr> {
+pub fn swiglu(a: Rc<Expr>) -> Rc<Expr> {
 	// TODO
 }
 

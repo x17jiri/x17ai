@@ -26,6 +26,15 @@ impl Tensor {
 		self.buffer.randn_(self);
 	}
 }
+
+pub fn gemm(alpha: f64, a: &Tensor, b: &Tensor, beta: f64, c: &Tensor) {
+	// TODO
+}
+
+pub fn rms_norm(a: &Tensor, out: &Tensor) {
+	// TODO
+}
+
 /*
 pub struct PrepMM {
 	pub batch_size: usize,
