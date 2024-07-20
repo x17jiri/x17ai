@@ -191,31 +191,40 @@ impl Attention {
 
 	// input is of the form: [..., inputs, embeding]
 	pub fn forward(&self, input: Rc<Expr>) -> Rc<Expr> {
-		// input: [batch, inputs, embedings]
+		// explanation of dimension names:
+		// *: batch (can be 0 or more dimensions)
+		// i: input sequence
+		// h: head
+		// q, k, v: query, key, value
+
+		// input: [*, i, embedings]
 		let input = self.rms_norm.forward(input);
 		let seq_len = input.shape[-2];
 
-		// k: [batch, seq, qk_size]
+		// k: [*, i, k_size]
 		let k = self.k.forward(input);
 
-		// q: [batch, seq, heads * qk_size]
+		// q: [*, i, heads * q_size]
+		// -> [*, i, heads, q_size]
+		// -> [*, heads, i, q_size]
 		let q = self.q.forward(input);
-		// q: [batch, seq * heads, qk_size]
-		let q = q.reshape(-2, &[seq_len * self.heads, self.qk_size]);
-		// q: [batch, qk_size, seq * heads]
-		let q = q.T;
+		let q = q.reshape_last_n(1, &[self.heads, self.qk_size]);
+		let q = q.transpose(-3, -2);
 
 		// scores: [batch, seq, heads * seq]
 		let scores = m_dot_m(k, q);
+		// scores: [batch, seq, heads, seq]
+		let scores = scores.reshape(-1, &[heads, seq]);
 
-		// v: [batch, seq, heads * v_size]
+		// v: [*, i, h * v]
+		// -> [*, i, h, v]
+		// -> [*, h, i, v]
 		let v = self.v.forward(input);
-		// v: [batch, seq * heads, v_size]
-		let v = v.reshape(-2, &[seq_len * self.heads, self.v_size]);
-		// v: [batch, v_size, seq * heads]
-		let v = v.T;
+		let v = v.reshape_last_n(1, &[self.heads, self.v_size]);
+		let v = v.transpose(-3, -2);
 
-		let w = m_dot_v(v, scores);
+		// w: [*, seq, heads * v_size, v_size]
+		let w = m_dot_m(scores, v);
 
 		//
 		//
