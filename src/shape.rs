@@ -37,6 +37,7 @@ impl Shape {
 		})
 	}
 
+	// Converts a negative dimension number to a positive one
 	pub fn dim_to_usize(&self, dim: isize) -> Option<usize> {
 		let dim = if dim >= 0 { dim as usize } else { self.__ndim - ((-dim) as usize) };
 		if likely(dim < self.__ndim) { Some(dim) } else { None }
@@ -55,6 +56,35 @@ impl Shape {
 		}
 
 		self.__elems = self.__dims.iter().product();
+	}
+
+	// Prepends n dimensions of size 1 to the shape
+	// example:
+	//     shape = [2, 3]
+	//     shape.prepend_dims(2)
+	//     shape = [1, 1, 2, 3]
+	pub fn prepend_dims(&mut self, n: usize) {
+		assert!(self.__ndim + n <= MAX_DIMS);
+		self.__ndim += n;
+		for i in (n..self.__ndim).rev() {
+			self.__dims[i] = self.__dims[i - n];
+		}
+		for i in 0..n {
+			self.__dims[i] = 1;
+		}
+	}
+
+	// Merges the first n dimensions into a single dimension
+	pub fn merge_dims(&mut self, n: usize) {
+		assert!(n > 0);
+		assert!(n <= self.__ndim);
+		assert!(self.__ndim > 0);
+
+		self.__dims[0] = self.__dims[..n].iter().product();
+		self.__ndim = self.__ndim - n + 1;
+		for i in 1..self.__ndim {
+			self.__dims[i] = self.__dims[i + n];
+		}
 	}
 
 	pub fn swap(&mut self, dim1: usize, dim2: usize) {

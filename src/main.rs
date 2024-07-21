@@ -42,31 +42,8 @@ use crate::shape::*;
 use crate::tensor::*;
 use std::rc::Rc;
 
-pub struct Context {
-	pub alloc: ScopedAllocator,
-}
-
-impl Context {
-	pub fn new(alloc: ScopedAllocator) -> Context {
-		Context { alloc }
-	}
-
-	pub fn scoped_tensor(&self, shape: Rc<Shape>, dtype: DType) -> ScopedTensor {
-		self.alloc.new_tensor(shape, dtype)
-	}
-}
-
 pub trait Module {
-	fn output_info(&self, input: &Tensor) -> (Rc<Shape>, DType);
-
-	fn forward_(&self, input: &Tensor, output: &Tensor, _ctx: &Context);
-
-	fn forward(&self, input: &Tensor, ctx: &Context) -> ScopedTensor {
-		let (shape, dtype) = self.output_info(input);
-		let output = ctx.scoped_tensor(shape, dtype);
-		self.forward_(input, output.get(), ctx);
-		output
-	}
+	fn forward(&self, input: &Tensor) -> Tensor;
 }
 
 // Linear layer transforming inputs to outputs
@@ -91,31 +68,15 @@ impl Linear {
 }
 
 impl Module for Linear {
-	fn output_info(&self, input: &Tensor) -> (Rc<Shape>, DType) {
-		let shape = input.shape.reshape(-1, &[self.outputs]);
-		(shape, self.dtype)
-	}
+	fn forward(&self, input: &Tensor) -> Tensor {
+		let input = input.as_ndim(2);
 
-	fn forward_(&self, input: &Tensor, output: &Tensor, _ctx: &Context) {
-		gemm(self.scale, &self.weights, input, 0.0, &output);
-	}
-}
+		let mut output_shape = input.shape.clone();
+		output_shape.replace_last_n(1, &[self.outputs]);
 
-struct RMSNorm;
-
-impl RMSNorm {
-	pub fn new() -> RMSNorm {
-		RMSNorm
-	}
-}
-
-impl Module for RMSNorm {
-	fn output_info(&self, input: &Tensor) -> (Rc<Shape>, DType) {
-		(input.shape.clone(), input.dtype)
-	}
-
-	fn forward_(&self, input: &Tensor, output: &Tensor, _ctx: &Context) {
-		rms_norm(input, output);
+		let output = input.new_tensor(output_shape, self.dtype);
+		gemm(self.scale, &self.weights, &input, 0.0, &output);
+		output
 	}
 }
 
@@ -155,9 +116,11 @@ impl Attention {
 			v,
 		}
 	}
+}
 
+impl Module for Attention {
 	// input is of the form: [..., inputs, embeding]
-	pub fn forward(&self, input: &Tensor, ctx: &Context) -> Tensor {
+	fn forward(&self, input: &Tensor) -> Tensor {
 		// explanation of dimension names:
 		// *: batch (can be any number of dimensions >= 0)
 		// i: input sequence
@@ -170,30 +133,29 @@ impl Attention {
 		// k: [*, i, k]
 		// -> [*, 1, i, k]
 		// -> [*, h, i, k]
-		let k = self.k.forward(input, ctx);
-		let k = k.get();
+		let k = self.k.forward(input);
 		let k = k.reshape_last_n(2, &[1, seq_len, self.qk_size]);
 		let k = k.broadcast(-3, self.heads);
 
 		// q: [*, i, h * q]
 		// -> [*, i, h, q]
 		// -> [*, h, i, q]
-		let q = self.q.forward(input, ctx);
-		let q = q.get();
+		// -> [*, h, q, i]
+		let q = self.q.forward(input);
 		let q = q.reshape_last_n(1, &[self.heads, self.qk_size]);
 		let q = q.transpose(-3, -2);
+		let q = q.transpose(-2, -1);
 
 		// v: [*, i, h * v]
 		// -> [*, i, h, v]
 		// -> [*, h, i, v]
-		let v = self.v.forward(input, ctx);
-		let v = v.get();
+		let v = self.v.forward(input);
 		let v = v.reshape_last_n(1, &[self.heads, self.v_size]);
 		let w_shape = v.shape.clone(); // [*, i, h, v]
 		let v = v.transpose(-3, -2);
 
 		// scores: [*, h, i, i]
-		let scores = m_dot_m(k, q);
+		let scores = matmul(k, q);
 
 		// w = reweighted v
 		// w: [*, h, i, v]

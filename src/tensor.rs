@@ -16,6 +16,11 @@ pub struct Tensor {
 }
 
 impl Tensor {
+	// Allocate a new tensor on the same device
+	pub fn new_tensor(&self, shape: Shape, dtype: DType) -> Tensor {
+		// TODO
+	}
+
 	pub fn zeros_(&self) {
 		self.buffer.zeros_(self);
 	}
@@ -32,6 +37,35 @@ impl Tensor {
 		new_shape.replace_last_n(n, replacement);
 		if new_shape.elems() != self.shape.elems() {
 			panic!("reshape_last_n() must preserve the number of elements");
+		}
+		Tensor {
+			shape: new_shape,
+			strides: self.strides.clone(),
+			dtype: self.dtype,
+			buffer: self.buffer.clone(),
+			byte_offset: self.byte_offset,
+		}
+	}
+
+	// Reshape the tensor to have the new number of dimensions
+	//
+	// if current ndim <= new_ndim, prepend 1s to the shape to make it the required size
+	//
+	// if current ndim > new_ndim:
+	// - the last (new_ndim - 1) dimensions are unchanged
+	// - the dimensions before that are combined into a single big dimension
+	//
+	// Limitation: Tensors with strides are not supported at the moment
+	pub fn as_ndim(&self, new_ndim: usize) -> Tensor {
+		if !self.strides.is_empty() {
+			todo!("as_ndim() for strided tensors");
+		}
+		let ndim = self.shape.ndim();
+		let mut new_shape = self.shape.clone();
+		if ndim <= new_ndim {
+			new_shape.prepend_dims(new_ndim - ndim);
+		} else {
+			new_shape.merge_dims(ndim - new_ndim + 1);
 		}
 		Tensor {
 			shape: new_shape,
@@ -130,6 +164,11 @@ impl Tensor {
 	}
 }
 
+pub fn matmul(m1: &Tensor, m2: &Tensor) -> Tensor {
+	// TODO
+}
+
+// c = alpha * (a dot b) + beta * c
 pub fn gemm(alpha: f64, a: &Tensor, b: &Tensor, beta: f64, c: &Tensor) {
 	// TODO
 }
