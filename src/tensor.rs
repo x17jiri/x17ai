@@ -4,20 +4,18 @@
 use crate::*;
 use std::fmt;
 use std::rc::{Rc, Weak};
+use thin_vec::ThinVec;
 
 #[derive(Clone)]
 pub struct Tensor {
-	pub shape: Rc<Shape>,
+	pub shape: Shape,
+	pub strides: ThinVec<usize>,
 	pub dtype: DType,
 	pub buffer: Rc<dyn Buffer>,
 	pub byte_offset: usize,
 }
 
 impl Tensor {
-	pub fn as_expr(&self) -> Rc<Expr> {
-		Expr::new_input(self.clone())
-	}
-
 	pub fn zeros_(&self) {
 		self.buffer.zeros_(self);
 	}
@@ -27,15 +25,108 @@ impl Tensor {
 	}
 
 	pub fn reshape_last_n(&self, n: usize, replacement: &[usize]) -> Tensor {
-		// TODO
+		if !self.strides.is_empty() {
+			todo!("reshape_last_n() for strided tensors");
+		}
+		let mut new_shape = self.shape.clone();
+		new_shape.replace_last_n(n, replacement);
+		if new_shape.elems() != self.shape.elems() {
+			panic!("reshape_last_n() must preserve the number of elements");
+		}
+		Tensor {
+			shape: new_shape,
+			strides: self.strides.clone(),
+			dtype: self.dtype,
+			buffer: self.buffer.clone(),
+			byte_offset: self.byte_offset,
+		}
+	}
+
+	fn __default_strides(&self) -> ThinVec<usize> {
+		let mut strides = ThinVec::new();
+		strides.resize(self.shape.ndim(), 0);
+		let mut elems = 1;
+		let stride_iter = strides.iter_mut().rev();
+		let dim_iter = self.shape.iter().rev();
+		for (stride, dim) in stride_iter.zip(dim_iter) {
+			*stride = elems;
+			elems *= *dim;
+		}
+		strides
+	}
+
+	fn __are_default_strides(&self, strides: &[usize]) -> bool {
+		let mut elems = 1;
+		let stride_iter = strides.iter().rev();
+		let dim_iter = self.shape.iter().rev();
+		for (stride, dim) in stride_iter.zip(dim_iter) {
+			if *stride != elems {
+				return false;
+			}
+			elems *= *dim;
+		}
+		true
 	}
 
 	pub fn transpose(&self, dim1: isize, dim2: isize) -> Tensor {
-		// TODO
+		let dim1 = self.shape.dim_to_usize(dim1).unwrap();
+		let dim2 = self.shape.dim_to_usize(dim2).unwrap();
+
+		let mut new_shape = self.shape.clone();
+		new_shape.swap(dim1, dim2);
+
+		let new_strides = if self.strides.is_empty() {
+			// create default strides
+			let mut s = self.__default_strides();
+
+			// swap
+			s.swap(dim1, dim2);
+
+			s
+		} else {
+			// copy strides
+			let mut s = self.strides.clone();
+			// swap
+			s.swap(dim1, dim2);
+
+			// if the strides are equal to default, we can get rid of them
+			if self.__are_default_strides(&new_strides) {
+				s = ThinVec::new();
+			}
+
+			s
+		};
+
+		Tensor {
+			shape: new_shape,
+			strides: new_strides,
+			dtype: self.dtype,
+			buffer: self.buffer.clone(),
+			byte_offset: self.byte_offset,
+		}
 	}
 
 	pub fn broadcast(&self, dim: isize, size: usize) -> Tensor {
-		// TODO
+		let dim = self.shape.dim_to_usize(dim).unwrap();
+
+		if self.shape.__dims[dim] != 1 {
+			panic!("broadcasting dimension must have size 1");
+		}
+
+		let mut new_shape = self.shape.clone();
+		new_shape.__dims[dim] = size;
+
+		let mut new_strides =
+			if self.strides.is_empty() { self.__default_strides() } else { self.strides.clone() };
+		new_strides[dim] = 0;
+
+		Tensor {
+			shape: new_shape,
+			strides: new_strides,
+			dtype: self.dtype,
+			buffer: self.buffer.clone(),
+			byte_offset: self.byte_offset,
+		}
 	}
 }
 
@@ -140,7 +231,7 @@ impl fmt::Display for Tensor {
 			1 => fmt_1d(self, f, 0)?,
 			2 => fmt_2d(self, f, 0)?,
 			_ => {
-				unimplemented!("Tensor with {} dimensions", ndim);
+				todo!("Tensor with {} dimensions", ndim);
 			},
 		};
 		write!(f, ")")

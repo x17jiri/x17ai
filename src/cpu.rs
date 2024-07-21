@@ -138,7 +138,7 @@ impl CPUBuffer {
 	/*
 		fn mm_f32(&self, a: &Tensor, b: &Tensor, c: &Tensor, prep: PrepMM) {
 			if prep.a_transpose || prep.b_transpose {
-				unimplemented!("TODO");
+				todo!("TODO");
 			}
 
 			let a = self.traversal::<f32>(a.byte_offset, prep.batch_size, prep.a_rows * prep.a_cols);
@@ -178,7 +178,7 @@ impl Buffer for CPUBuffer {
 			DType { kind: DTypeKind::Float, bits: 32 } => {
 				self.zeros_f32_(tensor.byte_offset, tensor.shape.elems())
 			},
-			_ => unimplemented!(),
+			_ => todo!(),
 		}
 	}
 
@@ -189,7 +189,7 @@ impl Buffer for CPUBuffer {
 			DType { kind: DTypeKind::Float, bits: 32 } => {
 				self.randn_f32_(tensor.byte_offset, tensor.shape.elems())
 			},
-			_ => unimplemented!(),
+			_ => todo!(),
 		}
 	}
 
@@ -209,7 +209,7 @@ impl Buffer for CPUBuffer {
 				params.batch_size,
 				params.input_size,
 			),
-			_ => unimplemented!(),
+			_ => todo!(),
 		}
 	}
 	/*
@@ -221,7 +221,7 @@ impl Buffer for CPUBuffer {
 
 			match prep.dtype {
 				DType { kind: DTypeKind::Float, bits: 32 } => self.mm_f32(a, b, c, prep),
-				_ => unimplemented!(),
+				_ => todo!(),
 			}
 		}
 	*/
@@ -234,7 +234,7 @@ impl Buffer for CPUBuffer {
 	) -> fmt::Result {
 		match dtype {
 			DType { kind: DTypeKind::Float, bits: 32 } => self.format_f32(byte_offset, f, count),
-			_ => unimplemented!(),
+			_ => todo!(),
 		}
 	}
 }

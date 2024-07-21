@@ -1,175 +1,76 @@
 // Copyright 2024 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
+use crate::*;
 use core::fmt;
 use std::intrinsics::{likely, unlikely};
 use std::rc::Rc;
 
+pub const MAX_DIMS: usize = 5;
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct Shape {
-	// TODO - could use some sort of small vec optimization
-	__dims: Box<[usize]>,
-	__elems: usize,
-}
-
-pub enum BroadcastType {
-	Error,
-	NoBroadcast,
-	Broadcast(bool, bool, Rc<Shape>),
+	pub __ndim: usize,
+	pub __dims: [usize; MAX_DIMS],
+	pub __elems: usize,
 }
 
 impl Shape {
-	pub fn new_scalar() -> Rc<Self> {
-		Rc::new(Self {
-			__dims: Vec::new().into_boxed_slice(),
+	pub fn new_scalar() -> Self {
+		Self {
+			__ndim: 0,
+			__dims: [1; MAX_DIMS],
 			__elems: 1,
-		})
+		}
 	}
 
 	pub fn new(dims: &[usize]) -> Rc<Self> {
-		Self::from_iter(dims.iter().copied())
-	}
-
-	pub fn reshape(&self, from_dim: isize, replacement: &[usize]) -> Rc<Shape> {
-		// TODO
-	}
-
-	pub fn split(&self, i: isize) -> (&[usize], &[usize]) {
-		let ndim = self.ndim();
-		let i = if i < 0 { (ndim as isize) + i } else { i };
-		let i = i as usize;
-		if i > ndim {
-			panic!("Invalid dimension");
-		}
-		(&self.__dims[..i], &self.__dims[i..])
-	}
-
-	pub fn from_iter<'a, D: Iterator<Item = usize> + ExactSizeIterator<Item = usize>>(
-		dims: D,
-	) -> Rc<Self> {
-		let ndim = dims.len();
-		let mut elems: usize = 1;
-		let mut vec = Vec::<usize>::with_capacity(ndim);
-		for (i, dim) in dims.enumerate() {
-			unsafe {
-				let p = vec.as_mut_ptr();
-				let p = p.add(i);
-				std::ptr::write(p, dim);
-			}
-
-			if let Some(e) = elems.checked_mul(dim) {
-				elems = e;
-			} else {
-				panic!("Too many elements");
-			}
-		}
-		unsafe {
-			vec.set_len(ndim);
+		assert!(dims.len() <= MAX_DIMS);
+		let mut __dims = [1; MAX_DIMS];
+		for (o, i) in __dims.iter_mut().zip(dims.iter()) {
+			*o = *i;
 		}
 		Rc::new(Self {
-			__dims: vec.into_boxed_slice(),
-			__elems: elems,
+			__ndim: dims.len(),
+			__dims,
+			__elems: dims.iter().product(),
 		})
 	}
 
-	pub fn new_transposed(&self, x1: usize, x2: usize) -> Rc<Self> {
-		let mut new_dims = self.__dims.clone();
-		new_dims.swap(x1, x2);
-		Rc::new(Self { __dims: new_dims, __elems: self.__elems })
+	pub fn dim_to_usize(&self, dim: isize) -> Option<usize> {
+		let dim = if dim >= 0 { dim as usize } else { self.__ndim - ((-dim) as usize) };
+		if likely(dim < self.__ndim) { Some(dim) } else { None }
 	}
 
-	pub fn new_reduced(&self, dims_to_reduce: &[isize]) -> Rc<Self> {
-		let mut new_dims = self.__dims.clone();
-		let ndim = new_dims.len();
-		for dim in dims_to_reduce {
-			let dim = if *dim >= 0 {
-				*dim as usize
-			} else {
-				ndim.wrapping_sub(dim.wrapping_neg() as usize)
-			};
-			if unlikely(dim >= ndim) {
-				panic!("Invalid dimension");
-			}
-			new_dims[dim] = 1;
+	pub fn replace_last_n(&mut self, n: usize, replacement: &[usize]) {
+		let start = self.__ndim.saturating_sub(n);
+		self.__ndim = start + replacement.len();
+		assert!(self.__ndim <= MAX_DIMS);
+
+		// extend replacement with 1s
+		let t = replacement.iter().chain(std::iter::repeat(&1));
+
+		for (o, i) in self.__dims[start..].iter_mut().zip(t) {
+			*o = *i;
 		}
-		let elems = new_dims.iter().product();
-		Rc::new(Self { __dims: new_dims, __elems: elems })
+
+		self.__elems = self.__dims.iter().product();
+	}
+
+	pub fn swap(&mut self, dim1: usize, dim2: usize) {
+		self.__dims.swap(dim1, dim2);
 	}
 
 	pub fn ndim(&self) -> usize {
-		self.__dims.len()
-	}
-
-	pub fn dims(&self) -> &[usize] {
-		&self.__dims
-	}
-
-	fn __fix_dim_index(&self, i: isize) -> Option<usize> {
-		let ndim = self.ndim();
-		let i = if i >= 0 { i as usize } else { ndim - ((-i) as usize) };
-		if unlikely(i >= ndim) { None } else { Some(i) }
-	}
-
-	pub fn dim(&self, i: isize) -> usize {
-		if let Some(i) = self.__fix_dim_index(i) { self.__dims[i] } else { 1 }
+		self.__ndim
 	}
 
 	pub fn elems(&self) -> usize {
 		self.__elems
 	}
 
-	pub fn broadcast_type(&self, other: &Self) -> BroadcastType {
-		if self.__dims == other.__dims {
-			return BroadcastType::NoBroadcast;
-		}
-		let a_ndim = self.ndim();
-		let b_ndim = other.ndim();
-		let a_dims = &self.__dims;
-		let b_dims = &other.__dims;
-
-		let ndim = a_ndim.max(b_ndim);
-		let a_prefix = ndim - a_ndim;
-		let b_prefix = ndim - b_ndim;
-
-		let mut dims = vec![0; ndim];
-		let mut elems: usize = 1;
-		let mut a_broadcast = false;
-		let mut b_broadcast = false;
-
-		for i in 0..ndim {
-			let a_dim = if i < a_prefix { 1 } else { a_dims[i - a_prefix] };
-
-			let b_dim = if i < b_prefix { 1 } else { b_dims[i - b_prefix] };
-
-			if a_dim != b_dim {
-				if a_dim == 1 {
-					a_broadcast = true;
-					dims[i] = b_dim;
-				} else if b_dim == 1 {
-					b_broadcast = true;
-					dims[i] = a_dim;
-				} else {
-					return BroadcastType::Error;
-				}
-			} else {
-				dims[i] = a_dim;
-			}
-
-			if let Some(e) = elems.checked_mul(dims[i]) {
-				elems = e;
-			} else {
-				return BroadcastType::Error;
-			}
-		}
-
-		BroadcastType::Broadcast(
-			a_broadcast,
-			b_broadcast,
-			Rc::new(Self {
-				__dims: dims.into_boxed_slice(),
-				__elems: elems,
-			}),
-		)
+	pub fn iter(&self) -> std::slice::Iter<usize> {
+		self.__dims.iter()
 	}
 }
 
@@ -177,7 +78,57 @@ impl std::ops::Index<isize> for Shape {
 	type Output = usize;
 
 	fn index(&self, i: isize) -> &usize {
-		if let Some(i) = self.__fix_dim_index(i) { &self.__dims[i] } else { &1 }
+		let ndim = self.ndim();
+		if let i = self.dim_to_usize(i) {
+			&self.__dims[i]
+		} else {
+			cold_path();
+			&1
+		}
+	}
+}
+
+impl std::ops::IndexMut<isize> for Shape {
+	fn index_mut(&mut self, i: isize) -> &mut usize {
+		let ndim = self.ndim();
+		let i = self.dim_to_usize(i).unwrap();
+		&mut self.__dims[i]
+	}
+}
+
+impl std::ops::Index<std::ops::Range<isize>> for Shape {
+	type Output = [usize];
+
+	fn index(&self, r: std::ops::Range<isize>) -> &[usize] {
+		let start = self.dim_to_usize(r.start).unwrap();
+		let end = self.dim_to_usize(r.end).unwrap();
+		&self.__dims[start..end]
+	}
+}
+
+impl std::ops::Index<std::ops::RangeTo<isize>> for Shape {
+	type Output = [usize];
+
+	fn index(&self, r: std::ops::RangeTo<isize>) -> &[usize] {
+		let end = self.dim_to_usize(r.end).unwrap();
+		&self.__dims[..end]
+	}
+}
+
+impl std::ops::Index<std::ops::RangeFrom<isize>> for Shape {
+	type Output = [usize];
+
+	fn index(&self, r: std::ops::RangeFrom<isize>) -> &[usize] {
+		let start = self.dim_to_usize(r.start).unwrap();
+		&self.__dims[start..]
+	}
+}
+
+impl std::ops::Index<std::ops::RangeFull> for Shape {
+	type Output = [usize];
+
+	fn index(&self, _: std::ops::RangeFull) -> &[usize] {
+		&self.__dims[..self.ndim()]
 	}
 }
 

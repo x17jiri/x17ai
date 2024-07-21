@@ -29,7 +29,7 @@ impl DType {
 	pub fn array_bytes(&self, elems: usize) -> Option<usize> {
 		debug_assert!(self.bits.is_power_of_two());
 		if self.bits < 8 {
-			unimplemented!("TODO: bitfields");
+			todo!("bitfields");
 		}
 		self.bytes().checked_mul(elems)
 	}

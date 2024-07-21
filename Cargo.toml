@@ -14,3 +14,4 @@ smallvec = { version = "1.7.0", features = ["union"] }
 tempfile = "3.2.0"
 libloading = "0.7"
 bit-set = "0.6.0"
+thin-vec = "0.2.13"
