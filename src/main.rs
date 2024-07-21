@@ -120,149 +120,128 @@ impl Module for RMSNorm {
 }
 
 struct Attention {
-	// number of heads
+	pub input_features: usize,
 	pub heads: usize,
-
-	// length of input sequence
-	pub inputs: usize,
-
-	// size of embeding
-	pub embeding: usize,
-
-	// size of q and k
 	pub qk_size: usize,
-
-	// size of v
 	pub v_size: usize,
+	pub dtype: DType,
 
-	pub rms_norm: RMSNorm,
-	pub q: Linear,
 	pub k: Linear,
+	pub q: Linear,
 	pub v: Linear,
-	pub mix: Linear,
 }
 
 impl Attention {
 	pub fn new(
+		input_features: usize,
 		heads: usize,
-		inputs: usize,
-		embeding: usize,
 		qk_size: usize,
 		v_size: usize,
 		dtype: DType,
 		alloc: &mut dyn Allocator,
 	) -> Attention {
-		let rms_norm = RMSNorm::new();
-		let q = Linear::new(embeding, heads * qk_size, dtype, alloc);
-		let k = Linear::new(embeding, heads * qk_size, dtype, alloc);
-		let v = Linear::new(embeding, heads * v_size, dtype, alloc);
-		let mix = Linear::new(heads * v_size, 2 * embeding, dtype, alloc);
+		let k = Linear::new(input_features, qk_size, dtype, alloc);
+		let q = Linear::new(input_features, heads * qk_size, dtype, alloc);
+		let v = Linear::new(input_features, heads * v_size, dtype, alloc);
 
 		Attention {
+			input_features,
 			heads,
-			inputs,
-			embeding,
 			qk_size,
 			v_size,
-			rms_norm,
-			q,
+			dtype,
 			k,
+			q,
 			v,
-			mix,
 		}
 	}
 
-	//
-	// q: [batch, inputs, heads, qk_size]
-	// q: [batch, inputs * heads, qk_size]
-	// k: [batch, inputs, qk_size]
-	//
-	// scores = q * k.T
-	// scores: [batch, inputs, heads, inputs]
-	// scores: [batch, inputs * heads, inputs]
-	//
-	//
-	//
-	//
-	//
-	//
-	//
-	//
-
 	// input is of the form: [..., inputs, embeding]
-	pub fn forward(&self, input: Rc<Expr>) -> Rc<Expr> {
+	pub fn forward(&self, input: &Tensor, ctx: &Context) -> Tensor {
 		// explanation of dimension names:
-		// *: batch (can be 0 or more dimensions)
+		// *: batch (can be any number of dimensions >= 0)
 		// i: input sequence
 		// h: head
-		// q, k, v: query, key, value
+		// q, k, v: key, query, value
 
-		// input: [*, i, embedings]
-		let input = self.rms_norm.forward(input);
+		// input: [*, i, input_features]
 		let seq_len = input.shape[-2];
 
-		// k: [*, i, k_size]
-		let k = self.k.forward(input);
+		// k: [*, i, k]
+		// -> [*, 1, i, k]
+		// -> [*, h, i, k]
+		let k = self.k.forward(input, ctx);
+		let k = k.get();
+		let k = k.reshape_last_n(2, &[1, seq_len, self.qk_size]);
+		let k = k.broadcast(-3, self.heads);
 
-		// q: [*, i, heads * q_size]
-		// -> [*, i, heads, q_size]
-		// -> [*, heads, i, q_size]
-		let q = self.q.forward(input);
+		// q: [*, i, h * q]
+		// -> [*, i, h, q]
+		// -> [*, h, i, q]
+		let q = self.q.forward(input, ctx);
+		let q = q.get();
 		let q = q.reshape_last_n(1, &[self.heads, self.qk_size]);
 		let q = q.transpose(-3, -2);
-
-		// scores: [batch, seq, heads * seq]
-		let scores = m_dot_m(k, q);
-		// scores: [batch, seq, heads, seq]
-		let scores = scores.reshape(-1, &[heads, seq]);
 
 		// v: [*, i, h * v]
 		// -> [*, i, h, v]
 		// -> [*, h, i, v]
-		let v = self.v.forward(input);
+		let v = self.v.forward(input, ctx);
+		let v = v.get();
 		let v = v.reshape_last_n(1, &[self.heads, self.v_size]);
+		let w_shape = v.shape.clone(); // [*, i, h, v]
 		let v = v.transpose(-3, -2);
 
-		// w: [*, seq, heads * v_size, v_size]
-		let w = m_dot_m(scores, v);
+		// scores: [*, h, i, i]
+		let scores = m_dot_m(k, q);
 
-		//
-		//
-		//
-		//
-		//
-		//
-		//
-		//
+		// w = reweighted v
+		// w: [*, h, i, v]
+		// -> [*, i, h, v]
+		// -> [*, i, w = h * v]
 
-		// q: [batch, inputs, heads, qk_size]
-		let q = self.q.forward(input);
-		// q: [batch, heads, inputs, qk_size]
-		let q = q.transpose(1, 2);
+		let w = ctx.scoped_tensor(w_shape, v.dtype); // [*, i, h, v]
+		let w = w.get();
+		let w = w.transpose(-3, -2); // [*, h, i, v]
 
-		// k: [batch, inputs, qk_size]
-		let k = self.k.forward(input);
-		// k: [batch, heads, inputs, qk_size]
-		let k = k.transpose(1, 2);
+		m_dot_m_(scores, v, w);
+		let w = w.transpose(-3, -2); // [*, i, h, v]
+		let w = w.reshape_last_n(2, &[self.heads * self.v_size]);
 
-		// scores: [batch, inputs, inputs, heads]
-		let scores = m_dot_mt(q, k);
-		let scores = attention_mask(scores);
-		let scores = softmax(scores);
+		w
+	}
+}
 
-		// v: [batch, inputs, heads,  v_size]
-		let v = self.v.forward(input);
-		let v = v.reshape(-1, &[self.heads, self.v_size]);
+struct Transformer {
+	pub attention: Attention,
+	pub feed_forward: Linear,
+}
 
-		// w: [batch, inputs, v_size * heads]
-		let w = m_dot_m(scores, v);
-		let w = w.reshape(-2, &[self.heads * self.v_size]);
+impl Transformer {
+	pub fn new(
+		input_features: usize,
+		heads: usize,
+		qk_size: usize,
+		v_size: usize,
+		dtype: DType,
+		alloc: &mut dyn Allocator,
+	) -> Transformer {
+		let attention = Attention::new(input_features, heads, qk_size, v_size, dtype, alloc);
+		let feed_forward = Linear::new(heads * v_size, 2 * input_features, dtype, alloc);
+		Transformer { attention, feed_forward }
+	}
+}
 
-		// mix: [batch, inputs, 2 * embeding]
-		let mix = self.mix.forward(w);
+impl Module for Transformer {
+	fn output_info(&self, input: &Tensor) -> (Rc<Shape>, DType) {
+		(input.shape.clone(), input.dtype)
+	}
 
-		// result: [batch, inputs, embeding]
-		swiglu(mix)
+	fn forward_(&self, input: &Tensor, output: &Tensor, _ctx: &Context) {
+		let a = self.rms_norm.forward(input);
+		let b = self.attention.forward(a);
+		let c = self.feed_forward.forward(b);
+		swiglu_(c, output);
 	}
 }
 

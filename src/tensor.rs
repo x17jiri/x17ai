@@ -25,6 +25,18 @@ impl Tensor {
 	pub fn randn_(&self) {
 		self.buffer.randn_(self);
 	}
+
+	pub fn reshape_last_n(&self, n: usize, replacement: &[usize]) -> Tensor {
+		// TODO
+	}
+
+	pub fn transpose(&self, dim1: isize, dim2: isize) -> Tensor {
+		// TODO
+	}
+
+	pub fn broadcast(&self, dim: isize, size: usize) -> Tensor {
+		// TODO
+	}
 }
 
 pub fn gemm(alpha: f64, a: &Tensor, b: &Tensor, beta: f64, c: &Tensor) {
