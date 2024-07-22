@@ -11,6 +11,8 @@ use std::ops::Index;
 use std::rc::{Rc, Weak};
 use thin_vec::ThinVec;
 
+pub const INLINE_DIMS: usize = 5;
+
 #[derive(Clone, Copy)]
 pub struct SizeAndStride {
 	pub size: usize,
@@ -26,16 +28,8 @@ impl<'a> ShapeView<'a> {
 		self.tensor.dims.len()
 	}
 
-	pub fn to_vec(&self) -> SmallVec<[usize; MAX_DIMS]> {
-		let ndim = self.tensor.ndim as usize;
-		let dims = &self.tensor.dims;
-		let dims = unsafe { dims.get_unchecked(..ndim) };
-		let mut result = SmallVec::new();
-		unsafe { result.set_len(ndim) };
-		for (o, i) in result.iter_mut().zip(dims) {
-			*o = unsafe { i.assume_init_ref().size };
-		}
-		result
+	pub fn to_vec(&self) -> SmallVec<[usize; INLINE_DIMS]> {
+		self.tensor.dims.iter().map(|x| x.size).collect()
 	}
 }
 
@@ -44,13 +38,13 @@ impl Index<isize> for ShapeView<'_> {
 
 	fn index(&self, index: isize) -> &Self::Output {
 		let index = self.tensor.__dim_to_usize(index);
-		unsafe { &self.tensor.dims[index].assume_init_ref().size }
+		unsafe { &self.tensor.dims.get_unchecked(index).size }
 	}
 }
 
 #[derive(Clone)]
 pub struct Tensor {
-	dims: SmallVec<[MaybeUninit<SizeAndStride>; MAX_DIM]>,
+	dims: SmallVec<[SizeAndStride; INLINE_DIMS]>,
 	byte_offset: isize,
 	dtype: DType,
 	elems: usize,
