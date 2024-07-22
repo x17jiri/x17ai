@@ -2,23 +2,78 @@
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
 use crate::*;
+use core::panic;
+use smallvec::SmallVec;
 use std::fmt;
+use std::intrinsics::likely;
 use std::rc::{Rc, Weak};
 use thin_vec::ThinVec;
 
+pub const MAX_DIM: usize = 5;
+
+#[derive(Clone, Copy)]
+pub struct SizeAndStride {
+	pub size: usize,
+	pub stride: isize,
+}
+
 #[derive(Clone)]
 pub struct Tensor {
-	pub shape: Shape,
-	pub strides: ThinVec<usize>,
-	pub dtype: DType,
-	pub buffer: Rc<dyn Buffer>,
-	pub byte_offset: usize,
+	ndim: u8,
+	dims: [SizeAndStride; MAX_DIM],
+	byte_offset: isize,
+	dtype: DType,
+	elems: usize,
+	buffer: Rc<dyn Buffer>,
 }
 
 impl Tensor {
 	// Allocate a new tensor on the same device
-	pub fn new_tensor(&self, shape: Shape, dtype: DType) -> Tensor {
-		// TODO
+	pub fn new_tensor(&self, shape: &[usize], dtype: DType) -> Tensor {
+		let ndim = shape.len();
+		if ndim > MAX_DIM {
+			panic!("too many dimensions");
+		}
+
+		let mut dims = [SizeAndStride { size: 0, stride: 0 }; MAX_DIM];
+
+		// Total number of elements in the dimensions processed so far
+		let mut elems = 1;
+
+		// Total number of elements in the dimensions processed so far,
+		// ignoring zero length dimensions.
+		let mut nonzero_elems: isize = 1;
+
+		for i in (0..ndim).rev() {
+			// dimension len must be a positive number that fits into isize
+			let len: Option<isize> = shape[i].try_into().ok();
+			let Some(len) = len else {
+				panic!("dimension length does not fit into isize");
+			};
+
+			// Check that if we ignore zero length dimensions, the number of elements
+			// does not overflow. This is done to make sure our calculations would not overflow
+			// even if we had the same dimensions but in different order.
+			if likely(len > 0) {
+				let Some(mul) = nonzero_elems.checked_mul(len) else {
+					panic!("too many elements");
+				};
+				nonzero_elems = mul;
+			}
+
+			// Initialize the dimension
+			dims[i] = SizeAndStride { size: len as usize, stride: elems };
+			elems *= len;
+		}
+
+		Tensor {
+			ndim: ndim as u8,
+			dims,
+			byte_offset: 0,
+			dtype,
+			elems: elems as usize,
+			buffer: self.buffer.new_buffer(elems, dtype),
+		}
 	}
 
 	pub fn zeros_(&self) {
@@ -27,6 +82,53 @@ impl Tensor {
 
 	pub fn randn_(&self) {
 		self.buffer.randn_(self);
+	}
+
+	pub fn __merge_dims(&self, dims: &[SizeAndStride]) -> SmallVec<[SizeAndStride; MAX_DIMS]> {
+		let mut result = SmallVec::new();
+		if dims.is_empty() {
+			result.push(SizeAndStride { size: 1, stride: 1 });
+			return result;
+		}
+		result.push(dims[0]);
+		for dim in dims[1..].iter().rev() {
+			let last = result.last_mut().unwrap();
+			if last.stride == (dim.size as isize) * dim.stride {
+				last.size *= dim.size;
+				last.stride = dim.stride;
+			} else {
+				result.push(*dim);
+			}
+		}
+		result
+	}
+
+	// Reshape `dims` to the new `shape` and return new dims
+	fn __reshape(
+		&self,
+		dims: &[SizeAndStride],
+		shape: &[usize],
+	) -> SmallVec<[SizeAndStride; MAX_DIMS]> {
+		let merged = self.__merge_dims(dims).iter();
+		let mut merged_dim = *merged.next().unwrap();
+		let mut t = 1;
+
+		let mut result = SmallVec::with_capacity(shape.len());
+		unsafe { result.set_len(shape.len()) };
+
+		for (o, i) in result.iter_mut().zip(shape.iter()) {
+			/*			t *= *i;
+			if t < merged_dim.size {
+			} else if t == merged_dim.size {
+				*o = merged_dim;
+				merged_dim = *merged.next().unwrap();
+				t = 1;
+			} else {
+				*o = SizeAndStride { size: *i, stride: 0 };
+			}
+			*o = SizeAndStride { size: *i, stride: 0 };*/
+		}
+		0 // TOOD
 	}
 
 	pub fn reshape_last_n(&self, n: usize, replacement: &[usize]) -> Tensor {
