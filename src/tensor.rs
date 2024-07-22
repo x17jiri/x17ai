@@ -84,189 +84,155 @@ impl Tensor {
 		self.buffer.randn_(self);
 	}
 
-	pub fn __merge_dims(&self, dims: &[SizeAndStride]) -> SmallVec<[SizeAndStride; MAX_DIMS]> {
-		let mut result = SmallVec::new();
+	fn __merge_dims(dims: &[SizeAndStride]) -> SmallVec<[SizeAndStride; MAX_DIMS]> {
 		if dims.is_empty() {
+			let mut result = SmallVec::new();
 			result.push(SizeAndStride { size: 1, stride: 1 });
 			return result;
 		}
+
+		let mut result = SmallVec::with_capacity(dims.len());
 		result.push(dims[0]);
+		let mut last = result.last_mut().unwrap();
+
 		for dim in dims[1..].iter().rev() {
-			let last = result.last_mut().unwrap();
+			if dim.size == 1 {
+				continue;
+			}
+
 			if last.stride == (dim.size as isize) * dim.stride {
 				last.size *= dim.size;
 				last.stride = dim.stride;
 			} else {
 				result.push(*dim);
+				last = result.last_mut().unwrap();
 			}
 		}
 		result
 	}
 
 	// Reshape `dims` to the new `shape` and return new dims
-	fn __reshape(
-		&self,
+	fn __try_reshape(
 		dims: &[SizeAndStride],
 		shape: &[usize],
-	) -> SmallVec<[SizeAndStride; MAX_DIMS]> {
-		let merged = self.__merge_dims(dims).iter();
-		let mut merged_dim = *merged.next().unwrap();
-		let mut t = 1;
+	) -> Option<SmallVec<[SizeAndStride; MAX_DIMS]>> {
+		let merged = Self::__merge_dims(dims).iter();
+		let merged_dim = *merged.next()?;
+		let mut acc: isize = merged_dim.stride;
+		let mut target: isize = (merged_dim.size as isize) * merged_dim.stride;
+		let mut range = -target.abs()..=target.abs();
 
 		let mut result = SmallVec::with_capacity(shape.len());
 		unsafe { result.set_len(shape.len()) };
 
-		for (o, i) in result.iter_mut().zip(shape.iter()) {
-			/*			t *= *i;
-			if t < merged_dim.size {
-			} else if t == merged_dim.size {
-				*o = merged_dim;
-				merged_dim = *merged.next().unwrap();
-				t = 1;
-			} else {
-				*o = SizeAndStride { size: *i, stride: 0 };
+		for (o, i) in result.iter_mut().zip(shape.iter()).rev() {
+			let i: isize = i.try_into().ok()?;
+
+			if !range.contains(&(acc * i)) {
+				if acc == target {
+					merged_dim = *merged.next()?;
+					acc = merged_dim.stride;
+					target = merged_dim.size * merged_dim.stride;
+					range = -target.abs()..=target.abs();
+					if !range.contains(&(acc * i)) {
+						return None;
+					}
+				} else {
+					return None;
+				}
 			}
-			*o = SizeAndStride { size: *i, stride: 0 };*/
+			acc *= i;
+
+			*o = SizeAndStride { size: i as usize, stride: acc };
 		}
-		0 // TOOD
+
+		Some(result)
+	}
+
+	pub fn clone_shape(&self) -> SmallVec<[usize; MAX_DIMS]> {
+		let dims = unsafe { self.dims.get_unchecked(..self.ndim as usize) };
+		let mut result = SmallVec::new();
+		unsafe { result.set_len(self.ndim as usize) };
+		for (o, i) in result.iter_mut().zip(dims) {
+			*o = i.size;
+		}
+		result
 	}
 
 	pub fn reshape_last_n(&self, n: usize, replacement: &[usize]) -> Tensor {
-		if !self.strides.is_empty() {
-			todo!("reshape_last_n() for strided tensors");
+		let ndim = self.ndim as usize;
+		if n > ndim {
+			panic!("cannot reshape more dimensions than the tensor has");
 		}
-		let mut new_shape = self.shape.clone();
-		new_shape.replace_last_n(n, replacement);
-		if new_shape.elems() != self.shape.elems() {
-			panic!("reshape_last_n() must preserve the number of elements");
-		}
-		Tensor {
-			shape: new_shape,
-			strides: self.strides.clone(),
-			dtype: self.dtype,
-			buffer: self.buffer.clone(),
-			byte_offset: self.byte_offset,
-		}
-	}
-
-	// Reshape the tensor to have the new number of dimensions
-	//
-	// if current ndim <= new_ndim, prepend 1s to the shape to make it the required size
-	//
-	// if current ndim > new_ndim:
-	// - the last (new_ndim - 1) dimensions are unchanged
-	// - the dimensions before that are combined into a single big dimension
-	//
-	// Limitation: Tensors with strides are not supported at the moment
-	pub fn as_ndim(&self, new_ndim: usize) -> Tensor {
-		if !self.strides.is_empty() {
-			todo!("as_ndim() for strided tensors");
-		}
-		let ndim = self.shape.ndim();
-		let mut new_shape = self.shape.clone();
-		if ndim <= new_ndim {
-			new_shape.prepend_dims(new_ndim - ndim);
-		} else {
-			new_shape.merge_dims(ndim - new_ndim + 1);
-		}
-		Tensor {
-			shape: new_shape,
-			strides: self.strides.clone(),
-			dtype: self.dtype,
-			buffer: self.buffer.clone(),
-			byte_offset: self.byte_offset,
-		}
-	}
-
-	fn __default_strides(&self) -> ThinVec<usize> {
-		let mut strides = ThinVec::new();
-		strides.resize(self.shape.ndim(), 0);
-		let mut elems = 1;
-		let stride_iter = strides.iter_mut().rev();
-		let dim_iter = self.shape.iter().rev();
-		for (stride, dim) in stride_iter.zip(dim_iter) {
-			*stride = elems;
-			elems *= *dim;
-		}
-		strides
-	}
-
-	fn __are_default_strides(&self, strides: &[usize]) -> bool {
-		let mut elems = 1;
-		let stride_iter = strides.iter().rev();
-		let dim_iter = self.shape.iter().rev();
-		for (stride, dim) in stride_iter.zip(dim_iter) {
-			if *stride != elems {
-				return false;
-			}
-			elems *= *dim;
-		}
-		true
-	}
-
-	pub fn transpose(&self, dim1: isize, dim2: isize) -> Tensor {
-		let dim1 = self.shape.dim_to_usize(dim1).unwrap();
-		let dim2 = self.shape.dim_to_usize(dim2).unwrap();
-
-		let mut new_shape = self.shape.clone();
-		new_shape.swap(dim1, dim2);
-
-		let new_strides = if self.strides.is_empty() {
-			// create default strides
-			let mut s = self.__default_strides();
-
-			// swap
-			s.swap(dim1, dim2);
-
-			s
-		} else {
-			// copy strides
-			let mut s = self.strides.clone();
-			// swap
-			s.swap(dim1, dim2);
-
-			// if the strides are equal to default, we can get rid of them
-			if self.__are_default_strides(&new_strides) {
-				s = ThinVec::new();
-			}
-
-			s
+		let last_n = unsafe { self.dims.get_unchecked(ndim - n..) };
+		let reshape: Option<_> = Self::__try_reshape(last_n, replacement);
+		let Some(new_dims) = reshape else {
+			panic!("incompatible shape");
 		};
 
+		let mut dims = self.dims;
+		let b = ndim - n;
+		let e = b + new_dims.len();
+		if e > MAX_DIMS {
+			panic!("too many dimensions");
+		}
+		let mut slice = unsafe { dims.get_unchecked(b..e) };
+		slice.copy_from_slice(&new_dims);
+
 		Tensor {
-			shape: new_shape,
-			strides: new_strides,
-			dtype: self.dtype,
-			buffer: self.buffer.clone(),
+			ndim: e as u8,
+			dims,
 			byte_offset: self.byte_offset,
+			dtype: self.dtype,
+			elems: self.elems,
+			buffer: self.buffer.clone(),
 		}
 	}
 
-	pub fn broadcast(&self, dim: isize, size: usize) -> Tensor {
-		let dim = self.shape.dim_to_usize(dim).unwrap();
-
-		if self.shape.__dims[dim] != 1 {
-			panic!("broadcasting dimension must have size 1");
+	fn __dim_to_usize(&self, dim: isize) -> usize {
+		let dim = if dim >= 0 { dim as usize } else { self.ndim as usize - ((-dim) as usize) };
+		if likely(dim < self.ndim as usize) {
+			dim
+		} else {
+			panic!("dimension out of range");
 		}
+	}
 
-		let mut new_shape = self.shape.clone();
-		new_shape.__dims[dim] = size;
+	pub fn transposed(&self, dim1: isize, dim2: isize) -> Tensor {
+		let dim1 = self.__dim_to_usize(dim1);
+		let dim2 = self.__dim_to_usize(dim2);
 
-		let mut new_strides =
-			if self.strides.is_empty() { self.__default_strides() } else { self.strides.clone() };
-		new_strides[dim] = 0;
+		let mut new_dims = self.dims;
+		new_dims.swap(dim1, dim2);
 
 		Tensor {
-			shape: new_shape,
-			strides: new_strides,
-			dtype: self.dtype,
-			buffer: self.buffer.clone(),
+			ndim: self.ndim,
+			dims: new_dims,
 			byte_offset: self.byte_offset,
+			dtype: self.dtype,
+			elems: self.elems,
+			buffer: self.buffer.clone(),
 		}
+	}
+
+	pub fn t(&self) -> Tensor {
+		self.transposed(-2, -1)
 	}
 }
 
+// result = a * b
 pub fn matmul(m1: &Tensor, m2: &Tensor) -> Tensor {
+	scaled_matmul(m1, m2, 1.0)
+}
+
+// result = (a * b) * scale
+pub fn scaled_matmul(m1: &Tensor, m2: &Tensor, scale: f64) -> Tensor {
+	// TODO
+}
+
+// t = v reinterpretted as a column matrix
+// result = (m * t) * scale
+pub fn scaled_mat_vec_mul(m: &Tensor, v: &Tensor, scale: f64) -> Tensor {
 	// TODO
 }
 

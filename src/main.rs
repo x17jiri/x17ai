@@ -69,14 +69,11 @@ impl Linear {
 
 impl Module for Linear {
 	fn forward(&self, input: &Tensor) -> Tensor {
-		let input = input.as_ndim(2);
+		let mut output_shape = input.clone_shape();
+		*output_shape.last_mut().unwrap() = self.outputs;
 
-		let mut output_shape = input.shape.clone();
-		output_shape.replace_last_n(1, &[self.outputs]);
-
-		let output = input.new_tensor(output_shape, self.dtype);
-		gemm(self.scale, &self.weights, &input, 0.0, &output);
-		output
+		let output = input.new_tensor(&output_shape, self.dtype);
+		scaled_mat_vec_mul(&self.weights, &input, self.scale)
 	}
 }
 
@@ -143,7 +140,7 @@ impl Module for Attention {
 		// -> [*, h, q, i]
 		let q = self.q.forward(input);
 		let q = q.reshape_last_n(1, &[self.heads, self.qk_size]);
-		let q = q.transpose(-3, -2);
+		let q = q.transposed(-3, -2);
 		let q = q.transpose(-2, -1);
 
 		// v: [*, i, h * v]
@@ -152,7 +149,7 @@ impl Module for Attention {
 		let v = self.v.forward(input);
 		let v = v.reshape_last_n(1, &[self.heads, self.v_size]);
 		let w_shape = v.shape.clone(); // [*, i, h, v]
-		let v = v.transpose(-3, -2);
+		let v = v.transposed(-3, -2);
 
 		// scores: [*, h, i, i]
 		let scores = matmul(k, q);
@@ -164,7 +161,7 @@ impl Module for Attention {
 
 		let w = ctx.scoped_tensor(w_shape, v.dtype); // [*, i, h, v]
 		let w = w.get();
-		let w = w.transpose(-3, -2); // [*, h, i, v]
+		let w = w.transposed(-3, -2); // [*, h, i, v]
 
 		m_dot_m_(scores, v, w);
 		let w = w.transpose(-3, -2); // [*, i, h, v]
