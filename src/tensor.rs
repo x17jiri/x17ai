@@ -55,9 +55,6 @@ impl Tensor {
 	// Allocate a new tensor on the same device
 	pub fn new_tensor(&self, shape: &[usize], dtype: DType) -> Tensor {
 		let ndim = shape.len();
-		if ndim > MAX_DIM {
-			panic!("too many dimensions");
-		}
 
 		// Total number of elements in the dimensions processed so far
 		let mut elems = 1;
@@ -66,19 +63,19 @@ impl Tensor {
 		// ignoring zero length dimensions.
 		let mut nonzero_elems: usize = 1;
 
-		let mut dims: [MaybeUninit<SizeAndStride>; MAX_DIM] = [MaybeUninit::uninit(); MAX_DIM];
-		// Note: using `_` as type to avoid very long inlay hints
-		let dims_iter: _ = dims[..ndim].iter_mut().map(|x: _| unsafe { x.assume_init_mut() });
+		let mut dims = SmallVec::with_capacity(ndim);
+		unsafe { dims.set_len(ndim) };
 
-		for (dim, size) in dims_iter.zip(shape.iter().copied()).rev() {
+		for (dim, size) in dims.iter_mut().zip(shape.iter().copied()).rev() {
 			// Check that if we ignore zero length dimensions, the number of elements
 			// does not overflow. This is done to make sure our calculations would not overflow
 			// even if we had the same dimensions but in different order.
 			if likely(size > 0) {
-				let Some(mul) = nonzero_elems.checked_mul(size) else {
+				if let Some(mul) = nonzero_elems.checked_mul(size) {
+					nonzero_elems = mul;
+				} else {
 					panic!("too many elements");
 				};
-				nonzero_elems = mul;
 			}
 
 			// Initialize the dimension
@@ -86,8 +83,12 @@ impl Tensor {
 			elems *= size;
 		}
 
+		let check: Option<isize> = nonzero_elems.try_into().ok();
+		if check.is_none() {
+			panic!("too many elements");
+		}
+
 		Tensor {
-			ndim: ndim as u8,
 			dims,
 			byte_offset: 0,
 			dtype,
@@ -104,16 +105,13 @@ impl Tensor {
 		self.buffer.randn_(self);
 	}
 
-	fn __merge_dims(dims: &[SizeAndStride]) -> ArrayVec<SizeAndStride, MAX_DIMS> {
-		let mut result = ArrayVec::new();
-
+	fn __merge_dims(dims: &[SizeAndStride]) -> SmallVec<[SizeAndStride; INLINE_DIMS]> {
 		if dims.is_empty() {
-			result.push(SizeAndStride { size: 1, stride: 1 });
-			return result;
+			return smallvec![SizeAndStride { size: 1, stride: 1 }];
 		}
 
-		result.push(dims[0]);
-		// the last dimension pushed to result
+		let mut result = smallvec![dims[0]];
+		// last = the last dimension pushed to result
 		let mut last: &mut SizeAndStride = result.last_mut().unwrap();
 
 		for dim in dims[1..].iter().rev().copied() {
@@ -136,29 +134,25 @@ impl Tensor {
 	fn __try_reshape(
 		dims: &[SizeAndStride],
 		shape: &[usize],
-	) -> Option<SmallVec<[SizeAndStride; MAX_DIMS]>> {
+	) -> Option<SmallVec<[SizeAndStride; INLINE_DIMS]>> {
 		let merged = Self::__merge_dims(dims);
 		let mut merged = merged.iter();
 
 		let merged_dim = *merged.next()?;
-		let mut acc: isize = merged_dim.stride;
-		let mut target: isize = (merged_dim.size as isize) * merged_dim.stride;
-		let mut range = -target.abs()..=target.abs();
+		let mut acc = merged_dim.stride;
+		let mut target = merged_dim.size * merged_dim.stride;
 
 		let mut result = SmallVec::with_capacity(shape.len());
 		unsafe { result.set_len(shape.len()) };
 
-		for (o, i) in result.iter_mut().zip(shape.iter()).rev() {
-			let i: isize = (*i).try_into().ok()?;
-
-			if !range.contains(&(acc * i)) {
+		for (o, size) in result.iter_mut().zip(shape.iter().copied()).rev() {
+			if acc * size >= target {
 				if acc == target {
 					let merged_dim = *merged.next()?;
 					acc = merged_dim.stride;
-					target = (merged_dim.size as isize) * merged_dim.stride;
-					range = -target.abs()..=target.abs();
+					target = merged_dim.size * merged_dim.stride;
 
-					if !range.contains(&(acc * i)) {
+					if acc * size > target {
 						cold_path();
 						return None;
 					}
@@ -167,9 +161,10 @@ impl Tensor {
 					return None;
 				}
 			}
-			acc *= i;
 
-			*o = SizeAndStride { size: i as usize, stride: acc };
+			acc *= size;
+
+			*o = SizeAndStride { size, stride: acc };
 		}
 
 		Some(result)
@@ -179,8 +174,12 @@ impl Tensor {
 		ShapeView { tensor: self }
 	}
 
+	pub fn dtype(&self) -> DType {
+		self.dtype
+	}
+
 	pub fn reshape_last_n(&self, n: usize, replacement: &[usize]) -> Tensor {
-		let ndim = self.ndim as usize;
+		let ndim = self.dims.len();
 		if n > ndim {
 			panic!("cannot reshape more dimensions than the tensor has");
 		}
@@ -190,17 +189,15 @@ impl Tensor {
 			panic!("incompatible shape");
 		};
 
-		let mut dims = self.dims;
-		let b = ndim - n;
-		let e = b + new_dims.len();
-		if e > MAX_DIMS {
-			panic!("too many dimensions");
-		}
-		let slice = unsafe { dims.get_unchecked_mut(b..e) };
-		slice.copy_from_slice(&new_dims);
+		let new_ndim = ndim - n + new_dims.len();
+		let mut dims = SmallVec::with_capacity(new_ndim);
+		unsafe { dims.set_len(new_ndim) };
+
+		let mid = ndim - n;
+		dims[..mid].copy_from_slice(&self.dims[..mid]);
+		dims[mid..].copy_from_slice(&new_dims);
 
 		Tensor {
-			ndim: e as u8,
 			dims,
 			byte_offset: self.byte_offset,
 			dtype: self.dtype,
@@ -210,8 +207,9 @@ impl Tensor {
 	}
 
 	fn __dim_to_usize(&self, dim: isize) -> usize {
-		let dim = if dim >= 0 { dim as usize } else { self.ndim as usize - ((-dim) as usize) };
-		if likely(dim < self.ndim as usize) {
+		let ndim = self.dims.len();
+		let dim = if dim >= 0 { dim as usize } else { ndim - ((-dim) as usize) };
+		if likely(dim < ndim as usize) {
 			dim
 		} else {
 			panic!("dimension out of range");
@@ -222,11 +220,10 @@ impl Tensor {
 		let dim1 = self.__dim_to_usize(dim1);
 		let dim2 = self.__dim_to_usize(dim2);
 
-		let mut new_dims = self.dims;
+		let mut new_dims = self.dims.clone();
 		new_dims.swap(dim1, dim2);
 
 		Tensor {
-			ndim: self.ndim,
 			dims: new_dims,
 			byte_offset: self.byte_offset,
 			dtype: self.dtype,
@@ -420,100 +417,55 @@ pub fn prep_op_1(input: &Shape) -> (Traversal<1>, Shape) {
 	}
 }
 
+pub struct TraversalDim<const N: usize> {
+	pub size: usize,
+	pub out_stride: usize,
+	pub in_strides: [usize; N],
+}
+
 #[derive(Clone)]
 pub struct Traversal<const N: usize> {
-	pub ndim: usize,
-	pub out_off: isize,
-	pub out_dims: [MaybeUninit<SizeAndStride>; MAX_DIMS],
+	pub out_off: usize,
 	pub in_off: [isize; N],
-	// The dimension lengths are the same for output and all inputs,
-	// so for inputs, we only need to store the strides.
-	pub in_strides: [[MaybeUninit<isize>; MAX_DIMS]; N],
+	pub dims: SmallVec<[TraversalDim<N>; INLINE_DIMS]>,
 	pub elems: usize,
 }
 
 impl<const N: usize> Traversal<N> {
 	pub fn new(byte_offsets: [isize; N]) -> Traversal<N> {
 		Traversal {
-			ndim: 0,
 			out_off: 0,
-			out_dims: [MaybeUninit::uninit(); MAX_DIMS],
 			in_off: byte_offsets,
-			in_strides: [[MaybeUninit::uninit(); MAX_DIMS]; N],
+			dims: SmallVec::new(),
 			elems: 1,
 		}
 	}
 
-	fn can_merge(&self, prev: TraversalDim<N>, next: TraversalDim<N>) -> bool {
-		let mut can = true;
-
-		// Check if prev and next are contiguous
-		for i in 0..N {
-			let real_stride = next.in_strides[i].unsigned_abs();
-			let expected_stride = (prev.in_strides[i] * prev.len as isize).unsigned_abs();
-			let contiguous = real_stride == expected_stride;
-
-			can &= contiguous;
-		}
-
-		// Check if all strides are positive
-		for i in 1..N {
-			let both_positive = (prev.in_strides[i] | next.in_strides[i]) >= 0;
-			can &= both_positive;
-		}
-
-		can
-	}
-
-	pub fn push_dim(&mut self, len: usize, mut in_strides: [isize; N]) {
-		if len == 1 {
+	pub fn push_dim(&mut self, size: usize, in_strides: [usize; N]) {
+		if size == 1 {
 			return;
 		}
 
-		// Prepare the new dimension
-		// Make sure that out_stride >= 0 and in_strides[0] >= 0
-		let out_stride = self.elems as isize;
-		if unlikely(in_strides[0] < 0) {
-			self.out_off += (len as isize - 1) * out_stride;
-
-			// flip the dimension for all inputs
-			for i in 0..N {
-				self.in_off[i] += (len as isize - 1) * in_strides[i];
-				in_strides[i] = -in_strides[i];
-			}
-		}
-		self.elems *= len;
-
-		debug_assert!(self.ndim < MAX_DIMS);
-		self.out_dims[self.ndim].write(SizeAndStride { size: len, stride: out_stride });
-		for i in 0..N {
-			self.in_strides[self.ndim][i].write(in_strides[i]);
-		}
+		let out_stride = self.elems;
+		self.elems *= size;
 
 		// If there already are dimensions, try to merge the new dimension with the last one
-		if self.ndim > 0 {
-			let prev = *self.dims.last().unwrap();
+		if !self.dims.is_empty() {
+			let prev = self.dims.last_mut().unwrap();
 
-			if self.can_merge(prev, next) {
-				let mut merged = prev;
-				merged.len *= next.len;
-				*self.dims.last_mut().unwrap() = merged;
+			let mut can_merge = true;
+			#[allow(unused_parens)]
+			for i in 0..N {
+				can_merge &= (in_strides[i] == prev.in_strides[i] * prev.size);
+			}
+
+			if can_merge {
+				prev.size *= size;
 				return;
 			}
 		}
 
 		// Can't merge, push the new dimension
-		self.dims.push(next);
-	}
-
-	pub fn finalize(&mut self) {
-		// If we have no dimensions, add a dummy dimension
-		if self.dims.is_empty() {
-			self.dims.push(TraversalDim {
-				len: 1,
-				out_stride: 1,
-				in_strides: [1; N],
-			});
-		}
+		self.dims.push(TraversalDim { size, out_stride, in_strides });
 	}
 }

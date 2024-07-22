@@ -121,14 +121,13 @@ impl Module for Attention {
 		// q, k, v: key, query, value
 
 		// input: [*, i, input_features]
-		let seq_len = input.shape[-2];
+		let seq_len = input.shape()[-2];
 
 		// k: [*, i, k]
 		// -> [*, 1, i, k]
 		// -> [*, h, i, k]
 		let k = self.k.forward(input);
 		let k = k.reshape_last_n(2, &[1, seq_len, self.qk_size]);
-		let k = k.broadcast(-3, self.heads);
 
 		// q: [*, i, h * q]
 		// -> [*, i, h, q]
@@ -137,30 +136,29 @@ impl Module for Attention {
 		let q = self.q.forward(input);
 		let q = q.reshape_last_n(1, &[self.heads, self.qk_size]);
 		let q = q.transposed(-3, -2);
-		let q = q.transpose(-2, -1);
+		let q = q.transposed(-2, -1);
 
 		// v: [*, i, h * v]
 		// -> [*, i, h, v]
 		// -> [*, h, i, v]
 		let v = self.v.forward(input);
 		let v = v.reshape_last_n(1, &[self.heads, self.v_size]);
-		let w_shape = v.shape.clone(); // [*, i, h, v]
+		let w_shape = v.shape().to_vec(); // [*, i, h, v]
 		let v = v.transposed(-3, -2);
 
 		// scores: [*, h, i, i]
-		let scores = matmul(k, q);
+		let scores = matmul(&k, &q);
 
 		// w = reweighted v
 		// w: [*, h, i, v]
 		// -> [*, i, h, v]
 		// -> [*, i, w = h * v]
 
-		let w = ctx.scoped_tensor(w_shape, v.dtype); // [*, i, h, v]
-		let w = w.get();
+		let w = v.new_tensor(&w_shape, v.dtype()); // [*, i, h, v]
 		let w = w.transposed(-3, -2); // [*, h, i, v]
 
-		m_dot_m_(scores, v, w);
-		let w = w.transpose(-3, -2); // [*, i, h, v]
+		matmul_(scores, v, w);
+		let w = w.transposed(-3, -2); // [*, i, h, v]
 		let w = w.reshape_last_n(2, &[self.heads * self.v_size]);
 
 		w
