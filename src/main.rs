@@ -69,10 +69,6 @@ impl Linear {
 
 impl Module for Linear {
 	fn forward(&self, input: &Tensor) -> Tensor {
-		let mut output_shape = input.clone_shape();
-		*output_shape.last_mut().unwrap() = self.outputs;
-
-		let output = input.new_tensor(&output_shape, self.dtype);
 		scaled_mat_vec_mul(&self.weights, &input, self.scale)
 	}
 }

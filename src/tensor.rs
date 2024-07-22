@@ -3,24 +3,54 @@
 
 use crate::*;
 use core::panic;
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 use std::fmt;
-use std::intrinsics::likely;
+use std::intrinsics::{likely, unlikely};
+use std::mem::MaybeUninit;
+use std::ops::Index;
 use std::rc::{Rc, Weak};
 use thin_vec::ThinVec;
-
-pub const MAX_DIM: usize = 5;
 
 #[derive(Clone, Copy)]
 pub struct SizeAndStride {
 	pub size: usize,
-	pub stride: isize,
+	pub stride: usize,
+}
+
+pub struct ShapeView<'a> {
+	tensor: &'a Tensor,
+}
+
+impl<'a> ShapeView<'a> {
+	pub fn len(&self) -> usize {
+		self.tensor.dims.len()
+	}
+
+	pub fn to_vec(&self) -> SmallVec<[usize; MAX_DIMS]> {
+		let ndim = self.tensor.ndim as usize;
+		let dims = &self.tensor.dims;
+		let dims = unsafe { dims.get_unchecked(..ndim) };
+		let mut result = SmallVec::new();
+		unsafe { result.set_len(ndim) };
+		for (o, i) in result.iter_mut().zip(dims) {
+			*o = unsafe { i.assume_init_ref().size };
+		}
+		result
+	}
+}
+
+impl Index<isize> for ShapeView<'_> {
+	type Output = usize;
+
+	fn index(&self, index: isize) -> &Self::Output {
+		let index = self.tensor.__dim_to_usize(index);
+		unsafe { &self.tensor.dims[index].assume_init_ref().size }
+	}
 }
 
 #[derive(Clone)]
 pub struct Tensor {
-	ndim: u8,
-	dims: [SizeAndStride; MAX_DIM],
+	dims: SmallVec<[MaybeUninit<SizeAndStride>; MAX_DIM]>,
 	byte_offset: isize,
 	dtype: DType,
 	elems: usize,
@@ -35,35 +65,31 @@ impl Tensor {
 			panic!("too many dimensions");
 		}
 
-		let mut dims = [SizeAndStride { size: 0, stride: 0 }; MAX_DIM];
-
 		// Total number of elements in the dimensions processed so far
 		let mut elems = 1;
 
 		// Total number of elements in the dimensions processed so far,
 		// ignoring zero length dimensions.
-		let mut nonzero_elems: isize = 1;
+		let mut nonzero_elems: usize = 1;
 
-		for i in (0..ndim).rev() {
-			// dimension len must be a positive number that fits into isize
-			let len: Option<isize> = shape[i].try_into().ok();
-			let Some(len) = len else {
-				panic!("dimension length does not fit into isize");
-			};
+		let mut dims: [MaybeUninit<SizeAndStride>; MAX_DIM] = [MaybeUninit::uninit(); MAX_DIM];
+		// Note: using `_` as type to avoid very long inlay hints
+		let dims_iter: _ = dims[..ndim].iter_mut().map(|x: _| unsafe { x.assume_init_mut() });
 
+		for (dim, size) in dims_iter.zip(shape.iter().copied()).rev() {
 			// Check that if we ignore zero length dimensions, the number of elements
 			// does not overflow. This is done to make sure our calculations would not overflow
 			// even if we had the same dimensions but in different order.
-			if likely(len > 0) {
-				let Some(mul) = nonzero_elems.checked_mul(len) else {
+			if likely(size > 0) {
+				let Some(mul) = nonzero_elems.checked_mul(size) else {
 					panic!("too many elements");
 				};
 				nonzero_elems = mul;
 			}
 
 			// Initialize the dimension
-			dims[i] = SizeAndStride { size: len as usize, stride: elems };
-			elems *= len;
+			*dim = SizeAndStride { size, stride: elems };
+			elems *= size;
 		}
 
 		Tensor {
@@ -71,8 +97,8 @@ impl Tensor {
 			dims,
 			byte_offset: 0,
 			dtype,
-			elems: elems as usize,
-			buffer: self.buffer.new_buffer(elems, dtype),
+			elems,
+			buffer: self.buffer.new_buffer(dtype.array_bytes(elems).unwrap()),
 		}
 	}
 
@@ -84,27 +110,28 @@ impl Tensor {
 		self.buffer.randn_(self);
 	}
 
-	fn __merge_dims(dims: &[SizeAndStride]) -> SmallVec<[SizeAndStride; MAX_DIMS]> {
+	fn __merge_dims(dims: &[SizeAndStride]) -> ArrayVec<SizeAndStride, MAX_DIMS> {
+		let mut result = ArrayVec::new();
+
 		if dims.is_empty() {
-			let mut result = SmallVec::new();
 			result.push(SizeAndStride { size: 1, stride: 1 });
 			return result;
 		}
 
-		let mut result = SmallVec::with_capacity(dims.len());
 		result.push(dims[0]);
-		let mut last = result.last_mut().unwrap();
+		// the last dimension pushed to result
+		let mut last: &mut SizeAndStride = result.last_mut().unwrap();
 
-		for dim in dims[1..].iter().rev() {
+		for dim in dims[1..].iter().rev().copied() {
 			if dim.size == 1 {
 				continue;
 			}
 
-			if last.stride == (dim.size as isize) * dim.stride {
+			if last.stride == dim.size * dim.stride {
 				last.size *= dim.size;
 				last.stride = dim.stride;
 			} else {
-				result.push(*dim);
+				result.push(dim);
 				last = result.last_mut().unwrap();
 			}
 		}
@@ -116,7 +143,9 @@ impl Tensor {
 		dims: &[SizeAndStride],
 		shape: &[usize],
 	) -> Option<SmallVec<[SizeAndStride; MAX_DIMS]>> {
-		let merged = Self::__merge_dims(dims).iter();
+		let merged = Self::__merge_dims(dims);
+		let mut merged = merged.iter();
+
 		let merged_dim = *merged.next()?;
 		let mut acc: isize = merged_dim.stride;
 		let mut target: isize = (merged_dim.size as isize) * merged_dim.stride;
@@ -126,18 +155,21 @@ impl Tensor {
 		unsafe { result.set_len(shape.len()) };
 
 		for (o, i) in result.iter_mut().zip(shape.iter()).rev() {
-			let i: isize = i.try_into().ok()?;
+			let i: isize = (*i).try_into().ok()?;
 
 			if !range.contains(&(acc * i)) {
 				if acc == target {
-					merged_dim = *merged.next()?;
+					let merged_dim = *merged.next()?;
 					acc = merged_dim.stride;
-					target = merged_dim.size * merged_dim.stride;
+					target = (merged_dim.size as isize) * merged_dim.stride;
 					range = -target.abs()..=target.abs();
+
 					if !range.contains(&(acc * i)) {
+						cold_path();
 						return None;
 					}
 				} else {
+					cold_path();
 					return None;
 				}
 			}
@@ -149,14 +181,8 @@ impl Tensor {
 		Some(result)
 	}
 
-	pub fn clone_shape(&self) -> SmallVec<[usize; MAX_DIMS]> {
-		let dims = unsafe { self.dims.get_unchecked(..self.ndim as usize) };
-		let mut result = SmallVec::new();
-		unsafe { result.set_len(self.ndim as usize) };
-		for (o, i) in result.iter_mut().zip(dims) {
-			*o = i.size;
-		}
-		result
+	pub fn shape(&self) -> ShapeView {
+		ShapeView { tensor: self }
 	}
 
 	pub fn reshape_last_n(&self, n: usize, replacement: &[usize]) -> Tensor {
@@ -176,7 +202,7 @@ impl Tensor {
 		if e > MAX_DIMS {
 			panic!("too many dimensions");
 		}
-		let mut slice = unsafe { dims.get_unchecked(b..e) };
+		let slice = unsafe { dims.get_unchecked_mut(b..e) };
 		slice.copy_from_slice(&new_dims);
 
 		Tensor {
@@ -233,6 +259,8 @@ pub fn scaled_matmul(m1: &Tensor, m2: &Tensor, scale: f64) -> Tensor {
 // t = v reinterpretted as a column matrix
 // result = (m * t) * scale
 pub fn scaled_mat_vec_mul(m: &Tensor, v: &Tensor, scale: f64) -> Tensor {
+	let mut output_shape = input.shape().to_vec();
+	*output_shape.last_mut().unwrap() = self.outputs;
 	// TODO
 }
 
@@ -342,5 +370,156 @@ impl fmt::Display for Tensor {
 			},
 		};
 		write!(f, ")")
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub fn prep_op<const N: usize>(inputs: [&Shape; N]) -> Option<(Traversal<N>, Shape)> {
+	assert!(N > 0);
+	let ndim = inputs[0].ndim();
+	let perm = inputs[0].perm();
+
+	// Check if the number of dimensions is the same for all inputs
+	for n in 1..N {
+		if unlikely(inputs[n].ndim() != ndim) {
+			return None;
+		}
+	}
+
+	let mut traversal = Traversal::new(inputs);
+	let mut out_shape = inputs[0].clone();
+
+	for perm_index in 0..ndim {
+		let i = perm[perm_index] as usize;
+		let dim = inputs[0].dims()[i];
+
+		// Set the stride of the output shape so that it is contiguous
+		out_shape.dims_mut()[i].stride = traversal.elems as isize;
+		if unlikely(dim.stride < 0) {
+			out_shape.dims_mut()[i].stride *= -1;
+		}
+
+		// Collect the strides of the input shapes
+		let mut strides = [0; N];
+		for n in 0..N {
+			if unlikely(inputs[n].dims()[i].len != dim.len) {
+				return None;
+			}
+			strides[n] = inputs[n].dims()[i].stride;
+		}
+
+		// Push the dimension to the traversal
+		traversal.push_dim(dim.len, strides);
+	}
+
+	traversal.finalize();
+	out_shape.__off = traversal.out_off;
+	Some((traversal, out_shape))
+}
+
+pub fn prep_op_1(input: &Shape) -> (Traversal<1>, Shape) {
+	unsafe {
+		// SAFETY: prep_op() will fail if inputs are not compatible
+		// and we are passing only one input
+		prep_op([&input]).unwrap_unchecked()
+	}
+}
+
+#[derive(Clone)]
+pub struct Traversal<const N: usize> {
+	pub ndim: usize,
+	pub out_off: isize,
+	pub out_dims: [MaybeUninit<SizeAndStride>; MAX_DIMS],
+	pub in_off: [isize; N],
+	// The dimension lengths are the same for output and all inputs,
+	// so for inputs, we only need to store the strides.
+	pub in_strides: [[MaybeUninit<isize>; MAX_DIMS]; N],
+	pub elems: usize,
+}
+
+impl<const N: usize> Traversal<N> {
+	pub fn new(byte_offsets: [isize; N]) -> Traversal<N> {
+		Traversal {
+			ndim: 0,
+			out_off: 0,
+			out_dims: [MaybeUninit::uninit(); MAX_DIMS],
+			in_off: byte_offsets,
+			in_strides: [[MaybeUninit::uninit(); MAX_DIMS]; N],
+			elems: 1,
+		}
+	}
+
+	fn can_merge(&self, prev: TraversalDim<N>, next: TraversalDim<N>) -> bool {
+		let mut can = true;
+
+		// Check if prev and next are contiguous
+		for i in 0..N {
+			let real_stride = next.in_strides[i].unsigned_abs();
+			let expected_stride = (prev.in_strides[i] * prev.len as isize).unsigned_abs();
+			let contiguous = real_stride == expected_stride;
+
+			can &= contiguous;
+		}
+
+		// Check if all strides are positive
+		for i in 1..N {
+			let both_positive = (prev.in_strides[i] | next.in_strides[i]) >= 0;
+			can &= both_positive;
+		}
+
+		can
+	}
+
+	pub fn push_dim(&mut self, len: usize, mut in_strides: [isize; N]) {
+		if len == 1 {
+			return;
+		}
+
+		// Prepare the new dimension
+		// Make sure that out_stride >= 0 and in_strides[0] >= 0
+		let out_stride = self.elems as isize;
+		if unlikely(in_strides[0] < 0) {
+			self.out_off += (len as isize - 1) * out_stride;
+
+			// flip the dimension for all inputs
+			for i in 0..N {
+				self.in_off[i] += (len as isize - 1) * in_strides[i];
+				in_strides[i] = -in_strides[i];
+			}
+		}
+		self.elems *= len;
+
+		debug_assert!(self.ndim < MAX_DIMS);
+		self.out_dims[self.ndim].write(SizeAndStride { size: len, stride: out_stride });
+		for i in 0..N {
+			self.in_strides[self.ndim][i].write(in_strides[i]);
+		}
+
+		// If there already are dimensions, try to merge the new dimension with the last one
+		if self.ndim > 0 {
+			let prev = *self.dims.last().unwrap();
+
+			if self.can_merge(prev, next) {
+				let mut merged = prev;
+				merged.len *= next.len;
+				*self.dims.last_mut().unwrap() = merged;
+				return;
+			}
+		}
+
+		// Can't merge, push the new dimension
+		self.dims.push(next);
+	}
+
+	pub fn finalize(&mut self) {
+		// If we have no dimensions, add a dummy dimension
+		if self.dims.is_empty() {
+			self.dims.push(TraversalDim {
+				len: 1,
+				out_stride: 1,
+				in_strides: [1; N],
+			});
+		}
 	}
 }

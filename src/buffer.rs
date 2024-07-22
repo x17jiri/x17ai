@@ -10,6 +10,8 @@ pub trait Buffer {
 
 	fn rms_norm(&self, a: &Tensor, out: &Tensor, params: &ReduceParams);
 
+	fn new_buffer(&self, byte_size: usize) -> Rc<dyn Buffer>;
+
 	//	fn mm(&self, a: &Tensor, b: &Tensor, c: &Tensor);
 
 	fn format(
