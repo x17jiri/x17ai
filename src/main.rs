@@ -148,6 +148,8 @@ impl Module for Attention {
 		// h: head
 		// q, k, v: key, query, value
 
+		// TODO - use scopes so tensors are freed when not needed
+
 		// input: [*, i, input_features]
 		let seq_len = input.shape()[-2];
 
