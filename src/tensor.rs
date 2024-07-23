@@ -178,13 +178,13 @@ impl Tensor {
 		self.dtype
 	}
 
-	pub fn reshape_last_n(&self, n: usize, replacement: &[usize]) -> Tensor {
+	pub fn reshape_last_n(&self, n: usize, new_shape: &[usize]) -> Tensor {
 		let ndim = self.dims.len();
 		if n > ndim {
 			panic!("cannot reshape more dimensions than the tensor has");
 		}
 		let last_n = unsafe { self.dims.get_unchecked(ndim - n..) };
-		let reshape: Option<_> = Self::__try_reshape(last_n, replacement);
+		let reshape: Option<_> = Self::__try_reshape(last_n, new_shape);
 		let Some(new_dims) = reshape else {
 			panic!("incompatible shape");
 		};
@@ -250,9 +250,20 @@ pub fn scaled_matmul(m1: &Tensor, m2: &Tensor, scale: f64) -> Tensor {
 // t = v reinterpretted as a column matrix
 // result = (m * t) * scale
 pub fn scaled_mat_vec_mul(m: &Tensor, v: &Tensor, scale: f64) -> Tensor {
-	let mut output_shape = input.shape().to_vec();
-	*output_shape.last_mut().unwrap() = self.outputs;
-	// TODO
+	// skip formatting
+	#[rustfmt::skip]
+	let (traversal, out_dims) = prep_batch_traversal(
+		[
+			&m.dims[..m.dims.len() - 2],
+			&v.dims[..v.dims.len() - 1],
+		],
+		&[
+			SizeAndStride {
+				size: m.dims[m.dims.len() - 1].size,
+				stride: 1,
+			}
+		],
+	);
 }
 
 // c = alpha * (a dot b) + beta * c
@@ -312,8 +323,9 @@ impl fmt::Display for Tensor {
 pub fn prep_batch_traversal<const N: usize>(
 	inputs: [&[SizeAndStride]; N],
 	nonbatch_out_dims: &[SizeAndStride],
-) -> Option<(Traversal<N>, SmallVec<[SizeAndStride; INLINE_DIMS]>)> {
-	let ndim = inputs.iter().map(|x| x.len()).max()?;
+) -> (Traversal<N>, SmallVec<[SizeAndStride; INLINE_DIMS]>) {
+	assert!(N > 0);
+	let ndim = inputs.iter().map(|x| x.len()).max().unwrap();
 
 	let mut traversal = Traversal::new(ndim);
 
@@ -360,26 +372,14 @@ pub fn prep_batch_traversal<const N: usize>(
 				} else {
 					// cannot broadcast
 					cold_path();
-					return None;
+					panic!("incompatible dimensions");
 				}
 			}
 		}
 		traversal.push_dim(dim_size, in_strides);
 	}
 
-	Some((traversal, out_shape))
-}
-
-pub fn prep_batch_traversal_1(
-	input: &[SizeAndStride],
-	nonbatch_out_dims: &[SizeAndStride],
-) -> (Traversal<1>, SmallVec<[SizeAndStride; INLINE_DIMS]>) {
-	let traversal: Option<_> = prep_batch_traversal([&input], nonbatch_out_dims);
-	unsafe {
-		// SAFETY: prep_batch_traversal() can only fail if inputs are not compatible.
-		// We are passing just one input so it cannot fail.
-		traversal.unwrap_unchecked()
-	}
+	(traversal, out_dims)
 }
 
 #[derive(Clone)]
