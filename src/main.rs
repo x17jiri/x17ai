@@ -44,6 +44,19 @@ use std::rc::Rc;
 
 pub trait Module {
 	fn forward(&self, input: &Tensor) -> Tensor;
+	fn backward(&self, grad: &Tensor) -> Tensor;
+	fn reg_params(&self, ctx: &Context);
+}
+
+pub struct Context {
+	pub training: bool,
+	pub device: Rc<dyn Device>,
+}
+
+impl Context {
+	pub fn reg_param(&self, param: &Tensor) -> Tensor {
+		// TODO
+	}
 }
 
 // Linear layer transforming inputs to outputs
@@ -54,22 +67,37 @@ struct Linear {
 	pub inputs: usize,
 	pub outputs: usize,
 	pub weights: Tensor,
+	pub weights_grad: Option<Tensor>,
 	pub scale: f64,
 	pub dtype: DType,
 }
 
 impl Linear {
-	pub fn new(inputs: usize, outputs: usize, dtype: DType, alloc: &mut dyn Allocator) -> Linear {
-		let shape = Shape::new(&[outputs, inputs]);
-		let weights = alloc.new_tensor(shape, dtype);
+	pub fn new(inputs: usize, outputs: usize, dtype: DType, ctx: &Context) -> Linear {
+		let weights = Tensor::new(&[outputs, inputs], dtype, ctx.device.clone());
 		let scale = 1.0 / (inputs as f64).sqrt();
-		Linear { inputs, outputs, weights, scale, dtype }
+		Linear {
+			inputs,
+			outputs,
+			weights,
+			weights_grad: None,
+			scale,
+			dtype,
+		}
 	}
 }
 
 impl Module for Linear {
 	fn forward(&self, input: &Tensor) -> Tensor {
 		scaled_mat_vec_mul(&self.weights, &input, self.scale)
+	}
+
+	fn backward(&self, grad: &Tensor) -> Tensor {
+		// TOOD
+	}
+
+	fn reg_params(&self, ctx: &Context) {
+		self.weights_grad = Some(ctx.reg_param(&self.weights));
 	}
 }
 

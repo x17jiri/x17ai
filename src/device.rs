@@ -8,5 +8,5 @@ use std::rc::Rc;
 pub trait Device {
 	fn name(&self) -> &str;
 
-	fn new_buffer(self: Rc<Self>, size_bytes: usize, name: String) -> Rc<dyn Buffer>;
+	fn new_buffer(self: Rc<Self>, size_bytes: usize) -> Rc<dyn Buffer>;
 }

@@ -12,7 +12,16 @@ pub trait Buffer {
 
 	fn new_buffer(&self, byte_size: usize) -> Rc<dyn Buffer>;
 
-	//	fn mm(&self, a: &Tensor, b: &Tensor, c: &Tensor);
+	unsafe fn mat_vec_mul(
+		&self,
+		a: &Tensor,
+		b: &Tensor,
+		scale: f64,
+		c: &Tensor,
+		batch: Traversal<2>,
+	);
+
+	unsafe fn matmul(&self, a: &Tensor, b: &Tensor, scale: f64, c: &Tensor, batch: Traversal<2>);
 
 	fn format(
 		&self,
@@ -43,4 +52,16 @@ pub fn is_buf_owned_by_device(buf: &dyn Buffer, device: &dyn Device) -> bool {
 	let expected_device = expected_device as *const u8;
 
 	buffer_device == expected_device
+}
+
+pub fn are_bufs_on_the_same_device(buf1: &dyn Buffer, buf2: &dyn Buffer) -> bool {
+	let device1 = buf_to_base(buf1).device.as_ref();
+	let device1 = device1 as *const dyn Device;
+	let device1 = device1 as *const u8;
+
+	let device2 = buf_to_base(buf2).device.as_ref();
+	let device2 = device2 as *const dyn Device;
+	let device2 = device2 as *const u8;
+
+	device1 == device2
 }

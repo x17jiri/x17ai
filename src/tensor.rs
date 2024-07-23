@@ -42,8 +42,79 @@ impl Index<isize> for ShapeView<'_> {
 	}
 }
 
+// This struct is used mainly to ensure that the total number of elements does not overflow
+struct DimsConstructor {
+	// dimensions in reverse order
+	dims: SmallVec<[SizeAndStride; INLINE_DIMS]>,
+
+	remaining_dims: usize,
+
+	// Total number of elements in the dimensions processed so far
+	elems: usize,
+
+	// Total number of elements in the dimensions processed so far,
+	// ignoring zero length dimensions.
+	nonzero_elems: usize,
+}
+
+impl DimsConstructor {
+	fn from_shape(shape: &[usize]) -> DimsConstructor {
+		let mut t = DimsConstructor::new(shape.len());
+		for dim in shape.iter().copied().rev() {
+			t.push(dim);
+		}
+		t.final_check();
+		t
+	}
+
+	fn new(ndim: usize) -> DimsConstructor {
+		let mut dims = SmallVec::with_capacity(ndim);
+		unsafe { dims.set_len(ndim) };
+
+		DimsConstructor {
+			dims,
+			remaining_dims: ndim,
+			elems: 1,
+			nonzero_elems: 1,
+		}
+	}
+
+	fn push(&mut self, size: usize) {
+		debug_assert!(self.remaining_dims > 0);
+
+		// Check that if we ignore zero length dimensions, the number of elements
+		// does not overflow. This is done to make sure our calculations would not overflow
+		// even if we had the same dimensions but in different order.
+		if likely(size != 0) {
+			if let Some(mul) = self.nonzero_elems.checked_mul(size) {
+				self.nonzero_elems = mul;
+			} else {
+				panic!("too many elements");
+			};
+		}
+
+		unsafe {
+			self.remaining_dims -= 1;
+			*self.dims.get_unchecked_mut(self.remaining_dims) =
+				SizeAndStride { size, stride: self.elems };
+		}
+		self.elems *= size;
+	}
+
+	fn final_check(&self) {
+		debug_assert!(self.remaining_dims == 0);
+
+		// Check that the total number of elements does not overflow isize
+		let check: Option<isize> = self.elems.try_into().ok();
+		if check.is_none() {
+			panic!("too many elements");
+		}
+	}
+}
+
 #[derive(Clone)]
 pub struct Tensor {
+	// dims in reverse order
 	dims: SmallVec<[SizeAndStride; INLINE_DIMS]>,
 	byte_offset: isize,
 	dtype: DType,
@@ -52,42 +123,29 @@ pub struct Tensor {
 }
 
 impl Tensor {
+	pub fn new(shape: &[usize], dtype: DType, device: Rc<dyn Device>) -> Tensor {
+		let t = DimsConstructor::from_shape(shape);
+		Tensor {
+			dims: t.dims,
+			byte_offset: 0,
+			dtype,
+			elems: t.elems,
+			buffer: device.new_buffer(dtype.array_bytes(t.elems).unwrap()),
+		}
+	}
+
 	// Allocate a new tensor on the same device
 	pub fn new_tensor(&self, shape: &[usize], dtype: DType) -> Tensor {
-		let ndim = shape.len();
+		let t = DimsConstructor::from_shape(shape);
+		self.__new(t.elems, t.dims, dtype)
+	}
 
-		// Total number of elements in the dimensions processed so far
-		let mut elems = 1;
-
-		// Total number of elements in the dimensions processed so far,
-		// ignoring zero length dimensions.
-		let mut nonzero_elems: usize = 1;
-
-		let mut dims = SmallVec::with_capacity(ndim);
-		unsafe { dims.set_len(ndim) };
-
-		for (dim, size) in dims.iter_mut().zip(shape.iter().copied()).rev() {
-			// Check that if we ignore zero length dimensions, the number of elements
-			// does not overflow. This is done to make sure our calculations would not overflow
-			// even if we had the same dimensions but in different order.
-			if likely(size > 0) {
-				if let Some(mul) = nonzero_elems.checked_mul(size) {
-					nonzero_elems = mul;
-				} else {
-					panic!("too many elements");
-				};
-			}
-
-			// Initialize the dimension
-			*dim = SizeAndStride { size, stride: elems };
-			elems *= size;
-		}
-
-		let check: Option<isize> = nonzero_elems.try_into().ok();
-		if check.is_none() {
-			panic!("too many elements");
-		}
-
+	fn __new(
+		&self,
+		elems: usize,
+		dims: SmallVec<[SizeAndStride; INLINE_DIMS]>,
+		dtype: DType,
+	) -> Tensor {
 		Tensor {
 			dims,
 			byte_offset: 0,
@@ -244,31 +302,51 @@ pub fn matmul(m1: &Tensor, m2: &Tensor) -> Tensor {
 
 // result = (a * b) * scale
 pub fn scaled_matmul(m1: &Tensor, m2: &Tensor, scale: f64) -> Tensor {
-	// TODO
+	if m1.dtype() != m2.dtype() {
+		panic!("incompatible dtypes");
+	}
+	if !are_bufs_on_the_same_device(m1.buffer.as_ref(), m2.buffer.as_ref()) {
+		panic!("incompatible devices");
+	}
+
+	let m1_batch_dims = &m1.dims[..m1.dims.len() - 2];
+	let m2_batch_dims = &m2.dims[..m2.dims.len() - 2];
+	let nonbatch_out_dims = [m1.dims[m1.dims.len() - 2].size, m2.dims[m2.dims.len() - 1].size];
+	let (traversal, out_dims, out_elems) =
+		prep_batch_traversal([&m1_batch_dims, &m2_batch_dims], &nonbatch_out_dims);
+
+	let out = m1.__new(out_elems, out_dims, m1.dtype);
+
+	unsafe {
+		m1.buffer.matmul(m1, m2, scale, &out, traversal);
+	}
+
+	out
 }
 
 // t = v reinterpretted as a column matrix
 // result = (m * t) * scale
 pub fn scaled_mat_vec_mul(m: &Tensor, v: &Tensor, scale: f64) -> Tensor {
-	// skip formatting
-	#[rustfmt::skip]
-	let (traversal, out_dims) = prep_batch_traversal(
-		[
-			&m.dims[..m.dims.len() - 2],
-			&v.dims[..v.dims.len() - 1],
-		],
-		&[
-			SizeAndStride {
-				size: m.dims[m.dims.len() - 1].size,
-				stride: 1,
-			}
-		],
-	);
-}
+	if m.dtype() != v.dtype() {
+		panic!("incompatible dtypes");
+	}
+	if !are_bufs_on_the_same_device(m.buffer.as_ref(), v.buffer.as_ref()) {
+		panic!("incompatible devices");
+	}
 
-// c = alpha * (a dot b) + beta * c
-pub fn gemm(alpha: f64, a: &Tensor, b: &Tensor, beta: f64, c: &Tensor) {
-	// TODO
+	let m_batch_dims = &m.dims[..m.dims.len() - 2];
+	let v_batch_dims = &v.dims[..v.dims.len() - 1];
+	let nonbatch_out_dim = m.dims[m.dims.len() - 1].size;
+	let (traversal, out_dims, out_elems) =
+		prep_batch_traversal([&m_batch_dims, &v_batch_dims], &[nonbatch_out_dim]);
+
+	let out = m.__new(out_elems, out_dims, m.dtype);
+
+	unsafe {
+		m.buffer.mat_vec_mul(m, v, scale, &out, traversal);
+	}
+
+	out
 }
 
 pub fn rms_norm(a: &Tensor, out: &Tensor) {
@@ -322,49 +400,44 @@ impl fmt::Display for Tensor {
 
 pub fn prep_batch_traversal<const N: usize>(
 	inputs: [&[SizeAndStride]; N],
-	nonbatch_out_dims: &[SizeAndStride],
-) -> (Traversal<N>, SmallVec<[SizeAndStride; INLINE_DIMS]>) {
+	nonbatch_out_dims: &[usize],
+) -> (Traversal<N>, SmallVec<[SizeAndStride; INLINE_DIMS]>, usize) {
 	assert!(N > 0);
 	let ndim = inputs.iter().map(|x| x.len()).max().unwrap();
 
 	let mut traversal = Traversal::new(ndim);
 
-	let out_ndim = ndim + nonbatch_out_dims.len();
-	let mut out_dims = SmallVec::with_capacity(out_ndim);
-	unsafe { out_dims.set_len(out_ndim) };
-	let mut out_dims_iter = out_dims.iter_mut().rev();
-
-	let mut elems = 1;
-	for i in nonbatch_out_dims.iter().rev() {
-		let out_dim: &mut SizeAndStride = unsafe { out_dims_iter.next().unwrap_unchecked() };
-		out_dim.size = i.size;
-		out_dim.stride = i.stride;
+	let mut out_shape = DimsConstructor::new(ndim + nonbatch_out_dims.len());
+	for dim_size in nonbatch_out_dims.iter().rev().copied() {
+		out_shape.push(dim_size);
 	}
 
-	for d in 0..ndim {
+	for d in (0..ndim).rev() {
+		// Get sizes and strides for the current dimension from all inputs
 		let mut in_sizes = [0; N];
 		let mut in_strides = [0; N];
 		for i in 0..N {
 			if d < inputs[i].len() {
-				in_sizes[i] = inputs[i][ndim - d - 1].size;
-				in_strides[i] = inputs[i][ndim - d - 1].stride;
+				in_sizes[i] = inputs[i][d].size;
+				in_strides[i] = inputs[i][d].stride;
 			} else {
 				in_sizes[i] = 1;
 				in_strides[i] = 0;
 			}
 		}
+
+		// The dim_size should be the same for all inputs except for broadcasted inputs
+		// So max() gets the dim_size of the non-broadcasted inputs.
 		let dim_size = *in_sizes.iter().max().unwrap();
 
-		let out_dim = unsafe { out_dims_iter.next().unwrap_unchecked() };
-		out_dim.size = dim_size;
-		out_dim.stride = elems;
+		out_shape.push(dim_size);
 
+		// dimensions of size 1 have no effect on the traversal
 		if dim_size == 1 {
 			continue;
 		}
 
-		elems *= dim_size;
-
+		// Set the strides of the broadcasted inputs to 0
 		for i in 0..N {
 			if in_sizes[i] != dim_size {
 				if in_sizes[i] == 1 {
@@ -376,10 +449,12 @@ pub fn prep_batch_traversal<const N: usize>(
 				}
 			}
 		}
+
 		traversal.push_dim(dim_size, in_strides);
 	}
 
-	(traversal, out_dims)
+	out_shape.final_check();
+	(traversal, out_shape.dims, out_shape.elems)
 }
 
 #[derive(Clone)]
@@ -391,14 +466,16 @@ pub struct TraversalDim<const N: usize> {
 
 #[derive(Clone)]
 pub struct Traversal<const N: usize> {
-	pub dims: SmallVec<[TraversalDim<N>; INLINE_DIMS]>,
+	// dims in traversal are in reverse order
+	// in other words, from smallest to largest stride
+	pub rev_dims: SmallVec<[TraversalDim<N>; INLINE_DIMS]>,
 	pub elems: usize,
 }
 
 impl<const N: usize> Traversal<N> {
 	pub fn new(ndim: usize) -> Traversal<N> {
 		Traversal {
-			dims: SmallVec::with_capacity(ndim),
+			rev_dims: SmallVec::with_capacity(ndim),
 			elems: 1,
 		}
 	}
@@ -409,8 +486,8 @@ impl<const N: usize> Traversal<N> {
 		self.elems *= size;
 
 		// If there already are dimensions, try to merge the new dimension with the last one
-		if !self.dims.is_empty() {
-			let prev = self.dims.last_mut().unwrap();
+		if !self.rev_dims.is_empty() {
+			let prev = self.rev_dims.last_mut().unwrap();
 
 			let mut can_merge = true;
 			#[allow(unused_parens)]
@@ -425,6 +502,6 @@ impl<const N: usize> Traversal<N> {
 		}
 
 		// Can't merge, push the new dimension
-		self.dims.push(TraversalDim { size, out_stride, in_strides });
+		self.rev_dims.push(TraversalDim { size, out_stride, in_strides });
 	}
 }
