@@ -264,63 +264,6 @@ pub fn rms_norm(a: &Tensor, out: &Tensor) {
 	// TODO
 }
 
-/*
-pub struct PrepMM {
-	pub batch_size: usize,
-	pub a_rows: usize,
-	pub a_cols: usize,
-	pub b_cols: usize,
-	pub a_transpose: bool,
-	pub b_transpose: bool,
-	pub dtype: DType,
-}
-
-pub fn prep_mm(a: &Tensor, b: &Tensor, c: &Tensor) -> PrepMM {
-	let (a_batch_dims, a_dims) = a.shape.split(-2);
-	let (b_batch_dims, b_dims) = b.shape.split(-2);
-	let (c_batch_dims, c_dims) = c.shape.split(-2);
-
-	if a_batch_dims != b_batch_dims || a_batch_dims != c_batch_dims {
-		panic!("batch dimensions do not match");
-	}
-	let batch_size = a_batch_dims.iter().product();
-
-	if a_dims[1] != b_dims[0] || a_dims[0] != c_dims[0] || b_dims[1] != c_dims[1] {
-		panic!("matrix dimensions do not match");
-	}
-
-	if a.dtype != b.dtype || a.dtype != c.dtype {
-		panic!("dtype mismatch");
-	}
-
-	PrepMM {
-		batch_size,
-		a_rows: a_dims[0],
-		a_cols: a_dims[1],
-		b_cols: b_dims[1],
-		a_transpose: false,
-		b_transpose: false,
-		dtype: a.dtype,
-	}
-}
-
-// matrix-matrix multiplication
-// c = a * b
-pub fn m_dot_m(m1: &Tensor, m2: &Tensor, out: &Tensor) {
-	a.buffer.mm(m1, m2, out);
-}
-
-// vector-matrix multiplication
-pub fn v_dot_m(v: &Tensor, m: &Tensor, out: &Tensor) {
-	// TODO
-}
-
-// matrix-vector multiplication
-pub fn m_dot_v(m: &Tensor, v: &Tensor, out: &Tensor) {
-	// TODO
-}
-*/
-
 fn fmt_0d(tensor: &Tensor, f: &mut fmt::Formatter, off: usize) -> fmt::Result {
 	let byte_offset = tensor.byte_offset + off * tensor.dtype.bytes();
 	tensor.buffer.format(byte_offset, tensor.dtype, f, 1)
@@ -366,57 +309,80 @@ impl fmt::Display for Tensor {
 
 //--------------------------------------------------------------------------------------------------
 
-pub fn prep_op<const N: usize>(inputs: [&Shape; N]) -> Option<(Traversal<N>, Shape)> {
-	assert!(N > 0);
-	let ndim = inputs[0].ndim();
-	let perm = inputs[0].perm();
+pub fn prep_batch_traversal<const N: usize>(
+	inputs: [&[SizeAndStride]; N],
+	nonbatch_out_dims: &[SizeAndStride],
+) -> Option<(Traversal<N>, SmallVec<[SizeAndStride; INLINE_DIMS]>)> {
+	let ndim = inputs.iter().map(|x| x.len()).max()?;
 
-	// Check if the number of dimensions is the same for all inputs
-	for n in 1..N {
-		if unlikely(inputs[n].ndim() != ndim) {
-			return None;
-		}
+	let mut traversal = Traversal::new(ndim);
+
+	let out_ndim = ndim + nonbatch_out_dims.len();
+	let mut out_dims = SmallVec::with_capacity(out_ndim);
+	unsafe { out_dims.set_len(out_ndim) };
+	let mut out_dims_iter = out_dims.iter_mut().rev();
+
+	let mut elems = 1;
+	for i in nonbatch_out_dims.iter().rev() {
+		let out_dim: &mut SizeAndStride = unsafe { out_dims_iter.next().unwrap_unchecked() };
+		out_dim.size = i.size;
+		out_dim.stride = i.stride;
 	}
 
-	let mut traversal = Traversal::new(inputs);
-	let mut out_shape = inputs[0].clone();
-
-	for perm_index in 0..ndim {
-		let i = perm[perm_index] as usize;
-		let dim = inputs[0].dims()[i];
-
-		// Set the stride of the output shape so that it is contiguous
-		out_shape.dims_mut()[i].stride = traversal.elems as isize;
-		if unlikely(dim.stride < 0) {
-			out_shape.dims_mut()[i].stride *= -1;
-		}
-
-		// Collect the strides of the input shapes
-		let mut strides = [0; N];
-		for n in 0..N {
-			if unlikely(inputs[n].dims()[i].len != dim.len) {
-				return None;
+	for d in 0..ndim {
+		let mut in_sizes = [0; N];
+		let mut in_strides = [0; N];
+		for i in 0..N {
+			if d < inputs[i].len() {
+				in_sizes[i] = inputs[i][ndim - d - 1].size;
+				in_strides[i] = inputs[i][ndim - d - 1].stride;
+			} else {
+				in_sizes[i] = 1;
+				in_strides[i] = 0;
 			}
-			strides[n] = inputs[n].dims()[i].stride;
+		}
+		let dim_size = *in_sizes.iter().max().unwrap();
+
+		let out_dim = unsafe { out_dims_iter.next().unwrap_unchecked() };
+		out_dim.size = dim_size;
+		out_dim.stride = elems;
+
+		if dim_size == 1 {
+			continue;
 		}
 
-		// Push the dimension to the traversal
-		traversal.push_dim(dim.len, strides);
+		elems *= dim_size;
+
+		for i in 0..N {
+			if in_sizes[i] != dim_size {
+				if in_sizes[i] == 1 {
+					in_strides[i] = 0;
+				} else {
+					// cannot broadcast
+					cold_path();
+					return None;
+				}
+			}
+		}
+		traversal.push_dim(dim_size, in_strides);
 	}
 
-	traversal.finalize();
-	out_shape.__off = traversal.out_off;
 	Some((traversal, out_shape))
 }
 
-pub fn prep_op_1(input: &Shape) -> (Traversal<1>, Shape) {
+pub fn prep_batch_traversal_1(
+	input: &[SizeAndStride],
+	nonbatch_out_dims: &[SizeAndStride],
+) -> (Traversal<1>, SmallVec<[SizeAndStride; INLINE_DIMS]>) {
+	let traversal: Option<_> = prep_batch_traversal([&input], nonbatch_out_dims);
 	unsafe {
-		// SAFETY: prep_op() will fail if inputs are not compatible
-		// and we are passing only one input
-		prep_op([&input]).unwrap_unchecked()
+		// SAFETY: prep_batch_traversal() can only fail if inputs are not compatible.
+		// We are passing just one input so it cannot fail.
+		traversal.unwrap_unchecked()
 	}
 }
 
+#[derive(Clone)]
 pub struct TraversalDim<const N: usize> {
 	pub size: usize,
 	pub out_stride: usize,
@@ -425,27 +391,20 @@ pub struct TraversalDim<const N: usize> {
 
 #[derive(Clone)]
 pub struct Traversal<const N: usize> {
-	pub out_off: usize,
-	pub in_off: [isize; N],
 	pub dims: SmallVec<[TraversalDim<N>; INLINE_DIMS]>,
 	pub elems: usize,
 }
 
 impl<const N: usize> Traversal<N> {
-	pub fn new(byte_offsets: [isize; N]) -> Traversal<N> {
+	pub fn new(ndim: usize) -> Traversal<N> {
 		Traversal {
-			out_off: 0,
-			in_off: byte_offsets,
-			dims: SmallVec::new(),
+			dims: SmallVec::with_capacity(ndim),
 			elems: 1,
 		}
 	}
 
+	// dimensions should be pushed in the order of increasing strides
 	pub fn push_dim(&mut self, size: usize, in_strides: [usize; N]) {
-		if size == 1 {
-			return;
-		}
-
 		let out_stride = self.elems;
 		self.elems *= size;
 
