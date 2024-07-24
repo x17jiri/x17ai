@@ -293,14 +293,45 @@ impl Tensor {
 	pub fn t(&self) -> Tensor {
 		self.transposed(-2, -1)
 	}
+
+	// Reinterprets the last dimension as a row matrix
+	pub fn as_row_matrix(&self) -> Tensor {
+		let mut new_dims = self.dims.clone();
+		new_dims.push(SizeAndStride { size: 1, stride: 1 });
+
+		Tensor {
+			dims: new_dims,
+			byte_offset: self.byte_offset,
+			dtype: self.dtype,
+			elems: self.elems,
+			buffer: self.buffer.clone(),
+		}
+	}
+
+	// Reinterprets the last dimension as a column matrix
+	pub fn as_col_matrix(&self) -> Tensor {
+		let mut new_dims = self.dims.clone();
+		let last_dim = new_dims.last_mut().unwrap();
+		let last_dim_copy = *last_dim;
+		*last_dim = SizeAndStride { size: 1, stride: 1 };
+		new_dims.push(last_dim_copy);
+
+		Tensor {
+			dims: new_dims,
+			byte_offset: self.byte_offset,
+			dtype: self.dtype,
+			elems: self.elems,
+			buffer: self.buffer.clone(),
+		}
+	}
 }
 
-// result = a * b
+// result = m1 * m2
 pub fn matmul(m1: &Tensor, m2: &Tensor) -> Tensor {
 	scaled_matmul(m1, m2, 1.0)
 }
 
-// result = (a * b) * scale
+// result = (m1 * m2) * scale
 pub fn scaled_matmul(m1: &Tensor, m2: &Tensor, scale: f64) -> Tensor {
 	if m1.dtype() != m2.dtype() {
 		panic!("incompatible dtypes");
@@ -308,6 +339,9 @@ pub fn scaled_matmul(m1: &Tensor, m2: &Tensor, scale: f64) -> Tensor {
 	if !are_bufs_on_the_same_device(m1.buffer.as_ref(), m2.buffer.as_ref()) {
 		panic!("incompatible devices");
 	}
+
+	// TODO: if one of the inputs is row / column matrix,
+	// we can turn one batch dimension into a non-batch dimension
 
 	let m1_batch_dims = &m1.dims[..m1.dims.len() - 2];
 	let m2_batch_dims = &m2.dims[..m2.dims.len() - 2];
@@ -322,6 +356,11 @@ pub fn scaled_matmul(m1: &Tensor, m2: &Tensor, scale: f64) -> Tensor {
 	}
 
 	out
+}
+
+// acc += (m1 * m2) * scale
+pub fn scaled_matmul_acc(m1: &Tensor, m2: &Tensor, scale: f64, acc: &Tensor) {
+	// TODO
 }
 
 // t = v reinterpretted as a column matrix

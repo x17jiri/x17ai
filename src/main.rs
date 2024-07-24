@@ -43,13 +43,12 @@ use crate::tensor::*;
 use std::rc::Rc;
 
 pub trait Module {
-	fn forward(&self, input: &Tensor) -> Tensor;
-	fn backward(&self, grad: &Tensor) -> Tensor;
+	fn forward(&self, x: &Tensor) -> Tensor;
+	fn backward(&self, dy: &Tensor, dx: Option<&Tensor>);
 	fn reg_params(&self, ctx: &Context);
 }
 
 pub struct Context {
-	pub training: bool,
 	pub device: Rc<dyn Device>,
 }
 
@@ -66,9 +65,13 @@ impl Context {
 struct Linear {
 	pub inputs: usize,
 	pub outputs: usize,
+
 	pub weights: Tensor,
 	pub weights_grad: Option<Tensor>,
+
 	pub scale: f64,
+	pub backward_scale: f64,
+
 	pub dtype: DType,
 }
 
@@ -76,24 +79,32 @@ impl Linear {
 	pub fn new(inputs: usize, outputs: usize, dtype: DType, ctx: &Context) -> Linear {
 		let weights = Tensor::new(&[outputs, inputs], dtype, ctx.device.clone());
 		let scale = 1.0 / (inputs as f64).sqrt();
+		let backward_scale = 1.0 / (outputs as f64).sqrt();
 		Linear {
 			inputs,
 			outputs,
+
 			weights,
 			weights_grad: None,
+
 			scale,
+			backward_scale,
+
 			dtype,
 		}
 	}
 }
 
 impl Module for Linear {
-	fn forward(&self, input: &Tensor) -> Tensor {
-		scaled_mat_vec_mul(&self.weights, &input, self.scale)
+	fn forward(&self, x: &Tensor) -> Tensor {
+		scaled_matmul(&self.weights, &x.as_col_matrix(), self.scale)
 	}
 
-	fn backward(&self, grad: &Tensor) -> Tensor {
-		// TOOD
+	fn backward(&self, dy: &Tensor, dx: Option<&Tensor>) -> Tensor {
+		if let Some(dx) = dx {
+			scaled_matmul_acc(dy.as_row_matrix(), &self.weights, self.backward_scale, dx);
+		}
+		if let Some(weights_grad) = self.weights_grad.as_ref() {}
 	}
 
 	fn reg_params(&self, ctx: &Context) {
