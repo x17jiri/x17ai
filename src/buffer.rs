@@ -12,16 +12,16 @@ pub trait Buffer {
 
 	fn new_buffer(&self, byte_size: usize) -> Rc<dyn Buffer>;
 
-	unsafe fn mat_vec_mul(
+	unsafe fn matmul(
 		&self,
-		a: &Tensor,
-		b: &Tensor,
+		mat1: &Tensor,
+		mat1_dims: [SizeAndStride; 2],
+		mat2: &Tensor,
+		mat2_dims: [SizeAndStride; 2],
 		scale: f64,
-		c: &Tensor,
-		batch: Traversal<2>,
+		result: &Tensor,
+		batch: &[TraversalDim<2>],
 	);
-
-	unsafe fn matmul(&self, a: &Tensor, b: &Tensor, scale: f64, c: &Tensor, batch: Traversal<2>);
 
 	fn format(
 		&self,
