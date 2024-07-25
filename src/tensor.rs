@@ -79,7 +79,9 @@ impl DimsConstructor {
 		}
 	}
 
-	fn push(&mut self, size: usize) {
+	// Push a new dimension with the given size
+	// Returns the stride of the new dimension
+	fn push(&mut self, size: usize) -> usize {
 		debug_assert!(self.remaining_dims > 0);
 
 		// Check that if we ignore zero length dimensions, the number of elements
@@ -93,12 +95,15 @@ impl DimsConstructor {
 			};
 		}
 
-		unsafe {
-			self.remaining_dims -= 1;
-			*self.dims.get_unchecked_mut(self.remaining_dims) =
-				SizeAndStride { size, stride: self.elems };
-		}
+		let stride = self.elems;
 		self.elems *= size;
+
+		self.remaining_dims -= 1;
+		unsafe {
+			*self.dims.get_unchecked_mut(self.remaining_dims) = SizeAndStride { size, stride };
+		}
+
+		stride
 	}
 
 	fn final_check(&self) {
@@ -179,11 +184,11 @@ impl Tensor {
 
 		// will use `Traversal` to merge the last `n` dimensions
 		let last_n = unsafe { self.dims.get_unchecked(ndim - n..) };
-		let mut merged = Traversal::new(n);
+		let mut merged = Traversal::new(n, 1);
 		for dim in last_n.iter().rev() {
-			merged.push_dim(dim.size, [dim.stride]);
+			merged.push_dim(dim.size, merged.next_out_stride, [dim.stride]);
 		}
-		let mut merged = merged.rev_dims.iter();
+		let mut merged = merged.get_rev_dims().iter();
 
 		let merged_dim = merged.next().unwrap();
 		let mut prev_stride = merged_dim.in_strides[0];
@@ -258,54 +263,53 @@ impl Tensor {
 	}
 }
 
-pub fn assert_types_compatible(a: &Tensor, b: &Tensor) {
+pub fn assert_compatible_types(a: &Tensor, b: &Tensor) {
 	if a.dtype != b.dtype {
 		panic!("incompatible dtypes");
 	}
 }
 
-pub fn assert_devices_compatible(a: &Tensor, b: &Tensor) {
+pub fn assert_compatible_devices(a: &Tensor, b: &Tensor) {
 	if !are_bufs_on_the_same_device(a.buffer.as_ref(), b.buffer.as_ref()) {
 		panic!("incompatible devices");
 	}
 }
 
 // result = m1 * m2
-pub fn matmul(mat1: &Tensor, mat2: &Tensor, scale: f64) -> Tensor {
-	assert_types_compatible(mat1, mat2);
-	assert_devices_compatible(mat1, mat2);
+pub fn gemm(
+	a: &Tensor,
+	a_batch_dims: &[SizeAndStride],
+	a_dims: [SizeAndStride; 2], // [rows, cols]
 
-	assert!(mat1.dims.len() >= 2);
-	assert!(mat2.dims.len() >= 2);
+	b: &Tensor,
+	b_batch_dims: &[SizeAndStride],
+	b_dims: [SizeAndStride; 2], // [rows, cols]
 
-	let mat1_batch_dims = &mat1.dims[..mat1.dims.len() - 2];
-	let mat2_batch_dims = &mat2.dims[..mat2.dims.len() - 2];
+	alpha: f64,
+) -> Tensor {
+	assert_compatible_types(a, b);
+	assert_compatible_devices(a, b);
 
-	let mat1_rows = mat1.dims[mat1.dims.len() - 2];
-	let mat1_cols = mat1.dims[mat1.dims.len() - 1];
-	let mat1_dims = [mat1_rows, mat1_cols];
-
-	let mat2_rows = mat2.dims[mat2.dims.len() - 2];
-	let mat2_cols = mat2.dims[mat2.dims.len() - 1];
-	let mat2_dims = [mat2_rows, mat2_cols];
-
-	if mat1_cols.size != mat2_rows.size {
+	if a[1].size != b[0].size {
 		panic!("incompatible dimensions");
 	}
 
-	let dtype = mat1.dtype;
-	let result_rows = mat1_rows.size;
-	let result_cols = mat2_cols.size;
-	let result_nonbatch_dims = [result_rows, result_cols];
+	let dtype = a.dtype;
+	let batch_ndim = a_batch_dims.len().max(b_batch_dims.len());
+	let c_dims = DimsConstructor::new(batch_ndim + 2);
+	c_dims.push(b_dims[1].size);
+	c_dims.push(a_dims[0].size);
 
-	let (batch, result_dims, result_elems) =
-		prep_batch_traversal([mat1_batch_dims, mat2_batch_dims], &result_nonbatch_dims);
-	let batch = &batch.rev_dims;
+	let batch = prep_batch_traversal(batch_ndim, [&a_dims, &b_dims], &mut c_dims);
+	let batch = batch.get_rev_dims();
 
-	let result = mat1.__new(result_elems, result_dims, dtype);
+	c_dims.final_check();
+	let c = a.__new(c_dims.elems, c_dims.dims, dtype);
 
-	let lda = mat1_rows.stride;
-	let transa = mat1_cols.stride != 1;
+	//-------------
+
+	let lda = a_dims[0].stride;
+	let transa = a_dims[1].stride != 1;
 	if transa {
 		lda = mat1_cols.stride;
 		assert!(mat1_rows.stride == 1, "at least one of the matrix dimensions must be contiguous");
@@ -407,26 +411,7 @@ pub fn scaled_matmul_acc(m1: &Tensor, m2: &Tensor, scale: f64, acc: &Tensor) {
 // t = v reinterpretted as a column matrix
 // result = (m * t) * scale
 pub fn scaled_mat_vec_mul(m: &Tensor, v: &Tensor, scale: f64) -> Tensor {
-	if m.dtype() != v.dtype() {
-		panic!("incompatible dtypes");
-	}
-	if !are_bufs_on_the_same_device(m.buffer.as_ref(), v.buffer.as_ref()) {
-		panic!("incompatible devices");
-	}
-
-	let m_batch_dims = &m.dims[..m.dims.len() - 2];
-	let v_batch_dims = &v.dims[..v.dims.len() - 1];
-	let nonbatch_out_dim = m.dims[m.dims.len() - 1].size;
-	let (traversal, out_dims, out_elems) =
-		prep_batch_traversal([&m_batch_dims, &v_batch_dims], &[nonbatch_out_dim]);
-
-	let out = m.__new(out_elems, out_dims, m.dtype);
-
-	unsafe {
-		m.buffer.mat_vec_mul(m, v, scale, &out, traversal);
-	}
-
-	out
+	// TODO
 }
 
 pub fn rms_norm(a: &Tensor, out: &Tensor) {
@@ -479,24 +464,21 @@ impl fmt::Display for Tensor {
 //--------------------------------------------------------------------------------------------------
 
 pub fn prep_batch_traversal<const N: usize>(
+	ndim: usize,
 	inputs: [&[SizeAndStride]; N],
-	nonbatch_dims: &[usize],
-) -> (Traversal<N>, SmallVec<[SizeAndStride; INLINE_DIMS]>, usize) {
+	output: &mut DimsConstructor,
+) -> Traversal<N> {
 	assert!(N > 0);
-	let ndim = inputs.iter().map(|x| x.len()).max().unwrap();
 
 	let mut traversal = Traversal::new(ndim);
-
-	let mut out_shape = DimsConstructor::new(ndim + nonbatch_dims.len());
-	for dim_size in nonbatch_dims.iter().rev().copied() {
-		out_shape.push(dim_size);
-	}
 
 	for d in (0..ndim).rev() {
 		// Get sizes and strides for the current dimension from all inputs
 		let mut in_sizes = [0; N];
 		let mut in_strides = [0; N];
 		for i in 0..N {
+			// Does the input have enough dimensions,
+			// or do we need to extend it with broadcasted dimensions?
 			if d < inputs[i].len() {
 				in_sizes[i] = inputs[i][d].size;
 				in_strides[i] = inputs[i][d].stride;
@@ -506,30 +488,26 @@ pub fn prep_batch_traversal<const N: usize>(
 			}
 		}
 
+		// TODO - what happens when one of the dimensions has size 0?
+
 		// The dim_size should be the same for all inputs except for broadcasted inputs
 		// So max() gets the dim_size of the non-broadcasted inputs.
-		let dim_size = *in_sizes.iter().max().unwrap();
+		let dim_size = in_sizes.iter().copied().max().unwrap();
 
-		out_shape.push(dim_size);
+		let out_stride = output.push(dim_size);
 
-		// Set the strides of the broadcasted inputs to 0
+		// Find inputs that need broadcasting and set their strides to 0
 		for i in 0..N {
 			if in_sizes[i] != dim_size {
-				if in_sizes[i] == 1 {
-					in_strides[i] = 0;
-				} else {
-					// cannot broadcast
-					cold_path();
-					panic!("incompatible dimensions");
-				}
+				assert!(in_sizes[i] == 1, "cannot broadcast: incompatible dimensions");
+				in_strides[i] = 0;
 			}
 		}
 
-		traversal.push_dim(dim_size, in_strides);
+		traversal.push_dim(dim_size, out_stride, in_strides);
 	}
 
-	out_shape.final_check();
-	(traversal, out_shape.dims, out_shape.elems)
+	traversal
 }
 
 #[derive(Clone)]
@@ -544,45 +522,30 @@ pub struct Traversal<const N: usize> {
 	// dims in traversal are in reverse order
 	// in other words, from smallest to largest stride
 	pub rev_dims: SmallVec<[TraversalDim<N>; INLINE_DIMS]>,
-	pub elems: usize,
 }
 
 impl<const N: usize> Traversal<N> {
 	pub fn new(ndim: usize) -> Traversal<N> {
-		if ndim == 0 {
-			Traversal {
-				rev_dims: smallvec![TraversalDim {
-					size: 1,
-					out_stride: 1,
-					in_strides: [1; N],
-				}],
-				elems: 1,
-			}
-		} else {
-			Traversal {
-				rev_dims: SmallVec::with_capacity(ndim),
-				elems: 1,
-			}
-		}
+		Traversal { rev_dims: SmallVec::with_capacity(ndim) }
 	}
 
 	// dimensions should be pushed in the order of increasing strides
-	pub fn push_dim(&mut self, size: usize, in_strides: [usize; N]) {
+	pub fn push_dim(&mut self, size: usize, out_stride: usize, in_strides: [usize; N]) {
 		if size == 1 {
 			return;
 		}
-
-		let out_stride = self.elems;
-		self.elems *= size;
 
 		// If there already are dimensions, try to merge the new dimension with the last one
 		if !self.rev_dims.is_empty() {
 			let prev = self.rev_dims.last_mut().unwrap();
 
-			let mut can_merge = true;
+			let mut can_merge;
 			#[allow(unused_parens)]
-			for i in 0..N {
-				can_merge &= (in_strides[i] == prev.in_strides[i] * prev.size);
+			{
+				can_merge = (out_stride == prev.out_stride * prev.size);
+				for i in 0..N {
+					can_merge &= (in_strides[i] == prev.in_strides[i] * prev.size);
+				}
 			}
 
 			if can_merge {
@@ -593,5 +556,16 @@ impl<const N: usize> Traversal<N> {
 
 		// Can't merge, push the new dimension
 		self.rev_dims.push(TraversalDim { size, out_stride, in_strides });
+	}
+
+	pub fn get_rev_dims(&mut self) -> &[TraversalDim<N>] {
+		if unlikely(self.rev_dims.is_empty()) {
+			self.rev_dims.push(TraversalDim {
+				size: 1,
+				out_stride: 1,
+				in_strides: [1; N],
+			});
+		}
+		&self.rev_dims
 	}
 }
