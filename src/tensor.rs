@@ -121,10 +121,10 @@ impl DimsConstructor {
 pub struct Tensor {
 	// dims in reverse order
 	dims: SmallVec<[SizeAndStride; INLINE_DIMS]>,
-	byte_offset: isize,
+	pub(crate) byte_offset: usize,
 	dtype: DType,
 	elems: usize,
-	buffer: Rc<dyn Buffer>,
+	pub(crate) buffer: Rc<dyn Buffer>,
 }
 
 impl Tensor {
@@ -172,6 +172,14 @@ impl Tensor {
 		ShapeView { tensor: self }
 	}
 
+	pub fn ndim(&self) -> usize {
+		self.dims.len()
+	}
+
+	pub fn elems(&self) -> usize {
+		self.elems
+	}
+
 	pub fn dtype(&self) -> DType {
 		self.dtype
 	}
@@ -182,9 +190,9 @@ impl Tensor {
 			panic!("cannot reshape more dimensions than the tensor has");
 		}
 
-		// use `Barch` to merge the last `n` dimensions
+		// use `Batch` to merge the last `n` dimensions
 		let last_n = unsafe { self.dims.get_unchecked(ndim - n..) };
-		let mut merged = Barch::new(n);
+		let mut merged = Batch::new(n);
 		let mut elems = 1;
 		for dim in last_n.iter().rev() {
 			merged.push_dim(dim.size, elems, [dim.stride]);
@@ -247,22 +255,6 @@ impl Tensor {
 	pub fn t(self) -> Tensor {
 		self.transposed(-2, -1)
 	}
-
-	// Reinterprets the last dimension as a row matrix
-	pub fn as_row_matrix(mut self) -> Tensor {
-		self.dims.push(SizeAndStride { size: 1, stride: 1 });
-		self
-	}
-
-	// Reinterprets the last dimension as a column matrix
-	pub fn as_col_matrix(mut self) -> Tensor {
-		let last_dim = self.dims.last_mut().unwrap();
-		let last_dim_copy = *last_dim;
-		*last_dim = SizeAndStride { size: 1, stride: 1 };
-
-		self.dims.push(last_dim_copy);
-		self
-	}
 }
 
 pub fn assert_compatible_types(a: &Tensor, b: &Tensor) {
@@ -277,7 +269,7 @@ pub fn assert_compatible_devices(a: &Tensor, b: &Tensor) {
 	}
 }
 
-// result = m1 * m2
+// c = a * b * alpha
 pub fn gemm(
 	a: &Tensor,
 	a_batch_dims: &[SizeAndStride],
@@ -296,13 +288,16 @@ pub fn gemm(
 		panic!("incompatible dimensions");
 	}
 	let c_dims = [
-		SizeAndStride { size: a_dims[0], stride: b_dims[1] },
-		SizeAndStride { size: b_dims[1], stride: 1 },
+		SizeAndStride {
+			size: a_dims[0].size,
+			stride: b_dims[1].size,
+		},
+		SizeAndStride { size: b_dims[1].size, stride: 1 },
 	];
 
 	let dtype = a.dtype;
 	let batch_ndim = a_batch_dims.len().max(b_batch_dims.len());
-	let c_dims_ctor = DimsConstructor::new(batch_ndim + 2);
+	let mut c_dims_ctor = DimsConstructor::new(batch_ndim + 2);
 	// Note: dims need to be pushed to ctor in reverse order
 	c_dims_ctor.push(c_dims[1].size);
 	c_dims_ctor.push(c_dims[0].size);
@@ -313,35 +308,38 @@ pub fn gemm(
 	c_dims_ctor.final_check();
 	let c = a.__new(c_dims_ctor.elems, c_dims_ctor.dims, dtype);
 
-	let lda = a_dims[0].stride;
-	let transa = a_dims[1].stride != 1;
-	if transa {
-		lda = a_dims[1].stride;
-		assert!(a_dims[0].stride == 1, "at least one of the matrix dimensions must be contiguous");
-	}
+	let a_rows_contiguous = a_dims[0].stride == 1;
+	let a_cols_contiguous = a_dims[1].stride == 1;
+	let transa = !a_rows_contiguous;
+	let lda = if a_rows_contiguous { a_dims[0].stride } else { a_dims[1].stride };
+	assert!(
+		a_rows_contiguous || a_cols_contiguous,
+		"at least one of the matrix dimensions must be contiguous"
+	);
 
-	let ldb = b_dims[0].stride;
-	let transb = b_dims[1].stride != 1;
-	if transb {
-		ldb = b_dims[1].stride;
-		assert!(b_dims[0].stride == 1, "at least one of the matrix dimensions must be contiguous");
-	}
+	let b_rows_contiguous = b_dims[0].stride == 1;
+	let b_cols_contiguous = b_dims[1].stride == 1;
+	let transb = !b_rows_contiguous;
+	let ldb = if b_rows_contiguous { b_dims[0].stride } else { b_dims[1].stride };
+	assert!(
+		b_rows_contiguous || b_cols_contiguous,
+		"at least one of the matrix dimensions must be contiguous"
+	);
 
 	let m = c_dims[0].size;
 	let n = c_dims[1].size;
 	let k = a_dims[1].size;
 
-	let ldc = c_dims[0].stride;
-	let transc = c_dims[1].stride != 1;
-	if transc {
-		ldc = c_dims[1].stride;
+	let c_rows_contiguous = c_dims[0].stride == 1;
+	let c_cols_contiguous = c_dims[1].stride == 1;
+	let transc = !c_rows_contiguous;
+	let ldc = if c_rows_contiguous { c_dims[0].stride } else { c_dims[1].stride };
+	assert!(
+		c_rows_contiguous || c_cols_contiguous,
+		"at least one of the matrix dimensions must be contiguous"
+	);
 
-		// C^T = B^T * A^T
-		let (transa, transb) = (!transb, !transa);
-		let (m, n) = (n, m);
-		let (a, b) = (b, a);
-		let (lda, ldb) = (ldb, lda);
-
+	if !transc {
 		unsafe {
 			c.buffer.gemm(
 				dtype, transa, transb, m, n, k, // .
@@ -350,6 +348,12 @@ pub fn gemm(
 			);
 		}
 	} else {
+		// C^T = B^T * A^T
+		let (transa, transb) = (!transb, !transa);
+		let (m, n) = (n, m);
+		let (a, b) = (b, a);
+		let (lda, ldb) = (ldb, lda);
+
 		unsafe {
 			c.buffer.gemm(
 				dtype, transa, transb, m, n, k, // .
@@ -368,26 +372,22 @@ pub fn rms_norm(a: &Tensor, out: &Tensor) {
 
 fn fmt_0d(tensor: &Tensor, f: &mut fmt::Formatter, off: usize) -> fmt::Result {
 	let byte_offset = tensor.byte_offset + off * tensor.dtype.bytes();
-	tensor.buffer.format(byte_offset, tensor.dtype, f, 1)
+	tensor.buffer.format(f, tensor.dtype, byte_offset, SizeAndStride { size: 1, stride: 1 })
 }
 
 fn fmt_1d(tensor: &Tensor, f: &mut fmt::Formatter, off: usize) -> fmt::Result {
 	let byte_offset = tensor.byte_offset + off * tensor.dtype.bytes();
 	write!(f, "[")?;
-	let ndim = tensor.shape.ndim();
-	let len = tensor.shape.dims()[ndim - 1];
-	tensor.buffer.format(byte_offset, tensor.dtype, f, len)?;
+	tensor.buffer.format(f, tensor.dtype, byte_offset, tensor.dims[tensor.ndim() - 1])?;
 	write!(f, "]")
 }
 
 fn fmt_2d(tensor: &Tensor, f: &mut fmt::Formatter, off: usize) -> fmt::Result {
 	writeln!(f, "[")?;
-	let ndim = tensor.shape.ndim();
-	let len = tensor.shape.dims()[ndim - 2];
-	let stride = tensor.shape.dims()[ndim - 1];
-	for i in 0..len {
+	let dim = tensor.dims[tensor.ndim() - 2];
+	for i in 0..dim.size {
 		write!(f, "\t")?;
-		fmt_1d(tensor, f, off + i * stride)?;
+		fmt_1d(tensor, f, off + i * dim.stride)?;
 		writeln!(f, ",")?;
 	}
 	write!(f, "]")
@@ -396,13 +396,12 @@ fn fmt_2d(tensor: &Tensor, f: &mut fmt::Formatter, off: usize) -> fmt::Result {
 impl fmt::Display for Tensor {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		write!(f, "Tensor(")?;
-		let ndim = self.shape.ndim();
-		match ndim {
+		match self.ndim() {
 			0 => fmt_0d(self, f, 0)?,
 			1 => fmt_1d(self, f, 0)?,
 			2 => fmt_2d(self, f, 0)?,
 			_ => {
-				todo!("Tensor with {} dimensions", ndim);
+				todo!("Tensor with {} dimensions", self.ndim());
 			},
 		};
 		write!(f, ")")
@@ -415,10 +414,10 @@ pub fn prep_batch<const N: usize>(
 	ndim: usize,
 	inputs: [&[SizeAndStride]; N],
 	output: &mut DimsConstructor,
-) -> Barch<N> {
+) -> Batch<N> {
 	assert!(N > 0);
 
-	let mut batch = Barch::new(ndim);
+	let mut batch = Batch::new(ndim);
 
 	for d in (0..ndim).rev() {
 		// Get sizes and strides for the current dimension from all inputs
@@ -459,22 +458,22 @@ pub fn prep_batch<const N: usize>(
 }
 
 #[derive(Clone)]
-pub struct BarchDim<const N: usize> {
+pub struct BatchDim<const N: usize> {
 	pub size: usize,
 	pub out_stride: usize,
 	pub in_strides: [usize; N],
 }
 
 #[derive(Clone)]
-pub struct Barch<const N: usize> {
+pub struct Batch<const N: usize> {
 	// dims in batch are in reverse order
 	// in other words, from smallest to largest stride
-	pub rev_dims: SmallVec<[BarchDim<N>; INLINE_DIMS]>,
+	pub rev_dims: SmallVec<[BatchDim<N>; INLINE_DIMS]>,
 }
 
-impl<const N: usize> Barch<N> {
-	pub fn new(ndim: usize) -> Barch<N> {
-		Barch { rev_dims: SmallVec::with_capacity(ndim) }
+impl<const N: usize> Batch<N> {
+	pub fn new(ndim: usize) -> Batch<N> {
+		Batch { rev_dims: SmallVec::with_capacity(ndim) }
 	}
 
 	// dimensions should be pushed in the order of increasing strides
@@ -503,12 +502,12 @@ impl<const N: usize> Barch<N> {
 		}
 
 		// Can't merge, push the new dimension
-		self.rev_dims.push(BarchDim { size, out_stride, in_strides });
+		self.rev_dims.push(BatchDim { size, out_stride, in_strides });
 	}
 
-	pub fn get_rev_dims(&mut self) -> &[BarchDim<N>] {
+	pub fn get_rev_dims(&mut self) -> &[BatchDim<N>] {
 		if unlikely(self.rev_dims.is_empty()) {
-			self.rev_dims.push(BarchDim {
+			self.rev_dims.push(BatchDim {
 				size: 1,
 				out_stride: 1,
 				in_strides: [1; N],

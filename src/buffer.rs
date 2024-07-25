@@ -33,15 +33,15 @@ pub trait Buffer {
 		beta: f64,
 		c: &Tensor,
 		ldc: usize, // number of elements between two consecutive rows in C
-		batch: Traversal<2>,
+		batch: Batch<2>,
 	);
 
 	fn format(
 		&self,
-		byte_offset: usize,
-		dtype: DType,
 		f: &mut fmt::Formatter,
-		count: usize,
+		dtype: DType,
+		byte_offset: usize,
+		size_stride: SizeAndStride,
 	) -> fmt::Result;
 }
 

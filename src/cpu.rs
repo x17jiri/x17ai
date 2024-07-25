@@ -20,11 +20,12 @@ impl CPUDevice {
 	}
 }
 
+type CPUBufferElement = u64;
+
 #[repr(C)] // make sure the addr of base == the addr of the struct
 pub struct CPUBuffer {
 	base: BufferBase,
-	name: String,
-	memory: Box<[Cell<u64>]>,
+	memory: Box<[Cell<CPUBufferElement>]>,
 }
 
 impl Device for CPUDevice {
@@ -32,40 +33,16 @@ impl Device for CPUDevice {
 		&self.name
 	}
 
-	fn new_buffer(self: Rc<Self>, size_bytes: usize, name: String) -> Rc<dyn Buffer> {
+	fn new_buffer(self: Rc<Self>, size_bytes: usize) -> Rc<dyn Buffer> {
+		let elem_size = std::mem::size_of::<CPUBufferElement>();
+		let elems = (size_bytes + elem_size - 1) / elem_size;
 		Rc::new(CPUBuffer {
 			base: BufferBase {
 				device: self.clone(),
 				capacity: size_bytes,
 			},
-			name,
-			memory: vec![Cell::new(0); size_bytes].into_boxed_slice(),
+			memory: vec![Cell::new(0); elems].into_boxed_slice(),
 		})
-	}
-}
-
-struct BatchTraversal<'a, T> {
-	ptr: *const Cell<T>,
-	batch_size: usize,
-	input_size: usize,
-	phantom: std::marker::PhantomData<&'a T>,
-}
-
-impl<'a, T> Iterator for BatchTraversal<'a, T> {
-	type Item = &'a [Cell<T>];
-
-	fn next(&mut self) -> Option<Self::Item> {
-		if self.batch_size == 0 {
-			return None;
-		}
-
-		let data = self.ptr;
-		let len = self.input_size;
-		self.ptr = unsafe { self.ptr.add(len) };
-
-		self.batch_size -= 1;
-
-		Some(unsafe { std::slice::from_raw_parts(data, len) })
 	}
 }
 
@@ -82,25 +59,11 @@ impl CPUBuffer {
 	}
 
 	fn cast<T>(&self, byte_offset: usize, elems: usize) -> &[Cell<T>] {
-		let ptr = self.memory.as_ptr().wrapping_add(byte_offset);
+		let ptr = self.memory.as_ptr();
+		let ptr = ptr as *const Cell<u8>;
+		let ptr = ptr.wrapping_add(byte_offset);
 		let ptr = ptr as *const Cell<T>;
 		unsafe { std::slice::from_raw_parts(ptr, elems) }
-	}
-
-	fn traversal<T>(
-		&self,
-		byte_offset: usize,
-		batch_size: usize,
-		input_size: usize,
-	) -> BatchTraversal<T> {
-		let ptr = self.memory.as_ptr().wrapping_add(byte_offset);
-		let ptr = ptr as *const Cell<T>;
-		BatchTraversal {
-			ptr,
-			batch_size,
-			input_size,
-			phantom: std::marker::PhantomData,
-		}
 	}
 
 	fn zeros_f32_(&self, byte_offset: usize, elems: usize) {
@@ -174,9 +137,9 @@ impl Buffer for CPUBuffer {
 	fn zeros_(&self, tensor: &Tensor) {
 		debug_assert!(self.is_on_my_device(tensor));
 
-		match tensor.dtype {
+		match tensor.dtype() {
 			DType { kind: DTypeKind::Float, bits: 32 } => {
-				self.zeros_f32_(tensor.byte_offset, tensor.shape.elems())
+				self.zeros_f32_(tensor.byte_offset, tensor.elems())
 			},
 			_ => todo!(),
 		}
@@ -185,9 +148,9 @@ impl Buffer for CPUBuffer {
 	fn randn_(&self, tensor: &Tensor) {
 		debug_assert!(self.is_on_my_device(tensor));
 
-		match tensor.dtype {
+		match tensor.dtype() {
 			DType { kind: DTypeKind::Float, bits: 32 } => {
-				self.randn_f32_(tensor.byte_offset, tensor.shape.elems())
+				self.randn_f32_(tensor.byte_offset, tensor.elems())
 			},
 			_ => todo!(),
 		}
