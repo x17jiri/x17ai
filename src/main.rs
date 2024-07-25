@@ -19,29 +19,23 @@ pub enum Error {
 	TooManyElems,
 }
 
-mod alloc;
 mod buffer;
 mod cpu;
 mod device;
 mod dtype;
-mod expr;
 mod format;
 mod rand;
-mod shape;
 mod tensor;
 
-use crate::alloc::*;
 use crate::buffer::*;
 use crate::cpu::*;
 use crate::device::*;
 use crate::dtype::*;
-//use crate::expr::*;
 use crate::format::*;
 use crate::rand::*;
-use crate::shape::*;
 use crate::tensor::*;
 use std::rc::Rc;
-
+/*
 pub trait Module {
 	fn forward(&self, x: &Tensor) -> Tensor;
 	fn backward(&self, dy: &Tensor, dx: Option<&Tensor>);
@@ -238,7 +232,7 @@ impl Module for Transformer {
 		swiglu_(c, output);
 	}
 }
-
+*/
 fn main() {
 	let dev = CPUDevice::new("CPU".to_string());
 	let buf = dev.new_buffer(1024 * 1024, "my_buf".to_string());

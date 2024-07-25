@@ -182,11 +182,13 @@ impl Tensor {
 			panic!("cannot reshape more dimensions than the tensor has");
 		}
 
-		// will use `Traversal` to merge the last `n` dimensions
+		// use `Barch` to merge the last `n` dimensions
 		let last_n = unsafe { self.dims.get_unchecked(ndim - n..) };
-		let mut merged = Traversal::new(n, 1);
+		let mut merged = Barch::new(n);
+		let mut elems = 1;
 		for dim in last_n.iter().rev() {
-			merged.push_dim(dim.size, merged.next_out_stride, [dim.stride]);
+			merged.push_dim(dim.size, elems, [dim.stride]);
+			elems *= dim.size;
 		}
 		let mut merged = merged.get_rev_dims().iter();
 
@@ -290,128 +292,74 @@ pub fn gemm(
 	assert_compatible_types(a, b);
 	assert_compatible_devices(a, b);
 
-	if a[1].size != b[0].size {
+	if a_dims[1].size != b_dims[0].size {
 		panic!("incompatible dimensions");
 	}
+	let c_dims = [
+		SizeAndStride { size: a_dims[0], stride: b_dims[1] },
+		SizeAndStride { size: b_dims[1], stride: 1 },
+	];
 
 	let dtype = a.dtype;
 	let batch_ndim = a_batch_dims.len().max(b_batch_dims.len());
-	let c_dims = DimsConstructor::new(batch_ndim + 2);
-	c_dims.push(b_dims[1].size);
-	c_dims.push(a_dims[0].size);
+	let c_dims_ctor = DimsConstructor::new(batch_ndim + 2);
+	// Note: dims need to be pushed to ctor in reverse order
+	c_dims_ctor.push(c_dims[1].size);
+	c_dims_ctor.push(c_dims[0].size);
 
-	let batch = prep_batch_traversal(batch_ndim, [&a_dims, &b_dims], &mut c_dims);
+	let batch = prep_batch(batch_ndim, [&a_dims, &b_dims], &mut c_dims_ctor);
 	let batch = batch.get_rev_dims();
 
-	c_dims.final_check();
-	let c = a.__new(c_dims.elems, c_dims.dims, dtype);
-
-	//-------------
+	c_dims_ctor.final_check();
+	let c = a.__new(c_dims_ctor.elems, c_dims_ctor.dims, dtype);
 
 	let lda = a_dims[0].stride;
 	let transa = a_dims[1].stride != 1;
 	if transa {
-		lda = mat1_cols.stride;
-		assert!(mat1_rows.stride == 1, "at least one of the matrix dimensions must be contiguous");
+		lda = a_dims[1].stride;
+		assert!(a_dims[0].stride == 1, "at least one of the matrix dimensions must be contiguous");
 	}
 
-	let ldb = mat2_rows.stride;
-	let transb = mat2_cols.stride != 1;
+	let ldb = b_dims[0].stride;
+	let transb = b_dims[1].stride != 1;
 	if transb {
-		ldb = mat2_cols.stride;
-		assert!(mat2_rows.stride == 1, "at least one of the matrix dimensions must be contiguous");
+		ldb = b_dims[1].stride;
+		assert!(b_dims[0].stride == 1, "at least one of the matrix dimensions must be contiguous");
 	}
 
-	let m = result_rows;
-	let n = result_cols;
-	let k = mat1_cols.size;
+	let m = c_dims[0].size;
+	let n = c_dims[1].size;
+	let k = a_dims[1].size;
 
-	let transc = false; // TODO
-	let ldc = result_cols;
+	let ldc = c_dims[0].stride;
+	let transc = c_dims[1].stride != 1;
 	if transc {
-		ldc = result_rows; // TODO
+		ldc = c_dims[1].stride;
+
+		// C^T = B^T * A^T
+		let (transa, transb) = (!transb, !transa);
+		let (m, n) = (n, m);
+		let (a, b) = (b, a);
+		let (lda, ldb) = (ldb, lda);
+
 		unsafe {
-			// C^T = B^T * A^T
-			mat1.buffer.gemm(
-				dtype, !transb, !transa, n, m, k, // .
-				scale, mat2, ldb, mat1, lda, // .
-				0.0, &result, ldc, batch,
+			c.buffer.gemm(
+				dtype, transa, transb, m, n, k, // .
+				alpha, a, lda, b, ldb, // .
+				0.0, &c, ldc, batch,
 			);
 		}
 	} else {
 		unsafe {
-			mat1.buffer.gemm(
-				dtype, // .
-				transa, transb, m, n, k, // .
-				scale, mat1, lda, mat2, ldb, // .
-				0.0, &result, ldc, batch,
+			c.buffer.gemm(
+				dtype, transa, transb, m, n, k, // .
+				alpha, a, lda, b, ldb, // .
+				0.0, &c, ldc, batch,
 			);
 		}
 	}
-	result
-}
 
-// We multiply a row vector by a matrix:
-//
-//                      [[ 1 2 3 ]
-// result = [ 1 2 3 ] *  [ 4 5 6 ]
-//                       [ 7 8 9 ]]
-//
-// We can do the following optimization:
-// - if there is a batch of the row vectors
-// - and the matrix stays the same for all the row vectors in the batch
-// - then we can turn the entire batch into a single matrix by matrix multiplication
-//
-//                   [[ row1 ]    [[ 1 2 3 ]
-// result_of_batch =  [ row2 ]  *  [ 4 5 6 ]
-//                    [ row2 ]]    [ 7 8 9 ]]
-//
-pub fn matmul_row_mat(row: &Tensor, mat: &Tensor, scale: f64) -> Tensor {
-	assert_types_compatible(row, mat);
-	assert_devices_compatible(row, mat);
-
-	let row_batch_dims = &row.dims[..row.dims.len() - 1];
-	let mat_batch_dims = &mat.dims[..mat.dims.len() - 2];
-
-	let row_cols = row.dims[row.dims.len() - 1].size;
-	let mat_rows = mat.dims[mat.dims.len() - 2].size;
-	let mat_cols = mat.dims[mat.dims.len() - 1].size;
-
-	if row_cols != mat_rows {
-		panic!("incompatible dimensions");
-	}
-}
-
-pub fn matmul_mat_col(mat: &Tensor, col: &Tensor, scale: f64) -> Tensor {
-	assert_types_compatible(mat, col);
-	assert_devices_compatible(mat, col);
-
-	// TODO
-}
-
-pub fn matmul_row_col(row: &Tensor, col: &Tensor, scale: f64) -> Tensor {
-	assert_types_compatible(row, col);
-	assert_devices_compatible(row, col);
-
-	// TODO
-}
-
-pub fn matmul_col_row(col: &Tensor, row: &Tensor, scale: f64) -> Tensor {
-	assert_types_compatible(col, row);
-	assert_devices_compatible(col, row);
-
-	// TODO
-}
-
-// acc += (m1 * m2) * scale
-pub fn scaled_matmul_acc(m1: &Tensor, m2: &Tensor, scale: f64, acc: &Tensor) {
-	// TODO
-}
-
-// t = v reinterpretted as a column matrix
-// result = (m * t) * scale
-pub fn scaled_mat_vec_mul(m: &Tensor, v: &Tensor, scale: f64) -> Tensor {
-	// TODO
+	c
 }
 
 pub fn rms_norm(a: &Tensor, out: &Tensor) {
@@ -463,14 +411,14 @@ impl fmt::Display for Tensor {
 
 //--------------------------------------------------------------------------------------------------
 
-pub fn prep_batch_traversal<const N: usize>(
+pub fn prep_batch<const N: usize>(
 	ndim: usize,
 	inputs: [&[SizeAndStride]; N],
 	output: &mut DimsConstructor,
-) -> Traversal<N> {
+) -> Barch<N> {
 	assert!(N > 0);
 
-	let mut traversal = Traversal::new(ndim);
+	let mut batch = Barch::new(ndim);
 
 	for d in (0..ndim).rev() {
 		// Get sizes and strides for the current dimension from all inputs
@@ -504,29 +452,29 @@ pub fn prep_batch_traversal<const N: usize>(
 			}
 		}
 
-		traversal.push_dim(dim_size, out_stride, in_strides);
+		batch.push_dim(dim_size, out_stride, in_strides);
 	}
 
-	traversal
+	batch
 }
 
 #[derive(Clone)]
-pub struct TraversalDim<const N: usize> {
+pub struct BarchDim<const N: usize> {
 	pub size: usize,
 	pub out_stride: usize,
 	pub in_strides: [usize; N],
 }
 
 #[derive(Clone)]
-pub struct Traversal<const N: usize> {
-	// dims in traversal are in reverse order
+pub struct Barch<const N: usize> {
+	// dims in batch are in reverse order
 	// in other words, from smallest to largest stride
-	pub rev_dims: SmallVec<[TraversalDim<N>; INLINE_DIMS]>,
+	pub rev_dims: SmallVec<[BarchDim<N>; INLINE_DIMS]>,
 }
 
-impl<const N: usize> Traversal<N> {
-	pub fn new(ndim: usize) -> Traversal<N> {
-		Traversal { rev_dims: SmallVec::with_capacity(ndim) }
+impl<const N: usize> Barch<N> {
+	pub fn new(ndim: usize) -> Barch<N> {
+		Barch { rev_dims: SmallVec::with_capacity(ndim) }
 	}
 
 	// dimensions should be pushed in the order of increasing strides
@@ -555,12 +503,12 @@ impl<const N: usize> Traversal<N> {
 		}
 
 		// Can't merge, push the new dimension
-		self.rev_dims.push(TraversalDim { size, out_stride, in_strides });
+		self.rev_dims.push(BarchDim { size, out_stride, in_strides });
 	}
 
-	pub fn get_rev_dims(&mut self) -> &[TraversalDim<N>] {
+	pub fn get_rev_dims(&mut self) -> &[BarchDim<N>] {
 		if unlikely(self.rev_dims.is_empty()) {
-			self.rev_dims.push(TraversalDim {
+			self.rev_dims.push(BarchDim {
 				size: 1,
 				out_stride: 1,
 				in_strides: [1; N],

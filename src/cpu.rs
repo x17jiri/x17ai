@@ -20,6 +20,13 @@ impl CPUDevice {
 	}
 }
 
+#[repr(C)] // make sure the addr of base == the addr of the struct
+pub struct CPUBuffer {
+	base: BufferBase,
+	name: String,
+	memory: Box<[Cell<u64>]>,
+}
+
 impl Device for CPUDevice {
 	fn name(&self) -> &str {
 		&self.name
@@ -60,13 +67,6 @@ impl<'a, T> Iterator for BatchTraversal<'a, T> {
 
 		Some(unsafe { std::slice::from_raw_parts(data, len) })
 	}
-}
-
-#[repr(C)] // make sure the addr of base == the addr of the struct
-pub struct CPUBuffer {
-	base: BufferBase,
-	name: String,
-	memory: Box<[Cell<u8>]>,
 }
 
 impl CPUBuffer {
