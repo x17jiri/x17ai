@@ -12,15 +12,28 @@ pub trait Buffer {
 
 	fn new_buffer(&self, byte_size: usize) -> Rc<dyn Buffer>;
 
-	unsafe fn matmul(
+	// All matrices are stored in row-major order.
+	// Example:
+	//     [ 1 2 3
+	// A =   4 5 6   ->  [ 1 2 3 4 5 6 7 8 9 ]
+	//       7 8 9 ]
+	unsafe fn gemm(
 		&self,
-		mat1: &Tensor,
-		mat1_dims: [SizeAndStride; 2],
-		mat2: &Tensor,
-		mat2_dims: [SizeAndStride; 2],
-		scale: f64,
-		result: &Tensor,
-		batch: &[TraversalDim<2>],
+		dtype: DType,
+		transa: bool,
+		transb: bool,
+		m: usize, // rows in A. If transa, then rows in A after the transposition
+		n: usize, // cols in B. If transb, then cols in B after the transposition
+		k: usize, // cols in A. If transa, then cols in A after the transposition
+		alpha: f64,
+		a: &Tensor,
+		lda: usize, // number of elements between two consecutive rows in A
+		b: &Tensor,
+		ldb: usize, // number of elements between two consecutive rows in B
+		beta: f64,
+		c: &Tensor,
+		ldc: usize, // number of elements between two consecutive rows in C
+		batch: Traversal<2>,
 	);
 
 	fn format(

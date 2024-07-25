@@ -293,6 +293,7 @@ pub fn matmul(mat1: &Tensor, mat2: &Tensor, scale: f64) -> Tensor {
 		panic!("incompatible dimensions");
 	}
 
+	let dtype = mat1.dtype;
 	let result_rows = mat1_rows.size;
 	let result_cols = mat2_cols.size;
 	let result_nonbatch_dims = [result_rows, result_cols];
@@ -301,12 +302,45 @@ pub fn matmul(mat1: &Tensor, mat2: &Tensor, scale: f64) -> Tensor {
 		prep_batch_traversal([mat1_batch_dims, mat2_batch_dims], &result_nonbatch_dims);
 	let batch = &batch.rev_dims;
 
-	let result = mat1.__new(result_elems, result_dims, mat1.dtype);
+	let result = mat1.__new(result_elems, result_dims, dtype);
 
-	unsafe {
-		mat1.buffer.matmul(mat1, mat1_dims, mat2, mat2_dims, scale, &result, batch);
+	let lda = mat1_rows.stride;
+	let transa = mat1_cols.stride != 1;
+	if transa {
+		lda = mat1_cols.stride;
+		assert!(mat1_rows.stride == 1, "at least one of the matrix dimensions must be contiguous");
 	}
 
+	let ldb = mat2_rows.stride;
+	let transb = mat2_cols.stride != 1;
+	if transb {
+		ldb = mat2_cols.stride;
+		assert!(mat2_rows.stride == 1, "at least one of the matrix dimensions must be contiguous");
+	}
+
+	let m = result_rows;
+	let n = result_cols;
+	let k = mat1_cols.size;
+
+	let transc = false; // TODO
+	let ldc = result_cols;
+	if transc {
+		ldc = result_rows; // TODO
+		unsafe {
+			// C^T = B^T * A^T
+			mat1.buffer.gemm(
+				dtype, !transb, !transa, n, m, k, scale, mat2, ldb, mat1, lda, 0.0, &result, ldc,
+				batch,
+			);
+		}
+	} else {
+		unsafe {
+			mat1.buffer.gemm(
+				dtype, transa, transb, m, n, k, scale, mat1, lda, mat2, ldb, 0.0, &result, ldc,
+				batch,
+			);
+		}
+	}
 	result
 }
 
