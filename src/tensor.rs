@@ -329,15 +329,18 @@ pub fn matmul(mat1: &Tensor, mat2: &Tensor, scale: f64) -> Tensor {
 		unsafe {
 			// C^T = B^T * A^T
 			mat1.buffer.gemm(
-				dtype, !transb, !transa, n, m, k, scale, mat2, ldb, mat1, lda, 0.0, &result, ldc,
-				batch,
+				dtype, !transb, !transa, n, m, k, // .
+				scale, mat2, ldb, mat1, lda, // .
+				0.0, &result, ldc, batch,
 			);
 		}
 	} else {
 		unsafe {
 			mat1.buffer.gemm(
-				dtype, transa, transb, m, n, k, scale, mat1, lda, mat2, ldb, 0.0, &result, ldc,
-				batch,
+				dtype, // .
+				transa, transb, m, n, k, // .
+				scale, mat1, lda, mat2, ldb, // .
+				0.0, &result, ldc, batch,
 			);
 		}
 	}
