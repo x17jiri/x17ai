@@ -8,9 +8,9 @@ pub trait Buffer {
 	fn zeros_(&self, tensor: &Tensor);
 	fn randn_(&self, tensor: &Tensor);
 
-	fn rms_norm(&self, a: &Tensor, out: &Tensor, params: &ReduceParams);
-
 	fn new_buffer(&self, byte_size: usize) -> Rc<dyn Buffer>;
+
+	unsafe fn rms_norm(&self, a: &Tensor, out: &Tensor, dim_size: usize, eps: f64, batch: Batch<1>);
 
 	// All matrices are stored in row-major order.
 	// Example:
@@ -19,7 +19,6 @@ pub trait Buffer {
 	//       7 8 9 ]
 	unsafe fn gemm(
 		&self,
-		dtype: DType,
 		transa: bool,
 		transb: bool,
 		m: usize, // rows in A. If transa, then rows in A after the transposition

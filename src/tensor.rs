@@ -37,8 +37,14 @@ impl Index<isize> for ShapeView<'_> {
 	type Output = usize;
 
 	fn index(&self, index: isize) -> &Self::Output {
-		let index = self.tensor.__dim_to_usize(index);
+		let index = self.tensor.__dim_to_internal(index);
 		unsafe { &self.tensor.dims.get_unchecked(index).size }
+	}
+}
+
+impl std::cmp::PartialEq<ShapeView<'_>> for ShapeView<'_> {
+	fn eq(&self, other: &ShapeView) -> bool {
+		self.tensor.dims == other.tensor.dims
 	}
 }
 
@@ -342,7 +348,7 @@ pub fn gemm(
 	if !transc {
 		unsafe {
 			c.buffer.gemm(
-				dtype, transa, transb, m, n, k, // .
+				transa, transb, m, n, k, // .
 				alpha, a, lda, b, ldb, // .
 				0.0, &c, ldc, batch,
 			);
@@ -356,7 +362,7 @@ pub fn gemm(
 
 		unsafe {
 			c.buffer.gemm(
-				dtype, transa, transb, m, n, k, // .
+				transa, transb, m, n, k, // .
 				alpha, a, lda, b, ldb, // .
 				0.0, &c, ldc, batch,
 			);

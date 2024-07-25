@@ -156,16 +156,23 @@ impl Buffer for CPUBuffer {
 		}
 	}
 
-	fn rms_norm(&self, input: &Tensor, output: &Tensor, params: &ReduceParams) {
-		debug_assert!(self.is_on_my_device(input));
-		debug_assert!(self.is_on_my_device(output));
-		debug_assert!(input.shape == output.shape);
-		debug_assert!(input.dtype == output.dtype);
+	unsafe fn rms_norm(
+		&self,
+		a: &Tensor,
+		out: &Tensor,
+		dim_size: usize,
+		eps: f64,
+		batch: Batch<1>,
+	) {
+		debug_assert!(self.is_on_my_device(a));
+		debug_assert!(self.is_on_my_device(out));
+		debug_assert!(a.shape() == out.shape());
+		debug_assert!(a.dtype() == out.dtype());
 		let (batch_dims, input_dim) = input.shape.split(-1);
 		debug_assert!(params.batch_size == batch_dims.iter().product());
 		debug_assert!(params.input_size == input_dim.iter().product());
 
-		match input.dtype {
+		match input.dtype() {
 			DType { kind: DTypeKind::Float, bits: 32 } => self.rms_norm_f32_(
 				input.byte_offset,
 				output.byte_offset,
