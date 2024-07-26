@@ -58,44 +58,86 @@ impl CPUBuffer {
 		is_buf_owned_by_device(tensor.buffer.as_ref(), self.base.device.as_ref())
 	}
 
-	fn cast<T>(&self, byte_offset: usize, elems: usize) -> &[Cell<T>] {
+	fn get_buffer_of(&self, t: &Tensor) -> &CPUBuffer {
+		debug_assert!(self.is_on_my_device(t));
+		let buf = t.buffer.as_ref();
+		let buf = buf as *const dyn Buffer;
+		let buf = buf as *const CPUBuffer;
+		unsafe { &*buf }
+	}
+
+	fn cast<T>(&self, offset: usize, elems: usize) -> &[Cell<T>] {
 		let ptr = self.memory.as_ptr();
-		let ptr = ptr as *const Cell<u8>;
-		let ptr = ptr.wrapping_add(byte_offset);
 		let ptr = ptr as *const Cell<T>;
+		let ptr = ptr.wrapping_add(offset);
 		unsafe { std::slice::from_raw_parts(ptr, elems) }
 	}
 
-	fn zeros_f32_(&self, byte_offset: usize, elems: usize) {
-		let data = self.cast::<f32>(byte_offset, elems);
+	fn zeros_f32_(&self, offset: usize, elems: usize) {
+		let data = self.cast::<f32>(offset, elems);
 		for val in data {
 			val.set(0.0);
 		}
 	}
 
-	fn randn_f32_(&self, byte_offset: usize, elems: usize) {
-		let data = self.cast::<f32>(byte_offset, elems);
+	fn randn_f32_(&self, offset: usize, elems: usize) {
+		let data = self.cast::<f32>(offset, elems);
 		let mut rng = self.device().rng.borrow_mut();
 		for val in data {
 			val.set(rng.get_normal() as f32);
 		}
 	}
 
-	fn rms_norm_f32_(
+	fn rms_norm_dtype(
 		&self,
-		i_byte_offset: usize,
-		o_byte_offset: usize,
-		batch_size: usize,
-		input_size: usize,
+		dtype: DType,
+		offset: usize,
+		a: &Self,
+		a_offset: usize,
+		dim_size: usize,
+		eps: f64,
+		batch: &[BatchDim<1>],
 	) {
-		let i_batch = self.traversal::<f32>(i_byte_offset, batch_size, input_size);
-		let o_batch = self.traversal::<f32>(o_byte_offset, batch_size, input_size);
-		for (i_vec, o_vec) in i_batch.zip(o_batch) {
-			let sqr_sum: f32 = i_vec.iter().map(|x| x.get() * x.get()).sum();
-			let scale = ((input_size as f32) / sqr_sum).sqrt();
-			for (i, o) in i_vec.iter().zip(o_vec) {
-				o.set(i.get() * scale);
+		if !batch.is_empty() {
+			let batch_dim = batch[0];
+			let batch = &batch[1..];
+			for i in 0..batch_dim.size {
+				self.rms_norm_dtype(
+					dtype,
+					offset + i * batch_dim.out_stride,
+					a,
+					a_offset + i * batch_dim.in_strides[0],
+					dim_size,
+					eps,
+					batch,
+				);
 			}
+			return;
+		}
+
+		match dtype {
+			DType { kind: DTypeKind::Float, bits: 32 } => {
+				self.rms_norm_f32(offset, a, a_offset, dim_size, eps)
+			},
+			_ => todo!(),
+		}
+	}
+
+	fn rms_norm_f32(&self, offset: usize, a: &Self, a_offset: usize, dim_size: usize, eps: f64) {
+		let out_vec = self.cast::<f32>(offset, dim_size);
+		let in_vec = a.cast::<f32>(a_offset, dim_size);
+
+		let mut sqr_sum = eps;
+		for i in in_vec {
+			let i = i.get() as f64;
+			sqr_sum += i * i;
+		}
+
+		let scale = ((dim_size as f64) / sqr_sum).sqrt();
+
+		for (o, i) in out_vec.iter().zip(in_vec) {
+			let i = i.get() as f64;
+			o.set((i * scale) as f32);
 		}
 	}
 	/*
@@ -121,13 +163,19 @@ impl CPUBuffer {
 			}
 		}
 	*/
-	fn format_f32(&self, byte_offset: usize, f: &mut fmt::Formatter, count: usize) -> fmt::Result {
-		let data = self.cast::<f32>(byte_offset, count);
-		for (i, val) in data.iter().enumerate() {
+	fn format_f32(
+		&self,
+		offset: usize,
+		f: &mut fmt::Formatter,
+		count: usize,
+		stride: usize,
+	) -> fmt::Result {
+		for i in 0..count {
 			if i != 0 {
 				write!(f, ", ")?;
 			}
-			write!(f, "{:.6}", val.get())?;
+			let val = self.cast::<f32>(offset + i * stride, 1)[0].get();
+			write!(f, "{:.6}", val)?;
 		}
 		Ok(())
 	}
@@ -139,7 +187,7 @@ impl Buffer for CPUBuffer {
 
 		match tensor.dtype() {
 			DType { kind: DTypeKind::Float, bits: 32 } => {
-				self.zeros_f32_(tensor.byte_offset, tensor.elems())
+				self.zeros_f32_(tensor.offset, tensor.elems())
 			},
 			_ => todo!(),
 		}
@@ -150,7 +198,7 @@ impl Buffer for CPUBuffer {
 
 		match tensor.dtype() {
 			DType { kind: DTypeKind::Float, bits: 32 } => {
-				self.randn_f32_(tensor.byte_offset, tensor.elems())
+				self.randn_f32_(tensor.offset, tensor.elems())
 			},
 			_ => todo!(),
 		}
@@ -158,29 +206,21 @@ impl Buffer for CPUBuffer {
 
 	unsafe fn rms_norm(
 		&self,
-		a: &Tensor,
 		out: &Tensor,
+		a: &Tensor,
 		dim_size: usize,
 		eps: f64,
-		batch: Batch<1>,
+		batch: &[BatchDim<1>],
 	) {
-		debug_assert!(self.is_on_my_device(a));
-		debug_assert!(self.is_on_my_device(out));
-		debug_assert!(a.shape() == out.shape());
-		debug_assert!(a.dtype() == out.dtype());
-		let (batch_dims, input_dim) = input.shape.split(-1);
-		debug_assert!(params.batch_size == batch_dims.iter().product());
-		debug_assert!(params.input_size == input_dim.iter().product());
-
-		match input.dtype() {
-			DType { kind: DTypeKind::Float, bits: 32 } => self.rms_norm_f32_(
-				input.byte_offset,
-				output.byte_offset,
-				params.batch_size,
-				params.input_size,
-			),
-			_ => todo!(),
-		}
+		self.get_buffer_of(out).rms_norm_dtype(
+			out.dtype(),
+			out.offset,
+			self.get_buffer_of(a),
+			a.offset,
+			dim_size,
+			eps,
+			batch,
+		)
 	}
 	/*
 		fn mm(&self, a: &Tensor, b: &Tensor, c: &Tensor) {
@@ -195,15 +235,16 @@ impl Buffer for CPUBuffer {
 			}
 		}
 	*/
-	fn format(
+	unsafe fn format(
 		&self,
-		byte_offset: usize,
-		dtype: DType,
 		f: &mut fmt::Formatter,
+		dtype: DType,
+		offset: usize,
 		count: usize,
+		stride: usize,
 	) -> fmt::Result {
 		match dtype {
-			DType { kind: DTypeKind::Float, bits: 32 } => self.format_f32(byte_offset, f, count),
+			DType { kind: DTypeKind::Float, bits: 32 } => self.format_f32(offset, f, count, stride),
 			_ => todo!(),
 		}
 	}

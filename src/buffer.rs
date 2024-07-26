@@ -10,7 +10,14 @@ pub trait Buffer {
 
 	fn new_buffer(&self, byte_size: usize) -> Rc<dyn Buffer>;
 
-	unsafe fn rms_norm(&self, a: &Tensor, out: &Tensor, dim_size: usize, eps: f64, batch: Batch<1>);
+	unsafe fn rms_norm(
+		&self,
+		a: &Tensor,
+		out: &Tensor,
+		dim_size: usize,
+		eps: f64,
+		batch: &[BatchDim<1>],
+	);
 
 	// All matrices are stored in row-major order.
 	// Example:
@@ -32,15 +39,16 @@ pub trait Buffer {
 		beta: f64,
 		c: &Tensor,
 		ldc: usize, // number of elements between two consecutive rows in C
-		batch: Batch<2>,
+		batch: &[BatchDim<2>],
 	);
 
-	fn format(
+	unsafe fn format(
 		&self,
 		f: &mut fmt::Formatter,
 		dtype: DType,
-		byte_offset: usize,
-		size_stride: SizeAndStride,
+		offset: usize,
+		count: usize,
+		stride: usize,
 	) -> fmt::Result;
 }
 

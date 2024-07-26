@@ -127,7 +127,7 @@ impl DimsConstructor {
 pub struct Tensor {
 	// dims in reverse order
 	dims: SmallVec<[SizeAndStride; INLINE_DIMS]>,
-	pub(crate) byte_offset: usize,
+	pub(crate) offset: usize,
 	dtype: DType,
 	elems: usize,
 	pub(crate) buffer: Rc<dyn Buffer>,
@@ -138,7 +138,7 @@ impl Tensor {
 		let t = DimsConstructor::from_shape(shape);
 		Tensor {
 			dims: t.dims,
-			byte_offset: 0,
+			offset: 0,
 			dtype,
 			elems: t.elems,
 			buffer: device.new_buffer(dtype.array_bytes(t.elems).unwrap()),
@@ -159,7 +159,7 @@ impl Tensor {
 	) -> Tensor {
 		Tensor {
 			dims,
-			byte_offset: 0,
+			offset: 0,
 			dtype,
 			elems,
 			buffer: self.buffer.new_buffer(dtype.array_bytes(elems).unwrap()),
@@ -376,24 +376,25 @@ pub fn rms_norm(a: &Tensor, out: &Tensor) {
 	// TODO
 }
 
-fn fmt_0d(tensor: &Tensor, f: &mut fmt::Formatter, off: usize) -> fmt::Result {
-	let byte_offset = tensor.byte_offset + off * tensor.dtype.bytes();
-	tensor.buffer.format(f, tensor.dtype, byte_offset, SizeAndStride { size: 1, stride: 1 })
+fn fmt_0d(tensor: &Tensor, f: &mut fmt::Formatter, offset: usize) -> fmt::Result {
+	let offset = tensor.offset + offset;
+	unsafe { tensor.buffer.format(f, tensor.dtype, offset, 1, 1) }
 }
 
-fn fmt_1d(tensor: &Tensor, f: &mut fmt::Formatter, off: usize) -> fmt::Result {
-	let byte_offset = tensor.byte_offset + off * tensor.dtype.bytes();
+fn fmt_1d(tensor: &Tensor, f: &mut fmt::Formatter, offset: usize) -> fmt::Result {
+	let offset = tensor.offset + offset;
+	let dim = tensor.dims[tensor.ndim() - 1];
 	write!(f, "[")?;
-	tensor.buffer.format(f, tensor.dtype, byte_offset, tensor.dims[tensor.ndim() - 1])?;
+	unsafe { tensor.buffer.format(f, tensor.dtype, offset, dim.size, dim.stride)? };
 	write!(f, "]")
 }
 
-fn fmt_2d(tensor: &Tensor, f: &mut fmt::Formatter, off: usize) -> fmt::Result {
+fn fmt_2d(tensor: &Tensor, f: &mut fmt::Formatter, offset: usize) -> fmt::Result {
 	writeln!(f, "[")?;
 	let dim = tensor.dims[tensor.ndim() - 2];
 	for i in 0..dim.size {
 		write!(f, "\t")?;
-		fmt_1d(tensor, f, off + i * dim.stride)?;
+		fmt_1d(tensor, f, offset + i * dim.stride)?;
 		writeln!(f, ",")?;
 	}
 	write!(f, "]")
@@ -463,7 +464,7 @@ pub fn prep_batch<const N: usize>(
 	batch
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct BatchDim<const N: usize> {
 	pub size: usize,
 	pub out_stride: usize,
