@@ -8,12 +8,10 @@ pub trait Buffer {
 	fn zeros_(&self, tensor: &Tensor);
 	fn randn_(&self, tensor: &Tensor);
 
-	fn new_buffer(&self, byte_size: usize) -> Rc<dyn Buffer>;
-
 	unsafe fn rms_norm(
 		&self,
-		a: &Tensor,
 		out: &Tensor,
+		a: &Tensor,
 		dim_size: usize,
 		eps: f64,
 		batch: &[BatchDim<1>],

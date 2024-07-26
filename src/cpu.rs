@@ -140,29 +140,7 @@ impl CPUBuffer {
 			o.set((i * scale) as f32);
 		}
 	}
-	/*
-		fn mm_f32(&self, a: &Tensor, b: &Tensor, c: &Tensor, prep: PrepMM) {
-			if prep.a_transpose || prep.b_transpose {
-				todo!("TODO");
-			}
 
-			let a = self.traversal::<f32>(a.byte_offset, prep.batch_size, prep.a_rows * prep.a_cols);
-			let b = self.traversal::<f32>(b.byte_offset, prep.batch_size, prep.a_cols * prep.b_cols);
-			let c = self.traversal::<f32>(c.byte_offset, prep.batch_size, prep.a_rows * prep.b_cols);
-
-			for ((a, b), c) in a.zip(b).zip(c) {
-				for i in 0..prep.a_rows {
-					for j in 0..prep.b_cols {
-						let mut sum = 0.0;
-						for k in 0..prep.a_cols {
-							sum += a[i * prep.a_cols + k].get() * b[k * prep.b_cols + j].get();
-						}
-						c[i * prep.b_cols + j].set(sum);
-					}
-				}
-			}
-		}
-	*/
 	fn format_f32(
 		&self,
 		offset: usize,
@@ -222,19 +200,27 @@ impl Buffer for CPUBuffer {
 			batch,
 		)
 	}
-	/*
-		fn mm(&self, a: &Tensor, b: &Tensor, c: &Tensor) {
-			// TODO - could relax this to just check that the tensors are on the same device
-			debug_assert!(self.owns(a) && self.owns(b) && self.owns(c));
 
-			let prep = prep_mm(a, b, c);
+	unsafe fn gemm(
+		&self,
+		transa: bool,
+		transb: bool,
+		m: usize, // rows in A. If transa, then rows in A after the transposition
+		n: usize, // cols in B. If transb, then cols in B after the transposition
+		k: usize, // cols in A. If transa, then cols in A after the transposition
+		alpha: f64,
+		a: &Tensor,
+		lda: usize, // number of elements between two consecutive rows in A
+		b: &Tensor,
+		ldb: usize, // number of elements between two consecutive rows in B
+		beta: f64,
+		c: &Tensor,
+		ldc: usize, // number of elements between two consecutive rows in C
+		batch: &[BatchDim<2>],
+	) {
+		todo!()
+	}
 
-			match prep.dtype {
-				DType { kind: DTypeKind::Float, bits: 32 } => self.mm_f32(a, b, c, prep),
-				_ => todo!(),
-			}
-		}
-	*/
 	unsafe fn format(
 		&self,
 		f: &mut fmt::Formatter,

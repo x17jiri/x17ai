@@ -6,5 +6,29 @@
 	"workbench.colorCustomizations": {
 		"editorInlayHint.foreground": "#aaaabb",
 		"editorInlayHint.background": "#fafafa"
-	}
+	},
+    "rust-analyzer.semanticHighlighting.operator.specialization.logicalNot.enable": true,
+    "rust-analyzer.semanticHighlighting.operator.specialization.enable": true,
+    //    "rust-analyzer.semanticHighlighting.operator.enable" : false,
+    "editor.semanticTokenColorCustomizations": {
+        "rules": {
+            "logical": {
+                "foreground": "#8F08C4", // "#808",
+            },
+            "logicalNot": {
+                //                "foreground": "#808",
+                "foreground": "#8F08C4", // "#e90",
+                //                "fontStyle": "bold",
+            },
+            "operator.controlFlow": {
+                "foreground": "#8F08C4",
+                //                "fontStyle": "bold",
+            },
+			/*
+			"entity.name.function.preprocessor": {
+				"foreground": "#8A1BFF",
+			},
+			*/
+        }
+    },
 }

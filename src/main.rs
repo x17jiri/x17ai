@@ -235,11 +235,9 @@ impl Module for Transformer {
 */
 fn main() {
 	let dev = CPUDevice::new("CPU".to_string());
-	let buf = dev.new_buffer(1024 * 1024, "my_buf".to_string());
-	let mut alloc = BumpAllocator::new(buf);
 
-	let x = alloc.new_tensor(DType::f32(), Shape::new(&[2, 3]));
-	let y = alloc.new_tensor(DType::f32(), Shape::new(&[3, 2]));
+	let x = Tensor::new(&[2, 3], DType::f32(), dev.clone());
+	let y = Tensor::new(&[3, 2], DType::f32(), dev.clone());
 
 	x.randn_();
 	y.randn_();
@@ -247,12 +245,14 @@ fn main() {
 	println!("x = {}", x);
 	println!("y = {}", y);
 
-	let z = alloc.new_tensor(DType::f32(), Shape::new(&[2, 2]));
+	let x = rms_norm(&x);
+	let y = rms_norm(&y);
 
-	//	mm(&x, &y, &z);
+	println!("rms_norm(x) = {}", x);
+	println!("rms_norm(y) = {}", y);
+
+	//	let z = Tensor::new(&[2, 2], DType::f32(), dev.clone());
+	let z = gemm(&x, &y, 1.0);
 
 	println!("z = {}", z);
-
-	println!("capacity: {}", alloc.capacity);
-	println!("allocated bytes: {}", alloc.offset);
 }

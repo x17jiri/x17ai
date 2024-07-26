@@ -13,7 +13,7 @@ use thin_vec::ThinVec;
 
 pub const INLINE_DIMS: usize = 5;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct SizeAndStride {
 	pub size: usize,
 	pub stride: usize,
@@ -49,7 +49,7 @@ impl std::cmp::PartialEq<ShapeView<'_>> for ShapeView<'_> {
 }
 
 // This struct is used mainly to ensure that the total number of elements does not overflow
-struct DimsConstructor {
+struct DimsCtor {
 	// dimensions in reverse order
 	dims: SmallVec<[SizeAndStride; INLINE_DIMS]>,
 
@@ -63,9 +63,9 @@ struct DimsConstructor {
 	nonzero_elems: usize,
 }
 
-impl DimsConstructor {
-	fn from_shape(shape: &[usize]) -> DimsConstructor {
-		let mut t = DimsConstructor::new(shape.len());
+impl DimsCtor {
+	fn from_shape(shape: &[usize]) -> DimsCtor {
+		let mut t = DimsCtor::new(shape.len());
 		for dim in shape.iter().copied().rev() {
 			t.push(dim);
 		}
@@ -73,11 +73,11 @@ impl DimsConstructor {
 		t
 	}
 
-	fn new(ndim: usize) -> DimsConstructor {
+	fn new(ndim: usize) -> DimsCtor {
 		let mut dims = SmallVec::with_capacity(ndim);
 		unsafe { dims.set_len(ndim) };
 
-		DimsConstructor {
+		DimsCtor {
 			dims,
 			remaining_dims: ndim,
 			elems: 1,
@@ -135,7 +135,7 @@ pub struct Tensor {
 
 impl Tensor {
 	pub fn new(shape: &[usize], dtype: DType, device: Rc<dyn Device>) -> Tensor {
-		let t = DimsConstructor::from_shape(shape);
+		let t = DimsCtor::from_shape(shape);
 		Tensor {
 			dims: t.dims,
 			offset: 0,
@@ -147,7 +147,7 @@ impl Tensor {
 
 	// Allocate a new tensor on the same device
 	pub fn new_tensor(&self, shape: &[usize], dtype: DType) -> Tensor {
-		let t = DimsConstructor::from_shape(shape);
+		let t = DimsCtor::from_shape(shape);
 		self.__new(t.elems, t.dims, dtype)
 	}
 
@@ -162,8 +162,12 @@ impl Tensor {
 			offset: 0,
 			dtype,
 			elems,
-			buffer: self.buffer.new_buffer(dtype.array_bytes(elems).unwrap()),
+			buffer: self.device().new_buffer(dtype.array_bytes(elems).unwrap()),
 		}
+	}
+
+	pub fn device(&self) -> Rc<dyn Device> {
+		buf_to_base(self.buffer.as_ref()).device.clone()
 	}
 
 	pub fn zeros_(&self) {
@@ -204,7 +208,8 @@ impl Tensor {
 			merged.push_dim(dim.size, elems, [dim.stride]);
 			elems *= dim.size;
 		}
-		let mut merged = merged.get_rev_dims().iter();
+		merged.ensure_nonzero_ndim();
+		let mut merged = merged.rev_dims.iter();
 
 		let merged_dim = merged.next().unwrap();
 		let mut prev_stride = merged_dim.in_strides[0];
@@ -276,7 +281,7 @@ pub fn assert_compatible_devices(a: &Tensor, b: &Tensor) {
 }
 
 // c = a * b * alpha
-pub fn gemm(
+fn __gemm(
 	a: &Tensor,
 	a_batch_dims: &[SizeAndStride],
 	a_dims: [SizeAndStride; 2], // [rows, cols]
@@ -303,13 +308,13 @@ pub fn gemm(
 
 	let dtype = a.dtype;
 	let batch_ndim = a_batch_dims.len().max(b_batch_dims.len());
-	let mut c_dims_ctor = DimsConstructor::new(batch_ndim + 2);
+	let mut c_dims_ctor = DimsCtor::new(batch_ndim + 2);
 	// Note: dims need to be pushed to ctor in reverse order
 	c_dims_ctor.push(c_dims[1].size);
 	c_dims_ctor.push(c_dims[0].size);
 
-	let batch = prep_batch(batch_ndim, [&a_dims, &b_dims], &mut c_dims_ctor);
-	let batch = batch.get_rev_dims();
+	let batch = prep_batch(batch_ndim, [a_batch_dims, b_batch_dims], &mut c_dims_ctor);
+	let batch = &batch.rev_dims;
 
 	c_dims_ctor.final_check();
 	let c = a.__new(c_dims_ctor.elems, c_dims_ctor.dims, dtype);
@@ -372,8 +377,41 @@ pub fn gemm(
 	c
 }
 
-pub fn rms_norm(a: &Tensor, out: &Tensor) {
-	// TODO
+// c = a * b * alpha
+pub fn gemm(a: &Tensor, b: &Tensor, alpha: f64) -> Tensor {
+	let a_ndim = a.ndim();
+	assert!(a_ndim >= 2);
+	let a_batch_dims = &a.dims[..a_ndim - 2];
+	let a_dims = [a.dims[a_ndim - 2], a.dims[a_ndim - 1]];
+
+	let b_ndim = b.ndim();
+	assert!(b_ndim >= 2);
+	let b_batch_dims = &b.dims[..b_ndim - 2];
+	let b_dims = [b.dims[b_ndim - 2], b.dims[b_ndim - 1]];
+
+	__gemm(a, a_batch_dims, a_dims, b, b_batch_dims, b_dims, alpha)
+}
+
+pub fn rms_norm(a: &Tensor) -> Tensor {
+	assert!(a.ndim() > 0);
+	let ndim = a.ndim();
+	let batch_ndim = ndim - 1;
+	let dim_size = a.dims[ndim - 1].size;
+
+	let mut out_dims_ctor = DimsCtor::new(ndim);
+	out_dims_ctor.push(dim_size);
+
+	let batch = prep_batch(batch_ndim, [&a.dims[..batch_ndim]], &mut out_dims_ctor);
+	let batch = &batch.rev_dims;
+
+	out_dims_ctor.final_check();
+	let out = a.__new(out_dims_ctor.elems, out_dims_ctor.dims, a.dtype);
+
+	unsafe {
+		a.buffer.rms_norm(&out, a, dim_size, 1e-6, batch);
+	}
+
+	out
 }
 
 fn fmt_0d(tensor: &Tensor, f: &mut fmt::Formatter, offset: usize) -> fmt::Result {
@@ -420,7 +458,7 @@ impl fmt::Display for Tensor {
 pub fn prep_batch<const N: usize>(
 	ndim: usize,
 	inputs: [&[SizeAndStride]; N],
-	output: &mut DimsConstructor,
+	output: &mut DimsCtor,
 ) -> Batch<N> {
 	assert!(N > 0);
 
@@ -512,7 +550,7 @@ impl<const N: usize> Batch<N> {
 		self.rev_dims.push(BatchDim { size, out_stride, in_strides });
 	}
 
-	pub fn get_rev_dims(&mut self) -> &[BatchDim<N>] {
+	pub fn ensure_nonzero_ndim(&mut self) {
 		if unlikely(self.rev_dims.is_empty()) {
 			self.rev_dims.push(BatchDim {
 				size: 1,
@@ -520,6 +558,5 @@ impl<const N: usize> Batch<N> {
 				in_strides: [1; N],
 			});
 		}
-		&self.rev_dims
 	}
 }
