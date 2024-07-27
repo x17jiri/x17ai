@@ -565,4 +565,9 @@ impl<const N: usize> Batch<N> {
 			});
 		}
 	}
+
+	// f = fn(offset: usize, count: usize)
+	pub fn run<F: Fn(usize, usize)>(&self, f: F) {
+		todo!();
+	}
 }

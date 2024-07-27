@@ -267,29 +267,16 @@ impl Buffer for CPUBuffer {
 		)
 	}
 
+	#[rustfmt::skip]
 	unsafe fn gemm(
-		&self,
-		c: &Tensor,
-		ldc: usize, // number of elements between two consecutive rows in C
-
-		m: usize, // rows in A. If transa, then rows in A after the transposition
-		n: usize, // cols in B. If transb, then cols in B after the transposition
-		k: usize, // cols in A. If transa, then cols in A after the transposition
-
-		a: &Tensor,
-		lda: usize, // number of elements between two consecutive rows in A
-		transa: bool,
-
-		b: &Tensor,
-		ldb: usize, // number of elements between two consecutive rows in B
-		transb: bool,
-
-		alpha: f64,
-		beta: f64,
-
+		&self, c: &Tensor, ldc: usize,
+		m: usize, n: usize, k: usize,
+		a: &Tensor, lda: usize, transa: bool,
+		b: &Tensor, ldb: usize, transb: bool,
+		alpha: f64, beta: f64,
 		batch: &[BatchDim<2>],
 	) {
-		#[rustfmt::skip] self.get_buffer_of(c).gemm_dtype(
+		self.get_buffer_of(c).gemm_dtype(
 			c.dtype(), c.offset, ldc,
 			m, n, k,
 			self.get_buffer_of(a), a.offset, lda, transa,
