@@ -144,29 +144,13 @@ impl CPUBuffer {
 		}
 	}
 
+	#[rustfmt::skip]
 	fn gemm_dtype(
-		&self, // c
-		dtype: DType,
-		c_offset: usize,
-		ldc: usize, // number of elements between two consecutive rows in C
-
-		m: usize, // rows in A. If transa, then rows in A after the transposition
-		n: usize, // cols in B. If transb, then cols in B after the transposition
-		k: usize, // cols in A. If transa, then cols in A after the transposition
-
-		a: &Self,
-		a_offset: usize,
-		lda: usize, // number of elements between two consecutive rows in A
-		transa: bool,
-
-		b: &Self,
-		b_offset: usize,
-		ldb: usize, // number of elements between two consecutive rows in B
-		transb: bool,
-
-		alpha: f64,
-		beta: f64,
-
+		&self, dtype: DType, c_offset: usize, ldc: usize, // self == c
+		m: usize, n: usize, k: usize,
+		a: &Self, a_offset: usize, lda: usize, transa: bool,
+		b: &Self, b_offset: usize, ldb: usize, transb: bool,
+		alpha: f64, beta: f64,
 		batch: &[BatchDim<2>],
 	) {
 		if !batch.is_empty() {
@@ -174,22 +158,11 @@ impl CPUBuffer {
 			let batch = &batch[..batch.len() - 1];
 			for i in 0..batch_dim.size {
 				self.gemm_dtype(
-					dtype,
-					c_offset + i * batch_dim.out_stride,
-					ldc,
-					m,
-					n,
-					k,
-					a,
-					a_offset + i * batch_dim.in_strides[0],
-					lda,
-					transa,
-					b,
-					b_offset + i * batch_dim.in_strides[1],
-					ldb,
-					transb,
-					alpha,
-					beta,
+					dtype, c_offset + i * batch_dim.out_stride, ldc,
+					m, n, k,
+					a, a_offset + i * batch_dim.in_strides[0], lda, transa,
+					b, b_offset + i * batch_dim.in_strides[1], ldb, transb,
+					alpha, beta,
 					batch,
 				);
 			}
@@ -197,67 +170,39 @@ impl CPUBuffer {
 		}
 
 		match dtype {
-			DType { kind: DTypeKind::Float, bits: 32 } => self.gemm_f32(
-				c_offset, ldc, m, n, k, a, a_offset, lda, transa, b, b_offset, ldb, transb, alpha,
-				beta,
-			),
+			DType { kind: DTypeKind::Float, bits: 32 } => {
+				self.gemm_f32(
+					c_offset, ldc,
+					m, n, k,
+					a, a_offset, lda, transa,
+					b, b_offset, ldb, transb,
+					alpha, beta,
+				);
+			},
 			_ => todo!(),
 		}
 	}
 
+	#[rustfmt::skip]
 	fn gemm_f32(
-		&self, // c
-		c_offset: usize,
-		ldc: usize, // number of elements between two consecutive rows in C
-
-		m: usize, // rows in A. If transa, then rows in A after the transposition
-		n: usize, // cols in B. If transb, then cols in B after the transposition
-		k: usize, // cols in A. If transa, then cols in A after the transposition
-
-		a: &Self,
-		a_offset: usize,
-		lda: usize, // number of elements between two consecutive rows in A
-		transa: bool,
-
-		b: &Self,
-		b_offset: usize,
-		ldb: usize, // number of elements between two consecutive rows in B
-		transb: bool,
-
-		alpha: f64,
-		beta: f64,
+		&self, c_offset: usize, ldc: usize, // self == c
+		m: usize, n: usize, k: usize,
+		a: &Self, a_offset: usize, lda: usize, transa: bool,
+		b: &Self, b_offset: usize, ldb: usize, transb: bool,
+		alpha: f64, beta: f64,
 	) {
-		let (rsa, csa) = if transa { (lda, 1) } else { (1, lda) };
-		let (rsb, csb) = if transb { (ldb, 1) } else { (1, ldb) };
-		let (rsc, csc) = (ldc, 1_isize);
-
-		let (rsa, csa) = (csa, rsa);
-		let (rsb, csb) = (csb, rsb);
-		let (rsc, csc) = (csc, rsc);
-
-		println!("ldc = {}, rsc = {}, csc = {}, c_offset = {}", ldc, rsc, csc, c_offset);
-		println!("lda = {}, rsa = {}, csa = {}, a_offset = {}", lda, rsa, csa, a_offset);
-		println!("ldb = {}, rsb = {}, csb = {}, b_offset = {}", ldb, rsb, csb, b_offset);
-		println!("m = {}, n = {}, k = {}", m, n, k);
-		println!("alpha = {}, beta = {}", alpha, beta);
-		println!("transa = {}, transb = {}", transa, transb);
+		let (rsa, csa) = if transa { (1, lda) } else { (lda, 1) };
+		let (rsb, csb) = if transb { (1, ldb) } else { (ldb, 1) };
+		let (rsc, csc) = (ldc, 1_usize);
 
 		unsafe {
 			sgemm(
-				m,
-				k,
-				n,
+				m, k, n,
 				alpha as f32,
-				a.cast::<f32>(a_offset, 0).as_ptr() as *const f32,
-				rsa as isize,
-				csa as isize,
-				b.cast::<f32>(b_offset, 0).as_ptr() as *const f32,
-				rsb as isize,
-				csb as isize,
+				a.cast::<f32>(a_offset, 0).as_ptr() as *const f32, rsa as isize, csa as isize,
+				b.cast::<f32>(b_offset, 0).as_ptr() as *const f32, rsb as isize, csb as isize,
 				beta as f32,
-				self.cast::<f32>(c_offset, 0).as_ptr() as *mut f32,
-				rsc as isize,
-				csc as isize,
+				self.cast::<f32>(c_offset, 0).as_ptr() as *mut f32, rsc as isize, csc as isize,
 			);
 		}
 	}
@@ -344,23 +289,12 @@ impl Buffer for CPUBuffer {
 
 		batch: &[BatchDim<2>],
 	) {
-		self.get_buffer_of(c).gemm_dtype(
-			c.dtype(),
-			c.offset,
-			ldc,
-			m,
-			n,
-			k,
-			self.get_buffer_of(a),
-			a.offset,
-			lda,
-			transa,
-			self.get_buffer_of(b),
-			b.offset,
-			ldb,
-			transb,
-			alpha,
-			beta,
+		#[rustfmt::skip] self.get_buffer_of(c).gemm_dtype(
+			c.dtype(), c.offset, ldc,
+			m, n, k,
+			self.get_buffer_of(a), a.offset, lda, transa,
+			self.get_buffer_of(b), b.offset, ldb, transb,
+			alpha, beta,
 			batch,
 		)
 	}

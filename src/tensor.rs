@@ -319,8 +319,8 @@ fn __gemm(
 	c_dims_ctor.final_check();
 	let c = a.__new(c_dims_ctor.elems, c_dims_ctor.dims, dtype);
 
-	let a_rows_contiguous = a_dims[0].stride == 1;
-	let a_cols_contiguous = a_dims[1].stride == 1;
+	let a_rows_contiguous = a_dims[1].stride == 1;
+	let a_cols_contiguous = a_dims[0].stride == 1;
 	let transa = !a_rows_contiguous;
 	let lda = if a_rows_contiguous { a_dims[0].stride } else { a_dims[1].stride };
 	assert!(
@@ -328,8 +328,8 @@ fn __gemm(
 		"at least one of the matrix dimensions must be contiguous"
 	);
 
-	let b_rows_contiguous = b_dims[0].stride == 1;
-	let b_cols_contiguous = b_dims[1].stride == 1;
+	let b_rows_contiguous = b_dims[1].stride == 1;
+	let b_cols_contiguous = b_dims[0].stride == 1;
 	let transb = !b_rows_contiguous;
 	let ldb = if b_rows_contiguous { b_dims[0].stride } else { b_dims[1].stride };
 	assert!(
@@ -341,8 +341,8 @@ fn __gemm(
 	let n = c_dims[1].size;
 	let k = a_dims[1].size;
 
-	let c_rows_contiguous = c_dims[0].stride == 1;
-	let c_cols_contiguous = c_dims[1].stride == 1;
+	let c_rows_contiguous = c_dims[1].stride == 1;
+	let c_cols_contiguous = c_dims[0].stride == 1;
 	let transc = !c_rows_contiguous;
 	let ldc = if c_rows_contiguous { c_dims[0].stride } else { c_dims[1].stride };
 	assert!(
@@ -352,12 +352,12 @@ fn __gemm(
 
 	if !transc {
 		unsafe {
-			c.buffer.gemm(
-				&c, ldc, //_
-				m, n, k, //_
-				&a, lda, transa, //_
-				&b, ldb, transb, //_
-				alpha, 0.0, //_
+			#[rustfmt::skip] c.buffer.gemm(
+				&c, ldc,
+				m, n, k,
+				&a, lda, transa,
+				&b, ldb, transb,
+				alpha, 0.0,
 				batch,
 			);
 		}
@@ -369,12 +369,12 @@ fn __gemm(
 		let (lda, ldb) = (ldb, lda);
 
 		unsafe {
-			c.buffer.gemm(
-				&c, ldc, //_
-				m, n, k, //_
-				&a, lda, transa, //_
-				&b, ldb, transb, //_
-				alpha, 0.0, //_
+			#[rustfmt::skip] c.buffer.gemm(
+				&c, ldc,
+				m, n, k,
+				&a, lda, transa,
+				&b, ldb, transb,
+				alpha, 0.0,
 				batch,
 			);
 		}

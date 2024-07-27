@@ -245,14 +245,16 @@ fn main() {
 	println!("x = {}", x);
 	println!("y = {}", y);
 
-	let x = rms_norm(&x);
-	let y = rms_norm(&y);
+	let nx = rms_norm(&x);
+	let ny = rms_norm(&y);
 
-	println!("rms_norm(x) = {}", x);
-	println!("rms_norm(y) = {}", y);
+	println!("rms_norm(x) = {}", nx);
+	println!("rms_norm(y) = {}", ny);
 
 	//	let z = Tensor::new(&[2, 2], DType::f32(), dev.clone());
-	let z = gemm(&x, &y, 1.0);
+	let xt = x.t();
+	let yt = y.t();
+	let z = gemm(&yt, &xt, 1.0);
 
 	println!("z = {}", z);
 }
