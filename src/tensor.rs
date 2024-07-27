@@ -353,9 +353,12 @@ fn __gemm(
 	if !transc {
 		unsafe {
 			c.buffer.gemm(
-				transa, transb, m, n, k, // .
-				alpha, a, lda, b, ldb, // .
-				0.0, &c, ldc, batch,
+				&c, ldc, //_
+				m, n, k, //_
+				&a, lda, transa, //_
+				&b, ldb, transb, //_
+				alpha, 0.0, //_
+				batch,
 			);
 		}
 	} else {
@@ -367,9 +370,12 @@ fn __gemm(
 
 		unsafe {
 			c.buffer.gemm(
-				transa, transb, m, n, k, // .
-				alpha, a, lda, b, ldb, // .
-				0.0, &c, ldc, batch,
+				&c, ldc, //_
+				m, n, k, //_
+				&a, lda, transa, //_
+				&b, ldb, transb, //_
+				alpha, 0.0, //_
+				batch,
 			);
 		}
 	}

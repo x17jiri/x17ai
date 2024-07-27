@@ -24,19 +24,24 @@ pub trait Buffer {
 	//       7 8 9 ]
 	unsafe fn gemm(
 		&self,
-		transa: bool,
-		transb: bool,
+		c: &Tensor,
+		ldc: usize, // number of elements between two consecutive rows in C
+
 		m: usize, // rows in A. If transa, then rows in A after the transposition
 		n: usize, // cols in B. If transb, then cols in B after the transposition
 		k: usize, // cols in A. If transa, then cols in A after the transposition
-		alpha: f64,
+
 		a: &Tensor,
 		lda: usize, // number of elements between two consecutive rows in A
+		transa: bool,
+
 		b: &Tensor,
 		ldb: usize, // number of elements between two consecutive rows in B
+		transb: bool,
+
+		alpha: f64,
 		beta: f64,
-		c: &Tensor,
-		ldc: usize, // number of elements between two consecutive rows in C
+
 		batch: &[BatchDim<2>],
 	);
 

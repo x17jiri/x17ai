@@ -2,6 +2,7 @@
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
 use crate::*;
+use matrixmultiply::sgemm;
 use std::boxed::Box;
 use std::cell::{Cell, RefCell};
 use std::fmt;
@@ -99,8 +100,8 @@ impl CPUBuffer {
 		batch: &[BatchDim<1>],
 	) {
 		if !batch.is_empty() {
-			let batch_dim = batch[0];
-			let batch = &batch[1..];
+			let batch_dim = batch[batch.len() - 1];
+			let batch = &batch[..batch.len() - 1];
 			for i in 0..batch_dim.size {
 				self.rms_norm_dtype(
 					dtype,
@@ -123,6 +124,8 @@ impl CPUBuffer {
 		}
 	}
 
+	// internally uses f64 and then stores the result as f32
+	// on modern CPUs, this should have no performance impact and we get better precision
 	fn rms_norm_f32(&self, offset: usize, a: &Self, a_offset: usize, dim_size: usize, eps: f64) {
 		let out_vec = self.cast::<f32>(offset, dim_size);
 		let in_vec = a.cast::<f32>(a_offset, dim_size);
@@ -138,6 +141,124 @@ impl CPUBuffer {
 		for (o, i) in out_vec.iter().zip(in_vec) {
 			let i = i.get() as f64;
 			o.set((i * scale) as f32);
+		}
+	}
+
+	fn gemm_dtype(
+		&self, // c
+		dtype: DType,
+		c_offset: usize,
+		ldc: usize, // number of elements between two consecutive rows in C
+
+		m: usize, // rows in A. If transa, then rows in A after the transposition
+		n: usize, // cols in B. If transb, then cols in B after the transposition
+		k: usize, // cols in A. If transa, then cols in A after the transposition
+
+		a: &Self,
+		a_offset: usize,
+		lda: usize, // number of elements between two consecutive rows in A
+		transa: bool,
+
+		b: &Self,
+		b_offset: usize,
+		ldb: usize, // number of elements between two consecutive rows in B
+		transb: bool,
+
+		alpha: f64,
+		beta: f64,
+
+		batch: &[BatchDim<2>],
+	) {
+		if !batch.is_empty() {
+			let batch_dim = batch[batch.len() - 1];
+			let batch = &batch[..batch.len() - 1];
+			for i in 0..batch_dim.size {
+				self.gemm_dtype(
+					dtype,
+					c_offset + i * batch_dim.out_stride,
+					ldc,
+					m,
+					n,
+					k,
+					a,
+					a_offset + i * batch_dim.in_strides[0],
+					lda,
+					transa,
+					b,
+					b_offset + i * batch_dim.in_strides[1],
+					ldb,
+					transb,
+					alpha,
+					beta,
+					batch,
+				);
+			}
+			return;
+		}
+
+		match dtype {
+			DType { kind: DTypeKind::Float, bits: 32 } => self.gemm_f32(
+				c_offset, ldc, m, n, k, a, a_offset, lda, transa, b, b_offset, ldb, transb, alpha,
+				beta,
+			),
+			_ => todo!(),
+		}
+	}
+
+	fn gemm_f32(
+		&self, // c
+		c_offset: usize,
+		ldc: usize, // number of elements between two consecutive rows in C
+
+		m: usize, // rows in A. If transa, then rows in A after the transposition
+		n: usize, // cols in B. If transb, then cols in B after the transposition
+		k: usize, // cols in A. If transa, then cols in A after the transposition
+
+		a: &Self,
+		a_offset: usize,
+		lda: usize, // number of elements between two consecutive rows in A
+		transa: bool,
+
+		b: &Self,
+		b_offset: usize,
+		ldb: usize, // number of elements between two consecutive rows in B
+		transb: bool,
+
+		alpha: f64,
+		beta: f64,
+	) {
+		let (rsa, csa) = if transa { (lda, 1) } else { (1, lda) };
+		let (rsb, csb) = if transb { (ldb, 1) } else { (1, ldb) };
+		let (rsc, csc) = (ldc, 1_isize);
+
+		let (rsa, csa) = (csa, rsa);
+		let (rsb, csb) = (csb, rsb);
+		let (rsc, csc) = (csc, rsc);
+
+		println!("ldc = {}, rsc = {}, csc = {}, c_offset = {}", ldc, rsc, csc, c_offset);
+		println!("lda = {}, rsa = {}, csa = {}, a_offset = {}", lda, rsa, csa, a_offset);
+		println!("ldb = {}, rsb = {}, csb = {}, b_offset = {}", ldb, rsb, csb, b_offset);
+		println!("m = {}, n = {}, k = {}", m, n, k);
+		println!("alpha = {}, beta = {}", alpha, beta);
+		println!("transa = {}, transb = {}", transa, transb);
+
+		unsafe {
+			sgemm(
+				m,
+				k,
+				n,
+				alpha as f32,
+				a.cast::<f32>(a_offset, 0).as_ptr() as *const f32,
+				rsa as isize,
+				csa as isize,
+				b.cast::<f32>(b_offset, 0).as_ptr() as *const f32,
+				rsb as isize,
+				csb as isize,
+				beta as f32,
+				self.cast::<f32>(c_offset, 0).as_ptr() as *mut f32,
+				rsc as isize,
+				csc as isize,
+			);
 		}
 	}
 
@@ -203,22 +324,45 @@ impl Buffer for CPUBuffer {
 
 	unsafe fn gemm(
 		&self,
-		transa: bool,
-		transb: bool,
+		c: &Tensor,
+		ldc: usize, // number of elements between two consecutive rows in C
+
 		m: usize, // rows in A. If transa, then rows in A after the transposition
 		n: usize, // cols in B. If transb, then cols in B after the transposition
 		k: usize, // cols in A. If transa, then cols in A after the transposition
-		alpha: f64,
+
 		a: &Tensor,
 		lda: usize, // number of elements between two consecutive rows in A
+		transa: bool,
+
 		b: &Tensor,
 		ldb: usize, // number of elements between two consecutive rows in B
+		transb: bool,
+
+		alpha: f64,
 		beta: f64,
-		c: &Tensor,
-		ldc: usize, // number of elements between two consecutive rows in C
+
 		batch: &[BatchDim<2>],
 	) {
-		todo!()
+		self.get_buffer_of(c).gemm_dtype(
+			c.dtype(),
+			c.offset,
+			ldc,
+			m,
+			n,
+			k,
+			self.get_buffer_of(a),
+			a.offset,
+			lda,
+			transa,
+			self.get_buffer_of(b),
+			b.offset,
+			ldb,
+			transb,
+			alpha,
+			beta,
+			batch,
+		)
 	}
 
 	unsafe fn format(
