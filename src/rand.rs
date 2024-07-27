@@ -108,6 +108,7 @@ impl Rng {
 	}
 
 	// generates a float with normal distribution with mean 0 and variance 1
+	// The generated values are guaranteed to be in the range (-10.0, 10.0)
 	pub fn get_normal(&mut self) -> f64 {
 		let x = 1.0 - self.get_uniform(); // (0.0, 1.0]
 		let y = self.get_uniform(); // [0.0, 1.0)
@@ -118,7 +119,10 @@ impl Rng {
 		let z0 = r * theta.cos();
 		let z1 = r * theta.sin();
 
-		// combine the two values so we don't have to store one
-		(z0 + z1) * std::f64::consts::FRAC_1_SQRT_2
+		// Combine z0 and z1 into a single value
+		// This increases the variance, so we need to rescale
+		let result = (z0 + z1) * std::f64::consts::FRAC_1_SQRT_2;
+
+		if result.abs() < 10.0 { result } else { 0.0 }
 	}
 }
