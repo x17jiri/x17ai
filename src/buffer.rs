@@ -24,12 +24,12 @@ pub trait Buffer {
 	//       7 8 9 ]
 	#[rustfmt::skip]
 	unsafe fn gemm(
-		&self, dtype: DType, c_offset: usize, ldc: usize,
+		&self, dtype: DType, c_offset: usize, ldc: usize, c_batch_stride: usize,
 		m: usize, n: usize, k: usize,
-		a: &dyn Buffer, a_offset: usize, lda: usize, transa: bool,
-		b: &dyn Buffer, b_offset: usize, ldb: usize, transb: bool,
+		a: &dyn Buffer, a_offset: usize, lda: usize, transa: bool, a_batch_stride: usize,
+		b: &dyn Buffer, b_offset: usize, ldb: usize, transb: bool, b_batch_stride: usize,
 		alpha: f64, beta: f64,
-		batch: BatchDim<2>,
+		batch_size: usize,
 	);
 
 	unsafe fn format(

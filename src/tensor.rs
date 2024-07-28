@@ -378,15 +378,15 @@ fn __gemm(
 	#[rustfmt::skip]
 	batch.run(
 		c.offset, [a.offset, b.offset],
-		&|c_offset, [a_offset, b_offset], batch_dim| {
+		&|c_offset, [a_offset, b_offset], batch| {
 			unsafe {
 				c.buffer.gemm(
-					dtype, c_offset, ldc,
+					dtype, c_offset, ldc, batch.out_stride,
 					m, n, k,
-					a_buf, a_offset, lda, transa,
-					b_buf, b_offset, ldb, transb,
+					a_buf, a_offset, lda, transa, batch.in_strides[0],
+					b_buf, b_offset, ldb, transb, batch.in_strides[1],
 					alpha, 0.0,
-					batch_dim,
+					batch.size,
 				);
 			}
 		},

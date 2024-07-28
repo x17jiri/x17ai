@@ -237,23 +237,23 @@ impl Buffer for CPUBuffer {
 
 	#[rustfmt::skip]
 	unsafe fn gemm(
-		&self, dtype: DType, c_offset: usize, ldc: usize,
+		&self, dtype: DType, c_offset: usize, ldc: usize, c_batch_stride: usize,
 		m: usize, n: usize, k: usize,
-		a: &dyn Buffer, a_offset: usize, lda: usize, transa: bool,
-		b: &dyn Buffer, b_offset: usize, ldb: usize, transb: bool,
+		a: &dyn Buffer, a_offset: usize, lda: usize, transa: bool, a_batch_stride: usize,
+		b: &dyn Buffer, b_offset: usize, ldb: usize, transb: bool, b_batch_stride: usize,
 		alpha: f64, beta: f64,
-		batch: BatchDim<2>,
+		batch_size: usize,
 	) {
 		let c = self;
 		let a = self.cast_buffer(a);
 		let b = self.cast_buffer(b);
-		for i in 0..batch.size {
-			let c_offset = c_offset + i * batch.out_stride;
-			let a_offset = a_offset + i * batch.in_strides[0];
-			let b_offset = b_offset + i * batch.in_strides[1];
+		for i in 0..batch_size {
+			let c_offset = c_offset + i * c_batch_stride;
+			let a_offset = a_offset + i * a_batch_stride;
+			let b_offset = b_offset + i * b_batch_stride;
 			match dtype {
 				DType { kind: DTypeKind::Float, bits: 32 } => {
-					self.gemm_f32(
+					c.gemm_f32(
 						c_offset, ldc,
 						m, n, k,
 						a, a_offset, lda, transa,
