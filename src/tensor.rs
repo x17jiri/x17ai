@@ -314,7 +314,6 @@ fn __gemm(
 	c_dims_ctor.push(c_dims[0].size);
 
 	let batch = prep_batch(batch_ndim, [a_batch_dims, b_batch_dims], &mut c_dims_ctor);
-	let batch = &batch.rev_dims;
 
 	c_dims_ctor.final_check();
 	let c = a.__new(c_dims_ctor.elems, c_dims_ctor.dims, dtype);
@@ -350,35 +349,48 @@ fn __gemm(
 		"at least one of the matrix dimensions must be contiguous"
 	);
 
-	if !transc {
-		unsafe {
-			#[rustfmt::skip] c.buffer.gemm(
-				&c, ldc,
-				m, n, k,
-				&a, lda, transa,
-				&b, ldb, transb,
-				alpha, 0.0,
-				batch,
-			);
-		}
-	} else {
+	let mut transa = transa;
+	let mut transb = transb;
+	let mut m = m;
+	let mut n = n;
+	let mut a = a;
+	let mut b = b;
+	let mut lda = lda;
+	let mut ldb = ldb;
+	if transc {
 		// C^T = B^T * A^T
-		let (transa, transb) = (!transb, !transa);
-		let (m, n) = (n, m);
-		let (a, b) = (b, a);
-		let (lda, ldb) = (ldb, lda);
-
-		unsafe {
-			#[rustfmt::skip] c.buffer.gemm(
-				&c, ldc,
-				m, n, k,
-				&a, lda, transa,
-				&b, ldb, transb,
-				alpha, 0.0,
-				batch,
-			);
-		}
+		(transa, transb) = (!transb, !transa);
+		(m, n) = (n, m);
+		(a, b) = (b, a);
+		(lda, ldb) = (ldb, lda);
 	}
+	let transa = transa;
+	let transb = transb;
+	let m = m;
+	let n = n;
+	let a = a;
+	let b = b;
+	let lda = lda;
+	let ldb = ldb;
+
+	let a_buf = a.buffer.as_ref();
+	let b_buf = b.buffer.as_ref();
+	#[rustfmt::skip]
+	batch.run(
+		c.offset, [a.offset, b.offset],
+		&|c_offset, [a_offset, b_offset], batch_dim| {
+			unsafe {
+				c.buffer.gemm(
+					dtype, c_offset, ldc,
+					m, n, k,
+					a_buf, a_offset, lda, transa,
+					b_buf, b_offset, ldb, transb,
+					alpha, 0.0,
+					batch_dim,
+				);
+			}
+		},
+	);
 
 	c
 }
@@ -566,8 +578,49 @@ impl<const N: usize> Batch<N> {
 		}
 	}
 
-	// f = fn(offset: usize, count: usize)
-	pub fn run<F: Fn(usize, usize)>(&self, f: F) {
-		todo!();
+	fn __run<F: Fn(usize, [usize; N], BatchDim<N>)>(
+		&self,
+		out_offset: usize,
+		in_offsets: [usize; N],
+		f: &F,
+		batch: &[BatchDim<N>],
+	) {
+		debug_assert!(!batch.is_empty());
+		let batch_dim = unsafe { batch.get_unchecked(batch.len() - 1) };
+		let batch = &batch[..batch.len() - 1];
+		if batch.is_empty() {
+			f(out_offset, in_offsets, *batch_dim);
+		} else {
+			for i in 0..batch_dim.size {
+				let out_offset = out_offset + i * batch_dim.out_stride;
+				let mut in_offsets = in_offsets;
+				for j in 0..N {
+					in_offsets[j] += i * batch_dim.in_strides[j];
+				}
+				self.__run(out_offset, in_offsets, f, batch);
+			}
+		}
+	}
+
+	// f = fn(out_offset: usize, in_offsets: [usize; N], batch_dim: BatchDim<N>)
+	pub fn run<F: Fn(usize, [usize; N], BatchDim<N>)>(
+		&self,
+		out_offset: usize,
+		in_offsets: [usize; N],
+		f: &F,
+	) {
+		if self.rev_dims.is_empty() {
+			f(
+				out_offset,
+				in_offsets,
+				BatchDim {
+					size: 1,
+					out_stride: 0,
+					in_strides: [0; N],
+				},
+			);
+		} else {
+			self.__run(out_offset, in_offsets, f, &self.rev_dims);
+		}
 	}
 }

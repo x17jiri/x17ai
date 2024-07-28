@@ -22,27 +22,14 @@ pub trait Buffer {
 	//     [ 1 2 3
 	// A =   4 5 6   ->  [ 1 2 3 4 5 6 7 8 9 ]
 	//       7 8 9 ]
+	#[rustfmt::skip]
 	unsafe fn gemm(
-		&self,
-		c: &Tensor,
-		ldc: usize, // number of elements between two consecutive rows in C
-
-		m: usize, // rows in A. If transa, then rows in A after the transposition
-		n: usize, // cols in B. If transb, then cols in B after the transposition
-		k: usize, // cols in A. If transa, then cols in A after the transposition
-
-		a: &Tensor,
-		lda: usize, // number of elements between two consecutive rows in A
-		transa: bool,
-
-		b: &Tensor,
-		ldb: usize, // number of elements between two consecutive rows in B
-		transb: bool,
-
-		alpha: f64,
-		beta: f64,
-
-		batch: &[BatchDim<2>],
+		&self, dtype: DType, c_offset: usize, ldc: usize,
+		m: usize, n: usize, k: usize,
+		a: &dyn Buffer, a_offset: usize, lda: usize, transa: bool,
+		b: &dyn Buffer, b_offset: usize, ldb: usize, transb: bool,
+		alpha: f64, beta: f64,
+		batch: BatchDim<2>,
 	);
 
 	unsafe fn format(

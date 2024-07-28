@@ -67,6 +67,13 @@ impl CPUBuffer {
 		unsafe { &*buf }
 	}
 
+	fn cast_buffer(&self, buf: &dyn Buffer) -> &CPUBuffer {
+		debug_assert!(are_bufs_on_the_same_device(buf, self));
+		let buf = buf as *const dyn Buffer;
+		let buf = buf as *const CPUBuffer;
+		unsafe { &*buf }
+	}
+
 	fn cast<T>(&self, offset: usize, elems: usize) -> &[Cell<T>] {
 		let ptr = self.memory.as_ptr();
 		let ptr = ptr as *const Cell<T>;
@@ -141,45 +148,6 @@ impl CPUBuffer {
 		for (o, i) in out_vec.iter().zip(in_vec) {
 			let i = i.get() as f64;
 			o.set((i * scale) as f32);
-		}
-	}
-
-	#[rustfmt::skip]
-	fn gemm_dtype(
-		&self, dtype: DType, c_offset: usize, ldc: usize, // self == c
-		m: usize, n: usize, k: usize,
-		a: &Self, a_offset: usize, lda: usize, transa: bool,
-		b: &Self, b_offset: usize, ldb: usize, transb: bool,
-		alpha: f64, beta: f64,
-		batch: &[BatchDim<2>],
-	) {
-		if !batch.is_empty() {
-			let batch_dim = batch[batch.len() - 1];
-			let batch = &batch[..batch.len() - 1];
-			for i in 0..batch_dim.size {
-				self.gemm_dtype(
-					dtype, c_offset + i * batch_dim.out_stride, ldc,
-					m, n, k,
-					a, a_offset + i * batch_dim.in_strides[0], lda, transa,
-					b, b_offset + i * batch_dim.in_strides[1], ldb, transb,
-					alpha, beta,
-					batch,
-				);
-			}
-			return;
-		}
-
-		match dtype {
-			DType { kind: DTypeKind::Float, bits: 32 } => {
-				self.gemm_f32(
-					c_offset, ldc,
-					m, n, k,
-					a, a_offset, lda, transa,
-					b, b_offset, ldb, transb,
-					alpha, beta,
-				);
-			},
-			_ => todo!(),
 		}
 	}
 
@@ -269,21 +237,33 @@ impl Buffer for CPUBuffer {
 
 	#[rustfmt::skip]
 	unsafe fn gemm(
-		&self, c: &Tensor, ldc: usize,
+		&self, dtype: DType, c_offset: usize, ldc: usize,
 		m: usize, n: usize, k: usize,
-		a: &Tensor, lda: usize, transa: bool,
-		b: &Tensor, ldb: usize, transb: bool,
+		a: &dyn Buffer, a_offset: usize, lda: usize, transa: bool,
+		b: &dyn Buffer, b_offset: usize, ldb: usize, transb: bool,
 		alpha: f64, beta: f64,
-		batch: &[BatchDim<2>],
+		batch: BatchDim<2>,
 	) {
-		self.get_buffer_of(c).gemm_dtype(
-			c.dtype(), c.offset, ldc,
-			m, n, k,
-			self.get_buffer_of(a), a.offset, lda, transa,
-			self.get_buffer_of(b), b.offset, ldb, transb,
-			alpha, beta,
-			batch,
-		)
+		let c = self;
+		let a = self.cast_buffer(a);
+		let b = self.cast_buffer(b);
+		for i in 0..batch.size {
+			let c_offset = c_offset + i * batch.out_stride;
+			let a_offset = a_offset + i * batch.in_strides[0];
+			let b_offset = b_offset + i * batch.in_strides[1];
+			match dtype {
+				DType { kind: DTypeKind::Float, bits: 32 } => {
+					self.gemm_f32(
+						c_offset, ldc,
+						m, n, k,
+						a, a_offset, lda, transa,
+						b, b_offset, ldb, transb,
+						alpha, beta,
+					);
+				},
+				_ => todo!(),
+			}
+		}
 	}
 
 	unsafe fn format(
