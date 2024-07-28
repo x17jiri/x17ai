@@ -8,13 +8,20 @@ pub trait Buffer {
 	fn zeros_(&self, tensor: &Tensor);
 	fn randn_(&self, tensor: &Tensor);
 
+	#[rustfmt::skip]
 	unsafe fn rms_norm(
-		&self,
-		out: &Tensor,
-		a: &Tensor,
-		dim_size: usize,
-		eps: f64,
-		batch: &[BatchDim<1>],
+		&self, dtype: DType, out_offset: usize, out_batch_stride: usize,
+		a: &BufferBase, a_offset: usize, a_batch_stride: usize,
+		count: usize, eps: f64,
+		batch_size: usize,
+	);
+
+	#[rustfmt::skip]
+	unsafe fn softmax(
+		&self, dtype: DType, out_offset: usize, out_batch_stride: usize,
+		a: &BufferBase, a_offset: usize, a_batch_stride: usize,
+		count: usize,
+		batch_size: usize,
 	);
 
 	// All matrices are stored in row-major order.
@@ -26,25 +33,35 @@ pub trait Buffer {
 	unsafe fn gemm(
 		&self, dtype: DType, c_offset: usize, ldc: usize, c_batch_stride: usize,
 		m: usize, n: usize, k: usize,
-		a: &dyn Buffer, a_offset: usize, lda: usize, transa: bool, a_batch_stride: usize,
-		b: &dyn Buffer, b_offset: usize, ldb: usize, transb: bool, b_batch_stride: usize,
+		a: &BufferBase, a_offset: usize, lda: usize, transa: bool, a_batch_stride: usize,
+		b: &BufferBase, b_offset: usize, ldb: usize, transb: bool, b_batch_stride: usize,
 		alpha: f64, beta: f64,
 		batch_size: usize,
 	);
 
+	#[rustfmt::skip]
 	unsafe fn format(
-		&self,
-		f: &mut fmt::Formatter,
-		dtype: DType,
-		offset: usize,
-		count: usize,
-		stride: usize,
+		&self, f: &mut fmt::Formatter, dtype: DType,
+		offset: usize, count: usize, stride: usize,
 	) -> fmt::Result;
 }
 
 pub struct BufferBase {
 	pub device: Rc<dyn Device>,
 	pub capacity: usize,
+}
+
+impl BufferBase {
+	pub fn is_on_device(&self, device: &dyn Device) -> bool {
+		let my_dev = self.device.as_ref();
+		let my_dev = my_dev as *const dyn Device;
+		let my_dev = my_dev as *const u8;
+
+		let dev = device as *const dyn Device;
+		let dev = dev as *const u8;
+
+		my_dev == dev
+	}
 }
 
 pub fn buf_to_base(buf: &dyn Buffer) -> &BufferBase {

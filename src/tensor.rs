@@ -202,7 +202,7 @@ impl Tensor {
 
 		// use `Batch` to merge the last `n` dimensions
 		let last_n = unsafe { self.dims.get_unchecked(ndim - n..) };
-		let mut merged = Batch::new(n);
+		let mut merged = Batch::new_empty(n);
 		let mut elems = 1;
 		for dim in last_n.iter().rev() {
 			merged.push_dim(dim.size, elems, [dim.stride]);
@@ -266,6 +266,18 @@ impl Tensor {
 	pub fn t(self) -> Tensor {
 		self.transposed(-2, -1)
 	}
+
+	pub fn as_row_matrix(mut self) -> Tensor {
+		self.dims.push(SizeAndStride { size: 1, stride: 1 });
+		let ndim = self.ndim();
+		self.dims.swap(ndim - 2, ndim - 1);
+		self
+	}
+
+	pub fn as_col_matrix(mut self) -> Tensor {
+		self.dims.push(SizeAndStride { size: 1, stride: 1 });
+		self
+	}
 }
 
 pub fn assert_compatible_types(a: &Tensor, b: &Tensor) {
@@ -313,7 +325,7 @@ fn __gemm(
 	c_dims_ctor.push(c_dims[1].size);
 	c_dims_ctor.push(c_dims[0].size);
 
-	let batch = prep_batch(batch_ndim, [a_batch_dims, b_batch_dims], &mut c_dims_ctor);
+	let batch = Batch::new(batch_ndim, [a_batch_dims, b_batch_dims], &mut c_dims_ctor);
 
 	c_dims_ctor.final_check();
 	let c = a.__new(c_dims_ctor.elems, c_dims_ctor.dims, dtype);
@@ -373,8 +385,8 @@ fn __gemm(
 	let lda = lda;
 	let ldb = ldb;
 
-	let a_buf = a.buffer.as_ref();
-	let b_buf = b.buffer.as_ref();
+	let a_buf = buf_to_base(a.buffer.as_ref());
+	let b_buf = buf_to_base(b.buffer.as_ref());
 	#[rustfmt::skip]
 	batch.run(
 		c.offset, [a.offset, b.offset],
@@ -419,15 +431,61 @@ pub fn rms_norm(a: &Tensor) -> Tensor {
 	let mut out_dims_ctor = DimsCtor::new(ndim);
 	out_dims_ctor.push(dim_size);
 
-	let batch = prep_batch(batch_ndim, [&a.dims[..batch_ndim]], &mut out_dims_ctor);
-	let batch = &batch.rev_dims;
+	let batch = Batch::new(batch_ndim, [&a.dims[..batch_ndim]], &mut out_dims_ctor);
 
 	out_dims_ctor.final_check();
 	let out = a.__new(out_dims_ctor.elems, out_dims_ctor.dims, a.dtype);
 
-	unsafe {
-		a.buffer.rms_norm(&out, a, dim_size, 1e-6, batch);
-	}
+	let out_buf = out.buffer.as_ref();
+	let a_buf = buf_to_base(a.buffer.as_ref());
+	#[rustfmt::skip]
+	batch.run(
+		out.offset, [a.offset],
+		&|out_offset, [a_offset], batch| {
+			unsafe {
+				out_buf.rms_norm(
+					a.dtype, out_offset, batch.out_stride,
+					a_buf, a_offset, batch.in_strides[0],
+					dim_size, 1e-6,
+					batch.size
+				);
+			}
+		}
+	);
+
+	out
+}
+
+pub fn softmax(a: &Tensor) -> Tensor {
+	assert!(a.ndim() > 0);
+	let ndim = a.ndim();
+	let batch_ndim = ndim - 1;
+	let dim_size = a.dims[ndim - 1].size;
+
+	let mut out_dims_ctor = DimsCtor::new(ndim);
+	out_dims_ctor.push(dim_size);
+
+	let batch = Batch::new(batch_ndim, [&a.dims[..batch_ndim]], &mut out_dims_ctor);
+
+	out_dims_ctor.final_check();
+	let out = a.__new(out_dims_ctor.elems, out_dims_ctor.dims, a.dtype);
+
+	let out_buf = out.buffer.as_ref();
+	let a_buf = buf_to_base(a.buffer.as_ref());
+	#[rustfmt::skip]
+	batch.run(
+		out.offset, [a.offset],
+		&|out_offset, [a_offset], batch| {
+			unsafe {
+				out_buf.softmax(
+					a.dtype, out_offset, batch.out_stride,
+					a_buf, a_offset, batch.in_strides[0],
+					dim_size,
+					batch.size
+				);
+			}
+		}
+	);
 
 	out
 }
@@ -473,53 +531,6 @@ impl fmt::Display for Tensor {
 
 //--------------------------------------------------------------------------------------------------
 
-pub fn prep_batch<const N: usize>(
-	ndim: usize,
-	inputs: [&[SizeAndStride]; N],
-	output: &mut DimsCtor,
-) -> Batch<N> {
-	assert!(N > 0);
-
-	let mut batch = Batch::new(ndim);
-
-	for d in (0..ndim).rev() {
-		// Get sizes and strides for the current dimension from all inputs
-		let mut in_sizes = [0; N];
-		let mut in_strides = [0; N];
-		for i in 0..N {
-			// Does the input have enough dimensions,
-			// or do we need to extend it with broadcasted dimensions?
-			if d < inputs[i].len() {
-				in_sizes[i] = inputs[i][d].size;
-				in_strides[i] = inputs[i][d].stride;
-			} else {
-				in_sizes[i] = 1;
-				in_strides[i] = 0;
-			}
-		}
-
-		// TODO - what happens when one of the dimensions has size 0?
-
-		// The dim_size should be the same for all inputs except for broadcasted inputs
-		// So max() gets the dim_size of the non-broadcasted inputs.
-		let dim_size = in_sizes.iter().copied().max().unwrap();
-
-		let out_stride = output.push(dim_size);
-
-		// Find inputs that need broadcasting and set their strides to 0
-		for i in 0..N {
-			if in_sizes[i] != dim_size {
-				assert!(in_sizes[i] == 1, "cannot broadcast: incompatible dimensions");
-				in_strides[i] = 0;
-			}
-		}
-
-		batch.push_dim(dim_size, out_stride, in_strides);
-	}
-
-	batch
-}
-
 #[derive(Clone, Copy)]
 pub struct BatchDim<const N: usize> {
 	pub size: usize,
@@ -535,7 +546,50 @@ pub struct Batch<const N: usize> {
 }
 
 impl<const N: usize> Batch<N> {
-	pub fn new(ndim: usize) -> Batch<N> {
+	pub fn new(ndim: usize, inputs: [&[SizeAndStride]; N], output: &mut DimsCtor) -> Batch<N> {
+		assert!(N > 0);
+
+		let mut batch = Batch::new_empty(ndim);
+
+		for d in (0..ndim).rev() {
+			// Get sizes and strides for the current dimension from all inputs
+			let mut in_sizes = [0; N];
+			let mut in_strides = [0; N];
+			for i in 0..N {
+				// Does the input have enough dimensions,
+				// or do we need to extend it with broadcasted dimensions?
+				if d < inputs[i].len() {
+					in_sizes[i] = inputs[i][d].size;
+					in_strides[i] = inputs[i][d].stride;
+				} else {
+					in_sizes[i] = 1;
+					in_strides[i] = 0;
+				}
+			}
+
+			// TODO - what happens when one of the dimensions has size 0?
+
+			// The dim_size should be the same for all inputs except for broadcasted inputs
+			// So max() gets the dim_size of the non-broadcasted inputs.
+			let dim_size = in_sizes.iter().copied().max().unwrap();
+
+			let out_stride = output.push(dim_size);
+
+			// Find inputs that need broadcasting and set their strides to 0
+			for i in 0..N {
+				if in_sizes[i] != dim_size {
+					assert!(in_sizes[i] == 1, "cannot broadcast: incompatible dimensions");
+					in_strides[i] = 0;
+				}
+			}
+
+			batch.push_dim(dim_size, out_stride, in_strides);
+		}
+
+		batch
+	}
+
+	pub fn new_empty(ndim: usize) -> Batch<N> {
 		Batch { rev_dims: SmallVec::with_capacity(ndim) }
 	}
 

@@ -67,9 +67,9 @@ impl CPUBuffer {
 		unsafe { &*buf }
 	}
 
-	fn cast_buffer(&self, buf: &dyn Buffer) -> &CPUBuffer {
-		debug_assert!(are_bufs_on_the_same_device(buf, self));
-		let buf = buf as *const dyn Buffer;
+	fn cast_buffer(&self, buf: &BufferBase) -> &CPUBuffer {
+		debug_assert!(buf.is_on_device(self.base.device.as_ref()));
+		let buf = buf as *const BufferBase;
 		let buf = buf as *const CPUBuffer;
 		unsafe { &*buf }
 	}
@@ -96,46 +96,11 @@ impl CPUBuffer {
 		}
 	}
 
-	fn rms_norm_dtype(
-		&self,
-		dtype: DType,
-		offset: usize,
-		a: &Self,
-		a_offset: usize,
-		dim_size: usize,
-		eps: f64,
-		batch: &[BatchDim<1>],
-	) {
-		if !batch.is_empty() {
-			let batch_dim = batch[batch.len() - 1];
-			let batch = &batch[..batch.len() - 1];
-			for i in 0..batch_dim.size {
-				self.rms_norm_dtype(
-					dtype,
-					offset + i * batch_dim.out_stride,
-					a,
-					a_offset + i * batch_dim.in_strides[0],
-					dim_size,
-					eps,
-					batch,
-				);
-			}
-			return;
-		}
-
-		match dtype {
-			DType { kind: DTypeKind::Float, bits: 32 } => {
-				self.rms_norm_f32(offset, a, a_offset, dim_size, eps)
-			},
-			_ => todo!(),
-		}
-	}
-
 	// internally uses f64 and then stores the result as f32
 	// on modern CPUs, this should have no performance impact and we get better precision
-	fn rms_norm_f32(&self, offset: usize, a: &Self, a_offset: usize, dim_size: usize, eps: f64) {
-		let out_vec = self.cast::<f32>(offset, dim_size);
-		let in_vec = a.cast::<f32>(a_offset, dim_size);
+	fn rms_norm_f32(&self, offset: usize, a: &Self, a_offset: usize, count: usize, eps: f64) {
+		let out_vec = self.cast::<f32>(offset, count);
+		let in_vec = a.cast::<f32>(a_offset, count);
 
 		let mut sqr_sum = eps;
 		for i in in_vec {
@@ -143,11 +108,24 @@ impl CPUBuffer {
 			sqr_sum += i * i;
 		}
 
-		let scale = ((dim_size as f64) / sqr_sum).sqrt();
+		let scale = ((count as f64) / sqr_sum).sqrt();
 
 		for (o, i) in out_vec.iter().zip(in_vec) {
 			let i = i.get() as f64;
 			o.set((i * scale) as f32);
+		}
+	}
+
+	fn softmax_f32(&self, offset: usize, a: &Self, a_offset: usize, count: usize) {
+		let out_vec = self.cast::<f32>(offset, count);
+		let in_vec = a.cast::<f32>(a_offset, count);
+
+		let max: f64 = in_vec.iter().map(|x| x.get()).fold(f32::NEG_INFINITY, f32::max) as f64;
+		let sum: f64 = in_vec.iter().map(|x| (x.get() as f64 - max).exp()).sum();
+
+		for (o, i) in out_vec.iter().zip(in_vec) {
+			let i = i.get() as f64;
+			o.set(((i - max).exp() / sum) as f32);
 		}
 	}
 
@@ -159,6 +137,10 @@ impl CPUBuffer {
 		b: &Self, b_offset: usize, ldb: usize, transb: bool,
 		alpha: f64, beta: f64,
 	) {
+		let a = a.cast::<f32>(a_offset, 0).as_ptr();
+		let b = b.cast::<f32>(b_offset, 0).as_ptr();
+		let c = self.cast::<f32>(c_offset, 0).as_ptr();
+
 		let (rsa, csa) = if transa { (1, lda) } else { (lda, 1) };
 		let (rsb, csb) = if transb { (1, ldb) } else { (ldb, 1) };
 		let (rsc, csc) = (ldc, 1_usize);
@@ -167,10 +149,10 @@ impl CPUBuffer {
 			sgemm(
 				m, k, n,
 				alpha as f32,
-				a.cast::<f32>(a_offset, 0).as_ptr() as *const f32, rsa as isize, csa as isize,
-				b.cast::<f32>(b_offset, 0).as_ptr() as *const f32, rsb as isize, csb as isize,
+				a as *const f32, rsa as isize, csa as isize,
+				b as *const f32, rsb as isize, csb as isize,
 				beta as f32,
-				self.cast::<f32>(c_offset, 0).as_ptr() as *mut f32, rsc as isize, csc as isize,
+				c as *mut f32, rsc as isize, csc as isize,
 			);
 		}
 	}
@@ -216,31 +198,54 @@ impl Buffer for CPUBuffer {
 		}
 	}
 
+	#[rustfmt::skip]
 	unsafe fn rms_norm(
-		&self,
-		out: &Tensor,
-		a: &Tensor,
-		dim_size: usize,
-		eps: f64,
-		batch: &[BatchDim<1>],
+		&self, dtype: DType, out_offset: usize, out_batch_stride: usize,
+		a: &BufferBase, a_offset: usize, a_batch_stride: usize,
+		count: usize, eps: f64,
+		batch_size: usize,
 	) {
-		self.get_buffer_of(out).rms_norm_dtype(
-			out.dtype(),
-			out.offset,
-			self.get_buffer_of(a),
-			a.offset,
-			dim_size,
-			eps,
-			batch,
-		)
+		let out = self;
+		let a = self.cast_buffer(a);
+		for i in 0..batch_size {
+			let out_offset = out_offset + i * out_batch_stride;
+			let a_offset = a_offset + i * a_batch_stride;
+			match dtype {
+				DType { kind: DTypeKind::Float, bits: 32 } => {
+					out.rms_norm_f32(out_offset, a, a_offset, count, eps)
+				},
+				_ => todo!(),
+			}
+		}
+	}
+
+	#[rustfmt::skip]
+	unsafe fn softmax(
+		&self, dtype: DType, out_offset: usize, out_batch_stride: usize,
+		a: &BufferBase, a_offset: usize, a_batch_stride: usize,
+		count: usize,
+		batch_size: usize,
+	) {
+		let out = self;
+		let a = self.cast_buffer(a);
+		for i in 0..batch_size {
+			let out_offset = out_offset + i * out_batch_stride;
+			let a_offset = a_offset + i * a_batch_stride;
+			match dtype {
+				DType { kind: DTypeKind::Float, bits: 32 } => {
+					out.softmax_f32(out_offset, a, a_offset, count)
+				},
+				_ => todo!(),
+			}
+		}
 	}
 
 	#[rustfmt::skip]
 	unsafe fn gemm(
 		&self, dtype: DType, c_offset: usize, ldc: usize, c_batch_stride: usize,
 		m: usize, n: usize, k: usize,
-		a: &dyn Buffer, a_offset: usize, lda: usize, transa: bool, a_batch_stride: usize,
-		b: &dyn Buffer, b_offset: usize, ldb: usize, transb: bool, b_batch_stride: usize,
+		a: &BufferBase, a_offset: usize, lda: usize, transa: bool, a_batch_stride: usize,
+		b: &BufferBase, b_offset: usize, ldb: usize, transb: bool, b_batch_stride: usize,
 		alpha: f64, beta: f64,
 		batch_size: usize,
 	) {

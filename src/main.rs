@@ -35,10 +35,8 @@ use crate::format::*;
 use crate::rand::*;
 use crate::tensor::*;
 use std::rc::Rc;
-/*
+
 pub trait Module {
-	fn forward(&self, x: &Tensor) -> Tensor;
-	fn backward(&self, dy: &Tensor, dx: Option<&Tensor>);
 	fn reg_params(&self, ctx: &Context);
 }
 
@@ -47,9 +45,13 @@ pub struct Context {
 }
 
 impl Context {
-	pub fn reg_param(&self, param: &Tensor) -> Tensor {
+	pub fn reg_param(&self, param: &Tensor) -> GradData {
 		// TODO
 	}
+}
+
+pub struct GradData {
+	pub grad: Option<Tensor>,
 }
 
 // Linear layer transforming inputs to outputs
@@ -60,8 +62,8 @@ struct Linear {
 	pub inputs: usize,
 	pub outputs: usize,
 
-	pub weights: Tensor,
-	pub weights_grad: Option<Tensor>,
+	pub w: Tensor,
+	pub dw: Option<Rc<GradData>>,
 
 	pub scale: f64,
 	pub backward_scale: f64,
@@ -71,41 +73,40 @@ struct Linear {
 
 impl Linear {
 	pub fn new(inputs: usize, outputs: usize, dtype: DType, ctx: &Context) -> Linear {
-		let weights = Tensor::new(&[outputs, inputs], dtype, ctx.device.clone());
+		let w = Tensor::new(&[outputs, inputs], dtype, ctx.device.clone());
 		let scale = 1.0 / (inputs as f64).sqrt();
 		let backward_scale = 1.0 / (outputs as f64).sqrt();
+		#[rustfmt::skip]
 		Linear {
-			inputs,
-			outputs,
-
-			weights,
-			weights_grad: None,
-
-			scale,
-			backward_scale,
-
+			inputs, outputs,
+			w, dw: None,
+			scale, backward_scale,
 			dtype,
 		}
+	}
+
+	fn forward(&self, x: &Tensor) -> Tensor {
+		gemm(&self.w, &x.clone().as_col_matrix(), self.scale)
+	}
+
+	fn backward(&self, dy: &Tensor) -> Tensor {
+		if let Some(dw) = &self.dw {
+			assert!(dw.grad.is_none());
+			// TODO
+			//			dw.grad =
+			//				Some(gemm(&self.w.clone().t(), &dy.clone().as_col_matrix(), self.backward_scale));
+		}
+		gemm(&self.w.clone().t(), &dy.clone().as_col_matrix(), self.scale)
 	}
 }
 
 impl Module for Linear {
-	fn forward(&self, x: &Tensor) -> Tensor {
-		scaled_matmul(&self.weights, &x.as_col_matrix(), self.scale)
-	}
-
-	fn backward(&self, dy: &Tensor, dx: Option<&Tensor>) -> Tensor {
-		if let Some(dx) = dx {
-			scaled_matmul_acc(dy.as_row_matrix(), &self.weights, self.backward_scale, dx);
-		}
-		if let Some(weights_grad) = self.weights_grad.as_ref() {}
-	}
-
 	fn reg_params(&self, ctx: &Context) {
 		self.weights_grad = Some(ctx.reg_param(&self.weights));
 	}
 }
 
+/*
 struct Attention {
 	pub input_features: usize,
 	pub heads: usize,
@@ -250,6 +251,12 @@ fn main() {
 
 	println!("rms_norm(x) = {}", nx);
 	println!("rms_norm(y) = {}", ny);
+
+	let xs = softmax(&x);
+	let ys = softmax(&y);
+
+	println!("softmax(x) = {}", xs);
+	println!("softmax(y) = {}", ys);
 
 	//	let z = Tensor::new(&[2, 2], DType::f32(), dev.clone());
 	let xt = x.t();

@@ -120,8 +120,7 @@ impl Rng {
 		let z1 = r * theta.sin();
 
 		// Combine z0 and z1 into a single value
-		// This increases the variance, so we need to rescale
-		let result = (z0 + z1) * std::f64::consts::FRAC_1_SQRT_2;
+		let result = z0 * z1;
 
 		if result.abs() < 10.0 { result } else { 0.0 }
 	}
