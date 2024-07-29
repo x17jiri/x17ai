@@ -423,9 +423,32 @@ pub fn mm(a: &Tensor, b: &Tensor, alpha: f64) -> Tensor {
 	__gemm(a, a_batch_dims, a_dims, b, b_batch_dims, b_dims, alpha)
 }
 
+pub struct MatDotCol<'a> {
+	pub mat: &'a Tensor,
+	pub col: &'a Tensor,
+}
+
+impl<'a> MatDotCol<'a> {
+	pub fn new(mat: &'a Tensor, col: &'a Tensor) -> MatDotCol<'a> {
+		MatDotCol { mat, col }
+	}
+
+	pub fn result(&self, alpha: f64) -> Tensor {
+		mat_dot_col(self.mat, self.col, alpha)
+	}
+
+	pub fn dmat(&self, dy: &Tensor, alpha: f64) -> Tensor {
+		col_dot_row(dy, self.col, alpha)
+	}
+
+	pub fn dcol(&self, dy: &Tensor, alpha: f64) -> Tensor {
+		matT_dot_col(self.mat, dy, alpha)
+	}
+}
+
 // Multiply a matrix by a column vector
 // result = m * col * alpha
-pub fn m_dot_col(mat: &Tensor, col: &Tensor, alpha: f64) -> Tensor {
+pub fn mat_dot_col(mat: &Tensor, col: &Tensor, alpha: f64) -> Tensor {
 	let mat_ndim = mat.ndim();
 	assert!(mat_ndim >= 2);
 	let mat_batch_dims = &mat.dims[..mat_ndim - 2];
@@ -441,7 +464,7 @@ pub fn m_dot_col(mat: &Tensor, col: &Tensor, alpha: f64) -> Tensor {
 
 // Multiply a transposed matrix by a column vector
 #[allow(non_snake_case)]
-pub fn mT_dot_col(mat: &Tensor, col: &Tensor, alpha: f64) -> Tensor {
+pub fn matT_dot_col(mat: &Tensor, col: &Tensor, alpha: f64) -> Tensor {
 	let mat_ndim = mat.ndim();
 	assert!(mat_ndim >= 2);
 	let mat_batch_dims = &mat.dims[..mat_ndim - 2];

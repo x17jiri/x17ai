@@ -51,8 +51,8 @@ impl Context {
 	}
 }
 
-pub struct GradData {
-	pub grad: Option<Tensor>,
+trait GradData {
+	fn set(&self, grad: Tensor);
 }
 
 // Linear layer transforming inputs to outputs
@@ -64,7 +64,7 @@ struct Linear {
 	pub outputs: usize,
 
 	pub w: Tensor,
-	pub dw: Option<Rc<RefCell<GradData>>>,
+	pub dw: Option<Rc<RefCell<dyn GradData>>>,
 	pub saved_x: RefCell<Option<Tensor>>,
 
 	pub scale: f64,
@@ -93,17 +93,22 @@ impl Linear {
 		if training {
 			self.saved_x.borrow_mut().replace(x.clone());
 		}
-		m_dot_col(&self.w, &x, self.scale)
+		MatDotCol::new(&self.w, x).result(self.scale)
 	}
 
 	fn backward(&self, dy: &Tensor) -> Tensor {
+		let x = self.saved_x.borrow().as_ref().unwrap();
+		let mm = MatDotCol::new(&self.w, x);
+
+		// dw
 		if let Some(dw) = &self.dw {
-			let mut dw = dw.borrow_mut();
-			assert!(dw.grad.is_none());
-			dw.grad = Some(col_dot_row(&dy, self.saved_x.borrow().as_ref().unwrap(), 1.0));
+			let dw = dw.borrow_mut();
+			dw.set(mm.dmat(dy, 1.0));
 			self.saved_x.borrow_mut().take();
 		}
-		mT_dot_col(&self.w, &dy, self.backward_scale)
+
+		// dx
+		mm.dcol(dy, self.backward_scale)
 	}
 }
 
