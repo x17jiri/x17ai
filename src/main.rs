@@ -101,6 +101,7 @@ impl Linear {
 			let mut dw = dw.borrow_mut();
 			assert!(dw.grad.is_none());
 			dw.grad = Some(col_dot_row(&dy, self.saved_x.borrow().as_ref().unwrap(), 1.0));
+			self.saved_x.borrow_mut().take();
 		}
 		mT_dot_col(&self.w, &dy, self.backward_scale)
 	}
