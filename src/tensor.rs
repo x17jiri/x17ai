@@ -423,32 +423,9 @@ pub fn mm(a: &Tensor, b: &Tensor, alpha: f64) -> Tensor {
 	__gemm(a, a_batch_dims, a_dims, b, b_batch_dims, b_dims, alpha)
 }
 
-pub struct MatDotCol<'a> {
-	pub mat: &'a Tensor,
-	pub col: &'a Tensor,
-}
-
-impl<'a> MatDotCol<'a> {
-	pub fn new(mat: &'a Tensor, col: &'a Tensor) -> MatDotCol<'a> {
-		MatDotCol { mat, col }
-	}
-
-	pub fn result(&self, alpha: f64) -> Tensor {
-		mat_dot_col(self.mat, self.col, alpha)
-	}
-
-	pub fn dmat(&self, dy: &Tensor, alpha: f64) -> Tensor {
-		col_dot_row(dy, self.col, alpha)
-	}
-
-	pub fn dcol(&self, dy: &Tensor, alpha: f64) -> Tensor {
-		matT_dot_col(self.mat, dy, alpha)
-	}
-}
-
 // Multiply a matrix by a column vector
 // result = m * col * alpha
-pub fn mat_dot_col(mat: &Tensor, col: &Tensor, alpha: f64) -> Tensor {
+fn __mat_dot_col(mat: &Tensor, col: &Tensor, alpha: f64) -> Tensor {
 	let mat_ndim = mat.ndim();
 	assert!(mat_ndim >= 2);
 	let mat_batch_dims = &mat.dims[..mat_ndim - 2];
@@ -460,6 +437,82 @@ pub fn mat_dot_col(mat: &Tensor, col: &Tensor, alpha: f64) -> Tensor {
 	let col_dims = [col.dims[0], SizeAndStride { size: 1, stride: 1 }];
 
 	__gemm(mat, mat_batch_dims, mat_dims, col, col_batch_dims, col_dims, alpha)
+}
+
+pub fn mat_dot_col<'a>(mat: &'a Tensor, col: &'a Tensor) -> MatDotCol<'a> {
+	MatDotCol { mat, col }
+}
+
+pub struct MatDotCol<'a> {
+	pub mat: &'a Tensor,
+	pub col: &'a Tensor,
+}
+
+impl<'a> MatDotCol<'a> {
+	pub fn default_scale(&self) -> f64 {
+		let n = self.col.dims.last().unwrap().size;
+		1.0 / (n as f64).sqrt()
+	}
+
+	pub fn scaled(&self, scale: f64) -> Tensor {
+		__mat_dot_col(self.mat, self.col, scale)
+	}
+
+	pub fn checked_scaled(&self, scale: f64) -> Tensor {
+		debug_assert!(scale == self.default_scale());
+		self.scaled(scale)
+	}
+
+	pub fn dmat(&self, dy: &Tensor) -> MatDotCol_DMat {
+		MatDotCol_DMat { col: self.col, dy }
+	}
+
+	pub fn dcol(&self, dy: &Tensor) -> MatDotCol_DCol {
+		MatDotCol_DCol { mat: self.mat, dy }
+	}
+}
+
+#[allow(non_camel_case_types)]
+pub struct MatDotCol_DMat<'a> {
+	pub col: &'a Tensor,
+	pub dy: &'a Tensor,
+}
+
+impl<'a> MatDotCol_DMat<'a> {
+	pub fn default_scale(&self) -> f64 {
+		1.0
+	}
+
+	pub fn scaled(&self, scale: f64) -> Tensor {
+		col_dot_row(self.dy, self.col, scale)
+	}
+
+	pub fn checked_scaled(&self, scale: f64) -> Tensor {
+		debug_assert!(scale == self.default_scale());
+		self.scaled(scale)
+	}
+}
+
+#[allow(non_camel_case_types)]
+pub struct MatDotCol_DCol<'a> {
+	pub mat: &'a Tensor,
+	pub dy: &'a Tensor,
+}
+
+impl<'a> MatDotCol_DCol<'a> {
+	pub fn default_scale(&self) -> f64 {
+		let n = self.dy.dims.last().unwrap().size;
+		1.0 / (n as f64).sqrt()
+	}
+
+	pub fn scaled(&self, scale: f64) -> Tensor {
+		matT_dot_col(self.mat, self.dy, scale)
+	}
+
+	pub fn checked_scaled(&self, scale: f64) -> Tensor {
+		debug_assert!(scale == self.default_scale());
+		self.scaled(scale)
+	}
 }
 
 // Multiply a transposed matrix by a column vector

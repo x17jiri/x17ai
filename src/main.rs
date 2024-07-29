@@ -57,8 +57,8 @@ trait GradData {
 
 // Linear layer transforming inputs to outputs
 //
-// input: [..., inputs]
-// output: [..., outputs]
+// input: [*, inputs]
+// output: [*, outputs]
 struct Linear {
 	pub inputs: usize,
 	pub outputs: usize,
@@ -93,22 +93,25 @@ impl Linear {
 		if training {
 			self.saved_x.borrow_mut().replace(x.clone());
 		}
-		MatDotCol::new(&self.w, x).result(self.scale)
+		let dot = mat_dot_col(&self.w, x);
+		debug_assert!(dot.default_scale() == self.scale);
+		dot.scaled(self.scale)
 	}
 
 	fn backward(&self, dy: &Tensor) -> Tensor {
 		let x = self.saved_x.borrow().as_ref().unwrap();
-		let mm = MatDotCol::new(&self.w, x);
-
+		let dot = mat_dot_col(&self.w, x);
 		// dw
 		if let Some(dw) = &self.dw {
 			let dw = dw.borrow_mut();
-			dw.set(mm.dmat(dy, 1.0));
+			debug_assert!(dot.dmat(dy).default_scale() == 1.0);
+			dw.set(dot.dmat(dy).scaled(1.0));
 			self.saved_x.borrow_mut().take();
 		}
 
 		// dx
-		mm.dcol(dy, self.backward_scale)
+		debug_assert!(dot.dcol(dy).default_scale() == self.backward_scale);
+		dot.dcol(dy).scaled(self.backward_scale)
 	}
 }
 
