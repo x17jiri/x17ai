@@ -407,8 +407,9 @@ fn __gemm(
 	c
 }
 
-// c = a * b * alpha
-pub fn gemm(a: &Tensor, b: &Tensor, alpha: f64) -> Tensor {
+// Multiply two matrices
+// result = a * b * alpha
+pub fn mm(a: &Tensor, b: &Tensor, alpha: f64) -> Tensor {
 	let a_ndim = a.ndim();
 	assert!(a_ndim >= 2);
 	let a_batch_dims = &a.dims[..a_ndim - 2];
@@ -417,9 +418,55 @@ pub fn gemm(a: &Tensor, b: &Tensor, alpha: f64) -> Tensor {
 	let b_ndim = b.ndim();
 	assert!(b_ndim >= 2);
 	let b_batch_dims = &b.dims[..b_ndim - 2];
-	let b_dims = [b.dims[b_ndim - 2], b.dims[b_ndim - 1]];
+	let b_dims: [SizeAndStride; 2] = [b.dims[b_ndim - 2], b.dims[b_ndim - 1]];
 
 	__gemm(a, a_batch_dims, a_dims, b, b_batch_dims, b_dims, alpha)
+}
+
+// Multiply a matrix by a column vector
+// result = m * col * alpha
+pub fn m_dot_col(mat: &Tensor, col: &Tensor, alpha: f64) -> Tensor {
+	let mat_ndim = mat.ndim();
+	assert!(mat_ndim >= 2);
+	let mat_batch_dims = &mat.dims[..mat_ndim - 2];
+	let mat_dims = [mat.dims[mat_ndim - 2], mat.dims[mat_ndim - 1]];
+
+	let col_ndim = col.ndim();
+	assert!(col_ndim >= 1);
+	let col_batch_dims = &col.dims[..col_ndim - 1];
+	let col_dims = [col.dims[0], SizeAndStride { size: 1, stride: 1 }];
+
+	__gemm(mat, mat_batch_dims, mat_dims, col, col_batch_dims, col_dims, alpha)
+}
+
+// Multiply a transposed matrix by a column vector
+#[allow(non_snake_case)]
+pub fn mT_dot_col(mat: &Tensor, col: &Tensor, alpha: f64) -> Tensor {
+	let mat_ndim = mat.ndim();
+	assert!(mat_ndim >= 2);
+	let mat_batch_dims = &mat.dims[..mat_ndim - 2];
+	let mat_dims = [mat.dims[mat_ndim - 1], mat.dims[mat_ndim - 2]];
+
+	let col_ndim = col.ndim();
+	assert!(col_ndim >= 1);
+	let col_batch_dims = &col.dims[..col_ndim - 1];
+	let col_dims = [col.dims[0], SizeAndStride { size: 1, stride: 1 }];
+
+	__gemm(mat, mat_batch_dims, mat_dims, col, col_batch_dims, col_dims, alpha)
+}
+
+pub fn col_dot_row(col: &Tensor, row: &Tensor, alpha: f64) -> Tensor {
+	let col_ndim = col.ndim();
+	assert!(col_ndim >= 1);
+	let col_batch_dims = &col.dims[..col_ndim - 1];
+	let col_dims = [col.dims[0], SizeAndStride { size: 1, stride: 1 }];
+
+	let row_ndim = row.ndim();
+	assert!(row_ndim >= 1);
+	let row_batch_dims = &row.dims[..row_ndim - 1];
+	let row_dims = [SizeAndStride { size: 1, stride: 1 }, row.dims[0]];
+
+	__gemm(col, col_batch_dims, col_dims, row, row_batch_dims, row_dims, alpha)
 }
 
 pub fn rms_norm(a: &Tensor) -> Tensor {

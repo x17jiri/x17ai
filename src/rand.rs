@@ -1,6 +1,9 @@
 // Copyright 2024 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
+use log::warn;
+use std::intrinsics::unlikely;
+
 // State initialization constant ("expand 32-byte k")
 const CONSTANTS: [u32; 4] = [0x_6170_7865, 0x_3320_646e, 0x_7962_2d32, 0x_6b20_6574];
 
@@ -122,6 +125,11 @@ impl Rng {
 		// Combine z0 and z1 into a single value
 		let result = z0 * z1;
 
-		if result.abs() < 10.0 { result } else { 0.0 }
+		if unlikely(result.abs() >= 10.0) {
+			warn!("Rng::get_normal(): clamping {} to (-10.0, 10.0)", result);
+			return 0.0;
+		}
+
+		result
 	}
 }

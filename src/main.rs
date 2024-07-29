@@ -34,10 +34,11 @@ use crate::dtype::*;
 use crate::format::*;
 use crate::rand::*;
 use crate::tensor::*;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 pub trait Module {
-	fn reg_params(&self, ctx: &Context);
+	fn reg_params(&mut self, ctx: &mut Context);
 }
 
 pub struct Context {
@@ -45,7 +46,7 @@ pub struct Context {
 }
 
 impl Context {
-	pub fn reg_param(&self, param: &Tensor) -> GradData {
+	pub fn reg_param(&mut self, param: &Tensor) -> Rc<GradData> {
 		// TODO
 	}
 }
@@ -63,7 +64,8 @@ struct Linear {
 	pub outputs: usize,
 
 	pub w: Tensor,
-	pub dw: Option<Rc<GradData>>,
+	pub dw: Option<Rc<RefCell<GradData>>>,
+	pub saved_x: RefCell<Option<Tensor>>,
 
 	pub scale: f64,
 	pub backward_scale: f64,
@@ -80,29 +82,33 @@ impl Linear {
 		Linear {
 			inputs, outputs,
 			w, dw: None,
+			saved_x: RefCell::new(None),
 			scale, backward_scale,
 			dtype,
 		}
 	}
 
 	fn forward(&self, x: &Tensor) -> Tensor {
-		gemm(&self.w, &x.clone().as_col_matrix(), self.scale)
+		let training = self.dw.is_some();
+		if training {
+			self.saved_x.borrow_mut().replace(x.clone());
+		}
+		m_dot_col(&self.w, &x, self.scale)
 	}
 
 	fn backward(&self, dy: &Tensor) -> Tensor {
 		if let Some(dw) = &self.dw {
+			let mut dw = dw.borrow_mut();
 			assert!(dw.grad.is_none());
-			// TODO
-			//			dw.grad =
-			//				Some(gemm(&self.w.clone().t(), &dy.clone().as_col_matrix(), self.backward_scale));
+			dw.grad = Some(col_dot_row(&dy, self.saved_x.borrow().as_ref().unwrap(), 1.0));
 		}
-		gemm(&self.w.clone().t(), &dy.clone().as_col_matrix(), self.scale)
+		mT_dot_col(&self.w, &dy, self.backward_scale)
 	}
 }
 
 impl Module for Linear {
-	fn reg_params(&self, ctx: &Context) {
-		self.weights_grad = Some(ctx.reg_param(&self.weights));
+	fn reg_params(&mut self, ctx: &mut Context) {
+		self.dw = Some(ctx.reg_param(&self.w));
 	}
 }
 
@@ -235,6 +241,8 @@ impl Module for Transformer {
 }
 */
 fn main() {
+	stderrlog::new().module(module_path!()).init().unwrap();
+
 	let dev = CPUDevice::new("CPU".to_string());
 
 	let x = Tensor::new(&[2, 3], DType::f32(), dev.clone());
