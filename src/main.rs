@@ -93,25 +93,23 @@ impl Linear {
 		if training {
 			self.saved_x.borrow_mut().replace(x.clone());
 		}
-		let dot = mat_dot_col(&self.w, x);
-		debug_assert!(dot.default_scale() == self.scale);
-		dot.scaled(self.scale)
+		mm(&self.w, x.as_col_matrix()).checked_scaled(self.scale)
 	}
 
 	fn backward(&self, dy: &Tensor) -> Tensor {
 		let x = self.saved_x.borrow().as_ref().unwrap();
-		let dot = mat_dot_col(&self.w, x);
+		let grad = mm(&self.w, x.as_col_matrix()).backward(dy);
+
 		// dw
 		if let Some(dw) = &self.dw {
-			let dw = dw.borrow_mut();
-			debug_assert!(dot.dmat(dy).default_scale() == 1.0);
-			dw.set(dot.dmat(dy).scaled(1.0));
+			dw.borrow_mut().set(grad.da().checked_scaled(1.0));
+
+			// clear saved_x
 			self.saved_x.borrow_mut().take();
 		}
 
 		// dx
-		debug_assert!(dot.dcol(dy).default_scale() == self.backward_scale);
-		dot.dcol(dy).scaled(self.backward_scale)
+		grad.db().checked_scaled(self.backward_scale)
 	}
 }
 

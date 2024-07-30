@@ -263,20 +263,31 @@ impl Tensor {
 		self
 	}
 
-	pub fn t(self) -> Tensor {
-		self.transposed(-2, -1)
+	#[allow(non_snake_case)]
+	pub fn T<'a>(&'a self) -> MatrixView<'a> {
+		self.matrix_view().T()
 	}
 
-	pub fn as_row_matrix(mut self) -> Tensor {
-		self.dims.push(SizeAndStride { size: 1, stride: 1 });
+	pub fn as_row_matrix<'a>(&'a self) -> MatrixView<'a> {
 		let ndim = self.ndim();
-		self.dims.swap(ndim - 2, ndim - 1);
-		self
+		assert!(ndim >= 1);
+		MatrixView {
+			tensor: self,
+			batch_dims: &self.dims[..ndim - 1],
+			rows: SizeAndStride { size: 1, stride: 1 },
+			cols: self.dims[ndim - 1],
+		}
 	}
 
-	pub fn as_col_matrix(mut self) -> Tensor {
-		self.dims.push(SizeAndStride { size: 1, stride: 1 });
-		self
+	pub fn as_col_matrix<'a>(&'a self) -> MatrixView<'a> {
+		let ndim = self.ndim();
+		assert!(ndim >= 1);
+		MatrixView {
+			tensor: self,
+			batch_dims: &self.dims[..ndim - 1],
+			rows: self.dims[ndim - 1],
+			cols: SizeAndStride { size: 1, stride: 1 },
+		}
 	}
 }
 
@@ -407,20 +418,136 @@ fn __gemm(
 	c
 }
 
+#[derive(Clone, Copy)]
+pub struct MatrixView<'a> {
+	pub tensor: &'a Tensor,
+	pub batch_dims: &'a [SizeAndStride],
+	pub rows: SizeAndStride,
+	pub cols: SizeAndStride,
+}
+
+impl<'a> MatrixView<'a> {
+	#[allow(non_snake_case)]
+	pub fn T(&self) -> MatrixView<'a> {
+		MatrixView {
+			tensor: self.tensor,
+			batch_dims: self.batch_dims,
+			rows: self.cols,
+			cols: self.rows,
+		}
+	}
+}
+
+pub trait MatrixLike<'a> {
+	fn matrix_view(self) -> MatrixView<'a>;
+}
+
+impl<'a> MatrixLike<'a> for &'a Tensor {
+	fn matrix_view(self) -> MatrixView<'a> {
+		let ndim = self.ndim();
+		assert!(ndim >= 2);
+		let batch_dims = &self.dims[..ndim - 2];
+		let rows = self.dims[ndim - 2];
+		let cols = self.dims[ndim - 1];
+		MatrixView { tensor: self, batch_dims, rows, cols }
+	}
+}
+
+impl<'a> MatrixLike<'a> for MatrixView<'a> {
+	fn matrix_view(self) -> MatrixView<'a> {
+		self
+	}
+}
+
 // Multiply two matrices
 // result = a * b * alpha
-pub fn mm(a: &Tensor, b: &Tensor, alpha: f64) -> Tensor {
-	let a_ndim = a.ndim();
-	assert!(a_ndim >= 2);
-	let a_batch_dims = &a.dims[..a_ndim - 2];
-	let a_dims = [a.dims[a_ndim - 2], a.dims[a_ndim - 1]];
+pub fn mm<'a, A: MatrixLike<'a>, B: MatrixLike<'a>>(a: A, b: B) -> MatMul<'a> {
+	let a = a.matrix_view();
+	let b = b.matrix_view();
+	assert!(a.cols.size == b.rows.size);
+	MatMul { a, b }
+}
 
-	let b_ndim = b.ndim();
-	assert!(b_ndim >= 2);
-	let b_batch_dims = &b.dims[..b_ndim - 2];
-	let b_dims: [SizeAndStride; 2] = [b.dims[b_ndim - 2], b.dims[b_ndim - 1]];
+pub struct MatMul<'a> {
+	pub a: MatrixView<'a>,
+	pub b: MatrixView<'a>,
+}
 
-	__gemm(a, a_batch_dims, a_dims, b, b_batch_dims, b_dims, alpha)
+impl<'a> MatMul<'a> {
+	pub fn default_scale(&self) -> f64 {
+		let n = self.a.cols.size;
+		1.0 / (n as f64).sqrt()
+	}
+
+	pub fn scaled(&self, scale: f64) -> Tensor {
+		#[rustfmt::skip]
+		__gemm(
+			self.a.tensor, self.a.batch_dims, [self.a.rows, self.a.cols],
+			self.b.tensor, self.b.batch_dims, [self.b.rows, self.b.cols],
+			scale,
+		)
+	}
+
+	pub fn checked_scaled(&self, scale: f64) -> Tensor {
+		debug_assert!(scale == self.default_scale());
+		self.scaled(scale)
+	}
+
+	pub fn backward(&self, dy: &Tensor) -> MatMulBackward<'a> {
+		MatDotCol_DMat { col: self.col, dy }
+	}
+
+	// TODO - da, db should be functions of the type returned by `backward()`
+	pub fn da(&self) -> MatDotCol_DMat {
+		MatDotCol_DMat { col: self.col, dy }
+	}
+
+	pub fn db(&self) -> MatDotCol_DCol {
+		MatDotCol_DCol { mat: self.mat, dy }
+	}
+}
+
+#[allow(non_camel_case_types)]
+pub struct MatDotCol_DMat<'a> {
+	pub col: &'a Tensor,
+	pub dy: &'a Tensor,
+}
+
+impl<'a> MatDotCol_DMat<'a> {
+	pub fn default_scale(&self) -> f64 {
+		1.0
+	}
+
+	pub fn scaled(&self, scale: f64) -> Tensor {
+		col_dot_row(self.dy, self.col, scale)
+	}
+
+	pub fn checked_scaled(&self, scale: f64) -> Tensor {
+		debug_assert!(scale == self.default_scale());
+		self.scaled(scale)
+	}
+}
+
+#[allow(non_camel_case_types)]
+pub struct MatDotCol_DCol<'a> {
+	pub mat: &'a Tensor,
+	pub dy: &'a Tensor,
+}
+
+impl<'a> MatDotCol_DCol<'a> {
+	pub fn default_scale(&self) -> f64 {
+		let n = self.dy.dims.last().unwrap().size;
+		1.0 / (n as f64).sqrt()
+	}
+
+	pub fn scaled(&self, scale: f64) -> Tensor {
+		matT_dot_col(self.mat, self.dy, scale)
+	}
+
+	pub fn checked_scaled(&self, scale: f64) -> Tensor {
+		debug_assert!(scale == self.default_scale());
+		self.scaled(scale)
+	}
 }
 
 // Multiply a matrix by a column vector
