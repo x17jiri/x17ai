@@ -264,14 +264,14 @@ impl Tensor {
 	}
 
 	#[allow(non_snake_case)]
-	pub fn T<'a>(&'a self) -> MatrixView<'a> {
-		self.matrix_view().T()
+	pub fn T<'a>(&'a self) -> Matrix<'a> {
+		self.as_matrix().T()
 	}
 
-	pub fn as_row_matrix<'a>(&'a self) -> MatrixView<'a> {
+	pub fn as_row<'a>(&'a self) -> Matrix<'a> {
 		let ndim = self.ndim();
 		assert!(ndim >= 1);
-		MatrixView {
+		Matrix {
 			tensor: self,
 			batch_dims: &self.dims[..ndim - 1],
 			rows: SizeAndStride { size: 1, stride: 1 },
@@ -279,10 +279,10 @@ impl Tensor {
 		}
 	}
 
-	pub fn as_col_matrix<'a>(&'a self) -> MatrixView<'a> {
+	pub fn as_col<'a>(&'a self) -> Matrix<'a> {
 		let ndim = self.ndim();
 		assert!(ndim >= 1);
-		MatrixView {
+		Matrix {
 			tensor: self,
 			batch_dims: &self.dims[..ndim - 1],
 			rows: self.dims[ndim - 1],
@@ -292,81 +292,63 @@ impl Tensor {
 }
 
 pub fn assert_compatible_types(a: &Tensor, b: &Tensor) {
-	if a.dtype != b.dtype {
-		panic!("incompatible dtypes");
-	}
+	assert!(a.dtype == b.dtype, "incompatible dtypes");
 }
 
 pub fn assert_compatible_devices(a: &Tensor, b: &Tensor) {
-	if !are_bufs_on_the_same_device(a.buffer.as_ref(), b.buffer.as_ref()) {
-		panic!("incompatible devices");
-	}
+	assert!(
+		are_bufs_on_the_same_device(a.buffer.as_ref(), b.buffer.as_ref()),
+		"incompatible devices"
+	);
 }
 
 // c = a * b * alpha
-fn __gemm(
-	a: &Tensor,
-	a_batch_dims: &[SizeAndStride],
-	a_dims: [SizeAndStride; 2], // [rows, cols]
+fn __gemm<'a>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64) -> Tensor {
+	assert_compatible_types(a.tensor, b.tensor);
+	assert_compatible_devices(a.tensor, b.tensor);
 
-	b: &Tensor,
-	b_batch_dims: &[SizeAndStride],
-	b_dims: [SizeAndStride; 2], // [rows, cols]
+	assert!(a.cols.size == b.rows.size, "incompatible dimensions");
+	let c_rows = SizeAndStride { size: a.rows.size, stride: b.cols.size };
+	let c_cols = SizeAndStride { size: b.cols.size, stride: 1 };
 
-	alpha: f64,
-) -> Tensor {
-	assert_compatible_types(a, b);
-	assert_compatible_devices(a, b);
-
-	if a_dims[1].size != b_dims[0].size {
-		panic!("incompatible dimensions");
-	}
-	let c_dims = [
-		SizeAndStride {
-			size: a_dims[0].size,
-			stride: b_dims[1].size,
-		},
-		SizeAndStride { size: b_dims[1].size, stride: 1 },
-	];
-
-	let dtype = a.dtype;
-	let batch_ndim = a_batch_dims.len().max(b_batch_dims.len());
+	let dtype = a.tensor.dtype;
+	let batch_ndim = a.batch_dims.len().max(b.batch_dims.len());
 	let mut c_dims_ctor = DimsCtor::new(batch_ndim + 2);
 	// Note: dims need to be pushed to ctor in reverse order
-	c_dims_ctor.push(c_dims[1].size);
-	c_dims_ctor.push(c_dims[0].size);
+	c_dims_ctor.push(c_cols.size);
+	c_dims_ctor.push(c_rows.size);
 
-	let batch = Batch::new(batch_ndim, [a_batch_dims, b_batch_dims], &mut c_dims_ctor);
+	let batch = Batch::new(batch_ndim, [a.batch_dims, b.batch_dims], &mut c_dims_ctor);
 
 	c_dims_ctor.final_check();
-	let c = a.__new(c_dims_ctor.elems, c_dims_ctor.dims, dtype);
+	let c = a.tensor.__new(c_dims_ctor.elems, c_dims_ctor.dims, dtype);
 
-	let a_rows_contiguous = a_dims[1].stride == 1;
-	let a_cols_contiguous = a_dims[0].stride == 1;
+	let a_rows_contiguous = a.cols.stride == 1;
+	let a_cols_contiguous = a.rows.stride == 1;
 	let transa = !a_rows_contiguous;
-	let lda = if a_rows_contiguous { a_dims[0].stride } else { a_dims[1].stride };
+	let lda = if a_rows_contiguous { a.rows.stride } else { a.cols.stride };
 	assert!(
 		a_rows_contiguous || a_cols_contiguous,
 		"at least one of the matrix dimensions must be contiguous"
 	);
 
-	let b_rows_contiguous = b_dims[1].stride == 1;
-	let b_cols_contiguous = b_dims[0].stride == 1;
+	let b_rows_contiguous = b.cols.stride == 1;
+	let b_cols_contiguous = b.rows.stride == 1;
 	let transb = !b_rows_contiguous;
-	let ldb = if b_rows_contiguous { b_dims[0].stride } else { b_dims[1].stride };
+	let ldb = if b_rows_contiguous { b.rows.stride } else { b.cols.stride };
 	assert!(
 		b_rows_contiguous || b_cols_contiguous,
 		"at least one of the matrix dimensions must be contiguous"
 	);
 
-	let m = c_dims[0].size;
-	let n = c_dims[1].size;
-	let k = a_dims[1].size;
+	let m = c_rows.size;
+	let n = c_cols.size;
+	let k = a.cols.size;
 
-	let c_rows_contiguous = c_dims[1].stride == 1;
-	let c_cols_contiguous = c_dims[0].stride == 1;
+	let c_rows_contiguous = c_cols.stride == 1;
+	let c_cols_contiguous = c_rows.stride == 1;
 	let transc = !c_rows_contiguous;
-	let ldc = if c_rows_contiguous { c_dims[0].stride } else { c_dims[1].stride };
+	let ldc = if c_rows_contiguous { c_rows.stride } else { c_cols.stride };
 	assert!(
 		c_rows_contiguous || c_cols_contiguous,
 		"at least one of the matrix dimensions must be contiguous"
@@ -396,11 +378,11 @@ fn __gemm(
 	let lda = lda;
 	let ldb = ldb;
 
-	let a_buf = buf_to_base(a.buffer.as_ref());
-	let b_buf = buf_to_base(b.buffer.as_ref());
+	let a_buf = buf_to_base(a.tensor.buffer.as_ref());
+	let b_buf = buf_to_base(b.tensor.buffer.as_ref());
 	#[rustfmt::skip]
 	batch.run(
-		c.offset, [a.offset, b.offset],
+		c.offset, [a.tensor.offset, b.tensor.offset],
 		&|c_offset, [a_offset, b_offset], batch| {
 			unsafe {
 				c.buffer.gemm(
@@ -419,17 +401,17 @@ fn __gemm(
 }
 
 #[derive(Clone, Copy)]
-pub struct MatrixView<'a> {
+pub struct Matrix<'a> {
 	pub tensor: &'a Tensor,
 	pub batch_dims: &'a [SizeAndStride],
 	pub rows: SizeAndStride,
 	pub cols: SizeAndStride,
 }
 
-impl<'a> MatrixView<'a> {
+impl<'a> Matrix<'a> {
 	#[allow(non_snake_case)]
-	pub fn T(&self) -> MatrixView<'a> {
-		MatrixView {
+	pub fn T(&self) -> Matrix<'a> {
+		Matrix {
 			tensor: self.tensor,
 			batch_dims: self.batch_dims,
 			rows: self.cols,
@@ -439,22 +421,22 @@ impl<'a> MatrixView<'a> {
 }
 
 pub trait MatrixLike<'a> {
-	fn matrix_view(self) -> MatrixView<'a>;
+	fn as_matrix(self) -> Matrix<'a>;
 }
 
 impl<'a> MatrixLike<'a> for &'a Tensor {
-	fn matrix_view(self) -> MatrixView<'a> {
+	fn as_matrix(self) -> Matrix<'a> {
 		let ndim = self.ndim();
 		assert!(ndim >= 2);
 		let batch_dims = &self.dims[..ndim - 2];
 		let rows = self.dims[ndim - 2];
 		let cols = self.dims[ndim - 1];
-		MatrixView { tensor: self, batch_dims, rows, cols }
+		Matrix { tensor: self, batch_dims, rows, cols }
 	}
 }
 
-impl<'a> MatrixLike<'a> for MatrixView<'a> {
-	fn matrix_view(self) -> MatrixView<'a> {
+impl<'a> MatrixLike<'a> for Matrix<'a> {
+	fn as_matrix(self) -> Matrix<'a> {
 		self
 	}
 }
@@ -462,214 +444,94 @@ impl<'a> MatrixLike<'a> for MatrixView<'a> {
 // Multiply two matrices
 // result = a * b * alpha
 pub fn mm<'a, A: MatrixLike<'a>, B: MatrixLike<'a>>(a: A, b: B) -> MatMul<'a> {
-	let a = a.matrix_view();
-	let b = b.matrix_view();
-	assert!(a.cols.size == b.rows.size);
-	MatMul { a, b }
+	let a = a.as_matrix();
+	let b = b.as_matrix();
+	MatMul::new(a, b)
 }
 
 pub struct MatMul<'a> {
-	pub a: MatrixView<'a>,
-	pub b: MatrixView<'a>,
+	pub a: Matrix<'a>,
+	pub b: Matrix<'a>,
 }
 
 impl<'a> MatMul<'a> {
+	pub fn new(a: Matrix<'a>, b: Matrix<'a>) -> MatMul<'a> {
+		assert!(a.cols.size == b.rows.size);
+		MatMul { a, b }
+	}
+
+	// Calculate the default scale for the MatMul based on the `k` dimension.
+	// A = [m, k]
+	// B = [k, n]
+	// Each cell of the result is the sum of k products.
+	// The default scale is `1 / sqrt(k)` in order to preserve the variance of the input.
+	pub fn scale_for_k(k: usize) -> f64 {
+		1.0 / (k as f64).sqrt()
+	}
+
 	pub fn default_scale(&self) -> f64 {
-		let n = self.a.cols.size;
-		1.0 / (n as f64).sqrt()
+		Self::scale_for_k(self.a.cols.size)
 	}
 
-	pub fn scaled(&self, scale: f64) -> Tensor {
-		#[rustfmt::skip]
-		__gemm(
-			self.a.tensor, self.a.batch_dims, [self.a.rows, self.a.cols],
-			self.b.tensor, self.b.batch_dims, [self.b.rows, self.b.cols],
-			scale,
-		)
+	// Calculate the MatMul and multiply the result by `scale`.
+	pub fn eval(&self, scale: f64) -> Tensor {
+		__gemm(self.a, self.b, scale)
 	}
 
-	pub fn checked_scaled(&self, scale: f64) -> Tensor {
+	// Calculate the MatMul and multiply the result by the default scale.
+	pub fn eval_default_scale(&self) -> Tensor {
+		self.eval(self.default_scale())
+	}
+
+	// Calculate the MatMul and multiply the result by `scale`.
+	//
+	// In debug builds, this function checks that `scale` is equal to the default scale.
+	// In release builds, no check is performed.
+	//
+	// This is useful when we want to use the default scale, but we don't want to
+	// recalculate it every time.
+	// We can calculate it once using `scale_for_k()` and then use this function to make sure
+	// we didn't make a mistake and are in fact using the correct value.
+	pub fn eval_check_scale(&self, scale: f64) -> Tensor {
 		debug_assert!(scale == self.default_scale());
-		self.scaled(scale)
+		self.eval(scale)
 	}
 
-	pub fn backward(&self, dy: &Tensor) -> MatMulBackward<'a> {
-		MatDotCol_DMat { col: self.col, dy }
-	}
-
-	// TODO - da, db should be functions of the type returned by `backward()`
-	pub fn da(&self) -> MatDotCol_DMat {
-		MatDotCol_DMat { col: self.col, dy }
-	}
-
-	pub fn db(&self) -> MatDotCol_DCol {
-		MatDotCol_DCol { mat: self.mat, dy }
+	pub fn backward<M: MatrixLike<'a>>(&self, dy: M) -> MatMulBackward<'a> {
+		let dy = dy.as_matrix();
+		assert!(dy.rows.size == self.a.rows.size);
+		assert!(dy.cols.size == self.b.cols.size);
+		MatMulBackward { a: Some(self.a), b: Some(self.b), dy }
 	}
 }
 
-#[allow(non_camel_case_types)]
-pub struct MatDotCol_DMat<'a> {
-	pub col: &'a Tensor,
-	pub dy: &'a Tensor,
+pub struct MatMulBackward<'a> {
+	pub a: Option<Matrix<'a>>,
+	pub b: Option<Matrix<'a>>,
+	pub dy: Matrix<'a>,
 }
 
-impl<'a> MatDotCol_DMat<'a> {
-	pub fn default_scale(&self) -> f64 {
-		1.0
-	}
-
-	pub fn scaled(&self, scale: f64) -> Tensor {
-		col_dot_row(self.dy, self.col, scale)
-	}
-
-	pub fn checked_scaled(&self, scale: f64) -> Tensor {
-		debug_assert!(scale == self.default_scale());
-		self.scaled(scale)
-	}
+// Use this function only if either `a` or `b` can be `None`.
+// If both are `Some`, it is cleaner to use `mm(a, b).backward(dy)`.
+//
+// `da` can only be calculated if we have `b`,
+// and `db` if we have `a`.
+pub fn mm_backward<'a>(
+	a: Option<Matrix<'a>>,
+	b: Option<Matrix<'a>>,
+	dy: Matrix<'a>,
+) -> MatMulBackward<'a> {
+	MatMulBackward { a, b, dy }
 }
 
-#[allow(non_camel_case_types)]
-pub struct MatDotCol_DCol<'a> {
-	pub mat: &'a Tensor,
-	pub dy: &'a Tensor,
-}
-
-impl<'a> MatDotCol_DCol<'a> {
-	pub fn default_scale(&self) -> f64 {
-		let n = self.dy.dims.last().unwrap().size;
-		1.0 / (n as f64).sqrt()
+impl<'a> MatMulBackward<'a> {
+	pub fn da(&self) -> MatMul {
+		MatMul::new(self.dy, self.b.unwrap().T())
 	}
 
-	pub fn scaled(&self, scale: f64) -> Tensor {
-		matT_dot_col(self.mat, self.dy, scale)
+	pub fn db(&self) -> MatMul {
+		MatMul::new(self.a.unwrap().T(), self.dy)
 	}
-
-	pub fn checked_scaled(&self, scale: f64) -> Tensor {
-		debug_assert!(scale == self.default_scale());
-		self.scaled(scale)
-	}
-}
-
-// Multiply a matrix by a column vector
-// result = m * col * alpha
-fn __mat_dot_col(mat: &Tensor, col: &Tensor, alpha: f64) -> Tensor {
-	let mat_ndim = mat.ndim();
-	assert!(mat_ndim >= 2);
-	let mat_batch_dims = &mat.dims[..mat_ndim - 2];
-	let mat_dims = [mat.dims[mat_ndim - 2], mat.dims[mat_ndim - 1]];
-
-	let col_ndim = col.ndim();
-	assert!(col_ndim >= 1);
-	let col_batch_dims = &col.dims[..col_ndim - 1];
-	let col_dims = [col.dims[0], SizeAndStride { size: 1, stride: 1 }];
-
-	__gemm(mat, mat_batch_dims, mat_dims, col, col_batch_dims, col_dims, alpha)
-}
-
-pub fn mat_dot_col<'a>(mat: &'a Tensor, col: &'a Tensor) -> MatDotCol<'a> {
-	MatDotCol { mat, col }
-}
-
-pub struct MatDotCol<'a> {
-	pub mat: &'a Tensor,
-	pub col: &'a Tensor,
-}
-
-impl<'a> MatDotCol<'a> {
-	pub fn default_scale(&self) -> f64 {
-		let n = self.col.dims.last().unwrap().size;
-		1.0 / (n as f64).sqrt()
-	}
-
-	pub fn scaled(&self, scale: f64) -> Tensor {
-		__mat_dot_col(self.mat, self.col, scale)
-	}
-
-	pub fn checked_scaled(&self, scale: f64) -> Tensor {
-		debug_assert!(scale == self.default_scale());
-		self.scaled(scale)
-	}
-
-	pub fn dmat(&self, dy: &Tensor) -> MatDotCol_DMat {
-		MatDotCol_DMat { col: self.col, dy }
-	}
-
-	pub fn dcol(&self, dy: &Tensor) -> MatDotCol_DCol {
-		MatDotCol_DCol { mat: self.mat, dy }
-	}
-}
-
-#[allow(non_camel_case_types)]
-pub struct MatDotCol_DMat<'a> {
-	pub col: &'a Tensor,
-	pub dy: &'a Tensor,
-}
-
-impl<'a> MatDotCol_DMat<'a> {
-	pub fn default_scale(&self) -> f64 {
-		1.0
-	}
-
-	pub fn scaled(&self, scale: f64) -> Tensor {
-		col_dot_row(self.dy, self.col, scale)
-	}
-
-	pub fn checked_scaled(&self, scale: f64) -> Tensor {
-		debug_assert!(scale == self.default_scale());
-		self.scaled(scale)
-	}
-}
-
-#[allow(non_camel_case_types)]
-pub struct MatDotCol_DCol<'a> {
-	pub mat: &'a Tensor,
-	pub dy: &'a Tensor,
-}
-
-impl<'a> MatDotCol_DCol<'a> {
-	pub fn default_scale(&self) -> f64 {
-		let n = self.dy.dims.last().unwrap().size;
-		1.0 / (n as f64).sqrt()
-	}
-
-	pub fn scaled(&self, scale: f64) -> Tensor {
-		matT_dot_col(self.mat, self.dy, scale)
-	}
-
-	pub fn checked_scaled(&self, scale: f64) -> Tensor {
-		debug_assert!(scale == self.default_scale());
-		self.scaled(scale)
-	}
-}
-
-// Multiply a transposed matrix by a column vector
-#[allow(non_snake_case)]
-pub fn matT_dot_col(mat: &Tensor, col: &Tensor, alpha: f64) -> Tensor {
-	let mat_ndim = mat.ndim();
-	assert!(mat_ndim >= 2);
-	let mat_batch_dims = &mat.dims[..mat_ndim - 2];
-	let mat_dims = [mat.dims[mat_ndim - 1], mat.dims[mat_ndim - 2]];
-
-	let col_ndim = col.ndim();
-	assert!(col_ndim >= 1);
-	let col_batch_dims = &col.dims[..col_ndim - 1];
-	let col_dims = [col.dims[0], SizeAndStride { size: 1, stride: 1 }];
-
-	__gemm(mat, mat_batch_dims, mat_dims, col, col_batch_dims, col_dims, alpha)
-}
-
-pub fn col_dot_row(col: &Tensor, row: &Tensor, alpha: f64) -> Tensor {
-	let col_ndim = col.ndim();
-	assert!(col_ndim >= 1);
-	let col_batch_dims = &col.dims[..col_ndim - 1];
-	let col_dims = [col.dims[0], SizeAndStride { size: 1, stride: 1 }];
-
-	let row_ndim = row.ndim();
-	assert!(row_ndim >= 1);
-	let row_batch_dims = &row.dims[..row_ndim - 1];
-	let row_dims = [SizeAndStride { size: 1, stride: 1 }, row.dims[0]];
-
-	__gemm(col, col_batch_dims, col_dims, row, row_batch_dims, row_dims, alpha)
 }
 
 pub fn rms_norm(a: &Tensor) -> Tensor {

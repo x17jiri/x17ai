@@ -43,16 +43,13 @@ pub trait Module {
 
 pub struct Context {
 	pub device: Rc<dyn Device>,
+	pub training: bool,
 }
 
 impl Context {
-	pub fn reg_param(&mut self, param: &Tensor) -> Rc<GradData> {
-		// TODO
+	pub fn reg_param(&mut self, param: &Tensor, saved_tensors: usize) -> usize {
+		0 // TODO
 	}
-}
-
-trait GradData {
-	fn set(&self, grad: Tensor);
 }
 
 // Linear layer transforming inputs to outputs
@@ -64,10 +61,9 @@ struct Linear {
 	pub outputs: usize,
 
 	pub w: Tensor,
-	pub dw: Option<Rc<RefCell<dyn GradData>>>,
-	pub saved_x: RefCell<Option<Tensor>>,
-
 	pub scale: f64,
+
+	pub w_opt_id: usize,
 	pub backward_scale: f64,
 
 	pub dtype: DType,
@@ -76,14 +72,27 @@ struct Linear {
 impl Linear {
 	pub fn new(inputs: usize, outputs: usize, dtype: DType, ctx: &Context) -> Linear {
 		let w = Tensor::new(&[outputs, inputs], dtype, ctx.device.clone());
-		let scale = 1.0 / (inputs as f64).sqrt();
-		let backward_scale = 1.0 / (outputs as f64).sqrt();
-		#[rustfmt::skip]
+		let scale = MatMul::scale_for_k(inputs);
+		let grad = if ctx.training {
+			let dw = ctx.reg_param(&w);
+			let grad = LinearGrad {
+				dw: Rc::new(RefCell::new(dw)),
+				saved_x: Tensor::new(&[inputs], dtype, ctx.device.clone()),
+				backward_scale: MatMul::scale_for_k(outputs),
+			};
+			Some(Rc::new(RefCell::new(grad)))
+		} else {
+			None
+		};
+		let backward_scale = MatMul::scale_for_k(outputs);
 		Linear {
-			inputs, outputs,
-			w, dw: None,
+			inputs,
+			outputs,
+			w,
+			scale,
+			dw: None,
 			saved_x: RefCell::new(None),
-			scale, backward_scale,
+			backward_scale,
 			dtype,
 		}
 	}
@@ -93,23 +102,26 @@ impl Linear {
 		if training {
 			self.saved_x.borrow_mut().replace(x.clone());
 		}
-		mm(&self.w, x.as_col_matrix()).checked_scaled(self.scale)
+		mm(&self.w, x.as_col()).eval_check_scale(self.scale)
 	}
 
 	fn backward(&self, dy: &Tensor) -> Tensor {
-		let x = self.saved_x.borrow().as_ref().unwrap();
-		let grad = mm(&self.w, x.as_col_matrix()).backward(dy);
+		let x = self.saved_x.borrow();
+		let x = x.as_ref();
+		let x = x.unwrap();
+		let grad = mm(&self.w, x.as_col()).backward(dy);
 
 		// dw
-		if let Some(dw) = &self.dw {
-			dw.borrow_mut().set(grad.da().checked_scaled(1.0));
+		let dw = self.dw.as_ref();
+		let dw = dw.unwrap();
+		let dw = dw.borrow_mut();
+		dw.set(grad.da().eval_check_scale(1.0));
 
-			// clear saved_x
-			self.saved_x.borrow_mut().take();
-		}
+		// clear saved_x
+		self.saved_x.borrow_mut().take();
 
 		// dx
-		grad.db().checked_scaled(self.backward_scale)
+		grad.db().eval_check_scale(self.backward_scale)
 	}
 }
 
@@ -274,9 +286,7 @@ fn main() {
 	println!("softmax(y) = {}", ys);
 
 	//	let z = Tensor::new(&[2, 2], DType::f32(), dev.clone());
-	let xt = x.t();
-	let yt = y.t();
-	let z = gemm(&yt, &xt, 1.0);
+	let z = mm(y.T(), x.T()).eval(1.0);
 
 	println!("z = {}", z);
 }
