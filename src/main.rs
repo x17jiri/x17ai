@@ -37,19 +37,21 @@ use crate::tensor::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-pub trait Module {
-	fn reg_params(&mut self, ctx: &mut Context);
-}
-
 pub struct Context {
 	pub device: Rc<dyn Device>,
 	pub training: bool,
 }
 
 impl Context {
-	pub fn reg_param(&mut self, param: &Tensor, saved_tensors: usize) -> usize {
+	pub fn reg_param(&mut self, param: &Tensor) -> Rc<dyn GradParam> {
 		0 // TODO
 	}
+}
+
+pub trait GradParam {
+	fn acc(&self, value: Tensor);
+	fn push_tensor(&self, tensor: &Tensor);
+	fn pop_tensor(&self) -> Tensor;
 }
 
 // Linear layer transforming inputs to outputs
@@ -59,75 +61,41 @@ impl Context {
 struct Linear {
 	pub inputs: usize,
 	pub outputs: usize,
-
 	pub w: Tensor,
+	pub dw: Rc<dyn GradParam>,
 	pub scale: f64,
-
-	pub w_opt_id: usize,
 	pub backward_scale: f64,
-
 	pub dtype: DType,
 }
 
 impl Linear {
 	pub fn new(inputs: usize, outputs: usize, dtype: DType, ctx: &Context) -> Linear {
 		let w = Tensor::new(&[outputs, inputs], dtype, ctx.device.clone());
+		let dw = ctx.reg_param(&w);
 		let scale = MatMul::scale_for_k(inputs);
-		let grad = if ctx.training {
-			let dw = ctx.reg_param(&w);
-			let grad = LinearGrad {
-				dw: Rc::new(RefCell::new(dw)),
-				saved_x: Tensor::new(&[inputs], dtype, ctx.device.clone()),
-				backward_scale: MatMul::scale_for_k(outputs),
-			};
-			Some(Rc::new(RefCell::new(grad)))
-		} else {
-			None
-		};
 		let backward_scale = MatMul::scale_for_k(outputs);
+
+		#[rustfmt::skip]
 		Linear {
-			inputs,
-			outputs,
-			w,
-			scale,
-			dw: None,
-			saved_x: RefCell::new(None),
-			backward_scale,
-			dtype,
+			inputs, outputs, w, dw,
+			scale, backward_scale, dtype,
 		}
 	}
 
 	fn forward(&self, x: &Tensor) -> Tensor {
-		let training = self.dw.is_some();
-		if training {
-			self.saved_x.borrow_mut().replace(x.clone());
-		}
+		self.dw.push_tensor(x);
 		mm(&self.w, x.as_col()).eval_check_scale(self.scale)
 	}
 
 	fn backward(&self, dy: &Tensor) -> Tensor {
-		let x = self.saved_x.borrow();
-		let x = x.as_ref();
-		let x = x.unwrap();
+		let x = self.dw.pop_tensor();
 		let grad = mm(&self.w, x.as_col()).backward(dy);
 
 		// dw
-		let dw = self.dw.as_ref();
-		let dw = dw.unwrap();
-		let dw = dw.borrow_mut();
-		dw.set(grad.da().eval_check_scale(1.0));
-
-		// clear saved_x
-		self.saved_x.borrow_mut().take();
+		self.dw.acc(grad.da().eval_check_scale(1.0));
 
 		// dx
 		grad.db().eval_check_scale(self.backward_scale)
-	}
-}
-
-impl Module for Linear {
-	fn reg_params(&mut self, ctx: &mut Context) {
-		self.dw = Some(ctx.reg_param(&self.w));
 	}
 }
 
