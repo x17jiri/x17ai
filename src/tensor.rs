@@ -6,6 +6,7 @@ use core::panic;
 use smallvec::{smallvec, SmallVec};
 use std::fmt;
 use std::intrinsics::{likely, unlikely};
+use std::iter::ExactSizeIterator;
 use std::mem::MaybeUninit;
 use std::ops::Index;
 use std::rc::{Rc, Weak};
@@ -44,7 +45,25 @@ impl Index<isize> for ShapeView<'_> {
 
 impl std::cmp::PartialEq<ShapeView<'_>> for ShapeView<'_> {
 	fn eq(&self, other: &ShapeView) -> bool {
-		self.tensor.dims == other.tensor.dims
+		if self.tensor.dims.len() != other.tensor.dims.len() {
+			return false;
+		}
+		for (a, b) in self.tensor.dims.iter().zip(other.tensor.dims.iter()) {
+			if a.size != b.size {
+				return false;
+			}
+		}
+		true
+	}
+}
+
+impl<'a> IntoIterator for ShapeView<'a> {
+	type Item = &'a usize;
+	type IntoIter =
+		std::iter::Map<std::slice::Iter<'a, SizeAndStride>, fn(&SizeAndStride) -> &usize>;
+
+	fn into_iter(self) -> Self::IntoIter {
+		self.tensor.dims.iter().map(|x| &x.size)
 	}
 }
 
@@ -64,9 +83,15 @@ struct DimsCtor {
 }
 
 impl DimsCtor {
-	fn from_shape(shape: &[usize]) -> DimsCtor {
+	fn from_shape<'a, Shape>(shape: Shape) -> DimsCtor
+	where
+		Shape: IntoIterator<Item = &'a usize>,
+		<Shape as IntoIterator>::IntoIter:
+			DoubleEndedIterator<Item = &'a usize> + ExactSizeIterator,
+	{
+		let shape = shape.into_iter().copied();
 		let mut t = DimsCtor::new(shape.len());
-		for dim in shape.iter().copied().rev() {
+		for dim in shape.rev() {
 			t.push(dim);
 		}
 		t.final_check();
@@ -134,36 +159,38 @@ pub struct Tensor {
 }
 
 impl Tensor {
-	pub fn new(shape: &[usize], dtype: DType, device: Rc<dyn Device>) -> Tensor {
-		let t = DimsCtor::from_shape(shape);
+	fn __new_empty_on(dims_ctor: DimsCtor, dtype: DType, device: Rc<dyn Device>) -> Tensor {
 		Tensor {
-			dims: t.dims,
+			dims: dims_ctor.dims,
 			offset: 0,
 			dtype,
-			elems: t.elems,
-			buffer: device.new_buffer(dtype.array_bytes(t.elems).unwrap()),
+			elems: dims_ctor.elems,
+			buffer: device.new_buffer(dtype.array_bytes(dims_ctor.elems).unwrap()),
 		}
+	}
+
+	pub fn new_empty_on<'a, Shape>(shape: Shape, dtype: DType, device: Rc<dyn Device>) -> Tensor
+	where
+		Shape: IntoIterator<Item = &'a usize>,
+		<Shape as IntoIterator>::IntoIter:
+			DoubleEndedIterator<Item = &'a usize> + ExactSizeIterator,
+	{
+		Self::__new_empty_on(DimsCtor::from_shape(shape), dtype, device)
 	}
 
 	// Allocate a new tensor on the same device
-	pub fn new_tensor(&self, shape: &[usize], dtype: DType) -> Tensor {
-		let t = DimsCtor::from_shape(shape);
-		self.__new(t.elems, t.dims, dtype)
+	pub fn new_empty<'a, Shape>(&'a self, shape: Shape, dtype: DType) -> Tensor
+	where
+		Shape: IntoIterator<Item = &'a usize>,
+		<Shape as IntoIterator>::IntoIter:
+			DoubleEndedIterator<Item = &'a usize> + ExactSizeIterator,
+	{
+		Self::new_empty_on(shape, dtype, self.device())
 	}
 
-	fn __new(
-		&self,
-		elems: usize,
-		dims: SmallVec<[SizeAndStride; INLINE_DIMS]>,
-		dtype: DType,
-	) -> Tensor {
-		Tensor {
-			dims,
-			offset: 0,
-			dtype,
-			elems,
-			buffer: self.device().new_buffer(dtype.array_bytes(elems).unwrap()),
-		}
+	// Allocate a new tensor on the same device with the same shape and dtype
+	pub fn new_empty_like(&self) -> Tensor {
+		Self::new_empty_on(self.shape(), self.dtype, self.device())
 	}
 
 	pub fn device(&self) -> Rc<dyn Device> {

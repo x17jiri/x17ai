@@ -37,21 +37,43 @@ use crate::tensor::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+pub struct MomentumParam {
+	pub grad: Tensor,
+	pub stored_tensors: Vec<Tensor>,
+	pub alpha: f64,
+}
+
+impl GradParam for MomentumParam {
+	fn acc(&mut self, value: Tensor) {
+		self.grad.add_(value);
+	}
+
+	fn push_tensor(&mut self, tensor: &Tensor) {
+		self.stored_tensors.push(tensor.clone());
+	}
+
+	fn pop_tensor(&mut self) -> Tensor {
+		self.stored_tensors.pop().unwrap()
+	}
+}
+
 pub struct Context {
 	pub device: Rc<dyn Device>,
-	pub training: bool,
+	pub params: Vec<Rc<MomentumParam>>,
 }
 
 impl Context {
 	pub fn reg_param(&mut self, param: &Tensor) -> Rc<dyn GradParam> {
-		0 // TODO
+		let param = Rc::new(MomentumParam { grad: param.new_empty_like() });
+		self.params.push(param.clone());
+		param
 	}
 }
 
 pub trait GradParam {
-	fn acc(&self, value: Tensor);
-	fn push_tensor(&self, tensor: &Tensor);
-	fn pop_tensor(&self) -> Tensor;
+	fn acc(&mut self, value: Tensor);
+	fn push_tensor(&mut self, tensor: &Tensor);
+	fn pop_tensor(&mut self) -> Tensor;
 }
 
 // Linear layer transforming inputs to outputs
@@ -70,7 +92,7 @@ struct Linear {
 
 impl Linear {
 	pub fn new(inputs: usize, outputs: usize, dtype: DType, ctx: &Context) -> Linear {
-		let w = Tensor::new(&[outputs, inputs], dtype, ctx.device.clone());
+		let w = Tensor::new_empty_on(&[outputs, inputs], dtype, ctx.device.clone());
 		let dw = ctx.reg_param(&w);
 		let scale = MatMul::scale_for_k(inputs);
 		let backward_scale = MatMul::scale_for_k(outputs);
