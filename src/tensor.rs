@@ -21,16 +21,12 @@ pub struct SizeAndStride {
 }
 
 pub struct ShapeView<'a> {
-	tensor: &'a Tensor,
+	dims: &'a [SizeAndStride],
 }
 
 impl<'a> ShapeView<'a> {
 	pub fn len(&self) -> usize {
-		self.tensor.dims.len()
-	}
-
-	pub fn to_vec(&self) -> SmallVec<[usize; INLINE_DIMS]> {
-		self.tensor.dims.iter().map(|x| x.size).collect()
+		self.dims.len()
 	}
 }
 
@@ -38,11 +34,20 @@ impl Index<isize> for ShapeView<'_> {
 	type Output = usize;
 
 	fn index(&self, index: isize) -> &Self::Output {
-		let index = self.tensor.__dim_to_internal(index);
-		unsafe { &self.tensor.dims.get_unchecked(index).size }
+		let i = if index < 0 { self.dims.len() as isize + index } else { index };
+		&self.dims[i as usize].size
 	}
 }
 
+impl Index<usize> for ShapeView<'_> {
+	type Output = usize;
+
+	fn index(&self, index: usize) -> &Self::Output {
+		&self.dims[index].size
+	}
+}
+
+/*
 impl std::cmp::PartialEq<ShapeView<'_>> for ShapeView<'_> {
 	fn eq(&self, other: &ShapeView) -> bool {
 		if self.tensor.dims.len() != other.tensor.dims.len() {
@@ -56,6 +61,7 @@ impl std::cmp::PartialEq<ShapeView<'_>> for ShapeView<'_> {
 		true
 	}
 }
+*/
 
 impl<'a> IntoIterator for ShapeView<'a> {
 	type Item = &'a usize;
@@ -205,18 +211,125 @@ impl Tensor {
 		self.buffer.randn_(self);
 	}
 
+	/// Accumulate:
+	/// ```
+	///    self = alpha * self + beta * b
+	/// ```
+	/// This function doesn't broadcast
+	/// self.shape must be equal to b.shape
+	pub fn acc_(&self, alpha: f64, beta: f64, b: &Tensor) {
+		assert_compatible_types(self, other);
+		assert_compatible_devices(self, other);
+		// TODO
+	}
+
+	/// Accumulate the result of element-wise multiplication:
+	/// ```
+	///     self = alpha * self + beta * (b * c)
+	/// ```
+	/// This function may broadcast b and c to match the shape of self.
+	pub fn acc_mul_(&self, alpha: f64, beta: f64, b: &Tensor, c: &Tensor) {
+		assert_compatible_types(self, a);
+		assert_compatible_types(self, b);
+		assert_compatible_devices(self, a);
+		assert_compatible_devices(self, b);
+		// TODO
+	}
+
+	/// Accumulate the result of sum:
+	/// ```
+	///    self = alpha * self + beta * b.sum(keepdim)
+	/// ```
+	/// This function doesn't broadcast.
+	/// The shape of b after the sum must be equal to the shape of self.
+	pub fn acc_sum_(&self, alpha: f64, beta: f64, b: &Tensor, keepdim: bool) {
+		assert_compatible_types(self, other);
+		assert_compatible_devices(self, other);
+		// TODO
+	}
+
+	/// Accumulate the result of mean:
+	/// ```
+	///   self = alpha * self + beta * b.mean(keepdim)
+	/// ```
+	/// This function doesn't broadcast.
+	/// The shape of b after the sum must be equal to the shape of self.
+	pub fn acc_mean_(&self, alpha: f64, beta: f64, b: &Tensor, keepdim: bool) {
+		assert_compatible_types(self, other);
+		assert_compatible_devices(self, other);
+		// TODO
+	}
+
+	/// Calculate `x^2`:
+	/// ```
+	///    result = self * self
+	/// ```
+	pub fn square(&self) -> Tensor {
+		let mut out = self.new_empty_like();
+		self.buffer.square(&mut out, self);
+		out
+	}
+
+	/// reciprocal of the square root:
+	/// ```
+	///     result = 1.0 / (self.sqrt() + eps)
+	/// ```
+	pub fn rsqrt(&self, eps: f64) -> Tensor {
+		let mut out = self.new_empty_like();
+		self.buffer.rsqrt(&mut out, self, eps);
+		out
+	}
+
+	pub fn rsqrt_into(&self, eps: f64, into: &Tensor) {
+		assert_compatible_types(self, into);
+		assert_compatible_devices(self, into);
+		//self.buffer.rsqrt(into, self, eps);
+	}
+
+	/// Calculate the mean of the last dimension.
+	///
+	/// If keepdim is true, the last dimension is kept in the result with size 1.
+	///
+	/// If keepdim is false, the last dimension is removed from the result.
+	pub fn mean(&self, keepdim: bool) -> Tensor {
+		let mut out = self.new_empty_like();
+		//self.buffer.mean(&mut out, self, keepdim);
+		//out
+	}
+
+	pub fn mean_into(&self, keepdim: bool, into: &Tensor) {
+		assert_compatible_types(self, into);
+		assert_compatible_devices(self, into);
+		//self.buffer.mean(into, self, keepdim);
+	}
+
 	pub fn shape(&self) -> ShapeView {
 		ShapeView { tensor: self }
 	}
 
+	/// Returns the size of dimension `dim`.
+	pub fn size(&self, dim: isize) -> usize {
+		self.dims[self.__dim_to_internal(dim)].size
+	}
+
+	/// Returns the stride of dimension `dim`.
+	pub fn stride(&self, dim: isize) -> usize {
+		self.dims[self.__dim_to_internal(dim)].stride
+	}
+
+	/// Returns the number of dimensions in the tensor.
+	///
+	/// This is also known as the rank of the tensor.
 	pub fn ndim(&self) -> usize {
 		self.dims.len()
 	}
 
+	/// Returns the total number of elements in the tensor.
 	pub fn elems(&self) -> usize {
 		self.elems
 	}
 
+	/// Returns the data type of the tensor elements.
 	pub fn dtype(&self) -> DType {
 		self.dtype
 	}
@@ -244,6 +357,7 @@ impl Tensor {
 
 		unsafe { self.dims.set_len(ndim - n) };
 		self.dims.reserve(new_shape.len());
+		unsafe { self.dims.set_len(ndim - n + new_shape.len()) };
 		let result = unsafe { self.dims.get_unchecked_mut(ndim - n..) };
 
 		for (o, size) in result.iter_mut().zip(new_shape.iter().copied()).rev() {
@@ -272,6 +386,10 @@ impl Tensor {
 		self
 	}
 
+	pub fn reshape(mut self, new_shape: &[usize]) -> Tensor {
+		self.reshape_last_n(self.ndim(), new_shape)
+	}
+
 	fn __dim_to_internal(&self, dim: isize) -> usize {
 		let ndim = self.dims.len();
 		let dim = if dim >= 0 { dim as usize } else { ndim - ((-dim) as usize) };
@@ -287,6 +405,26 @@ impl Tensor {
 		let dim2 = self.__dim_to_internal(dim2);
 
 		self.dims.swap(dim1, dim2);
+		self
+	}
+
+	pub fn permuted(mut self, perm: &[usize]) -> Tensor {
+		let ndim = self.dims.len();
+		assert!(perm.len() == ndim, "number of dimensions does not match");
+
+		let mut new_dims = SmallVec::with_capacity(ndim);
+		unsafe { new_dims.set_len(ndim) };
+
+		let mut sum = 0;
+		for (new_dim, p) in new_dims.iter_mut().zip(perm.iter()) {
+			*new_dim = self.dims[*p];
+			sum += *p;
+		}
+
+		let expected_sum = ndim * (ndim - 1) / 2;
+		assert!(sum == expected_sum, "invalid permutation");
+
+		self.dims = new_dims;
 		self
 	}
 
@@ -315,6 +453,50 @@ impl Tensor {
 			rows: self.dims[ndim - 1],
 			cols: SizeAndStride { size: 1, stride: 1 },
 		}
+	}
+}
+
+pub trait TensorRef {
+	fn tensor_ref(&self) -> &Tensor;
+}
+
+impl TensorRef for &Tensor {
+	fn tensor_ref(&self) -> &Tensor {
+		*self
+	}
+}
+
+impl TensorRef for Tensor {
+	fn tensor_ref(&self) -> &Tensor {
+		self
+	}
+}
+
+impl<B: TensorRef> std::ops::Mul<B> for Tensor {
+	type Output = Tensor;
+
+	fn mul(self, other: B) -> Tensor {
+		// TODO
+	}
+}
+
+impl<B: TensorRef> std::ops::Mul<B> for &Tensor {
+	type Output = Tensor;
+
+	fn mul(self, other: B) -> Tensor {
+		// TODO
+	}
+}
+
+impl std::ops::SubAssign<&Tensor> for Tensor {
+	fn sub_assign(&mut self, other: &Tensor) {
+		// TODO
+	}
+}
+
+impl std::ops::SubAssign<Tensor> for Tensor {
+	fn sub_assign(&mut self, other: Tensor) {
+		// TODO
 	}
 }
 
