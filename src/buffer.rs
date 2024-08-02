@@ -4,25 +4,33 @@
 use crate::*;
 use std::fmt;
 
+/// Common set of arguments for 1D operations.
+///
+/// `out` and `a` are omitted from this struct.
+///
+/// `out` is typically `self` and `a` is typically the first argument.
+#[derive(Clone, Copy)]
+pub struct OpArgs1D {
+	pub dtype: DType,
+	pub out_offset: usize,
+	pub out_batch_stride: usize,
+
+	pub a_offset: usize,
+	pub a_batch_stride: usize,
+
+	pub count: usize,
+	pub batch_size: usize,
+}
+
 pub trait Buffer {
 	fn zeros_(&self, tensor: &Tensor);
 	fn randn_(&self, tensor: &Tensor);
 
-	#[rustfmt::skip]
-	unsafe fn rms_norm(
-		&self, dtype: DType, out_offset: usize, out_batch_stride: usize,
-		a: &BufferBase, a_offset: usize, a_batch_stride: usize,
-		count: usize, eps: f64,
-		batch_size: usize,
-	);
+	unsafe fn rms_norm(&self, a: &BufferBase, args: OpArgs1D, eps: f64);
 
-	#[rustfmt::skip]
-	unsafe fn softmax(
-		&self, dtype: DType, out_offset: usize, out_batch_stride: usize,
-		a: &BufferBase, a_offset: usize, a_batch_stride: usize,
-		count: usize,
-		batch_size: usize,
-	);
+	unsafe fn softmax(&self, a: &BufferBase, args: OpArgs1D);
+
+	unsafe fn acc(&self, a: &BufferBase, args: OpArgs1D, alpha: f64, beta: f64);
 
 	// All matrices are stored in row-major order.
 	// Example:

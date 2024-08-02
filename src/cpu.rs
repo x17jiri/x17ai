@@ -129,6 +129,16 @@ impl CPUBuffer {
 		}
 	}
 
+	fn acc_f32(&self, offset: usize, a: &Self, a_offset: usize, count: usize, alpha: f64, beta: f64) {
+		let out_vec = self.cast::<f32>(offset, count);
+		let in_vec = a.cast::<f32>(a_offset, count);
+
+		for (o, i) in out_vec.iter().zip(in_vec) {
+			let val = (alpha * (o.get() as f64) + beta * (i.get() as f64));
+			o.set(val as f32);
+		}
+	}
+
 	#[rustfmt::skip]
 	fn gemm_f32(
 		&self, c_offset: usize, ldc: usize, // self == c
@@ -198,45 +208,47 @@ impl Buffer for CPUBuffer {
 		}
 	}
 
-	#[rustfmt::skip]
-	unsafe fn rms_norm(
-		&self, dtype: DType, out_offset: usize, out_batch_stride: usize,
-		a: &BufferBase, a_offset: usize, a_batch_stride: usize,
-		count: usize, eps: f64,
-		batch_size: usize,
-	) {
+	unsafe fn rms_norm(&self, a: &BufferBase, args: OpArgs1D, eps: f64) {
 		let out = self;
 		let a = self.cast_buffer(a);
-		for i in 0..batch_size {
-			let out_offset = out_offset + i * out_batch_stride;
-			let a_offset = a_offset + i * a_batch_stride;
-			match dtype {
+		for i in 0..args.batch_size {
+			let out_offset = args.out_offset + i * args.out_batch_stride;
+			let a_offset = args.a_offset + i * args.a_batch_stride;
+			match args.dtype {
 				DType { kind: DTypeKind::Float, bits: 32 } => {
-					out.rms_norm_f32(out_offset, a, a_offset, count, eps)
+					out.rms_norm_f32(out_offset, a, a_offset, args.count, eps)
 				},
 				_ => todo!(),
 			}
 		}
 	}
 
-	#[rustfmt::skip]
-	unsafe fn softmax(
-		&self, dtype: DType, out_offset: usize, out_batch_stride: usize,
-		a: &BufferBase, a_offset: usize, a_batch_stride: usize,
-		count: usize,
-		batch_size: usize,
-	) {
+	unsafe fn softmax(&self, a: &BufferBase, args: OpArgs1D) {
 		let out = self;
 		let a = self.cast_buffer(a);
-		for i in 0..batch_size {
-			let out_offset = out_offset + i * out_batch_stride;
-			let a_offset = a_offset + i * a_batch_stride;
-			match dtype {
+		for i in 0..args.batch_size {
+			let out_offset = args.out_offset + i * args.out_batch_stride;
+			let a_offset = args.a_offset + i * args.a_batch_stride;
+			match args.dtype {
 				DType { kind: DTypeKind::Float, bits: 32 } => {
-					out.softmax_f32(out_offset, a, a_offset, count)
+					out.softmax_f32(out_offset, a, a_offset, args.count)
 				},
 				_ => todo!(),
 			}
+		}
+	}
+
+	unsafe fn acc(&self, a: &BufferBase, args: OpArgs1D, alpha: f64, beta: f64) {
+		let out = self;
+		let a = self.cast_buffer(a);
+		for i in 0..args.batch_size {
+			let out_offset = args.out_offset + i * args.out_batch_stride;
+			let a_offset = args.a_offset + i * args.a_batch_stride;
+			match args.dtype {
+				DType { kind: DTypeKind::Float, bits: 32 } => {
+					out.acc_f32(out_offset, a, a_offset, args.count, alpha, beta)
+				},
+				_ => todo!(),
 		}
 	}
 

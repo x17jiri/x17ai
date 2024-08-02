@@ -38,7 +38,7 @@ use smallvec::{smallvec, SmallVec};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-// Adam-mini: https://arxiv.org/abs/2406.16793
+// Inspired by Adam-mini: https://arxiv.org/abs/2406.16793
 pub struct AdamParam {
 	pub parts: usize,
 	pub part_elems: usize,
@@ -82,8 +82,8 @@ impl OptParam for AdamParam {
 		self.value.acc_mul_(1.0, -learning_rate, &self.m, &self.v_recip);
 	}
 
-	fn push_tensor(&mut self, tensor: &Tensor) {
-		self.stored_tensors.push(tensor.clone());
+	fn push_tensor(&mut self, tensor: Tensor) {
+		self.stored_tensors.push(tensor);
 	}
 
 	fn pop_tensor(&mut self) -> Tensor {
@@ -96,19 +96,52 @@ impl OptParam for AdamParam {
 }
 
 pub struct Context {
-	pub device: Rc<dyn Device>,
+	pub learning_rate: f64,
+	pub beta1: f64,
+	pub beta2: f64,
+	pub eps: f64,
 	pub params: Vec<Rc<RefCell<AdamParam>>>,
+	pub device: Rc<dyn Device>,
 }
 
 impl Context {
+	pub fn new(device: Rc<dyn Device>) -> Context {
+		Context {
+			learning_rate: 0.001,
+			beta1: 0.9,
+			beta2: 0.999,
+			eps: 1e-8,
+			params: Vec::new(),
+			device,
+		}
+	}
+
 	pub fn add_param(
 		&mut self,
 		dtype: DType,
 		parts: usize,
 		part_elems: usize,
 	) -> Rc<RefCell<dyn OptParam>> {
-		// TODO - this is incorrect
-		let param = Tensor::new_empty_on(&[parts, part_elems], dtype, self.device.clone());
+		let value = Tensor::new_empty_on(&[parts, part_elems], dtype, self.device.clone());
+		let grad = value.new_empty_like();
+		let m = value.new_empty_like();
+
+		let v = Tensor::new_empty_on(&[parts, 1], dtype, self.device.clone());
+		let v_recip = v.new_empty_like();
+
+		let param = Rc::new(RefCell::new(AdamParam {
+			parts,
+			part_elems,
+			value,
+			grad,
+			m,
+			v,
+			v_recip,
+			stored_tensors: Vec::new(),
+			beta1: self.beta1,
+			beta2: self.beta2,
+			eps: self.eps,
+		}));
 		self.params.push(param.clone());
 		param
 	}
@@ -130,19 +163,28 @@ pub trait OptParam {
 	fn acc(&mut self, value: Tensor);
 	fn zero_grad(&mut self);
 	fn step(&mut self, learning_rate: f64);
-	fn push_tensor(&mut self, tensor: &Tensor);
+	fn push_tensor(&mut self, tensor: Tensor);
 	fn pop_tensor(&mut self) -> Tensor;
 	fn value(&self) -> &Tensor;
 }
 
 /// Linear layer transforming inputs to outputs
 ///
+/// This is basically a thin wrapper around a matrix multiplication.
+/// It does not include a bias term.
+///
 /// If nhead != 0, this works like n parallel linear transformations of the same input:
+///
 ///     input: [*, inputs]
 ///     output: [*, head, outputs]
+///
 /// Otherwise:
+///
 ///     input: [*, inputs]
 ///     output: [*, outputs]
+///
+/// Even with multiple heads, there is only one matrix multiplication. The output is then reshaped
+/// to include the head dimension.
 struct Linear {
 	pub inputs: usize,
 	pub outputs: usize,
@@ -167,8 +209,8 @@ impl Linear {
 		let w_opt = ctx.add_param(dtype, parts, outputs * inputs);
 		let w = w_opt.borrow().value().clone();
 		let w = w.reshape(&[parts * outputs, inputs]);
-		let scale = MatMul::scale_for_k(inputs);
-		let backward_scale = MatMul::scale_for_k(outputs);
+		let scale = MatMul::normalizing_scale(inputs);
+		let backward_scale = MatMul::normalizing_scale(outputs);
 
 		#[rustfmt::skip]
 		Linear {
@@ -178,10 +220,15 @@ impl Linear {
 		}
 	}
 
-	fn forward(&self, x: &Tensor) -> Tensor {
+	fn forward(&self, x: Tensor) -> Tensor {
 		let mut w_opt = self.w_opt.borrow_mut();
+
+		let y = mm(&self.w, x.as_col());
+		let y = y.scale(self.scale).assert_normalizing_scale();
+		let y = y.eval();
+
 		w_opt.push_tensor(x);
-		let y = mm(&self.w, x.as_col()).eval_check_scale(self.scale);
+
 		if self.nhead != 0 {
 			// [..., head * outputs] -> [..., head, outputs]
 			y.reshape_last_n(1, &[self.nhead, self.outputs])
@@ -190,14 +237,20 @@ impl Linear {
 		}
 	}
 
-	fn backward(&self, dy: &Tensor) -> Tensor {
+	fn backward(&self, mut dy: Tensor) -> Tensor {
 		let mut w_opt = self.w_opt.borrow_mut();
 		let x = w_opt.pop_tensor();
 
-		let grad = mm(&self.w, x.as_col()).backward(dy);
+		if self.nhead != 0 {
+			// [..., head, outputs] -> [..., head * outputs]
+			dy = dy.reshape_last_n(2, &[self.nhead * self.outputs])
+		};
+		let grad = mm(&self.w, x.as_col()).backward(&dy);
 
 		// dw
-		let dw = grad.da().eval_check_scale(1.0);
+		let dw = grad.da();
+		let dw = dw.scale(1.0).assert_normalizing_scale();
+		let dw = dw.eval();
 
 		// Reshape the gradient to the shape expected by the optimizer
 		// [..., parts * outputs, inputs] -> [..., parts, outputs * inputs]
@@ -206,7 +259,11 @@ impl Linear {
 		w_opt.acc(dw);
 
 		// dx
-		grad.db().eval_check_scale(self.backward_scale)
+		let dx = grad.db();
+		let dx = dx.scale(self.backward_scale).assert_normalizing_scale();
+		let dx = dx.eval();
+
+		dx
 	}
 }
 
@@ -343,8 +400,8 @@ fn main() {
 
 	let dev = CPUDevice::new("CPU".to_string());
 
-	let x = Tensor::new(&[2, 3], DType::f32(), dev.clone());
-	let y = Tensor::new(&[3, 2], DType::f32(), dev.clone());
+	let x = Tensor::new_empty_on(&[2, 3], DType::f32(), dev.clone());
+	let y = Tensor::new_empty_on(&[3, 2], DType::f32(), dev.clone());
 
 	x.randn_();
 	y.randn_();
@@ -365,7 +422,7 @@ fn main() {
 	println!("softmax(y) = {}", ys);
 
 	//	let z = Tensor::new(&[2, 2], DType::f32(), dev.clone());
-	let z = mm(y.T(), x.T()).eval(1.0);
+	let z = mm(y.T(), x.T()).eval();
 
 	println!("z = {}", z);
 }

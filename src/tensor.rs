@@ -4,6 +4,7 @@
 use crate::*;
 use core::panic;
 use smallvec::{smallvec, SmallVec};
+use std::alloc::Layout;
 use std::fmt;
 use std::intrinsics::{likely, unlikely};
 use std::iter::ExactSizeIterator;
@@ -69,46 +70,54 @@ impl<'a> IntoIterator for ShapeView<'a> {
 		std::iter::Map<std::slice::Iter<'a, SizeAndStride>, fn(&SizeAndStride) -> &usize>;
 
 	fn into_iter(self) -> Self::IntoIter {
-		self.tensor.dims.iter().map(|x| &x.size)
+		self.dims.iter().map(|x| &x.size)
 	}
 }
 
-// This struct is used mainly to ensure that the total number of elements does not overflow
-struct DimsCtor {
-	// dimensions in reverse order
+pub trait LayoutHandler {
+	/// Adds a new dimension with the given size.
+	///
+	/// Returns the stride of the new dimension.
+	fn prepend_dim(&mut self, size: usize) -> usize;
+
+	/// Checks that the layout is valid and finalizes it.
+	///
+	/// This function should panic if the layout is invalid.
+	fn final_check(&self);
+}
+
+/// This struct is used mainly to ensure that the total number of elements does not overflow
+struct LayoutBuilder {
 	dims: SmallVec<[SizeAndStride; INLINE_DIMS]>,
-
 	remaining_dims: usize,
-
-	// Total number of elements in the dimensions processed so far
 	elems: usize,
 
-	// Total number of elements in the dimensions processed so far,
-	// ignoring zero length dimensions.
+	/// Total number of elements in the dimensions processed so far,
+	/// ignoring zero length dimensions.
 	nonzero_elems: usize,
 }
 
-impl DimsCtor {
-	fn from_shape<'a, Shape>(shape: Shape) -> DimsCtor
+impl LayoutBuilder {
+	fn from_shape<'a, Shape>(shape: Shape) -> LayoutBuilder
 	where
 		Shape: IntoIterator<Item = &'a usize>,
 		<Shape as IntoIterator>::IntoIter:
 			DoubleEndedIterator<Item = &'a usize> + ExactSizeIterator,
 	{
 		let shape = shape.into_iter().copied();
-		let mut t = DimsCtor::new(shape.len());
+		let mut builder = LayoutBuilder::new_empty(shape.len());
 		for dim in shape.rev() {
-			t.push(dim);
+			builder.prepend_dim(dim);
 		}
-		t.final_check();
-		t
+		builder.final_check();
+		builder
 	}
 
-	fn new(ndim: usize) -> DimsCtor {
+	fn new_empty(ndim: usize) -> LayoutBuilder {
 		let mut dims = SmallVec::with_capacity(ndim);
 		unsafe { dims.set_len(ndim) };
 
-		DimsCtor {
+		LayoutBuilder {
 			dims,
 			remaining_dims: ndim,
 			elems: 1,
@@ -116,9 +125,18 @@ impl DimsCtor {
 		}
 	}
 
-	// Push a new dimension with the given size
-	// Returns the stride of the new dimension
-	fn push(&mut self, size: usize) -> usize {
+	fn elems(&self) -> usize {
+		self.elems
+	}
+
+	fn dims(self) -> SmallVec<[SizeAndStride; INLINE_DIMS]> {
+		self.final_check();
+		self.dims
+	}
+}
+
+impl LayoutHandler for LayoutBuilder {
+	fn prepend_dim(&mut self, size: usize) -> usize {
 		debug_assert!(self.remaining_dims > 0);
 
 		// Check that if we ignore zero length dimensions, the number of elements
@@ -154,6 +172,36 @@ impl DimsCtor {
 	}
 }
 
+pub struct LayoutChecker<'a> {
+	tensor: &'a Tensor,
+	remaining_dims: usize,
+}
+
+impl LayoutChecker<'_> {
+	pub fn new(tensor: &Tensor) -> LayoutChecker {
+		LayoutChecker {
+			tensor,
+			remaining_dims: tensor.dims.len(),
+		}
+	}
+}
+
+impl LayoutHandler for LayoutChecker<'_> {
+	fn prepend_dim(&mut self, size: usize) -> usize {
+		assert!(self.remaining_dims > 0);
+
+		let dim = self.tensor.dims[self.remaining_dims - 1];
+		assert!(dim.size == size, "incompatible shape");
+
+		self.remaining_dims -= 1;
+		dim.stride
+	}
+
+	fn final_check(&self) {
+		assert!(self.remaining_dims == 0, "incompatible shape");
+	}
+}
+
 #[derive(Clone)]
 pub struct Tensor {
 	// dims in reverse order
@@ -165,26 +213,26 @@ pub struct Tensor {
 }
 
 impl Tensor {
-	fn __new_empty_on(dims_ctor: DimsCtor, dtype: DType, device: Rc<dyn Device>) -> Tensor {
-		Tensor {
-			dims: dims_ctor.dims,
-			offset: 0,
-			dtype,
-			elems: dims_ctor.elems,
-			buffer: device.new_buffer(dtype.array_bytes(dims_ctor.elems).unwrap()),
-		}
-	}
-
+	/// Allocate a new tensor on the provided device.
 	pub fn new_empty_on<'a, Shape>(shape: Shape, dtype: DType, device: Rc<dyn Device>) -> Tensor
 	where
 		Shape: IntoIterator<Item = &'a usize>,
 		<Shape as IntoIterator>::IntoIter:
 			DoubleEndedIterator<Item = &'a usize> + ExactSizeIterator,
 	{
-		Self::__new_empty_on(DimsCtor::from_shape(shape), dtype, device)
+		let layout = LayoutBuilder::from_shape(shape);
+		let elems = layout.elems();
+		let dims = layout.dims();
+		Tensor {
+			dims,
+			offset: 0,
+			dtype,
+			elems,
+			buffer: device.new_buffer(dtype.array_bytes(elems).unwrap()),
+		}
 	}
 
-	// Allocate a new tensor on the same device
+	/// Allocate a new tensor on the same device as `self`.
 	pub fn new_empty<'a, Shape>(&'a self, shape: Shape, dtype: DType) -> Tensor
 	where
 		Shape: IntoIterator<Item = &'a usize>,
@@ -194,117 +242,130 @@ impl Tensor {
 		Self::new_empty_on(shape, dtype, self.device())
 	}
 
-	// Allocate a new tensor on the same device with the same shape and dtype
+	pub fn new_empty_with_layout(&self, layout: LayoutBuilder) -> Tensor {
+		let elems = layout.elems();
+		let dims = layout.dims();
+		Tensor {
+			dims,
+			offset: 0,
+			dtype: self.dtype,
+			elems,
+			buffer: self.buffer.new_buffer(self.dtype.array_bytes(elems).unwrap()),
+		}
+	}
+
+	/// Allocate a new tensor on the same device with the same shape and dtype as `self`.
 	pub fn new_empty_like(&self) -> Tensor {
 		Self::new_empty_on(self.shape(), self.dtype, self.device())
 	}
 
+	/// Returns the device on which the tensor is allocated.
 	pub fn device(&self) -> Rc<dyn Device> {
 		buf_to_base(self.buffer.as_ref()).device.clone()
 	}
 
+	/// Fill the tensor with zeros.
 	pub fn zeros_(&self) {
 		self.buffer.zeros_(self);
 	}
 
+	/// Fill the tensor with random values from a normal distribution.
+	///
+	///     mean = 0, var = 1
 	pub fn randn_(&self) {
 		self.buffer.randn_(self);
 	}
 
 	/// Accumulate:
 	/// ```
-	///    self = alpha * self + beta * b
+	///    self = self * alpha + b * beta
 	/// ```
-	/// This function doesn't broadcast
-	/// self.shape must be equal to b.shape
-	pub fn acc_(&self, alpha: f64, beta: f64, b: &Tensor) {
-		assert_compatible_types(self, other);
-		assert_compatible_devices(self, other);
-		// TODO
-	}
-
-	/// Accumulate the result of element-wise multiplication:
-	/// ```
-	///     self = alpha * self + beta * (b * c)
-	/// ```
-	/// This function may broadcast b and c to match the shape of self.
-	pub fn acc_mul_(&self, alpha: f64, beta: f64, b: &Tensor, c: &Tensor) {
-		assert_compatible_types(self, a);
+	/// This function doesn't broadcast: self.shape must be equal to b.shape
+	pub fn acc_(&self, alpha: f64, b: &Tensor, beta: f64) {
 		assert_compatible_types(self, b);
-		assert_compatible_devices(self, a);
 		assert_compatible_devices(self, b);
 		// TODO
 	}
+	/*
+		/// Accumulate the result of element-wise multiplication:
+		/// ```
+		///     self = alpha * self + beta * (b * c)
+		/// ```
+		/// This function may broadcast b and c to match the shape of self.
+		pub fn acc_mul_(&self, alpha: f64, beta: f64, b: &Tensor, c: &Tensor) {
+			assert_compatible_types(self, b);
+			assert_compatible_devices(self, b);
+		}
 
-	/// Accumulate the result of sum:
-	/// ```
-	///    self = alpha * self + beta * b.sum(keepdim)
-	/// ```
-	/// This function doesn't broadcast.
-	/// The shape of b after the sum must be equal to the shape of self.
-	pub fn acc_sum_(&self, alpha: f64, beta: f64, b: &Tensor, keepdim: bool) {
-		assert_compatible_types(self, other);
-		assert_compatible_devices(self, other);
-		// TODO
-	}
+		/// Accumulate the result of sum:
+		/// ```
+		///    self = alpha * self + beta * b.sum(keepdim)
+		/// ```
+		/// This function doesn't broadcast.
+		/// The shape of b after the sum must be equal to the shape of self.
+		pub fn acc_sum_(&self, alpha: f64, beta: f64, b: &Tensor, keepdim: bool) {
+			assert_compatible_types(self, other);
+			assert_compatible_devices(self, other);
+			// TODO
+		}
 
-	/// Accumulate the result of mean:
-	/// ```
-	///   self = alpha * self + beta * b.mean(keepdim)
-	/// ```
-	/// This function doesn't broadcast.
-	/// The shape of b after the sum must be equal to the shape of self.
-	pub fn acc_mean_(&self, alpha: f64, beta: f64, b: &Tensor, keepdim: bool) {
-		assert_compatible_types(self, other);
-		assert_compatible_devices(self, other);
-		// TODO
-	}
+		/// Accumulate the result of mean:
+		/// ```
+		///   self = alpha * self + beta * b.mean(keepdim)
+		/// ```
+		/// This function doesn't broadcast.
+		/// The shape of b after the sum must be equal to the shape of self.
+		pub fn acc_mean_(&self, alpha: f64, beta: f64, b: &Tensor, keepdim: bool) {
+			// We can convert this to `acc_sum_()` because `mean = sum / n`
+			let n = b.size(-1) as f64;
+			self.acc_sum_(alpha, beta / n, b, keepdim);
+		}
 
-	/// Calculate `x^2`:
-	/// ```
-	///    result = self * self
-	/// ```
-	pub fn square(&self) -> Tensor {
-		let mut out = self.new_empty_like();
-		self.buffer.square(&mut out, self);
-		out
-	}
+		/// Calculate `x^2`:
+		/// ```
+		///    result = self * self
+		/// ```
+		pub fn square(&self) -> Tensor {
+			let mut out = self.new_empty_like();
+			self.buffer.square(&mut out, self);
+			out
+		}
 
-	/// reciprocal of the square root:
-	/// ```
-	///     result = 1.0 / (self.sqrt() + eps)
-	/// ```
-	pub fn rsqrt(&self, eps: f64) -> Tensor {
-		let mut out = self.new_empty_like();
-		self.buffer.rsqrt(&mut out, self, eps);
-		out
-	}
+		/// reciprocal of the square root:
+		/// ```
+		///     result = 1.0 / (self.sqrt() + eps)
+		/// ```
+		pub fn rsqrt(&self, eps: f64) -> Tensor {
+			let mut out = self.new_empty_like();
+			self.buffer.rsqrt(&mut out, self, eps);
+			out
+		}
 
-	pub fn rsqrt_into(&self, eps: f64, into: &Tensor) {
-		assert_compatible_types(self, into);
-		assert_compatible_devices(self, into);
-		//self.buffer.rsqrt(into, self, eps);
-	}
+		pub fn rsqrt_into(&self, eps: f64, into: &Tensor) {
+			assert_compatible_types(self, into);
+			assert_compatible_devices(self, into);
+			//self.buffer.rsqrt(into, self, eps);
+		}
 
-	/// Calculate the mean of the last dimension.
-	///
-	/// If keepdim is true, the last dimension is kept in the result with size 1.
-	///
-	/// If keepdim is false, the last dimension is removed from the result.
-	pub fn mean(&self, keepdim: bool) -> Tensor {
-		let mut out = self.new_empty_like();
-		//self.buffer.mean(&mut out, self, keepdim);
-		//out
-	}
+		/// Calculate the mean of the last dimension.
+		///
+		/// If keepdim is true, the last dimension is kept in the result with size 1.
+		///
+		/// If keepdim is false, the last dimension is removed from the result.
+		pub fn mean(&self, keepdim: bool) -> Tensor {
+			let mut out = self.new_empty_like();
+			//self.buffer.mean(&mut out, self, keepdim);
+			//out
+		}
 
-	pub fn mean_into(&self, keepdim: bool, into: &Tensor) {
-		assert_compatible_types(self, into);
-		assert_compatible_devices(self, into);
-		//self.buffer.mean(into, self, keepdim);
-	}
-
+		pub fn mean_into(&self, keepdim: bool, into: &Tensor) {
+			assert_compatible_types(self, into);
+			assert_compatible_devices(self, into);
+			//self.buffer.mean(into, self, keepdim);
+		}
+	*/
 	pub fn shape(&self) -> ShapeView {
-		ShapeView { tensor: self }
+		ShapeView { dims: &self.dims }
 	}
 
 	/// Returns the size of dimension `dim`.
@@ -345,7 +406,7 @@ impl Tensor {
 		let mut merged = Batch::new_empty(n);
 		let mut elems = 1;
 		for dim in last_n.iter().rev() {
-			merged.push_dim(dim.size, elems, [dim.stride]);
+			merged.prepend_dim(dim.size, elems, [dim.stride]);
 			elems *= dim.size;
 		}
 		merged.ensure_nonzero_ndim();
@@ -386,8 +447,9 @@ impl Tensor {
 		self
 	}
 
-	pub fn reshape(mut self, new_shape: &[usize]) -> Tensor {
-		self.reshape_last_n(self.ndim(), new_shape)
+	pub fn reshape(self, new_shape: &[usize]) -> Tensor {
+		let ndim = self.dims.len();
+		self.reshape_last_n(ndim, new_shape)
 	}
 
 	fn __dim_to_internal(&self, dim: isize) -> usize {
@@ -456,50 +518,6 @@ impl Tensor {
 	}
 }
 
-pub trait TensorRef {
-	fn tensor_ref(&self) -> &Tensor;
-}
-
-impl TensorRef for &Tensor {
-	fn tensor_ref(&self) -> &Tensor {
-		*self
-	}
-}
-
-impl TensorRef for Tensor {
-	fn tensor_ref(&self) -> &Tensor {
-		self
-	}
-}
-
-impl<B: TensorRef> std::ops::Mul<B> for Tensor {
-	type Output = Tensor;
-
-	fn mul(self, other: B) -> Tensor {
-		// TODO
-	}
-}
-
-impl<B: TensorRef> std::ops::Mul<B> for &Tensor {
-	type Output = Tensor;
-
-	fn mul(self, other: B) -> Tensor {
-		// TODO
-	}
-}
-
-impl std::ops::SubAssign<&Tensor> for Tensor {
-	fn sub_assign(&mut self, other: &Tensor) {
-		// TODO
-	}
-}
-
-impl std::ops::SubAssign<Tensor> for Tensor {
-	fn sub_assign(&mut self, other: Tensor) {
-		// TODO
-	}
-}
-
 pub fn assert_compatible_types(a: &Tensor, b: &Tensor) {
 	assert!(a.dtype == b.dtype, "incompatible dtypes");
 }
@@ -522,15 +540,13 @@ fn __gemm<'a>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64) -> Tensor {
 
 	let dtype = a.tensor.dtype;
 	let batch_ndim = a.batch_dims.len().max(b.batch_dims.len());
-	let mut c_dims_ctor = DimsCtor::new(batch_ndim + 2);
-	// Note: dims need to be pushed to ctor in reverse order
-	c_dims_ctor.push(c_cols.size);
-	c_dims_ctor.push(c_rows.size);
+	let mut c_layout = LayoutBuilder::new_empty(batch_ndim + 2);
+	c_layout.prepend_dim(c_cols.size);
+	c_layout.prepend_dim(c_rows.size);
 
-	let batch = Batch::new(batch_ndim, [a.batch_dims, b.batch_dims], &mut c_dims_ctor);
+	let batch = Batch::new(batch_ndim, [a.batch_dims, b.batch_dims], &mut c_layout);
 
-	c_dims_ctor.final_check();
-	let c = a.tensor.__new(c_dims_ctor.elems, c_dims_ctor.dims, dtype);
+	let c = a.tensor.new_empty_with_layout(c_layout);
 
 	let a_rows_contiguous = a.cols.stride == 1;
 	let a_cols_contiguous = a.rows.stride == 1;
@@ -658,58 +674,70 @@ pub fn mm<'a, A: MatrixLike<'a>, B: MatrixLike<'a>>(a: A, b: B) -> MatMul<'a> {
 	MatMul::new(a, b)
 }
 
+#[derive(Clone, Copy)]
 pub struct MatMul<'a> {
 	pub a: Matrix<'a>,
 	pub b: Matrix<'a>,
+	pub scale: f64,
 }
 
 impl<'a> MatMul<'a> {
 	pub fn new(a: Matrix<'a>, b: Matrix<'a>) -> MatMul<'a> {
 		assert!(a.cols.size == b.rows.size);
-		MatMul { a, b }
+		MatMul { a, b, scale: 1.0 }
 	}
 
-	// Calculate the default scale for the MatMul based on the `k` dimension.
-	// A = [m, k]
-	// B = [k, n]
-	// Each cell of the result is the sum of k products.
-	// The default scale is `1 / sqrt(k)` in order to preserve the variance of the input.
-	pub fn scale_for_k(k: usize) -> f64 {
+	/// We have:
+	/// - matrix `A` with shape `[m, k]` and elements with mean = `0`, variance = `var_a`
+	/// - matrix `B` with shape `[k, n]` and elements with mean = `0`, variance = `var_b`
+	///
+	/// The matrix multiplication `mm(A, B)` will have elements with
+	/// mean = `0`, variance = `var_a * var_b * k`.
+	///
+	/// If we scale the result by the constant returned by this function (`1 / sqrt(k)`),
+	/// the variance of the result elements will be independent on `k`.
+	/// It will just be `var_a * var_b`.
+	pub fn normalizing_scale(k: usize) -> f64 {
 		1.0 / (k as f64).sqrt()
 	}
 
-	pub fn default_scale(&self) -> f64 {
-		Self::scale_for_k(self.a.cols.size)
+	pub fn scale(&self, scale: f64) -> MatMul<'a> {
+		MatMul {
+			a: self.a,
+			b: self.b,
+			scale: self.scale * scale,
+		}
 	}
 
-	// Calculate the MatMul and multiply the result by `scale`.
-	pub fn eval(&self, scale: f64) -> Tensor {
-		__gemm(self.a, self.b, scale)
+	/// Calculate the MatMul and return a new tensor with the result.
+	///
+	///     result = a * b * scale
+	pub fn eval(&self) -> Tensor {
+		__gemm(self.a, self.b, self.scale)
 	}
 
-	// Calculate the MatMul and multiply the result by the default scale.
-	pub fn eval_default_scale(&self) -> Tensor {
-		self.eval(self.default_scale())
-	}
-
-	// Calculate the MatMul and multiply the result by `scale`.
-	//
-	// In debug builds, this function checks that `scale` is equal to the default scale.
-	// In release builds, no check is performed.
-	//
-	// This is useful when we want to use the default scale, but we don't want to
-	// recalculate it every time.
-	// We can calculate it once using `scale_for_k()` and then use this function to make sure
-	// we didn't make a mistake and are in fact using the correct value.
-	pub fn eval_check_scale(&self, scale: f64) -> Tensor {
-		debug_assert!(scale == self.default_scale());
-		self.eval(scale)
+	/// In debug builds, assert that the current scale is equal to the normalizing scale.
+	///
+	/// I.e., to the value returned by `normalizing_scale(self.a.cols.size)`.
+	///
+	/// If ok, return `self`. Otherwise, panic.
+	pub fn assert_normalizing_scale(&self) -> MatMul<'a> {
+		debug_assert!(self.scale == Self::normalizing_scale(self.a.cols.size));
+		*self
 	}
 
 	pub fn backward<M: MatrixLike<'a>>(&self, dy: M) -> MatMulBackward<'a> {
 		let dy = dy.as_matrix();
 		assert!(dy.rows.size == self.a.rows.size);
 		assert!(dy.cols.size == self.b.cols.size);
+		debug_assert!(
+			self.scale == 1.0,
+			concat!(
+				"TODO - we'd need to propagate the scale to MatMulBackward. ",
+				"Not sure if it's worth it. ",
+				"The backward pass should normally use its own scale."
+			)
+		);
 		MatMulBackward { a: Some(self.a), b: Some(self.b), dy }
 	}
 }
@@ -743,35 +771,39 @@ impl<'a> MatMulBackward<'a> {
 	}
 }
 
-pub fn rms_norm(a: &Tensor) -> Tensor {
+pub fn rms_norm(a: &Tensor, eps: f64) -> Tensor {
 	assert!(a.ndim() > 0);
 	let ndim = a.ndim();
 	let batch_ndim = ndim - 1;
 	let dim_size = a.dims[ndim - 1].size;
 
-	let mut out_dims_ctor = DimsCtor::new(ndim);
-	out_dims_ctor.push(dim_size);
+	let mut out_layout = LayoutBuilder::new_empty(ndim);
+	out_layout.prepend_dim(dim_size);
 
-	let batch = Batch::new(batch_ndim, [&a.dims[..batch_ndim]], &mut out_dims_ctor);
+	let batch = Batch::new(batch_ndim, [&a.dims[..batch_ndim]], &mut out_layout);
 
-	out_dims_ctor.final_check();
-	let out = a.__new(out_dims_ctor.elems, out_dims_ctor.dims, a.dtype);
-
+	let out = a.new_empty_with_layout(out_layout);
 	let out_buf = out.buffer.as_ref();
 	let a_buf = buf_to_base(a.buffer.as_ref());
-	#[rustfmt::skip]
 	batch.run(
-		out.offset, [a.offset],
-		&|out_offset, [a_offset], batch| {
-			unsafe {
-				out_buf.rms_norm(
-					a.dtype, out_offset, batch.out_stride,
-					a_buf, a_offset, batch.in_strides[0],
-					dim_size, 1e-6,
-					batch.size
-				);
-			}
-		}
+		// rustfmt::newline
+		out.offset,
+		[a.offset],
+		&|out_offset, [a_offset], batch| unsafe {
+			out_buf.rms_norm(
+				a_buf,
+				OpArgs1D {
+					dtype: a.dtype,
+					out_offset,
+					out_batch_stride: batch.out_stride,
+					a_offset,
+					a_batch_stride: batch.in_strides[0],
+					count: dim_size,
+					batch_size: batch.size,
+				},
+				eps,
+			);
+		},
 	);
 
 	out
@@ -783,29 +815,33 @@ pub fn softmax(a: &Tensor) -> Tensor {
 	let batch_ndim = ndim - 1;
 	let dim_size = a.dims[ndim - 1].size;
 
-	let mut out_dims_ctor = DimsCtor::new(ndim);
-	out_dims_ctor.push(dim_size);
+	let mut out_layout = LayoutBuilder::new_empty(ndim);
+	out_layout.prepend_dim(dim_size);
 
-	let batch = Batch::new(batch_ndim, [&a.dims[..batch_ndim]], &mut out_dims_ctor);
+	let batch = Batch::new(batch_ndim, [&a.dims[..batch_ndim]], &mut out_layout);
 
-	out_dims_ctor.final_check();
-	let out = a.__new(out_dims_ctor.elems, out_dims_ctor.dims, a.dtype);
+	let out = a.new_empty_with_layout(out_layout);
 
 	let out_buf = out.buffer.as_ref();
 	let a_buf = buf_to_base(a.buffer.as_ref());
-	#[rustfmt::skip]
 	batch.run(
-		out.offset, [a.offset],
-		&|out_offset, [a_offset], batch| {
-			unsafe {
-				out_buf.softmax(
-					a.dtype, out_offset, batch.out_stride,
-					a_buf, a_offset, batch.in_strides[0],
-					dim_size,
-					batch.size
-				);
-			}
-		}
+		// rustfmt::newline
+		out.offset,
+		[a.offset],
+		&|out_offset, [a_offset], batch| unsafe {
+			out_buf.softmax(
+				a_buf,
+				OpArgs1D {
+					dtype: a.dtype,
+					out_offset,
+					out_batch_stride: batch.out_stride,
+					a_offset,
+					a_batch_stride: batch.in_strides[0],
+					count: dim_size,
+					batch_size: batch.size,
+				},
+			);
+		},
 	);
 
 	out
@@ -867,7 +903,11 @@ pub struct Batch<const N: usize> {
 }
 
 impl<const N: usize> Batch<N> {
-	pub fn new(ndim: usize, inputs: [&[SizeAndStride]; N], output: &mut DimsCtor) -> Batch<N> {
+	pub fn new<L: LayoutHandler>(
+		ndim: usize,
+		inputs: [&[SizeAndStride]; N],
+		out_layout: &mut L,
+	) -> Batch<N> {
 		assert!(N > 0);
 
 		let mut batch = Batch::new_empty(ndim);
@@ -894,7 +934,7 @@ impl<const N: usize> Batch<N> {
 			// So max() gets the dim_size of the non-broadcasted inputs.
 			let dim_size = in_sizes.iter().copied().max().unwrap();
 
-			let out_stride = output.push(dim_size);
+			let out_stride = out_layout.prepend_dim(dim_size);
 
 			// Find inputs that need broadcasting and set their strides to 0
 			for i in 0..N {
@@ -904,7 +944,7 @@ impl<const N: usize> Batch<N> {
 				}
 			}
 
-			batch.push_dim(dim_size, out_stride, in_strides);
+			batch.prepend_dim(dim_size, out_stride, in_strides);
 		}
 
 		batch
@@ -915,7 +955,7 @@ impl<const N: usize> Batch<N> {
 	}
 
 	// dimensions should be pushed in the order of increasing strides
-	pub fn push_dim(&mut self, size: usize, out_stride: usize, in_strides: [usize; N]) {
+	pub fn prepend_dim(&mut self, size: usize, out_stride: usize, in_strides: [usize; N]) {
 		if size == 1 {
 			return;
 		}
