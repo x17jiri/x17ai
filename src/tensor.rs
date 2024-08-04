@@ -74,68 +74,74 @@ impl<'a> IntoIterator for ShapeView<'a> {
 	}
 }
 
-pub trait LayoutHandler {
+pub trait OutputHandler {
+	fn init(&mut self, ndim: usize, dtype: DType);
+
 	/// Adds a new dimension with the given size.
 	///
 	/// Returns the stride of the new dimension.
 	fn prepend_dim(&mut self, size: usize) -> usize;
 
-	/// Checks that the layout is valid and finalizes it.
+	/// Create a new buffer that can fit a new tensor with all the previously added dimensions
+	/// and the given dtype.
 	///
-	/// This function should panic if the layout is invalid.
-	fn final_check(&self);
+	/// Return the buffer and the offset in the buffer where the tensor should start.
+	fn make_buffer(&mut self) -> (&dyn Buffer, usize);
 }
 
 /// This struct is used mainly to ensure that the total number of elements does not overflow
-struct LayoutBuilder {
+struct OutputBuilder {
 	dims: SmallVec<[SizeAndStride; INLINE_DIMS]>,
+	dtype: DType,
+
+	/// How many more dims do we need to prepend.
 	remaining_dims: usize,
+
 	elems: usize,
 
-	/// Total number of elements in the dimensions processed so far,
-	/// ignoring zero length dimensions.
+	/// Total number of elements in the dimensions processed so far but ignoring
+	/// zero length dimensions.
 	nonzero_elems: usize,
+
+	device: Rc<dyn Device>,
+	buffer: Option<Rc<dyn Buffer>>,
 }
 
-impl LayoutBuilder {
-	fn from_shape<'a, Shape>(shape: Shape) -> LayoutBuilder
-	where
-		Shape: IntoIterator<Item = &'a usize>,
-		<Shape as IntoIterator>::IntoIter:
-			DoubleEndedIterator<Item = &'a usize> + ExactSizeIterator,
-	{
-		let shape = shape.into_iter().copied();
-		let mut builder = LayoutBuilder::new_empty(shape.len());
-		for dim in shape.rev() {
-			builder.prepend_dim(dim);
-		}
-		builder.final_check();
-		builder
-	}
-
-	fn new_empty(ndim: usize) -> LayoutBuilder {
-		let mut dims = SmallVec::with_capacity(ndim);
-		unsafe { dims.set_len(ndim) };
-
-		LayoutBuilder {
-			dims,
-			remaining_dims: ndim,
-			elems: 1,
-			nonzero_elems: 1,
+impl OutputBuilder {
+	pub fn new(device: Rc<dyn Device>) -> OutputBuilder {
+		OutputBuilder {
+			dims: SmallVec::new(),
+			dtype: DType::f32(),
+			remaining_dims: 0,
+			elems: 0,
+			nonzero_elems: 0,
+			device,
+			buffer: None,
 		}
 	}
 
-	fn elems(&self) -> usize {
-		self.elems
-	}
-
-	fn dims(self) -> SmallVec<[SizeAndStride; INLINE_DIMS]> {
-		self.final_check();
-		self.dims
+	// Note: this function expects that make_buffer() has been called before.
+	pub fn make_tensor(mut self) -> Tensor {
+		Tensor {
+			dims: self.dims,
+			offset: 0,
+			dtype: self.dtype,
+			elems: self.elems,
+			buffer: self.buffer.unwrap(),
+		}
 	}
 }
 
-impl LayoutHandler for LayoutBuilder {
+impl OutputHandler for OutputBuilder {
+	fn init(&mut self, ndim: usize, dtype: DType) {
+		self.dims = SmallVec::with_capacity(ndim);
+		self.dtype = dtype;
+		unsafe { self.dims.set_len(ndim) };
+		self.remaining_dims = ndim;
+		self.elems = 1;
+		self.nonzero_elems = 1;
+	}
+
 	fn prepend_dim(&mut self, size: usize) -> usize {
 		debug_assert!(self.remaining_dims > 0);
 
@@ -161,32 +167,32 @@ impl LayoutHandler for LayoutBuilder {
 		stride
 	}
 
-	fn final_check(&self) {
-		debug_assert!(self.remaining_dims == 0);
-
-		// Check that the total number of elements does not overflow isize
-		let check: Option<isize> = self.elems.try_into().ok();
-		if check.is_none() {
-			panic!("too many elements");
+	fn make_buffer(&mut self) -> (&dyn Buffer, usize) {
+		if unlikely(self.remaining_dims != 0) {
+			bug!("not all dimensions were added");
 		}
+
+		self.buffer = Some(self.device.new_buffer(self.dtype, self.elems));
+
+		(self.buffer.as_ref().unwrap().as_ref(), 0)
 	}
 }
 
-pub struct LayoutChecker<'a> {
+pub struct OutputRef<'a> {
 	tensor: &'a Tensor,
 	remaining_dims: usize,
 }
 
-impl LayoutChecker<'_> {
-	pub fn new(tensor: &Tensor) -> LayoutChecker {
-		LayoutChecker {
+impl OutputRef<'_> {
+	pub fn new(tensor: &Tensor) -> OutputRef {
+		OutputRef {
 			tensor,
 			remaining_dims: tensor.dims.len(),
 		}
 	}
 }
 
-impl LayoutHandler for LayoutChecker<'_> {
+impl OutputHandler for OutputRef<'_> {
 	fn prepend_dim(&mut self, size: usize) -> usize {
 		assert!(self.remaining_dims > 0);
 
@@ -197,8 +203,10 @@ impl LayoutHandler for LayoutChecker<'_> {
 		dim.stride
 	}
 
-	fn final_check(&self) {
+	fn get_tensor(&self, dtype: DType) -> &Tensor {
 		assert!(self.remaining_dims == 0, "incompatible shape");
+		assert!(self.tensor.dtype == dtype, "incompatible dtype");
+		self.tensor
 	}
 }
 
@@ -220,16 +228,14 @@ impl Tensor {
 		<Shape as IntoIterator>::IntoIter:
 			DoubleEndedIterator<Item = &'a usize> + ExactSizeIterator,
 	{
-		let layout = LayoutBuilder::from_shape(shape);
-		let elems = layout.elems();
-		let dims = layout.dims();
-		Tensor {
-			dims,
-			offset: 0,
-			dtype,
-			elems,
-			buffer: device.new_buffer(dtype.array_bytes(elems).unwrap()),
+		let shape = shape.into_iter().copied();
+		let mut builder = OutputBuilder::new(device);
+		builder.init(shape.len(), dtype);
+		for dim in shape.rev() {
+			builder.prepend_dim(dim);
 		}
+		builder.make_buffer();
+		builder.make_tensor()
 	}
 
 	/// Allocate a new tensor on the same device as `self`.
@@ -242,7 +248,7 @@ impl Tensor {
 		Self::new_empty_on(shape, dtype, self.device())
 	}
 
-	pub fn new_empty_with_layout(&self, layout: LayoutBuilder) -> Tensor {
+	pub fn new_empty_with_layout(&self, layout: OutputBuilder) -> Tensor {
 		let elems = layout.elems();
 		let dims = layout.dims();
 		Tensor {
@@ -530,7 +536,7 @@ pub fn assert_compatible_devices(a: &Tensor, b: &Tensor) {
 }
 
 // c = a * b * alpha
-fn __gemm<'a>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64) -> Tensor {
+fn __gemm<'a>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64, c: &mut OutputHandler) {
 	assert_compatible_types(a.tensor, b.tensor);
 	assert_compatible_devices(a.tensor, b.tensor);
 
@@ -540,13 +546,13 @@ fn __gemm<'a>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64) -> Tensor {
 
 	let dtype = a.tensor.dtype;
 	let batch_ndim = a.batch_dims.len().max(b.batch_dims.len());
-	let mut c_layout = LayoutBuilder::new_empty(batch_ndim + 2);
-	c_layout.prepend_dim(c_cols.size);
-	c_layout.prepend_dim(c_rows.size);
+	c.init(batch_ndim + 2, dtype);
+	c.prepend_dim(c_cols.size);
+	c.prepend_dim(c_rows.size);
 
-	let batch = Batch::new(batch_ndim, [a.batch_dims, b.batch_dims], &mut c_layout);
+	let batch = Batch::new(batch_ndim, [a.batch_dims, b.batch_dims], c);
 
-	let c = a.tensor.new_empty_with_layout(c_layout);
+	let (c, c_offset) = c.make_buffer();
 
 	let a_rows_contiguous = a.cols.stride == 1;
 	let a_cols_contiguous = a.rows.stride == 1;
@@ -621,8 +627,6 @@ fn __gemm<'a>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64) -> Tensor {
 			}
 		},
 	);
-
-	c
 }
 
 #[derive(Clone, Copy)]
@@ -777,7 +781,7 @@ pub fn rms_norm(a: &Tensor, eps: f64) -> Tensor {
 	let batch_ndim = ndim - 1;
 	let dim_size = a.dims[ndim - 1].size;
 
-	let mut out_layout = LayoutBuilder::new_empty(ndim);
+	let mut out_layout = OutputBuilder::new_empty(ndim);
 	out_layout.prepend_dim(dim_size);
 
 	let batch = Batch::new(batch_ndim, [&a.dims[..batch_ndim]], &mut out_layout);
@@ -815,7 +819,7 @@ pub fn softmax(a: &Tensor) -> Tensor {
 	let batch_ndim = ndim - 1;
 	let dim_size = a.dims[ndim - 1].size;
 
-	let mut out_layout = LayoutBuilder::new_empty(ndim);
+	let mut out_layout = OutputBuilder::new_empty(ndim);
 	out_layout.prepend_dim(dim_size);
 
 	let batch = Batch::new(batch_ndim, [&a.dims[..batch_ndim]], &mut out_layout);
@@ -903,7 +907,7 @@ pub struct Batch<const N: usize> {
 }
 
 impl<const N: usize> Batch<N> {
-	pub fn new<L: LayoutHandler>(
+	pub fn new<L: OutputHandler>(
 		ndim: usize,
 		inputs: [&[SizeAndStride]; N],
 		out_layout: &mut L,

@@ -34,15 +34,19 @@ impl Device for CPUDevice {
 		&self.name
 	}
 
-	fn new_buffer(self: Rc<Self>, size_bytes: usize) -> Rc<dyn Buffer> {
-		let elem_size = std::mem::size_of::<CPUBufferElement>();
-		let elems = (size_bytes + elem_size - 1) / elem_size;
+	fn new_buffer(self: Rc<Self>, dtype: DType, elems: usize) -> Rc<dyn Buffer> {
+		// we want to allocate `elems` elements of type `dtype`, but internally we use elements
+		// of type `CPUBufferElement`. So convert `elems` to `buf_elems`.
+		let size_bytes = dtype.array_bytes(elems).unwrap();
+		let step_size = std::mem::size_of::<CPUBufferElement>();
+		let buf_elems = (size_bytes + step_size - 1) / step_size;
 		Rc::new(CPUBuffer {
 			base: BufferBase {
 				device: self.clone(),
 				capacity: size_bytes,
 			},
-			memory: vec![Cell::new(0); elems].into_boxed_slice(),
+			// TODO - we could leave the memory uninitialized
+			memory: vec![Cell::new(0); buf_elems].into_boxed_slice(),
 		})
 	}
 }
