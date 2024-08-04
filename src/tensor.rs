@@ -103,7 +103,7 @@ struct OutputBuilder {
 	/// zero length dimensions.
 	nonzero_elems: usize,
 
-	device: Rc<dyn Device>,
+	device: Option<Rc<dyn Device>>,
 	buffer: Option<Rc<dyn Buffer>>,
 }
 
@@ -115,7 +115,7 @@ impl OutputBuilder {
 			remaining_dims: 0,
 			elems: 0,
 			nonzero_elems: 0,
-			device,
+			device: Some(device),
 			buffer: None,
 		}
 	}
@@ -169,10 +169,13 @@ impl OutputHandler for OutputBuilder {
 
 	fn make_buffer(&mut self) -> (&dyn Buffer, usize) {
 		if unlikely(self.remaining_dims != 0) {
-			bug!("not all dimensions were added");
+			panic!("not all dimensions were added");
 		}
+		let Some(device) = self.device.take() else {
+			panic!("buffer already created");
+		};
 
-		self.buffer = Some(self.device.new_buffer(self.dtype, self.elems));
+		self.buffer = Some(device.new_buffer(self.dtype, self.elems));
 
 		(self.buffer.as_ref().unwrap().as_ref(), 0)
 	}
@@ -193,6 +196,12 @@ impl OutputRef<'_> {
 }
 
 impl OutputHandler for OutputRef<'_> {
+	fn init(&mut self, ndim: usize, dtype: DType) {
+		assert!(self.tensor.dims.len() == ndim, "incompatible shape");
+		assert!(self.tensor.dtype == dtype, "incompatible dtype");
+		self.remaining_dims = ndim;
+	}
+
 	fn prepend_dim(&mut self, size: usize) -> usize {
 		assert!(self.remaining_dims > 0);
 
@@ -203,10 +212,9 @@ impl OutputHandler for OutputRef<'_> {
 		dim.stride
 	}
 
-	fn get_tensor(&self, dtype: DType) -> &Tensor {
-		assert!(self.remaining_dims == 0, "incompatible shape");
-		assert!(self.tensor.dtype == dtype, "incompatible dtype");
-		self.tensor
+	fn make_buffer(&mut self) -> (&dyn Buffer, usize) {
+		assert!(self.remaining_dims == 0, "not all dimensions were added");
+		(self.tensor.buffer.as_ref(), self.tensor.offset)
 	}
 }
 
@@ -246,18 +254,6 @@ impl Tensor {
 			DoubleEndedIterator<Item = &'a usize> + ExactSizeIterator,
 	{
 		Self::new_empty_on(shape, dtype, self.device())
-	}
-
-	pub fn new_empty_with_layout(&self, layout: OutputBuilder) -> Tensor {
-		let elems = layout.elems();
-		let dims = layout.dims();
-		Tensor {
-			dims,
-			offset: 0,
-			dtype: self.dtype,
-			elems,
-			buffer: self.buffer.new_buffer(self.dtype.array_bytes(elems).unwrap()),
-		}
 	}
 
 	/// Allocate a new tensor on the same device with the same shape and dtype as `self`.
@@ -536,7 +532,7 @@ pub fn assert_compatible_devices(a: &Tensor, b: &Tensor) {
 }
 
 // c = a * b * alpha
-fn __gemm<'a>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64, c: &mut OutputHandler) {
+fn __gemm<'a, O: OutputHandler>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64, c: &mut O) {
 	assert_compatible_types(a.tensor, b.tensor);
 	assert_compatible_devices(a.tensor, b.tensor);
 
@@ -552,7 +548,7 @@ fn __gemm<'a>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64, c: &mut OutputHandler) {
 
 	let batch = Batch::new(batch_ndim, [a.batch_dims, b.batch_dims], c);
 
-	let (c, c_offset) = c.make_buffer();
+	let (c_buffer, c_offset) = c.make_buffer();
 
 	let a_rows_contiguous = a.cols.stride == 1;
 	let a_cols_contiguous = a.rows.stride == 1;
@@ -613,10 +609,10 @@ fn __gemm<'a>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64, c: &mut OutputHandler) {
 	let b_buf = buf_to_base(b.tensor.buffer.as_ref());
 	#[rustfmt::skip]
 	batch.run(
-		c.offset, [a.tensor.offset, b.tensor.offset],
+		c_offset, [a.tensor.offset, b.tensor.offset],
 		&|c_offset, [a_offset, b_offset], batch| {
 			unsafe {
-				c.buffer.gemm(
+				c_buffer.gemm(
 					dtype, c_offset, ldc, batch.out_stride,
 					m, n, k,
 					a_buf, a_offset, lda, transa, batch.in_strides[0],
@@ -717,7 +713,14 @@ impl<'a> MatMul<'a> {
 	///
 	///     result = a * b * scale
 	pub fn eval(&self) -> Tensor {
-		__gemm(self.a, self.b, self.scale)
+		let mut c = OutputBuilder::new(self.a.tensor.device());
+		__gemm(self.a, self.b, self.scale, &mut c);
+		c.make_tensor()
+	}
+
+	pub fn eval_into(&self, into: &Tensor) {
+		let mut c = OutputRef::new(into);
+		__gemm(self.a, self.b, self.scale, &mut c);
 	}
 
 	/// In debug builds, assert that the current scale is equal to the normalizing scale.
@@ -775,27 +778,25 @@ impl<'a> MatMulBackward<'a> {
 	}
 }
 
-pub fn rms_norm(a: &Tensor, eps: f64) -> Tensor {
+fn __rms_norm<O: OutputHandler>(a: &Tensor, eps: f64, out: &mut O) {
 	assert!(a.ndim() > 0);
 	let ndim = a.ndim();
 	let batch_ndim = ndim - 1;
 	let dim_size = a.dims[ndim - 1].size;
 
-	let mut out_layout = OutputBuilder::new_empty(ndim);
-	out_layout.prepend_dim(dim_size);
+	out.init(ndim, a.dtype);
+	out.prepend_dim(dim_size);
 
-	let batch = Batch::new(batch_ndim, [&a.dims[..batch_ndim]], &mut out_layout);
+	let batch = Batch::new(batch_ndim, [&a.dims[..batch_ndim]], out);
 
-	let out = a.new_empty_with_layout(out_layout);
-	let out_buf = out.buffer.as_ref();
-	let a_buf = buf_to_base(a.buffer.as_ref());
+	let (out_buffer, out_offset) = out.make_buffer();
 	batch.run(
 		// rustfmt::newline
-		out.offset,
+		out_offset,
 		[a.offset],
 		&|out_offset, [a_offset], batch| unsafe {
-			out_buf.rms_norm(
-				a_buf,
+			out_buffer.rms_norm(
+				buf_to_base(a.buffer.as_ref()),
 				OpArgs1D {
 					dtype: a.dtype,
 					out_offset,
@@ -809,8 +810,11 @@ pub fn rms_norm(a: &Tensor, eps: f64) -> Tensor {
 			);
 		},
 	);
+}
 
-	out
+pub fn rms_norm(a: &Tensor, eps: f64) -> Tensor {
+	let mut out = OutputBuilder::new(a.device());
+	__rms_norm(a, eps, &mut out).make_tensor()
 }
 
 pub fn softmax(a: &Tensor) -> Tensor {

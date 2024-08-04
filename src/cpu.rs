@@ -133,12 +133,20 @@ impl CPUBuffer {
 		}
 	}
 
-	fn acc_f32(&self, offset: usize, a: &Self, a_offset: usize, count: usize, alpha: f64, beta: f64) {
+	fn acc_f32(
+		&self,
+		offset: usize,
+		a: &Self,
+		a_offset: usize,
+		count: usize,
+		alpha: f64,
+		beta: f64,
+	) {
 		let out_vec = self.cast::<f32>(offset, count);
 		let in_vec = a.cast::<f32>(a_offset, count);
 
 		for (o, i) in out_vec.iter().zip(in_vec) {
-			let val = (alpha * (o.get() as f64) + beta * (i.get() as f64));
+			let val = alpha * (o.get() as f64) + beta * (i.get() as f64);
 			o.set(val as f32);
 		}
 	}
@@ -253,6 +261,7 @@ impl Buffer for CPUBuffer {
 					out.acc_f32(out_offset, a, a_offset, args.count, alpha, beta)
 				},
 				_ => todo!(),
+			}
 		}
 	}
 
