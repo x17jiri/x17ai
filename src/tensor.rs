@@ -286,7 +286,7 @@ impl Tensor {
 	pub fn acc_(&self, alpha: f64, b: &Tensor, beta: f64) {
 		assert_compatible_types(self, b);
 		assert_compatible_devices(self, b);
-		// TODO
+		let mut out = OutputRef::new(self);
 	}
 	/*
 		/// Accumulate the result of element-wise multiplication:
@@ -778,24 +778,27 @@ impl<'a> MatMulBackward<'a> {
 	}
 }
 
-fn __rms_norm<O: OutputHandler>(a: &Tensor, eps: f64, out: &mut O) {
+fn __norm<O: OutputHandler, RunOp: Fn(&dyn Buffer, &BufferBase, OpArgs1D)>(
+	a: &Tensor,
+	out: &mut O,
+	run_op: RunOp,
+) {
 	assert!(a.ndim() > 0);
 	let ndim = a.ndim();
 	let batch_ndim = ndim - 1;
 	let dim_size = a.dims[ndim - 1].size;
 
-	out.init(ndim, a.dtype);
-	out.prepend_dim(dim_size);
-
+	out.init(batch_ndim, a.dtype);
 	let batch = Batch::new(batch_ndim, [&a.dims[..batch_ndim]], out);
-
 	let (out_buffer, out_offset) = out.make_buffer();
+
 	batch.run(
 		// rustfmt::newline
 		out_offset,
 		[a.offset],
-		&|out_offset, [a_offset], batch| unsafe {
-			out_buffer.rms_norm(
+		&|out_offset, [a_offset], batch| {
+			f(
+				out_buffer,
 				buf_to_base(a.buffer.as_ref()),
 				OpArgs1D {
 					dtype: a.dtype,
@@ -806,7 +809,6 @@ fn __rms_norm<O: OutputHandler>(a: &Tensor, eps: f64, out: &mut O) {
 					count: dim_size,
 					batch_size: batch.size,
 				},
-				eps,
 			);
 		},
 	);
@@ -814,45 +816,20 @@ fn __rms_norm<O: OutputHandler>(a: &Tensor, eps: f64, out: &mut O) {
 
 pub fn rms_norm(a: &Tensor, eps: f64) -> Tensor {
 	let mut out = OutputBuilder::new(a.device());
-	__rms_norm(a, eps, &mut out).make_tensor()
+	#[rustfmt::skip] __norm(
+		a, &mut out,
+		|o: &dyn Buffer, a: &BufferBase, args: OpArgs1D| unsafe { o.rms_norm(a, args, eps) },
+	);
+	out.make_tensor()
 }
 
 pub fn softmax(a: &Tensor) -> Tensor {
-	assert!(a.ndim() > 0);
-	let ndim = a.ndim();
-	let batch_ndim = ndim - 1;
-	let dim_size = a.dims[ndim - 1].size;
-
-	let mut out_layout = OutputBuilder::new_empty(ndim);
-	out_layout.prepend_dim(dim_size);
-
-	let batch = Batch::new(batch_ndim, [&a.dims[..batch_ndim]], &mut out_layout);
-
-	let out = a.new_empty_with_layout(out_layout);
-
-	let out_buf = out.buffer.as_ref();
-	let a_buf = buf_to_base(a.buffer.as_ref());
-	batch.run(
-		// rustfmt::newline
-		out.offset,
-		[a.offset],
-		&|out_offset, [a_offset], batch| unsafe {
-			out_buf.softmax(
-				a_buf,
-				OpArgs1D {
-					dtype: a.dtype,
-					out_offset,
-					out_batch_stride: batch.out_stride,
-					a_offset,
-					a_batch_stride: batch.in_strides[0],
-					count: dim_size,
-					batch_size: batch.size,
-				},
-			);
-		},
+	let mut out = OutputBuilder::new(a.device());
+	#[rustfmt::skip] __norm(
+		a, &mut out,
+		|o: &dyn Buffer, a: &BufferBase, args: OpArgs1D| unsafe { o.softmax(a, args) },
 	);
-
-	out
+	out.make_tensor()
 }
 
 fn fmt_0d(tensor: &Tensor, f: &mut fmt::Formatter, offset: usize) -> fmt::Result {
