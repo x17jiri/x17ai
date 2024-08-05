@@ -61,7 +61,7 @@ pub trait Buffer {
 		beta: f64,
 	);
 
-	unsafe fn acc_sum<'a>(
+	unsafe fn acc_sum(
 		&self,
 		o: BufOff<()>,
 		a: BufOff<&BufferBase>,
@@ -76,6 +76,7 @@ pub trait Buffer {
 	// A =   4 5 6   ->  [ 1 2 3 4 5 6 7 8 9 ]
 	//       7 8 9 ]
 	#[rustfmt::skip]
+	#[allow(clippy::too_many_arguments)]
 	unsafe fn gemm(
 		&self, dtype: DType, c_offset: usize, ldc: usize, c_batch_stride: usize,
 		m: usize, n: usize, k: usize,

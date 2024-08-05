@@ -6,6 +6,7 @@ use matrixmultiply::sgemm;
 use std::boxed::Box;
 use std::cell::{Cell, RefCell};
 use std::fmt;
+use std::intrinsics::unlikely;
 
 pub struct CPUDevice {
 	name: String,
@@ -108,28 +109,46 @@ impl CPUBuffer {
 
 		let mut sqr_sum = eps;
 		for i in in_vec {
-			let i = i.get() as f64;
+			let i = f64::from(i.get());
 			sqr_sum += i * i;
 		}
 
 		let scale = ((count as f64) / sqr_sum).sqrt();
 
 		for (o, i) in out_vec.iter().zip(in_vec) {
-			let i = i.get() as f64;
+			let i = f64::from(i.get());
 			o.set((i * scale) as f32);
 		}
 	}
 
 	fn softmax_f32(&self, offset: usize, a: &Self, a_offset: usize, count: usize) {
 		let out_vec = self.cast::<f32>(offset, count);
+
 		let in_vec = a.cast::<f32>(a_offset, count);
+		// convert to f64
+		let in_iter = in_vec.iter().map(|x| f64::from(x.get()));
+		// find max
+		let max: f64 = in_iter.clone().fold(f64::NEG_INFINITY, f64::max);
 
-		let max: f64 = in_vec.iter().map(|x| x.get()).fold(f32::NEG_INFINITY, f32::max) as f64;
-		let sum: f64 = in_vec.iter().map(|x| (x.get() as f64 - max).exp()).sum();
+		if unlikely(max == f64::NEG_INFINITY) {
+			// all values are -inf, set all to 0
+			let val = 1.0 / (count as f64);
+			for o in out_vec.iter() {
+				o.set(val as f32);
+			}
+			return;
+		}
 
-		for (o, i) in out_vec.iter().zip(in_vec) {
-			let i = i.get() as f64;
-			o.set(((i - max).exp() / sum) as f32);
+		let mut sum = 0.0;
+		for (o, val) in out_vec.iter().zip(in_iter) {
+			let val = (val - max).exp();
+			o.set(val as f32);
+			sum += val;
+		}
+
+		for o in out_vec.iter() {
+			let val = o.get() / sum as f32;
+			o.set(val);
 		}
 	}
 
@@ -146,14 +165,16 @@ impl CPUBuffer {
 		let in_vec = a.cast::<f32>(a_offset, count);
 
 		for (o, i) in out_vec.iter().zip(in_vec) {
-			let val = alpha * (o.get() as f64) + beta * (i.get() as f64);
+			let val = alpha * f64::from(o.get()) + beta * f64::from(i.get());
 			o.set(val as f32);
 		}
 	}
 
 	#[rustfmt::skip]
+	#[allow(clippy::too_many_arguments)]
 	fn gemm_f32(
-		&self, c_offset: usize, ldc: usize, // self == c
+		// self == c
+		&self, c_offset: usize, ldc: usize,
 		m: usize, n: usize, k: usize,
 		a: &Self, a_offset: usize, lda: usize, transa: bool,
 		b: &Self, b_offset: usize, ldb: usize, transb: bool,
@@ -220,8 +241,8 @@ impl Buffer for CPUBuffer {
 		}
 	}
 
-	unsafe fn rms_norm<'a>(
-		&'a self,
+	unsafe fn rms_norm(
+		&self,
 		o: BufOff<()>,
 		a: BufOff<&BufferBase>,
 		common: CommonArgs1D,
@@ -241,8 +262,8 @@ impl Buffer for CPUBuffer {
 		}
 	}
 
-	unsafe fn softmax<'a>(
-		&'a self,
+	unsafe fn softmax(
+		&self,
 		o: BufOff<()>,
 		a: BufOff<&BufferBase>,
 		common: CommonArgs1D, // rustfmt::newline
@@ -261,8 +282,8 @@ impl Buffer for CPUBuffer {
 		}
 	}
 
-	unsafe fn acc<'a>(
-		&'a self,
+	unsafe fn acc(
+		&self,
 		o: BufOff<()>,
 		a: BufOff<&BufferBase>,
 		common: CommonArgs1D,
@@ -283,13 +304,13 @@ impl Buffer for CPUBuffer {
 		}
 	}
 
-	unsafe fn acc_sum<'a>(
+	unsafe fn acc_sum(
 		&self,
-		o: BufOff<()>,
-		a: BufOff<&BufferBase>,
-		args: CommonArgs1D,
-		alpha: f64,
-		beta: f64,
+		_o: BufOff<()>,
+		_a: BufOff<&BufferBase>,
+		_args: CommonArgs1D,
+		_alpha: f64,
+		_beta: f64,
 	) {
 		todo!();
 	}

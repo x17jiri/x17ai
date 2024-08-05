@@ -458,7 +458,7 @@ impl Tensor {
 	fn __dim_to_internal(&self, dim: isize) -> usize {
 		let ndim = self.dims.len();
 		let dim = if dim >= 0 { dim as usize } else { ndim - ((-dim) as usize) };
-		if likely(dim < ndim as usize) {
+		if likely(dim < ndim) {
 			dim
 		} else {
 			panic!("dimension out of range");

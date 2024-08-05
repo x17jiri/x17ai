@@ -399,10 +399,11 @@ impl Module for Transformer {
 }
 */
 fn main() {
+	let eps = 1e-8;
 	stderrlog::new().module(module_path!()).init().unwrap();
 
 	let dev = CPUDevice::new("CPU".to_string());
-	/*
+
 	let x = Tensor::new_empty_on(&[2, 3], DType::f32(), dev.clone());
 	let y = Tensor::new_empty_on(&[3, 2], DType::f32(), dev.clone());
 
@@ -412,8 +413,8 @@ fn main() {
 	println!("x = {}", x);
 	println!("y = {}", y);
 
-	let nx = rms_norm(&x);
-	let ny = rms_norm(&y);
+	let nx = rms_norm(&x, eps);
+	let ny = rms_norm(&y, eps);
 
 	println!("rms_norm(x) = {}", nx);
 	println!("rms_norm(y) = {}", ny);
@@ -428,5 +429,4 @@ fn main() {
 	let z = mm(y.T(), x.T()).eval();
 
 	println!("z = {}", z);
-	*/
 }

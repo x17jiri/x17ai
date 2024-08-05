@@ -58,6 +58,7 @@ impl Rng {
 		}
 
 		// add original state
+		#[allow(clippy::needless_range_loop)]
 		for i in 0..STATE_WORDS {
 			result[i] = result[i].wrapping_add(self.state[i]);
 		}
@@ -65,7 +66,7 @@ impl Rng {
 		// increment counter
 		let (t, c) = self.state[12].overflowing_add(1);
 		self.state[12] = t;
-		self.state[13] = self.state[13].wrapping_add(c as u32);
+		self.state[13] = self.state[13].wrapping_add(u32::from(c));
 
 		result
 	}
@@ -103,8 +104,8 @@ impl Rng {
 
 	// generates a float in the range [0.0, 1.0) with uniform distribution
 	pub fn get_uniform(&mut self) -> f64 {
-		let lo = self.get_u32() as u64;
-		let hi = self.get_u32() as u64;
+		let lo = u64::from(self.get_u32());
+		let hi = u64::from(self.get_u32());
 		let val = (hi << 32) | lo;
 
 		(val as f64) * (1.0 / (4294967296.0 * 4294967296.0))
