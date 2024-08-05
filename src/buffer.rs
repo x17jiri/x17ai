@@ -10,39 +10,26 @@ use std::fmt;
 /// To get to the next slice, we need to add `batch_stride` to the offset.
 ///
 /// Length of the slice and size of the batch are the same for all arguments.
-/// We don't want to repeat them and so they are only passed once in `ContiguousSelfArg`.
-pub struct ContiguousArg<'a> {
-	pub buffer: &'a BufferBase,
+/// We don't want to repeat them and so they are only passed once in `SelfArg`.
+pub struct BufOff<Buf> {
+	pub buffer: Buf,
 	pub offset: usize,
 	pub batch_stride: usize,
 }
 
-/// This is similar to `ContiguousArg`, except:
-/// - the buffer is passed separately as `self`.
-/// - it contains the length of the slice and size of the batch.
-///   These values are the same for all arguments.
-pub struct ContiguousSelfArg {
-	pub offset: usize,
-	pub batch_stride: usize,
-	pub len: usize,
-	pub batch_size: usize,
+impl<Buf> BufOff<Buf> {
+	pub fn without_buf(&self) -> BufOff<()> {
+		BufOff {
+			buffer: (),
+			offset: self.offset,
+			batch_stride: self.batch_stride,
+		}
+	}
 }
 
-/// Common set of arguments for 1D operations.
-///
-/// `out` and `a` are omitted from this struct.
-///
-/// `out` is typically `self` and `a` is typically the first argument.
-#[derive(Clone, Copy)]
-pub struct OpArgs1D {
+pub struct CommonArgs1D {
 	pub dtype: DType,
-	pub out_offset: usize,
-	pub out_batch_stride: usize,
-
-	pub a_offset: usize,
-	pub a_batch_stride: usize,
-
-	pub count: usize,
+	pub len: usize,
 	pub batch_size: usize,
 }
 
@@ -50,11 +37,38 @@ pub trait Buffer {
 	fn zeros_(&self, tensor: &Tensor);
 	fn randn_(&self, tensor: &Tensor);
 
-	unsafe fn rms_norm<'a>(&self, o: ContiguousSelfArg, a: ContiguousArg<'a>, eps: f64);
+	unsafe fn rms_norm(
+		&self,
+		o: BufOff<()>,
+		a: BufOff<&BufferBase>,
+		common: CommonArgs1D,
+		eps: f64,
+	);
 
-	unsafe fn softmax<'a>(&self, o: ContiguousSelfArg, a: ContiguousArg<'a>);
+	unsafe fn softmax(
+		&self,
+		o: BufOff<()>,
+		a: BufOff<&BufferBase>,
+		common: CommonArgs1D, // rustfmt::newline
+	);
 
-	unsafe fn acc(&self, a: &BufferBase, args: OpArgs1D, alpha: f64, beta: f64);
+	unsafe fn acc(
+		&self,
+		o: BufOff<()>,
+		a: BufOff<&BufferBase>,
+		common: CommonArgs1D,
+		alpha: f64,
+		beta: f64,
+	);
+
+	unsafe fn acc_sum<'a>(
+		&self,
+		o: BufOff<()>,
+		a: BufOff<&BufferBase>,
+		common: CommonArgs1D,
+		alpha: f64,
+		beta: f64,
+	);
 
 	// All matrices are stored in row-major order.
 	// Example:

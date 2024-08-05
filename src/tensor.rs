@@ -121,7 +121,7 @@ impl OutputBuilder {
 	}
 
 	// Note: this function expects that make_buffer() has been called before.
-	pub fn make_tensor(mut self) -> Tensor {
+	pub fn make_tensor(self) -> Tensor {
 		Tensor {
 			dims: self.dims,
 			offset: 0,
@@ -283,10 +283,11 @@ impl Tensor {
 	///    self = self * alpha + b * beta
 	/// ```
 	/// This function doesn't broadcast: self.shape must be equal to b.shape
-	pub fn acc_(&self, alpha: f64, b: &Tensor, beta: f64) {
+	pub fn acc_(&self, _alpha: f64, b: &Tensor, _beta: f64) {
 		assert_compatible_types(self, b);
 		assert_compatible_devices(self, b);
-		let mut out = OutputRef::new(self);
+		//		let mut out = OutputRef::new(self);
+		// TODO
 	}
 	/*
 		/// Accumulate the result of element-wise multiplication:
@@ -610,15 +611,15 @@ fn __gemm<'a, O: OutputHandler>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64, c: &mu
 	#[rustfmt::skip]
 	batch.run(
 		c_offset, [a.tensor.offset, b.tensor.offset],
-		&|c_offset, [a_offset, b_offset], batch| {
+		&|batch: BatchRun<2>| {
 			unsafe {
 				c_buffer.gemm(
-					dtype, c_offset, ldc, batch.out_stride,
+					dtype, batch.out_offset, ldc, batch.out_stride,
 					m, n, k,
-					a_buf, a_offset, lda, transa, batch.in_strides[0],
-					b_buf, b_offset, ldb, transb, batch.in_strides[1],
+					a_buf, batch.in_offsets[0], lda, transa, batch.in_strides[0],
+					b_buf, batch.in_offsets[1], ldb, transb, batch.in_strides[1],
 					alpha, 0.0,
-					batch.size,
+					batch.batch_size,
 				);
 			}
 		},
@@ -778,7 +779,7 @@ impl<'a> MatMulBackward<'a> {
 	}
 }
 
-fn __norm<O: OutputHandler, RunOp: Fn(&dyn Buffer, ContiguousSelfArg, ContiguousArg)>(
+fn __norm<O: OutputHandler, RunOp: Fn(BufOff<&dyn Buffer>, BufOff<&BufferBase>, CommonArgs1D)>(
 	a: &Tensor,
 	out: &mut O,
 	run_op: RunOp,
@@ -786,45 +787,51 @@ fn __norm<O: OutputHandler, RunOp: Fn(&dyn Buffer, ContiguousSelfArg, Contiguous
 	let ndim = a.ndim();
 	assert!(ndim > 0);
 	let batch_ndim = ndim - 1;
+
 	// The last dimension is the one we are normalizing
 	let dim = a.dims[ndim - 1];
 	assert!(dim.stride == 1, "the normalized dimension must be contiguous");
 
-	out.init(ndim, a.dtype);
+	let dtype = a.dtype;
+	out.init(ndim, dtype);
 	let out_stride = out.prepend_dim(dim.size);
 	assert!(out_stride == 1, "the output dimension must be contiguous");
 	let batch = Batch::new(batch_ndim, [&a.dims[..batch_ndim]], out);
 	let (out_buffer, out_offset) = out.make_buffer();
 
-	batch.run(
-		out_offset,
-		[a.offset],
-		&|batch: BatchRun<1>| {
-			run_op(
-				out_buffer,
-				ContiguousSelfArg {
-					offset: batch.out_offset,
-					batch_stride: batch.out_stride,
-					len: dim.size,
-					batch_size: batch.batch_size,
-				},
-				ContiguousArg {
-					buffer: buf_to_base(a.buffer.as_ref()),
-					offset: batch.in_offsets[0],
-					batch_stride: batch.in_strides[0],
-				},
-			);
-		},
-	);
+	let a_buffer = buf_to_base(a.buffer.as_ref());
+
+	batch.run(out_offset, [a.offset], &|batch: BatchRun<1>| {
+		run_op(
+			// o:
+			BufOff {
+				buffer: out_buffer,
+				offset: batch.out_offset,
+				batch_stride: batch.out_stride,
+			},
+			// a:
+			BufOff {
+				buffer: a_buffer,
+				offset: batch.in_offsets[0],
+				batch_stride: batch.in_strides[0],
+			},
+			// common:
+			CommonArgs1D {
+				dtype,
+				len: dim.size,
+				batch_size: batch.batch_size,
+			},
+		);
+	});
 }
 
 pub fn rms_norm(a: &Tensor, eps: f64) -> Tensor {
 	let mut out = OutputBuilder::new(a.device());
 	#[rustfmt::skip] __norm(
-		a, &mut out, 
-		|self_: &dyn Buffer, o: ContiguousSelfArg, a: ContiguousArg| unsafe {
-			self_.rms_norm(o, a, eps)
-		}
+		a, &mut out,
+		|o: BufOff<&dyn Buffer>, a: BufOff<&BufferBase>, common: CommonArgs1D| unsafe {
+			o.buffer.rms_norm(o.without_buf(), a, common, eps)
+		},
 	);
 	out.make_tensor()
 }
@@ -833,9 +840,9 @@ pub fn softmax(a: &Tensor) -> Tensor {
 	let mut out = OutputBuilder::new(a.device());
 	#[rustfmt::skip] __norm(
 		a, &mut out,
-		|self_: &dyn Buffer, o: ContiguousSelfArg, a: ContiguousArg| unsafe {
-			self_.softmax(o, a)
-		}
+		|o: BufOff<&dyn Buffer>, a: BufOff<&BufferBase>, common: CommonArgs1D| unsafe {
+			o.buffer.softmax(o.without_buf(), a, common)
+		},
 	);
 	out.make_tensor()
 }

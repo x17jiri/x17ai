@@ -221,55 +221,79 @@ impl Buffer for CPUBuffer {
 	}
 
 	unsafe fn rms_norm<'a>(
-		self: SelfArg<'a, Self>,
-		a: Arg<'a>,
-		d: usize,
-		batch_size: usize,
+		&'a self,
+		o: BufOff<()>,
+		a: BufOff<&BufferBase>,
+		common: CommonArgs1D,
 		eps: f64,
 	) {
 		let out = self;
-		let a = self.cast_buffer(a);
-		for i in 0..args.batch_size {
-			let out_offset = args.out_offset + i * args.out_batch_stride;
-			let a_offset = args.a_offset + i * args.a_batch_stride;
-			match args.dtype {
+		for i in 0..common.batch_size {
+			let out_offset = o.offset + i * o.batch_stride;
+			let a_offset = a.offset + i * a.batch_stride;
+			let a = self.cast_buffer(a.buffer);
+			match common.dtype {
 				DType { kind: DTypeKind::Float, bits: 32 } => {
-					out.rms_norm_f32(out_offset, a, a_offset, args.count, eps)
+					out.rms_norm_f32(out_offset, a, a_offset, common.len, eps)
 				},
 				_ => todo!(),
 			}
 		}
 	}
 
-	unsafe fn softmax(&self, a: &BufferBase, args: OpArgs1D) {
+	unsafe fn softmax<'a>(
+		&'a self,
+		o: BufOff<()>,
+		a: BufOff<&BufferBase>,
+		common: CommonArgs1D, // rustfmt::newline
+	) {
 		let out = self;
-		let a = self.cast_buffer(a);
-		for i in 0..args.batch_size {
-			let out_offset = args.out_offset + i * args.out_batch_stride;
-			let a_offset = args.a_offset + i * args.a_batch_stride;
-			match args.dtype {
+		for i in 0..common.batch_size {
+			let out_offset = o.offset + i * o.batch_stride;
+			let a_offset = a.offset + i * a.batch_stride;
+			let a = self.cast_buffer(a.buffer);
+			match common.dtype {
 				DType { kind: DTypeKind::Float, bits: 32 } => {
-					out.softmax_f32(out_offset, a, a_offset, args.count)
+					out.softmax_f32(out_offset, a, a_offset, common.len);
 				},
 				_ => todo!(),
 			}
 		}
 	}
 
-	unsafe fn acc(&self, a: &BufferBase, args: OpArgs1D, alpha: f64, beta: f64) {
+	unsafe fn acc<'a>(
+		&'a self,
+		o: BufOff<()>,
+		a: BufOff<&BufferBase>,
+		common: CommonArgs1D,
+		alpha: f64,
+		beta: f64,
+	) {
 		let out = self;
-		let a = self.cast_buffer(a);
-		for i in 0..args.batch_size {
-			let out_offset = args.out_offset + i * args.out_batch_stride;
-			let a_offset = args.a_offset + i * args.a_batch_stride;
-			match args.dtype {
+		for i in 0..common.batch_size {
+			let out_offset = o.offset + i * o.batch_stride;
+			let a_offset = a.offset + i * a.batch_stride;
+			let a = self.cast_buffer(a.buffer);
+			match common.dtype {
 				DType { kind: DTypeKind::Float, bits: 32 } => {
-					out.acc_f32(out_offset, a, a_offset, args.count, alpha, beta)
+					out.acc_f32(out_offset, a, a_offset, common.len, alpha, beta)
 				},
 				_ => todo!(),
 			}
 		}
 	}
+
+	unsafe fn acc_sum<'a>(
+		&self,
+		o: BufOff<()>,
+		a: BufOff<&BufferBase>,
+		args: CommonArgs1D,
+		alpha: f64,
+		beta: f64,
+	) {
+		todo!();
+	}
+
 
 	#[rustfmt::skip]
 	unsafe fn gemm(

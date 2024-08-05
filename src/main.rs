@@ -9,6 +9,7 @@
 #![warn(clippy::cast_lossless)]
 #![feature(let_chains)]
 #![allow(unused_imports)] // TODO - remove when project stabilizes
+#![allow(dead_code)] // TODO - remove when project stabilizes
 #![feature(arbitrary_self_types)]
 #![feature(dispatch_from_dyn)]
 
@@ -39,7 +40,7 @@ use crate::tensor::*;
 use smallvec::{smallvec, SmallVec};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-
+/*
 // Inspired by Adam-mini: https://arxiv.org/abs/2406.16793
 pub struct AdamParam {
 	pub parts: usize,
@@ -268,7 +269,7 @@ impl Linear {
 		dx
 	}
 }
-
+*/
 /*
 struct Attention {
 	pub input_features: usize,
@@ -401,7 +402,7 @@ fn main() {
 	stderrlog::new().module(module_path!()).init().unwrap();
 
 	let dev = CPUDevice::new("CPU".to_string());
-
+	/*
 	let x = Tensor::new_empty_on(&[2, 3], DType::f32(), dev.clone());
 	let y = Tensor::new_empty_on(&[3, 2], DType::f32(), dev.clone());
 
@@ -427,4 +428,5 @@ fn main() {
 	let z = mm(y.T(), x.T()).eval();
 
 	println!("z = {}", z);
+	*/
 }
