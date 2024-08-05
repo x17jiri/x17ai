@@ -4,6 +4,30 @@
 use crate::*;
 use std::fmt;
 
+/// This struct represents a batch of contiguous slices.
+///
+/// The slices are stored in a `buffer` at given `offset`.
+/// To get to the next slice, we need to add `batch_stride` to the offset.
+///
+/// Length of the slice and size of the batch are the same for all arguments.
+/// We don't want to repeat them and so they are only passed once in `ContiguousSelfArg`.
+pub struct ContiguousArg<'a> {
+	pub buffer: &'a BufferBase,
+	pub offset: usize,
+	pub batch_stride: usize,
+}
+
+/// This is similar to `ContiguousArg`, except:
+/// - the buffer is passed separately as `self`.
+/// - it contains the length of the slice and size of the batch.
+///   These values are the same for all arguments.
+pub struct ContiguousSelfArg {
+	pub offset: usize,
+	pub batch_stride: usize,
+	pub len: usize,
+	pub batch_size: usize,
+}
+
 /// Common set of arguments for 1D operations.
 ///
 /// `out` and `a` are omitted from this struct.
@@ -26,9 +50,9 @@ pub trait Buffer {
 	fn zeros_(&self, tensor: &Tensor);
 	fn randn_(&self, tensor: &Tensor);
 
-	unsafe fn rms_norm(&self, a: &BufferBase, args: OpArgs1D, eps: f64);
+	unsafe fn rms_norm<'a>(&self, o: ContiguousSelfArg, a: ContiguousArg<'a>, eps: f64);
 
-	unsafe fn softmax(&self, a: &BufferBase, args: OpArgs1D);
+	unsafe fn softmax<'a>(&self, o: ContiguousSelfArg, a: ContiguousArg<'a>);
 
 	unsafe fn acc(&self, a: &BufferBase, args: OpArgs1D, alpha: f64, beta: f64);
 

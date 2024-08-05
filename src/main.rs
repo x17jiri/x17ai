@@ -9,6 +9,8 @@
 #![warn(clippy::cast_lossless)]
 #![feature(let_chains)]
 #![allow(unused_imports)] // TODO - remove when project stabilizes
+#![feature(arbitrary_self_types)]
+#![feature(dispatch_from_dyn)]
 
 #[cold]
 fn cold_path() {}

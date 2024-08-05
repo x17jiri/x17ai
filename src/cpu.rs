@@ -220,7 +220,13 @@ impl Buffer for CPUBuffer {
 		}
 	}
 
-	unsafe fn rms_norm(&self, a: &BufferBase, args: OpArgs1D, eps: f64) {
+	unsafe fn rms_norm<'a>(
+		self: SelfArg<'a, Self>,
+		a: Arg<'a>,
+		d: usize,
+		batch_size: usize,
+		eps: f64,
+	) {
 		let out = self;
 		let a = self.cast_buffer(a);
 		for i in 0..args.batch_size {

@@ -778,36 +778,40 @@ impl<'a> MatMulBackward<'a> {
 	}
 }
 
-fn __norm<O: OutputHandler, RunOp: Fn(&dyn Buffer, &BufferBase, OpArgs1D)>(
+fn __norm<O: OutputHandler, RunOp: Fn(&dyn Buffer, ContiguousSelfArg, ContiguousArg)>(
 	a: &Tensor,
 	out: &mut O,
 	run_op: RunOp,
 ) {
-	assert!(a.ndim() > 0);
 	let ndim = a.ndim();
+	assert!(ndim > 0);
 	let batch_ndim = ndim - 1;
-	let dim_size = a.dims[ndim - 1].size;
+	// The last dimension is the one we are normalizing
+	let dim = a.dims[ndim - 1];
+	assert!(dim.stride == 1, "the normalized dimension must be contiguous");
 
-	out.init(batch_ndim, a.dtype);
+	out.init(ndim, a.dtype);
+	let out_stride = out.prepend_dim(dim.size);
+	assert!(out_stride == 1, "the output dimension must be contiguous");
 	let batch = Batch::new(batch_ndim, [&a.dims[..batch_ndim]], out);
 	let (out_buffer, out_offset) = out.make_buffer();
 
 	batch.run(
-		// rustfmt::newline
 		out_offset,
 		[a.offset],
-		&|out_offset, [a_offset], batch| {
-			f(
+		&|batch: BatchRun<1>| {
+			run_op(
 				out_buffer,
-				buf_to_base(a.buffer.as_ref()),
-				OpArgs1D {
-					dtype: a.dtype,
-					out_offset,
-					out_batch_stride: batch.out_stride,
-					a_offset,
-					a_batch_stride: batch.in_strides[0],
-					count: dim_size,
-					batch_size: batch.size,
+				ContiguousSelfArg {
+					offset: batch.out_offset,
+					batch_stride: batch.out_stride,
+					len: dim.size,
+					batch_size: batch.batch_size,
+				},
+				ContiguousArg {
+					buffer: buf_to_base(a.buffer.as_ref()),
+					offset: batch.in_offsets[0],
+					batch_stride: batch.in_strides[0],
 				},
 			);
 		},
@@ -817,8 +821,10 @@ fn __norm<O: OutputHandler, RunOp: Fn(&dyn Buffer, &BufferBase, OpArgs1D)>(
 pub fn rms_norm(a: &Tensor, eps: f64) -> Tensor {
 	let mut out = OutputBuilder::new(a.device());
 	#[rustfmt::skip] __norm(
-		a, &mut out,
-		|o: &dyn Buffer, a: &BufferBase, args: OpArgs1D| unsafe { o.rms_norm(a, args, eps) },
+		a, &mut out, 
+		|self_: &dyn Buffer, o: ContiguousSelfArg, a: ContiguousArg| unsafe {
+			self_.rms_norm(o, a, eps)
+		}
 	);
 	out.make_tensor()
 }
@@ -827,7 +833,9 @@ pub fn softmax(a: &Tensor) -> Tensor {
 	let mut out = OutputBuilder::new(a.device());
 	#[rustfmt::skip] __norm(
 		a, &mut out,
-		|o: &dyn Buffer, a: &BufferBase, args: OpArgs1D| unsafe { o.softmax(a, args) },
+		|self_: &dyn Buffer, o: ContiguousSelfArg, a: ContiguousArg| unsafe {
+			self_.softmax(o, a)
+		}
 	);
 	out.make_tensor()
 }
@@ -872,6 +880,14 @@ impl fmt::Display for Tensor {
 }
 
 //--------------------------------------------------------------------------------------------------
+
+pub struct BatchRun<const N: usize> {
+	pub out_offset: usize,
+	pub out_stride: usize,
+	pub in_offsets: [usize; N],
+	pub in_strides: [usize; N],
+	pub batch_size: usize,
+}
 
 #[derive(Clone, Copy)]
 pub struct BatchDim<const N: usize> {
@@ -978,7 +994,7 @@ impl<const N: usize> Batch<N> {
 		}
 	}
 
-	fn __run<F: Fn(usize, [usize; N], BatchDim<N>)>(
+	fn __run<F: Fn(BatchRun<N>)>(
 		&self,
 		out_offset: usize,
 		in_offsets: [usize; N],
@@ -989,7 +1005,13 @@ impl<const N: usize> Batch<N> {
 		let batch_dim = unsafe { batch.get_unchecked(batch.len() - 1) };
 		let batch = &batch[..batch.len() - 1];
 		if batch.is_empty() {
-			f(out_offset, in_offsets, *batch_dim);
+			f(BatchRun {
+				out_offset,
+				out_stride: batch_dim.out_stride,
+				in_offsets,
+				in_strides: batch_dim.in_strides,
+				batch_size: batch_dim.size,
+			});
 		} else {
 			for i in 0..batch_dim.size {
 				let out_offset = out_offset + i * batch_dim.out_stride;
@@ -1002,23 +1024,15 @@ impl<const N: usize> Batch<N> {
 		}
 	}
 
-	// f = fn(out_offset: usize, in_offsets: [usize; N], batch_dim: BatchDim<N>)
-	pub fn run<F: Fn(usize, [usize; N], BatchDim<N>)>(
-		&self,
-		out_offset: usize,
-		in_offsets: [usize; N],
-		f: &F,
-	) {
+	pub fn run<F: Fn(BatchRun<N>)>(&self, out_offset: usize, in_offsets: [usize; N], f: &F) {
 		if self.rev_dims.is_empty() {
-			f(
+			f(BatchRun {
 				out_offset,
+				out_stride: 0,
 				in_offsets,
-				BatchDim {
-					size: 1,
-					out_stride: 0,
-					in_strides: [0; N],
-				},
-			);
+				in_strides: [0; N],
+				batch_size: 1,
+			});
 		} else {
 			self.__run(out_offset, in_offsets, f, &self.rev_dims);
 		}
