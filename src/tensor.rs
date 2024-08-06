@@ -280,7 +280,7 @@ impl Tensor {
 
 	/// Accumulate:
 	/// ```
-	///    self = self * alpha + b * beta
+	///    self = alpha * self + beta * b
 	/// ```
 	/// This function doesn't broadcast: self.shape must be equal to b.shape
 	pub fn acc_(&self, _alpha: f64, b: &Tensor, _beta: f64) {
@@ -290,28 +290,30 @@ impl Tensor {
 		// TODO
 	}
 	/*
-		/// Accumulate the result of element-wise multiplication:
-		/// ```
-		///     self = alpha * self + beta * (b * c)
-		/// ```
-		/// This function may broadcast b and c to match the shape of self.
-		pub fn acc_mul_(&self, alpha: f64, beta: f64, b: &Tensor, c: &Tensor) {
-			assert_compatible_types(self, b);
-			assert_compatible_devices(self, b);
-		}
+	/// Accumulate the result of element-wise multiplication:
+	/// ```
+	///     self = alpha * self + beta * (b * c)
+	/// ```
+	/// This function may broadcast b and c to match the shape of self.
+	pub fn acc_mul_(&self, alpha: f64, beta: f64, b: &Tensor, c: &Tensor) {
+		assert_compatible_types(self, b);
+		assert_compatible_devices(self, b);
+	}
+	*/
 
-		/// Accumulate the result of sum:
-		/// ```
-		///    self = alpha * self + beta * b.sum(keepdim)
-		/// ```
-		/// This function doesn't broadcast.
-		/// The shape of b after the sum must be equal to the shape of self.
-		pub fn acc_sum_(&self, alpha: f64, beta: f64, b: &Tensor, keepdim: bool) {
-			assert_compatible_types(self, other);
-			assert_compatible_devices(self, other);
-			// TODO
-		}
+	/// Accumulate the result of sum:
+	/// ```
+	///    self = alpha * self + beta * b.sum(keepdim)
+	/// ```
+	/// This function doesn't broadcast.
+	/// The shape of b after the sum must be equal to the shape of self.
+	pub fn acc_sum_(&self, alpha: f64, beta: f64, b: &Tensor, keepdim: bool) {
+		assert_compatible_types(self, other);
+		assert_compatible_devices(self, other);
+		// TODO
+	}
 
+	/*
 		/// Accumulate the result of mean:
 		/// ```
 		///   self = alpha * self + beta * b.mean(keepdim)

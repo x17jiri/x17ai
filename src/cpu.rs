@@ -170,6 +170,28 @@ impl CPUBuffer {
 		}
 	}
 
+	fn acc_sum_f32(
+		&self,
+		offset: usize,
+		a: &Self,
+		a_offset: usize,
+		count: usize,
+		alpha: f64,
+		beta: f64,
+	) {
+		let in_vec = a.cast::<f32>(a_offset, count);
+
+		let mut sum = 0.0;
+		for i in in_vec {
+			sum += f64::from(i.get());
+		}
+
+		let out_vec = self.cast::<f32>(offset, 1);
+		let o = &out_vec[0];
+		let val = alpha * f64::from(o.get()) + beta * sum;
+		o.set(val as f32);
+	}
+
 	#[rustfmt::skip]
 	#[allow(clippy::too_many_arguments)]
 	fn gemm_f32(
@@ -306,13 +328,24 @@ impl Buffer for CPUBuffer {
 
 	unsafe fn acc_sum(
 		&self,
-		_o: BufOff<()>,
-		_a: BufOff<&BufferBase>,
-		_args: CommonArgs1D,
-		_alpha: f64,
-		_beta: f64,
+		o: BufOff<()>,
+		a: BufOff<&BufferBase>,
+		common: CommonArgs1D,
+		alpha: f64,
+		beta: f64,
 	) {
-		todo!();
+		let out = self;
+		for i in 0..common.batch_size {
+			let out_offset = o.offset + i * o.batch_stride;
+			let a_offset = a.offset + i * a.batch_stride;
+			let a = self.cast_buffer(a.buffer);
+			match common.dtype {
+				DType { kind: DTypeKind::Float, bits: 32 } => {
+					out.acc_sum_f32(out_offset, a, a_offset, common.len, alpha, beta)
+				},
+				_ => todo!(),
+			}
+		}
 	}
 
 
