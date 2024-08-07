@@ -135,8 +135,8 @@ impl OutputBuilder {
 impl OutputHandler for OutputBuilder {
 	fn init(&mut self, ndim: usize, dtype: DType) {
 		self.dims = SmallVec::with_capacity(ndim);
-		self.dtype = dtype;
 		unsafe { self.dims.set_len(ndim) };
+		self.dtype = dtype;
 		self.remaining_dims = ndim;
 		self.elems = 1;
 		self.nonzero_elems = 1;
@@ -266,29 +266,6 @@ impl Tensor {
 		buf_to_base(self.buffer.as_ref()).device.clone()
 	}
 
-	/// Fill the tensor with zeros.
-	pub fn zeros_(&self) {
-		self.buffer.zeros_(self);
-	}
-
-	/// Fill the tensor with random values from a normal distribution.
-	///
-	///     mean = 0, var = 1
-	pub fn randn_(&self) {
-		self.buffer.randn_(self);
-	}
-
-	/// Accumulate:
-	/// ```
-	///    self = alpha * self + beta * b
-	/// ```
-	/// This function doesn't broadcast: self.shape must be equal to b.shape
-	pub fn acc_(&self, _alpha: f64, b: &Tensor, _beta: f64) {
-		assert_compatible_types(self, b);
-		assert_compatible_devices(self, b);
-		//		let mut out = OutputRef::new(self);
-		// TODO
-	}
 	/*
 	/// Accumulate the result of element-wise multiplication:
 	/// ```
@@ -521,6 +498,40 @@ impl Tensor {
 			cols: SizeAndStride { size: 1, stride: 1 },
 		}
 	}
+}
+
+/// Fill the tensor with zeros.
+pub fn zeros_(tensor: &Tensor) {
+	tensor.buffer.zeros_(tensor);
+}
+
+/// Fill the tensor with random values from a normal distribution.
+///
+///     mean = 0, var = 1
+pub fn randn_(tensor: &Tensor) {
+	tensor.buffer.randn_(tensor);
+}
+
+/// Accumulate:
+/// ```
+///    a = alpha * a + beta * b
+/// ```
+/// `b` is broadcasted to match the shape of `a`.
+pub fn acc_(alpha: f64, a: &Tensor, beta: f64, b: &Tensor) {
+	assert_compatible_types(a, b);
+	assert_compatible_devices(a, b);
+
+	let mut out = OutputRef::new(a);
+
+	let ndim = a.ndim();
+	let dtype = a.dtype;
+	out.init(ndim, dtype);
+	let batch = Batch::new(ndim, [&b.dims], &mut out);
+
+	let (a_buffer, a_offset) = out.make_buffer();
+
+	//		let mut out = OutputRef::new(self);
+	// TODO
 }
 
 pub fn assert_compatible_types(a: &Tensor, b: &Tensor) {
