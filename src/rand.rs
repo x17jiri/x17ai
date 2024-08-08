@@ -91,7 +91,7 @@ impl Rng {
 		state[b] = state[b].rotate_left(7);
 	}
 
-	// generates a random u32 with uniform distribution
+	/// Generates a random u32 with uniform distribution
 	pub fn get_u32(&mut self) -> u32 {
 		if self.pos == 0 {
 			self.block = self.get_block();
@@ -102,7 +102,7 @@ impl Rng {
 		self.block[self.pos]
 	}
 
-	// generates a float in the range [0.0, 1.0) with uniform distribution
+	/// Generates a float in the range [0.0, 1.0) with uniform distribution
 	pub fn get_uniform(&mut self) -> f64 {
 		let lo = u64::from(self.get_u32());
 		let hi = u64::from(self.get_u32());
@@ -111,8 +111,8 @@ impl Rng {
 		(val as f64) * (1.0 / (4294967296.0 * 4294967296.0))
 	}
 
-	// generates a float with normal distribution with mean 0 and variance 1
-	// The generated values are guaranteed to be in the range (-10.0, 10.0)
+	/// Generates a float with normal distribution with mean 0 and variance 1.
+	/// The generated values are guaranteed to be in the range (-10.0, 10.0)
 	pub fn get_normal(&mut self) -> f64 {
 		let x = 1.0 - self.get_uniform(); // (0.0, 1.0]
 		let y = self.get_uniform(); // [0.0, 1.0)
