@@ -266,86 +266,6 @@ impl Tensor {
 		buf_to_base(self.buffer.as_ref()).device.clone()
 	}
 
-	/*
-	/// Accumulate the result of element-wise multiplication:
-	/// ```
-	///     self = alpha * self + beta * (b * c)
-	/// ```
-	/// This function may broadcast b and c to match the shape of self.
-	pub fn acc_mul_(&self, alpha: f64, beta: f64, b: &Tensor, c: &Tensor) {
-		assert_compatible_types(self, b);
-		assert_compatible_devices(self, b);
-	}
-	*/
-
-	/// Accumulate the result of sum:
-	/// ```
-	///    self = alpha * self + beta * b.sum(keepdim)
-	/// ```
-	/// This function doesn't broadcast.
-	/// The shape of b after the sum must be equal to the shape of self.
-	pub fn acc_sum_(&self, alpha: f64, beta: f64, b: &Tensor, keepdim: bool) {
-		assert_compatible_types(self, other);
-		assert_compatible_devices(self, other);
-		// TODO
-	}
-
-	/*
-		/// Accumulate the result of mean:
-		/// ```
-		///   self = alpha * self + beta * b.mean(keepdim)
-		/// ```
-		/// This function doesn't broadcast.
-		/// The shape of b after the sum must be equal to the shape of self.
-		pub fn acc_mean_(&self, alpha: f64, beta: f64, b: &Tensor, keepdim: bool) {
-			// We can convert this to `acc_sum_()` because `mean = sum / n`
-			let n = b.size(-1) as f64;
-			self.acc_sum_(alpha, beta / n, b, keepdim);
-		}
-
-		/// Calculate `x^2`:
-		/// ```
-		///    result = self * self
-		/// ```
-		pub fn square(&self) -> Tensor {
-			let mut out = self.new_empty_like();
-			self.buffer.square(&mut out, self);
-			out
-		}
-
-		/// reciprocal of the square root:
-		/// ```
-		///     result = 1.0 / (self.sqrt() + eps)
-		/// ```
-		pub fn rsqrt(&self, eps: f64) -> Tensor {
-			let mut out = self.new_empty_like();
-			self.buffer.rsqrt(&mut out, self, eps);
-			out
-		}
-
-		pub fn rsqrt_into(&self, eps: f64, into: &Tensor) {
-			assert_compatible_types(self, into);
-			assert_compatible_devices(self, into);
-			//self.buffer.rsqrt(into, self, eps);
-		}
-
-		/// Calculate the mean of the last dimension.
-		///
-		/// If keepdim is true, the last dimension is kept in the result with size 1.
-		///
-		/// If keepdim is false, the last dimension is removed from the result.
-		pub fn mean(&self, keepdim: bool) -> Tensor {
-			let mut out = self.new_empty_like();
-			//self.buffer.mean(&mut out, self, keepdim);
-			//out
-		}
-
-		pub fn mean_into(&self, keepdim: bool, into: &Tensor) {
-			assert_compatible_types(self, into);
-			assert_compatible_devices(self, into);
-			//self.buffer.mean(into, self, keepdim);
-		}
-	*/
 	pub fn shape(&self) -> ShapeView {
 		ShapeView { dims: &self.dims }
 	}
@@ -391,12 +311,15 @@ impl Tensor {
 			merged.prepend_dim(dim.size, elems, [dim.stride]);
 			elems *= dim.size;
 		}
-		merged.ensure_nonzero_ndim();
 		let mut merged = merged.rev_dims.iter();
 
-		let merged_dim = merged.next().unwrap();
-		let mut prev_stride = merged_dim.in_strides[0];
-		let mut target_stride = merged_dim.size * merged_dim.in_strides[0];
+		let (mut prev_stride, mut target_stride) = // rustfmt::newline
+			if let Some(merged_dim) = merged.next() {
+				(merged_dim.in_strides[0], merged_dim.size * merged_dim.in_strides[0])
+			} else {
+				cold_path();
+				(1, 1)
+			};
 
 		unsafe { self.dims.set_len(ndim - n) };
 		self.dims.reserve(new_shape.len());
@@ -500,6 +423,17 @@ impl Tensor {
 	}
 }
 
+pub fn assert_compatible_types(a: &Tensor, b: &Tensor) {
+	assert!(a.dtype == b.dtype, "incompatible dtypes");
+}
+
+pub fn assert_compatible_devices(a: &Tensor, b: &Tensor) {
+	assert!(
+		are_bufs_on_the_same_device(a.buffer.as_ref(), b.buffer.as_ref()),
+		"incompatible devices"
+	);
+}
+
 /// Fill the tensor with zeros.
 pub fn zeros_(tensor: &Tensor) {
 	tensor.buffer.zeros_(tensor);
@@ -514,10 +448,10 @@ pub fn randn_(tensor: &Tensor) {
 
 /// Accumulate:
 /// ```
-///    a = alpha * a + beta * b
+///    a = a * alpha + b * beta
 /// ```
 /// `b` is broadcasted to match the shape of `a`.
-pub fn acc_(alpha: f64, a: &Tensor, beta: f64, b: &Tensor) {
+pub fn acc_(a: &Tensor, alpha: f64, b: &Tensor, beta: f64) {
 	assert_compatible_types(a, b);
 	assert_compatible_devices(a, b);
 
@@ -526,24 +460,163 @@ pub fn acc_(alpha: f64, a: &Tensor, beta: f64, b: &Tensor) {
 	let ndim = a.ndim();
 	let dtype = a.dtype;
 	out.init(ndim, dtype);
-	let batch = Batch::new(ndim, [&b.dims], &mut out);
+	let mut batch = Batch::new(ndim, [&b.dims], &mut out);
 
 	let (a_buffer, a_offset) = out.make_buffer();
 
-	//		let mut out = OutputRef::new(self);
-	// TODO
+	let op_dim = batch.pop_dim();
+	assert!(op_dim.out_stride == 1);
+	assert!(op_dim.in_strides[0] == 1);
+
+	let b_buffer = buf_to_base(b.buffer.as_ref());
+
+	batch.run(a_offset, [b.offset], &|batch: BatchRun<1>| unsafe {
+		a_buffer.acc(
+			BufOff {
+				buffer: (),
+				offset: batch.out_offset,
+				batch_stride: batch.out_stride,
+			},
+			BufOff {
+				buffer: b_buffer,
+				offset: batch.in_offsets[0],
+				batch_stride: batch.in_strides[0],
+			},
+			CommonArgs1D {
+				dtype,
+				len: op_dim.size,
+				batch_size: batch.batch_size,
+			},
+			alpha,
+			beta,
+		);
+	});
 }
 
-pub fn assert_compatible_types(a: &Tensor, b: &Tensor) {
-	assert!(a.dtype == b.dtype, "incompatible dtypes");
+/// Accumulate the result of element-wise multiplication:
+/// ```
+///     a = a * alpha + (b * c) * beta
+/// ```
+/// This function may broadcast b and c to match the shape of self.
+pub fn acc_mul_(a: &Tensor, alpha: f64, beta: f64, b: &Tensor, c: &Tensor) {
+	assert_compatible_types(a, b);
+	assert_compatible_types(a, c);
+	assert_compatible_devices(a, b);
+	assert_compatible_devices(a, c);
+
+	let mut out = OutputRef::new(a);
+
+	let ndim = a.ndim();
+	let dtype = a.dtype;
+	out.init(ndim, dtype);
+	let mut batch = Batch::new(ndim, [&b.dims, &c.dims], &mut out);
+
+	let (a_buffer, a_offset) = out.make_buffer();
+
+	let op_dim = batch.pop_dim();
+	assert!(op_dim.out_stride == 1);
+	assert!(op_dim.in_strides[0] == 1);
+	assert!(op_dim.in_strides[1] == 1);
+
+	let b_buffer = buf_to_base(b.buffer.as_ref());
+	let c_buffer = buf_to_base(c.buffer.as_ref());
+
+	batch.run(a_offset, [b.offset, c.offset], &|batch: BatchRun<2>| unsafe {
+		a_buffer.acc_mul(
+			BufOff {
+				buffer: (),
+				offset: batch.out_offset,
+				batch_stride: batch.out_stride,
+			},
+			BufOff {
+				buffer: b_buffer,
+				offset: batch.in_offsets[0],
+				batch_stride: batch.in_strides[0],
+			},
+			BufOff {
+				buffer: c_buffer,
+				offset: batch.in_offsets[1],
+				batch_stride: batch.in_strides[1],
+			},
+			CommonArgs1D {
+				dtype,
+				len: op_dim.size,
+				batch_size: batch.batch_size,
+			},
+			alpha,
+			beta,
+		);
+	});
 }
 
-pub fn assert_compatible_devices(a: &Tensor, b: &Tensor) {
-	assert!(
-		are_bufs_on_the_same_device(a.buffer.as_ref(), b.buffer.as_ref()),
-		"incompatible devices"
-	);
+/// Accumulate the result of sum:
+/// ```
+///    a = a * alpha + b.sum(keepdim) * beta
+/// ```
+/// This function doesn't broadcast.
+/// The shape of b after the sum must be equal to the shape of self.
+pub fn acc_sum_(a: &Tensor, alpha: f64, b: &Tensor, keepdim: bool, beta: f64) {
+	assert_compatible_types(a, b);
+	assert_compatible_devices(a, b);
+	todo!()
 }
+
+/// Accumulate the result of mean:
+/// ```
+///   a = a * alpha + b.mean(keepdim) * beta
+/// ```
+/// This function doesn't broadcast.
+/// The shape of b after the sum must be equal to the shape of self.
+pub fn acc_mean_(a: &Tensor, alpha: f64, b: &Tensor, keepdim: bool, beta: f64) {
+	// We can convert this to `acc_sum_()` because `mean = sum / n`
+	let n = b.size(-1) as f64;
+	acc_sum_(a, alpha, b, keepdim, beta / n);
+}
+
+/*
+	/// Calculate `x^2`:
+	/// ```
+	///    result = self * self
+	/// ```
+	pub fn square(&self) -> Tensor {
+		let mut out = self.new_empty_like();
+		self.buffer.square(&mut out, self);
+		out
+	}
+
+	/// reciprocal of the square root:
+	/// ```
+	///     result = 1.0 / (self.sqrt() + eps)
+	/// ```
+	pub fn rsqrt(&self, eps: f64) -> Tensor {
+		let mut out = self.new_empty_like();
+		self.buffer.rsqrt(&mut out, self, eps);
+		out
+	}
+
+	pub fn rsqrt_into(&self, eps: f64, into: &Tensor) {
+		assert_compatible_types(self, into);
+		assert_compatible_devices(self, into);
+		//self.buffer.rsqrt(into, self, eps);
+	}
+
+	/// Calculate the mean of the last dimension.
+	///
+	/// If keepdim is true, the last dimension is kept in the result with size 1.
+	///
+	/// If keepdim is false, the last dimension is removed from the result.
+	pub fn mean(&self, keepdim: bool) -> Tensor {
+		let mut out = self.new_empty_like();
+		//self.buffer.mean(&mut out, self, keepdim);
+		//out
+	}
+
+	pub fn mean_into(&self, keepdim: bool, into: &Tensor) {
+		assert_compatible_types(self, into);
+		assert_compatible_devices(self, into);
+		//self.buffer.mean(into, self, keepdim);
+	}
+*/
 
 // c = a * b * alpha
 fn __gemm<'a, O: OutputHandler>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64, c: &mut O) {
@@ -775,9 +848,7 @@ pub struct MatMulBackward<'a> {
 // `da` can only be calculated if we have `b`,
 // and `db` if we have `a`.
 pub fn mm_backward<'a>(
-	a: Option<Matrix<'a>>,
-	b: Option<Matrix<'a>>,
-	dy: Matrix<'a>,
+	a: Option<Matrix<'a>>, b: Option<Matrix<'a>>, dy: Matrix<'a>,
 ) -> MatMulBackward<'a> {
 	MatMulBackward { a, b, dy }
 }
@@ -793,9 +864,7 @@ impl<'a> MatMulBackward<'a> {
 }
 
 fn __norm<O: OutputHandler, RunOp: Fn(BufOff<&dyn Buffer>, BufOff<&BufferBase>, CommonArgs1D)>(
-	a: &Tensor,
-	out: &mut O,
-	run_op: RunOp,
+	a: &Tensor, out: &mut O, run_op: RunOp,
 ) {
 	let ndim = a.ndim();
 	assert!(ndim > 0);
@@ -921,13 +990,13 @@ pub struct Batch<const N: usize> {
 	// dims in batch are in reverse order
 	// in other words, from smallest to largest stride
 	pub rev_dims: SmallVec<[BatchDim<N>; INLINE_DIMS]>,
+
+	pub popped_dims: usize,
 }
 
 impl<const N: usize> Batch<N> {
 	pub fn new<L: OutputHandler>(
-		ndim: usize,
-		inputs: [&[SizeAndStride]; N],
-		out_layout: &mut L,
+		ndim: usize, inputs: [&[SizeAndStride]; N], out_layout: &mut L,
 	) -> Batch<N> {
 		assert!(N > 0);
 
@@ -972,10 +1041,13 @@ impl<const N: usize> Batch<N> {
 	}
 
 	pub fn new_empty(ndim: usize) -> Batch<N> {
-		Batch { rev_dims: SmallVec::with_capacity(ndim) }
+		Batch {
+			rev_dims: SmallVec::with_capacity(ndim),
+			popped_dims: 0,
+		}
 	}
 
-	// dimensions should be pushed in the order of increasing strides
+	// dimensions should be prepended in the order of increasing strides
 	pub fn prepend_dim(&mut self, size: usize, out_stride: usize, in_strides: [usize; N]) {
 		if size == 1 {
 			return;
@@ -1004,22 +1076,22 @@ impl<const N: usize> Batch<N> {
 		self.rev_dims.push(BatchDim { size, out_stride, in_strides });
 	}
 
-	pub fn ensure_nonzero_ndim(&mut self) {
-		if unlikely(self.rev_dims.is_empty()) {
-			self.rev_dims.push(BatchDim {
+	pub fn pop_dim(&mut self) -> BatchDim<N> {
+		if likely(self.rev_dims.len() > self.popped_dims) {
+			let result = self.rev_dims[self.popped_dims];
+			self.popped_dims += 1;
+			result
+		} else {
+			BatchDim {
 				size: 1,
-				out_stride: 1,
-				in_strides: [1; N],
-			});
+				out_stride: 0,
+				in_strides: [0; N],
+			}
 		}
 	}
 
 	fn __run<F: Fn(BatchRun<N>)>(
-		&self,
-		out_offset: usize,
-		in_offsets: [usize; N],
-		f: &F,
-		batch: &[BatchDim<N>],
+		&self, out_offset: usize, in_offsets: [usize; N], f: &F, batch: &[BatchDim<N>],
 	) {
 		debug_assert!(!batch.is_empty());
 		let batch_dim = unsafe { batch.get_unchecked(batch.len() - 1) };
@@ -1045,7 +1117,7 @@ impl<const N: usize> Batch<N> {
 	}
 
 	pub fn run<F: Fn(BatchRun<N>)>(&self, out_offset: usize, in_offsets: [usize; N], f: &F) {
-		if self.rev_dims.is_empty() {
+		if self.rev_dims.len() <= self.popped_dims {
 			f(BatchRun {
 				out_offset,
 				out_stride: 0,
@@ -1054,7 +1126,7 @@ impl<const N: usize> Batch<N> {
 				batch_size: 1,
 			});
 		} else {
-			self.__run(out_offset, in_offsets, f, &self.rev_dims);
+			self.__run(out_offset, in_offsets, f, &self.rev_dims[self.popped_dims..]);
 		}
 	}
 }

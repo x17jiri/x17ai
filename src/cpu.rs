@@ -153,16 +153,10 @@ impl CPUBuffer {
 	}
 
 	fn acc_f32(
-		&self,
-		offset: usize,
-		a: &Self,
-		a_offset: usize,
-		count: usize,
-		alpha: f64,
-		beta: f64,
+		&self, offset: usize, b: &Self, b_offset: usize, count: usize, alpha: f64, beta: f64,
 	) {
 		let out_vec = self.cast::<f32>(offset, count);
-		let in_vec = a.cast::<f32>(a_offset, count);
+		let in_vec = b.cast::<f32>(b_offset, count);
 
 		for (o, i) in out_vec.iter().zip(in_vec) {
 			let val = alpha * f64::from(o.get()) + beta * f64::from(i.get());
@@ -170,16 +164,24 @@ impl CPUBuffer {
 		}
 	}
 
-	fn acc_sum_f32(
-		&self,
-		offset: usize,
-		a: &Self,
-		a_offset: usize,
-		count: usize,
-		alpha: f64,
-		beta: f64,
+	fn acc_mul_f32(
+		&self, offset: usize, b: &Self, b_offset: usize, c: &Self, c_offset: usize, count: usize,
+		alpha: f64, beta: f64,
 	) {
-		let in_vec = a.cast::<f32>(a_offset, count);
+		let out_vec = self.cast::<f32>(offset, count);
+		let b_vec = b.cast::<f32>(b_offset, count);
+		let c_vec = c.cast::<f32>(c_offset, count);
+
+		for ((o, b), c) in out_vec.iter().zip(b_vec).zip(c_vec) {
+			let val = alpha * f64::from(o.get()) + beta * f64::from(b.get()) * f64::from(c.get());
+			o.set(val as f32);
+		}
+	}
+
+	fn acc_sum_f32(
+		&self, offset: usize, b: &Self, b_offset: usize, count: usize, alpha: f64, beta: f64,
+	) {
+		let in_vec = b.cast::<f32>(b_offset, count);
 
 		let mut sum = 0.0;
 		for i in in_vec {
@@ -223,11 +225,7 @@ impl CPUBuffer {
 	}
 
 	fn format_f32(
-		&self,
-		offset: usize,
-		f: &mut fmt::Formatter,
-		count: usize,
-		stride: usize,
+		&self, offset: usize, f: &mut fmt::Formatter, count: usize, stride: usize,
 	) -> fmt::Result {
 		for i in 0..count {
 			if i != 0 {
@@ -264,11 +262,7 @@ impl Buffer for CPUBuffer {
 	}
 
 	unsafe fn rms_norm(
-		&self,
-		o: BufOff<()>,
-		a: BufOff<&BufferBase>,
-		common: CommonArgs1D,
-		eps: f64,
+		&self, o: BufOff<()>, a: BufOff<&BufferBase>, common: CommonArgs1D, eps: f64,
 	) {
 		let out = self;
 		for i in 0..common.batch_size {
@@ -305,21 +299,35 @@ impl Buffer for CPUBuffer {
 	}
 
 	unsafe fn acc(
-		&self,
-		o: BufOff<()>,
-		a: BufOff<&BufferBase>,
-		common: CommonArgs1D,
-		alpha: f64,
-		beta: f64,
+		&self, a: BufOff<()>, b: BufOff<&BufferBase>, common: CommonArgs1D, alpha: f64, beta: f64,
 	) {
-		let out = self;
+		let b_buffer = self.cast_buffer(b.buffer);
 		for i in 0..common.batch_size {
-			let out_offset = o.offset + i * o.batch_stride;
 			let a_offset = a.offset + i * a.batch_stride;
-			let a = self.cast_buffer(a.buffer);
+			let b_offset = b.offset + i * b.batch_stride;
 			match common.dtype {
 				DType { kind: DTypeKind::Float, bits: 32 } => {
-					out.acc_f32(out_offset, a, a_offset, common.len, alpha, beta)
+					self.acc_f32(a_offset, b_buffer, b_offset, common.len, alpha, beta)
+				},
+				_ => todo!(),
+			}
+		}
+	}
+
+	unsafe fn acc_mul(
+		&self, a: BufOff<()>, b: BufOff<&BufferBase>, c: BufOff<&BufferBase>, common: CommonArgs1D,
+		alpha: f64, beta: f64,
+	) {
+		let b_buffer = self.cast_buffer(b.buffer);
+		let c_buffer = self.cast_buffer(c.buffer);
+		for i in 0..common.batch_size {
+			let a_offset = a.offset + i * a.batch_stride;
+			let b_offset = b.offset + i * b.batch_stride;
+			let c_offset = c.offset + i * c.batch_stride;
+			match common.dtype {
+				DType { kind: DTypeKind::Float, bits: 32 } => {
+					self.acc_f32(a_offset, b_buffer, b_offset, common.len, alpha, beta);
+					self.acc_f32(a_offset, c_buffer, c_offset, common.len, alpha, 1.0);
 				},
 				_ => todo!(),
 			}
@@ -327,27 +335,20 @@ impl Buffer for CPUBuffer {
 	}
 
 	unsafe fn acc_sum(
-		&self,
-		o: BufOff<()>,
-		a: BufOff<&BufferBase>,
-		common: CommonArgs1D,
-		alpha: f64,
-		beta: f64,
+		&self, a: BufOff<()>, b: BufOff<&BufferBase>, common: CommonArgs1D, alpha: f64, beta: f64,
 	) {
-		let out = self;
+		let b_buffer = self.cast_buffer(b.buffer);
 		for i in 0..common.batch_size {
-			let out_offset = o.offset + i * o.batch_stride;
 			let a_offset = a.offset + i * a.batch_stride;
-			let a = self.cast_buffer(a.buffer);
+			let b_offset = b.offset + i * b.batch_stride;
 			match common.dtype {
 				DType { kind: DTypeKind::Float, bits: 32 } => {
-					out.acc_sum_f32(out_offset, a, a_offset, common.len, alpha, beta)
+					self.acc_sum_f32(a_offset, b_buffer, b_offset, common.len, alpha, beta)
 				},
 				_ => todo!(),
 			}
 		}
 	}
-
 
 	#[rustfmt::skip]
 	unsafe fn gemm(
@@ -381,12 +382,7 @@ impl Buffer for CPUBuffer {
 	}
 
 	unsafe fn format(
-		&self,
-		f: &mut fmt::Formatter,
-		dtype: DType,
-		offset: usize,
-		count: usize,
-		stride: usize,
+		&self, f: &mut fmt::Formatter, dtype: DType, offset: usize, count: usize, stride: usize,
 	) -> fmt::Result {
 		match dtype {
 			DType { kind: DTypeKind::Float, bits: 32 } => self.format_f32(offset, f, count, stride),

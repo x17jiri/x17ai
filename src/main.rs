@@ -407,8 +407,8 @@ fn main() {
 	let x = Tensor::new_empty_on(&[2, 3], DType::f32(), dev.clone());
 	let y = Tensor::new_empty_on(&[3, 2], DType::f32(), dev.clone());
 
-	x.randn_();
-	y.randn_();
+	randn_(&x);
+	randn_(&y);
 
 	println!("x = {}", x);
 	println!("y = {}", y);

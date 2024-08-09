@@ -54,8 +54,8 @@ pub trait Buffer {
 
 	unsafe fn acc(
 		&self,
-		o: BufOff<()>,
-		a: BufOff<&BufferBase>,
+		a: BufOff<()>,
+		b: BufOff<&BufferBase>,
 		common: CommonArgs1D,
 		alpha: f64,
 		beta: f64,
@@ -63,8 +63,18 @@ pub trait Buffer {
 
 	unsafe fn acc_sum(
 		&self,
-		o: BufOff<()>,
-		a: BufOff<&BufferBase>,
+		a: BufOff<()>,
+		b: BufOff<&BufferBase>,
+		common: CommonArgs1D,
+		alpha: f64,
+		beta: f64,
+	);
+
+	unsafe fn acc_mul(
+		&self,
+		a: BufOff<()>,
+		b: BufOff<&BufferBase>,
+		c: BufOff<&BufferBase>,
 		common: CommonArgs1D,
 		alpha: f64,
 		beta: f64,
