@@ -25,3 +25,6 @@ struct_lit_width = 40
 unstable_features = true
 use_field_init_shorthand = true
 fn_args_layout = "Compressed"
+comment_width = 100
+wrap_comments = true
+#spaces_around_ranges = true

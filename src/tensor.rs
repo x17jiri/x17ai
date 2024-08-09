@@ -82,14 +82,16 @@ pub trait OutputHandler {
 	/// Returns the stride of the new dimension.
 	fn prepend_dim(&mut self, size: usize) -> usize;
 
-	/// Create a new buffer that can fit a new tensor with all the previously added dimensions
-	/// and the given dtype.
+	/// Create a new buffer that can fit a new tensor with all the previously
+	/// added dimensions and the given dtype.
 	///
-	/// Return the buffer and the offset in the buffer where the tensor should start.
+	/// Return the buffer and the offset in the buffer where the tensor should
+	/// start.
 	fn make_buffer(&mut self) -> (&dyn Buffer, usize);
 }
 
-/// This struct is used mainly to ensure that the total number of elements does not overflow
+/// This struct is used mainly to ensure that the total number of elements does
+/// not overflow
 struct OutputBuilder {
 	dims: SmallVec<[SizeAndStride; INLINE_DIMS]>,
 	dtype: DType,
@@ -145,9 +147,9 @@ impl OutputHandler for OutputBuilder {
 	fn prepend_dim(&mut self, size: usize) -> usize {
 		debug_assert!(self.remaining_dims > 0);
 
-		// Check that if we ignore zero length dimensions, the number of elements
-		// does not overflow. This is done to make sure our calculations would not overflow
-		// even if we had the same dimensions but in different order.
+		// Check that if we ignore zero length dimensions, the number of elements does not overflow.
+		// This is done to make sure our calculations would not overflow even if we had
+		// the same dimensions but in different order.
 		if likely(size != 0) {
 			if let Some(mul) = self.nonzero_elems.checked_mul(size) {
 				self.nonzero_elems = mul;
@@ -256,7 +258,8 @@ impl Tensor {
 		Self::new_empty_on(shape, dtype, self.device())
 	}
 
-	/// Allocate a new tensor on the same device with the same shape and dtype as `self`.
+	/// Allocate a new tensor on the same device with the same shape and dtype
+	/// as `self`.
 	pub fn new_empty_like(&self) -> Tensor {
 		Self::new_empty_on(self.shape(), self.dtype, self.device())
 	}
@@ -304,7 +307,7 @@ impl Tensor {
 		}
 
 		// use `Batch` to merge the last `n` dimensions
-		let last_n = unsafe { self.dims.get_unchecked(ndim - n..) };
+		let last_n = unsafe { self.dims.get_unchecked(ndim - n ..) };
 		let mut merged = Batch::new_empty(n);
 		let mut elems = 1;
 		for dim in last_n.iter().rev() {
@@ -313,18 +316,19 @@ impl Tensor {
 		}
 		let mut merged = merged.rev_dims.iter();
 
-		let (mut prev_stride, mut target_stride) = // rustfmt::newline
+		let (mut prev_stride, mut target_stride) = {
 			if let Some(merged_dim) = merged.next() {
 				(merged_dim.in_strides[0], merged_dim.size * merged_dim.in_strides[0])
 			} else {
 				cold_path();
 				(1, 1)
-			};
+			}
+		};
 
 		unsafe { self.dims.set_len(ndim - n) };
 		self.dims.reserve(new_shape.len());
 		unsafe { self.dims.set_len(ndim - n + new_shape.len()) };
-		let result = unsafe { self.dims.get_unchecked_mut(ndim - n..) };
+		let result = unsafe { self.dims.get_unchecked_mut(ndim - n ..) };
 
 		for (o, size) in result.iter_mut().zip(new_shape.iter().copied()).rev() {
 			if prev_stride * size > target_stride {
@@ -405,7 +409,7 @@ impl Tensor {
 		assert!(ndim >= 1);
 		Matrix {
 			tensor: self,
-			batch_dims: &self.dims[..ndim - 1],
+			batch_dims: &self.dims[.. ndim - 1],
 			rows: SizeAndStride { size: 1, stride: 1 },
 			cols: self.dims[ndim - 1],
 		}
@@ -416,7 +420,7 @@ impl Tensor {
 		assert!(ndim >= 1);
 		Matrix {
 			tensor: self,
-			batch_dims: &self.dims[..ndim - 1],
+			batch_dims: &self.dims[.. ndim - 1],
 			rows: self.dims[ndim - 1],
 			cols: SizeAndStride { size: 1, stride: 1 },
 		}
@@ -440,15 +444,16 @@ pub fn zeros_(tensor: &Tensor) {
 }
 
 /// Fill the tensor with random values from a normal distribution.
-///
+/// ```
 ///     mean = 0, var = 1
+/// ```
 pub fn randn_(tensor: &Tensor) {
 	tensor.buffer.randn_(tensor);
 }
 
 /// Accumulate:
 /// ```
-///    a = a * alpha + b * beta
+///     a = a * alpha + b * beta
 /// ```
 /// `b` is broadcasted to match the shape of `a`.
 pub fn acc_(a: &Tensor, alpha: f64, b: &Tensor, beta: f64) {
@@ -551,7 +556,7 @@ pub fn acc_mul_(a: &Tensor, alpha: f64, beta: f64, b: &Tensor, c: &Tensor) {
 
 /// Accumulate the result of sum:
 /// ```
-///    a = a * alpha + b.sum(keepdim) * beta
+///     a = a * alpha + b.sum(keepdim) * beta
 /// ```
 /// This function doesn't broadcast.
 /// The shape of b after the sum must be equal to the shape of self.
@@ -563,7 +568,7 @@ pub fn acc_sum_(a: &Tensor, alpha: f64, b: &Tensor, keepdim: bool, beta: f64) {
 
 /// Accumulate the result of mean:
 /// ```
-///   a = a * alpha + b.mean(keepdim) * beta
+///     a = a * alpha + b.mean(keepdim) * beta
 /// ```
 /// This function doesn't broadcast.
 /// The shape of b after the sum must be equal to the shape of self.
@@ -576,7 +581,7 @@ pub fn acc_mean_(a: &Tensor, alpha: f64, b: &Tensor, keepdim: bool, beta: f64) {
 /*
 	/// Calculate `x^2`:
 	/// ```
-	///    result = self * self
+	///     result = self * self
 	/// ```
 	pub fn square(&self) -> Tensor {
 		let mut out = self.new_empty_like();
@@ -740,7 +745,7 @@ impl<'a> MatrixLike<'a> for &'a Tensor {
 	fn as_matrix(self) -> Matrix<'a> {
 		let ndim = self.ndim();
 		assert!(ndim >= 2);
-		let batch_dims = &self.dims[..ndim - 2];
+		let batch_dims = &self.dims[.. ndim - 2];
 		let rows = self.dims[ndim - 2];
 		let cols = self.dims[ndim - 1];
 		Matrix { tensor: self, batch_dims, rows, cols }
@@ -781,9 +786,9 @@ impl<'a> MatMul<'a> {
 	/// The matrix multiplication `mm(A, B)` will have elements with
 	/// mean = `0`, variance = `var_a * var_b * k`.
 	///
-	/// If we scale the result by the constant returned by this function (`1 / sqrt(k)`),
-	/// the variance of the result elements will be independent on `k`.
-	/// It will just be `var_a * var_b`.
+	/// If we scale the result by the constant returned by this function (`1 /
+	/// sqrt(k)`), the variance of the result elements will be independent on
+	/// `k`. It will just be `var_a * var_b`.
 	pub fn normalizing_scale(k: usize) -> f64 {
 		1.0 / (k as f64).sqrt()
 	}
@@ -797,8 +802,9 @@ impl<'a> MatMul<'a> {
 	}
 
 	/// Calculate the MatMul and return a new tensor with the result.
-	///
+	/// ```
 	///     result = a * b * scale
+	/// ```
 	pub fn eval(&self) -> Tensor {
 		let mut c = OutputBuilder::new(self.a.tensor.device());
 		__gemm(self.a, self.b, self.scale, &mut c);
@@ -810,7 +816,8 @@ impl<'a> MatMul<'a> {
 		__gemm(self.a, self.b, self.scale, &mut c);
 	}
 
-	/// In debug builds, assert that the current scale is equal to the normalizing scale.
+	/// In debug builds, assert that the current scale is equal to the
+	/// normalizing scale.
 	///
 	/// I.e., to the value returned by `normalizing_scale(self.a.cols.size)`.
 	///
@@ -878,7 +885,7 @@ fn __norm<O: OutputHandler, RunOp: Fn(BufOff<&dyn Buffer>, BufOff<&BufferBase>, 
 	out.init(ndim, dtype);
 	let out_stride = out.prepend_dim(dim.size);
 	assert!(out_stride == 1, "the output dimension must be contiguous");
-	let batch = Batch::new(batch_ndim, [&a.dims[..batch_ndim]], out);
+	let batch = Batch::new(batch_ndim, [&a.dims[.. batch_ndim]], out);
 	let (out_buffer, out_offset) = out.make_buffer();
 
 	let a_buffer = buf_to_base(a.buffer.as_ref());
@@ -945,7 +952,7 @@ fn fmt_1d(tensor: &Tensor, f: &mut fmt::Formatter, offset: usize) -> fmt::Result
 fn fmt_2d(tensor: &Tensor, f: &mut fmt::Formatter, offset: usize) -> fmt::Result {
 	writeln!(f, "[")?;
 	let dim = tensor.dims[tensor.ndim() - 2];
-	for i in 0..dim.size {
+	for i in 0 .. dim.size {
 		write!(f, "\t")?;
 		fmt_1d(tensor, f, offset + i * dim.stride)?;
 		writeln!(f, ",")?;
@@ -1002,11 +1009,11 @@ impl<const N: usize> Batch<N> {
 
 		let mut batch = Batch::new_empty(ndim);
 
-		for d in (0..ndim).rev() {
+		for d in (0 .. ndim).rev() {
 			// Get sizes and strides for the current dimension from all inputs
 			let mut in_sizes = [0; N];
 			let mut in_strides = [0; N];
-			for i in 0..N {
+			for i in 0 .. N {
 				// Does the input have enough dimensions,
 				// or do we need to extend it with broadcasted dimensions?
 				if d < inputs[i].len() {
@@ -1027,7 +1034,7 @@ impl<const N: usize> Batch<N> {
 			let out_stride = out_layout.prepend_dim(dim_size);
 
 			// Find inputs that need broadcasting and set their strides to 0
-			for i in 0..N {
+			for i in 0 .. N {
 				if in_sizes[i] != dim_size {
 					assert!(in_sizes[i] == 1, "cannot broadcast: incompatible dimensions");
 					in_strides[i] = 0;
@@ -1053,7 +1060,8 @@ impl<const N: usize> Batch<N> {
 			return;
 		}
 
-		// If there already are dimensions, try to merge the new dimension with the last one
+		// If there already are dimensions, try to merge the new dimension with the last
+		// one
 		if !self.rev_dims.is_empty() {
 			let prev = self.rev_dims.last_mut().unwrap();
 
@@ -1061,7 +1069,7 @@ impl<const N: usize> Batch<N> {
 			#[allow(unused_parens)]
 			{
 				can_merge = (out_stride == prev.out_stride * prev.size);
-				for i in 0..N {
+				for i in 0 .. N {
 					can_merge &= (in_strides[i] == prev.in_strides[i] * prev.size);
 				}
 			}
@@ -1095,7 +1103,7 @@ impl<const N: usize> Batch<N> {
 	) {
 		debug_assert!(!batch.is_empty());
 		let batch_dim = unsafe { batch.get_unchecked(batch.len() - 1) };
-		let batch = &batch[..batch.len() - 1];
+		let batch = &batch[.. batch.len() - 1];
 		if batch.is_empty() {
 			f(BatchRun {
 				out_offset,
@@ -1105,10 +1113,10 @@ impl<const N: usize> Batch<N> {
 				batch_size: batch_dim.size,
 			});
 		} else {
-			for i in 0..batch_dim.size {
+			for i in 0 .. batch_dim.size {
 				let out_offset = out_offset + i * batch_dim.out_stride;
 				let mut in_offsets = in_offsets;
-				for j in 0..N {
+				for j in 0 .. N {
 					in_offsets[j] += i * batch_dim.in_strides[j];
 				}
 				self.__run(out_offset, in_offsets, f, batch);
@@ -1126,7 +1134,7 @@ impl<const N: usize> Batch<N> {
 				batch_size: 1,
 			});
 		} else {
-			self.__run(out_offset, in_offsets, f, &self.rev_dims[self.popped_dims..]);
+			self.__run(out_offset, in_offsets, f, &self.rev_dims[self.popped_dims ..]);
 		}
 	}
 }

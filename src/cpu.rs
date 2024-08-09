@@ -164,6 +164,7 @@ impl CPUBuffer {
 		}
 	}
 
+	#[allow(clippy::too_many_arguments)]
 	fn acc_mul_f32(
 		&self, offset: usize, b: &Self, b_offset: usize, c: &Self, c_offset: usize, count: usize,
 		alpha: f64, beta: f64,
@@ -278,12 +279,7 @@ impl Buffer for CPUBuffer {
 		}
 	}
 
-	unsafe fn softmax(
-		&self,
-		o: BufOff<()>,
-		a: BufOff<&BufferBase>,
-		common: CommonArgs1D, // rustfmt::newline
-	) {
+	unsafe fn softmax(&self, o: BufOff<()>, a: BufOff<&BufferBase>, common: CommonArgs1D) {
 		let out = self;
 		for i in 0..common.batch_size {
 			let out_offset = o.offset + i * o.batch_stride;

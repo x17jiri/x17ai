@@ -5,7 +5,7 @@ use log::warn;
 use std::intrinsics::unlikely;
 
 // State initialization constant ("expand 32-byte k")
-const CONSTANTS: [u32; 4] = [0x_6170_7865, 0x_3320_646e, 0x_7962_2d32, 0x_6b20_6574];
+const CONST: [u32; 4] = [0x_6170_7865, 0x_3320_646e, 0x_7962_2d32, 0x_6b20_6574];
 
 pub const STATE_WORDS: usize = 16;
 
@@ -25,15 +25,16 @@ impl Rng {
 			0x_0420_fb57, 0x_7d06_2de2, 0x_2b40_4131, 0x_4ed7_e569,
 		])
 	}
+
 	pub fn new_with_seed(key: &[u32; 8]) -> Self {
-		let iv = [0x_1ada_b14a, 0x_4c3d_51fd]; // just some arbitrary constants
-		#[rustfmt::skip]
+		// just some arbitrary constants
+		let iv = [0x_1ada_b14a, 0x_4c3d_51fd];
 		Rng {
-			state: [
-				CONSTANTS[0], CONSTANTS[1], CONSTANTS[2], CONSTANTS[3],
-				key[0],       key[1],       key[2],       key[3],
-				key[4],       key[5],       key[6],       key[7],
-				0,            0,            iv[0],        iv[1],
+			state: #[rustfmt::skip] [
+				CONST[0], CONST[1], CONST[2], CONST[3],
+				key[0],   key[1],   key[2],   key[3],
+				key[4],   key[5],   key[6],   key[7],
+				0,        0,        iv[0],    iv[1],
 			],
 			block: [0; STATE_WORDS],
 			pos: 0,

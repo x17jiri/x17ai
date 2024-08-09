@@ -9,10 +9,6 @@ opt-level = 3
 
 [dependencies]
 smallvec = { version = "1.7.0", features = ["union"] }
-#inkwell = { version = "0.4.0", features = ["llvm17-0"] }
-#llvm-sys = "181"
-tempfile = "3.2.0"
-libloading = "0.7"
 bit-set = "0.6.0"
 thin-vec = "0.2.13"
 arrayvec = "0.7.4"

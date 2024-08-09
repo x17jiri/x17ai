@@ -38,53 +38,29 @@ pub trait Buffer {
 	fn randn_(&self, tensor: &Tensor);
 
 	unsafe fn rms_norm(
-		&self,
-		o: BufOff<()>,
-		a: BufOff<&BufferBase>,
-		common: CommonArgs1D,
-		eps: f64,
+		&self, o: BufOff<()>, a: BufOff<&BufferBase>, common: CommonArgs1D, eps: f64,
 	);
 
-	unsafe fn softmax(
-		&self,
-		o: BufOff<()>,
-		a: BufOff<&BufferBase>,
-		common: CommonArgs1D, // rustfmt::newline
-	);
+	unsafe fn softmax(&self, o: BufOff<()>, a: BufOff<&BufferBase>, common: CommonArgs1D);
 
 	unsafe fn acc(
-		&self,
-		a: BufOff<()>,
-		b: BufOff<&BufferBase>,
-		common: CommonArgs1D,
-		alpha: f64,
-		beta: f64,
+		&self, a: BufOff<()>, b: BufOff<&BufferBase>, common: CommonArgs1D, alpha: f64, beta: f64,
 	);
 
 	unsafe fn acc_sum(
-		&self,
-		a: BufOff<()>,
-		b: BufOff<&BufferBase>,
-		common: CommonArgs1D,
-		alpha: f64,
-		beta: f64,
+		&self, a: BufOff<()>, b: BufOff<&BufferBase>, common: CommonArgs1D, alpha: f64, beta: f64,
 	);
 
 	unsafe fn acc_mul(
-		&self,
-		a: BufOff<()>,
-		b: BufOff<&BufferBase>,
-		c: BufOff<&BufferBase>,
-		common: CommonArgs1D,
-		alpha: f64,
-		beta: f64,
+		&self, a: BufOff<()>, b: BufOff<&BufferBase>, c: BufOff<&BufferBase>, common: CommonArgs1D,
+		alpha: f64, beta: f64,
 	);
 
 	// All matrices are stored in row-major order.
 	// Example:
-	//     [ 1 2 3
-	// A =   4 5 6   ->  [ 1 2 3 4 5 6 7 8 9 ]
-	//       7 8 9 ]
+	// 	[	1 2 3
+	// 		4 5 6	->	[ 1 2 3 4 5 6 7 8 9 ]
+	// 		7 8 9 ]
 	#[rustfmt::skip]
 	#[allow(clippy::too_many_arguments)]
 	unsafe fn gemm(
