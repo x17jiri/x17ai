@@ -464,9 +464,9 @@ fn __elem_wise<
 >(
 	ndim: usize, dtype: DType, a: [&Tensor; N], out: &mut O, run_op: RunOp,
 ) {
-	for [a, b] in a.windows(2) {
-		assert_compatible_types(*a, *b);
-		assert_compatible_devices(*a, *b);
+	for [a1, a2] in a.windows(2) {
+		assert_compatible_types(*a1, *a2);
+		assert_compatible_devices(*a1, *a2);
 	}
 
 	out.init(ndim, dtype);
@@ -475,10 +475,8 @@ fn __elem_wise<
 	let out = out.make_buffer();
 
 	let op_dim = batch.pop_dim();
-	if op_dim.size > 1 {
-		assert!(op_dim.out_stride == 1);
-		assert!(op_dim.in_strides == [1; N]);
-	}
+	assert!(op_dim.out_stride == 1);
+	assert!(op_dim.in_strides == [1; N]);
 
 	let a = a.map(|a| BufOff {
 		buffer: buf_to_base(a.buffer.as_ref()),
@@ -523,13 +521,13 @@ pub fn acc_(a: &Tensor, alpha: f64, b: &Tensor, beta: f64) {
 	let mut out = OutputRef::new(a);
 	#[rustfmt::skip]
 	__elem_wise(
-		ndim, dtype, [a], &mut out,
+		ndim, dtype, [b], &mut out,
 		|
-			o: BatchBufOff<&dyn Buffer>,
-			[a]: [BatchBufOff<&BufferBase>; 1],
+			a: BatchBufOff<&dyn Buffer>,
+			[b]: [BatchBufOff<&BufferBase>; 1],
 			common: CommonArgs1D
 		| unsafe {
-			o.buffer.acc(o.without_buf(), a, common, alpha, beta)
+			a.buffer.acc(a.without_buf(), b, common, alpha, beta)
 		},
 	);
 }
@@ -1077,8 +1075,8 @@ pub struct Batch<const N: usize> {
 }
 
 impl<const N: usize> Batch<N> {
-	pub fn new<L: OutputHandler>(
-		ndim: usize, inputs: [&[SizeAndStride]; N], out_layout: &mut L,
+	pub fn new<O: OutputHandler>(
+		ndim: usize, inputs: [&[SizeAndStride]; N], out: &mut O,
 	) -> Batch<N> {
 		assert!(N > 0);
 
@@ -1106,7 +1104,7 @@ impl<const N: usize> Batch<N> {
 			// So max() gets the dim_size of the non-broadcasted inputs.
 			let dim_size = in_sizes.iter().copied().max().unwrap();
 
-			let out_stride = out_layout.prepend_dim(dim_size);
+			let out_stride = out.prepend_dim(dim_size);
 
 			// Find inputs that need broadcasting and set their strides to 0
 			for i in 0..N {
@@ -1155,7 +1153,7 @@ impl<const N: usize> Batch<N> {
 			}
 		}
 
-		// Can't merge, push the new dimension
+		// Can't merge; prepend the new dimension
 		self.rev_dims.push(BatchDim { size, out_stride, in_strides });
 	}
 
@@ -1167,8 +1165,8 @@ impl<const N: usize> Batch<N> {
 		} else {
 			BatchDim {
 				size: 1,
-				out_stride: 0,
-				in_strides: [0; N],
+				out_stride: 1,
+				in_strides: [1; N],
 			}
 		}
 	}
