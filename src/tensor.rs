@@ -553,20 +553,62 @@ pub fn acc_mul_(a: &Tensor, alpha: f64, beta: f64, b: &Tensor, c: &Tensor) {
 /// ```
 ///    a = a * alpha + b.sum(keepdim) * beta
 /// ```
-/// This function doesn't broadcast.
-/// The shape of b after the sum must be equal to the shape of self.
 pub fn acc_sum_(a: &Tensor, alpha: f64, b: &Tensor, keepdim: bool, beta: f64) {
 	assert_compatible_types(a, b);
 	assert_compatible_devices(a, b);
-	todo!()
+
+	// The last dimension of `b` is the one we are summing over.
+	assert!(b.ndim() > 0);
+	let dim = b.dims[b.dims.len() - 1];
+	assert!(dim.stride == 1, "the summed dimension must be contiguous");
+
+	let mut out = OutputRef::new(a);
+
+	let ndim = a.ndim();
+	let dtype = a.dtype;
+	out.init(ndim, dtype);
+
+	let batch_ndim;
+	if keepdim {
+		// The last dimension of `a` has size 1 and is not part of the batch dimensions.
+		assert!(a.dims[ndim - 1].size == 1);
+		out.prepend_dim(1);
+		batch_ndim = ndim - 1;
+	} else {
+		batch_ndim = ndim;
+	};
+
+	let batch = Batch::new(batch_ndim, [&b.dims[..b.ndim() - 1]], &mut out);
+
+	let (a_buffer, a_offset) = out.make_buffer();
+
+	batch.run(a_offset, [b.offset], &|batch: BatchRun<1>| unsafe {
+		a_buffer.acc_sum(
+			BufOff {
+				buffer: (),
+				offset: batch.out_offset,
+				batch_stride: batch.out_stride,
+			},
+			BufOff {
+				buffer: buf_to_base(b.buffer.as_ref()),
+				offset: batch.in_offsets[0],
+				batch_stride: batch.in_strides[0],
+			},
+			CommonArgs1D {
+				dtype,
+				len: dim.size,
+				batch_size: batch.batch_size,
+			},
+			alpha,
+			beta,
+		);
+	});
 }
 
 /// Accumulate the result of mean:
 /// ```
 ///   a = a * alpha + b.mean(keepdim) * beta
 /// ```
-/// This function doesn't broadcast.
-/// The shape of b after the sum must be equal to the shape of self.
 pub fn acc_mean_(a: &Tensor, alpha: f64, b: &Tensor, keepdim: bool, beta: f64) {
 	// We can convert this to `acc_sum_()` because `mean = sum / n`
 	let n = b.size(-1) as f64;
