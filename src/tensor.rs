@@ -307,7 +307,7 @@ impl Tensor {
 		}
 
 		// use `Batch` to merge the last `n` dimensions
-		let last_n = unsafe { self.dims.get_unchecked(ndim - n ..) };
+		let last_n = unsafe { self.dims.get_unchecked(ndim - n..) };
 		let mut merged = Batch::new_empty(n);
 		let mut elems = 1;
 		for dim in last_n.iter().rev() {
@@ -328,7 +328,7 @@ impl Tensor {
 		unsafe { self.dims.set_len(ndim - n) };
 		self.dims.reserve(new_shape.len());
 		unsafe { self.dims.set_len(ndim - n + new_shape.len()) };
-		let result = unsafe { self.dims.get_unchecked_mut(ndim - n ..) };
+		let result = unsafe { self.dims.get_unchecked_mut(ndim - n..) };
 
 		for (o, size) in result.iter_mut().zip(new_shape.iter().copied()).rev() {
 			if prev_stride * size > target_stride {
@@ -409,7 +409,7 @@ impl Tensor {
 		assert!(ndim >= 1);
 		Matrix {
 			tensor: self,
-			batch_dims: &self.dims[.. ndim - 1],
+			batch_dims: &self.dims[..ndim - 1],
 			rows: SizeAndStride { size: 1, stride: 1 },
 			cols: self.dims[ndim - 1],
 		}
@@ -420,7 +420,7 @@ impl Tensor {
 		assert!(ndim >= 1);
 		Matrix {
 			tensor: self,
-			batch_dims: &self.dims[.. ndim - 1],
+			batch_dims: &self.dims[..ndim - 1],
 			rows: self.dims[ndim - 1],
 			cols: SizeAndStride { size: 1, stride: 1 },
 		}
@@ -455,7 +455,6 @@ pub fn randn_(tensor: &Tensor) {
 /// ```
 ///     a = a * alpha + b * beta
 /// ```
-/// `b` is broadcasted to match the shape of `a`.
 pub fn acc_(a: &Tensor, alpha: f64, b: &Tensor, beta: f64) {
 	assert_compatible_types(a, b);
 	assert_compatible_devices(a, b);
@@ -502,8 +501,7 @@ pub fn acc_(a: &Tensor, alpha: f64, b: &Tensor, beta: f64) {
 /// ```
 ///     a = a * alpha + (b * c) * beta
 /// ```
-/// This function may broadcast b and c to match the shape of self.
-pub fn acc_mul_(a: &Tensor, alpha: f64, beta: f64, b: &Tensor, c: &Tensor) {
+pub fn acc_mul_(a: &Tensor, alpha: f64, b: &Tensor, c: &Tensor, beta: f64) {
 	assert_compatible_types(a, b);
 	assert_compatible_types(a, c);
 	assert_compatible_devices(a, b);
@@ -556,7 +554,7 @@ pub fn acc_mul_(a: &Tensor, alpha: f64, beta: f64, b: &Tensor, c: &Tensor) {
 
 /// Accumulate the result of sum:
 /// ```
-///     a = a * alpha + b.sum(keepdim) * beta
+///     a = a * alpha + sum(b, keepdim) * beta
 /// ```
 pub fn acc_sum_(a: &Tensor, alpha: f64, b: &Tensor, keepdim: bool, beta: f64) {
 	assert_compatible_types(a, b);
@@ -612,7 +610,7 @@ pub fn acc_sum_(a: &Tensor, alpha: f64, b: &Tensor, keepdim: bool, beta: f64) {
 
 /// Accumulate the result of mean:
 /// ```
-///     a = a * alpha + b.mean(keepdim) * beta
+///     a = a * alpha + mean(b, keepdim) * beta
 /// ```
 pub fn acc_mean_(a: &Tensor, alpha: f64, b: &Tensor, keepdim: bool, beta: f64) {
 	// We can convert this to `acc_sum_()` because `mean = sum / n`
@@ -787,7 +785,7 @@ impl<'a> MatrixLike<'a> for &'a Tensor {
 	fn as_matrix(self) -> Matrix<'a> {
 		let ndim = self.ndim();
 		assert!(ndim >= 2);
-		let batch_dims = &self.dims[.. ndim - 2];
+		let batch_dims = &self.dims[..ndim - 2];
 		let rows = self.dims[ndim - 2];
 		let cols = self.dims[ndim - 1];
 		Matrix { tensor: self, batch_dims, rows, cols }
@@ -927,7 +925,7 @@ fn __norm<O: OutputHandler, RunOp: Fn(BufOff<&dyn Buffer>, BufOff<&BufferBase>, 
 	out.init(ndim, dtype);
 	let out_stride = out.prepend_dim(dim.size);
 	assert!(out_stride == 1, "the output dimension must be contiguous");
-	let batch = Batch::new(batch_ndim, [&a.dims[.. batch_ndim]], out);
+	let batch = Batch::new(batch_ndim, [&a.dims[..batch_ndim]], out);
 	let (out_buffer, out_offset) = out.make_buffer();
 
 	let a_buffer = buf_to_base(a.buffer.as_ref());
@@ -994,7 +992,7 @@ fn fmt_1d(tensor: &Tensor, f: &mut fmt::Formatter, offset: usize) -> fmt::Result
 fn fmt_2d(tensor: &Tensor, f: &mut fmt::Formatter, offset: usize) -> fmt::Result {
 	writeln!(f, "[")?;
 	let dim = tensor.dims[tensor.ndim() - 2];
-	for i in 0 .. dim.size {
+	for i in 0..dim.size {
 		write!(f, "\t")?;
 		fmt_1d(tensor, f, offset + i * dim.stride)?;
 		writeln!(f, ",")?;
@@ -1051,11 +1049,11 @@ impl<const N: usize> Batch<N> {
 
 		let mut batch = Batch::new_empty(ndim);
 
-		for d in (0 .. ndim).rev() {
+		for d in (0..ndim).rev() {
 			// Get sizes and strides for the current dimension from all inputs
 			let mut in_sizes = [0; N];
 			let mut in_strides = [0; N];
-			for i in 0 .. N {
+			for i in 0..N {
 				// Does the input have enough dimensions,
 				// or do we need to extend it with broadcasted dimensions?
 				if d < inputs[i].len() {
@@ -1076,7 +1074,7 @@ impl<const N: usize> Batch<N> {
 			let out_stride = out_layout.prepend_dim(dim_size);
 
 			// Find inputs that need broadcasting and set their strides to 0
-			for i in 0 .. N {
+			for i in 0..N {
 				if in_sizes[i] != dim_size {
 					assert!(in_sizes[i] == 1, "cannot broadcast: incompatible dimensions");
 					in_strides[i] = 0;
@@ -1111,7 +1109,7 @@ impl<const N: usize> Batch<N> {
 			#[allow(unused_parens)]
 			{
 				can_merge = (out_stride == prev.out_stride * prev.size);
-				for i in 0 .. N {
+				for i in 0..N {
 					can_merge &= (in_strides[i] == prev.in_strides[i] * prev.size);
 				}
 			}
@@ -1145,7 +1143,7 @@ impl<const N: usize> Batch<N> {
 	) {
 		debug_assert!(!batch.is_empty());
 		let batch_dim = unsafe { batch.get_unchecked(batch.len() - 1) };
-		let batch = &batch[.. batch.len() - 1];
+		let batch = &batch[..batch.len() - 1];
 		if batch.is_empty() {
 			f(BatchRun {
 				out_offset,
@@ -1155,10 +1153,10 @@ impl<const N: usize> Batch<N> {
 				batch_size: batch_dim.size,
 			});
 		} else {
-			for i in 0 .. batch_dim.size {
+			for i in 0..batch_dim.size {
 				let out_offset = out_offset + i * batch_dim.out_stride;
 				let mut in_offsets = in_offsets;
-				for j in 0 .. N {
+				for j in 0..N {
 					in_offsets[j] += i * batch_dim.in_strides[j];
 				}
 				self.__run(out_offset, in_offsets, f, batch);
@@ -1176,7 +1174,7 @@ impl<const N: usize> Batch<N> {
 				batch_size: 1,
 			});
 		} else {
-			self.__run(out_offset, in_offsets, f, &self.rev_dims[self.popped_dims ..]);
+			self.__run(out_offset, in_offsets, f, &self.rev_dims[self.popped_dims..]);
 		}
 	}
 }

@@ -40,7 +40,7 @@ use crate::tensor::*;
 use smallvec::{smallvec, SmallVec};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-/*
+
 // Inspired by Adam-mini: https://arxiv.org/abs/2406.16793
 pub struct AdamParam {
 	pub parts: usize,
@@ -71,18 +71,18 @@ impl OptParam for AdamParam {
 		// permute dimensions: [batch, ...] -> [..., batch]
 		let grads = grads.permuted(&[1, 2, 0]);
 
-		self.grad.acc_sum_(1.0, 1.0, &grads, false);
+		acc_sum_(&self.grad, 1.0, &grads, false, 1.0);
 	}
 
 	fn zero_grad(&mut self) {
-		self.grad.zeros_();
+		zeros_(&self.grad);
 	}
 
 	fn step(&mut self, learning_rate: f64) {
-		self.m.acc_(self.beta1, 1.0 - self.beta1, &self.grad);
-		self.v.acc_mean_(self.beta2, 1.0 - self.beta2, &self.grad.square(), true);
-		self.v.rsqrt_into(self.eps, &self.v_recip);
-		self.value.acc_mul_(1.0, -learning_rate, &self.m, &self.v_recip);
+		acc_(&self.m, self.beta1, &self.grad, 1.0 - self.beta1);
+		acc_mean_(&self.v, self.beta2, &self.grad.square(), true, 1.0 - self.beta2);
+		rsqrt_into(&self.v, self.eps, &self.v_recip);
+		acc_mul_(&self.value, 1.0, &self.m, &self.v_recip, -learning_rate);
 	}
 
 	fn push_tensor(&mut self, tensor: Tensor) {
@@ -120,10 +120,7 @@ impl Context {
 	}
 
 	pub fn add_param(
-		&mut self,
-		dtype: DType,
-		parts: usize,
-		part_elems: usize,
+		&mut self, dtype: DType, parts: usize, part_elems: usize,
 	) -> Rc<RefCell<dyn OptParam>> {
 		let value = Tensor::new_empty_on(&[parts, part_elems], dtype, self.device.clone());
 		let grad = value.new_empty_like();
@@ -202,11 +199,7 @@ struct Linear {
 
 impl Linear {
 	pub fn new(
-		inputs: usize,
-		outputs: usize,
-		nhead: usize,
-		dtype: DType,
-		ctx: &mut Context,
+		inputs: usize, outputs: usize, nhead: usize, dtype: DType, ctx: &mut Context,
 	) -> Linear {
 		let parts = nhead.max(1);
 		let w_opt = ctx.add_param(dtype, parts, outputs * inputs);
@@ -269,7 +262,7 @@ impl Linear {
 		dx
 	}
 }
-*/
+
 /*
 struct Attention {
 	pub input_features: usize,
