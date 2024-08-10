@@ -4,6 +4,12 @@
 use crate::*;
 use std::fmt;
 
+/// This struct represents a pointer into a buffer.
+pub struct BufOff<Buf> {
+	pub buffer: Buf,
+	pub offset: usize,
+}
+
 /// This struct represents a batch of contiguous slices.
 ///
 /// The slices are stored in a `buffer` at given `offset`.
@@ -11,22 +17,21 @@ use std::fmt;
 ///
 /// Length of the slice and size of the batch are the same for all arguments.
 /// We don't want to repeat them and so they are only passed once in `SelfArg`.
-pub struct BufOff<Buf> {
+pub struct BatchBufOff<Buf> {
 	pub buffer: Buf,
 	pub offset: usize,
 	pub batch_stride: usize,
 }
 
-impl<Buf> BufOff<Buf> {
-	pub fn without_buf(&self) -> BufOff<()> {
-		BufOff {
+impl<Buf> BatchBufOff<Buf> {
+	pub fn without_buf(&self) -> BatchBufOff<()> {
+		BatchBufOff {
 			buffer: (),
 			offset: self.offset,
 			batch_stride: self.batch_stride,
 		}
 	}
 }
-
 pub struct CommonArgs1D {
 	pub dtype: DType,
 	pub len: usize,
@@ -38,22 +43,24 @@ pub trait Buffer {
 	fn randn_(&self, tensor: &Tensor);
 
 	unsafe fn rms_norm(
-		&self, o: BufOff<()>, a: BufOff<&BufferBase>, common: CommonArgs1D, eps: f64,
+		&self, o: BatchBufOff<()>, a: BatchBufOff<&BufferBase>, common: CommonArgs1D, eps: f64,
 	);
 
-	unsafe fn softmax(&self, o: BufOff<()>, a: BufOff<&BufferBase>, common: CommonArgs1D);
+	unsafe fn softmax(&self, o: BatchBufOff<()>, a: BatchBufOff<&BufferBase>, common: CommonArgs1D);
 
 	unsafe fn acc(
-		&self, a: BufOff<()>, b: BufOff<&BufferBase>, common: CommonArgs1D, alpha: f64, beta: f64,
+		&self, a: BatchBufOff<()>, b: BatchBufOff<&BufferBase>, common: CommonArgs1D, alpha: f64,
+		beta: f64,
 	);
 
 	unsafe fn acc_sum(
-		&self, a: BufOff<()>, b: BufOff<&BufferBase>, common: CommonArgs1D, alpha: f64, beta: f64,
+		&self, a: BatchBufOff<()>, b: BatchBufOff<&BufferBase>, common: CommonArgs1D, alpha: f64,
+		beta: f64,
 	);
 
 	unsafe fn acc_mul(
-		&self, a: BufOff<()>, b: BufOff<&BufferBase>, c: BufOff<&BufferBase>, common: CommonArgs1D,
-		alpha: f64, beta: f64,
+		&self, a: BatchBufOff<()>, b: BatchBufOff<&BufferBase>, c: BatchBufOff<&BufferBase>,
+		common: CommonArgs1D, alpha: f64, beta: f64,
 	);
 
 	// All matrices are stored in row-major order.

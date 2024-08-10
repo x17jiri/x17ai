@@ -87,7 +87,7 @@ pub trait OutputHandler {
 	///
 	/// Return the buffer and the offset in the buffer where the tensor should
 	/// start.
-	fn make_buffer(&mut self) -> (&dyn Buffer, usize);
+	fn make_buffer(&mut self) -> BufOff<&dyn Buffer>;
 }
 
 /// This struct is used mainly to ensure that the total number of elements does
@@ -169,7 +169,7 @@ impl OutputHandler for OutputBuilder {
 		stride
 	}
 
-	fn make_buffer(&mut self) -> (&dyn Buffer, usize) {
+	fn make_buffer(&mut self) -> BufOff<&dyn Buffer> {
 		if unlikely(self.remaining_dims != 0) {
 			panic!("not all dimensions were added");
 		}
@@ -179,7 +179,10 @@ impl OutputHandler for OutputBuilder {
 
 		self.buffer = Some(device.new_buffer(self.dtype, self.elems));
 
-		(self.buffer.as_ref().unwrap().as_ref(), 0)
+		BufOff {
+			buffer: self.buffer.as_ref().unwrap().as_ref(),
+			offset: 0,
+		}
 	}
 }
 
@@ -214,9 +217,12 @@ impl OutputHandler for OutputRef<'_> {
 		dim.stride
 	}
 
-	fn make_buffer(&mut self) -> (&dyn Buffer, usize) {
+	fn make_buffer(&mut self) -> BufOff<&dyn Buffer> {
 		assert!(self.remaining_dims == 0, "not all dimensions were added");
-		(self.tensor.buffer.as_ref(), self.tensor.offset)
+		BufOff {
+			buffer: self.tensor.buffer.as_ref(),
+			offset: self.tensor.offset,
+		}
 	}
 }
 
@@ -454,7 +460,7 @@ pub fn randn_(tensor: &Tensor) {
 fn __elem_wise<
 	const N: usize,
 	O: OutputHandler,
-	RunOp: Fn(BufOff<&dyn Buffer>, [BufOff<&BufferBase>; N], CommonArgs1D),
+	RunOp: Fn(BatchBufOff<&dyn Buffer>, [BatchBufOff<&BufferBase>; N], CommonArgs1D),
 >(
 	ndim: usize, dtype: DType, a: [&Tensor; N], out: &mut O, run_op: RunOp,
 ) {
@@ -464,73 +470,68 @@ fn __elem_wise<
 	}
 
 	out.init(ndim, dtype);
-	let mut inputs: [&[SizeAndStride]; N] = [&[]; N];
-	for (i, a) in inputs.iter_mut().zip(a.iter().copied()) {
-		*i = &a.dims;
-	}
+	let inputs = a.map(|a| a.dims.as_slice());
 	let mut batch = Batch::new(ndim, inputs, out);
-	let (out_buffer, out_offset) = out.make_buffer();
+	let out = out.make_buffer();
 
 	let op_dim = batch.pop_dim();
-	assert!(op_dim.out_stride == 1);
-	for in_stride in op_dim.in_strides {
-		assert!(in_stride == 1);
+	if op_dim.size > 1 {
+		assert!(op_dim.out_stride == 1);
+		assert!(op_dim.in_strides == [1; N]);
 	}
 
-	let mut buffers: [&BufferBase; N] = [buf_to_base(a[0].buffer.as_ref()); N];
-	for (b, a) in buffers.iter_mut().zip(a.iter().copied()) {
-		*b = buf_to_base(a.buffer.as_ref());
-	}
-
-	batch.run(out_offset, offsets, &|batch: BatchRun<N>| unsafe {
-		// TODO
+	let a = a.map(|a| BufOff {
+		buffer: buf_to_base(a.buffer.as_ref()),
+		offset: a.offset,
 	});
+
+	#[rustfmt::skip]
+	batch.run(
+		out, a,
+		&|out: BatchBufOff<&dyn Buffer>, a: [BatchBufOff<&BufferBase>; N], batch_size: usize| {
+			run_op(
+				out, a,
+				CommonArgs1D {
+					dtype,
+					len: op_dim.size,
+					batch_size,
+				}
+			);
+		}
+	)
 }
 
 /// Accumulate:
 /// ```
 ///     a = a * alpha + b * beta
 /// ```
+/*
+pub fn rms_norm(a: &Tensor, eps: f64) -> Tensor {
+	let mut out = OutputBuilder::new(a.device());
+	#[rustfmt::skip] __norm(
+		a, &mut out,
+		|o: BufOff<&dyn Buffer>, a: BufOff<&BufferBase>, common: CommonArgs1D| unsafe {
+			o.buffer.rms_norm(o.without_buf(), a, common, eps)
+		},
+	);
+	out.make_tensor()
+}
+*/
 pub fn acc_(a: &Tensor, alpha: f64, b: &Tensor, beta: f64) {
-	assert_compatible_types(a, b);
-	assert_compatible_devices(a, b);
-
-	let mut out = OutputRef::new(a);
-
 	let ndim = a.ndim();
 	let dtype = a.dtype;
-	out.init(ndim, dtype);
-	let mut batch = Batch::new(ndim, [&b.dims], &mut out);
-
-	let (a_buffer, a_offset) = out.make_buffer();
-
-	let op_dim = batch.pop_dim();
-	assert!(op_dim.out_stride == 1);
-	assert!(op_dim.in_strides[0] == 1);
-
-	let b_buffer = buf_to_base(b.buffer.as_ref());
-
-	batch.run(a_offset, [b.offset], &|batch: BatchRun<1>| unsafe {
-		a_buffer.acc(
-			BufOff {
-				buffer: (),
-				offset: batch.out_offset,
-				batch_stride: batch.out_stride,
-			},
-			BufOff {
-				buffer: b_buffer,
-				offset: batch.in_offsets[0],
-				batch_stride: batch.in_strides[0],
-			},
-			CommonArgs1D {
-				dtype,
-				len: op_dim.size,
-				batch_size: batch.batch_size,
-			},
-			alpha,
-			beta,
-		);
-	});
+	let mut out = OutputRef::new(a);
+	#[rustfmt::skip]
+	__elem_wise(
+		ndim, dtype, [a], &mut out,
+		|
+			o: BatchBufOff<&dyn Buffer>,
+			[a]: [BatchBufOff<&BufferBase>; 1],
+			common: CommonArgs1D
+		| unsafe {
+			o.buffer.acc(o.without_buf(), a, common, alpha, beta)
+		},
+	);
 }
 
 /// Accumulate the result of element-wise multiplication:
@@ -1198,7 +1199,9 @@ impl<const N: usize> Batch<N> {
 		}
 	}
 
-	pub fn run<F: Fn(BatchRun<N>)>(&self, out_offset: usize, in_offsets: [usize; N], f: &F) {
+	pub fn run<O, I, F: Fn(BatchBufOff<O>, [BatchBufOff<I>; N], usize)>(
+		&self, out: BufOff<O>, in_: [BufOff<I>; N], f: &F,
+	) {
 		if self.rev_dims.len() <= self.popped_dims {
 			f(BatchRun {
 				out_offset,
