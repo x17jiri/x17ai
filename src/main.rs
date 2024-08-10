@@ -80,7 +80,7 @@ impl OptParam for AdamParam {
 
 	fn step(&mut self, learning_rate: f64) {
 		acc_(&self.m, self.beta1, &self.grad, 1.0 - self.beta1);
-		acc_mean_(&self.v, self.beta2, &self.grad.square(), true, 1.0 - self.beta2);
+		acc_mean_(&self.v, self.beta2, &square(&self.grad), true, 1.0 - self.beta2);
 		rsqrt_into(&self.v, self.eps, &self.v_recip);
 		acc_mul_(&self.value, 1.0, &self.m, &self.v_recip, -learning_rate);
 	}

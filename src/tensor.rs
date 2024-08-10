@@ -451,6 +451,42 @@ pub fn randn_(tensor: &Tensor) {
 	tensor.buffer.randn_(tensor);
 }
 
+fn __elem_wise<
+	const N: usize,
+	O: OutputHandler,
+	RunOp: Fn(BufOff<&dyn Buffer>, [BufOff<&BufferBase>; N], CommonArgs1D),
+>(
+	ndim: usize, dtype: DType, a: [&Tensor; N], out: &mut O, run_op: RunOp,
+) {
+	for [a, b] in a.windows(2) {
+		assert_compatible_types(*a, *b);
+		assert_compatible_devices(*a, *b);
+	}
+
+	out.init(ndim, dtype);
+	let mut inputs: [&[SizeAndStride]; N] = [&[]; N];
+	for (i, a) in inputs.iter_mut().zip(a.iter().copied()) {
+		*i = &a.dims;
+	}
+	let mut batch = Batch::new(ndim, inputs, out);
+	let (out_buffer, out_offset) = out.make_buffer();
+
+	let op_dim = batch.pop_dim();
+	assert!(op_dim.out_stride == 1);
+	for in_stride in op_dim.in_strides {
+		assert!(in_stride == 1);
+	}
+
+	let mut buffers: [&BufferBase; N] = [buf_to_base(a[0].buffer.as_ref()); N];
+	for (b, a) in buffers.iter_mut().zip(a.iter().copied()) {
+		*b = buf_to_base(a.buffer.as_ref());
+	}
+
+	batch.run(out_offset, offsets, &|batch: BatchRun<N>| unsafe {
+		// TODO
+	});
+}
+
 /// Accumulate:
 /// ```
 ///     a = a * alpha + b * beta
@@ -618,33 +654,31 @@ pub fn acc_mean_(a: &Tensor, alpha: f64, b: &Tensor, keepdim: bool, beta: f64) {
 	acc_sum_(a, alpha, b, keepdim, beta / n);
 }
 
+/// Calculate `x^2`:
+/// ```
+///     result = x * x
+pub fn square(x: &Tensor) -> Tensor {
+	let out = x.new_empty_like();
+	acc_mul_(&out, 0.0, x, x, 1.0);
+	out
+}
+
+/// reciprocal of the square root:
+/// ```
+///     result = 1.0 / (self.sqrt() + eps)
+pub fn rsqrt(&self, eps: f64) -> Tensor {
+	let mut out = self.new_empty_like();
+	self.buffer.rsqrt(&mut out, self, eps);
+	out
+}
+
+pub fn rsqrt_into(&self, eps: f64, into: &Tensor) {
+	assert_compatible_types(self, into);
+	assert_compatible_devices(self, into);
+	//self.buffer.rsqrt(into, self, eps);
+}
+
 /*
-	/// Calculate `x^2`:
-	/// ```
-	///     result = self * self
-	/// ```
-	pub fn square(&self) -> Tensor {
-		let mut out = self.new_empty_like();
-		self.buffer.square(&mut out, self);
-		out
-	}
-
-	/// reciprocal of the square root:
-	/// ```
-	///     result = 1.0 / (self.sqrt() + eps)
-	/// ```
-	pub fn rsqrt(&self, eps: f64) -> Tensor {
-		let mut out = self.new_empty_like();
-		self.buffer.rsqrt(&mut out, self, eps);
-		out
-	}
-
-	pub fn rsqrt_into(&self, eps: f64, into: &Tensor) {
-		assert_compatible_types(self, into);
-		assert_compatible_devices(self, into);
-		//self.buffer.rsqrt(into, self, eps);
-	}
-
 	/// Calculate the mean of the last dimension.
 	///
 	/// If keepdim is true, the last dimension is kept in the result with size 1.
