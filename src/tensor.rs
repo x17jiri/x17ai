@@ -15,10 +15,16 @@ use thin_vec::ThinVec;
 
 pub const INLINE_DIMS: usize = 5;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Default)]
 pub struct SizeAndStride {
 	pub size: usize,
 	pub stride: usize,
+}
+
+impl SizeAndStride {
+	pub fn is_contiguous(&self) -> bool {
+		self.size == 1 || self.stride == 1
+	}
 }
 
 pub struct ShapeView<'a> {
@@ -79,8 +85,8 @@ pub trait OutputHandler {
 
 	/// Adds a new dimension with the given size.
 	///
-	/// Returns the stride of the new dimension.
-	fn prepend_dim(&mut self, size: usize) -> usize;
+	/// Returns the size and stride of the new dimension.
+	fn prepend_dim(&mut self, size: usize, allow_broadcast: bool) -> SizeAndStride;
 
 	/// Create a new buffer that can fit a new tensor with all the previously
 	/// added dimensions and the given dtype.
@@ -144,7 +150,7 @@ impl OutputHandler for OutputBuilder {
 		self.nonzero_elems = 1;
 	}
 
-	fn prepend_dim(&mut self, size: usize) -> usize {
+	fn prepend_dim(&mut self, size: usize, _allow_broadcast: bool) -> SizeAndStride {
 		debug_assert!(self.remaining_dims > 0);
 
 		// Check that if we ignore zero length dimensions, the number of elements does not overflow.
@@ -166,7 +172,7 @@ impl OutputHandler for OutputBuilder {
 			*self.dims.get_unchecked_mut(self.remaining_dims) = SizeAndStride { size, stride };
 		}
 
-		stride
+		SizeAndStride { size, stride }
 	}
 
 	fn make_buffer(&mut self) -> BufOff<&dyn Buffer> {
@@ -207,14 +213,13 @@ impl OutputHandler for OutputRef<'_> {
 		self.remaining_dims = ndim;
 	}
 
-	fn prepend_dim(&mut self, size: usize) -> usize {
+	fn prepend_dim(&mut self, size: usize, allow_broadcast: bool) -> SizeAndStride {
 		assert!(self.remaining_dims > 0);
-
-		let dim = self.tensor.dims[self.remaining_dims - 1];
-		assert!(dim.size == size, "incompatible shape");
-
 		self.remaining_dims -= 1;
-		dim.stride
+		debug_assert!(self.remaining_dims < self.tensor.dims.len());
+		let dim = unsafe { *self.tensor.dims.get_unchecked(self.remaining_dims) };
+		assert!(allow_broadcast || dim.size == size, "incompatible shape");
+		dim
 	}
 
 	fn make_buffer(&mut self) -> BufOff<&dyn Buffer> {
@@ -248,7 +253,7 @@ impl Tensor {
 		let mut builder = OutputBuilder::new(device);
 		builder.init(shape.len(), dtype);
 		for dim in shape.rev() {
-			builder.prepend_dim(dim);
+			builder.prepend_dim(dim, false);
 		}
 		builder.make_buffer();
 		builder.make_tensor()
@@ -598,7 +603,7 @@ pub fn acc_sum_(a: &Tensor, alpha: f64, b: &Tensor, keepdim: bool, beta: f64) {
 	// The last dimension of `b` is the one we are summing over.
 	assert!(b.ndim() > 0);
 	let dim = b.dims[b.dims.len() - 1];
-	assert!(dim.stride == 1, "the summed dimension must be contiguous");
+	assert!(dim.is_contiguous(), "the summed dimension must be contiguous");
 
 	let mut out = OutputRef::new(a);
 
@@ -609,8 +614,7 @@ pub fn acc_sum_(a: &Tensor, alpha: f64, b: &Tensor, keepdim: bool, beta: f64) {
 	let batch_ndim;
 	if keepdim {
 		// The last dimension of `a` has size 1 and is not part of the batch dimensions.
-		assert!(a.dims[ndim - 1].size == 1);
-		out.prepend_dim(1);
+		out.prepend_dim(1, false);
 		batch_ndim = ndim - 1;
 	} else {
 		batch_ndim = ndim;
@@ -708,15 +712,16 @@ fn __gemm<'a, O: OutputHandler>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64, c: &mu
 	let dtype = a.tensor.dtype;
 	let batch_ndim = a.batch_dims.len().max(b.batch_dims.len());
 	c.init(batch_ndim + 2, dtype);
-	c.prepend_dim(c_cols.size);
-	c.prepend_dim(c_rows.size);
+
+	c.prepend_dim(c_cols.size, false);
+	c.prepend_dim(c_rows.size, false);
 
 	let batch = Batch::new(batch_ndim, [a.batch_dims, b.batch_dims], c);
 
 	let (c_buffer, c_offset) = c.make_buffer();
 
-	let a_rows_contiguous = a.cols.stride == 1;
-	let a_cols_contiguous = a.rows.stride == 1;
+	let a_rows_contiguous = a.cols.is_contiguous();
+	let a_cols_contiguous = a.rows.is_contiguous();
 	let transa = !a_rows_contiguous;
 	let lda = if a_rows_contiguous { a.rows.stride } else { a.cols.stride };
 	assert!(
@@ -724,8 +729,8 @@ fn __gemm<'a, O: OutputHandler>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64, c: &mu
 		"at least one of the matrix dimensions must be contiguous"
 	);
 
-	let b_rows_contiguous = b.cols.stride == 1;
-	let b_cols_contiguous = b.rows.stride == 1;
+	let b_rows_contiguous = b.cols.is_contiguous();
+	let b_cols_contiguous = b.rows.is_contiguous();
 	let transb = !b_rows_contiguous;
 	let ldb = if b_rows_contiguous { b.rows.stride } else { b.cols.stride };
 	assert!(
@@ -737,8 +742,8 @@ fn __gemm<'a, O: OutputHandler>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64, c: &mu
 	let n = c_cols.size;
 	let k = a.cols.size;
 
-	let c_rows_contiguous = c_cols.stride == 1;
-	let c_cols_contiguous = c_rows.stride == 1;
+	let c_rows_contiguous = c_cols.is_contiguous();
+	let c_cols_contiguous = c_rows.is_contiguous();
 	let transc = !c_rows_contiguous;
 	let ldc = if c_rows_contiguous { c_rows.stride } else { c_cols.stride };
 	assert!(
@@ -952,14 +957,14 @@ fn __norm<O: OutputHandler, RunOp: Fn(BufOff<&dyn Buffer>, BufOff<&BufferBase>, 
 
 	// The last dimension is the one we are normalizing
 	let dim = a.dims[ndim - 1];
-	assert!(dim.stride == 1, "the normalized dimension must be contiguous");
+	assert!(dim.is_contiguous(), "the normalized dimension must be contiguous");
 
 	let dtype = a.dtype;
 	out.init(ndim, dtype);
-	let out_stride = out.prepend_dim(dim.size);
-	assert!(out_stride == 1, "the output dimension must be contiguous");
+	let out_dim = out.prepend_dim(dim.size, false);
+	assert!(out_dim.is_contiguous(), "the output dimension must be contiguous");
 	let batch = Batch::new(batch_ndim, [&a.dims[..batch_ndim]], out);
-	let (out_buffer, out_offset) = out.make_buffer();
+	let out = out.make_buffer();
 
 	let a_buffer = buf_to_base(a.buffer.as_ref());
 
@@ -1078,43 +1083,36 @@ impl<const N: usize> Batch<N> {
 	pub fn new<O: OutputHandler>(
 		ndim: usize, inputs: [&[SizeAndStride]; N], out: &mut O,
 	) -> Batch<N> {
-		assert!(N > 0);
-
 		let mut batch = Batch::new_empty(ndim);
 
-		for d in (0..ndim).rev() {
-			// Get sizes and strides for the current dimension from all inputs
-			let mut in_sizes = [0; N];
-			let mut in_strides = [0; N];
-			for i in 0..N {
-				// Does the input have enough dimensions,
-				// or do we need to extend it with broadcasted dimensions?
-				if d < inputs[i].len() {
-					in_sizes[i] = inputs[i][d].size;
-					in_strides[i] = inputs[i][d].stride;
-				} else {
-					in_sizes[i] = 1;
-					in_strides[i] = 0;
-				}
-			}
+		// take the iterator to input dimensions, reverse it and append inf number of 1s
+		let mut inputs: [_; N] = inputs.map(|i| {
+			i.iter().rev().copied().chain(std::iter::repeat(SizeAndStride { size: 1, stride: 1 }))
+		});
 
-			// TODO - what happens when one of the dimensions has size 0?
+		for _ in 0..ndim {
+			// Get sizes and strides for the current dimension from all inputs
+			let mut in_dims = [Default::default(); N];
+			for i in 0..N {
+				in_dims[i] = inputs[i].next().unwrap();
+			}
 
 			// The dim_size should be the same for all inputs except for broadcasted inputs
 			// So max() gets the dim_size of the non-broadcasted inputs.
-			let dim_size = in_sizes.iter().copied().max().unwrap();
+			let dim_size = in_dims.iter().map(|i| i.size).max().unwrap_or(1);
+			let out_dim = out.prepend_dim(dim_size, true);
 
-			let out_stride = out.prepend_dim(dim_size);
-
-			// Find inputs that need broadcasting and set their strides to 0
-			for i in 0..N {
-				if in_sizes[i] != dim_size {
-					assert!(in_sizes[i] == 1, "cannot broadcast: incompatible dimensions");
-					in_strides[i] = 0;
+			// Get input strides. If needed, try to broadcast
+			let in_strides = in_dims.map(|i| {
+				if i.size == out_dim.size {
+					i.stride
+				} else {
+					assert!(i.size == 1, "cannot broadcast: incompatible dimensions");
+					0
 				}
-			}
+			});
 
-			batch.prepend_dim(dim_size, out_stride, in_strides);
+			batch.prepend_dim(out_dim.size, out_dim.stride, in_strides);
 		}
 
 		batch
@@ -1133,8 +1131,7 @@ impl<const N: usize> Batch<N> {
 			return;
 		}
 
-		// If there already are dimensions, try to merge the new dimension with the last
-		// one
+		// If there already are dimensions, try to merge the new dimension with the last one
 		if !self.rev_dims.is_empty() {
 			let prev = self.rev_dims.last_mut().unwrap();
 
