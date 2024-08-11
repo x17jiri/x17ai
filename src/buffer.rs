@@ -5,9 +5,19 @@ use crate::*;
 use std::fmt;
 
 /// This struct represents a pointer into a buffer.
-pub struct BufOff<Buf> {
+pub struct BufOff<Buf: Copy> {
 	pub buffer: Buf,
 	pub offset: usize,
+}
+
+impl<Buf: Copy> BufOff<Buf> {
+	pub fn make_batch(&self, batch_stride: usize) -> BatchBufOff<Buf> {
+		BatchBufOff {
+			buffer: self.buffer,
+			offset: self.offset,
+			batch_stride,
+		}
+	}
 }
 
 /// This struct represents a batch of contiguous slices.
@@ -17,13 +27,13 @@ pub struct BufOff<Buf> {
 ///
 /// Length of the slice and size of the batch are the same for all arguments.
 /// We don't want to repeat them and so they are only passed once in `SelfArg`.
-pub struct BatchBufOff<Buf> {
+pub struct BatchBufOff<Buf: Copy> {
 	pub buffer: Buf,
 	pub offset: usize,
 	pub batch_stride: usize,
 }
 
-impl<Buf> BatchBufOff<Buf> {
+impl<Buf: Copy> BatchBufOff<Buf> {
 	pub fn without_buf(&self) -> BatchBufOff<()> {
 		BatchBufOff {
 			buffer: (),

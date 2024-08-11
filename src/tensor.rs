@@ -473,6 +473,9 @@ fn __elem_wise<
 		assert_compatible_types(*a1, *a2);
 		assert_compatible_devices(*a1, *a2);
 	}
+	for i in a {
+		assert!(i.ndim() <= ndim, "incompatible number of dimensions");
+	}
 
 	out.init(ndim, dtype);
 	let inputs = a.map(|a| a.dims.as_slice());
@@ -508,18 +511,6 @@ fn __elem_wise<
 /// ```
 ///     a = a * alpha + b * beta
 /// ```
-/*
-pub fn rms_norm(a: &Tensor, eps: f64) -> Tensor {
-	let mut out = OutputBuilder::new(a.device());
-	#[rustfmt::skip] __norm(
-		a, &mut out,
-		|o: BufOff<&dyn Buffer>, a: BufOff<&BufferBase>, common: CommonArgs1D| unsafe {
-			o.buffer.rms_norm(o.without_buf(), a, common, eps)
-		},
-	);
-	out.make_tensor()
-}
-*/
 pub fn acc_(a: &Tensor, alpha: f64, b: &Tensor, beta: f64) {
 	let ndim = a.ndim();
 	let dtype = a.dtype;
@@ -542,54 +533,20 @@ pub fn acc_(a: &Tensor, alpha: f64, b: &Tensor, beta: f64) {
 ///     a = a * alpha + (b * c) * beta
 /// ```
 pub fn acc_mul_(a: &Tensor, alpha: f64, b: &Tensor, c: &Tensor, beta: f64) {
-	assert_compatible_types(a, b);
-	assert_compatible_types(a, c);
-	assert_compatible_devices(a, b);
-	assert_compatible_devices(a, c);
-
-	let mut out = OutputRef::new(a);
-
 	let ndim = a.ndim();
 	let dtype = a.dtype;
-	out.init(ndim, dtype);
-	let mut batch = Batch::new(ndim, [&b.dims, &c.dims], &mut out);
-
-	let (a_buffer, a_offset) = out.make_buffer();
-
-	let op_dim = batch.pop_dim();
-	assert!(op_dim.out_stride == 1);
-	assert!(op_dim.in_strides[0] == 1);
-	assert!(op_dim.in_strides[1] == 1);
-
-	let b_buffer = buf_to_base(b.buffer.as_ref());
-	let c_buffer = buf_to_base(c.buffer.as_ref());
-
-	batch.run(a_offset, [b.offset, c.offset], &|batch: BatchRun<2>| unsafe {
-		a_buffer.acc_mul(
-			BufOff {
-				buffer: (),
-				offset: batch.out_offset,
-				batch_stride: batch.out_stride,
-			},
-			BufOff {
-				buffer: b_buffer,
-				offset: batch.in_offsets[0],
-				batch_stride: batch.in_strides[0],
-			},
-			BufOff {
-				buffer: c_buffer,
-				offset: batch.in_offsets[1],
-				batch_stride: batch.in_strides[1],
-			},
-			CommonArgs1D {
-				dtype,
-				len: op_dim.size,
-				batch_size: batch.batch_size,
-			},
-			alpha,
-			beta,
-		);
-	});
+	let mut out = OutputRef::new(a);
+	#[rustfmt::skip]
+	__elem_wise(
+		ndim, dtype, [b, c], &mut out,
+		|
+			a: BatchBufOff<&dyn Buffer>,
+			[b, c]: [BatchBufOff<&BufferBase>; 2],
+			common: CommonArgs1D
+		| unsafe {
+			a.buffer.acc_mul(a.without_buf(), b, c, common, alpha, beta)
+		},
+	);
 }
 
 /// Accumulate the result of sum:
@@ -1099,7 +1056,8 @@ impl<const N: usize> Batch<N> {
 
 			// The dim_size should be the same for all inputs except for broadcasted inputs
 			// So max() gets the dim_size of the non-broadcasted inputs.
-			let dim_size = in_dims.iter().map(|i| i.size).max().unwrap_or(1);
+			let dim_size = in_dims.iter().map(|i| i.size).max();
+			let dim_size = dim_size.unwrap_or(1);
 			let out_dim = out.prepend_dim(dim_size, true);
 
 			// Get input strides. If needed, try to broadcast
@@ -1168,45 +1126,42 @@ impl<const N: usize> Batch<N> {
 		}
 	}
 
-	fn __run<F: Fn(BatchRun<N>)>(
-		&self, out_offset: usize, in_offsets: [usize; N], f: &F, batch: &[BatchDim<N>],
+	fn __run<O: Copy, I: Copy, F: Fn(BatchBufOff<O>, [BatchBufOff<I>; N], usize)>(
+		&self, mut out: BufOff<O>, mut in_: [BufOff<I>; N], f: &F, batch: &[BatchDim<N>],
 	) {
 		debug_assert!(!batch.is_empty());
 		let batch_dim = unsafe { batch.get_unchecked(batch.len() - 1) };
-		let batch = &batch[..batch.len() - 1];
-		if batch.is_empty() {
-			f(BatchRun {
-				out_offset,
-				out_stride: batch_dim.out_stride,
-				in_offsets,
-				in_strides: batch_dim.in_strides,
-				batch_size: batch_dim.size,
-			});
+		let sub_batch = unsafe { batch.get_unchecked(..batch.len() - 1) };
+		if sub_batch.is_empty() {
+			let out = out.make_batch(batch_dim.out_stride);
+			let mut in_ = in_.map(|i| i.make_batch(0));
+			for i in 0..N {
+				in_[i].batch_stride = batch_dim.in_strides[i];
+			}
+			let batch_size = batch_dim.size;
+			f(out, in_, batch_size);
 		} else {
-			for i in 0..batch_dim.size {
-				let out_offset = out_offset + i * batch_dim.out_stride;
-				let mut in_offsets = in_offsets;
-				for j in 0..N {
-					in_offsets[j] += i * batch_dim.in_strides[j];
+			for _ in 0..batch_dim.size {
+				self.__run(out, in_, f, sub_batch);
+
+				out.offset += batch_dim.out_stride;
+				for i in 0..N {
+					in_[i].offset += batch_dim.in_strides[i];
 				}
-				self.__run(out_offset, in_offsets, f, batch);
 			}
 		}
 	}
 
-	pub fn run<O, I, F: Fn(BatchBufOff<O>, [BatchBufOff<I>; N], usize)>(
+	pub fn run<O: Copy, I: Copy, F: Fn(BatchBufOff<O>, [BatchBufOff<I>; N], usize)>(
 		&self, out: BufOff<O>, in_: [BufOff<I>; N], f: &F,
 	) {
 		if self.rev_dims.len() <= self.popped_dims {
-			f(BatchRun {
-				out_offset,
-				out_stride: 0,
-				in_offsets,
-				in_strides: [0; N],
-				batch_size: 1,
-			});
+			let out = out.make_batch(0);
+			let in_ = in_.map(|i| i.make_batch(0));
+			let batch_size = 1;
+			f(out, in_, batch_size);
 		} else {
-			self.__run(out_offset, in_offsets, f, &self.rev_dims[self.popped_dims..]);
+			self.__run(out, in_, f, &self.rev_dims[self.popped_dims..]);
 		}
 	}
 }
