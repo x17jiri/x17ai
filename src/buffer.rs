@@ -73,6 +73,10 @@ pub trait Buffer {
 		common: CommonArgs1D, alpha: f64, beta: f64,
 	);
 
+	unsafe fn rsqrt(
+		&self, a: BatchBufOff<()>, b: BatchBufOff<&BufferBase>, common: CommonArgs1D, eps: f64,
+	);
+
 	// All matrices are stored in row-major order.
 	// Example:
 	// 	[	1 2 3

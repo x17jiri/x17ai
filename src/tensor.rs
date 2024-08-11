@@ -467,7 +467,7 @@ fn __elem_wise<
 	O: OutputHandler,
 	RunOp: Fn(BatchBufOff<&dyn Buffer>, [BatchBufOff<&BufferBase>; N], CommonArgs1D),
 >(
-	ndim: usize, dtype: DType, a: [&Tensor; N], out: &mut O, run_op: RunOp,
+	ndim: usize, dtype: DType, a: [&Tensor; N], mut out: O, run_op: RunOp,
 ) {
 	for [a1, a2] in a.windows(2) {
 		assert_compatible_types(*a1, *a2);
@@ -512,13 +512,9 @@ fn __elem_wise<
 ///     a = a * alpha + b * beta
 /// ```
 pub fn acc_(a: &Tensor, alpha: f64, b: &Tensor, beta: f64) {
-	let ndim = a.ndim();
-	let dtype = a.dtype;
-	let mut out = OutputRef::new(a);
-	#[rustfmt::skip]
-	__elem_wise(
-		ndim, dtype, [b], &mut out,
-		|
+	#[rustfmt::skip] __elem_wise(
+		a.ndim(), a.dtype, [b], OutputRef::new(a),
+		&|
 			a: BatchBufOff<&dyn Buffer>,
 			[b]: [BatchBufOff<&BufferBase>; 1],
 			common: CommonArgs1D
@@ -533,12 +529,8 @@ pub fn acc_(a: &Tensor, alpha: f64, b: &Tensor, beta: f64) {
 ///     a = a * alpha + (b * c) * beta
 /// ```
 pub fn acc_mul_(a: &Tensor, alpha: f64, b: &Tensor, c: &Tensor, beta: f64) {
-	let ndim = a.ndim();
-	let dtype = a.dtype;
-	let mut out = OutputRef::new(a);
-	#[rustfmt::skip]
-	__elem_wise(
-		ndim, dtype, [b, c], &mut out,
+	#[rustfmt::skip] __elem_wise(
+		a.ndim(), a.dtype, [b, c], OutputRef::new(a),
 		|
 			a: BatchBufOff<&dyn Buffer>,
 			[b, c]: [BatchBufOff<&BufferBase>; 2],
@@ -614,9 +606,10 @@ pub fn acc_mean_(a: &Tensor, alpha: f64, b: &Tensor, keepdim: bool, beta: f64) {
 	acc_sum_(a, alpha, b, keepdim, beta / n);
 }
 
-/// Calculate `x^2`:
+/// Calculate `x ^ 2`:
 /// ```
 ///     result = x * x
+/// ```
 pub fn square(x: &Tensor) -> Tensor {
 	let out = x.new_empty_like();
 	acc_mul_(&out, 0.0, x, x, 1.0);
@@ -625,17 +618,34 @@ pub fn square(x: &Tensor) -> Tensor {
 
 /// reciprocal of the square root:
 /// ```
-///     result = 1.0 / (self.sqrt() + eps)
-pub fn rsqrt(&self, eps: f64) -> Tensor {
-	let mut out = self.new_empty_like();
-	self.buffer.rsqrt(&mut out, self, eps);
-	out
+///     result = 1.0 / (a.sqrt() + eps)
+/// ```
+pub fn rsqrt(a: &Tensor, eps: f64) -> Tensor {
+	let result = a.new_empty_like();
+	#[rustfmt::skip] __elem_wise(
+		a.ndim(), a.dtype, [a], OutputRef::new(&result),
+		|
+			r: BatchBufOff<&dyn Buffer>,
+			[a]: [BatchBufOff<&BufferBase>; 1],
+			common: CommonArgs1D
+		| unsafe {
+			r.buffer.rsqrt(r.without_buf(), a, common, eps)
+		},
+	);
+	result
 }
 
-pub fn rsqrt_into(&self, eps: f64, into: &Tensor) {
-	assert_compatible_types(self, into);
-	assert_compatible_devices(self, into);
-	//self.buffer.rsqrt(into, self, eps);
+pub fn rsqrt_into(a: &Tensor, eps: f64, into: &Tensor) {
+	#[rustfmt::skip] __elem_wise(
+		a.ndim(), a.dtype, [a], OutputRef::new(into),
+		|
+			r: BatchBufOff<&dyn Buffer>,
+			[a]: [BatchBufOff<&BufferBase>; 1],
+			common: CommonArgs1D
+		| unsafe {
+			r.buffer.rsqrt(r.without_buf(), a, common, eps)
+		},
+	);
 }
 
 /*
@@ -675,7 +685,7 @@ fn __gemm<'a, O: OutputHandler>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64, c: &mu
 
 	let batch = Batch::new(batch_ndim, [a.batch_dims, b.batch_dims], c);
 
-	let (c_buffer, c_offset) = c.make_buffer();
+	let c = c.make_buffer();
 
 	let a_rows_contiguous = a.cols.is_contiguous();
 	let a_cols_contiguous = a.rows.is_contiguous();
@@ -736,7 +746,7 @@ fn __gemm<'a, O: OutputHandler>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64, c: &mu
 	let b_buf = buf_to_base(b.tensor.buffer.as_ref());
 	#[rustfmt::skip]
 	batch.run(
-		c_offset, [a.tensor.offset, b.tensor.offset],
+		c, [a.tensor.offset, b.tensor.offset],
 		&|batch: BatchRun<2>| {
 			unsafe {
 				c_buffer.gemm(
@@ -905,10 +915,15 @@ impl<'a> MatMulBackward<'a> {
 	}
 }
 
-fn __norm<O: OutputHandler, RunOp: Fn(BufOff<&dyn Buffer>, BufOff<&BufferBase>, CommonArgs1D)>(
+fn __norm<
+	O: OutputHandler,
+	RunOp: Fn(BatchBufOff<&dyn Buffer>, BatchBufOff<&BufferBase>, CommonArgs1D),
+>(
 	a: &Tensor, out: &mut O, run_op: RunOp,
 ) {
 	let ndim = a.ndim();
+	let dtype = a.dtype;
+
 	assert!(ndim > 0);
 	let batch_ndim = ndim - 1;
 
@@ -916,37 +931,35 @@ fn __norm<O: OutputHandler, RunOp: Fn(BufOff<&dyn Buffer>, BufOff<&BufferBase>, 
 	let dim = a.dims[ndim - 1];
 	assert!(dim.is_contiguous(), "the normalized dimension must be contiguous");
 
-	let dtype = a.dtype;
 	out.init(ndim, dtype);
 	let out_dim = out.prepend_dim(dim.size, false);
 	assert!(out_dim.is_contiguous(), "the output dimension must be contiguous");
 	let batch = Batch::new(batch_ndim, [&a.dims[..batch_ndim]], out);
 	let out = out.make_buffer();
 
-	let a_buffer = buf_to_base(a.buffer.as_ref());
+	let a = BufOff {
+		buffer: buf_to_base(a.buffer.as_ref()),
+		offset: a.offset,
+	};
 
-	batch.run(out_offset, [a.offset], &|batch: BatchRun<1>| {
-		run_op(
-			// o:
-			BufOff {
-				buffer: out_buffer,
-				offset: batch.out_offset,
-				batch_stride: batch.out_stride,
-			},
-			// a:
-			BufOff {
-				buffer: a_buffer,
-				offset: batch.in_offsets[0],
-				batch_stride: batch.in_strides[0],
-			},
-			// common:
-			CommonArgs1D {
-				dtype,
-				len: dim.size,
-				batch_size: batch.batch_size,
-			},
-		);
-	});
+	#[rustfmt::skip]
+	batch.run(
+		out, [a],
+		&|
+			out: BatchBufOff<&dyn Buffer>,
+			[a]: [BatchBufOff<&BufferBase>; 1],
+			batch_size: usize
+		| {
+			run_op(
+				out, a,
+				CommonArgs1D {
+					dtype,
+					len: dim.size,
+					batch_size,
+				},
+			);
+		}
+	);
 }
 
 pub fn rms_norm(a: &Tensor, eps: f64) -> Tensor {
@@ -1011,14 +1024,6 @@ impl fmt::Display for Tensor {
 }
 
 //--------------------------------------------------------------------------------------------------
-
-pub struct BatchRun<const N: usize> {
-	pub out_offset: usize,
-	pub out_stride: usize,
-	pub in_offsets: [usize; N],
-	pub in_strides: [usize; N],
-	pub batch_size: usize,
-}
 
 #[derive(Clone, Copy)]
 pub struct BatchDim<const N: usize> {
