@@ -569,28 +569,29 @@ pub fn acc_sum_(a: &Tensor, alpha: f64, b: &Tensor, keepdim: bool, beta: f64) {
 
 	let batch = Batch::new(batch_ndim, [&b.dims[..b.ndim() - 1]], &mut out);
 
-	let (a_buffer, a_offset) = out.make_buffer();
+	let out = out.make_buffer();
+	let b = BufOff {
+		buffer: buf_to_base(b.buffer.as_ref()),
+		offset: b.offset,
+	};
 
-	batch.run(a_offset, [b.offset], &|batch: BatchRun<1>| unsafe {
-		a_buffer.acc_sum(
-			BufOff {
-				buffer: (),
-				offset: batch.out_offset,
-				batch_stride: batch.out_stride,
-			},
-			BufOff {
-				buffer: buf_to_base(b.buffer.as_ref()),
-				offset: batch.in_offsets[0],
-				batch_stride: batch.in_strides[0],
-			},
-			CommonArgs1D {
-				dtype,
-				len: dim.size,
-				batch_size: batch.batch_size,
-			},
-			alpha,
-			beta,
-		);
+	#[rustfmt::skip]
+	batch.run(
+		out, [b],
+		&|
+			out: BatchBufOff<&dyn Buffer>,
+			[a]: [BatchBufOff<&BufferBase>; 1],
+			batch_size: usize
+		| unsafe {
+			out.buffer.acc_sum(
+				out.without_buf(), a,
+				CommonArgs1D {
+					dtype,
+					len: dim.size,
+					batch_size,
+				},
+				alpha, beta,
+			);
 	});
 }
 
@@ -646,25 +647,6 @@ pub fn rsqrt_into(a: &Tensor, eps: f64, into: &Tensor) {
 	);
 }
 
-/*
-	/// Calculate the mean of the last dimension.
-	///
-	/// If keepdim is true, the last dimension is kept in the result with size 1.
-	///
-	/// If keepdim is false, the last dimension is removed from the result.
-	pub fn mean(&self, keepdim: bool) -> Tensor {
-		let mut out = self.new_empty_like();
-		//self.buffer.mean(&mut out, self, keepdim);
-		//out
-	}
-
-	pub fn mean_into(&self, keepdim: bool, into: &Tensor) {
-		assert_compatible_types(self, into);
-		assert_compatible_devices(self, into);
-		//self.buffer.mean(into, self, keepdim);
-	}
-*/
-
 // c = a * b * alpha
 fn __gemm<'a, O: OutputHandler>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64, c: &mut O) {
 	assert_compatible_types(a.tensor, b.tensor);
@@ -716,29 +698,13 @@ fn __gemm<'a, O: OutputHandler>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64, c: &mu
 		"at least one of the matrix dimensions must be contiguous"
 	);
 
-	let mut transa = transa;
-	let mut transb = transb;
-	let mut m = m;
-	let mut n = n;
-	let mut a = a;
-	let mut b = b;
-	let mut lda = lda;
-	let mut ldb = ldb;
-	if transc {
-		// C^T = B^T * A^T
-		(transa, transb) = (!transb, !transa);
-		(m, n) = (n, m);
-		(a, b) = (b, a);
-		(lda, ldb) = (ldb, lda);
-	}
-	let transa = transa;
-	let transb = transb;
-	let m = m;
-	let n = n;
-	let a = a;
-	let b = b;
-	let lda = lda;
-	let ldb = ldb;
+	let (a, lda, transa, b, ldb, transb, m, n) = {
+		if transc {
+			(b, ldb, !transb, a, lda, !transa, n, m)
+		} else {
+			(a, lda, transa, b, ldb, transb, m, n)
+		}
+	};
 
 	let a_buf = buf_to_base(a.tensor.buffer.as_ref());
 	let b_buf = buf_to_base(b.tensor.buffer.as_ref());
