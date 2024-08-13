@@ -4,6 +4,7 @@
 use crate::*;
 use std::fmt;
 
+#[derive(Copy, Clone)]
 /// This struct represents a pointer into a buffer.
 pub struct BufOff<Buf: Copy> {
 	pub buffer: Buf,
@@ -20,6 +21,7 @@ impl<Buf: Copy> BufOff<Buf> {
 	}
 }
 
+#[derive(Copy, Clone)]
 /// This struct represents a batch of contiguous slices.
 ///
 /// The slices are stored in a `buffer` at given `offset`.

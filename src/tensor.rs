@@ -467,14 +467,12 @@ fn __elem_wise<
 	O: OutputHandler,
 	RunOp: Fn(BatchBufOff<&dyn Buffer>, [BatchBufOff<&BufferBase>; N], CommonArgs1D),
 >(
-	ndim: usize, dtype: DType, a: [&Tensor; N], mut out: O, run_op: RunOp,
+	ndim: usize, dtype: DType, a: [&Tensor; N], out: &mut O, run_op: RunOp,
 ) {
-	for [a1, a2] in a.windows(2) {
-		assert_compatible_types(*a1, *a2);
-		assert_compatible_devices(*a1, *a2);
-	}
-	for i in a {
-		assert!(i.ndim() <= ndim, "incompatible number of dimensions");
+	for i in 1..N {
+		assert_compatible_types(a[0], a[i]);
+		assert_compatible_devices(a[0], a[i]);
+		assert!(a[i].ndim() <= ndim, "incompatible number of dimensions");
 	}
 
 	out.init(ndim, dtype);
@@ -513,7 +511,7 @@ fn __elem_wise<
 /// ```
 pub fn acc_(a: &Tensor, alpha: f64, b: &Tensor, beta: f64) {
 	#[rustfmt::skip] __elem_wise(
-		a.ndim(), a.dtype, [b], OutputRef::new(a),
+		a.ndim(), a.dtype, [b], &mut OutputRef::new(a),
 		&|
 			a: BatchBufOff<&dyn Buffer>,
 			[b]: [BatchBufOff<&BufferBase>; 1],
@@ -530,7 +528,7 @@ pub fn acc_(a: &Tensor, alpha: f64, b: &Tensor, beta: f64) {
 /// ```
 pub fn acc_mul_(a: &Tensor, alpha: f64, b: &Tensor, c: &Tensor, beta: f64) {
 	#[rustfmt::skip] __elem_wise(
-		a.ndim(), a.dtype, [b, c], OutputRef::new(a),
+		a.ndim(), a.dtype, [b, c], &mut OutputRef::new(a),
 		|
 			a: BatchBufOff<&dyn Buffer>,
 			[b, c]: [BatchBufOff<&BufferBase>; 2],
@@ -623,7 +621,7 @@ pub fn square(x: &Tensor) -> Tensor {
 pub fn rsqrt(a: &Tensor, eps: f64) -> Tensor {
 	let result = a.new_empty_like();
 	#[rustfmt::skip] __elem_wise(
-		a.ndim(), a.dtype, [a], OutputRef::new(&result),
+		a.ndim(), a.dtype, [a], &mut OutputRef::new(&result),
 		|
 			r: BatchBufOff<&dyn Buffer>,
 			[a]: [BatchBufOff<&BufferBase>; 1],
@@ -637,7 +635,7 @@ pub fn rsqrt(a: &Tensor, eps: f64) -> Tensor {
 
 pub fn rsqrt_into(a: &Tensor, eps: f64, into: &Tensor) {
 	#[rustfmt::skip] __elem_wise(
-		a.ndim(), a.dtype, [a], OutputRef::new(into),
+		a.ndim(), a.dtype, [a], &mut OutputRef::new(into),
 		|
 			r: BatchBufOff<&dyn Buffer>,
 			[a]: [BatchBufOff<&BufferBase>; 1],
