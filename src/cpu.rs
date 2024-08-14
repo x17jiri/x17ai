@@ -152,6 +152,16 @@ impl CPUBuffer {
 		}
 	}
 
+	fn rsqrt_f32(&self, offset: usize, a: &Self, a_offset: usize, count: usize, eps: f64) {
+		let out_vec = self.cast::<f32>(offset, count);
+		let in_vec = a.cast::<f32>(a_offset, count);
+
+		for (o, i) in out_vec.iter().zip(in_vec) {
+			let val = 1.0 / (f64::from(i.get()) + eps).sqrt();
+			o.set(val as f32);
+		}
+	}
+
 	fn acc_f32(
 		&self, offset: usize, b: &Self, b_offset: usize, count: usize, alpha: f64, beta: f64,
 	) {
@@ -263,7 +273,7 @@ impl Buffer for CPUBuffer {
 	}
 
 	unsafe fn rms_norm(
-		&self, o: BufOff<()>, a: BufOff<&BufferBase>, common: CommonArgs1D, eps: f64,
+		&self, o: BatchBufOff<()>, a: BatchBufOff<&BufferBase>, common: CommonArgs1D, eps: f64,
 	) {
 		let out = self;
 		for i in 0..common.batch_size {
@@ -279,7 +289,9 @@ impl Buffer for CPUBuffer {
 		}
 	}
 
-	unsafe fn softmax(&self, o: BufOff<()>, a: BufOff<&BufferBase>, common: CommonArgs1D) {
+	unsafe fn softmax(
+		&self, o: BatchBufOff<()>, a: BatchBufOff<&BufferBase>, common: CommonArgs1D,
+	) {
 		let out = self;
 		for i in 0..common.batch_size {
 			let out_offset = o.offset + i * o.batch_stride;
@@ -294,8 +306,26 @@ impl Buffer for CPUBuffer {
 		}
 	}
 
+	unsafe fn rsqrt(
+		&self, o: BatchBufOff<()>, a: BatchBufOff<&BufferBase>, common: CommonArgs1D, eps: f64,
+	) {
+		let out = self;
+		let a_buffer = self.cast_buffer(a.buffer);
+		for i in 0..common.batch_size {
+			let out_offset = o.offset + i * o.batch_stride;
+			let a_offset = a.offset + i * a.batch_stride;
+			match common.dtype {
+				DType { kind: DTypeKind::Float, bits: 32 } => {
+					out.rsqrt_f32(out_offset, a_buffer, a_offset, common.len, eps)
+				},
+				_ => todo!(),
+			}
+		}
+	}
+
 	unsafe fn acc(
-		&self, a: BufOff<()>, b: BufOff<&BufferBase>, common: CommonArgs1D, alpha: f64, beta: f64,
+		&self, a: BatchBufOff<()>, b: BatchBufOff<&BufferBase>, common: CommonArgs1D, alpha: f64,
+		beta: f64,
 	) {
 		let b_buffer = self.cast_buffer(b.buffer);
 		for i in 0..common.batch_size {
@@ -311,8 +341,8 @@ impl Buffer for CPUBuffer {
 	}
 
 	unsafe fn acc_mul(
-		&self, a: BufOff<()>, b: BufOff<&BufferBase>, c: BufOff<&BufferBase>, common: CommonArgs1D,
-		alpha: f64, beta: f64,
+		&self, a: BatchBufOff<()>, b: BatchBufOff<&BufferBase>, c: BatchBufOff<&BufferBase>,
+		common: CommonArgs1D, alpha: f64, beta: f64,
 	) {
 		let b_buffer = self.cast_buffer(b.buffer);
 		let c_buffer = self.cast_buffer(c.buffer);
@@ -331,7 +361,8 @@ impl Buffer for CPUBuffer {
 	}
 
 	unsafe fn acc_sum(
-		&self, a: BufOff<()>, b: BufOff<&BufferBase>, common: CommonArgs1D, alpha: f64, beta: f64,
+		&self, a: BatchBufOff<()>, b: BatchBufOff<&BufferBase>, common: CommonArgs1D, alpha: f64,
+		beta: f64,
 	) {
 		let b_buffer = self.cast_buffer(b.buffer);
 		for i in 0..common.batch_size {

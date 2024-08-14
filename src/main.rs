@@ -16,12 +16,6 @@
 #[cold]
 fn cold_path() {}
 
-#[derive(Debug)]
-pub enum Error {
-	TooManyDims,
-	TooManyElems,
-}
-
 mod buffer;
 mod cpu;
 mod device;
@@ -201,7 +195,7 @@ impl Linear {
 	pub fn new(
 		inputs: usize, outputs: usize, nhead: usize, dtype: DType, ctx: &mut Context,
 	) -> Linear {
-		let parts = nhead.max(1);
+		let parts = if nhead != 0 { nhead } else { 1 };
 		let w_opt = ctx.add_param(dtype, parts, outputs * inputs);
 		let w = w_opt.borrow().value().clone();
 		let w = w.reshape(&[parts * outputs, inputs]);

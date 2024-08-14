@@ -436,6 +436,13 @@ impl Tensor {
 			cols: SizeAndStride { size: 1, stride: 1 },
 		}
 	}
+
+	pub fn bufoff(&self) -> BufOff<&BufferBase> {
+		BufOff {
+			buffer: buf_to_base(self.buffer.as_ref()),
+			offset: self.offset,
+		}
+	}
 }
 
 pub fn assert_compatible_types(a: &Tensor, b: &Tensor) {
@@ -478,20 +485,14 @@ fn __elem_wise<
 	out.init(ndim, dtype);
 	let inputs = a.map(|a| a.dims.as_slice());
 	let mut batch = Batch::new(ndim, inputs, out);
-	let out = out.make_buffer();
 
 	let op_dim = batch.pop_dim();
 	assert!(op_dim.out_stride == 1);
 	assert!(op_dim.in_strides == [1; N]);
 
-	let a = a.map(|a| BufOff {
-		buffer: buf_to_base(a.buffer.as_ref()),
-		offset: a.offset,
-	});
-
 	#[rustfmt::skip]
 	batch.run(
-		out, a,
+		out.make_buffer(), a.map(|i| i.bufoff()),
 		&|out: BatchBufOff<&dyn Buffer>, a: [BatchBufOff<&BufferBase>; N], batch_size: usize| {
 			run_op(
 				out, a,
@@ -569,15 +570,9 @@ pub fn acc_sum_(a: &Tensor, alpha: f64, b: &Tensor, keepdim: bool, beta: f64) {
 
 	let batch = Batch::new(batch_ndim, [&b.dims[..b.ndim() - 1]], &mut out);
 
-	let out = out.make_buffer();
-	let b = BufOff {
-		buffer: buf_to_base(b.buffer.as_ref()),
-		offset: b.offset,
-	};
-
 	#[rustfmt::skip]
 	batch.run(
-		out, [b],
+		out.make_buffer(), [b.bufoff()],
 		&|
 			out: BatchBufOff<&dyn Buffer>,
 			[a]: [BatchBufOff<&BufferBase>; 1],
@@ -665,8 +660,6 @@ fn __gemm<'a, O: OutputHandler>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64, c: &mu
 
 	let batch = Batch::new(batch_ndim, [a.batch_dims, b.batch_dims], c);
 
-	let c = c.make_buffer();
-
 	let a_rows_contiguous = a.cols.is_contiguous();
 	let a_cols_contiguous = a.rows.is_contiguous();
 	let transa = !a_rows_contiguous;
@@ -710,18 +703,20 @@ fn __gemm<'a, O: OutputHandler>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64, c: &mu
 	let b_buf = buf_to_base(b.tensor.buffer.as_ref());
 	#[rustfmt::skip]
 	batch.run(
-		c, [a.tensor.offset, b.tensor.offset],
-		&|batch: BatchRun<2>| {
-			unsafe {
-				c_buffer.gemm(
-					dtype, batch.out_offset, ldc, batch.out_stride,
-					m, n, k,
-					a_buf, batch.in_offsets[0], lda, transa, batch.in_strides[0],
-					b_buf, batch.in_offsets[1], ldb, transb, batch.in_strides[1],
-					alpha, 0.0,
-					batch.batch_size,
-				);
-			}
+		c.make_buffer(), [a.tensor.bufoff(), b.tensor.bufoff()],
+		&|
+			c: BatchBufOff<&dyn Buffer>,
+			[a, b]: [BatchBufOff<&BufferBase>; 2],
+			batch_size: usize
+		| unsafe {
+			c.buffer.gemm(
+				dtype, c.offset, ldc, c.batch_stride,
+				m, n, k,
+				a_buf, a.offset, lda, transa, a.batch_stride,
+				b_buf, b.offset, ldb, transb, b.batch_stride,
+				alpha, 0.0,
+				batch_size,
+			);
 		},
 	);
 }
@@ -899,16 +894,10 @@ fn __norm<
 	let out_dim = out.prepend_dim(dim.size, false);
 	assert!(out_dim.is_contiguous(), "the output dimension must be contiguous");
 	let batch = Batch::new(batch_ndim, [&a.dims[..batch_ndim]], out);
-	let out = out.make_buffer();
-
-	let a = BufOff {
-		buffer: buf_to_base(a.buffer.as_ref()),
-		offset: a.offset,
-	};
 
 	#[rustfmt::skip]
 	batch.run(
-		out, [a],
+		out.make_buffer(), [a.bufoff()],
 		&|
 			out: BatchBufOff<&dyn Buffer>,
 			[a]: [BatchBufOff<&BufferBase>; 1],
@@ -928,9 +917,14 @@ fn __norm<
 
 pub fn rms_norm(a: &Tensor, eps: f64) -> Tensor {
 	let mut out = OutputBuilder::new(a.device());
-	#[rustfmt::skip] __norm(
+	#[rustfmt::skip]
+	__norm(
 		a, &mut out,
-		|o: BufOff<&dyn Buffer>, a: BufOff<&BufferBase>, common: CommonArgs1D| unsafe {
+		|
+			o: BatchBufOff<&dyn Buffer>,
+			a: BatchBufOff<&BufferBase>,
+			common: CommonArgs1D
+		| unsafe {
 			o.buffer.rms_norm(o.without_buf(), a, common, eps)
 		},
 	);
@@ -939,9 +933,14 @@ pub fn rms_norm(a: &Tensor, eps: f64) -> Tensor {
 
 pub fn softmax(a: &Tensor) -> Tensor {
 	let mut out = OutputBuilder::new(a.device());
-	#[rustfmt::skip] __norm(
+	#[rustfmt::skip]
+	__norm(
 		a, &mut out,
-		|o: BufOff<&dyn Buffer>, a: BufOff<&BufferBase>, common: CommonArgs1D| unsafe {
+		|
+			o: BatchBufOff<&dyn Buffer>,
+			a: BatchBufOff<&BufferBase>,
+			common: CommonArgs1D
+		| unsafe {
 			o.buffer.softmax(o.without_buf(), a, common)
 		},
 	);
