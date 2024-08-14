@@ -642,8 +642,8 @@ pub fn rsqrt_into(a: &Tensor, eps: f64, into: &Tensor) {
 	);
 }
 
-// c = a * b * alpha
-fn __gemm<'a, O: OutputHandler>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64, c: &mut O) {
+// c = a * b * alpha + c * beta
+fn __gemm<'a, O: OutputHandler>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64, beta: f64, c: &mut O) {
 	assert_compatible_types(a.tensor, b.tensor);
 	assert_compatible_devices(a.tensor, b.tensor);
 
@@ -714,7 +714,7 @@ fn __gemm<'a, O: OutputHandler>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64, c: &mu
 				m, n, k,
 				a_buf, a.offset, lda, transa, a.batch_stride,
 				b_buf, b.offset, ldb, transb, b.batch_stride,
-				alpha, 0.0,
+				alpha, beta,
 				batch_size,
 			);
 		},
@@ -811,13 +811,18 @@ impl<'a> MatMul<'a> {
 	/// ```
 	pub fn eval(&self) -> Tensor {
 		let mut c = OutputBuilder::new(self.a.tensor.device());
-		__gemm(self.a, self.b, self.scale, &mut c);
+		__gemm(self.a, self.b, self.scale, 0.0, &mut c);
 		c.make_tensor()
 	}
 
 	pub fn eval_into(&self, into: &Tensor) {
 		let mut c = OutputRef::new(into);
-		__gemm(self.a, self.b, self.scale, &mut c);
+		__gemm(self.a, self.b, self.scale, 0.0, &mut c);
+	}
+
+	pub fn acc_into(&self, into: &Tensor) {
+		let mut c = OutputRef::new(into);
+		__gemm(self.a, self.b, self.scale, 1.0, &mut c);
 	}
 
 	/// In debug builds, assert that the current scale is equal to the

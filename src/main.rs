@@ -51,21 +51,8 @@ pub struct AdamParam {
 }
 
 impl OptParam for AdamParam {
-	// grad needs to have shape: [*, parts, part_elems]
-	// where * is any number of batch dimensions
-	fn acc(&mut self, grads: Tensor) {
-		assert!(grads.ndim() >= self.grad.ndim());
-		assert!(grads.size(-2) == self.grad.size(-2));
-		assert!(grads.size(-1) == self.grad.size(-1));
-
-		// merge all the batch dimensions into one
-		let batch_size = grads.elems() / self.grad.elems();
-		let grads = grads.reshape(&[batch_size, self.parts, self.part_elems]);
-
-		// permute dimensions: [batch, ...] -> [..., batch]
-		let grads = grads.permuted(&[1, 2, 0]);
-
-		acc_sum_(&self.grad, 1.0, &grads, false, 1.0);
+	fn grad(&self) -> &Tensor {
+		&self.grad
 	}
 
 	fn zero_grad(&mut self) {
@@ -154,7 +141,7 @@ impl Context {
 }
 
 pub trait OptParam {
-	fn acc(&mut self, value: Tensor);
+	fn grad(&self) -> &Tensor;
 	fn zero_grad(&mut self);
 	fn step(&mut self, learning_rate: f64);
 	fn push_tensor(&mut self, tensor: Tensor);
@@ -182,7 +169,7 @@ pub trait OptParam {
 struct Linear {
 	pub inputs: usize,
 	pub outputs: usize,
-	pub nhead: usize,
+	pub nhead: Option<usize>,
 	pub parts: usize,
 	pub w: Tensor,
 	pub w_opt: Rc<RefCell<dyn OptParam>>,
@@ -193,9 +180,9 @@ struct Linear {
 
 impl Linear {
 	pub fn new(
-		inputs: usize, outputs: usize, nhead: usize, dtype: DType, ctx: &mut Context,
+		inputs: usize, outputs: usize, nhead: Option<usize>, dtype: DType, ctx: &mut Context,
 	) -> Linear {
-		let parts = if nhead != 0 { nhead } else { 1 };
+		let parts = nhead.unwrap_or(1);
 		let w_opt = ctx.add_param(dtype, parts, outputs * inputs);
 		let w = w_opt.borrow().value().clone();
 		let w = w.reshape(&[parts * outputs, inputs]);
@@ -204,7 +191,7 @@ impl Linear {
 
 		#[rustfmt::skip]
 		Linear {
-			inputs, outputs, nhead: parts, parts,
+			inputs, outputs, nhead, parts,
 			w, w_opt,
 			scale, backward_scale, dtype,
 		}
@@ -219,9 +206,9 @@ impl Linear {
 
 		w_opt.push_tensor(x);
 
-		if self.nhead != 0 {
+		if let Some(nhead) = self.nhead {
 			// [..., head * outputs] -> [..., head, outputs]
-			y.reshape_last_n(1, &[self.nhead, self.outputs])
+			y.reshape_last_n(1, &[nhead, self.outputs])
 		} else {
 			y
 		}
@@ -231,28 +218,21 @@ impl Linear {
 		let mut w_opt = self.w_opt.borrow_mut();
 		let x = w_opt.pop_tensor();
 
-		if self.nhead != 0 {
+		if let Some(nhead) = self.nhead {
 			// [..., head, outputs] -> [..., head * outputs]
-			dy = dy.reshape_last_n(2, &[self.nhead * self.outputs])
+			dy = dy.reshape_last_n(2, &[nhead * self.outputs])
 		};
 		let grad = mm(&self.w, x.as_col()).backward(&dy);
 
 		// dw
 		let dw = grad.da();
 		let dw = dw.scale(1.0).assert_normalizing_scale();
-		let dw = dw.eval();
-
-		// Reshape the gradient to the shape expected by the optimizer
-		// [..., parts * outputs, inputs] -> [..., parts, outputs * inputs]
-		let dw = dw.reshape_last_n(2, &[self.parts, self.outputs * self.inputs]);
-
-		w_opt.acc(dw);
+		dw.acc_into(&w_opt.grad().clone().reshape(&[self.parts * self.outputs, self.inputs]));
 
 		// dx
 		let dx = grad.db();
 		let dx = dx.scale(self.backward_scale).assert_normalizing_scale();
 		let dx = dx.eval();
-
 		dx
 	}
 }
