@@ -1,6 +1,6 @@
 # Run rustfmt with this config (it should be picked up automatically).
 version = "Two"
-edition = "2021"
+edition = "2024"
 use_small_heuristics = "Max"
 max_width = 100
 #single_line_if_else_max_width = 100

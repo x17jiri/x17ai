@@ -12,28 +12,63 @@
 #![allow(dead_code)] // TODO - remove when project stabilizes
 #![feature(arbitrary_self_types)]
 #![feature(dispatch_from_dyn)]
+#![feature(generic_const_exprs)]
 
 #[cold]
 fn cold_path() {}
 
+mod batch;
 mod buffer;
 mod cpu;
 mod device;
+mod dim_merger;
 mod dtype;
+mod expr;
 mod format;
+mod matrix;
 mod rand;
 mod tensor;
 
+use crate::batch::*;
 use crate::buffer::*;
 use crate::cpu::*;
 use crate::device::*;
+use crate::dim_merger::*;
 use crate::dtype::*;
+use crate::expr::*;
 use crate::format::*;
+use crate::matrix::*;
 use crate::rand::*;
 use crate::tensor::*;
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+
+/*
+
+	b.acc_to(a, alpha, beta)                       # acc_(a, alpha, b, beta)
+
+	b.vec_mul(c).save_to(a)                        # acc_mul_(a, 0.0, b, c, 1.0)
+	b.vec_mul(c).acc_to(a, alpha, beta)            # acc_mul_(a, alpha, b, c, beta)
+
+	b.sum(keepdim).save_to(a)                      # acc_sum_(a, 0.0, b, 1.0)
+	b.sum(keepdim).acc_to(a, alpha, beta)          # acc_sum_(a, alpha, b, beta)
+
+	b.sum_square(keepdim).save_to(a)               # acc_sum_square_(a, 0.0, b, 1.0)
+	b.sum_square(keepdim).acc_to(a, alpha, beta)   # acc_sum_square_(a, alpha, b, beta)
+
+
+	# adam mini
+	self.grad.acc_to(&self.m, self.beta1, 1.0 - self.beta1);
+	self.grad.mean_square(keepdim: true).acc_to(&self.v, self.beta2, 1.0 - self.beta2);
+	self.v.one_over_sqrt().save_to(&self.v_recip);
+	self.m.vec_mul(&self.v_recip).acc_to(&self.value, 1.0, -self.learning_rate);
+
+	# rms norm
+	val.mean_square(keepdim: true).save_to(&scale);
+	scale.one_over_sqrt().save_to(&scale_recip);
+
+*/
 
 // Inspired by Adam-mini: https://arxiv.org/abs/2406.16793
 pub struct AdamParam {
@@ -60,9 +95,13 @@ impl OptParam for AdamParam {
 	}
 
 	fn step(&mut self, learning_rate: f64) {
+		// update momentum
 		acc_(&self.m, self.beta1, &self.grad, 1.0 - self.beta1);
+
+		// update velocity
 		acc_mean_(&self.v, self.beta2, &square(&self.grad), true, 1.0 - self.beta2);
 		rsqrt_into(&self.v, self.eps, &self.v_recip);
+
 		acc_mul_(&self.value, 1.0, &self.m, &self.v_recip, -learning_rate);
 	}
 

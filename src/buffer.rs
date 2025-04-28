@@ -4,80 +4,47 @@
 use crate::*;
 use std::fmt;
 
-#[derive(Copy, Clone)]
-/// This struct represents a pointer into a buffer.
-pub struct BufOff<Buf: Copy> {
-	pub buffer: Buf,
-	pub offset: usize,
+pub struct BufferBase {
+	pub device: Rc<dyn Device>,
+	pub size_bytes: usize,
 }
 
-impl<Buf: Copy> BufOff<Buf> {
-	pub fn make_batch(&self, batch_stride: usize) -> BatchBufOff<Buf> {
-		BatchBufOff {
-			buffer: self.buffer,
-			offset: self.offset,
-			batch_stride,
-		}
-	}
-}
-
-#[derive(Copy, Clone)]
-/// This struct represents a batch of contiguous slices.
-///
-/// The slices are stored in a `buffer` at given `offset`.
-/// To get to the next slice, we need to add `batch_stride` to the offset.
-///
-/// Length of the slice and size of the batch are the same for all arguments.
-/// We don't want to repeat them and so they are only passed once in `SelfArg`.
-pub struct BatchBufOff<Buf: Copy> {
-	pub buffer: Buf,
+pub struct SliceSet {
+	pub len: usize,
+	pub batch_size: usize,
 	pub offset: usize,
 	pub batch_stride: usize,
 }
 
-impl<Buf: Copy> BatchBufOff<Buf> {
-	pub fn without_buf(&self) -> BatchBufOff<()> {
-		BatchBufOff {
-			buffer: (),
-			offset: self.offset,
-			batch_stride: self.batch_stride,
-		}
-	}
-}
-pub struct CommonArgs1D {
-	pub dtype: DType,
-	pub len: usize,
-	pub batch_size: usize,
-}
-
 pub trait Buffer {
-	fn zeros_(&self, tensor: &Tensor);
-	fn randn_(&self, tensor: &Tensor);
+	// If any of the slices represented by a SliceSet are not in bounds,
+	// these functions will panic.
 
-	unsafe fn rms_norm(
-		&self, o: BatchBufOff<()>, a: BatchBufOff<&BufferBase>, common: CommonArgs1D, eps: f64,
+	fn zeros(&self, dtype: DType, dst_slices: &SliceSet);
+	fn randn(&self, dtype: DType, dst_slices: &SliceSet);
+
+	fn copy(&self, dtype: DType, dst_slices: &SliceSet, src: &BufferBase, src_slices: &SliceSet);
+	fn acc(
+		&self, dtype: DType, dst_slices: &SliceSet, dst_weight: f64, b: &BufferBase,
+		b_slices: &SliceSet, b_weight: f64,
 	);
 
-	unsafe fn softmax(&self, o: BatchBufOff<()>, a: BatchBufOff<&BufferBase>, common: CommonArgs1D);
-
-	unsafe fn acc(
-		&self, a: BatchBufOff<()>, b: BatchBufOff<&BufferBase>, common: CommonArgs1D, alpha: f64,
-		beta: f64,
+	fn vec_mul(
+		&self, dtype: DType, dst_slices: &SliceSet, a: &BufferBase, a_slices: &SliceSet,
+		b: &BufferBase, b_slices: &SliceSet,
+	);
+	fn vec_mul_acc(
+		&self, dtype: DType, dst_slices: &SliceSet, dst_weight: f64, a: &BufferBase,
+		a_slices: &SliceSet, b: &BufferBase, b_slices: &SliceSet, ab_weight: f64,
 	);
 
-	unsafe fn acc_sum(
-		&self, a: BatchBufOff<()>, b: BatchBufOff<&BufferBase>, common: CommonArgs1D, alpha: f64,
-		beta: f64,
+	fn rsqrt(
+		&self, dtype: DType, dst_slices: &SliceSet, a: &BufferBase, a_slices: &SliceSet, eps: f64,
 	);
 
-	unsafe fn acc_mul(
-		&self, a: BatchBufOff<()>, b: BatchBufOff<&BufferBase>, c: BatchBufOff<&BufferBase>,
-		common: CommonArgs1D, alpha: f64, beta: f64,
-	);
+	fn softmax(&self, dtype: DType, dst_slices: &SliceSet, a: &BufferBase, a_slices: &SliceSet);
 
-	unsafe fn rsqrt(
-		&self, a: BatchBufOff<()>, b: BatchBufOff<&BufferBase>, common: CommonArgs1D, eps: f64,
-	);
+	fn rms_norm(&self, slices: &SliceSet<1>, eps: f64);
 
 	// All matrices are stored in row-major order.
 	// Example:
@@ -102,12 +69,8 @@ pub trait Buffer {
 	) -> fmt::Result;
 }
 
-pub struct BufferBase {
-	pub device: Rc<dyn Device>,
-	pub capacity: usize,
-}
-
 impl BufferBase {
+	#[inline]
 	pub fn is_on_device(&self, device: &dyn Device) -> bool {
 		let my_dev = self.device.as_ref();
 		let my_dev = my_dev as *const dyn Device;
@@ -118,33 +81,53 @@ impl BufferBase {
 
 		my_dev == dev
 	}
-}
 
-pub fn buf_to_base(buf: &dyn Buffer) -> &BufferBase {
-	let buf = buf as *const dyn Buffer;
-	let buf = buf as *const BufferBase;
-	unsafe { &*buf }
-}
+	#[inline]
+	pub fn has_same_device(&self, other: &BufferBase) -> bool {
+		other.is_on_device(self.device.as_ref())
+	}
 
-pub fn is_buf_owned_by_device(buf: &dyn Buffer, device: &dyn Device) -> bool {
-	let buffer_device = buf_to_base(buf).device.as_ref();
-	let buffer_device = buffer_device as *const dyn Device;
-	let buffer_device = buffer_device as *const u8;
+	#[inline]
+	pub fn from_dyn_buf(buf: &dyn Buffer) -> &BufferBase {
+		let buf = buf as *const dyn Buffer;
+		let buf = buf as *const BufferBase;
+		unsafe { &*buf }
+	}
 
-	let expected_device = device as *const dyn Device;
-	let expected_device = expected_device as *const u8;
+	pub fn is_in_bounds(&self, dtype: DType, offset: usize, len: usize) -> bool {
+		let elems = offset + len;
+		let bytes = dtype.array_bytes(elems);
+		bytes.is_some_and(|b| b <= self.size_bytes)
+	}
 
-	buffer_device == expected_device
-}
+	pub fn are_slices_in_bounds(&self, dtype: DType, slice_set: &SliceSet) -> bool {
+		if slice_set.batch_size == 0 {
+			return true;
+		}
+		let max_batch = slice_set.batch_size - 1;
 
-pub fn are_bufs_on_the_same_device(buf1: &dyn Buffer, buf2: &dyn Buffer) -> bool {
-	let device1 = buf_to_base(buf1).device.as_ref();
-	let device1 = device1 as *const dyn Device;
-	let device1 = device1 as *const u8;
+		self.is_in_bounds(
+			dtype,
+			slice_set.offset,
+			slice_set.batch_stride * max_batch + slice_set.len,
+		)
+	}
 
-	let device2 = buf_to_base(buf2).device.as_ref();
-	let device2 = device2 as *const dyn Device;
-	let device2 = device2 as *const u8;
+	pub fn is_in_bounds_T<T>(&self, offset: usize, len: usize) -> bool {
+		let elems = offset + len;
+		let bytes = std::mem::size_of::<T>().checked_mul(elems);
+		bytes.is_some_and(|b| b <= self.size_bytes)
+	}
 
-	device1 == device2
+	pub fn are_slices_in_bounds_T<T>(&self, slice_set: &SliceSet) -> bool {
+		if slice_set.batch_size == 0 {
+			return true;
+		}
+		let max_batch = slice_set.batch_size - 1;
+
+		self.is_in_bounds_T::<T>(
+			slice_set.offset,
+			slice_set.batch_stride * max_batch + slice_set.len,
+		)
+	}
 }

@@ -2,6 +2,7 @@
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
 use crate::*;
+use core::slice;
 use matrixmultiply::sgemm;
 use std::boxed::Box;
 use std::cell::{Cell, RefCell};
@@ -42,17 +43,86 @@ impl Device for CPUDevice {
 		let step_size = std::mem::size_of::<CPUBufferElement>();
 		let buf_elems = (size_bytes + step_size - 1) / step_size;
 		Rc::new(CPUBuffer {
-			base: BufferBase {
-				device: self.clone(),
-				capacity: size_bytes,
-			},
+			base: BufferBase { device: self.clone(), size_bytes },
 			// TODO - we could leave the memory uninitialized
 			memory: vec![Cell::new(0); buf_elems].into_boxed_slice(),
 		})
 	}
 }
 
+trait FromToF64 {
+	fn from_f64(val: f64) -> Self;
+	fn to_f64(&self) -> f64;
+}
+
+impl FromToF64 for f32 {
+	fn from_f64(val: f64) -> Self {
+		val as f32
+	}
+
+	fn to_f64(&self) -> f64 {
+		*self as f64
+	}
+}
+
+impl FromToF64 for f64 {
+	fn from_f64(val: f64) -> Self {
+		val
+	}
+
+	fn to_f64(&self) -> f64 {
+		*self
+	}
+}
+
+impl CPUDevice {
+	// .
+}
+
+struct BatchIter<'a, T, const N: usize> {
+	buffers: [(&'a CPUBuffer, &'a SliceSet); N],
+	i: usize,
+	batch_size: usize,
+	phantom: std::marker::PhantomData<T>,
+}
+
+impl<'a, T: 'a, const N: usize> BatchIter<'a, T, N> {
+	fn new(buffers: [(&'a CPUBuffer, &'a SliceSet); N]) -> Self {
+		let first_slices = buffers[0].1;
+		for (buf, slices) in buffers {
+			assert!(buf.base.are_slices_in_bounds_T::<T>(slices));
+			assert!(first_slices.batch_size == slices.batch_size);
+		}
+		BatchIter {
+			buffers,
+			i: 0,
+			batch_size: first_slices.batch_size,
+			phantom: std::marker::PhantomData,
+		}
+	}
+}
+
+impl<'a, T: 'a, const N: usize> Iterator for BatchIter<'a, T, N> {
+	type Item = [&'a [Cell<T>]; N];
+
+	#[inline]
+	fn next(&mut self) -> Option<Self::Item> {
+		if self.i >= self.batch_size {
+			return None;
+		}
+		let out = self.buffers.map(|(buf, slices)| {
+			let offset = slices.offset + self.i * slices.batch_stride;
+			let elems = slices.len;
+			// SAFETY: In `new()`, we assert that all slices are in bounds
+			unsafe { buf.cast::<T>(offset, elems) }
+		});
+		self.i += 1;
+		Some(out)
+	}
+}
+
 impl CPUBuffer {
+	#[inline]
 	fn device(&self) -> &CPUDevice {
 		let dev = self.base.device.as_ref();
 		let dev = dev as *const dyn Device;
@@ -60,44 +130,142 @@ impl CPUBuffer {
 		unsafe { &*dev }
 	}
 
-	fn is_on_my_device(&self, tensor: &Tensor) -> bool {
-		is_buf_owned_by_device(tensor.buffer.as_ref(), self.base.device.as_ref())
-	}
-
-	fn get_buffer_of(&self, t: &Tensor) -> &CPUBuffer {
-		debug_assert!(self.is_on_my_device(t));
-		let buf = t.buffer.as_ref();
-		let buf = buf as *const dyn Buffer;
-		let buf = buf as *const CPUBuffer;
-		unsafe { &*buf }
-	}
-
+	#[inline]
 	fn cast_buffer(&self, buf: &BufferBase) -> &CPUBuffer {
-		debug_assert!(buf.is_on_device(self.base.device.as_ref()));
+		assert!(buf.is_on_device(self.base.device.as_ref()));
 		let buf = buf as *const BufferBase;
 		let buf = buf as *const CPUBuffer;
 		unsafe { &*buf }
 	}
 
-	fn cast<T>(&self, offset: usize, elems: usize) -> &[Cell<T>] {
+	#[inline]
+	unsafe fn cast<T>(&self, offset: usize, elems: usize) -> &[Cell<T>] {
+		debug_assert!(self.base.is_in_bounds_T::<T>(offset, elems));
 		let ptr = self.memory.as_ptr();
 		let ptr = ptr as *const Cell<T>;
 		let ptr = ptr.wrapping_add(offset);
 		unsafe { std::slice::from_raw_parts(ptr, elems) }
 	}
 
-	fn zeros_f32_(&self, offset: usize, elems: usize) {
-		let data = self.cast::<f32>(offset, elems);
-		for val in data {
-			val.set(0.0);
+	fn zeros<T: Default>(&self, dst_slices: &SliceSet) {
+		for [dst] in BatchIter::<T, 1>::new([(&self, dst_slices)]) {
+			for d in dst {
+				d.set(T::default());
+			}
 		}
 	}
 
-	fn randn_f32_(&self, offset: usize, elems: usize) {
-		let data = self.cast::<f32>(offset, elems);
+	fn randn_f<T: FromToF64>(&self, dst_slices: &SliceSet) {
 		let mut rng = self.device().rng.borrow_mut();
-		for val in data {
-			val.set(rng.get_normal() as f32);
+		for [dst] in BatchIter::<T, 1>::new([(&self, dst_slices)]) {
+			for d in dst {
+				d.set(T::from_f64(rng.get_normal()));
+			}
+		}
+	}
+
+	fn copy<T: Copy>(&self, dst_slices: &SliceSet, src: &CPUBuffer, src_slices: &SliceSet) {
+		assert!(dst_slices.len == src_slices.len);
+		for [dst, src] in BatchIter::<T, 2>::new([(&self, dst_slices), (src, src_slices)]) {
+			for (d, s) in dst.iter().zip(src) {
+				d.set(s.get());
+			}
+		}
+	}
+
+	fn acc_f<T: Copy + FromToF64>(
+		&self, dst_slices: &SliceSet, dst_weight: f64, b: &CPUBuffer, b_slices: &SliceSet,
+		b_weight: f64,
+	) {
+		assert!(dst_slices.len == b_slices.len);
+		for [dst, b] in BatchIter::<T, 2>::new([(&self, dst_slices), (b, b_slices)]) {
+			for (d, b) in dst.iter().zip(b) {
+				let d_val = d.get().to_f64();
+				let b_val = b.get().to_f64();
+				let d_val = d_val * dst_weight + b_val * b_weight;
+				d.set(T::from_f64(d_val));
+			}
+		}
+	}
+
+	fn vec_mul_f<T: Copy + FromToF64>(
+		&self, dst_slices: &SliceSet, a: &CPUBuffer, a_slices: &SliceSet, b: &CPUBuffer,
+		b_slices: &SliceSet,
+	) {
+		assert!(a_slices.len == b_slices.len);
+		assert!(dst_slices.len > 0);
+		for [dst, a, b] in
+			BatchIter::<T, 3>::new([(&self, dst_slices), (a, a_slices), (b, b_slices)])
+		{
+			let prod = a.iter().zip(b).map(|(a, b)| a.get().to_f64() * b.get().to_f64()).sum();
+			dst[0].set(T::from_f64(prod));
+		}
+	}
+
+	fn vec_mul_acc_f<T: Copy + FromToF64>(
+		&self, dst_slices: &SliceSet, dst_weight: f64, a: &CPUBuffer, a_slices: &SliceSet,
+		b: &CPUBuffer, b_slices: &SliceSet, ab_weight: f64,
+	) {
+		assert!(a_slices.len == b_slices.len);
+		assert!(dst_slices.len > 0);
+		for [dst, a, b] in
+			BatchIter::<T, 3>::new([(&self, dst_slices), (a, a_slices), (b, b_slices)])
+		{
+			let prod: f64 = a.iter().zip(b).map(|(a, b)| a.get().to_f64() * b.get().to_f64()).sum();
+			let d_val = dst[0].get().to_f64();
+			let d_val = d_val * dst_weight + prod * ab_weight;
+			dst[0].set(T::from_f64(d_val));
+		}
+	}
+
+	fn rsqrt_f<T: Copy + FromToF64>(
+		&self, dst_slices: &SliceSet, a: &CPUBuffer, a_slices: &SliceSet, eps: f64,
+	) {
+		assert!(dst_slices.len == a_slices.len);
+		for [dst, a] in BatchIter::<T, 2>::new([(&self, dst_slices), (a, a_slices)]) {
+			for (d, a) in dst.iter().zip(a) {
+				let val = 1.0 / (a.get().to_f64() + eps).sqrt();
+				d.set(T::from_f64(val));
+			}
+		}
+	}
+
+	fn softmax_f<T: Copy + FromToF64>(
+		&self, dst_slices: &SliceSet, a: &CPUBuffer, a_slices: &SliceSet,
+	) {
+		assert!(dst_slices.len == a_slices.len);
+		assert!(dst_slices.len > 0); // avoid division by zero
+		let len = dst_slices.len;
+
+		for [dst, a] in BatchIter::<T, 2>::new([(&self, dst_slices), (a, a_slices)]) {
+			// convert to f64
+			let a_iter = a.iter().map(|x| x.get().to_f64());
+			// find max
+			let max: f64 = a_iter.clone().fold(f64::NEG_INFINITY, f64::max);
+
+			if unlikely(max == f64::NEG_INFINITY) {
+				// all values are -inf, set all to 0
+				let val = T::from_f64(1.0 / (len as f64));
+				for o in dst {
+					o.set(val);
+				}
+				return;
+			}
+
+			let mut sum = 0.0;
+			for (d, a) in dst.iter().zip(a) {
+				let e = (a.get().to_f64() - max).exp();
+				d.set(T::from_f64(e));
+
+				sum += e;
+			}
+
+			for d in dst.iter() {
+				// NOTE: Subtracting max in the loop above ensures at least one exp(0) = 1.0,
+				// so sum will be >= 1.0 and division by zero is impossible.
+				let val = d.get().to_f64() / sum;
+				d.set(T::from_f64(val));
+			}
 		}
 	}
 
@@ -118,59 +286,6 @@ impl CPUBuffer {
 		for (o, i) in out_vec.iter().zip(in_vec) {
 			let i = f64::from(i.get());
 			o.set((i * scale) as f32);
-		}
-	}
-
-	fn softmax_f32(&self, offset: usize, a: &Self, a_offset: usize, count: usize) {
-		let out_vec = self.cast::<f32>(offset, count);
-
-		let in_vec = a.cast::<f32>(a_offset, count);
-		// convert to f64
-		let in_iter = in_vec.iter().map(|x| f64::from(x.get()));
-		// find max
-		let max: f64 = in_iter.clone().fold(f64::NEG_INFINITY, f64::max);
-
-		if unlikely(max == f64::NEG_INFINITY) {
-			// all values are -inf, set all to 0
-			let val = 1.0 / (count as f64);
-			for o in out_vec.iter() {
-				o.set(val as f32);
-			}
-			return;
-		}
-
-		let mut sum = 0.0;
-		for (o, val) in out_vec.iter().zip(in_iter) {
-			let val = (val - max).exp();
-			o.set(val as f32);
-			sum += val;
-		}
-
-		for o in out_vec.iter() {
-			let val = o.get() / sum as f32;
-			o.set(val);
-		}
-	}
-
-	fn rsqrt_f32(&self, offset: usize, a: &Self, a_offset: usize, count: usize, eps: f64) {
-		let out_vec = self.cast::<f32>(offset, count);
-		let in_vec = a.cast::<f32>(a_offset, count);
-
-		for (o, i) in out_vec.iter().zip(in_vec) {
-			let val = 1.0 / (f64::from(i.get()) + eps).sqrt();
-			o.set(val as f32);
-		}
-	}
-
-	fn acc_f32(
-		&self, offset: usize, b: &Self, b_offset: usize, count: usize, alpha: f64, beta: f64,
-	) {
-		let out_vec = self.cast::<f32>(offset, count);
-		let in_vec = b.cast::<f32>(b_offset, count);
-
-		for (o, i) in out_vec.iter().zip(in_vec) {
-			let val = alpha * f64::from(o.get()) + beta * f64::from(i.get());
-			o.set(val as f32);
 		}
 	}
 
@@ -250,23 +365,87 @@ impl CPUBuffer {
 }
 
 impl Buffer for CPUBuffer {
-	fn zeros_(&self, tensor: &Tensor) {
-		debug_assert!(self.is_on_my_device(tensor));
+	fn zeros(&self, dtype: DType, dst_slices: &SliceSet) {
+		match dtype {
+			DType { kind: DTypeKind::Float, bits: 32 } => self.zeros::<f32>(dst_slices),
+			_ => todo!(),
+		}
+	}
 
-		match tensor.dtype() {
+	fn randn(&self, dtype: DType, dst_slices: &SliceSet) {
+		match dtype {
+			DType { kind: DTypeKind::Float, bits: 32 } => self.randn_f::<f32>(dst_slices),
+			_ => todo!(),
+		}
+	}
+
+	fn copy(&self, dtype: DType, dst_slices: &SliceSet, src: &BufferBase, src_slices: &SliceSet) {
+		let src = self.cast_buffer(src);
+		match dtype {
 			DType { kind: DTypeKind::Float, bits: 32 } => {
-				self.zeros_f32_(tensor.offset, tensor.elems())
+				self.copy::<f32>(dst_slices, src, src_slices)
 			},
 			_ => todo!(),
 		}
 	}
 
-	fn randn_(&self, tensor: &Tensor) {
-		debug_assert!(self.is_on_my_device(tensor));
-
-		match tensor.dtype() {
+	fn acc(
+		&self, dtype: DType, dst_slices: &SliceSet, dst_weight: f64, b: &BufferBase,
+		b_slices: &SliceSet, b_weight: f64,
+	) {
+		let b = self.cast_buffer(b);
+		match dtype {
 			DType { kind: DTypeKind::Float, bits: 32 } => {
-				self.randn_f32_(tensor.offset, tensor.elems())
+				self.acc_f::<f32>(dst_slices, dst_weight, b, b_slices, b_weight)
+			},
+			_ => todo!(),
+		}
+	}
+
+	fn vec_mul(
+		&self, dtype: DType, dst_slices: &SliceSet, a: &BufferBase, a_slices: &SliceSet,
+		b: &BufferBase, b_slices: &SliceSet,
+	) {
+		let a = self.cast_buffer(a);
+		let b = self.cast_buffer(b);
+		match dtype {
+			DType { kind: DTypeKind::Float, bits: 32 } => {
+				self.vec_mul_f::<f32>(dst_slices, a, a_slices, b, b_slices)
+			},
+			_ => todo!(),
+		}
+	}
+
+	fn vec_mul_acc(
+		&self, dtype: DType, dst_slices: &SliceSet, dst_weight: f64, a: &BufferBase,
+		a_slices: &SliceSet, b: &BufferBase, b_slices: &SliceSet, ab_weight: f64,
+	) {
+		let a = self.cast_buffer(a);
+		let b = self.cast_buffer(b);
+		match dtype {
+			DType { kind: DTypeKind::Float, bits: 32 } => self
+				.vec_mul_acc_f::<f32>(dst_slices, dst_weight, a, a_slices, b, b_slices, ab_weight),
+			_ => todo!(),
+		}
+	}
+
+	fn rsqrt(
+		&self, dtype: DType, dst_slices: &SliceSet, a: &BufferBase, a_slices: &SliceSet, eps: f64,
+	) {
+		let a = self.cast_buffer(a);
+		match dtype {
+			DType { kind: DTypeKind::Float, bits: 32 } => {
+				self.rsqrt_f::<f32>(dst_slices, a, a_slices, eps)
+			},
+			_ => todo!(),
+		}
+	}
+
+	fn softmax(&self, dtype: DType, dst_slices: &SliceSet, a: &BufferBase, a_slices: &SliceSet) {
+		let a = self.cast_buffer(a);
+		match dtype {
+			DType { kind: DTypeKind::Float, bits: 32 } => {
+				self.softmax_f::<f32>(dst_slices, a, a_slices)
 			},
 			_ => todo!(),
 		}
@@ -283,94 +462,6 @@ impl Buffer for CPUBuffer {
 			match common.dtype {
 				DType { kind: DTypeKind::Float, bits: 32 } => {
 					out.rms_norm_f32(out_offset, a, a_offset, common.len, eps)
-				},
-				_ => todo!(),
-			}
-		}
-	}
-
-	unsafe fn softmax(
-		&self, o: BatchBufOff<()>, a: BatchBufOff<&BufferBase>, common: CommonArgs1D,
-	) {
-		let out = self;
-		for i in 0..common.batch_size {
-			let out_offset = o.offset + i * o.batch_stride;
-			let a_offset = a.offset + i * a.batch_stride;
-			let a = self.cast_buffer(a.buffer);
-			match common.dtype {
-				DType { kind: DTypeKind::Float, bits: 32 } => {
-					out.softmax_f32(out_offset, a, a_offset, common.len);
-				},
-				_ => todo!(),
-			}
-		}
-	}
-
-	unsafe fn rsqrt(
-		&self, o: BatchBufOff<()>, a: BatchBufOff<&BufferBase>, common: CommonArgs1D, eps: f64,
-	) {
-		let out = self;
-		let a_buffer = self.cast_buffer(a.buffer);
-		for i in 0..common.batch_size {
-			let out_offset = o.offset + i * o.batch_stride;
-			let a_offset = a.offset + i * a.batch_stride;
-			match common.dtype {
-				DType { kind: DTypeKind::Float, bits: 32 } => {
-					out.rsqrt_f32(out_offset, a_buffer, a_offset, common.len, eps)
-				},
-				_ => todo!(),
-			}
-		}
-	}
-
-	unsafe fn acc(
-		&self, a: BatchBufOff<()>, b: BatchBufOff<&BufferBase>, common: CommonArgs1D, alpha: f64,
-		beta: f64,
-	) {
-		let b_buffer = self.cast_buffer(b.buffer);
-		for i in 0..common.batch_size {
-			let a_offset = a.offset + i * a.batch_stride;
-			let b_offset = b.offset + i * b.batch_stride;
-			match common.dtype {
-				DType { kind: DTypeKind::Float, bits: 32 } => {
-					self.acc_f32(a_offset, b_buffer, b_offset, common.len, alpha, beta)
-				},
-				_ => todo!(),
-			}
-		}
-	}
-
-	unsafe fn acc_mul(
-		&self, a: BatchBufOff<()>, b: BatchBufOff<&BufferBase>, c: BatchBufOff<&BufferBase>,
-		common: CommonArgs1D, alpha: f64, beta: f64,
-	) {
-		let b_buffer = self.cast_buffer(b.buffer);
-		let c_buffer = self.cast_buffer(c.buffer);
-		for i in 0..common.batch_size {
-			let a_offset = a.offset + i * a.batch_stride;
-			let b_offset = b.offset + i * b.batch_stride;
-			let c_offset = c.offset + i * c.batch_stride;
-			match common.dtype {
-				DType { kind: DTypeKind::Float, bits: 32 } => {
-					self.acc_f32(a_offset, b_buffer, b_offset, common.len, alpha, beta);
-					self.acc_f32(a_offset, c_buffer, c_offset, common.len, alpha, 1.0);
-				},
-				_ => todo!(),
-			}
-		}
-	}
-
-	unsafe fn acc_sum(
-		&self, a: BatchBufOff<()>, b: BatchBufOff<&BufferBase>, common: CommonArgs1D, alpha: f64,
-		beta: f64,
-	) {
-		let b_buffer = self.cast_buffer(b.buffer);
-		for i in 0..common.batch_size {
-			let a_offset = a.offset + i * a.batch_stride;
-			let b_offset = b.offset + i * b.batch_stride;
-			match common.dtype {
-				DType { kind: DTypeKind::Float, bits: 32 } => {
-					self.acc_sum_f32(a_offset, b_buffer, b_offset, common.len, alpha, beta)
 				},
 				_ => todo!(),
 			}

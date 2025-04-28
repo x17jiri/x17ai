@@ -3,7 +3,7 @@
 
 use crate::*;
 use core::panic;
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 use std::alloc::Layout;
 use std::fmt;
 use std::intrinsics::{likely, unlikely};
@@ -23,7 +23,7 @@ pub struct SizeAndStride {
 
 impl SizeAndStride {
 	pub fn is_contiguous(&self) -> bool {
-		self.size == 1 || self.stride == 1
+		self.stride == 1 || self.size == 1
 	}
 }
 
@@ -85,8 +85,8 @@ pub trait OutputHandler {
 
 	/// Adds a new dimension with the given size.
 	///
-	/// Returns the size and stride of the new dimension.
-	fn prepend_dim(&mut self, size: usize, allow_broadcast: bool) -> SizeAndStride;
+	/// Returns the stride of the new dimension.
+	fn prepend_dim(&mut self, size: usize, allow_broadcast: bool) -> usize;
 
 	/// Create a new buffer that can fit a new tensor with all the previously
 	/// added dimensions and the given dtype.
@@ -213,13 +213,13 @@ impl OutputHandler for OutputRef<'_> {
 		self.remaining_dims = ndim;
 	}
 
-	fn prepend_dim(&mut self, size: usize, allow_broadcast: bool) -> SizeAndStride {
+	fn prepend_dim(&mut self, size: usize, allow_broadcast: bool) -> usize {
 		assert!(self.remaining_dims > 0);
 		self.remaining_dims -= 1;
 		debug_assert!(self.remaining_dims < self.tensor.dims.len());
 		let dim = unsafe { *self.tensor.dims.get_unchecked(self.remaining_dims) };
 		assert!(allow_broadcast || dim.size == size, "incompatible shape");
-		dim
+		dim.stride
 	}
 
 	fn make_buffer(&mut self) -> BufOff<&dyn Buffer> {
@@ -317,15 +317,14 @@ impl Tensor {
 			panic!("cannot reshape more dimensions than the tensor has");
 		}
 
-		// use `Batch` to merge the last `n` dimensions
 		let last_n = unsafe { self.dims.get_unchecked(ndim - n..) };
-		let mut merged = Batch::new_empty(n);
+		let mut merged = DimMerger::new_empty(n);
 		let mut elems = 1;
 		for dim in last_n.iter().rev() {
 			merged.prepend_dim(dim.size, elems, [dim.stride]);
 			elems *= dim.size;
 		}
-		let mut merged = merged.rev_dims.iter();
+		let mut merged = merged.rev_dims();
 
 		let (mut prev_stride, mut target_stride) = {
 			if let Some(merged_dim) = merged.next() {
@@ -992,149 +991,3 @@ impl fmt::Display for Tensor {
 }
 
 //--------------------------------------------------------------------------------------------------
-
-#[derive(Clone, Copy)]
-pub struct BatchDim<const N: usize> {
-	pub size: usize,
-	pub out_stride: usize,
-	pub in_strides: [usize; N],
-}
-
-#[derive(Clone)]
-pub struct Batch<const N: usize> {
-	// dims in batch are in reverse order
-	// in other words, from smallest to largest stride
-	pub rev_dims: SmallVec<[BatchDim<N>; INLINE_DIMS]>,
-
-	pub popped_dims: usize,
-}
-
-impl<const N: usize> Batch<N> {
-	pub fn new<O: OutputHandler>(
-		ndim: usize, inputs: [&[SizeAndStride]; N], out: &mut O,
-	) -> Batch<N> {
-		let mut batch = Batch::new_empty(ndim);
-
-		// take the iterator to input dimensions, reverse it and append inf number of 1s
-		let mut inputs: [_; N] = inputs.map(|i| {
-			i.iter().rev().copied().chain(std::iter::repeat(SizeAndStride { size: 1, stride: 1 }))
-		});
-
-		for _ in 0..ndim {
-			// Get sizes and strides for the current dimension from all inputs
-			let mut in_dims = [Default::default(); N];
-			for i in 0..N {
-				in_dims[i] = inputs[i].next().unwrap();
-			}
-
-			// The dim_size should be the same for all inputs except for broadcasted inputs
-			// So max() gets the dim_size of the non-broadcasted inputs.
-			let dim_size = in_dims.iter().map(|i| i.size).max();
-			let dim_size = dim_size.unwrap_or(1);
-			let out_dim = out.prepend_dim(dim_size, true);
-
-			// Get input strides. If needed, try to broadcast
-			let in_strides = in_dims.map(|i| {
-				if i.size == out_dim.size {
-					i.stride
-				} else {
-					assert!(i.size == 1, "cannot broadcast: incompatible dimensions");
-					0
-				}
-			});
-
-			batch.prepend_dim(out_dim.size, out_dim.stride, in_strides);
-		}
-
-		batch
-	}
-
-	pub fn new_empty(ndim: usize) -> Batch<N> {
-		Batch {
-			rev_dims: SmallVec::with_capacity(ndim),
-			popped_dims: 0,
-		}
-	}
-
-	// dimensions should be prepended in the order of increasing strides
-	pub fn prepend_dim(&mut self, size: usize, out_stride: usize, in_strides: [usize; N]) {
-		if size == 1 {
-			return;
-		}
-
-		// If there already are dimensions, try to merge the new dimension with the last one
-		if !self.rev_dims.is_empty() {
-			let prev = self.rev_dims.last_mut().unwrap();
-
-			let mut can_merge;
-			#[allow(unused_parens)]
-			{
-				can_merge = (out_stride == prev.out_stride * prev.size);
-				for i in 0..N {
-					can_merge &= (in_strides[i] == prev.in_strides[i] * prev.size);
-				}
-			}
-
-			if can_merge {
-				prev.size *= size;
-				return;
-			}
-		}
-
-		// Can't merge; prepend the new dimension
-		self.rev_dims.push(BatchDim { size, out_stride, in_strides });
-	}
-
-	pub fn pop_dim(&mut self) -> BatchDim<N> {
-		if likely(self.rev_dims.len() > self.popped_dims) {
-			let result = self.rev_dims[self.popped_dims];
-			self.popped_dims += 1;
-			result
-		} else {
-			BatchDim {
-				size: 1,
-				out_stride: 1,
-				in_strides: [1; N],
-			}
-		}
-	}
-
-	fn __run<O: Copy, I: Copy, F: Fn(BatchBufOff<O>, [BatchBufOff<I>; N], usize)>(
-		&self, mut out: BufOff<O>, mut in_: [BufOff<I>; N], f: &F, batch: &[BatchDim<N>],
-	) {
-		debug_assert!(!batch.is_empty());
-		let batch_dim = unsafe { batch.get_unchecked(batch.len() - 1) };
-		let sub_batch = unsafe { batch.get_unchecked(..batch.len() - 1) };
-		if sub_batch.is_empty() {
-			let out = out.make_batch(batch_dim.out_stride);
-			let mut in_ = in_.map(|i| i.make_batch(0));
-			for i in 0..N {
-				in_[i].batch_stride = batch_dim.in_strides[i];
-			}
-			let batch_size = batch_dim.size;
-			f(out, in_, batch_size);
-		} else {
-			for _ in 0..batch_dim.size {
-				self.__run(out, in_, f, sub_batch);
-
-				out.offset += batch_dim.out_stride;
-				for i in 0..N {
-					in_[i].offset += batch_dim.in_strides[i];
-				}
-			}
-		}
-	}
-
-	pub fn run<O: Copy, I: Copy, F: Fn(BatchBufOff<O>, [BatchBufOff<I>; N], usize)>(
-		&self, out: BufOff<O>, in_: [BufOff<I>; N], f: &F,
-	) {
-		if self.rev_dims.len() <= self.popped_dims {
-			let out = out.make_batch(0);
-			let in_ = in_.map(|i| i.make_batch(0));
-			let batch_size = 1;
-			f(out, in_, batch_size);
-		} else {
-			self.__run(out, in_, f, &self.rev_dims[self.popped_dims..]);
-		}
-	}
-}

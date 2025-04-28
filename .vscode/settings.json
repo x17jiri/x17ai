@@ -4,8 +4,15 @@
 		"editor.defaultFormatter": "rust-lang.rust-analyzer",
 	},
 	"workbench.colorCustomizations": {
-		"editorInlayHint.foreground": "#aaaabb",
-		"editorInlayHint.background": "#fafafa"
+		"diffEditor.removedTextBackground": "#ff000050",
+		"diffEditor.removedLineBackground": "#ff000010",
+		"diffEditor.removedTextBorder": "#ff0000",
+		"diffEditor.insertedTextBackground": "#ff000050",
+		"diffEditor.insertedLineBackground": "#ff000020",
+		"diffEditor.insertedTextBorder": "#ff0000",
+		"editorIndentGuide.activeBackground1": "#ffd040",
+		"editorInlayHint.foreground": "#909090",
+		"editorInlayHint.background": "#0000"
 	},
     "rust-analyzer.semanticHighlighting.operator.specialization.logicalNot.enable": true,
     "rust-analyzer.semanticHighlighting.operator.specialization.enable": true,
