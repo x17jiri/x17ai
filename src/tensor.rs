@@ -6,7 +6,7 @@ use core::panic;
 use smallvec::{SmallVec, smallvec};
 use std::alloc::Layout;
 use std::fmt;
-use std::intrinsics::{likely, unlikely};
+use std::intrinsics::{cold_path, likely, unlikely};
 use std::iter::ExactSizeIterator;
 use std::mem::MaybeUninit;
 use std::ops::Index;
@@ -14,6 +14,8 @@ use std::rc::{Rc, Weak};
 use thin_vec::ThinVec;
 
 pub const INLINE_DIMS: usize = 5;
+
+//--------------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Default)]
 pub struct SizeAndStride {
@@ -23,9 +25,11 @@ pub struct SizeAndStride {
 
 impl SizeAndStride {
 	pub fn is_contiguous(&self) -> bool {
-		self.stride == 1 || self.size == 1
+		self.stride == 1 || self.size <= 1
 	}
 }
+
+//--------------------------------------------------------------------------------------------------
 
 pub struct ShapeView<'a> {
 	dims: &'a [SizeAndStride],
@@ -80,164 +84,15 @@ impl<'a> IntoIterator for ShapeView<'a> {
 	}
 }
 
-pub trait OutputHandler {
-	fn init(&mut self, ndim: usize, dtype: DType);
-
-	/// Adds a new dimension with the given size.
-	///
-	/// Returns the stride of the new dimension.
-	fn prepend_dim(&mut self, size: usize, allow_broadcast: bool) -> usize;
-
-	/// Create a new buffer that can fit a new tensor with all the previously
-	/// added dimensions and the given dtype.
-	///
-	/// Return the buffer and the offset in the buffer where the tensor should
-	/// start.
-	fn make_buffer(&mut self) -> BufOff<&dyn Buffer>;
-}
-
-/// This struct is used mainly to ensure that the total number of elements does
-/// not overflow
-struct OutputBuilder {
-	dims: SmallVec<[SizeAndStride; INLINE_DIMS]>,
-	dtype: DType,
-
-	/// How many more dims do we need to prepend.
-	remaining_dims: usize,
-
-	elems: usize,
-
-	/// Total number of elements in the dimensions processed so far but ignoring
-	/// zero length dimensions.
-	nonzero_elems: usize,
-
-	device: Option<Rc<dyn Device>>,
-	buffer: Option<Rc<dyn Buffer>>,
-}
-
-impl OutputBuilder {
-	pub fn new(device: Rc<dyn Device>) -> OutputBuilder {
-		OutputBuilder {
-			dims: SmallVec::new(),
-			dtype: DType::f32(),
-			remaining_dims: 0,
-			elems: 0,
-			nonzero_elems: 0,
-			device: Some(device),
-			buffer: None,
-		}
-	}
-
-	// Note: this function expects that make_buffer() has been called before.
-	pub fn make_tensor(self) -> Tensor {
-		Tensor {
-			dims: self.dims,
-			offset: 0,
-			dtype: self.dtype,
-			elems: self.elems,
-			buffer: self.buffer.unwrap(),
-		}
-	}
-}
-
-impl OutputHandler for OutputBuilder {
-	fn init(&mut self, ndim: usize, dtype: DType) {
-		self.dims = SmallVec::with_capacity(ndim);
-		unsafe { self.dims.set_len(ndim) };
-		self.dtype = dtype;
-		self.remaining_dims = ndim;
-		self.elems = 1;
-		self.nonzero_elems = 1;
-	}
-
-	fn prepend_dim(&mut self, size: usize, _allow_broadcast: bool) -> SizeAndStride {
-		debug_assert!(self.remaining_dims > 0);
-
-		// Check that if we ignore zero length dimensions, the number of elements does not overflow.
-		// This is done to make sure our calculations would not overflow even if we had
-		// the same dimensions but in different order.
-		if likely(size != 0) {
-			if let Some(mul) = self.nonzero_elems.checked_mul(size) {
-				self.nonzero_elems = mul;
-			} else {
-				panic!("too many elements");
-			};
-		}
-
-		let stride = self.elems;
-		self.elems *= size;
-
-		self.remaining_dims -= 1;
-		unsafe {
-			*self.dims.get_unchecked_mut(self.remaining_dims) = SizeAndStride { size, stride };
-		}
-
-		SizeAndStride { size, stride }
-	}
-
-	fn make_buffer(&mut self) -> BufOff<&dyn Buffer> {
-		if unlikely(self.remaining_dims != 0) {
-			panic!("not all dimensions were added");
-		}
-		let Some(device) = self.device.take() else {
-			panic!("buffer already created");
-		};
-
-		self.buffer = Some(device.new_buffer(self.dtype, self.elems));
-
-		BufOff {
-			buffer: self.buffer.as_ref().unwrap().as_ref(),
-			offset: 0,
-		}
-	}
-}
-
-pub struct OutputRef<'a> {
-	tensor: &'a Tensor,
-	remaining_dims: usize,
-}
-
-impl OutputRef<'_> {
-	pub fn new(tensor: &Tensor) -> OutputRef {
-		OutputRef {
-			tensor,
-			remaining_dims: tensor.dims.len(),
-		}
-	}
-}
-
-impl OutputHandler for OutputRef<'_> {
-	fn init(&mut self, ndim: usize, dtype: DType) {
-		assert!(self.tensor.dims.len() == ndim, "incompatible shape");
-		assert!(self.tensor.dtype == dtype, "incompatible dtype");
-		self.remaining_dims = ndim;
-	}
-
-	fn prepend_dim(&mut self, size: usize, allow_broadcast: bool) -> usize {
-		assert!(self.remaining_dims > 0);
-		self.remaining_dims -= 1;
-		debug_assert!(self.remaining_dims < self.tensor.dims.len());
-		let dim = unsafe { *self.tensor.dims.get_unchecked(self.remaining_dims) };
-		assert!(allow_broadcast || dim.size == size, "incompatible shape");
-		dim.stride
-	}
-
-	fn make_buffer(&mut self) -> BufOff<&dyn Buffer> {
-		assert!(self.remaining_dims == 0, "not all dimensions were added");
-		BufOff {
-			buffer: self.tensor.buffer.as_ref(),
-			offset: self.tensor.offset,
-		}
-	}
-}
+//--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct Tensor {
 	// dims in reverse order
-	dims: SmallVec<[SizeAndStride; INLINE_DIMS]>,
+	pub(crate) dims: SmallVec<[SizeAndStride; INLINE_DIMS]>,
 	pub(crate) offset: usize,
-	dtype: DType,
-	elems: usize,
+	pub(crate) dtype: DType,
+	pub(crate) elems: usize,
 	pub(crate) buffer: Rc<dyn Buffer>,
 }
 
@@ -250,13 +105,12 @@ impl Tensor {
 			DoubleEndedIterator<Item = &'a usize> + ExactSizeIterator,
 	{
 		let shape = shape.into_iter().copied();
-		let mut builder = OutputBuilder::new(device);
-		builder.init(shape.len(), dtype);
+		let builder = NewOutputHandler::new(dtype, device);
+		let mut builder = builder.init(shape.len());
 		for dim in shape.rev() {
-			builder.prepend_dim(dim, false);
+			builder.prepend_dim(dim);
 		}
-		builder.make_buffer();
-		builder.make_tensor()
+		builder.value()
 	}
 
 	/// Allocate a new tensor on the same device as `self`.
@@ -277,21 +131,32 @@ impl Tensor {
 
 	/// Returns the device on which the tensor is allocated.
 	pub fn device(&self) -> Rc<dyn Device> {
-		buf_to_base(self.buffer.as_ref()).device.clone()
+		BufferBase::from_dyn_buf(self.buffer.as_ref()).device.clone()
 	}
 
 	pub fn shape(&self) -> ShapeView {
 		ShapeView { dims: &self.dims }
 	}
 
-	/// Returns the size of dimension `dim`.
-	pub fn size(&self, dim: isize) -> usize {
-		self.dims[self.__dim_to_internal(dim)].size
+	/// `dim` should be in the range `0..<ndim`.
+	pub fn dim_from_start(&self, dim: usize) -> SizeAndStride {
+		let ndim = self.dims.len();
+		if dim < ndim { self.dims[dim] } else { SizeAndStride { size: 1, stride: 1 } }
 	}
 
-	/// Returns the stride of dimension `dim`.
-	pub fn stride(&self, dim: isize) -> usize {
-		self.dims[self.__dim_to_internal(dim)].stride
+	/// `dim` should be in the range `1..=ndim`.
+	pub fn dim_from_end(&self, dim: usize) -> SizeAndStride {
+		let ndim = self.dims.len();
+		let dim = ndim.wrapping_sub(dim);
+		if dim < ndim { self.dims[dim] } else { SizeAndStride { size: 1, stride: 0 } }
+	}
+
+	pub fn dim(&self, dim: isize) -> SizeAndStride {
+		if dim >= 0 {
+			self.dim_from_start(dim.unsigned_abs())
+		} else {
+			self.dim_from_end(dim.unsigned_abs())
+		}
 	}
 
 	/// Returns the number of dimensions in the tensor.
@@ -311,43 +176,42 @@ impl Tensor {
 		self.dtype
 	}
 
-	pub fn reshape_last_n(mut self, n: usize, new_shape: &[usize]) -> Tensor {
-		let ndim = self.dims.len();
-		if n > ndim {
-			panic!("cannot reshape more dimensions than the tensor has");
-		}
+	pub fn reshape_last_n(&self, n: usize, new_shape: &[usize]) -> Tensor {
+		let dims = &mut self.dims;
+		let ndim = dims.len();
+		let n = n.min(ndim);
 
-		let last_n = unsafe { self.dims.get_unchecked(ndim - n..) };
-		let mut merged = DimMerger::new_empty(n);
-		let mut elems = 1;
-		for dim in last_n.iter().rev() {
-			merged.prepend_dim(dim.size, elems, [dim.stride]);
-			elems *= dim.size;
-		}
-		let mut merged = merged.rev_dims();
+		// Merge the last `n` dimensions
+		let merged = DimMerger::new([&dims[ndim - n..]]);
 
-		let (mut prev_stride, mut target_stride) = {
-			if let Some(merged_dim) = merged.next() {
-				(merged_dim.in_strides[0], merged_dim.size * merged_dim.in_strides[0])
-			} else {
+		// Resize the dims array. The new dimensions will be initialized in the `for` loop below.
+		unsafe { dims.set_len(ndim - n) };
+		dims.reserve(new_shape.len());
+		unsafe { dims.set_len(ndim - n + new_shape.len()) };
+
+		// Try to match the new shape with the merged dimensions
+		let smallest = merged.smallest_dim();
+		let other = merged.dims_increasing_without_smallest();
+		let mut other_iter = other.iter();
+
+		let mut prev_stride = smallest.strides[0];
+		let mut target_stride = smallest.size * smallest.strides[0];
+
+		for (new_dim, size) in dims[ndim - n..].iter_mut().zip(new_shape.iter().copied()).rev() {
+			let mut new_stride = prev_stride * size;
+
+			if new_stride > target_stride {
 				cold_path();
-				(1, 1)
-			}
-		};
 
-		unsafe { self.dims.set_len(ndim - n) };
-		self.dims.reserve(new_shape.len());
-		unsafe { self.dims.set_len(ndim - n + new_shape.len()) };
-		let result = unsafe { self.dims.get_unchecked_mut(ndim - n..) };
-
-		for (o, size) in result.iter_mut().zip(new_shape.iter().copied()).rev() {
-			if prev_stride * size > target_stride {
 				if prev_stride == target_stride {
-					let merged_dim = merged.next().unwrap();
-					prev_stride = merged_dim.in_strides[0];
-					target_stride = merged_dim.size * merged_dim.in_strides[0];
+					let Some(merged_dim) = other_iter.next() else {
+						panic!("incompatible reshape");
+					};
+					prev_stride = merged_dim.strides[0];
+					target_stride = merged_dim.size * merged_dim.strides[0];
 
-					if prev_stride * size > target_stride {
+					new_stride = prev_stride * size;
+					if new_stride > target_stride {
 						panic!("incompatible reshape");
 					}
 				} else {
@@ -355,12 +219,11 @@ impl Tensor {
 				}
 			}
 
-			prev_stride *= size;
-
-			*o = SizeAndStride { size, stride: prev_stride };
+			*new_dim = SizeAndStride { size, stride: new_stride };
+			prev_stride = new_stride;
 		}
 
-		assert!(merged.next().is_none());
+		assert!(other_iter.is_empty());
 		assert!(prev_stride == target_stride);
 
 		self
@@ -371,9 +234,9 @@ impl Tensor {
 		self.reshape_last_n(ndim, new_shape)
 	}
 
-	fn __dim_to_internal(&self, dim: isize) -> usize {
+	pub fn dim_to_positive(&self, dim: isize) -> usize {
 		let ndim = self.dims.len();
-		let dim = if dim >= 0 { dim as usize } else { ndim - ((-dim) as usize) };
+		let dim = if dim >= 0 { dim as usize } else { ndim.wrapping_add(dim as usize) };
 		if likely(dim < ndim) {
 			dim
 		} else {
@@ -382,8 +245,8 @@ impl Tensor {
 	}
 
 	pub fn transposed(mut self, dim1: isize, dim2: isize) -> Tensor {
-		let dim1 = self.__dim_to_internal(dim1);
-		let dim2 = self.__dim_to_internal(dim2);
+		let dim1 = self.dim_to_positive(dim1);
+		let dim2 = self.dim_to_positive(dim2);
 
 		self.dims.swap(dim1, dim2);
 		self
@@ -408,238 +271,10 @@ impl Tensor {
 		self.dims = new_dims;
 		self
 	}
-
-	#[allow(non_snake_case)]
-	pub fn T<'a>(&'a self) -> Matrix<'a> {
-		self.as_matrix().T()
-	}
-
-	pub fn as_row<'a>(&'a self) -> Matrix<'a> {
-		let ndim = self.ndim();
-		assert!(ndim >= 1);
-		Matrix {
-			tensor: self,
-			batch_dims: &self.dims[..ndim - 1],
-			rows: SizeAndStride { size: 1, stride: 1 },
-			cols: self.dims[ndim - 1],
-		}
-	}
-
-	pub fn as_col<'a>(&'a self) -> Matrix<'a> {
-		let ndim = self.ndim();
-		assert!(ndim >= 1);
-		Matrix {
-			tensor: self,
-			batch_dims: &self.dims[..ndim - 1],
-			rows: self.dims[ndim - 1],
-			cols: SizeAndStride { size: 1, stride: 1 },
-		}
-	}
-
-	pub fn bufoff(&self) -> BufOff<&BufferBase> {
-		BufOff {
-			buffer: buf_to_base(self.buffer.as_ref()),
-			offset: self.offset,
-		}
-	}
 }
 
-pub fn assert_compatible_types(a: &Tensor, b: &Tensor) {
-	assert!(a.dtype == b.dtype, "incompatible dtypes");
-}
-
-pub fn assert_compatible_devices(a: &Tensor, b: &Tensor) {
-	assert!(
-		are_bufs_on_the_same_device(a.buffer.as_ref(), b.buffer.as_ref()),
-		"incompatible devices"
-	);
-}
-
-/// Fill the tensor with zeros.
-pub fn zeros_(tensor: &Tensor) {
-	tensor.buffer.zeros_(tensor);
-}
-
-/// Fill the tensor with random values from a normal distribution.
-/// ```
-///     mean = 0, var = 1
-/// ```
-pub fn randn_(tensor: &Tensor) {
-	tensor.buffer.randn_(tensor);
-}
-
-fn __elem_wise<
-	const N: usize,
-	O: OutputHandler,
-	RunOp: Fn(BatchBufOff<&dyn Buffer>, [BatchBufOff<&BufferBase>; N], CommonArgs1D),
->(
-	ndim: usize, dtype: DType, a: [&Tensor; N], out: &mut O, run_op: RunOp,
-) {
-	for i in 1..N {
-		assert_compatible_types(a[0], a[i]);
-		assert_compatible_devices(a[0], a[i]);
-		assert!(a[i].ndim() <= ndim, "incompatible number of dimensions");
-	}
-
-	out.init(ndim, dtype);
-	let inputs = a.map(|a| a.dims.as_slice());
-	let mut batch = Batch::new(ndim, inputs, out);
-
-	let op_dim = batch.pop_dim();
-	assert!(op_dim.out_stride == 1);
-	assert!(op_dim.in_strides == [1; N]);
-
-	#[rustfmt::skip]
-	batch.run(
-		out.make_buffer(), a.map(|i| i.bufoff()),
-		&|out: BatchBufOff<&dyn Buffer>, a: [BatchBufOff<&BufferBase>; N], batch_size: usize| {
-			run_op(
-				out, a,
-				CommonArgs1D {
-					dtype,
-					len: op_dim.size,
-					batch_size,
-				}
-			);
-		}
-	)
-}
-
-/// Accumulate:
-/// ```
-///     a = a * alpha + b * beta
-/// ```
-pub fn acc_(a: &Tensor, alpha: f64, b: &Tensor, beta: f64) {
-	#[rustfmt::skip] __elem_wise(
-		a.ndim(), a.dtype, [b], &mut OutputRef::new(a),
-		&|
-			a: BatchBufOff<&dyn Buffer>,
-			[b]: [BatchBufOff<&BufferBase>; 1],
-			common: CommonArgs1D
-		| unsafe {
-			a.buffer.acc(a.without_buf(), b, common, alpha, beta)
-		},
-	);
-}
-
-/// Accumulate the result of element-wise multiplication:
-/// ```
-///     a = a * alpha + (b * c) * beta
-/// ```
-pub fn acc_mul_(a: &Tensor, alpha: f64, b: &Tensor, c: &Tensor, beta: f64) {
-	#[rustfmt::skip] __elem_wise(
-		a.ndim(), a.dtype, [b, c], &mut OutputRef::new(a),
-		|
-			a: BatchBufOff<&dyn Buffer>,
-			[b, c]: [BatchBufOff<&BufferBase>; 2],
-			common: CommonArgs1D
-		| unsafe {
-			a.buffer.acc_mul(a.without_buf(), b, c, common, alpha, beta)
-		},
-	);
-}
-
-/// Accumulate the result of sum:
-/// ```
-///     a = a * alpha + sum(b, keepdim) * beta
-/// ```
-pub fn acc_sum_(a: &Tensor, alpha: f64, b: &Tensor, keepdim: bool, beta: f64) {
-	assert_compatible_types(a, b);
-	assert_compatible_devices(a, b);
-
-	// The last dimension of `b` is the one we are summing over.
-	assert!(b.ndim() > 0);
-	let dim = b.dims[b.dims.len() - 1];
-	assert!(dim.is_contiguous(), "the summed dimension must be contiguous");
-
-	let mut out = OutputRef::new(a);
-
-	let ndim = a.ndim();
-	let dtype = a.dtype;
-	out.init(ndim, dtype);
-
-	let batch_ndim;
-	if keepdim {
-		// The last dimension of `a` has size 1 and is not part of the batch dimensions.
-		out.prepend_dim(1, false);
-		batch_ndim = ndim - 1;
-	} else {
-		batch_ndim = ndim;
-	};
-
-	let batch = Batch::new(batch_ndim, [&b.dims[..b.ndim() - 1]], &mut out);
-
-	#[rustfmt::skip]
-	batch.run(
-		out.make_buffer(), [b.bufoff()],
-		&|
-			out: BatchBufOff<&dyn Buffer>,
-			[a]: [BatchBufOff<&BufferBase>; 1],
-			batch_size: usize
-		| unsafe {
-			out.buffer.acc_sum(
-				out.without_buf(), a,
-				CommonArgs1D {
-					dtype,
-					len: dim.size,
-					batch_size,
-				},
-				alpha, beta,
-			);
-	});
-}
-
-/// Accumulate the result of mean:
-/// ```
-///     a = a * alpha + mean(b, keepdim) * beta
-/// ```
-pub fn acc_mean_(a: &Tensor, alpha: f64, b: &Tensor, keepdim: bool, beta: f64) {
-	// We can convert this to `acc_sum_()` because `mean = sum / n`
-	let n = b.size(-1) as f64;
-	acc_sum_(a, alpha, b, keepdim, beta / n);
-}
-
-/// Calculate `x ^ 2`:
-/// ```
-///     result = x * x
-/// ```
-pub fn square(x: &Tensor) -> Tensor {
-	let out = x.new_empty_like();
-	acc_mul_(&out, 0.0, x, x, 1.0);
-	out
-}
-
-/// reciprocal of the square root:
-/// ```
-///     result = 1.0 / (a.sqrt() + eps)
-/// ```
-pub fn rsqrt(a: &Tensor, eps: f64) -> Tensor {
-	let result = a.new_empty_like();
-	#[rustfmt::skip] __elem_wise(
-		a.ndim(), a.dtype, [a], &mut OutputRef::new(&result),
-		|
-			r: BatchBufOff<&dyn Buffer>,
-			[a]: [BatchBufOff<&BufferBase>; 1],
-			common: CommonArgs1D
-		| unsafe {
-			r.buffer.rsqrt(r.without_buf(), a, common, eps)
-		},
-	);
-	result
-}
-
-pub fn rsqrt_into(a: &Tensor, eps: f64, into: &Tensor) {
-	#[rustfmt::skip] __elem_wise(
-		a.ndim(), a.dtype, [a], &mut OutputRef::new(into),
-		|
-			r: BatchBufOff<&dyn Buffer>,
-			[a]: [BatchBufOff<&BufferBase>; 1],
-			common: CommonArgs1D
-		| unsafe {
-			r.buffer.rsqrt(r.without_buf(), a, common, eps)
-		},
-	);
-}
+/*
+//--------------------------------------------------------------------------------------------------
 
 // c = a * b * alpha + c * beta
 fn __gemm<'a, O: OutputHandler>(a: Matrix<'a>, b: Matrix<'a>, alpha: f64, beta: f64, c: &mut O) {
@@ -991,3 +626,4 @@ impl fmt::Display for Tensor {
 }
 
 //--------------------------------------------------------------------------------------------------
+*/

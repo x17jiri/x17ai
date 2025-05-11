@@ -3,70 +3,127 @@
 
 use crate::*;
 use std::fmt;
+use std::num::NonZeroUsize;
 
 pub struct BufferBase {
 	pub device: Rc<dyn Device>,
 	pub size_bytes: usize,
 }
 
-pub struct SliceSet {
+pub trait ToBufferBase {
+	fn to_buffer_base(&self) -> &BufferBase;
+}
+
+pub struct SliceSet<'a> {
+	pub buffer: &'a dyn Buffer,
+	pub dtype: DType,
+	pub offset: usize,
+
 	pub len: usize,
 	pub batch_size: usize,
-	pub offset: usize,
 	pub batch_stride: usize,
+}
+
+impl<'a> SliceSet<'a> {
+	pub fn to_typed_slice_set<T: ToBufferBase, F: FnOnce(&'a dyn Buffer) -> &'a T>(
+		&'a self, f: F,
+	) -> TypedSliceSet<'a, T> {
+		TypedSliceSet {
+			buffer: f(self.buffer),
+			dtype: self.dtype,
+			offset: self.offset,
+
+			len: self.len,
+			batch_size: self.batch_size,
+			batch_stride: self.batch_stride,
+		}
+	}
+}
+
+pub struct TypedSliceSet<'a, BufType: ToBufferBase> {
+	pub buffer: &'a BufType,
+	pub dtype: DType,
+	pub offset: usize,
+
+	pub len: usize,
+	pub batch_size: usize,
+	pub batch_stride: usize,
+}
+
+/// All matrices are stored in row-major order.
+/// Example:
+/// 	[	1 2 3
+/// 		4 5 6	->	[ 1 2 3 4 5 6 7 8 9 ]
+/// 		7 8 9 ]
+pub struct MatrixSet<'a> {
+	pub slice_set: SliceSet<'a>,
+
+	pub rows: NonZeroUsize,
+	pub cols: NonZeroUsize,
+	pub row_stride: usize,
+	pub col_stride: usize,
+}
+
+impl<'a> MatrixSet<'a> {
+	pub fn slice_len(
+		rows: NonZeroUsize, cols: NonZeroUsize, row_stride: usize, col_stride: usize,
+	) -> usize {
+		(rows.get() - 1) * row_stride + (cols.get() - 1) * col_stride + 1
+	}
+
+	pub fn to_typed_matrix_set<T: ToBufferBase, F: FnOnce(&'a dyn Buffer) -> &'a T>(
+		&'a self, f: F,
+	) -> TypedMatrixSet<'a, T> {
+		TypedMatrixSet {
+			slice_set: self.slice_set.to_typed_slice_set(f),
+			rows: self.rows,
+			cols: self.cols,
+			row_stride: self.row_stride,
+			col_stride: self.col_stride,
+		}
+	}
+}
+
+pub struct TypedMatrixSet<'a, BufType: ToBufferBase> {
+	pub slice_set: TypedSliceSet<'a, BufType>,
+
+	pub rows: NonZeroUsize,
+	pub cols: NonZeroUsize,
+	pub row_stride: usize,
+	pub col_stride: usize,
 }
 
 pub trait Buffer {
 	// If any of the slices represented by a SliceSet are not in bounds,
 	// these functions will panic.
 
-	fn zeros(&self, dtype: DType, dst_slices: &SliceSet);
-	fn randn(&self, dtype: DType, dst_slices: &SliceSet);
+	fn zeros(&self, dst: &SliceSet);
 
-	fn copy(&self, dtype: DType, dst_slices: &SliceSet, src: &BufferBase, src_slices: &SliceSet);
-	fn acc(
-		&self, dtype: DType, dst_slices: &SliceSet, dst_weight: f64, b: &BufferBase,
-		b_slices: &SliceSet, b_weight: f64,
-	);
+	fn randn(&self, dst: &SliceSet);
 
-	fn vec_mul(
-		&self, dtype: DType, dst_slices: &SliceSet, a: &BufferBase, a_slices: &SliceSet,
-		b: &BufferBase, b_slices: &SliceSet,
-	);
+	fn copy(&self, dst: &SliceSet, src: &SliceSet);
+
+	fn acc(&self, dst: &SliceSet, dst_weight: f64, b: &SliceSet, b_weight: f64);
+
+	fn mul(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet);
+
+	fn mul_acc(&self, dst: &SliceSet, dst_weight: f64, a: &SliceSet, b: &SliceSet, ab_weight: f64);
+
+	fn vec_mul(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet);
+
 	fn vec_mul_acc(
-		&self, dtype: DType, dst_slices: &SliceSet, dst_weight: f64, a: &BufferBase,
-		a_slices: &SliceSet, b: &BufferBase, b_slices: &SliceSet, ab_weight: f64,
+		&self, dst: &SliceSet, dst_weight: f64, a: &SliceSet, b: &SliceSet, ab_weight: f64,
 	);
 
-	fn rsqrt(
-		&self, dtype: DType, dst_slices: &SliceSet, a: &BufferBase, a_slices: &SliceSet, eps: f64,
-	);
+	fn rsqrt(&self, dst: &SliceSet, a: &SliceSet, eps: f64);
 
-	fn softmax(&self, dtype: DType, dst_slices: &SliceSet, a: &BufferBase, a_slices: &SliceSet);
+	fn softmax(&self, dst: &SliceSet, a: &SliceSet);
 
-	fn rms_norm(&self, slices: &SliceSet<1>, eps: f64);
+	fn rms_norm(&self, dst: &SliceSet, a: &SliceSet, eps: f64);
 
-	// All matrices are stored in row-major order.
-	// Example:
-	// 	[	1 2 3
-	// 		4 5 6	->	[ 1 2 3 4 5 6 7 8 9 ]
-	// 		7 8 9 ]
-	#[rustfmt::skip]
-	#[allow(clippy::too_many_arguments)]
-	unsafe fn gemm(
-		&self, dtype: DType, c_offset: usize, ldc: usize, c_batch_stride: usize,
-		m: usize, n: usize, k: usize,
-		a: &BufferBase, a_offset: usize, lda: usize, transa: bool, a_batch_stride: usize,
-		b: &BufferBase, b_offset: usize, ldb: usize, transb: bool, b_batch_stride: usize,
-		alpha: f64, beta: f64,
-		batch_size: usize,
-	);
+	fn gemm(&self, dst: &MatrixSet, dst_weight: f64, a: &MatrixSet, b: &MatrixSet, ab_weight: f64);
 
-	#[rustfmt::skip]
-	unsafe fn format(
-		&self, f: &mut fmt::Formatter, dtype: DType,
-		offset: usize, count: usize, stride: usize,
-	) -> fmt::Result;
+	fn format(&self, f: &mut fmt::Formatter, a: &SliceSet) -> fmt::Result;
 }
 
 impl BufferBase {
@@ -100,17 +157,27 @@ impl BufferBase {
 		bytes.is_some_and(|b| b <= self.size_bytes)
 	}
 
-	pub fn are_slices_in_bounds(&self, dtype: DType, slice_set: &SliceSet) -> bool {
+	pub fn are_slices_in_bounds(slice_set: &SliceSet) -> bool {
 		if slice_set.batch_size == 0 {
 			return true;
 		}
 		let max_batch = slice_set.batch_size - 1;
 
-		self.is_in_bounds(
-			dtype,
+		BufferBase::from_dyn_buf(slice_set.buffer).is_in_bounds(
+			slice_set.dtype,
 			slice_set.offset,
 			slice_set.batch_stride * max_batch + slice_set.len,
 		)
+	}
+
+	pub fn are_matrices_in_bounds(matrix_set: &MatrixSet) -> bool {
+		let slice_len = MatrixSet::slice_len(
+			matrix_set.rows,
+			matrix_set.cols,
+			matrix_set.row_stride,
+			matrix_set.col_stride,
+		);
+		matrix_set.slice_set.len >= slice_len && Self::are_slices_in_bounds(&matrix_set.slice_set)
 	}
 
 	pub fn is_in_bounds_T<T>(&self, offset: usize, len: usize) -> bool {

@@ -1,6 +1,7 @@
 // Copyright 2024 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
+#![allow(non_snake_case)]
 #![allow(incomplete_features)]
 #![allow(internal_features)]
 #![feature(core_intrinsics)]
@@ -14,11 +15,9 @@
 #![feature(dispatch_from_dyn)]
 #![feature(generic_const_exprs)]
 
-#[cold]
-fn cold_path() {}
-
 mod batch;
 mod buffer;
+mod context;
 mod cpu;
 mod device;
 mod dim_merger;
@@ -26,11 +25,13 @@ mod dtype;
 mod expr;
 mod format;
 mod matrix;
+mod optimizer;
 mod rand;
 mod tensor;
 
 use crate::batch::*;
 use crate::buffer::*;
+use crate::context::*;
 use crate::cpu::*;
 use crate::device::*;
 use crate::dim_merger::*;
@@ -38,6 +39,7 @@ use crate::dtype::*;
 use crate::expr::*;
 use crate::format::*;
 use crate::matrix::*;
+use crate::optimizer::*;
 use crate::rand::*;
 use crate::tensor::*;
 use smallvec::{SmallVec, smallvec};
@@ -70,197 +72,69 @@ use std::rc::Rc;
 
 */
 
-// Inspired by Adam-mini: https://arxiv.org/abs/2406.16793
-pub struct AdamParam {
-	pub parts: usize,
-	pub part_elems: usize,
-	pub value: Tensor,   // shape: [parts, part_elems]
-	pub grad: Tensor,    // shape: [parts, part_elems]
-	pub m: Tensor,       // shape: [parts, part_elems]
-	pub v: Tensor,       // shape: [parts, 1]
-	pub v_recip: Tensor, // shape: [parts, 1]
-	pub stored_tensors: Vec<Tensor>,
-	pub beta1: f64,
-	pub beta2: f64,
-	pub eps: f64,
-}
-
-impl OptParam for AdamParam {
-	fn grad(&self) -> &Tensor {
-		&self.grad
-	}
-
-	fn zero_grad(&mut self) {
-		zeros_(&self.grad);
-	}
-
-	fn step(&mut self, learning_rate: f64) {
-		// update momentum
-		acc_(&self.m, self.beta1, &self.grad, 1.0 - self.beta1);
-
-		// update velocity
-		acc_mean_(&self.v, self.beta2, &square(&self.grad), true, 1.0 - self.beta2);
-		rsqrt_into(&self.v, self.eps, &self.v_recip);
-
-		acc_mul_(&self.value, 1.0, &self.m, &self.v_recip, -learning_rate);
-	}
-
-	fn push_tensor(&mut self, tensor: Tensor) {
-		self.stored_tensors.push(tensor);
-	}
-
-	fn pop_tensor(&mut self) -> Tensor {
-		self.stored_tensors.pop().unwrap()
-	}
-
-	fn value(&self) -> &Tensor {
-		&self.value
-	}
-}
-
-pub struct Context {
-	pub learning_rate: f64,
-	pub beta1: f64,
-	pub beta2: f64,
-	pub eps: f64,
-	pub params: Vec<Rc<RefCell<AdamParam>>>,
-	pub device: Rc<dyn Device>,
-}
-
-impl Context {
-	pub fn new(device: Rc<dyn Device>) -> Context {
-		Context {
-			learning_rate: 0.001,
-			beta1: 0.9,
-			beta2: 0.999,
-			eps: 1e-8,
-			params: Vec::new(),
-			device,
-		}
-	}
-
-	pub fn add_param(
-		&mut self, dtype: DType, parts: usize, part_elems: usize,
-	) -> Rc<RefCell<dyn OptParam>> {
-		let value = Tensor::new_empty_on(&[parts, part_elems], dtype, self.device.clone());
-		let grad = value.new_empty_like();
-		let m = value.new_empty_like();
-
-		let v = Tensor::new_empty_on(&[parts, 1], dtype, self.device.clone());
-		let v_recip = v.new_empty_like();
-
-		let param = Rc::new(RefCell::new(AdamParam {
-			parts,
-			part_elems,
-			value,
-			grad,
-			m,
-			v,
-			v_recip,
-			stored_tensors: Vec::new(),
-			beta1: self.beta1,
-			beta2: self.beta2,
-			eps: self.eps,
-		}));
-		self.params.push(param.clone());
-		param
-	}
-
-	pub fn zero_grad(&mut self) {
-		for param in &self.params {
-			param.borrow_mut().zero_grad();
-		}
-	}
-
-	pub fn step(&mut self, learning_rate: f64) {
-		for param in &self.params {
-			param.borrow_mut().step(learning_rate);
-		}
-	}
-}
-
-pub trait OptParam {
-	fn grad(&self) -> &Tensor;
-	fn zero_grad(&mut self);
-	fn step(&mut self, learning_rate: f64);
-	fn push_tensor(&mut self, tensor: Tensor);
-	fn pop_tensor(&mut self) -> Tensor;
-	fn value(&self) -> &Tensor;
-}
-
-/// Linear layer transforming inputs to outputs
+/// Multihead Linear Layer transforming inputs to outputs
 ///
 /// This is basically a thin wrapper around a matrix multiplication.
 /// It does not include a bias term.
 ///
-/// If nhead != 0, this works like n parallel linear transformations of the same input:
+/// This works like n parallel linear transformations of the same input:
 ///
 ///     input: [*, inputs]
 ///     output: [*, head, outputs]
-///
-/// Otherwise:
-///
-///     input: [*, inputs]
-///     output: [*, outputs]
-///
-/// Even with multiple heads, there is only one matrix multiplication. The output is then reshaped
-/// to include the head dimension.
 struct Linear {
 	pub inputs: usize,
 	pub outputs: usize,
-	pub nhead: Option<usize>,
-	pub parts: usize,
+	pub heads: usize,
+
 	pub w: Tensor,
-	pub w_opt: Rc<RefCell<dyn OptParam>>,
-	pub scale: f64,
+	pub w_opt: Rc<RefCell<OptParam>>,
+
+	pub forward_scale: f64,
 	pub backward_scale: f64,
 	pub dtype: DType,
 }
 
 impl Linear {
 	pub fn new(
-		inputs: usize, outputs: usize, nhead: Option<usize>, dtype: DType, ctx: &mut Context,
+		inputs: usize, outputs: usize, heads: usize, dtype: DType, ctx: &mut Context,
 	) -> Linear {
-		let parts = nhead.unwrap_or(1);
-		let w_opt = ctx.add_param(dtype, parts, outputs * inputs);
+		let w_opt = ctx.add_param(dtype, heads, outputs * inputs);
 		let w = w_opt.borrow().value().clone();
-		let w = w.reshape(&[parts * outputs, inputs]);
-		let scale = MatMul::normalizing_scale(inputs);
-		let backward_scale = MatMul::normalizing_scale(outputs);
+		let w = w.reshape(&[heads * outputs, inputs]);
+
+		let forward_scale = 1.0 / (inputs as f64).sqrt();
+		let backward_scale = 1.0 / (outputs as f64).sqrt();
 
 		#[rustfmt::skip]
 		Linear {
-			inputs, outputs, nhead, parts,
+			inputs, outputs, heads,
 			w, w_opt,
-			scale, backward_scale, dtype,
+			forward_scale, backward_scale, dtype,
 		}
 	}
 
-	fn forward(&self, x: Tensor) -> Tensor {
+	fn forward(&self, inp: &Tensor, out: &Tensor) {
+		// [..., heads, outputs] -> [..., heads * outputs]
+		let out = out.reshape_last_n(2, &[self.heads * self.outputs]);
+
+		let w = matrix(&self.w);
+		let i = col_matrix(&inp);
+		let o = matrix(&out);
+		mat_mul(w, i).scale(self.forward_scale).save_to(o);
+
 		let mut w_opt = self.w_opt.borrow_mut();
-
-		let y = mm(&self.w, x.as_col());
-		let y = y.scale(self.scale).assert_normalizing_scale();
-		let y = y.eval();
-
-		w_opt.push_tensor(x);
-
-		if let Some(nhead) = self.nhead {
-			// [..., head * outputs] -> [..., head, outputs]
-			y.reshape_last_n(1, &[nhead, self.outputs])
-		} else {
-			y
-		}
+		w_opt.push_tensor(out);
 	}
 
 	fn backward(&self, mut dy: Tensor) -> Tensor {
-		let mut w_opt = self.w_opt.borrow_mut();
-		let x = w_opt.pop_tensor();
-
-		if let Some(nhead) = self.nhead {
-			// [..., head, outputs] -> [..., head * outputs]
-			dy = dy.reshape_last_n(2, &[nhead * self.outputs])
+		let x = {
+			let mut w_opt = self.w_opt.borrow_mut();
+			w_opt.pop_tensor()
 		};
+
+		// [..., heads, outputs] -> [..., heads * outputs]
+		dy = dy.reshape_last_n(2, &[self.heads * self.outputs]);
+
 		let grad = mm(&self.w, x.as_col()).backward(&dy);
 
 		// dw

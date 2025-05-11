@@ -5,123 +5,290 @@ use crate::tensor::INLINE_DIMS;
 use crate::*;
 use smallvec::SmallVec;
 use std::fmt;
+use std::intrinsics::{cold_path, likely, unlikely};
+
+//--------------------------------------------------------------------------------------------------
+// OutputHandler
+
+pub trait OutputHandler {
+	type Impl: OutputHandlerImpl;
+
+	/// `ndim` is the number of dims that will be prepended.
+	fn init(self, ndim: usize) -> Self::Impl;
+}
+
+pub trait OutputHandlerImpl {
+	type Value;
+
+	/// Adds a new dimension with the given size.
+	///
+	/// Returns the stride of the new dimension.
+	fn prepend_dim(&mut self, size: usize);
+
+	/// Checks validity after all dimensions have been added.
+	///
+	/// No additional dimensions should be added after callig this function.
+	fn value(self) -> Self::Value;
+}
+
+//--------------------------------------------------------------------------------------------------
+// NullOutputHandler
+
+pub struct NullOutputHandler();
+
+impl OutputHandler for NullOutputHandler {
+	type Impl = NullOutputHandler;
+
+	fn init(self, _ndim: usize) -> Self::Impl {
+		self
+	}
+}
+
+impl OutputHandlerImpl for NullOutputHandler {
+	type Value = ();
+
+	fn prepend_dim(&mut self, _size: usize) {}
+
+	fn value(self) -> Self::Value {}
+}
+
+//--------------------------------------------------------------------------------------------------
+// NewOutputHandler
+
+pub struct NewOutputHandler {
+	dtype: DType,
+	device: Rc<dyn Device>,
+}
+
+impl NewOutputHandler {
+	pub fn new(dtype: DType, device: Rc<dyn Device>) -> NewOutputHandler {
+		NewOutputHandler { dtype, device }
+	}
+}
+
+impl OutputHandler for NewOutputHandler {
+	type Impl = NewOutputHandlerImpl;
+
+	fn init(self, ndim: usize) -> Self::Impl {
+		let mut dims = SmallVec::with_capacity(ndim);
+		unsafe { dims.set_len(ndim) };
+		NewOutputHandlerImpl {
+			dims,
+			remaining_dims: ndim,
+			elems: 1,
+			nonzero_elems: 1,
+			dtype: self.dtype,
+			device: self.device,
+		}
+	}
+}
+
+pub struct NewOutputHandlerImpl {
+	dims: SmallVec<[SizeAndStride; INLINE_DIMS]>,
+
+	/// How many more dims do we need to prepend.
+	remaining_dims: usize,
+
+	elems: usize,
+
+	/// Total number of elements in the dimensions processed so far but ignoring
+	/// zero length dimensions.
+	nonzero_elems: usize,
+
+	dtype: DType,
+	device: Rc<dyn Device>,
+}
+
+impl OutputHandlerImpl for NewOutputHandlerImpl {
+	type Value = Tensor;
+
+	fn prepend_dim(&mut self, size: usize) {
+		assert!(self.remaining_dims > 0);
+		// Check that if we ignore zero length dimensions, the number of elements does not
+		// overflow. This is done to make sure our calculations would not overflow even if we
+		// had the same dimensions but in different order.
+		if likely(size != 0) {
+			if let Some(mul) = self.nonzero_elems.checked_mul(size) {
+				self.nonzero_elems = mul;
+			} else {
+				panic!("too many elements");
+			};
+		}
+
+		let stride = self.elems;
+		self.elems *= size;
+
+		let dim = SizeAndStride { size, stride };
+
+		self.remaining_dims -= 1;
+		*unsafe { self.dims.get_unchecked_mut(self.remaining_dims) } = dim;
+	}
+
+	fn value(mut self) -> Self::Value {
+		if self.remaining_dims != 0 {
+			cold_path();
+			for dim in unsafe { self.dims.get_unchecked_mut(0..self.remaining_dims) } {
+				*dim = SizeAndStride { size: 1, stride: 0 };
+			}
+		}
+
+		Tensor {
+			dims: self.dims,
+			offset: 0,
+			dtype: self.dtype,
+			elems: self.elems,
+			buffer: self.device.new_buffer(self.dtype, self.elems),
+		}
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
 pub struct MergedDim<const N: usize> {
 	pub size: usize,
-	pub out_stride: usize,
-	pub in_strides: [usize; N],
+	pub strides: [usize; N],
 }
 
 #[derive(Clone)]
 pub struct DimMerger<const N: usize> {
 	/// We order dimensions from smallest to largest stride.
 	/// This is the reverse order of how they are stored in a Tensor.
-	rev_dims: SmallVec<[MergedDim<N>; INLINE_DIMS]>,
+	dims_increasing: SmallVec<[MergedDim<N>; INLINE_DIMS]>,
+}
+
+pub struct MergedDimList<const N: usize> {
+	dims_increasing: SmallVec<[MergedDim<N>; INLINE_DIMS]>,
+	start: usize,
+}
+
+#[derive(Clone)]
+pub struct MergedDimIter<'a, const N: usize> {
+	iter: std::slice::Iter<'a, MergedDim<N>>,
 }
 
 impl<const N: usize> DimMerger<N> {
-	pub fn new<O: OutputHandler>(inputs: [&[SizeAndStride]; N], out: &mut O) -> DimMerger<N> {
-		let Some(ndim) = inputs.iter().map(|i| i.len()).max() else {
-			// N == 0
-			return DimMerger::new_empty(0);
-		};
-		let mut merger = DimMerger::new_empty(ndim);
-
-		// get iterators over input dimensions
-		let mut iterators: [_; N] = inputs.map(|i| i.iter().rev().copied());
-
-		for _ in 0..ndim {
-			// Get sizes and strides for the current dimension from all inputs
-			let in_dims = std::array::from_fn(|i| {
-				iterators[i].next().unwrap_or(SizeAndStride { size: 1, stride: 1 })
-			});
-
-			// Only dimensions with size 1 can be broadcasted.
-			// Other dimensions cannot be broadcasted and therefore should all be of the same size.
-			// Let's get the size of any of the non-broadcastable dimensions.
-			// If the non-broadcastable dimensions are not all the same size,
-			// we will detect it later.
-			let dim_size = in_dims.iter().fold(1, |acc, dim| if acc == 1 { dim.size } else { acc });
-
-			// Get input strides. If needed, try to broadcast
-			let in_strides = in_dims.map(|i| {
-				if i.size == dim_size {
-					i.stride
-				} else {
-					assert!(i.size == 1, "cannot broadcast: incompatible dimensions");
-					0
-				}
-			});
-
-			let out_stride = out.prepend_dim(dim_size, true);
-			merger.prepend_dim(dim_size, out_stride, in_strides);
-		}
-
+	pub fn new(inputs: [&[SizeAndStride]; N]) -> DimMerger<N> {
+		let (merger, _null) = Self::new_ex(inputs, NullOutputHandler());
 		merger
 	}
 
+	pub fn new_ex<H, I>(inputs: [&[SizeAndStride]; N], handler: H) -> (DimMerger<N>, I::Value)
+	where
+		H: OutputHandler<Impl = I>,
+		I: OutputHandlerImpl,
+	{
+		// NOTE: The default value of `unwrap_or` will only be used if N == 0,
+		// which should never happen.
+		let ndim = inputs.iter().map(|i| i.len()).max().unwrap_or(0);
+
+		let mut merger = DimMerger::new_empty();
+		let mut out = handler.init(ndim);
+
+		for dim in 0..ndim {
+			let size = merger.prepend_dim(inputs.map(|input| {
+				if dim < input.len() {
+					input[input.len() - dim - 1]
+				} else {
+					SizeAndStride { size: 1, stride: 0 }
+				}
+			}));
+			out.prepend_dim(size);
+		}
+
+		(merger, out.value())
+	}
+
 	/// The `ndim` parameter is just a hint to preallocate the right amount of space.
-	pub fn new_empty(ndim: usize) -> DimMerger<N> {
-		let mut rev_dims = SmallVec::with_capacity(ndim);
-		rev_dims.push(MergedDim {
-			size: 1,
-			out_stride: 1,
-			in_strides: [1; N],
-		});
-		DimMerger { rev_dims }
+	pub fn new_empty() -> DimMerger<N> {
+		DimMerger {
+			dims_increasing: smallvec![MergedDim { size: 1, strides: [1; N] }],
+		}
 	}
 
 	/// Adds a new dimension and tries to merge it with previous dimensions.
-	/// The strides of the new dimension should be >= than any of the previous dimensions.
 	///
-	/// If the strides are not all >=, merging will not work correctly.
-	pub fn prepend_dim(&mut self, size: usize, out_stride: usize, in_strides: [usize; N]) {
-		let prev = self.rev_dims.last_mut();
-		// SAFETY: In `new_empty()`, we make sure `rev_dims` has at least one element.
+	/// The merging will only happen if for all inputs:
+	///    new_dim_stride = prev_dim_stride * prev_dim_size
+	///
+	/// Returns the size of the new dimension
+	pub fn prepend_dim(&mut self, dims: [SizeAndStride; N]) -> usize {
+		let prev = self.dims_increasing.last_mut();
+		// SAFETY: In `new_empty()`, we make sure `dims_increasing` has at least one element.
 		let prev = unsafe { prev.unwrap_unchecked() };
 
+		// Only dimensions with size 1 can be broadcasted.
+		// Other dimensions cannot be broadcasted and therefore should all be of the same size.
+		// Let's get the size of any of the non-broadcastable dimensions.
+		// If the non-broadcastable dimensions are not all the same size,
+		// we will detect it later, we will detect it when making the `strides` array.
+		let size = dims.iter().fold(1, |acc, dim| if acc == 1 { dim.size } else { acc });
+		let strides = dims.map(|dim| {
+			assert!(dim.size == size || dim.size == 1, "cannot broadcast: incompatible dimensions");
+			if dim.size == size { dim.stride } else { 0 }
+		});
+
 		// Can we extend the previous dimension?
-		if size == 1
-			|| (out_stride == prev.out_stride * prev.size
-				// TODO - verify that the `.all(...)` generates good assembly code
-				&& (0..N).all(|i| in_strides[i] == prev.in_strides[i] * prev.size))
-		{
+		// TODO - verify that the `.all(...)` generates good assembly code
+		if size == 1 || (0..N).all(|i| strides[i] == prev.strides[i] * prev.size) {
 			prev.size *= size;
-			return;
+			return size;
 		}
 
 		// Can we entirely replace the previous dimension?
 		if prev.size == 1 {
 			prev.size = size;
-			prev.out_stride = out_stride;
-			prev.in_strides = in_strides;
-			return;
+			prev.strides = strides;
+			return size;
 		}
 
-		// We can neither extend nor replace the previous dimension. Add the new dimension.
-		self.rev_dims.push(MergedDim { size, out_stride, in_strides });
+		self.dims_increasing.push(MergedDim { size, strides });
+		size
 	}
 
-	/// Returns an iterator over the dimensions in the order of increasing strides.
-	/// This is the reverse of the order used internally by a Tensor.
-	pub fn dims_increasing(&self) -> impl ExactSizeIterator<Item = &MergedDim<N>> {
-		self.rev_dims.iter()
+	pub fn dims_increasing(self) -> MergedDimList<N> {
+		MergedDimList {
+			dims_increasing: self.dims_increasing,
+			start: 0,
+		}
 	}
 
-	pub fn smallest_dim(&self) -> &MergedDim<N> {
-		// SAFETY: In `new_empty()`, we make sure `rev_dims` has at least one element.
-		unsafe { self.rev_dims.get_unchecked(0) }
+	pub fn smallest_dim(&self) -> MergedDim<N> {
+		// SAFETY: In `new_empty()`, we make sure `dims_increasing` has at least one element.
+		unsafe { *self.dims_increasing.get_unchecked(0) }
 	}
 
-	pub fn dims_increasing_without_smallest(&self) -> impl ExactSizeIterator<Item = &MergedDim<N>> {
-		// SAFETY: In `new_empty()`, we make sure `rev_dims` has at least one element.
-		unsafe { self.rev_dims.get_unchecked(1..).iter() }
+	pub fn dims_increasing_without_smallest(self) -> MergedDimList<N> {
+		MergedDimList {
+			dims_increasing: self.dims_increasing,
+			start: 1,
+		}
 	}
+}
 
-	/// Returns an iterator over the dimensions in the order of decreasing strides.
-	/// This is the same order used internally by a Tensor.
-	pub fn dims_decreasing(&self) -> impl ExactSizeIterator<Item = &MergedDim<N>> {
-		self.rev_dims.iter().rev()
+impl<const N: usize> MergedDimList<N> {
+	pub fn iter(&self) -> MergedDimIter<'_, N> {
+		let slice = unsafe { self.dims_increasing.get_unchecked(self.start..) };
+		MergedDimIter { iter: slice.iter() }
+	}
+}
+
+impl<'a, const N: usize> Iterator for MergedDimIter<'a, N> {
+	type Item = MergedDim<N>;
+
+	fn next(&mut self) -> Option<Self::Item> {
+		self.iter.next().copied()
+	}
+}
+
+impl<'a, const N: usize> ExactSizeIterator for MergedDimIter<'a, N> {
+	fn len(&self) -> usize {
+		self.iter.len()
+	}
+}
+
+impl<'a, const N: usize> MergedDimIter<'a, N> {
+	pub fn is_empty(&self) -> bool {
+		self.iter.len() == 0
 	}
 }
