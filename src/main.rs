@@ -113,40 +113,36 @@ impl Linear {
 		}
 	}
 
-	fn forward(&self, inp: &Tensor, out: &Tensor) {
+	fn forward(&self, inp: Tensor, out: Tensor) {
 		// [..., heads, outputs] -> [..., heads * outputs]
-		let out = out.reshape_last_n(2, &[self.heads * self.outputs]);
+		let out = out.reshape(2, &[self.heads * self.outputs]);
 
 		let w = matrix(&self.w);
 		let i = col_matrix(&inp);
-		let o = matrix(&out);
-		mat_mul(w, i).scale(self.forward_scale).save_to(o);
+		let o = col_matrix(&out);
+		mm(w, i).scale(self.forward_scale).save_to(o);
 
-		let mut w_opt = self.w_opt.borrow_mut();
-		w_opt.push_tensor(out);
+		self.w_opt.borrow_mut().save_tensors([inp]);
 	}
 
-	fn backward(&self, mut dy: Tensor) -> Tensor {
-		let x = {
-			let mut w_opt = self.w_opt.borrow_mut();
-			w_opt.pop_tensor()
-		};
+	fn backward(&self, d_out: Tensor, d_inp: Tensor) {
+		let [inp] = self.w_opt.borrow_mut().load_tensors();
 
 		// [..., heads, outputs] -> [..., heads * outputs]
-		dy = dy.reshape_last_n(2, &[self.heads * self.outputs]);
+		let d_out = d_out.reshape(2, &[self.heads * self.outputs]);
 
-		let grad = mm(&self.w, x.as_col()).backward(&dy);
+		// [heads, outputs * inputs] -> [heads * outputs, inputs]
+		let d_weights = self.w_opt.borrow().grad().clone();
+		let d_weights = d_weights.reshape_all(&[self.heads * self.outputs, self.inputs]);
 
-		// dw
-		let dw = grad.da();
-		let dw = dw.scale(1.0).assert_normalizing_scale();
-		dw.acc_into(&w_opt.grad().clone().reshape(&[self.parts * self.outputs, self.inputs]));
+		let d_w = matrix(&d_weights);
+		let i = col_matrix(&inp);
+		let d_o = col_matrix(&d_out);
+		mm(d_o, i.T()).scale(1.0).acc_to(d_w, 1.0, 1.0);
 
-		// dx
-		let dx = grad.db();
-		let dx = dx.scale(self.backward_scale).assert_normalizing_scale();
-		let dx = dx.eval();
-		dx
+		let w = matrix(&self.w);
+		let d_i = col_matrix(&d_inp);
+		mm(w.T(), d_o).scale(self.backward_scale).save_to(d_i);
 	}
 }
 

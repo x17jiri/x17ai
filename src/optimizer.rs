@@ -87,12 +87,15 @@ impl OptParam {
 		mul(&self.momentum, &self.velocity_recip).acc_to(&self.value, 1.0, -coef.learning_rate);
 	}
 
-	pub fn push_tensor(&mut self, tensor: Tensor) {
-		self.stored_tensors.push(tensor);
+	pub fn save_tensors<const N: usize>(&mut self, tensors: [Tensor; N]) {
+		assert!(self.stored_tensors.is_empty());
+		self.stored_tensors.extend(tensors.into_iter());
 	}
 
-	pub fn pop_tensor(&mut self) -> Tensor {
-		self.stored_tensors.pop().unwrap()
+	pub fn load_tensors<const N: usize>(&mut self) -> [Tensor; N] {
+		assert!(self.stored_tensors.len() == N);
+		let mut iter = self.stored_tensors.drain(..);
+		std::array::from_fn(|_| unsafe { iter.next().unwrap_unchecked() })
 	}
 
 	pub fn value(&self) -> &Tensor {

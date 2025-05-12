@@ -356,7 +356,7 @@ pub struct MatMul<'a> {
 	pub scale: f64,
 }
 
-pub fn mat_mul<'a>(a: Matrix<'a>, b: Matrix<'a>) -> MatMul<'a> {
+pub fn mm<'a>(a: Matrix<'a>, b: Matrix<'a>) -> MatMul<'a> {
 	MatMul { a, b, scale: 1.0 }
 }
 
