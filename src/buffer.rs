@@ -123,7 +123,9 @@ pub trait Buffer {
 
 	fn gemm(&self, dst: &MatrixSet, dst_weight: f64, a: &MatrixSet, b: &MatrixSet, ab_weight: f64);
 
-	fn format(&self, f: &mut fmt::Formatter, a: &SliceSet) -> fmt::Result;
+	fn format(
+		&self, f: &mut fmt::Formatter, dtype: DType, offset: usize, len: usize, stride: usize,
+	) -> fmt::Result;
 }
 
 impl BufferBase {

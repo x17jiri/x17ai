@@ -100,7 +100,7 @@ impl Linear {
 	) -> Linear {
 		let w_opt = ctx.add_param(dtype, heads, outputs * inputs);
 		let w = w_opt.borrow().value().clone();
-		let w = w.reshape(&[heads * outputs, inputs]);
+		let w = w.reshape_all(&[heads * outputs, inputs]);
 
 		let forward_scale = 1.0 / (inputs as f64).sqrt();
 		let backward_scale = 1.0 / (outputs as f64).sqrt();
@@ -283,26 +283,30 @@ fn main() {
 	let x = Tensor::new_empty_on(&[2, 3], DType::f32(), dev.clone());
 	let y = Tensor::new_empty_on(&[3, 2], DType::f32(), dev.clone());
 
-	randn_(&x);
-	randn_(&y);
+	randn().save_to(&x);
+	randn().save_to(&y);
 
 	println!("x = {}", x);
 	println!("y = {}", y);
 
-	let nx = rms_norm(&x, eps);
-	let ny = rms_norm(&y, eps);
+	let nx = x.new_empty_like();
+	let ny = y.new_empty_like();
+	rms_norm(&x, eps).save_to(&nx);
+	rms_norm(&y, eps).save_to(&ny);
 
 	println!("rms_norm(x) = {}", nx);
 	println!("rms_norm(y) = {}", ny);
 
-	let xs = softmax(&x);
-	let ys = softmax(&y);
+	let xs = x.new_empty_like();
+	let ys = y.new_empty_like();
+	softmax(&x).save_to(&xs);
+	softmax(&y).save_to(&ys);
 
 	println!("softmax(x) = {}", xs);
 	println!("softmax(y) = {}", ys);
 
-	//	let z = Tensor::new(&[2, 2], DType::f32(), dev.clone());
-	let z = mm(y.T(), x.T()).eval();
+	let z = Tensor::new_empty_on(&[2, 2], DType::f32(), dev.clone());
+	mm(matrix(&y).T(), matrix(&x).T()).save_to(matrix(&z));
 
 	println!("z = {}", z);
 }

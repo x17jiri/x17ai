@@ -15,11 +15,15 @@ mod math {
 	use std::cell::Cell;
 
 	pub fn dot_prod<T: Copy + FromToF64>(a: &[Cell<T>], b: &[Cell<T>]) -> f64 {
-		a.iter().zip(b).map(|(a, b)| a.get().to_f64() * b.get().to_f64()).sum()
+		let res = a.iter().zip(b).map(|(a, b)| a.get().to_f64() * b.get().to_f64()).sum();
+		//println!("dot_prod: {}", res);
+		res
 	}
 
 	pub fn rsqrt(a: f64) -> f64 {
-		1.0 / a.sqrt()
+		let res = 1.0 / a.sqrt();
+		//println!("rsqrt: {}", res);
+		res
 	}
 }
 
@@ -306,7 +310,9 @@ impl CPUBuffer {
 
 			let mut sum = 0.0;
 			for (d, i) in dst_arr.iter().zip(inp_arr) {
-				let e = (i.get().to_f64() - max).exp();
+				let val = i.get().to_f64();
+				let val = val - max; // avoid overflow
+				let e = val.exp();
 				d.set(T::from_f64(e));
 
 				sum += e;
@@ -329,9 +335,10 @@ impl CPUBuffer {
 	) {
 		assert!(dst.len == inp.len);
 		let len = dst.len;
+		let rlen = 1.0 / (len as f64);
 
 		for [dst_arr, inp_arr] in BatchIter::<T, 2>::new([dst, inp]) {
-			let scale = (len as f64) * math::rsqrt(math::dot_prod(inp_arr, inp_arr) + eps);
+			let scale = math::rsqrt(math::dot_prod(inp_arr, inp_arr) * rlen + eps);
 			for (d, i) in dst_arr.iter().zip(inp_arr) {
 				let val = i.get().to_f64() * scale;
 				d.set(T::from_f64(val));
@@ -369,24 +376,25 @@ impl CPUBuffer {
 	}
 
 	fn format_f<T: Copy + FromToF64>(
-		f: &mut fmt::Formatter, slices: &TypedSliceSet<'_, CPUBuffer>,
+		&self, f: &mut fmt::Formatter, offset: usize, len: usize, stride: usize,
 	) -> fmt::Result {
-		let mut first_line = true;
-		for [arr] in BatchIter::<T, 1>::new([slices]) {
-			if !first_line {
-				write!(f, "\n")?;
-			}
-			first_line = false;
+		let slices = TypedSliceSet {
+			buffer: self,
+			dtype: DType::f32(),
+			offset,
 
-			let mut first_item = true;
-			for a in arr {
-				if !first_item {
-					write!(f, ", ")?;
-				}
-				first_item = false;
-
-				write!(f, "{:.6}", a.get().to_f64())?;
+			len: 1,
+			batch_size: len,
+			batch_stride: stride,
+		};
+		let mut first_item = true;
+		for [arr] in BatchIter::<T, 1>::new([&slices]) {
+			if !first_item {
+				write!(f, ", ")?;
 			}
+			first_item = false;
+
+			write!(f, "{:.6}", arr[0].get().to_f64())?;
 		}
 		Ok(())
 	}
@@ -529,10 +537,13 @@ impl Buffer for CPUBuffer {
 		}
 	}
 
-	fn format(&self, f: &mut fmt::Formatter, slices: &SliceSet) -> fmt::Result {
-		let slices = self.cast_slices(slices);
-		match slices.dtype {
-			DType { kind: DTypeKind::Float, bits: 32 } => Self::format_f::<f32>(f, &slices),
+	fn format(
+		&self, f: &mut fmt::Formatter, dtype: DType, offset: usize, len: usize, stride: usize,
+	) -> fmt::Result {
+		match dtype {
+			DType { kind: DTypeKind::Float, bits: 32 } => {
+				self.format_f::<f32>(f, offset, len, stride)
+			},
 			_ => todo!(),
 		}
 	}
