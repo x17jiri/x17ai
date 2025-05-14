@@ -8,5 +8,5 @@ use std::rc::Rc;
 pub trait Device {
 	fn name(&self) -> &str;
 
-	fn new_buffer(self: Rc<Self>, dtype: DType, elems: usize) -> Rc<dyn Buffer>;
+	fn new_buffer(self: Rc<Self>, dtype: DType, elems: TensorSize) -> Rc<dyn Buffer>;
 }

@@ -9,6 +9,7 @@ use std::fmt;
 use std::intrinsics::{cold_path, likely, unlikely};
 use std::iter::ExactSizeIterator;
 use std::mem::MaybeUninit;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::ops::Index;
 use std::rc::{Rc, Weak};
 use thin_vec::ThinVec;
@@ -17,10 +18,17 @@ pub const INLINE_DIMS: usize = 5;
 
 //--------------------------------------------------------------------------------------------------
 
+pub type TensorSize = u32;
+pub type NonZeroTensorSize = NonZeroU32;
+
+pub fn tensor_size_to_usize(size: TensorSize) -> usize {
+	usize::try_from(size).unwrap()
+}
+
 #[derive(Clone, Copy, PartialEq, Default)]
 pub struct SizeAndStride {
-	pub size: usize,
-	pub stride: usize,
+	pub size: TensorSize,
+	pub stride: TensorSize,
 }
 
 impl SizeAndStride {
@@ -42,7 +50,7 @@ impl<'a> ShapeView<'a> {
 }
 
 impl Index<isize> for ShapeView<'_> {
-	type Output = usize;
+	type Output = TensorSize;
 
 	fn index(&self, index: isize) -> &Self::Output {
 		let i = if index < 0 { self.dims.len() as isize + index } else { index };
@@ -51,7 +59,7 @@ impl Index<isize> for ShapeView<'_> {
 }
 
 impl Index<usize> for ShapeView<'_> {
-	type Output = usize;
+	type Output = TensorSize;
 
 	fn index(&self, index: usize) -> &Self::Output {
 		&self.dims[index].size
@@ -75,9 +83,9 @@ impl std::cmp::PartialEq<ShapeView<'_>> for ShapeView<'_> {
 */
 
 impl<'a> IntoIterator for ShapeView<'a> {
-	type Item = &'a usize;
+	type Item = &'a TensorSize;
 	type IntoIter =
-		std::iter::Map<std::slice::Iter<'a, SizeAndStride>, fn(&SizeAndStride) -> &usize>;
+		std::iter::Map<std::slice::Iter<'a, SizeAndStride>, fn(&SizeAndStride) -> &TensorSize>;
 
 	fn into_iter(self) -> Self::IntoIter {
 		self.dims.iter().map(|x| &x.size)
@@ -90,9 +98,9 @@ impl<'a> IntoIterator for ShapeView<'a> {
 pub struct Tensor {
 	// dims in reverse order
 	pub(crate) dims: SmallVec<[SizeAndStride; INLINE_DIMS]>,
-	pub(crate) offset: usize,
+	pub(crate) offset: TensorSize,
 	pub(crate) dtype: DType,
-	pub(crate) elems: usize,
+	pub(crate) elems: TensorSize,
 	pub(crate) buffer: Rc<dyn Buffer>,
 }
 
@@ -100,9 +108,9 @@ impl Tensor {
 	/// Allocate a new tensor on the provided device.
 	pub fn new_empty_on<'a, Shape>(shape: Shape, dtype: DType, device: Rc<dyn Device>) -> Tensor
 	where
-		Shape: IntoIterator<Item = &'a usize>,
+		Shape: IntoIterator<Item = &'a TensorSize>,
 		<Shape as IntoIterator>::IntoIter:
-			DoubleEndedIterator<Item = &'a usize> + ExactSizeIterator,
+			DoubleEndedIterator<Item = &'a TensorSize> + ExactSizeIterator,
 	{
 		let shape = shape.into_iter().copied();
 		let builder = NewOutputHandler::new(dtype, device);
@@ -116,9 +124,9 @@ impl Tensor {
 	/// Allocate a new tensor on the same device as `self`.
 	pub fn new_empty<'a, Shape>(&'a self, shape: Shape, dtype: DType) -> Tensor
 	where
-		Shape: IntoIterator<Item = &'a usize>,
+		Shape: IntoIterator<Item = &'a TensorSize>,
 		<Shape as IntoIterator>::IntoIter:
-			DoubleEndedIterator<Item = &'a usize> + ExactSizeIterator,
+			DoubleEndedIterator<Item = &'a TensorSize> + ExactSizeIterator,
 	{
 		Self::new_empty_on(shape, dtype, self.device())
 	}
@@ -167,7 +175,7 @@ impl Tensor {
 	}
 
 	/// Returns the total number of elements in the tensor.
-	pub fn elems(&self) -> usize {
+	pub fn elems(&self) -> TensorSize {
 		self.elems
 	}
 
@@ -177,14 +185,14 @@ impl Tensor {
 	}
 
 	// Reshapes the last `n_dims_to_reshape` dimensions of the tensor
-	pub fn reshape(mut self, n_dims_to_reshape: usize, new_shape: &[usize]) -> Tensor {
+	pub fn reshape(mut self, n_dims_to_reshape: usize, new_shape: &[TensorSize]) -> Tensor {
 		let dims = &mut self.dims;
 		let ndim = dims.len();
 		let n_dims_to_keep = ndim - n_dims_to_reshape.min(ndim);
 
 		// Merge the dimensions that we are going to reshape
 		let dims_to_reshape = &dims[n_dims_to_keep..];
-		let merged = DimMerger::new([dims_to_reshape]);
+		let merged = DimMerger::new([dims_to_reshape], 0);
 
 		// Resize the dims array. The new dimensions will be initialized in the `for` loop below.
 		unsafe { dims.set_len(n_dims_to_keep) };
@@ -225,7 +233,7 @@ impl Tensor {
 				}
 			}
 
-			*dims_slot = SizeAndStride { size, stride: new_stride };
+			*dims_slot = SizeAndStride { size, stride: prev_stride };
 			prev_stride = new_stride;
 		}
 
@@ -235,7 +243,7 @@ impl Tensor {
 		self
 	}
 
-	pub fn reshape_all(self, new_shape: &[usize]) -> Tensor {
+	pub fn reshape_all(self, new_shape: &[TensorSize]) -> Tensor {
 		let ndim = self.dims.len();
 		self.reshape(ndim, new_shape)
 	}
@@ -279,12 +287,12 @@ impl Tensor {
 	}
 }
 
-fn fmt_0d(tensor: &Tensor, f: &mut fmt::Formatter, offset: usize) -> fmt::Result {
+fn fmt_0d(tensor: &Tensor, f: &mut fmt::Formatter, offset: TensorSize) -> fmt::Result {
 	let offset = tensor.offset + offset;
 	tensor.buffer.format(f, tensor.dtype, offset, 1, 1)
 }
 
-fn fmt_1d(tensor: &Tensor, f: &mut fmt::Formatter, offset: usize) -> fmt::Result {
+fn fmt_1d(tensor: &Tensor, f: &mut fmt::Formatter, offset: TensorSize) -> fmt::Result {
 	let offset = tensor.offset + offset;
 	let dim = tensor.dims[tensor.ndim() - 1];
 	write!(f, "[")?;
@@ -292,7 +300,7 @@ fn fmt_1d(tensor: &Tensor, f: &mut fmt::Formatter, offset: usize) -> fmt::Result
 	write!(f, "]")
 }
 
-fn fmt_2d(tensor: &Tensor, f: &mut fmt::Formatter, offset: usize) -> fmt::Result {
+fn fmt_2d(tensor: &Tensor, f: &mut fmt::Formatter, offset: TensorSize) -> fmt::Result {
 	writeln!(f, "[")?;
 	let dim = tensor.dims[tensor.ndim() - 2];
 	for i in 0..dim.size {

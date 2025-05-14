@@ -1,4 +1,4 @@
-use crate::{DType, Device, OptCoef, OptParam, Tensor};
+use crate::{DType, Device, OptCoef, OptParam, Tensor, TensorSize};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -18,7 +18,7 @@ impl Context {
 	}
 
 	pub fn add_param(
-		&mut self, dtype: DType, parts: usize, part_elems: usize,
+		&mut self, dtype: DType, parts: TensorSize, part_elems: TensorSize,
 	) -> Rc<RefCell<OptParam>> {
 		let param = OptParam::new(self.device.clone(), dtype, parts, part_elems);
 		self.params.push(param.clone());

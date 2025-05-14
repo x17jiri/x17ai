@@ -23,7 +23,7 @@ pub trait OutputHandlerImpl {
 	/// Adds a new dimension with the given size.
 	///
 	/// Returns the stride of the new dimension.
-	fn prepend_dim(&mut self, size: usize);
+	fn prepend_dim(&mut self, size: TensorSize);
 
 	/// Checks validity after all dimensions have been added.
 	///
@@ -47,7 +47,7 @@ impl OutputHandler for NullOutputHandler {
 impl OutputHandlerImpl for NullOutputHandler {
 	type Value = ();
 
-	fn prepend_dim(&mut self, _size: usize) {}
+	fn prepend_dim(&mut self, _size: TensorSize) {}
 
 	fn value(self) -> Self::Value {}
 }
@@ -89,11 +89,11 @@ pub struct NewOutputHandlerImpl {
 	/// How many more dims do we need to prepend.
 	remaining_dims: usize,
 
-	elems: usize,
+	elems: TensorSize,
 
 	/// Total number of elements in the dimensions processed so far but ignoring
 	/// zero length dimensions.
-	nonzero_elems: usize,
+	nonzero_elems: TensorSize,
 
 	dtype: DType,
 	device: Rc<dyn Device>,
@@ -102,7 +102,7 @@ pub struct NewOutputHandlerImpl {
 impl OutputHandlerImpl for NewOutputHandlerImpl {
 	type Value = Tensor;
 
-	fn prepend_dim(&mut self, size: usize) {
+	fn prepend_dim(&mut self, size: TensorSize) {
 		assert!(self.remaining_dims > 0);
 		// Check that if we ignore zero length dimensions, the number of elements does not
 		// overflow. This is done to make sure our calculations would not overflow even if we
@@ -146,8 +146,8 @@ impl OutputHandlerImpl for NewOutputHandlerImpl {
 
 #[derive(Clone, Copy)]
 pub struct MergedDim<const N: usize> {
-	pub size: usize,
-	pub strides: [usize; N],
+	pub size: TensorSize,
+	pub strides: [TensorSize; N],
 }
 
 #[derive(Clone)]
@@ -168,12 +168,14 @@ pub struct MergedDimIter<'a, const N: usize> {
 }
 
 impl<const N: usize> DimMerger<N> {
-	pub fn new(inputs: [&[SizeAndStride]; N]) -> DimMerger<N> {
-		let (merger, _null) = Self::new_ex(inputs, NullOutputHandler());
+	pub fn new(inputs: [&[SizeAndStride]; N], n_without_broadcast: usize) -> DimMerger<N> {
+		let (merger, _null) = Self::new_ex(inputs, n_without_broadcast, NullOutputHandler());
 		merger
 	}
 
-	pub fn new_ex<H, I>(inputs: [&[SizeAndStride]; N], handler: H) -> (DimMerger<N>, I::Value)
+	pub fn new_ex<H, I>(
+		inputs: [&[SizeAndStride]; N], n_without_broadcast: usize, handler: H,
+	) -> (DimMerger<N>, I::Value)
 	where
 		H: OutputHandler<Impl = I>,
 		I: OutputHandlerImpl,
@@ -186,13 +188,16 @@ impl<const N: usize> DimMerger<N> {
 		let mut out = handler.init(ndim);
 
 		for dim in 0..ndim {
-			let size = merger.prepend_dim(inputs.map(|input| {
-				if dim < input.len() {
-					input[input.len() - dim - 1]
-				} else {
-					SizeAndStride { size: 1, stride: 0 }
-				}
-			}));
+			let size = merger.prepend_dim(
+				inputs.map(|input| {
+					if dim < input.len() {
+						input[input.len() - dim - 1]
+					} else {
+						SizeAndStride { size: 1, stride: 0 }
+					}
+				}),
+				n_without_broadcast,
+			);
 			out.prepend_dim(size);
 		}
 
@@ -212,7 +217,9 @@ impl<const N: usize> DimMerger<N> {
 	///    new_dim_stride = prev_dim_stride * prev_dim_size
 	///
 	/// Returns the size of the new dimension
-	pub fn prepend_dim(&mut self, dims: [SizeAndStride; N]) -> usize {
+	pub fn prepend_dim(
+		&mut self, dims: [SizeAndStride; N], n_without_broadcast: usize,
+	) -> TensorSize {
 		let prev = self.dims_increasing.last_mut();
 		// SAFETY: In `new_empty()`, we make sure `dims_increasing` has at least one element.
 		let prev = unsafe { prev.unwrap_unchecked() };
@@ -223,10 +230,15 @@ impl<const N: usize> DimMerger<N> {
 		// If the non-broadcastable dimensions are not all the same size,
 		// we will detect it later, we will detect it when making the `strides` array.
 		let size = dims.iter().fold(1, |acc, dim| if acc == 1 { dim.size } else { acc });
-		let strides = dims.map(|dim| {
-			assert!(dim.size == size || dim.size == 1, "cannot broadcast: incompatible dimensions");
+		let strides = std::array::from_fn(|i| {
+			let dim = dims[i];
+			assert!(
+				dim.size == size || (i >= n_without_broadcast && dim.size == 1),
+				"cannot broadcast: incompatible dimensions"
+			);
 			if dim.size == size { dim.stride } else { 0 }
 		});
+		//assert!(strides[0] != 0, "cannot broadcast output dimension");
 
 		// Can we extend the previous dimension?
 		// TODO - verify that the `.all(...)` generates good assembly code

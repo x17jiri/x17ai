@@ -6,8 +6,8 @@ use crate::*;
 use smallvec::SmallVec;
 use std::fmt;
 
-fn __run<const N: usize, F: Fn(usize, [usize; N], [usize; N])>(
-	prev_dim: MergedDim<N>, mut dims: MergedDimIter<N>, offsets: [usize; N], f: &F,
+fn __run<const N: usize, F: Fn(TensorSize, [TensorSize; N], [TensorSize; N])>(
+	prev_dim: MergedDim<N>, mut dims: MergedDimIter<N>, offsets: [TensorSize; N], f: &F,
 ) {
 	if let Some(dim) = dims.next() {
 		let mut offsets = offsets;
@@ -23,9 +23,9 @@ fn __run<const N: usize, F: Fn(usize, [usize; N], [usize; N])>(
 	}
 }
 
-/// F: fn(batch_size: usize, batch_strides: [usize; N], offsets: [usize; N])
-pub fn run<'a, const N: usize, F: Fn(usize, [usize; N], [usize; N])>(
-	mut dims: MergedDimIter<N>, offsets: [usize; N], f: F,
+/// F: fn(batch_size: TensorSize, batch_strides: [TensorSize; N], offsets: [TensorSize; N])
+pub fn run<'a, const N: usize, F: Fn(TensorSize, [TensorSize; N], [TensorSize; N])>(
+	mut dims: MergedDimIter<N>, offsets: [TensorSize; N], f: F,
 ) {
 	if let Some(dim) = dims.next() {
 		__run(dim, dims, offsets, &f);

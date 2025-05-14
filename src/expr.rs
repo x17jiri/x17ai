@@ -35,7 +35,7 @@ pub trait MatrixAccumulable {
 //--------------------------------------------------------------------------------------------------
 
 fn __elem_wise<'a, const N: usize, F: Fn([SliceSet; N])>(a: [&Tensor; N], f: F) {
-	let merger = DimMerger::new(a.map(|t| t.dims.as_slice()));
+	let merger = DimMerger::new(a.map(|t| t.dims.as_slice()), 1);
 	let smallest = merger.smallest_dim();
 	let batch_dims = merger.dims_increasing_without_smallest();
 	let batch_iter = batch_dims.iter();
@@ -49,7 +49,7 @@ fn __elem_wise<'a, const N: usize, F: Fn([SliceSet; N])>(a: [&Tensor; N], f: F) 
 	batch::run(
 		batch_iter,
 		a.map(|t| t.offset),
-		|batch_size: usize, batch_strides: [usize; N], offsets: [usize; N]| {
+		|batch_size: TensorSize, batch_strides: [TensorSize; N], offsets: [TensorSize; N]| {
 			f(std::array::from_fn(|i| SliceSet {
 				buffer: buffers[i],
 				dtype: dtypes[i],
@@ -70,14 +70,14 @@ fn __vec_wise<'a, const N: usize, F: Fn([SliceSet; N])>(a: [&Tensor; N], f: F) {
 	let dtypes = a.map(|a| a.dtype());
 	let buffers = a.map(|a| a.buffer.as_ref());
 
-	let merger = DimMerger::new(a.map(|a| &a.dims[..a.ndim() - 1]));
+	let merger = DimMerger::new(a.map(|a| &a.dims[..a.ndim() - 1]), 1);
 	let batch_dims = merger.dims_increasing();
 	let batch_iter = batch_dims.iter();
 
 	batch::run(
 		batch_iter,
 		a.map(|a| a.offset),
-		|batch_size: usize, batch_strides: [usize; N], offsets: [usize; N]| {
+		|batch_size: TensorSize, batch_strides: [TensorSize; N], offsets: [TensorSize; N]| {
 			f(std::array::from_fn(|i| SliceSet {
 				buffer: buffers[i],
 				dtype: dtypes[i],
@@ -96,7 +96,7 @@ fn __mat_wise<'a, const N: usize, F: Fn([MatrixSet; N])>(
 	batch::run(
 		batch_dims,
 		a.map(|a| a.tensor.offset),
-		|batch_size: usize, batch_strides: [usize; N], offsets: [usize; N]| {
+		|batch_size: TensorSize, batch_strides: [TensorSize; N], offsets: [TensorSize; N]| {
 			f(std::array::from_fn(|i| MatrixSet {
 				slice_set: SliceSet {
 					buffer: a[i].tensor.buffer.as_ref(),
@@ -224,14 +224,14 @@ pub struct VecMul<'a> {
 	pub b: &'a Tensor,
 }
 
-pub fn vec_mul<'a>(a: &'a Tensor, b: &'a Tensor) -> VecMul<'a> {
+pub fn dot<'a>(a: &'a Tensor, b: &'a Tensor) -> VecMul<'a> {
 	VecMul { a, b }
 }
 
 impl<'a> Savable for VecMul<'a> {
 	fn save_to(&self, to: &Tensor) {
 		__vec_wise([to, self.a, self.b], |[to, a, b]| {
-			to.buffer.vec_mul(&to, &a, &b);
+			to.buffer.dot(&to, &a, &b);
 		});
 	}
 }
@@ -239,7 +239,7 @@ impl<'a> Savable for VecMul<'a> {
 impl Accumulable for VecMul<'_> {
 	fn acc_to(&self, to: &Tensor, to_weight: f64, expr_weight: f64) {
 		__vec_wise([to, self.a, self.b], |[to, a, b]| {
-			to.buffer.vec_mul_acc(&to, to_weight, &a, &b, expr_weight);
+			to.buffer.dot_acc(&to, to_weight, &a, &b, expr_weight);
 		});
 	}
 }
@@ -288,10 +288,10 @@ pub struct Matrix<'a> {
 	pub tensor: &'a Tensor,
 	pub batch_dims: &'a [SizeAndStride],
 
-	pub rows: NonZeroUsize,
-	pub cols: NonZeroUsize,
-	pub row_stride: usize,
-	pub col_stride: usize,
+	pub rows: NonZeroTensorSize,
+	pub cols: NonZeroTensorSize,
+	pub row_stride: TensorSize,
+	pub col_stride: TensorSize,
 }
 
 impl<'a> Matrix<'a> {
@@ -313,8 +313,8 @@ pub fn matrix<'a>(tensor: &'a Tensor) -> Matrix<'a> {
 	Matrix {
 		tensor,
 		batch_dims: &tensor.dims[..tensor.ndim() - 2],
-		rows: NonZeroUsize::new(rows.size).unwrap(),
-		cols: NonZeroUsize::new(cols.size).unwrap(),
+		rows: NonZeroTensorSize::new(rows.size).unwrap(),
+		cols: NonZeroTensorSize::new(cols.size).unwrap(),
 		row_stride: rows.stride,
 		col_stride: cols.stride,
 	}
@@ -327,8 +327,8 @@ pub fn row_matrix<'a>(tensor: &'a Tensor) -> Matrix<'a> {
 	Matrix {
 		tensor,
 		batch_dims: &tensor.dims[..tensor.ndim() - 1],
-		rows: NonZeroUsize::new(rows.size).unwrap(),
-		cols: NonZeroUsize::new(cols.size).unwrap(),
+		rows: NonZeroTensorSize::new(rows.size).unwrap(),
+		cols: NonZeroTensorSize::new(cols.size).unwrap(),
 		row_stride: rows.stride,
 		col_stride: cols.stride,
 	}
@@ -341,8 +341,8 @@ pub fn col_matrix<'a>(tensor: &'a Tensor) -> Matrix<'a> {
 	Matrix {
 		tensor,
 		batch_dims: &tensor.dims[..tensor.ndim() - 1],
-		rows: NonZeroUsize::new(rows.size).unwrap(),
-		cols: NonZeroUsize::new(cols.size).unwrap(),
+		rows: NonZeroTensorSize::new(rows.size).unwrap(),
+		cols: NonZeroTensorSize::new(cols.size).unwrap(),
 		row_stride: rows.stride,
 		col_stride: cols.stride,
 	}
@@ -381,7 +381,7 @@ impl<'a> MatMulPrep<'a> {
 		const TO: usize = 0;
 		const A: usize = 1;
 		const B: usize = 2;
-		let merger = DimMerger::new([to.batch_dims, a.batch_dims, b.batch_dims]);
+		let merger = DimMerger::new([to.batch_dims, a.batch_dims, b.batch_dims], 1);
 
 		// Is this actually a vector dot product?
 		if to.rows.get() == 1 && to.cols.get() == 1 {
@@ -396,10 +396,10 @@ impl<'a> MatMulPrep<'a> {
 			// where the matrix `b` is the same for all items in the batch?
 			let batch_dim = merger.smallest_dim();
 			if batch_dim.size > 1 && batch_dim.strides[B] == 0 {
-				a.rows = NonZeroUsize::new(batch_dim.size).unwrap();
+				a.rows = NonZeroTensorSize::new(batch_dim.size).unwrap();
 				a.row_stride = batch_dim.strides[A];
 
-				to.rows = NonZeroUsize::new(batch_dim.size).unwrap();
+				to.rows = NonZeroTensorSize::new(batch_dim.size).unwrap();
 				to.row_stride = batch_dim.strides[TO];
 
 				return MatMulPrep {
@@ -417,10 +417,10 @@ impl<'a> MatMulPrep<'a> {
 			// where the matrix `a` is the same for all items in the batch?
 			let batch_dim = merger.smallest_dim();
 			if batch_dim.size > 1 && batch_dim.strides[A] == 0 {
-				b.cols = NonZeroUsize::new(batch_dim.size).unwrap();
+				b.cols = NonZeroTensorSize::new(batch_dim.size).unwrap();
 				b.col_stride = batch_dim.strides[B];
 
-				to.cols = NonZeroUsize::new(batch_dim.size).unwrap();
+				to.cols = NonZeroTensorSize::new(batch_dim.size).unwrap();
 				to.col_stride = batch_dim.strides[TO];
 
 				return MatMulPrep {

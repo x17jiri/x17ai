@@ -1,7 +1,7 @@
 // Optimizer. Inspired by Adam-mini: https://arxiv.org/abs/2406.16793
 
 use crate::expr::*;
-use crate::{DType, Device, Tensor};
+use crate::{DType, Device, Tensor, TensorSize};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -24,8 +24,9 @@ impl Default for OptCoef {
 }
 
 pub struct OptParam {
-	pub(crate) parts: usize,
-	pub(crate) part_elems: usize,
+	pub(crate) parts: TensorSize,
+	pub(crate) part_elems: TensorSize,
+	pub(crate) part_elems_recip: f64, // 1.0 / (part_elems as f64)
 
 	pub(crate) value: Tensor,          // shape: [parts, part_elems]
 	pub(crate) grad: Tensor,           // shape: [parts, part_elems]
@@ -38,7 +39,7 @@ pub struct OptParam {
 
 impl OptParam {
 	pub fn new(
-		device: Rc<dyn Device>, dtype: DType, parts: usize, part_elems: usize,
+		device: Rc<dyn Device>, dtype: DType, parts: TensorSize, part_elems: TensorSize,
 	) -> Rc<RefCell<OptParam>> {
 		let value = Tensor::new_empty_on(&[parts, part_elems], dtype, device);
 		let grad = value.new_empty_like();
@@ -50,6 +51,7 @@ impl OptParam {
 		Rc::new(RefCell::new(OptParam {
 			parts,
 			part_elems,
+			part_elems_recip: 1.0 / (part_elems as f64),
 
 			value,
 			grad,
@@ -74,12 +76,12 @@ impl OptParam {
 		self.grad.acc_to(&self.momentum, coef.momentum_decay, 1.0 - coef.momentum_decay);
 
 		// update velocity
-		// `vec_mul(grad, grad)` calculates the sum of squares.
+		// `dot(grad, grad)` calculates the sum of squares.
 		// Dividing the sum by `part_elems` gives the mean of squares.
-		vec_mul(&self.grad, &self.grad).acc_to(
+		dot(&self.grad, &self.grad).acc_to(
 			&self.velocity,
 			coef.velocity_decay,
-			(1.0 - coef.velocity_decay) / (self.part_elems as f64),
+			(1.0 - coef.velocity_decay) * self.part_elems_recip,
 		);
 		rsqrt(&self.velocity, coef.eps).save_to(&self.velocity_recip);
 

@@ -12,6 +12,7 @@ smallvec = { version = "1.7.0", features = ["union"] }
 bit-set = "0.6.0"
 thin-vec = "0.2.13"
 arrayvec = "0.7.4"
-matrixmultiply = "0.3.8"
+# matrixmultiply = "0.3.8"
 stderrlog = "0.6.0"
 log = "0.4.22"
+assert_approx_eq = "1.1.0"

@@ -25,6 +25,7 @@ mod dtype;
 mod expr;
 mod format;
 mod matrix;
+mod nn;
 mod optimizer;
 mod rand;
 mod tensor;
@@ -39,6 +40,8 @@ use crate::dtype::*;
 use crate::expr::*;
 use crate::format::*;
 use crate::matrix::*;
+use crate::nn::Layer;
+use crate::nn::linear::Linear;
 use crate::optimizer::*;
 use crate::rand::*;
 use crate::tensor::*;
@@ -50,8 +53,8 @@ use std::rc::Rc;
 
 	b.acc_to(a, alpha, beta)                       # acc_(a, alpha, b, beta)
 
-	b.vec_mul(c).save_to(a)                        # acc_mul_(a, 0.0, b, c, 1.0)
-	b.vec_mul(c).acc_to(a, alpha, beta)            # acc_mul_(a, alpha, b, c, beta)
+	b.dot(c).save_to(a)                        # acc_mul_(a, 0.0, b, c, 1.0)
+	b.dot(c).acc_to(a, alpha, beta)            # acc_mul_(a, alpha, b, c, beta)
 
 	b.sum(keepdim).save_to(a)                      # acc_sum_(a, 0.0, b, 1.0)
 	b.sum(keepdim).acc_to(a, alpha, beta)          # acc_sum_(a, alpha, b, beta)
@@ -64,87 +67,13 @@ use std::rc::Rc;
 	self.grad.acc_to(&self.m, self.beta1, 1.0 - self.beta1);
 	self.grad.mean_square(keepdim: true).acc_to(&self.v, self.beta2, 1.0 - self.beta2);
 	self.v.one_over_sqrt().save_to(&self.v_recip);
-	self.m.vec_mul(&self.v_recip).acc_to(&self.value, 1.0, -self.learning_rate);
+	self.m.dot(&self.v_recip).acc_to(&self.value, 1.0, -self.learning_rate);
 
 	# rms norm
 	val.mean_square(keepdim: true).save_to(&scale);
 	scale.one_over_sqrt().save_to(&scale_recip);
 
 */
-
-/// Multihead Linear Layer transforming inputs to outputs
-///
-/// This is basically a thin wrapper around a matrix multiplication.
-/// It does not include a bias term.
-///
-/// This works like n parallel linear transformations of the same input:
-///
-///     input: [*, inputs]
-///     output: [*, head, outputs]
-struct Linear {
-	pub inputs: usize,
-	pub outputs: usize,
-	pub heads: usize,
-
-	pub w: Tensor,
-	pub w_opt: Rc<RefCell<OptParam>>,
-
-	pub forward_scale: f64,
-	pub backward_scale: f64,
-	pub dtype: DType,
-}
-
-impl Linear {
-	pub fn new(
-		inputs: usize, outputs: usize, heads: usize, dtype: DType, ctx: &mut Context,
-	) -> Linear {
-		let w_opt = ctx.add_param(dtype, heads, outputs * inputs);
-		let w = w_opt.borrow().value().clone();
-		let w = w.reshape_all(&[heads * outputs, inputs]);
-
-		let forward_scale = 1.0 / (inputs as f64).sqrt();
-		let backward_scale = 1.0 / (outputs as f64).sqrt();
-
-		#[rustfmt::skip]
-		Linear {
-			inputs, outputs, heads,
-			w, w_opt,
-			forward_scale, backward_scale, dtype,
-		}
-	}
-
-	fn forward(&self, inp: Tensor, out: Tensor) {
-		// [..., heads, outputs] -> [..., heads * outputs]
-		let out = out.reshape(2, &[self.heads * self.outputs]);
-
-		let w = matrix(&self.w);
-		let i = col_matrix(&inp);
-		let o = col_matrix(&out);
-		mm(w, i).scale(self.forward_scale).save_to(o);
-
-		self.w_opt.borrow_mut().save_tensors([inp]);
-	}
-
-	fn backward(&self, d_out: Tensor, d_inp: Tensor) {
-		let [inp] = self.w_opt.borrow_mut().load_tensors();
-
-		// [..., heads, outputs] -> [..., heads * outputs]
-		let d_out = d_out.reshape(2, &[self.heads * self.outputs]);
-
-		// [heads, outputs * inputs] -> [heads * outputs, inputs]
-		let d_weights = self.w_opt.borrow().grad().clone();
-		let d_weights = d_weights.reshape_all(&[self.heads * self.outputs, self.inputs]);
-
-		let d_w = matrix(&d_weights);
-		let i = col_matrix(&inp);
-		let d_o = col_matrix(&d_out);
-		mm(d_o, i.T()).scale(1.0).acc_to(d_w, 1.0, 1.0);
-
-		let w = matrix(&self.w);
-		let d_i = col_matrix(&d_inp);
-		mm(w.T(), d_o).scale(self.backward_scale).save_to(d_i);
-	}
-}
 
 /*
 struct Attention {
@@ -275,38 +204,25 @@ impl Module for Transformer {
 }
 */
 fn main() {
-	let eps = 1e-8;
 	stderrlog::new().module(module_path!()).init().unwrap();
 
 	let dev = CPUDevice::new("CPU".to_string());
+	let mut ctx = Context::new(dev.clone());
 
-	let x = Tensor::new_empty_on(&[2, 3], DType::f32(), dev.clone());
-	let y = Tensor::new_empty_on(&[3, 2], DType::f32(), dev.clone());
+	let mut model = Linear::new(3, 2, 2, DType::F32, &mut ctx);
+	model.randomize();
 
-	randn().save_to(&x);
-	randn().save_to(&y);
+	let input = Tensor::new_empty_on(&[3], DType::F32, dev.clone());
+	let expected = Tensor::new_empty_on(&[2, 2], DType::F32, dev.clone());
 
-	println!("x = {}", x);
-	println!("y = {}", y);
+	randn().save_to(&input);
+	randn().save_to(&expected);
 
-	let nx = x.new_empty_like();
-	let ny = y.new_empty_like();
-	rms_norm(&x, eps).save_to(&nx);
-	rms_norm(&y, eps).save_to(&ny);
+	let output = expected.new_empty_like();
+	model.forward(&input, &output);
 
-	println!("rms_norm(x) = {}", nx);
-	println!("rms_norm(y) = {}", ny);
-
-	let xs = x.new_empty_like();
-	let ys = y.new_empty_like();
-	softmax(&x).save_to(&xs);
-	softmax(&y).save_to(&ys);
-
-	println!("softmax(x) = {}", xs);
-	println!("softmax(y) = {}", ys);
-
-	let z = Tensor::new_empty_on(&[2, 2], DType::f32(), dev.clone());
-	mm(matrix(&y).T(), matrix(&x).T()).save_to(matrix(&z));
-
-	println!("z = {}", z);
+	println!("input = {}", input);
+	println!("output = {}", output);
+	println!("expected = {}", expected);
+	println!("w = {}", model.w);
 }

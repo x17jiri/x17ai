@@ -3,7 +3,6 @@
 
 use crate::*;
 use std::fmt;
-use std::num::NonZeroUsize;
 
 pub struct BufferBase {
 	pub device: Rc<dyn Device>,
@@ -17,11 +16,11 @@ pub trait ToBufferBase {
 pub struct SliceSet<'a> {
 	pub buffer: &'a dyn Buffer,
 	pub dtype: DType,
-	pub offset: usize,
+	pub offset: TensorSize,
 
-	pub len: usize,
-	pub batch_size: usize,
-	pub batch_stride: usize,
+	pub len: TensorSize,
+	pub batch_size: TensorSize,
+	pub batch_stride: TensorSize,
 }
 
 impl<'a> SliceSet<'a> {
@@ -43,11 +42,11 @@ impl<'a> SliceSet<'a> {
 pub struct TypedSliceSet<'a, BufType: ToBufferBase> {
 	pub buffer: &'a BufType,
 	pub dtype: DType,
-	pub offset: usize,
+	pub offset: TensorSize,
 
-	pub len: usize,
-	pub batch_size: usize,
-	pub batch_stride: usize,
+	pub len: TensorSize,
+	pub batch_size: TensorSize,
+	pub batch_stride: TensorSize,
 }
 
 /// All matrices are stored in row-major order.
@@ -58,16 +57,17 @@ pub struct TypedSliceSet<'a, BufType: ToBufferBase> {
 pub struct MatrixSet<'a> {
 	pub slice_set: SliceSet<'a>,
 
-	pub rows: NonZeroUsize,
-	pub cols: NonZeroUsize,
-	pub row_stride: usize,
-	pub col_stride: usize,
+	pub rows: NonZeroTensorSize,
+	pub cols: NonZeroTensorSize,
+	pub row_stride: TensorSize,
+	pub col_stride: TensorSize,
 }
 
 impl<'a> MatrixSet<'a> {
 	pub fn slice_len(
-		rows: NonZeroUsize, cols: NonZeroUsize, row_stride: usize, col_stride: usize,
-	) -> usize {
+		rows: NonZeroTensorSize, cols: NonZeroTensorSize, row_stride: TensorSize,
+		col_stride: TensorSize,
+	) -> TensorSize {
 		(rows.get() - 1) * row_stride + (cols.get() - 1) * col_stride + 1
 	}
 
@@ -87,10 +87,10 @@ impl<'a> MatrixSet<'a> {
 pub struct TypedMatrixSet<'a, BufType: ToBufferBase> {
 	pub slice_set: TypedSliceSet<'a, BufType>,
 
-	pub rows: NonZeroUsize,
-	pub cols: NonZeroUsize,
-	pub row_stride: usize,
-	pub col_stride: usize,
+	pub rows: NonZeroTensorSize,
+	pub cols: NonZeroTensorSize,
+	pub row_stride: TensorSize,
+	pub col_stride: TensorSize,
 }
 
 pub trait Buffer {
@@ -109,11 +109,9 @@ pub trait Buffer {
 
 	fn mul_acc(&self, dst: &SliceSet, dst_weight: f64, a: &SliceSet, b: &SliceSet, ab_weight: f64);
 
-	fn vec_mul(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet);
+	fn dot(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet);
 
-	fn vec_mul_acc(
-		&self, dst: &SliceSet, dst_weight: f64, a: &SliceSet, b: &SliceSet, ab_weight: f64,
-	);
+	fn dot_acc(&self, dst: &SliceSet, dst_weight: f64, a: &SliceSet, b: &SliceSet, ab_weight: f64);
 
 	fn rsqrt(&self, dst: &SliceSet, a: &SliceSet, eps: f64);
 
@@ -124,7 +122,8 @@ pub trait Buffer {
 	fn gemm(&self, dst: &MatrixSet, dst_weight: f64, a: &MatrixSet, b: &MatrixSet, ab_weight: f64);
 
 	fn format(
-		&self, f: &mut fmt::Formatter, dtype: DType, offset: usize, len: usize, stride: usize,
+		&self, f: &mut fmt::Formatter, dtype: DType, offset: TensorSize, len: TensorSize,
+		stride: TensorSize,
 	) -> fmt::Result;
 }
 
@@ -153,7 +152,7 @@ impl BufferBase {
 		unsafe { &*buf }
 	}
 
-	pub fn is_in_bounds(&self, dtype: DType, offset: usize, len: usize) -> bool {
+	pub fn is_in_bounds(&self, dtype: DType, offset: TensorSize, len: TensorSize) -> bool {
 		let elems = offset + len;
 		let bytes = dtype.array_bytes(elems);
 		bytes.is_some_and(|b| b <= self.size_bytes)
@@ -182,8 +181,8 @@ impl BufferBase {
 		matrix_set.slice_set.len >= slice_len && Self::are_slices_in_bounds(&matrix_set.slice_set)
 	}
 
-	pub fn is_in_bounds_T<T>(&self, offset: usize, len: usize) -> bool {
-		let elems = offset + len;
+	pub fn is_in_bounds_T<T>(&self, offset: TensorSize, len: TensorSize) -> bool {
+		let elems = tensor_size_to_usize(offset + len);
 		let bytes = std::mem::size_of::<T>().checked_mul(elems);
 		bytes.is_some_and(|b| b <= self.size_bytes)
 	}

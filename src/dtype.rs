@@ -1,14 +1,16 @@
 // Copyright 2024 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
+use crate::{TensorSize, tensor_size_to_usize};
 use std::fmt;
+use std::num::NonZeroU8;
 
 pub const MAX_DTYPE_ALIGN: usize = 8; // 64-bit
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct DType {
 	pub kind: DTypeKind,
-	pub bits: u8,
+	pub bits: NonZeroU8,
 }
 
 impl DType {
@@ -17,26 +19,27 @@ impl DType {
 	}
 
 	pub fn bits(&self) -> usize {
-		self.bits as usize
+		usize::from(self.bits.get())
 	}
 
 	// NOTE: We don't support types with size 0.
 	// However, this function will return 0 if the type uses 1, 2 or 4 bits.
 	pub fn bytes(&self) -> usize {
-		(self.bits as usize) / 8
+		usize::from(self.bits.get()) / 8
 	}
 
-	pub fn array_bytes(&self, elems: usize) -> Option<usize> {
+	pub fn array_bytes(&self, elems: TensorSize) -> Option<usize> {
 		debug_assert!(self.bits.is_power_of_two());
-		if self.bits < 8 {
+		if self.bits.get() < 8 {
 			todo!("bitfields");
 		}
-		self.bytes().checked_mul(elems)
+		self.bytes().checked_mul(tensor_size_to_usize(elems))
 	}
 
-	pub fn f32() -> Self {
-		Self { kind: DTypeKind::Float, bits: 32 }
-	}
+	pub const F32: Self = Self {
+		kind: DTypeKind::Float,
+		bits: NonZeroU8::new(32).unwrap(),
+	};
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
