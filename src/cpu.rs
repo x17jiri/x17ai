@@ -274,6 +274,21 @@ impl CPUBuffer {
 	}
 
 	#[inline(never)]
+	fn sub_f<T: Copy + FromToF64>(
+		dst: &TypedSliceSet<'_, CPUBuffer>, a: &TypedSliceSet<'_, CPUBuffer>,
+		b: &TypedSliceSet<'_, CPUBuffer>,
+	) {
+		assert!(dst.len == a.len);
+		assert!(dst.len == b.len);
+		for [dst_arr, a_arr, b_arr] in BatchIter::<T, 3>::new([dst, a, b]) {
+			for ((d, a), b) in dst_arr.iter().zip(a_arr).zip(b_arr) {
+				let val = a.get().to_f64() - b.get().to_f64();
+				d.set(T::from_f64(val));
+			}
+		}
+	}
+
+	#[inline(never)]
 	fn dot_f<T: Copy + FromToF64>(
 		dst: &TypedSliceSet<'_, CPUBuffer>, a: &TypedSliceSet<'_, CPUBuffer>,
 		b: &TypedSliceSet<'_, CPUBuffer>,
@@ -492,6 +507,18 @@ impl Buffer for CPUBuffer {
 		assert!(dst.dtype == b.dtype);
 		match dst.dtype {
 			DType::F32 => Self::mul_acc_f::<f32>(&dst, dst_weight, &a, &b, ab_weight),
+			_ => todo!(),
+		}
+	}
+
+	fn sub(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet) {
+		let dst = self.cast_slices(dst);
+		let a = self.cast_slices(a);
+		let b = self.cast_slices(b);
+		assert!(dst.dtype == a.dtype);
+		assert!(dst.dtype == b.dtype);
+		match dst.dtype {
+			DType::F32 => Self::sub_f::<f32>(&dst, &a, &b),
 			_ => todo!(),
 		}
 	}
@@ -760,6 +787,47 @@ mod tests {
 				assert_eq!(a, 333.3 + i as f32);
 				assert_eq!(b, 222.2 + i as f32);
 				assert_approx_eq!(c, (333.3 + i as f32) * (222.2 + i as f32), 1e-4);
+			} else {
+				assert_eq!(a, default_value(i));
+				assert_eq!(b, default_value(i));
+				assert_eq!(c, default_value(i));
+			}
+		}
+	}
+
+	#[test]
+	fn test_sub() {
+		let a_buf = new_test_buffer_f32(100);
+		let a_slices = new_default_slices(&a_buf);
+		let a_data = unsafe { a_buf.cast::<f32>(0, 100) };
+
+		let b_buf = new_test_buffer_f32(100);
+		let b_slices = new_default_slices(&b_buf);
+		let b_data = unsafe { b_buf.cast::<f32>(0, 100) };
+
+		let c_buf = new_test_buffer_f32(100);
+		let c_slices = new_default_slices(&c_buf);
+		let c_data = unsafe { c_buf.cast::<f32>(0, 100) };
+
+		for i in 0..100 {
+			if in_default_slices(i) {
+				a_data[tensor_size_to_usize(i)].set(3.3 + i as f32);
+				b_data[tensor_size_to_usize(i)].set(2.2 + i as f32);
+				c_data[tensor_size_to_usize(i)].set(1.1 + i as f32);
+			}
+		}
+
+		CPUBuffer::sub_f::<f32>(&c_slices, &a_slices, &b_slices);
+
+		for i in 0..100 {
+			let a = a_data[tensor_size_to_usize(i)].get();
+			let b = b_data[tensor_size_to_usize(i)].get();
+			let c = c_data[tensor_size_to_usize(i)].get();
+
+			if in_default_slices(i) {
+				assert_eq!(a, 3.3 + i as f32);
+				assert_eq!(b, 2.2 + i as f32);
+				assert_approx_eq!(c, (3.3 + i as f32) - (2.2 + i as f32), 1e-4);
 			} else {
 				assert_eq!(a, default_value(i));
 				assert_eq!(b, default_value(i));

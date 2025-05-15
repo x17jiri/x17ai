@@ -200,6 +200,25 @@ impl<'a> Accumulable for Mul<'a> {
 
 //--------------------------------------------------------------------------------------------------
 
+pub struct Sub<'a> {
+	pub a: &'a Tensor,
+	pub b: &'a Tensor,
+}
+
+pub fn sub<'a>(a: &'a Tensor, b: &'a Tensor) -> Sub<'a> {
+	Sub { a, b }
+}
+
+impl<'a> Savable for Sub<'a> {
+	fn save_to(&self, to: &Tensor) {
+		__elem_wise([to, self.a, self.b], |[to, a, b]| {
+			to.buffer.sub(&to, &a, &b);
+		});
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
 pub struct RSqrt<'a> {
 	pub tensor: &'a Tensor,
 	pub eps: f64,

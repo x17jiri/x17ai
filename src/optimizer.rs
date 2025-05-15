@@ -33,8 +33,6 @@ pub struct OptParam {
 	pub(crate) momentum: Tensor,       // shape: [parts, part_elems]
 	pub(crate) velocity: Tensor,       // shape: [parts, 1]
 	pub(crate) velocity_recip: Tensor, // shape: [parts, 1]
-
-	pub(crate) stored_tensors: Vec<Tensor>,
 }
 
 impl OptParam {
@@ -58,8 +56,6 @@ impl OptParam {
 			momentum,
 			velocity,
 			velocity_recip,
-
-			stored_tensors: Vec::new(),
 		}))
 	}
 
@@ -87,17 +83,6 @@ impl OptParam {
 
 		// update value
 		mul(&self.momentum, &self.velocity_recip).acc_to(&self.value, 1.0, -coef.learning_rate);
-	}
-
-	pub fn save_tensors<const N: usize>(&mut self, tensors: [Tensor; N]) {
-		assert!(self.stored_tensors.is_empty());
-		self.stored_tensors.extend(tensors.into_iter());
-	}
-
-	pub fn load_tensors<const N: usize>(&mut self) -> [Tensor; N] {
-		assert!(self.stored_tensors.len() == N);
-		let mut iter = self.stored_tensors.drain(..);
-		std::array::from_fn(|_| unsafe { iter.next().unwrap_unchecked() })
 	}
 
 	pub fn value(&self) -> &Tensor {

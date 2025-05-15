@@ -4,9 +4,9 @@ use crate::dtype::DType;
 use crate::expr::{
 	Accumulable, MatrixAccumulable, MatrixSavable, Savable, col_matrix, dot, matrix, mm, randn,
 };
-use crate::nn::Layer;
+use crate::nn::{BackpropLayer, Layer, TensorStore};
 use crate::optimizer::OptParam;
-use crate::tensor::{Tensor, TensorSize};
+use crate::tensor::{self, Tensor, TensorSize};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -20,19 +20,19 @@ use std::rc::Rc;
 ///     input: [*, inputs]
 ///     output: [*, head, outputs]
 pub struct Linear {
-	pub inputs: TensorSize,
-	pub outputs: TensorSize,
-	pub heads: TensorSize,
+	inputs: TensorSize,
+	outputs: TensorSize,
+	heads: TensorSize,
 
-	pub input_shape: [TensorSize; 1],
-	pub output_shape: [TensorSize; 2],
+	input_shape: [TensorSize; 1],
+	output_shape: [TensorSize; 2],
 
-	pub w: Tensor,
-	pub w_opt: Rc<RefCell<OptParam>>,
+	pub(crate) w: Tensor, // TODO - can we remove the `pub(crate)`?
+	w_opt: Rc<RefCell<OptParam>>,
 
-	pub forward_scale: f64,
-	pub backward_scale: f64,
-	pub dtype: DType,
+	forward_scale: f64,
+	backward_scale: f64,
+	dtype: DType,
 }
 
 impl Linear {
@@ -72,7 +72,7 @@ impl Layer for Linear {
 		&self.output_shape
 	}
 
-	fn forward(&self, inp: &Tensor, out: &Tensor) {
+	fn forward(&self, inp: &Tensor, out: &Tensor, tensor_store: Option<&mut TensorStore>) {
 		// [..., heads, outputs] -> [..., heads * outputs]
 		let out = out.clone().reshape(2, &[self.heads * self.outputs]);
 
@@ -81,11 +81,15 @@ impl Layer for Linear {
 		let o = col_matrix(&out);
 		mm(w, i).scale(self.forward_scale).save_to(o);
 
-		self.w_opt.borrow_mut().save_tensors([inp.clone()]);
+		if let Some(tensor_store) = tensor_store {
+			tensor_store.set([inp.clone()]);
+		}
 	}
+}
 
-	fn backward(&self, d_out: &Tensor, d_inp: Option<&Tensor>) {
-		let [inp] = self.w_opt.borrow_mut().load_tensors();
+impl BackpropLayer for Linear {
+	fn backward(&self, d_out: &Tensor, d_inp: Option<&Tensor>, tensor_store: &mut TensorStore) {
+		let [inp] = tensor_store.get();
 
 		// [..., heads, outputs] -> [..., heads * outputs]
 		let d_out = d_out.clone().reshape(2, &[self.heads * self.outputs]);

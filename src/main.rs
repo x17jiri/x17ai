@@ -219,7 +219,8 @@ fn main() {
 	randn().save_to(&expected);
 
 	let output = expected.new_empty_like();
-	model.forward(&input, &output);
+	let mut t = nn::TensorStore::new();
+	model.forward(&input, &output, Some(&mut t));
 
 	println!("input = {}", input);
 	println!("output = {}", output);

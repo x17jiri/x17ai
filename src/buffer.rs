@@ -109,6 +109,8 @@ pub trait Buffer {
 
 	fn mul_acc(&self, dst: &SliceSet, dst_weight: f64, a: &SliceSet, b: &SliceSet, ab_weight: f64);
 
+	fn sub(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet);
+
 	fn dot(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet);
 
 	fn dot_acc(&self, dst: &SliceSet, dst_weight: f64, a: &SliceSet, b: &SliceSet, ab_weight: f64);
