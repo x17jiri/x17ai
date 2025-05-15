@@ -79,11 +79,15 @@ impl Device for CPUDevice {
 }
 
 trait FromToF64 {
+	const MIN: f64; // largest negative value of type
+
 	fn from_f64(val: f64) -> Self;
 	fn to_f64(&self) -> f64;
 }
 
 impl FromToF64 for f32 {
+	const MIN: f64 = f32::MIN as f64;
+
 	fn from_f64(val: f64) -> Self {
 		val as f32
 	}
@@ -94,6 +98,8 @@ impl FromToF64 for f32 {
 }
 
 impl FromToF64 for f64 {
+	const MIN: f64 = f64::MIN;
+
 	fn from_f64(val: f64) -> Self {
 		val
 	}
@@ -329,6 +335,20 @@ impl CPUBuffer {
 	}
 
 	#[inline(never)]
+	fn log_clamped_f<T: Copy + FromToF64>(
+		dst: &TypedSliceSet<'_, CPUBuffer>, inp: &TypedSliceSet<'_, CPUBuffer>,
+	) {
+		assert!(dst.len == inp.len);
+		for [dst_arr, inp_arr] in BatchIter::<T, 2>::new([dst, inp]) {
+			for (d, i) in dst_arr.iter().zip(inp_arr) {
+				let val = i.get().to_f64();
+				let val = val.ln().max(T::MIN.max(-1000.0));
+				d.set(T::from_f64(val));
+			}
+		}
+	}
+
+	#[inline(never)]
 	fn softmax_f<T: Copy + FromToF64>(
 		dst: &TypedSliceSet<'_, CPUBuffer>, inp: &TypedSliceSet<'_, CPUBuffer>,
 	) {
@@ -553,6 +573,16 @@ impl Buffer for CPUBuffer {
 		assert!(dst.dtype == inp.dtype);
 		match dst.dtype {
 			DType::F32 => Self::rsqrt_f::<f32>(&dst, &inp, eps),
+			_ => todo!(),
+		}
+	}
+
+	fn log_clamped(&self, dst: &SliceSet, a: &SliceSet) {
+		let dst = self.cast_slices(dst);
+		let a = self.cast_slices(a);
+		assert!(dst.dtype == a.dtype);
+		match dst.dtype {
+			DType::F32 => Self::log_clamped_f::<f32>(&dst, &a),
 			_ => todo!(),
 		}
 	}
@@ -1046,6 +1076,42 @@ mod tests {
 				assert_eq!(b, default_value(i));
 			}
 		}
+	}
+
+	#[test]
+	fn test_log_clamped() {
+		let buf = new_test_buffer_f32(100);
+		let a_slices = TypedSliceSet {
+			buffer: buf.as_ref(),
+			dtype: DType::F32,
+			offset: 10,
+			len: 4,
+			batch_size: 1,
+			batch_stride: 7,
+		};
+		let b_slices = TypedSliceSet {
+			buffer: buf.as_ref(),
+			dtype: DType::F32,
+			offset: 20,
+			len: 4,
+			batch_size: 1,
+			batch_stride: 7,
+		};
+
+		let data = unsafe { buf.cast::<f32>(0, 100) };
+
+		// [-1.0000,  0.0000, 20.0855, 10.0000] -> [-1000, -1000, 3.0000, 2.3026]
+		data[10].set(-1.0);
+		data[11].set(0.0);
+		data[12].set(20.0855);
+		data[13].set(10.0);
+
+		CPUBuffer::log_clamped_f::<f32>(&b_slices, &a_slices);
+
+		assert_eq!(data[20].get(), -1000.0);
+		assert_eq!(data[21].get(), -1000.0);
+		assert_approx_eq!(data[22].get(), 3.0, 1e-4);
+		assert_approx_eq!(data[23].get(), 2.3026, 1e-4);
 	}
 
 	#[test]

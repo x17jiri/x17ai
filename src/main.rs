@@ -17,22 +17,23 @@
 
 mod batch;
 mod buffer;
-mod context;
 mod cpu;
 mod device;
 mod dim_merger;
 mod dtype;
+mod eval_ctx;
 mod expr;
 mod format;
 mod matrix;
+mod model_ctx;
 mod nn;
 mod optimizer;
+mod param;
 mod rand;
 mod tensor;
 
 use crate::batch::*;
 use crate::buffer::*;
-use crate::context::*;
 use crate::cpu::*;
 use crate::device::*;
 use crate::dim_merger::*;
@@ -40,6 +41,7 @@ use crate::dtype::*;
 use crate::expr::*;
 use crate::format::*;
 use crate::matrix::*;
+use crate::model_ctx::*;
 use crate::nn::Layer;
 use crate::nn::linear::Linear;
 use crate::optimizer::*;
@@ -226,4 +228,9 @@ fn main() {
 	println!("output = {}", output);
 	println!("expected = {}", expected);
 	println!("w = {}", model.w);
+	println!("ln(+1.0) = {}", (1.0 as f64).ln());
+	println!("ln(+0.5) = {}", (0.5 as f64).ln());
+	println!("ln( 0.0) = {}", (0.0 as f64).ln());
+	println!("ln(-0.5) = {}", (-0.5 as f64).ln());
+	println!("ln(-1.0) = {}", (-1.0 as f64).ln());
 }

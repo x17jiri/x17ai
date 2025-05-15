@@ -1,26 +1,25 @@
+use crate::param::Param;
 use crate::{DType, Device, OptCoef, OptParam, Tensor, TensorSize};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-pub struct Context {
+pub struct ModelContext {
 	pub opt_coef: OptCoef,
-	pub params: Vec<Rc<RefCell<OptParam>>>,
+	pub params: Vec<Rc<RefCell<Param>>>,
 	pub device: Rc<dyn Device>,
 }
 
-impl Context {
-	pub fn new(device: Rc<dyn Device>) -> Context {
-		Context {
+impl ModelContext {
+	pub fn new(device: Rc<dyn Device>) -> ModelContext {
+		ModelContext {
 			opt_coef: OptCoef::default(),
 			params: Vec::new(),
 			device,
 		}
 	}
 
-	pub fn add_param(
-		&mut self, dtype: DType, parts: TensorSize, part_elems: TensorSize,
-	) -> Rc<RefCell<OptParam>> {
-		let param = OptParam::new(self.device.clone(), dtype, parts, part_elems);
+	pub fn new_param(&mut self, shape: &[TensorSize], dtype: DType) -> Rc<RefCell<Param>> {
+		let param = Param::new(shape, dtype, self.device.clone());
 		self.params.push(param.clone());
 		param
 	}

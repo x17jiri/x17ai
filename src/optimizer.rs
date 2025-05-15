@@ -27,6 +27,7 @@ pub struct OptParam {
 	pub(crate) parts: TensorSize,
 	pub(crate) part_elems: TensorSize,
 	pub(crate) part_elems_recip: f64, // 1.0 / (part_elems as f64)
+	pub(crate) already_have_grad: bool,
 
 	pub(crate) value: Tensor,          // shape: [parts, part_elems]
 	pub(crate) grad: Tensor,           // shape: [parts, part_elems]
@@ -36,35 +37,45 @@ pub struct OptParam {
 }
 
 impl OptParam {
-	pub fn new(
-		device: Rc<dyn Device>, dtype: DType, parts: TensorSize, part_elems: TensorSize,
-	) -> Rc<RefCell<OptParam>> {
-		let value = Tensor::new_empty_on(&[parts, part_elems], dtype, device);
+	pub fn new(value: Tensor) -> OptParam {
+		assert!(value.ndim() == 2);
+		let part_dim = value.dim_from_start(0);
+		let part_elems_dim = value.dim_from_start(1);
+		assert!(
+			part_dim.stride == 1 && part_elems_dim.stride == part_dim.size,
+			"Tensor is not contiguous"
+		);
+
+		let parts = part_dim.size;
+		let part_elems = part_elems_dim.size;
+
 		let grad = value.new_empty_like();
 		let momentum = value.new_empty_like();
 
-		let velocity = value.new_empty(&[parts, 1], dtype);
+		let velocity = value.new_empty(&[parts, 1], value.dtype());
 		let velocity_recip = velocity.new_empty_like();
 
-		Rc::new(RefCell::new(OptParam {
+		OptParam {
 			parts,
 			part_elems,
 			part_elems_recip: 1.0 / (part_elems as f64),
+			already_have_grad: false,
 
 			value,
 			grad,
 			momentum,
 			velocity,
 			velocity_recip,
-		}))
+		}
 	}
 
-	pub fn grad(&self) -> &Tensor {
-		&self.grad
+	pub fn update_grad(&mut self, update: impl FnOnce(&Tensor, bool)) {
+		update(&self.grad, self.already_have_grad);
+		self.already_have_grad = true;
 	}
 
 	pub fn zero_grad(&mut self) {
-		zeros().save_to(&self.grad);
+		self.already_have_grad = false;
 	}
 
 	pub fn step(&mut self, coef: &OptCoef) {

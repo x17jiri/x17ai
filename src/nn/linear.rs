@@ -1,13 +1,16 @@
-use crate::context::Context;
 use crate::device::Device;
 use crate::dtype::DType;
+use crate::eval_ctx::EvalContext;
 use crate::expr::{
 	Accumulable, MatrixAccumulable, MatrixSavable, Savable, col_matrix, dot, matrix, mm, randn,
 };
+use crate::model_ctx::ModelContext;
 use crate::nn::{BackpropLayer, Layer, TensorStore};
 use crate::optimizer::OptParam;
+use crate::param::Param;
 use crate::tensor::{self, Tensor, TensorSize};
 use std::cell::RefCell;
+use std::intrinsics::cold_path;
 use std::rc::Rc;
 
 /// Multihead Linear Layer transforming inputs to outputs
@@ -27,41 +30,36 @@ pub struct Linear {
 	input_shape: [TensorSize; 1],
 	output_shape: [TensorSize; 2],
 
-	pub(crate) w: Tensor, // TODO - can we remove the `pub(crate)`?
-	w_opt: Rc<RefCell<OptParam>>,
+	pub(crate) w: Rc<RefCell<Param>>, // TODO - can we remove the `pub(crate)`?
 
 	forward_scale: f64,
 	backward_scale: f64,
-	dtype: DType,
 }
 
 impl Linear {
 	pub fn new(
-		inputs: TensorSize, outputs: TensorSize, heads: TensorSize, dtype: DType, ctx: &mut Context,
+		inputs: TensorSize, outputs: TensorSize, heads: TensorSize, dtype: DType,
+		ctx: &mut ModelContext,
 	) -> Linear {
-		let w_opt = ctx.add_param(dtype, heads, outputs * inputs);
-		let w = w_opt.borrow().value().clone();
-		let w = w.reshape_all(&[heads * outputs, inputs]);
-
-		let forward_scale = 1.0 / (inputs as f64).sqrt();
-		let backward_scale = 1.0 / (outputs as f64).sqrt();
-
-		#[rustfmt::skip]
 		Linear {
-			inputs, outputs, heads,
+			inputs,
+			outputs,
+			heads,
+
 			input_shape: [inputs],
 			output_shape: [heads, outputs],
-			w, w_opt,
-			forward_scale, backward_scale, dtype,
+
+			w: ctx.new_param(&[heads * outputs, inputs], dtype),
+
+			forward_scale: 1.0 / (inputs as f64).sqrt(),
+			backward_scale: 1.0 / (outputs as f64).sqrt(),
 		}
 	}
 }
 
 impl Layer for Linear {
 	fn randomize(&mut self) {
-		let w_opt = self.w_opt.borrow_mut();
-		let w = w_opt.value();
-		randn().save_to(w);
+		randn().save_to(self.w.borrow().value());
 	}
 
 	fn input_shape(&self) -> &[TensorSize] {
@@ -72,39 +70,45 @@ impl Layer for Linear {
 		&self.output_shape
 	}
 
-	fn forward(&self, inp: &Tensor, out: &Tensor, tensor_store: Option<&mut TensorStore>) {
+	fn forward(&self, inp: &Tensor, out: &Tensor, ctx: &mut EvalContext) {
 		// [..., heads, outputs] -> [..., heads * outputs]
 		let out = out.clone().reshape(2, &[self.heads * self.outputs]);
+		let w = self.w.borrow();
 
-		let w = matrix(&self.w);
+		let w = matrix(w.value());
 		let i = col_matrix(&inp);
 		let o = col_matrix(&out);
 		mm(w, i).scale(self.forward_scale).save_to(o);
 
-		if let Some(tensor_store) = tensor_store {
-			tensor_store.set([inp.clone()]);
+		if ctx.is_training() {
+			ctx.tensors.set([inp.clone()]);
 		}
 	}
 }
 
 impl BackpropLayer for Linear {
-	fn backward(&self, d_out: &Tensor, d_inp: Option<&Tensor>, tensor_store: &mut TensorStore) {
-		let [inp] = tensor_store.get();
+	fn backward(&self, d_out: &Tensor, d_inp: Option<&Tensor>, ctx: &mut EvalContext) {
+		let [inp] = ctx.tensors.get();
 
 		// [..., heads, outputs] -> [..., heads * outputs]
 		let d_out = d_out.clone().reshape(2, &[self.heads * self.outputs]);
 
-		// [heads, outputs * inputs] -> [heads * outputs, inputs]
-		let d_weights = self.w_opt.borrow().grad().clone();
-		let d_weights = d_weights.reshape_all(&[self.heads * self.outputs, self.inputs]);
-
-		let d_w = matrix(&d_weights);
 		let i = col_matrix(&inp);
 		let d_o = col_matrix(&d_out);
-		mm(d_o, i.T()).scale(1.0).acc_to(d_w, 1.0, 1.0);
+		let d_w = mm(d_o, i.T()).scale(1.0);
+
+		self.w.borrow_mut().update_grad(|grad, already_have_grad| {
+			if already_have_grad {
+				cold_path();
+				d_w.acc_to(matrix(grad), 1.0, 1.0);
+			} else {
+				d_w.save_to(matrix(grad));
+			}
+		});
 
 		if let Some(d_inp) = d_inp {
-			let w = matrix(&self.w);
+			let w = self.w.borrow();
+			let w = matrix(w.value());
 			let d_i = col_matrix(d_inp);
 			mm(w.T(), d_o).scale(self.backward_scale).save_to(d_i);
 		}

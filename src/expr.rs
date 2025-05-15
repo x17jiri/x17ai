@@ -238,6 +238,30 @@ impl<'a> Savable for RSqrt<'a> {
 
 //--------------------------------------------------------------------------------------------------
 
+pub struct LogClamped<'a> {
+	pub tensor: &'a Tensor,
+}
+
+/// Calculates:
+///
+///     low_bound = max(-1000, DType.MAX_NEGATIVE);
+///     dst = max(log(a), low_bound);
+///
+/// So the output is defined even for a <= 0.
+pub fn log_clamped(tensor: &Tensor) -> LogClamped {
+	LogClamped { tensor }
+}
+
+impl<'a> Savable for LogClamped<'a> {
+	fn save_to(&self, to: &Tensor) {
+		__elem_wise([to, self.tensor], |[to, input]| {
+			to.buffer.log_clamped(&to, &input);
+		});
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
 pub struct VecMul<'a> {
 	pub a: &'a Tensor,
 	pub b: &'a Tensor,

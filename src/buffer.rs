@@ -117,6 +117,13 @@ pub trait Buffer {
 
 	fn rsqrt(&self, dst: &SliceSet, a: &SliceSet, eps: f64);
 
+	/// Calculates:
+	///
+	///    dst = max(log(a), -1000, DType.MAX_NEGATIVE);
+	///
+	/// So the output is defined even for a <= 0.
+	fn log_clamped(&self, dst: &SliceSet, a: &SliceSet);
+
 	fn softmax(&self, dst: &SliceSet, a: &SliceSet);
 
 	fn rms_norm(&self, dst: &SliceSet, a: &SliceSet, eps: f64);

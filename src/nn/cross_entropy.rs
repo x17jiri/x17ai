@@ -1,5 +1,5 @@
 use crate::expr::{self, Accumulable, Savable};
-use crate::nn::{Layer, Loss, TensorStore};
+use crate::nn::{Layer, LossLayer, TensorStore};
 use crate::tensor::{Tensor, TensorSize};
 
 pub struct CrossEntropy {
@@ -13,7 +13,9 @@ impl CrossEntropy {
 }
 
 impl Layer for CrossEntropy {
-	fn randomize(&mut self) {}
+	fn randomize(&mut self) {
+		// we don't have any parameters to randomize
+	}
 
 	fn input_shape(&self) -> &[TensorSize] {
 		&self.shape
@@ -32,7 +34,7 @@ impl Layer for CrossEntropy {
 	}
 }
 
-impl Loss for CrossEntropy {
+impl LossLayer for CrossEntropy {
 	fn expect(
 		&self, expected_out: &Tensor, d_inp: Option<&Tensor>, tensor_store: &mut TensorStore,
 	) -> f64 {
