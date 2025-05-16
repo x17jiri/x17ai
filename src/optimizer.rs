@@ -34,22 +34,22 @@ pub struct OptParam {
 	pub(crate) momentum: Tensor,       // shape: [parts, part_elems]
 	pub(crate) velocity: Tensor,       // shape: [parts, 1]
 	pub(crate) velocity_recip: Tensor, // shape: [parts, 1]
+
+	pub(crate) grad_reshaped: Tensor, // shape: what's expected by the user
 }
 
 impl OptParam {
-	pub fn new(value: Tensor) -> OptParam {
-		assert!(value.ndim() == 2);
-		let part_dim = value.dim_from_start(0);
-		let part_elems_dim = value.dim_from_start(1);
-		assert!(
-			part_elems_dim.stride == 1 && part_dim.stride == part_elems_dim.size,
-			"Tensor is not contiguous"
-		);
+	pub fn new(value: Tensor, parts: TensorSize, part_elems: TensorSize) -> OptParam {
+		let elems = parts.checked_mul(part_elems).expect("Overflow in multiplication");
+		assert!(value.elems() == elems, "Tensor size mismatch");
 
-		let parts = part_dim.size;
-		let part_elems = part_elems_dim.size;
+		let grad_reshaped = value.new_empty_like();
 
-		let grad = value.new_empty_like();
+		let value = value.reshape_all(&[elems]); // if fail, tensor is not contiguous
+		let value = value.reshape_all(&[parts, part_elems]);
+
+		let grad = grad_reshaped.clone().reshape_all(&[parts, part_elems]);
+
 		let momentum = value.new_empty_like();
 
 		let velocity = value.new_empty(&[parts, 1], value.dtype());
@@ -66,11 +66,13 @@ impl OptParam {
 			momentum,
 			velocity,
 			velocity_recip,
+
+			grad_reshaped,
 		}
 	}
 
 	pub fn update_grad(&mut self, update: impl FnOnce(&Tensor, bool)) {
-		update(&self.grad, self.already_have_grad);
+		update(&self.grad_reshaped, self.already_have_grad);
 		self.already_have_grad = true;
 	}
 

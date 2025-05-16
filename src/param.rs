@@ -24,10 +24,8 @@ impl Param {
 
 	pub fn init_optimizer(&mut self, parts: TensorSize, part_elems: TensorSize) {
 		assert!(self.opt_param.is_none(), "Optimizer already initialized for this parameter");
-		let elems = parts.checked_mul(part_elems).expect("Overflow in multiplication");
-		assert!(self.value.elems() == elems, "Tensor size mismatch");
 
-		self.opt_param = Some(OptParam::new(self.value.clone().reshape_all(&[parts, part_elems])));
+		self.opt_param = Some(OptParam::new(self.value.clone(), parts, part_elems));
 	}
 
 	pub fn zero_grad(&mut self) {

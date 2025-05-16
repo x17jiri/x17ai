@@ -57,13 +57,6 @@ impl LossLayer for SoftmaxCrossEntropy {
 		expr::log_clamped(&out).save_to(&tmp);
 		expr::mul(&tmp, &expected_out).save_to(&tmp);
 
-		let n_batch_dims = tmp.ndim().checked_sub(1);
-		let n_batch_dims = n_batch_dims.expect("SoftmaxCrossEntropy::loss: ndim() < 1");
-		let mut batch_size = 1;
-		for i in 0..n_batch_dims {
-			batch_size *= tmp.dim_from_start(i).size;
-		}
-
-		expr::sum_all(&tmp) / -(batch_size as f64)
+		expr::sum_all(&tmp) / -(tmp.batch_size(1) as f64)
 	}
 }

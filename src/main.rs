@@ -48,7 +48,7 @@ use crate::optimizer::*;
 use crate::rand::*;
 use crate::tensor::*;
 use eval_context::EvalContext;
-use nn::BackpropLayer;
+use nn::{BackpropLayer, LossLayer};
 use smallvec::{SmallVec, smallvec};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -230,11 +230,13 @@ fn main() {
 	a[2].set(0.0);
 	a[3].set(1.0);
 
-	let mut ectx_model = EvalContext::new();
+	let mut ectx_model = EvalContext::new(true);
 	let output_logits = model.forward(input.clone(), &mut ectx_model);
 
-	let mut ectx_loss = EvalContext::new();
+	let mut ectx_loss = EvalContext::new(true);
 	let output = loss.forward(output_logits.clone(), &mut ectx_loss);
+
+	let loss_value = loss.loss(output.clone(), expected.clone());
 
 	for (name, param) in model.named_params("model_params") {
 		println!("{}: {}", name, param.borrow().value());
@@ -244,4 +246,22 @@ fn main() {
 	println!("output_logits = {}", output_logits);
 	println!("output = {}", output);
 	println!("expected = {}", expected);
+	println!("loss_value = {}", loss_value);
+	println!("--------------------------------------------------");
+
+	mctx.zero_grad();
+
+	let d_logits = loss.backward(output.clone(), expected.clone(), &mut ectx_loss);
+	model.final_backward(d_logits.clone(), &mut ectx_model);
+
+	mctx.step();
+
+	let output_logits = model.forward(input.clone(), &mut ectx_model);
+	let output = loss.forward(output_logits.clone(), &mut ectx_loss);
+	let loss_value = loss.loss(output.clone(), expected.clone());
+
+	println!("output_logits = {}", output_logits);
+	println!("output = {}", output);
+	println!("loss_value = {}", loss_value);
+	println!("--------------------------------------------------");
 }

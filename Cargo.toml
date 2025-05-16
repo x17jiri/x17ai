@@ -8,7 +8,7 @@ edition = "2021"
 opt-level = 3
 
 [dependencies]
-smallvec = { version = "1.7.0", features = ["union"] }
+smallvec = { version = "1.15.0", features = ["union"] }
 bit-set = "0.6.0"
 thin-vec = "0.2.13"
 arrayvec = "0.7.4"

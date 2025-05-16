@@ -299,6 +299,12 @@ impl<'a, const N: usize> ExactSizeIterator for MergedDimIter<'a, N> {
 	}
 }
 
+impl<'a, const N: usize> DoubleEndedIterator for MergedDimIter<'a, N> {
+	fn next_back(&mut self) -> Option<Self::Item> {
+		self.iter.next_back().copied()
+	}
+}
+
 impl<'a, const N: usize> MergedDimIter<'a, N> {
 	pub fn is_empty(&self) -> bool {
 		self.iter.len() == 0

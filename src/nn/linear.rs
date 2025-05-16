@@ -3,6 +3,7 @@ use crate::dtype::DType;
 use crate::eval_context::EvalContext;
 use crate::expr::{
 	Accumulable, MatrixAccumulable, MatrixSavable, Savable, col_matrix, dot, matrix, mm, randn,
+	row_matrix,
 };
 use crate::format;
 use crate::model_context::ModelContext;
@@ -48,20 +49,29 @@ impl Linear {
 		}
 	}
 
-	fn calc_d_weights(&self, d_out: &Tensor, inp: &Tensor) {
-		let i = col_matrix(inp);
-		let d_o = col_matrix(d_out);
-		let d_w = mm(d_o, i.T()).scale(1.0);
-
-		let mut weights = self.weights.borrow_mut();
-		weights.update_grad(|grad, already_have_grad| {
-			if already_have_grad {
-				cold_path();
-				d_w.acc_to(matrix(grad), 1.0, 1.0);
+	fn calc_d_weights(&self, d_out: Tensor, inp: Tensor) {
+		if d_out.ndim() <= 2 {
+			let (d_o, i) = if d_out.ndim() == 2 {
+				(matrix(&d_out).T(), matrix(&inp))
 			} else {
-				d_w.save_to(matrix(grad));
-			}
-		});
+				(col_matrix(&d_out), row_matrix(&inp))
+			};
+
+			let d_w = mm(d_o, i).scale(1.0);
+
+			let mut weights = self.weights.borrow_mut();
+			weights.update_grad(|grad, already_have_grad| {
+				if already_have_grad {
+					cold_path();
+					d_w.acc_to(matrix(grad), 1.0, 1.0);
+				} else {
+					d_w.save_to(matrix(grad));
+				}
+			});
+		} else {
+			cold_path();
+			todo!("merge batch dimensions");
+		}
 	}
 
 	fn calc_d_inp(&self, d_out: &Tensor) -> Tensor {
@@ -138,13 +148,14 @@ impl BackpropLayer for Linear {
 
 	fn final_backward(&self, d_out: Tensor, ctx: &mut EvalContext) {
 		let [inp] = ctx.tensors.get();
-		self.calc_d_weights(&d_out, &inp);
+		self.calc_d_weights(d_out, inp);
 	}
 
 	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Tensor {
 		let [inp] = ctx.tensors.get();
-		self.calc_d_weights(&d_out, &inp);
-		self.calc_d_inp(&d_out)
+		let d_inp = self.calc_d_inp(&d_out);
+		self.calc_d_weights(d_out, inp);
+		d_inp
 	}
 }
 

@@ -27,11 +27,8 @@ pub struct EvalContext {
 }
 
 impl EvalContext {
-	pub fn new() -> EvalContext {
-		EvalContext {
-			training: false,
-			tensors: TensorStore::new(),
-		}
+	pub fn new(training: bool) -> EvalContext {
+		EvalContext { training, tensors: TensorStore::new() }
 	}
 
 	pub fn is_training(&self) -> bool {

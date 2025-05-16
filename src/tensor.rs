@@ -263,6 +263,17 @@ impl Tensor {
 		self.reshape(ndim, new_shape)
 	}
 
+	pub fn batch_size(&self, non_batch_dims: usize) -> TensorSize {
+		assert!(non_batch_dims <= self.dims.len(), "not enough dimensions");
+		let batch_dims = self.dims.len() - non_batch_dims;
+
+		let mut batch_size = 1;
+		for i in 0..batch_dims {
+			batch_size *= self.dims[i].size;
+		}
+		batch_size
+	}
+
 	pub fn dim_to_positive(&self, dim: isize) -> usize {
 		let ndim = self.dims.len();
 		let dim = if dim >= 0 { dim as usize } else { ndim.wrapping_add(dim as usize) };
