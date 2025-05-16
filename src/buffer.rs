@@ -115,6 +115,8 @@ pub trait Buffer {
 
 	fn dot_acc(&self, dst: &SliceSet, dst_weight: f64, a: &SliceSet, b: &SliceSet, ab_weight: f64);
 
+	fn sum_all(&self, a: &SliceSet) -> f64;
+
 	fn rsqrt(&self, dst: &SliceSet, a: &SliceSet, eps: f64);
 
 	/// Calculates:

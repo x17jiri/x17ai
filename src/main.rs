@@ -21,11 +21,11 @@ mod cpu;
 mod device;
 mod dim_merger;
 mod dtype;
-mod eval_ctx;
+mod eval_context;
 mod expr;
 mod format;
 mod matrix;
-mod model_ctx;
+mod model_context;
 mod nn;
 mod optimizer;
 mod param;
@@ -41,12 +41,14 @@ use crate::dtype::*;
 use crate::expr::*;
 use crate::format::*;
 use crate::matrix::*;
-use crate::model_ctx::*;
+use crate::model_context::*;
 use crate::nn::Layer;
-use crate::nn::linear::Linear;
+use crate::nn::linear::{Linear, MultiheadLinear};
 use crate::optimizer::*;
 use crate::rand::*;
 use crate::tensor::*;
+use eval_context::EvalContext;
+use nn::BackpropLayer;
 use smallvec::{SmallVec, smallvec};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -209,28 +211,37 @@ fn main() {
 	stderrlog::new().module(module_path!()).init().unwrap();
 
 	let dev = CPUDevice::new("CPU".to_string());
-	let mut ctx = Context::new(dev.clone());
+	let mut mctx = ModelContext::new(dev.clone());
 
-	let mut model = Linear::new(3, 2, 2, DType::F32, &mut ctx);
+	let mut model = Linear::new(3, 2, DType::F32, &mut mctx);
 	model.randomize();
+	model.init_optimizer();
 
-	let input = Tensor::new_empty_on(&[3], DType::F32, dev.clone());
+	let mut loss = nn::SoftmaxCrossEntropy::new(2);
+	loss.randomize();
+
+	let input = Tensor::new_empty_on(&[2, 3], DType::F32, dev.clone());
 	let expected = Tensor::new_empty_on(&[2, 2], DType::F32, dev.clone());
 
 	randn().save_to(&input);
-	randn().save_to(&expected);
+	let a = dev.tensor_as_slice::<f32>(&expected);
+	a[0].set(1.0);
+	a[1].set(0.0);
+	a[2].set(0.0);
+	a[3].set(1.0);
 
-	let output = expected.new_empty_like();
-	let mut t = nn::TensorStore::new();
-	model.forward(&input, &output, Some(&mut t));
+	let mut ectx_model = EvalContext::new();
+	let output_logits = model.forward(input.clone(), &mut ectx_model);
+
+	let mut ectx_loss = EvalContext::new();
+	let output = loss.forward(output_logits.clone(), &mut ectx_loss);
+
+	for (name, param) in model.named_params("model_params") {
+		println!("{}: {}", name, param.borrow().value());
+	}
 
 	println!("input = {}", input);
+	println!("output_logits = {}", output_logits);
 	println!("output = {}", output);
 	println!("expected = {}", expected);
-	println!("w = {}", model.w);
-	println!("ln(+1.0) = {}", (1.0 as f64).ln());
-	println!("ln(+0.5) = {}", (0.5 as f64).ln());
-	println!("ln( 0.0) = {}", (0.0 as f64).ln());
-	println!("ln(-0.5) = {}", (-0.5 as f64).ln());
-	println!("ln(-1.0) = {}", (-1.0 as f64).ln());
 }

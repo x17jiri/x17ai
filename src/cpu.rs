@@ -40,6 +40,31 @@ impl CPUDevice {
 		})
 	}
 
+	pub fn tensor_as_slice<'a, T>(&self, tensor: &'a Tensor) -> &'a [Cell<T>] {
+		assert!(tensor.dtype.bytes() == std::mem::size_of::<T>());
+
+		let buf_base = BufferBase::from_dyn_buf(tensor.buffer.as_ref());
+		assert!(buf_base.is_on_device(self));
+
+		let buf_base = buf_base as *const BufferBase;
+		let buf = buf_base as *const CPUBuffer;
+		let buf = unsafe { &*buf };
+
+		let offset = tensor.offset;
+		let mut elems = 1;
+		for i in 0..tensor.ndim() {
+			let dim = tensor.dim_from_start(i);
+			if dim.size == 0 {
+				return &[];
+			}
+
+			elems += (dim.size - 1) * dim.stride;
+		}
+
+		assert!(buf.base.is_in_bounds_T::<T>(offset, elems));
+		unsafe { buf.cast::<T>(offset, elems) }
+	}
+
 	fn new_cpu_buffer(self: Rc<Self>, dtype: DType, elems: TensorSize) -> Rc<CPUBuffer> {
 		// we want to allocate `elems` elements of type `dtype`, but internally we use elements
 		// of type `CPUBufferElement`. So convert `elems` to `buf_elems`.
@@ -322,6 +347,15 @@ impl CPUBuffer {
 	}
 
 	#[inline(never)]
+	fn sum_all_f<T: Copy + FromToF64>(a: &TypedSliceSet<'_, CPUBuffer>) -> f64 {
+		let mut sum = 0.0;
+		for [arr] in BatchIter::<T, 1>::new([a]) {
+			sum += arr.iter().map(|x| x.get().to_f64()).sum::<f64>();
+		}
+		sum
+	}
+
+	#[inline(never)]
 	fn rsqrt_f<T: Copy + FromToF64>(
 		dst: &TypedSliceSet<'_, CPUBuffer>, inp: &TypedSliceSet<'_, CPUBuffer>, eps: f64,
 	) {
@@ -563,6 +597,14 @@ impl Buffer for CPUBuffer {
 		assert!(dst.dtype == b.dtype);
 		match dst.dtype {
 			DType::F32 => Self::dot_acc_f::<f32>(&dst, dst_weight, &a, &b, ab_weight),
+			_ => todo!(),
+		}
+	}
+
+	fn sum_all(&self, a: &SliceSet) -> f64 {
+		let a = self.cast_slices(a);
+		match a.dtype {
+			DType::F32 => Self::sum_all_f::<f32>(&a),
 			_ => todo!(),
 		}
 	}
@@ -1044,6 +1086,8 @@ mod tests {
 			}
 		}
 	}
+
+	// TODO - test sum_all_f()
 
 	#[test]
 	fn test_rsqrt() {

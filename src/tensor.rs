@@ -131,6 +131,21 @@ impl Tensor {
 		Self::new_empty_on(shape, dtype, self.device())
 	}
 
+	pub fn new_replace_tail(&self, tail_len: usize, replace_with: &[TensorSize]) -> Tensor {
+		assert!(self.dims.len() >= tail_len);
+		let keep_len = self.dims.len() - tail_len;
+
+		let builder = NewOutputHandler::new(self.dtype, self.device());
+		let mut builder = builder.init(replace_with.len() + keep_len);
+		for dim in replace_with.iter().rev() {
+			builder.prepend_dim(*dim);
+		}
+		for dim in self.dims[..keep_len].iter().rev() {
+			builder.prepend_dim(dim.size);
+		}
+		builder.value()
+	}
+
 	/// Allocate a new tensor on the same device with the same shape and dtype
 	/// as `self`.
 	pub fn new_empty_like(&self) -> Tensor {

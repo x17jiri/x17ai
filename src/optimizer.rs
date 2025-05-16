@@ -42,7 +42,7 @@ impl OptParam {
 		let part_dim = value.dim_from_start(0);
 		let part_elems_dim = value.dim_from_start(1);
 		assert!(
-			part_dim.stride == 1 && part_elems_dim.stride == part_dim.size,
+			part_elems_dim.stride == 1 && part_dim.stride == part_elems_dim.size,
 			"Tensor is not contiguous"
 		);
 

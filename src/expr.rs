@@ -34,7 +34,7 @@ pub trait MatrixAccumulable {
 
 //--------------------------------------------------------------------------------------------------
 
-fn __elem_wise<'a, const N: usize, F: Fn([SliceSet; N])>(a: [&Tensor; N], f: F) {
+fn __elem_wise<'a, const N: usize, F: FnMut([SliceSet; N])>(a: [&Tensor; N], mut f: F) {
 	let merger = DimMerger::new(a.map(|t| t.dims.as_slice()), 1);
 	let smallest = merger.smallest_dim();
 	let batch_dims = merger.dims_increasing_without_smallest();
@@ -285,6 +285,16 @@ impl Accumulable for VecMul<'_> {
 			to.buffer.dot_acc(&to, to_weight, &a, &b, expr_weight);
 		});
 	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub fn sum_all(tensor: &Tensor) -> f64 {
+	let mut sum = 0.0;
+	__elem_wise([tensor], |[a]| {
+		sum += a.buffer.sum_all(&a);
+	});
+	sum
 }
 
 //--------------------------------------------------------------------------------------------------
