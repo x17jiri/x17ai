@@ -35,16 +35,20 @@ pub trait MatrixAccumulable {
 //--------------------------------------------------------------------------------------------------
 
 fn __elem_wise<'a, const N: usize, F: FnMut([SliceSet; N])>(a: [&Tensor; N], mut f: F) {
-	let merger = DimMerger::new(a.map(|t| t.dims.as_slice()), 1);
+	let merger = DimMerger::new(a.map(|t| t.dims.as_slice()));
 	let smallest = merger.smallest_dim();
 	let batch_dims = merger.dims_increasing_without_smallest();
 	let batch_iter = batch_dims.iter();
 
-	// TODO - should allow stride == 0?
-	assert!(smallest.strides.iter().copied().all(|stride| stride == 1));
-
 	let dtypes = a.map(|a| a.dtype());
 	let buffers = a.map(|a| a.buffer.as_ref());
+
+	// TODO - this doesn't handle well the output tensor
+	let lengths: [TensorSize; N] = std::array::from_fn(|i| match smallest.strides[i] {
+		0 => smallest.size.min(1),
+		1 => smallest.size,
+		_ => panic!("unexpected stride"),
+	});
 
 	batch::run(
 		batch_iter,
@@ -53,7 +57,7 @@ fn __elem_wise<'a, const N: usize, F: FnMut([SliceSet; N])>(a: [&Tensor; N], mut
 			f(std::array::from_fn(|i| SliceSet {
 				buffer: buffers[i],
 				dtype: dtypes[i],
-				len: smallest.size,
+				len: lengths[i],
 				batch_size,
 				batch_stride: batch_strides[i],
 				offset: offsets[i],
@@ -66,11 +70,19 @@ fn __vec_wise<'a, const N: usize, F: Fn([SliceSet; N])>(a: [&Tensor; N], f: F) {
 	assert!(a.iter().all(|a| a.ndim() >= 1));
 	assert!(a.iter().all(|a| a.dim(-1).is_contiguous()));
 
-	let lengths = a.map(|a| a.dim(-1).size);
+	// TODO - this doesn't handle well the output tensor
+	let lengths = a.map(|a| {
+		let smallest = a.dim(-1);
+		match smallest.stride {
+			0 => smallest.size.min(1),
+			1 => smallest.size,
+			_ => panic!("unexpected stride"),
+		}
+	});
 	let dtypes = a.map(|a| a.dtype());
 	let buffers = a.map(|a| a.buffer.as_ref());
 
-	let merger = DimMerger::new(a.map(|a| &a.dims[..a.ndim() - 1]), 1);
+	let merger = DimMerger::new(a.map(|a| &a.dims[..a.ndim() - 1]));
 	let batch_dims = merger.dims_increasing();
 	let batch_iter = batch_dims.iter();
 
@@ -434,7 +446,8 @@ impl<'a> MatMulPrep<'a> {
 		const TO: usize = 0;
 		const A: usize = 1;
 		const B: usize = 2;
-		let merger = DimMerger::new([to.batch_dims, a.batch_dims, b.batch_dims], 1);
+		// TODO - the output tensor could be broadcasted
+		let merger = DimMerger::new([to.batch_dims, a.batch_dims, b.batch_dims]);
 
 		// Is this actually a vector dot product?
 		if to.rows.get() == 1 && to.cols.get() == 1 {

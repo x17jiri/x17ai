@@ -168,14 +168,12 @@ pub struct MergedDimIter<'a, const N: usize> {
 }
 
 impl<const N: usize> DimMerger<N> {
-	pub fn new(inputs: [&[SizeAndStride]; N], n_without_broadcast: usize) -> DimMerger<N> {
-		let (merger, _null) = Self::new_ex(inputs, n_without_broadcast, NullOutputHandler());
+	pub fn new(inputs: [&[SizeAndStride]; N]) -> DimMerger<N> {
+		let (merger, _null) = Self::new_ex(inputs, NullOutputHandler());
 		merger
 	}
 
-	pub fn new_ex<H, I>(
-		inputs: [&[SizeAndStride]; N], n_without_broadcast: usize, handler: H,
-	) -> (DimMerger<N>, I::Value)
+	pub fn new_ex<H, I>(inputs: [&[SizeAndStride]; N], handler: H) -> (DimMerger<N>, I::Value)
 	where
 		H: OutputHandler<Impl = I>,
 		I: OutputHandlerImpl,
@@ -188,16 +186,13 @@ impl<const N: usize> DimMerger<N> {
 		let mut out = handler.init(ndim);
 
 		for dim in 0..ndim {
-			let size = merger.prepend_dim(
-				inputs.map(|input| {
-					if dim < input.len() {
-						input[input.len() - dim - 1]
-					} else {
-						SizeAndStride { size: 1, stride: 0 }
-					}
-				}),
-				n_without_broadcast,
-			);
+			let size = merger.prepend_dim(inputs.map(|input| {
+				if dim < input.len() {
+					input[input.len() - dim - 1]
+				} else {
+					SizeAndStride { size: 1, stride: 0 }
+				}
+			}));
 			out.prepend_dim(size);
 		}
 
@@ -217,9 +212,7 @@ impl<const N: usize> DimMerger<N> {
 	///    new_dim_stride = prev_dim_stride * prev_dim_size
 	///
 	/// Returns the size of the new dimension
-	pub fn prepend_dim(
-		&mut self, dims: [SizeAndStride; N], n_without_broadcast: usize,
-	) -> TensorSize {
+	pub fn prepend_dim(&mut self, dims: [SizeAndStride; N]) -> TensorSize {
 		let prev = self.dims_increasing.last_mut();
 		// SAFETY: In `new_empty()`, we make sure `dims_increasing` has at least one element.
 		let prev = unsafe { prev.unwrap_unchecked() };
@@ -232,10 +225,7 @@ impl<const N: usize> DimMerger<N> {
 		let size = dims.iter().fold(1, |acc, dim| if acc == 1 { dim.size } else { acc });
 		let strides = std::array::from_fn(|i| {
 			let dim = dims[i];
-			assert!(
-				dim.size == size || (i >= n_without_broadcast && dim.size == 1),
-				"cannot broadcast: incompatible dimensions"
-			);
+			assert!(dim.size == size || dim.size == 1, "cannot broadcast: incompatible dimensions");
 			if dim.size == size { dim.stride } else { 0 }
 		});
 		//assert!(strides[0] != 0, "cannot broadcast output dimension");

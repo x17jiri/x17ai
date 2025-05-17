@@ -272,7 +272,7 @@ impl CPUBuffer {
 	}
 
 	#[inline(never)]
-	fn mul_f<T: Copy + FromToF64>(
+	fn mul_nnn_f<T: Copy + FromToF64>(
 		dst: &TypedSliceSet<'_, CPUBuffer>, a: &TypedSliceSet<'_, CPUBuffer>,
 		b: &TypedSliceSet<'_, CPUBuffer>,
 	) {
@@ -287,7 +287,23 @@ impl CPUBuffer {
 	}
 
 	#[inline(never)]
-	fn mul_acc_f<T: Copy + FromToF64>(
+	fn mul_nnb_f<T: Copy + FromToF64>(
+		dst: &TypedSliceSet<'_, CPUBuffer>, a: &TypedSliceSet<'_, CPUBuffer>,
+		b: &TypedSliceSet<'_, CPUBuffer>,
+	) {
+		assert!(dst.len == a.len);
+		assert!(b.len == 1);
+		for [dst_arr, a_arr, b_arr] in BatchIter::<T, 3>::new([dst, a, b]) {
+			let b = b_arr[0].get().to_f64();
+			for (d, a) in dst_arr.iter().zip(a_arr) {
+				let val = a.get().to_f64() * b;
+				d.set(T::from_f64(val));
+			}
+		}
+	}
+
+	#[inline(never)]
+	fn mul_nnn_acc_f<T: Copy + FromToF64>(
 		dst: &TypedSliceSet<'_, CPUBuffer>, dst_weight: f64, a: &TypedSliceSet<'_, CPUBuffer>,
 		b: &TypedSliceSet<'_, CPUBuffer>, ab_weight: f64,
 	) {
@@ -299,6 +315,24 @@ impl CPUBuffer {
 				let a_val = a.get().to_f64();
 				let b_val = b.get().to_f64();
 				let val = d_val * dst_weight + a_val * b_val * ab_weight;
+				d.set(T::from_f64(val));
+			}
+		}
+	}
+
+	#[inline(never)]
+	fn mul_nnb_acc_f<T: Copy + FromToF64>(
+		dst: &TypedSliceSet<'_, CPUBuffer>, dst_weight: f64, a: &TypedSliceSet<'_, CPUBuffer>,
+		b: &TypedSliceSet<'_, CPUBuffer>, ab_weight: f64,
+	) {
+		assert!(dst.len == a.len);
+		assert!(b.len == 1);
+		for [dst_arr, a_arr, b_arr] in BatchIter::<T, 3>::new([dst, a, b]) {
+			let b = b_arr[0].get().to_f64();
+			for (d, a) in dst_arr.iter().zip(a_arr) {
+				let d_val = d.get().to_f64();
+				let a_val = a.get().to_f64();
+				let val = d_val * dst_weight + a_val * b * ab_weight;
 				d.set(T::from_f64(val));
 			}
 		}
@@ -548,7 +582,7 @@ impl Buffer for CPUBuffer {
 		assert!(dst.dtype == a.dtype);
 		assert!(dst.dtype == b.dtype);
 		match dst.dtype {
-			DType::F32 => Self::mul_f::<f32>(&dst, &a, &b),
+			DType::F32 => Self::mul_nnn_f::<f32>(&dst, &a, &b),
 			_ => todo!(),
 		}
 	}
@@ -560,7 +594,15 @@ impl Buffer for CPUBuffer {
 		assert!(dst.dtype == a.dtype);
 		assert!(dst.dtype == b.dtype);
 		match dst.dtype {
-			DType::F32 => Self::mul_acc_f::<f32>(&dst, dst_weight, &a, &b, ab_weight),
+			DType::F32 => {
+				if b.len == 1 {
+					Self::mul_nnb_acc_f::<f32>(&dst, dst_weight, &a, &b, ab_weight);
+				} else if a.len == 1 {
+					Self::mul_nnb_acc_f::<f32>(&dst, dst_weight, &b, &a, ab_weight);
+				} else {
+					Self::mul_nnn_acc_f::<f32>(&dst, dst_weight, &a, &b, ab_weight);
+				}
+			},
 			_ => todo!(),
 		}
 	}
@@ -827,7 +869,7 @@ mod tests {
 	}
 
 	#[test]
-	fn test_mul() {
+	fn test_mul_nnn() {
 		let a_buf = new_test_buffer_f32(100);
 		let a_slices = new_default_slices(&a_buf);
 		let a_data = unsafe { a_buf.cast::<f32>(0, 100) };
@@ -848,7 +890,7 @@ mod tests {
 			}
 		}
 
-		CPUBuffer::mul_f::<f32>(&c_slices, &a_slices, &b_slices);
+		CPUBuffer::mul_nnn_f::<f32>(&c_slices, &a_slices, &b_slices);
 
 		for i in 0..100 {
 			let a = a_data[tensor_size_to_usize(i)].get();
@@ -866,6 +908,8 @@ mod tests {
 			}
 		}
 	}
+
+	// TODO - test_mul_nnb
 
 	#[test]
 	fn test_sub() {
@@ -909,7 +953,7 @@ mod tests {
 	}
 
 	#[test]
-	fn test_mul_acc() {
+	fn test_mul_nnn_acc() {
 		let a_buf = new_test_buffer_f32(100);
 		let a_slices = new_default_slices(&a_buf);
 		let a_data = unsafe { a_buf.cast::<f32>(0, 100) };
@@ -930,7 +974,7 @@ mod tests {
 			}
 		}
 
-		CPUBuffer::mul_acc_f::<f32>(&c_slices, 0.7, &a_slices, &b_slices, 1.3);
+		CPUBuffer::mul_nnn_acc_f::<f32>(&c_slices, 0.7, &a_slices, &b_slices, 1.3);
 
 		for i in 0..100 {
 			let a = a_data[tensor_size_to_usize(i)].get();
@@ -952,6 +996,8 @@ mod tests {
 			}
 		}
 	}
+
+	// TODO - test_mul_nnb_acc
 
 	#[test]
 	fn test_dot() {

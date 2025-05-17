@@ -207,7 +207,7 @@ impl Tensor {
 
 		// Merge the dimensions that we are going to reshape
 		let dims_to_reshape = &dims[n_dims_to_keep..];
-		let merged = DimMerger::new([dims_to_reshape], 0);
+		let merged = DimMerger::new([dims_to_reshape]);
 
 		// Resize the dims array. The new dimensions will be initialized in the `for` loop below.
 		unsafe { dims.set_len(n_dims_to_keep) };
