@@ -31,9 +31,33 @@ pub struct SizeAndStride {
 	pub stride: TensorSize,
 }
 
+pub enum DimType {
+	Contiguous,
+	Broadcasted,
+	Strided,
+}
+
 impl SizeAndStride {
 	pub fn is_contiguous(&self) -> bool {
 		self.stride == 1 || self.size <= 1
+	}
+
+	pub fn is_broadcasted(&self) -> bool {
+		self.stride < 1 && self.size > 1
+	}
+
+	pub fn is_strided(&self) -> bool {
+		self.stride > 1 && self.size > 1
+	}
+
+	pub fn dim_type(&self) -> DimType {
+		if self.stride == 1 || self.size <= 1 {
+			DimType::Contiguous
+		} else if self.stride < 1 {
+			DimType::Broadcasted
+		} else {
+			DimType::Strided
+		}
 	}
 }
 

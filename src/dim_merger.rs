@@ -150,6 +150,16 @@ pub struct MergedDim<const N: usize> {
 	pub strides: [TensorSize; N],
 }
 
+impl<const N: usize> MergedDim<N> {
+	pub fn size_and_stride(&self, dim: usize) -> SizeAndStride {
+		assert!(dim < N);
+		SizeAndStride {
+			size: self.size,
+			stride: self.strides[dim],
+		}
+	}
+}
+
 #[derive(Clone)]
 pub struct DimMerger<const N: usize> {
 	/// We order dimensions from smallest to largest stride.
