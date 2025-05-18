@@ -8,19 +8,16 @@ use std::fmt;
 use std::intrinsics::cold_path;
 
 fn __run<const N: usize, F: FnMut(TensorSize, [TensorSize; N], [TensorSize; N])>(
-	prev_dim: MergedDim<N>, mut dims: MergedDimIter<N>, offsets: [TensorSize; N],
-	enable_broadcast: [bool; N], f: &mut F,
+	prev_dim: MergedDim<N>, mut dims: MergedDimIter<N>, offsets: [TensorSize; N], f: &mut F,
 ) {
 	if prev_dim.size > 1 {
-		for j in 0..N {
-			assert!(enable_broadcast[j] || prev_dim.strides[j] > 0);
-		}
+		assert!(prev_dim.strides[0] > 0, "broadcast is disabled for this tensor");
 	}
 
 	if let Some(dim) = dims.next() {
 		let mut offsets = offsets;
 		for _ in 0..prev_dim.size {
-			__run(dim, dims.clone(), offsets, enable_broadcast, f);
+			__run(dim, dims.clone(), offsets, f);
 
 			for j in 0..N {
 				offsets[j] += prev_dim.strides[j];
@@ -33,10 +30,10 @@ fn __run<const N: usize, F: FnMut(TensorSize, [TensorSize; N], [TensorSize; N])>
 
 /// F: fn(batch_size: TensorSize, batch_strides: [TensorSize; N], offsets: [TensorSize; N])
 pub fn run<'a, const N: usize, F: FnMut(TensorSize, [TensorSize; N], [TensorSize; N])>(
-	mut dims: MergedDimIter<N>, offsets: [TensorSize; N], enable_broadcast: [bool; N], mut f: F,
+	mut dims: MergedDimIter<N>, offsets: [TensorSize; N], mut f: F,
 ) {
 	if let Some(dim) = dims.next() {
-		__run(dim, dims, offsets, enable_broadcast, &mut f);
+		__run(dim, dims, offsets, &mut f);
 	} else {
 		f(1, [0; N], offsets);
 	}

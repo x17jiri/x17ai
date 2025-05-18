@@ -34,20 +34,8 @@ pub trait MatrixAccumulable {
 
 //--------------------------------------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum BroadcastToggle {
-	DisableBroadcast,
-	EnableBroadcast,
-}
-
-use BroadcastToggle::*;
-
-fn __elem_wise<'a, const N: usize, F: FnMut([SliceSet; N])>(
-	a: [(&Tensor, BroadcastToggle); N], mut f: F,
-) {
-	let tensors = a.map(|a| a.0);
-	let enable_broadcast = a.map(|a| a.1 != DisableBroadcast);
-
+/// Broadcast is disabled for tensors[0] and enabled for tensors[1..].
+fn __elem_wise<'a, const N: usize, F: FnMut([SliceSet; N])>(tensors: [&Tensor; N], mut f: F) {
 	let merger = DimMerger::new(tensors.map(|t| t.dims.as_slice()));
 	let smallest = merger.smallest_dim();
 	let batch_dims = merger.dims_increasing_without_smallest();
@@ -65,7 +53,7 @@ fn __elem_wise<'a, const N: usize, F: FnMut([SliceSet; N])>(
 				dim.is_broadcasted(),
 				"last dimension of each tensor needs to be either contiguous or broadcasted. It cannot be strided"
 			);
-			assert!(enable_broadcast[i], "broadcast is disabled for this tensor");
+			assert!(i != 0, "broadcast is disabled for this tensor");
 			1
 		}
 	});
@@ -73,7 +61,6 @@ fn __elem_wise<'a, const N: usize, F: FnMut([SliceSet; N])>(
 	batch::run(
 		batch_iter,
 		tensors.map(|t| t.offset),
-		enable_broadcast,
 		|batch_size: TensorSize, batch_strides: [TensorSize; N], offsets: [TensorSize; N]| {
 			f(std::array::from_fn(|i| SliceSet {
 				buffer: buffers[i],
@@ -87,12 +74,12 @@ fn __elem_wise<'a, const N: usize, F: FnMut([SliceSet; N])>(
 	);
 }
 
-/// Note: Currently, the BroadcastToggle controls the broadcast only for batch dimensions.
-/// For the data dimension, the broadcast is always disabled.
-fn __vec_wise<'a, const N: usize, F: Fn([SliceSet; N])>(a: [(&Tensor, BroadcastToggle); N], f: F) {
-	let tensors = a.map(|a| a.0);
-	let enable_broadcast = a.map(|a| a.1 != DisableBroadcast);
-
+/// Data dimension broadcast is disabled for all tensors.
+/// This could be improved.
+///
+/// Batch dimensions broadcast is disabled for tensors[0] and enabled for tensors[1..].
+/// This is by design.
+fn __vec_wise<'a, const N: usize, F: Fn([SliceSet; N])>(tensors: [&Tensor; N], f: F) {
 	assert!(tensors.iter().all(|t| t.ndim() >= 1));
 	assert!(tensors.iter().all(|t| t.dim(-1).is_contiguous()));
 
@@ -107,7 +94,6 @@ fn __vec_wise<'a, const N: usize, F: Fn([SliceSet; N])>(a: [(&Tensor, BroadcastT
 	batch::run(
 		batch_iter,
 		tensors.map(|t| t.offset),
-		enable_broadcast,
 		|batch_size: TensorSize, batch_strides: [TensorSize; N], offsets: [TensorSize; N]| {
 			f(std::array::from_fn(|i| SliceSet {
 				buffer: buffers[i],
@@ -121,16 +107,21 @@ fn __vec_wise<'a, const N: usize, F: Fn([SliceSet; N])>(a: [(&Tensor, BroadcastT
 	);
 }
 
+/// At least one of the matrix dimensions should be contiguous.
+///
+/// Batch dimensions broadcast is disabled for matrices[0] and enabled for matrices[1..].
+/// This is by design.
 fn __mat_wise<'a, const N: usize, F: Fn([MatrixSet; N])>(
-	a: [(&Matrix, BroadcastToggle); N], batch_dims: MergedDimIter<N>, f: F,
+	matrices: [&Matrix; N], batch_dims: MergedDimIter<N>, f: F,
 ) {
-	let matrices = a.map(|a| a.0);
-	let enable_broadcast = a.map(|a| a.1 != DisableBroadcast);
-
+	assert!(matrices.iter().all(|m| {
+		let row_dim = SizeAndStride { size: m.rows.get(), stride: m.row_stride };
+		let col_dim = SizeAndStride { size: m.cols.get(), stride: m.col_stride };
+		row_dim.is_contiguous() || col_dim.is_contiguous()
+	}));
 	batch::run(
 		batch_dims,
 		matrices.map(|m| m.tensor.offset),
-		enable_broadcast,
 		|batch_size: TensorSize, batch_strides: [TensorSize; N], offsets: [TensorSize; N]| {
 			f(std::array::from_fn(|i| MatrixSet {
 				slice_set: SliceSet {
@@ -166,14 +157,9 @@ pub fn zeros() -> Zeros {
 
 impl Savable for Zeros {
 	fn save_to(&self, to: &Tensor) {
-		__elem_wise(
-			[
-				(to, DisableBroadcast), //
-			],
-			|[to]| {
-				to.buffer.zeros(&to);
-			},
-		);
+		__elem_wise([to], |[to]| {
+			to.buffer.zeros(&to);
+		});
 	}
 }
 
@@ -187,14 +173,9 @@ pub fn randn() -> Randn {
 
 impl Savable for Randn {
 	fn save_to(&self, to: &Tensor) {
-		__elem_wise(
-			[
-				(to, DisableBroadcast), //
-			],
-			|[to]| {
-				to.buffer.randn(&to);
-			},
-		);
+		__elem_wise([to], |[to]| {
+			to.buffer.randn(&to);
+		});
 	}
 }
 
@@ -202,29 +183,17 @@ impl Savable for Randn {
 
 impl Savable for Tensor {
 	fn save_to(&self, to: &Tensor) {
-		__elem_wise(
-			[
-				(to, DisableBroadcast), //
-				(self, EnableBroadcast),
-			],
-			|[to, input]| {
-				to.buffer.copy(&to, &input);
-			},
-		);
+		__elem_wise([to, self], |[to, input]| {
+			to.buffer.copy(&to, &input);
+		});
 	}
 }
 
 impl Accumulable for Tensor {
 	fn acc_to(&self, to: &Tensor, to_weight: f64, expr_weight: f64) {
-		__elem_wise(
-			[
-				(to, DisableBroadcast), //
-				(self, EnableBroadcast),
-			],
-			|[to, input]| {
-				to.buffer.acc(&to, to_weight, &input, expr_weight);
-			},
-		);
+		__elem_wise([to, self], |[to, input]| {
+			to.buffer.acc(&to, to_weight, &input, expr_weight);
+		});
 	}
 }
 
@@ -241,31 +210,17 @@ pub fn mul<'a>(a: &'a Tensor, b: &'a Tensor) -> Mul<'a> {
 
 impl<'a> Savable for Mul<'a> {
 	fn save_to(&self, to: &Tensor) {
-		__elem_wise(
-			[
-				(to, DisableBroadcast), //
-				(self.a, EnableBroadcast),
-				(self.b, EnableBroadcast),
-			],
-			|[to, a, b]| {
-				to.buffer.mul(&to, &a, &b);
-			},
-		);
+		__elem_wise([to, self.a, self.b], |[to, a, b]| {
+			to.buffer.mul(&to, &a, &b);
+		});
 	}
 }
 
 impl<'a> Accumulable for Mul<'a> {
 	fn acc_to(&self, to: &Tensor, to_weight: f64, expr_weight: f64) {
-		__elem_wise(
-			[
-				(to, DisableBroadcast), //
-				(self.a, EnableBroadcast),
-				(self.b, EnableBroadcast),
-			],
-			|[to, a, b]| {
-				to.buffer.mul_acc(&to, to_weight, &a, &b, expr_weight);
-			},
-		);
+		__elem_wise([to, self.a, self.b], |[to, a, b]| {
+			to.buffer.mul_acc(&to, to_weight, &a, &b, expr_weight);
+		});
 	}
 }
 
@@ -282,16 +237,9 @@ pub fn sub<'a>(a: &'a Tensor, b: &'a Tensor) -> Sub<'a> {
 
 impl<'a> Savable for Sub<'a> {
 	fn save_to(&self, to: &Tensor) {
-		__elem_wise(
-			[
-				(to, DisableBroadcast), //
-				(self.a, EnableBroadcast),
-				(self.b, EnableBroadcast),
-			],
-			|[to, a, b]| {
-				to.buffer.sub(&to, &a, &b);
-			},
-		);
+		__elem_wise([to, self.a, self.b], |[to, a, b]| {
+			to.buffer.sub(&to, &a, &b);
+		});
 	}
 }
 
@@ -308,15 +256,9 @@ pub fn rsqrt(tensor: &Tensor, eps: f64) -> RSqrt {
 
 impl<'a> Savable for RSqrt<'a> {
 	fn save_to(&self, to: &Tensor) {
-		__elem_wise(
-			[
-				(to, DisableBroadcast), //
-				(self.tensor, EnableBroadcast),
-			],
-			|[to, input]| {
-				to.buffer.rsqrt(&to, &input, self.eps);
-			},
-		);
+		__elem_wise([to, self.tensor], |[to, input]| {
+			to.buffer.rsqrt(&to, &input, self.eps);
+		});
 	}
 }
 
@@ -338,15 +280,9 @@ pub fn log_clamped(tensor: &Tensor) -> LogClamped {
 
 impl<'a> Savable for LogClamped<'a> {
 	fn save_to(&self, to: &Tensor) {
-		__elem_wise(
-			[
-				(to, DisableBroadcast), //
-				(self.tensor, EnableBroadcast),
-			],
-			|[to, input]| {
-				to.buffer.log_clamped(&to, &input);
-			},
-		);
+		__elem_wise([to, self.tensor], |[to, input]| {
+			to.buffer.log_clamped(&to, &input);
+		});
 	}
 }
 
@@ -363,31 +299,17 @@ pub fn dot<'a>(a: &'a Tensor, b: &'a Tensor) -> VecMul<'a> {
 
 impl<'a> Savable for VecMul<'a> {
 	fn save_to(&self, to: &Tensor) {
-		__vec_wise(
-			[
-				(to, DisableBroadcast), //
-				(self.a, EnableBroadcast),
-				(self.b, EnableBroadcast),
-			],
-			|[to, a, b]| {
-				to.buffer.dot(&to, &a, &b);
-			},
-		);
+		__vec_wise([to, self.a, self.b], |[to, a, b]| {
+			to.buffer.dot(&to, &a, &b);
+		});
 	}
 }
 
 impl Accumulable for VecMul<'_> {
 	fn acc_to(&self, to: &Tensor, to_weight: f64, expr_weight: f64) {
-		__vec_wise(
-			[
-				(to, DisableBroadcast), //
-				(self.a, EnableBroadcast),
-				(self.b, EnableBroadcast),
-			],
-			|[to, a, b]| {
-				to.buffer.dot_acc(&to, to_weight, &a, &b, expr_weight);
-			},
-		);
+		__vec_wise([to, self.a, self.b], |[to, a, b]| {
+			to.buffer.dot_acc(&to, to_weight, &a, &b, expr_weight);
+		});
 	}
 }
 
@@ -395,17 +317,12 @@ impl Accumulable for VecMul<'_> {
 
 pub fn sum_all(tensor: &Tensor) -> f64 {
 	let mut sum = 0.0;
-	__elem_wise(
-		[
-			// TODO - I'm inclined to enable broadcast here, but the current implementation
-			// of __elem_wise() will set dim size to 1 if the smallest dim is broadcasted.
-			// This is not what we want for sum_all(). We would need to fix this first.
-			(tensor, DisableBroadcast),
-		],
-		|[a]| {
-			sum += a.buffer.sum_all(&a);
-		},
-	);
+	// TODO - `__elem_wise()` disables broadcast for tensor at position 0.
+	// In the case of a `sum_all()`, it would make sense to enable it,
+	// but it would require some refactoring. Not sure if it is worth it.
+	__elem_wise([tensor], |[a]| {
+		sum += a.buffer.sum_all(&a);
+	});
 	sum
 }
 
@@ -421,15 +338,9 @@ pub fn softmax<'a>(tensor: &'a Tensor) -> Softmax<'a> {
 
 impl<'a> Savable for Softmax<'a> {
 	fn save_to(&self, to: &Tensor) {
-		__vec_wise(
-			[
-				(to, DisableBroadcast), //
-				(self.tensor, EnableBroadcast),
-			],
-			|[to, input]| {
-				to.buffer.softmax(&to, &input);
-			},
-		);
+		__vec_wise([to, self.tensor], |[to, input]| {
+			to.buffer.softmax(&to, &input);
+		});
 	}
 }
 
@@ -446,15 +357,9 @@ pub fn rms_norm<'a>(tensor: &'a Tensor, eps: f64) -> RMSNorm<'a> {
 
 impl<'a> Savable for RMSNorm<'a> {
 	fn save_to(&self, to: &Tensor) {
-		__vec_wise(
-			[
-				(to, DisableBroadcast), //
-				(self.tensor, EnableBroadcast),
-			],
-			|[to, input]| {
-				to.buffer.rms_norm(&to, &input, self.eps);
-			},
-		);
+		__vec_wise([to, self.tensor], |[to, input]| {
+			to.buffer.rms_norm(&to, &input, self.eps);
+		});
 	}
 }
 
@@ -623,17 +528,9 @@ impl<'a> MatrixSavable for MatMul<'a> {
 	fn save_to(self, to: Matrix) {
 		let scale = self.scale;
 		let prep = MatMulPrep::new(self, to);
-		__mat_wise(
-			[
-				(&prep.to, DisableBroadcast), //
-				(&prep.a, EnableBroadcast),
-				(&prep.b, EnableBroadcast),
-			],
-			prep.batch_dims.iter(),
-			|[to, a, b]| {
-				to.slice_set.buffer.gemm(&to, 0.0, &a, &b, scale);
-			},
-		);
+		__mat_wise([&prep.to, &prep.a, &prep.b], prep.batch_dims.iter(), |[to, a, b]| {
+			to.slice_set.buffer.gemm(&to, 0.0, &a, &b, scale);
+		});
 	}
 }
 
@@ -641,17 +538,9 @@ impl<'a> MatrixAccumulable for MatMul<'a> {
 	fn acc_to(self, to: Matrix, to_weight: f64, expr_weight: f64) {
 		let scale = self.scale * expr_weight;
 		let prep = MatMulPrep::new(self, to);
-		__mat_wise(
-			[
-				(&prep.to, DisableBroadcast), //
-				(&prep.a, EnableBroadcast),
-				(&prep.b, EnableBroadcast),
-			],
-			prep.batch_dims.iter(),
-			|[to, a, b]| {
-				to.slice_set.buffer.gemm(&to, to_weight, &a, &b, scale);
-			},
-		);
+		__mat_wise([&prep.to, &prep.a, &prep.b], prep.batch_dims.iter(), |[to, a, b]| {
+			to.slice_set.buffer.gemm(&to, to_weight, &a, &b, scale);
+		});
 	}
 }
 

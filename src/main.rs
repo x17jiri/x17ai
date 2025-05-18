@@ -249,19 +249,30 @@ fn main() {
 	println!("loss_value = {}", loss_value);
 	println!("--------------------------------------------------");
 
-	mctx.zero_grad();
+	for i in 0..1000 {
+		//		println!("Step {}", i);
+		//		println!();
 
-	let d_logits = loss.backward(output.clone(), expected.clone(), &mut ectx_loss);
-	model.final_backward(d_logits.clone(), &mut ectx_model);
+		mctx.zero_grad();
 
-	mctx.step();
+		let d_logits = loss.backward(output.clone(), expected.clone(), &mut ectx_loss);
+		model.final_backward(d_logits.clone(), &mut ectx_model);
 
-	let output_logits = model.forward(input.clone(), &mut ectx_model);
-	let output = loss.forward(output_logits.clone(), &mut ectx_loss);
-	let loss_value = loss.loss(output.clone(), expected.clone());
+		mctx.step();
 
-	println!("output_logits = {}", output_logits);
-	println!("output = {}", output);
-	println!("loss_value = {}", loss_value);
-	println!("--------------------------------------------------");
+		let output_logits = model.forward(input.clone(), &mut ectx_model);
+		let output = loss.forward(output_logits.clone(), &mut ectx_loss);
+		let loss_value = loss.loss(output.clone(), expected.clone());
+
+		//		println!("output_logits = {}", output_logits);
+		//		println!("output = {}", output);
+		//		println!("loss_value = {}", loss_value);
+		println!("{}", loss_value);
+		//println!("--------------------------------------------------");
+	}
+	for (name, param) in model.named_params("model_params") {
+		println!("{}: {}", name, param.borrow().value());
+	}
+	println!("input = {}", input);
+	println!("expected = {}", expected);
 }

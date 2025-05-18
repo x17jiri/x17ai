@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 pub mod linear;
+pub mod softmax;
 pub mod softmax_cross_entropy;
 
 use crate::eval_context::EvalContext;
@@ -11,6 +12,7 @@ use crate::param::Param;
 use crate::tensor::{Tensor, TensorSize};
 
 pub use linear::{Linear, MultiheadLinear};
+pub use softmax::Softmax;
 pub use softmax_cross_entropy::SoftmaxCrossEntropy;
 
 pub trait Layer {
@@ -42,14 +44,23 @@ pub trait BackpropLayer: Layer {
 	fn zero_grad(&self);
 	fn step(&self, opt_coef: &OptCoef);
 
-	/// Use this function when you need `d_inp`
 	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Tensor;
 
-	/// Use this function when you don't need `d_inp`
-	fn final_backward(&self, d_out: Tensor, ctx: &mut EvalContext);
+	/// This function is similar to `backward()`. It should calculate derivatives of parameters
+	/// used by the layer, but it doesn't calculate derivatives that could be used by previous
+	/// layers. So it would typically only be used for the first layer in a model.
+	fn backward_first(&self, d_out: Tensor, ctx: &mut EvalContext);
+
+	fn as_loss_layer(&self) -> Option<&dyn LossLayer> {
+		None
+	}
 }
 
-pub trait LossLayer: Layer {
-	fn backward(&self, out: Tensor, expected_out: Tensor, ctx: &mut EvalContext) -> Tensor;
+pub trait LossLayer: BackpropLayer {
+	/// This function is similar to `backward()`, but instead of derivatives with respect to
+	/// the output, it takes expected value of the output.
+	// It would typically be used for the last layer in a model.
+	fn backward_last(&self, out: Tensor, expected_out: Tensor, ctx: &mut EvalContext) -> Tensor;
+
 	fn loss(&self, out: Tensor, expected_out: Tensor) -> f64;
 }
