@@ -146,7 +146,7 @@ impl BackpropLayer for Linear {
 		weights.step(opt_coef);
 	}
 
-	fn final_backward(&self, d_out: Tensor, ctx: &mut EvalContext) {
+	fn backward_first(&self, d_out: Tensor, ctx: &mut EvalContext) {
 		let [inp] = ctx.tensors.get();
 		self.calc_d_weights(d_out, inp);
 	}
@@ -234,11 +234,11 @@ impl BackpropLayer for MultiheadLinear {
 		self.linear.step(opt_coef);
 	}
 
-	fn final_backward(&self, d_out: Tensor, ctx: &mut EvalContext) {
+	fn backward_first(&self, d_out: Tensor, ctx: &mut EvalContext) {
 		// [..., heads, outputs] -> [..., heads * outputs]
 		let d_out = d_out.reshape(2, &self.linear.output_shape);
 
-		self.linear.final_backward(d_out, ctx)
+		self.linear.backward_first(d_out, ctx)
 	}
 
 	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Tensor {

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 pub mod linear;
+pub mod rms_norm;
 pub mod softmax;
 pub mod softmax_cross_entropy;
 
@@ -12,7 +13,8 @@ use crate::param::Param;
 use crate::tensor::{Tensor, TensorSize};
 
 pub use linear::{Linear, MultiheadLinear};
-pub use softmax::Softmax;
+pub use rms_norm::{RMSNorm, RMSNormGradientMode};
+pub use softmax::{Softmax, SoftmaxGradientMode};
 pub use softmax_cross_entropy::SoftmaxCrossEntropy;
 
 pub trait Layer {

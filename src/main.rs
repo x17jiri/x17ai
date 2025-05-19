@@ -255,8 +255,8 @@ fn main() {
 
 		mctx.zero_grad();
 
-		let d_logits = loss.backward(output.clone(), expected.clone(), &mut ectx_loss);
-		model.final_backward(d_logits.clone(), &mut ectx_model);
+		let d_logits = loss.backward_last(output.clone(), expected.clone(), &mut ectx_loss);
+		model.backward_first(d_logits.clone(), &mut ectx_model);
 
 		mctx.step();
 

@@ -339,7 +339,7 @@ impl CPUBuffer {
 	}
 
 	#[inline(never)]
-	fn sub_f<T: Copy + FromToF64>(
+	fn sub_nnn_f<T: Copy + FromToF64>(
 		dst: &TypedSliceSet<'_, CPUBuffer>, a: &TypedSliceSet<'_, CPUBuffer>,
 		b: &TypedSliceSet<'_, CPUBuffer>,
 	) {
@@ -354,14 +354,30 @@ impl CPUBuffer {
 	}
 
 	#[inline(never)]
-	fn dot_f<T: Copy + FromToF64>(
+	fn sub_nnb_f<T: Copy + FromToF64>(
 		dst: &TypedSliceSet<'_, CPUBuffer>, a: &TypedSliceSet<'_, CPUBuffer>,
 		b: &TypedSliceSet<'_, CPUBuffer>,
+	) {
+		assert!(dst.len == a.len);
+		assert!(b.len == 1);
+		for [dst_arr, a_arr, b_arr] in BatchIter::<T, 3>::new([dst, a, b]) {
+			let b = b_arr[0].get().to_f64();
+			for (d, a) in dst_arr.iter().zip(a_arr) {
+				let val = a.get().to_f64() - b;
+				d.set(T::from_f64(val));
+			}
+		}
+	}
+
+	#[inline(never)]
+	fn dot_f<T: Copy + FromToF64>(
+		dst: &TypedSliceSet<'_, CPUBuffer>, a: &TypedSliceSet<'_, CPUBuffer>,
+		b: &TypedSliceSet<'_, CPUBuffer>, ab_weight: f64,
 	) {
 		assert!(a.len == b.len);
 		assert!(dst.len == 1);
 		for [dst_arr, a_arr, b_arr] in BatchIter::<T, 3>::new([dst, a, b]) {
-			let val = math::dot(a_arr, b_arr);
+			let val = math::dot(a_arr, b_arr) * ab_weight;
 			dst_arr[0].set(T::from_f64(val));
 		}
 	}
@@ -582,7 +598,18 @@ impl Buffer for CPUBuffer {
 		assert!(dst.dtype == a.dtype);
 		assert!(dst.dtype == b.dtype);
 		match dst.dtype {
-			DType::F32 => Self::mul_nnn_f::<f32>(&dst, &a, &b),
+			DType::F32 => {
+				if b.len == 1 {
+					if a.len == 1 && a.len != dst.len {
+						todo!("both a and b are broadcasted");
+					}
+					Self::mul_nnb_f::<f32>(&dst, &a, &b);
+				} else if a.len == 1 {
+					todo!("a is broadcasted"); // Note: `sub` is not commutative
+				} else {
+					Self::mul_nnn_f::<f32>(&dst, &a, &b);
+				}
+			},
 			_ => todo!(),
 		}
 	}
@@ -596,6 +623,9 @@ impl Buffer for CPUBuffer {
 		match dst.dtype {
 			DType::F32 => {
 				if b.len == 1 {
+					if a.len == 1 && a.len != dst.len {
+						todo!("both a and b are broadcasted");
+					}
 					Self::mul_nnb_acc_f::<f32>(&dst, dst_weight, &a, &b, ab_weight);
 				} else if a.len == 1 {
 					Self::mul_nnb_acc_f::<f32>(&dst, dst_weight, &b, &a, ab_weight);
@@ -614,19 +644,30 @@ impl Buffer for CPUBuffer {
 		assert!(dst.dtype == a.dtype);
 		assert!(dst.dtype == b.dtype);
 		match dst.dtype {
-			DType::F32 => Self::sub_f::<f32>(&dst, &a, &b),
+			DType::F32 => {
+				if b.len == 1 {
+					if a.len == 1 && a.len != dst.len {
+						todo!("both a and b are broadcasted");
+					}
+					Self::sub_nnb_f::<f32>(&dst, &a, &b);
+				} else if a.len == 1 {
+					Self::sub_nnb_f::<f32>(&dst, &b, &a);
+				} else {
+					Self::sub_nnn_f::<f32>(&dst, &a, &b);
+				}
+			},
 			_ => todo!(),
 		}
 	}
 
-	fn dot(&self, dst_slices: &SliceSet, a: &SliceSet, b: &SliceSet) {
+	fn dot(&self, dst_slices: &SliceSet, a: &SliceSet, b: &SliceSet, ab_weight: f64) {
 		let dst = self.cast_slices(dst_slices);
 		let a = self.cast_slices(a);
 		let b = self.cast_slices(b);
 		assert!(dst.dtype == a.dtype);
 		assert!(dst.dtype == b.dtype);
 		match dst.dtype {
-			DType::F32 => Self::dot_f::<f32>(&dst, &a, &b),
+			DType::F32 => Self::dot_f::<f32>(&dst, &a, &b, ab_weight),
 			_ => todo!(),
 		}
 	}
@@ -933,7 +974,7 @@ mod tests {
 			}
 		}
 
-		CPUBuffer::sub_f::<f32>(&c_slices, &a_slices, &b_slices);
+		CPUBuffer::sub_nnn_f::<f32>(&c_slices, &a_slices, &b_slices);
 
 		for i in 0..100 {
 			let a = a_data[tensor_size_to_usize(i)].get();
@@ -1042,7 +1083,7 @@ mod tests {
 			}
 		}
 
-		CPUBuffer::dot_f::<f32>(&c_slices, &a_slices, &b_slices);
+		CPUBuffer::dot_f::<f32>(&c_slices, &a_slices, &b_slices, 1.3);
 
 		for i in 0..100 {
 			let a = a_data[tensor_size_to_usize(i)].get();
@@ -1054,7 +1095,7 @@ mod tests {
 				assert_eq!(b, 2.2 + i as f32);
 				if i == 13 || i == 30 || i == 47 {
 					let i = tensor_size_to_usize(i);
-					let val = math::dot(&a_data[i..i + 4], &b_data[i..i + 4]);
+					let val = math::dot(&a_data[i..i + 4], &b_data[i..i + 4]) * 1.3;
 					assert_approx_eq!(c, val as f32, 1e-4);
 				}
 			} else {

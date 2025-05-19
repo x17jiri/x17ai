@@ -291,16 +291,23 @@ impl<'a> Savable for LogClamped<'a> {
 pub struct VecMul<'a> {
 	pub a: &'a Tensor,
 	pub b: &'a Tensor,
+	pub scale: f64,
+}
+
+impl<'a> VecMul<'a> {
+	pub fn scale(self, scale: f64) -> VecMul<'a> {
+		VecMul { scale: self.scale * scale, ..self }
+	}
 }
 
 pub fn dot<'a>(a: &'a Tensor, b: &'a Tensor) -> VecMul<'a> {
-	VecMul { a, b }
+	VecMul { a, b, scale: 1.0 }
 }
 
 impl<'a> Savable for VecMul<'a> {
 	fn save_to(&self, to: &Tensor) {
 		__vec_wise([to, self.a, self.b], |[to, a, b]| {
-			to.buffer.dot(&to, &a, &b);
+			to.buffer.dot(&to, &a, &b, self.scale);
 		});
 	}
 }
@@ -308,7 +315,7 @@ impl<'a> Savable for VecMul<'a> {
 impl Accumulable for VecMul<'_> {
 	fn acc_to(&self, to: &Tensor, to_weight: f64, expr_weight: f64) {
 		__vec_wise([to, self.a, self.b], |[to, a, b]| {
-			to.buffer.dot_acc(&to, to_weight, &a, &b, expr_weight);
+			to.buffer.dot_acc(&to, to_weight, &a, &b, expr_weight * self.scale);
 		});
 	}
 }
