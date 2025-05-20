@@ -7,7 +7,7 @@ use crate::expr::{
 };
 use crate::format;
 use crate::model_context::ModelContext;
-use crate::nn::{BackpropLayer, Layer};
+use crate::nn::Layer;
 use crate::optimizer::{OptCoef, OptParam};
 use crate::param::Param;
 use crate::tensor::{self, Tensor, TensorSize};
@@ -89,10 +89,6 @@ impl Linear {
 }
 
 impl Layer for Linear {
-	fn randomize(&mut self) {
-		randn().save_to(self.weights.borrow().value());
-	}
-
 	fn input_shape(&self) -> &[TensorSize] {
 		&self.input_shape
 	}
@@ -126,9 +122,11 @@ impl Layer for Linear {
 
 		out
 	}
-}
 
-impl BackpropLayer for Linear {
+	fn randomize(&mut self) {
+		randn().save_to(self.weights.borrow().value());
+	}
+
 	fn init_optimizer(&self) {
 		let inputs = self.input_shape[0];
 		let outputs = self.output_shape[0];
@@ -146,16 +144,16 @@ impl BackpropLayer for Linear {
 		weights.step(opt_coef);
 	}
 
-	fn backward_first(&self, d_out: Tensor, ctx: &mut EvalContext) {
-		let [inp] = ctx.tensors.get();
-		self.calc_d_weights(d_out, inp);
-	}
-
 	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Tensor {
 		let [inp] = ctx.tensors.get();
 		let d_inp = self.calc_d_inp(&d_out);
 		self.calc_d_weights(d_out, inp);
 		d_inp
+	}
+
+	fn backward_finish(&self, d_out: Tensor, ctx: &mut EvalContext) {
+		let [inp] = ctx.tensors.get();
+		self.calc_d_weights(d_out, inp);
 	}
 }
 
@@ -189,10 +187,6 @@ impl MultiheadLinear {
 }
 
 impl Layer for MultiheadLinear {
-	fn randomize(&mut self) {
-		self.linear.randomize();
-	}
-
 	fn input_shape(&self) -> &[TensorSize] {
 		&self.linear.input_shape
 	}
@@ -215,9 +209,11 @@ impl Layer for MultiheadLinear {
 		// [..., heads * outputs] -> [..., heads, outputs]
 		out.reshape(1, &self.output_shape)
 	}
-}
 
-impl BackpropLayer for MultiheadLinear {
+	fn randomize(&mut self) {
+		self.linear.randomize();
+	}
+
 	fn init_optimizer(&self) {
 		let inputs = self.linear.input_shape[0];
 		let heads = self.output_shape[0];
@@ -234,11 +230,11 @@ impl BackpropLayer for MultiheadLinear {
 		self.linear.step(opt_coef);
 	}
 
-	fn backward_first(&self, d_out: Tensor, ctx: &mut EvalContext) {
+	fn backward_finish(&self, d_out: Tensor, ctx: &mut EvalContext) {
 		// [..., heads, outputs] -> [..., heads * outputs]
 		let d_out = d_out.reshape(2, &self.linear.output_shape);
 
-		self.linear.backward_first(d_out, ctx)
+		self.linear.backward_finish(d_out, ctx)
 	}
 
 	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Tensor {

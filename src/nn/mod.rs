@@ -4,6 +4,7 @@ use std::rc::Rc;
 
 pub mod linear;
 pub mod rms_norm;
+pub mod skip_connection;
 pub mod softmax;
 pub mod softmax_cross_entropy;
 
@@ -18,8 +19,6 @@ pub use softmax::{Softmax, SoftmaxGradientMode};
 pub use softmax_cross_entropy::SoftmaxCrossEntropy;
 
 pub trait Layer {
-	fn randomize(&mut self);
-
 	fn input_shape(&self) -> &[TensorSize];
 	fn output_shape(&self) -> &[TensorSize];
 
@@ -39,9 +38,8 @@ pub trait Layer {
 	}
 
 	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Tensor;
-}
 
-pub trait BackpropLayer: Layer {
+	fn randomize(&mut self);
 	fn init_optimizer(&self);
 	fn zero_grad(&self);
 	fn step(&self, opt_coef: &OptCoef);
@@ -51,18 +49,18 @@ pub trait BackpropLayer: Layer {
 	/// This function is similar to `backward()`. It should calculate derivatives of parameters
 	/// used by the layer, but it doesn't calculate derivatives that could be used by previous
 	/// layers. So it would typically only be used for the first layer in a model.
-	fn backward_first(&self, d_out: Tensor, ctx: &mut EvalContext);
+	fn backward_finish(&self, d_out: Tensor, ctx: &mut EvalContext);
 
-	fn as_loss_layer(&self) -> Option<&dyn LossLayer> {
+	fn as_loss_function(&self) -> Option<&dyn LossFunction> {
 		None
 	}
 }
 
-pub trait LossLayer: BackpropLayer {
+pub trait LossFunction: Layer {
 	/// This function is similar to `backward()`, but instead of derivatives with respect to
 	/// the output, it takes expected value of the output.
 	// It would typically be used for the last layer in a model.
-	fn backward_last(&self, out: Tensor, expected_out: Tensor, ctx: &mut EvalContext) -> Tensor;
+	fn backward_start(&self, out: Tensor, expected_out: Tensor, ctx: &mut EvalContext) -> Tensor;
 
 	fn loss(&self, out: Tensor, expected_out: Tensor) -> f64;
 }

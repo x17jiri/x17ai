@@ -48,7 +48,7 @@ use crate::optimizer::*;
 use crate::rand::*;
 use crate::tensor::*;
 use eval_context::EvalContext;
-use nn::{BackpropLayer, LossLayer};
+use nn::LossFunction;
 use smallvec::{SmallVec, smallvec};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -223,6 +223,8 @@ fn main() {
 	let input = Tensor::new_empty_on(&[2, 3], DType::F32, dev.clone());
 	let expected = Tensor::new_empty_on(&[2, 2], DType::F32, dev.clone());
 
+	println!("input owns buffer: {}", input.owns_buffer());
+
 	randn().save_to(&input);
 	let a = dev.tensor_as_slice::<f32>(&expected);
 	a[0].set(1.0);
@@ -255,8 +257,8 @@ fn main() {
 
 		mctx.zero_grad();
 
-		let d_logits = loss.backward_last(output.clone(), expected.clone(), &mut ectx_loss);
-		model.backward_first(d_logits.clone(), &mut ectx_model);
+		let d_logits = loss.backward_start(output.clone(), expected.clone(), &mut ectx_loss);
+		model.backward_finish(d_logits.clone(), &mut ectx_model);
 
 		mctx.step();
 

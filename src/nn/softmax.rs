@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use crate::eval_context::EvalContext;
 use crate::expr::{self, Accumulable, Savable};
-use crate::nn::{BackpropLayer, Layer, LossLayer};
+use crate::nn::Layer;
 use crate::param::Param;
 use crate::tensor::{Tensor, TensorSize};
 
@@ -18,19 +18,19 @@ pub struct Softmax {
 }
 
 impl Softmax {
-	pub fn new(classes: TensorSize) -> Softmax {
+	pub fn new(n_inputs: TensorSize) -> Softmax {
 		Softmax {
-			shape: [classes],
+			shape: [n_inputs],
 			gradient_mode: SoftmaxGradientMode::Precise,
 		}
+	}
+
+	pub fn set_gradient_mode(&mut self, mode: SoftmaxGradientMode) {
+		self.gradient_mode = mode;
 	}
 }
 
 impl Layer for Softmax {
-	fn randomize(&mut self) {
-		// no parameters to randomize
-	}
-
 	fn input_shape(&self) -> &[TensorSize] {
 		&self.shape
 	}
@@ -48,23 +48,33 @@ impl Layer for Softmax {
 	}
 
 	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Tensor {
-		let out = inp.new_empty_like();
+		// try to reuse `inp` for `out` if possible
+		let (out, out_ref);
+		if inp.owns_buffer() {
+			out = None;
+			out_ref = &inp;
+		} else {
+			out = Some(inp.new_empty_like());
+			out_ref = out.as_ref().unwrap();
+		}
 
-		expr::softmax(&inp).save_to(&out);
+		expr::softmax(&inp).save_to(out_ref);
 
 		if ctx.is_training() {
 			match self.gradient_mode {
 				SoftmaxGradientMode::StraightThrough => {},
 
-				_ => ctx.tensors.set([out.clone()]),
+				_ => ctx.tensors.set([out_ref.clone()]),
 			}
 		}
 
-		out
+		out.unwrap_or(inp)
 	}
-}
 
-impl BackpropLayer for Softmax {
+	fn randomize(&mut self) {
+		// no parameters to randomize
+	}
+
 	fn init_optimizer(&self) {
 		// no parameters to optimize
 	}
@@ -77,26 +87,35 @@ impl BackpropLayer for Softmax {
 		// no parameters to update
 	}
 
-	fn backward(&self, d_out: Tensor, _ctx: &mut EvalContext) -> Tensor {
+	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Tensor {
 		match self.gradient_mode {
 			SoftmaxGradientMode::Precise => {
-				let [out] = _ctx.tensors.get();
+				let [out] = ctx.tensors.get();
 
 				let g = out.new_replace_tail(1, &[1]); // [..., 1]
-				let d_inp = out.new_empty_like(); // [..., classes]
+				expr::dot(&out, &d_out).save_to(&g);
+
+				// try to reuse the `d_out` for `d_inp` if possible
+				let (d_inp, d_inp_ref);
+				if d_out.owns_buffer() {
+					d_inp = None;
+					d_inp_ref = &d_out;
+				} else {
+					d_inp = Some(d_out.new_empty_like());
+					d_inp_ref = d_inp.as_ref().unwrap();
+				}
 
 				// TODO - we could merge `sub` and `mul` into a single kernel
-				expr::dot(&out, &d_out).save_to(&g);
-				expr::sub(&d_out, &g).save_to(&d_inp);
-				expr::mul(&d_inp, &out).save_to(&d_inp);
+				expr::sub(&d_out, &g).save_to(d_inp_ref);
+				expr::mul(d_inp_ref, &out).save_to(d_inp_ref);
 
-				d_inp
+				d_inp.unwrap_or(d_out)
 			},
 			SoftmaxGradientMode::StraightThrough => d_out,
 		}
 	}
 
-	fn backward_first(&self, _d_out: Tensor, _ctx: &mut EvalContext) {
+	fn backward_finish(&self, _d_out: Tensor, _ctx: &mut EvalContext) {
 		// no parameters to update
 	}
 }

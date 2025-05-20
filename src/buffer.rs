@@ -110,6 +110,7 @@ pub trait Buffer {
 	fn mul_acc(&self, dst: &SliceSet, dst_weight: f64, a: &SliceSet, b: &SliceSet, ab_weight: f64);
 
 	fn sub(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet);
+	fn add(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet);
 
 	fn dot(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet, ab_weight: f64);
 
@@ -128,7 +129,7 @@ pub trait Buffer {
 
 	fn softmax(&self, dst: &SliceSet, a: &SliceSet);
 
-	fn rms_norm(&self, dst: &SliceSet, a: &SliceSet, eps: f64);
+	fn rms_norm(&self, dst: &SliceSet, a: &SliceSet, eps: f64, scale_storage: Option<&SliceSet>);
 
 	fn gemm(&self, dst: &MatrixSet, dst_weight: f64, a: &MatrixSet, b: &MatrixSet, ab_weight: f64);
 

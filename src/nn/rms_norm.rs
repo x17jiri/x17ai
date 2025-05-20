@@ -3,12 +3,14 @@ use std::rc::Rc;
 
 use crate::eval_context::EvalContext;
 use crate::expr::{self, Accumulable, Savable};
-use crate::nn::{BackpropLayer, Layer, LossLayer};
+use crate::nn::Layer;
 use crate::param::Param;
 use crate::tensor::{Tensor, TensorSize};
 
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub enum RMSNormGradientMode {
 	Precise,
+	NormGradients,
 	StraightThrough,
 }
 
@@ -19,9 +21,9 @@ pub struct RMSNorm {
 }
 
 impl RMSNorm {
-	pub fn new(classes: TensorSize, eps: f64) -> RMSNorm {
+	pub fn new(n_inputs: TensorSize, eps: f64) -> RMSNorm {
 		RMSNorm {
-			shape: [classes],
+			shape: [n_inputs],
 			eps,
 			gradient_mode: RMSNormGradientMode::Precise,
 		}
@@ -29,10 +31,6 @@ impl RMSNorm {
 }
 
 impl Layer for RMSNorm {
-	fn randomize(&mut self) {
-		// no parameters to randomize
-	}
-
 	fn input_shape(&self) -> &[TensorSize] {
 		&self.shape
 	}
@@ -50,30 +48,33 @@ impl Layer for RMSNorm {
 	}
 
 	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Tensor {
-		let out = inp.new_empty_like();
-
-		expr::rms_norm(&inp, self.eps).save_to(&out);
-
-		if ctx.is_training() {
-			match self.gradient_mode {
-				RMSNormGradientMode::StraightThrough => {},
-
-				_ => {
-					// TODO - pull the scale out of the `rms_norm()` call
-					let scale = out.new_replace_tail(1, &[1]);
-					expr::dot(&inp, &inp).scale(1.0 / self.shape[0] as f64).save_to(&scale);
-					expr::rsqrt(&scale, self.eps).save_to(&scale);
-
-					ctx.tensors.set([out.clone(), scale]);
-				},
-			}
+		// try to reuse `inp` for `out` if possible
+		let (out, out_ref);
+		if inp.owns_buffer() {
+			out = None;
+			out_ref = &inp;
+		} else {
+			out = Some(inp.new_empty_like());
+			out_ref = out.as_ref().unwrap();
 		}
 
-		out
-	}
-}
+		if ctx.is_training() && self.gradient_mode == RMSNormGradientMode::Precise {
+			let scale = out_ref.new_replace_tail(1, &[1]);
 
-impl BackpropLayer for RMSNorm {
+			expr::rms_norm(&inp, self.eps).scale_storage(&scale).save_to(out_ref);
+
+			ctx.tensors.set([out_ref.clone(), scale]);
+		} else {
+			expr::rms_norm(&inp, self.eps).save_to(out_ref);
+		}
+
+		out.unwrap_or(inp)
+	}
+
+	fn randomize(&mut self) {
+		// no parameters to randomize
+	}
+
 	fn init_optimizer(&self) {
 		// no parameters to optimize
 	}
@@ -86,27 +87,51 @@ impl BackpropLayer for RMSNorm {
 		// no parameters to update
 	}
 
-	fn backward(&self, d_out: Tensor, _ctx: &mut EvalContext) -> Tensor {
+	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Tensor {
 		match self.gradient_mode {
 			RMSNormGradientMode::Precise => {
-				let [out, scale] = _ctx.tensors.get();
+				let [out, scale] = ctx.tensors.get();
 
 				let g = scale.new_empty_like(); // [..., 1]
-				let d_inp = out.new_empty_like(); // [..., classes]
+				expr::dot(&out, &d_out).scale(1.0 / self.shape[0] as f64).save_to(&g);
+
+				// try to reuse `out` for `d_inp` if possible
+				let (d_inp, d_inp_ref);
+				if out.owns_buffer() {
+					d_inp = None;
+					d_inp_ref = &out;
+				} else {
+					d_inp = Some(out.new_empty_like());
+					d_inp_ref = d_inp.as_ref().unwrap();
+				}
 
 				// TODO - could we merge `mul, sub, mul` into a single kernel?
-				expr::dot(&out, &d_out).scale(1.0 / self.shape[0] as f64).save_to(&g);
-				expr::mul(&out, &g).save_to(&d_inp);
-				expr::sub(&d_out, &d_inp).save_to(&d_inp);
-				expr::mul(&d_inp, &scale).save_to(&d_inp);
+				expr::mul(&out, &g).save_to(d_inp_ref);
+				expr::sub(&d_out, d_inp_ref).save_to(d_inp_ref);
+				expr::mul(d_inp_ref, &scale).save_to(d_inp_ref);
 
-				d_inp
+				d_inp.unwrap_or(out)
+			},
+			RMSNormGradientMode::NormGradients => {
+				// try to reuse `d_out` for `d_inp` if possible
+				let (d_inp, d_inp_ref);
+				if d_out.owns_buffer() {
+					d_inp = None;
+					d_inp_ref = &d_out;
+				} else {
+					d_inp = Some(d_out.new_empty_like());
+					d_inp_ref = d_inp.as_ref().unwrap();
+				}
+
+				expr::rms_norm(&d_out, self.eps).save_to(d_inp_ref);
+
+				d_inp.unwrap_or(d_out)
 			},
 			RMSNormGradientMode::StraightThrough => d_out,
 		}
 	}
 
-	fn backward_first(&self, _d_out: Tensor, _ctx: &mut EvalContext) {
+	fn backward_finish(&self, _d_out: Tensor, _ctx: &mut EvalContext) {
 		// no parameters to update
 	}
 }

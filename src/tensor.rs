@@ -181,6 +181,14 @@ impl Tensor {
 		BufferBase::from_dyn_buf(self.buffer.as_ref()).device.clone()
 	}
 
+	#[inline]
+	pub fn owns_buffer(&self) -> bool {
+		let buffer = &self.buffer;
+		let weak = Rc::weak_count(buffer) + 1;
+		let strong = Rc::strong_count(buffer);
+		(weak | strong) <= 1
+	}
+
 	pub fn shape(&self) -> ShapeView {
 		ShapeView { dims: &self.dims }
 	}

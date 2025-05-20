@@ -245,6 +245,25 @@ impl<'a> Savable for Sub<'a> {
 
 //--------------------------------------------------------------------------------------------------
 
+pub struct Add<'a> {
+	pub a: &'a Tensor,
+	pub b: &'a Tensor,
+}
+
+pub fn add<'a>(a: &'a Tensor, b: &'a Tensor) -> Add<'a> {
+	Add { a, b }
+}
+
+impl<'a> Savable for Add<'a> {
+	fn save_to(&self, to: &Tensor) {
+		__elem_wise([to, self.a, self.b], |[to, a, b]| {
+			to.buffer.add(&to, &a, &b);
+		});
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
 pub struct RSqrt<'a> {
 	pub tensor: &'a Tensor,
 	pub eps: f64,
@@ -356,17 +375,33 @@ impl<'a> Savable for Softmax<'a> {
 pub struct RMSNorm<'a> {
 	pub tensor: &'a Tensor,
 	pub eps: f64,
+	pub scale_storage: Option<&'a Tensor>,
 }
 
 pub fn rms_norm<'a>(tensor: &'a Tensor, eps: f64) -> RMSNorm<'a> {
-	RMSNorm { tensor, eps }
+	RMSNorm { tensor, eps, scale_storage: None }
+}
+
+impl<'a> RMSNorm<'a> {
+	pub fn scale_storage(self, scale_storage: &'a Tensor) -> RMSNorm<'a> {
+		RMSNorm {
+			scale_storage: Some(scale_storage),
+			..self
+		}
+	}
 }
 
 impl<'a> Savable for RMSNorm<'a> {
 	fn save_to(&self, to: &Tensor) {
-		__vec_wise([to, self.tensor], |[to, input]| {
-			to.buffer.rms_norm(&to, &input, self.eps);
-		});
+		if let Some(scale_storage) = self.scale_storage {
+			__vec_wise([to, self.tensor, scale_storage], |[to, input, scale_storage]| {
+				to.buffer.rms_norm(&to, &input, self.eps, Some(&scale_storage));
+			});
+		} else {
+			__vec_wise([to, self.tensor], |[to, input]| {
+				to.buffer.rms_norm(&to, &input, self.eps, None);
+			});
+		}
 	}
 }
 

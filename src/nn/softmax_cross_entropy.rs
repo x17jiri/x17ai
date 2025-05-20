@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use crate::eval_context::EvalContext;
 use crate::expr::{self, Accumulable, Savable};
-use crate::nn::{BackpropLayer, Layer, LossLayer, Softmax};
+use crate::nn::{Layer, LossFunction, Softmax, SoftmaxGradientMode};
 use crate::param::Param;
 use crate::tensor::{Tensor, TensorSize};
 
@@ -12,16 +12,14 @@ pub struct SoftmaxCrossEntropy {
 }
 
 impl SoftmaxCrossEntropy {
-	pub fn new(classes: TensorSize) -> SoftmaxCrossEntropy {
-		SoftmaxCrossEntropy { softmax: Softmax::new(classes) }
+	pub fn new(n_inputs: TensorSize) -> SoftmaxCrossEntropy {
+		let mut softmax = Softmax::new(n_inputs);
+		softmax.set_gradient_mode(SoftmaxGradientMode::StraightThrough);
+		SoftmaxCrossEntropy { softmax }
 	}
 }
 
 impl Layer for SoftmaxCrossEntropy {
-	fn randomize(&mut self) {
-		self.softmax.randomize();
-	}
-
 	fn input_shape(&self) -> &[TensorSize] {
 		self.softmax.input_shape()
 	}
@@ -30,20 +28,22 @@ impl Layer for SoftmaxCrossEntropy {
 		self.softmax.output_shape()
 	}
 
-	fn collect_params(&self, _f: &mut dyn FnMut(Rc<RefCell<Param>>)) {
-		self.softmax.collect_params(_f);
+	fn collect_params(&self, f: &mut dyn FnMut(Rc<RefCell<Param>>)) {
+		self.softmax.collect_params(f);
 	}
 
-	fn collect_named_params(&self, _prefix: &str, _f: &mut dyn FnMut(String, Rc<RefCell<Param>>)) {
-		self.softmax.collect_named_params(_prefix, _f);
+	fn collect_named_params(&self, prefix: &str, f: &mut dyn FnMut(String, Rc<RefCell<Param>>)) {
+		self.softmax.collect_named_params(prefix, f);
 	}
 
-	fn forward(&self, inp: Tensor, _ctx: &mut EvalContext) -> Tensor {
-		self.softmax.forward(inp, _ctx)
+	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Tensor {
+		self.softmax.forward(inp, ctx)
 	}
-}
 
-impl BackpropLayer for SoftmaxCrossEntropy {
+	fn randomize(&mut self) {
+		self.softmax.randomize();
+	}
+
 	fn init_optimizer(&self) {
 		self.softmax.init_optimizer();
 	}
@@ -56,21 +56,21 @@ impl BackpropLayer for SoftmaxCrossEntropy {
 		self.softmax.step(opt_coef);
 	}
 
-	fn backward(&self, d_out: Tensor, _ctx: &mut EvalContext) -> Tensor {
-		self.softmax.backward(d_out, _ctx)
+	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Tensor {
+		self.softmax.backward(d_out, ctx)
 	}
 
-	fn backward_first(&self, d_out: Tensor, _ctx: &mut EvalContext) {
-		self.softmax.backward_first(d_out, _ctx)
+	fn backward_finish(&self, d_out: Tensor, ctx: &mut EvalContext) {
+		self.softmax.backward_finish(d_out, ctx)
 	}
 
-	fn as_loss_layer(&self) -> Option<&dyn LossLayer> {
+	fn as_loss_function(&self) -> Option<&dyn LossFunction> {
 		Some(self)
 	}
 }
 
-impl LossLayer for SoftmaxCrossEntropy {
-	fn backward_last(&self, out: Tensor, expected_out: Tensor, _ctx: &mut EvalContext) -> Tensor {
+impl LossFunction for SoftmaxCrossEntropy {
+	fn backward_start(&self, out: Tensor, expected_out: Tensor, _ctx: &mut EvalContext) -> Tensor {
 		let d_inp = out.new_empty_like();
 		expr::sub(&out, &expected_out).save_to(&d_inp);
 		d_inp

@@ -370,6 +370,21 @@ impl CPUBuffer {
 	}
 
 	#[inline(never)]
+	fn add_f<T: Copy + FromToF64>(
+		dst: &TypedSliceSet<'_, CPUBuffer>, a: &TypedSliceSet<'_, CPUBuffer>,
+		b: &TypedSliceSet<'_, CPUBuffer>,
+	) {
+		assert!(dst.len == a.len);
+		assert!(dst.len == b.len);
+		for [dst_arr, a_arr, b_arr] in BatchIter::<T, 3>::new([dst, a, b]) {
+			for ((d, a), b) in dst_arr.iter().zip(a_arr).zip(b_arr) {
+				let val = a.get().to_f64() + b.get().to_f64();
+				d.set(T::from_f64(val));
+			}
+		}
+	}
+
+	#[inline(never)]
 	fn dot_f<T: Copy + FromToF64>(
 		dst: &TypedSliceSet<'_, CPUBuffer>, a: &TypedSliceSet<'_, CPUBuffer>,
 		b: &TypedSliceSet<'_, CPUBuffer>, ab_weight: f64,
@@ -469,16 +484,29 @@ impl CPUBuffer {
 	#[inline(never)]
 	fn rms_norm_f<T: Copy + FromToF64>(
 		dst: &TypedSliceSet<'_, CPUBuffer>, inp: &TypedSliceSet<'_, CPUBuffer>, eps: f64,
+		scale_storage: Option<&TypedSliceSet<'_, CPUBuffer>>,
 	) {
 		assert!(dst.len == inp.len);
 		let len = dst.len;
 		let len_recip = 1.0 / (len as f64);
 
-		for [dst_arr, inp_arr] in BatchIter::<T, 2>::new([dst, inp]) {
-			let scale = math::rsqrt(math::dot(inp_arr, inp_arr) * len_recip + eps);
-			for (d, i) in dst_arr.iter().zip(inp_arr) {
-				let val = i.get().to_f64() * scale;
-				d.set(T::from_f64(val));
+		if let Some(scale_storage) = scale_storage {
+			assert!(scale_storage.len == 1);
+			for [dst_arr, inp_arr, sc] in BatchIter::<T, 3>::new([dst, inp, scale_storage]) {
+				let scale = math::rsqrt(math::dot(inp_arr, inp_arr) * len_recip + eps);
+				sc[0].set(T::from_f64(scale));
+				for (d, i) in dst_arr.iter().zip(inp_arr) {
+					let val = i.get().to_f64() * scale;
+					d.set(T::from_f64(val));
+				}
+			}
+		} else {
+			for [dst_arr, inp_arr] in BatchIter::<T, 2>::new([dst, inp]) {
+				let scale = math::rsqrt(math::dot(inp_arr, inp_arr) * len_recip + eps);
+				for (d, i) in dst_arr.iter().zip(inp_arr) {
+					let val = i.get().to_f64() * scale;
+					d.set(T::from_f64(val));
+				}
 			}
 		}
 	}
@@ -660,6 +688,18 @@ impl Buffer for CPUBuffer {
 		}
 	}
 
+	fn add(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet) {
+		let dst = self.cast_slices(dst);
+		let a = self.cast_slices(a);
+		let b = self.cast_slices(b);
+		assert!(dst.dtype == a.dtype);
+		assert!(dst.dtype == b.dtype);
+		match dst.dtype {
+			DType::F32 => Self::add_f::<f32>(&dst, &a, &b),
+			_ => todo!(),
+		}
+	}
+
 	fn dot(&self, dst_slices: &SliceSet, a: &SliceSet, b: &SliceSet, ab_weight: f64) {
 		let dst = self.cast_slices(dst_slices);
 		let a = self.cast_slices(a);
@@ -722,12 +762,16 @@ impl Buffer for CPUBuffer {
 		}
 	}
 
-	fn rms_norm(&self, dst: &SliceSet, inp: &SliceSet, eps: f64) {
+	fn rms_norm(&self, dst: &SliceSet, inp: &SliceSet, eps: f64, scale_storage: Option<&SliceSet>) {
 		let dst = self.cast_slices(dst);
 		let inp = self.cast_slices(inp);
+		let scale_storage = scale_storage.map(|s| {
+			assert!(dst.dtype == s.dtype);
+			self.cast_slices(s)
+		});
 		assert!(dst.dtype == inp.dtype);
 		match dst.dtype {
-			DType::F32 => Self::rms_norm_f::<f32>(&dst, &inp, eps),
+			DType::F32 => Self::rms_norm_f::<f32>(&dst, &inp, eps, scale_storage.as_ref()),
 			_ => todo!(),
 		}
 	}
@@ -1382,7 +1426,7 @@ mod tests {
 		a_data[15].set(1.8707);
 		a_data[16].set(0.6424);
 
-		CPUBuffer::rms_norm_f::<f32>(&b_slices, &a_slices, 1e-4);
+		CPUBuffer::rms_norm_f::<f32>(&b_slices, &a_slices, 1e-4, None);
 
 		assert_approx_eq!(b_data[13].get(), -0.8320, 1e-4);
 		assert_approx_eq!(b_data[14].get(), -0.3648, 1e-4);
