@@ -75,18 +75,6 @@ impl Layer for Softmax {
 		// no parameters to randomize
 	}
 
-	fn init_optimizer(&self) {
-		// no parameters to optimize
-	}
-
-	fn zero_grad(&self) {
-		// no parameters to update
-	}
-
-	fn step(&self, _opt_coef: &crate::optimizer::OptCoef) {
-		// no parameters to update
-	}
-
 	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Tensor {
 		match self.gradient_mode {
 			SoftmaxGradientMode::Precise => {

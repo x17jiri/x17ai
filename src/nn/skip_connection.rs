@@ -59,18 +59,6 @@ impl<Nested: Layer> Layer for SkipConnection<Nested> {
 		self.nested.randomize();
 	}
 
-	fn init_optimizer(&self) {
-		self.nested.init_optimizer();
-	}
-
-	fn zero_grad(&self) {
-		self.nested.zero_grad();
-	}
-
-	fn step(&self, opt_coef: &crate::optimizer::OptCoef) {
-		self.nested.step(opt_coef);
-	}
-
 	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Tensor {
 		let nested_out = self.nested.backward(d_out.clone(), ctx);
 		self.add_residual(d_out, nested_out)

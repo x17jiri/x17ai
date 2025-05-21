@@ -14,6 +14,9 @@
 #![feature(arbitrary_self_types)]
 #![feature(dispatch_from_dyn)]
 #![feature(generic_const_exprs)]
+#![feature(adt_const_params)]
+#![allow(non_upper_case_globals)]
+#![feature(new_range_api)]
 
 mod batch;
 mod buffer;
@@ -215,7 +218,6 @@ fn main() {
 
 	let mut model = Linear::new(3, 2, DType::F32, &mut mctx);
 	model.randomize();
-	model.init_optimizer();
 
 	let mut loss = nn::SoftmaxCrossEntropy::new(2);
 	loss.randomize();

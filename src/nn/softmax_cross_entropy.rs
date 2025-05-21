@@ -44,18 +44,6 @@ impl Layer for SoftmaxCrossEntropy {
 		self.softmax.randomize();
 	}
 
-	fn init_optimizer(&self) {
-		self.softmax.init_optimizer();
-	}
-
-	fn zero_grad(&self) {
-		self.softmax.zero_grad();
-	}
-
-	fn step(&self, opt_coef: &crate::optimizer::OptCoef) {
-		self.softmax.step(opt_coef);
-	}
-
 	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Tensor {
 		self.softmax.backward(d_out, ctx)
 	}

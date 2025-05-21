@@ -112,6 +112,12 @@ pub trait Buffer {
 	fn sub(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet);
 	fn add(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet);
 
+	fn jiri_glu(&self, dst: &SliceSet, lin: &SliceSet, gate: &SliceSet);
+	fn jiri_glu_backward(
+		&self, d_lin: &SliceSet, d_gate: &SliceSet, lin: &SliceSet, gate: &SliceSet,
+		d_out: &SliceSet,
+	);
+
 	fn dot(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet, ab_weight: f64);
 
 	fn dot_acc(&self, dst: &SliceSet, dst_weight: f64, a: &SliceSet, b: &SliceSet, ab_weight: f64);

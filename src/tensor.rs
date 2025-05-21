@@ -343,6 +343,16 @@ impl Tensor {
 		self.dims = new_dims;
 		self
 	}
+
+	pub fn slice(mut self, dim: isize, range: std::ops::Range<TensorSize>) -> Tensor {
+		let dim = self.dim_to_positive(dim as isize);
+		let dim = unsafe { self.dims.get_unchecked_mut(dim) };
+		assert!(range.start <= range.end, "invalid range");
+		assert!(range.end <= dim.size, "invalid range");
+		dim.size = range.end - range.start;
+		self.offset += range.start * dim.stride;
+		self
+	}
 }
 
 fn fmt_0d(tensor: &Tensor, f: &mut fmt::Formatter, offset: TensorSize) -> fmt::Result {

@@ -127,23 +127,6 @@ impl Layer for Linear {
 		randn().save_to(self.weights.borrow().value());
 	}
 
-	fn init_optimizer(&self) {
-		let inputs = self.input_shape[0];
-		let outputs = self.output_shape[0];
-		let mut weights = self.weights.borrow_mut();
-		weights.init_optimizer(1, inputs * outputs);
-	}
-
-	fn zero_grad(&self) {
-		let mut weights = self.weights.borrow_mut();
-		weights.zero_grad();
-	}
-
-	fn step(&self, opt_coef: &OptCoef) {
-		let mut weights = self.weights.borrow_mut();
-		weights.step(opt_coef);
-	}
-
 	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Tensor {
 		let [inp] = ctx.tensors.get();
 		let d_inp = self.calc_d_inp(&d_out);
@@ -178,6 +161,7 @@ impl MultiheadLinear {
 		ctx: &mut ModelContext,
 	) -> MultiheadLinear {
 		let mut linear = Linear::new(inputs, heads * outputs, dtype, ctx);
+		linear.weights.borrow_mut().partition(heads, inputs * outputs);
 
 		// TODO - should we change the backward scale?
 		linear.backward_scale = 1.0 / (outputs as f64).sqrt();
@@ -212,22 +196,6 @@ impl Layer for MultiheadLinear {
 
 	fn randomize(&mut self) {
 		self.linear.randomize();
-	}
-
-	fn init_optimizer(&self) {
-		let inputs = self.linear.input_shape[0];
-		let heads = self.output_shape[0];
-		let outputs = self.output_shape[1];
-		let mut weights = self.linear.weights.borrow_mut();
-		weights.init_optimizer(heads, inputs * outputs);
-	}
-
-	fn zero_grad(&self) {
-		self.linear.zero_grad();
-	}
-
-	fn step(&self, opt_coef: &OptCoef) {
-		self.linear.step(opt_coef);
 	}
 
 	fn backward_finish(&self, d_out: Tensor, ctx: &mut EvalContext) {

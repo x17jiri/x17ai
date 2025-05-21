@@ -307,6 +307,50 @@ impl<'a> Savable for LogClamped<'a> {
 
 //--------------------------------------------------------------------------------------------------
 
+pub struct JiriGLU<'a> {
+	pub lin: &'a Tensor,
+	pub gate: &'a Tensor,
+}
+
+pub fn jiri_glu<'a>(lin: &'a Tensor, gate: &'a Tensor) -> JiriGLU<'a> {
+	JiriGLU { lin, gate }
+}
+
+impl<'a> Savable for JiriGLU<'a> {
+	fn save_to(&self, to: &Tensor) {
+		__elem_wise([to, self.lin, self.gate], |[to, lin, gate]| {
+			to.buffer.jiri_glu(&to, &lin, &gate);
+		});
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct JiriGLUBackward<'a> {
+	pub d_out: &'a Tensor,
+	pub lin: &'a Tensor,
+	pub gate: &'a Tensor,
+}
+
+pub fn jiri_glu_backward<'a>(
+	d_out: &'a Tensor, lin: &'a Tensor, gate: &'a Tensor,
+) -> JiriGLUBackward<'a> {
+	JiriGLUBackward { d_out, lin, gate }
+}
+
+impl<'a> JiriGLUBackward<'a> {
+	pub fn save_to(&self, d_lin: &Tensor, d_gate: &Tensor) {
+		__elem_wise(
+			[d_lin, d_gate, self.lin, self.gate, self.d_out],
+			|[d_lin, d_gate, lin, gate, d_out]| {
+				d_lin.buffer.jiri_glu_backward(&d_lin, &d_gate, &lin, &gate, &d_out);
+			},
+		);
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
 pub struct VecMul<'a> {
 	pub a: &'a Tensor,
 	pub b: &'a Tensor,

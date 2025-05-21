@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+pub mod jiriglu;
 pub mod linear;
 pub mod rms_norm;
 pub mod skip_connection;
@@ -13,6 +14,7 @@ use crate::optimizer::OptCoef;
 use crate::param::Param;
 use crate::tensor::{Tensor, TensorSize};
 
+pub use jiriglu::JiriGLU;
 pub use linear::{Linear, MultiheadLinear};
 pub use rms_norm::{RMSNorm, RMSNormGradientMode};
 pub use softmax::{Softmax, SoftmaxGradientMode};
@@ -40,9 +42,6 @@ pub trait Layer {
 	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Tensor;
 
 	fn randomize(&mut self);
-	fn init_optimizer(&self);
-	fn zero_grad(&self);
-	fn step(&self, opt_coef: &OptCoef);
 
 	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Tensor;
 

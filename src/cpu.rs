@@ -25,7 +25,50 @@ mod math {
 		//println!("rsqrt: {}", res);
 		res
 	}
+
+	pub fn jiri_glu(lin: f64, gate: f64) -> f64 {
+		let gate_exp = gate.exp();
+
+		let gate_positive = gate;
+		let gate_negative = gate * gate_exp;
+		let gate_forward = if gate >= 0.0 { gate_positive } else { gate_negative };
+
+		let res = lin * gate_forward;
+		res
+	}
+
+	pub fn jiri_glu_backward(lin: f64, gate: f64) -> (f64, f64) {
+		let gate_exp = gate.exp();
+
+		let gate_positive = gate;
+		let gate_negative = gate * gate_exp;
+
+		let d_lin_positive = gate_positive;
+		let d_lin_negative = gate_negative;
+
+		let d_gate_positive = lin;
+		let d_gate_negative = lin * (gate_negative + gate_exp);
+
+		if gate >= 0.0 {
+			let d_lin = d_lin_positive;
+			let d_gate = d_gate_positive;
+			(d_lin, d_gate)
+		} else {
+			let d_lin = d_lin_negative;
+			let d_gate = d_gate_negative;
+			(d_lin, d_gate)
+		}
+	}
 }
+
+#[derive(std::marker::ConstParamTy, PartialEq, Eq)]
+enum Commutativity {
+	Commutative,
+	NonCommutative,
+}
+
+const Commutative: Commutativity = Commutativity::Commutative;
+const NonCommutative: Commutativity = Commutativity::NonCommutative;
 
 pub struct CPUDevice {
 	name: String,
@@ -226,225 +269,112 @@ impl CPUBuffer {
 		unsafe { std::slice::from_raw_parts(ptr, tensor_size_to_usize(elems)) }
 	}
 
-	#[inline(never)]
-	fn zeros<T: Default>(dst: &TypedSliceSet<'_, CPUBuffer>) {
-		for [dst_arr] in BatchIter::<T, 1>::new([dst]) {
+	fn array_wise<T: Copy, const N: usize>(
+		slices: [&TypedSliceSet<'_, CPUBuffer>; N], mut f: impl FnMut([&[Cell<T>]; N]),
+	) {
+		let dtype = slices[0].dtype;
+		assert!(slices.iter().all(|i| i.dtype == dtype));
+		for arrays in BatchIter::<T, N>::new(slices) {
+			f(arrays);
+		}
+	}
+
+	fn elem_wise<T: Copy, const N: usize>(
+		slices: [&TypedSliceSet<'_, CPUBuffer>; N], mut f: impl FnMut([&Cell<T>; N]),
+	) {
+		let len = slices[0].len;
+		assert!(slices.iter().all(|i| i.len == len));
+		Self::array_wise::<T, N>(slices, |arrays| {
+			for i in 0..len {
+				f(arrays.map(|arr| unsafe { arr.get_unchecked(i as usize) }));
+			}
+		});
+	}
+
+	fn elem_wise_bin<T: Copy, const C: Commutativity>(
+		dst: &TypedSliceSet<'_, CPUBuffer>, a_inp: &TypedSliceSet<'_, CPUBuffer>,
+		b_inp: &TypedSliceSet<'_, CPUBuffer>, f: impl FnMut(&Cell<T>, T, T) -> T,
+	) {
+		let dtype = dst.dtype;
+		assert!(a_inp.dtype == dtype);
+		assert!(b_inp.dtype == dtype);
+		if a_inp.len == 1 && b_inp.len == 1 {
+			return Self::elem_wise_bin_nbb::<T>(dst, a_inp, b_inp, f);
+		}
+		if a_inp.len == 1 {
+			return Self::elem_wise_bin_nnb::<T>(dst, a_inp, b_inp, f);
+		}
+		if b_inp.len == 1 {
+			if C == Commutative {
+				return Self::elem_wise_bin_nnb::<T>(dst, b_inp, a_inp, f);
+			} else {
+				return Self::elem_wise_bin_nbn::<T>(dst, a_inp, b_inp, f);
+			}
+		}
+		Self::elem_wise_bin_nnn::<T>(dst, a_inp, b_inp, f);
+	}
+
+	fn elem_wise_bin_nnn<T: Copy>(
+		dst: &TypedSliceSet<'_, CPUBuffer>, a_inp: &TypedSliceSet<'_, CPUBuffer>,
+		b_inp: &TypedSliceSet<'_, CPUBuffer>, mut f: impl FnMut(&Cell<T>, T, T) -> T,
+	) {
+		let len = dst.len;
+		assert!(a_inp.len == len);
+		assert!(b_inp.len == len);
+		Self::array_wise::<T, 3>([dst, a_inp, b_inp], |[dst_arr, a_arr, b_arr]| {
+			for (d, (a, b)) in dst_arr.iter().zip(a_arr.iter().zip(b_arr)) {
+				let val = f(d, a.get(), b.get());
+				d.set(val);
+			}
+		});
+	}
+
+	fn elem_wise_bin_nnb<T: Copy>(
+		dst: &TypedSliceSet<'_, CPUBuffer>, a_inp: &TypedSliceSet<'_, CPUBuffer>,
+		b_inp: &TypedSliceSet<'_, CPUBuffer>, mut f: impl FnMut(&Cell<T>, T, T) -> T,
+	) {
+		let len = dst.len;
+		assert!(a_inp.len == len);
+		assert!(b_inp.len == 1);
+		Self::array_wise::<T, 3>([dst, a_inp, b_inp], |[dst_arr, a_arr, b_arr]| {
+			let b = b_arr[0].get();
+			for (d, a) in dst_arr.iter().zip(a_arr) {
+				let val = f(d, a.get(), b);
+				d.set(val);
+			}
+		});
+	}
+
+	fn elem_wise_bin_nbn<T: Copy>(
+		dst: &TypedSliceSet<'_, CPUBuffer>, a_inp: &TypedSliceSet<'_, CPUBuffer>,
+		b_inp: &TypedSliceSet<'_, CPUBuffer>, mut f: impl FnMut(&Cell<T>, T, T) -> T,
+	) {
+		let len = dst.len;
+		assert!(a_inp.len == 1);
+		assert!(b_inp.len == len);
+		Self::array_wise::<T, 3>([dst, a_inp, b_inp], |[dst_arr, a_arr, b_arr]| {
+			let a = a_arr[0].get();
+			for (d, b) in dst_arr.iter().zip(b_arr) {
+				let val = f(d, a, b.get());
+				d.set(val);
+			}
+		});
+	}
+
+	fn elem_wise_bin_nbb<T: Copy>(
+		dst: &TypedSliceSet<'_, CPUBuffer>, a_inp: &TypedSliceSet<'_, CPUBuffer>,
+		b_inp: &TypedSliceSet<'_, CPUBuffer>, mut f: impl FnMut(&Cell<T>, T, T) -> T,
+	) {
+		assert!(a_inp.len == 1);
+		assert!(b_inp.len == 1);
+		Self::array_wise::<T, 3>([dst, a_inp, b_inp], |[dst_arr, a_arr, b_arr]| {
+			let a = a_arr[0].get();
+			let b = b_arr[0].get();
 			for d in dst_arr {
-				d.set(T::default());
+				let val = f(d, a, b);
+				d.set(val);
 			}
-		}
-	}
-
-	#[inline(never)]
-	fn randn_f<T: FromToF64>(dst: &TypedSliceSet<'_, CPUBuffer>) {
-		let mut rng = dst.buffer.device().rng.borrow_mut();
-		for [dst_arr] in BatchIter::<T, 1>::new([dst]) {
-			for d in dst_arr {
-				d.set(T::from_f64(rng.get_normal()));
-			}
-		}
-	}
-
-	#[inline(never)]
-	fn copy<T: Copy>(dst: &TypedSliceSet<'_, CPUBuffer>, src: &TypedSliceSet<'_, CPUBuffer>) {
-		assert!(dst.len == src.len);
-		for [dst_arr, src_arr] in BatchIter::<T, 2>::new([dst, src]) {
-			for (d, s) in dst_arr.iter().zip(src_arr) {
-				d.set(s.get());
-			}
-		}
-	}
-
-	#[inline(never)]
-	fn acc_f<T: Copy + FromToF64>(
-		dst: &TypedSliceSet<'_, CPUBuffer>, dst_weight: f64, new: &TypedSliceSet<'_, CPUBuffer>,
-		new_weight: f64,
-	) {
-		assert!(dst.len == new.len);
-		for [dst_arr, new_arr] in BatchIter::<T, 2>::new([dst, new]) {
-			for (d, n) in dst_arr.iter().zip(new_arr) {
-				let d_val = d.get().to_f64();
-				let n_val = n.get().to_f64();
-				let d_val = d_val * dst_weight + n_val * new_weight;
-				d.set(T::from_f64(d_val));
-			}
-		}
-	}
-
-	#[inline(never)]
-	fn mul_nnn_f<T: Copy + FromToF64>(
-		dst: &TypedSliceSet<'_, CPUBuffer>, a: &TypedSliceSet<'_, CPUBuffer>,
-		b: &TypedSliceSet<'_, CPUBuffer>,
-	) {
-		assert!(dst.len == a.len);
-		assert!(dst.len == b.len);
-		for [dst_arr, a_arr, b_arr] in BatchIter::<T, 3>::new([dst, a, b]) {
-			for ((d, a), b) in dst_arr.iter().zip(a_arr).zip(b_arr) {
-				let val = a.get().to_f64() * b.get().to_f64();
-				d.set(T::from_f64(val));
-			}
-		}
-	}
-
-	#[inline(never)]
-	fn mul_nnb_f<T: Copy + FromToF64>(
-		dst: &TypedSliceSet<'_, CPUBuffer>, a: &TypedSliceSet<'_, CPUBuffer>,
-		b: &TypedSliceSet<'_, CPUBuffer>,
-	) {
-		assert!(dst.len == a.len);
-		assert!(b.len == 1);
-		for [dst_arr, a_arr, b_arr] in BatchIter::<T, 3>::new([dst, a, b]) {
-			let b = b_arr[0].get().to_f64();
-			for (d, a) in dst_arr.iter().zip(a_arr) {
-				let val = a.get().to_f64() * b;
-				d.set(T::from_f64(val));
-			}
-		}
-	}
-
-	#[inline(never)]
-	fn mul_nnn_acc_f<T: Copy + FromToF64>(
-		dst: &TypedSliceSet<'_, CPUBuffer>, dst_weight: f64, a: &TypedSliceSet<'_, CPUBuffer>,
-		b: &TypedSliceSet<'_, CPUBuffer>, ab_weight: f64,
-	) {
-		assert!(dst.len == a.len);
-		assert!(dst.len == b.len);
-		for [dst_arr, a_arr, b_arr] in BatchIter::<T, 3>::new([dst, a, b]) {
-			for ((d, a), b) in dst_arr.iter().zip(a_arr).zip(b_arr) {
-				let d_val = d.get().to_f64();
-				let a_val = a.get().to_f64();
-				let b_val = b.get().to_f64();
-				let val = d_val * dst_weight + a_val * b_val * ab_weight;
-				d.set(T::from_f64(val));
-			}
-		}
-	}
-
-	#[inline(never)]
-	fn mul_nnb_acc_f<T: Copy + FromToF64>(
-		dst: &TypedSliceSet<'_, CPUBuffer>, dst_weight: f64, a: &TypedSliceSet<'_, CPUBuffer>,
-		b: &TypedSliceSet<'_, CPUBuffer>, ab_weight: f64,
-	) {
-		assert!(dst.len == a.len);
-		assert!(b.len == 1);
-		for [dst_arr, a_arr, b_arr] in BatchIter::<T, 3>::new([dst, a, b]) {
-			let b = b_arr[0].get().to_f64();
-			for (d, a) in dst_arr.iter().zip(a_arr) {
-				let d_val = d.get().to_f64();
-				let a_val = a.get().to_f64();
-				let val = d_val * dst_weight + a_val * b * ab_weight;
-				d.set(T::from_f64(val));
-			}
-		}
-	}
-
-	#[inline(never)]
-	fn sub_nnn_f<T: Copy + FromToF64>(
-		dst: &TypedSliceSet<'_, CPUBuffer>, a: &TypedSliceSet<'_, CPUBuffer>,
-		b: &TypedSliceSet<'_, CPUBuffer>,
-	) {
-		assert!(dst.len == a.len);
-		assert!(dst.len == b.len);
-		for [dst_arr, a_arr, b_arr] in BatchIter::<T, 3>::new([dst, a, b]) {
-			for ((d, a), b) in dst_arr.iter().zip(a_arr).zip(b_arr) {
-				let val = a.get().to_f64() - b.get().to_f64();
-				d.set(T::from_f64(val));
-			}
-		}
-	}
-
-	#[inline(never)]
-	fn sub_nnb_f<T: Copy + FromToF64>(
-		dst: &TypedSliceSet<'_, CPUBuffer>, a: &TypedSliceSet<'_, CPUBuffer>,
-		b: &TypedSliceSet<'_, CPUBuffer>,
-	) {
-		assert!(dst.len == a.len);
-		assert!(b.len == 1);
-		for [dst_arr, a_arr, b_arr] in BatchIter::<T, 3>::new([dst, a, b]) {
-			let b = b_arr[0].get().to_f64();
-			for (d, a) in dst_arr.iter().zip(a_arr) {
-				let val = a.get().to_f64() - b;
-				d.set(T::from_f64(val));
-			}
-		}
-	}
-
-	#[inline(never)]
-	fn add_f<T: Copy + FromToF64>(
-		dst: &TypedSliceSet<'_, CPUBuffer>, a: &TypedSliceSet<'_, CPUBuffer>,
-		b: &TypedSliceSet<'_, CPUBuffer>,
-	) {
-		assert!(dst.len == a.len);
-		assert!(dst.len == b.len);
-		for [dst_arr, a_arr, b_arr] in BatchIter::<T, 3>::new([dst, a, b]) {
-			for ((d, a), b) in dst_arr.iter().zip(a_arr).zip(b_arr) {
-				let val = a.get().to_f64() + b.get().to_f64();
-				d.set(T::from_f64(val));
-			}
-		}
-	}
-
-	#[inline(never)]
-	fn dot_f<T: Copy + FromToF64>(
-		dst: &TypedSliceSet<'_, CPUBuffer>, a: &TypedSliceSet<'_, CPUBuffer>,
-		b: &TypedSliceSet<'_, CPUBuffer>, ab_weight: f64,
-	) {
-		assert!(a.len == b.len);
-		assert!(dst.len == 1);
-		for [dst_arr, a_arr, b_arr] in BatchIter::<T, 3>::new([dst, a, b]) {
-			let val = math::dot(a_arr, b_arr) * ab_weight;
-			dst_arr[0].set(T::from_f64(val));
-		}
-	}
-
-	#[inline(never)]
-	fn dot_acc_f<T: Copy + FromToF64>(
-		dst: &TypedSliceSet<'_, CPUBuffer>, dst_weight: f64, a: &TypedSliceSet<'_, CPUBuffer>,
-		b: &TypedSliceSet<'_, CPUBuffer>, ab_weight: f64,
-	) {
-		assert!(a.len == b.len);
-		assert!(dst.len == 1);
-		for [dst_arr, a_arr, b_arr] in BatchIter::<T, 3>::new([dst, a, b]) {
-			let old_val = dst_arr[0].get().to_f64();
-			let new_val = dst_weight * old_val + ab_weight * math::dot(a_arr, b_arr);
-			dst_arr[0].set(T::from_f64(new_val));
-		}
-	}
-
-	#[inline(never)]
-	fn sum_all_f<T: Copy + FromToF64>(a: &TypedSliceSet<'_, CPUBuffer>) -> f64 {
-		let mut sum = 0.0;
-		for [arr] in BatchIter::<T, 1>::new([a]) {
-			sum += arr.iter().map(|x| x.get().to_f64()).sum::<f64>();
-		}
-		sum
-	}
-
-	#[inline(never)]
-	fn rsqrt_f<T: Copy + FromToF64>(
-		dst: &TypedSliceSet<'_, CPUBuffer>, inp: &TypedSliceSet<'_, CPUBuffer>, eps: f64,
-	) {
-		assert!(dst.len == inp.len);
-		for [dst_arr, inp_arr] in BatchIter::<T, 2>::new([dst, inp]) {
-			for (d, i) in dst_arr.iter().zip(inp_arr) {
-				let val = math::rsqrt(i.get().to_f64() + eps);
-				d.set(T::from_f64(val));
-			}
-		}
-	}
-
-	#[inline(never)]
-	fn log_clamped_f<T: Copy + FromToF64>(
-		dst: &TypedSliceSet<'_, CPUBuffer>, inp: &TypedSliceSet<'_, CPUBuffer>,
-	) {
-		assert!(dst.len == inp.len);
-		for [dst_arr, inp_arr] in BatchIter::<T, 2>::new([dst, inp]) {
-			for (d, i) in dst_arr.iter().zip(inp_arr) {
-				let val = i.get().to_f64();
-				let val = val.ln().max(T::MIN.max(-1000.0));
-				d.set(T::from_f64(val));
-			}
-		}
+		});
 	}
 
 	#[inline(never)]
@@ -586,15 +516,16 @@ impl Buffer for CPUBuffer {
 	fn zeros(&self, dst: &SliceSet) {
 		let dst = self.cast_slices(dst);
 		match dst.dtype {
-			DType::F32 => Self::zeros::<f32>(&dst),
+			DType::F32 => Self::elem_wise::<f32, 1>([&dst], |[d]| d.set(0.0)),
 			_ => todo!(),
 		}
 	}
 
 	fn randn(&self, dst: &SliceSet) {
 		let dst = self.cast_slices(dst);
+		let mut rng = self.device().rng.borrow_mut();
 		match dst.dtype {
-			DType::F32 => Self::randn_f::<f32>(&dst),
+			DType::F32 => Self::elem_wise::<f32, 1>([&dst], |[d]| d.set(rng.get_normal() as f32)),
 			_ => todo!(),
 		}
 	}
@@ -602,9 +533,8 @@ impl Buffer for CPUBuffer {
 	fn copy(&self, dst: &SliceSet, src: &SliceSet) {
 		let dst = self.cast_slices(dst);
 		let src = self.cast_slices(src);
-		assert!(dst.dtype == src.dtype);
 		match dst.dtype {
-			DType::F32 => Self::copy::<f32>(&dst, &src),
+			DType::F32 => Self::elem_wise::<f32, 2>([&dst, &src], |[d, s]| d.set(s.get())),
 			_ => todo!(),
 		}
 	}
@@ -612,9 +542,13 @@ impl Buffer for CPUBuffer {
 	fn acc(&self, dst: &SliceSet, dst_weight: f64, new: &SliceSet, new_weight: f64) {
 		let dst = self.cast_slices(dst);
 		let new = self.cast_slices(new);
-		assert!(dst.dtype == new.dtype);
 		match dst.dtype {
-			DType::F32 => Self::acc_f::<f32>(&dst, dst_weight, &new, new_weight),
+			DType::F32 => Self::elem_wise::<f32, 2>([&dst, &new], |[d, n]| {
+				let d_val = f64::from(d.get());
+				let n_val = f64::from(n.get());
+				let val = d_val * dst_weight + n_val * new_weight;
+				d.set(val as f32)
+			}),
 			_ => todo!(),
 		}
 	}
@@ -623,21 +557,8 @@ impl Buffer for CPUBuffer {
 		let dst = self.cast_slices(dst);
 		let a = self.cast_slices(a);
 		let b = self.cast_slices(b);
-		assert!(dst.dtype == a.dtype);
-		assert!(dst.dtype == b.dtype);
 		match dst.dtype {
-			DType::F32 => {
-				if b.len == 1 {
-					if a.len == 1 && a.len != dst.len {
-						todo!("both a and b are broadcasted");
-					}
-					Self::mul_nnb_f::<f32>(&dst, &a, &b);
-				} else if a.len == 1 {
-					todo!("a is broadcasted"); // Note: `sub` is not commutative
-				} else {
-					Self::mul_nnn_f::<f32>(&dst, &a, &b);
-				}
-			},
+			DType::F32 => Self::elem_wise_bin::<f32, Commutative>(&dst, &a, &b, |_, a, b| a * b),
 			_ => todo!(),
 		}
 	}
@@ -649,18 +570,12 @@ impl Buffer for CPUBuffer {
 		assert!(dst.dtype == a.dtype);
 		assert!(dst.dtype == b.dtype);
 		match dst.dtype {
-			DType::F32 => {
-				if b.len == 1 {
-					if a.len == 1 && a.len != dst.len {
-						todo!("both a and b are broadcasted");
-					}
-					Self::mul_nnb_acc_f::<f32>(&dst, dst_weight, &a, &b, ab_weight);
-				} else if a.len == 1 {
-					Self::mul_nnb_acc_f::<f32>(&dst, dst_weight, &b, &a, ab_weight);
-				} else {
-					Self::mul_nnn_acc_f::<f32>(&dst, dst_weight, &a, &b, ab_weight);
-				}
-			},
+			DType::F32 => Self::elem_wise_bin::<f32, Commutative>(&dst, &a, &b, |d, a, b| {
+				let d = f64::from(d.get());
+				let a = f64::from(a);
+				let b = f64::from(b);
+				(d * dst_weight + a * b * ab_weight) as f32
+			}),
 			_ => todo!(),
 		}
 	}
@@ -669,21 +584,8 @@ impl Buffer for CPUBuffer {
 		let dst = self.cast_slices(dst);
 		let a = self.cast_slices(a);
 		let b = self.cast_slices(b);
-		assert!(dst.dtype == a.dtype);
-		assert!(dst.dtype == b.dtype);
 		match dst.dtype {
-			DType::F32 => {
-				if b.len == 1 {
-					if a.len == 1 && a.len != dst.len {
-						todo!("both a and b are broadcasted");
-					}
-					Self::sub_nnb_f::<f32>(&dst, &a, &b);
-				} else if a.len == 1 {
-					Self::sub_nnb_f::<f32>(&dst, &b, &a);
-				} else {
-					Self::sub_nnn_f::<f32>(&dst, &a, &b);
-				}
-			},
+			DType::F32 => Self::elem_wise_bin::<f32, NonCommutative>(&dst, &a, &b, |_, a, b| a - b),
 			_ => todo!(),
 		}
 	}
@@ -692,44 +594,96 @@ impl Buffer for CPUBuffer {
 		let dst = self.cast_slices(dst);
 		let a = self.cast_slices(a);
 		let b = self.cast_slices(b);
-		assert!(dst.dtype == a.dtype);
-		assert!(dst.dtype == b.dtype);
 		match dst.dtype {
-			DType::F32 => Self::add_f::<f32>(&dst, &a, &b),
+			DType::F32 => Self::elem_wise_bin::<f32, Commutative>(&dst, &a, &b, |_, a, b| a + b),
 			_ => todo!(),
 		}
 	}
 
-	fn dot(&self, dst_slices: &SliceSet, a: &SliceSet, b: &SliceSet, ab_weight: f64) {
-		let dst = self.cast_slices(dst_slices);
+	fn jiri_glu(&self, dst: &SliceSet, lin: &SliceSet, gate: &SliceSet) {
+		let dst = self.cast_slices(dst);
+		let lin = self.cast_slices(lin);
+		let gate = self.cast_slices(gate);
+		match dst.dtype {
+			DType::F32 => Self::elem_wise::<f32, 3>([&dst, &lin, &gate], |[dst, lin, gate]| {
+				let forward = math::jiri_glu(f64::from(lin.get()), f64::from(gate.get()));
+				dst.set(forward as f32);
+			}),
+			_ => todo!(),
+		}
+	}
+
+	fn jiri_glu_backward(
+		&self, d_lin: &SliceSet, d_gate: &SliceSet, lin: &SliceSet, gate: &SliceSet,
+		d_out: &SliceSet,
+	) {
+		let d_lin = self.cast_slices(d_lin);
+		let d_gate = self.cast_slices(d_gate);
+		let lin = self.cast_slices(lin);
+		let gate = self.cast_slices(gate);
+		let d_out = self.cast_slices(d_out);
+		match d_lin.dtype {
+			DType::F32 => Self::elem_wise::<f32, 5>(
+				[&d_lin, &d_gate, &lin, &gate, &d_out],
+				|[d_lin, d_gate, lin, gate, d_out]| {
+					let lin = f64::from(lin.get());
+					let gate = f64::from(gate.get());
+					let d_out = f64::from(d_out.get());
+					let (d_lin_val, d_gate_val) = math::jiri_glu_backward(lin, gate);
+					let d_lin_val = d_lin_val * d_out;
+					let d_gate_val = d_gate_val * d_out;
+					d_lin.set(d_lin_val as f32);
+					d_gate.set(d_gate_val as f32);
+				},
+			),
+			_ => todo!(),
+		}
+	}
+
+	fn dot(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet, ab_weight: f64) {
+		assert!(a.len == b.len);
+		assert!(dst.len == 1);
+		let dst = self.cast_slices(dst);
 		let a = self.cast_slices(a);
 		let b = self.cast_slices(b);
-		assert!(dst.dtype == a.dtype);
-		assert!(dst.dtype == b.dtype);
 		match dst.dtype {
-			DType::F32 => Self::dot_f::<f32>(&dst, &a, &b, ab_weight),
+			DType::F32 => Self::array_wise::<f32, 3>([&dst, &a, &b], |[dst, a, b]| {
+				let val = math::dot(a, b) * ab_weight;
+				let val = f32::from_f64(val);
+				dst[0].set(val);
+			}),
 			_ => todo!(),
 		}
 	}
 
 	fn dot_acc(&self, dst: &SliceSet, dst_weight: f64, a: &SliceSet, b: &SliceSet, ab_weight: f64) {
+		assert!(a.len == b.len);
+		assert!(dst.len == 1);
 		let dst = self.cast_slices(dst);
 		let a = self.cast_slices(a);
 		let b = self.cast_slices(b);
-		assert!(dst.dtype == a.dtype);
-		assert!(dst.dtype == b.dtype);
 		match dst.dtype {
-			DType::F32 => Self::dot_acc_f::<f32>(&dst, dst_weight, &a, &b, ab_weight),
+			DType::F32 => Self::array_wise::<f32, 3>([&dst, &a, &b], |[dst, a, b]| {
+				let old_val = f64::from(dst[0].get());
+				let dot = math::dot(a, b);
+				let val = dst_weight * old_val + ab_weight * dot;
+				let val = f32::from_f64(val);
+				dst[0].set(val);
+			}),
 			_ => todo!(),
 		}
 	}
 
 	fn sum_all(&self, a: &SliceSet) -> f64 {
 		let a = self.cast_slices(a);
+		let mut sum = 0.0;
 		match a.dtype {
-			DType::F32 => Self::sum_all_f::<f32>(&a),
+			DType::F32 => Self::array_wise::<f32, 1>([&a], |[arr]| {
+				sum += arr.iter().map(|x| x.get().to_f64()).sum::<f64>()
+			}),
 			_ => todo!(),
 		}
+		sum
 	}
 
 	fn rsqrt(&self, dst: &SliceSet, inp: &SliceSet, eps: f64) {
@@ -737,7 +691,10 @@ impl Buffer for CPUBuffer {
 		let inp = self.cast_slices(inp);
 		assert!(dst.dtype == inp.dtype);
 		match dst.dtype {
-			DType::F32 => Self::rsqrt_f::<f32>(&dst, &inp, eps),
+			DType::F32 => Self::elem_wise::<f32, 2>([&dst, &inp], |[d, i]| {
+				let i = f64::from(i.get());
+				d.set(math::rsqrt(i + eps) as f32);
+			}),
 			_ => todo!(),
 		}
 	}
@@ -747,7 +704,10 @@ impl Buffer for CPUBuffer {
 		let a = self.cast_slices(a);
 		assert!(dst.dtype == a.dtype);
 		match dst.dtype {
-			DType::F32 => Self::log_clamped_f::<f32>(&dst, &a),
+			DType::F32 => Self::elem_wise::<f32, 2>([&dst, &a], |[d, a]| {
+				let a = f64::from(a.get());
+				d.set(a.ln().max(-1000.0) as f32);
+			}),
 			_ => todo!(),
 		}
 	}
