@@ -7,21 +7,21 @@ use crate::nn::Layer;
 use crate::param::Param;
 use crate::tensor::{Tensor, TensorSize};
 
-pub struct JiriGLU {
+pub struct SwiGLU {
 	input_shape: [TensorSize; 2],
 	output_shape: [TensorSize; 1],
 }
 
-impl JiriGLU {
-	pub fn new(n_outputs: TensorSize) -> JiriGLU {
-		JiriGLU {
+impl SwiGLU {
+	pub fn new(n_outputs: TensorSize) -> SwiGLU {
+		SwiGLU {
 			input_shape: [2, n_outputs],
 			output_shape: [n_outputs],
 		}
 	}
 }
 
-impl Layer for JiriGLU {
+impl Layer for SwiGLU {
 	fn input_shape(&self) -> &[TensorSize] {
 		&self.input_shape
 	}
@@ -43,7 +43,7 @@ impl Layer for JiriGLU {
 		let lin = inp.clone().slice(-2, 0..1);
 		let gate = inp.slice(-2, 1..2);
 
-		expr::jiri_glu(&lin, &gate).save_to(&out);
+		expr::swiglu(&lin, &gate).save_to(&out);
 
 		if ctx.is_training() {
 			ctx.tensors.set([lin, gate]);
@@ -63,7 +63,7 @@ impl Layer for JiriGLU {
 		let d_lin = d_inp.clone().slice(-2, 0..1);
 		let d_gate = d_inp.clone().slice(-2, 1..2);
 
-		expr::jiri_glu_backward(&d_out, &lin, &gate).save_to(&d_lin, &d_gate);
+		expr::swiglu_backward(&d_out, &lin, &gate).save_to(&d_lin, &d_gate);
 
 		d_inp
 	}

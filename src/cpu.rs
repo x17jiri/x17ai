@@ -21,43 +21,29 @@ mod math {
 	}
 
 	pub fn rsqrt(a: f64) -> f64 {
-		let res = 1.0 / a.sqrt();
-		//println!("rsqrt: {}", res);
-		res
+		1.0 / a.sqrt()
 	}
 
-	pub fn jiri_glu(lin: f64, gate: f64) -> f64 {
-		let gate_exp = gate.exp();
-
-		let gate_positive = gate;
-		let gate_negative = gate * gate_exp;
-		let gate_forward = if gate >= 0.0 { gate_positive } else { gate_negative };
-
-		let res = lin * gate_forward;
-		res
+	pub fn sigmoid(x: f64) -> f64 {
+		1.0 / (1.0 + (-x).exp())
 	}
 
-	pub fn jiri_glu_backward(lin: f64, gate: f64) -> (f64, f64) {
-		let gate_exp = gate.exp();
+	pub fn swish(x: f64) -> f64 {
+		x * sigmoid(x)
+	}
 
-		let gate_positive = gate;
-		let gate_negative = gate * gate_exp;
+	pub fn swiglu(lin: f64, gate: f64) -> f64 {
+		lin * swish(gate)
+	}
 
-		let d_lin_positive = gate_positive;
-		let d_lin_negative = gate_negative;
+	pub fn swiglu_backward(lin: f64, gate: f64) -> (f64, f64) {
+		let sigmoid = sigmoid(gate);
+		let swish = gate * sigmoid;
 
-		let d_gate_positive = lin;
-		let d_gate_negative = lin * (gate_negative + gate_exp);
+		let d_lin = swish;
+		let d_gate = lin * (swish + sigmoid * (1.0 - swish));
 
-		if gate >= 0.0 {
-			let d_lin = d_lin_positive;
-			let d_gate = d_gate_positive;
-			(d_lin, d_gate)
-		} else {
-			let d_lin = d_lin_negative;
-			let d_gate = d_gate_negative;
-			(d_lin, d_gate)
-		}
+		(d_lin, d_gate)
 	}
 }
 
@@ -301,10 +287,10 @@ impl CPUBuffer {
 		if a_inp.len == 1 && b_inp.len == 1 {
 			return Self::elem_wise_bin_nbb::<T>(dst, a_inp, b_inp, f);
 		}
-		if a_inp.len == 1 {
+		if b_inp.len == 1 {
 			return Self::elem_wise_bin_nnb::<T>(dst, a_inp, b_inp, f);
 		}
-		if b_inp.len == 1 {
+		if a_inp.len == 1 {
 			if C == Commutative {
 				return Self::elem_wise_bin_nnb::<T>(dst, b_inp, a_inp, f);
 			} else {
@@ -600,20 +586,20 @@ impl Buffer for CPUBuffer {
 		}
 	}
 
-	fn jiri_glu(&self, dst: &SliceSet, lin: &SliceSet, gate: &SliceSet) {
+	fn swiglu(&self, dst: &SliceSet, lin: &SliceSet, gate: &SliceSet) {
 		let dst = self.cast_slices(dst);
 		let lin = self.cast_slices(lin);
 		let gate = self.cast_slices(gate);
 		match dst.dtype {
 			DType::F32 => Self::elem_wise::<f32, 3>([&dst, &lin, &gate], |[dst, lin, gate]| {
-				let forward = math::jiri_glu(f64::from(lin.get()), f64::from(gate.get()));
+				let forward = math::swiglu(f64::from(lin.get()), f64::from(gate.get()));
 				dst.set(forward as f32);
 			}),
 			_ => todo!(),
 		}
 	}
 
-	fn jiri_glu_backward(
+	fn swiglu_backward(
 		&self, d_lin: &SliceSet, d_gate: &SliceSet, lin: &SliceSet, gate: &SliceSet,
 		d_out: &SliceSet,
 	) {
@@ -629,7 +615,7 @@ impl Buffer for CPUBuffer {
 					let lin = f64::from(lin.get());
 					let gate = f64::from(gate.get());
 					let d_out = f64::from(d_out.get());
-					let (d_lin_val, d_gate_val) = math::jiri_glu_backward(lin, gate);
+					let (d_lin_val, d_gate_val) = math::swiglu_backward(lin, gate);
 					let d_lin_val = d_lin_val * d_out;
 					let d_gate_val = d_gate_val * d_out;
 					d_lin.set(d_lin_val as f32);

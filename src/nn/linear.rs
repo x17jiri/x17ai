@@ -105,6 +105,7 @@ impl Layer for Linear {
 		f(format!("{}.weights", prefix), self.weights.clone());
 	}
 
+	#[inline(never)]
 	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Tensor {
 		// [..., inputs] -> [..., outputs]
 		let out = inp.new_replace_tail(1, &self.output_shape);
@@ -187,11 +188,12 @@ impl Layer for MultiheadLinear {
 		self.linear.collect_named_params(format!("{}.linear", prefix).as_str(), f);
 	}
 
+	#[inline(never)]
 	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Tensor {
 		let out = self.linear.forward(inp, ctx);
 
 		// [..., heads * outputs] -> [..., heads, outputs]
-		out.reshape(1, &self.output_shape)
+		out.reshape_last_dim(self.output_shape)
 	}
 
 	fn randomize(&mut self) {
@@ -200,14 +202,14 @@ impl Layer for MultiheadLinear {
 
 	fn backward_finish(&self, d_out: Tensor, ctx: &mut EvalContext) {
 		// [..., heads, outputs] -> [..., heads * outputs]
-		let d_out = d_out.reshape(2, &self.linear.output_shape);
+		let d_out = d_out.merge_dims::<2>();
 
 		self.linear.backward_finish(d_out, ctx)
 	}
 
 	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Tensor {
 		// [..., heads, outputs] -> [..., heads * outputs]
-		let d_out = d_out.reshape(2, &self.linear.output_shape);
+		let d_out = d_out.merge_dims::<2>();
 
 		self.linear.backward(d_out, ctx)
 	}

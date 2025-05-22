@@ -45,10 +45,11 @@ impl OptParam {
 
 		let grad_reshaped = value.new_empty_like();
 
-		let value = value.reshape_all(&[elems]); // if fail, tensor is not contiguous
-		let value = value.reshape_all(&[parts, part_elems]);
+		let value = value.merge_all_dims(); // if fail, tensor is not contiguous
+		let value = value.reshape_last_dim([parts, part_elems]);
 
-		let grad = grad_reshaped.clone().reshape_all(&[parts, part_elems]);
+		let grad = grad_reshaped.clone().merge_all_dims();
+		let grad = grad.reshape_last_dim([parts, part_elems]);
 
 		let momentum = value.new_empty_like();
 

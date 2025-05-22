@@ -307,43 +307,43 @@ impl<'a> Savable for LogClamped<'a> {
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct JiriGLU<'a> {
+pub struct SwiGLU<'a> {
 	pub lin: &'a Tensor,
 	pub gate: &'a Tensor,
 }
 
-pub fn jiri_glu<'a>(lin: &'a Tensor, gate: &'a Tensor) -> JiriGLU<'a> {
-	JiriGLU { lin, gate }
+pub fn swiglu<'a>(lin: &'a Tensor, gate: &'a Tensor) -> SwiGLU<'a> {
+	SwiGLU { lin, gate }
 }
 
-impl<'a> Savable for JiriGLU<'a> {
+impl<'a> Savable for SwiGLU<'a> {
 	fn save_to(&self, to: &Tensor) {
 		__elem_wise([to, self.lin, self.gate], |[to, lin, gate]| {
-			to.buffer.jiri_glu(&to, &lin, &gate);
+			to.buffer.swiglu(&to, &lin, &gate);
 		});
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct JiriGLUBackward<'a> {
+pub struct SwiGLUBackward<'a> {
 	pub d_out: &'a Tensor,
 	pub lin: &'a Tensor,
 	pub gate: &'a Tensor,
 }
 
-pub fn jiri_glu_backward<'a>(
+pub fn swiglu_backward<'a>(
 	d_out: &'a Tensor, lin: &'a Tensor, gate: &'a Tensor,
-) -> JiriGLUBackward<'a> {
-	JiriGLUBackward { d_out, lin, gate }
+) -> SwiGLUBackward<'a> {
+	SwiGLUBackward { d_out, lin, gate }
 }
 
-impl<'a> JiriGLUBackward<'a> {
+impl<'a> SwiGLUBackward<'a> {
 	pub fn save_to(&self, d_lin: &Tensor, d_gate: &Tensor) {
 		__elem_wise(
 			[d_lin, d_gate, self.lin, self.gate, self.d_out],
 			|[d_lin, d_gate, lin, gate, d_out]| {
-				d_lin.buffer.jiri_glu_backward(&d_lin, &d_gate, &lin, &gate, &d_out);
+				d_lin.buffer.swiglu_backward(&d_lin, &d_gate, &lin, &gate, &d_out);
 			},
 		);
 	}

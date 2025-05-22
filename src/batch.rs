@@ -3,12 +3,12 @@
 
 use crate::dim_merger::MergedDim;
 use crate::*;
-use smallvec::SmallVec;
 use std::fmt;
 use std::intrinsics::cold_path;
 
 fn __run<const N: usize, F: FnMut(TensorSize, [TensorSize; N], [TensorSize; N])>(
-	prev_dim: MergedDim<N>, mut dims: MergedDimIter<N>, offsets: [TensorSize; N], f: &mut F,
+	prev_dim: MergedDim<N>, mut dims: impl Clone + Iterator<Item = MergedDim<N>>,
+	offsets: [TensorSize; N], f: &mut F,
 ) {
 	if prev_dim.size > 1 {
 		assert!(prev_dim.strides[0] > 0, "broadcast is disabled for this tensor");
@@ -30,8 +30,9 @@ fn __run<const N: usize, F: FnMut(TensorSize, [TensorSize; N], [TensorSize; N])>
 
 /// F: fn(batch_size: TensorSize, batch_strides: [TensorSize; N], offsets: [TensorSize; N])
 pub fn run<'a, const N: usize, F: FnMut(TensorSize, [TensorSize; N], [TensorSize; N])>(
-	mut dims: MergedDimIter<N>, offsets: [TensorSize; N], mut f: F,
+	dims: MergedDimIter<N>, offsets: [TensorSize; N], mut f: F,
 ) {
+	let mut dims = dims.rev();
 	if let Some(dim) = dims.next() {
 		__run(dim, dims, offsets, &mut f);
 	} else {

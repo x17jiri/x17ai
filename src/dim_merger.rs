@@ -3,10 +3,10 @@
 
 use crate::tensor::INLINE_DIMS;
 use crate::*;
-use smallvec::SmallVec;
+use smallvec::{SmallVec, smallvec};
 use std::fmt;
 use std::intrinsics::{cold_path, likely, unlikely};
-
+/*
 //--------------------------------------------------------------------------------------------------
 // OutputHandler
 
@@ -133,7 +133,7 @@ impl OutputHandlerImpl for NewOutputHandlerImpl {
 		}
 
 		Tensor {
-			dims: self.dims,
+			dims: DimVec { vec: self.dims }, // TODO - use DimVec for self.dims
 			offset: 0,
 			dtype: self.dtype,
 			elems: self.elems,
@@ -143,6 +143,7 @@ impl OutputHandlerImpl for NewOutputHandlerImpl {
 }
 
 //--------------------------------------------------------------------------------------------------
+*/
 
 #[derive(Clone, Copy)]
 pub struct MergedDim<const N: usize> {
@@ -179,83 +180,55 @@ pub struct MergedDimIter<'a, const N: usize> {
 
 impl<const N: usize> DimMerger<N> {
 	pub fn new(inputs: [&[SizeAndStride]; N]) -> DimMerger<N> {
-		let (merger, _null) = Self::new_ex(inputs, NullOutputHandler());
+		let ndim = inputs.iter().fold(1, |acc, input| acc.max(input.len()));
+
+		let dim = inputs.map(|i| i.get(0).copied().unwrap_or(SizeAndStride { size: 1, stride: 0 }));
+		let size = dim.iter().fold(1, |acc, d| if acc == 1 { d.size } else { acc });
+		let strides = dim.map(|d| {
+			assert!(d.size == size || d.size == 1, "cannot broadcast: incompatible dimensions");
+			if d.size == size { d.stride } else { 0 }
+		});
+		let mut dim = MergedDim { size, strides };
+
+		let mut merger = DimMerger { dims_increasing: smallvec![dim] };
+
+		for k in 1..ndim {
+			let next_dim =
+				inputs.map(|i| i.get(k).copied().unwrap_or(SizeAndStride { size: 1, stride: 0 }));
+			let size = next_dim.iter().fold(1, |acc, d| if acc == 1 { d.size } else { acc });
+			if size == 1 {
+				continue;
+			}
+
+			let strides = next_dim.map(|d| {
+				assert!(d.size == size || d.size == 1, "cannot broadcast: incompatible dimensions");
+				if d.size == size { d.stride } else { 0 }
+			});
+
+			// Can we extend the previous dimension?
+			// TODO - verify that the `.all(...)` generates good assembly code
+			if (0..N).all(|i| strides[i] == dim.strides[i] * dim.size) {
+				dim.size *= size;
+			} else {
+				merger.prepend_dim(dim);
+				dim = MergedDim { size, strides };
+			}
+		}
+
+		unsafe {
+			let len = merger.dims_increasing.len();
+			let ptr = merger.dims_increasing.as_mut_ptr().add(len);
+			ptr.write(dim);
+			merger.dims_increasing.set_len(len + 1);
+		}
+
 		merger
 	}
 
-	pub fn new_ex<H, I>(inputs: [&[SizeAndStride]; N], handler: H) -> (DimMerger<N>, I::Value)
-	where
-		H: OutputHandler<Impl = I>,
-		I: OutputHandlerImpl,
-	{
-		// NOTE: The default value of `unwrap_or` will only be used if N == 0,
-		// which should never happen.
-		let ndim = inputs.iter().map(|i| i.len()).max().unwrap_or(0);
-
-		let mut merger = DimMerger::new_empty();
-		let mut out = handler.init(ndim);
-
-		for dim in 0..ndim {
-			let size = merger.prepend_dim(inputs.map(|input| {
-				if dim < input.len() {
-					input[input.len() - dim - 1]
-				} else {
-					SizeAndStride { size: 1, stride: 0 }
-				}
-			}));
-			out.prepend_dim(size);
-		}
-
-		(merger, out.value())
-	}
-
-	/// The `ndim` parameter is just a hint to preallocate the right amount of space.
-	pub fn new_empty() -> DimMerger<N> {
-		DimMerger {
-			dims_increasing: smallvec![MergedDim { size: 1, strides: [1; N] }],
-		}
-	}
-
-	/// Adds a new dimension and tries to merge it with previous dimensions.
-	///
-	/// The merging will only happen if for all inputs:
-	///    new_dim_stride = prev_dim_stride * prev_dim_size
-	///
-	/// Returns the size of the new dimension
-	pub fn prepend_dim(&mut self, dims: [SizeAndStride; N]) -> TensorSize {
-		let prev = self.dims_increasing.last_mut();
-		// SAFETY: In `new_empty()`, we make sure `dims_increasing` has at least one element.
-		let prev = unsafe { prev.unwrap_unchecked() };
-
-		// Only dimensions with size 1 can be broadcasted.
-		// Other dimensions cannot be broadcasted and therefore should all be of the same size.
-		// Let's get the size of any of the non-broadcastable dimensions.
-		// If the non-broadcastable dimensions are not all the same size,
-		// we will detect it later, we will detect it when making the `strides` array.
-		let size = dims.iter().fold(1, |acc, dim| if acc == 1 { dim.size } else { acc });
-		let strides = std::array::from_fn(|i| {
-			let dim = dims[i];
-			assert!(dim.size == size || dim.size == 1, "cannot broadcast: incompatible dimensions");
-			if dim.size == size { dim.stride } else { 0 }
-		});
-		//assert!(strides[0] != 0, "cannot broadcast output dimension");
-
-		// Can we extend the previous dimension?
-		// TODO - verify that the `.all(...)` generates good assembly code
-		if size == 1 || (0..N).all(|i| strides[i] == prev.strides[i] * prev.size) {
-			prev.size *= size;
-			return size;
-		}
-
-		// Can we entirely replace the previous dimension?
-		if prev.size == 1 {
-			prev.size = size;
-			prev.strides = strides;
-			return size;
-		}
-
-		self.dims_increasing.push(MergedDim { size, strides });
-		size
+	#[inline(never)]
+	fn prepend_dim(&mut self, dim: MergedDim<N>) {
+		self.dims_increasing.reserve(2);
+		self.dims_increasing.push(dim);
 	}
 
 	pub fn dims_increasing(self) -> MergedDimList<N> {

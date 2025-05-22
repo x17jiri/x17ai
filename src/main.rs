@@ -17,6 +17,8 @@
 #![feature(adt_const_params)]
 #![allow(non_upper_case_globals)]
 #![feature(new_range_api)]
+#![feature(maybe_uninit_uninit_array)]
+#![feature(maybe_uninit_array_assume_init)]
 
 mod batch;
 mod buffer;
@@ -52,7 +54,6 @@ use crate::rand::*;
 use crate::tensor::*;
 use eval_context::EvalContext;
 use nn::LossFunction;
-use smallvec::{SmallVec, smallvec};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 

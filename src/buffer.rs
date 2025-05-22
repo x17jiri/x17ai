@@ -112,8 +112,8 @@ pub trait Buffer {
 	fn sub(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet);
 	fn add(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet);
 
-	fn jiri_glu(&self, dst: &SliceSet, lin: &SliceSet, gate: &SliceSet);
-	fn jiri_glu_backward(
+	fn swiglu(&self, dst: &SliceSet, lin: &SliceSet, gate: &SliceSet);
+	fn swiglu_backward(
 		&self, d_lin: &SliceSet, d_gate: &SliceSet, lin: &SliceSet, gate: &SliceSet,
 		d_out: &SliceSet,
 	);
