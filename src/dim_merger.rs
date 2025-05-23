@@ -82,11 +82,11 @@ impl<const N: usize> DimMerger<N> {
 					}
 				}
 			});
-
 			let next_dim = MergedDim { size, strides };
 
 			// Do we have to add a new dimension?
-			if next_dim.size != 1
+			let are_strides_valid = next_dim.size > 1;
+			if are_strides_valid
 				&& (0..N).any(|i| next_dim.strides[i] != prev_dim.size * prev_dim.strides[i])
 			{
 				cold_path();
@@ -107,6 +107,8 @@ impl<const N: usize> DimMerger<N> {
 
 	#[inline(never)]
 	fn add_dim(&mut self) -> &mut MergedDim<N> {
+		// Why warn? I expect this to be really rare event. But if it happens more often,
+		// I may remove the warning.
 		warn!("DimMerger: adding a dimension");
 		self.dims_increasing.push(MergedDim { size: 1, strides: [0; N] });
 		self.dims_increasing.last_mut().unwrap()

@@ -217,8 +217,9 @@ impl DimVec {
 	}
 
 	pub fn pop_n(&mut self, n: usize) {
-		assert!(n <= self.vec.len());
-		unsafe { self.vec.set_len(self.vec.len() - n) };
+		let len = self.vec.len();
+		assert!(n <= len);
+		unsafe { self.vec.set_len(len - n) };
 	}
 
 	pub fn as_slice(&self) -> &[SizeAndStride] {
@@ -291,24 +292,26 @@ impl DerefMut for DimVec {
 
 //--------------------------------------------------------------------------------------------------
 
-struct ShapeChainIter<'a> {
+/// This iterator is used in the `new_replace_tail()` function.
+/// I would use `std::iter::chain()` but it doesn't implement `ExactSizeIterator`.
+struct ReplaceTailIter<'a> {
 	a: &'a [SizeAndStride],
 	b: &'a [TensorSize],
 }
 
-impl<'a> ShapeChainIter<'a> {
-	fn new(a: &'a [SizeAndStride], b: &'a [TensorSize]) -> ShapeChainIter<'a> {
-		ShapeChainIter { a, b }
+impl<'a> ReplaceTailIter<'a> {
+	fn new(a: &'a [SizeAndStride], b: &'a [TensorSize]) -> ReplaceTailIter<'a> {
+		ReplaceTailIter { a, b }
 	}
 }
 
-impl<'a> ExactSizeIterator for ShapeChainIter<'a> {
+impl<'a> ExactSizeIterator for ReplaceTailIter<'a> {
 	fn len(&self) -> usize {
 		self.a.len() + self.b.len()
 	}
 }
 
-impl<'a> Iterator for ShapeChainIter<'a> {
+impl<'a> Iterator for ReplaceTailIter<'a> {
 	type Item = &'a TensorSize;
 
 	fn next(&mut self) -> Option<Self::Item> {
@@ -328,7 +331,7 @@ impl<'a> Iterator for ShapeChainIter<'a> {
 	}
 }
 
-impl<'a> DoubleEndedIterator for ShapeChainIter<'a> {
+impl<'a> DoubleEndedIterator for ReplaceTailIter<'a> {
 	fn next_back(&mut self) -> Option<Self::Item> {
 		if self.b.is_empty() {
 			if self.a.is_empty() {
@@ -421,7 +424,7 @@ impl Tensor {
 		let keep_len = ndim - tail_len;
 		let keep = &self.dims[..keep_len];
 
-		let new_shape = ShapeChainIter::new(keep, replace_with);
+		let new_shape = ReplaceTailIter::new(keep, replace_with);
 
 		Self::new_empty_on(new_shape, self.dtype, self.device())
 	}

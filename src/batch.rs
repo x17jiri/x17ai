@@ -6,6 +6,7 @@ use crate::*;
 use std::fmt;
 use std::intrinsics::cold_path;
 
+// TODO - could this be implemented without recursion?
 fn __run<const N: usize, F: FnMut(TensorSize, [TensorSize; N], [TensorSize; N])>(
 	prev_dim: MergedDim<N>, mut dims: impl Clone + Iterator<Item = MergedDim<N>>,
 	offsets: [TensorSize; N], f: &mut F,

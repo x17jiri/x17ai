@@ -156,6 +156,7 @@ pub fn zeros() -> Zeros {
 }
 
 impl Savable for Zeros {
+	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
 		__elem_wise([to], |[to]| {
 			to.buffer.zeros(&to);
@@ -172,6 +173,7 @@ pub fn randn() -> Randn {
 }
 
 impl Savable for Randn {
+	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
 		__elem_wise([to], |[to]| {
 			to.buffer.randn(&to);
@@ -182,6 +184,7 @@ impl Savable for Randn {
 //--------------------------------------------------------------------------------------------------
 
 impl Savable for Tensor {
+	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
 		__elem_wise([to, self], |[to, input]| {
 			to.buffer.copy(&to, &input);
@@ -190,6 +193,7 @@ impl Savable for Tensor {
 }
 
 impl Accumulable for Tensor {
+	#[inline(never)]
 	fn acc_to(&self, to: &Tensor, to_weight: f64, expr_weight: f64) {
 		__elem_wise([to, self], |[to, input]| {
 			to.buffer.acc(&to, to_weight, &input, expr_weight);
@@ -209,6 +213,7 @@ pub fn mul<'a>(a: &'a Tensor, b: &'a Tensor) -> Mul<'a> {
 }
 
 impl<'a> Savable for Mul<'a> {
+	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
 		__elem_wise([to, self.a, self.b], |[to, a, b]| {
 			to.buffer.mul(&to, &a, &b);
@@ -217,6 +222,7 @@ impl<'a> Savable for Mul<'a> {
 }
 
 impl<'a> Accumulable for Mul<'a> {
+	#[inline(never)]
 	fn acc_to(&self, to: &Tensor, to_weight: f64, expr_weight: f64) {
 		__elem_wise([to, self.a, self.b], |[to, a, b]| {
 			to.buffer.mul_acc(&to, to_weight, &a, &b, expr_weight);
@@ -236,6 +242,7 @@ pub fn sub<'a>(a: &'a Tensor, b: &'a Tensor) -> Sub<'a> {
 }
 
 impl<'a> Savable for Sub<'a> {
+	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
 		__elem_wise([to, self.a, self.b], |[to, a, b]| {
 			to.buffer.sub(&to, &a, &b);
@@ -255,6 +262,7 @@ pub fn add<'a>(a: &'a Tensor, b: &'a Tensor) -> Add<'a> {
 }
 
 impl<'a> Savable for Add<'a> {
+	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
 		__elem_wise([to, self.a, self.b], |[to, a, b]| {
 			to.buffer.add(&to, &a, &b);
@@ -274,6 +282,7 @@ pub fn rsqrt(tensor: &Tensor, eps: f64) -> RSqrt {
 }
 
 impl<'a> Savable for RSqrt<'a> {
+	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
 		__elem_wise([to, self.tensor], |[to, input]| {
 			to.buffer.rsqrt(&to, &input, self.eps);
@@ -298,6 +307,7 @@ pub fn log_clamped(tensor: &Tensor) -> LogClamped {
 }
 
 impl<'a> Savable for LogClamped<'a> {
+	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
 		__elem_wise([to, self.tensor], |[to, input]| {
 			to.buffer.log_clamped(&to, &input);
@@ -317,6 +327,7 @@ pub fn swiglu<'a>(lin: &'a Tensor, gate: &'a Tensor) -> SwiGLU<'a> {
 }
 
 impl<'a> Savable for SwiGLU<'a> {
+	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
 		__elem_wise([to, self.lin, self.gate], |[to, lin, gate]| {
 			to.buffer.swiglu(&to, &lin, &gate);
@@ -339,6 +350,7 @@ pub fn swiglu_backward<'a>(
 }
 
 impl<'a> SwiGLUBackward<'a> {
+	#[inline(never)]
 	pub fn save_to(&self, d_lin: &Tensor, d_gate: &Tensor) {
 		__elem_wise(
 			[d_lin, d_gate, self.lin, self.gate, self.d_out],
@@ -368,6 +380,7 @@ pub fn dot<'a>(a: &'a Tensor, b: &'a Tensor) -> VecMul<'a> {
 }
 
 impl<'a> Savable for VecMul<'a> {
+	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
 		__vec_wise([to, self.a, self.b], |[to, a, b]| {
 			to.buffer.dot(&to, &a, &b, self.scale);
@@ -376,6 +389,7 @@ impl<'a> Savable for VecMul<'a> {
 }
 
 impl Accumulable for VecMul<'_> {
+	#[inline(never)]
 	fn acc_to(&self, to: &Tensor, to_weight: f64, expr_weight: f64) {
 		__vec_wise([to, self.a, self.b], |[to, a, b]| {
 			to.buffer.dot_acc(&to, to_weight, &a, &b, expr_weight * self.scale);
@@ -407,6 +421,7 @@ pub fn softmax<'a>(tensor: &'a Tensor) -> Softmax<'a> {
 }
 
 impl<'a> Savable for Softmax<'a> {
+	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
 		__vec_wise([to, self.tensor], |[to, input]| {
 			to.buffer.softmax(&to, &input);
@@ -436,6 +451,7 @@ impl<'a> RMSNorm<'a> {
 }
 
 impl<'a> Savable for RMSNorm<'a> {
+	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
 		if let Some(scale_storage) = self.scale_storage {
 			__vec_wise([to, self.tensor, scale_storage], |[to, input, scale_storage]| {
@@ -611,6 +627,7 @@ impl<'a> MatMulPrep<'a> {
 }
 
 impl<'a> MatrixSavable for MatMul<'a> {
+	#[inline(never)]
 	fn save_to(self, to: Matrix) {
 		let scale = self.scale;
 		let prep = MatMulPrep::new(self, to);
@@ -621,6 +638,7 @@ impl<'a> MatrixSavable for MatMul<'a> {
 }
 
 impl<'a> MatrixAccumulable for MatMul<'a> {
+	#[inline(never)]
 	fn acc_to(self, to: Matrix, to_weight: f64, expr_weight: f64) {
 		let scale = self.scale * expr_weight;
 		let prep = MatMulPrep::new(self, to);
