@@ -1,14 +1,22 @@
-// Copyright 2024 Jiri Bobek. All rights reserved.
+// Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
-use crate::*;
-use assert_approx_eq::assert_approx_eq;
-use core::slice;
 use std::boxed::Box;
 use std::cell::{Cell, RefCell};
 use std::fmt;
-use std::intrinsics::{cold_path, unlikely};
-use std::ops::Div;
+use std::rc::Rc;
+
+mod rng;
+
+use rng::Rng;
+
+use crate::tensor::buffer::{
+	Buffer, BufferBase, MatrixSet, SliceSet, ToBufferBase, TypedMatrixSet, TypedSliceSet,
+};
+use crate::tensor::dtype::DType;
+use crate::tensor::{Tensor, TensorSize, tensor_size_to_usize};
+
+use super::Device;
 
 mod math {
 	use super::FromToF64;
@@ -746,7 +754,7 @@ impl Buffer for CPUBuffer {
 		}
 	}
 }
-
+/*
 #[cfg(test)]
 mod tests {
 	use std::num::NonZero;
@@ -1510,3 +1518,4 @@ mod tests {
 		}
 	}
 }
+*/

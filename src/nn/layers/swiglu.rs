@@ -1,11 +1,15 @@
+// Copyright 2025 Jiri Bobek. All rights reserved.
+// License: GPL 3.0 or later. See LICENSE.txt for details.
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::eval_context::EvalContext;
-use crate::expr::{self, Accumulable, Savable};
-use crate::nn::Layer;
-use crate::param::Param;
-use crate::tensor::{Tensor, TensorSize};
+use crate::nn::eval_context::EvalContext;
+use crate::nn::param::Param;
+use crate::tensor::math::Savable;
+use crate::tensor::{self, Tensor, TensorSize};
+
+use super::Layer;
 
 pub struct SwiGLU {
 	input_shape: [TensorSize; 2],
@@ -43,7 +47,7 @@ impl Layer for SwiGLU {
 		let lin = inp.clone().slice(-2, 0..1);
 		let gate = inp.slice(-2, 1..2);
 
-		expr::swiglu(&lin, &gate).save_to(&out);
+		tensor::math::swiglu(&lin, &gate).save_to(&out);
 
 		if ctx.is_training() {
 			ctx.tensors.set([lin, gate]);
@@ -63,7 +67,7 @@ impl Layer for SwiGLU {
 		let d_lin = d_inp.clone().slice(-2, 0..1);
 		let d_gate = d_inp.clone().slice(-2, 1..2);
 
-		expr::swiglu_backward(&d_out, &lin, &gate).save_to(&d_lin, &d_gate);
+		tensor::math::swiglu_backward(&d_out, &lin, &gate).save_to(&d_lin, &d_gate);
 
 		d_inp
 	}

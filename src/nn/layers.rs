@@ -1,5 +1,7 @@
+// Copyright 2025 Jiri Bobek. All rights reserved.
+// License: GPL 3.0 or later. See LICENSE.txt for details.
+
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 pub mod linear;
@@ -9,10 +11,9 @@ pub mod softmax;
 pub mod softmax_cross_entropy;
 pub mod swiglu;
 
-use crate::eval_context::EvalContext;
-use crate::optimizer::OptCoef;
-use crate::param::Param;
 use crate::tensor::{Tensor, TensorSize};
+
+use super::{EvalContext, Param};
 
 pub use linear::{Linear, MultiheadLinear};
 pub use rms_norm::{RMSNorm, RMSNormGradientMode};

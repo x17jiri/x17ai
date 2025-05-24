@@ -1,8 +1,12 @@
-// Copyright 2024 Jiri Bobek. All rights reserved.
+// Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
-use crate::*;
 use std::num::NonZeroUsize;
+
+use super::buffer::{MatrixSet, SliceSet};
+use super::dim_merger::{DimMerger, MergedDimIter, MergedDimList};
+use super::dim_vec::SizeAndStride;
+use super::{NonZeroTensorSize, Tensor, TensorSize, batch};
 
 pub trait Savable {
 	/// Calculate the result of the operation represented by `self`

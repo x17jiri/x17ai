@@ -1,10 +1,11 @@
-// Copyright 2024 Jiri Bobek. All rights reserved.
+// Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
-use crate::dim_merger::MergedDim;
-use crate::*;
 use std::fmt;
 use std::intrinsics::cold_path;
+
+use super::TensorSize;
+use super::dim_merger::{MergedDim, MergedDimIter};
 
 // TODO - could this be implemented without recursion?
 fn __run<const N: usize, F: FnMut(TensorSize, [TensorSize; N], [TensorSize; N])>(

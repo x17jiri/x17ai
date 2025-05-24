@@ -1,12 +1,14 @@
-// Copyright 2024 Jiri Bobek. All rights reserved.
+// Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
-use crate::tensor::INLINE_DIMS;
-use crate::*;
 use log::warn;
 use smallvec::{SmallVec, smallvec};
 use std::intrinsics::{cold_path, likely, unlikely};
 use std::{default, fmt};
+
+use super::TensorSize;
+use super::dim_vec::{INLINE_DIMS, SizeAndStride};
+
 #[derive(Clone, Copy)]
 pub struct MergedDim<const N: usize> {
 	pub size: TensorSize,

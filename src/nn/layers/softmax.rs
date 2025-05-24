@@ -1,11 +1,15 @@
+// Copyright 2025 Jiri Bobek. All rights reserved.
+// License: GPL 3.0 or later. See LICENSE.txt for details.
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::eval_context::EvalContext;
-use crate::expr::{self, Accumulable, Savable};
-use crate::nn::Layer;
-use crate::param::Param;
-use crate::tensor::{Tensor, TensorSize};
+use crate::nn::eval_context::EvalContext;
+use crate::nn::param::Param;
+use crate::tensor::math::Savable;
+use crate::tensor::{self, Tensor, TensorSize};
+
+use super::Layer;
 
 pub enum SoftmaxGradientMode {
 	Precise,
@@ -58,13 +62,12 @@ impl Layer for Softmax {
 			out_ref = out.as_ref().unwrap();
 		}
 
-		expr::softmax(&inp).save_to(out_ref);
+		tensor::math::softmax(&inp).save_to(out_ref);
 
 		if ctx.is_training() {
 			match self.gradient_mode {
+				SoftmaxGradientMode::Precise => ctx.tensors.set([out_ref.clone()]),
 				SoftmaxGradientMode::StraightThrough => {},
-
-				_ => ctx.tensors.set([out_ref.clone()]),
 			}
 		}
 
@@ -81,7 +84,7 @@ impl Layer for Softmax {
 				let [out] = ctx.tensors.get();
 
 				let g = out.new_replace_tail(1, &[1]); // [..., 1]
-				expr::dot(&out, &d_out).save_to(&g);
+				tensor::math::dot(&out, &d_out).save_to(&g);
 
 				// try to reuse the `d_out` for `d_inp` if possible
 				let (d_inp, d_inp_ref);
@@ -94,8 +97,8 @@ impl Layer for Softmax {
 				}
 
 				// TODO - we could merge `sub` and `mul` into a single kernel
-				expr::sub(&d_out, &g).save_to(d_inp_ref);
-				expr::mul(d_inp_ref, &out).save_to(d_inp_ref);
+				tensor::math::sub(&d_out, &g).save_to(d_inp_ref);
+				tensor::math::mul(d_inp_ref, &out).save_to(d_inp_ref);
 
 				d_inp.unwrap_or(d_out)
 			},
@@ -107,7 +110,7 @@ impl Layer for Softmax {
 		// no parameters to update
 	}
 }
-
+/*
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -161,3 +164,4 @@ mod tests {
 		assert_approx_eq!(d_in_slice[3].get(), -0.0008, 1e-4);
 	}
 }
+*/

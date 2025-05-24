@@ -1,9 +1,13 @@
+// Copyright 2025 Jiri Bobek. All rights reserved.
+// License: GPL 3.0 or later. See LICENSE.txt for details.
+
 // Optimizer. Inspired by Adam-mini: https://arxiv.org/abs/2406.16793
 
-use crate::expr::*;
-use crate::{DType, Device, Tensor, TensorSize};
 use std::cell::RefCell;
 use std::rc::Rc;
+
+use crate::tensor::math::{Accumulable, Savable};
+use crate::tensor::{self, DType, Device, Tensor, TensorSize};
 
 pub struct OptCoef {
 	pub(crate) momentum_decay: f64, // beta1
@@ -88,15 +92,19 @@ impl OptParam {
 		// update velocity
 		// `dot(grad, grad)` calculates the sum of squares.
 		// Dividing the sum by `part_elems` gives the mean of squares.
-		dot(&self.grad, &self.grad).acc_to(
+		tensor::math::dot(&self.grad, &self.grad).acc_to(
 			&self.velocity,
 			coef.velocity_decay,
 			(1.0 - coef.velocity_decay) * self.part_elems_recip,
 		);
-		rsqrt(&self.velocity, coef.eps).save_to(&self.velocity_recip);
+		tensor::math::rsqrt(&self.velocity, coef.eps).save_to(&self.velocity_recip);
 
 		// update value
-		mul(&self.momentum, &self.velocity_recip).acc_to(&self.value, 1.0, -coef.learning_rate);
+		tensor::math::mul(&self.momentum, &self.velocity_recip).acc_to(
+			&self.value,
+			1.0,
+			-coef.learning_rate,
+		);
 	}
 
 	pub fn value(&self) -> &Tensor {

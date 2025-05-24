@@ -1,7 +1,13 @@
-use crate::param::Param;
-use crate::{DType, Device, OptCoef, OptParam, Tensor, TensorSize};
+// Copyright 2025 Jiri Bobek. All rights reserved.
+// License: GPL 3.0 or later. See LICENSE.txt for details.
+
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+
+use crate::tensor::{DType, Device, Tensor, TensorSize};
+
+use super::optimizer::OptCoef;
+use super::param::Param;
 
 pub struct ModelContext {
 	pub opt_coef: OptCoef,

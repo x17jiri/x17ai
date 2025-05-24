@@ -1,11 +1,15 @@
+// Copyright 2025 Jiri Bobek. All rights reserved.
+// License: GPL 3.0 or later. See LICENSE.txt for details.
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::eval_context::EvalContext;
-use crate::expr::{self, Accumulable, Savable};
-use crate::nn::Layer;
-use crate::param::Param;
-use crate::tensor::{Tensor, TensorSize};
+use crate::nn::eval_context::EvalContext;
+use crate::nn::param::Param;
+use crate::tensor::math::Savable;
+use crate::tensor::{self, Tensor, TensorSize};
+
+use super::Layer;
 
 pub struct SkipConnection<Nested: Layer> {
 	nested: Nested,
@@ -27,7 +31,7 @@ impl<Nested: Layer> SkipConnection<Nested> {
 			out_ref = out.as_ref().unwrap();
 		}
 
-		expr::add(&inp, &nested_out).save_to(out_ref);
+		tensor::math::add(&inp, &nested_out).save_to(out_ref);
 
 		out.unwrap_or(nested_out)
 	}

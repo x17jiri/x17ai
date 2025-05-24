@@ -1,10 +1,13 @@
-use crate::device::Device;
-use crate::dtype::DType;
-use crate::optimizer::{OptCoef, OptParam};
-use crate::tensor::{Tensor, TensorSize};
+// Copyright 2025 Jiri Bobek. All rights reserved.
+// License: GPL 3.0 or later. See LICENSE.txt for details.
+
 use std::cell::RefCell;
 use std::intrinsics::cold_path;
 use std::rc::Rc;
+
+use crate::tensor::{DType, Device, Tensor, TensorSize};
+
+use super::optimizer::{OptCoef, OptParam};
 
 pub struct Param {
 	value: Tensor,

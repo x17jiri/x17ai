@@ -1,19 +1,18 @@
-use crate::device::Device;
-use crate::dtype::DType;
-use crate::eval_context::EvalContext;
-use crate::expr::{
-	Accumulable, MatrixAccumulable, MatrixSavable, Savable, col_matrix, dot, matrix, mm, randn,
-	row_matrix,
-};
-use crate::format;
-use crate::model_context::ModelContext;
-use crate::nn::Layer;
-use crate::optimizer::{OptCoef, OptParam};
-use crate::param::Param;
-use crate::tensor::{self, Tensor, TensorSize};
+// Copyright 2025 Jiri Bobek. All rights reserved.
+// License: GPL 3.0 or later. See LICENSE.txt for details.
+
 use std::cell::RefCell;
 use std::intrinsics::cold_path;
 use std::rc::Rc;
+
+use crate::nn::model_context::ModelContext;
+use crate::nn::param::Param;
+use crate::tensor::math::{
+	Accumulable, MatrixAccumulable, MatrixSavable, Savable, col_matrix, matrix, row_matrix,
+};
+use crate::tensor::{self, DType, Tensor, TensorSize};
+
+use super::{EvalContext, Layer};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -57,7 +56,7 @@ impl Linear {
 				(col_matrix(&d_out), row_matrix(&inp))
 			};
 
-			let d_w = mm(d_o, i).scale(1.0);
+			let d_w = tensor::math::mm(d_o, i).scale(1.0);
 
 			let mut weights = self.weights.borrow_mut();
 			weights.update_grad(|grad, already_have_grad| {
@@ -83,7 +82,7 @@ impl Linear {
 
 		let w = self.weights.borrow();
 		let w = matrix(w.value());
-		mm(w.T(), d_o).scale(self.backward_scale).save_to(d_i);
+		tensor::math::mm(w.T(), d_o).scale(self.backward_scale).save_to(d_i);
 		d_inp
 	}
 }
@@ -115,7 +114,7 @@ impl Layer for Linear {
 		let w = matrix(weights.value());
 		let i = col_matrix(&inp);
 		let o = col_matrix(&out);
-		mm(w, i).scale(self.forward_scale).save_to(o);
+		tensor::math::mm(w, i).scale(self.forward_scale).save_to(o);
 
 		if ctx.is_training() {
 			ctx.tensors.set([inp]);
@@ -125,7 +124,7 @@ impl Layer for Linear {
 	}
 
 	fn randomize(&mut self) {
-		randn().save_to(self.weights.borrow().value());
+		tensor::math::randn().save_to(self.weights.borrow().value());
 	}
 
 	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Tensor {

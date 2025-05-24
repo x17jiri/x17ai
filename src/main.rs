@@ -1,4 +1,4 @@
-// Copyright 2024 Jiri Bobek. All rights reserved.
+// Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
 #![allow(non_snake_case)]
@@ -20,68 +20,18 @@
 #![feature(maybe_uninit_uninit_array)]
 #![feature(maybe_uninit_array_assume_init)]
 
-mod batch;
-mod buffer;
-mod cpu;
-mod device;
-mod dim_merger;
-mod dtype;
-mod eval_context;
-mod expr;
-mod format;
-mod matrix;
-mod model_context;
-mod nn;
-mod optimizer;
-mod param;
-mod rand;
-mod tensor;
-
-use crate::batch::*;
-use crate::buffer::*;
-use crate::cpu::*;
-use crate::device::*;
-use crate::dim_merger::*;
-use crate::dtype::*;
-use crate::expr::*;
-use crate::format::*;
-use crate::matrix::*;
-use crate::model_context::*;
-use crate::nn::Layer;
-use crate::nn::linear::{Linear, MultiheadLinear};
-use crate::optimizer::*;
-use crate::rand::*;
-use crate::tensor::*;
-use eval_context::EvalContext;
-use nn::LossFunction;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-/*
+use nn::layers::{Layer, Linear, LossFunction, SoftmaxCrossEntropy};
+use nn::{EvalContext, ModelContext};
+use tensor::device::cpu::CPUDevice;
+use tensor::math::Savable;
+use tensor::{DType, Tensor};
 
-	b.acc_to(a, alpha, beta)                       # acc_(a, alpha, b, beta)
-
-	b.dot(c).save_to(a)                        # acc_mul_(a, 0.0, b, c, 1.0)
-	b.dot(c).acc_to(a, alpha, beta)            # acc_mul_(a, alpha, b, c, beta)
-
-	b.sum(keepdim).save_to(a)                      # acc_sum_(a, 0.0, b, 1.0)
-	b.sum(keepdim).acc_to(a, alpha, beta)          # acc_sum_(a, alpha, b, beta)
-
-	b.sum_square(keepdim).save_to(a)               # acc_sum_square_(a, 0.0, b, 1.0)
-	b.sum_square(keepdim).acc_to(a, alpha, beta)   # acc_sum_square_(a, alpha, b, beta)
-
-
-	# adam mini
-	self.grad.acc_to(&self.m, self.beta1, 1.0 - self.beta1);
-	self.grad.mean_square(keepdim: true).acc_to(&self.v, self.beta2, 1.0 - self.beta2);
-	self.v.one_over_sqrt().save_to(&self.v_recip);
-	self.m.dot(&self.v_recip).acc_to(&self.value, 1.0, -self.learning_rate);
-
-	# rms norm
-	val.mean_square(keepdim: true).save_to(&scale);
-	scale.one_over_sqrt().save_to(&scale_recip);
-
-*/
+mod format;
+mod nn;
+mod tensor;
 
 /*
 struct Attention {
@@ -212,6 +162,8 @@ impl Module for Transformer {
 }
 */
 fn main() {
+	//	let t = tensor![[1, 2, 3], [4, 5, 6],];
+
 	stderrlog::new().module(module_path!()).init().unwrap();
 
 	let dev = CPUDevice::new("CPU".to_string());
@@ -220,7 +172,7 @@ fn main() {
 	let mut model = Linear::new(3, 2, DType::F32, &mut mctx);
 	model.randomize();
 
-	let mut loss = nn::SoftmaxCrossEntropy::new(2);
+	let mut loss = SoftmaxCrossEntropy::new(2);
 	loss.randomize();
 
 	let input = Tensor::new_empty_on(&[2, 3], DType::F32, dev.clone());
@@ -228,7 +180,7 @@ fn main() {
 
 	println!("input owns buffer: {}", input.owns_buffer());
 
-	randn().save_to(&input);
+	tensor::math::randn().save_to(&input);
 	let a = dev.tensor_as_slice::<f32>(&expected);
 	a[0].set(1.0);
 	a[1].set(0.0);

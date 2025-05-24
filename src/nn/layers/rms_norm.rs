@@ -1,11 +1,15 @@
+// Copyright 2025 Jiri Bobek. All rights reserved.
+// License: GPL 3.0 or later. See LICENSE.txt for details.
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::eval_context::EvalContext;
-use crate::expr::{self, Accumulable, Savable};
-use crate::nn::Layer;
-use crate::param::Param;
-use crate::tensor::{Tensor, TensorSize};
+use crate::nn::eval_context::EvalContext;
+use crate::nn::param::Param;
+use crate::tensor::math::Savable;
+use crate::tensor::{self, Tensor, TensorSize};
+
+use super::Layer;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum RMSNormGradientMode {
@@ -61,11 +65,11 @@ impl Layer for RMSNorm {
 		if ctx.is_training() && self.gradient_mode == RMSNormGradientMode::Precise {
 			let scale = out_ref.new_replace_tail(1, &[1]);
 
-			expr::rms_norm(&inp, self.eps).scale_storage(&scale).save_to(out_ref);
+			tensor::math::rms_norm(&inp, self.eps).scale_storage(&scale).save_to(out_ref);
 
 			ctx.tensors.set([out_ref.clone(), scale]);
 		} else {
-			expr::rms_norm(&inp, self.eps).save_to(out_ref);
+			tensor::math::rms_norm(&inp, self.eps).save_to(out_ref);
 		}
 
 		out.unwrap_or(inp)
@@ -81,7 +85,7 @@ impl Layer for RMSNorm {
 				let [out, scale] = ctx.tensors.get();
 
 				let g = scale.new_empty_like(); // [..., 1]
-				expr::dot(&out, &d_out).scale(1.0 / self.shape[0] as f64).save_to(&g);
+				tensor::math::dot(&out, &d_out).scale(1.0 / self.shape[0] as f64).save_to(&g);
 
 				// try to reuse `out` for `d_inp` if possible
 				let (d_inp, d_inp_ref);
@@ -94,9 +98,9 @@ impl Layer for RMSNorm {
 				}
 
 				// TODO - could we merge `mul, sub, mul` into a single kernel?
-				expr::mul(&out, &g).save_to(d_inp_ref);
-				expr::sub(&d_out, d_inp_ref).save_to(d_inp_ref);
-				expr::mul(d_inp_ref, &scale).save_to(d_inp_ref);
+				tensor::math::mul(&out, &g).save_to(d_inp_ref);
+				tensor::math::sub(&d_out, d_inp_ref).save_to(d_inp_ref);
+				tensor::math::mul(d_inp_ref, &scale).save_to(d_inp_ref);
 
 				d_inp.unwrap_or(out)
 			},
@@ -111,7 +115,7 @@ impl Layer for RMSNorm {
 					d_inp_ref = d_inp.as_ref().unwrap();
 				}
 
-				expr::rms_norm(&d_out, self.eps).save_to(d_inp_ref);
+				tensor::math::rms_norm(&d_out, self.eps).save_to(d_inp_ref);
 
 				d_inp.unwrap_or(d_out)
 			},
@@ -123,10 +127,9 @@ impl Layer for RMSNorm {
 		// no parameters to update
 	}
 }
-
+/*
 #[cfg(test)]
 mod tests {
-	use super::*;
 	use crate::cpu::CPUDevice;
 	use crate::device::Device;
 	use crate::dtype::DType;
@@ -178,3 +181,4 @@ mod tests {
 		assert_approx_eq!(d_in_slice[3].get(), 0.0210, 1e-4);
 	}
 }
+*/

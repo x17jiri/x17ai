@@ -1,9 +1,10 @@
-// Copyright 2024 Jiri Bobek. All rights reserved.
+// Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
-use crate::{TensorSize, tensor_size_to_usize};
 use std::fmt;
 use std::num::NonZeroU8;
+
+use super::{TensorSize, tensor_size_to_usize};
 
 pub const MAX_DTYPE_ALIGN: usize = 8; // 64-bit
 

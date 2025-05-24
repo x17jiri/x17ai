@@ -1,8 +1,12 @@
-// Copyright 2024 Jiri Bobek. All rights reserved.
+// Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
-use crate::*;
 use std::fmt;
+use std::rc::Rc;
+
+use super::device::Device;
+use super::dtype::DType;
+use super::{NonZeroTensorSize, TensorSize, tensor_size_to_usize};
 
 pub struct BufferBase {
 	pub device: Rc<dyn Device>,

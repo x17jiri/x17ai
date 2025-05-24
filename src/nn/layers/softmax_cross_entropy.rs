@@ -1,11 +1,15 @@
+// Copyright 2025 Jiri Bobek. All rights reserved.
+// License: GPL 3.0 or later. See LICENSE.txt for details.
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::eval_context::EvalContext;
-use crate::expr::{self, Accumulable, Savable};
-use crate::nn::{Layer, LossFunction, Softmax, SoftmaxGradientMode};
-use crate::param::Param;
-use crate::tensor::{Tensor, TensorSize};
+use crate::nn::eval_context::EvalContext;
+use crate::nn::param::Param;
+use crate::tensor::math::Savable;
+use crate::tensor::{self, Tensor, TensorSize};
+
+use super::{Layer, LossFunction, Softmax, SoftmaxGradientMode};
 
 pub struct SoftmaxCrossEntropy {
 	softmax: Softmax,
@@ -60,15 +64,15 @@ impl Layer for SoftmaxCrossEntropy {
 impl LossFunction for SoftmaxCrossEntropy {
 	fn backward_start(&self, out: Tensor, expected_out: Tensor, _ctx: &mut EvalContext) -> Tensor {
 		let d_inp = out.new_empty_like();
-		expr::sub(&out, &expected_out).save_to(&d_inp);
+		tensor::math::sub(&out, &expected_out).save_to(&d_inp);
 		d_inp
 	}
 
 	fn loss(&self, out: Tensor, expected_out: Tensor) -> f64 {
 		let tmp = out.new_empty_like();
-		expr::log_clamped(&out).save_to(&tmp);
-		expr::mul(&tmp, &expected_out).save_to(&tmp);
+		tensor::math::log_clamped(&out).save_to(&tmp);
+		tensor::math::mul(&tmp, &expected_out).save_to(&tmp);
 
-		expr::sum_all(&tmp) / -(tmp.batch_size(1) as f64)
+		tensor::math::sum_all(&tmp) / -(tmp.batch_size(1) as f64)
 	}
 }
