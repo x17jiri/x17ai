@@ -101,6 +101,8 @@ pub trait Buffer {
 	// If any of the slices represented by a SliceSet are not in bounds,
 	// these functions will panic.
 
+	fn load_data(&self, dtype: DType, offset: TensorSize, len: TensorSize, src: &[u8]);
+
 	fn zeros(&self, dst: &SliceSet);
 
 	fn randn(&self, dst: &SliceSet);
@@ -127,6 +129,7 @@ pub trait Buffer {
 	fn dot_acc(&self, dst: &SliceSet, dst_weight: f64, a: &SliceSet, b: &SliceSet, ab_weight: f64);
 
 	fn sum_all(&self, a: &SliceSet) -> f64;
+	fn approx_eq(&self, a: &SliceSet, b: &SliceSet, eps: f64) -> bool;
 
 	fn rsqrt(&self, dst: &SliceSet, a: &SliceSet, eps: f64);
 

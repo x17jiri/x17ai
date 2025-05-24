@@ -11,6 +11,9 @@ pub mod softmax;
 pub mod softmax_cross_entropy;
 pub mod swiglu;
 
+#[cfg(test)]
+mod tests;
+
 use crate::tensor::{Tensor, TensorSize};
 
 use super::{EvalContext, Param};

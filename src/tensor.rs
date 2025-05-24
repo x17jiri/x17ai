@@ -23,6 +23,9 @@ use dim_vec::{DimVec, SizeAndStride};
 
 pub use device::Device;
 pub use dtype::DType;
+use dtype::HasDType;
+
+use crate::tensor;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -489,6 +492,90 @@ impl Tensor {
 		dim.size = range.end - range.start;
 		self.offset += range.start * dim.stride;
 		self
+	}
+
+	#[inline(never)]
+	pub fn new_1d<T: HasDType>(device: Rc<dyn Device>, value: Vec<T>) -> Tensor {
+		let x = value.len();
+		let x = TensorSize::try_from(x).expect("length too large");
+
+		let mut tensor = Self::new_empty_on(&[x], T::dtype(), device);
+		tensor.fill_1d(value);
+		tensor
+	}
+
+	#[inline(never)]
+	pub fn new_2d<T: HasDType>(device: Rc<dyn Device>, value: Vec<Vec<T>>) -> Tensor {
+		let y = value.len();
+		let y = TensorSize::try_from(y).expect("length too large");
+
+		let x = value.get(0).map_or(0, |row| row.len());
+		assert!(value.iter().all(|row| row.len() == x), "rows have different lengths");
+		let x = TensorSize::try_from(x).expect("length too large");
+
+		let mut tensor = Self::new_empty_on(&[y, x], T::dtype(), device);
+		tensor.fill_2d(value);
+		tensor
+	}
+
+	#[inline(never)]
+	pub fn fill_1d<T: HasDType>(&self, value: Vec<T>) {
+		let x = value.len();
+		let x = TensorSize::try_from(x).expect("length too large");
+
+		assert!(self.ndim() == 1, "fill_1d() can only be used on 1D tensors");
+
+		assert!(self.dims[0].size == x, "invalid size");
+		assert!(self.dims[0].size <= 1 || self.dims[0].stride == 1, "tensor is not contiguous");
+
+		assert!(self.dtype == T::dtype(), "invalid dtype");
+		let dtype = self.dtype;
+		let offset = self.offset;
+
+		let buf = value.as_slice();
+		let buf = unsafe {
+			std::slice::from_raw_parts(
+				buf.as_ptr() as *const u8,
+				buf.len() * std::mem::size_of::<T>(),
+			)
+		};
+
+		self.buffer.load_data(dtype, offset, x, buf);
+	}
+
+	#[inline(never)]
+	pub fn fill_2d<T: HasDType>(&self, value: Vec<Vec<T>>) {
+		let y = value.len();
+		let y = TensorSize::try_from(y).expect("length too large");
+
+		let x = value.get(0).map_or(0, |row| row.len());
+		assert!(value.iter().all(|row| row.len() == x), "rows have different lengths");
+		let x = TensorSize::try_from(x).expect("length too large");
+
+		assert!(self.ndim() == 2, "fill_2d() can only be used on 2D tensors");
+
+		assert!(self.dims[1].size == x, "invalid size");
+		assert!(self.dims[1].size <= 1 || self.dims[1].stride == 1, "tensor is not contiguous");
+
+		assert!(self.dims[0].size == y, "invalid size");
+		assert!(self.dims[0].size <= 1 || self.dims[0].stride >= x, "output overlap");
+
+		assert!(self.dtype == T::dtype(), "invalid dtype");
+		let dtype = self.dtype;
+
+		for (i, row) in value.into_iter().enumerate() {
+			let offset = self.offset + (i as TensorSize) * self.dims[0].stride;
+
+			let buf = row.as_slice();
+			let buf = unsafe {
+				std::slice::from_raw_parts(
+					buf.as_ptr() as *const u8,
+					buf.len() * std::mem::size_of::<T>(),
+				)
+			};
+
+			self.buffer.load_data(dtype, offset, x, buf);
+		}
 	}
 }
 

@@ -507,6 +507,20 @@ impl CPUBuffer {
 }
 
 impl Buffer for CPUBuffer {
+	fn load_data(&self, dtype: DType, offset: TensorSize, len: TensorSize, src: &[u8]) {
+		let begin = dtype.array_bytes(offset).and_then(|t| TensorSize::try_from(t).ok()).unwrap();
+		let len = dtype.array_bytes(len).and_then(|t| TensorSize::try_from(t).ok()).unwrap();
+		let end = tensor_size_to_usize(begin.checked_add(len).unwrap());
+
+		assert!(end <= self.base.size_bytes);
+		let dst = unsafe { self.cast::<u8>(begin, len) };
+
+		assert!(dst.len() == src.len());
+		for (d, s) in dst.iter().zip(src) {
+			d.set(*s);
+		}
+	}
+
 	fn zeros(&self, dst: &SliceSet) {
 		let dst = self.cast_slices(dst);
 		match dst.dtype {
@@ -678,6 +692,21 @@ impl Buffer for CPUBuffer {
 			_ => todo!(),
 		}
 		sum
+	}
+
+	fn approx_eq(&self, a: &SliceSet, b: &SliceSet, eps: f64) -> bool {
+		let a = self.cast_slices(a);
+		let b = self.cast_slices(b);
+		let mut result = true;
+		match a.dtype {
+			DType::F32 => Self::elem_wise::<f32, 2>([&a, &b], |[a, b]| {
+				let a_val = f64::from(a.get());
+				let b_val = f64::from(b.get());
+				result &= (a_val - b_val).abs() < eps;
+			}),
+			_ => todo!(),
+		}
+		result
 	}
 
 	fn rsqrt(&self, dst: &SliceSet, inp: &SliceSet, eps: f64) {

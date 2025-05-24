@@ -3,11 +3,8 @@
 
 // Optimizer. Inspired by Adam-mini: https://arxiv.org/abs/2406.16793
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
 use crate::tensor::math::{Accumulable, Savable};
-use crate::tensor::{self, DType, Device, Tensor, TensorSize};
+use crate::tensor::{self, Tensor, TensorSize};
 
 pub struct OptCoef {
 	pub(crate) momentum_decay: f64, // beta1
@@ -109,5 +106,13 @@ impl OptParam {
 
 	pub fn value(&self) -> &Tensor {
 		&self.value
+	}
+
+	pub fn parts(&self) -> TensorSize {
+		self.parts
+	}
+
+	pub fn part_elems(&self) -> TensorSize {
+		self.part_elems
 	}
 }

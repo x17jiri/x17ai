@@ -1,10 +1,10 @@
 // Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::tensor::{DType, Device, Tensor, TensorSize};
+use crate::tensor::{DType, Device, TensorSize};
 
 use super::optimizer::OptCoef;
 use super::param::Param;

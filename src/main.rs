@@ -4,6 +4,7 @@
 use x17ai::nn::layers::{Layer, Linear, LossFunction, SoftmaxCrossEntropy};
 use x17ai::nn::{EvalContext, ModelContext};
 use x17ai::tensor::device::cpu::CPUDevice;
+use x17ai::tensor::dtype::HasDType;
 use x17ai::tensor::math::Savable;
 use x17ai::tensor::{self, DType, Tensor};
 
@@ -136,6 +137,7 @@ impl Module for Transformer {
 }
 */
 fn main() {
+	let dt = f32::dtype();
 	//	let t = tensor![[1, 2, 3], [4, 5, 6],];
 
 	stderrlog::new().module(module_path!()).init().unwrap();

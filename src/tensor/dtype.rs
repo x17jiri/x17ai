@@ -8,6 +8,16 @@ use super::{TensorSize, tensor_size_to_usize};
 
 pub const MAX_DTYPE_ALIGN: usize = 8; // 64-bit
 
+pub trait HasDType {
+	fn dtype() -> DType;
+}
+
+impl HasDType for f32 {
+	fn dtype() -> DType {
+		DType::F32
+	}
+}
+
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct DType {
 	pub kind: DTypeKind,

@@ -8,7 +8,7 @@ use std::rc::Rc;
 use crate::nn::model_context::ModelContext;
 use crate::nn::param::Param;
 use crate::tensor::math::{
-	Accumulable, MatrixAccumulable, MatrixSavable, Savable, col_matrix, matrix, row_matrix,
+	MatrixAccumulable, MatrixSavable, Savable, col_matrix, matrix, row_matrix,
 };
 use crate::tensor::{self, DType, Tensor, TensorSize};
 

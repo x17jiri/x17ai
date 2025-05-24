@@ -412,6 +412,14 @@ pub fn sum_all(tensor: &Tensor) -> f64 {
 	sum
 }
 
+pub fn approx_eq(a: &Tensor, b: &Tensor, eps: f64) -> bool {
+	let mut result = true;
+	__elem_wise([a, b], |[a, b]| {
+		result &= a.buffer.approx_eq(&a, &b, eps);
+	});
+	result
+}
+
 //--------------------------------------------------------------------------------------------------
 
 pub struct Softmax<'a> {
