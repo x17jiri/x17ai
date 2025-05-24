@@ -3,7 +3,6 @@
 
 pub mod cpu;
 
-use std::fmt;
 use std::rc::Rc;
 
 use super::TensorSize;

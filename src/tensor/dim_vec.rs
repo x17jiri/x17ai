@@ -5,7 +5,6 @@
 
 use smallvec::SmallVec;
 use std::intrinsics::cold_path;
-use std::num::NonZeroU32;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 
 use super::TensorSize;

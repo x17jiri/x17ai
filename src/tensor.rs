@@ -10,15 +10,13 @@ pub mod dtype;
 pub mod math;
 
 use core::panic;
-use smallvec::{SmallVec, smallvec};
-use std::alloc::Layout;
-use std::intrinsics::{cold_path, likely, unlikely};
+use std::fmt;
+use std::intrinsics::likely;
 use std::iter::ExactSizeIterator;
 use std::mem::MaybeUninit;
-use std::num::{NonZeroU32, NonZeroUsize};
-use std::ops::{Deref, DerefMut, Index, IndexMut};
-use std::rc::{Rc, Weak};
-use std::{array, fmt};
+use std::num::NonZeroU32;
+use std::ops::Index;
+use std::rc::Rc;
 
 use buffer::{Buffer, BufferBase};
 use dim_vec::{DimVec, SizeAndStride};
@@ -368,8 +366,9 @@ impl Tensor {
 	}
 
 	/// Reshapes the last `n_dims_to_reshape` dimensions of the tensor
-	pub fn reshape_n(mut self, n_dims_to_reshape: usize, new_shape: &[TensorSize]) -> Tensor {
-		todo!("reshape_n");
+	pub fn reshape_n(self, _n_dims_to_reshape: usize, _new_shape: &[TensorSize]) -> Tensor {
+		todo!("reshape_n"); // TODO
+		//
 		/*
 		let dims = &mut self.dims;
 		let ndim = dims.len();

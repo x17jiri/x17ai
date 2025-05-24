@@ -3,8 +3,7 @@
 
 use log::warn;
 use smallvec::{SmallVec, smallvec};
-use std::intrinsics::{cold_path, likely, unlikely};
-use std::{default, fmt};
+use std::intrinsics::cold_path;
 
 use super::TensorSize;
 use super::dim_vec::{INLINE_DIMS, SizeAndStride};

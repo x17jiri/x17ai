@@ -1,37 +1,11 @@
 // Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
-#![allow(non_snake_case)]
-#![allow(incomplete_features)]
-#![allow(internal_features)]
-#![feature(core_intrinsics)]
-#![feature(inherent_associated_types)]
-#![feature(stmt_expr_attributes)]
-#![warn(clippy::cast_lossless)]
-#![feature(let_chains)]
-#![allow(unused_imports)] // TODO - remove when project stabilizes
-#![allow(dead_code)] // TODO - remove when project stabilizes
-#![feature(arbitrary_self_types)]
-#![feature(dispatch_from_dyn)]
-#![feature(generic_const_exprs)]
-#![feature(adt_const_params)]
-#![allow(non_upper_case_globals)]
-#![feature(new_range_api)]
-#![feature(maybe_uninit_uninit_array)]
-#![feature(maybe_uninit_array_assume_init)]
-
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
-
-use nn::layers::{Layer, Linear, LossFunction, SoftmaxCrossEntropy};
-use nn::{EvalContext, ModelContext};
-use tensor::device::cpu::CPUDevice;
-use tensor::math::Savable;
-use tensor::{DType, Tensor};
-
-mod format;
-mod nn;
-mod tensor;
+use x17ai::nn::layers::{Layer, Linear, LossFunction, SoftmaxCrossEntropy};
+use x17ai::nn::{EvalContext, ModelContext};
+use x17ai::tensor::device::cpu::CPUDevice;
+use x17ai::tensor::math::Savable;
+use x17ai::tensor::{self, DType, Tensor};
 
 /*
 struct Attention {
@@ -206,7 +180,7 @@ fn main() {
 	println!("loss_value = {}", loss_value);
 	println!("--------------------------------------------------");
 
-	for i in 0..1000 {
+	for _ in 0..1000 {
 		//		println!("Step {}", i);
 		//		println!();
 
