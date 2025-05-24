@@ -25,8 +25,6 @@ pub use device::Device;
 pub use dtype::DType;
 use dtype::HasDType;
 
-use crate::tensor;
-
 //--------------------------------------------------------------------------------------------------
 
 pub type TensorSize = u32;
@@ -36,6 +34,23 @@ pub fn tensor_size_to_usize(size: TensorSize) -> usize {
 	usize::try_from(size).unwrap()
 }
 
+//--------------------------------------------------------------------------------------------------
+
+#[macro_export]
+macro_rules! data1d {
+    ( $( $x:expr ),* $(,)? ) => {
+        vec![$($x),*]
+    };
+}
+
+#[macro_export]
+macro_rules! data2d {
+    ( $( [ $( $x:expr ),* ] ),* $(,)? ) => {
+        vec![
+            $(vec![$($x),*]),*
+        ]
+    };
+}
 //--------------------------------------------------------------------------------------------------
 
 pub struct ShapeView<'a> {
