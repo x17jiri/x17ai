@@ -1,7 +1,7 @@
 import sys
 import torch
 
-def gen_softmax_data():
+def gen_softmax():
 	inp = torch.tensor([
 		[-1.2719, -0.6884, -0.6477, -1.3343, -1.7648],
 		[-1.9440,  0.9989,  2.8260, -0.3503, -0.5406],
@@ -24,7 +24,7 @@ def gen_softmax_data():
 
 	print("expected_d_inp = ", inp.grad)
 
-def gen_rms_norm_data():
+def gen_rms_norm():
 	inp = torch.tensor([
 		[-1.2719, -0.6884, -0.6477, -1.3343, -1.7648],
 		[-1.9440,  0.9989,  2.8260, -0.3503, -0.5406],
@@ -47,7 +47,7 @@ def gen_rms_norm_data():
 
 	print("expected_d_inp = ", inp.grad)
 
-def gen_skip_con_data():
+def gen_skip_con():
 	inp = torch.tensor([
 		[-1.2719, -0.6884, -0.6477, -1.3343, -1.7648],
 		[-1.9440,  0.9989,  2.8260, -0.3503, -0.5406],
@@ -70,7 +70,7 @@ def gen_skip_con_data():
 
 	print("expected_d_inp = ", inp.grad)
 
-def gen_swiglu_data():
+def gen_swiglu():
 	input = torch.tensor([
 		[
 			[-0.8714,  0.0940, -1.8542,  0.7304, -0.2773, -0.7002, -0.6732],
@@ -105,6 +105,9 @@ def gen_swiglu_data():
 
 	print("expected_d_inp = ", input.grad)
 
+def gen_linear():
+	input =
+
 what = ''
 try:
 	what = sys.argv[1]
@@ -112,10 +115,11 @@ except:
 	pass
 
 options = {
-	'softmax': gen_softmax_data,
-	'rms_norm': gen_rms_norm_data,
-	'skip_con': gen_skip_con_data,
-	'swiglu': gen_swiglu_data,
+	'softmax': gen_softmax,
+	'rms_norm': gen_rms_norm,
+	'skip_con': gen_skip_con,
+	'swiglu': gen_swiglu,
+	'linear': gen_linear,
 }
 
 if __name__ == "__main__":

@@ -27,7 +27,7 @@ pub struct Linear {
 	input_shape: [TensorSize; 1],
 	output_shape: [TensorSize; 1],
 
-	weights: Rc<RefCell<Param>>,
+	pub(crate) weights: Rc<RefCell<Param>>,
 
 	forward_scale: f64,
 	backward_scale: f64, // TODO - do we need to scale the backward pass?
