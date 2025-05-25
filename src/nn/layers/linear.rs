@@ -150,7 +150,7 @@ impl Layer for Linear {
 ///     input: [..., inputs]
 ///     output: [..., head, outputs]
 pub struct MultiheadLinear {
-	linear: Linear,
+	pub(crate) linear: Linear,
 
 	output_shape: [TensorSize; 2],
 }

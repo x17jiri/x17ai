@@ -106,7 +106,41 @@ def gen_swiglu():
 	print("expected_d_inp = ", input.grad)
 
 def gen_linear():
-	input =
+	weights = torch.tensor([
+		[-0.7392, -0.4243, -2.2199, -0.7662, -0.4344],
+		[-1.1176, -0.5131,  0.5884,  1.6860, -0.5456],
+		[-0.6692, -0.7482, -0.5937, -0.4305, -1.6972],
+		[ 1.0881, -0.7972, -1.2000, -0.6788, -0.9008],
+		[ 1.8882, -1.1999,  0.3821, -0.2152,  0.2094],
+		[-1.1796, -1.8167,  1.2314, -0.6760,  0.0761],
+	], dtype=torch.float32, requires_grad=True)
+
+	input = torch.tensor([
+		[-1.2794, -0.1038,  0.3636, -0.0918, -0.6903],
+		[-0.2495, -1.7407, -0.4136,  1.2375,  0.0408],
+		[ 0.2060, -1.0269,  0.2663,  1.8425,  1.4105],
+		[-1.8738,  1.0913,  0.5786, -0.8210,  0.0362],
+	], dtype=torch.float32, requires_grad=True)
+
+	out = torch.matmul(weights, input.T).T
+	forward_scale = (1.0 / (weights.shape[1] ** 0.5))
+	backward_scale = (1.0 / ((weights.shape[0]/2) ** 0.5))
+	scaled_out = out * forward_scale
+
+	print("expected_out = ", scaled_out)
+
+	d_out = torch.tensor([
+		[-1.2192,  0.9470, -1.0698,  1.0365,  0.1644, -0.1481],
+		[-1.0424, -0.4814, -1.5834,  0.4658,  1.0362, -0.2995],
+		[-0.5644,  1.4450, -1.0186, -0.5245,  2.2684, -0.5567],
+		[-0.9963, -1.7835,  0.6185,  2.0077, -0.5136, -0.9927]
+	], dtype=torch.float32)
+
+	out.backward(d_out)
+
+	d_inp = input.grad * backward_scale
+
+	print("expected_d_inp = ", d_inp);
 
 what = ''
 try:

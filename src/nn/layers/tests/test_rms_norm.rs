@@ -38,8 +38,7 @@ fn test_rms_norm() {
 	);
 
 	let mut ctx = EvalContext::new(true);
-	let out = expected_out.new_empty_like();
-	rms_norm.forward(inp.clone(), &mut ctx).save_to(&out);
+	let out = rms_norm.forward(inp.clone(), &mut ctx);
 
 	assert!(tensor::math::approx_eq(&out, &expected_out, 1e-4));
 
@@ -63,8 +62,7 @@ fn test_rms_norm() {
 		]
 	);
 
-	let d_inp = expected_d_inp.new_empty_like();
-	rms_norm.backward(d_out.clone(), &mut ctx).save_to(&d_inp);
+	let d_inp = rms_norm.backward(d_out.clone(), &mut ctx);
 
 	println!("d_inp = {d_inp}");
 	println!("expected_d_inp = {expected_d_inp}");

@@ -47,8 +47,7 @@ fn test_swiglu() {
 	);
 
 	let mut ctx = EvalContext::new(true);
-	let out = expected_out.new_empty_like();
-	swiglu.forward(inp.clone(), &mut ctx).save_to(&out);
+	let out = swiglu.forward(inp.clone(), &mut ctx);
 
 	assert!(tensor::math::approx_eq(&out, &expected_out, 1e-4));
 
@@ -89,8 +88,7 @@ fn test_swiglu() {
 		]
 	);
 
-	let d_inp = expected_d_inp.new_empty_like();
-	swiglu.backward(d_out.clone(), &mut ctx).save_to(&d_inp);
+	let d_inp = swiglu.backward(d_out.clone(), &mut ctx);
 
 	assert!(tensor::math::approx_eq(&d_inp, &expected_d_inp, 1e-4));
 }

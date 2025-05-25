@@ -39,8 +39,7 @@ fn test_skip_con() {
 	);
 
 	let mut ctx = EvalContext::new(true);
-	let out = expected_out.new_empty_like();
-	skip_con.forward(inp.clone(), &mut ctx).save_to(&out);
+	let out = skip_con.forward(inp.clone(), &mut ctx);
 
 	assert!(tensor::math::approx_eq(&out, &expected_out, 1e-4));
 
@@ -64,8 +63,7 @@ fn test_skip_con() {
 		]
 	);
 
-	let d_inp = expected_d_inp.new_empty_like();
-	skip_con.backward(d_out.clone(), &mut ctx).save_to(&d_inp);
+	let d_inp = skip_con.backward(d_out.clone(), &mut ctx);
 
 	println!("d_inp = {d_inp}");
 	println!("expected_d_inp = {expected_d_inp}");
