@@ -68,19 +68,13 @@ impl<const N: usize> DimMerger<N> {
 			});
 
 			// Find common size and reset stride to 0 for broadcasted inputs
-			let mut size = 1;
+			let size = next_dim.iter().fold(1, |size, inp| if size == 1 { inp.size } else { size });
 			let strides = next_dim.map(|inp| {
-				if size == 1 {
-					// All inputs so far had size 1
-					size = inp.size;
+				if inp.size == size {
 					inp.stride
 				} else {
-					if inp.size == size {
-						inp.stride
-					} else {
-						assert!(inp.size == 1, "dimensions don't match");
-						0
-					}
+					assert!(inp.size == 1, "dimensions don't match");
+					0
 				}
 			});
 			let next_dim = MergedDim { size, strides };
@@ -140,6 +134,10 @@ impl<const N: usize> MergedDimList<N> {
 	pub fn iter(&self) -> MergedDimIter<'_, N> {
 		let slice = unsafe { self.dims_increasing.get_unchecked(self.start..) };
 		MergedDimIter { iter: slice.iter() }
+	}
+
+	pub fn len(&self) -> usize {
+		self.dims_increasing.len() - self.start
 	}
 }
 

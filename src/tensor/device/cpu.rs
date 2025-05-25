@@ -37,11 +37,13 @@ mod math {
 	}
 
 	pub fn swish(x: f64) -> f64 {
-		x * sigmoid(x)
+		let sigmoid = sigmoid(x);
+		x * sigmoid
 	}
 
 	pub fn swiglu(lin: f64, gate: f64) -> f64 {
-		lin * swish(gate)
+		let swish = swish(gate);
+		lin * swish
 	}
 
 	pub fn swiglu_backward(lin: f64, gate: f64) -> (f64, f64) {

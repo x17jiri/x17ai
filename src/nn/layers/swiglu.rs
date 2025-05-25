@@ -44,8 +44,8 @@ impl Layer for SwiGLU {
 
 	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Tensor {
 		let out = inp.new_replace_tail(2, &self.output_shape);
-		let lin = inp.clone().slice(-2, 0..1);
-		let gate = inp.slice(-2, 1..2);
+		let lin = inp.clone().slice(-2, 0..1).merge_dims::<2>();
+		let gate = inp.slice(-2, 1..2).merge_dims::<2>();
 
 		tensor::math::swiglu(&lin, &gate).save_to(&out);
 
@@ -64,8 +64,8 @@ impl Layer for SwiGLU {
 		let [lin, gate] = ctx.tensors.get();
 
 		let d_inp = d_out.new_replace_tail(1, &self.input_shape);
-		let d_lin = d_inp.clone().slice(-2, 0..1);
-		let d_gate = d_inp.clone().slice(-2, 1..2);
+		let d_lin = d_inp.clone().slice(-2, 0..1).merge_dims::<2>();
+		let d_gate = d_inp.clone().slice(-2, 1..2).merge_dims::<2>();
 
 		tensor::math::swiglu_backward(&d_out, &lin, &gate).save_to(&d_lin, &d_gate);
 

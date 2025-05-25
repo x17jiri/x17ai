@@ -9,6 +9,9 @@ pub mod dim_vec;
 pub mod dtype;
 pub mod math;
 
+#[cfg(test)]
+mod tests;
+
 use core::panic;
 use std::fmt;
 use std::intrinsics::likely;
@@ -51,6 +54,20 @@ macro_rules! data2d {
         ]
     };
 }
+
+#[macro_export]
+macro_rules! data3d {
+	( $( [ $( [ $( $x:expr ),* ] ),* $(,)? ] ),* $(,)? ) => {
+		vec![
+			$(
+				vec![
+					$(vec![$($x),*]),*
+				]
+			),*
+		]
+	};
+}
+
 //--------------------------------------------------------------------------------------------------
 
 pub struct ShapeView<'a> {
@@ -514,7 +531,7 @@ impl Tensor {
 		let x = value.len();
 		let x = TensorSize::try_from(x).expect("length too large");
 
-		let mut tensor = Self::new_empty_on(&[x], T::dtype(), device);
+		let tensor = Self::new_empty_on(&[x], T::dtype(), device);
 		tensor.fill_1d(value);
 		tensor
 	}
@@ -528,8 +545,29 @@ impl Tensor {
 		assert!(value.iter().all(|row| row.len() == x), "rows have different lengths");
 		let x = TensorSize::try_from(x).expect("length too large");
 
-		let mut tensor = Self::new_empty_on(&[y, x], T::dtype(), device);
+		let tensor = Self::new_empty_on(&[y, x], T::dtype(), device);
 		tensor.fill_2d(value);
+		tensor
+	}
+
+	#[inline(never)]
+	pub fn new_3d<T: HasDType>(device: Rc<dyn Device>, value: Vec<Vec<Vec<T>>>) -> Tensor {
+		let z = value.len();
+		let z = TensorSize::try_from(z).expect("length too large");
+
+		let y = value.get(0).map_or(0, |mat| mat.len());
+		assert!(value.iter().all(|mat| mat.len() == y), "matrices have different numbers of rows");
+		let y = TensorSize::try_from(y).expect("length too large");
+
+		let x = value.get(0).and_then(|mat| mat.get(0)).map_or(0, |row| row.len());
+		assert!(
+			value.iter().all(|mat| mat.iter().all(|row| row.len() == x)),
+			"rows have different lengths"
+		);
+		let x = TensorSize::try_from(x).expect("length too large");
+
+		let tensor = Self::new_empty_on(&[z, y, x], T::dtype(), device);
+		tensor.fill_3d(value);
 		tensor
 	}
 
@@ -592,6 +630,58 @@ impl Tensor {
 			self.buffer.load_data(dtype, offset, x, buf);
 		}
 	}
+
+	#[inline(never)]
+	pub fn fill_3d<T: HasDType>(&self, value: Vec<Vec<Vec<T>>>) {
+		let z = value.len();
+		let z = TensorSize::try_from(z).expect("length too large");
+
+		let y = value.get(0).map_or(0, |mat| mat.len());
+		assert!(value.iter().all(|mat| mat.len() == y), "matrices have different numbers of rows");
+		let y = TensorSize::try_from(y).expect("length too large");
+
+		let x = value.get(0).and_then(|mat| mat.get(0)).map_or(0, |row| row.len());
+		assert!(
+			value.iter().all(|mat| mat.iter().all(|row| row.len() == x)),
+			"rows have different lengths"
+		);
+		let x = TensorSize::try_from(x).expect("length too large");
+
+		assert!(self.ndim() == 3, "fill_3d() can only be used on 3D tensors");
+
+		assert!(self.dims[2].size == x, "invalid size");
+		assert!(self.dims[2].size <= 1 || self.dims[2].stride == 1, "tensor is not contiguous");
+
+		assert!(self.dims[1].size == y, "invalid size");
+		assert!(self.dims[1].size <= 1 || self.dims[1].stride >= x, "output overlap");
+
+		assert!(self.dims[0].size == z, "invalid size");
+		assert!(
+			self.dims[0].size <= 1 || self.dims[0].stride >= y * self.dims[1].stride,
+			"output overlap"
+		);
+
+		assert!(self.dtype == T::dtype(), "invalid dtype");
+		let dtype = self.dtype;
+
+		for (i, mat) in value.into_iter().enumerate() {
+			let offset = self.offset + (i as TensorSize) * self.dims[0].stride;
+
+			for (j, row) in mat.into_iter().enumerate() {
+				let row_offset = offset + (j as TensorSize) * self.dims[1].stride;
+
+				let buf = row.as_slice();
+				let buf = unsafe {
+					std::slice::from_raw_parts(
+						buf.as_ptr() as *const u8,
+						buf.len() * std::mem::size_of::<T>(),
+					)
+				};
+
+				self.buffer.load_data(dtype, row_offset, x, buf);
+			}
+		}
+	}
 }
 
 fn fmt_0d(tensor: &Tensor, f: &mut fmt::Formatter, offset: TensorSize) -> fmt::Result {
@@ -607,15 +697,20 @@ fn fmt_1d(tensor: &Tensor, f: &mut fmt::Formatter, offset: TensorSize) -> fmt::R
 	write!(f, "]")
 }
 
-fn fmt_2d(tensor: &Tensor, f: &mut fmt::Formatter, offset: TensorSize) -> fmt::Result {
-	writeln!(f, "[")?;
-	let dim = tensor.dims[tensor.ndim() - 2];
+fn fmt_Nd(tensor: &Tensor, f: &mut fmt::Formatter, offset: TensorSize, d: usize) -> fmt::Result {
+	let indent = "\t".repeat(d);
+	writeln!(f, "{indent}[")?;
+	let dim = tensor.dims[d];
 	for i in 0..dim.size {
-		write!(f, "\t")?;
-		fmt_1d(tensor, f, offset + i * dim.stride)?;
+		write!(f, "{indent}\t")?;
+		if d + 1 < tensor.ndim() - 1 {
+			fmt_Nd(tensor, f, offset + i * dim.stride, d + 1)?;
+		} else {
+			fmt_1d(tensor, f, offset + i * dim.stride)?;
+		}
 		writeln!(f, ",")?;
 	}
-	write!(f, "]")
+	write!(f, "{indent}]")
 }
 
 impl fmt::Display for Tensor {
@@ -624,10 +719,7 @@ impl fmt::Display for Tensor {
 		match self.ndim() {
 			0 => fmt_0d(self, f, 0)?,
 			1 => fmt_1d(self, f, 0)?,
-			2 => fmt_2d(self, f, 0)?,
-			_ => {
-				todo!("Tensor with {} dimensions", self.ndim());
-			},
+			_ => fmt_Nd(self, f, 0, 0)?,
 		};
 		write!(f, ")")
 	}
