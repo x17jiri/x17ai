@@ -24,6 +24,12 @@ impl HasDType for f32 {
 	}
 }
 
+impl HasDType for f64 {
+	fn dtype() -> DType {
+		DType::F64
+	}
+}
+
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct DType {
 	pub kind: DTypeKind,
@@ -61,6 +67,11 @@ impl DType {
 	pub const F32: Self = Self {
 		kind: DTypeKind::Float,
 		bits: NonZeroU8::new(32).unwrap(),
+	};
+
+	pub const F64: Self = Self {
+		kind: DTypeKind::Float,
+		bits: NonZeroU8::new(64).unwrap(),
 	};
 }
 

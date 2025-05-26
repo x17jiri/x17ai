@@ -1,7 +1,6 @@
 // Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
-use std::alloc::{Global, GlobalAlloc};
 use std::boxed::Box;
 use std::cell::{Cell, RefCell};
 use std::fmt;
@@ -82,21 +81,6 @@ impl<'a, T> CPUSliceSet<'a, T> {
 
 type CPUBufferElement = u64;
 
-struct CPUBuffer {
-	memory: Box<[Cell<CPUBufferElement>]>,
-}
-
-impl CPUBuffer {
-	#[inline]
-	fn as_slice<T>(&self, dtype: DType) -> &[Cell<T>] {
-		debug_assert!(dtype.bytes() == std::mem::size_of::<T>());
-		let ptr = self.memory.as_ptr() as *const Cell<T>;
-		let bytes = self.memory.len() * std::mem::size_of::<CPUBufferElement>();
-		let elems = bytes / std::mem::size_of::<T>();
-		unsafe { std::slice::from_raw_parts(ptr, elems) }
-	}
-}
-
 //--------------------------------------------------------------------------------------------------
 
 #[derive(std::marker::ConstParamTy, PartialEq, Eq)]
@@ -121,19 +105,25 @@ impl CPUDevice {
 		})
 	}
 
-	fn cast_buffer(&self, buf: &Buffer) -> &CPUBuffer {
-		assert!(buf.is_on_device(self));
-		unsafe { buf.device_buffer.cast().as_ref() }
-	}
+	fn cast_slice_set<'a, T: HasDType>(&'a self, slice_set: &SliceSet<'a>) -> CPUSliceSet<'a, T> {
+		let buffer = slice_set.buffer;
+		assert!(buffer.is_on_device(self));
 
-	fn cast_slices<'a, T: HasDType>(&'a self, slices: &'a SliceSet<'a>) -> CPUSliceSet<'a, T> {
-		let buffer = self.cast_buffer(slices.buffer);
-		assert!(T::dtype() == slices.dtype);
-		let buffer = buffer.as_slice::<T>(slices.dtype);
-		let len = slices.len as usize;
-		let count = slices.count as usize;
-		let stride = slices.stride as usize;
-		let begin = slices.offset as usize;
+		let dtype = slice_set.dtype;
+		assert!(dtype == T::dtype());
+		debug_assert!(dtype.bytes() == std::mem::size_of::<T>());
+
+		let buffer = unsafe {
+			let ptr = buffer.device_buffer.as_ptr() as *const Cell<T>;
+			let bytes = buffer.size_bytes;
+			let elems = bytes / std::mem::size_of::<T>();
+			std::slice::from_raw_parts(ptr, elems)
+		};
+
+		let len = slice_set.len as usize;
+		let count = slice_set.count as usize;
+		let stride = slice_set.stride as usize;
+		let begin = slice_set.offset as usize;
 		let end = begin + if count > 0 { (count - 1) * stride + len } else { 0 };
 		let buffer = &buffer[begin..end];
 		CPUSliceSet { buffer, len, count, stride }
@@ -170,9 +160,11 @@ impl CPUDevice {
 	}
 	*/
 
-	fn array_wise<'a, T: Copy, const N: usize>(
-		slices: [CPUSliceSet<'a, T>; N], mut f: impl FnMut([&[Cell<T>]; N]),
+	fn array_wise<'a, T: Copy + HasDType, const N: usize>(
+		&self, slices: [&SliceSet<'a>; N], mut f: impl FnMut([&[Cell<T>]; N]),
 	) {
+		let slices = slices.map(|s| self.cast_slice_set::<T>(s));
+
 		let count = slices.get(0).map_or(0, |s| s.count);
 		assert!(slices.iter().all(|s| s.count == count));
 
@@ -184,13 +176,13 @@ impl CPUDevice {
 		}
 	}
 
-	fn elem_wise<'a, T: Copy, const N: usize>(
-		slices: [CPUSliceSet<'a, T>; N], mut f: impl FnMut([&Cell<T>; N]),
+	fn elem_wise<'a, T: Copy + HasDType, const N: usize>(
+		&self, slices: [&SliceSet<'a>; N], mut f: impl FnMut([&Cell<T>; N]),
 	) {
-		let len = slices.get(0).map_or(0, |s| s.len);
-		assert!(slices.iter().all(|i| i.len == len));
+		let len = slices.get(0).map_or(0, |s| s.len as usize);
+		assert!(slices.iter().all(|i| i.len as usize == len));
 
-		Self::array_wise::<T, N>(slices, |arrays| {
+		self.array_wise::<T, N>(slices, |arrays| {
 			for i in 0..len {
 				f(arrays.map(|array| {
 					debug_assert!(i < array.len());
@@ -201,34 +193,34 @@ impl CPUDevice {
 		});
 	}
 
-	fn elem_wise_bin<'a, T: Copy, const C: Commutativity>(
-		dst: CPUSliceSet<'a, T>, a_inp: CPUSliceSet<'a, T>, b_inp: CPUSliceSet<'a, T>,
+	fn elem_wise_bin<'a, T: Copy + HasDType, const C: Commutativity>(
+		&self, dst: &SliceSet<'a>, a_inp: &SliceSet<'a>, b_inp: &SliceSet<'a>,
 		f: impl FnMut(&Cell<T>, T, T) -> T,
 	) {
 		if a_inp.len == 1 && b_inp.len == 1 {
-			return Self::elem_wise_bin_nbb::<T>(dst, a_inp, b_inp, f);
+			return self.elem_wise_bin_nbb::<T>(dst, a_inp, b_inp, f);
 		}
 		if b_inp.len == 1 {
-			return Self::elem_wise_bin_nnb::<T>(dst, a_inp, b_inp, f);
+			return self.elem_wise_bin_nnb::<T>(dst, a_inp, b_inp, f);
 		}
 		if a_inp.len == 1 {
 			if C == Commutative {
-				return Self::elem_wise_bin_nnb::<T>(dst, b_inp, a_inp, f);
+				return self.elem_wise_bin_nnb::<T>(dst, b_inp, a_inp, f);
 			} else {
-				return Self::elem_wise_bin_nbn::<T>(dst, a_inp, b_inp, f);
+				return self.elem_wise_bin_nbn::<T>(dst, a_inp, b_inp, f);
 			}
 		}
-		Self::elem_wise_bin_nnn::<T>(dst, a_inp, b_inp, f);
+		self.elem_wise_bin_nnn::<T>(dst, a_inp, b_inp, f);
 	}
 
-	fn elem_wise_bin_nnn<'a, T: Copy>(
-		dst: CPUSliceSet<'a, T>, a_inp: CPUSliceSet<'a, T>, b_inp: CPUSliceSet<'a, T>,
+	fn elem_wise_bin_nnn<'a, T: Copy + HasDType>(
+		&self, dst: &SliceSet<'a>, a_inp: &SliceSet<'a>, b_inp: &SliceSet<'a>,
 		mut f: impl FnMut(&Cell<T>, T, T) -> T,
 	) {
 		let len = dst.len;
 		assert!(a_inp.len == len);
 		assert!(b_inp.len == len);
-		Self::array_wise([dst, a_inp, b_inp], |[dst_arr, a_arr, b_arr]| {
+		self.array_wise::<T, 3>([dst, a_inp, b_inp], |[dst_arr, a_arr, b_arr]| {
 			for (d, (a, b)) in dst_arr.iter().zip(a_arr.iter().zip(b_arr)) {
 				let val = f(d, a.get(), b.get());
 				d.set(val);
@@ -236,14 +228,14 @@ impl CPUDevice {
 		});
 	}
 
-	fn elem_wise_bin_nnb<'a, T: Copy>(
-		dst: CPUSliceSet<'a, T>, a_inp: CPUSliceSet<'a, T>, b_inp: CPUSliceSet<'a, T>,
+	fn elem_wise_bin_nnb<'a, T: Copy + HasDType>(
+		&self, dst: &SliceSet<'a>, a_inp: &SliceSet<'a>, b_inp: &SliceSet<'a>,
 		mut f: impl FnMut(&Cell<T>, T, T) -> T,
 	) {
 		let len = dst.len;
 		assert!(a_inp.len == len);
 		assert!(b_inp.len == 1);
-		Self::array_wise([dst, a_inp, b_inp], |[dst_arr, a_arr, b_arr]| {
+		self.array_wise::<T, 3>([dst, a_inp, b_inp], |[dst_arr, a_arr, b_arr]| {
 			let b = b_arr[0].get();
 			for (d, a) in dst_arr.iter().zip(a_arr) {
 				let val = f(d, a.get(), b);
@@ -252,14 +244,14 @@ impl CPUDevice {
 		});
 	}
 
-	fn elem_wise_bin_nbn<'a, T: Copy>(
-		dst: CPUSliceSet<'a, T>, a_inp: CPUSliceSet<'a, T>, b_inp: CPUSliceSet<'a, T>,
+	fn elem_wise_bin_nbn<'a, T: Copy + HasDType>(
+		&self, dst: &SliceSet<'a>, a_inp: &SliceSet<'a>, b_inp: &SliceSet<'a>,
 		mut f: impl FnMut(&Cell<T>, T, T) -> T,
 	) {
 		let len = dst.len;
 		assert!(a_inp.len == 1);
 		assert!(b_inp.len == len);
-		Self::array_wise([dst, a_inp, b_inp], |[dst_arr, a_arr, b_arr]| {
+		self.array_wise::<T, 3>([dst, a_inp, b_inp], |[dst_arr, a_arr, b_arr]| {
 			let a = a_arr[0].get();
 			for (d, b) in dst_arr.iter().zip(b_arr) {
 				let val = f(d, a, b.get());
@@ -268,13 +260,13 @@ impl CPUDevice {
 		});
 	}
 
-	fn elem_wise_bin_nbb<'a, T: Copy>(
-		dst: CPUSliceSet<'a, T>, a_inp: CPUSliceSet<'a, T>, b_inp: CPUSliceSet<'a, T>,
+	fn elem_wise_bin_nbb<'a, T: Copy + HasDType>(
+		&self, dst: &SliceSet<'a>, a_inp: &SliceSet<'a>, b_inp: &SliceSet<'a>,
 		mut f: impl FnMut(&Cell<T>, T, T) -> T,
 	) {
 		assert!(a_inp.len == 1);
 		assert!(b_inp.len == 1);
-		Self::array_wise([dst, a_inp, b_inp], |[dst_arr, a_arr, b_arr]| {
+		self.array_wise::<T, 3>([dst, a_inp, b_inp], |[dst_arr, a_arr, b_arr]| {
 			let a = a_arr[0].get();
 			let b = b_arr[0].get();
 			for d in dst_arr {
@@ -501,10 +493,7 @@ impl Device for CPUDevice {
 
 	fn zeros(&self, dst: &SliceSet) {
 		match dst.dtype {
-			DType::F32 => {
-				let dst = self.cast_slices::<f32>(dst);
-				Self::elem_wise([dst], |[d]| d.set(0.0));
-			},
+			DType::F32 => self.elem_wise::<f32, 1>([dst], |[d]| d.set(0.0)),
 			_ => todo!(),
 		}
 	}
@@ -512,105 +501,69 @@ impl Device for CPUDevice {
 	fn randn(&self, dst: &SliceSet) {
 		let mut rng = self.rng.borrow_mut();
 		match dst.dtype {
-			DType::F32 => {
-				let dst = self.cast_slices::<f32>(dst);
-				Self::elem_wise([dst], |[d]| d.set(rng.get_normal() as f32));
-			},
+			DType::F32 => self.elem_wise::<f32, 1>([dst], |[d]| d.set(rng.get_normal() as f32)),
 			_ => todo!(),
 		}
 	}
 
 	fn copy(&self, dst: &SliceSet, src: &SliceSet) {
 		match dst.dtype {
-			DType::F32 => {
-				let dst = self.cast_slices::<f32>(dst);
-				let src = self.cast_slices::<f32>(src);
-				Self::elem_wise([dst, src], |[d, s]| d.set(s.get()));
-			},
+			DType::F32 => self.elem_wise::<f32, 2>([dst, src], |[d, s]| d.set(s.get())),
 			_ => todo!(),
 		}
 	}
 
 	fn acc(&self, dst: &SliceSet, dst_weight: f64, new: &SliceSet, new_weight: f64) {
 		match dst.dtype {
-			DType::F32 => {
-				let dst = self.cast_slices::<f32>(dst);
-				let new = self.cast_slices::<f32>(new);
-				Self::elem_wise([dst, new], |[d, n]| {
-					let d_val = f64::from(d.get());
-					let n_val = f64::from(n.get());
-					let val = d_val * dst_weight + n_val * new_weight;
-					d.set(val as f32)
-				});
-			},
+			DType::F32 => self.elem_wise::<f32, 2>([dst, new], |[d, n]| {
+				let d_val = f64::from(d.get());
+				let n_val = f64::from(n.get());
+				let val = d_val * dst_weight + n_val * new_weight;
+				d.set(val as f32)
+			}),
 			_ => todo!(),
 		}
 	}
 
 	fn mul(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet) {
 		match dst.dtype {
-			DType::F32 => {
-				let dst = self.cast_slices(dst);
-				let a = self.cast_slices(a);
-				let b = self.cast_slices(b);
-				Self::elem_wise_bin::<f32, Commutative>(dst, a, b, |_, a, b| a * b);
-			},
+			DType::F32 => self.elem_wise_bin::<f32, Commutative>(dst, a, b, |_, a, b| a * b),
 			_ => todo!(),
 		}
 	}
 
 	fn mul_acc(&self, dst: &SliceSet, dst_weight: f64, a: &SliceSet, b: &SliceSet, ab_weight: f64) {
 		match dst.dtype {
-			DType::F32 => {
-				let dst = self.cast_slices(dst);
-				let a = self.cast_slices(a);
-				let b = self.cast_slices(b);
-				Self::elem_wise_bin::<f32, Commutative>(dst, a, b, |d, a, b| {
-					let d = f64::from(d.get());
-					let a = f64::from(a);
-					let b = f64::from(b);
-					(d * dst_weight + a * b * ab_weight) as f32
-				});
-			},
+			DType::F32 => self.elem_wise_bin::<f32, Commutative>(dst, a, b, |d, a, b| {
+				let d = f64::from(d.get());
+				let a = f64::from(a);
+				let b = f64::from(b);
+				(d * dst_weight + a * b * ab_weight) as f32
+			}),
 			_ => todo!(),
 		}
 	}
 
 	fn sub(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet) {
 		match dst.dtype {
-			DType::F32 => {
-				let dst = self.cast_slices(dst);
-				let a = self.cast_slices(a);
-				let b = self.cast_slices(b);
-				Self::elem_wise_bin::<f32, NonCommutative>(dst, a, b, |_, a, b| a - b);
-			},
+			DType::F32 => self.elem_wise_bin::<f32, NonCommutative>(dst, a, b, |_, a, b| a - b),
 			_ => todo!(),
 		}
 	}
 
 	fn add(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet) {
 		match dst.dtype {
-			DType::F32 => {
-				let dst = self.cast_slices(dst);
-				let a = self.cast_slices(a);
-				let b = self.cast_slices(b);
-				Self::elem_wise_bin::<f32, Commutative>(dst, a, b, |_, a, b| a + b);
-			},
+			DType::F32 => self.elem_wise_bin::<f32, Commutative>(dst, a, b, |_, a, b| a + b),
 			_ => todo!(),
 		}
 	}
 
 	fn swiglu(&self, dst: &SliceSet, lin: &SliceSet, gate: &SliceSet) {
 		match dst.dtype {
-			DType::F32 => {
-				let dst = self.cast_slices::<f32>(dst);
-				let lin = self.cast_slices::<f32>(lin);
-				let gate = self.cast_slices::<f32>(gate);
-				Self::elem_wise([dst, lin, gate], |[dst, lin, gate]| {
-					let forward = math::swiglu(f64::from(lin.get()), f64::from(gate.get()));
-					dst.set(forward as f32);
-				});
-			},
+			DType::F32 => self.elem_wise::<f32, 3>([dst, lin, gate], |[dst, lin, gate]| {
+				let forward = math::swiglu(f64::from(lin.get()), f64::from(gate.get()));
+				dst.set(forward as f32);
+			}),
 			_ => todo!(),
 		}
 	}
@@ -620,26 +573,19 @@ impl Device for CPUDevice {
 		d_out: &SliceSet,
 	) {
 		match d_lin.dtype {
-			DType::F32 => {
-				let d_lin = self.cast_slices::<f32>(d_lin);
-				let d_gate = self.cast_slices::<f32>(d_gate);
-				let lin = self.cast_slices::<f32>(lin);
-				let gate = self.cast_slices::<f32>(gate);
-				let d_out = self.cast_slices::<f32>(d_out);
-				Self::elem_wise(
-					[d_lin, d_gate, lin, gate, d_out],
-					|[d_lin, d_gate, lin, gate, d_out]| {
-						let lin = f64::from(lin.get());
-						let gate = f64::from(gate.get());
-						let d_out = f64::from(d_out.get());
-						let (d_lin_val, d_gate_val) = math::swiglu_backward(lin, gate);
-						let d_lin_val = d_lin_val * d_out;
-						let d_gate_val = d_gate_val * d_out;
-						d_lin.set(d_lin_val as f32);
-						d_gate.set(d_gate_val as f32);
-					},
-				);
-			},
+			DType::F32 => self.elem_wise::<f32, 5>(
+				[d_lin, d_gate, lin, gate, d_out],
+				|[d_lin, d_gate, lin, gate, d_out]| {
+					let lin = f64::from(lin.get());
+					let gate = f64::from(gate.get());
+					let d_out = f64::from(d_out.get());
+					let (d_lin_val, d_gate_val) = math::swiglu_backward(lin, gate);
+					let d_lin_val = d_lin_val * d_out;
+					let d_gate_val = d_gate_val * d_out;
+					d_lin.set(d_lin_val as f32);
+					d_gate.set(d_gate_val as f32);
+				},
+			),
 			_ => todo!(),
 		}
 	}
@@ -647,11 +593,8 @@ impl Device for CPUDevice {
 	fn dot(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet, ab_weight: f64) {
 		assert!(a.len == b.len);
 		assert!(dst.len == 1);
-		let dst = self.cast_slices(dst);
-		let a = self.cast_slices(a);
-		let b = self.cast_slices(b);
 		match dst.dtype {
-			DType::F32 => Self::array_wise::<f32, 3>([&dst, &a, &b], |[dst, a, b]| {
+			DType::F32 => self.array_wise::<f32, 3>([&dst, &a, &b], |[dst, a, b]| {
 				let val = math::dot(a, b) * ab_weight;
 				let val = f32::from_f64(val);
 				dst[0].set(val);
@@ -663,11 +606,8 @@ impl Device for CPUDevice {
 	fn dot_acc(&self, dst: &SliceSet, dst_weight: f64, a: &SliceSet, b: &SliceSet, ab_weight: f64) {
 		assert!(a.len == b.len);
 		assert!(dst.len == 1);
-		let dst = self.cast_slices(dst);
-		let a = self.cast_slices(a);
-		let b = self.cast_slices(b);
 		match dst.dtype {
-			DType::F32 => Self::array_wise::<f32, 3>([&dst, &a, &b], |[dst, a, b]| {
+			DType::F32 => self.array_wise::<f32, 3>([&dst, &a, &b], |[dst, a, b]| {
 				let old_val = f64::from(dst[0].get());
 				let dot = math::dot(a, b);
 				let val = dst_weight * old_val + ab_weight * dot;
@@ -679,10 +619,9 @@ impl Device for CPUDevice {
 	}
 
 	fn sum_all(&self, a: &SliceSet) -> f64 {
-		let a = self.cast_slices(a);
 		let mut sum = 0.0;
 		match a.dtype {
-			DType::F32 => Self::array_wise::<f32, 1>([&a], |[arr]| {
+			DType::F32 => self.array_wise::<f32, 1>([&a], |[arr]| {
 				sum += arr.iter().map(|x| x.get().to_f64()).sum::<f64>()
 			}),
 			_ => todo!(),
@@ -693,15 +632,11 @@ impl Device for CPUDevice {
 	fn approx_eq(&self, a: &SliceSet, b: &SliceSet, eps: f64) -> bool {
 		let mut result = true;
 		match a.dtype {
-			DType::F32 => {
-				let a = self.cast_slices::<f32>(a);
-				let b = self.cast_slices::<f32>(b);
-				Self::elem_wise([a, b], |[a, b]| {
-					let a_val = f64::from(a.get());
-					let b_val = f64::from(b.get());
-					result &= (a_val - b_val).abs() < eps;
-				});
-			},
+			DType::F32 => self.elem_wise::<f32, 2>([a, b], |[a, b]| {
+				let a_val = f64::from(a.get());
+				let b_val = f64::from(b.get());
+				result &= (a_val - b_val).abs() < eps;
+			}),
 			_ => todo!(),
 		}
 		result
@@ -709,28 +644,20 @@ impl Device for CPUDevice {
 
 	fn rsqrt(&self, dst: &SliceSet, inp: &SliceSet, eps: f64) {
 		match dst.dtype {
-			DType::F32 => {
-				let dst = self.cast_slices::<f32>(dst);
-				let inp = self.cast_slices::<f32>(inp);
-				Self::elem_wise([dst, inp], |[d, i]| {
-					let i = f64::from(i.get());
-					d.set(math::rsqrt(i + eps) as f32);
-				});
-			},
+			DType::F32 => self.elem_wise::<f32, 2>([dst, inp], |[d, i]| {
+				let i = f64::from(i.get());
+				d.set(math::rsqrt(i + eps) as f32);
+			}),
 			_ => todo!(),
 		}
 	}
 
 	fn log_clamped(&self, dst: &SliceSet, a: &SliceSet) {
 		match dst.dtype {
-			DType::F32 => {
-				let dst = self.cast_slices::<f32>(dst);
-				let a = self.cast_slices::<f32>(a);
-				Self::elem_wise::<f32, 2>([dst, a], |[d, a]| {
-					let a = f64::from(a.get());
-					d.set(a.ln().max(-1000.0) as f32);
-				});
-			},
+			DType::F32 => self.elem_wise::<f32, 2>([dst, a], |[d, a]| {
+				let a = f64::from(a.get());
+				d.set(a.ln().max(-1000.0) as f32);
+			}),
 			_ => todo!(),
 		}
 	}
