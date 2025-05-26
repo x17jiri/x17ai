@@ -1,6 +1,7 @@
 // Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
+use log::{error, warn};
 use x17ai::nn::layers::{Layer, Linear, LossFunction, SoftmaxCrossEntropy};
 use x17ai::nn::{EvalContext, ModelContext};
 use x17ai::tensor::device::cpu::CPUDevice;
@@ -137,10 +138,7 @@ impl Module for Transformer {
 }
 */
 fn main() {
-	let dt = f32::dtype();
-	//	let t = tensor![[1, 2, 3], [4, 5, 6],];
-
-	stderrlog::new().module(module_path!()).init().unwrap();
+	stderrlog::new().verbosity(10).init().unwrap();
 
 	let dev = CPUDevice::new("CPU".to_string());
 	let mut mctx = ModelContext::new(dev.clone());

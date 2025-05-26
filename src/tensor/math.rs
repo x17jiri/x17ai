@@ -1,6 +1,8 @@
 // Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
+use crate::tensor::device::AttentionParams;
+
 use super::buffer::{MatrixSet, SliceSet};
 use super::dim_merger::{DimMerger, MergedDimIter, MergedDimList};
 use super::dim_vec::SizeAndStride;
@@ -160,8 +162,9 @@ pub fn zeros() -> Zeros {
 impl Savable for Zeros {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
+		let executor = to.buffer.device.as_ref();
 		__elem_wise([to], |[to]| {
-			to.buffer.zeros(&to);
+			executor.zeros(&to);
 		});
 	}
 }
@@ -177,8 +180,9 @@ pub fn randn() -> Randn {
 impl Savable for Randn {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
+		let executor = to.buffer.device.as_ref();
 		__elem_wise([to], |[to]| {
-			to.buffer.randn(&to);
+			executor.randn(&to);
 		});
 	}
 }
@@ -188,8 +192,9 @@ impl Savable for Randn {
 impl Savable for Tensor {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
+		let executor = to.buffer.device.as_ref();
 		__elem_wise([to, self], |[to, input]| {
-			to.buffer.copy(&to, &input);
+			executor.copy(&to, &input);
 		});
 	}
 }
@@ -197,8 +202,9 @@ impl Savable for Tensor {
 impl Accumulable for Tensor {
 	#[inline(never)]
 	fn acc_to(&self, to: &Tensor, to_weight: f64, expr_weight: f64) {
+		let executor = to.buffer.device.as_ref();
 		__elem_wise([to, self], |[to, input]| {
-			to.buffer.acc(&to, to_weight, &input, expr_weight);
+			executor.acc(&to, to_weight, &input, expr_weight);
 		});
 	}
 }
@@ -217,8 +223,9 @@ pub fn mul<'a>(a: &'a Tensor, b: &'a Tensor) -> Mul<'a> {
 impl<'a> Savable for Mul<'a> {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
+		let executor = to.buffer.device.as_ref();
 		__elem_wise([to, self.a, self.b], |[to, a, b]| {
-			to.buffer.mul(&to, &a, &b);
+			executor.mul(&to, &a, &b);
 		});
 	}
 }
@@ -226,8 +233,9 @@ impl<'a> Savable for Mul<'a> {
 impl<'a> Accumulable for Mul<'a> {
 	#[inline(never)]
 	fn acc_to(&self, to: &Tensor, to_weight: f64, expr_weight: f64) {
+		let executor = to.buffer.device.as_ref();
 		__elem_wise([to, self.a, self.b], |[to, a, b]| {
-			to.buffer.mul_acc(&to, to_weight, &a, &b, expr_weight);
+			executor.mul_acc(&to, to_weight, &a, &b, expr_weight);
 		});
 	}
 }
@@ -246,8 +254,9 @@ pub fn sub<'a>(a: &'a Tensor, b: &'a Tensor) -> Sub<'a> {
 impl<'a> Savable for Sub<'a> {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
+		let executor = to.buffer.device.as_ref();
 		__elem_wise([to, self.a, self.b], |[to, a, b]| {
-			to.buffer.sub(&to, &a, &b);
+			executor.sub(&to, &a, &b);
 		});
 	}
 }
@@ -266,8 +275,9 @@ pub fn add<'a>(a: &'a Tensor, b: &'a Tensor) -> Add<'a> {
 impl<'a> Savable for Add<'a> {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
+		let executor = to.buffer.device.as_ref();
 		__elem_wise([to, self.a, self.b], |[to, a, b]| {
-			to.buffer.add(&to, &a, &b);
+			executor.add(&to, &a, &b);
 		});
 	}
 }
@@ -286,8 +296,9 @@ pub fn rsqrt(tensor: &Tensor, eps: f64) -> RSqrt {
 impl<'a> Savable for RSqrt<'a> {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
+		let executor = to.buffer.device.as_ref();
 		__elem_wise([to, self.tensor], |[to, input]| {
-			to.buffer.rsqrt(&to, &input, self.eps);
+			executor.rsqrt(&to, &input, self.eps);
 		});
 	}
 }
@@ -311,8 +322,9 @@ pub fn log_clamped(tensor: &Tensor) -> LogClamped {
 impl<'a> Savable for LogClamped<'a> {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
+		let executor = to.buffer.device.as_ref();
 		__elem_wise([to, self.tensor], |[to, input]| {
-			to.buffer.log_clamped(&to, &input);
+			executor.log_clamped(&to, &input);
 		});
 	}
 }
@@ -331,8 +343,9 @@ pub fn swiglu<'a>(lin: &'a Tensor, gate: &'a Tensor) -> SwiGLU<'a> {
 impl<'a> Savable for SwiGLU<'a> {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
+		let executor = to.buffer.device.as_ref();
 		__elem_wise([to, self.lin, self.gate], |[to, lin, gate]| {
-			to.buffer.swiglu(&to, &lin, &gate);
+			executor.swiglu(&to, &lin, &gate);
 		});
 	}
 }
@@ -354,10 +367,11 @@ pub fn swiglu_backward<'a>(
 impl<'a> SwiGLUBackward<'a> {
 	#[inline(never)]
 	pub fn save_to(&self, d_lin: &Tensor, d_gate: &Tensor) {
+		let executor = d_lin.buffer.device.as_ref();
 		__elem_wise(
 			[d_lin, d_gate, self.lin, self.gate, self.d_out],
 			|[d_lin, d_gate, lin, gate, d_out]| {
-				d_lin.buffer.swiglu_backward(&d_lin, &d_gate, &lin, &gate, &d_out);
+				executor.swiglu_backward(&d_lin, &d_gate, &lin, &gate, &d_out);
 			},
 		);
 	}
@@ -384,8 +398,9 @@ pub fn dot<'a>(a: &'a Tensor, b: &'a Tensor) -> VecMul<'a> {
 impl<'a> Savable for VecMul<'a> {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
+		let executor = to.buffer.device.as_ref();
 		__vec_wise([to, self.a, self.b], |[to, a, b]| {
-			to.buffer.dot(&to, &a, &b, self.scale);
+			executor.dot(&to, &a, &b, self.scale);
 		});
 	}
 }
@@ -393,8 +408,9 @@ impl<'a> Savable for VecMul<'a> {
 impl Accumulable for VecMul<'_> {
 	#[inline(never)]
 	fn acc_to(&self, to: &Tensor, to_weight: f64, expr_weight: f64) {
+		let executor = to.buffer.device.as_ref();
 		__vec_wise([to, self.a, self.b], |[to, a, b]| {
-			to.buffer.dot_acc(&to, to_weight, &a, &b, expr_weight * self.scale);
+			executor.dot_acc(&to, to_weight, &a, &b, expr_weight * self.scale);
 		});
 	}
 }
@@ -402,20 +418,22 @@ impl Accumulable for VecMul<'_> {
 //--------------------------------------------------------------------------------------------------
 
 pub fn sum_all(tensor: &Tensor) -> f64 {
+	let executor = tensor.buffer.device.as_ref();
 	let mut sum = 0.0;
 	// TODO - `__elem_wise()` disables broadcast for tensor at position 0.
 	// In the case of a `sum_all()`, it would make sense to enable it,
 	// but it would require some refactoring. Not sure if it is worth it.
 	__elem_wise([tensor], |[a]| {
-		sum += a.buffer.sum_all(&a);
+		sum += executor.sum_all(&a);
 	});
 	sum
 }
 
 pub fn approx_eq(a: &Tensor, b: &Tensor, eps: f64) -> bool {
+	let executor = a.buffer.device.as_ref();
 	let mut result = true;
 	__elem_wise([a, b], |[a, b]| {
-		result &= a.buffer.approx_eq(&a, &b, eps);
+		result &= executor.approx_eq(&a, &b, eps);
 	});
 	result
 }
@@ -433,8 +451,9 @@ pub fn softmax<'a>(tensor: &'a Tensor) -> Softmax<'a> {
 impl<'a> Savable for Softmax<'a> {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
+		let executor = to.buffer.device.as_ref();
 		__vec_wise([to, self.tensor], |[to, input]| {
-			to.buffer.softmax(&to, &input);
+			executor.softmax(&to, &input);
 		});
 	}
 }
@@ -463,13 +482,14 @@ impl<'a> RMSNorm<'a> {
 impl<'a> Savable for RMSNorm<'a> {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
+		let executor = to.buffer.device.as_ref();
 		if let Some(scale_storage) = self.scale_storage {
 			__vec_wise([to, self.tensor, scale_storage], |[to, input, scale_storage]| {
-				to.buffer.rms_norm(&to, &input, self.eps, Some(&scale_storage));
+				executor.rms_norm(&to, &input, self.eps, Some(&scale_storage));
 			});
 		} else {
 			__vec_wise([to, self.tensor], |[to, input]| {
-				to.buffer.rms_norm(&to, &input, self.eps, None);
+				executor.rms_norm(&to, &input, self.eps, None);
 			});
 		}
 	}
@@ -639,10 +659,11 @@ impl<'a> MatMulPrep<'a> {
 impl<'a> MatrixSavable for MatMul<'a> {
 	#[inline(never)]
 	fn save_to(self, to: Matrix) {
+		let executor = to.tensor.buffer.device.as_ref();
 		let scale = self.scale;
 		let prep = MatMulPrep::new(self, to);
 		__mat_wise([&prep.to, &prep.a, &prep.b], prep.batch_dims.iter(), |[to, a, b]| {
-			to.slice_set.buffer.gemm(&to, 0.0, &a, &b, scale);
+			executor.gemm(&to, 0.0, &a, &b, scale);
 		});
 	}
 }
@@ -650,11 +671,145 @@ impl<'a> MatrixSavable for MatMul<'a> {
 impl<'a> MatrixAccumulable for MatMul<'a> {
 	#[inline(never)]
 	fn acc_to(self, to: Matrix, to_weight: f64, expr_weight: f64) {
+		let executor = to.tensor.buffer.device.as_ref();
 		let scale = self.scale * expr_weight;
 		let prep = MatMulPrep::new(self, to);
 		__mat_wise([&prep.to, &prep.a, &prep.b], prep.batch_dims.iter(), |[to, a, b]| {
-			to.slice_set.buffer.gemm(&to, to_weight, &a, &b, scale);
+			executor.gemm(&to, to_weight, &a, &b, scale);
 		});
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct Attention<'a> {
+	pub q: &'a Tensor,
+	pub k: &'a Tensor,
+	pub v: &'a Tensor,
+}
+
+/// Requirements:
+///
+///    q.shape = [..., inputs, q_heads, qk_size]
+///    k.shape = [..., inputs, k_heads, qk_size]
+///    v.shape = [..., inputs, v_heads, v_size]
+///
+///    q_heads >= k_heads && q_heads % k_heads == 0 && (q_heads / k_heads).is_power_of_two()
+///    q_heads >= v_heads && q_heads % v_heads == 0 && (q_heads / v_heads).is_power_of_two()
+///
+/// The output shape is:
+///
+///    [..., inputs, q_heads, v_size]
+pub fn attention<'a>(q: &'a Tensor, k: &'a Tensor, v: &'a Tensor) -> Attention<'a> {
+	Attention { q, k, v }
+}
+
+impl<'a> Savable for Attention<'a> {
+	#[inline(never)]
+	fn save_to(&self, to: &Tensor) {
+		let tensors = [self.q, self.k, self.v, to];
+		assert!(tensors.iter().all(|t| t.ndim() >= 3));
+
+		let inputs = self.q.dim_from_end(3).size;
+		let q_heads = self.q.dim_from_end(2).size;
+		let qk_size = self.q.dim_from_end(1).size;
+		assert!(self.q.dim_from_end(1).is_contiguous());
+		assert!(self.q.dim_from_end(2).stride == qk_size);
+		let q_input_stride = self.q.dim_from_end(3).stride;
+
+		assert!(self.k.dim_from_end(3).size == inputs);
+		let k_heads = self.k.dim_from_end(2).size;
+		assert!(self.k.dim_from_end(1).size == qk_size);
+		assert!(self.k.dim_from_end(1).is_contiguous());
+		assert!(self.k.dim_from_end(2).stride == qk_size);
+		let k_input_stride = self.k.dim_from_end(3).stride;
+
+		assert!(self.v.dim_from_end(3).size == inputs);
+		let v_heads = self.v.dim_from_end(2).size;
+		let v_size = self.v.dim_from_end(1).size;
+		assert!(self.v.dim_from_end(1).is_contiguous());
+		assert!(self.v.dim_from_end(2).stride == v_size);
+		let v_input_stride = self.v.dim_from_end(3).stride;
+
+		assert!(q_heads >= k_heads);
+		assert!(q_heads % k_heads == 0);
+		assert!((q_heads / k_heads).is_power_of_two());
+
+		assert!(q_heads >= v_heads);
+		assert!(q_heads % v_heads == 0);
+		assert!((q_heads / v_heads).is_power_of_two());
+
+		assert!(to.dim_from_end(3).size == inputs);
+		assert!(to.dim_from_end(2).size == q_heads);
+		assert!(to.dim_from_end(1).size == v_size);
+		assert!(to.dim_from_end(1).is_contiguous());
+		assert!(to.dim_from_end(2).stride == v_size);
+		let to_input_stride = to.dim_from_end(3).stride;
+
+		let params = AttentionParams {
+			inputs,
+			q_heads,
+			k_heads,
+			v_heads,
+			qk_size,
+			v_size,
+		};
+
+		let merger = DimMerger::new(tensors.map(|t| &t.dims[..t.ndim() - 3]));
+		let batch_dims = merger.dims_increasing();
+		let batch_iter = batch_dims.iter();
+
+		let mut q = SliceSet {
+			buffer: self.q.buffer.as_ref(),
+			dtype: self.q.dtype(),
+			len: q_heads * qk_size,
+			batch_size: inputs,
+			batch_stride: q_input_stride,
+			offset: 0,
+		};
+
+		let mut k = SliceSet {
+			buffer: self.k.buffer.as_ref(),
+			dtype: self.k.dtype(),
+			len: k_heads * qk_size,
+			batch_size: inputs,
+			batch_stride: k_input_stride,
+			offset: 0,
+		};
+
+		let mut v = SliceSet {
+			buffer: self.v.buffer.as_ref(),
+			dtype: self.v.dtype(),
+			len: v_heads * v_size,
+			batch_size: inputs,
+			batch_stride: v_input_stride,
+			offset: 0,
+		};
+
+		let mut to = SliceSet {
+			buffer: to.buffer.as_ref(),
+			dtype: to.dtype(),
+			len: q_heads * v_size,
+			batch_size: inputs,
+			batch_stride: to_input_stride,
+			offset: 0,
+		};
+
+		let executor = to.buffer.device.as_ref();
+
+		batch::run(
+			batch_iter,
+			tensors.map(|t| t.offset),
+			|batch_size: TensorSize, batch_strides: [TensorSize; 4], offsets: [TensorSize; 4]| {
+				for i in 0..batch_size {
+					q.offset = offsets[0] + i * batch_strides[0];
+					k.offset = offsets[1] + i * batch_strides[1];
+					v.offset = offsets[2] + i * batch_strides[2];
+					to.offset = offsets[3] + i * batch_strides[3];
+					executor.attention(&to, &q, &k, &v, &params);
+				}
+			},
+		);
 	}
 }
 

@@ -12,6 +12,12 @@ pub trait HasDType {
 	fn dtype() -> DType;
 }
 
+impl HasDType for u8 {
+	fn dtype() -> DType {
+		DType::U8
+	}
+}
+
 impl HasDType for f32 {
 	fn dtype() -> DType {
 		DType::F32
@@ -46,6 +52,11 @@ impl DType {
 		}
 		self.bytes().checked_mul(tensor_size_to_usize(elems))
 	}
+
+	pub const U8: Self = Self {
+		kind: DTypeKind::Uint,
+		bits: NonZeroU8::new(8).unwrap(),
+	};
 
 	pub const F32: Self = Self {
 		kind: DTypeKind::Float,

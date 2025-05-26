@@ -191,7 +191,7 @@ pub struct Tensor {
 	pub(crate) offset: TensorSize,
 	pub(crate) dtype: DType,
 	pub(crate) elems: TensorSize,
-	pub(crate) buffer: Rc<dyn Buffer>,
+	pub(crate) buffer: Rc<Buffer>,
 }
 
 impl Tensor {
