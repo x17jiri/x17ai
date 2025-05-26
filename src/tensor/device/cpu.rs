@@ -1,7 +1,6 @@
 // Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
-use std::boxed::Box;
 use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::mem::ManuallyDrop;
@@ -16,7 +15,7 @@ use crate::tensor::buffer::{Buffer, MatrixSet, SliceSet};
 use crate::tensor::dtype::{DType, HasDType};
 use crate::tensor::{TensorSize, tensor_size_to_usize};
 
-use super::Device;
+use super::{AttentionParams, Device};
 
 mod math {
 	use super::FromToF64;
@@ -105,21 +104,22 @@ impl CPUDevice {
 		})
 	}
 
-	fn cast_slice_set<'a, T: HasDType>(&'a self, slice_set: &SliceSet<'a>) -> CPUSliceSet<'a, T> {
-		let buffer = slice_set.buffer;
+	fn cast_buffer<T: HasDType>(&self, buffer: &Buffer) -> &[Cell<T>] {
 		assert!(buffer.is_on_device(self));
-
-		let dtype = slice_set.dtype;
-		assert!(dtype == T::dtype());
-		debug_assert!(dtype.bytes() == std::mem::size_of::<T>());
-
-		let buffer = unsafe {
+		debug_assert!(T::dtype().bytes() == std::mem::size_of::<T>());
+		unsafe {
 			let ptr = buffer.device_buffer.as_ptr() as *const Cell<T>;
 			let bytes = buffer.size_bytes;
 			let elems = bytes / std::mem::size_of::<T>();
 			std::slice::from_raw_parts(ptr, elems)
-		};
+		}
+	}
 
+	fn cast_slice_set<'a, T: HasDType>(&'a self, slice_set: &SliceSet<'a>) -> CPUSliceSet<'a, T> {
+		let dtype = slice_set.dtype;
+		assert!(dtype == T::dtype());
+
+		let buffer = self.cast_buffer::<T>(slice_set.buffer);
 		let len = slice_set.len as usize;
 		let count = slice_set.count as usize;
 		let stride = slice_set.stride as usize;
@@ -128,37 +128,6 @@ impl CPUDevice {
 		let buffer = &buffer[begin..end];
 		CPUSliceSet { buffer, len, count, stride }
 	}
-
-	/*
-	fn cast_matrices<'a>(&'a self, mat: &'a MatrixSet<'a>) -> MatrixSet<'a, CPUBuffer> {
-		assert!(mat.buffer.are_matrices_in_bounds(mat));
-		MatrixSet {
-			slice_set: SliceSet {
-				buffer: self.cast_buffer(mat.slice_set.buffer),
-				..mat.slice_set
-			},
-			..mat
-		}
-	}*/
-
-	/*
-	#[inline]
-	fn is_in_bounds<T>(&self, dtype: DType, offset: TensorSize, len: TensorSize) -> bool {
-		debug_assert!(dtype.bytes() == std::mem::size_of::<T>());
-		let elems = tensor_size_to_usize(offset + len);
-		let bytes = std::mem::size_of::<T>().checked_mul(elems);
-		bytes.is_some_and(|b| b <= self.base.size_bytes)
-	}
-
-	#[inline]
-	unsafe fn cast<T>(&self, offset: TensorSize, elems: TensorSize) -> &[Cell<T>] {
-		debug_assert!(self.base.is_in_bounds_T::<T>(offset, elems));
-		let ptr = self.memory.as_ptr();
-		let ptr = ptr as *const Cell<T>;
-		let ptr = ptr.wrapping_add(tensor_size_to_usize(offset));
-		unsafe { std::slice::from_raw_parts(ptr, tensor_size_to_usize(elems)) }
-	}
-	*/
 
 	fn array_wise<'a, T: Copy + HasDType, const N: usize>(
 		&self, slices: [&SliceSet<'a>; N], mut f: impl FnMut([&[Cell<T>]; N]),
@@ -275,6 +244,146 @@ impl CPUDevice {
 			}
 		});
 	}
+
+	#[inline(never)]
+	fn softmax<'a, T: Copy + HasDType + FromToF64>(&self, dst: &SliceSet<'a>, inp: &SliceSet<'a>) {
+		assert!(dst.len == inp.len);
+		self.array_wise::<T, 2>([dst, inp], |[dst_arr, inp_arr]| {
+			let max: f64 = inp_arr.iter().map(|x| x.get().to_f64()).fold(f64::MIN, f64::max);
+
+			let mut sum = 0.0;
+			for (d, i) in dst_arr.iter().zip(inp_arr) {
+				let val = i.get().to_f64();
+				let val = val - max;
+				let e = val.exp();
+				d.set(T::from_f64(e));
+
+				sum += e;
+			}
+
+			// NOTE:
+			// Subtracting max in the loop above ensures at least one of the exponents
+			// is `exp(max - max) == 1.0`. So sum will be >= 1.0 and division by zero
+			// is impossible.
+			// This could only fail if all inputs are `-inf` or at least one input is `+inf`.
+			// In that case, `sum == nan` and so all outputs will be `nan`.
+			let sum_recip = 1.0 / sum;
+
+			for d in dst_arr.iter() {
+				let val = d.get().to_f64() * sum_recip;
+				d.set(T::from_f64(val));
+			}
+		});
+	}
+
+	#[inline(never)]
+	fn rms_norm_f<'a, T: Copy + HasDType + FromToF64>(
+		&self, dst: &SliceSet<'a>, inp: &SliceSet<'a>, eps: f64,
+	) {
+		let len = dst.len;
+		let len_recip = 1.0 / (len as f64);
+		assert!(inp.len == len);
+
+		self.array_wise::<T, 2>([dst, inp], |[dst_arr, inp_arr]| {
+			let scale = math::rsqrt(math::dot(inp_arr, inp_arr) * len_recip + eps);
+			for (d, i) in dst_arr.iter().zip(inp_arr) {
+				let val = i.get().to_f64() * scale;
+				d.set(T::from_f64(val));
+			}
+		});
+	}
+
+	#[inline(never)]
+	fn rms_norm_with_scale_storage_f<'a, T: Copy + HasDType + FromToF64>(
+		&self, dst: &SliceSet<'a>, inp: &SliceSet<'a>, eps: f64, scale_storage: &SliceSet<'a>,
+	) {
+		let len = dst.len;
+		let len_recip = 1.0 / (len as f64);
+		assert!(inp.len == len);
+		assert!(scale_storage.len == 1);
+
+		self.array_wise::<T, 3>([dst, inp, scale_storage], |[dst_arr, inp_arr, sc]| {
+			let scale = math::rsqrt(math::dot(inp_arr, inp_arr) * len_recip + eps);
+			sc[0].set(T::from_f64(scale));
+			for (d, i) in dst_arr.iter().zip(inp_arr) {
+				let val = i.get().to_f64() * scale;
+				d.set(T::from_f64(val));
+			}
+		});
+	}
+
+	#[inline(never)]
+	fn gemm_f<'a, T: Copy + HasDType + FromToF64>(
+		&self, c: &MatrixSet<'a>, dst_weight: f64, a: &MatrixSet<'a>, b: &MatrixSet<'a>,
+		ab_weight: f64,
+	) {
+		let m = c.rows.get();
+		let n = c.cols.get();
+		let k = a.cols.get();
+
+		assert!(a.rows.get() == m);
+		assert!(b.cols.get() == n);
+		assert!(b.rows.get() == k);
+
+		self.array_wise::<T, 3>(
+			[&c.slice_set, &a.slice_set, &b.slice_set],
+			|[c_arr, a_arr, b_arr]| {
+				for row in 0..m {
+					for col in 0..n {
+						let mut sum = 0.0;
+						for i in 0..k {
+							let a_index =
+								tensor_size_to_usize(row * a.row_stride + i * a.col_stride);
+							let a_cell = unsafe { a_arr.get_unchecked(a_index) };
+							let a_val = a_cell.get().to_f64();
+
+							let b_index =
+								tensor_size_to_usize(i * b.row_stride + col * b.col_stride);
+							let b_cell = unsafe { b_arr.get_unchecked(b_index) };
+							let b_val = b_cell.get().to_f64();
+
+							sum += a_val * b_val;
+						}
+						let c_index = tensor_size_to_usize(row * c.row_stride + col * c.col_stride);
+						let c_cell = unsafe { c_arr.get_unchecked(c_index) };
+						let c_val = c_cell.get().to_f64();
+
+						let new_val = c_val * dst_weight + sum * ab_weight;
+						c_cell.set(T::from_f64(new_val));
+					}
+				}
+			},
+		);
+	}
+
+	#[inline(never)]
+	fn format_f<T: Copy + HasDType + FromToF64>(
+		&self, f: &mut fmt::Formatter, offset: TensorSize, len: TensorSize, stride: TensorSize,
+	) -> fmt::Result {
+		let slices = TypedSliceSet {
+			buffer: self,
+			dtype: DType::F32,
+			offset,
+
+			len: 1,
+			batch_size: len,
+			batch_stride: stride,
+		};
+		let mut first_item = true;
+		for [arr] in BatchIter::<T, 1>::new([&slices]) {
+			if !first_item {
+				write!(f, ", ")?;
+			}
+			first_item = false;
+
+			let val = arr[0].get().to_f64();
+			if val >= 0.0 {
+				write!(f, " ")?;
+			}
+			write!(f, "{:.4}", val)?;
+		}
+		Ok(())
+	}
 }
 
 trait FromToF64 {
@@ -314,10 +423,8 @@ impl Device for CPUDevice {
 	}
 
 	fn new_buffer(self: Rc<Self>, dtype: DType, elems: TensorSize) -> Rc<Buffer> {
-		// we want to allocate `elems` elements of type `dtype`, but internally we use elements
-		// of type `CPUBufferElement`. So convert `elems` to `buf_elems`.
-		let size_bytes = dtype.array_bytes(elems).unwrap();
 		let step_size = std::mem::size_of::<CPUBufferElement>();
+		let size_bytes = dtype.array_bytes(elems).unwrap().next_multiple_of(step_size);
 		let layout = std::alloc::Layout::from_size_align(size_bytes, step_size).unwrap();
 		let memory = unsafe { std::alloc::alloc(layout) };
 		let memory = NonNull::new(memory).expect("Failed to allocate memory for CPUBuffer");
@@ -330,8 +437,9 @@ impl Device for CPUDevice {
 
 	fn drop_buffer(&self, buffer: &mut Buffer) {
 		assert!(buffer.is_on_device(self));
-		let size_bytes = buffer.size_bytes;
 		let step_size = std::mem::size_of::<CPUBufferElement>();
+		let size_bytes = buffer.size_bytes;
+		debug_assert!(size_bytes % step_size == 0);
 		let layout = std::alloc::Layout::from_size_align(size_bytes, step_size).unwrap();
 		unsafe {
 			std::alloc::dealloc(buffer.device_buffer.as_ptr(), layout);
@@ -339,145 +447,10 @@ impl Device for CPUDevice {
 		}
 	}
 
-	#[inline(never)]
-	fn softmax_f<T: Copy + FromToF64>(
-		dst: &TypedSliceSet<'_, CPUBuffer>, inp: &TypedSliceSet<'_, CPUBuffer>,
-	) {
-		assert!(dst.len == inp.len);
-
-		for [dst_arr, inp_arr] in BatchIter::<T, 2>::new([dst, inp]) {
-			let max: f64 = inp_arr.iter().map(|x| x.get().to_f64()).fold(f64::MIN, f64::max);
-
-			let mut sum = 0.0;
-			for (d, i) in dst_arr.iter().zip(inp_arr) {
-				let val = i.get().to_f64();
-				let val = val - max;
-				let e = val.exp();
-				d.set(T::from_f64(e));
-
-				sum += e;
-			}
-
-			// NOTE:
-			// Subtracting max in the loop above ensures at least one of the exponents
-			// is `exp(max - max) == 1.0`. So sum will be >= 1.0 and division by zero
-			// is impossible.
-			// This could only fail if all inputs are `-inf` or at least one input is `+inf`.
-			// In that case, `sum == nan` and so all outputs will be `nan`.
-			let sum_recip = 1.0 / sum;
-
-			for d in dst_arr.iter() {
-				let val = d.get().to_f64() * sum_recip;
-				d.set(T::from_f64(val));
-			}
-		}
-	}
-
-	#[inline(never)]
-	fn rms_norm_f<T: Copy + FromToF64>(
-		dst: &TypedSliceSet<'_, CPUBuffer>, inp: &TypedSliceSet<'_, CPUBuffer>, eps: f64,
-		scale_storage: Option<&TypedSliceSet<'_, CPUBuffer>>,
-	) {
-		assert!(dst.len == inp.len);
-		let len = dst.len;
-		let len_recip = 1.0 / (len as f64);
-
-		if let Some(scale_storage) = scale_storage {
-			assert!(scale_storage.len == 1);
-			for [dst_arr, inp_arr, sc] in BatchIter::<T, 3>::new([dst, inp, scale_storage]) {
-				let scale = math::rsqrt(math::dot(inp_arr, inp_arr) * len_recip + eps);
-				sc[0].set(T::from_f64(scale));
-				for (d, i) in dst_arr.iter().zip(inp_arr) {
-					let val = i.get().to_f64() * scale;
-					d.set(T::from_f64(val));
-				}
-			}
-		} else {
-			for [dst_arr, inp_arr] in BatchIter::<T, 2>::new([dst, inp]) {
-				let scale = math::rsqrt(math::dot(inp_arr, inp_arr) * len_recip + eps);
-				for (d, i) in dst_arr.iter().zip(inp_arr) {
-					let val = i.get().to_f64() * scale;
-					d.set(T::from_f64(val));
-				}
-			}
-		}
-	}
-
-	#[inline(never)]
-	fn gemm_f32(
-		c: &TypedMatrixSet<'_, CPUBuffer>, dst_weight: f64, a: &TypedMatrixSet<'_, CPUBuffer>,
-		b: &TypedMatrixSet<'_, CPUBuffer>, ab_weight: f64,
-	) {
-		let m = c.rows.get();
-		let n = c.cols.get();
-		let k = a.cols.get();
-
-		assert!(a.rows.get() == m);
-		assert!(b.cols.get() == n);
-		assert!(b.rows.get() == k);
-
-		for [c_arr, a_arr, b_arr] in
-			BatchIter::<f32, 3>::new([&c.slice_set, &a.slice_set, &b.slice_set])
-		{
-			for row in 0..m {
-				for col in 0..n {
-					let mut sum = 0.0;
-					for i in 0..k {
-						let a_index = tensor_size_to_usize(row * a.row_stride + i * a.col_stride);
-						let a_cell = unsafe { a_arr.get_unchecked(a_index) };
-						let a_val = a_cell.get().to_f64();
-
-						let b_index = tensor_size_to_usize(i * b.row_stride + col * b.col_stride);
-						let b_cell = unsafe { b_arr.get_unchecked(b_index) };
-						let b_val = b_cell.get().to_f64();
-
-						sum += a_val * b_val;
-					}
-					let c_index = tensor_size_to_usize(row * c.row_stride + col * c.col_stride);
-					let c_cell = unsafe { c_arr.get_unchecked(c_index) };
-					let c_val = c_cell.get().to_f64();
-
-					let new_val = c_val * dst_weight + sum * ab_weight;
-					c_cell.set(new_val as f32);
-				}
-			}
-		}
-	}
-
-	#[inline(never)]
-	fn format_f<T: Copy + FromToF64>(
-		&self, f: &mut fmt::Formatter, offset: TensorSize, len: TensorSize, stride: TensorSize,
-	) -> fmt::Result {
-		let slices = TypedSliceSet {
-			buffer: self,
-			dtype: DType::F32,
-			offset,
-
-			len: 1,
-			batch_size: len,
-			batch_stride: stride,
-		};
-		let mut first_item = true;
-		for [arr] in BatchIter::<T, 1>::new([&slices]) {
-			if !first_item {
-				write!(f, ", ")?;
-			}
-			first_item = false;
-
-			let val = arr[0].get().to_f64();
-			if val >= 0.0 {
-				write!(f, " ")?;
-			}
-			write!(f, "{:.4}", val)?;
-		}
-		Ok(())
-	}
-
 	fn load_data(
 		&self, buffer: &Buffer, dtype: DType, offset: TensorSize, len: TensorSize, src: &[u8],
 	) {
-		let buffer = self.cast_buffer(buffer);
-		let buffer = buffer.as_slice::<u8>(u8::dtype());
+		let buffer = self.cast_buffer::<u8>(buffer);
 
 		let begin = dtype.array_bytes(offset).unwrap();
 		let len = dtype.array_bytes(len).unwrap();
@@ -663,32 +636,28 @@ impl Device for CPUDevice {
 	}
 
 	fn softmax(&self, dst: &SliceSet, inp: &SliceSet) {
-		let dst = self.cast_slices(dst);
-		let inp = self.cast_slices(inp);
 		match dst.dtype {
-			DType::F32 => Self::softmax_f::<f32>(&dst, &inp),
+			DType::F32 => self.softmax::<f32>(dst, inp),
 			_ => todo!(),
 		}
 	}
 
 	fn rms_norm(&self, dst: &SliceSet, inp: &SliceSet, eps: f64, scale_storage: Option<&SliceSet>) {
-		let dst = self.cast_slices(dst);
-		let inp = self.cast_slices(inp);
-		let scale_storage = scale_storage.map(|s| self.cast_slices(s));
 		match dst.dtype {
-			DType::F32 => Self::rms_norm_f::<f32>(&dst, &inp, eps, scale_storage.as_ref()),
+			DType::F32 => {
+				if let Some(scale_storage) = scale_storage {
+					self.rms_norm_with_scale_storage_f::<f32>(&dst, &inp, eps, scale_storage);
+				} else {
+					self.rms_norm_f::<f32>(&dst, &inp, eps);
+				}
+			},
 			_ => todo!(),
 		}
 	}
 
 	fn gemm(&self, dst: &MatrixSet, dst_weight: f64, a: &MatrixSet, b: &MatrixSet, ab_weight: f64) {
-		let dst = self.cast_matrices(dst);
-		let a = self.cast_matrices(a);
-		let b = self.cast_matrices(b);
 		match dst.slice_set.dtype {
-			DType::F32 => {
-				Self::gemm_f32(&dst, dst_weight, &a, &b, ab_weight);
-			},
+			DType::F32 => self.gemm_f::<f32>(&dst, dst_weight, &a, &b, ab_weight),
 			_ => todo!(),
 		}
 	}
@@ -696,10 +665,11 @@ impl Device for CPUDevice {
 	fn attention(
 		&self, dst: &SliceSet, q: &SliceSet, k: &SliceSet, v: &SliceSet, params: &AttentionParams,
 	) {
-		let dst = self.cast_slices(dst);
+		/*let dst = self.cast_slices(dst);
 		let q = self.cast_slices(q);
 		let k = self.cast_slices(k);
-		let v = self.cast_slices(v);
+		let v = self.cast_slices(v);*/
+		todo!()
 	}
 
 	fn format(
