@@ -14,9 +14,10 @@ mod tests;
 
 use std::intrinsics::likely;
 use std::rc::Rc;
+use std::slice::SliceIndex;
 
 use buffer::Buffer;
-use dim_vec::DimVec;
+use dim_vec::{DimIndex, DimVec};
 
 pub use device::Device;
 pub use dtype::{DType, HasDType};
@@ -112,10 +113,13 @@ impl SizeAndStride {
 
 #[derive(Clone)]
 pub struct Tensor {
-	pub(crate) dims: DimVec,
-	pub(crate) offset: usize,
-	pub(crate) dtype: DType,
-	pub(crate) buffer: Rc<Buffer>,
+	// TODO - I could save 8 bytes per Tensor if I stored ndim as `u32` instead of `usize`.
+	// However, in order to avoid padding, I'd need to stop using `DimVec` and implement all the
+	// logic directly in `Tensor`.
+	dims: DimVec,
+	offset: usize,
+	dtype: DType,
+	buffer: Rc<Buffer>,
 }
 
 impl Tensor {
@@ -192,25 +196,14 @@ impl Tensor {
 		(weak | strong) <= 1
 	}
 
-	/// `dim` should be in the range `0..<ndim`.
-	pub fn dim_from_start(&self, dim: usize) -> SizeAndStride {
-		let ndim = self.dims.len();
-		if dim < ndim { self.dims[dim] } else { SizeAndStride { size: 1, stride: 1 } }
+	pub fn dim<D: DimIndex>(&self, dim: D) -> SizeAndStride {
+		let ndim = self.ndim();
+		let dim = dim.resolve(ndim);
+		*unsafe { self.dims.get_unchecked(dim) }
 	}
 
-	/// `dim` should be in the range `1..=ndim`.
-	pub fn dim_from_end(&self, dim: usize) -> SizeAndStride {
-		let ndim = self.dims.len();
-		let dim = ndim.wrapping_sub(dim);
-		if dim < ndim { self.dims[dim] } else { SizeAndStride { size: 1, stride: 0 } }
-	}
-
-	pub fn dim(&self, dim: isize) -> SizeAndStride {
-		if dim >= 0 {
-			self.dim_from_start(dim.unsigned_abs())
-		} else {
-			self.dim_from_end(dim.unsigned_abs())
-		}
+	pub fn dim_slice<I: SliceIndex<[SizeAndStride]>>(&self, index: I) -> &I::Output {
+		self.dims.get(index).expect("dimension index out of range")
 	}
 
 	/// Returns the number of dimensions in the tensor.
@@ -377,27 +370,17 @@ impl Tensor {
 		self.dims[..batch_dims].iter().map(|dim| dim.size).product()
 	}
 
-	pub fn dim_to_positive(&self, dim: isize) -> usize {
-		let ndim = self.dims.len();
-		let dim = if dim >= 0 { dim as usize } else { ndim.wrapping_add(dim as usize) };
-		if likely(dim < ndim) {
-			dim
-		} else {
-			panic!("dimension out of range");
-		}
-	}
-
-	pub fn transposed(mut self, dim1: isize, dim2: isize) -> Tensor {
-		let dim1 = self.dim_to_positive(dim1);
-		let dim2 = self.dim_to_positive(dim2);
-
+	pub fn transposed<D1: DimIndex, D2: DimIndex>(mut self, dim1: D1, dim2: D2) -> Tensor {
+		let ndim = self.ndim();
+		let dim1 = dim1.resolve(ndim);
+		let dim2 = dim2.resolve(ndim);
 		self.dims.swap(dim1, dim2);
 		self
 	}
 
-	#[inline(never)] // TODO - remove
-	pub fn slice(mut self, dim: isize, range: std::ops::Range<usize>) -> Tensor {
-		let dim = self.dim_to_positive(dim);
+	pub fn slice<D: DimIndex>(mut self, dim: D, range: std::ops::Range<usize>) -> Tensor {
+		let ndim = self.ndim();
+		let dim = dim.resolve(ndim);
 		let dim = &mut self.dims[dim];
 		assert!(range.start <= range.end, "invalid range");
 		assert!(range.end <= dim.size, "invalid range");

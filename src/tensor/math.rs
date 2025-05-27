@@ -41,7 +41,7 @@ pub trait MatrixAccumulable {
 
 /// Broadcast is disabled for tensors[0] and enabled for tensors[1..].
 fn __elem_wise<'a, const N: usize, F: FnMut([SliceSet; N])>(tensors: [&Tensor; N], mut f: F) {
-	let merger = DimMerger::new(tensors.map(|t| t.dims.as_slice()));
+	let merger = DimMerger::new(tensors.map(|t| t.dim_slice(..)));
 	let smallest = merger.smallest_dim();
 	let batch_dims = merger.dims_increasing_without_smallest();
 	let batch_iter = batch_dims.iter();
@@ -91,7 +91,7 @@ fn __vec_wise<'a, const N: usize, F: Fn([SliceSet; N])>(tensors: [&Tensor; N], f
 	let dtypes = tensors.map(|t| t.dtype());
 	let buffers = tensors.map(|t| t.buffer.as_ref());
 
-	let merger = DimMerger::new(tensors.map(|t| &t.dims[..t.ndim() - 1]));
+	let merger = DimMerger::new(tensors.map(|t| t.dim_slice(..t.ndim() - 1)));
 	let batch_dims = merger.dims_increasing();
 	let batch_iter = batch_dims.iter();
 
@@ -522,11 +522,11 @@ impl<'a> Matrix<'a> {
 
 pub fn matrix<'a>(tensor: &'a Tensor) -> Matrix<'a> {
 	assert!(tensor.ndim() >= 2);
-	let rows = tensor.dim_from_end(2);
-	let cols = tensor.dim_from_end(1);
+	let rows = tensor.dim(-2);
+	let cols = tensor.dim(-1);
 	Matrix {
 		tensor,
-		batch_dims: &tensor.dims[..tensor.ndim() - 2],
+		batch_dims: tensor.dim_slice(..tensor.ndim() - 2),
 		rows: NonZeroUsize::new(rows.size).unwrap(),
 		cols: NonZeroUsize::new(cols.size).unwrap(),
 		row_stride: rows.stride,
@@ -537,10 +537,10 @@ pub fn matrix<'a>(tensor: &'a Tensor) -> Matrix<'a> {
 pub fn row_matrix<'a>(tensor: &'a Tensor) -> Matrix<'a> {
 	assert!(tensor.ndim() >= 1);
 	let rows = SizeAndStride { size: 1, stride: 0 };
-	let cols = tensor.dim_from_end(1);
+	let cols = tensor.dim(-1);
 	Matrix {
 		tensor,
-		batch_dims: &tensor.dims[..tensor.ndim() - 1],
+		batch_dims: tensor.dim_slice(..tensor.ndim() - 1),
 		rows: NonZeroUsize::new(rows.size).unwrap(),
 		cols: NonZeroUsize::new(cols.size).unwrap(),
 		row_stride: rows.stride,
@@ -550,11 +550,11 @@ pub fn row_matrix<'a>(tensor: &'a Tensor) -> Matrix<'a> {
 
 pub fn col_matrix<'a>(tensor: &'a Tensor) -> Matrix<'a> {
 	assert!(tensor.ndim() >= 1);
-	let rows = tensor.dim_from_end(1);
+	let rows = tensor.dim(-1);
 	let cols = SizeAndStride { size: 1, stride: 0 };
 	Matrix {
 		tensor,
-		batch_dims: &tensor.dims[..tensor.ndim() - 1],
+		batch_dims: tensor.dim_slice(..tensor.ndim() - 1),
 		rows: NonZeroUsize::new(rows.size).unwrap(),
 		cols: NonZeroUsize::new(cols.size).unwrap(),
 		row_stride: rows.stride,
@@ -710,26 +710,26 @@ impl<'a> Savable for Attention<'a> {
 		let tensors = [self.q, self.k, self.v, to];
 		assert!(tensors.iter().all(|t| t.ndim() >= 3));
 
-		let inputs = self.q.dim_from_end(3).size;
-		let q_heads = self.q.dim_from_end(2).size;
-		let qk_size = self.q.dim_from_end(1).size;
-		assert!(self.q.dim_from_end(1).is_contiguous());
-		assert!(self.q.dim_from_end(2).stride == qk_size);
-		let q_input_stride = self.q.dim_from_end(3).stride;
+		let inputs = self.q.dim(-3).size;
+		let q_heads = self.q.dim(-2).size;
+		let qk_size = self.q.dim(-1).size;
+		assert!(self.q.dim(-1).is_contiguous());
+		assert!(self.q.dim(-2).stride == qk_size);
+		let q_input_stride = self.q.dim(-3).stride;
 
-		assert!(self.k.dim_from_end(3).size == inputs);
-		let k_heads = self.k.dim_from_end(2).size;
-		assert!(self.k.dim_from_end(1).size == qk_size);
-		assert!(self.k.dim_from_end(1).is_contiguous());
-		assert!(self.k.dim_from_end(2).stride == qk_size);
-		let k_input_stride = self.k.dim_from_end(3).stride;
+		assert!(self.k.dim(-3).size == inputs);
+		let k_heads = self.k.dim(-2).size;
+		assert!(self.k.dim(-1).size == qk_size);
+		assert!(self.k.dim(-1).is_contiguous());
+		assert!(self.k.dim(-2).stride == qk_size);
+		let k_input_stride = self.k.dim(-3).stride;
 
-		assert!(self.v.dim_from_end(3).size == inputs);
-		let v_heads = self.v.dim_from_end(2).size;
-		let v_size = self.v.dim_from_end(1).size;
-		assert!(self.v.dim_from_end(1).is_contiguous());
-		assert!(self.v.dim_from_end(2).stride == v_size);
-		let v_input_stride = self.v.dim_from_end(3).stride;
+		assert!(self.v.dim(-3).size == inputs);
+		let v_heads = self.v.dim(-2).size;
+		let v_size = self.v.dim(-1).size;
+		assert!(self.v.dim(-1).is_contiguous());
+		assert!(self.v.dim(-2).stride == v_size);
+		let v_input_stride = self.v.dim(-3).stride;
 
 		assert!(q_heads >= k_heads);
 		assert!(q_heads % k_heads == 0);
@@ -739,12 +739,12 @@ impl<'a> Savable for Attention<'a> {
 		assert!(q_heads % v_heads == 0);
 		assert!((q_heads / v_heads).is_power_of_two());
 
-		assert!(to.dim_from_end(3).size == inputs);
-		assert!(to.dim_from_end(2).size == q_heads);
-		assert!(to.dim_from_end(1).size == v_size);
-		assert!(to.dim_from_end(1).is_contiguous());
-		assert!(to.dim_from_end(2).stride == v_size);
-		let to_input_stride = to.dim_from_end(3).stride;
+		assert!(to.dim(-3).size == inputs);
+		assert!(to.dim(-2).size == q_heads);
+		assert!(to.dim(-1).size == v_size);
+		assert!(to.dim(-1).is_contiguous());
+		assert!(to.dim(-2).stride == v_size);
+		let to_input_stride = to.dim(-3).stride;
 
 		let params = AttentionParams {
 			inputs,
@@ -755,7 +755,7 @@ impl<'a> Savable for Attention<'a> {
 			v_size,
 		};
 
-		let merger = DimMerger::new(tensors.map(|t| &t.dims[..t.ndim() - 3]));
+		let merger = DimMerger::new(tensors.map(|t| t.dim_slice(..t.ndim() - 3)));
 		let batch_dims = merger.dims_increasing();
 		let batch_iter = batch_dims.iter();
 
