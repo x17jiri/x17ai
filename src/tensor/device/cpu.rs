@@ -117,15 +117,14 @@ impl CPUDevice {
 
 	fn cast_slice_set<'a, T: HasDType>(&'a self, slice_set: &SliceSet<'a>) -> CPUSliceSet<'a, T> {
 		let dtype = slice_set.dtype;
-		assert!(dtype == T::dtype());
+		assert_eq!(dtype, T::dtype());
 
 		let buffer = self.cast_buffer::<T>(slice_set.buffer);
 		let len = slice_set.len as usize;
 		let count = slice_set.count as usize;
 		let stride = slice_set.stride as usize;
-		let begin = slice_set.offset as usize;
-		let end = begin + if count > 0 { (count - 1) * stride + len } else { 0 };
-		let buffer = &buffer[begin..end];
+		let span = slice_set.span();
+		let buffer = &buffer[span];
 		CPUSliceSet { buffer, len, count, stride }
 	}
 
@@ -358,25 +357,21 @@ impl CPUDevice {
 
 	#[inline(never)]
 	fn format_f<T: Copy + HasDType + FromToF64>(
-		&self, f: &mut fmt::Formatter, offset: TensorSize, len: TensorSize, stride: TensorSize,
+		&self, f: &mut fmt::Formatter, buffer: &Buffer, offset: TensorSize, len: TensorSize,
+		stride: TensorSize,
 	) -> fmt::Result {
-		let slices = TypedSliceSet {
-			buffer: self,
-			dtype: DType::F32,
-			offset,
-
-			len: 1,
-			batch_size: len,
-			batch_stride: stride,
-		};
+		let buffer = self.cast_buffer::<T>(buffer);
+		let offset = tensor_size_to_usize(offset);
+		let len = tensor_size_to_usize(len);
+		let stride = tensor_size_to_usize(stride);
 		let mut first_item = true;
-		for [arr] in BatchIter::<T, 1>::new([&slices]) {
+		for i in 0..len {
 			if !first_item {
 				write!(f, ", ")?;
 			}
 			first_item = false;
 
-			let val = arr[0].get().to_f64();
+			let val = buffer[offset + i * stride].get().to_f64();
 			if val >= 0.0 {
 				write!(f, " ")?;
 			}
@@ -435,16 +430,11 @@ impl Device for CPUDevice {
 		})
 	}
 
-	fn drop_buffer(&self, buffer: &mut Buffer) {
-		assert!(buffer.is_on_device(self));
+	fn drop_buffer(self: Rc<Self>, device_buffer: NonNull<u8>, size_bytes: usize) {
 		let step_size = std::mem::size_of::<CPUBufferElement>();
-		let size_bytes = buffer.size_bytes;
 		debug_assert!(size_bytes % step_size == 0);
 		let layout = std::alloc::Layout::from_size_align(size_bytes, step_size).unwrap();
-		unsafe {
-			std::alloc::dealloc(buffer.device_buffer.as_ptr(), layout);
-			ManuallyDrop::drop(&mut buffer.device);
-		}
+		unsafe { std::alloc::dealloc(device_buffer.as_ptr(), layout) }
 	}
 
 	fn load_data(
@@ -673,11 +663,11 @@ impl Device for CPUDevice {
 	}
 
 	fn format(
-		&self, f: &mut fmt::Formatter, dtype: DType, offset: TensorSize, len: TensorSize,
-		stride: TensorSize,
+		&self, f: &mut fmt::Formatter, buffer: &Buffer, dtype: DType, offset: TensorSize,
+		len: TensorSize, stride: TensorSize,
 	) -> fmt::Result {
 		match dtype {
-			DType::F32 => self.format_f::<f32>(f, offset, len, stride),
+			DType::F32 => self.format_f::<f32>(f, buffer, offset, len, stride),
 			_ => todo!(),
 		}
 	}

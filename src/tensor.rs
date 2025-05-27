@@ -21,7 +21,7 @@ use std::num::NonZeroU32;
 use std::ops::Index;
 use std::rc::Rc;
 
-use buffer::{Buffer, BufferBase};
+use buffer::Buffer;
 use dim_vec::{DimVec, SizeAndStride};
 
 pub use device::Device;
@@ -262,15 +262,15 @@ impl Tensor {
 		Self::new_empty_on(new_shape, self.dtype, self.device())
 	}
 
-	/// Allocate a new tensor on the same device with the same shape and dtype
-	/// as `self`.
+	/// Allocate a new tensor on the same device with the same shape and dtype as `self`.
 	pub fn new_empty_like(&self) -> Tensor {
 		Self::new_empty_on(self.shape(), self.dtype, self.device())
 	}
 
 	/// Returns the device on which the tensor is allocated.
 	pub fn device(&self) -> Rc<dyn Device> {
-		BufferBase::from_dyn_buf(self.buffer.as_ref()).device.clone()
+		let device = &*self.buffer.device;
+		device.clone()
 	}
 
 	#[inline]
@@ -593,7 +593,8 @@ impl Tensor {
 			)
 		};
 
-		self.buffer.load_data(dtype, offset, x, buf);
+		let executor = self.buffer.executor();
+		executor.load_data(self.buffer.as_ref(), dtype, offset, x, buf);
 	}
 
 	#[inline(never)]
@@ -627,7 +628,8 @@ impl Tensor {
 				)
 			};
 
-			self.buffer.load_data(dtype, offset, x, buf);
+			let executor = self.buffer.executor();
+			executor.load_data(self.buffer.as_ref(), dtype, offset, x, buf);
 		}
 	}
 
@@ -678,22 +680,30 @@ impl Tensor {
 					)
 				};
 
-				self.buffer.load_data(dtype, row_offset, x, buf);
+				let executor = self.buffer.executor();
+				executor.load_data(self.buffer.as_ref(), dtype, row_offset, x, buf);
 			}
 		}
 	}
 }
 
 fn fmt_0d(tensor: &Tensor, f: &mut fmt::Formatter, offset: TensorSize) -> fmt::Result {
-	let offset = tensor.offset + offset;
-	tensor.buffer.format(f, tensor.dtype, offset, 1, 1)
+	let executor = tensor.buffer.executor();
+	executor.format(f, tensor.buffer.as_ref(), tensor.dtype, tensor.offset + offset, 1, 1)
 }
 
 fn fmt_1d(tensor: &Tensor, f: &mut fmt::Formatter, offset: TensorSize) -> fmt::Result {
-	let offset = tensor.offset + offset;
+	let executor = tensor.buffer.executor();
 	let dim = tensor.dims[tensor.ndim() - 1];
 	write!(f, "[")?;
-	tensor.buffer.format(f, tensor.dtype, offset, dim.size, dim.stride)?;
+	executor.format(
+		f,
+		tensor.buffer.as_ref(),
+		tensor.dtype,
+		tensor.offset + offset,
+		dim.size,
+		dim.stride,
+	)?;
 	write!(f, "]")
 }
 

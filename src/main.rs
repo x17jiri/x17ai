@@ -1,11 +1,10 @@
 // Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
-use log::{error, warn};
+use x17ai::data2d;
 use x17ai::nn::layers::{Layer, Linear, LossFunction, SoftmaxCrossEntropy};
 use x17ai::nn::{EvalContext, ModelContext};
 use x17ai::tensor::device::cpu::CPUDevice;
-use x17ai::tensor::dtype::HasDType;
 use x17ai::tensor::math::Savable;
 use x17ai::tensor::{self, DType, Tensor};
 
@@ -150,16 +149,9 @@ fn main() {
 	loss.randomize();
 
 	let input = Tensor::new_empty_on(&[2, 3], DType::F32, dev.clone());
-	let expected = Tensor::new_empty_on(&[2, 2], DType::F32, dev.clone());
-
-	println!("input owns buffer: {}", input.owns_buffer());
-
 	tensor::math::randn().save_to(&input);
-	let a = dev.tensor_as_slice::<f32>(&expected);
-	a[0].set(1.0);
-	a[1].set(0.0);
-	a[2].set(0.0);
-	a[3].set(1.0);
+
+	let expected = Tensor::new_2d::<f32>(dev.clone(), data2d![[1.0, 0.0], [0.0, 1.0],]);
 
 	let mut ectx_model = EvalContext::new(true);
 	let output_logits = model.forward(input.clone(), &mut ectx_model);

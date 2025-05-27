@@ -4,6 +4,7 @@
 pub mod cpu;
 
 use std::fmt;
+use std::ptr::NonNull;
 use std::rc::Rc;
 
 use super::TensorSize;
@@ -24,8 +25,7 @@ pub trait Device {
 
 	fn new_buffer(self: Rc<Self>, dtype: DType, elems: TensorSize) -> Rc<Buffer>;
 
-	// This function must manually drop buffer.device
-	fn drop_buffer(&self, buffer: &mut Buffer);
+	fn drop_buffer(self: Rc<Self>, device_buffer: NonNull<u8>, size_bytes: usize);
 
 	// If any of the slices represented by a SliceSet are not in bounds,
 	// these functions will panic.
@@ -82,7 +82,7 @@ pub trait Device {
 	);
 
 	fn format(
-		&self, f: &mut fmt::Formatter, dtype: DType, offset: TensorSize, len: TensorSize,
-		stride: TensorSize,
+		&self, f: &mut fmt::Formatter, buffer: &Buffer, dtype: DType, offset: TensorSize,
+		len: TensorSize, stride: TensorSize,
 	) -> fmt::Result;
 }

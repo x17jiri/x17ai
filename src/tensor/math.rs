@@ -69,10 +69,10 @@ fn __elem_wise<'a, const N: usize, F: FnMut([SliceSet; N])>(tensors: [&Tensor; N
 			f(std::array::from_fn(|i| SliceSet {
 				buffer: buffers[i],
 				dtype: dtypes[i],
-				len: lengths[i],
-				batch_size,
-				batch_stride: batch_strides[i],
 				offset: offsets[i],
+				len: lengths[i],
+				count: batch_size,
+				stride: batch_strides[i],
 			}));
 		},
 	);
@@ -103,9 +103,9 @@ fn __vec_wise<'a, const N: usize, F: Fn([SliceSet; N])>(tensors: [&Tensor; N], f
 				buffer: buffers[i],
 				dtype: dtypes[i],
 				len: lengths[i],
-				batch_size,
-				batch_stride: batch_strides[i],
 				offset: offsets[i],
+				count: batch_size,
+				stride: batch_strides[i],
 			}));
 		},
 	);
@@ -138,8 +138,8 @@ fn __mat_wise<'a, const N: usize, F: Fn([MatrixSet; N])>(
 						matrices[i].row_stride,
 						matrices[i].col_stride,
 					),
-					batch_size,
-					batch_stride: batch_strides[i],
+					count: batch_size,
+					stride: batch_strides[i],
 				},
 
 				rows: matrices[i].rows,
@@ -162,7 +162,7 @@ pub fn zeros() -> Zeros {
 impl Savable for Zeros {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
-		let executor = to.buffer.device.as_ref();
+		let executor = to.buffer.executor();
 		__elem_wise([to], |[to]| {
 			executor.zeros(&to);
 		});
@@ -180,7 +180,7 @@ pub fn randn() -> Randn {
 impl Savable for Randn {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
-		let executor = to.buffer.device.as_ref();
+		let executor = to.buffer.executor();
 		__elem_wise([to], |[to]| {
 			executor.randn(&to);
 		});
@@ -192,7 +192,7 @@ impl Savable for Randn {
 impl Savable for Tensor {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
-		let executor = to.buffer.device.as_ref();
+		let executor = to.buffer.executor();
 		__elem_wise([to, self], |[to, input]| {
 			executor.copy(&to, &input);
 		});
@@ -202,7 +202,7 @@ impl Savable for Tensor {
 impl Accumulable for Tensor {
 	#[inline(never)]
 	fn acc_to(&self, to: &Tensor, to_weight: f64, expr_weight: f64) {
-		let executor = to.buffer.device.as_ref();
+		let executor = to.buffer.executor();
 		__elem_wise([to, self], |[to, input]| {
 			executor.acc(&to, to_weight, &input, expr_weight);
 		});
@@ -223,7 +223,7 @@ pub fn mul<'a>(a: &'a Tensor, b: &'a Tensor) -> Mul<'a> {
 impl<'a> Savable for Mul<'a> {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
-		let executor = to.buffer.device.as_ref();
+		let executor = to.buffer.executor();
 		__elem_wise([to, self.a, self.b], |[to, a, b]| {
 			executor.mul(&to, &a, &b);
 		});
@@ -233,7 +233,7 @@ impl<'a> Savable for Mul<'a> {
 impl<'a> Accumulable for Mul<'a> {
 	#[inline(never)]
 	fn acc_to(&self, to: &Tensor, to_weight: f64, expr_weight: f64) {
-		let executor = to.buffer.device.as_ref();
+		let executor = to.buffer.executor();
 		__elem_wise([to, self.a, self.b], |[to, a, b]| {
 			executor.mul_acc(&to, to_weight, &a, &b, expr_weight);
 		});
@@ -254,7 +254,7 @@ pub fn sub<'a>(a: &'a Tensor, b: &'a Tensor) -> Sub<'a> {
 impl<'a> Savable for Sub<'a> {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
-		let executor = to.buffer.device.as_ref();
+		let executor = to.buffer.executor();
 		__elem_wise([to, self.a, self.b], |[to, a, b]| {
 			executor.sub(&to, &a, &b);
 		});
@@ -275,7 +275,7 @@ pub fn add<'a>(a: &'a Tensor, b: &'a Tensor) -> Add<'a> {
 impl<'a> Savable for Add<'a> {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
-		let executor = to.buffer.device.as_ref();
+		let executor = to.buffer.executor();
 		__elem_wise([to, self.a, self.b], |[to, a, b]| {
 			executor.add(&to, &a, &b);
 		});
@@ -296,7 +296,7 @@ pub fn rsqrt(tensor: &Tensor, eps: f64) -> RSqrt {
 impl<'a> Savable for RSqrt<'a> {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
-		let executor = to.buffer.device.as_ref();
+		let executor = to.buffer.executor();
 		__elem_wise([to, self.tensor], |[to, input]| {
 			executor.rsqrt(&to, &input, self.eps);
 		});
@@ -322,7 +322,7 @@ pub fn log_clamped(tensor: &Tensor) -> LogClamped {
 impl<'a> Savable for LogClamped<'a> {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
-		let executor = to.buffer.device.as_ref();
+		let executor = to.buffer.executor();
 		__elem_wise([to, self.tensor], |[to, input]| {
 			executor.log_clamped(&to, &input);
 		});
@@ -343,7 +343,7 @@ pub fn swiglu<'a>(lin: &'a Tensor, gate: &'a Tensor) -> SwiGLU<'a> {
 impl<'a> Savable for SwiGLU<'a> {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
-		let executor = to.buffer.device.as_ref();
+		let executor = to.buffer.executor();
 		__elem_wise([to, self.lin, self.gate], |[to, lin, gate]| {
 			executor.swiglu(&to, &lin, &gate);
 		});
@@ -367,7 +367,7 @@ pub fn swiglu_backward<'a>(
 impl<'a> SwiGLUBackward<'a> {
 	#[inline(never)]
 	pub fn save_to(&self, d_lin: &Tensor, d_gate: &Tensor) {
-		let executor = d_lin.buffer.device.as_ref();
+		let executor = d_lin.buffer.executor();
 		__elem_wise(
 			[d_lin, d_gate, self.lin, self.gate, self.d_out],
 			|[d_lin, d_gate, lin, gate, d_out]| {
@@ -398,7 +398,7 @@ pub fn dot<'a>(a: &'a Tensor, b: &'a Tensor) -> VecMul<'a> {
 impl<'a> Savable for VecMul<'a> {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
-		let executor = to.buffer.device.as_ref();
+		let executor = to.buffer.executor();
 		__vec_wise([to, self.a, self.b], |[to, a, b]| {
 			executor.dot(&to, &a, &b, self.scale);
 		});
@@ -408,7 +408,7 @@ impl<'a> Savable for VecMul<'a> {
 impl Accumulable for VecMul<'_> {
 	#[inline(never)]
 	fn acc_to(&self, to: &Tensor, to_weight: f64, expr_weight: f64) {
-		let executor = to.buffer.device.as_ref();
+		let executor = to.buffer.executor();
 		__vec_wise([to, self.a, self.b], |[to, a, b]| {
 			executor.dot_acc(&to, to_weight, &a, &b, expr_weight * self.scale);
 		});
@@ -418,7 +418,7 @@ impl Accumulable for VecMul<'_> {
 //--------------------------------------------------------------------------------------------------
 
 pub fn sum_all(tensor: &Tensor) -> f64 {
-	let executor = tensor.buffer.device.as_ref();
+	let executor = tensor.buffer.executor();
 	let mut sum = 0.0;
 	// TODO - `__elem_wise()` disables broadcast for tensor at position 0.
 	// In the case of a `sum_all()`, it would make sense to enable it,
@@ -430,7 +430,7 @@ pub fn sum_all(tensor: &Tensor) -> f64 {
 }
 
 pub fn approx_eq(a: &Tensor, b: &Tensor, eps: f64) -> bool {
-	let executor = a.buffer.device.as_ref();
+	let executor = a.buffer.executor();
 	let mut result = true;
 	__elem_wise([a, b], |[a, b]| {
 		result &= executor.approx_eq(&a, &b, eps);
@@ -451,7 +451,7 @@ pub fn softmax<'a>(tensor: &'a Tensor) -> Softmax<'a> {
 impl<'a> Savable for Softmax<'a> {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
-		let executor = to.buffer.device.as_ref();
+		let executor = to.buffer.executor();
 		__vec_wise([to, self.tensor], |[to, input]| {
 			executor.softmax(&to, &input);
 		});
@@ -482,7 +482,7 @@ impl<'a> RMSNorm<'a> {
 impl<'a> Savable for RMSNorm<'a> {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
-		let executor = to.buffer.device.as_ref();
+		let executor = to.buffer.executor();
 		if let Some(scale_storage) = self.scale_storage {
 			__vec_wise([to, self.tensor, scale_storage], |[to, input, scale_storage]| {
 				executor.rms_norm(&to, &input, self.eps, Some(&scale_storage));
@@ -659,7 +659,7 @@ impl<'a> MatMulPrep<'a> {
 impl<'a> MatrixSavable for MatMul<'a> {
 	#[inline(never)]
 	fn save_to(self, to: Matrix) {
-		let executor = to.tensor.buffer.device.as_ref();
+		let executor = to.tensor.buffer.executor();
 		let scale = self.scale;
 		let prep = MatMulPrep::new(self, to);
 		__mat_wise([&prep.to, &prep.a, &prep.b], prep.batch_dims.iter(), |[to, a, b]| {
@@ -671,7 +671,7 @@ impl<'a> MatrixSavable for MatMul<'a> {
 impl<'a> MatrixAccumulable for MatMul<'a> {
 	#[inline(never)]
 	fn acc_to(self, to: Matrix, to_weight: f64, expr_weight: f64) {
-		let executor = to.tensor.buffer.device.as_ref();
+		let executor = to.tensor.buffer.executor();
 		let scale = self.scale * expr_weight;
 		let prep = MatMulPrep::new(self, to);
 		__mat_wise([&prep.to, &prep.a, &prep.b], prep.batch_dims.iter(), |[to, a, b]| {
@@ -762,40 +762,40 @@ impl<'a> Savable for Attention<'a> {
 		let mut q = SliceSet {
 			buffer: self.q.buffer.as_ref(),
 			dtype: self.q.dtype(),
-			len: q_heads * qk_size,
-			batch_size: inputs,
-			batch_stride: q_input_stride,
 			offset: 0,
+			len: q_heads * qk_size,
+			count: inputs,
+			stride: q_input_stride,
 		};
 
 		let mut k = SliceSet {
 			buffer: self.k.buffer.as_ref(),
 			dtype: self.k.dtype(),
-			len: k_heads * qk_size,
-			batch_size: inputs,
-			batch_stride: k_input_stride,
 			offset: 0,
+			len: k_heads * qk_size,
+			count: inputs,
+			stride: k_input_stride,
 		};
 
 		let mut v = SliceSet {
 			buffer: self.v.buffer.as_ref(),
 			dtype: self.v.dtype(),
-			len: v_heads * v_size,
-			batch_size: inputs,
-			batch_stride: v_input_stride,
 			offset: 0,
+			len: v_heads * v_size,
+			count: inputs,
+			stride: v_input_stride,
 		};
 
 		let mut to = SliceSet {
 			buffer: to.buffer.as_ref(),
 			dtype: to.dtype(),
-			len: q_heads * v_size,
-			batch_size: inputs,
-			batch_stride: to_input_stride,
 			offset: 0,
+			len: q_heads * v_size,
+			count: inputs,
+			stride: to_input_stride,
 		};
 
-		let executor = to.buffer.device.as_ref();
+		let executor = to.buffer.executor();
 
 		batch::run(
 			batch_iter,
