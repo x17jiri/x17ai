@@ -2,12 +2,14 @@
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
 use std::mem::ManuallyDrop;
+use std::num::NonZeroUsize;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
 use super::device::Device;
 use super::dtype::DType;
-use super::{NonZeroTensorSize, TensorSize};
+
+//--------------------------------------------------------------------------------------------------
 
 pub struct Buffer {
 	pub device: ManuallyDrop<Rc<dyn Device>>,
@@ -28,7 +30,7 @@ impl Buffer {
 		my_dev == dev
 	}
 
-	#[inline]
+	#[inline(never)]
 	pub fn executor(&self) -> &dyn Device {
 		self.device.as_ref()
 	}
@@ -41,48 +43,44 @@ impl Drop for Buffer {
 	}
 }
 
+//--------------------------------------------------------------------------------------------------
+
 pub struct SliceSet<'a> {
 	pub buffer: &'a Buffer,
 	pub dtype: DType,
-	pub offset: TensorSize,
+	pub offset: usize,
 
-	pub len: TensorSize,
-	pub count: TensorSize,
-	pub stride: TensorSize,
+	pub len: usize,
+	pub count: usize,
+	pub stride: usize,
 }
 
 impl<'a> SliceSet<'a> {
 	pub fn span(&self) -> std::ops::Range<usize> {
-		let offset = self.offset as usize;
-		let len = self.len as usize;
-		let count = self.count as usize;
-		let stride = self.stride as usize;
-
-		let begin = offset;
-		let end = begin + if count > 0 { (count - 1) * stride + len } else { 0 };
+		let begin = self.offset;
+		let len = if self.count > 0 { (self.count - 1) * self.stride + self.len } else { 0 };
+		let end = begin + len;
 		begin..end
 	}
 }
 
-/// All matrices are stored in row-major order.
-/// Example:
-/// 	[	1 2 3
-/// 		4 5 6	->	[ 1 2 3 4 5 6 7 8 9 ]
-/// 		7 8 9 ]
+//--------------------------------------------------------------------------------------------------
+
 pub struct MatrixSet<'a> {
 	pub slice_set: SliceSet<'a>,
 
-	pub rows: NonZeroTensorSize,
-	pub cols: NonZeroTensorSize,
-	pub row_stride: TensorSize,
-	pub col_stride: TensorSize,
+	pub rows: NonZeroUsize,
+	pub cols: NonZeroUsize,
+	pub row_stride: usize,
+	pub col_stride: usize,
 }
 
 impl<'a> MatrixSet<'a> {
 	pub fn slice_len(
-		rows: NonZeroTensorSize, cols: NonZeroTensorSize, row_stride: TensorSize,
-		col_stride: TensorSize,
-	) -> TensorSize {
+		rows: NonZeroUsize, cols: NonZeroUsize, row_stride: usize, col_stride: usize,
+	) -> usize {
 		(rows.get() - 1) * row_stride + (cols.get() - 1) * col_stride + 1
 	}
 }
+
+//--------------------------------------------------------------------------------------------------

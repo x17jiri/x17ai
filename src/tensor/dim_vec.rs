@@ -1,49 +1,11 @@
 // Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
-//--------------------------------------------------------------------------------------------------
-
 use smallvec::SmallVec;
 use std::intrinsics::cold_path;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 
-use super::TensorSize;
-
-#[derive(Clone, Copy, PartialEq, Default)]
-pub struct SizeAndStride {
-	pub size: TensorSize,
-	pub stride: TensorSize,
-}
-
-pub enum DimType {
-	Contiguous,
-	Broadcasted,
-	Strided,
-}
-
-impl SizeAndStride {
-	pub fn is_contiguous(&self) -> bool {
-		self.stride == 1 || self.size <= 1
-	}
-
-	pub fn is_broadcasted(&self) -> bool {
-		self.stride < 1 && self.size > 1
-	}
-
-	pub fn is_strided(&self) -> bool {
-		self.stride > 1 && self.size > 1
-	}
-
-	pub fn dim_type(&self) -> DimType {
-		if self.stride == 1 || self.size <= 1 {
-			DimType::Contiguous
-		} else if self.stride < 1 {
-			DimType::Broadcasted
-		} else {
-			DimType::Strided
-		}
-	}
-}
+use super::SizeAndStride;
 
 //--------------------------------------------------------------------------------------------------
 // I expect that 99.99% of the time, the DimVec will use inline storage.
@@ -54,7 +16,7 @@ impl SizeAndStride {
 pub const INLINE_DIMS: usize = 5;
 
 pub struct DimVec {
-	pub(crate) vec: SmallVec<[SizeAndStride; INLINE_DIMS]>,
+	vec: SmallVec<[SizeAndStride; INLINE_DIMS]>,
 }
 
 impl DimVec {
@@ -72,6 +34,62 @@ impl DimVec {
 		}
 	}
 
+	pub fn new_from_iter<I: IntoIterator<Item = SizeAndStride> + ExactSizeIterator>(
+		iter: I,
+	) -> DimVec {
+		let len = iter.len();
+		let mut t = DimVec::with_capacity(len);
+		unsafe {
+			let mut ptr = t.vec.as_mut_ptr();
+			for i in iter {
+				*ptr = i;
+				ptr = ptr.add(1);
+			}
+			t.vec.set_len(len);
+		}
+		t
+	}
+
+	pub unsafe fn extend_unchecked<I: IntoIterator<Item = SizeAndStride> + ExactSizeIterator>(
+		&mut self, iter: I,
+	) {
+		let len = self.vec.len();
+		let add = iter.len();
+		debug_assert!(len + add <= self.vec.capacity());
+		unsafe {
+			let mut ptr = self.vec.as_mut_ptr().add(len);
+			for i in iter {
+				*ptr = i;
+				ptr = ptr.add(1);
+			}
+			self.vec.set_len(len + add);
+		}
+	}
+
+	pub fn extend_rev<I: IntoIterator<Item = SizeAndStride> + ExactSizeIterator>(
+		&mut self, iter: I,
+	) {
+		let len = self.vec.len();
+		let add = iter.len();
+		let cap = self.vec.capacity();
+
+		let ptr = if len + add <= cap {
+			self.vec.as_mut_ptr()
+		} else {
+			cold_path();
+			self.reserve_large(add)
+		};
+
+		unsafe {
+			let mut ptr = ptr.add(len + add);
+			for i in iter {
+				ptr = ptr.sub(1);
+				*ptr = i;
+			}
+			self.vec.set_len(len + add);
+		}
+	}
+
 	#[inline(never)]
 	fn clone_large(&self) -> DimVec {
 		DimVec { vec: self.vec.clone() }
@@ -86,43 +104,6 @@ impl DimVec {
 	fn reserve_large(&mut self, additional: usize) -> *mut SizeAndStride {
 		self.vec.reserve(additional);
 		self.vec.as_mut_ptr()
-	}
-
-	pub fn extend<'a, I: IntoIterator<Item = &'a SizeAndStride> + ExactSizeIterator>(
-		&mut self, iterable: I,
-	) {
-		let mut ptr = self.vec.as_mut_ptr();
-		let len = self.vec.len();
-		let cap = self.vec.capacity();
-		let add = iterable.len();
-		if len + add > cap {
-			ptr = self.reserve_large(add);
-		}
-		unsafe {
-			for i in iterable {
-				*ptr = *i;
-				ptr = ptr.add(1);
-			}
-			self.vec.set_len(len + add);
-		}
-	}
-
-	pub fn extend_with_array<const N: usize>(&mut self, array: &[SizeAndStride; N]) {
-		let mut ptr = self.vec.as_mut_ptr();
-		let len = self.vec.len();
-		let cap = self.vec.capacity();
-		let add = N;
-		if len + add > cap {
-			ptr = self.reserve_large(add);
-		}
-		unsafe {
-			ptr = ptr.add(len);
-			for i in array {
-				*ptr = *i;
-				ptr = ptr.add(1);
-			}
-			self.vec.set_len(len + add);
-		}
 	}
 
 	pub fn swap(&mut self, a: usize, b: usize) {

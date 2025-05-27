@@ -5,13 +5,12 @@ use std::intrinsics::cold_path;
 
 use log::warn;
 
-use super::TensorSize;
 use super::dim_merger::{MergedDim, MergedDimIter};
 
 #[inline(never)]
-fn __run_recursive<const N: usize, F: FnMut(TensorSize, [TensorSize; N], [TensorSize; N])>(
+fn __run_recursive<const N: usize, F: FnMut(usize, [usize; N], [usize; N])>(
 	prev_dim: MergedDim<N>, mut dims: impl Clone + Iterator<Item = MergedDim<N>>,
-	offsets: [TensorSize; N], f: &mut F,
+	offsets: [usize; N], f: &mut F,
 ) {
 	if prev_dim.size > 1 {
 		assert!(prev_dim.strides[0] > 0, "broadcast is disabled for this tensor");
@@ -32,18 +31,18 @@ fn __run_recursive<const N: usize, F: FnMut(TensorSize, [TensorSize; N], [Tensor
 }
 
 #[inline(never)]
-fn __run<'a, const N: usize, F: FnMut(TensorSize, [TensorSize; N], [TensorSize; N])>(
-	mut dims: MergedDimIter<N>, offsets: [TensorSize; N], mut f: F,
+fn __run<'a, const N: usize, F: FnMut(usize, [usize; N], [usize; N])>(
+	mut dims: MergedDimIter<N>, offsets: [usize; N], mut f: F,
 ) {
 	warn!("batch::run() called with more than one batch dimension");
 	let dim = dims.next().unwrap();
 	__run_recursive(dim, dims, offsets, &mut f);
 }
 
-/// F: fn(batch_size: TensorSize, batch_strides: [TensorSize; N], offsets: [TensorSize; N])
+/// F: fn(batch_size: usize, batch_strides: [usize; N], offsets: [usize; N])
 #[inline]
-pub fn run<'a, const N: usize, F: FnMut(TensorSize, [TensorSize; N], [TensorSize; N])>(
-	mut dims: MergedDimIter<N>, offsets: [TensorSize; N], mut f: F,
+pub fn run<'a, const N: usize, F: FnMut(usize, [usize; N], [usize; N])>(
+	mut dims: MergedDimIter<N>, offsets: [usize; N], mut f: F,
 ) {
 	match dims.len() {
 		0 => f(1, [0; N], offsets),

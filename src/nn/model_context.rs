@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::tensor::{DType, Device, TensorSize};
+use crate::tensor::{DType, Device};
 
 use super::optimizer::OptCoef;
 use super::param::Param;
@@ -24,7 +24,7 @@ impl ModelContext {
 		}
 	}
 
-	pub fn new_param(&mut self, shape: &[TensorSize], dtype: DType) -> Rc<RefCell<Param>> {
+	pub fn new_param(&mut self, shape: &[usize], dtype: DType) -> Rc<RefCell<Param>> {
 		let param = Param::new(shape, dtype, self.device.clone());
 		self.params.push(param.clone());
 		param

@@ -9,7 +9,7 @@ const CONST: [u32; 4] = [0x_6170_7865, 0x_3320_646e, 0x_7962_2d32, 0x_6b20_6574]
 
 pub const STATE_WORDS: usize = 16;
 
-pub const BLOCK_SIZE: usize = 64; // bytes
+//pub const BLOCK_SIZE: usize = 64; // bytes
 
 pub struct Rng {
 	state: [u32; STATE_WORDS],

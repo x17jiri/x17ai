@@ -4,7 +4,7 @@
 // Optimizer. Inspired by Adam-mini: https://arxiv.org/abs/2406.16793
 
 use crate::tensor::math::{Accumulable, Savable};
-use crate::tensor::{self, Tensor, TensorSize};
+use crate::tensor::{self, Tensor};
 
 pub struct OptCoef {
 	pub(crate) momentum_decay: f64, // beta1
@@ -25,8 +25,8 @@ impl Default for OptCoef {
 }
 
 pub struct OptParam {
-	pub(crate) parts: TensorSize,
-	pub(crate) part_elems: TensorSize,
+	pub(crate) parts: usize,
+	pub(crate) part_elems: usize,
 	pub(crate) part_elems_recip: f64, // 1.0 / (part_elems as f64)
 	pub(crate) already_have_grad: bool,
 
@@ -40,7 +40,7 @@ pub struct OptParam {
 }
 
 impl OptParam {
-	pub fn new(value: Tensor, parts: TensorSize, part_elems: TensorSize) -> OptParam {
+	pub fn new(value: Tensor, parts: usize, part_elems: usize) -> OptParam {
 		let elems = parts.checked_mul(part_elems).expect("Overflow in multiplication");
 		assert!(value.elems() == elems, "Tensor size mismatch");
 
@@ -108,11 +108,11 @@ impl OptParam {
 		&self.value
 	}
 
-	pub fn parts(&self) -> TensorSize {
+	pub fn parts(&self) -> usize {
 		self.parts
 	}
 
-	pub fn part_elems(&self) -> TensorSize {
+	pub fn part_elems(&self) -> usize {
 		self.part_elems
 	}
 }

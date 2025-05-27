@@ -1,8 +1,6 @@
 // Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
-use std::fmt;
-
 #[derive(Clone, Copy)]
 pub struct Indent(usize);
 
@@ -44,9 +42,9 @@ impl std::ops::SubAssign<usize> for Indent {
 	}
 }
 
-// fmt::Display for Indent
-impl fmt::Display for Indent {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+// std::fmt::Display for Indent
+impl std::fmt::Display for Indent {
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		for _ in 0..self.0 {
 			write!(f, "\t")?;
 		}

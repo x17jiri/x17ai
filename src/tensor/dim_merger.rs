@@ -5,22 +5,18 @@ use log::warn;
 use smallvec::{SmallVec, smallvec};
 use std::intrinsics::cold_path;
 
-use super::TensorSize;
-use super::dim_vec::{INLINE_DIMS, SizeAndStride};
+use super::SizeAndStride;
+use super::dim_vec::INLINE_DIMS;
 
 #[derive(Clone, Copy)]
 pub struct MergedDim<const N: usize> {
-	pub size: TensorSize,
-	pub strides: [TensorSize; N],
+	pub size: usize,
+	pub strides: [usize; N],
 }
 
 impl<const N: usize> MergedDim<N> {
-	pub fn size_and_stride(&self, dim: usize) -> SizeAndStride {
-		assert!(dim < N);
-		SizeAndStride {
-			size: self.size,
-			stride: self.strides[dim],
-		}
+	pub fn size_and_stride(&self, i: usize) -> SizeAndStride {
+		SizeAndStride { size: self.size, stride: self.strides[i] }
 	}
 }
 

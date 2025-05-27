@@ -5,19 +5,19 @@ use std::cell::RefCell;
 use std::intrinsics::cold_path;
 use std::rc::Rc;
 
-use crate::tensor::{DType, Device, Tensor, TensorSize};
+use crate::tensor::{DType, Device, Tensor};
 
 use super::optimizer::{OptCoef, OptParam};
 
 pub struct Param {
 	value: Tensor,
 	opt_param: Option<OptParam>,
-	parts: TensorSize,
-	part_elems: TensorSize,
+	parts: usize,
+	part_elems: usize,
 }
 
 impl Param {
-	pub fn new(shape: &[TensorSize], dtype: DType, device: Rc<dyn Device>) -> Rc<RefCell<Param>> {
+	pub fn new(shape: &[usize], dtype: DType, device: Rc<dyn Device>) -> Rc<RefCell<Param>> {
 		let value = Tensor::new_empty_on(shape, dtype, device);
 		let opt_param = None;
 		let parts = 1;
@@ -29,7 +29,7 @@ impl Param {
 		&self.value
 	}
 
-	pub fn partition(&mut self, parts: TensorSize, part_elems: TensorSize) {
+	pub fn partition(&mut self, parts: usize, part_elems: usize) {
 		assert!(self.value.elems() == parts * part_elems, "Tensor size mismatch");
 		self.parts = parts;
 		self.part_elems = part_elems;

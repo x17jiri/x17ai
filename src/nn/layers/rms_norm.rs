@@ -7,7 +7,7 @@ use std::rc::Rc;
 use crate::nn::eval_context::EvalContext;
 use crate::nn::param::Param;
 use crate::tensor::math::Savable;
-use crate::tensor::{self, Tensor, TensorSize};
+use crate::tensor::{self, Tensor};
 
 use super::Layer;
 
@@ -19,13 +19,13 @@ pub enum RMSNormGradientMode {
 }
 
 pub struct RMSNorm {
-	shape: [TensorSize; 1],
+	shape: [usize; 1],
 	eps: f64,
 	gradient_mode: RMSNormGradientMode,
 }
 
 impl RMSNorm {
-	pub fn new(n_inputs: TensorSize, eps: f64) -> RMSNorm {
+	pub fn new(n_inputs: usize, eps: f64) -> RMSNorm {
 		RMSNorm {
 			shape: [n_inputs],
 			eps,
@@ -35,11 +35,11 @@ impl RMSNorm {
 }
 
 impl Layer for RMSNorm {
-	fn input_shape(&self) -> &[TensorSize] {
+	fn input_shape(&self) -> &[usize] {
 		&self.shape
 	}
 
-	fn output_shape(&self) -> &[TensorSize] {
+	fn output_shape(&self) -> &[usize] {
 		&self.shape
 	}
 

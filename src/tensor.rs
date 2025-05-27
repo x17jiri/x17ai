@@ -12,172 +12,98 @@ pub mod math;
 #[cfg(test)]
 mod tests;
 
-use core::panic;
-use std::fmt;
 use std::intrinsics::likely;
-use std::iter::ExactSizeIterator;
-use std::mem::MaybeUninit;
-use std::num::NonZeroU32;
-use std::ops::Index;
 use std::rc::Rc;
 
 use buffer::Buffer;
-use dim_vec::{DimVec, SizeAndStride};
+use dim_vec::DimVec;
 
 pub use device::Device;
-pub use dtype::DType;
-use dtype::HasDType;
+pub use dtype::{DType, HasDType};
 
 //--------------------------------------------------------------------------------------------------
 
-pub type TensorSize = u32;
-pub type NonZeroTensorSize = NonZeroU32;
-
-pub fn tensor_size_to_usize(size: TensorSize) -> usize {
-	usize::try_from(size).unwrap()
+pub struct Data1D<T: HasDType> {
+	pub data: Vec<T>,
 }
 
-//--------------------------------------------------------------------------------------------------
+pub struct Data2D<T: HasDType> {
+	pub data: Vec<Vec<T>>,
+}
+
+pub struct Data3D<T: HasDType> {
+	pub data: Vec<Vec<Vec<T>>>,
+}
 
 #[macro_export]
 macro_rules! data1d {
-    ( $( $x:expr ),* $(,)? ) => {
-        vec![$($x),*]
+    ( $dt:ty; $( $x:expr ),* $(,)? ) => {
+        $crate::tensor::Data1D::<$dt> {
+			data: vec![$($x),*]
+		}
     };
 }
 
 #[macro_export]
 macro_rules! data2d {
-    ( $( [ $( $x:expr ),* ] ),* $(,)? ) => {
-        vec![
-            $(vec![$($x),*]),*
-        ]
+    ( $dt:ty; $( [ $( $x:expr ),* ] ),* $(,)? ) => {
+		$crate::tensor::Data2D::<$dt> {
+        	data: vec![
+				$(vec![$($x),*]),*
+			]
+		}
     };
 }
 
 #[macro_export]
 macro_rules! data3d {
-	( $( [ $( [ $( $x:expr ),* ] ),* $(,)? ] ),* $(,)? ) => {
-		vec![
-			$(
-				vec![
-					$(vec![$($x),*]),*
-				]
-			),*
-		]
+	( $dt:ty; $( [ $( [ $( $x:expr ),* ] ),* $(,)? ] ),* $(,)? ) => {
+		$crate::tensor::Data3D::<$dt> {
+			data: vec![
+				$(
+					vec![
+						$(vec![$($x),*]),*
+					]
+				),*
+			]
+		}
 	};
 }
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct ShapeView<'a> {
-	dims: &'a [SizeAndStride],
+#[derive(Clone, Copy, PartialEq, Default)]
+pub struct SizeAndStride {
+	pub size: usize,
+	pub stride: usize,
 }
 
-impl<'a> ShapeView<'a> {
-	pub fn len(&self) -> usize {
-		self.dims.len()
+pub enum DimType {
+	Contiguous,
+	Broadcasted,
+	Strided,
+}
+
+impl SizeAndStride {
+	pub fn is_contiguous(&self) -> bool {
+		self.stride == 1 || self.size <= 1
 	}
-}
 
-impl Index<isize> for ShapeView<'_> {
-	type Output = TensorSize;
-
-	fn index(&self, index: isize) -> &Self::Output {
-		let i = if index < 0 { self.dims.len() as isize + index } else { index };
-		&self.dims[i as usize].size
+	pub fn is_broadcasted(&self) -> bool {
+		self.stride < 1 && self.size > 1
 	}
-}
 
-impl Index<usize> for ShapeView<'_> {
-	type Output = TensorSize;
-
-	fn index(&self, index: usize) -> &Self::Output {
-		&self.dims[index].size
+	pub fn is_strided(&self) -> bool {
+		self.stride > 1 && self.size > 1
 	}
-}
 
-/*
-impl std::cmp::PartialEq<ShapeView<'_>> for ShapeView<'_> {
-	fn eq(&self, other: &ShapeView) -> bool {
-		if self.tensor.dims.len() != other.tensor.dims.len() {
-			return false;
-		}
-		for (a, b) in self.tensor.dims.iter().zip(other.tensor.dims.iter()) {
-			if a.size != b.size {
-				return false;
-			}
-		}
-		true
-	}
-}
-*/
-
-impl<'a> IntoIterator for ShapeView<'a> {
-	type Item = &'a TensorSize;
-	type IntoIter =
-		std::iter::Map<std::slice::Iter<'a, SizeAndStride>, fn(&SizeAndStride) -> &TensorSize>;
-
-	fn into_iter(self) -> Self::IntoIter {
-		self.dims.iter().map(|x| &x.size)
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
-/// This iterator is used in the `new_replace_tail()` function.
-/// I would use `std::iter::chain()` but it doesn't implement `ExactSizeIterator`.
-struct ReplaceTailIter<'a> {
-	a: &'a [SizeAndStride],
-	b: &'a [TensorSize],
-}
-
-impl<'a> ReplaceTailIter<'a> {
-	fn new(a: &'a [SizeAndStride], b: &'a [TensorSize]) -> ReplaceTailIter<'a> {
-		ReplaceTailIter { a, b }
-	}
-}
-
-impl<'a> ExactSizeIterator for ReplaceTailIter<'a> {
-	fn len(&self) -> usize {
-		self.a.len() + self.b.len()
-	}
-}
-
-impl<'a> Iterator for ReplaceTailIter<'a> {
-	type Item = &'a TensorSize;
-
-	fn next(&mut self) -> Option<Self::Item> {
-		if self.a.is_empty() {
-			if self.b.is_empty() {
-				None
-			} else {
-				let item = &self.b[0];
-				self.b = &self.b[1..];
-				Some(item)
-			}
+	pub fn dim_type(&self) -> DimType {
+		if self.stride == 1 || self.size <= 1 {
+			DimType::Contiguous
+		} else if self.stride < 1 {
+			DimType::Broadcasted
 		} else {
-			let item = &self.a[0].size;
-			self.a = &self.a[1..];
-			Some(item)
-		}
-	}
-}
-
-impl<'a> DoubleEndedIterator for ReplaceTailIter<'a> {
-	fn next_back(&mut self) -> Option<Self::Item> {
-		if self.b.is_empty() {
-			if self.a.is_empty() {
-				None
-			} else {
-				let item = &self.a[self.a.len() - 1].size;
-				self.a = &self.a[..self.a.len() - 1];
-				Some(item)
-			}
-		} else {
-			let item = &self.b[self.b.len() - 1];
-			self.b = &self.b[..self.b.len() - 1];
-			Some(item)
+			DimType::Strided
 		}
 	}
 }
@@ -186,85 +112,70 @@ impl<'a> DoubleEndedIterator for ReplaceTailIter<'a> {
 
 #[derive(Clone)]
 pub struct Tensor {
-	// dims in reverse order
 	pub(crate) dims: DimVec,
-	pub(crate) offset: TensorSize,
+	pub(crate) offset: usize,
 	pub(crate) dtype: DType,
-	pub(crate) elems: TensorSize,
 	pub(crate) buffer: Rc<Buffer>,
 }
 
 impl Tensor {
-	/// Allocate a new tensor on the provided device.
-	pub fn new_empty_on<'a, Shape>(shape: Shape, dtype: DType, device: Rc<dyn Device>) -> Tensor
-	where
-		Shape: IntoIterator<Item = &'a TensorSize>,
-		<Shape as IntoIterator>::IntoIter:
-			DoubleEndedIterator<Item = &'a TensorSize> + ExactSizeIterator,
-	{
-		let shape = shape.into_iter().copied();
-		let ndim = shape.len();
-		let mut dims = DimVec::with_capacity(ndim);
-		let mut elems = 1;
-		let mut nonzero_elems: TensorSize = 1;
-
-		let mut ptr = unsafe { dims.vec.as_mut_ptr().add(ndim) };
-		for size in shape.rev() {
+	fn __new_empty_on(mut dims: DimVec, dtype: DType, device: Rc<dyn Device>) -> Tensor {
+		let mut stride = 1;
+		let mut nonzero_elems: usize = 1;
+		for dim in dims.iter_mut().rev() {
 			// Check that if we ignore zero length dimensions, the number of elements does not
 			// overflow. This is done to make sure our calculations would not overflow even if we
 			// had the same dimensions but in different order.
-			if likely(size != 0) {
-				if let Some(mul) = nonzero_elems.checked_mul(size) {
+			if likely(dim.size != 0) {
+				if let Some(mul) = nonzero_elems.checked_mul(dim.size) {
 					nonzero_elems = mul;
 				} else {
 					panic!("too many elements");
 				};
 			}
 
-			let stride = elems;
-			elems *= size;
-
-			unsafe {
-				ptr = ptr.sub(1);
-				ptr.write(SizeAndStride { size, stride })
-			};
+			dim.stride = stride;
+			stride *= dim.size;
 		}
-
-		unsafe { dims.vec.set_len(ndim) };
-
 		Tensor {
 			dims,
 			offset: 0,
 			dtype,
-			elems,
-			buffer: device.new_buffer(dtype, elems),
+			buffer: device.new_buffer(dtype, stride),
 		}
 	}
 
+	/// Allocate a new tensor on the provided device.
+	pub fn new_empty_on(shape: &[usize], dtype: DType, device: Rc<dyn Device>) -> Tensor {
+		let dims =
+			DimVec::new_from_iter(shape.iter().map(|&size| SizeAndStride { size, stride: 0 }));
+		Self::__new_empty_on(dims, dtype, device)
+	}
+
 	/// Allocate a new tensor on the same device as `self`.
-	pub fn new_empty<'a, Shape>(&'a self, shape: Shape, dtype: DType) -> Tensor
-	where
-		Shape: IntoIterator<Item = &'a TensorSize>,
-		<Shape as IntoIterator>::IntoIter:
-			DoubleEndedIterator<Item = &'a TensorSize> + ExactSizeIterator,
-	{
+	pub fn new_empty(&self, shape: &[usize], dtype: DType) -> Tensor {
 		Self::new_empty_on(shape, dtype, self.device())
 	}
 
-	pub fn new_replace_tail(&self, tail_len: usize, replace_with: &[TensorSize]) -> Tensor {
-		let ndim = self.dims.len();
-		assert!(tail_len <= ndim, "not enough dimensions");
-		let keep_len = ndim - tail_len;
-		let keep = &self.dims[..keep_len];
+	pub fn new_replace_tail(&self, tail_len: usize, replace_with: &[usize]) -> Tensor {
+		let n_keep = self.dims.len().checked_sub(tail_len).expect("not enough dimensions");
+		let ndim = n_keep + replace_with.len();
+		let mut dims = DimVec::with_capacity(ndim);
 
-		let new_shape = ReplaceTailIter::new(keep, replace_with);
+		unsafe {
+			dims.extend_unchecked(self.dims.get_unchecked(..n_keep).iter().copied());
+			dims.extend_unchecked(
+				replace_with.iter().map(|&size| SizeAndStride { size, stride: 0 }),
+			);
+		}
 
-		Self::new_empty_on(new_shape, self.dtype, self.device())
+		Self::__new_empty_on(dims, self.dtype, self.device())
 	}
 
 	/// Allocate a new tensor on the same device with the same shape and dtype as `self`.
 	pub fn new_empty_like(&self) -> Tensor {
-		Self::new_empty_on(self.shape(), self.dtype, self.device())
+		let dims = self.dims.clone();
+		Self::__new_empty_on(dims, self.dtype, self.device())
 	}
 
 	/// Returns the device on which the tensor is allocated.
@@ -279,10 +190,6 @@ impl Tensor {
 		let weak = Rc::weak_count(buffer) + 1;
 		let strong = Rc::strong_count(buffer);
 		(weak | strong) <= 1
-	}
-
-	pub fn shape(&self) -> ShapeView {
-		ShapeView { dims: &self.dims }
 	}
 
 	/// `dim` should be in the range `0..<ndim`.
@@ -314,8 +221,8 @@ impl Tensor {
 	}
 
 	/// Returns the total number of elements in the tensor.
-	pub fn elems(&self) -> TensorSize {
-		self.elems
+	pub fn elems(&self) -> usize {
+		self.dims.iter().map(|dim| dim.size).product()
 	}
 
 	/// Returns the data type of the tensor elements.
@@ -323,24 +230,20 @@ impl Tensor {
 		self.dtype
 	}
 
-	pub fn reshape_last_dim<const TO: usize>(mut self, to_shape: [TensorSize; TO]) -> Tensor {
+	pub fn reshape_last_dim<const TO: usize>(mut self, to_shape: [usize; TO]) -> Tensor {
 		let dims = &mut self.dims;
 
 		let removed_dim = dims.pop().expect("not enough dimensions");
 
-		let elems = to_shape.iter().copied().product::<TensorSize>();
+		let elems = to_shape.iter().copied().product::<usize>();
 		assert!(elems == removed_dim.size, "incompatible reshape");
 
 		let mut stride = removed_dim.stride;
-		let mut new_dims: [MaybeUninit<SizeAndStride>; TO] = MaybeUninit::uninit_array();
-		for i in (0..TO).rev() {
-			let size = to_shape[i];
-			new_dims[i].write(SizeAndStride { size, stride });
+		dims.extend_rev(to_shape.iter().rev().map(|&size| {
+			let dim = SizeAndStride { size, stride };
 			stride *= size;
-		}
-		let new_dims = unsafe { MaybeUninit::array_assume_init(new_dims) };
-
-		dims.extend_with_array(&new_dims);
+			dim
+		}));
 
 		self
 	}
@@ -396,12 +299,12 @@ impl Tensor {
 		self
 	}
 
-	pub fn reshape<const FROM: usize, const TO: usize>(self, to_shape: [TensorSize; TO]) -> Tensor {
+	pub fn reshape<const FROM: usize, const TO: usize>(self, to_shape: [usize; TO]) -> Tensor {
 		self.merge_dims::<FROM>().reshape_last_dim(to_shape)
 	}
 
 	/// Reshapes the last `n_dims_to_reshape` dimensions of the tensor
-	pub fn reshape_n(self, _n_dims_to_reshape: usize, _new_shape: &[TensorSize]) -> Tensor {
+	pub fn reshape_n(self, _n_dims_to_reshape: usize, _new_shape: &[usize]) -> Tensor {
 		todo!("reshape_n"); // TODO
 		//
 		/*
@@ -463,20 +366,15 @@ impl Tensor {
 		*/
 	}
 
-	pub fn reshape_all(self, new_shape: &[TensorSize]) -> Tensor {
+	pub fn reshape_all(self, new_shape: &[usize]) -> Tensor {
 		let ndim = self.dims.len();
 		self.reshape_n(ndim, new_shape)
 	}
 
-	pub fn batch_size(&self, non_batch_dims: usize) -> TensorSize {
-		assert!(non_batch_dims <= self.dims.len(), "not enough dimensions");
-		let batch_dims = self.dims.len() - non_batch_dims;
-
-		let mut batch_size = 1;
-		for i in 0..batch_dims {
-			batch_size *= self.dims[i].size;
-		}
-		batch_size
+	pub fn batch_size(&self, non_batch_dims: usize) -> usize {
+		let batch_dims =
+			self.dims.len().checked_sub(non_batch_dims).expect("not enough dimensions");
+		self.dims[..batch_dims].iter().map(|dim| dim.size).product()
 	}
 
 	pub fn dim_to_positive(&self, dim: isize) -> usize {
@@ -497,27 +395,9 @@ impl Tensor {
 		self
 	}
 
-	pub fn permuted(mut self, perm: &[usize]) -> Tensor {
-		let ndim = self.dims.len();
-		assert!(perm.len() == ndim, "number of dimensions does not match");
-
-		let mut sum = 0;
-		let mut new_dims = DimVec::with_capacity(ndim);
-		new_dims.extend(perm.iter().map(|p| {
-			sum += *p;
-			&self.dims[*p]
-		}));
-
-		let expected_sum = ndim * (ndim - 1) / 2;
-		assert!(sum == expected_sum, "invalid permutation"); // TODO - does this work?
-
-		self.dims = new_dims;
-		self
-	}
-
 	#[inline(never)] // TODO - remove
-	pub fn slice(mut self, dim: isize, range: std::ops::Range<TensorSize>) -> Tensor {
-		let dim = self.dim_to_positive(dim as isize);
+	pub fn slice(mut self, dim: isize, range: std::ops::Range<usize>) -> Tensor {
+		let dim = self.dim_to_positive(dim);
 		let dim = &mut self.dims[dim];
 		assert!(range.start <= range.end, "invalid range");
 		assert!(range.end <= dim.size, "invalid range");
@@ -527,65 +407,61 @@ impl Tensor {
 	}
 
 	#[inline(never)]
-	pub fn new_1d<T: HasDType>(device: Rc<dyn Device>, value: Vec<T>) -> Tensor {
-		let x = value.len();
-		let x = TensorSize::try_from(x).expect("length too large");
+	pub fn new_1d<T: HasDType>(device: Rc<dyn Device>, value: Data1D<T>) -> Tensor {
+		let x = value.data.len();
 
-		let tensor = Self::new_empty_on(&[x], T::dtype(), device);
+		let tensor = Self::new_empty_on(&[x], T::dtype, device);
 		tensor.fill_1d(value);
 		tensor
 	}
 
 	#[inline(never)]
-	pub fn new_2d<T: HasDType>(device: Rc<dyn Device>, value: Vec<Vec<T>>) -> Tensor {
-		let y = value.len();
-		let y = TensorSize::try_from(y).expect("length too large");
+	pub fn new_2d<T: HasDType>(device: Rc<dyn Device>, value: Data2D<T>) -> Tensor {
+		let y = value.data.len();
 
-		let x = value.get(0).map_or(0, |row| row.len());
-		assert!(value.iter().all(|row| row.len() == x), "rows have different lengths");
-		let x = TensorSize::try_from(x).expect("length too large");
+		let x = value.data.get(0).map_or(0, |row| row.len());
+		assert!(value.data.iter().all(|row| row.len() == x), "rows have different lengths");
 
-		let tensor = Self::new_empty_on(&[y, x], T::dtype(), device);
+		let tensor = Self::new_empty_on(&[y, x], T::dtype, device);
 		tensor.fill_2d(value);
 		tensor
 	}
 
 	#[inline(never)]
-	pub fn new_3d<T: HasDType>(device: Rc<dyn Device>, value: Vec<Vec<Vec<T>>>) -> Tensor {
-		let z = value.len();
-		let z = TensorSize::try_from(z).expect("length too large");
+	pub fn new_3d<T: HasDType>(device: Rc<dyn Device>, value: Data3D<T>) -> Tensor {
+		let z = value.data.len();
 
-		let y = value.get(0).map_or(0, |mat| mat.len());
-		assert!(value.iter().all(|mat| mat.len() == y), "matrices have different numbers of rows");
-		let y = TensorSize::try_from(y).expect("length too large");
-
-		let x = value.get(0).and_then(|mat| mat.get(0)).map_or(0, |row| row.len());
+		let y = value.data.get(0).map_or(0, |mat| mat.len());
 		assert!(
-			value.iter().all(|mat| mat.iter().all(|row| row.len() == x)),
+			value.data.iter().all(|mat| mat.len() == y),
+			"matrices have different numbers of rows"
+		);
+
+		let x = value.data.get(0).and_then(|mat| mat.get(0)).map_or(0, |row| row.len());
+		assert!(
+			value.data.iter().all(|mat| mat.iter().all(|row| row.len() == x)),
 			"rows have different lengths"
 		);
-		let x = TensorSize::try_from(x).expect("length too large");
 
-		let tensor = Self::new_empty_on(&[z, y, x], T::dtype(), device);
+		let tensor = Self::new_empty_on(&[z, y, x], T::dtype, device);
 		tensor.fill_3d(value);
 		tensor
 	}
 
 	#[inline(never)]
-	pub fn fill_1d<T: HasDType>(&self, value: Vec<T>) {
-		let x = value.len();
-		let x = TensorSize::try_from(x).expect("length too large");
+	pub fn fill_1d<T: HasDType>(&self, value: Data1D<T>) {
+		let x = value.data.len();
 
 		assert!(self.ndim() == 1, "fill_1d() can only be used on 1D tensors");
 
 		assert!(self.dims[0].size == x, "invalid size");
 		assert!(self.dims[0].size <= 1 || self.dims[0].stride == 1, "tensor is not contiguous");
 
-		assert!(self.dtype == T::dtype(), "invalid dtype");
+		assert!(self.dtype == T::dtype, "invalid dtype");
 		let dtype = self.dtype;
 		let offset = self.offset;
 
-		let buf = value.as_slice();
+		let buf = value.data.as_slice();
 		let buf = unsafe {
 			std::slice::from_raw_parts(
 				buf.as_ptr() as *const u8,
@@ -598,13 +474,11 @@ impl Tensor {
 	}
 
 	#[inline(never)]
-	pub fn fill_2d<T: HasDType>(&self, value: Vec<Vec<T>>) {
-		let y = value.len();
-		let y = TensorSize::try_from(y).expect("length too large");
+	pub fn fill_2d<T: HasDType>(&self, value: Data2D<T>) {
+		let y = value.data.len();
 
-		let x = value.get(0).map_or(0, |row| row.len());
-		assert!(value.iter().all(|row| row.len() == x), "rows have different lengths");
-		let x = TensorSize::try_from(x).expect("length too large");
+		let x = value.data.get(0).map_or(0, |row| row.len());
+		assert!(value.data.iter().all(|row| row.len() == x), "rows have different lengths");
 
 		assert!(self.ndim() == 2, "fill_2d() can only be used on 2D tensors");
 
@@ -614,11 +488,11 @@ impl Tensor {
 		assert!(self.dims[0].size == y, "invalid size");
 		assert!(self.dims[0].size <= 1 || self.dims[0].stride >= x, "output overlap");
 
-		assert!(self.dtype == T::dtype(), "invalid dtype");
+		assert!(self.dtype == T::dtype, "invalid dtype");
 		let dtype = self.dtype;
 
-		for (i, row) in value.into_iter().enumerate() {
-			let offset = self.offset + (i as TensorSize) * self.dims[0].stride;
+		for (i, row) in value.data.into_iter().enumerate() {
+			let offset = self.offset + i * self.dims[0].stride;
 
 			let buf = row.as_slice();
 			let buf = unsafe {
@@ -634,20 +508,20 @@ impl Tensor {
 	}
 
 	#[inline(never)]
-	pub fn fill_3d<T: HasDType>(&self, value: Vec<Vec<Vec<T>>>) {
-		let z = value.len();
-		let z = TensorSize::try_from(z).expect("length too large");
+	pub fn fill_3d<T: HasDType>(&self, value: Data3D<T>) {
+		let z = value.data.len();
 
-		let y = value.get(0).map_or(0, |mat| mat.len());
-		assert!(value.iter().all(|mat| mat.len() == y), "matrices have different numbers of rows");
-		let y = TensorSize::try_from(y).expect("length too large");
-
-		let x = value.get(0).and_then(|mat| mat.get(0)).map_or(0, |row| row.len());
+		let y = value.data.get(0).map_or(0, |mat| mat.len());
 		assert!(
-			value.iter().all(|mat| mat.iter().all(|row| row.len() == x)),
+			value.data.iter().all(|mat| mat.len() == y),
+			"matrices have different numbers of rows"
+		);
+
+		let x = value.data.get(0).and_then(|mat| mat.get(0)).map_or(0, |row| row.len());
+		assert!(
+			value.data.iter().all(|mat| mat.iter().all(|row| row.len() == x)),
 			"rows have different lengths"
 		);
-		let x = TensorSize::try_from(x).expect("length too large");
 
 		assert!(self.ndim() == 3, "fill_3d() can only be used on 3D tensors");
 
@@ -663,14 +537,14 @@ impl Tensor {
 			"output overlap"
 		);
 
-		assert!(self.dtype == T::dtype(), "invalid dtype");
+		assert!(self.dtype == T::dtype, "invalid dtype");
 		let dtype = self.dtype;
 
-		for (i, mat) in value.into_iter().enumerate() {
-			let offset = self.offset + (i as TensorSize) * self.dims[0].stride;
+		for (i, mat) in value.data.into_iter().enumerate() {
+			let offset = self.offset + i * self.dims[0].stride;
 
 			for (j, row) in mat.into_iter().enumerate() {
-				let row_offset = offset + (j as TensorSize) * self.dims[1].stride;
+				let row_offset = offset + j * self.dims[1].stride;
 
 				let buf = row.as_slice();
 				let buf = unsafe {
@@ -687,44 +561,46 @@ impl Tensor {
 	}
 }
 
-fn fmt_0d(tensor: &Tensor, f: &mut fmt::Formatter, offset: TensorSize) -> fmt::Result {
+fn fmt_0d(tensor: &Tensor, f: &mut std::fmt::Formatter, offset: usize) -> std::fmt::Result {
 	let executor = tensor.buffer.executor();
-	executor.format(f, tensor.buffer.as_ref(), tensor.dtype, tensor.offset + offset, 1, 1)
+	let offset = tensor.offset + offset;
+	let len = 1;
+	let stride = 1;
+	executor.format(f, tensor.buffer.as_ref(), tensor.dtype, offset, len, stride)
 }
 
-fn fmt_1d(tensor: &Tensor, f: &mut fmt::Formatter, offset: TensorSize) -> fmt::Result {
+fn fmt_1d(tensor: &Tensor, f: &mut std::fmt::Formatter, offset: usize) -> std::fmt::Result {
 	let executor = tensor.buffer.executor();
 	let dim = tensor.dims[tensor.ndim() - 1];
+	let offset = tensor.offset + offset;
+	let len = dim.size;
+	let stride = dim.stride;
 	write!(f, "[")?;
-	executor.format(
-		f,
-		tensor.buffer.as_ref(),
-		tensor.dtype,
-		tensor.offset + offset,
-		dim.size,
-		dim.stride,
-	)?;
+	executor.format(f, tensor.buffer.as_ref(), tensor.dtype, offset, len, stride)?;
 	write!(f, "]")
 }
 
-fn fmt_Nd(tensor: &Tensor, f: &mut fmt::Formatter, offset: TensorSize, d: usize) -> fmt::Result {
+fn fmt_Nd(
+	tensor: &Tensor, f: &mut std::fmt::Formatter, offset: usize, d: usize,
+) -> std::fmt::Result {
 	let indent = "\t".repeat(d);
 	writeln!(f, "{indent}[")?;
 	let dim = tensor.dims[d];
 	for i in 0..dim.size {
 		write!(f, "{indent}\t")?;
+		let offset = offset + i * dim.stride;
 		if d + 1 < tensor.ndim() - 1 {
-			fmt_Nd(tensor, f, offset + i * dim.stride, d + 1)?;
+			fmt_Nd(tensor, f, offset, d + 1)?;
 		} else {
-			fmt_1d(tensor, f, offset + i * dim.stride)?;
+			fmt_1d(tensor, f, offset)?;
 		}
 		writeln!(f, ",")?;
 	}
 	write!(f, "{indent}]")
 }
 
-impl fmt::Display for Tensor {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl std::fmt::Display for Tensor {
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		write!(f, "Tensor(")?;
 		match self.ndim() {
 			0 => fmt_0d(self, f, 0)?,

@@ -1,12 +1,13 @@
 // Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
+use std::num::NonZeroUsize;
+
 use crate::tensor::device::AttentionParams;
 
 use super::buffer::{MatrixSet, SliceSet};
 use super::dim_merger::{DimMerger, MergedDimIter, MergedDimList};
-use super::dim_vec::SizeAndStride;
-use super::{NonZeroTensorSize, Tensor, TensorSize, batch};
+use super::{SizeAndStride, Tensor, batch};
 
 pub trait Savable {
 	/// Calculate the result of the operation represented by `self`
@@ -48,13 +49,12 @@ fn __elem_wise<'a, const N: usize, F: FnMut([SliceSet; N])>(tensors: [&Tensor; N
 	let dtypes = tensors.map(|t| t.dtype());
 	let buffers = tensors.map(|t| t.buffer.as_ref());
 
-	let lengths: [TensorSize; N] = std::array::from_fn(|i| {
-		let dim = smallest.size_and_stride(i);
-		if dim.is_contiguous() {
+	let lengths: [usize; N] = std::array::from_fn(|i| {
+		if smallest.size_and_stride(i).is_contiguous() {
 			smallest.size
 		} else {
 			assert!(
-				dim.is_broadcasted(),
+				smallest.size_and_stride(i).is_broadcasted(),
 				"last dimension of each tensor needs to be either contiguous or broadcasted. It cannot be strided"
 			);
 			assert!(i != 0, "broadcast is disabled for this tensor");
@@ -65,7 +65,7 @@ fn __elem_wise<'a, const N: usize, F: FnMut([SliceSet; N])>(tensors: [&Tensor; N
 	batch::run(
 		batch_iter,
 		tensors.map(|t| t.offset),
-		|batch_size: TensorSize, batch_strides: [TensorSize; N], offsets: [TensorSize; N]| {
+		|batch_size: usize, batch_strides: [usize; N], offsets: [usize; N]| {
 			f(std::array::from_fn(|i| SliceSet {
 				buffer: buffers[i],
 				dtype: dtypes[i],
@@ -98,7 +98,7 @@ fn __vec_wise<'a, const N: usize, F: Fn([SliceSet; N])>(tensors: [&Tensor; N], f
 	batch::run(
 		batch_iter,
 		tensors.map(|t| t.offset),
-		|batch_size: TensorSize, batch_strides: [TensorSize; N], offsets: [TensorSize; N]| {
+		|batch_size: usize, batch_strides: [usize; N], offsets: [usize; N]| {
 			f(std::array::from_fn(|i| SliceSet {
 				buffer: buffers[i],
 				dtype: dtypes[i],
@@ -126,7 +126,7 @@ fn __mat_wise<'a, const N: usize, F: Fn([MatrixSet; N])>(
 	batch::run(
 		batch_dims,
 		matrices.map(|m| m.tensor.offset),
-		|batch_size: TensorSize, batch_strides: [TensorSize; N], offsets: [TensorSize; N]| {
+		|batch_size: usize, batch_strides: [usize; N], offsets: [usize; N]| {
 			f(std::array::from_fn(|i| MatrixSet {
 				slice_set: SliceSet {
 					buffer: matrices[i].tensor.buffer.as_ref(),
@@ -502,10 +502,10 @@ pub struct Matrix<'a> {
 	pub tensor: &'a Tensor,
 	pub batch_dims: &'a [SizeAndStride],
 
-	pub rows: NonZeroTensorSize,
-	pub cols: NonZeroTensorSize,
-	pub row_stride: TensorSize,
-	pub col_stride: TensorSize,
+	pub rows: NonZeroUsize,
+	pub cols: NonZeroUsize,
+	pub row_stride: usize,
+	pub col_stride: usize,
 }
 
 impl<'a> Matrix<'a> {
@@ -527,8 +527,8 @@ pub fn matrix<'a>(tensor: &'a Tensor) -> Matrix<'a> {
 	Matrix {
 		tensor,
 		batch_dims: &tensor.dims[..tensor.ndim() - 2],
-		rows: NonZeroTensorSize::new(rows.size).unwrap(),
-		cols: NonZeroTensorSize::new(cols.size).unwrap(),
+		rows: NonZeroUsize::new(rows.size).unwrap(),
+		cols: NonZeroUsize::new(cols.size).unwrap(),
 		row_stride: rows.stride,
 		col_stride: cols.stride,
 	}
@@ -541,8 +541,8 @@ pub fn row_matrix<'a>(tensor: &'a Tensor) -> Matrix<'a> {
 	Matrix {
 		tensor,
 		batch_dims: &tensor.dims[..tensor.ndim() - 1],
-		rows: NonZeroTensorSize::new(rows.size).unwrap(),
-		cols: NonZeroTensorSize::new(cols.size).unwrap(),
+		rows: NonZeroUsize::new(rows.size).unwrap(),
+		cols: NonZeroUsize::new(cols.size).unwrap(),
 		row_stride: rows.stride,
 		col_stride: cols.stride,
 	}
@@ -555,8 +555,8 @@ pub fn col_matrix<'a>(tensor: &'a Tensor) -> Matrix<'a> {
 	Matrix {
 		tensor,
 		batch_dims: &tensor.dims[..tensor.ndim() - 1],
-		rows: NonZeroTensorSize::new(rows.size).unwrap(),
-		cols: NonZeroTensorSize::new(cols.size).unwrap(),
+		rows: NonZeroUsize::new(rows.size).unwrap(),
+		cols: NonZeroUsize::new(cols.size).unwrap(),
 		row_stride: rows.stride,
 		col_stride: cols.stride,
 	}
@@ -611,10 +611,10 @@ impl<'a> MatMulPrep<'a> {
 			// where the matrix `b` is the same for all items in the batch?
 			let batch_dim = merger.smallest_dim();
 			if batch_dim.size > 1 && batch_dim.strides[B] == 0 {
-				a.rows = NonZeroTensorSize::new(batch_dim.size).unwrap();
+				a.rows = NonZeroUsize::new(batch_dim.size).unwrap();
 				a.row_stride = batch_dim.strides[A];
 
-				to.rows = NonZeroTensorSize::new(batch_dim.size).unwrap();
+				to.rows = NonZeroUsize::new(batch_dim.size).unwrap();
 				to.row_stride = batch_dim.strides[TO];
 
 				return MatMulPrep {
@@ -632,10 +632,10 @@ impl<'a> MatMulPrep<'a> {
 			// where the matrix `a` is the same for all items in the batch?
 			let batch_dim = merger.smallest_dim();
 			if batch_dim.size > 1 && batch_dim.strides[A] == 0 {
-				b.cols = NonZeroTensorSize::new(batch_dim.size).unwrap();
+				b.cols = NonZeroUsize::new(batch_dim.size).unwrap();
 				b.col_stride = batch_dim.strides[B];
 
-				to.cols = NonZeroTensorSize::new(batch_dim.size).unwrap();
+				to.cols = NonZeroUsize::new(batch_dim.size).unwrap();
 				to.col_stride = batch_dim.strides[TO];
 
 				return MatMulPrep {
@@ -800,7 +800,7 @@ impl<'a> Savable for Attention<'a> {
 		batch::run(
 			batch_iter,
 			tensors.map(|t| t.offset),
-			|batch_size: TensorSize, batch_strides: [TensorSize; 4], offsets: [TensorSize; 4]| {
+			|batch_size: usize, batch_strides: [usize; 4], offsets: [usize; 4]| {
 				for i in 0..batch_size {
 					q.offset = offsets[0] + i * batch_strides[0];
 					k.offset = offsets[1] + i * batch_strides[1];

@@ -6,7 +6,6 @@ use super::super::swiglu::*;
 use crate::nn::EvalContext;
 use crate::nn::layers::Layer;
 use crate::tensor::device::cpu::CPUDevice;
-use crate::tensor::math::Savable;
 use crate::tensor::{self, Tensor};
 use crate::{data2d, data3d};
 
@@ -17,9 +16,10 @@ fn test_swiglu() {
 	let swiglu = SwiGLU::new(7);
 	let dev = CPUDevice::new("CPU".to_string());
 
-	#[rustfmt::skip] let inp = Tensor::new_3d::<f32>(
+	#[rustfmt::skip] let inp = Tensor::new_3d(
 		dev.clone(),
 		data3d![
+			f32;
 			[
 				[-0.8714,  0.0940, -1.8542,  0.7304, -0.2773, -0.7002, -0.6732],
 				[-0.3639,  0.3168, -0.1291,  0.0461,  1.1104,  1.1302,  0.9531],
@@ -36,9 +36,10 @@ fn test_swiglu() {
 		]
 	);
 
-	#[rustfmt::skip] let expected_out = Tensor::new_2d::<f32>(
+	#[rustfmt::skip] let expected_out = Tensor::new_2d(
 		dev.clone(),
 		data2d![
+			f32;
 			[ 0.1300,  0.0172,  0.1120,  0.0172, -0.2316, -0.5982, -0.4631],
 			[ 0.0909,  0.8621,  0.2025, -0.5517,  0.2075,  0.0047,  0.1329],
 			[-0.3956, -0.8125,  0.6575, -0.0462, -0.1185,  0.3040,  0.1652],
@@ -51,9 +52,10 @@ fn test_swiglu() {
 
 	assert!(tensor::math::approx_eq(&out, &expected_out, 1e-4));
 
-	#[rustfmt::skip] let d_out = Tensor::new_2d::<f32>(
+	#[rustfmt::skip] let d_out = Tensor::new_2d(
 		dev.clone(),
 		data2d![
+			f32;
 			[-0.8866,  0.5923,  1.6628, -0.0801, -0.8071, -0.4731, -0.5233],
 			[ 1.1934, -0.0170,  0.1537,  0.4730, -0.5441,  0.9822,  0.1070],
 			[-1.4121, -0.9289,  0.4226,  0.2391, -1.1131, -0.2210, -0.7231],
@@ -61,9 +63,10 @@ fn test_swiglu() {
 		]
 	);
 
-	#[rustfmt::skip] let expected_d_inp = Tensor::new_3d::<f32>(
+	#[rustfmt::skip] let expected_d_inp = Tensor::new_3d(
 		dev.clone(),
 		data3d![
+			f32;
 			[
 				[ 1.3228e-01,  1.0856e-01, -1.0041e-01, -1.8889e-03,
 				 -6.7413e-01, -4.0416e-01, -3.5997e-01],

@@ -7,7 +7,7 @@ use std::rc::Rc;
 use crate::nn::eval_context::EvalContext;
 use crate::nn::param::Param;
 use crate::tensor::math::Savable;
-use crate::tensor::{self, Tensor, TensorSize};
+use crate::tensor::{self, Tensor};
 
 use super::{Layer, LossFunction, Softmax, SoftmaxGradientMode};
 
@@ -16,7 +16,7 @@ pub struct SoftmaxCrossEntropy {
 }
 
 impl SoftmaxCrossEntropy {
-	pub fn new(n_inputs: TensorSize) -> SoftmaxCrossEntropy {
+	pub fn new(n_inputs: usize) -> SoftmaxCrossEntropy {
 		let mut softmax = Softmax::new(n_inputs);
 		softmax.set_gradient_mode(SoftmaxGradientMode::StraightThrough);
 		SoftmaxCrossEntropy { softmax }
@@ -24,11 +24,11 @@ impl SoftmaxCrossEntropy {
 }
 
 impl Layer for SoftmaxCrossEntropy {
-	fn input_shape(&self) -> &[TensorSize] {
+	fn input_shape(&self) -> &[usize] {
 		self.softmax.input_shape()
 	}
 
-	fn output_shape(&self) -> &[TensorSize] {
+	fn output_shape(&self) -> &[usize] {
 		self.softmax.output_shape()
 	}
 

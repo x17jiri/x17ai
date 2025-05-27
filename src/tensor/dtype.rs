@@ -1,33 +1,33 @@
 // Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
-use std::fmt;
 use std::num::NonZeroU8;
-
-use super::{TensorSize, tensor_size_to_usize};
 
 pub const MAX_DTYPE_ALIGN: usize = 8; // 64-bit
 
 pub trait HasDType {
-	fn dtype() -> DType;
+	const dtype: DType;
 }
 
 impl HasDType for u8 {
-	fn dtype() -> DType {
-		DType::U8
-	}
+	const dtype: DType = DType {
+		kind: DTypeKind::Uint,
+		bits: NonZeroU8::new(8).unwrap(),
+	};
 }
 
 impl HasDType for f32 {
-	fn dtype() -> DType {
-		DType::F32
-	}
+	const dtype: DType = DType {
+		kind: DTypeKind::Float,
+		bits: NonZeroU8::new(32).unwrap(),
+	};
 }
 
 impl HasDType for f64 {
-	fn dtype() -> DType {
-		DType::F64
-	}
+	const dtype: DType = DType {
+		kind: DTypeKind::Float,
+		bits: NonZeroU8::new(64).unwrap(),
+	};
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -51,28 +51,13 @@ impl DType {
 		usize::from(self.bits.get()) / 8
 	}
 
-	pub fn array_bytes(&self, elems: TensorSize) -> Option<usize> {
+	pub fn array_bytes(&self, elems: usize) -> Option<usize> {
 		debug_assert!(self.bits.is_power_of_two());
 		if self.bits.get() < 8 {
 			todo!("bitfields");
 		}
-		self.bytes().checked_mul(tensor_size_to_usize(elems))
+		self.bytes().checked_mul(elems)
 	}
-
-	pub const U8: Self = Self {
-		kind: DTypeKind::Uint,
-		bits: NonZeroU8::new(8).unwrap(),
-	};
-
-	pub const F32: Self = Self {
-		kind: DTypeKind::Float,
-		bits: NonZeroU8::new(32).unwrap(),
-	};
-
-	pub const F64: Self = Self {
-		kind: DTypeKind::Float,
-		bits: NonZeroU8::new(64).unwrap(),
-	};
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -82,8 +67,8 @@ pub enum DTypeKind {
 	Uint,
 }
 
-impl fmt::Display for DType {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl std::fmt::Display for DType {
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		let kind = match self.kind {
 			DTypeKind::Float => "f",
 			DTypeKind::Int => "i",

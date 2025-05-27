@@ -2,7 +2,6 @@
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
 use std::cell::{Cell, RefCell};
-use std::fmt;
 use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -12,10 +11,10 @@ mod rng;
 use rng::Rng;
 
 use crate::tensor::buffer::{Buffer, MatrixSet, SliceSet};
+use crate::tensor::device::AttentionParams;
 use crate::tensor::dtype::{DType, HasDType};
-use crate::tensor::{TensorSize, tensor_size_to_usize};
 
-use super::{AttentionParams, Device};
+use super::Device;
 
 mod math {
 	use super::FromToF64;
@@ -106,7 +105,7 @@ impl CPUDevice {
 
 	fn cast_buffer<T: HasDType>(&self, buffer: &Buffer) -> &[Cell<T>] {
 		assert!(buffer.is_on_device(self));
-		debug_assert!(T::dtype().bytes() == std::mem::size_of::<T>());
+		debug_assert!(T::dtype.bytes() == std::mem::size_of::<T>());
 		unsafe {
 			let ptr = buffer.device_buffer.as_ptr() as *const Cell<T>;
 			let bytes = buffer.size_bytes;
@@ -117,15 +116,15 @@ impl CPUDevice {
 
 	fn cast_slice_set<'a, T: HasDType>(&'a self, slice_set: &SliceSet<'a>) -> CPUSliceSet<'a, T> {
 		let dtype = slice_set.dtype;
-		assert_eq!(dtype, T::dtype());
+		assert_eq!(dtype, T::dtype);
 
 		let buffer = self.cast_buffer::<T>(slice_set.buffer);
-		let len = slice_set.len as usize;
-		let count = slice_set.count as usize;
-		let stride = slice_set.stride as usize;
-		let span = slice_set.span();
-		let buffer = &buffer[span];
-		CPUSliceSet { buffer, len, count, stride }
+		CPUSliceSet {
+			buffer: &buffer[slice_set.span()],
+			len: slice_set.len,
+			count: slice_set.count,
+			stride: slice_set.stride,
+		}
 	}
 
 	fn array_wise<'a, T: Copy + HasDType, const N: usize>(
@@ -147,14 +146,14 @@ impl CPUDevice {
 	fn elem_wise<'a, T: Copy + HasDType, const N: usize>(
 		&self, slices: [&SliceSet<'a>; N], mut f: impl FnMut([&Cell<T>; N]),
 	) {
-		let len = slices.get(0).map_or(0, |s| s.len as usize);
-		assert!(slices.iter().all(|i| i.len as usize == len));
+		let len = slices.get(0).map_or(0, |s| s.len);
+		assert!(slices.iter().all(|i| i.len == len));
 
 		self.array_wise::<T, N>(slices, |arrays| {
 			for i in 0..len {
 				f(arrays.map(|array| {
 					debug_assert!(i < array.len());
-					let element = unsafe { array.get_unchecked(i as usize) };
+					let element = unsafe { array.get_unchecked(i) };
 					element
 				}));
 			}
@@ -331,19 +330,17 @@ impl CPUDevice {
 					for col in 0..n {
 						let mut sum = 0.0;
 						for i in 0..k {
-							let a_index =
-								tensor_size_to_usize(row * a.row_stride + i * a.col_stride);
+							let a_index = row * a.row_stride + i * a.col_stride;
 							let a_cell = unsafe { a_arr.get_unchecked(a_index) };
 							let a_val = a_cell.get().to_f64();
 
-							let b_index =
-								tensor_size_to_usize(i * b.row_stride + col * b.col_stride);
+							let b_index = i * b.row_stride + col * b.col_stride;
 							let b_cell = unsafe { b_arr.get_unchecked(b_index) };
 							let b_val = b_cell.get().to_f64();
 
 							sum += a_val * b_val;
 						}
-						let c_index = tensor_size_to_usize(row * c.row_stride + col * c.col_stride);
+						let c_index = row * c.row_stride + col * c.col_stride;
 						let c_cell = unsafe { c_arr.get_unchecked(c_index) };
 						let c_val = c_cell.get().to_f64();
 
@@ -357,13 +354,10 @@ impl CPUDevice {
 
 	#[inline(never)]
 	fn format_f<T: Copy + HasDType + FromToF64>(
-		&self, f: &mut fmt::Formatter, buffer: &Buffer, offset: TensorSize, len: TensorSize,
-		stride: TensorSize,
-	) -> fmt::Result {
+		&self, f: &mut std::fmt::Formatter, buffer: &Buffer, offset: usize, len: usize,
+		stride: usize,
+	) -> std::fmt::Result {
 		let buffer = self.cast_buffer::<T>(buffer);
-		let offset = tensor_size_to_usize(offset);
-		let len = tensor_size_to_usize(len);
-		let stride = tensor_size_to_usize(stride);
 		let mut first_item = true;
 		for i in 0..len {
 			if !first_item {
@@ -417,7 +411,7 @@ impl Device for CPUDevice {
 		&self.name
 	}
 
-	fn new_buffer(self: Rc<Self>, dtype: DType, elems: TensorSize) -> Rc<Buffer> {
+	fn new_buffer(self: Rc<Self>, dtype: DType, elems: usize) -> Rc<Buffer> {
 		let step_size = std::mem::size_of::<CPUBufferElement>();
 		let size_bytes = dtype.array_bytes(elems).unwrap().next_multiple_of(step_size);
 		let layout = std::alloc::Layout::from_size_align(size_bytes, step_size).unwrap();
@@ -437,9 +431,7 @@ impl Device for CPUDevice {
 		unsafe { std::alloc::dealloc(device_buffer.as_ptr(), layout) }
 	}
 
-	fn load_data(
-		&self, buffer: &Buffer, dtype: DType, offset: TensorSize, len: TensorSize, src: &[u8],
-	) {
+	fn load_data(&self, buffer: &Buffer, dtype: DType, offset: usize, len: usize, src: &[u8]) {
 		let buffer = self.cast_buffer::<u8>(buffer);
 
 		let begin = dtype.array_bytes(offset).unwrap();
@@ -456,7 +448,7 @@ impl Device for CPUDevice {
 
 	fn zeros(&self, dst: &SliceSet) {
 		match dst.dtype {
-			DType::F32 => self.elem_wise::<f32, 1>([dst], |[d]| d.set(0.0)),
+			f32::dtype => self.elem_wise::<f32, 1>([dst], |[d]| d.set(0.0)),
 			_ => todo!(),
 		}
 	}
@@ -464,21 +456,21 @@ impl Device for CPUDevice {
 	fn randn(&self, dst: &SliceSet) {
 		let mut rng = self.rng.borrow_mut();
 		match dst.dtype {
-			DType::F32 => self.elem_wise::<f32, 1>([dst], |[d]| d.set(rng.get_normal() as f32)),
+			f32::dtype => self.elem_wise::<f32, 1>([dst], |[d]| d.set(rng.get_normal() as f32)),
 			_ => todo!(),
 		}
 	}
 
 	fn copy(&self, dst: &SliceSet, src: &SliceSet) {
 		match dst.dtype {
-			DType::F32 => self.elem_wise::<f32, 2>([dst, src], |[d, s]| d.set(s.get())),
+			f32::dtype => self.elem_wise::<f32, 2>([dst, src], |[d, s]| d.set(s.get())),
 			_ => todo!(),
 		}
 	}
 
 	fn acc(&self, dst: &SliceSet, dst_weight: f64, new: &SliceSet, new_weight: f64) {
 		match dst.dtype {
-			DType::F32 => self.elem_wise::<f32, 2>([dst, new], |[d, n]| {
+			f32::dtype => self.elem_wise::<f32, 2>([dst, new], |[d, n]| {
 				let d_val = f64::from(d.get());
 				let n_val = f64::from(n.get());
 				let val = d_val * dst_weight + n_val * new_weight;
@@ -490,14 +482,14 @@ impl Device for CPUDevice {
 
 	fn mul(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet) {
 		match dst.dtype {
-			DType::F32 => self.elem_wise_bin::<f32, Commutative>(dst, a, b, |_, a, b| a * b),
+			f32::dtype => self.elem_wise_bin::<f32, Commutative>(dst, a, b, |_, a, b| a * b),
 			_ => todo!(),
 		}
 	}
 
 	fn mul_acc(&self, dst: &SliceSet, dst_weight: f64, a: &SliceSet, b: &SliceSet, ab_weight: f64) {
 		match dst.dtype {
-			DType::F32 => self.elem_wise_bin::<f32, Commutative>(dst, a, b, |d, a, b| {
+			f32::dtype => self.elem_wise_bin::<f32, Commutative>(dst, a, b, |d, a, b| {
 				let d = f64::from(d.get());
 				let a = f64::from(a);
 				let b = f64::from(b);
@@ -509,21 +501,21 @@ impl Device for CPUDevice {
 
 	fn sub(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet) {
 		match dst.dtype {
-			DType::F32 => self.elem_wise_bin::<f32, NonCommutative>(dst, a, b, |_, a, b| a - b),
+			f32::dtype => self.elem_wise_bin::<f32, NonCommutative>(dst, a, b, |_, a, b| a - b),
 			_ => todo!(),
 		}
 	}
 
 	fn add(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet) {
 		match dst.dtype {
-			DType::F32 => self.elem_wise_bin::<f32, Commutative>(dst, a, b, |_, a, b| a + b),
+			f32::dtype => self.elem_wise_bin::<f32, Commutative>(dst, a, b, |_, a, b| a + b),
 			_ => todo!(),
 		}
 	}
 
 	fn swiglu(&self, dst: &SliceSet, lin: &SliceSet, gate: &SliceSet) {
 		match dst.dtype {
-			DType::F32 => self.elem_wise::<f32, 3>([dst, lin, gate], |[dst, lin, gate]| {
+			f32::dtype => self.elem_wise::<f32, 3>([dst, lin, gate], |[dst, lin, gate]| {
 				let forward = math::swiglu(f64::from(lin.get()), f64::from(gate.get()));
 				dst.set(forward as f32);
 			}),
@@ -536,7 +528,7 @@ impl Device for CPUDevice {
 		d_out: &SliceSet,
 	) {
 		match d_lin.dtype {
-			DType::F32 => self.elem_wise::<f32, 5>(
+			f32::dtype => self.elem_wise::<f32, 5>(
 				[d_lin, d_gate, lin, gate, d_out],
 				|[d_lin, d_gate, lin, gate, d_out]| {
 					let lin = f64::from(lin.get());
@@ -557,7 +549,7 @@ impl Device for CPUDevice {
 		assert!(a.len == b.len);
 		assert!(dst.len == 1);
 		match dst.dtype {
-			DType::F32 => self.array_wise::<f32, 3>([&dst, &a, &b], |[dst, a, b]| {
+			f32::dtype => self.array_wise::<f32, 3>([&dst, &a, &b], |[dst, a, b]| {
 				let val = math::dot(a, b) * ab_weight;
 				let val = f32::from_f64(val);
 				dst[0].set(val);
@@ -570,7 +562,7 @@ impl Device for CPUDevice {
 		assert!(a.len == b.len);
 		assert!(dst.len == 1);
 		match dst.dtype {
-			DType::F32 => self.array_wise::<f32, 3>([&dst, &a, &b], |[dst, a, b]| {
+			f32::dtype => self.array_wise::<f32, 3>([&dst, &a, &b], |[dst, a, b]| {
 				let old_val = f64::from(dst[0].get());
 				let dot = math::dot(a, b);
 				let val = dst_weight * old_val + ab_weight * dot;
@@ -584,7 +576,7 @@ impl Device for CPUDevice {
 	fn sum_all(&self, a: &SliceSet) -> f64 {
 		let mut sum = 0.0;
 		match a.dtype {
-			DType::F32 => self.array_wise::<f32, 1>([&a], |[arr]| {
+			f32::dtype => self.array_wise::<f32, 1>([&a], |[arr]| {
 				sum += arr.iter().map(|x| x.get().to_f64()).sum::<f64>()
 			}),
 			_ => todo!(),
@@ -595,7 +587,7 @@ impl Device for CPUDevice {
 	fn approx_eq(&self, a: &SliceSet, b: &SliceSet, eps: f64) -> bool {
 		let mut result = true;
 		match a.dtype {
-			DType::F32 => self.elem_wise::<f32, 2>([a, b], |[a, b]| {
+			f32::dtype => self.elem_wise::<f32, 2>([a, b], |[a, b]| {
 				let a_val = f64::from(a.get());
 				let b_val = f64::from(b.get());
 				result &= (a_val - b_val).abs() < eps;
@@ -607,7 +599,7 @@ impl Device for CPUDevice {
 
 	fn rsqrt(&self, dst: &SliceSet, inp: &SliceSet, eps: f64) {
 		match dst.dtype {
-			DType::F32 => self.elem_wise::<f32, 2>([dst, inp], |[d, i]| {
+			f32::dtype => self.elem_wise::<f32, 2>([dst, inp], |[d, i]| {
 				let i = f64::from(i.get());
 				d.set(math::rsqrt(i + eps) as f32);
 			}),
@@ -617,7 +609,7 @@ impl Device for CPUDevice {
 
 	fn log_clamped(&self, dst: &SliceSet, a: &SliceSet) {
 		match dst.dtype {
-			DType::F32 => self.elem_wise::<f32, 2>([dst, a], |[d, a]| {
+			f32::dtype => self.elem_wise::<f32, 2>([dst, a], |[d, a]| {
 				let a = f64::from(a.get());
 				d.set(a.ln().max(-1000.0) as f32);
 			}),
@@ -627,14 +619,14 @@ impl Device for CPUDevice {
 
 	fn softmax(&self, dst: &SliceSet, inp: &SliceSet) {
 		match dst.dtype {
-			DType::F32 => self.softmax::<f32>(dst, inp),
+			f32::dtype => self.softmax::<f32>(dst, inp),
 			_ => todo!(),
 		}
 	}
 
 	fn rms_norm(&self, dst: &SliceSet, inp: &SliceSet, eps: f64, scale_storage: Option<&SliceSet>) {
 		match dst.dtype {
-			DType::F32 => {
+			f32::dtype => {
 				if let Some(scale_storage) = scale_storage {
 					self.rms_norm_with_scale_storage_f::<f32>(&dst, &inp, eps, scale_storage);
 				} else {
@@ -647,7 +639,7 @@ impl Device for CPUDevice {
 
 	fn gemm(&self, dst: &MatrixSet, dst_weight: f64, a: &MatrixSet, b: &MatrixSet, ab_weight: f64) {
 		match dst.slice_set.dtype {
-			DType::F32 => self.gemm_f::<f32>(&dst, dst_weight, &a, &b, ab_weight),
+			f32::dtype => self.gemm_f::<f32>(&dst, dst_weight, &a, &b, ab_weight),
 			_ => todo!(),
 		}
 	}
@@ -659,15 +651,16 @@ impl Device for CPUDevice {
 		let q = self.cast_slices(q);
 		let k = self.cast_slices(k);
 		let v = self.cast_slices(v);*/
+		let _ = (dst, q, k, v, params);
 		todo!()
 	}
 
 	fn format(
-		&self, f: &mut fmt::Formatter, buffer: &Buffer, dtype: DType, offset: TensorSize,
-		len: TensorSize, stride: TensorSize,
-	) -> fmt::Result {
+		&self, f: &mut std::fmt::Formatter, buffer: &Buffer, dtype: DType, offset: usize,
+		len: usize, stride: usize,
+	) -> std::fmt::Result {
 		match dtype {
-			DType::F32 => self.format_f::<f32>(f, buffer, offset, len, stride),
+			f32::dtype => self.format_f::<f32>(f, buffer, offset, len, stride),
 			_ => todo!(),
 		}
 	}

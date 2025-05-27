@@ -1,38 +1,34 @@
 // Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
-pub mod cpu;
-
-use std::fmt;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-use super::TensorSize;
 use super::buffer::{Buffer, MatrixSet, SliceSet};
 use super::dtype::DType;
 
+pub mod cpu;
+
 pub struct AttentionParams {
-	pub inputs: TensorSize,
-	pub q_heads: TensorSize,
-	pub k_heads: TensorSize,
-	pub v_heads: TensorSize,
-	pub qk_size: TensorSize,
-	pub v_size: TensorSize,
+	pub inputs: usize,
+	pub q_heads: usize,
+	pub k_heads: usize,
+	pub v_heads: usize,
+	pub qk_size: usize,
+	pub v_size: usize,
 }
 
 pub trait Device {
 	fn name(&self) -> &str;
 
-	fn new_buffer(self: Rc<Self>, dtype: DType, elems: TensorSize) -> Rc<Buffer>;
+	fn new_buffer(self: Rc<Self>, dtype: DType, elems: usize) -> Rc<Buffer>;
 
 	fn drop_buffer(self: Rc<Self>, device_buffer: NonNull<u8>, size_bytes: usize);
 
 	// If any of the slices represented by a SliceSet are not in bounds,
 	// these functions will panic.
 
-	fn load_data(
-		&self, buffer: &Buffer, dtype: DType, offset: TensorSize, len: TensorSize, src: &[u8],
-	);
+	fn load_data(&self, buffer: &Buffer, dtype: DType, offset: usize, len: usize, src: &[u8]);
 
 	fn zeros(&self, dst: &SliceSet);
 
@@ -82,7 +78,7 @@ pub trait Device {
 	);
 
 	fn format(
-		&self, f: &mut fmt::Formatter, buffer: &Buffer, dtype: DType, offset: TensorSize,
-		len: TensorSize, stride: TensorSize,
-	) -> fmt::Result;
+		&self, f: &mut std::fmt::Formatter, buffer: &Buffer, dtype: DType, offset: usize,
+		len: usize, stride: usize,
+	) -> std::fmt::Result;
 }

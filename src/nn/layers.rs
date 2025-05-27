@@ -15,7 +15,7 @@ pub mod swiglu;
 #[cfg(test)]
 mod tests;
 
-use crate::tensor::{Tensor, TensorSize};
+use crate::tensor::Tensor;
 
 use super::{EvalContext, Param};
 
@@ -26,8 +26,8 @@ pub use softmax_cross_entropy::SoftmaxCrossEntropy;
 pub use swiglu::SwiGLU;
 
 pub trait Layer {
-	fn input_shape(&self) -> &[TensorSize];
-	fn output_shape(&self) -> &[TensorSize];
+	fn input_shape(&self) -> &[usize];
+	fn output_shape(&self) -> &[usize];
 
 	fn collect_params(&self, f: &mut dyn FnMut(Rc<RefCell<Param>>));
 	fn collect_named_params(&self, prefix: &str, f: &mut dyn FnMut(String, Rc<RefCell<Param>>));

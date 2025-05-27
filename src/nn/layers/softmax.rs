@@ -7,7 +7,7 @@ use std::rc::Rc;
 use crate::nn::eval_context::EvalContext;
 use crate::nn::param::Param;
 use crate::tensor::math::Savable;
-use crate::tensor::{self, Tensor, TensorSize};
+use crate::tensor::{self, Tensor};
 
 use super::Layer;
 
@@ -17,12 +17,12 @@ pub enum SoftmaxGradientMode {
 }
 
 pub struct Softmax {
-	shape: [TensorSize; 1],
+	shape: [usize; 1],
 	gradient_mode: SoftmaxGradientMode,
 }
 
 impl Softmax {
-	pub fn new(n_inputs: TensorSize) -> Softmax {
+	pub fn new(n_inputs: usize) -> Softmax {
 		Softmax {
 			shape: [n_inputs],
 			gradient_mode: SoftmaxGradientMode::Precise,
@@ -35,11 +35,11 @@ impl Softmax {
 }
 
 impl Layer for Softmax {
-	fn input_shape(&self) -> &[TensorSize] {
+	fn input_shape(&self) -> &[usize] {
 		&self.shape
 	}
 
-	fn output_shape(&self) -> &[TensorSize] {
+	fn output_shape(&self) -> &[usize] {
 		&self.shape
 	}
 

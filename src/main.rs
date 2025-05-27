@@ -6,7 +6,7 @@ use x17ai::nn::layers::{Layer, Linear, LossFunction, SoftmaxCrossEntropy};
 use x17ai::nn::{EvalContext, ModelContext};
 use x17ai::tensor::device::cpu::CPUDevice;
 use x17ai::tensor::math::Savable;
-use x17ai::tensor::{self, DType, Tensor};
+use x17ai::tensor::{self, HasDType, Tensor};
 
 /*
 struct Attention {
@@ -142,16 +142,16 @@ fn main() {
 	let dev = CPUDevice::new("CPU".to_string());
 	let mut mctx = ModelContext::new(dev.clone());
 
-	let mut model = Linear::new(3, 2, DType::F32, &mut mctx);
+	let mut model = Linear::new(3, 2, f32::dtype, &mut mctx);
 	model.randomize();
 
 	let mut loss = SoftmaxCrossEntropy::new(2);
 	loss.randomize();
 
-	let input = Tensor::new_empty_on(&[2, 3], DType::F32, dev.clone());
+	let input = Tensor::new_empty_on(&[2, 3], f32::dtype, dev.clone());
 	tensor::math::randn().save_to(&input);
 
-	let expected = Tensor::new_2d::<f32>(dev.clone(), data2d![[1.0, 0.0], [0.0, 1.0],]);
+	let expected = Tensor::new_2d(dev.clone(), data2d![f32; [1.0, 0.0], [0.0, 1.0],]);
 
 	let mut ectx_model = EvalContext::new(true);
 	let output_logits = model.forward(input.clone(), &mut ectx_model);

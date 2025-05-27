@@ -10,7 +10,7 @@ use crate::nn::param::Param;
 use crate::tensor::math::{
 	MatrixAccumulable, MatrixSavable, Savable, col_matrix, matrix, row_matrix,
 };
-use crate::tensor::{self, DType, Tensor, TensorSize};
+use crate::tensor::{self, DType, Tensor};
 
 use super::{EvalContext, Layer};
 
@@ -24,8 +24,8 @@ use super::{EvalContext, Layer};
 ///     input: [..., inputs]
 ///     output: [..., outputs]
 pub struct Linear {
-	input_shape: [TensorSize; 1],
-	output_shape: [TensorSize; 1],
+	input_shape: [usize; 1],
+	output_shape: [usize; 1],
 
 	pub(crate) weights: Rc<RefCell<Param>>,
 
@@ -34,9 +34,7 @@ pub struct Linear {
 }
 
 impl Linear {
-	pub fn new(
-		inputs: TensorSize, outputs: TensorSize, dtype: DType, ctx: &mut ModelContext,
-	) -> Linear {
+	pub fn new(inputs: usize, outputs: usize, dtype: DType, ctx: &mut ModelContext) -> Linear {
 		Linear {
 			input_shape: [inputs],
 			output_shape: [outputs],
@@ -88,11 +86,11 @@ impl Linear {
 }
 
 impl Layer for Linear {
-	fn input_shape(&self) -> &[TensorSize] {
+	fn input_shape(&self) -> &[usize] {
 		&self.input_shape
 	}
 
-	fn output_shape(&self) -> &[TensorSize] {
+	fn output_shape(&self) -> &[usize] {
 		&self.output_shape
 	}
 
@@ -152,13 +150,12 @@ impl Layer for Linear {
 pub struct MultiheadLinear {
 	pub(crate) linear: Linear,
 
-	output_shape: [TensorSize; 2],
+	output_shape: [usize; 2],
 }
 
 impl MultiheadLinear {
 	pub fn new(
-		inputs: TensorSize, outputs: TensorSize, heads: TensorSize, dtype: DType,
-		ctx: &mut ModelContext,
+		inputs: usize, outputs: usize, heads: usize, dtype: DType, ctx: &mut ModelContext,
 	) -> MultiheadLinear {
 		let mut linear = Linear::new(inputs, heads * outputs, dtype, ctx);
 		linear.weights.borrow_mut().partition(heads, inputs * outputs);
@@ -171,11 +168,11 @@ impl MultiheadLinear {
 }
 
 impl Layer for MultiheadLinear {
-	fn input_shape(&self) -> &[TensorSize] {
+	fn input_shape(&self) -> &[usize] {
 		&self.linear.input_shape
 	}
 
-	fn output_shape(&self) -> &[TensorSize] {
+	fn output_shape(&self) -> &[usize] {
 		&self.output_shape
 	}
 

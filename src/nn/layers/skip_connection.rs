@@ -7,7 +7,7 @@ use std::rc::Rc;
 use crate::nn::eval_context::EvalContext;
 use crate::nn::param::Param;
 use crate::tensor::math::Savable;
-use crate::tensor::{self, Tensor, TensorSize};
+use crate::tensor::{self, Tensor};
 
 use super::Layer;
 
@@ -38,11 +38,11 @@ impl<Nested: Layer> SkipConnection<Nested> {
 }
 
 impl<Nested: Layer> Layer for SkipConnection<Nested> {
-	fn input_shape(&self) -> &[TensorSize] {
+	fn input_shape(&self) -> &[usize] {
 		self.nested.input_shape()
 	}
 
-	fn output_shape(&self) -> &[TensorSize] {
+	fn output_shape(&self) -> &[usize] {
 		self.nested.output_shape()
 	}
 

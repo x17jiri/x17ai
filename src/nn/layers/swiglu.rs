@@ -7,17 +7,17 @@ use std::rc::Rc;
 use crate::nn::eval_context::EvalContext;
 use crate::nn::param::Param;
 use crate::tensor::math::Savable;
-use crate::tensor::{self, Tensor, TensorSize};
+use crate::tensor::{self, Tensor};
 
 use super::Layer;
 
 pub struct SwiGLU {
-	input_shape: [TensorSize; 2],
-	output_shape: [TensorSize; 1],
+	input_shape: [usize; 2],
+	output_shape: [usize; 1],
 }
 
 impl SwiGLU {
-	pub fn new(n_outputs: TensorSize) -> SwiGLU {
+	pub fn new(n_outputs: usize) -> SwiGLU {
 		SwiGLU {
 			input_shape: [2, n_outputs],
 			output_shape: [n_outputs],
@@ -26,11 +26,11 @@ impl SwiGLU {
 }
 
 impl Layer for SwiGLU {
-	fn input_shape(&self) -> &[TensorSize] {
+	fn input_shape(&self) -> &[usize] {
 		&self.input_shape
 	}
 
-	fn output_shape(&self) -> &[TensorSize] {
+	fn output_shape(&self) -> &[usize] {
 		&self.output_shape
 	}
 
