@@ -12,64 +12,15 @@ pub mod math;
 #[cfg(test)]
 mod tests;
 
-use std::intrinsics::likely;
+use std::intrinsics::{cold_path, likely};
 use std::rc::Rc;
 use std::slice::SliceIndex;
 
 use buffer::Buffer;
-use dim_vec::{DimIndex, DimVec};
+use dim_vec::DimVec;
 
 pub use device::Device;
 pub use dtype::{DType, HasDType};
-
-//--------------------------------------------------------------------------------------------------
-
-pub struct Data1D<T: HasDType> {
-	pub data: Vec<T>,
-}
-
-pub struct Data2D<T: HasDType> {
-	pub data: Vec<Vec<T>>,
-}
-
-pub struct Data3D<T: HasDType> {
-	pub data: Vec<Vec<Vec<T>>>,
-}
-
-#[macro_export]
-macro_rules! data1d {
-    ( $dt:ty; $( $x:expr ),* $(,)? ) => {
-        $crate::tensor::Data1D::<$dt> {
-			data: vec![$($x),*]
-		}
-    };
-}
-
-#[macro_export]
-macro_rules! data2d {
-    ( $dt:ty; $( [ $( $x:expr ),* ] ),* $(,)? ) => {
-		$crate::tensor::Data2D::<$dt> {
-        	data: vec![
-				$(vec![$($x),*]),*
-			]
-		}
-    };
-}
-
-#[macro_export]
-macro_rules! data3d {
-	( $dt:ty; $( [ $( [ $( $x:expr ),* ] ),* $(,)? ] ),* $(,)? ) => {
-		$crate::tensor::Data3D::<$dt> {
-			data: vec![
-				$(
-					vec![
-						$(vec![$($x),*]),*
-					]
-				),*
-			]
-		}
-	};
-}
 
 //--------------------------------------------------------------------------------------------------
 
@@ -77,12 +28,6 @@ macro_rules! data3d {
 pub struct SizeAndStride {
 	pub size: usize,
 	pub stride: usize,
-}
-
-pub enum DimType {
-	Contiguous,
-	Broadcasted,
-	Strided,
 }
 
 impl SizeAndStride {
@@ -93,19 +38,46 @@ impl SizeAndStride {
 	pub fn is_broadcasted(&self) -> bool {
 		self.stride < 1 && self.size > 1
 	}
+}
 
-	pub fn is_strided(&self) -> bool {
-		self.stride > 1 && self.size > 1
-	}
+//--------------------------------------------------------------------------------------------------
 
-	pub fn dim_type(&self) -> DimType {
-		if self.stride == 1 || self.size <= 1 {
-			DimType::Contiguous
-		} else if self.stride < 1 {
-			DimType::Broadcasted
+pub trait DimIndex {
+	fn resolve(self, ndim: usize) -> usize;
+}
+
+impl DimIndex for usize {
+	fn resolve(self, ndim: usize) -> usize {
+		if self < ndim {
+			self
 		} else {
-			DimType::Strided
+			cold_path();
+			panic!("dimension index out of bounds: index = {}, ndim = {}", self, ndim);
 		}
+	}
+}
+
+impl DimIndex for isize {
+	fn resolve(self, ndim: usize) -> usize {
+		let dim = if self >= 0 { self as usize } else { ndim.wrapping_add(self as usize) };
+		if dim < ndim {
+			dim
+		} else {
+			cold_path();
+			panic!("dimension index out of bounds: index = {}, ndim = {}", self, ndim);
+		}
+	}
+}
+
+impl DimIndex for u32 {
+	fn resolve(self, ndim: usize) -> usize {
+		(self as usize).resolve(ndim)
+	}
+}
+
+impl DimIndex for i32 {
+	fn resolve(self, ndim: usize) -> usize {
+		(self as isize).resolve(ndim)
 	}
 }
 
@@ -123,6 +95,7 @@ pub struct Tensor {
 }
 
 impl Tensor {
+	/// This function takes a DimVec, but uses only the dimension sizes and overrides the strides.
 	fn __new_empty_on(mut dims: DimVec, dtype: DType, device: Rc<dyn Device>) -> Tensor {
 		let mut stride = 1;
 		let mut nonzero_elems: usize = 1;
@@ -131,11 +104,7 @@ impl Tensor {
 			// overflow. This is done to make sure our calculations would not overflow even if we
 			// had the same dimensions but in different order.
 			if likely(dim.size != 0) {
-				if let Some(mul) = nonzero_elems.checked_mul(dim.size) {
-					nonzero_elems = mul;
-				} else {
-					panic!("too many elements");
-				};
+				nonzero_elems = nonzero_elems.checked_mul(dim.size).expect("too many elements");
 			}
 
 			dim.stride = stride;
@@ -296,11 +265,9 @@ impl Tensor {
 		self.merge_dims::<FROM>().reshape_last_dim(to_shape)
 	}
 
+	/*
 	/// Reshapes the last `n_dims_to_reshape` dimensions of the tensor
 	pub fn reshape_n(self, _n_dims_to_reshape: usize, _new_shape: &[usize]) -> Tensor {
-		todo!("reshape_n"); // TODO
-		//
-		/*
 		let dims = &mut self.dims;
 		let ndim = dims.len();
 		let n_dims_to_keep = ndim - n_dims_to_reshape.min(ndim);
@@ -356,13 +323,13 @@ impl Tensor {
 		assert!(prev_stride == target_stride);
 
 		self
-		*/
 	}
 
 	pub fn reshape_all(self, new_shape: &[usize]) -> Tensor {
 		let ndim = self.dims.len();
 		self.reshape_n(ndim, new_shape)
 	}
+	*/
 
 	pub fn batch_size(&self, non_batch_dims: usize) -> usize {
 		let batch_dims =
@@ -592,6 +559,55 @@ impl std::fmt::Display for Tensor {
 		};
 		write!(f, ")")
 	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct Data1D<T: HasDType> {
+	pub data: Vec<T>,
+}
+
+pub struct Data2D<T: HasDType> {
+	pub data: Vec<Vec<T>>,
+}
+
+pub struct Data3D<T: HasDType> {
+	pub data: Vec<Vec<Vec<T>>>,
+}
+
+#[macro_export]
+macro_rules! data1d {
+    ( $dt:ty; $( $x:expr ),* $(,)? ) => {
+        $crate::tensor::Data1D::<$dt> {
+			data: vec![$($x),*]
+		}
+    };
+}
+
+#[macro_export]
+macro_rules! data2d {
+    ( $dt:ty; $( [ $( $x:expr ),* ] ),* $(,)? ) => {
+		$crate::tensor::Data2D::<$dt> {
+        	data: vec![
+				$(vec![$($x),*]),*
+			]
+		}
+    };
+}
+
+#[macro_export]
+macro_rules! data3d {
+	( $dt:ty; $( [ $( [ $( $x:expr ),* ] ),* $(,)? ] ),* $(,)? ) => {
+		$crate::tensor::Data3D::<$dt> {
+			data: vec![
+				$(
+					vec![
+						$(vec![$($x),*]),*
+					]
+				),*
+			]
+		}
+	};
 }
 
 //--------------------------------------------------------------------------------------------------

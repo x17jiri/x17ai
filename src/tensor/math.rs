@@ -484,6 +484,7 @@ impl<'a> Savable for RMSNorm<'a> {
 	fn save_to(&self, to: &Tensor) {
 		let executor = to.buffer.executor();
 		if let Some(scale_storage) = self.scale_storage {
+			// TODO - could this broadcast the `scale_storage` tensor?
 			__vec_wise([to, self.tensor, scale_storage], |[to, input, scale_storage]| {
 				executor.rms_norm(&to, &input, self.eps, Some(&scale_storage));
 			});

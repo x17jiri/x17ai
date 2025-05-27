@@ -8,47 +8,6 @@ use std::ops::{Deref, DerefMut, Index, IndexMut};
 use super::SizeAndStride;
 
 //--------------------------------------------------------------------------------------------------
-
-pub trait DimIndex {
-	fn resolve(self, ndim: usize) -> usize;
-}
-
-impl DimIndex for usize {
-	fn resolve(self, ndim: usize) -> usize {
-		if self < ndim {
-			self
-		} else {
-			cold_path();
-			panic!("dimension index out of bounds: index = {}, ndim = {}", self, ndim);
-		}
-	}
-}
-
-impl DimIndex for isize {
-	fn resolve(self, ndim: usize) -> usize {
-		let dim = if self >= 0 { self as usize } else { ndim.wrapping_add(self as usize) };
-		if dim < ndim {
-			dim
-		} else {
-			cold_path();
-			panic!("dimension index out of bounds: index = {}, ndim = {}", self, ndim);
-		}
-	}
-}
-
-impl DimIndex for u32 {
-	fn resolve(self, ndim: usize) -> usize {
-		(self as usize).resolve(ndim)
-	}
-}
-
-impl DimIndex for i32 {
-	fn resolve(self, ndim: usize) -> usize {
-		(self as isize).resolve(ndim)
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
 // I expect that 99.99% of the time, the DimVec will use inline storage.
 // This implementaton is optimized so that we inline functions as long as they use the inline
 // storage, but functions that would extend the storage are never inlined.
