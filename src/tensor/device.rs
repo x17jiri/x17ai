@@ -10,12 +10,11 @@ use super::dtype::DType;
 pub mod cpu;
 
 pub struct AttentionParams {
-	pub inputs: usize,
-	pub q_heads: usize,
-	pub k_heads: usize,
-	pub v_heads: usize,
-	pub qk_size: usize,
-	pub v_size: usize,
+	pub heads: usize,
+	pub k_shift: usize,
+	pub v_shift: usize,
+	pub qk_features: usize,
+	pub v_features: usize,
 }
 
 pub trait Device {

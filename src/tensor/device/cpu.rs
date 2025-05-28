@@ -17,8 +17,39 @@ use crate::tensor::dtype::{DType, HasDType};
 use super::Device;
 
 mod math {
-	use super::FromToF64;
 	use std::cell::Cell;
+	use std::ops::RangeFull;
+
+	pub trait FromToF64 {
+		const MIN: f64; // largest negative value of type
+
+		fn from_f64(val: f64) -> Self;
+		fn to_f64(&self) -> f64;
+	}
+
+	impl FromToF64 for f32 {
+		const MIN: f64 = f32::MIN as f64;
+
+		fn from_f64(val: f64) -> Self {
+			val as f32
+		}
+
+		fn to_f64(&self) -> f64 {
+			*self as f64
+		}
+	}
+
+	impl FromToF64 for f64 {
+		const MIN: f64 = f64::MIN;
+
+		fn from_f64(val: f64) -> Self {
+			val
+		}
+
+		fn to_f64(&self) -> f64 {
+			*self
+		}
+	}
 
 	pub fn dot<T: Copy + FromToF64>(a: &[Cell<T>], b: &[Cell<T>]) -> f64 {
 		let res = a.iter().zip(b).map(|(a, b)| a.get().to_f64() * b.get().to_f64()).sum();
@@ -53,7 +84,81 @@ mod math {
 
 		(d_lin, d_gate)
 	}
+
+	pub fn softmax_part1<T: Copy + FromToF64>(dst: &[Cell<T>], inp: &[Cell<T>]) -> (f64, f64) {
+		let max: f64 = inp.iter().map(|x| x.get().to_f64()).fold(f64::MIN, f64::max);
+
+		let mut sum = 0.0;
+		for (d, i) in dst.iter().zip(inp) {
+			let val = i.get().to_f64();
+			let val = val - max;
+			let e = val.exp();
+			d.set(T::from_f64(e));
+
+			sum += e;
+		}
+
+		(max, sum)
+	}
+
+	pub fn softmax_part2<T: Copy + FromToF64>(dst: &[Cell<T>], sum: f64) {
+		// NOTE:
+		// Subtracting max in part1 ensures at least one of the exponents
+		// is `exp(max - max) == 1.0`. So sum will be >= 1.0 and division by zero
+		// is impossible.
+		// This could only fail if all inputs are `-inf` or at least one input is `+inf`.
+		// In that case, `sum == nan` and so all outputs will be `nan`.
+		let sum_recip = 1.0 / sum;
+
+		for d in dst.iter() {
+			let val = d.get().to_f64() * sum_recip;
+			d.set(T::from_f64(val));
+		}
+	}
+
+	pub fn softmax<T: Copy + FromToF64>(dst: &[Cell<T>], inp: &[Cell<T>]) {
+		let (_, sum) = softmax_part1(dst, inp);
+		softmax_part2(dst, sum);
+	}
+
+	pub struct View2D<'a, T> {
+		data: &'a [Cell<T>],
+		features: usize,
+	}
+
+	impl<'a, T> View2D<'a, T> {
+		pub fn item(&self, head: usize, feature: usize) -> &'a Cell<T> {
+			let index = head * self.features + feature;
+			&self.data[index]
+		}
+
+		pub fn slice(&self, head: usize, _: RangeFull) -> &'a [Cell<T>] {
+			let begin = head * self.features;
+			let end = begin + self.features;
+			&self.data[begin..end]
+		}
+	}
+
+	pub struct View3D<'a, T> {
+		pub data: &'a [Cell<T>],
+		pub seq_len: usize,
+		pub seq_stride: usize,
+		pub head_shift: usize,
+		pub heads: usize,
+		pub features: usize,
+	}
+
+	impl<'a, T> View3D<'a, T> {
+		pub fn slice(&self, input: usize, head: usize, _: RangeFull) -> &'a [Cell<T>] {
+			let head = head >> self.head_shift;
+			let begin = input * self.seq_stride + head * self.features;
+			let end = begin + self.features;
+			&self.data[begin..end]
+		}
+	}
 }
+
+use math::{FromToF64, View2D, View3D};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -247,30 +352,7 @@ impl CPUDevice {
 	fn softmax<'a, T: Copy + HasDType + FromToF64>(&self, dst: &SliceSet<'a>, inp: &SliceSet<'a>) {
 		assert!(dst.len == inp.len);
 		self.array_wise::<T, 2>([dst, inp], |[dst_arr, inp_arr]| {
-			let max: f64 = inp_arr.iter().map(|x| x.get().to_f64()).fold(f64::MIN, f64::max);
-
-			let mut sum = 0.0;
-			for (d, i) in dst_arr.iter().zip(inp_arr) {
-				let val = i.get().to_f64();
-				let val = val - max;
-				let e = val.exp();
-				d.set(T::from_f64(e));
-
-				sum += e;
-			}
-
-			// NOTE:
-			// Subtracting max in the loop above ensures at least one of the exponents
-			// is `exp(max - max) == 1.0`. So sum will be >= 1.0 and division by zero
-			// is impossible.
-			// This could only fail if all inputs are `-inf` or at least one input is `+inf`.
-			// In that case, `sum == nan` and so all outputs will be `nan`.
-			let sum_recip = 1.0 / sum;
-
-			for d in dst_arr.iter() {
-				let val = d.get().to_f64() * sum_recip;
-				d.set(T::from_f64(val));
-			}
+			math::softmax(dst_arr, inp_arr);
 		});
 	}
 
@@ -352,6 +434,86 @@ impl CPUDevice {
 		);
 	}
 
+	fn attn_block<T: Copy + FromToF64>(
+		q: View3D<T>, // [output, head, qk_feature]
+		k: View3D<T>, // [input, head, qk_feature]
+		v: View3D<T>, // [input, head, vo_feature]
+
+		// For the first tile, these are initialized to 0.0. Or more precisely,
+		// they will be multiplied by 0.0, so the exact value is not important,
+		// but it must not be nan or inf because the result would be nan.
+		o: View3D<f64>, // [output, head, vo_feature]
+
+		// For the first tile, these can be initialized either to the largest neg number or -inf.
+		prev_m: View2D<f64>, // [output, head]
+
+		// Similarly to `o`, these will be multiplied by 0.0 and so should be initialized to 0.0
+		// for the first tile.
+		prev_l: View2D<f64>, // [output, head]
+
+		// Scratch space for storing scores. It doesn't need to be initialized.
+		// On GPU, its shape will be [output, head, input]. However, we process outputs
+		// sequentially, so we don't need separate space for each output.
+		scores: View2D<f64>, // [head, input]
+	) {
+		let O = q.seq_len;
+		let I = k.seq_len;
+		let H = q.heads;
+		let V = v.features;
+		for j in 0..O {
+			for i in 0..I {
+				for h in 0..H {
+					let q = q.slice(j, h, ..);
+					let k = k.slice(i, h, ..);
+					scores.item(h, i).set(math::dot(q, k));
+				}
+			}
+			for h in 0..H {
+				let scores = scores.slice(h, ..);
+				let (new_m, new_l) = math::softmax_part1(scores, scores);
+
+				let prev_m = prev_m.item(h, j);
+				let m = new_m.max(prev_m.get());
+
+				let prev_weight = (prev_m.get() - m).exp();
+				let new_weight = (new_m - m).exp();
+				prev_m.set(m);
+
+				let prev_l = prev_l.item(h, j);
+				prev_l.set(prev_l.get() * prev_weight + new_l * new_weight);
+
+				let o = o.slice(j, h, ..);
+				for i in 0..I {
+					let v = v.slice(i, h, ..);
+					let score = scores[i].get().to_f64() * new_weight;
+					for f in 0..V {
+						let v = v[f].get().to_f64();
+						o[f].set(o[f].get() * prev_weight + score * v);
+					}
+				}
+			}
+		}
+	}
+
+	#[inline(never)]
+	fn attention_f<T: Copy + HasDType + FromToF64>(
+		&self, dst: &SliceSet, q: &SliceSet, k: &SliceSet, v: &SliceSet, params: &AttentionParams,
+	) {
+		let scratch = vec![[f64::default(); BLOCK_SIZE]; params.q_heads];
+
+		let dst = self.cast_slice_set::<T>(dst);
+		let q = self.cast_slice_set::<T>(q);
+		let k = self.cast_slice_set::<T>(k);
+		let v = self.cast_slice_set::<T>(v);
+
+		let count = dst.count;
+		assert!(q.count == count);
+		assert!(k.count == count);
+		assert!(v.count == count);
+
+		const BLOCK_SIZE: usize = 256;
+	}
+
 	#[inline(never)]
 	fn format_f<T: Copy + HasDType + FromToF64>(
 		&self, f: &mut std::fmt::Formatter, buffer: &Buffer, offset: usize, len: usize,
@@ -372,37 +534,6 @@ impl CPUDevice {
 			write!(f, "{:.4}", val)?;
 		}
 		Ok(())
-	}
-}
-
-trait FromToF64 {
-	const MIN: f64; // largest negative value of type
-
-	fn from_f64(val: f64) -> Self;
-	fn to_f64(&self) -> f64;
-}
-
-impl FromToF64 for f32 {
-	const MIN: f64 = f32::MIN as f64;
-
-	fn from_f64(val: f64) -> Self {
-		val as f32
-	}
-
-	fn to_f64(&self) -> f64 {
-		*self as f64
-	}
-}
-
-impl FromToF64 for f64 {
-	const MIN: f64 = f64::MIN;
-
-	fn from_f64(val: f64) -> Self {
-		val
-	}
-
-	fn to_f64(&self) -> f64 {
-		*self
 	}
 }
 
@@ -647,6 +778,7 @@ impl Device for CPUDevice {
 	fn attention(
 		&self, dst: &SliceSet, q: &SliceSet, k: &SliceSet, v: &SliceSet, params: &AttentionParams,
 	) {
+		const BLOCK_SIZE: usize = 256;
 		/*let dst = self.cast_slices(dst);
 		let q = self.cast_slices(q);
 		let k = self.cast_slices(k);

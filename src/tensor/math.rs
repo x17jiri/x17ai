@@ -691,16 +691,16 @@ pub struct Attention<'a> {
 
 /// Requirements:
 ///
-///    q.shape = [..., inputs, q_heads, qk_size]
-///    k.shape = [..., inputs, k_heads, qk_size]
-///    v.shape = [..., inputs, v_heads, v_size]
+///    q.shape = [..., inputs, q_heads, qk_features]
+///    k.shape = [..., inputs, k_heads, qk_features]
+///    v.shape = [..., inputs, v_heads, v_features]
 ///
 ///    q_heads >= k_heads && q_heads % k_heads == 0 && (q_heads / k_heads).is_power_of_two()
 ///    q_heads >= v_heads && q_heads % v_heads == 0 && (q_heads / v_heads).is_power_of_two()
 ///
 /// The output shape is:
 ///
-///    [..., inputs, q_heads, v_size]
+///    [..., inputs, q_heads, v_features]
 pub fn attention<'a>(q: &'a Tensor, k: &'a Tensor, v: &'a Tensor) -> Attention<'a> {
 	Attention { q, k, v }
 }
@@ -711,49 +711,78 @@ impl<'a> Savable for Attention<'a> {
 		let tensors = [self.q, self.k, self.v, to];
 		assert!(tensors.iter().all(|t| t.ndim() >= 3));
 
-		let inputs = self.q.dim(-3).size;
-		let q_heads = self.q.dim(-2).size;
-		let qk_size = self.q.dim(-1).size;
-		assert!(self.q.dim(-1).is_contiguous());
-		assert!(self.q.dim(-2).stride == qk_size);
-		let q_input_stride = self.q.dim(-3).stride;
+		let q_input_dim = self.q.dim(-3);
+		let q_head_dim = self.q.dim(-2);
+		let q_feature_dim = self.q.dim(-1);
 
-		assert!(self.k.dim(-3).size == inputs);
-		let k_heads = self.k.dim(-2).size;
-		assert!(self.k.dim(-1).size == qk_size);
-		assert!(self.k.dim(-1).is_contiguous());
-		assert!(self.k.dim(-2).stride == qk_size);
-		let k_input_stride = self.k.dim(-3).stride;
+		let k_input_dim = self.k.dim(-3);
+		let k_head_dim = self.k.dim(-2);
+		let k_feature_dim = self.k.dim(-1);
 
-		assert!(self.v.dim(-3).size == inputs);
-		let v_heads = self.v.dim(-2).size;
-		let v_size = self.v.dim(-1).size;
-		assert!(self.v.dim(-1).is_contiguous());
-		assert!(self.v.dim(-2).stride == v_size);
-		let v_input_stride = self.v.dim(-3).stride;
+		let v_input_dim = self.v.dim(-3);
+		let v_head_dim = self.v.dim(-2);
+		let v_feature_dim = self.v.dim(-1);
 
+		let to_output_dim = to.dim(-3);
+		let to_head_dim = to.dim(-2);
+		let to_feature_dim = to.dim(-1);
+
+		let qk_features = q_feature_dim.size;
+		assert!(q_feature_dim.is_contiguous());
+		assert!(k_feature_dim.size == qk_features);
+		assert!(k_feature_dim.is_contiguous());
+
+		let v_features = v_feature_dim.size;
+		assert!(v_feature_dim.is_contiguous());
+
+		let q_heads = q_head_dim.size;
+		assert!(
+			q_head_dim.stride == qk_features,
+			"TODO: If this were useful, we'd need to capture the stride in AttentionParams"
+		);
+
+		let k_heads = k_head_dim.size;
+		assert!(
+			k_head_dim.stride == qk_features,
+			"TODO: If this were useful, we'd need to capture the stride in AttentionParams"
+		);
 		assert!(q_heads >= k_heads);
 		assert!(q_heads % k_heads == 0);
 		assert!((q_heads / k_heads).is_power_of_two());
 
+		let v_heads = v_head_dim.size;
+		assert!(
+			v_head_dim.stride == v_features,
+			"TODO: If this were useful, we'd need to capture the stride in AttentionParams"
+		);
 		assert!(q_heads >= v_heads);
 		assert!(q_heads % v_heads == 0);
 		assert!((q_heads / v_heads).is_power_of_two());
 
-		assert!(to.dim(-3).size == inputs);
-		assert!(to.dim(-2).size == q_heads);
-		assert!(to.dim(-1).size == v_size);
-		assert!(to.dim(-1).is_contiguous());
-		assert!(to.dim(-2).stride == v_size);
-		let to_input_stride = to.dim(-3).stride;
+		let inputs = q_input_dim.size;
+		assert!(k_input_dim.size == inputs);
+		assert!(v_input_dim.size == inputs);
+
+		assert!(to_output_dim.size == inputs);
+		assert!(to_head_dim.size == q_heads);
+		assert!(to_feature_dim.size == v_features);
+		assert!(to_feature_dim.is_contiguous());
+		assert!(
+			to_head_dim.stride == v_features,
+			"TODO: If this were useful, we'd need to capture the stride in AttentionParams"
+		);
+
+		let q_input_stride = q_input_dim.stride;
+		let k_input_stride = k_input_dim.stride;
+		let v_input_stride = v_input_dim.stride;
+		let to_output_stride = to_output_dim.stride;
 
 		let params = AttentionParams {
-			inputs,
 			q_heads,
 			k_heads,
 			v_heads,
-			qk_size,
-			v_size,
+			qk_features,
+			v_features,
 		};
 
 		let merger = DimMerger::new(tensors.map(|t| t.dim_slice(..t.ndim() - 3)));
@@ -764,7 +793,7 @@ impl<'a> Savable for Attention<'a> {
 			buffer: self.q.buffer.as_ref(),
 			dtype: self.q.dtype(),
 			offset: 0,
-			len: q_heads * qk_size,
+			len: q_heads * qk_features,
 			count: inputs,
 			stride: q_input_stride,
 		};
@@ -773,7 +802,7 @@ impl<'a> Savable for Attention<'a> {
 			buffer: self.k.buffer.as_ref(),
 			dtype: self.k.dtype(),
 			offset: 0,
-			len: k_heads * qk_size,
+			len: k_heads * qk_features,
 			count: inputs,
 			stride: k_input_stride,
 		};
@@ -782,7 +811,7 @@ impl<'a> Savable for Attention<'a> {
 			buffer: self.v.buffer.as_ref(),
 			dtype: self.v.dtype(),
 			offset: 0,
-			len: v_heads * v_size,
+			len: v_heads * v_features,
 			count: inputs,
 			stride: v_input_stride,
 		};
@@ -791,9 +820,9 @@ impl<'a> Savable for Attention<'a> {
 			buffer: to.buffer.as_ref(),
 			dtype: to.dtype(),
 			offset: 0,
-			len: q_heads * v_size,
+			len: q_heads * v_features,
 			count: inputs,
-			stride: to_input_stride,
+			stride: to_output_stride,
 		};
 
 		let executor = to.buffer.executor();
