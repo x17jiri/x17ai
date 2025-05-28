@@ -1,8 +1,9 @@
 // Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
+use core::f64;
 use std::cell::{Cell, RefCell};
-use std::mem::ManuallyDrop;
+use std::mem::{self, ManuallyDrop};
 use std::ptr::NonNull;
 use std::rc::Rc;
 
@@ -121,24 +122,26 @@ mod math {
 		softmax_part2(dst, sum);
 	}
 
+	#[derive(Clone, Copy)]
 	pub struct View2D<'a, T> {
-		data: &'a [Cell<T>],
-		features: usize,
+		pub data: &'a [Cell<T>],
+		pub cols: usize,
 	}
 
 	impl<'a, T> View2D<'a, T> {
 		pub fn item(&self, head: usize, feature: usize) -> &'a Cell<T> {
-			let index = head * self.features + feature;
+			let index = head * self.cols + feature;
 			&self.data[index]
 		}
 
 		pub fn slice(&self, head: usize, _: RangeFull) -> &'a [Cell<T>] {
-			let begin = head * self.features;
-			let end = begin + self.features;
+			let begin = head * self.cols;
+			let end = begin + self.cols;
 			&self.data[begin..end]
 		}
 	}
 
+	#[derive(Clone, Copy)]
 	pub struct View3D<'a, T> {
 		pub data: &'a [Cell<T>],
 		pub seq_len: usize,
@@ -444,7 +447,7 @@ impl CPUDevice {
 		// but it must not be nan or inf because the result would be nan.
 		o: View3D<f64>, // [output, head, vo_feature]
 
-		// For the first tile, these can be initialized either to the largest neg number or -inf.
+		// For the first tile, these can be initialized either to f64::MIN or -inf.
 		prev_m: View2D<f64>, // [output, head]
 
 		// Similarly to `o`, these will be multiplied by 0.0 and so should be initialized to 0.0
@@ -459,7 +462,7 @@ impl CPUDevice {
 		let O = q.seq_len;
 		let I = k.seq_len;
 		let H = q.heads;
-		let V = v.features;
+		let VO = v.features;
 		for j in 0..O {
 			for i in 0..I {
 				for h in 0..H {
@@ -486,7 +489,7 @@ impl CPUDevice {
 				for i in 0..I {
 					let v = v.slice(i, h, ..);
 					let score = scores[i].get().to_f64() * new_weight;
-					for f in 0..V {
+					for f in 0..VO {
 						let v = v[f].get().to_f64();
 						o[f].set(o[f].get() * prev_weight + score * v);
 					}
@@ -499,19 +502,102 @@ impl CPUDevice {
 	fn attention_f<T: Copy + HasDType + FromToF64>(
 		&self, dst: &SliceSet, q: &SliceSet, k: &SliceSet, v: &SliceSet, params: &AttentionParams,
 	) {
-		let scratch = vec![[f64::default(); BLOCK_SIZE]; params.q_heads];
-
 		let dst = self.cast_slice_set::<T>(dst);
 		let q = self.cast_slice_set::<T>(q);
 		let k = self.cast_slice_set::<T>(k);
 		let v = self.cast_slice_set::<T>(v);
+
+		const Bq: usize = 64; // Number of outputs processed in one tile.
+		const Bkv: usize = 128; // Number of inputs processed in one tile.
+		let H = params.heads;
+
+		let o_size = Bq * H * params.v_features;
+		let scores_size = H * Bkv;
+		let prev_l_size = Bq * H;
+		let prev_m_size = Bq * H;
+
+		let o_off = 0;
+		let scores_off = o_off + o_size;
+		let prev_l_off = scores_off + scores_size;
+		let prev_m_off = prev_l_off + prev_l_size;
+		let mem_size = prev_m_off + prev_m_size;
+
+		let mut scratch_space = vec![Cell::new(0.0); mem_size];
+
+		//-------
 
 		let count = dst.count;
 		assert!(q.count == count);
 		assert!(k.count == count);
 		assert!(v.count == count);
 
-		const BLOCK_SIZE: usize = 256;
+		for j in (0..count).step_by(Bq) {
+			let je = (j + Bq).min(count);
+
+			scratch_space[..prev_m_off].fill(Cell::new(0.0));
+			scratch_space[prev_m_off..].fill(Cell::new(f64::NEG_INFINITY));
+
+			let o = View3D {
+				data: &scratch_space[o_off..scores_off],
+				seq_len: Bq,
+				seq_stride: H * params.v_features,
+				head_shift: 0,
+				heads: H,
+				features: params.v_features,
+			};
+
+			let scores = View2D {
+				data: &scratch_space[scores_off..prev_l_off],
+				cols: Bkv,
+			};
+
+			let prev_l = View2D {
+				data: &scratch_space[prev_l_off..prev_m_off],
+				cols: H,
+			};
+
+			let prev_m = View2D {
+				data: &scratch_space[prev_m_off..],
+				cols: H,
+			};
+
+			let q = View3D {
+				data: &q.buffer[j * q.stride..],
+				seq_len: je - j,
+				seq_stride: q.stride,
+				head_shift: 0,
+				heads: H,
+				features: params.qk_features,
+			};
+
+			for i in (0..count).step_by(Bkv) {
+				let ie = (i + Bkv).min(count);
+
+				let k = View3D {
+					data: &k.buffer[i * k.stride..],
+					seq_len: ie - i,
+					seq_stride: k.stride,
+					head_shift: params.k_shift,
+					heads: H >> params.k_shift,
+					features: params.qk_features,
+				};
+
+				let v = View3D {
+					data: &v.buffer[i * v.stride..],
+					seq_len: ie - i,
+					seq_stride: v.stride,
+					head_shift: params.v_shift,
+					heads: H >> params.v_shift,
+					features: params.v_features,
+				};
+
+				Self::attn_block(q, k, v, o, prev_m, prev_l, scores);
+			}
+
+			// TODO: divide `o` by `prev_l` and store in `dst`.
+		}
+
+		//-------
 	}
 
 	#[inline(never)]
