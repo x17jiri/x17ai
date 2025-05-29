@@ -58,11 +58,11 @@ mod math {
 			.zip(b)
 			.map(|(a, b)| {
 				let val = a.get().to_f64() * b.get().to_f64();
-				println!("dot: {} * {} = {}", a.get().to_f64(), b.get().to_f64(), val);
+				//println!("dot: {} * {} = {}", a.get().to_f64(), b.get().to_f64(), val);
 				val
 			})
 			.sum();
-		println!("dot: {}", res);
+		//println!("dot: {}", res);
 		res
 	}
 
@@ -149,8 +149,9 @@ mod math {
 	}
 
 	impl<'a, T> View2D<'a, T> {
-		pub fn item(&self, head: usize, feature: usize) -> &'a Cell<T> {
-			let index = head * self.cols + feature;
+		pub fn item(&self, row: usize, col: usize) -> &'a Cell<T> {
+			debug_assert!(col < self.cols);
+			let index = row * self.cols + col;
 			&self.data[index]
 		}
 
@@ -501,12 +502,14 @@ impl CPUDevice {
 					let scores = &scores[..I]; // TODO
 					let (first_m, first_l) = math::softmax_part1(scores, scores);
 
-					prev_m.item(h, j).set(first_m);
-					prev_l.item(h, j).set(first_l);
+					//let S: Vec<f64> = scores.iter().map(|s| s.get() / first_l).collect();
+					//println!("j = {}, h = {}, scores = {:.4?}", j, h, S.as_slice());
+
+					prev_m.item(j, h).set(first_m);
+					prev_l.item(j, h).set(first_l);
 
 					let o = o.slice(j, h, ..);
-					{
-						let i = 0;
+					for i in 0..1 {
 						let v = v.slice(i, h, ..);
 						let score = scores[i].get().to_f64();
 						for f in 0..VO {
@@ -526,25 +529,37 @@ impl CPUDevice {
 			} else {
 				for h in 0..H {
 					let scores = scores.slice(h, ..);
+					let scores = &scores[..I]; // TODO
 					let (new_m, new_l) = math::softmax_part1(scores, scores);
 
-					let prev_m = prev_m.item(h, j);
+					//let S: Vec<f64> = scores.iter().map(|s| s.get() / new_l).collect();
+					//println!("j = {}, h = {}, ..scores = {:.4?}", j, h, S.as_slice());
+
+					let prev_m = prev_m.item(j, h);
 					let m = new_m.max(prev_m.get());
 
 					let prev_weight = (prev_m.get() - m).exp();
 					let new_weight = (new_m - m).exp();
 					prev_m.set(m);
 
-					let prev_l = prev_l.item(h, j);
+					let prev_l = prev_l.item(j, h);
 					prev_l.set(prev_l.get() * prev_weight + new_l * new_weight);
 
 					let o = o.slice(j, h, ..);
-					for i in 0..I {
+					for i in 0..1 {
 						let v = v.slice(i, h, ..);
 						let score = scores[i].get().to_f64() * new_weight;
 						for f in 0..VO {
 							let v = v[f].get().to_f64();
 							o[f].set(o[f].get() * prev_weight + score * v);
+						}
+					}
+					for i in 1..I {
+						let v = v.slice(i, h, ..);
+						let score = scores[i].get().to_f64() * new_weight;
+						for f in 0..VO {
+							let v = v[f].get().to_f64();
+							o[f].set(o[f].get() + score * v);
 						}
 					}
 				}
@@ -561,7 +576,7 @@ impl CPUDevice {
 		let H = dst.heads;
 		for j in 0..O {
 			for h in 0..H {
-				let norm = prev_l.item(h, j).get();
+				let norm = prev_l.item(j, h).get();
 				let o_slice = o.slice(j, h, ..);
 				let dst_slice = dst.slice(j, h, ..);
 				math::softmax_part2(o_slice, norm, dst_slice);
@@ -579,7 +594,7 @@ impl CPUDevice {
 		let v = self.cast_slice_set::<T>(v);
 
 		const Bq: usize = 64; // Number of outputs processed in one tile.
-		const Bkv: usize = 128; // Number of inputs processed in one tile.
+		const Bkv: usize = 13; // Number of inputs processed in one tile.
 		let H = params.heads;
 
 		let o_size = Bq * H * params.v_features;
@@ -699,7 +714,7 @@ impl CPUDevice {
 			if val >= 0.0 {
 				write!(f, " ")?;
 			}
-			write!(f, "{:.4}", val)?;
+			write!(f, "{:.7}", val)?;
 		}
 		Ok(())
 	}

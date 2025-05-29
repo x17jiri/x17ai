@@ -206,7 +206,7 @@ fn main() {
 		println!("t = {}", t);*/
 	*/
 	//	let Q = Tensor::new_empty_on(&[10, 8, 64], f32::dtype, dev.clone());
-	let Q = Tensor::new_empty_on(&[3, 4, 5], f32::dtype, dev.clone());
+	let Q = Tensor::new_empty_on(&[10, 4, 5], f32::dtype, dev.clone());
 	let K = Q.new_empty_like();
 	let V = Q.new_empty_like();
 	let expected_out = Q.new_empty_like();
