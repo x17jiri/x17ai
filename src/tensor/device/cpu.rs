@@ -3,7 +3,7 @@
 
 use core::f64;
 use std::cell::{Cell, RefCell};
-use std::mem::{self, ManuallyDrop};
+use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
@@ -19,7 +19,7 @@ use super::Device;
 
 mod math {
 	use std::cell::Cell;
-	use std::ops::RangeFull;
+	use std::ops::{Range, RangeFull};
 
 	pub trait FromToF64 {
 		const MIN: f64; // largest negative value of type
@@ -86,15 +86,23 @@ mod math {
 		(d_lin, d_gate)
 	}
 
-	pub fn softmax_part1<T: Copy + FromToF64>(dst: &[Cell<T>], inp: &[Cell<T>]) -> (f64, f64) {
+	pub fn softmax_part1<T: Copy + FromToF64, S: Copy + FromToF64>(
+		inp: &[Cell<T>], scratch: &[Cell<S>],
+	) -> (f64, f64) {
+		// TODO
+		// - calculating `max` is one loop
+		// - calculating `sum` is another loop
+		// - there are online algorithms for calculating `max` and `sum` simultaneously
+		// - would they be worth it?
+
 		let max: f64 = inp.iter().map(|x| x.get().to_f64()).fold(f64::MIN, f64::max);
 
 		let mut sum = 0.0;
-		for (d, i) in dst.iter().zip(inp) {
+		for (i, s) in inp.iter().zip(scratch) {
 			let val = i.get().to_f64();
 			let val = val - max;
 			let e = val.exp();
-			d.set(T::from_f64(e));
+			s.set(S::from_f64(e));
 
 			sum += e;
 		}
@@ -102,7 +110,9 @@ mod math {
 		(max, sum)
 	}
 
-	pub fn softmax_part2<T: Copy + FromToF64>(dst: &[Cell<T>], sum: f64) {
+	pub fn softmax_part2<S: Copy + FromToF64, T: Copy + FromToF64>(
+		scratch: &[Cell<S>], sum: f64, dst: &[Cell<T>],
+	) {
 		// NOTE:
 		// Subtracting max in part1 ensures at least one of the exponents
 		// is `exp(max - max) == 1.0`. So sum will be >= 1.0 and division by zero
@@ -111,15 +121,17 @@ mod math {
 		// In that case, `sum == nan` and so all outputs will be `nan`.
 		let sum_recip = 1.0 / sum;
 
-		for d in dst.iter() {
-			let val = d.get().to_f64() * sum_recip;
+		for (s, d) in scratch.iter().zip(dst) {
+			let val = s.get().to_f64() * sum_recip;
 			d.set(T::from_f64(val));
 		}
 	}
 
 	pub fn softmax<T: Copy + FromToF64>(dst: &[Cell<T>], inp: &[Cell<T>]) {
-		let (_, sum) = softmax_part1(dst, inp);
-		softmax_part2(dst, sum);
+		// use `dst` as scratch space between part1 and part2
+		let scratch = dst;
+		let (_, sum) = softmax_part1(inp, scratch);
+		softmax_part2(scratch, sum, dst);
 	}
 
 	#[derive(Clone, Copy)]
@@ -157,6 +169,17 @@ mod math {
 			let begin = input * self.seq_stride + head * self.features;
 			let end = begin + self.features;
 			&self.data[begin..end]
+		}
+
+		pub fn sub_sequence(&self, range: Range<usize>) -> Self {
+			let data_begin = range.start * self.seq_stride;
+			let data_end = range.end * self.seq_stride;
+			let seq_len = range.end.saturating_sub(range.start);
+			Self {
+				data: &self.data[data_begin..data_end],
+				seq_len,
+				..*self
+			}
 		}
 	}
 }
@@ -437,21 +460,14 @@ impl CPUDevice {
 		);
 	}
 
-	fn attn_block<T: Copy + FromToF64>(
+	fn attn_block<T: Copy + FromToF64, const FIRST: bool>(
 		q: View3D<T>, // [output, head, qk_feature]
 		k: View3D<T>, // [input, head, qk_feature]
 		v: View3D<T>, // [input, head, vo_feature]
 
-		// For the first tile, these are initialized to 0.0. Or more precisely,
-		// they will be multiplied by 0.0, so the exact value is not important,
-		// but it must not be nan or inf because the result would be nan.
-		o: View3D<f64>, // [output, head, vo_feature]
-
-		// For the first tile, these can be initialized either to f64::MIN or -inf.
+		// `o`, `prev_m` and `prev_l` will be initialized when processing the first tile.
+		o: View3D<f64>,      // [output, head, vo_feature]
 		prev_m: View2D<f64>, // [output, head]
-
-		// Similarly to `o`, these will be multiplied by 0.0 and so should be initialized to 0.0
-		// for the first tile.
 		prev_l: View2D<f64>, // [output, head]
 
 		// Scratch space for storing scores. It doesn't need to be initialized.
@@ -471,29 +487,64 @@ impl CPUDevice {
 					scores.item(h, i).set(math::dot(q, k));
 				}
 			}
-			for h in 0..H {
-				let scores = scores.slice(h, ..);
-				let (new_m, new_l) = math::softmax_part1(scores, scores);
+			let scores = scores.slice(h, ..);
+			let (new_m, new_l) = math::softmax_part1(scores, scores);
 
-				let prev_m = prev_m.item(h, j);
-				let m = new_m.max(prev_m.get());
+			if FIRST {
+				for h in 0..H {
+					prev_m.item(h, j).set(new_m);
+					prev_l.item(h, j).set(new_l);
+					let m = new_m;
 
-				let prev_weight = (prev_m.get() - m).exp();
-				let new_weight = (new_m - m).exp();
-				prev_m.set(m);
-
-				let prev_l = prev_l.item(h, j);
-				prev_l.set(prev_l.get() * prev_weight + new_l * new_weight);
-
-				let o = o.slice(j, h, ..);
-				for i in 0..I {
-					let v = v.slice(i, h, ..);
-					let score = scores[i].get().to_f64() * new_weight;
-					for f in 0..VO {
-						let v = v[f].get().to_f64();
-						o[f].set(o[f].get() * prev_weight + score * v);
+					let o = o.slice(j, h, ..);
+					for i in 0..I {
+						let v = v.slice(i, h, ..);
+						let score = scores[i].get().to_f64();
+						for f in 0..VO {
+							let v = v[f].get().to_f64();
+							o[f].set(score * v);
+						}
 					}
 				}
+			} else {
+				for h in 0..H {
+					let prev_m = prev_m.item(h, j);
+					let m = new_m.max(prev_m.get());
+
+					let prev_weight = (prev_m.get() - m).exp();
+					let new_weight = (new_m - m).exp();
+					prev_m.set(m);
+
+					let prev_l = prev_l.item(h, j);
+					prev_l.set(prev_l.get() * prev_weight + new_l * new_weight);
+
+					let o = o.slice(j, h, ..);
+					for i in 0..I {
+						let v = v.slice(i, h, ..);
+						let score = scores[i].get().to_f64() * new_weight;
+						for f in 0..VO {
+							let v = v[f].get().to_f64();
+							o[f].set(o[f].get() * prev_weight + score * v);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	fn attn_finish<T: Copy + FromToF64>(
+		dst: View3D<T>,      // [output, head, vo_feature]
+		o: View3D<f64>,      // [output, head, vo_feature]
+		prev_l: View2D<f64>, // [output, head]
+	) {
+		let O = dst.seq_len;
+		let H = dst.heads;
+		for j in 0..O {
+			for h in 0..H {
+				let norm = prev_l.item(h, j).get();
+				let o_slice = o.slice(j, h, ..);
+				let dst_slice = dst.slice(j, h, ..);
+				math::softmax_part2(o_slice, norm, dst_slice);
 			}
 		}
 	}
@@ -512,92 +563,101 @@ impl CPUDevice {
 		let H = params.heads;
 
 		let o_size = Bq * H * params.v_features;
-		let scores_size = H * Bkv;
 		let prev_l_size = Bq * H;
 		let prev_m_size = Bq * H;
+		let scores_size = H * Bkv;
 
 		let o_off = 0;
-		let scores_off = o_off + o_size;
-		let prev_l_off = scores_off + scores_size;
-		let prev_m_off = prev_l_off + prev_l_size;
-		let mem_size = prev_m_off + prev_m_size;
+		let o_end = o_off + o_size;
 
-		let mut scratch_space = vec![Cell::new(0.0); mem_size];
+		let prev_m_off = o_end;
+		let prev_m_end = prev_m_off + prev_m_size;
 
-		//-------
+		let prev_l_off = prev_m_end;
+		let prev_l_end = prev_l_off + prev_l_size;
 
-		let count = dst.count;
-		assert!(q.count == count);
-		assert!(k.count == count);
-		assert!(v.count == count);
+		let scores_off = prev_l_end;
+		let scores_end = scores_off + scores_size;
 
-		for j in (0..count).step_by(Bq) {
-			let je = (j + Bq).min(count);
+		let mem_size = scores_end;
 
-			scratch_space[..prev_m_off].fill(Cell::new(0.0));
-			scratch_space[prev_m_off..].fill(Cell::new(f64::NEG_INFINITY));
+		let scratch_space = vec![Default::default(); mem_size];
 
-			let o = View3D {
-				data: &scratch_space[o_off..scores_off],
-				seq_len: Bq,
-				seq_stride: H * params.v_features,
-				head_shift: 0,
-				heads: H,
-				features: params.v_features,
-			};
+		let o = View3D {
+			data: &scratch_space[o_off..o_end],
+			seq_len: Bq,
+			seq_stride: H * params.v_features,
+			head_shift: 0,
+			heads: H,
+			features: params.v_features,
+		};
+		let prev_m = View2D {
+			data: &scratch_space[prev_m_off..prev_m_end],
+			cols: H,
+		};
+		let prev_l = View2D {
+			data: &scratch_space[prev_l_off..prev_l_end],
+			cols: H,
+		};
+		let scores = View2D {
+			data: &scratch_space[scores_off..scores_end],
+			cols: Bkv,
+		};
 
-			let scores = View2D {
-				data: &scratch_space[scores_off..prev_l_off],
-				cols: Bkv,
-			};
+		let q = View3D {
+			data: q.buffer,
+			seq_len: q.count,
+			seq_stride: q.stride,
+			head_shift: 0,
+			heads: H,
+			features: params.qk_features,
+		};
+		let k = View3D {
+			data: k.buffer,
+			seq_len: k.count,
+			seq_stride: k.stride,
+			head_shift: params.k_shift,
+			heads: H >> params.k_shift,
+			features: params.qk_features,
+		};
+		let v = View3D {
+			data: v.buffer,
+			seq_len: v.count,
+			seq_stride: v.stride,
+			head_shift: params.v_shift,
+			heads: H >> params.v_shift,
+			features: params.v_features,
+		};
+		let dst = View3D {
+			data: dst.buffer,
+			seq_len: dst.count,
+			seq_stride: dst.stride,
+			head_shift: 0,
+			heads: H,
+			features: params.v_features,
+		};
 
-			let prev_l = View2D {
-				data: &scratch_space[prev_l_off..prev_m_off],
-				cols: H,
-			};
+		let seq_len = dst.seq_len;
+		for j in (0..seq_len).step_by(Bq) {
+			let je = (j + Bq).min(seq_len);
+			let q = q.sub_sequence(j..je);
 
-			let prev_m = View2D {
-				data: &scratch_space[prev_m_off..],
-				cols: H,
-			};
+			for i in (0..seq_len).step_by(Bkv) {
+				let ie = (i + Bkv).min(seq_len);
+				let k = k.sub_sequence(i..ie);
+				let v = v.sub_sequence(i..ie);
 
-			let q = View3D {
-				data: &q.buffer[j * q.stride..],
-				seq_len: je - j,
-				seq_stride: q.stride,
-				head_shift: 0,
-				heads: H,
-				features: params.qk_features,
-			};
-
-			for i in (0..count).step_by(Bkv) {
-				let ie = (i + Bkv).min(count);
-
-				let k = View3D {
-					data: &k.buffer[i * k.stride..],
-					seq_len: ie - i,
-					seq_stride: k.stride,
-					head_shift: params.k_shift,
-					heads: H >> params.k_shift,
-					features: params.qk_features,
-				};
-
-				let v = View3D {
-					data: &v.buffer[i * v.stride..],
-					seq_len: ie - i,
-					seq_stride: v.stride,
-					head_shift: params.v_shift,
-					heads: H >> params.v_shift,
-					features: params.v_features,
-				};
-
-				Self::attn_block(q, k, v, o, prev_m, prev_l, scores);
+				// First tile will initialize `o`, `prev_m`, `prev_l`
+				if i == 0 {
+					Self::attn_block::<T, true>(q, k, v, o, prev_m, prev_l, scores);
+				} else {
+					Self::attn_block::<T, false>(q, k, v, o, prev_m, prev_l, scores);
+				}
 			}
 
-			// TODO: divide `o` by `prev_l` and store in `dst`.
+			let dst = dst.sub_sequence(j..je);
+			Self::attn_finish::<T>(dst, o, prev_l);
 		}
-
-		//-------
 	}
 
 	#[inline(never)]
