@@ -22,6 +22,8 @@ pub fn fill_from_file(dst: &Tensor, path: &str) -> std::io::Result<()> {
 	fill_from_reader(dst, &mut file)
 }
 
+//--------------------------------------------------------------------------------------------------
+
 fn fmt_0d(tensor: &Tensor, f: &mut std::fmt::Formatter, offset: usize) -> std::fmt::Result {
 	let executor = tensor.buffer.executor();
 	let offset = tensor.offset + offset;
@@ -99,6 +101,10 @@ pub struct DebugData1DRead<T: HasDType> {
 
 impl<T: HasDType> std::io::Read for DebugData1DRead<T> {
 	fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
+		#[cfg(target_endian = "big")]
+		{
+			todo!("Device::load_from_reader() expects little-endian data");
+		}
 		let vec = self.data.as_slice();
 		let vec_ptr = vec.as_ptr() as *const u8;
 		let vec_len = vec.len() * std::mem::size_of::<T>();
@@ -135,6 +141,10 @@ pub struct DebugData2DRead<T: HasDType> {
 
 impl<T: HasDType> std::io::Read for DebugData2DRead<T> {
 	fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
+		#[cfg(target_endian = "big")]
+		{
+			todo!("Device::load_from_reader() expects little-endian data");
+		}
 		let mut count = 0;
 		while count == 0 && self.y < self.data.len() {
 			let vec = self.data[self.y].as_slice();
@@ -189,6 +199,10 @@ pub struct DebugData3DRead<T: HasDType> {
 
 impl<T: HasDType> std::io::Read for DebugData3DRead<T> {
 	fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
+		#[cfg(target_endian = "big")]
+		{
+			todo!("Device::load_from_reader() expects little-endian data");
+		}
 		let mut count = 0;
 		while count == 0 && self.z < self.data.len() {
 			let vec = self.data[self.z][self.y].as_slice();

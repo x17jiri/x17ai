@@ -721,6 +721,19 @@ impl Device for CPUDevice {
 					let bytes = d.len() * std::mem::size_of::<f32>();
 					let slice = unsafe { std::slice::from_raw_parts_mut(ptr, bytes) };
 					result = src.read_exact(slice);
+
+					// We always store values as little-endian,
+					// so conversion is needed for big-endian targets
+					#[cfg(target_endian = "big")]
+					{
+						for elem in d {
+							let le = elem.get();
+							let bits = le.to_bits();
+							let swapped = bits.swap_bytes();
+							let be = f32::from_bits(swapped);
+							elem.set(be);
+						}
+					}
 				}
 			}),
 			_ => todo!(),
