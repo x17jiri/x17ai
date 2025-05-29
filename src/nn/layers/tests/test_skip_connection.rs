@@ -4,7 +4,7 @@
 use super::super::rms_norm::*;
 use super::super::skip_connection::*;
 
-use crate::data2d;
+use crate::debug_2d;
 use crate::nn::EvalContext;
 use crate::nn::layers::Layer;
 use crate::tensor::device::cpu::CPUDevice;
@@ -17,9 +17,9 @@ fn test_skip_con() {
 	let skip_con = SkipConnection::new(RMSNorm::new(5, 1e-5));
 	let dev = CPUDevice::new("CPU".to_string());
 
-	#[rustfmt::skip] let inp = Tensor::new_2d(
+	#[rustfmt::skip] let inp = Tensor::new_debug_2d(
 		dev.clone(),
-		data2d![
+		debug_2d![
 			f32;
 			[-1.2719, -0.6884, -0.6477, -1.3343, -1.7648],
 			[-1.9440,  0.9989,  2.8260, -0.3503, -0.5406],
@@ -28,9 +28,9 @@ fn test_skip_con() {
 		]
 	);
 
-	#[rustfmt::skip] let expected_out = Tensor::new_2d(
+	#[rustfmt::skip] let expected_out = Tensor::new_debug_2d(
 		dev.clone(),
-		data2d![
+		debug_2d![
 			f32;
 			[-2.3170, -1.2540, -1.1799, -2.4306, -3.2149],
 			[-3.1414,  1.6142,  4.5667, -0.5661, -0.8736],
@@ -44,9 +44,9 @@ fn test_skip_con() {
 
 	assert!(tensor::math::approx_eq(&out, &expected_out, 1e-4));
 
-	#[rustfmt::skip] let d_out = Tensor::new_2d(
+	#[rustfmt::skip] let d_out = Tensor::new_debug_2d(
 		dev.clone(),
-		data2d![
+		debug_2d![
 			f32;
 			[ 0.1000,  0.2000, -0.3000, -0.1000,  0.7000],
 			[ 0.0500, -0.1500,  0.1000,  0.0000,  0.6500],
@@ -55,9 +55,9 @@ fn test_skip_con() {
 		]
 	);
 
-	#[rustfmt::skip] let expected_d_inp = Tensor::new_2d(
+	#[rustfmt::skip] let expected_d_inp = Tensor::new_debug_2d(
 		dev.clone(),
-		data2d![
+		debug_2d![
 			f32;
 			[ 0.0167,  0.2748, -0.6308, -0.3557,  1.0456],
 			[ 0.0521, -0.2276,  0.2033, -0.0052,  1.0424],

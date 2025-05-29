@@ -1,7 +1,7 @@
 // Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
-use x17ai::data2d;
+use x17ai::debug_2d;
 use x17ai::nn::layers::{Layer, Linear, LossFunction, SoftmaxCrossEntropy};
 use x17ai::nn::{EvalContext, ModelContext};
 use x17ai::tensor::device::cpu::CPUDevice;
@@ -151,7 +151,7 @@ fn main() {
 	let input = Tensor::new_empty_on(&[2, 3], f32::dtype, dev.clone());
 	tensor::math::randn().save_to(&input);
 
-	let expected = Tensor::new_2d(dev.clone(), data2d![f32; [1.0, 0.0], [0.0, 1.0],]);
+	let expected = Tensor::new_debug_2d(dev.clone(), debug_2d![f32; [1.0, 0.0], [0.0, 1.0],]);
 
 	let mut ectx_model = EvalContext::new(true);
 	let output_logits = model.forward(input.clone(), &mut ectx_model);

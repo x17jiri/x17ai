@@ -40,7 +40,9 @@ pub trait MatrixAccumulable {
 //--------------------------------------------------------------------------------------------------
 
 /// Broadcast is disabled for tensors[0] and enabled for tensors[1..].
-fn __elem_wise<'a, const N: usize, F: FnMut([SliceSet; N])>(tensors: [&Tensor; N], mut f: F) {
+pub(crate) fn __elem_wise<'a, const N: usize, F: FnMut([SliceSet; N])>(
+	tensors: [&Tensor; N], mut f: F,
+) {
 	let merger = DimMerger::new(tensors.map(|t| t.dim_slice(..)));
 	let smallest = merger.smallest_dim();
 	let batch_dims = merger.dims_increasing_without_smallest();
@@ -749,6 +751,7 @@ impl<'a> Savable for Attention<'a> {
 		assert!(q_heads >= k_heads);
 		assert!(q_heads % k_heads == 0);
 		assert!((q_heads / k_heads).is_power_of_two());
+		let k_shift = (q_heads / k_heads).trailing_zeros() as usize;
 
 		let v_heads = v_head_dim.size;
 		assert!(
@@ -758,6 +761,7 @@ impl<'a> Savable for Attention<'a> {
 		assert!(q_heads >= v_heads);
 		assert!(q_heads % v_heads == 0);
 		assert!((q_heads / v_heads).is_power_of_two());
+		let v_shift = (q_heads / v_heads).trailing_zeros() as usize;
 
 		let inputs = q_input_dim.size;
 		assert!(k_input_dim.size == inputs);
@@ -778,11 +782,11 @@ impl<'a> Savable for Attention<'a> {
 		let to_output_stride = to_output_dim.stride;
 
 		let params = AttentionParams {
-			q_heads,
-			k_heads,
-			v_heads,
+			heads: q_heads,
 			qk_features,
 			v_features,
+			k_shift,
+			v_shift,
 		};
 
 		let merger = DimMerger::new(tensors.map(|t| t.dim_slice(..t.ndim() - 3)));

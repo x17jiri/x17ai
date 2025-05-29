@@ -487,14 +487,13 @@ impl CPUDevice {
 					scores.item(h, i).set(math::dot(q, k));
 				}
 			}
-			let scores = scores.slice(h, ..);
-			let (new_m, new_l) = math::softmax_part1(scores, scores);
-
 			if FIRST {
 				for h in 0..H {
-					prev_m.item(h, j).set(new_m);
-					prev_l.item(h, j).set(new_l);
-					let m = new_m;
+					let scores = scores.slice(h, ..);
+					let (first_m, first_l) = math::softmax_part1(scores, scores);
+
+					prev_m.item(h, j).set(first_m);
+					prev_l.item(h, j).set(first_l);
 
 					let o = o.slice(j, h, ..);
 					for i in 0..I {
@@ -508,6 +507,9 @@ impl CPUDevice {
 				}
 			} else {
 				for h in 0..H {
+					let scores = scores.slice(h, ..);
+					let (new_m, new_l) = math::softmax_part1(scores, scores);
+
 					let prev_m = prev_m.item(h, j);
 					let m = new_m.max(prev_m.get());
 
@@ -637,6 +639,8 @@ impl CPUDevice {
 			features: params.v_features,
 		};
 
+		// TODO masking
+
 		let seq_len = dst.seq_len;
 		for j in (0..seq_len).step_by(Bq) {
 			let je = (j + Bq).min(seq_len);
@@ -708,19 +712,20 @@ impl Device for CPUDevice {
 		unsafe { std::alloc::dealloc(device_buffer.as_ptr(), layout) }
 	}
 
-	fn load_data(&self, buffer: &Buffer, dtype: DType, offset: usize, len: usize, src: &[u8]) {
-		let buffer = self.cast_buffer::<u8>(buffer);
-
-		let begin = dtype.array_bytes(offset).unwrap();
-		let len = dtype.array_bytes(len).unwrap();
-		let end = begin.checked_add(len).unwrap();
-
-		let dst = &buffer[begin..end];
-
-		assert!(dst.len() == src.len());
-		for (d, s) in dst.iter().zip(src) {
-			d.set(*s);
+	fn load_from_reader(&self, dst: &SliceSet, src: &mut dyn std::io::Read) -> std::io::Result<()> {
+		let mut result = Ok(());
+		match dst.dtype {
+			f32::dtype => self.array_wise::<f32, 1>([dst], |[d]| {
+				if result.is_ok() {
+					let ptr = d.as_ptr() as *mut u8;
+					let bytes = d.len() * std::mem::size_of::<f32>();
+					let slice = unsafe { std::slice::from_raw_parts_mut(ptr, bytes) };
+					result = src.read_exact(slice);
+				}
+			}),
+			_ => todo!(),
 		}
+		result
 	}
 
 	fn zeros(&self, dst: &SliceSet) {
@@ -924,13 +929,10 @@ impl Device for CPUDevice {
 	fn attention(
 		&self, dst: &SliceSet, q: &SliceSet, k: &SliceSet, v: &SliceSet, params: &AttentionParams,
 	) {
-		const BLOCK_SIZE: usize = 256;
-		/*let dst = self.cast_slices(dst);
-		let q = self.cast_slices(q);
-		let k = self.cast_slices(k);
-		let v = self.cast_slices(v);*/
-		let _ = (dst, q, k, v, params);
-		todo!()
+		match dst.dtype {
+			f32::dtype => self.attention_f::<f32>(&dst, &q, &k, &v, params),
+			_ => todo!(),
+		}
 	}
 
 	fn format(

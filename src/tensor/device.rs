@@ -11,10 +11,22 @@ pub mod cpu;
 
 pub struct AttentionParams {
 	pub heads: usize,
-	pub k_shift: usize,
-	pub v_shift: usize,
 	pub qk_features: usize,
 	pub v_features: usize,
+
+	/// `v_shift` and `k_shift` are used to implement Grouped Query Attention (GQA).
+	///
+	/// Each head has its own `Q`, but `K` and `V` can be shared by multiple heads.
+	///
+	/// For example:
+	/// - we have 20 heads, so there is 20 `Q` inputs
+	/// - each `K` is shared by 4 heads (k_shift = 2), so there are 5 `K` inputs
+	/// - each `V` is shared by 2 heads (v_shift = 1), so there are 10 `V` inputs
+	/// - for head H, we use Q[H], K[H >> k_shift], V[H >> v_shift]
+	pub k_shift: usize,
+
+	/// See `k_shift` for explanation.
+	pub v_shift: usize,
 }
 
 pub trait Device {
@@ -27,7 +39,7 @@ pub trait Device {
 	// If any of the slices represented by a SliceSet are not in bounds,
 	// these functions will panic.
 
-	fn load_data(&self, buffer: &Buffer, dtype: DType, offset: usize, len: usize, src: &[u8]);
+	fn load_from_reader(&self, dst: &SliceSet, src: &mut dyn std::io::Read) -> std::io::Result<()>;
 
 	fn zeros(&self, dst: &SliceSet);
 

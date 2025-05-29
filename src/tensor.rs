@@ -7,6 +7,7 @@ pub mod device;
 pub mod dim_merger;
 pub mod dim_vec;
 pub mod dtype;
+pub mod io;
 pub mod math;
 
 #[cfg(test)]
@@ -95,9 +96,11 @@ pub struct Tensor {
 }
 
 impl Tensor {
-	/// This function takes a DimVec, but uses only the dimension sizes and overrides the strides.
-	fn __new_empty_on(mut dims: DimVec, dtype: DType, device: Rc<dyn Device>) -> Tensor {
-		let mut stride = 1;
+	/// This function will initialize strides in a DimVec so a new tensor is contiguous in memory.
+	///
+	/// It returns the total number of elements in the tensor.
+	fn __init_strides(dims: &mut DimVec) -> usize {
+		let mut elems = 1;
 		let mut nonzero_elems: usize = 1;
 		for dim in dims.iter_mut().rev() {
 			// Check that if we ignore zero length dimensions, the number of elements does not
@@ -107,22 +110,23 @@ impl Tensor {
 				nonzero_elems = nonzero_elems.checked_mul(dim.size).expect("too many elements");
 			}
 
-			dim.stride = stride;
-			stride *= dim.size;
+			dim.stride = elems;
+			elems *= dim.size;
 		}
-		Tensor {
-			dims,
-			offset: 0,
-			dtype,
-			buffer: device.new_buffer(dtype, stride),
-		}
+		elems
 	}
 
 	/// Allocate a new tensor on the provided device.
 	pub fn new_empty_on(shape: &[usize], dtype: DType, device: Rc<dyn Device>) -> Tensor {
-		let dims =
+		let mut dims =
 			DimVec::new_from_iter(shape.iter().map(|&size| SizeAndStride { size, stride: 0 }));
-		Self::__new_empty_on(dims, dtype, device)
+		let elems = Self::__init_strides(&mut dims);
+		Tensor {
+			dims,
+			offset: 0,
+			dtype,
+			buffer: device.new_buffer(dtype, elems),
+		}
 	}
 
 	/// Allocate a new tensor on the same device as `self`.
@@ -134,21 +138,31 @@ impl Tensor {
 		let n_keep = self.dims.len().checked_sub(tail_len).expect("not enough dimensions");
 		let ndim = n_keep + replace_with.len();
 		let mut dims = DimVec::with_capacity(ndim);
-
 		unsafe {
 			dims.extend_unchecked(self.dims.get_unchecked(..n_keep).iter().copied());
 			dims.extend_unchecked(
 				replace_with.iter().map(|&size| SizeAndStride { size, stride: 0 }),
 			);
 		}
-
-		Self::__new_empty_on(dims, self.dtype, self.device())
+		let elems = Self::__init_strides(&mut dims);
+		Tensor {
+			dims,
+			offset: 0,
+			dtype: self.dtype,
+			buffer: self.device().new_buffer(self.dtype, elems),
+		}
 	}
 
 	/// Allocate a new tensor on the same device with the same shape and dtype as `self`.
 	pub fn new_empty_like(&self) -> Tensor {
 		let dims = self.dims.clone();
-		Self::__new_empty_on(dims, self.dtype, self.device())
+		let elems = Self::__init_strides(&mut dims.clone());
+		Tensor {
+			dims,
+			offset: 0,
+			dtype: self.dtype,
+			buffer: self.device().new_buffer(self.dtype, elems),
+		}
 	}
 
 	/// Returns the device on which the tensor is allocated.
@@ -356,258 +370,72 @@ impl Tensor {
 		self
 	}
 
-	#[inline(never)]
-	pub fn new_1d<T: HasDType>(device: Rc<dyn Device>, value: Data1D<T>) -> Tensor {
-		let x = value.data.len();
+	pub fn fill_from_reader(&self, reader: &mut dyn std::io::Read) -> std::io::Result<()> {
+		io::fill_from_reader(self, reader)
+	}
 
+	pub fn fill_from_file(&self, path: &str) -> std::io::Result<()> {
+		io::fill_from_file(self, path)
+	}
+
+	#[inline(never)]
+	pub fn new_debug_1d<T: HasDType>(device: Rc<dyn Device>, value: io::DebugData1D<T>) -> Tensor {
+		let (x,) = value.shape();
 		let tensor = Self::new_empty_on(&[x], T::dtype, device);
-		tensor.fill_1d(value);
+		tensor.fill_debug_1d(value);
 		tensor
 	}
 
 	#[inline(never)]
-	pub fn new_2d<T: HasDType>(device: Rc<dyn Device>, value: Data2D<T>) -> Tensor {
-		let y = value.data.len();
-
-		let x = value.data.get(0).map_or(0, |row| row.len());
-		assert!(value.data.iter().all(|row| row.len() == x), "rows have different lengths");
-
+	pub fn new_debug_2d<T: HasDType>(device: Rc<dyn Device>, value: io::DebugData2D<T>) -> Tensor {
+		let (y, x) = value.shape();
 		let tensor = Self::new_empty_on(&[y, x], T::dtype, device);
-		tensor.fill_2d(value);
+		tensor.fill_debug_2d(value);
 		tensor
 	}
 
 	#[inline(never)]
-	pub fn new_3d<T: HasDType>(device: Rc<dyn Device>, value: Data3D<T>) -> Tensor {
-		let z = value.data.len();
-
-		let y = value.data.get(0).map_or(0, |mat| mat.len());
-		assert!(
-			value.data.iter().all(|mat| mat.len() == y),
-			"matrices have different numbers of rows"
-		);
-
-		let x = value.data.get(0).and_then(|mat| mat.get(0)).map_or(0, |row| row.len());
-		assert!(
-			value.data.iter().all(|mat| mat.iter().all(|row| row.len() == x)),
-			"rows have different lengths"
-		);
-
+	pub fn new_debug_3d<T: HasDType>(device: Rc<dyn Device>, value: io::DebugData3D<T>) -> Tensor {
+		let (z, y, x) = value.shape();
 		let tensor = Self::new_empty_on(&[z, y, x], T::dtype, device);
-		tensor.fill_3d(value);
+		tensor.fill_debug_3d(value);
 		tensor
 	}
 
 	#[inline(never)]
-	pub fn fill_1d<T: HasDType>(&self, value: Data1D<T>) {
-		let x = value.data.len();
-
+	pub fn fill_debug_1d<T: HasDType>(&self, value: io::DebugData1D<T>) {
+		let (x,) = value.shape();
 		assert!(self.ndim() == 1, "fill_1d() can only be used on 1D tensors");
-
 		assert!(self.dims[0].size == x, "invalid size");
-		assert!(self.dims[0].size <= 1 || self.dims[0].stride == 1, "tensor is not contiguous");
-
 		assert!(self.dtype == T::dtype, "invalid dtype");
-		let dtype = self.dtype;
-		let offset = self.offset;
 
-		let buf = value.data.as_slice();
-		let buf = unsafe {
-			std::slice::from_raw_parts(
-				buf.as_ptr() as *const u8,
-				buf.len() * std::mem::size_of::<T>(),
-			)
-		};
-
-		let executor = self.buffer.executor();
-		executor.load_data(self.buffer.as_ref(), dtype, offset, x, buf);
+		let mut reader = value.into_read();
+		io::fill_from_reader(self, &mut reader).expect("failed to fill 1D tensor");
 	}
 
 	#[inline(never)]
-	pub fn fill_2d<T: HasDType>(&self, value: Data2D<T>) {
-		let y = value.data.len();
-
-		let x = value.data.get(0).map_or(0, |row| row.len());
-		assert!(value.data.iter().all(|row| row.len() == x), "rows have different lengths");
-
+	pub fn fill_debug_2d<T: HasDType>(&self, value: io::DebugData2D<T>) {
+		let (y, x) = value.shape();
 		assert!(self.ndim() == 2, "fill_2d() can only be used on 2D tensors");
-
-		assert!(self.dims[1].size == x, "invalid size");
-		assert!(self.dims[1].size <= 1 || self.dims[1].stride == 1, "tensor is not contiguous");
-
 		assert!(self.dims[0].size == y, "invalid size");
-		assert!(self.dims[0].size <= 1 || self.dims[0].stride >= x, "output overlap");
-
+		assert!(self.dims[1].size == x, "invalid size");
 		assert!(self.dtype == T::dtype, "invalid dtype");
-		let dtype = self.dtype;
 
-		for (i, row) in value.data.into_iter().enumerate() {
-			let offset = self.offset + i * self.dims[0].stride;
-
-			let buf = row.as_slice();
-			let buf = unsafe {
-				std::slice::from_raw_parts(
-					buf.as_ptr() as *const u8,
-					buf.len() * std::mem::size_of::<T>(),
-				)
-			};
-
-			let executor = self.buffer.executor();
-			executor.load_data(self.buffer.as_ref(), dtype, offset, x, buf);
-		}
+		let mut reader = value.into_read();
+		io::fill_from_reader(self, &mut reader).expect("failed to fill 2D tensor");
 	}
 
 	#[inline(never)]
-	pub fn fill_3d<T: HasDType>(&self, value: Data3D<T>) {
-		let z = value.data.len();
-
-		let y = value.data.get(0).map_or(0, |mat| mat.len());
-		assert!(
-			value.data.iter().all(|mat| mat.len() == y),
-			"matrices have different numbers of rows"
-		);
-
-		let x = value.data.get(0).and_then(|mat| mat.get(0)).map_or(0, |row| row.len());
-		assert!(
-			value.data.iter().all(|mat| mat.iter().all(|row| row.len() == x)),
-			"rows have different lengths"
-		);
-
+	pub fn fill_debug_3d<T: HasDType>(&self, value: io::DebugData3D<T>) {
+		let (z, y, x) = value.shape();
 		assert!(self.ndim() == 3, "fill_3d() can only be used on 3D tensors");
-
 		assert!(self.dims[2].size == x, "invalid size");
-		assert!(self.dims[2].size <= 1 || self.dims[2].stride == 1, "tensor is not contiguous");
-
 		assert!(self.dims[1].size == y, "invalid size");
-		assert!(self.dims[1].size <= 1 || self.dims[1].stride >= x, "output overlap");
-
 		assert!(self.dims[0].size == z, "invalid size");
-		assert!(
-			self.dims[0].size <= 1 || self.dims[0].stride >= y * self.dims[1].stride,
-			"output overlap"
-		);
 
-		assert!(self.dtype == T::dtype, "invalid dtype");
-		let dtype = self.dtype;
-
-		for (i, mat) in value.data.into_iter().enumerate() {
-			let offset = self.offset + i * self.dims[0].stride;
-
-			for (j, row) in mat.into_iter().enumerate() {
-				let row_offset = offset + j * self.dims[1].stride;
-
-				let buf = row.as_slice();
-				let buf = unsafe {
-					std::slice::from_raw_parts(
-						buf.as_ptr() as *const u8,
-						buf.len() * std::mem::size_of::<T>(),
-					)
-				};
-
-				let executor = self.buffer.executor();
-				executor.load_data(self.buffer.as_ref(), dtype, row_offset, x, buf);
-			}
-		}
+		let mut reader = value.into_read();
+		io::fill_from_reader(self, &mut reader).expect("failed to fill 3D tensor");
 	}
-}
-
-fn fmt_0d(tensor: &Tensor, f: &mut std::fmt::Formatter, offset: usize) -> std::fmt::Result {
-	let executor = tensor.buffer.executor();
-	let offset = tensor.offset + offset;
-	let len = 1;
-	let stride = 1;
-	executor.format(f, tensor.buffer.as_ref(), tensor.dtype, offset, len, stride)
-}
-
-fn fmt_1d(tensor: &Tensor, f: &mut std::fmt::Formatter, offset: usize) -> std::fmt::Result {
-	let executor = tensor.buffer.executor();
-	let dim = tensor.dims[tensor.ndim() - 1];
-	let offset = tensor.offset + offset;
-	let len = dim.size;
-	let stride = dim.stride;
-	write!(f, "[")?;
-	executor.format(f, tensor.buffer.as_ref(), tensor.dtype, offset, len, stride)?;
-	write!(f, "]")
-}
-
-fn fmt_Nd(
-	tensor: &Tensor, f: &mut std::fmt::Formatter, offset: usize, d: usize,
-) -> std::fmt::Result {
-	let indent = "\t".repeat(d);
-	writeln!(f, "{indent}[")?;
-	let dim = tensor.dims[d];
-	for i in 0..dim.size {
-		write!(f, "{indent}\t")?;
-		let offset = offset + i * dim.stride;
-		if d + 1 < tensor.ndim() - 1 {
-			fmt_Nd(tensor, f, offset, d + 1)?;
-		} else {
-			fmt_1d(tensor, f, offset)?;
-		}
-		writeln!(f, ",")?;
-	}
-	write!(f, "{indent}]")
-}
-
-impl std::fmt::Display for Tensor {
-	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-		write!(f, "Tensor(")?;
-		match self.ndim() {
-			0 => fmt_0d(self, f, 0)?,
-			1 => fmt_1d(self, f, 0)?,
-			_ => fmt_Nd(self, f, 0, 0)?,
-		};
-		write!(f, ")")
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
-pub struct Data1D<T: HasDType> {
-	pub data: Vec<T>,
-}
-
-pub struct Data2D<T: HasDType> {
-	pub data: Vec<Vec<T>>,
-}
-
-pub struct Data3D<T: HasDType> {
-	pub data: Vec<Vec<Vec<T>>>,
-}
-
-#[macro_export]
-macro_rules! data1d {
-    ( $dt:ty; $( $x:expr ),* $(,)? ) => {
-        $crate::tensor::Data1D::<$dt> {
-			data: vec![$($x),*]
-		}
-    };
-}
-
-#[macro_export]
-macro_rules! data2d {
-    ( $dt:ty; $( [ $( $x:expr ),* ] ),* $(,)? ) => {
-		$crate::tensor::Data2D::<$dt> {
-        	data: vec![
-				$(vec![$($x),*]),*
-			]
-		}
-    };
-}
-
-#[macro_export]
-macro_rules! data3d {
-	( $dt:ty; $( [ $( [ $( $x:expr ),* ] ),* $(,)? ] ),* $(,)? ) => {
-		$crate::tensor::Data3D::<$dt> {
-			data: vec![
-				$(
-					vec![
-						$(vec![$($x),*]),*
-					]
-				),*
-			]
-		}
-	};
 }
 
 //--------------------------------------------------------------------------------------------------

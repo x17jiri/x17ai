@@ -3,7 +3,7 @@
 
 use super::super::softmax::*;
 
-use crate::data2d;
+use crate::debug_2d;
 use crate::nn::EvalContext;
 use crate::nn::layers::Layer;
 use crate::tensor::device::cpu::CPUDevice;
@@ -16,9 +16,9 @@ fn test_softmax() {
 	let softmax = Softmax::new(5);
 	let dev = CPUDevice::new("CPU".to_string());
 
-	#[rustfmt::skip] let inp = Tensor::new_2d(
+	#[rustfmt::skip] let inp = Tensor::new_debug_2d(
 		dev.clone(),
-		data2d![
+		debug_2d![
 			f32;
 			[-1.2719, -0.6884, -0.6477, -1.3343, -1.7648],
 			[-1.9440,  0.9989,  2.8260, -0.3503, -0.5406],
@@ -27,9 +27,9 @@ fn test_softmax() {
 		]
 	);
 
-	#[rustfmt::skip] let expected_out = Tensor::new_2d(
+	#[rustfmt::skip] let expected_out = Tensor::new_debug_2d(
 		dev.clone(),
-		data2d![
+		debug_2d![
 			f32;
 			[ 0.1610,  0.2886,  0.3006,  0.1513,  0.0984],
 			[ 0.0068,  0.1292,  0.8028,  0.0335,  0.0277],
@@ -43,9 +43,9 @@ fn test_softmax() {
 
 	assert!(tensor::math::approx_eq(&out, &expected_out, 1e-4));
 
-	#[rustfmt::skip] let d_out = Tensor::new_2d(
+	#[rustfmt::skip] let d_out = Tensor::new_debug_2d(
 		dev.clone(),
-		data2d![
+		debug_2d![
 			f32;
 			[ 0.1000,  0.2000, -0.3000, -0.1000,  0.7000],
 			[ 0.0500, -0.1500,  0.1000,  0.0000,  0.6500],
@@ -54,9 +54,9 @@ fn test_softmax() {
 		]
 	);
 
-	#[rustfmt::skip] let expected_d_inp = Tensor::new_2d(
+	#[rustfmt::skip] let expected_d_inp = Tensor::new_debug_2d(
 		dev.clone(),
-		data2d![
+		debug_2d![
 			f32;
 			[ 0.0101,  0.0469, -0.1014, -0.0208,  0.0652],
 			[-0.0002, -0.0296,  0.0167, -0.0027,  0.0158],

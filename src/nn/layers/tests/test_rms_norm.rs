@@ -3,7 +3,7 @@
 
 use super::super::rms_norm::*;
 
-use crate::data2d;
+use crate::debug_2d;
 use crate::nn::EvalContext;
 use crate::nn::layers::Layer;
 use crate::tensor::device::cpu::CPUDevice;
@@ -16,9 +16,9 @@ fn test_rms_norm() {
 	let rms_norm = RMSNorm::new(5, 1e-5);
 	let dev = CPUDevice::new("CPU".to_string());
 
-	#[rustfmt::skip] let inp = Tensor::new_2d(
+	#[rustfmt::skip] let inp = Tensor::new_debug_2d(
 		dev.clone(),
-		data2d![
+		debug_2d![
 			f32;
 			[-1.2719, -0.6884, -0.6477, -1.3343, -1.7648],
 			[-1.9440,  0.9989,  2.8260, -0.3503, -0.5406],
@@ -27,9 +27,9 @@ fn test_rms_norm() {
 		]
 	);
 
-	#[rustfmt::skip] let expected_out = Tensor::new_2d(
+	#[rustfmt::skip] let expected_out = Tensor::new_debug_2d(
 		dev.clone(),
-		data2d![
+		debug_2d![
 			f32;
 			[-1.0451, -0.5656, -0.5322, -1.0963, -1.4501],
 			[-1.1974,  0.6153,  1.7407, -0.2158, -0.3330],
@@ -43,9 +43,9 @@ fn test_rms_norm() {
 
 	assert!(tensor::math::approx_eq(&out, &expected_out, 1e-4));
 
-	#[rustfmt::skip] let d_out = Tensor::new_2d(
+	#[rustfmt::skip] let d_out = Tensor::new_debug_2d(
 		dev.clone(),
-		data2d![
+		debug_2d![
 			f32;
 			[ 0.1000,  0.2000, -0.3000, -0.1000,  0.7000],
 			[ 0.0500, -0.1500,  0.1000,  0.0000,  0.6500],
@@ -54,9 +54,9 @@ fn test_rms_norm() {
 		]
 	);
 
-	#[rustfmt::skip] let expected_d_inp = Tensor::new_2d(
+	#[rustfmt::skip] let expected_d_inp = Tensor::new_debug_2d(
 		dev.clone(),
-		data2d![
+		debug_2d![
 			f32;
 			[-0.0833,  0.0748, -0.3308, -0.2557,  0.3456],
 			[ 0.0021, -0.0776,  0.1033, -0.0052,  0.3924],
