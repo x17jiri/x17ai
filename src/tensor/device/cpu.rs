@@ -53,8 +53,16 @@ mod math {
 	}
 
 	pub fn dot<T: Copy + FromToF64>(a: &[Cell<T>], b: &[Cell<T>]) -> f64 {
-		let res = a.iter().zip(b).map(|(a, b)| a.get().to_f64() * b.get().to_f64()).sum();
-		//println!("dot: {}", res);
+		let res = a
+			.iter()
+			.zip(b)
+			.map(|(a, b)| {
+				let val = a.get().to_f64() * b.get().to_f64();
+				println!("dot: {} * {} = {}", a.get().to_f64(), b.get().to_f64(), val);
+				val
+			})
+			.sum();
+		println!("dot: {}", res);
 		res
 	}
 
@@ -490,18 +498,28 @@ impl CPUDevice {
 			if FIRST {
 				for h in 0..H {
 					let scores = scores.slice(h, ..);
+					let scores = &scores[..I]; // TODO
 					let (first_m, first_l) = math::softmax_part1(scores, scores);
 
 					prev_m.item(h, j).set(first_m);
 					prev_l.item(h, j).set(first_l);
 
 					let o = o.slice(j, h, ..);
-					for i in 0..I {
+					{
+						let i = 0;
 						let v = v.slice(i, h, ..);
 						let score = scores[i].get().to_f64();
 						for f in 0..VO {
 							let v = v[f].get().to_f64();
 							o[f].set(score * v);
+						}
+					}
+					for i in 1..I {
+						let v = v.slice(i, h, ..);
+						let score = scores[i].get().to_f64();
+						for f in 0..VO {
+							let v = v[f].get().to_f64();
+							o[f].set(o[f].get() + score * v);
 						}
 					}
 				}
@@ -639,7 +657,7 @@ impl CPUDevice {
 			features: params.v_features,
 		};
 
-		// TODO masking
+		// TODO masking, scale
 
 		let seq_len = dst.seq_len;
 		for j in (0..seq_len).step_by(Bq) {

@@ -370,12 +370,12 @@ impl Tensor {
 		self
 	}
 
-	pub fn fill_from_reader(&self, reader: &mut dyn std::io::Read) -> std::io::Result<()> {
-		io::fill_from_reader(self, reader)
+	pub fn read_from_reader(&self, reader: &mut dyn std::io::Read) -> std::io::Result<()> {
+		io::read_from_reader(self, reader)
 	}
 
-	pub fn fill_from_file(&self, path: &str) -> std::io::Result<()> {
-		io::fill_from_file(self, path)
+	pub fn read_from_file<P: AsRef<std::path::Path>>(&self, path: P) -> std::io::Result<()> {
+		io::read_from_file(self, path)
 	}
 
 	#[inline(never)]
@@ -410,7 +410,7 @@ impl Tensor {
 		assert!(self.dtype == T::dtype, "invalid dtype");
 
 		let mut reader = value.into_read();
-		io::fill_from_reader(self, &mut reader).expect("failed to fill 1D tensor");
+		io::read_from_reader(self, &mut reader).expect("failed to fill 1D tensor");
 	}
 
 	#[inline(never)]
@@ -422,7 +422,7 @@ impl Tensor {
 		assert!(self.dtype == T::dtype, "invalid dtype");
 
 		let mut reader = value.into_read();
-		io::fill_from_reader(self, &mut reader).expect("failed to fill 2D tensor");
+		io::read_from_reader(self, &mut reader).expect("failed to fill 2D tensor");
 	}
 
 	#[inline(never)]
@@ -434,7 +434,7 @@ impl Tensor {
 		assert!(self.dims[0].size == z, "invalid size");
 
 		let mut reader = value.into_read();
-		io::fill_from_reader(self, &mut reader).expect("failed to fill 3D tensor");
+		io::read_from_reader(self, &mut reader).expect("failed to fill 3D tensor");
 	}
 }
 

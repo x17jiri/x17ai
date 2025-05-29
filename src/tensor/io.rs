@@ -6,7 +6,7 @@ use super::{HasDType, Tensor};
 
 //--------------------------------------------------------------------------------------------------
 
-pub fn fill_from_reader(dst: &Tensor, reader: &mut dyn std::io::Read) -> std::io::Result<()> {
+pub fn read_from_reader(dst: &Tensor, reader: &mut dyn std::io::Read) -> std::io::Result<()> {
 	let executor = dst.buffer.executor();
 	let mut result = Ok(());
 	__elem_wise([dst], |[dst]| {
@@ -17,9 +17,21 @@ pub fn fill_from_reader(dst: &Tensor, reader: &mut dyn std::io::Read) -> std::io
 	result
 }
 
-pub fn fill_from_file(dst: &Tensor, path: &str) -> std::io::Result<()> {
+pub fn read_from_file<P: AsRef<std::path::Path>>(dst: &Tensor, path: P) -> std::io::Result<()> {
+	let elems = dst.elems();
+	let bytes = dst.dtype.array_bytes(elems).unwrap();
 	let mut file = std::fs::File::open(path)?;
-	fill_from_reader(dst, &mut file)
+	if file.metadata()?.len() != bytes as u64 {
+		return Err(std::io::Error::new(
+			std::io::ErrorKind::InvalidData,
+			format!(
+				"File size does not match tensor size: expected {} bytes, got {} bytes",
+				bytes,
+				file.metadata()?.len()
+			),
+		));
+	}
+	read_from_reader(dst, &mut file)
 }
 
 //--------------------------------------------------------------------------------------------------
