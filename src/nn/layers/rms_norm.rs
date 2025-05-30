@@ -52,27 +52,19 @@ impl Layer for RMSNorm {
 	}
 
 	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Tensor {
-		// try to reuse `inp` for `out` if possible
-		let (out, out_ref);
-		if inp.owns_buffer() {
-			out = None;
-			out_ref = &inp;
-		} else {
-			out = Some(inp.new_empty_like());
-			out_ref = out.as_ref().unwrap();
-		}
+		let out = inp.reuse_or_new_like();
 
 		if ctx.is_training() && self.gradient_mode == RMSNormGradientMode::Precise {
-			let scale = out_ref.new_replace_tail(1, &[1]);
+			let scale = out.new_replace_tail(1, &[1]);
 
-			tensor::math::rms_norm(&inp, self.eps).scale_storage(&scale).save_to(out_ref);
+			tensor::math::rms_norm(&inp, self.eps).scale_storage(&scale).save_to(&out);
 
-			ctx.tensors.set([out_ref.clone(), scale]);
+			ctx.tensors.set([out.clone(), scale]);
 		} else {
-			tensor::math::rms_norm(&inp, self.eps).save_to(out_ref);
+			tensor::math::rms_norm(&inp, self.eps).save_to(&out);
 		}
 
-		out.unwrap_or(inp)
+		out
 	}
 
 	fn randomize(&mut self) {
@@ -87,37 +79,19 @@ impl Layer for RMSNorm {
 				let g = scale.new_empty_like(); // [..., 1]
 				tensor::math::dot(&out, &d_out).scale(1.0 / self.shape[0] as f64).save_to(&g);
 
-				// try to reuse `out` for `d_inp` if possible
-				let (d_inp, d_inp_ref);
-				if out.owns_buffer() {
-					d_inp = None;
-					d_inp_ref = &out;
-				} else {
-					d_inp = Some(out.new_empty_like());
-					d_inp_ref = d_inp.as_ref().unwrap();
-				}
+				let d_inp = out.reuse_or_new_like();
 
 				// TODO - could we merge `mul, sub, mul` into a single kernel?
-				tensor::math::mul(&out, &g).save_to(d_inp_ref);
-				tensor::math::sub(&d_out, d_inp_ref).save_to(d_inp_ref);
-				tensor::math::mul(d_inp_ref, &scale).save_to(d_inp_ref);
+				tensor::math::mul(&out, &g).save_to(&d_inp);
+				tensor::math::sub(&d_out, &d_inp).save_to(&d_inp);
+				tensor::math::mul(&d_inp, &scale).save_to(&d_inp);
 
-				d_inp.unwrap_or(out)
+				d_inp
 			},
 			RMSNormGradientMode::NormGradients => {
-				// try to reuse `d_out` for `d_inp` if possible
-				let (d_inp, d_inp_ref);
-				if d_out.owns_buffer() {
-					d_inp = None;
-					d_inp_ref = &d_out;
-				} else {
-					d_inp = Some(d_out.new_empty_like());
-					d_inp_ref = d_inp.as_ref().unwrap();
-				}
-
-				tensor::math::rms_norm(&d_out, self.eps).save_to(d_inp_ref);
-
-				d_inp.unwrap_or(d_out)
+				let d_inp = d_out.reuse_or_new_like();
+				tensor::math::rms_norm(&d_out, self.eps).save_to(&d_inp);
+				d_inp
 			},
 			RMSNormGradientMode::StraightThrough => d_out,
 		}

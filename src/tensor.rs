@@ -165,10 +165,17 @@ impl Tensor {
 		}
 	}
 
-	/// Returns the device on which the tensor is allocated.
-	pub fn device(&self) -> Rc<dyn Device> {
-		let device = &*self.buffer.device;
-		device.clone()
+	/// Typical user of this function would be `nn` layer that can either
+	/// allocate a new tensor for storing the output, or overwrite the input tensor.
+	///
+	/// If no one else has reference to this tensor's buffer, i.e.,
+	/// this tensor owns its buffer, we assume the buffer is safe to overwrite
+	/// and simply return a clone of `self`.
+	///
+	/// If the tensor does not own its buffer, we allocate a new empty tensor
+	/// with the same shape and dtype as `self`.
+	pub fn reuse_or_new_like(&self) -> Tensor {
+		if self.owns_buffer() { self.clone() } else { self.new_empty_like() }
 	}
 
 	#[inline]
@@ -177,6 +184,12 @@ impl Tensor {
 		let weak = Rc::weak_count(buffer) + 1;
 		let strong = Rc::strong_count(buffer);
 		(weak | strong) <= 1
+	}
+
+	/// Returns the device on which the tensor is allocated.
+	pub fn device(&self) -> Rc<dyn Device> {
+		let device = &*self.buffer.device;
+		device.clone()
 	}
 
 	pub fn dim<D: DimIndex>(&self, dim: D) -> SizeAndStride {
@@ -370,12 +383,20 @@ impl Tensor {
 		self
 	}
 
-	pub fn read_from_reader(&self, reader: &mut dyn std::io::Read) -> std::io::Result<()> {
-		io::read_from_reader(self, reader)
+	pub fn read_bin(&self, reader: &mut dyn std::io::Read) -> std::io::Result<()> {
+		io::read_bin(self, reader)
 	}
 
-	pub fn read_from_file<P: AsRef<std::path::Path>>(&self, path: P) -> std::io::Result<()> {
-		io::read_from_file(self, path)
+	pub fn read_file<P: AsRef<std::path::Path>>(&self, path: P) -> std::io::Result<()> {
+		io::read_file(self, path)
+	}
+
+	pub fn write_bin(&self, writer: &mut dyn std::io::Write) -> std::io::Result<()> {
+		io::write_bin(self, writer)
+	}
+
+	pub fn write_file<P: AsRef<std::path::Path>>(&self, path: P) -> std::io::Result<()> {
+		io::write_file(self, path)
 	}
 
 	#[inline(never)]
@@ -410,7 +431,7 @@ impl Tensor {
 		assert!(self.dtype == T::dtype, "invalid dtype");
 
 		let mut reader = value.into_read();
-		io::read_from_reader(self, &mut reader).expect("failed to fill 1D tensor");
+		io::read_bin(self, &mut reader).expect("failed to fill 1D tensor");
 	}
 
 	#[inline(never)]
@@ -422,7 +443,7 @@ impl Tensor {
 		assert!(self.dtype == T::dtype, "invalid dtype");
 
 		let mut reader = value.into_read();
-		io::read_from_reader(self, &mut reader).expect("failed to fill 2D tensor");
+		io::read_bin(self, &mut reader).expect("failed to fill 2D tensor");
 	}
 
 	#[inline(never)]
@@ -434,7 +455,7 @@ impl Tensor {
 		assert!(self.dims[0].size == z, "invalid size");
 
 		let mut reader = value.into_read();
-		io::read_from_reader(self, &mut reader).expect("failed to fill 3D tensor");
+		io::read_bin(self, &mut reader).expect("failed to fill 3D tensor");
 	}
 }
 

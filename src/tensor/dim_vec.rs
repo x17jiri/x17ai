@@ -34,6 +34,10 @@ impl DimVec {
 		}
 	}
 
+	pub fn new() -> DimVec {
+		DimVec { vec: SmallVec::new() }
+	}
+
 	pub fn new_from_iter<I: IntoIterator<Item = SizeAndStride> + ExactSizeIterator>(
 		iter: I,
 	) -> DimVec {

@@ -1,6 +1,8 @@
 // Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 
+#![allow(non_snake_case)]
+
 use x17ai::debug_2d;
 use x17ai::nn::layers::{Layer, Linear, LossFunction, SoftmaxCrossEntropy};
 use x17ai::nn::{EvalContext, ModelContext};
@@ -212,10 +214,15 @@ fn main() {
 	let expected_out = Q.new_empty_like();
 	let out = Q.new_empty_like();
 
-	Q.read_from_file("Q.bin").unwrap();
-	K.read_from_file("K.bin").unwrap();
-	V.read_from_file("V.bin").unwrap();
-	expected_out.read_from_file("expected_out.bin").unwrap();
+	Q.read_file("Q.bin").unwrap();
+	K.read_file("K.bin").unwrap();
+	V.read_file("V.bin").unwrap();
+	expected_out.read_file("expected_out.bin").unwrap();
+
+	Q.write_file("QQ.bin").unwrap();
+
+	let rank0 = Tensor::new_empty_on(&[], f32::dtype, dev.clone());
+	rank0.read_file("rank0.bin").unwrap();
 
 	tensor::math::attention(&Q, &K, &V).save_to(&out);
 	let mut out_txt = std::fs::File::create("out.txt").unwrap();

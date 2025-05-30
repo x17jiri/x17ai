@@ -745,7 +745,7 @@ impl Device for CPUDevice {
 		unsafe { std::alloc::dealloc(device_buffer.as_ptr(), layout) }
 	}
 
-	fn load_from_reader(&self, dst: &SliceSet, src: &mut dyn std::io::Read) -> std::io::Result<()> {
+	fn read_bin(&self, dst: &SliceSet, src: &mut dyn std::io::Read) -> std::io::Result<()> {
 		let mut result = Ok(());
 		match dst.dtype {
 			f32::dtype => self.array_wise::<f32, 1>([dst], |[d]| {
@@ -767,6 +767,26 @@ impl Device for CPUDevice {
 							elem.set(be);
 						}
 					}
+				}
+			}),
+			_ => todo!(),
+		}
+		result
+	}
+
+	fn write_bin(&self, src: &SliceSet, dst: &mut dyn std::io::Write) -> std::io::Result<()> {
+		#[cfg(target_endian = "big")]
+		{
+			todo!("Saving to binary file on big-endian targets is not implemented yet");
+		}
+		let mut result = Ok(());
+		match src.dtype {
+			f32::dtype => self.array_wise::<f32, 1>([src], |[s]| {
+				if result.is_ok() {
+					let ptr = s.as_ptr() as *const u8;
+					let bytes = s.len() * std::mem::size_of::<f32>();
+					let slice = unsafe { std::slice::from_raw_parts(ptr, bytes) };
+					result = dst.write_all(slice);
 				}
 			}),
 			_ => todo!(),

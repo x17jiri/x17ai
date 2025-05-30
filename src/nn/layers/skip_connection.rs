@@ -21,19 +21,9 @@ impl<Nested: Layer> SkipConnection<Nested> {
 	}
 
 	fn add_residual(&self, inp: Tensor, nested_out: Tensor) -> Tensor {
-		// try to reuse `nested_out` for `out` if possible
-		let (out, out_ref);
-		if inp.owns_buffer() {
-			out = None;
-			out_ref = &nested_out;
-		} else {
-			out = Some(nested_out.new_empty_like());
-			out_ref = out.as_ref().unwrap();
-		}
-
-		tensor::math::add(&inp, &nested_out).save_to(out_ref);
-
-		out.unwrap_or(nested_out)
+		let out = nested_out.reuse_or_new_like();
+		tensor::math::add(&inp, &nested_out).save_to(&out);
+		out
 	}
 }
 

@@ -17,6 +17,7 @@
 #![feature(maybe_uninit_uninit_array)]
 #![feature(maybe_uninit_array_assume_init)]
 #![feature(trait_upcasting)]
+#![feature(cursor_split)]
 #![warn(clippy::cast_lossless)]
 
 pub mod format;

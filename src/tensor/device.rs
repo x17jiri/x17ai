@@ -39,10 +39,11 @@ pub trait Device {
 	// If any of the slices represented by a SliceSet are not in bounds,
 	// these functions will panic.
 
-	// This function is designed to load data from a file.
+	// These functions are designed to load/save data from a files.
 	// And in files, we always use little-endian format.
 	// So it expects bytes to be in little-endian format.
-	fn load_from_reader(&self, dst: &SliceSet, src: &mut dyn std::io::Read) -> std::io::Result<()>;
+	fn read_bin(&self, dst: &SliceSet, src: &mut dyn std::io::Read) -> std::io::Result<()>;
+	fn write_bin(&self, src: &SliceSet, dst: &mut dyn std::io::Write) -> std::io::Result<()>;
 
 	fn zeros(&self, dst: &SliceSet);
 

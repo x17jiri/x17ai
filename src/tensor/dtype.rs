@@ -37,6 +37,14 @@ pub struct DType {
 }
 
 impl DType {
+	pub fn from_str(s: &str) -> Option<DType> {
+		match s {
+			"f32" => Some(f32::dtype),
+			"f64" => Some(f64::dtype),
+			_ => None,
+		}
+	}
+
 	pub fn is_float(&self) -> bool {
 		self.kind == DTypeKind::Float
 	}
