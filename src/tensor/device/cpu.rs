@@ -469,13 +469,14 @@ impl CPUDevice {
 		);
 	}
 
-	fn attn_block<T: Copy + FromToF64, const FIRST: bool>(
+	fn attention_tile<T: Copy + FromToF64, const FIRST: bool>(
+		acc: View3D<f64>, // [output, head, vo_feature]
+
 		q: View3D<T>, // [output, head, qk_feature]
 		k: View3D<T>, // [input, head, qk_feature]
 		v: View3D<T>, // [input, head, vo_feature]
 
-		// `o`, `prev_m` and `prev_l` will be initialized when processing the first tile.
-		o: View3D<f64>,      // [output, head, vo_feature]
+		// `acc`, `prev_m` and `prev_l` will be initialized when processing the first tile.
 		prev_m: View2D<f64>, // [output, head]
 		prev_l: View2D<f64>, // [output, head]
 
@@ -508,13 +509,13 @@ impl CPUDevice {
 					prev_m.item(j, h).set(first_m);
 					prev_l.item(j, h).set(first_l);
 
-					let o = o.slice(j, h, ..);
+					let acc = acc.slice(j, h, ..);
 					for i in 0..1 {
 						let v = v.slice(i, h, ..);
 						let score = scores[i].get().to_f64();
 						for f in 0..VO {
 							let v = v[f].get().to_f64();
-							o[f].set(score * v);
+							acc[f].set(score * v);
 						}
 					}
 					for i in 1..I {
@@ -522,7 +523,7 @@ impl CPUDevice {
 						let score = scores[i].get().to_f64();
 						for f in 0..VO {
 							let v = v[f].get().to_f64();
-							o[f].set(o[f].get() + score * v);
+							acc[f].set(acc[f].get() + score * v);
 						}
 					}
 				}
@@ -545,13 +546,13 @@ impl CPUDevice {
 					let prev_l = prev_l.item(j, h);
 					prev_l.set(prev_l.get() * prev_weight + new_l * new_weight);
 
-					let o = o.slice(j, h, ..);
+					let acc = acc.slice(j, h, ..);
 					for i in 0..1 {
 						let v = v.slice(i, h, ..);
 						let score = scores[i].get().to_f64() * new_weight;
 						for f in 0..VO {
 							let v = v[f].get().to_f64();
-							o[f].set(o[f].get() * prev_weight + score * v);
+							acc[f].set(acc[f].get() * prev_weight + score * v);
 						}
 					}
 					for i in 1..I {
@@ -559,7 +560,7 @@ impl CPUDevice {
 						let score = scores[i].get().to_f64() * new_weight;
 						for f in 0..VO {
 							let v = v[f].get().to_f64();
-							o[f].set(o[f].get() + score * v);
+							acc[f].set(acc[f].get() + score * v);
 						}
 					}
 				}
@@ -567,17 +568,17 @@ impl CPUDevice {
 		}
 	}
 
-	fn attn_finish<T: Copy + FromToF64>(
+	fn attention_finish<T: Copy + FromToF64>(
 		dst: View3D<T>,      // [output, head, vo_feature]
-		o: View3D<f64>,      // [output, head, vo_feature]
+		acc: View3D<f64>,    // [output, head, vo_feature]
 		prev_l: View2D<f64>, // [output, head]
 	) {
-		let O = dst.seq_len;
+		let acc = dst.seq_len;
 		let H = dst.heads;
-		for j in 0..O {
+		for j in 0..acc {
 			for h in 0..H {
 				let norm = prev_l.item(j, h).get();
-				let o_slice = o.slice(j, h, ..);
+				let o_slice = acc.slice(j, h, ..);
 				let dst_slice = dst.slice(j, h, ..);
 				math::softmax_part2(o_slice, norm, dst_slice);
 			}
@@ -586,9 +587,9 @@ impl CPUDevice {
 
 	#[inline(never)]
 	fn attention_f<T: Copy + HasDType + FromToF64>(
-		&self, dst: &SliceSet, q: &SliceSet, k: &SliceSet, v: &SliceSet, params: &AttentionParams,
+		&self, o: &SliceSet, q: &SliceSet, k: &SliceSet, v: &SliceSet, params: &AttentionParams,
 	) {
-		let dst = self.cast_slice_set::<T>(dst);
+		let o = self.cast_slice_set::<T>(o);
 		let q = self.cast_slice_set::<T>(q);
 		let k = self.cast_slice_set::<T>(k);
 		let v = self.cast_slice_set::<T>(v);
@@ -618,7 +619,7 @@ impl CPUDevice {
 
 		let scratch_space = vec![Default::default(); mem_size];
 
-		let o = View3D {
+		let acc = View3D {
 			data: &scratch_space[o_off..o_end],
 			seq_len: Bq,
 			seq_stride: H * params.v_features,
@@ -663,10 +664,10 @@ impl CPUDevice {
 			heads: H >> params.v_shift,
 			features: params.v_features,
 		};
-		let dst = View3D {
-			data: dst.buffer,
-			seq_len: dst.count,
-			seq_stride: dst.stride,
+		let o = View3D {
+			data: o.buffer,
+			seq_len: o.count,
+			seq_stride: o.stride,
 			head_shift: 0,
 			heads: H,
 			features: params.v_features,
@@ -674,7 +675,7 @@ impl CPUDevice {
 
 		// TODO masking, scale
 
-		let seq_len = dst.seq_len;
+		let seq_len = o.seq_len;
 		for j in (0..seq_len).step_by(Bq) {
 			let je = (j + Bq).min(seq_len);
 			let q = q.sub_sequence(j..je);
@@ -684,16 +685,16 @@ impl CPUDevice {
 				let k = k.sub_sequence(i..ie);
 				let v = v.sub_sequence(i..ie);
 
-				// First tile will initialize `o`, `prev_m`, `prev_l`
+				// First tile will initialize `acc`, `prev_m`, `prev_l`
 				if i == 0 {
-					Self::attn_block::<T, true>(q, k, v, o, prev_m, prev_l, scores);
+					Self::attention_tile::<T, true>(acc, q, k, v, prev_m, prev_l, scores);
 				} else {
-					Self::attn_block::<T, false>(q, k, v, o, prev_m, prev_l, scores);
+					Self::attention_tile::<T, false>(acc, q, k, v, prev_m, prev_l, scores);
 				}
 			}
 
-			let dst = dst.sub_sequence(j..je);
-			Self::attn_finish::<T>(dst, o, prev_l);
+			let o = o.sub_sequence(j..je);
+			Self::attention_finish::<T>(o, acc, prev_l);
 		}
 	}
 
