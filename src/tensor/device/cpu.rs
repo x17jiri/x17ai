@@ -495,6 +495,7 @@ impl CPUDevice {
 					let q = q.slice(j, h, ..);
 					let k = k.slice(i, h, ..);
 					scores.item(h, i).set(math::dot(q, k));
+					// scores[h][i].set(math::dot(q, k))
 				}
 			}
 			if FIRST {
@@ -573,9 +574,9 @@ impl CPUDevice {
 		acc: View3D<f64>,    // [output, head, vo_feature]
 		prev_l: View2D<f64>, // [output, head]
 	) {
-		let acc = dst.seq_len;
+		let O = dst.seq_len;
 		let H = dst.heads;
-		for j in 0..acc {
+		for j in 0..O {
 			for h in 0..H {
 				let norm = prev_l.item(j, h).get();
 				let o_slice = acc.slice(j, h, ..);

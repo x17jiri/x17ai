@@ -43,42 +43,66 @@ impl SizeAndStride {
 
 //--------------------------------------------------------------------------------------------------
 
-pub trait DimIndex {
-	fn resolve(self, ndim: usize) -> usize;
+pub trait DimIndex: Copy {
+	fn resolve(self, len: usize) -> usize;
+	fn resolve_range(self, len: usize) -> usize;
 }
 
 impl DimIndex for usize {
-	fn resolve(self, ndim: usize) -> usize {
-		if self < ndim {
+	fn resolve(self, len: usize) -> usize {
+		if self < len {
 			self
 		} else {
 			cold_path();
-			panic!("dimension index out of bounds: index = {}, ndim = {}", self, ndim);
+			panic!("dimension index out of bounds: index = {}, len = {}", self, len);
+		}
+	}
+	fn resolve_range(self, len: usize) -> usize {
+		if self <= len {
+			self
+		} else {
+			cold_path();
+			panic!("dimension index out of bounds: index = {}, len = {}", self, len);
 		}
 	}
 }
 
 impl DimIndex for isize {
-	fn resolve(self, ndim: usize) -> usize {
-		let dim = if self >= 0 { self as usize } else { ndim.wrapping_add(self as usize) };
-		if dim < ndim {
+	fn resolve(self, len: usize) -> usize {
+		let dim = if self >= 0 { self as usize } else { len.wrapping_add(self as usize) };
+		if dim < len {
 			dim
 		} else {
 			cold_path();
-			panic!("dimension index out of bounds: index = {}, ndim = {}", self, ndim);
+			panic!("dimension index out of bounds: index = {}, len = {}", self, len);
+		}
+	}
+	fn resolve_range(self, len: usize) -> usize {
+		let dim = if self >= 0 { self as usize } else { len.wrapping_add(self as usize) };
+		if dim <= len {
+			dim
+		} else {
+			cold_path();
+			panic!("dimension index out of bounds: index = {}, len = {}", self, len);
 		}
 	}
 }
 
 impl DimIndex for u32 {
-	fn resolve(self, ndim: usize) -> usize {
-		(self as usize).resolve(ndim)
+	fn resolve(self, len: usize) -> usize {
+		(self as usize).resolve(len)
+	}
+	fn resolve_range(self, len: usize) -> usize {
+		(self as usize).resolve_range(len)
 	}
 }
 
 impl DimIndex for i32 {
-	fn resolve(self, ndim: usize) -> usize {
-		(self as isize).resolve(ndim)
+	fn resolve(self, len: usize) -> usize {
+		(self as isize).resolve(len)
+	}
+	fn resolve_range(self, len: usize) -> usize {
+		(self as isize).resolve_range(len)
 	}
 }
 

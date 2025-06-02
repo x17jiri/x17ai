@@ -19,7 +19,9 @@
 #![feature(trait_upcasting)]
 #![feature(cursor_split)]
 #![warn(clippy::cast_lossless)]
+#![feature(negative_impls)]
 
 pub mod format;
 pub mod nn;
 pub mod tensor;
+pub mod tensor2;

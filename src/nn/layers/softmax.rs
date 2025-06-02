@@ -90,20 +90,6 @@ impl Layer for Softmax {
 		}
 	}
 
-	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Tensor {
-		let [out] = ctx.tensors.get();
-
-		let g = out.new_replace_tail(1, &[1]); // [batch, 1]
-		tensor::math::dot(&out, &d_out).save_to(&g);
-
-		let d_inp = d_out.new_like();
-
-		tensor::math::sub(&d_out, &g).save_to(&d_inp);
-		tensor::math::mul(&d_inp, &out).save_to(&d_inp);
-
-		d_inp
-	}
-
 	fn backward_finish(&self, _d_out: Tensor, _ctx: &mut EvalContext) {
 		// no parameters to update
 	}

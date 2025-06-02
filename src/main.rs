@@ -8,8 +8,10 @@ use x17ai::nn::layers::{Layer, Linear, LossFunction, SoftmaxCrossEntropy};
 use x17ai::nn::{EvalContext, ModelContext};
 use x17ai::tensor::device::cpu::CPUDevice;
 use x17ai::tensor::math::Savable;
-use x17ai::tensor::{self, HasDType, Tensor};
+use x17ai::tensor::{self, HasDType, SizeAndStride, Tensor};
+use x17ai::tensor2::{ND, Slice1D};
 
+use std::cell::Cell;
 use std::io::Write;
 
 /*
@@ -142,6 +144,21 @@ impl Module for Transformer {
 */
 fn main() {
 	stderrlog::new().verbosity(10).init().unwrap();
+
+	let data = &[Cell::new(1), Cell::new(2), Cell::new(3)];
+	let ten = x17ai::tensor2::Tensor::<ND<1>, &[Cell<u32>]> {
+		buf: data,
+		map: ND::<1> {
+			dims: [SizeAndStride { size: 3, stride: 1 }],
+			offset: 0,
+		},
+	};
+	let t = ten.slice(0..2);
+	t[(1,)].set(5);
+	//print!("ten = ");
+	//for i in ten.iter()
+
+	return;
 
 	let dev = CPUDevice::new("CPU".to_string());
 	let mut mctx = ModelContext::new(dev.clone());
