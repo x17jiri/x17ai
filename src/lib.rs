@@ -14,12 +14,11 @@
 #![feature(dispatch_from_dyn)]
 #![feature(generic_const_exprs)]
 #![feature(adt_const_params)]
-#![feature(maybe_uninit_uninit_array)]
 #![feature(maybe_uninit_array_assume_init)]
-#![feature(trait_upcasting)]
 #![feature(cursor_split)]
-#![warn(clippy::cast_lossless)]
 #![feature(negative_impls)]
+#![feature(cold_path)]
+#![warn(clippy::cast_lossless)]
 
 pub mod format;
 pub mod nn;

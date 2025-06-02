@@ -6,9 +6,9 @@
 // - ND<4>
 // - DynD
 
-use crate::tensor::{DimIndex, SizeAndStride};
+use std::hint::cold_path;
 
-use my_rc::{Rc, RcInner};
+use crate::tensor::{DimIndex, SizeAndStride};
 
 mod my_rc {
 	use std::cell::Cell;
@@ -150,6 +150,25 @@ pub trait IMap {
 	fn dim_size<I: DimIndex>(&self, i: I) -> usize;
 }
 
+pub trait MergeDims<const M: usize> {
+	type Output;
+
+	fn merge_dims(self) -> Self::Output;
+}
+
+pub trait MergeAllDims {
+	type Output;
+
+	fn merge_all_dims(self) -> Self::Output;
+}
+
+pub trait ReshapeLastDim<const M: usize> {
+	type Output;
+
+	fn reshape_last_dim(self, to_shape: [usize; M]) -> Self::Output;
+}
+
+#[derive(Clone, Copy)]
 pub struct ND<const N: usize> {
 	pub dims: [SizeAndStride; N],
 	pub offset: usize,
@@ -162,6 +181,103 @@ impl<const N: usize> IMap for ND<N> {
 
 	fn dim_size<I: DimIndex>(&self, i: I) -> usize {
 		self.dims[i.resolve(N)].size
+	}
+}
+
+impl<const N: usize, const M: usize> MergeDims<M> for ND<N>
+where
+	[(); N-M]:,
+	[(); N-M+1]:,
+{
+	type Output = Option<ND<{N-M+1}>>;
+
+	fn merge_dims(self) -> Self::Output {
+		let mut dims = [SizeAndStride::default(); N-M+1];
+		for i in 0..N-M {
+			dims[i] = self.dims[i];
+		}
+		let mut iter = self.dims[N-M..N].iter().copied().rev();
+		let mut merged = iter.next().unwrap_or(SizeAndStride { size: 1, stride: 1 });
+		for dim in iter {
+			if dim.stride == merged.size * merged.stride {
+				merged.size *= dim.size;
+			} else {
+				cold_path();
+				if dim.size == 1 {
+					// Nothing to do
+				} else if merged.size == 1 {
+					merged = dim;
+				} else if dim.size == 0 || merged.size == 0 {
+					merged = SizeAndStride { size: 0, stride: 0 };
+					break;
+				} else {
+					return None;
+				}
+			}
+		}
+		dims[N-M] = merged;
+		Some(ND {dims, offset: self.offset})
+	}
+}
+
+impl<const N: usize> MergeAllDims for ND<N> {
+	type Output = Option<ND<1>>;
+
+	fn merge_all_dims(self) -> Self::Output {
+		let mut iter = self.dims.iter().copied().rev();
+		let mut merged = iter.next().unwrap_or(SizeAndStride { size: 1, stride: 1 });
+		for dim in iter {
+			if dim.stride == merged.size * merged.stride {
+				merged.size *= dim.size;
+			} else {
+				cold_path();
+				if dim.size == 1 {
+					// Nothing to do
+				} else if merged.size == 1 {
+					merged = dim;
+				} else if dim.size == 0 || merged.size == 0 {
+					merged = SizeAndStride { size: 0, stride: 0 };
+					break;
+				} else {
+					return None;
+				}
+			}
+		}
+		Some(ND {
+			dims: [merged],
+			offset: self.offset,
+		})
+	}
+}
+
+impl<const N: usize, const M: usize> ReshapeLastDim<M> for ND<N>
+where
+	[(); N-1]:,
+	[(); N-1+M]:,
+{
+	type Output = Option<ND<{N-1+M}>>;
+
+	fn reshape_last_dim(self, to_shape: [usize; M]) -> Self::Output {
+		let mut dims = [SizeAndStride::default(); N-1+M];
+		for i in 0..N-1 {
+			dims[i] = self.dims[i];
+		}
+		let removed_dim = self.dims[N-1];
+		let elems = to_shape.iter().copied().product::<usize>();
+		if elems != removed_dim.size {
+			cold_path();
+			return None;
+		}
+		let mut stride = removed_dim.stride;
+		for i in (N-1..N-1+M).rev() {
+			let size = to_shape[i - (N-1)];
+			dims[i] = SizeAndStride {
+				size,
+				stride,
+			};
+			stride *= size;
+		}
+		Some(ND { dims, offset: self.offset })
 	}
 }
 
@@ -188,13 +304,13 @@ impl<I0: DimIndex, T> std::ops::Index<(I0,)> for Tensor<ND<1>, &[T]> {
 pub trait Slice1D {
 	type Output;
 
-	fn slice<R0: DimRange>(&self, r0: R0) -> Self::Output;
+	fn slice<R0: DimRange>(self, r0: R0) -> Self::Output;
 }
 
 impl<Buf: IBuffer> Slice1D for Tensor<ND<1>, Buf> {
 	type Output = Tensor<ND<1>, Buf::Ref>;
 
-	fn slice<R0: DimRange>(&self, r0: R0) -> Self::Output {
+	fn slice<R0: DimRange>(self, r0: R0) -> Self::Output {
 		let r0 = r0.resolve(self.map.dims[0].size);
 		let new_map = ND::<1> {
 			dims: [SizeAndStride {
@@ -311,7 +427,7 @@ impl<Buf: IBuffer> Slice3D for Tensor<ND<3>, Buf> {
 
 //--------------------------------------------------------------------------------------------------
 
-pub trait IBuffer {
+pub trait IBuffer: Clone {
 	type Ref: IBuffer;
 
 	fn as_ref(&self) -> Self::Ref;
