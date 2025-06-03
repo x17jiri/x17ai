@@ -5,7 +5,29 @@ use smallvec::SmallVec;
 use std::intrinsics::cold_path;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 
-use super::SizeAndStride;
+use super::{IMap, SizeAndStride};
+
+//--------------------------------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub struct DynD {
+	dims: DimVec,
+	offset: usize,
+}
+
+impl IMap for DynD {
+	fn offset(&self) -> usize {
+		self.offset
+	}
+
+	fn dims(&self) -> &[SizeAndStride] {
+		self.dims.as_slice()
+	}
+
+	fn dims_mut(&mut self) -> &mut [SizeAndStride] {
+		self.dims.as_mut_slice()
+	}
+}
 
 //--------------------------------------------------------------------------------------------------
 // I expect that 99.99% of the time, the DimVec will use inline storage.
@@ -140,6 +162,10 @@ impl DimVec {
 
 	pub fn as_slice(&self) -> &[SizeAndStride] {
 		self.vec.as_slice()
+	}
+
+	pub fn as_mut_slice(&mut self) -> &mut [SizeAndStride] {
+		self.vec.as_mut_slice()
 	}
 }
 

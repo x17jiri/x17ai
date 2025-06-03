@@ -18,9 +18,13 @@
 #![feature(cursor_split)]
 #![feature(negative_impls)]
 #![feature(cold_path)]
+#![feature(likely_unlikely)]
+#![feature(auto_traits)]
 #![warn(clippy::cast_lossless)]
 
 pub mod format;
 pub mod nn;
 pub mod tensor;
-pub mod tensor2;
+pub mod util;
+
+pub type Error = Box<dyn std::error::Error + Send + Sync>;

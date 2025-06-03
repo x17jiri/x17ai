@@ -492,7 +492,7 @@ impl CPUDevice {
 		for j in 0..O {
 			for i in 0..I {
 				for h in 0..H {
-					let q = q.slice(j, h, ..);
+					let q = q.slice(x![j, h, ..]);
 					let k = k.slice(i, h, ..);
 					scores.item(h, i).set(math::dot(q, k));
 					// scores[h][i].set(math::dot(q, k))

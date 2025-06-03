@@ -5,15 +5,15 @@ pub mod batch;
 pub mod buffer;
 pub mod device;
 pub mod dim_merger;
-pub mod dim_vec;
 pub mod dtype;
+pub mod generic;
 pub mod io;
 pub mod math;
 
 #[cfg(test)]
 mod tests;
 
-use std::intrinsics::{cold_path, likely};
+use std::hint::likely;
 use std::rc::Rc;
 use std::slice::SliceIndex;
 
@@ -22,89 +22,7 @@ use dim_vec::DimVec;
 
 pub use device::Device;
 pub use dtype::{DType, HasDType};
-
-//--------------------------------------------------------------------------------------------------
-
-#[derive(Clone, Copy, PartialEq, Default)]
-pub struct SizeAndStride {
-	pub size: usize,
-	pub stride: usize,
-}
-
-impl SizeAndStride {
-	pub fn is_contiguous(&self) -> bool {
-		self.stride == 1 || self.size <= 1
-	}
-
-	pub fn is_broadcasted(&self) -> bool {
-		self.stride < 1 && self.size > 1
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
-pub trait DimIndex: Copy {
-	fn resolve(self, len: usize) -> usize;
-	fn resolve_range(self, len: usize) -> usize;
-}
-
-impl DimIndex for usize {
-	fn resolve(self, len: usize) -> usize {
-		if self < len {
-			self
-		} else {
-			cold_path();
-			panic!("dimension index out of bounds: index = {}, len = {}", self, len);
-		}
-	}
-	fn resolve_range(self, len: usize) -> usize {
-		if self <= len {
-			self
-		} else {
-			cold_path();
-			panic!("dimension index out of bounds: index = {}, len = {}", self, len);
-		}
-	}
-}
-
-impl DimIndex for isize {
-	fn resolve(self, len: usize) -> usize {
-		let dim = if self >= 0 { self as usize } else { len.wrapping_add(self as usize) };
-		if dim < len {
-			dim
-		} else {
-			cold_path();
-			panic!("dimension index out of bounds: index = {}, len = {}", self, len);
-		}
-	}
-	fn resolve_range(self, len: usize) -> usize {
-		let dim = if self >= 0 { self as usize } else { len.wrapping_add(self as usize) };
-		if dim <= len {
-			dim
-		} else {
-			cold_path();
-			panic!("dimension index out of bounds: index = {}, len = {}", self, len);
-		}
-	}
-}
-
-impl DimIndex for u32 {
-	fn resolve(self, len: usize) -> usize {
-		(self as usize).resolve(len)
-	}
-	fn resolve_range(self, len: usize) -> usize {
-		(self as usize).resolve_range(len)
-	}
-}
-
-impl DimIndex for i32 {
-	fn resolve(self, len: usize) -> usize {
-		(self as isize).resolve(len)
-	}
-	fn resolve_range(self, len: usize) -> usize {
-		(self as isize).resolve_range(len)
-	}
-}
+use indexing::DimIndex;
 
 //--------------------------------------------------------------------------------------------------
 
