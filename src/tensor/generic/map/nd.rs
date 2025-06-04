@@ -1,11 +1,17 @@
+//------------------------------------------------------------------------------
+//
 // Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
+//
+//------------------------------------------------------------------------------
 
 use std::hint::cold_path;
 
-use crate::Error;
-
-use super::{IndexToOffset, Map, MergeAllDims, MergeDims, ReshapeLastDim, SizeAndStride};
+use super::{
+	CompactND, DynD, IndexToOffset, Map, MergeAllDims, MergeDims, ReshapeLastDim, SizeAndStride,
+	Transpose,
+};
+use crate::{Error, Result};
 
 #[derive(Clone, Copy)]
 pub struct ND<const N: usize> {
@@ -13,17 +19,54 @@ pub struct ND<const N: usize> {
 	pub offset: usize,
 }
 
+impl<const N: usize> From<CompactND<N>> for ND<N>
+where
+	[(); N - 2]:,
+{
+	fn from(compact: CompactND<N>) -> Self {
+		let mut dims = [SizeAndStride::default(); N];
+		let mut stride = 1;
+		for i in (1..N).rev() {
+			let size = compact.shape[i];
+			dims[i] = SizeAndStride { size, stride };
+			stride *= size;
+		}
+		dims[0] = SizeAndStride {
+			size: compact.shape[0],
+			stride: compact.outer_stride,
+		};
+		ND { dims, offset: compact.offset }
+	}
+}
+
+impl<const N: usize> TryFrom<DynD> for ND<N> {
+	type Error = Error;
+
+	fn try_from(dyn_d: DynD) -> Result<Self> {
+		if dyn_d.dims.len() != N {
+			cold_path();
+			return Err(format!(
+				"Cannot convert DynD with {} dimensions to ND with {} dimensions.",
+				dyn_d.dims.len(),
+				N
+			)
+			.into());
+		}
+		let mut dims = [SizeAndStride::default(); N];
+		for (i, dim) in dyn_d.dims.iter().enumerate() {
+			dims[i] = *dim;
+		}
+		Ok(ND { dims, offset: dyn_d.offset })
+	}
+}
+
 impl<const N: usize> Map for ND<N> {
-	fn offset(&self) -> usize {
-		self.offset
+	fn ndim(&self) -> usize {
+		N
 	}
 
-	fn dims(&self) -> &[SizeAndStride] {
-		&self.dims
-	}
-
-	fn dims_mut(&mut self) -> &mut [SizeAndStride] {
-		&mut self.dims
+	fn elems(&self) -> usize {
+		self.dims.iter().map(|dim| dim.size).product()
 	}
 }
 
@@ -34,7 +77,7 @@ where
 {
 	type Output = ND<{ N - M + 1 }>;
 
-	fn merge_dims(self) -> Option<Self::Output> {
+	fn merge_dims(self) -> Result<Self::Output> {
 		let mut dims = [SizeAndStride::default(); N - M + 1];
 		for i in 0..N - M {
 			dims[i] = self.dims[i];
@@ -54,19 +97,21 @@ where
 					merged = SizeAndStride { size: 0, stride: 0 };
 					break;
 				} else {
-					return None;
+					return Err(
+						format!("Cannot merge dimensions because of incompatible strides").into()
+					);
 				}
 			}
 		}
 		dims[N - M] = merged;
-		Some(ND { dims, offset: self.offset })
+		Ok(ND { dims, offset: self.offset })
 	}
 }
 
 impl<const N: usize> MergeAllDims for ND<N> {
 	type Output = ND<1>;
 
-	fn merge_all_dims(self) -> Option<Self::Output> {
+	fn merge_all_dims(self) -> Result<Self::Output> {
 		let mut iter = self.dims.iter().copied().rev();
 		let mut merged = iter.next().unwrap_or(SizeAndStride { size: 1, stride: 1 });
 		for dim in iter {
@@ -82,11 +127,13 @@ impl<const N: usize> MergeAllDims for ND<N> {
 					merged = SizeAndStride { size: 0, stride: 0 };
 					break;
 				} else {
-					return None;
+					return Err(
+						format!("Cannot merge dimensions because of incompatible strides").into()
+					);
 				}
 			}
 		}
-		Some(ND { dims: [merged], offset: self.offset })
+		Ok(ND { dims: [merged], offset: self.offset })
 	}
 }
 
@@ -97,7 +144,7 @@ where
 {
 	type Output = ND<{ N - 1 + M }>;
 
-	fn reshape_last_dim(self, to_shape: [usize; M]) -> Option<Self::Output> {
+	fn reshape_last_dim(self, to_shape: [usize; M]) -> Result<Self::Output> {
 		let mut dims = [SizeAndStride::default(); N - 1 + M];
 		for i in 0..N - 1 {
 			dims[i] = self.dims[i];
@@ -106,7 +153,11 @@ where
 		let elems = to_shape.iter().copied().product::<usize>();
 		if elems != removed_dim.size {
 			cold_path();
-			return None;
+			return Err(format!(
+				"Cannot reshape last dimension of size {} to shape {:?}. Total elements must match.",
+				removed_dim.size, to_shape
+			)
+			.into());
 		}
 		let mut stride = removed_dim.stride;
 		for i in (N - 1..N - 1 + M).rev() {
@@ -114,7 +165,7 @@ where
 			dims[i] = SizeAndStride { size, stride };
 			stride *= size;
 		}
-		Some(ND { dims, offset: self.offset })
+		Ok(ND { dims, offset: self.offset })
 	}
 }
 
@@ -122,10 +173,11 @@ impl<const N: usize> IndexToOffset<N> for ND<N>
 where
 	[(); N - 1]:,
 {
-	fn index_to_offset(&self, index: [usize; N]) -> Result<usize, Error> {
+	fn index_to_offset(&self, index: [usize; N]) -> Result<usize> {
 		let mut offset = self.offset;
 		for (d, (&i, &dim)) in index.iter().zip(self.dims.iter()).enumerate() {
 			if i >= dim.size {
+				cold_path();
 				return Err(format!(
 					"Index {} out of range 0 ..< {} for dimension {}",
 					i, dim.size, d
@@ -135,5 +187,21 @@ where
 			offset += i * dim.stride;
 		}
 		Ok(offset)
+	}
+}
+
+impl<const N: usize> Transpose for ND<N> {
+	type Output = Self;
+
+	fn transposed(mut self, d0: usize, d1: usize) -> Result<Self> {
+		if d0 >= N || d1 >= N {
+			return Err(format!(
+				"Cannot transpose dimension {} with {}. Tensor has {} dimensions.",
+				d0, d1, N
+			)
+			.into());
+		}
+		self.dims.swap(d0, d1);
+		Ok(self)
 	}
 }

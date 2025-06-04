@@ -1,5 +1,9 @@
+//------------------------------------------------------------------------------
+//
 // Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
+//
+//------------------------------------------------------------------------------
 
 use std::num::NonZeroU8;
 
@@ -53,8 +57,8 @@ impl DType {
 		usize::from(self.bits.get())
 	}
 
-	// NOTE: We don't support types with size 0.
-	// However, this function will return 0 if the type uses 1, 2 or 4 bits.
+	/// NOTE: We don't support types with size 0.
+	/// However, this function will return 0 if the type uses 1, 2 or 4 bits.
 	pub fn bytes(&self) -> usize {
 		usize::from(self.bits.get()) / 8
 	}

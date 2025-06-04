@@ -1,74 +1,34 @@
+//------------------------------------------------------------------------------
+//
 // Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
+//
+//------------------------------------------------------------------------------
 
-pub mod batch;
-pub mod buffer;
+use std::rc::Rc;
+
+pub use device::{DType, Device};
+
+// pub mod batch; TODO
 pub mod device;
-pub mod dim_merger;
-pub mod dtype;
+// pub mod dim_merger; TODO
 pub mod generic;
-pub mod io;
-pub mod math;
+// pub mod io; TODO
+// pub mod math; TODO
 
 #[cfg(test)]
 mod tests;
 
-use std::hint::likely;
-use std::rc::Rc;
-use std::slice::SliceIndex;
-
-use buffer::Buffer;
-use dim_vec::DimVec;
-
-pub use device::Device;
-pub use dtype::{DType, HasDType};
-use indexing::DimIndex;
-
 //--------------------------------------------------------------------------------------------------
 
-#[derive(Clone)]
-pub struct Tensor {
-	// TODO - I could save 8 bytes per Tensor if I stored ndim as `u32` instead of `usize`.
-	// However, in order to avoid padding, I'd need to stop using `DimVec` and implement all the
-	// logic directly in `Tensor`.
-	dims: DimVec,
-	offset: usize,
-	dtype: DType,
-	buffer: Rc<Buffer>,
-}
+pub type Tensor = generic::Tensor<generic::map::DynD, Rc<device::DeviceBuffer>>;
 
 impl Tensor {
-	/// This function will initialize strides in a DimVec so a new tensor is contiguous in memory.
-	///
-	/// It returns the total number of elements in the tensor.
-	fn __init_strides(dims: &mut DimVec) -> usize {
-		let mut elems = 1;
-		let mut nonzero_elems: usize = 1;
-		for dim in dims.iter_mut().rev() {
-			// Check that if we ignore zero length dimensions, the number of elements does not
-			// overflow. This is done to make sure our calculations would not overflow even if we
-			// had the same dimensions but in different order.
-			if likely(dim.size != 0) {
-				nonzero_elems = nonzero_elems.checked_mul(dim.size).expect("too many elements");
-			}
-
-			dim.stride = elems;
-			elems *= dim.size;
-		}
-		elems
-	}
-
 	/// Allocate a new tensor on the provided device.
 	pub fn new_empty_on(shape: &[usize], dtype: DType, device: Rc<dyn Device>) -> Tensor {
-		let mut dims =
-			DimVec::new_from_iter(shape.iter().map(|&size| SizeAndStride { size, stride: 0 }));
-		let elems = Self::__init_strides(&mut dims);
-		Tensor {
-			dims,
-			offset: 0,
-			dtype,
-			buffer: device.new_buffer(dtype, elems),
-		}
+		let (map, elems) = generic::map::DynD::new(shape);
+		let buf = device.new_buffer(dtype, elems);
+		Tensor { map, buf }
 	}
 
 	/// Allocate a new tensor on the same device as `self`.
@@ -76,35 +36,11 @@ impl Tensor {
 		Self::new_empty_on(shape, dtype, self.device())
 	}
 
-	pub fn new_replace_tail(&self, tail_len: usize, replace_with: &[usize]) -> Tensor {
-		let n_keep = self.dims.len().checked_sub(tail_len).expect("not enough dimensions");
-		let ndim = n_keep + replace_with.len();
-		let mut dims = DimVec::with_capacity(ndim);
-		unsafe {
-			dims.extend_unchecked(self.dims.get_unchecked(..n_keep).iter().copied());
-			dims.extend_unchecked(
-				replace_with.iter().map(|&size| SizeAndStride { size, stride: 0 }),
-			);
-		}
-		let elems = Self::__init_strides(&mut dims);
-		Tensor {
-			dims,
-			offset: 0,
-			dtype: self.dtype,
-			buffer: self.device().new_buffer(self.dtype, elems),
-		}
-	}
-
 	/// Allocate a new tensor on the same device with the same shape and dtype as `self`.
 	pub fn new_empty_like(&self) -> Tensor {
-		let dims = self.dims.clone();
-		let elems = Self::__init_strides(&mut dims.clone());
-		Tensor {
-			dims,
-			offset: 0,
-			dtype: self.dtype,
-			buffer: self.device().new_buffer(self.dtype, elems),
-		}
+		let (map, elems) = self.map.new_like();
+		let buf = self.device().new_buffer(self.buf.dtype, elems);
+		Tensor { map, buf }
 	}
 
 	/// Typical user of this function would be `nn` layer that can either
@@ -122,18 +58,32 @@ impl Tensor {
 
 	#[inline]
 	pub fn owns_buffer(&self) -> bool {
-		let buffer = &self.buffer;
-		let weak = Rc::weak_count(buffer) + 1;
-		let strong = Rc::strong_count(buffer);
+		let buf = &self.buf;
+		let weak = Rc::weak_count(buf) + 1;
+		let strong = Rc::strong_count(buf);
 		(weak | strong) <= 1
+	}
+
+	pub fn new_replace_tail(&self, tail_len: usize, replace_with: &[usize]) -> Tensor {
+		let (map, elems) = self.map.new_replace_tail(tail_len, replace_with);
+		let buf = self.device().new_buffer(self.buf.dtype, elems);
+		Tensor { map, buf }
 	}
 
 	/// Returns the device on which the tensor is allocated.
 	pub fn device(&self) -> Rc<dyn Device> {
-		let device = &*self.buffer.device;
+		let device = &*self.buf.device;
 		device.clone()
 	}
 
+	/// Returns the data type of the tensor elements.
+	pub fn dtype(&self) -> DType {
+		self.buf.dtype
+	}
+}
+
+#[cfg(false)]
+impl Tensor {
 	pub fn dim<D: DimIndex>(&self, dim: D) -> SizeAndStride {
 		let ndim = self.ndim();
 		let dim = dim.resolve(ndim);
@@ -142,92 +92,6 @@ impl Tensor {
 
 	pub fn dim_slice<I: SliceIndex<[SizeAndStride]>>(&self, index: I) -> &I::Output {
 		self.dims.get(index).expect("dimension index out of range")
-	}
-
-	/// Returns the number of dimensions in the tensor.
-	///
-	/// This is also known as the rank of the tensor.
-	pub fn ndim(&self) -> usize {
-		self.dims.len()
-	}
-
-	/// Returns the total number of elements in the tensor.
-	pub fn elems(&self) -> usize {
-		self.dims.iter().map(|dim| dim.size).product()
-	}
-
-	/// Returns the data type of the tensor elements.
-	pub fn dtype(&self) -> DType {
-		self.dtype
-	}
-
-	pub fn reshape_last_dim<const TO: usize>(mut self, to_shape: [usize; TO]) -> Tensor {
-		let dims = &mut self.dims;
-
-		let removed_dim = dims.pop().expect("not enough dimensions");
-
-		let elems = to_shape.iter().copied().product::<usize>();
-		assert!(elems == removed_dim.size, "incompatible reshape");
-
-		let mut stride = removed_dim.stride;
-		dims.extend_rev(to_shape.iter().rev().map(|&size| {
-			let dim = SizeAndStride { size, stride };
-			stride *= size;
-			dim
-		}));
-
-		self
-	}
-
-	pub fn merge_dims<const N: usize>(mut self) -> Tensor {
-		let dims = &mut self.dims;
-		let ndim = dims.len();
-		assert!(N <= ndim, "not enough dimensions");
-
-		if N == 0 {
-			dims.push(SizeAndStride { size: 1, stride: 0 });
-		} else {
-			let mut merged = *unsafe { dims.get_unchecked(ndim - 1) };
-			for i in (ndim - N..ndim - 1).rev() {
-				let dim = *unsafe { dims.get_unchecked(i) };
-				assert!(
-					dim.size <= 1 || dim.stride == merged.size * merged.stride,
-					"cannot merge because of discontinuity"
-				);
-				merged.size *= dim.size;
-			}
-			dims.pop_n(N - 1);
-			*unsafe { dims.get_unchecked_mut(ndim - N) } = merged;
-		}
-
-		self
-	}
-
-	pub fn merge_all_dims(mut self) -> Tensor {
-		let dims = &mut self.dims;
-		let ndim = dims.len();
-
-		match ndim {
-			0 => {
-				dims.push(SizeAndStride { size: 1, stride: 0 });
-			},
-			1 => {},
-			_ => {
-				let mut merged = *unsafe { dims.get_unchecked(ndim - 1) };
-				for i in (0..ndim - 1).rev() {
-					let dim = *unsafe { dims.get_unchecked(i) };
-					assert!(
-						dim.size <= 1 || dim.stride == merged.size * merged.stride,
-						"cannot merge because of discontinuity"
-					);
-					merged.size *= dim.size;
-				}
-				dims.pop_n(ndim - 1);
-				*unsafe { dims.get_unchecked_mut(0) } = merged;
-			},
-		}
-
-		self
 	}
 
 	pub fn reshape<const FROM: usize, const TO: usize>(self, to_shape: [usize; TO]) -> Tensor {

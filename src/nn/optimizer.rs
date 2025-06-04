@@ -1,5 +1,9 @@
+//------------------------------------------------------------------------------
+//
 // Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
+//
+//------------------------------------------------------------------------------
 
 // Optimizer. Inspired by Adam-mini: https://arxiv.org/abs/2406.16793
 

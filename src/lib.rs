@@ -1,5 +1,9 @@
+//------------------------------------------------------------------------------
+//
 // Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
+//
+//------------------------------------------------------------------------------
 
 #![allow(non_snake_case)]
 #![allow(incomplete_features)]
@@ -20,11 +24,14 @@
 #![feature(cold_path)]
 #![feature(likely_unlikely)]
 #![feature(auto_traits)]
+#![feature(coerce_unsized)]
+#![feature(unsize)]
 #![warn(clippy::cast_lossless)]
 
 pub mod format;
-pub mod nn;
+//pub mod nn; TODO
 pub mod tensor;
 pub mod util;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
+pub type Result<T> = std::result::Result<T, Error>;

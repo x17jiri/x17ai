@@ -1,13 +1,10 @@
-pub trait Buffer: Clone {
-	type Ref: Buffer;
+//------------------------------------------------------------------------------
+//
+// Copyright 2025 Jiri Bobek. All rights reserved.
+// License: GPL 3.0 or later. See LICENSE.txt for details.
+//
+//------------------------------------------------------------------------------
 
-	fn as_ref(&self) -> Self::Ref;
-}
+pub trait Buffer: Clone {}
 
-impl<T> Buffer for &[T] {
-	type Ref = Self;
-
-	fn as_ref(&self) -> Self::Ref {
-		*self
-	}
-}
+impl<T> Buffer for &[T] {}

@@ -1,21 +1,26 @@
+//------------------------------------------------------------------------------
+//
 // Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
+//
+//------------------------------------------------------------------------------
 
-use core::f64;
 use std::cell::{Cell, RefCell};
 use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 use std::rc::Rc;
-
-mod rng;
-
-use rng::Rng;
 
 use crate::tensor::buffer::{Buffer, MatrixSet, SliceSet};
 use crate::tensor::device::AttentionParams;
 use crate::tensor::dtype::{DType, HasDType};
 
 use super::Device;
+use super::buffer::DeviceBuffer;
+use super::dtype::DType;
+
+pub mod rng;
+
+use rng::Rng;
 
 mod math {
 	use std::cell::Cell;
@@ -214,10 +219,6 @@ impl<'a, T> CPUSliceSet<'a, T> {
 		unsafe { self.buffer.get_unchecked(begin..end) }
 	}
 }
-
-//--------------------------------------------------------------------------------------------------
-
-type CPUBufferElement = u64;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -492,7 +493,7 @@ impl CPUDevice {
 		for j in 0..O {
 			for i in 0..I {
 				for h in 0..H {
-					let q = q.slice(x![j, h, ..]);
+					let q = q.slice(j, h, ..);
 					let k = k.slice(i, h, ..);
 					scores.item(h, i).set(math::dot(q, k));
 					// scores[h][i].set(math::dot(q, k))
@@ -728,25 +729,31 @@ impl Device for CPUDevice {
 	}
 
 	fn new_buffer(self: Rc<Self>, dtype: DType, elems: usize) -> Rc<Buffer> {
-		let step_size = std::mem::size_of::<CPUBufferElement>();
-		let size_bytes = dtype.array_bytes(elems).unwrap().next_multiple_of(step_size);
-		let layout = std::alloc::Layout::from_size_align(size_bytes, step_size).unwrap();
+		let align = dtype.bytes().min(1);
+		let size = dtype.array_bytes(elems).expect("Invalid size for CPUBuffer");
+		let layout = std::alloc::Layout::from_size_align(size, align)
+			.expect("Couldn't create layout for CPUBuffer");
 		let memory = unsafe { std::alloc::alloc(layout) };
 		let memory = NonNull::new(memory).expect("Failed to allocate memory for CPUBuffer");
-		Rc::new(Buffer {
+		Rc::new(DeviceBuffer {
+			executor: TODO,
+			dtype,
+			elems,
+			device_data: memory.into(),
 			device: ManuallyDrop::new(self.clone()),
-			size_bytes,
-			device_buffer: memory,
 		})
 	}
 
-	fn drop_buffer(self: Rc<Self>, device_buffer: NonNull<u8>, size_bytes: usize) {
-		let step_size = std::mem::size_of::<CPUBufferElement>();
+	fn drop_buffer(self: Rc<Self>, dtype: DType, elems: usize, device_data: *mut u8) {
+		let align = dtype.bytes().min(1);
+		let size = dtype.array_bytes(elems).unwrap();
 		debug_assert!(size_bytes % step_size == 0);
-		let layout = std::alloc::Layout::from_size_align(size_bytes, step_size).unwrap();
+		let layout = std::alloc::Layout::from_size_align(size, align).unwrap();
 		unsafe { std::alloc::dealloc(device_buffer.as_ptr(), layout) }
 	}
+}
 
+impl Executor for CPUDevice {
 	fn read_bin(&self, dst: &SliceSet, src: &mut dyn std::io::Read) -> std::io::Result<()> {
 		let mut result = Ok(());
 		match dst.dtype {

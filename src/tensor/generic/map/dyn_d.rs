@@ -1,31 +1,199 @@
+//------------------------------------------------------------------------------
+//
 // Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
+//
+//------------------------------------------------------------------------------
 
 use smallvec::SmallVec;
+use std::hint::likely;
 use std::intrinsics::cold_path;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 
-use super::{IMap, SizeAndStride};
+use crate::Result;
+use crate::tensor::generic::map::{MergeAllDims, MergeDims, ReshapeLastDim};
+
+use super::{Map, SizeAndStride, Transpose};
 
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct DynD {
-	dims: DimVec,
-	offset: usize,
+	pub dims: DimVec,
+	pub offset: usize,
 }
 
-impl IMap for DynD {
-	fn offset(&self) -> usize {
-		self.offset
+impl DynD {
+	/// This function will initialize strides in a DimVec so a new tensor is contiguous in memory.
+	///
+	/// It returns the total number of elements in the tensor.
+	fn __init_strides(dims: &mut DimVec) -> usize {
+		let mut elems = 1;
+		let mut nonzero_elems: usize = 1;
+		for dim in dims.iter_mut().rev() {
+			// Check that if we ignore zero length dimensions, the number of elements does not
+			// overflow. This is done to make sure our calculations would not overflow even if we
+			// had the same dimensions but in different order.
+			if likely(dim.size != 0) {
+				nonzero_elems = nonzero_elems.checked_mul(dim.size).expect("too many elements");
+			}
+
+			dim.stride = elems;
+			elems *= dim.size;
+		}
+		elems
 	}
 
-	fn dims(&self) -> &[SizeAndStride] {
-		self.dims.as_slice()
+	pub fn new(shape: &[usize]) -> (DynD, usize) {
+		let mut dims =
+			DimVec::new_from_iter(shape.iter().map(|&size| SizeAndStride { size, stride: 0 }));
+		let elems = Self::__init_strides(&mut dims);
+		let map = DynD { dims, offset: 0 };
+		(map, elems)
 	}
 
-	fn dims_mut(&mut self) -> &mut [SizeAndStride] {
-		self.dims.as_mut_slice()
+	pub fn new_like(&self) -> (DynD, usize) {
+		let mut dims = self.dims.clone();
+		let elems = Self::__init_strides(&mut dims);
+		let map = DynD { dims, offset: 0 };
+		(map, elems)
+	}
+
+	pub fn new_replace_tail(&self, tail_len: usize, replace_with: &[usize]) -> (DynD, usize) {
+		let n_keep = self.dims.len().checked_sub(tail_len).expect("not enough dimensions");
+		let ndim = n_keep + replace_with.len();
+		let mut dims = DimVec::with_capacity(ndim);
+		unsafe {
+			dims.extend_unchecked(self.dims.get_unchecked(..n_keep).iter().copied());
+			dims.extend_unchecked(
+				replace_with.iter().map(|&size| SizeAndStride { size, stride: 0 }),
+			);
+		}
+		let elems = Self::__init_strides(&mut dims);
+		let map = DynD { dims, offset: 0 };
+		(map, elems)
+	}
+}
+
+impl Map for DynD {
+	fn ndim(&self) -> usize {
+		self.dims.len()
+	}
+
+	fn elems(&self) -> usize {
+		self.dims.iter().map(|dim| dim.size).product()
+	}
+}
+
+impl<const M: usize> MergeDims<M> for DynD {
+	type Output = Self;
+
+	fn merge_dims(mut self) -> Result<Self::Output> {
+		let dims = &mut self.dims;
+		let ndim = dims.len();
+		if M > ndim {
+			cold_path();
+			return Err(format!(
+				"Cannot merge {} dimensions in a tensor with {} dimensions.",
+				M, ndim
+			)
+			.into());
+		}
+
+		if M == 0 {
+			dims.push(SizeAndStride { size: 1, stride: 0 });
+		} else {
+			let mut merged = *unsafe { dims.get_unchecked(ndim - 1) };
+			for i in (ndim - M..ndim - 1).rev() {
+				let dim = *unsafe { dims.get_unchecked(i) };
+				if dim.size > 1 && dim.stride != merged.size * merged.stride {
+					cold_path();
+					return Err("cannot merge because of discontinuity".into());
+				}
+				merged.size *= dim.size;
+			}
+			dims.pop_n(M - 1);
+			*unsafe { dims.get_unchecked_mut(ndim - M) } = merged;
+		}
+
+		Ok(self)
+	}
+}
+
+impl MergeAllDims for DynD {
+	type Output = Self;
+
+	fn merge_all_dims(mut self) -> Result<Self::Output> {
+		let dims = &mut self.dims;
+		let ndim = dims.len();
+
+		match ndim {
+			0 => {
+				dims.push(SizeAndStride { size: 1, stride: 0 });
+			},
+			1 => {},
+			_ => {
+				let mut merged = *unsafe { dims.get_unchecked(ndim - 1) };
+				for i in (0..ndim - 1).rev() {
+					let dim = *unsafe { dims.get_unchecked(i) };
+					if dim.size > 1 && dim.stride != merged.size * merged.stride {
+						cold_path();
+						return Err("cannot merge because of discontinuity".into());
+					}
+					merged.size *= dim.size;
+				}
+				dims.pop_n(ndim - 1);
+				*unsafe { dims.get_unchecked_mut(0) } = merged;
+			},
+		}
+
+		Ok(self)
+	}
+}
+
+impl<const M: usize> ReshapeLastDim<M> for DynD {
+	type Output = Self;
+
+	fn reshape_last_dim(mut self, to_shape: [usize; M]) -> Result<Self::Output> {
+		let dims = &mut self.dims;
+
+		let Some(removed_dim) = dims.pop() else {
+			cold_path();
+			return Err("Not enough dimensions".into());
+		};
+
+		let elems = to_shape.iter().copied().product::<usize>();
+		if elems != removed_dim.size {
+			cold_path();
+			return Err("incompatible reshape".into());
+		}
+
+		let mut stride = removed_dim.stride;
+		dims.extend_rev(to_shape.iter().rev().map(|&size| {
+			let dim = SizeAndStride { size, stride };
+			stride *= size;
+			dim
+		}));
+
+		Ok(self)
+	}
+}
+
+impl Transpose for DynD {
+	type Output = Self;
+
+	fn transposed(mut self, d0: usize, d1: usize) -> Result<Self> {
+		if d0 >= self.dims.len() || d1 >= self.dims.len() {
+			return Err(format!(
+				"Cannot transpose dimension {} with {}. Tensor has {} dimensions.",
+				d0,
+				d1,
+				self.dims.len()
+			)
+			.into());
+		}
+		self.dims.swap(d0, d1);
+		Ok(self)
 	}
 }
 

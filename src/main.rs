@@ -1,18 +1,21 @@
+//------------------------------------------------------------------------------
+//
 // Copyright 2025 Jiri Bobek. All rights reserved.
 // License: GPL 3.0 or later. See LICENSE.txt for details.
+//
+//------------------------------------------------------------------------------
 
 #![allow(non_snake_case)]
 
-use x17ai::debug_2d;
-use x17ai::nn::layers::{Layer, Linear, LossFunction, SoftmaxCrossEntropy};
-use x17ai::nn::{EvalContext, ModelContext};
-use x17ai::tensor::device::cpu::CPUDevice;
-use x17ai::tensor::math::Savable;
-use x17ai::tensor::{self, HasDType, SizeAndStride, Tensor};
-use x17ai::tensor2::{ND, Slice1D};
+//use x17ai::nn::layers::{Layer, Linear, LossFunction, SoftmaxCrossEntropy};
+//use x17ai::nn::{EvalContext, ModelContext};
+//use x17ai::tensor::device::cpu::CPUDevice;
+//use x17ai::tensor::math::Savable;
+//use x17ai::{debug_2d, tensor};
 
 use std::cell::Cell;
 use std::io::Write;
+use std::rc::Rc;
 
 /*
 struct Attention {
@@ -142,7 +145,16 @@ impl Module for Transformer {
 	}
 }
 */
+
+fn main() {}
+
+#[cfg(false)]
 fn main() {
+	let a = &[1, 2, 3];
+	let b = a.as_ref();
+	let c = Rc::new(1);
+	let d = c.as_ref();
+
 	stderrlog::new().verbosity(10).init().unwrap();
 
 	let data = &[Cell::new(1), Cell::new(2), Cell::new(3)];
