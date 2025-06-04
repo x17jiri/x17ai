@@ -46,68 +46,69 @@ pub struct AttentionParams {
 pub trait Executor {
 	// If any of the slices represented by a SliceSet are not in bounds,
 	// these functions will panic.
-
-	// These functions are designed to load/save data from files.
-	// And in files, we always use little-endian format.
-	// So it expects bytes to be in little-endian format.
-	fn read_bin(&self, dst: &SliceBatch, src: &mut dyn std::io::Read) -> std::io::Result<()>;
-	fn write_bin(&self, src: &SliceBatch, dst: &mut dyn std::io::Write) -> std::io::Result<()>;
-
+	/*
+		// These functions are designed to load/save data from files.
+		// And in files, we always use little-endian format.
+		// So it expects bytes to be in little-endian format.
+		fn read_bin(&self, dst: &SliceBatch, src: &mut dyn std::io::Read) -> std::io::Result<()>;
+		fn write_bin(&self, src: &SliceBatch, dst: &mut dyn std::io::Write) -> std::io::Result<()>;
+	*/
 	fn zeros(&self, dst: &SliceBatch);
+	/*
+		fn randn_clamped(&self, dst: &SliceBatch);
 
-	fn randn_clamped(&self, dst: &SliceBatch);
+		fn copy(&self, dst: &SliceBatch, src: &SliceBatch);
 
-	fn copy(&self, dst: &SliceBatch, src: &SliceBatch);
+		fn acc(&self, dst: &SliceBatch, dst_weight: f64, b: &SliceBatch, b_weight: f64);
 
-	fn acc(&self, dst: &SliceBatch, dst_weight: f64, b: &SliceBatch, b_weight: f64);
+		fn mul(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch);
 
-	fn mul(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch);
+		fn mul_acc(
+			&self, dst: &SliceBatch, dst_weight: f64, a: &SliceBatch, b: &SliceBatch, ab_weight: f64,
+		);
 
-	fn mul_acc(
-		&self, dst: &SliceBatch, dst_weight: f64, a: &SliceBatch, b: &SliceBatch, ab_weight: f64,
-	);
+		fn sub(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch);
+		fn add(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch);
 
-	fn sub(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch);
-	fn add(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch);
+		fn swiglu(&self, dst: &SliceBatch, lin: &SliceBatch, gate: &SliceBatch);
+		fn swiglu_backward(
+			&self, d_lin: &SliceBatch, d_gate: &SliceBatch, lin: &SliceBatch, gate: &SliceBatch,
+			d_out: &SliceBatch,
+		);
 
-	fn swiglu(&self, dst: &SliceBatch, lin: &SliceBatch, gate: &SliceBatch);
-	fn swiglu_backward(
-		&self, d_lin: &SliceBatch, d_gate: &SliceBatch, lin: &SliceBatch, gate: &SliceBatch,
-		d_out: &SliceBatch,
-	);
+		fn dot(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64);
 
-	fn dot(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64);
+		fn dot_acc(
+			&self, dst: &SliceBatch, dst_weight: f64, a: &SliceBatch, b: &SliceBatch, ab_weight: f64,
+		);
 
-	fn dot_acc(
-		&self, dst: &SliceBatch, dst_weight: f64, a: &SliceBatch, b: &SliceBatch, ab_weight: f64,
-	);
+		fn sum_all(&self, a: &SliceBatch) -> f64;
+		fn approx_eq(&self, a: &SliceBatch, b: &SliceBatch, eps: f64) -> bool;
 
-	fn sum_all(&self, a: &SliceBatch) -> f64;
-	fn approx_eq(&self, a: &SliceBatch, b: &SliceBatch, eps: f64) -> bool;
+		fn rsqrt(&self, dst: &SliceBatch, a: &SliceBatch, eps: f64);
 
-	fn rsqrt(&self, dst: &SliceBatch, a: &SliceBatch, eps: f64);
+		/// Calculates:
+		///
+		///    dst = max(log(a), -1000, DType.MAX_NEGATIVE);
+		///
+		/// So the output is defined even for a <= 0.
+		fn log_clamped(&self, dst: &SliceBatch, a: &SliceBatch);
 
-	/// Calculates:
-	///
-	///    dst = max(log(a), -1000, DType.MAX_NEGATIVE);
-	///
-	/// So the output is defined even for a <= 0.
-	fn log_clamped(&self, dst: &SliceBatch, a: &SliceBatch);
+		fn softmax(&self, dst: &SliceBatch, a: &SliceBatch);
 
-	fn softmax(&self, dst: &SliceBatch, a: &SliceBatch);
+		fn rms_norm(
+			&self, dst: &SliceBatch, a: &SliceBatch, eps: f64, scale_storage: Option<&SliceBatch>,
+		);
 
-	fn rms_norm(
-		&self, dst: &SliceBatch, a: &SliceBatch, eps: f64, scale_storage: Option<&SliceBatch>,
-	);
+		fn gemm(
+			&self, dst: &MatrixBatch, dst_weight: f64, a: &MatrixBatch, b: &MatrixBatch, ab_weight: f64,
+		);
 
-	fn gemm(
-		&self, dst: &MatrixBatch, dst_weight: f64, a: &MatrixBatch, b: &MatrixBatch, ab_weight: f64,
-	);
+		fn attention(
+			&self, dst: &SliceBatch, q: &SliceBatch, k: &SliceBatch, v: &SliceBatch,
+			params: &AttentionParams,
+		);
 
-	fn attention(
-		&self, dst: &SliceBatch, q: &SliceBatch, k: &SliceBatch, v: &SliceBatch,
-		params: &AttentionParams,
-	);
-
-	fn format(&self, f: &mut std::fmt::Formatter, src: &StridedSlice) -> std::fmt::Result;
+		fn format(&self, f: &mut std::fmt::Formatter, src: &StridedSlice) -> std::fmt::Result;
+	*/
 }

@@ -8,12 +8,12 @@
 use std::rc::Rc;
 
 pub mod buffer;
-// pub mod cpu; TODO
+pub mod cpu;
 pub mod dtype;
 pub mod executor;
 
 pub use buffer::DeviceBuffer;
-pub use dtype::DType;
+pub use dtype::{DType, HasDType};
 
 pub trait Device {
 	fn name(&self) -> &str;

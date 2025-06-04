@@ -5,9 +5,12 @@
 //
 //------------------------------------------------------------------------------
 
+use std::hint::cold_path;
 use std::rc::Rc;
 
-pub use device::{DType, Device};
+pub use device::{DType, Device, HasDType};
+
+use crate::Result;
 
 // pub mod batch; TODO
 pub mod device;
@@ -18,6 +21,24 @@ pub mod generic;
 
 #[cfg(test)]
 mod tests;
+
+//--------------------------------------------------------------------------------------------------
+
+impl<M: generic::map::Map> generic::Tensor<M, &device::DeviceBuffer> {
+	pub fn try_view<T: HasDType>(&self) -> Result<generic::Tensor<M, &[T]>> {
+		if self.buf.dtype != T::dtype {
+			cold_path();
+			return Err(format!(
+				"cannot convert tensor with dtype {:?} to dtype {:?}",
+				self.buf.dtype,
+				T::dtype
+			)
+			.into());
+		}
+		// TODO
+		1
+	}
+}
 
 //--------------------------------------------------------------------------------------------------
 
