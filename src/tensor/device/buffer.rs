@@ -22,6 +22,7 @@ pub struct DeviceBuffer {
 	pub dtype: DType,
 	pub elems: usize,
 	pub device_data: *mut u8,
+	pub device_is_cpu: bool,
 	pub device: ManuallyDrop<Rc<dyn Device>>,
 }
 

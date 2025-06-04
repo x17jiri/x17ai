@@ -6,10 +6,12 @@
 //------------------------------------------------------------------------------
 
 use std::cell::{Cell, RefCell};
+use std::hint::cold_path;
 use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
+use crate::Result;
 use crate::tensor::HasDType;
 
 pub mod float_executor;
@@ -244,64 +246,27 @@ impl CPUDevice {
 			f32_executor: FloatExecutor::new(),
 		})
 	}
+
+	pub fn try_view<T: HasDType>(buf: &DeviceBuffer) -> Result<&[Cell<T>]> {
+		if buf.dtype != T::dtype {
+			cold_path();
+			return Err(format!(
+				"cannot convert tensor with dtype {:?} to dtype {:?}",
+				buf.dtype,
+				T::dtype
+			)
+			.into());
+		}
+		debug_assert!(T::dtype.bytes() == std::mem::size_of::<T>());
+		if !buf.device_is_cpu {
+			cold_path();
+			return Err("buffer is not on CPU device".into());
+		}
+
+		let elems = buf.elems;
+		Ok(unsafe { std::slice::from_raw_parts(buf.device_data as *const Cell<T>, elems) })
+	}
 	/*
-		fn cast_buffer<T: HasDType>(&self, buffer: &Buffer) -> &[Cell<T>] {
-			assert!(buffer.is_on_device(self));
-			debug_assert!(T::dtype.bytes() == std::mem::size_of::<T>());
-			unsafe {
-				let ptr = buffer.device_buffer.as_ptr() as *const Cell<T>;
-				let bytes = buffer.size_bytes;
-				let elems = bytes / std::mem::size_of::<T>();
-				std::slice::from_raw_parts(ptr, elems)
-			}
-		}
-
-		fn cast_slice_set<'a, T: HasDType>(&'a self, slice_set: &SliceSet<'a>) -> CPUSliceSet<'a, T> {
-			let dtype = slice_set.dtype;
-			assert_eq!(dtype, T::dtype);
-
-			let buffer = self.cast_buffer::<T>(slice_set.buffer);
-			CPUSliceSet {
-				buffer: &buffer[slice_set.span()],
-				len: slice_set.len,
-				count: slice_set.count,
-				stride: slice_set.stride,
-			}
-		}
-
-		fn array_wise<'a, T: Copy + HasDType, const N: usize>(
-			&self, slices: [&SliceSet<'a>; N], mut f: impl FnMut([&[Cell<T>]; N]),
-		) {
-			let slices = slices.map(|s| self.cast_slice_set::<T>(s));
-
-			let count = slices.get(0).map_or(0, |s| s.count);
-			assert!(slices.iter().all(|s| s.count == count));
-
-			for i in 0..count {
-				// SAFETY: When we create a `CPUSliceSet` in `CPUDevice::cast_slices()`,
-				// we assert that the slice is in bounds.
-				let arrays = slices.map(|s| unsafe { s.get_unchecked(i) });
-				f(arrays);
-			}
-		}
-
-		fn elem_wise<'a, T: Copy + HasDType, const N: usize>(
-			&self, slices: [&SliceSet<'a>; N], mut f: impl FnMut([&Cell<T>; N]),
-		) {
-			let len = slices.get(0).map_or(0, |s| s.len);
-			assert!(slices.iter().all(|i| i.len == len));
-
-			self.array_wise::<T, N>(slices, |arrays| {
-				for i in 0..len {
-					f(arrays.map(|array| {
-						debug_assert!(i < array.len());
-						let element = unsafe { array.get_unchecked(i) };
-						element
-					}));
-				}
-			});
-		}
-
 		fn elem_wise_bin<'a, T: Copy + HasDType, const C: Commutativity>(
 			&self, dst: &SliceSet<'a>, a_inp: &SliceSet<'a>, b_inp: &SliceSet<'a>,
 			f: impl FnMut(&Cell<T>, T, T) -> T,
