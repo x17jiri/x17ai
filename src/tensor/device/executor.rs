@@ -5,6 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
+use crate::Result;
 use crate::tensor::generic::map::{CompactND, ND};
 use crate::tensor::generic::{self};
 
@@ -34,9 +35,9 @@ pub struct AttentionParams {
 	///
 	/// For example:
 	/// - we have 20 heads, so there is 20 `Q` inputs
-	/// - each `K` is shared by 4 heads (k_shift = 2), so there are 5 `K` inputs
-	/// - each `V` is shared by 2 heads (v_shift = 1), so there are 10 `V` inputs
-	/// - for head H, we use Q[H], K[H >> k_shift], V[H >> v_shift]
+	/// - each `K` is shared by 4 heads `(k_shift = 2)`, so there are 5 `K` inputs
+	/// - each `V` is shared by 2 heads `(v_shift = 1)`, so there are 10 `V` inputs
+	/// - for head `H`, we use `Q[H]`, `K[H >> k_shift]`, `V[H >> v_shift]`
 	pub k_shift: usize,
 
 	/// See `k_shift` for explanation.
@@ -44,8 +45,6 @@ pub struct AttentionParams {
 }
 
 pub trait Executor {
-	// If any of the slices represented by a SliceSet are not in bounds,
-	// these functions will panic.
 	/*
 		// These functions are designed to load/save data from files.
 		// And in files, we always use little-endian format.
@@ -53,16 +52,58 @@ pub trait Executor {
 		fn read_bin(&self, dst: &SliceBatch, src: &mut dyn std::io::Read) -> std::io::Result<()>;
 		fn write_bin(&self, src: &SliceBatch, dst: &mut dyn std::io::Write) -> std::io::Result<()>;
 	*/
-	fn zeros(&self, dst: &SliceBatch);
+
+	/// Fills the `dst` tensor with zeros.
+	///
+	/// # Errors
+	/// - If `dst` doesn't have dtype corresponding to this Executor.
+	/// - If `dst` isn't on device corresponding to this Executor.
+	/// - If there is any problem executing the operation on the device.
+	fn zeros(&self, dst: &SliceBatch) -> Result<()>;
+
+	/// Fills the `dst` tensor with random values from a normal distribution
+	/// with mean 0 and variance 1. The values are clamped to the range (-10.0, +10.0)
+	///
+	/// # Errors
+	/// - If `dst` doesn't have dtype corresponding to this Executor.
+	/// - If `dst` isn't on device corresponding to this Executor.
+	/// - If there is any problem executing the operation on the device.
+	fn randn_clamped(&self, dst: &SliceBatch) -> Result<()>;
+
+	/// Copies the data from `src` to `dst`.
+	///
+	/// # Errors
+	/// - If `dst` and `src` don't have the same shape.
+	/// - If `dst` and `src` don't have dtype corresponding to this Executor.
+	/// - If `dst` and `src` aren't on device corresponding to this Executor.
+	/// - If there is any problem executing the operation on the device.
+	fn copy(&self, dst: &SliceBatch, src: &SliceBatch) -> Result<()>;
+
+	/// Element-wise accumulation:
+	///
+	///     dst[j, i] = dst[j, i] * dst_weight + upd[j, i] * upd_weight
+	///
+	/// # Errors
+	/// - If `dst` and `upd` don't have the same shape.
+	/// - If `dst` and `upd` don't have dtype corresponding to this Executor.
+	/// - If `dst` and `upd` aren't on device corresponding to this Executor.
+	/// - If there is any problem executing the operation on the device.
+	fn acc(
+		&self, dst: &SliceBatch, dst_weight: f64, upd: &SliceBatch, upd_weight: f64,
+	) -> Result<()>;
+
+	/// Element-wise multiplication:
+	///
+	///     dst[j, i] = a[j, i] * b[j, i]
+	///
+	/// # Errors
+	/// - If `dst`, `a`, and `b` don't have the same shape.
+	/// - If `dst`, `a`, and `b` don't have dtype corresponding to this Executor.
+	/// - If `dst`, `a`, and `b` aren't on device corresponding to this Executor.
+	/// - If there is any problem executing the operation on the device.
+	fn mul(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()>;
+
 	/*
-		fn randn_clamped(&self, dst: &SliceBatch);
-
-		fn copy(&self, dst: &SliceBatch, src: &SliceBatch);
-
-		fn acc(&self, dst: &SliceBatch, dst_weight: f64, b: &SliceBatch, b_weight: f64);
-
-		fn mul(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch);
-
 		fn mul_acc(
 			&self, dst: &SliceBatch, dst_weight: f64, a: &SliceBatch, b: &SliceBatch, ab_weight: f64,
 		);

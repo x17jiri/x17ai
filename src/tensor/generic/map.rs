@@ -15,7 +15,7 @@ pub use nd::ND;
 
 use crate::Result;
 
-use super::SliceRange;
+use super::Selection;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -40,6 +40,10 @@ impl SizeAndStride {
 pub trait Map: Clone {
 	fn ndim(&self) -> usize;
 	fn elems(&self) -> usize;
+	fn span(&self) -> std::ops::Range<usize>;
+	fn is_contiguous(&self) -> bool {
+		self.span().len() == self.elems()
+	}
 }
 
 pub trait MergeDims<const M: usize> {
@@ -64,10 +68,11 @@ pub trait IndexToOffset<const K: usize> {
 	fn index_to_offset(&self, index: [usize; K]) -> Result<usize>;
 }
 
-pub trait Slice<const K: usize> {
+pub trait Select<const K: usize> {
 	type Output: Map;
 
-	fn slice(self, ranges: [SliceRange; K]) -> Self::Output;
+	fn select(self, selections: [Selection; K]) -> Result<Self::Output>;
+	unsafe fn select_unchecked(self, selections: [Selection; K]) -> Self::Output;
 }
 
 pub trait Transpose {

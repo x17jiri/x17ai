@@ -11,48 +11,18 @@ use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-use crate::Result;
 use crate::tensor::HasDType;
+use crate::{Error, Result};
 
 pub mod float_executor;
 pub mod rng;
 
 use rng::Rng;
 
+#[cfg(false)]
 mod math {
 	use std::cell::Cell;
 	use std::ops::{Range, RangeFull};
-
-	pub trait FromToF64 {
-		const MIN: f64; // largest negative value of type
-
-		fn from_f64(val: f64) -> Self;
-		fn to_f64(&self) -> f64;
-	}
-
-	impl FromToF64 for f32 {
-		const MIN: f64 = f32::MIN as f64;
-
-		fn from_f64(val: f64) -> Self {
-			val as f32
-		}
-
-		fn to_f64(&self) -> f64 {
-			*self as f64
-		}
-	}
-
-	impl FromToF64 for f64 {
-		const MIN: f64 = f64::MIN;
-
-		fn from_f64(val: f64) -> Self {
-			val
-		}
-
-		fn to_f64(&self) -> f64 {
-			*self
-		}
-	}
 
 	pub fn dot<T: Copy + FromToF64>(a: &[Cell<T>], b: &[Cell<T>]) -> f64 {
 		let res = a
@@ -195,8 +165,6 @@ mod math {
 	}
 }
 
-use math::{FromToF64, View2D, View3D};
-
 use crate::tensor::device::DeviceBuffer;
 use crate::tensor::device::cpu::float_executor::FloatExecutor;
 use crate::tensor::{DType, Device};
@@ -234,33 +202,40 @@ const NonCommutative: Commutativity = Commutativity::NonCommutative;
 
 pub struct CPUDevice {
 	name: String,
-	rng: RefCell<Rng>,
+	rng: Rc<RefCell<Rng>>,
 	f32_executor: FloatExecutor<f32>,
 }
 
 impl CPUDevice {
 	pub fn new(name: String) -> Rc<Self> {
+		let rng = Rc::new(RefCell::new(Rng::new_default()));
+		let f32_rng = rng.clone();
 		Rc::new(Self {
 			name,
-			rng: RefCell::new(Rng::new_default()),
-			f32_executor: FloatExecutor::new(),
+			rng,
+			f32_executor: FloatExecutor::new(f32_rng),
 		})
 	}
 
+	/// Returns a slice view of the buffer on CPU device.
+	///
+	/// # Errors
+	/// If the buffer's dtype does not match `T` or if the buffer is not on CPU device.
 	pub fn try_view<T: HasDType>(buf: &DeviceBuffer) -> Result<&[Cell<T>]> {
 		if buf.dtype != T::dtype {
-			cold_path();
-			return Err(format!(
-				"cannot convert tensor with dtype {:?} to dtype {:?}",
-				buf.dtype,
-				T::dtype
-			)
-			.into());
+			#[cold]
+			fn err_view_invalid_dtype(buf_dtype: DType, T_dtype: DType) -> Error {
+				format!("Cannot view a tensor with dtype {buf_dtype:?} as {T_dtype:?}").into()
+			}
+			return Err(err_view_invalid_dtype(buf.dtype, T::dtype));
 		}
 		debug_assert!(T::dtype.bytes() == std::mem::size_of::<T>());
 		if !buf.device_is_cpu {
-			cold_path();
-			return Err("buffer is not on CPU device".into());
+			#[cold]
+			fn err_view_not_cpu_buffer() -> Error {
+				"buffer is not on CPU device".into()
+			}
+			return Err(err_view_not_cpu_buffer());
 		}
 
 		let elems = buf.elems;
@@ -712,6 +687,7 @@ impl Device for CPUDevice {
 			elems,
 			device_data: memory.as_ptr(),
 			device: ManuallyDrop::new(self.clone()),
+			device_is_cpu: true,
 		})
 	}
 
@@ -772,40 +748,6 @@ impl Executor for CPUDevice {
 			_ => todo!(),
 		}
 		result
-	}
-
-	fn zeros(&self, dst: &SliceSet) {
-		match dst.dtype {
-			f32::dtype => self.elem_wise::<f32, 1>([dst], |[d]| d.set(0.0)),
-			_ => todo!(),
-		}
-	}
-
-	fn randn(&self, dst: &SliceSet) {
-		let mut rng = self.rng.borrow_mut();
-		match dst.dtype {
-			f32::dtype => self.elem_wise::<f32, 1>([dst], |[d]| d.set(rng.get_normal() as f32)),
-			_ => todo!(),
-		}
-	}
-
-	fn copy(&self, dst: &SliceSet, src: &SliceSet) {
-		match dst.dtype {
-			f32::dtype => self.elem_wise::<f32, 2>([dst, src], |[d, s]| d.set(s.get())),
-			_ => todo!(),
-		}
-	}
-
-	fn acc(&self, dst: &SliceSet, dst_weight: f64, new: &SliceSet, new_weight: f64) {
-		match dst.dtype {
-			f32::dtype => self.elem_wise::<f32, 2>([dst, new], |[d, n]| {
-				let d_val = f64::from(d.get());
-				let n_val = f64::from(n.get());
-				let val = d_val * dst_weight + n_val * new_weight;
-				d.set(val as f32)
-			}),
-			_ => todo!(),
-		}
 	}
 
 	fn mul(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet) {

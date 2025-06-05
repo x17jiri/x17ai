@@ -9,6 +9,8 @@ use std::hint::cold_path;
 
 use super::{IndexToOffset, Map, ND, Transpose};
 use crate::Result;
+use crate::tensor::generic::Selection;
+use crate::tensor::generic::map::Select;
 
 #[derive(Clone, Copy)]
 pub struct CompactND<const N: usize>
@@ -30,6 +32,19 @@ where
 
 	fn elems(&self) -> usize {
 		self.shape.iter().product()
+	}
+
+	fn span(&self) -> std::ops::Range<usize> {
+		// TODO - this will fail if self.outer_stride == 0
+		let start = self.offset;
+		let len =
+			(self.shape[0] - 1) * self.outer_stride + self.shape[1..].iter().product::<usize>();
+		let end = start + len;
+		start..end
+	}
+
+	fn is_contiguous(&self) -> bool {
+		self.shape[0] <= 1 || self.outer_stride == self.shape[1..].iter().product()
 	}
 }
 
@@ -55,6 +70,52 @@ where
 		}
 		offset += index[0] * self.outer_stride;
 		Ok(offset)
+	}
+}
+
+impl<const K: usize> Select<K> for CompactND<K>
+where
+	[(); K - 2]:,
+{
+	type Output = ND<K>;
+
+	fn select(self, selections: [Selection; K]) -> Result<Self::Output> {
+		let mut result = ND::<K>::from(self);
+		for k in 0..K {
+			let size = self.shape[k];
+			let start = selections[k].start.unwrap_or(0);
+			let end = selections[k].end.unwrap_or(size);
+			if end < start {
+				cold_path();
+				return Err(format!(
+					"Invalid range {start}..{end} for dimension {k} of size {size}",
+				)
+				.into());
+			}
+			if end > size {
+				cold_path();
+				return Err(
+					format!("Range {start}..{end} exceeds size {size} for dimension {k}",).into()
+				);
+			}
+			result.offset += start * self.outer_stride;
+			result.dims[k].size = end - start;
+		}
+		Ok(result)
+	}
+
+	unsafe fn select_unchecked(self, selections: [Selection; K]) -> Self::Output {
+		let mut result = ND::<K>::from(self);
+		for k in 0..K {
+			let size = self.shape[k];
+			let start = selections[k].start.unwrap_or(0);
+			let end = selections[k].end.unwrap_or(size);
+			debug_assert!(end >= start);
+			debug_assert!(end <= size);
+			result.offset += start * self.outer_stride;
+			result.dims[k].size = end - start;
+		}
+		result
 	}
 }
 

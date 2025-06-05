@@ -6,7 +6,7 @@
 //------------------------------------------------------------------------------
 
 use log;
-use std::intrinsics::unlikely;
+use std::hint::cold_path;
 
 // State initialization constant ("expand 32-byte k")
 const CONST: [u32; 4] = [0x_6170_7865, 0x_3320_646e, 0x_7962_2d32, 0x_6b20_6574];
@@ -33,7 +33,7 @@ impl Rng {
 	pub fn new_with_seed(key: &[u32; 8]) -> Self {
 		// just some arbitrary constants
 		let iv = [0x_1ada_b14a, 0x_4c3d_51fd];
-		Rng {
+		Self {
 			state: #[rustfmt::skip] [
 				CONST[0], CONST[1], CONST[2], CONST[3],
 				key[0],   key[1],   key[2],   key[3],
@@ -113,12 +113,14 @@ impl Rng {
 		let hi = u64::from(self.get_u32());
 		let val = (hi << 32) | lo;
 
-		(val as f64) * (1.0 / (4294967296.0 * 4294967296.0))
+		#[allow(clippy::cast_precision_loss)]
+		(val as f64)
+			* (1.0 / (4_294_967_296.0 * 4_294_967_296.0))
 	}
 
 	/// Generates a float with normal distribution with mean 0 and variance 1.
 	/// The generated values are guaranteed to be in the range (-10.0, 10.0)
-	pub fn get_normal(&mut self) -> f64 {
+	pub fn get_normal_clamped(&mut self) -> f64 {
 		let x = 1.0 - self.get_uniform(); // (0.0, 1.0]
 		let y = self.get_uniform(); // [0.0, 1.0)
 
@@ -131,7 +133,8 @@ impl Rng {
 		// Combine z0 and z1 into a single value
 		let result = z0 * z1;
 
-		if unlikely(result.abs() >= 10.0) {
+		if result.abs() >= 10.0 {
+			cold_path();
 			log::warn!("Rng::get_normal(): clamping {} to (-10.0, 10.0)", result);
 			return 0.0;
 		}

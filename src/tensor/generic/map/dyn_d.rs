@@ -24,7 +24,8 @@ pub struct DynD {
 }
 
 impl DynD {
-	/// This function will initialize strides in a DimVec so a new tensor is contiguous in memory.
+	/// This function will initialize strides in a `DimVec` so a new tensor is contiguous in
+	/// memory.
 	///
 	/// It returns the total number of elements in the tensor.
 	fn __init_strides(dims: &mut DimVec) -> usize {
@@ -44,22 +45,22 @@ impl DynD {
 		elems
 	}
 
-	pub fn new(shape: &[usize]) -> (DynD, usize) {
+	pub fn new(shape: &[usize]) -> (Self, usize) {
 		let mut dims =
 			DimVec::new_from_iter(shape.iter().map(|&size| SizeAndStride { size, stride: 0 }));
 		let elems = Self::__init_strides(&mut dims);
-		let map = DynD { dims, offset: 0 };
+		let map = Self { dims, offset: 0 };
 		(map, elems)
 	}
 
-	pub fn new_like(&self) -> (DynD, usize) {
+	pub fn new_like(&self) -> (Self, usize) {
 		let mut dims = self.dims.clone();
 		let elems = Self::__init_strides(&mut dims);
-		let map = DynD { dims, offset: 0 };
+		let map = Self { dims, offset: 0 };
 		(map, elems)
 	}
 
-	pub fn new_replace_tail(&self, tail_len: usize, replace_with: &[usize]) -> (DynD, usize) {
+	pub fn new_replace_tail(&self, tail_len: usize, replace_with: &[usize]) -> (Self, usize) {
 		let n_keep = self.dims.len().checked_sub(tail_len).expect("not enough dimensions");
 		let ndim = n_keep + replace_with.len();
 		let mut dims = DimVec::with_capacity(ndim);
@@ -70,7 +71,7 @@ impl DynD {
 			);
 		}
 		let elems = Self::__init_strides(&mut dims);
-		let map = DynD { dims, offset: 0 };
+		let map = Self { dims, offset: 0 };
 		(map, elems)
 	}
 }
@@ -83,6 +84,14 @@ impl Map for DynD {
 	fn elems(&self) -> usize {
 		self.dims.iter().map(|dim| dim.size).product()
 	}
+
+	fn span(&self) -> std::ops::Range<usize> {
+		// TODO - this will fail if dim.size == 0
+		let start = self.offset;
+		let len = self.dims.iter().map(|dim| (dim.size - 1) * dim.stride).product::<usize>() + 1;
+		let end = start + len;
+		start..end
+	}
 }
 
 impl<const M: usize> MergeDims<M> for DynD {
@@ -93,11 +102,9 @@ impl<const M: usize> MergeDims<M> for DynD {
 		let ndim = dims.len();
 		if M > ndim {
 			cold_path();
-			return Err(format!(
-				"Cannot merge {} dimensions in a tensor with {} dimensions.",
-				M, ndim
-			)
-			.into());
+			return Err(
+				format!("Cannot merge {M} dimensions in a tensor with {ndim} dimensions.",).into(),
+			);
 		}
 
 		if M == 0 {
@@ -108,7 +115,7 @@ impl<const M: usize> MergeDims<M> for DynD {
 				let dim = *unsafe { dims.get_unchecked(i) };
 				if dim.size > 1 && dim.stride != merged.size * merged.stride {
 					cold_path();
-					return Err("cannot merge because of discontinuity".into());
+					return Err("Cannot merge because of discontinuity".into());
 				}
 				merged.size *= dim.size;
 			}
@@ -211,28 +218,28 @@ pub struct DimVec {
 
 impl DimVec {
 	#[inline(never)]
-	fn with_large_capacity(capacity: usize) -> DimVec {
-		DimVec { vec: SmallVec::with_capacity(capacity) }
+	fn with_large_capacity(capacity: usize) -> Self {
+		Self { vec: SmallVec::with_capacity(capacity) }
 	}
 
-	pub fn with_capacity(capacity: usize) -> DimVec {
+	pub fn with_capacity(capacity: usize) -> Self {
 		if capacity <= INLINE_DIMS {
-			DimVec { vec: SmallVec::with_capacity(capacity) }
+			Self { vec: SmallVec::with_capacity(capacity) }
 		} else {
 			cold_path();
-			DimVec::with_large_capacity(capacity)
+			Self::with_large_capacity(capacity)
 		}
 	}
 
-	pub fn new() -> DimVec {
-		DimVec { vec: SmallVec::new() }
+	pub fn new() -> Self {
+		Self { vec: SmallVec::new() }
 	}
 
 	pub fn new_from_iter<I: IntoIterator<Item = SizeAndStride> + ExactSizeIterator>(
 		iter: I,
-	) -> DimVec {
+	) -> Self {
 		let len = iter.len();
-		let mut t = DimVec::with_capacity(len);
+		let mut t = Self::with_capacity(len);
 		unsafe {
 			let mut ptr = t.vec.as_mut_ptr();
 			for i in iter {
@@ -285,8 +292,8 @@ impl DimVec {
 	}
 
 	#[inline(never)]
-	fn clone_large(&self) -> DimVec {
-		DimVec { vec: self.vec.clone() }
+	fn clone_large(&self) -> Self {
+		Self { vec: self.vec.clone() }
 	}
 
 	#[inline]
@@ -322,6 +329,11 @@ impl DimVec {
 		self.vec.pop()
 	}
 
+	/// Removes `n` elements from the end of the vector.
+	///
+	/// # Panics
+	///
+	/// Panics if `n` is greater than the current length of the vector.
 	pub fn pop_n(&mut self, n: usize) {
 		let len = self.vec.len();
 		assert!(n <= len);
@@ -338,9 +350,9 @@ impl DimVec {
 }
 
 impl Clone for DimVec {
-	fn clone(&self) -> DimVec {
+	fn clone(&self) -> Self {
 		if self.vec.capacity() <= INLINE_DIMS {
-			DimVec { vec: self.vec.clone() }
+			Self { vec: self.vec.clone() }
 		} else {
 			cold_path();
 			self.clone_large()

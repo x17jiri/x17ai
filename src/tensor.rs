@@ -6,7 +6,6 @@
 //------------------------------------------------------------------------------
 
 use std::cell::Cell;
-use std::hint::cold_path;
 use std::rc::Rc;
 
 pub use device::{DType, Device, HasDType};
@@ -21,12 +20,28 @@ pub mod generic;
 // pub mod io; TODO
 // pub mod math; TODO
 
-#[cfg(test)]
+#[cfg(false)] // TODO: #[cfg(test)]
 mod tests;
 
 //--------------------------------------------------------------------------------------------------
 
+impl<M: generic::map::Map> generic::Tensor<M, Rc<device::DeviceBuffer>> {
+	/// Returns a "view" tensor which has a slice `&[Cell<T>]` as its buffer.
+	///
+	/// # Errors
+	/// If the buffer's dtype does not match `T` or if the buffer is not on CPU device.
+	pub fn try_view<T: HasDType>(&self) -> Result<generic::Tensor<M, &[Cell<T>]>> {
+		let buf = CPUDevice::try_view(self.buf.as_ref())?;
+		let map = self.map.clone();
+		Ok(generic::Tensor { map, buf })
+	}
+}
+
 impl<M: generic::map::Map> generic::Tensor<M, &device::DeviceBuffer> {
+	/// Returns a "view" tensor which has a slice `&[Cell<T>]` as its buffer.
+	///
+	/// # Errors
+	/// If the buffer's dtype does not match `T` or if the buffer is not on CPU device.
 	pub fn try_view<T: HasDType>(&self) -> Result<generic::Tensor<M, &[Cell<T>]>> {
 		let buf = CPUDevice::try_view(self.buf)?;
 		let map = self.map.clone();

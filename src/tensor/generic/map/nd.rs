@@ -68,6 +68,14 @@ impl<const N: usize> Map for ND<N> {
 	fn elems(&self) -> usize {
 		self.dims.iter().map(|dim| dim.size).product()
 	}
+
+	fn span(&self) -> std::ops::Range<usize> {
+		// TODO - this will fail if dim.size == 0
+		let start = self.offset;
+		let len = self.dims.iter().map(|dim| (dim.size - 1) * dim.stride).product::<usize>() + 1;
+		let end = start + len;
+		start..end
+	}
 }
 
 impl<const N: usize, const M: usize> MergeDims<M> for ND<N>

@@ -26,7 +26,20 @@
 #![feature(auto_traits)]
 #![feature(coerce_unsized)]
 #![feature(unsize)]
+#![feature(array_try_map)]
+// clippy
+#![warn(clippy::all)]
+#![warn(clippy::pedantic)]
+#![warn(clippy::nursery)]
+#![warn(clippy::cargo)]
 #![warn(clippy::cast_lossless)]
+#![warn(clippy::unwrap_used)]
+#![warn(clippy::expect_used)]
+#![warn(clippy::indexing_slicing)]
+#![warn(clippy::panic_in_result_fn)]
+#![warn(clippy::panic)]
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::missing_const_for_fn)]
 
 pub mod format;
 //pub mod nn; TODO
