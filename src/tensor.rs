@@ -30,8 +30,8 @@ impl<M: generic::map::Map> generic::Tensor<M, Rc<device::DeviceBuffer>> {
 	///
 	/// # Errors
 	/// If the buffer's dtype does not match `T` or if the buffer is not on CPU device.
-	pub fn try_view<T: HasDType>(&self) -> Result<generic::Tensor<M, &[Cell<T>]>> {
-		let buf = CPUDevice::try_view(self.buf.as_ref())?;
+	pub fn view<T: HasDType>(&self) -> Result<generic::Tensor<M, &[Cell<T>]>> {
+		let buf = CPUDevice::view(self.buf.as_ref())?;
 		let map = self.map.clone();
 		Ok(generic::Tensor { map, buf })
 	}
@@ -42,8 +42,8 @@ impl<M: generic::map::Map> generic::Tensor<M, &device::DeviceBuffer> {
 	///
 	/// # Errors
 	/// If the buffer's dtype does not match `T` or if the buffer is not on CPU device.
-	pub fn try_view<T: HasDType>(&self) -> Result<generic::Tensor<M, &[Cell<T>]>> {
-		let buf = CPUDevice::try_view(self.buf)?;
+	pub fn view<T: HasDType>(&self) -> Result<generic::Tensor<M, &[Cell<T>]>> {
+		let buf = CPUDevice::view(self.buf)?;
 		let map = self.map.clone();
 		Ok(generic::Tensor { map, buf })
 	}

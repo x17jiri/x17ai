@@ -7,6 +7,8 @@
 
 use std::num::NonZeroU8;
 
+use crate::Error;
+
 pub const MAX_DTYPE_ALIGN: usize = 8; // 64-bit
 
 pub trait HasDType {
@@ -34,21 +36,31 @@ impl HasDType for f64 {
 	};
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct DType {
 	pub kind: DTypeKind,
 	pub bits: NonZeroU8,
 }
 
-impl DType {
-	pub fn from_str(s: &str) -> Option<DType> {
+impl std::str::FromStr for DType {
+	type Err = Error;
+
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		match s {
-			"f32" => Some(f32::dtype),
-			"f64" => Some(f64::dtype),
-			_ => None,
+			"f32" => Ok(f32::dtype),
+			"f64" => Ok(f64::dtype),
+			_ => {
+				#[cold]
+				fn err_unknown_dtype_str(s: &str) -> Error {
+					format!("Unknown DType string: {s}").into()
+				}
+				Err(err_unknown_dtype_str(s))
+			},
 		}
 	}
+}
 
+impl DType {
 	pub fn is_float(&self) -> bool {
 		self.kind == DTypeKind::Float
 	}
@@ -72,7 +84,7 @@ impl DType {
 	}
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum DTypeKind {
 	Float,
 	Int,

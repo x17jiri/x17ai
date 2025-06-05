@@ -221,7 +221,7 @@ impl CPUDevice {
 	///
 	/// # Errors
 	/// If the buffer's dtype does not match `T` or if the buffer is not on CPU device.
-	pub fn try_view<T: HasDType>(buf: &DeviceBuffer) -> Result<&[Cell<T>]> {
+	pub fn view<T: HasDType>(buf: &DeviceBuffer) -> Result<&[Cell<T>]> {
 		if buf.dtype != T::dtype {
 			#[cold]
 			fn err_view_invalid_dtype(buf_dtype: DType, T_dtype: DType) -> Error {

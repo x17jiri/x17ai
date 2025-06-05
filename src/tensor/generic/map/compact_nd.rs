@@ -8,9 +8,9 @@
 use std::hint::cold_path;
 
 use super::{IndexToOffset, Map, ND, Transpose};
-use crate::Result;
 use crate::tensor::generic::Selection;
 use crate::tensor::generic::map::Select;
+use crate::{Error, Result};
 
 #[derive(Clone, Copy)]
 pub struct CompactND<const N: usize>
@@ -45,6 +45,35 @@ where
 
 	fn is_contiguous(&self) -> bool {
 		self.shape[0] <= 1 || self.outer_stride == self.shape[1..].iter().product()
+	}
+}
+
+impl<const N: usize> TryFrom<ND<N>> for CompactND<N>
+where
+	[(); N - 2]:,
+{
+	type Error = Error;
+
+	fn try_from(nd: ND<N>) -> Result<Self> {
+		let mut shape = [0; N];
+		let mut stride = 1;
+		for i in (1..N).rev() {
+			if nd.dims[i].stride != stride {
+				#[cold]
+				fn err_cannot_convert_nd_to_compact_nd() -> Error {
+					"Cannot convert ND with non-contiguous dimensions to CompactND.".into()
+				}
+				return Err(err_cannot_convert_nd_to_compact_nd());
+			}
+			shape[i] = nd.dims[i].size;
+			stride *= nd.dims[i].size;
+		}
+		shape[0] = nd.dims[0].size;
+		Ok(CompactND {
+			shape,
+			outer_stride: nd.dims[0].stride,
+			offset: nd.offset,
+		})
 	}
 }
 

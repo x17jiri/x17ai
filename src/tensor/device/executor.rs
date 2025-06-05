@@ -19,7 +19,7 @@ pub type StridedSlice<'a> = generic::Tensor<ND<1>, &'a DeviceBuffer>;
 /// They all have the same size and are contiguous in memory.
 ///
 /// Stride is used to get from one slice in the batch to the next one.
-pub type SliceBatch<'a> = generic::Tensor<CompactND<2>, &'a DeviceBuffer>;
+pub type SliceBatch<'a> = generic::Tensor<ND<2>, &'a DeviceBuffer>;
 
 /// A batch of matrices.
 pub type MatrixBatch<'a> = generic::Tensor<ND<3>, &'a DeviceBuffer>;
@@ -56,6 +56,7 @@ pub trait Executor {
 	/// Fills the `dst` tensor with zeros.
 	///
 	/// # Errors
+	/// - If any of the tensors doesn't have a safe map.
 	/// - If `dst` doesn't have dtype corresponding to this Executor.
 	/// - If `dst` isn't on device corresponding to this Executor.
 	/// - If there is any problem executing the operation on the device.
@@ -65,6 +66,7 @@ pub trait Executor {
 	/// with mean 0 and variance 1. The values are clamped to the range (-10.0, +10.0)
 	///
 	/// # Errors
+	/// - If any of the tensors doesn't have a safe map.
 	/// - If `dst` doesn't have dtype corresponding to this Executor.
 	/// - If `dst` isn't on device corresponding to this Executor.
 	/// - If there is any problem executing the operation on the device.
@@ -73,6 +75,7 @@ pub trait Executor {
 	/// Copies the data from `src` to `dst`.
 	///
 	/// # Errors
+	/// - If any of the tensors doesn't have a safe map.
 	/// - If `dst` and `src` don't have the same shape.
 	/// - If `dst` and `src` don't have dtype corresponding to this Executor.
 	/// - If `dst` and `src` aren't on device corresponding to this Executor.
@@ -84,6 +87,7 @@ pub trait Executor {
 	///     dst[j, i] = dst[j, i] * dst_weight + upd[j, i] * upd_weight
 	///
 	/// # Errors
+	/// - If any of the tensors doesn't have a safe map.
 	/// - If `dst` and `upd` don't have the same shape.
 	/// - If `dst` and `upd` don't have dtype corresponding to this Executor.
 	/// - If `dst` and `upd` aren't on device corresponding to this Executor.
@@ -97,6 +101,7 @@ pub trait Executor {
 	///     dst[j, i] = a[j, i] * b[j, i]
 	///
 	/// # Errors
+	/// - If any of the tensors doesn't have a safe map.
 	/// - If `dst`, `a`, and `b` don't have the same shape.
 	/// - If `dst`, `a`, and `b` don't have dtype corresponding to this Executor.
 	/// - If `dst`, `a`, and `b` aren't on device corresponding to this Executor.

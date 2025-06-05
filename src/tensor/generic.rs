@@ -98,25 +98,12 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		Ok(Tensor { buf: self.buf, map: new_map })
 	}
 
-	pub fn into_tensor<NewMap: Map, NewBuf: Buffer>(self) -> Tensor<NewMap, NewBuf>
+	pub fn conv_map<NewMap: Map>(self) -> std::result::Result<Tensor<NewMap, B>, M::Error>
 	where
-		M: Into<NewMap>,
-		B: Into<NewBuf>,
-	{
-		Tensor {
-			map: self.map.into(),
-			buf: self.buf.into(),
-		}
-	}
-
-	pub fn try_into_tensor<NewMap: Map, NewBuf: Buffer>(self) -> Result<Tensor<NewMap, NewBuf>>
-	where
-		M: TryInto<NewMap, Error = Error>,
-		B: TryInto<NewBuf, Error = Error>,
+		M: TryInto<NewMap>,
 	{
 		let map = self.map.try_into()?;
-		let buf = self.buf.try_into()?;
-		Ok(Tensor { map, buf })
+		Ok(Tensor { map, buf: self.buf })
 	}
 }
 

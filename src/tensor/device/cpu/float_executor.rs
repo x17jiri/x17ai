@@ -175,27 +175,35 @@ impl FromToF64 for f64 {
 
 impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 	fn zeros(&self, dst: &SliceBatch) -> Result<()> {
-		let dst = dst.try_view()?;
+		let dst = dst.view()?;
+		let dst = dst.conv_map()?;
 		Self::nullary(dst, |d| d.set(T::from_f64(0.0)))
 	}
 
 	fn randn_clamped(&self, dst: &SliceBatch) -> Result<()> {
-		let dst = dst.try_view()?;
+		let dst = dst.view()?;
+		let dst = dst.conv_map()?;
 		let mut rng = self.rng.borrow_mut();
 		Self::nullary(dst, |d| d.set(T::from_f64(rng.get_normal_clamped())))
 	}
 
 	fn copy(&self, dst: &SliceBatch, src: &SliceBatch) -> Result<()> {
-		let dst = dst.try_view()?;
-		let src = src.try_view()?;
+		let dst = dst.view()?;
+		let dst = dst.conv_map()?;
+		let src = src.view()?;
+		let src = src.conv_map()?;
 		Self::unary(dst, src, |d, s| d.set(s.get()))
 	}
 
 	fn acc(
 		&self, dst: &SliceBatch, dst_weight: f64, upd: &SliceBatch, upd_weight: f64,
 	) -> Result<()> {
-		let dst = dst.try_view()?;
-		let upd = upd.try_view()?;
+		// TODO - should ditch CompactND and allow stride == 0 ??
+
+		let dst = dst.view()?;
+		let dst = dst.conv_map()?;
+		let upd = upd.view()?;
+		let upd = upd.conv_map()?;
 		Self::unary(dst, upd, |d, u| {
 			let d_val = d.get().to_f64();
 			let u_val = u.get().to_f64();
@@ -212,9 +220,12 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 
 	fn mul(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()> {
 		// TODO - this doesn't handle broadcasting
-		let dst = dst.try_view()?;
-		let a = a.try_view()?;
-		let b = b.try_view()?;
+		let dst = dst.view()?;
+		let dst = dst.conv_map()?;
+		let a = a.view()?;
+		let a = a.conv_map()?;
+		let b = b.view()?;
+		let b = b.conv_map()?;
 		Self::elem_wise([dst, a, b], |[d, a, b]| {
 			let v = a.get().to_f64() * b.get().to_f64();
 			d.set(T::from_f64(v));
