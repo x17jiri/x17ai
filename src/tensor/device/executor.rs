@@ -55,30 +55,45 @@ pub trait Executor {
 
 	/// Fills the `dst` tensor with zeros.
 	///
+	/// # Requrements
+	/// - The `dst` tensor has to:
+	///   - have a safe map
+	///   - have dtype corresponding to this Executor
+	///   - be on the device corresponding to this Executor
+	///   - have contiguous dimension 1
+	///
 	/// # Errors
-	/// - If any of the tensors doesn't have a safe map.
-	/// - If `dst` doesn't have dtype corresponding to this Executor.
-	/// - If `dst` isn't on device corresponding to this Executor.
+	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
 	fn zeros(&self, dst: &SliceBatch) -> Result<()>;
 
 	/// Fills the `dst` tensor with random values from a normal distribution
 	/// with mean 0 and variance 1. The values are clamped to the range (-10.0, +10.0)
 	///
+	/// # Requrements
+	/// - The `dst` tensor has to:
+	///   - have a safe map
+	///   - have dtype corresponding to this Executor
+	///   - be on the device corresponding to this Executor
+	///   - have contiguous dimension 1
+	///
 	/// # Errors
-	/// - If any of the tensors doesn't have a safe map.
-	/// - If `dst` doesn't have dtype corresponding to this Executor.
-	/// - If `dst` isn't on device corresponding to this Executor.
+	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
 	fn randn_clamped(&self, dst: &SliceBatch) -> Result<()>;
 
-	/// Copies the data from `src` to `dst`.
+	/// # Requrements
+	/// - All input tensors have to:
+	///   - have a safe map
+	///   - have dtype corresponding to this Executor
+	///   - be on the device corresponding to this Executor
+	/// - The `dst` tensor has to:
+	///   - have contiguous dimension 1
+	/// - Other tensors have to:
+	///   - have either contiguous or broadcasted dimension 1
 	///
 	/// # Errors
-	/// - If any of the tensors doesn't have a safe map.
-	/// - If `dst` and `src` don't have the same shape.
-	/// - If `dst` and `src` don't have dtype corresponding to this Executor.
-	/// - If `dst` and `src` aren't on device corresponding to this Executor.
+	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
 	fn copy(&self, dst: &SliceBatch, src: &SliceBatch) -> Result<()>;
 
@@ -86,11 +101,18 @@ pub trait Executor {
 	///
 	///     dst[j, i] = dst[j, i] * dst_weight + upd[j, i] * upd_weight
 	///
+	/// # Requrements
+	/// - All input tensors have to:
+	///   - have a safe map
+	///   - have dtype corresponding to this Executor
+	///   - be on the device corresponding to this Executor
+	/// - The `dst` tensor has to:
+	///   - have contiguous dimension 1
+	/// - Other tensors have to:
+	///   - have either contiguous or broadcasted dimension 1
+	///
 	/// # Errors
-	/// - If any of the tensors doesn't have a safe map.
-	/// - If `dst` and `upd` don't have the same shape.
-	/// - If `dst` and `upd` don't have dtype corresponding to this Executor.
-	/// - If `dst` and `upd` aren't on device corresponding to this Executor.
+	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
 	fn acc(
 		&self, dst: &SliceBatch, dst_weight: f64, upd: &SliceBatch, upd_weight: f64,
@@ -100,29 +122,114 @@ pub trait Executor {
 	///
 	///     dst[j, i] = a[j, i] * b[j, i]
 	///
+	/// # Requrements
+	/// - All input tensors have to:
+	///   - have a safe map
+	///   - have dtype corresponding to this Executor
+	///   - be on the device corresponding to this Executor
+	/// - The `dst` tensor has to:
+	///   - have contiguous dimension 1
+	/// - Other tensors have to:
+	///   - have either contiguous or broadcasted dimension 1
+	///
 	/// # Errors
-	/// - If any of the tensors doesn't have a safe map.
-	/// - If `dst`, `a`, and `b` don't have the same shape.
-	/// - If `dst`, `a`, and `b` don't have dtype corresponding to this Executor.
-	/// - If `dst`, `a`, and `b` aren't on device corresponding to this Executor.
+	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
 	fn mul(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()>;
 
+	/// Element-wise multiplication with accumulation:
+	///
+	///     dst[j, i] = dst[j, i] * dst_weight + a[j, i] * b[j, i] * ab_weight
+	///
+	/// # Requrements
+	/// - All input tensors have to:
+	///   - have a safe map
+	///   - have dtype corresponding to this Executor
+	///   - be on the device corresponding to this Executor
+	/// - The `dst` tensor has to:
+	///   - have contiguous dimension 1
+	/// - Other tensors have to:
+	///   - have either contiguous or broadcasted dimension 1
+	///
+	/// # Errors
+	/// - If any of the requirements is not met.
+	/// - If there is any problem executing the operation on the device.
 	fn mul_acc(
 		&self, dst: &SliceBatch, dst_weight: f64, a: &SliceBatch, b: &SliceBatch, ab_weight: f64,
 	) -> Result<()>;
 
+	/// Element-wise subtraction:
+	///
+	///     dst[j, i] = a[j, i] - b[j, i]
+	///
+	/// # Requrements
+	/// - All input tensors have to:
+	///   - have a safe map
+	///   - have dtype corresponding to this Executor
+	///   - be on the device corresponding to this Executor
+	/// - The `dst` tensor has to:
+	///   - have contiguous dimension 1
+	/// - Other tensors have to:
+	///   - have either contiguous or broadcasted dimension 1
+	///
+	/// # Errors
+	/// - If any of the requirements is not met.
+	/// - If there is any problem executing the operation on the device.
 	fn sub(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()>;
 
+	/// Element-wise addition:
+	///
+	///     dst[j, i] = a[j, i] + b[j, i]
+	///
+	/// # Requrements
+	/// - All input tensors have to:
+	///   - have a safe map
+	///   - have dtype corresponding to this Executor
+	///   - be on the device corresponding to this Executor
+	/// - The `dst` tensor has to:
+	///   - have contiguous dimension 1
+	/// - Other tensors have to:
+	///   - have either contiguous or broadcasted dimension 1
+	///
+	/// # Errors
+	/// - If any of the requirements is not met.
+	/// - If there is any problem executing the operation on the device.
 	fn add(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()>;
 
-	/*
-		fn swiglu(&self, dst: &SliceBatch, lin: &SliceBatch, gate: &SliceBatch);
-		fn swiglu_backward(
-			&self, d_lin: &SliceBatch, d_gate: &SliceBatch, lin: &SliceBatch, gate: &SliceBatch,
-			d_out: &SliceBatch,
-		);
+	/// The SwiGLU activation function:
+	///
+	///     dst[j, i] = lin[j, i] * sigmoid(gate[j, i])
+	///
+	/// # Requrements
+	/// - All input tensors have to:
+	///   - have a safe map
+	///   - have dtype corresponding to this Executor
+	///   - be on the device corresponding to this Executor
+	///   - have contiguous dimension 1
+	///
+	/// # Errors
+	/// - If any of the requirements is not met.
+	/// - If there is any problem executing the operation on the device.
+	fn swiglu(&self, dst: &SliceBatch, lin: &SliceBatch, gate: &SliceBatch) -> Result<()>;
 
+	/// Backward pass for the SwiGLU activation function:
+	///
+	/// # Requrements
+	/// - All input tensors have to:
+	///   - have a safe map
+	///   - have dtype corresponding to this Executor
+	///   - be on the device corresponding to this Executor
+	///   - have contiguous dimension 1
+	///
+	/// # Errors
+	/// - If any of the requirements is not met.
+	/// - If there is any problem executing the operation on the device.
+	fn swiglu_backward(
+		&self, d_lin: &SliceBatch, d_gate: &SliceBatch, lin: &SliceBatch, gate: &SliceBatch,
+		d_out: &SliceBatch,
+	) -> Result<()>;
+
+	/*
 		fn dot(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64);
 
 		fn dot_acc(

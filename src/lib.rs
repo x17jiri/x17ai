@@ -27,6 +27,7 @@
 #![feature(coerce_unsized)]
 #![feature(unsize)]
 #![feature(array_try_map)]
+#![feature(maybe_uninit_uninit_array_transpose)]
 // clippy
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]

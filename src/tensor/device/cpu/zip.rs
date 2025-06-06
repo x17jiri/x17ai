@@ -7,11 +7,13 @@
 
 use std::cell::Cell;
 use std::hint::cold_path;
+use std::mem::MaybeUninit;
 
 use crate::tensor::HasDType;
 use crate::tensor::device::executor::SliceBatch;
 use crate::tensor::generic::map::Map;
 use crate::tensor::generic::{self};
+use crate::util::array::map_borrowed;
 use crate::{Error, Result};
 
 #[derive(Clone, Copy, Debug)]
@@ -266,6 +268,25 @@ pub unsafe fn zip3<T: Copy, M1: Map + Zippable, M2: Map + Zippable, M3: Map + Zi
 			let v3 = unsafe { t3.buf.get_unchecked(o3) };
 
 			f(v1, v2, v3);
+		}
+	}
+}
+
+pub unsafe fn zip_n<T: Copy, M: Map + Zippable, const N: usize>(
+	t: [generic::Tensor<M, &[Cell<T>]>; N], mut f: impl FnMut([&Cell<T>; N]),
+) {
+	debug_assert!(t.iter().all(|t| t.ensure_safe().is_ok()));
+	let batch_size = t.first().map_or(0, |t| t.map.batch_size());
+	debug_assert!(t.iter().map(|t| t.map.batch_size()).all(|b| b == batch_size));
+	let item_len = t.first().map_or(0, |t| t.map.item_len());
+	debug_assert!(t.iter().map(|t| t.map.item_len()).all(|i| i == item_len));
+	for b in 0..batch_size {
+		for i in 0..item_len {
+			f(map_borrowed(&t, |_, t| {
+				let o = t.map.offset(b, i);
+				debug_assert!(o < t.buf.len());
+				unsafe { t.buf.get_unchecked(o) }
+			}));
 		}
 	}
 }

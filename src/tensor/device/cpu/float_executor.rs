@@ -6,50 +6,16 @@
 //------------------------------------------------------------------------------
 
 use std::cell::{Cell, RefCell};
+use std::mem::MaybeUninit;
 use std::rc::Rc;
 
 use crate::Result;
 use crate::tensor::HasDType;
 use crate::tensor::device::executor::{Executor, SliceBatch};
 
+use super::math::{self, FromToF64};
 use super::rng::Rng;
-use super::zip::{CPUInput, zip1, zip2, zip3};
-
-//--------------------------------------------------------------------------------------------------
-
-pub trait FromToF64 {
-	const MIN: f64; // largest negative value of type
-
-	fn from_f64(val: f64) -> Self;
-	fn to_f64(&self) -> f64;
-}
-
-#[allow(clippy::use_self)]
-impl FromToF64 for f32 {
-	const MIN: f64 = f32::MIN as f64;
-
-	fn from_f64(val: f64) -> Self {
-		#[allow(clippy::cast_possible_truncation)]
-		(val as f32)
-	}
-
-	fn to_f64(&self) -> f64 {
-		f64::from(*self)
-	}
-}
-
-#[allow(clippy::use_self)]
-impl FromToF64 for f64 {
-	const MIN: f64 = f64::MIN;
-
-	fn from_f64(val: f64) -> Self {
-		val
-	}
-
-	fn to_f64(&self) -> f64 {
-		*self
-	}
-}
+use super::zip::{CPUInput, zip_n, zip1, zip2, zip3};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -151,6 +117,23 @@ impl<T: Copy + HasDType> FloatExecutor<T> {
 		}
 		Ok(())
 	}
+
+	pub fn n_contiguous<const N: usize>(
+		t: [&SliceBatch; N], f: impl FnMut([&Cell<T>; N]),
+	) -> Result<()> {
+		let mut u = [MaybeUninit::uninit(); N];
+		for n in 0..N {
+			u[n].write(CPUInput::new_safe_contiguous(t[n])?);
+		}
+		let t = unsafe { MaybeUninit::array_assume_init(u) };
+
+		// TODO - assert shape
+
+		unsafe {
+			zip_n(t, f);
+		}
+		Ok(())
+	}
 }
 
 impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
@@ -221,5 +204,31 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 			let v = a.get().to_f64() + b.get().to_f64();
 			dst.set(T::from_f64(v));
 		})
+	}
+
+	fn swiglu(&self, dst: &SliceBatch, lin: &SliceBatch, gate: &SliceBatch) -> Result<()> {
+		Self::n_contiguous([dst, lin, gate], |[dst, lin, gate]| {
+			let forward = math::swiglu(lin.get().to_f64(), gate.get().to_f64());
+			dst.set(T::from_f64(forward));
+		})
+	}
+
+	fn swiglu_backward(
+		&self, d_lin: &SliceBatch, d_gate: &SliceBatch, lin: &SliceBatch, gate: &SliceBatch,
+		d_out: &SliceBatch,
+	) -> Result<()> {
+		Self::n_contiguous(
+			[d_lin, d_gate, lin, gate, d_out],
+			|[d_lin, d_gate, lin, gate, d_out]| {
+				let lin = lin.get().to_f64();
+				let gate = gate.get().to_f64();
+				let d_out = d_out.get().to_f64();
+				let (d_lin_val, d_gate_val) = math::swiglu_backward(lin, gate);
+				let d_lin_val = d_lin_val * d_out;
+				let d_gate_val = d_gate_val * d_out;
+				d_lin.set(T::from_f64(d_lin_val));
+				d_gate.set(T::from_f64(d_gate_val));
+			},
+		)
 	}
 }
