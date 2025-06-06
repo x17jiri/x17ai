@@ -30,11 +30,11 @@ impl DeviceBuffer {
 	#[inline]
 	pub fn is_on_device(&self, device: &dyn Device) -> bool {
 		let my_dev = self.device.as_ref();
-		let my_dev = my_dev as *const dyn Device;
-		let my_dev = my_dev as *const u8;
+		let my_dev = std::ptr::from_ref(my_dev);
+		let my_dev = my_dev.cast::<u8>();
 
-		let dev = device as *const dyn Device;
-		let dev = dev as *const u8;
+		let dev = std::ptr::from_ref(device);
+		let dev = dev.cast::<u8>();
 
 		my_dev == dev
 	}
@@ -58,6 +58,6 @@ impl Drop for DeviceBuffer {
 }
 
 impl Buffer for Rc<DeviceBuffer> {}
-impl<'a> Buffer for &'a DeviceBuffer {}
+impl Buffer for &DeviceBuffer {}
 
 //--------------------------------------------------------------------------------------------------

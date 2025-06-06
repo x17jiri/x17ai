@@ -6,7 +6,7 @@
 //------------------------------------------------------------------------------
 
 use crate::Result;
-use crate::tensor::generic::map::{CompactND, ND};
+use crate::tensor::generic::map::ND;
 use crate::tensor::generic::{self};
 
 use super::buffer::DeviceBuffer;
@@ -210,6 +210,7 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
+	#[allow(clippy::doc_markdown)]
 	fn swiglu(&self, dst: &SliceBatch, lin: &SliceBatch, gate: &SliceBatch) -> Result<()>;
 
 	/// Backward pass for the SwiGLU activation function:
@@ -224,14 +225,15 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
+	#[allow(clippy::doc_markdown)]
 	fn swiglu_backward(
 		&self, d_lin: &SliceBatch, d_gate: &SliceBatch, lin: &SliceBatch, gate: &SliceBatch,
 		d_out: &SliceBatch,
 	) -> Result<()>;
 
-	/*
-		fn dot(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64);
+	fn dot(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64) -> Result<()>;
 
+	/*
 		fn dot_acc(
 			&self, dst: &SliceBatch, dst_weight: f64, a: &SliceBatch, b: &SliceBatch, ab_weight: f64,
 		);

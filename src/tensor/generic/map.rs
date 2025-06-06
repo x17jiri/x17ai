@@ -5,11 +5,9 @@
 //
 //------------------------------------------------------------------------------
 
-pub mod compact_nd;
 pub mod dyn_d;
 pub mod nd;
 
-pub use compact_nd::CompactND;
 pub use dyn_d::DynD;
 pub use nd::ND;
 

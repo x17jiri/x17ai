@@ -7,7 +7,6 @@
 
 use std::cell::Cell;
 use std::hint::cold_path;
-use std::mem::MaybeUninit;
 
 use crate::tensor::HasDType;
 use crate::tensor::device::executor::SliceBatch;
@@ -288,5 +287,23 @@ pub unsafe fn zip_n<T: Copy, M: Map + Zippable, const N: usize>(
 				unsafe { t.buf.get_unchecked(o) }
 			}));
 		}
+	}
+}
+
+pub unsafe fn vec_zip_n<T: Copy, const N: usize>(
+	t: [generic::Tensor<SliceMap, &[Cell<T>]>; N], mut f: impl FnMut([&[Cell<T>]; N]),
+) {
+	debug_assert!(t.iter().all(|t| t.ensure_safe().is_ok()));
+	let batch_size = t.first().map_or(0, |t| t.map.batch_size());
+	debug_assert!(t.iter().map(|t| t.map.batch_size()).all(|b| b == batch_size));
+	let item_len = t.first().map_or(0, |t| t.map.item_len());
+	debug_assert!(t.iter().map(|t| t.map.item_len()).all(|i| i == item_len));
+	for b in 0..batch_size {
+		f(map_borrowed(&t, |_, t| {
+			let b = t.map.offset(b, 0);
+			let e = b + item_len;
+			debug_assert!(e < t.buf.len());
+			unsafe { t.buf.get_unchecked(b..e) }
+		}));
 	}
 }

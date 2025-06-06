@@ -6,7 +6,6 @@
 //------------------------------------------------------------------------------
 
 use std::cell::Cell;
-use std::ops::{Range, RangeFull};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -47,17 +46,8 @@ impl FromToF64 for f64 {
 //--------------------------------------------------------------------------------------------------
 
 pub fn dot<T: Copy + FromToF64>(a: &[Cell<T>], b: &[Cell<T>]) -> f64 {
-	let res = a
-		.iter()
-		.zip(b)
-		.map(|(a, b)| {
-			let val = a.get().to_f64() * b.get().to_f64();
-			//println!("dot: {} * {} = {}", a.get().to_f64(), b.get().to_f64(), val);
-			val
-		})
-		.sum();
-	//println!("dot: {}", res);
-	res
+	let zip = a.iter().zip(b);
+	zip.map(|(a, b)| a.get().to_f64() * b.get().to_f64()).sum()
 }
 
 pub fn rsqrt(a: f64) -> f64 {
@@ -83,6 +73,11 @@ pub fn swiglu_backward(lin: f64, gate: f64) -> (f64, f64) {
 	let swish = gate * sigmoid;
 
 	let d_lin = swish;
+
+	// Justification for allowing suboptimal_flops:
+	// Clippy recommends using `mul_add()`, however I checked the assembly and
+	// it generates `callq	*fma@GOTPCREL(%rip)`, which will probably be incredibly slow.
+	#[allow(clippy::suboptimal_flops)]
 	let d_gate = lin * (swish + sigmoid * (1.0 - swish));
 
 	(d_lin, d_gate)
@@ -134,54 +129,4 @@ pub fn softmax<T: Copy + FromToF64>(dst: &[Cell<T>], inp: &[Cell<T>]) {
 	let scratch = dst;
 	let (_, sum) = softmax_part1(inp, scratch);
 	softmax_part2(scratch, sum, dst);
-}
-
-#[derive(Clone, Copy)]
-pub struct View2D<'a, T> {
-	pub data: &'a [Cell<T>],
-	pub cols: usize,
-}
-
-impl<'a, T> View2D<'a, T> {
-	pub fn item(&self, row: usize, col: usize) -> &'a Cell<T> {
-		debug_assert!(col < self.cols);
-		let index = row * self.cols + col;
-		&self.data[index]
-	}
-
-	pub fn slice(&self, head: usize, _: RangeFull) -> &'a [Cell<T>] {
-		let begin = head * self.cols;
-		let end = begin + self.cols;
-		&self.data[begin..end]
-	}
-}
-
-#[derive(Clone, Copy)]
-pub struct View3D<'a, T> {
-	pub data: &'a [Cell<T>],
-	pub seq_len: usize,
-	pub seq_stride: usize,
-	pub head_shift: usize,
-	pub heads: usize,
-	pub features: usize,
-}
-
-impl<'a, T> View3D<'a, T> {
-	pub fn slice(&self, input: usize, head: usize, _: RangeFull) -> &'a [Cell<T>] {
-		let head = head >> self.head_shift;
-		let begin = input * self.seq_stride + head * self.features;
-		let end = begin + self.features;
-		&self.data[begin..end]
-	}
-
-	pub fn sub_sequence(&self, range: Range<usize>) -> Self {
-		let data_begin = range.start * self.seq_stride;
-		let data_end = range.end * self.seq_stride;
-		let seq_len = range.end.saturating_sub(range.start);
-		Self {
-			data: &self.data[data_begin..data_end],
-			seq_len,
-			..*self
-		}
-	}
 }

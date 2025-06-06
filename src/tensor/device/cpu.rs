@@ -7,6 +7,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::mem::ManuallyDrop;
+use std::ops::{Range, RangeFull};
 use std::ptr::NonNull;
 use std::rc::Rc;
 
@@ -25,6 +26,56 @@ use crate::tensor::device::cpu::float_executor::FloatExecutor;
 use crate::tensor::{DType, Device};
 
 //--------------------------------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+pub struct View2D<'a, T> {
+	pub data: &'a [Cell<T>],
+	pub cols: usize,
+}
+
+impl<'a, T> View2D<'a, T> {
+	pub fn item(&self, row: usize, col: usize) -> &'a Cell<T> {
+		debug_assert!(col < self.cols);
+		let index = row * self.cols + col;
+		&self.data[index]
+	}
+
+	pub fn slice(&self, head: usize, _: RangeFull) -> &'a [Cell<T>] {
+		let begin = head * self.cols;
+		let end = begin + self.cols;
+		&self.data[begin..end]
+	}
+}
+
+#[derive(Clone, Copy)]
+pub struct View3D<'a, T> {
+	pub data: &'a [Cell<T>],
+	pub seq_len: usize,
+	pub seq_stride: usize,
+	pub head_shift: usize,
+	pub heads: usize,
+	pub features: usize,
+}
+
+impl<'a, T> View3D<'a, T> {
+	pub fn slice(&self, input: usize, head: usize, _: RangeFull) -> &'a [Cell<T>] {
+		let head = head >> self.head_shift;
+		let begin = input * self.seq_stride + head * self.features;
+		let end = begin + self.features;
+		&self.data[begin..end]
+	}
+
+	pub fn sub_sequence(&self, range: Range<usize>) -> Self {
+		let data_begin = range.start * self.seq_stride;
+		let data_end = range.end * self.seq_stride;
+		let seq_len = range.end.saturating_sub(range.start);
+		Self {
+			data: &self.data[data_begin..data_end],
+			seq_len,
+			..*self
+		}
+	}
+}
 
 #[derive(Copy, Clone)]
 struct CPUSliceSet<'a, T> {
@@ -526,11 +577,7 @@ impl Executor for CPUDevice {
 		assert!(a.len == b.len);
 		assert!(dst.len == 1);
 		match dst.dtype {
-			f32::dtype => self.array_wise::<f32, 3>([&dst, &a, &b], |[dst, a, b]| {
-				let val = math::dot(a, b) * ab_weight;
-				let val = f32::from_f64(val);
-				dst[0].set(val);
-			}),
+			f32::dtype => self.array_wise::<f32, 3>([&dst, &a, &b], |[dst, a, b]| {}),
 			_ => todo!(),
 		}
 	}

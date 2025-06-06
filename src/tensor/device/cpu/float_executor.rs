@@ -6,12 +6,12 @@
 //------------------------------------------------------------------------------
 
 use std::cell::{Cell, RefCell};
-use std::mem::MaybeUninit;
 use std::rc::Rc;
 
-use crate::Result;
 use crate::tensor::HasDType;
+use crate::tensor::device::cpu::zip::vec_zip_n;
 use crate::tensor::device::executor::{Executor, SliceBatch};
+use crate::{Result, util};
 
 use super::math::{self, FromToF64};
 use super::rng::Rng;
@@ -29,32 +29,6 @@ impl<T: Copy + HasDType> FloatExecutor<T> {
 		Self { rng, phantom: std::marker::PhantomData }
 	}
 
-	/*
-		/// # Safety
-		/// - batch_size - All inputs must have equal shape[0], i.e., the batch size.
-		/// - safe_map - All inputs must have safe maps.
-		pub unsafe fn slice_wise<const N: usize>(
-			batch: [CPUSliceBatch<T>; N], mut f: impl FnMut([&[Cell<T>]; N]),
-		) {
-			let count = batch.first().map_or(0, |s| s.map.shape[0]);
-			for i in 0..count {
-				f(batch.map(|s| {
-					unsafe {
-						// SAFETY:
-						// - dimensionality - `CPUSliceBatch` has 2 dimensions
-						// - valid_ranges - The index `i` is valid if all inputs have the same shape[0],
-						// which is one of the preconditions of this function.
-						let s = s.select_unchecked(s![i, ..]);
-						// SAFETY:
-						// - contiguous - `CPUSliceBatch` uses `CompactND` as `Map`, which guarantees
-						//   that the selected sub-tensor is contiguous
-						// - safe_map - This is a precondition of this function.
-						s.as_slice_unchecked()
-					}
-				}));
-			}
-		}
-	*/
 	/// # Errors
 	/// - If 'dst' doesn't have a safe map.
 	pub fn nullary(dst: &SliceBatch, f: impl FnMut(&Cell<T>)) -> Result<()> {
@@ -121,16 +95,25 @@ impl<T: Copy + HasDType> FloatExecutor<T> {
 	pub fn n_contiguous<const N: usize>(
 		t: [&SliceBatch; N], f: impl FnMut([&Cell<T>; N]),
 	) -> Result<()> {
-		let mut u = [MaybeUninit::uninit(); N];
-		for n in 0..N {
-			u[n].write(CPUInput::new_safe_contiguous(t[n])?);
-		}
-		let t = unsafe { MaybeUninit::array_assume_init(u) };
+		let t = util::array::try_map_borrowed(&t, |_, t| CPUInput::new_safe_contiguous(t))?;
 
 		// TODO - assert shape
 
 		unsafe {
 			zip_n(t, f);
+		}
+		Ok(())
+	}
+
+	pub fn n_vec<const N: usize>(
+		t: [&SliceBatch; N], f: impl FnMut([&[Cell<T>]; N]),
+	) -> Result<()> {
+		let t = util::array::try_map_borrowed(&t, |_, t| CPUInput::new_safe_contiguous(t))?;
+
+		// TODO - assert shape
+
+		unsafe {
+			vec_zip_n(t, f);
 		}
 		Ok(())
 	}
@@ -230,5 +213,14 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 				d_gate.set(T::from_f64(d_gate_val));
 			},
 		)
+	}
+
+	fn dot(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64) -> Result<()> {
+		// TODO - ensure shape
+		Self::n_vec([dst, a, b], |[dst, a, b]| {
+			let val = math::dot(a, b) * ab_weight;
+			let val = T::from_f64(val);
+			dst[0].set(val);
+		})
 	}
 }

@@ -6,15 +6,15 @@
 //------------------------------------------------------------------------------
 
 use std::mem::MaybeUninit;
-/*
-pub fn map_owned<const N: usize, T, U>(array: [T; N], mut f: impl FnMut(usize, T) -> U) -> [U; N] {
+
+pub fn map_into<const N: usize, T, U>(array: [T; N], mut f: impl FnMut(usize, T) -> U) -> [U; N] {
 	let mut u = [const { MaybeUninit::uninit() }; N];
-	for i in 0..N {
-		u[i].write(f(i, array[i]));
+	for (i, t) in array.into_iter().enumerate() {
+		u[i].write(f(i, t));
 	}
 	unsafe { MaybeUninit::array_assume_init(u) }
 }
-*/
+
 pub fn map_borrowed<const N: usize, T, U>(
 	array: &[T; N], mut f: impl FnMut(usize, &T) -> U,
 ) -> [U; N] {
@@ -23,4 +23,29 @@ pub fn map_borrowed<const N: usize, T, U>(
 		u[i].write(f(i, &array[i]));
 	}
 	unsafe { MaybeUninit::array_assume_init(u) }
+}
+
+pub fn try_map_borrowed<const N: usize, T, U, E>(
+	array: &[T; N], mut f: impl FnMut(usize, &T) -> Result<U, E>,
+) -> Result<[U; N], E> {
+	let mut u = [const { MaybeUninit::uninit() }; N];
+	for i in 0..N {
+		u[i].write(f(i, &array[i])?);
+	}
+	Ok(unsafe { MaybeUninit::array_assume_init(u) })
+}
+
+pub fn try_array_from_iter<const N: usize, T, I>(iter: I) -> Option<[T; N]>
+where
+	I: IntoIterator<Item = T, IntoIter: ExactSizeIterator + Sized>,
+{
+	let mut iter = iter.into_iter();
+	if iter.len() != N {
+		return None;
+	}
+	let mut array = [const { MaybeUninit::uninit() }; N];
+	for a in array.iter_mut() {
+		a.write(iter.next().unwrap());
+	}
+	Some(unsafe { MaybeUninit::array_assume_init(array) })
 }

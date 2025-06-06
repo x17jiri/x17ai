@@ -8,9 +8,9 @@
 use std::hint::cold_path;
 
 use super::{
-	CompactND, DynD, IndexToOffset, Map, MergeAllDims, MergeDims, ReshapeLastDim, SizeAndStride,
-	Transpose,
+	DynD, IndexToOffset, Map, MergeAllDims, MergeDims, ReshapeLastDim, SizeAndStride, Transpose,
 };
+use crate::util::array::try_array_from_iter;
 use crate::{Error, Result};
 
 #[derive(Clone, Copy)]
@@ -19,44 +19,19 @@ pub struct ND<const N: usize> {
 	pub offset: usize,
 }
 
-impl<const N: usize> From<CompactND<N>> for ND<N>
-where
-	[(); N - 2]:,
-{
-	fn from(compact: CompactND<N>) -> Self {
-		let mut dims = [SizeAndStride::default(); N];
-		let mut stride = 1;
-		for i in (1..N).rev() {
-			let size = compact.shape[i];
-			dims[i] = SizeAndStride { size, stride };
-			stride *= size;
-		}
-		dims[0] = SizeAndStride {
-			size: compact.shape[0],
-			stride: compact.outer_stride,
-		};
-		ND { dims, offset: compact.offset }
-	}
-}
-
 impl<const N: usize> TryFrom<DynD> for ND<N> {
 	type Error = Error;
 
 	fn try_from(dyn_d: DynD) -> Result<Self> {
-		if dyn_d.dims.len() != N {
-			cold_path();
-			return Err(format!(
-				"Cannot convert DynD with {} dimensions to ND with {} dimensions.",
-				dyn_d.dims.len(),
-				N
-			)
-			.into());
-		}
-		let mut dims = [SizeAndStride::default(); N];
-		for (i, dim) in dyn_d.dims.iter().enumerate() {
-			dims[i] = *dim;
-		}
-		Ok(ND { dims, offset: dyn_d.offset })
+		let Some(dims) = try_array_from_iter(dyn_d.dims.iter().copied()) else {
+			#[cold]
+			fn err_cannot_conv_dynd_to_nd(dyn_d: usize, nd: usize) -> Error {
+				format!("Cannot convert DynD with {dyn_d} dimensions to ND with {nd} dimensions.")
+					.into()
+			}
+			return Err(err_cannot_conv_dynd_to_nd(dyn_d.dims.len(), N));
+		};
+		Ok(Self { dims, offset: dyn_d.offset })
 	}
 }
 
