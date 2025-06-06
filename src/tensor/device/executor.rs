@@ -108,14 +108,15 @@ pub trait Executor {
 	/// - If there is any problem executing the operation on the device.
 	fn mul(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()>;
 
+	fn mul_acc(
+		&self, dst: &SliceBatch, dst_weight: f64, a: &SliceBatch, b: &SliceBatch, ab_weight: f64,
+	) -> Result<()>;
+
+	fn sub(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()>;
+
+	fn add(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()>;
+
 	/*
-		fn mul_acc(
-			&self, dst: &SliceBatch, dst_weight: f64, a: &SliceBatch, b: &SliceBatch, ab_weight: f64,
-		);
-
-		fn sub(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch);
-		fn add(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch);
-
 		fn swiglu(&self, dst: &SliceBatch, lin: &SliceBatch, gate: &SliceBatch);
 		fn swiglu_backward(
 			&self, d_lin: &SliceBatch, d_gate: &SliceBatch, lin: &SliceBatch, gate: &SliceBatch,

@@ -6,7 +6,6 @@
 //------------------------------------------------------------------------------
 
 use std::cell::{Cell, RefCell};
-use std::hint::cold_path;
 use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -16,6 +15,7 @@ use crate::{Error, Result};
 
 pub mod float_executor;
 pub mod rng;
+pub mod zip;
 
 use rng::Rng;
 

@@ -19,7 +19,7 @@ use super::Selection;
 
 //--------------------------------------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub struct SizeAndStride {
 	pub size: usize,
 	pub stride: usize,
@@ -41,9 +41,7 @@ pub trait Map: Clone {
 	fn ndim(&self) -> usize;
 	fn elems(&self) -> usize;
 	fn span(&self) -> std::ops::Range<usize>;
-	fn is_contiguous(&self) -> bool {
-		self.span().len() == self.elems()
-	}
+	fn is_contiguous(&self) -> bool;
 }
 
 pub trait MergeDims<const M: usize> {

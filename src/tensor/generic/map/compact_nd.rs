@@ -35,10 +35,15 @@ where
 	}
 
 	fn span(&self) -> std::ops::Range<usize> {
-		// TODO - this will fail if self.outer_stride == 0
 		let start = self.offset;
-		let len =
-			(self.shape[0] - 1) * self.outer_stride + self.shape[1..].iter().product::<usize>();
+		let outer_size = self.shape[0];
+		let inner_size = self.shape[1..].iter().product::<usize>();
+		let elems = outer_size * inner_size;
+		if elems == 0 {
+			cold_path();
+			return start..start;
+		}
+		let len = (outer_size - 1) * self.outer_stride + inner_size;
 		let end = start + len;
 		start..end
 	}

@@ -86,11 +86,11 @@ impl Map for DynD {
 	}
 
 	fn span(&self) -> std::ops::Range<usize> {
-		// TODO - this will fail if dim.size == 0
-		let start = self.offset;
-		let len = self.dims.iter().map(|dim| (dim.size - 1) * dim.stride).product::<usize>() + 1;
-		let end = start + len;
-		start..end
+		todo!();
+	}
+
+	fn is_contiguous(&self) -> bool {
+		todo!();
 	}
 }
 

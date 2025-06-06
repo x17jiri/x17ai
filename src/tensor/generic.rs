@@ -19,7 +19,7 @@ use crate::{Error, Result};
 //--------------------------------------------------------------------------------------------------
 // Tensor
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Tensor<M: Map, B: Buffer> {
 	pub map: M,
 	pub buf: B,
@@ -74,8 +74,8 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 	}
 
 	/// # Safety
-	/// - The tensor must be K-dimensional
-	/// - Ranges must be valid (end >= start) and within bounds
+	/// - dimensionality - The tensor must be K-dimensional
+	/// - valid_ranges - Ranges must be valid (end >= start and within bounds)
 	pub unsafe fn select_unchecked<const K: usize>(
 		self, ranges: [Selection; K],
 	) -> Tensor<M::Output, B>
@@ -101,6 +101,7 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 	pub fn conv_map<NewMap: Map>(self) -> std::result::Result<Tensor<NewMap, B>, M::Error>
 	where
 		M: TryInto<NewMap>,
+		M::Error: Into<crate::Error>,
 	{
 		let map = self.map.try_into()?;
 		Ok(Tensor { map, buf: self.buf })
@@ -130,37 +131,59 @@ impl<'a, M: Map, T> Tensor<M, &'a [T]> {
 	///
 	/// # Errors
 	/// - If the tensor is not contiguous, because there would be gaps in the slice.
+	/// - If the map is not safe, i.e., it gives an out-of-bounds offset.
 	pub fn as_slice(&self) -> Result<&'a [T]> {
 		if !self.map.is_contiguous() {
-			return Err(
+			#[cold]
+			fn err_tensor_not_contiguous() -> Error {
 				"Cannot view a tensor as a slice because the tensor is not contiguous.".into()
-			);
+			}
+			return Err(err_tensor_not_contiguous());
 		}
-		// Justification for allowing indexing:
-		// If tensors are constructed correctly, the tensor's span should always be inside
-		// the buffer. So the indexing operation could only panic if there is a bug in the code.
-		#[allow(clippy::indexing_slicing)]
-		Ok(&self.buf[self.map.span()])
-	}
-
-	pub fn is_map_safe(&self) -> bool {
 		let span = self.map.span();
-		let buf_len = self.buf.len();
-		span.start <= span.end && span.end <= buf_len
+		let Some(slice) = self.buf.get(span.clone()) else {
+			#[cold]
+			fn err_slice_out_of_bounds(span: std::ops::Range<usize>, buf_len: usize) -> Error {
+				format!("Slice {span:?} is out of bounds for buffer of length {buf_len}.",).into()
+			}
+			return Err(err_slice_out_of_bounds(span, self.buf.len()));
+		};
+		Ok(slice)
 	}
 
 	/// Returns a slice with the elements of the tensor.
 	///
 	/// # Safety
-	/// - The tensor must be contiguous, otherwise the slice will contain gaps. This can be checked
-	///   with `self.map.is_contiguous()`.
-	/// - The map is safe, i.e., it never gives an out-of-bounds index. This can be checked with
-	///   `self.is_map_safe()`.
+	/// - contiguous - The tensor must be contiguous, otherwise the slice will contain gaps. This
+	///   can be checked with `self.map.is_contiguous()`.
+	/// - safe_map - The map is safe, i.e., it never gives an out-of-bounds index. This can be
+	///   checked with `self.ensure_safe()`.
 	pub unsafe fn as_slice_unchecked(&self) -> &'a [T] {
-		debug_assert!(self.map.is_contiguous());
-		debug_assert!(self.is_map_safe());
+		debug_assert!(self.is_contiguous());
+		debug_assert!(self.clone().ensure_safe().is_ok());
 		let span = self.map.span();
 		self.buf.get_unchecked(span)
+	}
+
+	pub fn is_contiguous(&self) -> bool {
+		self.map.is_contiguous()
+	}
+
+	pub fn ensure_safe(&self) -> Result<()> {
+		let span = self.map.span();
+		let buf_len = self.buf.len();
+		let safe = span.start <= span.end && span.end <= buf_len;
+		if !safe {
+			#[cold]
+			fn err_map_not_safe(span: std::ops::Range<usize>, buf_len: usize) -> Error {
+				format!(
+					"Tensor map is not safe: span {span:?} is out of bounds for buffer of length {buf_len}.",
+				)
+				.into()
+			}
+			return Err(err_map_not_safe(span, buf_len));
+		}
+		Ok(())
 	}
 }
 

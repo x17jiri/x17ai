@@ -6,138 +6,16 @@
 //------------------------------------------------------------------------------
 
 use std::cell::{Cell, RefCell};
-use std::hint::cold_path;
 use std::rc::Rc;
 
-use crate::tensor::device::cpu::rng::Rng;
+use crate::Result;
+use crate::tensor::HasDType;
 use crate::tensor::device::executor::{Executor, SliceBatch};
-use crate::tensor::generic::map::CompactND;
-use crate::tensor::{HasDType, generic};
-use crate::{Error, Result, s};
 
-pub type CPUSliceBatch<'a, T> = generic::Tensor<CompactND<2>, &'a [Cell<T>]>;
+use super::rng::Rng;
+use super::zip::{CPUInput, zip1, zip2, zip3};
 
-pub struct FloatExecutor<T: HasDType> {
-	rng: Rc<RefCell<Rng>>,
-	phantom: std::marker::PhantomData<T>,
-}
-
-impl<T: HasDType> FloatExecutor<T> {
-	pub fn new(rng: Rc<RefCell<Rng>>) -> Self {
-		Self { rng, phantom: std::marker::PhantomData }
-	}
-
-	/// # Errors
-	/// - If all the batches don't have the same size.
-	/// - If any of the inputs don't have a safe map.
-	pub fn slice_wise<const N: usize>(
-		batch: [CPUSliceBatch<T>; N], mut f: impl FnMut([&[Cell<T>]; N]),
-	) -> Result<()> {
-		for item in batch {
-			if !item.is_map_safe() {
-				#[cold]
-				fn err_slice_batch_not_safe() -> Error {
-					"Unsafe SliceBatch detected".into()
-				}
-				return Err(err_slice_batch_not_safe());
-			}
-		}
-
-		let count = batch.first().map_or(0, |s| s.map.shape[0]);
-		if batch.iter().any(|s| s.map.shape[0] != count) {
-			#[cold]
-			fn err_batch_sizes_not_equal() -> Error {
-				"Batches must have the same size".into()
-			}
-			return Err(err_batch_sizes_not_equal());
-		}
-
-		for i in 0..count {
-			let slices = batch.map(|s| {
-				unsafe {
-					// SAFETY: `i < count` && we verified that all batches have size `count`
-					let s = s.select_unchecked(s![i, ..]);
-					// SAFETY:
-					// - `SliceBatch` uses `CompactND` as `Map`, which guarantees that the selected
-					//   sub-tensor is contiguous
-					// - At the start of the function, we checked that all slices have safe maps.
-					s.as_slice_unchecked()
-				}
-			});
-			f(slices);
-		}
-
-		Ok(())
-	}
-
-	/// # Errors
-	/// - If all the batches don't have the same shape.
-	/// - If any of the inputs doesn't have a safe map.
-	pub fn elem_wise<const N: usize>(
-		batch: [CPUSliceBatch<T>; N], mut f: impl FnMut([&Cell<T>; N]),
-	) -> Result<()> {
-		let slice_len = batch.first().map_or(0, |&s| s.map.shape[1]);
-		if batch.iter().any(|i| i.map.shape[1] != slice_len) {
-			cold_path();
-			return Err("Batches must have the same slice length".into());
-		}
-
-		Self::slice_wise(batch, |slices| {
-			for i in 0..slice_len {
-				f(slices.map(|slice| {
-					debug_assert!(i < slice.len());
-					let element = unsafe { slice.get_unchecked(i) };
-					element
-				}));
-			}
-		})
-	}
-
-	/// # Errors
-	/// - If 'dst' doesn't have a safe map.
-	pub fn nullary(dst: CPUSliceBatch<T>, mut f: impl FnMut(&Cell<T>)) -> Result<()> {
-		Self::slice_wise([dst], |[dst]| {
-			for d in dst {
-				f(d);
-			}
-		})
-	}
-
-	/// # Errors
-	/// - If both tensors don't have the same shape.
-	/// - If any of the tensors doesn't have a safe map.
-	pub fn unary(
-		dst: CPUSliceBatch<T>, inp: CPUSliceBatch<T>, mut f: impl FnMut(&Cell<T>, &Cell<T>),
-	) -> Result<()> {
-		if inp.map.shape[0] != dst.map.shape[0]
-			|| (inp.map.shape[1] != dst.map.shape[1] && inp.map.shape[1] != 1)
-		{
-			#[cold]
-			fn err_batches_shape_mismatch() -> Error {
-				"Batches must have the same shape".into()
-			}
-			return Err(err_batches_shape_mismatch());
-		}
-
-		if inp.map.shape[1] == 1 {
-			Self::slice_wise([dst, inp], |[dst, inp]| {
-				debug_assert!(inp.len() == 1);
-				// SAFETY: `inp.map.shape[1] == 1`, so `inp` has only one element and so we can
-				// safely use `first()`.
-				let i = unsafe { inp.first().unwrap_unchecked() };
-				for d in dst {
-					f(d, i);
-				}
-			})
-		} else {
-			Self::slice_wise([dst, inp], |[dst, inp]| {
-				for (d, i) in dst.iter().zip(inp.iter()) {
-					f(d, i);
-				}
-			})
-		}
-	}
-}
+//--------------------------------------------------------------------------------------------------
 
 pub trait FromToF64 {
 	const MIN: f64; // largest negative value of type
@@ -173,62 +51,175 @@ impl FromToF64 for f64 {
 	}
 }
 
+//--------------------------------------------------------------------------------------------------
+
+pub struct FloatExecutor<T: Copy + HasDType> {
+	rng: Rc<RefCell<Rng>>,
+	phantom: std::marker::PhantomData<T>,
+}
+
+impl<T: Copy + HasDType> FloatExecutor<T> {
+	pub fn new(rng: Rc<RefCell<Rng>>) -> Self {
+		Self { rng, phantom: std::marker::PhantomData }
+	}
+
+	/*
+		/// # Safety
+		/// - batch_size - All inputs must have equal shape[0], i.e., the batch size.
+		/// - safe_map - All inputs must have safe maps.
+		pub unsafe fn slice_wise<const N: usize>(
+			batch: [CPUSliceBatch<T>; N], mut f: impl FnMut([&[Cell<T>]; N]),
+		) {
+			let count = batch.first().map_or(0, |s| s.map.shape[0]);
+			for i in 0..count {
+				f(batch.map(|s| {
+					unsafe {
+						// SAFETY:
+						// - dimensionality - `CPUSliceBatch` has 2 dimensions
+						// - valid_ranges - The index `i` is valid if all inputs have the same shape[0],
+						// which is one of the preconditions of this function.
+						let s = s.select_unchecked(s![i, ..]);
+						// SAFETY:
+						// - contiguous - `CPUSliceBatch` uses `CompactND` as `Map`, which guarantees
+						//   that the selected sub-tensor is contiguous
+						// - safe_map - This is a precondition of this function.
+						s.as_slice_unchecked()
+					}
+				}));
+			}
+		}
+	*/
+	/// # Errors
+	/// - If 'dst' doesn't have a safe map.
+	pub fn nullary(dst: &SliceBatch, f: impl FnMut(&Cell<T>)) -> Result<()> {
+		let dst = CPUInput::new_safe_contiguous(dst)?;
+		unsafe {
+			zip1(dst, f);
+		}
+		Ok(())
+	}
+
+	/// # Errors
+	/// - If both tensors don't have the same shape.
+	/// - If any of the tensors doesn't have a safe map.
+	pub fn unary(
+		dst: &SliceBatch, inp: &SliceBatch, mut f: impl FnMut(&Cell<T>, &Cell<T>),
+	) -> Result<()> {
+		let dst = CPUInput::new_safe_contiguous(dst)?;
+		let inp = CPUInput::new_safe(inp)?;
+
+		// TODO - assert shape
+
+		unsafe {
+			match inp {
+				CPUInput::Slice(inp) => {
+					zip2(dst, inp, |d, i| f(d, i));
+				},
+				CPUInput::Broadcast(inp) => {
+					zip2(dst, inp, |d, i| f(d, i));
+				},
+			}
+		}
+		Ok(())
+	}
+
+	pub fn binary(
+		dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch,
+		mut f: impl FnMut(&Cell<T>, &Cell<T>, &Cell<T>),
+	) -> Result<()> {
+		let dst = CPUInput::new_safe_contiguous(dst)?;
+		let a = CPUInput::new_safe(a)?;
+		let b = CPUInput::new_safe(b)?;
+
+		// TODO - assert shape
+
+		unsafe {
+			match (a, b) {
+				(CPUInput::Slice(a), CPUInput::Slice(b)) => {
+					zip3(dst, a, b, |d, a, b| f(d, a, b));
+				},
+				(CPUInput::Broadcast(a), CPUInput::Broadcast(b)) => {
+					zip3(dst, a, b, |d, a, b| f(d, a, b));
+				},
+				(CPUInput::Slice(a), CPUInput::Broadcast(b)) => {
+					zip3(dst, a, b, |d, a, b| f(d, a, b));
+				},
+				(CPUInput::Broadcast(a), CPUInput::Slice(b)) => {
+					zip3(dst, a, b, |d, a, b| f(d, a, b));
+				},
+			}
+		}
+		Ok(())
+	}
+}
+
 impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 	fn zeros(&self, dst: &SliceBatch) -> Result<()> {
-		let dst = dst.view()?;
-		let dst = dst.conv_map()?;
-		Self::nullary(dst, |d| d.set(T::from_f64(0.0)))
+		Self::nullary(dst, |dst| dst.set(T::from_f64(0.0)))
 	}
 
 	fn randn_clamped(&self, dst: &SliceBatch) -> Result<()> {
-		let dst = dst.view()?;
-		let dst = dst.conv_map()?;
 		let mut rng = self.rng.borrow_mut();
-		Self::nullary(dst, |d| d.set(T::from_f64(rng.get_normal_clamped())))
+		Self::nullary(dst, |dst| dst.set(T::from_f64(rng.get_normal_clamped())))
 	}
 
 	fn copy(&self, dst: &SliceBatch, src: &SliceBatch) -> Result<()> {
-		let dst = dst.view()?;
-		let dst = dst.conv_map()?;
-		let src = src.view()?;
-		let src = src.conv_map()?;
-		Self::unary(dst, src, |d, s| d.set(s.get()))
+		Self::unary(dst, src, |dst, src| dst.set(src.get()))
 	}
 
 	fn acc(
 		&self, dst: &SliceBatch, dst_weight: f64, upd: &SliceBatch, upd_weight: f64,
 	) -> Result<()> {
-		// TODO - should ditch CompactND and allow stride == 0 ??
-
-		let dst = dst.view()?;
-		let dst = dst.conv_map()?;
-		let upd = upd.view()?;
-		let upd = upd.conv_map()?;
-		Self::unary(dst, upd, |d, u| {
-			let d_val = d.get().to_f64();
-			let u_val = u.get().to_f64();
+		Self::unary(dst, upd, |dst, upd| {
+			let d = dst.get().to_f64();
+			let u = upd.get().to_f64();
 
 			// Justification for allowing suboptimal_flops:
 			// Clippy recommends using `mul_add()`, however I checked the assembly and
 			// it generates `callq	*fma@GOTPCREL(%rip)`, which will probably be incredibly slow.
 			#[allow(clippy::suboptimal_flops)]
-			let v = (d_val * dst_weight) + (u_val * upd_weight);
+			let v = (d * dst_weight) + (u * upd_weight);
 
-			d.set(T::from_f64(v));
+			dst.set(T::from_f64(v));
 		})
 	}
 
 	fn mul(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()> {
-		// TODO - this doesn't handle broadcasting
-		let dst = dst.view()?;
-		let dst = dst.conv_map()?;
-		let a = a.view()?;
-		let a = a.conv_map()?;
-		let b = b.view()?;
-		let b = b.conv_map()?;
-		Self::elem_wise([dst, a, b], |[d, a, b]| {
+		Self::binary(dst, a, b, |dst, a, b| {
 			let v = a.get().to_f64() * b.get().to_f64();
-			d.set(T::from_f64(v));
+			dst.set(T::from_f64(v));
+		})
+	}
+
+	fn mul_acc(
+		&self, dst: &SliceBatch, dst_weight: f64, a: &SliceBatch, b: &SliceBatch, ab_weight: f64,
+	) -> Result<()> {
+		Self::binary(dst, a, b, |dst, a, b| {
+			let d_val = dst.get().to_f64();
+			let a_val = a.get().to_f64();
+			let b_val = b.get().to_f64();
+
+			// Justification for allowing suboptimal_flops:
+			// Clippy recommends using `mul_add()`, however I checked the assembly and
+			// it generates `callq	*fma@GOTPCREL(%rip)`, which will probably be incredibly slow.
+			#[allow(clippy::suboptimal_flops)]
+			let v = (d_val * dst_weight) + (a_val * b_val * ab_weight);
+
+			dst.set(T::from_f64(v));
+		})
+	}
+
+	fn sub(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()> {
+		Self::binary(dst, a, b, |dst, a, b| {
+			let v = a.get().to_f64() - b.get().to_f64();
+			dst.set(T::from_f64(v));
+		})
+	}
+
+	fn add(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()> {
+		Self::binary(dst, a, b, |dst, a, b| {
+			let v = a.get().to_f64() + b.get().to_f64();
+			dst.set(T::from_f64(v));
 		})
 	}
 }

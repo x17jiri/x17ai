@@ -70,11 +70,30 @@ impl<const N: usize> Map for ND<N> {
 	}
 
 	fn span(&self) -> std::ops::Range<usize> {
-		// TODO - this will fail if dim.size == 0
 		let start = self.offset;
-		let len = self.dims.iter().map(|dim| (dim.size - 1) * dim.stride).product::<usize>() + 1;
+		if self.elems() == 0 {
+			cold_path();
+			return start..start;
+		}
+		let len = self.dims.iter().map(|dim| (dim.size - 1) * dim.stride).sum::<usize>() + 1;
 		let end = start + len;
 		start..end
+	}
+
+	fn is_contiguous(&self) -> bool {
+		// TODO - this calculation doesn't work. Or does it?????
+		// Consider these dims:
+		//     dim 0: size 3, stride 10
+		//     dim 1: size 10, stride 0
+		//
+		//     len = 2*10 + 9*0 + 1 = 21
+		let elems = self.elems();
+		if elems == 0 {
+			cold_path();
+			return true;
+		}
+		let len = self.dims.iter().map(|dim| (dim.size - 1) * dim.stride).sum::<usize>() + 1;
+		len == elems
 	}
 }
 
