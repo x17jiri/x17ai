@@ -139,7 +139,7 @@ pub trait Executor {
 
 	/// Element-wise unary operation:
 	///
-	///    dst = max(log(a), -1000, DType.MAX_NEGATIVE);
+	///     dst = max(ln(a), -1000, DType.MAX_NEGATIVE);
 	///
 	/// So the output is defined even for a <= 0.
 	///
@@ -156,7 +156,7 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn log_clamped(&self, dst: &SliceBatch, a: &SliceBatch) -> Result<()>;
+	fn ln_clamped(&self, dst: &SliceBatch, a: &SliceBatch) -> Result<()>;
 
 	/// Element-wise multiplication:
 	///

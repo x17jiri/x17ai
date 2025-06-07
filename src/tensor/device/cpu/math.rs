@@ -50,6 +50,10 @@ pub fn dot<T: Copy + FromToF64>(a: &[Cell<T>], b: &[Cell<T>]) -> f64 {
 	zip.map(|(a, b)| a.get().to_f64() * b.get().to_f64()).sum()
 }
 
+pub fn approx_eq(a: f64, b: f64, eps: f64) -> bool {
+	(a - b).abs() < eps
+}
+
 pub fn rsqrt(a: f64) -> f64 {
 	1.0 / a.sqrt()
 }
@@ -74,10 +78,6 @@ pub fn swiglu_backward(lin: f64, gate: f64) -> (f64, f64) {
 
 	let d_lin = swish;
 
-	// Justification for allowing suboptimal_flops:
-	// Clippy recommends using `mul_add()`, however I checked the assembly and
-	// it generates `callq	*fma@GOTPCREL(%rip)`, which will probably be incredibly slow.
-	#[allow(clippy::suboptimal_flops)]
 	let d_gate = lin * (swish + sigmoid * (1.0 - swish));
 
 	(d_lin, d_gate)

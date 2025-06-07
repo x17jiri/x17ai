@@ -8,6 +8,8 @@
 use log;
 use std::hint::cold_path;
 
+use crate::util::LossyInto;
+
 // State initialization constant ("expand 32-byte k")
 const CONST: [u32; 4] = [0x_6170_7865, 0x_3320_646e, 0x_7962_2d32, 0x_6b20_6574];
 
@@ -112,10 +114,9 @@ impl Rng {
 		let lo = u64::from(self.get_u32());
 		let hi = u64::from(self.get_u32());
 		let val = (hi << 32) | lo;
+		let val: f64 = val.lossy_into();
 
-		#[allow(clippy::cast_precision_loss)]
-		(val as f64)
-			* (1.0 / (4_294_967_296.0 * 4_294_967_296.0))
+		val * (1.0 / (4_294_967_296.0 * 4_294_967_296.0))
 	}
 
 	/// Generates a float with normal distribution with mean 0 and variance 1.

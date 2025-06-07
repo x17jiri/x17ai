@@ -7,3 +7,21 @@
 
 // pub mod rc; TODO
 pub mod array;
+
+pub trait LossyInto<T> {
+	fn lossy_into(self) -> T;
+}
+
+#[allow(clippy::cast_precision_loss)]
+impl LossyInto<f64> for usize {
+	fn lossy_into(self) -> f64 {
+		self as f64
+	}
+}
+
+#[allow(clippy::cast_precision_loss)]
+impl LossyInto<f64> for u64 {
+	fn lossy_into(self) -> f64 {
+		self as f64
+	}
+}

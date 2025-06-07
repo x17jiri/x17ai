@@ -11,6 +11,7 @@ use std::rc::Rc;
 use crate::tensor::HasDType;
 use crate::tensor::device::cpu::zip::vec_zip_n;
 use crate::tensor::device::executor::{Executor, SliceBatch};
+use crate::util::LossyInto;
 use crate::util::array::{try_map_borrowed, try_map_into};
 use crate::{Error, Result};
 
@@ -152,11 +153,7 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 			let d = dst.get().to_f64();
 			let u = upd.get().to_f64();
 
-			// Justification for allowing suboptimal_flops:
-			// Clippy recommends using `mul_add()`, however I checked the assembly and
-			// it generates `callq	*fma@GOTPCREL(%rip)`, which will probably be incredibly slow.
-			#[allow(clippy::suboptimal_flops)]
-			let v = (d * dst_weight) + (u * upd_weight);
+			let v = d * dst_weight + u * upd_weight;
 
 			dst.set(T::from_f64(v));
 		})
@@ -165,20 +162,30 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 	fn rsqrt(&self, dst: &SliceBatch, a: &SliceBatch, eps: f64) -> Result<()> {
 		Self::unary(dst, a, |dst, a| {
 			let a = a.get().to_f64();
-			dst.set(T::from_f64(math::rsqrt(a + eps)));
+
+			let v = math::rsqrt(a + eps);
+
+			dst.set(T::from_f64(v));
 		})
 	}
 
-	fn log_clamped(&self, dst: &SliceBatch, a: &SliceBatch) -> Result<()> {
+	fn ln_clamped(&self, dst: &SliceBatch, a: &SliceBatch) -> Result<()> {
 		Self::unary(dst, a, |dst, a| {
 			let a = a.get().to_f64();
-			dst.set(T::from_f64(a.ln().max(-1000.0)));
+
+			let v = a.ln().max(-1000.0);
+
+			dst.set(T::from_f64(v));
 		})
 	}
 
 	fn mul(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()> {
 		Self::binary(dst, a, b, |dst, a, b| {
-			let v = a.get().to_f64() * b.get().to_f64();
+			let a = a.get().to_f64();
+			let b = b.get().to_f64();
+
+			let v = a * b;
+
 			dst.set(T::from_f64(v));
 		})
 	}
@@ -187,15 +194,11 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		&self, dst: &SliceBatch, dst_weight: f64, a: &SliceBatch, b: &SliceBatch, ab_weight: f64,
 	) -> Result<()> {
 		Self::binary(dst, a, b, |dst, a, b| {
-			let d_val = dst.get().to_f64();
-			let a_val = a.get().to_f64();
-			let b_val = b.get().to_f64();
+			let d = dst.get().to_f64();
+			let a = a.get().to_f64();
+			let b = b.get().to_f64();
 
-			// Justification for allowing suboptimal_flops:
-			// Clippy recommends using `mul_add()`, however I checked the assembly and
-			// it generates `callq	*fma@GOTPCREL(%rip)`, which will probably be incredibly slow.
-			#[allow(clippy::suboptimal_flops)]
-			let v = (d_val * dst_weight) + (a_val * b_val * ab_weight);
+			let v = (d * dst_weight) + (a * b * ab_weight);
 
 			dst.set(T::from_f64(v));
 		})
@@ -203,14 +206,22 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 
 	fn sub(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()> {
 		Self::binary(dst, a, b, |dst, a, b| {
-			let v = a.get().to_f64() - b.get().to_f64();
+			let a = a.get().to_f64();
+			let b = b.get().to_f64();
+
+			let v = a - b;
+
 			dst.set(T::from_f64(v));
 		})
 	}
 
 	fn add(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()> {
 		Self::binary(dst, a, b, |dst, a, b| {
-			let v = a.get().to_f64() + b.get().to_f64();
+			let a = a.get().to_f64();
+			let b = b.get().to_f64();
+
+			let v = a + b;
+
 			dst.set(T::from_f64(v));
 		})
 	}
@@ -244,17 +255,16 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 	fn sum_all(&self, a: &SliceBatch) -> Result<f64> {
 		// TODO - this could handle broadcasted tensors as well
 		let mut sum = 0.0;
-		Self::n_contiguous([a], |[a]| sum += a.get().to_f64())?;
+		Self::n_contiguous([a], |[a]| {
+			sum += a.get().to_f64();
+		})?;
 		Ok(sum)
 	}
-
 	fn approx_eq(&self, a: &SliceBatch, b: &SliceBatch, eps: f64) -> Result<bool> {
 		// TODO - this could handle broadcasted tensors as well
 		let mut result = true;
 		Self::n_contiguous([a, b], |[a, b]| {
-			let a_val = a.get().to_f64();
-			let b_val = b.get().to_f64();
-			result &= (a_val - b_val).abs() < eps;
+			result &= math::approx_eq(a.get().to_f64(), b.get().to_f64(), eps);
 		})?;
 		Ok(result)
 	}
@@ -264,14 +274,14 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 	}
 
 	fn rms_norm(&self, dst: &SliceBatch, a: &SliceBatch, eps: f64) -> Result<()> {
-		let len = dst.map.dims[1].size;
-		#[allow(clippy::cast_precision_loss)]
-		let len_recip = 1.0 / (len as f64);
-
 		Self::n_vec([dst, a], |[dst, a]| {
+			//let len = dst.map.dims[1].size;
+			let len = dst.len();
+			let len: f64 = len.lossy_into();
+			let len_recip = 1.0 / len;
+
 			//--
 
-			#[allow(clippy::suboptimal_flops)]
 			let scale = math::rsqrt(math::dot(a, a) * len_recip + eps);
 			for (d, i) in dst.iter().zip(a) {
 				let val = i.get().to_f64() * scale;

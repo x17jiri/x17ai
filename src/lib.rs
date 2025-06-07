@@ -41,6 +41,9 @@
 #![warn(clippy::panic)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::missing_const_for_fn)]
+// Clippy recommends using `mul_add()`, however I checked the assembly and
+// it generates `callq	*fma@GOTPCREL(%rip)`, which will probably be incredibly slow.
+#![allow(clippy::suboptimal_flops)]
 
 pub mod format;
 //pub mod nn; TODO
