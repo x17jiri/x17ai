@@ -11,7 +11,8 @@ use std::rc::Rc;
 use crate::tensor::HasDType;
 use crate::tensor::device::cpu::zip::vec_zip_n;
 use crate::tensor::device::executor::{Executor, SliceBatch};
-use crate::{Result, util};
+use crate::util::array::{try_map_borrowed, try_map_into};
+use crate::{Error, Result};
 
 use super::math::{self, FromToF64};
 use super::rng::Rng;
@@ -27,6 +28,25 @@ pub struct FloatExecutor<T: Copy + HasDType> {
 impl<T: Copy + HasDType> FloatExecutor<T> {
 	pub fn new(rng: Rc<RefCell<Rng>>) -> Self {
 		Self { rng, phantom: std::marker::PhantomData }
+	}
+
+	pub fn ensure_same_shape<const N: usize>(t: [&SliceBatch; N]) -> Result<()> {
+		let shapes = try_map_into(t, |_, t| t.nd_shape())?;
+		if let Some(shape) = shapes.first()
+			&& shapes.iter().any(|s| s != shape)
+		{
+			#[cold]
+			fn err_shape_mismatch<const N: usize>(shapes: &[[usize; 2]]) -> Error {
+				let shapes_str = shapes
+					.iter()
+					.map(|[a, b]| format!("[{a}, {b}]"))
+					.collect::<Vec<_>>()
+					.join(", ");
+				format!("Expected all tensors to have the same shape, but got: {shapes_str}").into()
+			}
+			return Err(err_shape_mismatch::<N>(&shapes));
+		}
+		Ok(())
 	}
 
 	/// # Errors
@@ -45,11 +65,9 @@ impl<T: Copy + HasDType> FloatExecutor<T> {
 	pub fn unary(
 		dst: &SliceBatch, inp: &SliceBatch, mut f: impl FnMut(&Cell<T>, &Cell<T>),
 	) -> Result<()> {
+		Self::ensure_same_shape([dst, inp])?;
 		let dst = CPUInput::new_safe_contiguous(dst)?;
 		let inp = CPUInput::new_safe(inp)?;
-
-		// TODO - assert shape
-
 		unsafe {
 			match inp {
 				CPUInput::Slice(inp) => {
@@ -67,12 +85,10 @@ impl<T: Copy + HasDType> FloatExecutor<T> {
 		dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch,
 		mut f: impl FnMut(&Cell<T>, &Cell<T>, &Cell<T>),
 	) -> Result<()> {
+		Self::ensure_same_shape([dst, a, b])?;
 		let dst = CPUInput::new_safe_contiguous(dst)?;
 		let a = CPUInput::new_safe(a)?;
 		let b = CPUInput::new_safe(b)?;
-
-		// TODO - assert shape
-
 		unsafe {
 			match (a, b) {
 				(CPUInput::Slice(a), CPUInput::Slice(b)) => {
@@ -95,10 +111,8 @@ impl<T: Copy + HasDType> FloatExecutor<T> {
 	pub fn n_contiguous<const N: usize>(
 		t: [&SliceBatch; N], f: impl FnMut([&Cell<T>; N]),
 	) -> Result<()> {
-		let t = util::array::try_map_borrowed(&t, |_, t| CPUInput::new_safe_contiguous(t))?;
-
-		// TODO - assert shape
-
+		Self::ensure_same_shape(t)?;
+		let t = try_map_borrowed(&t, |_, t| CPUInput::new_safe_contiguous(t))?;
 		unsafe {
 			zip_n(t, f);
 		}
@@ -108,10 +122,8 @@ impl<T: Copy + HasDType> FloatExecutor<T> {
 	pub fn n_vec<const N: usize>(
 		t: [&SliceBatch; N], f: impl FnMut([&[Cell<T>]; N]),
 	) -> Result<()> {
-		let t = util::array::try_map_borrowed(&t, |_, t| CPUInput::new_safe_contiguous(t))?;
-
-		// TODO - assert shape
-
+		Self::ensure_same_shape(t)?;
+		let t = try_map_borrowed(&t, |_, t| CPUInput::new_safe_contiguous(t))?;
 		unsafe {
 			vec_zip_n(t, f);
 		}
@@ -147,6 +159,20 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 			let v = (d * dst_weight) + (u * upd_weight);
 
 			dst.set(T::from_f64(v));
+		})
+	}
+
+	fn rsqrt(&self, dst: &SliceBatch, a: &SliceBatch, eps: f64) -> Result<()> {
+		Self::unary(dst, a, |dst, a| {
+			let a = a.get().to_f64();
+			dst.set(T::from_f64(math::rsqrt(a + eps)));
+		})
+	}
+
+	fn log_clamped(&self, dst: &SliceBatch, a: &SliceBatch) -> Result<()> {
+		Self::unary(dst, a, |dst, a| {
+			let a = a.get().to_f64();
+			dst.set(T::from_f64(a.ln().max(-1000.0)));
 		})
 	}
 
@@ -215,6 +241,46 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		)
 	}
 
+	fn sum_all(&self, a: &SliceBatch) -> Result<f64> {
+		// TODO - this could handle broadcasted tensors as well
+		let mut sum = 0.0;
+		Self::n_contiguous([a], |[a]| sum += a.get().to_f64())?;
+		Ok(sum)
+	}
+
+	fn approx_eq(&self, a: &SliceBatch, b: &SliceBatch, eps: f64) -> Result<bool> {
+		// TODO - this could handle broadcasted tensors as well
+		let mut result = true;
+		Self::n_contiguous([a, b], |[a, b]| {
+			let a_val = a.get().to_f64();
+			let b_val = b.get().to_f64();
+			result &= (a_val - b_val).abs() < eps;
+		})?;
+		Ok(result)
+	}
+
+	fn softmax(&self, dst: &SliceBatch, a: &SliceBatch) -> Result<()> {
+		Self::n_vec([dst, a], |[dst, a]| math::softmax(dst, a))
+	}
+
+	fn rms_norm(&self, dst: &SliceBatch, a: &SliceBatch, eps: f64) -> Result<()> {
+		let len = dst.map.dims[1].size;
+		#[allow(clippy::cast_precision_loss)]
+		let len_recip = 1.0 / (len as f64);
+
+		Self::n_vec([dst, a], |[dst, a]| {
+			//--
+
+			#[allow(clippy::suboptimal_flops)]
+			let scale = math::rsqrt(math::dot(a, a) * len_recip + eps);
+			for (d, i) in dst.iter().zip(a) {
+				let val = i.get().to_f64() * scale;
+				d.set(T::from_f64(val));
+			}
+		})
+	}
+
+	/*
 	fn dot(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64) -> Result<()> {
 		// TODO - ensure shape
 		Self::n_vec([dst, a, b], |[dst, a, b]| {
@@ -223,4 +289,5 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 			dst[0].set(val);
 		})
 	}
+	*/
 }

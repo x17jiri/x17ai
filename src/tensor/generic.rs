@@ -13,7 +13,7 @@ use buffer::Buffer;
 use dim_index::DimIndex;
 use map::{IndexToOffset, Map, MergeAllDims, MergeDims, ReshapeLastDim};
 
-use crate::tensor::generic::map::{Select, Transpose};
+use crate::tensor::generic::map::{NDShape, Select, Transpose};
 use crate::{Error, Result};
 
 //--------------------------------------------------------------------------------------------------
@@ -96,6 +96,13 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		let d1 = d1.resolve_index(self.ndim())?;
 		let new_map = self.map.transposed(d0, d1)?;
 		Ok(Tensor { buf: self.buf, map: new_map })
+	}
+
+	pub fn nd_shape<const K: usize>(&self) -> std::result::Result<[usize; K], M::Error>
+	where
+		M: NDShape<K>,
+	{
+		self.map.nd_shape()
 	}
 
 	pub fn conv_map<NewMap: Map>(self) -> std::result::Result<Tensor<NewMap, B>, M::Error>

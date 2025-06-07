@@ -118,6 +118,46 @@ pub trait Executor {
 		&self, dst: &SliceBatch, dst_weight: f64, upd: &SliceBatch, upd_weight: f64,
 	) -> Result<()>;
 
+	/// Element-wise unary operation:
+	///
+	///    dst = 1.0 / sqrt(a + eps);
+	///
+	/// # Requrements
+	/// - All input tensors have to:
+	///   - have a safe map
+	///   - have dtype corresponding to this Executor
+	///   - be on the device corresponding to this Executor
+	/// - The `dst` tensor has to:
+	///   - have contiguous dimension 1
+	/// - Other tensors have to:
+	///   - have either contiguous or broadcasted dimension 1
+	///
+	/// # Errors
+	/// - If any of the requirements is not met.
+	/// - If there is any problem executing the operation on the device.
+	fn rsqrt(&self, dst: &SliceBatch, a: &SliceBatch, eps: f64) -> Result<()>;
+
+	/// Element-wise unary operation:
+	///
+	///    dst = max(log(a), -1000, DType.MAX_NEGATIVE);
+	///
+	/// So the output is defined even for a <= 0.
+	///
+	/// # Requrements
+	/// - All input tensors have to:
+	///   - have a safe map
+	///   - have dtype corresponding to this Executor
+	///   - be on the device corresponding to this Executor
+	/// - The `dst` tensor has to:
+	///   - have contiguous dimension 1
+	/// - Other tensors have to:
+	///   - have either contiguous or broadcasted dimension 1
+	///
+	/// # Errors
+	/// - If any of the requirements is not met.
+	/// - If there is any problem executing the operation on the device.
+	fn log_clamped(&self, dst: &SliceBatch, a: &SliceBatch) -> Result<()>;
+
 	/// Element-wise multiplication:
 	///
 	///     dst[j, i] = a[j, i] * b[j, i]
@@ -231,30 +271,46 @@ pub trait Executor {
 		d_out: &SliceBatch,
 	) -> Result<()>;
 
-	fn dot(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64) -> Result<()>;
+	/// Sums all elements in the `a` tensor and returns the result.
+	///
+	/// # Requrements
+	/// - The `a` tensor has to:
+	///   - have a safe map
+	///   - have dtype corresponding to this Executor
+	///   - be on the device corresponding to this Executor
+	///   - have either contiguous or broadcasted dimension 1
+	///
+	/// # Errors
+	/// - If any of the requirements is not met.
+	/// - If there is any problem executing the operation on the device.
+	fn sum_all(&self, a: &SliceBatch) -> Result<f64>;
+
+	/// Checks if two tensors are approximately equal element-wise:
+	///
+	/// # Requrements
+	/// - All input tensors have to:
+	///   - have a safe map
+	///   - have dtype corresponding to this Executor
+	///   - be on the device corresponding to this Executor
+	///   - have either contiguous or broadcasted dimension 1
+	///
+	/// # Errors
+	/// - If any of the requirements is not met.
+	/// - If there is any problem executing the operation on the device.
+	fn approx_eq(&self, a: &SliceBatch, b: &SliceBatch, eps: f64) -> Result<bool>;
+
+	fn softmax(&self, dst: &SliceBatch, a: &SliceBatch) -> Result<()>;
+
+	fn rms_norm(&self, dst: &SliceBatch, a: &SliceBatch, eps: f64) -> Result<()>;
 
 	/*
+	fn dot(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64) -> Result<()>;
+
 		fn dot_acc(
 			&self, dst: &SliceBatch, dst_weight: f64, a: &SliceBatch, b: &SliceBatch, ab_weight: f64,
 		);
 
-		fn sum_all(&self, a: &SliceBatch) -> f64;
-		fn approx_eq(&self, a: &SliceBatch, b: &SliceBatch, eps: f64) -> bool;
 
-		fn rsqrt(&self, dst: &SliceBatch, a: &SliceBatch, eps: f64);
-
-		/// Calculates:
-		///
-		///    dst = max(log(a), -1000, DType.MAX_NEGATIVE);
-		///
-		/// So the output is defined even for a <= 0.
-		fn log_clamped(&self, dst: &SliceBatch, a: &SliceBatch);
-
-		fn softmax(&self, dst: &SliceBatch, a: &SliceBatch);
-
-		fn rms_norm(
-			&self, dst: &SliceBatch, a: &SliceBatch, eps: f64, scale_storage: Option<&SliceBatch>,
-		);
 
 		fn gemm(
 			&self, dst: &MatrixBatch, dst_weight: f64, a: &MatrixBatch, b: &MatrixBatch, ab_weight: f64,

@@ -5,11 +5,13 @@
 //
 //------------------------------------------------------------------------------
 
+use std::convert::Infallible;
 use std::hint::cold_path;
 
 use super::{
 	DynD, IndexToOffset, Map, MergeAllDims, MergeDims, ReshapeLastDim, SizeAndStride, Transpose,
 };
+use crate::tensor::generic::map::NDShape;
 use crate::util::array::try_array_from_iter;
 use crate::{Error, Result};
 
@@ -99,6 +101,7 @@ where
 					merged = SizeAndStride { size: 0, stride: 0 };
 					break;
 				} else {
+					// TODO - create err() function
 					return Err(
 						format!("Cannot merge dimensions because of incompatible strides").into()
 					);
@@ -129,6 +132,7 @@ impl<const N: usize> MergeAllDims for ND<N> {
 					merged = SizeAndStride { size: 0, stride: 0 };
 					break;
 				} else {
+					// TODO - create err() function
 					return Err(
 						format!("Cannot merge dimensions because of incompatible strides").into()
 					);
@@ -154,6 +158,7 @@ where
 		let removed_dim = self.dims[N - 1];
 		let elems = to_shape.iter().copied().product::<usize>();
 		if elems != removed_dim.size {
+			// TODO - create err() function
 			cold_path();
 			return Err(format!(
 				"Cannot reshape last dimension of size {} to shape {:?}. Total elements must match.",
@@ -179,6 +184,7 @@ where
 		let mut offset = self.offset;
 		for (d, (&i, &dim)) in index.iter().zip(self.dims.iter()).enumerate() {
 			if i >= dim.size {
+				// TODO - create err() function
 				cold_path();
 				return Err(format!(
 					"Index {} out of range 0 ..< {} for dimension {}",
@@ -197,6 +203,7 @@ impl<const N: usize> Transpose for ND<N> {
 
 	fn transposed(mut self, d0: usize, d1: usize) -> Result<Self> {
 		if d0 >= N || d1 >= N {
+			// TODO - create err() function
 			return Err(format!(
 				"Cannot transpose dimension {} with {}. Tensor has {} dimensions.",
 				d0, d1, N
@@ -205,5 +212,17 @@ impl<const N: usize> Transpose for ND<N> {
 		}
 		self.dims.swap(d0, d1);
 		Ok(self)
+	}
+}
+
+impl<const N: usize> NDShape<N> for ND<N> {
+	type Error = Infallible;
+
+	fn nd_shape(&self) -> std::result::Result<[usize; N], Self::Error> {
+		let mut shape = [0; N];
+		for (size, dim) in shape.iter_mut().zip(self.dims.iter()) {
+			*size = dim.size;
+		}
+		Ok(shape)
 	}
 }

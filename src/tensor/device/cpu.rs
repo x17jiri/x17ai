@@ -149,31 +149,6 @@ impl CPUDevice {
 	}
 	/*
 		#[inline(never)]
-		fn softmax<'a, T: Copy + HasDType + FromToF64>(&self, dst: &SliceSet<'a>, inp: &SliceSet<'a>) {
-			assert!(dst.len == inp.len);
-			self.array_wise::<T, 2>([dst, inp], |[dst_arr, inp_arr]| {
-				math::softmax(dst_arr, inp_arr);
-			});
-		}
-
-		#[inline(never)]
-		fn rms_norm_f<'a, T: Copy + HasDType + FromToF64>(
-			&self, dst: &SliceSet<'a>, inp: &SliceSet<'a>, eps: f64,
-		) {
-			let len = dst.len;
-			let len_recip = 1.0 / (len as f64);
-			assert!(inp.len == len);
-
-			self.array_wise::<T, 2>([dst, inp], |[dst_arr, inp_arr]| {
-				let scale = math::rsqrt(math::dot(inp_arr, inp_arr) * len_recip + eps);
-				for (d, i) in dst_arr.iter().zip(inp_arr) {
-					let val = i.get().to_f64() * scale;
-					d.set(T::from_f64(val));
-				}
-			});
-		}
-
-		#[inline(never)]
 		fn rms_norm_with_scale_storage_f<'a, T: Copy + HasDType + FromToF64>(
 			&self, dst: &SliceSet<'a>, inp: &SliceSet<'a>, eps: f64, scale_storage: &SliceSet<'a>,
 		) {
@@ -593,57 +568,6 @@ impl Executor for CPUDevice {
 				let val = f32::from_f64(val);
 				dst[0].set(val);
 			}),
-			_ => todo!(),
-		}
-	}
-
-	fn sum_all(&self, a: &SliceSet) -> f64 {
-		let mut sum = 0.0;
-		match a.dtype {
-			f32::dtype => self.array_wise::<f32, 1>([&a], |[arr]| {
-				sum += arr.iter().map(|x| x.get().to_f64()).sum::<f64>()
-			}),
-			_ => todo!(),
-		}
-		sum
-	}
-
-	fn approx_eq(&self, a: &SliceSet, b: &SliceSet, eps: f64) -> bool {
-		let mut result = true;
-		match a.dtype {
-			f32::dtype => self.elem_wise::<f32, 2>([a, b], |[a, b]| {
-				let a_val = f64::from(a.get());
-				let b_val = f64::from(b.get());
-				result &= (a_val - b_val).abs() < eps;
-			}),
-			_ => todo!(),
-		}
-		result
-	}
-
-	fn rsqrt(&self, dst: &SliceSet, inp: &SliceSet, eps: f64) {
-		match dst.dtype {
-			f32::dtype => self.elem_wise::<f32, 2>([dst, inp], |[d, i]| {
-				let i = f64::from(i.get());
-				d.set(math::rsqrt(i + eps) as f32);
-			}),
-			_ => todo!(),
-		}
-	}
-
-	fn log_clamped(&self, dst: &SliceSet, a: &SliceSet) {
-		match dst.dtype {
-			f32::dtype => self.elem_wise::<f32, 2>([dst, a], |[d, a]| {
-				let a = f64::from(a.get());
-				d.set(a.ln().max(-1000.0) as f32);
-			}),
-			_ => todo!(),
-		}
-	}
-
-	fn softmax(&self, dst: &SliceSet, inp: &SliceSet) {
-		match dst.dtype {
-			f32::dtype => self.softmax::<f32>(dst, inp),
 			_ => todo!(),
 		}
 	}

@@ -77,4 +77,10 @@ pub trait Transpose {
 	fn transposed(self, d0: usize, d1: usize) -> Result<Self::Output>;
 }
 
+pub trait NDShape<const K: usize> {
+	type Error: Into<crate::Error>;
+
+	fn nd_shape(&self) -> std::result::Result<[usize; K], Self::Error>;
+}
+
 //--------------------------------------------------------------------------------------------------

@@ -15,6 +15,16 @@ pub fn map_into<const N: usize, T, U>(array: [T; N], mut f: impl FnMut(usize, T)
 	unsafe { MaybeUninit::array_assume_init(u) }
 }
 
+pub fn try_map_into<const N: usize, T, U, E>(
+	array: [T; N], mut f: impl FnMut(usize, T) -> Result<U, E>,
+) -> Result<[U; N], E> {
+	let mut u = [const { MaybeUninit::uninit() }; N];
+	for (i, t) in array.into_iter().enumerate() {
+		u[i].write(f(i, t)?);
+	}
+	Ok(unsafe { MaybeUninit::array_assume_init(u) })
+}
+
 pub fn map_borrowed<const N: usize, T, U>(
 	array: &[T; N], mut f: impl FnMut(usize, &T) -> U,
 ) -> [U; N] {
