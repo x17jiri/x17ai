@@ -8,12 +8,12 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use crate::Result;
 use crate::tensor::HasDType;
-use crate::tensor::device::cpu::zip::vec_zip_n;
-use crate::tensor::device::executor::{Executor, SliceBatch};
+use crate::tensor::device::cpu::zip::{SliceMap, reduce_zip_n, vec_zip_n};
+use crate::tensor::device::executor::{Executor, SliceBatch, ensure_same_shape};
 use crate::util::LossyInto;
-use crate::util::array::{try_map_borrowed, try_map_into};
-use crate::{Error, Result};
+use crate::util::array::{concat_arrays, try_map_borrowed};
 
 use super::math::{self, FromToF64};
 use super::rng::Rng;
@@ -29,25 +29,6 @@ pub struct FloatExecutor<T: Copy + HasDType> {
 impl<T: Copy + HasDType> FloatExecutor<T> {
 	pub fn new(rng: Rc<RefCell<Rng>>) -> Self {
 		Self { rng, phantom: std::marker::PhantomData }
-	}
-
-	pub fn ensure_same_shape<const N: usize>(t: [&SliceBatch; N]) -> Result<()> {
-		let shapes = try_map_into(t, |_, t| t.nd_shape())?;
-		if let Some(shape) = shapes.first()
-			&& shapes.iter().any(|s| s != shape)
-		{
-			#[cold]
-			fn err_shape_mismatch<const N: usize>(shapes: &[[usize; 2]]) -> Error {
-				let shapes_str = shapes
-					.iter()
-					.map(|[a, b]| format!("[{a}, {b}]"))
-					.collect::<Vec<_>>()
-					.join(", ");
-				format!("Expected all tensors to have the same shape, but got: {shapes_str}").into()
-			}
-			return Err(err_shape_mismatch::<N>(&shapes));
-		}
-		Ok(())
 	}
 
 	/// # Errors
@@ -66,7 +47,7 @@ impl<T: Copy + HasDType> FloatExecutor<T> {
 	pub fn unary(
 		dst: &SliceBatch, inp: &SliceBatch, mut f: impl FnMut(&Cell<T>, &Cell<T>),
 	) -> Result<()> {
-		Self::ensure_same_shape([dst, inp])?;
+		ensure_same_shape([dst, inp])?;
 		let dst = CPUInput::new_safe_contiguous(dst)?;
 		let inp = CPUInput::new_safe(inp)?;
 		unsafe {
@@ -86,7 +67,7 @@ impl<T: Copy + HasDType> FloatExecutor<T> {
 		dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch,
 		mut f: impl FnMut(&Cell<T>, &Cell<T>, &Cell<T>),
 	) -> Result<()> {
-		Self::ensure_same_shape([dst, a, b])?;
+		ensure_same_shape([dst, a, b])?;
 		let dst = CPUInput::new_safe_contiguous(dst)?;
 		let a = CPUInput::new_safe(a)?;
 		let b = CPUInput::new_safe(b)?;
@@ -112,7 +93,7 @@ impl<T: Copy + HasDType> FloatExecutor<T> {
 	pub fn n_contiguous<const N: usize>(
 		t: [&SliceBatch; N], f: impl FnMut([&Cell<T>; N]),
 	) -> Result<()> {
-		Self::ensure_same_shape(t)?;
+		ensure_same_shape(t)?;
 		let t = try_map_borrowed(&t, |_, t| CPUInput::new_safe_contiguous(t))?;
 		unsafe {
 			zip_n(t, f);
@@ -123,10 +104,36 @@ impl<T: Copy + HasDType> FloatExecutor<T> {
 	pub fn n_vec<const N: usize>(
 		t: [&SliceBatch; N], f: impl FnMut([&[Cell<T>]; N]),
 	) -> Result<()> {
-		Self::ensure_same_shape(t)?;
+		ensure_same_shape(t)?;
 		let t = try_map_borrowed(&t, |_, t| CPUInput::new_safe_contiguous(t))?;
 		unsafe {
 			vec_zip_n(t, f);
+		}
+		Ok(())
+	}
+
+	pub fn vec_reduce<const N: usize>(
+		r: &SliceBatch, a: [&SliceBatch; N], f: impl FnMut(&Cell<T>, [&[Cell<T>]; N]),
+	) -> Result<()>
+	where
+		[(); 1 + N]:,
+	{
+		let a_shape = ensure_same_shape(a)?;
+		let r_shape = r.nd_shape()?;
+		if r_shape[0] != a_shape[0] || r_shape[1] != 1 {
+			#[cold]
+			fn err_reduce_shape(r_shape: [usize; 2], a_shape: [usize; 2]) -> crate::Error {
+				let r0 = r_shape[0];
+				let r1 = r_shape[1];
+				let a0 = a_shape[0];
+				format!("Invalid output shape. Expected [{a0}, 1], got [{r0}, {r1}].",).into()
+			}
+			return Err(err_reduce_shape(r_shape, a_shape));
+		}
+		let r = CPUInput::new_safe_contiguous(r)?;
+		let a = try_map_borrowed(&a, |_, a| CPUInput::new_safe_contiguous(a))?;
+		unsafe {
+			reduce_zip_n(r, a, f);
 		}
 		Ok(())
 	}
@@ -256,48 +263,66 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		// TODO - this could handle broadcasted tensors as well
 		let mut sum = 0.0;
 		Self::n_contiguous([a], |[a]| {
-			sum += a.get().to_f64();
+			let a = a.get().to_f64();
+
+			sum += a;
 		})?;
 		Ok(sum)
 	}
+
 	fn approx_eq(&self, a: &SliceBatch, b: &SliceBatch, eps: f64) -> Result<bool> {
 		// TODO - this could handle broadcasted tensors as well
 		let mut result = true;
 		Self::n_contiguous([a, b], |[a, b]| {
-			result &= math::approx_eq(a.get().to_f64(), b.get().to_f64(), eps);
+			let a = a.get().to_f64();
+			let b = b.get().to_f64();
+
+			result &= math::approx_eq(a, b, eps);
 		})?;
 		Ok(result)
 	}
 
-	fn softmax(&self, dst: &SliceBatch, a: &SliceBatch) -> Result<()> {
-		Self::n_vec([dst, a], |[dst, a]| math::softmax(dst, a))
+	fn softmax(&self, out: &SliceBatch, inp: &SliceBatch) -> Result<()> {
+		Self::n_vec([out, inp], |[out, inp]| math::softmax(out, inp))
 	}
 
-	fn rms_norm(&self, dst: &SliceBatch, a: &SliceBatch, eps: f64) -> Result<()> {
-		Self::n_vec([dst, a], |[dst, a]| {
-			//let len = dst.map.dims[1].size;
-			let len = dst.len();
-			let len: f64 = len.lossy_into();
-			let len_recip = 1.0 / len;
-
-			//--
-
-			let scale = math::rsqrt(math::dot(a, a) * len_recip + eps);
-			for (d, i) in dst.iter().zip(a) {
-				let val = i.get().to_f64() * scale;
-				d.set(T::from_f64(val));
-			}
+	fn softmax_backward(
+		&self, d_inp: &SliceBatch, out: &SliceBatch, d_out: &SliceBatch,
+	) -> Result<()> {
+		Self::n_vec([d_inp, out, d_out], |[d_inp, out, d_out]| {
+			math::softmax_backward(d_inp, out, d_out);
 		})
 	}
 
-	/*
+	fn rms_norm(&self, out: &SliceBatch, inp: &SliceBatch, eps: f64) -> Result<()> {
+		Self::n_vec([out, inp], |[out, inp]| math::rms_norm(out, inp, eps))
+	}
+
 	fn dot(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64) -> Result<()> {
-		// TODO - ensure shape
-		Self::n_vec([dst, a, b], |[dst, a, b]| {
-			let val = math::dot(a, b) * ab_weight;
-			let val = T::from_f64(val);
-			dst[0].set(val);
+		Self::vec_reduce(dst, [a, b], |dst, [a, b]| {
+			let v = math::dot(a, b) * ab_weight;
+			dst.set(T::from_f64(v));
 		})
 	}
-	*/
+
+	fn dot_acc(
+		&self, dst: &SliceBatch, dst_weight: f64, a: &SliceBatch, b: &SliceBatch, ab_weight: f64,
+	) -> Result<()> {
+		Self::vec_reduce(dst, [a, b], |dst, [a, b]| {
+			let d = dst.get().to_f64();
+			let v = math::dot(a, b);
+			let v = d * dst_weight + v * ab_weight;
+			dst.set(T::from_f64(v));
+		})
+	}
+
+	fn rsqrt_dot(
+		&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64, eps: f64,
+	) -> Result<()> {
+		Self::vec_reduce(dst, [a, b], |dst, [a, b]| {
+			let v = math::dot(a, b) * ab_weight;
+			let v = math::rsqrt(v + eps);
+			dst.set(T::from_f64(v));
+		})
+	}
 }

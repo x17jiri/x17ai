@@ -307,3 +307,30 @@ pub unsafe fn vec_zip_n<T: Copy, const N: usize>(
 		}));
 	}
 }
+
+pub unsafe fn reduce_zip_n<T: Copy, const N: usize>(
+	r: generic::Tensor<SliceMap, &[Cell<T>]>, t: [generic::Tensor<SliceMap, &[Cell<T>]>; N],
+	mut f: impl FnMut(&Cell<T>, [&[Cell<T>]; N]),
+) {
+	debug_assert!(t.iter().all(|t| t.ensure_safe().is_ok()));
+	debug_assert!(r.ensure_safe().is_ok());
+	let batch_size = t.first().map_or(0, |t| t.map.batch_size());
+	debug_assert!(t.iter().map(|t| t.map.batch_size()).all(|b| b == batch_size));
+	debug_assert!(r.map.batch_size() == batch_size);
+	let item_len = t.first().map_or(0, |t| t.map.item_len());
+	debug_assert!(t.iter().map(|t| t.map.item_len()).all(|i| i == item_len));
+	debug_assert!(r.map.item_len() == 1);
+	for b in 0..batch_size {
+		let o = r.map.offset(b, 0);
+		debug_assert!(o < r.buf.len());
+		f(
+			unsafe { r.buf.get_unchecked(o) },
+			map_borrowed(&t, |_, t| {
+				let b = t.map.offset(b, 0);
+				let e = b + item_len;
+				debug_assert!(e < t.buf.len());
+				unsafe { t.buf.get_unchecked(b..e) }
+			}),
+		);
+	}
+}

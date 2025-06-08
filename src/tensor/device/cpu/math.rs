@@ -7,6 +7,8 @@
 
 use std::cell::Cell;
 
+use crate::util::LossyInto;
+
 //--------------------------------------------------------------------------------------------------
 
 pub trait FromToF64 {
@@ -129,4 +131,32 @@ pub fn softmax<T: Copy + FromToF64>(dst: &[Cell<T>], inp: &[Cell<T>]) {
 	let scratch = dst;
 	let (_, sum) = softmax_part1(inp, scratch);
 	softmax_part2(scratch, sum, dst);
+}
+
+pub fn softmax_backward<T: Copy + FromToF64>(
+	d_inp: &[Cell<T>], out: &[Cell<T>], d_out: &[Cell<T>],
+) {
+	let g = dot(out, d_out);
+	for (d_i, (o, d_o)) in d_inp.iter().zip(out.iter().zip(d_out)) {
+		let o = o.get().to_f64();
+		let d_o = d_o.get().to_f64();
+
+		let v = (d_o - g) * o;
+
+		d_i.set(T::from_f64(v));
+	}
+}
+
+pub fn rms_norm<T: Copy + FromToF64>(dst: &[Cell<T>], inp: &[Cell<T>], eps: f64) {
+	let len: f64 = inp.len().lossy_into();
+	let len_recip = 1.0 / len;
+
+	let scale = rsqrt(dot(inp, inp) * len_recip + eps);
+	for (d, i) in dst.iter().zip(inp) {
+		let i = i.get().to_f64();
+
+		let v = i * scale;
+
+		d.set(T::from_f64(v));
+	}
 }

@@ -59,3 +59,16 @@ where
 	}
 	Some(unsafe { MaybeUninit::array_assume_init(array) })
 }
+
+pub fn concat_arrays<T, const A: usize, const B: usize>(
+	a: [T; A], b: [T; B],
+) -> [T; A + B] {
+	let mut c = [const { MaybeUninit::uninit() }; A + B];
+	for (i, t) in a.into_iter().enumerate() {
+		c[i].write(t);
+	}
+	for (i, t) in b.into_iter().enumerate() {
+		c[A + i].write(t);
+	}
+	unsafe { MaybeUninit::array_assume_init(c) }
+}

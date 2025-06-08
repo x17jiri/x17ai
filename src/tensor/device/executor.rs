@@ -5,9 +5,10 @@
 //
 //------------------------------------------------------------------------------
 
-use crate::Result;
 use crate::tensor::generic::map::ND;
 use crate::tensor::generic::{self};
+use crate::util::array::try_map_into;
+use crate::{Error, Result};
 
 use super::buffer::DeviceBuffer;
 
@@ -23,6 +24,21 @@ pub type SliceBatch<'a> = generic::Tensor<ND<2>, &'a DeviceBuffer>;
 
 /// A batch of matrices.
 pub type MatrixBatch<'a> = generic::Tensor<ND<3>, &'a DeviceBuffer>;
+
+pub fn ensure_same_shape<const N: usize>(t: [&SliceBatch; N]) -> Result<[usize; 2]> {
+	let shapes = try_map_into(t, |_, t| t.nd_shape())?;
+	let shape = shapes.first().unwrap_or(&[0, 0]);
+	if shapes.iter().any(|s| s != shape) {
+		#[cold]
+		fn err_shape_mismatch<const N: usize>(shapes: &[[usize; 2]]) -> Error {
+			let shapes_str =
+				shapes.iter().map(|[a, b]| format!("[{a}, {b}]")).collect::<Vec<_>>().join(", ");
+			format!("Expected all tensors to have the same shape, but got: {shapes_str}").into()
+		}
+		return Err(err_shape_mismatch::<N>(&shapes));
+	}
+	Ok(*shape)
+}
 
 pub struct AttentionParams {
 	pub heads: usize,
@@ -301,14 +317,25 @@ pub trait Executor {
 
 	fn softmax(&self, dst: &SliceBatch, a: &SliceBatch) -> Result<()>;
 
+	fn softmax_backward(
+		&self, d_lin: &SliceBatch, dst: &SliceBatch, d_out: &SliceBatch,
+	) -> Result<()>;
+
 	fn rms_norm(&self, dst: &SliceBatch, a: &SliceBatch, eps: f64) -> Result<()>;
 
-	/*
+	// TODO - rms_norm_backward
+
 	fn dot(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64) -> Result<()>;
 
-		fn dot_acc(
-			&self, dst: &SliceBatch, dst_weight: f64, a: &SliceBatch, b: &SliceBatch, ab_weight: f64,
-		);
+	fn dot_acc(
+		&self, dst: &SliceBatch, dst_weight: f64, a: &SliceBatch, b: &SliceBatch, ab_weight: f64,
+	) -> Result<()>;
+
+	fn rsqrt_dot(
+		&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64, eps: f64,
+	) -> Result<()>;
+	/*
+
 
 
 
