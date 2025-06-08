@@ -67,21 +67,21 @@ pub(crate) fn __elem_wise<const N: usize>(
 ///
 /// Batch dimensions broadcast is disabled for tensors[0] and enabled for tensors[1..].
 /// This is by design.
-fn __vec_wise<'a, const N: usize, F: Fn([SliceSet; N])>(tensors: [&Tensor; N], f: F) {
+fn __vec_wise<const N: usize>(
+	tensors: [&Tensor; N], f: impl Fn([SliceBatch; N]) -> Result<()>,
+) -> Result<()> {
 	assert!(tensors.iter().all(|t| t.ndim() >= 1));
-	assert!(tensors.iter().all(|t| t.dim(-1).is_contiguous()));
 
-	let lengths = tensors.map(|t| t.dim(-1).size);
-	let dtypes = tensors.map(|t| t.dtype());
-	let buffers = tensors.map(|t| t.buffer.as_ref());
+	let lengths = tensors.map(|t| t.map.dims.last().unwrap().size);
+	let buffers = tensors.map(|t| t.buf.as_ref());
 
-	let merger = DimMerger::new(tensors.map(|t| t.dim_slice(..t.ndim() - 1)));
+	let merger = DimMerger::new(tensors.map(|t| t.map.dims.as_slice()))?;
 	let batch_dims = merger.dims_increasing();
 	let batch_iter = batch_dims.iter();
 
 	batch::run(
 		batch_iter,
-		tensors.map(|t| t.offset),
+		tensors.map(|t| t.map.offset),
 		|batch_size: usize, batch_strides: [usize; N], offsets: [usize; N]| {
 			f(std::array::from_fn(|i| SliceSet {
 				buffer: buffers[i],
@@ -92,7 +92,7 @@ fn __vec_wise<'a, const N: usize, F: Fn([SliceSet; N])>(tensors: [&Tensor; N], f
 				stride: batch_strides[i],
 			}));
 		},
-	);
+	)
 }
 
 /*
