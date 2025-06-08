@@ -140,103 +140,97 @@ impl<T: Copy + HasDType> FloatExecutor<T> {
 }
 
 impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
-	fn zeros(&self, dst: &SliceBatch) -> Result<()> {
-		Self::nullary(dst, |dst| dst.set(T::from_f64(0.0)))
+	fn zeros(&self, o: &SliceBatch) -> Result<()> {
+		Self::nullary(o, |o| {
+			let v = 0.0;
+			o.set(T::from_f64(v))
+		})
 	}
 
-	fn randn_clamped(&self, dst: &SliceBatch) -> Result<()> {
+	fn randn_clamped(&self, o: &SliceBatch) -> Result<()> {
 		let mut rng = self.rng.borrow_mut();
-		Self::nullary(dst, |dst| dst.set(T::from_f64(rng.get_normal_clamped())))
-	}
-
-	fn copy(&self, dst: &SliceBatch, src: &SliceBatch) -> Result<()> {
-		Self::unary(dst, src, |dst, src| dst.set(src.get()))
-	}
-
-	fn acc(
-		&self, dst: &SliceBatch, dst_weight: f64, upd: &SliceBatch, upd_weight: f64,
-	) -> Result<()> {
-		Self::unary(dst, upd, |dst, upd| {
-			let d = dst.get().to_f64();
-			let u = upd.get().to_f64();
-
-			let v = d * dst_weight + u * upd_weight;
-
-			dst.set(T::from_f64(v));
+		Self::nullary(o, |o| {
+			let v = rng.get_normal_clamped();
+			o.set(T::from_f64(v))
 		})
 	}
 
-	fn rsqrt(&self, dst: &SliceBatch, a: &SliceBatch, eps: f64) -> Result<()> {
-		Self::unary(dst, a, |dst, a| {
-			let a = a.get().to_f64();
+	fn copy(&self, o: &SliceBatch, a: &SliceBatch) -> Result<()> {
+		Self::unary(o, a, |o, a| o.set(a.get()))
+	}
 
+	fn rsqrt(&self, o: &SliceBatch, a: &SliceBatch, eps: f64) -> Result<()> {
+		Self::unary(o, a, |o, a| {
+			let a = a.get().to_f64();
 			let v = math::rsqrt(a + eps);
-
-			dst.set(T::from_f64(v));
+			o.set(T::from_f64(v))
 		})
 	}
 
-	fn ln_clamped(&self, dst: &SliceBatch, a: &SliceBatch) -> Result<()> {
-		Self::unary(dst, a, |dst, a| {
+	fn ln_clamped(&self, o: &SliceBatch, a: &SliceBatch) -> Result<()> {
+		Self::unary(o, a, |o, a| {
 			let a = a.get().to_f64();
-
 			let v = a.ln().max(-1000.0);
-
-			dst.set(T::from_f64(v));
+			o.set(T::from_f64(v));
 		})
 	}
 
-	fn mul(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()> {
-		Self::binary(dst, a, b, |dst, a, b| {
-			let a = a.get().to_f64();
-			let b = b.get().to_f64();
-
-			let v = a * b;
-
-			dst.set(T::from_f64(v));
-		})
-	}
-
-	fn mul_acc(
-		&self, dst: &SliceBatch, dst_weight: f64, a: &SliceBatch, b: &SliceBatch, ab_weight: f64,
+	fn add_weighted(
+		&self, o: &SliceBatch, a: &SliceBatch, a_weight: f64, b: &SliceBatch, b_weight: f64,
 	) -> Result<()> {
-		Self::binary(dst, a, b, |dst, a, b| {
-			let d = dst.get().to_f64();
+		Self::binary(o, a, b, |o, a, b| {
 			let a = a.get().to_f64();
 			let b = b.get().to_f64();
-
-			let v = (d * dst_weight) + (a * b * ab_weight);
-
-			dst.set(T::from_f64(v));
+			let v = math::add_weighted(a, a_weight, b, b_weight);
+			o.set(T::from_f64(v));
 		})
 	}
 
-	fn sub(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()> {
-		Self::binary(dst, a, b, |dst, a, b| {
+	fn mul(&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()> {
+		Self::binary(o, a, b, |o, a, b| {
 			let a = a.get().to_f64();
 			let b = b.get().to_f64();
+			let v = a * b;
+			o.set(T::from_f64(v));
+		})
+	}
 
+	fn acc_mul(
+		&self, acc: &SliceBatch, prev_weight: f64, a: &SliceBatch, b: &SliceBatch, new_weight: f64,
+	) -> Result<()> {
+		Self::binary(acc, a, b, |acc, a, b| {
+			let c = acc.get().to_f64();
+			let a = a.get().to_f64();
+			let b = b.get().to_f64();
+			let v = math::add_weighted(c, prev_weight, a * b, new_weight);
+			acc.set(T::from_f64(v));
+		})
+	}
+
+	fn sub(&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()> {
+		Self::binary(o, a, b, |o, a, b| {
+			let a = a.get().to_f64();
+			let b = b.get().to_f64();
 			let v = a - b;
-
-			dst.set(T::from_f64(v));
+			o.set(T::from_f64(v));
 		})
 	}
 
-	fn add(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()> {
-		Self::binary(dst, a, b, |dst, a, b| {
+	fn add(&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()> {
+		Self::binary(o, a, b, |o, a, b| {
 			let a = a.get().to_f64();
 			let b = b.get().to_f64();
-
 			let v = a + b;
-
-			dst.set(T::from_f64(v));
+			o.set(T::from_f64(v));
 		})
 	}
 
-	fn swiglu(&self, dst: &SliceBatch, lin: &SliceBatch, gate: &SliceBatch) -> Result<()> {
-		Self::n_contiguous([dst, lin, gate], |[dst, lin, gate]| {
-			let forward = math::swiglu(lin.get().to_f64(), gate.get().to_f64());
-			dst.set(T::from_f64(forward));
+	fn swiglu(&self, out: &SliceBatch, lin: &SliceBatch, gate: &SliceBatch) -> Result<()> {
+		Self::n_contiguous([out, lin, gate], |[out, lin, gate]| {
+			let lin = lin.get().to_f64();
+			let gate = gate.get().to_f64();
+			let v = math::swiglu(lin, gate);
+			out.set(T::from_f64(v));
 		})
 	}
 
@@ -264,7 +258,6 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		let mut sum = 0.0;
 		Self::n_contiguous([a], |[a]| {
 			let a = a.get().to_f64();
-
 			sum += a;
 		})?;
 		Ok(sum)
@@ -276,7 +269,6 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		Self::n_contiguous([a, b], |[a, b]| {
 			let a = a.get().to_f64();
 			let b = b.get().to_f64();
-
 			result &= math::approx_eq(a, b, eps);
 		})?;
 		Ok(result)
@@ -294,35 +286,33 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		})
 	}
 
-	fn rms_norm(&self, out: &SliceBatch, inp: &SliceBatch, eps: f64) -> Result<()> {
-		Self::n_vec([out, inp], |[out, inp]| math::rms_norm(out, inp, eps))
-	}
-
-	fn dot(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64) -> Result<()> {
-		Self::vec_reduce(dst, [a, b], |dst, [a, b]| {
-			let v = math::dot(a, b) * ab_weight;
-			dst.set(T::from_f64(v));
+	fn dot(&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch, scale: f64) -> Result<()> {
+		Self::vec_reduce(o, [a, b], |o, [a, b]| {
+			let dot = math::dot(a, b);
+			let v = dot * scale;
+			o.set(T::from_f64(v));
 		})
 	}
 
-	fn dot_acc(
-		&self, dst: &SliceBatch, dst_weight: f64, a: &SliceBatch, b: &SliceBatch, ab_weight: f64,
+	fn acc_dot(
+		&self, acc: &SliceBatch, prev_weight: f64, a: &SliceBatch, b: &SliceBatch, new_weight: f64,
 	) -> Result<()> {
-		Self::vec_reduce(dst, [a, b], |dst, [a, b]| {
-			let d = dst.get().to_f64();
-			let v = math::dot(a, b);
-			let v = d * dst_weight + v * ab_weight;
-			dst.set(T::from_f64(v));
+		Self::vec_reduce(acc, [a, b], |acc, [a, b]| {
+			let c = acc.get().to_f64();
+			let dot = math::dot(a, b);
+			let v = math::add_weighted(c, prev_weight, dot, new_weight);
+			acc.set(T::from_f64(v));
 		})
 	}
 
 	fn rsqrt_dot(
-		&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64, eps: f64,
+		&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch, scale: f64, eps: f64,
 	) -> Result<()> {
-		Self::vec_reduce(dst, [a, b], |dst, [a, b]| {
-			let v = math::dot(a, b) * ab_weight;
-			let v = math::rsqrt(v + eps);
-			dst.set(T::from_f64(v));
+		Self::vec_reduce(o, [a, b], |o, [a, b]| {
+			let dot = math::dot(a, b);
+			let scaled = dot * scale;
+			let v = math::rsqrt(scaled + eps);
+			o.set(T::from_f64(v));
 		})
 	}
 }

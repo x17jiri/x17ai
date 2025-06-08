@@ -9,54 +9,75 @@ use std::intrinsics::cold_path;
 
 use log::warn;
 
+use crate::{Error, Result};
+
 use super::dim_merger::{MergedDim, MergedDimIter};
 
 #[inline(never)]
-fn __run_recursive<const N: usize, F: FnMut(usize, [usize; N], [usize; N])>(
+fn __run_recursive<const N: usize>(
 	prev_dim: MergedDim<N>, mut dims: impl Clone + Iterator<Item = MergedDim<N>>,
-	offsets: [usize; N], f: &mut F,
-) {
-	if prev_dim.size > 1 {
-		assert!(prev_dim.strides[0] > 0, "broadcast is disabled for this tensor");
+	offsets: [usize; N],
+	f: &mut impl FnMut(
+		usize,      // batch_size
+		[usize; N], // batch_strides
+		[usize; N], // offsets
+	) -> Result<()>,
+) -> Result<()> {
+	if prev_dim.size > 1 && prev_dim.strides[0] == 0 {
+		#[cold]
+		fn err_cannot_broadcast_output_tensor() -> Error {
+			"broadcast is disabled for output tensor".into()
+		}
+		return Err(err_cannot_broadcast_output_tensor());
 	}
 
 	if let Some(dim) = dims.next() {
 		let mut offsets = offsets;
 		for _ in 0..prev_dim.size {
-			__run_recursive(dim, dims.clone(), offsets, f);
+			__run_recursive(dim, dims.clone(), offsets, f)?;
 
 			for j in 0..N {
 				offsets[j] += prev_dim.strides[j];
 			}
 		}
+		Ok(())
 	} else {
-		f(prev_dim.size, prev_dim.strides, offsets);
+		f(prev_dim.size, prev_dim.strides, offsets)
 	}
 }
 
 #[inline(never)]
-fn __run<'a, const N: usize, F: FnMut(usize, [usize; N], [usize; N])>(
-	mut dims: MergedDimIter<N>, offsets: [usize; N], mut f: F,
-) {
+fn __run<const N: usize>(
+	mut dims: MergedDimIter<N>, offsets: [usize; N],
+	mut f: impl FnMut(
+		usize,      // batch_size
+		[usize; N], // batch_strides
+		[usize; N], // offsets
+	) -> Result<()>,
+) -> Result<()> {
 	warn!("batch::run() called with more than one batch dimension");
 	let dim = dims.next().unwrap();
-	__run_recursive(dim, dims, offsets, &mut f);
+	__run_recursive(dim, dims, offsets, &mut f)
 }
 
-/// F: fn(batch_size: usize, batch_strides: [usize; N], offsets: [usize; N])
 #[inline]
-pub fn run<'a, const N: usize, F: FnMut(usize, [usize; N], [usize; N])>(
-	mut dims: MergedDimIter<N>, offsets: [usize; N], mut f: F,
-) {
+pub fn run<const N: usize>(
+	mut dims: MergedDimIter<N>, offsets: [usize; N],
+	mut f: impl FnMut(
+		usize,      // batch_size
+		[usize; N], // batch_strides
+		[usize; N], // offsets
+	) -> Result<()>,
+) -> Result<()> {
 	match dims.len() {
 		0 => f(1, [0; N], offsets),
 		1 => {
 			let first = dims.next().unwrap();
-			f(first.size, first.strides, offsets);
+			f(first.size, first.strides, offsets)
 		},
 		_ => {
 			cold_path();
-			__run(dims, offsets, f);
+			__run(dims, offsets, f)
 		},
 	}
 }

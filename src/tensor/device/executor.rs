@@ -25,6 +25,8 @@ pub type SliceBatch<'a> = generic::Tensor<ND<2>, &'a DeviceBuffer>;
 /// A batch of matrices.
 pub type MatrixBatch<'a> = generic::Tensor<ND<3>, &'a DeviceBuffer>;
 
+/// # Errors
+/// - If the shapes of the tensors are not the same.
 pub fn ensure_same_shape<const N: usize>(t: [&SliceBatch; N]) -> Result<[usize; 2]> {
 	let shapes = try_map_into(t, |_, t| t.nd_shape())?;
 	let shape = shapes.first().unwrap_or(&[0, 0]);
@@ -69,10 +71,12 @@ pub trait Executor {
 		fn write_bin(&self, src: &SliceBatch, dst: &mut dyn std::io::Write) -> std::io::Result<()>;
 	*/
 
-	/// Fills the `dst` tensor with zeros.
+	/// Fills the `o` tensor with zeros.
+	///
+	///     o[i] = 0.0;
 	///
 	/// # Requrements
-	/// - The `dst` tensor has to:
+	/// - The `o` tensor has to:
 	///   - have a safe map
 	///   - have dtype corresponding to this Executor
 	///   - be on the device corresponding to this Executor
@@ -81,13 +85,15 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn zeros(&self, dst: &SliceBatch) -> Result<()>;
+	fn zeros(&self, o: &SliceBatch) -> Result<()>;
 
-	/// Fills the `dst` tensor with random values from a normal distribution
-	/// with mean 0 and variance 1. The values are clamped to the range (-10.0, +10.0)
+	/// Fills the `o` tensor with random values from a normal distribution
+	/// with mean 0 and variance 1.
+	///
+	/// The values are clamped to the range (-10.0, +10.0)
 	///
 	/// # Requrements
-	/// - The `dst` tensor has to:
+	/// - The `o` tensor has to:
 	///   - have a safe map
 	///   - have dtype corresponding to this Executor
 	///   - be on the device corresponding to this Executor
@@ -96,14 +102,18 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn randn_clamped(&self, dst: &SliceBatch) -> Result<()>;
+	fn randn_clamped(&self, o: &SliceBatch) -> Result<()>;
 
+	/// Copies data from `a` to `o`:
+	///
+	///     o[i] = a[i];
+	///
 	/// # Requrements
 	/// - All input tensors have to:
 	///   - have a safe map
 	///   - have dtype corresponding to this Executor
 	///   - be on the device corresponding to this Executor
-	/// - The `dst` tensor has to:
+	/// - The `o` tensor has to:
 	///   - have contiguous dimension 1
 	/// - Other tensors have to:
 	///   - have either contiguous or broadcasted dimension 1
@@ -111,39 +121,18 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn copy(&self, dst: &SliceBatch, src: &SliceBatch) -> Result<()>;
-
-	/// Element-wise accumulation:
-	///
-	///     dst[j, i] = dst[j, i] * dst_weight + upd[j, i] * upd_weight
-	///
-	/// # Requrements
-	/// - All input tensors have to:
-	///   - have a safe map
-	///   - have dtype corresponding to this Executor
-	///   - be on the device corresponding to this Executor
-	/// - The `dst` tensor has to:
-	///   - have contiguous dimension 1
-	/// - Other tensors have to:
-	///   - have either contiguous or broadcasted dimension 1
-	///
-	/// # Errors
-	/// - If any of the requirements is not met.
-	/// - If there is any problem executing the operation on the device.
-	fn acc(
-		&self, dst: &SliceBatch, dst_weight: f64, upd: &SliceBatch, upd_weight: f64,
-	) -> Result<()>;
+	fn copy(&self, o: &SliceBatch, a: &SliceBatch) -> Result<()>;
 
 	/// Element-wise unary operation:
 	///
-	///    dst = 1.0 / sqrt(a + eps);
+	///    o[i] = 1.0 / sqrt(a[i] + eps);
 	///
 	/// # Requrements
 	/// - All input tensors have to:
 	///   - have a safe map
 	///   - have dtype corresponding to this Executor
 	///   - be on the device corresponding to this Executor
-	/// - The `dst` tensor has to:
+	/// - The `o` tensor has to:
 	///   - have contiguous dimension 1
 	/// - Other tensors have to:
 	///   - have either contiguous or broadcasted dimension 1
@@ -151,11 +140,11 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn rsqrt(&self, dst: &SliceBatch, a: &SliceBatch, eps: f64) -> Result<()>;
+	fn rsqrt(&self, o: &SliceBatch, a: &SliceBatch, eps: f64) -> Result<()>;
 
 	/// Element-wise unary operation:
 	///
-	///     dst = max(ln(a), -1000, DType.MAX_NEGATIVE);
+	///     o[i] = max(ln(a[i]), -1000, DType.MAX_NEGATIVE);
 	///
 	/// So the output is defined even for a <= 0.
 	///
@@ -164,7 +153,7 @@ pub trait Executor {
 	///   - have a safe map
 	///   - have dtype corresponding to this Executor
 	///   - be on the device corresponding to this Executor
-	/// - The `dst` tensor has to:
+	/// - The `o` tensor has to:
 	///   - have contiguous dimension 1
 	/// - Other tensors have to:
 	///   - have either contiguous or broadcasted dimension 1
@@ -172,18 +161,39 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn ln_clamped(&self, dst: &SliceBatch, a: &SliceBatch) -> Result<()>;
+	fn ln_clamped(&self, o: &SliceBatch, a: &SliceBatch) -> Result<()>;
+
+	/// Element-wise accumulation:
+	///
+	///     o[i] = (a[i] * a_weight) + (b[i] * b_weight)
+	///
+	/// # Requrements
+	/// - All input tensors have to:
+	///   - have a safe map
+	///   - have dtype corresponding to this Executor
+	///   - be on the device corresponding to this Executor
+	/// - The `o` tensor has to:
+	///   - have contiguous dimension 1
+	/// - Other tensors have to:
+	///   - have either contiguous or broadcasted dimension 1
+	///
+	/// # Errors
+	/// - If any of the requirements is not met.
+	/// - If there is any problem executing the operation on the device.
+	fn add_weighted(
+		&self, o: &SliceBatch, a: &SliceBatch, a_weight: f64, b: &SliceBatch, b_weight: f64,
+	) -> Result<()>;
 
 	/// Element-wise multiplication:
 	///
-	///     dst[j, i] = a[j, i] * b[j, i]
+	///     o[i] = a[j, i] * b[j, i]
 	///
 	/// # Requrements
 	/// - All input tensors have to:
 	///   - have a safe map
 	///   - have dtype corresponding to this Executor
 	///   - be on the device corresponding to this Executor
-	/// - The `dst` tensor has to:
+	/// - The `i` tensor has to:
 	///   - have contiguous dimension 1
 	/// - Other tensors have to:
 	///   - have either contiguous or broadcasted dimension 1
@@ -191,18 +201,18 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn mul(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()>;
+	fn mul(&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()>;
 
 	/// Element-wise multiplication with accumulation:
 	///
-	///     dst[j, i] = dst[j, i] * dst_weight + a[j, i] * b[j, i] * ab_weight
+	///     acc[i] = (acc[i] * acc_weight) + (a[i] * b[i] * ab_weight)
 	///
 	/// # Requrements
 	/// - All input tensors have to:
 	///   - have a safe map
 	///   - have dtype corresponding to this Executor
 	///   - be on the device corresponding to this Executor
-	/// - The `dst` tensor has to:
+	/// - The `acc` tensor has to:
 	///   - have contiguous dimension 1
 	/// - Other tensors have to:
 	///   - have either contiguous or broadcasted dimension 1
@@ -210,20 +220,20 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn mul_acc(
-		&self, dst: &SliceBatch, dst_weight: f64, a: &SliceBatch, b: &SliceBatch, ab_weight: f64,
+	fn acc_mul(
+		&self, acc: &SliceBatch, prev_weight: f64, a: &SliceBatch, b: &SliceBatch, new_weight: f64,
 	) -> Result<()>;
 
 	/// Element-wise subtraction:
 	///
-	///     dst[j, i] = a[j, i] - b[j, i]
+	///     o[i] = a[i] - b[i]
 	///
 	/// # Requrements
 	/// - All input tensors have to:
 	///   - have a safe map
 	///   - have dtype corresponding to this Executor
 	///   - be on the device corresponding to this Executor
-	/// - The `dst` tensor has to:
+	/// - The `o` tensor has to:
 	///   - have contiguous dimension 1
 	/// - Other tensors have to:
 	///   - have either contiguous or broadcasted dimension 1
@@ -231,18 +241,18 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn sub(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()>;
+	fn sub(&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()>;
 
 	/// Element-wise addition:
 	///
-	///     dst[j, i] = a[j, i] + b[j, i]
+	///     o[j, i] = a[j, i] + b[j, i]
 	///
 	/// # Requrements
 	/// - All input tensors have to:
 	///   - have a safe map
 	///   - have dtype corresponding to this Executor
 	///   - be on the device corresponding to this Executor
-	/// - The `dst` tensor has to:
+	/// - The `o` tensor has to:
 	///   - have contiguous dimension 1
 	/// - Other tensors have to:
 	///   - have either contiguous or broadcasted dimension 1
@@ -250,11 +260,11 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn add(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()>;
+	fn add(&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()>;
 
 	/// The SwiGLU activation function:
 	///
-	///     dst[j, i] = lin[j, i] * sigmoid(gate[j, i])
+	///     out[j, i] = lin[j, i] * sigmoid(gate[j, i])
 	///
 	/// # Requrements
 	/// - All input tensors have to:
@@ -267,7 +277,7 @@ pub trait Executor {
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
 	#[allow(clippy::doc_markdown)]
-	fn swiglu(&self, dst: &SliceBatch, lin: &SliceBatch, gate: &SliceBatch) -> Result<()>;
+	fn swiglu(&self, out: &SliceBatch, lin: &SliceBatch, gate: &SliceBatch) -> Result<()>;
 
 	/// Backward pass for the SwiGLU activation function:
 	///
@@ -301,6 +311,8 @@ pub trait Executor {
 	/// - If there is any problem executing the operation on the device.
 	fn sum_all(&self, a: &SliceBatch) -> Result<f64>;
 
+	fn sum(&self, o: &SliceBatch, a: &SliceBatch) -> Result<()>;
+
 	/// Checks if two tensors are approximately equal element-wise:
 	///
 	/// # Requrements
@@ -315,33 +327,26 @@ pub trait Executor {
 	/// - If there is any problem executing the operation on the device.
 	fn approx_eq(&self, a: &SliceBatch, b: &SliceBatch, eps: f64) -> Result<bool>;
 
-	fn softmax(&self, dst: &SliceBatch, a: &SliceBatch) -> Result<()>;
+	fn softmax(&self, out: &SliceBatch, inp: &SliceBatch) -> Result<()>;
 
 	fn softmax_backward(
-		&self, d_lin: &SliceBatch, dst: &SliceBatch, d_out: &SliceBatch,
+		&self, d_lin: &SliceBatch, out: &SliceBatch, d_out: &SliceBatch,
 	) -> Result<()>;
 
-	fn rms_norm(&self, dst: &SliceBatch, a: &SliceBatch, eps: f64) -> Result<()>;
+	fn dot(&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch, scale: f64) -> Result<()>;
 
-	// TODO - rms_norm_backward
-
-	fn dot(&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64) -> Result<()>;
-
-	fn dot_acc(
-		&self, dst: &SliceBatch, dst_weight: f64, a: &SliceBatch, b: &SliceBatch, ab_weight: f64,
+	fn acc_dot(
+		&self, acc: &SliceBatch, prev_weight: f64, a: &SliceBatch, b: &SliceBatch, new_weight: f64,
 	) -> Result<()>;
 
 	fn rsqrt_dot(
-		&self, dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64, eps: f64,
+		&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch, scale: f64, eps: f64,
 	) -> Result<()>;
+
 	/*
-
-
-
-
 		fn gemm(
 			&self, dst: &MatrixBatch, dst_weight: f64, a: &MatrixBatch, b: &MatrixBatch, ab_weight: f64,
-		);
+		) -> Result<()>;
 
 		fn attention(
 			&self, dst: &SliceBatch, q: &SliceBatch, k: &SliceBatch, v: &SliceBatch,

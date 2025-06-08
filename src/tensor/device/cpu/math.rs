@@ -47,9 +47,29 @@ impl FromToF64 for f64 {
 
 //--------------------------------------------------------------------------------------------------
 
+/// Calculates `(a * a_weight) + (b * b_weight)`
+pub fn add_weighted(a: f64, a_weight: f64, b: f64, b_weight: f64) -> f64 {
+	// Clippy recommends using `mul_add()`, however I checked the assembly and
+	// it generates `callq	*fma@GOTPCREL(%rip)`, which will probably be incredibly slow.
+	#![allow(clippy::suboptimal_flops)]
+	(a * a_weight) + (b * b_weight)
+}
+
+/// Calculates `acc + (a * b)`
+pub fn acc_mul(acc: f64, a: f64, b: f64) -> f64 {
+	// Clippy recommends using `mul_add()`, however I checked the assembly and
+	// it generates `callq	*fma@GOTPCREL(%rip)`, which will probably be incredibly slow.
+	#![allow(clippy::suboptimal_flops)]
+	acc + (a * b)
+}
+
 pub fn dot<T: Copy + FromToF64>(a: &[Cell<T>], b: &[Cell<T>]) -> f64 {
 	let zip = a.iter().zip(b);
-	zip.map(|(a, b)| a.get().to_f64() * b.get().to_f64()).sum()
+	zip.fold(0.0, |acc, (a, b)| {
+		let a = a.get().to_f64();
+		let b = b.get().to_f64();
+		acc_mul(acc, a, b)
+	})
 }
 
 pub fn approx_eq(a: f64, b: f64, eps: f64) -> bool {

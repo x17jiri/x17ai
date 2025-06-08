@@ -12,13 +12,14 @@ pub use device::{DType, Device, HasDType};
 
 use crate::Result;
 use crate::tensor::device::cpu::CPUDevice;
+use crate::tensor::device::executor::Executor;
 
-// pub mod batch; TODO
+pub mod batch;
 pub mod device;
-// pub mod dim_merger; TODO
+pub mod dim_merger;
 pub mod generic;
 // pub mod io; TODO
-// pub mod math; TODO
+pub mod math;
 
 #[cfg(false)] // TODO: #[cfg(test)]
 mod tests;
@@ -109,6 +110,10 @@ impl Tensor {
 	/// Returns the data type of the tensor elements.
 	pub fn dtype(&self) -> DType {
 		self.buf.dtype
+	}
+
+	pub fn executor(&self) -> &dyn Executor {
+		self.buf.executor()
 	}
 }
 

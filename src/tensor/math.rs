@@ -5,83 +5,61 @@
 //
 //------------------------------------------------------------------------------
 
-use std::num::NonZeroUsize;
-
-use crate::tensor::device::AttentionParams;
-
-use super::buffer::{MatrixSet, SliceSet};
-use super::dim_merger::{DimMerger, MergedDimIter, MergedDimList};
-use super::{SizeAndStride, Tensor, batch};
+use crate::Result;
+use crate::tensor::device::executor::SliceBatch;
+use crate::tensor::dim_merger::DimMerger;
+use crate::tensor::generic::map::{ND, SizeAndStride};
+use crate::tensor::{Tensor, batch};
 
 pub trait Savable {
 	/// Calculate the result of the operation represented by `self`
 	/// and save it into the `to` tensor.
-	fn save_to(&self, to: &Tensor);
+	fn save_to(&self, to: &Tensor) -> Result<()>;
 }
 
+/*
 pub trait MatrixSavable {
 	/// Calculate the result of the operation represented by `self`
 	/// and save it into the `to` matrix.
-	fn save_to(self, to: Matrix);
+	fn save_to(self, to: Matrix) -> Result<()>;
 }
-
-pub trait Accumulable {
-	/// Calculate the result of the operation represented by `self`
-	/// and accumulate it into the `to` tensor.
-	///
-	///    to = to_weight * to + expr_weight * self
-	fn acc_to(&self, to: &Tensor, to_weight: f64, expr_weight: f64);
-}
-
-pub trait MatrixAccumulable {
-	/// Calculate the result of the operation represented by `self`
-	/// and accumulate it into the `to` matrix.
-	///
-	///    to = to_weight * to + expr_weight * self
-	fn acc_to(self, to: Matrix, to_weight: f64, expr_weight: f64);
-}
+*/
 
 //--------------------------------------------------------------------------------------------------
 
 /// Broadcast is disabled for tensors[0] and enabled for tensors[1..].
-pub(crate) fn __elem_wise<'a, const N: usize, F: FnMut([SliceSet; N])>(
-	tensors: [&Tensor; N], mut f: F,
-) {
-	let merger = DimMerger::new(tensors.map(|t| t.dim_slice(..)));
+pub(crate) fn __elem_wise<const N: usize>(
+	tensors: [&Tensor; N], mut f: impl FnMut([SliceBatch; N]) -> Result<()>,
+) -> Result<()> {
+	let merger = DimMerger::new(tensors.map(|t| t.map.dims.as_slice()))?;
 	let smallest = merger.smallest_dim();
 	let batch_dims = merger.dims_increasing_without_smallest();
 	let batch_iter = batch_dims.iter();
 
-	let dtypes = tensors.map(|t| t.dtype());
-	let buffers = tensors.map(|t| t.buffer.as_ref());
-
-	let lengths: [usize; N] = std::array::from_fn(|i| {
-		if smallest.size_and_stride(i).is_contiguous() {
-			smallest.size
-		} else {
-			assert!(
-				smallest.size_and_stride(i).is_broadcasted(),
-				"last dimension of each tensor needs to be either contiguous or broadcasted. It cannot be strided"
-			);
-			assert!(i != 0, "broadcast is disabled for this tensor");
-			1
-		}
-	});
+	let buffers = tensors.map(|t| t.buf.as_ref());
 
 	batch::run(
 		batch_iter,
-		tensors.map(|t| t.offset),
+		tensors.map(|t| t.map.offset),
 		|batch_size: usize, batch_strides: [usize; N], offsets: [usize; N]| {
-			f(std::array::from_fn(|i| SliceSet {
-				buffer: buffers[i],
-				dtype: dtypes[i],
-				offset: offsets[i],
-				len: lengths[i],
-				count: batch_size,
-				stride: batch_strides[i],
-			}));
+			f(std::array::from_fn(|i| SliceBatch {
+				map: ND {
+					dims: [
+						SizeAndStride {
+							size: batch_size,
+							stride: batch_strides[i],
+						},
+						SizeAndStride {
+							size: smallest.size,
+							stride: smallest.strides[i],
+						},
+					],
+					offset: offsets[i],
+				},
+				buf: buffers[i],
+			}))
 		},
-	);
+	)
 }
 
 /// Data dimension broadcast is disabled for all tensors.
@@ -117,6 +95,7 @@ fn __vec_wise<'a, const N: usize, F: Fn([SliceSet; N])>(tensors: [&Tensor; N], f
 	);
 }
 
+/*
 /// At least one of the matrix dimensions should be contiguous.
 ///
 /// Batch dimensions broadcast is disabled for matrices[0] and enabled for matrices[1..].
@@ -156,6 +135,7 @@ fn __mat_wise<'a, const N: usize, F: Fn([MatrixSet; N])>(
 		},
 	);
 }
+*/
 
 //--------------------------------------------------------------------------------------------------
 
@@ -167,29 +147,25 @@ pub fn zeros() -> Zeros {
 
 impl Savable for Zeros {
 	#[inline(never)]
-	fn save_to(&self, to: &Tensor) {
-		let executor = to.buffer.executor();
-		__elem_wise([to], |[to]| {
-			executor.zeros(&to);
-		});
+	fn save_to(&self, to: &Tensor) -> Result<()> {
+		let executor = to.executor();
+		__elem_wise([to], |[to]| executor.zeros(&to))
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct Randn();
+pub struct RandnClamped();
 
-pub fn randn() -> Randn {
-	Randn()
+pub fn randn_clamped() -> RandnClamped {
+	RandnClamped()
 }
 
-impl Savable for Randn {
+impl Savable for RandnClamped {
 	#[inline(never)]
-	fn save_to(&self, to: &Tensor) {
-		let executor = to.buffer.executor();
-		__elem_wise([to], |[to]| {
-			executor.randn(&to);
-		});
+	fn save_to(&self, to: &Tensor) -> Result<()> {
+		let executor = to.executor();
+		__elem_wise([to], |[to]| executor.randn_clamped(&to))
 	}
 }
 
@@ -197,21 +173,147 @@ impl Savable for Randn {
 
 impl Savable for Tensor {
 	#[inline(never)]
-	fn save_to(&self, to: &Tensor) {
-		let executor = to.buffer.executor();
-		__elem_wise([to, self], |[to, input]| {
-			executor.copy(&to, &input);
+	fn save_to(&self, to: &Tensor) -> Result<()> {
+		let executor = to.executor();
+		__elem_wise([to, self], |[to, input]| executor.copy(&to, &input))
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub trait Scalable {
+	type Output;
+	fn scale(self, scale: f64) -> Self::Output;
+}
+
+pub fn scale<T: Scalable>(expr: T, scale: f64) -> T::Output {
+	expr.scale(scale)
+}
+
+pub struct ScaledTensor<'a> {
+	pub tensor: &'a Tensor,
+	pub scale: f64,
+}
+
+impl<'a> Scalable for &'a Tensor {
+	type Output = ScaledTensor<'a>;
+	fn scale(self, scale: f64) -> Self::Output {
+		ScaledTensor { tensor: self, scale }
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub trait AddableTo<B> {
+	type Output;
+	fn add_to(self, b: B) -> Self::Output;
+}
+
+pub struct AddWeighted<'a> {
+	pub a: &'a Tensor,
+	pub a_weight: f64,
+	pub b: &'a Tensor,
+	pub b_weight: f64,
+}
+
+pub fn add_weighted<'a>(
+	a: &'a Tensor, a_weight: f64, b: &'a Tensor, b_weight: f64,
+) -> AddWeighted<'a> {
+	AddWeighted { a, a_weight, b, b_weight }
+}
+
+impl Scalable for AddWeighted<'_> {
+	type Output = Self;
+	fn scale(self, scale: f64) -> Self::Output {
+		AddWeighted {
+			a: self.a,
+			a_weight: self.a_weight * scale,
+			b: self.b,
+			b_weight: self.b_weight * scale,
+		}
+	}
+}
+
+impl Savable for AddWeighted<'_> {
+	#[inline(never)]
+	fn save_to(&self, to: &Tensor) -> Result<()> {
+		let executor = to.executor();
+		__elem_wise([to, self.a, self.b], |[to, a, b]| {
+			executor.add_weighted(&to, &a, self.a_weight, &b, self.b_weight)
+		})
+	}
+}
+
+impl<'a> AddableTo<&'a Tensor> for &'a Tensor {
+	type Output = AddWeighted<'a>;
+	fn add_to(self, a: &'a Tensor) -> Self::Output {
+		add_weighted(a, 1.0, self, 1.0)
+	}
+}
+
+impl<'a> AddableTo<&'a Tensor> for ScaledTensor<'a> {
+	type Output = AddWeighted<'a>;
+	fn add_to(self, a: &'a Tensor) -> Self::Output {
+		add_weighted(a, 1.0, self.tensor, self.scale)
+	}
+}
+
+impl<'a> AddableTo<ScaledTensor<'a>> for &'a Tensor {
+	type Output = AddWeighted<'a>;
+	fn add_to(self, a: ScaledTensor<'a>) -> Self::Output {
+		add_weighted(a.tensor, a.scale, self, 1.0)
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct Dot<'a> {
+	pub a: &'a Tensor,
+	pub b: &'a Tensor,
+	pub scale: f64,
+}
+
+impl Scalable for Dot<'_> {
+	type Output = Self;
+	fn scale(self, scale: f64) -> Self::Output {
+		Self { scale: self.scale * scale, ..self }
+	}
+}
+
+pub fn dot<'a>(a: &'a Tensor, b: &'a Tensor) -> Dot<'a> {
+	Dot { a, b, scale: 1.0 }
+}
+
+impl<'a> Savable for Dot<'a> {
+	#[inline(never)]
+	fn save_to(&self, to: &Tensor) -> Result<()> {
+		let executor = to.executor();
+		__vec_wise([to, self.a, self.b], |[to, a, b]| {
+			executor.dot(&to, &a, &b, self.scale);
 		});
 	}
 }
 
-impl Accumulable for Tensor {
+//--------------------------------------------------------------------------------------------------
+
+pub trait Summable {
+	type Output;
+	fn sum(self) -> Self::Output;
+}
+
+pub struct Sum<'a> {
+	pub tensor: &'a Tensor,
+}
+
+pub fn sum<'a>(tensor: &'a Tensor) -> Sum<'a> {
+	Sum { tensor }
+}
+
+impl<'a> Savable for Sum<'a> {
 	#[inline(never)]
-	fn acc_to(&self, to: &Tensor, to_weight: f64, expr_weight: f64) {
-		let executor = to.buffer.executor();
-		__elem_wise([to, self], |[to, input]| {
-			executor.acc(&to, to_weight, &input, expr_weight);
-		});
+	fn save_to(&self, to: &Tensor) -> Result<()> {
+		let executor = to.executor();
+		__elem_wise([to, self.tensor], |[to, input]| executor.sum(&to, &input))
 	}
 }
 
@@ -228,26 +330,22 @@ pub fn mul<'a>(a: &'a Tensor, b: &'a Tensor) -> Mul<'a> {
 
 impl<'a> Savable for Mul<'a> {
 	#[inline(never)]
-	fn save_to(&self, to: &Tensor) {
-		let executor = to.buffer.executor();
-		__elem_wise([to, self.a, self.b], |[to, a, b]| {
-			executor.mul(&to, &a, &b);
-		});
+	fn save_to(&self, to: &Tensor) -> Result<()> {
+		let executor = to.executor();
+		__elem_wise([to, self.a, self.b], |[to, a, b]| executor.mul(&to, &a, &b))
 	}
 }
 
-impl<'a> Accumulable for Mul<'a> {
-	#[inline(never)]
-	fn acc_to(&self, to: &Tensor, to_weight: f64, expr_weight: f64) {
-		let executor = to.buffer.executor();
-		__elem_wise([to, self.a, self.b], |[to, a, b]| {
-			executor.mul_acc(&to, to_weight, &a, &b, expr_weight);
-		});
+impl<'a> Summable for Mul<'a> {
+	type Output = Dot<'a>;
+	fn sum(self) -> Self::Output {
+		Dot { a: self.a, b: self.b, scale: 1.0 }
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
 
+/*
 pub struct Sub<'a> {
 	pub a: &'a Tensor,
 	pub b: &'a Tensor,
@@ -380,44 +478,6 @@ impl<'a> SwiGLUBackward<'a> {
 				executor.swiglu_backward(&d_lin, &d_gate, &lin, &gate, &d_out);
 			},
 		);
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
-pub struct VecMul<'a> {
-	pub a: &'a Tensor,
-	pub b: &'a Tensor,
-	pub scale: f64,
-}
-
-impl<'a> VecMul<'a> {
-	pub fn scale(self, scale: f64) -> VecMul<'a> {
-		VecMul { scale: self.scale * scale, ..self }
-	}
-}
-
-pub fn dot<'a>(a: &'a Tensor, b: &'a Tensor) -> VecMul<'a> {
-	VecMul { a, b, scale: 1.0 }
-}
-
-impl<'a> Savable for VecMul<'a> {
-	#[inline(never)]
-	fn save_to(&self, to: &Tensor) {
-		let executor = to.buffer.executor();
-		__vec_wise([to, self.a, self.b], |[to, a, b]| {
-			executor.dot(&to, &a, &b, self.scale);
-		});
-	}
-}
-
-impl Accumulable for VecMul<'_> {
-	#[inline(never)]
-	fn acc_to(&self, to: &Tensor, to_weight: f64, expr_weight: f64) {
-		let executor = to.buffer.executor();
-		__vec_wise([to, self.a, self.b], |[to, a, b]| {
-			executor.dot_acc(&to, to_weight, &a, &b, expr_weight * self.scale);
-		});
 	}
 }
 
@@ -852,3 +912,4 @@ impl<'a> Savable for Attention<'a> {
 }
 
 //--------------------------------------------------------------------------------------------------
+*/

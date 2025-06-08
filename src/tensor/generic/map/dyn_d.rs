@@ -210,7 +210,7 @@ impl Transpose for DynD {
 // storage, but functions that would extend the storage are never inlined.
 // This is to avoid code bloat.
 
-pub const INLINE_DIMS: usize = 5;
+pub const INLINE_DIMS: usize = 4;
 
 pub struct DimVec {
 	vec: SmallVec<[SizeAndStride; INLINE_DIMS]>,

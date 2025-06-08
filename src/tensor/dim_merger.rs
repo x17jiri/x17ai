@@ -9,8 +9,9 @@ use log::warn;
 use smallvec::{SmallVec, smallvec};
 use std::intrinsics::cold_path;
 
-use super::SizeAndStride;
-use super::dim_vec::INLINE_DIMS;
+use crate::Result;
+use crate::tensor::generic::map::SizeAndStride;
+use crate::tensor::generic::map::dyn_d::INLINE_DIMS;
 
 #[derive(Clone, Copy)]
 pub struct MergedDim<const N: usize> {
@@ -43,7 +44,7 @@ pub struct MergedDimIter<'a, const N: usize> {
 
 impl<const N: usize> DimMerger<N> {
 	#[inline(never)]
-	pub fn new(inputs: [&[SizeAndStride]; N]) -> DimMerger<N> {
+	pub fn new(inputs: [&[SizeAndStride]; N]) -> Result<DimMerger<N>> {
 		// Get the max len of the input slices, or 0 if N == 0.
 		let ndim = inputs.iter().map(|inp| inp.len()).max().unwrap_or(0);
 
@@ -97,7 +98,7 @@ impl<const N: usize> DimMerger<N> {
 			prev_dim.size *= next_dim.size;
 		}
 
-		merger
+		Ok(merger)
 	}
 
 	#[inline(never)]
