@@ -93,11 +93,12 @@ impl OptParam {
 		let momentum_update = &self.grad * (1.0 - coef.momentum_decay);
 		self.momentum.assign(decayed_momentum + momentum_update);
 
+		// Dividing the sum by `part_elems` gives the mean of squares
+		let grad_mean_squares = (&self.grad * &self.grad).sum() * self.part_elems_recip;
+
 		// Update velocity
-		// Dividing the sum by `part_elems` gives the mean of squares.
 		let decayed_velocity = &self.velocity * coef.velocity_decay;
-		let velocity_update =
-			(&self.grad * &self.grad).sum() * self.part_elems_recip * (1.0 - coef.velocity_decay);
+		let velocity_update = grad_mean_squares * (1.0 - coef.velocity_decay);
 		self.velocity.assign(decayed_velocity + velocity_update);
 		self.velocity_recip.assign(self.velocity.rsqrt(coef.eps));
 
