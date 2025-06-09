@@ -11,17 +11,17 @@ use crate::tensor::dim_merger::DimMerger;
 use crate::tensor::generic::map::{ND, SizeAndStride};
 use crate::tensor::{Tensor, batch};
 
-pub trait Savable {
+pub trait EvaluatesToTensor {
 	/// Calculate the result of the operation represented by `self`
 	/// and save it into the `to` tensor.
-	fn save_to(&self, to: &Tensor) -> Result<()>;
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<()>;
 }
 
 /*
 pub trait MatrixSavable {
 	/// Calculate the result of the operation represented by `self`
 	/// and save it into the `to` matrix.
-	fn save_to(self, to: Matrix) -> Result<()>;
+	fn eval_to_matrix(self, to: Matrix) -> Result<()>;
 }
 */
 
@@ -72,10 +72,10 @@ fn __vec_wise<const N: usize>(
 ) -> Result<()> {
 	assert!(tensors.iter().all(|t| t.ndim() >= 1));
 
-	let lengths = tensors.map(|t| t.map.dims.last().unwrap().size);
+	let smallest = tensors.map(|t| *t.map.dims.last().unwrap());
 	let buffers = tensors.map(|t| t.buf.as_ref());
 
-	let merger = DimMerger::new(tensors.map(|t| t.map.dims.as_slice()))?;
+	let merger = DimMerger::new(tensors.map(|t| &t.map.dims[..&t.map.dims.len() - 1]))?;
 	let batch_dims = merger.dims_increasing();
 	let batch_iter = batch_dims.iter();
 
@@ -83,14 +83,19 @@ fn __vec_wise<const N: usize>(
 		batch_iter,
 		tensors.map(|t| t.map.offset),
 		|batch_size: usize, batch_strides: [usize; N], offsets: [usize; N]| {
-			f(std::array::from_fn(|i| SliceSet {
-				buffer: buffers[i],
-				dtype: dtypes[i],
-				len: lengths[i],
-				offset: offsets[i],
-				count: batch_size,
-				stride: batch_strides[i],
-			}));
+			f(std::array::from_fn(|i| SliceBatch {
+				map: ND {
+					dims: [
+						SizeAndStride {
+							size: batch_size,
+							stride: batch_strides[i],
+						},
+						smallest[i],
+					],
+					offset: offsets[i],
+				},
+				buf: buffers[i],
+			}))
 		},
 	)
 }
@@ -139,15 +144,15 @@ fn __mat_wise<'a, const N: usize, F: Fn([MatrixSet; N])>(
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct Zeros();
+pub struct ZerosExpr();
 
-pub fn zeros() -> Zeros {
-	Zeros()
+pub fn zeros() -> ZerosExpr {
+	ZerosExpr()
 }
 
-impl Savable for Zeros {
+impl EvaluatesToTensor for ZerosExpr {
 	#[inline(never)]
-	fn save_to(&self, to: &Tensor) -> Result<()> {
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
 		let executor = to.executor();
 		__elem_wise([to], |[to]| executor.zeros(&to))
 	}
@@ -155,15 +160,15 @@ impl Savable for Zeros {
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct RandnClamped();
+pub struct RandnClampedExpr();
 
-pub fn randn_clamped() -> RandnClamped {
-	RandnClamped()
+pub fn randn_clamped() -> RandnClampedExpr {
+	RandnClampedExpr()
 }
 
-impl Savable for RandnClamped {
+impl EvaluatesToTensor for RandnClampedExpr {
 	#[inline(never)]
-	fn save_to(&self, to: &Tensor) -> Result<()> {
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
 		let executor = to.executor();
 		__elem_wise([to], |[to]| executor.randn_clamped(&to))
 	}
@@ -171,292 +176,674 @@ impl Savable for RandnClamped {
 
 //--------------------------------------------------------------------------------------------------
 
-impl Savable for Tensor {
+impl EvaluatesToTensor for Tensor {
 	#[inline(never)]
-	fn save_to(&self, to: &Tensor) -> Result<()> {
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
 		let executor = to.executor();
 		__elem_wise([to, self], |[to, input]| executor.copy(&to, &input))
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
+// Scaling, i.e., multyplication by a scalar.
 
 pub trait Scalable {
 	type Output;
 	fn scale(self, scale: f64) -> Self::Output;
 }
 
-pub fn scale<T: Scalable>(expr: T, scale: f64) -> T::Output {
-	expr.scale(scale)
-}
-
-pub struct ScaledTensor<'a> {
+pub struct ScaledTensorExpr<'a> {
 	pub tensor: &'a Tensor,
 	pub scale: f64,
 }
 
-impl<'a> Scalable for &'a Tensor {
-	type Output = ScaledTensor<'a>;
-	fn scale(self, scale: f64) -> Self::Output {
-		ScaledTensor { tensor: self, scale }
+impl<'a> From<&'a Tensor> for ScaledTensorExpr<'a> {
+	fn from(tensor: &'a Tensor) -> Self {
+		Self { tensor, scale: 1.0 }
 	}
 }
 
-//--------------------------------------------------------------------------------------------------
-
-pub trait AddableTo<B> {
-	type Output;
-	fn add_to(self, b: B) -> Self::Output;
+impl<'a> Scalable for &'a Tensor {
+	type Output = ScaledTensorExpr<'a>;
+	fn scale(self, scale: f64) -> Self::Output {
+		ScaledTensorExpr { tensor: self, scale }
+	}
 }
 
-pub struct AddWeighted<'a> {
-	pub a: &'a Tensor,
-	pub a_weight: f64,
-	pub b: &'a Tensor,
-	pub b_weight: f64,
-}
-
-pub fn add_weighted<'a>(
-	a: &'a Tensor, a_weight: f64, b: &'a Tensor, b_weight: f64,
-) -> AddWeighted<'a> {
-	AddWeighted { a, a_weight, b, b_weight }
-}
-
-impl Scalable for AddWeighted<'_> {
+impl<'a> Scalable for ScaledTensorExpr<'a> {
 	type Output = Self;
 	fn scale(self, scale: f64) -> Self::Output {
-		AddWeighted {
-			a: self.a,
-			a_weight: self.a_weight * scale,
-			b: self.b,
-			b_weight: self.b_weight * scale,
+		Self {
+			tensor: self.tensor,
+			scale: self.scale * scale,
 		}
 	}
 }
 
-impl Savable for AddWeighted<'_> {
+impl<'a> std::ops::Mul<f64> for &'a Tensor {
+	type Output = ScaledTensorExpr<'a>;
+	fn mul(self, scale: f64) -> Self::Output {
+		self.scale(scale)
+	}
+}
+
+impl<'a> std::ops::Mul<f64> for ScaledTensorExpr<'a> {
+	type Output = Self;
+	fn mul(self, scale: f64) -> Self::Output {
+		self.scale(scale)
+	}
+}
+
+impl<'a> std::ops::Mul<f64> for AddWeightedExpr<'a> {
+	type Output = Self;
+	fn mul(self, scale: f64) -> Self::Output {
+		self.scale(scale)
+	}
+}
+
+impl<'a> std::ops::Mul<f64> for DotExpr<'a> {
+	type Output = Self;
+	fn mul(self, scale: f64) -> Self::Output {
+		self.scale(scale)
+	}
+}
+
+impl<'a> std::ops::Mul<f64> for DotAddExpr<'a> {
+	type Output = Self;
+	fn mul(self, scale: f64) -> Self::Output {
+		self.scale(scale)
+	}
+}
+
+impl<'a> std::ops::Mul<f64> for MulExpr<'a> {
+	type Output = ScaledMulExpr<'a>;
+	fn mul(self, scale: f64) -> Self::Output {
+		self.scale(scale)
+	}
+}
+
+impl<'a> std::ops::Mul<f64> for ScaledMulExpr<'a> {
+	type Output = Self;
+	fn mul(self, scale: f64) -> Self::Output {
+		self.scale(scale)
+	}
+}
+
+impl<'a> std::ops::Mul<&'a Tensor> for f64 {
+	type Output = ScaledTensorExpr<'a>;
+	fn mul(self, tensor: &'a Tensor) -> Self::Output {
+		tensor.scale(self)
+	}
+}
+
+impl<'a> std::ops::Mul<ScaledTensorExpr<'a>> for f64 {
+	type Output = ScaledTensorExpr<'a>;
+	fn mul(self, tensor: ScaledTensorExpr<'a>) -> Self::Output {
+		tensor.scale(self)
+	}
+}
+
+impl<'a> std::ops::Mul<AddWeightedExpr<'a>> for f64 {
+	type Output = AddWeightedExpr<'a>;
+	fn mul(self, expr: AddWeightedExpr<'a>) -> Self::Output {
+		expr.scale(self)
+	}
+}
+
+impl<'a> std::ops::Mul<DotExpr<'a>> for f64 {
+	type Output = DotExpr<'a>;
+	fn mul(self, expr: DotExpr<'a>) -> Self::Output {
+		expr.scale(self)
+	}
+}
+
+impl<'a> std::ops::Mul<DotAddExpr<'a>> for f64 {
+	type Output = DotAddExpr<'a>;
+	fn mul(self, expr: DotAddExpr<'a>) -> Self::Output {
+		expr.scale(self)
+	}
+}
+
+impl<'a> std::ops::Mul<MulExpr<'a>> for f64 {
+	type Output = ScaledMulExpr<'a>;
+	fn mul(self, expr: MulExpr<'a>) -> Self::Output {
+		expr.scale(self)
+	}
+}
+
+impl<'a> std::ops::Mul<ScaledMulExpr<'a>> for f64 {
+	type Output = ScaledMulExpr<'a>;
+	fn mul(self, expr: ScaledMulExpr<'a>) -> Self::Output {
+		expr.scale(self)
+	}
+}
+
+impl<'a> std::ops::Neg for &'a Tensor {
+	type Output = ScaledTensorExpr<'a>;
+	fn neg(self) -> Self::Output {
+		self.scale(-1.0)
+	}
+}
+
+impl<'a> std::ops::Neg for ScaledTensorExpr<'a> {
+	type Output = Self;
+	fn neg(self) -> Self::Output {
+		self.scale(-1.0)
+	}
+}
+
+impl<'a> std::ops::Neg for AddWeightedExpr<'a> {
+	type Output = Self;
+	fn neg(self) -> Self::Output {
+		self.scale(-1.0)
+	}
+}
+
+impl<'a> std::ops::Neg for DotExpr<'a> {
+	type Output = Self;
+	fn neg(self) -> Self::Output {
+		self.scale(-1.0)
+	}
+}
+
+impl<'a> std::ops::Neg for DotAddExpr<'a> {
+	type Output = Self;
+	fn neg(self) -> Self::Output {
+		self.scale(-1.0)
+	}
+}
+
+impl<'a> std::ops::Neg for MulExpr<'a> {
+	type Output = ScaledMulExpr<'a>;
+	fn neg(self) -> Self::Output {
+		self.scale(-1.0)
+	}
+}
+
+impl<'a> std::ops::Neg for ScaledMulExpr<'a> {
+	type Output = Self;
+	fn neg(self) -> Self::Output {
+		self.scale(-1.0)
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+// Adding & Subtracting tensors.
+
+pub struct AddWeightedExpr<'a> {
+	pub a: ScaledTensorExpr<'a>,
+	pub b: ScaledTensorExpr<'a>,
+}
+
+impl EvaluatesToTensor for AddWeightedExpr<'_> {
 	#[inline(never)]
-	fn save_to(&self, to: &Tensor) -> Result<()> {
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
 		let executor = to.executor();
-		__elem_wise([to, self.a, self.b], |[to, a, b]| {
-			executor.add_weighted(&to, &a, self.a_weight, &b, self.b_weight)
+		__elem_wise([to, self.a.tensor, self.b.tensor], |[to, a, b]| {
+			executor.add_weighted(&to, &a, self.a.scale, &b, self.b.scale)
 		})
 	}
 }
 
-impl<'a> AddableTo<&'a Tensor> for &'a Tensor {
-	type Output = AddWeighted<'a>;
-	fn add_to(self, a: &'a Tensor) -> Self::Output {
-		add_weighted(a, 1.0, self, 1.0)
+impl Scalable for AddWeightedExpr<'_> {
+	type Output = Self;
+	fn scale(self, scale: f64) -> Self::Output {
+		Self {
+			a: self.a.scale(scale),
+			b: self.b.scale(scale),
+		}
 	}
 }
 
-impl<'a> AddableTo<&'a Tensor> for ScaledTensor<'a> {
-	type Output = AddWeighted<'a>;
-	fn add_to(self, a: &'a Tensor) -> Self::Output {
-		add_weighted(a, 1.0, self.tensor, self.scale)
+impl<'a> std::ops::Add<&'a Tensor> for &'a Tensor {
+	type Output = AddWeightedExpr<'a>;
+	fn add(self, b: &'a Tensor) -> Self::Output {
+		AddWeightedExpr { a: self.into(), b: b.into() }
 	}
 }
 
-impl<'a> AddableTo<ScaledTensor<'a>> for &'a Tensor {
-	type Output = AddWeighted<'a>;
-	fn add_to(self, a: ScaledTensor<'a>) -> Self::Output {
-		add_weighted(a.tensor, a.scale, self, 1.0)
+impl<'a> std::ops::Add<ScaledTensorExpr<'a>> for &'a Tensor {
+	type Output = AddWeightedExpr<'a>;
+	fn add(self, b: ScaledTensorExpr<'a>) -> Self::Output {
+		AddWeightedExpr { a: self.into(), b }
+	}
+}
+
+impl<'a> std::ops::Add<&'a Tensor> for ScaledTensorExpr<'a> {
+	type Output = AddWeightedExpr<'a>;
+	fn add(self, b: &'a Tensor) -> Self::Output {
+		AddWeightedExpr { a: self, b: b.into() }
+	}
+}
+
+impl<'a> std::ops::Add<ScaledTensorExpr<'a>> for ScaledTensorExpr<'a> {
+	type Output = AddWeightedExpr<'a>;
+	fn add(self, b: Self) -> Self::Output {
+		AddWeightedExpr { a: self, b }
+	}
+}
+
+impl<'a> std::ops::Sub<&'a Tensor> for &'a Tensor {
+	type Output = AddWeightedExpr<'a>;
+	fn sub(self, b: &'a Tensor) -> Self::Output {
+		AddWeightedExpr { a: self.into(), b: b.scale(-1.0) }
+	}
+}
+
+impl<'a> std::ops::Sub<ScaledTensorExpr<'a>> for &'a Tensor {
+	type Output = AddWeightedExpr<'a>;
+	fn sub(self, b: ScaledTensorExpr<'a>) -> Self::Output {
+		AddWeightedExpr { a: self.into(), b: b.scale(-1.0) }
+	}
+}
+
+impl<'a> std::ops::Sub<&'a Tensor> for ScaledTensorExpr<'a> {
+	type Output = AddWeightedExpr<'a>;
+	fn sub(self, b: &'a Tensor) -> Self::Output {
+		AddWeightedExpr { a: self, b: b.scale(-1.0) }
+	}
+}
+
+impl<'a> std::ops::Sub<ScaledTensorExpr<'a>> for ScaledTensorExpr<'a> {
+	type Output = AddWeightedExpr<'a>;
+	fn sub(self, b: ScaledTensorExpr<'a>) -> Self::Output {
+		AddWeightedExpr { a: self, b: b.scale(-1.0) }
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct Dot<'a> {
+pub struct DotExpr<'a> {
 	pub a: &'a Tensor,
 	pub b: &'a Tensor,
 	pub scale: f64,
 }
 
-impl Scalable for Dot<'_> {
+pub fn dot<'a>(a: &'a Tensor, b: &'a Tensor) -> DotExpr<'a> {
+	DotExpr { a, b, scale: 1.0 }
+}
+
+impl<'a> EvaluatesToTensor for DotExpr<'a> {
+	#[inline(never)]
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
+		let executor = to.executor();
+		__vec_wise([to, self.a, self.b], |[to, a, b]| executor.dot(&to, &a, &b, self.scale))
+	}
+}
+
+impl Scalable for DotExpr<'_> {
 	type Output = Self;
 	fn scale(self, scale: f64) -> Self::Output {
 		Self { scale: self.scale * scale, ..self }
 	}
 }
 
-pub fn dot<'a>(a: &'a Tensor, b: &'a Tensor) -> Dot<'a> {
-	Dot { a, b, scale: 1.0 }
+//--------------------------------------------------------------------------------------------------
+
+pub struct DotAddExpr<'a> {
+	pub dot: DotExpr<'a>,
+	pub add: ScaledTensorExpr<'a>,
 }
 
-impl<'a> Savable for Dot<'a> {
+impl<'a> EvaluatesToTensor for DotAddExpr<'a> {
 	#[inline(never)]
-	fn save_to(&self, to: &Tensor) -> Result<()> {
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
 		let executor = to.executor();
-		__vec_wise([to, self.a, self.b], |[to, a, b]| {
-			executor.dot(&to, &a, &b, self.scale);
-		});
+		__vec_wise([to, self.add.tensor, self.dot.a, self.dot.b], |[to, x, a, b]| {
+			executor.dot_add(&to, &a, &b, self.dot.scale, &x, self.add.scale)
+		})
+	}
+}
+
+impl Scalable for DotAddExpr<'_> {
+	type Output = Self;
+	fn scale(self, scale: f64) -> Self::Output {
+		Self {
+			dot: self.dot.scale(scale),
+			add: self.add.scale(scale),
+		}
+	}
+}
+
+impl<'a> std::ops::Add<&'a Tensor> for DotExpr<'a> {
+	type Output = DotAddExpr<'a>;
+	fn add(self, add: &'a Tensor) -> Self::Output {
+		DotAddExpr { dot: self, add: add.into() }
+	}
+}
+
+impl<'a> std::ops::Add<ScaledTensorExpr<'a>> for DotExpr<'a> {
+	type Output = DotAddExpr<'a>;
+	fn add(self, add: ScaledTensorExpr<'a>) -> Self::Output {
+		DotAddExpr { dot: self, add }
+	}
+}
+
+impl<'a> std::ops::Add<DotExpr<'a>> for &'a Tensor {
+	type Output = DotAddExpr<'a>;
+	fn add(self, dot: DotExpr<'a>) -> Self::Output {
+		DotAddExpr { dot, add: self.into() }
+	}
+}
+
+impl<'a> std::ops::Add<DotExpr<'a>> for ScaledTensorExpr<'a> {
+	type Output = DotAddExpr<'a>;
+	fn add(self, dot: DotExpr<'a>) -> Self::Output {
+		DotAddExpr { dot, add: self }
+	}
+}
+
+impl<'a> std::ops::Sub<&'a Tensor> for DotExpr<'a> {
+	type Output = DotAddExpr<'a>;
+	fn sub(self, sub: &'a Tensor) -> Self::Output {
+		DotAddExpr { dot: self, add: sub.scale(-1.0) }
+	}
+}
+
+impl<'a> std::ops::Sub<ScaledTensorExpr<'a>> for DotExpr<'a> {
+	type Output = DotAddExpr<'a>;
+	fn sub(self, sub: ScaledTensorExpr<'a>) -> Self::Output {
+		DotAddExpr { dot: self, add: sub.scale(-1.0) }
+	}
+}
+
+impl<'a> std::ops::Sub<DotExpr<'a>> for &'a Tensor {
+	type Output = DotAddExpr<'a>;
+	fn sub(self, dot: DotExpr<'a>) -> Self::Output {
+		DotAddExpr { dot: dot.scale(-1.0), add: self.into() }
+	}
+}
+
+impl<'a> std::ops::Sub<DotExpr<'a>> for ScaledTensorExpr<'a> {
+	type Output = DotAddExpr<'a>;
+	fn sub(self, dot: DotExpr<'a>) -> Self::Output {
+		DotAddExpr { dot: dot.scale(-1.0), add: self }
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
 
-pub trait Summable {
+pub struct MulAddExpr<'a> {
+	pub mul: ScaledMulExpr<'a>,
+	pub add: ScaledTensorExpr<'a>,
+}
+
+impl<'a> EvaluatesToTensor for MulAddExpr<'a> {
+	#[inline(never)]
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
+		let executor = to.executor();
+		__elem_wise([to, self.mul.a, self.mul.b, self.add.tensor], |[to, a, b, add]| {
+			executor.mul_add(&to, &a, &b, self.mul.scale, &add, self.add.scale)
+		})
+	}
+}
+
+impl Scalable for MulAddExpr<'_> {
+	type Output = Self;
+	fn scale(self, scale: f64) -> Self::Output {
+		Self {
+			mul: self.mul.scale(scale),
+			add: self.add.scale(scale),
+		}
+	}
+}
+
+impl<'a> std::ops::Add<&'a Tensor> for ScaledMulExpr<'a> {
+	type Output = MulAddExpr<'a>;
+	fn add(self, add: &'a Tensor) -> Self::Output {
+		MulAddExpr { mul: self, add: add.into() }
+	}
+}
+
+impl<'a> std::ops::Add<ScaledTensorExpr<'a>> for ScaledMulExpr<'a> {
+	type Output = MulAddExpr<'a>;
+	fn add(self, add: ScaledTensorExpr<'a>) -> Self::Output {
+		MulAddExpr { mul: self, add }
+	}
+}
+
+impl<'a> std::ops::Add<ScaledMulExpr<'a>> for &'a Tensor {
+	type Output = MulAddExpr<'a>;
+	fn add(self, mul: ScaledMulExpr<'a>) -> Self::Output {
+		MulAddExpr { mul, add: self.into() }
+	}
+}
+
+impl<'a> std::ops::Add<ScaledMulExpr<'a>> for ScaledTensorExpr<'a> {
+	type Output = MulAddExpr<'a>;
+	fn add(self, mul: ScaledMulExpr<'a>) -> Self::Output {
+		MulAddExpr { mul, add: self }
+	}
+}
+
+impl<'a> std::ops::Sub<&'a Tensor> for ScaledMulExpr<'a> {
+	type Output = MulAddExpr<'a>;
+	fn sub(self, sub: &'a Tensor) -> Self::Output {
+		MulAddExpr { mul: self, add: sub.scale(-1.0) }
+	}
+}
+
+impl<'a> std::ops::Sub<ScaledTensorExpr<'a>> for ScaledMulExpr<'a> {
+	type Output = MulAddExpr<'a>;
+	fn sub(self, sub: ScaledTensorExpr<'a>) -> Self::Output {
+		MulAddExpr { mul: self, add: sub.scale(-1.0) }
+	}
+}
+
+impl<'a> std::ops::Sub<ScaledMulExpr<'a>> for &'a Tensor {
+	type Output = MulAddExpr<'a>;
+	fn sub(self, mul: ScaledMulExpr<'a>) -> Self::Output {
+		MulAddExpr { mul: mul.scale(-1.0), add: self.into() }
+	}
+}
+
+impl<'a> std::ops::Sub<ScaledMulExpr<'a>> for ScaledTensorExpr<'a> {
+	type Output = MulAddExpr<'a>;
+	fn sub(self, mul: ScaledMulExpr<'a>) -> Self::Output {
+		MulAddExpr { mul: mul.scale(-1.0), add: self }
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub trait Sum {
 	type Output;
 	fn sum(self) -> Self::Output;
 }
 
-pub struct Sum<'a> {
+pub struct SumExpr<'a> {
 	pub tensor: &'a Tensor,
 }
 
-pub fn sum<'a>(tensor: &'a Tensor) -> Sum<'a> {
-	Sum { tensor }
-}
-
-impl<'a> Savable for Sum<'a> {
-	#[inline(never)]
-	fn save_to(&self, to: &Tensor) -> Result<()> {
-		let executor = to.executor();
-		__elem_wise([to, self.tensor], |[to, input]| executor.sum(&to, &input))
+impl<'a> Sum for &'a Tensor {
+	type Output = SumExpr<'a>;
+	fn sum(self) -> Self::Output {
+		SumExpr { tensor: self }
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct Mul<'a> {
+pub struct MulExpr<'a> {
 	pub a: &'a Tensor,
 	pub b: &'a Tensor,
 }
 
-pub fn mul<'a>(a: &'a Tensor, b: &'a Tensor) -> Mul<'a> {
-	Mul { a, b }
+impl<'a> std::ops::Mul<&'a Tensor> for &'a Tensor {
+	type Output = MulExpr<'a>;
+	fn mul(self, b: &'a Tensor) -> Self::Output {
+		MulExpr { a: self, b }
+	}
 }
 
-impl<'a> Savable for Mul<'a> {
+impl EvaluatesToTensor for MulExpr<'_> {
 	#[inline(never)]
-	fn save_to(&self, to: &Tensor) -> Result<()> {
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
 		let executor = to.executor();
 		__elem_wise([to, self.a, self.b], |[to, a, b]| executor.mul(&to, &a, &b))
 	}
 }
 
-impl<'a> Summable for Mul<'a> {
-	type Output = Dot<'a>;
+impl<'a> Sum for MulExpr<'a> {
+	type Output = DotExpr<'a>;
 	fn sum(self) -> Self::Output {
-		Dot { a: self.a, b: self.b, scale: 1.0 }
+		DotExpr { a: self.a, b: self.b, scale: 1.0 }
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
 
-/*
-pub struct Sub<'a> {
+pub struct ScaledMulExpr<'a> {
 	pub a: &'a Tensor,
 	pub b: &'a Tensor,
+	pub scale: f64,
 }
 
-pub fn sub<'a>(a: &'a Tensor, b: &'a Tensor) -> Sub<'a> {
-	Sub { a, b }
+impl<'a> Scalable for MulExpr<'a> {
+	type Output = ScaledMulExpr<'a>;
+	fn scale(self, scale: f64) -> Self::Output {
+		ScaledMulExpr { a: self.a, b: self.b, scale }
+	}
 }
 
-impl<'a> Savable for Sub<'a> {
-	#[inline(never)]
-	fn save_to(&self, to: &Tensor) {
-		let executor = to.buffer.executor();
-		__elem_wise([to, self.a, self.b], |[to, a, b]| {
-			executor.sub(&to, &a, &b);
-		});
+impl<'a> Scalable for ScaledMulExpr<'a> {
+	type Output = Self;
+	fn scale(self, scale: f64) -> Self::Output {
+		Self {
+			a: self.a,
+			b: self.b,
+			scale: self.scale * scale,
+		}
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct Add<'a> {
-	pub a: &'a Tensor,
-	pub b: &'a Tensor,
-}
-
-pub fn add<'a>(a: &'a Tensor, b: &'a Tensor) -> Add<'a> {
-	Add { a, b }
-}
-
-impl<'a> Savable for Add<'a> {
-	#[inline(never)]
-	fn save_to(&self, to: &Tensor) {
-		let executor = to.buffer.executor();
-		__elem_wise([to, self.a, self.b], |[to, a, b]| {
-			executor.add(&to, &a, &b);
-		});
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
-pub struct RSqrt<'a> {
+pub struct RSqrtExpr<'a> {
 	pub tensor: &'a Tensor,
+	pub scale: f64,
 	pub eps: f64,
 }
 
-pub fn rsqrt(tensor: &Tensor, eps: f64) -> RSqrt {
-	RSqrt { tensor, eps }
+pub trait RSqrt {
+	type Output;
+	fn rsqrt(self, eps: f64) -> Self::Output;
 }
 
-impl<'a> Savable for RSqrt<'a> {
+impl<'a> RSqrt for &'a Tensor {
+	type Output = RSqrtExpr<'a>;
+	fn rsqrt(self, eps: f64) -> Self::Output {
+		RSqrtExpr { tensor: self, scale: 1.0, eps }
+	}
+}
+
+impl<'a> RSqrt for ScaledTensorExpr<'a> {
+	type Output = RSqrtExpr<'a>;
+	fn rsqrt(self, eps: f64) -> Self::Output {
+		RSqrtExpr {
+			tensor: self.tensor,
+			scale: self.scale,
+			eps,
+		}
+	}
+}
+
+impl<'a> EvaluatesToTensor for RSqrtExpr<'a> {
 	#[inline(never)]
-	fn save_to(&self, to: &Tensor) {
-		let executor = to.buffer.executor();
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
+		let executor = to.executor();
 		__elem_wise([to, self.tensor], |[to, input]| {
-			executor.rsqrt(&to, &input, self.eps);
-		});
+			executor.rsqrt(&to, &input, self.scale, self.eps)
+		})
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct LogClamped<'a> {
+pub struct RSqrtDotExpr<'a> {
+	pub a: &'a Tensor,
+	pub b: &'a Tensor,
+	pub scale: f64,
+	pub eps: f64,
+}
+
+impl<'a> RSqrt for DotExpr<'a> {
+	type Output = RSqrtDotExpr<'a>;
+	fn rsqrt(self, eps: f64) -> Self::Output {
+		RSqrtDotExpr {
+			a: self.a,
+			b: self.b,
+			scale: self.scale,
+			eps,
+		}
+	}
+}
+
+impl<'a> EvaluatesToTensor for RSqrtDotExpr<'a> {
+	#[inline(never)]
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
+		let executor = to.executor();
+		__vec_wise([to, self.a, self.b], |[to, a, b]| {
+			executor.rsqrt_dot(&to, &a, &b, self.scale, self.eps)
+		})
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub trait LnClamped {
+	type Output;
+
+	/// Calculates:
+	///
+	///     low_bound = max(-1000, DType.MAX_NEGATIVE);
+	///     dst = max(ln(a), low_bound);
+	///
+	/// So the output is defined even for a <= 0.
+	fn ln_clamped(self) -> Self::Output;
+}
+
+pub struct LnClampedExpr<'a> {
 	pub tensor: &'a Tensor,
 }
 
-/// Calculates:
-///
-///     low_bound = max(-1000, DType.MAX_NEGATIVE);
-///     dst = max(log(a), low_bound);
-///
-/// So the output is defined even for a <= 0.
-pub fn log_clamped(tensor: &Tensor) -> LogClamped {
-	LogClamped { tensor }
+impl<'a> LnClamped for &'a Tensor {
+	type Output = LnClampedExpr<'a>;
+	fn ln_clamped(self) -> Self::Output {
+		LnClampedExpr { tensor: self }
+	}
 }
 
-impl<'a> Savable for LogClamped<'a> {
+impl<'a> EvaluatesToTensor for LnClampedExpr<'a> {
 	#[inline(never)]
-	fn save_to(&self, to: &Tensor) {
-		let executor = to.buffer.executor();
-		__elem_wise([to, self.tensor], |[to, input]| {
-			executor.log_clamped(&to, &input);
-		});
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
+		let executor = to.executor();
+		__elem_wise([to, self.tensor], |[to, input]| executor.ln_clamped(&to, &input))
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct SwiGLU<'a> {
+pub struct SwiGLUExpr<'a> {
 	pub lin: &'a Tensor,
 	pub gate: &'a Tensor,
 }
 
-pub fn swiglu<'a>(lin: &'a Tensor, gate: &'a Tensor) -> SwiGLU<'a> {
-	SwiGLU { lin, gate }
+pub fn swiglu<'a>(lin: &'a Tensor, gate: &'a Tensor) -> SwiGLUExpr<'a> {
+	SwiGLUExpr { lin, gate }
 }
 
-impl<'a> Savable for SwiGLU<'a> {
+impl<'a> EvaluatesToTensor for SwiGLUExpr<'a> {
 	#[inline(never)]
-	fn save_to(&self, to: &Tensor) {
-		let executor = to.buffer.executor();
-		__elem_wise([to, self.lin, self.gate], |[to, lin, gate]| {
-			executor.swiglu(&to, &lin, &gate);
-		});
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
+		let executor = to.executor();
+		__elem_wise([to, self.lin, self.gate], |[to, lin, gate]| executor.swiglu(&to, &lin, &gate))
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct SwiGLUBackward<'a> {
+pub struct SwiGLUBackwardExpr<'a> {
 	pub d_out: &'a Tensor,
 	pub lin: &'a Tensor,
 	pub gate: &'a Tensor,
@@ -464,48 +851,52 @@ pub struct SwiGLUBackward<'a> {
 
 pub fn swiglu_backward<'a>(
 	d_out: &'a Tensor, lin: &'a Tensor, gate: &'a Tensor,
-) -> SwiGLUBackward<'a> {
-	SwiGLUBackward { d_out, lin, gate }
+) -> SwiGLUBackwardExpr<'a> {
+	SwiGLUBackwardExpr { d_out, lin, gate }
 }
 
-impl<'a> SwiGLUBackward<'a> {
+// Note: We cannot implement `EvaluatesToTensor` because there are two output tensors
+impl<'a> SwiGLUBackwardExpr<'a> {
 	#[inline(never)]
-	pub fn save_to(&self, d_lin: &Tensor, d_gate: &Tensor) {
-		let executor = d_lin.buffer.executor();
+	pub fn eval_to_tensors(&self, d_lin: &Tensor, d_gate: &Tensor) -> Result<()> {
+		let executor = d_lin.executor();
 		__elem_wise(
 			[d_lin, d_gate, self.lin, self.gate, self.d_out],
 			|[d_lin, d_gate, lin, gate, d_out]| {
-				executor.swiglu_backward(&d_lin, &d_gate, &lin, &gate, &d_out);
+				executor.swiglu_backward(&d_lin, &d_gate, &lin, &gate, &d_out)
 			},
-		);
+		)
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
 
-pub fn sum_all(tensor: &Tensor) -> f64 {
-	let executor = tensor.buffer.executor();
+pub fn sum_all(tensor: &Tensor) -> Result<f64> {
+	let executor = tensor.executor();
 	let mut sum = 0.0;
 	// TODO - `__elem_wise()` disables broadcast for tensor at position 0.
 	// In the case of a `sum_all()`, it would make sense to enable it,
 	// but it would require some refactoring. Not sure if it is worth it.
 	__elem_wise([tensor], |[a]| {
-		sum += executor.sum_all(&a);
-	});
-	sum
+		sum += executor.sum_all(&a)?;
+		Ok(())
+	})?;
+	Ok(sum)
 }
 
-pub fn approx_eq(a: &Tensor, b: &Tensor, eps: f64) -> bool {
-	let executor = a.buffer.executor();
+pub fn approx_eq(a: &Tensor, b: &Tensor, eps: f64) -> Result<bool> {
+	let executor = a.executor();
 	let mut result = true;
 	__elem_wise([a, b], |[a, b]| {
-		result &= executor.approx_eq(&a, &b, eps);
-	});
-	result
+		result &= executor.approx_eq(&a, &b, eps)?;
+		Ok(())
+	})?;
+	Ok(result)
 }
 
 //--------------------------------------------------------------------------------------------------
 
+/*
 pub struct Softmax<'a> {
 	pub tensor: &'a Tensor,
 }
@@ -514,7 +905,7 @@ pub fn softmax<'a>(tensor: &'a Tensor) -> Softmax<'a> {
 	Softmax { tensor }
 }
 
-impl<'a> Savable for Softmax<'a> {
+impl<'a> EvaluatesToTensor for Softmax<'a> {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
 		let executor = to.buffer.executor();
@@ -545,7 +936,7 @@ impl<'a> RMSNorm<'a> {
 	}
 }
 
-impl<'a> Savable for RMSNorm<'a> {
+impl<'a> EvaluatesToTensor for RMSNorm<'a> {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
 		let executor = to.buffer.executor();
@@ -771,7 +1162,7 @@ pub fn attention<'a>(q: &'a Tensor, k: &'a Tensor, v: &'a Tensor) -> Attention<'
 	Attention { q, k, v }
 }
 
-impl<'a> Savable for Attention<'a> {
+impl<'a> EvaluatesToTensor for Attention<'a> {
 	#[inline(never)]
 	fn save_to(&self, to: &Tensor) {
 		let tensors = [self.q, self.k, self.v, to];

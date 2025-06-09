@@ -125,7 +125,7 @@ pub trait Executor {
 
 	/// Element-wise unary operation:
 	///
-	///    o[i] = 1.0 / sqrt(a[i] + eps);
+	///    o[i] = 1.0 / sqrt(a[i] * scale + eps);
 	///
 	/// # Requrements
 	/// - All input tensors have to:
@@ -140,7 +140,7 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn rsqrt(&self, o: &SliceBatch, a: &SliceBatch, eps: f64) -> Result<()>;
+	fn rsqrt(&self, o: &SliceBatch, a: &SliceBatch, scale: f64, eps: f64) -> Result<()>;
 
 	/// Element-wise unary operation:
 	///
@@ -203,64 +203,10 @@ pub trait Executor {
 	/// - If there is any problem executing the operation on the device.
 	fn mul(&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()>;
 
-	/// Element-wise multiplication with accumulation:
-	///
-	///     acc[i] = (acc[i] * acc_weight) + (a[i] * b[i] * ab_weight)
-	///
-	/// # Requrements
-	/// - All input tensors have to:
-	///   - have a safe map
-	///   - have dtype corresponding to this Executor
-	///   - be on the device corresponding to this Executor
-	/// - The `acc` tensor has to:
-	///   - have contiguous dimension 1
-	/// - Other tensors have to:
-	///   - have either contiguous or broadcasted dimension 1
-	///
-	/// # Errors
-	/// - If any of the requirements is not met.
-	/// - If there is any problem executing the operation on the device.
-	fn acc_mul(
-		&self, acc: &SliceBatch, prev_weight: f64, a: &SliceBatch, b: &SliceBatch, new_weight: f64,
+	fn mul_add(
+		&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64, c: &SliceBatch,
+		c_weight: f64,
 	) -> Result<()>;
-
-	/// Element-wise subtraction:
-	///
-	///     o[i] = a[i] - b[i]
-	///
-	/// # Requrements
-	/// - All input tensors have to:
-	///   - have a safe map
-	///   - have dtype corresponding to this Executor
-	///   - be on the device corresponding to this Executor
-	/// - The `o` tensor has to:
-	///   - have contiguous dimension 1
-	/// - Other tensors have to:
-	///   - have either contiguous or broadcasted dimension 1
-	///
-	/// # Errors
-	/// - If any of the requirements is not met.
-	/// - If there is any problem executing the operation on the device.
-	fn sub(&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()>;
-
-	/// Element-wise addition:
-	///
-	///     o[j, i] = a[j, i] + b[j, i]
-	///
-	/// # Requrements
-	/// - All input tensors have to:
-	///   - have a safe map
-	///   - have dtype corresponding to this Executor
-	///   - be on the device corresponding to this Executor
-	/// - The `o` tensor has to:
-	///   - have contiguous dimension 1
-	/// - Other tensors have to:
-	///   - have either contiguous or broadcasted dimension 1
-	///
-	/// # Errors
-	/// - If any of the requirements is not met.
-	/// - If there is any problem executing the operation on the device.
-	fn add(&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()>;
 
 	/// The SwiGLU activation function:
 	///
@@ -311,8 +257,6 @@ pub trait Executor {
 	/// - If there is any problem executing the operation on the device.
 	fn sum_all(&self, a: &SliceBatch) -> Result<f64>;
 
-	fn sum(&self, o: &SliceBatch, a: &SliceBatch) -> Result<()>;
-
 	/// Checks if two tensors are approximately equal element-wise:
 	///
 	/// # Requrements
@@ -335,8 +279,9 @@ pub trait Executor {
 
 	fn dot(&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch, scale: f64) -> Result<()>;
 
-	fn acc_dot(
-		&self, acc: &SliceBatch, prev_weight: f64, a: &SliceBatch, b: &SliceBatch, new_weight: f64,
+	fn dot_add(
+		&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64, c: &SliceBatch,
+		c_weight: f64,
 	) -> Result<()>;
 
 	fn rsqrt_dot(

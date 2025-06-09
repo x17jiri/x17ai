@@ -13,6 +13,7 @@ pub use device::{DType, Device, HasDType};
 use crate::Result;
 use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::device::executor::Executor;
+use crate::tensor::math::EvaluatesToTensor;
 
 pub mod batch;
 pub mod device;
@@ -114,6 +115,10 @@ impl Tensor {
 
 	pub fn executor(&self) -> &dyn Executor {
 		self.buf.executor()
+	}
+
+	pub fn assign<Expr: EvaluatesToTensor>(&self, expr: Expr) -> Result<()> {
+		expr.eval_to_tensor(self)
 	}
 }
 

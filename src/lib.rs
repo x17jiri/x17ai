@@ -43,7 +43,7 @@
 #![allow(clippy::missing_const_for_fn)]
 
 pub mod format;
-//pub mod nn; TODO
+pub mod nn;
 pub mod tensor;
 pub mod util;
 

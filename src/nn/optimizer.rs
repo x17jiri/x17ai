@@ -7,8 +7,9 @@
 
 // Optimizer. Inspired by Adam-mini: https://arxiv.org/abs/2406.16793
 
-use crate::tensor::math::{Accumulable, Savable};
-use crate::tensor::{self, Tensor};
+use crate::Result;
+use crate::tensor::Tensor;
+use crate::tensor::math::{RSqrt, Sum};
 
 pub struct OptCoef {
 	pub(crate) momentum_decay: f64, // beta1
@@ -44,24 +45,24 @@ pub struct OptParam {
 }
 
 impl OptParam {
-	pub fn new(value: Tensor, parts: usize, part_elems: usize) -> OptParam {
+	pub fn new(value: Tensor, parts: usize, part_elems: usize) -> Result<OptParam> {
 		let elems = parts.checked_mul(part_elems).expect("Overflow in multiplication");
 		assert!(value.elems() == elems, "Tensor size mismatch");
 
 		let grad_reshaped = value.new_empty_like();
 
-		let value = value.merge_all_dims(); // if fail, tensor is not contiguous
-		let value = value.reshape_last_dim([parts, part_elems]);
+		let value = value.merge_all_dims()?; // if fails, tensor is not contiguous
+		let value = value.reshape_last_dim([parts, part_elems])?;
 
-		let grad = grad_reshaped.clone().merge_all_dims();
-		let grad = grad.reshape_last_dim([parts, part_elems]);
+		let grad = grad_reshaped.clone().merge_all_dims()?;
+		let grad = grad.reshape_last_dim([parts, part_elems])?;
 
 		let momentum = value.new_empty_like();
 
 		let velocity = value.new_empty(&[parts, 1], value.dtype());
 		let velocity_recip = velocity.new_empty_like();
 
-		OptParam {
+		Ok(OptParam {
 			parts,
 			part_elems,
 			part_elems_recip: 1.0 / (part_elems as f64),
@@ -74,7 +75,7 @@ impl OptParam {
 			velocity_recip,
 
 			grad_reshaped,
-		}
+		})
 	}
 
 	pub fn update_grad(&mut self, update: impl FnOnce(&Tensor, bool)) {
@@ -87,25 +88,22 @@ impl OptParam {
 	}
 
 	pub fn step(&mut self, coef: &OptCoef) {
-		// update momentum
-		self.grad.acc_to(&self.momentum, coef.momentum_decay, 1.0 - coef.momentum_decay);
+		// Update momentum
+		let decayed_momentum = &self.momentum * coef.momentum_decay;
+		let momentum_update = &self.grad * (1.0 - coef.momentum_decay);
+		self.momentum.assign(decayed_momentum + momentum_update);
 
-		// update velocity
-		// `dot(grad, grad)` calculates the sum of squares.
+		// Update velocity
 		// Dividing the sum by `part_elems` gives the mean of squares.
-		tensor::math::dot(&self.grad, &self.grad).acc_to(
-			&self.velocity,
-			coef.velocity_decay,
-			(1.0 - coef.velocity_decay) * self.part_elems_recip,
-		);
-		tensor::math::rsqrt(&self.velocity, coef.eps).save_to(&self.velocity_recip);
+		let decayed_velocity = &self.velocity * coef.velocity_decay;
+		let velocity_update =
+			(&self.grad * &self.grad).sum() * self.part_elems_recip * (1.0 - coef.velocity_decay);
+		self.velocity.assign(decayed_velocity + velocity_update);
+		self.velocity_recip.assign(self.velocity.rsqrt(coef.eps));
 
-		// update value
-		tensor::math::mul(&self.momentum, &self.velocity_recip).acc_to(
-			&self.value,
-			1.0,
-			-coef.learning_rate,
-		);
+		// Update value
+		let update = &self.momentum * &self.velocity_recip;
+		self.value.assign(&self.value - coef.learning_rate * update);
 	}
 
 	pub fn value(&self) -> &Tensor {
