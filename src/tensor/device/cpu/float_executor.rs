@@ -161,7 +161,7 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 	fn rsqrt(&self, o: &SliceBatch, a: &SliceBatch, scale: f64, eps: f64) -> Result<()> {
 		Self::unary(o, a, |o, a| {
 			let a = a.get().to_f64();
-			let v = math::rsqrt(a * scale + eps);
+			let v = math::rsqrt(a * scale, eps);
 			o.set(T::from_f64(v))
 		})
 	}
@@ -295,7 +295,7 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 	) -> Result<()> {
 		Self::vec_reduce([o], [a, b], |o, [a, b]| {
 			let dot = math::dot(a, b);
-			let v = math::rsqrt(dot * scale + eps);
+			let v = math::rsqrt(dot * scale, eps);
 			o[0].set(T::from_f64(v));
 		})
 	}

@@ -76,8 +76,8 @@ pub fn approx_eq(a: f64, b: f64, eps: f64) -> bool {
 	(a - b).abs() < eps
 }
 
-pub fn rsqrt(a: f64) -> f64 {
-	1.0 / a.sqrt()
+pub fn rsqrt(a: f64, eps: f64) -> f64 {
+	1.0 / (a.sqrt() + eps)
 }
 
 pub fn sigmoid(x: f64) -> f64 {
@@ -171,7 +171,7 @@ pub fn rms_norm<T: Copy + FromToF64>(dst: &[Cell<T>], inp: &[Cell<T>], eps: f64)
 	let len: f64 = inp.len().lossy_into();
 	let len_recip = 1.0 / len;
 
-	let scale = rsqrt(dot(inp, inp) * len_recip + eps);
+	let scale = rsqrt(dot(inp, inp) * len_recip, eps);
 	for (d, i) in dst.iter().zip(inp) {
 		let i = i.get().to_f64();
 

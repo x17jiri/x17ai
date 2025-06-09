@@ -5,24 +5,27 @@
 //
 //------------------------------------------------------------------------------
 
-// Optimizer. Inspired by Adam-mini: https://arxiv.org/abs/2406.16793
+// Optimizer inspired by Adam-mini.
+//
+//     Original Adam: https://arxiv.org/abs/1412.6980
+//     Adam-mini: https://arxiv.org/abs/2406.16793
 
 use crate::Result;
 use crate::tensor::Tensor;
 use crate::tensor::math::{RSqrt, Sum};
 
 pub struct OptCoef {
-	pub(crate) momentum_decay: f64, // beta1
-	pub(crate) velocity_decay: f64, // beta2
-	pub(crate) eps: f64,            // epsilon
-	pub(crate) learning_rate: f64,  // alpha
+	pub(crate) m_decay: f64,       // beta1
+	pub(crate) v_decay: f64,       // beta2
+	pub(crate) eps: f64,           // epsilon
+	pub(crate) learning_rate: f64, // alpha
 }
 
 impl Default for OptCoef {
 	fn default() -> Self {
-		OptCoef {
-			momentum_decay: 0.9,
-			velocity_decay: 0.99,
+		Self {
+			m_decay: 0.9,
+			v_decay: 0.995,
 			eps: 1e-8,
 			learning_rate: 0.001,
 		}
@@ -35,11 +38,11 @@ pub struct OptParam {
 	pub(crate) part_elems_recip: f64, // 1.0 / (part_elems as f64)
 	pub(crate) already_have_grad: bool,
 
-	pub(crate) value: Tensor,          // shape: [parts, part_elems]
-	pub(crate) grad: Tensor,           // shape: [parts, part_elems]
-	pub(crate) momentum: Tensor,       // shape: [parts, part_elems]
-	pub(crate) velocity: Tensor,       // shape: [parts, 1]
-	pub(crate) velocity_recip: Tensor, // shape: [parts, 1]
+	pub(crate) value: Tensor,   // shape: [parts, part_elems]
+	pub(crate) grad: Tensor,    // shape: [parts, part_elems]
+	pub(crate) m: Tensor,       // shape: [parts, part_elems]
+	pub(crate) v: Tensor,       // shape: [parts, 1]
+	pub(crate) v_rsqrt: Tensor, // shape: [parts, 1]
 
 	pub(crate) grad_reshaped: Tensor, // shape: what's expected by the user
 }
@@ -57,10 +60,10 @@ impl OptParam {
 		let grad = grad_reshaped.clone().merge_all_dims()?;
 		let grad = grad.reshape_last_dim([parts, part_elems])?;
 
-		let momentum = value.new_empty_like();
+		let m = value.new_empty_like();
 
-		let velocity = value.new_empty(&[parts, 1], value.dtype());
-		let velocity_recip = velocity.new_empty_like();
+		let v = value.new_empty(&[parts, 1], value.dtype());
+		let v_rsqrt = v.new_empty_like();
 
 		Ok(OptParam {
 			parts,
@@ -70,9 +73,9 @@ impl OptParam {
 
 			value,
 			grad,
-			momentum,
-			velocity,
-			velocity_recip,
+			m,
+			v,
+			v_rsqrt,
 
 			grad_reshaped,
 		})
@@ -87,24 +90,31 @@ impl OptParam {
 		self.already_have_grad = false;
 	}
 
-	pub fn step(&mut self, coef: &OptCoef) {
-		// Update momentum
-		let decayed_momentum = &self.momentum * coef.momentum_decay;
-		let momentum_update = &self.grad * (1.0 - coef.momentum_decay);
-		self.momentum.assign(decayed_momentum + momentum_update);
+	pub fn step(&mut self, coef: &OptCoef) -> Result<()> {
+		let grad = &self.grad;
 
-		// Dividing the sum by `part_elems` gives the mean of squares
-		let grad_mean_squares = (&self.grad * &self.grad).sum() * self.part_elems_recip;
+		// The original Adam uses just `grad * grad`. Adam-mini saves space
+		// required for `v` by computing the mean of `grad * grad` for each part
+		// of the parameter tensor.
+		// Dividing the sum by `part_elems` gives the mean.
+		let grad_squared = (grad * grad).sum() * self.part_elems_recip;
 
-		// Update velocity
-		let decayed_velocity = &self.velocity * coef.velocity_decay;
-		let velocity_update = grad_mean_squares * (1.0 - coef.velocity_decay);
-		self.velocity.assign(decayed_velocity + velocity_update);
-		self.velocity_recip.assign(self.velocity.rsqrt(coef.eps));
+		// Update the first moment estimate
+		let m_decayed = &self.m * coef.m_decay;
+		let m_update = grad * (1.0 - coef.m_decay);
+		self.m.assign(m_decayed + m_update)?;
+
+		// Update the second moment estimate
+		let v_decayed = &self.v * coef.v_decay;
+		let v_update = grad_squared * (1.0 - coef.v_decay);
+		self.v.assign(v_decayed + v_update)?;
 
 		// Update value
-		let update = &self.momentum * &self.velocity_recip;
-		self.value.assign(&self.value - coef.learning_rate * update);
+		self.v_rsqrt.assign(self.v.rsqrt(coef.eps))?;
+		let update = &self.m * &self.v_rsqrt;
+		self.value.assign(&self.value - coef.learning_rate * update)?;
+
+		Ok(())
 	}
 
 	pub fn value(&self) -> &Tensor {
