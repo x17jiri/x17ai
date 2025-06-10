@@ -171,17 +171,3 @@ pub fn softmax_backward<T: Copy + FromToF64>(
 		d_i.set(T::from_f64(v));
 	}
 }
-
-pub fn rms_norm<T: Copy + FromToF64>(dst: &[Cell<T>], inp: &[Cell<T>], eps: f64) {
-	let len: f64 = inp.len().lossy_into();
-	let len_recip = 1.0 / len;
-
-	let scale = rsqrt(dot(inp, inp) * len_recip, eps);
-	for (d, i) in dst.iter().zip(inp) {
-		let i = i.get().to_f64();
-
-		let v = i * scale;
-
-		d.set(T::from_f64(v));
-	}
-}

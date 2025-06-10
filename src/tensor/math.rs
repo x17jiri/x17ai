@@ -595,10 +595,24 @@ impl<'a> std::ops::Add<&'a Tensor> for ScaledMulExpr<'a> {
 	}
 }
 
+impl<'a> std::ops::Add<&'a Tensor> for MulExpr<'a> {
+	type Output = MulAddExpr<'a>;
+	fn add(self, add: &'a Tensor) -> Self::Output {
+		MulAddExpr { mul: self.scale(1.0), add: add.into() }
+	}
+}
+
 impl<'a> std::ops::Add<ScaledTensorExpr<'a>> for ScaledMulExpr<'a> {
 	type Output = MulAddExpr<'a>;
 	fn add(self, add: ScaledTensorExpr<'a>) -> Self::Output {
 		MulAddExpr { mul: self, add }
+	}
+}
+
+impl<'a> std::ops::Add<ScaledTensorExpr<'a>> for MulExpr<'a> {
+	type Output = MulAddExpr<'a>;
+	fn add(self, add: ScaledTensorExpr<'a>) -> Self::Output {
+		MulAddExpr { mul: self.scale(1.0), add }
 	}
 }
 
@@ -609,10 +623,24 @@ impl<'a> std::ops::Add<ScaledMulExpr<'a>> for &'a Tensor {
 	}
 }
 
+impl<'a> std::ops::Add<MulExpr<'a>> for &'a Tensor {
+	type Output = MulAddExpr<'a>;
+	fn add(self, mul: MulExpr<'a>) -> Self::Output {
+		MulAddExpr { mul: mul.scale(1.0), add: self.into() }
+	}
+}
+
 impl<'a> std::ops::Add<ScaledMulExpr<'a>> for ScaledTensorExpr<'a> {
 	type Output = MulAddExpr<'a>;
 	fn add(self, mul: ScaledMulExpr<'a>) -> Self::Output {
 		MulAddExpr { mul, add: self }
+	}
+}
+
+impl<'a> std::ops::Add<MulExpr<'a>> for ScaledTensorExpr<'a> {
+	type Output = MulAddExpr<'a>;
+	fn add(self, mul: MulExpr<'a>) -> Self::Output {
+		MulAddExpr { mul: mul.scale(1.0), add: self }
 	}
 }
 
@@ -623,10 +651,30 @@ impl<'a> std::ops::Sub<&'a Tensor> for ScaledMulExpr<'a> {
 	}
 }
 
+impl<'a> std::ops::Sub<&'a Tensor> for MulExpr<'a> {
+	type Output = MulAddExpr<'a>;
+	fn sub(self, sub: &'a Tensor) -> Self::Output {
+		MulAddExpr {
+			mul: self.scale(1.0),
+			add: sub.scale(-1.0),
+		}
+	}
+}
+
 impl<'a> std::ops::Sub<ScaledTensorExpr<'a>> for ScaledMulExpr<'a> {
 	type Output = MulAddExpr<'a>;
 	fn sub(self, sub: ScaledTensorExpr<'a>) -> Self::Output {
 		MulAddExpr { mul: self, add: sub.scale(-1.0) }
+	}
+}
+
+impl<'a> std::ops::Sub<ScaledTensorExpr<'a>> for MulExpr<'a> {
+	type Output = MulAddExpr<'a>;
+	fn sub(self, sub: ScaledTensorExpr<'a>) -> Self::Output {
+		MulAddExpr {
+			mul: self.scale(1.0),
+			add: sub.scale(-1.0),
+		}
 	}
 }
 
@@ -637,9 +685,23 @@ impl<'a> std::ops::Sub<ScaledMulExpr<'a>> for &'a Tensor {
 	}
 }
 
+impl<'a> std::ops::Sub<MulExpr<'a>> for &'a Tensor {
+	type Output = MulAddExpr<'a>;
+	fn sub(self, mul: MulExpr<'a>) -> Self::Output {
+		MulAddExpr { mul: mul.scale(-1.0), add: self.into() }
+	}
+}
+
 impl<'a> std::ops::Sub<ScaledMulExpr<'a>> for ScaledTensorExpr<'a> {
 	type Output = MulAddExpr<'a>;
 	fn sub(self, mul: ScaledMulExpr<'a>) -> Self::Output {
+		MulAddExpr { mul: mul.scale(-1.0), add: self }
+	}
+}
+
+impl<'a> std::ops::Sub<MulExpr<'a>> for ScaledTensorExpr<'a> {
+	type Output = MulAddExpr<'a>;
+	fn sub(self, mul: MulExpr<'a>) -> Self::Output {
 		MulAddExpr { mul: mul.scale(-1.0), add: self }
 	}
 }
@@ -896,7 +958,6 @@ pub fn approx_eq(a: &Tensor, b: &Tensor, eps: f64) -> Result<bool> {
 
 //--------------------------------------------------------------------------------------------------
 
-/*
 pub struct Softmax<'a> {
 	pub tensor: &'a Tensor,
 }
@@ -907,16 +968,15 @@ pub fn softmax<'a>(tensor: &'a Tensor) -> Softmax<'a> {
 
 impl<'a> EvaluatesToTensor for Softmax<'a> {
 	#[inline(never)]
-	fn save_to(&self, to: &Tensor) {
-		let executor = to.buffer.executor();
-		__vec_wise([to, self.tensor], |[to, input]| {
-			executor.softmax(&to, &input);
-		});
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
+		let executor = to.executor();
+		__vec_wise([to, self.tensor], |[to, input]| executor.softmax(&to, &input))
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
 
+/*
 pub struct RMSNorm<'a> {
 	pub tensor: &'a Tensor,
 	pub eps: f64,

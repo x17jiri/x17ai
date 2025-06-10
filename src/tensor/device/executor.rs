@@ -163,7 +163,7 @@ pub trait Executor {
 	/// - If there is any problem executing the operation on the device.
 	fn ln_clamped(&self, o: &SliceBatch, a: &SliceBatch) -> Result<()>;
 
-	/// Element-wise accumulation:
+	/// Element-wise weighted addition:
 	///
 	///     o[i] = (a[i] * a_weight) + (b[i] * b_weight)
 	///
@@ -273,10 +273,6 @@ pub trait Executor {
 
 	fn softmax(&self, out: &SliceBatch, inp: &SliceBatch) -> Result<()>;
 
-	fn softmax_backward(
-		&self, d_lin: &SliceBatch, out: &SliceBatch, d_out: &SliceBatch,
-	) -> Result<()>;
-
 	fn dot(&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch, scale: f64) -> Result<()>;
 
 	fn dot_add(
@@ -288,11 +284,9 @@ pub trait Executor {
 		&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch, scale: f64, eps: f64,
 	) -> Result<()>;
 
-	/*
-		fn gemm(
-			&self, dst: &MatrixBatch, dst_weight: f64, a: &MatrixBatch, b: &MatrixBatch, ab_weight: f64,
-		) -> Result<()>;
+	fn mm(&self, o: &MatrixBatch, a: &MatrixBatch, b: &MatrixBatch, scale: f64) -> Result<()>;
 
+	/*
 		fn attention(
 			&self, dst: &SliceBatch, q: &SliceBatch, k: &SliceBatch, v: &SliceBatch,
 			params: &AttentionParams,

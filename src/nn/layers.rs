@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 //pub mod attention;
 //pub mod linear;
-//pub mod rms_norm;
+pub mod rms_norm;
 //pub mod skip_connection;
 pub mod softmax;
 //pub mod softmax_cross_entropy;
@@ -19,6 +19,7 @@ pub mod softmax;
 #[cfg(false)] // TODO: #[cfg(test)]
 mod tests;
 
+use crate::Result;
 use crate::tensor::Tensor;
 
 use super::{EvalContext, Param};
@@ -48,16 +49,16 @@ pub trait Layer {
 		params
 	}
 
-	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Tensor;
+	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Result<Tensor>;
 
-	fn randomize(&mut self);
+	fn randomize(&mut self) -> Result<()>;
 
-	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Tensor;
+	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Result<Tensor>;
 
 	/// This function is similar to `backward()`. It should calculate derivatives of parameters
 	/// used by the layer, but it doesn't calculate derivatives that could be used by previous
 	/// layers. So it would typically only be used for the first layer in a model.
-	fn backward_finish(&self, d_out: Tensor, ctx: &mut EvalContext);
+	fn backward_finish(&self, d_out: Tensor, ctx: &mut EvalContext) -> Result<()>;
 
 	fn as_loss_function(&self) -> Option<&dyn LossFunction> {
 		None

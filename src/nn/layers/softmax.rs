@@ -10,8 +10,9 @@ use std::rc::Rc;
 
 use crate::nn::eval_context::EvalContext;
 use crate::nn::param::Param;
-use crate::tensor::math::dot;
-use crate::tensor::{self, Tensor};
+use crate::tensor::math::Sum;
+use crate::tensor::{Tensor, math};
+use crate::Result;
 
 use super::Layer;
 
@@ -26,8 +27,8 @@ pub struct Softmax {
 }
 
 impl Softmax {
-	pub fn new(n_inputs: usize) -> Softmax {
-		Softmax {
+	pub fn new(n_inputs: usize) -> Self {
+		Self {
 			shape: [n_inputs],
 			gradient_mode: SoftmaxGradientMode::Precise,
 		}
@@ -55,10 +56,10 @@ impl Layer for Softmax {
 		// no parameters to collect
 	}
 
-	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Tensor {
+	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Result<Tensor> {
 		let out = inp.reuse_or_new_like();
 
-		tensor::math::softmax(&inp).save_to(&out);
+		out.assign(math::softmax(&inp))?;
 
 		if ctx.is_training() {
 			match self.gradient_mode {
@@ -67,34 +68,36 @@ impl Layer for Softmax {
 			}
 		}
 
-		out
+		Ok(out)
 	}
 
-	fn randomize(&mut self) {
+	fn randomize(&mut self) -> Result<()> {
 		// no parameters to randomize
+		Ok(())
 	}
 
-	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Tensor {
+	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Result<Tensor> {
 		match self.gradient_mode {
 			SoftmaxGradientMode::Precise => {
 				let [out] = ctx.tensors.get();
 
 				let g = out.new_replace_tail(1, &[1]); // [..., 1]
-				g.assign(dot(&out, &d_out));
+				g.assign((&out * &d_out).sum())?;
 
 				let d_inp = d_out.reuse_or_new_like();
 
 				// TODO - we could merge `-` and `*` into a single kernel
-				d_inp.assign(&d_out - &g);
-				d_inp.assign(&d_inp * &out);
+				d_inp.assign(&d_out - &g)?;
+				d_inp.assign(&d_inp * &out)?;
 
-				d_inp
+				Ok(d_inp)
 			},
-			SoftmaxGradientMode::StraightThrough => d_out,
+			SoftmaxGradientMode::StraightThrough => Ok(d_out),
 		}
 	}
 
-	fn backward_finish(&self, _d_out: Tensor, _ctx: &mut EvalContext) {
+	fn backward_finish(&self, _d_out: Tensor, _ctx: &mut EvalContext) -> Result<()> {
 		// no parameters to update
+		Ok(())
 	}
 }

@@ -8,10 +8,12 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::Result;
 use crate::nn::eval_context::EvalContext;
 use crate::nn::param::Param;
-use crate::tensor::math::Savable;
-use crate::tensor::{self, Tensor};
+use crate::tensor::Tensor;
+use crate::tensor::math::{RSqrt, Sum};
+use crate::util::LossyInto;
 
 use super::Layer;
 
@@ -29,8 +31,8 @@ pub struct RMSNorm {
 }
 
 impl RMSNorm {
-	pub fn new(n_inputs: usize, eps: f64) -> RMSNorm {
-		RMSNorm {
+	pub fn new(n_inputs: usize, eps: f64) -> Self {
+		Self {
 			shape: [n_inputs],
 			eps,
 			gradient_mode: RMSNormGradientMode::Precise,
@@ -55,53 +57,55 @@ impl Layer for RMSNorm {
 		// no parameters to collect
 	}
 
-	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Tensor {
+	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Result<Tensor> {
+		let scale = inp.new_replace_tail(1, &[1]);
+		scale.assign((&inp * &inp).sum().rsqrt(self.eps))?;
+
 		let out = inp.reuse_or_new_like();
+		out.assign(&inp * &scale)?;
 
 		if ctx.is_training() && self.gradient_mode == RMSNormGradientMode::Precise {
-			let scale = out.new_replace_tail(1, &[1]);
-
-			tensor::math::rms_norm(&inp, self.eps).scale_storage(&scale).save_to(&out);
-
 			ctx.tensors.set([out.clone(), scale]);
-		} else {
-			tensor::math::rms_norm(&inp, self.eps).save_to(&out);
 		}
 
-		out
+		Ok(out)
 	}
 
-	fn randomize(&mut self) {
+	fn randomize(&mut self) -> Result<()> {
 		// no parameters to randomize
+		Ok(())
 	}
 
-	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Tensor {
+	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Result<Tensor> {
 		match self.gradient_mode {
 			RMSNormGradientMode::Precise => {
 				let [out, scale] = ctx.tensors.get();
 
 				let g = scale.new_empty_like(); // [..., 1]
-				tensor::math::dot(&out, &d_out).scale(1.0 / self.shape[0] as f64).save_to(&g);
+				g.assign((&out * &d_out).sum() * (1.0 / self.shape[0].lossy_into()))?;
 
-				let d_inp = out.reuse_or_new_like();
+				let d_inp = d_out.reuse_or_new_like();
 
 				// TODO - could we merge `mul, sub, mul` into a single kernel?
-				tensor::math::mul(&out, &g).save_to(&d_inp);
-				tensor::math::sub(&d_out, &d_inp).save_to(&d_inp);
-				tensor::math::mul(&d_inp, &scale).save_to(&d_inp);
+				d_inp.assign(&d_out - (&out * &g))?;
+				d_inp.assign(&d_inp * &scale)?;
 
-				d_inp
+				Ok(d_inp)
 			},
 			RMSNormGradientMode::NormGradients => {
+				let scale = d_out.new_replace_tail(1, &[1]);
+				scale.assign((&d_out * &d_out).sum().rsqrt(self.eps))?;
+
 				let d_inp = d_out.reuse_or_new_like();
-				tensor::math::rms_norm(&d_out, self.eps).save_to(&d_inp);
-				d_inp
+				d_inp.assign(&d_out * &scale)?;
+				Ok(d_inp)
 			},
-			RMSNormGradientMode::StraightThrough => d_out,
+			RMSNormGradientMode::StraightThrough => Ok(d_out),
 		}
 	}
 
-	fn backward_finish(&self, _d_out: Tensor, _ctx: &mut EvalContext) {
+	fn backward_finish(&self, _d_out: Tensor, _ctx: &mut EvalContext) -> Result<()> {
 		// no parameters to update
+		Ok(())
 	}
 }

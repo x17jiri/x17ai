@@ -8,11 +8,11 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use crate::Result;
 use crate::tensor::HasDType;
 use crate::tensor::device::cpu::zip::{reduce_zip_n, vec_zip_n};
-use crate::tensor::device::executor::{Executor, SliceBatch, ensure_same_shape};
+use crate::tensor::device::executor::{Executor, MatrixBatch, SliceBatch, ensure_same_shape};
 use crate::util::array::try_map_borrowed;
+use crate::{Result, sel};
 
 use super::math::{self, FromToF64};
 use super::rng::Rng;
@@ -20,12 +20,12 @@ use super::zip::{CPUInput, zip_n, zip1, zip2, zip3};
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct FloatExecutor<T: Copy + HasDType> {
+pub struct FloatExecutor<T: Copy + HasDType + FromToF64> {
 	rng: Rc<RefCell<Rng>>,
 	phantom: std::marker::PhantomData<T>,
 }
 
-impl<T: Copy + HasDType> FloatExecutor<T> {
+impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 	pub fn new(rng: Rc<RefCell<Rng>>) -> Self {
 		Self { rng, phantom: std::marker::PhantomData }
 	}
@@ -259,14 +259,6 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		Self::n_vec([out, inp], |[out, inp]| math::softmax(out, inp))
 	}
 
-	fn softmax_backward(
-		&self, d_inp: &SliceBatch, out: &SliceBatch, d_out: &SliceBatch,
-	) -> Result<()> {
-		Self::n_vec([d_inp, out, d_out], |[d_inp, out, d_out]| {
-			math::softmax_backward(d_inp, out, d_out);
-		})
-	}
-
 	fn dot(&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch, scale: f64) -> Result<()> {
 		Self::vec_reduce([o], [a, b], |o, [a, b]| {
 			let dot = math::dot(a, b);
@@ -296,5 +288,13 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 			let v = math::rsqrt(dot * scale, eps);
 			o[0].set(T::from_f64(v));
 		})
+	}
+
+	fn mm(&self, o: &MatrixBatch, a: &MatrixBatch, b: &MatrixBatch, scale: f64) -> Result<()> {
+		for i in 0..o.map.dims[0].size {
+			let o = o.select(sel![i, *]);
+		}
+
+		Ok(()) // TODO
 	}
 }

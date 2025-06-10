@@ -12,8 +12,7 @@ pub use dyn_d::DynD;
 pub use nd::ND;
 
 use crate::Result;
-
-use super::Selection;
+use crate::tensor::generic::select::SelectionInfo;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -64,11 +63,11 @@ pub trait IndexToOffset<const K: usize> {
 	fn index_to_offset(&self, index: [usize; K]) -> Result<usize>;
 }
 
-pub trait Select<const K: usize> {
+pub trait Select<const N: usize, const I: usize, const E: bool> {
 	type Output: Map;
 
-	fn select(self, selections: [Selection; K]) -> Result<Self::Output>;
-	unsafe fn select_unchecked(self, selections: [Selection; K]) -> Self::Output;
+	fn select(self, selection: SelectionInfo<N, I, E>) -> Result<Self::Output>;
+	unsafe fn select_unchecked(self, selection: SelectionInfo<N, I, E>) -> Self::Output;
 }
 
 pub trait Transpose {

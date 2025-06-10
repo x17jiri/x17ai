@@ -6,6 +6,7 @@
 //------------------------------------------------------------------------------
 
 #![allow(non_snake_case)]
+#![feature(generic_const_exprs)]
 
 //use x17ai::nn::layers::{Layer, Linear, LossFunction, SoftmaxCrossEntropy};
 //use x17ai::nn::{EvalContext, ModelContext};
@@ -16,6 +17,10 @@
 use std::cell::Cell;
 use std::io::Write;
 use std::rc::Rc;
+
+use x17ai::sel;
+use x17ai::tensor::generic::map::Select;
+use x17ai::tensor::generic::select::SelectionInfo;
 
 /*
 struct Attention {
@@ -146,7 +151,27 @@ impl Module for Transformer {
 }
 */
 
-fn main() {}
+/*use ndarray::{Array2, ArrayView2, s};
+
+#[allow(clippy::reversed_empty_ranges)]
+fn laplacian(v: &ArrayView2<f32>) -> Array2<f32> {
+	let q = s![..-2, 1..-1];
+
+	-4. * &v.slice(s![1..-1, 1..-1])
+		+ v.slice(s![..-2, 1..-1])
+		+ v.slice(s![1..-1, ..-2])
+		+ v.slice(s![1..-1, 2..])
+		+ v.slice(s![2.., 1..-1])
+}*/
+
+fn main() {
+	//	let aa: SelectionInfo<1, 1, false>;
+	//	let qq = SelectionInfo::new();
+	//	let qq = qq.append_dim(1);
+	let qq: isize = 0;
+
+	let q = sel![1, *, 3..4];
+}
 
 #[cfg(false)]
 fn main() {

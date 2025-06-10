@@ -8,12 +8,14 @@
 pub mod buffer;
 pub mod dim_index;
 pub mod map;
+pub mod select;
 
 use buffer::Buffer;
 use dim_index::DimIndex;
 use map::{IndexToOffset, Map, MergeAllDims, MergeDims, ReshapeLastDim};
 
 use crate::tensor::generic::map::{NDShape, Select, Transpose};
+use crate::tensor::generic::select::SelectionInfo;
 use crate::{Error, Result};
 
 //--------------------------------------------------------------------------------------------------
@@ -65,24 +67,26 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 	/// # Errors
 	/// - If the tensor is not K-dimensional
 	/// - If any range is invalid (end < start) or out of bounds
-	pub fn select<const K: usize>(self, ranges: [Selection; K]) -> Result<Tensor<M::Output, B>>
+	pub fn select<const N: usize, const I: usize, const E: bool>(
+		self, selection: SelectionInfo<N, I, E>,
+	) -> Result<Tensor<M::Output, B>>
 	where
-		M: Select<K>,
+		M: Select<N, I, E>,
 	{
-		let new_map = self.map.select(ranges)?;
+		let new_map = self.map.select(selection)?;
 		Ok(Tensor { buf: self.buf, map: new_map })
 	}
 
 	/// # Safety
 	/// - dimensionality - The tensor must be K-dimensional
-	/// - valid_ranges - Ranges must be valid (end >= start and within bounds)
-	pub unsafe fn select_unchecked<const K: usize>(
-		self, ranges: [Selection; K],
+	/// - valid-ranges - Ranges must be valid (end >= start and within bounds)
+	pub unsafe fn select_unchecked<const N: usize, const I: usize, const E: bool>(
+		self, selection: SelectionInfo<N, I, E>,
 	) -> Tensor<M::Output, B>
 	where
-		M: Select<K>,
+		M: Select<N, I, E>,
 	{
-		let new_map = self.map.select_unchecked(ranges);
+		let new_map = self.map.select_unchecked(selection);
 		Tensor { buf: self.buf, map: new_map }
 	}
 
@@ -192,68 +196,6 @@ impl<'a, M: Map, T> Tensor<M, &'a [T]> {
 		}
 		Ok(())
 	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
-pub struct Selection {
-	pub start: Option<usize>,
-	pub end: Option<usize>,
-}
-
-impl From<usize> for Selection {
-	fn from(index: usize) -> Self {
-		Self { start: Some(index), end: Some(index + 1) }
-	}
-}
-
-impl From<std::ops::Range<usize>> for Selection {
-	fn from(range: std::ops::Range<usize>) -> Self {
-		Self {
-			start: Some(range.start),
-			end: Some(range.end),
-		}
-	}
-}
-
-impl From<std::ops::RangeInclusive<usize>> for Selection {
-	fn from(range: std::ops::RangeInclusive<usize>) -> Self {
-		Self {
-			start: Some(*range.start()),
-			end: Some(*range.end() + 1),
-		}
-	}
-}
-
-impl From<std::ops::RangeFrom<usize>> for Selection {
-	fn from(range: std::ops::RangeFrom<usize>) -> Self {
-		Self { start: Some(range.start), end: None }
-	}
-}
-
-impl From<std::ops::RangeTo<usize>> for Selection {
-	fn from(range: std::ops::RangeTo<usize>) -> Self {
-		Self { start: None, end: Some(range.end) }
-	}
-}
-
-impl From<std::ops::RangeToInclusive<usize>> for Selection {
-	fn from(range: std::ops::RangeToInclusive<usize>) -> Self {
-		Self { start: None, end: Some(range.end + 1) }
-	}
-}
-
-impl From<std::ops::RangeFull> for Selection {
-	fn from(_range: std::ops::RangeFull) -> Self {
-		Self { start: None, end: None }
-	}
-}
-
-#[macro_export]
-macro_rules! s {
-	[$($range:expr),* $(,)?] => {
-		[$($crate::tensor::generic::Selection::from($range)),*]
-	};
 }
 
 //--------------------------------------------------------------------------------------------------
