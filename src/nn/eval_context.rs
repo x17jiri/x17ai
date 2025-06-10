@@ -11,16 +11,40 @@ pub struct TensorStore {
 	tensors: Vec<Tensor>,
 }
 
+impl Default for TensorStore {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
 impl TensorStore {
-	pub fn new() -> TensorStore {
-		TensorStore { tensors: Vec::new() }
+	pub fn new() -> Self {
+		Self { tensors: Vec::new() }
 	}
 
+	/// Sets the store with a fixed-size array of tensors.
+	///
+	/// We assume that the store value is set once during the forward pass,
+	/// and then the tensors are retrieved once during the backward pass.
+	///
+	/// So when calling this, the store should be empty.
+	///
+	/// # Panics
+	/// - if the store is not empty.
 	pub fn set<const N: usize>(&mut self, tensors: [Tensor; N]) {
 		assert!(self.tensors.is_empty());
-		self.tensors.extend(tensors.into_iter());
+		self.tensors.extend(tensors);
 	}
 
+	/// Retrieves the tensors from the store as a fixed-size array.
+	///
+	/// We assume that the store value is set once during the forward pass,
+	/// and then the tensors are retrieved once during the backward pass.
+	///
+	/// So when calling this, the store should contain exactly `N` tensors.
+	///
+	/// # Panics
+	/// - if the store does not contain exactly `N` tensors.
 	pub fn get<const N: usize>(&mut self) -> [Tensor; N] {
 		assert!(self.tensors.len() == N);
 		let mut iter = self.tensors.drain(..);
@@ -34,8 +58,8 @@ pub struct EvalContext {
 }
 
 impl EvalContext {
-	pub fn new(training: bool) -> EvalContext {
-		EvalContext { training, tensors: TensorStore::new() }
+	pub fn new(training: bool) -> Self {
+		Self { training, tensors: TensorStore::new() }
 	}
 
 	pub fn is_training(&self) -> bool {

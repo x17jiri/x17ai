@@ -47,20 +47,27 @@ impl FromToF64 for f64 {
 
 //--------------------------------------------------------------------------------------------------
 
-/// Calculates `(a * a_weight) + (b * b_weight)`
-pub fn add_weighted(a: f64, a_weight: f64, b: f64, b_weight: f64) -> f64 {
-	// Clippy recommends using `mul_add()`, however I checked the assembly and
+/// Calculates `(a * b) + c`
+pub fn mul_add(a: f64, b: f64, c: f64) -> f64 {
+	// Clippy recommends using `f64::mul_add()`, however I checked the assembly and
 	// it generates `callq	*fma@GOTPCREL(%rip)`, which will probably be incredibly slow.
 	#![allow(clippy::suboptimal_flops)]
-	(a * a_weight) + (b * b_weight)
+	(a * b) + c
 }
 
-/// Calculates `acc + (a * b)`
-pub fn acc_mul(acc: f64, a: f64, b: f64) -> f64 {
-	// Clippy recommends using `mul_add()`, however I checked the assembly and
-	// it generates `callq	*fma@GOTPCREL(%rip)`, which will probably be incredibly slow.
-	#![allow(clippy::suboptimal_flops)]
-	acc + (a * b)
+/// Calculates `(a * a_weight) + (b * b_weight)`
+pub fn add_weighted(a: f64, a_weight: f64, b: f64, b_weight: f64) -> f64 {
+	mul_add(a, a_weight, b * b_weight)
+}
+
+/// Linear interpolation between a and b. Equivalent to:
+///
+///     `add_weighted(a, 1.0 - t, b, t)`
+///
+/// When `t == 0.0`, returns `a`.
+/// When `t == 1.0`, returns `b`.
+pub fn lerp(a: f64, b: f64, t: f64) -> f64 {
+	mul_add(t, b, mul_add(-t, a, a))
 }
 
 pub fn dot<T: Copy + FromToF64>(a: &[Cell<T>], b: &[Cell<T>]) -> f64 {
@@ -68,7 +75,7 @@ pub fn dot<T: Copy + FromToF64>(a: &[Cell<T>], b: &[Cell<T>]) -> f64 {
 	zip.fold(0.0, |acc, (a, b)| {
 		let a = a.get().to_f64();
 		let b = b.get().to_f64();
-		acc_mul(acc, a, b)
+		mul_add(a, b, acc)
 	})
 }
 
@@ -94,14 +101,12 @@ pub fn swiglu(lin: f64, gate: f64) -> f64 {
 	lin * swish
 }
 
-pub fn swiglu_backward(lin: f64, gate: f64) -> (f64, f64) {
+pub fn swiglu_backward(lin: f64, gate: f64, d_out: f64) -> (f64, f64) {
 	let sigmoid = sigmoid(gate);
 	let swish = gate * sigmoid;
 
-	let d_lin = swish;
-
-	let d_gate = lin * (swish + sigmoid * (1.0 - swish));
-
+	let d_lin = swish * d_out;
+	let d_gate = mul_add(sigmoid, 1.0 - swish, swish) * lin * d_out;
 	(d_lin, d_gate)
 }
 

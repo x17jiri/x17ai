@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use crate::nn::eval_context::EvalContext;
 use crate::nn::param::Param;
-use crate::tensor::math::Savable;
+use crate::tensor::math::dot;
 use crate::tensor::{self, Tensor};
 
 use super::Layer;
@@ -80,13 +80,13 @@ impl Layer for Softmax {
 				let [out] = ctx.tensors.get();
 
 				let g = out.new_replace_tail(1, &[1]); // [..., 1]
-				tensor::math::dot(&out, &d_out).save_to(&g);
+				g.assign(dot(&out, &d_out));
 
 				let d_inp = d_out.reuse_or_new_like();
 
-				// TODO - we could merge `sub` and `mul` into a single kernel
-				tensor::math::sub(&d_out, &g).save_to(&d_inp);
-				tensor::math::mul(&d_inp, &out).save_to(&d_inp);
+				// TODO - we could merge `-` and `*` into a single kernel
+				d_inp.assign(&d_out - &g);
+				d_inp.assign(&d_inp * &out);
 
 				d_inp
 			},

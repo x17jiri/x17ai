@@ -41,6 +41,7 @@
 #![warn(clippy::panic)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::missing_const_for_fn)]
+#![allow(clippy::struct_field_names)]
 
 pub mod format;
 pub mod nn;

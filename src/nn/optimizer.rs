@@ -81,13 +81,15 @@ impl OptParam {
 		})
 	}
 
-	pub fn update_grad(&mut self, update: impl FnOnce(&Tensor, bool)) {
-		update(&self.grad_reshaped, self.already_have_grad);
+	pub fn update_grad(&mut self, update: impl FnOnce(&Tensor, bool) -> Result<()>) -> Result<()> {
+		let result = update(&self.grad_reshaped, self.already_have_grad);
 		self.already_have_grad = true;
+		result
 	}
 
-	pub fn zero_grad(&mut self) {
+	pub fn zero_grad(&mut self) -> Result<()>{
 		self.already_have_grad = false;
+		Ok(())
 	}
 
 	pub fn step(&mut self, coef: &OptCoef) -> Result<()> {

@@ -227,9 +227,7 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 				let lin = lin.get().to_f64();
 				let gate = gate.get().to_f64();
 				let d_out = d_out.get().to_f64();
-				let (d_lin_val, d_gate_val) = math::swiglu_backward(lin, gate);
-				let d_lin_val = d_lin_val * d_out;
-				let d_gate_val = d_gate_val * d_out;
+				let (d_lin_val, d_gate_val) = math::swiglu_backward(lin, gate, d_out);
 				d_lin.set(T::from_f64(d_lin_val));
 				d_gate.set(T::from_f64(d_gate_val));
 			},

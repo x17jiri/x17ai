@@ -5,12 +5,12 @@
 //
 //------------------------------------------------------------------------------
 
-//pub mod eval_context;
-//pub mod layers;
-//pub mod model_context;
+pub mod eval_context;
+pub mod layers;
+pub mod model_context;
 pub mod optimizer;
-//pub mod param;
+pub mod param;
 
-//pub use eval_context::EvalContext;
-//pub use model_context::ModelContext;
-//pub use param::Param;
+pub use eval_context::EvalContext;
+pub use model_context::ModelContext;
+pub use param::Param;

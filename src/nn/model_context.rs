@@ -9,6 +9,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::tensor::{DType, Device};
+use crate::Result;
 
 use super::optimizer::OptCoef;
 use super::param::Param;
@@ -20,8 +21,8 @@ pub struct ModelContext {
 }
 
 impl ModelContext {
-	pub fn new(device: Rc<dyn Device>) -> ModelContext {
-		ModelContext {
+	pub fn new(device: Rc<dyn Device>) -> Self {
+		Self {
 			opt_coef: OptCoef::default(),
 			params: Vec::new(),
 			device,
@@ -34,15 +35,17 @@ impl ModelContext {
 		param
 	}
 
-	pub fn zero_grad(&mut self) {
+	pub fn zero_grad(&mut self) -> Result<()>{
 		for param in &self.params {
-			param.borrow_mut().zero_grad();
+			param.borrow_mut().zero_grad()?;
 		}
+		Ok(())
 	}
 
-	pub fn step(&mut self) {
+	pub fn step(&mut self) -> Result<()> {
 		for param in &self.params {
-			param.borrow_mut().step(&self.opt_coef);
+			param.borrow_mut().step(&self.opt_coef)?;
 		}
+		Ok(())
 	}
 }
