@@ -12,27 +12,27 @@ pub enum IndexOrRange {
 	Range(std::ops::Range<Option<usize>>),
 }
 
-pub struct SelectionInfo<const N: usize, const I: usize, const E: bool> {
+pub struct Sel<const N: usize, const I: usize, const S: bool> {
 	pub items: [IndexOrRange; N],
-	pub ellipsis_pos: usize,
+	pub star_pos: usize,
 }
 
-impl SelectionInfo<0, 0, false> {
+impl Sel<0, 0, false> {
 	pub fn new() -> Self {
-		SelectionInfo { items: [], ellipsis_pos: 0 }
+		Self { items: [], star_pos: 0 }
 	}
 }
 
-pub trait AppendEllipsis {
+pub trait AppendStar {
 	type Output;
-	fn append_ellipsis(self) -> Self::Output;
+	fn append_star(self) -> Self::Output;
 }
 
-impl<const N: usize, const I: usize> AppendEllipsis for SelectionInfo<N, I, false> {
-	type Output = SelectionInfo<N, I, true>;
+impl<const N: usize, const I: usize> AppendStar for Sel<N, I, false> {
+	type Output = Sel<N, I, true>;
 
-	fn append_ellipsis(self) -> Self::Output {
-		SelectionInfo { items: self.items, ellipsis_pos: N }
+	fn append_star(self) -> Self::Output {
+		Self::Output { items: self.items, star_pos: N }
 	}
 }
 
@@ -41,120 +41,119 @@ pub trait AppendDim<T> {
 	fn append_dim(self, index: T) -> Self::Output;
 }
 
-impl<const N: usize, const I: usize, const E: bool> AppendDim<usize> for SelectionInfo<N, I, E>
+impl<const N: usize, const I: usize, const S: bool> AppendDim<usize> for Sel<N, I, S>
 where
 	[(); N + 1]:,
 	[(); I + 1]:,
 {
-	type Output = SelectionInfo<{ N + 1 }, { I + 1 }, E>;
+	type Output = Sel<{ N + 1 }, { I + 1 }, S>;
 
 	fn append_dim(self, index: usize) -> Self::Output {
 		let index = IndexOrRange::Index(index);
-		SelectionInfo {
+		Sel {
 			items: concat_arrays(self.items, [index]),
-			ellipsis_pos: self.ellipsis_pos,
+			star_pos: self.star_pos,
 		}
 	}
 }
 
-impl<const N: usize, const I: usize, const E: bool> AppendDim<std::ops::Range<usize>>
-	for SelectionInfo<N, I, E>
+impl<const N: usize, const I: usize, const S: bool> AppendDim<std::ops::Range<usize>>
+	for Sel<N, I, S>
 where
 	[(); N + 1]:,
 	[(); I]:,
 {
-	type Output = SelectionInfo<{ N + 1 }, I, E>;
+	type Output = Sel<{ N + 1 }, I, S>;
 
 	fn append_dim(self, range: std::ops::Range<usize>) -> Self::Output {
 		let range = IndexOrRange::Range(Some(range.start)..Some(range.end));
-		SelectionInfo {
+		Sel {
 			items: concat_arrays(self.items, [range]),
-			ellipsis_pos: self.ellipsis_pos,
+			star_pos: self.star_pos,
 		}
 	}
 }
 
-impl<const N: usize, const I: usize, const E: bool> AppendDim<std::ops::RangeInclusive<usize>>
-	for SelectionInfo<N, I, E>
+impl<const N: usize, const I: usize, const S: bool> AppendDim<std::ops::RangeInclusive<usize>>
+	for Sel<N, I, S>
 where
 	[(); N + 1]:,
 	[(); I]:,
 {
-	type Output = SelectionInfo<{ N + 1 }, I, E>;
+	type Output = Sel<{ N + 1 }, I, S>;
 
 	fn append_dim(self, range: std::ops::RangeInclusive<usize>) -> Self::Output {
 		let range = IndexOrRange::Range(Some(*range.start())..Some(*range.end() + 1));
-		SelectionInfo {
+		Sel {
 			items: concat_arrays(self.items, [range]),
-			ellipsis_pos: self.ellipsis_pos,
+			star_pos: self.star_pos,
 		}
 	}
 }
 
-impl<const N: usize, const I: usize, const E: bool> AppendDim<std::ops::RangeFrom<usize>>
-	for SelectionInfo<N, I, E>
+impl<const N: usize, const I: usize, const S: bool> AppendDim<std::ops::RangeFrom<usize>>
+	for Sel<N, I, S>
 where
 	[(); N + 1]:,
 	[(); I]:,
 {
-	type Output = SelectionInfo<{ N + 1 }, I, E>;
+	type Output = Sel<{ N + 1 }, I, S>;
 
 	fn append_dim(self, range: std::ops::RangeFrom<usize>) -> Self::Output {
 		let range = IndexOrRange::Range(Some(range.start)..None);
-		SelectionInfo {
+		Sel {
 			items: concat_arrays(self.items, [range]),
-			ellipsis_pos: self.ellipsis_pos,
+			star_pos: self.star_pos,
 		}
 	}
 }
 
-impl<const N: usize, const I: usize, const E: bool> AppendDim<std::ops::RangeTo<usize>>
-	for SelectionInfo<N, I, E>
+impl<const N: usize, const I: usize, const S: bool> AppendDim<std::ops::RangeTo<usize>>
+	for Sel<N, I, S>
 where
 	[(); N + 1]:,
 	[(); I]:,
 {
-	type Output = SelectionInfo<{ N + 1 }, I, E>;
+	type Output = Sel<{ N + 1 }, I, S>;
 
 	fn append_dim(self, range: std::ops::RangeTo<usize>) -> Self::Output {
 		let range = IndexOrRange::Range(None..Some(range.end));
-		SelectionInfo {
+		Sel {
 			items: concat_arrays(self.items, [range]),
-			ellipsis_pos: self.ellipsis_pos,
+			star_pos: self.star_pos,
 		}
 	}
 }
 
-impl<const N: usize, const I: usize, const E: bool> AppendDim<std::ops::RangeToInclusive<usize>>
-	for SelectionInfo<N, I, E>
+impl<const N: usize, const I: usize, const S: bool> AppendDim<std::ops::RangeToInclusive<usize>>
+	for Sel<N, I, S>
 where
 	[(); N + 1]:,
 	[(); I]:,
 {
-	type Output = SelectionInfo<{ N + 1 }, I, E>;
+	type Output = Sel<{ N + 1 }, I, S>;
 
 	fn append_dim(self, range: std::ops::RangeToInclusive<usize>) -> Self::Output {
 		let range = IndexOrRange::Range(None..Some(range.end + 1));
-		SelectionInfo {
+		Sel {
 			items: concat_arrays(self.items, [range]),
-			ellipsis_pos: self.ellipsis_pos,
+			star_pos: self.star_pos,
 		}
 	}
 }
 
-impl<const N: usize, const I: usize, const E: bool> AppendDim<std::ops::RangeFull>
-	for SelectionInfo<N, I, E>
+impl<const N: usize, const I: usize, const S: bool> AppendDim<std::ops::RangeFull> for Sel<N, I, S>
 where
 	[(); N + 1]:,
 	[(); I]:,
 {
-	type Output = SelectionInfo<{ N + 1 }, I, E>;
+	type Output = Sel<{ N + 1 }, I, S>;
 
 	fn append_dim(self, _range: std::ops::RangeFull) -> Self::Output {
 		let range = IndexOrRange::Range(None..None);
-		SelectionInfo {
+		Sel {
 			items: concat_arrays(self.items, [range]),
-			ellipsis_pos: self.ellipsis_pos,
+			star_pos: self.star_pos,
 		}
 	}
 }
@@ -162,7 +161,7 @@ where
 #[macro_export]
 macro_rules! sel {
 	($($rest:tt)*) => {
-		$crate::s_append!($crate::tensor::generic::select::SelectionInfo::new(), $($rest)*)
+		$crate::s_append!($crate::tensor::generic::select::Sel::new(), $($rest)*)
 	};
 }
 
@@ -173,11 +172,11 @@ macro_rules! s_append {
 		$builder
 	};
 	($builder:expr, *) => {
-		$crate::tensor::generic::select::AppendEllipsis::append_ellipsis($builder)
+		$crate::tensor::generic::select::AppendStar::append_star($builder)
 	};
 	($builder:expr, *, $($rest:tt)*) => {
 		$crate::s_append2!(
-			$crate::tensor::generic::select::AppendEllipsis::append_ellipsis($builder),
+			$crate::tensor::generic::select::AppendStar::append_star($builder),
 			$($rest)*
 		)
 	};
