@@ -8,14 +8,14 @@
 pub mod buffer;
 pub mod dim_index;
 pub mod map;
-pub mod select;
+pub mod universal_range;
 
 use buffer::Buffer;
 use dim_index::DimIndex;
 use map::{IndexToOffset, Map, MergeAllDims, MergeDims, ReshapeLastDim};
 
-use crate::tensor::generic::map::{NDShape, Select, Transpose};
-use crate::tensor::generic::select::SelectionInfo;
+use crate::tensor::generic::map::{NDShape, Narrow, Select, Transpose};
+use crate::tensor::generic::universal_range::UniversalRange;
 use crate::{Error, Result};
 
 //--------------------------------------------------------------------------------------------------
@@ -64,30 +64,25 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		Ok(Tensor { buf: self.buf, map: new_map })
 	}
 
-	/// # Errors
-	/// - If the tensor is not K-dimensional
-	/// - If any range is invalid (end < start) or out of bounds
-	pub fn select<const N: usize, const I: usize, const E: bool>(
-		self, selection: SelectionInfo<N, I, E>,
-	) -> Result<Tensor<M::Output, B>>
+	pub fn select<D: DimIndex>(self, dim: D, index: usize) -> Result<Tensor<M::Output, B>>
 	where
-		M: Select<N, I, E>,
+		M: Select,
 	{
-		let new_map = self.map.select(selection)?;
+		let dim = dim.resolve_index(self.ndim())?;
+		let new_map = self.map.select(dim, index)?;
 		Ok(Tensor { buf: self.buf, map: new_map })
 	}
 
-	/// # Safety
-	/// - dimensionality - The tensor must be K-dimensional
-	/// - valid-ranges - Ranges must be valid (end >= start and within bounds)
-	pub unsafe fn select_unchecked<const N: usize, const I: usize, const E: bool>(
-		self, selection: SelectionInfo<N, I, E>,
-	) -> Tensor<M::Output, B>
+	pub fn narrow<D: DimIndex, R: Into<UniversalRange>>(
+		self, dim: D, range: R,
+	) -> Result<Tensor<M::Output, B>>
 	where
-		M: Select<N, I, E>,
+		M: Narrow,
 	{
-		let new_map = self.map.select_unchecked(selection);
-		Tensor { buf: self.buf, map: new_map }
+		let dim = dim.resolve_index(self.ndim())?;
+		let range = range.into();
+		let new_map = self.map.narrow(dim, range)?;
+		Ok(Tensor { buf: self.buf, map: new_map })
 	}
 
 	pub fn transposed<D0: DimIndex, D1: DimIndex>(

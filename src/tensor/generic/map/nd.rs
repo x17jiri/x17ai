@@ -11,7 +11,7 @@ use std::hint::cold_path;
 use super::{
 	DynD, IndexToOffset, Map, MergeAllDims, MergeDims, ReshapeLastDim, SizeAndStride, Transpose,
 };
-use crate::tensor::generic::map::NDShape;
+use crate::tensor::generic::map::{NDShape, Narrow, Select};
 use crate::util::array::try_array_from_iter;
 use crate::{Error, Result};
 
@@ -195,6 +195,25 @@ where
 			offset += i * dim.stride;
 		}
 		Ok(offset)
+	}
+}
+
+impl<const N: usize> Select for ND<N>
+where
+	[(); N - 1]:,
+{
+	type Output = ND<{ N - 1 }>;
+
+	fn select(self, dim: usize, index: usize) -> Result<Self::Output> {
+		todo!();
+	}
+}
+
+impl<const N: usize> Narrow for ND<N> {
+	type Output = Self;
+
+	fn narrow(self, dim: usize, range: std::ops::Range<usize>) -> Result<Self::Output> {
+		todo!();
 	}
 }
 

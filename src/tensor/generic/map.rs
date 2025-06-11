@@ -12,7 +12,7 @@ pub use dyn_d::DynD;
 pub use nd::ND;
 
 use crate::Result;
-use crate::tensor::generic::select::SelectionInfo;
+use crate::tensor::generic::universal_range::UniversalRange;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -24,11 +24,11 @@ pub struct SizeAndStride {
 
 impl SizeAndStride {
 	pub fn is_contiguous(&self) -> bool {
-		self.stride == 1 || self.size <= 1
+		self.size <= 1 || self.stride == 1
 	}
 
 	pub fn is_broadcasted(&self) -> bool {
-		self.stride < 1 && self.size > 1
+		self.size <= 1 || self.stride < 1
 	}
 }
 
@@ -63,11 +63,16 @@ pub trait IndexToOffset<const K: usize> {
 	fn index_to_offset(&self, index: [usize; K]) -> Result<usize>;
 }
 
-pub trait Select<const N: usize, const I: usize, const E: bool> {
+pub trait Select {
 	type Output: Map;
 
-	fn select(self, selection: SelectionInfo<N, I, E>) -> Result<Self::Output>;
-	unsafe fn select_unchecked(self, selection: SelectionInfo<N, I, E>) -> Self::Output;
+	fn select(self, dim: usize, index: usize) -> Result<Self::Output>;
+}
+
+pub trait Narrow {
+	type Output: Map;
+
+	fn narrow(self, dim: usize, range: UniversalRange) -> Result<Self::Output>;
 }
 
 pub trait Transpose {

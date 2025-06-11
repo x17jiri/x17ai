@@ -12,12 +12,12 @@ pub enum IndexOrRange {
 	Range(std::ops::Range<Option<usize>>),
 }
 
-pub struct Sel<const N: usize, const I: usize, const S: bool> {
+pub struct SliceInfo<const N: usize, const I: usize, const S: bool> {
 	pub items: [IndexOrRange; N],
 	pub star_pos: usize,
 }
 
-impl Sel<0, 0, false> {
+impl SliceInfo<0, 0, false> {
 	pub fn new() -> Self {
 		Self { items: [], star_pos: 0 }
 	}
@@ -28,8 +28,8 @@ pub trait AppendStar {
 	fn append_star(self) -> Self::Output;
 }
 
-impl<const N: usize, const I: usize> AppendStar for Sel<N, I, false> {
-	type Output = Sel<N, I, true>;
+impl<const N: usize, const I: usize> AppendStar for SliceInfo<N, I, false> {
+	type Output = SliceInfo<N, I, true>;
 
 	fn append_star(self) -> Self::Output {
 		Self::Output { items: self.items, star_pos: N }
@@ -41,16 +41,16 @@ pub trait AppendDim<T> {
 	fn append_dim(self, index: T) -> Self::Output;
 }
 
-impl<const N: usize, const I: usize, const S: bool> AppendDim<usize> for Sel<N, I, S>
+impl<const N: usize, const I: usize, const S: bool> AppendDim<usize> for SliceInfo<N, I, S>
 where
 	[(); N + 1]:,
 	[(); I + 1]:,
 {
-	type Output = Sel<{ N + 1 }, { I + 1 }, S>;
+	type Output = SliceInfo<{ N + 1 }, { I + 1 }, S>;
 
 	fn append_dim(self, index: usize) -> Self::Output {
 		let index = IndexOrRange::Index(index);
-		Sel {
+		SliceInfo {
 			items: concat_arrays(self.items, [index]),
 			star_pos: self.star_pos,
 		}
@@ -58,16 +58,16 @@ where
 }
 
 impl<const N: usize, const I: usize, const S: bool> AppendDim<std::ops::Range<usize>>
-	for Sel<N, I, S>
+	for SliceInfo<N, I, S>
 where
 	[(); N + 1]:,
 	[(); I]:,
 {
-	type Output = Sel<{ N + 1 }, I, S>;
+	type Output = SliceInfo<{ N + 1 }, I, S>;
 
 	fn append_dim(self, range: std::ops::Range<usize>) -> Self::Output {
 		let range = IndexOrRange::Range(Some(range.start)..Some(range.end));
-		Sel {
+		SliceInfo {
 			items: concat_arrays(self.items, [range]),
 			star_pos: self.star_pos,
 		}
@@ -75,16 +75,16 @@ where
 }
 
 impl<const N: usize, const I: usize, const S: bool> AppendDim<std::ops::RangeInclusive<usize>>
-	for Sel<N, I, S>
+	for SliceInfo<N, I, S>
 where
 	[(); N + 1]:,
 	[(); I]:,
 {
-	type Output = Sel<{ N + 1 }, I, S>;
+	type Output = SliceInfo<{ N + 1 }, I, S>;
 
 	fn append_dim(self, range: std::ops::RangeInclusive<usize>) -> Self::Output {
 		let range = IndexOrRange::Range(Some(*range.start())..Some(*range.end() + 1));
-		Sel {
+		SliceInfo {
 			items: concat_arrays(self.items, [range]),
 			star_pos: self.star_pos,
 		}
@@ -92,16 +92,16 @@ where
 }
 
 impl<const N: usize, const I: usize, const S: bool> AppendDim<std::ops::RangeFrom<usize>>
-	for Sel<N, I, S>
+	for SliceInfo<N, I, S>
 where
 	[(); N + 1]:,
 	[(); I]:,
 {
-	type Output = Sel<{ N + 1 }, I, S>;
+	type Output = SliceInfo<{ N + 1 }, I, S>;
 
 	fn append_dim(self, range: std::ops::RangeFrom<usize>) -> Self::Output {
 		let range = IndexOrRange::Range(Some(range.start)..None);
-		Sel {
+		SliceInfo {
 			items: concat_arrays(self.items, [range]),
 			star_pos: self.star_pos,
 		}
@@ -109,16 +109,16 @@ where
 }
 
 impl<const N: usize, const I: usize, const S: bool> AppendDim<std::ops::RangeTo<usize>>
-	for Sel<N, I, S>
+	for SliceInfo<N, I, S>
 where
 	[(); N + 1]:,
 	[(); I]:,
 {
-	type Output = Sel<{ N + 1 }, I, S>;
+	type Output = SliceInfo<{ N + 1 }, I, S>;
 
 	fn append_dim(self, range: std::ops::RangeTo<usize>) -> Self::Output {
 		let range = IndexOrRange::Range(None..Some(range.end));
-		Sel {
+		SliceInfo {
 			items: concat_arrays(self.items, [range]),
 			star_pos: self.star_pos,
 		}
@@ -126,32 +126,33 @@ where
 }
 
 impl<const N: usize, const I: usize, const S: bool> AppendDim<std::ops::RangeToInclusive<usize>>
-	for Sel<N, I, S>
+	for SliceInfo<N, I, S>
 where
 	[(); N + 1]:,
 	[(); I]:,
 {
-	type Output = Sel<{ N + 1 }, I, S>;
+	type Output = SliceInfo<{ N + 1 }, I, S>;
 
 	fn append_dim(self, range: std::ops::RangeToInclusive<usize>) -> Self::Output {
 		let range = IndexOrRange::Range(None..Some(range.end + 1));
-		Sel {
+		SliceInfo {
 			items: concat_arrays(self.items, [range]),
 			star_pos: self.star_pos,
 		}
 	}
 }
 
-impl<const N: usize, const I: usize, const S: bool> AppendDim<std::ops::RangeFull> for Sel<N, I, S>
+impl<const N: usize, const I: usize, const S: bool> AppendDim<std::ops::RangeFull>
+	for SliceInfo<N, I, S>
 where
 	[(); N + 1]:,
 	[(); I]:,
 {
-	type Output = Sel<{ N + 1 }, I, S>;
+	type Output = SliceInfo<{ N + 1 }, I, S>;
 
 	fn append_dim(self, _range: std::ops::RangeFull) -> Self::Output {
 		let range = IndexOrRange::Range(None..None);
-		Sel {
+		SliceInfo {
 			items: concat_arrays(self.items, [range]),
 			star_pos: self.star_pos,
 		}
@@ -159,9 +160,9 @@ where
 }
 
 #[macro_export]
-macro_rules! sel {
+macro_rules! s {
 	($($rest:tt)*) => {
-		$crate::s_append!($crate::tensor::generic::select::Sel::new(), $($rest)*)
+		$crate::s_append!($crate::tensor::generic::select::SliceInfo::new(), $($rest)*)
 	};
 }
 

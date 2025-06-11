@@ -48,8 +48,8 @@ impl Layer for SwiGLU {
 
 	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Tensor {
 		let out = inp.new_replace_tail(2, &self.output_shape);
-		let lin = inp.clone().slice(-2, 0..1).merge_dims::<2>();
-		let gate = inp.slice(-2, 1..2).merge_dims::<2>();
+		let lin = inp.clone().select(-2, 0);
+		let gate = inp.select(-2, 1);
 
 		tensor::math::swiglu(&lin, &gate).save_to(&out);
 

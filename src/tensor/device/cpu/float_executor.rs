@@ -8,11 +8,11 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use crate::Result;
 use crate::tensor::HasDType;
 use crate::tensor::device::cpu::zip::{reduce_zip_n, vec_zip_n};
 use crate::tensor::device::executor::{Executor, MatrixBatch, SliceBatch, ensure_same_shape};
 use crate::util::array::try_map_borrowed;
-use crate::{Result, sel};
 
 use super::math::{self, FromToF64};
 use super::rng::Rng;
@@ -292,7 +292,7 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 
 	fn mm(&self, o: &MatrixBatch, a: &MatrixBatch, b: &MatrixBatch, scale: f64) -> Result<()> {
 		for i in 0..o.map.dims[0].size {
-			let o = o.select(sel![i, *]);
+			let o = o.select(0, i)?;
 		}
 
 		Ok(()) // TODO

@@ -20,7 +20,7 @@ use std::rc::Rc;
 
 use x17ai::sel;
 use x17ai::tensor::generic::map::Select;
-use x17ai::tensor::generic::select::SelectionInfo;
+use x17ai::tensor::generic::slicing::SelectionInfo;
 
 /*
 struct Attention {
