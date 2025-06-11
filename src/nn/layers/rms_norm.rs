@@ -58,10 +58,10 @@ impl Layer for RMSNorm {
 	}
 
 	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Result<Tensor> {
-		let scale = inp.new_replace_tail(1, &[1]);
+		let scale = inp.new_replace_tail(1, &[1])?;
 		scale.assign((&inp * &inp).sum().rsqrt(self.eps))?;
 
-		let out = inp.reuse_or_new_like();
+		let out = inp.reuse_or_new_like()?;
 		out.assign(&inp * &scale)?;
 
 		if ctx.is_training() && self.gradient_mode == RMSNormGradientMode::Precise {
@@ -81,10 +81,10 @@ impl Layer for RMSNorm {
 			RMSNormGradientMode::Precise => {
 				let [out, scale] = ctx.tensors.get();
 
-				let g = scale.new_empty_like(); // [..., 1]
+				let g = scale.new_empty_like()?; // [..., 1]
 				g.assign((&out * &d_out).sum() * (1.0 / self.shape[0].lossy_into()))?;
 
-				let d_inp = d_out.reuse_or_new_like();
+				let d_inp = d_out.reuse_or_new_like()?;
 
 				// TODO - could we merge `mul, sub, mul` into a single kernel?
 				d_inp.assign(&d_out - (&out * &g))?;
@@ -93,10 +93,10 @@ impl Layer for RMSNorm {
 				Ok(d_inp)
 			},
 			RMSNormGradientMode::NormGradients => {
-				let scale = d_out.new_replace_tail(1, &[1]);
+				let scale = d_out.new_replace_tail(1, &[1])?;
 				scale.assign((&d_out * &d_out).sum().rsqrt(self.eps))?;
 
-				let d_inp = d_out.reuse_or_new_like();
+				let d_inp = d_out.reuse_or_new_like()?;
 				d_inp.assign(&d_out * &scale)?;
 				Ok(d_inp)
 			},

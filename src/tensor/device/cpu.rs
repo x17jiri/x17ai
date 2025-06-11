@@ -107,13 +107,17 @@ const Commutative: Commutativity = Commutativity::Commutative;
 const NonCommutative: Commutativity = Commutativity::NonCommutative;
 
 pub struct CPUDevice {
-	name: String,
-	rng: Rc<RefCell<Rng>>,
-	f32_executor: FloatExecutor<f32>,
+	pub name: String,
+	pub rng: Rc<RefCell<Rng>>,
+	pub f32_executor: FloatExecutor<f32>,
 }
 
 impl CPUDevice {
-	pub fn new(name: String) -> Rc<Self> {
+	pub fn new() -> Rc<Self> {
+		Self::new_named("CPU".to_string())
+	}
+
+	pub fn new_named(name: String) -> Rc<Self> {
 		let rng = Rc::new(RefCell::new(Rng::new_default()));
 		let f32_rng = rng.clone();
 		Rc::new(Self {
@@ -468,7 +472,7 @@ impl Device for CPUDevice {
 		&self.name
 	}
 
-	fn new_buffer(self: Rc<Self>, dtype: DType, elems: usize) -> Rc<DeviceBuffer> {
+	fn new_buffer(self: Rc<Self>, dtype: DType, elems: usize) -> Result<Rc<DeviceBuffer>> {
 		let executor = match dtype {
 			f32::dtype => &self.f32_executor,
 			_ => todo!("Unsupported dtype for CPUDevice: {}", dtype),
@@ -479,14 +483,14 @@ impl Device for CPUDevice {
 			.expect("Couldn't create layout for CPUBuffer");
 		let memory = unsafe { std::alloc::alloc(layout) };
 		let memory = NonNull::new(memory).expect("Failed to allocate memory for CPUBuffer");
-		Rc::new(DeviceBuffer {
+		Ok(Rc::new(DeviceBuffer {
 			executor: NonNull::from(executor),
 			dtype,
 			elems,
 			device_data: memory.as_ptr(),
 			device: ManuallyDrop::new(self.clone()),
 			device_is_cpu: true,
-		})
+		}))
 	}
 
 	fn drop_buffer(self: Rc<Self>, dtype: DType, elems: usize, device_data: *mut u8) {
@@ -499,55 +503,6 @@ impl Device for CPUDevice {
 
 #[cfg(false)]
 impl Executor for CPUDevice {
-	fn read_bin(&self, dst: &SliceSet, src: &mut dyn std::io::Read) -> std::io::Result<()> {
-		let mut result = Ok(());
-		match dst.dtype {
-			f32::dtype => self.array_wise::<f32, 1>([dst], |[d]| {
-				if result.is_ok() {
-					let ptr = d.as_ptr() as *mut u8;
-					let bytes = d.len() * std::mem::size_of::<f32>();
-					let slice = unsafe { std::slice::from_raw_parts_mut(ptr, bytes) };
-					result = src.read_exact(slice);
-
-					// We always store values as little-endian,
-					// so conversion is needed for big-endian targets
-					#[cfg(target_endian = "big")]
-					{
-						for elem in d {
-							let le = elem.get();
-							let bits = le.to_bits();
-							let swapped = bits.swap_bytes();
-							let be = f32::from_bits(swapped);
-							elem.set(be);
-						}
-					}
-				}
-			}),
-			_ => todo!(),
-		}
-		result
-	}
-
-	fn write_bin(&self, src: &SliceSet, dst: &mut dyn std::io::Write) -> std::io::Result<()> {
-		#[cfg(target_endian = "big")]
-		{
-			todo!("Saving to binary file on big-endian targets is not implemented yet");
-		}
-		let mut result = Ok(());
-		match src.dtype {
-			f32::dtype => self.array_wise::<f32, 1>([src], |[s]| {
-				if result.is_ok() {
-					let ptr = s.as_ptr() as *const u8;
-					let bytes = s.len() * std::mem::size_of::<f32>();
-					let slice = unsafe { std::slice::from_raw_parts(ptr, bytes) };
-					result = dst.write_all(slice);
-				}
-			}),
-			_ => todo!(),
-		}
-		result
-	}
-
 	fn dot(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet, ab_weight: f64) {
 		assert!(a.len == b.len);
 		assert!(dst.len == 1);

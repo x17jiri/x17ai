@@ -34,6 +34,18 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		self.map.ndim()
 	}
 
+	pub fn size(&self, dim: usize) -> Result<usize> {
+		if dim >= self.map.ndim() {
+			#[cold]
+			fn err_dim_out_of_bounds(dim: usize, ndim: usize) -> Error {
+				format!("Dimension {dim} is out of bounds for tensor with {ndim} dimensions.")
+					.into()
+			}
+			return Err(err_dim_out_of_bounds(dim, self.ndim()));
+		}
+		Ok(self.map.size(dim))
+	}
+
 	pub fn elems(&self) -> usize {
 		self.map.elems()
 	}
@@ -71,6 +83,15 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		let dim = dim.resolve_index(self.ndim())?;
 		let new_map = self.map.select(dim, index)?;
 		Ok(Tensor { buf: self.buf, map: new_map })
+	}
+
+	pub fn iter_along_axis<D: DimIndex>(&self, dim: D) -> AxisIter<M, B>
+	where
+		M: Select,
+	{
+		let dim = dim.resolve_index(self.ndim()).unwrap();
+		let size = self.size(dim).unwrap();
+		AxisIter { tensor: self, dim, current: 0, size }
 	}
 
 	pub fn narrow<D: DimIndex, R: Into<UniversalRange>>(
@@ -162,7 +183,7 @@ impl<'a, M: Map, T> Tensor<M, &'a [T]> {
 	/// # Safety
 	/// - contiguous - The tensor must be contiguous, otherwise the slice will contain gaps. This
 	///   can be checked with `self.map.is_contiguous()`.
-	/// - safe_map - The map is safe, i.e., it never gives an out-of-bounds index. This can be
+	/// - safe-map - The map is safe, i.e., it never gives an out-of-bounds index. This can be
 	///   checked with `self.ensure_safe()`.
 	pub unsafe fn as_slice_unchecked(&self) -> &'a [T] {
 		debug_assert!(self.is_contiguous());
@@ -175,6 +196,8 @@ impl<'a, M: Map, T> Tensor<M, &'a [T]> {
 		self.map.is_contiguous()
 	}
 
+	/// # Errors
+	/// - If the map is not safe, i.e., if some index may be mapped to an out-of-bounds offset.
 	pub fn ensure_safe(&self) -> Result<()> {
 		let span = self.map.span();
 		let buf_len = self.buf.len();
@@ -190,6 +213,37 @@ impl<'a, M: Map, T> Tensor<M, &'a [T]> {
 			return Err(err_map_not_safe(span, buf_len));
 		}
 		Ok(())
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct AxisIter<'a, M: Map + Select, B: Buffer> {
+	tensor: &'a Tensor<M, B>,
+	dim: usize,
+	current: usize,
+	size: usize,
+}
+
+impl<'a, M: Map + Select, B: Buffer> Iterator for AxisIter<'a, M, B> {
+	type Item = Tensor<M::Output, B>;
+
+	fn next(&mut self) -> Option<Self::Item> {
+		if self.current >= self.size {
+			return None;
+		}
+		let index = self.current;
+		self.current += 1;
+		Some(Tensor {
+			map: unsafe { self.tensor.map.clone().select_unchecked(self.dim, index) },
+			buf: self.tensor.buf.clone(),
+		})
+	}
+}
+
+impl<'a, M: Map + Select, B: Buffer> ExactSizeIterator for AxisIter<'a, M, B> {
+	fn len(&self) -> usize {
+		self.size - self.current
 	}
 }
 

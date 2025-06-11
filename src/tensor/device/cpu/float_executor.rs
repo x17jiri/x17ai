@@ -139,10 +139,47 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 }
 
 impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
+	fn read_bin(&self, dst: &SliceBatch, src: &mut dyn std::io::Read) -> Result<()> {
+		let mut result = Ok(());
+		Self::n_vec([dst], |[dst]| {
+			if result.is_ok() {
+				let ptr = dst.as_ptr() as *mut u8;
+				let bytes = dst.len() * std::mem::size_of::<T>();
+				let slice = unsafe { std::slice::from_raw_parts_mut(ptr, bytes) };
+				result = src.read_exact(slice);
+
+				// We always store values as little-endian,
+				// so conversion is needed for big-endian targets
+				#[cfg(target_endian = "big")]
+				{
+					todo!("Reading from binary file on big-endian targets is not implemented yet");
+				}
+			}
+		})?;
+		result.map_err(Into::into)
+	}
+
+	fn write_bin(&self, src: &SliceBatch, dst: &mut dyn std::io::Write) -> Result<()> {
+		#[cfg(target_endian = "big")]
+		{
+			todo!("Saving to binary file on big-endian targets is not implemented yet");
+		}
+		let mut result = Ok(());
+		Self::n_vec([src], |[src]| {
+			if result.is_ok() {
+				let ptr = src.as_ptr() as *const u8;
+				let bytes = src.len() * std::mem::size_of::<f32>();
+				let slice = unsafe { std::slice::from_raw_parts(ptr, bytes) };
+				result = dst.write_all(slice);
+			}
+		})?;
+		result.map_err(Into::into)
+	}
+
 	fn zeros(&self, o: &SliceBatch) -> Result<()> {
 		Self::nullary(o, |o| {
 			let v = 0.0;
-			o.set(T::from_f64(v))
+			o.set(T::from_f64(v));
 		})
 	}
 
@@ -150,7 +187,7 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		let mut rng = self.rng.borrow_mut();
 		Self::nullary(o, |o| {
 			let v = rng.get_normal_clamped();
-			o.set(T::from_f64(v))
+			o.set(T::from_f64(v));
 		})
 	}
 
@@ -162,7 +199,7 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		Self::unary(o, a, |o, a| {
 			let a = a.get().to_f64();
 			let v = math::rsqrt(a * scale, eps);
-			o.set(T::from_f64(v))
+			o.set(T::from_f64(v));
 		})
 	}
 
@@ -291,10 +328,19 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 	}
 
 	fn mm(&self, o: &MatrixBatch, a: &MatrixBatch, b: &MatrixBatch, scale: f64) -> Result<()> {
-		for i in 0..o.map.dims[0].size {
-			let o = o.select(0, i)?;
+		//for i in 0..o.map.dims[0].size {
+		//	let o = o.select(0, i)?;
+		//}
+
+		for m in o.iter_along_axis(0) {
+			xyz(&m);
 		}
 
 		Ok(()) // TODO
 	}
+}
+
+#[inline(never)]
+fn xyz(a: &SliceBatch) {
+	println!("hello world. offset = {}", a.map.offset);
 }

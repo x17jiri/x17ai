@@ -27,6 +27,17 @@ impl Map for SliceMap {
 		2
 	}
 
+	fn size(&self, dim: usize) -> usize {
+		match dim {
+			0 => self.batch_size,
+			1 => self.slice_len,
+			_ => {
+				cold_path();
+				1
+			},
+		}
+	}
+
 	fn elems(&self) -> usize {
 		self.slice_len * self.batch_size
 	}
@@ -62,6 +73,17 @@ pub struct BroadcastMap {
 impl Map for BroadcastMap {
 	fn ndim(&self) -> usize {
 		2
+	}
+
+	fn size(&self, dim: usize) -> usize {
+		match dim {
+			0 => self.batch_size,
+			1 => self.broadcast_len,
+			_ => {
+				cold_path();
+				1
+			},
+		}
 	}
 
 	fn elems(&self) -> usize {

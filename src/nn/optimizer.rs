@@ -52,7 +52,7 @@ impl OptParam {
 		let elems = parts.checked_mul(part_elems).expect("Overflow in multiplication");
 		assert!(value.elems() == elems, "Tensor size mismatch");
 
-		let grad_reshaped = value.new_empty_like();
+		let grad_reshaped = value.new_empty_like()?;
 
 		let value = value.merge_all_dims()?; // if fails, tensor is not contiguous
 		let value = value.reshape_last_dim([parts, part_elems])?;
@@ -60,10 +60,10 @@ impl OptParam {
 		let grad = grad_reshaped.clone().merge_all_dims()?;
 		let grad = grad.reshape_last_dim([parts, part_elems])?;
 
-		let m = value.new_empty_like();
+		let m = value.new_empty_like()?;
 
-		let v = value.new_empty(&[parts, 1], value.dtype());
-		let v_rsqrt = v.new_empty_like();
+		let v = value.new_empty(&[parts, 1], value.dtype())?;
+		let v_rsqrt = v.new_empty_like()?;
 
 		Ok(OptParam {
 			parts,
@@ -87,7 +87,7 @@ impl OptParam {
 		result
 	}
 
-	pub fn zero_grad(&mut self) -> Result<()>{
+	pub fn zero_grad(&mut self) -> Result<()> {
 		self.already_have_grad = false;
 		Ok(())
 	}

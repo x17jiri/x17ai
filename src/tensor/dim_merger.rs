@@ -11,7 +11,7 @@ use std::intrinsics::cold_path;
 
 use crate::Result;
 use crate::tensor::generic::map::SizeAndStride;
-use crate::tensor::generic::map::dyn_d::INLINE_DIMS;
+use crate::tensor::generic::map::dd::INLINE_DIMS;
 
 #[derive(Clone, Copy)]
 pub struct MergedDim<const N: usize> {

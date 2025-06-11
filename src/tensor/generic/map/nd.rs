@@ -9,9 +9,10 @@ use std::convert::Infallible;
 use std::hint::cold_path;
 
 use super::{
-	DynD, IndexToOffset, Map, MergeAllDims, MergeDims, ReshapeLastDim, SizeAndStride, Transpose,
+	DD, IndexToOffset, Map, MergeAllDims, MergeDims, ReshapeLastDim, SizeAndStride, Transpose,
 };
-use crate::tensor::generic::map::{NDShape, Narrow, Select};
+use crate::tensor::generic::map::{NDShape, Narrow, Select, init_strides};
+use crate::tensor::generic::universal_range::UniversalRange;
 use crate::util::array::try_array_from_iter;
 use crate::{Error, Result};
 
@@ -21,17 +22,26 @@ pub struct ND<const N: usize> {
 	pub offset: usize,
 }
 
-impl<const N: usize> TryFrom<DynD> for ND<N> {
+impl<const N: usize> ND<N> {
+	pub fn new(shape: &[usize; N]) -> Result<(Self, usize)> {
+		let mut dims = shape.map(|size| SizeAndStride { size, stride: 0 });
+		let elems = init_strides(&mut dims)?;
+		let map = Self { dims, offset: 0 };
+		Ok((map, elems))
+	}
+}
+
+impl<const N: usize> TryFrom<DD> for ND<N> {
 	type Error = Error;
 
-	fn try_from(dyn_d: DynD) -> Result<Self> {
+	fn try_from(dyn_d: DD) -> Result<Self> {
 		let Some(dims) = try_array_from_iter(dyn_d.dims.iter().copied()) else {
 			#[cold]
-			fn err_cannot_conv_dynd_to_nd(dyn_d: usize, nd: usize) -> Error {
-				format!("Cannot convert DynD with {dyn_d} dimensions to ND with {nd} dimensions.")
+			fn err_cannot_conv_dd_to_nd(dyn_d: usize, nd: usize) -> Error {
+				format!("Cannot convert DD with {dyn_d} dimensions to ND with {nd} dimensions.")
 					.into()
 			}
-			return Err(err_cannot_conv_dynd_to_nd(dyn_d.dims.len(), N));
+			return Err(err_cannot_conv_dd_to_nd(dyn_d.dims.len(), N));
 		};
 		Ok(Self { dims, offset: dyn_d.offset })
 	}
@@ -40,6 +50,14 @@ impl<const N: usize> TryFrom<DynD> for ND<N> {
 impl<const N: usize> Map for ND<N> {
 	fn ndim(&self) -> usize {
 		N
+	}
+
+	fn size(&self, dim: usize) -> usize {
+		if dim >= N {
+			cold_path();
+			return 1;
+		}
+		self.dims[dim].size
 	}
 
 	fn elems(&self) -> usize {
@@ -101,10 +119,11 @@ where
 					merged = SizeAndStride { size: 0, stride: 0 };
 					break;
 				} else {
-					// TODO - create err() function
-					return Err(
-						format!("Cannot merge dimensions because of incompatible strides").into()
-					);
+					#[cold]
+					fn err_incompatible_strides() -> Error {
+						"Cannot merge dimensions because of incompatible strides.".into()
+					}
+					return Err(err_incompatible_strides());
 				}
 			}
 		}
@@ -132,10 +151,11 @@ impl<const N: usize> MergeAllDims for ND<N> {
 					merged = SizeAndStride { size: 0, stride: 0 };
 					break;
 				} else {
-					// TODO - create err() function
-					return Err(
-						format!("Cannot merge dimensions because of incompatible strides").into()
-					);
+					#[cold]
+					fn err_incompatible_strides() -> Error {
+						"Cannot merge dimensions because of incompatible strides.".into()
+					}
+					return Err(err_incompatible_strides());
 				}
 			}
 		}
@@ -158,13 +178,14 @@ where
 		let removed_dim = self.dims[N - 1];
 		let elems = to_shape.iter().copied().product::<usize>();
 		if elems != removed_dim.size {
-			// TODO - create err() function
-			cold_path();
-			return Err(format!(
-				"Cannot reshape last dimension of size {} to shape {:?}. Total elements must match.",
-				removed_dim.size, to_shape
-			)
-			.into());
+			#[cold]
+			fn err_reshape_last_dim(removed_size: usize, to_shape: &[usize]) -> Error {
+				format!(
+					"Cannot reshape last dimension of size {removed_size} to shape {to_shape:?}. Total elements must match.",
+				)
+				.into()
+			}
+			return Err(err_reshape_last_dim(removed_dim.size, &to_shape));
 		}
 		let mut stride = removed_dim.stride;
 		for i in (N - 1..N - 1 + M).rev() {
@@ -184,13 +205,11 @@ where
 		let mut offset = self.offset;
 		for (d, (&i, &dim)) in index.iter().zip(self.dims.iter()).enumerate() {
 			if i >= dim.size {
-				// TODO - create err() function
-				cold_path();
-				return Err(format!(
-					"Index {} out of range 0 ..< {} for dimension {}",
-					i, dim.size, d
-				)
-				.into());
+				#[cold]
+				fn err_index_out_of_range(i: usize, size: usize, d: usize) -> Error {
+					format!("Index {i} out of range 0 ..< {size} for dimension {d}.").into()
+				}
+				return Err(err_index_out_of_range(i, dim.size, d));
 			}
 			offset += i * dim.stride;
 		}
@@ -205,15 +224,58 @@ where
 	type Output = ND<{ N - 1 }>;
 
 	fn select(self, dim: usize, index: usize) -> Result<Self::Output> {
-		todo!();
+		if dim >= N {
+			#[cold]
+			fn err_dim_out_of_bounds(dim: usize, ndim: usize) -> Error {
+				format!("Dimension {dim} is out of bounds for tensor with {ndim} dimensions.")
+					.into()
+			}
+			return Err(err_dim_out_of_bounds(dim, N));
+		}
+		let removed_dim = &self.dims[dim];
+		if index >= removed_dim.size {
+			#[cold]
+			fn err_index_out_of_bounds(index: usize, size: usize) -> Error {
+				format!("Index {index} is out of bounds for dimension of size {size}.").into()
+			}
+			return Err(err_index_out_of_bounds(index, removed_dim.size));
+		}
+		let mut new_dims = [Default::default(); N - 1];
+		for i in 0..dim {
+			new_dims[i] = self.dims[i];
+		}
+		for i in dim + 1..N {
+			new_dims[i - 1] = self.dims[i];
+		}
+		Ok(ND {
+			dims: new_dims,
+			offset: self.offset + index * removed_dim.stride,
+		})
+	}
+
+	unsafe fn select_unchecked(self, dim: usize, index: usize) -> Self::Output {
+		debug_assert!(dim < N);
+		let removed_dim = self.dims.get_unchecked(dim);
+		debug_assert!(index < removed_dim.size);
+		let mut new_dims = [Default::default(); N - 1];
+		for i in 0..dim {
+			*new_dims.get_unchecked_mut(i) = *self.dims.get_unchecked(i);
+		}
+		for i in dim + 1..N {
+			*new_dims.get_unchecked_mut(i - 1) = *self.dims.get_unchecked(i);
+		}
+		ND {
+			dims: new_dims,
+			offset: self.offset + index * removed_dim.stride,
+		}
 	}
 }
 
 impl<const N: usize> Narrow for ND<N> {
 	type Output = Self;
 
-	fn narrow(self, dim: usize, range: std::ops::Range<usize>) -> Result<Self::Output> {
-		todo!();
+	fn narrow(self, dim: usize, range: UniversalRange) -> Result<Self::Output> {
+		todo!("Narrow::narrow for ND<N> not implemented yet");
 	}
 }
 
@@ -222,12 +284,12 @@ impl<const N: usize> Transpose for ND<N> {
 
 	fn transposed(mut self, d0: usize, d1: usize) -> Result<Self> {
 		if d0 >= N || d1 >= N {
-			// TODO - create err() function
-			return Err(format!(
-				"Cannot transpose dimension {} with {}. Tensor has {} dimensions.",
-				d0, d1, N
-			)
-			.into());
+			#[cold]
+			fn err_transpose_out_of_range(d0: usize, d1: usize, N: usize) -> Error {
+				format!("Cannot transpose dimensions {d0} and {d1}. Tensor has {N} dimensions.")
+					.into()
+			}
+			return Err(err_transpose_out_of_range(d0, d1, N));
 		}
 		self.dims.swap(d0, d1);
 		Ok(self)

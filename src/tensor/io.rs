@@ -8,44 +8,38 @@
 use std::intrinsics::cold_path;
 use std::io::{Read, Write};
 
+use crate::Result;
+use crate::tensor::device::DeviceBuffer;
+use crate::tensor::generic;
+use crate::tensor::generic::map::ND;
+
+use super::Tensor;
 use super::math::__elem_wise;
-use super::{HasDType, Tensor};
 
 //--------------------------------------------------------------------------------------------------
 
-pub fn write_bin(src: &Tensor, writer: &mut dyn std::io::Write) -> std::io::Result<()> {
-	let executor = src.buffer.executor();
-	let mut result = Ok(());
-	__elem_wise([src], |[src]| {
-		if result.is_ok() {
-			result = executor.write_bin(&src, writer);
-		}
-	});
-	result
+pub fn write_bin(src: &Tensor, writer: &mut dyn std::io::Write) -> Result<()> {
+	let executor = src.executor();
+	__elem_wise([src], |[src]| executor.write_bin(&src, writer))
 }
-
-pub fn write_file<P: AsRef<std::path::Path>>(src: &Tensor, path: P) -> std::io::Result<()> {
+/*
+pub fn write_file<P: AsRef<std::path::Path>>(src: &Tensor, path: P) -> Result<()> {
 	let mut file = std::fs::File::create(path)?;
 	let mut header_bytes = [Default::default(); file_header::HEADER_LEN];
-	file_header::write_header(&mut header_bytes, src.dtype, &src.dims)?;
+	file_header::write_header(&mut header_bytes, src.dtype(), &src.map.dims)?;
 	file.write_all(&header_bytes)?;
 	write_bin(src, &mut file)?;
 	Ok(())
 }
-
+*/
 //--------------------------------------------------------------------------------------------------
 
-pub fn read_bin(dst: &Tensor, reader: &mut dyn std::io::Read) -> std::io::Result<()> {
-	let executor = dst.buffer.executor();
-	let mut result = Ok(());
-	__elem_wise([dst], |[dst]| {
-		if result.is_ok() {
-			result = executor.read_bin(&dst, reader);
-		}
-	});
-	result
+pub fn read_bin(dst: &Tensor, reader: &mut dyn std::io::Read) -> Result<()> {
+	let executor = dst.executor();
+	__elem_wise([dst], |[dst]| executor.read_bin(&dst, reader))
 }
 
+/*
 pub fn read_file<P: AsRef<std::path::Path>>(dst: &Tensor, path: P) -> std::io::Result<()> {
 	let elems = dst.elems();
 	let data_len = dst.dtype.array_bytes(elems).unwrap();
@@ -240,26 +234,27 @@ pub mod file_header {
 		write_header_content(&mut header_bytes[prefix_end..suffix_start], dtype, dims)
 	}
 }
-
+*/
 //--------------------------------------------------------------------------------------------------
 
-fn fmt_0d(tensor: &Tensor, f: &mut std::fmt::Formatter, offset: usize) -> std::fmt::Result {
-	let executor = tensor.buffer.executor();
-	let offset = tensor.offset + offset;
-	let len = 1;
-	let stride = 1;
-	executor.format(f, tensor.buffer.as_ref(), tensor.dtype, offset, len, stride)
+fn fmt_0d<T: Copy>(
+	f: &mut std::fmt::Formatter, tensor: generic::Tensor<ND<0>, &[T]>,
+	format_one: &mut impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
+) -> Result<()> {
+	format_one(f, tensor[[]])?;
+	Ok(())
 }
 
-fn fmt_1d(tensor: &Tensor, f: &mut std::fmt::Formatter, offset: usize) -> std::fmt::Result {
-	let executor = tensor.buffer.executor();
-	let dim = tensor.dims[tensor.ndim() - 1];
-	let offset = tensor.offset + offset;
-	let len = dim.size;
-	let stride = dim.stride;
+fn fmt_1d<T: Copy>(
+	f: &mut std::fmt::Formatter, tensor: generic::Tensor<ND<1>, &[T]>,
+	format_one: &mut impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
+) -> Result<()> {
 	write!(f, "[")?;
-	executor.format(f, tensor.buffer.as_ref(), tensor.dtype, offset, len, stride)?;
-	write!(f, "]")
+	for elem in tensor.iter_along_axis(0) {
+		format_one(f, elem[[]])?;
+	}
+	write!(f, "]")?;
+	Ok(())
 }
 
 fn fmt_Nd(
@@ -285,7 +280,7 @@ impl std::fmt::Display for Tensor {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		write!(f, "Tensor(")?;
 		match self.ndim() {
-			0 => fmt_0d(self, f, 0)?,
+			0 => fmt_0d(self.conv_map(), f, 0)?,
 			1 => fmt_1d(self, f, 0)?,
 			_ => fmt_Nd(self, f, 0, 0)?,
 		};
@@ -293,6 +288,7 @@ impl std::fmt::Display for Tensor {
 	}
 }
 
+/*
 //--------------------------------------------------------------------------------------------------
 
 // The following macros are meant for debugging.
@@ -448,22 +444,22 @@ impl<T: HasDType> std::io::Read for DebugData3DRead<T> {
 
 #[macro_export]
 macro_rules! debug_1d {
-    ( $dt:ty; $( $x:expr ),* $(,)? ) => {
-        $crate::tensor::io::DebugData1D::<$dt> {
+	( $dt:ty; $( $x:expr ),* $(,)? ) => {
+		$crate::tensor::io::DebugData1D::<$dt> {
 			data: vec![$($x),*]
 		}
-    };
+	};
 }
 
 #[macro_export]
 macro_rules! debug_2d {
-    ( $dt:ty; $( [ $( $x:expr ),* ] ),* $(,)? ) => {
+	( $dt:ty; $( [ $( $x:expr ),* ] ),* $(,)? ) => {
 		$crate::tensor::io::DebugData2D::<$dt> {
-        	data: vec![
+			data: vec![
 				$(vec![$($x),*]),*
 			]
 		}
-    };
+	};
 }
 
 #[macro_export]
@@ -482,3 +478,4 @@ macro_rules! debug_3d {
 }
 
 //--------------------------------------------------------------------------------------------------
+*/

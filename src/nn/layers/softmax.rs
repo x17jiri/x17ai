@@ -8,11 +8,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::Result;
 use crate::nn::eval_context::EvalContext;
 use crate::nn::param::Param;
 use crate::tensor::math::Sum;
 use crate::tensor::{Tensor, math};
-use crate::Result;
 
 use super::Layer;
 
@@ -57,7 +57,7 @@ impl Layer for Softmax {
 	}
 
 	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Result<Tensor> {
-		let out = inp.reuse_or_new_like();
+		let out = inp.reuse_or_new_like()?;
 
 		out.assign(math::softmax(&inp))?;
 
@@ -81,10 +81,10 @@ impl Layer for Softmax {
 			SoftmaxGradientMode::Precise => {
 				let [out] = ctx.tensors.get();
 
-				let g = out.new_replace_tail(1, &[1]); // [..., 1]
+				let g = out.new_replace_tail(1, &[1])?; // [..., 1]
 				g.assign((&out * &d_out).sum())?;
 
-				let d_inp = d_out.reuse_or_new_like();
+				let d_inp = d_out.reuse_or_new_like()?;
 
 				// TODO - we could merge `-` and `*` into a single kernel
 				d_inp.assign(&d_out - &g)?;

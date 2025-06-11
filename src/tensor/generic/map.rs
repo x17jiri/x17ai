@@ -5,10 +5,12 @@
 //
 //------------------------------------------------------------------------------
 
-pub mod dyn_d;
+pub mod dd;
 pub mod nd;
 
-pub use dyn_d::DynD;
+use std::hint::likely;
+
+pub use dd::DD;
 pub use nd::ND;
 
 use crate::Result;
@@ -23,10 +25,16 @@ pub struct SizeAndStride {
 }
 
 impl SizeAndStride {
+	/// Returns true if the dimension can be treated as contiguous.
+	///
+	/// Note that dimension size 1 can be treated as both contiguous and broadcasted.
 	pub fn is_contiguous(&self) -> bool {
 		self.size <= 1 || self.stride == 1
 	}
 
+	/// Returns true if the dimension is broadcasted.
+	///
+	/// Note that dimension size 1 can be treated as both contiguous and broadcasted.
 	pub fn is_broadcasted(&self) -> bool {
 		self.size <= 1 || self.stride < 1
 	}
@@ -36,6 +44,7 @@ impl SizeAndStride {
 
 pub trait Map: Clone {
 	fn ndim(&self) -> usize;
+	fn size(&self, dim: usize) -> usize;
 	fn elems(&self) -> usize;
 	fn span(&self) -> std::ops::Range<usize>;
 	fn is_contiguous(&self) -> bool;
@@ -67,6 +76,7 @@ pub trait Select {
 	type Output: Map;
 
 	fn select(self, dim: usize, index: usize) -> Result<Self::Output>;
+	unsafe fn select_unchecked(self, dim: usize, index: usize) -> Self::Output;
 }
 
 pub trait Narrow {
@@ -85,6 +95,36 @@ pub trait NDShape<const K: usize> {
 	type Error: Into<crate::Error>;
 
 	fn nd_shape(&self) -> std::result::Result<[usize; K], Self::Error>;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+/// This function will initialize strides in a slice so a new tensor using them
+/// is contiguous in memory.
+///
+/// It returns the total number of elements in the tensor.
+pub fn init_strides(dims: &mut [SizeAndStride]) -> Result<usize> {
+	let mut elems = 1;
+	let mut nonzero_elems: usize = 1;
+	for dim in dims.iter_mut().rev() {
+		// Check that if we ignore zero length dimensions, the number of elements does not
+		// overflow. This is done to make sure our calculations would not overflow even if we
+		// had the same dimensions but in different order.
+		if likely(dim.size != 0) {
+			let Some(e) = nonzero_elems.checked_mul(dim.size) else {
+				#[cold]
+				fn err_init_strides_overflow() -> crate::Error {
+					"Tensor dimensions overflowed while calculating strides.".into()
+				}
+				return Err(err_init_strides_overflow());
+			};
+			nonzero_elems = e;
+		}
+
+		dim.stride = elems;
+		elems *= dim.size;
+	}
+	Ok(elems)
 }
 
 //--------------------------------------------------------------------------------------------------

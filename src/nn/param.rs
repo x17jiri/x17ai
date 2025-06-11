@@ -22,12 +22,12 @@ pub struct Param {
 }
 
 impl Param {
-	pub fn new(shape: &[usize], dtype: DType, device: Rc<dyn Device>) -> Rc<RefCell<Self>> {
-		let value = Tensor::new_empty_on(shape, dtype, device);
+	pub fn new(shape: &[usize], dtype: DType, device: Rc<dyn Device>) -> Result<Rc<RefCell<Self>>> {
+		let value = Tensor::new_empty_on(shape, dtype, device)?;
 		let opt_param = None;
 		let parts = 1;
 		let part_elems = value.elems();
-		Rc::new(RefCell::new(Self { value, opt_param, parts, part_elems }))
+		Ok(Rc::new(RefCell::new(Self { value, opt_param, parts, part_elems })))
 	}
 
 	pub fn value(&self) -> &Tensor {

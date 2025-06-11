@@ -11,56 +11,37 @@ use std::intrinsics::cold_path;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 
 use crate::Result;
-use crate::tensor::generic::map::{MergeAllDims, MergeDims, ReshapeLastDim};
+use crate::tensor::generic::map::{MergeAllDims, MergeDims, ReshapeLastDim, init_strides};
 
 use super::{Map, SizeAndStride, Transpose};
 
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
-pub struct DynD {
+pub struct DD {
 	pub dims: DimVec,
 	pub offset: usize,
 }
 
-impl DynD {
-	/// This function will initialize strides in a `DimVec` so a new tensor is contiguous in
-	/// memory.
-	///
-	/// It returns the total number of elements in the tensor.
-	fn __init_strides(dims: &mut DimVec) -> usize {
-		let mut elems = 1;
-		let mut nonzero_elems: usize = 1;
-		for dim in dims.iter_mut().rev() {
-			// Check that if we ignore zero length dimensions, the number of elements does not
-			// overflow. This is done to make sure our calculations would not overflow even if we
-			// had the same dimensions but in different order.
-			if likely(dim.size != 0) {
-				nonzero_elems = nonzero_elems.checked_mul(dim.size).expect("too many elements");
-			}
-
-			dim.stride = elems;
-			elems *= dim.size;
-		}
-		elems
-	}
-
-	pub fn new(shape: &[usize]) -> (Self, usize) {
+impl DD {
+	pub fn new(shape: &[usize]) -> Result<(Self, usize)> {
 		let mut dims =
 			DimVec::new_from_iter(shape.iter().map(|&size| SizeAndStride { size, stride: 0 }));
-		let elems = Self::__init_strides(&mut dims);
+		let elems = init_strides(&mut dims)?;
 		let map = Self { dims, offset: 0 };
-		(map, elems)
+		Ok((map, elems))
 	}
 
 	pub fn new_like(&self) -> (Self, usize) {
 		let mut dims = self.dims.clone();
-		let elems = Self::__init_strides(&mut dims);
+		let elems = init_strides(&mut dims).unwrap();
 		let map = Self { dims, offset: 0 };
 		(map, elems)
 	}
 
-	pub fn new_replace_tail(&self, tail_len: usize, replace_with: &[usize]) -> (Self, usize) {
+	pub fn new_replace_tail(
+		&self, tail_len: usize, replace_with: &[usize],
+	) -> Result<(Self, usize)> {
 		let n_keep = self.dims.len().checked_sub(tail_len).expect("not enough dimensions");
 		let ndim = n_keep + replace_with.len();
 		let mut dims = DimVec::with_capacity(ndim);
@@ -70,15 +51,23 @@ impl DynD {
 				replace_with.iter().map(|&size| SizeAndStride { size, stride: 0 }),
 			);
 		}
-		let elems = Self::__init_strides(&mut dims);
+		let elems = init_strides(&mut dims)?;
 		let map = Self { dims, offset: 0 };
-		(map, elems)
+		Ok((map, elems))
 	}
 }
 
-impl Map for DynD {
+impl Map for DD {
 	fn ndim(&self) -> usize {
 		self.dims.len()
+	}
+
+	fn size(&self, dim: usize) -> usize {
+		if dim >= self.dims.len() {
+			cold_path();
+			return 1;
+		}
+		self.dims[dim].size
 	}
 
 	fn elems(&self) -> usize {
@@ -94,7 +83,7 @@ impl Map for DynD {
 	}
 }
 
-impl<const M: usize> MergeDims<M> for DynD {
+impl<const M: usize> MergeDims<M> for DD {
 	type Output = Self;
 
 	fn merge_dims(mut self) -> Result<Self::Output> {
@@ -127,7 +116,7 @@ impl<const M: usize> MergeDims<M> for DynD {
 	}
 }
 
-impl MergeAllDims for DynD {
+impl MergeAllDims for DD {
 	type Output = Self;
 
 	fn merge_all_dims(mut self) -> Result<Self::Output> {
@@ -158,7 +147,7 @@ impl MergeAllDims for DynD {
 	}
 }
 
-impl<const M: usize> ReshapeLastDim<M> for DynD {
+impl<const M: usize> ReshapeLastDim<M> for DD {
 	type Output = Self;
 
 	fn reshape_last_dim(mut self, to_shape: [usize; M]) -> Result<Self::Output> {
@@ -186,7 +175,7 @@ impl<const M: usize> ReshapeLastDim<M> for DynD {
 	}
 }
 
-impl Transpose for DynD {
+impl Transpose for DD {
 	type Output = Self;
 
 	fn transposed(mut self, d0: usize, d1: usize) -> Result<Self> {

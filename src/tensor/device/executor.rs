@@ -63,13 +63,11 @@ pub struct AttentionParams {
 }
 
 pub trait Executor {
-	/*
-		// These functions are designed to load/save data from files.
-		// And in files, we always use little-endian format.
-		// So it expects bytes to be in little-endian format.
-		fn read_bin(&self, dst: &SliceBatch, src: &mut dyn std::io::Read) -> std::io::Result<()>;
-		fn write_bin(&self, src: &SliceBatch, dst: &mut dyn std::io::Write) -> std::io::Result<()>;
-	*/
+	// These functions are designed to load/save data from files.
+	// And in files, we always use little-endian format.
+	// So it expects bytes to be in little-endian format.
+	fn read_bin(&self, dst: &SliceBatch, src: &mut dyn std::io::Read) -> Result<()>;
+	fn write_bin(&self, src: &SliceBatch, dst: &mut dyn std::io::Write) -> Result<()>;
 
 	/// Fills the `o` tensor with zeros.
 	///
@@ -287,11 +285,9 @@ pub trait Executor {
 	fn mm(&self, o: &MatrixBatch, a: &MatrixBatch, b: &MatrixBatch, scale: f64) -> Result<()>;
 
 	/*
-		fn attention(
-			&self, dst: &SliceBatch, q: &SliceBatch, k: &SliceBatch, v: &SliceBatch,
-			params: &AttentionParams,
-		);
-
-		fn format(&self, f: &mut std::fmt::Formatter, src: &StridedSlice) -> std::fmt::Result;
+	fn attention(
+		&self, dst: &SliceBatch, q: &SliceBatch, k: &SliceBatch, v: &SliceBatch,
+		params: &AttentionParams,
+	);
 	*/
 }

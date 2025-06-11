@@ -19,7 +19,7 @@ pub mod batch;
 pub mod device;
 pub mod dim_merger;
 pub mod generic;
-// pub mod io; TODO
+pub mod io;
 pub mod math;
 
 #[cfg(false)] // TODO: #[cfg(test)]
@@ -53,26 +53,26 @@ impl<M: generic::map::Map> generic::Tensor<M, &device::DeviceBuffer> {
 
 //--------------------------------------------------------------------------------------------------
 
-pub type Tensor = generic::Tensor<generic::map::DynD, Rc<device::DeviceBuffer>>;
+pub type Tensor = generic::Tensor<generic::map::DD, Rc<device::DeviceBuffer>>;
 
 impl Tensor {
 	/// Allocate a new tensor on the provided device.
-	pub fn new_empty_on(shape: &[usize], dtype: DType, device: Rc<dyn Device>) -> Tensor {
-		let (map, elems) = generic::map::DynD::new(shape);
-		let buf = device.new_buffer(dtype, elems);
-		Tensor { map, buf }
+	pub fn new_empty_on(shape: &[usize], dtype: DType, device: Rc<dyn Device>) -> Result<Tensor> {
+		let (map, elems) = generic::map::DD::new(shape)?;
+		let buf = device.new_buffer(dtype, elems)?;
+		Ok(Tensor { map, buf })
 	}
 
 	/// Allocate a new tensor on the same device as `self`.
-	pub fn new_empty(&self, shape: &[usize], dtype: DType) -> Tensor {
+	pub fn new_empty(&self, shape: &[usize], dtype: DType) -> Result<Tensor> {
 		Self::new_empty_on(shape, dtype, self.device())
 	}
 
 	/// Allocate a new tensor on the same device with the same shape and dtype as `self`.
-	pub fn new_empty_like(&self) -> Tensor {
+	pub fn new_empty_like(&self) -> Result<Tensor> {
 		let (map, elems) = self.map.new_like();
-		let buf = self.device().new_buffer(self.buf.dtype, elems);
-		Tensor { map, buf }
+		let buf = self.device().new_buffer(self.buf.dtype, elems)?;
+		Ok(Tensor { map, buf })
 	}
 
 	/// Typical user of this function would be `nn` layer that can either
@@ -84,8 +84,8 @@ impl Tensor {
 	///
 	/// If the tensor does not own its buffer, we allocate a new empty tensor
 	/// with the same shape and dtype as `self`.
-	pub fn reuse_or_new_like(&self) -> Tensor {
-		if self.owns_buffer() { self.clone() } else { self.new_empty_like() }
+	pub fn reuse_or_new_like(&self) -> Result<Tensor> {
+		if self.owns_buffer() { Ok(self.clone()) } else { self.new_empty_like() }
 	}
 
 	#[inline]
@@ -96,10 +96,10 @@ impl Tensor {
 		(weak | strong) <= 1
 	}
 
-	pub fn new_replace_tail(&self, tail_len: usize, replace_with: &[usize]) -> Tensor {
-		let (map, elems) = self.map.new_replace_tail(tail_len, replace_with);
-		let buf = self.device().new_buffer(self.buf.dtype, elems);
-		Tensor { map, buf }
+	pub fn new_replace_tail(&self, tail_len: usize, replace_with: &[usize]) -> Result<Tensor> {
+		let (map, elems) = self.map.new_replace_tail(tail_len, replace_with)?;
+		let buf = self.device().new_buffer(self.buf.dtype, elems)?;
+		Ok(Tensor { map, buf })
 	}
 
 	/// Returns the device on which the tensor is allocated.
@@ -119,6 +119,46 @@ impl Tensor {
 
 	pub fn assign<Expr: EvaluatesToTensor>(&self, expr: Expr) -> Result<()> {
 		expr.eval_to_tensor(self)
+	}
+
+	pub fn literal_factory<T: HasDType>(device: Rc<dyn Device>) -> TensorLiteralFactory<T> {
+		TensorLiteralFactory {
+			device,
+			phantom: std::marker::PhantomData,
+		}
+	}
+}
+
+pub struct TensorLiteralFactory<T: HasDType> {
+	pub device: Rc<dyn Device>,
+	pub phantom: std::marker::PhantomData<T>,
+}
+
+impl<T: HasDType> TensorLiteralFactory<T> {
+	#[inline(never)]
+	pub fn new_1d<const X: usize>(&self, value: &[T; X]) -> Result<Tensor> {
+		let tensor = Tensor::new_empty_on(&[X], T::dtype, self.device.clone())?;
+
+		let val_ptr = value.as_ptr() as *const u8;
+		let val_len = X * std::mem::size_of::<T>();
+		let val = unsafe { std::slice::from_raw_parts(val_ptr, val_len) };
+		let mut reader = std::io::Cursor::new(val);
+		io::read_bin(&tensor, &mut reader)?;
+
+		Ok(tensor)
+	}
+
+	#[inline(never)]
+	pub fn new_2d<const Y: usize, const X: usize>(&self, value: &[[T; X]; Y]) -> Result<Tensor> {
+		let tensor = Tensor::new_empty_on(&[Y, X], T::dtype, self.device.clone())?;
+
+		let val_ptr = value.as_ptr() as *const u8;
+		let val_len = X * std::mem::size_of::<T>();
+		let val = unsafe { std::slice::from_raw_parts(val_ptr, val_len) };
+		let mut reader = std::io::Cursor::new(val);
+		io::read_bin(&tensor, &mut reader)?;
+
+		Ok(tensor)
 	}
 }
 
@@ -267,17 +307,6 @@ impl Tensor {
 		let tensor = Self::new_empty_on(&[z, y, x], T::dtype, device);
 		tensor.fill_debug_3d(value);
 		tensor
-	}
-
-	#[inline(never)]
-	pub fn fill_debug_1d<T: HasDType>(&self, value: io::DebugData1D<T>) {
-		let (x,) = value.shape();
-		assert!(self.ndim() == 1, "fill_1d() can only be used on 1D tensors");
-		assert!(self.dims[0].size == x, "invalid size");
-		assert!(self.dtype == T::dtype, "invalid dtype");
-
-		let mut reader = value.into_read();
-		io::read_bin(self, &mut reader).expect("failed to fill 1D tensor");
 	}
 
 	#[inline(never)]

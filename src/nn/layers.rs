@@ -16,7 +16,7 @@ pub mod softmax;
 //pub mod softmax_cross_entropy;
 //pub mod swiglu;
 
-#[cfg(false)] // TODO: #[cfg(test)]
+#[cfg(test)]
 mod tests;
 
 use crate::Result;

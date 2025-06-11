@@ -14,14 +14,6 @@
 //use x17ai::tensor::math::Savable;
 //use x17ai::{debug_2d, tensor};
 
-use std::cell::Cell;
-use std::io::Write;
-use std::rc::Rc;
-
-use x17ai::sel;
-use x17ai::tensor::generic::map::Select;
-use x17ai::tensor::generic::slicing::SelectionInfo;
-
 /*
 struct Attention {
 	pub input_features: usize,
@@ -164,13 +156,19 @@ fn laplacian(v: &ArrayView2<f32>) -> Array2<f32> {
 		+ v.slice(s![2.., 1..-1])
 }*/
 
-fn main() {
-	//	let aa: SelectionInfo<1, 1, false>;
-	//	let qq = SelectionInfo::new();
-	//	let qq = qq.append_dim(1);
-	let qq: isize = 0;
+use x17ai::tensor::device::cpu::CPUDevice;
+use x17ai::tensor::device::executor::Executor;
+use x17ai::tensor::generic::Tensor;
+use x17ai::tensor::generic::map::ND;
+use x17ai::tensor::{Device, HasDType};
 
-	let q = sel![1, *, 3..4];
+fn main() {
+	let dev = CPUDevice::new();
+	let (map, elems) = ND::new(&[3, 4, 5]).unwrap();
+	let buf = dev.clone().new_buffer(f32::dtype, elems).unwrap();
+	let t = Tensor { map, buf: buf.as_ref() };
+	let exec = &dev.f32_executor;
+	exec.mm(&t, &t, &t, 1.0).unwrap();
 }
 
 #[cfg(false)]
