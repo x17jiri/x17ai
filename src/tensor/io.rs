@@ -5,16 +5,18 @@
 //
 //------------------------------------------------------------------------------
 
+use std::cell::Cell;
 use std::intrinsics::cold_path;
 use std::io::{Read, Write};
 
 use crate::Result;
 use crate::tensor::device::DeviceBuffer;
+use crate::tensor::device::cpu::math::FromToF64;
 use crate::tensor::generic;
-use crate::tensor::generic::map::ND;
+use crate::tensor::generic::map::{DD, ND};
 
-use super::Tensor;
 use super::math::__elem_wise;
+use super::{HasDType, Tensor};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -238,52 +240,68 @@ pub mod file_header {
 //--------------------------------------------------------------------------------------------------
 
 fn fmt_0d<T: Copy>(
-	f: &mut std::fmt::Formatter, tensor: generic::Tensor<ND<0>, &[T]>,
-	format_one: &mut impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
-) -> Result<()> {
-	format_one(f, tensor[[]])?;
+	f: &mut std::fmt::Formatter, tensor: generic::Tensor<ND<0>, &[Cell<T>]>,
+	mut fmt_one: impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
+) -> std::fmt::Result {
+	fmt_one(f, tensor[[]].get())?;
 	Ok(())
 }
 
 fn fmt_1d<T: Copy>(
-	f: &mut std::fmt::Formatter, tensor: generic::Tensor<ND<1>, &[T]>,
-	format_one: &mut impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
-) -> Result<()> {
+	f: &mut std::fmt::Formatter, tensor: generic::Tensor<ND<1>, &[Cell<T>]>,
+	mut fmt_one: impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
+) -> std::fmt::Result {
 	write!(f, "[")?;
 	for elem in tensor.iter_along_axis(0) {
-		format_one(f, elem[[]])?;
+		fmt_one(f, elem[[]].get())?;
 	}
 	write!(f, "]")?;
 	Ok(())
 }
 
-fn fmt_Nd(
-	tensor: &Tensor, f: &mut std::fmt::Formatter, offset: usize, d: usize,
+fn fmt_Nd<T: Copy>(
+	f: &mut std::fmt::Formatter, tensor: &generic::Tensor<DD, &[Cell<T>]>, indent: usize,
+	mut fmt_one: impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
 ) -> std::fmt::Result {
-	let indent = "\t".repeat(d);
-	writeln!(f, "{indent}[")?;
-	let dim = tensor.dims[d];
-	for i in 0..dim.size {
-		write!(f, "{indent}\t")?;
-		let offset = offset + i * dim.stride;
-		if d + 1 < tensor.ndim() - 1 {
-			fmt_Nd(tensor, f, offset, d + 1)?;
-		} else {
-			fmt_1d(tensor, f, offset)?;
-		}
-		writeln!(f, ",")?;
+	match tensor.ndim() {
+		0 => {
+			let tensor = tensor.conv_map().unwrap();
+			fmt_0d(f, tensor, fmt_one)?;
+		},
+		1 => {
+			let tensor = tensor.conv_map().unwrap();
+			fmt_1d(f, tensor, fmt_one)?;
+		},
+		_ => {
+			let indent_str = "\t".repeat(indent);
+			writeln!(f, "{indent_str}[")?;
+			for sub_tensor in tensor.iter_along_axis(0) {
+				write!(f, "{indent_str}\t")?;
+				fmt_Nd(f, &sub_tensor, indent + 1, fmt_one)?;
+				writeln!(f, ",")?;
+			}
+			write!(f, "{indent_str}]");
+		},
 	}
-	write!(f, "{indent}]")
+	Ok(())
+}
+
+fn fmt_one<T: FromToF64>(f: &mut std::fmt::Formatter, val: T) -> std::fmt::Result {
+	let val = val.to_f64();
+	if val >= 0.0 {
+		write!(f, " ")?;
+	}
+	write!(f, "{:.7}", val)
 }
 
 impl std::fmt::Display for Tensor {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+		if self.dtype() != f32::dtype {
+			todo!("Display for non-f32 tensors is not implemented yet");
+		}
+		let tensor = self.view::<f32>().unwrap();
 		write!(f, "Tensor(")?;
-		match self.ndim() {
-			0 => fmt_0d(self.conv_map(), f, 0)?,
-			1 => fmt_1d(self, f, 0)?,
-			_ => fmt_Nd(self, f, 0, 0)?,
-		};
+		fmt_Nd(f, &tensor, 0, fmt_one)?;
 		write!(f, ")")
 	}
 }

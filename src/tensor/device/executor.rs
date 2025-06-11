@@ -12,14 +12,7 @@ use crate::{Error, Result};
 
 use super::buffer::DeviceBuffer;
 
-/// A single slice that doesn't have to be contiguous in memory.
-pub type StridedSlice<'a> = generic::Tensor<ND<1>, &'a DeviceBuffer>;
-
 /// A batch of slices.
-///
-/// They all have the same size and are contiguous in memory.
-///
-/// Stride is used to get from one slice in the batch to the next one.
 pub type SliceBatch<'a> = generic::Tensor<ND<2>, &'a DeviceBuffer>;
 
 /// A batch of matrices.

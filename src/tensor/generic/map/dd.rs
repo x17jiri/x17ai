@@ -6,7 +6,6 @@
 //------------------------------------------------------------------------------
 
 use smallvec::SmallVec;
-use std::hint::likely;
 use std::intrinsics::cold_path;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 

@@ -11,6 +11,7 @@ use std::hint::cold_path;
 use super::{
 	DD, IndexToOffset, Map, MergeAllDims, MergeDims, ReshapeLastDim, SizeAndStride, Transpose,
 };
+use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;
 use crate::tensor::generic::map::{NDShape, Narrow, Select, init_strides};
 use crate::tensor::generic::universal_range::UniversalRange;
 use crate::util::array::try_array_from_iter;
@@ -31,17 +32,31 @@ impl<const N: usize> ND<N> {
 	}
 }
 
-impl<const N: usize> TryFrom<DD> for ND<N> {
-	type Error = Error;
+#[derive(Clone, Copy, Debug)]
+pub struct TryNDFromDDError {
+	pub nd_dims: usize,
+	pub dd_dims: usize,
+}
 
-	fn try_from(dyn_d: DD) -> Result<Self> {
+impl std::error::Error for TryNDFromDDError {}
+
+impl std::fmt::Display for TryNDFromDDError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(
+			f,
+			"Cannot convert from DD with {} dimensions to ND with {} dimensions.",
+			self.dd_dims, self.nd_dims
+		)
+	}
+}
+
+impl<const N: usize> TryFrom<DD> for ND<N> {
+	type Error = TryNDFromDDError;
+
+	fn try_from(dyn_d: DD) -> std::result::Result<Self, TryNDFromDDError> {
 		let Some(dims) = try_array_from_iter(dyn_d.dims.iter().copied()) else {
-			#[cold]
-			fn err_cannot_conv_dd_to_nd(dyn_d: usize, nd: usize) -> Error {
-				format!("Cannot convert DD with {dyn_d} dimensions to ND with {nd} dimensions.")
-					.into()
-			}
-			return Err(err_cannot_conv_dd_to_nd(dyn_d.dims.len(), N));
+			cold_path();
+			return Err(TryNDFromDDError { nd_dims: N, dd_dims: dyn_d.dims.len() });
 		};
 		Ok(Self { dims, offset: dyn_d.offset })
 	}
@@ -225,12 +240,8 @@ where
 
 	fn select(self, dim: usize, index: usize) -> Result<Self::Output> {
 		if dim >= N {
-			#[cold]
-			fn err_dim_out_of_bounds(dim: usize, ndim: usize) -> Error {
-				format!("Dimension {dim} is out of bounds for tensor with {ndim} dimensions.")
-					.into()
-			}
-			return Err(err_dim_out_of_bounds(dim, N));
+			cold_path();
+			return Err(DimIndexOutOfBoundsError.into());
 		}
 		let removed_dim = &self.dims[dim];
 		if index >= removed_dim.size {
