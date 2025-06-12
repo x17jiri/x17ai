@@ -12,9 +12,11 @@ use super::{
 	DD, IndexToOffset, Map, MergeAllDims, MergeDims, ReshapeLastDim, SizeAndStride, Transpose,
 };
 use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;
-use crate::tensor::generic::map::{NDShape, Narrow, Select, init_strides};
+use crate::tensor::generic::map::{
+	NDShape, Narrow, Select, StrideCounter, StrideCounterUnchecked, merge_dims,
+};
 use crate::tensor::generic::universal_range::UniversalRange;
-use crate::util::array::try_array_from_iter;
+use crate::util::array::{try_array_from_iter, try_map_backward};
 use crate::{Error, Result};
 
 #[derive(Clone, Copy)]
@@ -25,10 +27,10 @@ pub struct ND<const N: usize> {
 
 impl<const N: usize> ND<N> {
 	pub fn new(shape: &[usize; N]) -> Result<(Self, usize)> {
-		let mut dims = shape.map(|size| SizeAndStride { size, stride: 0 });
-		let elems = init_strides(&mut dims)?;
-		let map = Self { dims, offset: 0 };
-		Ok((map, elems))
+		let mut stride_counter = StrideCounter::new();
+		let dims = try_map_backward(shape, |_, &size| stride_counter.prepend_dim(size))?;
+		let elems = stride_counter.elems();
+		Ok((Self { dims, offset: 0 }, elems))
 	}
 }
 
@@ -50,15 +52,16 @@ impl std::fmt::Display for TryNDFromDDError {
 	}
 }
 
-impl<const N: usize> TryFrom<DD> for ND<N> {
+impl<const N: usize> TryFrom<&DD> for ND<N> {
 	type Error = TryNDFromDDError;
 
-	fn try_from(dyn_d: DD) -> std::result::Result<Self, TryNDFromDDError> {
-		let Some(dims) = try_array_from_iter(dyn_d.dims.iter().copied()) else {
+	fn try_from(dd: &DD) -> std::result::Result<Self, TryNDFromDDError> {
+		let dd_slice = dd.dims.as_slice();
+		let Some(dims) = try_array_from_iter(dd_slice.iter().copied()) else {
 			cold_path();
-			return Err(TryNDFromDDError { nd_dims: N, dd_dims: dyn_d.dims.len() });
+			return Err(TryNDFromDDError { nd_dims: N, dd_dims: dd.dims.len() });
 		};
-		Ok(Self { dims, offset: dyn_d.offset })
+		Ok(Self { dims, offset: dd.offset })
 	}
 }
 
@@ -114,35 +117,12 @@ where
 {
 	type Output = ND<{ N - M + 1 }>;
 
-	fn merge_dims(self) -> Result<Self::Output> {
+	fn merge_dims(&self) -> Result<Self::Output> {
 		let mut dims = [SizeAndStride::default(); N - M + 1];
 		for i in 0..N - M {
 			dims[i] = self.dims[i];
 		}
-		let mut iter = self.dims[N - M..N].iter().copied().rev();
-		let mut merged = iter.next().unwrap_or(SizeAndStride { size: 1, stride: 1 });
-		for dim in iter {
-			if dim.stride == merged.size * merged.stride {
-				merged.size *= dim.size;
-			} else {
-				cold_path();
-				if dim.size == 1 {
-					// Nothing to do
-				} else if merged.size == 1 {
-					merged = dim;
-				} else if dim.size == 0 || merged.size == 0 {
-					merged = SizeAndStride { size: 0, stride: 0 };
-					break;
-				} else {
-					#[cold]
-					fn err_incompatible_strides() -> Error {
-						"Cannot merge dimensions because of incompatible strides.".into()
-					}
-					return Err(err_incompatible_strides());
-				}
-			}
-		}
-		dims[N - M] = merged;
+		dims[N - M] = merge_dims(&self.dims[N - M..N])?;
 		Ok(ND { dims, offset: self.offset })
 	}
 }
@@ -150,31 +130,11 @@ where
 impl<const N: usize> MergeAllDims for ND<N> {
 	type Output = ND<1>;
 
-	fn merge_all_dims(self) -> Result<Self::Output> {
-		let mut iter = self.dims.iter().copied().rev();
-		let mut merged = iter.next().unwrap_or(SizeAndStride { size: 1, stride: 1 });
-		for dim in iter {
-			if dim.stride == merged.size * merged.stride {
-				merged.size *= dim.size;
-			} else {
-				cold_path();
-				if dim.size == 1 {
-					// Nothing to do
-				} else if merged.size == 1 {
-					merged = dim;
-				} else if dim.size == 0 || merged.size == 0 {
-					merged = SizeAndStride { size: 0, stride: 0 };
-					break;
-				} else {
-					#[cold]
-					fn err_incompatible_strides() -> Error {
-						"Cannot merge dimensions because of incompatible strides.".into()
-					}
-					return Err(err_incompatible_strides());
-				}
-			}
-		}
-		Ok(ND { dims: [merged], offset: self.offset })
+	fn merge_all_dims(&self) -> Result<Self::Output> {
+		Ok(ND {
+			dims: [merge_dims(&self.dims)?],
+			offset: self.offset,
+		})
 	}
 }
 
@@ -185,37 +145,37 @@ where
 {
 	type Output = ND<{ N - 1 + M }>;
 
-	fn reshape_last_dim(self, to_shape: [usize; M]) -> Result<Self::Output> {
+	fn reshape_last_dim(&self, to_shape: [usize; M]) -> Result<Self::Output> {
+		let last_dim = self.dims[N - 1];
+
+		let elems = to_shape.iter().copied().product::<usize>();
+		if elems != last_dim.size {
+			cold_path();
+			#[inline(never)]
+			fn err_incompatible_reshape(removed_size: usize, to_shape: &[usize]) -> Error {
+				format!(
+					"Cannot reshape last dimension of size {removed_size} to shape {:?}.",
+					to_shape
+				)
+				.into()
+			}
+			return Err(err_incompatible_reshape(last_dim.size, &to_shape));
+		}
+
 		let mut dims = [SizeAndStride::default(); N - 1 + M];
 		for i in 0..N - 1 {
 			dims[i] = self.dims[i];
 		}
-		let removed_dim = self.dims[N - 1];
-		let elems = to_shape.iter().copied().product::<usize>();
-		if elems != removed_dim.size {
-			#[cold]
-			fn err_reshape_last_dim(removed_size: usize, to_shape: &[usize]) -> Error {
-				format!(
-					"Cannot reshape last dimension of size {removed_size} to shape {to_shape:?}. Total elements must match.",
-				)
-				.into()
-			}
-			return Err(err_reshape_last_dim(removed_dim.size, &to_shape));
-		}
-		let mut stride = removed_dim.stride;
+		let mut stride_counter = StrideCounterUnchecked::with_stride(last_dim.stride);
 		for i in (N - 1..N - 1 + M).rev() {
-			let size = to_shape[i - (N - 1)];
-			dims[i] = SizeAndStride { size, stride };
-			stride *= size;
+			dims[i] = stride_counter.prepend_dim(to_shape[i - (N - 1)]);
 		}
+
 		Ok(ND { dims, offset: self.offset })
 	}
 }
 
-impl<const N: usize> IndexToOffset<N> for ND<N>
-where
-	[(); N - 1]:,
-{
+impl<const N: usize> IndexToOffset<N> for ND<N> {
 	fn index_to_offset(&self, index: [usize; N]) -> Result<usize> {
 		let mut offset = self.offset;
 		for (d, (&i, &dim)) in index.iter().zip(self.dims.iter()).enumerate() {
@@ -238,11 +198,16 @@ where
 {
 	type Output = ND<{ N - 1 }>;
 
-	fn select(self, dim: usize, index: usize) -> Result<Self::Output> {
+	fn select(&self, dim: usize, index: usize) -> Result<Self::Output> {
 		if dim >= N {
 			cold_path();
-			return Err(DimIndexOutOfBoundsError.into());
+			#[inline(never)]
+			fn err_dim_index_out_of_bounds() -> Error {
+				return DimIndexOutOfBoundsError.into();
+			}
+			return Err(err_dim_index_out_of_bounds());
 		}
+
 		let removed_dim = &self.dims[dim];
 		if index >= removed_dim.size {
 			#[cold]
@@ -251,32 +216,33 @@ where
 			}
 			return Err(err_index_out_of_bounds(index, removed_dim.size));
 		}
-		let mut new_dims = [Default::default(); N - 1];
+
+		let mut dims = [Default::default(); N - 1];
 		for i in 0..dim {
-			new_dims[i] = self.dims[i];
+			dims[i] = self.dims[i];
 		}
-		for i in dim + 1..N {
-			new_dims[i - 1] = self.dims[i];
+		for i in dim..N - 1 {
+			dims[i] = self.dims[i + 1];
 		}
 		Ok(ND {
-			dims: new_dims,
+			dims,
 			offset: self.offset + index * removed_dim.stride,
 		})
 	}
 
-	unsafe fn select_unchecked(self, dim: usize, index: usize) -> Self::Output {
+	unsafe fn select_unchecked(&self, dim: usize, index: usize) -> Self::Output {
 		debug_assert!(dim < N);
 		let removed_dim = self.dims.get_unchecked(dim);
 		debug_assert!(index < removed_dim.size);
-		let mut new_dims = [Default::default(); N - 1];
+		let mut dims = [Default::default(); N - 1];
 		for i in 0..dim {
-			*new_dims.get_unchecked_mut(i) = *self.dims.get_unchecked(i);
+			*dims.get_unchecked_mut(i) = *self.dims.get_unchecked(i);
 		}
-		for i in dim + 1..N {
-			*new_dims.get_unchecked_mut(i - 1) = *self.dims.get_unchecked(i);
+		for i in dim..N - 1 {
+			*dims.get_unchecked_mut(i) = *self.dims.get_unchecked(i + 1);
 		}
 		ND {
-			dims: new_dims,
+			dims,
 			offset: self.offset + index * removed_dim.stride,
 		}
 	}
@@ -285,7 +251,7 @@ where
 impl<const N: usize> Narrow for ND<N> {
 	type Output = Self;
 
-	fn narrow(self, dim: usize, range: UniversalRange) -> Result<Self::Output> {
+	fn narrow(&self, _dim: usize, _range: UniversalRange) -> Result<Self::Output> {
 		todo!("Narrow::narrow for ND<N> not implemented yet");
 	}
 }

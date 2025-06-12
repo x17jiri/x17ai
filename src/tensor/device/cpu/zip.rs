@@ -324,7 +324,7 @@ pub unsafe fn vec_zip_n<T: Copy, const N: usize>(
 		f(map_borrowed(&t, |_, t| {
 			let b = t.map.offset(b, 0);
 			let e = b + item_len;
-			debug_assert!(e < t.buf.len());
+			debug_assert!(e <= t.buf.len());
 			unsafe { t.buf.get_unchecked(b..e) }
 		}));
 	}
@@ -353,7 +353,7 @@ pub unsafe fn reduce_zip_n<T: Copy, const M: usize, const N: usize>(
 			map_borrowed(&t, |_, t| {
 				let b = t.map.offset(b, 0);
 				let e = b + item_len;
-				debug_assert!(e < t.buf.len());
+				debug_assert!(e <= t.buf.len());
 				unsafe { t.buf.get_unchecked(b..e) }
 			}),
 		);

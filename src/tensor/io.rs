@@ -6,17 +6,14 @@
 //------------------------------------------------------------------------------
 
 use std::cell::Cell;
-use std::intrinsics::cold_path;
-use std::io::{Read, Write};
 
 use crate::Result;
-use crate::tensor::device::DeviceBuffer;
 use crate::tensor::device::cpu::math::FromToF64;
 use crate::tensor::generic;
 use crate::tensor::generic::map::{DD, ND};
 
+use super::Tensor;
 use super::math::__elem_wise;
-use super::{HasDType, Tensor};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -252,7 +249,13 @@ fn fmt_1d<T: Copy>(
 	mut fmt_one: impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
 ) -> std::fmt::Result {
 	write!(f, "[")?;
+	let mut first = true;
 	for elem in tensor.iter_along_axis(0) {
+		if !first {
+			write!(f, ", ")?;
+		}
+		first = false;
+
 		fmt_one(f, elem[[]].get())?;
 	}
 	write!(f, "]")?;
@@ -261,7 +264,7 @@ fn fmt_1d<T: Copy>(
 
 fn fmt_Nd<T: Copy>(
 	f: &mut std::fmt::Formatter, tensor: &generic::Tensor<DD, &[Cell<T>]>, indent: usize,
-	mut fmt_one: impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
+	fmt_one: &mut impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
 ) -> std::fmt::Result {
 	match tensor.ndim() {
 		0 => {
@@ -280,7 +283,7 @@ fn fmt_Nd<T: Copy>(
 				fmt_Nd(f, &sub_tensor, indent + 1, fmt_one)?;
 				writeln!(f, ",")?;
 			}
-			write!(f, "{indent_str}]");
+			write!(f, "{indent_str}]")?;
 		},
 	}
 	Ok(())
@@ -291,17 +294,13 @@ fn fmt_one<T: FromToF64>(f: &mut std::fmt::Formatter, val: T) -> std::fmt::Resul
 	if val >= 0.0 {
 		write!(f, " ")?;
 	}
-	write!(f, "{:.7}", val)
+	write!(f, "{val:.7}")
 }
 
-impl std::fmt::Display for Tensor {
+impl<T: FromToF64> std::fmt::Display for generic::Tensor<DD, &[Cell<T>]> {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-		if self.dtype() != f32::dtype {
-			todo!("Display for non-f32 tensors is not implemented yet");
-		}
-		let tensor = self.view::<f32>().unwrap();
 		write!(f, "Tensor(")?;
-		fmt_Nd(f, &tensor, 0, fmt_one)?;
+		fmt_Nd(f, self, 0, &mut fmt_one)?;
 		write!(f, ")")
 	}
 }

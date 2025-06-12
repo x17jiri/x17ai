@@ -5,12 +5,16 @@
 //
 //------------------------------------------------------------------------------
 
-use smallvec::SmallVec;
 use std::intrinsics::cold_path;
-use std::ops::{Deref, DerefMut, Index, IndexMut};
+use std::mem::MaybeUninit;
+use std::ptr::NonNull;
 
 use crate::Result;
-use crate::tensor::generic::map::{MergeAllDims, MergeDims, ReshapeLastDim, init_strides};
+use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;
+use crate::tensor::generic::map::{
+	MergeAllDims, MergeDims, ReshapeLastDim, Select, StrideCounter, StrideCounterUnchecked,
+	merge_dims,
+};
 
 use super::{Map, SizeAndStride, Transpose};
 
@@ -23,36 +27,72 @@ pub struct DD {
 }
 
 impl DD {
+	#[inline(never)] // TODO
 	pub fn new(shape: &[usize]) -> Result<(Self, usize)> {
-		let mut dims =
-			DimVec::new_from_iter(shape.iter().map(|&size| SizeAndStride { size, stride: 0 }));
-		let elems = init_strides(&mut dims)?;
-		let map = Self { dims, offset: 0 };
-		Ok((map, elems))
+		let mut dims = DimVecBuilder::new(shape.len());
+		let slice = dims.as_slice_mut();
+
+		let mut stride_counter = StrideCounter::new();
+		for (dim, &size) in slice.iter_mut().zip(shape.iter()).rev() {
+			dim.write(stride_counter.prepend_dim(size)?);
+		}
+		let elems = stride_counter.elems();
+
+		let dims = unsafe { dims.assume_init() };
+		Ok((Self { dims, offset: 0 }, elems))
 	}
 
+	#[inline(never)] // TODO
 	pub fn new_like(&self) -> (Self, usize) {
-		let mut dims = self.dims.clone();
-		let elems = init_strides(&mut dims).unwrap();
-		let map = Self { dims, offset: 0 };
-		(map, elems)
+		let src_slice = self.dims.as_slice();
+
+		let mut dims = DimVecBuilder::new(src_slice.len());
+		let slice = dims.as_slice_mut();
+
+		let mut stride_counter = StrideCounterUnchecked::new();
+		for (dim, src_dim) in slice.iter_mut().zip(src_slice.iter()).rev() {
+			dim.write(stride_counter.prepend_dim(src_dim.size));
+		}
+		let elems = stride_counter.elems();
+
+		let dims = unsafe { dims.assume_init() };
+		(Self { dims, offset: 0 }, elems)
 	}
 
+	#[inline(never)] // TODO
 	pub fn new_replace_tail(
 		&self, tail_len: usize, replace_with: &[usize],
 	) -> Result<(Self, usize)> {
-		let n_keep = self.dims.len().checked_sub(tail_len).expect("not enough dimensions");
+		let src_slice = self.dims.as_slice();
+		let Some(n_keep) = src_slice.len().checked_sub(tail_len) else {
+			#[cold]
+			fn err_tail_len_out_of_bounds(tail_len: usize, ndim: usize) -> Result<(DD, usize)> {
+				Err(format!(
+					"Tail length {tail_len} is out of bounds for tensor with {ndim} dimensions."
+				)
+				.into())
+			}
+			return err_tail_len_out_of_bounds(tail_len, src_slice.len());
+		};
+		let src_slice = &src_slice[..n_keep];
 		let ndim = n_keep + replace_with.len();
-		let mut dims = DimVec::with_capacity(ndim);
-		unsafe {
-			dims.extend_unchecked(self.dims.get_unchecked(..n_keep).iter().copied());
-			dims.extend_unchecked(
-				replace_with.iter().map(|&size| SizeAndStride { size, stride: 0 }),
-			);
+
+		let mut dims = DimVecBuilder::new(ndim);
+		let slice = dims.as_slice_mut();
+
+		let mut stride_counter = StrideCounter::new();
+		let second_part = &mut slice[n_keep..];
+		for (dim, &size) in second_part.iter_mut().zip(replace_with.iter()).rev() {
+			dim.write(stride_counter.prepend_dim(size)?);
 		}
-		let elems = init_strides(&mut dims)?;
-		let map = Self { dims, offset: 0 };
-		Ok((map, elems))
+		let first_part = &mut slice[..n_keep];
+		for (dim, src_dim) in first_part.iter_mut().zip(src_slice.iter()).rev() {
+			dim.write(stride_counter.prepend_dim(src_dim.size)?);
+		}
+		let elems = stride_counter.elems();
+
+		let dims = unsafe { dims.assume_init() };
+		Ok((Self { dims, offset: 0 }, elems))
 	}
 }
 
@@ -62,341 +102,327 @@ impl Map for DD {
 	}
 
 	fn size(&self, dim: usize) -> usize {
-		if dim >= self.dims.len() {
-			cold_path();
-			return 1;
-		}
-		self.dims[dim].size
+		let dims = self.dims.as_slice();
+		dims[dim].size
 	}
 
 	fn elems(&self) -> usize {
-		self.dims.iter().map(|dim| dim.size).product()
+		let dims = self.dims.as_slice();
+		dims.iter().map(|dim| dim.size).product()
 	}
 
 	fn span(&self) -> std::ops::Range<usize> {
-		todo!();
+		todo!("<DD as Map>::span is not implemented yet");
 	}
 
 	fn is_contiguous(&self) -> bool {
-		todo!();
+		todo!("<DD as Map>::is_contiguous is not implemented yet");
 	}
 }
 
 impl<const M: usize> MergeDims<M> for DD {
 	type Output = Self;
 
-	fn merge_dims(mut self) -> Result<Self::Output> {
-		let dims = &mut self.dims;
-		let ndim = dims.len();
-		if M > ndim {
+	#[inline(never)] // TODO
+	fn merge_dims(&self) -> Result<Self::Output> {
+		let old_slice = self.dims.as_slice();
+		let old_ndim = old_slice.len();
+		if old_ndim < M {
 			cold_path();
-			return Err(
-				format!("Cannot merge {M} dimensions in a tensor with {ndim} dimensions.",).into(),
-			);
-		}
-
-		if M == 0 {
-			dims.push(SizeAndStride { size: 1, stride: 0 });
-		} else {
-			let mut merged = *unsafe { dims.get_unchecked(ndim - 1) };
-			for i in (ndim - M..ndim - 1).rev() {
-				let dim = *unsafe { dims.get_unchecked(i) };
-				if dim.size > 1 && dim.stride != merged.size * merged.stride {
-					cold_path();
-					return Err("Cannot merge because of discontinuity".into());
-				}
-				merged.size *= dim.size;
+			#[inline(never)]
+			fn err_merge_too_many_dims(m: usize, old_ndim: usize) -> Result<DD> {
+				Err(format!("Cannot merge {m} dimensions in a tensor with {old_ndim} dimensions.",)
+					.into())
 			}
-			dims.pop_n(M - 1);
-			*unsafe { dims.get_unchecked_mut(ndim - M) } = merged;
+			return err_merge_too_many_dims(M, old_ndim);
 		}
+		let n_keep = old_ndim - M;
+		let ndim = n_keep + 1;
 
-		Ok(self)
+		let merged = merge_dims(&old_slice[n_keep..old_ndim])?;
+
+		let mut dims = DimVecBuilder::new(ndim);
+		let slice = dims.as_slice_mut();
+		for i in 0..n_keep {
+			slice[i].write(old_slice[i]);
+		}
+		slice[n_keep].write(merged);
+
+		let dims = unsafe { dims.assume_init() };
+		Ok(Self { dims, offset: 0 })
 	}
 }
 
 impl MergeAllDims for DD {
 	type Output = Self;
 
-	fn merge_all_dims(mut self) -> Result<Self::Output> {
-		let dims = &mut self.dims;
-		let ndim = dims.len();
+	#[inline(never)] // TODO
+	fn merge_all_dims(&self) -> Result<Self::Output> {
+		let merged = merge_dims(self.dims.as_slice())?;
 
-		match ndim {
-			0 => {
-				dims.push(SizeAndStride { size: 1, stride: 0 });
-			},
-			1 => {},
-			_ => {
-				let mut merged = *unsafe { dims.get_unchecked(ndim - 1) };
-				for i in (0..ndim - 1).rev() {
-					let dim = *unsafe { dims.get_unchecked(i) };
-					if dim.size > 1 && dim.stride != merged.size * merged.stride {
-						cold_path();
-						return Err("cannot merge because of discontinuity".into());
-					}
-					merged.size *= dim.size;
-				}
-				dims.pop_n(ndim - 1);
-				*unsafe { dims.get_unchecked_mut(0) } = merged;
-			},
-		}
+		let mut dims = DimVecBuilder::new(1);
+		let slice = dims.as_slice_mut();
+		slice[0].write(merged);
 
-		Ok(self)
+		let dims = unsafe { dims.assume_init() };
+		Ok(Self { dims, offset: 0 })
 	}
 }
 
 impl<const M: usize> ReshapeLastDim<M> for DD {
 	type Output = Self;
 
-	fn reshape_last_dim(mut self, to_shape: [usize; M]) -> Result<Self::Output> {
-		let dims = &mut self.dims;
+	#[inline(never)] // TODO
+	fn reshape_last_dim(&self, to_shape: [usize; M]) -> Result<Self::Output> {
+		let old_slice = self.dims.as_slice();
+		let old_ndim = old_slice.len();
 
-		let Some(removed_dim) = dims.pop() else {
+		let Some(last_dim) = old_slice.last() else {
 			cold_path();
-			return Err("Not enough dimensions".into());
+			#[inline(never)]
+			fn err_not_enough_dimensions() -> Result<DD> {
+				Err("Not enough dimensions".into())
+			}
+			return err_not_enough_dimensions();
 		};
 
 		let elems = to_shape.iter().copied().product::<usize>();
-		if elems != removed_dim.size {
+		if elems != last_dim.size {
 			cold_path();
-			return Err("incompatible reshape".into());
+			#[inline(never)]
+			fn err_incompatible_reshape(removed_size: usize, to_shape: &[usize]) -> Result<DD> {
+				Err(format!(
+					"Cannot reshape last dimension of size {removed_size} to shape {:?}.",
+					to_shape
+				)
+				.into())
+			}
+			return err_incompatible_reshape(last_dim.size, &to_shape);
 		}
 
-		let mut stride = removed_dim.stride;
-		dims.extend_rev(to_shape.iter().rev().map(|&size| {
-			let dim = SizeAndStride { size, stride };
-			stride *= size;
-			dim
-		}));
+		let n_keep = old_ndim - 1;
+		let ndim = n_keep + M;
 
-		Ok(self)
+		let mut dims = DimVecBuilder::new(ndim);
+		let slice = dims.as_slice_mut();
+
+		for i in 0..n_keep {
+			slice[i].write(old_slice[i]);
+		}
+		let mut stride_counter = StrideCounterUnchecked::with_stride(last_dim.stride);
+		for i in (n_keep..ndim).rev() {
+			slice[i].write(stride_counter.prepend_dim(to_shape[i - n_keep]));
+		}
+
+		let dims = unsafe { dims.assume_init() };
+		Ok(Self { dims, offset: 0 })
+	}
+}
+
+impl Select for DD {
+	type Output = DD;
+
+	#[inline(never)] // TODO
+	fn select(&self, dim: usize, index: usize) -> Result<Self::Output> {
+		let old_slice = self.dims.as_slice();
+
+		let Some(removed_dim) = old_slice.get(dim) else {
+			cold_path();
+			#[inline(never)]
+			fn err_dim_index_out_of_bounds() -> Result<DD> {
+				return Err(DimIndexOutOfBoundsError.into());
+			}
+			return err_dim_index_out_of_bounds();
+		};
+
+		if index >= removed_dim.size {
+			cold_path();
+			#[inline(never)]
+			fn err_index_out_of_bounds(index: usize, size: usize) -> Result<DD> {
+				Err(format!("Index {index} is out of bounds for dimension of size {size}.").into())
+			}
+			return err_index_out_of_bounds(index, removed_dim.size);
+		}
+
+		let ndim = old_slice.len() - 1;
+		let mut dims = DimVecBuilder::new(ndim);
+		let slice = dims.as_slice_mut();
+
+		for i in 0..dim {
+			slice[i].write(old_slice[i]);
+		}
+		for i in dim..ndim {
+			slice[i].write(old_slice[i + 1]);
+		}
+
+		let dims = unsafe { dims.assume_init() };
+		Ok(Self {
+			dims,
+			offset: self.offset + index * removed_dim.stride,
+		})
+	}
+
+	#[inline(never)] // TODO
+	unsafe fn select_unchecked(&self, dim: usize, index: usize) -> Self::Output {
+		let old_slice = self.dims.as_slice();
+		debug_assert!(dim < old_slice.len());
+
+		let removed_dim = old_slice.get_unchecked(dim);
+		debug_assert!(index < removed_dim.size);
+
+		let ndim = old_slice.len() - 1;
+		let mut dims = DimVecBuilder::new(ndim);
+		let slice = dims.as_slice_mut();
+
+		for i in 0..dim {
+			slice.get_unchecked_mut(i).write(*old_slice.get_unchecked(i));
+		}
+		for i in dim..ndim {
+			slice.get_unchecked_mut(i).write(*old_slice.get_unchecked(i + 1));
+		}
+
+		let dims = unsafe { dims.assume_init() };
+		Self {
+			dims,
+			offset: self.offset + index * removed_dim.stride,
+		}
 	}
 }
 
 impl Transpose for DD {
 	type Output = Self;
 
+	#[inline(never)] // TODO
 	fn transposed(mut self, d0: usize, d1: usize) -> Result<Self> {
-		if d0 >= self.dims.len() || d1 >= self.dims.len() {
-			return Err(format!(
-				"Cannot transpose dimension {} with {}. Tensor has {} dimensions.",
-				d0,
-				d1,
-				self.dims.len()
-			)
-			.into());
+		let slice = self.dims.as_slice_mut();
+		if d0 >= slice.len() || d1 >= slice.len() {
+			cold_path();
+			#[inline(never)]
+			fn err_dim_index_out_of_bounds() -> Result<DD> {
+				return Err(DimIndexOutOfBoundsError.into());
+			}
+			return err_dim_index_out_of_bounds();
 		}
-		self.dims.swap(d0, d1);
+		slice.swap(d0, d1);
 		Ok(self)
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
-// I expect that 99.99% of the time, the DimVec will use inline storage.
-// This implementaton is optimized so that we inline functions as long as they use the inline
-// storage, but functions that would extend the storage are never inlined.
-// This is to avoid code bloat.
 
 pub const INLINE_DIMS: usize = 4;
 
+#[derive(Copy, Clone)]
+union DimVecItems {
+	inline: [MaybeUninit<SizeAndStride>; INLINE_DIMS],
+	heap: NonNull<MaybeUninit<SizeAndStride>>,
+}
+
+pub struct DimVecBuilder {
+	pub len: usize,
+	pub items: DimVecItems,
+}
+
+impl DimVecBuilder {
+	#[inline(never)]
+	fn new_heap_items(len: usize) -> NonNull<MaybeUninit<SizeAndStride>> {
+		let layout = std::alloc::Layout::array::<MaybeUninit<SizeAndStride>>(len)
+			.expect("Failed to create layout for DimVecBuilderItems");
+		let mem = NonNull::new(unsafe { std::alloc::alloc(layout) })
+			.expect("Failed to allocate memory for DimVecBuilderItems");
+		mem.cast()
+	}
+
+	pub fn new(len: usize) -> Self {
+		if len <= INLINE_DIMS {
+			Self {
+				len,
+				items: DimVecItems {
+					inline: [MaybeUninit::uninit(); INLINE_DIMS],
+				},
+			}
+		} else {
+			cold_path();
+			Self {
+				len,
+				items: DimVecItems { heap: Self::new_heap_items(len) },
+			}
+		}
+	}
+
+	pub fn as_slice_mut(&mut self) -> &mut [MaybeUninit<SizeAndStride>] {
+		unsafe {
+			if self.len <= INLINE_DIMS {
+				&mut self.items.inline[..self.len]
+			} else {
+				cold_path();
+				std::slice::from_raw_parts_mut(self.items.heap.as_ptr(), self.len)
+			}
+		}
+	}
+
+	pub unsafe fn assume_init(self) -> DimVec {
+		let DimVecBuilder { len, items } = self;
+		DimVec { len, items }
+	}
+}
+
 pub struct DimVec {
-	vec: SmallVec<[SizeAndStride; INLINE_DIMS]>,
+	pub len: usize,
+	pub items: DimVecItems,
 }
 
 impl DimVec {
-	#[inline(never)]
-	fn with_large_capacity(capacity: usize) -> Self {
-		Self { vec: SmallVec::with_capacity(capacity) }
-	}
-
-	pub fn with_capacity(capacity: usize) -> Self {
-		if capacity <= INLINE_DIMS {
-			Self { vec: SmallVec::with_capacity(capacity) }
-		} else {
-			cold_path();
-			Self::with_large_capacity(capacity)
-		}
-	}
-
-	pub fn new() -> Self {
-		Self { vec: SmallVec::new() }
-	}
-
-	pub fn new_from_iter<I: IntoIterator<Item = SizeAndStride> + ExactSizeIterator>(
-		iter: I,
-	) -> Self {
-		let len = iter.len();
-		let mut t = Self::with_capacity(len);
-		unsafe {
-			let mut ptr = t.vec.as_mut_ptr();
-			for i in iter {
-				*ptr = i;
-				ptr = ptr.add(1);
-			}
-			t.vec.set_len(len);
-		}
-		t
-	}
-
-	pub unsafe fn extend_unchecked<I: IntoIterator<Item = SizeAndStride> + ExactSizeIterator>(
-		&mut self, iter: I,
-	) {
-		let len = self.vec.len();
-		let add = iter.len();
-		debug_assert!(len + add <= self.vec.capacity());
-		unsafe {
-			let mut ptr = self.vec.as_mut_ptr().add(len);
-			for i in iter {
-				*ptr = i;
-				ptr = ptr.add(1);
-			}
-			self.vec.set_len(len + add);
-		}
-	}
-
-	pub fn extend_rev<I: IntoIterator<Item = SizeAndStride> + ExactSizeIterator>(
-		&mut self, iter: I,
-	) {
-		let len = self.vec.len();
-		let add = iter.len();
-		let cap = self.vec.capacity();
-
-		let ptr = if len + add <= cap {
-			self.vec.as_mut_ptr()
-		} else {
-			cold_path();
-			self.reserve_large(add)
-		};
-
-		unsafe {
-			let mut ptr = ptr.add(len + add);
-			for i in iter {
-				ptr = ptr.sub(1);
-				*ptr = i;
-			}
-			self.vec.set_len(len + add);
-		}
-	}
-
-	#[inline(never)]
-	fn clone_large(&self) -> Self {
-		Self { vec: self.vec.clone() }
-	}
-
-	#[inline]
 	pub fn len(&self) -> usize {
-		self.vec.len()
-	}
-
-	#[inline(never)]
-	fn reserve_large(&mut self, additional: usize) -> *mut SizeAndStride {
-		self.vec.reserve(additional);
-		self.vec.as_mut_ptr()
-	}
-
-	pub fn swap(&mut self, a: usize, b: usize) {
-		self.vec.swap(a, b);
-	}
-
-	#[inline(never)]
-	fn push_large(&mut self, dim: SizeAndStride) {
-		self.vec.push(dim);
-	}
-
-	pub fn push(&mut self, dim: SizeAndStride) {
-		if self.vec.len() < self.vec.capacity() {
-			self.vec.push(dim);
-		} else {
-			cold_path();
-			self.push_large(dim);
-		}
-	}
-
-	pub fn pop(&mut self) -> Option<SizeAndStride> {
-		self.vec.pop()
-	}
-
-	/// Removes `n` elements from the end of the vector.
-	///
-	/// # Panics
-	///
-	/// Panics if `n` is greater than the current length of the vector.
-	pub fn pop_n(&mut self, n: usize) {
-		let len = self.vec.len();
-		assert!(n <= len);
-		unsafe { self.vec.set_len(len - n) };
+		self.len
 	}
 
 	pub fn as_slice(&self) -> &[SizeAndStride] {
-		self.vec.as_slice()
+		unsafe {
+			if self.len <= INLINE_DIMS {
+				let slice = &self.items.inline[..self.len];
+				slice.assume_init_ref()
+			} else {
+				cold_path();
+				let slice = std::slice::from_raw_parts(self.items.heap.as_ptr(), self.len);
+				slice.assume_init_ref()
+			}
+		}
 	}
 
-	pub fn as_mut_slice(&mut self) -> &mut [SizeAndStride] {
-		self.vec.as_mut_slice()
+	pub fn as_slice_mut(&mut self) -> &mut [SizeAndStride] {
+		unsafe {
+			if self.len <= INLINE_DIMS {
+				let slice = &mut self.items.inline[..self.len];
+				slice.assume_init_mut()
+			} else {
+				cold_path();
+				let slice = std::slice::from_raw_parts_mut(self.items.heap.as_ptr(), self.len);
+				slice.assume_init_mut()
+			}
+		}
+	}
+
+	#[inline(never)]
+	fn finish_clone_large(&mut self) {
+		unsafe {
+			let new_items = DimVecBuilder::new_heap_items(self.len);
+			let src = std::slice::from_raw_parts(self.items.heap.as_ptr(), self.len);
+			let dst = std::slice::from_raw_parts_mut(new_items.as_ptr(), self.len);
+			dst.copy_from_slice(src);
+			self.items.heap = new_items;
+		}
 	}
 }
 
 impl Clone for DimVec {
 	fn clone(&self) -> Self {
-		if self.vec.capacity() <= INLINE_DIMS {
-			Self { vec: self.vec.clone() }
-		} else {
+		let mut result = Self { len: self.len, items: self.items };
+		if self.len > INLINE_DIMS {
 			cold_path();
-			self.clone_large()
+			result.finish_clone_large();
 		}
-	}
-}
-
-impl Index<usize> for DimVec {
-	type Output = SizeAndStride;
-
-	fn index(&self, index: usize) -> &Self::Output {
-		&self.vec[index]
-	}
-}
-
-impl IndexMut<usize> for DimVec {
-	fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-		&mut self.vec[index]
-	}
-}
-
-impl Index<std::ops::Range<usize>> for DimVec {
-	type Output = [SizeAndStride];
-
-	fn index(&self, index: std::ops::Range<usize>) -> &Self::Output {
-		&self.vec[index]
-	}
-}
-
-impl Index<std::ops::RangeTo<usize>> for DimVec {
-	type Output = [SizeAndStride];
-
-	fn index(&self, index: std::ops::RangeTo<usize>) -> &Self::Output {
-		&self.vec[index]
-	}
-}
-
-impl Index<std::ops::RangeFrom<usize>> for DimVec {
-	type Output = [SizeAndStride];
-
-	fn index(&self, index: std::ops::RangeFrom<usize>) -> &Self::Output {
-		&self.vec[index]
-	}
-}
-
-impl Deref for DimVec {
-	type Target = [SizeAndStride];
-
-	fn deref(&self) -> &Self::Target {
-		&self.vec
-	}
-}
-
-impl DerefMut for DimVec {
-	fn deref_mut(&mut self) -> &mut Self::Target {
-		&mut self.vec
+		result
 	}
 }
 

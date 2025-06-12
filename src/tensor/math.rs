@@ -72,10 +72,11 @@ fn __vec_wise<const N: usize>(
 ) -> Result<()> {
 	assert!(tensors.iter().all(|t| t.ndim() >= 1));
 
-	let smallest = tensors.map(|t| *t.map.dims.last().unwrap());
+	let dims = tensors.map(|t| t.map.dims.as_slice());
+	let smallest = dims.map(|d| *d.last().unwrap());
 	let buffers = tensors.map(|t| t.buf.as_ref());
 
-	let merger = DimMerger::new(tensors.map(|t| &t.map.dims[..&t.map.dims.len() - 1]))?;
+	let merger = DimMerger::new(dims.map(|d| &d[..d.len() - 1]))?;
 	let batch_dims = merger.dims_increasing();
 	let batch_iter = batch_dims.iter();
 

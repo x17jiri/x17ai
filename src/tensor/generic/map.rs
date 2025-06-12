@@ -8,7 +8,7 @@
 pub mod dd;
 pub mod nd;
 
-use std::hint::likely;
+use std::hint::{cold_path, likely};
 
 pub use dd::DD;
 pub use nd::ND;
@@ -53,19 +53,19 @@ pub trait Map: Clone {
 pub trait MergeDims<const M: usize> {
 	type Output: Map;
 
-	fn merge_dims(self) -> Result<Self::Output>;
+	fn merge_dims(&self) -> Result<Self::Output>;
 }
 
 pub trait MergeAllDims {
 	type Output: Map;
 
-	fn merge_all_dims(self) -> Result<Self::Output>;
+	fn merge_all_dims(&self) -> Result<Self::Output>;
 }
 
 pub trait ReshapeLastDim<const M: usize> {
 	type Output: Map;
 
-	fn reshape_last_dim(self, to_shape: [usize; M]) -> Result<Self::Output>;
+	fn reshape_last_dim(&self, to_shape: [usize; M]) -> Result<Self::Output>;
 }
 
 pub trait IndexToOffset<const K: usize> {
@@ -75,14 +75,14 @@ pub trait IndexToOffset<const K: usize> {
 pub trait Select {
 	type Output: Map;
 
-	fn select(self, dim: usize, index: usize) -> Result<Self::Output>;
-	unsafe fn select_unchecked(self, dim: usize, index: usize) -> Self::Output;
+	fn select(&self, dim: usize, index: usize) -> Result<Self::Output>;
+	unsafe fn select_unchecked(&self, dim: usize, index: usize) -> Self::Output;
 }
 
 pub trait Narrow {
 	type Output: Map;
 
-	fn narrow(self, dim: usize, range: UniversalRange) -> Result<Self::Output>;
+	fn narrow(&self, dim: usize, range: UniversalRange) -> Result<Self::Output>;
 }
 
 pub trait Transpose {
@@ -99,32 +99,94 @@ pub trait NDShape<const K: usize> {
 
 //--------------------------------------------------------------------------------------------------
 
-/// This function will initialize strides in a slice so a new tensor using them
-/// is contiguous in memory.
-///
-/// It returns the total number of elements in the tensor.
-pub fn init_strides(dims: &mut [SizeAndStride]) -> Result<usize> {
-	let mut elems = 1;
-	let mut nonzero_elems: usize = 1;
-	for dim in dims.iter_mut().rev() {
+pub struct StrideCounter {
+	pub elems: usize,
+	pub nonzero_elems: usize,
+}
+
+impl StrideCounter {
+	pub fn new() -> Self {
+		Self { elems: 1, nonzero_elems: 1 }
+	}
+
+	pub fn prepend_dim(&mut self, size: usize) -> Result<SizeAndStride> {
 		// Check that if we ignore zero length dimensions, the number of elements does not
 		// overflow. This is done to make sure our calculations would not overflow even if we
 		// had the same dimensions but in different order.
-		if likely(dim.size != 0) {
-			let Some(e) = nonzero_elems.checked_mul(dim.size) else {
+		if likely(size != 0) {
+			let Some(e) = self.nonzero_elems.checked_mul(size) else {
 				#[cold]
-				fn err_init_strides_overflow() -> crate::Error {
-					"Tensor dimensions overflowed while calculating strides.".into()
+				fn err_overflow(size: usize, elems: usize) -> crate::Error {
+					"overflow when initializing strides - too many elements".into()
 				}
-				return Err(err_init_strides_overflow());
+				return Err(err_overflow(size, self.nonzero_elems));
 			};
-			nonzero_elems = e;
+			self.nonzero_elems = e;
 		}
 
-		dim.stride = elems;
-		elems *= dim.size;
+		let stride = self.elems;
+		self.elems *= size;
+
+		Ok(SizeAndStride { size, stride })
 	}
-	Ok(elems)
+
+	pub fn elems(&self) -> usize {
+		self.elems
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+/// This is like `StrideCounter`, but it does not check for overflow.
+///
+/// The typical use case is creating a new map from an existing map. Since we have an existing map,
+/// we know the number of elements will not overflow.
+pub struct StrideCounterUnchecked {
+	pub elems: usize,
+}
+
+impl StrideCounterUnchecked {
+	pub fn new() -> Self {
+		Self { elems: 1 }
+	}
+
+	pub fn with_stride(stride: usize) -> Self {
+		Self { elems: stride }
+	}
+
+	pub fn prepend_dim(&mut self, size: usize) -> SizeAndStride {
+		let stride = self.elems;
+		self.elems *= size;
+		SizeAndStride { size, stride }
+	}
+
+	pub fn elems(&self) -> usize {
+		self.elems
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub fn merge_dims(dims: &[SizeAndStride]) -> Result<SizeAndStride> {
+	let mut merged = SizeAndStride { size: 1, stride: 1 };
+	for dim in dims.iter().rev() {
+		if dim.stride == merged.size * merged.stride || dim.size <= 1 {
+			merged.size *= dim.size;
+		} else {
+			cold_path();
+			if merged.size == 1 {
+				merged = *dim;
+			} else if merged.size > 1 {
+				cold_path();
+				#[inline(never)]
+				fn err_incompatible_strides() -> Result<SizeAndStride> {
+					Err("Cannot merge dimensions because of incompatible strides".into())
+				}
+				return err_incompatible_strides();
+			}
+		}
+	}
+	Ok(merged)
 }
 
 //--------------------------------------------------------------------------------------------------

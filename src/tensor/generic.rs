@@ -125,13 +125,13 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		self.map.nd_shape()
 	}
 
-	pub fn conv_map<NewMap: Map>(self) -> std::result::Result<Tensor<NewMap, B>, M::Error>
+	pub fn conv_map<'a, NewMap>(&'a self) -> std::result::Result<Tensor<NewMap, B>, NewMap::Error>
 	where
-		M: TryInto<NewMap>,
-		M::Error: Into<crate::Error>,
+		NewMap: Map + TryFrom<&'a M>,
+		NewMap::Error: Into<crate::Error>,
 	{
-		let map = self.map.try_into()?;
-		Ok(Tensor { map, buf: self.buf })
+		let map = NewMap::try_from(&self.map)?;
+		Ok(Tensor { map, buf: self.buf.clone() })
 	}
 }
 

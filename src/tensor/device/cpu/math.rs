@@ -11,7 +11,7 @@ use crate::util::LossyInto;
 
 //--------------------------------------------------------------------------------------------------
 
-pub trait FromToF64 {
+pub trait FromToF64: Copy {
 	const MIN: f64; // largest negative value of type
 
 	fn from_f64(val: f64) -> Self;

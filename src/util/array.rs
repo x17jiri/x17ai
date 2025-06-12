@@ -60,9 +60,7 @@ where
 	Some(unsafe { MaybeUninit::array_assume_init(array) })
 }
 
-pub fn concat_arrays<T, const A: usize, const B: usize>(
-	a: [T; A], b: [T; B],
-) -> [T; A + B] {
+pub fn concat_arrays<T, const A: usize, const B: usize>(a: [T; A], b: [T; B]) -> [T; A + B] {
 	let mut c = [const { MaybeUninit::uninit() }; A + B];
 	for (i, t) in a.into_iter().enumerate() {
 		c[i].write(t);
@@ -71,4 +69,14 @@ pub fn concat_arrays<T, const A: usize, const B: usize>(
 		c[A + i].write(t);
 	}
 	unsafe { MaybeUninit::array_assume_init(c) }
+}
+
+pub fn try_map_backward<const N: usize, T, U, E>(
+	array: &[T; N], mut f: impl FnMut(usize, &T) -> Result<U, E>,
+) -> Result<[U; N], E> {
+	let mut u = [const { MaybeUninit::uninit() }; N];
+	for i in (0..N).rev() {
+		u[i].write(f(i, &array[i])?);
+	}
+	Ok(unsafe { MaybeUninit::array_assume_init(u) })
 }

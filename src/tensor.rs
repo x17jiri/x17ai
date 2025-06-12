@@ -153,7 +153,7 @@ impl<T: HasDType> TensorLiteralFactory<T> {
 		let tensor = Tensor::new_empty_on(&[Y, X], T::dtype, self.device.clone())?;
 
 		let val_ptr = value.as_ptr() as *const u8;
-		let val_len = X * std::mem::size_of::<T>();
+		let val_len = Y * X * std::mem::size_of::<T>();
 		let val = unsafe { std::slice::from_raw_parts(val_ptr, val_len) };
 		let mut reader = std::io::Cursor::new(val);
 		io::read_bin(&tensor, &mut reader)?;
