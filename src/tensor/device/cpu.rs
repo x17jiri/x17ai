@@ -97,15 +97,6 @@ impl<'a, T> CPUSliceSet<'a, T> {
 
 //--------------------------------------------------------------------------------------------------
 
-#[derive(std::marker::ConstParamTy, PartialEq, Eq)]
-enum Commutativity {
-	Commutative,
-	NonCommutative,
-}
-
-const Commutative: Commutativity = Commutativity::Commutative;
-const NonCommutative: Commutativity = Commutativity::NonCommutative;
-
 pub struct CPUDevice {
 	pub name: String,
 	pub rng: Rc<RefCell<Rng>>,
@@ -503,43 +494,6 @@ impl Device for CPUDevice {
 
 #[cfg(false)]
 impl Executor for CPUDevice {
-	fn dot(&self, dst: &SliceSet, a: &SliceSet, b: &SliceSet, ab_weight: f64) {
-		assert!(a.len == b.len);
-		assert!(dst.len == 1);
-		match dst.dtype {
-			f32::dtype => self.array_wise::<f32, 3>([&dst, &a, &b], |[dst, a, b]| {}),
-			_ => todo!(),
-		}
-	}
-
-	fn dot_acc(&self, dst: &SliceSet, dst_weight: f64, a: &SliceSet, b: &SliceSet, ab_weight: f64) {
-		assert!(a.len == b.len);
-		assert!(dst.len == 1);
-		match dst.dtype {
-			f32::dtype => self.array_wise::<f32, 3>([&dst, &a, &b], |[dst, a, b]| {
-				let old_val = f64::from(dst[0].get());
-				let dot = math::dot(a, b);
-				let val = dst_weight * old_val + ab_weight * dot;
-				let val = f32::from_f64(val);
-				dst[0].set(val);
-			}),
-			_ => todo!(),
-		}
-	}
-
-	fn rms_norm(&self, dst: &SliceSet, inp: &SliceSet, eps: f64, scale_storage: Option<&SliceSet>) {
-		match dst.dtype {
-			f32::dtype => {
-				if let Some(scale_storage) = scale_storage {
-					self.rms_norm_with_scale_storage_f::<f32>(&dst, &inp, eps, scale_storage);
-				} else {
-					self.rms_norm_f::<f32>(&dst, &inp, eps);
-				}
-			},
-			_ => todo!(),
-		}
-	}
-
 	fn gemm(&self, dst: &MatrixSet, dst_weight: f64, a: &MatrixSet, b: &MatrixSet, ab_weight: f64) {
 		match dst.slice_set.dtype {
 			f32::dtype => self.gemm_f::<f32>(&dst, dst_weight, &a, &b, ab_weight),

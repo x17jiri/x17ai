@@ -128,12 +128,13 @@ impl<const M: usize> MergeDims<M> for DD {
 		let old_slice = self.dims.as_slice();
 		let old_ndim = old_slice.len();
 		if old_ndim < M {
-			cold_path();
 			#[inline(never)]
 			fn err_merge_too_many_dims(m: usize, old_ndim: usize) -> Result<DD> {
 				Err(format!("Cannot merge {m} dimensions in a tensor with {old_ndim} dimensions.",)
-					.into())
+				.into())
 			}
+
+			cold_path();
 			return err_merge_too_many_dims(M, old_ndim);
 		}
 		let n_keep = old_ndim - M;

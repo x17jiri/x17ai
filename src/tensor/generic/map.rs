@@ -116,10 +116,10 @@ impl StrideCounter {
 		if likely(size != 0) {
 			let Some(e) = self.nonzero_elems.checked_mul(size) else {
 				#[cold]
-				fn err_overflow(size: usize, elems: usize) -> crate::Error {
+				fn err_overflow() -> crate::Error {
 					"overflow when initializing strides - too many elements".into()
 				}
-				return Err(err_overflow(size, self.nonzero_elems));
+				return Err(err_overflow());
 			};
 			self.nonzero_elems = e;
 		}

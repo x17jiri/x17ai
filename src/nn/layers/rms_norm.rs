@@ -26,6 +26,7 @@ pub enum RMSNormGradientMode {
 
 pub struct RMSNorm {
 	shape: [usize; 1],
+	sum_to_mean: f64,
 	eps: f64,
 	gradient_mode: RMSNormGradientMode,
 }
@@ -34,6 +35,7 @@ impl RMSNorm {
 	pub fn new(n_inputs: usize, eps: f64) -> Self {
 		Self {
 			shape: [n_inputs],
+			sum_to_mean: 1.0 / n_inputs.lossy_into(),
 			eps,
 			gradient_mode: RMSNormGradientMode::Precise,
 		}
@@ -59,7 +61,9 @@ impl Layer for RMSNorm {
 
 	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Result<Tensor> {
 		let scale = inp.new_replace_tail(1, &[1])?;
-		scale.assign((&inp * &inp).sum().rsqrt(self.eps))?;
+		let sum_square = (&inp * &inp).sum();
+		let mean_square = sum_square * self.sum_to_mean;
+		scale.assign(mean_square.rsqrt(self.eps))?;
 
 		let out = inp.reuse_or_new_like()?;
 		out.assign(&inp * &scale)?;
@@ -82,19 +86,22 @@ impl Layer for RMSNorm {
 				let [out, scale] = ctx.tensors.get();
 
 				let g = scale.new_empty_like()?; // [..., 1]
-				g.assign((&out * &d_out).sum() * (1.0 / self.shape[0].lossy_into()))?;
+				g.assign((&out * &d_out).sum() * self.sum_to_mean)?;
 
-				let d_inp = d_out.reuse_or_new_like()?;
+				let d_inp = out.reuse_or_new_like()?;
 
 				// TODO - could we merge `mul, sub, mul` into a single kernel?
-				d_inp.assign(&d_out - (&out * &g))?;
+				d_inp.assign(&out * &g)?;
+				d_inp.assign(&d_out - &d_inp)?;
 				d_inp.assign(&d_inp * &scale)?;
 
 				Ok(d_inp)
 			},
 			RMSNormGradientMode::NormGradients => {
 				let scale = d_out.new_replace_tail(1, &[1])?;
-				scale.assign((&d_out * &d_out).sum().rsqrt(self.eps))?;
+				let sum_square = (&d_out * &d_out).sum();
+				let mean_square = sum_square * self.sum_to_mean;
+				scale.assign(mean_square.rsqrt(self.eps))?;
 
 				let d_inp = d_out.reuse_or_new_like()?;
 				d_inp.assign(&d_out * &scale)?;

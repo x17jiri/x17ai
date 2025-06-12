@@ -85,7 +85,7 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		Ok(Tensor { buf: self.buf, map: new_map })
 	}
 
-	pub fn iter_along_axis<D: DimIndex>(&self, dim: D) -> AxisIter<M, B>
+	pub fn iter_along_axis<D: DimIndex>(&self, dim: D) -> AxisIter<'_, M, B>
 	where
 		M: Select,
 	{

@@ -340,6 +340,7 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 	}
 }
 
+// TODO - delete
 #[inline(never)]
 fn xyz(a: &SliceBatch) {
 	println!("hello world. offset = {}", a.map.offset);
