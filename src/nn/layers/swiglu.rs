@@ -8,10 +8,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::Result;
 use crate::nn::eval_context::EvalContext;
 use crate::nn::param::Param;
-use crate::tensor::math::Savable;
-use crate::tensor::{self, Tensor};
+use crate::tensor::{Tensor, math};
 
 use super::Layer;
 
@@ -21,8 +21,8 @@ pub struct SwiGLU {
 }
 
 impl SwiGLU {
-	pub fn new(n_outputs: usize) -> SwiGLU {
-		SwiGLU {
+	pub fn new(n_outputs: usize) -> Self {
+		Self {
 			input_shape: [2, n_outputs],
 			output_shape: [n_outputs],
 		}
@@ -46,37 +46,39 @@ impl Layer for SwiGLU {
 		// no parameters to collect
 	}
 
-	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Tensor {
-		let out = inp.new_replace_tail(2, &self.output_shape);
-		let lin = inp.clone().select(-2, 0);
-		let gate = inp.select(-2, 1);
+	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Result<Tensor> {
+		let out = inp.new_replace_tail(2, &self.output_shape)?;
+		let lin = inp.select(-2, 0)?;
+		let gate = inp.select(-2, 1)?;
 
-		tensor::math::swiglu(&lin, &gate).save_to(&out);
+		out.assign(math::swiglu(&lin, &gate))?;
 
 		if ctx.is_training() {
 			ctx.tensors.set([lin, gate]);
 		}
 
-		out
+		Ok(out)
 	}
 
-	fn randomize(&mut self) {
+	fn randomize(&mut self) -> Result<()> {
 		// no parameters to randomize
+		Ok(())
 	}
 
-	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Tensor {
+	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Result<Tensor> {
 		let [lin, gate] = ctx.tensors.get();
 
-		let d_inp = d_out.new_replace_tail(1, &self.input_shape);
-		let d_lin = d_inp.clone().slice(-2, 0..1).merge_dims::<2>();
-		let d_gate = d_inp.clone().slice(-2, 1..2).merge_dims::<2>();
+		let d_inp = d_out.new_replace_tail(1, &self.input_shape)?;
+		let d_lin = d_inp.select(-2, 0)?;
+		let d_gate = d_inp.select(-2, 1)?;
 
-		tensor::math::swiglu_backward(&d_out, &lin, &gate).save_to(&d_lin, &d_gate);
+		math::swiglu_backward(&d_out, &lin, &gate).eval_to_tensors(&d_lin, &d_gate)?;
 
-		d_inp
+		Ok(d_inp)
 	}
 
-	fn backward_finish(&self, _d_out: Tensor, _ctx: &mut EvalContext) {
+	fn backward_finish(&self, _d_out: Tensor, _ctx: &mut EvalContext) -> Result<()> {
 		// no parameters to update
+		Ok(())
 	}
 }

@@ -76,13 +76,13 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		Ok(Tensor { buf: self.buf, map: new_map })
 	}
 
-	pub fn select<D: DimIndex>(self, dim: D, index: usize) -> Result<Tensor<M::Output, B>>
+	pub fn select<D: DimIndex>(&self, dim: D, index: usize) -> Result<Tensor<M::Output, B>>
 	where
 		M: Select,
 	{
 		let dim = dim.resolve_index(self.ndim())?;
 		let new_map = self.map.select(dim, index)?;
-		Ok(Tensor { buf: self.buf, map: new_map })
+		Ok(Tensor { buf: self.buf.clone(), map: new_map })
 	}
 
 	pub fn iter_along_axis<D: DimIndex>(&self, dim: D) -> AxisIter<'_, M, B>

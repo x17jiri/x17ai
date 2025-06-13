@@ -40,6 +40,14 @@ impl RMSNorm {
 			gradient_mode: RMSNormGradientMode::Precise,
 		}
 	}
+
+	pub fn calc_scale(&self, inp: &Tensor) -> Result<Tensor> {
+		let scale = inp.new_replace_tail(1, &[1])?;
+		let sum_square = (inp * inp).sum();
+		let mean_square = sum_square * self.sum_to_mean;
+		scale.assign(mean_square.rsqrt(self.eps))?;
+		Ok(scale)
+	}
 }
 
 impl Layer for RMSNorm {
@@ -60,10 +68,7 @@ impl Layer for RMSNorm {
 	}
 
 	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Result<Tensor> {
-		let scale = inp.new_replace_tail(1, &[1])?;
-		let sum_square = (&inp * &inp).sum();
-		let mean_square = sum_square * self.sum_to_mean;
-		scale.assign(mean_square.rsqrt(self.eps))?;
+		let scale = self.calc_scale(&inp)?;
 
 		let out = inp.reuse_or_new_like()?;
 		out.assign(&inp * &scale)?;
@@ -98,10 +103,7 @@ impl Layer for RMSNorm {
 				Ok(d_inp)
 			},
 			RMSNormGradientMode::NormGradients => {
-				let scale = d_out.new_replace_tail(1, &[1])?;
-				let sum_square = (&d_out * &d_out).sum();
-				let mean_square = sum_square * self.sum_to_mean;
-				scale.assign(mean_square.rsqrt(self.eps))?;
+				let scale = self.calc_scale(&d_out)?;
 
 				let d_inp = d_out.reuse_or_new_like()?;
 				d_inp.assign(&d_out * &scale)?;

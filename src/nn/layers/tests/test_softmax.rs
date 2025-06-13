@@ -42,6 +42,9 @@ fn test_softmax() {
 	let mut ctx = EvalContext::new(true);
 	let out = softmax.forward(inp, &mut ctx).unwrap();
 
+	println!("out = {}", out.view::<f32>().unwrap());
+	println!("expected_out = {}", expected_out.view::<f32>().unwrap());
+
 	assert!(approx_eq(&out, &expected_out, 1e-4).unwrap());
 
 	#[rustfmt::skip] let d_out = Tensor::literal_factory::<f32>(dev.clone()).new_2d(

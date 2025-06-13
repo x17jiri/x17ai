@@ -8,10 +8,12 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::Result;
 use crate::nn::eval_context::EvalContext;
 use crate::nn::param::Param;
-use crate::tensor::math::Savable;
-use crate::tensor::{self, Tensor};
+use crate::tensor::Tensor;
+use crate::tensor::math::{LnClamped, sum_all};
+use crate::util::LossyInto;
 
 use super::{Layer, LossFunction, Softmax, SoftmaxGradientMode};
 
@@ -20,10 +22,12 @@ pub struct SoftmaxCrossEntropy {
 }
 
 impl SoftmaxCrossEntropy {
-	pub fn new(n_inputs: usize) -> SoftmaxCrossEntropy {
+	pub fn new(n_inputs: usize) -> Self {
 		let mut softmax = Softmax::new(n_inputs);
+		// Set the gradient mode to StraightThrough so that the forward pass
+		// doesn't cache its output
 		softmax.set_gradient_mode(SoftmaxGradientMode::StraightThrough);
-		SoftmaxCrossEntropy { softmax }
+		Self { softmax }
 	}
 }
 
@@ -44,19 +48,19 @@ impl Layer for SoftmaxCrossEntropy {
 		self.softmax.collect_named_params(prefix, f);
 	}
 
-	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Tensor {
+	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Result<Tensor> {
 		self.softmax.forward(inp, ctx)
 	}
 
-	fn randomize(&mut self) {
-		self.softmax.randomize();
+	fn randomize(&mut self) -> Result<()> {
+		self.softmax.randomize()
 	}
 
-	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Tensor {
+	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Result<Tensor> {
 		self.softmax.backward(d_out, ctx)
 	}
 
-	fn backward_finish(&self, d_out: Tensor, ctx: &mut EvalContext) {
+	fn backward_finish(&self, d_out: Tensor, ctx: &mut EvalContext) -> Result<()> {
 		self.softmax.backward_finish(d_out, ctx)
 	}
 
@@ -66,17 +70,23 @@ impl Layer for SoftmaxCrossEntropy {
 }
 
 impl LossFunction for SoftmaxCrossEntropy {
-	fn backward_start(&self, out: Tensor, expected_out: Tensor, _ctx: &mut EvalContext) -> Tensor {
-		let d_inp = out.new_empty_like();
-		tensor::math::sub(&out, &expected_out).save_to(&d_inp);
-		d_inp
+	fn backward_start(
+		&self, out: Tensor, expected_out: Tensor, _ctx: &mut EvalContext,
+	) -> Result<Tensor> {
+		let d_inp = out.new_empty_like()?;
+		d_inp.assign(&out - &expected_out)?;
+		Ok(d_inp)
 	}
 
-	fn loss(&self, out: Tensor, expected_out: Tensor) -> f64 {
-		let tmp = out.new_empty_like();
-		tensor::math::log_clamped(&out).save_to(&tmp);
-		tensor::math::mul(&tmp, &expected_out).save_to(&tmp);
+	fn loss(&self, out: Tensor, expected_out: Tensor) -> Result<f64> {
+		// Remove the feature dimension (-1). All other dimensions are batch dimensions,
+		// so `elems()` will give us the batch size.
+		let batch_size = out.select(-1, 0)?.elems();
 
-		tensor::math::sum_all(&tmp) / -(tmp.batch_size(1) as f64)
+		let tmp = out.new_empty_like()?;
+		tmp.assign(out.ln_clamped())?;
+		tmp.assign(&tmp * &expected_out)?;
+
+		Ok(sum_all(&tmp)? / -batch_size.lossy_into())
 	}
 }

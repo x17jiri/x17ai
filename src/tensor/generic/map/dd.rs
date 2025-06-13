@@ -64,7 +64,7 @@ impl DD {
 		&self, tail_len: usize, replace_with: &[usize],
 	) -> Result<(Self, usize)> {
 		let src_slice = self.dims.as_slice();
-		let Some(n_keep) = src_slice.len().checked_sub(tail_len) else {
+		if tail_len > src_slice.len() {
 			#[cold]
 			fn err_tail_len_out_of_bounds(tail_len: usize, ndim: usize) -> Result<(DD, usize)> {
 				Err(format!(
@@ -74,18 +74,19 @@ impl DD {
 			}
 			return err_tail_len_out_of_bounds(tail_len, src_slice.len());
 		};
-		let src_slice = &src_slice[..n_keep];
+		let n_keep = src_slice.len() - tail_len;
+		let src_slice = unsafe { &src_slice.get_unchecked(..n_keep) };
 		let ndim = n_keep + replace_with.len();
 
 		let mut dims = DimVecBuilder::new(ndim);
 		let slice = dims.as_slice_mut();
 
 		let mut stride_counter = StrideCounter::new();
-		let second_part = &mut slice[n_keep..];
+		let second_part = unsafe { slice.get_unchecked_mut(n_keep..) };
 		for (dim, &size) in second_part.iter_mut().zip(replace_with.iter()).rev() {
 			dim.write(stride_counter.prepend_dim(size)?);
 		}
-		let first_part = &mut slice[..n_keep];
+		let first_part = unsafe { slice.get_unchecked_mut(..n_keep) };
 		for (dim, src_dim) in first_part.iter_mut().zip(src_slice.iter()).rev() {
 			dim.write(stride_counter.prepend_dim(src_dim.size)?);
 		}
@@ -131,7 +132,7 @@ impl<const M: usize> MergeDims<M> for DD {
 			#[inline(never)]
 			fn err_merge_too_many_dims(m: usize, old_ndim: usize) -> Result<DD> {
 				Err(format!("Cannot merge {m} dimensions in a tensor with {old_ndim} dimensions.",)
-				.into())
+					.into())
 			}
 
 			cold_path();

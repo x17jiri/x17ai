@@ -160,6 +160,21 @@ impl<T: HasDType> TensorLiteralFactory<T> {
 
 		Ok(tensor)
 	}
+
+	#[inline(never)]
+	pub fn new_3d<const Z: usize, const Y: usize, const X: usize>(
+		&self, value: &[[[T; X]; Y]; Z],
+	) -> Result<Tensor> {
+		let tensor = Tensor::new_empty_on(&[Z, Y, X], T::dtype, self.device.clone())?;
+
+		let val_ptr = value.as_ptr() as *const u8;
+		let val_len = Z * Y * X * std::mem::size_of::<T>();
+		let val = unsafe { std::slice::from_raw_parts(val_ptr, val_len) };
+		let mut reader = std::io::Cursor::new(val);
+		io::read_bin(&tensor, &mut reader)?;
+
+		Ok(tensor)
+	}
 }
 
 #[cfg(false)]
@@ -244,31 +259,6 @@ impl Tensor {
 	}
 	*/
 
-	pub fn batch_size(&self, non_batch_dims: usize) -> usize {
-		let batch_dims =
-			self.dims.len().checked_sub(non_batch_dims).expect("not enough dimensions");
-		self.dims[..batch_dims].iter().map(|dim| dim.size).product()
-	}
-
-	pub fn transposed<D1: DimIndex, D2: DimIndex>(mut self, dim1: D1, dim2: D2) -> Tensor {
-		let ndim = self.ndim();
-		let dim1 = dim1.resolve(ndim);
-		let dim2 = dim2.resolve(ndim);
-		self.dims.swap(dim1, dim2);
-		self
-	}
-
-	pub fn slice<D: DimIndex>(mut self, dim: D, range: std::ops::Range<usize>) -> Tensor {
-		let ndim = self.ndim();
-		let dim = dim.resolve(ndim);
-		let dim = &mut self.dims[dim];
-		assert!(range.start <= range.end, "invalid range");
-		assert!(range.end <= dim.size, "invalid range");
-		dim.size = range.end - range.start;
-		self.offset += range.start * dim.stride;
-		self
-	}
-
 	pub fn read_bin(&self, reader: &mut dyn std::io::Read) -> std::io::Result<()> {
 		io::read_bin(self, reader)
 	}
@@ -283,54 +273,6 @@ impl Tensor {
 
 	pub fn write_file<P: AsRef<std::path::Path>>(&self, path: P) -> std::io::Result<()> {
 		io::write_file(self, path)
-	}
-
-	#[inline(never)]
-	pub fn new_debug_1d<T: HasDType>(device: Rc<dyn Device>, value: io::DebugData1D<T>) -> Tensor {
-		let (x,) = value.shape();
-		let tensor = Self::new_empty_on(&[x], T::dtype, device);
-		tensor.fill_debug_1d(value);
-		tensor
-	}
-
-	#[inline(never)]
-	pub fn new_debug_2d<T: HasDType>(device: Rc<dyn Device>, value: io::DebugData2D<T>) -> Tensor {
-		let (y, x) = value.shape();
-		let tensor = Self::new_empty_on(&[y, x], T::dtype, device);
-		tensor.fill_debug_2d(value);
-		tensor
-	}
-
-	#[inline(never)]
-	pub fn new_debug_3d<T: HasDType>(device: Rc<dyn Device>, value: io::DebugData3D<T>) -> Tensor {
-		let (z, y, x) = value.shape();
-		let tensor = Self::new_empty_on(&[z, y, x], T::dtype, device);
-		tensor.fill_debug_3d(value);
-		tensor
-	}
-
-	#[inline(never)]
-	pub fn fill_debug_2d<T: HasDType>(&self, value: io::DebugData2D<T>) {
-		let (y, x) = value.shape();
-		assert!(self.ndim() == 2, "fill_2d() can only be used on 2D tensors");
-		assert!(self.dims[0].size == y, "invalid size");
-		assert!(self.dims[1].size == x, "invalid size");
-		assert!(self.dtype == T::dtype, "invalid dtype");
-
-		let mut reader = value.into_read();
-		io::read_bin(self, &mut reader).expect("failed to fill 2D tensor");
-	}
-
-	#[inline(never)]
-	pub fn fill_debug_3d<T: HasDType>(&self, value: io::DebugData3D<T>) {
-		let (z, y, x) = value.shape();
-		assert!(self.ndim() == 3, "fill_3d() can only be used on 3D tensors");
-		assert!(self.dims[2].size == x, "invalid size");
-		assert!(self.dims[1].size == y, "invalid size");
-		assert!(self.dims[0].size == z, "invalid size");
-
-		let mut reader = value.into_read();
-		io::read_bin(self, &mut reader).expect("failed to fill 3D tensor");
 	}
 }
 

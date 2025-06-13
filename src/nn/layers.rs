@@ -11,10 +11,10 @@ use std::rc::Rc;
 //pub mod attention;
 //pub mod linear;
 pub mod rms_norm;
-//pub mod skip_connection;
+pub mod skip_connection;
 pub mod softmax;
-//pub mod softmax_cross_entropy;
-//pub mod swiglu;
+pub mod softmax_cross_entropy;
+pub mod swiglu;
 
 #[cfg(test)]
 mod tests;
@@ -25,10 +25,10 @@ use crate::tensor::Tensor;
 use super::{EvalContext, Param};
 
 //pub use linear::{Linear, MultiheadLinear};
-//pub use rms_norm::{RMSNorm, RMSNormGradientMode};
-//pub use softmax::{Softmax, SoftmaxGradientMode};
-//pub use softmax_cross_entropy::SoftmaxCrossEntropy;
-//pub use swiglu::SwiGLU;
+pub use rms_norm::{RMSNorm, RMSNormGradientMode};
+pub use softmax::{Softmax, SoftmaxGradientMode};
+pub use softmax_cross_entropy::SoftmaxCrossEntropy;
+pub use swiglu::SwiGLU;
 
 pub trait Layer {
 	fn input_shape(&self) -> &[usize];
@@ -69,7 +69,9 @@ pub trait LossFunction: Layer {
 	/// This function is similar to `backward()`, but instead of derivatives with respect to
 	/// the output, it takes expected value of the output.
 	// It would typically be used for the last layer in a model.
-	fn backward_start(&self, out: Tensor, expected_out: Tensor, ctx: &mut EvalContext) -> Tensor;
+	fn backward_start(
+		&self, out: Tensor, expected_out: Tensor, ctx: &mut EvalContext,
+	) -> Result<Tensor>;
 
-	fn loss(&self, out: Tensor, expected_out: Tensor) -> f64;
+	fn loss(&self, out: Tensor, expected_out: Tensor) -> Result<f64>;
 }
