@@ -8,6 +8,8 @@
 #![allow(non_snake_case)]
 #![feature(generic_const_exprs)]
 
+use safetensors;
+
 //use x17ai::nn::layers::{Layer, Linear, LossFunction, SoftmaxCrossEntropy};
 //use x17ai::nn::{EvalContext, ModelContext};
 //use x17ai::tensor::device::cpu::CPUDevice;

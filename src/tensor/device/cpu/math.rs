@@ -5,10 +5,6 @@
 //
 //------------------------------------------------------------------------------
 
-use std::cell::Cell;
-
-//--------------------------------------------------------------------------------------------------
-
 pub trait FromToF64: Copy {
 	const MIN: f64; // largest negative value of type
 
@@ -68,11 +64,11 @@ pub fn lerp(a: f64, b: f64, t: f64) -> f64 {
 	mul_add(t, b, mul_add(-t, a, a))
 }
 
-pub fn dot<T: Copy + FromToF64>(a: &[Cell<T>], b: &[Cell<T>]) -> f64 {
+pub fn dot<T: Copy + FromToF64>(a: &[T], b: &[T]) -> f64 {
 	let zip = a.iter().zip(b);
 	zip.fold(0.0, |acc, (a, b)| {
-		let a = a.get().to_f64();
-		let b = b.get().to_f64();
+		let a = a.to_f64();
+		let b = b.to_f64();
 		mul_add(a, b, acc)
 	})
 }
@@ -109,7 +105,7 @@ pub fn swiglu_backward(lin: f64, gate: f64, d_out: f64) -> (f64, f64) {
 }
 
 pub fn softmax_part1<T: Copy + FromToF64, S: Copy + FromToF64>(
-	inp: &[Cell<T>], scratch: &[Cell<S>],
+	inp: &[T], scratch: &mut [S],
 ) -> (f64, f64) {
 	// TODO
 	// - calculating `max` is one loop
@@ -117,14 +113,36 @@ pub fn softmax_part1<T: Copy + FromToF64, S: Copy + FromToF64>(
 	// - there are online algorithms for calculating `max` and `sum` simultaneously
 	// - would they be worth it?
 
-	let max: f64 = inp.iter().map(|x| x.get().to_f64()).fold(f64::MIN, f64::max);
+	let max: f64 = inp.iter().map(|x| x.to_f64()).fold(f64::MIN, f64::max);
 
 	let mut sum = 0.0;
 	for (i, s) in inp.iter().zip(scratch) {
-		let val = i.get().to_f64();
+		let val = i.to_f64();
 		let val = val - max;
 		let e = val.exp();
-		s.set(S::from_f64(e));
+		*s = S::from_f64(e);
+
+		sum += e;
+	}
+
+	(max, sum)
+}
+
+pub fn softmax_part1_<T: Copy + FromToF64>(inp: &mut [T]) -> (f64, f64) {
+	// TODO
+	// - calculating `max` is one loop
+	// - calculating `sum` is another loop
+	// - there are online algorithms for calculating `max` and `sum` simultaneously
+	// - would they be worth it?
+
+	let max: f64 = inp.iter().map(|x| x.to_f64()).fold(f64::MIN, f64::max);
+
+	let mut sum = 0.0;
+	for i in inp {
+		let val = i.to_f64();
+		let val = val - max;
+		let e = val.exp();
+		*i = T::from_f64(e);
 
 		sum += e;
 	}
@@ -133,7 +151,7 @@ pub fn softmax_part1<T: Copy + FromToF64, S: Copy + FromToF64>(
 }
 
 pub fn softmax_part2<S: Copy + FromToF64, T: Copy + FromToF64>(
-	scratch: &[Cell<S>], sum: f64, dst: &[Cell<T>],
+	scratch: &[S], sum: f64, dst: &mut [T],
 ) {
 	// NOTE:
 	// Subtracting max in part1 ensures at least one of the exponents
@@ -144,28 +162,40 @@ pub fn softmax_part2<S: Copy + FromToF64, T: Copy + FromToF64>(
 	let sum_recip = 1.0 / sum;
 
 	for (s, d) in scratch.iter().zip(dst) {
-		let val = s.get().to_f64() * sum_recip;
-		d.set(T::from_f64(val));
+		let val = s.to_f64() * sum_recip;
+		*d = T::from_f64(val);
 	}
 }
 
-pub fn softmax<T: Copy + FromToF64>(dst: &[Cell<T>], inp: &[Cell<T>]) {
-	// use `dst` as scratch space between part1 and part2
-	let scratch = dst;
-	let (_, sum) = softmax_part1(inp, scratch);
-	softmax_part2(scratch, sum, dst);
+pub fn softmax_part2_<T: Copy + FromToF64>(sum: f64, inp: &mut [T]) {
+	// NOTE:
+	// Subtracting max in part1 ensures at least one of the exponents
+	// is `exp(max - max) == 1.0`. So sum will be >= 1.0 and division by zero
+	// is impossible.
+	// This could only fail if all inputs are `-inf` or at least one input is `+inf`.
+	// In that case, `sum == nan` and so all outputs will be `nan`.
+	let sum_recip = 1.0 / sum;
+
+	for i in inp {
+		let val = i.to_f64() * sum_recip;
+		*i = T::from_f64(val);
+	}
 }
 
-pub fn softmax_backward<T: Copy + FromToF64>(
-	d_inp: &[Cell<T>], out: &[Cell<T>], d_out: &[Cell<T>],
-) {
+pub fn softmax_<T: Copy + FromToF64>(inp: &mut [T]) {
+	// use `dst` as scratch space between part1 and part2
+	let (_, sum) = softmax_part1_(inp);
+	softmax_part2_(sum, inp);
+}
+
+pub fn softmax_backward<T: Copy + FromToF64>(d_inp: &mut [T], out: &[T], d_out: &[T]) {
 	let g = dot(out, d_out);
-	for (d_i, (o, d_o)) in d_inp.iter().zip(out.iter().zip(d_out)) {
-		let o = o.get().to_f64();
-		let d_o = d_o.get().to_f64();
+	for (d_i, (o, d_o)) in d_inp.iter_mut().zip(out.iter().zip(d_out)) {
+		let o = o.to_f64();
+		let d_o = d_o.to_f64();
 
 		let v = (d_o - g) * o;
 
-		d_i.set(T::from_f64(v));
+		*d_i = T::from_f64(v);
 	}
 }

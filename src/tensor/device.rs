@@ -22,5 +22,5 @@ pub trait Device {
 
 	fn new_buffer(self: Rc<Self>, dtype: DType, elems: usize) -> Result<Rc<DeviceBuffer>>;
 
-	fn drop_buffer(self: Rc<Self>, dtype: DType, elems: usize, device_data: *mut u8);
+	unsafe fn drop_buffer(self: Rc<Self>, dtype: DType, elems: usize, device_data: *mut u8);
 }

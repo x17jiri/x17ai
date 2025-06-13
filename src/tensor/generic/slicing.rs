@@ -5,7 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
-use crate::util::array::concat_arrays;
+use crate::util::array;
 
 pub enum IndexOrRange {
 	Index(usize),

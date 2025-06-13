@@ -5,14 +5,15 @@
 //
 //------------------------------------------------------------------------------
 
-use std::cell::Cell;
 use std::rc::Rc;
 
 pub use device::{DType, Device, HasDType};
 
 use crate::Result;
+use crate::tensor::device::buffer::{BorrowError, DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::device::executor::Executor;
+use crate::tensor::generic::map::DD;
 use crate::tensor::math::EvaluatesToTensor;
 
 pub mod batch;
@@ -28,24 +29,56 @@ mod tests;
 //--------------------------------------------------------------------------------------------------
 
 impl<M: generic::map::Map> generic::Tensor<M, Rc<device::DeviceBuffer>> {
-	/// Returns a "view" tensor which has a slice `&[Cell<T>]` as its buffer.
-	///
-	/// # Errors
-	/// If the buffer's dtype does not match `T` or if the buffer is not on CPU device.
-	pub fn view<T: HasDType>(&self) -> Result<generic::Tensor<M, &[Cell<T>]>> {
-		let buf = CPUDevice::view(self.buf.as_ref())?;
+	pub fn borrow(
+		&self,
+	) -> std::result::Result<generic::Tensor<M, DeviceBufferRef<'_>>, BorrowError> {
+		let buf = self.buf.try_borrow()?;
+		let map = self.map.clone();
+		Ok(generic::Tensor { map, buf })
+	}
+
+	pub fn borrow_mut(
+		&self,
+	) -> std::result::Result<generic::Tensor<M, DeviceBufferRefMut<'_>>, BorrowError> {
+		let buf = self.buf.try_borrow_mut()?;
 		let map = self.map.clone();
 		Ok(generic::Tensor { map, buf })
 	}
 }
 
 impl<M: generic::map::Map> generic::Tensor<M, &device::DeviceBuffer> {
-	/// Returns a "view" tensor which has a slice `&[Cell<T>]` as its buffer.
+	pub fn borrow(
+		&self,
+	) -> std::result::Result<generic::Tensor<M, DeviceBufferRef<'_>>, BorrowError> {
+		let buf = self.buf.try_borrow()?;
+		let map = self.map.clone();
+		Ok(generic::Tensor { map, buf })
+	}
+
+	pub fn borrow_mut(
+		&self,
+	) -> std::result::Result<generic::Tensor<M, DeviceBufferRefMut<'_>>, BorrowError> {
+		let buf = self.buf.try_borrow_mut()?;
+		let map = self.map.clone();
+		Ok(generic::Tensor { map, buf })
+	}
+}
+
+impl<'a, M: generic::map::Map> generic::Tensor<M, DeviceBufferRef<'a>> {
+	/// Returns a "view" tensor which has a slice `&[T]` as its buffer.
 	///
 	/// # Errors
 	/// If the buffer's dtype does not match `T` or if the buffer is not on CPU device.
-	pub fn view<T: HasDType>(&self) -> Result<generic::Tensor<M, &[Cell<T>]>> {
-		let buf = CPUDevice::view(self.buf)?;
+	pub fn view<T: HasDType>(&self) -> Result<generic::Tensor<M, &[T]>> {
+		let buf = CPUDevice::view(&self.buf)?;
+		let map = self.map.clone();
+		Ok(generic::Tensor { map, buf })
+	}
+}
+
+impl<'a, M: generic::map::Map> generic::Tensor<M, DeviceBufferRefMut<'a>> {
+	pub fn view_mut<T: HasDType>(&self) -> Result<generic::Tensor<M, &mut [T]>> {
+		let buf = CPUDevice::view_mut(&self.buf)?;
 		let map = self.map.clone();
 		Ok(generic::Tensor { map, buf })
 	}
@@ -53,12 +86,12 @@ impl<M: generic::map::Map> generic::Tensor<M, &device::DeviceBuffer> {
 
 //--------------------------------------------------------------------------------------------------
 
-pub type Tensor = generic::Tensor<generic::map::DD, Rc<device::DeviceBuffer>>;
+pub type Tensor = generic::Tensor<DD, Rc<device::DeviceBuffer>>;
 
 impl Tensor {
 	/// Allocate a new tensor on the provided device.
 	pub fn new_empty_on(shape: &[usize], dtype: DType, device: Rc<dyn Device>) -> Result<Tensor> {
-		let (map, elems) = generic::map::DD::new(shape)?;
+		let (map, elems) = DD::new(shape)?;
 		let buf = device.new_buffer(dtype, elems)?;
 		Ok(Tensor { map, buf })
 	}

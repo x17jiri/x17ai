@@ -5,8 +5,6 @@
 //
 //------------------------------------------------------------------------------
 
-use std::cell::Cell;
-
 use crate::Result;
 use crate::tensor::device::cpu::math::FromToF64;
 use crate::tensor::generic;
@@ -237,15 +235,15 @@ pub mod file_header {
 //--------------------------------------------------------------------------------------------------
 
 fn fmt_0d<T: Copy>(
-	f: &mut std::fmt::Formatter, tensor: generic::Tensor<ND<0>, &[Cell<T>]>,
+	f: &mut std::fmt::Formatter, tensor: generic::Tensor<ND<0>, &[T]>,
 	mut fmt_one: impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
 ) -> std::fmt::Result {
-	fmt_one(f, tensor[[]].get())?;
+	fmt_one(f, tensor[[]])?;
 	Ok(())
 }
 
 fn fmt_1d<T: Copy>(
-	f: &mut std::fmt::Formatter, tensor: generic::Tensor<ND<1>, &[Cell<T>]>,
+	f: &mut std::fmt::Formatter, tensor: generic::Tensor<ND<1>, &[T]>,
 	mut fmt_one: impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
 ) -> std::fmt::Result {
 	write!(f, "[")?;
@@ -256,14 +254,14 @@ fn fmt_1d<T: Copy>(
 		}
 		first = false;
 
-		fmt_one(f, elem[[]].get())?;
+		fmt_one(f, elem[[]])?;
 	}
 	write!(f, "]")?;
 	Ok(())
 }
 
 fn fmt_Nd<T: Copy>(
-	f: &mut std::fmt::Formatter, tensor: &generic::Tensor<DD, &[Cell<T>]>, indent: usize,
+	f: &mut std::fmt::Formatter, tensor: &generic::Tensor<DD, &[T]>, indent: usize,
 	fmt_one: &mut impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
 ) -> std::fmt::Result {
 	match tensor.ndim() {
@@ -297,7 +295,7 @@ fn fmt_one<T: FromToF64>(f: &mut std::fmt::Formatter, val: T) -> std::fmt::Resul
 	write!(f, "{val:.7}")
 }
 
-impl<T: FromToF64> std::fmt::Display for generic::Tensor<DD, &[Cell<T>]> {
+impl<T: FromToF64> std::fmt::Display for generic::Tensor<DD, &[T]> {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		write!(f, "Tensor(")?;
 		fmt_Nd(f, self, 0, &mut fmt_one)?;

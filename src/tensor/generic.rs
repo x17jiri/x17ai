@@ -79,6 +79,7 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 	pub fn select<D: DimIndex>(&self, dim: D, index: usize) -> Result<Tensor<M::Output, B>>
 	where
 		M: Select,
+		B: Clone,
 	{
 		let dim = dim.resolve_index(self.ndim())?;
 		let new_map = self.map.select(dim, index)?;
@@ -88,6 +89,7 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 	pub fn iter_along_axis<D: DimIndex>(&self, dim: D) -> AxisIter<'_, M, B>
 	where
 		M: Select,
+		B: Clone,
 	{
 		let dim = dim.resolve_index(self.ndim()).unwrap();
 		let size = self.size(dim).unwrap();
@@ -129,9 +131,33 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 	where
 		NewMap: Map + TryFrom<&'a M>,
 		NewMap::Error: Into<crate::Error>,
+		B: Clone,
 	{
 		let map = NewMap::try_from(&self.map)?;
 		Ok(Tensor { map, buf: self.buf.clone() })
+	}
+
+	pub fn is_contiguous(&self) -> bool {
+		self.map.is_contiguous()
+	}
+
+	/// # Errors
+	/// - If the map is not safe, i.e., if some index may be mapped to an out-of-bounds offset.
+	pub fn ensure_safe(&self) -> Result<()> {
+		let span = self.map.span();
+		let buf_len = self.buf.len();
+		let safe = span.start <= span.end && span.end <= buf_len;
+		if !safe {
+			#[cold]
+			fn err_map_not_safe(span: std::ops::Range<usize>, buf_len: usize) -> Error {
+				format!(
+					"Tensor map is not safe: span {span:?} is out of bounds for buffer of length {buf_len}.",
+				)
+				.into()
+			}
+			return Err(err_map_not_safe(span, buf_len));
+		}
+		Ok(())
 	}
 }
 
@@ -191,41 +217,18 @@ impl<'a, M: Map, T> Tensor<M, &'a [T]> {
 		let span = self.map.span();
 		self.buf.get_unchecked(span)
 	}
-
-	pub fn is_contiguous(&self) -> bool {
-		self.map.is_contiguous()
-	}
-
-	/// # Errors
-	/// - If the map is not safe, i.e., if some index may be mapped to an out-of-bounds offset.
-	pub fn ensure_safe(&self) -> Result<()> {
-		let span = self.map.span();
-		let buf_len = self.buf.len();
-		let safe = span.start <= span.end && span.end <= buf_len;
-		if !safe {
-			#[cold]
-			fn err_map_not_safe(span: std::ops::Range<usize>, buf_len: usize) -> Error {
-				format!(
-					"Tensor map is not safe: span {span:?} is out of bounds for buffer of length {buf_len}.",
-				)
-				.into()
-			}
-			return Err(err_map_not_safe(span, buf_len));
-		}
-		Ok(())
-	}
 }
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct AxisIter<'a, M: Map + Select, B: Buffer> {
+pub struct AxisIter<'a, M: Map + Select, B: Buffer + Clone> {
 	tensor: &'a Tensor<M, B>,
 	dim: usize,
 	current: usize,
 	size: usize,
 }
 
-impl<'a, M: Map + Select, B: Buffer> Iterator for AxisIter<'a, M, B> {
+impl<M: Map + Select, B: Buffer + Clone> Iterator for AxisIter<'_, M, B> {
 	type Item = Tensor<M::Output, B>;
 
 	fn next(&mut self) -> Option<Self::Item> {
@@ -241,7 +244,7 @@ impl<'a, M: Map + Select, B: Buffer> Iterator for AxisIter<'a, M, B> {
 	}
 }
 
-impl<'a, M: Map + Select, B: Buffer> ExactSizeIterator for AxisIter<'a, M, B> {
+impl<M: Map + Select, B: Buffer + Clone> ExactSizeIterator for AxisIter<'_, M, B> {
 	fn len(&self) -> usize {
 		self.size - self.current
 	}

@@ -16,7 +16,7 @@ use crate::tensor::generic::map::{
 	NDShape, Narrow, Select, StrideCounter, StrideCounterUnchecked, merge_dims,
 };
 use crate::tensor::generic::universal_range::UniversalRange;
-use crate::util::array::{try_array_from_iter, try_map_backward};
+use crate::util::array;
 use crate::{Error, Result};
 
 #[derive(Clone, Copy)]
@@ -28,7 +28,7 @@ pub struct ND<const N: usize> {
 impl<const N: usize> ND<N> {
 	pub fn new(shape: &[usize; N]) -> Result<(Self, usize)> {
 		let mut stride_counter = StrideCounter::new();
-		let dims = try_map_backward(shape, |_, &size| stride_counter.prepend_dim(size))?;
+		let dims = array::try_map_backward(shape, |_, &size| stride_counter.prepend_dim(size))?;
 		let elems = stride_counter.elems();
 		Ok((Self { dims, offset: 0 }, elems))
 	}
@@ -57,7 +57,7 @@ impl<const N: usize> TryFrom<&DD> for ND<N> {
 
 	fn try_from(dd: &DD) -> std::result::Result<Self, TryNDFromDDError> {
 		let dd_slice = dd.dims.as_slice();
-		let Some(dims) = try_array_from_iter(dd_slice.iter().copied()) else {
+		let Some(dims) = array::try_from_iter(dd_slice.iter().copied()) else {
 			cold_path();
 			return Err(TryNDFromDDError { nd_dims: N, dd_dims: dd.dims.len() });
 		};

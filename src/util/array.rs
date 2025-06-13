@@ -25,9 +25,7 @@ pub fn try_map_into<const N: usize, T, U, E>(
 	Ok(unsafe { MaybeUninit::array_assume_init(u) })
 }
 
-pub fn map_borrowed<const N: usize, T, U>(
-	array: &[T; N], mut f: impl FnMut(usize, &T) -> U,
-) -> [U; N] {
+pub fn map<const N: usize, T, U>(array: &[T; N], mut f: impl FnMut(usize, &T) -> U) -> [U; N] {
 	let mut u = [const { MaybeUninit::uninit() }; N];
 	for i in 0..N {
 		u[i].write(f(i, &array[i]));
@@ -35,7 +33,7 @@ pub fn map_borrowed<const N: usize, T, U>(
 	unsafe { MaybeUninit::array_assume_init(u) }
 }
 
-pub fn try_map_borrowed<const N: usize, T, U, E>(
+pub fn try_map<const N: usize, T, U, E>(
 	array: &[T; N], mut f: impl FnMut(usize, &T) -> Result<U, E>,
 ) -> Result<[U; N], E> {
 	let mut u = [const { MaybeUninit::uninit() }; N];
@@ -45,7 +43,7 @@ pub fn try_map_borrowed<const N: usize, T, U, E>(
 	Ok(unsafe { MaybeUninit::array_assume_init(u) })
 }
 
-pub fn try_array_from_iter<const N: usize, T, I>(iter: I) -> Option<[T; N]>
+pub fn try_from_iter<const N: usize, T, I>(iter: I) -> Option<[T; N]>
 where
 	I: IntoIterator<Item = T, IntoIter: ExactSizeIterator + Sized>,
 {

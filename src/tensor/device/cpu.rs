@@ -12,6 +12,7 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 
 use crate::tensor::HasDType;
+use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
 use crate::{Error, Result};
 
 pub mod float_executor;
@@ -77,24 +78,6 @@ impl<'a, T> View3D<'a, T> {
 	}
 }
 
-#[derive(Copy, Clone)]
-struct CPUSliceSet<'a, T> {
-	buffer: &'a [Cell<T>],
-	len: usize,
-	count: usize,
-	stride: usize,
-}
-
-impl<'a, T> CPUSliceSet<'a, T> {
-	unsafe fn get_unchecked(&self, i: usize) -> &'a [Cell<T>] {
-		debug_assert!(i < self.count);
-		let begin = i * self.stride;
-		let end = begin + self.len;
-		debug_assert!(end <= self.buffer.len());
-		unsafe { self.buffer.get_unchecked(begin..end) }
-	}
-}
-
 //--------------------------------------------------------------------------------------------------
 
 pub struct CPUDevice {
@@ -118,11 +101,7 @@ impl CPUDevice {
 		})
 	}
 
-	/// Returns a slice view of the buffer on CPU device.
-	///
-	/// # Errors
-	/// If the buffer's dtype does not match `T` or if the buffer is not on CPU device.
-	pub fn view<T: HasDType>(buf: &DeviceBuffer) -> Result<&[Cell<T>]> {
+	pub fn ensure_can_view<'a, T: HasDType>(buf: &DeviceBuffer) -> Result<()> {
 		if buf.dtype != T::dtype {
 			#[cold]
 			fn err_view_invalid_dtype(buf_dtype: DType, T_dtype: DType) -> Error {
@@ -138,30 +117,28 @@ impl CPUDevice {
 			}
 			return Err(err_view_not_cpu_buffer());
 		}
-
-		let elems = buf.elems;
-		Ok(unsafe { std::slice::from_raw_parts(buf.device_data as *const Cell<T>, elems) })
+		Ok(())
 	}
+
+	/// Returns a slice view of the buffer on CPU device.
+	///
+	/// # Errors
+	/// If the buffer's dtype does not match `T` or if the buffer is not on CPU device.
+	pub fn view<'a, T: HasDType>(buf: &DeviceBufferRef<'a>) -> Result<&'a [T]> {
+		Self::ensure_can_view::<T>(buf)?;
+		let data = buf.device_data;
+		let elems = buf.elems;
+		Ok(unsafe { std::slice::from_raw_parts(data.cast(), elems) })
+	}
+
+	pub fn view_mut<'a, T: HasDType>(buf: &DeviceBufferRefMut<'a>) -> Result<&'a mut [T]> {
+		Self::ensure_can_view::<T>(buf)?;
+		let data = buf.device_data;
+		let elems = buf.elems;
+		Ok(unsafe { std::slice::from_raw_parts_mut(data.cast(), elems) })
+	}
+
 	/*
-		#[inline(never)]
-		fn rms_norm_with_scale_storage_f<'a, T: Copy + HasDType + FromToF64>(
-			&self, dst: &SliceSet<'a>, inp: &SliceSet<'a>, eps: f64, scale_storage: &SliceSet<'a>,
-		) {
-			let len = dst.len;
-			let len_recip = 1.0 / (len as f64);
-			assert!(inp.len == len);
-			assert!(scale_storage.len == 1);
-
-			self.array_wise::<T, 3>([dst, inp, scale_storage], |[dst_arr, inp_arr, sc]| {
-				let scale = math::rsqrt(math::dot(inp_arr, inp_arr) * len_recip + eps);
-				sc[0].set(T::from_f64(scale));
-				for (d, i) in dst_arr.iter().zip(inp_arr) {
-					let val = i.get().to_f64() * scale;
-					d.set(T::from_f64(val));
-				}
-			});
-		}
-
 		#[inline(never)]
 		fn gemm_f<'a, T: Copy + HasDType + FromToF64>(
 			&self, c: &MatrixSet<'a>, dst_weight: f64, a: &MatrixSet<'a>, b: &MatrixSet<'a>,
@@ -481,10 +458,11 @@ impl Device for CPUDevice {
 			device_data: memory.as_ptr(),
 			device: ManuallyDrop::new(self.clone()),
 			device_is_cpu: true,
+			borrow_count: Cell::new(0),
 		}))
 	}
 
-	fn drop_buffer(self: Rc<Self>, dtype: DType, elems: usize, device_data: *mut u8) {
+	unsafe fn drop_buffer(self: Rc<Self>, dtype: DType, elems: usize, device_data: *mut u8) {
 		let align = dtype.bytes().min(1);
 		let size = dtype.array_bytes(elems).unwrap();
 		let layout = std::alloc::Layout::from_size_align(size, align).unwrap();

@@ -12,7 +12,7 @@ use crate::Result;
 use crate::tensor::HasDType;
 use crate::tensor::device::cpu::zip::{reduce_zip_n, vec_zip_n};
 use crate::tensor::device::executor::{Executor, MatrixBatch, SliceBatch, ensure_same_shape};
-use crate::util::array::try_map_borrowed;
+use crate::util::array;
 
 use super::math::{self, FromToF64};
 use super::rng::Rng;
@@ -32,8 +32,11 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 
 	/// # Errors
 	/// - If 'dst' doesn't have a safe map.
-	pub fn nullary(dst: &SliceBatch, f: impl FnMut(&Cell<T>)) -> Result<()> {
-		let dst = CPUInput::new_safe_contiguous(dst)?;
+	pub fn nullary(dst: &SliceBatch, f: impl FnMut() -> T) -> Result<()> {
+		dst.ensure_safe()?; /////////// ensure it has a safe map
+		let dst = dst.borrow_mut()?; // make sure is mutable
+		let dst = dst.view_mut()?; //// make sure is on CPU and has the right DType
+		let dst = CPUInput::new_safe_contiguous(&dst)?;
 		unsafe {
 			zip1(dst, f);
 		}
@@ -93,7 +96,7 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 		t: [&SliceBatch; N], f: impl FnMut([&Cell<T>; N]),
 	) -> Result<()> {
 		ensure_same_shape(t)?;
-		let t = try_map_borrowed(&t, |_, t| CPUInput::new_safe_contiguous(t))?;
+		let t = array::try_map(&t, |_, t| CPUInput::new_safe_contiguous(t))?;
 		unsafe {
 			zip_n(t, f);
 		}
@@ -104,7 +107,7 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 		t: [&SliceBatch; N], f: impl FnMut([&[Cell<T>]; N]),
 	) -> Result<()> {
 		ensure_same_shape(t)?;
-		let t = try_map_borrowed(&t, |_, t| CPUInput::new_safe_contiguous(t))?;
+		let t = array::try_map(&t, |_, t| CPUInput::new_safe_contiguous(t))?;
 		unsafe {
 			vec_zip_n(t, f);
 		}
@@ -129,8 +132,8 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 			}
 			return Err(err_reduce_shape(r_shape, a_shape));
 		}
-		let r = try_map_borrowed(&r, |_, r| CPUInput::new_safe_contiguous(r))?;
-		let a = try_map_borrowed(&a, |_, a| CPUInput::new_safe_contiguous(a))?;
+		let r = array::try_map(&r, |_, r| CPUInput::new_safe_contiguous(r))?;
+		let a = array::try_map(&a, |_, a| CPUInput::new_safe_contiguous(a))?;
 		unsafe {
 			reduce_zip_n(r, a, f);
 		}

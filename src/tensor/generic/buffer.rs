@@ -5,6 +5,17 @@
 //
 //------------------------------------------------------------------------------
 
-pub trait Buffer: Clone {}
+pub trait Buffer {
+	fn len(&self) -> usize;
+}
 
-impl<T> Buffer for &[T] {}
+impl<T> Buffer for &[T] {
+	fn len(&self) -> usize {
+		<[T]>::len(self)
+	}
+}
+impl<T> Buffer for &mut [T] {
+	fn len(&self) -> usize {
+		<[T]>::len(self)
+	}
+}

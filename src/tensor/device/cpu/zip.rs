@@ -5,14 +5,13 @@
 //
 //------------------------------------------------------------------------------
 
-use std::cell::Cell;
 use std::hint::cold_path;
 
 use crate::tensor::HasDType;
-use crate::tensor::device::executor::SliceBatch;
-use crate::tensor::generic::map::Map;
+use crate::tensor::device::executor::SliceBatchRef;
+use crate::tensor::generic::map::{Map, ND, NDShape};
 use crate::tensor::generic::{self};
-use crate::util::array::map_borrowed;
+use crate::util::array;
 use crate::{Error, Result};
 
 #[derive(Clone, Copy, Debug)]
@@ -105,8 +104,8 @@ impl Map for BroadcastMap {
 	}
 }
 
-pub type CPUSliceTensor<'a, T> = generic::Tensor<SliceMap, &'a [Cell<T>]>;
-pub type CPUBroadcastTensor<'a, T> = generic::Tensor<BroadcastMap, &'a [Cell<T>]>;
+pub type CPUSliceTensor<'a, T> = generic::Tensor<SliceMap, &'a [T]>;
+pub type CPUBroadcastTensor<'a, T> = generic::Tensor<BroadcastMap, &'a [T]>;
 
 pub enum CPUInput<'a, T> {
 	Slice(CPUSliceTensor<'a, T>),
@@ -114,8 +113,9 @@ pub enum CPUInput<'a, T> {
 }
 
 impl<'a, T: HasDType> CPUInput<'a, T> {
-	pub fn new_safe(input: &'a SliceBatch) -> Result<Self> {
+	pub fn new_safe(input: &'a SliceBatchRef) -> Result<Self> {
 		let input = input.view()?;
+		input.ensure_safe()?;
 		if input.map.dims[1].stride == 0 || input.map.dims[1].size <= 1 {
 			let tensor = CPUBroadcastTensor {
 				map: BroadcastMap {
@@ -123,9 +123,8 @@ impl<'a, T: HasDType> CPUInput<'a, T> {
 					batch_size: input.map.dims[0].size,
 					batch_stride: input.map.dims[0].stride,
 				},
-				buf: input.buf,
+				buf: unsafe { input.buf.get_unchecked(input.map.offset..) },
 			};
-			tensor.ensure_safe()?;
 			Ok(CPUInput::Broadcast(tensor))
 		} else if input.map.dims[1].stride == 1 {
 			let tensor = CPUSliceTensor {
@@ -134,9 +133,8 @@ impl<'a, T: HasDType> CPUInput<'a, T> {
 					batch_size: input.map.dims[0].size,
 					batch_stride: input.map.dims[0].stride,
 				},
-				buf: input.buf,
+				buf: unsafe { input.buf.get_unchecked(input.map.offset..) },
 			};
-			tensor.ensure_safe()?;
 			Ok(CPUInput::Slice(tensor))
 		} else {
 			#[cold]
@@ -147,8 +145,9 @@ impl<'a, T: HasDType> CPUInput<'a, T> {
 		}
 	}
 
-	pub fn new_safe_contiguous(input: &'a SliceBatch) -> Result<CPUSliceTensor<'a, T>> {
+	pub fn new_safe_contiguous(input: &'a SliceBatchRef<'a>) -> Result<CPUSliceTensor<'a, T>> {
 		let input = input.view()?;
+		input.ensure_safe()?;
 		if input.map.dims[1].stride != 0 || input.map.dims[1].size <= 1 {
 			let tensor = CPUSliceTensor {
 				map: SliceMap {
@@ -156,9 +155,8 @@ impl<'a, T: HasDType> CPUInput<'a, T> {
 					batch_size: input.map.dims[0].size,
 					batch_stride: input.map.dims[0].stride,
 				},
-				buf: input.buf,
+				buf: unsafe { input.buf.get_unchecked(input.map.offset..) },
 			};
-			tensor.ensure_safe()?;
 			Ok(tensor)
 		} else {
 			#[cold]
@@ -208,11 +206,55 @@ impl Zippable for BroadcastMap {
 	}
 }
 
+pub unsafe fn zip<
+	T: Copy,
+	const N_Outputs: usize,
+	const N_ContiguousInputs: usize,
+	const N_BroadcastInputs: usize,
+>(
+	outputs: [generic::Tensor<ND<2>, &mut [T]>; N_Outputs],
+	contiguous_inputs: [generic::Tensor<ND<2>, &[T]>; N_ContiguousInputs],
+	broadcast_inputs: [generic::Tensor<ND<2>, &[T]>; N_BroadcastInputs],
+	mut f: impl FnMut([&mut T; N_Outputs], [T; N_ContiguousInputs], [T; N_BroadcastInputs]),
+) {
+	let shape = if let Some(t) = outputs.first() {
+		t.map.nd_shape().unwrap()
+	} else if let Some(t) = contiguous_inputs.first() {
+		t.map.nd_shape().unwrap()
+	} else if let Some(t) = broadcast_inputs.first() {
+		t.map.nd_shape().unwrap()
+	} else {
+		return;
+	};
+
+	debug_assert!(outputs.iter().all(|t| t.ensure_safe().is_ok()));
+	debug_assert!(contiguous_inputs.iter().all(|t| t.ensure_safe().is_ok()));
+	debug_assert!(broadcast_inputs.iter().all(|t| t.ensure_safe().is_ok()));
+
+	debug_assert!(outputs.iter().all(|t| t.nd_shape().unwrap() == shape));
+	debug_assert!(contiguous_inputs.iter().all(|t| t.nd_shape().unwrap() == shape));
+	debug_assert!(broadcast_inputs.iter().all(|t| t.nd_shape().unwrap() == shape));
+
+	let mut off_outputs = array::map(&outputs, |_, t| t.map.offset);
+	let mut off_contiguous_inputs = array::map(&contiguous_inputs, |_, t| t.map.offset);
+	let mut off_broadcast_inputs = array::map(&broadcast_inputs, |_, t| t.map.offset);
+
+	for b in 0..shape[0] {
+		for i in 0..shape[1] {
+			let o1 = t1.map.offset(b, i);
+			debug_assert!(o1 < t1.buf.len());
+			let v1 = unsafe { t1.buf.get_unchecked(o1) };
+
+			f(v1);
+		}
+	}
+}
+
 /// # Safety
 /// - safe-map - `t1` must have a safe map, i.e., every index must be mapped to an offset that is
 ///   within the bounds of the buffer.
 pub unsafe fn zip1<T: Copy, M1: Map + Zippable>(
-	t1: generic::Tensor<M1, &[Cell<T>]>, mut f: impl FnMut(&Cell<T>),
+	t1: generic::Tensor<M1, &[T]>, mut f: impl FnMut(&T),
 ) {
 	debug_assert!(t1.ensure_safe().is_ok());
 	let batch_size = t1.map.batch_size();
@@ -233,8 +275,7 @@ pub unsafe fn zip1<T: Copy, M1: Map + Zippable>(
 ///   that is within the bounds of the buffer.
 /// - equal-shape - `t1`, `t2` must have equal `batch_size` and `item_len`.
 pub unsafe fn zip2<T: Copy, M1: Map + Zippable, M2: Map + Zippable>(
-	t1: generic::Tensor<M1, &[Cell<T>]>, t2: generic::Tensor<M2, &[Cell<T>]>,
-	mut f: impl FnMut(&Cell<T>, &Cell<T>),
+	t1: generic::Tensor<M1, &[T]>, t2: generic::Tensor<M2, &[T]>, mut f: impl FnMut(&T, &T),
 ) {
 	debug_assert!(t1.ensure_safe().is_ok());
 	debug_assert!(t2.ensure_safe().is_ok());
@@ -262,8 +303,8 @@ pub unsafe fn zip2<T: Copy, M1: Map + Zippable, M2: Map + Zippable>(
 ///   that is within the bounds of the buffer.
 /// - equal-shape - `t1`, `t2`, `t3` must have equal `batch_size` and `item_len`.
 pub unsafe fn zip3<T: Copy, M1: Map + Zippable, M2: Map + Zippable, M3: Map + Zippable>(
-	t1: generic::Tensor<M1, &[Cell<T>]>, t2: generic::Tensor<M2, &[Cell<T>]>,
-	t3: generic::Tensor<M3, &[Cell<T>]>, mut f: impl FnMut(&Cell<T>, &Cell<T>, &Cell<T>),
+	t1: generic::Tensor<M1, &[T]>, t2: generic::Tensor<M2, &[T]>, t3: generic::Tensor<M3, &[T]>,
+	mut f: impl FnMut(&T, &T, &T),
 ) {
 	debug_assert!(t1.ensure_safe().is_ok());
 	debug_assert!(t2.ensure_safe().is_ok());
@@ -294,7 +335,7 @@ pub unsafe fn zip3<T: Copy, M1: Map + Zippable, M2: Map + Zippable, M3: Map + Zi
 }
 
 pub unsafe fn zip_n<T: Copy, M: Map + Zippable, const N: usize>(
-	t: [generic::Tensor<M, &[Cell<T>]>; N], mut f: impl FnMut([&Cell<T>; N]),
+	t: [generic::Tensor<M, &[T]>; N], mut f: impl FnMut([&T; N]),
 ) {
 	debug_assert!(t.iter().all(|t| t.ensure_safe().is_ok()));
 	let batch_size = t.first().map_or(0, |t| t.map.batch_size());
@@ -303,7 +344,7 @@ pub unsafe fn zip_n<T: Copy, M: Map + Zippable, const N: usize>(
 	debug_assert!(t.iter().map(|t| t.map.item_len()).all(|i| i == item_len));
 	for b in 0..batch_size {
 		for i in 0..item_len {
-			f(map_borrowed(&t, |_, t| {
+			f(array::map(&t, |_, t| {
 				let o = t.map.offset(b, i);
 				debug_assert!(o < t.buf.len());
 				unsafe { t.buf.get_unchecked(o) }
@@ -313,7 +354,7 @@ pub unsafe fn zip_n<T: Copy, M: Map + Zippable, const N: usize>(
 }
 
 pub unsafe fn vec_zip_n<T: Copy, const N: usize>(
-	t: [generic::Tensor<SliceMap, &[Cell<T>]>; N], mut f: impl FnMut([&[Cell<T>]; N]),
+	t: [generic::Tensor<SliceMap, &[T]>; N], mut f: impl FnMut([&[T]; N]),
 ) {
 	debug_assert!(t.iter().all(|t| t.ensure_safe().is_ok()));
 	let batch_size = t.first().map_or(0, |t| t.map.batch_size());
@@ -321,7 +362,7 @@ pub unsafe fn vec_zip_n<T: Copy, const N: usize>(
 	let item_len = t.first().map_or(0, |t| t.map.item_len());
 	debug_assert!(t.iter().map(|t| t.map.item_len()).all(|i| i == item_len));
 	for b in 0..batch_size {
-		f(map_borrowed(&t, |_, t| {
+		f(array::map(&t, |_, t| {
 			let b = t.map.offset(b, 0);
 			let e = b + item_len;
 			debug_assert!(e <= t.buf.len());
@@ -332,8 +373,8 @@ pub unsafe fn vec_zip_n<T: Copy, const N: usize>(
 
 #[allow(clippy::many_single_char_names)]
 pub unsafe fn reduce_zip_n<T: Copy, const M: usize, const N: usize>(
-	r: [generic::Tensor<SliceMap, &[Cell<T>]>; M], t: [generic::Tensor<SliceMap, &[Cell<T>]>; N],
-	mut f: impl FnMut([&Cell<T>; M], [&[Cell<T>]; N]),
+	r: [generic::Tensor<SliceMap, &[T]>; M], t: [generic::Tensor<SliceMap, &[T]>; N],
+	mut f: impl FnMut([&T; M], [&[T]; N]),
 ) {
 	debug_assert!(t.iter().all(|t| t.ensure_safe().is_ok()));
 	debug_assert!(r.iter().all(|r| r.ensure_safe().is_ok()));
@@ -345,12 +386,12 @@ pub unsafe fn reduce_zip_n<T: Copy, const M: usize, const N: usize>(
 	debug_assert!(r.iter().all(|r| r.map.item_len() == 1));
 	for b in 0..batch_size {
 		f(
-			map_borrowed(&r, |_, r| {
+			array::map(&r, |_, r| {
 				let o = r.map.offset(b, 0);
 				debug_assert!(o < r.buf.len());
 				unsafe { r.buf.get_unchecked(o) }
 			}),
-			map_borrowed(&t, |_, t| {
+			array::map(&t, |_, t| {
 				let b = t.map.offset(b, 0);
 				let e = b + item_len;
 				debug_assert!(e <= t.buf.len());

@@ -5,23 +5,32 @@
 //
 //------------------------------------------------------------------------------
 
+use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::generic::map::ND;
 use crate::tensor::generic::{self};
-use crate::util::array::try_map_into;
+use crate::util::array;
 use crate::{Error, Result};
 
 use super::buffer::DeviceBuffer;
 
 /// A batch of slices.
 pub type SliceBatch<'a> = generic::Tensor<ND<2>, &'a DeviceBuffer>;
+/// An immutable borrow of `SliceBatch`.
+pub type SliceBatchRef<'a> = generic::Tensor<ND<2>, DeviceBufferRef<'a>>;
+/// A mutable borrow of `SliceBatch`.
+pub type SliceBatchRefMut<'a> = generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>;
 
 /// A batch of matrices.
 pub type MatrixBatch<'a> = generic::Tensor<ND<3>, &'a DeviceBuffer>;
+/// An immutable borrow of `MatrixBatch`.
+pub type MatrixBatchRef<'a> = generic::Tensor<ND<3>, DeviceBufferRef<'a>>;
+/// A mutable borrow of `MatrixBatch`.
+pub type MatrixBatchRefMut<'a> = generic::Tensor<ND<3>, DeviceBufferRefMut<'a>>;
 
 /// # Errors
 /// - If the shapes of the tensors are not the same.
 pub fn ensure_same_shape<const N: usize>(t: [&SliceBatch; N]) -> Result<[usize; 2]> {
-	let shapes = try_map_into(t, |_, t| t.nd_shape())?;
+	let shapes = array::try_map_into(t, |_, t| t.nd_shape())?;
 	let shape = shapes.first().unwrap_or(&[0, 0]);
 	if shapes.iter().any(|s| s != shape) {
 		#[cold]
