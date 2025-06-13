@@ -137,10 +137,6 @@ impl<'a, T: HasDType> CPUInput<'a, T> {
 			};
 			Ok(CPUInput::Slice(tensor))
 		} else {
-			#[cold]
-			fn err_tensor_has_stride() -> Error {
-				"Tensor data is neither contiguous nor broadcasted.".into()
-			}
 			Err(err_tensor_has_stride())
 		}
 	}
@@ -168,84 +164,52 @@ impl<'a, T: HasDType> CPUInput<'a, T> {
 	}
 }
 
-pub trait Zippable {
-	fn item_len(&self) -> usize;
-	fn batch_size(&self) -> usize;
-	fn offset(&self, b: usize, i: usize) -> usize;
-}
-
-impl Zippable for SliceMap {
-	fn item_len(&self) -> usize {
-		self.slice_len
-	}
-
-	fn batch_size(&self) -> usize {
-		self.batch_size
-	}
-
-	fn offset(&self, b: usize, i: usize) -> usize {
-		debug_assert!(b < self.batch_size);
-		debug_assert!(i < self.slice_len);
-		b * self.batch_stride + i
-	}
-}
-
-impl Zippable for BroadcastMap {
-	fn item_len(&self) -> usize {
-		self.broadcast_len
-	}
-
-	fn batch_size(&self) -> usize {
-		self.batch_size
-	}
-
-	fn offset(&self, b: usize, i: usize) -> usize {
-		debug_assert!(b < self.batch_size);
-		debug_assert!(i < self.broadcast_len);
-		b * self.batch_stride
-	}
-}
-
 pub unsafe fn zip<
 	T: Copy,
-	const N_Outputs: usize,
-	const N_ContiguousInputs: usize,
-	const N_BroadcastInputs: usize,
+	const O: usize, // number of outputs
+	const C: usize, // number of contiguous inputs
+	const B: usize, // number of broadcasted inputs
 >(
-	outputs: [generic::Tensor<ND<2>, &mut [T]>; N_Outputs],
-	contiguous_inputs: [generic::Tensor<ND<2>, &[T]>; N_ContiguousInputs],
-	broadcast_inputs: [generic::Tensor<ND<2>, &[T]>; N_BroadcastInputs],
-	mut f: impl FnMut([&mut T; N_Outputs], [T; N_ContiguousInputs], [T; N_BroadcastInputs]),
+	o: [generic::Tensor<ND<2>, &mut [T]>; O], //
+	c: [generic::Tensor<ND<2>, &[T]>; C],
+	b: [generic::Tensor<ND<2>, &[T]>; B],
+	mut f: impl FnMut([&mut T; O], [T; C], [T; B]),
 ) {
-	let shape = if let Some(t) = outputs.first() {
+	let shape = if let Some(t) = o.first() {
 		t.map.nd_shape().unwrap()
-	} else if let Some(t) = contiguous_inputs.first() {
+	} else if let Some(t) = c.first() {
 		t.map.nd_shape().unwrap()
-	} else if let Some(t) = broadcast_inputs.first() {
+	} else if let Some(t) = b.first() {
 		t.map.nd_shape().unwrap()
 	} else {
 		return;
 	};
 
-	debug_assert!(outputs.iter().all(|t| t.ensure_safe().is_ok()));
-	debug_assert!(contiguous_inputs.iter().all(|t| t.ensure_safe().is_ok()));
-	debug_assert!(broadcast_inputs.iter().all(|t| t.ensure_safe().is_ok()));
+	debug_assert!(o.iter().all(|t| t.ensure_safe().is_ok()));
+	debug_assert!(c.iter().all(|t| t.ensure_safe().is_ok()));
+	debug_assert!(b.iter().all(|t| t.ensure_safe().is_ok()));
 
-	debug_assert!(outputs.iter().all(|t| t.nd_shape().unwrap() == shape));
-	debug_assert!(contiguous_inputs.iter().all(|t| t.nd_shape().unwrap() == shape));
-	debug_assert!(broadcast_inputs.iter().all(|t| t.nd_shape().unwrap() == shape));
+	debug_assert!(o.iter().all(|t| t.nd_shape().unwrap() == shape));
+	debug_assert!(c.iter().all(|t| t.nd_shape().unwrap() == shape));
+	debug_assert!(b.iter().all(|t| t.nd_shape().unwrap() == shape));
 
-	let mut off_outputs = array::map(&outputs, |_, t| t.map.offset);
-	let mut off_contiguous_inputs = array::map(&contiguous_inputs, |_, t| t.map.offset);
-	let mut off_broadcast_inputs = array::map(&broadcast_inputs, |_, t| t.map.offset);
+	debug_assert!(o.iter().all(|t| t.map.dims[1].is_contiguous()));
+	debug_assert!(c.iter().all(|t| t.map.dims[1].is_contiguous()));
+	debug_assert!(b.iter().all(|t| t.map.dims[1].is_broadcasted()));
 
-	for b in 0..shape[0] {
+	let o = o.map(|t| (t.buf.as_mut_ptr().add(t.map.offset), t.map.dims[0].stride));
+	let c = c.map(|t| (t.buf.as_ptr().add(t.map.offset), t.map.dims[0].stride));
+	let b = b.map(|t| (t.buf.as_ptr().add(t.map.offset), t.map.dims[0].stride));
+
+	for j in 0..shape[0] {
+		let o = o.map(|(ptr, stride)| (ptr.add(j * stride)));
+		let c = c.map(|(ptr, stride)| (ptr.add(j * stride)));
+		let b = b.map(|(ptr, stride)| (ptr.add(j * stride)));
 		for i in 0..shape[1] {
-			let o1 = t1.map.offset(b, i);
-			debug_assert!(o1 < t1.buf.len());
-			let v1 = unsafe { t1.buf.get_unchecked(o1) };
-
-			f(v1);
+			let o = o.map(|ptr| ptr.add(i).as_mut().unwrap_unchecked());
+			let c = c.map(|ptr| ptr.add(i).read());
+			let b = b.map(|ptr| ptr.add(i).read());
+			f(o, c, b);
 		}
 	}
 }

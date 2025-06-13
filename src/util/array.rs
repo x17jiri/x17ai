@@ -33,6 +33,16 @@ pub fn map<const N: usize, T, U>(array: &[T; N], mut f: impl FnMut(usize, &T) ->
 	unsafe { MaybeUninit::array_assume_init(u) }
 }
 
+pub fn map_mut<const N: usize, T, U>(
+	array: &mut [T; N], mut f: impl FnMut(usize, &mut T) -> U,
+) -> [U; N] {
+	let mut u = [const { MaybeUninit::uninit() }; N];
+	for i in 0..N {
+		u[i].write(f(i, &mut array[i]));
+	}
+	unsafe { MaybeUninit::array_assume_init(u) }
+}
+
 pub fn try_map<const N: usize, T, U, E>(
 	array: &[T; N], mut f: impl FnMut(usize, &T) -> Result<U, E>,
 ) -> Result<[U; N], E> {

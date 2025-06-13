@@ -8,17 +8,27 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use crate::Result;
 use crate::tensor::HasDType;
-use crate::tensor::device::cpu::zip::{reduce_zip_n, vec_zip_n};
+use crate::tensor::device::cpu::zip::{reduce_zip_n, vec_zip_n, zip};
 use crate::tensor::device::executor::{Executor, MatrixBatch, SliceBatch, ensure_same_shape};
 use crate::util::array;
+use crate::{Error, Result};
 
 use super::math::{self, FromToF64};
 use super::rng::Rng;
 use super::zip::{CPUInput, zip_n, zip1, zip2, zip3};
 
 //--------------------------------------------------------------------------------------------------
+
+#[cold]
+fn err_tensor_has_stride() -> Error {
+	"Tensor data is neither contiguous nor broadcasted.".into()
+}
+
+#[cold]
+fn err_tensor_not_contiguous() -> Error {
+	"Tensor data is not contiguous.".into()
+}
 
 pub struct FloatExecutor<T: Copy + HasDType + FromToF64> {
 	rng: Rc<RefCell<Rng>>,
@@ -32,33 +42,46 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 
 	/// # Errors
 	/// - If 'dst' doesn't have a safe map.
-	pub fn nullary(dst: &SliceBatch, f: impl FnMut() -> T) -> Result<()> {
-		dst.ensure_safe()?; /////////// ensure it has a safe map
-		let dst = dst.borrow_mut()?; // make sure is mutable
-		let dst = dst.view_mut()?; //// make sure is on CPU and has the right DType
-		let dst = CPUInput::new_safe_contiguous(&dst)?;
+	pub fn nullary(out: &SliceBatch, mut f: impl FnMut() -> f64) -> Result<()> {
+		out.ensure_safe()?;
+		let out = out.borrow_mut()?;
+		let out = out.view_mut::<T>()?;
+		if !out.is_contiguous() {
+			return Err(err_tensor_not_contiguous());
+		}
+
 		unsafe {
-			zip1(dst, f);
+			zip([out], [], [], |[out], [], []| *out = T::from_f64(f()));
 		}
 		Ok(())
 	}
 
-	/// # Errors
-	/// - If both tensors don't have the same shape.
-	/// - If any of the tensors doesn't have a safe map.
-	pub fn unary(
-		dst: &SliceBatch, inp: &SliceBatch, mut f: impl FnMut(&Cell<T>, &Cell<T>),
-	) -> Result<()> {
-		ensure_same_shape([dst, inp])?;
-		let dst = CPUInput::new_safe_contiguous(dst)?;
-		let inp = CPUInput::new_safe(inp)?;
+	pub fn unary(o: &SliceBatch, a: &SliceBatch, mut f: impl FnMut(f64) -> f64) -> Result<()> {
+		ensure_same_shape([o, a])?;
+
+		o.ensure_safe()?;
+		let o = o.borrow_mut()?;
+		let o = o.view_mut::<T>()?;
+		let o_dim = o.map.dims[1];
+		if !o_dim.is_contiguous() {
+			return Err(err_tensor_not_contiguous());
+		}
+
+		a.ensure_safe()?;
+		let a = a.borrow()?;
+		let a = a.view::<T>()?;
+		let a_dim = a.map.dims[1];
+
 		unsafe {
-			match inp {
-				CPUInput::Slice(inp) => {
-					zip2(dst, inp, |d, i| f(d, i));
+			match a_dim.is_contiguous() {
+				false => {
+					if !a_dim.is_broadcasted() {
+						return Err(err_tensor_has_stride());
+					}
+					zip([o], [], [a], |[o], [], [a]| *o = T::from_f64(f(a.to_f64())));
 				},
-				CPUInput::Broadcast(inp) => {
-					zip2(dst, inp, |d, i| f(d, i));
+				_ => {
+					zip([o], [a], [], |[o], [a], []| *o = T::from_f64(f(a.to_f64())));
 				},
 			}
 		}
@@ -66,26 +89,58 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 	}
 
 	pub fn binary(
-		dst: &SliceBatch, a: &SliceBatch, b: &SliceBatch,
-		mut f: impl FnMut(&Cell<T>, &Cell<T>, &Cell<T>),
+		o: &SliceBatch, a: &SliceBatch, b: &SliceBatch, mut f: impl FnMut(f64, f64) -> f64,
 	) -> Result<()> {
-		ensure_same_shape([dst, a, b])?;
-		let dst = CPUInput::new_safe_contiguous(dst)?;
-		let a = CPUInput::new_safe(a)?;
-		let b = CPUInput::new_safe(b)?;
+		ensure_same_shape([o, a, b])?;
+
+		o.ensure_safe()?;
+		let o = o.borrow_mut()?;
+		let o = o.view_mut::<T>()?;
+		let o_dim = o.map.dims[1];
+		if !o_dim.is_contiguous() {
+			return Err(err_tensor_not_contiguous());
+		}
+
+		a.ensure_safe()?;
+		let a = a.borrow()?;
+		let a = a.view::<T>()?;
+		let a_dim = a.map.dims[1];
+
+		b.ensure_safe()?;
+		let b = b.borrow()?;
+		let b = b.view::<T>()?;
+		let b_dim = b.map.dims[1];
+
 		unsafe {
-			match (a, b) {
-				(CPUInput::Slice(a), CPUInput::Slice(b)) => {
-					zip3(dst, a, b, |d, a, b| f(d, a, b));
+			match (a_dim.is_contiguous(), b_dim.is_contiguous()) {
+				(true, true) => {
+					zip([o], [a, b], [], |[d], [a, b], []| {
+						*d = T::from_f64(f(a.to_f64(), b.to_f64()));
+					});
 				},
-				(CPUInput::Broadcast(a), CPUInput::Broadcast(b)) => {
-					zip3(dst, a, b, |d, a, b| f(d, a, b));
+				(true, false) => {
+					if !b_dim.is_broadcasted() {
+						return Err(err_tensor_has_stride());
+					}
+					zip([o], [a], [b], |[d], [a], [b]| {
+						*d = T::from_f64(f(a.to_f64(), b.to_f64()));
+					});
 				},
-				(CPUInput::Slice(a), CPUInput::Broadcast(b)) => {
-					zip3(dst, a, b, |d, a, b| f(d, a, b));
+				(false, true) => {
+					if !a_dim.is_broadcasted() {
+						return Err(err_tensor_has_stride());
+					}
+					zip([o], [b], [a], |[d], [b], [a]| {
+						*d = T::from_f64(f(a.to_f64(), b.to_f64()));
+					});
 				},
-				(CPUInput::Broadcast(a), CPUInput::Slice(b)) => {
-					zip3(dst, a, b, |d, a, b| f(d, a, b));
+				(false, false) => {
+					if !a_dim.is_broadcasted() || !b_dim.is_broadcasted() {
+						return Err(err_tensor_has_stride());
+					}
+					zip([o], [], [a, b], |[d], [], [a, b]| {
+						*d = T::from_f64(f(a.to_f64(), b.to_f64()));
+					});
 				},
 			}
 		}
@@ -180,58 +235,34 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 	}
 
 	fn zeros(&self, o: &SliceBatch) -> Result<()> {
-		Self::nullary(o, |o| {
-			let v = 0.0;
-			o.set(T::from_f64(v));
-		})
+		Self::nullary(o, || 0.0)
 	}
 
 	fn randn_clamped(&self, o: &SliceBatch) -> Result<()> {
 		let mut rng = self.rng.borrow_mut();
-		Self::nullary(o, |o| {
-			let v = rng.get_normal_clamped();
-			o.set(T::from_f64(v));
-		})
+		Self::nullary(o, || rng.get_normal_clamped())
 	}
 
 	fn copy(&self, o: &SliceBatch, a: &SliceBatch) -> Result<()> {
-		Self::unary(o, a, |o, a| o.set(a.get()))
+		Self::unary(o, a, |a| a)
 	}
 
 	fn rsqrt(&self, o: &SliceBatch, a: &SliceBatch, scale: f64, eps: f64) -> Result<()> {
-		Self::unary(o, a, |o, a| {
-			let a = a.get().to_f64();
-			let v = math::rsqrt(a * scale, eps);
-			o.set(T::from_f64(v));
-		})
+		Self::unary(o, a, |a| math::rsqrt(a * scale, eps))
 	}
 
 	fn ln_clamped(&self, o: &SliceBatch, a: &SliceBatch) -> Result<()> {
-		Self::unary(o, a, |o, a| {
-			let a = a.get().to_f64();
-			let v = a.ln().max(-1000.0);
-			o.set(T::from_f64(v));
-		})
+		Self::unary(o, a, |a| a.ln().max(-1000.0))
 	}
 
 	fn add_weighted(
 		&self, o: &SliceBatch, a: &SliceBatch, a_weight: f64, b: &SliceBatch, b_weight: f64,
 	) -> Result<()> {
-		Self::binary(o, a, b, |o, a, b| {
-			let a = a.get().to_f64();
-			let b = b.get().to_f64();
-			let v = math::add_weighted(a, a_weight, b, b_weight);
-			o.set(T::from_f64(v));
-		})
+		Self::binary(o, a, b, |o, a, b| math::add_weighted(a, a_weight, b, b_weight))
 	}
 
 	fn mul(&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()> {
-		Self::binary(o, a, b, |o, a, b| {
-			let a = a.get().to_f64();
-			let b = b.get().to_f64();
-			let v = a * b;
-			o.set(T::from_f64(v));
-		})
+		Self::binary(o, a, b, |o, a, b| a * b)
 	}
 
 	#[allow(clippy::many_single_char_names)]
