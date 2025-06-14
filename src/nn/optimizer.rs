@@ -104,17 +104,20 @@ impl OptParam {
 		// Update the first moment estimate
 		let m_decayed = &self.m * coef.m_decay;
 		let m_update = grad * (1.0 - coef.m_decay);
-		self.m.assign(m_decayed + m_update)?;
+		let new_m = m_decayed + m_update;
+		self.m.assign(new_m)?;
 
 		// Update the second moment estimate
 		let v_decayed = &self.v * coef.v_decay;
 		let v_update = grad_squared * (1.0 - coef.v_decay);
-		self.v.assign(v_decayed + v_update)?;
+		let new_v = v_decayed + v_update;
+		self.v.assign(new_v)?;
 
 		// Update value
 		self.v_rsqrt.assign(self.v.rsqrt(coef.eps))?;
 		let update = &self.m * &self.v_rsqrt;
-		self.value.assign(&self.value - coef.learning_rate * update)?;
+		let new_value = &self.value - coef.learning_rate * update;
+		self.value.assign(new_value)?;
 
 		Ok(())
 	}

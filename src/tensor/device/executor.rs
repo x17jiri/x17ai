@@ -208,6 +208,10 @@ pub trait Executor {
 		c_weight: f64,
 	) -> Result<()>;
 
+	fn mul_acc(
+		&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64, o_weight: f64,
+	) -> Result<()>;
+
 	/// The SwiGLU activation function:
 	///
 	///     out[j, i] = lin[j, i] * sigmoid(gate[j, i])
