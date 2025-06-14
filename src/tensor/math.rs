@@ -6,9 +6,11 @@
 //------------------------------------------------------------------------------
 
 use crate::Result;
+use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::dim_merger::DimMerger;
 use crate::tensor::generic::map::{ND, SizeAndStride};
-use crate::tensor::{Tensor, batch};
+use crate::tensor::{Tensor, batch, generic};
+use crate::util::array;
 
 pub trait EvaluatesToTensor {
 	/// Calculate the result of the operation represented by `self`
@@ -26,22 +28,37 @@ pub trait MatrixSavable {
 
 //--------------------------------------------------------------------------------------------------
 
-/// Broadcast is disabled for tensors[0] and enabled for tensors[1..].
-pub(crate) fn __elem_wise<const N: usize>(
-	tensors: [&Tensor; N],
-	mut f: impl FnMut([SliceBatch; N]) -> Result<()>,
-) -> Result<()> {
-	let merger = DimMerger::new(tensors.map(|t| t.map.dims.as_slice()))?;
+pub(crate) fn __elem_wise<const O: usize, const C: usize>(
+	o: [&Tensor; O],
+	c: [&Tensor; C],
+	mut f: impl FnMut(
+		[generic::Tensor<ND<2>, DeviceBufferRefMut>; O],
+		[generic::Tensor<ND<2>, DeviceBufferRef>; C],
+	) -> Result<()>,
+) -> Result<()>
+where
+	[(); O + C]:,
+{
+	let o_dims = o.map(|t| t.map.dims.as_slice());
+	let c_dims = c.map(|t| t.map.dims.as_slice());
+	let dims = array::concat_arrays(o_dims, c_dims);
+
+	let merger = DimMerger::new(dims)?;
 	let smallest = merger.smallest_dim();
 	let batch_dims = merger.dims_increasing_without_smallest();
 	let batch_iter = batch_dims.iter();
 
-	let buffers = tensors.map(|t| t.buf.as_ref());
+	let o_buffers = o.try_map(|t| t.buf.try_borrow_mut())?;
+	let c_buffers = c.try_map(|t| t.buf.try_borrow())?;
+
+	let o_offsets = o.map(|t| t.map.offset);
+	let c_offsets = c.map(|t| t.map.offset);
+	let offsets = array::concat_arrays(o_offsets, c_offsets);
 
 	batch::run(
 		batch_iter,
-		tensors.map(|t| t.map.offset),
-		|batch_size: usize, batch_strides: [usize; N], offsets: [usize; N]| {
+		offsets,
+		|batch_size: usize, batch_strides: [usize; O + C], offsets: [usize; O + C]| {
 			f(std::array::from_fn(|i| SliceBatch {
 				map: ND {
 					dims: [
