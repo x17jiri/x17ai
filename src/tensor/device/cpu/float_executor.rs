@@ -6,11 +6,15 @@
 //------------------------------------------------------------------------------
 
 use std::cell::{Cell, RefCell};
+use std::hint::cold_path;
 use std::rc::Rc;
 
-use crate::tensor::HasDType;
 use crate::tensor::device::cpu::zip::{reduce_zip_n, vec_zip_n, zip};
-use crate::tensor::device::executor::{Executor, MatrixBatch, SliceBatch, ensure_same_shape};
+use crate::tensor::device::executor::{
+	Executor, MatrixBatch, SliceBatch, SliceBatchRef, SliceBatchRefMut, ensure_same_shape,
+};
+use crate::tensor::generic::map::ND;
+use crate::tensor::{HasDType, generic};
 use crate::util::array;
 use crate::{Error, Result};
 
@@ -40,51 +44,78 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 		Self { rng, phantom: std::marker::PhantomData }
 	}
 
-	pub fn ensure_safe_contiguous(tensor: &SliceBatch) -> Result<()> {
+	pub fn view_contiguous<'a>(
+		tensor: &'a SliceBatchRef<'a>,
+	) -> Result<generic::Tensor<ND<2>, &'a [T]>> {
 		tensor.ensure_safe()?;
-		let dim = tensor.map.dims[1];
-		if !dim.is_contiguous() {
+		let feature_dim = tensor.map.dims[1];
+		if !feature_dim.is_contiguous() {
+			cold_path();
 			return Err(err_tensor_not_contiguous());
 		}
-		Ok(())
+		tensor.view()
 	}
 
-	pub fn ensure_safe_contiguous_or_broadcasted(tensor: &SliceBatch) -> Result<bool> {
+	pub fn view_contiguous_mut<'a>(
+		tensor: &'a SliceBatchRefMut<'a>,
+	) -> Result<generic::Tensor<ND<2>, &'a mut [T]>> {
 		tensor.ensure_safe()?;
-		let dim = tensor.map.dims[1];
-		if dim.is_contiguous() {
-			Ok(false)
-		} else if dim.is_broadcasted() {
-			Ok(true)
-		} else {
-			Err(err_tensor_has_stride())
+		let feature_dim = tensor.map.dims[1];
+		if !feature_dim.is_contiguous() {
+			cold_path();
+			return Err(err_tensor_not_contiguous());
 		}
+		tensor.view_mut()
+	}
+
+	pub fn view_contiguous_or_broadcasted<'a>(
+		tensor: &'a SliceBatchRef<'a>,
+	) -> Result<(generic::Tensor<ND<2>, &'a [T]>, bool)> {
+		tensor.ensure_safe()?;
+		let feature_dim = tensor.map.dims[1];
+		let broadcast = if feature_dim.is_contiguous() {
+			false
+		} else if feature_dim.is_broadcasted() {
+			true
+		} else {
+			cold_path();
+			return Err(err_tensor_has_stride());
+		};
+		(tensor.view(), broadcast)
+	}
+
+	pub fn view_contiguous_or_broadcasted_mut<'a>(
+		tensor: &'a SliceBatchRefMut<'a>,
+	) -> Result<(generic::Tensor<ND<2>, &'a mut [T]>, bool)> {
+		tensor.ensure_safe()?;
+		let feature_dim = tensor.map.dims[1];
+		let broadcast = if feature_dim.is_contiguous() {
+			false
+		} else if feature_dim.is_broadcasted() {
+			true
+		} else {
+			cold_path();
+			return Err(err_tensor_has_stride());
+		};
+		(tensor.view_mut(), broadcast)
 	}
 
 	/// # Errors
 	/// - If 'dst' doesn't have a safe map.
-	pub fn nullary(o: &SliceBatch, mut f: impl FnMut(&mut T)) -> Result<()> {
-		Self::ensure_safe_contiguous(o)?;
-		let o = o.borrow_mut()?;
-		let o = o.view_mut::<T>()?;
-
+	pub fn nullary(o: &SliceBatchRefMut, mut f: impl FnMut(&mut T)) -> Result<()> {
+		let o = Self::view_contiguous_mut(o)?;
 		unsafe {
 			zip([o], [], [], |[o], [], []| f(o));
 		}
 		Ok(())
 	}
 
-	pub fn unary(o: &SliceBatch, a: &SliceBatch, mut f: impl FnMut(&mut T, T)) -> Result<()> {
+	pub fn unary(
+		o: &SliceBatchRefMut, a: &SliceBatchRef, mut f: impl FnMut(&mut T, T),
+	) -> Result<()> {
 		ensure_same_shape([o, a])?;
-
-		Self::ensure_safe_contiguous(o)?;
-		let o = o.borrow_mut()?;
-		let o = o.view_mut::<T>()?;
-
-		let a_broadcast = Self::ensure_safe_contiguous_or_broadcasted(a)?;
-		let a = a.borrow()?;
-		let a = a.view::<T>()?;
-
+		let o = Self::view_contiguous_mut(o)?;
+		let (a, a_broadcast) = Self::view_contiguous_or_broadcasted(a)?;
 		unsafe {
 			match a_broadcast {
 				false => {
@@ -99,22 +130,12 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 	}
 
 	pub fn binary(
-		o: &SliceBatch, a: &SliceBatch, b: &SliceBatch, mut f: impl FnMut(&mut T, T, T),
+		o: &SliceBatchRefMut, a: &SliceBatchRef, b: &SliceBatchRef, mut f: impl FnMut(&mut T, T, T),
 	) -> Result<()> {
 		ensure_same_shape([o, a, b])?;
-
-		Self::ensure_safe_contiguous(o)?;
-		let o = o.borrow_mut()?;
-		let o = o.view_mut::<T>()?;
-
-		let a_broadcast = Self::ensure_safe_contiguous_or_broadcasted(a)?;
-		let a = a.borrow()?;
-		let a = a.view::<T>()?;
-
-		let b_broadcast = Self::ensure_safe_contiguous_or_broadcasted(b)?;
-		let b = b.borrow()?;
-		let b = b.view::<T>()?;
-
+		let o = Self::ensure_safe_contiguous_or_broadcasted(o)?;
+		let (a, a_broadcast) = Self::view_contiguous_or_broadcasted(a)?;
+		let (b, b_broadcast) = Self::view_contiguous_or_broadcasted(b)?;
 		unsafe {
 			match (a_broadcast, b_broadcast) {
 				(false, false) => {
@@ -130,17 +151,6 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 					zip([o], [], [a, b], |[o], [], [a, b]| f(o, a, b));
 				},
 			}
-		}
-		Ok(())
-	}
-
-	pub fn n_contiguous<const N: usize>(
-		t: [&SliceBatch; N], f: impl FnMut([&Cell<T>; N]),
-	) -> Result<()> {
-		ensure_same_shape(t)?;
-		let t = array::try_map(&t, |_, t| CPUInput::new_safe_contiguous(t))?;
-		unsafe {
-			zip_n(t, f);
 		}
 		Ok(())
 	}
@@ -221,36 +231,37 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		result.map_err(Into::into)
 	}
 
-	fn zeros(&self, o: &SliceBatch) -> Result<()> {
+	fn zeros(&self, o: &SliceBatchRefMut) -> Result<()> {
 		Self::nullary(o, |o| *o = T::from_f64(0.0))
 	}
 
-	fn randn_clamped(&self, o: &SliceBatch) -> Result<()> {
+	fn randn_clamped(&self, o: &SliceBatchRefMut) -> Result<()> {
 		let mut rng = self.rng.borrow_mut();
 		Self::nullary(o, |o| *o = T::from_f64(rng.get_normal_clamped()))
 	}
 
-	fn copy(&self, o: &SliceBatch, a: &SliceBatch) -> Result<()> {
+	fn copy(&self, o: &SliceBatchRefMut, a: &SliceBatchRef) -> Result<()> {
 		Self::unary(o, a, |o, a| *o = a)
 	}
 
-	fn rsqrt(&self, o: &SliceBatch, a: &SliceBatch, scale: f64, eps: f64) -> Result<()> {
+	fn rsqrt(&self, o: &SliceBatchRefMut, a: &SliceBatchRef, scale: f64, eps: f64) -> Result<()> {
 		Self::unary(o, a, |o, a| *o = T::from_f64(math::rsqrt(a.to_f64() * scale, eps)))
 	}
 
-	fn ln_clamped(&self, o: &SliceBatch, a: &SliceBatch) -> Result<()> {
+	fn ln_clamped(&self, o: &SliceBatchRefMut, a: &SliceBatchRef) -> Result<()> {
 		Self::unary(o, a, |o, a| *o = T::from_f64(a.to_f64().ln().max(-1000.0)))
 	}
 
 	fn add_weighted(
-		&self, o: &SliceBatch, a: &SliceBatch, a_weight: f64, b: &SliceBatch, b_weight: f64,
+		&self, o: &SliceBatchRefMut, a: &SliceBatchRef, a_weight: f64, b: &SliceBatchRef,
+		b_weight: f64,
 	) -> Result<()> {
 		Self::binary(o, a, b, |o, a, b| {
 			*o = T::from_f64(math::add_weighted(a.to_f64(), a_weight, b.to_f64(), b_weight))
 		})
 	}
 
-	fn mul(&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()> {
+	fn mul(&self, o: &SliceBatchRefMut, a: &SliceBatchRef, b: &SliceBatchRef) -> Result<()> {
 		Self::binary(o, a, b, |o, a, b| *o = T::from_f64(a.to_f64() * b.to_f64()))
 	}
 
@@ -283,19 +294,33 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 	}
 
 	fn swiglu(&self, out: &SliceBatch, lin: &SliceBatch, gate: &SliceBatch) -> Result<()> {
-		Self::n_contiguous([out, lin, gate], |[out, lin, gate]| {
-			let lin = lin.get().to_f64();
-			let gate = gate.get().to_f64();
-			let v = math::swiglu(lin, gate);
-			out.set(T::from_f64(v));
-		})
+		ensure_same_shape([out, lin, gate])?;
+
+		Self::ensure_safe_contiguous(out)?;
+		let out = out.borrow_mut()?;
+		let out = out.view_mut::<T>()?;
+
+		Self::ensure_safe_contiguous(lin)?;
+		let lin = lin.borrow()?;
+		let lin = lin.view::<T>()?;
+
+		Self::ensure_safe_contiguous(gate)?;
+		let gate = gate.borrow()?;
+		let gate = gate.view::<T>()?;
+
+		unsafe {
+			zip([out], [lin, gate], [], |[out], [lin, gate], []| {
+				*out = math::swiglu(lin.to_f64(), gate.to_f64());
+			});
+		}
+		Ok(())
 	}
 
 	fn swiglu_backward(
 		&self, d_lin: &SliceBatch, d_gate: &SliceBatch, lin: &SliceBatch, gate: &SliceBatch,
 		d_out: &SliceBatch,
 	) -> Result<()> {
-		Self::n_contiguous(
+		/*Self::n_contiguous(
 			[d_lin, d_gate, lin, gate, d_out],
 			|[d_lin, d_gate, lin, gate, d_out]| {
 				let lin = lin.get().to_f64();
@@ -305,27 +330,41 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 				d_lin.set(T::from_f64(d_lin_val));
 				d_gate.set(T::from_f64(d_gate_val));
 			},
-		)
+		)*/
+		todo!("FloatExecutor::swiglu_backward is not implemented yet");
 	}
 
 	fn sum_all(&self, a: &SliceBatch) -> Result<f64> {
 		// TODO - this could handle broadcasted tensors as well
+		Self::ensure_safe_contiguous(a)?;
+		let a = a.borrow()?;
+		let a = a.view::<T>()?;
+
 		let mut sum = 0.0;
-		Self::n_contiguous([a], |[a]| {
-			let a = a.get().to_f64();
-			sum += a;
-		})?;
+		unsafe {
+			zip([], [a], [], |[], [a], []| {
+				sum += a.to_f64();
+			});
+		}
 		Ok(sum)
 	}
 
 	fn approx_eq(&self, a: &SliceBatch, b: &SliceBatch, eps: f64) -> Result<bool> {
 		// TODO - this could handle broadcasted tensors as well
+		Self::ensure_safe_contiguous(a)?;
+		let a = a.borrow()?;
+		let a = a.view::<T>()?;
+
+		Self::ensure_safe_contiguous(b)?;
+		let b = b.borrow()?;
+		let b = b.view::<T>()?;
+
 		let mut result = true;
-		Self::n_contiguous([a, b], |[a, b]| {
-			let a = a.get().to_f64();
-			let b = b.get().to_f64();
-			result &= math::approx_eq(a, b, eps);
-		})?;
+		unsafe {
+			zip([], [a, b], [], |[], [a, b], []| {
+				result &= math::approx_eq(a.to_f64(), b.to_f64(), eps);
+			});
+		}
 		Ok(result)
 	}
 

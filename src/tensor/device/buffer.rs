@@ -73,7 +73,6 @@ impl Drop for DeviceBuffer {
 //--------------------------------------------------------------------------------------------------
 
 impl Buffer for Rc<DeviceBuffer> {}
-impl Buffer for &DeviceBuffer {}
 impl<'a> Buffer for DeviceBufferRef<'a> {}
 impl<'a> Buffer for DeviceBufferRefMut<'a> {}
 

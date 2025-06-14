@@ -68,8 +68,8 @@ pub trait Executor {
 	// These functions are designed to load/save data from files.
 	// And in files, we always use little-endian format.
 	// So it expects bytes to be in little-endian format.
-	fn read_bin(&self, dst: &SliceBatch, src: &mut dyn std::io::Read) -> Result<()>;
-	fn write_bin(&self, src: &SliceBatch, dst: &mut dyn std::io::Write) -> Result<()>;
+	fn read_bin(&self, dst: &SliceBatchRefMut, src: &mut dyn std::io::Read) -> Result<()>;
+	fn write_bin(&self, src: &SliceBatchRef, dst: &mut dyn std::io::Write) -> Result<()>;
 
 	/// Fills the `o` tensor with zeros.
 	///
@@ -85,7 +85,7 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn zeros(&self, o: &SliceBatch) -> Result<()>;
+	fn zeros(&self, o: &SliceBatchRefMut) -> Result<()>;
 
 	/// Fills the `o` tensor with random values from a normal distribution
 	/// with mean 0 and variance 1.
@@ -102,7 +102,7 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn randn_clamped(&self, o: &SliceBatch) -> Result<()>;
+	fn randn_clamped(&self, o: &SliceBatchRefMut) -> Result<()>;
 
 	/// Copies data from `a` to `o`:
 	///
@@ -121,7 +121,7 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn copy(&self, o: &SliceBatch, a: &SliceBatch) -> Result<()>;
+	fn copy(&self, o: &SliceBatchRefMut, a: &SliceBatchRef) -> Result<()>;
 
 	/// Element-wise unary operation:
 	///
@@ -140,7 +140,7 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn rsqrt(&self, o: &SliceBatch, a: &SliceBatch, scale: f64, eps: f64) -> Result<()>;
+	fn rsqrt(&self, o: &SliceBatchRefMut, a: &SliceBatchRef, scale: f64, eps: f64) -> Result<()>;
 
 	/// Element-wise unary operation:
 	///
@@ -161,7 +161,7 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn ln_clamped(&self, o: &SliceBatch, a: &SliceBatch) -> Result<()>;
+	fn ln_clamped(&self, o: &SliceBatchRefMut, a: &SliceBatchRef) -> Result<()>;
 
 	/// Element-wise weighted addition:
 	///
@@ -181,7 +181,8 @@ pub trait Executor {
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
 	fn add_weighted(
-		&self, o: &SliceBatch, a: &SliceBatch, a_weight: f64, b: &SliceBatch, b_weight: f64,
+		&self, o: &SliceBatchRefMut, a: &SliceBatchRef, a_weight: f64, b: &SliceBatchRef,
+		b_weight: f64,
 	) -> Result<()>;
 
 	/// Element-wise multiplication:
@@ -201,15 +202,16 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn mul(&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch) -> Result<()>;
+	fn mul(&self, o: &SliceBatchRefMut, a: &SliceBatchRef, b: &SliceBatchRef) -> Result<()>;
 
 	fn mul_add(
-		&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64, c: &SliceBatch,
-		c_weight: f64,
+		&self, o: &SliceBatchRefMut, a: &SliceBatchRef, b: &SliceBatchRef, ab_weight: f64,
+		c: &SliceBatchRef, c_weight: f64,
 	) -> Result<()>;
 
 	fn mul_acc(
-		&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64, o_weight: f64,
+		&self, o: &SliceBatchRefMut, a: &SliceBatchRef, b: &SliceBatchRef, ab_weight: f64,
+		o_weight: f64,
 	) -> Result<()>;
 
 	/// The SwiGLU activation function:
@@ -227,7 +229,9 @@ pub trait Executor {
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
 	#[allow(clippy::doc_markdown)]
-	fn swiglu(&self, out: &SliceBatch, lin: &SliceBatch, gate: &SliceBatch) -> Result<()>;
+	fn swiglu(
+		&self, out: &SliceBatchRefMut, lin: &SliceBatchRef, gate: &SliceBatchRef,
+	) -> Result<()>;
 
 	/// Backward pass for the SwiGLU activation function:
 	///
@@ -243,8 +247,8 @@ pub trait Executor {
 	/// - If there is any problem executing the operation on the device.
 	#[allow(clippy::doc_markdown)]
 	fn swiglu_backward(
-		&self, d_lin: &SliceBatch, d_gate: &SliceBatch, lin: &SliceBatch, gate: &SliceBatch,
-		d_out: &SliceBatch,
+		&self, d_lin: &SliceBatchRefMut, d_gate: &SliceBatchRefMut, lin: &SliceBatchRef,
+		gate: &SliceBatchRef, d_out: &SliceBatchRef,
 	) -> Result<()>;
 
 	/// Sums all elements in the `a` tensor and returns the result.
@@ -259,7 +263,7 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn sum_all(&self, a: &SliceBatch) -> Result<f64>;
+	fn sum_all(&self, a: &SliceBatchRef) -> Result<f64>;
 
 	/// Checks if two tensors are approximately equal element-wise:
 	///
@@ -273,26 +277,28 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn approx_eq(&self, a: &SliceBatch, b: &SliceBatch, eps: f64) -> Result<bool>;
+	fn approx_eq(&self, a: &SliceBatchRef, b: &SliceBatchRef, eps: f64) -> Result<bool>;
 
-	fn softmax(&self, out: &SliceBatch, inp: &SliceBatch) -> Result<()>;
+	fn softmax(&self, out: &SliceBatchRefMut, inp: &SliceBatchRef) -> Result<()>;
 
-	fn dot(&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch, scale: f64) -> Result<()>;
+	fn dot(
+		&self, o: &SliceBatchRefMut, a: &SliceBatchRef, b: &SliceBatchRef, scale: f64,
+	) -> Result<()>;
 
 	fn dot_add(
-		&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64, c: &SliceBatch,
-		c_weight: f64,
+		&self, o: &SliceBatchRefMut, a: &SliceBatchRef, b: &SliceBatchRef, ab_weight: f64,
+		c: &SliceBatchRef, c_weight: f64,
 	) -> Result<()>;
 
 	fn rsqrt_dot(
-		&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch, scale: f64, eps: f64,
+		&self, o: &SliceBatchRefMut, a: &SliceBatchRef, b: &SliceBatchRef, scale: f64, eps: f64,
 	) -> Result<()>;
 
 	fn mm(&self, o: &MatrixBatch, a: &MatrixBatch, b: &MatrixBatch, scale: f64) -> Result<()>;
 
 	/*
 	fn attention(
-		&self, dst: &SliceBatch, q: &SliceBatch, k: &SliceBatch, v: &SliceBatch,
+		&self, dst: &SliceBatchRefMut, q: &SliceBatchRef, k: &SliceBatchRef, v: &SliceBatchRef,
 		params: &AttentionParams,
 	);
 	*/
