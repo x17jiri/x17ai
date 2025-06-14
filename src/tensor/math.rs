@@ -6,7 +6,6 @@
 //------------------------------------------------------------------------------
 
 use crate::Result;
-use crate::tensor::device::executor::SliceBatch;
 use crate::tensor::dim_merger::DimMerger;
 use crate::tensor::generic::map::{ND, SizeAndStride};
 use crate::tensor::{Tensor, batch};
@@ -29,7 +28,8 @@ pub trait MatrixSavable {
 
 /// Broadcast is disabled for tensors[0] and enabled for tensors[1..].
 pub(crate) fn __elem_wise<const N: usize>(
-	tensors: [&Tensor; N], mut f: impl FnMut([SliceBatch; N]) -> Result<()>,
+	tensors: [&Tensor; N],
+	mut f: impl FnMut([SliceBatch; N]) -> Result<()>,
 ) -> Result<()> {
 	let merger = DimMerger::new(tensors.map(|t| t.map.dims.as_slice()))?;
 	let smallest = merger.smallest_dim();
@@ -68,7 +68,8 @@ pub(crate) fn __elem_wise<const N: usize>(
 /// Batch dimensions broadcast is disabled for tensors[0] and enabled for tensors[1..].
 /// This is by design.
 fn __vec_wise<const N: usize>(
-	tensors: [&Tensor; N], f: impl Fn([SliceBatch; N]) -> Result<()>,
+	tensors: [&Tensor; N],
+	f: impl Fn([SliceBatch; N]) -> Result<()>,
 ) -> Result<()> {
 	assert!(tensors.iter().all(|t| t.ndim() >= 1));
 
@@ -913,7 +914,9 @@ pub struct SwiGLUBackwardExpr<'a> {
 }
 
 pub fn swiglu_backward<'a>(
-	d_out: &'a Tensor, lin: &'a Tensor, gate: &'a Tensor,
+	d_out: &'a Tensor,
+	lin: &'a Tensor,
+	gate: &'a Tensor,
 ) -> SwiGLUBackwardExpr<'a> {
 	SwiGLUBackwardExpr { d_out, lin, gate }
 }

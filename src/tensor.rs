@@ -46,24 +46,6 @@ impl<M: generic::map::Map> generic::Tensor<M, Rc<device::DeviceBuffer>> {
 	}
 }
 
-impl<M: generic::map::Map> generic::Tensor<M, &device::DeviceBuffer> {
-	pub fn borrow(
-		&self,
-	) -> std::result::Result<generic::Tensor<M, DeviceBufferRef<'_>>, BorrowError> {
-		let buf = self.buf.try_borrow()?;
-		let map = self.map.clone();
-		Ok(generic::Tensor { map, buf })
-	}
-
-	pub fn borrow_mut(
-		&self,
-	) -> std::result::Result<generic::Tensor<M, DeviceBufferRefMut<'_>>, BorrowError> {
-		let buf = self.buf.try_borrow_mut()?;
-		let map = self.map.clone();
-		Ok(generic::Tensor { map, buf })
-	}
-}
-
 impl<'a, M: generic::map::Map> generic::Tensor<M, DeviceBufferRef<'a>> {
 	/// Returns a "view" tensor which has a slice `&[T]` as its buffer.
 	///
@@ -196,7 +178,8 @@ impl<T: HasDType> TensorLiteralFactory<T> {
 
 	#[inline(never)]
 	pub fn new_3d<const Z: usize, const Y: usize, const X: usize>(
-		&self, value: &[[[T; X]; Y]; Z],
+		&self,
+		value: &[[[T; X]; Y]; Z],
 	) -> Result<Tensor> {
 		let tensor = Tensor::new_empty_on(&[Z, Y, X], T::dtype, self.device.clone())?;
 

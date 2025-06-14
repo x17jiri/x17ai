@@ -72,9 +72,23 @@ impl Drop for DeviceBuffer {
 
 //--------------------------------------------------------------------------------------------------
 
-impl Buffer for Rc<DeviceBuffer> {}
-impl<'a> Buffer for DeviceBufferRef<'a> {}
-impl<'a> Buffer for DeviceBufferRefMut<'a> {}
+impl Buffer for Rc<DeviceBuffer> {
+	fn len(&self) -> usize {
+		self.elems
+	}
+}
+
+impl<'a> Buffer for DeviceBufferRef<'a> {
+	fn len(&self) -> usize {
+		self.device_buffer.elems
+	}
+}
+
+impl<'a> Buffer for DeviceBufferRefMut<'a> {
+	fn len(&self) -> usize {
+		self.device_buffer.elems
+	}
+}
 
 //--------------------------------------------------------------------------------------------------
 

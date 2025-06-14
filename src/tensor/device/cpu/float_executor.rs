@@ -5,33 +5,51 @@
 //
 //------------------------------------------------------------------------------
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::hint::cold_path;
 use std::rc::Rc;
 
-use crate::tensor::device::cpu::zip::{reduce_zip_n, vec_zip_n, zip};
-use crate::tensor::device::executor::{
-	Executor, MatrixBatch, SliceBatch, SliceBatchRef, SliceBatchRefMut, ensure_same_shape,
-};
-use crate::tensor::generic::map::ND;
+use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
+use crate::tensor::device::cpu::zip::{zip_elems, zip_vec_reduce, zip_vecs};
+use crate::tensor::device::executor::{Executor, ensure_same_shape};
+use crate::tensor::generic::buffer::Buffer;
+use crate::tensor::generic::map::{ND, NDShape};
 use crate::tensor::{HasDType, generic};
-use crate::util::array;
 use crate::{Error, Result};
 
 use super::math::{self, FromToF64};
 use super::rng::Rng;
-use super::zip::{CPUInput, zip_n, zip1, zip2, zip3};
 
 //--------------------------------------------------------------------------------------------------
 
 #[cold]
+#[inline(never)]
 fn err_tensor_has_stride() -> Error {
 	"Tensor data is neither contiguous nor broadcasted.".into()
 }
 
 #[cold]
+#[inline(never)]
 fn err_tensor_not_contiguous() -> Error {
 	"Tensor data is not contiguous.".into()
+}
+
+#[cold]
+#[inline(never)]
+fn err_tensor_invalid_shape(shape: [usize; 2], expected: [usize; 2]) -> Error {
+	format!("Tensor shape {:?} does not match expected shape {:?}", shape, expected).into()
+}
+
+fn ensure_expected_shape<B: Buffer>(
+	tensor: &generic::Tensor<ND<2>, B>,
+	expected: [usize; 2],
+) -> Result<()> {
+	let shape = tensor.map.nd_shape()?;
+	if shape != expected {
+		cold_path();
+		return Err(err_tensor_invalid_shape(shape, expected));
+	}
+	Ok(())
 }
 
 pub struct FloatExecutor<T: Copy + HasDType + FromToF64> {
@@ -45,7 +63,7 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 	}
 
 	pub fn view_contiguous<'a>(
-		tensor: &'a SliceBatchRef<'a>,
+		tensor: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
 	) -> Result<generic::Tensor<ND<2>, &'a [T]>> {
 		tensor.ensure_safe()?;
 		let feature_dim = tensor.map.dims[1];
@@ -57,7 +75,7 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 	}
 
 	pub fn view_contiguous_mut<'a>(
-		tensor: &'a SliceBatchRefMut<'a>,
+		tensor: &'a generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
 	) -> Result<generic::Tensor<ND<2>, &'a mut [T]>> {
 		tensor.ensure_safe()?;
 		let feature_dim = tensor.map.dims[1];
@@ -69,7 +87,7 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 	}
 
 	pub fn view_contiguous_or_broadcasted<'a>(
-		tensor: &'a SliceBatchRef<'a>,
+		tensor: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
 	) -> Result<(generic::Tensor<ND<2>, &'a [T]>, bool)> {
 		tensor.ensure_safe()?;
 		let feature_dim = tensor.map.dims[1];
@@ -81,11 +99,11 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 			cold_path();
 			return Err(err_tensor_has_stride());
 		};
-		(tensor.view(), broadcast)
+		Ok((tensor.view()?, broadcast))
 	}
 
 	pub fn view_contiguous_or_broadcasted_mut<'a>(
-		tensor: &'a SliceBatchRefMut<'a>,
+		tensor: &'a generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
 	) -> Result<(generic::Tensor<ND<2>, &'a mut [T]>, bool)> {
 		tensor.ensure_safe()?;
 		let feature_dim = tensor.map.dims[1];
@@ -97,32 +115,35 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 			cold_path();
 			return Err(err_tensor_has_stride());
 		};
-		(tensor.view_mut(), broadcast)
+		Ok((tensor.view_mut()?, broadcast))
 	}
 
-	/// # Errors
-	/// - If 'dst' doesn't have a safe map.
-	pub fn nullary(o: &SliceBatchRefMut, mut f: impl FnMut(&mut T)) -> Result<()> {
+	pub fn nullary(
+		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
+		mut f: impl FnMut(&mut T),
+	) -> Result<()> {
 		let o = Self::view_contiguous_mut(o)?;
 		unsafe {
-			zip([o], [], [], |[o], [], []| f(o));
+			zip_elems([o], [], [], |[o], [], []| f(o));
 		}
 		Ok(())
 	}
 
 	pub fn unary(
-		o: &SliceBatchRefMut, a: &SliceBatchRef, mut f: impl FnMut(&mut T, T),
+		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		mut f: impl FnMut(&mut T, T),
 	) -> Result<()> {
-		ensure_same_shape([o, a])?;
+		ensure_same_shape([o], [a])?;
 		let o = Self::view_contiguous_mut(o)?;
 		let (a, a_broadcast) = Self::view_contiguous_or_broadcasted(a)?;
 		unsafe {
 			match a_broadcast {
 				false => {
-					zip([o], [a], [], |[o], [a], []| f(o, a));
+					zip_elems([o], [a], [], |[o], [a], []| f(o, a));
 				},
 				_ => {
-					zip([o], [], [a], |[o], [], [a]| f(o, a));
+					zip_elems([o], [], [a], |[o], [], [a]| f(o, a));
 				},
 			}
 		}
@@ -130,130 +151,130 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 	}
 
 	pub fn binary(
-		o: &SliceBatchRefMut, a: &SliceBatchRef, b: &SliceBatchRef, mut f: impl FnMut(&mut T, T, T),
+		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		mut f: impl FnMut(&mut T, T, T),
 	) -> Result<()> {
-		ensure_same_shape([o, a, b])?;
-		let o = Self::ensure_safe_contiguous_or_broadcasted(o)?;
+		ensure_same_shape([o], [a, b])?;
+		let o = Self::view_contiguous_mut(o)?;
 		let (a, a_broadcast) = Self::view_contiguous_or_broadcasted(a)?;
 		let (b, b_broadcast) = Self::view_contiguous_or_broadcasted(b)?;
 		unsafe {
 			match (a_broadcast, b_broadcast) {
 				(false, false) => {
-					zip([o], [a, b], [], |[o], [a, b], []| f(o, a, b));
+					zip_elems([o], [a, b], [], |[o], [a, b], []| f(o, a, b));
 				},
 				(false, _) => {
-					zip([o], [a], [b], |[o], [a], [b]| f(o, a, b));
+					zip_elems([o], [a], [b], |[o], [a], [b]| f(o, a, b));
 				},
 				(_, false) => {
-					zip([o], [b], [a], |[o], [b], [a]| f(o, a, b));
+					zip_elems([o], [b], [a], |[o], [b], [a]| f(o, a, b));
 				},
 				_ => {
-					zip([o], [], [a, b], |[o], [], [a, b]| f(o, a, b));
+					zip_elems([o], [], [a, b], |[o], [], [a, b]| f(o, a, b));
 				},
 			}
-		}
-		Ok(())
-	}
-
-	pub fn n_vec<const N: usize>(
-		t: [&SliceBatch; N], f: impl FnMut([&[Cell<T>]; N]),
-	) -> Result<()> {
-		ensure_same_shape(t)?;
-		let t = array::try_map(&t, |_, t| CPUInput::new_safe_contiguous(t))?;
-		unsafe {
-			vec_zip_n(t, f);
-		}
-		Ok(())
-	}
-
-	pub fn vec_reduce<const M: usize, const N: usize>(
-		r: [&SliceBatch; M], a: [&SliceBatch; N], f: impl FnMut([&Cell<T>; M], [&[Cell<T>]; N]),
-	) -> Result<()>
-	where
-		[(); 1 + N]:,
-	{
-		let a_shape = ensure_same_shape(a)?;
-		let r_shape = ensure_same_shape(r)?;
-		if r_shape[0] != a_shape[0] || r_shape[1] != 1 {
-			#[cold]
-			fn err_reduce_shape(r_shape: [usize; 2], a_shape: [usize; 2]) -> crate::Error {
-				let r0 = r_shape[0];
-				let r1 = r_shape[1];
-				let a0 = a_shape[0];
-				format!("Invalid output shape. Expected [{a0}, 1], got [{r0}, {r1}].",).into()
-			}
-			return Err(err_reduce_shape(r_shape, a_shape));
-		}
-		let r = array::try_map(&r, |_, r| CPUInput::new_safe_contiguous(r))?;
-		let a = array::try_map(&a, |_, a| CPUInput::new_safe_contiguous(a))?;
-		unsafe {
-			reduce_zip_n(r, a, f);
 		}
 		Ok(())
 	}
 }
 
 impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
-	fn read_bin(&self, dst: &SliceBatch, src: &mut dyn std::io::Read) -> Result<()> {
+	fn read_bin(
+		&self,
+		dst: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
+		src: &mut dyn std::io::Read,
+	) -> Result<()> {
 		let mut result = Ok(());
-		Self::n_vec([dst], |[dst]| {
-			if result.is_ok() {
-				let ptr = dst.as_ptr() as *mut u8;
-				let bytes = dst.len() * std::mem::size_of::<T>();
-				let slice = unsafe { std::slice::from_raw_parts_mut(ptr, bytes) };
-				result = src.read_exact(slice);
+		let dst = Self::view_contiguous_mut(dst)?;
+		unsafe {
+			zip_vecs([dst], [], |[dst], []| {
+				if result.is_ok() {
+					let ptr = dst.as_mut_ptr().cast();
+					let bytes = dst.len() * std::mem::size_of::<T>();
+					let slice = std::slice::from_raw_parts_mut(ptr, bytes);
+					result = src.read_exact(slice);
 
-				// We always store values as little-endian,
-				// so conversion is needed for big-endian targets
-				#[cfg(target_endian = "big")]
-				{
-					todo!("Reading from binary file on big-endian targets is not implemented yet");
+					// We always store values as little-endian,
+					// so conversion is needed for big-endian targets
+					#[cfg(target_endian = "big")]
+					{
+						todo!(
+							"Reading from binary file on big-endian targets is not implemented yet"
+						);
+					}
 				}
-			}
-		})?;
+			});
+		}
 		result.map_err(Into::into)
 	}
 
-	fn write_bin(&self, src: &SliceBatch, dst: &mut dyn std::io::Write) -> Result<()> {
+	fn write_bin(
+		&self,
+		src: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		dst: &mut dyn std::io::Write,
+	) -> Result<()> {
 		#[cfg(target_endian = "big")]
 		{
 			todo!("Saving to binary file on big-endian targets is not implemented yet");
 		}
 		let mut result = Ok(());
-		Self::n_vec([src], |[src]| {
-			if result.is_ok() {
-				let ptr = src.as_ptr() as *const u8;
-				let bytes = src.len() * std::mem::size_of::<f32>();
-				let slice = unsafe { std::slice::from_raw_parts(ptr, bytes) };
-				result = dst.write_all(slice);
-			}
-		})?;
+		let src = Self::view_contiguous(src)?;
+		unsafe {
+			zip_vecs([], [src], |[], [src]| {
+				if result.is_ok() {
+					let ptr = src.as_ptr().cast();
+					let bytes = src.len() * std::mem::size_of::<T>();
+					let slice = std::slice::from_raw_parts(ptr, bytes);
+					result = dst.write_all(slice);
+				}
+			});
+		}
 		result.map_err(Into::into)
 	}
 
-	fn zeros(&self, o: &SliceBatchRefMut) -> Result<()> {
+	fn zeros(&self, o: &generic::Tensor<ND<2>, DeviceBufferRefMut>) -> Result<()> {
 		Self::nullary(o, |o| *o = T::from_f64(0.0))
 	}
 
-	fn randn_clamped(&self, o: &SliceBatchRefMut) -> Result<()> {
+	fn randn_clamped(&self, o: &generic::Tensor<ND<2>, DeviceBufferRefMut>) -> Result<()> {
 		let mut rng = self.rng.borrow_mut();
 		Self::nullary(o, |o| *o = T::from_f64(rng.get_normal_clamped()))
 	}
 
-	fn copy(&self, o: &SliceBatchRefMut, a: &SliceBatchRef) -> Result<()> {
+	fn copy(
+		&self,
+		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
+	) -> Result<()> {
 		Self::unary(o, a, |o, a| *o = a)
 	}
 
-	fn rsqrt(&self, o: &SliceBatchRefMut, a: &SliceBatchRef, scale: f64, eps: f64) -> Result<()> {
+	fn rsqrt(
+		&self,
+		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		scale: f64,
+		eps: f64,
+	) -> Result<()> {
 		Self::unary(o, a, |o, a| *o = T::from_f64(math::rsqrt(a.to_f64() * scale, eps)))
 	}
 
-	fn ln_clamped(&self, o: &SliceBatchRefMut, a: &SliceBatchRef) -> Result<()> {
+	fn ln_clamped(
+		&self,
+		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
+	) -> Result<()> {
 		Self::unary(o, a, |o, a| *o = T::from_f64(a.to_f64().ln().max(-1000.0)))
 	}
 
 	fn add_weighted(
-		&self, o: &SliceBatchRefMut, a: &SliceBatchRef, a_weight: f64, b: &SliceBatchRef,
+		&self,
+		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		a_weight: f64,
+		b: &generic::Tensor<ND<2>, DeviceBufferRef>,
 		b_weight: f64,
 	) -> Result<()> {
 		Self::binary(o, a, b, |o, a, b| {
@@ -261,14 +282,24 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		})
 	}
 
-	fn mul(&self, o: &SliceBatchRefMut, a: &SliceBatchRef, b: &SliceBatchRef) -> Result<()> {
+	fn mul(
+		&self,
+		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+	) -> Result<()> {
 		Self::binary(o, a, b, |o, a, b| *o = T::from_f64(a.to_f64() * b.to_f64()))
 	}
 
 	#[allow(clippy::many_single_char_names)]
 	fn mul_add(
-		&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64, c: &SliceBatch,
-		c_weight: f64,
+		&self,
+		_o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
+		_a: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		_b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		_ab_weight: f64,
+		_c: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		_c_weight: f64,
 	) -> Result<()> {
 		/*Self::n_contiguous([o, a, b, c], |[o, a, b, c]| {
 			let a = a.get().to_f64();
@@ -281,7 +312,12 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 	}
 
 	fn mul_acc(
-		&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64, o_weight: f64,
+		&self,
+		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		ab_weight: f64,
+		o_weight: f64,
 	) -> Result<()> {
 		Self::binary(o, a, b, |o, a, b| {
 			*o = T::from_f64(math::add_weighted(
@@ -293,32 +329,31 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		})
 	}
 
-	fn swiglu(&self, out: &SliceBatch, lin: &SliceBatch, gate: &SliceBatch) -> Result<()> {
-		ensure_same_shape([out, lin, gate])?;
-
-		Self::ensure_safe_contiguous(out)?;
-		let out = out.borrow_mut()?;
-		let out = out.view_mut::<T>()?;
-
-		Self::ensure_safe_contiguous(lin)?;
-		let lin = lin.borrow()?;
-		let lin = lin.view::<T>()?;
-
-		Self::ensure_safe_contiguous(gate)?;
-		let gate = gate.borrow()?;
-		let gate = gate.view::<T>()?;
-
+	fn swiglu(
+		&self,
+		out: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
+		lin: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		gate: &generic::Tensor<ND<2>, DeviceBufferRef>,
+	) -> Result<()> {
+		ensure_same_shape([out], [lin, gate])?;
+		let out = Self::view_contiguous_mut(out)?;
+		let lin = Self::view_contiguous(lin)?;
+		let gate = Self::view_contiguous(gate)?;
 		unsafe {
-			zip([out], [lin, gate], [], |[out], [lin, gate], []| {
-				*out = math::swiglu(lin.to_f64(), gate.to_f64());
+			zip_elems([out], [lin, gate], [], |[out], [lin, gate], []| {
+				*out = T::from_f64(math::swiglu(lin.to_f64(), gate.to_f64()));
 			});
 		}
 		Ok(())
 	}
 
 	fn swiglu_backward(
-		&self, d_lin: &SliceBatch, d_gate: &SliceBatch, lin: &SliceBatch, gate: &SliceBatch,
-		d_out: &SliceBatch,
+		&self,
+		_d_lin: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
+		_d_gate: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
+		_lin: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		_gate: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		_d_out: &generic::Tensor<ND<2>, DeviceBufferRef>,
 	) -> Result<()> {
 		/*Self::n_contiguous(
 			[d_lin, d_gate, lin, gate, d_out],
@@ -334,90 +369,128 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		todo!("FloatExecutor::swiglu_backward is not implemented yet");
 	}
 
-	fn sum_all(&self, a: &SliceBatch) -> Result<f64> {
+	fn sum_all(&self, a: &generic::Tensor<ND<2>, DeviceBufferRef>) -> Result<f64> {
 		// TODO - this could handle broadcasted tensors as well
-		Self::ensure_safe_contiguous(a)?;
-		let a = a.borrow()?;
-		let a = a.view::<T>()?;
-
+		let a = Self::view_contiguous(a)?;
 		let mut sum = 0.0;
 		unsafe {
-			zip([], [a], [], |[], [a], []| {
+			zip_elems([], [a], [], |[], [a], []| {
 				sum += a.to_f64();
 			});
 		}
 		Ok(sum)
 	}
 
-	fn approx_eq(&self, a: &SliceBatch, b: &SliceBatch, eps: f64) -> Result<bool> {
+	fn approx_eq(
+		&self,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		eps: f64,
+	) -> Result<bool> {
 		// TODO - this could handle broadcasted tensors as well
-		Self::ensure_safe_contiguous(a)?;
-		let a = a.borrow()?;
-		let a = a.view::<T>()?;
-
-		Self::ensure_safe_contiguous(b)?;
-		let b = b.borrow()?;
-		let b = b.view::<T>()?;
-
+		ensure_same_shape([], [a, b])?;
+		let a = Self::view_contiguous(a)?;
+		let b = Self::view_contiguous(b)?;
 		let mut result = true;
 		unsafe {
-			zip([], [a, b], [], |[], [a, b], []| {
+			zip_elems([], [a, b], [], |[], [a, b], []| {
 				result &= math::approx_eq(a.to_f64(), b.to_f64(), eps);
 			});
 		}
 		Ok(result)
 	}
 
-	fn softmax(&self, out: &SliceBatch, inp: &SliceBatch) -> Result<()> {
-		Self::n_vec([out, inp], |[out, inp]| math::softmax(out, inp))
+	fn softmax(
+		&self,
+		out: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
+		inp: &generic::Tensor<ND<2>, DeviceBufferRef>,
+	) -> Result<()> {
+		ensure_same_shape([out], [inp])?;
+		let out = Self::view_contiguous_mut(out)?;
+		let inp = Self::view_contiguous(inp)?;
+		unsafe {
+			zip_vecs([out], [inp], |[out], [inp]| {
+				let (_max, sum) = math::softmax_part1(inp, out);
+				math::softmax_part2_(sum, out);
+			});
+		}
+		Ok(())
 	}
 
-	fn dot(&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch, scale: f64) -> Result<()> {
-		Self::vec_reduce([o], [a, b], |o, [a, b]| {
-			let dot = math::dot(a, b);
-			let v = dot * scale;
-			o[0].set(T::from_f64(v));
-		})
+	fn dot(
+		&self,
+		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		scale: f64,
+	) -> Result<()> {
+		let shape = ensure_same_shape([], [a, b])?;
+		ensure_expected_shape(o, [shape[0], 1])?;
+		let o = Self::view_contiguous_mut(o)?;
+		let a = Self::view_contiguous(a)?;
+		let b = Self::view_contiguous(b)?;
+		unsafe {
+			zip_vec_reduce(o, [a, b], |o, [a, b]| *o = T::from_f64(math::dot(a, b) * scale));
+		}
+		Ok(())
 	}
 
 	#[allow(clippy::many_single_char_names)]
 	fn dot_add(
-		&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch, ab_weight: f64, c: &SliceBatch,
-		c_weight: f64,
+		&self,
+		_o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
+		_a: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		_b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		_ab_weight: f64,
+		_c: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		_c_weight: f64,
 	) -> Result<()> {
-		Self::vec_reduce([o, c], [a, b], |[o, c], [a, b]| {
+		/*Self::vec_reduce([o, c], [a, b], |[o, c], [a, b]| {
 			let c = c.get().to_f64();
 			let dot = math::dot(a, b);
 			let v = math::add_weighted(dot, ab_weight, c, c_weight);
 			o.set(T::from_f64(v));
-		})
+		})*/
+		todo!("FloatExecutor::dot_add is not implemented yet");
 	}
 
 	fn rsqrt_dot(
-		&self, o: &SliceBatch, a: &SliceBatch, b: &SliceBatch, scale: f64, eps: f64,
+		&self,
+		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		scale: f64,
+		eps: f64,
 	) -> Result<()> {
-		Self::vec_reduce([o], [a, b], |o, [a, b]| {
-			let dot = math::dot(a, b);
-			let v = math::rsqrt(dot * scale, eps);
-			o[0].set(T::from_f64(v));
-		})
+		let shape = ensure_same_shape([], [a, b])?;
+		ensure_expected_shape(o, [shape[0], 1])?;
+		let o = Self::view_contiguous_mut(o)?;
+		let a = Self::view_contiguous(a)?;
+		let b = Self::view_contiguous(b)?;
+		unsafe {
+			zip_vec_reduce(o, [a, b], |o, [a, b]| {
+				let dot = math::dot(a, b);
+				*o = T::from_f64(math::rsqrt(dot * scale, eps));
+			});
+		}
+		Ok(())
 	}
 
-	fn mm(&self, o: &MatrixBatch, a: &MatrixBatch, b: &MatrixBatch, scale: f64) -> Result<()> {
+	fn mm(
+		&self,
+		_o: &generic::Tensor<ND<3>, DeviceBufferRefMut>,
+		_a: &generic::Tensor<ND<3>, DeviceBufferRef>,
+		_b: &generic::Tensor<ND<3>, DeviceBufferRef>,
+		_scale: f64,
+	) -> Result<()> {
 		//for i in 0..o.map.dims[0].size {
 		//	let o = o.select(0, i)?;
 		//}
 
-		for m in o.iter_along_axis(0) {
-			xyz(&m);
-		}
+		//for m in o.iter_along_axis(0) {
+		//	xyz(&m);
+		//}
 
 		Ok(()) // TODO
 	}
-}
-
-// TODO - delete
-#[inline(never)]
-fn xyz(a: &SliceBatch) {
-	println!("hello world. offset = {}", a.map.offset);
 }
