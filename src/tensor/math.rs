@@ -32,8 +32,8 @@ pub(crate) fn __elem_wise<const O: usize, const C: usize>(
 	o: [&Tensor; O],
 	c: [&Tensor; C],
 	mut f: impl FnMut(
-		[generic::Tensor<ND<2>, DeviceBufferRefMut>; O],
-		[generic::Tensor<ND<2>, DeviceBufferRef>; C],
+		&[generic::Tensor<ND<2>, DeviceBufferRefMut>; O],
+		&[generic::Tensor<ND<2>, DeviceBufferRef>; C],
 	) -> Result<()>,
 ) -> Result<()>
 where
@@ -48,33 +48,51 @@ where
 	let batch_dims = merger.dims_increasing_without_smallest();
 	let batch_iter = batch_dims.iter();
 
-	let o_buffers = o.try_map(|t| t.buf.try_borrow_mut())?;
-	let c_buffers = c.try_map(|t| t.buf.try_borrow())?;
+	let mut o_buffers = Some(o.try_map(|t| t.buf.try_borrow_mut())?);
+	let mut c_buffers = Some(c.try_map(|t| t.buf.try_borrow())?);
 
 	let o_offsets = o.map(|t| t.map.offset);
 	let c_offsets = c.map(|t| t.map.offset);
-	let offsets = array::concat_arrays(o_offsets, c_offsets);
 
 	batch::run(
 		batch_iter,
-		offsets,
-		|batch_size: usize, batch_strides: [usize; O + C], offsets: [usize; O + C]| {
-			f(std::array::from_fn(|i| SliceBatch {
+		o_offsets,
+		c_offsets,
+		|batch_size: usize,
+		 o_strides: [usize; O],
+		 c_strides: [usize; C],
+		 o_offsets: [usize; O],
+		 c_offsets: [usize; C]| {
+			let o_tensors = array::map_into(o_buffers.take().unwrap(), |i, buf| generic::Tensor {
 				map: ND {
 					dims: [
-						SizeAndStride {
-							size: batch_size,
-							stride: batch_strides[i],
-						},
+						SizeAndStride { size: batch_size, stride: o_strides[i] },
 						SizeAndStride {
 							size: smallest.size,
 							stride: smallest.strides[i],
 						},
 					],
-					offset: offsets[i],
+					offset: o_offsets[i],
 				},
-				buf: buffers[i],
-			}))
+				buf,
+			});
+			let c_tensors = array::map_into(c_buffers.take().unwrap(), |i, buf| generic::Tensor {
+				map: ND {
+					dims: [
+						SizeAndStride { size: batch_size, stride: c_strides[i] },
+						SizeAndStride {
+							size: smallest.size,
+							stride: smallest.strides[O + i],
+						},
+					],
+					offset: c_offsets[i],
+				},
+				buf,
+			});
+			f(&o_tensors, &c_tensors)?;
+			o_buffers = Some(array::map_into(o_tensors, |_, t| t.buf));
+			c_buffers = Some(array::map_into(c_tensors, |_, t| t.buf));
+			Ok(())
 		},
 	)
 }

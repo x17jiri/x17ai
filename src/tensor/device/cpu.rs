@@ -131,7 +131,7 @@ impl CPUDevice {
 		Ok(unsafe { std::slice::from_raw_parts(data.cast(), elems) })
 	}
 
-	pub fn view_mut<'a, T: HasDType>(buf: &DeviceBufferRefMut<'a>) -> Result<&'a mut [T]> {
+	pub fn view_mut<'a, T: HasDType>(buf: &mut DeviceBufferRefMut<'a>) -> Result<&'a mut [T]> {
 		Self::ensure_can_view::<T>(buf)?;
 		let data = buf.device_data;
 		let elems = buf.elems;
@@ -480,7 +480,12 @@ impl Executor for CPUDevice {
 	}
 
 	fn attention(
-		&self, dst: &SliceSet, q: &SliceSet, k: &SliceSet, v: &SliceSet, params: &AttentionParams,
+		&self,
+		dst: &SliceSet,
+		q: &SliceSet,
+		k: &SliceSet,
+		v: &SliceSet,
+		params: &AttentionParams,
 	) {
 		match dst.dtype {
 			f32::dtype => self.attention_f::<f32>(&dst, &q, &k, &v, params),
@@ -489,8 +494,13 @@ impl Executor for CPUDevice {
 	}
 
 	fn format(
-		&self, f: &mut std::fmt::Formatter, buffer: &Buffer, dtype: DType, offset: usize,
-		len: usize, stride: usize,
+		&self,
+		f: &mut std::fmt::Formatter,
+		buffer: &Buffer,
+		dtype: DType,
+		offset: usize,
+		len: usize,
+		stride: usize,
 	) -> std::fmt::Result {
 		match dtype {
 			f32::dtype => self.format_f::<f32>(f, buffer, offset, len, stride),

@@ -81,8 +81,8 @@ impl<const N: usize> DimMerger<N> {
 			let next_dim = MergedDim { size, strides };
 
 			// Do we have to add a new dimension?
-			let are_strides_valid = next_dim.size > 1;
-			if are_strides_valid
+			let can_have_arbitrary_strides = next_dim.size <= 1;
+			if !can_have_arbitrary_strides
 				&& (0..N).any(|i| next_dim.strides[i] != prev_dim.size * prev_dim.strides[i])
 			{
 				cold_path();
