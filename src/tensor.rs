@@ -16,7 +16,6 @@ use crate::tensor::device::executor::Executor;
 use crate::tensor::generic::map::DD;
 use crate::tensor::math::EvaluatesToTensor;
 
-pub mod batch;
 pub mod device;
 pub mod dim_merger;
 pub mod generic;

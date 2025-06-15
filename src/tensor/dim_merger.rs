@@ -12,10 +12,14 @@ use std::intrinsics::cold_path;
 use crate::Result;
 use crate::tensor::generic::map::SizeAndStride;
 
-const MERGER_INLINE_DIMS: usize = if crate::tensor::generic::map::dd::INLINE_DIMS > 3 {
-	crate::tensor::generic::map::dd::INLINE_DIMS
-} else {
-	3
+const MAX_SPLIT: usize = 3;
+
+const MERGER_INLINE_DIMS: usize = {
+	if crate::tensor::generic::map::dd::INLINE_DIMS > MAX_SPLIT {
+		crate::tensor::generic::map::dd::INLINE_DIMS
+	} else {
+		MAX_SPLIT
+	}
 };
 
 #[derive(Clone, Copy)]
@@ -47,7 +51,7 @@ impl<const N: usize> DimMerger<N> {
 		// This way if the real first dimension is contiguous, we will extend the initial
 		// value and not take the cold path in the loop.
 		let mut merger = DimMerger {
-			dims_increasing: smallvec![MergedDim { size: 1, strides: [1; N] }; MERGER_INLINE_DIMS],
+			dims_increasing: smallvec![MergedDim { size: 1, strides: [1; N] }; MAX_SPLIT],
 		};
 		merger.dims_increasing.truncate(1);
 		let mut prev_dim = merger.dims_increasing.last_mut().unwrap();
@@ -108,9 +112,9 @@ impl<const N: usize> DimMerger<N> {
 
 	pub fn split<const K: usize>(&self) -> (&[MergedDim<N>; K], &[MergedDim<N>])
 	where
-		// In `::new()`, we initialize `dims_increasing` with MERGER_INLINE_DIMS elements,
+		// In `::new()`, we initialize `dims_increasing` with MAX_SPLIT elements,
 		// so we know there is at least that many guaranteed.
-		[(); K - MERGER_INLINE_DIMS]:,
+		[(); MAX_SPLIT - K]:,
 	{
 		unsafe {
 			let result = self.dims_increasing.as_ptr();
@@ -119,14 +123,5 @@ impl<const N: usize> DimMerger<N> {
 			let rest = self.dims_increasing.get_unchecked(K..);
 			(result, rest)
 		}
-	}
-
-	pub fn get<const K: usize>(&self) -> &[MergedDim<N>; K]
-	where
-		[(); K - MERGER_INLINE_DIMS]:,
-	{
-		let (result, rest) = self.split::<K>();
-		assert!(rest.is_empty(), "rest is not empty");
-		result
 	}
 }
