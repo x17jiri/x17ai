@@ -11,7 +11,12 @@ use std::intrinsics::cold_path;
 
 use crate::Result;
 use crate::tensor::generic::map::SizeAndStride;
-use crate::tensor::generic::map::dd::INLINE_DIMS;
+
+const MERGER_INLINE_DIMS: usize = if crate::tensor::generic::map::dd::INLINE_DIMS > 3 {
+	crate::tensor::generic::map::dd::INLINE_DIMS
+} else {
+	3
+};
 
 #[derive(Clone, Copy)]
 pub struct MergedDim<const N: usize> {
@@ -29,17 +34,7 @@ impl<const N: usize> MergedDim<N> {
 pub struct DimMerger<const N: usize> {
 	/// We order dimensions from smallest to largest stride.
 	/// This is the reverse order of how they are stored in a Tensor.
-	dims_increasing: SmallVec<[MergedDim<N>; INLINE_DIMS]>,
-}
-
-pub struct MergedDimList<const N: usize> {
-	dims_increasing: SmallVec<[MergedDim<N>; INLINE_DIMS]>,
-	start: usize,
-}
-
-#[derive(Clone)]
-pub struct MergedDimIter<'a, const N: usize> {
-	iter: std::slice::Iter<'a, MergedDim<N>>,
+	dims_increasing: SmallVec<[MergedDim<N>; MERGER_INLINE_DIMS]>,
 }
 
 impl<const N: usize> DimMerger<N> {
@@ -52,8 +47,9 @@ impl<const N: usize> DimMerger<N> {
 		// This way if the real first dimension is contiguous, we will extend the initial
 		// value and not take the cold path in the loop.
 		let mut merger = DimMerger {
-			dims_increasing: smallvec![MergedDim { size: 1, strides: [1; N] }],
+			dims_increasing: smallvec![MergedDim { size: 1, strides: [1; N] }; MERGER_INLINE_DIMS],
 		};
+		merger.dims_increasing.truncate(1);
 		let mut prev_dim = merger.dims_increasing.last_mut().unwrap();
 
 		for index_from_end in 1..=ndim {
@@ -110,60 +106,27 @@ impl<const N: usize> DimMerger<N> {
 		self.dims_increasing.last_mut().unwrap()
 	}
 
-	pub fn dims_increasing(self) -> MergedDimList<N> {
-		MergedDimList {
-			dims_increasing: self.dims_increasing,
-			start: 0,
+	pub fn split<const K: usize>(&self) -> (&[MergedDim<N>; K], &[MergedDim<N>])
+	where
+		// In `::new()`, we initialize `dims_increasing` with MERGER_INLINE_DIMS elements,
+		// so we know there is at least that many guaranteed.
+		[(); K - MERGER_INLINE_DIMS]:,
+	{
+		unsafe {
+			let result = self.dims_increasing.as_ptr();
+			let result = result.cast::<[MergedDim<N>; K]>();
+			let result = result.as_ref().unwrap_unchecked();
+			let rest = self.dims_increasing.get_unchecked(K..);
+			(result, rest)
 		}
 	}
 
-	pub fn smallest_dim(&self) -> MergedDim<N> {
-		// SAFETY: In `new()`, we create `dims_increasing` with at least one element
-		// and we never remove elements from it.
-		unsafe { *self.dims_increasing.get_unchecked(0) }
-	}
-
-	pub fn dims_increasing_without_smallest(self) -> MergedDimList<N> {
-		MergedDimList {
-			dims_increasing: self.dims_increasing,
-			start: 1,
-		}
-	}
-}
-
-impl<const N: usize> MergedDimList<N> {
-	pub fn iter(&self) -> MergedDimIter<'_, N> {
-		let slice = unsafe { self.dims_increasing.get_unchecked(self.start..) };
-		MergedDimIter { iter: slice.iter() }
-	}
-
-	pub fn len(&self) -> usize {
-		self.dims_increasing.len() - self.start
-	}
-}
-
-impl<'a, const N: usize> Iterator for MergedDimIter<'a, N> {
-	type Item = MergedDim<N>;
-
-	fn next(&mut self) -> Option<Self::Item> {
-		self.iter.next().copied()
-	}
-}
-
-impl<'a, const N: usize> ExactSizeIterator for MergedDimIter<'a, N> {
-	fn len(&self) -> usize {
-		self.iter.len()
-	}
-}
-
-impl<'a, const N: usize> DoubleEndedIterator for MergedDimIter<'a, N> {
-	fn next_back(&mut self) -> Option<Self::Item> {
-		self.iter.next_back().copied()
-	}
-}
-
-impl<'a, const N: usize> MergedDimIter<'a, N> {
-	pub fn is_empty(&self) -> bool {
-		self.iter.len() == 0
+	pub fn get<const K: usize>(&self) -> &[MergedDim<N>; K]
+	where
+		[(); K - MERGER_INLINE_DIMS]:,
+	{
+		let (result, rest) = self.split::<K>();
+		assert!(rest.is_empty(), "rest is not empty");
+		result
 	}
 }
