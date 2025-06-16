@@ -168,9 +168,9 @@ fn main() {
 	let dev = CPUDevice::new();
 	let (map, elems) = ND::new(&[3, 4, 5]).unwrap();
 	let buf = dev.clone().new_buffer(f32::dtype, elems).unwrap();
-	let t = Tensor { map, buf: buf.as_ref() };
+	/*	let t = Tensor { map, buf: buf.as_ref() };
 	let exec = &dev.f32_executor;
-	exec.mm(&t, &t, &t, 1.0).unwrap();
+	exec.mm(&t, &t, &t, 1.0).unwrap();*/
 }
 
 #[cfg(false)]

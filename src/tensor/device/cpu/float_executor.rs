@@ -57,16 +57,19 @@ pub struct FloatExecutor<T: Copy + HasDType + FromToF64> {
 	phantom: std::marker::PhantomData<T>,
 }
 
-impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
+impl<T: Copy + HasDType + FromToF64> FloatExecutor<T>
+where
+	T: 'static,
+{
 	pub fn new(rng: Rc<RefCell<Rng>>) -> Self {
 		Self { rng, phantom: std::marker::PhantomData }
 	}
 
-	pub fn view_contiguous<'a>(
-		tensor: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
-	) -> Result<generic::Tensor<ND<2>, &'a [T]>>
+	pub fn view_contiguous<'buf>(
+		tensor: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+	) -> Result<generic::Tensor<ND<2>, &'buf [T]>>
 	where
-		T: 'a,
+		T: 'static,
 	{
 		tensor.ensure_safe()?;
 		let feature_dim = tensor.map.dims[1];
@@ -77,11 +80,11 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 		tensor.view()
 	}
 
-	pub fn view_contiguous_mut<'a, 'b>(
-		tensor: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'b>>,
-	) -> Result<generic::Tensor<ND<2>, &'b mut [T]>>
+	pub fn view_contiguous_mut<'buf>(
+		tensor: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+	) -> Result<generic::Tensor<ND<2>, &'buf mut [T]>>
 	where
-		T: 'b,
+		T: 'static,
 	{
 		tensor.ensure_safe()?;
 		let feature_dim = tensor.map.dims[1];
@@ -92,11 +95,11 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 		tensor.view_mut()
 	}
 
-	pub fn view_contiguous_or_broadcasted<'a>(
-		tensor: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
-	) -> Result<(generic::Tensor<ND<2>, &'a [T]>, bool)>
+	pub fn view_contiguous_or_broadcasted<'buf>(
+		tensor: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+	) -> Result<(generic::Tensor<ND<2>, &'buf [T]>, bool)>
 	where
-		T: 'a,
+		T: 'static,
 	{
 		tensor.ensure_safe()?;
 		let feature_dim = tensor.map.dims[1];
@@ -111,11 +114,11 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 		Ok((tensor.view()?, broadcast))
 	}
 
-	pub fn view_contiguous_or_broadcasted_mut<'a>(
-		tensor: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
-	) -> Result<(generic::Tensor<ND<2>, &'a mut [T]>, bool)>
+	pub fn view_contiguous_or_broadcasted_mut<'buf>(
+		tensor: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+	) -> Result<(generic::Tensor<ND<2>, &'buf mut [T]>, bool)>
 	where
-		T: 'a,
+		T: 'static,
 	{
 		tensor.ensure_safe()?;
 		let feature_dim = tensor.map.dims[1];
@@ -130,12 +133,12 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 		Ok((tensor.view_mut()?, broadcast))
 	}
 
-	pub fn nullary<'a, 'b>(
-		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'b>>,
+	pub fn nullary<'buf>(
+		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 		mut f: impl FnMut(&mut T),
 	) -> Result<()>
 	where
-		T: 'b,
+		T: 'static,
 	{
 		let o = Self::view_contiguous_mut(o)?;
 		unsafe {
@@ -144,13 +147,13 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 		Ok(())
 	}
 
-	pub fn unary<'a>(
-		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
-		a: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
+	pub fn unary<'buf>(
+		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		mut f: impl FnMut(&mut T, T),
 	) -> Result<()>
 	where
-		T: 'a,
+		T: 'static,
 	{
 		ensure_same_shape([o], [a])?;
 		let o = Self::view_contiguous_mut(o)?;
@@ -168,14 +171,14 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 		Ok(())
 	}
 
-	pub fn binary<'a>(
-		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
-		a: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
-		b: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
+	pub fn binary<'buf>(
+		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		mut f: impl FnMut(&mut T, T, T),
 	) -> Result<()>
 	where
-		T: 'a,
+		T: 'static,
 	{
 		ensure_same_shape([o], [a, b])?;
 		let o = Self::view_contiguous_mut(o)?;
@@ -201,11 +204,14 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 	}
 }
 
-impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
-	fn read_bin<'a>(
-		&'a self,
-		dst: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
-		src: &'a mut dyn std::io::Read,
+impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T>
+where
+	T: 'static,
+{
+	fn read_bin<'buf>(
+		&self,
+		dst: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		src: &mut dyn std::io::Read,
 	) -> Result<()> {
 		let mut result = Ok(());
 		let dst = Self::view_contiguous_mut(dst)?;
@@ -231,9 +237,9 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		result.map_err(Into::into)
 	}
 
-	fn write_bin(
+	fn write_bin<'buf>(
 		&self,
-		src: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		src: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		dst: &mut dyn std::io::Write,
 	) -> Result<()> {
 		#[cfg(target_endian = "big")]
@@ -255,53 +261,50 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		result.map_err(Into::into)
 	}
 
-	fn zeros<'a, 'b, 'c>(
-		&'a self,
-		o: &'b mut generic::Tensor<ND<2>, DeviceBufferRefMut<'c>>,
-	) -> Result<()> {
+	fn zeros<'buf>(&self, o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>) -> Result<()> {
 		Self::nullary(o, |o| *o = T::from_f64(0.0))
 	}
 
-	fn randn_clamped<'a>(
-		&'a self,
-		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+	fn randn_clamped<'buf>(
+		&self,
+		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 	) -> Result<()> {
 		let mut rng = self.rng.borrow_mut();
 		Self::nullary(o, |o| *o = T::from_f64(rng.get_normal_clamped()))
 	}
 
-	fn copy<'a>(
-		&'a self,
-		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
-		a: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
+	fn copy<'buf>(
+		&self,
+		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 	) -> Result<()> {
 		Self::unary(o, a, |o, a| *o = a)
 	}
 
-	fn rsqrt<'a>(
-		&'a self,
-		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
-		a: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
+	fn rsqrt<'buf>(
+		&self,
+		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		scale: f64,
 		eps: f64,
 	) -> Result<()> {
 		Self::unary(o, a, |o, a| *o = T::from_f64(math::rsqrt(a.to_f64() * scale, eps)))
 	}
 
-	fn ln_clamped<'a>(
-		&'a self,
-		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
-		a: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
+	fn ln_clamped<'buf>(
+		&self,
+		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 	) -> Result<()> {
 		Self::unary(o, a, |o, a| *o = T::from_f64(a.to_f64().ln().max(-1000.0)))
 	}
 
-	fn add_weighted(
+	fn add_weighted<'buf>(
 		&self,
-		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		a_weight: f64,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		b_weight: f64,
 	) -> Result<()> {
 		Self::binary(o, a, b, |o, a, b| {
@@ -309,23 +312,23 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		})
 	}
 
-	fn mul(
+	fn mul<'buf>(
 		&self,
-		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 	) -> Result<()> {
 		Self::binary(o, a, b, |o, a, b| *o = T::from_f64(a.to_f64() * b.to_f64()))
 	}
 
 	#[allow(clippy::many_single_char_names)]
-	fn mul_add(
+	fn mul_add<'buf>(
 		&self,
-		_o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		_a: &generic::Tensor<ND<2>, DeviceBufferRef>,
-		_b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		_o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		_a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		_b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		_ab_weight: f64,
-		_c: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		_c: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		_c_weight: f64,
 	) -> Result<()> {
 		/*Self::n_contiguous([o, a, b, c], |[o, a, b, c]| {
@@ -338,11 +341,11 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		todo!("FloatExecutor::mul_add is not implemented yet");
 	}
 
-	fn mul_acc(
+	fn mul_acc<'buf>(
 		&self,
-		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		ab_weight: f64,
 		o_weight: f64,
 	) -> Result<()> {
@@ -356,11 +359,11 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		})
 	}
 
-	fn swiglu(
+	fn swiglu<'buf>(
 		&self,
-		out: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		lin: &generic::Tensor<ND<2>, DeviceBufferRef>,
-		gate: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		out: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		lin: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		gate: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 	) -> Result<()> {
 		ensure_same_shape([out], [lin, gate])?;
 		let out = Self::view_contiguous_mut(out)?;
@@ -374,13 +377,13 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		Ok(())
 	}
 
-	fn swiglu_backward(
+	fn swiglu_backward<'buf>(
 		&self,
-		_d_lin: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		_d_gate: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		_lin: &generic::Tensor<ND<2>, DeviceBufferRef>,
-		_gate: &generic::Tensor<ND<2>, DeviceBufferRef>,
-		_d_out: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		_d_lin: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		_d_gate: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		_lin: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		_gate: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		_d_out: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 	) -> Result<()> {
 		/*Self::n_contiguous(
 			[d_lin, d_gate, lin, gate, d_out],
@@ -396,7 +399,7 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		todo!("FloatExecutor::swiglu_backward is not implemented yet");
 	}
 
-	fn sum_all(&self, a: &generic::Tensor<ND<2>, DeviceBufferRef>) -> Result<f64> {
+	fn sum_all<'buf>(&self, a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>) -> Result<f64> {
 		// TODO - this could handle broadcasted tensors as well
 		let a = Self::view_contiguous(a)?;
 		let mut sum = 0.0;
@@ -408,10 +411,10 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		Ok(sum)
 	}
 
-	fn approx_eq(
+	fn approx_eq<'buf>(
 		&self,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		eps: f64,
 	) -> Result<bool> {
 		// TODO - this could handle broadcasted tensors as well
@@ -427,10 +430,10 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		Ok(result)
 	}
 
-	fn softmax(
+	fn softmax<'buf>(
 		&self,
-		out: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		inp: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		out: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		inp: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 	) -> Result<()> {
 		ensure_same_shape([out], [inp])?;
 		let out = Self::view_contiguous_mut(out)?;
@@ -444,11 +447,25 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		Ok(())
 	}
 
-	fn dot(
+	fn softmax_<'buf>(
 		&self,
-		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		t: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+	) -> Result<()> {
+		let t = Self::view_contiguous_mut(t)?;
+		unsafe {
+			zip_vecs([t], [], |[t], []| {
+				let (_max, sum) = math::softmax_part1_(t);
+				math::softmax_part2_(sum, t);
+			});
+		}
+		Ok(())
+	}
+
+	fn dot<'buf>(
+		&self,
+		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		scale: f64,
 	) -> Result<()> {
 		let shape = ensure_same_shape([], [a, b])?;
@@ -463,13 +480,13 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 	}
 
 	#[allow(clippy::many_single_char_names)]
-	fn dot_add(
+	fn dot_add<'buf>(
 		&self,
-		_o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		_a: &generic::Tensor<ND<2>, DeviceBufferRef>,
-		_b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		_o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		_a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		_b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		_ab_weight: f64,
-		_c: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		_c: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		_c_weight: f64,
 	) -> Result<()> {
 		/*Self::vec_reduce([o, c], [a, b], |[o, c], [a, b]| {
@@ -481,11 +498,11 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		todo!("FloatExecutor::dot_add is not implemented yet");
 	}
 
-	fn rsqrt_dot(
+	fn rsqrt_dot<'buf>(
 		&self,
-		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		scale: f64,
 		eps: f64,
 	) -> Result<()> {
@@ -503,11 +520,11 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		Ok(())
 	}
 
-	fn mm(
+	fn mm<'buf>(
 		&self,
-		_o: &generic::Tensor<ND<3>, DeviceBufferRefMut>,
-		_a: &generic::Tensor<ND<3>, DeviceBufferRef>,
-		_b: &generic::Tensor<ND<3>, DeviceBufferRef>,
+		_o: &mut generic::Tensor<ND<3>, DeviceBufferRefMut<'buf>>,
+		_a: &generic::Tensor<ND<3>, DeviceBufferRef<'buf>>,
+		_b: &generic::Tensor<ND<3>, DeviceBufferRef<'buf>>,
 		_scale: f64,
 	) -> Result<()> {
 		//for i in 0..o.map.dims[0].size {

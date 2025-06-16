@@ -5,6 +5,8 @@
 //
 //------------------------------------------------------------------------------
 
+use std::rc::Rc;
+
 use crate::Result;
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::dim_merger::DimMerger;
@@ -45,24 +47,6 @@ where
 	let (dims, rest) = merger.split::<3>();
 	assert!(rest.is_empty());
 
-	let mut o_tensors = array::try_map(&o, |i, o| {
-		o.buf.try_borrow_mut().map(|buf| generic::Tensor {
-			map: ND {
-				dims: [
-					SizeAndStride {
-						size: dims[1].size,
-						stride: dims[1].strides[i],
-					},
-					SizeAndStride {
-						size: dims[0].size,
-						stride: dims[0].strides[i],
-					},
-				],
-				offset: o.map.offset,
-			},
-			buf,
-		})
-	})?;
 	let mut c_tensors = array::try_map(&c, |i, c| {
 		c.buf.try_borrow().map(|buf| generic::Tensor {
 			map: ND {
@@ -77,6 +61,24 @@ where
 					},
 				],
 				offset: c.map.offset,
+			},
+			buf,
+		})
+	})?;
+	let mut o_tensors = array::try_map(&o, |i, o| {
+		o.buf.try_borrow_mut().map(|buf| generic::Tensor {
+			map: ND {
+				dims: [
+					SizeAndStride {
+						size: dims[1].size,
+						stride: dims[1].strides[i],
+					},
+					SizeAndStride {
+						size: dims[0].size,
+						stride: dims[0].strides[i],
+					},
+				],
+				offset: o.map.offset,
 			},
 			buf,
 		})
@@ -100,12 +102,12 @@ where
 ///
 /// Batch dimensions broadcast is disabled for tensors[0] and enabled for tensors[1..].
 /// This is by design.
-fn __vec_wise<const O: usize, const C: usize>(
-	o: [&Tensor; O],
-	c: [&Tensor; C],
+fn __vec_wise<'a, const O: usize, const C: usize>(
+	o: [&'a Tensor; O],
+	c: [&'a Tensor; C],
 	f: impl Fn(
-		&[generic::Tensor<ND<2>, DeviceBufferRefMut>; O],
-		&[generic::Tensor<ND<2>, DeviceBufferRef>; C],
+		&mut [generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>; O],
+		&[generic::Tensor<ND<2>, DeviceBufferRef<'a>>; C],
 	) -> Result<()>,
 ) -> Result<()>
 where
@@ -124,24 +126,6 @@ where
 	let (dims, rest) = merger.split::<2>();
 	assert!(rest.is_empty());
 
-	let mut o_tensors = array::try_map(&o, |i, o| {
-		o.buf.try_borrow_mut().map(|buf| generic::Tensor {
-			map: ND {
-				dims: [
-					SizeAndStride {
-						size: dims[0].size,
-						stride: dims[0].strides[i],
-					},
-					SizeAndStride {
-						size: o_vec[i].size,
-						stride: o_vec[i].stride,
-					},
-				],
-				offset: o.map.offset,
-			},
-			buf,
-		})
-	})?;
 	let mut c_tensors = array::try_map(&c, |i, c| {
 		c.buf.try_borrow().map(|buf| generic::Tensor {
 			map: ND {
@@ -160,9 +144,27 @@ where
 			buf,
 		})
 	})?;
+	let mut o_tensors = array::try_map(&o, |i, o| {
+		o.buf.try_borrow_mut().map(|buf| generic::Tensor {
+			map: ND {
+				dims: [
+					SizeAndStride {
+						size: dims[0].size,
+						stride: dims[0].strides[i],
+					},
+					SizeAndStride {
+						size: o_vec[i].size,
+						stride: o_vec[i].stride,
+					},
+				],
+				offset: o.map.offset,
+			},
+			buf,
+		})
+	})?;
 
 	for _ in 0..dims[1].size {
-		f(&o_tensors, &c_tensors)?;
+		f(&mut o_tensors, &c_tensors)?;
 
 		for j in 0..O {
 			o_tensors[j].map.offset += dims[1].strides[j];
@@ -244,7 +246,7 @@ impl EvaluatesToTensor for RandnClampedExpr {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
 		let executor = to.executor();
-		__elem_wise([to], [], |[to], []| executor.randn_clamped(&to))
+		__elem_wise([to], [], |[to], []| executor.randn_clamped(to))
 	}
 }
 
@@ -254,7 +256,7 @@ impl EvaluatesToTensor for Tensor {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
 		let executor = to.executor();
-		__elem_wise([to], [self], |[to], [input]| executor.copy(&to, &input))
+		__elem_wise([to], [self], |[to], [input]| executor.copy(to, input))
 	}
 }
 
@@ -454,7 +456,7 @@ impl EvaluatesToTensor for AddWeightedExpr<'_> {
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
 		let executor = to.executor();
 		__elem_wise([to], [self.a.tensor, self.b.tensor], |[to], [a, b]| {
-			executor.add_weighted(&to, &a, self.a.scale, &b, self.b.scale)
+			executor.add_weighted(to, a, self.a.scale, b, self.b.scale)
 		})
 	}
 }
@@ -541,7 +543,7 @@ impl<'a> EvaluatesToTensor for DotExpr<'a> {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
 		let executor = to.executor();
-		__vec_wise([to], [self.a, self.b], |[to], [a, b]| executor.dot(&to, &a, &b, self.scale))
+		__vec_wise([to], [self.a, self.b], |[to], [a, b]| executor.dot(to, a, b, self.scale))
 	}
 }
 
@@ -564,7 +566,7 @@ impl<'a> EvaluatesToTensor for DotAddExpr<'a> {
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
 		let executor = to.executor();
 		__vec_wise([to], [self.add.tensor, self.dot.a, self.dot.b], |[to], [x, a, b]| {
-			executor.dot_add(&to, &a, &b, self.dot.scale, &x, self.add.scale)
+			executor.dot_add(to, a, b, self.dot.scale, x, self.add.scale)
 		})
 	}
 }
@@ -647,7 +649,7 @@ impl<'a> EvaluatesToTensor for MulAddExpr<'a> {
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
 		let executor = to.executor();
 		__elem_wise([to], [self.mul.a, self.mul.b, self.add.tensor], |[to], [a, b, add]| {
-			executor.mul_add(&to, &a, &b, self.mul.scale, &add, self.add.scale)
+			executor.mul_add(to, a, b, self.mul.scale, add, self.add.scale)
 		})
 	}
 }
@@ -816,7 +818,7 @@ impl EvaluatesToTensor for MulExpr<'_> {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
 		let executor = to.executor();
-		__elem_wise([to], [self.a, self.b], |[to], [a, b]| executor.mul(&to, &a, &b))
+		__elem_wise([to], [self.a, self.b], |[to], [a, b]| executor.mul(to, a, b))
 	}
 }
 
@@ -889,7 +891,7 @@ impl<'a> EvaluatesToTensor for RSqrtExpr<'a> {
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
 		let executor = to.executor();
 		__elem_wise([to], [self.tensor], |[to], [input]| {
-			executor.rsqrt(&to, &input, self.scale, self.eps)
+			executor.rsqrt(to, input, self.scale, self.eps)
 		})
 	}
 }
@@ -920,7 +922,7 @@ impl<'a> EvaluatesToTensor for RSqrtDotExpr<'a> {
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
 		let executor = to.executor();
 		__vec_wise([to], [self.a, self.b], |[to], [a, b]| {
-			executor.rsqrt_dot(&to, &a, &b, self.scale, self.eps)
+			executor.rsqrt_dot(to, a, b, self.scale, self.eps)
 		})
 	}
 }
@@ -954,7 +956,7 @@ impl<'a> EvaluatesToTensor for LnClampedExpr<'a> {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
 		let executor = to.executor();
-		__elem_wise([to], [self.tensor], |[to], [input]| executor.ln_clamped(&to, &input))
+		__elem_wise([to], [self.tensor], |[to], [input]| executor.ln_clamped(to, input))
 	}
 }
 
@@ -973,9 +975,7 @@ impl<'a> EvaluatesToTensor for SwiGLUExpr<'a> {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
 		let executor = to.executor();
-		__elem_wise([to], [self.lin, self.gate], |[to], [lin, gate]| {
-			executor.swiglu(&to, &lin, &gate)
-		})
+		__elem_wise([to], [self.lin, self.gate], |[to], [lin, gate]| executor.swiglu(to, lin, gate))
 	}
 }
 
@@ -1004,7 +1004,7 @@ impl<'a> SwiGLUBackwardExpr<'a> {
 			[d_lin, d_gate],
 			[self.lin, self.gate, self.d_out],
 			|[d_lin, d_gate], [lin, gate, d_out]| {
-				executor.swiglu_backward(&d_lin, &d_gate, &lin, &gate, &d_out)
+				executor.swiglu_backward(d_lin, d_gate, lin, gate, d_out)
 			},
 		)
 	}
@@ -1049,7 +1049,11 @@ impl<'a> EvaluatesToTensor for Softmax<'a> {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
 		let executor = to.executor();
-		__vec_wise([to], [self.tensor], |[to], [input]| executor.softmax(&to, &input))
+		if Rc::ptr_eq(&to.buf, &self.tensor.buf) && to.map == self.tensor.map {
+			__vec_wise([to], [], |[to], []| executor.softmax_(to))
+		} else {
+			__vec_wise([to], [self.tensor], |[to], [input]| executor.softmax(to, input))
+		}
 	}
 }
 

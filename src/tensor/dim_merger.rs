@@ -117,10 +117,15 @@ impl<const N: usize> DimMerger<N> {
 		[(); MAX_SPLIT - K]:,
 	{
 		unsafe {
-			let result = self.dims_increasing.as_ptr();
-			let result = result.cast::<[MergedDim<N>; K]>();
-			let result = result.as_ref().unwrap_unchecked();
-			let rest = self.dims_increasing.get_unchecked(K..);
+			let buf_ptr = self.dims_increasing.as_ptr();
+
+			let result_ptr = buf_ptr.cast::<[MergedDim<N>; K]>();
+			let result = result_ptr.as_ref().unwrap_unchecked();
+
+			let rest_ptr = buf_ptr.add(K);
+			let rest =
+				std::slice::from_raw_parts(rest_ptr, self.dims_increasing.len().saturating_sub(K));
+
 			(result, rest)
 		}
 	}

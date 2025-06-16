@@ -33,7 +33,7 @@ pub fn write_file<P: AsRef<std::path::Path>>(src: &Tensor, path: P) -> Result<()
 
 pub fn read_bin(dst: &Tensor, reader: &mut dyn std::io::Read) -> Result<()> {
 	let executor = dst.executor();
-	__elem_wise([dst], [], |[dst], []| executor.read_bin(&dst, reader))
+	__elem_wise([dst], [], |[dst], []| executor.read_bin(dst, reader))
 }
 
 /*

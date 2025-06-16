@@ -45,20 +45,20 @@ impl<M: generic::map::Map> generic::Tensor<M, Rc<device::DeviceBuffer>> {
 	}
 }
 
-impl<'a, M: generic::map::Map> generic::Tensor<M, DeviceBufferRef<'a>> {
+impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRef<'buf>> {
 	/// Returns a "view" tensor which has a slice `&[T]` as its buffer.
 	///
 	/// # Errors
 	/// If the buffer's dtype does not match `T` or if the buffer is not on CPU device.
-	pub fn view<T: HasDType>(&self) -> Result<generic::Tensor<M, &[T]>> {
+	pub fn view<T: HasDType>(&self) -> Result<generic::Tensor<M, &'buf [T]>> {
 		let buf = CPUDevice::view(&self.buf)?;
 		let map = self.map.clone();
 		Ok(generic::Tensor { map, buf })
 	}
 }
 
-impl<'a, M: generic::map::Map> generic::Tensor<M, DeviceBufferRefMut<'a>> {
-	pub fn view_mut<T: HasDType>(&mut self) -> Result<generic::Tensor<M, &'a mut [T]>> {
+impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRefMut<'buf>> {
+	pub fn view_mut<T: HasDType>(&mut self) -> Result<generic::Tensor<M, &'buf mut [T]>> {
 		let buf = CPUDevice::view_mut(&mut self.buf)?;
 		let map = self.map.clone();
 		Ok(generic::Tensor { map, buf })

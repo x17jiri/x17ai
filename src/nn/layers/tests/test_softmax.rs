@@ -42,8 +42,8 @@ fn test_softmax() {
 	let mut ctx = EvalContext::new(true);
 	let out = softmax.forward(inp, &mut ctx).unwrap();
 
-	println!("out = {}", out.view::<f32>().unwrap());
-	println!("expected_out = {}", expected_out.view::<f32>().unwrap());
+	println!("out = {}", out.borrow().unwrap().view::<f32>().unwrap());
+	println!("expected_out = {}", expected_out.borrow().unwrap().view::<f32>().unwrap());
 
 	assert!(approx_eq(&out, &expected_out, 1e-4).unwrap());
 
@@ -67,8 +67,8 @@ fn test_softmax() {
 
 	let d_inp = softmax.backward(d_out, &mut ctx).unwrap();
 
-	println!("d_inp = {}", d_inp.view::<f32>().unwrap());
-	println!("expected_d_inp = {}", expected_d_inp.view::<f32>().unwrap());
+	println!("d_inp = {}", d_inp.borrow().unwrap().view::<f32>().unwrap());
+	println!("expected_d_inp = {}", expected_d_inp.borrow().unwrap().view::<f32>().unwrap());
 
 	assert!(approx_eq(&d_inp, &expected_d_inp, 1e-4).unwrap());
 }

@@ -20,7 +20,7 @@ use super::{Map, SizeAndStride, Transpose};
 
 //--------------------------------------------------------------------------------------------------
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct DD {
 	pub dims: DimVec,
 	pub offset: usize,
@@ -61,7 +61,9 @@ impl DD {
 
 	#[inline(never)] // TODO
 	pub fn new_replace_tail(
-		&self, tail_len: usize, replace_with: &[usize],
+		&self,
+		tail_len: usize,
+		replace_with: &[usize],
 	) -> Result<(Self, usize)> {
 		let src_slice = self.dims.as_slice();
 		if tail_len > src_slice.len() {
@@ -427,5 +429,13 @@ impl Clone for DimVec {
 		result
 	}
 }
+
+impl PartialEq for DimVec {
+	fn eq(&self, other: &Self) -> bool {
+		self.as_slice() == other.as_slice()
+	}
+}
+
+impl Eq for DimVec {}
 
 //--------------------------------------------------------------------------------------------------
