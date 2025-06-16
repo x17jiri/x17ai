@@ -66,10 +66,10 @@ pub trait Executor {
 	// These functions are designed to load/save data from files.
 	// And in files, we always use little-endian format.
 	// So it expects bytes to be in little-endian format.
-	fn read_bin(
-		&self,
-		dst: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		src: &mut dyn std::io::Read,
+	fn read_bin<'a>(
+		&'a self,
+		dst: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+		src: &'a mut dyn std::io::Read,
 	) -> Result<()>;
 
 	fn write_bin(
@@ -92,7 +92,10 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn zeros(&self, o: &generic::Tensor<ND<2>, DeviceBufferRefMut>) -> Result<()>;
+	fn zeros<'a, 'b, 'c>(
+		&'a self,
+		o: &'b mut generic::Tensor<ND<2>, DeviceBufferRefMut<'c>>,
+	) -> Result<()>;
 
 	/// Fills the `o` tensor with random values from a normal distribution
 	/// with mean 0 and variance 1.
@@ -109,7 +112,10 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn randn_clamped(&self, o: &generic::Tensor<ND<2>, DeviceBufferRefMut>) -> Result<()>;
+	fn randn_clamped<'a>(
+		&'a self,
+		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+	) -> Result<()>;
 
 	/// Copies data from `a` to `o`:
 	///
@@ -128,10 +134,10 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn copy(
-		&self,
-		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
+	fn copy<'a>(
+		&'a self,
+		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+		a: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
 	) -> Result<()>;
 
 	/// Element-wise unary operation:
@@ -151,10 +157,10 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn rsqrt(
-		&self,
-		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
+	fn rsqrt<'a>(
+		&'a self,
+		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+		a: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
 		scale: f64,
 		eps: f64,
 	) -> Result<()>;
@@ -178,10 +184,10 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn ln_clamped(
-		&self,
-		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
+	fn ln_clamped<'a>(
+		&'a self,
+		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+		a: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
 	) -> Result<()>;
 
 	/// Element-wise weighted addition:
@@ -201,12 +207,12 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn add_weighted(
-		&self,
-		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
+	fn add_weighted<'a>(
+		&'a self,
+		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+		a: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
 		a_weight: f64,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		b: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
 		b_weight: f64,
 	) -> Result<()>;
 
@@ -227,28 +233,28 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn mul(
-		&self,
-		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+	fn mul<'a>(
+		&'a self,
+		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+		a: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
+		b: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
 	) -> Result<()>;
 
-	fn mul_add(
-		&self,
-		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+	fn mul_add<'a>(
+		&'a self,
+		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+		a: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
+		b: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
 		ab_weight: f64,
-		c: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		c: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
 		c_weight: f64,
 	) -> Result<()>;
 
-	fn mul_acc(
-		&self,
-		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+	fn mul_acc<'a>(
+		&'a self,
+		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+		a: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
+		b: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
 		ab_weight: f64,
 		o_weight: f64,
 	) -> Result<()>;
@@ -268,11 +274,11 @@ pub trait Executor {
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
 	#[allow(clippy::doc_markdown)]
-	fn swiglu(
-		&self,
-		out: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		lin: &generic::Tensor<ND<2>, DeviceBufferRef>,
-		gate: &generic::Tensor<ND<2>, DeviceBufferRef>,
+	fn swiglu<'a>(
+		&'a self,
+		out: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+		lin: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
+		gate: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
 	) -> Result<()>;
 
 	/// Backward pass for the SwiGLU activation function:
@@ -288,13 +294,13 @@ pub trait Executor {
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
 	#[allow(clippy::doc_markdown)]
-	fn swiglu_backward(
-		&self,
-		d_lin: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		d_gate: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		lin: &generic::Tensor<ND<2>, DeviceBufferRef>,
-		gate: &generic::Tensor<ND<2>, DeviceBufferRef>,
-		d_out: &generic::Tensor<ND<2>, DeviceBufferRef>,
+	fn swiglu_backward<'a>(
+		&'a self,
+		d_lin: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+		d_gate: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+		lin: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
+		gate: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
+		d_out: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
 	) -> Result<()>;
 
 	/// Sums all elements in the `a` tensor and returns the result.
@@ -309,7 +315,7 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn sum_all(&self, a: &generic::Tensor<ND<2>, DeviceBufferRef>) -> Result<f64>;
+	fn sum_all<'a>(&'a self, a: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>) -> Result<f64>;
 
 	/// Checks if two tensors are approximately equal element-wise:
 	///
@@ -323,51 +329,51 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn approx_eq(
-		&self,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+	fn approx_eq<'a>(
+		&'a self,
+		a: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
+		b: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
 		eps: f64,
 	) -> Result<bool>;
 
-	fn softmax(
-		&self,
-		out: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		inp: &generic::Tensor<ND<2>, DeviceBufferRef>,
+	fn softmax<'a>(
+		&'a self,
+		out: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+		inp: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
 	) -> Result<()>;
 
-	fn dot(
-		&self,
-		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+	fn dot<'a>(
+		&'a self,
+		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+		a: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
+		b: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
 		scale: f64,
 	) -> Result<()>;
 
-	fn dot_add(
-		&self,
-		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+	fn dot_add<'a>(
+		&'a self,
+		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+		a: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
+		b: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
 		ab_weight: f64,
-		c: &generic::Tensor<ND<2>, DeviceBufferRef>,
+		c: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
 		c_weight: f64,
 	) -> Result<()>;
 
-	fn rsqrt_dot(
-		&self,
-		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+	fn rsqrt_dot<'a>(
+		&'a self,
+		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+		a: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
+		b: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
 		scale: f64,
 		eps: f64,
 	) -> Result<()>;
 
-	fn mm(
-		&self,
-		o: &generic::Tensor<ND<3>, DeviceBufferRefMut>,
-		a: &generic::Tensor<ND<3>, DeviceBufferRef>,
-		b: &generic::Tensor<ND<3>, DeviceBufferRef>,
+	fn mm<'a>(
+		&'a self,
+		o: &'a mut generic::Tensor<ND<3>, DeviceBufferRefMut<'a>>,
+		a: &'a generic::Tensor<ND<3>, DeviceBufferRef<'a>>,
+		b: &'a generic::Tensor<ND<3>, DeviceBufferRef<'a>>,
 		scale: f64,
 	) -> Result<()>;
 

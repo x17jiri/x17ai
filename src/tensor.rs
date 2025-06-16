@@ -58,8 +58,8 @@ impl<'a, M: generic::map::Map> generic::Tensor<M, DeviceBufferRef<'a>> {
 }
 
 impl<'a, M: generic::map::Map> generic::Tensor<M, DeviceBufferRefMut<'a>> {
-	pub fn view_mut<T: HasDType>(&self) -> Result<generic::Tensor<M, &mut [T]>> {
-		let buf = CPUDevice::view_mut(&self.buf)?;
+	pub fn view_mut<T: HasDType>(&mut self) -> Result<generic::Tensor<M, &'a mut [T]>> {
+		let buf = CPUDevice::view_mut(&mut self.buf)?;
 		let map = self.map.clone();
 		Ok(generic::Tensor { map, buf })
 	}

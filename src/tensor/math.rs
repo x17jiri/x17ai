@@ -28,12 +28,12 @@ pub trait MatrixSavable {
 
 //--------------------------------------------------------------------------------------------------
 
-pub(crate) fn __elem_wise<const O: usize, const C: usize>(
-	o: [&Tensor; O],
-	c: [&Tensor; C],
+pub(crate) fn __elem_wise<'a, const O: usize, const C: usize>(
+	o: [&'a Tensor; O],
+	c: [&'a Tensor; C],
 	mut f: impl FnMut(
-		&[generic::Tensor<ND<2>, DeviceBufferRefMut>; O],
-		&[generic::Tensor<ND<2>, DeviceBufferRef>; C],
+		&mut [generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>; O],
+		&[generic::Tensor<ND<2>, DeviceBufferRef<'a>>; C],
 	) -> Result<()>,
 ) -> Result<()>
 where
@@ -83,7 +83,7 @@ where
 	})?;
 
 	for _ in 0..dims[2].size {
-		f(&o_tensors, &c_tensors)?;
+		f(&mut o_tensors, &c_tensors)?;
 
 		for j in 0..O {
 			o_tensors[j].map.offset += dims[2].strides[j];
@@ -228,7 +228,7 @@ impl EvaluatesToTensor for ZerosExpr {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
 		let executor = to.executor();
-		__elem_wise([to], [], |[to], []| executor.zeros(&to))
+		__elem_wise([to], [], |[to], []| executor.zeros(to))
 	}
 }
 

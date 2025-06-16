@@ -64,7 +64,10 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 
 	pub fn view_contiguous<'a>(
 		tensor: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
-	) -> Result<generic::Tensor<ND<2>, &'a [T]>> {
+	) -> Result<generic::Tensor<ND<2>, &'a [T]>>
+	where
+		T: 'a,
+	{
 		tensor.ensure_safe()?;
 		let feature_dim = tensor.map.dims[1];
 		if !feature_dim.is_contiguous() {
@@ -74,9 +77,12 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 		tensor.view()
 	}
 
-	pub fn view_contiguous_mut<'a>(
-		tensor: &'a generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
-	) -> Result<generic::Tensor<ND<2>, &'a mut [T]>> {
+	pub fn view_contiguous_mut<'a, 'b>(
+		tensor: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'b>>,
+	) -> Result<generic::Tensor<ND<2>, &'b mut [T]>>
+	where
+		T: 'b,
+	{
 		tensor.ensure_safe()?;
 		let feature_dim = tensor.map.dims[1];
 		if !feature_dim.is_contiguous() {
@@ -88,7 +94,10 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 
 	pub fn view_contiguous_or_broadcasted<'a>(
 		tensor: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
-	) -> Result<(generic::Tensor<ND<2>, &'a [T]>, bool)> {
+	) -> Result<(generic::Tensor<ND<2>, &'a [T]>, bool)>
+	where
+		T: 'a,
+	{
 		tensor.ensure_safe()?;
 		let feature_dim = tensor.map.dims[1];
 		let broadcast = if feature_dim.is_contiguous() {
@@ -103,8 +112,11 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 	}
 
 	pub fn view_contiguous_or_broadcasted_mut<'a>(
-		tensor: &'a generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
-	) -> Result<(generic::Tensor<ND<2>, &'a mut [T]>, bool)> {
+		tensor: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+	) -> Result<(generic::Tensor<ND<2>, &'a mut [T]>, bool)>
+	where
+		T: 'a,
+	{
 		tensor.ensure_safe()?;
 		let feature_dim = tensor.map.dims[1];
 		let broadcast = if feature_dim.is_contiguous() {
@@ -118,10 +130,13 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 		Ok((tensor.view_mut()?, broadcast))
 	}
 
-	pub fn nullary(
-		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
+	pub fn nullary<'a, 'b>(
+		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'b>>,
 		mut f: impl FnMut(&mut T),
-	) -> Result<()> {
+	) -> Result<()>
+	where
+		T: 'b,
+	{
 		let o = Self::view_contiguous_mut(o)?;
 		unsafe {
 			zip_elems([o], [], [], |[o], [], []| f(o));
@@ -129,11 +144,14 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 		Ok(())
 	}
 
-	pub fn unary(
-		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
+	pub fn unary<'a>(
+		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+		a: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
 		mut f: impl FnMut(&mut T, T),
-	) -> Result<()> {
+	) -> Result<()>
+	where
+		T: 'a,
+	{
 		ensure_same_shape([o], [a])?;
 		let o = Self::view_contiguous_mut(o)?;
 		let (a, a_broadcast) = Self::view_contiguous_or_broadcasted(a)?;
@@ -150,12 +168,15 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 		Ok(())
 	}
 
-	pub fn binary(
-		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef>,
+	pub fn binary<'a>(
+		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+		a: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
+		b: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
 		mut f: impl FnMut(&mut T, T, T),
-	) -> Result<()> {
+	) -> Result<()>
+	where
+		T: 'a,
+	{
 		ensure_same_shape([o], [a, b])?;
 		let o = Self::view_contiguous_mut(o)?;
 		let (a, a_broadcast) = Self::view_contiguous_or_broadcasted(a)?;
@@ -181,10 +202,10 @@ impl<T: Copy + HasDType + FromToF64> FloatExecutor<T> {
 }
 
 impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
-	fn read_bin(
-		&self,
-		dst: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		src: &mut dyn std::io::Read,
+	fn read_bin<'a>(
+		&'a self,
+		dst: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+		src: &'a mut dyn std::io::Read,
 	) -> Result<()> {
 		let mut result = Ok(());
 		let dst = Self::view_contiguous_mut(dst)?;
@@ -234,37 +255,43 @@ impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		result.map_err(Into::into)
 	}
 
-	fn zeros(&self, o: &generic::Tensor<ND<2>, DeviceBufferRefMut>) -> Result<()> {
+	fn zeros<'a, 'b, 'c>(
+		&'a self,
+		o: &'b mut generic::Tensor<ND<2>, DeviceBufferRefMut<'c>>,
+	) -> Result<()> {
 		Self::nullary(o, |o| *o = T::from_f64(0.0))
 	}
 
-	fn randn_clamped(&self, o: &generic::Tensor<ND<2>, DeviceBufferRefMut>) -> Result<()> {
+	fn randn_clamped<'a>(
+		&'a self,
+		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+	) -> Result<()> {
 		let mut rng = self.rng.borrow_mut();
 		Self::nullary(o, |o| *o = T::from_f64(rng.get_normal_clamped()))
 	}
 
-	fn copy(
-		&self,
-		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
+	fn copy<'a>(
+		&'a self,
+		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+		a: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
 	) -> Result<()> {
 		Self::unary(o, a, |o, a| *o = a)
 	}
 
-	fn rsqrt(
-		&self,
-		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
+	fn rsqrt<'a>(
+		&'a self,
+		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+		a: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
 		scale: f64,
 		eps: f64,
 	) -> Result<()> {
 		Self::unary(o, a, |o, a| *o = T::from_f64(math::rsqrt(a.to_f64() * scale, eps)))
 	}
 
-	fn ln_clamped(
-		&self,
-		o: &generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef>,
+	fn ln_clamped<'a>(
+		&'a self,
+		o: &'a mut generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>,
+		a: &'a generic::Tensor<ND<2>, DeviceBufferRef<'a>>,
 	) -> Result<()> {
 		Self::unary(o, a, |o, a| *o = T::from_f64(a.to_f64().ln().max(-1000.0)))
 	}

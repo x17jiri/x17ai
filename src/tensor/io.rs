@@ -17,7 +17,7 @@ use super::math::__elem_wise;
 
 pub fn write_bin(src: &Tensor, writer: &mut dyn std::io::Write) -> Result<()> {
 	let executor = src.executor();
-	__elem_wise([src], |[src]| executor.write_bin(&src, writer))
+	__elem_wise([], [src], |[], [src]| executor.write_bin(&src, writer))
 }
 /*
 pub fn write_file<P: AsRef<std::path::Path>>(src: &Tensor, path: P) -> Result<()> {
@@ -33,7 +33,7 @@ pub fn write_file<P: AsRef<std::path::Path>>(src: &Tensor, path: P) -> Result<()
 
 pub fn read_bin(dst: &Tensor, reader: &mut dyn std::io::Read) -> Result<()> {
 	let executor = dst.executor();
-	__elem_wise([dst], |[dst]| executor.read_bin(&dst, reader))
+	__elem_wise([dst], [], |[dst], []| executor.read_bin(&dst, reader))
 }
 
 /*
@@ -235,7 +235,8 @@ pub mod file_header {
 //--------------------------------------------------------------------------------------------------
 
 fn fmt_0d<T: Copy>(
-	f: &mut std::fmt::Formatter, tensor: generic::Tensor<ND<0>, &[T]>,
+	f: &mut std::fmt::Formatter,
+	tensor: generic::Tensor<ND<0>, &[T]>,
 	mut fmt_one: impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
 ) -> std::fmt::Result {
 	fmt_one(f, tensor[[]])?;
@@ -243,7 +244,8 @@ fn fmt_0d<T: Copy>(
 }
 
 fn fmt_1d<T: Copy>(
-	f: &mut std::fmt::Formatter, tensor: generic::Tensor<ND<1>, &[T]>,
+	f: &mut std::fmt::Formatter,
+	tensor: generic::Tensor<ND<1>, &[T]>,
 	mut fmt_one: impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
 ) -> std::fmt::Result {
 	write!(f, "[")?;
@@ -261,7 +263,9 @@ fn fmt_1d<T: Copy>(
 }
 
 fn fmt_Nd<T: Copy>(
-	f: &mut std::fmt::Formatter, tensor: &generic::Tensor<DD, &[T]>, indent: usize,
+	f: &mut std::fmt::Formatter,
+	tensor: &generic::Tensor<DD, &[T]>,
+	indent: usize,
 	fmt_one: &mut impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
 ) -> std::fmt::Result {
 	match tensor.ndim() {
