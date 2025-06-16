@@ -25,6 +25,12 @@ pub enum TensorOpError {
 	CannotBorrowMut,
 	MissingVecDimension,
 	ExecutorError,
+	DimIndexOutOfBounds,
+	IndexOutOfBounds,
+	ElementsOverflow,
+	NotEnoughDimensions,
+	UnsupportedDType,
+	AllocationFailed,
 }
 
 impl TensorOpError {

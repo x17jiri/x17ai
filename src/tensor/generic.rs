@@ -10,10 +10,13 @@ pub mod dim_index;
 pub mod map;
 pub mod universal_range;
 
+use std::hint::cold_path;
+
 use buffer::Buffer;
 use dim_index::DimIndex;
 use map::{IndexToOffset, Map, MergeAllDims, MergeDims, ReshapeLastDim};
 
+use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;
 use crate::tensor::generic::map::{NDShape, Narrow, Select, Transpose};
 use crate::tensor::generic::universal_range::UniversalRange;
 use crate::{ErrExtra, ErrPack};
@@ -54,14 +57,10 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		self.map.ndim()
 	}
 
-	pub fn size(&self, dim: usize) -> Result<usize> {
+	pub fn size(&self, dim: usize) -> Result<usize, DimIndexOutOfBoundsError> {
 		if dim >= self.map.ndim() {
-			#[cold]
-			fn err_dim_out_of_bounds(dim: usize, ndim: usize) -> Error {
-				format!("Dimension {dim} is out of bounds for tensor with {ndim} dimensions.")
-					.into()
-			}
-			return Err(err_dim_out_of_bounds(dim, self.ndim()));
+			cold_path();
+			return Err(DimIndexOutOfBoundsError);
 		}
 		Ok(self.map.size(dim))
 	}
@@ -70,7 +69,7 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		self.map.elems()
 	}
 
-	pub fn merge_dims<const K: usize>(self) -> Result<Tensor<M::Output, B>>
+	pub fn merge_dims<const K: usize>(self) -> Result<Tensor<M::Output, B>, M::Error>
 	where
 		M: MergeDims<K>,
 	{
@@ -78,7 +77,7 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		Ok(Tensor { buf: self.buf, map: new_map })
 	}
 
-	pub fn merge_all_dims(self) -> Result<Tensor<M::Output, B>>
+	pub fn merge_all_dims(self) -> Result<Tensor<M::Output, B>, M::Error>
 	where
 		M: MergeAllDims,
 	{
@@ -89,7 +88,7 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 	pub fn reshape_last_dim<const K: usize>(
 		self,
 		to_shape: [usize; K],
-	) -> Result<Tensor<M::Output, B>>
+	) -> Result<Tensor<M::Output, B>, M::Error>
 	where
 		M: ReshapeLastDim<K>,
 	{
@@ -97,7 +96,11 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		Ok(Tensor { buf: self.buf, map: new_map })
 	}
 
-	pub fn select<D: DimIndex>(&self, dim: D, index: usize) -> Result<Tensor<M::Output, B>>
+	pub fn select<D: DimIndex>(
+		&self,
+		dim: D,
+		index: usize,
+	) -> Result<Tensor<M::Output, B>, M::Error>
 	where
 		M: Select,
 		B: Clone,
@@ -121,7 +124,7 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		self,
 		dim: D,
 		range: R,
-	) -> Result<Tensor<M::Output, B>>
+	) -> Result<Tensor<M::Output, B>, M::Error>
 	where
 		M: Narrow,
 	{
@@ -135,7 +138,7 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		self,
 		d0: D0,
 		d1: D1,
-	) -> Result<Tensor<M::Output, B>>
+	) -> Result<Tensor<M::Output, B>, M::Error>
 	where
 		M: Transpose,
 	{
@@ -155,7 +158,6 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 	pub fn conv_map<'a, NewMap>(&'a self) -> std::result::Result<Tensor<NewMap, B>, NewMap::Error>
 	where
 		NewMap: Map + TryFrom<&'a M>,
-		NewMap::Error: Into<crate::Error>,
 		B: Clone,
 	{
 		let map = NewMap::try_from(&self.map)?;
@@ -194,46 +196,6 @@ impl<const K: usize, M: Map + IndexToOffset<K>, T> std::ops::Index<[usize; K]> f
 			let offset = self.map.index_to_offset(index).unwrap();
 			&self.buf[offset]
 		}
-	}
-}
-
-impl<'a, M: Map, T> Tensor<M, &'a [T]> {
-	/// Returns a slice with the elements of the tensor.
-	///
-	/// # Errors
-	/// - If the tensor is not contiguous, because there would be gaps in the slice.
-	/// - If the map is not safe, i.e., it gives an out-of-bounds offset.
-	pub fn as_slice(&self) -> Result<&'a [T]> {
-		if !self.map.is_contiguous() {
-			#[cold]
-			fn err_tensor_not_contiguous() -> Error {
-				"Cannot view a tensor as a slice because the tensor is not contiguous.".into()
-			}
-			return Err(err_tensor_not_contiguous());
-		}
-		let span = self.map.span();
-		let Some(slice) = self.buf.get(span.clone()) else {
-			#[cold]
-			fn err_slice_out_of_bounds(span: std::ops::Range<usize>, buf_len: usize) -> Error {
-				format!("Slice {span:?} is out of bounds for buffer of length {buf_len}.",).into()
-			}
-			return Err(err_slice_out_of_bounds(span, self.buf.len()));
-		};
-		Ok(slice)
-	}
-
-	/// Returns a slice with the elements of the tensor.
-	///
-	/// # Safety
-	/// - contiguous - The tensor must be contiguous, otherwise the slice will contain gaps. This
-	///   can be checked with `self.map.is_contiguous()`.
-	/// - safe-map - The map is safe, i.e., it never gives an out-of-bounds index. This can be
-	///   checked with `self.ensure_safe()`.
-	pub unsafe fn as_slice_unchecked(&self) -> &'a [T] {
-		debug_assert!(self.is_contiguous());
-		debug_assert!(self.clone().ensure_safe().is_ok());
-		let span = self.map.span();
-		self.buf.get_unchecked(span)
 	}
 }
 

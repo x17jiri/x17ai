@@ -9,12 +9,14 @@ use std::rc::Rc;
 
 pub use device::{DType, Device, HasDType};
 
-use crate::Result;
+use crate::ErrPack;
+use crate::tensor::device::DeviceError;
 use crate::tensor::device::buffer::{BorrowError, DeviceBufferRef, DeviceBufferRefMut};
-use crate::tensor::device::cpu::CPUDevice;
+use crate::tensor::device::cpu::{CPUDevice, ViewError};
 use crate::tensor::device::executor::Executor;
-use crate::tensor::generic::map::DD;
-use crate::tensor::math::EvaluatesToTensor;
+use crate::tensor::generic::map::dd::ReplaceTailError;
+use crate::tensor::generic::map::{DD, ElementsOverflowError};
+use crate::tensor::math::{EvaluatesToTensor, TensorOpError};
 
 pub mod device;
 pub mod dim_merger;
@@ -50,7 +52,7 @@ impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRef<'buf>> {
 	///
 	/// # Errors
 	/// If the buffer's dtype does not match `T` or if the buffer is not on CPU device.
-	pub fn view<T: HasDType>(&self) -> Result<generic::Tensor<M, &'buf [T]>> {
+	pub fn view<T: HasDType>(&self) -> Result<generic::Tensor<M, &'buf [T]>, ViewError> {
 		let buf = CPUDevice::view(&self.buf)?;
 		let map = self.map.clone();
 		Ok(generic::Tensor { map, buf })
@@ -58,7 +60,9 @@ impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRef<'buf>> {
 }
 
 impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRefMut<'buf>> {
-	pub fn view_mut<T: HasDType>(&mut self) -> Result<generic::Tensor<M, &'buf mut [T]>> {
+	pub fn view_mut<T: HasDType>(
+		&mut self,
+	) -> Result<generic::Tensor<M, &'buf mut [T]>, ViewError> {
 		let buf = CPUDevice::view_mut(&mut self.buf)?;
 		let map = self.map.clone();
 		Ok(generic::Tensor { map, buf })
@@ -67,23 +71,83 @@ impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRefMut<'buf>> {
 
 //--------------------------------------------------------------------------------------------------
 
+pub enum NewTensorError {
+	ElementsOverflow,
+	NotEnoughDimensions,
+	UnsupportedDType,
+	AllocationFailed,
+}
+
+impl From<ElementsOverflowError> for NewTensorError {
+	fn from(_: ElementsOverflowError) -> Self {
+		NewTensorError::ElementsOverflow
+	}
+}
+
+impl From<DeviceError> for NewTensorError {
+	#[cold]
+	#[inline(never)]
+	fn from(err: DeviceError) -> Self {
+		match err {
+			DeviceError::UnsupportedDType => NewTensorError::UnsupportedDType,
+			DeviceError::AllocationFailed => NewTensorError::AllocationFailed,
+		}
+	}
+}
+
+impl From<ReplaceTailError> for NewTensorError {
+	#[cold]
+	#[inline(never)]
+	fn from(err: ReplaceTailError) -> Self {
+		match err {
+			ReplaceTailError::ElementsOverflow => NewTensorError::ElementsOverflow,
+			ReplaceTailError::NotEnoughDimensions => NewTensorError::NotEnoughDimensions,
+		}
+	}
+}
+
+impl From<NewTensorError> for TensorOpError {
+	#[cold]
+	#[inline(never)]
+	fn from(err: NewTensorError) -> Self {
+		match err {
+			NewTensorError::ElementsOverflow => TensorOpError::ElementsOverflow,
+			NewTensorError::NotEnoughDimensions => TensorOpError::NotEnoughDimensions,
+			NewTensorError::UnsupportedDType => TensorOpError::UnsupportedDType,
+			NewTensorError::AllocationFailed => TensorOpError::AllocationFailed,
+		}
+	}
+}
+
+impl From<NewTensorError> for ErrPack<TensorOpError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: NewTensorError) -> Self {
+		ErrPack { code: err.into(), extra: None }
+	}
+}
+
 pub type Tensor = generic::Tensor<DD, Rc<device::DeviceBuffer>>;
 
 impl Tensor {
 	/// Allocate a new tensor on the provided device.
-	pub fn new_empty_on(shape: &[usize], dtype: DType, device: Rc<dyn Device>) -> Result<Tensor> {
+	pub fn new_empty_on(
+		shape: &[usize],
+		dtype: DType,
+		device: Rc<dyn Device>,
+	) -> Result<Tensor, NewTensorError> {
 		let (map, elems) = DD::new(shape)?;
 		let buf = device.new_buffer(dtype, elems)?;
 		Ok(Tensor { map, buf })
 	}
 
 	/// Allocate a new tensor on the same device as `self`.
-	pub fn new_empty(&self, shape: &[usize], dtype: DType) -> Result<Tensor> {
+	pub fn new_empty(&self, shape: &[usize], dtype: DType) -> Result<Tensor, NewTensorError> {
 		Self::new_empty_on(shape, dtype, self.device())
 	}
 
 	/// Allocate a new tensor on the same device with the same shape and dtype as `self`.
-	pub fn new_empty_like(&self) -> Result<Tensor> {
+	pub fn new_empty_like(&self) -> Result<Tensor, DeviceError> {
 		let (map, elems) = self.map.new_like();
 		let buf = self.device().new_buffer(self.buf.dtype, elems)?;
 		Ok(Tensor { map, buf })
@@ -98,7 +162,7 @@ impl Tensor {
 	///
 	/// If the tensor does not own its buffer, we allocate a new empty tensor
 	/// with the same shape and dtype as `self`.
-	pub fn reuse_or_new_like(&self) -> Result<Tensor> {
+	pub fn reuse_or_new_like(&self) -> Result<Tensor, DeviceError> {
 		if self.owns_buffer() { Ok(self.clone()) } else { self.new_empty_like() }
 	}
 
@@ -110,7 +174,11 @@ impl Tensor {
 		(weak | strong) <= 1
 	}
 
-	pub fn new_replace_tail(&self, tail_len: usize, replace_with: &[usize]) -> Result<Tensor> {
+	pub fn new_replace_tail(
+		&self,
+		tail_len: usize,
+		replace_with: &[usize],
+	) -> Result<Tensor, NewTensorError> {
 		let (map, elems) = self.map.new_replace_tail(tail_len, replace_with)?;
 		let buf = self.device().new_buffer(self.buf.dtype, elems)?;
 		Ok(Tensor { map, buf })
@@ -131,7 +199,10 @@ impl Tensor {
 		self.buf.executor()
 	}
 
-	pub fn assign<Expr: EvaluatesToTensor>(&self, expr: Expr) -> Result<()> {
+	pub fn assign<Expr: EvaluatesToTensor>(
+		&self,
+		expr: Expr,
+	) -> Result<(), ErrPack<TensorOpError>> {
 		expr.eval_to_tensor(self)
 	}
 
@@ -150,7 +221,7 @@ pub struct TensorLiteralFactory<T: HasDType> {
 
 impl<T: HasDType> TensorLiteralFactory<T> {
 	#[inline(never)]
-	pub fn new_1d<const X: usize>(&self, value: &[T; X]) -> Result<Tensor> {
+	pub fn new_1d<const X: usize>(&self, value: &[T; X]) -> Result<Tensor, ErrPack<TensorOpError>> {
 		let tensor = Tensor::new_empty_on(&[X], T::dtype, self.device.clone())?;
 
 		let val_ptr = value.as_ptr() as *const u8;
@@ -163,7 +234,10 @@ impl<T: HasDType> TensorLiteralFactory<T> {
 	}
 
 	#[inline(never)]
-	pub fn new_2d<const Y: usize, const X: usize>(&self, value: &[[T; X]; Y]) -> Result<Tensor> {
+	pub fn new_2d<const Y: usize, const X: usize>(
+		&self,
+		value: &[[T; X]; Y],
+	) -> Result<Tensor, ErrPack<TensorOpError>> {
 		let tensor = Tensor::new_empty_on(&[Y, X], T::dtype, self.device.clone())?;
 
 		let val_ptr = value.as_ptr() as *const u8;
@@ -179,7 +253,7 @@ impl<T: HasDType> TensorLiteralFactory<T> {
 	pub fn new_3d<const Z: usize, const Y: usize, const X: usize>(
 		&self,
 		value: &[[[T; X]; Y]; Z],
-	) -> Result<Tensor> {
+	) -> Result<Tensor, ErrPack<TensorOpError>> {
 		let tensor = Tensor::new_empty_on(&[Z, Y, X], T::dtype, self.device.clone())?;
 
 		let val_ptr = value.as_ptr() as *const u8;
@@ -273,22 +347,6 @@ impl Tensor {
 		self.reshape_n(ndim, new_shape)
 	}
 	*/
-
-	pub fn read_bin(&self, reader: &mut dyn std::io::Read) -> std::io::Result<()> {
-		io::read_bin(self, reader)
-	}
-
-	pub fn read_file<P: AsRef<std::path::Path>>(&self, path: P) -> std::io::Result<()> {
-		io::read_file(self, path)
-	}
-
-	pub fn write_bin(&self, writer: &mut dyn std::io::Write) -> std::io::Result<()> {
-		io::write_bin(self, writer)
-	}
-
-	pub fn write_file<P: AsRef<std::path::Path>>(&self, path: P) -> std::io::Result<()> {
-		io::write_file(self, path)
-	}
 }
 
 //--------------------------------------------------------------------------------------------------

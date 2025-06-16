@@ -7,9 +7,9 @@
 
 use crate::ErrPack;
 use crate::tensor::device::cpu::math::FromToF64;
-use crate::tensor::device::executor::ExecutorError;
 use crate::tensor::generic;
 use crate::tensor::generic::map::{DD, ND};
+use crate::tensor::math::TensorOpError;
 
 use super::Tensor;
 use super::math::__elem_wise;
@@ -19,9 +19,12 @@ use super::math::__elem_wise;
 pub fn write_bin(
 	src: &Tensor,
 	writer: &mut dyn std::io::Write,
-) -> Result<(), ErrPack<ExecutorError>> {
+) -> Result<(), ErrPack<TensorOpError>> {
 	let executor = src.executor();
-	__elem_wise([], [src], |[], [src]| executor.write_bin(&src, writer))
+	__elem_wise([], [src], |[], [src]| {
+		executor.write_bin(&src, writer)?;
+		Ok(())
+	})
 }
 /*
 pub fn write_file<P: AsRef<std::path::Path>>(src: &Tensor, path: P) -> Result<()> {
@@ -38,9 +41,12 @@ pub fn write_file<P: AsRef<std::path::Path>>(src: &Tensor, path: P) -> Result<()
 pub fn read_bin(
 	dst: &Tensor,
 	reader: &mut dyn std::io::Read,
-) -> Result<(), ErrPack<ExecutorError>> {
+) -> Result<(), ErrPack<TensorOpError>> {
 	let executor = dst.executor();
-	__elem_wise([dst], [], |[dst], []| executor.read_bin(dst, reader))
+	__elem_wise([dst], [], |[dst], []| {
+		executor.read_bin(dst, reader)?;
+		Ok(())
+	})
 }
 
 /*

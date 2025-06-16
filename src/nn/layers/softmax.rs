@@ -8,10 +8,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::Result;
+use crate::ErrPack;
 use crate::nn::eval_context::EvalContext;
 use crate::nn::param::Param;
-use crate::tensor::math::Sum;
+use crate::tensor::math::{Sum, TensorOpError};
 use crate::tensor::{Tensor, math};
 
 use super::Layer;
@@ -56,7 +56,11 @@ impl Layer for Softmax {
 		// no parameters to collect
 	}
 
-	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Result<Tensor> {
+	fn forward(
+		&self,
+		inp: Tensor,
+		ctx: &mut EvalContext,
+	) -> Result<Tensor, ErrPack<TensorOpError>> {
 		let out = inp.reuse_or_new_like()?;
 
 		out.assign(math::softmax(&inp))?;
@@ -71,12 +75,16 @@ impl Layer for Softmax {
 		Ok(out)
 	}
 
-	fn randomize(&mut self) -> Result<()> {
+	fn randomize(&mut self) -> Result<(), ErrPack<TensorOpError>> {
 		// no parameters to randomize
 		Ok(())
 	}
 
-	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Result<Tensor> {
+	fn backward(
+		&self,
+		d_out: Tensor,
+		ctx: &mut EvalContext,
+	) -> Result<Tensor, ErrPack<TensorOpError>> {
 		match self.gradient_mode {
 			SoftmaxGradientMode::Precise => {
 				let [out] = ctx.tensors.get();
@@ -96,7 +104,11 @@ impl Layer for Softmax {
 		}
 	}
 
-	fn backward_finish(&self, _d_out: Tensor, _ctx: &mut EvalContext) -> Result<()> {
+	fn backward_finish(
+		&self,
+		_d_out: Tensor,
+		_ctx: &mut EvalContext,
+	) -> Result<(), ErrPack<TensorOpError>> {
 		// no parameters to update
 		Ok(())
 	}

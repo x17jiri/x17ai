@@ -8,7 +8,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::Result;
 use crate::tensor::{DType, Device};
 
 use super::optimizer::OptCoef;

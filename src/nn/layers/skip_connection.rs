@@ -8,10 +8,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::Result;
+use crate::ErrPack;
 use crate::nn::eval_context::EvalContext;
 use crate::nn::param::Param;
 use crate::tensor::Tensor;
+use crate::tensor::math::TensorOpError;
 
 use super::Layer;
 
@@ -24,7 +25,11 @@ impl<Nested: Layer> SkipConnection<Nested> {
 		Self { nested }
 	}
 
-	pub fn add_residual(&self, inp: Tensor, nested_out: Tensor) -> Result<Tensor> {
+	pub fn add_residual(
+		&self,
+		inp: Tensor,
+		nested_out: Tensor,
+	) -> Result<Tensor, ErrPack<TensorOpError>> {
 		let out = nested_out.reuse_or_new_like()?;
 		out.assign(&inp + &nested_out)?;
 		Ok(out)
@@ -48,21 +53,33 @@ impl<Nested: Layer> Layer for SkipConnection<Nested> {
 		self.nested.collect_named_params(prefix, f);
 	}
 
-	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Result<Tensor> {
+	fn forward(
+		&self,
+		inp: Tensor,
+		ctx: &mut EvalContext,
+	) -> Result<Tensor, ErrPack<TensorOpError>> {
 		let nested_out = self.nested.forward(inp.clone(), ctx)?;
 		self.add_residual(inp, nested_out)
 	}
 
-	fn randomize(&mut self) -> Result<()> {
+	fn randomize(&mut self) -> Result<(), ErrPack<TensorOpError>> {
 		self.nested.randomize()
 	}
 
-	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Result<Tensor> {
+	fn backward(
+		&self,
+		d_out: Tensor,
+		ctx: &mut EvalContext,
+	) -> Result<Tensor, ErrPack<TensorOpError>> {
 		let nested_out = self.nested.backward(d_out.clone(), ctx)?;
 		self.add_residual(d_out, nested_out)
 	}
 
-	fn backward_finish(&self, d_out: Tensor, ctx: &mut EvalContext) -> Result<()> {
+	fn backward_finish(
+		&self,
+		d_out: Tensor,
+		ctx: &mut EvalContext,
+	) -> Result<(), ErrPack<TensorOpError>> {
 		self.nested.backward_finish(d_out, ctx)
 	}
 }

@@ -5,9 +5,8 @@
 //
 //------------------------------------------------------------------------------
 
+use std::hint::cold_path;
 use std::num::NonZeroU8;
-
-use crate::Error;
 
 pub const MAX_DTYPE_ALIGN: usize = 8; // 64-bit
 
@@ -42,19 +41,18 @@ pub struct DType {
 	pub bits: NonZeroU8,
 }
 
-impl std::str::FromStr for DType {
-	type Err = Error;
+pub struct UnknownDTypeError;
 
-	fn from_str(s: &str) -> Result<Self, Self::Err> {
+impl std::str::FromStr for DType {
+	type Err = UnknownDTypeError;
+
+	fn from_str(s: &str) -> Result<Self, UnknownDTypeError> {
 		match s {
 			"f32" => Ok(f32::dtype),
 			"f64" => Ok(f64::dtype),
 			_ => {
-				#[cold]
-				fn err_unknown_dtype_str(s: &str) -> Error {
-					format!("Unknown DType string: {s}").into()
-				}
-				Err(err_unknown_dtype_str(s))
+				cold_path();
+				Err(UnknownDTypeError)
 			},
 		}
 	}

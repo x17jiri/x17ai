@@ -8,9 +8,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::Result;
+use crate::ErrPack;
 use crate::nn::eval_context::EvalContext;
 use crate::nn::param::Param;
+use crate::tensor::math::TensorOpError;
 use crate::tensor::{Tensor, math};
 
 use super::Layer;
@@ -46,7 +47,11 @@ impl Layer for SwiGLU {
 		// no parameters to collect
 	}
 
-	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Result<Tensor> {
+	fn forward(
+		&self,
+		inp: Tensor,
+		ctx: &mut EvalContext,
+	) -> Result<Tensor, ErrPack<TensorOpError>> {
 		let out = inp.new_replace_tail(2, &self.output_shape)?;
 		let lin = inp.select(-2, 0)?;
 		let gate = inp.select(-2, 1)?;
@@ -60,12 +65,16 @@ impl Layer for SwiGLU {
 		Ok(out)
 	}
 
-	fn randomize(&mut self) -> Result<()> {
+	fn randomize(&mut self) -> Result<(), ErrPack<TensorOpError>> {
 		// no parameters to randomize
 		Ok(())
 	}
 
-	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Result<Tensor> {
+	fn backward(
+		&self,
+		d_out: Tensor,
+		ctx: &mut EvalContext,
+	) -> Result<Tensor, ErrPack<TensorOpError>> {
 		let [lin, gate] = ctx.tensors.get();
 
 		let d_inp = d_out.new_replace_tail(1, &self.input_shape)?;
@@ -77,7 +86,11 @@ impl Layer for SwiGLU {
 		Ok(d_inp)
 	}
 
-	fn backward_finish(&self, _d_out: Tensor, _ctx: &mut EvalContext) -> Result<()> {
+	fn backward_finish(
+		&self,
+		_d_out: Tensor,
+		_ctx: &mut EvalContext,
+	) -> Result<(), ErrPack<TensorOpError>> {
 		// no parameters to update
 		Ok(())
 	}

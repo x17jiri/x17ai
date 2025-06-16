@@ -8,11 +8,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::Result;
+use crate::ErrPack;
 use crate::nn::eval_context::EvalContext;
 use crate::nn::param::Param;
 use crate::tensor::Tensor;
-use crate::tensor::math::{LnClamped, sum_all};
+use crate::tensor::math::{LnClamped, TensorOpError, sum_all};
 use crate::util::LossyInto;
 
 use super::{Layer, LossFunction, Softmax, SoftmaxGradientMode};
@@ -48,19 +48,31 @@ impl Layer for SoftmaxCrossEntropy {
 		self.softmax.collect_named_params(prefix, f);
 	}
 
-	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Result<Tensor> {
+	fn forward(
+		&self,
+		inp: Tensor,
+		ctx: &mut EvalContext,
+	) -> Result<Tensor, ErrPack<TensorOpError>> {
 		self.softmax.forward(inp, ctx)
 	}
 
-	fn randomize(&mut self) -> Result<()> {
+	fn randomize(&mut self) -> Result<(), ErrPack<TensorOpError>> {
 		self.softmax.randomize()
 	}
 
-	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Result<Tensor> {
+	fn backward(
+		&self,
+		d_out: Tensor,
+		ctx: &mut EvalContext,
+	) -> Result<Tensor, ErrPack<TensorOpError>> {
 		self.softmax.backward(d_out, ctx)
 	}
 
-	fn backward_finish(&self, d_out: Tensor, ctx: &mut EvalContext) -> Result<()> {
+	fn backward_finish(
+		&self,
+		d_out: Tensor,
+		ctx: &mut EvalContext,
+	) -> Result<(), ErrPack<TensorOpError>> {
 		self.softmax.backward_finish(d_out, ctx)
 	}
 
@@ -71,14 +83,17 @@ impl Layer for SoftmaxCrossEntropy {
 
 impl LossFunction for SoftmaxCrossEntropy {
 	fn backward_start(
-		&self, out: Tensor, expected_out: Tensor, _ctx: &mut EvalContext,
-	) -> Result<Tensor> {
+		&self,
+		out: Tensor,
+		expected_out: Tensor,
+		_ctx: &mut EvalContext,
+	) -> Result<Tensor, ErrPack<TensorOpError>> {
 		let d_inp = out.new_empty_like()?;
 		d_inp.assign(&out - &expected_out)?;
 		Ok(d_inp)
 	}
 
-	fn loss(&self, out: Tensor, expected_out: Tensor) -> Result<f64> {
+	fn loss(&self, out: Tensor, expected_out: Tensor) -> Result<f64, ErrPack<TensorOpError>> {
 		// Remove the feature dimension (-1). All other dimensions are batch dimensions,
 		// so `elems()` will give us the batch size.
 		let batch_size = out.select(-1, 0)?.elems();

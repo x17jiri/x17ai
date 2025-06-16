@@ -13,7 +13,10 @@ use std::hint::{cold_path, likely};
 pub use dd::DD;
 pub use nd::ND;
 
+use crate::ErrPack;
+use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;
 use crate::tensor::generic::universal_range::UniversalRange;
+use crate::tensor::math::TensorOpError;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -83,6 +86,9 @@ pub trait MergeAllDims {
 }
 
 #[derive(Debug, Copy, Clone)]
+pub struct InvalidNumElementsError;
+
+#[derive(Debug, Copy, Clone)]
 pub enum ReshapeLastDimError {
 	NotEnoughDimensions,
 	InvalidNumElements,
@@ -108,9 +114,34 @@ enum SelectError {
 	IndexOutOfBounds,
 }
 
+impl From<SelectError> for TensorOpError {
+	#[cold]
+	#[inline(never)]
+	fn from(err: SelectError) -> Self {
+		match err {
+			SelectError::DimIndexOutOfBounds => TensorOpError::DimIndexOutOfBounds,
+			SelectError::IndexOutOfBounds => TensorOpError::IndexOutOfBounds,
+		}
+	}
+}
+
+impl From<SelectError> for ErrPack<TensorOpError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: SelectError) -> Self {
+		ErrPack { code: err.into(), extra: None }
+	}
+}
+
+impl From<DimIndexOutOfBoundsError> for SelectError {
+	fn from(_: DimIndexOutOfBoundsError) -> Self {
+		SelectError::DimIndexOutOfBounds
+	}
+}
+
 pub trait Select {
 	type Output: Map;
-	type Error;
+	type Error: From<DimIndexOutOfBoundsError>;
 
 	fn select(&self, dim: usize, index: usize) -> Result<Self::Output, Self::Error>;
 	unsafe fn select_unchecked(&self, dim: usize, index: usize) -> Self::Output;
@@ -120,14 +151,14 @@ type NarrowError = SelectError;
 
 pub trait Narrow {
 	type Output: Map;
-	type Error;
+	type Error: From<DimIndexOutOfBoundsError>;
 
 	fn narrow(&self, dim: usize, range: UniversalRange) -> Result<Self::Output, Self::Error>;
 }
 
 pub trait Transpose {
 	type Output: Map;
-	type Error;
+	type Error: From<DimIndexOutOfBoundsError>;
 
 	fn transposed(self, d0: usize, d1: usize) -> Result<Self::Output, Self::Error>;
 }

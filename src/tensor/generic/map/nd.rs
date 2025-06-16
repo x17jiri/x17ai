@@ -13,8 +13,9 @@ use super::{
 };
 use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;
 use crate::tensor::generic::map::{
-	ElementsOverflowError, IndexOutOfBoundsError, MergeAllDimsError, NDShape, Narrow, NarrowError,
-	ReshapeLastDimError, Select, SelectError, StrideCounter, StrideCounterUnchecked, merge_dims,
+	ElementsOverflowError, IndexOutOfBoundsError, InvalidNumElementsError, MergeAllDimsError,
+	NDShape, Narrow, NarrowError, Select, SelectError, StrideCounter, StrideCounterUnchecked,
+	merge_dims,
 };
 use crate::tensor::generic::universal_range::UniversalRange;
 use crate::util::array;
@@ -146,23 +147,18 @@ where
 	[(); N - 1 + M]:,
 {
 	type Output = ND<{ N - 1 + M }>;
-	type Error = ReshapeLastDimError; // TODO - we don't need InvalidNDim
+	type Error = InvalidNumElementsError;
 
-	fn reshape_last_dim(&self, to_shape: [usize; M]) -> Result<Self::Output> {
+	fn reshape_last_dim(
+		&self,
+		to_shape: [usize; M],
+	) -> Result<Self::Output, InvalidNumElementsError> {
 		let last_dim = self.dims[N - 1];
 
 		let elems = to_shape.iter().copied().product::<usize>();
 		if elems != last_dim.size {
 			cold_path();
-			#[inline(never)]
-			fn err_incompatible_reshape(removed_size: usize, to_shape: &[usize]) -> Error {
-				format!(
-					"Cannot reshape last dimension of size {removed_size} to shape {:?}.",
-					to_shape
-				)
-				.into()
-			}
-			return Err(err_incompatible_reshape(last_dim.size, &to_shape));
+			return Err(InvalidNumElementsError);
 		}
 
 		let mut dims = [SizeAndStride::default(); N - 1 + M];
@@ -181,7 +177,7 @@ where
 impl<const N: usize> IndexToOffset<N> for ND<N> {
 	fn index_to_offset(&self, index: [usize; N]) -> Result<usize, IndexOutOfBoundsError> {
 		let mut offset = self.offset;
-		for (d, (&i, &dim)) in index.iter().zip(self.dims.iter()).enumerate() {
+		for (&i, &dim) in index.iter().zip(self.dims.iter()) {
 			if i >= dim.size {
 				cold_path();
 				return Err(IndexOutOfBoundsError);

@@ -8,11 +8,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::Result;
+use crate::ErrPack;
 use crate::nn::eval_context::EvalContext;
 use crate::nn::param::Param;
 use crate::tensor::Tensor;
-use crate::tensor::math::{RSqrt, Sum};
+use crate::tensor::math::{RSqrt, Sum, TensorOpError};
 use crate::util::LossyInto;
 
 use super::Layer;
@@ -41,7 +41,7 @@ impl RMSNorm {
 		}
 	}
 
-	pub fn calc_scale(&self, inp: &Tensor) -> Result<Tensor> {
+	pub fn calc_scale(&self, inp: &Tensor) -> Result<Tensor, ErrPack<TensorOpError>> {
 		let scale = inp.new_replace_tail(1, &[1])?;
 		let sum_square = (inp * inp).sum();
 		let mean_square = sum_square * self.sum_to_mean;
@@ -67,7 +67,11 @@ impl Layer for RMSNorm {
 		// no parameters to collect
 	}
 
-	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Result<Tensor> {
+	fn forward(
+		&self,
+		inp: Tensor,
+		ctx: &mut EvalContext,
+	) -> Result<Tensor, ErrPack<TensorOpError>> {
 		let scale = self.calc_scale(&inp)?;
 
 		let out = inp.reuse_or_new_like()?;
@@ -80,12 +84,16 @@ impl Layer for RMSNorm {
 		Ok(out)
 	}
 
-	fn randomize(&mut self) -> Result<()> {
+	fn randomize(&mut self) -> Result<(), ErrPack<TensorOpError>> {
 		// no parameters to randomize
 		Ok(())
 	}
 
-	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Result<Tensor> {
+	fn backward(
+		&self,
+		d_out: Tensor,
+		ctx: &mut EvalContext,
+	) -> Result<Tensor, ErrPack<TensorOpError>> {
 		match self.gradient_mode {
 			RMSNormGradientMode::Precise => {
 				let [out, scale] = ctx.tensors.get();
@@ -113,7 +121,11 @@ impl Layer for RMSNorm {
 		}
 	}
 
-	fn backward_finish(&self, _d_out: Tensor, _ctx: &mut EvalContext) -> Result<()> {
+	fn backward_finish(
+		&self,
+		_d_out: Tensor,
+		_ctx: &mut EvalContext,
+	) -> Result<(), ErrPack<TensorOpError>> {
 		// no parameters to update
 		Ok(())
 	}

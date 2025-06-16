@@ -19,7 +19,9 @@ pub mod swiglu;
 #[cfg(test)]
 mod tests;
 
+use crate::ErrPack;
 use crate::tensor::Tensor;
+use crate::tensor::math::TensorOpError;
 
 use super::{EvalContext, Param};
 
@@ -48,16 +50,25 @@ pub trait Layer {
 		params
 	}
 
-	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Result<Tensor>;
+	fn forward(&self, inp: Tensor, ctx: &mut EvalContext)
+	-> Result<Tensor, ErrPack<TensorOpError>>;
 
-	fn randomize(&mut self) -> Result<()>;
+	fn randomize(&mut self) -> Result<(), ErrPack<TensorOpError>>;
 
-	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Result<Tensor>;
+	fn backward(
+		&self,
+		d_out: Tensor,
+		ctx: &mut EvalContext,
+	) -> Result<Tensor, ErrPack<TensorOpError>>;
 
 	/// This function is similar to `backward()`. It should calculate derivatives of parameters
 	/// used by the layer, but it doesn't calculate derivatives that could be used by previous
 	/// layers. So it would typically only be used for the first layer in a model.
-	fn backward_finish(&self, d_out: Tensor, ctx: &mut EvalContext) -> Result<()>;
+	fn backward_finish(
+		&self,
+		d_out: Tensor,
+		ctx: &mut EvalContext,
+	) -> Result<(), ErrPack<TensorOpError>>;
 
 	fn as_loss_function(&self) -> Option<&dyn LossFunction> {
 		None
@@ -73,7 +84,7 @@ pub trait LossFunction: Layer {
 		out: Tensor,
 		expected_out: Tensor,
 		ctx: &mut EvalContext,
-	) -> Result<Tensor>;
+	) -> Result<Tensor, ErrPack<TensorOpError>>;
 
-	fn loss(&self, out: Tensor, expected_out: Tensor) -> Result<f64>;
+	fn loss(&self, out: Tensor, expected_out: Tensor) -> Result<f64, ErrPack<TensorOpError>>;
 }
