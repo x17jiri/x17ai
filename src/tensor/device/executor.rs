@@ -11,6 +11,7 @@ use crate::tensor::generic::{self, TensorUnsafeError};
 use crate::util::array;
 use crate::{ErrExtra, ErrPack};
 
+#[derive(Debug, Copy, Clone)]
 pub enum ExecutorError {
 	ShapeMismatch,
 	UnsafeTensor,

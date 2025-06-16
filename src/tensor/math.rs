@@ -5,20 +5,95 @@
 //
 //------------------------------------------------------------------------------
 
-use std::hint::cold_path;
 use std::rc::Rc;
 
-use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
-use crate::tensor::dim_merger::DimMerger;
+use crate::tensor::device::buffer::{BorrowError, DeviceBufferRef, DeviceBufferRefMut};
+use crate::tensor::device::executor::ExecutorError;
+use crate::tensor::dim_merger::{DimMerger, DimMergerError};
 use crate::tensor::generic::map::{ND, SizeAndStride};
 use crate::tensor::{Tensor, generic};
 use crate::util::array;
-use crate::{Error, Result};
+use crate::{ErrExtra, ErrPack};
+
+//--------------------------------------------------------------------------------------------------
+
+#[derive(Debug, Copy, Clone)]
+pub enum TensorOpError {
+	IncompatibleDimensions,
+	TooManyMergedDimensions,
+	CannotBorrow,
+	CannotBorrowMut,
+	MissingVecDimension,
+	ExecutorError,
+}
+
+impl TensorOpError {
+	#[cold]
+	#[inline(never)]
+	pub fn missing_vec_dimension() -> ErrPack<TensorOpError> {
+		let message = "At least one dimension is required for vector-wise operations".into();
+		let result = ErrPack {
+			code: Self::MissingVecDimension,
+			extra: Some(Box::new(ErrExtra { message, nested: None })),
+		};
+		result
+	}
+}
+
+impl From<DimMergerError> for TensorOpError {
+	fn from(err: DimMergerError) -> Self {
+		match err {
+			DimMergerError::IncompatibleDimensions => TensorOpError::IncompatibleDimensions,
+			DimMergerError::TooManyMergedDimensions => TensorOpError::TooManyMergedDimensions,
+		}
+	}
+}
+
+impl From<DimMergerError> for ErrPack<TensorOpError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: DimMergerError) -> Self {
+		ErrPack { code: err.into(), extra: None }
+	}
+}
+
+impl From<BorrowError> for TensorOpError {
+	fn from(err: BorrowError) -> Self {
+		match err {
+			BorrowError::CannotBorrow => TensorOpError::CannotBorrow,
+			BorrowError::CannotBorrowMut => TensorOpError::CannotBorrowMut,
+		}
+	}
+}
+
+impl From<BorrowError> for ErrPack<TensorOpError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: BorrowError) -> Self {
+		ErrPack { code: err.into(), extra: None }
+	}
+}
+
+impl From<ErrPack<ExecutorError>> for ErrPack<TensorOpError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: ErrPack<ExecutorError>) -> Self {
+		ErrPack {
+			code: TensorOpError::ExecutorError,
+			extra: Some(Box::new(ErrExtra {
+				message: String::new(),
+				nested: Some(err.into()),
+			})),
+		}
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
 
 pub trait EvaluatesToTensor {
 	/// Calculate the result of the operation represented by `self`
 	/// and save it into the `to` tensor.
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<()>;
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>>;
 }
 
 /*
@@ -37,8 +112,8 @@ pub(crate) fn __elem_wise<'a, const O: usize, const C: usize>(
 	mut f: impl FnMut(
 		&mut [generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>; O],
 		&[generic::Tensor<ND<2>, DeviceBufferRef<'a>>; C],
-	) -> Result<()>,
-) -> Result<()>
+	) -> Result<(), ErrPack<TensorOpError>>,
+) -> Result<(), ErrPack<TensorOpError>>
 where
 	[(); O + C]:,
 {
@@ -107,18 +182,13 @@ fn __vec_wise<'a, const O: usize, const C: usize>(
 	f: impl Fn(
 		&mut [generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>; O],
 		&[generic::Tensor<ND<2>, DeviceBufferRef<'a>>; C],
-	) -> Result<()>,
-) -> Result<()>
+	) -> Result<(), ErrPack<TensorOpError>>,
+) -> Result<(), ErrPack<TensorOpError>>
 where
 	[(); O + C]:,
 {
 	if o.iter().any(|t| t.ndim() < 1) || c.iter().any(|t| t.ndim() < 1) {
-		cold_path();
-		#[inline(never)]
-		fn err_required_dim() -> Error {
-			"At least one dimension is required for vector-wise operations".into()
-		}
-		return Err(err_required_dim());
+		return Err(TensorOpError::missing_vec_dimension());
 	}
 	let o_dims = o.map(|t| t.map.dims.as_slice());
 	let c_dims = c.map(|t| t.map.dims.as_slice());
@@ -231,9 +301,12 @@ pub fn zeros() -> ZerosExpr {
 
 impl EvaluatesToTensor for ZerosExpr {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
-		__elem_wise([to], [], |[to], []| executor.zeros(to))
+		__elem_wise([to], [], |[to], []| {
+			executor.zeros(to)?;
+			Ok(())
+		})
 	}
 }
 
@@ -247,9 +320,12 @@ pub fn randn_clamped() -> RandnClampedExpr {
 
 impl EvaluatesToTensor for RandnClampedExpr {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
-		__elem_wise([to], [], |[to], []| executor.randn_clamped(to))
+		__elem_wise([to], [], |[to], []| {
+			executor.randn_clamped(to)?;
+			Ok(())
+		})
 	}
 }
 
@@ -257,9 +333,12 @@ impl EvaluatesToTensor for RandnClampedExpr {
 
 impl EvaluatesToTensor for Tensor {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
-		__elem_wise([to], [self], |[to], [input]| executor.copy(to, input))
+		__elem_wise([to], [self], |[to], [input]| {
+			executor.copy(to, input)?;
+			Ok(())
+		})
 	}
 }
 
@@ -456,10 +535,11 @@ pub struct AddWeightedExpr<'a> {
 
 impl EvaluatesToTensor for AddWeightedExpr<'_> {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
 		__elem_wise([to], [self.a.tensor, self.b.tensor], |[to], [a, b]| {
-			executor.add_weighted(to, a, self.a.scale, b, self.b.scale)
+			executor.add_weighted(to, a, self.a.scale, b, self.b.scale)?;
+			Ok(())
 		})
 	}
 }
@@ -544,9 +624,12 @@ pub fn dot<'a>(a: &'a Tensor, b: &'a Tensor) -> DotExpr<'a> {
 
 impl<'a> EvaluatesToTensor for DotExpr<'a> {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
-		__vec_wise([to], [self.a, self.b], |[to], [a, b]| executor.dot(to, a, b, self.scale))
+		__vec_wise([to], [self.a, self.b], |[to], [a, b]| {
+			executor.dot(to, a, b, self.scale)?;
+			Ok(())
+		})
 	}
 }
 
@@ -566,10 +649,11 @@ pub struct DotAddExpr<'a> {
 
 impl<'a> EvaluatesToTensor for DotAddExpr<'a> {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
 		__vec_wise([to], [self.add.tensor, self.dot.a, self.dot.b], |[to], [x, a, b]| {
-			executor.dot_add(to, a, b, self.dot.scale, x, self.add.scale)
+			executor.dot_add(to, a, b, self.dot.scale, x, self.add.scale)?;
+			Ok(())
 		})
 	}
 }
@@ -649,10 +733,11 @@ pub struct MulAddExpr<'a> {
 
 impl<'a> EvaluatesToTensor for MulAddExpr<'a> {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
 		__elem_wise([to], [self.mul.a, self.mul.b, self.add.tensor], |[to], [a, b, add]| {
-			executor.mul_add(to, a, b, self.mul.scale, add, self.add.scale)
+			executor.mul_add(to, a, b, self.mul.scale, add, self.add.scale)?;
+			Ok(())
 		})
 	}
 }
@@ -819,9 +904,12 @@ impl<'a> std::ops::Mul<&'a Tensor> for &'a Tensor {
 
 impl EvaluatesToTensor for MulExpr<'_> {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
-		__elem_wise([to], [self.a, self.b], |[to], [a, b]| executor.mul(to, a, b))
+		__elem_wise([to], [self.a, self.b], |[to], [a, b]| {
+			executor.mul(to, a, b)?;
+			Ok(())
+		})
 	}
 }
 
@@ -891,10 +979,11 @@ impl<'a> RSqrt for ScaledTensorExpr<'a> {
 
 impl<'a> EvaluatesToTensor for RSqrtExpr<'a> {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
 		__elem_wise([to], [self.tensor], |[to], [input]| {
-			executor.rsqrt(to, input, self.scale, self.eps)
+			executor.rsqrt(to, input, self.scale, self.eps)?;
+			Ok(())
 		})
 	}
 }
@@ -922,10 +1011,11 @@ impl<'a> RSqrt for DotExpr<'a> {
 
 impl<'a> EvaluatesToTensor for RSqrtDotExpr<'a> {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
 		__vec_wise([to], [self.a, self.b], |[to], [a, b]| {
-			executor.rsqrt_dot(to, a, b, self.scale, self.eps)
+			executor.rsqrt_dot(to, a, b, self.scale, self.eps)?;
+			Ok(())
 		})
 	}
 }
@@ -957,9 +1047,12 @@ impl<'a> LnClamped for &'a Tensor {
 
 impl<'a> EvaluatesToTensor for LnClampedExpr<'a> {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
-		__elem_wise([to], [self.tensor], |[to], [input]| executor.ln_clamped(to, input))
+		__elem_wise([to], [self.tensor], |[to], [input]| {
+			executor.ln_clamped(to, input)?;
+			Ok(())
+		})
 	}
 }
 
@@ -976,9 +1069,12 @@ pub fn swiglu<'a>(lin: &'a Tensor, gate: &'a Tensor) -> SwiGLUExpr<'a> {
 
 impl<'a> EvaluatesToTensor for SwiGLUExpr<'a> {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
-		__elem_wise([to], [self.lin, self.gate], |[to], [lin, gate]| executor.swiglu(to, lin, gate))
+		__elem_wise([to], [self.lin, self.gate], |[to], [lin, gate]| {
+			executor.swiglu(to, lin, gate)?;
+			Ok(())
+		})
 	}
 }
 
@@ -1001,13 +1097,18 @@ pub fn swiglu_backward<'a>(
 // Note: We cannot implement `EvaluatesToTensor` because there are two output tensors
 impl<'a> SwiGLUBackwardExpr<'a> {
 	#[inline(never)]
-	pub fn eval_to_tensors(&self, d_lin: &Tensor, d_gate: &Tensor) -> Result<()> {
+	pub fn eval_to_tensors(
+		&self,
+		d_lin: &Tensor,
+		d_gate: &Tensor,
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = d_lin.executor();
 		__elem_wise(
 			[d_lin, d_gate],
 			[self.lin, self.gate, self.d_out],
 			|[d_lin, d_gate], [lin, gate, d_out]| {
-				executor.swiglu_backward(d_lin, d_gate, lin, gate, d_out)
+				executor.swiglu_backward(d_lin, d_gate, lin, gate, d_out)?;
+				Ok(())
 			},
 		)
 	}
@@ -1015,7 +1116,7 @@ impl<'a> SwiGLUBackwardExpr<'a> {
 
 //--------------------------------------------------------------------------------------------------
 
-pub fn sum_all(tensor: &Tensor) -> Result<f64> {
+pub fn sum_all(tensor: &Tensor) -> Result<f64, ErrPack<TensorOpError>> {
 	let executor = tensor.executor();
 	let mut sum = 0.0;
 	// TODO - `__elem_wise()` disables broadcast for tensor at position 0.
@@ -1028,7 +1129,7 @@ pub fn sum_all(tensor: &Tensor) -> Result<f64> {
 	Ok(sum)
 }
 
-pub fn approx_eq(a: &Tensor, b: &Tensor, eps: f64) -> Result<bool> {
+pub fn approx_eq(a: &Tensor, b: &Tensor, eps: f64) -> Result<bool, ErrPack<TensorOpError>> {
 	let executor = a.executor();
 	let mut result = true;
 	__elem_wise([], [a, b], |[], [a, b]| {
@@ -1050,12 +1151,18 @@ pub fn softmax<'a>(tensor: &'a Tensor) -> Softmax<'a> {
 
 impl<'a> EvaluatesToTensor for Softmax<'a> {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<()> {
+	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
 		if Rc::ptr_eq(&to.buf, &self.tensor.buf) && to.map == self.tensor.map {
-			__vec_wise([to], [], |[to], []| executor.softmax_(to))
+			__vec_wise([to], [], |[to], []| {
+				executor.softmax_(to)?;
+				Ok(())
+			})
 		} else {
-			__vec_wise([to], [self.tensor], |[to], [input]| executor.softmax(to, input))
+			__vec_wise([to], [self.tensor], |[to], [input]| {
+				executor.softmax(to, input)?;
+				Ok(())
+			})
 		}
 	}
 }

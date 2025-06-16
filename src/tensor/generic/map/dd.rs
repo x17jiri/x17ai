@@ -9,7 +9,6 @@ use std::intrinsics::cold_path;
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
-use crate::Result;
 use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;
 use crate::tensor::generic::map::{
 	MergeAllDims, MergeDims, ReshapeLastDim, Select, StrideCounter, StrideCounterUnchecked,

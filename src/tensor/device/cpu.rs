@@ -13,7 +13,6 @@ use std::rc::Rc;
 
 use crate::tensor::HasDType;
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
-use crate::{Error, Result};
 
 pub mod float_executor;
 pub mod math;

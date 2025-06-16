@@ -8,7 +8,6 @@
 use std::intrinsics::cold_path;
 
 use crate::tensor::generic::map::SizeAndStride;
-use crate::{Error, Result};
 
 const MAX_SPLIT: usize = 3;
 
@@ -26,6 +25,11 @@ impl<const N: usize> MergedDim<N> {
 	}
 }
 
+pub enum DimMergerError {
+	IncompatibleDimensions,
+	TooManyMergedDimensions,
+}
+
 pub struct DimMerger<const N: usize> {
 	/// We order dimensions from smallest to largest stride.
 	/// This is the reverse order of how they are stored in a Tensor.
@@ -35,7 +39,10 @@ pub struct DimMerger<const N: usize> {
 
 impl<const N: usize> DimMerger<N> {
 	#[inline(never)]
-	pub fn new(inputs: [&[SizeAndStride]; N], max_dims: usize) -> Result<DimMerger<N>> {
+	pub fn new(
+		inputs: [&[SizeAndStride]; N],
+		max_dims: usize,
+	) -> Result<DimMerger<N>, DimMergerError> {
 		// Get the max len of the input slices, or 0 if N == 0.
 		let ndim = inputs.iter().map(|inp| inp.len()).max().unwrap_or(0);
 
@@ -68,11 +75,7 @@ impl<const N: usize> DimMerger<N> {
 				} else {
 					if inp.size != 1 {
 						cold_path();
-						#[inline(never)]
-						fn err_incompatible_dims() -> Error {
-							"dimensions don't match".into()
-						}
-						return Err(err_incompatible_dims());
+						return Err(DimMergerError::IncompatibleDimensions);
 					}
 					Ok(0)
 				}
@@ -88,7 +91,8 @@ impl<const N: usize> DimMerger<N> {
 				if prev_dim.size != 1 {
 					let max_dims = max_dims.min(MERGER_DIMS);
 					if merger.ndim >= max_dims {
-						return Err("dim merger: Too many dimensions".into());
+						cold_path();
+						return Err(DimMergerError::TooManyMergedDimensions);
 					}
 					prev_dim = &mut merger.dims_increasing[merger.ndim];
 					merger.ndim += 1;
@@ -116,7 +120,9 @@ impl<const N: usize> DimMerger<N> {
 		(result, rest)
 	}
 
-	pub fn merge<const K: usize>(inputs: [&[SizeAndStride]; N]) -> Result<[MergedDim<N>; K]>
+	pub fn merge<const K: usize>(
+		inputs: [&[SizeAndStride]; N],
+	) -> Result<[MergedDim<N>; K], DimMergerError>
 	where
 		// In `::new()`, we initialize `dims_increasing` with MAX_SPLIT elements,
 		// so we know there is at least that many guaranteed.

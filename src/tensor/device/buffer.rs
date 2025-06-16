@@ -95,7 +95,7 @@ impl<'a> Buffer for DeviceBufferRefMut<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BorrowError {
 	CannotBorrow,
-	CannotBarrowMut,
+	CannotBorrowMut,
 }
 
 impl std::error::Error for BorrowError {}
@@ -104,7 +104,7 @@ impl std::fmt::Display for BorrowError {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
 			BorrowError::CannotBorrow => write!(f, "Cannot borrow the device buffer"),
-			BorrowError::CannotBarrowMut => write!(f, "Cannot borrow the device buffer mutably"),
+			BorrowError::CannotBorrowMut => write!(f, "Cannot borrow the device buffer mutably"),
 		}
 	}
 }
@@ -174,7 +174,7 @@ impl<'a> DeviceBufferRefMut<'a> {
 			device_buffer.borrow_count.set(-1);
 			Ok(Self { device_buffer })
 		} else {
-			Err(BorrowError::CannotBarrowMut)
+			Err(BorrowError::CannotBorrowMut)
 		}
 	}
 }

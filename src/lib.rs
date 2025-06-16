@@ -51,24 +51,45 @@ pub mod nn;
 pub mod tensor;
 pub mod util;
 
+#[derive(Debug)]
 pub struct ErrExtra {
 	pub message: String,
 	pub nested: Option<Box<dyn std::error::Error + Send + Sync>>,
 }
 
-pub struct ErrPack<Code> {
+#[derive(Debug)]
+pub struct ErrPack<Code: Copy + std::fmt::Debug> {
 	pub code: Code,
 	pub extra: Option<Box<ErrExtra>>,
 }
 
 #[cold]
 #[inline(never)]
-fn panic_infallible_to_err_conversion<Code>() -> ErrPack<Code> {
+fn panic_infallible_to_err_conversion<Code: Copy + std::fmt::Debug>() -> ErrPack<Code> {
 	panic!("Infallible should never be converted to ErrPack");
 }
 
-impl<Code> From<Infallible> for ErrPack<Code> {
+impl<Code: Copy + std::fmt::Debug> From<Infallible> for ErrPack<Code> {
 	fn from(_: Infallible) -> Self {
 		panic_infallible_to_err_conversion()
+	}
+}
+
+impl<Code: Copy + std::fmt::Debug> std::error::Error for ErrPack<Code> {}
+
+impl<Code: Copy + std::fmt::Debug> std::fmt::Display for ErrPack<Code> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		let code = self.code;
+		write!(f, "(ErrPack: code={code:?}")?;
+		if let Some(extra) = self.extra {
+			let msg = extra.message.as_str();
+			if !msg.is_empty() {
+				write!(f, ", message={msg}")?;
+			}
+			if let Some(nested) = &extra.nested {
+				write!(f, ", nested={:?}", nested)?;
+			}
+		}
+		write!(f, ")")
 	}
 }

@@ -19,7 +19,6 @@ pub mod swiglu;
 #[cfg(test)]
 mod tests;
 
-use crate::Result;
 use crate::tensor::Tensor;
 
 use super::{EvalContext, Param};
@@ -70,7 +69,10 @@ pub trait LossFunction: Layer {
 	/// the output, it takes expected value of the output.
 	// It would typically be used for the last layer in a model.
 	fn backward_start(
-		&self, out: Tensor, expected_out: Tensor, ctx: &mut EvalContext,
+		&self,
+		out: Tensor,
+		expected_out: Tensor,
+		ctx: &mut EvalContext,
 	) -> Result<Tensor>;
 
 	fn loss(&self, out: Tensor, expected_out: Tensor) -> Result<f64>;

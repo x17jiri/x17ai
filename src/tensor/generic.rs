@@ -20,6 +20,7 @@ use crate::{ErrExtra, ErrPack};
 
 //--------------------------------------------------------------------------------------------------
 
+#[derive(Debug, Copy, Clone)]
 pub struct TensorUnsafeError;
 
 impl TensorUnsafeError {
