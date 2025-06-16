@@ -16,7 +16,26 @@ use map::{IndexToOffset, Map, MergeAllDims, MergeDims, ReshapeLastDim};
 
 use crate::tensor::generic::map::{NDShape, Narrow, Select, Transpose};
 use crate::tensor::generic::universal_range::UniversalRange;
-use crate::{Error, Result};
+use crate::{ErrExtra, ErrPack};
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct TensorUnsafeError;
+
+impl TensorUnsafeError {
+	#[cold]
+	#[inline(never)]
+	fn new(span: std::ops::Range<usize>, buf_len: usize) -> ErrPack<Self> {
+		let message = format!(
+			"Tensor map is not safe: span {span:?} is out of bounds for buffer of length {buf_len}."
+		);
+		let result = ErrPack {
+			code: Self,
+			extra: Some(Box::new(ErrExtra { message, nested: None })),
+		};
+		result
+	}
+}
 
 //--------------------------------------------------------------------------------------------------
 // Tensor
@@ -67,7 +86,8 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 	}
 
 	pub fn reshape_last_dim<const K: usize>(
-		self, to_shape: [usize; K],
+		self,
+		to_shape: [usize; K],
 	) -> Result<Tensor<M::Output, B>>
 	where
 		M: ReshapeLastDim<K>,
@@ -97,7 +117,9 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 	}
 
 	pub fn narrow<D: DimIndex, R: Into<UniversalRange>>(
-		self, dim: D, range: R,
+		self,
+		dim: D,
+		range: R,
 	) -> Result<Tensor<M::Output, B>>
 	where
 		M: Narrow,
@@ -109,7 +131,9 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 	}
 
 	pub fn transposed<D0: DimIndex, D1: DimIndex>(
-		self, d0: D0, d1: D1,
+		self,
+		d0: D0,
+		d1: D1,
 	) -> Result<Tensor<M::Output, B>>
 	where
 		M: Transpose,
@@ -143,19 +167,12 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 
 	/// # Errors
 	/// - If the map is not safe, i.e., if some index may be mapped to an out-of-bounds offset.
-	pub fn ensure_safe(&self) -> Result<()> {
+	pub fn ensure_safe(&self) -> Result<(), ErrPack<TensorUnsafeError>> {
 		let span = self.map.span();
 		let buf_len = self.buf.len();
 		let safe = span.start <= span.end && span.end <= buf_len;
 		if !safe {
-			#[cold]
-			fn err_map_not_safe(span: std::ops::Range<usize>, buf_len: usize) -> Error {
-				format!(
-					"Tensor map is not safe: span {span:?} is out of bounds for buffer of length {buf_len}.",
-				)
-				.into()
-			}
-			return Err(err_map_not_safe(span, buf_len));
+			return Err(TensorUnsafeError::new(span, buf_len));
 		}
 		Ok(())
 	}

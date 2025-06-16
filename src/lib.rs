@@ -44,10 +44,31 @@
 #![allow(clippy::missing_const_for_fn)]
 #![allow(clippy::struct_field_names)]
 
+use std::convert::Infallible;
+
 pub mod format;
 pub mod nn;
 pub mod tensor;
 pub mod util;
 
-pub type Error = Box<dyn std::error::Error + Send + Sync>;
-pub type Result<T> = std::result::Result<T, Error>;
+pub struct ErrExtra {
+	pub message: String,
+	pub nested: Option<Box<dyn std::error::Error + Send + Sync>>,
+}
+
+pub struct ErrPack<Code> {
+	pub code: Code,
+	pub extra: Option<Box<ErrExtra>>,
+}
+
+#[cold]
+#[inline(never)]
+fn panic_infallible_to_err_conversion<Code>() -> ErrPack<Code> {
+	panic!("Infallible should never be converted to ErrPack");
+}
+
+impl<Code> From<Infallible> for ErrPack<Code> {
+	fn from(_: Infallible) -> Self {
+		panic_infallible_to_err_conversion()
+	}
+}

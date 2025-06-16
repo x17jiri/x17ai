@@ -7,16 +7,111 @@
 
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::generic::map::ND;
-use crate::tensor::generic::{self};
+use crate::tensor::generic::{self, TensorUnsafeError};
 use crate::util::array;
-use crate::{Error, Result};
+use crate::{ErrExtra, ErrPack};
+
+pub enum ExecutorError {
+	ShapeMismatch,
+	UnsafeTensor,
+	NotContiguous,
+	NotContiguousOrBroadcasted,
+	InvalidShape,
+	IOError,
+}
+
+impl ExecutorError {
+	#[cold]
+	#[inline(never)]
+	pub fn shape_mismatch(m_shapes: &[[usize; 2]], c_shapes: &[[usize; 2]]) -> ErrPack<Self> {
+		let shapes = m_shapes
+			.iter()
+			.chain(c_shapes.iter())
+			.map(|[a, b]| format!("[{a}, {b}]"))
+			.collect::<Vec<_>>()
+			.join(", ");
+		let message = format!("Expected all tensors to have the same shape, but got: {shapes}");
+		let result = ErrPack {
+			code: Self::ShapeMismatch,
+			extra: Some(Box::new(ErrExtra { message, nested: None })),
+		};
+		result
+	}
+
+	#[cold]
+	#[inline(never)]
+	pub fn not_contiguous() -> ErrPack<Self> {
+		let message = "Expected the tensor to have contiguous dimension -1, but it does not".into();
+		let result = ErrPack {
+			code: Self::NotContiguous,
+			extra: Some(Box::new(ErrExtra { message, nested: None })),
+		};
+		result
+	}
+
+	#[cold]
+	#[inline(never)]
+	pub fn not_contiguous_or_broadcasted() -> ErrPack<Self> {
+		let message =
+			"Expected the tensor to have contiguous or broadcasted dimension -1, but it does not"
+				.into();
+		let result = ErrPack {
+			code: Self::NotContiguousOrBroadcasted,
+			extra: Some(Box::new(ErrExtra { message, nested: None })),
+		};
+		result
+	}
+
+	#[cold]
+	#[inline(never)]
+	pub fn invalid_shape(shape: [usize; 2], expected: [usize; 2]) -> ErrPack<Self> {
+		let message =
+			format!("Tensor shape {:?} does not match expected shape {:?}", shape, expected);
+		let result = ErrPack {
+			code: Self::InvalidShape,
+			extra: Some(Box::new(ErrExtra { message, nested: None })),
+		};
+		result
+	}
+
+	#[cold]
+	#[inline(never)]
+	pub fn io_error(err: std::io::Error) -> ErrPack<Self> {
+		let result = ErrPack {
+			code: Self::IOError,
+			extra: Some(Box::new(ErrExtra {
+				message: String::new(),
+				nested: Some(Box::new(err)),
+			})),
+		};
+		result
+	}
+}
+
+impl From<TensorUnsafeError> for ExecutorError {
+	fn from(_: TensorUnsafeError) -> Self {
+		Self::UnsafeTensor
+	}
+}
+
+impl From<ErrPack<TensorUnsafeError>> for ErrPack<ExecutorError> {
+	fn from(err: ErrPack<TensorUnsafeError>) -> Self {
+		ErrPack { code: err.code.into(), extra: err.extra }
+	}
+}
+
+impl From<std::io::Error> for ErrPack<ExecutorError> {
+	fn from(err: std::io::Error) -> Self {
+		ExecutorError::io_error(err)
+	}
+}
 
 /// # Errors
 /// - If the shapes of the tensors are not the same.
 pub fn ensure_same_shape<const M: usize, const C: usize>(
 	m: [&generic::Tensor<ND<2>, DeviceBufferRefMut>; M],
 	c: [&generic::Tensor<ND<2>, DeviceBufferRef>; C],
-) -> Result<[usize; 2]> {
+) -> Result<[usize; 2], ErrPack<ExecutorError>> {
 	let m_shapes = array::try_map_into(m, |_, m| m.nd_shape())?;
 	let c_shapes = array::try_map_into(c, |_, c| c.nd_shape())?;
 	let shape = if let Some(m) = m_shapes.first() {
@@ -27,17 +122,7 @@ pub fn ensure_same_shape<const M: usize, const C: usize>(
 		return Ok([0, 0]);
 	};
 	if m_shapes.iter().any(|s| s != shape) || c_shapes.iter().any(|s| s != shape) {
-		#[cold]
-		fn err_shape_mismatch(m_shapes: &[[usize; 2]], c_shapes: &[[usize; 2]]) -> Error {
-			let shapes_str = m_shapes
-				.iter()
-				.chain(c_shapes.iter())
-				.map(|[a, b]| format!("[{a}, {b}]"))
-				.collect::<Vec<_>>()
-				.join(", ");
-			format!("Expected all tensors to have the same shape, but got: {shapes_str}").into()
-		}
-		return Err(err_shape_mismatch(&m_shapes, &c_shapes));
+		return Err(ExecutorError::shape_mismatch(&m_shapes, &c_shapes));
 	}
 	Ok(*shape)
 }
@@ -70,13 +155,13 @@ pub trait Executor {
 		&self,
 		dst: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 		src: &mut dyn std::io::Read,
-	) -> Result<()>;
+	) -> Result<(), ErrPack<ExecutorError>>;
 
 	fn write_bin<'buf>(
 		&self,
 		src: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		dst: &mut dyn std::io::Write,
-	) -> Result<()>;
+	) -> Result<(), ErrPack<ExecutorError>>;
 
 	/// Fills the `o` tensor with zeros.
 	///
@@ -92,7 +177,10 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn zeros<'buf>(&self, o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>) -> Result<()>;
+	fn zeros<'buf>(
+		&self,
+		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+	) -> Result<(), ErrPack<ExecutorError>>;
 
 	/// Fills the `o` tensor with random values from a normal distribution
 	/// with mean 0 and variance 1.
@@ -112,7 +200,7 @@ pub trait Executor {
 	fn randn_clamped<'buf>(
 		&self,
 		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-	) -> Result<()>;
+	) -> Result<(), ErrPack<ExecutorError>>;
 
 	/// Copies data from `a` to `o`:
 	///
@@ -135,7 +223,7 @@ pub trait Executor {
 		&self,
 		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<()>;
+	) -> Result<(), ErrPack<ExecutorError>>;
 
 	/// Element-wise unary operation:
 	///
@@ -160,7 +248,7 @@ pub trait Executor {
 		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		scale: f64,
 		eps: f64,
-	) -> Result<()>;
+	) -> Result<(), ErrPack<ExecutorError>>;
 
 	/// Element-wise unary operation:
 	///
@@ -185,7 +273,7 @@ pub trait Executor {
 		&self,
 		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<()>;
+	) -> Result<(), ErrPack<ExecutorError>>;
 
 	/// Element-wise weighted addition:
 	///
@@ -211,7 +299,7 @@ pub trait Executor {
 		a_weight: f64,
 		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		b_weight: f64,
-	) -> Result<()>;
+	) -> Result<(), ErrPack<ExecutorError>>;
 
 	/// Element-wise multiplication:
 	///
@@ -235,7 +323,7 @@ pub trait Executor {
 		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<()>;
+	) -> Result<(), ErrPack<ExecutorError>>;
 
 	fn mul_add<'buf>(
 		&self,
@@ -245,7 +333,7 @@ pub trait Executor {
 		ab_weight: f64,
 		c: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		c_weight: f64,
-	) -> Result<()>;
+	) -> Result<(), ErrPack<ExecutorError>>;
 
 	fn mul_acc<'buf>(
 		&self,
@@ -254,7 +342,7 @@ pub trait Executor {
 		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		ab_weight: f64,
 		o_weight: f64,
-	) -> Result<()>;
+	) -> Result<(), ErrPack<ExecutorError>>;
 
 	/// The SwiGLU activation function:
 	///
@@ -276,7 +364,7 @@ pub trait Executor {
 		out: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 		lin: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		gate: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<()>;
+	) -> Result<(), ErrPack<ExecutorError>>;
 
 	/// Backward pass for the SwiGLU activation function:
 	///
@@ -298,7 +386,7 @@ pub trait Executor {
 		lin: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		gate: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		d_out: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<()>;
+	) -> Result<(), ErrPack<ExecutorError>>;
 
 	/// Sums all elements in the `a` tensor and returns the result.
 	///
@@ -312,7 +400,10 @@ pub trait Executor {
 	/// # Errors
 	/// - If any of the requirements is not met.
 	/// - If there is any problem executing the operation on the device.
-	fn sum_all<'buf>(&self, a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>) -> Result<f64>;
+	fn sum_all<'buf>(
+		&self,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+	) -> Result<f64, ErrPack<ExecutorError>>;
 
 	/// Checks if two tensors are approximately equal element-wise:
 	///
@@ -331,18 +422,18 @@ pub trait Executor {
 		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		eps: f64,
-	) -> Result<bool>;
+	) -> Result<bool, ErrPack<ExecutorError>>;
 
 	fn softmax_<'buf>(
 		&self,
 		t: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-	) -> Result<()>;
+	) -> Result<(), ErrPack<ExecutorError>>;
 
 	fn softmax<'buf>(
 		&self,
 		out: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 		inp: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<()>;
+	) -> Result<(), ErrPack<ExecutorError>>;
 
 	fn dot<'buf>(
 		&self,
@@ -350,7 +441,7 @@ pub trait Executor {
 		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		scale: f64,
-	) -> Result<()>;
+	) -> Result<(), ErrPack<ExecutorError>>;
 
 	fn dot_add<'buf>(
 		&self,
@@ -360,7 +451,7 @@ pub trait Executor {
 		ab_weight: f64,
 		c: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		c_weight: f64,
-	) -> Result<()>;
+	) -> Result<(), ErrPack<ExecutorError>>;
 
 	fn rsqrt_dot<'buf>(
 		&self,
@@ -369,7 +460,7 @@ pub trait Executor {
 		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		scale: f64,
 		eps: f64,
-	) -> Result<()>;
+	) -> Result<(), ErrPack<ExecutorError>>;
 
 	fn mm<'buf>(
 		&self,
@@ -377,7 +468,7 @@ pub trait Executor {
 		a: &generic::Tensor<ND<3>, DeviceBufferRef<'buf>>,
 		b: &generic::Tensor<ND<3>, DeviceBufferRef<'buf>>,
 		scale: f64,
-	) -> Result<()>;
+	) -> Result<(), ErrPack<ExecutorError>>;
 
 	/*
 	fn attention(

@@ -5,14 +5,15 @@
 //
 //------------------------------------------------------------------------------
 
+use std::hint::cold_path;
 use std::rc::Rc;
 
-use crate::Result;
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::dim_merger::DimMerger;
 use crate::tensor::generic::map::{ND, SizeAndStride};
 use crate::tensor::{Tensor, generic};
 use crate::util::array;
+use crate::{Error, Result};
 
 pub trait EvaluatesToTensor {
 	/// Calculate the result of the operation represented by `self`
@@ -43,9 +44,7 @@ where
 {
 	let o_dims = o.map(|t| t.map.dims.as_slice());
 	let c_dims = c.map(|t| t.map.dims.as_slice());
-	let merger = DimMerger::new(array::concat_arrays(o_dims, c_dims))?;
-	let (dims, rest) = merger.split::<3>();
-	assert!(rest.is_empty());
+	let dims = DimMerger::merge::<3>(array::concat_arrays(o_dims, c_dims))?;
 
 	let mut c_tensors = array::try_map(&c, |i, c| {
 		c.buf.try_borrow().map(|buf| generic::Tensor {
@@ -113,8 +112,14 @@ fn __vec_wise<'a, const O: usize, const C: usize>(
 where
 	[(); O + C]:,
 {
-	assert!(o.iter().all(|t| t.ndim() >= 1));
-	assert!(c.iter().all(|t| t.ndim() >= 1));
+	if o.iter().any(|t| t.ndim() < 1) || c.iter().any(|t| t.ndim() < 1) {
+		cold_path();
+		#[inline(never)]
+		fn err_required_dim() -> Error {
+			"At least one dimension is required for vector-wise operations".into()
+		}
+		return Err(err_required_dim());
+	}
 	let o_dims = o.map(|t| t.map.dims.as_slice());
 	let c_dims = c.map(|t| t.map.dims.as_slice());
 	let o_vec = o_dims.map(|d| *d.last().unwrap());
@@ -122,9 +127,7 @@ where
 
 	let o_dims = o_dims.map(|d| &d[..d.len() - 1]);
 	let c_dims = c_dims.map(|d| &d[..d.len() - 1]);
-	let merger = DimMerger::new(array::concat_arrays(o_dims, c_dims))?;
-	let (dims, rest) = merger.split::<2>();
-	assert!(rest.is_empty());
+	let dims = DimMerger::merge::<2>(array::concat_arrays(o_dims, c_dims))?;
 
 	let mut c_tensors = array::try_map(&c, |i, c| {
 		c.buf.try_borrow().map(|buf| generic::Tensor {

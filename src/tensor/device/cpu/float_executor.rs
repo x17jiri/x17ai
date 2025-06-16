@@ -6,48 +6,28 @@
 //------------------------------------------------------------------------------
 
 use std::cell::RefCell;
-use std::hint::cold_path;
 use std::rc::Rc;
 
+use crate::ErrPack;
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::device::cpu::zip::{zip_elems, zip_vec_reduce, zip_vecs};
-use crate::tensor::device::executor::{Executor, ensure_same_shape};
+use crate::tensor::device::executor::{Executor, ExecutorError, ensure_same_shape};
 use crate::tensor::generic::buffer::Buffer;
 use crate::tensor::generic::map::{ND, NDShape};
 use crate::tensor::{HasDType, generic};
-use crate::{Error, Result};
 
 use super::math::{self, FromToF64};
 use super::rng::Rng;
 
 //--------------------------------------------------------------------------------------------------
 
-#[cold]
-#[inline(never)]
-fn err_tensor_has_stride() -> Error {
-	"Tensor data is neither contiguous nor broadcasted.".into()
-}
-
-#[cold]
-#[inline(never)]
-fn err_tensor_not_contiguous() -> Error {
-	"Tensor data is not contiguous.".into()
-}
-
-#[cold]
-#[inline(never)]
-fn err_tensor_invalid_shape(shape: [usize; 2], expected: [usize; 2]) -> Error {
-	format!("Tensor shape {:?} does not match expected shape {:?}", shape, expected).into()
-}
-
 fn ensure_expected_shape<B: Buffer>(
 	tensor: &generic::Tensor<ND<2>, B>,
 	expected: [usize; 2],
-) -> Result<()> {
+) -> Result<(), ErrPack<ExecutorError>> {
 	let shape = tensor.map.nd_shape()?;
 	if shape != expected {
-		cold_path();
-		return Err(err_tensor_invalid_shape(shape, expected));
+		return Err(ExecutorError::invalid_shape(shape, expected));
 	}
 	Ok(())
 }
@@ -67,37 +47,35 @@ where
 
 	pub fn view_contiguous<'buf>(
 		tensor: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<generic::Tensor<ND<2>, &'buf [T]>>
+	) -> Result<generic::Tensor<ND<2>, &'buf [T]>, ErrPack<ExecutorError>>
 	where
 		T: 'static,
 	{
 		tensor.ensure_safe()?;
 		let feature_dim = tensor.map.dims[1];
 		if !feature_dim.is_contiguous() {
-			cold_path();
-			return Err(err_tensor_not_contiguous());
+			return Err(ExecutorError::not_contiguous());
 		}
 		tensor.view()
 	}
 
 	pub fn view_contiguous_mut<'buf>(
 		tensor: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-	) -> Result<generic::Tensor<ND<2>, &'buf mut [T]>>
+	) -> Result<generic::Tensor<ND<2>, &'buf mut [T]>, ErrPack<ExecutorError>>
 	where
 		T: 'static,
 	{
 		tensor.ensure_safe()?;
 		let feature_dim = tensor.map.dims[1];
 		if !feature_dim.is_contiguous() {
-			cold_path();
-			return Err(err_tensor_not_contiguous());
+			return Err(ExecutorError::not_contiguous());
 		}
 		tensor.view_mut()
 	}
 
 	pub fn view_contiguous_or_broadcasted<'buf>(
 		tensor: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<(generic::Tensor<ND<2>, &'buf [T]>, bool)>
+	) -> Result<(generic::Tensor<ND<2>, &'buf [T]>, bool), ErrPack<ExecutorError>>
 	where
 		T: 'static,
 	{
@@ -108,15 +86,14 @@ where
 		} else if feature_dim.is_broadcasted() {
 			true
 		} else {
-			cold_path();
-			return Err(err_tensor_has_stride());
+			return Err(ExecutorError::not_contiguous_or_broadcasted());
 		};
 		Ok((tensor.view()?, broadcast))
 	}
 
 	pub fn view_contiguous_or_broadcasted_mut<'buf>(
 		tensor: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-	) -> Result<(generic::Tensor<ND<2>, &'buf mut [T]>, bool)>
+	) -> Result<(generic::Tensor<ND<2>, &'buf mut [T]>, bool), ErrPack<ExecutorError>>
 	where
 		T: 'static,
 	{
@@ -127,8 +104,7 @@ where
 		} else if feature_dim.is_broadcasted() {
 			true
 		} else {
-			cold_path();
-			return Err(err_tensor_has_stride());
+			return Err(ExecutorError::not_contiguous_or_broadcasted());
 		};
 		Ok((tensor.view_mut()?, broadcast))
 	}
@@ -136,7 +112,7 @@ where
 	pub fn nullary<'buf>(
 		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 		mut f: impl FnMut(&mut T),
-	) -> Result<()>
+	) -> Result<(), ErrPack<ExecutorError>>
 	where
 		T: 'static,
 	{
@@ -151,7 +127,7 @@ where
 		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		mut f: impl FnMut(&mut T, T),
-	) -> Result<()>
+	) -> Result<(), ErrPack<ExecutorError>>
 	where
 		T: 'static,
 	{
@@ -176,7 +152,7 @@ where
 		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		mut f: impl FnMut(&mut T, T, T),
-	) -> Result<()>
+	) -> Result<(), ErrPack<ExecutorError>>
 	where
 		T: 'static,
 	{
@@ -212,7 +188,7 @@ where
 		&self,
 		dst: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 		src: &mut dyn std::io::Read,
-	) -> Result<()> {
+	) -> Result<(), ErrPack<ExecutorError>> {
 		let mut result = Ok(());
 		let dst = Self::view_contiguous_mut(dst)?;
 		unsafe {
@@ -241,7 +217,7 @@ where
 		&self,
 		src: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		dst: &mut dyn std::io::Write,
-	) -> Result<()> {
+	) -> Result<(), ErrPack<ExecutorError>> {
 		#[cfg(target_endian = "big")]
 		{
 			todo!("Saving to binary file on big-endian targets is not implemented yet");
@@ -261,14 +237,17 @@ where
 		result.map_err(Into::into)
 	}
 
-	fn zeros<'buf>(&self, o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>) -> Result<()> {
+	fn zeros<'buf>(
+		&self,
+		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+	) -> Result<(), ErrPack<ExecutorError>> {
 		Self::nullary(o, |o| *o = T::from_f64(0.0))
 	}
 
 	fn randn_clamped<'buf>(
 		&self,
 		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-	) -> Result<()> {
+	) -> Result<(), ErrPack<ExecutorError>> {
 		let mut rng = self.rng.borrow_mut();
 		Self::nullary(o, |o| *o = T::from_f64(rng.get_normal_clamped()))
 	}
@@ -277,7 +256,7 @@ where
 		&self,
 		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<()> {
+	) -> Result<(), ErrPack<ExecutorError>> {
 		Self::unary(o, a, |o, a| *o = a)
 	}
 
@@ -287,7 +266,7 @@ where
 		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		scale: f64,
 		eps: f64,
-	) -> Result<()> {
+	) -> Result<(), ErrPack<ExecutorError>> {
 		Self::unary(o, a, |o, a| *o = T::from_f64(math::rsqrt(a.to_f64() * scale, eps)))
 	}
 
@@ -295,7 +274,7 @@ where
 		&self,
 		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<()> {
+	) -> Result<(), ErrPack<ExecutorError>> {
 		Self::unary(o, a, |o, a| *o = T::from_f64(a.to_f64().ln().max(-1000.0)))
 	}
 
@@ -306,7 +285,7 @@ where
 		a_weight: f64,
 		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		b_weight: f64,
-	) -> Result<()> {
+	) -> Result<(), ErrPack<ExecutorError>> {
 		Self::binary(o, a, b, |o, a, b| {
 			*o = T::from_f64(math::add_weighted(a.to_f64(), a_weight, b.to_f64(), b_weight))
 		})
@@ -317,7 +296,7 @@ where
 		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<()> {
+	) -> Result<(), ErrPack<ExecutorError>> {
 		Self::binary(o, a, b, |o, a, b| *o = T::from_f64(a.to_f64() * b.to_f64()))
 	}
 
@@ -330,7 +309,7 @@ where
 		_ab_weight: f64,
 		_c: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		_c_weight: f64,
-	) -> Result<()> {
+	) -> Result<(), ErrPack<ExecutorError>> {
 		/*Self::n_contiguous([o, a, b, c], |[o, a, b, c]| {
 			let a = a.get().to_f64();
 			let b = b.get().to_f64();
@@ -348,7 +327,7 @@ where
 		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		ab_weight: f64,
 		o_weight: f64,
-	) -> Result<()> {
+	) -> Result<(), ErrPack<ExecutorError>> {
 		Self::binary(o, a, b, |o, a, b| {
 			*o = T::from_f64(math::add_weighted(
 				a.to_f64() * b.to_f64(),
@@ -364,7 +343,7 @@ where
 		out: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 		lin: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		gate: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<()> {
+	) -> Result<(), ErrPack<ExecutorError>> {
 		ensure_same_shape([out], [lin, gate])?;
 		let out = Self::view_contiguous_mut(out)?;
 		let lin = Self::view_contiguous(lin)?;
@@ -384,7 +363,7 @@ where
 		_lin: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		_gate: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		_d_out: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<()> {
+	) -> Result<(), ErrPack<ExecutorError>> {
 		/*Self::n_contiguous(
 			[d_lin, d_gate, lin, gate, d_out],
 			|[d_lin, d_gate, lin, gate, d_out]| {
@@ -399,7 +378,10 @@ where
 		todo!("FloatExecutor::swiglu_backward is not implemented yet");
 	}
 
-	fn sum_all<'buf>(&self, a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>) -> Result<f64> {
+	fn sum_all<'buf>(
+		&self,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+	) -> Result<f64, ErrPack<ExecutorError>> {
 		// TODO - this could handle broadcasted tensors as well
 		let a = Self::view_contiguous(a)?;
 		let mut sum = 0.0;
@@ -416,7 +398,7 @@ where
 		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		eps: f64,
-	) -> Result<bool> {
+	) -> Result<bool, ErrPack<ExecutorError>> {
 		// TODO - this could handle broadcasted tensors as well
 		ensure_same_shape([], [a, b])?;
 		let a = Self::view_contiguous(a)?;
@@ -434,7 +416,7 @@ where
 		&self,
 		out: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 		inp: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<()> {
+	) -> Result<(), ErrPack<ExecutorError>> {
 		ensure_same_shape([out], [inp])?;
 		let out = Self::view_contiguous_mut(out)?;
 		let inp = Self::view_contiguous(inp)?;
@@ -450,7 +432,7 @@ where
 	fn softmax_<'buf>(
 		&self,
 		t: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-	) -> Result<()> {
+	) -> Result<(), ErrPack<ExecutorError>> {
 		let t = Self::view_contiguous_mut(t)?;
 		unsafe {
 			zip_vecs([t], [], |[t], []| {
@@ -467,7 +449,7 @@ where
 		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		scale: f64,
-	) -> Result<()> {
+	) -> Result<(), ErrPack<ExecutorError>> {
 		let shape = ensure_same_shape([], [a, b])?;
 		ensure_expected_shape(o, [shape[0], 1])?;
 		let o = Self::view_contiguous_mut(o)?;
@@ -488,7 +470,7 @@ where
 		_ab_weight: f64,
 		_c: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		_c_weight: f64,
-	) -> Result<()> {
+	) -> Result<(), ErrPack<ExecutorError>> {
 		/*Self::vec_reduce([o, c], [a, b], |[o, c], [a, b]| {
 			let c = c.get().to_f64();
 			let dot = math::dot(a, b);
@@ -505,7 +487,7 @@ where
 		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		scale: f64,
 		eps: f64,
-	) -> Result<()> {
+	) -> Result<(), ErrPack<ExecutorError>> {
 		let shape = ensure_same_shape([], [a, b])?;
 		ensure_expected_shape(o, [shape[0], 1])?;
 		let o = Self::view_contiguous_mut(o)?;
@@ -526,7 +508,7 @@ where
 		_a: &generic::Tensor<ND<3>, DeviceBufferRef<'buf>>,
 		_b: &generic::Tensor<ND<3>, DeviceBufferRef<'buf>>,
 		_scale: f64,
-	) -> Result<()> {
+	) -> Result<(), ErrPack<ExecutorError>> {
 		//for i in 0..o.map.dims[0].size {
 		//	let o = o.select(0, i)?;
 		//}
