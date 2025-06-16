@@ -6,6 +6,7 @@
 //------------------------------------------------------------------------------
 
 use std::cell::{Cell, RefCell};
+use std::hint::cold_path;
 use std::mem::ManuallyDrop;
 use std::ops::{Range, RangeFull};
 use std::ptr::NonNull;
@@ -21,9 +22,17 @@ pub mod zip;
 
 use rng::Rng;
 
-use crate::tensor::device::DeviceBuffer;
 use crate::tensor::device::cpu::float_executor::FloatExecutor;
+use crate::tensor::device::{DeviceBuffer, DeviceError};
 use crate::tensor::{DType, Device};
+
+//--------------------------------------------------------------------------------------------------
+
+#[derive(Debug, Copy, Clone)]
+pub enum ViewError {
+	InvalidDType,
+	NotOnCPUDevice,
+}
 
 //--------------------------------------------------------------------------------------------------
 
@@ -100,21 +109,15 @@ impl CPUDevice {
 		})
 	}
 
-	pub fn ensure_can_view<'a, T: HasDType>(buf: &DeviceBuffer) -> Result<()> {
+	pub fn ensure_can_view<'a, T: HasDType>(buf: &DeviceBuffer) -> Result<(), ViewError> {
 		if buf.dtype != T::dtype {
-			#[cold]
-			fn err_view_invalid_dtype(buf_dtype: DType, T_dtype: DType) -> Error {
-				format!("Cannot view a tensor with dtype {buf_dtype:?} as {T_dtype:?}").into()
-			}
-			return Err(err_view_invalid_dtype(buf.dtype, T::dtype));
+			cold_path();
+			return Err(ViewError::InvalidDType);
 		}
 		debug_assert!(T::dtype.bytes() == std::mem::size_of::<T>());
 		if !buf.device_is_cpu {
-			#[cold]
-			fn err_view_not_cpu_buffer() -> Error {
-				"buffer is not on CPU device".into()
-			}
-			return Err(err_view_not_cpu_buffer());
+			cold_path();
+			return Err(ViewError::NotOnCPUDevice);
 		}
 		Ok(())
 	}
@@ -123,14 +126,16 @@ impl CPUDevice {
 	///
 	/// # Errors
 	/// If the buffer's dtype does not match `T` or if the buffer is not on CPU device.
-	pub fn view<'a, T: HasDType>(buf: &DeviceBufferRef<'a>) -> Result<&'a [T]> {
+	pub fn view<'a, T: HasDType>(buf: &DeviceBufferRef<'a>) -> Result<&'a [T], ViewError> {
 		Self::ensure_can_view::<T>(buf)?;
 		let data = buf.device_data;
 		let elems = buf.elems;
 		Ok(unsafe { std::slice::from_raw_parts(data.cast(), elems) })
 	}
 
-	pub fn view_mut<'a, T: HasDType>(buf: &mut DeviceBufferRefMut<'a>) -> Result<&'a mut [T]> {
+	pub fn view_mut<'a, T: HasDType>(
+		buf: &mut DeviceBufferRefMut<'a>,
+	) -> Result<&'a mut [T], ViewError> {
 		Self::ensure_can_view::<T>(buf)?;
 		let data = buf.device_data;
 		let elems = buf.elems;
@@ -439,17 +444,33 @@ impl Device for CPUDevice {
 		&self.name
 	}
 
-	fn new_buffer(self: Rc<Self>, dtype: DType, elems: usize) -> Result<Rc<DeviceBuffer>> {
+	#[inline(never)]
+	fn new_buffer(
+		self: Rc<Self>,
+		dtype: DType,
+		elems: usize,
+	) -> Result<Rc<DeviceBuffer>, DeviceError> {
 		let executor = match dtype {
 			f32::dtype => &self.f32_executor,
-			_ => todo!("Unsupported dtype for CPUDevice: {}", dtype),
+			_ => {
+				cold_path();
+				return Err(DeviceError::UnsupportedDType);
+			},
 		};
 		let align = dtype.bytes().min(1);
-		let size = dtype.array_bytes(elems).expect("Invalid size for CPUBuffer");
-		let layout = std::alloc::Layout::from_size_align(size, align)
-			.expect("Couldn't create layout for CPUBuffer");
+		let Some(size) = dtype.array_bytes(elems) else {
+			cold_path();
+			return Err(DeviceError::AllocationFailed);
+		};
+		let Ok(layout) = std::alloc::Layout::from_size_align(size, align) else {
+			cold_path();
+			return Err(DeviceError::AllocationFailed);
+		};
 		let memory = unsafe { std::alloc::alloc(layout) };
-		let memory = NonNull::new(memory).expect("Failed to allocate memory for CPUBuffer");
+		let Some(memory) = NonNull::new(memory) else {
+			cold_path();
+			return Err(DeviceError::AllocationFailed);
+		};
 		Ok(Rc::new(DeviceBuffer {
 			executor: NonNull::from(executor),
 			dtype,

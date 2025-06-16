@@ -81,7 +81,7 @@ impl<Code: Copy + std::fmt::Debug> std::fmt::Display for ErrPack<Code> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		let code = self.code;
 		write!(f, "(ErrPack: code={code:?}")?;
-		if let Some(extra) = self.extra {
+		if let Some(ref extra) = self.extra {
 			let msg = extra.message.as_str();
 			if !msg.is_empty() {
 				write!(f, ", message={msg}")?;

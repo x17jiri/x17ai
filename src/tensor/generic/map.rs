@@ -13,7 +13,6 @@ use std::hint::{cold_path, likely};
 pub use dd::DD;
 pub use nd::ND;
 
-use crate::Result;
 use crate::tensor::generic::universal_range::UniversalRange;
 
 //--------------------------------------------------------------------------------------------------
@@ -50,54 +49,102 @@ pub trait Map: Clone {
 	fn is_contiguous(&self) -> bool;
 }
 
+#[derive(Debug, Copy, Clone)]
+pub enum MergeDimsError {
+	NotEnoughDimensions,
+	IncompatibleStrides,
+}
+
+impl From<MergeAllDimsError> for MergeDimsError {
+	fn from(err: MergeAllDimsError) -> Self {
+		match err {
+			MergeAllDimsError::IncompatibleStrides => MergeDimsError::IncompatibleStrides,
+		}
+	}
+}
+
 pub trait MergeDims<const M: usize> {
 	type Output: Map;
+	type Error;
 
-	fn merge_dims(&self) -> Result<Self::Output>;
+	fn merge_dims(&self) -> Result<Self::Output, Self::Error>;
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum MergeAllDimsError {
+	IncompatibleStrides,
 }
 
 pub trait MergeAllDims {
 	type Output: Map;
+	type Error;
 
-	fn merge_all_dims(&self) -> Result<Self::Output>;
+	fn merge_all_dims(&self) -> Result<Self::Output, Self::Error>;
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum ReshapeLastDimError {
+	NotEnoughDimensions,
+	InvalidNumElements,
 }
 
 pub trait ReshapeLastDim<const M: usize> {
 	type Output: Map;
+	type Error;
 
-	fn reshape_last_dim(&self, to_shape: [usize; M]) -> Result<Self::Output>;
+	fn reshape_last_dim(&self, to_shape: [usize; M]) -> Result<Self::Output, Self::Error>;
 }
 
+#[derive(Debug, Copy, Clone)]
+pub struct IndexOutOfBoundsError;
+
 pub trait IndexToOffset<const K: usize> {
-	fn index_to_offset(&self, index: [usize; K]) -> Result<usize>;
+	fn index_to_offset(&self, index: [usize; K]) -> Result<usize, IndexOutOfBoundsError>;
+}
+
+#[derive(Debug, Copy, Clone)]
+enum SelectError {
+	DimIndexOutOfBounds,
+	IndexOutOfBounds,
 }
 
 pub trait Select {
 	type Output: Map;
+	type Error;
 
-	fn select(&self, dim: usize, index: usize) -> Result<Self::Output>;
+	fn select(&self, dim: usize, index: usize) -> Result<Self::Output, Self::Error>;
 	unsafe fn select_unchecked(&self, dim: usize, index: usize) -> Self::Output;
 }
 
+type NarrowError = SelectError;
+
 pub trait Narrow {
 	type Output: Map;
+	type Error;
 
-	fn narrow(&self, dim: usize, range: UniversalRange) -> Result<Self::Output>;
+	fn narrow(&self, dim: usize, range: UniversalRange) -> Result<Self::Output, Self::Error>;
 }
 
 pub trait Transpose {
 	type Output: Map;
+	type Error;
 
-	fn transposed(self, d0: usize, d1: usize) -> Result<Self::Output>;
+	fn transposed(self, d0: usize, d1: usize) -> Result<Self::Output, Self::Error>;
 }
 
+#[derive(Debug, Copy, Clone)]
+pub struct InvalidNDimError;
+
 pub trait NDShape<const K: usize> {
-	type Error: Into<crate::Error>;
+	type Error;
 
 	fn nd_shape(&self) -> std::result::Result<[usize; K], Self::Error>;
 }
 
 //--------------------------------------------------------------------------------------------------
+
+/// The total nubmer of elements in a tensor is larger than the maximum allowed.
+pub struct ElementsOverflowError;
 
 pub struct StrideCounter {
 	pub elems: usize,
@@ -109,17 +156,14 @@ impl StrideCounter {
 		Self { elems: 1, nonzero_elems: 1 }
 	}
 
-	pub fn prepend_dim(&mut self, size: usize) -> Result<SizeAndStride> {
+	pub fn prepend_dim(&mut self, size: usize) -> Result<SizeAndStride, ElementsOverflowError> {
 		// Check that if we ignore zero length dimensions, the number of elements does not
 		// overflow. This is done to make sure our calculations would not overflow even if we
 		// had the same dimensions but in different order.
 		if likely(size != 0) {
 			let Some(e) = self.nonzero_elems.checked_mul(size) else {
-				#[cold]
-				fn err_overflow() -> crate::Error {
-					"overflow when initializing strides - too many elements".into()
-				}
-				return Err(err_overflow());
+				cold_path();
+				return Err(ElementsOverflowError);
 			};
 			self.nonzero_elems = e;
 		}
@@ -167,7 +211,7 @@ impl StrideCounterUnchecked {
 
 //--------------------------------------------------------------------------------------------------
 
-pub fn merge_dims(dims: &[SizeAndStride]) -> Result<SizeAndStride> {
+pub fn merge_dims(dims: &[SizeAndStride]) -> Result<SizeAndStride, MergeAllDimsError> {
 	let mut merged = SizeAndStride { size: 1, stride: 1 };
 	for dim in dims.iter().rev() {
 		if dim.stride == merged.size * merged.stride || dim.size <= 1 {
@@ -178,11 +222,7 @@ pub fn merge_dims(dims: &[SizeAndStride]) -> Result<SizeAndStride> {
 				merged = *dim;
 			} else if merged.size > 1 {
 				cold_path();
-				#[inline(never)]
-				fn err_incompatible_strides() -> Result<SizeAndStride> {
-					Err("Cannot merge dimensions because of incompatible strides".into())
-				}
-				return err_incompatible_strides();
+				return Err(MergeAllDimsError::IncompatibleStrides);
 			}
 		}
 	}

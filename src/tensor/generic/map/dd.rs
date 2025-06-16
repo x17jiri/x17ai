@@ -11,11 +11,25 @@ use std::ptr::NonNull;
 
 use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;
 use crate::tensor::generic::map::{
-	MergeAllDims, MergeDims, ReshapeLastDim, Select, StrideCounter, StrideCounterUnchecked,
-	merge_dims,
+	ElementsOverflowError, MergeAllDims, MergeAllDimsError, MergeDims, MergeDimsError,
+	ReshapeLastDim, ReshapeLastDimError, Select, SelectError, StrideCounter,
+	StrideCounterUnchecked, merge_dims,
 };
 
 use super::{Map, SizeAndStride, Transpose};
+
+//--------------------------------------------------------------------------------------------------
+
+pub enum ReplaceTailError {
+	ElementsOverflow,
+	NotEnoughDimensions,
+}
+
+impl From<ElementsOverflowError> for ReplaceTailError {
+	fn from(_: ElementsOverflowError) -> Self {
+		ReplaceTailError::ElementsOverflow
+	}
+}
 
 //--------------------------------------------------------------------------------------------------
 
@@ -27,7 +41,7 @@ pub struct DD {
 
 impl DD {
 	#[inline(never)] // TODO
-	pub fn new(shape: &[usize]) -> Result<(Self, usize)> {
+	pub fn new(shape: &[usize]) -> Result<(Self, usize), ElementsOverflowError> {
 		let mut dims = DimVecBuilder::new(shape.len());
 		let slice = dims.as_slice_mut();
 
@@ -63,17 +77,11 @@ impl DD {
 		&self,
 		tail_len: usize,
 		replace_with: &[usize],
-	) -> Result<(Self, usize)> {
+	) -> Result<(Self, usize), ReplaceTailError> {
 		let src_slice = self.dims.as_slice();
 		if tail_len > src_slice.len() {
-			#[cold]
-			fn err_tail_len_out_of_bounds(tail_len: usize, ndim: usize) -> Result<(DD, usize)> {
-				Err(format!(
-					"Tail length {tail_len} is out of bounds for tensor with {ndim} dimensions."
-				)
-				.into())
-			}
-			return err_tail_len_out_of_bounds(tail_len, src_slice.len());
+			cold_path();
+			return Err(ReplaceTailError::NotEnoughDimensions);
 		};
 		let n_keep = src_slice.len() - tail_len;
 		let src_slice = unsafe { &src_slice.get_unchecked(..n_keep) };
@@ -124,20 +132,15 @@ impl Map for DD {
 
 impl<const M: usize> MergeDims<M> for DD {
 	type Output = Self;
+	type Error = MergeDimsError;
 
 	#[inline(never)] // TODO
-	fn merge_dims(&self) -> Result<Self::Output> {
+	fn merge_dims(&self) -> Result<Self::Output, MergeDimsError> {
 		let old_slice = self.dims.as_slice();
 		let old_ndim = old_slice.len();
 		if old_ndim < M {
-			#[inline(never)]
-			fn err_merge_too_many_dims(m: usize, old_ndim: usize) -> Result<DD> {
-				Err(format!("Cannot merge {m} dimensions in a tensor with {old_ndim} dimensions.",)
-					.into())
-			}
-
 			cold_path();
-			return err_merge_too_many_dims(M, old_ndim);
+			return Err(MergeDimsError::NotEnoughDimensions);
 		}
 		let n_keep = old_ndim - M;
 		let ndim = n_keep + 1;
@@ -158,9 +161,10 @@ impl<const M: usize> MergeDims<M> for DD {
 
 impl MergeAllDims for DD {
 	type Output = Self;
+	type Error = MergeAllDimsError;
 
 	#[inline(never)] // TODO
-	fn merge_all_dims(&self) -> Result<Self::Output> {
+	fn merge_all_dims(&self) -> Result<Self::Output, MergeAllDimsError> {
 		let merged = merge_dims(self.dims.as_slice())?;
 
 		let mut dims = DimVecBuilder::new(1);
@@ -174,33 +178,22 @@ impl MergeAllDims for DD {
 
 impl<const M: usize> ReshapeLastDim<M> for DD {
 	type Output = Self;
+	type Error = ReshapeLastDimError;
 
 	#[inline(never)] // TODO
-	fn reshape_last_dim(&self, to_shape: [usize; M]) -> Result<Self::Output> {
+	fn reshape_last_dim(&self, to_shape: [usize; M]) -> Result<Self::Output, ReshapeLastDimError> {
 		let old_slice = self.dims.as_slice();
 		let old_ndim = old_slice.len();
 
 		let Some(last_dim) = old_slice.last() else {
 			cold_path();
-			#[inline(never)]
-			fn err_not_enough_dimensions() -> Result<DD> {
-				Err("Not enough dimensions".into())
-			}
-			return err_not_enough_dimensions();
+			return Err(ReshapeLastDimError::NotEnoughDimensions);
 		};
 
 		let elems = to_shape.iter().copied().product::<usize>();
 		if elems != last_dim.size {
 			cold_path();
-			#[inline(never)]
-			fn err_incompatible_reshape(removed_size: usize, to_shape: &[usize]) -> Result<DD> {
-				Err(format!(
-					"Cannot reshape last dimension of size {removed_size} to shape {:?}.",
-					to_shape
-				)
-				.into())
-			}
-			return err_incompatible_reshape(last_dim.size, &to_shape);
+			return Err(ReshapeLastDimError::InvalidNumElements);
 		}
 
 		let n_keep = old_ndim - 1;
@@ -224,27 +217,20 @@ impl<const M: usize> ReshapeLastDim<M> for DD {
 
 impl Select for DD {
 	type Output = DD;
+	type Error = SelectError;
 
 	#[inline(never)] // TODO
-	fn select(&self, dim: usize, index: usize) -> Result<Self::Output> {
+	fn select(&self, dim: usize, index: usize) -> Result<Self::Output, SelectError> {
 		let old_slice = self.dims.as_slice();
 
 		let Some(removed_dim) = old_slice.get(dim) else {
 			cold_path();
-			#[inline(never)]
-			fn err_dim_index_out_of_bounds() -> Result<DD> {
-				return Err(DimIndexOutOfBoundsError.into());
-			}
-			return err_dim_index_out_of_bounds();
+			return Err(SelectError::DimIndexOutOfBounds);
 		};
 
 		if index >= removed_dim.size {
 			cold_path();
-			#[inline(never)]
-			fn err_index_out_of_bounds(index: usize, size: usize) -> Result<DD> {
-				Err(format!("Index {index} is out of bounds for dimension of size {size}.").into())
-			}
-			return err_index_out_of_bounds(index, removed_dim.size);
+			return Err(SelectError::IndexOutOfBounds);
 		}
 
 		let ndim = old_slice.len() - 1;
@@ -294,17 +280,14 @@ impl Select for DD {
 
 impl Transpose for DD {
 	type Output = Self;
+	type Error = DimIndexOutOfBoundsError;
 
 	#[inline(never)] // TODO
-	fn transposed(mut self, d0: usize, d1: usize) -> Result<Self> {
+	fn transposed(mut self, d0: usize, d1: usize) -> Result<Self, DimIndexOutOfBoundsError> {
 		let slice = self.dims.as_slice_mut();
 		if d0 >= slice.len() || d1 >= slice.len() {
 			cold_path();
-			#[inline(never)]
-			fn err_dim_index_out_of_bounds() -> Result<DD> {
-				return Err(DimIndexOutOfBoundsError.into());
-			}
-			return err_dim_index_out_of_bounds();
+			return Err(DimIndexOutOfBoundsError);
 		}
 		slice.swap(d0, d1);
 		Ok(self)
