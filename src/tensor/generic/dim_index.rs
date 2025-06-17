@@ -10,7 +10,7 @@ use std::ops::{Range, RangeFrom, RangeFull, RangeInclusive, RangeTo, RangeToIncl
 
 //------------------------------------------------------------------------------
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct DimIndexOutOfBoundsError;
 
 impl std::error::Error for DimIndexOutOfBoundsError {}

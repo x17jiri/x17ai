@@ -8,6 +8,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::ErrPack;
+use crate::nn::optimizer::OptimizerError;
+use crate::tensor::math::TensorOpError;
 use crate::tensor::{DType, Device};
 
 use super::optimizer::OptCoef;
@@ -28,20 +31,24 @@ impl ModelContext {
 		}
 	}
 
-	pub fn new_param(&mut self, shape: &[usize], dtype: DType) -> Result<Rc<RefCell<Param>>> {
+	pub fn new_param(
+		&mut self,
+		shape: &[usize],
+		dtype: DType,
+	) -> Result<Rc<RefCell<Param>>, ErrPack<TensorOpError>> {
 		let param = Param::new(shape, dtype, self.device.clone())?;
 		self.params.push(param.clone());
 		Ok(param)
 	}
 
-	pub fn zero_grad(&mut self) -> Result<()> {
+	pub fn zero_grad(&mut self) -> Result<(), ErrPack<OptimizerError>> {
 		for param in &self.params {
 			param.borrow_mut().zero_grad()?;
 		}
 		Ok(())
 	}
 
-	pub fn step(&mut self) -> Result<()> {
+	pub fn step(&mut self) -> Result<(), ErrPack<OptimizerError>> {
 		for param in &self.params {
 			param.borrow_mut().step(&self.opt_coef)?;
 		}

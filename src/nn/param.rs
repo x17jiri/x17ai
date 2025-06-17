@@ -10,7 +10,7 @@ use std::intrinsics::cold_path;
 use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::nn::optimizer::OptimizerError;
+use crate::nn::optimizer::{OptimizerError, PartitionError};
 use crate::tensor::math::TensorOpError;
 use crate::tensor::{DType, Device, Tensor};
 
@@ -47,18 +47,15 @@ impl Param {
 	///
 	/// # Errors
 	/// - if `parts * part_elems != self.value().elems()`
-	pub fn partition(&mut self, parts: usize, part_elems: usize) -> Result<()> {
+	pub fn partition(
+		&mut self,
+		parts: usize,
+		part_elems: usize,
+	) -> Result<(), ErrPack<PartitionError>> {
 		let total_elems = self.value.elems();
 		if parts * part_elems != total_elems {
-			#[cold]
-			fn err_invalid_param_partition(
-				parts: usize,
-				part_elems: usize,
-				total_elems: usize,
-			) -> Error {
-				format!("Invalid parameter partition: parts * part_elems must equal the total number of elements in the tensor. parts = {parts}, part_elems = {part_elems}, total_elems = {total_elems}").into()
-			}
-			return Err(err_invalid_param_partition(parts, part_elems, total_elems));
+			cold_path();
+			return Err(PartitionError::new(parts, part_elems, total_elems));
 		}
 		self.parts = parts;
 		self.part_elems = part_elems;

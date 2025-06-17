@@ -17,9 +17,31 @@ use crate::{ErrExtra, ErrPack};
 
 //------------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct PartitionError;
+
+impl PartitionError {
+	#[cold]
+	#[inline(never)]
+	pub fn new(parts: usize, part_elems: usize, total_elems: usize) -> ErrPack<Self> {
+		let message = format!("Invalid parameter partition: parts * part_elems must equal the total number of elements in the tensor. parts = {parts}, part_elems = {part_elems}, total_elems = {total_elems}").into();
+		ErrPack {
+			code: Self,
+			extra: Some(Box::new(ErrExtra { message, nested: None })),
+		}
+	}
+}
+
+impl From<PartitionError> for OptimizerError {
+	fn from(_: PartitionError) -> Self {
+		OptimizerError::Partition
+	}
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum OptimizerError {
 	TensorOp,
+	Partition,
 }
 
 impl From<TensorOpError> for OptimizerError {

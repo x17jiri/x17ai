@@ -25,6 +25,7 @@ impl<const N: usize> MergedDim<N> {
 	}
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum DimMergerError {
 	DimsDontMatch,
 	TooManyMergedDimensions,

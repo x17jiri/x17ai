@@ -52,7 +52,7 @@ pub trait Map: Clone {
 	fn is_contiguous(&self) -> bool;
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum MergeDimsError {
 	NotEnoughDimensions,
 	IncompatibleStrides,
@@ -73,7 +73,7 @@ pub trait MergeDims<const M: usize> {
 	fn merge_dims(&self) -> Result<Self::Output, Self::Error>;
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum MergeAllDimsError {
 	IncompatibleStrides,
 }
@@ -85,10 +85,10 @@ pub trait MergeAllDims {
 	fn merge_all_dims(&self) -> Result<Self::Output, Self::Error>;
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct InvalidNumElementsError;
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ReshapeLastDimError {
 	NotEnoughDimensions,
 	InvalidNumElements,
@@ -101,15 +101,15 @@ pub trait ReshapeLastDim<const M: usize> {
 	fn reshape_last_dim(&self, to_shape: [usize; M]) -> Result<Self::Output, Self::Error>;
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct IndexOutOfBoundsError;
 
 pub trait IndexToOffset<const K: usize> {
 	fn index_to_offset(&self, index: [usize; K]) -> Result<usize, IndexOutOfBoundsError>;
 }
 
-#[derive(Debug, Copy, Clone)]
-enum SelectError {
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum SelectError {
 	DimIndexOutOfBounds,
 	IndexOutOfBounds,
 }
@@ -147,7 +147,7 @@ pub trait Select {
 	unsafe fn select_unchecked(&self, dim: usize, index: usize) -> Self::Output;
 }
 
-type NarrowError = SelectError;
+pub type NarrowError = SelectError;
 
 pub trait Narrow {
 	type Output: Map;
@@ -163,7 +163,7 @@ pub trait Transpose {
 	fn transposed(self, d0: usize, d1: usize) -> Result<Self::Output, Self::Error>;
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct InvalidNDimError;
 
 pub trait NDShape<const K: usize> {
@@ -174,6 +174,7 @@ pub trait NDShape<const K: usize> {
 
 //--------------------------------------------------------------------------------------------------
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 /// The total nubmer of elements in a tensor is larger than the maximum allowed.
 pub struct ElementsOverflowError;
 

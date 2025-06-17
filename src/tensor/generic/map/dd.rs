@@ -15,12 +15,12 @@ use crate::tensor::generic::map::{
 	ReshapeLastDim, ReshapeLastDimError, Select, SelectError, StrideCounter,
 	StrideCounterUnchecked, merge_dims,
 };
-use crate::tensor::math::TensorOpError;
 
 use super::{Map, SizeAndStride, Transpose};
 
 //--------------------------------------------------------------------------------------------------
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ReplaceTailError {
 	ElementsOverflow,
 	NotEnoughDimensions,
@@ -29,17 +29,6 @@ pub enum ReplaceTailError {
 impl From<ElementsOverflowError> for ReplaceTailError {
 	fn from(_: ElementsOverflowError) -> Self {
 		ReplaceTailError::ElementsOverflow
-	}
-}
-
-impl From<ReplaceTailError> for TensorOpError {
-	#[cold]
-	#[inline(never)]
-	fn from(err: ReplaceTailError) -> Self {
-		match err {
-			ReplaceTailError::ElementsOverflow => TensorOpError::ElementsOverflow,
-			ReplaceTailError::NotEnoughDimensions => TensorOpError::NotEnoughDimensions,
-		}
 	}
 }
 

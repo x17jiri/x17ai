@@ -92,7 +92,7 @@ impl<'a> Buffer for DeviceBufferRefMut<'a> {
 
 //--------------------------------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum BorrowError {
 	CannotBorrow,
 	CannotBorrowMut,

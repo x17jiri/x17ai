@@ -41,6 +41,7 @@ pub struct DType {
 	pub bits: NonZeroU8,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct UnknownDTypeError;
 
 impl std::str::FromStr for DType {

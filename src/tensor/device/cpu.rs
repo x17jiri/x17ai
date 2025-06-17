@@ -12,10 +12,10 @@ use std::ops::{Range, RangeFull};
 use std::ptr::NonNull;
 use std::rc::Rc;
 
+use crate::ErrPack;
 use crate::tensor::HasDType;
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::device::executor::{Executor, ExecutorError};
-use crate::ErrPack;
 
 pub mod float_executor;
 pub mod math;
@@ -30,7 +30,7 @@ use crate::tensor::{DType, Device};
 
 //--------------------------------------------------------------------------------------------------
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ViewError {
 	InvalidDType,
 	NotOnCPUDevice,

@@ -11,8 +11,10 @@ use crate::tensor::device::DeviceError;
 use crate::tensor::device::buffer::{BorrowError, DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::device::executor::ExecutorError;
 use crate::tensor::dim_merger::{DimMerger, DimMergerError};
+use crate::tensor::generic::map::dd::ReplaceTailError;
 use crate::tensor::generic::map::{
-	MergeAllDimsError, MergeDimsError, ND, ReshapeLastDimError, SizeAndStride,
+	ElementsOverflowError, MergeAllDimsError, MergeDimsError, ND, ReshapeLastDimError,
+	SizeAndStride,
 };
 use crate::tensor::{Tensor, generic};
 use crate::util::array;
@@ -20,7 +22,7 @@ use crate::{ErrExtra, ErrPack};
 
 //--------------------------------------------------------------------------------------------------
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum TensorOpError {
 	DimsDontMatch,
 	TooManyMergedDimensions,
@@ -51,6 +53,8 @@ impl TensorOpError {
 }
 
 impl From<DimMergerError> for TensorOpError {
+	#[cold]
+	#[inline(never)]
 	fn from(err: DimMergerError) -> Self {
 		match err {
 			DimMergerError::DimsDontMatch => TensorOpError::DimsDontMatch,
@@ -68,6 +72,8 @@ impl From<DimMergerError> for ErrPack<TensorOpError> {
 }
 
 impl From<BorrowError> for TensorOpError {
+	#[cold]
+	#[inline(never)]
 	fn from(err: BorrowError) -> Self {
 		match err {
 			BorrowError::CannotBorrow => TensorOpError::CannotBorrow,
@@ -137,6 +143,8 @@ impl From<MergeDimsError> for ErrPack<TensorOpError> {
 }
 
 impl From<MergeAllDimsError> for TensorOpError {
+	#[cold]
+	#[inline(never)]
 	fn from(err: MergeAllDimsError) -> Self {
 		match err {
 			MergeAllDimsError::IncompatibleStrides => TensorOpError::IncompatibleStridesForMerge,
@@ -145,6 +153,8 @@ impl From<MergeAllDimsError> for TensorOpError {
 }
 
 impl From<MergeAllDimsError> for ErrPack<TensorOpError> {
+	#[cold]
+	#[inline(never)]
 	fn from(err: MergeAllDimsError) -> Self {
 		ErrPack { code: err.into(), extra: None }
 	}
@@ -166,6 +176,44 @@ impl From<ReshapeLastDimError> for ErrPack<TensorOpError> {
 	#[inline(never)]
 	fn from(err: ReshapeLastDimError) -> Self {
 		ErrPack { code: err.into(), extra: None }
+	}
+}
+
+impl From<ElementsOverflowError> for TensorOpError {
+	#[cold]
+	#[inline(never)]
+	fn from(_: ElementsOverflowError) -> Self {
+		TensorOpError::ElementsOverflow
+	}
+}
+
+impl From<ElementsOverflowError> for ErrPack<TensorOpError> {
+	#[cold]
+	#[inline(never)]
+	fn from(_: ElementsOverflowError) -> Self {
+		ErrPack {
+			code: TensorOpError::ElementsOverflow,
+			extra: None,
+		}
+	}
+}
+
+impl From<ReplaceTailError> for TensorOpError {
+	#[cold]
+	#[inline(never)]
+	fn from(err: ReplaceTailError) -> Self {
+		match err {
+			ReplaceTailError::ElementsOverflow => TensorOpError::ElementsOverflow,
+			ReplaceTailError::NotEnoughDimensions => TensorOpError::NotEnoughDimensions,
+		}
+	}
+}
+
+impl From<ReplaceTailError> for ErrPack<TensorOpError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: ReplaceTailError) -> Self {
+		Self { code: err.into(), extra: None }
 	}
 }
 
