@@ -56,7 +56,7 @@ impl DeviceBuffer {
 		DeviceBufferRef::new(self)
 	}
 
-	pub fn try_borrow_mut(&self) -> Result<DeviceBufferRefMut, BorrowError> {
+	pub fn try_borrow_mut(&self) -> Result<DeviceBufferRefMut, BorrowMutError> {
 		DeviceBufferRefMut::new(self)
 	}
 }
@@ -93,19 +93,26 @@ impl<'a> Buffer for DeviceBufferRefMut<'a> {
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum BorrowError {
-	CannotBorrow,
-	CannotBorrowMut,
-}
+#[non_exhaustive]
+pub struct BorrowError;
 
 impl std::error::Error for BorrowError {}
 
 impl std::fmt::Display for BorrowError {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		match self {
-			BorrowError::CannotBorrow => write!(f, "Cannot borrow the device buffer"),
-			BorrowError::CannotBorrowMut => write!(f, "Cannot borrow the device buffer mutably"),
-		}
+		write!(f, "Cannot borrow the device buffer")
+	}
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BorrowMutError;
+
+impl std::error::Error for BorrowMutError {}
+
+impl std::fmt::Display for BorrowMutError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "Cannot borrow the device buffer mutably")
 	}
 }
 
@@ -125,7 +132,7 @@ impl<'a> DeviceBufferRef<'a> {
 			device_buffer.borrow_count.set(new_count);
 			Ok(Self { device_buffer })
 		} else {
-			Err(BorrowError::CannotBorrow)
+			Err(BorrowError)
 		}
 	}
 }
@@ -168,13 +175,13 @@ pub struct DeviceBufferRefMut<'a> {
 }
 
 impl<'a> DeviceBufferRefMut<'a> {
-	pub fn new(device_buffer: &'a DeviceBuffer) -> Result<Self, BorrowError> {
+	pub fn new(device_buffer: &'a DeviceBuffer) -> Result<Self, BorrowMutError> {
 		let count = device_buffer.borrow_count.get();
 		if count == 0 {
 			device_buffer.borrow_count.set(-1);
 			Ok(Self { device_buffer })
 		} else {
-			Err(BorrowError::CannotBorrowMut)
+			Err(BorrowMutError)
 		}
 	}
 }

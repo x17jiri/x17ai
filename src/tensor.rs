@@ -10,7 +10,9 @@ use std::rc::Rc;
 pub use device::{DType, Device, HasDType};
 
 use crate::ErrPack;
-use crate::tensor::device::buffer::{BorrowError, DeviceBufferRef, DeviceBufferRefMut};
+use crate::tensor::device::buffer::{
+	BorrowError, BorrowMutError, DeviceBufferRef, DeviceBufferRefMut,
+};
 use crate::tensor::device::cpu::{CPUDevice, ViewError};
 use crate::tensor::device::executor::Executor;
 use crate::tensor::generic::map::DD;
@@ -38,7 +40,7 @@ impl<M: generic::map::Map> generic::Tensor<M, Rc<device::DeviceBuffer>> {
 
 	pub fn borrow_mut(
 		&self,
-	) -> std::result::Result<generic::Tensor<M, DeviceBufferRefMut<'_>>, BorrowError> {
+	) -> std::result::Result<generic::Tensor<M, DeviceBufferRefMut<'_>>, BorrowMutError> {
 		let buf = self.buf.try_borrow_mut()?;
 		let map = self.map.clone();
 		Ok(generic::Tensor { map, buf })
@@ -157,6 +159,10 @@ impl Tensor {
 			device,
 			phantom: std::marker::PhantomData,
 		}
+	}
+
+	pub fn are_identical(a: &Tensor, b: &Tensor) -> bool {
+		Rc::ptr_eq(&a.buf, &b.buf) && a.map == b.map
 	}
 }
 

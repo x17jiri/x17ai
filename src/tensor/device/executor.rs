@@ -12,6 +12,7 @@ use crate::util::array;
 use crate::{ErrExtra, ErrPack};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ExecutorError {
 	ShapeMismatch,
 	UnsafeTensor,
@@ -34,22 +35,20 @@ impl ExecutorError {
 			.collect::<Vec<_>>()
 			.join(", ");
 		let message = format!("Expected all tensors to have the same shape, but got: {shapes}");
-		let result = ErrPack {
+		ErrPack {
 			code: Self::ShapeMismatch,
 			extra: Some(Box::new(ErrExtra { message, nested: None })),
-		};
-		result
+		}
 	}
 
 	#[cold]
 	#[inline(never)]
 	pub fn not_contiguous() -> ErrPack<Self> {
 		let message = "Expected the tensor to have contiguous dimension -1, but it does not".into();
-		let result = ErrPack {
+		ErrPack {
 			code: Self::NotContiguous,
 			extra: Some(Box::new(ErrExtra { message, nested: None })),
-		};
-		result
+		}
 	}
 
 	#[cold]
@@ -58,36 +57,32 @@ impl ExecutorError {
 		let message =
 			"Expected the tensor to have contiguous or broadcasted dimension -1, but it does not"
 				.into();
-		let result = ErrPack {
+		ErrPack {
 			code: Self::NotContiguousOrBroadcasted,
 			extra: Some(Box::new(ErrExtra { message, nested: None })),
-		};
-		result
+		}
 	}
 
 	#[cold]
 	#[inline(never)]
 	pub fn invalid_shape(shape: [usize; 2], expected: [usize; 2]) -> ErrPack<Self> {
-		let message =
-			format!("Tensor shape {:?} does not match expected shape {:?}", shape, expected);
-		let result = ErrPack {
+		let message = format!("Tensor shape {shape:?} does not match expected shape {expected:?}");
+		ErrPack {
 			code: Self::InvalidShape,
 			extra: Some(Box::new(ErrExtra { message, nested: None })),
-		};
-		result
+		}
 	}
 
 	#[cold]
 	#[inline(never)]
 	pub fn io_error(err: std::io::Error) -> ErrPack<Self> {
-		let result = ErrPack {
+		ErrPack {
 			code: Self::IOError,
 			extra: Some(Box::new(ErrExtra {
 				message: String::new(),
 				nested: Some(Box::new(err)),
 			})),
-		};
-		result
+		}
 	}
 }
 
@@ -99,7 +94,7 @@ impl From<TensorUnsafeError> for ExecutorError {
 
 impl From<ErrPack<TensorUnsafeError>> for ErrPack<ExecutorError> {
 	fn from(err: ErrPack<TensorUnsafeError>) -> Self {
-		ErrPack { code: err.code.into(), extra: err.extra }
+		Self { code: err.code.into(), extra: err.extra }
 	}
 }
 
@@ -304,6 +299,14 @@ pub trait Executor {
 		b_weight: f64,
 	) -> Result<(), ErrPack<ExecutorError>>;
 
+	fn acc_weighted<'buf>(
+		&self,
+		a: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		a_weight: f64,
+		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		b_weight: f64,
+	) -> Result<(), ErrPack<ExecutorError>>;
+
 	/// Element-wise multiplication:
 	///
 	///     o[i] = a[j, i] * b[j, i]
@@ -325,6 +328,12 @@ pub trait Executor {
 		&self,
 		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+	) -> Result<(), ErrPack<ExecutorError>>;
+
+	fn mul_<'buf>(
+		&self,
+		a: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 	) -> Result<(), ErrPack<ExecutorError>>;
 

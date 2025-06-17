@@ -16,6 +16,7 @@ pub use buffer::DeviceBuffer;
 pub use dtype::{DType, HasDType};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DeviceError {
 	UnsupportedDType,
 	AllocationFailed,

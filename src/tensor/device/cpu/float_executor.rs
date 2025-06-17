@@ -287,7 +287,19 @@ where
 		b_weight: f64,
 	) -> Result<(), ErrPack<ExecutorError>> {
 		Self::binary(o, a, b, |o, a, b| {
-			*o = T::from_f64(math::add_weighted(a.to_f64(), a_weight, b.to_f64(), b_weight))
+			*o = T::from_f64(math::add_weighted(a.to_f64(), a_weight, b.to_f64(), b_weight));
+		})
+	}
+
+	fn acc_weighted<'buf>(
+		&self,
+		a: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		a_weight: f64,
+		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		b_weight: f64,
+	) -> Result<(), ErrPack<ExecutorError>> {
+		Self::unary(a, b, |a, b| {
+			*a = T::from_f64(math::add_weighted(a.to_f64(), a_weight, b.to_f64(), b_weight));
 		})
 	}
 
@@ -298,6 +310,14 @@ where
 		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 	) -> Result<(), ErrPack<ExecutorError>> {
 		Self::binary(o, a, b, |o, a, b| *o = T::from_f64(a.to_f64() * b.to_f64()))
+	}
+
+	fn mul_<'buf>(
+		&self,
+		a: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+	) -> Result<(), ErrPack<ExecutorError>> {
+		Self::unary(a, b, |a, b| *a = T::from_f64(a.to_f64() * b.to_f64()))
 	}
 
 	#[allow(clippy::many_single_char_names)]

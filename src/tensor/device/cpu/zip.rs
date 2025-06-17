@@ -52,7 +52,7 @@ pub unsafe fn zip_elems<
 		for i in 0..shape[1] {
 			let o = o.map(|ptr| ptr.add(i).as_mut().unwrap_unchecked());
 			let c = c.map(|ptr| ptr.add(i).read());
-			let b = b.map(|ptr| ptr.add(i).read());
+			let b = b.map(|ptr| ptr.read());
 			f(o, c, b);
 		}
 	}

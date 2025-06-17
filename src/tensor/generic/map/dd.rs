@@ -11,7 +11,7 @@ use std::ptr::NonNull;
 
 use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;
 use crate::tensor::generic::map::{
-	ElementsOverflowError, MergeAllDims, MergeAllDimsError, MergeDims, MergeDimsError,
+	ElementsOverflowError, IncompatibleStridesError, MergeAllDims, MergeDims, MergeDimsError,
 	ReshapeLastDim, ReshapeLastDimError, Select, SelectError, StrideCounter,
 	StrideCounterUnchecked, merge_dims,
 };
@@ -162,10 +162,10 @@ impl<const M: usize> MergeDims<M> for DD {
 
 impl MergeAllDims for DD {
 	type Output = Self;
-	type Error = MergeAllDimsError;
+	type Error = IncompatibleStridesError;
 
 	#[inline(never)] // TODO
-	fn merge_all_dims(&self) -> Result<Self::Output, MergeAllDimsError> {
+	fn merge_all_dims(&self) -> Result<Self::Output, IncompatibleStridesError> {
 		let merged = merge_dims(self.dims.as_slice())?;
 
 		let mut dims = DimVecBuilder::new(1);

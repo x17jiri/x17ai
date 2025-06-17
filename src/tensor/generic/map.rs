@@ -58,11 +58,9 @@ pub enum MergeDimsError {
 	IncompatibleStrides,
 }
 
-impl From<MergeAllDimsError> for MergeDimsError {
-	fn from(err: MergeAllDimsError) -> Self {
-		match err {
-			MergeAllDimsError::IncompatibleStrides => MergeDimsError::IncompatibleStrides,
-		}
+impl From<IncompatibleStridesError> for MergeDimsError {
+	fn from(_: IncompatibleStridesError) -> Self {
+		MergeDimsError::IncompatibleStrides
 	}
 }
 
@@ -74,9 +72,8 @@ pub trait MergeDims<const M: usize> {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum MergeAllDimsError {
-	IncompatibleStrides,
-}
+#[non_exhaustive]
+pub struct IncompatibleStridesError;
 
 pub trait MergeAllDims {
 	type Output: Map;
@@ -86,6 +83,7 @@ pub trait MergeAllDims {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct InvalidNumElementsError;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -102,6 +100,7 @@ pub trait ReshapeLastDim<const M: usize> {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct IndexOutOfBoundsError;
 
 pub trait IndexToOffset<const K: usize> {
@@ -112,25 +111,6 @@ pub trait IndexToOffset<const K: usize> {
 pub enum SelectError {
 	DimIndexOutOfBounds,
 	IndexOutOfBounds,
-}
-
-impl From<SelectError> for TensorOpError {
-	#[cold]
-	#[inline(never)]
-	fn from(err: SelectError) -> Self {
-		match err {
-			SelectError::DimIndexOutOfBounds => TensorOpError::DimIndexOutOfBounds,
-			SelectError::IndexOutOfBounds => TensorOpError::IndexOutOfBounds,
-		}
-	}
-}
-
-impl From<SelectError> for ErrPack<TensorOpError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: SelectError) -> Self {
-		ErrPack { code: err.into(), extra: None }
-	}
 }
 
 impl From<DimIndexOutOfBoundsError> for SelectError {
@@ -164,6 +144,7 @@ pub trait Transpose {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct InvalidNDimError;
 
 pub trait NDShape<const K: usize> {
@@ -176,6 +157,7 @@ pub trait NDShape<const K: usize> {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 /// The total nubmer of elements in a tensor is larger than the maximum allowed.
+#[non_exhaustive]
 pub struct ElementsOverflowError;
 
 pub struct StrideCounter {
@@ -243,7 +225,7 @@ impl StrideCounterUnchecked {
 
 //--------------------------------------------------------------------------------------------------
 
-pub fn merge_dims(dims: &[SizeAndStride]) -> Result<SizeAndStride, MergeAllDimsError> {
+pub fn merge_dims(dims: &[SizeAndStride]) -> Result<SizeAndStride, IncompatibleStridesError> {
 	let mut merged = SizeAndStride { size: 1, stride: 1 };
 	for dim in dims.iter().rev() {
 		if dim.stride == merged.size * merged.stride || dim.size <= 1 {
@@ -254,7 +236,7 @@ pub fn merge_dims(dims: &[SizeAndStride]) -> Result<SizeAndStride, MergeAllDimsE
 				merged = *dim;
 			} else if merged.size > 1 {
 				cold_path();
-				return Err(MergeAllDimsError::IncompatibleStrides);
+				return Err(IncompatibleStridesError);
 			}
 		}
 	}

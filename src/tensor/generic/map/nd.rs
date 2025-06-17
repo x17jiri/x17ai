@@ -13,9 +13,9 @@ use super::{
 };
 use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;
 use crate::tensor::generic::map::{
-	ElementsOverflowError, IndexOutOfBoundsError, InvalidNumElementsError, MergeAllDimsError,
-	NDShape, Narrow, NarrowError, Select, SelectError, StrideCounter, StrideCounterUnchecked,
-	merge_dims,
+	ElementsOverflowError, IncompatibleStridesError, IndexOutOfBoundsError,
+	InvalidNumElementsError, NDShape, Narrow, NarrowError, Select, SelectError, StrideCounter,
+	StrideCounterUnchecked, merge_dims,
 };
 use crate::tensor::generic::universal_range::UniversalRange;
 use crate::util::array;
@@ -36,6 +36,7 @@ impl<const N: usize> ND<N> {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct TryNDFromDDError {
 	pub nd_dims: usize,
 	pub dd_dims: usize,
@@ -117,9 +118,9 @@ where
 	[(); N - M + 1]:,
 {
 	type Output = ND<{ N - M + 1 }>;
-	type Error = MergeAllDimsError;
+	type Error = IncompatibleStridesError;
 
-	fn merge_dims(&self) -> Result<Self::Output, MergeAllDimsError> {
+	fn merge_dims(&self) -> Result<Self::Output, IncompatibleStridesError> {
 		let mut dims = [SizeAndStride::default(); N - M + 1];
 		for i in 0..N - M {
 			dims[i] = self.dims[i];
@@ -131,9 +132,9 @@ where
 
 impl<const N: usize> MergeAllDims for ND<N> {
 	type Output = ND<1>;
-	type Error = MergeAllDimsError;
+	type Error = IncompatibleStridesError;
 
-	fn merge_all_dims(&self) -> Result<Self::Output, MergeAllDimsError> {
+	fn merge_all_dims(&self) -> Result<Self::Output, IncompatibleStridesError> {
 		Ok(ND {
 			dims: [merge_dims(&self.dims)?],
 			offset: self.offset,

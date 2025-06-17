@@ -10,106 +10,15 @@
 //     Original Adam: https://arxiv.org/abs/1412.6980
 //     Adam-mini: https://arxiv.org/abs/2406.16793
 
+use std::hint::cold_path;
+
 use crate::tensor::Tensor;
-use crate::tensor::generic::map::{MergeAllDimsError, MergeDimsError, ReshapeLastDimError};
+use crate::tensor::generic::map::{IncompatibleStridesError, MergeDimsError, ReshapeLastDimError};
 use crate::tensor::math::{RSqrt, Sum, TensorOpError};
+use crate::util::LossyInto;
 use crate::{ErrExtra, ErrPack};
 
-//------------------------------------------------------------------------------
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct PartitionError;
-
-impl PartitionError {
-	#[cold]
-	#[inline(never)]
-	pub fn new(parts: usize, part_elems: usize, total_elems: usize) -> ErrPack<Self> {
-		let message = format!("Invalid parameter partition: parts * part_elems must equal the total number of elements in the tensor. parts = {parts}, part_elems = {part_elems}, total_elems = {total_elems}").into();
-		ErrPack {
-			code: Self,
-			extra: Some(Box::new(ErrExtra { message, nested: None })),
-		}
-	}
-}
-
-impl From<PartitionError> for OptimizerError {
-	fn from(_: PartitionError) -> Self {
-		OptimizerError::Partition
-	}
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum OptimizerError {
-	TensorOp,
-	Partition,
-}
-
-impl From<TensorOpError> for OptimizerError {
-	fn from(_: TensorOpError) -> Self {
-		OptimizerError::TensorOp
-	}
-}
-
-impl From<ErrPack<TensorOpError>> for ErrPack<OptimizerError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: ErrPack<TensorOpError>) -> Self {
-		ErrPack {
-			code: OptimizerError::TensorOp,
-			extra: Some(Box::new(ErrExtra {
-				message: String::new(),
-				nested: Some(err.into()),
-			})),
-		}
-	}
-}
-
-impl From<MergeDimsError> for ErrPack<OptimizerError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: MergeDimsError) -> Self {
-		let t: ErrPack<TensorOpError> = err.into();
-		ErrPack {
-			code: OptimizerError::TensorOp,
-			extra: Some(Box::new(ErrExtra {
-				message: String::new(),
-				nested: Some(t.into()),
-			})),
-		}
-	}
-}
-
-impl From<MergeAllDimsError> for ErrPack<OptimizerError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: MergeAllDimsError) -> Self {
-		let t: ErrPack<TensorOpError> = err.into();
-		ErrPack {
-			code: OptimizerError::TensorOp,
-			extra: Some(Box::new(ErrExtra {
-				message: String::new(),
-				nested: Some(t.into()),
-			})),
-		}
-	}
-}
-
-impl From<ReshapeLastDimError> for ErrPack<OptimizerError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: ReshapeLastDimError) -> Self {
-		let t: ErrPack<TensorOpError> = err.into();
-		ErrPack {
-			code: OptimizerError::TensorOp,
-			extra: Some(Box::new(ErrExtra {
-				message: String::new(),
-				nested: Some(t.into()),
-			})),
-		}
-	}
-}
-
-//------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------------------
 
 pub struct OptCoef {
 	pub(crate) m_decay: f64,       // beta1
@@ -150,8 +59,14 @@ impl OptParam {
 		parts: usize,
 		part_elems: usize,
 	) -> Result<OptParam, ErrPack<OptimizerError>> {
-		let elems = parts.checked_mul(part_elems).expect("Overflow in multiplication");
-		assert!(value.elems() == elems, "Tensor size mismatch");
+		let value_elems = value.elems();
+		match parts.checked_mul(part_elems) {
+			Some(partition_elems) if partition_elems == value_elems => {},
+			_ => {
+				cold_path();
+				return Err(OptimizerError::partition(parts, part_elems, value_elems));
+			},
+		}
 
 		let grad_reshaped = value.new_empty_like()?;
 
@@ -166,10 +81,10 @@ impl OptParam {
 		let v = value.new_empty(&[parts, 1], value.dtype())?;
 		let v_rsqrt = v.new_empty_like()?;
 
-		Ok(OptParam {
+		Ok(Self {
 			parts,
 			part_elems,
-			part_elems_recip: 1.0 / (part_elems as f64),
+			part_elems_recip: 1.0 / part_elems.lossy_into(),
 			already_have_grad: false,
 
 			value,
@@ -238,3 +153,118 @@ impl OptParam {
 		self.part_elems
 	}
 }
+
+//--------------------------------------------------------------------------------------------------
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PartitionError;
+
+impl PartitionError {
+	#[cold]
+	#[inline(never)]
+	pub fn new(parts: usize, part_elems: usize, total_elems: usize) -> ErrPack<Self> {
+		let message = format!(
+			"Invalid parameter partition: parts * part_elems must equal the total number of elements in the tensor. parts = {parts}, part_elems = {part_elems}, total_elems = {total_elems}"
+		);
+		ErrPack {
+			code: Self,
+			extra: Some(Box::new(ErrExtra { message, nested: None })),
+		}
+	}
+}
+
+impl From<PartitionError> for OptimizerError {
+	fn from(_: PartitionError) -> Self {
+		Self::Partition
+	}
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OptimizerError {
+	TensorOp,
+	Partition,
+}
+
+impl OptimizerError {
+	#[cold]
+	#[inline(never)]
+	pub fn partition(parts: usize, part_elems: usize, total_elems: usize) -> ErrPack<Self> {
+		let err = PartitionError::new(parts, part_elems, total_elems);
+		ErrPack {
+			code: Self::Partition,
+			extra: Some(Box::new(ErrExtra {
+				message: String::new(),
+				nested: Some(err.into()),
+			})),
+		}
+	}
+}
+
+impl From<TensorOpError> for OptimizerError {
+	fn from(_: TensorOpError) -> Self {
+		Self::TensorOp
+	}
+}
+
+impl From<ErrPack<TensorOpError>> for ErrPack<OptimizerError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: ErrPack<TensorOpError>) -> Self {
+		Self {
+			code: OptimizerError::TensorOp,
+			extra: Some(Box::new(ErrExtra {
+				message: String::new(),
+				nested: Some(err.into()),
+			})),
+		}
+	}
+}
+
+impl From<MergeDimsError> for ErrPack<OptimizerError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: MergeDimsError) -> Self {
+		let t: ErrPack<TensorOpError> = err.into();
+		Self {
+			code: OptimizerError::TensorOp,
+			extra: Some(Box::new(ErrExtra {
+				message: String::new(),
+				nested: Some(t.into()),
+			})),
+		}
+	}
+}
+
+impl From<IncompatibleStridesError> for ErrPack<OptimizerError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: IncompatibleStridesError) -> Self {
+		let t: ErrPack<TensorOpError> = err.into();
+		Self {
+			code: OptimizerError::TensorOp,
+			extra: Some(Box::new(ErrExtra {
+				message: String::new(),
+				nested: Some(t.into()),
+			})),
+		}
+	}
+}
+
+impl From<ReshapeLastDimError> for ErrPack<OptimizerError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: ReshapeLastDimError) -> Self {
+		let t: ErrPack<TensorOpError> = err.into();
+		Self {
+			code: OptimizerError::TensorOp,
+			extra: Some(Box::new(ErrExtra {
+				message: String::new(),
+				nested: Some(t.into()),
+			})),
+		}
+	}
+}
+
+//--------------------------------------------------------------------------------------------------

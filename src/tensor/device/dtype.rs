@@ -42,6 +42,7 @@ pub struct DType {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UnknownDTypeError;
 
 impl std::str::FromStr for DType {

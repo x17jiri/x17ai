@@ -11,6 +11,7 @@ use std::ops::{Range, RangeFrom, RangeFull, RangeInclusive, RangeTo, RangeToIncl
 //------------------------------------------------------------------------------
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DimIndexOutOfBoundsError;
 
 impl std::error::Error for DimIndexOutOfBoundsError {}

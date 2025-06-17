@@ -53,9 +53,12 @@ impl Param {
 		part_elems: usize,
 	) -> Result<(), ErrPack<PartitionError>> {
 		let total_elems = self.value.elems();
-		if parts * part_elems != total_elems {
-			cold_path();
-			return Err(PartitionError::new(parts, part_elems, total_elems));
+		match parts.checked_mul(part_elems) {
+			Some(partition_elems) if partition_elems == total_elems => {},
+			_ => {
+				cold_path();
+				return Err(PartitionError::new(parts, part_elems, total_elems));
+			},
 		}
 		self.parts = parts;
 		self.part_elems = part_elems;
