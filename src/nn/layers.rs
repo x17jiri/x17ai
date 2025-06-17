@@ -50,6 +50,12 @@ pub trait Layer {
 		params
 	}
 
+	/// Note: Passing the `inp` tensor by value allows the implementations to check if the tensor
+	/// can be reused for output. It can test if the tensor owns the buffer.
+	///
+	/// If we passed by reference, even if the tensor owned the buffer, there could be multiple
+	/// references to the tensor itself and so the implementations would be unable to tell
+	/// if the buffer can be reused.
 	fn forward(&self, inp: Tensor, ctx: &mut EvalContext)
 	-> Result<Tensor, ErrPack<TensorOpError>>;
 

@@ -30,6 +30,8 @@ mod tests;
 //--------------------------------------------------------------------------------------------------
 
 impl<M: generic::map::Map> generic::Tensor<M, Rc<device::DeviceBuffer>> {
+	/// # Errors
+	/// `BorrowError` if there is a mutable borrow preventing a shared borrow.
 	pub fn borrow(
 		&self,
 	) -> std::result::Result<generic::Tensor<M, DeviceBufferRef<'_>>, BorrowError> {
@@ -38,6 +40,8 @@ impl<M: generic::map::Map> generic::Tensor<M, Rc<device::DeviceBuffer>> {
 		Ok(generic::Tensor { map, buf })
 	}
 
+	/// # Errors
+	/// `BorrowMutError` if there already is any other borrow of the buffer.
 	pub fn borrow_mut(
 		&self,
 	) -> std::result::Result<generic::Tensor<M, DeviceBufferRefMut<'_>>, BorrowMutError> {
@@ -51,7 +55,7 @@ impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRef<'buf>> {
 	/// Returns a "view" tensor which has a slice `&[T]` as its buffer.
 	///
 	/// # Errors
-	/// If the buffer's dtype does not match `T` or if the buffer is not on CPU device.
+	/// See [`ViewError`](`crate::tensor::device::cpu::ViewError`)
 	pub fn view<T: HasDType>(&self) -> Result<generic::Tensor<M, &'buf [T]>, ViewError> {
 		let buf = CPUDevice::view(&self.buf)?;
 		let map = self.map.clone();
@@ -60,6 +64,10 @@ impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRef<'buf>> {
 }
 
 impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRefMut<'buf>> {
+	/// Returns a "view" tensor which has a slice `&mut [T]` as its buffer.
+	///
+	/// # Errors
+	/// See [`ViewError`](`crate::tensor::device::cpu::ViewError`)
 	pub fn view_mut<T: HasDType>(
 		&mut self,
 	) -> Result<generic::Tensor<M, &'buf mut [T]>, ViewError> {
@@ -154,6 +162,14 @@ impl Tensor {
 		expr.eval_to_tensor(self)
 	}
 
+	/// I use this function because Rust doesn't allow specifying only some generic parameters.
+	///
+	/// If I created `Tensor::new_2d<T, const Y: usize, const X: usize>(...)`,
+	/// the caller would have to specify either all `T`, `Y`, `X`, or none of them.
+	///
+	/// With `literal_factory`, it is possible to only specify `T` and have `Y` and `X` inferred:
+	///
+	///     Tensor::literal_factory<f32>::new_2d(...)
 	pub fn literal_factory<T: HasDType>(device: Rc<dyn Device>) -> TensorLiteralFactory<T> {
 		TensorLiteralFactory {
 			device,
@@ -161,7 +177,10 @@ impl Tensor {
 		}
 	}
 
-	pub fn are_identical(a: &Tensor, b: &Tensor) -> bool {
+	/// Checkes if two tensors are identical.
+	///
+	/// I.e., if they share the same buffer and have the same map.
+	pub fn are_identical(a: &Self, b: &Self) -> bool {
 		Rc::ptr_eq(&a.buf, &b.buf) && a.map == b.map
 	}
 }

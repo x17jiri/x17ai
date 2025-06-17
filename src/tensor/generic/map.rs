@@ -13,10 +13,8 @@ use std::hint::{cold_path, likely};
 pub use dd::DD;
 pub use nd::ND;
 
-use crate::ErrPack;
 use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;
 use crate::tensor::generic::universal_range::UniversalRange;
-use crate::tensor::math::TensorOpError;
 
 //--------------------------------------------------------------------------------------------------
 

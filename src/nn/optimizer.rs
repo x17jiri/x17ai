@@ -58,7 +58,7 @@ impl OptParam {
 		value: Tensor,
 		parts: usize,
 		part_elems: usize,
-	) -> Result<OptParam, ErrPack<OptimizerError>> {
+	) -> Result<Self, ErrPack<OptimizerError>> {
 		let value_elems = value.elems();
 		match parts.checked_mul(part_elems) {
 			Some(partition_elems) if partition_elems == value_elems => {},

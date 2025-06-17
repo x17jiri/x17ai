@@ -92,18 +92,11 @@ impl Layer for Softmax {
 				let g = out.new_replace_tail(1, &[1])?; // [..., 1]
 				g.assign((&out * &d_out).sum())?;
 
-				println!("g = {}", g.borrow().unwrap().view::<f32>().unwrap());
-
 				let d_inp = d_out.reuse_or_new_like()?;
 
 				// TODO - we could merge `-` and `*` into a single kernel
 				d_inp.assign(&d_out - &g)?;
-
-				println!("sub = {}", d_inp.borrow().unwrap().view::<f32>().unwrap());
-
 				d_inp.assign(&d_inp * &out)?;
-
-				println!("res = {}", d_inp.borrow().unwrap().view::<f32>().unwrap());
 
 				Ok(d_inp)
 			},

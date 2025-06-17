@@ -105,7 +105,8 @@ pub fn swiglu_backward(lin: f64, gate: f64, d_out: f64) -> (f64, f64) {
 }
 
 pub fn softmax_part1<T: Copy + FromToF64, S: Copy + FromToF64>(
-	inp: &[T], scratch: &mut [S],
+	inp: &[T],
+	scratch: &mut [S],
 ) -> (f64, f64) {
 	// TODO
 	// - calculating `max` is one loop
@@ -113,7 +114,7 @@ pub fn softmax_part1<T: Copy + FromToF64, S: Copy + FromToF64>(
 	// - there are online algorithms for calculating `max` and `sum` simultaneously
 	// - would they be worth it?
 
-	let max: f64 = inp.iter().map(|x| x.to_f64()).fold(f64::MIN, f64::max);
+	let max: f64 = inp.iter().map(T::to_f64).fold(f64::MIN, f64::max);
 
 	let mut sum = 0.0;
 	for (i, s) in inp.iter().zip(scratch) {
@@ -135,7 +136,7 @@ pub fn softmax_part1_<T: Copy + FromToF64>(inp: &mut [T]) -> (f64, f64) {
 	// - there are online algorithms for calculating `max` and `sum` simultaneously
 	// - would they be worth it?
 
-	let max: f64 = inp.iter().map(|x| x.to_f64()).fold(f64::MIN, f64::max);
+	let max: f64 = inp.iter().map(T::to_f64).fold(f64::MIN, f64::max);
 
 	let mut sum = 0.0;
 	for i in inp {
@@ -151,7 +152,9 @@ pub fn softmax_part1_<T: Copy + FromToF64>(inp: &mut [T]) -> (f64, f64) {
 }
 
 pub fn softmax_part2<S: Copy + FromToF64, T: Copy + FromToF64>(
-	scratch: &[S], sum: f64, dst: &mut [T],
+	scratch: &[S],
+	sum: f64,
+	dst: &mut [T],
 ) {
 	// NOTE:
 	// Subtracting max in part1 ensures at least one of the exponents

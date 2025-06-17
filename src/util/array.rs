@@ -16,7 +16,8 @@ pub fn map_into<const N: usize, T, U>(array: [T; N], mut f: impl FnMut(usize, T)
 }
 
 pub fn try_map_into<const N: usize, T, U, E>(
-	array: [T; N], mut f: impl FnMut(usize, T) -> Result<U, E>,
+	array: [T; N],
+	mut f: impl FnMut(usize, T) -> Result<U, E>,
 ) -> Result<[U; N], E> {
 	let mut u = [const { MaybeUninit::uninit() }; N];
 	for (i, t) in array.into_iter().enumerate() {
@@ -34,7 +35,8 @@ pub fn map<const N: usize, T, U>(array: &[T; N], mut f: impl FnMut(usize, &T) ->
 }
 
 pub fn map_mut<const N: usize, T, U>(
-	array: &mut [T; N], mut f: impl FnMut(usize, &mut T) -> U,
+	array: &mut [T; N],
+	mut f: impl FnMut(usize, &mut T) -> U,
 ) -> [U; N] {
 	let mut u = [const { MaybeUninit::uninit() }; N];
 	for i in 0..N {
@@ -44,7 +46,8 @@ pub fn map_mut<const N: usize, T, U>(
 }
 
 pub fn try_map<const N: usize, T, U, E>(
-	array: &[T; N], mut f: impl FnMut(usize, &T) -> Result<U, E>,
+	array: &[T; N],
+	mut f: impl FnMut(usize, &T) -> Result<U, E>,
 ) -> Result<[U; N], E> {
 	let mut u = [const { MaybeUninit::uninit() }; N];
 	for i in 0..N {
@@ -80,7 +83,8 @@ pub fn concat_arrays<T, const A: usize, const B: usize>(a: [T; A], b: [T; B]) ->
 }
 
 pub fn try_map_backward<const N: usize, T, U, E>(
-	array: &[T; N], mut f: impl FnMut(usize, &T) -> Result<U, E>,
+	array: &[T; N],
+	mut f: impl FnMut(usize, &T) -> Result<U, E>,
 ) -> Result<[U; N], E> {
 	let mut u = [const { MaybeUninit::uninit() }; N];
 	for i in (0..N).rev() {

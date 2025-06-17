@@ -17,7 +17,7 @@ pub use dtype::{DType, HasDType};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum DeviceError {
+pub enum NewDeviceBufferError {
 	UnsupportedDType,
 	AllocationFailed,
 }
@@ -29,7 +29,7 @@ pub trait Device {
 		self: Rc<Self>,
 		dtype: DType,
 		elems: usize,
-	) -> Result<Rc<DeviceBuffer>, DeviceError>;
+	) -> Result<Rc<DeviceBuffer>, NewDeviceBufferError>;
 
 	unsafe fn drop_buffer(self: Rc<Self>, dtype: DType, elems: usize, device_data: *mut u8);
 }

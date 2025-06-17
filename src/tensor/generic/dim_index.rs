@@ -17,7 +17,7 @@ pub struct DimIndexOutOfBoundsError;
 impl std::error::Error for DimIndexOutOfBoundsError {}
 
 impl std::fmt::Display for DimIndexOutOfBoundsError {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		write!(f, "Dimension index out of range.")
 	}
 }

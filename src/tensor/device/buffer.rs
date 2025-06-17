@@ -26,9 +26,9 @@ pub struct DeviceBuffer {
 	pub device_is_cpu: bool,
 	pub device: ManuallyDrop<Rc<dyn Device>>,
 
-	/// 0 => not borrowed,
-	/// >0 => number of immutable borrows,
-	/// <0 => one mutable borrow (exclusive).
+	/// `== 0` => not borrowed,
+	/// ` > 0` => number of immutable borrows,
+	/// ` < 0` => one mutable borrow (exclusive).
 	pub borrow_count: Cell<isize>,
 }
 
@@ -52,11 +52,11 @@ impl DeviceBuffer {
 		unsafe { self.executor.as_ref() }
 	}
 
-	pub fn try_borrow(&self) -> Result<DeviceBufferRef, BorrowError> {
+	pub fn try_borrow(&self) -> Result<DeviceBufferRef<'_>, BorrowError> {
 		DeviceBufferRef::new(self)
 	}
 
-	pub fn try_borrow_mut(&self) -> Result<DeviceBufferRefMut, BorrowMutError> {
+	pub fn try_borrow_mut(&self) -> Result<DeviceBufferRefMut<'_>, BorrowMutError> {
 		DeviceBufferRefMut::new(self)
 	}
 }
@@ -99,7 +99,7 @@ pub struct BorrowError;
 impl std::error::Error for BorrowError {}
 
 impl std::fmt::Display for BorrowError {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		write!(f, "Cannot borrow the device buffer")
 	}
 }
@@ -111,7 +111,7 @@ pub struct BorrowMutError;
 impl std::error::Error for BorrowMutError {}
 
 impl std::fmt::Display for BorrowMutError {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		write!(f, "Cannot borrow the device buffer mutably")
 	}
 }

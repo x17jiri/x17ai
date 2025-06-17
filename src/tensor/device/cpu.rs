@@ -15,7 +15,7 @@ use std::rc::Rc;
 use crate::ErrPack;
 use crate::tensor::HasDType;
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
-use crate::tensor::device::executor::{Executor, ExecutorError};
+use crate::tensor::device::executor::ExecutorError;
 
 pub mod float_executor;
 pub mod math;
@@ -25,7 +25,7 @@ pub mod zip;
 use rng::Rng;
 
 use crate::tensor::device::cpu::float_executor::FloatExecutor;
-use crate::tensor::device::{DeviceBuffer, DeviceError};
+use crate::tensor::device::{DeviceBuffer, NewDeviceBufferError};
 use crate::tensor::{DType, Device};
 
 //--------------------------------------------------------------------------------------------------
@@ -473,27 +473,27 @@ impl Device for CPUDevice {
 		self: Rc<Self>,
 		dtype: DType,
 		elems: usize,
-	) -> Result<Rc<DeviceBuffer>, DeviceError> {
+	) -> Result<Rc<DeviceBuffer>, NewDeviceBufferError> {
 		let executor = match dtype {
 			f32::dtype => &self.f32_executor,
 			_ => {
 				cold_path();
-				return Err(DeviceError::UnsupportedDType);
+				return Err(NewDeviceBufferError::UnsupportedDType);
 			},
 		};
 		let align = dtype.bytes().min(1);
 		let Some(size) = dtype.array_bytes(elems) else {
 			cold_path();
-			return Err(DeviceError::AllocationFailed);
+			return Err(NewDeviceBufferError::AllocationFailed);
 		};
 		let Ok(layout) = std::alloc::Layout::from_size_align(size, align) else {
 			cold_path();
-			return Err(DeviceError::AllocationFailed);
+			return Err(NewDeviceBufferError::AllocationFailed);
 		};
 		let memory = unsafe { std::alloc::alloc(layout) };
 		let Some(memory) = NonNull::new(memory) else {
 			cold_path();
-			return Err(DeviceError::AllocationFailed);
+			return Err(NewDeviceBufferError::AllocationFailed);
 		};
 		Ok(Rc::new(DeviceBuffer {
 			executor: NonNull::from(executor),

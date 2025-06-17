@@ -25,6 +25,7 @@ impl<Nested: Layer> SkipConnection<Nested> {
 		Self { nested }
 	}
 
+	#[allow(clippy::needless_pass_by_value)]
 	pub fn add_residual(
 		&self,
 		inp: Tensor,

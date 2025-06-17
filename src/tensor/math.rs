@@ -5,9 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
-use std::rc::Rc;
-
-use crate::tensor::device::DeviceError;
+use crate::tensor::device::NewDeviceBufferError;
 use crate::tensor::device::buffer::{
 	BorrowError, BorrowMutError, DeviceBufferRef, DeviceBufferRefMut,
 };
@@ -27,6 +25,9 @@ use crate::{ErrExtra, ErrPack};
 pub trait EvaluatesToTensor {
 	/// Calculate the result of the operation represented by `self`
 	/// and save it into the `to` tensor.
+	///
+	/// # Errors
+	/// See [`TensorOpError`] for possible errors.
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>>;
 }
 
@@ -40,6 +41,8 @@ pub trait MatrixSavable {
 
 //--------------------------------------------------------------------------------------------------
 
+#[allow(clippy::indexing_slicing)]
+#[allow(clippy::needless_range_loop)]
 pub(crate) fn __elem_wise<'a, const O: usize, const C: usize>(
 	o: [&'a Tensor; O],
 	c: [&'a Tensor; C],
@@ -110,6 +113,10 @@ where
 ///
 /// Batch dimensions broadcast is disabled for tensors[0] and enabled for tensors[1..].
 /// This is by design.
+#[allow(clippy::indexing_slicing)]
+#[allow(clippy::needless_range_loop)]
+#[allow(clippy::unwrap_used)]
+#[inline(never)]
 fn __vec_wise<'a, const O: usize, const C: usize>(
 	o: [&'a Tensor; O],
 	c: [&'a Tensor; C],
@@ -467,7 +474,7 @@ pub struct AddWeightedExpr<'a> {
 	pub b: ScaledTensorExpr<'a>,
 }
 
-impl EvaluatesToTensor for AddWeightedExpr<'_> {
+impl<'a> EvaluatesToTensor for AddWeightedExpr<'a> {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
@@ -490,7 +497,7 @@ impl EvaluatesToTensor for AddWeightedExpr<'_> {
 	}
 }
 
-impl Scalable for AddWeightedExpr<'_> {
+impl<'a> Scalable for AddWeightedExpr<'a> {
 	type Output = Self;
 	fn scale(self, scale: f64) -> Self::Output {
 		Self {
@@ -521,7 +528,7 @@ impl<'a> std::ops::Add<&'a Tensor> for ScaledTensorExpr<'a> {
 	}
 }
 
-impl<'a> std::ops::Add<ScaledTensorExpr<'a>> for ScaledTensorExpr<'a> {
+impl<'a> std::ops::Add<Self> for ScaledTensorExpr<'a> {
 	type Output = AddWeightedExpr<'a>;
 	fn add(self, b: Self) -> Self::Output {
 		AddWeightedExpr { a: self, b }
@@ -549,9 +556,9 @@ impl<'a> std::ops::Sub<&'a Tensor> for ScaledTensorExpr<'a> {
 	}
 }
 
-impl<'a> std::ops::Sub<ScaledTensorExpr<'a>> for ScaledTensorExpr<'a> {
+impl<'a> std::ops::Sub<Self> for ScaledTensorExpr<'a> {
 	type Output = AddWeightedExpr<'a>;
-	fn sub(self, b: ScaledTensorExpr<'a>) -> Self::Output {
+	fn sub(self, b: Self) -> Self::Output {
 		AddWeightedExpr { a: self, b: b.scale(-1.0) }
 	}
 }
@@ -579,7 +586,7 @@ impl<'a> EvaluatesToTensor for DotExpr<'a> {
 	}
 }
 
-impl Scalable for DotExpr<'_> {
+impl<'a> Scalable for DotExpr<'a> {
 	type Output = Self;
 	fn scale(self, scale: f64) -> Self::Output {
 		Self { scale: self.scale * scale, ..self }
@@ -604,7 +611,7 @@ impl<'a> EvaluatesToTensor for DotAddExpr<'a> {
 	}
 }
 
-impl Scalable for DotAddExpr<'_> {
+impl<'a> Scalable for DotAddExpr<'a> {
 	type Output = Self;
 	fn scale(self, scale: f64) -> Self::Output {
 		Self {
@@ -688,7 +695,7 @@ impl<'a> EvaluatesToTensor for MulAddExpr<'a> {
 	}
 }
 
-impl Scalable for MulAddExpr<'_> {
+impl<'a> Scalable for MulAddExpr<'a> {
 	type Output = Self;
 	fn scale(self, scale: f64) -> Self::Output {
 		Self {
@@ -848,7 +855,7 @@ impl<'a> std::ops::Mul<&'a Tensor> for &'a Tensor {
 	}
 }
 
-impl EvaluatesToTensor for MulExpr<'_> {
+impl<'a> EvaluatesToTensor for MulExpr<'a> {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
@@ -1053,6 +1060,7 @@ pub fn swiglu_backward<'a>(
 }
 
 // Note: We cannot implement `EvaluatesToTensor` because there are two output tensors
+
 impl<'a> SwiGLUBackwardExpr<'a> {
 	#[inline(never)]
 	pub fn eval_to_tensors(
@@ -1081,7 +1089,7 @@ pub fn sum_all(tensor: &Tensor) -> Result<f64, ErrPack<TensorOpError>> {
 	// In the case of a `sum_all()`, it would make sense to enable it,
 	// but it would require some refactoring. Not sure if it is worth it.
 	__elem_wise([], [tensor], |[], [a]| {
-		sum += executor.sum_all(&a)?;
+		sum += executor.sum_all(a)?;
 		Ok(())
 	})?;
 	Ok(sum)
@@ -1091,7 +1099,7 @@ pub fn approx_eq(a: &Tensor, b: &Tensor, eps: f64) -> Result<bool, ErrPack<Tenso
 	let executor = a.executor();
 	let mut result = true;
 	__elem_wise([], [a, b], |[], [a, b]| {
-		result &= executor.approx_eq(&a, &b, eps)?;
+		result &= executor.approx_eq(a, b, eps)?;
 		Ok(())
 	})?;
 	Ok(result)
@@ -1529,21 +1537,20 @@ pub enum TensorOpError {
 	IndexOutOfBounds,
 	ElementsOverflow,
 	NotEnoughDimensions,
-	UnsupportedDType,
-	AllocationFailed,
+	NewBufUnsupportedDType,
+	NewBufAllocationFailed,
 	IncompatibleStridesForMerge,
 }
 
 impl TensorOpError {
 	#[cold]
 	#[inline(never)]
-	pub fn missing_vec_dimension() -> ErrPack<TensorOpError> {
+	pub fn missing_vec_dimension() -> ErrPack<Self> {
 		let message = "At least one dimension is required for vector-wise operations".into();
-		let result = ErrPack {
+		ErrPack {
 			code: Self::MissingVecDimension,
 			extra: Some(Box::new(ErrExtra { message, nested: None })),
-		};
-		result
+		}
 	}
 }
 
@@ -1552,8 +1559,8 @@ impl From<DimMergerError> for TensorOpError {
 	#[inline(never)]
 	fn from(err: DimMergerError) -> Self {
 		match err {
-			DimMergerError::DimsDontMatch => TensorOpError::DimsDontMatch,
-			DimMergerError::TooManyMergedDimensions => TensorOpError::TooManyMergedDimensions,
+			DimMergerError::DimsDontMatch => Self::DimsDontMatch,
+			DimMergerError::TooManyMergedDimensions => Self::TooManyMergedDimensions,
 		}
 	}
 }
@@ -1562,19 +1569,19 @@ impl From<DimMergerError> for ErrPack<TensorOpError> {
 	#[cold]
 	#[inline(never)]
 	fn from(err: DimMergerError) -> Self {
-		ErrPack { code: err.into(), extra: None }
+		Self { code: err.into(), extra: None }
 	}
 }
 
 impl From<BorrowError> for TensorOpError {
 	fn from(_: BorrowError) -> Self {
-		TensorOpError::CannotBorrow
+		Self::CannotBorrow
 	}
 }
 
 impl From<BorrowError> for ErrPack<TensorOpError> {
 	fn from(_: BorrowError) -> Self {
-		ErrPack {
+		Self {
 			code: TensorOpError::CannotBorrow,
 			extra: None,
 		}
@@ -1585,7 +1592,7 @@ impl From<BorrowMutError> for TensorOpError {
 	#[cold]
 	#[inline(never)]
 	fn from(_: BorrowMutError) -> Self {
-		TensorOpError::CannotBorrowMut
+		Self::CannotBorrowMut
 	}
 }
 
@@ -1593,7 +1600,7 @@ impl From<BorrowMutError> for ErrPack<TensorOpError> {
 	#[cold]
 	#[inline(never)]
 	fn from(_: BorrowMutError) -> Self {
-		ErrPack {
+		Self {
 			code: TensorOpError::CannotBorrowMut,
 			extra: None,
 		}
@@ -1604,7 +1611,7 @@ impl From<ErrPack<ExecutorError>> for ErrPack<TensorOpError> {
 	#[cold]
 	#[inline(never)]
 	fn from(err: ErrPack<ExecutorError>) -> Self {
-		ErrPack {
+		Self {
 			code: TensorOpError::ExecutorError,
 			extra: Some(Box::new(ErrExtra {
 				message: String::new(),
@@ -1614,22 +1621,22 @@ impl From<ErrPack<ExecutorError>> for ErrPack<TensorOpError> {
 	}
 }
 
-impl From<DeviceError> for TensorOpError {
+impl From<NewDeviceBufferError> for TensorOpError {
 	#[cold]
 	#[inline(never)]
-	fn from(err: DeviceError) -> Self {
+	fn from(err: NewDeviceBufferError) -> Self {
 		match err {
-			DeviceError::AllocationFailed => TensorOpError::AllocationFailed,
-			DeviceError::UnsupportedDType => TensorOpError::UnsupportedDType,
+			NewDeviceBufferError::AllocationFailed => Self::NewBufAllocationFailed,
+			NewDeviceBufferError::UnsupportedDType => Self::NewBufUnsupportedDType,
 		}
 	}
 }
 
-impl From<DeviceError> for ErrPack<TensorOpError> {
+impl From<NewDeviceBufferError> for ErrPack<TensorOpError> {
 	#[cold]
 	#[inline(never)]
-	fn from(err: DeviceError) -> Self {
-		ErrPack { code: err.into(), extra: None }
+	fn from(err: NewDeviceBufferError) -> Self {
+		Self { code: err.into(), extra: None }
 	}
 }
 
@@ -1638,8 +1645,8 @@ impl From<MergeDimsError> for TensorOpError {
 	#[inline(never)]
 	fn from(err: MergeDimsError) -> Self {
 		match err {
-			MergeDimsError::NotEnoughDimensions => TensorOpError::NotEnoughDimensions,
-			MergeDimsError::IncompatibleStrides => TensorOpError::IncompatibleStridesForMerge,
+			MergeDimsError::NotEnoughDimensions => Self::NotEnoughDimensions,
+			MergeDimsError::IncompatibleStrides => Self::IncompatibleStridesForMerge,
 		}
 	}
 }
@@ -1648,7 +1655,7 @@ impl From<MergeDimsError> for ErrPack<TensorOpError> {
 	#[cold]
 	#[inline(never)]
 	fn from(err: MergeDimsError) -> Self {
-		ErrPack { code: err.into(), extra: None }
+		Self { code: err.into(), extra: None }
 	}
 }
 
@@ -1656,7 +1663,7 @@ impl From<IncompatibleStridesError> for TensorOpError {
 	#[cold]
 	#[inline(never)]
 	fn from(_: IncompatibleStridesError) -> Self {
-		TensorOpError::IncompatibleStridesForMerge
+		Self::IncompatibleStridesForMerge
 	}
 }
 
@@ -1664,7 +1671,7 @@ impl From<IncompatibleStridesError> for ErrPack<TensorOpError> {
 	#[cold]
 	#[inline(never)]
 	fn from(err: IncompatibleStridesError) -> Self {
-		ErrPack { code: err.into(), extra: None }
+		Self { code: err.into(), extra: None }
 	}
 }
 
@@ -1673,8 +1680,8 @@ impl From<ReshapeLastDimError> for TensorOpError {
 	#[inline(never)]
 	fn from(err: ReshapeLastDimError) -> Self {
 		match err {
-			ReshapeLastDimError::NotEnoughDimensions => TensorOpError::NotEnoughDimensions,
-			ReshapeLastDimError::InvalidNumElements => TensorOpError::ElementsOverflow,
+			ReshapeLastDimError::NotEnoughDimensions => Self::NotEnoughDimensions,
+			ReshapeLastDimError::InvalidNumElements => Self::ElementsOverflow,
 		}
 	}
 }
@@ -1683,7 +1690,7 @@ impl From<ReshapeLastDimError> for ErrPack<TensorOpError> {
 	#[cold]
 	#[inline(never)]
 	fn from(err: ReshapeLastDimError) -> Self {
-		ErrPack { code: err.into(), extra: None }
+		Self { code: err.into(), extra: None }
 	}
 }
 
@@ -1691,7 +1698,7 @@ impl From<ElementsOverflowError> for TensorOpError {
 	#[cold]
 	#[inline(never)]
 	fn from(_: ElementsOverflowError) -> Self {
-		TensorOpError::ElementsOverflow
+		Self::ElementsOverflow
 	}
 }
 
@@ -1699,7 +1706,7 @@ impl From<ElementsOverflowError> for ErrPack<TensorOpError> {
 	#[cold]
 	#[inline(never)]
 	fn from(_: ElementsOverflowError) -> Self {
-		ErrPack {
+		Self {
 			code: TensorOpError::ElementsOverflow,
 			extra: None,
 		}
@@ -1711,8 +1718,8 @@ impl From<ReplaceTailError> for TensorOpError {
 	#[inline(never)]
 	fn from(err: ReplaceTailError) -> Self {
 		match err {
-			ReplaceTailError::ElementsOverflow => TensorOpError::ElementsOverflow,
-			ReplaceTailError::NotEnoughDimensions => TensorOpError::NotEnoughDimensions,
+			ReplaceTailError::ElementsOverflow => Self::ElementsOverflow,
+			ReplaceTailError::NotEnoughDimensions => Self::NotEnoughDimensions,
 		}
 	}
 }
@@ -1730,8 +1737,8 @@ impl From<SelectError> for TensorOpError {
 	#[inline(never)]
 	fn from(err: SelectError) -> Self {
 		match err {
-			SelectError::DimIndexOutOfBounds => TensorOpError::DimIndexOutOfBounds,
-			SelectError::IndexOutOfBounds => TensorOpError::IndexOutOfBounds,
+			SelectError::DimIndexOutOfBounds => Self::DimIndexOutOfBounds,
+			SelectError::IndexOutOfBounds => Self::IndexOutOfBounds,
 		}
 	}
 }
@@ -1740,7 +1747,7 @@ impl From<SelectError> for ErrPack<TensorOpError> {
 	#[cold]
 	#[inline(never)]
 	fn from(err: SelectError) -> Self {
-		ErrPack { code: err.into(), extra: None }
+		Self { code: err.into(), extra: None }
 	}
 }
 

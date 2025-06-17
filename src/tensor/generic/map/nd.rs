@@ -45,7 +45,7 @@ pub struct TryNDFromDDError {
 impl std::error::Error for TryNDFromDDError {}
 
 impl std::fmt::Display for TryNDFromDDError {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		write!(
 			f,
 			"Cannot convert from DD with {} dimensions to ND with {} dimensions.",

@@ -22,7 +22,7 @@ pub fn write_bin(
 ) -> Result<(), ErrPack<TensorOpError>> {
 	let executor = src.executor();
 	__elem_wise([], [src], |[], [src]| {
-		executor.write_bin(&src, writer)?;
+		executor.write_bin(src, writer)?;
 		Ok(())
 	})
 }
@@ -263,7 +263,8 @@ fn fmt_1d<T: Copy>(
 ) -> std::fmt::Result {
 	write!(f, "[")?;
 	let mut first = true;
-	for elem in tensor.iter_along_axis(0) {
+	#[allow(clippy::unwrap_used)]
+	for elem in tensor.iter_along_axis(0).unwrap() {
 		if !first {
 			write!(f, ", ")?;
 		}
@@ -281,6 +282,7 @@ fn fmt_Nd<T: Copy>(
 	indent: usize,
 	fmt_one: &mut impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
 ) -> std::fmt::Result {
+	#[allow(clippy::unwrap_used)]
 	match tensor.ndim() {
 		0 => {
 			let tensor = tensor.conv_map().unwrap();
@@ -293,7 +295,7 @@ fn fmt_Nd<T: Copy>(
 		_ => {
 			let indent_str = "\t".repeat(indent);
 			writeln!(f, "{indent_str}[")?;
-			for sub_tensor in tensor.iter_along_axis(0) {
+			for sub_tensor in tensor.iter_along_axis(0).unwrap() {
 				write!(f, "{indent_str}\t")?;
 				fmt_Nd(f, &sub_tensor, indent + 1, fmt_one)?;
 				writeln!(f, ",")?;

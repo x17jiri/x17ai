@@ -43,6 +43,8 @@
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::missing_const_for_fn)]
 #![allow(clippy::struct_field_names)]
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::elidable_lifetime_names)]
 
 use std::convert::Infallible;
 
@@ -65,6 +67,7 @@ pub struct ErrPack<Code: Copy + std::fmt::Debug> {
 
 #[cold]
 #[inline(never)]
+#[allow(clippy::panic)]
 fn panic_infallible_to_err_conversion<Code: Copy + std::fmt::Debug>() -> ErrPack<Code> {
 	panic!("Infallible should never be converted to ErrPack");
 }
@@ -78,7 +81,7 @@ impl<Code: Copy + std::fmt::Debug> From<Infallible> for ErrPack<Code> {
 impl<Code: Copy + std::fmt::Debug> std::error::Error for ErrPack<Code> {}
 
 impl<Code: Copy + std::fmt::Debug> std::fmt::Display for ErrPack<Code> {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		let code = self.code;
 		write!(f, "(ErrPack: code={code:?}")?;
 		if let Some(ref extra) = self.extra {
@@ -87,7 +90,7 @@ impl<Code: Copy + std::fmt::Debug> std::fmt::Display for ErrPack<Code> {
 				write!(f, ", message={msg}")?;
 			}
 			if let Some(nested) = &extra.nested {
-				write!(f, ", nested={:?}", nested)?;
+				write!(f, ", nested={nested:?}")?;
 			}
 		}
 		write!(f, ")")

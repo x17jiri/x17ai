@@ -34,11 +34,10 @@ impl TensorUnsafeError {
 		let message = format!(
 			"Tensor map is not safe: span {span:?} is out of bounds for buffer of length {buf_len}."
 		);
-		let result = ErrPack {
+		ErrPack {
 			code: Self,
 			extra: Some(Box::new(ErrExtra { message, nested: None })),
-		};
-		result
+		}
 	}
 }
 
@@ -111,14 +110,17 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		Ok(Tensor { buf: self.buf.clone(), map: new_map })
 	}
 
-	pub fn iter_along_axis<D: DimIndex>(&self, dim: D) -> AxisIter<'_, M, B>
+	pub fn iter_along_axis<D: DimIndex>(
+		&self,
+		dim: D,
+	) -> Result<AxisIter<'_, M, B>, DimIndexOutOfBoundsError>
 	where
 		M: Select,
 		B: Clone,
 	{
-		let dim = dim.resolve_index(self.ndim()).unwrap();
-		let size = self.size(dim).unwrap();
-		AxisIter { tensor: self, dim, current: 0, size }
+		let dim = dim.resolve_index(self.ndim())?;
+		let size = self.size(dim)?;
+		Ok(AxisIter { tensor: self, dim, current: 0, size })
 	}
 
 	pub fn narrow<D: DimIndex, R: Into<UniversalRange>>(
@@ -209,7 +211,7 @@ pub struct AxisIter<'a, M: Map + Select, B: Buffer + Clone> {
 	size: usize,
 }
 
-impl<M: Map + Select, B: Buffer + Clone> Iterator for AxisIter<'_, M, B> {
+impl<'a, M: Map + Select, B: Buffer + Clone> Iterator for AxisIter<'a, M, B> {
 	type Item = Tensor<M::Output, B>;
 
 	fn next(&mut self) -> Option<Self::Item> {
@@ -225,7 +227,7 @@ impl<M: Map + Select, B: Buffer + Clone> Iterator for AxisIter<'_, M, B> {
 	}
 }
 
-impl<M: Map + Select, B: Buffer + Clone> ExactSizeIterator for AxisIter<'_, M, B> {
+impl<'a, M: Map + Select, B: Buffer + Clone> ExactSizeIterator for AxisIter<'a, M, B> {
 	fn len(&self) -> usize {
 		self.size - self.current
 	}
