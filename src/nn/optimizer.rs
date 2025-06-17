@@ -10,9 +10,84 @@
 //     Original Adam: https://arxiv.org/abs/1412.6980
 //     Adam-mini: https://arxiv.org/abs/2406.16793
 
-use crate::Result;
 use crate::tensor::Tensor;
-use crate::tensor::math::{RSqrt, Sum};
+use crate::tensor::generic::map::{MergeAllDimsError, MergeDimsError, ReshapeLastDimError};
+use crate::tensor::math::{RSqrt, Sum, TensorOpError};
+use crate::{ErrExtra, ErrPack};
+
+//------------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum OptimizerError {
+	TensorOp,
+}
+
+impl From<TensorOpError> for OptimizerError {
+	fn from(_: TensorOpError) -> Self {
+		OptimizerError::TensorOp
+	}
+}
+
+impl From<ErrPack<TensorOpError>> for ErrPack<OptimizerError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: ErrPack<TensorOpError>) -> Self {
+		ErrPack {
+			code: OptimizerError::TensorOp,
+			extra: Some(Box::new(ErrExtra {
+				message: String::new(),
+				nested: Some(err.into()),
+			})),
+		}
+	}
+}
+
+impl From<MergeDimsError> for ErrPack<OptimizerError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: MergeDimsError) -> Self {
+		let t: ErrPack<TensorOpError> = err.into();
+		ErrPack {
+			code: OptimizerError::TensorOp,
+			extra: Some(Box::new(ErrExtra {
+				message: String::new(),
+				nested: Some(t.into()),
+			})),
+		}
+	}
+}
+
+impl From<MergeAllDimsError> for ErrPack<OptimizerError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: MergeAllDimsError) -> Self {
+		let t: ErrPack<TensorOpError> = err.into();
+		ErrPack {
+			code: OptimizerError::TensorOp,
+			extra: Some(Box::new(ErrExtra {
+				message: String::new(),
+				nested: Some(t.into()),
+			})),
+		}
+	}
+}
+
+impl From<ReshapeLastDimError> for ErrPack<OptimizerError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: ReshapeLastDimError) -> Self {
+		let t: ErrPack<TensorOpError> = err.into();
+		ErrPack {
+			code: OptimizerError::TensorOp,
+			extra: Some(Box::new(ErrExtra {
+				message: String::new(),
+				nested: Some(t.into()),
+			})),
+		}
+	}
+}
+
+//------------------------------------------------------------------------------
 
 pub struct OptCoef {
 	pub(crate) m_decay: f64,       // beta1
@@ -48,7 +123,11 @@ pub struct OptParam {
 }
 
 impl OptParam {
-	pub fn new(value: Tensor, parts: usize, part_elems: usize) -> Result<OptParam> {
+	pub fn new(
+		value: Tensor,
+		parts: usize,
+		part_elems: usize,
+	) -> Result<OptParam, ErrPack<OptimizerError>> {
 		let elems = parts.checked_mul(part_elems).expect("Overflow in multiplication");
 		assert!(value.elems() == elems, "Tensor size mismatch");
 
@@ -81,18 +160,21 @@ impl OptParam {
 		})
 	}
 
-	pub fn update_grad(&mut self, update: impl FnOnce(&Tensor, bool) -> Result<()>) -> Result<()> {
+	pub fn update_grad(
+		&mut self,
+		update: impl FnOnce(&Tensor, bool) -> Result<(), ErrPack<TensorOpError>>,
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let result = update(&self.grad_reshaped, self.already_have_grad);
 		self.already_have_grad = true;
 		result
 	}
 
-	pub fn zero_grad(&mut self) -> Result<()> {
+	pub fn zero_grad(&mut self) -> Result<(), ErrPack<TensorOpError>> {
 		self.already_have_grad = false;
 		Ok(())
 	}
 
-	pub fn step(&mut self, coef: &OptCoef) -> Result<()> {
+	pub fn step(&mut self, coef: &OptCoef) -> Result<(), ErrPack<TensorOpError>> {
 		let grad = &self.grad;
 
 		// The original Adam uses just `grad * grad`. Adam-mini saves space

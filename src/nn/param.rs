@@ -9,8 +9,10 @@ use std::cell::RefCell;
 use std::intrinsics::cold_path;
 use std::rc::Rc;
 
+use crate::ErrPack;
+use crate::nn::optimizer::OptimizerError;
+use crate::tensor::math::TensorOpError;
 use crate::tensor::{DType, Device, Tensor};
-use crate::{Error, Result};
 
 use super::optimizer::{OptCoef, OptParam};
 
@@ -22,7 +24,11 @@ pub struct Param {
 }
 
 impl Param {
-	pub fn new(shape: &[usize], dtype: DType, device: Rc<dyn Device>) -> Result<Rc<RefCell<Self>>> {
+	pub fn new(
+		shape: &[usize],
+		dtype: DType,
+		device: Rc<dyn Device>,
+	) -> Result<Rc<RefCell<Self>>, ErrPack<TensorOpError>> {
 		let value = Tensor::new_empty_on(shape, dtype, device)?;
 		let opt_param = None;
 		let parts = 1;
@@ -46,7 +52,9 @@ impl Param {
 		if parts * part_elems != total_elems {
 			#[cold]
 			fn err_invalid_param_partition(
-				parts: usize, part_elems: usize, total_elems: usize,
+				parts: usize,
+				part_elems: usize,
+				total_elems: usize,
 			) -> Error {
 				format!("Invalid parameter partition: parts * part_elems must equal the total number of elements in the tensor. parts = {parts}, part_elems = {part_elems}, total_elems = {total_elems}").into()
 			}
@@ -58,7 +66,7 @@ impl Param {
 	}
 
 	#[inline(never)]
-	fn init_opt_param(&mut self) -> Result<&mut OptParam> {
+	fn init_opt_param(&mut self) -> Result<&mut OptParam, ErrPack<OptimizerError>> {
 		let opt_param = OptParam::new(self.value.clone(), self.parts, self.part_elems)?;
 		self.opt_param = Some(opt_param);
 
@@ -67,7 +75,7 @@ impl Param {
 		Ok(self.opt_param.as_mut().unwrap())
 	}
 
-	fn opt_param(&mut self) -> Result<&mut OptParam> {
+	fn opt_param(&mut self) -> Result<&mut OptParam, ErrPack<OptimizerError>> {
 		if let Some(ref mut opt_param) = self.opt_param {
 			Ok(opt_param)
 		} else {
@@ -76,15 +84,18 @@ impl Param {
 		}
 	}
 
-	pub fn zero_grad(&mut self) -> Result<()> {
-		self.opt_param()?.zero_grad()
+	pub fn zero_grad(&mut self) -> Result<(), ErrPack<OptimizerError>> {
+		Ok(self.opt_param()?.zero_grad()?)
 	}
 
-	pub fn update_grad(&mut self, update: impl FnOnce(&Tensor, bool) -> Result<()>) -> Result<()> {
-		self.opt_param()?.update_grad(update)
+	pub fn update_grad(
+		&mut self,
+		update: impl FnOnce(&Tensor, bool) -> Result<(), ErrPack<TensorOpError>>,
+	) -> Result<(), ErrPack<OptimizerError>> {
+		Ok(self.opt_param()?.update_grad(update)?)
 	}
 
-	pub fn step(&mut self, opt_coef: &OptCoef) -> Result<()> {
-		self.opt_param()?.step(opt_coef)
+	pub fn step(&mut self, opt_coef: &OptCoef) -> Result<(), ErrPack<OptimizerError>> {
+		Ok(self.opt_param()?.step(opt_coef)?)
 	}
 }

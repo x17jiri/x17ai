@@ -14,6 +14,8 @@ use std::rc::Rc;
 
 use crate::tensor::HasDType;
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
+use crate::tensor::device::executor::{Executor, ExecutorError};
+use crate::ErrPack;
 
 pub mod float_executor;
 pub mod math;
@@ -32,6 +34,28 @@ use crate::tensor::{DType, Device};
 pub enum ViewError {
 	InvalidDType,
 	NotOnCPUDevice,
+}
+
+impl From<ViewError> for ExecutorError {
+	#[cold]
+	#[inline(never)]
+	fn from(err: ViewError) -> Self {
+		match err {
+			ViewError::InvalidDType => ExecutorError::InvalidDType,
+			ViewError::NotOnCPUDevice => ExecutorError::InvalidDevice,
+		}
+	}
+}
+
+impl From<ViewError> for ErrPack<ExecutorError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: ViewError) -> Self {
+		ErrPack {
+			code: ExecutorError::from(err),
+			extra: None,
+		}
+	}
 }
 
 //--------------------------------------------------------------------------------------------------

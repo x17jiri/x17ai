@@ -10,12 +10,10 @@ use std::rc::Rc;
 pub use device::{DType, Device, HasDType};
 
 use crate::ErrPack;
-use crate::tensor::device::DeviceError;
 use crate::tensor::device::buffer::{BorrowError, DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::device::cpu::{CPUDevice, ViewError};
 use crate::tensor::device::executor::Executor;
-use crate::tensor::generic::map::dd::ReplaceTailError;
-use crate::tensor::generic::map::{DD, ElementsOverflowError};
+use crate::tensor::generic::map::DD;
 use crate::tensor::math::{EvaluatesToTensor, TensorOpError};
 
 pub mod device;
@@ -71,62 +69,6 @@ impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRefMut<'buf>> {
 
 //--------------------------------------------------------------------------------------------------
 
-pub enum NewTensorError {
-	ElementsOverflow,
-	NotEnoughDimensions,
-	UnsupportedDType,
-	AllocationFailed,
-}
-
-impl From<ElementsOverflowError> for NewTensorError {
-	fn from(_: ElementsOverflowError) -> Self {
-		NewTensorError::ElementsOverflow
-	}
-}
-
-impl From<DeviceError> for NewTensorError {
-	#[cold]
-	#[inline(never)]
-	fn from(err: DeviceError) -> Self {
-		match err {
-			DeviceError::UnsupportedDType => NewTensorError::UnsupportedDType,
-			DeviceError::AllocationFailed => NewTensorError::AllocationFailed,
-		}
-	}
-}
-
-impl From<ReplaceTailError> for NewTensorError {
-	#[cold]
-	#[inline(never)]
-	fn from(err: ReplaceTailError) -> Self {
-		match err {
-			ReplaceTailError::ElementsOverflow => NewTensorError::ElementsOverflow,
-			ReplaceTailError::NotEnoughDimensions => NewTensorError::NotEnoughDimensions,
-		}
-	}
-}
-
-impl From<NewTensorError> for TensorOpError {
-	#[cold]
-	#[inline(never)]
-	fn from(err: NewTensorError) -> Self {
-		match err {
-			NewTensorError::ElementsOverflow => TensorOpError::ElementsOverflow,
-			NewTensorError::NotEnoughDimensions => TensorOpError::NotEnoughDimensions,
-			NewTensorError::UnsupportedDType => TensorOpError::UnsupportedDType,
-			NewTensorError::AllocationFailed => TensorOpError::AllocationFailed,
-		}
-	}
-}
-
-impl From<NewTensorError> for ErrPack<TensorOpError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: NewTensorError) -> Self {
-		ErrPack { code: err.into(), extra: None }
-	}
-}
-
 pub type Tensor = generic::Tensor<DD, Rc<device::DeviceBuffer>>;
 
 impl Tensor {
@@ -135,19 +77,23 @@ impl Tensor {
 		shape: &[usize],
 		dtype: DType,
 		device: Rc<dyn Device>,
-	) -> Result<Tensor, NewTensorError> {
+	) -> Result<Tensor, ErrPack<TensorOpError>> {
 		let (map, elems) = DD::new(shape)?;
 		let buf = device.new_buffer(dtype, elems)?;
 		Ok(Tensor { map, buf })
 	}
 
 	/// Allocate a new tensor on the same device as `self`.
-	pub fn new_empty(&self, shape: &[usize], dtype: DType) -> Result<Tensor, NewTensorError> {
+	pub fn new_empty(
+		&self,
+		shape: &[usize],
+		dtype: DType,
+	) -> Result<Tensor, ErrPack<TensorOpError>> {
 		Self::new_empty_on(shape, dtype, self.device())
 	}
 
 	/// Allocate a new tensor on the same device with the same shape and dtype as `self`.
-	pub fn new_empty_like(&self) -> Result<Tensor, DeviceError> {
+	pub fn new_empty_like(&self) -> Result<Tensor, ErrPack<TensorOpError>> {
 		let (map, elems) = self.map.new_like();
 		let buf = self.device().new_buffer(self.buf.dtype, elems)?;
 		Ok(Tensor { map, buf })
@@ -162,7 +108,7 @@ impl Tensor {
 	///
 	/// If the tensor does not own its buffer, we allocate a new empty tensor
 	/// with the same shape and dtype as `self`.
-	pub fn reuse_or_new_like(&self) -> Result<Tensor, DeviceError> {
+	pub fn reuse_or_new_like(&self) -> Result<Tensor, ErrPack<TensorOpError>> {
 		if self.owns_buffer() { Ok(self.clone()) } else { self.new_empty_like() }
 	}
 
@@ -178,7 +124,7 @@ impl Tensor {
 		&self,
 		tail_len: usize,
 		replace_with: &[usize],
-	) -> Result<Tensor, NewTensorError> {
+	) -> Result<Tensor, ErrPack<TensorOpError>> {
 		let (map, elems) = self.map.new_replace_tail(tail_len, replace_with)?;
 		let buf = self.device().new_buffer(self.buf.dtype, elems)?;
 		Ok(Tensor { map, buf })

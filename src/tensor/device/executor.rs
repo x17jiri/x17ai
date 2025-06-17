@@ -19,6 +19,8 @@ pub enum ExecutorError {
 	NotContiguousOrBroadcasted,
 	InvalidShape,
 	IOError,
+	InvalidDType,
+	InvalidDevice,
 }
 
 impl ExecutorError {

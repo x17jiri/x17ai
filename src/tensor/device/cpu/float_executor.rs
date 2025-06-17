@@ -56,7 +56,7 @@ where
 		if !feature_dim.is_contiguous() {
 			return Err(ExecutorError::not_contiguous());
 		}
-		tensor.view()
+		Ok(tensor.view()?)
 	}
 
 	pub fn view_contiguous_mut<'buf>(
@@ -70,7 +70,7 @@ where
 		if !feature_dim.is_contiguous() {
 			return Err(ExecutorError::not_contiguous());
 		}
-		tensor.view_mut()
+		Ok(tensor.view_mut()?)
 	}
 
 	pub fn view_contiguous_or_broadcasted<'buf>(

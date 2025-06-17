@@ -7,10 +7,13 @@
 
 use std::rc::Rc;
 
+use crate::tensor::device::DeviceError;
 use crate::tensor::device::buffer::{BorrowError, DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::device::executor::ExecutorError;
 use crate::tensor::dim_merger::{DimMerger, DimMergerError};
-use crate::tensor::generic::map::{ND, SizeAndStride};
+use crate::tensor::generic::map::{
+	MergeAllDimsError, MergeDimsError, ND, ReshapeLastDimError, SizeAndStride,
+};
 use crate::tensor::{Tensor, generic};
 use crate::util::array;
 use crate::{ErrExtra, ErrPack};
@@ -19,7 +22,7 @@ use crate::{ErrExtra, ErrPack};
 
 #[derive(Debug, Copy, Clone)]
 pub enum TensorOpError {
-	IncompatibleDimensions,
+	DimsDontMatch,
 	TooManyMergedDimensions,
 	CannotBorrow,
 	CannotBorrowMut,
@@ -31,6 +34,7 @@ pub enum TensorOpError {
 	NotEnoughDimensions,
 	UnsupportedDType,
 	AllocationFailed,
+	IncompatibleStridesForMerge,
 }
 
 impl TensorOpError {
@@ -49,7 +53,7 @@ impl TensorOpError {
 impl From<DimMergerError> for TensorOpError {
 	fn from(err: DimMergerError) -> Self {
 		match err {
-			DimMergerError::IncompatibleDimensions => TensorOpError::IncompatibleDimensions,
+			DimMergerError::DimsDontMatch => TensorOpError::DimsDontMatch,
 			DimMergerError::TooManyMergedDimensions => TensorOpError::TooManyMergedDimensions,
 		}
 	}
@@ -91,6 +95,77 @@ impl From<ErrPack<ExecutorError>> for ErrPack<TensorOpError> {
 				nested: Some(err.into()),
 			})),
 		}
+	}
+}
+
+impl From<DeviceError> for TensorOpError {
+	#[cold]
+	#[inline(never)]
+	fn from(err: DeviceError) -> Self {
+		match err {
+			DeviceError::AllocationFailed => TensorOpError::AllocationFailed,
+			DeviceError::UnsupportedDType => TensorOpError::UnsupportedDType,
+		}
+	}
+}
+
+impl From<DeviceError> for ErrPack<TensorOpError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: DeviceError) -> Self {
+		ErrPack { code: err.into(), extra: None }
+	}
+}
+
+impl From<MergeDimsError> for TensorOpError {
+	#[cold]
+	#[inline(never)]
+	fn from(err: MergeDimsError) -> Self {
+		match err {
+			MergeDimsError::NotEnoughDimensions => TensorOpError::NotEnoughDimensions,
+			MergeDimsError::IncompatibleStrides => TensorOpError::IncompatibleStridesForMerge,
+		}
+	}
+}
+
+impl From<MergeDimsError> for ErrPack<TensorOpError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: MergeDimsError) -> Self {
+		ErrPack { code: err.into(), extra: None }
+	}
+}
+
+impl From<MergeAllDimsError> for TensorOpError {
+	fn from(err: MergeAllDimsError) -> Self {
+		match err {
+			MergeAllDimsError::IncompatibleStrides => TensorOpError::IncompatibleStridesForMerge,
+		}
+	}
+}
+
+impl From<MergeAllDimsError> for ErrPack<TensorOpError> {
+	fn from(err: MergeAllDimsError) -> Self {
+		ErrPack { code: err.into(), extra: None }
+	}
+}
+
+impl From<ReshapeLastDimError> for TensorOpError {
+	#[cold]
+	#[inline(never)]
+	fn from(err: ReshapeLastDimError) -> Self {
+		match err {
+			ReshapeLastDimError::NotEnoughDimensions => TensorOpError::NotEnoughDimensions,
+			ReshapeLastDimError::InvalidNumElements => TensorOpError::ElementsOverflow,
+		}
+	}
+}
+
+impl From<ReshapeLastDimError> for ErrPack<TensorOpError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: ReshapeLastDimError) -> Self {
+		ErrPack { code: err.into(), extra: None }
 	}
 }
 

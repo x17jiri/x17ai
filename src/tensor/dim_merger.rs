@@ -26,7 +26,7 @@ impl<const N: usize> MergedDim<N> {
 }
 
 pub enum DimMergerError {
-	IncompatibleDimensions,
+	DimsDontMatch,
 	TooManyMergedDimensions,
 }
 
@@ -75,7 +75,7 @@ impl<const N: usize> DimMerger<N> {
 				} else {
 					if inp.size != 1 {
 						cold_path();
-						return Err(DimMergerError::IncompatibleDimensions);
+						return Err(DimMergerError::DimsDontMatch);
 					}
 					Ok(0)
 				}
