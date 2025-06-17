@@ -10,8 +10,7 @@ use std::rc::Rc;
 
 use crate::ErrPack;
 use crate::nn::optimizer::OptimizerError;
-use crate::tensor::math::TensorOpError;
-use crate::tensor::{DType, Device};
+use crate::tensor::{DType, Device, TensorOpError};
 
 use super::optimizer::OptCoef;
 use super::param::Param;

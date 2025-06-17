@@ -12,9 +12,9 @@
 
 use std::hint::cold_path;
 
-use crate::tensor::Tensor;
 use crate::tensor::generic::map::{IncompatibleStridesError, MergeDimsError, ReshapeLastDimError};
-use crate::tensor::math::{RSqrt, Sum, TensorOpError};
+use crate::tensor::math::{RSqrt, Sum};
+use crate::tensor::{Tensor, TensorOpError};
 use crate::util::LossyInto;
 use crate::{ErrExtra, ErrPack};
 

@@ -31,5 +31,9 @@ pub trait Device {
 		elems: usize,
 	) -> Result<Rc<DeviceBuffer>, NewDeviceBufferError>;
 
+	/// # Safety
+	/// This function should only be called from `DeviceBuffer::drop()`.
+	///
+	/// The parameters must come from a valid `DeviceBuffer` instance.
 	unsafe fn drop_buffer(self: Rc<Self>, dtype: DType, elems: usize, device_data: *mut u8);
 }

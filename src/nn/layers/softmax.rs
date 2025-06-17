@@ -11,8 +11,8 @@ use std::rc::Rc;
 use crate::ErrPack;
 use crate::nn::eval_context::EvalContext;
 use crate::nn::param::Param;
-use crate::tensor::math::{Sum, TensorOpError};
-use crate::tensor::{Tensor, math};
+use crate::tensor::math::Sum;
+use crate::tensor::{Tensor, TensorOpError, math};
 
 use super::Layer;
 

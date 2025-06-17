@@ -11,8 +11,7 @@ use std::rc::Rc;
 
 use crate::ErrPack;
 use crate::nn::optimizer::{OptimizerError, PartitionError};
-use crate::tensor::math::TensorOpError;
-use crate::tensor::{DType, Device, Tensor};
+use crate::tensor::{DType, Device, Tensor, TensorOpError};
 
 use super::optimizer::{OptCoef, OptParam};
 

@@ -7,9 +7,8 @@
 
 use crate::ErrPack;
 use crate::tensor::device::cpu::math::FromToF64;
-use crate::tensor::generic;
 use crate::tensor::generic::map::{DD, ND};
-use crate::tensor::math::TensorOpError;
+use crate::tensor::{TensorOpError, generic};
 
 use super::Tensor;
 use super::math::__elem_wise;

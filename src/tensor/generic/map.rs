@@ -50,18 +50,6 @@ pub trait Map: Clone {
 	fn is_contiguous(&self) -> bool;
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum MergeDimsError {
-	NotEnoughDimensions,
-	IncompatibleStrides,
-}
-
-impl From<IncompatibleStridesError> for MergeDimsError {
-	fn from(_: IncompatibleStridesError) -> Self {
-		MergeDimsError::IncompatibleStrides
-	}
-}
-
 pub trait MergeDims<const M: usize> {
 	type Output: Map;
 	type Error;
@@ -69,25 +57,11 @@ pub trait MergeDims<const M: usize> {
 	fn merge_dims(&self) -> Result<Self::Output, Self::Error>;
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct IncompatibleStridesError;
-
 pub trait MergeAllDims {
 	type Output: Map;
 	type Error;
 
 	fn merge_all_dims(&self) -> Result<Self::Output, Self::Error>;
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct InvalidNumElementsError;
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum ReshapeLastDimError {
-	NotEnoughDimensions,
-	InvalidNumElements,
 }
 
 pub trait ReshapeLastDim<const M: usize> {
@@ -97,23 +71,13 @@ pub trait ReshapeLastDim<const M: usize> {
 	fn reshape_last_dim(&self, to_shape: [usize; M]) -> Result<Self::Output, Self::Error>;
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct IndexOutOfBoundsError;
-
 pub trait IndexToOffset<const K: usize> {
 	fn index_to_offset(&self, index: [usize; K]) -> Result<usize, IndexOutOfBoundsError>;
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum SelectError {
-	DimIndexOutOfBounds,
-	IndexOutOfBounds,
-}
-
 impl From<DimIndexOutOfBoundsError> for SelectError {
 	fn from(_: DimIndexOutOfBoundsError) -> Self {
-		SelectError::DimIndexOutOfBounds
+		Self::DimIndexOutOfBounds
 	}
 }
 
@@ -122,6 +86,9 @@ pub trait Select {
 	type Error: From<DimIndexOutOfBoundsError>;
 
 	fn select(&self, dim: usize, index: usize) -> Result<Self::Output, Self::Error>;
+
+	/// # Safety
+	/// Both `dim` and `index` must be within bounds of the map.
 	unsafe fn select_unchecked(&self, dim: usize, index: usize) -> Self::Output;
 }
 
@@ -141,10 +108,6 @@ pub trait Transpose {
 	fn transposed(self, d0: usize, d1: usize) -> Result<Self::Output, Self::Error>;
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct InvalidNDimError;
-
 pub trait NDShape<const K: usize> {
 	type Error;
 
@@ -153,14 +116,15 @@ pub trait NDShape<const K: usize> {
 
 //--------------------------------------------------------------------------------------------------
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-/// The total nubmer of elements in a tensor is larger than the maximum allowed.
-#[non_exhaustive]
-pub struct ElementsOverflowError;
-
 pub struct StrideCounter {
 	pub elems: usize,
 	pub nonzero_elems: usize,
+}
+
+impl Default for StrideCounter {
+	fn default() -> Self {
+		Self::new()
+	}
 }
 
 impl StrideCounter {
@@ -199,6 +163,12 @@ impl StrideCounter {
 /// we know the number of elements will not overflow.
 pub struct StrideCounterUnchecked {
 	pub elems: usize,
+}
+
+impl Default for StrideCounterUnchecked {
+	fn default() -> Self {
+		Self::new()
+	}
 }
 
 impl StrideCounterUnchecked {
@@ -240,5 +210,52 @@ pub fn merge_dims(dims: &[SizeAndStride]) -> Result<SizeAndStride, IncompatibleS
 	}
 	Ok(merged)
 }
+
+//--------------------------------------------------------------------------------------------------
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum MergeDimsError {
+	NotEnoughDimensions,
+	IncompatibleStrides,
+}
+
+impl From<IncompatibleStridesError> for MergeDimsError {
+	fn from(_: IncompatibleStridesError) -> Self {
+		Self::IncompatibleStrides
+	}
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct IncompatibleStridesError;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct InvalidNumElementsError;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ReshapeLastDimError {
+	NotEnoughDimensions,
+	InvalidNumElements,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct IndexOutOfBoundsError;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum SelectError {
+	DimIndexOutOfBounds,
+	IndexOutOfBounds,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct InvalidNDimError;
+
+/// The total nubmer of elements in a tensor is larger than the maximum allowed.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ElementsOverflowError;
 
 //--------------------------------------------------------------------------------------------------

@@ -28,7 +28,7 @@ pub enum ReplaceTailError {
 
 impl From<ElementsOverflowError> for ReplaceTailError {
 	fn from(_: ElementsOverflowError) -> Self {
-		ReplaceTailError::ElementsOverflow
+		Self::ElementsOverflow
 	}
 }
 
@@ -83,7 +83,7 @@ impl DD {
 		if tail_len > src_slice.len() {
 			cold_path();
 			return Err(ReplaceTailError::NotEnoughDimensions);
-		};
+		}
 		let n_keep = src_slice.len() - tail_len;
 		let src_slice = unsafe { &src_slice.get_unchecked(..n_keep) };
 		let ndim = n_keep + replace_with.len();
@@ -217,11 +217,11 @@ impl<const M: usize> ReshapeLastDim<M> for DD {
 }
 
 impl Select for DD {
-	type Output = DD;
+	type Output = Self;
 	type Error = SelectError;
 
 	#[inline(never)] // TODO
-	fn select(&self, dim: usize, index: usize) -> Result<Self::Output, SelectError> {
+	fn select(&self, dim: usize, index: usize) -> Result<Self, SelectError> {
 		let old_slice = self.dims.as_slice();
 
 		let Some(removed_dim) = old_slice.get(dim) else {
@@ -306,8 +306,8 @@ union DimVecItems {
 }
 
 pub struct DimVecBuilder {
-	pub len: usize,
-	pub items: DimVecItems,
+	len: usize,
+	items: DimVecItems,
 }
 
 impl DimVecBuilder {
@@ -340,7 +340,7 @@ impl DimVecBuilder {
 	pub fn as_slice_mut(&mut self) -> &mut [MaybeUninit<SizeAndStride>] {
 		unsafe {
 			if self.len <= INLINE_DIMS {
-				&mut self.items.inline[..self.len]
+				self.items.inline.get_unchecked_mut(..self.len)
 			} else {
 				cold_path();
 				std::slice::from_raw_parts_mut(self.items.heap.as_ptr(), self.len)
@@ -349,14 +349,14 @@ impl DimVecBuilder {
 	}
 
 	pub unsafe fn assume_init(self) -> DimVec {
-		let DimVecBuilder { len, items } = self;
+		let Self { len, items } = self;
 		DimVec { len, items }
 	}
 }
 
 pub struct DimVec {
-	pub len: usize,
-	pub items: DimVecItems,
+	len: usize,
+	items: DimVecItems,
 }
 
 impl DimVec {
@@ -364,10 +364,14 @@ impl DimVec {
 		self.len
 	}
 
+	pub fn is_empty(&self) -> bool {
+		self.len == 0
+	}
+
 	pub fn as_slice(&self) -> &[SizeAndStride] {
 		unsafe {
 			if self.len <= INLINE_DIMS {
-				let slice = &self.items.inline[..self.len];
+				let slice = self.items.inline.get_unchecked(..self.len);
 				slice.assume_init_ref()
 			} else {
 				cold_path();
@@ -380,7 +384,7 @@ impl DimVec {
 	pub fn as_slice_mut(&mut self) -> &mut [SizeAndStride] {
 		unsafe {
 			if self.len <= INLINE_DIMS {
-				let slice = &mut self.items.inline[..self.len];
+				let slice = self.items.inline.get_unchecked_mut(..self.len);
 				slice.assume_init_mut()
 			} else {
 				cold_path();

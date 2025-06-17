@@ -6,10 +6,12 @@
 //------------------------------------------------------------------------------
 
 use std::cell::Cell;
+use std::hint::cold_path;
 use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
+use crate::tensor::device;
 use crate::tensor::generic::buffer::Buffer;
 
 use super::Device;
@@ -26,10 +28,8 @@ pub struct DeviceBuffer {
 	pub device_is_cpu: bool,
 	pub device: ManuallyDrop<Rc<dyn Device>>,
 
-	/// `== 0` => not borrowed,
-	/// ` > 0` => number of immutable borrows,
-	/// ` < 0` => one mutable borrow (exclusive).
-	pub borrow_count: Cell<isize>,
+	pub read_count: Cell<isize>,
+	pub write_count: Cell<isize>,
 }
 
 impl DeviceBuffer {
@@ -120,42 +120,48 @@ impl std::fmt::Display for BorrowMutError {
 
 pub struct DeviceBufferRef<'a> {
 	device_buffer: &'a DeviceBuffer,
+	span: std::ops::Range<usize>,
 }
 
 impl<'a> DeviceBufferRef<'a> {
 	pub fn new(device_buffer: &'a DeviceBuffer) -> Result<Self, BorrowError> {
-		let count = device_buffer.borrow_count.get();
-		debug_assert!(count < isize::MAX, "DeviceBufferRef borrow count overflow");
+		let read_count = device_buffer.read_count.get();
+		let write_count = device_buffer.write_count.get();
 
-		let new_count = count.wrapping_add(1);
-		if new_count > 0 {
-			device_buffer.borrow_count.set(new_count);
-			Ok(Self { device_buffer })
-		} else {
-			Err(BorrowError)
+		if write_count != 0 {
+			cold_path();
+			return Err(BorrowError);
 		}
+
+		device_buffer.read_count.set(read_count + 1);
+		Ok(Self {
+			device_buffer,
+			span: 0..device_buffer.elems,
+		})
 	}
 }
 
 impl<'a> Clone for DeviceBufferRef<'a> {
 	fn clone(&self) -> Self {
-		let count = self.device_buffer.borrow_count.get();
-		debug_assert!(count > 0, "DeviceBufferRef: invalid counter state");
-		debug_assert!(count < isize::MAX, "DeviceBufferRef borrow count overflow");
+		let read_count = self.device_buffer.read_count.get();
 
-		let new_count = count + 1;
-		self.device_buffer.borrow_count.set(new_count);
-		Self { device_buffer: self.device_buffer }
+		debug_assert!(read_count > 0, "DeviceBufferRef: invalid counter state");
+
+		self.device_buffer.read_count.set(read_count + 1);
+		Self {
+			device_buffer: self.device_buffer,
+			span: self.span.clone(),
+		}
 	}
 }
 
 impl<'a> Drop for DeviceBufferRef<'a> {
 	fn drop(&mut self) {
-		let count = self.device_buffer.borrow_count.get();
-		debug_assert!(count > 0, "DeviceBufferRef: invalid counter state");
+		let read_count = self.device_buffer.read_count.get();
 
-		let new_count = count - 1;
-		self.device_buffer.borrow_count.set(new_count);
+		debug_assert!(read_count > 0, "DeviceBufferRef: invalid counter state");
+
+		self.device_buffer.read_count.set(read_count - 1);
 	}
 }
 
@@ -168,30 +174,97 @@ impl<'a> std::ops::Deref for DeviceBufferRef<'a> {
 	}
 }
 
+impl<'a> From<DeviceBufferRefMut<'a>> for DeviceBufferRef<'a> {
+	fn from(value: DeviceBufferRefMut<'a>) -> Self {
+		let read_count = value.device_buffer.read_count.get();
+		let write_count = value.device_buffer.write_count.get();
+
+		debug_assert!(write_count > 0, "DeviceBufferRefMut: invalid counter state");
+
+		value.device_buffer.read_count.set(read_count + 1);
+		value.device_buffer.write_count.set(write_count - 1);
+		let result = Self {
+			device_buffer: value.device_buffer,
+			span: value.span.clone(),
+		};
+
+		std::mem::forget(value);
+		result
+	}
+}
+
 //--------------------------------------------------------------------------------------------------
 
 pub struct DeviceBufferRefMut<'a> {
 	device_buffer: &'a DeviceBuffer,
+	span: std::ops::Range<usize>,
 }
 
 impl<'a> DeviceBufferRefMut<'a> {
 	pub fn new(device_buffer: &'a DeviceBuffer) -> Result<Self, BorrowMutError> {
-		let count = device_buffer.borrow_count.get();
-		if count == 0 {
-			device_buffer.borrow_count.set(-1);
-			Ok(Self { device_buffer })
-		} else {
-			Err(BorrowMutError)
+		let read_count = device_buffer.read_count.get();
+		let write_count = device_buffer.write_count.get();
+
+		if (read_count | write_count) != 0 {
+			cold_path();
+			return Err(BorrowMutError);
 		}
+
+		device_buffer.write_count.set(1);
+		Ok(Self {
+			device_buffer,
+			span: 0..device_buffer.elems,
+		})
+	}
+
+	fn is_subrange(inner: &std::ops::Range<usize>, outer: &std::ops::Range<usize>) -> bool {
+		inner.start >= outer.start && inner.end <= outer.end
+	}
+
+	fn intersect(a: &std::ops::Range<usize>, b: &std::ops::Range<usize>) -> bool {
+		a.start < b.end && b.start < a.end
+	}
+
+	pub fn split(
+		self,
+		span1: std::ops::Range<usize>,
+		span2: std::ops::Range<usize>,
+	) -> Result<(DeviceBufferRefMut<'a>, DeviceBufferRefMut<'a>), BorrowMutError> {
+		if !Self::is_subrange(&span1, &self.span)
+			|| !Self::is_subrange(&span2, &self.span)
+			|| !Self::intersect(&span1, &span2)
+		{
+			cold_path();
+			return Err(BorrowMutError);
+		}
+
+		let write_count = self.device_buffer.write_count.get();
+
+		debug_assert!(write_count > 0, "DeviceBufferRefMut: invalid counter state");
+
+		self.device_buffer.write_count.set(write_count + 1);
+
+		let part1 = DeviceBufferRefMut {
+			device_buffer: self.device_buffer,
+			span: span1,
+		};
+
+		let part2 = DeviceBufferRefMut {
+			device_buffer: self.device_buffer,
+			span: span2,
+		};
+
+		Ok((part1, part2))
 	}
 }
 
 impl<'a> Drop for DeviceBufferRefMut<'a> {
 	fn drop(&mut self) {
-		let count = self.device_buffer.borrow_count.get();
-		debug_assert!(count == -1, "DeviceBufferRefMut: invalid counter state");
+		let write_count = self.device_buffer.write_count.get();
 
-		self.device_buffer.borrow_count.set(0);
+		debug_assert!(write_count > 0, "DeviceBufferRefMut: invalid counter state");
+
+		self.device_buffer.write_count.set(write_count - 1);
 	}
 }
 

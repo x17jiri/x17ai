@@ -11,8 +11,8 @@ use std::rc::Rc;
 use crate::ErrPack;
 use crate::nn::eval_context::EvalContext;
 use crate::nn::param::Param;
-use crate::tensor::Tensor;
-use crate::tensor::math::{RSqrt, Sum, TensorOpError};
+use crate::tensor::math::{RSqrt, Sum};
+use crate::tensor::{Tensor, TensorOpError};
 use crate::util::LossyInto;
 
 use super::Layer;

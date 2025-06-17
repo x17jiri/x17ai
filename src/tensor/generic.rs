@@ -22,26 +22,6 @@ use crate::tensor::generic::universal_range::UniversalRange;
 use crate::{ErrExtra, ErrPack};
 
 //--------------------------------------------------------------------------------------------------
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct TensorUnsafeError;
-
-impl TensorUnsafeError {
-	#[cold]
-	#[inline(never)]
-	fn new(span: std::ops::Range<usize>, buf_len: usize) -> ErrPack<Self> {
-		let message = format!(
-			"Tensor map is not safe: span {span:?} is out of bounds for buffer of length {buf_len}."
-		);
-		ErrPack {
-			code: Self,
-			extra: Some(Box::new(ErrExtra { message, nested: None })),
-		}
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
 // Tensor
 
 #[derive(Clone, Debug)]
@@ -230,6 +210,26 @@ impl<'a, M: Map + Select, B: Buffer + Clone> Iterator for AxisIter<'a, M, B> {
 impl<'a, M: Map + Select, B: Buffer + Clone> ExactSizeIterator for AxisIter<'a, M, B> {
 	fn len(&self) -> usize {
 		self.size - self.current
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TensorUnsafeError;
+
+impl TensorUnsafeError {
+	#[cold]
+	#[inline(never)]
+	fn new(span: std::ops::Range<usize>, buf_len: usize) -> ErrPack<Self> {
+		let message = format!(
+			"Tensor map is not safe: span {span:?} is out of bounds for buffer of length {buf_len}."
+		);
+		ErrPack {
+			code: Self,
+			extra: Some(Box::new(ErrExtra { message, nested: None })),
+		}
 	}
 }
 

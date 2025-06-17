@@ -11,8 +11,7 @@ use std::rc::Rc;
 use crate::ErrPack;
 use crate::nn::eval_context::EvalContext;
 use crate::nn::param::Param;
-use crate::tensor::math::TensorOpError;
-use crate::tensor::{Tensor, math};
+use crate::tensor::{Tensor, TensorOpError, math};
 
 use super::Layer;
 

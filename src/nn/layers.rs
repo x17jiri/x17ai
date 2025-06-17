@@ -20,8 +20,7 @@ pub mod swiglu;
 mod tests;
 
 use crate::ErrPack;
-use crate::tensor::Tensor;
-use crate::tensor::math::TensorOpError;
+use crate::tensor::{Tensor, TensorOpError};
 
 use super::{EvalContext, Param};
 
