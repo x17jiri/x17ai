@@ -399,6 +399,15 @@ pub trait Executor {
 		d_out: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 	) -> Result<(), ErrPack<ExecutorError>>;
 
+	fn swiglu_backward2<'buf>(
+		&self,
+		d_lin: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		d_gate: &ND<2>, // mapping to the same buffer as `d_lin`
+		lin: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		gate: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		d_out: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+	) -> Result<(), ErrPack<ExecutorError>>;
+
 	/// Sums all elements in the `a` tensor and returns the result.
 	///
 	/// # Requrements

@@ -34,7 +34,7 @@ impl From<ElementsOverflowError> for ReplaceTailError {
 
 //--------------------------------------------------------------------------------------------------
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct DD {
 	pub dims: DimVec,
 	pub offset: usize,
@@ -426,13 +426,5 @@ impl Clone for DimVec {
 		result
 	}
 }
-
-impl PartialEq for DimVec {
-	fn eq(&self, other: &Self) -> bool {
-		self.as_slice() == other.as_slice()
-	}
-}
-
-impl Eq for DimVec {}
 
 //--------------------------------------------------------------------------------------------------

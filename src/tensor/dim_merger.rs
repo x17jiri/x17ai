@@ -5,7 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
-use std::intrinsics::cold_path;
+use std::hint::cold_path;
 
 use crate::tensor::generic::map::SizeAndStride;
 
@@ -17,12 +17,6 @@ const MERGER_DIMS: usize = MAX_SPLIT + 2;
 pub struct MergedDim<const N: usize> {
 	pub size: usize,
 	pub strides: [usize; N],
-}
-
-impl<const N: usize> MergedDim<N> {
-	pub fn size_and_stride(&self, i: usize) -> SizeAndStride {
-		SizeAndStride { size: self.size, stride: self.strides[i] }
-	}
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -82,27 +76,37 @@ impl<const N: usize> DimMerger<N> {
 			})?;
 			let next_dim = MergedDim { size, strides };
 
-			// Do we have to add a new dimension?
-			let can_have_arbitrary_strides = next_dim.size <= 1;
-			if !can_have_arbitrary_strides
-				&& (0..N).any(|i| next_dim.strides[i] != prev_dim.size * prev_dim.strides[i])
-			{
-				cold_path();
-				if prev_dim.size != 1 {
-					let max_dims = max_dims.min(MERGER_DIMS);
-					if merger.ndim >= max_dims {
-						cold_path();
-						return Err(DimMergerError::TooManyMergedDimensions);
+			if next_dim.size > 1 {
+				// Can we extend previous dimension?
+				if (0..N).all(|i| next_dim.strides[i] == prev_dim.size * prev_dim.strides[i]) {
+					// Fast path: Extend the previous dimension
+					prev_dim.size *= next_dim.size;
+				} else {
+					// Slow path: Add a new dimension
+					cold_path();
+					if prev_dim.size != 1 {
+						let max_dims = max_dims.min(MERGER_DIMS);
+						if merger.ndim >= max_dims {
+							cold_path();
+							return Err(DimMergerError::TooManyMergedDimensions);
+						}
+						prev_dim = &mut merger.dims_increasing[merger.ndim];
+						merger.ndim += 1;
 					}
-					prev_dim = &mut merger.dims_increasing[merger.ndim];
-					merger.ndim += 1;
+					*prev_dim = next_dim;
 				}
-				*prev_dim = next_dim;
-				continue;
+			} else {
+				cold_path();
+				#[allow(clippy::redundant_else)]
+				if next_dim.size < 1 {
+					cold_path();
+					prev_dim.size = 0;
+					prev_dim.strides = [0; N];
+					break;
+				} else {
+					// next_dim.size == 1, we can ignore it
+				}
 			}
-
-			// Fast path: Extend the previous dimension
-			prev_dim.size *= next_dim.size;
 		}
 
 		Ok(merger)

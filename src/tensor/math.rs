@@ -80,6 +80,8 @@ fn resolve_borrows<Map: generic::map::Map, const C: usize, const M: usize>(
 
 //--------------------------------------------------------------------------------------------------
 
+// TODO - disable broadcast for M tensors.
+
 pub struct ElemWise<'a, const M: usize, const C: usize>
 where
 	[(); M + C]:,
@@ -103,14 +105,15 @@ where
 	/// Note that we use 'K' instead of 'C' and it is allowed that 'K <= C'.
 	///
 	/// So we don't have to use all the `c` tensors processed during `::new()`.
-	pub fn run<const K: usize>(
-		self,
+	pub fn run<const O: usize, const K: usize>(
+		&self,
 		mut f: impl FnMut(
-			&mut [generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>; M],
+			&mut [generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>; O],
 			&[generic::Tensor<ND<2>, DeviceBufferRef<'a>>; K],
 		) -> Result<(), ErrPack<TensorOpError>>,
 	) -> Result<(), ErrPack<TensorOpError>>
 	where
+		[(); M - O]:,
 		[(); C - K]:,
 	{
 		let mut c_fail = 0;
@@ -168,35 +171,40 @@ where
 		Ok(())
 	}
 
-	pub fn are_identical(&self, m_index: usize, c_index: usize) -> bool {
-		let m_stride = self.dims[2].strides[m_index];
-		let c_stride = self.dims[2].strides[M + c_index];
-
-		let m_tensor = &self.m[m_index];
-		let c_tensor = &self.c[c_index];
-
+	pub fn are_identical<const MI: usize, const CI: usize>(&self) -> bool
+	where
+		[(); C - 1 - CI]:,
+		[(); M - 1 - MI]:,
+	{
+		let m_tensor = &self.m[MI];
 		let m_offset = m_tensor.map().offset;
-		let c_offset = c_tensor.map().offset;
-		let m_dim0 = self.dims[0].strides[m_index];
-		let c_dim0 = self.dims[0].strides[M + c_index];
-		let m_dim1 = self.dims[1].strides[m_index];
-		let c_dim1 = self.dims[1].strides[M + c_index];
-
 		let m_buf = m_tensor.buf().as_ref();
+
+		let c_tensor = &self.c[CI];
+		let c_offset = c_tensor.map().offset;
 		let c_buf = c_tensor.buf().as_ref();
+
+		let m_stride0 = self.dims[0].strides[MI];
+		let m_stride1 = self.dims[1].strides[MI];
+		let m_stride2 = self.dims[2].strides[MI];
+
+		let c_stride0 = self.dims[0].strides[M + CI];
+		let c_stride1 = self.dims[1].strides[M + CI];
+		let c_stride2 = self.dims[2].strides[M + CI];
+
 		let buf_eq = std::ptr::eq(m_buf, c_buf);
 
 		let a = buf_eq
 			&& m_offset == c_offset
-			&& (self.dims[2].size <= 1 || m_stride == c_stride)
-			&& (self.dims[1].size <= 1 || m_dim1 == c_dim1)
-			&& (self.dims[0].size <= 1 || m_dim0 == c_dim0);
+			&& (self.dims[0].size <= 1 || m_stride0 == c_stride0)
+			&& (self.dims[1].size <= 1 || m_stride1 == c_stride1)
+			&& (self.dims[2].size <= 1 || m_stride2 == c_stride2);
 
 		let b = ((m_buf as *const DeviceBuffer as usize) ^ (c_buf as *const DeviceBuffer as usize))
 			| (m_offset ^ c_offset)
-			| (m_stride ^ c_stride)
-			| (m_dim1 ^ c_dim1)
-			| (m_dim0 ^ c_dim0);
+			| (m_stride0 ^ c_stride0)
+			| (m_stride1 ^ c_stride1)
+			| (m_stride2 ^ c_stride2);
 		let b = b == 0;
 
 		debug_assert!(a == b);
@@ -204,92 +212,149 @@ where
 	}
 }
 
-/// Data dimension broadcast is disabled for all tensors.
-/// This could be improved.
-///
-/// Batch dimensions broadcast is disabled for tensors[0] and enabled for tensors[1..].
-/// This is by design.
-#[allow(clippy::indexing_slicing)]
-#[allow(clippy::needless_range_loop)]
-#[allow(clippy::unwrap_used)]
-#[inline(never)]
-fn __vec_wise<'a, const O: usize, const C: usize>(
-	o: [&'a Tensor; O],
-	c: [&'a Tensor; C],
-	f: impl Fn(
-		&mut [generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>; O],
-		&[generic::Tensor<ND<2>, DeviceBufferRef<'a>>; C],
-	) -> Result<(), ErrPack<TensorOpError>>,
-) -> Result<(), ErrPack<TensorOpError>>
+//--------------------------------------------------------------------------------------------------
+
+pub struct VecWise<'a, const M: usize, const C: usize>
 where
-	[(); O + C]:,
+	[(); M + C]:,
 {
-	if o.iter().any(|t| t.ndim() < 1) || c.iter().any(|t| t.ndim() < 1) {
-		return Err(TensorOpError::missing_vec_dimension());
-	}
-	let o_dims = o.map(|t| t.map().dims.as_slice());
-	let c_dims = c.map(|t| t.map().dims.as_slice());
-	let o_vec = o_dims.map(|d| *d.last().unwrap());
-	let c_vec = c_dims.map(|d| *d.last().unwrap());
-
-	let o_dims = o_dims.map(|d| &d[..d.len() - 1]);
-	let c_dims = c_dims.map(|d| &d[..d.len() - 1]);
-	let dims = DimMerger::merge::<2>(array::concat_arrays(o_dims, c_dims))?;
-
-	let mut c_fail = 0;
-	let mut c_tensors = std::array::from_fn(|i| unsafe {
-		generic::Tensor::new_unchecked(
-			ND {
-				dims: [
-					SizeAndStride {
-						size: dims[0].size,
-						stride: dims[0].strides[O + i],
-					},
-					SizeAndStride {
-						size: c_vec[i].size,
-						stride: c_vec[i].stride,
-					},
-				],
-				offset: c[i].map().offset,
-			},
-			DeviceBufferRef::new_unsafe(c[i].buf().as_ref(), &mut c_fail),
-		)
-	});
-
-	let mut fail = c_fail;
-	let mut o_tensors = std::array::from_fn(|i| unsafe {
-		generic::Tensor::new_unchecked(
-			ND {
-				dims: [
-					SizeAndStride {
-						size: dims[0].size,
-						stride: dims[0].strides[i],
-					},
-					SizeAndStride {
-						size: o_vec[i].size,
-						stride: o_vec[i].stride,
-					},
-				],
-				offset: o[i].map().offset,
-			},
-			DeviceBufferRefMut::new_unsafe(o[i].buf().as_ref(), &mut fail),
-		)
-	});
-
-	resolve_borrows(&c_tensors, c_fail, &mut o_tensors, fail)?;
-
-	for _ in 0..dims[1].size {
-		f(&mut o_tensors, &c_tensors)?;
-
-		for j in 0..O {
-			unsafe { o_tensors[j].map_mut().offset += dims[1].strides[j] }
-		}
-		for j in 0..C {
-			unsafe { c_tensors[j].map_mut().offset += dims[1].strides[O + j] }
-		}
-	}
-	Ok(())
+	m: [&'a Tensor; M],
+	c: [&'a Tensor; C],
+	dims: [MergedDim<{ M + C }>; 2],
+	m_vec: [SizeAndStride; M],
+	c_vec: [SizeAndStride; C],
 }
+
+impl<'a, const M: usize, const C: usize> VecWise<'a, M, C>
+where
+	[(); M + C]:,
+{
+	pub fn new(m: [&'a Tensor; M], c: [&'a Tensor; C]) -> Result<Self, ErrPack<TensorOpError>> {
+		if m.iter().any(|t| t.ndim() < 1) || c.iter().any(|t| t.ndim() < 1) {
+			return Err(TensorOpError::missing_vec_dimension());
+		}
+
+		// All dimensions except the feature dimension
+		let m_dims = m.map(|t| t.map().dims.as_slice());
+		let c_dims = c.map(|t| t.map().dims.as_slice());
+
+		// the feature dimension
+		let m_vec = m_dims.map(|d| *d.last().unwrap());
+		let c_vec = c_dims.map(|d| *d.last().unwrap());
+
+		let m_dims = m_dims.map(|d| &d[..d.len() - 1]);
+		let c_dims = c_dims.map(|d| &d[..d.len() - 1]);
+		let dims = DimMerger::merge::<2>(array::concat_arrays(m_dims, c_dims))?;
+
+		Ok(Self { m, c, dims, m_vec, c_vec })
+	}
+
+	pub fn run<const O: usize, const K: usize>(
+		&self,
+		mut f: impl FnMut(
+			&mut [generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>; O],
+			&[generic::Tensor<ND<2>, DeviceBufferRef<'a>>; K],
+		) -> Result<(), ErrPack<TensorOpError>>,
+	) -> Result<(), ErrPack<TensorOpError>>
+	where
+		[(); M - O]:,
+		[(); C - K]:,
+	{
+		let mut c_fail = 0;
+		let mut c_tensors = std::array::from_fn(|i| unsafe {
+			generic::Tensor::new_unchecked(
+				ND {
+					dims: [
+						SizeAndStride {
+							size: self.dims[0].size,
+							stride: self.dims[0].strides[M + i],
+						},
+						self.c_vec[i],
+					],
+					offset: self.c[i].map().offset,
+				},
+				DeviceBufferRef::new_unsafe(self.c[i].buf().as_ref(), &mut c_fail),
+			)
+		});
+
+		let mut fail = c_fail;
+		let mut m_tensors = std::array::from_fn(|i| unsafe {
+			generic::Tensor::new_unchecked(
+				ND {
+					dims: [
+						SizeAndStride {
+							size: self.dims[0].size,
+							stride: self.dims[0].strides[i],
+						},
+						self.m_vec[i],
+					],
+					offset: self.m[i].map().offset,
+				},
+				DeviceBufferRefMut::new_unsafe(self.m[i].buf().as_ref(), &mut fail),
+			)
+		});
+
+		resolve_borrows(&c_tensors, c_fail, &mut m_tensors, fail)?;
+
+		for _ in 0..self.dims[1].size {
+			f(&mut m_tensors, &c_tensors)?;
+
+			for j in 0..M {
+				unsafe { m_tensors[j].map_mut().offset += self.dims[1].strides[j] }
+			}
+			for j in 0..K {
+				unsafe { c_tensors[j].map_mut().offset += self.dims[1].strides[M + j] }
+			}
+		}
+		Ok(())
+	}
+
+	pub fn are_identical<const MI: usize, const CI: usize>(&self) -> bool
+	where
+		[(); C - 1 - CI]:,
+		[(); M - 1 - MI]:,
+	{
+		let m_tensor = &self.m[MI];
+		let m_offset = m_tensor.map().offset;
+		let m_buf = m_tensor.buf().as_ref();
+
+		let c_tensor = &self.c[CI];
+		let c_offset = c_tensor.map().offset;
+		let c_buf = c_tensor.buf().as_ref();
+
+		let m_size0 = self.m_vec[MI].size;
+		let m_stride0 = self.m_vec[MI].stride;
+		let m_stride1 = self.dims[0].strides[MI];
+		let m_stride2 = self.dims[1].strides[MI];
+
+		let c_size0 = self.c_vec[CI].size;
+		let c_stride0 = self.c_vec[CI].stride;
+		let c_stride1 = self.dims[0].strides[M + CI];
+		let c_stride2 = self.dims[1].strides[M + CI];
+
+		let a = //.
+			std::ptr::eq(m_buf, c_buf)
+			&& m_offset == c_offset
+			&& (m_size0 == c_size0)
+			&& (m_size0 <= 1 || m_stride0 == c_stride0)
+			&& (self.dims[0].size <= 1 || m_stride1 == c_stride1)
+			&& (self.dims[1].size <= 1 || m_stride2 == c_stride2);
+
+		let b = ((m_buf as *const DeviceBuffer as usize) ^ (c_buf as *const DeviceBuffer as usize))
+			| (m_offset ^ c_offset)
+			| (m_stride1 ^ c_stride1)
+			| (m_stride2 ^ c_stride2);
+		let b = //.
+			b == 0
+			&& (m_size0 == c_size0)
+			&& (m_size0 <= 1 || m_stride0 == c_stride0);
+
+		debug_assert!(a == b);
+		b
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
 
 /*
 /// At least one of the matrix dimensions should be contiguous.
@@ -589,7 +654,7 @@ impl<'a> EvaluatesToTensor for AddWeightedExpr<'a> {
 		let (a, b) = if std::ptr::eq(to_buf, a_buf) { (b, a) } else { (a, b) };
 
 		let ew = ElemWise::new([to], [a.tensor, b.tensor])?;
-		let overlap = ew.are_identical(0, 1);
+		let overlap = ew.are_identical::<0, 1>();
 		if overlap {
 			ew.run(|[to_tensor], [a_tensor]| {
 				executor.acc_weighted(to_tensor, b.scale, a_tensor, a.scale)?;
@@ -686,7 +751,7 @@ impl<'a> EvaluatesToTensor for DotExpr<'a> {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
-		__vec_wise([to], [self.a, self.b], |[to], [a, b]| {
+		VecWise::new([to], [self.a, self.b])?.run(|[to], [a, b]| {
 			executor.dot(to, a, b, self.scale)?;
 			Ok(())
 		})
@@ -711,7 +776,7 @@ impl<'a> EvaluatesToTensor for DotAddExpr<'a> {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
-		__vec_wise([to], [self.add.tensor, self.dot.a, self.dot.b], |[to], [x, a, b]| {
+		VecWise::new([to], [self.add.tensor, self.dot.a, self.dot.b])?.run(|[to], [x, a, b]| {
 			executor.dot_add(to, a, b, self.dot.scale, x, self.add.scale)?;
 			Ok(())
 		})
@@ -975,7 +1040,7 @@ impl<'a> EvaluatesToTensor for MulExpr<'a> {
 		let (a, b) = if std::ptr::eq(to_buf, a_buf) { (b, a) } else { (a, b) };
 
 		let ew = ElemWise::new([to], [a, b])?;
-		let overlap = ew.are_identical(0, 1);
+		let overlap = ew.are_identical::<0, 1>();
 		if overlap {
 			ew.run(|[to_tensor], [a_tensor]| {
 				executor.mul_(to_tensor, a_tensor)?;
@@ -1090,7 +1155,7 @@ impl<'a> EvaluatesToTensor for RSqrtDotExpr<'a> {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
-		__vec_wise([to], [self.a, self.b], |[to], [a, b]| {
+		VecWise::new([to], [self.a, self.b])?.run(|[to], [a, b]| {
 			executor.rsqrt_dot(to, a, b, self.scale, self.eps)?;
 			Ok(())
 		})
@@ -1181,12 +1246,49 @@ impl<'a> SwiGLUBackwardExpr<'a> {
 		d_gate: &Tensor,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = d_lin.executor();
-		ElemWise::new([d_lin, d_gate], [self.lin, self.gate, self.d_out])?.run(
-			|[d_lin, d_gate], [lin, gate, d_out]| {
+		let ew = ElemWise::new([d_lin, d_gate], [self.lin, self.gate, self.d_out])?;
+
+		let d_lin_buf = d_lin.buf().as_ref();
+		let d_gate_buf = d_gate.buf().as_ref();
+
+		let mut allow_same_buf = false;
+		if std::ptr::eq(d_lin_buf, d_gate_buf)
+			&& ew.dims[0].strides[0] == ew.dims[0].strides[1]
+			&& ew.dims[1].strides[0] == ew.dims[1].strides[1]
+			&& ew.dims[2].strides[0] == ew.dims[2].strides[1]
+		{
+			let shift = if ew.m[0].map().offset >= ew.m[1].map().offset {
+				ew.m[0].map().offset - ew.m[1].map().offset
+			} else {
+				ew.m[1].map().offset - ew.m[0].map().offset
+			};
+			let width = ew.dims[0].size * ew.dims[0].strides[0];
+			let min_stride1 = shift + width;
+			let min_stride2 = ew.dims[1].size * ew.dims[1].strides[0];
+
+			if shift >= width
+				&& (ew.dims[1].size <= 1
+					|| (ew.dims[1].strides[0] >= min_stride1
+						&& (ew.dims[2].size <= 1 || ew.dims[2].strides[0] >= min_stride2)))
+			{
+				allow_same_buf = true;
+			}
+		}
+
+		if allow_same_buf {
+			let shift = ew.m[1].map().offset.wrapping_sub(ew.m[0].map().offset);
+			ew.run(|[d_lin], [lin, gate, d_out]| {
+				let mut d_gate = d_lin.map().clone();
+				d_gate.offset = d_gate.offset.wrapping_add(shift);
+				executor.swiglu_backward2(d_lin, &d_gate, lin, gate, d_out)?;
+				Ok(())
+			})
+		} else {
+			ew.run(|[d_lin, d_gate], [lin, gate, d_out]| {
 				executor.swiglu_backward(d_lin, d_gate, lin, gate, d_out)?;
 				Ok(())
-			},
-		)
+			})
+		}
 	}
 }
 
@@ -1229,14 +1331,15 @@ impl<'a> EvaluatesToTensor for Softmax<'a> {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
-		/*		if Tensor::are_identical(to, self.tensor) {
-			__vec_wise([to], [], |[to], []| {
+		let vw = VecWise::new([to], [self.tensor])?;
+		let overlap = vw.are_identical::<0, 0>();
+		if overlap {
+			vw.run(|[to], []| {
 				executor.softmax_(to)?;
 				Ok(())
 			})
-		} else */
-		{
-			__vec_wise([to], [self.tensor], |[to], [input]| {
+		} else {
+			vw.run(|[to], [input]| {
 				executor.softmax(to, input)?;
 				Ok(())
 			})
