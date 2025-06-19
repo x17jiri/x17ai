@@ -14,7 +14,6 @@ use std::rc::Rc;
 
 use crate::ErrPack;
 use crate::tensor::HasDType;
-use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::device::executor::ExecutorError;
 
 pub mod float_executor;
@@ -144,26 +143,6 @@ impl CPUDevice {
 			return Err(ViewError::NotOnCPUDevice);
 		}
 		Ok(())
-	}
-
-	/// Returns a slice view of the buffer on CPU device.
-	///
-	/// # Errors
-	/// If the buffer's dtype does not match `T` or if the buffer is not on CPU device.
-	pub fn view<'a, T: HasDType>(buf: &DeviceBufferRef<'a>) -> Result<&'a [T], ViewError> {
-		Self::ensure_can_view::<T>(buf)?;
-		let data = buf.device_data;
-		let elems = buf.elems;
-		Ok(unsafe { std::slice::from_raw_parts(data.cast(), elems) })
-	}
-
-	pub fn view_mut<'a, T: HasDType>(
-		buf: &mut DeviceBufferRefMut<'a>,
-	) -> Result<&'a mut [T], ViewError> {
-		Self::ensure_can_view::<T>(buf)?;
-		let data = buf.device_data;
-		let elems = buf.elems;
-		Ok(unsafe { std::slice::from_raw_parts_mut(data.cast(), elems) })
 	}
 
 	/*

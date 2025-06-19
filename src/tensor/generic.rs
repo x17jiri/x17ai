@@ -26,13 +26,61 @@ use crate::{ErrExtra, ErrPack};
 
 #[derive(Clone, Debug)]
 pub struct Tensor<M: Map, B: Buffer> {
-	pub map: M,
-	pub buf: B,
+	map: M,
+	buf: B,
 }
 
 impl<M: Map + Copy, B: Buffer + Copy> Copy for Tensor<M, B> {}
 
 impl<M: Map, B: Buffer> Tensor<M, B> {
+	pub fn new(map: M, buf: B) -> Option<Self> {
+		let map_span = map.span();
+		let buf_len = buf.len();
+		let safe = map_span.start <= map_span.end && map_span.end <= buf_len;
+		if !safe {
+			cold_path();
+			return None;
+		}
+		Some(Self { map, buf })
+	}
+
+	/// # Safety
+	///
+	/// The map must be safe, i.e., the span of the map must be within the bounds of the buffer.
+	pub unsafe fn new_unchecked(map: M, buf: B) -> Self {
+		let map_span = map.span();
+		let buf_len = buf.len();
+		let safe = map_span.start <= map_span.end && map_span.end <= buf_len;
+		debug_assert!(safe);
+		Self { map, buf }
+	}
+
+	pub fn into_parts(self) -> (M, B) {
+		(self.map, self.buf)
+	}
+
+	pub fn map(&self) -> &M {
+		&self.map
+	}
+
+	pub fn buf(&self) -> &B {
+		&self.buf
+	}
+
+	/// # Safety
+	///
+	/// The map must not be modified in such a way that the tensor becomes unsafe.
+	pub unsafe fn map_mut(&mut self) -> &mut M {
+		&mut self.map
+	}
+
+	/// # Safety
+	///
+	/// The buffer must not be modified in such a way that the tensor becomes unsafe.
+	pub unsafe fn buf_mut(&mut self) -> &mut B {
+		&mut self.buf
+	}
+
 	pub fn ndim(&self) -> usize {
 		self.map.ndim()
 	}

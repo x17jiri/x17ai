@@ -15,7 +15,7 @@ pub fn map_into<const N: usize, T, U>(array: [T; N], mut f: impl FnMut(usize, T)
 	unsafe { MaybeUninit::array_assume_init(u) }
 }
 
-pub fn try_map_into<const N: usize, T, U, E>(
+/*pub fn try_map_into<const N: usize, T, U, E>(
 	array: [T; N],
 	mut f: impl FnMut(usize, T) -> Result<U, E>,
 ) -> Result<[U; N], E> {
@@ -24,7 +24,7 @@ pub fn try_map_into<const N: usize, T, U, E>(
 		u[i].write(f(i, t)?);
 	}
 	Ok(unsafe { MaybeUninit::array_assume_init(u) })
-}
+}*/
 
 pub fn map<const N: usize, T, U>(array: &[T; N], mut f: impl FnMut(usize, &T) -> U) -> [U; N] {
 	let mut u = [const { MaybeUninit::uninit() }; N];
@@ -45,7 +45,7 @@ pub fn map_mut<const N: usize, T, U>(
 	unsafe { MaybeUninit::array_assume_init(u) }
 }
 
-pub fn try_map<const N: usize, T, U, E>(
+pub fn try_map_xx<const N: usize, T, U, E>(
 	array: &[T; N],
 	mut f: impl FnMut(usize, &T) -> Result<U, E>,
 ) -> Result<[U; N], E> {
@@ -82,7 +82,7 @@ pub fn concat_arrays<T, const A: usize, const B: usize>(a: [T; A], b: [T; B]) ->
 	unsafe { MaybeUninit::array_assume_init(c) }
 }
 
-pub fn try_map_backward<const N: usize, T, U, E>(
+/*pub fn try_map_backward<const N: usize, T, U, E>(
 	array: &[T; N],
 	mut f: impl FnMut(usize, &T) -> Result<U, E>,
 ) -> Result<[U; N], E> {
@@ -91,4 +91,4 @@ pub fn try_map_backward<const N: usize, T, U, E>(
 		u[i].write(f(i, &array[i])?);
 	}
 	Ok(unsafe { MaybeUninit::array_assume_init(u) })
-}
+}*/

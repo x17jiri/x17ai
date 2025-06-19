@@ -39,7 +39,6 @@ pub struct DimMerger<const N: usize> {
 }
 
 impl<const N: usize> DimMerger<N> {
-	#[inline(never)]
 	pub fn new(
 		inputs: [&[SizeAndStride]; N],
 		max_dims: usize,
@@ -115,10 +114,13 @@ impl<const N: usize> DimMerger<N> {
 		// so we know there is at least that many guaranteed.
 		[(); MAX_SPLIT - K]:,
 	{
-		let result = <&[MergedDim<N>; K]>::try_from(&self.dims_increasing[..K]).unwrap();
-		let rest_len = self.dims_increasing.len().saturating_sub(K);
-		let rest = &self.dims_increasing[K..K + rest_len];
-		(result, rest)
+		unsafe {
+			let result = <&[MergedDim<N>; K]>::try_from(self.dims_increasing.get_unchecked(..K))
+				.unwrap_unchecked();
+			let rest_len = self.ndim.saturating_sub(K);
+			let rest = self.dims_increasing.get_unchecked(K..K + rest_len);
+			(result, rest)
+		}
 	}
 
 	pub fn merge<const K: usize>(
@@ -129,8 +131,12 @@ impl<const N: usize> DimMerger<N> {
 		// so we know there is at least that many guaranteed.
 		[(); MAX_SPLIT - K]:,
 	{
-		let merger = DimMerger::new(inputs, K)?;
-		let (&result, _rest) = merger.split::<K>();
-		Ok(result)
+		let merger = Self::new(inputs, K)?;
+		let result = unsafe {
+			<&[MergedDim<N>; K]>::try_from(merger.dims_increasing.get_unchecked(..K))
+				.unwrap_unchecked()
+		};
+
+		Ok(*result)
 	}
 }

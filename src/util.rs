@@ -5,6 +5,8 @@
 //
 //------------------------------------------------------------------------------
 
+use std::convert::Infallible;
+
 // pub mod rc; TODO
 pub mod array;
 
@@ -23,5 +25,15 @@ impl LossyInto<f64> for usize {
 impl LossyInto<f64> for u64 {
 	fn lossy_into(self) -> f64 {
 		self as f64
+	}
+}
+
+pub trait UnwrapInfallible<T> {
+	fn unwrap_infallible(self) -> T;
+}
+
+impl<T> UnwrapInfallible<T> for Result<T, Infallible> {
+	fn unwrap_infallible(self) -> T {
+		self.unwrap()
 	}
 }

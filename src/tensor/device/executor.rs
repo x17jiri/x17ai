@@ -8,7 +8,6 @@
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::generic::map::ND;
 use crate::tensor::generic::{self, TensorUnsafeError};
-use crate::util::array;
 use crate::{ErrExtra, ErrPack};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -110,8 +109,8 @@ pub fn ensure_same_shape<const M: usize, const C: usize>(
 	m: [&generic::Tensor<ND<2>, DeviceBufferRefMut>; M],
 	c: [&generic::Tensor<ND<2>, DeviceBufferRef>; C],
 ) -> Result<[usize; 2], ErrPack<ExecutorError>> {
-	let m_shapes = array::try_map_into(m, |_, m| m.nd_shape())?;
-	let c_shapes = array::try_map_into(c, |_, c| c.nd_shape())?;
+	let m_shapes = m.try_map(generic::Tensor::nd_shape)?;
+	let c_shapes = c.try_map(generic::Tensor::nd_shape)?;
 	let shape = if let Some(m) = m_shapes.first() {
 		m
 	} else if let Some(c) = c_shapes.first() {

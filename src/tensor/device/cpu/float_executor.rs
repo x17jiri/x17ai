@@ -13,7 +13,7 @@ use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::device::cpu::zip::{zip_elems, zip_vec_reduce, zip_vecs};
 use crate::tensor::device::executor::{Executor, ExecutorError, ensure_same_shape};
 use crate::tensor::generic::buffer::Buffer;
-use crate::tensor::generic::map::{ND, NDShape};
+use crate::tensor::generic::map::ND;
 use crate::tensor::{HasDType, generic};
 
 use super::math::{self, FromToF64};
@@ -25,7 +25,7 @@ fn ensure_expected_shape<B: Buffer>(
 	tensor: &generic::Tensor<ND<2>, B>,
 	expected: [usize; 2],
 ) -> Result<(), ErrPack<ExecutorError>> {
-	let shape = tensor.map.nd_shape()?;
+	let shape = tensor.nd_shape()?;
 	if shape != expected {
 		return Err(ExecutorError::invalid_shape(shape, expected));
 	}
@@ -45,42 +45,42 @@ where
 		Self { rng, phantom: std::marker::PhantomData }
 	}
 
-	pub fn view_contiguous<'buf>(
-		tensor: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<generic::Tensor<ND<2>, &'buf [T]>, ErrPack<ExecutorError>>
+	pub fn view_contiguous<'t, 'buf>(
+		tensor: &'t generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+	) -> Result<generic::Tensor<ND<2>, &'t [T]>, ErrPack<ExecutorError>>
 	where
 		T: 'static,
 	{
 		tensor.ensure_safe()?;
-		let feature_dim = tensor.map.dims[1];
+		let feature_dim = tensor.map().dims[1];
 		if !feature_dim.is_contiguous() {
 			return Err(ExecutorError::not_contiguous());
 		}
 		Ok(tensor.view()?)
 	}
 
-	pub fn view_contiguous_mut<'buf>(
-		tensor: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-	) -> Result<generic::Tensor<ND<2>, &'buf mut [T]>, ErrPack<ExecutorError>>
+	pub fn view_contiguous_mut<'t, 'buf>(
+		tensor: &'t mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+	) -> Result<generic::Tensor<ND<2>, &'t mut [T]>, ErrPack<ExecutorError>>
 	where
 		T: 'static,
 	{
 		tensor.ensure_safe()?;
-		let feature_dim = tensor.map.dims[1];
+		let feature_dim = tensor.map().dims[1];
 		if !feature_dim.is_contiguous() {
 			return Err(ExecutorError::not_contiguous());
 		}
 		Ok(tensor.view_mut()?)
 	}
 
-	pub fn view_contiguous_or_broadcasted<'buf>(
-		tensor: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<(generic::Tensor<ND<2>, &'buf [T]>, bool), ErrPack<ExecutorError>>
+	pub fn view_contiguous_or_broadcasted<'t, 'buf>(
+		tensor: &'t generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+	) -> Result<(generic::Tensor<ND<2>, &'t [T]>, bool), ErrPack<ExecutorError>>
 	where
 		T: 'static,
 	{
 		tensor.ensure_safe()?;
-		let feature_dim = tensor.map.dims[1];
+		let feature_dim = tensor.map().dims[1];
 		let broadcast = if feature_dim.is_contiguous() {
 			false
 		} else if feature_dim.is_broadcasted() {
@@ -91,14 +91,14 @@ where
 		Ok((tensor.view()?, broadcast))
 	}
 
-	pub fn view_contiguous_or_broadcasted_mut<'buf>(
-		tensor: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-	) -> Result<(generic::Tensor<ND<2>, &'buf mut [T]>, bool), ErrPack<ExecutorError>>
+	pub fn view_contiguous_or_broadcasted_mut<'t, 'buf>(
+		tensor: &'t mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+	) -> Result<(generic::Tensor<ND<2>, &'t mut [T]>, bool), ErrPack<ExecutorError>>
 	where
 		T: 'static,
 	{
 		tensor.ensure_safe()?;
-		let feature_dim = tensor.map.dims[1];
+		let feature_dim = tensor.map().dims[1];
 		let broadcast = if feature_dim.is_contiguous() {
 			false
 		} else if feature_dim.is_broadcasted() {

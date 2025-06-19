@@ -5,9 +5,12 @@
 //
 //------------------------------------------------------------------------------
 
+use std::hint::cold_path;
+
 use crate::ErrPack;
+use crate::tensor::device::DeviceBuffer;
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
-use crate::tensor::dim_merger::DimMerger;
+use crate::tensor::dim_merger::{DimMerger, MergedDim};
 use crate::tensor::generic::map::{ND, SizeAndStride};
 use crate::tensor::{Tensor, TensorOpError, generic};
 use crate::util::array;
@@ -33,71 +36,172 @@ pub trait MatrixSavable {
 
 //--------------------------------------------------------------------------------------------------
 
-#[allow(clippy::indexing_slicing)]
-#[allow(clippy::needless_range_loop)]
-pub(crate) fn __elem_wise<'a, const O: usize, const C: usize>(
-	o: [&'a Tensor; O],
-	c: [&'a Tensor; C],
-	mut f: impl FnMut(
-		&mut [generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>; O],
-		&[generic::Tensor<ND<2>, DeviceBufferRef<'a>>; C],
-	) -> Result<(), ErrPack<TensorOpError>>,
-) -> Result<(), ErrPack<TensorOpError>>
-where
-	[(); O + C]:,
-{
-	let o_dims = o.map(|t| t.map.dims.as_slice());
-	let c_dims = c.map(|t| t.map.dims.as_slice());
-	let dims = DimMerger::merge::<3>(array::concat_arrays(o_dims, c_dims))?;
-
-	let mut c_tensors = array::try_map(&c, |i, c| {
-		c.buf.try_borrow().map(|buf| generic::Tensor {
-			map: ND {
-				dims: [
-					SizeAndStride {
-						size: dims[1].size,
-						stride: dims[1].strides[O + i],
-					},
-					SizeAndStride {
-						size: dims[0].size,
-						stride: dims[0].strides[O + i],
-					},
-				],
-				offset: c.map.offset,
-			},
-			buf,
-		})
-	})?;
-	let mut o_tensors = array::try_map(&o, |i, o| {
-		o.buf.try_borrow_mut().map(|buf| generic::Tensor {
-			map: ND {
-				dims: [
-					SizeAndStride {
-						size: dims[1].size,
-						stride: dims[1].strides[i],
-					},
-					SizeAndStride {
-						size: dims[0].size,
-						stride: dims[0].strides[i],
-					},
-				],
-				offset: o.map.offset,
-			},
-			buf,
-		})
-	})?;
-
-	for _ in 0..dims[2].size {
-		f(&mut o_tensors, &c_tensors)?;
-
-		for j in 0..O {
-			o_tensors[j].map.offset += dims[2].strides[j];
+/// In theory, this function could be extended to check if different tensors actually
+/// map to different areas of the same buffer. It could then allow to borrow
+/// the same buffer multiple times, as long as the tensors do not overlap.
+///
+/// However, this would be pretty complex and probably not worth it.
+fn resolve_borrows<Map: generic::map::Map, const C: usize, const M: usize>(
+	_c_tensors: &[generic::Tensor<Map, DeviceBufferRef<'_>>; C],
+	c_fail: usize,
+	_m_tensors: &mut [generic::Tensor<Map, DeviceBufferRefMut<'_>>; M],
+	fail: usize,
+) -> Result<(), ErrPack<TensorOpError>> {
+	#[allow(clippy::collapsible_else_if)]
+	if M == 0 {
+		if c_fail == 0 {
+			Ok(())
+		} else {
+			cold_path();
+			Err(ErrPack {
+				code: TensorOpError::CannotBorrow,
+				extra: None,
+			})
 		}
-		for j in 0..C {
-			c_tensors[j].map.offset += dims[2].strides[O + j];
+	} else {
+		if fail == 0 {
+			Ok(())
+		} else {
+			cold_path();
+			if c_fail == 0 {
+				Err(ErrPack {
+					code: TensorOpError::CannotBorrowMut,
+					extra: None,
+				})
+			} else {
+				Err(ErrPack {
+					code: TensorOpError::CannotBorrow,
+					extra: None,
+				})
+			}
 		}
 	}
-	Ok(())
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct ElemWise<'a, const M: usize, const C: usize>
+where
+	[(); M + C]:,
+{
+	m: [&'a Tensor; M],
+	c: [&'a Tensor; C],
+	dims: [MergedDim<{ M + C }>; 3],
+}
+
+impl<'a, const M: usize, const C: usize> ElemWise<'a, M, C>
+where
+	[(); M + C]:,
+{
+	pub fn new(m: [&'a Tensor; M], c: [&'a Tensor; C]) -> Result<Self, ErrPack<TensorOpError>> {
+		let m_dims = m.map(|t| t.map().dims.as_slice());
+		let c_dims = c.map(|t| t.map().dims.as_slice());
+		let dims = DimMerger::merge::<3>(array::concat_arrays(m_dims, c_dims))?;
+		Ok(Self { m, c, dims })
+	}
+
+	/// Note that we use 'K' instead of 'C' and it is allowed that 'K <= C'.
+	///
+	/// So we don't have to use all the `c` tensors processed during `::new()`.
+	pub fn run<const K: usize>(
+		self,
+		mut f: impl FnMut(
+			&mut [generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>; M],
+			&[generic::Tensor<ND<2>, DeviceBufferRef<'a>>; K],
+		) -> Result<(), ErrPack<TensorOpError>>,
+	) -> Result<(), ErrPack<TensorOpError>>
+	where
+		[(); C - K]:,
+	{
+		let mut c_fail = 0;
+		let mut c_tensors = std::array::from_fn(|i| unsafe {
+			generic::Tensor::new_unchecked(
+				ND {
+					dims: [
+						SizeAndStride {
+							size: self.dims[1].size,
+							stride: self.dims[1].strides[M + i],
+						},
+						SizeAndStride {
+							size: self.dims[0].size,
+							stride: self.dims[0].strides[M + i],
+						},
+					],
+					offset: self.c[i].map().offset,
+				},
+				DeviceBufferRef::new_unsafe(self.c[i].buf().as_ref(), &mut c_fail),
+			)
+		});
+
+		let mut fail = c_fail;
+		let mut m_tensors = std::array::from_fn(|i| unsafe {
+			generic::Tensor::new_unchecked(
+				ND {
+					dims: [
+						SizeAndStride {
+							size: self.dims[1].size,
+							stride: self.dims[1].strides[i],
+						},
+						SizeAndStride {
+							size: self.dims[0].size,
+							stride: self.dims[0].strides[i],
+						},
+					],
+					offset: self.m[i].map().offset,
+				},
+				DeviceBufferRefMut::new_unsafe(self.m[i].buf().as_ref(), &mut fail),
+			)
+		});
+
+		resolve_borrows(&c_tensors, c_fail, &mut m_tensors, fail)?;
+
+		for _ in 0..self.dims[2].size {
+			f(&mut m_tensors, &c_tensors)?;
+
+			for j in 0..M {
+				unsafe { m_tensors[j].map_mut().offset += self.dims[2].strides[j] }
+			}
+			for j in 0..K {
+				unsafe { c_tensors[j].map_mut().offset += self.dims[2].strides[M + j] }
+			}
+		}
+		Ok(())
+	}
+
+	pub fn are_identical(&self, m_index: usize, c_index: usize) -> bool {
+		let m_stride = self.dims[2].strides[m_index];
+		let c_stride = self.dims[2].strides[M + c_index];
+
+		let m_tensor = &self.m[m_index];
+		let c_tensor = &self.c[c_index];
+
+		let m_offset = m_tensor.map().offset;
+		let c_offset = c_tensor.map().offset;
+		let m_dim0 = self.dims[0].strides[m_index];
+		let c_dim0 = self.dims[0].strides[M + c_index];
+		let m_dim1 = self.dims[1].strides[m_index];
+		let c_dim1 = self.dims[1].strides[M + c_index];
+
+		let m_buf = m_tensor.buf().as_ref();
+		let c_buf = c_tensor.buf().as_ref();
+		let buf_eq = std::ptr::eq(m_buf, c_buf);
+
+		let a = buf_eq
+			&& m_offset == c_offset
+			&& (self.dims[2].size <= 1 || m_stride == c_stride)
+			&& (self.dims[1].size <= 1 || m_dim1 == c_dim1)
+			&& (self.dims[0].size <= 1 || m_dim0 == c_dim0);
+
+		let b = ((m_buf as *const DeviceBuffer as usize) ^ (c_buf as *const DeviceBuffer as usize))
+			| (m_offset ^ c_offset)
+			| (m_stride ^ c_stride)
+			| (m_dim1 ^ c_dim1)
+			| (m_dim0 ^ c_dim0);
+		let b = b == 0;
+
+		debug_assert!(a == b);
+		b
+	}
 }
 
 /// Data dimension broadcast is disabled for all tensors.
@@ -123,8 +227,8 @@ where
 	if o.iter().any(|t| t.ndim() < 1) || c.iter().any(|t| t.ndim() < 1) {
 		return Err(TensorOpError::missing_vec_dimension());
 	}
-	let o_dims = o.map(|t| t.map.dims.as_slice());
-	let c_dims = c.map(|t| t.map.dims.as_slice());
+	let o_dims = o.map(|t| t.map().dims.as_slice());
+	let c_dims = c.map(|t| t.map().dims.as_slice());
 	let o_vec = o_dims.map(|d| *d.last().unwrap());
 	let c_vec = c_dims.map(|d| *d.last().unwrap());
 
@@ -132,9 +236,10 @@ where
 	let c_dims = c_dims.map(|d| &d[..d.len() - 1]);
 	let dims = DimMerger::merge::<2>(array::concat_arrays(o_dims, c_dims))?;
 
-	let mut c_tensors = array::try_map(&c, |i, c| {
-		c.buf.try_borrow().map(|buf| generic::Tensor {
-			map: ND {
+	let mut c_fail = 0;
+	let mut c_tensors = std::array::from_fn(|i| unsafe {
+		generic::Tensor::new_unchecked(
+			ND {
 				dims: [
 					SizeAndStride {
 						size: dims[0].size,
@@ -145,14 +250,16 @@ where
 						stride: c_vec[i].stride,
 					},
 				],
-				offset: c.map.offset,
+				offset: c[i].map().offset,
 			},
-			buf,
-		})
-	})?;
-	let mut o_tensors = array::try_map(&o, |i, o| {
-		o.buf.try_borrow_mut().map(|buf| generic::Tensor {
-			map: ND {
+			DeviceBufferRef::new_unsafe(c[i].buf().as_ref(), &mut c_fail),
+		)
+	});
+
+	let mut fail = c_fail;
+	let mut o_tensors = std::array::from_fn(|i| unsafe {
+		generic::Tensor::new_unchecked(
+			ND {
 				dims: [
 					SizeAndStride {
 						size: dims[0].size,
@@ -163,20 +270,22 @@ where
 						stride: o_vec[i].stride,
 					},
 				],
-				offset: o.map.offset,
+				offset: o[i].map().offset,
 			},
-			buf,
-		})
-	})?;
+			DeviceBufferRefMut::new_unsafe(o[i].buf().as_ref(), &mut fail),
+		)
+	});
+
+	resolve_borrows(&c_tensors, c_fail, &mut o_tensors, fail)?;
 
 	for _ in 0..dims[1].size {
 		f(&mut o_tensors, &c_tensors)?;
 
 		for j in 0..O {
-			o_tensors[j].map.offset += dims[1].strides[j];
+			unsafe { o_tensors[j].map_mut().offset += dims[1].strides[j] }
 		}
 		for j in 0..C {
-			c_tensors[j].map.offset += dims[1].strides[O + j];
+			unsafe { c_tensors[j].map_mut().offset += dims[1].strides[O + j] }
 		}
 	}
 	Ok(())
@@ -236,7 +345,7 @@ impl EvaluatesToTensor for ZerosExpr {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
-		__elem_wise([to], [], |[to], []| {
+		ElemWise::new([to], [])?.run(|[to], []| {
 			executor.zeros(to)?;
 			Ok(())
 		})
@@ -255,7 +364,7 @@ impl EvaluatesToTensor for RandnClampedExpr {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
-		__elem_wise([to], [], |[to], []| {
+		ElemWise::new([to], [])?.run(|[to], []| {
 			executor.randn_clamped(to)?;
 			Ok(())
 		})
@@ -268,7 +377,7 @@ impl EvaluatesToTensor for Tensor {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
-		__elem_wise([to], [self], |[to], [input]| {
+		ElemWise::new([to], [self])?.run(|[to], [input]| {
 			executor.copy(to, input)?;
 			Ok(())
 		})
@@ -283,6 +392,7 @@ pub trait Scalable {
 	fn scale(self, scale: f64) -> Self::Output;
 }
 
+#[derive(Clone, Copy)]
 pub struct ScaledTensorExpr<'a> {
 	pub tensor: &'a Tensor,
 	pub scale: f64,
@@ -470,19 +580,24 @@ impl<'a> EvaluatesToTensor for AddWeightedExpr<'a> {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
-		if Tensor::are_identical(to, self.a.tensor) {
-			__elem_wise([to], [self.b.tensor], |[to], [b]| {
-				executor.acc_weighted(to, self.a.scale, b, self.b.scale)?;
-				Ok(())
-			})
-		} else if Tensor::are_identical(to, self.b.tensor) {
-			__elem_wise([to], [self.a.tensor], |[to], [a]| {
-				executor.acc_weighted(to, self.b.scale, a, self.a.scale)?;
+
+		// If any of the inputs overlaps with output, make sure it's 'b'
+		let a = self.a;
+		let b = self.b;
+		let a_buf = a.tensor.buf().as_ref();
+		let to_buf = to.buf().as_ref();
+		let (a, b) = if std::ptr::eq(to_buf, a_buf) { (b, a) } else { (a, b) };
+
+		let ew = ElemWise::new([to], [a.tensor, b.tensor])?;
+		let overlap = ew.are_identical(0, 1);
+		if overlap {
+			ew.run(|[to_tensor], [a_tensor]| {
+				executor.acc_weighted(to_tensor, b.scale, a_tensor, a.scale)?;
 				Ok(())
 			})
 		} else {
-			__elem_wise([to], [self.a.tensor, self.b.tensor], |[to], [a, b]| {
-				executor.add_weighted(to, a, self.a.scale, b, self.b.scale)?;
+			ew.run(|[to_], [a_, b_]| {
+				executor.add_weighted(to_, a_, self.a.scale, b_, self.b.scale)?;
 				Ok(())
 			})
 		}
@@ -680,7 +795,7 @@ impl<'a> EvaluatesToTensor for MulAddExpr<'a> {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
-		__elem_wise([to], [self.mul.a, self.mul.b, self.add.tensor], |[to], [a, b, add]| {
+		ElemWise::new([to], [self.mul.a, self.mul.b, self.add.tensor])?.run(|[to], [a, b, add]| {
 			executor.mul_add(to, a, b, self.mul.scale, add, self.add.scale)?;
 			Ok(())
 		})
@@ -851,19 +966,24 @@ impl<'a> EvaluatesToTensor for MulExpr<'a> {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
-		if Tensor::are_identical(to, self.a) {
-			__elem_wise([to], [self.b], |[to], [b]| {
-				executor.mul_(to, b)?;
-				Ok(())
-			})
-		} else if Tensor::are_identical(to, self.b) {
-			__elem_wise([to], [self.a], |[to], [a]| {
-				executor.mul_(to, a)?;
+
+		// If any of the inputs overlaps with output, make sure it's 'b'
+		let a = self.a;
+		let b = self.b;
+		let a_buf = a.buf().as_ref();
+		let to_buf = to.buf().as_ref();
+		let (a, b) = if std::ptr::eq(to_buf, a_buf) { (b, a) } else { (a, b) };
+
+		let ew = ElemWise::new([to], [a, b])?;
+		let overlap = ew.are_identical(0, 1);
+		if overlap {
+			ew.run(|[to_tensor], [a_tensor]| {
+				executor.mul_(to_tensor, a_tensor)?;
 				Ok(())
 			})
 		} else {
-			__elem_wise([to], [self.a, self.b], |[to], [a, b]| {
-				executor.mul(to, a, b)?;
+			ew.run(|[to_tensor], [a_tensor, b_tensor]| {
+				executor.mul(to_tensor, a_tensor, b_tensor)?;
 				Ok(())
 			})
 		}
@@ -938,7 +1058,7 @@ impl<'a> EvaluatesToTensor for RSqrtExpr<'a> {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
-		__elem_wise([to], [self.tensor], |[to], [input]| {
+		ElemWise::new([to], [self.tensor])?.run(|[to], [input]| {
 			executor.rsqrt(to, input, self.scale, self.eps)?;
 			Ok(())
 		})
@@ -1006,7 +1126,7 @@ impl<'a> EvaluatesToTensor for LnClampedExpr<'a> {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
-		__elem_wise([to], [self.tensor], |[to], [input]| {
+		ElemWise::new([to], [self.tensor])?.run(|[to], [input]| {
 			executor.ln_clamped(to, input)?;
 			Ok(())
 		})
@@ -1028,7 +1148,7 @@ impl<'a> EvaluatesToTensor for SwiGLUExpr<'a> {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
-		__elem_wise([to], [self.lin, self.gate], |[to], [lin, gate]| {
+		ElemWise::new([to], [self.lin, self.gate])?.run(|[to], [lin, gate]| {
 			executor.swiglu(to, lin, gate)?;
 			Ok(())
 		})
@@ -1061,9 +1181,7 @@ impl<'a> SwiGLUBackwardExpr<'a> {
 		d_gate: &Tensor,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = d_lin.executor();
-		__elem_wise(
-			[d_lin, d_gate],
-			[self.lin, self.gate, self.d_out],
+		ElemWise::new([d_lin, d_gate], [self.lin, self.gate, self.d_out])?.run(
 			|[d_lin, d_gate], [lin, gate, d_out]| {
 				executor.swiglu_backward(d_lin, d_gate, lin, gate, d_out)?;
 				Ok(())
@@ -1080,7 +1198,7 @@ pub fn sum_all(tensor: &Tensor) -> Result<f64, ErrPack<TensorOpError>> {
 	// TODO - `__elem_wise()` disables broadcast for tensor at position 0.
 	// In the case of a `sum_all()`, it would make sense to enable it,
 	// but it would require some refactoring. Not sure if it is worth it.
-	__elem_wise([], [tensor], |[], [a]| {
+	ElemWise::new([], [tensor])?.run(|[], [a]| {
 		sum += executor.sum_all(a)?;
 		Ok(())
 	})?;
@@ -1090,7 +1208,7 @@ pub fn sum_all(tensor: &Tensor) -> Result<f64, ErrPack<TensorOpError>> {
 pub fn approx_eq(a: &Tensor, b: &Tensor, eps: f64) -> Result<bool, ErrPack<TensorOpError>> {
 	let executor = a.executor();
 	let mut result = true;
-	__elem_wise([], [a, b], |[], [a, b]| {
+	ElemWise::new([], [a, b])?.run(|[], [a, b]| {
 		result &= executor.approx_eq(a, b, eps)?;
 		Ok(())
 	})?;
@@ -1111,12 +1229,13 @@ impl<'a> EvaluatesToTensor for Softmax<'a> {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
-		if Tensor::are_identical(to, self.tensor) {
+		/*		if Tensor::are_identical(to, self.tensor) {
 			__vec_wise([to], [], |[to], []| {
 				executor.softmax_(to)?;
 				Ok(())
 			})
-		} else {
+		} else */
+		{
 			__vec_wise([to], [self.tensor], |[to], [input]| {
 				executor.softmax(to, input)?;
 				Ok(())

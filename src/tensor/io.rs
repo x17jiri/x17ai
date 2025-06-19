@@ -8,10 +8,10 @@
 use crate::ErrPack;
 use crate::tensor::device::cpu::math::FromToF64;
 use crate::tensor::generic::map::{DD, ND};
+use crate::tensor::math::ElemWise;
 use crate::tensor::{TensorOpError, generic};
 
 use super::Tensor;
-use super::math::__elem_wise;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -20,7 +20,7 @@ pub fn write_bin(
 	writer: &mut dyn std::io::Write,
 ) -> Result<(), ErrPack<TensorOpError>> {
 	let executor = src.executor();
-	__elem_wise([], [src], |[], [src]| {
+	ElemWise::new([], [src])?.run(|[], [src]| {
 		executor.write_bin(src, writer)?;
 		Ok(())
 	})
@@ -42,7 +42,7 @@ pub fn read_bin(
 	reader: &mut dyn std::io::Read,
 ) -> Result<(), ErrPack<TensorOpError>> {
 	let executor = dst.executor();
-	__elem_wise([dst], [], |[dst], []| {
+	ElemWise::new([dst], [])?.run(|[dst], []| {
 		executor.read_bin(dst, reader)?;
 		Ok(())
 	})

@@ -29,7 +29,10 @@ pub struct ND<const N: usize> {
 impl<const N: usize> ND<N> {
 	pub fn new(shape: &[usize; N]) -> Result<(Self, usize), ElementsOverflowError> {
 		let mut stride_counter = StrideCounter::new();
-		let dims = array::try_map_backward(shape, |_, &size| stride_counter.prepend_dim(size))?;
+		let mut dims = [SizeAndStride::default(); N];
+		for i in (0..N).rev() {
+			dims[i] = stride_counter.prepend_dim(shape[i])?;
+		}
 		let elems = stride_counter.elems();
 		Ok((Self { dims, offset: 0 }, elems))
 	}

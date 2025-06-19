@@ -41,9 +41,11 @@ impl<M: generic::map::Map> generic::Tensor<M, Rc<device::DeviceBuffer>> {
 	pub fn borrow(
 		&self,
 	) -> std::result::Result<generic::Tensor<M, DeviceBufferRef<'_>>, BorrowError> {
-		let buf = self.buf.try_borrow()?;
-		let map = self.map.clone();
-		Ok(generic::Tensor { map, buf })
+		let buf = self.buf().try_borrow()?;
+		let map = self.map().clone();
+		// SAFETY: We only change the type of buffer reference.
+		// So if the map was safe before, it is still safe.
+		Ok(unsafe { generic::Tensor::new_unchecked(map, buf) })
 	}
 
 	/// # Errors
@@ -51,35 +53,43 @@ impl<M: generic::map::Map> generic::Tensor<M, Rc<device::DeviceBuffer>> {
 	pub fn borrow_mut(
 		&self,
 	) -> std::result::Result<generic::Tensor<M, DeviceBufferRefMut<'_>>, BorrowMutError> {
-		let buf = self.buf.try_borrow_mut()?;
-		let map = self.map.clone();
-		Ok(generic::Tensor { map, buf })
+		let buf = self.buf().try_borrow_mut()?;
+		let map = self.map().clone();
+		// SAFETY: We only change the type of buffer reference.
+		// So if the map was safe before, it is still safe.
+		Ok(unsafe { generic::Tensor::new_unchecked(map, buf) })
 	}
 }
 
 impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRef<'buf>> {
 	/// Returns a "view" tensor which has a slice `&[T]` as its buffer.
-	///
-	/// # Errors
-	/// See [`ViewError`](`crate::tensor::device::cpu::ViewError`)
-	pub fn view<T: HasDType>(&self) -> Result<generic::Tensor<M, &'buf [T]>, ViewError> {
-		let buf = CPUDevice::view(&self.buf)?;
-		let map = self.map.clone();
-		Ok(generic::Tensor { map, buf })
+	pub fn view<T: HasDType>(&self) -> Result<generic::Tensor<M, &[T]>, ViewError> {
+		let map = self.map().clone();
+		let buf = self.buf();
+		CPUDevice::ensure_can_view::<T>(buf.device_buffer())?;
+		let data = buf.device_data;
+		let elems = buf.elems;
+		let slice = unsafe { std::slice::from_raw_parts(data.cast(), elems) };
+
+		// SAFETY: We only change the type of buffer reference.
+		// So if the map was safe before, it is still safe.
+		Ok(unsafe { generic::Tensor::new_unchecked(map, slice) })
 	}
 }
 
 impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRefMut<'buf>> {
 	/// Returns a "view" tensor which has a slice `&mut [T]` as its buffer.
-	///
-	/// # Errors
-	/// See [`ViewError`](`crate::tensor::device::cpu::ViewError`)
-	pub fn view_mut<T: HasDType>(
-		&mut self,
-	) -> Result<generic::Tensor<M, &'buf mut [T]>, ViewError> {
-		let buf = CPUDevice::view_mut(&mut self.buf)?;
-		let map = self.map.clone();
-		Ok(generic::Tensor { map, buf })
+	pub fn view_mut<T: HasDType>(&mut self) -> Result<generic::Tensor<M, &mut [T]>, ViewError> {
+		let map = self.map().clone();
+		let buf = self.buf();
+		CPUDevice::ensure_can_view::<T>(buf.device_buffer())?;
+		let data = buf.device_data;
+		let elems = buf.elems;
+		let slice = unsafe { std::slice::from_raw_parts_mut(data.cast(), elems) };
+
+		// SAFETY: We only change the type of buffer reference.
+		// So if the map was safe before, it is still safe.
+		Ok(unsafe { generic::Tensor::new_unchecked(map, slice) })
 	}
 }
 
@@ -96,7 +106,9 @@ impl Tensor {
 	) -> Result<Tensor, ErrPack<TensorOpError>> {
 		let (map, elems) = DD::new(shape)?;
 		let buf = device.new_buffer(dtype, elems)?;
-		Ok(Tensor { map, buf })
+
+		// SAFETY: We created the buffer to be as big as the mapping.
+		Ok(unsafe { Tensor::new_unchecked(map, buf) })
 	}
 
 	/// Allocate a new tensor on the same device as `self`.
@@ -110,9 +122,11 @@ impl Tensor {
 
 	/// Allocate a new tensor on the same device with the same shape and dtype as `self`.
 	pub fn new_empty_like(&self) -> Result<Tensor, ErrPack<TensorOpError>> {
-		let (map, elems) = self.map.new_like();
-		let buf = self.device().new_buffer(self.buf.dtype, elems)?;
-		Ok(Tensor { map, buf })
+		let (map, elems) = self.map().new_like();
+		let buf = self.device().new_buffer(self.buf().dtype, elems)?;
+
+		// SAFETY: We created the buffer to be as big as the mapping.
+		Ok(unsafe { Tensor::new_unchecked(map, buf) })
 	}
 
 	/// Typical user of this function would be `nn` layer that can either
@@ -130,7 +144,7 @@ impl Tensor {
 
 	#[inline]
 	pub fn owns_buffer(&self) -> bool {
-		let buf = &self.buf;
+		let buf = self.buf();
 		let weak = Rc::weak_count(buf) + 1;
 		let strong = Rc::strong_count(buf);
 		(weak | strong) <= 1
@@ -141,24 +155,26 @@ impl Tensor {
 		tail_len: usize,
 		replace_with: &[usize],
 	) -> Result<Tensor, ErrPack<TensorOpError>> {
-		let (map, elems) = self.map.new_replace_tail(tail_len, replace_with)?;
-		let buf = self.device().new_buffer(self.buf.dtype, elems)?;
-		Ok(Tensor { map, buf })
+		let (map, elems) = self.map().new_replace_tail(tail_len, replace_with)?;
+		let buf = self.device().new_buffer(self.buf().dtype, elems)?;
+
+		// SAFETY: We created the buffer to be as big as the mapping.
+		Ok(unsafe { Tensor::new_unchecked(map, buf) })
 	}
 
 	/// Returns the device on which the tensor is allocated.
 	pub fn device(&self) -> Rc<dyn Device> {
-		let device = &*self.buf.device;
+		let device = &*self.buf().device;
 		device.clone()
 	}
 
 	/// Returns the data type of the tensor elements.
 	pub fn dtype(&self) -> DType {
-		self.buf.dtype
+		self.buf().dtype
 	}
 
 	pub fn executor(&self) -> &dyn Executor {
-		self.buf.executor()
+		self.buf().executor()
 	}
 
 	pub fn assign<Expr: EvaluatesToTensor>(
@@ -181,13 +197,6 @@ impl Tensor {
 			device,
 			phantom: std::marker::PhantomData,
 		}
-	}
-
-	/// Checkes if two tensors are identical.
-	///
-	/// I.e., if they share the same buffer and have the same map.
-	pub fn are_identical(a: &Self, b: &Self) -> bool {
-		Rc::ptr_eq(&a.buf, &b.buf) && a.map == b.map
 	}
 }
 

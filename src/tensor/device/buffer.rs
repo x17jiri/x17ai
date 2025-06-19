@@ -11,7 +11,6 @@ use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-use crate::tensor::device;
 use crate::tensor::generic::buffer::Buffer;
 
 use super::Device;
@@ -28,8 +27,8 @@ pub struct DeviceBuffer {
 	pub device_is_cpu: bool,
 	pub device: ManuallyDrop<Rc<dyn Device>>,
 
-	pub read_count: Cell<isize>,
-	pub write_count: Cell<isize>,
+	pub read_count: Cell<usize>,
+	pub write_count: Cell<usize>,
 }
 
 impl DeviceBuffer {
@@ -78,6 +77,12 @@ impl Buffer for Rc<DeviceBuffer> {
 	}
 }
 
+impl Buffer for &DeviceBuffer {
+	fn len(&self) -> usize {
+		self.elems
+	}
+}
+
 impl<'a> Buffer for DeviceBufferRef<'a> {
 	fn len(&self) -> usize {
 		self.device_buffer.elems
@@ -120,7 +125,6 @@ impl std::fmt::Display for BorrowMutError {
 
 pub struct DeviceBufferRef<'a> {
 	device_buffer: &'a DeviceBuffer,
-	span: std::ops::Range<usize>,
 }
 
 impl<'a> DeviceBufferRef<'a> {
@@ -134,10 +138,21 @@ impl<'a> DeviceBufferRef<'a> {
 		}
 
 		device_buffer.read_count.set(read_count + 1);
-		Ok(Self {
-			device_buffer,
-			span: 0..device_buffer.elems,
-		})
+		Ok(Self { device_buffer })
+	}
+
+	pub unsafe fn new_unsafe(device_buffer: &'a DeviceBuffer, fail: &mut usize) -> Self {
+		let read_count = device_buffer.read_count.get();
+		let write_count = device_buffer.write_count.get();
+
+		*fail |= write_count;
+
+		device_buffer.read_count.set(read_count + 1);
+		Self { device_buffer }
+	}
+
+	pub fn device_buffer(&self) -> &'a DeviceBuffer {
+		self.device_buffer
 	}
 }
 
@@ -148,10 +163,7 @@ impl<'a> Clone for DeviceBufferRef<'a> {
 		debug_assert!(read_count > 0, "DeviceBufferRef: invalid counter state");
 
 		self.device_buffer.read_count.set(read_count + 1);
-		Self {
-			device_buffer: self.device_buffer,
-			span: self.span.clone(),
-		}
+		Self { device_buffer: self.device_buffer }
 	}
 }
 
@@ -183,10 +195,7 @@ impl<'a> From<DeviceBufferRefMut<'a>> for DeviceBufferRef<'a> {
 
 		value.device_buffer.read_count.set(read_count + 1);
 		value.device_buffer.write_count.set(write_count - 1);
-		let result = Self {
-			device_buffer: value.device_buffer,
-			span: value.span.clone(),
-		};
+		let result = Self { device_buffer: value.device_buffer };
 
 		std::mem::forget(value);
 		result
@@ -197,7 +206,6 @@ impl<'a> From<DeviceBufferRefMut<'a>> for DeviceBufferRef<'a> {
 
 pub struct DeviceBufferRefMut<'a> {
 	device_buffer: &'a DeviceBuffer,
-	span: std::ops::Range<usize>,
 }
 
 impl<'a> DeviceBufferRefMut<'a> {
@@ -211,50 +219,21 @@ impl<'a> DeviceBufferRefMut<'a> {
 		}
 
 		device_buffer.write_count.set(1);
-		Ok(Self {
-			device_buffer,
-			span: 0..device_buffer.elems,
-		})
+		Ok(Self { device_buffer })
 	}
 
-	fn is_subrange(inner: &std::ops::Range<usize>, outer: &std::ops::Range<usize>) -> bool {
-		inner.start >= outer.start && inner.end <= outer.end
+	pub unsafe fn new_unsafe(device_buffer: &'a DeviceBuffer, fail: &mut usize) -> Self {
+		let read_count = device_buffer.read_count.get();
+		let write_count = device_buffer.write_count.get();
+
+		*fail |= read_count | write_count;
+
+		device_buffer.write_count.set(write_count + 1);
+		Self { device_buffer }
 	}
 
-	fn intersect(a: &std::ops::Range<usize>, b: &std::ops::Range<usize>) -> bool {
-		a.start < b.end && b.start < a.end
-	}
-
-	pub fn split(
-		self,
-		span1: std::ops::Range<usize>,
-		span2: std::ops::Range<usize>,
-	) -> Result<(DeviceBufferRefMut<'a>, DeviceBufferRefMut<'a>), BorrowMutError> {
-		if !Self::is_subrange(&span1, &self.span)
-			|| !Self::is_subrange(&span2, &self.span)
-			|| !Self::intersect(&span1, &span2)
-		{
-			cold_path();
-			return Err(BorrowMutError);
-		}
-
-		let write_count = self.device_buffer.write_count.get();
-
-		debug_assert!(write_count > 0, "DeviceBufferRefMut: invalid counter state");
-
-		self.device_buffer.write_count.set(write_count + 1);
-
-		let part1 = DeviceBufferRefMut {
-			device_buffer: self.device_buffer,
-			span: span1,
-		};
-
-		let part2 = DeviceBufferRefMut {
-			device_buffer: self.device_buffer,
-			span: span2,
-		};
-
-		Ok((part1, part2))
+	pub fn device_buffer(&self) -> &'a DeviceBuffer {
+		self.device_buffer
 	}
 }
 

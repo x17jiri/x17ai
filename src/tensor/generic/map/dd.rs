@@ -123,7 +123,17 @@ impl Map for DD {
 	}
 
 	fn span(&self) -> std::ops::Range<usize> {
-		todo!("<DD as Map>::span is not implemented yet");
+		let start = self.offset;
+		let mut elems = 1;
+		let mut len = 1;
+		for dim in self.dims.as_slice() {
+			elems *= dim.size;
+			len += dim.size.wrapping_sub(1).wrapping_mul(dim.stride);
+		}
+		if elems == 0 {
+			len = 0;
+		}
+		start..start + len
 	}
 
 	fn is_contiguous(&self) -> bool {
