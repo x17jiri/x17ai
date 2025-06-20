@@ -401,8 +401,9 @@ pub trait Executor {
 
 	fn swiglu_backward2<'buf>(
 		&self,
-		d_lin: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		d_gate: &ND<2>, // mapping to the same buffer as `d_lin`
+		d_lin_gate: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		size: usize,
+		swapped: bool,
 		lin: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		gate: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		d_out: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,

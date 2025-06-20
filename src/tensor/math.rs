@@ -1246,43 +1246,42 @@ impl<'a> SwiGLUBackwardExpr<'a> {
 		d_gate: &Tensor,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = d_lin.executor();
-		let ew = ElemWise::new([d_lin, d_gate], [self.lin, self.gate, self.d_out])?;
+		let mut ew = ElemWise::new([d_lin, d_gate], [self.lin, self.gate, self.d_out])?;
 
 		let d_lin_buf = d_lin.buf().as_ref();
 		let d_gate_buf = d_gate.buf().as_ref();
+		if std::ptr::eq(d_lin_buf, d_gate_buf) {
+			let swapped = d_lin.map().offset > d_gate.map().offset;
+			if swapped {
+				ew.m = [d_gate, d_lin];
+			}
+			let shift = ew.m[1].map().offset - ew.m[0].map().offset;
+			let size = ew.dims[0].size;
+			ew.dims[0].size = size + shift;
 
-		let mut allow_same_buf = false;
-		if std::ptr::eq(d_lin_buf, d_gate_buf)
-			&& ew.dims[0].strides[0] == ew.dims[0].strides[1]
-			&& ew.dims[1].strides[0] == ew.dims[1].strides[1]
-			&& ew.dims[2].strides[0] == ew.dims[2].strides[1]
-		{
-			let shift = if ew.m[0].map().offset >= ew.m[1].map().offset {
-				ew.m[0].map().offset - ew.m[1].map().offset
-			} else {
-				ew.m[1].map().offset - ew.m[0].map().offset
-			};
-			let width = ew.dims[0].size * ew.dims[0].strides[0];
-			let min_stride1 = shift + width;
+			let min_stride1 = ew.dims[0].size;
 			let min_stride2 = ew.dims[1].size * ew.dims[1].strides[0];
 
-			if shift >= width
+			if shift >= size
+				&& ew.dims[0].strides[0] == 1
+				&& ew.dims[0].strides[0] == ew.dims[0].strides[1]
+				&& ew.dims[1].strides[0] == ew.dims[1].strides[1]
+				&& ew.dims[2].strides[0] == ew.dims[2].strides[1]
 				&& (ew.dims[1].size <= 1
 					|| (ew.dims[1].strides[0] >= min_stride1
 						&& (ew.dims[2].size <= 1 || ew.dims[2].strides[0] >= min_stride2)))
 			{
-				allow_same_buf = true;
+				ew.run(|[d_lin_gate], [lin, gate, d_out]| {
+					executor.swiglu_backward2(d_lin_gate, size, swapped, lin, gate, d_out)?;
+					Ok(())
+				})
+			} else {
+				cold_path();
+				Err(ErrPack {
+					code: TensorOpError::CannotBorrowMut,
+					extra: None,
+				})
 			}
-		}
-
-		if allow_same_buf {
-			let shift = ew.m[1].map().offset.wrapping_sub(ew.m[0].map().offset);
-			ew.run(|[d_lin], [lin, gate, d_out]| {
-				let mut d_gate = d_lin.map().clone();
-				d_gate.offset = d_gate.offset.wrapping_add(shift);
-				executor.swiglu_backward2(d_lin, &d_gate, lin, gate, d_out)?;
-				Ok(())
-			})
 		} else {
 			ew.run(|[d_lin, d_gate], [lin, gate, d_out]| {
 				executor.swiglu_backward(d_lin, d_gate, lin, gate, d_out)?;
