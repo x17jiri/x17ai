@@ -43,6 +43,9 @@ impl SizeAndStride {
 //--------------------------------------------------------------------------------------------------
 
 pub trait Map: Clone {
+	type Deref: Map;
+	fn as_ref(&self) -> &Self::Deref;
+
 	fn ndim(&self) -> usize;
 	fn size(&self, dim: usize) -> usize;
 	fn elems(&self) -> usize;
@@ -62,6 +65,20 @@ pub trait MergeAllDims {
 	type Error;
 
 	fn merge_all_dims(&self) -> Result<Self::Output, Self::Error>;
+}
+
+pub trait SpanDims<const M: usize> {
+	type Output: Map;
+	type Error;
+
+	fn span_dims(&self) -> Result<Self::Output, Self::Error>;
+}
+
+pub trait SpanAllDims {
+	type Output: Map;
+	type Error;
+
+	fn span_all_dims(&self) -> Result<Self::Output, Self::Error>;
 }
 
 pub trait ReshapeLastDim<const M: usize> {
@@ -257,5 +274,158 @@ pub struct InvalidNDimError;
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ElementsOverflowError;
+
+//--------------------------------------------------------------------------------------------------
+
+impl<'a, T> Map for &'a T
+where
+	T: Map,
+{
+	type Deref = T::Deref;
+
+	fn as_ref(&self) -> &Self::Deref {
+		(*self).as_ref()
+	}
+
+	fn ndim(&self) -> usize {
+		(*self).ndim()
+	}
+
+	fn size(&self, dim: usize) -> usize {
+		(*self).size(dim)
+	}
+
+	fn elems(&self) -> usize {
+		(*self).elems()
+	}
+
+	fn span(&self) -> std::ops::Range<usize> {
+		(*self).span()
+	}
+
+	fn is_contiguous(&self) -> bool {
+		(*self).is_contiguous()
+	}
+}
+
+impl<T, const M: usize> MergeDims<M> for &T
+where
+	T: MergeDims<M>,
+{
+	type Output = T::Output;
+	type Error = T::Error;
+
+	fn merge_dims(&self) -> Result<Self::Output, Self::Error> {
+		(*self).merge_dims()
+	}
+}
+
+impl<T> MergeAllDims for &T
+where
+	T: MergeAllDims,
+{
+	type Output = T::Output;
+	type Error = T::Error;
+
+	fn merge_all_dims(&self) -> Result<Self::Output, Self::Error> {
+		(*self).merge_all_dims()
+	}
+}
+
+impl<T, const M: usize> SpanDims<M> for &T
+where
+	T: SpanDims<M>,
+{
+	type Output = T::Output;
+	type Error = T::Error;
+
+	fn span_dims(&self) -> Result<Self::Output, Self::Error> {
+		(*self).span_dims()
+	}
+}
+
+impl<T> SpanAllDims for &T
+where
+	T: SpanAllDims,
+{
+	type Output = T::Output;
+	type Error = T::Error;
+
+	fn span_all_dims(&self) -> Result<Self::Output, Self::Error> {
+		(*self).span_all_dims()
+	}
+}
+
+impl<T, const M: usize> ReshapeLastDim<M> for &T
+where
+	T: ReshapeLastDim<M>,
+{
+	type Output = T::Output;
+	type Error = T::Error;
+
+	fn reshape_last_dim(&self, to_shape: [usize; M]) -> Result<Self::Output, Self::Error> {
+		(*self).reshape_last_dim(to_shape)
+	}
+}
+
+impl<T> IndexToOffset<1> for &T
+where
+	T: IndexToOffset<1>,
+{
+	fn index_to_offset(&self, index: [usize; 1]) -> Result<usize, IndexOutOfBoundsError> {
+		(*self).index_to_offset(index)
+	}
+}
+
+impl<T> Select for &T
+where
+	T: Select,
+{
+	type Output = T::Output;
+	type Error = T::Error;
+
+	fn select(&self, dim: usize, index: usize) -> Result<Self::Output, Self::Error> {
+		(*self).select(dim, index)
+	}
+
+	unsafe fn select_unchecked(&self, dim: usize, index: usize) -> Self::Output {
+		(*self).select_unchecked(dim, index)
+	}
+}
+
+impl<T> Narrow for &T
+where
+	T: Narrow,
+{
+	type Output = T::Output;
+	type Error = T::Error;
+
+	fn narrow(&self, dim: usize, range: UniversalRange) -> Result<Self::Output, Self::Error> {
+		(*self).narrow(dim, range)
+	}
+}
+
+/*impl<T> Transpose for &T
+where
+	T: Transpose,
+{
+	type Output = T::Output;
+	type Error = T::Error;
+
+	fn transposed(self, d0: usize, d1: usize) -> Result<Self::Output, Self::Error> {
+		self.transposed(d0, d1)
+	}
+}*/
+
+impl<T, const K: usize> NDShape<K> for &T
+where
+	T: NDShape<K>,
+{
+	type Error = T::Error;
+
+	fn nd_shape(&self) -> std::result::Result<[usize; K], Self::Error> {
+		(*self).nd_shape()
+	}
+}
 
 //--------------------------------------------------------------------------------------------------

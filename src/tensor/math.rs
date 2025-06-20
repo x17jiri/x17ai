@@ -36,12 +36,7 @@ pub trait MatrixSavable {
 
 //--------------------------------------------------------------------------------------------------
 
-/// In theory, this function could be extended to check if different tensors actually
-/// map to different areas of the same buffer. It could then allow to borrow
-/// the same buffer multiple times, as long as the tensors do not overlap.
-///
-/// However, this would be pretty complex and probably not worth it.
-fn resolve_borrows<Map: generic::map::Map, const C: usize, const M: usize>(
+fn check_borrows<Map: generic::map::Map, const C: usize, const M: usize>(
 	_c_tensors: &[generic::Tensor<Map, DeviceBufferRef<'_>>; C],
 	c_fail: usize,
 	_m_tensors: &mut [generic::Tensor<Map, DeviceBufferRefMut<'_>>; M],
@@ -156,7 +151,7 @@ where
 			)
 		});
 
-		resolve_borrows(&c_tensors, c_fail, &mut m_tensors, fail)?;
+		check_borrows(&c_tensors, c_fail, &mut m_tensors, fail)?;
 
 		for _ in 0..self.dims[2].size {
 			f(&mut m_tensors, &c_tensors)?;
@@ -294,7 +289,7 @@ where
 			)
 		});
 
-		resolve_borrows(&c_tensors, c_fail, &mut m_tensors, fail)?;
+		check_borrows(&c_tensors, c_fail, &mut m_tensors, fail)?;
 
 		for _ in 0..self.dims[1].size {
 			f(&mut m_tensors, &c_tensors)?;

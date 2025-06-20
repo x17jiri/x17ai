@@ -108,6 +108,11 @@ impl DD {
 }
 
 impl Map for DD {
+	type Deref = Self;
+	fn as_ref(&self) -> &Self::Deref {
+		self
+	}
+
 	fn ndim(&self) -> usize {
 		self.dims.len()
 	}

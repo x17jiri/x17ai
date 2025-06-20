@@ -277,18 +277,18 @@ fn fmt_1d<T: Copy>(
 
 fn fmt_Nd<T: Copy>(
 	f: &mut std::fmt::Formatter,
-	tensor: &generic::Tensor<DD, &[T]>,
+	tensor: &generic::Tensor<&DD, &[T]>,
 	indent: usize,
 	fmt_one: &mut impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
 ) -> std::fmt::Result {
 	#[allow(clippy::unwrap_used)]
 	match tensor.ndim() {
 		0 => {
-			let tensor = tensor.conv_map().unwrap();
+			let tensor = tensor.conv_map_ref().unwrap();
 			fmt_0d(f, tensor, fmt_one)?;
 		},
 		1 => {
-			let tensor = tensor.conv_map().unwrap();
+			let tensor = tensor.conv_map_ref().unwrap();
 			fmt_1d(f, tensor, fmt_one)?;
 		},
 		_ => {
@@ -296,7 +296,7 @@ fn fmt_Nd<T: Copy>(
 			writeln!(f, "{indent_str}[")?;
 			for sub_tensor in tensor.iter_along_axis(0).unwrap() {
 				write!(f, "{indent_str}\t")?;
-				fmt_Nd(f, &sub_tensor, indent + 1, fmt_one)?;
+				fmt_Nd(f, &sub_tensor.ref_map(), indent + 1, fmt_one)?;
 				writeln!(f, ",")?;
 			}
 			write!(f, "{indent_str}]")?;
@@ -313,7 +313,7 @@ fn fmt_one<T: FromToF64>(f: &mut std::fmt::Formatter, val: T) -> std::fmt::Resul
 	write!(f, "{val:.7}")
 }
 
-impl<T: FromToF64> std::fmt::Display for generic::Tensor<DD, &[T]> {
+impl<T: FromToF64> std::fmt::Display for generic::Tensor<&DD, &[T]> {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		write!(f, "Tensor(")?;
 		fmt_Nd(f, self, 0, &mut fmt_one)?;

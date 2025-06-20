@@ -40,9 +40,9 @@ impl<M: generic::map::Map> generic::Tensor<M, Rc<device::DeviceBuffer>> {
 	/// `BorrowError` if there is a mutable borrow preventing a shared borrow.
 	pub fn borrow(
 		&self,
-	) -> std::result::Result<generic::Tensor<M, DeviceBufferRef<'_>>, BorrowError> {
+	) -> std::result::Result<generic::Tensor<&M::Deref, DeviceBufferRef<'_>>, BorrowError> {
+		let map = self.map().as_ref();
 		let buf = self.buf().try_borrow()?;
-		let map = self.map().clone();
 		// SAFETY: We only change the type of buffer reference.
 		// So if the map was safe before, it is still safe.
 		Ok(unsafe { generic::Tensor::new_unchecked(map, buf) })
@@ -52,9 +52,9 @@ impl<M: generic::map::Map> generic::Tensor<M, Rc<device::DeviceBuffer>> {
 	/// `BorrowMutError` if there already is any other borrow of the buffer.
 	pub fn borrow_mut(
 		&self,
-	) -> std::result::Result<generic::Tensor<M, DeviceBufferRefMut<'_>>, BorrowMutError> {
+	) -> std::result::Result<generic::Tensor<&M::Deref, DeviceBufferRefMut<'_>>, BorrowMutError> {
+		let map = self.map().as_ref();
 		let buf = self.buf().try_borrow_mut()?;
-		let map = self.map().clone();
 		// SAFETY: We only change the type of buffer reference.
 		// So if the map was safe before, it is still safe.
 		Ok(unsafe { generic::Tensor::new_unchecked(map, buf) })
@@ -63,8 +63,8 @@ impl<M: generic::map::Map> generic::Tensor<M, Rc<device::DeviceBuffer>> {
 
 impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRef<'buf>> {
 	/// Returns a "view" tensor which has a slice `&[T]` as its buffer.
-	pub fn view<T: HasDType>(&self) -> Result<generic::Tensor<M, &[T]>, ViewError> {
-		let map = self.map().clone();
+	pub fn view<T: HasDType>(&self) -> Result<generic::Tensor<&M::Deref, &[T]>, ViewError> {
+		let map = self.map().as_ref();
 		let buf = self.buf();
 		CPUDevice::ensure_can_view::<T>(buf.device_buffer())?;
 		let data = buf.device_data;
@@ -79,8 +79,10 @@ impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRef<'buf>> {
 
 impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRefMut<'buf>> {
 	/// Returns a "view" tensor which has a slice `&mut [T]` as its buffer.
-	pub fn view_mut<T: HasDType>(&mut self) -> Result<generic::Tensor<M, &mut [T]>, ViewError> {
-		let map = self.map().clone();
+	pub fn view_mut<T: HasDType>(
+		&mut self,
+	) -> Result<generic::Tensor<&M::Deref, &mut [T]>, ViewError> {
+		let map = self.map().as_ref();
 		let buf = self.buf();
 		CPUDevice::ensure_can_view::<T>(buf.device_buffer())?;
 		let data = buf.device_data;

@@ -30,6 +30,7 @@
 #![feature(array_try_from_fn)]
 #![feature(maybe_uninit_uninit_array_transpose)]
 #![feature(maybe_uninit_slice)]
+#![feature(associated_type_defaults)]
 // clippy
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]

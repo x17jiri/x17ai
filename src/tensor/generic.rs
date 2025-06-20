@@ -17,7 +17,7 @@ use dim_index::DimIndex;
 use map::{IndexToOffset, Map, MergeAllDims, MergeDims, ReshapeLastDim};
 
 use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;
-use crate::tensor::generic::map::{NDShape, Narrow, Select, Transpose};
+use crate::tensor::generic::map::{NDShape, Narrow, Select, SpanAllDims, SpanDims, Transpose};
 use crate::tensor::generic::universal_range::UniversalRange;
 use crate::{ErrExtra, ErrPack};
 
@@ -97,20 +97,40 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		self.map.elems()
 	}
 
-	pub fn merge_dims<const K: usize>(self) -> Result<Tensor<M::Output, B>, M::Error>
+	pub fn merge_dims<const K: usize>(&self) -> Result<Tensor<M::Output, B>, M::Error>
 	where
 		M: MergeDims<K>,
+		B: Clone,
 	{
 		let new_map = self.map.merge_dims()?;
-		Ok(Tensor { buf: self.buf, map: new_map })
+		Ok(Tensor { buf: self.buf.clone(), map: new_map })
 	}
 
-	pub fn merge_all_dims(self) -> Result<Tensor<M::Output, B>, M::Error>
+	pub fn merge_all_dims(&self) -> Result<Tensor<M::Output, B>, M::Error>
 	where
 		M: MergeAllDims,
+		B: Clone,
 	{
 		let new_map = self.map.merge_all_dims()?;
-		Ok(Tensor { buf: self.buf, map: new_map })
+		Ok(Tensor { buf: self.buf.clone(), map: new_map })
+	}
+
+	pub fn span_dims<const K: usize>(&self) -> Result<Tensor<M::Output, B>, M::Error>
+	where
+		M: SpanDims<K>,
+		B: Clone,
+	{
+		let new_map = self.map.span_dims()?;
+		Ok(Tensor { buf: self.buf.clone(), map: new_map })
+	}
+
+	pub fn span_all_dims(&self) -> Result<Tensor<M::Output, B>, M::Error>
+	where
+		M: SpanAllDims,
+		B: Clone,
+	{
+		let new_map = self.map.span_all_dims()?;
+		Ok(Tensor { buf: self.buf.clone(), map: new_map })
 	}
 
 	pub fn reshape_last_dim<const K: usize>(
@@ -193,6 +213,22 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 	{
 		let map = NewMap::try_from(&self.map)?;
 		Ok(Tensor { map, buf: self.buf.clone() })
+	}
+
+	pub fn conv_map_ref<NewMap>(&self) -> std::result::Result<Tensor<NewMap, B>, NewMap::Error>
+	where
+		NewMap: Map + TryFrom<M>,
+		B: Clone,
+	{
+		let map = NewMap::try_from(self.map.clone())?;
+		Ok(Tensor { map, buf: self.buf.clone() })
+	}
+
+	pub fn ref_map(&self) -> Tensor<&M, B>
+	where
+		B: Clone,
+	{
+		Tensor { map: &self.map, buf: self.buf.clone() }
 	}
 
 	pub fn is_contiguous(&self) -> bool {

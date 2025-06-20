@@ -14,13 +14,30 @@ use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::device::cpu::zip::{zip_elems, zip_vec_reduce, zip_vecs, zip_vecs_varsize};
 use crate::tensor::device::executor::{Executor, ExecutorError, ensure_same_shape};
 use crate::tensor::generic::buffer::Buffer;
-use crate::tensor::generic::map::ND;
+use crate::tensor::generic::map::{ND, SpanDims};
 use crate::tensor::{HasDType, generic};
 
 use super::math::{self, FromToF64};
 use super::rng::Rng;
 
 //--------------------------------------------------------------------------------------------------
+
+pub struct ContiguousOutput<'t, T> {
+	pub tensor: generic::Tensor<&'t ND<2>, &'t mut [T]>,
+}
+
+pub struct ContiguousInput<'t, T> {
+	pub tensor: generic::Tensor<&'t ND<2>, &'t [T]>,
+}
+
+pub struct BroadcastedInput<'t, T> {
+	pub tensor: generic::Tensor<&'t ND<2>, &'t [T]>,
+}
+
+pub enum Input<'t, T> {
+	Contiguous(ContiguousInput<'t, T>),
+	Broadcasted(BroadcastedInput<'t, T>),
+}
 
 fn ensure_expected_shape<B: Buffer>(
 	tensor: &generic::Tensor<ND<2>, B>,
@@ -38,17 +55,14 @@ pub struct FloatExecutor<T: Copy + HasDType + FromToF64> {
 	phantom: std::marker::PhantomData<T>,
 }
 
-impl<T: Copy + HasDType + FromToF64> FloatExecutor<T>
-where
-	T: 'static,
-{
+impl<T: 'static + Copy + HasDType + FromToF64> FloatExecutor<T> {
 	pub fn new(rng: Rc<RefCell<Rng>>) -> Self {
 		Self { rng, phantom: std::marker::PhantomData }
 	}
 
 	pub fn view_contiguous<'t, 'buf>(
 		tensor: &'t generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<generic::Tensor<ND<2>, &'t [T]>, ErrPack<ExecutorError>>
+	) -> Result<ContiguousInput<'t, T>, ErrPack<ExecutorError>>
 	where
 		T: 'static,
 	{
@@ -57,12 +71,12 @@ where
 		if !feature_dim.is_contiguous() {
 			return Err(ExecutorError::not_contiguous());
 		}
-		Ok(tensor.view()?)
+		Ok(ContiguousInput { tensor: tensor.view()? })
 	}
 
 	pub fn view_contiguous_mut<'t, 'buf>(
 		tensor: &'t mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-	) -> Result<generic::Tensor<ND<2>, &'t mut [T]>, ErrPack<ExecutorError>>
+	) -> Result<ContiguousOutput<'t, T>, ErrPack<ExecutorError>>
 	where
 		T: 'static,
 	{
@@ -71,12 +85,12 @@ where
 		if !feature_dim.is_contiguous() {
 			return Err(ExecutorError::not_contiguous());
 		}
-		Ok(tensor.view_mut()?)
+		Ok(ContiguousOutput { tensor: tensor.view_mut()? })
 	}
 
 	pub fn view_contiguous_or_broadcasted<'t, 'buf>(
 		tensor: &'t generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<(generic::Tensor<ND<2>, &'t [T]>, bool), ErrPack<ExecutorError>>
+	) -> Result<Input<'t, T>, ErrPack<ExecutorError>>
 	where
 		T: 'static,
 	{
@@ -89,25 +103,12 @@ where
 		} else {
 			return Err(ExecutorError::not_contiguous_or_broadcasted());
 		};
-		Ok((tensor.view()?, broadcast))
-	}
-
-	pub fn view_contiguous_or_broadcasted_mut<'t, 'buf>(
-		tensor: &'t mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-	) -> Result<(generic::Tensor<ND<2>, &'t mut [T]>, bool), ErrPack<ExecutorError>>
-	where
-		T: 'static,
-	{
-		tensor.ensure_safe()?;
-		let feature_dim = tensor.map().dims[1];
-		let broadcast = if feature_dim.is_contiguous() {
-			false
-		} else if feature_dim.is_broadcasted() {
-			true
+		let view = tensor.view()?;
+		if broadcast {
+			Ok(Input::Broadcasted(BroadcastedInput { tensor: view }))
 		} else {
-			return Err(ExecutorError::not_contiguous_or_broadcasted());
-		};
-		Ok((tensor.view_mut()?, broadcast))
+			Ok(Input::Contiguous(ContiguousInput { tensor: view }))
+		}
 	}
 
 	pub fn nullary<'buf>(
@@ -134,13 +135,13 @@ where
 	{
 		ensure_same_shape([o], [a])?;
 		let o = Self::view_contiguous_mut(o)?;
-		let (a, a_broadcast) = Self::view_contiguous_or_broadcasted(a)?;
+		let a = Self::view_contiguous_or_broadcasted(a)?;
 		unsafe {
-			match a_broadcast {
-				false => {
+			match a {
+				Input::Contiguous(a) => {
 					zip_elems([o], [a], [], |[o], [a], []| f(o, a));
 				},
-				_ => {
+				Input::Broadcasted(a) => {
 					zip_elems([o], [], [a], |[o], [], [a]| f(o, a));
 				},
 			}
@@ -159,20 +160,20 @@ where
 	{
 		ensure_same_shape([o], [a, b])?;
 		let o = Self::view_contiguous_mut(o)?;
-		let (a, a_broadcast) = Self::view_contiguous_or_broadcasted(a)?;
-		let (b, b_broadcast) = Self::view_contiguous_or_broadcasted(b)?;
+		let a = Self::view_contiguous_or_broadcasted(a)?;
+		let b = Self::view_contiguous_or_broadcasted(b)?;
 		unsafe {
-			match (a_broadcast, b_broadcast) {
-				(false, false) => {
+			match (a, b) {
+				(Input::Contiguous(a), Input::Contiguous(b)) => {
 					zip_elems([o], [a, b], [], |[o], [a, b], []| f(o, a, b));
 				},
-				(false, _) => {
+				(Input::Contiguous(a), Input::Broadcasted(b)) => {
 					zip_elems([o], [a], [b], |[o], [a], [b]| f(o, a, b));
 				},
-				(_, false) => {
+				(Input::Broadcasted(a), Input::Contiguous(b)) => {
 					zip_elems([o], [b], [a], |[o], [b], [a]| f(o, a, b));
 				},
-				_ => {
+				(Input::Broadcasted(a), Input::Broadcasted(b)) => {
 					zip_elems([o], [], [a, b], |[o], [], [a, b]| f(o, a, b));
 				},
 			}
@@ -181,10 +182,7 @@ where
 	}
 }
 
-impl<T: HasDType + Copy + FromToF64> Executor for FloatExecutor<T>
-where
-	T: 'static,
-{
+impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 	fn read_bin<'buf>(
 		&self,
 		dst: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
@@ -196,7 +194,7 @@ where
 			zip_vecs([dst], [], |[dst], []| {
 				if result.is_ok() {
 					let ptr = dst.as_mut_ptr().cast();
-					let bytes = dst.len() * std::mem::size_of::<T>();
+					let bytes = std::mem::size_of_val(dst);
 					let slice = std::slice::from_raw_parts_mut(ptr, bytes);
 					result = src.read_exact(slice);
 
@@ -229,7 +227,7 @@ where
 			zip_vecs([], [src], |[], [src]| {
 				if result.is_ok() {
 					let ptr = src.as_ptr().cast();
-					let bytes = src.len() * std::mem::size_of::<T>();
+					let bytes = std::mem::size_of_val(src);
 					let slice = std::slice::from_raw_parts(ptr, bytes);
 					result = dst.write_all(slice);
 				}
@@ -355,7 +353,7 @@ where
 				ab_weight,
 				o.to_f64(),
 				o_weight,
-			))
+			));
 		})
 	}
 
@@ -421,7 +419,7 @@ where
 		let gate = Self::view_contiguous(gate)?;
 		let d_out = Self::view_contiguous(d_out)?;
 
-		let dim_size = d_lin_gate.map().dims[1].size;
+		let dim_size = d_lin_gate.tensor.map().dims[1].size;
 		assert!(size <= dim_size / 2);
 		let (d_lin_start, d_gate_start) =
 			if swapped { (dim_size - size, 0) } else { (0, dim_size - size) };
@@ -570,18 +568,44 @@ where
 
 	fn mm<'buf>(
 		&self,
-		_o: &mut generic::Tensor<ND<3>, DeviceBufferRefMut<'buf>>,
-		_a: &generic::Tensor<ND<3>, DeviceBufferRef<'buf>>,
-		_b: &generic::Tensor<ND<3>, DeviceBufferRef<'buf>>,
-		_scale: f64,
+		o: &mut generic::Tensor<ND<3>, DeviceBufferRefMut<'buf>>,
+		a: &generic::Tensor<ND<3>, DeviceBufferRef<'buf>>,
+		b: &generic::Tensor<ND<3>, DeviceBufferRef<'buf>>,
+		scale: f64,
 	) -> Result<(), ErrPack<ExecutorError>> {
-		//for i in 0..o.map.dims[0].size {
-		//	let o = o.select(0, i)?;
-		//}
+		o.ensure_safe()?;
+		let o_mat_map = ND {
+			dims: [o.map().dims[1], o.map().dims[2]],
+			offset: 0,
+		};
+		let (o_map, o_buf) = o.view_mut::<T>()?.into_parts();
+		let o_map = <generic::map::nd::ND<3> as generic::map::SpanDims<2>>::span_dims(o_map)?;
+		let o = unsafe { generic::Tensor::new_unchecked(&o_map, o_buf) };
+		let o = ContiguousOutput { tensor: o };
 
-		//for m in o.iter_along_axis(0) {
-		//	xyz(&m);
-		//}
+		a.ensure_safe()?;
+		let a_mat_map = ND {
+			dims: [a.map().dims[1], a.map().dims[2]],
+			offset: 0,
+		};
+		let a = a.view::<T>()?.span_dims::<2>()?;
+		let a = ContiguousInput { tensor: a.ref_map() };
+
+		b.ensure_safe()?;
+		let b_mat_map = ND {
+			dims: [b.map().dims[1], b.map().dims[2]],
+			offset: 0,
+		};
+		let b = b.view::<T>()?.span_dims::<2>()?;
+		let b = ContiguousInput { tensor: b.ref_map() };
+
+		unsafe {
+			zip_vecs_varsize([o], [a, b], |[o], [a, b]| {
+				let o = generic::Tensor::new_unchecked(&o_mat_map, o);
+				let a = generic::Tensor::new_unchecked(&a_mat_map, a);
+				let b = generic::Tensor::new_unchecked(&b_mat_map, b);
+			});
+		}
 
 		Ok(()) // TODO
 	}
