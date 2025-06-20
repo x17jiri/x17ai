@@ -14,7 +14,7 @@ use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::device::cpu::zip::{zip_elems, zip_vec_reduce, zip_vecs, zip_vecs_varsize};
 use crate::tensor::device::executor::{Executor, ExecutorError, ensure_same_shape};
 use crate::tensor::generic::buffer::Buffer;
-use crate::tensor::generic::map::{ND, SpanDims};
+use crate::tensor::generic::map::ND;
 use crate::tensor::{HasDType, generic};
 
 use super::math::{self, FromToF64};
@@ -566,6 +566,8 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		Ok(())
 	}
 
+	#[allow(clippy::panic_in_result_fn)]
+	#[allow(clippy::many_single_char_names)]
 	fn mm<'buf>(
 		&self,
 		o: &mut generic::Tensor<ND<3>, DeviceBufferRefMut<'buf>>,
@@ -573,37 +575,51 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		b: &generic::Tensor<ND<3>, DeviceBufferRef<'buf>>,
 		scale: f64,
 	) -> Result<(), ErrPack<ExecutorError>> {
+		// TODO - ensure shapes
+		assert!(o.map().dims[0].size == a.map().dims[0].size);
+		assert!(o.map().dims[0].size == b.map().dims[0].size);
+
+		let m = o.map().dims[1].size;
+		let n = o.map().dims[2].size;
+		let k = a.map().dims[2].size;
+
+		assert!(a.map().dims[1].size == m);
+		assert!(b.map().dims[1].size == k);
+		assert!(b.map().dims[2].size == n);
+
 		o.ensure_safe()?;
-		let o_mat_map = ND {
-			dims: [o.map().dims[1], o.map().dims[2]],
-			offset: 0,
-		};
+		let o_row_stride = o.map().dims[1].stride;
+		let o_col_stride = o.map().dims[2].stride;
 		let (o_map, o_buf) = o.view_mut::<T>()?.into_parts();
 		let o_map = <generic::map::nd::ND<3> as generic::map::SpanDims<2>>::span_dims(o_map)?;
 		let o = unsafe { generic::Tensor::new_unchecked(&o_map, o_buf) };
 		let o = ContiguousOutput { tensor: o };
 
 		a.ensure_safe()?;
-		let a_mat_map = ND {
-			dims: [a.map().dims[1], a.map().dims[2]],
-			offset: 0,
-		};
+		let a_row_stride = a.map().dims[1].stride;
+		let a_col_stride = a.map().dims[2].stride;
 		let a = a.view::<T>()?.span_dims::<2>()?;
 		let a = ContiguousInput { tensor: a.ref_map() };
 
 		b.ensure_safe()?;
-		let b_mat_map = ND {
-			dims: [b.map().dims[1], b.map().dims[2]],
-			offset: 0,
-		};
+		let b_row_stride = b.map().dims[1].stride;
+		let b_col_stride = b.map().dims[2].stride;
 		let b = b.view::<T>()?.span_dims::<2>()?;
 		let b = ContiguousInput { tensor: b.ref_map() };
 
 		unsafe {
 			zip_vecs_varsize([o], [a, b], |[o], [a, b]| {
-				let o = generic::Tensor::new_unchecked(&o_mat_map, o);
-				let a = generic::Tensor::new_unchecked(&a_mat_map, a);
-				let b = generic::Tensor::new_unchecked(&b_mat_map, b);
+				for j in 0..m {
+					for i in 0..n {
+						let t = 0.0;
+						for k in 0..k {
+							let a = a[j * a_row_stride + k];
+							let b = b[k * b_row_stride + i];
+							let t = t + a.to_f64() * b.to_f64();
+						}
+						let t = T::from_f64(t * scale);
+					}
+				}
 			});
 		}
 

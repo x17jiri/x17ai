@@ -55,7 +55,7 @@ pub struct OptParam {
 
 impl OptParam {
 	pub fn new(
-		value: Tensor,
+		value: &Tensor,
 		parts: usize,
 		part_elems: usize,
 	) -> Result<Self, ErrPack<OptimizerError>> {
@@ -73,7 +73,7 @@ impl OptParam {
 		let value = value.merge_all_dims()?; // if fails, tensor is not contiguous
 		let value = value.reshape_last_dim([parts, part_elems])?;
 
-		let grad = grad_reshaped.clone().merge_all_dims()?;
+		let grad = grad_reshaped.merge_all_dims()?;
 		let grad = grad.reshape_last_dim([parts, part_elems])?;
 
 		let m = value.new_empty_like()?;

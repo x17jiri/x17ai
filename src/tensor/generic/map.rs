@@ -231,6 +231,15 @@ pub fn merge_dims(dims: &[SizeAndStride]) -> Result<SizeAndStride, IncompatibleS
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct NotEnoughDimensionsError;
+
+impl From<NotEnoughDimensionsError> for MergeDimsError {
+	fn from(_: NotEnoughDimensionsError) -> Self {
+		Self::NotEnoughDimensions
+	}
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum MergeDimsError {
 	NotEnoughDimensions,
 	IncompatibleStrides,

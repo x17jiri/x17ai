@@ -18,8 +18,8 @@ use crate::tensor::device::executor::{Executor, ExecutorError};
 use crate::tensor::dim_merger::DimMergerError;
 use crate::tensor::generic::map::dd::ReplaceTailError;
 use crate::tensor::generic::map::{
-	DD, ElementsOverflowError, IncompatibleStridesError, MergeDimsError, ReshapeLastDimError,
-	SelectError,
+	DD, ElementsOverflowError, IncompatibleStridesError, MergeDimsError, NotEnoughDimensionsError,
+	ReshapeLastDimError, SelectError,
 };
 use crate::tensor::math::EvaluatesToTensor;
 use crate::{ErrExtra, ErrPack};
@@ -452,6 +452,14 @@ impl From<NewDeviceBufferError> for ErrPack<TensorOpError> {
 	#[inline(never)]
 	fn from(err: NewDeviceBufferError) -> Self {
 		Self { code: err.into(), extra: None }
+	}
+}
+
+impl From<NotEnoughDimensionsError> for TensorOpError {
+	#[cold]
+	#[inline(never)]
+	fn from(_: NotEnoughDimensionsError) -> Self {
+		Self::NotEnoughDimensions
 	}
 }
 

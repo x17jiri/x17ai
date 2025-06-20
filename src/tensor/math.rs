@@ -11,7 +11,7 @@ use crate::ErrPack;
 use crate::tensor::device::DeviceBuffer;
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::dim_merger::{DimMerger, MergedDim};
-use crate::tensor::generic::map::{ND, SizeAndStride};
+use crate::tensor::generic::map::{ND, NotEnoughDimensionsError, SizeAndStride};
 use crate::tensor::{Tensor, TensorOpError, generic};
 use crate::util::array;
 
@@ -20,19 +20,22 @@ use crate::util::array;
 pub trait EvaluatesToTensor {
 	/// Calculate the result of the operation represented by `self`
 	/// and save it into the `to` tensor.
-	///
-	/// # Errors
-	/// See [`TensorOpError`] for possible errors.
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>>;
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>>;
 }
 
-/*
-pub trait MatrixSavable {
+pub trait EvaluatesToMatrix {
 	/// Calculate the result of the operation represented by `self`
 	/// and save it into the `to` matrix.
-	fn eval_to_matrix(self, to: Matrix) -> Result<()>;
+	fn eval_to_matrix(self, to: &Matrix) -> Result<(), ErrPack<TensorOpError>>;
 }
-*/
+
+pub trait EvaluatesToColMatrix {
+	fn eval_to_col_matrix(self, to: &ColMatrix) -> Result<(), ErrPack<TensorOpError>>;
+}
+
+pub trait EvaluatesToRowMatrix {
+	fn eval_to_row_matrix(self, to: &RowMatrix) -> Result<(), ErrPack<TensorOpError>>;
+}
 
 //--------------------------------------------------------------------------------------------------
 
@@ -403,7 +406,7 @@ pub fn zeros() -> ZerosExpr {
 
 impl EvaluatesToTensor for ZerosExpr {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
 		ElemWise::new([to], [])?.run(|[to], []| {
 			executor.zeros(to)?;
@@ -422,7 +425,7 @@ pub fn randn_clamped() -> RandnClampedExpr {
 
 impl EvaluatesToTensor for RandnClampedExpr {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
 		ElemWise::new([to], [])?.run(|[to], []| {
 			executor.randn_clamped(to)?;
@@ -432,7 +435,7 @@ impl EvaluatesToTensor for RandnClampedExpr {
 }
 
 //--------------------------------------------------------------------------------------------------
-
+/*
 impl EvaluatesToTensor for Tensor {
 	#[inline(never)]
 	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
@@ -443,7 +446,7 @@ impl EvaluatesToTensor for Tensor {
 		})
 	}
 }
-
+*/
 //--------------------------------------------------------------------------------------------------
 // Scaling, i.e., multyplication by a scalar.
 
@@ -638,7 +641,7 @@ pub struct AddWeightedExpr<'a> {
 
 impl<'a> EvaluatesToTensor for AddWeightedExpr<'a> {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
 
 		// If any of the inputs overlaps with output, make sure it's 'b'
@@ -744,7 +747,7 @@ pub fn dot<'a>(a: &'a Tensor, b: &'a Tensor) -> DotExpr<'a> {
 
 impl<'a> EvaluatesToTensor for DotExpr<'a> {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
 		VecWise::new([to], [self.a, self.b])?.run(|[to], [a, b]| {
 			executor.dot(to, a, b, self.scale)?;
@@ -769,7 +772,7 @@ pub struct DotAddExpr<'a> {
 
 impl<'a> EvaluatesToTensor for DotAddExpr<'a> {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
 		VecWise::new([to], [self.add.tensor, self.dot.a, self.dot.b])?.run(|[to], [x, a, b]| {
 			executor.dot_add(to, a, b, self.dot.scale, x, self.add.scale)?;
@@ -853,7 +856,7 @@ pub struct MulAddExpr<'a> {
 
 impl<'a> EvaluatesToTensor for MulAddExpr<'a> {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
 		ElemWise::new([to], [self.mul.a, self.mul.b, self.add.tensor])?.run(|[to], [a, b, add]| {
 			executor.mul_add(to, a, b, self.mul.scale, add, self.add.scale)?;
@@ -1024,7 +1027,7 @@ impl<'a> std::ops::Mul<&'a Tensor> for &'a Tensor {
 
 impl<'a> EvaluatesToTensor for MulExpr<'a> {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
 
 		// If any of the inputs overlaps with output, make sure it's 'b'
@@ -1116,7 +1119,7 @@ impl<'a> RSqrt for ScaledTensorExpr<'a> {
 
 impl<'a> EvaluatesToTensor for RSqrtExpr<'a> {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
 		ElemWise::new([to], [self.tensor])?.run(|[to], [input]| {
 			executor.rsqrt(to, input, self.scale, self.eps)?;
@@ -1148,7 +1151,7 @@ impl<'a> RSqrt for DotExpr<'a> {
 
 impl<'a> EvaluatesToTensor for RSqrtDotExpr<'a> {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
 		VecWise::new([to], [self.a, self.b])?.run(|[to], [a, b]| {
 			executor.rsqrt_dot(to, a, b, self.scale, self.eps)?;
@@ -1184,7 +1187,7 @@ impl<'a> LnClamped for &'a Tensor {
 
 impl<'a> EvaluatesToTensor for LnClampedExpr<'a> {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
 		ElemWise::new([to], [self.tensor])?.run(|[to], [input]| {
 			executor.ln_clamped(to, input)?;
@@ -1206,7 +1209,7 @@ pub fn swiglu<'a>(lin: &'a Tensor, gate: &'a Tensor) -> SwiGLUExpr<'a> {
 
 impl<'a> EvaluatesToTensor for SwiGLUExpr<'a> {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
 		ElemWise::new([to], [self.lin, self.gate])?.run(|[to], [lin, gate]| {
 			executor.swiglu(to, lin, gate)?;
@@ -1323,7 +1326,7 @@ pub fn softmax<'a>(tensor: &'a Tensor) -> Softmax<'a> {
 
 impl<'a> EvaluatesToTensor for Softmax<'a> {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
 		let vw = VecWise::new([to], [self.tensor])?;
 		let overlap = vw.are_identical::<0, 0>();
@@ -1343,128 +1346,175 @@ impl<'a> EvaluatesToTensor for Softmax<'a> {
 
 //--------------------------------------------------------------------------------------------------
 
-/*
-pub struct RMSNorm<'a> {
-	pub tensor: &'a Tensor,
-	pub eps: f64,
-	pub scale_storage: Option<&'a Tensor>,
-}
-
-pub fn rms_norm<'a>(tensor: &'a Tensor, eps: f64) -> RMSNorm<'a> {
-	RMSNorm { tensor, eps, scale_storage: None }
-}
-
-impl<'a> RMSNorm<'a> {
-	pub fn scale_storage(self, scale_storage: &'a Tensor) -> RMSNorm<'a> {
-		RMSNorm {
-			scale_storage: Some(scale_storage),
-			..self
-		}
-	}
-}
-
-impl<'a> EvaluatesToTensor for RMSNorm<'a> {
-	#[inline(never)]
-	fn save_to(&self, to: &Tensor) {
-		let executor = to.buffer.executor();
-		if let Some(scale_storage) = self.scale_storage {
-			// TODO - could this broadcast the `scale_storage` tensor?
-			__vec_wise([to, self.tensor, scale_storage], |[to, input, scale_storage]| {
-				executor.rms_norm(&to, &input, self.eps, Some(&scale_storage));
-			});
-		} else {
-			__vec_wise([to, self.tensor], |[to, input]| {
-				executor.rms_norm(&to, &input, self.eps, None);
-			});
-		}
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
 #[derive(Clone, Copy)]
 pub struct Matrix<'a> {
 	pub tensor: &'a Tensor,
 	pub batch_dims: &'a [SizeAndStride],
-
-	pub rows: NonZeroUsize,
-	pub cols: NonZeroUsize,
-	pub row_stride: usize,
-	pub col_stride: usize,
+	pub rows: SizeAndStride,
+	pub cols: SizeAndStride,
 }
 
 impl<'a> Matrix<'a> {
-	pub fn T(self) -> Matrix<'a> {
-		Matrix {
+	pub fn T(self) -> Self {
+		Matrix { rows: self.cols, cols: self.rows, ..self }
+	}
+
+	pub fn assign<Expr: EvaluatesToMatrix>(
+		&self,
+		expr: Expr,
+	) -> Result<(), ErrPack<TensorOpError>> {
+		expr.eval_to_matrix(self)
+	}
+}
+
+pub fn matrix<'a>(tensor: &'a Tensor) -> Result<Matrix<'a>, NotEnoughDimensionsError> {
+	let dims = tensor.map().dims.as_slice();
+	if dims.len() < 2 {
+		cold_path();
+		Err(NotEnoughDimensionsError)
+	} else {
+		Ok(Matrix {
+			tensor,
+			batch_dims: &dims[..dims.len() - 2],
+			rows: dims[dims.len() - 2],
+			cols: dims[dims.len() - 1],
+		})
+	}
+}
+
+#[derive(Clone, Copy)]
+pub struct RowMatrix<'a> {
+	pub tensor: &'a Tensor,
+	pub batch_dims: &'a [SizeAndStride],
+	pub cols: SizeAndStride,
+}
+
+impl<'a> RowMatrix<'a> {
+	pub fn T(self) -> ColMatrix<'a> {
+		ColMatrix {
+			tensor: self.tensor,
+			batch_dims: self.batch_dims,
 			rows: self.cols,
-			cols: self.rows,
-			row_stride: self.col_stride,
-			col_stride: self.row_stride,
-			..self
 		}
 	}
-}
 
-pub fn matrix<'a>(tensor: &'a Tensor) -> Matrix<'a> {
-	assert!(tensor.ndim() >= 2);
-	let rows = tensor.dim(-2);
-	let cols = tensor.dim(-1);
-	Matrix {
-		tensor,
-		batch_dims: tensor.dim_slice(..tensor.ndim() - 2),
-		rows: NonZeroUsize::new(rows.size).unwrap(),
-		cols: NonZeroUsize::new(cols.size).unwrap(),
-		row_stride: rows.stride,
-		col_stride: cols.stride,
+	pub fn assign<Expr: EvaluatesToRowMatrix>(
+		&self,
+		expr: Expr,
+	) -> Result<(), ErrPack<TensorOpError>> {
+		expr.eval_to_row_matrix(self)
 	}
 }
 
-pub fn row_matrix<'a>(tensor: &'a Tensor) -> Matrix<'a> {
-	assert!(tensor.ndim() >= 1);
-	let rows = SizeAndStride { size: 1, stride: 0 };
-	let cols = tensor.dim(-1);
-	Matrix {
-		tensor,
-		batch_dims: tensor.dim_slice(..tensor.ndim() - 1),
-		rows: NonZeroUsize::new(rows.size).unwrap(),
-		cols: NonZeroUsize::new(cols.size).unwrap(),
-		row_stride: rows.stride,
-		col_stride: cols.stride,
+pub fn row_matrix<'a>(tensor: &'a Tensor) -> Result<RowMatrix<'a>, NotEnoughDimensionsError> {
+	let dims = tensor.map().dims.as_slice();
+	#[allow(clippy::len_zero)]
+	if dims.len() < 1 {
+		cold_path();
+		Err(NotEnoughDimensionsError)
+	} else {
+		Ok(RowMatrix {
+			tensor,
+			batch_dims: &dims[..dims.len() - 1],
+			cols: dims[dims.len() - 1],
+		})
 	}
 }
 
-pub fn col_matrix<'a>(tensor: &'a Tensor) -> Matrix<'a> {
-	assert!(tensor.ndim() >= 1);
-	let rows = tensor.dim(-1);
-	let cols = SizeAndStride { size: 1, stride: 0 };
-	Matrix {
-		tensor,
-		batch_dims: tensor.dim_slice(..tensor.ndim() - 1),
-		rows: NonZeroUsize::new(rows.size).unwrap(),
-		cols: NonZeroUsize::new(cols.size).unwrap(),
-		row_stride: rows.stride,
-		col_stride: cols.stride,
+#[derive(Clone, Copy)]
+pub struct ColMatrix<'a> {
+	pub tensor: &'a Tensor,
+	pub batch_dims: &'a [SizeAndStride],
+	pub rows: SizeAndStride,
+}
+
+impl<'a> ColMatrix<'a> {
+	pub fn T(self) -> RowMatrix<'a> {
+		RowMatrix {
+			tensor: self.tensor,
+			batch_dims: self.batch_dims,
+			cols: self.rows,
+		}
+	}
+
+	pub fn assign<Expr: EvaluatesToColMatrix>(
+		&self,
+		expr: Expr,
+	) -> Result<(), ErrPack<TensorOpError>> {
+		expr.eval_to_col_matrix(self)
+	}
+}
+
+pub fn column_matrix<'a>(tensor: &'a Tensor) -> Result<ColMatrix<'a>, NotEnoughDimensionsError> {
+	let dims = tensor.map().dims.as_slice();
+	#[allow(clippy::len_zero)]
+	if dims.len() < 1 {
+		cold_path();
+		Err(NotEnoughDimensionsError)
+	} else {
+		Ok(ColMatrix {
+			tensor,
+			batch_dims: &dims[..dims.len() - 1],
+			rows: dims[dims.len() - 1],
+		})
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct MatMul<'a> {
-	pub a: Matrix<'a>,
-	pub b: Matrix<'a>,
+pub struct ColTimesRow<'a> {
+	pub col: ColMatrix<'a>,
+	pub row: RowMatrix<'a>,
 	pub scale: f64,
 }
 
-pub fn mm<'a>(a: Matrix<'a>, b: Matrix<'a>) -> MatMul<'a> {
-	MatMul { a, b, scale: 1.0 }
+pub struct MatTimesCol<'a> {
+	pub mat: Matrix<'a>,
+	pub col: ColMatrix<'a>,
+	pub scale: f64,
 }
 
-impl<'a> MatMul<'a> {
-	pub fn scale(self, scale: f64) -> MatMul<'a> {
-		MatMul { scale: self.scale * scale, ..self }
+impl<'a> std::ops::Mul<RowMatrix<'a>> for ColMatrix<'a> {
+	type Output = ColTimesRow<'a>;
+
+	fn mul(self, row: RowMatrix<'a>) -> Self::Output {
+		ColTimesRow { col: self, row, scale: 1.0 }
 	}
 }
 
+impl<'a> std::ops::Mul<ColMatrix<'a>> for Matrix<'a> {
+	type Output = MatTimesCol<'a>;
+
+	fn mul(self, col: ColMatrix<'a>) -> Self::Output {
+		MatTimesCol { mat: self, col, scale: 1.0 }
+	}
+}
+
+impl<'a> EvaluatesToMatrix for ColTimesRow<'a> {
+	#[inline(never)]
+	fn eval_to_matrix(self, to: &Matrix) -> Result<(), ErrPack<TensorOpError>> {
+		// TODO
+		1
+	}
+}
+
+impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
+	#[inline(never)]
+	fn eval_to_col_matrix(self, to: &ColMatrix) -> Result<(), ErrPack<TensorOpError>> {
+		if self.mat.batch_dims.is_empty() {
+			// TODO - optimize
+			let dims = DimMerger::merge::<3>([to.batch_dims, self.col.batch_dims]);
+		} else {
+			// no optimizaiton
+		}
+
+		1
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+/*
 struct MatMulPrep<'a> {
 	to: Matrix<'a>,
 	a: Matrix<'a>,

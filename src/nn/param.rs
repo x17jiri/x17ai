@@ -66,7 +66,7 @@ impl Param {
 
 	#[inline(never)]
 	fn init_opt_param(&mut self) -> Result<&mut OptParam, ErrPack<OptimizerError>> {
-		let opt_param = OptParam::new(self.value.clone(), self.parts, self.part_elems)?;
+		let opt_param = OptParam::new(&self.value, self.parts, self.part_elems)?;
 		self.opt_param = Some(opt_param);
 
 		// We just assigned `self.opt_param`, so `unwrap()` can never fail.
