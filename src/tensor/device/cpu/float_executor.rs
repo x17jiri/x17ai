@@ -6,11 +6,12 @@
 //------------------------------------------------------------------------------
 
 use std::cell::RefCell;
+use std::hint::cold_path;
 use std::rc::Rc;
 
 use crate::ErrPack;
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
-use crate::tensor::device::cpu::zip::{zip_elems, zip_vec_reduce, zip_vecs};
+use crate::tensor::device::cpu::zip::{zip_elems, zip_vec_reduce, zip_vecs, zip_vecs_varsize};
 use crate::tensor::device::executor::{Executor, ExecutorError, ensure_same_shape};
 use crate::tensor::generic::buffer::Buffer;
 use crate::tensor::generic::map::ND;
@@ -408,28 +409,37 @@ where
 		gate: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		d_out: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 	) -> Result<(), ErrPack<ExecutorError>> {
-		// TODO - ensure shapes
+		let shape = ensure_same_shape([], [lin, gate, d_out])?;
+		let expected_shape = [d_lin_gate.map().dims[0].size, shape[1]];
+		if shape != expected_shape {
+			cold_path();
+			return Err(ExecutorError::invalid_shape(shape, expected_shape));
+		}
 
 		let d_lin_gate = Self::view_contiguous_mut(d_lin_gate)?;
 		let lin = Self::view_contiguous(lin)?;
 		let gate = Self::view_contiguous(gate)?;
 		let d_out = Self::view_contiguous(d_out)?;
 
-		let dim_size = d_lin_gate.map().dims[0].size;
+		let dim_size = d_lin_gate.map().dims[1].size;
 		assert!(size <= dim_size / 2);
 		let (d_lin_start, d_gate_start) =
 			if swapped { (dim_size - size, 0) } else { (0, dim_size - size) };
 		unsafe {
-			zip_vecs([d_lin_gate], [lin, gate, d_out], |[d_lin_gate], [lin, gate, d_out]| {
-				for i in 0..size {
-					let lin = lin[i].to_f64();
-					let gate = gate[i].to_f64();
-					let d_out = d_out[i].to_f64();
-					let (d_lin_val, d_gate_val) = math::swiglu_backward(lin, gate, d_out);
-					d_lin_gate[d_lin_start + i] = T::from_f64(d_lin_val);
-					d_lin_gate[d_gate_start + i] = T::from_f64(d_gate_val);
-				}
-			});
+			zip_vecs_varsize(
+				[d_lin_gate],
+				[lin, gate, d_out],
+				|[d_lin_gate], [lin, gate, d_out]| {
+					for i in 0..size {
+						let lin = lin[i].to_f64();
+						let gate = gate[i].to_f64();
+						let d_out = d_out[i].to_f64();
+						let (d_lin_val, d_gate_val) = math::swiglu_backward(lin, gate, d_out);
+						d_lin_gate[d_lin_start + i] = T::from_f64(d_lin_val);
+						d_lin_gate[d_gate_start + i] = T::from_f64(d_gate_val);
+					}
+				},
+			);
 		}
 		Ok(())
 	}

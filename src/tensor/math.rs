@@ -161,7 +161,7 @@ where
 		for _ in 0..self.dims[2].size {
 			f(&mut m_tensors, &c_tensors)?;
 
-			for j in 0..M {
+			for j in 0..O {
 				unsafe { m_tensors[j].map_mut().offset += self.dims[2].strides[j] }
 			}
 			for j in 0..K {
@@ -1251,13 +1251,12 @@ impl<'a> SwiGLUBackwardExpr<'a> {
 		let d_lin_buf = d_lin.buf().as_ref();
 		let d_gate_buf = d_gate.buf().as_ref();
 		if std::ptr::eq(d_lin_buf, d_gate_buf) {
+			let size = ew.dims[0].size;
 			let swapped = d_lin.map().offset > d_gate.map().offset;
 			if swapped {
 				ew.m = [d_gate, d_lin];
 			}
 			let shift = ew.m[1].map().offset - ew.m[0].map().offset;
-			let size = ew.dims[0].size;
-			ew.dims[0].size = size + shift;
 
 			let min_stride1 = ew.dims[0].size;
 			let min_stride2 = ew.dims[1].size * ew.dims[1].strides[0];
@@ -1272,6 +1271,7 @@ impl<'a> SwiGLUBackwardExpr<'a> {
 						&& (ew.dims[2].size <= 1 || ew.dims[2].strides[0] >= min_stride2)))
 			{
 				ew.run(|[d_lin_gate], [lin, gate, d_out]| {
+					unsafe { d_lin_gate.map_mut().dims[1].size = size + shift };
 					executor.swiglu_backward2(d_lin_gate, size, swapped, lin, gate, d_out)?;
 					Ok(())
 				})

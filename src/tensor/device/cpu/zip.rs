@@ -104,6 +104,42 @@ pub unsafe fn zip_vecs<T: Copy, const O: usize, const C: usize>(
 	}
 }
 
+pub unsafe fn zip_vecs_varsize<T: Copy, const O: usize, const C: usize>(
+	o: [generic::Tensor<ND<2>, &mut [T]>; O],
+	c: [generic::Tensor<ND<2>, &[T]>; C],
+	mut f: impl FnMut([&mut [T]; O], [&[T]; C]),
+) {
+	let count = if let Some(t) = o.first() {
+		t.map().dims[0].size
+	} else if let Some(t) = c.first() {
+		t.map().dims[0].size
+	} else {
+		return;
+	};
+
+	debug_assert!(o.iter().all(|t| t.ensure_safe().is_ok()));
+	debug_assert!(c.iter().all(|t| t.ensure_safe().is_ok()));
+
+	debug_assert!(o.iter().all(|t| t.map().dims[0].size == count));
+	debug_assert!(c.iter().all(|t| t.map().dims[0].size == count));
+
+	let o = o.map(|t| {
+		let (map, buf) = t.into_parts();
+		(buf.as_mut_ptr().add(map.offset), map.dims[0].stride, map.dims[1].size)
+	});
+	let c = c.map(|t| {
+		let (map, buf) = t.into_parts();
+		(buf.as_ptr().add(map.offset), map.dims[0].stride, map.dims[1].size)
+	});
+
+	for j in 0..count {
+		let o =
+			o.map(|(ptr, stride, len)| std::slice::from_raw_parts_mut(ptr.add(j * stride), len));
+		let c = c.map(|(ptr, stride, len)| std::slice::from_raw_parts(ptr.add(j * stride), len));
+		f(o, c);
+	}
+}
+
 #[allow(clippy::many_single_char_names)]
 pub unsafe fn zip_vec_reduce<T: Copy, const C: usize>(
 	r: generic::Tensor<ND<2>, &mut [T]>,
