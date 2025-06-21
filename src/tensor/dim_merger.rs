@@ -10,13 +10,18 @@ use std::hint::cold_path;
 use crate::tensor::generic::map::SizeAndStride;
 
 const MAX_SPLIT: usize = 3;
-
-const MERGER_DIMS: usize = MAX_SPLIT + 2;
+const MERGER_DIMS: usize = MAX_SPLIT + 1;
 
 #[derive(Clone, Copy)]
 pub struct MergedDim<const N: usize> {
 	pub size: usize,
 	pub strides: [usize; N],
+}
+
+impl<const N: usize> MergedDim<N> {
+	pub fn get(&self, i: usize) -> SizeAndStride {
+		SizeAndStride { size: self.size, stride: self.strides[i] }
+	}
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -28,26 +33,22 @@ pub enum DimMergerError {
 pub struct DimMerger<const N: usize> {
 	/// We order dimensions from smallest to largest stride.
 	/// This is the reverse order of how they are stored in a Tensor.
-	dims_increasing: [MergedDim<N>; MERGER_DIMS],
-	ndim: usize,
+	dims: [MergedDim<N>; MERGER_DIMS],
+	free_dims: usize,
 }
 
 impl<const N: usize> DimMerger<N> {
-	pub fn new(
-		inputs: [&[SizeAndStride]; N],
-		max_dims: usize,
-	) -> Result<DimMerger<N>, DimMergerError> {
+	pub fn new(inputs: [&[SizeAndStride]; N], first_dim: usize) -> Result<Self, DimMergerError> {
 		// Get the max len of the input slices, or 0 if N == 0.
 		let ndim = inputs.iter().map(|inp| inp.len()).max().unwrap_or(0);
 
 		// Initialize the first dimension with strides == 1.
 		// This way if the real first dimension is contiguous, we will extend the initial
 		// value and not take the cold path in the loop.
-		let mut merger = DimMerger {
-			dims_increasing: [MergedDim { size: 1, strides: [1; N] }; MERGER_DIMS],
-			ndim: 1,
-		};
-		let mut prev_dim = &mut merger.dims_increasing[0];
+		let mut dims = [MergedDim { size: 1, strides: [1; N] }; MERGER_DIMS];
+		let mut prev_dim_pos = MERGER_DIMS - 1;
+		debug_assert!(prev_dim_pos >= first_dim);
+		let mut prev_dim = &mut dims[prev_dim_pos];
 
 		for index_from_end in 1..=ndim {
 			// Get input data. Some inputs may be shorter. We extend them with dummy dimensions.
@@ -85,13 +86,12 @@ impl<const N: usize> DimMerger<N> {
 					// Slow path: Add a new dimension
 					cold_path();
 					if prev_dim.size != 1 {
-						let max_dims = max_dims.min(MERGER_DIMS);
-						if merger.ndim >= max_dims {
+						if prev_dim_pos <= first_dim {
 							cold_path();
 							return Err(DimMergerError::TooManyMergedDimensions);
 						}
-						prev_dim = &mut merger.dims_increasing[merger.ndim];
-						merger.ndim += 1;
+						prev_dim_pos -= 1;
+						prev_dim = &mut dims[prev_dim_pos];
 					}
 					*prev_dim = next_dim;
 				}
@@ -109,38 +109,19 @@ impl<const N: usize> DimMerger<N> {
 			}
 		}
 
-		Ok(merger)
-	}
-
-	pub fn split<const K: usize>(&self) -> (&[MergedDim<N>; K], &[MergedDim<N>])
-	where
-		// In `::new()`, we initialize `dims_increasing` with MAX_SPLIT elements,
-		// so we know there is at least that many guaranteed.
-		[(); MAX_SPLIT - K]:,
-	{
-		unsafe {
-			let result = <&[MergedDim<N>; K]>::try_from(self.dims_increasing.get_unchecked(..K))
-				.unwrap_unchecked();
-			let rest_len = self.ndim.saturating_sub(K);
-			let rest = self.dims_increasing.get_unchecked(K..K + rest_len);
-			(result, rest)
-		}
+		Ok(Self { dims, free_dims: prev_dim_pos })
 	}
 
 	pub fn merge<const K: usize>(
 		inputs: [&[SizeAndStride]; N],
 	) -> Result<[MergedDim<N>; K], DimMergerError>
 	where
-		// In `::new()`, we initialize `dims_increasing` with MAX_SPLIT elements,
+		// In `::new()`, we initialize `dims` with MAX_SPLIT elements,
 		// so we know there is at least that many guaranteed.
 		[(); MAX_SPLIT - K]:,
 	{
+		let first_dim = MERGER_DIMS - K;
 		let merger = Self::new(inputs, K)?;
-		let result = unsafe {
-			<&[MergedDim<N>; K]>::try_from(merger.dims_increasing.get_unchecked(..K))
-				.unwrap_unchecked()
-		};
-
-		Ok(*result)
+		Ok(std::array::from_fn(|i| merger.dims[first_dim + i]))
 	}
 }
