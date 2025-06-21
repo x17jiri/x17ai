@@ -11,8 +11,9 @@ use std::rc::Rc;
 use crate::ErrPack;
 use crate::nn::model_context::ModelContext;
 use crate::nn::param::Param;
-use crate::tensor::math::matrix;
+use crate::tensor::math::{self, Scalable, col, mat};
 use crate::tensor::{self, DType, Tensor, TensorOpError};
+use crate::util::LossyInto;
 
 use super::{EvalContext, Layer};
 
@@ -41,15 +42,15 @@ impl Linear {
 		outputs: usize,
 		dtype: DType,
 		ctx: &mut ModelContext,
-	) -> Result<Linear, ErrPack<TensorOpError>> {
-		Ok(Linear {
+	) -> Result<Self, ErrPack<TensorOpError>> {
+		Ok(Self {
 			input_shape: [inputs],
 			output_shape: [outputs],
 
 			weights: ctx.new_param(&[outputs, inputs], dtype)?,
 
-			forward_scale: 1.0 / (inputs as f64).sqrt(),
-			backward_scale: 1.0 / (outputs as f64).sqrt(),
+			forward_scale: 1.0 / inputs.lossy_into().sqrt(),
+			backward_scale: 1.0 / outputs.lossy_into().sqrt(),
 		})
 	}
 
@@ -108,7 +109,7 @@ impl Layer for Linear {
 	}
 
 	fn collect_named_params(&self, prefix: &str, f: &mut dyn FnMut(String, Rc<RefCell<Param>>)) {
-		f(format!("{}.weights", prefix), self.weights.clone());
+		f(format!("{prefix}.weights"), self.weights.clone());
 	}
 
 	#[inline(never)]
@@ -118,24 +119,24 @@ impl Layer for Linear {
 		ctx: &mut EvalContext,
 	) -> Result<Tensor, ErrPack<TensorOpError>> {
 		// [..., inputs] -> [..., outputs]
-		let out = inp.new_replace_tail(1, &self.output_shape);
+		let out = inp.new_replace_tail(1, &self.output_shape)?;
 
-		let weights = self.weights.borrow();
-
-		let w = matrix(weights.value())?;
-		let i = col_matrix(&inp);
-		let o = col_matrix(&out);
-		tensor::math::mm(w, i).scale(self.forward_scale).save_to(o);
+		let w = self.weights.borrow();
+		let w = mat(w.value())?;
+		let i = col(&inp)?;
+		let o = col(&out)?;
+		o.assign((w * i).scale(self.forward_scale))?;
 
 		if ctx.is_training() {
 			ctx.tensors.set([inp]);
 		}
 
-		out
+		Ok(out)
 	}
 
-	fn randomize(&mut self) {
-		tensor::math::randn().save_to(self.weights.borrow().value());
+	fn randomize(&mut self) -> std::result::Result<(), ErrPack<tensor::TensorOpError>> {
+		let w = self.weights.borrow();
+		w.value().assign(math::randn_clamped())
 	}
 
 	fn backward(

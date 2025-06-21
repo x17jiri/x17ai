@@ -1345,7 +1345,7 @@ impl<'a> Matrix<'a> {
 	}
 }
 
-pub fn matrix<'a>(tensor: &'a Tensor) -> Result<Matrix<'a>, NotEnoughDimensionsError> {
+pub fn mat<'a>(tensor: &'a Tensor) -> Result<Matrix<'a>, NotEnoughDimensionsError> {
 	let dims = tensor.map().dims.as_slice();
 	if dims.len() < 2 {
 		cold_path();
@@ -1384,7 +1384,7 @@ impl<'a> RowMatrix<'a> {
 	}
 }
 
-pub fn row_matrix<'a>(tensor: &'a Tensor) -> Result<RowMatrix<'a>, NotEnoughDimensionsError> {
+pub fn row<'a>(tensor: &'a Tensor) -> Result<RowMatrix<'a>, NotEnoughDimensionsError> {
 	let dims = tensor.map().dims.as_slice();
 	#[allow(clippy::len_zero)]
 	if dims.len() < 1 {
@@ -1423,7 +1423,7 @@ impl<'a> ColMatrix<'a> {
 	}
 }
 
-pub fn col_matrix<'a>(tensor: &'a Tensor) -> Result<ColMatrix<'a>, NotEnoughDimensionsError> {
+pub fn col<'a>(tensor: &'a Tensor) -> Result<ColMatrix<'a>, NotEnoughDimensionsError> {
 	let dims = tensor.map().dims.as_slice();
 	#[allow(clippy::len_zero)]
 	if dims.len() < 1 {
@@ -1446,10 +1446,32 @@ pub struct ColTimesRow<'a> {
 	pub scale: f64,
 }
 
+impl<'a> Scalable for ColTimesRow<'a> {
+	type Output = Self;
+	fn scale(self, scale: f64) -> Self::Output {
+		Self {
+			col: self.col,
+			row: self.row,
+			scale: self.scale * scale,
+		}
+	}
+}
+
 pub struct MatTimesCol<'a> {
 	pub mat: Matrix<'a>,
 	pub col: ColMatrix<'a>,
 	pub scale: f64,
+}
+
+impl<'a> Scalable for MatTimesCol<'a> {
+	type Output = Self;
+	fn scale(self, scale: f64) -> Self::Output {
+		Self {
+			mat: self.mat,
+			col: self.col,
+			scale: self.scale * scale,
+		}
+	}
 }
 
 impl<'a> std::ops::Mul<RowMatrix<'a>> for ColMatrix<'a> {

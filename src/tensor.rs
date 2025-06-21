@@ -461,6 +461,15 @@ impl From<NotEnoughDimensionsError> for TensorOpError {
 	}
 }
 
+impl From<NotEnoughDimensionsError> for ErrPack<TensorOpError> {
+	fn from(_: NotEnoughDimensionsError) -> Self {
+		Self {
+			code: TensorOpError::NotEnoughDimensions,
+			extra: None,
+		}
+	}
+}
+
 impl From<MergeDimsError> for TensorOpError {
 	#[cold]
 	#[inline(never)]
