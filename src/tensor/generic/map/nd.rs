@@ -153,7 +153,7 @@ where
 			cold_path();
 			0
 		} else {
-			span.iter().map(|dim| (dim.size - 1) * dim.stride).product::<usize>() + 1
+			span.iter().map(|dim| (dim.size - 1) * dim.stride).sum::<usize>() + 1
 		};
 		Ok(ND {
 			dims: std::array::from_fn(|i| {

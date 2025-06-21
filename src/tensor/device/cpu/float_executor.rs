@@ -611,13 +611,14 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 			zip_vecs_varsize([o], [a, b], |[o], [a, b]| {
 				for j in 0..m {
 					for i in 0..n {
-						let t = 0.0;
+						let mut t = 0.0;
 						for k in 0..k {
-							let a = a[j * a_row_stride + k];
-							let b = b[k * b_row_stride + i];
-							let t = t + a.to_f64() * b.to_f64();
+							let a = a[j * a_row_stride + k * a_col_stride];
+							let b = b[k * b_row_stride + i * b_col_stride];
+							t += a.to_f64() * b.to_f64();
 						}
 						let t = T::from_f64(t * scale);
+						o[j * o_row_stride + i * o_col_stride] = t;
 					}
 				}
 			});

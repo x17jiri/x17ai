@@ -8,8 +8,8 @@
 use std::hint::cold_path;
 
 use crate::ErrPack;
-use crate::tensor::device::DeviceBuffer;
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
+use crate::tensor::device::{DeviceBuffer, executor};
 use crate::tensor::dim_merger::{DimMerger, MergedDim};
 use crate::tensor::generic::map::{ND, NotEnoughDimensionsError, SizeAndStride};
 use crate::tensor::{Tensor, TensorOpError, generic};
@@ -132,7 +132,7 @@ where
 	/// So we don't have to use all the `c` tensors processed during `::new()`.
 	pub fn run<const O: usize, const K: usize>(
 		&self,
-		mut f: impl FnMut(
+		f: impl FnMut(
 			&mut [generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>; O],
 			&[generic::Tensor<ND<2>, DeviceBufferRef<'a>>; K],
 		) -> Result<(), ErrPack<TensorOpError>>,
@@ -1227,24 +1227,24 @@ impl<'a> SwiGLUBackwardExpr<'a> {
 		let d_lin_buf = d_lin.buf().as_ref();
 		let d_gate_buf = d_gate.buf().as_ref();
 		if std::ptr::eq(d_lin_buf, d_gate_buf) {
-			let size = ew.dims[0].size;
+			let size = ew.dims[2].size;
 			let swapped = d_lin.map().offset > d_gate.map().offset;
 			if swapped {
 				ew.m = [d_gate, d_lin];
 			}
 			let shift = ew.m[1].map().offset - ew.m[0].map().offset;
 
-			let min_stride1 = ew.dims[0].size;
+			let min_stride1 = ew.dims[2].size;
 			let min_stride2 = ew.dims[1].size * ew.dims[1].strides[0];
 
 			if shift >= size
-				&& ew.dims[0].strides[0] == 1
-				&& ew.dims[0].strides[0] == ew.dims[0].strides[1]
-				&& ew.dims[1].strides[0] == ew.dims[1].strides[1]
+				&& ew.dims[2].strides[0] == 1
 				&& ew.dims[2].strides[0] == ew.dims[2].strides[1]
+				&& ew.dims[1].strides[0] == ew.dims[1].strides[1]
+				&& ew.dims[0].strides[0] == ew.dims[0].strides[1]
 				&& (ew.dims[1].size <= 1
 					|| (ew.dims[1].strides[0] >= min_stride1
-						&& (ew.dims[2].size <= 1 || ew.dims[2].strides[0] >= min_stride2)))
+						&& (ew.dims[0].size <= 1 || ew.dims[0].strides[0] >= min_stride2)))
 			{
 				ew.run(|[d_lin_gate], [lin, gate, d_out]| {
 					unsafe { d_lin_gate.map_mut().dims[1].size = size + shift };
@@ -1423,7 +1423,7 @@ impl<'a> ColMatrix<'a> {
 	}
 }
 
-pub fn column_matrix<'a>(tensor: &'a Tensor) -> Result<ColMatrix<'a>, NotEnoughDimensionsError> {
+pub fn col_matrix<'a>(tensor: &'a Tensor) -> Result<ColMatrix<'a>, NotEnoughDimensionsError> {
 	let dims = tensor.map().dims.as_slice();
 	#[allow(clippy::len_zero)]
 	if dims.len() < 1 {
@@ -1467,17 +1467,18 @@ impl<'a> std::ops::Mul<ColMatrix<'a>> for Matrix<'a> {
 		MatTimesCol { mat: self, col, scale: 1.0 }
 	}
 }
-/*
+
 impl<'a> EvaluatesToMatrix for ColTimesRow<'a> {
 	#[inline(never)]
 	fn eval_to_matrix(self, to: &Matrix) -> Result<(), ErrPack<TensorOpError>> {
-		// TODO
-		1
+		unsafe {
+			let Self { col, row, scale } = self;
+			1;
+		}
+		todo!();
 	}
 }
-*/
 
-/*
 impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 	#[inline(never)]
 	fn eval_to_col_matrix(self, to: &ColMatrix) -> Result<(), ErrPack<TensorOpError>> {
@@ -1490,34 +1491,73 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 			let to_buf = DeviceBufferRefMut::new_unsafe(to.tensor.buf().as_ref(), &mut fail);
 			check_borrows(c_fail, fail)?;
 
+			let (batch_dim, mut m_tensors, mut c_tensors);
 			if mat.batch_dims.is_empty() {
-				// TODO - optimize
-				let dims = DimMerger::merge::<3>([to.batch_dims, col.batch_dims]);
-				let mat = generic::Tensor::new_unchecked(
+				let dims = DimMerger::merge::<3>([to.batch_dims, col.batch_dims])?;
+				batch_dim = MergedDim {
+					size: dims[0].size,
+					strides: [dims[0].strides[0], 0, dims[0].strides[1]],
+				};
+				c_tensors = [
+					generic::Tensor::new_unchecked(
+						ND {
+							dims: [SizeAndStride { size: 1, stride: 0 }, mat.rows, mat.cols],
+							offset: mat.tensor.map().offset,
+						},
+						mat_buf,
+					),
+					generic::Tensor::new_unchecked(
+						ND {
+							dims: [dims[1].get(1), col.rows, dims[2].get(1)],
+							offset: col.tensor.map().offset,
+						},
+						col_buf,
+					),
+				];
+				m_tensors = [generic::Tensor::new_unchecked(
 					ND {
-						dims: [SizeAndStride { size: 1, stride: 0 }, mat.rows, mat.cols],
-						offset: mat.tensor.map().offset,
+						dims: [dims[1].get(0), to.rows, dims[2].get(0)],
+						offset: to.tensor.map().offset,
 					},
-					mat_buf,
-				);
-				let col = generic::Tensor::new_unchecked(
-					ND {
-						dims: [
-							SizeAndStride
-							col.rows
-							],
-						offset: col.tensor.map().offset,
-					},
-					col_buf,
-				);
+					to_buf,
+				)];
 			} else {
-				// no optimizaiton
+				let dims = DimMerger::merge::<2>([to.batch_dims, mat.batch_dims, col.batch_dims])?;
+				batch_dim = dims[0];
+
+				c_tensors = [
+					generic::Tensor::new_unchecked(
+						ND {
+							dims: [dims[1].get(1), mat.rows, mat.cols],
+							offset: mat.tensor.map().offset,
+						},
+						mat_buf,
+					),
+					generic::Tensor::new_unchecked(
+						ND {
+							dims: [dims[1].get(2), col.rows, SizeAndStride { size: 1, stride: 0 }],
+							offset: col.tensor.map().offset,
+						},
+						col_buf,
+					),
+				];
+				m_tensors = [generic::Tensor::new_unchecked(
+					ND {
+						dims: [dims[1].get(0), to.rows, SizeAndStride { size: 1, stride: 0 }],
+						offset: to.tensor.map().offset,
+					},
+					to_buf,
+				)];
 			}
+
+			let executor = to.tensor.executor();
+			run_batch::<3, 1, 2, 1, 2>(batch_dim, &mut m_tensors, &mut c_tensors, |[o], [a, b]| {
+				executor.mm(o, a, b, scale)?;
+				Ok(())
+			})
 		}
-		1
 	}
 }
-*/
 
 //--------------------------------------------------------------------------------------------------
 

@@ -162,12 +162,36 @@ use x17ai::tensor::device::cpu::CPUDevice;
 use x17ai::tensor::device::executor::Executor;
 use x17ai::tensor::generic::Tensor;
 use x17ai::tensor::generic::map::ND;
+use x17ai::tensor::math::{col_matrix, matrix};
 use x17ai::tensor::{Device, HasDType};
 
 fn main() {
 	let dev = CPUDevice::new();
-	let (map, elems) = ND::new(&[3, 4, 5]).unwrap();
-	let buf = dev.clone().new_buffer(f32::dtype, elems).unwrap();
+	let lit = Tensor::literal_factory::<f32>(dev.clone());
+	let a = lit
+		.new_2d(&[
+			[-1.5924, 0.7530, -0.2418, 0.3416],
+			[0.1225, -1.1488, 0.3338, -0.8102],
+			[-0.3426, 1.7670, 0.0596, -0.1160],
+		])
+		.unwrap();
+	let b = lit
+		.new_1d(&[
+			-0.5254, //
+			2.2503,  //
+			-0.2887, //
+			-0.2313, //
+		])
+		.unwrap();
+	let c = Tensor::new_empty_on(&[3], f32::dtype, dev.clone()).unwrap();
+	col_matrix(&c).unwrap().assign(matrix(&a).unwrap() * col_matrix(&b).unwrap()).unwrap();
+
+	println!("a = {}", a.borrow().unwrap().view::<f32>().unwrap());
+	println!("b = {}", b.borrow().unwrap().view::<f32>().unwrap());
+	println!("c = {}", c.borrow().unwrap().view::<f32>().unwrap());
+
+	/*	let (map, elems) = ND::new(&[3, 4, 5]).unwrap();
+	let buf = dev.clone().new_buffer(f32::dtype, elems).unwrap();*/
 	/*	let t = Tensor { map, buf: buf.as_ref() };
 	let exec = &dev.f32_executor;
 	exec.mm(&t, &t, &t, 1.0).unwrap();*/
