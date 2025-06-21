@@ -162,7 +162,7 @@ use x17ai::tensor::device::cpu::CPUDevice;
 use x17ai::tensor::device::executor::Executor;
 use x17ai::tensor::generic::Tensor;
 use x17ai::tensor::generic::map::ND;
-use x17ai::tensor::math::{col_matrix, matrix};
+use x17ai::tensor::math::{col_matrix, matrix, row_matrix};
 use x17ai::tensor::{Device, HasDType};
 
 fn main() {
@@ -185,6 +185,19 @@ fn main() {
 		.unwrap();
 	let c = Tensor::new_empty_on(&[3], f32::dtype, dev.clone()).unwrap();
 	col_matrix(&c).unwrap().assign(matrix(&a).unwrap() * col_matrix(&b).unwrap()).unwrap();
+
+	let a = lit
+		.new_1d(&[
+			-1.2854, //
+			0.3690,  //
+			0.0352,  //
+			0.4591,  //
+			-0.2684, //
+		])
+		.unwrap();
+	let b = lit.new_1d(&[0.3259, -2.2469, 0.8345, 0.6012]).unwrap();
+	let c = Tensor::new_empty_on(&[5, 4], f32::dtype, dev.clone()).unwrap();
+	matrix(&c).unwrap().assign(col_matrix(&a).unwrap() * row_matrix(&b).unwrap()).unwrap();
 
 	println!("a = {}", a.borrow().unwrap().view::<f32>().unwrap());
 	println!("b = {}", b.borrow().unwrap().view::<f32>().unwrap());

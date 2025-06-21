@@ -6,15 +6,13 @@
 //------------------------------------------------------------------------------
 
 use std::cell::RefCell;
-use std::intrinsics::cold_path;
 use std::rc::Rc;
 
+use crate::ErrPack;
 use crate::nn::model_context::ModelContext;
 use crate::nn::param::Param;
-use crate::tensor::math::{
-	MatrixAccumulable, MatrixSavable, Savable, col_matrix, matrix, row_matrix,
-};
-use crate::tensor::{self, DType, Tensor};
+use crate::tensor::math::matrix;
+use crate::tensor::{self, DType, Tensor, TensorOpError};
 
 use super::{EvalContext, Layer};
 
@@ -38,18 +36,24 @@ pub struct Linear {
 }
 
 impl Linear {
-	pub fn new(inputs: usize, outputs: usize, dtype: DType, ctx: &mut ModelContext) -> Linear {
-		Linear {
+	pub fn new(
+		inputs: usize,
+		outputs: usize,
+		dtype: DType,
+		ctx: &mut ModelContext,
+	) -> Result<Linear, ErrPack<TensorOpError>> {
+		Ok(Linear {
 			input_shape: [inputs],
 			output_shape: [outputs],
 
-			weights: ctx.new_param(&[outputs, inputs], dtype),
+			weights: ctx.new_param(&[outputs, inputs], dtype)?,
 
 			forward_scale: 1.0 / (inputs as f64).sqrt(),
 			backward_scale: 1.0 / (outputs as f64).sqrt(),
-		}
+		})
 	}
 
+	/*
 	fn calc_d_weights(&self, d_out: Tensor, inp: Tensor) {
 		if d_out.ndim() <= 2 {
 			let (d_o, i) = if d_out.ndim() == 2 {
@@ -87,6 +91,7 @@ impl Linear {
 		tensor::math::mm(w.T(), d_o).scale(self.backward_scale).save_to(d_i);
 		d_inp
 	}
+	*/
 }
 
 impl Layer for Linear {
@@ -107,13 +112,17 @@ impl Layer for Linear {
 	}
 
 	#[inline(never)]
-	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Tensor {
+	fn forward(
+		&self,
+		inp: Tensor,
+		ctx: &mut EvalContext,
+	) -> Result<Tensor, ErrPack<TensorOpError>> {
 		// [..., inputs] -> [..., outputs]
 		let out = inp.new_replace_tail(1, &self.output_shape);
 
 		let weights = self.weights.borrow();
 
-		let w = matrix(weights.value());
+		let w = matrix(weights.value())?;
 		let i = col_matrix(&inp);
 		let o = col_matrix(&out);
 		tensor::math::mm(w, i).scale(self.forward_scale).save_to(o);
@@ -129,21 +138,31 @@ impl Layer for Linear {
 		tensor::math::randn().save_to(self.weights.borrow().value());
 	}
 
-	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Tensor {
-		let [inp] = ctx.tensors.get();
+	fn backward(
+		&self,
+		d_out: Tensor,
+		ctx: &mut EvalContext,
+	) -> Result<Tensor, ErrPack<tensor::TensorOpError>> {
+		/*let [inp] = ctx.tensors.get();
 		let d_inp = self.calc_d_inp(&d_out);
 		self.calc_d_weights(d_out, inp);
-		d_inp
+		d_inp*/
+		todo!();
 	}
 
-	fn backward_finish(&self, d_out: Tensor, ctx: &mut EvalContext) {
-		let [inp] = ctx.tensors.get();
-		self.calc_d_weights(d_out, inp);
+	fn backward_finish(
+		&self,
+		d_out: Tensor,
+		ctx: &mut EvalContext,
+	) -> Result<(), ErrPack<tensor::TensorOpError>> {
+		/*let [inp] = ctx.tensors.get();
+		self.calc_d_weights(d_out, inp);*/
+		todo!();
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
-
+/*
 /// Multihead Linear Layer.
 ///
 /// It works similarly to linear layer, but the same inputs are transformed
@@ -159,7 +178,11 @@ pub struct MultiheadLinear {
 
 impl MultiheadLinear {
 	pub fn new(
-		inputs: usize, outputs: usize, heads: usize, dtype: DType, ctx: &mut ModelContext,
+		inputs: usize,
+		outputs: usize,
+		heads: usize,
+		dtype: DType,
+		ctx: &mut ModelContext,
 	) -> MultiheadLinear {
 		let mut linear = Linear::new(inputs, heads * outputs, dtype, ctx);
 		linear.weights.borrow_mut().partition(heads, inputs * outputs);
@@ -216,3 +239,4 @@ impl Layer for MultiheadLinear {
 }
 
 //--------------------------------------------------------------------------------------------------
+*/

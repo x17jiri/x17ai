@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 //pub mod attention;
-//pub mod linear;
+pub mod linear;
 pub mod rms_norm;
 pub mod skip_connection;
 pub mod softmax;

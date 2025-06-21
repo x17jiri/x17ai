@@ -1472,10 +1472,48 @@ impl<'a> EvaluatesToMatrix for ColTimesRow<'a> {
 	#[inline(never)]
 	fn eval_to_matrix(self, to: &Matrix) -> Result<(), ErrPack<TensorOpError>> {
 		unsafe {
+			const TO: usize = 0;
+			const COL: usize = 1;
+			const ROW: usize = 2;
+
 			let Self { col, row, scale } = self;
-			1;
+
+			let dims = DimMerger::merge::<2>([to.batch_dims, col.batch_dims, row.batch_dims])?;
+			let batch_dim = dims[0];
+
+			let mut c_fail = 0;
+			let mut c_tensors = [
+				generic::Tensor::new_unchecked(
+					ND {
+						dims: [dims[1].get(COL), col.rows, SizeAndStride { size: 1, stride: 0 }],
+						offset: col.tensor.map().offset,
+					},
+					DeviceBufferRef::new_unsafe(col.tensor.buf().as_ref(), &mut c_fail),
+				),
+				generic::Tensor::new_unchecked(
+					ND {
+						dims: [dims[1].get(ROW), SizeAndStride { size: 1, stride: 0 }, row.cols],
+						offset: row.tensor.map().offset,
+					},
+					DeviceBufferRef::new_unsafe(row.tensor.buf().as_ref(), &mut c_fail),
+				),
+			];
+			let mut fail = c_fail;
+			let mut m_tensors = [generic::Tensor::new_unchecked(
+				ND {
+					dims: [dims[1].get(TO), to.rows, to.cols],
+					offset: to.tensor.map().offset,
+				},
+				DeviceBufferRefMut::new_unsafe(to.tensor.buf().as_ref(), &mut fail),
+			)];
+			check_borrows(c_fail, fail)?;
+
+			let executor = to.tensor.executor();
+			run_batch::<3, 1, 2, 1, 2>(batch_dim, &mut m_tensors, &mut c_tensors, |[o], [a, b]| {
+				executor.mm(o, a, b, scale)?;
+				Ok(())
+			})
 		}
-		todo!();
 	}
 }
 
@@ -1493,22 +1531,29 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 
 			let (batch_dim, mut m_tensors, mut c_tensors);
 			if mat.batch_dims.is_empty() {
+				const TO: usize = 0;
+				const COL: usize = 1;
+
 				let dims = DimMerger::merge::<3>([to.batch_dims, col.batch_dims])?;
 				batch_dim = MergedDim {
 					size: dims[0].size,
-					strides: [dims[0].strides[0], 0, dims[0].strides[1]],
+					strides: [dims[0].strides[TO], 0, dims[0].strides[COL]],
 				};
 				c_tensors = [
 					generic::Tensor::new_unchecked(
 						ND {
-							dims: [SizeAndStride { size: 1, stride: 0 }, mat.rows, mat.cols],
+							dims: [
+								SizeAndStride { size: dims[1].size, stride: 0 },
+								mat.rows,
+								mat.cols,
+							],
 							offset: mat.tensor.map().offset,
 						},
 						mat_buf,
 					),
 					generic::Tensor::new_unchecked(
 						ND {
-							dims: [dims[1].get(1), col.rows, dims[2].get(1)],
+							dims: [dims[1].get(COL), col.rows, dims[2].get(COL)],
 							offset: col.tensor.map().offset,
 						},
 						col_buf,
@@ -1516,26 +1561,38 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 				];
 				m_tensors = [generic::Tensor::new_unchecked(
 					ND {
-						dims: [dims[1].get(0), to.rows, dims[2].get(0)],
+						dims: [dims[1].get(TO), to.rows, dims[2].get(TO)],
 						offset: to.tensor.map().offset,
 					},
 					to_buf,
 				)];
 			} else {
+				const TO: usize = 0;
+				const MAT: usize = 1;
+				const COL: usize = 2;
+
 				let dims = DimMerger::merge::<2>([to.batch_dims, mat.batch_dims, col.batch_dims])?;
 				batch_dim = dims[0];
 
 				c_tensors = [
 					generic::Tensor::new_unchecked(
 						ND {
-							dims: [dims[1].get(1), mat.rows, mat.cols],
+							dims: [
+								dims[1].get(MAT), //
+								mat.rows,
+								mat.cols,
+							],
 							offset: mat.tensor.map().offset,
 						},
 						mat_buf,
 					),
 					generic::Tensor::new_unchecked(
 						ND {
-							dims: [dims[1].get(2), col.rows, SizeAndStride { size: 1, stride: 0 }],
+							dims: [
+								dims[1].get(COL), //
+								col.rows,
+								SizeAndStride { size: 1, stride: 0 },
+							],
 							offset: col.tensor.map().offset,
 						},
 						col_buf,
@@ -1543,7 +1600,11 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 				];
 				m_tensors = [generic::Tensor::new_unchecked(
 					ND {
-						dims: [dims[1].get(0), to.rows, SizeAndStride { size: 1, stride: 0 }],
+						dims: [
+							dims[1].get(TO), //
+							to.rows,
+							SizeAndStride { size: 1, stride: 0 },
+						],
 						offset: to.tensor.map().offset,
 					},
 					to_buf,

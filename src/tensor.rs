@@ -456,8 +456,6 @@ impl From<NewDeviceBufferError> for ErrPack<TensorOpError> {
 }
 
 impl From<NotEnoughDimensionsError> for TensorOpError {
-	#[cold]
-	#[inline(never)]
 	fn from(_: NotEnoughDimensionsError) -> Self {
 		Self::NotEnoughDimensions
 	}
