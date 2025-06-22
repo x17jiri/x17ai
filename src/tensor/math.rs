@@ -413,10 +413,10 @@ impl EvaluatesToTensor for RandnClampedExpr {
 }
 
 //--------------------------------------------------------------------------------------------------
-/*
-impl EvaluatesToTensor for Tensor {
+
+impl EvaluatesToTensor for &Tensor {
 	#[inline(never)]
-	fn eval_to_tensor(&self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
 		ElemWise::new([to], [self])?.run(|[to], [input]| {
 			executor.copy(to, input)?;
@@ -424,7 +424,7 @@ impl EvaluatesToTensor for Tensor {
 		})
 	}
 }
-*/
+
 //--------------------------------------------------------------------------------------------------
 // Scaling, i.e., multyplication by a scalar.
 

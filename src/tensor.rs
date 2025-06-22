@@ -581,4 +581,18 @@ impl From<SelectError> for ErrPack<TensorOpError> {
 	}
 }
 
+impl From<ViewError> for ErrPack<TensorOpError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: ViewError) -> Self {
+		Self {
+			code: TensorOpError::ExecutorError,
+			extra: Some(Box::new(ErrExtra {
+				message: String::new(),
+				nested: Some(Box::new(ErrPack::<ExecutorError>::from(err))),
+			})),
+		}
+	}
+}
+
 //--------------------------------------------------------------------------------------------------

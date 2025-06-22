@@ -20,7 +20,7 @@ use crate::tensor::generic::map::{
 use crate::tensor::generic::universal_range::UniversalRange;
 use crate::util::array;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct ND<const N: usize> {
 	pub dims: [SizeAndStride; N],
 	pub offset: usize,

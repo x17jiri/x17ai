@@ -575,6 +575,11 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		b: &generic::Tensor<ND<3>, DeviceBufferRef<'buf>>,
 		scale: f64,
 	) -> Result<(), ErrPack<ExecutorError>> {
+		println!("float_executor::mm: scale = {}", scale);
+		println!("a shape = {:?}", a.map().dims);
+		println!("b shape = {:?}", b.map().dims);
+		println!("o shape = {:?}", o.map().dims);
+
 		// TODO - ensure shapes
 		assert!(o.map().dims[0].size == a.map().dims[0].size);
 		assert!(o.map().dims[0].size == b.map().dims[0].size);

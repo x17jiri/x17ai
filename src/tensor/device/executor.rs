@@ -6,6 +6,7 @@
 //------------------------------------------------------------------------------
 
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
+use crate::tensor::device::cpu::ViewError;
 use crate::tensor::generic::map::ND;
 use crate::tensor::generic::{self, TensorUnsafeError};
 use crate::{ErrExtra, ErrPack};
@@ -100,6 +101,28 @@ impl From<ErrPack<TensorUnsafeError>> for ErrPack<ExecutorError> {
 impl From<std::io::Error> for ErrPack<ExecutorError> {
 	fn from(err: std::io::Error) -> Self {
 		ExecutorError::io_error(err)
+	}
+}
+
+impl From<ViewError> for ExecutorError {
+	#[cold]
+	#[inline(never)]
+	fn from(err: ViewError) -> Self {
+		match err {
+			ViewError::InvalidDType => Self::InvalidDType,
+			ViewError::NotOnCPUDevice => Self::InvalidDevice,
+		}
+	}
+}
+
+impl From<ViewError> for ErrPack<ExecutorError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: ViewError) -> Self {
+		Self {
+			code: ExecutorError::from(err),
+			extra: None,
+		}
 	}
 }
 

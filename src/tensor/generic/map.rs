@@ -18,7 +18,7 @@ use crate::tensor::generic::universal_range::UniversalRange;
 
 //--------------------------------------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub struct SizeAndStride {
 	pub size: usize,
 	pub stride: usize,

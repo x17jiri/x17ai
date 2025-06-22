@@ -35,28 +35,6 @@ pub enum ViewError {
 	NotOnCPUDevice,
 }
 
-impl From<ViewError> for ExecutorError {
-	#[cold]
-	#[inline(never)]
-	fn from(err: ViewError) -> Self {
-		match err {
-			ViewError::InvalidDType => ExecutorError::InvalidDType,
-			ViewError::NotOnCPUDevice => ExecutorError::InvalidDevice,
-		}
-	}
-}
-
-impl From<ViewError> for ErrPack<ExecutorError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: ViewError) -> Self {
-		ErrPack {
-			code: ExecutorError::from(err),
-			extra: None,
-		}
-	}
-}
-
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
