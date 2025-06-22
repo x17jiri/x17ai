@@ -10,6 +10,7 @@ use std::rc::Rc;
 
 use crate::ErrPack;
 use crate::nn::eval_context::EvalContext;
+use crate::nn::optimizer::OptimizerError;
 use crate::nn::param::Param;
 use crate::tensor::math::{RSqrt, Sum};
 use crate::tensor::{Tensor, TensorOpError};
@@ -93,7 +94,7 @@ impl Layer for RMSNorm {
 		&self,
 		d_out: Tensor,
 		ctx: &mut EvalContext,
-	) -> Result<Tensor, ErrPack<TensorOpError>> {
+	) -> Result<Tensor, ErrPack<OptimizerError>> {
 		match self.gradient_mode {
 			RMSNormGradientMode::Precise => {
 				let [out, scale] = ctx.tensors.get();
@@ -119,14 +120,5 @@ impl Layer for RMSNorm {
 			},
 			RMSNormGradientMode::StraightThrough => Ok(d_out),
 		}
-	}
-
-	fn backward_finish(
-		&self,
-		_d_out: Tensor,
-		_ctx: &mut EvalContext,
-	) -> Result<(), ErrPack<TensorOpError>> {
-		// no parameters to update
-		Ok(())
 	}
 }

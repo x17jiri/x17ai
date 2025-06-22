@@ -29,6 +29,12 @@ pub trait EvaluatesToMatrix {
 	fn eval_to_matrix(self, to: &Matrix) -> Result<(), ErrPack<TensorOpError>>;
 }
 
+pub trait AccumulatesToMatrix {
+	/// Calculate the result of the operation represented by `self`
+	/// and save it into the `to` matrix.
+	fn acc_to_matrix(self, to: &Matrix) -> Result<(), ErrPack<TensorOpError>>;
+}
+
 pub trait EvaluatesToColMatrix {
 	fn eval_to_col_matrix(self, to: &ColMatrix) -> Result<(), ErrPack<TensorOpError>>;
 }
@@ -1343,6 +1349,10 @@ impl<'a> Matrix<'a> {
 	) -> Result<(), ErrPack<TensorOpError>> {
 		expr.eval_to_matrix(self)
 	}
+
+	pub fn acc<Expr: AccumulatesToMatrix>(&self, expr: Expr) -> Result<(), ErrPack<TensorOpError>> {
+		expr.acc_to_matrix(self)
+	}
 }
 
 pub fn mat<'a>(tensor: &'a Tensor) -> Result<Matrix<'a>, NotEnoughDimensionsError> {
@@ -1536,6 +1546,13 @@ impl<'a> EvaluatesToMatrix for ColTimesRow<'a> {
 				Ok(())
 			})
 		}
+	}
+}
+
+impl<'a> AccumulatesToMatrix for ColTimesRow<'a> {
+	#[inline(never)]
+	fn acc_to_matrix(self, _to: &Matrix) -> Result<(), ErrPack<TensorOpError>> {
+		todo!("implement `acc_to_matrix` for `ColTimesRow`");
 	}
 }
 

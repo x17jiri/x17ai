@@ -10,6 +10,7 @@ use std::rc::Rc;
 
 use crate::ErrPack;
 use crate::nn::eval_context::EvalContext;
+use crate::nn::optimizer::OptimizerError;
 use crate::nn::param::Param;
 use crate::tensor::math::{LnClamped, sum_all};
 use crate::tensor::{Tensor, TensorOpError};
@@ -64,16 +65,8 @@ impl Layer for SoftmaxCrossEntropy {
 		&self,
 		d_out: Tensor,
 		ctx: &mut EvalContext,
-	) -> Result<Tensor, ErrPack<TensorOpError>> {
+	) -> Result<Tensor, ErrPack<OptimizerError>> {
 		self.softmax.backward(d_out, ctx)
-	}
-
-	fn backward_finish(
-		&self,
-		d_out: Tensor,
-		ctx: &mut EvalContext,
-	) -> Result<(), ErrPack<TensorOpError>> {
-		self.softmax.backward_finish(d_out, ctx)
 	}
 
 	fn as_loss_function(&self) -> Option<&dyn LossFunction> {
@@ -87,7 +80,7 @@ impl LossFunction for SoftmaxCrossEntropy {
 		out: Tensor,
 		expected_out: Tensor,
 		_ctx: &mut EvalContext,
-	) -> Result<Tensor, ErrPack<TensorOpError>> {
+	) -> Result<Tensor, ErrPack<OptimizerError>> {
 		let d_inp = out.new_empty_like()?;
 		d_inp.assign(&out - &expected_out)?;
 		Ok(d_inp)

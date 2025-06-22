@@ -10,6 +10,7 @@ use std::rc::Rc;
 
 use crate::ErrPack;
 use crate::nn::eval_context::EvalContext;
+use crate::nn::optimizer::OptimizerError;
 use crate::nn::param::Param;
 use crate::tensor::{Tensor, TensorOpError, math};
 
@@ -73,7 +74,7 @@ impl Layer for SwiGLU {
 		&self,
 		d_out: Tensor,
 		ctx: &mut EvalContext,
-	) -> Result<Tensor, ErrPack<TensorOpError>> {
+	) -> Result<Tensor, ErrPack<OptimizerError>> {
 		let [lin, gate] = ctx.tensors.get();
 
 		let d_inp = d_out.new_replace_tail(1, &self.input_shape)?;
@@ -83,14 +84,5 @@ impl Layer for SwiGLU {
 		math::swiglu_backward(&d_out, &lin, &gate).eval_to_tensors(&d_lin, &d_gate)?;
 
 		Ok(d_inp)
-	}
-
-	fn backward_finish(
-		&self,
-		_d_out: Tensor,
-		_ctx: &mut EvalContext,
-	) -> Result<(), ErrPack<TensorOpError>> {
-		// no parameters to update
-		Ok(())
 	}
 }

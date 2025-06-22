@@ -208,7 +208,7 @@ impl From<TensorOpError> for OptimizerError {
 	}
 }
 
-impl From<ErrPack<TensorOpError>> for ErrPack<OptimizerError> {
+impl<T: Into<ErrPack<TensorOpError>>> From<T> for ErrPack<OptimizerError> {
 	#[cold]
 	#[inline(never)]
 	fn from(err: ErrPack<TensorOpError>) -> Self {
@@ -217,51 +217,6 @@ impl From<ErrPack<TensorOpError>> for ErrPack<OptimizerError> {
 			extra: Some(Box::new(ErrExtra {
 				message: String::new(),
 				nested: Some(err.into()),
-			})),
-		}
-	}
-}
-
-impl From<MergeDimsError> for ErrPack<OptimizerError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: MergeDimsError) -> Self {
-		let t: ErrPack<TensorOpError> = err.into();
-		Self {
-			code: OptimizerError::TensorOp,
-			extra: Some(Box::new(ErrExtra {
-				message: String::new(),
-				nested: Some(t.into()),
-			})),
-		}
-	}
-}
-
-impl From<IncompatibleStridesError> for ErrPack<OptimizerError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: IncompatibleStridesError) -> Self {
-		let t: ErrPack<TensorOpError> = err.into();
-		Self {
-			code: OptimizerError::TensorOp,
-			extra: Some(Box::new(ErrExtra {
-				message: String::new(),
-				nested: Some(t.into()),
-			})),
-		}
-	}
-}
-
-impl From<ReshapeLastDimError> for ErrPack<OptimizerError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: ReshapeLastDimError) -> Self {
-		let t: ErrPack<TensorOpError> = err.into();
-		Self {
-			code: OptimizerError::TensorOp,
-			extra: Some(Box::new(ErrExtra {
-				message: String::new(),
-				nested: Some(t.into()),
 			})),
 		}
 	}

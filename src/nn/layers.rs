@@ -20,6 +20,7 @@ pub mod swiglu;
 mod tests;
 
 use crate::ErrPack;
+use crate::nn::optimizer::OptimizerError;
 use crate::tensor::{Tensor, TensorOpError};
 
 use super::{EvalContext, Param};
@@ -64,16 +65,7 @@ pub trait Layer {
 		&self,
 		d_out: Tensor,
 		ctx: &mut EvalContext,
-	) -> Result<Tensor, ErrPack<TensorOpError>>;
-
-	/// This function is similar to `backward()`. It should calculate derivatives of parameters
-	/// used by the layer, but it doesn't calculate derivatives that could be used by previous
-	/// layers. So it would typically only be used for the first layer in a model.
-	fn backward_finish(
-		&self,
-		d_out: Tensor,
-		ctx: &mut EvalContext,
-	) -> Result<(), ErrPack<TensorOpError>>;
+	) -> Result<Tensor, ErrPack<OptimizerError>>;
 
 	fn as_loss_function(&self) -> Option<&dyn LossFunction> {
 		None
@@ -89,7 +81,7 @@ pub trait LossFunction: Layer {
 		out: Tensor,
 		expected_out: Tensor,
 		ctx: &mut EvalContext,
-	) -> Result<Tensor, ErrPack<TensorOpError>>;
+	) -> Result<Tensor, ErrPack<OptimizerError>>;
 
 	fn loss(&self, out: Tensor, expected_out: Tensor) -> Result<f64, ErrPack<TensorOpError>>;
 }

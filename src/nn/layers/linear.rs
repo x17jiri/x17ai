@@ -6,12 +6,14 @@
 //------------------------------------------------------------------------------
 
 use std::cell::RefCell;
+use std::hint::cold_path;
 use std::rc::Rc;
 
 use crate::ErrPack;
 use crate::nn::model_context::ModelContext;
+use crate::nn::optimizer::OptimizerError;
 use crate::nn::param::Param;
-use crate::tensor::math::{self, Scalable, col, mat};
+use crate::tensor::math::{self, Scalable, col, mat, row};
 use crate::tensor::{self, DType, Tensor, TensorOpError};
 use crate::util::LossyInto;
 
@@ -53,46 +55,6 @@ impl Linear {
 			backward_scale: 1.0 / outputs.lossy_into().sqrt(),
 		})
 	}
-
-	/*
-	fn calc_d_weights(&self, d_out: Tensor, inp: Tensor) {
-		if d_out.ndim() <= 2 {
-			let (d_o, i) = if d_out.ndim() == 2 {
-				(matrix(&d_out).T(), matrix(&inp))
-			} else {
-				(col_matrix(&d_out), row_matrix(&inp))
-			};
-
-			let d_w = tensor::math::mm(d_o, i).scale(1.0);
-
-			let mut weights = self.weights.borrow_mut();
-			weights.update_grad(|grad, already_have_grad| {
-				if already_have_grad {
-					cold_path();
-					d_w.acc_to(matrix(grad), 1.0, 1.0);
-				} else {
-					d_w.save_to(matrix(grad));
-				}
-			});
-		} else {
-			cold_path();
-			todo!("merge batch dimensions");
-		}
-	}
-
-	fn calc_d_inp(&self, d_out: &Tensor) -> Tensor {
-		// [... , outputs] -> [... , inputs]
-		let d_inp = d_out.new_replace_tail(1, &self.input_shape);
-		let d_i = col_matrix(&d_inp);
-
-		let d_o = col_matrix(d_out);
-
-		let w = self.weights.borrow();
-		let w = matrix(w.value());
-		tensor::math::mm(w.T(), d_o).scale(self.backward_scale).save_to(d_i);
-		d_inp
-	}
-	*/
 }
 
 impl Layer for Linear {
@@ -143,22 +105,34 @@ impl Layer for Linear {
 		&self,
 		d_out: Tensor,
 		ctx: &mut EvalContext,
-	) -> Result<Tensor, ErrPack<tensor::TensorOpError>> {
-		/*let [inp] = ctx.tensors.get();
-		let d_inp = self.calc_d_inp(&d_out);
-		self.calc_d_weights(d_out, inp);
-		d_inp*/
-		todo!();
-	}
+	) -> Result<Tensor, ErrPack<OptimizerError>> {
+		let [inp] = ctx.tensors.get();
 
-	fn backward_finish(
-		&self,
-		d_out: Tensor,
-		ctx: &mut EvalContext,
-	) -> Result<(), ErrPack<tensor::TensorOpError>> {
-		/*let [inp] = ctx.tensors.get();
-		self.calc_d_weights(d_out, inp);*/
-		todo!();
+		let mut weights = self.weights.borrow_mut();
+		let w = mat(weights.value())?;
+
+		// d_inp
+		let d_o = col(&d_out)?;
+		let d_i = (w.T() * d_o).scale(self.backward_scale);
+
+		// [... , outputs] -> [... , inputs]
+		let d_inp = d_out.new_replace_tail(1, &self.input_shape)?;
+		col(&d_inp)?.assign(d_i)?;
+
+		// d_w
+		let i = row(&inp)?;
+		let d_w = (d_o * i).scale(1.0);
+		weights.update_grad(|grad, already_have_grad| {
+			let grad = mat(grad)?;
+			if already_have_grad {
+				cold_path();
+				grad.acc(d_w)
+			} else {
+				grad.assign(d_w)
+			}
+		})?;
+
+		Ok(d_inp)
 	}
 }
 
@@ -222,13 +196,6 @@ impl Layer for MultiheadLinear {
 
 	fn randomize(&mut self) {
 		self.linear.randomize();
-	}
-
-	fn backward_finish(&self, d_out: Tensor, ctx: &mut EvalContext) {
-		// [..., heads, outputs] -> [..., heads * outputs]
-		let d_out = d_out.merge_dims::<2>();
-
-		self.linear.backward_finish(d_out, ctx)
 	}
 
 	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Tensor {

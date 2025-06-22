@@ -10,6 +10,7 @@ use std::rc::Rc;
 
 use crate::ErrPack;
 use crate::nn::eval_context::EvalContext;
+use crate::nn::optimizer::OptimizerError;
 use crate::nn::param::Param;
 use crate::tensor::{Tensor, TensorOpError};
 
@@ -70,16 +71,9 @@ impl<Nested: Layer> Layer for SkipConnection<Nested> {
 		&self,
 		d_out: Tensor,
 		ctx: &mut EvalContext,
-	) -> Result<Tensor, ErrPack<TensorOpError>> {
+	) -> Result<Tensor, ErrPack<OptimizerError>> {
 		let nested_out = self.nested.backward(d_out.clone(), ctx)?;
-		self.add_residual(d_out, nested_out)
-	}
-
-	fn backward_finish(
-		&self,
-		d_out: Tensor,
-		ctx: &mut EvalContext,
-	) -> Result<(), ErrPack<TensorOpError>> {
-		self.nested.backward_finish(d_out, ctx)
+		let d_in = self.add_residual(d_out, nested_out)?;
+		Ok(d_in)
 	}
 }
