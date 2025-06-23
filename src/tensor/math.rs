@@ -9,7 +9,6 @@ use std::hint::cold_path;
 
 use crate::ErrPack;
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
-use crate::tensor::device::{DeviceBuffer, executor};
 use crate::tensor::dim_merger::{DimMerger, MergedDim};
 use crate::tensor::generic::map::{ND, NotEnoughDimensionsError, SizeAndStride};
 use crate::tensor::{Tensor, TensorOpError, generic};
@@ -23,24 +22,12 @@ pub trait EvaluatesToTensor {
 	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>>;
 }
 
-pub trait EvaluatesToMatrix {
-	/// Calculate the result of the operation represented by `self`
-	/// and save it into the `to` matrix.
-	fn eval_to_matrix(self, to: &Matrix) -> Result<(), ErrPack<TensorOpError>>;
-}
-
-pub trait AccumulatesToMatrix {
-	/// Calculate the result of the operation represented by `self`
-	/// and save it into the `to` matrix.
-	fn acc_to_matrix(self, to: &Matrix) -> Result<(), ErrPack<TensorOpError>>;
+pub trait ClearAccToMatrix {
+	fn clear_acc_to_matrix(self, to: &Matrix) -> Result<(), ErrPack<TensorOpError>>;
 }
 
 pub trait EvaluatesToColMatrix {
 	fn eval_to_col_matrix(self, to: &ColMatrix) -> Result<(), ErrPack<TensorOpError>>;
-}
-
-pub trait EvaluatesToRowMatrix {
-	fn eval_to_row_matrix(self, to: &RowMatrix) -> Result<(), ErrPack<TensorOpError>>;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -66,51 +53,6 @@ fn check_borrows(c_fail: usize, fail: usize) -> Result<(), ErrPack<TensorOpError
 
 //--------------------------------------------------------------------------------------------------
 
-unsafe fn run_batch<
-	'a,
-	const N: usize,
-	const M: usize,
-	const C: usize,
-	const O: usize,
-	const K: usize,
->(
-	batch_dim: MergedDim<{ M + C }>,
-	m_tensors: &mut [generic::Tensor<ND<N>, DeviceBufferRefMut<'a>>; O],
-	c_tensors: &mut [generic::Tensor<ND<N>, DeviceBufferRef<'a>>; K],
-	mut f: impl FnMut(
-		&mut [generic::Tensor<ND<N>, DeviceBufferRefMut<'a>>; O],
-		&[generic::Tensor<ND<N>, DeviceBufferRef<'a>>; K],
-	) -> Result<(), ErrPack<TensorOpError>>,
-) -> Result<(), ErrPack<TensorOpError>>
-where
-	[(); M - O]:,
-	[(); C - K]:,
-{
-	if batch_dim.size == 0 {
-		cold_path();
-		return Ok(());
-	}
-
-	let i = batch_dim.size - 1;
-	loop {
-		f(m_tensors, c_tensors)?;
-		if i > 0 {
-			cold_path();
-			for (tensor, &stride) in m_tensors.iter_mut().zip(&batch_dim.strides) {
-				unsafe { tensor.map_mut().offset += stride }
-			}
-			for (tensor, &stride) in c_tensors.iter_mut().zip(&batch_dim.strides[M..]) {
-				unsafe { tensor.map_mut().offset += stride }
-			}
-		} else {
-			break;
-		}
-	}
-	Ok(())
-}
-
-//--------------------------------------------------------------------------------------------------
-
 // TODO - disable broadcast for M tensors.
 
 pub struct ElemWise<'a, const M: usize, const C: usize>
@@ -119,7 +61,7 @@ where
 {
 	m: [&'a Tensor; M],
 	c: [&'a Tensor; C],
-	dims: [MergedDim<{ M + C }>; 3],
+	dims: [MergedDim<{ M + C }>; 2],
 }
 
 impl<'a, const M: usize, const C: usize> ElemWise<'a, M, C>
@@ -129,7 +71,7 @@ where
 	pub fn new(m: [&'a Tensor; M], c: [&'a Tensor; C]) -> Result<Self, ErrPack<TensorOpError>> {
 		let m_dims = m.map(|t| t.map().dims.as_slice());
 		let c_dims = c.map(|t| t.map().dims.as_slice());
-		let dims = DimMerger::merge::<3>(array::concat_arrays(m_dims, c_dims))?;
+		let dims = DimMerger::merge(array::concat_arrays(m_dims, c_dims))?;
 		Ok(Self { m, c, dims })
 	}
 
@@ -138,7 +80,7 @@ where
 	/// So we don't have to use all the `c` tensors processed during `::new()`.
 	pub fn run<const O: usize, const K: usize>(
 		&self,
-		f: impl FnMut(
+		mut f: impl FnMut(
 			&mut [generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>; O],
 			&[generic::Tensor<ND<2>, DeviceBufferRef<'a>>; K],
 		) -> Result<(), ErrPack<TensorOpError>>,
@@ -149,10 +91,10 @@ where
 	{
 		unsafe {
 			let mut c_fail = 0;
-			let mut c_tensors = std::array::from_fn(|i| {
+			let c_tensors = std::array::from_fn(|i| {
 				generic::Tensor::new_unchecked(
 					ND {
-						dims: [self.dims[1].get(M + i), self.dims[2].get(M + i)],
+						dims: [self.dims[0].get(M + i), self.dims[1].get(M + i)],
 						offset: self.c[i].map().offset,
 					},
 					DeviceBufferRef::new_unsafe(self.c[i].buf().as_ref(), &mut c_fail),
@@ -162,7 +104,7 @@ where
 			let mut m_tensors = std::array::from_fn(|i| {
 				generic::Tensor::new_unchecked(
 					ND {
-						dims: [self.dims[1].get(i), self.dims[2].get(i)],
+						dims: [self.dims[0].get(i), self.dims[1].get(i)],
 						offset: self.m[i].map().offset,
 					},
 					DeviceBufferRefMut::new_unsafe(self.m[i].buf().as_ref(), &mut fail),
@@ -170,7 +112,7 @@ where
 			});
 			check_borrows(c_fail, fail)?;
 
-			run_batch(self.dims[0], &mut m_tensors, &mut c_tensors, f)
+			f(&mut m_tensors, &c_tensors)
 		}
 	}
 
@@ -189,25 +131,23 @@ where
 
 		let m_stride0 = self.dims[0].strides[MI];
 		let m_stride1 = self.dims[1].strides[MI];
-		let m_stride2 = self.dims[2].strides[MI];
 
 		let c_stride0 = self.dims[0].strides[M + CI];
 		let c_stride1 = self.dims[1].strides[M + CI];
-		let c_stride2 = self.dims[2].strides[M + CI];
 
 		let buf_eq = std::ptr::eq(m_buf, c_buf);
 
 		let a = buf_eq
 			&& m_offset == c_offset
 			&& (self.dims[0].size <= 1 || m_stride0 == c_stride0)
-			&& (self.dims[1].size <= 1 || m_stride1 == c_stride1)
-			&& (self.dims[2].size <= 1 || m_stride2 == c_stride2);
+			&& (self.dims[1].size <= 1 || m_stride1 == c_stride1);
 
-		let b = ((m_buf as *const DeviceBuffer as usize) ^ (c_buf as *const DeviceBuffer as usize))
+		let m_buf_ptr = std::ptr::from_ref(m_buf) as usize;
+		let c_buf_ptr = std::ptr::from_ref(c_buf) as usize;
+		let b = (m_buf_ptr ^ c_buf_ptr)
 			| (m_offset ^ c_offset)
 			| (m_stride0 ^ c_stride0)
-			| (m_stride1 ^ c_stride1)
-			| (m_stride2 ^ c_stride2);
+			| (m_stride1 ^ c_stride1);
 		let b = b == 0;
 
 		debug_assert!(a == b);
@@ -223,7 +163,7 @@ where
 {
 	m: [&'a Tensor; M],
 	c: [&'a Tensor; C],
-	dims: [MergedDim<{ M + C }>; 2],
+	dims: [MergedDim<{ M + C }>; 1],
 	m_vec: [SizeAndStride; M],
 	c_vec: [SizeAndStride; C],
 }
@@ -247,7 +187,7 @@ where
 
 		let m_dims = m_dims.map(|d| &d[..d.len() - 1]);
 		let c_dims = c_dims.map(|d| &d[..d.len() - 1]);
-		let dims = DimMerger::merge::<2>(array::concat_arrays(m_dims, c_dims))?;
+		let dims = DimMerger::merge(array::concat_arrays(m_dims, c_dims))?;
 
 		Ok(Self { m, c, dims, m_vec, c_vec })
 	}
@@ -265,10 +205,10 @@ where
 	{
 		unsafe {
 			let mut c_fail = 0;
-			let mut c_tensors = std::array::from_fn(|i| {
+			let c_tensors = std::array::from_fn(|i| {
 				generic::Tensor::new_unchecked(
 					ND {
-						dims: [self.dims[1].get(M + i), self.c_vec[i]],
+						dims: [self.dims[0].get(M + i), self.c_vec[i]],
 						offset: self.c[i].map().offset,
 					},
 					DeviceBufferRef::new_unsafe(self.c[i].buf().as_ref(), &mut c_fail),
@@ -279,7 +219,7 @@ where
 			let mut m_tensors = std::array::from_fn(|i| {
 				generic::Tensor::new_unchecked(
 					ND {
-						dims: [self.dims[1].get(i), self.m_vec[i]],
+						dims: [self.dims[0].get(i), self.m_vec[i]],
 						offset: self.m[i].map().offset,
 					},
 					DeviceBufferRefMut::new_unsafe(self.m[i].buf().as_ref(), &mut fail),
@@ -287,7 +227,7 @@ where
 			});
 			check_borrows(c_fail, fail)?;
 
-			run_batch(self.dims[0], &mut m_tensors, &mut c_tensors, f)
+			f(&mut m_tensors, &c_tensors)
 		}
 	}
 
@@ -304,32 +244,28 @@ where
 		let c_offset = c_tensor.map().offset;
 		let c_buf = c_tensor.buf().as_ref();
 
-		let m_size0 = self.m_vec[MI].size;
-		let m_stride0 = self.m_vec[MI].stride;
-		let m_stride1 = self.dims[0].strides[MI];
-		let m_stride2 = self.dims[1].strides[MI];
+		let m_stride0 = self.dims[0].strides[MI];
+		let m_stride1 = self.m_vec[MI].stride;
+		let m_size1 = self.m_vec[MI].size;
 
-		let c_size0 = self.c_vec[CI].size;
-		let c_stride0 = self.c_vec[CI].stride;
-		let c_stride1 = self.dims[0].strides[M + CI];
-		let c_stride2 = self.dims[1].strides[M + CI];
+		let c_stride0 = self.dims[0].strides[M + CI];
+		let c_size1 = self.c_vec[CI].size;
+		let c_stride1 = self.c_vec[CI].stride;
 
 		let a = //.
 			std::ptr::eq(m_buf, c_buf)
 			&& m_offset == c_offset
-			&& (m_size0 == c_size0)
-			&& (m_size0 <= 1 || m_stride0 == c_stride0)
-			&& (self.dims[0].size <= 1 || m_stride1 == c_stride1)
-			&& (self.dims[1].size <= 1 || m_stride2 == c_stride2);
+			&& (self.dims[0].size <= 1 || m_stride0 == c_stride0)
+			&& (m_size1 == c_size1)
+			&& (m_size1 <= 1 || m_stride1 == c_stride1);
 
-		let b = ((m_buf as *const DeviceBuffer as usize) ^ (c_buf as *const DeviceBuffer as usize))
+		let m_buf_ptr = std::ptr::from_ref(m_buf) as usize;
+		let c_buf_ptr = std::ptr::from_ref(c_buf) as usize;
+		let b = (m_buf_ptr ^ c_buf_ptr)
 			| (m_offset ^ c_offset)
-			| (m_stride1 ^ c_stride1)
-			| (m_stride2 ^ c_stride2);
-		let b = //.
-			b == 0
-			&& (m_size0 == c_size0)
-			&& (m_size0 <= 1 || m_stride0 == c_stride0);
+			| (m_stride0 ^ c_stride0)
+			| (m_size1 ^ c_size1);
+		let b = (b == 0) && (m_size1 <= 1 || m_stride1 == c_stride1);
 
 		debug_assert!(a == b);
 		b
@@ -1233,28 +1169,22 @@ impl<'a> SwiGLUBackwardExpr<'a> {
 		let d_lin_buf = d_lin.buf().as_ref();
 		let d_gate_buf = d_gate.buf().as_ref();
 		if std::ptr::eq(d_lin_buf, d_gate_buf) {
-			let size = ew.dims[2].size;
+			let size = ew.dims[1].size;
 			let swapped = d_lin.map().offset > d_gate.map().offset;
 			if swapped {
 				ew.m = [d_gate, d_lin];
 			}
 			let shift = ew.m[1].map().offset - ew.m[0].map().offset;
 
-			let min_stride1 = ew.dims[2].size;
-			let min_stride2 = ew.dims[1].size * ew.dims[1].strides[0];
-
 			if shift >= size
-				&& ew.dims[2].strides[0] == 1
-				&& ew.dims[2].strides[0] == ew.dims[2].strides[1]
+				&& ew.dims[1].strides[0] == 1
 				&& ew.dims[1].strides[0] == ew.dims[1].strides[1]
 				&& ew.dims[0].strides[0] == ew.dims[0].strides[1]
-				&& (ew.dims[1].size <= 1
-					|| (ew.dims[1].strides[0] >= min_stride1
-						&& (ew.dims[0].size <= 1 || ew.dims[0].strides[0] >= min_stride2)))
+				&& (ew.dims[0].size <= 1 || ew.dims[0].strides[0] >= shift + size)
 			{
 				ew.run(|[d_lin_gate], [lin, gate, d_out]| {
 					unsafe { d_lin_gate.map_mut().dims[1].size = size + shift };
-					executor.swiglu_backward2(d_lin_gate, size, swapped, lin, gate, d_out)?;
+					executor.swiglu_backward(d_lin_gate, swapped, lin, gate, d_out)?;
 					Ok(())
 				})
 			} else {
@@ -1265,10 +1195,7 @@ impl<'a> SwiGLUBackwardExpr<'a> {
 				})
 			}
 		} else {
-			ew.run(|[d_lin, d_gate], [lin, gate, d_out]| {
-				executor.swiglu_backward(d_lin, d_gate, lin, gate, d_out)?;
-				Ok(())
-			})
+			todo!("SwiGLUBackwardExpr with different output tensors");
 		}
 	}
 }
@@ -1343,15 +1270,13 @@ impl<'a> Matrix<'a> {
 		Matrix { rows: self.cols, cols: self.rows, ..self }
 	}
 
-	pub fn assign<Expr: EvaluatesToMatrix>(
+	/// First clears the matrix `self` (i.e. sets all elements to zero),
+	/// then accumulates the result of a batch of matrix multiplications into it.
+	pub fn clear_acc<Expr: ClearAccToMatrix>(
 		&self,
 		expr: Expr,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		expr.eval_to_matrix(self)
-	}
-
-	pub fn acc<Expr: AccumulatesToMatrix>(&self, expr: Expr) -> Result<(), ErrPack<TensorOpError>> {
-		expr.acc_to_matrix(self)
+		expr.clear_acc_to_matrix(self)
 	}
 }
 
@@ -1384,13 +1309,6 @@ impl<'a> RowMatrix<'a> {
 			batch_dims: self.batch_dims,
 			rows: self.cols,
 		}
-	}
-
-	pub fn assign<Expr: EvaluatesToRowMatrix>(
-		&self,
-		expr: Expr,
-	) -> Result<(), ErrPack<TensorOpError>> {
-		expr.eval_to_row_matrix(self)
 	}
 }
 
@@ -1500,161 +1418,93 @@ impl<'a> std::ops::Mul<ColMatrix<'a>> for Matrix<'a> {
 	}
 }
 
-impl<'a> EvaluatesToMatrix for ColTimesRow<'a> {
+impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
+	#[allow(clippy::panic_in_result_fn)]
 	#[inline(never)]
-	fn eval_to_matrix(self, to: &Matrix) -> Result<(), ErrPack<TensorOpError>> {
+	fn clear_acc_to_matrix(self, to: &Matrix) -> Result<(), ErrPack<TensorOpError>> {
 		unsafe {
-			const TO: usize = 0;
-			const COL: usize = 1;
-			const ROW: usize = 2;
+			const COL: usize = 0;
+			const ROW: usize = 1;
 
 			let Self { col, row, scale } = self;
 
-			let dims = DimMerger::merge::<2>([to.batch_dims, col.batch_dims, row.batch_dims])?;
-			let batch_dim = dims[0];
+			assert!(to.batch_dims.is_empty());
+
+			let dims = DimMerger::merge::<1>([col.batch_dims, row.batch_dims])?;
 
 			let mut c_fail = 0;
-			let mut c_tensors = [
-				generic::Tensor::new_unchecked(
-					ND {
-						dims: [dims[1].get(COL), col.rows, SizeAndStride { size: 1, stride: 0 }],
-						offset: col.tensor.map().offset,
-					},
-					DeviceBufferRef::new_unsafe(col.tensor.buf().as_ref(), &mut c_fail),
-				),
-				generic::Tensor::new_unchecked(
-					ND {
-						dims: [dims[1].get(ROW), SizeAndStride { size: 1, stride: 0 }, row.cols],
-						offset: row.tensor.map().offset,
-					},
-					DeviceBufferRef::new_unsafe(row.tensor.buf().as_ref(), &mut c_fail),
-				),
-			];
-			let mut fail = c_fail;
-			let mut m_tensors = [generic::Tensor::new_unchecked(
+			let col = generic::Tensor::new_unchecked(
 				ND {
-					dims: [dims[1].get(TO), to.rows, to.cols],
+					dims: [col.rows, dims[0].get(COL)],
+					offset: col.tensor.map().offset,
+				},
+				DeviceBufferRef::new_unsafe(col.tensor.buf().as_ref(), &mut c_fail),
+			);
+			let row = generic::Tensor::new_unchecked(
+				ND {
+					dims: [dims[0].get(ROW), row.cols],
+					offset: row.tensor.map().offset,
+				},
+				DeviceBufferRef::new_unsafe(row.tensor.buf().as_ref(), &mut c_fail),
+			);
+			let mut fail = c_fail;
+			let mut to = generic::Tensor::new_unchecked(
+				ND {
+					dims: [to.rows, to.cols],
 					offset: to.tensor.map().offset,
 				},
 				DeviceBufferRefMut::new_unsafe(to.tensor.buf().as_ref(), &mut fail),
-			)];
+			);
 			check_borrows(c_fail, fail)?;
 
-			let executor = to.tensor.executor();
-			run_batch::<3, 1, 2, 1, 2>(batch_dim, &mut m_tensors, &mut c_tensors, |[o], [a, b]| {
-				executor.mm(o, a, b, scale)?;
-				Ok(())
-			})
+			let executor = col.buf().executor();
+			executor.mm(&mut to, &col, &row, scale)?;
+			Ok(())
 		}
 	}
 }
 
-impl<'a> AccumulatesToMatrix for ColTimesRow<'a> {
-	#[inline(never)]
-	fn acc_to_matrix(self, _to: &Matrix) -> Result<(), ErrPack<TensorOpError>> {
-		todo!("implement `acc_to_matrix` for `ColTimesRow`");
-	}
-}
-
 impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
+	#[allow(clippy::panic_in_result_fn)]
 	#[inline(never)]
 	fn eval_to_col_matrix(self, to: &ColMatrix) -> Result<(), ErrPack<TensorOpError>> {
 		unsafe {
+			const TO: usize = 0;
+			const COL: usize = 1;
+
 			let Self { mat, col, scale } = self;
+
+			assert!(mat.batch_dims.is_empty());
+
+			let dims = DimMerger::merge::<1>([to.batch_dims, col.batch_dims])?;
 			let mut c_fail = 0;
-			let mat_buf = DeviceBufferRef::new_unsafe(mat.tensor.buf().as_ref(), &mut c_fail);
-			let col_buf = DeviceBufferRef::new_unsafe(col.tensor.buf().as_ref(), &mut c_fail);
+			let mat = generic::Tensor::new_unchecked(
+				ND {
+					dims: [mat.rows, mat.cols],
+					offset: mat.tensor.map().offset,
+				},
+				DeviceBufferRef::new_unsafe(mat.tensor.buf().as_ref(), &mut c_fail),
+			);
+			let col = generic::Tensor::new_unchecked(
+				ND {
+					dims: [col.rows, dims[0].get(COL)],
+					offset: col.tensor.map().offset,
+				},
+				DeviceBufferRef::new_unsafe(col.tensor.buf().as_ref(), &mut c_fail),
+			);
 			let mut fail = c_fail;
-			let to_buf = DeviceBufferRefMut::new_unsafe(to.tensor.buf().as_ref(), &mut fail);
+			let mut to = generic::Tensor::new_unchecked(
+				ND {
+					dims: [to.rows, dims[0].get(TO)],
+					offset: to.tensor.map().offset,
+				},
+				DeviceBufferRefMut::new_unsafe(to.tensor.buf().as_ref(), &mut fail),
+			);
 			check_borrows(c_fail, fail)?;
 
-			let (batch_dim, mut m_tensors, mut c_tensors);
-			if mat.batch_dims.is_empty() {
-				const TO: usize = 0;
-				const COL: usize = 1;
-
-				let dims = DimMerger::merge::<3>([to.batch_dims, col.batch_dims])?;
-				batch_dim = MergedDim {
-					size: dims[0].size,
-					strides: [dims[0].strides[TO], 0, dims[0].strides[COL]],
-				};
-				c_tensors = [
-					generic::Tensor::new_unchecked(
-						ND {
-							dims: [
-								SizeAndStride { size: dims[1].size, stride: 0 },
-								mat.rows,
-								mat.cols,
-							],
-							offset: mat.tensor.map().offset,
-						},
-						mat_buf,
-					),
-					generic::Tensor::new_unchecked(
-						ND {
-							dims: [dims[1].get(COL), col.rows, dims[2].get(COL)],
-							offset: col.tensor.map().offset,
-						},
-						col_buf,
-					),
-				];
-				m_tensors = [generic::Tensor::new_unchecked(
-					ND {
-						dims: [dims[1].get(TO), to.rows, dims[2].get(TO)],
-						offset: to.tensor.map().offset,
-					},
-					to_buf,
-				)];
-			} else {
-				const TO: usize = 0;
-				const MAT: usize = 1;
-				const COL: usize = 2;
-
-				let dims = DimMerger::merge::<2>([to.batch_dims, mat.batch_dims, col.batch_dims])?;
-				batch_dim = dims[0];
-
-				c_tensors = [
-					generic::Tensor::new_unchecked(
-						ND {
-							dims: [
-								dims[1].get(MAT), //
-								mat.rows,
-								mat.cols,
-							],
-							offset: mat.tensor.map().offset,
-						},
-						mat_buf,
-					),
-					generic::Tensor::new_unchecked(
-						ND {
-							dims: [
-								dims[1].get(COL), //
-								col.rows,
-								SizeAndStride { size: 1, stride: 0 },
-							],
-							offset: col.tensor.map().offset,
-						},
-						col_buf,
-					),
-				];
-				m_tensors = [generic::Tensor::new_unchecked(
-					ND {
-						dims: [
-							dims[1].get(TO), //
-							to.rows,
-							SizeAndStride { size: 1, stride: 0 },
-						],
-						offset: to.tensor.map().offset,
-					},
-					to_buf,
-				)];
-			}
-
-			let executor = to.tensor.executor();
-			run_batch::<3, 1, 2, 1, 2>(batch_dim, &mut m_tensors, &mut c_tensors, |[o], [a, b]| {
-				executor.mm(o, a, b, scale)?;
-				Ok(())
-			})
+			let executor = mat.buf().executor();
+			executor.mm(&mut to, &mat, &col, scale)?;
+			Ok(())
 		}
 	}
 }

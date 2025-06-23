@@ -158,56 +158,53 @@ fn laplacian(v: &ArrayView2<f32>) -> Array2<f32> {
 		+ v.slice(s![2.., 1..-1])
 }*/
 
+use x17ai::ErrPack;
 use x17ai::tensor::device::cpu::CPUDevice;
 use x17ai::tensor::device::executor::Executor;
 use x17ai::tensor::generic::Tensor;
 use x17ai::tensor::generic::map::ND;
 use x17ai::tensor::math::{col, mat, row};
-use x17ai::tensor::{Device, HasDType};
+use x17ai::tensor::{Device, HasDType, TensorOpError};
 
-fn main() {
+fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let dev = CPUDevice::new();
 	let lit = Tensor::literal_factory::<f32>(dev.clone());
-	let a = lit
-		.new_2d(&[
-			[-1.5924, 0.7530, -0.2418, 0.3416],
-			[0.1225, -1.1488, 0.3338, -0.8102],
-			[-0.3426, 1.7670, 0.0596, -0.1160],
-		])
-		.unwrap();
-	let b = lit
-		.new_1d(&[
-			-0.5254, //
-			2.2503,  //
-			-0.2887, //
-			-0.2313, //
-		])
-		.unwrap();
-	let c = Tensor::new_empty_on(&[3], f32::dtype, dev.clone()).unwrap();
-	col(&c).unwrap().assign(mat(&a).unwrap() * col(&b).unwrap()).unwrap();
+	let a = lit.new_2d(&[
+		[-1.5924, 0.7530, -0.2418, 0.3416],
+		[0.1225, -1.1488, 0.3338, -0.8102],
+		[-0.3426, 1.7670, 0.0596, -0.1160],
+	])?;
+	let b = lit.new_1d(&[
+		-0.5254, //
+		2.2503,  //
+		-0.2887, //
+		-0.2313, //
+	])?;
+	let c = Tensor::new_empty_on(&[3], f32::dtype, dev.clone())?;
+	col(&c)?.assign(mat(&a)? * col(&b)?)?;
 
-	let a = lit
-		.new_1d(&[
-			-1.2854, //
-			0.3690,  //
-			0.0352,  //
-			0.4591,  //
-			-0.2684, //
-		])
-		.unwrap();
-	let b = lit.new_1d(&[0.3259, -2.2469, 0.8345, 0.6012]).unwrap();
-	let c = Tensor::new_empty_on(&[5, 4], f32::dtype, dev.clone()).unwrap();
-	mat(&c).unwrap().assign(col(&a).unwrap() * row(&b).unwrap()).unwrap();
+	let a = lit.new_1d(&[
+		-1.2854, //
+		0.3690,  //
+		0.0352,  //
+		0.4591,  //
+		-0.2684, //
+	])?;
+	let b = lit.new_1d(&[0.3259, -2.2469, 0.8345, 0.6012])?;
+	let c = Tensor::new_empty_on(&[5, 4], f32::dtype, dev.clone())?;
+	mat(&c)?.clear_acc(col(&a)? * row(&b)?)?;
 
-	println!("a = {}", a.borrow().unwrap().view::<f32>().unwrap());
-	println!("b = {}", b.borrow().unwrap().view::<f32>().unwrap());
-	println!("c = {}", c.borrow().unwrap().view::<f32>().unwrap());
+	println!("a = {}", a.borrow()?.view::<f32>()?);
+	println!("b = {}", b.borrow()?.view::<f32>()?);
+	println!("c = {}", c.borrow()?.view::<f32>()?);
 
-	/*	let (map, elems) = ND::new(&[3, 4, 5]).unwrap();
-	let buf = dev.clone().new_buffer(f32::dtype, elems).unwrap();*/
+	/*	let (map, elems) = ND::new(&[3, 4, 5])?;
+	let buf = dev.clone().new_buffer(f32::dtype, elems)?;*/
 	/*	let t = Tensor { map, buf: buf.as_ref() };
 	let exec = &dev.f32_executor;
-	exec.mm(&t, &t, &t, 1.0).unwrap();*/
+	exec.mm(&t, &t, &t, 1.0)?;*/
+
+	Ok(())
 }
 
 #[cfg(false)]
@@ -217,7 +214,7 @@ fn main() {
 	let c = Rc::new(1);
 	let d = c.as_ref();
 
-	stderrlog::new().verbosity(10).init().unwrap();
+	stderrlog::new().verbosity(10).init()?;
 
 	let data = &[Cell::new(1), Cell::new(2), Cell::new(3)];
 	let ten = x17ai::tensor2::Tensor::<ND<1>, &[Cell<u32>]> {

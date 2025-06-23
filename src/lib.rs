@@ -51,6 +51,7 @@
 
 use std::convert::Infallible;
 
+pub mod autograd;
 pub mod format;
 pub mod nn;
 pub mod tensor;

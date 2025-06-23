@@ -147,6 +147,10 @@ def gen_linear():
 
 	print("expected_d_inp = ", d_inp);
 
+	d_weights = weights.grad
+
+	print("expected_d_weights = ", d_weights)
+
 what = ''
 try:
 	what = sys.argv[1]

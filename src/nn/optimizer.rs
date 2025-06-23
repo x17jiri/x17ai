@@ -12,7 +12,12 @@
 
 use std::hint::cold_path;
 
-use crate::tensor::generic::map::{IncompatibleStridesError, MergeDimsError, ReshapeLastDimError};
+use crate::tensor::device::buffer::BorrowError;
+use crate::tensor::device::cpu::ViewError;
+use crate::tensor::generic::map::{
+	IncompatibleStridesError, MergeDimsError, NotEnoughDimensionsError, ReshapeLastDimError,
+	SelectError,
+};
 use crate::tensor::math::{RSqrt, Sum};
 use crate::tensor::{Tensor, TensorOpError};
 use crate::util::LossyInto;
@@ -208,7 +213,7 @@ impl From<TensorOpError> for OptimizerError {
 	}
 }
 
-impl<T: Into<ErrPack<TensorOpError>>> From<T> for ErrPack<OptimizerError> {
+impl From<ErrPack<TensorOpError>> for ErrPack<OptimizerError> {
 	#[cold]
 	#[inline(never)]
 	fn from(err: ErrPack<TensorOpError>) -> Self {
@@ -222,4 +227,104 @@ impl<T: Into<ErrPack<TensorOpError>>> From<T> for ErrPack<OptimizerError> {
 	}
 }
 
+impl From<MergeDimsError> for ErrPack<OptimizerError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: MergeDimsError) -> Self {
+		let t: ErrPack<TensorOpError> = err.into();
+		Self {
+			code: OptimizerError::TensorOp,
+			extra: Some(Box::new(ErrExtra {
+				message: String::new(),
+				nested: Some(t.into()),
+			})),
+		}
+	}
+}
+
+impl From<IncompatibleStridesError> for ErrPack<OptimizerError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: IncompatibleStridesError) -> Self {
+		let t: ErrPack<TensorOpError> = err.into();
+		Self {
+			code: OptimizerError::TensorOp,
+			extra: Some(Box::new(ErrExtra {
+				message: String::new(),
+				nested: Some(t.into()),
+			})),
+		}
+	}
+}
+
+impl From<ReshapeLastDimError> for ErrPack<OptimizerError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: ReshapeLastDimError) -> Self {
+		let t: ErrPack<TensorOpError> = err.into();
+		Self {
+			code: OptimizerError::TensorOp,
+			extra: Some(Box::new(ErrExtra {
+				message: String::new(),
+				nested: Some(t.into()),
+			})),
+		}
+	}
+}
+
+impl From<NotEnoughDimensionsError> for ErrPack<OptimizerError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: NotEnoughDimensionsError) -> Self {
+		let t_err: ErrPack<TensorOpError> = err.into();
+		t_err.into()
+	}
+}
+
+impl From<SelectError> for ErrPack<OptimizerError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: SelectError) -> Self {
+		let t_err: ErrPack<TensorOpError> = err.into();
+		t_err.into()
+	}
+}
+
+impl From<ViewError> for ErrPack<OptimizerError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: ViewError) -> Self {
+		let t_err: ErrPack<TensorOpError> = err.into();
+		t_err.into()
+	}
+}
+
+impl From<BorrowError> for ErrPack<OptimizerError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: BorrowError) -> Self {
+		let t_err: ErrPack<TensorOpError> = err.into();
+		t_err.into()
+	}
+}
+
+impl From<PartitionError> for ErrPack<OptimizerError> {
+	fn from(_: PartitionError) -> Self {
+		ErrPack {
+			code: OptimizerError::Partition,
+			extra: None,
+		}
+	}
+}
+
+impl From<ErrPack<PartitionError>> for ErrPack<OptimizerError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: ErrPack<PartitionError>) -> Self {
+		Self {
+			code: OptimizerError::Partition,
+			extra: err.extra,
+		}
+	}
+}
 //--------------------------------------------------------------------------------------------------

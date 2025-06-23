@@ -97,4 +97,9 @@ impl Param {
 	pub fn step(&mut self, opt_coef: &OptCoef) -> Result<(), ErrPack<OptimizerError>> {
 		Ok(self.opt_param()?.step(opt_coef)?)
 	}
+
+	pub fn grad(&self) -> Option<&Tensor> {
+		let opt_param = self.opt_param.as_ref()?;
+		Some(&opt_param.grad_reshaped)
+	}
 }

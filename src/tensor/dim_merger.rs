@@ -7,8 +7,6 @@
 
 use std::hint::cold_path;
 
-use ndarray::Dim;
-
 use crate::tensor::generic::map::SizeAndStride;
 
 #[derive(Clone, Copy)]

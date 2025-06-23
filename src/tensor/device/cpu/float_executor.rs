@@ -375,43 +375,23 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		Ok(())
 	}
 
+	#[allow(clippy::panic_in_result_fn)]
 	fn swiglu_backward<'buf>(
 		&self,
-		_d_lin: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		_d_gate: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		_lin: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		_gate: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		_d_out: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		/*Self::n_contiguous(
-			[d_lin, d_gate, lin, gate, d_out],
-			|[d_lin, d_gate, lin, gate, d_out]| {
-				let lin = lin.get().to_f64();
-				let gate = gate.get().to_f64();
-				let d_out = d_out.get().to_f64();
-				let (d_lin_val, d_gate_val) = math::swiglu_backward(lin, gate, d_out);
-				d_lin.set(T::from_f64(d_lin_val));
-				d_gate.set(T::from_f64(d_gate_val));
-			},
-		)*/
-		todo!("FloatExecutor::swiglu_backward is not implemented yet");
-	}
-
-	#[allow(clippy::panic_in_result_fn)]
-	fn swiglu_backward2<'buf>(
-		&self,
 		d_lin_gate: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		size: usize,
 		swapped: bool,
 		lin: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		gate: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		d_out: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 	) -> Result<(), ErrPack<ExecutorError>> {
 		let shape = ensure_same_shape([], [lin, gate, d_out])?;
-		let expected_shape = [d_lin_gate.map().dims[0].size, shape[1]];
-		if shape != expected_shape {
+		let d_lin_gate_shape = d_lin_gate.nd_shape()?;
+		if d_lin_gate_shape[0] != shape[0] || d_lin_gate_shape[1] / 2 < shape[1] {
 			cold_path();
-			return Err(ExecutorError::invalid_shape(shape, expected_shape));
+			return Err(ErrPack {
+				code: ExecutorError::InvalidShape,
+				extra: None,
+			});
 		}
 
 		let d_lin_gate = Self::view_contiguous_mut(d_lin_gate)?;
@@ -419,16 +399,17 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		let gate = Self::view_contiguous(gate)?;
 		let d_out = Self::view_contiguous(d_out)?;
 
-		let dim_size = d_lin_gate.tensor.map().dims[1].size;
-		assert!(size <= dim_size / 2);
-		let (d_lin_start, d_gate_start) =
-			if swapped { (dim_size - size, 0) } else { (0, dim_size - size) };
+		let (d_lin_start, d_gate_start) = if swapped {
+			(d_lin_gate_shape[1] - shape[1], 0)
+		} else {
+			(0, d_lin_gate_shape[1] - shape[1])
+		};
 		unsafe {
 			zip_vecs_varsize(
 				[d_lin_gate],
 				[lin, gate, d_out],
 				|[d_lin_gate], [lin, gate, d_out]| {
-					for i in 0..size {
+					for i in 0..shape[1] {
 						let lin = lin[i].to_f64();
 						let gate = gate[i].to_f64();
 						let d_out = d_out[i].to_f64();
@@ -570,9 +551,9 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 	#[allow(clippy::many_single_char_names)]
 	fn mm<'buf>(
 		&self,
-		o: &mut generic::Tensor<ND<3>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<3>, DeviceBufferRef<'buf>>,
-		b: &generic::Tensor<ND<3>, DeviceBufferRef<'buf>>,
+		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		scale: f64,
 	) -> Result<(), ErrPack<ExecutorError>> {
 		println!("float_executor::mm: scale = {scale}");
@@ -580,53 +561,44 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		println!("b shape = {:?}", b.map().dims);
 		println!("o shape = {:?}", o.map().dims);
 
-		// TODO - ensure shapes
-		assert!(o.map().dims[0].size == a.map().dims[0].size);
-		assert!(o.map().dims[0].size == b.map().dims[0].size);
+		let m = o.map().dims[0].size;
+		let n = o.map().dims[1].size;
+		let k = a.map().dims[1].size;
 
-		let m = o.map().dims[1].size;
-		let n = o.map().dims[2].size;
-		let k = a.map().dims[2].size;
-
-		assert!(a.map().dims[1].size == m);
-		assert!(b.map().dims[1].size == k);
-		assert!(b.map().dims[2].size == n);
+		assert!(a.map().dims[0].size == m);
+		assert!(b.map().dims[0].size == k);
+		assert!(b.map().dims[1].size == n);
 
 		o.ensure_safe()?;
-		let o_row_stride = o.map().dims[1].stride;
-		let o_col_stride = o.map().dims[2].stride;
-		let (o_map, o_buf) = o.view_mut::<T>()?.into_parts();
-		let o_map = <generic::map::nd::ND<3> as generic::map::SpanDims<2>>::span_dims(o_map)?;
-		let o = unsafe { generic::Tensor::new_unchecked(&o_map, o_buf) };
-		let o = ContiguousOutput { tensor: o };
+		let o_row_stride = o.map().dims[0].stride;
+		let o_col_stride = o.map().dims[1].stride;
+		let mut o = o.view_mut::<T>()?;
+		let o_off = o.map().offset;
+		let o = unsafe { &mut o.buf_mut()[o_off..] };
 
 		a.ensure_safe()?;
-		let a_row_stride = a.map().dims[1].stride;
-		let a_col_stride = a.map().dims[2].stride;
-		let a = a.view::<T>()?.span_dims::<2>()?;
-		let a = ContiguousInput { tensor: a.ref_map() };
+		let a_row_stride = a.map().dims[0].stride;
+		let a_col_stride = a.map().dims[1].stride;
+		let a = a.view::<T>()?;
+		let a = &a.buf()[a.map().offset..];
 
 		b.ensure_safe()?;
-		let b_row_stride = b.map().dims[1].stride;
-		let b_col_stride = b.map().dims[2].stride;
-		let b = b.view::<T>()?.span_dims::<2>()?;
-		let b = ContiguousInput { tensor: b.ref_map() };
+		let b_row_stride = b.map().dims[0].stride;
+		let b_col_stride = b.map().dims[1].stride;
+		let b = b.view::<T>()?;
+		let b = &b.buf()[b.map().offset..];
 
-		unsafe {
-			zip_vecs_varsize([o], [a, b], |[o], [a, b]| {
-				for j in 0..m {
-					for i in 0..n {
-						let mut t = 0.0;
-						for k in 0..k {
-							let a = a[j * a_row_stride + k * a_col_stride];
-							let b = b[k * b_row_stride + i * b_col_stride];
-							t += a.to_f64() * b.to_f64();
-						}
-						let t = T::from_f64(t * scale);
-						o[j * o_row_stride + i * o_col_stride] = t;
-					}
+		for j in 0..m {
+			for i in 0..n {
+				let mut t = 0.0;
+				for k in 0..k {
+					let a = a[j * a_row_stride + k * a_col_stride];
+					let b = b[k * b_row_stride + i * b_col_stride];
+					t += a.to_f64() * b.to_f64();
 				}
-			});
+				let t = T::from_f64(t * scale);
+				o[j * o_row_stride + i * o_col_stride] = t;
+			}
 		}
 
 		Ok(()) // TODO

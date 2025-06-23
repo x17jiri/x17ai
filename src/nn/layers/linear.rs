@@ -114,7 +114,6 @@ impl Layer for Linear {
 		// d_inp
 		let d_o = col(&d_out)?;
 		let d_i = (w.T() * d_o).scale(self.backward_scale);
-
 		// [... , outputs] -> [... , inputs]
 		let d_inp = d_out.new_replace_tail(1, &self.input_shape)?;
 		col(&d_inp)?.assign(d_i)?;
@@ -126,10 +125,9 @@ impl Layer for Linear {
 			let grad = mat(grad)?;
 			if already_have_grad {
 				cold_path();
-				grad.acc(d_w)
-			} else {
-				grad.assign(d_w)
+				todo!("Linear layer backward with existing gradient is not implemented yet");
 			}
+			grad.clear_acc(d_w)
 		})?;
 
 		Ok(d_inp)
@@ -137,7 +135,7 @@ impl Layer for Linear {
 }
 
 //--------------------------------------------------------------------------------------------------
-/*
+
 /// Multihead Linear Layer.
 ///
 /// It works similarly to linear layer, but the same inputs are transformed
@@ -147,7 +145,6 @@ impl Layer for Linear {
 ///     output: [..., head, outputs]
 pub struct MultiheadLinear {
 	pub(crate) linear: Linear,
-
 	output_shape: [usize; 2],
 }
 
@@ -158,14 +155,14 @@ impl MultiheadLinear {
 		heads: usize,
 		dtype: DType,
 		ctx: &mut ModelContext,
-	) -> MultiheadLinear {
-		let mut linear = Linear::new(inputs, heads * outputs, dtype, ctx);
-		linear.weights.borrow_mut().partition(heads, inputs * outputs);
+	) -> Result<Self, ErrPack<OptimizerError>> {
+		let linear = Linear::new(inputs, heads * outputs, dtype, ctx)?;
+		linear.weights.borrow_mut().partition(heads, inputs * outputs)?;
 
 		// TODO - should we change the backward scale?
-		linear.backward_scale = 1.0 / (outputs as f64).sqrt();
+		//linear.backward_scale = 1.0 / (outputs as f64).sqrt();
 
-		MultiheadLinear { linear, output_shape: [heads, outputs] }
+		Ok(Self { linear, output_shape: [heads, outputs] })
 	}
 }
 
@@ -183,28 +180,34 @@ impl Layer for MultiheadLinear {
 	}
 
 	fn collect_named_params(&self, prefix: &str, f: &mut dyn FnMut(String, Rc<RefCell<Param>>)) {
-		self.linear.collect_named_params(format!("{}.linear", prefix).as_str(), f);
+		self.linear.collect_named_params(format!("{prefix}.linear").as_str(), f);
 	}
 
 	#[inline(never)]
-	fn forward(&self, inp: Tensor, ctx: &mut EvalContext) -> Tensor {
-		let out = self.linear.forward(inp, ctx);
+	fn forward(
+		&self,
+		inp: Tensor,
+		ctx: &mut EvalContext,
+	) -> Result<Tensor, ErrPack<TensorOpError>> {
+		let out = self.linear.forward(inp, ctx)?;
 
 		// [..., heads * outputs] -> [..., heads, outputs]
-		out.reshape_last_dim(self.output_shape)
+		Ok(out.reshape_last_dim(self.output_shape)?)
 	}
 
-	fn randomize(&mut self) {
-		self.linear.randomize();
+	fn randomize(&mut self) -> std::result::Result<(), ErrPack<tensor::TensorOpError>> {
+		self.linear.randomize()
 	}
 
-	fn backward(&self, d_out: Tensor, ctx: &mut EvalContext) -> Tensor {
+	fn backward(
+		&self,
+		d_out: Tensor,
+		ctx: &mut EvalContext,
+	) -> Result<Tensor, ErrPack<OptimizerError>> {
 		// [..., heads, outputs] -> [..., heads * outputs]
-		let d_out = d_out.merge_dims::<2>();
-
+		let d_out = d_out.merge_dims::<2>()?;
 		self.linear.backward(d_out, ctx)
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
-*/

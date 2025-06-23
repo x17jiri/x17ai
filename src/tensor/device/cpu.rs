@@ -12,9 +12,7 @@ use std::ops::{Range, RangeFull};
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-use crate::ErrPack;
 use crate::tensor::HasDType;
-use crate::tensor::device::executor::ExecutorError;
 
 pub mod float_executor;
 pub mod math;
