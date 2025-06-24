@@ -31,6 +31,7 @@
 #![feature(maybe_uninit_uninit_array_transpose)]
 #![feature(maybe_uninit_slice)]
 #![feature(associated_type_defaults)]
+#![feature(box_into_inner)]
 // clippy
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]

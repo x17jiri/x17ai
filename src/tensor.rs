@@ -355,6 +355,7 @@ pub enum TensorOpError {
 	NewBufUnsupportedDType,
 	NewBufAllocationFailed,
 	IncompatibleStridesForMerge,
+	MissingValue,
 }
 
 impl TensorOpError {
@@ -366,6 +367,10 @@ impl TensorOpError {
 			code: Self::MissingVecDimension,
 			extra: Some(Box::new(ErrExtra { message, nested: None })),
 		}
+	}
+
+	pub fn missing_value() -> ErrPack<Self> {
+		ErrPack { code: Self::MissingValue, extra: None }
 	}
 }
 
