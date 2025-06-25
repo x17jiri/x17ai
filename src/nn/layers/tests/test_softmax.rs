@@ -8,7 +8,7 @@
 use super::super::softmax::*;
 
 use crate::ErrPack;
-use crate::nn::EvalContext;
+use crate::autograd::{Autograd, AutogradNode, GradientCapture};
 use crate::nn::layers::Layer;
 use crate::nn::optimizer::OptimizerError;
 use crate::tensor::Tensor;
@@ -37,8 +37,11 @@ fn test_softmax() -> Result<(), ErrPack<OptimizerError>> {
 		[ 0.1642,  0.5081,  0.1545,  0.0794,  0.0938],
 	])?;
 
-	let mut ctx = EvalContext::new(true);
-	let out = softmax.forward(inp, &mut ctx)?;
+	let d_inp_capture = GradientCapture::new();
+	let d_inp = d_inp_capture.storage();
+	let out = softmax.forward(AutogradNode::new(inp, Some(d_inp_capture)))?;
+
+	let (out, backward_fn) = out.take();
 
 	println!("out = {}", out.borrow()?.view::<f32>()?);
 	println!("expected_out = {}", expected_out.borrow()?.view::<f32>()?);
@@ -59,7 +62,8 @@ fn test_softmax() -> Result<(), ErrPack<OptimizerError>> {
 		[-0.0042,  0.0378, -0.0117, -0.0060, -0.0159],
 	])?;
 
-	let d_inp = softmax.backward(d_out, &mut ctx)?;
+	Autograd::run(backward_fn.unwrap(), d_out);
+	let d_inp = d_inp.borrow_mut().take().unwrap();
 
 	println!("d_inp = {}", d_inp.borrow()?.view::<f32>()?);
 	println!("expected_d_inp = {}", expected_d_inp.borrow()?.view::<f32>()?);

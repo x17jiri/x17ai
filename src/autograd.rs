@@ -5,6 +5,9 @@
 //
 //------------------------------------------------------------------------------
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use smallvec::SmallVec;
 
 use crate::ErrPack;
@@ -12,38 +15,48 @@ use crate::tensor::{Tensor, TensorOpError};
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct Node {
-	value: Option<Tensor>,
-	backward_fn: Option<Box<dyn BackwardFn>>,
+pub struct AutogradNode {
+	pub value: Tensor,
+	pub backward_fn: Option<Box<dyn BackwardFn>>,
 }
 
-impl Node {
-	pub fn new(value: Tensor, backward_fn: Option<Box<dyn BackwardFn>>) -> Box<Self> {
-		Box::new(Self { value: Some(value), backward_fn })
+impl AutogradNode {
+	pub fn new(value: Tensor, backward_fn: Option<Box<dyn BackwardFn>>) -> Self {
+		Self { value, backward_fn }
 	}
 
 	pub fn requires_grad(&self) -> bool {
 		self.backward_fn.is_some()
 	}
 
-	pub fn take_value(&mut self) -> Option<Tensor> {
-		self.value.take()
+	pub fn take(self) -> (Tensor, Option<Box<dyn BackwardFn>>) {
+		let backward_fn = self.backward_fn;
+		(self.value, backward_fn)
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct AutogradCtx {
-	nodes: SmallVec<[(Box<Node>, Tensor); 3]>,
+pub struct Autograd {
+	nodes: SmallVec<[(Box<dyn BackwardFn>, Tensor); 3]>,
 }
 
-impl AutogradCtx {
-	fn new() -> Self {
-		Self { nodes: SmallVec::new() }
+impl Autograd {
+	pub fn set_grad(&mut self, node: Box<dyn BackwardFn>, grad: Tensor) {
+		self.nodes.push((node, grad));
 	}
 
-	pub fn set_grad(&mut self, node: Box<Node>, grad: Tensor) {
-		self.nodes.push((node, grad));
+	pub fn run(
+		backward_fn: Box<dyn BackwardFn>,
+		grad: Tensor,
+	) -> Result<(), ErrPack<TensorOpError>> {
+		let mut ctx = Self { nodes: SmallVec::new() };
+		backward_fn.backward(grad, &mut ctx)?;
+		while !ctx.nodes.is_empty() {
+			let (node, d_out) = ctx.nodes.pop().unwrap();
+			node.backward(d_out, &mut ctx)?;
+		}
+		Ok(())
 	}
 }
 
@@ -53,19 +66,19 @@ pub trait BackwardFn {
 	fn backward(
 		self: Box<Self>,
 		d_out: Tensor,
-		ctx: &mut AutogradCtx,
+		autograd: &mut Autograd,
 	) -> Result<(), ErrPack<TensorOpError>>;
 }
 
 //--------------------------------------------------------------------------------------------------
 
 pub struct StraightThroughBackwardFn {
-	pub inp_node: Box<Node>,
+	pub inp_backward: Box<dyn BackwardFn>,
 }
 
 impl StraightThroughBackwardFn {
-	pub fn new(inp_node: Box<Node>) -> Self {
-		Self { inp_node }
+	pub fn new(inp_backward: Box<dyn BackwardFn>) -> Self {
+		Self { inp_backward }
 	}
 }
 
@@ -73,9 +86,42 @@ impl BackwardFn for StraightThroughBackwardFn {
 	fn backward(
 		self: Box<Self>,
 		d_out: Tensor,
-		ctx: &mut AutogradCtx,
+		autograd: &mut Autograd,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		ctx.set_grad(self.inp_node, d_out);
+		autograd.set_grad(self.inp_backward, d_out);
+		Ok(())
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct GradientCapture {
+	pub storage: Rc<RefCell<Option<Tensor>>>,
+}
+
+impl GradientCapture {
+	pub fn new() -> Box<Self> {
+		Box::new(Self { storage: Rc::new(RefCell::new(None)) })
+	}
+
+	pub fn storage(&self) -> Rc<RefCell<Option<Tensor>>> {
+		self.storage.clone()
+	}
+}
+
+impl BackwardFn for GradientCapture {
+	#[allow(clippy::panic_in_result_fn)]
+	fn backward(
+		self: Box<Self>,
+		d_out: Tensor,
+		_autograd: &mut Autograd,
+	) -> Result<(), ErrPack<TensorOpError>> {
+		let Self { storage } = Box::into_inner(self);
+		let mut storage = storage.borrow_mut();
+
+		assert!(storage.is_none());
+		*storage = Some(d_out);
+
 		Ok(())
 	}
 }

@@ -9,27 +9,27 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 //pub mod attention;
-pub mod linear;
+//pub mod linear;
 pub mod rms_norm;
-pub mod skip_connection;
+//pub mod skip_connection;
 pub mod softmax;
-pub mod softmax_cross_entropy;
-pub mod swiglu;
+//pub mod softmax_cross_entropy;
+//pub mod swiglu;
 
 #[cfg(test)]
 mod tests;
 
 use crate::ErrPack;
-use crate::nn::optimizer::OptimizerError;
-use crate::tensor::{Tensor, TensorOpError};
+use crate::autograd::AutogradNode;
+use crate::tensor::TensorOpError;
 
-use super::{EvalContext, Param};
+use super::Param;
 
 //pub use linear::{Linear, MultiheadLinear};
 pub use rms_norm::{RMSNorm, RMSNormGradientMode};
 pub use softmax::{Softmax, SoftmaxGradientMode};
-pub use softmax_cross_entropy::SoftmaxCrossEntropy;
-pub use swiglu::SwiGLU;
+//pub use softmax_cross_entropy::SoftmaxCrossEntropy;
+//pub use swiglu::SwiGLU;
 
 pub trait Layer {
 	fn input_shape(&self) -> &[usize];
@@ -50,32 +50,16 @@ pub trait Layer {
 		params
 	}
 
-	/// Note: Passing the `inp` tensor by value allows the implementations to check if the tensor
-	/// can be reused for output. It can test if the tensor owns the buffer.
-	///
-	/// If we passed by reference, even if the tensor owned the buffer, there could be multiple
-	/// references to the tensor itself and so the implementations would be unable to tell
-	/// if the buffer can be reused.
-	fn forward(&self, inp: Tensor, ctx: &mut EvalContext)
-	-> Result<Tensor, ErrPack<TensorOpError>>;
+	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>>;
 
 	fn randomize(&mut self) -> Result<(), ErrPack<TensorOpError>>;
-
-	fn backward(
-		&self,
-		d_out: Tensor,
-		ctx: &mut EvalContext,
-	) -> Result<Tensor, ErrPack<OptimizerError>>;
-
-	fn as_loss_function(&self) -> Option<&dyn LossFunction> {
-		None
-	}
 }
 
+/*
 pub trait LossFunction: Layer {
 	/// This function is similar to `backward()`, but instead of derivatives with respect to
 	/// the output, it takes expected value of the output.
-	// It would typically be used for the last layer in a model.
+	/// It would typically be used for the last layer in a model.
 	fn backward_start(
 		&self,
 		out: Tensor,
@@ -85,3 +69,4 @@ pub trait LossFunction: Layer {
 
 	fn loss(&self, out: Tensor, expected_out: Tensor) -> Result<f64, ErrPack<TensorOpError>>;
 }
+*/
