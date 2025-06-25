@@ -47,13 +47,15 @@ impl Autograd {
 	}
 
 	pub fn run(
-		backward_fn: Box<dyn BackwardFn>,
+		backward_fn: Option<Box<dyn BackwardFn>>,
 		grad: Tensor,
 	) -> Result<(), ErrPack<TensorOpError>> {
+		let Some(backward_fn) = backward_fn else {
+			return Ok(());
+		};
 		let mut ctx = Self { nodes: SmallVec::new() };
 		backward_fn.backward(grad, &mut ctx)?;
-		while !ctx.nodes.is_empty() {
-			let (node, d_out) = ctx.nodes.pop().unwrap();
+		while let Some((node, d_out)) = ctx.nodes.pop() {
 			node.backward(d_out, &mut ctx)?;
 		}
 		Ok(())

@@ -49,6 +49,7 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::elidable_lifetime_names)]
 #![allow(clippy::return_self_not_must_use)]
+#![allow(clippy::comparison_chain)]
 
 use std::convert::Infallible;
 

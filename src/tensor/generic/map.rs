@@ -13,6 +13,7 @@ use std::hint::{cold_path, likely};
 pub use dd::DD;
 pub use nd::ND;
 
+use crate::tensor::dim_merger::DimMerger;
 use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;
 use crate::tensor::generic::universal_range::UniversalRange;
 
@@ -228,6 +229,44 @@ pub fn merge_dims(dims: &[SizeAndStride]) -> Result<SizeAndStride, IncompatibleS
 	Ok(merged)
 }
 
+pub fn reshape_dims(
+	dims: &[SizeAndStride],
+	into: &mut [SizeAndStride],
+) -> Result<(), ReshapeError> {
+	let Ok(dims) = DimMerger::merge::<5>([dims]) else {
+		cold_path();
+		return Err(ReshapeError);
+	};
+	let mut inp_iter =
+		dims.iter().rev().map(|i| SizeAndStride { size: i.size, stride: i.strides[0] });
+	let mut inp = inp_iter.next().unwrap_or(SizeAndStride { size: 1, stride: 0 });
+	let mut out_acc = SizeAndStride { size: 1, stride: inp.stride };
+	for out in into.iter_mut().rev() {
+		let Some(mul) = out_acc.size.checked_mul(out.size) else {
+			cold_path();
+			return Err(ReshapeError);
+		};
+		out_acc.size = mul;
+		if out_acc.size < inp.size {
+			out.stride = out_acc.stride;
+			out_acc.stride *= out.size;
+		} else if out_acc.size == inp.size {
+			out.stride = out_acc.stride;
+			inp = inp_iter.next().unwrap_or(SizeAndStride { size: 1, stride: 0 });
+			out_acc = SizeAndStride { size: 1, stride: inp.stride };
+		} else {
+			cold_path();
+			return Err(ReshapeError);
+		}
+	}
+	if inp.size == 1 {
+		Ok(())
+	} else {
+		cold_path();
+		Err(ReshapeError)
+	}
+}
+
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -260,6 +299,10 @@ pub struct IncompatibleStridesError;
 pub struct InvalidNumElementsError;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ReshapeError;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ReshapeLastDimError {
 	NotEnoughDimensions,
 	InvalidNumElements,
@@ -286,10 +329,7 @@ pub struct ElementsOverflowError;
 
 //--------------------------------------------------------------------------------------------------
 
-impl<'a, T> Map for &'a T
-where
-	T: Map,
-{
+impl<'a, T: Map> Map for &'a T {
 	type Deref = T::Deref;
 
 	fn as_ref(&self) -> &Self::Deref {

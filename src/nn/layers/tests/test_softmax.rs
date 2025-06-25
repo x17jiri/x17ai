@@ -62,7 +62,7 @@ fn test_softmax() -> Result<(), ErrPack<OptimizerError>> {
 		[-0.0042,  0.0378, -0.0117, -0.0060, -0.0159],
 	])?;
 
-	Autograd::run(backward_fn.unwrap(), d_out);
+	Autograd::run(backward_fn, d_out)?;
 	let d_inp = d_inp.borrow_mut().take().unwrap();
 
 	println!("d_inp = {}", d_inp.borrow()?.view::<f32>()?);
