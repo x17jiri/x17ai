@@ -115,7 +115,6 @@ impl Layer for RMSNorm {
 	}
 }
 
-#[allow(non_camel_case_types)]
 pub struct RMSNormBackwardFn_Precise {
 	out: Tensor,
 	scale: Tensor,
@@ -146,7 +145,6 @@ impl BackwardFn for RMSNormBackwardFn_Precise {
 	}
 }
 
-#[allow(non_camel_case_types)]
 pub struct RMSNormBackwardFn_NormGradients {
 	calc_scale: CalcScale,
 	inp_backward: Box<dyn BackwardFn>,

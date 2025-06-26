@@ -13,6 +13,9 @@ use smallvec::SmallVec;
 use crate::ErrPack;
 use crate::tensor::{Tensor, TensorOpError};
 
+pub mod add;
+pub mod split;
+
 //--------------------------------------------------------------------------------------------------
 
 pub struct AutogradNode {

@@ -50,6 +50,7 @@
 #![allow(clippy::elidable_lifetime_names)]
 #![allow(clippy::return_self_not_must_use)]
 #![allow(clippy::comparison_chain)]
+#![allow(non_camel_case_types)]
 
 use std::convert::Infallible;
 

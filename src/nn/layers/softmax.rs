@@ -87,7 +87,6 @@ impl Layer for Softmax {
 	}
 }
 
-#[allow(non_camel_case_types)]
 pub struct SoftmaxBackwardFn_Precise {
 	pub out: Tensor,
 	pub inp_backward: Box<dyn BackwardFn>,
