@@ -10,9 +10,10 @@ use std::rc::Rc;
 
 //pub mod attention;
 //pub mod linear;
+pub mod cross_entropy;
 pub mod rms_norm;
 pub mod skip_connection;
-pub mod softmax_cross_entropy;
+pub mod softmax;
 pub mod swiglu;
 
 #[cfg(test)]
@@ -25,8 +26,8 @@ use crate::tensor::TensorOpError;
 use super::Param;
 
 //pub use linear::{Linear, MultiheadLinear};
+pub use cross_entropy::CrossEntropy;
 pub use rms_norm::{RMSNorm, RMSNormGradientMode};
-pub use softmax_cross_entropy::{SoftmaxCrossEntropy, SoftmaxGradientMode};
 pub use swiglu::SwiGLU;
 
 pub trait Layer {

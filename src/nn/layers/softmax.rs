@@ -9,11 +9,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::autograd::{Autograd, AutogradNode, BackwardFn, LossFn, StraightThroughBackwardFn};
+use crate::autograd::{Autograd, AutogradNode, BackwardFn, StraightThroughBackwardFn};
 use crate::nn::param::Param;
-use crate::tensor::math::{LnClamped, Sum, sum_all};
+use crate::tensor::math::Sum;
 use crate::tensor::{Tensor, TensorOpError, math};
-use crate::util::LossyInto;
 
 use super::Layer;
 
@@ -23,12 +22,12 @@ pub enum SoftmaxGradientMode {
 	StraightThrough,
 }
 
-pub struct SoftmaxCrossEntropy {
+pub struct Softmax {
 	shape: [usize; 1],
 	gradient_mode: SoftmaxGradientMode,
 }
 
-impl SoftmaxCrossEntropy {
+impl Softmax {
 	pub fn new(n_inputs: usize) -> Self {
 		Self {
 			shape: [n_inputs],
@@ -41,7 +40,7 @@ impl SoftmaxCrossEntropy {
 	}
 }
 
-impl Layer for SoftmaxCrossEntropy {
+impl Layer for Softmax {
 	fn input_shape(&self) -> &[usize] {
 		&self.shape
 	}
@@ -64,15 +63,20 @@ impl Layer for SoftmaxCrossEntropy {
 
 		out.assign(math::softmax(&inp))?;
 
-		let backward_fn = inp_backward.map(|inp_backward| match self.gradient_mode {
-			SoftmaxGradientMode::Precise => {
-				Box::new(SoftmaxBackwardFn_Precise { out: out.clone(), inp_backward })
-					as Box<dyn BackwardFn>
+		#[allow(clippy::option_if_let_else)]
+		let backward_fn = match inp_backward {
+			Some(inp_backward) => match self.gradient_mode {
+				SoftmaxGradientMode::Precise => {
+					Some(Box::new(SoftmaxBackwardFn_Precise { out: out.clone(), inp_backward })
+						as Box<dyn BackwardFn>)
+				},
+				SoftmaxGradientMode::StraightThrough => {
+					Some(Box::new(StraightThroughBackwardFn::new(inp_backward))
+						as Box<dyn BackwardFn>)
+				},
 			},
-			SoftmaxGradientMode::StraightThrough => {
-				Box::new(StraightThroughBackwardFn::new(inp_backward)) as Box<dyn BackwardFn>
-			},
-		});
+			None => None,
+		};
 
 		Ok(AutogradNode::new(out, backward_fn))
 	}
@@ -89,7 +93,7 @@ pub struct SoftmaxBackwardFn_Precise {
 }
 
 impl BackwardFn for SoftmaxBackwardFn_Precise {
-	fn backward(
+	fn run(
 		self: Box<Self>,
 		d_out: Tensor,
 		autograd: &mut Autograd,
@@ -106,36 +110,6 @@ impl BackwardFn for SoftmaxBackwardFn_Precise {
 		d_inp.assign(&d_inp * &out)?;
 
 		autograd.set_grad(inp_backward, d_inp);
-		Ok(())
-	}
-}
-
-pub struct SoftmaxCrossEntropyLossFn {
-	pub out: Tensor,
-	pub expected_out: Tensor,
-	pub inp_backward: Option<Box<dyn BackwardFn>>,
-}
-
-impl LossFn for SoftmaxCrossEntropyLossFn {
-	fn loss(&self) -> Result<f64, ErrPack<TensorOpError>> {
-		let out = &self.out;
-		let expected_out = &self.expected_out;
-		// Remove the feature dimension (-1). All other dimensions are batch dimensions,
-		// so `elems()` will give us the batch size.
-		let batch_size = out.select(-1, 0)?.elems();
-
-		let tmp = out.new_empty_like()?;
-		tmp.assign(out.ln_clamped())?;
-		tmp.assign(&tmp * expected_out)?;
-
-		Ok(sum_all(&tmp)? / -batch_size.lossy_into())
-	}
-
-	fn backward_loss(self: Box<Self>) -> Result<(), ErrPack<TensorOpError>> {
-		let Self { out, expected_out, inp_backward } = Box::into_inner(self);
-		let d_inp = out.new_empty_like()?;
-		d_inp.assign(&out - &expected_out)?;
-		Autograd::run(inp_backward, d_inp)?;
 		Ok(())
 	}
 }

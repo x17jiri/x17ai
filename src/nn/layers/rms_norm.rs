@@ -122,7 +122,7 @@ pub struct RMSNormBackwardFn_Precise {
 }
 
 impl BackwardFn for RMSNormBackwardFn_Precise {
-	fn backward(
+	fn run(
 		self: Box<Self>,
 		d_out: Tensor,
 		autograd: &mut Autograd,
@@ -150,7 +150,7 @@ pub struct RMSNormBackwardFn_NormGradients {
 }
 
 impl BackwardFn for RMSNormBackwardFn_NormGradients {
-	fn backward(
+	fn run(
 		self: Box<Self>,
 		d_out: Tensor,
 		autograd: &mut Autograd,

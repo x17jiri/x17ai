@@ -61,7 +61,7 @@ pub struct SplitBackwardFn {
 }
 
 impl BackwardFn for SplitBackwardFn {
-	fn backward(
+	fn run(
 		self: Box<Self>,
 		mut d_out: Tensor,
 		autograd: &mut Autograd,
@@ -95,7 +95,7 @@ impl BackwardFn for SplitBackwardFn {
 		if let Ok(refcell) = Rc::try_unwrap(rc_inner) {
 			let SplitBackwardFn_Inner { grad, backward_fn } = refcell.into_inner();
 			if let Some(grad) = grad {
-				backward_fn.backward(grad, autograd)?;
+				autograd.set_grad(backward_fn, grad);
 			} else {
 				// TODO - return some error when grad is None ?
 			}

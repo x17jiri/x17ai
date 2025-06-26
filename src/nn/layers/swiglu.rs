@@ -80,7 +80,7 @@ pub struct SwiGLUBackwardFn {
 }
 
 impl BackwardFn for SwiGLUBackwardFn {
-	fn backward(
+	fn run(
 		self: Box<Self>,
 		d_out: Tensor,
 		autograd: &mut Autograd,

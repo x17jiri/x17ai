@@ -50,7 +50,7 @@ pub struct AddBackwardFn {
 }
 
 impl BackwardFn for AddBackwardFn {
-	fn backward(
+	fn run(
 		self: Box<Self>,
 		d_out: Tensor,
 		autograd: &mut Autograd,

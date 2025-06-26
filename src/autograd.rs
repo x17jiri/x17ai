@@ -57,9 +57,9 @@ impl Autograd {
 			return Ok(());
 		};
 		let mut ctx = Self { nodes: SmallVec::new() };
-		backward_fn.backward(grad, &mut ctx)?;
+		backward_fn.run(grad, &mut ctx)?;
 		while let Some((node, d_out)) = ctx.nodes.pop() {
-			node.backward(d_out, &mut ctx)?;
+			node.run(d_out, &mut ctx)?;
 		}
 		Ok(())
 	}
@@ -68,7 +68,7 @@ impl Autograd {
 //--------------------------------------------------------------------------------------------------
 
 pub trait BackwardFn {
-	fn backward(
+	fn run(
 		self: Box<Self>,
 		d_out: Tensor,
 		autograd: &mut Autograd,
@@ -76,8 +76,10 @@ pub trait BackwardFn {
 }
 
 pub trait LossFn {
+	fn value(&self) -> Tensor;
+	fn target(&self) -> Tensor;
 	fn loss(&self) -> Result<f64, ErrPack<TensorOpError>>;
-	fn backward_loss(self: Box<Self>) -> Result<(), ErrPack<TensorOpError>>;
+	fn backward(self: Box<Self>) -> Result<(), ErrPack<TensorOpError>>;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -93,7 +95,7 @@ impl StraightThroughBackwardFn {
 }
 
 impl BackwardFn for StraightThroughBackwardFn {
-	fn backward(
+	fn run(
 		self: Box<Self>,
 		d_out: Tensor,
 		autograd: &mut Autograd,
@@ -121,7 +123,7 @@ impl GradientCapture {
 
 impl BackwardFn for GradientCapture {
 	#[allow(clippy::panic_in_result_fn)]
-	fn backward(
+	fn run(
 		self: Box<Self>,
 		d_out: Tensor,
 		_autograd: &mut Autograd,
