@@ -17,31 +17,33 @@ use crate::tensor::{Tensor, TensorOpError};
 
 pub fn split<const N: usize>(inp_node: AutogradNode) -> [AutogradNode; N] {
 	let mut output = [const { MaybeUninit::uninit() }; N];
-	let (inp, inp_fn) = inp_node.take();
-	if let Some(inp_fn) = inp_fn {
-		let rc_inner =
-			Rc::new(RefCell::new(SplitBackwardFn_Inner { grad: None, backward_fn: inp_fn }));
-		for elem in output.iter_mut().take(N.saturating_sub(1)) {
-			let inp = inp.clone();
-			let rc_inner = rc_inner.clone();
-			elem.write(AutogradNode::new(
-				inp,
-				Some(Box::new(SplitBackwardFn { rc_inner }) as Box<dyn BackwardFn>),
-			));
-		}
-		if let Some(last) = output.last_mut() {
-			last.write(AutogradNode::new(
-				inp,
-				Some(Box::new(SplitBackwardFn { rc_inner }) as Box<dyn BackwardFn>),
-			));
-		}
-	} else {
-		for elem in output.iter_mut().take(N.saturating_sub(1)) {
-			let inp = inp.clone();
-			elem.write(AutogradNode::new(inp, None));
-		}
-		if let Some(last) = output.last_mut() {
-			last.write(AutogradNode::new(inp, None));
+	if N > 0 {
+		let (inp, inp_fn) = inp_node.take();
+		if let Some(inp_fn) = inp_fn {
+			let rc_inner =
+				Rc::new(RefCell::new(SplitBackwardFn_Inner { grad: None, backward_fn: inp_fn }));
+			for elem in output.iter_mut().take(N - 1) {
+				let inp = inp.clone();
+				let rc_inner = rc_inner.clone();
+				elem.write(AutogradNode::new(
+					inp,
+					Some(Box::new(SplitBackwardFn { rc_inner }) as Box<dyn BackwardFn>),
+				));
+			}
+			if let Some(last) = output.last_mut() {
+				last.write(AutogradNode::new(
+					inp,
+					Some(Box::new(SplitBackwardFn { rc_inner }) as Box<dyn BackwardFn>),
+				));
+			}
+		} else {
+			for elem in output.iter_mut().take(N - 1) {
+				let inp = inp.clone();
+				elem.write(AutogradNode::new(inp, None));
+			}
+			if let Some(last) = output.last_mut() {
+				last.write(AutogradNode::new(inp, None));
+			}
 		}
 	}
 	unsafe { MaybeUninit::array_assume_init(output) }

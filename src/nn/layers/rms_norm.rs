@@ -83,28 +83,27 @@ impl Layer for RMSNorm {
 		let out = inp.reuse_or_new_like()?;
 		out.assign(&inp * &scale)?;
 
-		#[allow(clippy::option_if_let_else)]
-		let backward_fn = match inp_backward {
-			Some(inp_backward) => match self.gradient_mode {
-				RMSNormGradientMode::Precise => Some(Box::new(RMSNormBackwardFn_Precise {
+		let backward_fn = inp_backward.map(|inp_backward| match self.gradient_mode {
+			RMSNormGradientMode::Precise => {
+				//
+				Box::new(RMSNormBackwardFn_Precise {
 					out: out.clone(),
 					scale,
 					sum_to_mean: self.calc_scale.sum_to_mean,
 					inp_backward,
-				}) as Box<dyn BackwardFn>),
-				RMSNormGradientMode::NormGradients => {
-					Some(Box::new(RMSNormBackwardFn_NormGradients {
-						calc_scale: self.calc_scale,
-						inp_backward,
-					}) as Box<dyn BackwardFn>)
-				},
-				RMSNormGradientMode::StraightThrough => {
-					Some(Box::new(StraightThroughBackwardFn::new(inp_backward))
-						as Box<dyn BackwardFn>)
-				},
+				}) as Box<dyn BackwardFn>
 			},
-			None => None,
-		};
+			RMSNormGradientMode::NormGradients => {
+				//
+				Box::new(RMSNormBackwardFn_NormGradients {
+					calc_scale: self.calc_scale,
+					inp_backward,
+				}) as Box<dyn BackwardFn>
+			},
+			RMSNormGradientMode::StraightThrough => {
+				Box::new(StraightThroughBackwardFn::new(inp_backward)) as Box<dyn BackwardFn>
+			},
+		});
 
 		Ok(AutogradNode::new(out, backward_fn))
 	}

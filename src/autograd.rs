@@ -75,6 +75,11 @@ pub trait BackwardFn {
 	) -> Result<(), ErrPack<TensorOpError>>;
 }
 
+pub trait LossFn {
+	fn loss(&self) -> Result<f64, ErrPack<TensorOpError>>;
+	fn backward_loss(self: Box<Self>) -> Result<(), ErrPack<TensorOpError>>;
+}
+
 //--------------------------------------------------------------------------------------------------
 
 pub struct StraightThroughBackwardFn {
