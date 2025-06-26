@@ -40,7 +40,6 @@ fn test_softmax() -> Result<(), ErrPack<OptimizerError>> {
 	let d_inp_capture = GradientCapture::new();
 	let d_inp = d_inp_capture.storage();
 	let out = softmax.forward(AutogradNode::new(inp, Some(d_inp_capture)))?;
-
 	let (out, backward_fn) = out.take();
 
 	println!("out = {}", out.borrow()?.view::<f32>()?);

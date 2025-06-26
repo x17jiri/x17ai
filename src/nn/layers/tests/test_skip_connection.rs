@@ -6,11 +6,11 @@
 //------------------------------------------------------------------------------
 
 use super::super::rms_norm::*;
-use super::super::skip_connection::*;
 
 use crate::ErrPack;
-use crate::nn::EvalContext;
+use crate::autograd::{Autograd, AutogradNode, GradientCapture};
 use crate::nn::layers::Layer;
+use crate::nn::layers::skip_connection::SkipConnection;
 use crate::nn::optimizer::OptimizerError;
 use crate::tensor::Tensor;
 use crate::tensor::device::cpu::CPUDevice;
@@ -38,8 +38,10 @@ fn test_skip_con() -> Result<(), ErrPack<OptimizerError>> {
 		[ 0.1748,  3.0405,  0.0195, -1.6696, -1.2476],
 	])?;
 
-	let mut ctx = EvalContext::new(true);
-	let out = skip_con.forward(inp, &mut ctx)?;
+	let d_inp_capture = GradientCapture::new();
+	let d_inp = d_inp_capture.storage();
+	let out = skip_con.forward(AutogradNode::new(inp, Some(d_inp_capture)))?;
+	let (out, backward_fn) = out.take();
 
 	println!("out = {}", out.borrow()?.view::<f32>()?);
 	println!("expected_out = {}", expected_out.borrow()?.view::<f32>()?);
@@ -60,7 +62,8 @@ fn test_skip_con() -> Result<(), ErrPack<OptimizerError>> {
 		[-0.0112,  0.0593, -0.1281, -0.0201, -0.2861],
 	])?;
 
-	let d_inp = skip_con.backward(d_out, &mut ctx)?;
+	Autograd::run(backward_fn, d_out)?;
+	let d_inp = d_inp.borrow_mut().take().unwrap();
 
 	println!("d_inp = {}", d_inp.borrow()?.view::<f32>()?);
 	println!("expected_d_inp = {}", expected_d_inp.borrow()?.view::<f32>()?);

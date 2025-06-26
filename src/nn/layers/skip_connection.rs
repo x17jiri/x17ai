@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::nn::eval_context::EvalContext;
+use crate::autograd::{Autograd, AutogradNode, BackwardFn, GradientCapture};
 use crate::nn::optimizer::OptimizerError;
 use crate::nn::param::Param;
 use crate::tensor::{Tensor, TensorOpError};
@@ -24,17 +24,12 @@ impl<Nested: Layer> SkipConnection<Nested> {
 	pub fn new(nested: Nested) -> Self {
 		Self { nested }
 	}
+}
 
-	#[allow(clippy::needless_pass_by_value)]
-	pub fn add_residual(
-		&self,
-		inp: Tensor,
-		nested_out: Tensor,
-	) -> Result<Tensor, ErrPack<TensorOpError>> {
-		let out = nested_out.reuse_or_new_like()?;
-		out.assign(&inp + &nested_out)?;
-		Ok(out)
-	}
+pub fn add_residual(inp: Tensor, nested_out: Tensor) -> Result<Tensor, ErrPack<TensorOpError>> {
+	let out = nested_out.reuse_or_new_like()?;
+	out.assign(&inp + &nested_out)?;
+	Ok(out)
 }
 
 impl<Nested: Layer> Layer for SkipConnection<Nested> {
@@ -54,26 +49,52 @@ impl<Nested: Layer> Layer for SkipConnection<Nested> {
 		self.nested.collect_named_params(prefix, f);
 	}
 
-	fn forward(
-		&self,
-		inp: Tensor,
-		ctx: &mut EvalContext,
-	) -> Result<Tensor, ErrPack<TensorOpError>> {
-		let nested_out = self.nested.forward(inp.clone(), ctx)?;
-		self.add_residual(inp, nested_out)
+	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
+		let (inp, backward_fn) = inp_node.take();
+		if let Some(backward_fn) = backward_fn {
+			let gradient_capture = GradientCapture::new();
+			let nested_gradient = gradient_capture.storage();
+			let nested_inp_node = AutogradNode::new(inp.clone(), Some(gradient_capture));
+			let (nested_out, nested_fn) = self.nested.forward(nested_inp_node)?.take();
+			let out = add_residual(inp, nested_out)?;
+			Ok(AutogradNode::new(
+				out,
+				Some(Box::new(SkipConnectionBackwardFn {
+					nested_fn: nested_fn.unwrap(),
+					nested_gradient,
+					backward_fn,
+				})),
+			))
+		} else {
+			let nested_inp_node = AutogradNode::new(inp.clone(), None);
+			let (nested_out, nested_fn) = self.nested.forward(nested_inp_node)?.take();
+			let out = add_residual(inp, nested_out)?;
+			Ok(AutogradNode::new(out, nested_fn))
+		}
 	}
 
 	fn randomize(&mut self) -> Result<(), ErrPack<TensorOpError>> {
 		self.nested.randomize()
 	}
+}
 
+pub struct SkipConnectionBackwardFn {
+	pub nested_fn: Box<dyn BackwardFn>,
+	pub nested_gradient: Rc<RefCell<Option<Tensor>>>,
+	pub backward_fn: Box<dyn BackwardFn>,
+}
+
+impl BackwardFn for SkipConnectionBackwardFn {
 	fn backward(
-		&self,
+		self: Box<Self>,
 		d_out: Tensor,
-		ctx: &mut EvalContext,
-	) -> Result<Tensor, ErrPack<OptimizerError>> {
-		let nested_out = self.nested.backward(d_out.clone(), ctx)?;
-		let d_in = self.add_residual(d_out, nested_out)?;
-		Ok(d_in)
+		autograd: &mut Autograd,
+	) -> Result<(), ErrPack<TensorOpError>> {
+		Autograd::run(Some(self.nested_fn), d_out.clone())?;
+		if let Some(d_nested) = self.nested_gradient.borrow_mut().take() {
+			let d_inp = add_residual(d_out, d_nested)?;
+			autograd.set_grad(self.backward_fn, d_inp);
+		}
+		Ok(())
 	}
 }
