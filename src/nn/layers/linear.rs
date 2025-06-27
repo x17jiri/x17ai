@@ -10,20 +10,20 @@ use std::hint::cold_path;
 use std::rc::Rc;
 
 use crate::ErrPack;
+use crate::autograd::AutogradNode;
 use crate::nn::model_context::ModelContext;
-use crate::nn::optimizer::OptimizerError;
 use crate::nn::param::Param;
 use crate::tensor::math::{self, Scalable, col, mat, row};
 use crate::tensor::{self, DType, Tensor, TensorOpError};
 use crate::util::LossyInto;
 
-use super::{EvalContext, Layer};
+use super::Layer;
 
 //--------------------------------------------------------------------------------------------------
 
 /// Linear Layer transforming inputs to outputs
 ///
-/// This is basically a thin wrapper around a matrix multiplication.
+/// This is basically a thin wrapper around matrix multiplication.
 /// It does not include a bias term.
 ///
 ///     input: [..., inputs]
@@ -32,7 +32,7 @@ pub struct Linear {
 	input_shape: [usize; 1],
 	output_shape: [usize; 1],
 
-	pub(crate) weights: Rc<RefCell<Param>>,
+	weights: Rc<RefCell<Param>>,
 
 	forward_scale: f64,
 	backward_scale: f64, // TODO - do we need to scale the backward pass?
@@ -74,12 +74,9 @@ impl Layer for Linear {
 		f(format!("{prefix}.weights"), self.weights.clone());
 	}
 
-	#[inline(never)]
-	fn forward(
-		&self,
-		inp: Tensor,
-		ctx: &mut EvalContext,
-	) -> Result<Tensor, ErrPack<TensorOpError>> {
+	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
+		let (inp, inp_backward) = inp_node.take();
+
 		// [..., inputs] -> [..., outputs]
 		let out = inp.new_replace_tail(1, &self.output_shape)?;
 
@@ -100,7 +97,9 @@ impl Layer for Linear {
 		let w = self.weights.borrow();
 		w.value().assign(math::randn_clamped())
 	}
+}
 
+/*
 	fn backward(
 		&self,
 		d_out: Tensor,
@@ -132,10 +131,10 @@ impl Layer for Linear {
 
 		Ok(d_inp)
 	}
-}
+}*/
 
 //--------------------------------------------------------------------------------------------------
-
+/*
 /// Multihead Linear Layer.
 ///
 /// It works similarly to linear layer, but the same inputs are transformed
@@ -209,5 +208,5 @@ impl Layer for MultiheadLinear {
 		self.linear.backward(d_out, ctx)
 	}
 }
-
+*/
 //--------------------------------------------------------------------------------------------------

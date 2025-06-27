@@ -9,7 +9,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::nn::optimizer::OptimizerError;
 use crate::tensor::{DType, Device, TensorOpError};
 
 use super::optimizer::OptCoef;
@@ -40,14 +39,14 @@ impl ModelContext {
 		Ok(param)
 	}
 
-	pub fn zero_grad(&mut self) -> Result<(), ErrPack<OptimizerError>> {
+	pub fn zero_grad(&mut self) -> Result<(), ErrPack<TensorOpError>> {
 		for param in &self.params {
 			param.borrow_mut().zero_grad()?;
 		}
 		Ok(())
 	}
 
-	pub fn step(&mut self) -> Result<(), ErrPack<OptimizerError>> {
+	pub fn step(&mut self) -> Result<(), ErrPack<TensorOpError>> {
 		for param in &self.params {
 			param.borrow_mut().step(&self.opt_coef)?;
 		}

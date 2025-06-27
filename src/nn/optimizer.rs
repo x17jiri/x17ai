@@ -10,14 +10,11 @@
 //     Original Adam: https://arxiv.org/abs/1412.6980
 //     Adam-mini: https://arxiv.org/abs/2406.16793
 
-use std::hint::cold_path;
+use std::cell::RefCell;
+use std::rc::Rc;
 
-use crate::tensor::device::buffer::BorrowError;
-use crate::tensor::device::cpu::ViewError;
-use crate::tensor::generic::map::{
-	IncompatibleStridesError, MergeDimsError, NotEnoughDimensionsError, ReshapeLastDimError,
-	SelectError,
-};
+use crate::autograd::{Autograd, BackwardFn};
+use crate::nn::Param;
 use crate::tensor::math::{RSqrt, Sum};
 use crate::tensor::{Tensor, TensorOpError};
 use crate::util::LossyInto;
@@ -47,15 +44,12 @@ pub struct OptParam {
 	pub(crate) parts: usize,
 	pub(crate) part_elems: usize,
 	pub(crate) part_elems_recip: f64, // 1.0 / (part_elems as f64)
-	pub(crate) already_have_grad: bool,
 
-	pub(crate) value: Tensor,   // shape: [parts, part_elems]
-	pub(crate) grad: Tensor,    // shape: [parts, part_elems]
-	pub(crate) m: Tensor,       // shape: [parts, part_elems]
-	pub(crate) v: Tensor,       // shape: [parts, 1]
-	pub(crate) v_rsqrt: Tensor, // shape: [parts, 1]
-
-	pub(crate) grad_reshaped: Tensor, // shape: what's expected by the user
+	pub(crate) value: Tensor,        // shape: [parts, part_elems]
+	pub(crate) grad: Option<Tensor>, // shape: [parts, part_elems]
+	pub(crate) m: Tensor,            // shape: [parts, part_elems]
+	pub(crate) v: Tensor,            // shape: [parts, 1]
+	pub(crate) v_rsqrt: Tensor,      // shape: [parts, 1]
 }
 
 impl OptParam {
@@ -63,23 +57,9 @@ impl OptParam {
 		value: &Tensor,
 		parts: usize,
 		part_elems: usize,
-	) -> Result<Self, ErrPack<OptimizerError>> {
-		let value_elems = value.elems();
-		match parts.checked_mul(part_elems) {
-			Some(partition_elems) if partition_elems == value_elems => {},
-			_ => {
-				cold_path();
-				return Err(OptimizerError::partition(parts, part_elems, value_elems));
-			},
-		}
-
-		let grad_reshaped = value.new_empty_like()?;
-
-		let value = value.merge_all_dims()?; // if fails, tensor is not contiguous
-		let value = value.reshape_last_dim([parts, part_elems])?;
-
-		let grad = grad_reshaped.merge_all_dims()?;
-		let grad = grad.reshape_last_dim([parts, part_elems])?;
+	) -> Result<Self, ErrPack<TensorOpError>> {
+		let value = value.merge_all_dims().unwrap(); // if fails, tensor is not contiguous
+		let value = value.reshape_last_dim([parts, part_elems]).unwrap();
 
 		let m = value.new_empty_like()?;
 
@@ -90,34 +70,24 @@ impl OptParam {
 			parts,
 			part_elems,
 			part_elems_recip: 1.0 / part_elems.lossy_into(),
-			already_have_grad: false,
 
 			value,
-			grad,
+			grad: None,
 			m,
 			v,
 			v_rsqrt,
-
-			grad_reshaped,
 		})
 	}
 
-	pub fn update_grad(
-		&mut self,
-		update: impl FnOnce(&Tensor, bool) -> Result<(), ErrPack<TensorOpError>>,
-	) -> Result<(), ErrPack<TensorOpError>> {
-		let result = update(&self.grad_reshaped, self.already_have_grad);
-		self.already_have_grad = true;
-		result
-	}
-
 	pub fn zero_grad(&mut self) -> Result<(), ErrPack<TensorOpError>> {
-		self.already_have_grad = false;
+		self.grad = None;
 		Ok(())
 	}
 
 	pub fn step(&mut self, coef: &OptCoef) -> Result<(), ErrPack<TensorOpError>> {
-		let grad = &self.grad;
+		let Some(grad) = &self.grad else {
+			return Ok(());
+		};
 
 		// The original Adam uses just `grad * grad`. Adam-mini saves space
 		// required for `v` by computing the mean of `grad * grad` for each part
@@ -157,6 +127,38 @@ impl OptParam {
 	pub fn part_elems(&self) -> usize {
 		self.part_elems
 	}
+
+	pub fn add_grad(&mut self, grad: Tensor) -> Result<(), ErrPack<TensorOpError>> {
+		let grad_reshaped = grad.merge_all_dims()?;
+		let grad_reshaped = grad_reshaped.reshape_last_dim([self.parts, self.part_elems])?;
+		std::mem::drop(grad);
+		if let Some(existing_grad) = &self.grad {
+			existing_grad.assign(existing_grad + &grad_reshaped)?;
+		} else {
+			if grad_reshaped.owns_buffer() {
+				self.grad = Some(grad_reshaped);
+			} else {
+				todo!("need to copy");
+			}
+		}
+		Ok(())
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct ParamUpdateBackwardFn {
+	pub param: Rc<RefCell<Param>>,
+}
+
+impl BackwardFn for ParamUpdateBackwardFn {
+	fn run(
+		self: Box<Self>,
+		d_out: Tensor,
+		_autograd: &mut Autograd,
+	) -> Result<(), ErrPack<TensorOpError>> {
+		self.param.borrow_mut().add_grad(d_out)
+	}
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -179,152 +181,4 @@ impl PartitionError {
 	}
 }
 
-impl From<PartitionError> for OptimizerError {
-	fn from(_: PartitionError) -> Self {
-		Self::Partition
-	}
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum OptimizerError {
-	TensorOp,
-	Partition,
-}
-
-impl OptimizerError {
-	#[cold]
-	#[inline(never)]
-	pub fn partition(parts: usize, part_elems: usize, total_elems: usize) -> ErrPack<Self> {
-		let err = PartitionError::new(parts, part_elems, total_elems);
-		ErrPack {
-			code: Self::Partition,
-			extra: Some(Box::new(ErrExtra {
-				message: String::new(),
-				nested: Some(err.into()),
-			})),
-		}
-	}
-}
-
-impl From<TensorOpError> for OptimizerError {
-	fn from(_: TensorOpError) -> Self {
-		Self::TensorOp
-	}
-}
-
-impl From<ErrPack<TensorOpError>> for ErrPack<OptimizerError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: ErrPack<TensorOpError>) -> Self {
-		Self {
-			code: OptimizerError::TensorOp,
-			extra: Some(Box::new(ErrExtra {
-				message: String::new(),
-				nested: Some(err.into()),
-			})),
-		}
-	}
-}
-
-impl From<MergeDimsError> for ErrPack<OptimizerError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: MergeDimsError) -> Self {
-		let t: ErrPack<TensorOpError> = err.into();
-		Self {
-			code: OptimizerError::TensorOp,
-			extra: Some(Box::new(ErrExtra {
-				message: String::new(),
-				nested: Some(t.into()),
-			})),
-		}
-	}
-}
-
-impl From<IncompatibleStridesError> for ErrPack<OptimizerError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: IncompatibleStridesError) -> Self {
-		let t: ErrPack<TensorOpError> = err.into();
-		Self {
-			code: OptimizerError::TensorOp,
-			extra: Some(Box::new(ErrExtra {
-				message: String::new(),
-				nested: Some(t.into()),
-			})),
-		}
-	}
-}
-
-impl From<ReshapeLastDimError> for ErrPack<OptimizerError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: ReshapeLastDimError) -> Self {
-		let t: ErrPack<TensorOpError> = err.into();
-		Self {
-			code: OptimizerError::TensorOp,
-			extra: Some(Box::new(ErrExtra {
-				message: String::new(),
-				nested: Some(t.into()),
-			})),
-		}
-	}
-}
-
-impl From<NotEnoughDimensionsError> for ErrPack<OptimizerError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: NotEnoughDimensionsError) -> Self {
-		let t_err: ErrPack<TensorOpError> = err.into();
-		t_err.into()
-	}
-}
-
-impl From<SelectError> for ErrPack<OptimizerError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: SelectError) -> Self {
-		let t_err: ErrPack<TensorOpError> = err.into();
-		t_err.into()
-	}
-}
-
-impl From<ViewError> for ErrPack<OptimizerError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: ViewError) -> Self {
-		let t_err: ErrPack<TensorOpError> = err.into();
-		t_err.into()
-	}
-}
-
-impl From<BorrowError> for ErrPack<OptimizerError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: BorrowError) -> Self {
-		let t_err: ErrPack<TensorOpError> = err.into();
-		t_err.into()
-	}
-}
-
-impl From<PartitionError> for ErrPack<OptimizerError> {
-	fn from(_: PartitionError) -> Self {
-		ErrPack {
-			code: OptimizerError::Partition,
-			extra: None,
-		}
-	}
-}
-
-impl From<ErrPack<PartitionError>> for ErrPack<OptimizerError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: ErrPack<PartitionError>) -> Self {
-		Self {
-			code: OptimizerError::Partition,
-			extra: err.extra,
-		}
-	}
-}
 //--------------------------------------------------------------------------------------------------

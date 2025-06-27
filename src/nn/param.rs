@@ -10,7 +10,7 @@ use std::intrinsics::cold_path;
 use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::nn::optimizer::{OptimizerError, PartitionError};
+use crate::nn::optimizer::PartitionError;
 use crate::tensor::{DType, Device, Tensor, TensorOpError};
 
 use super::optimizer::{OptCoef, OptParam};
@@ -65,7 +65,7 @@ impl Param {
 	}
 
 	#[inline(never)]
-	fn init_opt_param(&mut self) -> Result<&mut OptParam, ErrPack<OptimizerError>> {
+	fn init_opt_param(&mut self) -> Result<&mut OptParam, ErrPack<TensorOpError>> {
 		let opt_param = OptParam::new(&self.value, self.parts, self.part_elems)?;
 		self.opt_param = Some(opt_param);
 
@@ -74,7 +74,7 @@ impl Param {
 		Ok(self.opt_param.as_mut().unwrap())
 	}
 
-	fn opt_param(&mut self) -> Result<&mut OptParam, ErrPack<OptimizerError>> {
+	fn opt_param(&mut self) -> Result<&mut OptParam, ErrPack<TensorOpError>> {
 		if let Some(ref mut opt_param) = self.opt_param {
 			Ok(opt_param)
 		} else {
@@ -83,23 +83,15 @@ impl Param {
 		}
 	}
 
-	pub fn zero_grad(&mut self) -> Result<(), ErrPack<OptimizerError>> {
+	pub fn zero_grad(&mut self) -> Result<(), ErrPack<TensorOpError>> {
 		Ok(self.opt_param()?.zero_grad()?)
 	}
 
-	pub fn update_grad(
-		&mut self,
-		update: impl FnOnce(&Tensor, bool) -> Result<(), ErrPack<TensorOpError>>,
-	) -> Result<(), ErrPack<OptimizerError>> {
-		Ok(self.opt_param()?.update_grad(update)?)
+	pub fn add_grad(&mut self, grad: Tensor) -> Result<(), ErrPack<TensorOpError>> {
+		Ok(self.opt_param()?.add_grad(grad)?)
 	}
 
-	pub fn step(&mut self, opt_coef: &OptCoef) -> Result<(), ErrPack<OptimizerError>> {
+	pub fn step(&mut self, opt_coef: &OptCoef) -> Result<(), ErrPack<TensorOpError>> {
 		Ok(self.opt_param()?.step(opt_coef)?)
-	}
-
-	pub fn grad(&self) -> Option<&Tensor> {
-		let opt_param = self.opt_param.as_ref()?;
-		Some(&opt_param.grad_reshaped)
 	}
 }
