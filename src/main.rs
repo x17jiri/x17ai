@@ -8,8 +8,6 @@
 #![allow(non_snake_case)]
 #![feature(generic_const_exprs)]
 
-use safetensors;
-
 //use x17ai::nn::layers::{Layer, Linear, LossFunction, SoftmaxCrossEntropy};
 //use x17ai::nn::{EvalContext, ModelContext};
 //use x17ai::tensor::device::cpu::CPUDevice;
@@ -158,14 +156,19 @@ fn laplacian(v: &ArrayView2<f32>) -> Array2<f32> {
 		+ v.slice(s![2.., 1..-1])
 }*/
 
-use x17ai::ErrPack;
+use x17ai::autograd::{AutogradNode, LossFn};
+use x17ai::nn::ModelContext;
+use x17ai::nn::layers::linear::Linear;
+use x17ai::nn::layers::{CrossEntropy, Layer};
 use x17ai::tensor::device::cpu::CPUDevice;
 use x17ai::tensor::device::executor::Executor;
 use x17ai::tensor::generic::Tensor;
 use x17ai::tensor::generic::map::ND;
 use x17ai::tensor::math::{col, mat, row};
 use x17ai::tensor::{Device, HasDType, TensorOpError};
+use x17ai::{ErrPack, tensor};
 
+#[cfg(false)]
 fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let dev = CPUDevice::new();
 	let lit = Tensor::literal_factory::<f32>(dev.clone());
@@ -207,94 +210,64 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	Ok(())
 }
 
-#[cfg(false)]
-fn main() {
-	let a = &[1, 2, 3];
-	let b = a.as_ref();
-	let c = Rc::new(1);
-	let d = c.as_ref();
-
-	stderrlog::new().verbosity(10).init()?;
-
-	let data = &[Cell::new(1), Cell::new(2), Cell::new(3)];
-	let ten = x17ai::tensor2::Tensor::<ND<1>, &[Cell<u32>]> {
-		buf: data,
-		map: ND::<1> {
-			dims: [SizeAndStride { size: 3, stride: 1 }],
-			offset: 0,
-		},
-	};
-	let t = ten.slice(0..2);
-	t[(1,)].set(5);
-	//print!("ten = ");
-	//for i in ten.iter()
-
-	return;
-
-	let dev = CPUDevice::new("CPU".to_string());
+fn main() -> Result<(), ErrPack<TensorOpError>> {
+	stderrlog::new().verbosity(10).init().unwrap();
+	let dev = CPUDevice::new();
+	let lit = Tensor::literal_factory::<f32>(dev.clone());
 	let mut mctx = ModelContext::new(dev.clone());
+
+	let mut model = Linear::new(3, 2, f32::dtype, &mut mctx)?;
+	model.randomize()?;
+	mctx.init_optimizer()?;
+
+	let loss_layer = CrossEntropy::new();
+
+	let input = Tensor::new_empty_on(&[2, 3], f32::dtype, dev.clone())?;
+	input.assign(tensor::math::randn_clamped())?;
+
+	let expected = lit.new_2d(&[[1.0, 0.0], [0.0, 1.0]])?;
+
+	for (name, param) in model.named_params("model_params") {
+		println!("{}: {}", name, param.borrow().value().borrow()?.view::<f32>()?);
+	}
+
+	/*	println!("input = {}", input.borrow()?.view::<f32>()?);
+	println!("output_logits = {}", logits.borrow()?.view::<f32>()?);
+	println!("output = {}", loss_fn.value().borrow()?.view::<f32>()?);
+	println!("expected = {}", expected.borrow()?.view::<f32>()?);
+	println!("loss = {loss}");
+	println!("--------------------------------------------------");*/
+
+	for _ in 0..1000 {
+		//		println!("Step {}", i);
+		//		println!();
+
+		let logits_node = model.forward(AutogradNode::new(input.clone(), None))?;
+		//let logits = logits_node.value.clone();
+		let loss_fn = loss_layer.forward_with_target(logits_node, expected.clone())?;
+		let loss = loss_fn.loss()?;
+
+		mctx.zero_grad();
+
+		loss_fn.backward()?;
+
+		mctx.step();
+
+		println!("{loss}");
+		//println!("--------------------------------------------------");
+	}
+
+	for (name, param) in model.named_params("model_params") {
+		println!("{}: {}", name, param.borrow().value().borrow()?.view::<f32>()?);
+	}
+	println!("input = {}", input.borrow()?.view::<f32>()?);
+	println!("expected = {}", expected.borrow()?.view::<f32>()?);
+
+	/*	let t = Tensor::new_empty_on(&[5, 7], f32::dtype, dev.clone());
+	let _ = t.read_from_file("tensor.bin");
+	println!("t = {}", t);*/
+
 	/*
-		let mut model = Linear::new(3, 2, f32::dtype, &mut mctx);
-		model.randomize();
-
-		let mut loss = SoftmaxCrossEntropy::new(2);
-		loss.randomize();
-
-		let input = Tensor::new_empty_on(&[2, 3], f32::dtype, dev.clone());
-		tensor::math::randn().save_to(&input);
-
-		let expected = Tensor::new_debug_2d(dev.clone(), debug_2d![f32; [1.0, 0.0], [0.0, 1.0],]);
-
-		let mut ectx_model = EvalContext::new(true);
-		let output_logits = model.forward(input.clone(), &mut ectx_model);
-
-		let mut ectx_loss = EvalContext::new(true);
-		let output = loss.forward(output_logits.clone(), &mut ectx_loss);
-
-		let loss_value = loss.loss(output.clone(), expected.clone());
-
-		for (name, param) in model.named_params("model_params") {
-			println!("{}: {}", name, param.borrow().value());
-		}
-
-		println!("input = {}", input);
-		println!("output_logits = {}", output_logits);
-		println!("output = {}", output);
-		println!("expected = {}", expected);
-		println!("loss_value = {}", loss_value);
-		println!("--------------------------------------------------");
-
-		for _ in 0..1000 {
-			//		println!("Step {}", i);
-			//		println!();
-
-			mctx.zero_grad();
-
-			let d_logits = loss.backward_start(output.clone(), expected.clone(), &mut ectx_loss);
-			model.backward_finish(d_logits.clone(), &mut ectx_model);
-
-			mctx.step();
-
-			let output_logits = model.forward(input.clone(), &mut ectx_model);
-			let output = loss.forward(output_logits.clone(), &mut ectx_loss);
-			let loss_value = loss.loss(output.clone(), expected.clone());
-
-			//		println!("output_logits = {}", output_logits);
-			//		println!("output = {}", output);
-			//		println!("loss_value = {}", loss_value);
-			println!("{}", loss_value);
-			//println!("--------------------------------------------------");
-		}
-		for (name, param) in model.named_params("model_params") {
-			println!("{}: {}", name, param.borrow().value());
-		}
-		println!("input = {}", input);
-		println!("expected = {}", expected);
-
-		/*	let t = Tensor::new_empty_on(&[5, 7], f32::dtype, dev.clone());
-		let _ = t.read_from_file("tensor.bin");
-		println!("t = {}", t);*/
-	*/
 	//	let Q = Tensor::new_empty_on(&[10, 8, 64], f32::dtype, dev.clone());
 	let Q = Tensor::new_empty_on(&[10, 4, 5], f32::dtype, dev.clone());
 	let K = Q.new_empty_like();
@@ -315,7 +288,7 @@ fn main() {
 	tensor::math::attention(&Q, &K, &V).save_to(&out);
 	let mut out_txt = std::fs::File::create("out.txt").unwrap();
 	writeln!(out_txt, "out = {}", out).unwrap();
-
+	*/
 	/*
 	Q = tensor([[[-0.5728,  0.2759, -1.2481,  1.2678,  0.0717],
 			 [ 0.7365, -0.1365, -1.0994, -0.5166,  1.5378],
@@ -382,4 +355,5 @@ fn main() {
 		],
 	]
 		*/
+	Ok(())
 }

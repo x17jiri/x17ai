@@ -93,26 +93,25 @@ impl OptParam {
 		self.grad_error = false;
 	}
 
+	#[allow(clippy::panic_in_result_fn)]
 	pub fn step(&mut self, coef: &OptCoef) -> Result<(), ErrPack<TensorOpError>> {
 		let Some(grad) = &self.grad else {
 			return Ok(());
 		};
 
-		// TODO - reshape grad to [parts, part_elems]
-		// TODO - check grad_error
-		//let grad_reshaped = grad.merge_all_dims()?;
-		//let grad_reshaped = grad_reshaped.reshape_last_dim([self.parts, self.part_elems])?;
-		todo!("TODO");
+		let grad = grad.merge_all_dims()?;
+		let grad = grad.reshape_last_dim([self.parts, self.part_elems])?;
+		assert!(!self.grad_error, "TODO : return an error");
 
 		// The original Adam uses just `grad * grad`. Adam-mini saves space
 		// required for `v` by computing the mean of `grad * grad` for each part
 		// of the parameter tensor.
 		// Dividing the sum by `part_elems` gives the mean.
-		let grad_squared = (grad * grad).sum() * self.part_elems_recip;
+		let grad_squared = (&grad * &grad).sum() * self.part_elems_recip;
 
 		// Update the first moment estimate
 		let m_decayed = &self.m * coef.m_decay;
-		let m_update = grad * (1.0 - coef.m_decay);
+		let m_update = &grad * (1.0 - coef.m_decay);
 		let new_m = m_decayed + m_update;
 		self.m.assign(new_m)?;
 
