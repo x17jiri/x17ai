@@ -20,7 +20,7 @@ use crate::{ErrExtra, ErrPack};
 //--------------------------------------------------------------------------------------------------
 
 pub enum CurrentGradValue<'a> {
-	Zero(&'a Tensor),
+	Uninit(&'a Tensor),
 	Value(&'a Tensor),
 }
 
@@ -163,7 +163,7 @@ impl OptParam {
 			match self.value_orig_shape.new_empty_like() {
 				Ok(grad) => {
 					let grad = self.grad.insert(grad);
-					let result = f(CurrentGradValue::Zero(grad));
+					let result = f(CurrentGradValue::Uninit(grad));
 					self.grad_error |= result.is_err();
 					result
 				},

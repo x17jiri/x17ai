@@ -102,84 +102,71 @@ fn test_linear() -> Result<(), ErrPack<TensorOpError>> {
 	Ok(())
 }
 
+#[allow(clippy::panic_in_result_fn)]
 #[test]
 fn test_multihead_linear() -> Result<(), ErrPack<tensor::TensorOpError>> {
 	let dev = CPUDevice::new();
 	let mut model_ctx = ModelContext::new(dev.clone());
-	let linear = MultiheadLinear::new(5, 3, 2, f32::dtype, &mut model_ctx);
+	let linear = MultiheadLinear::new(5, 3, 2, f32::dtype, &mut model_ctx)?;
 	model_ctx.init_optimizer()?;
 
-	/*
-	#[rustfmt::skip] linear.linear.weights.borrow().value().fill_debug_2d(
-		debug_2d![
-			f32;
-			[-0.7392, -0.4243, -2.2199, -0.7662, -0.4344],
-			[-1.1176, -0.5131,  0.5884,  1.6860, -0.5456],
-			[-0.6692, -0.7482, -0.5937, -0.4305, -1.6972],
-			[ 1.0881, -0.7972, -1.2000, -0.6788, -0.9008],
-			[ 1.8882, -1.1999,  0.3821, -0.2152,  0.2094],
-			[-1.1796, -1.8167,  1.2314, -0.6760,  0.0761],
-		]
-	);
+	let lit = Tensor::literal_factory::<f32>(dev);
 
-	#[rustfmt::skip] let inp = Tensor::new_debug_2d(
-		dev.clone(),
-		debug_2d![
-			f32;
-			[-1.2794, -0.1038,  0.3636, -0.0918, -0.6903],
-			[-0.2495, -1.7407, -0.4136,  1.2375,  0.0408],
-			[ 0.2060, -1.0269,  0.2663,  1.8425,  1.4105],
-			[-1.8738,  1.0913,  0.5786, -0.8210,  0.0362],
-		]
-	);
+	#[rustfmt::skip] let weights = lit.new_2d(&[
+		[-0.7392, -0.4243, -2.2199, -0.7662, -0.4344],
+		[-1.1176, -0.5131,  0.5884,  1.6860, -0.5456],
+		[-0.6692, -0.7482, -0.5937, -0.4305, -1.6972],
+		[ 1.0881, -0.7972, -1.2000, -0.6788, -0.9008],
+		[ 1.8882, -1.1999,  0.3821, -0.2152,  0.2094],
+		[-1.1796, -1.8167,  1.2314, -0.6760,  0.0761],
+	])?;
 
-	#[rustfmt::skip] let expected_out = Tensor::new_debug_3d(
-		dev.clone(),
-		debug_3d![
-			f32;
-			[ [ 0.2472,  0.8582,  0.8627], [-0.4747, -1.0183,  0.9638] ],
-			[ [ 0.3914,  1.3384,  0.4977], [ 0.3290,  0.5374,  0.9454] ],
-			[ [-1.0430,  1.2478, -1.2141], [-0.8041,  0.7253,  0.3633] ],
-			[ [ 0.1122,  0.2105,  0.1726], [-1.3767, -1.9866,  0.6699] ],
-		]
-	);
+	#[rustfmt::skip] linear.linear.weights().borrow().value().assign(&weights)?;
 
-	let mut ctx = EvalContext::new(true);
-	let out = linear.forward(inp.clone(), &mut ctx);
+	#[rustfmt::skip] let inp = lit.new_2d(&[
+		[-1.2794, -0.1038,  0.3636, -0.0918, -0.6903],
+		[-0.2495, -1.7407, -0.4136,  1.2375,  0.0408],
+		[ 0.2060, -1.0269,  0.2663,  1.8425,  1.4105],
+		[-1.8738,  1.0913,  0.5786, -0.8210,  0.0362],
+	])?;
 
-	println!("out = {out}");
-	println!("expected_out = {expected_out}");
+	#[rustfmt::skip] let expected_out = lit.new_3d(&[
+		[ [ 0.2472,  0.8582,  0.8627], [-0.4747, -1.0183,  0.9638] ],
+		[ [ 0.3914,  1.3384,  0.4977], [ 0.3290,  0.5374,  0.9454] ],
+		[ [-1.0430,  1.2478, -1.2141], [-0.8041,  0.7253,  0.3633] ],
+		[ [ 0.1122,  0.2105,  0.1726], [-1.3767, -1.9866,  0.6699] ],
+	])?;
 
-	assert!(tensor::math::approx_eq(&out, &expected_out, 1e-4));
+	let d_inp_capture = GradientCapture::new();
+	let d_inp = d_inp_capture.storage();
+	let out = linear.forward(AutogradNode::new(inp, Some(d_inp_capture)))?;
+	let (out, backward_fn) = out.take();
 
-	#[rustfmt::skip] let d_out = Tensor::new_debug_3d(
-		dev.clone(),
-		debug_3d![
-			f32;
-			[ [-1.2192,  0.9470, -1.0698], [ 1.0365,  0.1644, -0.1481] ],
-			[ [-1.0424, -0.4814, -1.5834], [ 0.4658,  1.0362, -0.2995] ],
-			[ [-0.5644,  1.4450, -1.0186], [-0.5245,  2.2684, -0.5567] ],
-			[ [-0.9963, -1.7835,  0.6185], [ 2.0077, -0.5136, -0.9927] ],
-		]
-	);
+	println!("out = {}", out.borrow()?.view::<f32>()?);
+	println!("expected_out = {}", expected_out.borrow()?.view::<f32>()?);
 
-	#[rustfmt::skip] let expected_d_inp = Tensor::new_debug_2d(
-		dev.clone(),
-		debug_2d![
-			f32;
-			[ 1.2538,  0.0446,  1.4639,  1.3582,  0.5301],
-			[ 2.9935,  0.4639,  1.4082,  0.1917,  1.8345],
-			[ 2.2246, -0.5959,  2.0314,  2.0504,  1.2070],
-			[ 2.7145,  0.9782, -1.7510, -1.7847, -0.9442],
-		]
-	);
+	assert!(approx_eq(&out, &expected_out, 1e-4)?);
 
-	let d_inp = linear.backward(d_out.clone(), &mut ctx);
+	#[rustfmt::skip] let d_out = lit.new_3d(&[
+		[ [-1.2192,  0.9470, -1.0698], [ 1.0365,  0.1644, -0.1481] ],
+		[ [-1.0424, -0.4814, -1.5834], [ 0.4658,  1.0362, -0.2995] ],
+		[ [-0.5644,  1.4450, -1.0186], [-0.5245,  2.2684, -0.5567] ],
+		[ [-0.9963, -1.7835,  0.6185], [ 2.0077, -0.5136, -0.9927] ],
+	])?;
 
-	println!("d_inp = {d_inp}");
-	println!("expected_d_inp = {expected_d_inp}");
+	#[rustfmt::skip] let expected_d_inp = lit.new_2d(&[
+		[ 0.8866,  0.0316,  1.0351,  0.9604,  0.3748],
+		[ 2.1167,  0.3280,  0.9957,  0.1355,  1.2972],
+		[ 1.5730, -0.4214,  1.4364,  1.4499,  0.8535],
+		[ 1.9194,  0.6917, -1.2381, -1.2619, -0.6677],
+	])?;
 
-	assert!(tensor::math::approx_eq(&d_inp, &expected_d_inp, 1e-4));
-	*/
+	Autograd::run(backward_fn, d_out)?;
+	let d_inp = d_inp.borrow_mut().take().unwrap();
+
+	println!("d_inp = {}", d_inp.borrow()?.view::<f32>()?);
+	println!("expected_d_inp = {}", expected_d_inp.borrow()?.view::<f32>()?);
+
+	assert!(approx_eq(&d_inp, &expected_d_inp, 1e-4)?);
 	Ok(())
 }
