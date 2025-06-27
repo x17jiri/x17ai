@@ -1368,6 +1368,7 @@ pub fn col<'a>(tensor: &'a Tensor) -> Result<ColMatrix<'a>, NotEnoughDimensionsE
 
 //--------------------------------------------------------------------------------------------------
 
+#[derive(Clone, Copy)]
 pub struct ColTimesRow<'a> {
 	pub col: ColMatrix<'a>,
 	pub row: RowMatrix<'a>,
@@ -1385,6 +1386,7 @@ impl<'a> Scalable for ColTimesRow<'a> {
 	}
 }
 
+#[derive(Clone, Copy)]
 pub struct MatTimesCol<'a> {
 	pub mat: Matrix<'a>,
 	pub col: ColMatrix<'a>,

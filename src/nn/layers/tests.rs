@@ -5,7 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
-//mod test_linear;
+mod test_linear;
 mod test_rms_norm;
 mod test_skip_connection;
 mod test_softmax;

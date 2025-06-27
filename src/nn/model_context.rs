@@ -39,9 +39,22 @@ impl ModelContext {
 		Ok(param)
 	}
 
+	pub fn init_optimizer(&mut self) -> Result<(), ErrPack<TensorOpError>> {
+		for param in &self.params {
+			param.borrow_mut().init_optimizer()?;
+		}
+		Ok(())
+	}
+
+	pub fn deinit_optimizer(&mut self) {
+		for param in &self.params {
+			param.borrow_mut().deinit_optimizer();
+		}
+	}
+
 	pub fn zero_grad(&mut self) -> Result<(), ErrPack<TensorOpError>> {
 		for param in &self.params {
-			param.borrow_mut().zero_grad()?;
+			param.borrow_mut().zero_grad();
 		}
 		Ok(())
 	}

@@ -63,20 +63,15 @@ impl Layer for Softmax {
 
 		out.assign(math::softmax(&inp))?;
 
-		#[allow(clippy::option_if_let_else)]
-		let backward_fn = match inp_backward {
-			Some(inp_backward) => match self.gradient_mode {
-				SoftmaxGradientMode::Precise => {
-					Some(Box::new(SoftmaxBackwardFn_Precise { out: out.clone(), inp_backward })
-						as Box<dyn BackwardFn>)
-				},
-				SoftmaxGradientMode::StraightThrough => {
-					Some(Box::new(StraightThroughBackwardFn::new(inp_backward))
-						as Box<dyn BackwardFn>)
-				},
+		let backward_fn = inp_backward.map(|inp_backward| match self.gradient_mode {
+			SoftmaxGradientMode::Precise => {
+				Box::new(SoftmaxBackwardFn_Precise { out: out.clone(), inp_backward })
+					as Box<dyn BackwardFn>
 			},
-			None => None,
-		};
+			SoftmaxGradientMode::StraightThrough => {
+				Box::new(StraightThroughBackwardFn::new(inp_backward)) as Box<dyn BackwardFn>
+			},
+		});
 
 		Ok(AutogradNode::new(out, backward_fn))
 	}

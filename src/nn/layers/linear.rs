@@ -6,12 +6,12 @@
 //------------------------------------------------------------------------------
 
 use std::cell::RefCell;
-use std::hint::cold_path;
 use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::autograd::AutogradNode;
+use crate::autograd::{Autograd, AutogradNode, BackwardFn};
 use crate::nn::model_context::ModelContext;
+use crate::nn::optimizer::CurrentGradValue;
 use crate::nn::param::Param;
 use crate::tensor::math::{self, Scalable, col, mat, row};
 use crate::tensor::{self, DType, Tensor, TensorOpError};
@@ -55,6 +55,10 @@ impl Linear {
 			backward_scale: 1.0 / outputs.lossy_into().sqrt(),
 		})
 	}
+
+	pub fn weights(&self) -> Rc<RefCell<Param>> {
+		self.weights.clone()
+	}
 }
 
 impl Layer for Linear {
@@ -80,17 +84,25 @@ impl Layer for Linear {
 		// [..., inputs] -> [..., outputs]
 		let out = inp.new_replace_tail(1, &self.output_shape)?;
 
-		let w = self.weights.borrow();
-		let w = mat(w.value())?;
+		let weights = self.weights.borrow();
+		let w = mat(weights.value())?;
 		let i = col(&inp)?;
 		let o = col(&out)?;
 		o.assign((w * i).scale(self.forward_scale))?;
 
-		if ctx.is_training() {
-			ctx.tensors.set([inp]);
-		}
+		let backward_fn = if inp_backward.is_some() || weights.requires_grad() {
+			Some(Box::new(LinearBackwardFn {
+				weights: self.weights.clone(),
+				inp: if weights.requires_grad() { Some(inp) } else { None },
+				inp_backward,
+				backward_scale: self.backward_scale,
+				input_shape: self.input_shape,
+			}) as Box<dyn BackwardFn>)
+		} else {
+			None
+		};
 
-		Ok(out)
+		Ok(AutogradNode::new(out, backward_fn))
 	}
 
 	fn randomize(&mut self) -> std::result::Result<(), ErrPack<tensor::TensorOpError>> {
@@ -99,42 +111,70 @@ impl Layer for Linear {
 	}
 }
 
-/*
-	fn backward(
-		&self,
+pub struct LinearBackwardFn {
+	weights: Rc<RefCell<Param>>,
+
+	/// should be `Some` if we should compute `d_w`
+	inp: Option<Tensor>,
+
+	/// should be `Some` if we should compute `d_inp`
+	inp_backward: Option<Box<dyn BackwardFn>>,
+
+	backward_scale: f64,
+
+	input_shape: [usize; 1],
+}
+
+impl BackwardFn for LinearBackwardFn {
+	fn run(
+		self: Box<Self>,
 		d_out: Tensor,
-		ctx: &mut EvalContext,
-	) -> Result<Tensor, ErrPack<OptimizerError>> {
-		let [inp] = ctx.tensors.get();
+		autograd: &mut Autograd,
+	) -> Result<(), ErrPack<TensorOpError>> {
+		let Self {
+			weights,
+			inp,
+			inp_backward,
+			backward_scale,
+			input_shape,
+		} = Box::into_inner(self);
 
-		let mut weights = self.weights.borrow_mut();
-		let w = mat(weights.value())?;
-
-		// d_inp
+		let mut weights = weights.borrow_mut();
 		let d_o = col(&d_out)?;
-		let d_i = (w.T() * d_o).scale(self.backward_scale);
-		// [... , outputs] -> [... , inputs]
-		let d_inp = d_out.new_replace_tail(1, &self.input_shape)?;
-		col(&d_inp)?.assign(d_i)?;
 
 		// d_w
-		let i = row(&inp)?;
-		let d_w = (d_o * i).scale(1.0);
-		weights.update_grad(|grad, already_have_grad| {
-			let grad = mat(grad)?;
-			if already_have_grad {
-				cold_path();
-				todo!("Linear layer backward with existing gradient is not implemented yet");
-			}
-			grad.clear_acc(d_w)
-		})?;
+		if let Some(inp) = inp
+			&& weights.requires_grad()
+		{
+			let i = row(&inp)?;
+			let d_w = (d_o * i).scale(1.0);
+			weights.update_grad(|current_grad| match current_grad {
+				CurrentGradValue::Zero(tensor) => {
+					let grad = mat(tensor)?;
+					grad.clear_acc(d_w)
+				},
+				CurrentGradValue::Value(_tensor) => {
+					todo!("Linear layer backward with existing gradient is not implemented yet");
+				},
+			})?;
+		}
 
-		Ok(d_inp)
+		// d_inp
+		if let Some(inp_backward) = inp_backward {
+			let w = mat(weights.value())?;
+			let d_i = (w.T() * d_o).scale(backward_scale);
+			// [... , outputs] -> [... , inputs]
+			let d_inp = d_out.new_replace_tail(1, &input_shape)?;
+			col(&d_inp)?.assign(d_i)?;
+			autograd.set_grad(inp_backward, d_inp);
+		}
+
+		Ok(())
 	}
-}*/
+}
 
 //--------------------------------------------------------------------------------------------------
-/*
+
 /// Multihead Linear Layer.
 ///
 /// It works similarly to linear layer, but the same inputs are transformed
@@ -154,9 +194,9 @@ impl MultiheadLinear {
 		heads: usize,
 		dtype: DType,
 		ctx: &mut ModelContext,
-	) -> Result<Self, ErrPack<OptimizerError>> {
+	) -> Result<Self, ErrPack<TensorOpError>> {
 		let linear = Linear::new(inputs, heads * outputs, dtype, ctx)?;
-		linear.weights.borrow_mut().partition(heads, inputs * outputs)?;
+		linear.weights.borrow_mut().partition(heads, inputs * outputs).unwrap(); // TODO: unwrap
 
 		// TODO - should we change the backward scale?
 		//linear.backward_scale = 1.0 / (outputs as f64).sqrt();
@@ -183,30 +223,41 @@ impl Layer for MultiheadLinear {
 	}
 
 	#[inline(never)]
-	fn forward(
-		&self,
-		inp: Tensor,
-		ctx: &mut EvalContext,
-	) -> Result<Tensor, ErrPack<TensorOpError>> {
-		let out = self.linear.forward(inp, ctx)?;
+	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
+		let out_node = self.linear.forward(inp_node)?;
+		let (out, backward_fn) = out_node.take();
 
 		// [..., heads * outputs] -> [..., heads, outputs]
-		Ok(out.reshape_last_dim(self.output_shape)?)
+		let out = out.reshape_last_dim(self.output_shape)?;
+
+		let backward_fn = backward_fn.map(|inp_backward| {
+			Box::new(MultiheadLinearBackwardFn { inp_backward }) as Box<dyn BackwardFn>
+		});
+
+		Ok(AutogradNode::new(out, backward_fn))
 	}
 
 	fn randomize(&mut self) -> std::result::Result<(), ErrPack<tensor::TensorOpError>> {
 		self.linear.randomize()
 	}
+}
 
-	fn backward(
-		&self,
+pub struct MultiheadLinearBackwardFn {
+	inp_backward: Box<dyn BackwardFn>,
+}
+
+impl BackwardFn for MultiheadLinearBackwardFn {
+	fn run(
+		self: Box<Self>,
 		d_out: Tensor,
-		ctx: &mut EvalContext,
-	) -> Result<Tensor, ErrPack<OptimizerError>> {
+		autograd: &mut Autograd,
+	) -> Result<(), ErrPack<TensorOpError>> {
+		let Self { inp_backward } = Box::into_inner(self);
 		// [..., heads, outputs] -> [..., heads * outputs]
 		let d_out = d_out.merge_dims::<2>()?;
-		self.linear.backward(d_out, ctx)
+		autograd.set_grad(inp_backward, d_out);
+		Ok(())
 	}
 }
-*/
+
 //--------------------------------------------------------------------------------------------------

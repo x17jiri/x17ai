@@ -10,14 +10,14 @@ use std::intrinsics::cold_path;
 use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::nn::optimizer::PartitionError;
+use crate::nn::optimizer::{CurrentGradValue, PartitionError};
 use crate::tensor::{DType, Device, Tensor, TensorOpError};
 
 use super::optimizer::{OptCoef, OptParam};
 
 pub struct Param {
 	value: Tensor,
-	opt_param: Option<OptParam>,
+	opt_param: Option<Box<OptParam>>,
 	parts: usize,
 	part_elems: usize,
 }
@@ -65,33 +65,48 @@ impl Param {
 	}
 
 	#[inline(never)]
-	fn init_opt_param(&mut self) -> Result<&mut OptParam, ErrPack<TensorOpError>> {
-		let opt_param = OptParam::new(&self.value, self.parts, self.part_elems)?;
-		self.opt_param = Some(opt_param);
-
-		// We just assigned `self.opt_param`, so `unwrap()` can never fail.
-		#[allow(clippy::unwrap_used)]
-		Ok(self.opt_param.as_mut().unwrap())
+	pub fn init_optimizer(&mut self) -> Result<&mut OptParam, ErrPack<TensorOpError>> {
+		let opt_param = Box::new(OptParam::new(self.value.clone(), self.parts, self.part_elems)?);
+		Ok(self.opt_param.insert(opt_param))
 	}
 
-	fn opt_param(&mut self) -> Result<&mut OptParam, ErrPack<TensorOpError>> {
-		if let Some(ref mut opt_param) = self.opt_param {
-			Ok(opt_param)
-		} else {
-			cold_path();
-			self.init_opt_param()
+	#[inline(never)]
+	pub fn deinit_optimizer(&mut self) {
+		self.opt_param.take();
+	}
+
+	pub fn requires_grad(&self) -> bool {
+		self.opt_param.is_some()
+	}
+
+	pub fn zero_grad(&mut self) {
+		if let Some(opt_param) = &mut self.opt_param {
+			opt_param.zero_grad();
 		}
 	}
 
-	pub fn zero_grad(&mut self) -> Result<(), ErrPack<TensorOpError>> {
-		Ok(self.opt_param()?.zero_grad()?)
+	pub fn update_grad(
+		&mut self,
+		f: impl FnMut(CurrentGradValue) -> Result<(), ErrPack<TensorOpError>>,
+	) -> Result<(), ErrPack<TensorOpError>> {
+		#[allow(clippy::option_if_let_else)]
+		if let Some(opt_param) = &mut self.opt_param {
+			opt_param.update_grad(f) //
+		} else {
+			Ok(())
+		}
 	}
 
-	pub fn add_grad(&mut self, grad: Tensor) -> Result<(), ErrPack<TensorOpError>> {
-		Ok(self.opt_param()?.add_grad(grad)?)
+	pub fn grad(&self) -> Option<&Tensor> {
+		self.opt_param.as_ref().and_then(|opt_param| opt_param.grad())
 	}
 
 	pub fn step(&mut self, opt_coef: &OptCoef) -> Result<(), ErrPack<TensorOpError>> {
-		Ok(self.opt_param()?.step(opt_coef)?)
+		#[allow(clippy::option_if_let_else)]
+		if let Some(opt_param) = &mut self.opt_param {
+			opt_param.step(opt_coef) //
+		} else {
+			Ok(())
+		}
 	}
 }

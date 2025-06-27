@@ -10,17 +10,19 @@
 //     Original Adam: https://arxiv.org/abs/1412.6980
 //     Adam-mini: https://arxiv.org/abs/2406.16793
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::hint::cold_path;
 
-use crate::autograd::{Autograd, BackwardFn};
-use crate::nn::Param;
 use crate::tensor::math::{RSqrt, Sum};
 use crate::tensor::{Tensor, TensorOpError};
 use crate::util::LossyInto;
 use crate::{ErrExtra, ErrPack};
 
 //--------------------------------------------------------------------------------------------------
+
+pub enum CurrentGradValue<'a> {
+	Zero(&'a Tensor),
+	Value(&'a Tensor),
+}
 
 pub struct OptCoef {
 	pub(crate) m_decay: f64,       // beta1
@@ -45,20 +47,24 @@ pub struct OptParam {
 	pub(crate) part_elems: usize,
 	pub(crate) part_elems_recip: f64, // 1.0 / (part_elems as f64)
 
-	pub(crate) value: Tensor,        // shape: [parts, part_elems]
-	pub(crate) grad: Option<Tensor>, // shape: [parts, part_elems]
-	pub(crate) m: Tensor,            // shape: [parts, part_elems]
-	pub(crate) v: Tensor,            // shape: [parts, 1]
-	pub(crate) v_rsqrt: Tensor,      // shape: [parts, 1]
+	pub(crate) value: Tensor,   // shape: [parts, part_elems]
+	pub(crate) m: Tensor,       // shape: [parts, part_elems]
+	pub(crate) v: Tensor,       // shape: [parts, 1]
+	pub(crate) v_rsqrt: Tensor, // shape: [parts, 1]
+
+	pub(crate) value_orig_shape: Tensor, // shape: user defined
+	pub(crate) grad: Option<Tensor>,     // shape: same as value_orig_shape
+	pub(crate) grad_error: bool,
 }
 
 impl OptParam {
 	pub fn new(
-		value: &Tensor,
+		value: Tensor,
 		parts: usize,
 		part_elems: usize,
 	) -> Result<Self, ErrPack<TensorOpError>> {
-		let value = value.merge_all_dims().unwrap(); // if fails, tensor is not contiguous
+		let value_orig_shape = value;
+		let value = value_orig_shape.merge_all_dims().unwrap(); // if fails, tensor is not contiguous
 		let value = value.reshape_last_dim([parts, part_elems]).unwrap();
 
 		let m = value.new_empty_like()?;
@@ -72,22 +78,31 @@ impl OptParam {
 			part_elems_recip: 1.0 / part_elems.lossy_into(),
 
 			value,
-			grad: None,
 			m,
 			v,
 			v_rsqrt,
+
+			value_orig_shape,
+			grad: None,
+			grad_error: false,
 		})
 	}
 
-	pub fn zero_grad(&mut self) -> Result<(), ErrPack<TensorOpError>> {
+	pub fn zero_grad(&mut self) {
 		self.grad = None;
-		Ok(())
+		self.grad_error = false;
 	}
 
 	pub fn step(&mut self, coef: &OptCoef) -> Result<(), ErrPack<TensorOpError>> {
 		let Some(grad) = &self.grad else {
 			return Ok(());
 		};
+
+		// TODO - reshape grad to [parts, part_elems]
+		// TODO - check grad_error
+		//let grad_reshaped = grad.merge_all_dims()?;
+		//let grad_reshaped = grad_reshaped.reshape_last_dim([self.parts, self.part_elems])?;
+		todo!("TODO");
 
 		// The original Adam uses just `grad * grad`. Adam-mini saves space
 		// required for `v` by computing the mean of `grad * grad` for each part
@@ -120,6 +135,14 @@ impl OptParam {
 		&self.value
 	}
 
+	pub fn grad(&self) -> Option<&Tensor> {
+		if self.grad_error {
+			cold_path();
+			return None;
+		}
+		self.grad.as_ref()
+	}
+
 	pub fn parts(&self) -> usize {
 		self.parts
 	}
@@ -128,36 +151,29 @@ impl OptParam {
 		self.part_elems
 	}
 
-	pub fn add_grad(&mut self, grad: Tensor) -> Result<(), ErrPack<TensorOpError>> {
-		let grad_reshaped = grad.merge_all_dims()?;
-		let grad_reshaped = grad_reshaped.reshape_last_dim([self.parts, self.part_elems])?;
-		std::mem::drop(grad);
-		if let Some(existing_grad) = &self.grad {
-			existing_grad.assign(existing_grad + &grad_reshaped)?;
+	pub fn update_grad(
+		&mut self,
+		mut f: impl FnMut(CurrentGradValue) -> Result<(), ErrPack<TensorOpError>>,
+	) -> Result<(), ErrPack<TensorOpError>> {
+		if let Some(grad) = &self.grad {
+			let result = f(CurrentGradValue::Value(grad));
+			self.grad_error |= result.is_err();
+			result
 		} else {
-			if grad_reshaped.owns_buffer() {
-				self.grad = Some(grad_reshaped);
-			} else {
-				todo!("need to copy");
+			match self.value_orig_shape.new_empty_like() {
+				Ok(grad) => {
+					let grad = self.grad.insert(grad);
+					let result = f(CurrentGradValue::Zero(grad));
+					self.grad_error |= result.is_err();
+					result
+				},
+				Err(err) => {
+					cold_path();
+					self.grad_error = true;
+					Err(err)
+				},
 			}
 		}
-		Ok(())
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
-pub struct ParamUpdateBackwardFn {
-	pub param: Rc<RefCell<Param>>,
-}
-
-impl BackwardFn for ParamUpdateBackwardFn {
-	fn run(
-		self: Box<Self>,
-		d_out: Tensor,
-		_autograd: &mut Autograd,
-	) -> Result<(), ErrPack<TensorOpError>> {
-		self.param.borrow_mut().add_grad(d_out)
 	}
 }
 
