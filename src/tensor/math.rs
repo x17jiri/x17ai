@@ -694,10 +694,19 @@ impl<'a> EvaluatesToTensor for DotAddExpr<'a> {
 	#[inline(never)]
 	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
-		VecWise::new([to], [self.add.tensor, self.dot.a, self.dot.b])?.run(|[to], [x, a, b]| {
-			executor.dot_add(to, a, b, self.dot.scale, x, self.add.scale)?;
-			Ok(())
-		})
+		let vw = VecWise::new([to], [self.dot.a, self.dot.b, self.add.tensor])?;
+		let overlap = vw.are_identical::<0, 2>();
+		if overlap {
+			vw.run(|[to], [a, b]| {
+				executor.dot_acc(to, self.add.scale, a, b, self.dot.scale)?;
+				Ok(())
+			})
+		} else {
+			vw.run(|[to], [a, b, x]| {
+				executor.dot_add(to, a, b, self.dot.scale, x, self.add.scale)?;
+				Ok(())
+			})
+		}
 	}
 }
 
@@ -778,10 +787,19 @@ impl<'a> EvaluatesToTensor for MulAddExpr<'a> {
 	#[inline(never)]
 	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let executor = to.executor();
-		ElemWise::new([to], [self.mul.a, self.mul.b, self.add.tensor])?.run(|[to], [a, b, add]| {
-			executor.mul_add(to, a, b, self.mul.scale, add, self.add.scale)?;
-			Ok(())
-		})
+		let ew = ElemWise::new([to], [self.mul.a, self.mul.b, self.add.tensor])?;
+		let overlap = ew.are_identical::<0, 2>();
+		if overlap {
+			ew.run(|[to], [a, b]| {
+				executor.mul_acc(to, a, b, self.mul.scale, self.add.scale)?;
+				Ok(())
+			})
+		} else {
+			ew.run(|[to], [a, b, add]| {
+				executor.mul_add(to, a, b, self.mul.scale, add, self.add.scale)?;
+				Ok(())
+			})
+		}
 	}
 }
 

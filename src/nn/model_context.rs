@@ -52,11 +52,10 @@ impl ModelContext {
 		}
 	}
 
-	pub fn zero_grad(&mut self) -> Result<(), ErrPack<TensorOpError>> {
+	pub fn zero_grad(&mut self) {
 		for param in &self.params {
 			param.borrow_mut().zero_grad();
 		}
-		Ok(())
 	}
 
 	pub fn step(&mut self) -> Result<(), ErrPack<TensorOpError>> {

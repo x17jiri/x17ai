@@ -35,7 +35,7 @@ impl Default for OptCoef {
 	fn default() -> Self {
 		Self {
 			m_decay: 0.9,
-			v_decay: 0.995,
+			v_decay: 0.99,
 			eps: 1e-8,
 			learning_rate: 0.001,
 		}

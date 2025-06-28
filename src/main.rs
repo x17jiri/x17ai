@@ -159,6 +159,7 @@ fn laplacian(v: &ArrayView2<f32>) -> Array2<f32> {
 use x17ai::autograd::{AutogradNode, LossFn};
 use x17ai::nn::ModelContext;
 use x17ai::nn::layers::linear::Linear;
+use x17ai::nn::layers::softmax::{Softmax, SoftmaxGradientMode};
 use x17ai::nn::layers::{CrossEntropy, Layer};
 use x17ai::tensor::device::cpu::CPUDevice;
 use x17ai::tensor::device::executor::Executor;
@@ -216,8 +217,12 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let lit = Tensor::literal_factory::<f32>(dev.clone());
 	let mut mctx = ModelContext::new(dev.clone());
 
-	let mut model = Linear::new(3, 2, f32::dtype, &mut mctx)?;
-	model.randomize()?;
+	let mut lin1 = Linear::new(3, 5, f32::dtype, &mut mctx)?;
+	let mut sf = Softmax::new(5);
+	sf.set_gradient_mode(SoftmaxGradientMode::Precise);
+	let mut lin2 = Linear::new(5, 2, f32::dtype, &mut mctx)?;
+	lin1.randomize()?;
+	lin2.randomize()?;
 	mctx.init_optimizer()?;
 
 	let loss_layer = CrossEntropy::new();
@@ -227,9 +232,9 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 
 	let expected = lit.new_2d(&[[1.0, 0.0], [0.0, 1.0]])?;
 
-	for (name, param) in model.named_params("model_params") {
-		println!("{}: {}", name, param.borrow().value().borrow()?.view::<f32>()?);
-	}
+	//	for (name, param) in model.named_params("model_params") {
+	//		println!("{}: {}", name, param.borrow().value().borrow()?.view::<f32>()?);
+	//	}
 
 	/*	println!("input = {}", input.borrow()?.view::<f32>()?);
 	println!("output_logits = {}", logits.borrow()?.view::<f32>()?);
@@ -238,28 +243,30 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	println!("loss = {loss}");
 	println!("--------------------------------------------------");*/
 
-	for _ in 0..1000 {
+	for _ in 0..10000 {
 		//		println!("Step {}", i);
 		//		println!();
 
-		let logits_node = model.forward(AutogradNode::new(input.clone(), None))?;
-		//let logits = logits_node.value.clone();
-		let loss_fn = loss_layer.forward_with_target(logits_node, expected.clone())?;
+		let a = AutogradNode::new(input.clone(), None);
+		let b = lin1.forward(a)?;
+		let c = sf.forward(b)?;
+		let d = lin2.forward(c)?;
+		let loss_fn = loss_layer.forward_with_target(d, expected.clone())?;
 		let loss = loss_fn.loss()?;
 
 		mctx.zero_grad();
 
 		loss_fn.backward()?;
 
-		mctx.step();
+		mctx.step()?;
 
 		println!("{loss}");
 		//println!("--------------------------------------------------");
 	}
 
-	for (name, param) in model.named_params("model_params") {
-		println!("{}: {}", name, param.borrow().value().borrow()?.view::<f32>()?);
-	}
+	//	for (name, param) in model.named_params("model_params") {
+	//		println!("{}: {}", name, param.borrow().value().borrow()?.view::<f32>()?);
+	//	}
 	println!("input = {}", input.borrow()?.view::<f32>()?);
 	println!("expected = {}", expected.borrow()?.view::<f32>()?);
 

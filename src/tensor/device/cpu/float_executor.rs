@@ -525,6 +525,32 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		todo!("FloatExecutor::dot_add is not implemented yet");
 	}
 
+	fn dot_acc<'buf>(
+		&self,
+		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		o_weight: f64,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		ab_weight: f64,
+	) -> Result<(), ErrPack<ExecutorError>> {
+		let shape = ensure_same_shape([], [a, b])?;
+		ensure_expected_shape(o, [shape[0], 1])?;
+		let o = Self::view_contiguous_mut(o)?;
+		let a = Self::view_contiguous(a)?;
+		let b = Self::view_contiguous(b)?;
+		unsafe {
+			zip_vec_reduce(o, [a, b], |o, [a, b]| {
+				*o = T::from_f64(math::add_weighted(
+					o.to_f64(),
+					o_weight,
+					math::dot(a, b),
+					ab_weight,
+				));
+			});
+		}
+		Ok(())
+	}
+
 	fn rsqrt_dot<'buf>(
 		&self,
 		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
@@ -556,11 +582,6 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		scale: f64,
 	) -> Result<(), ErrPack<ExecutorError>> {
-		println!("float_executor::mm: scale = {scale}");
-		println!("a shape = {:?}", a.map().dims);
-		println!("b shape = {:?}", b.map().dims);
-		println!("o shape = {:?}", o.map().dims);
-
 		let m = o.map().dims[0].size;
 		let n = o.map().dims[1].size;
 		let k = a.map().dims[1].size;

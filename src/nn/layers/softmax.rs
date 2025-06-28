@@ -19,6 +19,7 @@ use super::Layer;
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum SoftmaxGradientMode {
 	Precise,
+	Simplified,
 	StraightThrough,
 }
 
@@ -68,6 +69,10 @@ impl Layer for Softmax {
 				Box::new(SoftmaxBackwardFn_Precise { out: out.clone(), inp_backward })
 					as Box<dyn BackwardFn>
 			},
+			SoftmaxGradientMode::Simplified => {
+				Box::new(SoftmaxBackwardFn_Simplified { out: out.clone(), inp_backward })
+					as Box<dyn BackwardFn>
+			},
 			SoftmaxGradientMode::StraightThrough => {
 				Box::new(StraightThroughBackwardFn::new(inp_backward)) as Box<dyn BackwardFn>
 			},
@@ -103,6 +108,28 @@ impl BackwardFn for SoftmaxBackwardFn_Precise {
 		// TODO - we could merge `-` and `*` into a single kernel
 		d_inp.assign(&d_out - &g)?;
 		d_inp.assign(&d_inp * &out)?;
+
+		autograd.set_grad(inp_backward, d_inp);
+		Ok(())
+	}
+}
+
+pub struct SoftmaxBackwardFn_Simplified {
+	pub out: Tensor,
+	pub inp_backward: Box<dyn BackwardFn>,
+}
+
+impl BackwardFn for SoftmaxBackwardFn_Simplified {
+	fn run(
+		self: Box<Self>,
+		d_out: Tensor,
+		autograd: &mut Autograd,
+	) -> Result<(), ErrPack<TensorOpError>> {
+		let Self { out, inp_backward } = Box::into_inner(self);
+
+		let d_inp = d_out.reuse_or_new_like()?;
+
+		d_inp.assign(&d_out * &out)?;
 
 		autograd.set_grad(inp_backward, d_inp);
 		Ok(())
