@@ -36,28 +36,6 @@ pub fn ensure_same_shape<const M: usize, const C: usize>(
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct AttentionParams {
-	pub heads: usize,
-	pub qk_features: usize,
-	pub v_features: usize,
-
-	/// `v_shift` and `k_shift` are used to implement Grouped Query Attention (GQA).
-	///
-	/// Each head has its own `Q`, but `K` and `V` can be shared by multiple heads.
-	///
-	/// For example:
-	/// - we have 20 heads, so there is 20 `Q` inputs
-	/// - each `K` is shared by 4 heads `(k_shift = 2)`, so there are 5 `K` inputs
-	/// - each `V` is shared by 2 heads `(v_shift = 1)`, so there are 10 `V` inputs
-	/// - for head `H`, we use `Q[H]`, `K[H >> k_shift]`, `V[H >> v_shift]`
-	pub k_shift: usize,
-
-	/// See `k_shift` for explanation.
-	pub v_shift: usize,
-}
-
-//--------------------------------------------------------------------------------------------------
-
 pub trait Executor {
 	/// `read_bin()` and `write_bin()` are designed to load/save data from files.
 	/// And in files, we always use little-endian format.
@@ -301,12 +279,16 @@ pub trait Executor {
 		scale: f64,
 	) -> Result<(), ErrPack<ExecutorError>>;
 
-	/*
+	/// If `k_head != q_head`, there has to be `k_shift` such that:
+	///     `q_head = k_head << k_shift`
+	/// The same applies to `v_head`.
 	fn attention(
-		&self, dst: &generic::Tensor<ND<2>, DeviceBufferRefMut>, q: &generic::Tensor<ND<2>, DeviceBufferRef>, k: &generic::Tensor<ND<2>, DeviceBufferRef>, v: &generic::Tensor<ND<2>, DeviceBufferRef>,
-		params: &AttentionParams,
+		&self,
+		o: &mut generic::Tensor<ND<3>, DeviceBufferRefMut>, // [input, q_head, feature]
+		q: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [input, q_head, feature]
+		k: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [input, k_head, feature]
+		v: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [input, v_head, feature]
 	);
-	*/
 }
 
 //--------------------------------------------------------------------------------------------------

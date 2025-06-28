@@ -20,29 +20,13 @@ use super::Layer;
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum RMSNormGradientMode {
 	Precise,
-	NormGradients,
 	StraightThrough,
-}
-
-#[derive(Clone, Copy)]
-struct CalcScale {
-	sum_to_mean: f64,
-	eps: f64,
-}
-
-impl CalcScale {
-	pub fn calc(&self, inp: &Tensor) -> Result<Tensor, ErrPack<TensorOpError>> {
-		let scale = inp.new_replace_tail(1, &[1])?;
-		let sum_square = (inp * inp).sum();
-		let mean_square = sum_square * self.sum_to_mean;
-		scale.assign(mean_square.rsqrt(self.eps))?;
-		Ok(scale)
-	}
 }
 
 pub struct RMSNorm {
 	shape: [usize; 1],
-	calc_scale: CalcScale,
+	sum_to_mean: f64,
+	eps: f64,
 	gradient_mode: RMSNormGradientMode,
 }
 
@@ -50,12 +34,18 @@ impl RMSNorm {
 	pub fn new(n_inputs: usize, eps: f64) -> Self {
 		Self {
 			shape: [n_inputs],
-			calc_scale: CalcScale {
-				sum_to_mean: 1.0 / n_inputs.lossy_into(),
-				eps,
-			},
+			sum_to_mean: 1.0 / n_inputs.lossy_into(),
+			eps,
 			gradient_mode: RMSNormGradientMode::Precise,
 		}
+	}
+
+	pub fn calc_scale(&self, inp: &Tensor) -> Result<Tensor, ErrPack<TensorOpError>> {
+		let scale = inp.new_replace_tail(1, &[1])?;
+		let sum_square = (inp * inp).sum();
+		let mean_square = sum_square * self.sum_to_mean;
+		scale.assign(mean_square.rsqrt(self.eps))?;
+		Ok(scale)
 	}
 }
 
@@ -78,7 +68,7 @@ impl Layer for RMSNorm {
 
 	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
 		let (inp, inp_backward) = inp_node.take();
-		let scale = self.calc_scale.calc(&inp)?;
+		let scale = self.calc_scale(&inp)?;
 
 		let out = inp.reuse_or_new_like()?;
 		out.assign(&inp * &scale)?;
@@ -89,14 +79,7 @@ impl Layer for RMSNorm {
 				Box::new(RMSNormBackwardFn_Precise {
 					out: out.clone(),
 					scale,
-					sum_to_mean: self.calc_scale.sum_to_mean,
-					inp_backward,
-				}) as Box<dyn BackwardFn>
-			},
-			RMSNormGradientMode::NormGradients => {
-				//
-				Box::new(RMSNormBackwardFn_NormGradients {
-					calc_scale: self.calc_scale,
+					sum_to_mean: self.sum_to_mean,
 					inp_backward,
 				}) as Box<dyn BackwardFn>
 			},
@@ -144,24 +127,82 @@ impl BackwardFn for RMSNormBackwardFn_Precise {
 	}
 }
 
-pub struct RMSNormBackwardFn_NormGradients {
-	calc_scale: CalcScale,
+/// This is no-op in the forward pass and normalizes the gradients in the backward pass.
+pub struct BackwardRMSNorm {
+	shape: [usize; 1],
+	sum_to_mean: f64,
+	eps: f64,
+}
+
+impl BackwardRMSNorm {
+	pub fn new(n_inputs: usize, eps: f64) -> Self {
+		let rms_norm = RMSNorm::new(n_inputs, eps);
+		Self {
+			shape: rms_norm.shape,
+			sum_to_mean: rms_norm.sum_to_mean,
+			eps: rms_norm.eps,
+		}
+	}
+}
+
+impl Layer for BackwardRMSNorm {
+	fn input_shape(&self) -> &[usize] {
+		&self.shape
+	}
+
+	fn output_shape(&self) -> &[usize] {
+		&self.shape
+	}
+
+	fn collect_params(&self, _f: &mut dyn FnMut(Rc<RefCell<Param>>)) {
+		// no parameters to collect
+	}
+
+	fn collect_named_params(&self, _prefix: &str, _f: &mut dyn FnMut(String, Rc<RefCell<Param>>)) {
+		// no parameters to collect
+	}
+
+	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
+		let (inp, inp_backward) = inp_node.take();
+
+		let backward_fn = inp_backward.map(|inp_backward| {
+			Box::new(BackwardRMSNormBackwardFn {
+				sum_to_mean: self.sum_to_mean,
+				eps: self.eps,
+				inp_backward,
+			}) as Box<dyn BackwardFn>
+		});
+
+		Ok(AutogradNode::new(inp, backward_fn))
+	}
+
+	fn randomize(&mut self) -> Result<(), ErrPack<TensorOpError>> {
+		// no parameters to randomize
+		Ok(())
+	}
+}
+
+pub struct BackwardRMSNormBackwardFn {
+	sum_to_mean: f64,
+	eps: f64,
 	inp_backward: Box<dyn BackwardFn>,
 }
 
-impl BackwardFn for RMSNormBackwardFn_NormGradients {
+impl BackwardFn for BackwardRMSNormBackwardFn {
 	fn run(
 		self: Box<Self>,
 		d_out: Tensor,
 		autograd: &mut Autograd,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		let Self { calc_scale, inp_backward } = Box::into_inner(self);
-
-		let scale = calc_scale.calc(&d_out)?;
-
-		let d_inp = d_out.reuse_or_new_like()?;
-		d_inp.assign(&d_out * &scale)?;
-
+		let Self { sum_to_mean, eps, inp_backward } = Box::into_inner(self);
+		let rms_norm = RMSNorm {
+			shape: [0], // shape is not important; it will not be used
+			sum_to_mean,
+			eps,
+			gradient_mode: RMSNormGradientMode::Precise,
+		};
+		let d_inp_node = rms_norm.forward(AutogradNode::new(d_out, None))?;
+		let (d_inp, _) = d_inp_node.take();
 		autograd.set_grad(inp_backward, d_inp);
 		Ok(())
 	}
