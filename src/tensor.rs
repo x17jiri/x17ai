@@ -30,7 +30,7 @@ pub mod generic;
 pub mod io;
 pub mod math;
 
-#[cfg(false)] // TODO: #[cfg(test)]
+#[cfg(test)]
 mod tests;
 
 //--------------------------------------------------------------------------------------------------
@@ -252,89 +252,6 @@ impl<T: HasDType> TensorLiteralFactory<T> {
 
 		Ok(tensor)
 	}
-}
-
-#[cfg(false)]
-impl Tensor {
-	pub fn dim<D: DimIndex>(&self, dim: D) -> SizeAndStride {
-		let ndim = self.ndim();
-		let dim = dim.resolve(ndim);
-		*unsafe { self.dims.get_unchecked(dim) }
-	}
-
-	pub fn dim_slice<I: SliceIndex<[SizeAndStride]>>(&self, index: I) -> &I::Output {
-		self.dims.get(index).expect("dimension index out of range")
-	}
-
-	pub fn reshape<const FROM: usize, const TO: usize>(self, to_shape: [usize; TO]) -> Tensor {
-		self.merge_dims::<FROM>().reshape_last_dim(to_shape)
-	}
-
-	/*
-	/// Reshapes the last `n_dims_to_reshape` dimensions of the tensor
-	pub fn reshape_n(self, _n_dims_to_reshape: usize, _new_shape: &[usize]) -> Tensor {
-		let dims = &mut self.dims;
-		let ndim = dims.len();
-		let n_dims_to_keep = ndim - n_dims_to_reshape.min(ndim);
-
-		// Merge the dimensions that we are going to reshape
-		let dims_to_reshape = &dims[n_dims_to_keep..];
-		let merged = DimMerger::new([dims_to_reshape]);
-
-		// Resize the dims array. The new dimensions will be initialized in the `for` loop below.
-		unsafe { dims.set_len(n_dims_to_keep) };
-		dims.reserve(new_shape.len());
-		unsafe { dims.set_len(n_dims_to_keep + new_shape.len()) };
-		let new_dims = &mut dims[n_dims_to_keep..];
-
-		// Try to match the new shape with the merged dimensions
-		let smallest_dim = merged.smallest_dim();
-		let mut prev_stride = smallest_dim.strides[0];
-		let mut target_stride = smallest_dim.size * smallest_dim.strides[0];
-
-		let merged_dims = merged.dims_increasing_without_smallest();
-		let mut merged_dims = merged_dims.iter();
-
-		for (dims_slot, size) in new_dims.iter_mut().zip(new_shape.iter().copied()).rev() {
-			// We are about to store `size` into a slot in `dims`,
-			// but first we need to calculate the stride
-
-			let mut new_stride = prev_stride * size;
-
-			if new_stride > target_stride {
-				cold_path();
-
-				if prev_stride == target_stride {
-					let Some(merged_dim) = merged_dims.next() else {
-						panic!("incompatible reshape");
-					};
-					prev_stride = merged_dim.strides[0];
-					target_stride = merged_dim.size * merged_dim.strides[0];
-
-					new_stride = prev_stride * size;
-					if new_stride > target_stride {
-						panic!("incompatible reshape");
-					}
-				} else {
-					panic!("incompatible reshape");
-				}
-			}
-
-			*dims_slot = SizeAndStride { size, stride: prev_stride };
-			prev_stride = new_stride;
-		}
-
-		assert!(merged_dims.is_empty());
-		assert!(prev_stride == target_stride);
-
-		self
-	}
-
-	pub fn reshape_all(self, new_shape: &[usize]) -> Tensor {
-		let ndim = self.dims.len();
-		self.reshape_n(ndim, new_shape)
-	}
-	*/
 }
 
 //--------------------------------------------------------------------------------------------------

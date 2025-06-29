@@ -122,48 +122,6 @@ impl CPUDevice {
 	}
 
 	/*
-		#[inline(never)]
-		fn gemm_f<'a, T: Copy + HasDType + FromToF64>(
-			&self, c: &MatrixSet<'a>, dst_weight: f64, a: &MatrixSet<'a>, b: &MatrixSet<'a>,
-			ab_weight: f64,
-		) {
-			let m = c.rows.get();
-			let n = c.cols.get();
-			let k = a.cols.get();
-
-			assert!(a.rows.get() == m);
-			assert!(b.cols.get() == n);
-			assert!(b.rows.get() == k);
-
-			self.array_wise::<T, 3>(
-				[&c.slice_set, &a.slice_set, &b.slice_set],
-				|[c_arr, a_arr, b_arr]| {
-					for row in 0..m {
-						for col in 0..n {
-							let mut sum = 0.0;
-							for i in 0..k {
-								let a_index = row * a.row_stride + i * a.col_stride;
-								let a_cell = unsafe { a_arr.get_unchecked(a_index) };
-								let a_val = a_cell.get().to_f64();
-
-								let b_index = i * b.row_stride + col * b.col_stride;
-								let b_cell = unsafe { b_arr.get_unchecked(b_index) };
-								let b_val = b_cell.get().to_f64();
-
-								sum += a_val * b_val;
-							}
-							let c_index = row * c.row_stride + col * c.col_stride;
-							let c_cell = unsafe { c_arr.get_unchecked(c_index) };
-							let c_val = c_cell.get().to_f64();
-
-							let new_val = c_val * dst_weight + sum * ab_weight;
-							c_cell.set(T::from_f64(new_val));
-						}
-					}
-				},
-			);
-		}
-
 		fn attention_tile<T: Copy + FromToF64, const FIRST: bool>(
 			acc: View3D<f64>, // [output, head, vo_feature]
 
@@ -467,44 +425,5 @@ impl Device for CPUDevice {
 		let size = dtype.array_bytes(elems).unwrap();
 		let layout = std::alloc::Layout::from_size_align(size, align).unwrap();
 		unsafe { std::alloc::dealloc(device_data, layout) }
-	}
-}
-
-#[cfg(false)]
-impl Executor for CPUDevice {
-	fn gemm(&self, dst: &MatrixSet, dst_weight: f64, a: &MatrixSet, b: &MatrixSet, ab_weight: f64) {
-		match dst.slice_set.dtype {
-			f32::dtype => self.gemm_f::<f32>(&dst, dst_weight, &a, &b, ab_weight),
-			_ => todo!(),
-		}
-	}
-
-	fn attention(
-		&self,
-		dst: &SliceSet,
-		q: &SliceSet,
-		k: &SliceSet,
-		v: &SliceSet,
-		params: &AttentionParams,
-	) {
-		match dst.dtype {
-			f32::dtype => self.attention_f::<f32>(&dst, &q, &k, &v, params),
-			_ => todo!(),
-		}
-	}
-
-	fn format(
-		&self,
-		f: &mut std::fmt::Formatter,
-		buffer: &Buffer,
-		dtype: DType,
-		offset: usize,
-		len: usize,
-		stride: usize,
-	) -> std::fmt::Result {
-		match dtype {
-			f32::dtype => self.format_f::<f32>(f, buffer, offset, len, stride),
-			_ => todo!(),
-		}
 	}
 }

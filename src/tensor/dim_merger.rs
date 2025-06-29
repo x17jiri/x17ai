@@ -9,7 +9,7 @@ use std::hint::cold_path;
 
 use crate::tensor::generic::map::SizeAndStride;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MergedDim<const N: usize> {
 	pub size: usize,
 	pub strides: [usize; N],

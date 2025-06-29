@@ -624,4 +624,14 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 
 		Ok(()) // TODO
 	}
+
+	fn attention(
+		&self,
+		o: &mut generic::Tensor<ND<3>, DeviceBufferRefMut>, // [inputs, heads, features]
+		q: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, heads, features]
+		k: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, k_heads, features]
+		v: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, v_heads, features]
+	) {
+		todo!("FloatExecutor::attention is not implemented yet");
+	}
 }
