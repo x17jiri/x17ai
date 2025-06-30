@@ -17,26 +17,11 @@ use super::Layer;
 
 pub struct SkipConnection<Nested: Layer> {
 	nested: Nested,
-	nested_weight: f64,
-	skip_weight: f64,
 }
 
 impl<Nested: Layer> SkipConnection<Nested> {
 	pub fn new(nested: Nested) -> Self {
-		Self {
-			nested,
-			nested_weight: 1.0,
-			skip_weight: 1.0,
-		}
-	}
-
-	/// We can weigh the gradients during the backward pass.
-	/// - `nested_weight` is the weight of the gradient from the nested layer
-	/// - `skip_weight` is the weight of the gradient from the skip connection
-	pub fn set_weights(&mut self, nested_weight: f64, skip_weight: f64) -> &mut Self {
-		self.nested_weight = nested_weight;
-		self.skip_weight = skip_weight;
-		self
+		Self { nested }
 	}
 }
 
@@ -58,7 +43,7 @@ impl<Nested: Layer> Layer for SkipConnection<Nested> {
 	}
 
 	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
-		let [a, b] = autograd::split::split(inp_node, [self.nested_weight, self.skip_weight]);
+		let [a, b] = autograd::split::split(inp_node, [1.0, 1.0]);
 		let nested_out = self.nested.forward(a)?;
 		autograd::add::add(nested_out, b)
 	}

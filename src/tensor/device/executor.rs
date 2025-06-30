@@ -279,15 +279,15 @@ pub trait Executor {
 		scale: f64,
 	) -> Result<(), ErrPack<ExecutorError>>;
 
-	/// If `k_heads != heads`, there has to be `k_shift` such that:
-	///     `heads = k_heads << k_shift`
+	/// If `k_heads != qo_heads`, there has to be `k_shift` such that:
+	///     `qo_heads = k_heads << k_shift`
 	/// The same applies to `v_head`.
 	fn attention(
 		&self,
-		o: &mut generic::Tensor<ND<3>, DeviceBufferRefMut>, // [inputs, heads, features]
-		q: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, heads, features]
-		k: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, k_heads, features]
-		v: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, v_heads, features]
+		o: &mut generic::Tensor<ND<3>, DeviceBufferRefMut>, // [inputs, qo_heads, vo_features]
+		q: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, qo_heads, qk_features]
+		k: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, k_heads, qk_features]
+		v: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, v_heads, vo_features]
 	);
 }
 

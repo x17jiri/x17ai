@@ -129,7 +129,7 @@ def gen_linear():
 
 	out = torch.matmul(weights, input.T).T
 	forward_scale = (1.0 / (weights.shape[1] ** 0.5))
-	backward_scale = (1.0 / ((weights.shape[0]/2) ** 0.5))
+	backward_scale = 1.0
 	scaled_out = out * forward_scale
 
 	print("expected_out = ", scaled_out)

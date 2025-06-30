@@ -14,11 +14,71 @@ use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::device::cpu::zip::{zip_elems, zip_vec_reduce, zip_vecs, zip_vecs_varsize};
 use crate::tensor::device::executor::{Executor, ExecutorError, ensure_same_shape};
 use crate::tensor::generic::buffer::Buffer;
-use crate::tensor::generic::map::ND;
+use crate::tensor::generic::map::{Map, ND, Select};
 use crate::tensor::{HasDType, generic};
 
 use super::math::{self, FromToF64};
 use super::rng::Rng;
+
+//--------------------------------------------------------------------------------------------------
+
+trait Slice2D<T> {
+	fn slice(&self, dim0: usize, dim1: std::ops::RangeFull) -> &[T];
+}
+
+impl<T: Copy + HasDType + FromToF64> Slice2D<T> for generic::Tensor<ND<2>, &[T]> {
+	fn slice(&self, dim0: usize, dim1: std::ops::RangeFull) -> &[T] {
+		let map = self.map();
+		let map = map.select(0, dim0).unwrap();
+		let span = map.span();
+		assert!(map.dims[0].size == span.len());
+		self.buf().get(span).unwrap()
+	}
+}
+
+trait Slice3D<T> {
+	fn slice(&self, dim0: usize, dim1: usize, dim2: std::ops::RangeFull) -> &[T];
+}
+
+impl<T: Copy + HasDType + FromToF64> Slice3D<T> for generic::Tensor<ND<3>, &[T]> {
+	fn slice(&self, dim0: usize, dim1: usize, dim2: std::ops::RangeFull) -> &[T] {
+		let map = self.map();
+		let map = map.select(0, dim0).unwrap();
+		let map = map.select(0, dim1).unwrap();
+		let span = map.span();
+		assert!(map.dims[0].size == span.len());
+		self.buf().get(span).unwrap()
+	}
+}
+
+trait SliceMut2D<T> {
+	fn slice_mut(&mut self, dim0: usize, dim1: std::ops::RangeFull) -> &mut [T];
+}
+
+impl<T: Copy + HasDType + FromToF64> SliceMut2D<T> for generic::Tensor<ND<2>, &mut [T]> {
+	fn slice_mut(&mut self, dim0: usize, dim1: std::ops::RangeFull) -> &mut [T] {
+		let map = self.map();
+		let map = map.select(0, dim0).unwrap();
+		let span = map.span();
+		assert!(map.dims[0].size == span.len());
+		unsafe { self.buf_mut() }.get_mut(span).unwrap()
+	}
+}
+
+trait SliceMut3D<T> {
+	fn slice_mut(&mut self, dim0: usize, dim1: usize, dim2: std::ops::RangeFull) -> &mut [T];
+}
+
+impl<T: Copy + HasDType + FromToF64> SliceMut3D<T> for generic::Tensor<ND<3>, &mut [T]> {
+	fn slice_mut(&mut self, dim0: usize, dim1: usize, dim2: std::ops::RangeFull) -> &mut [T] {
+		let map = self.map();
+		let map = map.select(0, dim0).unwrap();
+		let map = map.select(0, dim1).unwrap();
+		let span = map.span();
+		assert!(map.dims[0].size == span.len());
+		unsafe { self.buf_mut() }.get_mut(span).unwrap()
+	}
+}
 
 //--------------------------------------------------------------------------------------------------
 
@@ -179,6 +239,100 @@ impl<T: 'static + Copy + HasDType + FromToF64> FloatExecutor<T> {
 			}
 		}
 		Ok(())
+	}
+
+	pub fn attention_tile<const FIRST: bool>(
+		acc: &mut generic::Tensor<ND<3>, &mut [f64]>, // [output, head, vo_feature]
+
+		q: &generic::Tensor<ND<3>, &[T]>, // [output, head, qk_feature]
+		k: &generic::Tensor<ND<3>, &[T]>, // [input, head, qk_feature]
+		v: &generic::Tensor<ND<3>, &[T]>, // [input, head, vo_feature]
+
+		// `acc`, `prev_max` and `prev_sum` will be initialized when processing the first tile.
+		prev_max: &mut generic::Tensor<ND<2>, &mut [f64]>, // [output, head]
+		prev_sum: &mut generic::Tensor<ND<2>, &mut [f64]>, // [output, head]
+
+		// Scratch space for storing scores. It doesn't need to be initialized.
+		// On GPU, its shape will be [output, head, input]. However, we process outputs
+		// sequentially, so we don't need separate space for each output.
+		scores: &mut generic::Tensor<ND<2>, &mut [f64]>, // [head, input]
+	) {
+		let O = q.size(0).unwrap();
+		let I = k.size(0).unwrap();
+		let H = q.size(1).unwrap();
+		let VO = v.size(2).unwrap();
+		for j in 0..O {
+			for i in 0..I {
+				for h in 0..H {
+					let q = q.slice(j, h, ..);
+					let k = k.slice(i, h, ..);
+					scores[[h, i]] = math::dot(q, k);
+					// scores[h][i].set(math::dot(q, k))
+				}
+			}
+			if FIRST {
+				for h in 0..H {
+					let prev_max = &mut prev_max[[j, h]];
+					let prev_sum = &mut prev_sum[[j, h]];
+
+					let scores = scores.slice_mut(h, ..);
+					let scores = &mut scores[..I]; // TODO
+					let (first_max, first_sum) = math::softmax_part1_(scores);
+
+					*prev_max = first_max;
+					*prev_sum = first_sum;
+
+					let acc = acc.slice_mut(j, h, ..);
+					for i in 0..1 {
+						let v = v.slice(i, h, ..);
+						let score = scores[i].to_f64();
+						for f in 0..VO {
+							acc[f] = score * v[f].to_f64();
+						}
+					}
+					for i in 1..I {
+						let v = v.slice(i, h, ..);
+						let score = scores[i].to_f64();
+						for f in 0..VO {
+							acc[f] += score * v[f].to_f64();
+						}
+					}
+				}
+			} else {
+				for h in 0..H {
+					let prev_max = &mut prev_max[[j, h]];
+					let prev_sum = &mut prev_sum[[j, h]];
+
+					let scores = scores.slice_mut(h, ..);
+					let scores = &mut scores[..I]; // TODO
+					let (new_max, new_sum) = math::softmax_part1_(scores);
+
+					let total_max = prev_max.max(new_max);
+					*prev_max = total_max;
+
+					let prev_weight = (*prev_max - total_max).exp();
+					let new_weight = (new_max - total_max).exp();
+
+					*prev_sum = (*prev_sum * prev_weight) + (new_sum * new_weight);
+
+					let acc = acc.slice_mut(j, h, ..);
+					for i in 0..1 {
+						let v = v.slice(i, h, ..);
+						let score = scores[i].to_f64() * new_weight;
+						for f in 0..VO {
+							acc[f] = (acc[f] * prev_weight) + (score * v[f].to_f64());
+						}
+					}
+					for i in 1..I {
+						let v = v.slice(i, h, ..);
+						let score = scores[i].to_f64() * new_weight;
+						for f in 0..VO {
+							acc[f] += score * v[f].to_f64();
+						}
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -627,10 +781,10 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 
 	fn attention(
 		&self,
-		o: &mut generic::Tensor<ND<3>, DeviceBufferRefMut>, // [inputs, heads, features]
-		q: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, heads, features]
-		k: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, k_heads, features]
-		v: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, v_heads, features]
+		o: &mut generic::Tensor<ND<3>, DeviceBufferRefMut>, // [inputs, qo_heads, vo_features]
+		q: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, qo_heads, qk_features]
+		k: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, k_heads, qk_features]
+		v: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, v_heads, vo_features]
 	) {
 		todo!("FloatExecutor::attention is not implemented yet");
 	}

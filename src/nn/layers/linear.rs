@@ -35,7 +35,7 @@ pub struct Linear {
 	weights: Rc<RefCell<Param>>,
 
 	forward_scale: f64,
-	backward_scale: f64, // TODO - do we need to scale the backward pass?
+	backward_scale: f64,
 }
 
 impl Linear {
@@ -52,7 +52,7 @@ impl Linear {
 			weights: ctx.new_param(&[outputs, inputs], dtype)?,
 
 			forward_scale: 1.0 / inputs.lossy_into().sqrt(),
-			backward_scale: 1.0 / outputs.lossy_into().sqrt(),
+			backward_scale: 1.0,
 		})
 	}
 

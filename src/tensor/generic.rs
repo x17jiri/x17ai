@@ -85,11 +85,8 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		self.map.ndim()
 	}
 
-	pub fn size(&self, dim: usize) -> Result<usize, DimIndexOutOfBoundsError> {
-		if dim >= self.map.ndim() {
-			cold_path();
-			return Err(DimIndexOutOfBoundsError);
-		}
+	pub fn size<D: DimIndex>(&self, dim: D) -> Result<usize, DimIndexOutOfBoundsError> {
+		let dim = dim.resolve_index(self.ndim())?;
 		Ok(self.map.size(dim))
 	}
 
@@ -253,7 +250,7 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 impl<const K: usize, M: Map + IndexToOffset<K>, T> std::ops::Index<[usize; K]> for Tensor<M, &[T]> {
 	type Output = T;
 
-	fn index(&self, index: [usize; K]) -> &Self::Output {
+	fn index(&self, index: [usize; K]) -> &T {
 		// Justification for allowing indexing and unwrap:
 		// This is implementation of the index operator.
 		// It is expected that it may panic if the index is out of bounds.
@@ -262,6 +259,40 @@ impl<const K: usize, M: Map + IndexToOffset<K>, T> std::ops::Index<[usize; K]> f
 		{
 			let offset = self.map.index_to_offset(index).unwrap();
 			&self.buf[offset]
+		}
+	}
+}
+
+impl<const K: usize, M: Map + IndexToOffset<K>, T> std::ops::Index<[usize; K]>
+	for Tensor<M, &mut [T]>
+{
+	type Output = T;
+
+	fn index(&self, index: [usize; K]) -> &T {
+		// Justification for allowing indexing and unwrap:
+		// This is implementation of the index operator.
+		// It is expected that it may panic if the index is out of bounds.
+		#[allow(clippy::indexing_slicing)]
+		#[allow(clippy::unwrap_used)]
+		{
+			let offset = self.map.index_to_offset(index).unwrap();
+			&self.buf[offset]
+		}
+	}
+}
+
+impl<const K: usize, M: Map + IndexToOffset<K>, T> std::ops::IndexMut<[usize; K]>
+	for Tensor<M, &mut [T]>
+{
+	fn index_mut(&mut self, index: [usize; K]) -> &mut T {
+		// Justification for allowing indexing and unwrap:
+		// This is implementation of the index operator.
+		// It is expected that it may panic if the index is out of bounds.
+		#[allow(clippy::indexing_slicing)]
+		#[allow(clippy::unwrap_used)]
+		{
+			let offset = self.map.index_to_offset(index).unwrap();
+			&mut self.buf[offset]
 		}
 	}
 }
