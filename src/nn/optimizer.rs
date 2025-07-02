@@ -58,6 +58,10 @@ pub struct OptParam {
 }
 
 impl OptParam {
+	/// # Panics
+	/// - when the value tensor is not contiguous
+	/// - when the value tensor cannot be reshaped to [parts, part_elems]
+	#[allow(clippy::unwrap_used)]
 	pub fn new(
 		value: Tensor,
 		parts: usize,
@@ -93,15 +97,32 @@ impl OptParam {
 		self.grad_error = false;
 	}
 
+	#[cold]
+	#[inline(never)]
+	fn grad_error(&mut self) -> Result<(), ErrPack<TensorOpError>> {
+		Err(ErrPack {
+			code: TensorOpError::InvalidValue,
+			extra: Some(Box::new(ErrExtra {
+				message: "There was an error while computing the gradient. \
+					We don't have a valid value to use"
+					.to_string(),
+				nested: None,
+			})),
+		})
+	}
+
 	#[allow(clippy::panic_in_result_fn)]
 	pub fn step(&mut self, coef: &OptCoef) -> Result<(), ErrPack<TensorOpError>> {
+		if self.grad_error {
+			cold_path();
+			return self.grad_error();
+		}
+
 		let Some(grad) = &self.grad else {
 			return Ok(());
 		};
-
 		let grad = grad.merge_all_dims()?;
 		let grad = grad.reshape_last_dim([self.parts, self.part_elems])?;
-		assert!(!self.grad_error, "TODO : return an error");
 
 		// The original Adam uses just `grad * grad`. Adam-mini saves space
 		// required for `v` by computing the mean of `grad * grad` for each part

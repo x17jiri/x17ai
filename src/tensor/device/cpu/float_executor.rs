@@ -27,7 +27,7 @@ trait Slice2D<T> {
 }
 
 impl<T: Copy + HasDType + FromToF64> Slice2D<T> for generic::Tensor<ND<2>, &[T]> {
-	fn slice(&self, dim0: usize, dim1: std::ops::RangeFull) -> &[T] {
+	fn slice(&self, dim0: usize, _dim1: std::ops::RangeFull) -> &[T] {
 		let map = self.map();
 		let map = map.select(0, dim0).unwrap();
 		let span = map.span();
@@ -41,7 +41,7 @@ trait Slice3D<T> {
 }
 
 impl<T: Copy + HasDType + FromToF64> Slice3D<T> for generic::Tensor<ND<3>, &[T]> {
-	fn slice(&self, dim0: usize, dim1: usize, dim2: std::ops::RangeFull) -> &[T] {
+	fn slice(&self, dim0: usize, dim1: usize, _dim2: std::ops::RangeFull) -> &[T] {
 		let map = self.map();
 		let map = map.select(0, dim0).unwrap();
 		let map = map.select(0, dim1).unwrap();

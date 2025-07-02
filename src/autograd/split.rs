@@ -15,7 +15,7 @@ use crate::tensor::{Tensor, TensorOpError};
 
 //--------------------------------------------------------------------------------------------------
 
-pub fn split<const N: usize>(inp_node: AutogradNode, weights: [f64; N]) -> [AutogradNode; N] {
+pub fn split<const N: usize>(inp_node: AutogradNode) -> [AutogradNode; N] {
 	let mut output = [const { MaybeUninit::uninit() }; N];
 	if N > 0 {
 		let (inp, inp_fn) = inp_node.take();
@@ -27,14 +27,12 @@ pub fn split<const N: usize>(inp_node: AutogradNode, weights: [f64; N]) -> [Auto
 				let rc_inner = rc_inner.clone();
 				output[i].write(AutogradNode::new(
 					inp,
-					Some(Box::new(SplitBackwardFn { rc_inner, weight: weights[i] })
-						as Box<dyn BackwardFn>),
+					Some(Box::new(SplitBackwardFn { rc_inner }) as Box<dyn BackwardFn>),
 				));
 			}
 			output[N - 1].write(AutogradNode::new(
 				inp,
-				Some(Box::new(SplitBackwardFn { rc_inner, weight: weights[N - 1] })
-					as Box<dyn BackwardFn>),
+				Some(Box::new(SplitBackwardFn { rc_inner }) as Box<dyn BackwardFn>),
 			));
 		} else {
 			for i in 0..N - 1 {
@@ -49,49 +47,39 @@ pub fn split<const N: usize>(inp_node: AutogradNode, weights: [f64; N]) -> [Auto
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct GradWithWeight {
-	tensor: Tensor,
-	weight: f64,
-}
-
 pub struct SplitBackwardFn_Inner {
-	grad: Option<GradWithWeight>,
+	grad: Option<Tensor>,
 	backward_fn: Box<dyn BackwardFn>,
 }
 
 pub struct SplitBackwardFn {
 	rc_inner: Rc<RefCell<SplitBackwardFn_Inner>>,
-	weight: f64,
 }
 
 impl BackwardFn for SplitBackwardFn {
 	fn run(
 		self: Box<Self>,
-		d_out: Tensor,
+		mut d_out: Tensor,
 		autograd: &mut Autograd,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		let Self { rc_inner, weight } = Box::into_inner(self);
-		let mut d_out = GradWithWeight { tensor: d_out, weight };
+		let Self { rc_inner } = Box::into_inner(self);
 
 		// accumulate gradient
 		{
 			let mut inner = rc_inner.borrow_mut();
 			if let Some(ref mut grad) = inner.grad {
-				if !grad.tensor.owns_buffer() {
+				if !grad.owns_buffer() {
 					std::mem::swap(grad, &mut d_out);
 				}
-				if grad.tensor.owns_buffer() {
-					grad.tensor
-						.assign(&grad.tensor * grad.weight + &d_out.tensor * d_out.weight)?;
+				if grad.owns_buffer() {
+					let grad = &*grad;
+					grad.assign(grad + &d_out)?;
 				} else {
-					let mut new_grad = grad.tensor.new_empty_like()?;
-					std::mem::swap(&mut grad.tensor, &mut new_grad);
-					grad.tensor.assign(&new_grad * grad.weight + &d_out.tensor * d_out.weight)?;
+					let mut new_grad = grad.new_empty_like()?;
+					std::mem::swap(grad, &mut new_grad);
+					grad.assign(&new_grad + &d_out)?;
 					std::mem::drop(new_grad);
 				}
-				// Both gradients have already been scaled by their weights.
-				// When we get another gradient, we don't want to scale them again.
-				grad.weight = 1.0;
 				std::mem::drop(d_out);
 			} else {
 				// first gradient
@@ -105,8 +93,7 @@ impl BackwardFn for SplitBackwardFn {
 			// The value 1.0 is not result of any computation, so it should be exact.
 			#[allow(clippy::float_cmp)]
 			if let Some(grad) = grad {
-				debug_assert!(grad.weight == 1.0, "GradWithWeight.weight should be 1.0");
-				autograd.set_grad(backward_fn, grad.tensor);
+				autograd.set_grad(backward_fn, grad);
 			} else {
 				// TODO - return some error when grad is None ?
 			}

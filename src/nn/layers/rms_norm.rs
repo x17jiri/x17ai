@@ -25,27 +25,57 @@ pub enum RMSNormGradientMode {
 
 pub struct RMSNorm {
 	shape: [usize; 1],
-	sum_to_mean: f64,
-	eps: f64,
 	gradient_mode: RMSNormGradientMode,
+	calc: RMSCalc,
+}
+
+pub struct RMSCalc {
+	pub sum_to_mean: f64,
+	pub eps: f64,
+}
+
+impl RMSCalc {
+	pub fn new(n_inputs: usize, eps: f64) -> Self {
+		Self {
+			sum_to_mean: 1.0 / n_inputs.lossy_into(),
+			eps,
+		}
+	}
+
+	/// Calculates:
+	///
+	///     1.0 / sqrt(mean(inp * inp) + eps)
+	///
+	/// where `mean` is calculated over the last dimension of `inp`.
+	pub fn root_mean_square(&self, inp: &Tensor) -> Result<Tensor, ErrPack<TensorOpError>> {
+		let result = inp.new_replace_tail(1, &[1])?;
+		let sum_square = (inp * inp).sum();
+		let mean_square = sum_square * self.sum_to_mean;
+		result.assign(mean_square.rsqrt(self.eps))?;
+		Ok(result)
+	}
+
+	/// Calculates:
+	///
+	///     mean(inp * inp)
+	///
+	/// where `mean` is calculated over the last dimension of `inp`.
+	pub fn mean_square(&self, inp: &Tensor) -> Result<Tensor, ErrPack<TensorOpError>> {
+		let result = inp.new_replace_tail(1, &[1])?;
+		let sum_square = (inp * inp).sum();
+		let mean_square = sum_square * self.sum_to_mean;
+		result.assign(mean_square)?;
+		Ok(result)
+	}
 }
 
 impl RMSNorm {
 	pub fn new(n_inputs: usize, eps: f64) -> Self {
 		Self {
 			shape: [n_inputs],
-			sum_to_mean: 1.0 / n_inputs.lossy_into(),
-			eps,
+			calc: RMSCalc::new(n_inputs, eps),
 			gradient_mode: RMSNormGradientMode::Precise,
 		}
-	}
-
-	pub fn calc_scale(&self, inp: &Tensor) -> Result<Tensor, ErrPack<TensorOpError>> {
-		let scale = inp.new_replace_tail(1, &[1])?;
-		let sum_square = (inp * inp).sum();
-		let mean_square = sum_square * self.sum_to_mean;
-		scale.assign(mean_square.rsqrt(self.eps))?;
-		Ok(scale)
 	}
 }
 
@@ -68,7 +98,7 @@ impl Layer for RMSNorm {
 
 	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
 		let (inp, inp_backward) = inp_node.take();
-		let scale = self.calc_scale(&inp)?;
+		let scale = self.calc.root_mean_square(&inp)?;
 
 		let out = inp.reuse_or_new_like()?;
 		out.assign(&inp * &scale)?;
@@ -79,7 +109,7 @@ impl Layer for RMSNorm {
 				Box::new(RMSNormBackwardFn_Precise {
 					out: out.clone(),
 					scale,
-					sum_to_mean: self.sum_to_mean,
+					sum_to_mean: self.calc.sum_to_mean,
 					inp_backward,
 				}) as Box<dyn BackwardFn>
 			},

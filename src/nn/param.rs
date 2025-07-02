@@ -30,8 +30,8 @@ impl Param {
 	) -> Result<Rc<RefCell<Self>>, ErrPack<TensorOpError>> {
 		let value = Tensor::new_empty_on(shape, dtype, device)?;
 		let opt_param = None;
-		let parts = 1;
-		let part_elems = value.elems();
+		let parts = value.elems();
+		let part_elems = 1;
 		Ok(Rc::new(RefCell::new(Self { value, opt_param, parts, part_elems })))
 	}
 

@@ -43,7 +43,7 @@ impl<Nested: Layer> Layer for SkipConnection<Nested> {
 	}
 
 	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
-		let [a, b] = autograd::split::split(inp_node, [1.0, 1.0]);
+		let [a, b] = autograd::split::split(inp_node);
 		let nested_out = self.nested.forward(a)?;
 		autograd::add::add(nested_out, b)
 	}
