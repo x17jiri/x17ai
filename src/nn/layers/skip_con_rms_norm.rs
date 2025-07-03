@@ -6,10 +6,11 @@
 //------------------------------------------------------------------------------
 
 use std::cell::RefCell;
+use std::f128::consts::E;
 use std::hint::cold_path;
 use std::rc::Rc;
 
-use crate::autograd::{AutogradNode, BackwardFn};
+use crate::autograd::{Autograd, AutogradNode, BackwardFn};
 use crate::nn::layers::rms_norm::RMSCalc;
 use crate::nn::param::Param;
 use crate::tensor::{Tensor, TensorOpError};
@@ -58,23 +59,47 @@ impl<Nested: Layer> Layer for SkipConRMSNorm<Nested> {
 	}
 
 	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
-		let (inp, backward_fn) = inp_node.take();
+		let (mut inp, backward_fn) = inp_node.take();
 
-		let inp_rms = self.calc.root_mean_square(&inp)?;
-		let value = inp.new_empty_like()?;
-		value.assign(&inp * &inp_rms)?;
+		let inp_scale = self.calc.root_mean_square(&inp)?;
+		let nested_inp = inp.new_empty_like()?;
+		nested_inp.assign(&inp * &inp_scale)?;
 
-		if let Some(backward_fn) = backward_fn {
+		let (mut nested_out, merge_fn) = if let Some(backward_fn) = backward_fn {
 			let rc_grad = Rc::new(RefCell::new(None));
-			let merge_fn = Box::new(SkipConRMSNormBackwardFn_Merge { rc_grad, backward_fn })
-				as Box<dyn BackwardFn>;
-			let nested_out = self.nested.forward(AutogradNode::new(value, Some(merge_fn)))?;
-			// TODO
-			1
+
+			let split_fn =
+				Box::new(SkipConRMSNormBackwardFn_Split { rc_grad: rc_grad.clone(), backward_fn })
+					as Box<dyn BackwardFn>;
+
+			let nested_out_node =
+				self.nested.forward(AutogradNode::new(nested_inp, Some(split_fn)))?;
+			let (nested_out, nested_fn) = nested_out_node.take();
+
+			let merge_fn = if let Some(nested_fn) = nested_fn {
+				let nested_scale = self.calc.root_mean_square(&nested_out)?;
+				// TODO: backward_scale = inp_scale / nested_scale
+				// backward_scale will be used to multiply the gradient before propagating
+				// to the nested layer
+				Some(Box::new(SkipConRMSNormBackwardFn_Merge { rc_grad, nested_fn })
+					as Box<dyn BackwardFn>)
+			} else {
+				None
+			};
+
+			(nested_out, merge_fn)
 		} else {
-			let nested_out = self.nested.forward(AutogradNode::new(value, None))?;
-			autograd::add::add(nested_out, AutogradNode::new(inp, None))
+			let nested_node = self.nested.forward(AutogradNode::new(nested_inp, None))?;
+			nested_node.take()
+		};
+
+		if !inp.owns_buffer() {
+			std::mem::swap(&mut inp, &mut nested_out);
 		}
+		let out = if inp.owns_buffer() { inp.clone() } else { inp.new_empty_like()? };
+		out.assign(&inp + &nested_out)?;
+
+		Ok(autograd::AutogradNode::new(out, merge_fn))
 	}
 
 	fn randomize(&mut self) -> Result<(), ErrPack<TensorOpError>> {
@@ -84,17 +109,28 @@ impl<Nested: Layer> Layer for SkipConRMSNorm<Nested> {
 
 pub struct SkipConRMSNormBackwardFn_Split {
 	rc_grad: Rc<RefCell<Option<Tensor>>>,
+	backward_fn: Box<dyn BackwardFn>,
 }
 
 pub struct SkipConRMSNormBackwardFn_Merge {
 	rc_grad: Rc<RefCell<Option<Tensor>>>,
-	backward_fn: Box<dyn BackwardFn>,
+	nested_fn: Box<dyn BackwardFn>,
 }
 
 impl BackwardFn for SkipConRMSNormBackwardFn_Split {
-	//
+	fn run(
+		self: Box<Self>,
+		d_out: Tensor,
+		autograd: &mut Autograd,
+	) -> Result<(), ErrPack<TensorOpError>> {
+	}
 }
 
 impl BackwardFn for SkipConRMSNormBackwardFn_Merge {
-	//
+	fn run(
+		self: Box<Self>,
+		d_out: Tensor,
+		autograd: &mut Autograd,
+	) -> Result<(), ErrPack<TensorOpError>> {
+	}
 }
