@@ -88,10 +88,8 @@ impl BackwardFn for SplitBackwardFn {
 		}
 
 		// propagate if we have the last Rc
-		if let Ok(refcell) = Rc::try_unwrap(rc_inner) {
+		if let Some(refcell) = Rc::into_inner(rc_inner) {
 			let SplitBackwardFn_Inner { grad, backward_fn } = refcell.into_inner();
-			// The value 1.0 is not result of any computation, so it should be exact.
-			#[allow(clippy::float_cmp)]
 			if let Some(grad) = grad {
 				autograd.set_grad(backward_fn, grad);
 			} else {

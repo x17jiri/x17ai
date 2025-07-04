@@ -29,6 +29,7 @@ pub struct RMSNorm {
 	calc: RMSCalc,
 }
 
+#[derive(Clone, Copy)]
 pub struct RMSCalc {
 	pub sum_to_mean: f64,
 	pub eps: f64,
@@ -47,7 +48,7 @@ impl RMSCalc {
 	///     1.0 / sqrt(mean(inp * inp) + eps)
 	///
 	/// where `mean` is calculated over the last dimension of `inp`.
-	pub fn root_mean_square(&self, inp: &Tensor) -> Result<Tensor, ErrPack<TensorOpError>> {
+	pub fn rsqrt_mean_square(&self, inp: &Tensor) -> Result<Tensor, ErrPack<TensorOpError>> {
 		let result = inp.new_replace_tail(1, &[1])?;
 		let sum_square = (inp * inp).sum();
 		let mean_square = sum_square * self.sum_to_mean;
@@ -60,11 +61,11 @@ impl RMSCalc {
 	///     mean(inp * inp)
 	///
 	/// where `mean` is calculated over the last dimension of `inp`.
-	pub fn mean_square(&self, inp: &Tensor) -> Result<Tensor, ErrPack<TensorOpError>> {
+	pub fn sqrt_mean_square(&self, inp: &Tensor) -> Result<Tensor, ErrPack<TensorOpError>> {
 		let result = inp.new_replace_tail(1, &[1])?;
 		let sum_square = (inp * inp).sum();
 		let mean_square = sum_square * self.sum_to_mean;
-		result.assign(mean_square)?;
+		result.assign(mean_square.sqrt())?;
 		Ok(result)
 	}
 }
@@ -98,7 +99,7 @@ impl Layer for RMSNorm {
 
 	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
 		let (inp, inp_backward) = inp_node.take();
-		let scale = self.calc.root_mean_square(&inp)?;
+		let scale = self.calc.rsqrt_mean_square(&inp)?;
 
 		let out = inp.reuse_or_new_like()?;
 		out.assign(&inp * &scale)?;
@@ -169,8 +170,8 @@ impl BackwardRMSNorm {
 		let rms_norm = RMSNorm::new(n_inputs, eps);
 		Self {
 			shape: rms_norm.shape,
-			sum_to_mean: rms_norm.sum_to_mean,
-			eps: rms_norm.eps,
+			sum_to_mean: rms_norm.calc.sum_to_mean,
+			eps: rms_norm.calc.eps,
 		}
 	}
 }
@@ -227,8 +228,7 @@ impl BackwardFn for BackwardRMSNormBackwardFn {
 		let Self { sum_to_mean, eps, inp_backward } = Box::into_inner(self);
 		let rms_norm = RMSNorm {
 			shape: [0], // shape is not important; it will not be used
-			sum_to_mean,
-			eps,
+			calc: RMSCalc { sum_to_mean, eps },
 			gradient_mode: RMSNormGradientMode::Precise,
 		};
 		let d_inp_node = rms_norm.forward(AutogradNode::new(d_out, None))?;

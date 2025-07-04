@@ -34,7 +34,7 @@ impl From<ElementsOverflowError> for ReplaceTailError {
 
 //--------------------------------------------------------------------------------------------------
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DD {
 	pub dims: DimVec,
 	pub offset: usize,
@@ -429,6 +429,13 @@ impl Clone for DimVec {
 			result.finish_clone_large();
 		}
 		result
+	}
+}
+
+impl std::fmt::Debug for DimVec {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		let slice = self.as_slice();
+		f.debug_list().entries(slice.iter()).finish()
 	}
 }
 
