@@ -17,8 +17,8 @@ use crate::tensor::{Tensor, TensorOpError};
 
 pub fn split<const N: usize>(inp_node: AutogradNode) -> [AutogradNode; N] {
 	let mut output = [const { MaybeUninit::uninit() }; N];
+	let (inp, inp_fn) = inp_node.take();
 	if N > 0 {
-		let (inp, inp_fn) = inp_node.take();
 		if let Some(inp_fn) = inp_fn {
 			let rc_inner =
 				Rc::new(RefCell::new(SplitBackwardFn_Inner { grad: None, backward_fn: inp_fn }));
@@ -40,6 +40,25 @@ pub fn split<const N: usize>(inp_node: AutogradNode) -> [AutogradNode; N] {
 				output[i].write(AutogradNode::new(inp, None));
 			}
 			output[N - 1].write(AutogradNode::new(inp, None));
+		}
+	}
+	unsafe { MaybeUninit::array_assume_init(output) }
+}
+
+pub fn split_fn<const N: usize>(
+	inp_fn: Option<Box<dyn BackwardFn>>,
+) -> [Option<Box<dyn BackwardFn>>; N] {
+	let mut output = [const { MaybeUninit::uninit() }; N];
+	if let Some(inp_fn) = inp_fn {
+		let rc_inner =
+			Rc::new(RefCell::new(SplitBackwardFn_Inner { grad: None, backward_fn: inp_fn }));
+		for i in 0..N {
+			let rc_inner = rc_inner.clone();
+			output[i].write(Some(Box::new(SplitBackwardFn { rc_inner }) as Box<dyn BackwardFn>));
+		}
+	} else {
+		for i in 0..N {
+			output[i].write(None);
 		}
 	}
 	unsafe { MaybeUninit::array_assume_init(output) }

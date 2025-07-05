@@ -17,10 +17,32 @@ use crate::{ErrPack, autograd};
 
 use super::Layer;
 
+pub enum NormPosition {
+	/// ```
+	///         +------+    +--------+    +-----+
+	/// ---+--->| norm |--->| nested |--->| add |---->
+	///    |    +------+    +--------+    +-----+
+	///    |                                 ^
+	///    |                                 |
+	///    +---------------------------------+
+	/// ```
+	Inside,
+
+	/// ```
+	///     +------+        +--------+    +-----+
+	/// --->| norm |---+--->| nested |--->| add |---->
+	///     +------+   |    +--------+    +-----+
+	///                |                     ^
+	///                |                     |
+	///                +---------------------+
+	/// ```
+	Outside,
+}
+
 pub struct SkipConRMSNorm<Nested: Layer> {
 	nested: Nested,
 	calc: RMSCalc,
-	is_after_rms_norm: bool,
+	norm_pos: NormPosition,
 }
 
 impl<Nested: Layer> SkipConRMSNorm<Nested> {
@@ -33,12 +55,58 @@ impl<Nested: Layer> SkipConRMSNorm<Nested> {
 			Some(Self {
 				nested,
 				calc: RMSCalc::new(n_inputs, eps),
-				is_after_rms_norm: false,
+				norm_pos: NormPosition::Inside,
 			})
 		} else {
 			cold_path();
 			None
 		}
+	}
+
+	fn forward_norm_inside(
+		&self,
+		inp_node: AutogradNode,
+	) -> Result<AutogradNode, ErrPack<TensorOpError>> {
+		let (mut inp, inp_fn) = inp_node.take();
+		let [nested_inp_fn, residual_fn] = autograd::split::split_fn(inp_fn);
+
+		let rescale = self.calc.rsqrt_mean_square(&inp)?;
+		let nested_inp = inp.new_empty_like()?;
+		nested_inp.assign(&inp * &rescale)?;
+
+		let t = self.nested.forward(AutogradNode::new(nested_inp, nested_inp_fn))?;
+		let (mut nested_out, nested_out_fn) = t.take();
+		let out_fn = if let Some(residual_fn) = residual_fn
+			&& let Some(nested_out_fn) = nested_out_fn
+		{
+			// backward_scale will be used to multiply the gradient before propagating
+			// to the nested layer
+			let backward_scale = self.calc.sqrt_mean_square(&nested_out)?;
+			backward_scale.assign(&backward_scale * &rescale)?;
+			Some(Box::new(SkipConRMSNormBackwardFn {
+				residual_fn,
+				nested_fn: nested_out_fn,
+				backward_rescale: backward_scale,
+				rms_calc: self.calc,
+			}) as Box<dyn BackwardFn>)
+		} else {
+			nested_out_fn
+		};
+
+		if !inp.owns_buffer() {
+			std::mem::swap(&mut inp, &mut nested_out);
+		}
+		let out = if inp.owns_buffer() { inp.clone() } else { inp.new_empty_like()? };
+		out.assign(&inp + &nested_out)?;
+
+		Ok(autograd::AutogradNode::new(out, out_fn))
+	}
+
+	fn forward_norm_outside(
+		&self,
+		_inp_node: AutogradNode,
+	) -> Result<AutogradNode, ErrPack<TensorOpError>> {
+		todo!("SkipConRMSNorm::forward_norm_outside is not implemented yet");
 	}
 }
 
@@ -60,62 +128,10 @@ impl<Nested: Layer> Layer for SkipConRMSNorm<Nested> {
 	}
 
 	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
-		let (mut inp, backward_fn) = inp_node.take();
-
-		// If we are after RMSNorm, we can assume that scale == 1.0
-		let inp_rescale;
-		let nested_inp;
-		if self.is_after_rms_norm {
-			let rescale = self.calc.rsqrt_mean_square(&inp)?;
-			nested_inp = inp.new_empty_like()?;
-			nested_inp.assign(&inp * &rescale)?;
-			inp_rescale = Some(rescale);
-		} else {
-			inp_rescale = None;
-			nested_inp = inp.clone();
+		match self.norm_pos {
+			NormPosition::Inside => self.forward_norm_inside(inp_node),
+			NormPosition::Outside => self.forward_norm_outside(inp_node),
 		}
-
-		let (mut nested_out, merge_fn) = if let Some(backward_fn) = backward_fn {
-			let rc_grad = Rc::new(RefCell::new(None));
-
-			let split_fn =
-				Box::new(SkipConRMSNormBackwardFn_Split { rc_grad: rc_grad.clone(), backward_fn })
-					as Box<dyn BackwardFn>;
-
-			let nested_out_node =
-				self.nested.forward(AutogradNode::new(nested_inp, Some(split_fn)))?;
-			let (nested_out, nested_fn) = nested_out_node.take();
-
-			let merge_fn = if let Some(nested_fn) = nested_fn {
-				// backward_scale will be used to multiply the gradient before propagating
-				// to the nested layer
-				let backward_scale = self.calc.sqrt_mean_square(&nested_out)?;
-				if let Some(inp_rescale) = inp_rescale {
-					backward_scale.assign(&backward_scale * &inp_rescale)?;
-				}
-				Some(Box::new(SkipConRMSNormBackwardFn_Merge {
-					rc_grad,
-					nested_fn,
-					backward_rescale: backward_scale,
-					rms_calc: self.calc,
-				}) as Box<dyn BackwardFn>)
-			} else {
-				None
-			};
-
-			(nested_out, merge_fn)
-		} else {
-			let nested_node = self.nested.forward(AutogradNode::new(nested_inp, None))?;
-			nested_node.take()
-		};
-
-		if !inp.owns_buffer() {
-			std::mem::swap(&mut inp, &mut nested_out);
-		}
-		let out = if inp.owns_buffer() { inp.clone() } else { inp.new_empty_like()? };
-		out.assign(&inp + &nested_out)?;
-
-		Ok(autograd::AutogradNode::new(out, merge_fn))
 	}
 
 	fn randomize(&mut self) -> Result<(), ErrPack<TensorOpError>> {
@@ -123,44 +139,21 @@ impl<Nested: Layer> Layer for SkipConRMSNorm<Nested> {
 	}
 }
 
-pub struct SkipConRMSNormBackwardFn_Split {
-	rc_grad: Rc<RefCell<Option<Tensor>>>,
-	backward_fn: Box<dyn BackwardFn>,
-}
-
-pub struct SkipConRMSNormBackwardFn_Merge {
-	rc_grad: Rc<RefCell<Option<Tensor>>>,
+pub struct SkipConRMSNormBackwardFn {
+	residual_fn: Box<dyn BackwardFn>,
 	nested_fn: Box<dyn BackwardFn>,
 	backward_rescale: Tensor,
 	rms_calc: RMSCalc,
 }
 
-impl BackwardFn for SkipConRMSNormBackwardFn_Split {
-	fn run(
-		self: Box<Self>,
-		d_out: Tensor,
-		autograd: &mut Autograd,
-	) -> Result<(), ErrPack<TensorOpError>> {
-		let Self { rc_grad, backward_fn } = Box::into_inner(self);
-
-		let refcell = Rc::into_inner(rc_grad).unwrap();
-		let grad = refcell.into_inner().unwrap();
-		debug_assert!(grad.owns_buffer());
-		grad.assign(&grad + &d_out)?;
-
-		autograd.set_grad(backward_fn, grad);
-		Ok(())
-	}
-}
-
-impl BackwardFn for SkipConRMSNormBackwardFn_Merge {
+impl BackwardFn for SkipConRMSNormBackwardFn {
 	fn run(
 		self: Box<Self>,
 		d_out: Tensor,
 		autograd: &mut Autograd,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let Self {
-			rc_grad,
+			residual_fn,
 			nested_fn,
 			backward_rescale,
 			rms_calc,
@@ -176,11 +169,8 @@ impl BackwardFn for SkipConRMSNormBackwardFn_Merge {
 		d_nested.assign(&d_out * &backward_rescale)?;
 		autograd.set_grad(nested_fn, d_nested);
 
-		let grad = d_out.reuse_or_new_like()?;
-		grad.assign(&d_out * &grad_rescale)?;
-		let mut rc_grad = rc_grad.borrow_mut();
-		rc_grad.insert(grad);
-
-		Ok(())
+		let d_residual = d_out.reuse_or_new_like()?;
+		d_residual.assign(&d_out * &grad_rescale)?;
+		residual_fn.run(d_residual, autograd)
 	}
 }
