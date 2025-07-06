@@ -10,7 +10,7 @@ use std::mem::MaybeUninit;
 use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::autograd::{Autograd, AutogradNode, BackwardFn};
+use crate::autograd::{self, AutogradNode, BackwardFn};
 use crate::tensor::{Tensor, TensorOpError};
 
 //--------------------------------------------------------------------------------------------------
@@ -50,11 +50,16 @@ pub fn split_fn<const N: usize>(
 ) -> [Option<Box<dyn BackwardFn>>; N] {
 	let mut output = [const { MaybeUninit::uninit() }; N];
 	if let Some(inp_fn) = inp_fn {
-		let rc_inner =
-			Rc::new(RefCell::new(SplitBackwardFn_Inner { grad: None, backward_fn: inp_fn }));
-		for i in 0..N {
-			let rc_inner = rc_inner.clone();
-			output[i].write(Some(Box::new(SplitBackwardFn { rc_inner }) as Box<dyn BackwardFn>));
+		if N > 0 {
+			let rc_inner =
+				Rc::new(RefCell::new(SplitBackwardFn_Inner { grad: None, backward_fn: inp_fn }));
+			for i in 0..N - 1 {
+				let rc_inner = rc_inner.clone();
+				output[i]
+					.write(Some(Box::new(SplitBackwardFn { rc_inner }) as Box<dyn BackwardFn>));
+			}
+			output[N - 1]
+				.write(Some(Box::new(SplitBackwardFn { rc_inner }) as Box<dyn BackwardFn>));
 		}
 	} else {
 		for i in 0..N {
@@ -79,7 +84,7 @@ impl BackwardFn for SplitBackwardFn {
 	fn run(
 		self: Box<Self>,
 		mut d_out: Tensor,
-		autograd: &mut Autograd,
+		queue: &mut autograd::Queue,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let Self { rc_inner } = Box::into_inner(self);
 
@@ -110,7 +115,7 @@ impl BackwardFn for SplitBackwardFn {
 		if let Some(refcell) = Rc::into_inner(rc_inner) {
 			let SplitBackwardFn_Inner { grad, backward_fn } = refcell.into_inner();
 			if let Some(grad) = grad {
-				autograd.set_grad(backward_fn, grad);
+				queue.add(backward_fn, grad);
 			} else {
 				// TODO - return some error when grad is None ?
 			}

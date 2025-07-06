@@ -6,7 +6,7 @@
 //------------------------------------------------------------------------------
 
 use crate::ErrPack;
-use crate::autograd::{Autograd, AutogradNode, BackwardFn};
+use crate::autograd::{self, AutogradNode, BackwardFn};
 use crate::tensor::{Tensor, TensorOpError};
 
 //--------------------------------------------------------------------------------------------------
@@ -53,11 +53,11 @@ impl BackwardFn for AddBackwardFn {
 	fn run(
 		self: Box<Self>,
 		d_out: Tensor,
-		autograd: &mut Autograd,
+		queue: &mut autograd::Queue,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let Self { a_fn, b_fn } = Box::into_inner(self);
-		autograd.set_grad(a_fn, d_out.clone());
-		autograd.set_grad(b_fn, d_out);
+		queue.add(a_fn, d_out.clone());
+		queue.add(b_fn, d_out);
 		Ok(())
 	}
 }

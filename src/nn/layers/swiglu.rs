@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::autograd::{Autograd, AutogradNode, BackwardFn};
+use crate::autograd::{self, AutogradNode, BackwardFn};
 use crate::nn::param::Param;
 use crate::tensor::{Tensor, TensorOpError, math};
 
@@ -83,7 +83,7 @@ impl BackwardFn for SwiGLUBackwardFn {
 	fn run(
 		self: Box<Self>,
 		d_out: Tensor,
-		autograd: &mut Autograd,
+		queue: &mut autograd::Queue,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let Self { lin, gate, inp_backward, output_shape } = Box::into_inner(self);
 
@@ -94,7 +94,7 @@ impl BackwardFn for SwiGLUBackwardFn {
 
 		math::swiglu_backward(&d_out, &lin, &gate).eval_to_tensors(&d_lin, &d_gate)?;
 
-		autograd.set_grad(inp_backward, d_inp);
+		queue.add(inp_backward, d_inp);
 		Ok(())
 	}
 }

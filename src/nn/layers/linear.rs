@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::autograd::{Autograd, AutogradNode, BackwardFn};
+use crate::autograd::{self, AutogradNode, BackwardFn};
 use crate::nn::model_context::ModelContext;
 use crate::nn::optimizer::CurrentGradValue;
 use crate::nn::param::Param;
@@ -129,7 +129,7 @@ impl BackwardFn for LinearBackwardFn {
 	fn run(
 		self: Box<Self>,
 		d_out: Tensor,
-		autograd: &mut Autograd,
+		queue: &mut autograd::Queue,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let Self {
 			weights,
@@ -166,7 +166,7 @@ impl BackwardFn for LinearBackwardFn {
 			// [... , outputs] -> [... , inputs]
 			let d_inp = d_out.new_replace_tail(1, &input_shape)?;
 			col(&d_inp)?.assign(d_i)?;
-			autograd.set_grad(inp_backward, d_inp);
+			queue.add(inp_backward, d_inp);
 		}
 
 		Ok(())
@@ -250,12 +250,12 @@ impl BackwardFn for MultiheadLinearBackwardFn {
 	fn run(
 		self: Box<Self>,
 		d_out: Tensor,
-		autograd: &mut Autograd,
+		queue: &mut autograd::Queue,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let Self { inp_backward } = Box::into_inner(self);
 		// [..., heads, outputs] -> [..., heads * outputs]
 		let d_out = d_out.merge_dims::<2>()?;
-		autograd.set_grad(inp_backward, d_out);
+		queue.add(inp_backward, d_out);
 		Ok(())
 	}
 }

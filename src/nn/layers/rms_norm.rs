@@ -9,11 +9,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::autograd::{Autograd, AutogradNode, BackwardFn, StraightThroughBackwardFn};
+use crate::autograd::{self, AutogradNode, BackwardFn, StraightThroughBackwardFn};
 use crate::nn::param::Param;
-use crate::tensor::math::{RSqrt, Sum};
+use crate::tensor::math::{RMSCalc, Sum};
 use crate::tensor::{Tensor, TensorOpError};
-use crate::util::LossyInto;
 
 use super::Layer;
 
@@ -27,47 +26,6 @@ pub struct RMSNorm {
 	shape: [usize; 1],
 	gradient_mode: RMSNormGradientMode,
 	calc: RMSCalc,
-}
-
-#[derive(Clone, Copy)]
-pub struct RMSCalc {
-	pub sum_to_mean: f64,
-	pub eps: f64,
-}
-
-impl RMSCalc {
-	pub fn new(n_inputs: usize, eps: f64) -> Self {
-		Self {
-			sum_to_mean: 1.0 / n_inputs.lossy_into(),
-			eps,
-		}
-	}
-
-	/// Calculates:
-	///
-	///     1.0 / sqrt(mean(inp * inp) + eps)
-	///
-	/// where `mean` is calculated over the last dimension of `inp`.
-	pub fn rsqrt_mean_square(&self, inp: &Tensor) -> Result<Tensor, ErrPack<TensorOpError>> {
-		let result = inp.new_replace_tail(1, &[1])?;
-		let sum_square = (inp * inp).sum();
-		let mean_square = sum_square * self.sum_to_mean;
-		result.assign(mean_square.rsqrt(self.eps))?;
-		Ok(result)
-	}
-
-	/// Calculates:
-	///
-	///     mean(inp * inp)
-	///
-	/// where `mean` is calculated over the last dimension of `inp`.
-	pub fn sqrt_mean_square(&self, inp: &Tensor) -> Result<Tensor, ErrPack<TensorOpError>> {
-		let result = inp.new_replace_tail(1, &[1])?;
-		let sum_square = (inp * inp).sum();
-		let mean_square = sum_square * self.sum_to_mean;
-		result.assign(mean_square.sqrt())?;
-		Ok(result)
-	}
 }
 
 impl RMSNorm {
@@ -99,17 +57,18 @@ impl Layer for RMSNorm {
 
 	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
 		let (inp, inp_backward) = inp_node.take();
-		let scale = self.calc.rsqrt_mean_square(&inp)?;
+		let magn_recip = inp.new_replace_tail(1, &[1])?;
+		magn_recip.assign(self.calc.rsqrt_mean_square(&inp))?;
 
 		let out = inp.reuse_or_new_like()?;
-		out.assign(&inp * &scale)?;
+		out.assign(&inp * &magn_recip)?;
 
 		let backward_fn = inp_backward.map(|inp_backward| match self.gradient_mode {
 			RMSNormGradientMode::Precise => {
 				//
 				Box::new(RMSNormBackwardFn_Precise {
 					out: out.clone(),
-					scale,
+					magn_recip,
 					sum_to_mean: self.calc.sum_to_mean,
 					inp_backward,
 				}) as Box<dyn BackwardFn>
@@ -130,7 +89,7 @@ impl Layer for RMSNorm {
 
 pub struct RMSNormBackwardFn_Precise {
 	out: Tensor,
-	scale: Tensor,
+	magn_recip: Tensor,
 	sum_to_mean: f64,
 	inp_backward: Box<dyn BackwardFn>,
 }
@@ -139,11 +98,16 @@ impl BackwardFn for RMSNormBackwardFn_Precise {
 	fn run(
 		self: Box<Self>,
 		d_out: Tensor,
-		autograd: &mut Autograd,
+		queue: &mut autograd::Queue,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		let Self { out, scale, sum_to_mean, inp_backward } = Box::into_inner(self);
+		let Self {
+			out,
+			magn_recip,
+			sum_to_mean,
+			inp_backward,
+		} = Box::into_inner(self);
 
-		let g = scale.new_empty_like()?; // [..., 1]
+		let g = magn_recip.new_empty_like()?; // [..., 1]
 		g.assign((&out * &d_out).sum() * sum_to_mean)?;
 
 		let d_inp = out.reuse_or_new_like()?;
@@ -151,9 +115,9 @@ impl BackwardFn for RMSNormBackwardFn_Precise {
 		// TODO - could we merge `mul, sub, mul` into a single kernel?
 		d_inp.assign(&out * &g)?;
 		d_inp.assign(&d_out - &d_inp)?;
-		d_inp.assign(&d_inp * &scale)?;
+		d_inp.assign(&d_inp * &magn_recip)?;
 
-		autograd.set_grad(inp_backward, d_inp);
+		queue.add(inp_backward, d_inp);
 		Ok(())
 	}
 }
@@ -161,17 +125,14 @@ impl BackwardFn for RMSNormBackwardFn_Precise {
 /// This is no-op in the forward pass and normalizes the gradients in the backward pass.
 pub struct BackwardRMSNorm {
 	shape: [usize; 1],
-	sum_to_mean: f64,
-	eps: f64,
+	calc: RMSCalc,
 }
 
 impl BackwardRMSNorm {
 	pub fn new(n_inputs: usize, eps: f64) -> Self {
-		let rms_norm = RMSNorm::new(n_inputs, eps);
 		Self {
-			shape: rms_norm.shape,
-			sum_to_mean: rms_norm.calc.sum_to_mean,
-			eps: rms_norm.calc.eps,
+			shape: [n_inputs],
+			calc: RMSCalc::new(n_inputs, eps),
 		}
 	}
 }
@@ -198,9 +159,9 @@ impl Layer for BackwardRMSNorm {
 
 		let backward_fn = inp_backward.map(|inp_backward| {
 			Box::new(BackwardRMSNormBackwardFn {
-				sum_to_mean: self.sum_to_mean,
-				eps: self.eps,
+				calc: self.calc,
 				inp_backward,
+				required_magn: None,
 			}) as Box<dyn BackwardFn>
 		});
 
@@ -214,26 +175,29 @@ impl Layer for BackwardRMSNorm {
 }
 
 pub struct BackwardRMSNormBackwardFn {
-	sum_to_mean: f64,
-	eps: f64,
-	inp_backward: Box<dyn BackwardFn>,
+	pub calc: RMSCalc,
+	pub inp_backward: Box<dyn BackwardFn>,
+	pub required_magn: Option<Tensor>,
 }
 
 impl BackwardFn for BackwardRMSNormBackwardFn {
 	fn run(
 		self: Box<Self>,
 		d_out: Tensor,
-		autograd: &mut Autograd,
+		queue: &mut autograd::Queue,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		let Self { sum_to_mean, eps, inp_backward } = Box::into_inner(self);
-		let rms_norm = RMSNorm {
-			shape: [0], // shape is not important; it will not be used
-			calc: RMSCalc { sum_to_mean, eps },
-			gradient_mode: RMSNormGradientMode::Precise,
-		};
-		let d_inp_node = rms_norm.forward(AutogradNode::new(d_out, None))?;
-		let (d_inp, _) = d_inp_node.take();
-		autograd.set_grad(inp_backward, d_inp);
+		let Self { calc, inp_backward, required_magn } = Box::into_inner(self);
+		let magn_recip = d_out.new_replace_tail(1, &[1])?;
+		magn_recip.assign(calc.rsqrt_mean_square(&d_out))?;
+
+		if let Some(required_magn) = required_magn {
+			magn_recip.assign(&magn_recip * &required_magn)?;
+		}
+
+		let d_inp = d_out.reuse_or_new_like()?;
+		d_inp.assign(&d_out * &magn_recip)?;
+
+		queue.add(inp_backward, d_inp);
 		Ok(())
 	}
 }

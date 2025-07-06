@@ -36,33 +36,41 @@ impl AutogradNode {
 		let backward_fn = self.backward_fn;
 		(self.value, backward_fn)
 	}
+
+	pub fn map_backward_fn(
+		self,
+		f: impl FnOnce(Box<dyn BackwardFn>) -> Box<dyn BackwardFn>,
+	) -> Self {
+		let Self { value, backward_fn } = self;
+		Self { value, backward_fn: backward_fn.map(f) }
+	}
 }
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct Autograd {
+pub struct Queue {
 	nodes: SmallVec<[(Box<dyn BackwardFn>, Tensor); 3]>,
 }
 
-impl Autograd {
-	pub fn set_grad(&mut self, node: Box<dyn BackwardFn>, grad: Tensor) {
+impl Queue {
+	pub fn add(&mut self, node: Box<dyn BackwardFn>, grad: Tensor) {
 		self.nodes.push((node, grad));
 	}
+}
 
-	pub fn run(
-		backward_fn: Option<Box<dyn BackwardFn>>,
-		grad: Tensor,
-	) -> Result<(), ErrPack<TensorOpError>> {
-		let Some(backward_fn) = backward_fn else {
-			return Ok(());
-		};
-		let mut ctx = Self { nodes: SmallVec::new() };
-		backward_fn.run(grad, &mut ctx)?;
-		while let Some((node, d_out)) = ctx.nodes.pop() {
-			node.run(d_out, &mut ctx)?;
-		}
-		Ok(())
+pub fn run(
+	backward_fn: Option<Box<dyn BackwardFn>>,
+	grad: Tensor,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let Some(backward_fn) = backward_fn else {
+		return Ok(());
+	};
+	let mut queue = Queue { nodes: SmallVec::new() };
+	backward_fn.run(grad, &mut queue)?;
+	while let Some((node, d_out)) = queue.nodes.pop() {
+		node.run(d_out, &mut queue)?;
 	}
+	Ok(())
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -71,7 +79,7 @@ pub trait BackwardFn {
 	fn run(
 		self: Box<Self>,
 		d_out: Tensor,
-		autograd: &mut Autograd,
+		autograd: &mut Queue,
 	) -> Result<(), ErrPack<TensorOpError>>;
 }
 
@@ -98,9 +106,9 @@ impl BackwardFn for StraightThroughBackwardFn {
 	fn run(
 		self: Box<Self>,
 		d_out: Tensor,
-		autograd: &mut Autograd,
+		queue: &mut Queue,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		autograd.set_grad(self.inp_backward, d_out);
+		queue.add(self.inp_backward, d_out);
 		Ok(())
 	}
 }
@@ -126,7 +134,7 @@ impl BackwardFn for GradientCapture {
 	fn run(
 		self: Box<Self>,
 		d_out: Tensor,
-		_autograd: &mut Autograd,
+		_queue: &mut Queue,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let Self { storage } = Box::into_inner(self);
 		let mut storage = storage.borrow_mut();

@@ -12,7 +12,7 @@ use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::dim_merger::{DimMerger, MergedDim};
 use crate::tensor::generic::map::{ND, NotEnoughDimensionsError, SizeAndStride};
 use crate::tensor::{Tensor, TensorOpError, generic};
-use crate::util::array;
+use crate::util::{LossyInto, array};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -1024,6 +1024,13 @@ impl<'a> EvaluatesToTensor for RSqrtExpr<'a> {
 
 //--------------------------------------------------------------------------------------------------
 
+pub trait Sqrt {
+	type Output;
+	fn sqrt(self) -> Self::Output;
+}
+
+//--------------------------------------------------------------------------------------------------
+
 pub struct RSqrtDotExpr<'a> {
 	pub a: &'a Tensor,
 	pub b: &'a Tensor,
@@ -1049,6 +1056,32 @@ impl<'a> EvaluatesToTensor for RSqrtDotExpr<'a> {
 		let executor = to.executor();
 		VecWise::new([to], [self.a, self.b])?.run(|[to], [a, b]| {
 			executor.rsqrt_dot(to, a, b, self.scale, self.eps)?;
+			Ok(())
+		})
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct SqrtDotExpr<'a> {
+	pub a: &'a Tensor,
+	pub b: &'a Tensor,
+	pub scale: f64,
+}
+
+impl<'a> Sqrt for DotExpr<'a> {
+	type Output = SqrtDotExpr<'a>;
+	fn sqrt(self) -> Self::Output {
+		SqrtDotExpr { a: self.a, b: self.b, scale: self.scale }
+	}
+}
+
+impl<'a> EvaluatesToTensor for SqrtDotExpr<'a> {
+	#[inline(never)]
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+		let executor = to.executor();
+		VecWise::new([to], [self.a, self.b])?.run(|[to], [a, b]| {
+			executor.sqrt_dot(to, a, b, self.scale)?;
 			Ok(())
 		})
 	}
@@ -1482,6 +1515,74 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 			executor.mm(&mut to, &mat, &col, scale)?;
 			Ok(())
 		}
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+pub struct RMSCalc {
+	pub sum_to_mean: f64,
+	pub eps: f64,
+}
+
+impl RMSCalc {
+	pub fn new(n_inputs: usize, eps: f64) -> Self {
+		Self {
+			sum_to_mean: 1.0 / n_inputs.lossy_into(),
+			eps,
+		}
+	}
+
+	/// Calculates:
+	///
+	///     1.0 / sqrt(mean(inp * inp) + eps)
+	///
+	/// where `mean` is calculated over the last dimension of `inp`.
+	pub fn rsqrt_mean_square<'a>(&self, inp: &'a Tensor) -> RsqrtMeanSquare<'a> {
+		RsqrtMeanSquare {
+			sum_to_mean: self.sum_to_mean,
+			eps: self.eps,
+			inp,
+		}
+	}
+
+	/// Calculates:
+	///
+	///     mean(inp * inp)
+	///
+	/// where `mean` is calculated over the last dimension of `inp`.
+	pub fn sqrt_mean_square<'a>(&self, inp: &'a Tensor) -> SqrtMeanSquare<'a> {
+		SqrtMeanSquare { sum_to_mean: self.sum_to_mean, inp }
+	}
+}
+
+pub struct RsqrtMeanSquare<'a> {
+	pub sum_to_mean: f64,
+	pub eps: f64,
+	pub inp: &'a Tensor,
+}
+
+pub struct SqrtMeanSquare<'a> {
+	pub sum_to_mean: f64,
+	pub inp: &'a Tensor,
+}
+
+impl EvaluatesToTensor for RsqrtMeanSquare<'_> {
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+		let inp = self.inp;
+		let sum_square = (inp * inp).sum();
+		let mean_square = sum_square * self.sum_to_mean;
+		to.assign(mean_square.rsqrt(self.eps))
+	}
+}
+
+impl EvaluatesToTensor for SqrtMeanSquare<'_> {
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+		let inp = self.inp;
+		let sum_square = (inp * inp).sum();
+		let mean_square = sum_square * self.sum_to_mean;
+		to.assign(mean_square.sqrt())
 	}
 }
 

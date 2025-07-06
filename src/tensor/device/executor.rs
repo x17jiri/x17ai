@@ -271,6 +271,14 @@ pub trait Executor {
 		eps: f64,
 	) -> Result<(), ErrPack<ExecutorError>>;
 
+	fn sqrt_dot<'buf>(
+		&self,
+		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		scale: f64,
+	) -> Result<(), ErrPack<ExecutorError>>;
+
 	fn mm<'buf>(
 		&self,
 		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,

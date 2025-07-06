@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::autograd::{Autograd, AutogradNode, BackwardFn, StraightThroughBackwardFn};
+use crate::autograd::{self, AutogradNode, BackwardFn, StraightThroughBackwardFn};
 use crate::nn::param::Param;
 use crate::tensor::math::Sum;
 use crate::tensor::{Tensor, TensorOpError, math};
@@ -96,7 +96,7 @@ impl BackwardFn for SoftmaxBackwardFn_Precise {
 	fn run(
 		self: Box<Self>,
 		d_out: Tensor,
-		autograd: &mut Autograd,
+		queue: &mut autograd::Queue,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let Self { out, inp_backward } = Box::into_inner(self);
 
@@ -109,7 +109,7 @@ impl BackwardFn for SoftmaxBackwardFn_Precise {
 		d_inp.assign(&d_out - &g)?;
 		d_inp.assign(&d_inp * &out)?;
 
-		autograd.set_grad(inp_backward, d_inp);
+		queue.add(inp_backward, d_inp);
 		Ok(())
 	}
 }
@@ -123,7 +123,7 @@ impl BackwardFn for SoftmaxBackwardFn_Simplified {
 	fn run(
 		self: Box<Self>,
 		d_out: Tensor,
-		autograd: &mut Autograd,
+		queue: &mut autograd::Queue,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let Self { out, inp_backward } = Box::into_inner(self);
 
@@ -131,7 +131,7 @@ impl BackwardFn for SoftmaxBackwardFn_Simplified {
 
 		d_inp.assign(&d_out * &out)?;
 
-		autograd.set_grad(inp_backward, d_inp);
+		queue.add(inp_backward, d_inp);
 		Ok(())
 	}
 }

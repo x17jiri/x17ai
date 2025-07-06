@@ -8,7 +8,7 @@
 use super::super::rms_norm::*;
 
 use crate::ErrPack;
-use crate::autograd::{Autograd, AutogradNode, GradientCapture};
+use crate::autograd::{self, AutogradNode, GradientCapture};
 use crate::nn::layers::Layer;
 use crate::nn::layers::skip_connection::SkipConnection;
 use crate::tensor::device::cpu::CPUDevice;
@@ -61,7 +61,7 @@ fn test_skip_con() -> Result<(), ErrPack<TensorOpError>> {
 		[-0.0112,  0.0593, -0.1281, -0.0201, -0.2861],
 	])?;
 
-	Autograd::run(backward_fn, d_out)?;
+	autograd::run(backward_fn, d_out)?;
 	let d_inp = d_inp.borrow_mut().take().unwrap();
 
 	println!("d_inp = {}", d_inp.borrow()?.view::<f32>()?);

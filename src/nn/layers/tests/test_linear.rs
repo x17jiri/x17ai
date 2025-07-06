@@ -8,7 +8,7 @@
 use super::super::linear::*;
 
 use crate::ErrPack;
-use crate::autograd::{Autograd, AutogradNode, GradientCapture};
+use crate::autograd::{self, AutogradNode, GradientCapture};
 use crate::nn::ModelContext;
 use crate::nn::layers::Layer;
 use crate::tensor::device::cpu::CPUDevice;
@@ -86,7 +86,7 @@ fn test_linear() -> Result<(), ErrPack<TensorOpError>> {
 		[ 2.0096,  0.0251, -0.6526, -0.5677, -0.7311]
 	])?;
 
-	Autograd::run(backward_fn, d_out)?;
+	autograd::run(backward_fn, d_out)?;
 	let d_inp = d_inp.borrow_mut().take().unwrap();
 
 	println!("d_inp = {}", d_inp.borrow()?.view::<f32>()?);
@@ -163,7 +163,7 @@ fn test_multihead_linear() -> Result<(), ErrPack<tensor::TensorOpError>> {
 		[ 4.7016,  1.6943, -3.0328, -3.0911, -1.6355],
 	])?;
 
-	Autograd::run(backward_fn, d_out)?;
+	autograd::run(backward_fn, d_out)?;
 	let d_inp = d_inp.borrow_mut().take().unwrap();
 
 	println!("d_inp = {}", d_inp.borrow()?.view::<f32>()?);

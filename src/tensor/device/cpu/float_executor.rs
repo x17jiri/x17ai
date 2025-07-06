@@ -727,6 +727,27 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		Ok(())
 	}
 
+	fn sqrt_dot<'buf>(
+		&self,
+		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		scale: f64,
+	) -> Result<(), ErrPack<ExecutorError>> {
+		let shape = ensure_same_shape([], [a, b])?;
+		ensure_expected_shape(o, [shape[0], 1])?;
+		let o = Self::view_contiguous_mut(o)?;
+		let a = Self::view_contiguous(a)?;
+		let b = Self::view_contiguous(b)?;
+		unsafe {
+			zip_vec_reduce(o, [a, b], |o, [a, b]| {
+				let dot = math::dot(a, b);
+				*o = T::from_f64((dot * scale).sqrt());
+			});
+		}
+		Ok(())
+	}
+
 	#[allow(clippy::panic_in_result_fn)]
 	#[allow(clippy::many_single_char_names)]
 	fn mm<'buf>(
