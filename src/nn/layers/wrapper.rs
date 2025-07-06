@@ -14,7 +14,7 @@ use crate::autograd::{self, AutogradNode};
 use crate::nn::layers::rms_norm::BackwardRMSNormBackwardFn;
 use crate::nn::param::Param;
 use crate::tensor::TensorOpError;
-use crate::tensor::math::RMSCalc;
+use crate::tensor::math::{RMSCalc, Recip};
 
 use super::Layer;
 
@@ -41,13 +41,14 @@ pub enum NormPosition {
 	Outside,
 }
 
-pub struct SkipConRMSNorm<Nested: Layer> {
+pub struct Wrapper<Nested: Layer> {
 	nested: Nested,
 	calc: RMSCalc,
+	eps: f64,
 	norm_pos: NormPosition,
 }
 
-impl<Nested: Layer> SkipConRMSNorm<Nested> {
+impl<Nested: Layer> Wrapper<Nested> {
 	pub fn new(nested: Nested, eps: f64) -> Option<Self> {
 		let input_shape = nested.input_shape();
 		let output_shape = nested.output_shape();
@@ -56,7 +57,8 @@ impl<Nested: Layer> SkipConRMSNorm<Nested> {
 		{
 			Some(Self {
 				nested,
-				calc: RMSCalc::new(n_inputs, eps),
+				calc: RMSCalc::new(n_inputs),
+				eps,
 				norm_pos: NormPosition::Inside,
 			})
 		} else {
@@ -66,7 +68,7 @@ impl<Nested: Layer> SkipConRMSNorm<Nested> {
 	}
 }
 
-impl<Nested: Layer> Layer for SkipConRMSNorm<Nested> {
+impl<Nested: Layer> Layer for Wrapper<Nested> {
 	fn input_shape(&self) -> &[usize] {
 		self.nested.input_shape()
 	}
@@ -88,7 +90,7 @@ impl<Nested: Layer> Layer for SkipConRMSNorm<Nested> {
 		let [nested_inp_fn, residual_fn] = autograd::split::split_fn(inp_fn);
 
 		let inp_magn_recip = inp.new_replace_tail(1, &[1])?;
-		inp_magn_recip.assign(self.calc.rsqrt_mean_square(&inp))?;
+		inp_magn_recip.assign(self.calc.root_mean_square(&inp).recip(self.eps))?;
 		let rms_norm = inp.new_empty_like()?;
 		rms_norm.assign(&inp * &inp_magn_recip)?;
 
@@ -102,6 +104,7 @@ impl<Nested: Layer> Layer for SkipConRMSNorm<Nested> {
 			let required_magn = inp_magn_recip.new_empty_like()?;
 			let grad_rescale_fn = Box::new(BackwardRMSNormBackwardFn {
 				calc: self.calc,
+				eps: self.eps,
 				inp_backward: nested_inp_fn,
 				required_magn: Some(required_magn.clone()),
 			});
@@ -109,7 +112,7 @@ impl<Nested: Layer> Layer for SkipConRMSNorm<Nested> {
 			let nested_inp = AutogradNode::new(rms_norm, Some(grad_rescale_fn));
 			nested_out = self.nested.forward(nested_inp)?;
 
-			required_magn.assign(self.calc.sqrt_mean_square(&nested_out.value))?;
+			required_magn.assign(self.calc.root_mean_square(&nested_out.value))?;
 			if self.norm_pos == NormPosition::Inside {
 				required_magn.assign(&required_magn * &inp_magn_recip)?;
 			}
@@ -123,6 +126,7 @@ impl<Nested: Layer> Layer for SkipConRMSNorm<Nested> {
 		Ok(out.map_backward_fn(|f| {
 			Box::new(BackwardRMSNormBackwardFn {
 				calc: self.calc,
+				eps: self.eps,
 				inp_backward: f,
 				required_magn: None,
 			})

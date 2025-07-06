@@ -11,7 +11,7 @@ use std::rc::Rc;
 use crate::ErrPack;
 use crate::autograd::{self, AutogradNode, BackwardFn, StraightThroughBackwardFn};
 use crate::nn::param::Param;
-use crate::tensor::math::{RMSCalc, Sum};
+use crate::tensor::math::{RMSCalc, Recip, Sum};
 use crate::tensor::{Tensor, TensorOpError};
 
 use super::Layer;
@@ -26,14 +26,16 @@ pub struct RMSNorm {
 	shape: [usize; 1],
 	gradient_mode: RMSNormGradientMode,
 	calc: RMSCalc,
+	eps: f64,
 }
 
 impl RMSNorm {
 	pub fn new(n_inputs: usize, eps: f64) -> Self {
 		Self {
 			shape: [n_inputs],
-			calc: RMSCalc::new(n_inputs, eps),
 			gradient_mode: RMSNormGradientMode::Precise,
+			calc: RMSCalc::new(n_inputs),
+			eps,
 		}
 	}
 }
@@ -58,7 +60,7 @@ impl Layer for RMSNorm {
 	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
 		let (inp, inp_backward) = inp_node.take();
 		let magn_recip = inp.new_replace_tail(1, &[1])?;
-		magn_recip.assign(self.calc.rsqrt_mean_square(&inp))?;
+		magn_recip.assign(self.calc.root_mean_square(&inp).recip(self.eps))?;
 
 		let out = inp.reuse_or_new_like()?;
 		out.assign(&inp * &magn_recip)?;
@@ -126,13 +128,15 @@ impl BackwardFn for RMSNormBackwardFn_Precise {
 pub struct BackwardRMSNorm {
 	shape: [usize; 1],
 	calc: RMSCalc,
+	eps: f64,
 }
 
 impl BackwardRMSNorm {
 	pub fn new(n_inputs: usize, eps: f64) -> Self {
 		Self {
 			shape: [n_inputs],
-			calc: RMSCalc::new(n_inputs, eps),
+			calc: RMSCalc::new(n_inputs),
+			eps,
 		}
 	}
 }
@@ -160,6 +164,7 @@ impl Layer for BackwardRMSNorm {
 		let backward_fn = inp_backward.map(|inp_backward| {
 			Box::new(BackwardRMSNormBackwardFn {
 				calc: self.calc,
+				eps: self.eps,
 				inp_backward,
 				required_magn: None,
 			}) as Box<dyn BackwardFn>
@@ -176,6 +181,7 @@ impl Layer for BackwardRMSNorm {
 
 pub struct BackwardRMSNormBackwardFn {
 	pub calc: RMSCalc,
+	pub eps: f64,
 	pub inp_backward: Box<dyn BackwardFn>,
 	pub required_magn: Option<Tensor>,
 }
@@ -186,9 +192,9 @@ impl BackwardFn for BackwardRMSNormBackwardFn {
 		d_out: Tensor,
 		queue: &mut autograd::Queue,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		let Self { calc, inp_backward, required_magn } = Box::into_inner(self);
+		let Self { calc, eps, inp_backward, required_magn } = Box::into_inner(self);
 		let magn_recip = d_out.new_replace_tail(1, &[1])?;
-		magn_recip.assign(calc.rsqrt_mean_square(&d_out))?;
+		magn_recip.assign(calc.root_mean_square(&d_out).recip(eps))?;
 
 		if let Some(required_magn) = required_magn {
 			magn_recip.assign(&magn_recip * &required_magn)?;

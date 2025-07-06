@@ -12,7 +12,7 @@
 
 use std::hint::cold_path;
 
-use crate::tensor::math::{RSqrt, Sum};
+use crate::tensor::math::{Recip, Sqrt, Sum};
 use crate::tensor::{Tensor, TensorOpError};
 use crate::util::LossyInto;
 use crate::{ErrExtra, ErrPack};
@@ -143,7 +143,7 @@ impl OptParam {
 		self.v.assign(new_v)?;
 
 		// Update value
-		self.v_rsqrt.assign(self.v.rsqrt(coef.eps))?;
+		self.v_rsqrt.assign(self.v.sqrt().recip(coef.eps))?;
 		let update = &self.m * &self.v_rsqrt;
 		let new_value = &self.value - coef.learning_rate * update;
 		self.value.assign(new_value)?;

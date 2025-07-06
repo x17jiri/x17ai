@@ -982,30 +982,47 @@ impl<'a> Scalable for ScaledMulExpr<'a> {
 
 //--------------------------------------------------------------------------------------------------
 
+pub trait Sqrt {
+	type Output;
+	fn sqrt(self) -> Self::Output;
+}
+
+pub trait Recip {
+	type Output;
+	fn recip(self, eps: f64) -> Self::Output;
+}
+
+pub struct SqrtExpr<'a> {
+	pub tensor: &'a Tensor,
+	pub scale: f64,
+}
+
 pub struct RSqrtExpr<'a> {
 	pub tensor: &'a Tensor,
 	pub scale: f64,
 	pub eps: f64,
 }
 
-pub trait RSqrt {
-	type Output;
-	fn rsqrt(self, eps: f64) -> Self::Output;
-}
-
-impl<'a> RSqrt for &'a Tensor {
-	type Output = RSqrtExpr<'a>;
-	fn rsqrt(self, eps: f64) -> Self::Output {
-		RSqrtExpr { tensor: self, scale: 1.0, eps }
+impl<'a> Sqrt for &'a Tensor {
+	type Output = SqrtExpr<'a>;
+	fn sqrt(self) -> Self::Output {
+		SqrtExpr { tensor: self, scale: 1.0 }
 	}
 }
 
-impl<'a> RSqrt for ScaledTensorExpr<'a> {
+impl<'a> Sqrt for ScaledTensorExpr<'a> {
+	type Output = SqrtExpr<'a>;
+	fn sqrt(self) -> Self::Output {
+		SqrtExpr { tensor: self.tensor, scale: self.scale }
+	}
+}
+
+impl<'a> Recip for SqrtExpr<'a> {
 	type Output = RSqrtExpr<'a>;
-	fn rsqrt(self, eps: f64) -> Self::Output {
+	fn recip(self, eps: f64) -> Self::Output {
 		RSqrtExpr {
 			tensor: self.tensor,
-			scale: self.scale,
+			scale: 1.0 / self.scale,
 			eps,
 		}
 	}
@@ -1017,45 +1034,6 @@ impl<'a> EvaluatesToTensor for RSqrtExpr<'a> {
 		let executor = to.executor();
 		ElemWise::new([to], [self.tensor])?.run(|[to], [input]| {
 			executor.rsqrt(to, input, self.scale, self.eps)?;
-			Ok(())
-		})
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
-pub trait Sqrt {
-	type Output;
-	fn sqrt(self) -> Self::Output;
-}
-
-//--------------------------------------------------------------------------------------------------
-
-pub struct RSqrtDotExpr<'a> {
-	pub a: &'a Tensor,
-	pub b: &'a Tensor,
-	pub scale: f64,
-	pub eps: f64,
-}
-
-impl<'a> RSqrt for DotExpr<'a> {
-	type Output = RSqrtDotExpr<'a>;
-	fn rsqrt(self, eps: f64) -> Self::Output {
-		RSqrtDotExpr {
-			a: self.a,
-			b: self.b,
-			scale: self.scale,
-			eps,
-		}
-	}
-}
-
-impl<'a> EvaluatesToTensor for RSqrtDotExpr<'a> {
-	#[inline(never)]
-	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
-		let executor = to.executor();
-		VecWise::new([to], [self.a, self.b])?.run(|[to], [a, b]| {
-			executor.rsqrt_dot(to, a, b, self.scale, self.eps)?;
 			Ok(())
 		})
 	}
@@ -1082,6 +1060,38 @@ impl<'a> EvaluatesToTensor for SqrtDotExpr<'a> {
 		let executor = to.executor();
 		VecWise::new([to], [self.a, self.b])?.run(|[to], [a, b]| {
 			executor.sqrt_dot(to, a, b, self.scale)?;
+			Ok(())
+		})
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct RSqrtDotExpr<'a> {
+	pub a: &'a Tensor,
+	pub b: &'a Tensor,
+	pub scale: f64,
+	pub eps: f64,
+}
+
+impl<'a> Recip for SqrtDotExpr<'a> {
+	type Output = RSqrtDotExpr<'a>;
+	fn recip(self, eps: f64) -> Self::Output {
+		RSqrtDotExpr {
+			a: self.a,
+			b: self.b,
+			scale: self.scale,
+			eps,
+		}
+	}
+}
+
+impl<'a> EvaluatesToTensor for RSqrtDotExpr<'a> {
+	#[inline(never)]
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+		let executor = to.executor();
+		VecWise::new([to], [self.a, self.b])?.run(|[to], [a, b]| {
+			executor.rsqrt_dot(to, a, b, self.scale, self.eps)?;
 			Ok(())
 		})
 	}
@@ -1523,28 +1533,11 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 #[derive(Clone, Copy)]
 pub struct RMSCalc {
 	pub sum_to_mean: f64,
-	pub eps: f64,
 }
 
 impl RMSCalc {
-	pub fn new(n_inputs: usize, eps: f64) -> Self {
-		Self {
-			sum_to_mean: 1.0 / n_inputs.lossy_into(),
-			eps,
-		}
-	}
-
-	/// Calculates:
-	///
-	///     1.0 / sqrt(mean(inp * inp) + eps)
-	///
-	/// where `mean` is calculated over the last dimension of `inp`.
-	pub fn rsqrt_mean_square<'a>(&self, inp: &'a Tensor) -> RsqrtMeanSquare<'a> {
-		RsqrtMeanSquare {
-			sum_to_mean: self.sum_to_mean,
-			eps: self.eps,
-			inp,
-		}
+	pub fn new(n_inputs: usize) -> Self {
+		Self { sum_to_mean: 1.0 / n_inputs.lossy_into() }
 	}
 
 	/// Calculates:
@@ -1552,37 +1545,10 @@ impl RMSCalc {
 	///     mean(inp * inp)
 	///
 	/// where `mean` is calculated over the last dimension of `inp`.
-	pub fn sqrt_mean_square<'a>(&self, inp: &'a Tensor) -> SqrtMeanSquare<'a> {
-		SqrtMeanSquare { sum_to_mean: self.sum_to_mean, inp }
-	}
-}
-
-pub struct RsqrtMeanSquare<'a> {
-	pub sum_to_mean: f64,
-	pub eps: f64,
-	pub inp: &'a Tensor,
-}
-
-pub struct SqrtMeanSquare<'a> {
-	pub sum_to_mean: f64,
-	pub inp: &'a Tensor,
-}
-
-impl EvaluatesToTensor for RsqrtMeanSquare<'_> {
-	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
-		let inp = self.inp;
+	pub fn root_mean_square<'a>(&self, inp: &'a Tensor) -> SqrtDotExpr<'a> {
 		let sum_square = (inp * inp).sum();
 		let mean_square = sum_square * self.sum_to_mean;
-		to.assign(mean_square.rsqrt(self.eps))
-	}
-}
-
-impl EvaluatesToTensor for SqrtMeanSquare<'_> {
-	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
-		let inp = self.inp;
-		let sum_square = (inp * inp).sum();
-		let mean_square = sum_square * self.sum_to_mean;
-		to.assign(mean_square.sqrt())
+		mean_square.sqrt()
 	}
 }
 
