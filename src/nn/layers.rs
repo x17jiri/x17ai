@@ -12,10 +12,10 @@ use std::rc::Rc;
 pub mod cross_entropy;
 pub mod linear;
 pub mod rms_norm;
-pub mod wrapper;
 pub mod skip_connection;
 pub mod softmax;
 pub mod swiglu;
+pub mod wrapper;
 
 #[cfg(test)]
 mod tests;

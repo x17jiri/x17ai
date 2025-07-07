@@ -18,6 +18,8 @@ use crate::tensor::math::{RMSCalc, Recip};
 
 use super::Layer;
 
+//--------------------------------------------------------------------------------------------------
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum NormPosition {
 	/// ```
@@ -40,6 +42,8 @@ pub enum NormPosition {
 	/// ```
 	Outside,
 }
+
+//--------------------------------------------------------------------------------------------------
 
 pub struct Wrapper<Nested: Layer> {
 	nested: Nested,
@@ -91,12 +95,20 @@ impl<Nested: Layer> Layer for Wrapper<Nested> {
 
 		let inp_magn_recip = inp.new_replace_tail(1, &[1])?;
 		inp_magn_recip.assign(self.calc.root_mean_square(&inp).recip(self.eps))?;
-		let rms_norm = inp.new_empty_like()?;
+
+		let rms_norm = if self.norm_pos != NormPosition::Inside && inp.owns_buffer() {
+			inp.clone()
+		} else {
+			inp.new_empty_like()?
+		};
+
 		rms_norm.assign(&inp * &inp_magn_recip)?;
 
-		let residual = match self.norm_pos {
-			NormPosition::Inside => AutogradNode::new(inp, residual_fn),
-			NormPosition::Outside => AutogradNode::new(rms_norm.clone(), residual_fn),
+		let residual = if self.norm_pos == NormPosition::Inside {
+			AutogradNode::new(inp, residual_fn)
+		} else {
+			std::mem::drop(inp);
+			AutogradNode::new(rms_norm.clone(), residual_fn)
 		};
 
 		let nested_out;
@@ -137,3 +149,5 @@ impl<Nested: Layer> Layer for Wrapper<Nested> {
 		self.nested.randomize()
 	}
 }
+
+//--------------------------------------------------------------------------------------------------
