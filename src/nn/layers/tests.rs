@@ -10,3 +10,4 @@ mod test_rms_norm;
 mod test_skip_connection;
 mod test_softmax;
 mod test_swiglu;
+mod test_wrapper;

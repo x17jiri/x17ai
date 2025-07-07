@@ -46,7 +46,7 @@ pub enum NormPosition {
 //--------------------------------------------------------------------------------------------------
 
 pub struct Wrapper<Nested: Layer> {
-	nested: Nested,
+	pub nested: Nested,
 	calc: RMSCalc,
 	eps: f64,
 	norm_pos: NormPosition,
@@ -103,6 +103,7 @@ impl<Nested: Layer> Layer for Wrapper<Nested> {
 		};
 
 		rms_norm.assign(&inp * &inp_magn_recip)?;
+		println!("rms_norm = {}", rms_norm.borrow()?.view::<f32>()?);
 
 		let residual = if self.norm_pos == NormPosition::Inside {
 			AutogradNode::new(inp, residual_fn)

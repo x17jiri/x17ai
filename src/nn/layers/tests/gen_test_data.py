@@ -151,6 +151,49 @@ def gen_linear():
 
 	print("expected_d_weights = ", d_weights)
 
+def gen_wrapper():
+	weights = torch.tensor([
+		[ 1.7020,  6.0947,  3.4361, -0.6843],
+        [-6.3394,  1.0607,  2.0116,  0.4654],
+        [ 0.5924, -2.0077, -1.3039,  0.0213],
+        [-2.1613,  1.1771, -5.4062, -0.2243],
+	], dtype=torch.float32, requires_grad=True)
+
+	input = torch.tensor([
+		[ 1.1364, -1.0560,  2.3672, -2.8698],
+		[-0.4039,  0.3338,  0.2042,  0.1764],
+		[ 3.5515,  0.7146, -0.4302, -0.3935],
+		[ 1.0369,  0.2028, -0.1517,  0.3535],
+		[-0.6558,  2.5798,  0.4381, -1.5726]
+	], dtype=torch.float32, requires_grad=True)
+
+	rms = (input*input).sum(dim=-1, keepdim=True).sqrt()
+	norm = input / (rms + 1e-5)
+	print("norm = ", norm)
+
+	forward_scale = (1.0 / (weights.shape[1] ** 0.5))
+	out = torch.matmul(weights, norm.T).T * forward_scale
+
+	print("expected_out = ", out + input)
+
+	if False:
+		d_out = torch.tensor([
+			[-1.2192,  0.9470, -1.0698,  1.0365,  0.1644, -0.1481],
+			[-1.0424, -0.4814, -1.5834,  0.4658,  1.0362, -0.2995],
+			[-0.5644,  1.4450, -1.0186, -0.5245,  2.2684, -0.5567],
+			[-0.9963, -1.7835,  0.6185,  2.0077, -0.5136, -0.9927]
+		], dtype=torch.float32)
+
+		out.backward(d_out)
+
+		d_inp = input.grad * backward_scale
+
+		print("expected_d_inp = ", d_inp);
+
+		d_weights = weights.grad
+
+		print("expected_d_weights = ", d_weights)
+
 what = ''
 try:
 	what = sys.argv[1]
@@ -163,6 +206,7 @@ options = {
 	'skip_con': gen_skip_con,
 	'swiglu': gen_swiglu,
 	'linear': gen_linear,
+	'wrapper': gen_wrapper,
 }
 
 if __name__ == "__main__":
