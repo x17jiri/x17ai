@@ -10,11 +10,11 @@ use std::hint::cold_path;
 use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::autograd::{self, AutogradNode};
+use crate::autograd::{self, AutogradNode, BackwardFn};
 use crate::nn::layers::rms_norm::BackwardRMSNormBackwardFn;
 use crate::nn::param::Param;
-use crate::tensor::TensorOpError;
 use crate::tensor::math::{RMSCalc, Recip};
+use crate::tensor::{Tensor, TensorOpError};
 
 use super::Layer;
 
@@ -90,8 +90,7 @@ impl<Nested: Layer> Layer for Wrapper<Nested> {
 	}
 
 	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
-		let (inp, inp_fn) = inp_node.take();
-		let [nested_inp_fn, residual_fn] = autograd::split::split_fn(inp_fn);
+		let (inp, backward_fn) = inp_node.take();
 
 		let inp_magn_recip = inp.new_replace_tail(1, &[1])?;
 		inp_magn_recip.assign(self.calc.root_mean_square(&inp).recip(self.eps))?;
@@ -101,53 +100,114 @@ impl<Nested: Layer> Layer for Wrapper<Nested> {
 		} else {
 			inp.new_empty_like()?
 		};
-
 		rms_norm.assign(&inp * &inp_magn_recip)?;
-		println!("rms_norm = {}", rms_norm.borrow()?.view::<f32>()?);
 
-		let residual = if self.norm_pos == NormPosition::Inside {
-			AutogradNode::new(inp, residual_fn)
+		let mut residual = if self.norm_pos == NormPosition::Inside {
+			inp
 		} else {
 			std::mem::drop(inp);
-			AutogradNode::new(rms_norm.clone(), residual_fn)
+			rms_norm.clone()
 		};
 
-		let nested_out;
-		if let Some(nested_inp_fn) = nested_inp_fn {
-			let required_magn = inp_magn_recip.new_empty_like()?;
-			let grad_rescale_fn = Box::new(BackwardRMSNormBackwardFn {
-				calc: self.calc,
-				eps: self.eps,
-				inp_backward: nested_inp_fn,
-				required_magn: Some(required_magn.clone()),
-			});
+		let (mut nested_out, nested_out_fn) = if let Some(backward_fn) = backward_fn {
+			let rc_inner = Rc::new(RefCell::new(WrapperBackwardFn_Inner {
+				d_residual: None,
+				forward_ratio: inp_magn_recip.new_empty_like()?,
+			}));
+			let inner = rc_inner.borrow();
 
-			let nested_inp = AutogradNode::new(rms_norm, Some(grad_rescale_fn));
-			nested_out = self.nested.forward(nested_inp)?;
+			let nested_inp = AutogradNode::new(
+				rms_norm,
+				Some(Box::new(WrapperBackwardFn_Split { rc_inner: rc_inner.clone(), backward_fn })),
+			);
+			let (nested_out, nested_out_fn) = self.nested.forward(nested_inp)?.take();
 
-			required_magn.assign(self.calc.root_mean_square(&nested_out.value))?;
+			inner.forward_ratio.assign(self.calc.root_mean_square(&nested_out))?;
 			if self.norm_pos == NormPosition::Inside {
-				required_magn.assign(&required_magn * &inp_magn_recip)?;
+				inner.forward_ratio.assign(&inner.forward_ratio * &inp_magn_recip)?;
 			}
+			std::mem::drop(inner);
+
+			(
+				nested_out,
+				if let Some(nested_out_fn) = nested_out_fn {
+					Some(Box::new(WrapperBackwardFn_Merge { rc_inner, nested_out_fn })
+						as Box<dyn BackwardFn>)
+				} else {
+					cold_path();
+					std::mem::drop(rc_inner);
+					None
+				},
+			)
 		} else {
+			std::mem::drop(backward_fn);
 			let nested_inp = AutogradNode::new(rms_norm, None);
-			nested_out = self.nested.forward(nested_inp)?;
+			self.nested.forward(nested_inp)?.take()
+		};
+
+		if !nested_out.owns_buffer() {
+			std::mem::swap(&mut nested_out, &mut residual);
 		}
-
-		let out = autograd::add::add(nested_out, residual)?;
-
-		Ok(out.map_backward_fn(|f| {
-			Box::new(BackwardRMSNormBackwardFn {
-				calc: self.calc,
-				eps: self.eps,
-				inp_backward: f,
-				required_magn: None,
-			})
-		}))
+		let out = if nested_out.owns_buffer() {
+			// TODO - could I avoid the clone?
+			nested_out.clone()
+		} else {
+			nested_out.new_empty_like()?
+		};
+		out.assign(&nested_out + &residual)?;
+		Ok(AutogradNode::new(out, nested_out_fn))
 	}
 
 	fn randomize(&mut self) -> Result<(), ErrPack<TensorOpError>> {
 		self.nested.randomize()
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct WrapperBackwardFn_Inner {
+	d_residual: Option<Tensor>,
+
+	// magnitude of the signal coming from the nested block
+	// divided by magnitude of the residual signal
+	forward_ratio: Tensor,
+}
+
+pub struct WrapperBackwardFn_Split {
+	rc_inner: Rc<RefCell<WrapperBackwardFn_Inner>>,
+	backward_fn: Box<dyn BackwardFn>,
+}
+
+pub struct WrapperBackwardFn_Merge {
+	rc_inner: Rc<RefCell<WrapperBackwardFn_Inner>>,
+	nested_out_fn: Box<dyn BackwardFn>,
+}
+
+impl BackwardFn for WrapperBackwardFn_Split {
+	fn run(
+		self: Box<Self>,
+		d_out: Tensor,
+		queue: &mut autograd::Queue,
+	) -> Result<(), ErrPack<TensorOpError>> {
+		let Self { rc_inner, backward_fn } = Box::into_inner(self);
+		let refcell = Rc::into_inner(rc_inner).unwrap();
+		let inner = refcell.into_inner();
+		let WrapperBackwardFn_Inner { d_residual, forward_ratio } = inner;
+		todo!("Implement WrapperBackwardFn_Split::run");
+	}
+}
+
+impl BackwardFn for WrapperBackwardFn_Merge {
+	fn run(
+		self: Box<Self>,
+		d_out: Tensor,
+		queue: &mut autograd::Queue,
+	) -> Result<(), ErrPack<TensorOpError>> {
+		let Self { rc_inner, nested_out_fn } = Box::into_inner(self);
+		let mut inner = rc_inner.borrow_mut();
+		inner.d_residual = Some(d_out.clone());
+		queue.add(nested_out_fn, d_out);
+		Ok(())
 	}
 }
 

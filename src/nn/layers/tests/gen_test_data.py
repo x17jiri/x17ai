@@ -167,14 +167,18 @@ def gen_wrapper():
 		[-0.6558,  2.5798,  0.4381, -1.5726]
 	], dtype=torch.float32, requires_grad=True)
 
-	rms = (input*input).sum(dim=-1, keepdim=True).sqrt()
+	rms = (input*input).mean(dim=-1, keepdim=True).sqrt()
 	norm = input / (rms + 1e-5)
 	print("norm = ", norm)
 
 	forward_scale = (1.0 / (weights.shape[1] ** 0.5))
 	out = torch.matmul(weights, norm.T).T * forward_scale
 
+	rms_out = (out*out).mean(dim=-1, keepdim=True).sqrt()
+	ratio = rms_out / (rms + 1e-5)
+
 	print("expected_out = ", out + input)
+	print("expected_ratio = ", ratio)
 
 	if False:
 		d_out = torch.tensor([
