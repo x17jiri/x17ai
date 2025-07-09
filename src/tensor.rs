@@ -105,30 +105,26 @@ impl Tensor {
 		shape: &[usize],
 		dtype: DType,
 		device: Rc<dyn Device>,
-	) -> Result<Tensor, ErrPack<TensorOpError>> {
+	) -> Result<Self, ErrPack<TensorOpError>> {
 		let (map, elems) = DD::new(shape)?;
 		let buf = device.new_buffer(dtype, elems)?;
 
 		// SAFETY: We created the buffer to be as big as the mapping.
-		Ok(unsafe { Tensor::new_unchecked(map, buf) })
+		Ok(unsafe { Self::new_unchecked(map, buf) })
 	}
 
 	/// Allocate a new tensor on the same device as `self`.
-	pub fn new_empty(
-		&self,
-		shape: &[usize],
-		dtype: DType,
-	) -> Result<Tensor, ErrPack<TensorOpError>> {
+	pub fn new_empty(&self, shape: &[usize], dtype: DType) -> Result<Self, ErrPack<TensorOpError>> {
 		Self::new_empty_on(shape, dtype, self.device())
 	}
 
 	/// Allocate a new tensor on the same device with the same shape and dtype as `self`.
-	pub fn new_empty_like(&self) -> Result<Tensor, ErrPack<TensorOpError>> {
+	pub fn new_empty_like(&self) -> Result<Self, ErrPack<TensorOpError>> {
 		let (map, elems) = self.map().new_like();
 		let buf = self.device().new_buffer(self.buf().dtype, elems)?;
 
 		// SAFETY: We created the buffer to be as big as the mapping.
-		Ok(unsafe { Tensor::new_unchecked(map, buf) })
+		Ok(unsafe { Self::new_unchecked(map, buf) })
 	}
 
 	/// Typical user of this function would be `nn` layer that can either
@@ -140,7 +136,7 @@ impl Tensor {
 	///
 	/// If the tensor does not own its buffer, we allocate a new empty tensor
 	/// with the same shape and dtype as `self`.
-	pub fn reuse_or_new_like(&self) -> Result<Tensor, ErrPack<TensorOpError>> {
+	pub fn reuse_or_new_like(&self) -> Result<Self, ErrPack<TensorOpError>> {
 		if self.owns_buffer() { Ok(self.clone()) } else { self.new_empty_like() }
 	}
 
@@ -156,12 +152,12 @@ impl Tensor {
 		&self,
 		tail_len: usize,
 		replace_with: &[usize],
-	) -> Result<Tensor, ErrPack<TensorOpError>> {
+	) -> Result<Self, ErrPack<TensorOpError>> {
 		let (map, elems) = self.map().new_replace_tail(tail_len, replace_with)?;
 		let buf = self.device().new_buffer(self.buf().dtype, elems)?;
 
 		// SAFETY: We created the buffer to be as big as the mapping.
-		Ok(unsafe { Tensor::new_unchecked(map, buf) })
+		Ok(unsafe { Self::new_unchecked(map, buf) })
 	}
 
 	/// Returns the device on which the tensor is allocated.

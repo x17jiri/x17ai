@@ -25,7 +25,7 @@ pub enum RMSNormGradientMode {
 pub struct RMSNorm {
 	shape: [usize; 1],
 	gradient_mode: RMSNormGradientMode,
-	calc: RMSCalc,
+	rms: RMSCalc,
 	eps: f64,
 }
 
@@ -34,7 +34,7 @@ impl RMSNorm {
 		Self {
 			shape: [n_inputs],
 			gradient_mode: RMSNormGradientMode::Precise,
-			calc: RMSCalc::new(n_inputs),
+			rms: RMSCalc::new(n_inputs),
 			eps,
 		}
 	}
@@ -60,7 +60,7 @@ impl Layer for RMSNorm {
 	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
 		let (inp, inp_backward) = inp_node.take();
 		let magn_recip = inp.new_replace_tail(1, &[1])?;
-		magn_recip.assign(self.calc.root_mean_square(&inp).recip(self.eps))?;
+		magn_recip.assign(self.rms.root_mean_square(&inp).recip(self.eps))?;
 
 		let out = inp.reuse_or_new_like()?;
 		out.assign(&inp * &magn_recip)?;
@@ -71,7 +71,7 @@ impl Layer for RMSNorm {
 				Box::new(RMSNormBackwardFn_Precise {
 					out: out.clone(),
 					magn_recip,
-					sum_to_mean: self.calc.sum_to_mean,
+					sum_to_mean: self.rms.sum_to_mean,
 					inp_backward,
 				}) as Box<dyn BackwardFn>
 			},
@@ -118,90 +118,6 @@ impl BackwardFn for RMSNormBackwardFn_Precise {
 		d_inp.assign(&out * &g)?;
 		d_inp.assign(&d_out - &d_inp)?;
 		d_inp.assign(&d_inp * &magn_recip)?;
-
-		queue.add(inp_backward, d_inp);
-		Ok(())
-	}
-}
-
-/// This is no-op in the forward pass and normalizes the gradients in the backward pass.
-pub struct BackwardRMSNorm {
-	shape: [usize; 1],
-	calc: RMSCalc,
-	eps: f64,
-}
-
-impl BackwardRMSNorm {
-	pub fn new(n_inputs: usize, eps: f64) -> Self {
-		Self {
-			shape: [n_inputs],
-			calc: RMSCalc::new(n_inputs),
-			eps,
-		}
-	}
-}
-
-impl Layer for BackwardRMSNorm {
-	fn input_shape(&self) -> &[usize] {
-		&self.shape
-	}
-
-	fn output_shape(&self) -> &[usize] {
-		&self.shape
-	}
-
-	fn collect_params(&self, _f: &mut dyn FnMut(Rc<RefCell<Param>>)) {
-		// no parameters to collect
-	}
-
-	fn collect_named_params(&self, _prefix: &str, _f: &mut dyn FnMut(String, Rc<RefCell<Param>>)) {
-		// no parameters to collect
-	}
-
-	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
-		let (inp, inp_backward) = inp_node.take();
-
-		let backward_fn = inp_backward.map(|inp_backward| {
-			Box::new(BackwardRMSNormBackwardFn {
-				calc: self.calc,
-				eps: self.eps,
-				inp_backward,
-				required_magn: None,
-			}) as Box<dyn BackwardFn>
-		});
-
-		Ok(AutogradNode::new(inp, backward_fn))
-	}
-
-	fn randomize(&mut self) -> Result<(), ErrPack<TensorOpError>> {
-		// no parameters to randomize
-		Ok(())
-	}
-}
-
-pub struct BackwardRMSNormBackwardFn {
-	pub calc: RMSCalc,
-	pub eps: f64,
-	pub inp_backward: Box<dyn BackwardFn>,
-	pub required_magn: Option<Tensor>,
-}
-
-impl BackwardFn for BackwardRMSNormBackwardFn {
-	fn run(
-		self: Box<Self>,
-		d_out: Tensor,
-		queue: &mut autograd::Queue,
-	) -> Result<(), ErrPack<TensorOpError>> {
-		let Self { calc, eps, inp_backward, required_magn } = Box::into_inner(self);
-		let magn_recip = d_out.new_replace_tail(1, &[1])?;
-		magn_recip.assign(calc.root_mean_square(&d_out).recip(eps))?;
-
-		if let Some(required_magn) = required_magn {
-			magn_recip.assign(&magn_recip * &required_magn)?;
-		}
-
-		let d_inp = d_out.reuse_or_new_like()?;
-		d_inp.assign(&d_out * &magn_recip)?;
 
 		queue.add(inp_backward, d_inp);
 		Ok(())

@@ -11,7 +11,6 @@ use std::rc::Rc;
 
 use crate::ErrPack;
 use crate::autograd::{self, AutogradNode, BackwardFn};
-use crate::nn::layers::rms_norm::BackwardRMSNormBackwardFn;
 use crate::nn::param::Param;
 use crate::tensor::math::{RMSCalc, Recip};
 use crate::tensor::{Tensor, TensorOpError};
@@ -47,7 +46,7 @@ pub enum NormPosition {
 
 pub struct Wrapper<Nested: Layer> {
 	pub nested: Nested,
-	calc: RMSCalc,
+	rms: RMSCalc,
 	eps: f64,
 	norm_pos: NormPosition,
 }
@@ -61,7 +60,7 @@ impl<Nested: Layer> Wrapper<Nested> {
 		{
 			Some(Self {
 				nested,
-				calc: RMSCalc::new(n_inputs),
+				rms: RMSCalc::new(n_inputs),
 				eps,
 				norm_pos: NormPosition::Inside,
 			})
@@ -93,7 +92,7 @@ impl<Nested: Layer> Layer for Wrapper<Nested> {
 		let (inp, backward_fn) = inp_node.take();
 
 		let inp_magn_recip = inp.new_replace_tail(1, &[1])?;
-		inp_magn_recip.assign(self.calc.root_mean_square(&inp).recip(self.eps))?;
+		inp_magn_recip.assign(self.rms.root_mean_square(&inp).recip(self.eps))?;
 
 		let rms_norm = if self.norm_pos != NormPosition::Inside && inp.owns_buffer() {
 			inp.clone()
@@ -112,19 +111,24 @@ impl<Nested: Layer> Layer for Wrapper<Nested> {
 		let (mut nested_out, nested_out_fn) = if let Some(backward_fn) = backward_fn {
 			let rc_inner = Rc::new(RefCell::new(WrapperBackwardFn_Inner {
 				d_residual: None,
-				forward_ratio: inp_magn_recip.new_empty_like()?,
+				ratio: inp_magn_recip.new_empty_like()?,
 			}));
 			let inner = rc_inner.borrow();
 
 			let nested_inp = AutogradNode::new(
 				rms_norm,
-				Some(Box::new(WrapperBackwardFn_Split { rc_inner: rc_inner.clone(), backward_fn })),
+				Some(Box::new(WrapperBackwardFn_Split {
+					rc_inner: rc_inner.clone(),
+					rms: self.rms,
+					eps: self.eps,
+					backward_fn,
+				})),
 			);
 			let (nested_out, nested_out_fn) = self.nested.forward(nested_inp)?.take();
 
-			inner.forward_ratio.assign(self.calc.root_mean_square(&nested_out))?;
+			inner.ratio.assign(self.rms.root_mean_square(&nested_out))?;
 			if self.norm_pos == NormPosition::Inside {
-				inner.forward_ratio.assign(&inner.forward_ratio * &inp_magn_recip)?;
+				inner.ratio.assign(&inner.ratio * &inp_magn_recip)?;
 			}
 			std::mem::drop(inner);
 
@@ -148,12 +152,7 @@ impl<Nested: Layer> Layer for Wrapper<Nested> {
 		if !nested_out.owns_buffer() {
 			std::mem::swap(&mut nested_out, &mut residual);
 		}
-		let out = if nested_out.owns_buffer() {
-			// TODO - could I avoid the clone?
-			nested_out.clone()
-		} else {
-			nested_out.new_empty_like()?
-		};
+		let out = nested_out.reuse_or_new_like()?;
 		out.assign(&nested_out + &residual)?;
 		Ok(AutogradNode::new(out, nested_out_fn))
 	}
@@ -168,13 +167,15 @@ impl<Nested: Layer> Layer for Wrapper<Nested> {
 pub struct WrapperBackwardFn_Inner {
 	d_residual: Option<Tensor>,
 
-	// magnitude of the signal coming from the nested block
-	// divided by magnitude of the residual signal
-	forward_ratio: Tensor,
+	/// Magnitude of the signal coming from the nested block
+	/// divided by magnitude of the residual signal
+	ratio: Tensor,
 }
 
 pub struct WrapperBackwardFn_Split {
 	rc_inner: Rc<RefCell<WrapperBackwardFn_Inner>>,
+	rms: RMSCalc,
+	eps: f64,
 	backward_fn: Box<dyn BackwardFn>,
 }
 
@@ -189,11 +190,23 @@ impl BackwardFn for WrapperBackwardFn_Split {
 		d_out: Tensor,
 		queue: &mut autograd::Queue,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		let Self { rc_inner, backward_fn } = Box::into_inner(self);
+		let Self { rc_inner, rms, eps, backward_fn } = Box::into_inner(self);
 		let refcell = Rc::into_inner(rc_inner).unwrap();
 		let inner = refcell.into_inner();
-		let WrapperBackwardFn_Inner { d_residual, forward_ratio } = inner;
-		todo!("Implement WrapperBackwardFn_Split::run");
+		let WrapperBackwardFn_Inner { d_residual, ratio } = inner;
+		let d_residual = d_residual.unwrap();
+
+		let tmp = ratio.new_empty_like()?;
+		tmp.assign(rms.root_mean_square(&d_out).recip(eps))?;
+		ratio.assign(&ratio * &tmp)?;
+		tmp.assign(rms.root_mean_square(&d_residual))?;
+		ratio.assign(&ratio * &tmp)?;
+		std::mem::drop(tmp);
+
+		let grad = d_residual.reuse_or_new_like()?;
+		grad.assign(&d_residual + (&d_out * &ratio))?;
+		queue.add(backward_fn, grad);
+		Ok(())
 	}
 }
 
