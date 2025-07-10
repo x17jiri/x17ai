@@ -171,8 +171,11 @@ def gen_wrapper():
 	norm = input / (rms + 1e-5)
 	print("norm = ", norm)
 
+	mm_inp = norm
+	mm_inp.retain_grad()
+
 	forward_scale = (1.0 / (weights.shape[1] ** 0.5))
-	out = torch.matmul(weights, norm.T).T * forward_scale
+	out = torch.matmul(weights, mm_inp.T).T * forward_scale
 
 	rms_out = (out*out).mean(dim=-1, keepdim=True).sqrt()
 	ratio = rms_out / (rms + 1e-5)
@@ -180,23 +183,30 @@ def gen_wrapper():
 	print("expected_out = ", out + input)
 	print("expected_ratio = ", ratio)
 
-	if False:
-		d_out = torch.tensor([
-			[-1.2192,  0.9470, -1.0698,  1.0365,  0.1644, -0.1481],
-			[-1.0424, -0.4814, -1.5834,  0.4658,  1.0362, -0.2995],
-			[-0.5644,  1.4450, -1.0186, -0.5245,  2.2684, -0.5567],
-			[-0.9963, -1.7835,  0.6185,  2.0077, -0.5136, -0.9927]
-		], dtype=torch.float32)
+	# torch.randn(5, 4) * 0.5
+	d_out = torch.tensor([
+		[-0.3847,  0.0664, -0.6217,  0.5983],
+		[ 0.2775,  0.2007, -0.7973,  0.0167],
+		[ 0.5394, -0.0854,  0.5947, -0.4340],
+		[ 0.0528, -0.1087,  0.2953,  0.3368],
+		[ 0.1521, -0.4394, -0.6771, -0.0617],
+	], dtype=torch.float32)
 
-		out.backward(d_out)
+	out.backward(d_out)
 
-		d_inp = input.grad * backward_scale
+	d_mm = mm_inp.grad
+	d_inp_real = input.grad
+	d_weights = weights.grad
 
-		print("expected_d_inp = ", d_inp);
+	rms_d_out = (d_out*d_out).mean(dim=-1, keepdim=True).sqrt()
+	rms_d_mm = (d_mm*d_mm).mean(dim=-1, keepdim=True).sqrt()
+	ratio_d = rms_d_mm / (rms_d_out + 1e-5)
+	d_inp = d_mm / ratio_d * ratio + d_out
 
-		d_weights = weights.grad
-
-		print("expected_d_weights = ", d_weights)
+	print("expected_d_mm = ", d_mm)
+	print("expected_d_inp = ", d_inp)
+	print("expected_d_inp_real = ", d_inp_real)
+	print("expected_d_weights = ", d_weights)
 
 what = ''
 try:
