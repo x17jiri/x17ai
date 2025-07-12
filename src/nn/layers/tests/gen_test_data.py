@@ -152,19 +152,23 @@ def gen_linear():
 	print("expected_d_weights = ", d_weights)
 
 def gen_wrapper():
+	# torch.randn(4, 4) * 5
 	weights = torch.tensor([
-		[ 1.7020,  6.0947,  3.4361, -0.6843],
-        [-6.3394,  1.0607,  2.0116,  0.4654],
-        [ 0.5924, -2.0077, -1.3039,  0.0213],
-        [-2.1613,  1.1771, -5.4062, -0.2243],
+		[ 0.4410,  1.0766,  3.7616, -6.4873],
+		[ 9.6167,  1.4782, -1.6646, -9.1857],
+		[ 1.6518,  1.8148,  0.7772, -3.1704],
+		[-3.5822,  5.1029,  0.5198, -2.1559],
 	], dtype=torch.float32, requires_grad=True)
+	#weights = torch.randn(4, 4) * 2
+	#weights.requires_grad = True
 
+	# torch.randn(5, 4) * 3
 	input = torch.tensor([
-		[ 1.1364, -1.0560,  2.3672, -2.8698],
-		[-0.4039,  0.3338,  0.2042,  0.1764],
-		[ 3.5515,  0.7146, -0.4302, -0.3935],
-		[ 1.0369,  0.2028, -0.1517,  0.3535],
-		[-0.6558,  2.5798,  0.4381, -1.5726]
+		[-2.7016,  2.2977, -1.3401,  0.8465],
+		[ 0.1577,  1.2480,  2.9994, -1.7373],
+		[-1.9980,  3.0446,  5.2757, -1.2850],
+		[-2.1982, -0.8580, -0.6265, -1.6002],
+		[-2.2695, -1.1619, -3.1626,  2.6974],
 	], dtype=torch.float32, requires_grad=True)
 
 	rms = (input*input).mean(dim=-1, keepdim=True).sqrt()
@@ -180,7 +184,9 @@ def gen_wrapper():
 	rms_out = (out*out).mean(dim=-1, keepdim=True).sqrt()
 	ratio = rms_out / (rms + 1e-5)
 
-	print("expected_out = ", out + input)
+	final_out = out + input
+
+	print("expected_out = ", final_out)
 	print("expected_ratio = ", ratio)
 
 	# torch.randn(5, 4) * 0.5
@@ -192,21 +198,33 @@ def gen_wrapper():
 		[ 0.1521, -0.4394, -0.6771, -0.0617],
 	], dtype=torch.float32)
 
-	out.backward(d_out)
+	d_out_magn = (d_out*d_out).mean(dim=-1, keepdim=True).sqrt()
+	print("d_out_magn = ", d_out_magn)
+
+	final_out.backward(d_out)
 
 	d_mm = mm_inp.grad
 	d_inp_real = input.grad
+	d_inp_real_magn = (d_inp_real*d_inp_real).mean(dim=-1, keepdim=True).sqrt()
 	d_weights = weights.grad
 
 	rms_d_out = (d_out*d_out).mean(dim=-1, keepdim=True).sqrt()
 	rms_d_mm = (d_mm*d_mm).mean(dim=-1, keepdim=True).sqrt()
 	ratio_d = rms_d_mm / (rms_d_out + 1e-5)
 	d_inp = d_mm / ratio_d * ratio + d_out
+	d_inp_magn = (d_inp*d_inp).mean(dim=-1, keepdim=True).sqrt()
+
+	d_inp_rescaled = d_inp / (d_inp_magn + 1e-5) * d_out_magn
+	print("d_inp_rescaled = ", d_inp_rescaled)
 
 	print("expected_d_mm = ", d_mm)
 	print("expected_d_inp = ", d_inp)
+	print("expected_d_inp_magn = ", d_inp_magn)
+	print("expected_d_inp2 = ", d_inp / (d_inp_magn + 1e-5))
 	print("expected_d_inp_real = ", d_inp_real)
-	print("expected_d_weights = ", d_weights)
+	print("expected_d_inp_real_magn = ", d_inp_real_magn)
+	print("expected_d_inp_real2 = ", d_inp_real / (d_inp_real_magn + 1e-5))
+	print("expected_d_weights = ", d_weights / forward_scale)
 
 what = ''
 try:

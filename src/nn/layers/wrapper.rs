@@ -187,25 +187,37 @@ pub struct WrapperBackwardFn_Merge {
 impl BackwardFn for WrapperBackwardFn_Split {
 	fn run(
 		self: Box<Self>,
-		d_out: Tensor,
+		d_nested: Tensor,
 		queue: &mut autograd::Queue,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let Self { rc_inner, rms, eps, backward_fn } = Box::into_inner(self);
 		let refcell = Rc::into_inner(rc_inner).unwrap();
 		let inner = refcell.into_inner();
 		let WrapperBackwardFn_Inner { d_residual, ratio } = inner;
-		let d_residual = d_residual.unwrap();
+		let d_out = d_residual.unwrap();
 
-		let tmp = ratio.new_empty_like()?;
-		tmp.assign(rms.root_mean_square(&d_out).recip(eps))?;
-		ratio.assign(&ratio * &tmp)?;
-		tmp.assign(rms.root_mean_square(&d_residual))?;
-		ratio.assign(&ratio * &tmp)?;
-		std::mem::drop(tmp);
+		let d_nested_magn_recip = ratio.new_empty_like()?;
+		d_nested_magn_recip.assign(rms.root_mean_square(&d_nested).recip(eps))?;
+		ratio.assign(&ratio * &d_nested_magn_recip)?;
 
-		let grad = d_residual.reuse_or_new_like()?;
-		grad.assign(&d_residual + (&d_out * &ratio))?;
-		queue.add(backward_fn, grad);
+		let d_out_magn = d_nested_magn_recip; // reuse tensor with different variable name
+		d_out_magn.assign(rms.root_mean_square(&d_out))?;
+		ratio.assign(&ratio * &d_out_magn)?;
+
+		let d_inp = d_out.reuse_or_new_like()?;
+		d_inp.assign(&d_out + (&d_nested * &ratio))?;
+		std::mem::drop(d_out);
+		std::mem::drop(d_nested);
+
+		let d_inp_magn_recip = ratio; // reuse tensor with different variable name
+		d_inp_magn_recip.assign(rms.root_mean_square(&d_inp).recip(eps))?;
+		d_inp.assign(&d_inp * &d_inp_magn_recip)?;
+		std::mem::drop(d_inp_magn_recip);
+
+		d_inp.assign(&d_inp * &d_out_magn)?;
+		std::mem::drop(d_out_magn);
+
+		queue.add(backward_fn, d_inp);
 		Ok(())
 	}
 }
