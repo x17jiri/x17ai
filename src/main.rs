@@ -163,6 +163,7 @@ use x17ai::nn::layers::softmax::{Softmax, SoftmaxGradientMode};
 use x17ai::nn::layers::{CrossEntropy, Layer};
 use x17ai::tensor::device::cpu::CPUDevice;
 use x17ai::tensor::device::executor::Executor;
+use x17ai::tensor::device::kernels::KernelBuilder;
 use x17ai::tensor::generic::Tensor;
 use x17ai::tensor::generic::map::ND;
 use x17ai::tensor::math::{col, mat, row};
@@ -211,7 +212,20 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	Ok(())
 }
 
+#[link(name = "torch_shim")]
+extern "C" {
+	fn hello_torch() -> std::ffi::c_int;
+}
+
 fn main() -> Result<(), ErrPack<TensorOpError>> {
+	let (builder, [c], [a, b], [x]) = KernelBuilder::new(["c"], ["a", "b"], ["x"]);
+
+	let x = unsafe { hello_torch() };
+	println!("Hello Torch result! {x}");
+	return Ok(());
+	/*	let t: tch::Tensor; // = tch::Tensor::of_slice(&[1, 2, 3, 4, 5, 6]);
+	let reshaped = t.view([2, 3]);*/
+
 	stderrlog::new().verbosity(10).init().unwrap();
 	let dev = CPUDevice::new();
 	let lit = Tensor::literal_factory::<f32>(dev.clone());

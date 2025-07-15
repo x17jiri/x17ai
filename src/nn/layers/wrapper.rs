@@ -185,6 +185,7 @@ pub struct WrapperBackwardFn_Merge {
 }
 
 impl BackwardFn for WrapperBackwardFn_Split {
+	#[allow(clippy::unwrap_used)]
 	fn run(
 		self: Box<Self>,
 		d_nested: Tensor,
@@ -211,7 +212,7 @@ impl BackwardFn for WrapperBackwardFn_Split {
 
 		let d_inp_magn_recip = ratio; // reuse tensor with different variable name
 		d_inp_magn_recip.assign(rms.root_mean_square(&d_inp).recip(eps))?;
-		d_inp.assign(&d_inp * &d_inp_magn_recip)?;
+		d_out_magn.assign(&d_out_magn * &d_inp_magn_recip)?;
 		std::mem::drop(d_inp_magn_recip);
 
 		d_inp.assign(&d_inp * &d_out_magn)?;
