@@ -11,6 +11,8 @@ use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
+use crate::ErrPack;
+use crate::tensor::TensorOpError;
 use crate::tensor::generic::buffer::Buffer;
 
 use super::Device;
@@ -199,6 +201,27 @@ impl<'a> From<DeviceBufferRefMut<'a>> for DeviceBufferRef<'a> {
 
 		std::mem::forget(value);
 		result
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub fn check_borrows(c_fail: usize, fail: usize) -> Result<(), ErrPack<TensorOpError>> {
+	if fail == 0 {
+		Ok(())
+	} else {
+		cold_path();
+		if c_fail == 0 {
+			Err(ErrPack {
+				code: TensorOpError::CannotBorrowMut,
+				extra: None,
+			})
+		} else {
+			Err(ErrPack {
+				code: TensorOpError::CannotBorrow,
+				extra: None,
+			})
+		}
 	}
 }
 

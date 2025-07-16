@@ -163,7 +163,7 @@ use x17ai::nn::layers::softmax::{Softmax, SoftmaxGradientMode};
 use x17ai::nn::layers::{CrossEntropy, Layer};
 use x17ai::tensor::device::cpu::CPUDevice;
 use x17ai::tensor::device::executor::Executor;
-use x17ai::tensor::device::kernels::KernelBuilder;
+use x17ai::tensor::device::kernel_builder::KernelBuilder;
 use x17ai::tensor::generic::Tensor;
 use x17ai::tensor::generic::map::ND;
 use x17ai::tensor::math::{col, mat, row};
@@ -218,7 +218,8 @@ extern "C" {
 }
 
 fn main() -> Result<(), ErrPack<TensorOpError>> {
-	let (builder, [c], [a, b], [x]) = KernelBuilder::new(["c"], ["a", "b"], ["x"]);
+	let (builder, [c], [a, b], [x]) = KernelBuilder::new("my_kernel", ["c"], ["a", "b"], ["x"]);
+	let kernel = builder.build((a * b).sum() + c);
 
 	let x = unsafe { hello_torch() };
 	println!("Hello Torch result! {x}");

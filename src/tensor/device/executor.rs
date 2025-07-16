@@ -7,6 +7,7 @@
 
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::device::cpu::ViewError;
+use crate::tensor::device::kernel_builder::KernelData;
 use crate::tensor::generic::map::ND;
 use crate::tensor::generic::{self, TensorUnsafeError};
 use crate::{ErrExtra, ErrPack};
@@ -297,6 +298,15 @@ pub trait Executor {
 		k: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, k_heads, qk_features]
 		v: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, v_heads, vo_features]
 	);
+
+	unsafe fn run_kernel(
+		&self,
+		kernel_data: &KernelData,
+		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut>,
+		elem_args: &[generic::Tensor<ND<2>, DeviceBufferRef>],
+		vec_args: &[generic::Tensor<ND<3>, DeviceBufferRef>],
+		const_args: &[f64],
+	) -> Result<(), ErrPack<ExecutorError>>;
 }
 
 //--------------------------------------------------------------------------------------------------

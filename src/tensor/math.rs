@@ -8,7 +8,7 @@
 use std::hint::cold_path;
 
 use crate::ErrPack;
-use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
+use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut, check_borrows};
 use crate::tensor::dim_merger::{DimMerger, MergedDim};
 use crate::tensor::generic::map::{ND, NotEnoughDimensionsError, SizeAndStride};
 use crate::tensor::{Tensor, TensorOpError, generic};
@@ -28,27 +28,6 @@ pub trait ClearAccToMatrix {
 
 pub trait EvaluatesToColMatrix {
 	fn eval_to_col_matrix(self, to: &ColMatrix) -> Result<(), ErrPack<TensorOpError>>;
-}
-
-//--------------------------------------------------------------------------------------------------
-
-fn check_borrows(c_fail: usize, fail: usize) -> Result<(), ErrPack<TensorOpError>> {
-	if fail == 0 {
-		Ok(())
-	} else {
-		cold_path();
-		if c_fail == 0 {
-			Err(ErrPack {
-				code: TensorOpError::CannotBorrowMut,
-				extra: None,
-			})
-		} else {
-			Err(ErrPack {
-				code: TensorOpError::CannotBorrow,
-				extra: None,
-			})
-		}
-	}
 }
 
 //--------------------------------------------------------------------------------------------------
