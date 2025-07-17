@@ -75,6 +75,12 @@ impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRef<'buf>> {
 		// So if the map was safe before, it is still safe.
 		Ok(unsafe { generic::Tensor::new_unchecked(map, slice) })
 	}
+
+	pub unsafe fn buf_ptr<T: HasDType>(&self) -> *const T {
+		let buf = self.buf();
+		debug_assert!(CPUDevice::ensure_can_view::<T>(buf.device_buffer()).is_ok());
+		buf.device_data.cast()
+	}
 }
 
 impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRefMut<'buf>> {
@@ -92,6 +98,12 @@ impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRefMut<'buf>> {
 		// SAFETY: We only change the type of buffer reference.
 		// So if the map was safe before, it is still safe.
 		Ok(unsafe { generic::Tensor::new_unchecked(map, slice) })
+	}
+
+	pub unsafe fn buf_ptr_mut<T: HasDType>(&mut self) -> *mut T {
+		let buf = self.buf();
+		debug_assert!(CPUDevice::ensure_can_view::<T>(buf.device_buffer()).is_ok());
+		buf.device_data.cast()
 	}
 }
 

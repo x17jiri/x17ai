@@ -79,17 +79,17 @@ where
 					DeviceBufferRef::new_unsafe(self.c[i].buf().as_ref(), &mut c_fail),
 				)
 			});
-			let mut fail = c_fail;
+			let mut m_fail = 0;
 			let mut m_tensors = std::array::from_fn(|i| {
 				generic::Tensor::new_unchecked(
 					ND {
 						dims: [self.dims[0].get(i), self.dims[1].get(i)],
 						offset: self.m[i].map().offset,
 					},
-					DeviceBufferRefMut::new_unsafe(self.m[i].buf().as_ref(), &mut fail),
+					DeviceBufferRefMut::new_unsafe(self.m[i].buf().as_ref(), &mut m_fail),
 				)
 			});
-			check_borrows(c_fail, fail)?;
+			check_borrows(c_fail, m_fail)?;
 
 			f(&mut m_tensors, &c_tensors)
 		}
@@ -194,17 +194,17 @@ where
 				)
 			});
 
-			let mut fail = c_fail;
+			let mut m_fail = 0;
 			let mut m_tensors = std::array::from_fn(|i| {
 				generic::Tensor::new_unchecked(
 					ND {
 						dims: [self.dims[0].get(i), self.m_vec[i]],
 						offset: self.m[i].map().offset,
 					},
-					DeviceBufferRefMut::new_unsafe(self.m[i].buf().as_ref(), &mut fail),
+					DeviceBufferRefMut::new_unsafe(self.m[i].buf().as_ref(), &mut m_fail),
 				)
 			});
-			check_borrows(c_fail, fail)?;
+			check_borrows(c_fail, m_fail)?;
 
 			f(&mut m_tensors, &c_tensors)
 		}
@@ -1445,15 +1445,15 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 				},
 				DeviceBufferRef::new_unsafe(row.tensor.buf().as_ref(), &mut c_fail),
 			);
-			let mut fail = c_fail;
+			let mut m_fail = 0;
 			let mut to = generic::Tensor::new_unchecked(
 				ND {
 					dims: [to.rows, to.cols],
 					offset: to.tensor.map().offset,
 				},
-				DeviceBufferRefMut::new_unsafe(to.tensor.buf().as_ref(), &mut fail),
+				DeviceBufferRefMut::new_unsafe(to.tensor.buf().as_ref(), &mut m_fail),
 			);
-			check_borrows(c_fail, fail)?;
+			check_borrows(c_fail, m_fail)?;
 
 			let executor = col.buf().executor();
 			executor.mm(&mut to, &col, &row, scale)?;
@@ -1490,15 +1490,15 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 				},
 				DeviceBufferRef::new_unsafe(col.tensor.buf().as_ref(), &mut c_fail),
 			);
-			let mut fail = c_fail;
+			let mut m_fail = 0;
 			let mut to = generic::Tensor::new_unchecked(
 				ND {
 					dims: [to.rows, dims[0].get(TO)],
 					offset: to.tensor.map().offset,
 				},
-				DeviceBufferRefMut::new_unsafe(to.tensor.buf().as_ref(), &mut fail),
+				DeviceBufferRefMut::new_unsafe(to.tensor.buf().as_ref(), &mut m_fail),
 			);
-			check_borrows(c_fail, fail)?;
+			check_borrows(c_fail, m_fail)?;
 
 			let executor = mat.buf().executor();
 			executor.mm(&mut to, &mat, &col, scale)?;

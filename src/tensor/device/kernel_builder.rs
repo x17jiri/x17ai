@@ -102,16 +102,25 @@ impl<const E: usize, const V: usize, const C: usize> Kernel<E, V, C> {
 		let merged: [MergedDim<{ 1 + E + V }>; 2] = DimMerger::merge(all_dims)?;
 
 		unsafe {
+			let mut m_fail = 0;
+			let mut o_tensor = generic::Tensor::new_unchecked(
+				ND {
+					dims: [merged[0].get(0), merged[1].get(0)],
+					offset: output.map().offset,
+				},
+				DeviceBufferRefMut::new_unsafe(output.buf().as_ref(), &mut m_fail),
+			);
+
 			let mut c_fail = 0;
-			let elem_tensors: [generic::Tensor<ND<2>, DeviceBufferRef>; E] =
+			let elem_tensors: [Option<generic::Tensor<ND<2>, DeviceBufferRef>>; E] =
 				std::array::from_fn(|i| {
-					generic::Tensor::new_unchecked(
+					Some(generic::Tensor::new_unchecked(
 						ND {
 							dims: [merged[0].get(1 + i), merged[1].get(1 + i)],
 							offset: elem_args[i].map().offset,
 						},
 						DeviceBufferRef::new_unsafe(elem_args[i].buf().as_ref(), &mut c_fail),
-					)
+					))
 				});
 			let vec_tensors: [generic::Tensor<ND<3>, DeviceBufferRef>; V] =
 				std::array::from_fn(|i| {
@@ -127,15 +136,10 @@ impl<const E: usize, const V: usize, const C: usize> Kernel<E, V, C> {
 						DeviceBufferRef::new_unsafe(vec_args[i].buf().as_ref(), &mut c_fail),
 					)
 				});
-			let mut fail = c_fail;
-			let mut o_tensor = generic::Tensor::new_unchecked(
-				ND {
-					dims: [merged[0].get(0), merged[1].get(0)],
-					offset: output.map().offset,
-				},
-				DeviceBufferRefMut::new_unsafe(output.buf().as_ref(), &mut fail),
-			);
-			check_borrows(c_fail, fail)?;
+
+			check_borrows(c_fail, m_fail)?;
+			// TODO - ensure_safe
+			// TODO - ensure all on same device
 
 			let executor = output.executor();
 

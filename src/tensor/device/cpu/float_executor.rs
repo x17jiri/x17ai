@@ -13,6 +13,7 @@ use crate::ErrPack;
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::device::cpu::zip::{zip_elems, zip_vec_reduce, zip_vecs, zip_vecs_varsize};
 use crate::tensor::device::executor::{Executor, ExecutorError, ensure_same_shape};
+use crate::tensor::device::kernel_builder::KernelData;
 use crate::tensor::generic::buffer::Buffer;
 use crate::tensor::generic::map::{Map, ND, Select};
 use crate::tensor::{HasDType, generic};
@@ -808,5 +809,26 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		v: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, v_heads, vo_features]
 	) {
 		todo!("FloatExecutor::attention is not implemented yet");
+	}
+
+	unsafe fn run_kernel(
+		&self,
+		kernel_data: &KernelData,
+		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut>,
+		elem_args: &[Option<generic::Tensor<ND<2>, DeviceBufferRef>>],
+		vec_args: &[generic::Tensor<ND<3>, DeviceBufferRef>],
+		const_args: &[f64],
+	) -> Result<(), ErrPack<ExecutorError>> {
+		let o_map = o.map().clone();
+		let o_buf: *mut T = o.buf_ptr_mut();
+
+		//        let e_data = elem_args.
+
+		for j in 0..o_map.dims[0].size {
+			for i in 0..o_map.dims[1].size {
+				//
+			}
+		}
+		Ok(())
 	}
 }

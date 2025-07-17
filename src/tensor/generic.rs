@@ -241,7 +241,7 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		if !safe {
 			return Err(TensorUnsafeError::new(span, buf_len));
 		}
-		Ok(())
+		Ok(())  	
 	}
 }
 

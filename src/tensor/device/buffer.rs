@@ -206,23 +206,23 @@ impl<'a> From<DeviceBufferRefMut<'a>> for DeviceBufferRef<'a> {
 
 //--------------------------------------------------------------------------------------------------
 
-pub fn check_borrows(c_fail: usize, fail: usize) -> Result<(), ErrPack<TensorOpError>> {
-	if fail == 0 {
-		Ok(())
-	} else {
+pub fn check_borrows(c_fail: usize, m_fail: usize) -> Result<(), ErrPack<TensorOpError>> {
+	if (c_fail | m_fail) != 0 {
 		cold_path();
-		if c_fail == 0 {
-			Err(ErrPack {
-				code: TensorOpError::CannotBorrowMut,
-				extra: None,
-			})
-		} else {
-			Err(ErrPack {
+		#[allow(clippy::redundant_else)]
+		if m_fail == 0 {
+			return Err(ErrPack {
 				code: TensorOpError::CannotBorrow,
 				extra: None,
-			})
+			});
+		} else {
+			return Err(ErrPack {
+				code: TensorOpError::CannotBorrowMut,
+				extra: None,
+			});
 		}
 	}
+	Ok(())
 }
 
 //--------------------------------------------------------------------------------------------------

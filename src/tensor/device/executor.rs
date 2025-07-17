@@ -303,7 +303,7 @@ pub trait Executor {
 		&self,
 		kernel_data: &KernelData,
 		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		elem_args: &[generic::Tensor<ND<2>, DeviceBufferRef>],
+		elem_args: &[Option<generic::Tensor<ND<2>, DeviceBufferRef>>],
 		vec_args: &[generic::Tensor<ND<3>, DeviceBufferRef>],
 		const_args: &[f64],
 	) -> Result<(), ErrPack<ExecutorError>>;
