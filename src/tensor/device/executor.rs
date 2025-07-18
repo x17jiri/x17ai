@@ -302,11 +302,36 @@ pub trait Executor {
 	unsafe fn run_kernel(
 		&self,
 		kernel_data: &KernelData,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut>,
-		elem_args: &[Option<generic::Tensor<ND<2>, DeviceBufferRef>>],
-		vec_args: &[generic::Tensor<ND<3>, DeviceBufferRef>],
-		const_args: &[f64],
+		o: *const KernelOutput,
+		elem_args: *const KernelElemArg,
+		vec_args: *const KernelVecArg,
+		const_args: *const f64,
 	) -> Result<(), ErrPack<ExecutorError>>;
+}
+
+//--------------------------------------------------------------------------------------------------
+
+#[repr(C)]
+pub struct KernelOutput {
+	pub size: [usize; 2],
+	pub stride: [usize; 2],
+	pub offset: usize,
+	pub device_data: *mut u8,
+}
+
+#[repr(C)]
+pub struct KernelElemArg {
+	pub stride: [usize; 2],
+	pub offset: usize,
+	pub device_data: *mut u8,
+}
+
+#[repr(C)]
+pub struct KernelVecArg {
+	pub vec_size: usize,
+	pub stride: [usize; 2],
+	pub offset: usize,
+	pub device_data: *mut u8,
 }
 
 //--------------------------------------------------------------------------------------------------

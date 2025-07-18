@@ -11,8 +11,9 @@ pub mod buffer;
 pub mod cpu;
 pub mod dtype;
 pub mod executor;
-pub mod kernel_registry;
+pub mod kernel;
 pub mod kernel_builder;
+pub mod kernel_registry;
 
 pub use buffer::DeviceBuffer;
 pub use dtype::{DType, HasDType};
