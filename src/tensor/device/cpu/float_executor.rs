@@ -13,9 +13,9 @@ use crate::ErrPack;
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::device::cpu::zip::{zip_elems, zip_vec_reduce, zip_vecs, zip_vecs_varsize};
 use crate::tensor::device::executor::{
-	Executor, ExecutorError, KernelElemArg, KernelOutput, KernelVecArg, ensure_same_shape,
+	Executor, ExecutorError, KernelElemArg, KernelOutput, KernelReduceArg, ensure_same_shape,
 };
-use crate::tensor::device::kernel_builder::{FloatLiteral, KernelData, ScalarExpr};
+use crate::tensor::device::kernel::{FloatLiteral, KernelData, ScalarExpr};
 use crate::tensor::generic::buffer::Buffer;
 use crate::tensor::generic::map::{Map, ND, Select};
 use crate::tensor::{HasDType, generic};
@@ -339,12 +339,11 @@ impl<T: 'static + Copy + HasDType + FromToF64> FloatExecutor<T> {
 	}
 
 	pub unsafe fn eval_expr(
-		&self,
 		expr: &ScalarExpr,
 		j: usize,
 		i: usize,
 		elem_args: *const KernelElemArg,
-		vec_args: *const KernelVecArg,
+		reduce_args: *const KernelReduceArg,
 		const_args: *const f64,
 	) -> f64 {
 		match expr {
@@ -359,9 +358,10 @@ impl<T: 'static + Copy + HasDType + FromToF64> FloatExecutor<T> {
 			},
 			ScalarExpr::ConstArg(arg) => const_args.add(arg.index).read(),
 			ScalarExpr::FloatLiteral(FloatLiteral { value }) => *value,
+
 			ScalarExpr::DotExpr(a, b) => {
-				let vec_a = &*vec_args.add(a.index);
-				let vec_b = &*vec_args.add(b.index);
+				let vec_a = &*reduce_args.add(a.index);
+				let vec_b = &*reduce_args.add(b.index);
 				let ptr_a = vec_a
 					.device_data
 					.cast::<T>()
@@ -370,15 +370,30 @@ impl<T: 'static + Copy + HasDType + FromToF64> FloatExecutor<T> {
 					.device_data
 					.cast::<T>()
 					.add(vec_b.offset + j * vec_b.stride[0] + i * vec_b.stride[1]);
-				let slice_a = std::slice::from_raw_parts(ptr_a, vec_a.vec_size);
-				let slice_b = std::slice::from_raw_parts(ptr_b, vec_b.vec_size);
+				let slice_a = std::slice::from_raw_parts(ptr_a, vec_a.reduction_size);
+				let slice_b = std::slice::from_raw_parts(ptr_b, vec_b.reduction_size);
 				debug_assert!(slice_a.len() == slice_b.len());
 				math::dot(slice_a, slice_b)
 			},
+
+			ScalarExpr::SqrtExpr(a) => {
+				let a = Self::eval_expr(a, j, i, elem_args, reduce_args, const_args);
+				a.sqrt()
+			},
+			ScalarExpr::RecipExpr(a, eps) => {
+				let a = Self::eval_expr(a, j, i, elem_args, reduce_args, const_args);
+				let eps = Self::eval_expr(eps, j, i, elem_args, reduce_args, const_args);
+				1.0 / (a + eps)
+			},
 			ScalarExpr::AddExpr(a, b) => {
-				let a = self.eval_expr(a, j, i, elem_args, vec_args, const_args);
-				let b = self.eval_expr(b, j, i, elem_args, vec_args, const_args);
+				let a = Self::eval_expr(a, j, i, elem_args, reduce_args, const_args);
+				let b = Self::eval_expr(b, j, i, elem_args, reduce_args, const_args);
 				a + b
+			},
+			ScalarExpr::MulExpr(a, b) => {
+				let a = Self::eval_expr(a, j, i, elem_args, reduce_args, const_args);
+				let b = Self::eval_expr(b, j, i, elem_args, reduce_args, const_args);
+				a * b
 			},
 		}
 	}
@@ -863,7 +878,7 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		kernel_data: &KernelData,
 		o: *const KernelOutput,
 		elem_args: *const KernelElemArg,
-		vec_args: *const KernelVecArg,
+		reduce_args: *const KernelReduceArg,
 		const_args: *const f64,
 	) -> Result<(), ErrPack<ExecutorError>> {
 		let expr = kernel_data.expr.as_ref();
@@ -871,7 +886,14 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		for j in 0..o.size[0] {
 			for i in 0..o.size[1] {
 				let o = o.device_data.cast::<T>().add(j * o.stride[0] + i * o.stride[1]);
-				o.write(T::from_f64(self.eval_expr(expr, j, i, elem_args, vec_args, const_args)));
+				o.write(T::from_f64(Self::eval_expr(
+					expr,
+					j,
+					i,
+					elem_args,
+					reduce_args,
+					const_args,
+				)));
 			}
 		}
 		Ok(())

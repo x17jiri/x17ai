@@ -153,7 +153,7 @@ where
 {
 	pub fn new(m: [&'a Tensor; M], c: [&'a Tensor; C]) -> Result<Self, ErrPack<TensorOpError>> {
 		if m.iter().any(|t| t.ndim() < 1) || c.iter().any(|t| t.ndim() < 1) {
-			return Err(TensorOpError::missing_vec_dimension());
+			return Err(TensorOpError::missing_reduce_dimension());
 		}
 
 		// All dimensions except the feature dimension

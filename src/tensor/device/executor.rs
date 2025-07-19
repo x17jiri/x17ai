@@ -7,7 +7,7 @@
 
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::device::cpu::ViewError;
-use crate::tensor::device::kernel_builder::KernelData;
+use crate::tensor::device::kernel::KernelData;
 use crate::tensor::generic::map::ND;
 use crate::tensor::generic::{self, TensorUnsafeError};
 use crate::{ErrExtra, ErrPack};
@@ -304,7 +304,7 @@ pub trait Executor {
 		kernel_data: &KernelData,
 		o: *const KernelOutput,
 		elem_args: *const KernelElemArg,
-		vec_args: *const KernelVecArg,
+		reduce_args: *const KernelReduceArg,
 		const_args: *const f64,
 	) -> Result<(), ErrPack<ExecutorError>>;
 }
@@ -327,8 +327,8 @@ pub struct KernelElemArg {
 }
 
 #[repr(C)]
-pub struct KernelVecArg {
-	pub vec_size: usize,
+pub struct KernelReduceArg {
+	pub reduction_size: usize,
 	pub stride: [usize; 2],
 	pub offset: usize,
 	pub device_data: *mut u8,

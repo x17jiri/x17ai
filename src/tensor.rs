@@ -271,7 +271,7 @@ pub enum TensorOpError {
 	TooManyMergedDimensions,
 	CannotBorrow,
 	CannotBorrowMut,
-	MissingVecDimension,
+	MissingReduceDimension,
 	ExecutorError,
 	DimIndexOutOfBounds,
 	IndexOutOfBounds,
@@ -286,12 +286,34 @@ pub enum TensorOpError {
 impl TensorOpError {
 	#[cold]
 	#[inline(never)]
-	pub fn missing_vec_dimension() -> ErrPack<Self> {
-		let message = "At least one dimension is required for vector-wise operations".into();
+	pub fn missing_reduce_dimension() -> ErrPack<Self> {
+		let message = "At least one dimension is required for reducing operations".into();
 		ErrPack {
-			code: Self::MissingVecDimension,
+			code: Self::MissingReduceDimension,
 			extra: Some(Box::new(ErrExtra { message, nested: None })),
 		}
+	}
+
+	#[cold]
+	#[inline(never)]
+	pub fn not_contiguous() -> ErrPack<Self> {
+		ExecutorError::not_contiguous().into()
+	}
+
+	#[cold]
+	#[inline(never)]
+	pub fn not_contiguous_or_broadcasted() -> ErrPack<Self> {
+		ExecutorError::not_contiguous_or_broadcasted().into()
+	}
+
+	#[cold]
+	#[inline(never)]
+	pub fn invalid_shape() -> ErrPack<Self> {
+		let err = ErrPack {
+			code: ExecutorError::InvalidShape,
+			extra: None,
+		};
+		err.into()
 	}
 }
 

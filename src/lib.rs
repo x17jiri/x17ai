@@ -32,6 +32,7 @@
 #![feature(maybe_uninit_slice)]
 #![feature(associated_type_defaults)]
 #![feature(box_into_inner)]
+#![feature(unboxed_closures)]
 // clippy
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]

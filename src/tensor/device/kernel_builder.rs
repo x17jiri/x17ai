@@ -7,18 +7,20 @@
 
 use std::sync::Arc;
 
-use crate::tensor::device::kernel::{ConstArg, ElemArg, Kernel, KernelData, ScalarExpr, VecArg};
+use crate::tensor::device::kernel::{ConstArg, ElemArg, Kernel, KernelData, ReduceArg, ScalarExpr};
 use crate::tensor::device::kernel_registry::KernelRegistry;
 use crate::util::array;
 
 //--------------------------------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct ScalarExprWrapper {
 	pub expr: Arc<ScalarExpr>,
 }
 
-pub struct VecArgWrapper {
-	pub arg: Arc<VecArg>,
+#[derive(Clone)]
+pub struct ReduceArgWrapper {
+	pub arg: Arc<ReduceArg>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -26,7 +28,7 @@ pub struct VecArgWrapper {
 pub struct KernelBuilder<const E: usize, const V: usize, const C: usize> {
 	pub(crate) name: String,
 	pub(crate) elem_args: [Arc<ElemArg>; E],
-	pub(crate) vec_args: [Arc<VecArg>; V],
+	pub(crate) reduce_args: [Arc<ReduceArg>; V],
 	pub(crate) const_args: [Arc<ConstArg>; C],
 }
 
@@ -34,14 +36,14 @@ impl<const E: usize, const V: usize, const C: usize> KernelBuilder<E, V, C> {
 	pub fn new(
 		name: &str,
 		elem_args: [&str; E],
-		vec_args: [&str; V],
+		reduce_args: [&str; V],
 		const_args: [&str; C],
-	) -> (Self, [ScalarExprWrapper; E], [VecArgWrapper; V], [ScalarExprWrapper; C]) {
+	) -> (Self, [ScalarExprWrapper; E], [ReduceArgWrapper; V], [ScalarExprWrapper; C]) {
 		let elem_args = array::map_into(elem_args, |index, name| {
 			Arc::new(ElemArg { index, name: name.to_string() })
 		});
-		let vec_args = array::map_into(vec_args, |index, name| {
-			Arc::new(VecArg { index, name: name.to_string() })
+		let reduce_args = array::map_into(reduce_args, |index, name| {
+			Arc::new(ReduceArg { index, name: name.to_string() })
 		});
 		let const_args = array::map_into(const_args, |index, name| {
 			Arc::new(ConstArg { index, name: name.to_string() })
@@ -50,25 +52,25 @@ impl<const E: usize, const V: usize, const C: usize> KernelBuilder<E, V, C> {
 		let builder = Self {
 			name: name.to_string(),
 			elem_args: elem_args.clone(),
-			vec_args: vec_args.clone(),
+			reduce_args: reduce_args.clone(),
 			const_args: const_args.clone(),
 		};
 
 		let elem_args_exprs =
 			elem_args.map(|a| ScalarExprWrapper { expr: Arc::new(ScalarExpr::ElemArg(a)) });
-		let vec_args_exprs = vec_args.map(|a| VecArgWrapper { arg: a });
+		let reduce_args_exprs = reduce_args.map(|a| ReduceArgWrapper { arg: a });
 		let const_args_exprs =
 			const_args.map(|a| ScalarExprWrapper { expr: Arc::new(ScalarExpr::ConstArg(a)) });
 
-		(builder, elem_args_exprs, vec_args_exprs, const_args_exprs)
+		(builder, elem_args_exprs, reduce_args_exprs, const_args_exprs)
 	}
 
 	pub fn build(self, expr: ScalarExprWrapper) -> Kernel<E, V, C> {
 		let ScalarExprWrapper { expr } = expr;
-		let Self { name, elem_args, vec_args, const_args } = self;
+		let Self { name, elem_args, reduce_args, const_args } = self;
 
 		let elem_args = elem_args.into();
-		let vec_args = vec_args.into();
+		let reduce_args = reduce_args.into();
 		let const_args = const_args.into();
 
 		let reg = KernelRegistry::instance();
@@ -78,7 +80,7 @@ impl<const E: usize, const V: usize, const C: usize> KernelBuilder<E, V, C> {
 				id,
 				name,
 				elem_args,
-				vec_args,
+				reduce_args,
 				const_args,
 				expr,
 			})
@@ -99,11 +101,35 @@ impl std::ops::Add<Self> for ScalarExprWrapper {
 	}
 }
 
+impl std::ops::Mul<Self> for ScalarExprWrapper {
+	type Output = Self;
+
+	fn mul(self, rhs: Self) -> Self {
+		Self {
+			expr: Arc::new(ScalarExpr::MulExpr(self.expr, rhs.expr)),
+		}
+	}
+}
+
+impl ScalarExprWrapper {
+	pub fn sqrt(self) -> Self {
+		Self {
+			expr: Arc::new(ScalarExpr::SqrtExpr(self.expr)),
+		}
+	}
+
+	pub fn recip(self, eps: ScalarExprWrapper) -> Self {
+		Self {
+			expr: Arc::new(ScalarExpr::RecipExpr(self.expr, eps.expr)),
+		}
+	}
+}
+
 //--------------------------------------------------------------------------------------------------
 
-pub struct VecMul(Arc<VecArg>, Arc<VecArg>);
+pub struct ReduceMul(Arc<ReduceArg>, Arc<ReduceArg>);
 
-impl VecMul {
+impl ReduceMul {
 	pub fn sum(self) -> ScalarExprWrapper {
 		ScalarExprWrapper {
 			expr: Arc::new(ScalarExpr::DotExpr(self.0, self.1)),
@@ -111,11 +137,11 @@ impl VecMul {
 	}
 }
 
-impl std::ops::Mul<Self> for VecArgWrapper {
-	type Output = VecMul;
+impl std::ops::Mul<Self> for ReduceArgWrapper {
+	type Output = ReduceMul;
 
 	fn mul(self, rhs: Self) -> Self::Output {
-		VecMul(self.arg, rhs.arg)
+		ReduceMul(self.arg, rhs.arg)
 	}
 }
 
