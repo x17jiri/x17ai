@@ -5,6 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
+#![allow(warnings)] // TODO - disabling warnings for main.rs. Remove this later.
 #![allow(non_snake_case)]
 #![feature(generic_const_exprs)]
 
@@ -163,7 +164,7 @@ use x17ai::nn::layers::softmax::{Softmax, SoftmaxGradientMode};
 use x17ai::nn::layers::{CrossEntropy, Layer};
 use x17ai::tensor::device::cpu::CPUDevice;
 use x17ai::tensor::device::executor::Executor;
-use x17ai::tensor::device::kernel_builder::KernelBuilder;
+use x17ai::tensor::device::kernel::builder::KernelBuilder;
 use x17ai::tensor::generic::Tensor;
 use x17ai::tensor::generic::map::ND;
 use x17ai::tensor::math::{col, mat, row};
@@ -213,7 +214,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 }
 
 #[link(name = "torch_shim")]
-extern "C" {
+unsafe extern "C" {
 	fn hello_torch() -> std::ffi::c_int;
 }
 

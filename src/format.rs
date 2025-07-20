@@ -18,7 +18,7 @@ impl Indent {
 impl std::ops::Add<usize> for Indent {
 	type Output = Self;
 
-	fn add(self, rhs: usize) -> Self::Output {
+	fn add(self, rhs: usize) -> Self {
 		Self(self.0 + rhs)
 	}
 }
@@ -34,7 +34,7 @@ impl std::ops::AddAssign<usize> for Indent {
 impl std::ops::Sub<usize> for Indent {
 	type Output = Self;
 
-	fn sub(self, rhs: usize) -> Self::Output {
+	fn sub(self, rhs: usize) -> Self {
 		Self(self.0 - rhs)
 	}
 }

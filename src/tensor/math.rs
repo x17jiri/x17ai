@@ -324,14 +324,14 @@ impl<'a> From<&'a Tensor> for ScaledTensorExpr<'a> {
 
 impl<'a> Scalable for &'a Tensor {
 	type Output = ScaledTensorExpr<'a>;
-	fn scale(self, scale: f64) -> Self::Output {
+	fn scale(self, scale: f64) -> ScaledTensorExpr<'a> {
 		ScaledTensorExpr { tensor: self, scale }
 	}
 }
 
 impl<'a> Scalable for ScaledTensorExpr<'a> {
 	type Output = Self;
-	fn scale(self, scale: f64) -> Self::Output {
+	fn scale(self, scale: f64) -> Self {
 		Self {
 			tensor: self.tensor,
 			scale: self.scale * scale,
@@ -341,147 +341,147 @@ impl<'a> Scalable for ScaledTensorExpr<'a> {
 
 impl<'a> std::ops::Mul<f64> for &'a Tensor {
 	type Output = ScaledTensorExpr<'a>;
-	fn mul(self, scale: f64) -> Self::Output {
+	fn mul(self, scale: f64) -> ScaledTensorExpr<'a> {
 		self.scale(scale)
 	}
 }
 
 impl<'a> std::ops::Mul<f64> for ScaledTensorExpr<'a> {
 	type Output = Self;
-	fn mul(self, scale: f64) -> Self::Output {
+	fn mul(self, scale: f64) -> Self {
 		self.scale(scale)
 	}
 }
 
 impl<'a> std::ops::Mul<f64> for AddWeightedExpr<'a> {
 	type Output = Self;
-	fn mul(self, scale: f64) -> Self::Output {
+	fn mul(self, scale: f64) -> Self {
 		self.scale(scale)
 	}
 }
 
 impl<'a> std::ops::Mul<f64> for DotExpr<'a> {
 	type Output = Self;
-	fn mul(self, scale: f64) -> Self::Output {
+	fn mul(self, scale: f64) -> Self {
 		self.scale(scale)
 	}
 }
 
 impl<'a> std::ops::Mul<f64> for DotAddExpr<'a> {
 	type Output = Self;
-	fn mul(self, scale: f64) -> Self::Output {
+	fn mul(self, scale: f64) -> Self {
 		self.scale(scale)
 	}
 }
 
 impl<'a> std::ops::Mul<f64> for MulExpr<'a> {
 	type Output = ScaledMulExpr<'a>;
-	fn mul(self, scale: f64) -> Self::Output {
+	fn mul(self, scale: f64) -> ScaledMulExpr<'a> {
 		self.scale(scale)
 	}
 }
 
 impl<'a> std::ops::Mul<f64> for ScaledMulExpr<'a> {
 	type Output = Self;
-	fn mul(self, scale: f64) -> Self::Output {
+	fn mul(self, scale: f64) -> Self {
 		self.scale(scale)
 	}
 }
 
 impl<'a> std::ops::Mul<&'a Tensor> for f64 {
 	type Output = ScaledTensorExpr<'a>;
-	fn mul(self, tensor: &'a Tensor) -> Self::Output {
+	fn mul(self, tensor: &'a Tensor) -> ScaledTensorExpr<'a> {
 		tensor.scale(self)
 	}
 }
 
 impl<'a> std::ops::Mul<ScaledTensorExpr<'a>> for f64 {
 	type Output = ScaledTensorExpr<'a>;
-	fn mul(self, tensor: ScaledTensorExpr<'a>) -> Self::Output {
+	fn mul(self, tensor: ScaledTensorExpr<'a>) -> ScaledTensorExpr<'a> {
 		tensor.scale(self)
 	}
 }
 
 impl<'a> std::ops::Mul<AddWeightedExpr<'a>> for f64 {
 	type Output = AddWeightedExpr<'a>;
-	fn mul(self, expr: AddWeightedExpr<'a>) -> Self::Output {
+	fn mul(self, expr: AddWeightedExpr<'a>) -> AddWeightedExpr<'a> {
 		expr.scale(self)
 	}
 }
 
 impl<'a> std::ops::Mul<DotExpr<'a>> for f64 {
 	type Output = DotExpr<'a>;
-	fn mul(self, expr: DotExpr<'a>) -> Self::Output {
+	fn mul(self, expr: DotExpr<'a>) -> DotExpr<'a> {
 		expr.scale(self)
 	}
 }
 
 impl<'a> std::ops::Mul<DotAddExpr<'a>> for f64 {
 	type Output = DotAddExpr<'a>;
-	fn mul(self, expr: DotAddExpr<'a>) -> Self::Output {
+	fn mul(self, expr: DotAddExpr<'a>) -> DotAddExpr<'a> {
 		expr.scale(self)
 	}
 }
 
 impl<'a> std::ops::Mul<MulExpr<'a>> for f64 {
 	type Output = ScaledMulExpr<'a>;
-	fn mul(self, expr: MulExpr<'a>) -> Self::Output {
+	fn mul(self, expr: MulExpr<'a>) -> ScaledMulExpr<'a> {
 		expr.scale(self)
 	}
 }
 
 impl<'a> std::ops::Mul<ScaledMulExpr<'a>> for f64 {
 	type Output = ScaledMulExpr<'a>;
-	fn mul(self, expr: ScaledMulExpr<'a>) -> Self::Output {
+	fn mul(self, expr: ScaledMulExpr<'a>) -> ScaledMulExpr<'a> {
 		expr.scale(self)
 	}
 }
 
 impl<'a> std::ops::Neg for &'a Tensor {
 	type Output = ScaledTensorExpr<'a>;
-	fn neg(self) -> Self::Output {
+	fn neg(self) -> ScaledTensorExpr<'a> {
 		self.scale(-1.0)
 	}
 }
 
 impl<'a> std::ops::Neg for ScaledTensorExpr<'a> {
 	type Output = Self;
-	fn neg(self) -> Self::Output {
+	fn neg(self) -> Self {
 		self.scale(-1.0)
 	}
 }
 
 impl<'a> std::ops::Neg for AddWeightedExpr<'a> {
 	type Output = Self;
-	fn neg(self) -> Self::Output {
+	fn neg(self) -> Self {
 		self.scale(-1.0)
 	}
 }
 
 impl<'a> std::ops::Neg for DotExpr<'a> {
 	type Output = Self;
-	fn neg(self) -> Self::Output {
+	fn neg(self) -> Self {
 		self.scale(-1.0)
 	}
 }
 
 impl<'a> std::ops::Neg for DotAddExpr<'a> {
 	type Output = Self;
-	fn neg(self) -> Self::Output {
+	fn neg(self) -> Self {
 		self.scale(-1.0)
 	}
 }
 
 impl<'a> std::ops::Neg for MulExpr<'a> {
 	type Output = ScaledMulExpr<'a>;
-	fn neg(self) -> Self::Output {
+	fn neg(self) -> ScaledMulExpr<'a> {
 		self.scale(-1.0)
 	}
 }
 
 impl<'a> std::ops::Neg for ScaledMulExpr<'a> {
 	type Output = Self;
-	fn neg(self) -> Self::Output {
+	fn neg(self) -> Self {
 		self.scale(-1.0)
 	}
 }
@@ -524,7 +524,7 @@ impl<'a> EvaluatesToTensor for AddWeightedExpr<'a> {
 
 impl<'a> Scalable for AddWeightedExpr<'a> {
 	type Output = Self;
-	fn scale(self, scale: f64) -> Self::Output {
+	fn scale(self, scale: f64) -> Self {
 		Self {
 			a: self.a.scale(scale),
 			b: self.b.scale(scale),
@@ -548,42 +548,42 @@ impl<'a> std::ops::Add<ScaledTensorExpr<'a>> for &'a Tensor {
 
 impl<'a> std::ops::Add<&'a Tensor> for ScaledTensorExpr<'a> {
 	type Output = AddWeightedExpr<'a>;
-	fn add(self, b: &'a Tensor) -> Self::Output {
+	fn add(self, b: &'a Tensor) -> AddWeightedExpr<'a> {
 		AddWeightedExpr { a: self, b: b.into() }
 	}
 }
 
 impl<'a> std::ops::Add<Self> for ScaledTensorExpr<'a> {
 	type Output = AddWeightedExpr<'a>;
-	fn add(self, b: Self) -> Self::Output {
+	fn add(self, b: Self) -> AddWeightedExpr<'a> {
 		AddWeightedExpr { a: self, b }
 	}
 }
 
 impl<'a> std::ops::Sub<&'a Tensor> for &'a Tensor {
 	type Output = AddWeightedExpr<'a>;
-	fn sub(self, b: &'a Tensor) -> Self::Output {
+	fn sub(self, b: &'a Tensor) -> AddWeightedExpr<'a> {
 		AddWeightedExpr { a: self.into(), b: b.scale(-1.0) }
 	}
 }
 
 impl<'a> std::ops::Sub<ScaledTensorExpr<'a>> for &'a Tensor {
 	type Output = AddWeightedExpr<'a>;
-	fn sub(self, b: ScaledTensorExpr<'a>) -> Self::Output {
+	fn sub(self, b: ScaledTensorExpr<'a>) -> AddWeightedExpr<'a> {
 		AddWeightedExpr { a: self.into(), b: b.scale(-1.0) }
 	}
 }
 
 impl<'a> std::ops::Sub<&'a Tensor> for ScaledTensorExpr<'a> {
 	type Output = AddWeightedExpr<'a>;
-	fn sub(self, b: &'a Tensor) -> Self::Output {
+	fn sub(self, b: &'a Tensor) -> AddWeightedExpr<'a> {
 		AddWeightedExpr { a: self, b: b.scale(-1.0) }
 	}
 }
 
 impl<'a> std::ops::Sub<Self> for ScaledTensorExpr<'a> {
 	type Output = AddWeightedExpr<'a>;
-	fn sub(self, b: Self) -> Self::Output {
+	fn sub(self, b: Self) -> AddWeightedExpr<'a> {
 		AddWeightedExpr { a: self, b: b.scale(-1.0) }
 	}
 }
@@ -613,7 +613,7 @@ impl<'a> EvaluatesToTensor for DotExpr<'a> {
 
 impl<'a> Scalable for DotExpr<'a> {
 	type Output = Self;
-	fn scale(self, scale: f64) -> Self::Output {
+	fn scale(self, scale: f64) -> Self {
 		Self { scale: self.scale * scale, ..self }
 	}
 }
@@ -647,7 +647,7 @@ impl<'a> EvaluatesToTensor for DotAddExpr<'a> {
 
 impl<'a> Scalable for DotAddExpr<'a> {
 	type Output = Self;
-	fn scale(self, scale: f64) -> Self::Output {
+	fn scale(self, scale: f64) -> Self {
 		Self {
 			dot: self.dot.scale(scale),
 			add: self.add.scale(scale),
@@ -657,14 +657,14 @@ impl<'a> Scalable for DotAddExpr<'a> {
 
 impl<'a> std::ops::Add<&'a Tensor> for DotExpr<'a> {
 	type Output = DotAddExpr<'a>;
-	fn add(self, add: &'a Tensor) -> Self::Output {
+	fn add(self, add: &'a Tensor) -> DotAddExpr<'a> {
 		DotAddExpr { dot: self, add: add.into() }
 	}
 }
 
 impl<'a> std::ops::Add<ScaledTensorExpr<'a>> for DotExpr<'a> {
 	type Output = DotAddExpr<'a>;
-	fn add(self, add: ScaledTensorExpr<'a>) -> Self::Output {
+	fn add(self, add: ScaledTensorExpr<'a>) -> DotAddExpr<'a> {
 		DotAddExpr { dot: self, add }
 	}
 }
@@ -678,35 +678,35 @@ impl<'a> std::ops::Add<DotExpr<'a>> for &'a Tensor {
 
 impl<'a> std::ops::Add<DotExpr<'a>> for ScaledTensorExpr<'a> {
 	type Output = DotAddExpr<'a>;
-	fn add(self, dot: DotExpr<'a>) -> Self::Output {
+	fn add(self, dot: DotExpr<'a>) -> DotAddExpr<'a> {
 		DotAddExpr { dot, add: self }
 	}
 }
 
 impl<'a> std::ops::Sub<&'a Tensor> for DotExpr<'a> {
 	type Output = DotAddExpr<'a>;
-	fn sub(self, sub: &'a Tensor) -> Self::Output {
+	fn sub(self, sub: &'a Tensor) -> DotAddExpr<'a> {
 		DotAddExpr { dot: self, add: sub.scale(-1.0) }
 	}
 }
 
 impl<'a> std::ops::Sub<ScaledTensorExpr<'a>> for DotExpr<'a> {
 	type Output = DotAddExpr<'a>;
-	fn sub(self, sub: ScaledTensorExpr<'a>) -> Self::Output {
+	fn sub(self, sub: ScaledTensorExpr<'a>) -> DotAddExpr<'a> {
 		DotAddExpr { dot: self, add: sub.scale(-1.0) }
 	}
 }
 
 impl<'a> std::ops::Sub<DotExpr<'a>> for &'a Tensor {
 	type Output = DotAddExpr<'a>;
-	fn sub(self, dot: DotExpr<'a>) -> Self::Output {
+	fn sub(self, dot: DotExpr<'a>) -> DotAddExpr<'a> {
 		DotAddExpr { dot: dot.scale(-1.0), add: self.into() }
 	}
 }
 
 impl<'a> std::ops::Sub<DotExpr<'a>> for ScaledTensorExpr<'a> {
 	type Output = DotAddExpr<'a>;
-	fn sub(self, dot: DotExpr<'a>) -> Self::Output {
+	fn sub(self, dot: DotExpr<'a>) -> DotAddExpr<'a> {
 		DotAddExpr { dot: dot.scale(-1.0), add: self }
 	}
 }
@@ -740,7 +740,7 @@ impl<'a> EvaluatesToTensor for MulAddExpr<'a> {
 
 impl<'a> Scalable for MulAddExpr<'a> {
 	type Output = Self;
-	fn scale(self, scale: f64) -> Self::Output {
+	fn scale(self, scale: f64) -> Self {
 		Self {
 			mul: self.mul.scale(scale),
 			add: self.add.scale(scale),
@@ -750,70 +750,70 @@ impl<'a> Scalable for MulAddExpr<'a> {
 
 impl<'a> std::ops::Add<&'a Tensor> for ScaledMulExpr<'a> {
 	type Output = MulAddExpr<'a>;
-	fn add(self, add: &'a Tensor) -> Self::Output {
+	fn add(self, add: &'a Tensor) -> MulAddExpr<'a> {
 		MulAddExpr { mul: self, add: add.into() }
 	}
 }
 
 impl<'a> std::ops::Add<&'a Tensor> for MulExpr<'a> {
 	type Output = MulAddExpr<'a>;
-	fn add(self, add: &'a Tensor) -> Self::Output {
+	fn add(self, add: &'a Tensor) -> MulAddExpr<'a> {
 		MulAddExpr { mul: self.scale(1.0), add: add.into() }
 	}
 }
 
 impl<'a> std::ops::Add<ScaledTensorExpr<'a>> for ScaledMulExpr<'a> {
 	type Output = MulAddExpr<'a>;
-	fn add(self, add: ScaledTensorExpr<'a>) -> Self::Output {
+	fn add(self, add: ScaledTensorExpr<'a>) -> MulAddExpr<'a> {
 		MulAddExpr { mul: self, add }
 	}
 }
 
 impl<'a> std::ops::Add<ScaledTensorExpr<'a>> for MulExpr<'a> {
 	type Output = MulAddExpr<'a>;
-	fn add(self, add: ScaledTensorExpr<'a>) -> Self::Output {
+	fn add(self, add: ScaledTensorExpr<'a>) -> MulAddExpr<'a> {
 		MulAddExpr { mul: self.scale(1.0), add }
 	}
 }
 
 impl<'a> std::ops::Add<ScaledMulExpr<'a>> for &'a Tensor {
 	type Output = MulAddExpr<'a>;
-	fn add(self, mul: ScaledMulExpr<'a>) -> Self::Output {
+	fn add(self, mul: ScaledMulExpr<'a>) -> MulAddExpr<'a> {
 		MulAddExpr { mul, add: self.into() }
 	}
 }
 
 impl<'a> std::ops::Add<MulExpr<'a>> for &'a Tensor {
 	type Output = MulAddExpr<'a>;
-	fn add(self, mul: MulExpr<'a>) -> Self::Output {
+	fn add(self, mul: MulExpr<'a>) -> MulAddExpr<'a> {
 		MulAddExpr { mul: mul.scale(1.0), add: self.into() }
 	}
 }
 
 impl<'a> std::ops::Add<ScaledMulExpr<'a>> for ScaledTensorExpr<'a> {
 	type Output = MulAddExpr<'a>;
-	fn add(self, mul: ScaledMulExpr<'a>) -> Self::Output {
+	fn add(self, mul: ScaledMulExpr<'a>) -> MulAddExpr<'a> {
 		MulAddExpr { mul, add: self }
 	}
 }
 
 impl<'a> std::ops::Add<MulExpr<'a>> for ScaledTensorExpr<'a> {
 	type Output = MulAddExpr<'a>;
-	fn add(self, mul: MulExpr<'a>) -> Self::Output {
+	fn add(self, mul: MulExpr<'a>) -> MulAddExpr<'a> {
 		MulAddExpr { mul: mul.scale(1.0), add: self }
 	}
 }
 
 impl<'a> std::ops::Sub<&'a Tensor> for ScaledMulExpr<'a> {
 	type Output = MulAddExpr<'a>;
-	fn sub(self, sub: &'a Tensor) -> Self::Output {
+	fn sub(self, sub: &'a Tensor) -> MulAddExpr<'a> {
 		MulAddExpr { mul: self, add: sub.scale(-1.0) }
 	}
 }
 
 impl<'a> std::ops::Sub<&'a Tensor> for MulExpr<'a> {
 	type Output = MulAddExpr<'a>;
-	fn sub(self, sub: &'a Tensor) -> Self::Output {
+	fn sub(self, sub: &'a Tensor) -> MulAddExpr<'a> {
 		MulAddExpr {
 			mul: self.scale(1.0),
 			add: sub.scale(-1.0),
@@ -823,14 +823,14 @@ impl<'a> std::ops::Sub<&'a Tensor> for MulExpr<'a> {
 
 impl<'a> std::ops::Sub<ScaledTensorExpr<'a>> for ScaledMulExpr<'a> {
 	type Output = MulAddExpr<'a>;
-	fn sub(self, sub: ScaledTensorExpr<'a>) -> Self::Output {
+	fn sub(self, sub: ScaledTensorExpr<'a>) -> MulAddExpr<'a> {
 		MulAddExpr { mul: self, add: sub.scale(-1.0) }
 	}
 }
 
 impl<'a> std::ops::Sub<ScaledTensorExpr<'a>> for MulExpr<'a> {
 	type Output = MulAddExpr<'a>;
-	fn sub(self, sub: ScaledTensorExpr<'a>) -> Self::Output {
+	fn sub(self, sub: ScaledTensorExpr<'a>) -> MulAddExpr<'a> {
 		MulAddExpr {
 			mul: self.scale(1.0),
 			add: sub.scale(-1.0),
@@ -840,28 +840,28 @@ impl<'a> std::ops::Sub<ScaledTensorExpr<'a>> for MulExpr<'a> {
 
 impl<'a> std::ops::Sub<ScaledMulExpr<'a>> for &'a Tensor {
 	type Output = MulAddExpr<'a>;
-	fn sub(self, mul: ScaledMulExpr<'a>) -> Self::Output {
+	fn sub(self, mul: ScaledMulExpr<'a>) -> MulAddExpr<'a> {
 		MulAddExpr { mul: mul.scale(-1.0), add: self.into() }
 	}
 }
 
 impl<'a> std::ops::Sub<MulExpr<'a>> for &'a Tensor {
 	type Output = MulAddExpr<'a>;
-	fn sub(self, mul: MulExpr<'a>) -> Self::Output {
+	fn sub(self, mul: MulExpr<'a>) -> MulAddExpr<'a> {
 		MulAddExpr { mul: mul.scale(-1.0), add: self.into() }
 	}
 }
 
 impl<'a> std::ops::Sub<ScaledMulExpr<'a>> for ScaledTensorExpr<'a> {
 	type Output = MulAddExpr<'a>;
-	fn sub(self, mul: ScaledMulExpr<'a>) -> Self::Output {
+	fn sub(self, mul: ScaledMulExpr<'a>) -> MulAddExpr<'a> {
 		MulAddExpr { mul: mul.scale(-1.0), add: self }
 	}
 }
 
 impl<'a> std::ops::Sub<MulExpr<'a>> for ScaledTensorExpr<'a> {
 	type Output = MulAddExpr<'a>;
-	fn sub(self, mul: MulExpr<'a>) -> Self::Output {
+	fn sub(self, mul: MulExpr<'a>) -> MulAddExpr<'a> {
 		MulAddExpr { mul: mul.scale(-1.0), add: self }
 	}
 }
@@ -928,7 +928,7 @@ impl<'a> EvaluatesToTensor for MulExpr<'a> {
 
 impl<'a> Sum for MulExpr<'a> {
 	type Output = DotExpr<'a>;
-	fn sum(self) -> Self::Output {
+	fn sum(self) -> DotExpr<'a> {
 		DotExpr { a: self.a, b: self.b, scale: 1.0 }
 	}
 }
@@ -943,14 +943,14 @@ pub struct ScaledMulExpr<'a> {
 
 impl<'a> Scalable for MulExpr<'a> {
 	type Output = ScaledMulExpr<'a>;
-	fn scale(self, scale: f64) -> Self::Output {
+	fn scale(self, scale: f64) -> ScaledMulExpr<'a> {
 		ScaledMulExpr { a: self.a, b: self.b, scale }
 	}
 }
 
 impl<'a> Scalable for ScaledMulExpr<'a> {
 	type Output = Self;
-	fn scale(self, scale: f64) -> Self::Output {
+	fn scale(self, scale: f64) -> Self {
 		Self {
 			a: self.a,
 			b: self.b,
@@ -991,14 +991,14 @@ impl<'a> Sqrt for &'a Tensor {
 
 impl<'a> Sqrt for ScaledTensorExpr<'a> {
 	type Output = SqrtExpr<'a>;
-	fn sqrt(self) -> Self::Output {
+	fn sqrt(self) -> SqrtExpr<'a> {
 		SqrtExpr { tensor: self.tensor, scale: self.scale }
 	}
 }
 
 impl<'a> Recip for SqrtExpr<'a> {
 	type Output = RSqrtExpr<'a>;
-	fn recip(self, eps: f64) -> Self::Output {
+	fn recip(self, eps: f64) -> RSqrtExpr<'a> {
 		RSqrtExpr {
 			tensor: self.tensor,
 			scale: 1.0 / self.scale,
@@ -1028,7 +1028,7 @@ pub struct SqrtDotExpr<'a> {
 
 impl<'a> Sqrt for DotExpr<'a> {
 	type Output = SqrtDotExpr<'a>;
-	fn sqrt(self) -> Self::Output {
+	fn sqrt(self) -> SqrtDotExpr<'a> {
 		SqrtDotExpr { a: self.a, b: self.b, scale: self.scale }
 	}
 }
@@ -1055,7 +1055,7 @@ pub struct RSqrtDotExpr<'a> {
 
 impl<'a> Recip for SqrtDotExpr<'a> {
 	type Output = RSqrtDotExpr<'a>;
-	fn recip(self, eps: f64) -> Self::Output {
+	fn recip(self, eps: f64) -> RSqrtDotExpr<'a> {
 		RSqrtDotExpr {
 			a: self.a,
 			b: self.b,
@@ -1373,7 +1373,7 @@ pub struct ColTimesRow<'a> {
 
 impl<'a> Scalable for ColTimesRow<'a> {
 	type Output = Self;
-	fn scale(self, scale: f64) -> Self::Output {
+	fn scale(self, scale: f64) -> Self {
 		Self {
 			col: self.col,
 			row: self.row,
@@ -1391,7 +1391,7 @@ pub struct MatTimesCol<'a> {
 
 impl<'a> Scalable for MatTimesCol<'a> {
 	type Output = Self;
-	fn scale(self, scale: f64) -> Self::Output {
+	fn scale(self, scale: f64) -> Self {
 		Self {
 			mat: self.mat,
 			col: self.col,
@@ -1403,7 +1403,7 @@ impl<'a> Scalable for MatTimesCol<'a> {
 impl<'a> std::ops::Mul<RowMatrix<'a>> for ColMatrix<'a> {
 	type Output = ColTimesRow<'a>;
 
-	fn mul(self, row: RowMatrix<'a>) -> Self::Output {
+	fn mul(self, row: RowMatrix<'a>) -> ColTimesRow<'a> {
 		ColTimesRow { col: self, row, scale: 1.0 }
 	}
 }
@@ -1411,7 +1411,7 @@ impl<'a> std::ops::Mul<RowMatrix<'a>> for ColMatrix<'a> {
 impl<'a> std::ops::Mul<ColMatrix<'a>> for Matrix<'a> {
 	type Output = MatTimesCol<'a>;
 
-	fn mul(self, col: ColMatrix<'a>) -> Self::Output {
+	fn mul(self, col: ColMatrix<'a>) -> MatTimesCol<'a> {
 		MatTimesCol { mat: self, col, scale: 1.0 }
 	}
 }

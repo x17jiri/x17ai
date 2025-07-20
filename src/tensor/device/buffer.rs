@@ -183,7 +183,7 @@ impl<'a> std::ops::Deref for DeviceBufferRef<'a> {
 	type Target = DeviceBuffer;
 
 	#[inline]
-	fn deref(&self) -> &Self::Target {
+	fn deref(&self) -> &DeviceBuffer {
 		self.device_buffer
 	}
 }
@@ -274,7 +274,7 @@ impl<'a> std::ops::Deref for DeviceBufferRefMut<'a> {
 	type Target = DeviceBuffer;
 
 	#[inline]
-	fn deref(&self) -> &Self::Target {
+	fn deref(&self) -> &DeviceBuffer {
 		self.device_buffer
 	}
 }

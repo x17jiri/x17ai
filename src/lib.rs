@@ -13,7 +13,6 @@
 #![feature(core_intrinsics)]
 #![feature(inherent_associated_types)]
 #![feature(stmt_expr_attributes)]
-#![feature(let_chains)]
 #![feature(arbitrary_self_types)]
 #![feature(dispatch_from_dyn)]
 #![feature(generic_const_exprs)]

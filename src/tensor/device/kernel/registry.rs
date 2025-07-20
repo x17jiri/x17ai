@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, OnceLock, RwLock};
 
-use super::kernel::KernelData;
+use super::KernelData;
 
 //--------------------------------------------------------------------------------------------------
 

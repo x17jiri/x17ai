@@ -7,8 +7,11 @@
 
 use std::sync::Arc;
 
-use crate::tensor::device::kernel::{ConstArg, ElemArg, Kernel, KernelData, ReduceArg, ScalarExpr};
-use crate::tensor::device::kernel_registry::KernelRegistry;
+use super::registry::KernelRegistry;
+
+use crate::tensor::device::kernel::{
+	ConstArg, ElemArg, FloatLiteral, Kernel, KernelData, ReduceArg, ScalarExpr,
+};
 use crate::util::array;
 
 //--------------------------------------------------------------------------------------------------
@@ -101,6 +104,22 @@ impl std::ops::Add<Self> for ScalarExprWrapper {
 	}
 }
 
+impl std::ops::Sub<Self> for ScalarExprWrapper {
+	type Output = Self;
+
+	fn sub(self, rhs: Self) -> Self {
+		Self {
+			expr: Arc::new(ScalarExpr::AddExpr(
+				self.expr,
+				Arc::new(ScalarExpr::MulExpr(
+					Arc::new(ScalarExpr::FloatLiteral(FloatLiteral { value: -1.0 })),
+					rhs.expr,
+				)),
+			)),
+		}
+	}
+}
+
 impl std::ops::Mul<Self> for ScalarExprWrapper {
 	type Output = Self;
 
@@ -140,7 +159,7 @@ impl ReduceMul {
 impl std::ops::Mul<Self> for ReduceArgWrapper {
 	type Output = ReduceMul;
 
-	fn mul(self, rhs: Self) -> Self::Output {
+	fn mul(self, rhs: Self) -> ReduceMul {
 		ReduceMul(self.arg, rhs.arg)
 	}
 }

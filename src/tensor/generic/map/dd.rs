@@ -109,7 +109,7 @@ impl DD {
 
 impl Map for DD {
 	type Deref = Self;
-	fn as_ref(&self) -> &Self::Deref {
+	fn as_ref(&self) -> &Self {
 		self
 	}
 
@@ -151,7 +151,7 @@ impl<const M: usize> MergeDims<M> for DD {
 	type Error = MergeDimsError;
 
 	#[inline(never)] // TODO
-	fn merge_dims(&self) -> Result<Self::Output, MergeDimsError> {
+	fn merge_dims(&self) -> Result<Self, MergeDimsError> {
 		let old_slice = self.dims.as_slice();
 		let old_ndim = old_slice.len();
 		if old_ndim < M {
@@ -180,7 +180,7 @@ impl MergeAllDims for DD {
 	type Error = IncompatibleStridesError;
 
 	#[inline(never)] // TODO
-	fn merge_all_dims(&self) -> Result<Self::Output, IncompatibleStridesError> {
+	fn merge_all_dims(&self) -> Result<Self, IncompatibleStridesError> {
 		let merged = merge_dims(self.dims.as_slice())?;
 
 		let mut dims = DimVecBuilder::new(1);
@@ -197,7 +197,7 @@ impl<const M: usize> ReshapeLastDim<M> for DD {
 	type Error = ReshapeLastDimError;
 
 	#[inline(never)] // TODO
-	fn reshape_last_dim(&self, to_shape: [usize; M]) -> Result<Self::Output, ReshapeLastDimError> {
+	fn reshape_last_dim(&self, to_shape: [usize; M]) -> Result<Self, ReshapeLastDimError> {
 		let old_slice = self.dims.as_slice();
 		let old_ndim = old_slice.len();
 
@@ -268,7 +268,7 @@ impl Select for DD {
 	}
 
 	#[inline(never)] // TODO
-	unsafe fn select_unchecked(&self, dim: usize, index: usize) -> Self::Output {
+	unsafe fn select_unchecked(&self, dim: usize, index: usize) -> Self {
 		let old_slice = self.dims.as_slice();
 		debug_assert!(dim < old_slice.len());
 

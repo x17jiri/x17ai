@@ -72,7 +72,7 @@ impl<const N: usize> TryFrom<&DD> for ND<N> {
 
 impl<const N: usize> Map for ND<N> {
 	type Deref = Self;
-	fn as_ref(&self) -> &Self::Deref {
+	fn as_ref(&self) -> &Self {
 		self
 	}
 
@@ -128,7 +128,7 @@ where
 	type Output = ND<{ N - M + 1 }>;
 	type Error = IncompatibleStridesError;
 
-	fn merge_dims(&self) -> Result<Self::Output, IncompatibleStridesError> {
+	fn merge_dims(&self) -> Result<ND<{ N - M + 1 }>, IncompatibleStridesError> {
 		let mut dims = [SizeAndStride::default(); N - M + 1];
 		for i in 0..N - M {
 			dims[i] = self.dims[i];
@@ -146,7 +146,7 @@ where
 	type Output = ND<{ N - M + 1 }>;
 	type Error = Infallible;
 
-	fn span_dims(&self) -> Result<Self::Output, Infallible> {
+	fn span_dims(&self) -> Result<ND<{ N - M + 1 }>, Infallible> {
 		let (keep, span) = self.dims.split_at(N - M);
 		let elems = span.iter().map(|dim| dim.size).product::<usize>();
 		let size = if elems == 0 {
@@ -168,7 +168,7 @@ impl<const N: usize> MergeAllDims for ND<N> {
 	type Output = ND<1>;
 	type Error = IncompatibleStridesError;
 
-	fn merge_all_dims(&self) -> Result<Self::Output, IncompatibleStridesError> {
+	fn merge_all_dims(&self) -> Result<ND<1>, IncompatibleStridesError> {
 		Ok(ND {
 			dims: [merge_dims(&self.dims)?],
 			offset: self.offset,
@@ -187,7 +187,7 @@ where
 	fn reshape_last_dim(
 		&self,
 		to_shape: [usize; M],
-	) -> Result<Self::Output, InvalidNumElementsError> {
+	) -> Result<ND<{ N - 1 + M }>, InvalidNumElementsError> {
 		let last_dim = self.dims[N - 1];
 
 		let elems = to_shape.iter().copied().product::<usize>();
@@ -230,7 +230,7 @@ where
 	type Output = ND<{ N - 1 }>;
 	type Error = SelectError;
 
-	fn select(&self, dim: usize, index: usize) -> Result<Self::Output, SelectError> {
+	fn select(&self, dim: usize, index: usize) -> Result<ND<{ N - 1 }>, SelectError> {
 		if dim >= N {
 			cold_path();
 			return Err(SelectError::DimIndexOutOfBounds);
@@ -255,7 +255,7 @@ where
 		})
 	}
 
-	unsafe fn select_unchecked(&self, dim: usize, index: usize) -> Self::Output {
+	unsafe fn select_unchecked(&self, dim: usize, index: usize) -> ND<{ N - 1 }> {
 		debug_assert!(dim < N);
 		let removed_dim = self.dims.get_unchecked(dim);
 		debug_assert!(index < removed_dim.size);
@@ -277,7 +277,7 @@ impl<const N: usize> Narrow for ND<N> {
 	type Output = Self;
 	type Error = NarrowError;
 
-	fn narrow(&self, _dim: usize, _range: UniversalRange) -> Result<Self::Output, NarrowError> {
+	fn narrow(&self, _dim: usize, _range: UniversalRange) -> Result<Self, NarrowError> {
 		todo!("Narrow::narrow for ND<N> not implemented yet");
 	}
 }
@@ -286,7 +286,7 @@ impl<const N: usize> Transpose for ND<N> {
 	type Output = Self;
 	type Error = DimIndexOutOfBoundsError;
 
-	fn transposed(mut self, d0: usize, d1: usize) -> Result<Self::Output, Self::Error> {
+	fn transposed(mut self, d0: usize, d1: usize) -> Result<Self, DimIndexOutOfBoundsError> {
 		if d0 >= N || d1 >= N {
 			cold_path();
 			return Err(DimIndexOutOfBoundsError);
@@ -299,7 +299,7 @@ impl<const N: usize> Transpose for ND<N> {
 impl<const N: usize> NDShape<N> for ND<N> {
 	type Error = Infallible;
 
-	fn nd_shape(&self) -> std::result::Result<[usize; N], Self::Error> {
+	fn nd_shape(&self) -> std::result::Result<[usize; N], Infallible> {
 		let mut shape = [0; N];
 		for (size, dim) in shape.iter_mut().zip(self.dims.iter()) {
 			*size = dim.size;

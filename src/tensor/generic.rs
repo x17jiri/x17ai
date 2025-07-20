@@ -241,7 +241,7 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		if !safe {
 			return Err(TensorUnsafeError::new(span, buf_len));
 		}
-		Ok(())  	
+		Ok(())
 	}
 }
 
@@ -309,7 +309,7 @@ pub struct AxisIter<'a, M: Map + Select, B: Buffer + Clone> {
 impl<'a, M: Map + Select, B: Buffer + Clone> Iterator for AxisIter<'a, M, B> {
 	type Item = Tensor<M::Output, B>;
 
-	fn next(&mut self) -> Option<Self::Item> {
+	fn next(&mut self) -> Option<Tensor<M::Output, B>> {
 		if self.current >= self.size {
 			return None;
 		}
