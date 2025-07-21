@@ -32,7 +32,7 @@ impl MulScaledKernel {
 		Self { kernel }
 	}
 
-	pub fn calc<'a>(self, a: &'a Tensor, b: &'a Tensor, scale: f64) -> MulScaledKernelCall<'a> {
+	pub fn call<'a>(self, a: &'a Tensor, b: &'a Tensor, scale: f64) -> MulScaledKernelCall<'a> {
 		MulScaledKernelCall { kernel: self, a, b, scale }
 	}
 }

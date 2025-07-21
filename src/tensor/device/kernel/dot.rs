@@ -31,7 +31,7 @@ impl DotKernel {
 		Self { kernel }
 	}
 
-	pub fn calc<'a>(self, a: &'a Tensor, b: &'a Tensor) -> DotKernelCall<'a> {
+	pub fn call<'a>(self, a: &'a Tensor, b: &'a Tensor) -> DotKernelCall<'a> {
 		DotKernelCall { kernel: self, a, b }
 	}
 }

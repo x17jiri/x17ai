@@ -31,7 +31,7 @@ impl MulKernel {
 		Self { kernel }
 	}
 
-	pub fn calc<'a>(self, a: &'a Tensor, b: &'a Tensor) -> MulKernelCall<'a> {
+	pub fn call<'a>(self, a: &'a Tensor, b: &'a Tensor) -> MulKernelCall<'a> {
 		MulKernelCall { kernel: self, a, b }
 	}
 }

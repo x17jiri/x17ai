@@ -12,6 +12,7 @@ use crate::ErrPack;
 use crate::autograd::{self, AutogradNode, BackwardFn, StraightThroughBackwardFn};
 use crate::nn::param::Param;
 use crate::tensor::device::kernel::library::KernelLibrary;
+use crate::tensor::device::kernel::lookup;
 use crate::tensor::{Tensor, TensorOpError};
 use crate::util::LossyInto;
 
@@ -116,7 +117,12 @@ impl BackwardFn for RMSNormBackwardFn_Precise {
 		g.assign(kernels.dot_scaled(&out, &d_out, sum_to_mean))?;
 
 		let d_inp = out.reuse_or_new_like()?;
-		d_inp.assign(kernels.Ia_sub_Ib_mul_cII_mul_d(&d_out, &out, &g, &magn_recip))?;
+
+		let d_out = lookup::tensor(&d_out);
+		let out = lookup::tensor(&out);
+		let g = lookup::tensor(&g);
+		let magn_recip = lookup::tensor(&magn_recip);
+		d_inp.assign(kernels.lookup((d_out - (out * g)) * magn_recip))?;
 
 		queue.add(inp_backward, d_inp);
 		Ok(())

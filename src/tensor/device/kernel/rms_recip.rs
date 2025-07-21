@@ -33,7 +33,7 @@ impl RMSRecipKernel {
 		Self { kernel }
 	}
 
-	pub fn calc<'a>(self, inp: &'a Tensor, eps: f64) -> RMSRecipKernelCall<'a> {
+	pub fn call<'a>(self, inp: &'a Tensor, eps: f64) -> RMSRecipKernelCall<'a> {
 		let n_inputs = inp.size(-1).unwrap_or(1);
 		let sum_to_mean = 1.0 / n_inputs.lossy_into();
 		RMSRecipKernelCall {
@@ -44,7 +44,7 @@ impl RMSRecipKernel {
 		}
 	}
 
-	pub fn calc2<'a>(self, inp: &'a Tensor, sum_to_mean: f64, eps: f64) -> RMSRecipKernelCall<'a> {
+	pub fn call2<'a>(self, inp: &'a Tensor, sum_to_mean: f64, eps: f64) -> RMSRecipKernelCall<'a> {
 		RMSRecipKernelCall {
 			rms_recip_kernel: self,
 			inp,

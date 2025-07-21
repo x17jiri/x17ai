@@ -32,7 +32,7 @@ impl Ia_sub_Ib_mul_cII_mul_d_Kernel {
 		Self { kernel }
 	}
 
-	pub fn calc<'a>(
+	pub fn call<'a>(
 		self,
 		a: &'a Tensor,
 		b: &'a Tensor,

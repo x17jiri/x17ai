@@ -32,7 +32,7 @@ impl DotScaledKernel {
 		Self { kernel }
 	}
 
-	pub fn calc<'a>(self, a: &'a Tensor, b: &'a Tensor, scale: f64) -> DotScaledKernelCall<'a> {
+	pub fn call<'a>(self, a: &'a Tensor, b: &'a Tensor, scale: f64) -> DotScaledKernelCall<'a> {
 		DotScaledKernelCall { kernel: self, a, b, scale }
 	}
 }

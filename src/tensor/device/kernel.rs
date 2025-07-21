@@ -20,7 +20,7 @@ use crate::util::array;
 
 pub mod Ia_sub_Ib_mul_cII_mul_d;
 pub mod builder;
-pub mod dispatch;
+pub mod lookup;
 pub mod dot;
 pub mod dot_scaled;
 pub mod library;
