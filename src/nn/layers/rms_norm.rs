@@ -11,8 +11,7 @@ use std::rc::Rc;
 use crate::ErrPack;
 use crate::autograd::{self, AutogradNode, BackwardFn, StraightThroughBackwardFn};
 use crate::nn::param::Param;
-use crate::tensor::device::kernel::library::KernelLibrary;
-use crate::tensor::device::kernel::lookup;
+use crate::tensor::device::kernel::lookup::tsr;
 use crate::tensor::{Tensor, TensorOpError};
 use crate::util::LossyInto;
 
@@ -30,7 +29,6 @@ pub struct RMSNorm {
 	shape: [usize; 1],
 	gradient_mode: RMSNormGradientMode,
 	eps: f64,
-	kernels: KernelLibrary,
 }
 
 impl RMSNorm {
@@ -39,7 +37,6 @@ impl RMSNorm {
 			shape: [n_inputs],
 			gradient_mode: RMSNormGradientMode::Precise,
 			eps,
-			kernels: KernelLibrary::instance(),
 		}
 	}
 }
@@ -63,11 +60,12 @@ impl Layer for RMSNorm {
 
 	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
 		let (inp, inp_backward) = inp_node.take();
+		let kernels = inp.builtin_kernel_library();
 		let magn_recip = inp.new_replace_tail(1, &[1])?;
-		magn_recip.assign(self.kernels.rms_recip(&inp, self.eps))?;
+		magn_recip.assign(kernels.rms_recip(&inp, self.eps))?;
 
 		let out = inp.reuse_or_new_like()?;
-		out.assign(self.kernels.mul(&inp, &magn_recip))?;
+		out.assign2(tsr(&inp) * tsr(&magn_recip))?;
 
 		let backward_fn = inp_backward.map(|inp_backward| match self.gradient_mode {
 			RMSNormGradientMode::Precise => {
@@ -76,7 +74,6 @@ impl Layer for RMSNorm {
 					out: out.clone(),
 					magn_recip,
 					inp_backward,
-					kernels: self.kernels.clone(),
 				}) as Box<dyn BackwardFn>
 			},
 			RMSNormGradientMode::StraightThrough => {
@@ -99,7 +96,6 @@ pub struct RMSNormBackwardFn_Precise {
 	out: Tensor,
 	magn_recip: Tensor,
 	inp_backward: Box<dyn BackwardFn>,
-	kernels: KernelLibrary,
 }
 
 impl BackwardFn for RMSNormBackwardFn_Precise {
@@ -108,21 +104,17 @@ impl BackwardFn for RMSNormBackwardFn_Precise {
 		d_out: Tensor,
 		queue: &mut autograd::Queue,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		let Self { out, magn_recip, inp_backward, kernels } = Box::into_inner(self);
+		let Self { out, magn_recip, inp_backward } = Box::into_inner(self);
 
 		let n = out.size(-1).unwrap_or(1);
 		let sum_to_mean = 1.0 / n.lossy_into();
 
 		let g = magn_recip.new_empty_like()?; // [..., 1]
-		g.assign(kernels.dot_scaled(&out, &d_out, sum_to_mean))?;
+		g.assign2((tsr(&out) * &d_out).sum() * sum_to_mean)?;
 
 		let d_inp = out.reuse_or_new_like()?;
 
-		let d_out = lookup::tensor(&d_out);
-		let out = lookup::tensor(&out);
-		let g = lookup::tensor(&g);
-		let magn_recip = lookup::tensor(&magn_recip);
-		d_inp.assign(kernels.lookup((d_out - (out * g)) * magn_recip))?;
+		d_inp.assign2((tsr(&d_out) - (tsr(&out) * &g)) * &magn_recip)?;
 
 		queue.add(inp_backward, d_inp);
 		Ok(())

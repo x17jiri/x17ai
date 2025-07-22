@@ -17,43 +17,36 @@ use super::builder::KernelBuilder;
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
-pub struct Ia_sub_Ib_mul_cII_mul_d_Kernel {
-	kernel: &'static Kernel<4, 0, 0>,
+pub struct MulSubABCKernel {
+	kernel: &'static Kernel<3, 0, 0>,
 }
 
-impl Ia_sub_Ib_mul_cII_mul_d_Kernel {
+impl MulSubABCKernel {
 	pub fn instance() -> Self {
-		static instance: OnceLock<Kernel<4, 0, 0>> = OnceLock::new();
+		static instance: OnceLock<Kernel<3, 0, 0>> = OnceLock::new();
 		let kernel = instance.get_or_init(|| {
-			let (builder, [a, b, c, d], [], []) =
-				KernelBuilder::new("(a - (b * c)) * d", ["a", "b", "c", "d"], [], []);
-			builder.build((a - (b * c)) * d)
+			let (builder, [a, b, c], [], []) =
+				KernelBuilder::new("(a - b) * c", ["a", "b", "c"], [], []);
+			builder.build((a - b) * c)
 		});
 		Self { kernel }
 	}
 
-	pub fn call<'a>(
-		self,
-		a: &'a Tensor,
-		b: &'a Tensor,
-		c: &'a Tensor,
-		d: &'a Tensor,
-	) -> Ia_sub_Ib_mul_cII_mul_d_KernelCall<'a> {
-		Ia_sub_Ib_mul_cII_mul_d_KernelCall { kernel: self, a, b, c, d }
+	pub fn call<'a>(self, a: &'a Tensor, b: &'a Tensor, c: &'a Tensor) -> MulSubABCKernelCall<'a> {
+		MulSubABCKernelCall { kernel: self, a, b, c }
 	}
 }
 
-pub struct Ia_sub_Ib_mul_cII_mul_d_KernelCall<'a> {
-	kernel: Ia_sub_Ib_mul_cII_mul_d_Kernel,
+pub struct MulSubABCKernelCall<'a> {
+	kernel: MulSubABCKernel,
 	a: &'a Tensor,
 	b: &'a Tensor,
 	c: &'a Tensor,
-	d: &'a Tensor,
 }
 
-impl<'a> EvaluatesToTensor for Ia_sub_Ib_mul_cII_mul_d_KernelCall<'a> {
+impl<'a> EvaluatesToTensor for MulSubABCKernelCall<'a> {
 	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
-		self.kernel.kernel.run(to, [self.a, self.b, self.c, self.d], [], [])
+		self.kernel.kernel.run(to, [self.a, self.b, self.c], [], [])
 	}
 }
 

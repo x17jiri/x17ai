@@ -13,6 +13,7 @@ use std::rc::Rc;
 
 use crate::ErrPack;
 use crate::tensor::TensorOpError;
+use crate::tensor::device::kernel::library::KernelLibrary;
 use crate::tensor::generic::buffer::Buffer;
 
 use super::Device;
@@ -28,6 +29,8 @@ pub struct DeviceBuffer {
 	pub device_data: *mut u8,
 	pub device_is_cpu: bool,
 	pub device: ManuallyDrop<Rc<dyn Device>>,
+
+	pub builtin_kernels: KernelLibrary,
 
 	pub read_count: Cell<usize>,
 	pub write_count: Cell<usize>,

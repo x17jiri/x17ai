@@ -18,14 +18,16 @@ use crate::util::array;
 
 //--------------------------------------------------------------------------------------------------
 
-pub mod Ia_sub_Ib_mul_cII_mul_d;
+pub mod add;
 pub mod builder;
-pub mod lookup;
 pub mod dot;
 pub mod dot_scaled;
 pub mod library;
+pub mod lookup;
 pub mod mul;
 pub mod mul_scaled;
+pub mod mul_sub_a_b_c;
+pub mod mul_sub_a_mul_b_c_d;
 pub mod registry;
 pub mod rms;
 pub mod rms_recip;

@@ -13,6 +13,7 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 
 use crate::tensor::HasDType;
+use crate::tensor::device::kernel::library::KernelLibrary;
 
 pub mod float_executor;
 pub mod math;
@@ -415,6 +416,7 @@ impl Device for CPUDevice {
 			device_data: memory.as_ptr(),
 			device: ManuallyDrop::new(self.clone()),
 			device_is_cpu: true,
+			builtin_kernels: KernelLibrary::instance(),
 			read_count: Cell::new(0),
 			write_count: Cell::new(0),
 		}))

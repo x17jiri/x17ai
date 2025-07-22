@@ -11,7 +11,7 @@ use std::rc::Rc;
 use crate::ErrPack;
 use crate::autograd::{self, AutogradNode, BackwardFn, StraightThroughBackwardFn};
 use crate::nn::param::Param;
-use crate::tensor::math::Sum;
+use crate::tensor::device::kernel::lookup::tsr;
 use crate::tensor::{Tensor, TensorOpError, math};
 
 use super::Layer;
@@ -101,13 +101,11 @@ impl BackwardFn for SoftmaxBackwardFn_Precise {
 		let Self { out, inp_backward } = Box::into_inner(self);
 
 		let g = out.new_replace_tail(1, &[1])?; // [..., 1]
-		g.assign((&out * &d_out).sum())?;
+		g.assign2((tsr(&out) * tsr(&d_out)).sum())?;
 
 		let d_inp = d_out.reuse_or_new_like()?;
 
-		// TODO - we could merge `-` and `*` into a single kernel
-		d_inp.assign(&d_out - &g)?;
-		d_inp.assign(&d_inp * &out)?;
+		d_inp.assign2((tsr(&d_out) - tsr(&g)) * tsr(&out))?;
 
 		queue.add(inp_backward, d_inp);
 		Ok(())
@@ -129,7 +127,7 @@ impl BackwardFn for SoftmaxBackwardFn_Simplified {
 
 		let d_inp = d_out.reuse_or_new_like()?;
 
-		d_inp.assign(&d_out * &out)?;
+		d_inp.assign2(tsr(&d_out) * tsr(&out))?;
 
 		queue.add(inp_backward, d_inp);
 		Ok(())

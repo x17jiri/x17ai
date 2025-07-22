@@ -15,6 +15,8 @@ use crate::tensor::device::buffer::{
 };
 use crate::tensor::device::cpu::{CPUDevice, ViewError};
 use crate::tensor::device::executor::{Executor, ExecutorError};
+use crate::tensor::device::kernel::library::KernelLibrary;
+use crate::tensor::device::kernel::lookup::{self, KernelLookup, LookupExpr, LookupWrapper};
 use crate::tensor::dim_merger::DimMergerError;
 use crate::tensor::generic::map::dd::ReplaceTailError;
 use crate::tensor::generic::map::{
@@ -187,11 +189,24 @@ impl Tensor {
 		self.buf().executor()
 	}
 
+	pub fn builtin_kernel_library(&self) -> KernelLibrary {
+		self.buf().builtin_kernels
+	}
+
 	pub fn assign<Expr: EvaluatesToTensor>(
 		&self,
 		expr: Expr,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		expr.eval_to_tensor(self)
+	}
+
+	pub fn assign2<Expr>(&self, expr: LookupWrapper<Expr>) -> Result<(), ErrPack<TensorOpError>>
+	where
+		Expr: LookupExpr,
+		KernelLibrary: KernelLookup<Expr>,
+	{
+		let builtin_kernels = self.buf().builtin_kernels;
+		builtin_kernels.create_call(expr).eval_to_tensor(self)
 	}
 
 	/// I use this function because Rust doesn't allow specifying only some generic parameters.
