@@ -105,10 +105,13 @@ pub struct MulLookupExpr<A: LookupExpr, B: LookupExpr>(pub A, pub B);
 impl<A: LookupExpr, B: LookupExpr> LookupExpr for MulLookupExpr<A, B> {}
 
 #[allow(clippy::use_self)]
-impl<A: LookupExpr, B: LookupExpr> std::ops::Mul<LookupWrapper<B>> for LookupWrapper<A> {
+default impl<A: LookupExpr, B: LookupExpr> std::ops::Mul<LookupWrapper<B>> for LookupWrapper<A> {
 	type Output = LookupWrapper<MulLookupExpr<A, B>>;
 
-	fn mul(self, rhs: LookupWrapper<B>) -> LookupWrapper<MulLookupExpr<A, B>> {
+	fn mul(
+		self,
+		rhs: LookupWrapper<B>,
+	) -> <LookupWrapper<A> as std::ops::Mul<LookupWrapper<B>>>::Output {
 		let LookupWrapper(lhs) = self;
 		let LookupWrapper(rhs) = rhs;
 		LookupWrapper(MulLookupExpr(lhs, rhs))
@@ -116,7 +119,7 @@ impl<A: LookupExpr, B: LookupExpr> std::ops::Mul<LookupWrapper<B>> for LookupWra
 }
 
 #[allow(clippy::use_self)]
-impl<A: LookupExpr, B: LookupExpr> std::ops::Mul<B> for LookupWrapper<A> {
+default impl<A: LookupExpr, B: LookupExpr> std::ops::Mul<B> for LookupWrapper<A> {
 	type Output = LookupWrapper<MulLookupExpr<A, B>>;
 
 	fn mul(self, rhs: B) -> LookupWrapper<MulLookupExpr<A, B>> {

@@ -12,6 +12,7 @@
 
 use std::hint::cold_path;
 
+use crate::tensor::device::kernel::lookup::tsr;
 use crate::tensor::math::{Recip, Sqrt, Sum};
 use crate::tensor::{Tensor, TensorOpError};
 use crate::util::LossyInto;
@@ -124,20 +125,19 @@ impl OptParam {
 		let grad = grad.merge_all_dims()?;
 		let grad = grad.reshape_last_dim([self.parts, self.part_elems])?;
 
+		// Update the first moment estimate
+		let m_decayed = tsr(&self.m) * coef.m_decay;
+		let m_update = tsr(&grad) * (1.0 - coef.m_decay);
+		let new_m = m_decayed + m_update;
+		self.m.assign2(new_m)?;
+
+		// Update the second moment estimate
 		// The original Adam uses just `grad * grad`. Adam-mini saves space
 		// required for `v` by computing the mean of `grad * grad` for each part
 		// of the parameter tensor.
 		// Dividing the sum by `part_elems` gives the mean.
 		let grad_squared = (&grad * &grad).sum() * self.part_elems_recip;
-
-		// Update the first moment estimate
-		let m_decayed = &self.m * coef.m_decay;
-		let m_update = &grad * (1.0 - coef.m_decay);
-		let new_m = m_decayed + m_update;
-		self.m.assign(new_m)?;
-
-		// Update the second moment estimate
-		let v_decayed = &self.v * coef.v_decay;
+		let v_decayed = tsr(&self.v) * coef.v_decay;
 		let v_update = grad_squared * (1.0 - coef.v_decay);
 		let new_v = v_decayed + v_update;
 		self.v.assign(new_v)?;

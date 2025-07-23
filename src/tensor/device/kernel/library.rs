@@ -23,6 +23,10 @@ use crate::tensor::device::kernel::mul_sub_a_mul_b_c_d::{
 };
 use crate::tensor::device::kernel::rms::{RMSKernel, RMSKernelCall};
 use crate::tensor::device::kernel::rms_recip::{RMSRecipKernel, RMSRecipKernelCall};
+use crate::tensor::device::kernel::weighted_add::{WeightedAddKernel, WeightedAddKernelCall};
+use crate::tensor::device::kernel::weighted_add_x_dot::{
+	WeightedAddXDotKernel, WeightedAddXDotKernelCall,
+};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -30,6 +34,8 @@ pub struct KernelLibraryData {
 	rms: RMSKernel,
 	rms_recip: RMSRecipKernel,
 	add: AddKernel,
+	weighted_add: WeightedAddKernel,
+	weighted_add_x_dot: WeightedAddXDotKernel,
 	mul: MulKernel,
 	mul_scaled: MulScaledKernel,
 	dot: DotKernel,
@@ -51,6 +57,8 @@ impl KernelLibrary {
 			mul: MulKernel::instance(),
 			rms_recip: RMSRecipKernel::instance(),
 			add: AddKernel::instance(),
+			weighted_add: WeightedAddKernel::instance(),
+			weighted_add_x_dot: WeightedAddXDotKernel::instance(),
 			mul_scaled: MulScaledKernel::instance(),
 			dot: DotKernel::instance(),
 			dot_scaled: DotScaledKernel::instance(),
@@ -80,69 +88,6 @@ impl KernelLibrary {
 	///     1.0 / ((inp * inp).mean().sqrt() + eps)
 	pub fn rms_recip<'a>(&self, inp: &'a Tensor, eps: f64) -> RMSRecipKernelCall<'a> {
 		self.data.rms_recip.call(inp, eps)
-	}
-
-	/// # Expression
-	///
-	///     a * b
-	pub fn mul<'a>(&self, a: &'a Tensor, b: &'a Tensor) -> MulKernelCall<'a> {
-		self.data.mul.call(a, b)
-	}
-
-	/// # Expression
-	///
-	///     a * b * scale
-	pub fn mul_scaled<'a>(
-		&self,
-		a: &'a Tensor,
-		b: &'a Tensor,
-		scale: f64,
-	) -> MulScaledKernelCall<'a> {
-		self.data.mul_scaled.call(a, b, scale)
-	}
-
-	/// # Expression
-	///
-	///     (a * b).sum()
-	pub fn dot<'a>(&self, a: &'a Tensor, b: &'a Tensor) -> DotKernelCall<'a> {
-		self.data.dot.call(a, b)
-	}
-
-	/// # Expression
-	///
-	///     (a * b).sum() * scale
-	pub fn dot_scaled<'a>(
-		&self,
-		a: &'a Tensor,
-		b: &'a Tensor,
-		scale: f64,
-	) -> DotScaledKernelCall<'a> {
-		self.data.dot_scaled.call(a, b, scale)
-	}
-
-	/// # Expression
-	///
-	///     (a - (b * c)) * d
-	pub fn mul_sub_a_mul_b_c_d<'a>(
-		&self,
-		a: &'a Tensor,
-		b: &'a Tensor,
-		c: &'a Tensor,
-		d: &'a Tensor,
-	) -> MulSubAMulBCDKernelCall<'a> {
-		self.data.mul_sub_a_mul_b_c_d.call(a, b, c, d)
-	}
-
-	/// # Expression
-	///
-	///      (a - b) * c
-	pub fn mul_sub_a_b_c<'a>(
-		&self,
-		a: &'a Tensor,
-		b: &'a Tensor,
-		c: &'a Tensor,
-	) -> MulSubABCKernelCall<'a> {
-		self.data.mul_sub_a_b_c.call(a, b, c)
 	}
 }
 
@@ -232,12 +177,13 @@ impl<'a> KernelLookup<AddExpr<'a>> for KernelLibrary {
 
 /// `(a * b).sum()`
 #[rustfmt::skip]
-type DotExpr<'a> = SumLookupExpr<
-	MulLookupExpr<
-		&'a Tensor,
-		&'a Tensor
-	>
->;
+type DotExpr<'a> =
+	SumLookupExpr<
+		MulLookupExpr<
+			&'a Tensor,
+			&'a Tensor
+		>
+	>;
 
 /// `(a * b).sum()`
 impl<'a> KernelLookup<DotExpr<'a>> for KernelLibrary {
@@ -253,15 +199,16 @@ impl<'a> KernelLookup<DotExpr<'a>> for KernelLibrary {
 
 /// `(a * b).sum() * c`
 #[rustfmt::skip]
-type DotScaledExpr<'a> = MulLookupExpr<
-	SumLookupExpr<
-		MulLookupExpr<
-			&'a Tensor,
-			&'a Tensor
-		>
-	>,
-	f64
->;
+type DotScaledExpr<'a> =
+	MulLookupExpr<
+		SumLookupExpr<
+			MulLookupExpr<
+				&'a Tensor,
+				&'a Tensor
+			>
+		>,
+		f64
+	>;
 
 /// `(a * b).sum() * c`
 impl<'a> KernelLookup<DotScaledExpr<'a>> for KernelLibrary {
@@ -270,6 +217,55 @@ impl<'a> KernelLookup<DotScaledExpr<'a>> for KernelLibrary {
 	fn create_call(&self, expr: LookupWrapper<DotScaledExpr<'a>>) -> DotScaledKernelCall<'a> {
 		let MulLookupExpr(SumLookupExpr(MulLookupExpr(a, b)), c) = expr.0;
 		self.data.dot_scaled.call(a, b, c)
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+/// `(a * a_weight) + (b * b_weight)`
+#[rustfmt::skip]
+type WeightedAddExpr<'a> =
+	AddLookupExpr<
+		MulLookupExpr<&'a Tensor, f64>,
+		MulLookupExpr<&'a Tensor, f64>
+	>;
+
+/// `(a * a_weight) + (b * b_weight)`
+impl<'a> KernelLookup<WeightedAddExpr<'a>> for KernelLibrary {
+	type CallType = WeightedAddKernelCall<'a>;
+
+	fn create_call(&self, expr: LookupWrapper<WeightedAddExpr<'a>>) -> WeightedAddKernelCall<'a> {
+		let AddLookupExpr(MulLookupExpr(a, a_weight), MulLookupExpr(b, b_weight)) = expr.0;
+		self.data.weighted_add.call(a, a_weight, b, b_weight)
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+/// `(a * a_weight) + ((b * c).sum() * dot_weight)`
+#[rustfmt::skip]
+type WeightedAddXDotExpr<'a> =
+	AddLookupExpr<
+		MulLookupExpr<&'a Tensor, f64>,
+		MulLookupExpr<
+			SumLookupExpr<MulLookupExpr<&'a Tensor, &'a Tensor>>,
+			f64
+		>
+	>;
+
+/// `(a * a_weight) + ((b * c).sum() * dot_weight)`
+impl<'a> KernelLookup<WeightedAddXDotExpr<'a>> for KernelLibrary {
+	type CallType = WeightedAddXDotKernelCall<'a>;
+
+	fn create_call(
+		&self,
+		expr: LookupWrapper<WeightedAddXDotExpr<'a>>,
+	) -> WeightedAddXDotKernelCall<'a> {
+		let AddLookupExpr(
+			MulLookupExpr(a, a_weight),
+			MulLookupExpr(SumLookupExpr(MulLookupExpr(b, c)), dot_weight),
+		) = expr.0;
+		self.data.weighted_add_x_dot.call(a, a_weight, b, c, dot_weight)
 	}
 }
 
