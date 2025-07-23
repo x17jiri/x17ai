@@ -26,6 +26,17 @@ impl<Expr: LookupExpr> LookupWrapper<Expr> {
 	pub fn sum(self) -> LookupWrapper<SumLookupExpr<Expr>> {
 		LookupWrapper(SumLookupExpr(self.0))
 	}
+
+	pub fn sqrt(self) -> LookupWrapper<SqrtLookupExpr<Expr>> {
+		LookupWrapper(SqrtLookupExpr(self.0))
+	}
+
+	pub fn recip<E: LookupExpr>(
+		self,
+		eps: LookupWrapper<E>,
+	) -> LookupWrapper<RecipLookupExpr<Expr, E>> {
+		LookupWrapper(RecipLookupExpr(self.0, eps.0))
+	}
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -105,13 +116,10 @@ pub struct MulLookupExpr<A: LookupExpr, B: LookupExpr>(pub A, pub B);
 impl<A: LookupExpr, B: LookupExpr> LookupExpr for MulLookupExpr<A, B> {}
 
 #[allow(clippy::use_self)]
-default impl<A: LookupExpr, B: LookupExpr> std::ops::Mul<LookupWrapper<B>> for LookupWrapper<A> {
+impl<A: LookupExpr, B: LookupExpr> std::ops::Mul<LookupWrapper<B>> for LookupWrapper<A> {
 	type Output = LookupWrapper<MulLookupExpr<A, B>>;
 
-	fn mul(
-		self,
-		rhs: LookupWrapper<B>,
-	) -> <LookupWrapper<A> as std::ops::Mul<LookupWrapper<B>>>::Output {
+	fn mul(self, rhs: LookupWrapper<B>) -> LookupWrapper<MulLookupExpr<A, B>> {
 		let LookupWrapper(lhs) = self;
 		let LookupWrapper(rhs) = rhs;
 		LookupWrapper(MulLookupExpr(lhs, rhs))
@@ -119,7 +127,7 @@ default impl<A: LookupExpr, B: LookupExpr> std::ops::Mul<LookupWrapper<B>> for L
 }
 
 #[allow(clippy::use_self)]
-default impl<A: LookupExpr, B: LookupExpr> std::ops::Mul<B> for LookupWrapper<A> {
+impl<A: LookupExpr, B: LookupExpr> std::ops::Mul<B> for LookupWrapper<A> {
 	type Output = LookupWrapper<MulLookupExpr<A, B>>;
 
 	fn mul(self, rhs: B) -> LookupWrapper<MulLookupExpr<A, B>> {
@@ -133,5 +141,17 @@ default impl<A: LookupExpr, B: LookupExpr> std::ops::Mul<B> for LookupWrapper<A>
 pub struct SumLookupExpr<A: LookupExpr>(pub A);
 
 impl<A: LookupExpr> LookupExpr for SumLookupExpr<A> {}
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct SqrtLookupExpr<A: LookupExpr>(pub A);
+
+impl<A: LookupExpr> LookupExpr for SqrtLookupExpr<A> {}
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct RecipLookupExpr<A: LookupExpr, E: LookupExpr>(pub A, pub E);
+
+impl<A: LookupExpr, E: LookupExpr> LookupExpr for RecipLookupExpr<A, E> {}
 
 //--------------------------------------------------------------------------------------------------

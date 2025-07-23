@@ -12,8 +12,8 @@ use crate::tensor::device::kernel::add::{AddKernel, AddKernelCall};
 use crate::tensor::device::kernel::dot::{DotKernel, DotKernelCall};
 use crate::tensor::device::kernel::dot_scaled::{DotScaledKernel, DotScaledKernelCall};
 use crate::tensor::device::kernel::lookup::{
-	AddLookupExpr, KernelLookup, LookupExpr, LookupWrapper, MulLookupExpr, SubLookupExpr,
-	SumLookupExpr,
+	AddLookupExpr, KernelLookup, LookupExpr, LookupWrapper, MulLookupExpr, RecipLookupExpr,
+	SqrtLookupExpr, SubLookupExpr, SumLookupExpr,
 };
 use crate::tensor::device::kernel::mul::{MulKernel, MulKernelCall};
 use crate::tensor::device::kernel::mul_scaled::{MulScaledKernel, MulScaledKernelCall};
@@ -23,6 +23,7 @@ use crate::tensor::device::kernel::mul_sub_a_mul_b_c_d::{
 };
 use crate::tensor::device::kernel::rms::{RMSKernel, RMSKernelCall};
 use crate::tensor::device::kernel::rms_recip::{RMSRecipKernel, RMSRecipKernelCall};
+use crate::tensor::device::kernel::sqrt_recip::{SqrtRecipKernel, SqrtRecipKernelCall};
 use crate::tensor::device::kernel::weighted_add::{WeightedAddKernel, WeightedAddKernelCall};
 use crate::tensor::device::kernel::weighted_add_x_dot::{
 	WeightedAddXDotKernel, WeightedAddXDotKernelCall,
@@ -42,6 +43,7 @@ pub struct KernelLibraryData {
 	dot_scaled: DotScaledKernel,
 	mul_sub_a_mul_b_c_d: MulSubAMulBCDKernel,
 	mul_sub_a_b_c: MulSubABCKernel,
+	sqrt_recip: SqrtRecipKernel,
 }
 
 #[derive(Copy, Clone)]
@@ -64,6 +66,7 @@ impl KernelLibrary {
 			dot_scaled: DotScaledKernel::instance(),
 			mul_sub_a_mul_b_c_d: MulSubAMulBCDKernel::instance(),
 			mul_sub_a_b_c: MulSubABCKernel::instance(),
+			sqrt_recip: SqrtRecipKernel::instance(),
 		});
 		Self { data }
 	}
@@ -160,6 +163,29 @@ impl<'a> KernelLookup<MulExpr<'a>> for KernelLibrary {
 
 //--------------------------------------------------------------------------------------------------
 
+/// `a * b * c`
+#[rustfmt::skip]
+type MulScaledExpr<'a> =
+	MulLookupExpr<
+		MulLookupExpr<
+			&'a Tensor,
+			&'a Tensor
+		>,
+		f64
+	>;
+
+/// `a * b * c`
+impl<'a> KernelLookup<MulScaledExpr<'a>> for KernelLibrary {
+	type CallType = MulScaledKernelCall<'a>;
+
+	fn create_call(&self, expr: LookupWrapper<MulScaledExpr<'a>>) -> MulScaledKernelCall<'a> {
+		let MulLookupExpr(MulLookupExpr(a, b), c) = expr.0;
+		self.data.mul_scaled.call(a, b, c)
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
 /// `a + b`
 type AddExpr<'a> = AddLookupExpr<&'a Tensor, &'a Tensor>;
 
@@ -222,6 +248,34 @@ impl<'a> KernelLookup<DotScaledExpr<'a>> for KernelLibrary {
 
 //--------------------------------------------------------------------------------------------------
 
+/// `(a * b).sum() * c * d`
+#[rustfmt::skip]
+type DotScaled2Expr<'a> =
+	MulLookupExpr<
+		MulLookupExpr<
+			SumLookupExpr<
+				MulLookupExpr<
+					&'a Tensor,
+					&'a Tensor
+				>
+			>,
+			f64
+		>,
+		f64
+	>;
+
+/// `(a * b).sum() * c * d`
+impl<'a> KernelLookup<DotScaled2Expr<'a>> for KernelLibrary {
+	type CallType = DotScaledKernelCall<'a>;
+
+	fn create_call(&self, expr: LookupWrapper<DotScaled2Expr<'a>>) -> DotScaledKernelCall<'a> {
+		let MulLookupExpr(MulLookupExpr(SumLookupExpr(MulLookupExpr(a, b)), c), d) = expr.0;
+		self.data.dot_scaled.call(a, b, c * d)
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
 /// `(a * a_weight) + (b * b_weight)`
 #[rustfmt::skip]
 type WeightedAddExpr<'a> =
@@ -237,6 +291,26 @@ impl<'a> KernelLookup<WeightedAddExpr<'a>> for KernelLibrary {
 	fn create_call(&self, expr: LookupWrapper<WeightedAddExpr<'a>>) -> WeightedAddKernelCall<'a> {
 		let AddLookupExpr(MulLookupExpr(a, a_weight), MulLookupExpr(b, b_weight)) = expr.0;
 		self.data.weighted_add.call(a, a_weight, b, b_weight)
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+/// `(a * a_weight) - (b * b_weight)`
+#[rustfmt::skip]
+type WeightedSubExpr<'a> =
+	SubLookupExpr<
+		MulLookupExpr<&'a Tensor, f64>,
+		MulLookupExpr<&'a Tensor, f64>
+	>;
+
+/// `(a * a_weight) + (b * b_weight)`
+impl<'a> KernelLookup<WeightedSubExpr<'a>> for KernelLibrary {
+	type CallType = WeightedAddKernelCall<'a>;
+
+	fn create_call(&self, expr: LookupWrapper<WeightedSubExpr<'a>>) -> WeightedAddKernelCall<'a> {
+		let SubLookupExpr(MulLookupExpr(a, a_weight), MulLookupExpr(b, b_weight)) = expr.0;
+		self.data.weighted_add.call(a, a_weight, b, -b_weight)
 	}
 }
 
@@ -266,6 +340,65 @@ impl<'a> KernelLookup<WeightedAddXDotExpr<'a>> for KernelLibrary {
 			MulLookupExpr(SumLookupExpr(MulLookupExpr(b, c)), dot_weight),
 		) = expr.0;
 		self.data.weighted_add_x_dot.call(a, a_weight, b, c, dot_weight)
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+/// `(a * a_weight) + ((b * c).sum() * dot_weight1 * dot_weight2)`
+#[rustfmt::skip]
+type WeightedAddXDotScaledExpr<'a> =
+	AddLookupExpr<
+		MulLookupExpr<&'a Tensor, f64>,
+		MulLookupExpr<
+			MulLookupExpr<
+				SumLookupExpr<MulLookupExpr<&'a Tensor, &'a Tensor>>,
+				f64
+			>,
+			f64
+		>
+	>;
+
+/// `(a * a_weight) + ((b * c).sum() * dot_weight1 * dot_weight2)`
+impl<'a> KernelLookup<WeightedAddXDotScaledExpr<'a>> for KernelLibrary {
+	type CallType = WeightedAddXDotKernelCall<'a>;
+
+	fn create_call(
+		&self,
+		expr: LookupWrapper<WeightedAddXDotScaledExpr<'a>>,
+	) -> WeightedAddXDotKernelCall<'a> {
+		#[rustfmt::skip]
+		let AddLookupExpr(
+			MulLookupExpr(a, a_weight),
+			MulLookupExpr(
+				MulLookupExpr(
+					SumLookupExpr(MulLookupExpr(b, c)),
+					dot_weight1
+				),
+				dot_weight2
+			),
+		) = expr.0;
+		self.data.weighted_add_x_dot.call(a, a_weight, b, c, dot_weight1 * dot_weight2)
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+/// `inp.sqrt().recip(eps)`
+#[rustfmt::skip]
+type SqrtRecipExpr<'a> =
+	RecipLookupExpr<
+		SqrtLookupExpr<&'a Tensor>,
+		f64
+	>;
+
+/// `inp.sqrt().recip(eps)`
+impl<'a> KernelLookup<SqrtRecipExpr<'a>> for KernelLibrary {
+	type CallType = SqrtRecipKernelCall<'a>;
+
+	fn create_call(&self, expr: LookupWrapper<SqrtRecipExpr<'a>>) -> SqrtRecipKernelCall<'a> {
+		let RecipLookupExpr(SqrtLookupExpr(inp), eps) = expr.0;
+		self.data.sqrt_recip.call(inp, eps)
 	}
 }
 

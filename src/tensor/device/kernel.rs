@@ -31,6 +31,7 @@ pub mod mul_sub_a_mul_b_c_d;
 pub mod registry;
 pub mod rms;
 pub mod rms_recip;
+pub mod sqrt_recip;
 pub mod weighted_add;
 pub mod weighted_add_x_dot;
 
