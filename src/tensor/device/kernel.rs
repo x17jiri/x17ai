@@ -19,6 +19,7 @@ use crate::util::array;
 //--------------------------------------------------------------------------------------------------
 
 pub mod add;
+pub mod add_x_mul_scaled;
 pub mod builder;
 pub mod dot;
 pub mod dot_scaled;
@@ -28,6 +29,7 @@ pub mod mul;
 pub mod mul_scaled;
 pub mod mul_sub_a_b_c;
 pub mod mul_sub_a_mul_b_c_d;
+pub mod mul_x_log_y;
 pub mod registry;
 pub mod rms;
 pub mod rms_recip;
@@ -67,6 +69,7 @@ pub enum ScalarExpr {
 
 	SqrtExpr(Arc<ScalarExpr>),
 	RecipExpr(Arc<ScalarExpr>, Arc<ScalarExpr>),
+	LnClampedExpr(Arc<ScalarExpr>),
 	AddExpr(Arc<ScalarExpr>, Arc<ScalarExpr>),
 	MulExpr(Arc<ScalarExpr>, Arc<ScalarExpr>),
 }

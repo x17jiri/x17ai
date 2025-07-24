@@ -9,11 +9,14 @@ use std::sync::OnceLock;
 
 use crate::tensor::Tensor;
 use crate::tensor::device::kernel::add::{AddKernel, AddKernelCall};
+use crate::tensor::device::kernel::add_x_mul_scaled::{
+	AddXMulScaledKernel, AddXMulScaledKernelCall,
+};
 use crate::tensor::device::kernel::dot::{DotKernel, DotKernelCall};
 use crate::tensor::device::kernel::dot_scaled::{DotScaledKernel, DotScaledKernelCall};
 use crate::tensor::device::kernel::lookup::{
-	AddLookupExpr, KernelLookup, LookupExpr, LookupWrapper, MulLookupExpr, RecipLookupExpr,
-	SqrtLookupExpr, SubLookupExpr, SumLookupExpr,
+	AddLookupExpr, KernelLookup, LnLookupExpr, LookupExpr, LookupWrapper, MulLookupExpr,
+	RecipLookupExpr, SqrtLookupExpr, SubLookupExpr, SumLookupExpr,
 };
 use crate::tensor::device::kernel::mul::{MulKernel, MulKernelCall};
 use crate::tensor::device::kernel::mul_scaled::{MulScaledKernel, MulScaledKernelCall};
@@ -21,6 +24,7 @@ use crate::tensor::device::kernel::mul_sub_a_b_c::{MulSubABCKernel, MulSubABCKer
 use crate::tensor::device::kernel::mul_sub_a_mul_b_c_d::{
 	MulSubAMulBCDKernel, MulSubAMulBCDKernelCall,
 };
+use crate::tensor::device::kernel::mul_x_log_y::{MulXLnYKernel, MulXLnYKernelCall};
 use crate::tensor::device::kernel::rms::{RMSKernel, RMSKernelCall};
 use crate::tensor::device::kernel::rms_recip::{RMSRecipKernel, RMSRecipKernelCall};
 use crate::tensor::device::kernel::sqrt_recip::{SqrtRecipKernel, SqrtRecipKernelCall};
@@ -37,8 +41,10 @@ pub struct KernelLibraryData {
 	add: AddKernel,
 	weighted_add: WeightedAddKernel,
 	weighted_add_x_dot: WeightedAddXDotKernel,
+	add_x_mul_scaled: AddXMulScaledKernel,
 	mul: MulKernel,
 	mul_scaled: MulScaledKernel,
+	mul_x_ln_y: MulXLnYKernel,
 	dot: DotKernel,
 	dot_scaled: DotScaledKernel,
 	mul_sub_a_mul_b_c_d: MulSubAMulBCDKernel,
@@ -61,7 +67,9 @@ impl KernelLibrary {
 			add: AddKernel::instance(),
 			weighted_add: WeightedAddKernel::instance(),
 			weighted_add_x_dot: WeightedAddXDotKernel::instance(),
+			add_x_mul_scaled: AddXMulScaledKernel::instance(),
 			mul_scaled: MulScaledKernel::instance(),
+			mul_x_ln_y: MulXLnYKernel::instance(),
 			dot: DotKernel::instance(),
 			dot_scaled: DotScaledKernel::instance(),
 			mul_sub_a_mul_b_c_d: MulSubAMulBCDKernel::instance(),
@@ -186,6 +194,26 @@ impl<'a> KernelLookup<MulScaledExpr<'a>> for KernelLibrary {
 
 //--------------------------------------------------------------------------------------------------
 
+/// `x * ln(y)`
+#[rustfmt::skip]
+type MulXLnYExpr<'a> =
+	MulLookupExpr<
+		&'a Tensor,
+		LnLookupExpr<&'a Tensor>
+	>;
+
+/// `x * log(y)`
+impl<'a> KernelLookup<MulXLnYExpr<'a>> for KernelLibrary {
+	type CallType = MulXLnYKernelCall<'a>;
+
+	fn create_call(&self, expr: LookupWrapper<MulXLnYExpr<'a>>) -> MulXLnYKernelCall<'a> {
+		let MulLookupExpr(x, LnLookupExpr(y)) = expr.0;
+		self.data.mul_x_ln_y.call(x, y)
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
 /// `a + b`
 type AddExpr<'a> = AddLookupExpr<&'a Tensor, &'a Tensor>;
 
@@ -196,6 +224,64 @@ impl<'a> KernelLookup<AddExpr<'a>> for KernelLibrary {
 	fn create_call(&self, expr: LookupWrapper<AddExpr<'a>>) -> AddKernelCall<'a> {
 		let AddLookupExpr(a, b) = expr.0;
 		self.data.add.call(a, b)
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+/// `x + (a * b * c)`
+#[rustfmt::skip]
+type AddXMulScaledExpr<'a> =
+	AddLookupExpr<
+		&'a Tensor,
+		MulLookupExpr<
+			MulLookupExpr<
+				&'a Tensor,
+				&'a Tensor
+			>,
+			f64
+		>
+	>;
+
+/// `x + (a * b * c)`
+impl<'a> KernelLookup<AddXMulScaledExpr<'a>> for KernelLibrary {
+	type CallType = AddXMulScaledKernelCall<'a>;
+
+	fn create_call(
+		&self,
+		expr: LookupWrapper<AddXMulScaledExpr<'a>>,
+	) -> AddXMulScaledKernelCall<'a> {
+		let AddLookupExpr(x, MulLookupExpr(MulLookupExpr(a, b), c)) = expr.0;
+		self.data.add_x_mul_scaled.call(x, a, b, c)
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+/// `x + (a * b * c)`
+#[rustfmt::skip]
+type SubXMulScaledExpr<'a> =
+	SubLookupExpr<
+		&'a Tensor,
+		MulLookupExpr<
+			MulLookupExpr<
+				&'a Tensor,
+				&'a Tensor
+			>,
+			f64
+		>
+	>;
+
+/// `x + (a * b * c)`
+impl<'a> KernelLookup<SubXMulScaledExpr<'a>> for KernelLibrary {
+	type CallType = AddXMulScaledKernelCall<'a>;
+
+	fn create_call(
+		&self,
+		expr: LookupWrapper<SubXMulScaledExpr<'a>>,
+	) -> AddXMulScaledKernelCall<'a> {
+		let SubLookupExpr(x, MulLookupExpr(MulLookupExpr(a, b), c)) = expr.0;
+		self.data.add_x_mul_scaled.call(x, a, b, -c)
 	}
 }
 

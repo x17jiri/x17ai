@@ -219,12 +219,14 @@ unsafe extern "C" {
 }
 
 fn main() -> Result<(), ErrPack<TensorOpError>> {
+	/*
 	let (builder, [c], [a, b], [x]) = KernelBuilder::new("my_kernel", ["c"], ["a", "b"], ["x"]);
 	let kernel = builder.build((a * b).sum() + c);
 
 	let x = unsafe { hello_torch() };
 	println!("Hello Torch result! {x}");
 	return Ok(());
+	*/
 	/*	let t: tch::Tensor; // = tch::Tensor::of_slice(&[1, 2, 3, 4, 5, 6]);
 	let reshaped = t.view([2, 3]);*/
 

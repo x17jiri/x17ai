@@ -346,55 +346,61 @@ impl<T: 'static + Copy + HasDType + FromToF64> FloatExecutor<T> {
 		reduce_args: *const KernelReduceArg,
 		const_args: *const f64,
 	) -> f64 {
-		match expr {
-			ScalarExpr::ElemArg(arg) => {
-				let elem_arg = &*elem_args.add(arg.index);
-				elem_arg
-					.device_data
-					.cast::<T>()
-					.add(elem_arg.offset + j * elem_arg.stride[0] + i * elem_arg.stride[1])
-					.read()
-					.to_f64()
-			},
-			ScalarExpr::ConstArg(arg) => const_args.add(arg.index).read(),
-			ScalarExpr::FloatLiteral(FloatLiteral { value }) => *value,
+		unsafe {
+			match expr {
+				ScalarExpr::ElemArg(arg) => {
+					let elem_arg = &*elem_args.add(arg.index);
+					elem_arg
+						.device_data
+						.cast::<T>()
+						.add(elem_arg.offset + j * elem_arg.stride[0] + i * elem_arg.stride[1])
+						.read()
+						.to_f64()
+				},
+				ScalarExpr::ConstArg(arg) => const_args.add(arg.index).read(),
+				ScalarExpr::FloatLiteral(FloatLiteral { value }) => *value,
 
-			ScalarExpr::DotExpr(a, b) => {
-				let vec_a = &*reduce_args.add(a.index);
-				let vec_b = &*reduce_args.add(b.index);
-				let ptr_a = vec_a
-					.device_data
-					.cast::<T>()
-					.add(vec_a.offset + j * vec_a.stride[0] + i * vec_a.stride[1]);
-				let ptr_b = vec_b
-					.device_data
-					.cast::<T>()
-					.add(vec_b.offset + j * vec_b.stride[0] + i * vec_b.stride[1]);
-				let slice_a = std::slice::from_raw_parts(ptr_a, vec_a.reduction_size);
-				let slice_b = std::slice::from_raw_parts(ptr_b, vec_b.reduction_size);
-				debug_assert!(slice_a.len() == slice_b.len());
-				math::dot(slice_a, slice_b)
-			},
+				ScalarExpr::DotExpr(a, b) => {
+					let vec_a = &*reduce_args.add(a.index);
+					let vec_b = &*reduce_args.add(b.index);
+					let ptr_a = vec_a
+						.device_data
+						.cast::<T>()
+						.add(vec_a.offset + j * vec_a.stride[0] + i * vec_a.stride[1]);
+					let ptr_b = vec_b
+						.device_data
+						.cast::<T>()
+						.add(vec_b.offset + j * vec_b.stride[0] + i * vec_b.stride[1]);
+					let slice_a = std::slice::from_raw_parts(ptr_a, vec_a.reduction_size);
+					let slice_b = std::slice::from_raw_parts(ptr_b, vec_b.reduction_size);
+					debug_assert!(slice_a.len() == slice_b.len());
+					math::dot(slice_a, slice_b)
+				},
 
-			ScalarExpr::SqrtExpr(a) => {
-				let a = Self::eval_expr(a, j, i, elem_args, reduce_args, const_args);
-				a.sqrt()
-			},
-			ScalarExpr::RecipExpr(a, eps) => {
-				let a = Self::eval_expr(a, j, i, elem_args, reduce_args, const_args);
-				let eps = Self::eval_expr(eps, j, i, elem_args, reduce_args, const_args);
-				1.0 / (a + eps)
-			},
-			ScalarExpr::AddExpr(a, b) => {
-				let a = Self::eval_expr(a, j, i, elem_args, reduce_args, const_args);
-				let b = Self::eval_expr(b, j, i, elem_args, reduce_args, const_args);
-				a + b
-			},
-			ScalarExpr::MulExpr(a, b) => {
-				let a = Self::eval_expr(a, j, i, elem_args, reduce_args, const_args);
-				let b = Self::eval_expr(b, j, i, elem_args, reduce_args, const_args);
-				a * b
-			},
+				ScalarExpr::SqrtExpr(a) => {
+					let a = Self::eval_expr(a, j, i, elem_args, reduce_args, const_args);
+					a.sqrt()
+				},
+				ScalarExpr::RecipExpr(a, eps) => {
+					let a = Self::eval_expr(a, j, i, elem_args, reduce_args, const_args);
+					let eps = Self::eval_expr(eps, j, i, elem_args, reduce_args, const_args);
+					1.0 / (a + eps)
+				},
+				ScalarExpr::LnClampedExpr(a) => {
+					let a = Self::eval_expr(a, j, i, elem_args, reduce_args, const_args);
+					a.ln().max(-1000.0)
+				},
+				ScalarExpr::AddExpr(a, b) => {
+					let a = Self::eval_expr(a, j, i, elem_args, reduce_args, const_args);
+					let b = Self::eval_expr(b, j, i, elem_args, reduce_args, const_args);
+					a + b
+				},
+				ScalarExpr::MulExpr(a, b) => {
+					let a = Self::eval_expr(a, j, i, elem_args, reduce_args, const_args);
+					let b = Self::eval_expr(b, j, i, elem_args, reduce_args, const_args);
+					a * b
+				},
+			}
 		}
 	}
 }

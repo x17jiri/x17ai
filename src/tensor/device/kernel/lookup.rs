@@ -37,6 +37,10 @@ impl<Expr: LookupExpr> LookupWrapper<Expr> {
 	) -> LookupWrapper<RecipLookupExpr<Expr, E>> {
 		LookupWrapper(RecipLookupExpr(self.0, eps.0))
 	}
+
+	pub fn ln_clamped(self) -> LookupWrapper<LnLookupExpr<Expr>> {
+		LookupWrapper(LnLookupExpr(self.0))
+	}
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -153,5 +157,11 @@ impl<A: LookupExpr> LookupExpr for SqrtLookupExpr<A> {}
 pub struct RecipLookupExpr<A: LookupExpr, E: LookupExpr>(pub A, pub E);
 
 impl<A: LookupExpr, E: LookupExpr> LookupExpr for RecipLookupExpr<A, E> {}
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct LnLookupExpr<A: LookupExpr>(pub A);
+
+impl<A: LookupExpr> LookupExpr for LnLookupExpr<A> {}
 
 //--------------------------------------------------------------------------------------------------

@@ -142,6 +142,12 @@ impl ScalarExprWrapper {
 			expr: Arc::new(ScalarExpr::RecipExpr(self.expr, eps.expr)),
 		}
 	}
+
+	pub fn ln_clamped(self) -> Self {
+		Self {
+			expr: Arc::new(ScalarExpr::LnClampedExpr(self.expr)),
+		}
+	}
 }
 
 //--------------------------------------------------------------------------------------------------

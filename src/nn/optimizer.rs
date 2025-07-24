@@ -146,7 +146,7 @@ impl OptParam {
 		// Update value
 		self.v_rsqrt.assign2(tsr(&self.v).sqrt().recip(scalar(coef.eps)))?;
 		let update = tsr(&self.m) * &self.v_rsqrt;
-		let new_value = tsr(&self.value) * 1.0 - update * coef.learning_rate;
+		let new_value = tsr(&self.value) - update * coef.learning_rate;
 		self.value.assign2(new_value)?;
 
 		Ok(())
