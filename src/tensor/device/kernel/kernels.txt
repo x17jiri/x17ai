@@ -1,0 +1,14 @@
+def add(a: Tensor, b: Tensor):
+	a + b
+
+def weighted_add(a_weight: Scalar, a: Tensor, b_weight: Scalar, b: Tensor):
+	(a * a_weight) + (b * b_weight)
+
+def dot(a: Tensor, b: Tensor):
+	(a * b).sum()
+
+def dot_scaled(a: Tensor, b: Tensor, scale: Scalar):
+	(a * b).sum() * scale
+
+def dot_scaled2(a: Tensor, b: Tensor, scale1: Scalar, scale2: Scalar):
+	dot_scaled(a, b, scale1 * scale2)

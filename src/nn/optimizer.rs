@@ -13,8 +13,7 @@
 use std::hint::cold_path;
 
 use crate::tensor::device::kernel::lookup::{scalar, tsr};
-use crate::tensor::math::{Recip, Sqrt, Sum};
-use crate::tensor::{Tensor, TensorOpError};
+use crate::tensor::{Tensor, TensorOpError, math};
 use crate::util::LossyInto;
 use crate::{ErrExtra, ErrPack};
 
@@ -46,22 +45,21 @@ impl Default for OptCoef {
 pub struct OptParam {
 	pub(crate) parts: usize,
 	pub(crate) part_elems: usize,
-	pub(crate) part_elems_recip: f64, // 1.0 / (part_elems as f64)
+	pub(crate) part_elems_recip: f64, // `1.0 / (part_elems as f64)`
 
-	pub(crate) value: Tensor,   // shape: [parts, part_elems]
-	pub(crate) m: Tensor,       // shape: [parts, part_elems]
-	pub(crate) v: Tensor,       // shape: [parts, 1]
-	pub(crate) v_rsqrt: Tensor, // shape: [parts, 1]
+	pub(crate) value: Tensor, // shape: `[parts, part_elems]`
+	pub(crate) m: Tensor,     // shape: `[parts, part_elems]`
+	pub(crate) v: Tensor,     // shape: `[parts, 1]`
 
 	pub(crate) value_orig_shape: Tensor, // shape: user defined
-	pub(crate) grad: Option<Tensor>,     // shape: same as value_orig_shape
+	pub(crate) grad: Option<Tensor>,     // shape: same as `value_orig_shape`
 	pub(crate) grad_error: bool,
 }
 
 impl OptParam {
 	/// # Panics
 	/// - when the value tensor is not contiguous
-	/// - when the value tensor cannot be reshaped to [parts, part_elems]
+	/// - when the value tensor cannot be reshaped to `[parts, part_elems]`
 	#[allow(clippy::unwrap_used)]
 	pub fn new(
 		value: Tensor,
@@ -73,9 +71,10 @@ impl OptParam {
 		let value = value.reshape_last_dim([parts, part_elems]).unwrap();
 
 		let m = value.new_empty_like()?;
+		m.assign(math::zeros())?;
 
 		let v = value.new_empty(&[parts, 1], value.dtype())?;
-		let v_rsqrt = v.new_empty_like()?;
+		v.assign(math::zeros())?;
 
 		Ok(Self {
 			parts,
@@ -85,7 +84,6 @@ impl OptParam {
 			value,
 			m,
 			v,
-			v_rsqrt,
 
 			value_orig_shape,
 			grad: None,
@@ -143,9 +141,11 @@ impl OptParam {
 		let new_v = v_decayed + v_update;
 		self.v.assign2(new_v)?;
 
+		let v_rsqrt = self.v.new_empty_like()?;
+		v_rsqrt.assign2(tsr(&self.v).sqrt().recip(scalar(coef.eps)))?;
+
 		// Update value
-		self.v_rsqrt.assign2(tsr(&self.v).sqrt().recip(scalar(coef.eps)))?;
-		let update = tsr(&self.m) * &self.v_rsqrt;
+		let update = tsr(&self.m) * &v_rsqrt;
 		let new_value = tsr(&self.value) - update * coef.learning_rate;
 		self.value.assign2(new_value)?;
 

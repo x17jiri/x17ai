@@ -2,7 +2,7 @@
 name = "x17ai" # the name of the package
 version = "0.1.0"    # the current version, obeying semver
 authors = ["Jiri <jiri.bobek@gmail.com>"]
-edition = "2021"
+edition = "2024"
 
 [profile.release]
 opt-level = 3
@@ -19,6 +19,9 @@ log = "0.4.22"
 assert_approx_eq = "1.1.0"
 tch = "0.20.0"
 safetensors = "0.5.3"
+
+[build-dependencies]
+cc = "1.0"
 
 [lib]
 doctest = false

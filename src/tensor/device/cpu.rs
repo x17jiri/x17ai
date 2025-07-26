@@ -388,6 +388,7 @@ impl Device for CPUDevice {
 		dtype: DType,
 		elems: usize,
 	) -> Result<Rc<DeviceBuffer>, NewDeviceBufferError> {
+		#[allow(clippy::single_match_else)]
 		let executor = match dtype {
 			f32::dtype => &self.f32_executor,
 			_ => {
