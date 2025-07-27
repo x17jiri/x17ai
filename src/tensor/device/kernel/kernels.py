@@ -13,8 +13,9 @@ def dot(a: Vector, b: Vector):
 def dot_scaled(a: Vector, b: Vector, scale: Const):
 	(a * b).sum() * scale
 
+@dot_scaled(a, b, scale1 * scale2)
 def dot_scaled2(a: Vector, b: Vector, scale1: Const, scale2: Const):
-	dot_scaled(a, b, scale1 * scale2)
+	(a * b).sum() * scale1 * scale2
 """;
 
 source_lines = kernels.splitlines()
@@ -29,8 +30,21 @@ class Arg:
 	def dump(self, indent=0):
 		print(f"Arg(name={self.name}, type={self.type}), pos={self.pos})", sep="")
 
+	def print_expr(self, indent):
+		return self.rust_type
+
+	def print_destructuring(self, indent):
+		return self.name
+
 class Fn:
 	def __init__(self, name, type_counts, args, body, redirection):
+		arg_map = {}
+		for arg in args:
+			assert arg.name not in arg_map, f"Duplicate argument name: {arg.name}"
+			arg_map[arg.name] = arg
+
+		self.body_op = parse_body(arg_map, body)
+
 		self.name = name
 		self.type_counts = type_counts
 		self.cls_name = to_camel_case(name)
@@ -52,6 +66,63 @@ class Fn:
 		print("//", "\t"*(indent+1), f"body = {self.body}", sep="")
 		print("//", "\t"*(indent+1), f"redirection = {self.redirection}", sep="")
 
+class Op:
+	def __init__(self, cls_name, args):
+		self.cls_name = cls_name
+		self.args = args
+
+	def print_expr(self, indent):
+		result = f"{self.cls_name}<\n";
+		nested_indent = indent + "\t"
+		for arg in self.args:
+			result += nested_indent + arg.print_expr(nested_indent) + ",\n"
+		result += indent + ">"
+		return result
+
+	def print_destructuring(self, indent):
+		result = f"{self.cls_name}(\n";
+		nested_indent = indent + "\t"
+		for arg in self.args:
+			result += nested_indent + arg.print_destructuring(nested_indent) + ",\n"
+		result += indent + ")"
+		return result
+
+def parse_body(arg_map, body):
+	match body:
+		case ast.Name(id):
+			assert id in arg_map, f"Argument {id} not found in argument map"
+			return arg_map[id]
+		case ast.BinOp(left, op, right):
+			left = parse_body(arg_map, left)
+			right = parse_body(arg_map, right)
+			match op:
+				case ast.Add():
+					return Op('AddLookupExpr', [left, right])
+				case ast.Sub():
+					return Op('SubLookupExpr', [left, right])
+				case ast.Mult():
+					return Op('MulLookupExpr', [left, right])
+				case _:
+					raise ValueError(f"Unexpected binary operator: {type(op)}")
+		case ast.Call(func, args):
+			match func:
+				case ast.Attribute(value, attr):
+					value = parse_body(arg_map, value)
+					args = [parse_body(arg_map, arg) for arg in args]
+					match attr:
+						case 'sum':
+							return Op('SumLookupExpr', [value] + args)
+						case 'sqrt':
+							return Op('SqrtLookupExpr', [value] + args)
+						case 'recip':
+							return Op('RecipLookupExpr', [value] + args)
+						case _:
+							raise ValueError(f"Unexpected attribute: {attr}")
+				case _:
+					raise ValueError(f"Unexpected function call: {type(func)}")
+		case _:
+			raise ValueError(f"Unexpected body type: {type(body)}")
+
 def to_camel_case(s):
     return ''.join(word.capitalize() for word in s.split('_'))
 
@@ -71,7 +142,7 @@ def parse_kernels(kernels):
 	kernel_list = []
 	for node in tree.body:
 		match node:
-			case ast.FunctionDef(name, args, body):
+			case ast.FunctionDef(name, args, body, decorator_list):
 				type_counts = {
 					'Scalar': 0,
 					'Vector': 0,
@@ -94,17 +165,18 @@ def parse_kernels(kernels):
 						case _:
 							raise ValueError(f"Unexpected annotation type: {type(arg.annotation)}")
 				assert len(body) == 1
+				assert isinstance(body[0], ast.Expr), f"Expected Expr, got {type(body[0])}"
 
 				redirection = None
-				match body[0]:
-					case ast.Expr(value):
-						match value:
-							case ast.Call(func, args):
-								match func:
-									case ast.Name(id):
-										redirection = (id, args)
+				if decorator_list:
+					assert len(decorator_list) == 1
+					match decorator_list[0]:
+						case ast.Call(func, args):
+							match func:
+								case ast.Name(id):
+									redirection = (id, args)
 
-				kernel_list.append(Fn(fn_name, type_counts, arg_list, body[0], redirection))
+				kernel_list.append(Fn(fn_name, type_counts, arg_list, body[0].value, redirection))
 			case _:
 				raise ValueError(f"Unexpected node type: {type(node)}")
 
@@ -137,21 +209,18 @@ for kernel in kernel_list:
 		print(f"}}")
 		print()
 		print(f"impl {kernel.cls_name}Kernel {{")
-		print(f"	pub fn instance() -> Self {{")
-		print(f"		static instance: OnceLock<Kernel<{E}, {R}, {C}>> = OnceLock::new();")
-		print(f"		let kernel = instance.get_or_init(|| {{")
+		print(f"	fn new() -> Self {{")
 		e_args = ", ".join(kernel.e_args)
 		r_args = ", ".join(kernel.r_args)
 		c_args = ", ".join(kernel.c_args)
 		e_arg_names = ", ".join([f'"{arg}"' for arg in kernel.e_args])
 		r_arg_names = ", ".join([f'"{arg}"' for arg in kernel.r_args])
 		c_arg_names = ", ".join([f'"{arg}"' for arg in kernel.c_args])
-		print(f'			let (builder, [{e_args}], [{r_args}], [{c_args}]) =')
-		print(f'				KernelBuilder::new(')
-		print(f'					"{kernel.name}", [{e_arg_names}], [{r_arg_names}], [{c_arg_names}]')
-		print(f'				);')
-		print(f'			builder.build({print_expr(kernel.body)})')
-		print(f'		}});')
+		print(f'		let (builder, [{e_args}], [{r_args}], [{c_args}]) =')
+		print(f'			KernelBuilder::new(')
+		print(f'				"{kernel.name}", [{e_arg_names}], [{r_arg_names}], [{c_arg_names}]')
+		print(f'			);')
+		print(f'		let kernel = builder.build({print_expr(kernel.body)});')
 		print(f'		Self {{ kernel }}')
 		print(f'	}}')
 		print()
@@ -178,16 +247,13 @@ for kernel in kernel_list:
 		print(f"}}")
 		print()
 		print(f"type {kernel.cls_name}Expr<'a> =")
-		print(f"	RecipLookupExpr<")
-		print(f"		SqrtLookupExpr<&'a Tensor>,")
-		print(f"		f64")
-		print(f"	>;")
+		print(f"\t{kernel.body_op.print_expr("\t")};")
 		print()
 		print(f"impl<'a> KernelLookup<{kernel.cls_name}Expr<'a>> for KernelLibrary {{")
 		print(f"	type CallType = {kernel.cls_name}KernelCall<'a>;")
 		print()
 		print(f"	fn create_call(&self, expr: LookupWrapper<{kernel.cls_name}Expr<'a>>) -> {kernel.cls_name}KernelCall<'a> {{")
-		print(f"		let RecipLookupExpr(SqrtLookupExpr(inp), eps) = expr.0;")
+		print(f"		let {kernel.body_op.print_destructuring("\t\t")} = expr.0;")
 		print(f"		self.data.{kernel.name}.call({args})")
 		print(f"	}}")
 		print(f"}}")
@@ -196,3 +262,20 @@ for kernel in kernel_list:
 
 print("//--------------------------------------------------------------------------------------------------")
 print()
+print(f"pub struct KernelLibraryData {{")
+for kernel in kernel_list:
+	if not kernel.redirection:
+		print(f"	{kernel.name}: {kernel.cls_name}Kernel,")
+print(f"}}")
+print()
+print(f"impl KernelLibraryData {{")
+print(f"	pub fn new() -> Self {{")
+print(f"		Self {{")
+for kernel in kernel_list:
+	if not kernel.redirection:
+		print(f"			{kernel.name}: {kernel.cls_name}Kernel::new(),")
+print(f"		}}")
+print(f"	}}")
+print(f"}}")
+print()
+print("//--------------------------------------------------------------------------------------------------")
