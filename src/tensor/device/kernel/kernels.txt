@@ -1,14 +1,31 @@
-def add(a: Tensor, b: Tensor):
+
+#			rms: RMSKernel::instance(),
+#			mul: MulKernel::instance(),
+#			rms_recip: RMSRecipKernel::instance(),
+##			add: AddKernel::instance(),
+##			weighted_add: WeightedAddKernel::instance(),
+#			weighted_add_x_dot: WeightedAddXDotKernel::instance(),
+#			add_x_mul_scaled: AddXMulScaledKernel::instance(),
+#			mul_scaled: MulScaledKernel::instance(),
+#			mul_x_ln_y: MulXLnYKernel::instance(),
+##			dot: DotKernel::instance(),
+##			dot_scaled: DotScaledKernel::instance(),
+#			mul_sub_a_mul_b_c_d: MulSubAMulBCDKernel::instance(),
+#			mul_sub_a_b_c: MulSubABCKernel::instance(),
+#			sqrt_recip: SqrtRecipKernel::instance(),
+
+def add(a: Scalar, b: Scalar):
 	a + b
 
-def weighted_add(a_weight: Scalar, a: Tensor, b_weight: Scalar, b: Tensor):
+def weighted_add(a_weight: Const, a: Scalar, b_weight: Const, b: Scalar):
 	(a * a_weight) + (b * b_weight)
 
-def dot(a: Tensor, b: Tensor):
+def dot(a: Vector, b: Vector):
 	(a * b).sum()
 
-def dot_scaled(a: Tensor, b: Tensor, scale: Scalar):
+def dot_scaled(a: Vector, b: Vector, scale: Const):
 	(a * b).sum() * scale
 
-def dot_scaled2(a: Tensor, b: Tensor, scale1: Scalar, scale2: Scalar):
-	dot_scaled(a, b, scale1 * scale2)
+@dot_scaled(a, b, scale1 * scale2)
+def dot_scaled2(a: Vector, b: Vector, scale1: Const, scale2: Const):
+	(a * b).sum() * scale1 * scale2

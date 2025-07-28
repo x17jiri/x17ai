@@ -18,24 +18,11 @@ use crate::util::array;
 
 //--------------------------------------------------------------------------------------------------
 
-pub mod add;
-pub mod add_x_mul_scaled;
 pub mod builder;
-pub mod dot;
-pub mod dot_scaled;
+pub mod generated_kernels;
 pub mod library;
 pub mod lookup;
-pub mod mul;
-pub mod mul_scaled;
-pub mod mul_sub_a_b_c;
-pub mod mul_sub_a_mul_b_c_d;
-pub mod mul_x_log_y;
 pub mod registry;
-pub mod rms;
-pub mod rms_recip;
-pub mod sqrt_recip;
-pub mod weighted_add;
-pub mod weighted_add_x_dot;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -87,6 +74,7 @@ pub struct KernelData {
 
 //--------------------------------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct Kernel<const E: usize, const R: usize, const C: usize> {
 	data: Arc<KernelData>,
 }

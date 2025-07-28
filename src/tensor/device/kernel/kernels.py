@@ -1,22 +1,13 @@
 import ast
+import re
+import sys
+import os
 
-kernels = """
-def add(a: Scalar, b: Scalar):
-	a + b
+script_dir = os.path.dirname(os.path.abspath(__file__))
+kernels_path = os.path.join(script_dir, 'kernels.txt')
 
-def weighted_add(a_weight: Const, a: Scalar, b_weight: Const, b: Scalar):
-	(a * a_weight) + (b * b_weight)
-
-def dot(a: Vector, b: Vector):
-	(a * b).sum()
-
-def dot_scaled(a: Vector, b: Vector, scale: Const):
-	(a * b).sum() * scale
-
-@dot_scaled(a, b, scale1 * scale2)
-def dot_scaled2(a: Vector, b: Vector, scale1: Const, scale2: Const):
-	(a * b).sum() * scale1 * scale2
-""";
+with open(kernels_path, 'r') as f:
+    kernels = f.read()
 
 source_lines = kernels.splitlines()
 
@@ -126,7 +117,7 @@ def parse_body(arg_map, body):
 def to_camel_case(s):
     return ''.join(word.capitalize() for word in s.split('_'))
 
-def print_expr(expr, add_parens=False):
+def expr_as_str(expr):
 	ln_b = expr.lineno
 	col_b = expr.col_offset
 	ln_e = expr.end_lineno
@@ -137,7 +128,7 @@ def print_expr(expr, add_parens=False):
 
 def parse_kernels(kernels):
 	tree = ast.parse(kernels)
-	print(ast.dump(tree, indent=4))
+	#print(ast.dump(tree, indent=4))
 
 	kernel_list = []
 	for node in tree.body:
@@ -149,7 +140,7 @@ def parse_kernels(kernels):
 					'Const': 0,
 				}
 				fn_name = name
-				print("Processing function name:", fn_name)
+				print("Processing function name:", fn_name, file=sys.stderr)
 				assert args.posonlyargs == []
 				assert args.kwonlyargs == []
 				assert args.kw_defaults == []
@@ -170,11 +161,7 @@ def parse_kernels(kernels):
 				redirection = None
 				if decorator_list:
 					assert len(decorator_list) == 1
-					match decorator_list[0]:
-						case ast.Call(func, args):
-							match func:
-								case ast.Name(id):
-									redirection = (id, args)
+					redirection = expr_as_str(decorator_list[0])
 
 				kernel_list.append(Fn(fn_name, type_counts, arg_list, body[0].value, redirection))
 			case _:
@@ -184,7 +171,7 @@ def parse_kernels(kernels):
 
 kernel_list = parse_kernels(kernels)
 
-print("// Generated file, do not edit!")
+print("// Generated file, do not edit")
 print()
 print("//------------------------------------------------------------------------------")
 print("//")
@@ -193,19 +180,27 @@ print("// License: GPL 3.0 or later. See LICENSE.txt for details.")
 print("//")
 print("//------------------------------------------------------------------------------")
 print()
+print("use crate::ErrPack;")
+print("use crate::tensor::math::EvaluatesToTensor;")
+print("use crate::tensor::{Tensor, TensorOpError};")
+print()
+print("use super::Kernel;")
+print("use super::builder::KernelBuilder;")
+print("use super::library::KernelLibrary;")
+print("use super::lookup::{AddLookupExpr, KernelLookup, LookupWrapper, MulLookupExpr, SumLookupExpr};")
+print()
+
 for kernel in kernel_list:
 	#kernel.dump()
 	print("//--------------------------------------------------------------------------------------------------")
 	print()
-	if kernel.redirection:
-		print(f"// TODO: Handle redirection")
-	else:
-		print(f"#[derive(Clone, Copy)]")
+	if not kernel.redirection:
+		print(f"#[derive(Clone)]")
 		print(f"pub struct {kernel.cls_name}Kernel {{")
 		E = kernel.type_counts['Scalar']
 		R = kernel.type_counts['Vector']
 		C = kernel.type_counts['Const']
-		print(f"\tkernel: &'static Kernel<{E}, {R}, {C}>,")
+		print(f"\tkernel: Kernel<{E}, {R}, {C}>,")
 		print(f"}}")
 		print()
 		print(f"impl {kernel.cls_name}Kernel {{")
@@ -220,19 +215,19 @@ for kernel in kernel_list:
 		print(f'			KernelBuilder::new(')
 		print(f'				"{kernel.name}", [{e_arg_names}], [{r_arg_names}], [{c_arg_names}]')
 		print(f'			);')
-		print(f'		let kernel = builder.build({print_expr(kernel.body)});')
+		print(f'		let kernel = builder.build({expr_as_str(kernel.body)});')
 		print(f'		Self {{ kernel }}')
 		print(f'	}}')
 		print()
 		header = ", ".join([f"{arg.name}: {arg.rust_type}" for arg in kernel.args])
 		args = ", ".join([arg.name for arg in kernel.args])
-		print(f"	pub fn call<'a>(self, {header}) -> {kernel.cls_name}KernelCall<'a> {{")
+		print(f"	pub fn call<'a>(&'a self, {header}) -> {kernel.cls_name}KernelCall<'a> {{")
 		print(f"		{kernel.cls_name}KernelCall {{ kernel: self, {args} }}")
 		print(f"	}}")
 		print(f"}}")
 		print()
 		print(f"pub struct {kernel.cls_name}KernelCall<'a> {{")
-		print(f"	kernel: {kernel.cls_name}Kernel,")
+		print(f"	kernel: &'a {kernel.cls_name}Kernel,")
 		for arg in kernel.args:
 			print(f"	{arg.name}: {arg.rust_type},")
 		print(f"}}")
@@ -246,17 +241,27 @@ for kernel in kernel_list:
 		print(f"	}}")
 		print(f"}}")
 		print()
-		print(f"type {kernel.cls_name}Expr<'a> =")
-		print(f"\t{kernel.body_op.print_expr("\t")};")
-		print()
-		print(f"impl<'a> KernelLookup<{kernel.cls_name}Expr<'a>> for KernelLibrary {{")
-		print(f"	type CallType = {kernel.cls_name}KernelCall<'a>;")
-		print()
-		print(f"	fn create_call(&self, expr: LookupWrapper<{kernel.cls_name}Expr<'a>>) -> {kernel.cls_name}KernelCall<'a> {{")
-		print(f"		let {kernel.body_op.print_destructuring("\t\t")} = expr.0;")
-		print(f"		self.data.{kernel.name}.call({args})")
-		print(f"	}}")
-		print(f"}}")
+
+		kernel_call_class = f"{kernel.cls_name}KernelCall"
+		kernel_call_expr = f"{kernel.name}.call({args})"
+	else:
+		#print(f"// Redirecting {kernel.name} to {kernel.redirection}")
+
+		kernel_call_func = re.search(r'^\s*(\w+)\s*\(', kernel.redirection).group(1)
+		kernel_call_class = f"{to_camel_case(kernel_call_func)}KernelCall"
+		kernel_call_expr = result = re.sub(r'^\s*(\w+)\s*\(', r'\1.call(', kernel.redirection)
+
+	print(f"type {kernel.cls_name}Expr<'a> =")
+	print(f"\t{kernel.body_op.print_expr("\t")};")
+	print()
+	print(f"impl<'a> KernelLookup<{kernel.cls_name}Expr<'a>> for KernelLibrary {{")
+	print(f"	type CallType = {kernel_call_class}<'a>;")
+	print()
+	print(f"	fn create_call(&self, expr: LookupWrapper<{kernel.cls_name}Expr<'a>>) -> {kernel_call_class}<'a> {{")
+	print(f"		let {kernel.body_op.print_destructuring("\t\t")} = expr.0;")
+	print(f"		self.data.{kernel_call_expr}")
+	print(f"	}}")
+	print(f"}}")
 
 	print()
 
