@@ -71,7 +71,7 @@ impl LossFn for CrossEntropyLossFn {
 	fn backward(self: Box<Self>) -> Result<(), ErrPack<TensorOpError>> {
 		let Self { value, target, inp_backward } = Box::into_inner(self);
 		let d_inp = value.new_empty_like()?;
-		d_inp.assign(&value - &target)?;
+		d_inp.assign2(tsr(&value) - &target)?;
 		autograd::run(inp_backward, d_inp)?;
 		Ok(())
 	}

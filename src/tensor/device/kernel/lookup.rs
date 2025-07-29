@@ -7,10 +7,13 @@
 
 use crate::tensor::Tensor;
 use crate::tensor::math::EvaluatesToTensor;
+use crate::util::LossyInto;
 
 //--------------------------------------------------------------------------------------------------
 
-pub trait LookupExpr {}
+pub trait LookupExpr {
+	fn last_dim_size(&self) -> usize;
+}
 
 pub trait KernelLookup<Expr: LookupExpr> {
 	type CallType: EvaluatesToTensor;
@@ -27,6 +30,12 @@ impl<Expr: LookupExpr> LookupWrapper<Expr> {
 		LookupWrapper(SumLookupExpr(self.0))
 	}
 
+	pub fn mean(self) -> LookupWrapper<MulLookupExpr<SumLookupExpr<Expr>, f64>> {
+		let n = self.0.last_dim_size();
+		let sum_to_mean = 1.0 / n.lossy_into();
+		LookupWrapper(MulLookupExpr(SumLookupExpr(self.0), sum_to_mean))
+	}
+
 	pub fn sqrt(self) -> LookupWrapper<SqrtLookupExpr<Expr>> {
 		LookupWrapper(SqrtLookupExpr(self.0))
 	}
@@ -38,14 +47,18 @@ impl<Expr: LookupExpr> LookupWrapper<Expr> {
 		LookupWrapper(RecipLookupExpr(self.0, eps.0))
 	}
 
-	pub fn ln_clamped(self) -> LookupWrapper<LnLookupExpr<Expr>> {
-		LookupWrapper(LnLookupExpr(self.0))
+	pub fn ln_clamped(self) -> LookupWrapper<LnClampedLookupExpr<Expr>> {
+		LookupWrapper(LnClampedLookupExpr(self.0))
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
 
-impl LookupExpr for &Tensor {}
+impl LookupExpr for &Tensor {
+	fn last_dim_size(&self) -> usize {
+		self.size(-1).unwrap_or(1)
+	}
+}
 
 pub fn tsr(tensor: &Tensor) -> LookupWrapper<&Tensor> {
 	LookupWrapper(tensor)
@@ -53,7 +66,11 @@ pub fn tsr(tensor: &Tensor) -> LookupWrapper<&Tensor> {
 
 //--------------------------------------------------------------------------------------------------
 
-impl LookupExpr for f64 {}
+impl LookupExpr for f64 {
+	fn last_dim_size(&self) -> usize {
+		1
+	}
+}
 
 pub fn scalar(value: f64) -> LookupWrapper<f64> {
 	LookupWrapper(value)
@@ -63,7 +80,11 @@ pub fn scalar(value: f64) -> LookupWrapper<f64> {
 
 pub struct AddLookupExpr<A: LookupExpr, B: LookupExpr>(pub A, pub B);
 
-impl<A: LookupExpr, B: LookupExpr> LookupExpr for AddLookupExpr<A, B> {}
+impl<A: LookupExpr, B: LookupExpr> LookupExpr for AddLookupExpr<A, B> {
+	fn last_dim_size(&self) -> usize {
+		self.0.last_dim_size().max(self.1.last_dim_size())
+	}
+}
 
 #[allow(clippy::use_self)]
 impl<A: LookupExpr, B: LookupExpr> std::ops::Add<LookupWrapper<B>> for LookupWrapper<A> {
@@ -90,7 +111,11 @@ impl<A: LookupExpr, B: LookupExpr> std::ops::Add<B> for LookupWrapper<A> {
 
 pub struct SubLookupExpr<A: LookupExpr, B: LookupExpr>(pub A, pub B);
 
-impl<A: LookupExpr, B: LookupExpr> LookupExpr for SubLookupExpr<A, B> {}
+impl<A: LookupExpr, B: LookupExpr> LookupExpr for SubLookupExpr<A, B> {
+	fn last_dim_size(&self) -> usize {
+		self.0.last_dim_size().max(self.1.last_dim_size())
+	}
+}
 
 #[allow(clippy::use_self)]
 impl<A: LookupExpr, B: LookupExpr> std::ops::Sub<LookupWrapper<B>> for LookupWrapper<A> {
@@ -117,7 +142,11 @@ impl<A: LookupExpr, B: LookupExpr> std::ops::Sub<B> for LookupWrapper<A> {
 
 pub struct MulLookupExpr<A: LookupExpr, B: LookupExpr>(pub A, pub B);
 
-impl<A: LookupExpr, B: LookupExpr> LookupExpr for MulLookupExpr<A, B> {}
+impl<A: LookupExpr, B: LookupExpr> LookupExpr for MulLookupExpr<A, B> {
+	fn last_dim_size(&self) -> usize {
+		self.0.last_dim_size().max(self.1.last_dim_size())
+	}
+}
 
 #[allow(clippy::use_self)]
 impl<A: LookupExpr, B: LookupExpr> std::ops::Mul<LookupWrapper<B>> for LookupWrapper<A> {
@@ -144,24 +173,40 @@ impl<A: LookupExpr, B: LookupExpr> std::ops::Mul<B> for LookupWrapper<A> {
 
 pub struct SumLookupExpr<A: LookupExpr>(pub A);
 
-impl<A: LookupExpr> LookupExpr for SumLookupExpr<A> {}
+impl<A: LookupExpr> LookupExpr for SumLookupExpr<A> {
+	fn last_dim_size(&self) -> usize {
+		1
+	}
+}
 
 //--------------------------------------------------------------------------------------------------
 
 pub struct SqrtLookupExpr<A: LookupExpr>(pub A);
 
-impl<A: LookupExpr> LookupExpr for SqrtLookupExpr<A> {}
+impl<A: LookupExpr> LookupExpr for SqrtLookupExpr<A> {
+	fn last_dim_size(&self) -> usize {
+		self.0.last_dim_size()
+	}
+}
 
 //--------------------------------------------------------------------------------------------------
 
 pub struct RecipLookupExpr<A: LookupExpr, E: LookupExpr>(pub A, pub E);
 
-impl<A: LookupExpr, E: LookupExpr> LookupExpr for RecipLookupExpr<A, E> {}
+impl<A: LookupExpr, E: LookupExpr> LookupExpr for RecipLookupExpr<A, E> {
+	fn last_dim_size(&self) -> usize {
+		self.0.last_dim_size().max(self.1.last_dim_size())
+	}
+}
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct LnLookupExpr<A: LookupExpr>(pub A);
+pub struct LnClampedLookupExpr<A: LookupExpr>(pub A);
 
-impl<A: LookupExpr> LookupExpr for LnLookupExpr<A> {}
+impl<A: LookupExpr> LookupExpr for LnClampedLookupExpr<A> {
+	fn last_dim_size(&self) -> usize {
+		self.0.last_dim_size()
+	}
+}
 
 //--------------------------------------------------------------------------------------------------

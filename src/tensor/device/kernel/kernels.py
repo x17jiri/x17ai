@@ -11,12 +11,16 @@ with open(kernels_path, 'r') as f:
 
 source_lines = kernels.splitlines()
 
+CONST_TYPE = 'C'
+ELEM_TYPE = 'E'
+REDUCE_TYPE = 'R'
+
 class Arg:
 	def __init__(self, name, type, pos):
 		self.name = name
 		self.type = type
 		self.pos = pos
-		self.rust_type = 'f64' if type == 'Const' else "&'a Tensor"
+		self.rust_type = 'f64' if type == CONST_TYPE else "&'a Tensor"
 
 	def dump(self, indent=0):
 		print(f"Arg(name={self.name}, type={self.type}), pos={self.pos})", sep="")
@@ -42,9 +46,9 @@ class Fn:
 		self.args = args
 		self.body = body
 		self.redirection = redirection
-		self.e_args = [arg.name for arg in args if arg.type == 'Scalar']
-		self.r_args = [arg.name for arg in args if arg.type == 'Vector']
-		self.c_args = [arg.name for arg in args if arg.type == 'Const']
+		self.e_args = [arg.name for arg in args if arg.type == ELEM_TYPE]
+		self.r_args = [arg.name for arg in args if arg.type == REDUCE_TYPE]
+		self.c_args = [arg.name for arg in args if arg.type == CONST_TYPE]
 
 	def dump(self, indent=0):
 		print(f"//Fn:", sep="")
@@ -107,6 +111,8 @@ def parse_body(arg_map, body):
 							return Op('SqrtLookupExpr', [value] + args)
 						case 'recip':
 							return Op('RecipLookupExpr', [value] + args)
+						case 'ln_clamped':
+							return Op('LnClampedLookupExpr', [value] + args)
 						case _:
 							raise ValueError(f"Unexpected attribute: {attr}")
 				case _:
@@ -135,9 +141,9 @@ def parse_kernels(kernels):
 		match node:
 			case ast.FunctionDef(name, args, body, decorator_list):
 				type_counts = {
-					'Scalar': 0,
-					'Vector': 0,
-					'Const': 0,
+					ELEM_TYPE: 0,
+					REDUCE_TYPE: 0,
+					CONST_TYPE: 0,
 				}
 				fn_name = name
 				print("Processing function name:", fn_name, file=sys.stderr)
@@ -187,7 +193,17 @@ print()
 print("use super::Kernel;")
 print("use super::builder::KernelBuilder;")
 print("use super::library::KernelLibrary;")
-print("use super::lookup::{AddLookupExpr, KernelLookup, LookupWrapper, MulLookupExpr, SumLookupExpr};")
+print("use super::lookup::{")
+print("	AddLookupExpr,")
+print("	KernelLookup,")
+print("	LnClampedLookupExpr,")
+print("	LookupWrapper,")
+print("	MulLookupExpr,")
+print("	RecipLookupExpr,")
+print("	SqrtLookupExpr,")
+print("	SubLookupExpr,")
+print("	SumLookupExpr,")
+print("};")
 print()
 
 for kernel in kernel_list:
@@ -197,9 +213,9 @@ for kernel in kernel_list:
 	if not kernel.redirection:
 		print(f"#[derive(Clone)]")
 		print(f"pub struct {kernel.cls_name}Kernel {{")
-		E = kernel.type_counts['Scalar']
-		R = kernel.type_counts['Vector']
-		C = kernel.type_counts['Const']
+		E = kernel.type_counts[ELEM_TYPE]
+		R = kernel.type_counts[REDUCE_TYPE]
+		C = kernel.type_counts[CONST_TYPE]
 		print(f"\tkernel: Kernel<{E}, {R}, {C}>,")
 		print(f"}}")
 		print()

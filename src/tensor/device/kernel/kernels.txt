@@ -1,31 +1,53 @@
 
-#			rms: RMSKernel::instance(),
-#			mul: MulKernel::instance(),
-#			rms_recip: RMSRecipKernel::instance(),
-##			add: AddKernel::instance(),
-##			weighted_add: WeightedAddKernel::instance(),
-#			weighted_add_x_dot: WeightedAddXDotKernel::instance(),
-#			add_x_mul_scaled: AddXMulScaledKernel::instance(),
-#			mul_scaled: MulScaledKernel::instance(),
-#			mul_x_ln_y: MulXLnYKernel::instance(),
-##			dot: DotKernel::instance(),
-##			dot_scaled: DotScaledKernel::instance(),
-#			mul_sub_a_mul_b_c_d: MulSubAMulBCDKernel::instance(),
-#			mul_sub_a_b_c: MulSubABCKernel::instance(),
-#			sqrt_recip: SqrtRecipKernel::instance(),
+def rms(a: R, b: R, sum_to_mean: C):                ((a * b).sum() * sum_to_mean).sqrt()
 
-def add(a: Scalar, b: Scalar):
-	a + b
+def rms_recip(a: R, b: R, eps: C, sum_to_mean: C):  ((a * b).sum() * sum_to_mean).sqrt().recip(eps)
 
-def weighted_add(a_weight: Const, a: Scalar, b_weight: Const, b: Scalar):
-	(a * a_weight) + (b * b_weight)
+def add(a: E, b: E):    a + b
+def sub(a: E, b: E):    a - b
+def mul(a: E, b: E):    a * b
 
-def dot(a: Vector, b: Vector):
-	(a * b).sum()
+def acc_mul(x: E, a: E, b: E):  x + (a * b)
 
-def dot_scaled(a: Vector, b: Vector, scale: Const):
-	(a * b).sum() * scale
+def mul_scaled(a: E, b: E, scale: C):                           (a * b) * scale
+
+@mul_scaled(a, b, scale1 * scale2)
+def mul_scaled2(a: E, b: E, scale1: C, scale2: C):              (a * b) * scale1 * scale2
+
+def mul_x_ln_y(x: E, y: E):                                     x * y.ln_clamped()
+
+def weighted_add(a: E, a_weight: C, b: E, b_weight: C):         (a * a_weight) + (b * b_weight)
+
+@weighted_add(a, a_weight, b, -b_weight)
+def weighted_sub(a: E, a_weight: C, b: E, b_weight: C):         (a * a_weight) - (b * b_weight)
+
+def add_x_mul_scaled(x: E, a: E, b: E, scale: C):               (x + (a * b)) * scale
+
+@add_x_mul_scaled(x, a, b, scale1 * scale2)
+def add_x_mul_scaled2(x: E, a: E, b: E, scale1: C, scale2: C):  (x + (a * b)) * scale1 * scale2
+
+def dot(a: R, b: R):                    (a * b).sum()
+def dot_scaled(a: R, b: R, scale: C):   (a * b).sum() * scale
 
 @dot_scaled(a, b, scale1 * scale2)
-def dot_scaled2(a: Vector, b: Vector, scale1: Const, scale2: Const):
-	(a * b).sum() * scale1 * scale2
+def dot_scaled2(a: R, b: R, scale1: C, scale2: C):              (a * b).sum() * scale1 * scale2
+
+def weighted_add_t_dot(t: E, t_weight: C, a: R, b: R, ab_weight: C):
+    (t * t_weight) + ((a * b).sum() * ab_weight)
+
+@weighted_add_t_dot(t, t_weight, a, b, ab_weight1 * ab_weight2)
+def weighted_add_t_dot2(t: E, t_weight: C, a: R, b: R, ab_weight1: C, ab_weight2: C):
+    (t * t_weight) + ((a * b).sum() * ab_weight1 * ab_weight2)
+
+def mul_sub_a_mul_b_c_d(a: E, b: E, c: E, d: E):                (a - (b * c)) * d
+
+def mul_sub_a_b_c(a: E, b: E, c: E):                            (a - b) * c
+
+def sqrt_recip(a: E, eps: C):                                   a.sqrt().recip(eps)
+
+def acc_mul_scaled(x: E, a: E, b: E, scale: C):                 x + (a * b * scale)
+
+@acc_mul_scaled(x, a, b, -scale)
+def acc_neg_mul_scaled(x: E, a: E, b: E, scale: C):             x - (a * b * scale)
+
+#def swiglu(lin: E, gate: E): lin * gate.swish()

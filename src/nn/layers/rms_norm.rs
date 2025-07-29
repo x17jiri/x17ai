@@ -11,7 +11,7 @@ use std::rc::Rc;
 use crate::ErrPack;
 use crate::autograd::{self, AutogradNode, BackwardFn, StraightThroughBackwardFn};
 use crate::nn::param::Param;
-use crate::tensor::device::kernel::lookup::tsr;
+use crate::tensor::device::kernel::lookup::{scalar, tsr};
 use crate::tensor::{Tensor, TensorOpError};
 use crate::util::LossyInto;
 
@@ -60,9 +60,8 @@ impl Layer for RMSNorm {
 
 	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
 		let (inp, inp_backward) = inp_node.take();
-		let kernels = inp.builtin_kernel_library();
 		let magn_recip = inp.new_replace_tail(1, &[1])?;
-		magn_recip.assign(kernels.rms_recip(&inp, self.eps))?;
+		magn_recip.assign2((tsr(&inp) * &inp).mean().sqrt().recip(scalar(self.eps)))?;
 
 		let out = inp.reuse_or_new_like()?;
 		out.assign2(tsr(&inp) * tsr(&magn_recip))?;
@@ -106,11 +105,8 @@ impl BackwardFn for RMSNormBackwardFn_Precise {
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let Self { out, magn_recip, inp_backward } = Box::into_inner(self);
 
-		let n = out.size(-1).unwrap_or(1);
-		let sum_to_mean = 1.0 / n.lossy_into();
-
 		let g = magn_recip.new_empty_like()?; // [..., 1]
-		g.assign2((tsr(&out) * &d_out).sum() * sum_to_mean)?;
+		g.assign2((tsr(&out) * &d_out).mean())?;
 
 		let d_inp = out.reuse_or_new_like()?;
 
