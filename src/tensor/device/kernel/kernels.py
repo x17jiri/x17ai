@@ -109,6 +109,8 @@ def parse_body(arg_map, body):
 							return Op('SumLookupExpr', [value] + args)
 						case 'sqrt':
 							return Op('SqrtLookupExpr', [value] + args)
+						case 'swish':
+							return Op('SwishLookupExpr', [value] + args)
 						case 'recip':
 							return Op('RecipLookupExpr', [value] + args)
 						case 'ln_clamped':
@@ -203,6 +205,7 @@ print("	RecipLookupExpr,")
 print("	SqrtLookupExpr,")
 print("	SubLookupExpr,")
 print("	SumLookupExpr,")
+print("	SwishLookupExpr,")
 print("};")
 print()
 

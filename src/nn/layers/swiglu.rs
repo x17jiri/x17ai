@@ -11,6 +11,7 @@ use std::rc::Rc;
 use crate::ErrPack;
 use crate::autograd::{self, AutogradNode, BackwardFn};
 use crate::nn::param::Param;
+use crate::tensor::device::kernel::lookup::tsr;
 use crate::tensor::{Tensor, TensorOpError, math};
 
 use super::Layer;
@@ -52,7 +53,7 @@ impl Layer for SwiGLU {
 		let lin = inp.select(-2, 0)?;
 		let gate = inp.select(-2, 1)?;
 
-		out.assign(math::swiglu(&lin, &gate))?;
+		out.assign(tsr(&lin) * tsr(&gate).swish())?;
 
 		let backward_fn = inp_backward.map(|inp_backward| {
 			Box::new(SwiGLUBackwardFn {

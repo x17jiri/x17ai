@@ -12,7 +12,7 @@
 
 use std::hint::cold_path;
 
-use crate::tensor::device::kernel::lookup::{scalar, tsr};
+use crate::tensor::device::kernel::lookup::{self, scalar, tsr};
 use crate::tensor::{Tensor, TensorOpError, math};
 use crate::util::LossyInto;
 use crate::{ErrExtra, ErrPack};
@@ -71,10 +71,10 @@ impl OptParam {
 		let value = value.reshape_last_dim([parts, part_elems]).unwrap();
 
 		let m = value.new_empty_like()?;
-		m.assign(math::zeros())?;
+		m.assign(lookup::zero())?;
 
 		let v = value.new_empty(&[parts, 1], value.dtype())?;
-		v.assign(math::zeros())?;
+		v.assign(lookup::zero())?;
 
 		Ok(Self {
 			parts,
@@ -127,7 +127,7 @@ impl OptParam {
 		let m_decayed = tsr(&self.m) * coef.m_decay;
 		let m_update = tsr(&grad) * (1.0 - coef.m_decay);
 		let new_m = m_decayed + m_update;
-		self.m.assign2(new_m)?;
+		self.m.assign(new_m)?;
 
 		// The original Adam uses just `grad * grad`. Adam-mini saves space
 		// required for `v` by computing the mean of `grad * grad` for each part
@@ -139,15 +139,15 @@ impl OptParam {
 		let v_decayed = tsr(&self.v) * coef.v_decay;
 		let v_update = grad_squared * (1.0 - coef.v_decay);
 		let new_v = v_decayed + v_update;
-		self.v.assign2(new_v)?;
+		self.v.assign(new_v)?;
 
 		let v_rsqrt = self.v.new_empty_like()?;
-		v_rsqrt.assign2(tsr(&self.v).sqrt().recip(scalar(coef.eps)))?;
+		v_rsqrt.assign(tsr(&self.v).sqrt().recip(scalar(coef.eps)))?;
 
 		// Update value
 		let update = tsr(&self.m) * &v_rsqrt;
 		let new_value = tsr(&self.value) - update * coef.learning_rate;
-		self.value.assign2(new_value)?;
+		self.value.assign(new_value)?;
 
 		Ok(())
 	}

@@ -61,10 +61,10 @@ impl Layer for RMSNorm {
 	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
 		let (inp, inp_backward) = inp_node.take();
 		let magn_recip = inp.new_replace_tail(1, &[1])?;
-		magn_recip.assign2((tsr(&inp) * &inp).mean().sqrt().recip(scalar(self.eps)))?;
+		magn_recip.assign((tsr(&inp) * &inp).mean().sqrt().recip(scalar(self.eps)))?;
 
 		let out = inp.reuse_or_new_like()?;
-		out.assign2(tsr(&inp) * tsr(&magn_recip))?;
+		out.assign(tsr(&inp) * tsr(&magn_recip))?;
 
 		let backward_fn = inp_backward.map(|inp_backward| match self.gradient_mode {
 			RMSNormGradientMode::Precise => {
@@ -106,11 +106,11 @@ impl BackwardFn for RMSNormBackwardFn_Precise {
 		let Self { out, magn_recip, inp_backward } = Box::into_inner(self);
 
 		let g = magn_recip.new_empty_like()?; // [..., 1]
-		g.assign2((tsr(&out) * &d_out).mean())?;
+		g.assign((tsr(&out) * &d_out).mean())?;
 
 		let d_inp = out.reuse_or_new_like()?;
 
-		d_inp.assign2((tsr(&d_out) - (tsr(&out) * &g)) * &magn_recip)?;
+		d_inp.assign((tsr(&d_out) - (tsr(&out) * &g)) * &magn_recip)?;
 
 		queue.add(inp_backward, d_inp);
 		Ok(())

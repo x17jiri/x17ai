@@ -101,11 +101,11 @@ impl BackwardFn for SoftmaxBackwardFn_Precise {
 		let Self { out, inp_backward } = Box::into_inner(self);
 
 		let g = out.new_replace_tail(1, &[1])?; // [..., 1]
-		g.assign2((tsr(&out) * tsr(&d_out)).sum())?;
+		g.assign((tsr(&out) * tsr(&d_out)).sum())?;
 
 		let d_inp = d_out.reuse_or_new_like()?;
 
-		d_inp.assign2((tsr(&d_out) - tsr(&g)) * tsr(&out))?;
+		d_inp.assign((tsr(&d_out) - tsr(&g)) * tsr(&out))?;
 
 		queue.add(inp_backward, d_inp);
 		Ok(())
@@ -127,7 +127,7 @@ impl BackwardFn for SoftmaxBackwardFn_Simplified {
 
 		let d_inp = d_out.reuse_or_new_like()?;
 
-		d_inp.assign2(tsr(&d_out) * tsr(&out))?;
+		d_inp.assign(tsr(&d_out) * tsr(&out))?;
 
 		queue.add(inp_backward, d_inp);
 		Ok(())

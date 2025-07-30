@@ -5,9 +5,12 @@
 //
 //------------------------------------------------------------------------------
 
-use crate::tensor::Tensor;
+use crate::ErrPack;
 use crate::tensor::math::EvaluatesToTensor;
+use crate::tensor::{Tensor, TensorOpError};
 use crate::util::LossyInto;
+
+use super::library::KernelLibrary;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -36,6 +39,10 @@ impl<Expr: LookupExpr> LookupWrapper<Expr> {
 		LookupWrapper(MulLookupExpr(SumLookupExpr(self.0), sum_to_mean))
 	}
 
+	pub fn swish(self) -> LookupWrapper<SwishLookupExpr<Expr>> {
+		LookupWrapper(SwishLookupExpr(self.0))
+	}
+
 	pub fn sqrt(self) -> LookupWrapper<SqrtLookupExpr<Expr>> {
 		LookupWrapper(SqrtLookupExpr(self.0))
 	}
@@ -49,6 +56,18 @@ impl<Expr: LookupExpr> LookupWrapper<Expr> {
 
 	pub fn ln_clamped(self) -> LookupWrapper<LnClampedLookupExpr<Expr>> {
 		LookupWrapper(LnClampedLookupExpr(self.0))
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+impl<Expr: LookupExpr> EvaluatesToTensor for LookupWrapper<Expr>
+where
+	KernelLibrary: KernelLookup<Expr>,
+{
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+		let builtin_kernels = to.buf().builtin_kernels;
+		builtin_kernels.create_call(self).eval_to_tensor(to)
 	}
 }
 
@@ -74,6 +93,10 @@ impl LookupExpr for f64 {
 
 pub fn scalar(value: f64) -> LookupWrapper<f64> {
 	LookupWrapper(value)
+}
+
+pub fn zero() -> LookupWrapper<f64> {
+	scalar(0.0)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -176,6 +199,16 @@ pub struct SumLookupExpr<A: LookupExpr>(pub A);
 impl<A: LookupExpr> LookupExpr for SumLookupExpr<A> {
 	fn last_dim_size(&self) -> usize {
 		1
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct SwishLookupExpr<A: LookupExpr>(pub A);
+
+impl<A: LookupExpr> LookupExpr for SwishLookupExpr<A> {
+	fn last_dim_size(&self) -> usize {
+		self.0.last_dim_size()
 	}
 }
 

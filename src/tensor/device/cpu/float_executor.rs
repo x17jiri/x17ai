@@ -151,29 +151,6 @@ impl<T: 'static + Copy + HasDType + FromToF64> FloatExecutor<T> {
 		Ok(ContiguousOutput { tensor: tensor.view_mut()? })
 	}
 
-	pub fn view_contiguous_or_broadcasted<'t, 'buf>(
-		tensor: &'t generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<Input<'t, T>, ErrPack<ExecutorError>>
-	where
-		T: 'static,
-	{
-		tensor.ensure_safe()?;
-		let feature_dim = tensor.map().dims[1];
-		let broadcast = if feature_dim.is_contiguous() {
-			false
-		} else if feature_dim.is_broadcasted() {
-			true
-		} else {
-			return Err(ExecutorError::not_contiguous_or_broadcasted());
-		};
-		let view = tensor.view()?;
-		if broadcast {
-			Ok(Input::Broadcasted(BroadcastedInput { tensor: view }))
-		} else {
-			Ok(Input::Contiguous(ContiguousInput { tensor: view }))
-		}
-	}
-
 	pub fn nullary<'buf>(
 		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 		mut f: impl FnMut(&mut T),
@@ -184,62 +161,6 @@ impl<T: 'static + Copy + HasDType + FromToF64> FloatExecutor<T> {
 		let o = Self::view_contiguous_mut(o)?;
 		unsafe {
 			zip_elems([o], [], [], |[o], [], []| f(o));
-		}
-		Ok(())
-	}
-
-	pub fn unary<'buf>(
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		mut f: impl FnMut(&mut T, T),
-	) -> Result<(), ErrPack<ExecutorError>>
-	where
-		T: 'static,
-	{
-		ensure_same_shape([o], [a])?;
-		let o = Self::view_contiguous_mut(o)?;
-		let a = Self::view_contiguous_or_broadcasted(a)?;
-		unsafe {
-			match a {
-				Input::Contiguous(a) => {
-					zip_elems([o], [a], [], |[o], [a], []| f(o, a));
-				},
-				Input::Broadcasted(a) => {
-					zip_elems([o], [], [a], |[o], [], [a]| f(o, a));
-				},
-			}
-		}
-		Ok(())
-	}
-
-	pub fn binary<'buf>(
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		mut f: impl FnMut(&mut T, T, T),
-	) -> Result<(), ErrPack<ExecutorError>>
-	where
-		T: 'static,
-	{
-		ensure_same_shape([o], [a, b])?;
-		let o = Self::view_contiguous_mut(o)?;
-		let a = Self::view_contiguous_or_broadcasted(a)?;
-		let b = Self::view_contiguous_or_broadcasted(b)?;
-		unsafe {
-			match (a, b) {
-				(Input::Contiguous(a), Input::Contiguous(b)) => {
-					zip_elems([o], [a, b], [], |[o], [a, b], []| f(o, a, b));
-				},
-				(Input::Contiguous(a), Input::Broadcasted(b)) => {
-					zip_elems([o], [a], [b], |[o], [a], [b]| f(o, a, b));
-				},
-				(Input::Broadcasted(a), Input::Contiguous(b)) => {
-					zip_elems([o], [b], [a], |[o], [b], [a]| f(o, a, b));
-				},
-				(Input::Broadcasted(a), Input::Broadcasted(b)) => {
-					zip_elems([o], [], [a, b], |[o], [], [a, b]| f(o, a, b));
-				},
-			}
 		}
 		Ok(())
 	}
@@ -377,6 +298,10 @@ impl<T: 'static + Copy + HasDType + FromToF64> FloatExecutor<T> {
 					math::dot(slice_a, slice_b)
 				},
 
+				ScalarExpr::SwishExpr(a) => {
+					let a = Self::eval_expr(a, j, i, elem_args, reduce_args, const_args);
+					math::swish(a)
+				},
 				ScalarExpr::SqrtExpr(a) => {
 					let a = Self::eval_expr(a, j, i, elem_args, reduce_args, const_args);
 					a.sqrt()
@@ -459,191 +384,12 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		result.map_err(Into::into)
 	}
 
-	fn zeros<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		Self::nullary(o, |o| *o = T::from_f64(0.0))
-	}
-
 	fn randn_clamped<'buf>(
 		&self,
 		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 	) -> Result<(), ErrPack<ExecutorError>> {
 		let mut rng = self.rng.borrow_mut();
 		Self::nullary(o, |o| *o = T::from_f64(rng.get_normal_clamped()))
-	}
-
-	fn copy<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		Self::unary(o, a, |o, a| *o = a)
-	}
-
-	fn rsqrt<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		scale: f64,
-		eps: f64,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		Self::unary(o, a, |o, a| *o = T::from_f64(math::rsqrt(a.to_f64() * scale, eps)))
-	}
-
-	fn ln_clamped<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		Self::unary(o, a, |o, a| *o = T::from_f64(a.to_f64().ln().max(-1000.0)))
-	}
-
-	fn add_weighted<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		a_weight: f64,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		b_weight: f64,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		Self::binary(o, a, b, |o, a, b| {
-			*o = T::from_f64(math::add_weighted(a.to_f64(), a_weight, b.to_f64(), b_weight));
-		})
-	}
-
-	fn acc_weighted<'buf>(
-		&self,
-		a: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a_weight: f64,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		b_weight: f64,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		Self::unary(a, b, |a, b| {
-			*a = T::from_f64(math::add_weighted(a.to_f64(), a_weight, b.to_f64(), b_weight));
-		})
-	}
-
-	fn mul<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		Self::binary(o, a, b, |o, a, b| *o = T::from_f64(a.to_f64() * b.to_f64()))
-	}
-
-	fn mul_<'buf>(
-		&self,
-		a: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		Self::unary(a, b, |a, b| *a = T::from_f64(a.to_f64() * b.to_f64()))
-	}
-
-	#[allow(clippy::many_single_char_names)]
-	fn mul_add<'buf>(
-		&self,
-		_o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		_a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		_b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		_ab_weight: f64,
-		_c: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		_c_weight: f64,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		/*Self::n_contiguous([o, a, b, c], |[o, a, b, c]| {
-			let a = a.get().to_f64();
-			let b = b.get().to_f64();
-			let c = c.get().to_f64();
-			let v = math::add_weighted(a * b, ab_weight, c, c_weight);
-			o.set(T::from_f64(v));
-		})*/
-		todo!("FloatExecutor::mul_add is not implemented yet");
-	}
-
-	fn mul_acc<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		ab_weight: f64,
-		o_weight: f64,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		Self::binary(o, a, b, |o, a, b| {
-			*o = T::from_f64(math::add_weighted(
-				a.to_f64() * b.to_f64(),
-				ab_weight,
-				o.to_f64(),
-				o_weight,
-			));
-		})
-	}
-
-	fn swiglu<'buf>(
-		&self,
-		out: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		lin: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		gate: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		ensure_same_shape([out], [lin, gate])?;
-		let out = Self::view_contiguous_mut(out)?;
-		let lin = Self::view_contiguous(lin)?;
-		let gate = Self::view_contiguous(gate)?;
-		unsafe {
-			zip_elems([out], [lin, gate], [], |[out], [lin, gate], []| {
-				*out = T::from_f64(math::swiglu(lin.to_f64(), gate.to_f64()));
-			});
-		}
-		Ok(())
-	}
-
-	#[allow(clippy::panic_in_result_fn)]
-	fn swiglu_backward<'buf>(
-		&self,
-		d_lin_gate: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		swapped: bool,
-		lin: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		gate: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		d_out: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		let shape = ensure_same_shape([], [lin, gate, d_out])?;
-		let d_lin_gate_shape = d_lin_gate.nd_shape()?;
-		if d_lin_gate_shape[0] != shape[0] || d_lin_gate_shape[1] / 2 < shape[1] {
-			cold_path();
-			return Err(ErrPack {
-				code: ExecutorError::InvalidShape,
-				extra: None,
-			});
-		}
-
-		let d_lin_gate = Self::view_contiguous_mut(d_lin_gate)?;
-		let lin = Self::view_contiguous(lin)?;
-		let gate = Self::view_contiguous(gate)?;
-		let d_out = Self::view_contiguous(d_out)?;
-
-		let (d_lin_start, d_gate_start) = if swapped {
-			(d_lin_gate_shape[1] - shape[1], 0)
-		} else {
-			(0, d_lin_gate_shape[1] - shape[1])
-		};
-		unsafe {
-			zip_vecs_varsize(
-				[d_lin_gate],
-				[lin, gate, d_out],
-				|[d_lin_gate], [lin, gate, d_out]| {
-					for i in 0..shape[1] {
-						let lin = lin[i].to_f64();
-						let gate = gate[i].to_f64();
-						let d_out = d_out[i].to_f64();
-						let (d_lin_val, d_gate_val) = math::swiglu_backward(lin, gate, d_out);
-						d_lin_gate[d_lin_start + i] = T::from_f64(d_lin_val);
-						d_lin_gate[d_gate_start + i] = T::from_f64(d_gate_val);
-					}
-				},
-			);
-		}
-		Ok(())
 	}
 
 	fn sum_all<'buf>(
@@ -706,112 +452,6 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 			zip_vecs([t], [], |[t], []| {
 				let (_max, sum) = math::softmax_part1_(t);
 				math::softmax_part2_(sum, t);
-			});
-		}
-		Ok(())
-	}
-
-	fn dot<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		scale: f64,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		let shape = ensure_same_shape([], [a, b])?;
-		ensure_expected_shape(o, [shape[0], 1])?;
-		let o = Self::view_contiguous_mut(o)?;
-		let a = Self::view_contiguous(a)?;
-		let b = Self::view_contiguous(b)?;
-		unsafe {
-			zip_vec_reduce(o, [a, b], |o, [a, b]| *o = T::from_f64(math::dot(a, b) * scale));
-		}
-		Ok(())
-	}
-
-	#[allow(clippy::many_single_char_names)]
-	fn dot_add<'buf>(
-		&self,
-		_o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		_a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		_b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		_ab_weight: f64,
-		_c: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		_c_weight: f64,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		/*Self::vec_reduce([o, c], [a, b], |[o, c], [a, b]| {
-			let c = c.get().to_f64();
-			let dot = math::dot(a, b);
-			let v = math::add_weighted(dot, ab_weight, c, c_weight);
-			o.set(T::from_f64(v));
-		})*/
-		todo!("FloatExecutor::dot_add is not implemented yet");
-	}
-
-	fn dot_acc<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		o_weight: f64,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		ab_weight: f64,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		let shape = ensure_same_shape([], [a, b])?;
-		ensure_expected_shape(o, [shape[0], 1])?;
-		let o = Self::view_contiguous_mut(o)?;
-		let a = Self::view_contiguous(a)?;
-		let b = Self::view_contiguous(b)?;
-		unsafe {
-			zip_vec_reduce(o, [a, b], |o, [a, b]| {
-				*o = T::from_f64(math::add_weighted(
-					o.to_f64(),
-					o_weight,
-					math::dot(a, b),
-					ab_weight,
-				));
-			});
-		}
-		Ok(())
-	}
-
-	fn rsqrt_dot<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		scale: f64,
-		eps: f64,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		let shape = ensure_same_shape([], [a, b])?;
-		ensure_expected_shape(o, [shape[0], 1])?;
-		let o = Self::view_contiguous_mut(o)?;
-		let a = Self::view_contiguous(a)?;
-		let b = Self::view_contiguous(b)?;
-		unsafe {
-			zip_vec_reduce(o, [a, b], |o, [a, b]| {
-				let dot = math::dot(a, b);
-				*o = T::from_f64(math::rsqrt(dot * scale, eps));
-			});
-		}
-		Ok(())
-	}
-
-	fn sqrt_dot<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		scale: f64,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		let shape = ensure_same_shape([], [a, b])?;
-		ensure_expected_shape(o, [shape[0], 1])?;
-		let o = Self::view_contiguous_mut(o)?;
-		let a = Self::view_contiguous(a)?;
-		let b = Self::view_contiguous(b)?;
-		unsafe {
-			zip_vec_reduce(o, [a, b], |o, [a, b]| {
-				let dot = math::dot(a, b);
-				*o = T::from_f64((dot * scale).sqrt());
 			});
 		}
 		Ok(())

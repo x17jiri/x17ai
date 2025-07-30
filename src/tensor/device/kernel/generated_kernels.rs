@@ -24,6 +24,7 @@ use super::lookup::{
 	SqrtLookupExpr,
 	SubLookupExpr,
 	SumLookupExpr,
+	SwishLookupExpr,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -1292,6 +1293,152 @@ impl<'a> KernelLookup<AccNegMulScaledExpr<'a>> for KernelLibrary {
 
 //--------------------------------------------------------------------------------------------------
 
+#[derive(Clone)]
+pub struct SwigluKernel {
+	kernel: Kernel<2, 0, 0>,
+}
+
+impl SwigluKernel {
+	fn new() -> Self {
+		let (builder, [lin, gate], [], []) =
+			KernelBuilder::new(
+				"swiglu", ["lin", "gate"], [], []
+			);
+		let kernel = builder.build(lin * gate.swish());
+		Self { kernel }
+	}
+
+	pub fn call<'a>(&'a self, lin: &'a Tensor, gate: &'a Tensor) -> SwigluKernelCall<'a> {
+		SwigluKernelCall { kernel: self, lin, gate }
+	}
+}
+
+pub struct SwigluKernelCall<'a> {
+	kernel: &'a SwigluKernel,
+	lin: &'a Tensor,
+	gate: &'a Tensor,
+}
+
+impl<'a> EvaluatesToTensor for SwigluKernelCall<'a> {
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+		self.kernel.kernel.run(to, [self.lin, self.gate], [], [])
+	}
+}
+
+type SwigluExpr<'a> =
+	MulLookupExpr<
+		&'a Tensor,
+		SwishLookupExpr<
+			&'a Tensor,
+		>,
+	>;
+
+impl<'a> KernelLookup<SwigluExpr<'a>> for KernelLibrary {
+	type CallType = SwigluKernelCall<'a>;
+
+	fn create_call(&self, expr: LookupWrapper<SwigluExpr<'a>>) -> SwigluKernelCall<'a> {
+		let MulLookupExpr(
+			lin,
+			SwishLookupExpr(
+				gate,
+			),
+		) = expr.0;
+		self.data.swiglu.call(lin, gate)
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub struct FillKernel {
+	kernel: Kernel<0, 0, 1>,
+}
+
+impl FillKernel {
+	fn new() -> Self {
+		let (builder, [], [], [v]) =
+			KernelBuilder::new(
+				"fill", [], [], ["v"]
+			);
+		let kernel = builder.build(v);
+		Self { kernel }
+	}
+
+	pub fn call<'a>(&'a self, v: f64) -> FillKernelCall<'a> {
+		FillKernelCall { kernel: self, v }
+	}
+}
+
+pub struct FillKernelCall<'a> {
+	kernel: &'a FillKernel,
+	v: f64,
+}
+
+impl<'a> EvaluatesToTensor for FillKernelCall<'a> {
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+		self.kernel.kernel.run(to, [], [], [self.v])
+	}
+}
+
+type FillExpr<'a> =
+	f64;
+
+impl<'a> KernelLookup<FillExpr<'a>> for KernelLibrary {
+	type CallType = FillKernelCall<'a>;
+
+	fn create_call(&self, expr: LookupWrapper<FillExpr<'a>>) -> FillKernelCall<'a> {
+		let v = expr.0;
+		self.data.fill.call(v)
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub struct CopyKernel {
+	kernel: Kernel<1, 0, 0>,
+}
+
+impl CopyKernel {
+	fn new() -> Self {
+		let (builder, [v], [], []) =
+			KernelBuilder::new(
+				"copy", ["v"], [], []
+			);
+		let kernel = builder.build(v);
+		Self { kernel }
+	}
+
+	pub fn call<'a>(&'a self, v: &'a Tensor) -> CopyKernelCall<'a> {
+		CopyKernelCall { kernel: self, v }
+	}
+}
+
+pub struct CopyKernelCall<'a> {
+	kernel: &'a CopyKernel,
+	v: &'a Tensor,
+}
+
+impl<'a> EvaluatesToTensor for CopyKernelCall<'a> {
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+		self.kernel.kernel.run(to, [self.v], [], [])
+	}
+}
+
+type CopyExpr<'a> =
+	&'a Tensor;
+
+impl<'a> KernelLookup<CopyExpr<'a>> for KernelLibrary {
+	type CallType = CopyKernelCall<'a>;
+
+	fn create_call(&self, expr: LookupWrapper<CopyExpr<'a>>) -> CopyKernelCall<'a> {
+		let v = expr.0;
+		self.data.copy.call(v)
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
 pub struct KernelLibraryData {
 	rms: RmsKernel,
 	rms_recip: RmsRecipKernel,
@@ -1310,6 +1457,9 @@ pub struct KernelLibraryData {
 	mul_sub_a_b_c: MulSubABCKernel,
 	sqrt_recip: SqrtRecipKernel,
 	acc_mul_scaled: AccMulScaledKernel,
+	swiglu: SwigluKernel,
+	fill: FillKernel,
+	copy: CopyKernel,
 }
 
 impl KernelLibraryData {
@@ -1332,6 +1482,9 @@ impl KernelLibraryData {
 			mul_sub_a_b_c: MulSubABCKernel::new(),
 			sqrt_recip: SqrtRecipKernel::new(),
 			acc_mul_scaled: AccMulScaledKernel::new(),
+			swiglu: SwigluKernel::new(),
+			fill: FillKernel::new(),
+			copy: CopyKernel::new(),
 		}
 	}
 }

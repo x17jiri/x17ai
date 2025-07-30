@@ -56,14 +56,6 @@ pub trait Executor {
 		dst: &mut dyn std::io::Write,
 	) -> Result<(), ErrPack<ExecutorError>>;
 
-	/// Fills the `o` tensor with zeros.
-	///
-	///     o[i] = 0.0;
-	fn zeros<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-	) -> Result<(), ErrPack<ExecutorError>>;
-
 	/// Fills the `o` tensor with random values from a normal distribution
 	/// with mean 0 and variance 1.
 	///
@@ -71,122 +63,6 @@ pub trait Executor {
 	fn randn_clamped<'buf>(
 		&self,
 		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-	) -> Result<(), ErrPack<ExecutorError>>;
-
-	/// Copies data from `a` to `o`:
-	///
-	///     o[i] = a[i];
-	fn copy<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<(), ErrPack<ExecutorError>>;
-
-	/// Element-wise unary operation:
-	///
-	///    o[i] = 1.0 / (sqrt(a[i] * scale) + eps);
-	fn rsqrt<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		scale: f64,
-		eps: f64,
-	) -> Result<(), ErrPack<ExecutorError>>;
-
-	/// Element-wise unary operation:
-	///
-	///     o[i] = max(ln(a[i]), -1000, DType.MAX_NEGATIVE);
-	fn ln_clamped<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<(), ErrPack<ExecutorError>>;
-
-	/// Element-wise weighted addition:
-	///
-	///     o[i] = (a[i] * a_weight) + (b[i] * b_weight)
-	fn add_weighted<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		a_weight: f64,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		b_weight: f64,
-	) -> Result<(), ErrPack<ExecutorError>>;
-
-	/// Element-wise weighted addition:
-	///
-	///     a[i] = (a[i] * a_weight) + (b[i] * b_weight)
-	fn acc_weighted<'buf>(
-		&self,
-		a: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a_weight: f64,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		b_weight: f64,
-	) -> Result<(), ErrPack<ExecutorError>>;
-
-	/// Element-wise multiplication:
-	///
-	///     o[i] = a[i] * b[i]
-	fn mul<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<(), ErrPack<ExecutorError>>;
-
-	/// Element-wise multiplication:
-	///
-	///     a[i] = a[i] * b[i]
-	fn mul_<'buf>(
-		&self,
-		a: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<(), ErrPack<ExecutorError>>;
-
-	/// Element-wise mul-add:
-	///
-	///     o[i] = (a[i] * b[i] * ab_weight) + (c[i] * c_weight)
-	fn mul_add<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		ab_weight: f64,
-		c: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		c_weight: f64,
-	) -> Result<(), ErrPack<ExecutorError>>;
-
-	/// Element-wise mul-add:
-	///
-	///     o[i] = (a[i] * b[i] * ab_weight) + (o[i] * o_weight)
-	fn mul_acc<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		ab_weight: f64,
-		o_weight: f64,
-	) -> Result<(), ErrPack<ExecutorError>>;
-
-	/// The SwiGLU activation function:
-	///
-	///     out[i] = lin[i] * sigmoid(gate[i])
-	#[allow(clippy::doc_markdown)]
-	fn swiglu<'buf>(
-		&self,
-		out: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		lin: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		gate: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<(), ErrPack<ExecutorError>>;
-
-	fn swiglu_backward<'buf>(
-		&self,
-		d_lin_gate: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		swapped: bool,
-		lin: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		gate: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		d_out: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 	) -> Result<(), ErrPack<ExecutorError>>;
 
 	/// Sums all elements in the `a` tensor and returns the result.
@@ -234,50 +110,6 @@ pub trait Executor {
 		&self,
 		out: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 		inp: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<(), ErrPack<ExecutorError>>;
-
-	fn dot<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		scale: f64,
-	) -> Result<(), ErrPack<ExecutorError>>;
-
-	fn dot_add<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		ab_weight: f64,
-		c: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		c_weight: f64,
-	) -> Result<(), ErrPack<ExecutorError>>;
-
-	fn dot_acc<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		o_weight: f64,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		ab_weight: f64,
-	) -> Result<(), ErrPack<ExecutorError>>;
-
-	fn rsqrt_dot<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		scale: f64,
-		eps: f64,
-	) -> Result<(), ErrPack<ExecutorError>>;
-
-	fn sqrt_dot<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		scale: f64,
 	) -> Result<(), ErrPack<ExecutorError>>;
 
 	fn mm<'buf>(

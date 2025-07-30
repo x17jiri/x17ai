@@ -200,15 +200,6 @@ impl Tensor {
 		expr.eval_to_tensor(self)
 	}
 
-	pub fn assign2<Expr>(&self, expr: LookupWrapper<Expr>) -> Result<(), ErrPack<TensorOpError>>
-	where
-		Expr: LookupExpr,
-		KernelLibrary: KernelLookup<Expr>,
-	{
-		let builtin_kernels = self.buf().builtin_kernels;
-		builtin_kernels.create_call(expr).eval_to_tensor(self)
-	}
-
 	/// I use this function because Rust doesn't allow specifying only some generic parameters.
 	///
 	/// If I created `Tensor::new_2d<T, const Y: usize, const X: usize>(...)`,

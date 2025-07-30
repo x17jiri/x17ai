@@ -98,11 +98,11 @@ impl BackwardFn for SplitBackwardFn {
 				}
 				if grad.owns_buffer() {
 					let grad = &*grad;
-					grad.assign2(tsr(grad) + tsr(&d_out))?;
+					grad.assign(tsr(grad) + tsr(&d_out))?;
 				} else {
 					let mut new_grad = grad.new_empty_like()?;
 					std::mem::swap(grad, &mut new_grad);
-					grad.assign2(tsr(&new_grad) + tsr(&d_out))?;
+					grad.assign(tsr(&new_grad) + tsr(&d_out))?;
 					std::mem::drop(new_grad);
 				}
 				std::mem::drop(d_out);

@@ -131,6 +131,12 @@ impl std::ops::Mul<Self> for ScalarExprWrapper {
 }
 
 impl ScalarExprWrapper {
+	pub fn swish(self) -> Self {
+		Self {
+			expr: Arc::new(ScalarExpr::SwishExpr(self.expr)),
+		}
+	}
+
 	pub fn sqrt(self) -> Self {
 		Self {
 			expr: Arc::new(ScalarExpr::SqrtExpr(self.expr)),

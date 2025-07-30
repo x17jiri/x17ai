@@ -8,7 +8,7 @@
 use crate::ErrPack;
 use crate::autograd::{self, AutogradNode, BackwardFn, LossFn};
 use crate::tensor::device::kernel::lookup::tsr;
-use crate::tensor::math::{self, LnClamped, sum_all};
+use crate::tensor::math::{self, sum_all};
 use crate::tensor::{Tensor, TensorOpError};
 use crate::util::LossyInto;
 
@@ -63,7 +63,7 @@ impl LossFn for CrossEntropyLossFn {
 		let batch_size = value.select(-1, 0)?.elems();
 
 		let tmp = value.new_empty_like()?;
-		tmp.assign2(tsr(target) * tsr(value).ln_clamped())?;
+		tmp.assign(tsr(target) * tsr(value).ln_clamped())?;
 
 		Ok(sum_all(&tmp)? / -batch_size.lossy_into())
 	}
@@ -71,7 +71,7 @@ impl LossFn for CrossEntropyLossFn {
 	fn backward(self: Box<Self>) -> Result<(), ErrPack<TensorOpError>> {
 		let Self { value, target, inp_backward } = Box::into_inner(self);
 		let d_inp = value.new_empty_like()?;
-		d_inp.assign2(tsr(&value) - &target)?;
+		d_inp.assign(tsr(&value) - &target)?;
 		autograd::run(inp_backward, d_inp)?;
 		Ok(())
 	}
