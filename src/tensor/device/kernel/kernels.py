@@ -15,6 +15,11 @@ CONST_TYPE = 'C'
 ELEM_TYPE = 'E'
 REDUCE_TYPE = 'R'
 
+class Redirect:
+	def __init__(self, target, args):
+		self.target = target
+		self.args = args
+
 class Arg:
 	def __init__(self, name, type, pos):
 		self.name = name
@@ -174,7 +179,11 @@ def parse_kernels(kernels):
 				redirection = None
 				if decorator_list:
 					assert len(decorator_list) == 1
-					redirection = expr_as_str(decorator_list[0])
+					match decorator_list[0]:
+						case ast.Call(func=ast.Name(id), args=args):
+							redirection = Redirect(id, [expr_as_str(arg) for arg in args])
+						case _:
+							raise ValueError(f"Unexpected decorator type: {type(decorator_list[0])}")
 
 				kernel_list.append(Fn(fn_name, type_counts, arg_list, body[0].value, redirection))
 			case _:
@@ -183,6 +192,7 @@ def parse_kernels(kernels):
 	return kernel_list
 
 kernel_list = parse_kernels(kernels)
+kernel_map = {kernel.name: kernel for kernel in kernel_list}
 
 print("// Generated file, do not edit")
 print()
@@ -286,12 +296,23 @@ for kernel in kernel_list:
 	print(f"\t{kernel.body_op.print_expr("\t")};")
 	print()
 	print(f"impl<'a> KernelCall<{kernel.cls_name}Expr<'a>> for KernelLibrary {{")
-	print(f"	fn call(&self, to: &Tensor, expr: LookupWrapper<{kernel.cls_name}Expr<'a>>) -> Result<(), ErrPack<TensorOpError>> {{")
+	print(f"	fn call(")
+	print(f"		&self,")
+	print(f"		to: &Tensor,")
+	print(f"		expr: LookupWrapper<{kernel.cls_name}Expr<'a>>")
+	print(f"	) -> Result<(), ErrPack<TensorOpError>> {{")
 	print(f"		let {kernel.body_op.print_destructuring("\t\t")} = expr.0;")
-	e_args = ", ".join(kernel.e_args)
-	r_args = ", ".join(kernel.r_args)
-	c_args = ", ".join(kernel.c_args)
-	print(f"		self.data.{kernel.name}.kernel.run(to, [{e_args}], [{r_args}], [{c_args}])")
+	if kernel.redirection:
+		zipped = list(zip(kernel.redirection.args, kernel_map[kernel.redirection.target].args))
+		e_args = ", ".join(z[0] for z in zipped if z[1].type == ELEM_TYPE)
+		r_args = ", ".join(z[0] for z in zipped if z[1].type == REDUCE_TYPE)
+		c_args = ", ".join(z[0] for z in zipped if z[1].type == CONST_TYPE)
+		print(f"		self.data.{kernel.redirection.target}.kernel.run(to, [{e_args}], [{r_args}], [{c_args}])")
+	else:
+		e_args = ", ".join(kernel.e_args)
+		r_args = ", ".join(kernel.r_args)
+		c_args = ", ".join(kernel.c_args)
+		print(f"		self.data.{kernel.name}.kernel.run(to, [{e_args}], [{r_args}], [{c_args}])")
 	print(f"	}}")
 	print(f"}}")
 

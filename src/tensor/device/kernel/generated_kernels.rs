@@ -58,7 +58,11 @@ type RmsExpr<'a> =
 	>;
 
 impl<'a> KernelCall<RmsExpr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<RmsExpr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<RmsExpr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let SqrtLookupExpr(
 			MulLookupExpr(
 				SumLookupExpr(
@@ -109,7 +113,11 @@ type RmsRecipExpr<'a> =
 	>;
 
 impl<'a> KernelCall<RmsRecipExpr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<RmsRecipExpr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<RmsRecipExpr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let RecipLookupExpr(
 			SqrtLookupExpr(
 				MulLookupExpr(
@@ -153,7 +161,11 @@ type AddExpr<'a> =
 	>;
 
 impl<'a> KernelCall<AddExpr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<AddExpr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<AddExpr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let AddLookupExpr(
 			a,
 			b,
@@ -187,7 +199,11 @@ type SubExpr<'a> =
 	>;
 
 impl<'a> KernelCall<SubExpr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<SubExpr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<SubExpr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let SubLookupExpr(
 			a,
 			b,
@@ -221,7 +237,11 @@ type MulExpr<'a> =
 	>;
 
 impl<'a> KernelCall<MulExpr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<MulExpr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<MulExpr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let MulLookupExpr(
 			a,
 			b,
@@ -258,7 +278,11 @@ type AccMulExpr<'a> =
 	>;
 
 impl<'a> KernelCall<AccMulExpr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<AccMulExpr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<AccMulExpr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let AddLookupExpr(
 			x,
 			MulLookupExpr(
@@ -298,7 +322,11 @@ type MulScaledExpr<'a> =
 	>;
 
 impl<'a> KernelCall<MulScaledExpr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<MulScaledExpr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<MulScaledExpr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let MulLookupExpr(
 			MulLookupExpr(
 				a,
@@ -325,7 +353,11 @@ type MulScaled2Expr<'a> =
 	>;
 
 impl<'a> KernelCall<MulScaled2Expr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<MulScaled2Expr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<MulScaled2Expr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let MulLookupExpr(
 			MulLookupExpr(
 				MulLookupExpr(
@@ -336,7 +368,7 @@ impl<'a> KernelCall<MulScaled2Expr<'a>> for KernelLibrary {
 			),
 			scale2,
 		) = expr.0;
-		self.data.mul_scaled2.kernel.run(to, [a, b], [], [scale1, scale2])
+		self.data.mul_scaled.kernel.run(to, [a, b], [], [scale1 * scale2])
 	}
 }
 
@@ -367,7 +399,11 @@ type MulXLnYExpr<'a> =
 	>;
 
 impl<'a> KernelCall<MulXLnYExpr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<MulXLnYExpr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<MulXLnYExpr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let MulLookupExpr(
 			x,
 			LnClampedLookupExpr(
@@ -409,7 +445,11 @@ type WeightedAddExpr<'a> =
 	>;
 
 impl<'a> KernelCall<WeightedAddExpr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<WeightedAddExpr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<WeightedAddExpr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let AddLookupExpr(
 			MulLookupExpr(
 				a,
@@ -439,7 +479,11 @@ type WeightedSubExpr<'a> =
 	>;
 
 impl<'a> KernelCall<WeightedSubExpr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<WeightedSubExpr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<WeightedSubExpr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let SubLookupExpr(
 			MulLookupExpr(
 				a,
@@ -450,7 +494,7 @@ impl<'a> KernelCall<WeightedSubExpr<'a>> for KernelLibrary {
 				b_weight,
 			),
 		) = expr.0;
-		self.data.weighted_sub.kernel.run(to, [a, b], [], [a_weight, b_weight])
+		self.data.weighted_add.kernel.run(to, [a, b], [], [a_weight, -b_weight])
 	}
 }
 
@@ -485,7 +529,11 @@ type AddXMulScaledExpr<'a> =
 	>;
 
 impl<'a> KernelCall<AddXMulScaledExpr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<AddXMulScaledExpr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<AddXMulScaledExpr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let MulLookupExpr(
 			AddLookupExpr(
 				x,
@@ -518,7 +566,11 @@ type AddXMulScaled2Expr<'a> =
 	>;
 
 impl<'a> KernelCall<AddXMulScaled2Expr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<AddXMulScaled2Expr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<AddXMulScaled2Expr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let MulLookupExpr(
 			MulLookupExpr(
 				AddLookupExpr(
@@ -532,7 +584,7 @@ impl<'a> KernelCall<AddXMulScaled2Expr<'a>> for KernelLibrary {
 			),
 			scale2,
 		) = expr.0;
-		self.data.add_x_mul_scaled2.kernel.run(to, [x, a, b], [], [scale1, scale2])
+		self.data.add_x_mul_scaled.kernel.run(to, [x, a, b], [], [scale1 * scale2])
 	}
 }
 
@@ -563,7 +615,11 @@ type DotExpr<'a> =
 	>;
 
 impl<'a> KernelCall<DotExpr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<DotExpr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<DotExpr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let SumLookupExpr(
 			MulLookupExpr(
 				a,
@@ -604,7 +660,11 @@ type DotScaledExpr<'a> =
 	>;
 
 impl<'a> KernelCall<DotScaledExpr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<DotScaledExpr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<DotScaledExpr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let MulLookupExpr(
 			SumLookupExpr(
 				MulLookupExpr(
@@ -635,7 +695,11 @@ type DotScaled2Expr<'a> =
 	>;
 
 impl<'a> KernelCall<DotScaled2Expr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<DotScaled2Expr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<DotScaled2Expr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let MulLookupExpr(
 			MulLookupExpr(
 				SumLookupExpr(
@@ -648,7 +712,7 @@ impl<'a> KernelCall<DotScaled2Expr<'a>> for KernelLibrary {
 			),
 			scale2,
 		) = expr.0;
-		self.data.dot_scaled2.kernel.run(to, [], [a, b], [scale1, scale2])
+		self.data.dot_scaled.kernel.run(to, [], [a, b], [scale1 * scale2])
 	}
 }
 
@@ -688,7 +752,11 @@ type WeightedAddTDotExpr<'a> =
 	>;
 
 impl<'a> KernelCall<WeightedAddTDotExpr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<WeightedAddTDotExpr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<WeightedAddTDotExpr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let AddLookupExpr(
 			MulLookupExpr(
 				t,
@@ -731,7 +799,11 @@ type WeightedAddTDot2Expr<'a> =
 	>;
 
 impl<'a> KernelCall<WeightedAddTDot2Expr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<WeightedAddTDot2Expr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<WeightedAddTDot2Expr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let AddLookupExpr(
 			MulLookupExpr(
 				t,
@@ -750,7 +822,7 @@ impl<'a> KernelCall<WeightedAddTDot2Expr<'a>> for KernelLibrary {
 				ab_weight2,
 			),
 		) = expr.0;
-		self.data.weighted_add_t_dot2.kernel.run(to, [t], [a, b], [t_weight, ab_weight1, ab_weight2])
+		self.data.weighted_add_t_dot.kernel.run(to, [t], [a, b], [t_weight, ab_weight1 * ab_weight2])
 	}
 }
 
@@ -785,7 +857,11 @@ type MulSubAMulBCDExpr<'a> =
 	>;
 
 impl<'a> KernelCall<MulSubAMulBCDExpr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<MulSubAMulBCDExpr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<MulSubAMulBCDExpr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let MulLookupExpr(
 			SubLookupExpr(
 				a,
@@ -828,7 +904,11 @@ type MulSubABCExpr<'a> =
 	>;
 
 impl<'a> KernelCall<MulSubABCExpr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<MulSubABCExpr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<MulSubABCExpr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let MulLookupExpr(
 			SubLookupExpr(
 				a,
@@ -867,7 +947,11 @@ type SqrtRecipExpr<'a> =
 	>;
 
 impl<'a> KernelCall<SqrtRecipExpr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<SqrtRecipExpr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<SqrtRecipExpr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let RecipLookupExpr(
 			SqrtLookupExpr(
 				a,
@@ -909,7 +993,11 @@ type AccMulScaledExpr<'a> =
 	>;
 
 impl<'a> KernelCall<AccMulScaledExpr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<AccMulScaledExpr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<AccMulScaledExpr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let AddLookupExpr(
 			x,
 			MulLookupExpr(
@@ -939,7 +1027,11 @@ type AccNegMulScaledExpr<'a> =
 	>;
 
 impl<'a> KernelCall<AccNegMulScaledExpr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<AccNegMulScaledExpr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<AccNegMulScaledExpr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let SubLookupExpr(
 			x,
 			MulLookupExpr(
@@ -950,7 +1042,7 @@ impl<'a> KernelCall<AccNegMulScaledExpr<'a>> for KernelLibrary {
 				scale,
 			),
 		) = expr.0;
-		self.data.acc_neg_mul_scaled.kernel.run(to, [x, a, b], [], [scale])
+		self.data.acc_mul_scaled.kernel.run(to, [x, a, b], [], [-scale])
 	}
 }
 
@@ -981,7 +1073,11 @@ type SwigluExpr<'a> =
 	>;
 
 impl<'a> KernelCall<SwigluExpr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<SwigluExpr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<SwigluExpr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let MulLookupExpr(
 			lin,
 			SwishLookupExpr(
@@ -1014,7 +1110,11 @@ type FillExpr<'a> =
 	f64;
 
 impl<'a> KernelCall<FillExpr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<FillExpr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<FillExpr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let v = expr.0;
 		self.data.fill.kernel.run(to, [], [], [v])
 	}
@@ -1042,7 +1142,11 @@ type CopyExpr<'a> =
 	&'a Tensor;
 
 impl<'a> KernelCall<CopyExpr<'a>> for KernelLibrary {
-	fn call(&self, to: &Tensor, expr: LookupWrapper<CopyExpr<'a>>) -> Result<(), ErrPack<TensorOpError>> {
+	fn call(
+		&self,
+		to: &Tensor,
+		expr: LookupWrapper<CopyExpr<'a>>
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let v = expr.0;
 		self.data.copy.kernel.run(to, [v], [], [])
 	}
