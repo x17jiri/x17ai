@@ -18,10 +18,8 @@ pub trait LookupExpr {
 	fn last_dim_size(&self) -> usize;
 }
 
-pub trait KernelLookup<Expr: LookupExpr> {
-	type CallType: EvaluatesToTensor;
-
-	fn create_call(&self, expr: LookupWrapper<Expr>) -> Self::CallType;
+pub trait KernelCall<Expr: LookupExpr> {
+	fn call(&self, to: &Tensor, expr: LookupWrapper<Expr>) -> Result<(), ErrPack<TensorOpError>>;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -63,11 +61,11 @@ impl<Expr: LookupExpr> LookupWrapper<Expr> {
 
 impl<Expr: LookupExpr> EvaluatesToTensor for LookupWrapper<Expr>
 where
-	KernelLibrary: KernelLookup<Expr>,
+	KernelLibrary: KernelCall<Expr>,
 {
 	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
-		let builtin_kernels = to.buf().builtin_kernels;
-		builtin_kernels.create_call(self).eval_to_tensor(to)
+		let library = to.buf().builtin_kernels;
+		library.call(to, self)
 	}
 }
 

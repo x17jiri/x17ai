@@ -20,6 +20,7 @@ class Arg:
 		self.name = name
 		self.type = type
 		self.pos = pos
+		self.needs_lifetime = type != CONST_TYPE
 		self.rust_type = 'f64' if type == CONST_TYPE else "&'a Tensor"
 
 	def dump(self, indent=0):
@@ -34,9 +35,11 @@ class Arg:
 class Fn:
 	def __init__(self, name, type_counts, args, body, redirection):
 		arg_map = {}
+		needs_lifetime = False
 		for arg in args:
 			assert arg.name not in arg_map, f"Duplicate argument name: {arg.name}"
 			arg_map[arg.name] = arg
+			needs_lifetime = needs_lifetime or arg.needs_lifetime
 
 		self.body_op = parse_body(arg_map, body)
 
@@ -49,6 +52,8 @@ class Fn:
 		self.e_args = [arg.name for arg in args if arg.type == ELEM_TYPE]
 		self.r_args = [arg.name for arg in args if arg.type == REDUCE_TYPE]
 		self.c_args = [arg.name for arg in args if arg.type == CONST_TYPE]
+		self.needs_lifetime = needs_lifetime
+		self.lifetime = "<'a>" if needs_lifetime else ""
 
 	def dump(self, indent=0):
 		print(f"//Fn:", sep="")
@@ -189,7 +194,6 @@ print("//")
 print("//------------------------------------------------------------------------------")
 print()
 print("use crate::ErrPack;")
-print("use crate::tensor::math::EvaluatesToTensor;")
 print("use crate::tensor::{Tensor, TensorOpError};")
 print()
 print("use super::Kernel;")
@@ -197,7 +201,7 @@ print("use super::builder::KernelBuilder;")
 print("use super::library::KernelLibrary;")
 print("use super::lookup::{")
 print("	AddLookupExpr,")
-print("	KernelLookup,")
+print("	KernelCall,")
 print("	LnClampedLookupExpr,")
 print("	LookupWrapper,")
 print("	MulLookupExpr,")
@@ -237,48 +241,57 @@ for kernel in kernel_list:
 		print(f'		let kernel = builder.build({expr_as_str(kernel.body)});')
 		print(f'		Self {{ kernel }}')
 		print(f'	}}')
+		print(f"}}")
 		print()
-		header = ", ".join([f"{arg.name}: {arg.rust_type}" for arg in kernel.args])
 		args = ", ".join([arg.name for arg in kernel.args])
-		print(f"	pub fn call<'a>(&'a self, {header}) -> {kernel.cls_name}KernelCall<'a> {{")
-		print(f"		{kernel.cls_name}KernelCall {{ kernel: self, {args} }}")
-		print(f"	}}")
-		print(f"}}")
-		print()
-		print(f"pub struct {kernel.cls_name}KernelCall<'a> {{")
-		print(f"	kernel: &'a {kernel.cls_name}Kernel,")
-		for arg in kernel.args:
-			print(f"	{arg.name}: {arg.rust_type},")
-		print(f"}}")
-		print()
-		print(f"impl<'a> EvaluatesToTensor for {kernel.cls_name}KernelCall<'a> {{")
-		print(f"	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {{")
-		e_args = ", ".join('self.'+arg for arg in kernel.e_args)
-		r_args = ", ".join('self.'+arg for arg in kernel.r_args)
-		c_args = ", ".join('self.'+arg for arg in kernel.c_args)
-		print(f"		self.kernel.kernel.run(to, [{e_args}], [{r_args}], [{c_args}])")
-		print(f"	}}")
-		print(f"}}")
-		print()
-
-		kernel_call_class = f"{kernel.cls_name}KernelCall"
-		kernel_call_expr = f"{kernel.name}.call({args})"
-	else:
-		#print(f"// Redirecting {kernel.name} to {kernel.redirection}")
-
-		kernel_call_func = re.search(r'^\s*(\w+)\s*\(', kernel.redirection).group(1)
-		kernel_call_class = f"{to_camel_case(kernel_call_func)}KernelCall"
-		kernel_call_expr = result = re.sub(r'^\s*(\w+)\s*\(', r'\1.call(', kernel.redirection)
+		#header = ", ".join([f"{arg.name}: {arg.rust_type}" for arg in kernel.args])
+		#if kernel.needs_lifetime:
+		#	print(f"	pub fn call<'a>(&'a self, {header}) -> {kernel.cls_name}KernelCall<'a> {{")
+		#	print(f"		{kernel.cls_name}KernelCall {{ kernel: self, {args} }}")
+		#	print(f"	}}")
+		#else:
+		#	print(f"	pub fn call<'a>(&'a self, {header}) -> {kernel.cls_name}KernelCall<'a> {{")
+		#	print(f"		{kernel.cls_name}KernelCall {{ kernel: self, {args}, phantom: std::marker::PhantomData, }}")
+		#	print(f"	}}")
+		#print(f"}}")
+		#print()
+		#print(f"pub struct {kernel.cls_name}KernelCall<'a> {{")
+		#print(f"	kernel: &'a {kernel.cls_name}Kernel,")
+		#for arg in kernel.args:
+		#	print(f"	{arg.name}: {arg.rust_type},")
+		#if not kernel.needs_lifetime:
+		#	print(f"	phantom: std::marker::PhantomData<&'a ()>,")
+		#print(f"}}")
+		#print()
+		#print(f"impl<'a> EvaluatesToTensor for {kernel.cls_name}KernelCall<'a> {{")
+		#print(f"	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {{")
+		#e_args = ", ".join('self.'+arg for arg in kernel.e_args)
+		#r_args = ", ".join('self.'+arg for arg in kernel.r_args)
+		#c_args = ", ".join('self.'+arg for arg in kernel.c_args)
+		#print(f"		self.kernel.kernel.run(to, [{e_args}], [{r_args}], [{c_args}])")
+		#print(f"	}}")
+		#print(f"}}")
+		#print()
+        #
+		#kernel_call_class = f"{kernel.cls_name}KernelCall"
+		#kernel_call_expr = f"{kernel.name}.call({args})"
+	#else:
+		##print(f"// Redirecting {kernel.name} to {kernel.redirection}")
+        #
+		#kernel_call_func = re.search(r'^\s*(\w+)\s*\(', kernel.redirection).group(1)
+		#kernel_call_class = f"{to_camel_case(kernel_call_func)}KernelCall"
+		#kernel_call_expr = result = re.sub(r'^\s*(\w+)\s*\(', r'\1.call(', kernel.redirection)
 
 	print(f"type {kernel.cls_name}Expr<'a> =")
 	print(f"\t{kernel.body_op.print_expr("\t")};")
 	print()
-	print(f"impl<'a> KernelLookup<{kernel.cls_name}Expr<'a>> for KernelLibrary {{")
-	print(f"	type CallType = {kernel_call_class}<'a>;")
-	print()
-	print(f"	fn create_call(&self, expr: LookupWrapper<{kernel.cls_name}Expr<'a>>) -> {kernel_call_class}<'a> {{")
+	print(f"impl<'a> KernelCall<{kernel.cls_name}Expr<'a>> for KernelLibrary {{")
+	print(f"	fn call(&self, to: &Tensor, expr: LookupWrapper<{kernel.cls_name}Expr<'a>>) -> Result<(), ErrPack<TensorOpError>> {{")
 	print(f"		let {kernel.body_op.print_destructuring("\t\t")} = expr.0;")
-	print(f"		self.data.{kernel_call_expr}")
+	e_args = ", ".join(kernel.e_args)
+	r_args = ", ".join(kernel.r_args)
+	c_args = ", ".join(kernel.c_args)
+	print(f"		self.data.{kernel.name}.kernel.run(to, [{e_args}], [{r_args}], [{c_args}])")
 	print(f"	}}")
 	print(f"}}")
 

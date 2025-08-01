@@ -16,7 +16,6 @@ use crate::tensor::device::buffer::{
 use crate::tensor::device::cpu::{CPUDevice, ViewError};
 use crate::tensor::device::executor::{Executor, ExecutorError};
 use crate::tensor::device::kernel::library::KernelLibrary;
-use crate::tensor::device::kernel::lookup::{self, KernelLookup, LookupExpr, LookupWrapper};
 use crate::tensor::dim_merger::DimMergerError;
 use crate::tensor::generic::map::dd::ReplaceTailError;
 use crate::tensor::generic::map::{
