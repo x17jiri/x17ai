@@ -16,6 +16,8 @@ use crate::tensor::{Tensor, TensorOpError};
 
 //--------------------------------------------------------------------------------------------------
 
+#[allow(clippy::indexing_slicing)]
+#[allow(clippy::needless_range_loop)]
 pub fn split<const N: usize>(inp_node: AutogradNode) -> [AutogradNode; N] {
 	let mut output = [const { MaybeUninit::uninit() }; N];
 	let (inp, inp_fn) = inp_node.take();

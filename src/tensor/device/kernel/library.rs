@@ -7,7 +7,7 @@
 
 use std::sync::OnceLock;
 
-use super::generated_kernels::KernelLibraryData;
+use super::KernelLibraryData;
 
 //--------------------------------------------------------------------------------------------------
 

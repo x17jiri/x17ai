@@ -438,7 +438,7 @@ where
 	}
 
 	unsafe fn select_unchecked(&self, dim: usize, index: usize) -> Self::Output {
-		(*self).select_unchecked(dim, index)
+		unsafe { (*self).select_unchecked(dim, index) }
 	}
 }
 

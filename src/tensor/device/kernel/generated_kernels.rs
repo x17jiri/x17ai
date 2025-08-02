@@ -33,7 +33,7 @@ use super::lookup::{
 //		Arg(name=b, type=R), pos=1)
 //		Arg(name=sum_to_mean, type=C), pos=0)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee3c2250>]
+//	body = [<ast.Expr object at 0x7ef2b9f7fc10>]
 //	redirection = None
 //--------------------------------------------------------------------------------------------------
 
@@ -87,6 +87,14 @@ impl<'a> KernelCall<RmsExpr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn rms(
+	to: &Tensor,
+	a: &Tensor, b: &Tensor, sum_to_mean: f64,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.rms.kernel.run(to, [], [a, b], [sum_to_mean])
+}
+
 //Fn:
 //	name = rms_recip
 //	args = [
@@ -95,7 +103,7 @@ impl<'a> KernelCall<RmsExpr<'a>> for KernelLibrary {
 //		Arg(name=eps, type=C), pos=0)
 //		Arg(name=sum_to_mean, type=C), pos=1)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee282f50>]
+//	body = [<ast.Expr object at 0x7ef2b9f7ef10>]
 //	redirection = None
 //--------------------------------------------------------------------------------------------------
 
@@ -155,13 +163,21 @@ impl<'a> KernelCall<RmsRecipExpr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn rms_recip(
+	to: &Tensor,
+	a: &Tensor, b: &Tensor, eps: f64, sum_to_mean: f64,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.rms_recip.kernel.run(to, [], [a, b], [eps, sum_to_mean])
+}
+
 //Fn:
 //	name = add
 //	args = [
 //		Arg(name=a, type=E), pos=0)
 //		Arg(name=b, type=E), pos=1)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee282550>]
+//	body = [<ast.Expr object at 0x7ef2b9f7e510>]
 //	redirection = None
 //--------------------------------------------------------------------------------------------------
 
@@ -201,13 +217,21 @@ impl<'a> KernelCall<AddExpr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn add(
+	to: &Tensor,
+	a: &Tensor, b: &Tensor,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.add.kernel.run(to, [a, b], [], [])
+}
+
 //Fn:
 //	name = sub
 //	args = [
 //		Arg(name=a, type=E), pos=0)
 //		Arg(name=b, type=E), pos=1)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee281e50>]
+//	body = [<ast.Expr object at 0x7ef2b9f7de10>]
 //	redirection = None
 //--------------------------------------------------------------------------------------------------
 
@@ -247,13 +271,21 @@ impl<'a> KernelCall<SubExpr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn sub(
+	to: &Tensor,
+	a: &Tensor, b: &Tensor,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.sub.kernel.run(to, [a, b], [], [])
+}
+
 //Fn:
 //	name = mul
 //	args = [
 //		Arg(name=a, type=E), pos=0)
 //		Arg(name=b, type=E), pos=1)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee281750>]
+//	body = [<ast.Expr object at 0x7ef2b9f7d710>]
 //	redirection = None
 //--------------------------------------------------------------------------------------------------
 
@@ -293,6 +325,14 @@ impl<'a> KernelCall<MulExpr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn mul(
+	to: &Tensor,
+	a: &Tensor, b: &Tensor,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.mul.kernel.run(to, [a, b], [], [])
+}
+
 //Fn:
 //	name = acc_mul
 //	args = [
@@ -300,7 +340,7 @@ impl<'a> KernelCall<MulExpr<'a>> for KernelLibrary {
 //		Arg(name=a, type=E), pos=1)
 //		Arg(name=b, type=E), pos=2)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee280f50>]
+//	body = [<ast.Expr object at 0x7ef2b9f7cf10>]
 //	redirection = None
 //--------------------------------------------------------------------------------------------------
 
@@ -346,6 +386,14 @@ impl<'a> KernelCall<AccMulExpr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn acc_mul(
+	to: &Tensor,
+	x: &Tensor, a: &Tensor, b: &Tensor,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.acc_mul.kernel.run(to, [x, a, b], [], [])
+}
+
 //Fn:
 //	name = mul_scaled
 //	args = [
@@ -353,7 +401,7 @@ impl<'a> KernelCall<AccMulExpr<'a>> for KernelLibrary {
 //		Arg(name=b, type=E), pos=1)
 //		Arg(name=scale, type=C), pos=0)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee280650>]
+//	body = [<ast.Expr object at 0x7ef2b9f7c610>]
 //	redirection = None
 //--------------------------------------------------------------------------------------------------
 
@@ -399,6 +447,14 @@ impl<'a> KernelCall<MulScaledExpr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn mul_scaled(
+	to: &Tensor,
+	a: &Tensor, b: &Tensor, scale: f64,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.mul_scaled.kernel.run(to, [a, b], [], [scale])
+}
+
 //Fn:
 //	name = mul_scaled2
 //	args = [
@@ -407,8 +463,8 @@ impl<'a> KernelCall<MulScaledExpr<'a>> for KernelLibrary {
 //		Arg(name=scale1, type=C), pos=0)
 //		Arg(name=scale2, type=C), pos=1)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee27fc10>]
-//	redirection = <__main__.Redirect object at 0x7b88ee262060>
+//	body = [<ast.Expr object at 0x7ef2b9f7bbd0>]
+//	redirection = <__main__.Redirect object at 0x7ef2b9f5b0e0>
 //--------------------------------------------------------------------------------------------------
 
 type MulScaled2Expr<'a> =
@@ -443,13 +499,21 @@ impl<'a> KernelCall<MulScaled2Expr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn mul_scaled2(
+	to: &Tensor,
+	a: &Tensor, b: &Tensor, scale1: f64, scale2: f64,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.mul_scaled.kernel.run(to, [a, b], [], [scale1 * scale2])
+}
+
 //Fn:
 //	name = mul_x_ln_y
 //	args = [
 //		Arg(name=x, type=E), pos=0)
 //		Arg(name=y, type=E), pos=1)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee27ed90>]
+//	body = [<ast.Expr object at 0x7ef2b9f7ad50>]
 //	redirection = None
 //--------------------------------------------------------------------------------------------------
 
@@ -493,6 +557,14 @@ impl<'a> KernelCall<MulXLnYExpr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn mul_x_ln_y(
+	to: &Tensor,
+	x: &Tensor, y: &Tensor,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.mul_x_ln_y.kernel.run(to, [x, y], [], [])
+}
+
 //Fn:
 //	name = weighted_add
 //	args = [
@@ -501,7 +573,7 @@ impl<'a> KernelCall<MulXLnYExpr<'a>> for KernelLibrary {
 //		Arg(name=b, type=E), pos=1)
 //		Arg(name=b_weight, type=C), pos=1)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee27e310>]
+//	body = [<ast.Expr object at 0x7ef2b9f7a2d0>]
 //	redirection = None
 //--------------------------------------------------------------------------------------------------
 
@@ -553,6 +625,14 @@ impl<'a> KernelCall<WeightedAddExpr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn weighted_add(
+	to: &Tensor,
+	a: &Tensor, a_weight: f64, b: &Tensor, b_weight: f64,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.weighted_add.kernel.run(to, [a, b], [], [a_weight, b_weight])
+}
+
 //Fn:
 //	name = weighted_sub
 //	args = [
@@ -561,8 +641,8 @@ impl<'a> KernelCall<WeightedAddExpr<'a>> for KernelLibrary {
 //		Arg(name=b, type=E), pos=1)
 //		Arg(name=b_weight, type=C), pos=1)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee27d810>]
-//	redirection = <__main__.Redirect object at 0x7b88ee262570>
+//	body = [<ast.Expr object at 0x7ef2b9f797d0>]
+//	redirection = <__main__.Redirect object at 0x7ef2b9f5b3e0>
 //--------------------------------------------------------------------------------------------------
 
 type WeightedSubExpr<'a> =
@@ -597,6 +677,14 @@ impl<'a> KernelCall<WeightedSubExpr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn weighted_sub(
+	to: &Tensor,
+	a: &Tensor, a_weight: f64, b: &Tensor, b_weight: f64,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.weighted_add.kernel.run(to, [a, b], [], [a_weight, -b_weight])
+}
+
 //Fn:
 //	name = add_x_mul_scaled
 //	args = [
@@ -605,7 +693,7 @@ impl<'a> KernelCall<WeightedSubExpr<'a>> for KernelLibrary {
 //		Arg(name=b, type=E), pos=2)
 //		Arg(name=scale, type=C), pos=0)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee27c8d0>]
+//	body = [<ast.Expr object at 0x7ef2b9f78890>]
 //	redirection = None
 //--------------------------------------------------------------------------------------------------
 
@@ -657,6 +745,14 @@ impl<'a> KernelCall<AddXMulScaledExpr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn add_x_mul_scaled(
+	to: &Tensor,
+	x: &Tensor, a: &Tensor, b: &Tensor, scale: f64,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.add_x_mul_scaled.kernel.run(to, [x, a, b], [], [scale])
+}
+
 //Fn:
 //	name = add_x_mul_scaled2
 //	args = [
@@ -666,8 +762,8 @@ impl<'a> KernelCall<AddXMulScaledExpr<'a>> for KernelLibrary {
 //		Arg(name=scale1, type=C), pos=0)
 //		Arg(name=scale2, type=C), pos=1)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee26fc50>]
-//	redirection = <__main__.Redirect object at 0x7b88ee262870>
+//	body = [<ast.Expr object at 0x7ef2b9f6bc10>]
+//	redirection = <__main__.Redirect object at 0x7ef2b9f5b950>
 //--------------------------------------------------------------------------------------------------
 
 type AddXMulScaled2Expr<'a> =
@@ -708,13 +804,21 @@ impl<'a> KernelCall<AddXMulScaled2Expr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn add_x_mul_scaled2(
+	to: &Tensor,
+	x: &Tensor, a: &Tensor, b: &Tensor, scale1: f64, scale2: f64,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.add_x_mul_scaled.kernel.run(to, [x, a, b], [], [scale1 * scale2])
+}
+
 //Fn:
 //	name = dot
 //	args = [
 //		Arg(name=a, type=R), pos=0)
 //		Arg(name=b, type=R), pos=1)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee28b3d0>]
+//	body = [<ast.Expr object at 0x7ef2b9f87390>]
 //	redirection = None
 //--------------------------------------------------------------------------------------------------
 
@@ -758,6 +862,14 @@ impl<'a> KernelCall<DotExpr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn dot(
+	to: &Tensor,
+	a: &Tensor, b: &Tensor,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.dot.kernel.run(to, [], [a, b], [])
+}
+
 //Fn:
 //	name = dot_scaled
 //	args = [
@@ -765,7 +877,7 @@ impl<'a> KernelCall<DotExpr<'a>> for KernelLibrary {
 //		Arg(name=b, type=R), pos=1)
 //		Arg(name=scale, type=C), pos=0)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee28aa50>]
+//	body = [<ast.Expr object at 0x7ef2b9f86a10>]
 //	redirection = None
 //--------------------------------------------------------------------------------------------------
 
@@ -815,6 +927,14 @@ impl<'a> KernelCall<DotScaledExpr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn dot_scaled(
+	to: &Tensor,
+	a: &Tensor, b: &Tensor, scale: f64,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.dot_scaled.kernel.run(to, [], [a, b], [scale])
+}
+
 //Fn:
 //	name = dot_scaled2
 //	args = [
@@ -823,8 +943,8 @@ impl<'a> KernelCall<DotScaledExpr<'a>> for KernelLibrary {
 //		Arg(name=scale1, type=C), pos=0)
 //		Arg(name=scale2, type=C), pos=1)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee289ed0>]
-//	redirection = <__main__.Redirect object at 0x7b88ee262cf0>
+//	body = [<ast.Expr object at 0x7ef2b9f85e90>]
+//	redirection = <__main__.Redirect object at 0x7ef2b9f5bdd0>
 //--------------------------------------------------------------------------------------------------
 
 type DotScaled2Expr<'a> =
@@ -863,6 +983,14 @@ impl<'a> KernelCall<DotScaled2Expr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn dot_scaled2(
+	to: &Tensor,
+	a: &Tensor, b: &Tensor, scale1: f64, scale2: f64,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.dot_scaled.kernel.run(to, [], [a, b], [scale1 * scale2])
+}
+
 //Fn:
 //	name = weighted_add_t_dot
 //	args = [
@@ -872,7 +1000,7 @@ impl<'a> KernelCall<DotScaled2Expr<'a>> for KernelLibrary {
 //		Arg(name=b, type=R), pos=1)
 //		Arg(name=ab_weight, type=C), pos=1)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee288d50>]
+//	body = [<ast.Expr object at 0x7ef2b9f84d10>]
 //	redirection = None
 //--------------------------------------------------------------------------------------------------
 
@@ -934,6 +1062,14 @@ impl<'a> KernelCall<WeightedAddTDotExpr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn weighted_add_t_dot(
+	to: &Tensor,
+	t: &Tensor, t_weight: f64, a: &Tensor, b: &Tensor, ab_weight: f64,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.weighted_add_t_dot.kernel.run(to, [t], [a, b], [t_weight, ab_weight])
+}
+
 //Fn:
 //	name = weighted_add_t_dot2
 //	args = [
@@ -944,8 +1080,8 @@ impl<'a> KernelCall<WeightedAddTDotExpr<'a>> for KernelLibrary {
 //		Arg(name=ab_weight1, type=C), pos=1)
 //		Arg(name=ab_weight2, type=C), pos=2)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee28bd10>]
-//	redirection = <__main__.Redirect object at 0x7b88ee263140>
+//	body = [<ast.Expr object at 0x7ef2b9f9c1d0>]
+//	redirection = <__main__.Redirect object at 0x7ef2b9f88260>
 //--------------------------------------------------------------------------------------------------
 
 type WeightedAddTDot2Expr<'a> =
@@ -996,6 +1132,14 @@ impl<'a> KernelCall<WeightedAddTDot2Expr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn weighted_add_t_dot2(
+	to: &Tensor,
+	t: &Tensor, t_weight: f64, a: &Tensor, b: &Tensor, ab_weight1: f64, ab_weight2: f64,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.weighted_add_t_dot.kernel.run(to, [t], [a, b], [t_weight, ab_weight1 * ab_weight2])
+}
+
 //Fn:
 //	name = mul_sub_a_mul_b_c_d
 //	args = [
@@ -1004,7 +1148,7 @@ impl<'a> KernelCall<WeightedAddTDot2Expr<'a>> for KernelLibrary {
 //		Arg(name=c, type=E), pos=2)
 //		Arg(name=d, type=E), pos=3)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee29d0d0>]
+//	body = [<ast.Expr object at 0x7ef2b9f9d550>]
 //	redirection = None
 //--------------------------------------------------------------------------------------------------
 
@@ -1056,6 +1200,14 @@ impl<'a> KernelCall<MulSubAMulBCDExpr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn mul_sub_a_mul_b_c_d(
+	to: &Tensor,
+	a: &Tensor, b: &Tensor, c: &Tensor, d: &Tensor,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.mul_sub_a_mul_b_c_d.kernel.run(to, [a, b, c, d], [], [])
+}
+
 //Fn:
 //	name = mul_sub_a_b_c
 //	args = [
@@ -1063,7 +1215,7 @@ impl<'a> KernelCall<MulSubAMulBCDExpr<'a>> for KernelLibrary {
 //		Arg(name=b, type=E), pos=1)
 //		Arg(name=c, type=E), pos=2)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee29dad0>]
+//	body = [<ast.Expr object at 0x7ef2b9f9df50>]
 //	redirection = None
 //--------------------------------------------------------------------------------------------------
 
@@ -1109,13 +1261,21 @@ impl<'a> KernelCall<MulSubABCExpr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn mul_sub_a_b_c(
+	to: &Tensor,
+	a: &Tensor, b: &Tensor, c: &Tensor,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.mul_sub_a_b_c.kernel.run(to, [a, b, c], [], [])
+}
+
 //Fn:
 //	name = sqrt_recip
 //	args = [
 //		Arg(name=a, type=E), pos=0)
 //		Arg(name=eps, type=C), pos=0)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee29e2d0>]
+//	body = [<ast.Expr object at 0x7ef2b9f9e750>]
 //	redirection = None
 //--------------------------------------------------------------------------------------------------
 
@@ -1159,6 +1319,14 @@ impl<'a> KernelCall<SqrtRecipExpr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn sqrt_recip(
+	to: &Tensor,
+	a: &Tensor, eps: f64,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.sqrt_recip.kernel.run(to, [a], [], [eps])
+}
+
 //Fn:
 //	name = acc_mul_scaled
 //	args = [
@@ -1167,7 +1335,7 @@ impl<'a> KernelCall<SqrtRecipExpr<'a>> for KernelLibrary {
 //		Arg(name=b, type=E), pos=2)
 //		Arg(name=scale, type=C), pos=0)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee29ee50>]
+//	body = [<ast.Expr object at 0x7ef2b9f9f2d0>]
 //	redirection = None
 //--------------------------------------------------------------------------------------------------
 
@@ -1219,6 +1387,14 @@ impl<'a> KernelCall<AccMulScaledExpr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn acc_mul_scaled(
+	to: &Tensor,
+	x: &Tensor, a: &Tensor, b: &Tensor, scale: f64,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.acc_mul_scaled.kernel.run(to, [x, a, b], [], [scale])
+}
+
 //Fn:
 //	name = acc_neg_mul_scaled
 //	args = [
@@ -1227,8 +1403,8 @@ impl<'a> KernelCall<AccMulScaledExpr<'a>> for KernelLibrary {
 //		Arg(name=b, type=E), pos=2)
 //		Arg(name=scale, type=C), pos=0)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee29f950>]
-//	redirection = <__main__.Redirect object at 0x7b88ee263a40>
+//	body = [<ast.Expr object at 0x7ef2b9f9fdd0>]
+//	redirection = <__main__.Redirect object at 0x7ef2b9f88b30>
 //--------------------------------------------------------------------------------------------------
 
 type AccNegMulScaledExpr<'a> =
@@ -1263,13 +1439,21 @@ impl<'a> KernelCall<AccNegMulScaledExpr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn acc_neg_mul_scaled(
+	to: &Tensor,
+	x: &Tensor, a: &Tensor, b: &Tensor, scale: f64,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.acc_mul_scaled.kernel.run(to, [x, a, b], [], [-scale])
+}
+
 //Fn:
 //	name = swiglu
 //	args = [
 //		Arg(name=gate, type=E), pos=0)
 //		Arg(name=lin, type=E), pos=1)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee2a4690>]
+//	body = [<ast.Expr object at 0x7ef2b9fa4b10>]
 //	redirection = None
 //--------------------------------------------------------------------------------------------------
 
@@ -1313,12 +1497,20 @@ impl<'a> KernelCall<SwigluExpr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn swiglu(
+	to: &Tensor,
+	gate: &Tensor, lin: &Tensor,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.swiglu.kernel.run(to, [gate, lin], [], [])
+}
+
 //Fn:
 //	name = fill
 //	args = [
 //		Arg(name=v, type=C), pos=0)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee2a4e10>]
+//	body = [<ast.Expr object at 0x7ef2b9fa5290>]
 //	redirection = None
 //--------------------------------------------------------------------------------------------------
 
@@ -1352,12 +1544,20 @@ impl<'a> KernelCall<FillExpr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn fill(
+	to: &Tensor,
+	v: f64,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.fill.kernel.run(to, [], [], [v])
+}
+
 //Fn:
 //	name = copy
 //	args = [
 //		Arg(name=v, type=E), pos=0)
 //	]
-//	body = [<ast.Expr object at 0x7b88ee2a5310>]
+//	body = [<ast.Expr object at 0x7ef2b9fa5790>]
 //	redirection = None
 //--------------------------------------------------------------------------------------------------
 
@@ -1391,6 +1591,14 @@ impl<'a> KernelCall<CopyExpr<'a>> for KernelLibrary {
 	}
 }
 
+pub fn copy(
+	to: &Tensor,
+	v: &Tensor,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.copy.kernel.run(to, [v], [], [])
+}
+
 //Fn:
 //	name = swiglu_d_gate
 //	args = [
@@ -1398,7 +1606,7 @@ impl<'a> KernelCall<CopyExpr<'a>> for KernelLibrary {
 //		Arg(name=gate, type=E), pos=1)
 //		Arg(name=d_out, type=E), pos=2)
 //	]
-//	body = [<ast.Assign object at 0x7b88ee2a5a10>, <ast.Assign object at 0x7b88ee2a5ed0>, <ast.Expr object at 0x7b88ee2a6310>]
+//	body = [<ast.Assign object at 0x7ef2b9fa5e90>, <ast.Assign object at 0x7ef2b9fa6350>, <ast.Expr object at 0x7ef2b9fa6790>]
 //	redirection = None
 //--------------------------------------------------------------------------------------------------
 
@@ -1480,6 +1688,32 @@ impl KernelLibraryData {
 			swiglu_d_gate: SwigluDGateKernel::new(),
 		}
 	}
+}
+
+pub mod export {
+	pub use super::KernelLibraryData;
+
+	pub use super::rms;
+	pub use super::rms_recip;
+	pub use super::add;
+	pub use super::sub;
+	pub use super::mul;
+	pub use super::acc_mul;
+	pub use super::mul_scaled;
+	pub use super::mul_x_ln_y;
+	pub use super::weighted_add;
+	pub use super::add_x_mul_scaled;
+	pub use super::dot;
+	pub use super::dot_scaled;
+	pub use super::weighted_add_t_dot;
+	pub use super::mul_sub_a_mul_b_c_d;
+	pub use super::mul_sub_a_b_c;
+	pub use super::sqrt_recip;
+	pub use super::acc_mul_scaled;
+	pub use super::swiglu;
+	pub use super::fill;
+	pub use super::copy;
+	pub use super::swiglu_d_gate;
 }
 
 //--------------------------------------------------------------------------------------------------

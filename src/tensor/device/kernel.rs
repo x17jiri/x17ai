@@ -24,6 +24,8 @@ pub mod library;
 pub mod lookup;
 pub mod registry;
 
+pub use generated_kernels::export::*;
+
 //--------------------------------------------------------------------------------------------------
 
 pub struct ElemArg {

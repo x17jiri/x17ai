@@ -266,58 +266,8 @@ for kernel in kernel_list:
 		print(f"}}")
 		print()
 		args = ", ".join([arg.name for arg in kernel.args])
-		#header = ", ".join([f"{arg.name}: {arg.rust_type}" for arg in kernel.args])
-		#if kernel.needs_lifetime:
-		#	print(f"	pub fn call<'a>(&'a self, {header}) -> {kernel.cls_name}KernelCall<'a> {{")
-		#	print(f"		{kernel.cls_name}KernelCall {{ kernel: self, {args} }}")
-		#	print(f"	}}")
-		#else:
-		#	print(f"	pub fn call<'a>(&'a self, {header}) -> {kernel.cls_name}KernelCall<'a> {{")
-		#	print(f"		{kernel.cls_name}KernelCall {{ kernel: self, {args}, phantom: std::marker::PhantomData, }}")
-		#	print(f"	}}")
-		#print(f"}}")
-		#print()
-		#print(f"pub struct {kernel.cls_name}KernelCall<'a> {{")
-		#print(f"	kernel: &'a {kernel.cls_name}Kernel,")
-		#for arg in kernel.args:
-		#	print(f"	{arg.name}: {arg.rust_type},")
-		#if not kernel.needs_lifetime:
-		#	print(f"	phantom: std::marker::PhantomData<&'a ()>,")
-		#print(f"}}")
-		#print()
-		#print(f"impl<'a> EvaluatesToTensor for {kernel.cls_name}KernelCall<'a> {{")
-		#print(f"	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {{")
-		#e_args = ", ".join('self.'+arg for arg in kernel.e_args)
-		#r_args = ", ".join('self.'+arg for arg in kernel.r_args)
-		#c_args = ", ".join('self.'+arg for arg in kernel.c_args)
-		#print(f"		self.kernel.kernel.run(to, [{e_args}], [{r_args}], [{c_args}])")
-		#print(f"	}}")
-		#print(f"}}")
-		#print()
-        #
-		#kernel_call_class = f"{kernel.cls_name}KernelCall"
-		#kernel_call_expr = f"{kernel.name}.call({args})"
-	#else:
-		##print(f"// Redirecting {kernel.name} to {kernel.redirection}")
-        #
-		#kernel_call_func = re.search(r'^\s*(\w+)\s*\(', kernel.redirection).group(1)
-		#kernel_call_class = f"{to_camel_case(kernel_call_func)}KernelCall"
-		#kernel_call_expr = result = re.sub(r'^\s*(\w+)\s*\(', r'\1.call(', kernel.redirection)
 
-	if kernel.temp:
-		header = ", ".join([f"{arg.name}: {re.sub("&'a ", "&", arg.rust_type)}" for arg in kernel.args])
-		print(f"pub fn {kernel.name}(")
-		print(f"	to: &Tensor,")
-		print(f"	{header},")
-		print(f") -> Result<(), ErrPack<TensorOpError>> {{")
-		print(f"	let library = to.builtin_kernel_library();")
-		e_args = ", ".join(kernel.e_args)
-		r_args = ", ".join(kernel.r_args)
-		c_args = ", ".join(kernel.c_args)
-		print(f"	library.data.{kernel.name}.kernel.run(to, [{e_args}], [{r_args}], [{c_args}])")
-		print(f"}}")
-
-	else:
+	if not kernel.temp:
 		print(f"type {kernel.cls_name}Expr<'a> =")
 		print(f"\t{kernel.body_op.print_expr("\t")};")
 
@@ -344,7 +294,26 @@ for kernel in kernel_list:
 			print(f"		self.data.{kernel.name}.kernel.run(to, [{e_args}], [{r_args}], [{c_args}])")
 		print(f"	}}")
 		print(f"}}")
+		print()
 
+	header = ", ".join([f"{arg.name}: {re.sub("&'a ", "&", arg.rust_type)}" for arg in kernel.args])
+	print(f"pub fn {kernel.name}(")
+	print(f"	to: &Tensor,")
+	print(f"	{header},")
+	print(f") -> Result<(), ErrPack<TensorOpError>> {{")
+	print(f"	let library = to.builtin_kernel_library();")
+	if kernel.redirection:
+		zipped = list(zip(kernel.redirection.args, kernel_map[kernel.redirection.target].args))
+		e_args = ", ".join(z[0] for z in zipped if z[1].type == ELEM_TYPE)
+		r_args = ", ".join(z[0] for z in zipped if z[1].type == REDUCE_TYPE)
+		c_args = ", ".join(z[0] for z in zipped if z[1].type == CONST_TYPE)
+		print(f"	library.data.{kernel.redirection.target}.kernel.run(to, [{e_args}], [{r_args}], [{c_args}])")
+	else:
+		e_args = ", ".join(kernel.e_args)
+		r_args = ", ".join(kernel.r_args)
+		c_args = ", ".join(kernel.c_args)
+		print(f"	library.data.{kernel.name}.kernel.run(to, [{e_args}], [{r_args}], [{c_args}])")
+	print(f"}}")
 	print()
 
 print("//--------------------------------------------------------------------------------------------------")
@@ -363,6 +332,14 @@ for kernel in kernel_list:
 		print(f"			{kernel.name}: {kernel.cls_name}Kernel::new(),")
 print(f"		}}")
 print(f"	}}")
+print(f"}}")
+print()
+print(f"pub mod export {{")
+print(f"	pub use super::KernelLibraryData;")
+print()
+for kernel in kernel_list:
+	if not kernel.redirection:
+		print(f"	pub use super::{kernel.name};")
 print(f"}}")
 print()
 print("//--------------------------------------------------------------------------------------------------")
