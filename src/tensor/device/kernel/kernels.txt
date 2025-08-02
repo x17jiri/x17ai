@@ -50,7 +50,12 @@ def acc_mul_scaled(x: E, a: E, b: E, scale: C):                 x + (a * b * sca
 @acc_mul_scaled(x, a, b, -scale)
 def acc_neg_mul_scaled(x: E, a: E, b: E, scale: C):             x - (a * b * scale)
 
-def swiglu(lin: E, gate: E): lin * gate.swish()
+def swiglu(gate: E, lin: E): gate.swish() * lin
 
 def fill(v: C):     v
 def copy(v: E):     v
+
+def swiglu_d_gate(lin: E, gate: E, d_out: E):
+	sigmoid = gate.clone().sigmoid()
+	swish = gate * sigmoid.clone()
+	(sigmoid.clone() + swish.clone() - (sigmoid * swish)) * lin * d_out

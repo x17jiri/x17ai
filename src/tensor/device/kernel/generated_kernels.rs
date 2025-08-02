@@ -26,6 +26,15 @@ use super::lookup::{
 	SwishLookupExpr,
 };
 
+//Fn:
+//	name = rms
+//	args = [
+//		Arg(name=a, type=R), pos=0)
+//		Arg(name=b, type=R), pos=1)
+//		Arg(name=sum_to_mean, type=C), pos=0)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee3c2250>]
+//	redirection = None
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -78,6 +87,16 @@ impl<'a> KernelCall<RmsExpr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = rms_recip
+//	args = [
+//		Arg(name=a, type=R), pos=0)
+//		Arg(name=b, type=R), pos=1)
+//		Arg(name=eps, type=C), pos=0)
+//		Arg(name=sum_to_mean, type=C), pos=1)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee282f50>]
+//	redirection = None
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -136,6 +155,14 @@ impl<'a> KernelCall<RmsRecipExpr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = add
+//	args = [
+//		Arg(name=a, type=E), pos=0)
+//		Arg(name=b, type=E), pos=1)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee282550>]
+//	redirection = None
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -174,6 +201,14 @@ impl<'a> KernelCall<AddExpr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = sub
+//	args = [
+//		Arg(name=a, type=E), pos=0)
+//		Arg(name=b, type=E), pos=1)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee281e50>]
+//	redirection = None
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -212,6 +247,14 @@ impl<'a> KernelCall<SubExpr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = mul
+//	args = [
+//		Arg(name=a, type=E), pos=0)
+//		Arg(name=b, type=E), pos=1)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee281750>]
+//	redirection = None
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -250,6 +293,15 @@ impl<'a> KernelCall<MulExpr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = acc_mul
+//	args = [
+//		Arg(name=x, type=E), pos=0)
+//		Arg(name=a, type=E), pos=1)
+//		Arg(name=b, type=E), pos=2)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee280f50>]
+//	redirection = None
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -294,6 +346,15 @@ impl<'a> KernelCall<AccMulExpr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = mul_scaled
+//	args = [
+//		Arg(name=a, type=E), pos=0)
+//		Arg(name=b, type=E), pos=1)
+//		Arg(name=scale, type=C), pos=0)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee280650>]
+//	redirection = None
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -338,6 +399,16 @@ impl<'a> KernelCall<MulScaledExpr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = mul_scaled2
+//	args = [
+//		Arg(name=a, type=E), pos=0)
+//		Arg(name=b, type=E), pos=1)
+//		Arg(name=scale1, type=C), pos=0)
+//		Arg(name=scale2, type=C), pos=1)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee27fc10>]
+//	redirection = <__main__.Redirect object at 0x7b88ee262060>
 //--------------------------------------------------------------------------------------------------
 
 type MulScaled2Expr<'a> =
@@ -372,6 +443,14 @@ impl<'a> KernelCall<MulScaled2Expr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = mul_x_ln_y
+//	args = [
+//		Arg(name=x, type=E), pos=0)
+//		Arg(name=y, type=E), pos=1)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee27ed90>]
+//	redirection = None
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -414,6 +493,16 @@ impl<'a> KernelCall<MulXLnYExpr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = weighted_add
+//	args = [
+//		Arg(name=a, type=E), pos=0)
+//		Arg(name=a_weight, type=C), pos=0)
+//		Arg(name=b, type=E), pos=1)
+//		Arg(name=b_weight, type=C), pos=1)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee27e310>]
+//	redirection = None
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -464,6 +553,16 @@ impl<'a> KernelCall<WeightedAddExpr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = weighted_sub
+//	args = [
+//		Arg(name=a, type=E), pos=0)
+//		Arg(name=a_weight, type=C), pos=0)
+//		Arg(name=b, type=E), pos=1)
+//		Arg(name=b_weight, type=C), pos=1)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee27d810>]
+//	redirection = <__main__.Redirect object at 0x7b88ee262570>
 //--------------------------------------------------------------------------------------------------
 
 type WeightedSubExpr<'a> =
@@ -498,6 +597,16 @@ impl<'a> KernelCall<WeightedSubExpr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = add_x_mul_scaled
+//	args = [
+//		Arg(name=x, type=E), pos=0)
+//		Arg(name=a, type=E), pos=1)
+//		Arg(name=b, type=E), pos=2)
+//		Arg(name=scale, type=C), pos=0)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee27c8d0>]
+//	redirection = None
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -548,6 +657,17 @@ impl<'a> KernelCall<AddXMulScaledExpr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = add_x_mul_scaled2
+//	args = [
+//		Arg(name=x, type=E), pos=0)
+//		Arg(name=a, type=E), pos=1)
+//		Arg(name=b, type=E), pos=2)
+//		Arg(name=scale1, type=C), pos=0)
+//		Arg(name=scale2, type=C), pos=1)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee26fc50>]
+//	redirection = <__main__.Redirect object at 0x7b88ee262870>
 //--------------------------------------------------------------------------------------------------
 
 type AddXMulScaled2Expr<'a> =
@@ -588,6 +708,14 @@ impl<'a> KernelCall<AddXMulScaled2Expr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = dot
+//	args = [
+//		Arg(name=a, type=R), pos=0)
+//		Arg(name=b, type=R), pos=1)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee28b3d0>]
+//	redirection = None
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -630,6 +758,15 @@ impl<'a> KernelCall<DotExpr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = dot_scaled
+//	args = [
+//		Arg(name=a, type=R), pos=0)
+//		Arg(name=b, type=R), pos=1)
+//		Arg(name=scale, type=C), pos=0)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee28aa50>]
+//	redirection = None
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -678,6 +815,16 @@ impl<'a> KernelCall<DotScaledExpr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = dot_scaled2
+//	args = [
+//		Arg(name=a, type=R), pos=0)
+//		Arg(name=b, type=R), pos=1)
+//		Arg(name=scale1, type=C), pos=0)
+//		Arg(name=scale2, type=C), pos=1)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee289ed0>]
+//	redirection = <__main__.Redirect object at 0x7b88ee262cf0>
 //--------------------------------------------------------------------------------------------------
 
 type DotScaled2Expr<'a> =
@@ -716,6 +863,17 @@ impl<'a> KernelCall<DotScaled2Expr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = weighted_add_t_dot
+//	args = [
+//		Arg(name=t, type=E), pos=0)
+//		Arg(name=t_weight, type=C), pos=0)
+//		Arg(name=a, type=R), pos=0)
+//		Arg(name=b, type=R), pos=1)
+//		Arg(name=ab_weight, type=C), pos=1)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee288d50>]
+//	redirection = None
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -776,6 +934,18 @@ impl<'a> KernelCall<WeightedAddTDotExpr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = weighted_add_t_dot2
+//	args = [
+//		Arg(name=t, type=E), pos=0)
+//		Arg(name=t_weight, type=C), pos=0)
+//		Arg(name=a, type=R), pos=0)
+//		Arg(name=b, type=R), pos=1)
+//		Arg(name=ab_weight1, type=C), pos=1)
+//		Arg(name=ab_weight2, type=C), pos=2)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee28bd10>]
+//	redirection = <__main__.Redirect object at 0x7b88ee263140>
 //--------------------------------------------------------------------------------------------------
 
 type WeightedAddTDot2Expr<'a> =
@@ -826,6 +996,16 @@ impl<'a> KernelCall<WeightedAddTDot2Expr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = mul_sub_a_mul_b_c_d
+//	args = [
+//		Arg(name=a, type=E), pos=0)
+//		Arg(name=b, type=E), pos=1)
+//		Arg(name=c, type=E), pos=2)
+//		Arg(name=d, type=E), pos=3)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee29d0d0>]
+//	redirection = None
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -876,6 +1056,15 @@ impl<'a> KernelCall<MulSubAMulBCDExpr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = mul_sub_a_b_c
+//	args = [
+//		Arg(name=a, type=E), pos=0)
+//		Arg(name=b, type=E), pos=1)
+//		Arg(name=c, type=E), pos=2)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee29dad0>]
+//	redirection = None
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -920,6 +1109,14 @@ impl<'a> KernelCall<MulSubABCExpr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = sqrt_recip
+//	args = [
+//		Arg(name=a, type=E), pos=0)
+//		Arg(name=eps, type=C), pos=0)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee29e2d0>]
+//	redirection = None
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -962,6 +1159,16 @@ impl<'a> KernelCall<SqrtRecipExpr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = acc_mul_scaled
+//	args = [
+//		Arg(name=x, type=E), pos=0)
+//		Arg(name=a, type=E), pos=1)
+//		Arg(name=b, type=E), pos=2)
+//		Arg(name=scale, type=C), pos=0)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee29ee50>]
+//	redirection = None
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -1012,6 +1219,16 @@ impl<'a> KernelCall<AccMulScaledExpr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = acc_neg_mul_scaled
+//	args = [
+//		Arg(name=x, type=E), pos=0)
+//		Arg(name=a, type=E), pos=1)
+//		Arg(name=b, type=E), pos=2)
+//		Arg(name=scale, type=C), pos=0)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee29f950>]
+//	redirection = <__main__.Redirect object at 0x7b88ee263a40>
 //--------------------------------------------------------------------------------------------------
 
 type AccNegMulScaledExpr<'a> =
@@ -1046,6 +1263,14 @@ impl<'a> KernelCall<AccNegMulScaledExpr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = swiglu
+//	args = [
+//		Arg(name=gate, type=E), pos=0)
+//		Arg(name=lin, type=E), pos=1)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee2a4690>]
+//	redirection = None
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -1055,21 +1280,21 @@ pub struct SwigluKernel {
 
 impl SwigluKernel {
 	fn new() -> Self {
-		let (builder, [lin, gate], [], []) =
+		let (builder, [gate, lin], [], []) =
 			KernelBuilder::new(
-				"swiglu", ["lin", "gate"], [], []
+				"swiglu", ["gate", "lin"], [], []
 			);
-		let kernel = builder.build(lin * gate.swish());
+		let kernel = builder.build(gate.swish() * lin);
 		Self { kernel }
 	}
 }
 
 type SwigluExpr<'a> =
 	MulLookupExpr<
-		&'a Tensor,
 		SwishLookupExpr<
 			&'a Tensor,
 		>,
+		&'a Tensor,
 	>;
 
 impl<'a> KernelCall<SwigluExpr<'a>> for KernelLibrary {
@@ -1079,15 +1304,22 @@ impl<'a> KernelCall<SwigluExpr<'a>> for KernelLibrary {
 		expr: LookupWrapper<SwigluExpr<'a>>
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let MulLookupExpr(
-			lin,
 			SwishLookupExpr(
 				gate,
 			),
+			lin,
 		) = expr.0;
-		self.data.swiglu.kernel.run(to, [lin, gate], [], [])
+		self.data.swiglu.kernel.run(to, [gate, lin], [], [])
 	}
 }
 
+//Fn:
+//	name = fill
+//	args = [
+//		Arg(name=v, type=C), pos=0)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee2a4e10>]
+//	redirection = None
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -1120,6 +1352,13 @@ impl<'a> KernelCall<FillExpr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = copy
+//	args = [
+//		Arg(name=v, type=E), pos=0)
+//	]
+//	body = [<ast.Expr object at 0x7b88ee2a5310>]
+//	redirection = None
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -1152,6 +1391,43 @@ impl<'a> KernelCall<CopyExpr<'a>> for KernelLibrary {
 	}
 }
 
+//Fn:
+//	name = swiglu_d_gate
+//	args = [
+//		Arg(name=lin, type=E), pos=0)
+//		Arg(name=gate, type=E), pos=1)
+//		Arg(name=d_out, type=E), pos=2)
+//	]
+//	body = [<ast.Assign object at 0x7b88ee2a5a10>, <ast.Assign object at 0x7b88ee2a5ed0>, <ast.Expr object at 0x7b88ee2a6310>]
+//	redirection = None
+//--------------------------------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub struct SwigluDGateKernel {
+	kernel: Kernel<3, 0, 0>,
+}
+
+impl SwigluDGateKernel {
+	fn new() -> Self {
+		let (builder, [lin, gate, d_out], [], []) =
+			KernelBuilder::new(
+				"swiglu_d_gate", ["lin", "gate", "d_out"], [], []
+			);
+		let sigmoid = gate.clone().sigmoid();
+		let swish = gate * sigmoid.clone();
+		let kernel = builder.build((sigmoid.clone() + swish.clone() - (sigmoid * swish)) * lin * d_out);
+		Self { kernel }
+	}
+}
+
+pub fn swiglu_d_gate(
+	to: &Tensor,
+	lin: &Tensor, gate: &Tensor, d_out: &Tensor,
+) -> Result<(), ErrPack<TensorOpError>> {
+	let library = to.builtin_kernel_library();
+	library.data.swiglu_d_gate.kernel.run(to, [lin, gate, d_out], [], [])
+}
+
 //--------------------------------------------------------------------------------------------------
 
 pub struct KernelLibraryData {
@@ -1175,6 +1451,7 @@ pub struct KernelLibraryData {
 	swiglu: SwigluKernel,
 	fill: FillKernel,
 	copy: CopyKernel,
+	swiglu_d_gate: SwigluDGateKernel,
 }
 
 impl KernelLibraryData {
@@ -1200,6 +1477,7 @@ impl KernelLibraryData {
 			swiglu: SwigluKernel::new(),
 			fill: FillKernel::new(),
 			copy: CopyKernel::new(),
+			swiglu_d_gate: SwigluDGateKernel::new(),
 		}
 	}
 }

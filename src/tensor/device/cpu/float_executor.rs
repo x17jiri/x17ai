@@ -298,6 +298,10 @@ impl<T: 'static + Copy + HasDType + FromToF64> FloatExecutor<T> {
 					math::dot(slice_a, slice_b)
 				},
 
+				ScalarExpr::SigmoidExpr(a) => {
+					let a = Self::eval_expr(a, j, i, elem_args, reduce_args, const_args);
+					math::sigmoid(a)
+				},
 				ScalarExpr::SwishExpr(a) => {
 					let a = Self::eval_expr(a, j, i, elem_args, reduce_args, const_args);
 					math::swish(a)
@@ -531,7 +535,7 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		let o = &*o;
 		for j in 0..o.size[0] {
 			for i in 0..o.size[1] {
-				let o = o.device_data.cast::<T>().add(j * o.stride[0] + i * o.stride[1]);
+				let o = o.device_data.cast::<T>().add(o.offset + j * o.stride[0] + i * o.stride[1]);
 				o.write(T::from_f64(Self::eval_expr(
 					expr,
 					j,

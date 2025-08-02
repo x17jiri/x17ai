@@ -54,6 +54,7 @@ pub enum ScalarExpr {
 
 	DotExpr(Arc<ReduceArg>, Arc<ReduceArg>),
 
+	SigmoidExpr(Arc<ScalarExpr>),
 	SwishExpr(Arc<ScalarExpr>),
 	SqrtExpr(Arc<ScalarExpr>),
 	RecipExpr(Arc<ScalarExpr>, Arc<ScalarExpr>),

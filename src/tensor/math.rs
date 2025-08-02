@@ -94,44 +94,6 @@ where
 			f(&mut m_tensors, &c_tensors)
 		}
 	}
-
-	pub fn are_identical<const MI: usize, const CI: usize>(&self) -> bool
-	where
-		[(); C - 1 - CI]:,
-		[(); M - 1 - MI]:,
-	{
-		let m_tensor = &self.m[MI];
-		let m_offset = m_tensor.map().offset;
-		let m_buf = m_tensor.buf().as_ref();
-
-		let c_tensor = &self.c[CI];
-		let c_offset = c_tensor.map().offset;
-		let c_buf = c_tensor.buf().as_ref();
-
-		let m_stride0 = self.dims[0].strides[MI];
-		let m_stride1 = self.dims[1].strides[MI];
-
-		let c_stride0 = self.dims[0].strides[M + CI];
-		let c_stride1 = self.dims[1].strides[M + CI];
-
-		let buf_eq = std::ptr::eq(m_buf, c_buf);
-
-		let a = buf_eq
-			&& m_offset == c_offset
-			&& (self.dims[0].size <= 1 || m_stride0 == c_stride0)
-			&& (self.dims[1].size <= 1 || m_stride1 == c_stride1);
-
-		let m_buf_ptr = std::ptr::from_ref(m_buf) as usize;
-		let c_buf_ptr = std::ptr::from_ref(c_buf) as usize;
-		let b = (m_buf_ptr ^ c_buf_ptr)
-			| (m_offset ^ c_offset)
-			| (m_stride0 ^ c_stride0)
-			| (m_stride1 ^ c_stride1);
-		let b = b == 0;
-
-		debug_assert!(a == b);
-		b
-	}
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -284,6 +246,8 @@ pub fn sum_all(tensor: &Tensor) -> Result<f64, ErrPack<TensorOpError>> {
 	})?;
 	Ok(sum)
 }
+
+//--------------------------------------------------------------------------------------------------
 
 pub fn approx_eq(a: &Tensor, b: &Tensor, eps: f64) -> Result<bool, ErrPack<TensorOpError>> {
 	let executor = a.executor();

@@ -37,6 +37,10 @@ impl<Expr: LookupExpr> LookupWrapper<Expr> {
 		LookupWrapper(MulLookupExpr(SumLookupExpr(self.0), sum_to_mean))
 	}
 
+	pub fn sigmoid(self) -> LookupWrapper<SigmoidLookupExpr<Expr>> {
+		LookupWrapper(SigmoidLookupExpr(self.0))
+	}
+
 	pub fn swish(self) -> LookupWrapper<SwishLookupExpr<Expr>> {
 		LookupWrapper(SwishLookupExpr(self.0))
 	}
@@ -197,6 +201,16 @@ pub struct SumLookupExpr<A: LookupExpr>(pub A);
 impl<A: LookupExpr> LookupExpr for SumLookupExpr<A> {
 	fn last_dim_size(&self) -> usize {
 		1
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct SigmoidLookupExpr<A: LookupExpr>(pub A);
+
+impl<A: LookupExpr> LookupExpr for SigmoidLookupExpr<A> {
+	fn last_dim_size(&self) -> usize {
+		self.0.last_dim_size()
 	}
 }
 

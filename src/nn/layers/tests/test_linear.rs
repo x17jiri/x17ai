@@ -12,6 +12,7 @@ use crate::autograd::{self, AutogradNode, GradientCapture};
 use crate::nn::ModelContext;
 use crate::nn::layers::Layer;
 use crate::tensor::device::cpu::CPUDevice;
+use crate::tensor::device::kernel::lookup::tsr;
 use crate::tensor::math::approx_eq;
 use crate::tensor::{self, HasDType, Tensor, TensorOpError};
 
@@ -37,7 +38,7 @@ fn test_linear() -> Result<(), ErrPack<TensorOpError>> {
 		[-1.1796, -1.8167,  1.2314, -0.6760,  0.0761],
 	])?;
 
-	#[rustfmt::skip] linear.weights().borrow().value().assign(&weights)?;
+	#[rustfmt::skip] linear.weights().borrow().value().assign(tsr(&weights))?;
 
 	#[rustfmt::skip] let inp = lit.new_2d(&[
 		[-1.2794, -0.1038,  0.3636, -0.0918, -0.6903],
@@ -123,7 +124,7 @@ fn test_multihead_linear() -> Result<(), ErrPack<tensor::TensorOpError>> {
 		[-1.1796, -1.8167,  1.2314, -0.6760,  0.0761],
 	])?;
 
-	#[rustfmt::skip] linear.linear.weights().borrow().value().assign(&weights)?;
+	#[rustfmt::skip] linear.linear.weights().borrow().value().assign(tsr(&weights))?;
 
 	#[rustfmt::skip] let inp = lit.new_2d(&[
 		[-1.2794, -0.1038,  0.3636, -0.0918, -0.6903],

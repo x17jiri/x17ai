@@ -37,6 +37,16 @@ class Arg:
 	def print_destructuring(self, indent):
 		return self.name
 
+class Temp:
+	def __init__(self, name):
+		self.name = name
+
+	def dump(self, indent=0):
+		print(f"Temp(name={self.name}")
+
+	def print_expr(self, indent):
+		return self.rust_type
+
 class Fn:
 	def __init__(self, name, type_counts, args, body, redirection):
 		arg_map = {}
@@ -46,7 +56,15 @@ class Fn:
 			arg_map[arg.name] = arg
 			needs_lifetime = needs_lifetime or arg.needs_lifetime
 
-		self.body_op = parse_body(arg_map, body)
+		assert len(body) > 0
+		assert isinstance(body[-1], ast.Expr), f"Expected Expr, got {type(body[-1])}"
+		self.temp = [parse_temp(arg_map, t) for t in body[:-1]]
+		self.return_expr = body[-1].value
+
+		if len(self.temp) == 0:
+			self.body_op = parse_body(arg_map, self.return_expr)
+		else:
+			self.body_op = None
 
 		self.name = name
 		self.type_counts = type_counts
@@ -92,10 +110,16 @@ class Op:
 		result += indent + ")"
 		return result
 
+def parse_temp(arg_map, temp):
+	match temp:
+		case ast.Assign(targets=[ast.Name(id)], value=value):
+			return (id, value)
+		case _:
+			raise ValueError(f"Unexpected temp command: {type(temp)}")
+
 def parse_body(arg_map, body):
 	match body:
 		case ast.Name(id):
-			assert id in arg_map, f"Argument {id} not found in argument map"
 			return arg_map[id]
 		case ast.BinOp(left, op, right):
 			left = parse_body(arg_map, left)
@@ -114,19 +138,7 @@ def parse_body(arg_map, body):
 				case ast.Attribute(value, attr):
 					value = parse_body(arg_map, value)
 					args = [parse_body(arg_map, arg) for arg in args]
-					match attr:
-						case 'sum':
-							return Op('SumLookupExpr', [value] + args)
-						case 'sqrt':
-							return Op('SqrtLookupExpr', [value] + args)
-						case 'swish':
-							return Op('SwishLookupExpr', [value] + args)
-						case 'recip':
-							return Op('RecipLookupExpr', [value] + args)
-						case 'ln_clamped':
-							return Op('LnClampedLookupExpr', [value] + args)
-						case _:
-							raise ValueError(f"Unexpected attribute: {attr}")
+					return Op(f"{to_camel_case(attr)}LookupExpr", [value] + args)
 				case _:
 					raise ValueError(f"Unexpected function call: {type(func)}")
 		case _:
@@ -146,7 +158,7 @@ def expr_as_str(expr):
 
 def parse_kernels(kernels):
 	tree = ast.parse(kernels)
-	#print(ast.dump(tree, indent=4))
+	print(ast.dump(tree, indent=4), file=sys.stderr)
 
 	kernel_list = []
 	for node in tree.body:
@@ -173,8 +185,6 @@ def parse_kernels(kernels):
 							arg_list.append(Arg(arg_name, id, pos))
 						case _:
 							raise ValueError(f"Unexpected annotation type: {type(arg.annotation)}")
-				assert len(body) == 1
-				assert isinstance(body[0], ast.Expr), f"Expected Expr, got {type(body[0])}"
 
 				redirection = None
 				if decorator_list:
@@ -185,7 +195,7 @@ def parse_kernels(kernels):
 						case _:
 							raise ValueError(f"Unexpected decorator type: {type(decorator_list[0])}")
 
-				kernel_list.append(Fn(fn_name, type_counts, arg_list, body[0].value, redirection))
+				kernel_list.append(Fn(fn_name, type_counts, arg_list, body, redirection))
 			case _:
 				raise ValueError(f"Unexpected node type: {type(node)}")
 
@@ -224,7 +234,7 @@ print("};")
 print()
 
 for kernel in kernel_list:
-	#kernel.dump()
+	kernel.dump()
 	print("//--------------------------------------------------------------------------------------------------")
 	print()
 	if not kernel.redirection:
@@ -248,7 +258,9 @@ for kernel in kernel_list:
 		print(f'			KernelBuilder::new(')
 		print(f'				"{kernel.name}", [{e_arg_names}], [{r_arg_names}], [{c_arg_names}]')
 		print(f'			);')
-		print(f'		let kernel = builder.build({expr_as_str(kernel.body)});')
+		for temp in kernel.temp:
+			print(f'		let {temp[0]} = {expr_as_str(temp[1])};')
+		print(f'		let kernel = builder.build({expr_as_str(kernel.return_expr)});')
 		print(f'		Self {{ kernel }}')
 		print(f'	}}')
 		print(f"}}")
@@ -292,29 +304,46 @@ for kernel in kernel_list:
 		#kernel_call_class = f"{to_camel_case(kernel_call_func)}KernelCall"
 		#kernel_call_expr = result = re.sub(r'^\s*(\w+)\s*\(', r'\1.call(', kernel.redirection)
 
-	print(f"type {kernel.cls_name}Expr<'a> =")
-	print(f"\t{kernel.body_op.print_expr("\t")};")
-	print()
-	print(f"impl<'a> KernelCall<{kernel.cls_name}Expr<'a>> for KernelLibrary {{")
-	print(f"	fn call(")
-	print(f"		&self,")
-	print(f"		to: &Tensor,")
-	print(f"		expr: LookupWrapper<{kernel.cls_name}Expr<'a>>")
-	print(f"	) -> Result<(), ErrPack<TensorOpError>> {{")
-	print(f"		let {kernel.body_op.print_destructuring("\t\t")} = expr.0;")
-	if kernel.redirection:
-		zipped = list(zip(kernel.redirection.args, kernel_map[kernel.redirection.target].args))
-		e_args = ", ".join(z[0] for z in zipped if z[1].type == ELEM_TYPE)
-		r_args = ", ".join(z[0] for z in zipped if z[1].type == REDUCE_TYPE)
-		c_args = ", ".join(z[0] for z in zipped if z[1].type == CONST_TYPE)
-		print(f"		self.data.{kernel.redirection.target}.kernel.run(to, [{e_args}], [{r_args}], [{c_args}])")
-	else:
+	if kernel.temp:
+		header = ", ".join([f"{arg.name}: {re.sub("&'a ", "&", arg.rust_type)}" for arg in kernel.args])
+		print(f"pub fn {kernel.name}(")
+		print(f"	to: &Tensor,")
+		print(f"	{header},")
+		print(f") -> Result<(), ErrPack<TensorOpError>> {{")
+		print(f"	let library = to.builtin_kernel_library();")
 		e_args = ", ".join(kernel.e_args)
 		r_args = ", ".join(kernel.r_args)
 		c_args = ", ".join(kernel.c_args)
-		print(f"		self.data.{kernel.name}.kernel.run(to, [{e_args}], [{r_args}], [{c_args}])")
-	print(f"	}}")
-	print(f"}}")
+		print(f"	library.data.{kernel.name}.kernel.run(to, [{e_args}], [{r_args}], [{c_args}])")
+		print(f"}}")
+
+	else:
+		print(f"type {kernel.cls_name}Expr<'a> =")
+		print(f"\t{kernel.body_op.print_expr("\t")};")
+
+		print()
+
+		print(f"impl<'a> KernelCall<{kernel.cls_name}Expr<'a>> for KernelLibrary {{")
+		print(f"	fn call(")
+		print(f"		&self,")
+		print(f"		to: &Tensor,")
+		print(f"		expr: LookupWrapper<{kernel.cls_name}Expr<'a>>")
+		print(f"	) -> Result<(), ErrPack<TensorOpError>> {{")
+		print(f"		let {kernel.body_op.print_destructuring("\t\t")} = expr.0;")
+
+		if kernel.redirection:
+			zipped = list(zip(kernel.redirection.args, kernel_map[kernel.redirection.target].args))
+			e_args = ", ".join(z[0] for z in zipped if z[1].type == ELEM_TYPE)
+			r_args = ", ".join(z[0] for z in zipped if z[1].type == REDUCE_TYPE)
+			c_args = ", ".join(z[0] for z in zipped if z[1].type == CONST_TYPE)
+			print(f"		self.data.{kernel.redirection.target}.kernel.run(to, [{e_args}], [{r_args}], [{c_args}])")
+		else:
+			e_args = ", ".join(kernel.e_args)
+			r_args = ", ".join(kernel.r_args)
+			c_args = ", ".join(kernel.c_args)
+			print(f"		self.data.{kernel.name}.kernel.run(to, [{e_args}], [{r_args}], [{c_args}])")
+		print(f"	}}")
+		print(f"}}")
 
 	print()
 
