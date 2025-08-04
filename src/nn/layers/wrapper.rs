@@ -54,9 +54,7 @@ impl<Nested: Layer> Wrapper<Nested> {
 	pub fn new(nested: Nested, eps: f64) -> Option<Self> {
 		let input_shape = nested.input_shape();
 		let output_shape = nested.output_shape();
-		if input_shape == output_shape
-			&& let Some(&n_inputs) = input_shape.last()
-		{
+		if input_shape == output_shape && input_shape.last().is_some() {
 			Some(Self {
 				nested,
 				eps,

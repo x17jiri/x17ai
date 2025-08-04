@@ -13,7 +13,7 @@
 use std::hint::cold_path;
 
 use crate::tensor::device::kernel::lookup::{self, scalar, tsr};
-use crate::tensor::{Tensor, TensorOpError, math};
+use crate::tensor::{Tensor, TensorOpError};
 use crate::util::LossyInto;
 use crate::{ErrExtra, ErrPack};
 

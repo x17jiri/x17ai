@@ -269,27 +269,29 @@ impl Select for DD {
 
 	#[inline(never)] // TODO
 	unsafe fn select_unchecked(&self, dim: usize, index: usize) -> Self {
-		let old_slice = self.dims.as_slice();
-		debug_assert!(dim < old_slice.len());
+		unsafe {
+			let old_slice = self.dims.as_slice();
+			debug_assert!(dim < old_slice.len());
 
-		let removed_dim = old_slice.get_unchecked(dim);
-		debug_assert!(index < removed_dim.size);
+			let removed_dim = old_slice.get_unchecked(dim);
+			debug_assert!(index < removed_dim.size);
 
-		let ndim = old_slice.len() - 1;
-		let mut dims = DimVecBuilder::new(ndim);
-		let slice = dims.as_slice_mut();
+			let ndim = old_slice.len() - 1;
+			let mut dims = DimVecBuilder::new(ndim);
+			let slice = dims.as_slice_mut();
 
-		for i in 0..dim {
-			slice.get_unchecked_mut(i).write(*old_slice.get_unchecked(i));
-		}
-		for i in dim..ndim {
-			slice.get_unchecked_mut(i).write(*old_slice.get_unchecked(i + 1));
-		}
+			for i in 0..dim {
+				slice.get_unchecked_mut(i).write(*old_slice.get_unchecked(i));
+			}
+			for i in dim..ndim {
+				slice.get_unchecked_mut(i).write(*old_slice.get_unchecked(i + 1));
+			}
 
-		let dims = unsafe { dims.assume_init() };
-		Self {
-			dims,
-			offset: self.offset + index * removed_dim.stride,
+			let dims = dims.assume_init();
+			Self {
+				dims,
+				offset: self.offset + index * removed_dim.stride,
+			}
 		}
 	}
 }

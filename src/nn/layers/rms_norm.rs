@@ -13,7 +13,6 @@ use crate::autograd::{self, AutogradNode, BackwardFn, StraightThroughBackwardFn}
 use crate::nn::param::Param;
 use crate::tensor::device::kernel::lookup::{scalar, tsr};
 use crate::tensor::{Tensor, TensorOpError};
-use crate::util::LossyInto;
 
 use super::Layer;
 

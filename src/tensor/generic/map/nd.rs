@@ -257,18 +257,20 @@ where
 
 	unsafe fn select_unchecked(&self, dim: usize, index: usize) -> ND<{ N - 1 }> {
 		debug_assert!(dim < N);
-		let removed_dim = self.dims.get_unchecked(dim);
-		debug_assert!(index < removed_dim.size);
-		let mut dims = [Default::default(); N - 1];
-		for i in 0..dim {
-			*dims.get_unchecked_mut(i) = *self.dims.get_unchecked(i);
-		}
-		for i in dim..N - 1 {
-			*dims.get_unchecked_mut(i) = *self.dims.get_unchecked(i + 1);
-		}
-		ND {
-			dims,
-			offset: self.offset + index * removed_dim.stride,
+		unsafe {
+			let removed_dim = self.dims.get_unchecked(dim);
+			debug_assert!(index < removed_dim.size);
+			let mut dims = [SizeAndStride::default(); N - 1];
+			for i in 0..dim {
+				*dims.get_unchecked_mut(i) = *self.dims.get_unchecked(i);
+			}
+			for i in dim..N - 1 {
+				*dims.get_unchecked_mut(i) = *self.dims.get_unchecked(i + 1);
+			}
+			ND {
+				dims,
+				offset: self.offset + index * removed_dim.stride,
+			}
 		}
 	}
 }

@@ -213,9 +213,9 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	Ok(())
 }
 
-#[link(name = "torch_shim")]
+#[link(name = "cuda_shim")]
 unsafe extern "C" {
-	fn hello_torch() -> std::ffi::c_int;
+	fn x17ai_hello_torch() -> std::ffi::c_int;
 }
 
 fn main() -> Result<(), ErrPack<TensorOpError>> {

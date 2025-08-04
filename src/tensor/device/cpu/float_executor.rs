@@ -6,17 +6,15 @@
 //------------------------------------------------------------------------------
 
 use std::cell::RefCell;
-use std::hint::cold_path;
 use std::rc::Rc;
 
 use crate::ErrPack;
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
-use crate::tensor::device::cpu::zip::{zip_elems, zip_vec_reduce, zip_vecs, zip_vecs_varsize};
+use crate::tensor::device::cpu::zip::{zip_elems, zip_vecs};
 use crate::tensor::device::executor::{
 	Executor, ExecutorError, KernelElemArg, KernelOutput, KernelReduceArg, ensure_same_shape,
 };
 use crate::tensor::device::kernel::{FloatLiteral, KernelData, ScalarExpr};
-use crate::tensor::generic::buffer::Buffer;
 use crate::tensor::generic::map::{Map, ND, Select};
 use crate::tensor::{HasDType, generic};
 
@@ -25,7 +23,7 @@ use super::rng::Rng;
 
 //--------------------------------------------------------------------------------------------------
 
-trait Slice2D<T> {
+/*trait Slice2D<T> {
 	fn slice(&self, dim0: usize, dim1: std::ops::RangeFull) -> &[T];
 }
 
@@ -37,7 +35,7 @@ impl<T: Copy + HasDType + FromToF64> Slice2D<T> for generic::Tensor<ND<2>, &[T]>
 		assert!(map.dims[0].size == span.len());
 		self.buf().get(span).unwrap()
 	}
-}
+}*/
 
 trait Slice3D<T> {
 	fn slice(&self, dim0: usize, dim1: usize, dim2: std::ops::RangeFull) -> &[T];
@@ -59,7 +57,7 @@ trait SliceMut2D<T> {
 }
 
 impl<T: Copy + HasDType + FromToF64> SliceMut2D<T> for generic::Tensor<ND<2>, &mut [T]> {
-	fn slice_mut(&mut self, dim0: usize, dim1: std::ops::RangeFull) -> &mut [T] {
+	fn slice_mut(&mut self, dim0: usize, _dim1: std::ops::RangeFull) -> &mut [T] {
 		let map = self.map();
 		let map = map.select(0, dim0).unwrap();
 		let span = map.span();
@@ -73,7 +71,7 @@ trait SliceMut3D<T> {
 }
 
 impl<T: Copy + HasDType + FromToF64> SliceMut3D<T> for generic::Tensor<ND<3>, &mut [T]> {
-	fn slice_mut(&mut self, dim0: usize, dim1: usize, dim2: std::ops::RangeFull) -> &mut [T] {
+	fn slice_mut(&mut self, dim0: usize, dim1: usize, _dim2: std::ops::RangeFull) -> &mut [T] {
 		let map = self.map();
 		let map = map.select(0, dim0).unwrap();
 		let map = map.select(0, dim1).unwrap();
@@ -100,17 +98,6 @@ pub struct BroadcastedInput<'t, T> {
 pub enum Input<'t, T> {
 	Contiguous(ContiguousInput<'t, T>),
 	Broadcasted(BroadcastedInput<'t, T>),
-}
-
-fn ensure_expected_shape<B: Buffer>(
-	tensor: &generic::Tensor<ND<2>, B>,
-	expected: [usize; 2],
-) -> Result<(), ErrPack<ExecutorError>> {
-	let shape = tensor.nd_shape()?;
-	if shape != expected {
-		return Err(ExecutorError::invalid_shape(shape, expected));
-	}
-	Ok(())
 }
 
 pub struct FloatExecutor<T: Copy + HasDType + FromToF64> {
@@ -515,10 +502,10 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 
 	fn attention(
 		&self,
-		o: &mut generic::Tensor<ND<3>, DeviceBufferRefMut>, // [inputs, qo_heads, vo_features]
-		q: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, qo_heads, qk_features]
-		k: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, k_heads, qk_features]
-		v: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, v_heads, vo_features]
+		_o: &mut generic::Tensor<ND<3>, DeviceBufferRefMut>, // [inputs, qo_heads, vo_features]
+		_q: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, qo_heads, qk_features]
+		_k: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, k_heads, qk_features]
+		_v: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, v_heads, vo_features]
 	) {
 		todo!("FloatExecutor::attention is not implemented yet");
 	}
@@ -532,18 +519,21 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		const_args: *const f64,
 	) -> Result<(), ErrPack<ExecutorError>> {
 		let expr = kernel_data.expr.as_ref();
-		let o = &*o;
-		for j in 0..o.size[0] {
-			for i in 0..o.size[1] {
-				let o = o.device_data.cast::<T>().add(o.offset + j * o.stride[0] + i * o.stride[1]);
-				o.write(T::from_f64(Self::eval_expr(
-					expr,
-					j,
-					i,
-					elem_args,
-					reduce_args,
-					const_args,
-				)));
+		unsafe {
+			let o = &*o;
+			for j in 0..o.size[0] {
+				for i in 0..o.size[1] {
+					let o =
+						o.device_data.cast::<T>().add(o.offset + j * o.stride[0] + i * o.stride[1]);
+					o.write(T::from_f64(Self::eval_expr(
+						expr,
+						j,
+						i,
+						elem_args,
+						reduce_args,
+						const_args,
+					)));
+				}
 			}
 		}
 		Ok(())
