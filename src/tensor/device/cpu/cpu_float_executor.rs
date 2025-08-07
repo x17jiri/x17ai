@@ -100,12 +100,12 @@ pub enum Input<'t, T> {
 	Broadcasted(BroadcastedInput<'t, T>),
 }
 
-pub struct FloatExecutor<T: Copy + HasDType + FromToF64> {
+pub struct CPUFloatExecutor<T: Copy + HasDType + FromToF64> {
 	rng: Rc<RefCell<Rng>>,
 	phantom: std::marker::PhantomData<T>,
 }
 
-impl<T: 'static + Copy + HasDType + FromToF64> FloatExecutor<T> {
+impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatExecutor<T> {
 	pub fn new(rng: Rc<RefCell<Rng>>) -> Self {
 		Self { rng, phantom: std::marker::PhantomData }
 	}
@@ -260,8 +260,12 @@ impl<T: 'static + Copy + HasDType + FromToF64> FloatExecutor<T> {
 					let elem_arg = &*elem_args.add(arg.index);
 					elem_arg
 						.device_data
+						.add(
+							elem_arg.offset_bytes
+								+ j * elem_arg.stride_bytes[0]
+								+ i * elem_arg.stride_bytes[1],
+						)
 						.cast::<T>()
-						.add(elem_arg.offset + j * elem_arg.stride[0] + i * elem_arg.stride[1])
 						.read()
 						.to_f64()
 				},
@@ -273,12 +277,20 @@ impl<T: 'static + Copy + HasDType + FromToF64> FloatExecutor<T> {
 					let vec_b = &*reduce_args.add(b.index);
 					let ptr_a = vec_a
 						.device_data
-						.cast::<T>()
-						.add(vec_a.offset + j * vec_a.stride[0] + i * vec_a.stride[1]);
+						.add(
+							vec_a.offset_bytes
+								+ j * vec_a.stride_bytes[0]
+								+ i * vec_a.stride_bytes[1],
+						)
+						.cast::<T>();
 					let ptr_b = vec_b
 						.device_data
-						.cast::<T>()
-						.add(vec_b.offset + j * vec_b.stride[0] + i * vec_b.stride[1]);
+						.add(
+							vec_b.offset_bytes
+								+ j * vec_b.stride_bytes[0]
+								+ i * vec_b.stride_bytes[1],
+						)
+						.cast::<T>();
 					let slice_a = std::slice::from_raw_parts(ptr_a, vec_a.reduction_size);
 					let slice_b = std::slice::from_raw_parts(ptr_b, vec_b.reduction_size);
 					debug_assert!(slice_a.len() == slice_b.len());
@@ -321,7 +333,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> FloatExecutor<T> {
 	}
 }
 
-impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
+impl<T: 'static + HasDType + Copy + FromToF64> Executor for CPUFloatExecutor<T> {
 	fn read_bin<'buf>(
 		&self,
 		dst: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
@@ -507,7 +519,7 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 		_k: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, k_heads, qk_features]
 		_v: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, v_heads, vo_features]
 	) {
-		todo!("FloatExecutor::attention is not implemented yet");
+		todo!("CPUFloatExecutor::attention is not implemented yet");
 	}
 
 	unsafe fn run_kernel(
@@ -523,8 +535,10 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for FloatExecutor<T> {
 			let o = &*o;
 			for j in 0..o.size[0] {
 				for i in 0..o.size[1] {
-					let o =
-						o.device_data.cast::<T>().add(o.offset + j * o.stride[0] + i * o.stride[1]);
+					let o = o
+						.device_data
+						.add(o.offset_bytes + j * o.stride_bytes[0] + i * o.stride_bytes[1])
+						.cast::<T>();
 					o.write(T::from_f64(Self::eval_expr(
 						expr,
 						j,

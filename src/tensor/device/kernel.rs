@@ -92,6 +92,7 @@ impl<const E: usize, const R: usize, const C: usize> Kernel<E, R, C> {
 	}
 
 	#[allow(clippy::indexing_slicing)]
+	#[allow(clippy::too_many_lines)]
 	pub fn run(
 		&self,
 		output: &Tensor,
@@ -102,6 +103,9 @@ impl<const E: usize, const R: usize, const C: usize> Kernel<E, R, C> {
 	where
 		[(); 1 + E + R]:,
 	{
+		let dtype_bytes = output.buf().dtype.bytes();
+		debug_assert!(dtype_bytes > 0);
+
 		let output_batch_dims: &[SizeAndStride];
 		let elem_args_batch_dims: [&[SizeAndStride]; E];
 		let reduce_args_batch_dims: [&[SizeAndStride]; R];
@@ -152,8 +156,11 @@ impl<const E: usize, const R: usize, const C: usize> Kernel<E, R, C> {
 			let arg = reduce_args[i];
 			KernelReduceArg {
 				reduction_size: reduce_args_top_dim[i].size,
-				stride: [merged[0].strides[1 + E + i], merged[1].strides[1 + E + i]],
-				offset: arg.map().offset,
+				stride_bytes: [
+					merged[0].strides[1 + E + i] * dtype_bytes,
+					merged[1].strides[1 + E + i] * dtype_bytes,
+				],
+				offset_bytes: arg.map().offset * dtype_bytes,
 				device_data: arg.buf().device_data,
 			}
 		});
@@ -161,16 +168,22 @@ impl<const E: usize, const R: usize, const C: usize> Kernel<E, R, C> {
 		let inp: [KernelElemArg; E] = std::array::from_fn(|i| {
 			let arg = elem_args[i];
 			KernelElemArg {
-				stride: [merged[0].strides[1 + i], merged[1].strides[1 + i]],
-				offset: arg.map().offset,
+				stride_bytes: [
+					merged[0].strides[1 + i] * dtype_bytes,
+					merged[1].strides[1 + i] * dtype_bytes,
+				],
+				offset_bytes: arg.map().offset * dtype_bytes,
 				device_data: arg.buf().device_data,
 			}
 		});
 
 		let out = [KernelOutput {
 			size: [merged[0].size, merged[1].size],
-			stride: [merged[0].strides[0], merged[1].strides[0]],
-			offset: output.map().offset,
+			stride_bytes: [
+				merged[0].strides[0] * dtype_bytes, //
+				merged[1].strides[0] * dtype_bytes,
+			],
+			offset_bytes: output.map().offset * dtype_bytes,
 			device_data: output.buf().device_data,
 		}];
 
@@ -183,7 +196,10 @@ impl<const E: usize, const R: usize, const C: usize> Kernel<E, R, C> {
 			let elem_borrows: [Option<DeviceBufferRef>; E] = std::array::from_fn(|i| {
 				let arg = &elem_args[i];
 				let same_as_output = std::ptr::eq(arg.buf().as_ref(), output.buf().as_ref())
-					&& likely(inp[i].offset == out[0].offset && inp[i].stride == out[0].stride);
+					&& likely(
+						inp[i].offset_bytes == out[0].offset_bytes
+							&& inp[i].stride_bytes == out[0].stride_bytes,
+					);
 				if same_as_output {
 					None
 				} else {

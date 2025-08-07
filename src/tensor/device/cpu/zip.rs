@@ -5,7 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
-use crate::tensor::device::cpu::float_executor::{
+use crate::tensor::device::cpu::cpu_float_executor::{
 	BroadcastedInput, ContiguousInput, ContiguousOutput,
 };
 use crate::util::UnwrapInfallible;

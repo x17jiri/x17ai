@@ -9,6 +9,7 @@ use std::rc::Rc;
 
 pub mod buffer;
 pub mod cpu;
+pub mod cuda;
 pub mod dtype;
 pub mod executor;
 pub mod kernel;

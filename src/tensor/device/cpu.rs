@@ -15,14 +15,14 @@ use std::rc::Rc;
 use crate::tensor::HasDType;
 use crate::tensor::device::kernel::library::KernelLibrary;
 
-pub mod float_executor;
+pub mod cpu_float_executor;
 pub mod math;
 pub mod rng;
 pub mod zip;
 
-use rng::Rng;
+use self::rng::Rng;
 
-use crate::tensor::device::cpu::float_executor::FloatExecutor;
+use crate::tensor::device::cpu::cpu_float_executor::CPUFloatExecutor;
 use crate::tensor::device::{DeviceBuffer, NewDeviceBufferError};
 use crate::tensor::{DType, Device};
 
@@ -91,7 +91,7 @@ impl<'a, T> View3D<'a, T> {
 pub struct CPUDevice {
 	pub name: String,
 	pub rng: Rc<RefCell<Rng>>,
-	pub f32_executor: FloatExecutor<f32>,
+	pub f32_executor: CPUFloatExecutor<f32>,
 }
 
 impl CPUDevice {
@@ -105,7 +105,7 @@ impl CPUDevice {
 		Rc::new(Self {
 			name,
 			rng,
-			f32_executor: FloatExecutor::new(f32_rng),
+			f32_executor: CPUFloatExecutor::new(f32_rng),
 		})
 	}
 

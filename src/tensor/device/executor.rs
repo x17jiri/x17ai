@@ -144,25 +144,25 @@ pub trait Executor {
 //--------------------------------------------------------------------------------------------------
 
 #[repr(C)]
-pub struct KernelOutput {
-	pub size: [usize; 2],
-	pub stride: [usize; 2],
-	pub offset: usize,
-	pub device_data: *mut u8,
-}
-
-#[repr(C)]
 pub struct KernelElemArg {
-	pub stride: [usize; 2],
-	pub offset: usize,
-	pub device_data: *mut u8,
+	pub stride_bytes: [usize; 2],
+	pub offset_bytes: usize,
+	pub device_data: *const u8,
 }
 
 #[repr(C)]
 pub struct KernelReduceArg {
 	pub reduction_size: usize,
-	pub stride: [usize; 2],
-	pub offset: usize,
+	pub stride_bytes: [usize; 2],
+	pub offset_bytes: usize,
+	pub device_data: *const u8,
+}
+
+#[repr(C)]
+pub struct KernelOutput {
+	pub size: [usize; 2],
+	pub stride_bytes: [usize; 2],
+	pub offset_bytes: usize,
 	pub device_data: *mut u8,
 }
 
