@@ -29,7 +29,7 @@ pub struct CUDADevice {
 
 impl CUDADevice {
 	pub fn new() -> Result<Rc<Self>, cuda_shim::CudaInitError> {
-		cuda_shim::cuda_init()?;
+		cuda_shim::init()?;
 		Ok(Self::new_named("CUDA".to_string()))
 	}
 
@@ -60,8 +60,9 @@ impl Device for CUDADevice {
 				return Err(NewDeviceBufferError::UnsupportedDType);
 			},
 		};
-		let memory = unsafe { cuda_shim::cuda_alloc(dtype.array_bytes(elems).unwrap()) };
-		let Some(memory) = NonNull::new(memory) else {
+		// TODO - hardcoded `alloc_f32` - use proper allocation function based on dtype
+		let memory = unsafe { cuda_shim::alloc_f32(dtype.array_bytes(elems).unwrap()) };
+		let Ok(memory) = memory else {
 			cold_path();
 			return Err(NewDeviceBufferError::AllocationFailed);
 		};
@@ -79,6 +80,6 @@ impl Device for CUDADevice {
 	}
 
 	unsafe fn drop_buffer(self: Rc<Self>, _dtype: DType, _elems: usize, device_data: *mut u8) {
-		unsafe { x17ai_cuda_free(device_data) };
+		unsafe { cuda_shim::free(device_data) };
 	}
 }
