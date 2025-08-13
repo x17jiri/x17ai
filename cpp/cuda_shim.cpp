@@ -5,12 +5,15 @@
 #include <torch/csrc/jit/tensorexpr/tensor.h>
 #include <torch/torch.h>
 
-#include <fstream>
-#include <iostream>
 #include <memory>
 #include <sstream>
 #include <stdio.h>
 #include <unordered_map>
+
+#include <dlfcn.h>
+
+#define FMT_HEADER_ONLY
+#include <fmt/core.h>
 
 #define X17_INLINE gnu::always_inline
 #define X17_NO_INLINE gnu::noinline
@@ -30,69 +33,77 @@ using isize = std::common_type_t<
 	std::make_signed_t<std::ptrdiff_t>,
 	std::make_signed_t<std::size_t>>;
 
-static bool cuda_initialized = false;
+static std::atomic<bool> cuda_initialized = false;
+static std::mutex cuda_init_mutex;
 
 namespace x17ai {
 
-	[[X17_NO_INLINE]] static int cuda_init_unchecked() {
-		if (!torch::cuda::is_available()) {
-			std::cerr << "CUDA is not available" << std::endl;
-			return 1;
+	int cuda_init() {
+		if (cuda_initialized.load(std::memory_order_acquire)) [[likely]] {
+			return 0;
 		}
+
+		std::lock_guard<std::mutex> lock(cuda_init_mutex);
+		if (cuda_initialized.load(std::memory_order_relaxed)) {
+			return 0;
+		}
+
 		CUresult result = cuInit(0);
 		if (result != CUDA_SUCCESS) {
-			std::cerr << "Failed to initialize CUDA driver API" << std::endl;
-			return 2;
+			fmt::print(stderr, "Failed to initialize CUDA\n");
+			return 1;
 		}
-		cuda_initialized = true;
-		return 0;
-	}
 
-	bool cuda_init() {
-		// TODO - make the check thread-safe
-		if (cuda_initialized) [[likely]] {
-			return 0;
-		} else {
-			return cuda_init_unchecked();
+		int cuda_device_count;
+		cudaError_t error = cudaGetDeviceCount(&cuda_device_count);
+		std::cout << "cudaGetDeviceCount(): " << cuda_device_count << std::endl;
+		std::cout << "CUDA Error: " << cudaGetErrorString(error) << std::endl;
+
+		void *handle = dlopen("libATen_cuda.so", RTLD_LAZY | RTLD_GLOBAL);
+		if (!handle) {
+			fprintf(stderr, "Failed to load libATen_cuda.so: %s\n", dlerror());
 		}
+
+		if (!torch::cuda::is_available()) {
+			fmt::print(stderr, "TORCH_VERSION: {}\n", TORCH_VERSION);
+			fmt::print(stderr, "CUDA is not available in Torch\n");
+			fmt::print(
+				stderr,
+				"Torch CUDA device count: {}\n",
+				torch::cuda::device_count()
+			);
+			return 1;
+		}
+
+		cuda_initialized.store(true, std::memory_order_release);
+		return 0;
 	}
 
 	void *cuda_alloc_f32(i64 count) {
 		assert(cuda_initialized);
-		try {
-			if (count <= 0) [[unlikely]] {
-				std::cerr << "Invalid count for CUDA allocation: " << count
-						  << std::endl;
-				return nullptr;
-			}
-
-			torch::Device device(torch::kCUDA, 0);
-
-			torch::TensorOptions options =
-				torch::TensorOptions().device(device).dtype(torch::kFloat32);
-
-			auto tensor =
-				std::make_unique<torch::Tensor>(torch::empty({count}, options));
-
-			return tensor.release();
-		} catch {
-			std::cerr << "CUDA allocation threw an exception" << std::endl;
+		if (count <= 0) [[unlikely]] {
+			fmt::print("Invalid count for CUDA allocation: {}\n", count);
 			return nullptr;
 		}
+
+		torch::Device device(torch::kCUDA, 0);
+
+		torch::TensorOptions options =
+			torch::TensorOptions().device(device).dtype(torch::kFloat32);
+
+		auto tensor =
+			std::make_unique<torch::Tensor>(torch::empty({count}, options));
+
+		return tensor.release();
 	}
 
 	void cuda_free(void *ptr) {
-		try {
-			auto tensor =
-				std::unique_ptr<torch::Tensor>(static_cast<torch::Tensor *>(ptr)
-				);
-		} catch {
-			std::cerr << "CUDA free threw an exception" << std::endl;
-		}
+		auto tensor =
+			std::unique_ptr<torch::Tensor>(static_cast<torch::Tensor *>(ptr));
 	}
 
 	/*
-	fn x17ai_cude_new_kernel(source
+	fn x17ai_cuda_new_kernel(source
 							 : *const std::ffi::c_char, len
 							 : usize, ) -> *const std::ffi::c_void;
 	fn x17ai_cuda_del_kernel(kernel : *const std::ffi::c_void);
@@ -108,19 +119,33 @@ namespace x17ai {
 
 extern "C" {
 	int x17ai_cuda_init() {
-		return x17ai::cuda_init();
+		try {
+			return x17ai::cuda_init();
+		} catch (...) {
+			fmt::print(stderr, "CUDA initialization threw an exception\n");
+			return 1;
+		}
 	}
 
 	void *x17ai_cuda_alloc_f32(i64 count) {
-		return x17ai::cuda_alloc_f32(count);
+		try {
+			return x17ai::cuda_alloc_f32(count);
+		} catch (...) {
+			fmt::print(stderr, "CUDA allocation threw an exception\n");
+			return nullptr;
+		}
 	}
 
 	void x17ai_cuda_free(void *ptr) {
-		x17ai::cuda_free(ptr);
+		try {
+			x17ai::cuda_free(ptr);
+		} catch (...) {
+			fmt::print(stderr, "CUDA free threw an exception\n");
+		}
 	}
 
 	/*
-	fn x17ai_cude_new_kernel(source
+	fn x17ai_cuda_new_kernel(source
 							 : *const std::ffi::c_char, len
 							 : usize, ) -> *const std::ffi::c_void;
 	fn x17ai_cuda_del_kernel(kernel : *const std::ffi::c_void);
@@ -134,6 +159,7 @@ extern "C" {
 	*/
 }
 
+/*
 // Cache for compiled modules
 static std::unordered_map<std::string, CUmodule> module_cache;
 
@@ -160,8 +186,11 @@ compile_cuda_kernel(const char *source_code, const char *kernel_name) {
 		nullptr
 	);
 	if (result != NVRTC_SUCCESS) {
-		std::cerr << "Failed to create NVRTC program: "
-				  << nvrtcGetErrorString(result) << std::endl;
+		fmt::print(
+			stderr,
+			"Failed to create NVRTC program: {}\n",
+			nvrtcGetErrorString(result)
+		);
 		return false;
 	}
 
@@ -180,7 +209,7 @@ compile_cuda_kernel(const char *source_code, const char *kernel_name) {
 		nvrtcGetProgramLogSize(prog, &log_size);
 		std::string log(log_size, '\0');
 		nvrtcGetProgramLog(prog, &log[0]);
-		std::cerr << "Compilation failed:\n" << log << std::endl;
+		fmt::print(stderr, "Compilation failed:\n{}\n", log);
 		nvrtcDestroyProgram(&prog);
 		return false;
 	}
@@ -196,7 +225,7 @@ compile_cuda_kernel(const char *source_code, const char *kernel_name) {
 	CUresult cu_result =
 		cuModuleLoadDataEx(&module, ptx.c_str(), 0, nullptr, nullptr);
 	if (cu_result != CUDA_SUCCESS) {
-		std::cerr << "Failed to load CUDA module" << std::endl;
+		fmt::print(stderr, "Failed to load CUDA module\n");
 		nvrtcDestroyProgram(&prog);
 		return false;
 	}
@@ -228,7 +257,7 @@ extern "C" bool execute_kernel(
 	std::string key(kernel_name);
 	auto it = module_cache.find(key);
 	if (it == module_cache.end()) {
-		std::cerr << "Kernel not found: " << kernel_name << std::endl;
+		fmt::print(stderr, "Kernel not found: {}\n", kernel_name);
 		return false;
 	}
 
@@ -237,7 +266,7 @@ extern "C" bool execute_kernel(
 
 	CUresult result = cuModuleGetFunction(&function, module, function_name);
 	if (result != CUDA_SUCCESS) {
-		std::cerr << "Failed to get function: " << function_name << std::endl;
+		fmt::print(stderr, "Failed to get function: {}\n", function_name);
 		return false;
 	}
 
@@ -257,7 +286,7 @@ extern "C" bool execute_kernel(
 	);
 
 	if (result != CUDA_SUCCESS) {
-		std::cerr << "Failed to launch kernel" << std::endl;
+		fmt::print(stderr, "Failed to launch kernel\n");
 		return false;
 	}
 
@@ -331,3 +360,4 @@ extern "C" bool multiply_tensors_with_dynamic_kernel(
 		kernel_source
 	);
 }
+*/

@@ -17,7 +17,7 @@ ndarray = "0.16.1"
 stderrlog = "0.6.0"
 log = "0.4.22"
 assert_approx_eq = "1.1.0"
-tch = "0.20.0"
+# tch = "0.20.0"
 safetensors = "0.5.3"
 
 [build-dependencies]

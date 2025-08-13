@@ -23,6 +23,7 @@ pub mod generated_kernels;
 pub mod library;
 pub mod lookup;
 pub mod registry;
+pub mod cache;
 
 pub use generated_kernels::export::*;
 

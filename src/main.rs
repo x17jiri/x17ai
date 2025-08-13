@@ -163,6 +163,7 @@ use x17ai::nn::layers::linear::Linear;
 use x17ai::nn::layers::softmax::{Softmax, SoftmaxGradientMode};
 use x17ai::nn::layers::{CrossEntropy, Layer};
 use x17ai::tensor::device::cpu::CPUDevice;
+use x17ai::tensor::device::cuda;
 use x17ai::tensor::device::executor::Executor;
 use x17ai::tensor::device::kernel::builder::KernelBuilder;
 use x17ai::tensor::generic::Tensor;
@@ -231,6 +232,9 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let reshaped = t.view([2, 3]);*/
 
 	stderrlog::new().verbosity(10).init().unwrap();
+
+	let cuda_dev = cuda::CUDADevice::new().unwrap();
+
 	let dev = CPUDevice::new();
 	let lit = Tensor::literal_factory::<f32>(dev.clone());
 	let mut mctx = ModelContext::new(dev.clone());
