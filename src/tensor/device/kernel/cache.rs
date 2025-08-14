@@ -5,14 +5,19 @@
 //
 //------------------------------------------------------------------------------
 
+use std::hint::cold_path;
 use std::rc::Rc;
+use std::sync::Arc;
+
+use const_siphasher::sip::SipHasher13;
 
 use crate::ErrPack;
 use crate::tensor::{Tensor, TensorOpError};
 
 //--------------------------------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
 pub enum ExprDiscriminant {
 	TensorArg,
 	ScalarArg,
@@ -26,6 +31,8 @@ pub enum ExprDiscriminant {
 	LnClampedExpr,
 	AddExpr,
 	MulExpr,
+
+	Invalid,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -47,12 +54,15 @@ pub enum DynExpr {
 
 //--------------------------------------------------------------------------------------------------
 
+#[const_trait]
 pub trait Expr {
+	const CONST: bool;
 	const TENSOR_COUNT: usize;
 	const REDUCE_COUNT: usize;
 	const SCALAR_COUNT: usize;
+	const ID_LEN: usize;
 
-	fn find_in<'n>(&self, node: &'n Node) -> Option<&'n Node>;
+	fn const_id(i: usize) -> ExprDiscriminant;
 }
 
 pub struct TensorArg<'a>(pub &'a Tensor);
@@ -70,138 +80,218 @@ pub struct MulExpr<A: Expr, B: Expr>(pub A, pub B);
 
 //--------------------------------------------------------------------------------------------------
 
-impl<'a> Expr for TensorArg<'a> {
+impl<'a> const Expr for TensorArg<'a> {
+	const CONST: bool = true;
 	const TENSOR_COUNT: usize = 1;
 	const REDUCE_COUNT: usize = 0;
 	const SCALAR_COUNT: usize = 0;
+	const ID_LEN: usize = 1;
 
-	fn find_in<'n>(&self, node: &'n Node) -> Option<&'n Node> {
-		node.next(ExprDiscriminant::TensorArg)
+	fn const_id(i: usize) -> ExprDiscriminant {
+		if i < 1 { ExprDiscriminant::TensorArg } else { ExprDiscriminant::Invalid }
 	}
 }
-impl Expr for ScalarArg {
+impl const Expr for ScalarArg {
+	const CONST: bool = true;
 	const TENSOR_COUNT: usize = 0;
 	const REDUCE_COUNT: usize = 0;
 	const SCALAR_COUNT: usize = 1;
+	const ID_LEN: usize = 1;
 
-	fn find_in<'n>(&self, node: &'n Node) -> Option<&'n Node> {
-		node.next(ExprDiscriminant::ScalarArg)
+	fn const_id(i: usize) -> ExprDiscriminant {
+		if i < 1 { ExprDiscriminant::ScalarArg } else { ExprDiscriminant::Invalid }
 	}
 }
 
-impl<A: Expr> Expr for SumExpr<A> {
+impl<A: const Expr> const Expr for SumExpr<A> {
+	const CONST: bool = A::CONST;
 	const TENSOR_COUNT: usize = A::TENSOR_COUNT;
 	const REDUCE_COUNT: usize = A::TENSOR_COUNT;
 	const SCALAR_COUNT: usize = A::SCALAR_COUNT;
+	const ID_LEN: usize = 1 + A::ID_LEN;
 
-	fn find_in<'n>(&self, node: &'n Node) -> Option<&'n Node> {
-		node.next(ExprDiscriminant::DotExpr).and_then(|n| self.0.find_in(n))
+	fn const_id(i: usize) -> ExprDiscriminant {
+		if i < 1 { ExprDiscriminant::DotExpr } else { A::const_id(i - 1) }
 	}
 }
 
-impl<A: Expr> Expr for SigmoidExpr<A> {
+impl<A: const Expr> const Expr for SigmoidExpr<A> {
+	const CONST: bool = A::CONST;
 	const TENSOR_COUNT: usize = A::TENSOR_COUNT;
 	const REDUCE_COUNT: usize = A::REDUCE_COUNT;
 	const SCALAR_COUNT: usize = A::SCALAR_COUNT;
+	const ID_LEN: usize = 1 + A::ID_LEN;
 
-	fn find_in<'n>(&self, node: &'n Node) -> Option<&'n Node> {
-		node.next(ExprDiscriminant::SigmoidExpr).and_then(|n| self.0.find_in(n))
+	fn const_id(i: usize) -> ExprDiscriminant {
+		if i < 1 { ExprDiscriminant::SigmoidExpr } else { A::const_id(i - 1) }
 	}
 }
-impl<A: Expr> Expr for SwishExpr<A> {
+impl<A: const Expr> const Expr for SwishExpr<A> {
+	const CONST: bool = A::CONST;
 	const TENSOR_COUNT: usize = A::TENSOR_COUNT;
 	const REDUCE_COUNT: usize = A::REDUCE_COUNT;
 	const SCALAR_COUNT: usize = A::SCALAR_COUNT;
+	const ID_LEN: usize = 1 + A::ID_LEN;
 
-	fn find_in<'n>(&self, node: &'n Node) -> Option<&'n Node> {
-		node.next(ExprDiscriminant::SwishExpr).and_then(|n| self.0.find_in(n))
+	fn const_id(i: usize) -> ExprDiscriminant {
+		if i < 1 { ExprDiscriminant::SwishExpr } else { A::const_id(i - 1) }
 	}
 }
-impl<A: Expr> Expr for SqrtExpr<A> {
+impl<A: const Expr> const Expr for SqrtExpr<A> {
+	const CONST: bool = A::CONST;
 	const TENSOR_COUNT: usize = A::TENSOR_COUNT;
 	const REDUCE_COUNT: usize = A::REDUCE_COUNT;
 	const SCALAR_COUNT: usize = A::SCALAR_COUNT;
+	const ID_LEN: usize = 1 + A::ID_LEN;
 
-	fn find_in<'n>(&self, node: &'n Node) -> Option<&'n Node> {
-		node.next(ExprDiscriminant::SqrtExpr).and_then(|n| self.0.find_in(n))
+	fn const_id(i: usize) -> ExprDiscriminant {
+		if i < 1 { ExprDiscriminant::SqrtExpr } else { A::const_id(i - 1) }
 	}
 }
-impl<A: Expr, B: Expr> Expr for RecipExpr<A, B> {
+impl<A: const Expr, B: const Expr> const Expr for RecipExpr<A, B> {
+	const CONST: bool = A::CONST && B::CONST;
 	const TENSOR_COUNT: usize = A::TENSOR_COUNT + B::TENSOR_COUNT;
 	const REDUCE_COUNT: usize = A::REDUCE_COUNT + B::REDUCE_COUNT;
 	const SCALAR_COUNT: usize = A::SCALAR_COUNT + B::SCALAR_COUNT;
+	const ID_LEN: usize = 1 + A::ID_LEN + B::ID_LEN;
 
-	fn find_in<'n>(&self, node: &'n Node) -> Option<&'n Node> {
-		node.next(ExprDiscriminant::RecipExpr)
-			.and_then(|n| self.0.find_in(n))
-			.and_then(|n| self.1.find_in(n))
+	fn const_id(i: usize) -> ExprDiscriminant {
+		if i < 1 {
+			ExprDiscriminant::RecipExpr
+		} else if i < 1 + A::ID_LEN {
+			A::const_id(i - 1)
+		} else {
+			B::const_id(i - 1 - A::ID_LEN)
+		}
 	}
 }
-impl<A: Expr> Expr for LnClampedExpr<A> {
+
+impl<A: const Expr> const Expr for LnClampedExpr<A> {
+	const CONST: bool = A::CONST;
 	const TENSOR_COUNT: usize = A::TENSOR_COUNT;
 	const REDUCE_COUNT: usize = A::REDUCE_COUNT;
 	const SCALAR_COUNT: usize = A::SCALAR_COUNT;
+	const ID_LEN: usize = 1 + A::ID_LEN;
 
-	fn find_in<'n>(&self, node: &'n Node) -> Option<&'n Node> {
-		node.next(ExprDiscriminant::LnClampedExpr).and_then(|n| self.0.find_in(n))
+	fn const_id(i: usize) -> ExprDiscriminant {
+		if i < 1 { ExprDiscriminant::LnClampedExpr } else { A::const_id(i - 1) }
 	}
 }
-impl<A: Expr, B: Expr> Expr for AddExpr<A, B> {
+impl<A: const Expr, B: const Expr> const Expr for AddExpr<A, B> {
+	const CONST: bool = A::CONST && B::CONST;
 	const TENSOR_COUNT: usize = A::TENSOR_COUNT + B::TENSOR_COUNT;
 	const REDUCE_COUNT: usize = A::REDUCE_COUNT + B::REDUCE_COUNT;
 	const SCALAR_COUNT: usize = A::SCALAR_COUNT + B::SCALAR_COUNT;
+	const ID_LEN: usize = 1 + A::ID_LEN + B::ID_LEN;
 
-	fn find_in<'n>(&self, node: &'n Node) -> Option<&'n Node> {
-		node.next(ExprDiscriminant::AddExpr)
-			.and_then(|n| self.0.find_in(n))
-			.and_then(|n| self.1.find_in(n))
+	fn const_id(i: usize) -> ExprDiscriminant {
+		if i < 1 {
+			ExprDiscriminant::AddExpr
+		} else if i < 1 + A::ID_LEN {
+			A::const_id(i - 1)
+		} else {
+			B::const_id(i - 1 - A::ID_LEN)
+		}
 	}
 }
-impl<A: Expr, B: Expr> Expr for MulExpr<A, B> {
+impl<A: const Expr, B: const Expr> const Expr for MulExpr<A, B> {
+	const CONST: bool = A::CONST && B::CONST;
 	const TENSOR_COUNT: usize = A::TENSOR_COUNT + B::TENSOR_COUNT;
 	const REDUCE_COUNT: usize = A::REDUCE_COUNT + B::REDUCE_COUNT;
 	const SCALAR_COUNT: usize = A::SCALAR_COUNT + B::SCALAR_COUNT;
+	const ID_LEN: usize = 1 + A::ID_LEN + B::ID_LEN;
 
-	fn find_in<'n>(&self, node: &'n Node) -> Option<&'n Node> {
-		node.next(ExprDiscriminant::MulExpr)
-			.and_then(|n| self.0.find_in(n))
-			.and_then(|n| self.1.find_in(n))
+	fn const_id(i: usize) -> ExprDiscriminant {
+		if i < 1 {
+			ExprDiscriminant::MulExpr
+		} else if i < 1 + A::ID_LEN {
+			A::const_id(i - 1)
+		} else {
+			B::const_id(i - 1 - A::ID_LEN)
+		}
 	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+const fn const_id<E: const Expr>() -> ([ExprDiscriminant; E::ID_LEN.next_multiple_of(8)], u64) {
+	let mut id = [ExprDiscriminant::Invalid; E::ID_LEN.next_multiple_of(8)];
+	let mut i = 0;
+	while i < E::ID_LEN {
+		id[i] = E::const_id(i);
+		i += 1;
+	}
+
+	let id_bytes: &[u8] = unsafe {
+		std::slice::from_raw_parts(
+			id.as_ptr().cast(),
+			id.len() * std::mem::size_of::<ExprDiscriminant>(),
+		)
+	};
+
+	#[allow(clippy::inconsistent_digit_grouping)]
+	#[allow(clippy::large_digit_groups)]
+	let hasher = SipHasher13::new_with_keys(3141_5926_5358_9793_u64, 2384_6264_3383_2795_u64);
+	(id, hasher.hash(id_bytes))
 }
 
 //--------------------------------------------------------------------------------------------------
 
 pub struct KernelData {
 	id: usize,
-	name: String,
+	expr_id: Box<[ExprDiscriminant]>,
+	expr_id_hash: u64,
 	expr: Rc<DynExpr>,
 }
 
-pub struct Node {
-	children: Vec<(ExprDiscriminant, Box<Node>)>,
-	data: Rc<KernelData>,
-}
-
-impl Node {
-	fn next(&self, discriminant: ExprDiscriminant) -> Option<&Self> {
-		self.children.iter().find(|(d, _)| *d == discriminant).map(|(_, child)| child.as_ref())
-	}
-}
-
 pub struct KernelCache {
-	head: Node,
+	kernels: Vec<Arc<KernelData>>,
 }
 
 impl KernelCache {
-	pub fn run<E: Expr>(&self, output: &Tensor, expr: &E) -> Result<(), ErrPack<TensorOpError>>
+	fn find(&self, id: &[ExprDiscriminant], id_hash: u64) -> Result<&KernelData, usize> {
+		let t = self.kernels.binary_search_by(|x| {
+			let x = x.as_ref();
+			match x.expr_id_hash.cmp(&id_hash) {
+				std::cmp::Ordering::Equal => match x.expr_id.len().cmp(&id.len()) {
+					std::cmp::Ordering::Equal => x.expr_id.as_ref().cmp(id),
+					other => other,
+				},
+				other => other,
+			}
+		});
+		match t {
+			Ok(idx) => Ok(unsafe { self.kernels.get_unchecked(idx) }),
+			Err(idx) => Err(idx),
+		}
+	}
+
+	pub fn run<E: const Expr>(
+		&self,
+		output: &Tensor,
+		expr: &E,
+	) -> Result<(), ErrPack<TensorOpError>>
 	where
 		[(); E::TENSOR_COUNT]:,
 		[(); E::REDUCE_COUNT]:,
 		[(); E::SCALAR_COUNT]:,
+		[(); E::ID_LEN.next_multiple_of(8)]:,
 	{
-		let a = [0_usize; E::TENSOR_COUNT];
-		let r = [0_usize; E::REDUCE_COUNT];
-		let c = [0_f64; E::SCALAR_COUNT];
-		Ok(())
+		if !E::CONST {
+			todo!("Handle non-constant exprs");
+		}
+		let (id, id_hash) = const { const_id::<E>() };
+		match self.find(&id, id_hash) {
+			Ok(kernel) => {
+				let a = [0_usize; E::TENSOR_COUNT];
+				let r = [0_usize; E::REDUCE_COUNT];
+				let c = [0_f64; E::SCALAR_COUNT];
+				Ok(())
+			},
+			Err(idx) => {
+				cold_path();
+				todo!("Create new kernel at index {idx}");
+			},
+		}
 	}
 }

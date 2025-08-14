@@ -33,6 +33,7 @@
 #![feature(box_into_inner)]
 #![feature(unboxed_closures)]
 #![feature(specialization)]
+#![feature(const_trait_impl)]
 // clippy
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]
