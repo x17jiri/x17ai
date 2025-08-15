@@ -9,6 +9,7 @@ use std::convert::Infallible;
 
 // pub mod rc; TODO
 pub mod array;
+pub mod hash_set;
 
 pub trait LossyInto<T> {
 	fn lossy_into(self) -> T;

@@ -5,6 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
+use std::collections::HashMap;
 use std::hint::cold_path;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -236,6 +237,11 @@ const fn const_id<E: const Expr>() -> ([ExprDiscriminant; E::ID_LEN.next_multipl
 }
 
 //--------------------------------------------------------------------------------------------------
+
+struct Key {
+	id: Box<[ExprDiscriminant]>,
+	hash: u64,
+}
 
 pub struct KernelData {
 	id: usize,

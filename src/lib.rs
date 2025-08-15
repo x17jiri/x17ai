@@ -34,6 +34,7 @@
 #![feature(unboxed_closures)]
 #![feature(specialization)]
 #![feature(const_trait_impl)]
+#![feature(ptr_as_ref_unchecked)]
 // clippy
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]
