@@ -65,14 +65,12 @@ impl<T: Hash + Eq> HashSet<T> {
 			if bucket_hash == hash {
 				let bucket = unsafe { buckets.add(i).as_ref_unchecked() };
 				if likely(eq(&bucket.key)) {
-					// Found
 					return (Some(bucket), i);
 				}
 			}
 
 			let bucket_dist = (i - bucket_hash) & mask;
 			if (bucket_hash as isize) < 0 || bucket_dist < dist {
-				// Not found
 				return (None, i);
 			}
 		}

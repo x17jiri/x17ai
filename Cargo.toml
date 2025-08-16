@@ -20,6 +20,7 @@ assert_approx_eq = "1.1.0"
 # tch = "0.20.0"
 safetensors = "0.5.3"
 const-siphasher = "1"
+hashbrown = "0.15.5"
 
 [build-dependencies]
 cc = "1.0"

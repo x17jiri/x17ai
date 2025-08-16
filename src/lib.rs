@@ -54,6 +54,9 @@
 #![allow(clippy::return_self_not_must_use)]
 #![allow(clippy::comparison_chain)]
 #![allow(non_camel_case_types)]
+#![allow(clippy::option_if_let_else)]
+#![allow(clippy::inconsistent_digit_grouping)]
+#![allow(clippy::large_digit_groups)]
 
 use std::convert::Infallible;
 

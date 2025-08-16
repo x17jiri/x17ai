@@ -19,11 +19,11 @@ use crate::util::array;
 //--------------------------------------------------------------------------------------------------
 
 pub mod builder;
+pub mod cache;
 pub mod generated_kernels;
 pub mod library;
 pub mod lookup;
 pub mod registry;
-pub mod cache;
 
 pub use generated_kernels::export::*;
 
@@ -70,6 +70,7 @@ pub enum ScalarExpr {
 
 pub struct KernelData {
 	pub id: usize,
+	pub key: Box<[u64]>,
 	pub name: String,
 	pub elem_args: Box<[Arc<ElemArg>]>,
 	pub reduce_args: Box<[Arc<ReduceArg>]>,
