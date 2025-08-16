@@ -5,7 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
-use std::cell::RefCell;
+use std::cell::UnsafeCell;
 use std::hint::{cold_path, likely};
 use std::mem::MaybeUninit;
 use std::sync::{Arc, RwLock};
@@ -13,7 +13,7 @@ use std::sync::{Arc, RwLock};
 use crate::ErrPack;
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut, check_borrows};
 use crate::tensor::device::executor::{KernelElemArg, KernelOutput, KernelReduceArg};
-use crate::tensor::device::kernel::registry::{KernelMap, KernelMapEntry, KernelRegistry};
+use crate::tensor::device::kernel::registry::{KernelMap, KernelRegistry};
 use crate::tensor::dim_merger::DimMerger;
 use crate::tensor::generic::map::SizeAndStride;
 use crate::tensor::{Tensor, TensorOpError};
@@ -74,7 +74,7 @@ pub trait Expr {
 }
 
 pub trait ExprToDyn {
-	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr>;
+	fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr>;
 }
 
 pub struct TensorArg<'a>(pub &'a Tensor);
@@ -126,7 +126,7 @@ impl<'a> const Expr for TensorArg<'a> {
 }
 
 impl<'a> ExprToDyn for TensorArg<'a> {
-	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+	fn to_dyn(e: &mut usize, r: &mut usize, _s: &mut usize, reduce: bool) -> Arc<DynExpr> {
 		let i = if reduce { r } else { e };
 		let result = Arc::new(DynExpr::TensorArg(*i));
 		*i += 1;
@@ -168,7 +168,7 @@ impl const Expr for ScalarArg {
 }
 
 impl ExprToDyn for ScalarArg {
-	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+	fn to_dyn(_e: &mut usize, _r: &mut usize, s: &mut usize, _reduce: bool) -> Arc<DynExpr> {
 		let result = Arc::new(DynExpr::ScalarArg(*s));
 		*s += 1;
 		result
@@ -208,9 +208,9 @@ impl<A: const Expr + ExprToDyn> const Expr for SumExpr<A> {
 }
 
 impl<A: const Expr + ExprToDyn> ExprToDyn for SumExpr<A> {
-	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+	fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
 		assert!(!reduce);
-		Arc::new(DynExpr::SumExpr(self.0.to_dyn(e, r, s, true)))
+		Arc::new(DynExpr::SumExpr(A::to_dyn(e, r, s, true)))
 	}
 }
 
@@ -247,8 +247,8 @@ impl<A: const Expr + ExprToDyn> const Expr for SigmoidExpr<A> {
 }
 
 impl<A: const Expr + ExprToDyn> ExprToDyn for SigmoidExpr<A> {
-	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
-		Arc::new(DynExpr::SigmoidExpr(self.0.to_dyn(e, r, s, reduce)))
+	fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+		Arc::new(DynExpr::SigmoidExpr(A::to_dyn(e, r, s, reduce)))
 	}
 }
 
@@ -285,8 +285,8 @@ impl<A: const Expr + ExprToDyn> const Expr for SwishExpr<A> {
 }
 
 impl<A: const Expr + ExprToDyn> ExprToDyn for SwishExpr<A> {
-	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
-		Arc::new(DynExpr::SwishExpr(self.0.to_dyn(e, r, s, reduce)))
+	fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+		Arc::new(DynExpr::SwishExpr(A::to_dyn(e, r, s, reduce)))
 	}
 }
 
@@ -323,8 +323,8 @@ impl<A: const Expr + ExprToDyn> const Expr for SqrtExpr<A> {
 }
 
 impl<A: const Expr + ExprToDyn> ExprToDyn for SqrtExpr<A> {
-	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
-		Arc::new(DynExpr::SqrtExpr(self.0.to_dyn(e, r, s, reduce)))
+	fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+		Arc::new(DynExpr::SqrtExpr(A::to_dyn(e, r, s, reduce)))
 	}
 }
 
@@ -369,9 +369,9 @@ impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> const Expr for RecipE
 }
 
 impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> ExprToDyn for RecipExpr<A, B> {
-	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
-		let a = self.0.to_dyn(e, r, s, reduce);
-		let b = self.1.to_dyn(e, r, s, reduce);
+	fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+		let a = A::to_dyn(e, r, s, reduce);
+		let b = B::to_dyn(e, r, s, reduce);
 		Arc::new(DynExpr::RecipExpr(a, b))
 	}
 }
@@ -409,8 +409,8 @@ impl<A: const Expr + ExprToDyn> const Expr for LnClampedExpr<A> {
 }
 
 impl<A: const Expr + ExprToDyn> ExprToDyn for LnClampedExpr<A> {
-	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
-		Arc::new(DynExpr::LnClampedExpr(self.0.to_dyn(e, r, s, reduce)))
+	fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+		Arc::new(DynExpr::LnClampedExpr(A::to_dyn(e, r, s, reduce)))
 	}
 }
 
@@ -455,9 +455,9 @@ impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> const Expr for AddExp
 }
 
 impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> ExprToDyn for AddExpr<A, B> {
-	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
-		let a = self.0.to_dyn(e, r, s, reduce);
-		let b = self.1.to_dyn(e, r, s, reduce);
+	fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+		let a = A::to_dyn(e, r, s, reduce);
+		let b = B::to_dyn(e, r, s, reduce);
 		Arc::new(DynExpr::AddExpr(a, b))
 	}
 }
@@ -503,9 +503,9 @@ impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> const Expr for MulExp
 }
 
 impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> ExprToDyn for MulExpr<A, B> {
-	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
-		let a = self.0.to_dyn(e, r, s, reduce);
-		let b = self.1.to_dyn(e, r, s, reduce);
+	fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+		let a = A::to_dyn(e, r, s, reduce);
+		let b = B::to_dyn(e, r, s, reduce);
 		Arc::new(DynExpr::MulExpr(a, b))
 	}
 }
@@ -535,7 +535,7 @@ pub struct KernelData {
 
 pub struct KernelRunner {
 	registry: Arc<RwLock<KernelRegistry>>,
-	cache: RefCell<KernelMap>,
+	cache: UnsafeCell<KernelMap>,
 }
 
 impl KernelRunner {
@@ -554,38 +554,70 @@ impl KernelRunner {
 		[(); E::KEY_LEN.next_multiple_of(KEY_BATCH) / KEY_BATCH]:,
 		[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
 	{
-		if !E::CONST {
+		if E::CONST {
+			let mut elem_args = [MaybeUninit::uninit(); E::ELEMWISE_COUNT];
+			let cnt = expr.elemwise_tensors(&mut elem_args, 0);
+			assert!(cnt == E::ELEMWISE_COUNT);
+			let elem_args = unsafe { MaybeUninit::array_assume_init(elem_args) };
+
+			let mut reduce_args = [MaybeUninit::uninit(); E::REDUCE_COUNT];
+			let cnt = expr.reduce_tensors(&mut reduce_args, 0);
+			assert!(cnt == E::REDUCE_COUNT);
+			let reduce_args = unsafe { MaybeUninit::array_assume_init(reduce_args) };
+
+			let mut scalar_args = [0_f64; E::SCALAR_COUNT];
+			let cnt = expr.scalars(&mut scalar_args, 0);
+			assert!(cnt == E::SCALAR_COUNT);
+			let scalar_args = scalar_args;
+
+			self.run_const(output, elem_args, reduce_args, scalar_args)
+		} else {
 			todo!("non-constant exprs not implemented yet");
 		}
+	}
 
-		let mut elem_args = [MaybeUninit::uninit(); E::ELEMWISE_COUNT];
-		let cnt = expr.elemwise_tensors(&mut elem_args, 0);
-		assert!(cnt == E::ELEMWISE_COUNT);
-		let elem_args = unsafe { MaybeUninit::array_assume_init(elem_args) };
-
-		let mut reduce_args = [MaybeUninit::uninit(); E::REDUCE_COUNT];
-		let cnt = expr.reduce_tensors(&mut reduce_args, 0);
-		assert!(cnt == E::REDUCE_COUNT);
-		let reduce_args = unsafe { MaybeUninit::array_assume_init(reduce_args) };
-
-		let mut scalar_args = [0_f64; E::SCALAR_COUNT];
-		let cnt = expr.scalars(&mut scalar_args, 0);
-		assert!(cnt == E::SCALAR_COUNT);
-		let scalar_args = scalar_args;
-
-		let (key, key_hash) = const { Self::get_key::<E>() };
-		let cache = self.cache.borrow();
-		let kernel = if let Some(map_entry) = cache.find(&key, key_hash) {
-			map_entry
+	#[inline(never)]
+	fn run_const<E: const Expr + ExprToDyn>(
+		&self,
+		output: &Tensor,
+		elem_args: [&Tensor; E::ELEMWISE_COUNT],
+		reduce_args: [&Tensor; E::REDUCE_COUNT],
+		scalar_args: [f64; E::SCALAR_COUNT],
+	) -> Result<(), ErrPack<TensorOpError>>
+	where
+		[(); E::KEY_LEN.next_multiple_of(KEY_BATCH) / KEY_BATCH]:,
+		[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
+	{
+		let (key, key_hash) = const { Self::const_key::<E>() };
+		let cache = unsafe { &mut *self.cache.get() };
+		let entry = if let Some(entry) = cache.find(&key, key_hash) {
+			entry
 		} else {
 			cold_path();
-			self.add_kernel(key, key_hash, expr)
+			let (mut e, mut r, mut s) = (0, 0, 0);
+			let dyn_expr = E::to_dyn(&mut e, &mut r, &mut s, false);
+			assert!(e == E::ELEMWISE_COUNT);
+			assert!(r == E::REDUCE_COUNT);
+			assert!(s == E::SCALAR_COUNT);
+			let mut registry = self.registry.write().unwrap();
+			let kernel = registry.add_kernel(&key, key_hash, |id| {
+				Arc::new(KernelData {
+					id,
+					key: key.into(),
+					expr: dyn_expr,
+					elemwise_count: E::ELEMWISE_COUNT,
+					reduce_count: E::REDUCE_COUNT,
+					scalar_count: E::SCALAR_COUNT,
+				})
+			});
+			cache.insert_unique(key_hash, kernel)
 		};
-		Self::dispatch(kernel.value.as_ref(), output, elem_args, reduce_args, scalar_args)
+		let kernel = entry.value.as_ref();
+		Self::dispatch(kernel, output, elem_args, reduce_args, scalar_args)
 	}
 
 	#[allow(clippy::indexing_slicing)]
-	const fn get_key<E: const Expr>()
+	const fn const_key<E: const Expr>()
 	-> ([u64; E::KEY_LEN.next_multiple_of(KEY_BATCH) / KEY_BATCH], u64)
 	where
 		[(); E::KEY_LEN.next_multiple_of(KEY_BATCH) / KEY_BATCH]:,
@@ -602,32 +634,6 @@ impl KernelRunner {
 	}
 
 	#[inline(never)]
-	fn add_kernel<E: const Expr + ExprToDyn>(
-		&mut self,
-		key: [u64; E::KEY_LEN.next_multiple_of(KEY_BATCH) / KEY_BATCH],
-		key_hash: u64,
-		expr: E,
-	) -> &KernelMapEntry {
-		let (mut e, mut r, mut s) = (0, 0, 0);
-		let dyn_expr = expr.to_dyn(&mut e, &mut r, &mut s, false);
-		assert!(e == E::ELEMWISE_COUNT);
-		assert!(r == E::REDUCE_COUNT);
-		assert!(s == E::SCALAR_COUNT);
-		let mut registry = self.registry.write().unwrap();
-		let kernel = registry.add_kernel(&key, key_hash, |id| {
-			Arc::new(KernelData {
-				id,
-				key: key.into(),
-				expr: dyn_expr,
-				elemwise_count: E::ELEMWISE_COUNT,
-				reduce_count: E::REDUCE_COUNT,
-				scalar_count: E::SCALAR_COUNT,
-			})
-		});
-		self.cache.insert_unique(key_hash, kernel)
-	}
-
-	#[inline(never)]
 	#[allow(clippy::indexing_slicing)]
 	#[allow(clippy::too_many_lines)]
 	fn dispatch<const E: usize, const R: usize, const C: usize>(
@@ -635,7 +641,7 @@ impl KernelRunner {
 		output: &Tensor,
 		elem_args: [&Tensor; E],
 		reduce_args: [&Tensor; R],
-		const_args: [f64; C],
+		scalar_args: [f64; C],
 	) -> Result<(), ErrPack<TensorOpError>>
 	where
 		[(); 1 + E + R]:,
@@ -763,7 +769,7 @@ impl KernelRunner {
 				out.as_ptr(),
 				inp.as_ptr(),
 				reduce_inp.as_ptr(),
-				const_args.as_ptr(),
+				scalar_args.as_ptr(),
 			)?;
 
 			std::mem::drop(out_borrow);

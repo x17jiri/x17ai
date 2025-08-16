@@ -19,7 +19,7 @@ use crate::util::array;
 //--------------------------------------------------------------------------------------------------
 
 pub mod builder;
-pub mod cache;
+pub mod runner;
 pub mod generated_kernels;
 pub mod library;
 pub mod lookup;
