@@ -5,18 +5,15 @@
 //
 //------------------------------------------------------------------------------
 
+use std::cell::RefCell;
 use std::hint::{cold_path, likely};
 use std::mem::MaybeUninit;
-use std::rc::Rc;
-use std::sync::Arc;
-
-use const_siphasher::sip::SipHasher13;
-use hashbrown::HashTable;
+use std::sync::{Arc, RwLock};
 
 use crate::ErrPack;
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut, check_borrows};
 use crate::tensor::device::executor::{KernelElemArg, KernelOutput, KernelReduceArg};
-use crate::tensor::device::kernel::KernelData;
+use crate::tensor::device::kernel::registry::{KernelMap, KernelMapEntry, KernelRegistry};
 use crate::tensor::dim_merger::DimMerger;
 use crate::tensor::generic::map::SizeAndStride;
 use crate::tensor::{Tensor, TensorOpError};
@@ -29,7 +26,7 @@ pub enum ExprDiscriminant {
 	TensorArg,
 	ScalarArg,
 
-	DotExpr,
+	SumExpr,
 
 	SigmoidExpr,
 	SwishExpr,
@@ -48,15 +45,15 @@ pub enum DynExpr {
 	TensorArg(usize),
 	ScalarArg(usize),
 
-	DotExpr(Rc<DynExpr>, Rc<DynExpr>),
+	SumExpr(Arc<DynExpr>),
 
-	SigmoidExpr(Rc<DynExpr>),
-	SwishExpr(Rc<DynExpr>),
-	SqrtExpr(Rc<DynExpr>),
-	RecipExpr(Rc<DynExpr>, Rc<DynExpr>),
-	LnClampedExpr(Rc<DynExpr>),
-	AddExpr(Rc<DynExpr>, Rc<DynExpr>),
-	MulExpr(Rc<DynExpr>, Rc<DynExpr>),
+	SigmoidExpr(Arc<DynExpr>),
+	SwishExpr(Arc<DynExpr>),
+	SqrtExpr(Arc<DynExpr>),
+	RecipExpr(Arc<DynExpr>, Arc<DynExpr>),
+	LnClampedExpr(Arc<DynExpr>),
+	AddExpr(Arc<DynExpr>, Arc<DynExpr>),
+	MulExpr(Arc<DynExpr>, Arc<DynExpr>),
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -67,6 +64,7 @@ pub trait Expr {
 	const ELEMWISE_COUNT: usize;
 	const REDUCE_COUNT: usize;
 	const SCALAR_COUNT: usize;
+	const REDUCE_OP_COUNT: usize;
 	const KEY_LEN: usize;
 
 	fn key(id: &mut [ExprDiscriminant], i: usize) -> usize;
@@ -76,21 +74,21 @@ pub trait Expr {
 }
 
 pub trait ExprToDyn {
-	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize) -> Arc<DynExpr>;
+	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr>;
 }
 
 pub struct TensorArg<'a>(pub &'a Tensor);
 pub struct ScalarArg(pub f64);
 
-pub struct SumExpr<A: Expr>(pub A);
+pub struct SumExpr<A: Expr + ExprToDyn>(pub A);
 
-pub struct SigmoidExpr<A: Expr>(pub A);
-pub struct SwishExpr<A: Expr>(pub A);
-pub struct SqrtExpr<A: Expr>(pub A);
-pub struct RecipExpr<A: Expr, B: Expr>(pub A, pub B);
-pub struct LnClampedExpr<A: Expr>(pub A);
-pub struct AddExpr<A: Expr, B: Expr>(pub A, pub B);
-pub struct MulExpr<A: Expr, B: Expr>(pub A, pub B);
+pub struct SigmoidExpr<A: Expr + ExprToDyn>(pub A);
+pub struct SwishExpr<A: Expr + ExprToDyn>(pub A);
+pub struct SqrtExpr<A: Expr + ExprToDyn>(pub A);
+pub struct RecipExpr<A: Expr + ExprToDyn, B: Expr + ExprToDyn>(pub A, pub B);
+pub struct LnClampedExpr<A: Expr + ExprToDyn>(pub A);
+pub struct AddExpr<A: Expr + ExprToDyn, B: Expr + ExprToDyn>(pub A, pub B);
+pub struct MulExpr<A: Expr + ExprToDyn, B: Expr + ExprToDyn>(pub A, pub B);
 
 //--------------------------------------------------------------------------------------------------
 
@@ -101,6 +99,7 @@ impl<'a> const Expr for TensorArg<'a> {
 	const ELEMWISE_COUNT: usize = 1;
 	const REDUCE_COUNT: usize = 0;
 	const SCALAR_COUNT: usize = 0;
+	const REDUCE_OP_COUNT: usize = 0;
 	const KEY_LEN: usize = 1;
 
 	#[inline(always)]
@@ -127,9 +126,10 @@ impl<'a> const Expr for TensorArg<'a> {
 }
 
 impl<'a> ExprToDyn for TensorArg<'a> {
-	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize) -> Arc<DynExpr> {
-		let result = Arc::new(DynExpr::TensorArg(*e));
-		*e += 1;
+	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+		let i = if reduce { r } else { e };
+		let result = Arc::new(DynExpr::TensorArg(*i));
+		*i += 1;
 		result
 	}
 }
@@ -141,6 +141,7 @@ impl const Expr for ScalarArg {
 	const ELEMWISE_COUNT: usize = 0;
 	const REDUCE_COUNT: usize = 0;
 	const SCALAR_COUNT: usize = 1;
+	const REDUCE_OP_COUNT: usize = 0;
 	const KEY_LEN: usize = 1;
 
 	#[inline(always)]
@@ -167,7 +168,7 @@ impl const Expr for ScalarArg {
 }
 
 impl ExprToDyn for ScalarArg {
-	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize) -> Arc<DynExpr> {
+	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
 		let result = Arc::new(DynExpr::ScalarArg(*s));
 		*s += 1;
 		result
@@ -176,16 +177,17 @@ impl ExprToDyn for ScalarArg {
 
 #[allow(clippy::inline_always)]
 #[allow(clippy::indexing_slicing)]
-impl<A: const Expr> const Expr for SumExpr<A> {
+impl<A: const Expr + ExprToDyn> const Expr for SumExpr<A> {
 	const CONST: bool = A::CONST;
 	const ELEMWISE_COUNT: usize = 0;
 	const REDUCE_COUNT: usize = A::ELEMWISE_COUNT;
 	const SCALAR_COUNT: usize = A::SCALAR_COUNT;
+	const REDUCE_OP_COUNT: usize = 1 + A::REDUCE_OP_COUNT;
 	const KEY_LEN: usize = 1 + A::KEY_LEN;
 
 	#[inline(always)]
 	fn key(id: &mut [ExprDiscriminant], i: usize) -> usize {
-		id[i] = ExprDiscriminant::DotExpr;
+		id[i] = ExprDiscriminant::SumExpr;
 		A::key(id, i + 1)
 	}
 
@@ -205,13 +207,21 @@ impl<A: const Expr> const Expr for SumExpr<A> {
 	}
 }
 
+impl<A: const Expr + ExprToDyn> ExprToDyn for SumExpr<A> {
+	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+		assert!(!reduce);
+		Arc::new(DynExpr::SumExpr(self.0.to_dyn(e, r, s, true)))
+	}
+}
+
 #[allow(clippy::inline_always)]
 #[allow(clippy::indexing_slicing)]
-impl<A: const Expr> const Expr for SigmoidExpr<A> {
+impl<A: const Expr + ExprToDyn> const Expr for SigmoidExpr<A> {
 	const CONST: bool = A::CONST;
 	const ELEMWISE_COUNT: usize = A::ELEMWISE_COUNT;
 	const REDUCE_COUNT: usize = A::REDUCE_COUNT;
 	const SCALAR_COUNT: usize = A::SCALAR_COUNT;
+	const REDUCE_OP_COUNT: usize = A::REDUCE_OP_COUNT;
 	const KEY_LEN: usize = 1 + A::KEY_LEN;
 
 	#[inline(always)]
@@ -236,13 +246,20 @@ impl<A: const Expr> const Expr for SigmoidExpr<A> {
 	}
 }
 
+impl<A: const Expr + ExprToDyn> ExprToDyn for SigmoidExpr<A> {
+	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+		Arc::new(DynExpr::SigmoidExpr(self.0.to_dyn(e, r, s, reduce)))
+	}
+}
+
 #[allow(clippy::inline_always)]
 #[allow(clippy::indexing_slicing)]
-impl<A: const Expr> const Expr for SwishExpr<A> {
+impl<A: const Expr + ExprToDyn> const Expr for SwishExpr<A> {
 	const CONST: bool = A::CONST;
 	const ELEMWISE_COUNT: usize = A::ELEMWISE_COUNT;
 	const REDUCE_COUNT: usize = A::REDUCE_COUNT;
 	const SCALAR_COUNT: usize = A::SCALAR_COUNT;
+	const REDUCE_OP_COUNT: usize = A::REDUCE_OP_COUNT;
 	const KEY_LEN: usize = 1 + A::KEY_LEN;
 
 	#[inline(always)]
@@ -267,13 +284,20 @@ impl<A: const Expr> const Expr for SwishExpr<A> {
 	}
 }
 
+impl<A: const Expr + ExprToDyn> ExprToDyn for SwishExpr<A> {
+	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+		Arc::new(DynExpr::SwishExpr(self.0.to_dyn(e, r, s, reduce)))
+	}
+}
+
 #[allow(clippy::inline_always)]
 #[allow(clippy::indexing_slicing)]
-impl<A: const Expr> const Expr for SqrtExpr<A> {
+impl<A: const Expr + ExprToDyn> const Expr for SqrtExpr<A> {
 	const CONST: bool = A::CONST;
 	const ELEMWISE_COUNT: usize = A::ELEMWISE_COUNT;
 	const REDUCE_COUNT: usize = A::REDUCE_COUNT;
 	const SCALAR_COUNT: usize = A::SCALAR_COUNT;
+	const REDUCE_OP_COUNT: usize = A::REDUCE_OP_COUNT;
 	const KEY_LEN: usize = 1 + A::KEY_LEN;
 
 	#[inline(always)]
@@ -298,13 +322,20 @@ impl<A: const Expr> const Expr for SqrtExpr<A> {
 	}
 }
 
+impl<A: const Expr + ExprToDyn> ExprToDyn for SqrtExpr<A> {
+	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+		Arc::new(DynExpr::SqrtExpr(self.0.to_dyn(e, r, s, reduce)))
+	}
+}
+
 #[allow(clippy::inline_always)]
 #[allow(clippy::indexing_slicing)]
-impl<A: const Expr, B: const Expr> const Expr for RecipExpr<A, B> {
+impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> const Expr for RecipExpr<A, B> {
 	const CONST: bool = A::CONST && B::CONST;
 	const ELEMWISE_COUNT: usize = A::ELEMWISE_COUNT + B::ELEMWISE_COUNT;
 	const REDUCE_COUNT: usize = A::REDUCE_COUNT + B::REDUCE_COUNT;
 	const SCALAR_COUNT: usize = A::SCALAR_COUNT + B::SCALAR_COUNT;
+	const REDUCE_OP_COUNT: usize = A::REDUCE_OP_COUNT + B::REDUCE_OP_COUNT;
 	const KEY_LEN: usize = 1 + A::KEY_LEN + B::KEY_LEN;
 
 	#[inline(always)]
@@ -337,13 +368,22 @@ impl<A: const Expr, B: const Expr> const Expr for RecipExpr<A, B> {
 	}
 }
 
+impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> ExprToDyn for RecipExpr<A, B> {
+	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+		let a = self.0.to_dyn(e, r, s, reduce);
+		let b = self.1.to_dyn(e, r, s, reduce);
+		Arc::new(DynExpr::RecipExpr(a, b))
+	}
+}
+
 #[allow(clippy::inline_always)]
 #[allow(clippy::indexing_slicing)]
-impl<A: const Expr> const Expr for LnClampedExpr<A> {
+impl<A: const Expr + ExprToDyn> const Expr for LnClampedExpr<A> {
 	const CONST: bool = A::CONST;
 	const ELEMWISE_COUNT: usize = A::ELEMWISE_COUNT;
 	const REDUCE_COUNT: usize = A::REDUCE_COUNT;
 	const SCALAR_COUNT: usize = A::SCALAR_COUNT;
+	const REDUCE_OP_COUNT: usize = A::REDUCE_OP_COUNT;
 	const KEY_LEN: usize = 1 + A::KEY_LEN;
 
 	#[inline(always)]
@@ -368,13 +408,20 @@ impl<A: const Expr> const Expr for LnClampedExpr<A> {
 	}
 }
 
+impl<A: const Expr + ExprToDyn> ExprToDyn for LnClampedExpr<A> {
+	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+		Arc::new(DynExpr::LnClampedExpr(self.0.to_dyn(e, r, s, reduce)))
+	}
+}
+
 #[allow(clippy::inline_always)]
 #[allow(clippy::indexing_slicing)]
-impl<A: const Expr, B: const Expr> const Expr for AddExpr<A, B> {
+impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> const Expr for AddExpr<A, B> {
 	const CONST: bool = A::CONST && B::CONST;
 	const ELEMWISE_COUNT: usize = A::ELEMWISE_COUNT + B::ELEMWISE_COUNT;
 	const REDUCE_COUNT: usize = A::REDUCE_COUNT + B::REDUCE_COUNT;
 	const SCALAR_COUNT: usize = A::SCALAR_COUNT + B::SCALAR_COUNT;
+	const REDUCE_OP_COUNT: usize = A::REDUCE_OP_COUNT + B::REDUCE_OP_COUNT;
 	const KEY_LEN: usize = 1 + A::KEY_LEN + B::KEY_LEN;
 
 	#[inline(always)]
@@ -407,13 +454,22 @@ impl<A: const Expr, B: const Expr> const Expr for AddExpr<A, B> {
 	}
 }
 
+impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> ExprToDyn for AddExpr<A, B> {
+	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+		let a = self.0.to_dyn(e, r, s, reduce);
+		let b = self.1.to_dyn(e, r, s, reduce);
+		Arc::new(DynExpr::AddExpr(a, b))
+	}
+}
+
 #[allow(clippy::inline_always)]
 #[allow(clippy::indexing_slicing)]
-impl<A: const Expr, B: const Expr> const Expr for MulExpr<A, B> {
+impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> const Expr for MulExpr<A, B> {
 	const CONST: bool = A::CONST && B::CONST;
 	const ELEMWISE_COUNT: usize = A::ELEMWISE_COUNT + B::ELEMWISE_COUNT;
 	const REDUCE_COUNT: usize = A::REDUCE_COUNT + B::REDUCE_COUNT;
 	const SCALAR_COUNT: usize = A::SCALAR_COUNT + B::SCALAR_COUNT;
+	const REDUCE_OP_COUNT: usize = A::REDUCE_OP_COUNT + B::REDUCE_OP_COUNT;
 	const KEY_LEN: usize = 1 + A::KEY_LEN + B::KEY_LEN;
 
 	#[inline(always)]
@@ -446,6 +502,14 @@ impl<A: const Expr, B: const Expr> const Expr for MulExpr<A, B> {
 	}
 }
 
+impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> ExprToDyn for MulExpr<A, B> {
+	fn to_dyn(self, e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+		let a = self.0.to_dyn(e, r, s, reduce);
+		let b = self.1.to_dyn(e, r, s, reduce);
+		Arc::new(DynExpr::MulExpr(a, b))
+	}
+}
+
 //--------------------------------------------------------------------------------------------------
 
 const KEY_BATCH: usize = std::mem::size_of::<u64>() / std::mem::size_of::<ExprDiscriminant>();
@@ -460,22 +524,29 @@ where
 
 //--------------------------------------------------------------------------------------------------
 
-struct CacheItem {
-	hash: u64,
-	value: Arc<KernelData>,
+pub struct KernelData {
+	pub id: usize,
+	pub key: Box<[u64]>,
+	pub expr: Arc<DynExpr>,
+	pub elemwise_count: usize,
+	pub reduce_count: usize,
+	pub scalar_count: usize,
 }
 
 pub struct KernelRunner {
-	cache: HashTable<CacheItem>,
+	registry: Arc<RwLock<KernelRegistry>>,
+	cache: RefCell<KernelMap>,
 }
 
 impl KernelRunner {
-	pub fn run<E: const Expr>(
+	#[inline]
+	pub fn run<E: const Expr + ExprToDyn>(
 		&self,
 		output: &Tensor,
-		expr: &E,
+		expr: E,
 	) -> Result<(), ErrPack<TensorOpError>>
 	where
+		[(); 1 - E::REDUCE_OP_COUNT]:, // REDUCE_OP_COUNT <= 1
 		[(); E::ELEMWISE_COUNT]:,
 		[(); E::REDUCE_COUNT]:,
 		[(); E::SCALAR_COUNT]:,
@@ -503,13 +574,14 @@ impl KernelRunner {
 		let scalar_args = scalar_args;
 
 		let (key, key_hash) = const { Self::get_key::<E>() };
-		let kernel = if let Some(found) = self.find_kernel(&key, key_hash) {
-			found
+		let cache = self.cache.borrow();
+		let kernel = if let Some(map_entry) = cache.find(&key, key_hash) {
+			map_entry
 		} else {
 			cold_path();
-			self.add_kernel(key, key_hash, expr)?
+			self.add_kernel(key, key_hash, expr)
 		};
-		Self::dispatch(kernel, output, elem_args, reduce_args, scalar_args)
+		Self::dispatch(kernel.value.as_ref(), output, elem_args, reduce_args, scalar_args)
 	}
 
 	#[allow(clippy::indexing_slicing)]
@@ -524,34 +596,38 @@ impl KernelRunner {
 
 		let key_union = KeyUnion { discriminants };
 		let key = unsafe { key_union.key };
+		let key_hash = KernelMap::hash_key(&key);
 
-		let mut key_hasher =
-			SipHasher13::new_with_keys(3141_5926_5358_9793_u64, 2384_6264_3383_2795_u64);
-		let mut i = 0;
-		while i < key.len() {
-			key_hasher.write_u64(key[i]);
-			i += 1;
-		}
-
-		(key, key_hasher.finish())
+		(key, key_hash)
 	}
 
 	#[inline(never)]
-	fn find_kernel(&self, key: &[u64], key_hash: u64) -> Option<&KernelData> {
-		self.cache
-			.find(key_hash, |item| item.hash == key_hash && likely(item.value.key.as_ref() == key))
-			.map(|item| item.value.as_ref())
-	}
-
-	fn add_kernel<E: const Expr>(
-		&self,
+	fn add_kernel<E: const Expr + ExprToDyn>(
+		&mut self,
 		key: [u64; E::KEY_LEN.next_multiple_of(KEY_BATCH) / KEY_BATCH],
 		key_hash: u64,
-		expr: &E,
-	) -> Result<&KernelData, ErrPack<TensorOpError>> {
-		//
+		expr: E,
+	) -> &KernelMapEntry {
+		let (mut e, mut r, mut s) = (0, 0, 0);
+		let dyn_expr = expr.to_dyn(&mut e, &mut r, &mut s, false);
+		assert!(e == E::ELEMWISE_COUNT);
+		assert!(r == E::REDUCE_COUNT);
+		assert!(s == E::SCALAR_COUNT);
+		let mut registry = self.registry.write().unwrap();
+		let kernel = registry.add_kernel(&key, key_hash, |id| {
+			Arc::new(KernelData {
+				id,
+				key: key.into(),
+				expr: dyn_expr,
+				elemwise_count: E::ELEMWISE_COUNT,
+				reduce_count: E::REDUCE_COUNT,
+				scalar_count: E::SCALAR_COUNT,
+			})
+		});
+		self.cache.insert_unique(key_hash, kernel)
 	}
 
+	#[inline(never)]
 	#[allow(clippy::indexing_slicing)]
 	#[allow(clippy::too_many_lines)]
 	fn dispatch<const E: usize, const R: usize, const C: usize>(
@@ -564,9 +640,9 @@ impl KernelRunner {
 	where
 		[(); 1 + E + R]:,
 	{
-		debug_assert!(kernel_data.elem_args.len() == E);
-		debug_assert!(kernel_data.reduce_args.len() == R);
-		debug_assert!(kernel_data.const_args.len() == C);
+		debug_assert!(kernel_data.elemwise_count == E);
+		debug_assert!(kernel_data.reduce_count == R);
+		debug_assert!(kernel_data.scalar_count == C);
 
 		let dtype_bytes = output.buf().dtype.bytes();
 		debug_assert!(dtype_bytes > 0);

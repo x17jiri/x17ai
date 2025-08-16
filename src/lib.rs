@@ -57,6 +57,7 @@
 #![allow(clippy::option_if_let_else)]
 #![allow(clippy::inconsistent_digit_grouping)]
 #![allow(clippy::large_digit_groups)]
+#![allow(clippy::many_single_char_names)]
 
 use std::convert::Infallible;
 
