@@ -15,7 +15,6 @@ use crate::tensor::device::buffer::{
 };
 use crate::tensor::device::cpu::{CPUDevice, ViewError};
 use crate::tensor::device::executor::{Executor, ExecutorError};
-use crate::tensor::device::kernel::library::KernelLibrary;
 use crate::tensor::dim_merger::DimMergerError;
 use crate::tensor::generic::map::dd::ReplaceTailError;
 use crate::tensor::generic::map::{
@@ -186,10 +185,6 @@ impl Tensor {
 
 	pub fn executor(&self) -> &dyn Executor {
 		self.buf().executor()
-	}
-
-	pub fn builtin_kernel_library(&self) -> KernelLibrary {
-		self.buf().builtin_kernels
 	}
 
 	pub fn assign<Expr: EvaluatesToTensor>(

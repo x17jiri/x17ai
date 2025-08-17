@@ -14,7 +14,8 @@ use crate::tensor::device::cpu::zip::{zip_elems, zip_vecs};
 use crate::tensor::device::executor::{
 	Executor, ExecutorError, KernelElemArg, KernelOutput, KernelReduceArg, ensure_same_shape,
 };
-use crate::tensor::device::kernel::runner::{DynExpr, KernelData};
+use crate::tensor::device::kernel::expr::DynExpr;
+use crate::tensor::device::kernel::runner::KernelData;
 use crate::tensor::generic::map::{Map, ND, Select};
 use crate::tensor::{HasDType, generic};
 
@@ -257,7 +258,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatExecutor<T> {
 	) -> f64 {
 		unsafe {
 			match expr {
-				DynExpr::ElemwiseArg(index) => {
+				DynExpr::ElemwiseTensorArg(index) => {
 					assert!(k == 0);
 					let elemwise_arg = &elemwise_args[*index];
 					elemwise_arg
@@ -271,7 +272,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatExecutor<T> {
 						.read()
 						.to_f64()
 				},
-				DynExpr::ReduceArg(index) => {
+				DynExpr::ReduceTensorArg(index) => {
 					let reduce_arg = &reduce_args[*index];
 					assert!(k < reduce_arg.reduction_size);
 					reduce_arg

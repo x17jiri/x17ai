@@ -12,7 +12,7 @@ use std::rc::Rc;
 use crate::ErrPack;
 use crate::autograd::{self, AutogradNode, BackwardFn};
 use crate::nn::param::Param;
-use crate::tensor::device::kernel::lookup::{scalar, tsr};
+use crate::tensor::device::kernel::expr::TensorOps;
 use crate::tensor::{Tensor, TensorOpError};
 
 use super::Layer;
@@ -88,14 +88,14 @@ impl<Nested: Layer> Layer for Wrapper<Nested> {
 		let (inp, backward_fn) = inp_node.take();
 
 		let inp_magn_recip = inp.new_replace_tail(1, &[1])?;
-		inp_magn_recip.assign((tsr(&inp) * &inp).mean().sqrt().recip(scalar(self.eps)))?;
+		inp_magn_recip.assign((&inp * &inp).mean().sqrt().recip(self.eps))?;
 
 		let rms_norm = if self.norm_pos != NormPosition::Inside && inp.owns_buffer() {
 			inp.clone()
 		} else {
 			inp.new_empty_like()?
 		};
-		rms_norm.assign(tsr(&inp) * &inp_magn_recip)?;
+		rms_norm.assign(&inp * &inp_magn_recip)?;
 
 		let mut residual = if self.norm_pos == NormPosition::Inside {
 			inp
@@ -121,9 +121,9 @@ impl<Nested: Layer> Layer for Wrapper<Nested> {
 			);
 			let (nested_out, nested_out_fn) = self.nested.forward(nested_inp)?.take();
 
-			inner.ratio.assign((tsr(&nested_out) * &nested_out).mean().sqrt())?;
+			inner.ratio.assign((&nested_out * &nested_out).mean().sqrt())?;
 			if self.norm_pos == NormPosition::Inside {
-				inner.ratio.assign(tsr(&inner.ratio) * &inp_magn_recip)?;
+				inner.ratio.assign(&inner.ratio * &inp_magn_recip)?;
 			}
 			std::mem::drop(inner);
 
@@ -148,7 +148,7 @@ impl<Nested: Layer> Layer for Wrapper<Nested> {
 			std::mem::swap(&mut nested_out, &mut residual);
 		}
 		let out = nested_out.reuse_or_new_like()?;
-		out.assign(tsr(&nested_out) + &residual)?;
+		out.assign(&nested_out + &residual)?;
 		Ok(AutogradNode::new(out, nested_out_fn))
 	}
 
@@ -192,25 +192,24 @@ impl BackwardFn for WrapperBackwardFn_Split {
 		let d_out = d_residual.unwrap();
 
 		let d_nested_magn_recip = ratio.new_empty_like()?;
-		d_nested_magn_recip
-			.assign((tsr(&d_nested) * &d_nested).mean().sqrt().recip(scalar(eps)))?;
-		ratio.assign(tsr(&ratio) * &d_nested_magn_recip)?;
+		d_nested_magn_recip.assign((&d_nested * &d_nested).mean().sqrt().recip(eps))?;
+		ratio.assign(&ratio * &d_nested_magn_recip)?;
 
 		let d_out_magn = d_nested_magn_recip; // reuse tensor with different variable name
-		d_out_magn.assign((tsr(&d_out) * &d_out).mean().sqrt())?;
-		ratio.assign(tsr(&ratio) * &d_out_magn)?;
+		d_out_magn.assign((&d_out * &d_out).mean().sqrt())?;
+		ratio.assign(&ratio * &d_out_magn)?;
 
 		let d_inp = d_out.reuse_or_new_like()?;
-		d_inp.assign(tsr(&d_out) + (tsr(&d_nested) * &ratio))?;
+		d_inp.assign(&d_out + (&d_nested * &ratio))?;
 		std::mem::drop(d_out);
 		std::mem::drop(d_nested);
 
 		let d_inp_magn_recip = ratio; // reuse tensor with different variable name
-		d_inp_magn_recip.assign((tsr(&d_inp) * &d_inp).mean().sqrt().recip(scalar(eps)))?;
-		d_out_magn.assign(tsr(&d_out_magn) * &d_inp_magn_recip)?;
+		d_inp_magn_recip.assign((&d_inp * &d_inp).mean().sqrt().recip(eps))?;
+		d_out_magn.assign(&d_out_magn * &d_inp_magn_recip)?;
 		std::mem::drop(d_inp_magn_recip);
 
-		d_inp.assign(tsr(&d_inp) * &d_out_magn)?;
+		d_inp.assign(&d_inp * &d_out_magn)?;
 		std::mem::drop(d_out_magn);
 
 		queue.add(backward_fn, d_inp);

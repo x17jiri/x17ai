@@ -12,7 +12,7 @@ use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::device::executor::{
 	Executor, ExecutorError, KernelElemArg, KernelOutput, KernelReduceArg,
 };
-use crate::tensor::device::kernel::KernelData;
+use crate::tensor::device::kernel::runner::KernelData;
 use crate::tensor::generic::map::ND;
 use crate::tensor::{HasDType, generic};
 

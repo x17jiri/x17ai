@@ -12,7 +12,7 @@
 
 use std::hint::cold_path;
 
-use crate::tensor::device::kernel::lookup::{self, scalar, tsr};
+use crate::tensor::device::kernel::expr::TensorOps;
 use crate::tensor::{Tensor, TensorOpError};
 use crate::util::LossyInto;
 use crate::{ErrExtra, ErrPack};
@@ -71,10 +71,10 @@ impl OptParam {
 		let value = value.reshape_last_dim([parts, part_elems]).unwrap();
 
 		let m = value.new_empty_like()?;
-		m.assign(lookup::zero())?;
+		m.assign(0.0)?;
 
 		let v = value.new_empty(&[parts, 1], value.dtype())?;
-		v.assign(lookup::zero())?;
+		v.assign(0.0)?;
 
 		Ok(Self {
 			parts,
@@ -124,8 +124,8 @@ impl OptParam {
 		let grad = grad.reshape_last_dim([self.parts, self.part_elems])?;
 
 		// Update the first moment estimate
-		let m_decayed = tsr(&self.m) * coef.m_decay;
-		let m_update = tsr(&grad) * (1.0 - coef.m_decay);
+		let m_decayed = &self.m * coef.m_decay;
+		let m_update = &grad * (1.0 - coef.m_decay);
 		let new_m = m_decayed + m_update;
 		self.m.assign(new_m)?;
 
@@ -133,20 +133,20 @@ impl OptParam {
 		// required for `v` by computing the mean of `grad * grad` for each part
 		// of the parameter tensor.
 		// Dividing the sum by `part_elems` gives the mean.
-		let grad_squared = (tsr(&grad) * &grad).sum() * self.part_elems_recip;
+		let grad_squared = (&grad * &grad).sum() * self.part_elems_recip;
 
 		// Update the second moment estimate
-		let v_decayed = tsr(&self.v) * coef.v_decay;
+		let v_decayed = &self.v * coef.v_decay;
 		let v_update = grad_squared * (1.0 - coef.v_decay);
 		let new_v = v_decayed + v_update;
 		self.v.assign(new_v)?;
 
 		let v_rsqrt = self.v.new_empty_like()?;
-		v_rsqrt.assign(tsr(&self.v).sqrt().recip(scalar(coef.eps)))?;
+		v_rsqrt.assign(self.v.sqrt().recip(coef.eps))?;
 
 		// Update value
-		let update = tsr(&self.m) * &v_rsqrt;
-		let new_value = tsr(&self.value) - update * coef.learning_rate;
+		let update = &self.m * &v_rsqrt;
+		let new_value = &self.value - update * coef.learning_rate;
 		self.value.assign(new_value)?;
 
 		Ok(())

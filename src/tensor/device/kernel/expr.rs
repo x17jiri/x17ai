@@ -8,7 +8,10 @@
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 
-use crate::tensor::Tensor;
+use crate::ErrPack;
+use crate::tensor::math::EvaluatesToTensor;
+use crate::tensor::{Tensor, TensorOpError};
+use crate::util::LossyInto;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -19,7 +22,9 @@ pub enum ExprDiscriminant {
 	ScalarArg,
 
 	SumExpr,
+	MaxExpr,
 
+	ExpExpr,
 	SigmoidExpr,
 	SwishExpr,
 	SqrtExpr,
@@ -39,7 +44,9 @@ pub enum DynExpr {
 	ScalarArg(usize),
 
 	SumExpr(Arc<DynExpr>),
+	MaxExpr(Arc<DynExpr>),
 
+	ExpExpr(Arc<DynExpr>),
 	SigmoidExpr(Arc<DynExpr>),
 	SwishExpr(Arc<DynExpr>),
 	SqrtExpr(Arc<DynExpr>),
@@ -68,14 +75,20 @@ pub trait Expr {
 	where
 		Self: 't;
 	fn scalars(&self, scalars: &mut [f64], i: usize) -> usize;
+
+	fn a_tensor(&self) -> Option<&Tensor>;
 }
 
 pub trait ExprToDyn {
 	fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr>;
 }
 
-pub struct SumExpr<A: Expr + ExprToDyn>(pub A);
+pub struct Scalar(pub f64);
 
+pub struct SumExpr<A: Expr + ExprToDyn>(pub A);
+pub struct MaxExpr<A: Expr + ExprToDyn>(pub A);
+
+pub struct ExpExpr<A: Expr + ExprToDyn>(pub A);
 pub struct SigmoidExpr<A: Expr + ExprToDyn>(pub A);
 pub struct SwishExpr<A: Expr + ExprToDyn>(pub A);
 pub struct SqrtExpr<A: Expr + ExprToDyn>(pub A);
@@ -123,6 +136,11 @@ impl<'a> const Expr for &'a Tensor {
 	fn scalars(&self, _scalars: &mut [f64], i: usize) -> usize {
 		i
 	}
+
+	#[inline(always)]
+	fn a_tensor(&self) -> Option<&Tensor> {
+		Some(*self)
+	}
 }
 
 impl<'a> ExprToDyn for &'a Tensor {
@@ -141,7 +159,7 @@ impl<'a> ExprToDyn for &'a Tensor {
 
 #[allow(clippy::inline_always)]
 #[allow(clippy::indexing_slicing)]
-impl const Expr for f64 {
+impl const Expr for Scalar {
 	const CONST: bool = true;
 	const ELEMWISE_COUNT: usize = 0;
 	const REDUCE_COUNT: usize = 0;
@@ -173,12 +191,17 @@ impl const Expr for f64 {
 
 	#[inline(always)]
 	fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
-		scalars[i] = *self;
+		scalars[i] = self.0;
 		i + 1
+	}
+
+	#[inline(always)]
+	fn a_tensor(&self) -> Option<&Tensor> {
+		None
 	}
 }
 
-impl ExprToDyn for f64 {
+impl ExprToDyn for Scalar {
 	fn to_dyn(_e: &mut usize, _r: &mut usize, s: &mut usize, _reduce: bool) -> Arc<DynExpr> {
 		let result = Arc::new(DynExpr::ScalarArg(*s));
 		*s += 1;
@@ -222,12 +245,116 @@ impl<A: const Expr + ExprToDyn> const Expr for SumExpr<A> {
 	fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
 		self.0.scalars(scalars, i)
 	}
+
+	#[inline(always)]
+	fn a_tensor(&self) -> Option<&Tensor> {
+		self.0.a_tensor()
+	}
 }
 
 impl<A: const Expr + ExprToDyn> ExprToDyn for SumExpr<A> {
 	fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
 		assert!(!reduce);
 		Arc::new(DynExpr::SumExpr(A::to_dyn(e, r, s, true)))
+	}
+}
+
+#[allow(clippy::inline_always)]
+#[allow(clippy::indexing_slicing)]
+impl<A: const Expr + ExprToDyn> const Expr for MaxExpr<A> {
+	const CONST: bool = A::CONST;
+	const ELEMWISE_COUNT: usize = 0;
+	const REDUCE_COUNT: usize = A::ELEMWISE_COUNT;
+	const SCALAR_COUNT: usize = A::SCALAR_COUNT;
+	const REDUCE_OP_COUNT: usize = 1 + A::REDUCE_OP_COUNT;
+	const KEY_LEN: usize = 1 + A::KEY_LEN;
+
+	#[inline(always)]
+	fn key(id: &mut [ExprDiscriminant], i: usize) -> usize {
+		id[i] = ExprDiscriminant::MaxExpr;
+		A::key(id, i + 1)
+	}
+
+	#[inline(always)]
+	fn elemwise_tensors<'t>(&self, _tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
+	where
+		Self: 't,
+	{
+		i
+	}
+
+	#[inline(always)]
+	fn reduce_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
+	where
+		Self: 't,
+	{
+		self.0.elemwise_tensors(tensors, i)
+	}
+
+	#[inline(always)]
+	fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
+		self.0.scalars(scalars, i)
+	}
+
+	#[inline(always)]
+	fn a_tensor(&self) -> Option<&Tensor> {
+		self.0.a_tensor()
+	}
+}
+
+impl<A: const Expr + ExprToDyn> ExprToDyn for MaxExpr<A> {
+	fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+		assert!(!reduce);
+		Arc::new(DynExpr::MaxExpr(A::to_dyn(e, r, s, true)))
+	}
+}
+
+#[allow(clippy::inline_always)]
+#[allow(clippy::indexing_slicing)]
+impl<A: const Expr + ExprToDyn> const Expr for ExpExpr<A> {
+	const CONST: bool = A::CONST;
+	const ELEMWISE_COUNT: usize = A::ELEMWISE_COUNT;
+	const REDUCE_COUNT: usize = A::REDUCE_COUNT;
+	const SCALAR_COUNT: usize = A::SCALAR_COUNT;
+	const REDUCE_OP_COUNT: usize = A::REDUCE_OP_COUNT;
+	const KEY_LEN: usize = 1 + A::KEY_LEN;
+
+	#[inline(always)]
+	fn key(id: &mut [ExprDiscriminant], i: usize) -> usize {
+		id[i] = ExprDiscriminant::ExpExpr;
+		A::key(id, i + 1)
+	}
+
+	#[inline(always)]
+	fn elemwise_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
+	where
+		Self: 't,
+	{
+		self.0.elemwise_tensors(tensors, i)
+	}
+
+	#[inline(always)]
+	fn reduce_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
+	where
+		Self: 't,
+	{
+		self.0.reduce_tensors(tensors, i)
+	}
+
+	#[inline(always)]
+	fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
+		self.0.scalars(scalars, i)
+	}
+
+	#[inline(always)]
+	fn a_tensor(&self) -> Option<&Tensor> {
+		self.0.a_tensor()
+	}
+}
+
+impl<A: const Expr + ExprToDyn> ExprToDyn for ExpExpr<A> {
+	fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+		Arc::new(DynExpr::ExpExpr(A::to_dyn(e, r, s, reduce)))
 	}
 }
 
@@ -266,6 +393,11 @@ impl<A: const Expr + ExprToDyn> const Expr for SigmoidExpr<A> {
 	#[inline(always)]
 	fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
 		self.0.scalars(scalars, i)
+	}
+
+	#[inline(always)]
+	fn a_tensor(&self) -> Option<&Tensor> {
+		self.0.a_tensor()
 	}
 }
 
@@ -311,6 +443,11 @@ impl<A: const Expr + ExprToDyn> const Expr for SwishExpr<A> {
 	fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
 		self.0.scalars(scalars, i)
 	}
+
+	#[inline(always)]
+	fn a_tensor(&self) -> Option<&Tensor> {
+		self.0.a_tensor()
+	}
 }
 
 impl<A: const Expr + ExprToDyn> ExprToDyn for SwishExpr<A> {
@@ -354,6 +491,11 @@ impl<A: const Expr + ExprToDyn> const Expr for SqrtExpr<A> {
 	#[inline(always)]
 	fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
 		self.0.scalars(scalars, i)
+	}
+
+	#[inline(always)]
+	fn a_tensor(&self) -> Option<&Tensor> {
+		self.0.a_tensor()
 	}
 }
 
@@ -407,6 +549,11 @@ impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> const Expr for RecipE
 		assert!(m == i + A::SCALAR_COUNT);
 		self.1.scalars(scalars, i + A::SCALAR_COUNT)
 	}
+
+	#[inline(always)]
+	fn a_tensor(&self) -> Option<&Tensor> {
+		self.0.a_tensor().or(self.1.a_tensor())
+	}
 }
 
 impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> ExprToDyn for RecipExpr<A, B> {
@@ -452,6 +599,11 @@ impl<A: const Expr + ExprToDyn> const Expr for LnClampedExpr<A> {
 	#[inline(always)]
 	fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
 		self.0.scalars(scalars, i)
+	}
+
+	#[inline(always)]
+	fn a_tensor(&self) -> Option<&Tensor> {
+		self.0.a_tensor()
 	}
 }
 
@@ -504,6 +656,11 @@ impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> const Expr for AddExp
 		let m = self.0.scalars(scalars, i);
 		assert!(m == i + A::SCALAR_COUNT);
 		self.1.scalars(scalars, i + A::SCALAR_COUNT)
+	}
+
+	#[inline(always)]
+	fn a_tensor(&self) -> Option<&Tensor> {
+		self.0.a_tensor().or(self.1.a_tensor())
 	}
 }
 
@@ -559,6 +716,11 @@ impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> const Expr for MulExp
 		assert!(m == i + A::SCALAR_COUNT);
 		self.1.scalars(scalars, i + A::SCALAR_COUNT)
 	}
+
+	#[inline(always)]
+	fn a_tensor(&self) -> Option<&Tensor> {
+		self.0.a_tensor().or(self.1.a_tensor())
+	}
 }
 
 impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> ExprToDyn for MulExpr<A, B> {
@@ -571,28 +733,322 @@ impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> ExprToDyn for MulExpr
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct ExprWrapper<E: const Expr + ExprToDyn>(E);
-
-impl<E: const Expr + ExprToDyn> From<E> for ExprWrapper<E> {
-	fn from(expr: E) -> Self {
-		Self(expr)
+impl<E: const Expr + ExprToDyn> EvaluatesToTensor for ExprWrapper<E> {
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+		todo!("ExprWrapper::eval_to_tensor not implemented yet");
 	}
 }
 
-impl<E, W> std::ops::Add<W> for &Tensor
-where
-	E: const Expr + ExprToDyn,
-	W: Into<ExprWrapper<E>>,
-{
+impl EvaluatesToTensor for Scalar {
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+		todo!("ExprWrapper::eval_to_tensor not implemented yet");
+	}
+}
+
+impl EvaluatesToTensor for f64 {
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+		todo!("ExprWrapper::eval_to_tensor not implemented yet");
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct ExprWrapper<E: const Expr + ExprToDyn>(E);
+
+pub trait Wrappable {
+	type E: const Expr + ExprToDyn;
+
+	fn wrap(self) -> ExprWrapper<Self::E>;
+}
+
+impl<'t> Wrappable for &'t Tensor {
+	type E = Self;
+
+	fn wrap(self) -> ExprWrapper<Self> {
+		ExprWrapper(self)
+	}
+}
+
+impl Wrappable for Scalar {
+	type E = Self;
+
+	fn wrap(self) -> ExprWrapper<Self> {
+		ExprWrapper(self)
+	}
+}
+
+impl Wrappable for f64 {
+	type E = Scalar;
+
+	fn wrap(self) -> ExprWrapper<Self::E> {
+		ExprWrapper(Scalar(self))
+	}
+}
+
+impl<E: const Expr + ExprToDyn> Wrappable for ExprWrapper<E> {
+	type E = E;
+
+	fn wrap(self) -> ExprWrapper<E> {
+		self
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+impl std::ops::Add<Self> for &Tensor {
+	type Output = ExprWrapper<AddExpr<Self, Self>>;
+
+	fn add(self, rhs: Self) -> ExprWrapper<AddExpr<Self, Self>> {
+		ExprWrapper(AddExpr(self, rhs))
+	}
+}
+
+impl std::ops::Add<f64> for &Tensor {
+	type Output = ExprWrapper<AddExpr<Self, Scalar>>;
+
+	fn add(self, rhs: f64) -> ExprWrapper<AddExpr<Self, Scalar>> {
+		ExprWrapper(AddExpr(self, Scalar(rhs)))
+	}
+}
+
+impl std::ops::Add<Scalar> for &Tensor {
+	type Output = ExprWrapper<AddExpr<Self, Scalar>>;
+
+	fn add(self, rhs: Scalar) -> ExprWrapper<AddExpr<Self, Scalar>> {
+		ExprWrapper(AddExpr(self, rhs))
+	}
+}
+
+impl<E: const Expr + ExprToDyn> std::ops::Add<ExprWrapper<E>> for &Tensor {
 	type Output = ExprWrapper<AddExpr<Self, E>>;
 
-	fn add(self, rhs: W) -> Self::Output {
-		ExprWrapper(
-			AddExpr(
-				*self,
-				rhs.into().0,
-			),
-		)
+	fn add(self, rhs: ExprWrapper<E>) -> ExprWrapper<AddExpr<Self, E>> {
+		ExprWrapper(AddExpr(self, rhs.0))
+	}
+}
+
+impl<'t, A: const Expr + ExprToDyn> std::ops::Add<&'t Tensor> for ExprWrapper<A> {
+	type Output = ExprWrapper<AddExpr<A, &'t Tensor>>;
+
+	fn add(self, rhs: &'t Tensor) -> ExprWrapper<AddExpr<A, &'t Tensor>> {
+		ExprWrapper(AddExpr(self.0, rhs))
+	}
+}
+
+impl<A: const Expr + ExprToDyn> std::ops::Add<f64> for ExprWrapper<A> {
+	type Output = ExprWrapper<AddExpr<A, Scalar>>;
+
+	fn add(self, rhs: f64) -> ExprWrapper<AddExpr<A, Scalar>> {
+		ExprWrapper(AddExpr(self.0, Scalar(rhs)))
+	}
+}
+
+impl<A: const Expr + ExprToDyn> std::ops::Add<Scalar> for ExprWrapper<A> {
+	type Output = ExprWrapper<AddExpr<A, Scalar>>;
+
+	fn add(self, rhs: Scalar) -> ExprWrapper<AddExpr<A, Scalar>> {
+		ExprWrapper(AddExpr(self.0, rhs))
+	}
+}
+
+impl<A: const Expr + ExprToDyn, E: const Expr + ExprToDyn> std::ops::Add<ExprWrapper<E>>
+	for ExprWrapper<A>
+{
+	type Output = ExprWrapper<AddExpr<A, E>>;
+
+	fn add(self, rhs: ExprWrapper<E>) -> ExprWrapper<AddExpr<A, E>> {
+		ExprWrapper(AddExpr(self.0, rhs.0))
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+impl std::ops::Sub<Self> for &Tensor {
+	type Output = ExprWrapper<AddExpr<Self, MulExpr<Self, Scalar>>>;
+
+	fn sub(self, rhs: Self) -> ExprWrapper<AddExpr<Self, MulExpr<Self, Scalar>>> {
+		ExprWrapper(AddExpr(self, MulExpr(rhs, Scalar(-1.0))))
+	}
+}
+
+impl std::ops::Sub<f64> for &Tensor {
+	type Output = ExprWrapper<AddExpr<Self, Scalar>>;
+
+	fn sub(self, rhs: f64) -> ExprWrapper<AddExpr<Self, Scalar>> {
+		ExprWrapper(AddExpr(self, Scalar(-rhs)))
+	}
+}
+
+impl std::ops::Sub<Scalar> for &Tensor {
+	type Output = ExprWrapper<AddExpr<Self, Scalar>>;
+
+	fn sub(self, rhs: Scalar) -> ExprWrapper<AddExpr<Self, Scalar>> {
+		ExprWrapper(AddExpr(self, Scalar(rhs.0 * -1.0)))
+	}
+}
+
+impl<E: const Expr + ExprToDyn> std::ops::Sub<ExprWrapper<E>> for &Tensor {
+	type Output = ExprWrapper<AddExpr<Self, MulExpr<E, Scalar>>>;
+
+	fn sub(self, rhs: ExprWrapper<E>) -> ExprWrapper<AddExpr<Self, MulExpr<E, Scalar>>> {
+		ExprWrapper(AddExpr(self, MulExpr(rhs.0, Scalar(-1.0))))
+	}
+}
+
+impl<'t, A: const Expr + ExprToDyn> std::ops::Sub<&'t Tensor> for ExprWrapper<A> {
+	type Output = ExprWrapper<AddExpr<A, MulExpr<&'t Tensor, Scalar>>>;
+
+	fn sub(self, rhs: &'t Tensor) -> ExprWrapper<AddExpr<A, MulExpr<&'t Tensor, Scalar>>> {
+		ExprWrapper(AddExpr(self.0, MulExpr(rhs, Scalar(-1.0))))
+	}
+}
+
+impl<A: const Expr + ExprToDyn> std::ops::Sub<f64> for ExprWrapper<A> {
+	type Output = ExprWrapper<AddExpr<A, Scalar>>;
+
+	fn sub(self, rhs: f64) -> ExprWrapper<AddExpr<A, Scalar>> {
+		ExprWrapper(AddExpr(self.0, Scalar(-rhs)))
+	}
+}
+
+impl<A: const Expr + ExprToDyn> std::ops::Sub<Scalar> for ExprWrapper<A> {
+	type Output = ExprWrapper<AddExpr<A, Scalar>>;
+
+	fn sub(self, rhs: Scalar) -> ExprWrapper<AddExpr<A, Scalar>> {
+		ExprWrapper(AddExpr(self.0, Scalar(rhs.0 * -1.0)))
+	}
+}
+
+impl<A: const Expr + ExprToDyn, E: const Expr + ExprToDyn> std::ops::Sub<ExprWrapper<E>>
+	for ExprWrapper<A>
+{
+	type Output = ExprWrapper<AddExpr<A, MulExpr<E, Scalar>>>;
+
+	fn sub(self, rhs: ExprWrapper<E>) -> ExprWrapper<AddExpr<A, MulExpr<E, Scalar>>> {
+		ExprWrapper(AddExpr(self.0, MulExpr(rhs.0, Scalar(-1.0))))
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+impl std::ops::Mul<Self> for &Tensor {
+	type Output = ExprWrapper<MulExpr<Self, Self>>;
+
+	fn mul(self, rhs: Self) -> ExprWrapper<MulExpr<Self, Self>> {
+		ExprWrapper(MulExpr(self, rhs))
+	}
+}
+
+impl std::ops::Mul<f64> for &Tensor {
+	type Output = ExprWrapper<MulExpr<Self, Scalar>>;
+
+	fn mul(self, rhs: f64) -> ExprWrapper<MulExpr<Self, Scalar>> {
+		ExprWrapper(MulExpr(self, Scalar(rhs)))
+	}
+}
+
+impl std::ops::Mul<Scalar> for &Tensor {
+	type Output = ExprWrapper<MulExpr<Self, Scalar>>;
+
+	fn mul(self, rhs: Scalar) -> ExprWrapper<MulExpr<Self, Scalar>> {
+		ExprWrapper(MulExpr(self, rhs))
+	}
+}
+
+impl<E: const Expr + ExprToDyn> std::ops::Mul<ExprWrapper<E>> for &Tensor {
+	type Output = ExprWrapper<MulExpr<Self, E>>;
+
+	fn mul(self, rhs: ExprWrapper<E>) -> ExprWrapper<MulExpr<Self, E>> {
+		ExprWrapper(MulExpr(self, rhs.0))
+	}
+}
+
+impl<'t, A: const Expr + ExprToDyn> std::ops::Mul<&'t Tensor> for ExprWrapper<A> {
+	type Output = ExprWrapper<MulExpr<A, &'t Tensor>>;
+
+	fn mul(self, rhs: &'t Tensor) -> ExprWrapper<MulExpr<A, &'t Tensor>> {
+		ExprWrapper(MulExpr(self.0, rhs))
+	}
+}
+
+impl<A: const Expr + ExprToDyn> std::ops::Mul<f64> for ExprWrapper<A> {
+	type Output = ExprWrapper<MulExpr<A, Scalar>>;
+
+	fn mul(self, rhs: f64) -> ExprWrapper<MulExpr<A, Scalar>> {
+		ExprWrapper(MulExpr(self.0, Scalar(rhs)))
+	}
+}
+
+impl<A: const Expr + ExprToDyn> std::ops::Mul<Scalar> for ExprWrapper<A> {
+	type Output = ExprWrapper<MulExpr<A, Scalar>>;
+
+	fn mul(self, rhs: Scalar) -> ExprWrapper<MulExpr<A, Scalar>> {
+		ExprWrapper(MulExpr(self.0, rhs))
+	}
+}
+
+impl<A: const Expr + ExprToDyn, E: const Expr + ExprToDyn> std::ops::Mul<ExprWrapper<E>>
+	for ExprWrapper<A>
+{
+	type Output = ExprWrapper<MulExpr<A, E>>;
+
+	fn mul(self, rhs: ExprWrapper<E>) -> ExprWrapper<MulExpr<A, E>> {
+		ExprWrapper(MulExpr(self.0, rhs.0))
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub trait TensorOps {
+	type E: const Expr + ExprToDyn;
+
+	fn sum(self) -> ExprWrapper<SumExpr<Self::E>>;
+	fn mean(self) -> ExprWrapper<MulExpr<SumExpr<Self::E>, Scalar>>;
+	fn max(self) -> ExprWrapper<MaxExpr<Self::E>>;
+
+	fn exp(self) -> ExprWrapper<ExpExpr<Self::E>>;
+	fn swish(self) -> ExprWrapper<SwishExpr<Self::E>>;
+	fn sqrt(self) -> ExprWrapper<SqrtExpr<Self::E>>;
+	fn recip<B: Wrappable>(self, b: B) -> ExprWrapper<RecipExpr<Self::E, B::E>>;
+	fn ln_clamped(self) -> ExprWrapper<LnClampedExpr<Self::E>>;
+}
+
+impl<T: Wrappable> TensorOps for T {
+	type E = T::E;
+
+	fn sum(self) -> ExprWrapper<SumExpr<T::E>> {
+		ExprWrapper(SumExpr(self.wrap().0))
+	}
+
+	fn mean(self) -> ExprWrapper<MulExpr<SumExpr<T::E>, Scalar>> {
+		let expr = self.wrap().0;
+		let n = expr.a_tensor().and_then(|t| t.size(-1).ok()).unwrap_or(1);
+		let sum_to_mean = 1.0 / n.lossy_into();
+		ExprWrapper(MulExpr(SumExpr(expr), Scalar(sum_to_mean)))
+	}
+
+	fn max(self) -> ExprWrapper<MaxExpr<T::E>> {
+		ExprWrapper(MaxExpr(self.wrap().0))
+	}
+
+	fn exp(self) -> ExprWrapper<ExpExpr<T::E>> {
+		ExprWrapper(ExpExpr(self.wrap().0))
+	}
+
+	fn swish(self) -> ExprWrapper<SwishExpr<T::E>> {
+		ExprWrapper(SwishExpr(self.wrap().0))
+	}
+
+	fn sqrt(self) -> ExprWrapper<SqrtExpr<T::E>> {
+		ExprWrapper(SqrtExpr(self.wrap().0))
+	}
+
+	fn recip<B: Wrappable>(self, b: B) -> ExprWrapper<RecipExpr<T::E, B::E>> {
+		ExprWrapper(RecipExpr(self.wrap().0, b.wrap().0))
+	}
+
+	fn ln_clamped(self) -> ExprWrapper<LnClampedExpr<T::E>> {
+		ExprWrapper(LnClampedExpr(self.wrap().0))
 	}
 }
 

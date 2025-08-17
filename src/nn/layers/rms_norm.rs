@@ -11,7 +11,7 @@ use std::rc::Rc;
 use crate::ErrPack;
 use crate::autograd::{self, AutogradNode, BackwardFn, StraightThroughBackwardFn};
 use crate::nn::param::Param;
-use crate::tensor::device::kernel::lookup::{scalar, tsr};
+use crate::tensor::device::kernel::expr::TensorOps;
 use crate::tensor::{Tensor, TensorOpError};
 
 use super::Layer;
@@ -60,10 +60,10 @@ impl Layer for RMSNorm {
 	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
 		let (inp, inp_backward) = inp_node.take();
 		let magn_recip = inp.new_replace_tail(1, &[1])?;
-		magn_recip.assign((tsr(&inp) * &inp).mean().sqrt().recip(scalar(self.eps)))?;
+		magn_recip.assign((&inp * &inp).mean().sqrt().recip(self.eps))?;
 
 		let out = inp.reuse_or_new_like()?;
-		out.assign(tsr(&inp) * tsr(&magn_recip))?;
+		out.assign(&inp * &magn_recip)?;
 
 		let backward_fn = inp_backward.map(|inp_backward| match self.gradient_mode {
 			RMSNormGradientMode::Precise => {
@@ -105,11 +105,11 @@ impl BackwardFn for RMSNormBackwardFn_Precise {
 		let Self { out, magn_recip, inp_backward } = Box::into_inner(self);
 
 		let g = magn_recip.new_empty_like()?; // [..., 1]
-		g.assign((tsr(&out) * &d_out).mean())?;
+		g.assign((&out * &d_out).mean())?;
 
 		let d_inp = out.reuse_or_new_like()?;
 
-		d_inp.assign((tsr(&d_out) - (tsr(&out) * &g)) * &magn_recip)?;
+		d_inp.assign((&d_out - (&out * &g)) * &magn_recip)?;
 
 		queue.add(inp_backward, d_inp);
 		Ok(())
