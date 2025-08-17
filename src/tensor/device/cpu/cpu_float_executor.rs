@@ -14,7 +14,7 @@ use crate::tensor::device::cpu::zip::{zip_elems, zip_vecs};
 use crate::tensor::device::executor::{
 	Executor, ExecutorError, KernelElemArg, KernelOutput, KernelReduceArg, ensure_same_shape,
 };
-use crate::tensor::device::kernel::{FloatLiteral, KernelData, ScalarExpr};
+use crate::tensor::device::kernel::runner::{DynExpr, KernelData};
 use crate::tensor::generic::map::{Map, ND, Select};
 use crate::tensor::{HasDType, generic};
 
@@ -247,85 +247,90 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatExecutor<T> {
 	}
 
 	pub unsafe fn eval_expr(
-		expr: &ScalarExpr,
+		expr: &DynExpr,
 		j: usize,
 		i: usize,
-		elem_args: *const KernelElemArg,
-		reduce_args: *const KernelReduceArg,
-		const_args: *const f64,
+		k: usize,
+		elemwise_args: &[KernelElemArg],
+		reduce_args: &[KernelReduceArg],
+		scalar_args: &[f64],
 	) -> f64 {
 		unsafe {
 			match expr {
-				ScalarExpr::ElemArg(arg) => {
-					let elem_arg = &*elem_args.add(arg.index);
-					elem_arg
+				DynExpr::ElemwiseArg(index) => {
+					assert!(k == 0);
+					let elemwise_arg = &elemwise_args[*index];
+					elemwise_arg
 						.device_data
 						.add(
-							elem_arg.offset_bytes
-								+ j * elem_arg.stride_bytes[0]
-								+ i * elem_arg.stride_bytes[1],
+							elemwise_arg.offset_bytes
+								+ j * elemwise_arg.stride_bytes[0]
+								+ i * elemwise_arg.stride_bytes[1],
 						)
 						.cast::<T>()
 						.read()
 						.to_f64()
 				},
-				ScalarExpr::ConstArg(arg) => const_args.add(arg.index).read(),
-				ScalarExpr::FloatLiteral(FloatLiteral { value }) => *value,
+				DynExpr::ReduceArg(index) => {
+					let reduce_arg = &reduce_args[*index];
+					assert!(k < reduce_arg.reduction_size);
+					reduce_arg
+						.device_data
+						.add(
+							reduce_arg.offset_bytes
+								+ j * reduce_arg.stride_bytes[0]
+								+ i * reduce_arg.stride_bytes[1]
+								+ k * std::mem::size_of::<T>(),
+						)
+						.cast::<T>()
+						.read()
+						.to_f64()
+				},
+				DynExpr::ScalarArg(index) => scalar_args[*index],
 
-				ScalarExpr::DotExpr(a, b) => {
-					let vec_a = &*reduce_args.add(a.index);
-					let vec_b = &*reduce_args.add(b.index);
-					let ptr_a = vec_a
-						.device_data
-						.add(
-							vec_a.offset_bytes
-								+ j * vec_a.stride_bytes[0]
-								+ i * vec_a.stride_bytes[1],
-						)
-						.cast::<T>();
-					let ptr_b = vec_b
-						.device_data
-						.add(
-							vec_b.offset_bytes
-								+ j * vec_b.stride_bytes[0]
-								+ i * vec_b.stride_bytes[1],
-						)
-						.cast::<T>();
-					let slice_a = std::slice::from_raw_parts(ptr_a, vec_a.reduction_size);
-					let slice_b = std::slice::from_raw_parts(ptr_b, vec_b.reduction_size);
-					debug_assert!(slice_a.len() == slice_b.len());
-					math::dot(slice_a, slice_b)
+				DynExpr::SumExpr(a) => {
+					assert!(!reduce_args.is_empty());
+					let reduction_size = reduce_args[0].reduction_size;
+					assert!(reduce_args.iter().all(|a| a.reduction_size == reduction_size));
+
+					let a = a.as_ref();
+					(0..reduction_size)
+						.map(|k| {
+							Self::eval_expr(a, j, i, k, elemwise_args, reduce_args, scalar_args)
+						})
+						.sum()
 				},
 
-				ScalarExpr::SigmoidExpr(a) => {
-					let a = Self::eval_expr(a, j, i, elem_args, reduce_args, const_args);
+				DynExpr::SigmoidExpr(a) => {
+					let a = Self::eval_expr(a, j, i, k, elemwise_args, reduce_args, scalar_args);
 					math::sigmoid(a)
 				},
-				ScalarExpr::SwishExpr(a) => {
-					let a = Self::eval_expr(a, j, i, elem_args, reduce_args, const_args);
+				DynExpr::SwishExpr(a) => {
+					let a = Self::eval_expr(a, j, i, k, elemwise_args, reduce_args, scalar_args);
 					math::swish(a)
 				},
-				ScalarExpr::SqrtExpr(a) => {
-					let a = Self::eval_expr(a, j, i, elem_args, reduce_args, const_args);
+				DynExpr::SqrtExpr(a) => {
+					let a = Self::eval_expr(a, j, i, k, elemwise_args, reduce_args, scalar_args);
 					a.sqrt()
 				},
-				ScalarExpr::RecipExpr(a, eps) => {
-					let a = Self::eval_expr(a, j, i, elem_args, reduce_args, const_args);
-					let eps = Self::eval_expr(eps, j, i, elem_args, reduce_args, const_args);
+				DynExpr::RecipExpr(a, eps) => {
+					let a = Self::eval_expr(a, j, i, k, elemwise_args, reduce_args, scalar_args);
+					let eps =
+						Self::eval_expr(eps, j, i, k, elemwise_args, reduce_args, scalar_args);
 					1.0 / (a + eps)
 				},
-				ScalarExpr::LnClampedExpr(a) => {
-					let a = Self::eval_expr(a, j, i, elem_args, reduce_args, const_args);
+				DynExpr::LnClampedExpr(a) => {
+					let a = Self::eval_expr(a, j, i, k, elemwise_args, reduce_args, scalar_args);
 					a.ln().max(-1000.0)
 				},
-				ScalarExpr::AddExpr(a, b) => {
-					let a = Self::eval_expr(a, j, i, elem_args, reduce_args, const_args);
-					let b = Self::eval_expr(b, j, i, elem_args, reduce_args, const_args);
+				DynExpr::AddExpr(a, b) => {
+					let a = Self::eval_expr(a, j, i, k, elemwise_args, reduce_args, scalar_args);
+					let b = Self::eval_expr(b, j, i, k, elemwise_args, reduce_args, scalar_args);
 					a + b
 				},
-				ScalarExpr::MulExpr(a, b) => {
-					let a = Self::eval_expr(a, j, i, elem_args, reduce_args, const_args);
-					let b = Self::eval_expr(b, j, i, elem_args, reduce_args, const_args);
+				DynExpr::MulExpr(a, b) => {
+					let a = Self::eval_expr(a, j, i, k, elemwise_args, reduce_args, scalar_args);
+					let b = Self::eval_expr(b, j, i, k, elemwise_args, reduce_args, scalar_args);
 					a * b
 				},
 			}
@@ -526,12 +531,16 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for CPUFloatExecutor<T> 
 		&self,
 		kernel_data: &KernelData,
 		o: *const KernelOutput,
-		elem_args: *const KernelElemArg,
+		elemwise_args: *const KernelElemArg,
 		reduce_args: *const KernelReduceArg,
-		const_args: *const f64,
+		scalar_args: *const f64,
 	) -> Result<(), ErrPack<ExecutorError>> {
 		let expr = kernel_data.expr.as_ref();
 		unsafe {
+			let elemwise_args =
+				std::slice::from_raw_parts(elemwise_args, kernel_data.elemwise_count);
+			let reduce_args = std::slice::from_raw_parts(reduce_args, kernel_data.reduce_count);
+			let scalar_args = std::slice::from_raw_parts(scalar_args, kernel_data.scalar_count);
 			let o = &*o;
 			for j in 0..o.size[0] {
 				for i in 0..o.size[1] {
@@ -543,9 +552,10 @@ impl<T: 'static + HasDType + Copy + FromToF64> Executor for CPUFloatExecutor<T> 
 						expr,
 						j,
 						i,
-						elem_args,
+						0,
+						elemwise_args,
 						reduce_args,
-						const_args,
+						scalar_args,
 					)));
 				}
 			}

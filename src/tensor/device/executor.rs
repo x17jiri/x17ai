@@ -135,9 +135,9 @@ pub trait Executor {
 		&self,
 		kernel_data: &KernelData,
 		o: *const KernelOutput,
-		elem_args: *const KernelElemArg,
+		elemwise_args: *const KernelElemArg,
 		reduce_args: *const KernelReduceArg,
-		const_args: *const f64,
+		scalar_args: *const f64,
 	) -> Result<(), ErrPack<ExecutorError>>;
 }
 

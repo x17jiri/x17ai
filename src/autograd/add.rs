@@ -7,7 +7,6 @@
 
 use crate::ErrPack;
 use crate::autograd::{self, AutogradNode, BackwardFn};
-use crate::tensor::device::kernel::lookup::tsr;
 use crate::tensor::{Tensor, TensorOpError};
 
 //--------------------------------------------------------------------------------------------------
@@ -23,7 +22,7 @@ pub fn add(
 		std::mem::swap(&mut a, &mut b);
 	}
 	let c = if a.owns_buffer() { a.clone() } else { a.new_empty_like()? };
-	c.assign(tsr(&a) + tsr(&b))?;
+	c.assign(&a + &b)?;
 
 	#[allow(clippy::collapsible_else_if)]
 	#[allow(clippy::option_if_let_else)]

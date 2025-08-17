@@ -18,15 +18,16 @@ use crate::util::array;
 
 //--------------------------------------------------------------------------------------------------
 
-pub mod builder;
-pub mod runner;
-pub mod generated_kernels;
-pub mod library;
-pub mod lookup;
+//pub mod builder;
+//pub mod generated_kernels;
+//pub mod library;
+//pub mod lookup;
+pub mod expr;
 pub mod registry;
+pub mod runner;
 
-pub use generated_kernels::export::*;
-
+//pub use generated_kernels::export::*;
+/*
 //--------------------------------------------------------------------------------------------------
 
 pub struct ElemArg {
@@ -235,3 +236,4 @@ impl<const E: usize, const R: usize, const C: usize> Kernel<E, R, C> {
 }
 
 //--------------------------------------------------------------------------------------------------
+*/
