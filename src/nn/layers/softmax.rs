@@ -78,6 +78,7 @@ impl Layer for Softmax {
 					as Box<dyn BackwardFn>
 			},
 			SoftmaxGradientMode::StraightThrough => {
+				// TODO - could I just use inp_backward directly?
 				Box::new(StraightThroughBackwardFn::new(inp_backward)) as Box<dyn BackwardFn>
 			},
 		});

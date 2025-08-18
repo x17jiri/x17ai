@@ -741,13 +741,19 @@ impl<E: const Expr + ExprToDyn> EvaluatesToTensor for ExprWrapper<E> {
 
 impl EvaluatesToTensor for Scalar {
 	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
-		todo!("ExprWrapper::eval_to_tensor not implemented yet");
+		self.wrap().eval_to_tensor(to)
 	}
 }
 
 impl EvaluatesToTensor for f64 {
 	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
-		todo!("ExprWrapper::eval_to_tensor not implemented yet");
+		self.wrap().eval_to_tensor(to)
+	}
+}
+
+impl EvaluatesToTensor for &Tensor {
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+		self.wrap().eval_to_tensor(to)
 	}
 }
 

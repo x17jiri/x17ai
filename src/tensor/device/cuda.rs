@@ -11,7 +11,6 @@ use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-use crate::tensor::device::kernel::library::KernelLibrary;
 use crate::tensor::device::{DeviceBuffer, NewDeviceBufferError};
 use crate::tensor::{DType, Device, HasDType};
 
@@ -73,7 +72,6 @@ impl Device for CUDADevice {
 			device_data: memory.as_ptr(),
 			device: ManuallyDrop::new(self.clone()),
 			device_is_cpu: false,
-			builtin_kernels: KernelLibrary::instance(),
 			read_count: Cell::new(0),
 			write_count: Cell::new(0),
 		}))

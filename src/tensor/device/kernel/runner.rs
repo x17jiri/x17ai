@@ -49,6 +49,7 @@ pub struct KernelRunner {
 
 impl KernelRunner {
 	#[inline]
+	#[allow(clippy::panic_in_result_fn)]
 	pub fn run<E: const Expr + ExprToDyn>(
 		&self,
 		output: &Tensor,
@@ -86,6 +87,7 @@ impl KernelRunner {
 	}
 
 	#[inline(never)]
+	#[allow(clippy::panic_in_result_fn)]
 	fn run_const<E: const Expr + ExprToDyn>(
 		&self,
 		output: &Tensor,

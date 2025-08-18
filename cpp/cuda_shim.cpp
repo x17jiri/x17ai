@@ -59,7 +59,7 @@ namespace x17ai {
 		std::cout << "cudaGetDeviceCount(): " << cuda_device_count << std::endl;
 		std::cout << "CUDA Error: " << cudaGetErrorString(error) << std::endl;
 
-		void *handle = dlopen("libATen_cuda.so", RTLD_LAZY | RTLD_GLOBAL);
+		/*void *handle = dlopen("libATen_cuda.so", RTLD_LAZY | RTLD_GLOBAL);
 		if (!handle) {
 			fprintf(stderr, "Failed to load libATen_cuda.so: %s\n", dlerror());
 		}
@@ -73,7 +73,7 @@ namespace x17ai {
 				torch::cuda::device_count()
 			);
 			return 1;
-		}
+		}*/
 
 		cuda_initialized.store(true, std::memory_order_release);
 		return 0;

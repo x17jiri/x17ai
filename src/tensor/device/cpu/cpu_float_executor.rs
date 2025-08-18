@@ -301,7 +301,23 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatExecutor<T> {
 						})
 						.sum()
 				},
+				DynExpr::MaxExpr(a) => {
+					assert!(!reduce_args.is_empty());
+					let reduction_size = reduce_args[0].reduction_size;
+					assert!(reduce_args.iter().all(|a| a.reduction_size == reduction_size));
 
+					let a = a.as_ref();
+					(0..reduction_size)
+						.map(|k| {
+							Self::eval_expr(a, j, i, k, elemwise_args, reduce_args, scalar_args)
+						})
+						.fold(f64::NEG_INFINITY, f64::max)
+				},
+
+				DynExpr::ExpExpr(a) => {
+					let a = Self::eval_expr(a, j, i, k, elemwise_args, reduce_args, scalar_args);
+					a.exp()
+				},
 				DynExpr::SigmoidExpr(a) => {
 					let a = Self::eval_expr(a, j, i, k, elemwise_args, reduce_args, scalar_args);
 					math::sigmoid(a)

@@ -165,7 +165,6 @@ use x17ai::nn::layers::{CrossEntropy, Layer};
 use x17ai::tensor::device::cpu::CPUDevice;
 use x17ai::tensor::device::cuda;
 use x17ai::tensor::device::executor::Executor;
-use x17ai::tensor::device::kernel::builder::KernelBuilder;
 use x17ai::tensor::generic::Tensor;
 use x17ai::tensor::generic::map::ND;
 use x17ai::tensor::math::{col, mat, row};
@@ -233,7 +232,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 
 	stderrlog::new().verbosity(10).init().unwrap();
 
-	let cuda_dev = cuda::CUDADevice::new().unwrap();
+	//let cuda_dev = cuda::CUDADevice::new().unwrap();
 
 	let dev = CPUDevice::new();
 	let lit = Tensor::literal_factory::<f32>(dev.clone());
@@ -247,7 +246,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	lin2.randomize()?;
 	mctx.init_optimizer()?;
 
-	let loss_layer = CrossEntropy::new();
+	let loss_layer = CrossEntropy::new(2);
 
 	let input = Tensor::new_empty_on(&[2, 3], f32::dtype, dev.clone())?;
 	input.assign(tensor::math::randn_clamped())?;

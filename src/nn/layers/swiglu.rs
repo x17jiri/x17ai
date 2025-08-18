@@ -95,7 +95,8 @@ impl BackwardFn for SwiGLUBackwardFn {
 		let d_gate = d_inp.select(-2, 1)?;
 
 		d_lin.assign(gate.swish() * &d_out)?;
-		kernel::swiglu_d_gate(&d_gate, &lin, &gate, &d_out)?;
+		//kernel::swiglu_d_gate(&d_gate, &lin, &gate, &d_out)?;
+		todo!("need swiglu_d_gate kernel");
 
 		queue.add(inp_backward, d_inp);
 		Ok(())
