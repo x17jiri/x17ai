@@ -11,10 +11,10 @@ pub use device::{DType, Device, HasDType};
 
 use crate::tensor::device::NewDeviceBufferError;
 use crate::tensor::device::buffer::{
-	BorrowError, BorrowMutError, DeviceBufferRef, DeviceBufferRefMut,
+	BorrowError, BorrowMutError, DeviceBufferRef, DeviceBufferRefMut, DeviceBufferVMT,
 };
 use crate::tensor::device::cpu::{CPUDevice, ViewError};
-use crate::tensor::device::executor::{Executor, ExecutorError};
+use crate::tensor::device::executor::ExecutorError;
 use crate::tensor::dim_merger::DimMergerError;
 use crate::tensor::generic::map::dd::ReplaceTailError;
 use crate::tensor::generic::map::{
@@ -183,8 +183,8 @@ impl Tensor {
 		self.buf().dtype
 	}
 
-	pub fn executor(&self) -> &dyn Executor {
-		self.buf().executor()
+	pub fn vmt(&self) -> &DeviceBufferVMT {
+		self.buf().vmt.as_ref()
 	}
 
 	pub fn assign<Expr: EvaluatesToTensor>(

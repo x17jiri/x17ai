@@ -9,15 +9,14 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
+use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut, DeviceBufferVMT};
+use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::device::cpu::zip::{zip_elems, zip_vecs};
-use crate::tensor::device::executor::{
-	Executor, ExecutorError, KernelElemArg, KernelOutput, KernelReduceArg, ensure_same_shape,
-};
+use crate::tensor::device::executor::{ExecutorError, ensure_same_shape};
 use crate::tensor::device::kernel::expr::DynExpr;
 use crate::tensor::device::kernel::runner::KernelData;
 use crate::tensor::generic::map::{Map, ND, Select};
-use crate::tensor::{HasDType, generic};
+use crate::tensor::{Device, HasDType, generic};
 
 use super::math::{self, FromToF64};
 use super::rng::Rng;
@@ -101,14 +100,35 @@ pub enum Input<'t, T> {
 	Broadcasted(BroadcastedInput<'t, T>),
 }
 
-pub struct CPUFloatExecutor<T: Copy + HasDType + FromToF64> {
-	rng: Rc<RefCell<Rng>>,
+#[repr(C)]
+pub struct CPUFloatVMT<T: Copy + HasDType + FromToF64> {
+	vmt: DeviceBufferVMT,
 	phantom: std::marker::PhantomData<T>,
 }
 
-impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatExecutor<T> {
-	pub fn new(rng: Rc<RefCell<Rng>>) -> Self {
-		Self { rng, phantom: std::marker::PhantomData }
+impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
+	pub fn new() -> Self {
+		Self {
+			vmt: DeviceBufferVMT {
+				device: std::ptr::null(),
+				device_is_cpu: true,
+				dtype: T::dtype,
+				new_buffer: CPUDevice::new_buffer,
+				drop_buffer: CPUDevice::drop_buffer,
+				read_bin: Self::read_bin,
+				write_bin: Self::write_bin,
+				randn_clamped: Self::randn_clamped,
+				mm: Self::mm,
+				attention: Self::attention,
+				run_kernel: Self::run_kernel,
+			},
+			phantom: std::marker::PhantomData,
+		}
+	}
+
+	pub(super) unsafe fn set_device(&mut self, device: &CPUDevice) {
+		let dyn_device: &dyn Device = device;
+		self.vmt.device = dyn_device as *const dyn Device;
 	}
 
 	pub fn view_contiguous<'t, 'buf>(

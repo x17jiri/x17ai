@@ -7,50 +7,122 @@
 
 use std::cell::Cell;
 use std::hint::cold_path;
-use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
 use crate::ErrPack;
 use crate::tensor::TensorOpError;
+use crate::tensor::device::NewDeviceBufferError;
+use crate::tensor::device::executor::ExecutorError;
+use crate::tensor::device::kernel::runner::KernelData;
 use crate::tensor::generic::buffer::Buffer;
+use crate::tensor::generic::map::ND;
+use crate::tensor::generic::{self};
 
 use super::Device;
 use super::dtype::DType;
-use super::executor::Executor;
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct DeviceBuffer {
-	pub executor: NonNull<dyn Executor>,
-	pub dtype: DType,
-	pub elems: usize,
-	pub device_data: *mut u8,
-	pub device_is_cpu: bool,
-	pub device: ManuallyDrop<Rc<dyn Device>>,
+#[repr(C)]
+pub struct KernelElemArg {
+	pub stride_bytes: [usize; 2],
+	pub offset_bytes: usize,
+	pub device_data: *const u8,
+}
 
+#[repr(C)]
+pub struct KernelReduceArg {
+	pub reduction_size: usize,
+	pub stride_bytes: [usize; 2],
+	pub offset_bytes: usize,
+	pub device_data: *const u8,
+}
+
+#[repr(C)]
+pub struct KernelOutput {
+	pub size: [usize; 2],
+	pub stride_bytes: [usize; 2],
+	pub offset_bytes: usize,
+	pub device_data: *mut u8,
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct DeviceBufferVMT {
+	pub device: *const dyn Device,
+	pub device_is_cpu: bool,
+	pub dtype: DType,
+
+	pub new_buffer: fn(
+		this: NonNull<dyn Device>,
+		dtype: DType,
+		elems: usize,
+	) -> Result<Rc<DeviceBuffer>, NewDeviceBufferError>,
+
+	pub drop_buffer: unsafe fn(this: NonNull<DeviceBufferVMT>, elems: usize, device_data: *mut u8),
+
+	pub read_bin: for<'buf> fn(
+		this: NonNull<DeviceBufferVMT>,
+		dst: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		src: &mut dyn std::io::Read,
+	) -> Result<(), ErrPack<ExecutorError>>,
+
+	pub write_bin: for<'buf> fn(
+		this: NonNull<DeviceBufferVMT>,
+		src: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		dst: &mut dyn std::io::Write,
+	) -> Result<(), ErrPack<ExecutorError>>,
+
+	pub randn_clamped: for<'buf> fn(
+		this: NonNull<DeviceBufferVMT>,
+		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+	) -> Result<(), ErrPack<ExecutorError>>,
+
+	pub mm: for<'buf> fn(
+		this: NonNull<DeviceBufferVMT>,
+		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		scale: f64,
+	) -> Result<(), ErrPack<ExecutorError>>,
+
+	pub attention: fn(
+		this: NonNull<DeviceBufferVMT>,
+		o: &mut generic::Tensor<ND<3>, DeviceBufferRefMut>, // [inputs, qo_heads, vo_features]
+		q: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, qo_heads, qk_features]
+		k: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, k_heads, qk_features]
+		v: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, v_heads, vo_features]
+	),
+
+	pub run_kernel: unsafe fn(
+		this: NonNull<DeviceBufferVMT>,
+		kernel_data: &KernelData,
+		o: *const KernelOutput,
+		elemwise_args: *const KernelElemArg,
+		reduce_args: *const KernelReduceArg,
+		scalar_args: *const f64,
+	) -> Result<(), ErrPack<ExecutorError>>,
+}
+
+pub struct DeviceBuffer {
+	pub device_data: *mut u8,
+	pub elems: usize,
 	pub read_count: Cell<usize>,
 	pub write_count: Cell<usize>,
+	pub vmt: NonNull<DeviceBufferVMT>,
 }
 
 impl DeviceBuffer {
 	#[inline]
 	pub fn is_on_device(&self, device: &dyn Device) -> bool {
-		let my_dev = self.device.as_ref();
-		let my_dev = std::ptr::from_ref(my_dev);
-		let my_dev = my_dev.cast::<u8>();
+		let vmt = unsafe { self.vmt.as_ref() };
+		let my_dev = vmt.device.cast::<u8>();
 
 		let dev = std::ptr::from_ref(device);
 		let dev = dev.cast::<u8>();
 
 		my_dev == dev
-	}
-
-	#[inline]
-	pub fn executor(&self) -> &dyn Executor {
-		// SAFETY: Executor will live as long as the device
-		// and device will live as long as `self` keeps the `Rc` alive.
-		unsafe { self.executor.as_ref() }
 	}
 
 	pub fn try_borrow(&self) -> Result<DeviceBufferRef<'_>, BorrowError> {
@@ -65,8 +137,7 @@ impl DeviceBuffer {
 impl Drop for DeviceBuffer {
 	fn drop(&mut self) {
 		unsafe {
-			let dev = ManuallyDrop::take(&mut self.device);
-			dev.drop_buffer(self.dtype, self.elems, self.device_data);
+			(self.vmt.as_ref().drop_buffer)(self.vmt, self.elems, self.device_data);
 		}
 	}
 }

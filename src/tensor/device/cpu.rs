@@ -14,14 +14,14 @@ use std::rc::Rc;
 
 use crate::tensor::HasDType;
 
-pub mod cpu_float_executor;
+pub mod cpu_float_vmt;
 pub mod math;
 pub mod rng;
 pub mod zip;
 
 use self::rng::Rng;
 
-use crate::tensor::device::cpu::cpu_float_executor::CPUFloatExecutor;
+use crate::tensor::device::cpu::cpu_float_vmt::CPUFloatVMT;
 use crate::tensor::device::{DeviceBuffer, NewDeviceBufferError};
 use crate::tensor::{DType, Device};
 
@@ -89,8 +89,8 @@ impl<'a, T> View3D<'a, T> {
 
 pub struct CPUDevice {
 	pub name: String,
-	pub rng: Rc<RefCell<Rng>>,
-	pub f32_executor: CPUFloatExecutor<f32>,
+	pub rng: RefCell<Rng>,
+	pub f32_vmt: CPUFloatVMT<f32>,
 }
 
 impl CPUDevice {
@@ -99,13 +99,13 @@ impl CPUDevice {
 	}
 
 	pub fn new_named(name: String) -> Rc<Self> {
-		let rng = Rc::new(RefCell::new(Rng::new_default()));
-		let f32_rng = rng.clone();
-		Rc::new(Self {
+		let device = Rc::new(Self {
 			name,
-			rng,
-			f32_executor: CPUFloatExecutor::new(f32_rng),
-		})
+			rng: RefCell::new(Rng::new_default()),
+			f32_vmt: CPUFloatVMT::new(),
+		});
+		unsafe { device.f32_vmt.set_device(device.as_ref()) };
+		device
 	}
 
 	pub fn ensure_can_view<'a, T: HasDType>(buf: &DeviceBuffer) -> Result<(), ViewError> {
