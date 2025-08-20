@@ -7,7 +7,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::hint::cold_path;
-use std::mem::ManuallyDrop;
 use std::ops::{Range, RangeFull};
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -99,13 +98,16 @@ impl CPUDevice {
 	}
 
 	pub fn new_named(name: String) -> Rc<Self> {
-		let device = Rc::new(Self {
+		let mut rc_uninit = Rc::new_uninit();
+		let instance = Self {
 			name,
 			rng: RefCell::new(Rng::new_default()),
-			f32_vmt: CPUFloatVMT::new(),
-		});
-		unsafe { device.f32_vmt.set_device(device.as_ref()) };
-		device
+			f32_vmt: CPUFloatVMT::new(&rc_uninit),
+		};
+		unsafe {
+			Rc::get_mut_unchecked(&mut rc_uninit).write(instance);
+			rc_uninit.assume_init()
+		}
 	}
 
 	pub fn ensure_can_view<'a, T: HasDType>(buf: &DeviceBuffer) -> Result<(), ViewError> {
@@ -410,14 +412,11 @@ impl Device for CPUDevice {
 			return Err(NewDeviceBufferError::AllocationFailed);
 		};
 		Ok(Rc::new(DeviceBuffer {
-			executor: NonNull::from(executor),
-			dtype,
-			elems,
 			device_data: memory.as_ptr(),
-			device: ManuallyDrop::new(self.clone()),
-			device_is_cpu: true,
+			elems,
 			read_count: Cell::new(0),
 			write_count: Cell::new(0),
+			vmt: self.f32_vmt,
 		}))
 	}
 

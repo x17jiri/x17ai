@@ -5,11 +5,14 @@
 //
 //------------------------------------------------------------------------------
 
-use std::cell::RefCell;
+use std::mem::MaybeUninit;
 use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut, DeviceBufferVMT};
+use crate::tensor::device::buffer::{
+	DeviceBufferRef, DeviceBufferRefMut, DeviceBufferVMT, KernelElemArg, KernelOutput,
+	KernelReduceArg,
+};
 use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::device::cpu::zip::{zip_elems, zip_vecs};
 use crate::tensor::device::executor::{ExecutorError, ensure_same_shape};
@@ -19,7 +22,6 @@ use crate::tensor::generic::map::{Map, ND, Select};
 use crate::tensor::{Device, HasDType, generic};
 
 use super::math::{self, FromToF64};
-use super::rng::Rng;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -107,10 +109,10 @@ pub struct CPUFloatVMT<T: Copy + HasDType + FromToF64> {
 }
 
 impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
-	pub fn new() -> Self {
+	pub fn new(device: &Rc<MaybeUninit<CPUDevice>>) -> Self {
 		Self {
 			vmt: DeviceBufferVMT {
-				device: std::ptr::null(),
+				device: device.as_ptr(),
 				device_is_cpu: true,
 				dtype: T::dtype,
 				new_buffer: CPUDevice::new_buffer,
@@ -126,7 +128,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 		}
 	}
 
-	pub(super) unsafe fn set_device(&mut self, device: &CPUDevice) {
+	pub(super) unsafe fn set_device(&self, device: &CPUDevice) {
 		let dyn_device: &dyn Device = device;
 		self.vmt.device = dyn_device as *const dyn Device;
 	}
@@ -373,9 +375,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 			}
 		}
 	}
-}
 
-impl<T: 'static + HasDType + Copy + FromToF64> Executor for CPUFloatExecutor<T> {
 	fn read_bin<'buf>(
 		&self,
 		dst: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,

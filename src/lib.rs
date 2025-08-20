@@ -36,6 +36,7 @@
 #![feature(const_trait_impl)]
 #![feature(ptr_as_ref_unchecked)]
 #![feature(const_option_ops)]
+#![feature(get_mut_unchecked)]
 // clippy
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]

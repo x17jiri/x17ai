@@ -5,7 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
-use std::cell::Cell;
+use std::cell::{Cell, UnsafeCell};
 use std::hint::cold_path;
 use std::ptr::NonNull;
 use std::rc::Rc;
