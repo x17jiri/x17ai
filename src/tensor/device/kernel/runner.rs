@@ -11,8 +11,10 @@ use std::mem::MaybeUninit;
 use std::sync::{Arc, RwLock};
 
 use crate::ErrPack;
-use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut, check_borrows};
-use crate::tensor::device::executor::{KernelElemArg, KernelOutput, KernelReduceArg};
+use crate::tensor::device::buffer::{
+	DeviceBufferRef, DeviceBufferRefMut, KernelElemArg, KernelOutput, KernelReduceArg,
+	check_borrows,
+};
 use crate::tensor::device::kernel::expr::{DynExpr, Expr, ExprDiscriminant, ExprToDyn};
 use crate::tensor::device::kernel::registry::{KernelMap, KernelRegistry};
 use crate::tensor::dim_merger::DimMerger;
@@ -161,7 +163,7 @@ impl KernelRunner {
 		debug_assert!(kernel_data.reduce_count == R);
 		debug_assert!(kernel_data.scalar_count == C);
 
-		let dtype_bytes = output.buf().dtype.bytes();
+		let dtype_bytes = output.buf().dtype().bytes();
 		debug_assert!(dtype_bytes > 0);
 
 		let output_batch_dims: &[SizeAndStride];
@@ -275,7 +277,7 @@ impl KernelRunner {
 			// TODO - ensure all on same device
 			// TODO - other things may need to be checked before running the kernel
 
-			output.executor().run_kernel(
+			output.vmt().run_kernel(
 				kernel_data,
 				out.as_ptr(),
 				inp.as_ptr(),

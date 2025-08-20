@@ -5,15 +5,6 @@
 //
 //------------------------------------------------------------------------------
 
-use std::hint::{cold_path, likely};
-use std::sync::Arc;
-
-use crate::ErrPack;
-use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut, check_borrows};
-use crate::tensor::device::executor::{KernelElemArg, KernelOutput, KernelReduceArg};
-use crate::tensor::dim_merger::DimMerger;
-use crate::tensor::generic::map::SizeAndStride;
-use crate::tensor::{Tensor, TensorOpError};
 use crate::util::array;
 
 //--------------------------------------------------------------------------------------------------

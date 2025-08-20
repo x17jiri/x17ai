@@ -6,6 +6,7 @@
 //------------------------------------------------------------------------------
 
 use std::mem::MaybeUninit;
+use std::ptr::NonNull;
 use std::rc::Rc;
 
 use crate::ErrPack;
@@ -104,18 +105,19 @@ pub enum Input<'t, T> {
 
 #[repr(C)]
 pub struct CPUFloatVMT<T: Copy + HasDType + FromToF64> {
-	vmt: DeviceBufferVMT,
+	pub(super) vmt: DeviceBufferVMT,
 	phantom: std::marker::PhantomData<T>,
 }
 
 impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 	pub fn new(device: &Rc<MaybeUninit<CPUDevice>>) -> Self {
+		let device = device.as_ptr();
+		let device = unsafe { NonNull::new_unchecked(device as *mut CPUDevice) };
 		Self {
 			vmt: DeviceBufferVMT {
-				device: device.as_ptr(),
+				device,
 				device_is_cpu: true,
 				dtype: T::dtype,
-				new_buffer: CPUDevice::new_buffer,
 				drop_buffer: CPUDevice::drop_buffer,
 				read_bin: Self::read_bin,
 				write_bin: Self::write_bin,
@@ -377,7 +379,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 	}
 
 	fn read_bin<'buf>(
-		&self,
+		_this: NonNull<DeviceBufferVMT>,
 		dst: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 		src: &mut dyn std::io::Read,
 	) -> Result<(), ErrPack<ExecutorError>> {
@@ -406,7 +408,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 	}
 
 	fn write_bin<'buf>(
-		&self,
+		_this: NonNull<DeviceBufferVMT>,
 		src: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		dst: &mut dyn std::io::Write,
 	) -> Result<(), ErrPack<ExecutorError>> {
@@ -430,7 +432,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 	}
 
 	fn randn_clamped<'buf>(
-		&self,
+		this: NonNull<DeviceBufferVMT>,
 		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 	) -> Result<(), ErrPack<ExecutorError>> {
 		let mut rng = self.rng.borrow_mut();

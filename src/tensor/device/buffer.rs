@@ -50,16 +50,14 @@ pub struct KernelOutput {
 //--------------------------------------------------------------------------------------------------
 
 pub struct DeviceBufferVMT {
-	pub device: *const dyn Device,
+	pub device: NonNull<dyn Device>,
 	pub device_is_cpu: bool,
 	pub dtype: DType,
 
-	pub new_buffer: fn(
-		this: NonNull<dyn Device>,
-		dtype: DType,
-		elems: usize,
-	) -> Result<Rc<DeviceBuffer>, NewDeviceBufferError>,
-
+	/// # Safety
+	/// This function should only be called from `DeviceBuffer::drop()`.
+	///
+	/// The parameters must come from a valid `DeviceBuffer` instance.
 	pub drop_buffer: unsafe fn(this: NonNull<DeviceBufferVMT>, elems: usize, device_data: *mut u8),
 
 	pub read_bin: for<'buf> fn(
@@ -105,6 +103,35 @@ pub struct DeviceBufferVMT {
 	) -> Result<(), ErrPack<ExecutorError>>,
 }
 
+impl DeviceBufferVMT {
+	#[inline]
+	pub fn device(&self) -> &dyn Device {
+		unsafe { self.device.as_ref() }
+	}
+
+	pub fn rc_device(&self) -> Rc<dyn Device> {
+		unsafe {
+			let device = self.device.as_ptr();
+			Rc::increment_strong_count(device);
+			Rc::from_raw(device)
+		}
+	}
+
+	#[inline]
+	pub unsafe fn run_kernel(
+		&self,
+		kernel_data: &KernelData,
+		o: *const KernelOutput,
+		elemwise_args: *const KernelElemArg,
+		reduce_args: *const KernelReduceArg,
+		scalar_args: *const f64,
+	) -> Result<(), ErrPack<ExecutorError>> {
+		unsafe {
+			(self.run_kernel)(self.into(), kernel_data, o, elemwise_args, reduce_args, scalar_args)
+		}
+	}
+}
+
 pub struct DeviceBuffer {
 	pub device_data: *mut u8,
 	pub elems: usize,
@@ -116,11 +143,10 @@ pub struct DeviceBuffer {
 impl DeviceBuffer {
 	#[inline]
 	pub fn is_on_device(&self, device: &dyn Device) -> bool {
-		let vmt = unsafe { self.vmt.as_ref() };
-		let my_dev = vmt.device.cast::<u8>();
+		let my_vmt = unsafe { self.vmt.as_ref() };
+		let (my_dev, _) = my_vmt.device.to_raw_parts();
 
-		let dev = std::ptr::from_ref(device);
-		let dev = dev.cast::<u8>();
+		let (dev, _) = NonNull::from_ref(device).to_raw_parts();
 
 		my_dev == dev
 	}
@@ -131,6 +157,14 @@ impl DeviceBuffer {
 
 	pub fn try_borrow_mut(&self) -> Result<DeviceBufferRefMut<'_>, BorrowMutError> {
 		DeviceBufferRefMut::new(self)
+	}
+
+	pub fn vmt(&self) -> &DeviceBufferVMT {
+		unsafe { self.vmt.as_ref() }
+	}
+
+	pub fn dtype(&self) -> DType {
+		self.vmt().dtype
 	}
 }
 

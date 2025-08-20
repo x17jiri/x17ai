@@ -12,6 +12,7 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 
 use crate::tensor::HasDType;
+use crate::tensor::device::buffer::DeviceBufferVMT;
 
 pub mod cpu_float_vmt;
 pub mod math;
@@ -111,16 +112,30 @@ impl CPUDevice {
 	}
 
 	pub fn ensure_can_view<'a, T: HasDType>(buf: &DeviceBuffer) -> Result<(), ViewError> {
-		if buf.dtype != T::dtype {
+		if buf.dtype() != T::dtype {
 			cold_path();
 			return Err(ViewError::InvalidDType);
 		}
 		debug_assert!(T::dtype.bytes() == std::mem::size_of::<T>());
-		if !buf.device_is_cpu {
+		if !buf.vmt().device_is_cpu {
 			cold_path();
 			return Err(ViewError::NotOnCPUDevice);
 		}
 		Ok(())
+	}
+
+	unsafe fn drop_buffer(this: NonNull<DeviceBufferVMT>, elems: usize, device_data: *mut u8) {
+		let this = unsafe { this.as_ref() };
+
+		let align = this.dtype.bytes().min(1);
+		let size = this.dtype.array_bytes(elems).unwrap();
+		unsafe {
+			let layout = std::alloc::Layout::from_size_align(size, align).unwrap_unchecked();
+			std::alloc::dealloc(device_data, layout);
+
+			let rc: Rc<dyn Device> = Rc::from_raw(this.device.as_ptr());
+			std::mem::drop(rc);
+		}
 	}
 
 	/*
@@ -390,8 +405,8 @@ impl Device for CPUDevice {
 		elems: usize,
 	) -> Result<Rc<DeviceBuffer>, NewDeviceBufferError> {
 		#[allow(clippy::single_match_else)]
-		let executor = match dtype {
-			f32::dtype => &self.f32_executor,
+		let vmt = match dtype {
+			f32::dtype => NonNull::from_ref(&self.f32_vmt.vmt),
 			_ => {
 				cold_path();
 				return Err(NewDeviceBufferError::UnsupportedDType);
@@ -411,19 +426,16 @@ impl Device for CPUDevice {
 			cold_path();
 			return Err(NewDeviceBufferError::AllocationFailed);
 		};
+
+		// We will recreate the `Rc` and drop it in `CPUDevice::drop_buffer()`
+		std::mem::forget(self);
+
 		Ok(Rc::new(DeviceBuffer {
 			device_data: memory.as_ptr(),
 			elems,
 			read_count: Cell::new(0),
 			write_count: Cell::new(0),
-			vmt: self.f32_vmt,
+			vmt,
 		}))
-	}
-
-	unsafe fn drop_buffer(self: Rc<Self>, dtype: DType, elems: usize, device_data: *mut u8) {
-		let align = dtype.bytes().min(1);
-		let size = dtype.array_bytes(elems).unwrap();
-		let layout = std::alloc::Layout::from_size_align(size, align).unwrap();
-		unsafe { std::alloc::dealloc(device_data, layout) }
 	}
 }
