@@ -117,7 +117,7 @@ impl CPUDevice {
 			return Err(ViewError::InvalidDType);
 		}
 		debug_assert!(T::dtype.bytes() == std::mem::size_of::<T>());
-		if !buf.vmt().device_is_cpu {
+		if !buf.vmt().device_is_cpu() {
 			cold_path();
 			return Err(ViewError::NotOnCPUDevice);
 		}
@@ -126,15 +126,18 @@ impl CPUDevice {
 
 	unsafe fn drop_buffer(this: NonNull<DeviceBufferVMT>, elems: usize, device_data: *mut u8) {
 		let this = unsafe { this.as_ref() };
+		let dtype = this.dtype();
+		let device_ptr = this.device_ptr();
 
-		let align = this.dtype.bytes().min(1);
-		let size = this.dtype.array_bytes(elems).unwrap();
+		let align = dtype.bytes().min(1);
+		let size = dtype.array_bytes(elems).unwrap();
 		unsafe {
 			let layout = std::alloc::Layout::from_size_align(size, align).unwrap_unchecked();
 			std::alloc::dealloc(device_data, layout);
 
-			let rc: Rc<dyn Device> = Rc::from_raw(this.device.as_ptr());
-			std::mem::drop(rc);
+			// Recreate the `Rc` that we forgot in `new_buffer()`
+			let rc_device: Rc<dyn Device> = Rc::from_raw(device_ptr.as_ptr());
+			std::mem::drop(rc_device);
 		}
 	}
 
@@ -406,7 +409,7 @@ impl Device for CPUDevice {
 	) -> Result<Rc<DeviceBuffer>, NewDeviceBufferError> {
 		#[allow(clippy::single_match_else)]
 		let vmt = match dtype {
-			f32::dtype => NonNull::from_ref(&self.f32_vmt.vmt),
+			f32::dtype => NonNull::from_ref(&self.f32_vmt),
 			_ => {
 				cold_path();
 				return Err(NewDeviceBufferError::UnsupportedDType);
@@ -422,7 +425,7 @@ impl Device for CPUDevice {
 			return Err(NewDeviceBufferError::AllocationFailed);
 		};
 		let memory = unsafe { std::alloc::alloc(layout) };
-		let Some(memory) = NonNull::new(memory) else {
+		if memory.is_null() {
 			cold_path();
 			return Err(NewDeviceBufferError::AllocationFailed);
 		};
@@ -430,12 +433,7 @@ impl Device for CPUDevice {
 		// We will recreate the `Rc` and drop it in `CPUDevice::drop_buffer()`
 		std::mem::forget(self);
 
-		Ok(Rc::new(DeviceBuffer {
-			device_data: memory.as_ptr(),
-			elems,
-			read_count: Cell::new(0),
-			write_count: Cell::new(0),
-			vmt,
-		}))
+		let device_data = memory;
+		Ok(Rc::new(unsafe { DeviceBuffer::new(device_data, elems, vmt) }))
 	}
 }

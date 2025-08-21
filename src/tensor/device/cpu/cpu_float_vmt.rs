@@ -16,11 +16,11 @@ use crate::tensor::device::buffer::{
 };
 use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::device::cpu::zip::{zip_elems, zip_vecs};
-use crate::tensor::device::executor::{ExecutorError, ensure_same_shape};
+use crate::tensor::device::executor::ExecutorError;
 use crate::tensor::device::kernel::expr::DynExpr;
 use crate::tensor::device::kernel::runner::KernelData;
 use crate::tensor::generic::map::{Map, ND, Select};
-use crate::tensor::{Device, HasDType, generic};
+use crate::tensor::{HasDType, generic};
 
 use super::math::{self, FromToF64};
 
@@ -104,8 +104,8 @@ pub enum Input<'t, T> {
 }
 
 #[repr(C)]
-pub struct CPUFloatVMT<T: Copy + HasDType + FromToF64> {
-	pub(super) vmt: DeviceBufferVMT,
+pub(super) struct CPUFloatVMT<T: Copy + HasDType + FromToF64> {
+	vmt: DeviceBufferVMT,
 	phantom: std::marker::PhantomData<T>,
 }
 
@@ -113,26 +113,37 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 	pub fn new(device: &Rc<MaybeUninit<CPUDevice>>) -> Self {
 		let device = device.as_ptr();
 		let device = unsafe { NonNull::new_unchecked(device as *mut CPUDevice) };
+		let device_is_cpu = true;
+		let dtype = T::dtype;
 		Self {
-			vmt: DeviceBufferVMT {
-				device,
-				device_is_cpu: true,
-				dtype: T::dtype,
-				drop_buffer: CPUDevice::drop_buffer,
-				read_bin: Self::read_bin,
-				write_bin: Self::write_bin,
-				randn_clamped: Self::randn_clamped,
-				mm: Self::mm,
-				attention: Self::attention,
-				run_kernel: Self::run_kernel,
+			vmt: unsafe {
+				DeviceBufferVMT::new(
+					device,
+					device_is_cpu,
+					dtype,
+					CPUDevice::drop_buffer,
+					Self::read_bin,
+					Self::write_bin,
+					Self::randn_clamped,
+					Self::mm,
+					Self::attention,
+					Self::run_kernel,
+				)
 			},
 			phantom: std::marker::PhantomData,
 		}
 	}
 
-	pub(super) unsafe fn set_device(&self, device: &CPUDevice) {
-		let dyn_device: &dyn Device = device;
-		self.vmt.device = dyn_device as *const dyn Device;
+	unsafe fn cast_this<'a>(vmt: NonNull<DeviceBufferVMT>) -> &'a Self {
+		debug_assert!(std::mem::offset_of!(Self, vmt) == 0);
+		let vmt = vmt.cast::<Self>();
+		unsafe { &*vmt.as_ptr() }
+	}
+
+	fn device(&self) -> &CPUDevice {
+		let (device, _) = self.vmt.device_ptr().to_raw_parts();
+		let cpu_device = device.cast::<CPUDevice>();
+		unsafe { cpu_device.as_ref() }
 	}
 
 	pub fn view_contiguous<'t, 'buf>(
@@ -435,12 +446,15 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 		this: NonNull<DeviceBufferVMT>,
 		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 	) -> Result<(), ErrPack<ExecutorError>> {
-		let mut rng = self.rng.borrow_mut();
+		let this = unsafe { Self::cast_this(this) };
+		let device = this.device();
+
+		let mut rng = device.rng.borrow_mut();
 		Self::nullary(o, |o| *o = T::from_f64(rng.get_normal_clamped()))
 	}
 
-	fn sum_all<'buf>(
-		&self,
+	/*	fn sum_all<'buf>(
+		this: NonNull<DeviceBufferVMT>,
 		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 	) -> Result<f64, ErrPack<ExecutorError>> {
 		// TODO - this could handle broadcasted tensors as well
@@ -502,12 +516,12 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 			});
 		}
 		Ok(())
-	}
+	}*/
 
 	#[allow(clippy::panic_in_result_fn)]
 	#[allow(clippy::many_single_char_names)]
 	fn mm<'buf>(
-		&self,
+		_this: NonNull<DeviceBufferVMT>,
 		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
 		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
@@ -557,7 +571,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 	}
 
 	fn attention(
-		&self,
+		_this: NonNull<DeviceBufferVMT>,
 		_o: &mut generic::Tensor<ND<3>, DeviceBufferRefMut>, // [inputs, qo_heads, vo_features]
 		_q: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, qo_heads, qk_features]
 		_k: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, k_heads, qk_features]
@@ -567,7 +581,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 	}
 
 	unsafe fn run_kernel(
-		&self,
+		_this: NonNull<DeviceBufferVMT>,
 		kernel_data: &KernelData,
 		o: *const KernelOutput,
 		elemwise_args: *const KernelElemArg,

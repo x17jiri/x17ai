@@ -49,72 +49,142 @@ pub struct KernelOutput {
 
 //--------------------------------------------------------------------------------------------------
 
+pub type DropBufferFn =
+	unsafe fn(this: NonNull<DeviceBufferVMT>, elems: usize, device_data: *mut u8);
+
+pub type ReadBinFn = for<'buf> unsafe fn(
+	this: NonNull<DeviceBufferVMT>,
+	dst: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+	src: &mut dyn std::io::Read,
+) -> Result<(), ErrPack<ExecutorError>>;
+
+pub type WriteBinFn = for<'buf> unsafe fn(
+	this: NonNull<DeviceBufferVMT>,
+	src: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+	dst: &mut dyn std::io::Write,
+) -> Result<(), ErrPack<ExecutorError>>;
+
+pub type RandnClampedFn = for<'buf> unsafe fn(
+	this: NonNull<DeviceBufferVMT>,
+	o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+) -> Result<(), ErrPack<ExecutorError>>;
+
+pub type MMFn = for<'buf> unsafe fn(
+	this: NonNull<DeviceBufferVMT>,
+	o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+	a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+	b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+	scale: f64,
+) -> Result<(), ErrPack<ExecutorError>>;
+
+pub type AttentionFn = unsafe fn(
+	this: NonNull<DeviceBufferVMT>,
+	o: &mut generic::Tensor<ND<3>, DeviceBufferRefMut>, // [inputs, qo_heads, vo_features]
+	q: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, qo_heads, qk_features]
+	k: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, k_heads, qk_features]
+	v: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, v_heads, vo_features]
+);
+
+pub type RunKernelFn = unsafe fn(
+	this: NonNull<DeviceBufferVMT>,
+	kernel_data: &KernelData,
+	o: *const KernelOutput,
+	elemwise_args: *const KernelElemArg,
+	reduce_args: *const KernelReduceArg,
+	scalar_args: *const f64,
+) -> Result<(), ErrPack<ExecutorError>>;
+
 pub struct DeviceBufferVMT {
-	pub device: NonNull<dyn Device>,
-	pub device_is_cpu: bool,
-	pub dtype: DType,
+	device: NonNull<dyn Device>,
+	device_is_cpu: bool,
+	dtype: DType,
 
-	/// # Safety
-	/// This function should only be called from `DeviceBuffer::drop()`.
-	///
-	/// The parameters must come from a valid `DeviceBuffer` instance.
-	pub drop_buffer: unsafe fn(this: NonNull<DeviceBufferVMT>, elems: usize, device_data: *mut u8),
-
-	pub read_bin: for<'buf> fn(
-		this: NonNull<DeviceBufferVMT>,
-		dst: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		src: &mut dyn std::io::Read,
-	) -> Result<(), ErrPack<ExecutorError>>,
-
-	pub write_bin: for<'buf> fn(
-		this: NonNull<DeviceBufferVMT>,
-		src: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		dst: &mut dyn std::io::Write,
-	) -> Result<(), ErrPack<ExecutorError>>,
-
-	pub randn_clamped: for<'buf> fn(
-		this: NonNull<DeviceBufferVMT>,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-	) -> Result<(), ErrPack<ExecutorError>>,
-
-	pub mm: for<'buf> fn(
-		this: NonNull<DeviceBufferVMT>,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		scale: f64,
-	) -> Result<(), ErrPack<ExecutorError>>,
-
-	pub attention: fn(
-		this: NonNull<DeviceBufferVMT>,
-		o: &mut generic::Tensor<ND<3>, DeviceBufferRefMut>, // [inputs, qo_heads, vo_features]
-		q: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, qo_heads, qk_features]
-		k: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, k_heads, qk_features]
-		v: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, v_heads, vo_features]
-	),
-
-	pub run_kernel: unsafe fn(
-		this: NonNull<DeviceBufferVMT>,
-		kernel_data: &KernelData,
-		o: *const KernelOutput,
-		elemwise_args: *const KernelElemArg,
-		reduce_args: *const KernelReduceArg,
-		scalar_args: *const f64,
-	) -> Result<(), ErrPack<ExecutorError>>,
+	drop_buffer: DropBufferFn,
+	read_bin: ReadBinFn,
+	write_bin: WriteBinFn,
+	randn_clamped: RandnClampedFn,
+	mm: MMFn,
+	attention: AttentionFn,
+	run_kernel: RunKernelFn,
 }
 
 impl DeviceBufferVMT {
+	/// # Safety
+	///
+	/// Calling the provided functions with pointer to `self` as `this` must be safe.
+	pub unsafe fn new(
+		device: NonNull<dyn Device>,
+		device_is_cpu: bool,
+		dtype: DType,
+
+		drop_buffer: DropBufferFn,
+		read_bin: ReadBinFn,
+		write_bin: WriteBinFn,
+		randn_clamped: RandnClampedFn,
+		mm: MMFn,
+		attention: AttentionFn,
+		run_kernel: RunKernelFn,
+	) -> Self {
+		Self {
+			device,
+			device_is_cpu,
+			dtype,
+
+			drop_buffer,
+			read_bin,
+			write_bin,
+			randn_clamped,
+			mm,
+			attention,
+			run_kernel,
+		}
+	}
+
 	#[inline]
 	pub fn device(&self) -> &dyn Device {
 		unsafe { self.device.as_ref() }
 	}
 
+	#[inline]
 	pub fn rc_device(&self) -> Rc<dyn Device> {
 		unsafe {
 			let device = self.device.as_ptr();
 			Rc::increment_strong_count(device);
 			Rc::from_raw(device)
 		}
+	}
+
+	#[inline]
+	pub fn device_ptr(&self) -> NonNull<dyn Device> {
+		self.device
+	}
+
+	#[inline]
+	pub fn device_is_cpu(&self) -> bool {
+		self.device_is_cpu
+	}
+
+	#[inline]
+	pub fn dtype(&self) -> DType {
+		self.dtype
+	}
+
+	#[inline]
+	pub fn read_bin<'buf>(
+		&self,
+		dst: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		src: &mut dyn std::io::Read,
+	) -> Result<(), ErrPack<ExecutorError>> {
+		unsafe { (self.read_bin)(self.into(), dst, src) }
+	}
+
+	#[inline]
+	pub fn write_bin<'buf>(
+		&self,
+		src: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		dst: &mut dyn std::io::Write,
+	) -> Result<(), ErrPack<ExecutorError>> {
+		unsafe { (self.write_bin)(self.into(), src, dst) }
 	}
 
 	#[inline]
@@ -133,14 +203,25 @@ impl DeviceBufferVMT {
 }
 
 pub struct DeviceBuffer {
-	pub device_data: *mut u8,
-	pub elems: usize,
-	pub read_count: Cell<usize>,
-	pub write_count: Cell<usize>,
-	pub vmt: NonNull<DeviceBufferVMT>,
+	device_data: *mut u8,
+	elems: usize,
+	read_count: Cell<usize>,
+	write_count: Cell<usize>,
+	vmt: NonNull<DeviceBufferVMT>,
 }
 
 impl DeviceBuffer {
+	#[inline]
+	pub unsafe fn new(device_data: *mut u8, elems: usize, vmt: NonNull<DeviceBufferVMT>) -> Self {
+		Self {
+			device_data,
+			elems,
+			read_count: Cell::new(0),
+			write_count: Cell::new(0),
+			vmt,
+		}
+	}
+
 	#[inline]
 	pub fn is_on_device(&self, device: &dyn Device) -> bool {
 		let my_vmt = unsafe { self.vmt.as_ref() };
@@ -151,18 +232,22 @@ impl DeviceBuffer {
 		my_dev == dev
 	}
 
+	#[inline]
 	pub fn try_borrow(&self) -> Result<DeviceBufferRef<'_>, BorrowError> {
 		DeviceBufferRef::new(self)
 	}
 
+	#[inline]
 	pub fn try_borrow_mut(&self) -> Result<DeviceBufferRefMut<'_>, BorrowMutError> {
 		DeviceBufferRefMut::new(self)
 	}
 
+	#[inline]
 	pub fn vmt(&self) -> &DeviceBufferVMT {
 		unsafe { self.vmt.as_ref() }
 	}
 
+	#[inline]
 	pub fn dtype(&self) -> DType {
 		self.vmt().dtype
 	}

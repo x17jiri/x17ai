@@ -19,9 +19,9 @@ pub fn write_bin(
 	src: &Tensor,
 	writer: &mut dyn std::io::Write,
 ) -> Result<(), ErrPack<TensorOpError>> {
-	let executor = src.executor();
+	let vmt = src.vmt();
 	ElemWise::new([], [src])?.run(|[], [src]| {
-		executor.write_bin(src, writer)?;
+		vmt.write_bin(src, writer)?;
 		Ok(())
 	})
 }
@@ -41,9 +41,9 @@ pub fn read_bin(
 	dst: &Tensor,
 	reader: &mut dyn std::io::Read,
 ) -> Result<(), ErrPack<TensorOpError>> {
-	let executor = dst.executor();
+	let vmt = dst.vmt();
 	ElemWise::new([dst], [])?.run(|[dst], []| {
-		executor.read_bin(dst, reader)?;
+		vmt.read_bin(dst, reader)?;
 		Ok(())
 	})
 }

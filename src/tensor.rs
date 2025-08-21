@@ -133,7 +133,7 @@ impl Tensor {
 	/// Allocate a new tensor on the same device with the same shape and dtype as `self`.
 	pub fn new_empty_like(&self) -> Result<Self, ErrPack<TensorOpError>> {
 		let (map, elems) = self.map().new_like();
-		let buf = self.device().new_buffer(self.buf().dtype, elems)?;
+		let buf = self.device().new_buffer(self.buf().dtype(), elems)?;
 
 		// SAFETY: We created the buffer to be as big as the mapping.
 		Ok(unsafe { Self::new_unchecked(map, buf) })
@@ -166,7 +166,7 @@ impl Tensor {
 		replace_with: &[usize],
 	) -> Result<Self, ErrPack<TensorOpError>> {
 		let (map, elems) = self.map().new_replace_tail(tail_len, replace_with)?;
-		let buf = self.device().new_buffer(self.buf().dtype, elems)?;
+		let buf = self.device().new_buffer(self.buf().dtype(), elems)?;
 
 		// SAFETY: We created the buffer to be as big as the mapping.
 		Ok(unsafe { Self::new_unchecked(map, buf) })
@@ -174,17 +174,16 @@ impl Tensor {
 
 	/// Returns the device on which the tensor is allocated.
 	pub fn device(&self) -> Rc<dyn Device> {
-		let device = &*self.buf().device;
-		device.clone()
+		self.vmt().rc_device()
 	}
 
 	/// Returns the data type of the tensor elements.
 	pub fn dtype(&self) -> DType {
-		self.buf().dtype
+		self.vmt().dtype()
 	}
 
 	pub fn vmt(&self) -> &DeviceBufferVMT {
-		self.buf().vmt.as_ref()
+		self.buf().vmt()
 	}
 
 	pub fn assign<Expr: EvaluatesToTensor>(
