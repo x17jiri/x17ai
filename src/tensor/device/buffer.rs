@@ -188,6 +188,25 @@ impl DeviceBufferVMT {
 	}
 
 	#[inline]
+	pub fn randn_clamped<'buf>(
+		&self,
+		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+	) -> Result<(), ErrPack<ExecutorError>> {
+		unsafe { (self.randn_clamped)(self.into(), o) }
+	}
+
+	#[inline]
+	pub fn mm<'buf>(
+		&self,
+		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		scale: f64,
+	) -> Result<(), ErrPack<ExecutorError>> {
+		unsafe { (self.mm)(self.into(), o, a, b, scale) }
+	}
+
+	#[inline]
 	pub unsafe fn run_kernel(
 		&self,
 		kernel_data: &KernelData,
@@ -240,6 +259,16 @@ impl DeviceBuffer {
 	#[inline]
 	pub fn try_borrow_mut(&self) -> Result<DeviceBufferRefMut<'_>, BorrowMutError> {
 		DeviceBufferRefMut::new(self)
+	}
+
+	#[inline]
+	pub fn device_data(&self) -> *mut u8 {
+		self.device_data
+	}
+
+	#[inline]
+	pub fn elems(&self) -> usize {
+		self.elems
 	}
 
 	#[inline]

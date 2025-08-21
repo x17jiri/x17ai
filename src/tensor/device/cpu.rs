@@ -434,6 +434,6 @@ impl Device for CPUDevice {
 		std::mem::forget(self);
 
 		let device_data = memory;
-		Ok(Rc::new(unsafe { DeviceBuffer::new(device_data, elems, vmt) }))
+		Ok(Rc::new(unsafe { DeviceBuffer::new(device_data, elems, vmt.cast()) }))
 	}
 }

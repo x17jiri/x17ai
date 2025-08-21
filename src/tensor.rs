@@ -67,8 +67,8 @@ impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRef<'buf>> {
 		let map = self.map().as_ref();
 		let buf = self.buf();
 		CPUDevice::ensure_can_view::<T>(buf.device_buffer())?;
-		let data = buf.device_data;
-		let elems = buf.elems;
+		let data = buf.device_data();
+		let elems = buf.elems();
 		let slice = unsafe { std::slice::from_raw_parts(data.cast(), elems) };
 
 		// SAFETY: We only change the type of buffer reference.
@@ -79,7 +79,7 @@ impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRef<'buf>> {
 	pub unsafe fn buf_ptr<T: HasDType>(&self) -> *const T {
 		let buf = self.buf();
 		debug_assert!(CPUDevice::ensure_can_view::<T>(buf.device_buffer()).is_ok());
-		buf.device_data.cast()
+		buf.device_data().cast()
 	}
 }
 
@@ -91,8 +91,8 @@ impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRefMut<'buf>> {
 		let map = self.map().as_ref();
 		let buf = self.buf();
 		CPUDevice::ensure_can_view::<T>(buf.device_buffer())?;
-		let data = buf.device_data;
-		let elems = buf.elems;
+		let data = buf.device_data();
+		let elems = buf.elems();
 		let slice = unsafe { std::slice::from_raw_parts_mut(data.cast(), elems) };
 
 		// SAFETY: We only change the type of buffer reference.
@@ -103,7 +103,7 @@ impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRefMut<'buf>> {
 	pub unsafe fn buf_ptr_mut<T: HasDType>(&mut self) -> *mut T {
 		let buf = self.buf();
 		debug_assert!(CPUDevice::ensure_can_view::<T>(buf.device_buffer()).is_ok());
-		buf.device_data.cast()
+		buf.device_data().cast()
 	}
 }
 

@@ -86,7 +86,7 @@ pub trait BackwardFn {
 pub trait LossFn {
 	fn value(&self) -> Tensor;
 	fn target(&self) -> Tensor;
-	fn loss(&self) -> Result<f64, ErrPack<TensorOpError>>;
+	fn loss(&self) -> Result<Tensor, ErrPack<TensorOpError>>;
 	fn backward(self: Box<Self>) -> Result<(), ErrPack<TensorOpError>>;
 }
 

@@ -222,7 +222,7 @@ impl KernelRunner {
 					merged[1].strides[1 + E + i] * dtype_bytes,
 				],
 				offset_bytes: arg.map().offset * dtype_bytes,
-				device_data: arg.buf().device_data,
+				device_data: arg.buf().device_data(),
 			}
 		});
 
@@ -234,7 +234,7 @@ impl KernelRunner {
 					merged[1].strides[1 + i] * dtype_bytes,
 				],
 				offset_bytes: arg.map().offset * dtype_bytes,
-				device_data: arg.buf().device_data,
+				device_data: arg.buf().device_data(),
 			}
 		});
 
@@ -245,7 +245,7 @@ impl KernelRunner {
 				merged[1].strides[0] * dtype_bytes,
 			],
 			offset_bytes: output.map().offset * dtype_bytes,
-			device_data: output.buf().device_data,
+			device_data: output.buf().device_data(),
 		}];
 
 		unsafe {

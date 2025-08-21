@@ -107,24 +107,24 @@ pub fn randn_clamped() -> RandnClampedExpr {
 impl EvaluatesToTensor for RandnClampedExpr {
 	#[inline(never)]
 	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
-		let executor = to.executor();
+		let vmt = to.vmt();
 		ElemWise::new([to], [])?.run(|[to], []| {
-			executor.randn_clamped(to)?;
+			vmt.randn_clamped(to)?;
 			Ok(())
 		})
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
-
+/*
 pub fn sum_all(tensor: &Tensor) -> Result<f64, ErrPack<TensorOpError>> {
-	let executor = tensor.executor();
+	let vmt = tensor.vmt();
 	let mut sum = 0.0;
 	// TODO - `__elem_wise()` disables broadcast for tensor at position 0.
 	// In the case of a `sum_all()`, it would make sense to enable it,
 	// but it would require some refactoring. Not sure if it is worth it.
 	ElemWise::new([], [tensor])?.run(|[], [a]| {
-		sum += executor.sum_all(a)?;
+		sum += vmt.sum_all(a)?;
 		Ok(())
 	})?;
 	Ok(sum)
@@ -141,7 +141,7 @@ pub fn approx_eq(a: &Tensor, b: &Tensor, eps: f64) -> Result<bool, ErrPack<Tenso
 	})?;
 	Ok(result)
 }
-
+*/
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
@@ -344,8 +344,8 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 			);
 			check_borrows(c_fail, m_fail)?;
 
-			let executor = col.buf().executor();
-			executor.mm(&mut to, &col, &row, scale)?;
+			let vmt = col.buf().vmt();
+			vmt.mm(&mut to, &col, &row, scale)?;
 			Ok(())
 		}
 	}
@@ -389,8 +389,8 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 			);
 			check_borrows(c_fail, m_fail)?;
 
-			let executor = mat.buf().executor();
-			executor.mm(&mut to, &mat, &col, scale)?;
+			let vmt = mat.buf().vmt();
+			vmt.mm(&mut to, &mat, &col, scale)?;
 			Ok(())
 		}
 	}

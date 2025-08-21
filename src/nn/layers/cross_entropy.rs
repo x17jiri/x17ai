@@ -10,7 +10,6 @@ use crate::autograd::{self, AutogradNode, BackwardFn, LossFn};
 use crate::nn::layers::Layer;
 use crate::nn::layers::softmax::{Softmax, SoftmaxGradientMode};
 use crate::tensor::device::kernel::expr::TensorOps;
-use crate::tensor::math::sum_all;
 use crate::tensor::{Tensor, TensorOpError};
 use crate::util::LossyInto;
 
@@ -51,18 +50,17 @@ impl LossFn for CrossEntropyLossFn {
 		self.target.clone()
 	}
 
-	fn loss(&self) -> Result<f64, ErrPack<TensorOpError>> {
+	fn loss(&self) -> Result<Tensor, ErrPack<TensorOpError>> {
 		let value = &self.value;
 		let target = &self.target;
 
-		// Remove the feature dimension (-1). All other dimensions are batch dimensions,
-		// so `elems()` will give us the batch size.
-		let batch_size = value.select(-1, 0)?.elems();
+		let err_sums = value.new_replace_tail(1, &[1])?;
+		err_sums.assign((target * value.ln_clamped()).sum())?;
 
-		let tmp = value.new_empty_like()?;
-		tmp.assign(target * value.ln_clamped())?;
+		let result = err_sums.new_empty(&[1], value.dtype())?;
+		result.assign(err_sums.mean())?;
 
-		Ok(sum_all(&tmp)? / -batch_size.lossy_into())
+		Ok(result)
 	}
 
 	fn backward(self: Box<Self>) -> Result<(), ErrPack<TensorOpError>> {
