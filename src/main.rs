@@ -163,8 +163,6 @@ use x17ai::nn::layers::linear::Linear;
 use x17ai::nn::layers::softmax::{Softmax, SoftmaxGradientMode};
 use x17ai::nn::layers::{CrossEntropy, Layer};
 use x17ai::tensor::device::cpu::CPUDevice;
-use x17ai::tensor::device::cuda;
-use x17ai::tensor::device::executor::Executor;
 use x17ai::tensor::generic::Tensor;
 use x17ai::tensor::generic::map::ND;
 use x17ai::tensor::math::{col, mat, row};
@@ -281,7 +279,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 
 		mctx.step()?;
 
-		println!("{loss}");
+		println!("{}", loss.borrow()?.view::<f32>()?);
 		//println!("--------------------------------------------------");
 	}
 

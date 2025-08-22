@@ -18,7 +18,7 @@ use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::device::cpu::zip::{zip_elems, zip_vecs};
 use crate::tensor::device::executor::ExecutorError;
 use crate::tensor::device::kernel::expr::DynExpr;
-use crate::tensor::device::kernel::runner::KernelData;
+use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
 use crate::tensor::generic::map::{Map, ND, Select};
 use crate::tensor::{HasDType, generic};
 
@@ -110,7 +110,7 @@ pub(super) struct CPUFloatVMT<T: Copy + HasDType + FromToF64> {
 }
 
 impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
-	pub fn new(device: &Rc<MaybeUninit<CPUDevice>>) -> Self {
+	pub fn new(device: &Rc<MaybeUninit<CPUDevice>>, kernel_runner: Rc<KernelRunner>) -> Self {
 		let device = device.as_ptr();
 		let device = unsafe { NonNull::new_unchecked(device as *mut CPUDevice) };
 		let device_is_cpu = true;
@@ -121,6 +121,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 					device,
 					device_is_cpu,
 					dtype,
+					kernel_runner,
 					CPUDevice::drop_buffer,
 					Self::read_bin,
 					Self::write_bin,

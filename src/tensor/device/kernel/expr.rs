@@ -66,6 +66,8 @@ pub trait Expr {
 	const SCALAR_COUNT: usize;
 	const REDUCE_OP_COUNT: usize;
 	const KEY_LEN: usize;
+	const PADDED_KEY_LEN: usize = Self::KEY_LEN.next_multiple_of(super::runner::KEY_BATCH_SIZE);
+	const BATCHED_KEY_LEN: usize = Self::PADDED_KEY_LEN / super::runner::KEY_BATCH_SIZE;
 
 	fn key(id: &mut [ExprDiscriminant], i: usize) -> usize;
 	fn elemwise_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
@@ -733,9 +735,18 @@ impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> ExprToDyn for MulExpr
 
 //--------------------------------------------------------------------------------------------------
 
-impl<E: const Expr + ExprToDyn> EvaluatesToTensor for ExprWrapper<E> {
+impl<E: const Expr + ExprToDyn> EvaluatesToTensor for ExprWrapper<E>
+where
+	[(); 1 - E::REDUCE_OP_COUNT]:,
+	[(); E::ELEMWISE_COUNT]:,
+	[(); E::REDUCE_COUNT]:,
+	[(); E::SCALAR_COUNT]:,
+	[(); E::PADDED_KEY_LEN]:,
+	[(); E::BATCHED_KEY_LEN]:,
+	[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
+{
 	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
-		todo!("ExprWrapper::eval_to_tensor not implemented yet");
+		to.vmt().kernel_runner().run(to, self.0)
 	}
 }
 

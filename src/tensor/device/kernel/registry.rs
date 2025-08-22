@@ -58,19 +58,21 @@ impl KernelMap {
 //--------------------------------------------------------------------------------------------------
 
 pub struct KernelRegistry {
-	pub(crate) kernels: Vec<Arc<KernelData>>,
+	kernels: Vec<Arc<KernelData>>,
 	map: KernelMap,
 }
 
 impl KernelRegistry {
-	pub fn instance() -> &'static RwLock<Self> {
-		static instance: OnceLock<RwLock<KernelRegistry>> = OnceLock::new();
-		instance.get_or_init(|| {
-			RwLock::new(Self {
-				kernels: Vec::new(),
-				map: KernelMap::new(),
+	pub fn instance() -> Arc<RwLock<Self>> {
+		static instance: OnceLock<Arc<RwLock<KernelRegistry>>> = OnceLock::new();
+		instance
+			.get_or_init(|| {
+				Arc::new(RwLock::new(Self {
+					kernels: Vec::new(),
+					map: KernelMap::new(),
+				}))
 			})
-		})
+			.clone()
 	}
 
 	pub(crate) fn add_kernel(

@@ -14,7 +14,7 @@ use crate::ErrPack;
 use crate::tensor::TensorOpError;
 use crate::tensor::device::NewDeviceBufferError;
 use crate::tensor::device::executor::ExecutorError;
-use crate::tensor::device::kernel::runner::KernelData;
+use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
 use crate::tensor::generic::buffer::Buffer;
 use crate::tensor::generic::map::ND;
 use crate::tensor::generic::{self};
@@ -98,6 +98,7 @@ pub struct DeviceBufferVMT {
 	device: NonNull<dyn Device>,
 	device_is_cpu: bool,
 	dtype: DType,
+	kernel_runner: Rc<KernelRunner>,
 
 	drop_buffer: DropBufferFn,
 	read_bin: ReadBinFn,
@@ -111,11 +112,14 @@ pub struct DeviceBufferVMT {
 impl DeviceBufferVMT {
 	/// # Safety
 	///
-	/// Calling the provided functions with pointer to `self` as `this` must be safe.
+	/// - `device` must be a valid pointer that outlives `self`
+	/// - calling the provided functions with pointer to `self` as `this` must be safe
+	#[allow(clippy::too_many_arguments)]
 	pub unsafe fn new(
 		device: NonNull<dyn Device>,
 		device_is_cpu: bool,
 		dtype: DType,
+		kernel_runner: Rc<KernelRunner>,
 
 		drop_buffer: DropBufferFn,
 		read_bin: ReadBinFn,
@@ -129,6 +133,7 @@ impl DeviceBufferVMT {
 			device,
 			device_is_cpu,
 			dtype,
+			kernel_runner,
 
 			drop_buffer,
 			read_bin,
@@ -170,6 +175,11 @@ impl DeviceBufferVMT {
 	}
 
 	#[inline]
+	pub fn kernel_runner(&self) -> &KernelRunner {
+		&self.kernel_runner
+	}
+
+	#[inline]
 	pub fn read_bin<'buf>(
 		&self,
 		dst: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
@@ -204,6 +214,17 @@ impl DeviceBufferVMT {
 		scale: f64,
 	) -> Result<(), ErrPack<ExecutorError>> {
 		unsafe { (self.mm)(self.into(), o, a, b, scale) }
+	}
+
+	#[inline]
+	pub fn attention(
+		&self,
+		o: &mut generic::Tensor<ND<3>, DeviceBufferRefMut>,
+		q: &generic::Tensor<ND<3>, DeviceBufferRef>,
+		k: &generic::Tensor<ND<3>, DeviceBufferRef>,
+		v: &generic::Tensor<ND<3>, DeviceBufferRef>,
+	) {
+		unsafe { (self.attention)(self.into(), o, q, k, v) }
 	}
 
 	#[inline]

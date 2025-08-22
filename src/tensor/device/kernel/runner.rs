@@ -23,14 +23,16 @@ use crate::tensor::{Tensor, TensorOpError};
 
 //--------------------------------------------------------------------------------------------------
 
-const KEY_BATCH: usize = std::mem::size_of::<u64>() / std::mem::size_of::<ExprDiscriminant>();
+pub const KEY_BATCH_SIZE: usize =
+	std::mem::size_of::<u64>() / std::mem::size_of::<ExprDiscriminant>();
 
-union KeyUnion<const N: usize>
+union KeyUnion<const PADDED_KEY_LEN: usize, const BATCHED_KEY_LEN: usize>
 where
-	[(); N / KEY_BATCH]:,
+	[(); PADDED_KEY_LEN]:,
+	[(); BATCHED_KEY_LEN]:,
 {
-	discriminants: [ExprDiscriminant; N],
-	key: [u64; N / KEY_BATCH],
+	discriminants: [ExprDiscriminant; PADDED_KEY_LEN],
+	key: [u64; BATCHED_KEY_LEN],
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -49,7 +51,20 @@ pub struct KernelRunner {
 	cache: UnsafeCell<KernelMap>,
 }
 
+impl Default for KernelRunner {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
 impl KernelRunner {
+	pub fn new() -> Self {
+		Self {
+			registry: KernelRegistry::instance(),
+			cache: UnsafeCell::new(KernelMap::new()),
+		}
+	}
+
 	#[inline]
 	#[allow(clippy::panic_in_result_fn)]
 	pub fn run<E: const Expr + ExprToDyn>(
@@ -62,8 +77,8 @@ impl KernelRunner {
 		[(); E::ELEMWISE_COUNT]:,
 		[(); E::REDUCE_COUNT]:,
 		[(); E::SCALAR_COUNT]:,
-		[(); E::KEY_LEN.next_multiple_of(KEY_BATCH)]:,
-		[(); E::KEY_LEN.next_multiple_of(KEY_BATCH) / KEY_BATCH]:,
+		[(); E::PADDED_KEY_LEN]:,
+		[(); E::BATCHED_KEY_LEN]:,
 		[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
 	{
 		if E::CONST {
@@ -98,7 +113,8 @@ impl KernelRunner {
 		scalar_args: [f64; E::SCALAR_COUNT],
 	) -> Result<(), ErrPack<TensorOpError>>
 	where
-		[(); E::KEY_LEN.next_multiple_of(KEY_BATCH) / KEY_BATCH]:,
+		[(); E::PADDED_KEY_LEN]:,
+		[(); E::BATCHED_KEY_LEN]:,
 		[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
 	{
 		let (key, key_hash) = const { Self::const_key::<E>() };
@@ -112,6 +128,7 @@ impl KernelRunner {
 			assert!(e == E::ELEMWISE_COUNT);
 			assert!(r == E::REDUCE_COUNT);
 			assert!(s == E::SCALAR_COUNT);
+
 			let mut registry = self.registry.write().unwrap();
 			let kernel = registry.add_kernel(&key, key_hash, |id| {
 				Arc::new(KernelData {
@@ -123,6 +140,8 @@ impl KernelRunner {
 					scalar_count: E::SCALAR_COUNT,
 				})
 			});
+			std::mem::drop(registry);
+
 			cache.insert_unique(key_hash, kernel)
 		};
 		let kernel = entry.value.as_ref();
@@ -130,12 +149,11 @@ impl KernelRunner {
 	}
 
 	#[allow(clippy::indexing_slicing)]
-	const fn const_key<E: const Expr>()
-	-> ([u64; E::KEY_LEN.next_multiple_of(KEY_BATCH) / KEY_BATCH], u64)
+	const fn const_key<E: const Expr>() -> ([u64; E::BATCHED_KEY_LEN], u64)
 	where
-		[(); E::KEY_LEN.next_multiple_of(KEY_BATCH) / KEY_BATCH]:,
+		[(); E::PADDED_KEY_LEN]:,
 	{
-		let mut discriminants = [ExprDiscriminant::Invalid; E::KEY_LEN.next_multiple_of(KEY_BATCH)];
+		let mut discriminants = [ExprDiscriminant::Invalid; E::PADDED_KEY_LEN];
 		let len = E::key(&mut discriminants, 0);
 		assert!(len == E::KEY_LEN);
 

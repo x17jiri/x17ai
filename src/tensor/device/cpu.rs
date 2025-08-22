@@ -13,6 +13,8 @@ use std::rc::Rc;
 
 use crate::tensor::HasDType;
 use crate::tensor::device::buffer::DeviceBufferVMT;
+use crate::tensor::device::kernel::registry::KernelRegistry;
+use crate::tensor::device::kernel::runner::KernelRunner;
 
 pub mod cpu_float_vmt;
 pub mod math;
@@ -88,9 +90,9 @@ impl<'a, T> View3D<'a, T> {
 //--------------------------------------------------------------------------------------------------
 
 pub struct CPUDevice {
-	pub name: String,
-	pub rng: RefCell<Rng>,
-	pub f32_vmt: CPUFloatVMT<f32>,
+	name: String,
+	rng: RefCell<Rng>,
+	f32_vmt: CPUFloatVMT<f32>,
 }
 
 impl CPUDevice {
@@ -99,11 +101,13 @@ impl CPUDevice {
 	}
 
 	pub fn new_named(name: String) -> Rc<Self> {
+		let kernel_runner = Rc::new(KernelRunner::new());
+
 		let mut rc_uninit = Rc::new_uninit();
 		let instance = Self {
 			name,
 			rng: RefCell::new(Rng::new_default()),
-			f32_vmt: CPUFloatVMT::new(&rc_uninit),
+			f32_vmt: CPUFloatVMT::new(&rc_uninit, kernel_runner),
 		};
 		unsafe {
 			Rc::get_mut_unchecked(&mut rc_uninit).write(instance);
