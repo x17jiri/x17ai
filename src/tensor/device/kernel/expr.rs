@@ -145,14 +145,14 @@ impl<'a> const Expr for &'a Tensor {
 	}
 }
 
-impl<'a> ExprToDyn for &'a Tensor {
+impl ExprToDyn for &Tensor {
 	fn to_dyn(e: &mut usize, r: &mut usize, _s: &mut usize, reduce: bool) -> Arc<DynExpr> {
 		if reduce {
-			let node = Arc::new(DynExpr::ElemwiseTensorArg(*r));
+			let node = Arc::new(DynExpr::ReduceTensorArg(*r));
 			*r += 1;
 			node
 		} else {
-			let node = Arc::new(DynExpr::ReduceTensorArg(*e));
+			let node = Arc::new(DynExpr::ElemwiseTensorArg(*e));
 			*e += 1;
 			node
 		}

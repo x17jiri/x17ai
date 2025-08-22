@@ -62,11 +62,12 @@ impl Layer for Softmax {
 		let (inp, inp_backward) = inp_node.take();
 		let out = inp.reuse_or_new_like()?;
 
-		let t = inp.new_replace_tail(1, &[1])?; // [..., 1]
+		let max = inp.new_replace_tail(1, &[1])?; // [..., 1]
+		let sum_recip = max.new_empty_like()?;
 
-		t.assign(inp.max())?;
-		t.assign((&inp - &t).exp().sum().recip(0.0))?;
-		out.assign((&inp - &t).exp() * &t)?;
+		max.assign(inp.max())?;
+		sum_recip.assign((&inp - &max).exp().sum().recip(0.0))?;
+		out.assign((&inp - &max).exp() * &sum_recip)?;
 
 		let backward_fn = inp_backward.map(|inp_backward| match self.gradient_mode {
 			SoftmaxGradientMode::Precise => {
