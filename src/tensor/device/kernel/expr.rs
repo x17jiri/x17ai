@@ -25,13 +25,15 @@ pub enum ExprDiscriminant {
 	MaxExpr,
 
 	ExpExpr,
+	AbsExpr,
 	SigmoidExpr,
 	SwishExpr,
 	SqrtExpr,
-	RecipExpr,
 	LnClampedExpr,
+
 	AddExpr,
 	MulExpr,
+	RecipExpr,
 
 	Invalid,
 }
@@ -47,13 +49,15 @@ pub enum DynExpr {
 	MaxExpr(Arc<DynExpr>),
 
 	ExpExpr(Arc<DynExpr>),
+	AbsExpr(Arc<DynExpr>),
 	SigmoidExpr(Arc<DynExpr>),
 	SwishExpr(Arc<DynExpr>),
 	SqrtExpr(Arc<DynExpr>),
-	RecipExpr(Arc<DynExpr>, Arc<DynExpr>),
 	LnClampedExpr(Arc<DynExpr>),
+
 	AddExpr(Arc<DynExpr>, Arc<DynExpr>),
 	MulExpr(Arc<DynExpr>, Arc<DynExpr>),
+	RecipExpr(Arc<DynExpr>, Arc<DynExpr>),
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -91,13 +95,15 @@ pub struct SumExpr<A: Expr + ExprToDyn>(pub A);
 pub struct MaxExpr<A: Expr + ExprToDyn>(pub A);
 
 pub struct ExpExpr<A: Expr + ExprToDyn>(pub A);
+pub struct AbsExpr<A: Expr + ExprToDyn>(pub A);
 pub struct SigmoidExpr<A: Expr + ExprToDyn>(pub A);
 pub struct SwishExpr<A: Expr + ExprToDyn>(pub A);
 pub struct SqrtExpr<A: Expr + ExprToDyn>(pub A);
-pub struct RecipExpr<A: Expr + ExprToDyn, B: Expr + ExprToDyn>(pub A, pub B);
 pub struct LnClampedExpr<A: Expr + ExprToDyn>(pub A);
+
 pub struct AddExpr<A: Expr + ExprToDyn, B: Expr + ExprToDyn>(pub A, pub B);
 pub struct MulExpr<A: Expr + ExprToDyn, B: Expr + ExprToDyn>(pub A, pub B);
+pub struct RecipExpr<A: Expr + ExprToDyn, B: Expr + ExprToDyn>(pub A, pub B);
 
 //--------------------------------------------------------------------------------------------------
 
@@ -211,527 +217,201 @@ impl ExprToDyn for Scalar {
 	}
 }
 
-#[allow(clippy::inline_always)]
-#[allow(clippy::indexing_slicing)]
-impl<A: const Expr + ExprToDyn> const Expr for SumExpr<A> {
-	const CONST: bool = A::CONST;
-	const ELEMWISE_COUNT: usize = 0;
-	const REDUCE_COUNT: usize = A::ELEMWISE_COUNT;
-	const SCALAR_COUNT: usize = A::SCALAR_COUNT;
-	const REDUCE_OP_COUNT: usize = 1 + A::REDUCE_OP_COUNT;
-	const KEY_LEN: usize = 1 + A::KEY_LEN;
+macro_rules! impl_expr_reduce {
+	($name:ident) => {
+		#[allow(clippy::inline_always)]
+		#[allow(clippy::indexing_slicing)]
+		impl<A: const Expr + ExprToDyn> const Expr for $name<A> {
+			const CONST: bool = A::CONST;
+			const ELEMWISE_COUNT: usize = 0;
+			const REDUCE_COUNT: usize = A::ELEMWISE_COUNT;
+			const SCALAR_COUNT: usize = A::SCALAR_COUNT;
+			const REDUCE_OP_COUNT: usize = 1 + A::REDUCE_OP_COUNT;
+			const KEY_LEN: usize = 1 + A::KEY_LEN;
 
-	#[inline(always)]
-	fn key(id: &mut [ExprDiscriminant], i: usize) -> usize {
-		id[i] = ExprDiscriminant::SumExpr;
-		A::key(id, i + 1)
-	}
+			#[inline(always)]
+			fn key(id: &mut [ExprDiscriminant], i: usize) -> usize {
+				id[i] = ExprDiscriminant::$name;
+				A::key(id, i + 1)
+			}
 
-	#[inline(always)]
-	fn elemwise_tensors<'t>(&self, _tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't,
-	{
-		i
-	}
+			#[inline(always)]
+			fn elemwise_tensors<'t>(
+				&self,
+				_tensors: &mut [MaybeUninit<&'t Tensor>],
+				i: usize,
+			) -> usize
+			where
+				Self: 't,
+			{
+				i
+			}
 
-	#[inline(always)]
-	fn reduce_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't,
-	{
-		self.0.elemwise_tensors(tensors, i)
-	}
+			#[inline(always)]
+			fn reduce_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
+			where
+				Self: 't,
+			{
+				self.0.elemwise_tensors(tensors, i)
+			}
 
-	#[inline(always)]
-	fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
-		self.0.scalars(scalars, i)
-	}
+			#[inline(always)]
+			fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
+				self.0.scalars(scalars, i)
+			}
 
-	#[inline(always)]
-	fn a_tensor(&self) -> Option<&Tensor> {
-		self.0.a_tensor()
-	}
+			#[inline(always)]
+			fn a_tensor(&self) -> Option<&Tensor> {
+				self.0.a_tensor()
+			}
+		}
+
+		impl<A: const Expr + ExprToDyn> ExprToDyn for $name<A> {
+			fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+				assert!(!reduce);
+				Arc::new(DynExpr::$name(A::to_dyn(e, r, s, true)))
+			}
+		}
+	};
 }
 
-impl<A: const Expr + ExprToDyn> ExprToDyn for SumExpr<A> {
-	fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
-		assert!(!reduce);
-		Arc::new(DynExpr::SumExpr(A::to_dyn(e, r, s, true)))
-	}
+impl_expr_reduce!(SumExpr);
+impl_expr_reduce!(MaxExpr);
+
+macro_rules! impl_expr_unary {
+	($name:ident) => {
+		#[allow(clippy::inline_always)]
+		#[allow(clippy::indexing_slicing)]
+		impl<A: const Expr + ExprToDyn> const Expr for $name<A> {
+			const CONST: bool = A::CONST;
+			const ELEMWISE_COUNT: usize = A::ELEMWISE_COUNT;
+			const REDUCE_COUNT: usize = A::REDUCE_COUNT;
+			const SCALAR_COUNT: usize = A::SCALAR_COUNT;
+			const REDUCE_OP_COUNT: usize = A::REDUCE_OP_COUNT;
+			const KEY_LEN: usize = 1 + A::KEY_LEN;
+
+			#[inline(always)]
+			fn key(id: &mut [ExprDiscriminant], i: usize) -> usize {
+				id[i] = ExprDiscriminant::$name;
+				A::key(id, i + 1)
+			}
+
+			#[inline(always)]
+			fn elemwise_tensors<'t>(
+				&self,
+				tensors: &mut [MaybeUninit<&'t Tensor>],
+				i: usize,
+			) -> usize
+			where
+				Self: 't,
+			{
+				self.0.elemwise_tensors(tensors, i)
+			}
+
+			#[inline(always)]
+			fn reduce_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
+			where
+				Self: 't,
+			{
+				self.0.reduce_tensors(tensors, i)
+			}
+
+			#[inline(always)]
+			fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
+				self.0.scalars(scalars, i)
+			}
+
+			#[inline(always)]
+			fn a_tensor(&self) -> Option<&Tensor> {
+				self.0.a_tensor()
+			}
+		}
+
+		impl<A: const Expr + ExprToDyn> ExprToDyn for $name<A> {
+			fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+				Arc::new(DynExpr::$name(A::to_dyn(e, r, s, reduce)))
+			}
+		}
+	};
 }
 
-#[allow(clippy::inline_always)]
-#[allow(clippy::indexing_slicing)]
-impl<A: const Expr + ExprToDyn> const Expr for MaxExpr<A> {
-	const CONST: bool = A::CONST;
-	const ELEMWISE_COUNT: usize = 0;
-	const REDUCE_COUNT: usize = A::ELEMWISE_COUNT;
-	const SCALAR_COUNT: usize = A::SCALAR_COUNT;
-	const REDUCE_OP_COUNT: usize = 1 + A::REDUCE_OP_COUNT;
-	const KEY_LEN: usize = 1 + A::KEY_LEN;
+impl_expr_unary!(ExpExpr);
+impl_expr_unary!(AbsExpr);
+impl_expr_unary!(SigmoidExpr);
+impl_expr_unary!(SwishExpr);
+impl_expr_unary!(SqrtExpr);
+impl_expr_unary!(LnClampedExpr);
 
-	#[inline(always)]
-	fn key(id: &mut [ExprDiscriminant], i: usize) -> usize {
-		id[i] = ExprDiscriminant::MaxExpr;
-		A::key(id, i + 1)
-	}
+macro_rules! impl_expr_binary {
+	($name:ident) => {
+		#[allow(clippy::inline_always)]
+		#[allow(clippy::indexing_slicing)]
+		impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> const Expr for $name<A, B> {
+			const CONST: bool = A::CONST && B::CONST;
+			const ELEMWISE_COUNT: usize = A::ELEMWISE_COUNT + B::ELEMWISE_COUNT;
+			const REDUCE_COUNT: usize = A::REDUCE_COUNT + B::REDUCE_COUNT;
+			const SCALAR_COUNT: usize = A::SCALAR_COUNT + B::SCALAR_COUNT;
+			const REDUCE_OP_COUNT: usize = A::REDUCE_OP_COUNT + B::REDUCE_OP_COUNT;
+			const KEY_LEN: usize = 1 + A::KEY_LEN + B::KEY_LEN;
 
-	#[inline(always)]
-	fn elemwise_tensors<'t>(&self, _tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't,
-	{
-		i
-	}
+			#[inline(always)]
+			fn key(id: &mut [ExprDiscriminant], i: usize) -> usize {
+				id[i] = ExprDiscriminant::$name;
+				let m = A::key(id, i + 1);
+				assert!(m == i + 1 + A::KEY_LEN);
+				B::key(id, i + 1 + A::KEY_LEN)
+			}
 
-	#[inline(always)]
-	fn reduce_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't,
-	{
-		self.0.elemwise_tensors(tensors, i)
-	}
+			#[inline(always)]
+			fn elemwise_tensors<'t>(
+				&self,
+				tensors: &mut [MaybeUninit<&'t Tensor>],
+				i: usize,
+			) -> usize
+			where
+				Self: 't,
+			{
+				let m = self.0.elemwise_tensors(tensors, i);
+				assert!(m == i + A::ELEMWISE_COUNT);
+				self.1.elemwise_tensors(tensors, i + A::ELEMWISE_COUNT)
+			}
 
-	#[inline(always)]
-	fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
-		self.0.scalars(scalars, i)
-	}
+			#[inline(always)]
+			fn reduce_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
+			where
+				Self: 't,
+			{
+				let m = self.0.reduce_tensors(tensors, i);
+				assert!(m == i + A::REDUCE_COUNT);
+				self.1.reduce_tensors(tensors, i + A::REDUCE_COUNT)
+			}
 
-	#[inline(always)]
-	fn a_tensor(&self) -> Option<&Tensor> {
-		self.0.a_tensor()
-	}
+			#[inline(always)]
+			fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
+				let m = self.0.scalars(scalars, i);
+				assert!(m == i + A::SCALAR_COUNT);
+				self.1.scalars(scalars, i + A::SCALAR_COUNT)
+			}
+
+			#[inline(always)]
+			fn a_tensor(&self) -> Option<&Tensor> {
+				self.0.a_tensor().or(self.1.a_tensor())
+			}
+		}
+
+		impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> ExprToDyn for $name<A, B> {
+			fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+				let a = A::to_dyn(e, r, s, reduce);
+				let b = B::to_dyn(e, r, s, reduce);
+				Arc::new(DynExpr::$name(a, b))
+			}
+		}
+	};
 }
 
-impl<A: const Expr + ExprToDyn> ExprToDyn for MaxExpr<A> {
-	fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
-		assert!(!reduce);
-		Arc::new(DynExpr::MaxExpr(A::to_dyn(e, r, s, true)))
-	}
-}
-
-#[allow(clippy::inline_always)]
-#[allow(clippy::indexing_slicing)]
-impl<A: const Expr + ExprToDyn> const Expr for ExpExpr<A> {
-	const CONST: bool = A::CONST;
-	const ELEMWISE_COUNT: usize = A::ELEMWISE_COUNT;
-	const REDUCE_COUNT: usize = A::REDUCE_COUNT;
-	const SCALAR_COUNT: usize = A::SCALAR_COUNT;
-	const REDUCE_OP_COUNT: usize = A::REDUCE_OP_COUNT;
-	const KEY_LEN: usize = 1 + A::KEY_LEN;
-
-	#[inline(always)]
-	fn key(id: &mut [ExprDiscriminant], i: usize) -> usize {
-		id[i] = ExprDiscriminant::ExpExpr;
-		A::key(id, i + 1)
-	}
-
-	#[inline(always)]
-	fn elemwise_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't,
-	{
-		self.0.elemwise_tensors(tensors, i)
-	}
-
-	#[inline(always)]
-	fn reduce_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't,
-	{
-		self.0.reduce_tensors(tensors, i)
-	}
-
-	#[inline(always)]
-	fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
-		self.0.scalars(scalars, i)
-	}
-
-	#[inline(always)]
-	fn a_tensor(&self) -> Option<&Tensor> {
-		self.0.a_tensor()
-	}
-}
-
-impl<A: const Expr + ExprToDyn> ExprToDyn for ExpExpr<A> {
-	fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
-		Arc::new(DynExpr::ExpExpr(A::to_dyn(e, r, s, reduce)))
-	}
-}
-
-#[allow(clippy::inline_always)]
-#[allow(clippy::indexing_slicing)]
-impl<A: const Expr + ExprToDyn> const Expr for SigmoidExpr<A> {
-	const CONST: bool = A::CONST;
-	const ELEMWISE_COUNT: usize = A::ELEMWISE_COUNT;
-	const REDUCE_COUNT: usize = A::REDUCE_COUNT;
-	const SCALAR_COUNT: usize = A::SCALAR_COUNT;
-	const REDUCE_OP_COUNT: usize = A::REDUCE_OP_COUNT;
-	const KEY_LEN: usize = 1 + A::KEY_LEN;
-
-	#[inline(always)]
-	fn key(id: &mut [ExprDiscriminant], i: usize) -> usize {
-		id[i] = ExprDiscriminant::SigmoidExpr;
-		A::key(id, i + 1)
-	}
-
-	#[inline(always)]
-	fn elemwise_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't,
-	{
-		self.0.elemwise_tensors(tensors, i)
-	}
-
-	#[inline(always)]
-	fn reduce_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't,
-	{
-		self.0.reduce_tensors(tensors, i)
-	}
-
-	#[inline(always)]
-	fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
-		self.0.scalars(scalars, i)
-	}
-
-	#[inline(always)]
-	fn a_tensor(&self) -> Option<&Tensor> {
-		self.0.a_tensor()
-	}
-}
-
-impl<A: const Expr + ExprToDyn> ExprToDyn for SigmoidExpr<A> {
-	fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
-		Arc::new(DynExpr::SigmoidExpr(A::to_dyn(e, r, s, reduce)))
-	}
-}
-
-#[allow(clippy::inline_always)]
-#[allow(clippy::indexing_slicing)]
-impl<A: const Expr + ExprToDyn> const Expr for SwishExpr<A> {
-	const CONST: bool = A::CONST;
-	const ELEMWISE_COUNT: usize = A::ELEMWISE_COUNT;
-	const REDUCE_COUNT: usize = A::REDUCE_COUNT;
-	const SCALAR_COUNT: usize = A::SCALAR_COUNT;
-	const REDUCE_OP_COUNT: usize = A::REDUCE_OP_COUNT;
-	const KEY_LEN: usize = 1 + A::KEY_LEN;
-
-	#[inline(always)]
-	fn key(id: &mut [ExprDiscriminant], i: usize) -> usize {
-		id[i] = ExprDiscriminant::SwishExpr;
-		A::key(id, i + 1)
-	}
-
-	#[inline(always)]
-	fn elemwise_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't,
-	{
-		self.0.elemwise_tensors(tensors, i)
-	}
-
-	#[inline(always)]
-	fn reduce_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't,
-	{
-		self.0.reduce_tensors(tensors, i)
-	}
-
-	#[inline(always)]
-	fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
-		self.0.scalars(scalars, i)
-	}
-
-	#[inline(always)]
-	fn a_tensor(&self) -> Option<&Tensor> {
-		self.0.a_tensor()
-	}
-}
-
-impl<A: const Expr + ExprToDyn> ExprToDyn for SwishExpr<A> {
-	fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
-		Arc::new(DynExpr::SwishExpr(A::to_dyn(e, r, s, reduce)))
-	}
-}
-
-#[allow(clippy::inline_always)]
-#[allow(clippy::indexing_slicing)]
-impl<A: const Expr + ExprToDyn> const Expr for SqrtExpr<A> {
-	const CONST: bool = A::CONST;
-	const ELEMWISE_COUNT: usize = A::ELEMWISE_COUNT;
-	const REDUCE_COUNT: usize = A::REDUCE_COUNT;
-	const SCALAR_COUNT: usize = A::SCALAR_COUNT;
-	const REDUCE_OP_COUNT: usize = A::REDUCE_OP_COUNT;
-	const KEY_LEN: usize = 1 + A::KEY_LEN;
-
-	#[inline(always)]
-	fn key(id: &mut [ExprDiscriminant], i: usize) -> usize {
-		id[i] = ExprDiscriminant::SqrtExpr;
-		A::key(id, i + 1)
-	}
-
-	#[inline(always)]
-	fn elemwise_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't,
-	{
-		self.0.elemwise_tensors(tensors, i)
-	}
-
-	#[inline(always)]
-	fn reduce_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't,
-	{
-		self.0.reduce_tensors(tensors, i)
-	}
-
-	#[inline(always)]
-	fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
-		self.0.scalars(scalars, i)
-	}
-
-	#[inline(always)]
-	fn a_tensor(&self) -> Option<&Tensor> {
-		self.0.a_tensor()
-	}
-}
-
-impl<A: const Expr + ExprToDyn> ExprToDyn for SqrtExpr<A> {
-	fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
-		Arc::new(DynExpr::SqrtExpr(A::to_dyn(e, r, s, reduce)))
-	}
-}
-
-#[allow(clippy::inline_always)]
-#[allow(clippy::indexing_slicing)]
-impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> const Expr for RecipExpr<A, B> {
-	const CONST: bool = A::CONST && B::CONST;
-	const ELEMWISE_COUNT: usize = A::ELEMWISE_COUNT + B::ELEMWISE_COUNT;
-	const REDUCE_COUNT: usize = A::REDUCE_COUNT + B::REDUCE_COUNT;
-	const SCALAR_COUNT: usize = A::SCALAR_COUNT + B::SCALAR_COUNT;
-	const REDUCE_OP_COUNT: usize = A::REDUCE_OP_COUNT + B::REDUCE_OP_COUNT;
-	const KEY_LEN: usize = 1 + A::KEY_LEN + B::KEY_LEN;
-
-	#[inline(always)]
-	fn key(id: &mut [ExprDiscriminant], i: usize) -> usize {
-		id[i] = ExprDiscriminant::RecipExpr;
-		let m = A::key(id, i + 1);
-		assert!(m == i + 1 + A::KEY_LEN);
-		B::key(id, i + 1 + A::KEY_LEN)
-	}
-
-	#[inline(always)]
-	fn elemwise_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't,
-	{
-		let m = self.0.elemwise_tensors(tensors, i);
-		assert!(m == i + A::ELEMWISE_COUNT);
-		self.1.elemwise_tensors(tensors, i + A::ELEMWISE_COUNT)
-	}
-
-	#[inline(always)]
-	fn reduce_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't,
-	{
-		let m = self.0.reduce_tensors(tensors, i);
-		assert!(m == i + A::REDUCE_COUNT);
-		self.1.reduce_tensors(tensors, i + A::REDUCE_COUNT)
-	}
-
-	#[inline(always)]
-	fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
-		let m = self.0.scalars(scalars, i);
-		assert!(m == i + A::SCALAR_COUNT);
-		self.1.scalars(scalars, i + A::SCALAR_COUNT)
-	}
-
-	#[inline(always)]
-	fn a_tensor(&self) -> Option<&Tensor> {
-		self.0.a_tensor().or(self.1.a_tensor())
-	}
-}
-
-impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> ExprToDyn for RecipExpr<A, B> {
-	fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
-		let a = A::to_dyn(e, r, s, reduce);
-		let b = B::to_dyn(e, r, s, reduce);
-		Arc::new(DynExpr::RecipExpr(a, b))
-	}
-}
-
-#[allow(clippy::inline_always)]
-#[allow(clippy::indexing_slicing)]
-impl<A: const Expr + ExprToDyn> const Expr for LnClampedExpr<A> {
-	const CONST: bool = A::CONST;
-	const ELEMWISE_COUNT: usize = A::ELEMWISE_COUNT;
-	const REDUCE_COUNT: usize = A::REDUCE_COUNT;
-	const SCALAR_COUNT: usize = A::SCALAR_COUNT;
-	const REDUCE_OP_COUNT: usize = A::REDUCE_OP_COUNT;
-	const KEY_LEN: usize = 1 + A::KEY_LEN;
-
-	#[inline(always)]
-	fn key(id: &mut [ExprDiscriminant], i: usize) -> usize {
-		id[i] = ExprDiscriminant::LnClampedExpr;
-		A::key(id, i + 1)
-	}
-
-	#[inline(always)]
-	fn elemwise_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't,
-	{
-		self.0.elemwise_tensors(tensors, i)
-	}
-
-	#[inline(always)]
-	fn reduce_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't,
-	{
-		self.0.reduce_tensors(tensors, i)
-	}
-
-	#[inline(always)]
-	fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
-		self.0.scalars(scalars, i)
-	}
-
-	#[inline(always)]
-	fn a_tensor(&self) -> Option<&Tensor> {
-		self.0.a_tensor()
-	}
-}
-
-impl<A: const Expr + ExprToDyn> ExprToDyn for LnClampedExpr<A> {
-	fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
-		Arc::new(DynExpr::LnClampedExpr(A::to_dyn(e, r, s, reduce)))
-	}
-}
-
-#[allow(clippy::inline_always)]
-#[allow(clippy::indexing_slicing)]
-impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> const Expr for AddExpr<A, B> {
-	const CONST: bool = A::CONST && B::CONST;
-	const ELEMWISE_COUNT: usize = A::ELEMWISE_COUNT + B::ELEMWISE_COUNT;
-	const REDUCE_COUNT: usize = A::REDUCE_COUNT + B::REDUCE_COUNT;
-	const SCALAR_COUNT: usize = A::SCALAR_COUNT + B::SCALAR_COUNT;
-	const REDUCE_OP_COUNT: usize = A::REDUCE_OP_COUNT + B::REDUCE_OP_COUNT;
-	const KEY_LEN: usize = 1 + A::KEY_LEN + B::KEY_LEN;
-
-	#[inline(always)]
-	fn key(id: &mut [ExprDiscriminant], i: usize) -> usize {
-		id[i] = ExprDiscriminant::AddExpr;
-		let m = A::key(id, i + 1);
-		assert!(m == i + 1 + A::KEY_LEN);
-		B::key(id, i + 1 + A::KEY_LEN)
-	}
-
-	#[inline(always)]
-	fn elemwise_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't,
-	{
-		let m = self.0.elemwise_tensors(tensors, i);
-		assert!(m == i + A::ELEMWISE_COUNT);
-		self.1.elemwise_tensors(tensors, i + A::ELEMWISE_COUNT)
-	}
-
-	#[inline(always)]
-	fn reduce_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't,
-	{
-		let m = self.0.reduce_tensors(tensors, i);
-		assert!(m == i + A::REDUCE_COUNT);
-		self.1.reduce_tensors(tensors, i + A::REDUCE_COUNT)
-	}
-
-	#[inline(always)]
-	fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
-		let m = self.0.scalars(scalars, i);
-		assert!(m == i + A::SCALAR_COUNT);
-		self.1.scalars(scalars, i + A::SCALAR_COUNT)
-	}
-
-	#[inline(always)]
-	fn a_tensor(&self) -> Option<&Tensor> {
-		self.0.a_tensor().or(self.1.a_tensor())
-	}
-}
-
-impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> ExprToDyn for AddExpr<A, B> {
-	fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
-		let a = A::to_dyn(e, r, s, reduce);
-		let b = B::to_dyn(e, r, s, reduce);
-		Arc::new(DynExpr::AddExpr(a, b))
-	}
-}
-
-#[allow(clippy::inline_always)]
-#[allow(clippy::indexing_slicing)]
-impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> const Expr for MulExpr<A, B> {
-	const CONST: bool = A::CONST && B::CONST;
-	const ELEMWISE_COUNT: usize = A::ELEMWISE_COUNT + B::ELEMWISE_COUNT;
-	const REDUCE_COUNT: usize = A::REDUCE_COUNT + B::REDUCE_COUNT;
-	const SCALAR_COUNT: usize = A::SCALAR_COUNT + B::SCALAR_COUNT;
-	const REDUCE_OP_COUNT: usize = A::REDUCE_OP_COUNT + B::REDUCE_OP_COUNT;
-	const KEY_LEN: usize = 1 + A::KEY_LEN + B::KEY_LEN;
-
-	#[inline(always)]
-	fn key(id: &mut [ExprDiscriminant], i: usize) -> usize {
-		id[i] = ExprDiscriminant::MulExpr;
-		let m = A::key(id, i + 1);
-		assert!(m == i + 1 + A::KEY_LEN);
-		B::key(id, i + 1 + A::KEY_LEN)
-	}
-
-	#[inline(always)]
-	fn elemwise_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't,
-	{
-		let m = self.0.elemwise_tensors(tensors, i);
-		assert!(m == i + A::ELEMWISE_COUNT);
-		self.1.elemwise_tensors(tensors, i + A::ELEMWISE_COUNT)
-	}
-
-	#[inline(always)]
-	fn reduce_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't,
-	{
-		let m = self.0.reduce_tensors(tensors, i);
-		assert!(m == i + A::REDUCE_COUNT);
-		self.1.reduce_tensors(tensors, i + A::REDUCE_COUNT)
-	}
-
-	#[inline(always)]
-	fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
-		let m = self.0.scalars(scalars, i);
-		assert!(m == i + A::SCALAR_COUNT);
-		self.1.scalars(scalars, i + A::SCALAR_COUNT)
-	}
-
-	#[inline(always)]
-	fn a_tensor(&self) -> Option<&Tensor> {
-		self.0.a_tensor().or(self.1.a_tensor())
-	}
-}
-
-impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> ExprToDyn for MulExpr<A, B> {
-	fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
-		let a = A::to_dyn(e, r, s, reduce);
-		let b = B::to_dyn(e, r, s, reduce);
-		Arc::new(DynExpr::MulExpr(a, b))
-	}
-}
+impl_expr_binary!(AddExpr);
+impl_expr_binary!(MulExpr);
+impl_expr_binary!(RecipExpr);
 
 //--------------------------------------------------------------------------------------------------
 
@@ -1024,10 +704,13 @@ pub trait TensorOps {
 	fn max(self) -> ExprWrapper<MaxExpr<Self::E>>;
 
 	fn exp(self) -> ExprWrapper<ExpExpr<Self::E>>;
+	fn abs(self) -> ExprWrapper<AbsExpr<Self::E>>;
+	fn sigmoid(self) -> ExprWrapper<SigmoidExpr<Self::E>>;
 	fn swish(self) -> ExprWrapper<SwishExpr<Self::E>>;
 	fn sqrt(self) -> ExprWrapper<SqrtExpr<Self::E>>;
-	fn recip<B: Wrappable>(self, b: B) -> ExprWrapper<RecipExpr<Self::E, B::E>>;
 	fn ln_clamped(self) -> ExprWrapper<LnClampedExpr<Self::E>>;
+
+	fn recip<B: Wrappable>(self, b: B) -> ExprWrapper<RecipExpr<Self::E, B::E>>;
 }
 
 impl<T: Wrappable> TensorOps for T {
@@ -1052,6 +735,14 @@ impl<T: Wrappable> TensorOps for T {
 		ExprWrapper(ExpExpr(self.wrap().0))
 	}
 
+	fn abs(self) -> ExprWrapper<AbsExpr<T::E>> {
+		ExprWrapper(AbsExpr(self.wrap().0))
+	}
+
+	fn sigmoid(self) -> ExprWrapper<SigmoidExpr<T::E>> {
+		ExprWrapper(SigmoidExpr(self.wrap().0))
+	}
+
 	fn swish(self) -> ExprWrapper<SwishExpr<T::E>> {
 		ExprWrapper(SwishExpr(self.wrap().0))
 	}
@@ -1060,13 +751,12 @@ impl<T: Wrappable> TensorOps for T {
 		ExprWrapper(SqrtExpr(self.wrap().0))
 	}
 
-	fn recip<B: Wrappable>(self, b: B) -> ExprWrapper<RecipExpr<T::E, B::E>> {
-		ExprWrapper(RecipExpr(self.wrap().0, b.wrap().0))
-	}
-
 	fn ln_clamped(self) -> ExprWrapper<LnClampedExpr<T::E>> {
 		ExprWrapper(LnClampedExpr(self.wrap().0))
 	}
-}
 
+	fn recip<B: Wrappable>(self, b: B) -> ExprWrapper<RecipExpr<T::E, B::E>> {
+		ExprWrapper(RecipExpr(self.wrap().0, b.wrap().0))
+	}
+}
 //--------------------------------------------------------------------------------------------------

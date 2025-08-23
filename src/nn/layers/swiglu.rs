@@ -95,8 +95,14 @@ impl BackwardFn for SwiGLUBackwardFn {
 		let d_gate = d_inp.select(-2, 1)?;
 
 		d_lin.assign(gate.swish() * &d_out)?;
-		//kernel::swiglu_d_gate(&d_gate, &lin, &gate, &d_out)?;
-		todo!("need swiglu_d_gate kernel");
+
+		// TODO - this generates a kernel where the `gate` input is repeated 4 times.
+		// This also blocks optimization because in the kernel we cannot assume the inputs
+		// are the same even if they are. And so we end up recalculating the sigmoid and swish.
+		// We really need a way to create variables with intermediate results that can be reused.
+		d_gate.assign(
+			(gate.sigmoid() + gate.swish() - (gate.sigmoid() * gate.swish())) * &lin * &d_out,
+		)?;
 
 		queue.add(inp_backward, d_inp);
 		Ok(())

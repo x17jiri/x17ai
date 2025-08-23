@@ -5,6 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
+use std::hint::cold_path;
 use std::rc::Rc;
 
 pub use device::{DType, Device, HasDType};
@@ -15,11 +16,11 @@ use crate::tensor::device::buffer::{
 };
 use crate::tensor::device::cpu::{CPUDevice, ViewError};
 use crate::tensor::device::executor::ExecutorError;
-use crate::tensor::dim_merger::DimMergerError;
+use crate::tensor::dim_merger::{DimMergerError, DimsDontMatchError, TooManyMergedDimensionsError};
 use crate::tensor::generic::map::dd::ReplaceTailError;
 use crate::tensor::generic::map::{
-	DD, ElementsOverflowError, IncompatibleStridesError, MergeDimsError, NotEnoughDimensionsError,
-	ReshapeLastDimError, SelectError,
+	DD, ElementsOverflowError, IncompatibleStridesError, IndexOutOfBoundsError, MergeDimsError, ND,
+	NotEnoughDimensionsError, ReshapeLastDimError, SelectError,
 };
 use crate::tensor::math::EvaluatesToTensor;
 use crate::{ErrExtra, ErrPack};
@@ -170,6 +171,19 @@ impl Tensor {
 
 		// SAFETY: We created the buffer to be as big as the mapping.
 		Ok(unsafe { Self::new_unchecked(map, buf) })
+	}
+
+	/// Returns float at index [0, 0, ..., 0].
+	pub fn scalar(&self) -> Result<f64, ErrPack<TensorOpError>> {
+		if self.elems() == 0 {
+			cold_path();
+			return Err(IndexOutOfBoundsError.into());
+		}
+		let (mut map, _) = ND::new(&[])?;
+		map.offset = self.map().offset;
+		let buf = self.buf().try_borrow()?;
+		let scalar_tensor = unsafe { generic::Tensor::new_unchecked(map, buf) };
+		Ok(self.vmt().read_float(&scalar_tensor)?)
 	}
 
 	/// Returns the device on which the tensor is allocated.
@@ -332,6 +346,44 @@ impl From<DimMergerError> for ErrPack<TensorOpError> {
 	#[inline(never)]
 	fn from(err: DimMergerError) -> Self {
 		Self { code: err.into(), extra: None }
+	}
+}
+
+impl From<DimsDontMatchError> for TensorOpError {
+	#[cold]
+	#[inline(never)]
+	fn from(_: DimsDontMatchError) -> Self {
+		Self::DimsDontMatch
+	}
+}
+
+impl From<DimsDontMatchError> for ErrPack<TensorOpError> {
+	#[cold]
+	#[inline(never)]
+	fn from(_: DimsDontMatchError) -> Self {
+		Self {
+			code: TensorOpError::DimsDontMatch,
+			extra: None,
+		}
+	}
+}
+
+impl From<TooManyMergedDimensionsError> for TensorOpError {
+	#[cold]
+	#[inline(never)]
+	fn from(_: TooManyMergedDimensionsError) -> Self {
+		Self::TooManyMergedDimensions
+	}
+}
+
+impl From<TooManyMergedDimensionsError> for ErrPack<TensorOpError> {
+	#[cold]
+	#[inline(never)]
+	fn from(_: TooManyMergedDimensionsError) -> Self {
+		Self {
+			code: TensorOpError::TooManyMergedDimensions,
+			extra: None,
+		}
 	}
 }
 
@@ -538,6 +590,15 @@ impl From<ViewError> for ErrPack<TensorOpError> {
 				message: String::new(),
 				nested: Some(Box::new(ErrPack::<ExecutorError>::from(err))),
 			})),
+		}
+	}
+}
+
+impl From<IndexOutOfBoundsError> for ErrPack<TensorOpError> {
+	fn from(_: IndexOutOfBoundsError) -> Self {
+		Self {
+			code: TensorOpError::IndexOutOfBounds,
+			extra: None,
 		}
 	}
 }

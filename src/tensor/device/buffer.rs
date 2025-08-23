@@ -12,7 +12,6 @@ use std::rc::Rc;
 
 use crate::ErrPack;
 use crate::tensor::TensorOpError;
-use crate::tensor::device::NewDeviceBufferError;
 use crate::tensor::device::executor::ExecutorError;
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
 use crate::tensor::generic::buffer::Buffer;
@@ -33,8 +32,7 @@ pub struct KernelElemArg {
 
 #[repr(C)]
 pub struct KernelReduceArg {
-	pub reduction_size: usize,
-	pub stride_bytes: [usize; 2],
+	pub stride_bytes: [usize; 3],
 	pub offset_bytes: usize,
 	pub device_data: *const u8,
 }
@@ -51,6 +49,11 @@ pub struct KernelOutput {
 
 pub type DropBufferFn =
 	unsafe fn(this: NonNull<DeviceBufferVMT>, elems: usize, device_data: *mut u8);
+
+pub type ReadFloatFn = for<'buf> unsafe fn(
+	this: NonNull<DeviceBufferVMT>,
+	src: &generic::Tensor<ND<0>, DeviceBufferRef<'buf>>,
+) -> Result<f64, ErrPack<ExecutorError>>;
 
 pub type ReadBinFn = for<'buf> unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
@@ -92,6 +95,7 @@ pub type RunKernelFn = unsafe fn(
 	elemwise_args: *const KernelElemArg,
 	reduce_args: *const KernelReduceArg,
 	scalar_args: *const f64,
+	reduction_size: usize,
 ) -> Result<(), ErrPack<ExecutorError>>;
 
 pub struct DeviceBufferVMT {
@@ -101,6 +105,7 @@ pub struct DeviceBufferVMT {
 	kernel_runner: Rc<KernelRunner>,
 
 	drop_buffer: DropBufferFn,
+	read_float: ReadFloatFn,
 	read_bin: ReadBinFn,
 	write_bin: WriteBinFn,
 	randn_clamped: RandnClampedFn,
@@ -122,6 +127,7 @@ impl DeviceBufferVMT {
 		kernel_runner: Rc<KernelRunner>,
 
 		drop_buffer: DropBufferFn,
+		read_float: ReadFloatFn,
 		read_bin: ReadBinFn,
 		write_bin: WriteBinFn,
 		randn_clamped: RandnClampedFn,
@@ -136,6 +142,7 @@ impl DeviceBufferVMT {
 			kernel_runner,
 
 			drop_buffer,
+			read_float,
 			read_bin,
 			write_bin,
 			randn_clamped,
@@ -177,6 +184,14 @@ impl DeviceBufferVMT {
 	#[inline]
 	pub fn kernel_runner(&self) -> &KernelRunner {
 		&self.kernel_runner
+	}
+
+	#[inline]
+	pub fn read_float<'buf>(
+		&self,
+		src: &generic::Tensor<ND<0>, DeviceBufferRef<'buf>>,
+	) -> Result<f64, ErrPack<ExecutorError>> {
+		unsafe { (self.read_float)(self.into(), src) }
 	}
 
 	#[inline]
@@ -235,9 +250,18 @@ impl DeviceBufferVMT {
 		elemwise_args: *const KernelElemArg,
 		reduce_args: *const KernelReduceArg,
 		scalar_args: *const f64,
+		reduction_size: usize,
 	) -> Result<(), ErrPack<ExecutorError>> {
 		unsafe {
-			(self.run_kernel)(self.into(), kernel_data, o, elemwise_args, reduce_args, scalar_args)
+			(self.run_kernel)(
+				self.into(),
+				kernel_data,
+				o,
+				elemwise_args,
+				reduce_args,
+				scalar_args,
+				reduction_size,
+			)
 		}
 	}
 }

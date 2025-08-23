@@ -22,14 +22,51 @@ impl<const N: usize> MergedDim<N> {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct DimsDontMatchError;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct TooManyMergedDimensionsError;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum DimMergerError {
 	DimsDontMatch,
 	TooManyMergedDimensions,
 }
 
+impl From<DimsDontMatchError> for DimMergerError {
+	fn from(_: DimsDontMatchError) -> Self {
+		Self::DimsDontMatch
+	}
+}
+
+impl From<TooManyMergedDimensionsError> for DimMergerError {
+	fn from(_: TooManyMergedDimensionsError) -> Self {
+		Self::TooManyMergedDimensions
+	}
+}
+
 pub struct DimMerger<const N: usize>;
 
 impl<const N: usize> DimMerger<N> {
+	/// Finds common size and resets stride to 0 for broadcasted inputs
+	///
+	/// If there are no inputs (N == 0), this function always returns size = 1.
+	pub fn merge_single_dim(dim: [SizeAndStride; N]) -> Result<MergedDim<N>, DimsDontMatchError> {
+		let size = dim.iter().fold(1, |size, inp| if size == 1 { inp.size } else { size });
+		let strides = dim.try_map(|inp| {
+			if inp.size == size {
+				Ok(inp.stride)
+			} else {
+				if inp.size != 1 {
+					cold_path();
+					return Err(DimsDontMatchError);
+				}
+				Ok(0)
+			}
+		})?;
+		Ok(MergedDim { size, strides })
+	}
+
 	#[inline(never)]
 	fn merge_impl(
 		inputs: [&[SizeAndStride]; N],
@@ -62,19 +99,7 @@ impl<const N: usize> DimMerger<N> {
 			});
 
 			// Find common size and reset stride to 0 for broadcasted inputs
-			let size = next_dim.iter().fold(1, |size, inp| if size == 1 { inp.size } else { size });
-			let strides = next_dim.try_map(|inp| {
-				if inp.size == size {
-					Ok(inp.stride)
-				} else {
-					if inp.size != 1 {
-						cold_path();
-						return Err(DimMergerError::DimsDontMatch);
-					}
-					Ok(0)
-				}
-			})?;
-			let next_dim = MergedDim { size, strides };
+			let next_dim = Self::merge_single_dim(next_dim)?;
 
 			if next_dim.size > 1 {
 				// Can we extend previous dimension?

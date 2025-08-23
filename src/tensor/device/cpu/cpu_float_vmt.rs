@@ -123,6 +123,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 					dtype,
 					kernel_runner,
 					CPUDevice::drop_buffer,
+					Self::read_float,
 					Self::read_bin,
 					Self::write_bin,
 					Self::randn_clamped,
@@ -283,6 +284,14 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 		}
 	}
 
+	// TODO - Extract this function into `DynamicEvalExpr` struct that will keep
+	// elemwise_args, reduce_args, scalar_args, reduction_size.
+	// If we don't have to pass these around, all the recursive calls will be just one line
+	// and this function will be much shorter.
+	//
+	// This way we will get rid of both clippy warnings.
+	#[allow(clippy::too_many_lines)]
+	#[allow(clippy::too_many_arguments)]
 	pub unsafe fn eval_expr(
 		expr: &DynExpr,
 		j: usize,
@@ -291,6 +300,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 		elemwise_args: &[KernelElemArg],
 		reduce_args: &[KernelReduceArg],
 		scalar_args: &[f64],
+		reduction_size: usize,
 	) -> f64 {
 		unsafe {
 			match expr {
@@ -310,7 +320,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 				},
 				DynExpr::ReduceTensorArg(index) => {
 					let reduce_arg = &reduce_args[*index];
-					assert!(k < reduce_arg.reduction_size);
+					assert!(k < reduction_size);
 					reduce_arg
 						.device_data
 						.add(
@@ -327,67 +337,199 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 
 				DynExpr::SumExpr(a) => {
 					assert!(!reduce_args.is_empty());
-					let reduction_size = reduce_args[0].reduction_size;
-					assert!(reduce_args.iter().all(|a| a.reduction_size == reduction_size));
-
 					let a = a.as_ref();
 					(0..reduction_size)
 						.map(|k| {
-							Self::eval_expr(a, j, i, k, elemwise_args, reduce_args, scalar_args)
+							Self::eval_expr(
+								a,
+								j,
+								i,
+								k,
+								elemwise_args,
+								reduce_args,
+								scalar_args,
+								reduction_size,
+							)
 						})
 						.sum()
 				},
 				DynExpr::MaxExpr(a) => {
 					assert!(!reduce_args.is_empty());
-					let reduction_size = reduce_args[0].reduction_size;
-					assert!(reduce_args.iter().all(|a| a.reduction_size == reduction_size));
-
 					let a = a.as_ref();
 					(0..reduction_size)
 						.map(|k| {
-							Self::eval_expr(a, j, i, k, elemwise_args, reduce_args, scalar_args)
+							Self::eval_expr(
+								a,
+								j,
+								i,
+								k,
+								elemwise_args,
+								reduce_args,
+								scalar_args,
+								reduction_size,
+							)
 						})
 						.fold(f64::NEG_INFINITY, f64::max)
 				},
 
 				DynExpr::ExpExpr(a) => {
-					let a = Self::eval_expr(a, j, i, k, elemwise_args, reduce_args, scalar_args);
+					let a = Self::eval_expr(
+						a,
+						j,
+						i,
+						k,
+						elemwise_args,
+						reduce_args,
+						scalar_args,
+						reduction_size,
+					);
 					a.exp()
 				},
+				DynExpr::AbsExpr(a) => {
+					let a = Self::eval_expr(
+						a,
+						j,
+						i,
+						k,
+						elemwise_args,
+						reduce_args,
+						scalar_args,
+						reduction_size,
+					);
+					a.abs()
+				},
 				DynExpr::SigmoidExpr(a) => {
-					let a = Self::eval_expr(a, j, i, k, elemwise_args, reduce_args, scalar_args);
+					let a = Self::eval_expr(
+						a,
+						j,
+						i,
+						k,
+						elemwise_args,
+						reduce_args,
+						scalar_args,
+						reduction_size,
+					);
 					math::sigmoid(a)
 				},
 				DynExpr::SwishExpr(a) => {
-					let a = Self::eval_expr(a, j, i, k, elemwise_args, reduce_args, scalar_args);
+					let a = Self::eval_expr(
+						a,
+						j,
+						i,
+						k,
+						elemwise_args,
+						reduce_args,
+						scalar_args,
+						reduction_size,
+					);
 					math::swish(a)
 				},
 				DynExpr::SqrtExpr(a) => {
-					let a = Self::eval_expr(a, j, i, k, elemwise_args, reduce_args, scalar_args);
+					let a = Self::eval_expr(
+						a,
+						j,
+						i,
+						k,
+						elemwise_args,
+						reduce_args,
+						scalar_args,
+						reduction_size,
+					);
 					a.sqrt()
 				},
-				DynExpr::RecipExpr(a, eps) => {
-					let a = Self::eval_expr(a, j, i, k, elemwise_args, reduce_args, scalar_args);
-					let eps =
-						Self::eval_expr(eps, j, i, k, elemwise_args, reduce_args, scalar_args);
-					1.0 / (a + eps)
-				},
 				DynExpr::LnClampedExpr(a) => {
-					let a = Self::eval_expr(a, j, i, k, elemwise_args, reduce_args, scalar_args);
+					let a = Self::eval_expr(
+						a,
+						j,
+						i,
+						k,
+						elemwise_args,
+						reduce_args,
+						scalar_args,
+						reduction_size,
+					);
 					a.ln().max(-1000.0)
 				},
 				DynExpr::AddExpr(a, b) => {
-					let a = Self::eval_expr(a, j, i, k, elemwise_args, reduce_args, scalar_args);
-					let b = Self::eval_expr(b, j, i, k, elemwise_args, reduce_args, scalar_args);
+					let a = Self::eval_expr(
+						a,
+						j,
+						i,
+						k,
+						elemwise_args,
+						reduce_args,
+						scalar_args,
+						reduction_size,
+					);
+					let b = Self::eval_expr(
+						b,
+						j,
+						i,
+						k,
+						elemwise_args,
+						reduce_args,
+						scalar_args,
+						reduction_size,
+					);
 					a + b
 				},
 				DynExpr::MulExpr(a, b) => {
-					let a = Self::eval_expr(a, j, i, k, elemwise_args, reduce_args, scalar_args);
-					let b = Self::eval_expr(b, j, i, k, elemwise_args, reduce_args, scalar_args);
+					let a = Self::eval_expr(
+						a,
+						j,
+						i,
+						k,
+						elemwise_args,
+						reduce_args,
+						scalar_args,
+						reduction_size,
+					);
+					let b = Self::eval_expr(
+						b,
+						j,
+						i,
+						k,
+						elemwise_args,
+						reduce_args,
+						scalar_args,
+						reduction_size,
+					);
 					a * b
+				},
+				DynExpr::RecipExpr(a, eps) => {
+					let a = Self::eval_expr(
+						a,
+						j,
+						i,
+						k,
+						elemwise_args,
+						reduce_args,
+						scalar_args,
+						reduction_size,
+					);
+					let eps = Self::eval_expr(
+						eps,
+						j,
+						i,
+						k,
+						elemwise_args,
+						reduce_args,
+						scalar_args,
+						reduction_size,
+					);
+					1.0 / (a + eps)
 				},
 			}
 		}
+	}
+
+	fn read_float<'buf>(
+		_this: NonNull<DeviceBufferVMT>,
+		src: &generic::Tensor<ND<0>, DeviceBufferRef<'buf>>,
+	) -> Result<f64, ErrPack<ExecutorError>> {
+		src.ensure_safe()?;
+		let view = src.view::<T>()?;
+		Ok(view[[]].to_f64())
 	}
 
 	fn read_bin<'buf>(
@@ -588,6 +730,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 		elemwise_args: *const KernelElemArg,
 		reduce_args: *const KernelReduceArg,
 		scalar_args: *const f64,
+		reduction_size: usize,
 	) -> Result<(), ErrPack<ExecutorError>> {
 		let expr = kernel_data.expr.as_ref();
 		unsafe {
@@ -610,6 +753,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 						elemwise_args,
 						reduce_args,
 						scalar_args,
+						reduction_size,
 					)));
 				}
 			}

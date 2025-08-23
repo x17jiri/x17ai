@@ -417,11 +417,11 @@ where
 	}
 }
 
-impl<T> IndexToOffset<1> for &T
+impl<const N: usize, T> IndexToOffset<N> for &T
 where
-	T: IndexToOffset<1>,
+	T: IndexToOffset<N>,
 {
-	fn index_to_offset(&self, index: [usize; 1]) -> Result<usize, IndexOutOfBoundsError> {
+	fn index_to_offset(&self, index: [usize; N]) -> Result<usize, IndexOutOfBoundsError> {
 		(*self).index_to_offset(index)
 	}
 }

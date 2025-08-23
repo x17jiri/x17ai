@@ -9,6 +9,7 @@ use std::hint::cold_path;
 
 use crate::ErrPack;
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut, check_borrows};
+use crate::tensor::device::kernel::expr::TensorOps;
 use crate::tensor::dim_merger::{DimMerger, MergedDim};
 use crate::tensor::generic::map::{ND, NotEnoughDimensionsError, SizeAndStride};
 use crate::tensor::{Tensor, TensorOpError, generic};
@@ -129,19 +130,19 @@ pub fn sum_all(tensor: &Tensor) -> Result<f64, ErrPack<TensorOpError>> {
 	})?;
 	Ok(sum)
 }
-
+*/
 //--------------------------------------------------------------------------------------------------
 
 pub fn approx_eq(a: &Tensor, b: &Tensor, eps: f64) -> Result<bool, ErrPack<TensorOpError>> {
-	let executor = a.executor();
-	let mut result = true;
-	ElemWise::new([], [a, b])?.run(|[], [a, b]| {
-		result &= executor.approx_eq(a, b, eps)?;
-		Ok(())
-	})?;
-	Ok(result)
+	// TODO - `a` may be broadcasted in which case the `diff` shape is wrong
+	let diff = a.new_empty_like()?;
+	diff.assign((a - b).abs())?;
+	let diff = diff.merge_all_dims()?;
+	let max = a.new_empty(&[1], diff.dtype())?;
+	max.assign(diff.max())?;
+	Ok(max.scalar()? <= eps)
 }
-*/
+
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]

@@ -231,13 +231,14 @@ impl KernelRunner {
 
 		let merged = DimMerger::merge::<2>(all_dims)?;
 
+		let reduce_args_top_dim = DimMerger::merge_single_dim(reduce_args_top_dim)?;
 		let reduce_inp: [KernelReduceArg; R] = std::array::from_fn(|i| {
 			let arg = reduce_args[i];
 			KernelReduceArg {
-				reduction_size: reduce_args_top_dim[i].size,
 				stride_bytes: [
 					merged[0].strides[1 + E + i] * dtype_bytes,
 					merged[1].strides[1 + E + i] * dtype_bytes,
+					reduce_args_top_dim.strides[i] * dtype_bytes,
 				],
 				offset_bytes: arg.map().offset * dtype_bytes,
 				device_data: arg.buf().device_data(),
@@ -301,6 +302,7 @@ impl KernelRunner {
 				inp.as_ptr(),
 				reduce_inp.as_ptr(),
 				scalar_args.as_ptr(),
+				reduce_args_top_dim.size,
 			)?;
 
 			std::mem::drop(out_borrow);
