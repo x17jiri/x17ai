@@ -15,11 +15,10 @@ use crate::tensor::device::buffer::{
 	KernelReduceArg,
 };
 use crate::tensor::device::cpu::CPUDevice;
-use crate::tensor::device::cpu::zip::{zip_elems, zip_vecs};
 use crate::tensor::device::executor::ExecutorError;
 use crate::tensor::device::kernel::expr::DynExpr;
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
-use crate::tensor::generic::map::{Map, ND, Select};
+use crate::tensor::generic::map::{IndexToOffset, Map, ND, Select};
 use crate::tensor::{HasDType, generic};
 
 use super::math::{self, FromToF64};
@@ -126,7 +125,6 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 					Self::read_float,
 					Self::read_bin,
 					Self::write_bin,
-					Self::randn_clamped,
 					Self::mm,
 					Self::attention,
 					Self::run_kernel,
@@ -174,20 +172,6 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 			return Err(ExecutorError::not_contiguous());
 		}
 		Ok(ContiguousOutput { tensor: tensor.view_mut()? })
-	}
-
-	pub fn nullary<'buf>(
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		mut f: impl FnMut(&mut T),
-	) -> Result<(), ErrPack<ExecutorError>>
-	where
-		T: 'static,
-	{
-		let o = Self::view_contiguous_mut(o)?;
-		unsafe {
-			zip_elems([o], [], [], |[o], [], []| f(o));
-		}
-		Ok(())
 	}
 
 	pub fn attention_tile<const FIRST: bool>(
@@ -293,6 +277,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 	#[allow(clippy::too_many_lines)]
 	#[allow(clippy::too_many_arguments)]
 	pub unsafe fn eval_expr(
+		&self,
 		expr: &DynExpr,
 		j: usize,
 		i: usize,
@@ -327,7 +312,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 							reduce_arg.offset_bytes
 								+ j * reduce_arg.stride_bytes[0]
 								+ i * reduce_arg.stride_bytes[1]
-								+ k * std::mem::size_of::<T>(),
+								+ k * reduce_arg.stride_bytes[2],
 						)
 						.cast::<T>()
 						.read()
@@ -335,30 +320,37 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 				},
 				DynExpr::ScalarArg(index) => scalar_args[*index],
 
+				DynExpr::RandnExpr() => {
+					let mut rng = self.device().rng.borrow_mut();
+					let val = rng.get_normal_clamped();
+					val
+				},
+
 				DynExpr::SumExpr(a) => {
 					assert!(!reduce_args.is_empty());
 					let a = a.as_ref();
-					(0..reduction_size)
-						.map(|k| {
-							Self::eval_expr(
-								a,
-								j,
-								i,
-								k,
-								elemwise_args,
-								reduce_args,
-								scalar_args,
-								reduction_size,
-							)
-						})
-						.sum()
+					let mut sum = 0.0;
+					for k in 0..reduction_size {
+						let value = self.eval_expr(
+							a,
+							j,
+							i,
+							k,
+							elemwise_args,
+							reduce_args,
+							scalar_args,
+							reduction_size,
+						);
+						sum += value;
+					}
+					sum
 				},
 				DynExpr::MaxExpr(a) => {
 					assert!(!reduce_args.is_empty());
 					let a = a.as_ref();
 					(0..reduction_size)
 						.map(|k| {
-							Self::eval_expr(
+							self.eval_expr(
 								a,
 								j,
 								i,
@@ -373,7 +365,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 				},
 
 				DynExpr::ExpExpr(a) => {
-					let a = Self::eval_expr(
+					let a = self.eval_expr(
 						a,
 						j,
 						i,
@@ -386,7 +378,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 					a.exp()
 				},
 				DynExpr::AbsExpr(a) => {
-					let a = Self::eval_expr(
+					let a = self.eval_expr(
 						a,
 						j,
 						i,
@@ -399,7 +391,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 					a.abs()
 				},
 				DynExpr::SigmoidExpr(a) => {
-					let a = Self::eval_expr(
+					let a = self.eval_expr(
 						a,
 						j,
 						i,
@@ -412,7 +404,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 					math::sigmoid(a)
 				},
 				DynExpr::SwishExpr(a) => {
-					let a = Self::eval_expr(
+					let a = self.eval_expr(
 						a,
 						j,
 						i,
@@ -425,7 +417,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 					math::swish(a)
 				},
 				DynExpr::SqrtExpr(a) => {
-					let a = Self::eval_expr(
+					let a = self.eval_expr(
 						a,
 						j,
 						i,
@@ -438,7 +430,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 					a.sqrt()
 				},
 				DynExpr::LnClampedExpr(a) => {
-					let a = Self::eval_expr(
+					let a = self.eval_expr(
 						a,
 						j,
 						i,
@@ -451,7 +443,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 					a.ln().max(-1000.0)
 				},
 				DynExpr::AddExpr(a, b) => {
-					let a = Self::eval_expr(
+					let a = self.eval_expr(
 						a,
 						j,
 						i,
@@ -461,7 +453,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 						scalar_args,
 						reduction_size,
 					);
-					let b = Self::eval_expr(
+					let b = self.eval_expr(
 						b,
 						j,
 						i,
@@ -474,7 +466,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 					a + b
 				},
 				DynExpr::MulExpr(a, b) => {
-					let a = Self::eval_expr(
+					let a = self.eval_expr(
 						a,
 						j,
 						i,
@@ -484,7 +476,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 						scalar_args,
 						reduction_size,
 					);
-					let b = Self::eval_expr(
+					let b = self.eval_expr(
 						b,
 						j,
 						i,
@@ -497,7 +489,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 					a * b
 				},
 				DynExpr::RecipExpr(a, eps) => {
-					let a = Self::eval_expr(
+					let a = self.eval_expr(
 						a,
 						j,
 						i,
@@ -507,7 +499,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 						scalar_args,
 						reduction_size,
 					);
-					let eps = Self::eval_expr(
+					let eps = self.eval_expr(
 						eps,
 						j,
 						i,
@@ -537,35 +529,25 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 		dst: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 		src: &mut dyn std::io::Read,
 	) -> Result<(), ErrPack<ExecutorError>> {
-		let mut result = Ok(());
-		let dst = Self::view_contiguous_mut(dst)?;
-		unsafe {
-			zip_vecs([dst], [], |[dst], []| {
-				if result.is_ok() {
-					let ptr = dst.as_mut_ptr().cast();
-					let bytes = std::mem::size_of_val(dst);
-					let slice = std::slice::from_raw_parts_mut(ptr, bytes);
-					result = src.read_exact(slice);
-
-					// We always store values as little-endian,
-					// so conversion is needed for big-endian targets
-					#[cfg(target_endian = "big")]
-					{
-						todo!(
-							"Reading from binary file on big-endian targets is not implemented yet"
-						);
-					}
-				}
-			});
+		let (map, buf) = Self::view_contiguous_mut(dst)?.tensor.into_parts();
+		for j in 0..map.dims[0].size {
+			let b = map.index_to_offset([j, 0]).unwrap();
+			let e = b + map.dims[1].size;
+			let buf = &mut buf[b..e];
+			let byte_slice = unsafe {
+				std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast::<u8>(), size_of_val(buf))
+			};
+			src.read_exact(byte_slice)?;
 		}
-		result.map_err(Into::into)
+		Ok(())
 	}
 
 	fn write_bin<'buf>(
 		_this: NonNull<DeviceBufferVMT>,
-		src: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		dst: &mut dyn std::io::Write,
+		_src: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		_dst: &mut dyn std::io::Write,
 	) -> Result<(), ErrPack<ExecutorError>> {
+		/*
 		#[cfg(target_endian = "big")]
 		{
 			todo!("Saving to binary file on big-endian targets is not implemented yet");
@@ -583,83 +565,9 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 			});
 		}
 		result.map_err(Into::into)
+		*/
+		todo!("Saving to binary file is not implemented yet");
 	}
-
-	fn randn_clamped<'buf>(
-		this: NonNull<DeviceBufferVMT>,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		let this = unsafe { Self::cast_this(this) };
-		let device = this.device();
-
-		let mut rng = device.rng.borrow_mut();
-		Self::nullary(o, |o| *o = T::from_f64(rng.get_normal_clamped()))
-	}
-
-	/*	fn sum_all<'buf>(
-		this: NonNull<DeviceBufferVMT>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<f64, ErrPack<ExecutorError>> {
-		// TODO - this could handle broadcasted tensors as well
-		let a = Self::view_contiguous(a)?;
-		let mut sum = 0.0;
-		unsafe {
-			zip_elems([], [a], [], |[], [a], []| {
-				sum += a.to_f64();
-			});
-		}
-		Ok(sum)
-	}
-
-	fn approx_eq<'buf>(
-		&self,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		eps: f64,
-	) -> Result<bool, ErrPack<ExecutorError>> {
-		// TODO - this could handle broadcasted tensors as well
-		ensure_same_shape([], [a, b])?;
-		let a = Self::view_contiguous(a)?;
-		let b = Self::view_contiguous(b)?;
-		let mut result = true;
-		unsafe {
-			zip_elems([], [a, b], [], |[], [a, b], []| {
-				result &= math::approx_eq(a.to_f64(), b.to_f64(), eps);
-			});
-		}
-		Ok(result)
-	}
-
-	fn softmax<'buf>(
-		&self,
-		out: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		inp: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		ensure_same_shape([out], [inp])?;
-		let out = Self::view_contiguous_mut(out)?;
-		let inp = Self::view_contiguous(inp)?;
-		unsafe {
-			zip_vecs([out], [inp], |[out], [inp]| {
-				let (_max, sum) = math::softmax_part1(inp, out);
-				math::softmax_part2_(sum, out);
-			});
-		}
-		Ok(())
-	}
-
-	fn softmax_<'buf>(
-		&self,
-		t: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		let t = Self::view_contiguous_mut(t)?;
-		unsafe {
-			zip_vecs([t], [], |[t], []| {
-				let (_max, sum) = math::softmax_part1_(t);
-				math::softmax_part2_(sum, t);
-			});
-		}
-		Ok(())
-	}*/
 
 	#[allow(clippy::panic_in_result_fn)]
 	#[allow(clippy::many_single_char_names)]
@@ -724,7 +632,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 	}
 
 	unsafe fn run_kernel(
-		_this: NonNull<DeviceBufferVMT>,
+		this: NonNull<DeviceBufferVMT>,
 		kernel_data: &KernelData,
 		o: *const KernelOutput,
 		elemwise_args: *const KernelElemArg,
@@ -732,6 +640,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 		scalar_args: *const f64,
 		reduction_size: usize,
 	) -> Result<(), ErrPack<ExecutorError>> {
+		let this = unsafe { Self::cast_this(this) };
 		let expr = kernel_data.expr.as_ref();
 		unsafe {
 			let elemwise_args =
@@ -745,7 +654,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 						.device_data
 						.add(o.offset_bytes + j * o.stride_bytes[0] + i * o.stride_bytes[1])
 						.cast::<T>();
-					o.write(T::from_f64(Self::eval_expr(
+					o.write(T::from_f64(this.eval_expr(
 						expr,
 						j,
 						i,

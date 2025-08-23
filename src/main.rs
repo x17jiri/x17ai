@@ -163,6 +163,7 @@ use x17ai::nn::layers::linear::Linear;
 use x17ai::nn::layers::softmax::{Softmax, SoftmaxGradientMode};
 use x17ai::nn::layers::{CrossEntropy, Layer};
 use x17ai::tensor::device::cpu::CPUDevice;
+use x17ai::tensor::device::kernel::expr;
 use x17ai::tensor::generic::Tensor;
 use x17ai::tensor::generic::map::ND;
 use x17ai::tensor::math::{col, mat, row};
@@ -247,7 +248,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let loss_layer = CrossEntropy::new(2);
 
 	let input = Tensor::new_empty_on(&[2, 3], f32::dtype, dev.clone())?;
-	input.assign(tensor::math::randn_clamped())?;
+	input.assign(expr::randn())?;
 
 	let expected = lit.new_2d(&[[1.0, 0.0], [0.0, 1.0]])?;
 

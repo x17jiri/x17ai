@@ -5,7 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
-use std::cell::{Cell, UnsafeCell};
+use std::cell::Cell;
 use std::hint::cold_path;
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -67,11 +67,6 @@ pub type WriteBinFn = for<'buf> unsafe fn(
 	dst: &mut dyn std::io::Write,
 ) -> Result<(), ErrPack<ExecutorError>>;
 
-pub type RandnClampedFn = for<'buf> unsafe fn(
-	this: NonNull<DeviceBufferVMT>,
-	o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-) -> Result<(), ErrPack<ExecutorError>>;
-
 pub type MMFn = for<'buf> unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
 	o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
@@ -108,7 +103,6 @@ pub struct DeviceBufferVMT {
 	read_float: ReadFloatFn,
 	read_bin: ReadBinFn,
 	write_bin: WriteBinFn,
-	randn_clamped: RandnClampedFn,
 	mm: MMFn,
 	attention: AttentionFn,
 	run_kernel: RunKernelFn,
@@ -130,7 +124,6 @@ impl DeviceBufferVMT {
 		read_float: ReadFloatFn,
 		read_bin: ReadBinFn,
 		write_bin: WriteBinFn,
-		randn_clamped: RandnClampedFn,
 		mm: MMFn,
 		attention: AttentionFn,
 		run_kernel: RunKernelFn,
@@ -145,7 +138,6 @@ impl DeviceBufferVMT {
 			read_float,
 			read_bin,
 			write_bin,
-			randn_clamped,
 			mm,
 			attention,
 			run_kernel,
@@ -210,14 +202,6 @@ impl DeviceBufferVMT {
 		dst: &mut dyn std::io::Write,
 	) -> Result<(), ErrPack<ExecutorError>> {
 		unsafe { (self.write_bin)(self.into(), src, dst) }
-	}
-
-	#[inline]
-	pub fn randn_clamped<'buf>(
-		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		unsafe { (self.randn_clamped)(self.into(), o) }
 	}
 
 	#[inline]

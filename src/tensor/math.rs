@@ -10,10 +10,9 @@ use std::hint::cold_path;
 use crate::ErrPack;
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut, check_borrows};
 use crate::tensor::device::kernel::expr::TensorOps;
-use crate::tensor::dim_merger::{DimMerger, MergedDim};
+use crate::tensor::dim_merger::DimMerger;
 use crate::tensor::generic::map::{ND, NotEnoughDimensionsError, SizeAndStride};
 use crate::tensor::{Tensor, TensorOpError, generic};
-use crate::util::array;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -31,106 +30,6 @@ pub trait EvaluatesToColMatrix {
 	fn eval_to_col_matrix(self, to: &ColMatrix) -> Result<(), ErrPack<TensorOpError>>;
 }
 
-//--------------------------------------------------------------------------------------------------
-
-// TODO - disable broadcast for M tensors.
-
-pub struct ElemWise<'a, const M: usize, const C: usize>
-where
-	[(); M + C]:,
-{
-	m: [&'a Tensor; M],
-	c: [&'a Tensor; C],
-	dims: [MergedDim<{ M + C }>; 2],
-}
-
-impl<'a, const M: usize, const C: usize> ElemWise<'a, M, C>
-where
-	[(); M + C]:,
-{
-	pub fn new(m: [&'a Tensor; M], c: [&'a Tensor; C]) -> Result<Self, ErrPack<TensorOpError>> {
-		let m_dims = m.map(|t| t.map().dims.as_slice());
-		let c_dims = c.map(|t| t.map().dims.as_slice());
-		let dims = DimMerger::merge(array::concat_arrays(m_dims, c_dims))?;
-		Ok(Self { m, c, dims })
-	}
-
-	/// Note that we use 'K' instead of 'C' and it is allowed that 'K <= C'.
-	///
-	/// So we don't have to use all the `c` tensors processed during `::new()`.
-	pub fn run<const O: usize, const K: usize>(
-		&self,
-		mut f: impl FnMut(
-			&mut [generic::Tensor<ND<2>, DeviceBufferRefMut<'a>>; O],
-			&[generic::Tensor<ND<2>, DeviceBufferRef<'a>>; K],
-		) -> Result<(), ErrPack<TensorOpError>>,
-	) -> Result<(), ErrPack<TensorOpError>>
-	where
-		[(); M - O]:,
-		[(); C - K]:,
-	{
-		unsafe {
-			let mut c_fail = 0;
-			let c_tensors = std::array::from_fn(|i| {
-				generic::Tensor::new_unchecked(
-					ND {
-						dims: [self.dims[0].get(M + i), self.dims[1].get(M + i)],
-						offset: self.c[i].map().offset,
-					},
-					DeviceBufferRef::new_unsafe(self.c[i].buf().as_ref(), &mut c_fail),
-				)
-			});
-			let mut m_fail = 0;
-			let mut m_tensors = std::array::from_fn(|i| {
-				generic::Tensor::new_unchecked(
-					ND {
-						dims: [self.dims[0].get(i), self.dims[1].get(i)],
-						offset: self.m[i].map().offset,
-					},
-					DeviceBufferRefMut::new_unsafe(self.m[i].buf().as_ref(), &mut m_fail),
-				)
-			});
-			check_borrows(c_fail, m_fail)?;
-
-			f(&mut m_tensors, &c_tensors)
-		}
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
-pub struct RandnClampedExpr();
-
-pub fn randn_clamped() -> RandnClampedExpr {
-	RandnClampedExpr()
-}
-
-impl EvaluatesToTensor for RandnClampedExpr {
-	#[inline(never)]
-	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
-		let vmt = to.vmt();
-		ElemWise::new([to], [])?.run(|[to], []| {
-			vmt.randn_clamped(to)?;
-			Ok(())
-		})
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-/*
-pub fn sum_all(tensor: &Tensor) -> Result<f64, ErrPack<TensorOpError>> {
-	let vmt = tensor.vmt();
-	let mut sum = 0.0;
-	// TODO - `__elem_wise()` disables broadcast for tensor at position 0.
-	// In the case of a `sum_all()`, it would make sense to enable it,
-	// but it would require some refactoring. Not sure if it is worth it.
-	ElemWise::new([], [tensor])?.run(|[], [a]| {
-		sum += vmt.sum_all(a)?;
-		Ok(())
-	})?;
-	Ok(sum)
-}
-*/
 //--------------------------------------------------------------------------------------------------
 
 pub fn approx_eq(a: &Tensor, b: &Tensor, eps: f64) -> Result<bool, ErrPack<TensorOpError>> {

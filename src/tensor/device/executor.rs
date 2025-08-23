@@ -7,7 +7,6 @@
 
 use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
 use crate::tensor::device::cpu::ViewError;
-use crate::tensor::device::kernel::runner::KernelData;
 use crate::tensor::generic::map::ND;
 use crate::tensor::generic::{self, TensorUnsafeError};
 use crate::{ErrExtra, ErrPack};

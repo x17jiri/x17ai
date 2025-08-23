@@ -24,6 +24,8 @@ pub enum ExprDiscriminant {
 	SumExpr,
 	MaxExpr,
 
+	RandnExpr,
+
 	ExpExpr,
 	AbsExpr,
 	SigmoidExpr,
@@ -47,6 +49,8 @@ pub enum DynExpr {
 
 	SumExpr(Arc<DynExpr>),
 	MaxExpr(Arc<DynExpr>),
+
+	RandnExpr(),
 
 	ExpExpr(Arc<DynExpr>),
 	AbsExpr(Arc<DynExpr>),
@@ -93,6 +97,8 @@ pub struct Scalar(pub f64);
 
 pub struct SumExpr<A: Expr + ExprToDyn>(pub A);
 pub struct MaxExpr<A: Expr + ExprToDyn>(pub A);
+
+pub struct RandnExpr();
 
 pub struct ExpExpr<A: Expr + ExprToDyn>(pub A);
 pub struct AbsExpr<A: Expr + ExprToDyn>(pub A);
@@ -275,8 +281,71 @@ macro_rules! impl_expr_reduce {
 	};
 }
 
-impl_expr_reduce!(SumExpr);
-impl_expr_reduce!(MaxExpr);
+macro_rules! impl_expr_nullary {
+	($name:ident) => {
+		#[allow(clippy::inline_always)]
+		#[allow(clippy::indexing_slicing)]
+		impl const Expr for $name {
+			const CONST: bool = true;
+			const ELEMWISE_COUNT: usize = 0;
+			const REDUCE_COUNT: usize = 0;
+			const SCALAR_COUNT: usize = 0;
+			const REDUCE_OP_COUNT: usize = 0;
+			const KEY_LEN: usize = 1;
+
+			#[inline(always)]
+			fn key(id: &mut [ExprDiscriminant], i: usize) -> usize {
+				id[i] = ExprDiscriminant::$name;
+				i + 1
+			}
+
+			#[inline(always)]
+			fn elemwise_tensors<'t>(
+				&self,
+				_tensors: &mut [MaybeUninit<&'t Tensor>],
+				i: usize,
+			) -> usize
+			where
+				Self: 't,
+			{
+				i
+			}
+
+			#[inline(always)]
+			fn reduce_tensors<'t>(
+				&self,
+				_tensors: &mut [MaybeUninit<&'t Tensor>],
+				i: usize,
+			) -> usize
+			where
+				Self: 't,
+			{
+				i
+			}
+
+			#[inline(always)]
+			fn scalars(&self, _scalars: &mut [f64], i: usize) -> usize {
+				i
+			}
+
+			#[inline(always)]
+			fn a_tensor(&self) -> Option<&Tensor> {
+				None
+			}
+		}
+
+		impl ExprToDyn for $name {
+			fn to_dyn(
+				_e: &mut usize,
+				_r: &mut usize,
+				_s: &mut usize,
+				_reduce: bool,
+			) -> Arc<DynExpr> {
+				Arc::new(DynExpr::$name())
+			}
+		}
+	};
+}
 
 macro_rules! impl_expr_unary {
 	($name:ident) => {
@@ -334,13 +403,6 @@ macro_rules! impl_expr_unary {
 		}
 	};
 }
-
-impl_expr_unary!(ExpExpr);
-impl_expr_unary!(AbsExpr);
-impl_expr_unary!(SigmoidExpr);
-impl_expr_unary!(SwishExpr);
-impl_expr_unary!(SqrtExpr);
-impl_expr_unary!(LnClampedExpr);
 
 macro_rules! impl_expr_binary {
 	($name:ident) => {
@@ -408,6 +470,18 @@ macro_rules! impl_expr_binary {
 		}
 	};
 }
+
+impl_expr_reduce!(SumExpr);
+impl_expr_reduce!(MaxExpr);
+
+impl_expr_nullary!(RandnExpr);
+
+impl_expr_unary!(ExpExpr);
+impl_expr_unary!(AbsExpr);
+impl_expr_unary!(SigmoidExpr);
+impl_expr_unary!(SwishExpr);
+impl_expr_unary!(SqrtExpr);
+impl_expr_unary!(LnClampedExpr);
 
 impl_expr_binary!(AddExpr);
 impl_expr_binary!(MulExpr);
@@ -695,6 +769,10 @@ impl<A: const Expr + ExprToDyn, E: const Expr + ExprToDyn> std::ops::Mul<ExprWra
 }
 
 //--------------------------------------------------------------------------------------------------
+
+pub fn randn() -> ExprWrapper<RandnExpr> {
+	ExprWrapper(RandnExpr())
+}
 
 pub trait TensorOps {
 	type E: const Expr + ExprToDyn;

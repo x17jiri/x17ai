@@ -13,13 +13,11 @@ use std::rc::Rc;
 
 use crate::tensor::HasDType;
 use crate::tensor::device::buffer::DeviceBufferVMT;
-use crate::tensor::device::kernel::registry::KernelRegistry;
 use crate::tensor::device::kernel::runner::KernelRunner;
 
 pub mod cpu_float_vmt;
 pub mod math;
 pub mod rng;
-pub mod zip;
 
 use self::rng::Rng;
 
