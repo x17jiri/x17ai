@@ -7,7 +7,6 @@
 
 use std::convert::Infallible;
 
-// pub mod rc; TODO
 pub mod array;
 
 pub trait LossyInto<T> {

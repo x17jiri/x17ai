@@ -271,6 +271,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 		let b = lin1.forward(a)?;
 		let c = sf.forward(b)?;
 		let d = lin2.forward(c)?;
+		//println!("d = {}", d.value.borrow()?.view::<f32>()?);
 		let loss_fn = loss_layer.forward_with_target(d, expected.clone())?;
 		let loss = loss_fn.loss()?;
 

@@ -27,17 +27,13 @@ pub struct SizeAndStride {
 
 impl SizeAndStride {
 	/// Returns true if the dimension can be treated as contiguous.
-	///
-	/// Note that dimension size 1 can be treated as both contiguous and broadcasted.
 	pub fn is_contiguous(&self) -> bool {
 		self.size <= 1 || self.stride == 1
 	}
 
 	/// Returns true if the dimension is broadcasted.
-	///
-	/// Note that dimension size 1 can be treated as both contiguous and broadcasted.
 	pub fn is_broadcasted(&self) -> bool {
-		self.size <= 1 || self.stride < 1
+		self.size > 1 && self.stride == 0
 	}
 }
 
@@ -51,7 +47,6 @@ pub trait Map: Clone {
 	fn size(&self, dim: usize) -> usize;
 	fn elems(&self) -> usize;
 	fn span(&self) -> std::ops::Range<usize>;
-	fn is_contiguous(&self) -> bool;
 }
 
 pub trait MergeDims<const M: usize> {
@@ -350,10 +345,6 @@ impl<'a, T: Map> Map for &'a T {
 
 	fn span(&self) -> std::ops::Range<usize> {
 		(*self).span()
-	}
-
-	fn is_contiguous(&self) -> bool {
-		(*self).is_contiguous()
 	}
 }
 

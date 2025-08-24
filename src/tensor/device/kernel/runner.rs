@@ -215,9 +215,7 @@ impl KernelRunner {
 
 			if output_top_dim.size != 1 || elem_args_top_dim.iter().any(|dim| dim.size != 1) {
 				cold_path();
-				// we would have to broadcast the result of the reduction
-				// TODO - maybe use a different error
-				return Err(TensorOpError::invalid_shape());
+				return Err(TensorOpError::cannot_broadcast_output());
 			}
 			if reduce_args_top_dim.iter().any(|vec| vec.stride != 1) {
 				cold_path();
@@ -256,6 +254,11 @@ impl KernelRunner {
 				device_data: arg.buf().device_data(),
 			}
 		});
+
+		if merged.iter().any(|m| m.get(0).is_broadcasted()) {
+			cold_path();
+			return Err(TensorOpError::cannot_broadcast_output());
+		}
 
 		let out = [KernelOutput {
 			size: [merged[0].size, merged[1].size],

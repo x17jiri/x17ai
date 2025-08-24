@@ -140,10 +140,6 @@ impl Map for DD {
 		}
 		start..start + len
 	}
-
-	fn is_contiguous(&self) -> bool {
-		todo!("<DD as Map>::is_contiguous is not implemented yet");
-	}
 }
 
 impl<const M: usize> MergeDims<M> for DD {

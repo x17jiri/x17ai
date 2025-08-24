@@ -228,10 +228,6 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		Tensor { map: &self.map, buf: self.buf.clone() }
 	}
 
-	pub fn is_contiguous(&self) -> bool {
-		self.map.is_contiguous()
-	}
-
 	/// # Errors
 	/// - If the map is not safe, i.e., if some index may be mapped to an out-of-bounds offset.
 	pub fn ensure_safe(&self) -> Result<(), ErrPack<TensorUnsafeError>> {

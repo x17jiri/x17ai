@@ -294,6 +294,7 @@ pub enum TensorOpError {
 	NewBufAllocationFailed,
 	IncompatibleStridesForMerge,
 	InvalidValue,
+	CannotBroadcastOutput,
 }
 
 impl TensorOpError {
@@ -327,6 +328,13 @@ impl TensorOpError {
 			extra: None,
 		};
 		err.into()
+	}
+
+	pub fn cannot_broadcast_output() -> ErrPack<Self> {
+		ErrPack {
+			code: Self::CannotBroadcastOutput,
+			extra: None,
+		}
 	}
 }
 
