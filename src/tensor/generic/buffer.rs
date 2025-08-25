@@ -20,3 +20,15 @@ impl<T> Buffer for &mut [T] {
 		<[T]>::len(self)
 	}
 }
+
+impl<T: Buffer> Buffer for &T {
+	fn len(&self) -> usize {
+		T::len(*self)
+	}
+}
+
+impl<T: Buffer> Buffer for &mut T {
+	fn len(&self) -> usize {
+		T::len(*self)
+	}
+}

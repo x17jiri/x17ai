@@ -218,6 +218,8 @@ unsafe extern "C" {
 }
 
 fn main() -> Result<(), ErrPack<TensorOpError>> {
+	let mut a = [1, 2, 3, 4, 5, 6, 7, 8];
+	let b = a.get_mut(2..5);
 	/*
 	let (builder, [c], [a, b], [x]) = KernelBuilder::new("my_kernel", ["c"], ["a", "b"], ["x"]);
 	let kernel = builder.build((a * b).sum() + c);

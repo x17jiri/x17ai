@@ -529,6 +529,9 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 		dst: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
 		src: &mut dyn std::io::Read,
 	) -> Result<(), ErrPack<ExecutorError>> {
+		for q in dst.iter_along_axis(0) {
+			//q.ensure_safe()?;
+		}
 		let (map, buf) = Self::view_contiguous_mut(dst)?.tensor.into_parts();
 		for j in 0..map.dims[0].size {
 			let b = map.index_to_offset([j, 0]).unwrap();

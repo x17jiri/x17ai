@@ -254,6 +254,9 @@ pub struct DeviceBuffer {
 	device_data: *mut u8,
 	elems: usize,
 	read_count: Cell<usize>,
+
+	// Yes, we can have multiple mutable borrows,
+	// see the function `reborrow_mut()` for details.
 	write_count: Cell<usize>,
 	vmt: NonNull<DeviceBufferVMT>,
 }
@@ -505,6 +508,21 @@ impl<'a> DeviceBufferRefMut<'a> {
 
 	pub fn device_buffer(&self) -> &'a DeviceBuffer {
 		self.device_buffer
+	}
+
+	/// We create a second mutable reference to the same buffer,
+	/// but it is safe because we take a mutable borrow of the first reference,
+	/// so it cannot be used.
+	///
+	/// We do however need to increment the write counter, because `Drop` will
+	/// decrement it.
+	pub fn reborrow_mut<'t>(&'t mut self) -> DeviceBufferRefMut<'t> {
+		let write_count = self.device_buffer.write_count.get();
+
+		debug_assert!(write_count > 0, "DeviceBufferRefMut: invalid counter state");
+
+		self.device_buffer.write_count.set(write_count + 1);
+		DeviceBufferRefMut { device_buffer: self.device_buffer }
 	}
 }
 
