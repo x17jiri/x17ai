@@ -11,15 +11,14 @@ use std::mem::MaybeUninit;
 use std::sync::{Arc, RwLock};
 
 use crate::ErrPack;
-use crate::tensor::device::buffer::{
-	DeviceBufferRef, DeviceBufferRefMut, KernelElemArg, KernelOutput, KernelReduceArg,
-	check_borrows,
-};
+use crate::tensor::device::DeviceBuffer;
+use crate::tensor::device::buffer::{KernelElemArg, KernelOutput, KernelReduceArg};
 use crate::tensor::device::kernel::expr::{DynExpr, Expr, ExprDiscriminant, ExprToDyn};
 use crate::tensor::device::kernel::registry::{KernelMap, KernelRegistry};
 use crate::tensor::dim_merger::DimMerger;
 use crate::tensor::generic::map::SizeAndStride;
 use crate::tensor::{Tensor, TensorOpError};
+use crate::util::mycell::{BorrowGuard, UnsafeBorrowFailFlag, UnsafeBorrowMutFailFlag};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -271,29 +270,24 @@ impl KernelRunner {
 		}];
 
 		unsafe {
-			let mut c_fail = 0;
-			let reduce_borrows: [DeviceBufferRef; R] = std::array::from_fn(|i| {
-				let arg = &reduce_args[i];
-				DeviceBufferRef::new_unsafe(arg.buf().as_ref(), &mut c_fail)
-			});
-			let elem_borrows: [Option<DeviceBufferRef>; E] = std::array::from_fn(|i| {
+			let mut inp_fail = UnsafeBorrowFailFlag::new();
+			let reduce_borrows: [BorrowGuard<DeviceBuffer>; R] =
+				std::array::from_fn(|i| reduce_args[i].buf().unsafe_borrow(&mut inp_fail));
+			let elem_borrows: [Option<BorrowGuard<DeviceBuffer>>; E] = std::array::from_fn(|i| {
 				let arg = &elem_args[i];
 				let same_as_output = std::ptr::eq(arg.buf().as_ref(), output.buf().as_ref())
 					&& likely(
 						inp[i].offset_bytes == out[0].offset_bytes
 							&& inp[i].stride_bytes == out[0].stride_bytes,
 					);
-				if same_as_output {
-					None
-				} else {
-					Some(DeviceBufferRef::new_unsafe(arg.buf().as_ref(), &mut c_fail))
-				}
+				if same_as_output { None } else { Some(arg.buf().unsafe_borrow(&mut inp_fail)) }
 			});
 
-			let mut m_fail = 0;
-			let out_borrow = DeviceBufferRefMut::new_unsafe(output.buf().as_ref(), &mut m_fail);
+			let mut out_fail = UnsafeBorrowMutFailFlag::new();
+			let out_borrow = output.buf().unsafe_borrow_mut(&mut out_fail);
 
-			check_borrows(c_fail, m_fail)?;
+			inp_fail.check()?;
+			out_fail.check()?;
 
 			// TODO - ensure_safe
 			// TODO - ensure all on same device

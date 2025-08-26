@@ -161,22 +161,11 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 	) -> Result<AxisIter<'_, M, B>, DimIndexOutOfBoundsError>
 	where
 		M: Select,
+		B: Clone,
 	{
 		let dim = dim.resolve_index(self.ndim())?;
 		let size = self.size(dim)?;
 		Ok(AxisIter { tensor: self, dim, current: 0, size })
-	}
-
-	pub fn iter_along_axis_mut<D: DimIndex>(
-		&mut self,
-		dim: D,
-	) -> Result<AxisIterMut<'_, M, B>, DimIndexOutOfBoundsError>
-	where
-		M: Select,
-	{
-		let dim = dim.resolve_index(self.ndim())?;
-		let size = self.size(dim)?;
-		Ok(AxisIterMut { tensor: self, dim, current: 0, size })
 	}
 
 	pub fn narrow<D: DimIndex, R: Into<UniversalRange>>(
@@ -306,17 +295,17 @@ impl<const K: usize, M: Map + IndexToOffset<K>, T> std::ops::IndexMut<[usize; K]
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct AxisIter<'a, M: Map + Select, B: Buffer> {
+pub struct AxisIter<'a, M: Map + Select, B: Buffer + Clone> {
 	tensor: &'a Tensor<M, B>,
 	dim: usize,
 	current: usize,
 	size: usize,
 }
 
-impl<'a, M: Map + Select, B: Buffer> Iterator for AxisIter<'a, M, B> {
-	type Item = Tensor<M::Output, &'a B>;
+impl<'a, M: Map + Select, B: Buffer + Clone> Iterator for AxisIter<'a, M, B> {
+	type Item = Tensor<M::Output, B>;
 
-	fn next(&mut self) -> Option<Tensor<M::Output, &'a B>> {
+	fn next(&mut self) -> Option<Tensor<M::Output, B>> {
 		if self.current >= self.size {
 			return None;
 		}
@@ -324,51 +313,18 @@ impl<'a, M: Map + Select, B: Buffer> Iterator for AxisIter<'a, M, B> {
 		self.current += 1;
 		Some(Tensor {
 			map: unsafe { self.tensor.map.clone().select_unchecked(self.dim, index) },
-			buf: &self.tensor.buf,
+			buf: self.tensor.buf.clone(),
 		})
 	}
 }
 
-impl<'a, M: Map + Select, B: Buffer> ExactSizeIterator for AxisIter<'a, M, B> {
+impl<'a, M: Map + Select, B: Buffer + Clone> ExactSizeIterator for AxisIter<'a, M, B> {
 	fn len(&self) -> usize {
 		self.size - self.current
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
-
-pub struct AxisIterMut<'a, M: Map + Select, B: Buffer> {
-	tensor: &'a mut Tensor<M, B>,
-	dim: usize,
-	current: usize,
-	size: usize,
-}
-
-impl<'a, M: Map + Select, B: Buffer> Iterator for AxisIterMut<'a, M, B> {
-	type Item = Tensor<M::Output, &'a mut B>;
-
-	fn next(&mut self) -> Option<Tensor<M::Output, &'a mut B>> {
-		/*if self.current >= self.size {
-			return None;
-		}
-		let index = self.current;
-		self.current += 1;
-		Some(Tensor {
-			map: unsafe { self.tensor.map.clone().select_unchecked(self.dim, index) },
-			buf: &mut self.tensor.buf,
-		})*/
-		todo!("Implement AxisIterMut (requires unsafe code and careful lifetime management)")
-	}
-}
-
-impl<'a, M: Map + Select, B: Buffer> ExactSizeIterator for AxisIterMut<'a, M, B> {
-	fn len(&self) -> usize {
-		self.size - self.current
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct TensorUnsafeError;

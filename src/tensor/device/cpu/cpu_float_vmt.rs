@@ -10,16 +10,16 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 
 use crate::ErrPack;
+use crate::tensor::device::DeviceBuffer;
 use crate::tensor::device::buffer::{
-	DeviceBufferRef, DeviceBufferRefMut, DeviceBufferVMT, KernelElemArg, KernelOutput,
-	KernelReduceArg,
+	DeviceBufferVMT, KernelElemArg, KernelOutput, KernelReduceArg,
 };
 use crate::tensor::device::cpu::CPUDevice;
-use crate::tensor::device::executor::ExecutorError;
 use crate::tensor::device::kernel::expr::DynExpr;
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
 use crate::tensor::generic::map::{IndexToOffset, Map, ND, Select};
-use crate::tensor::{HasDType, generic};
+use crate::tensor::{HasDType, TensorOpError, generic};
+use crate::util::mycell::{BorrowGuard, BorrowMutGuard};
 
 use super::math::{self, FromToF64};
 
@@ -85,23 +85,6 @@ impl<T: Copy + HasDType + FromToF64> SliceMut3D<T> for generic::Tensor<ND<3>, &m
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct ContiguousOutput<'t, T> {
-	pub tensor: generic::Tensor<&'t ND<2>, &'t mut [T]>,
-}
-
-pub struct ContiguousInput<'t, T> {
-	pub tensor: generic::Tensor<&'t ND<2>, &'t [T]>,
-}
-
-pub struct BroadcastedInput<'t, T> {
-	pub tensor: generic::Tensor<&'t ND<2>, &'t [T]>,
-}
-
-pub enum Input<'t, T> {
-	Contiguous(ContiguousInput<'t, T>),
-	Broadcasted(BroadcastedInput<'t, T>),
-}
-
 #[repr(C)]
 pub(super) struct CPUFloatVMT<T: Copy + HasDType + FromToF64> {
 	vmt: DeviceBufferVMT,
@@ -147,31 +130,31 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 	}
 
 	pub fn view_contiguous<'t, 'buf>(
-		tensor: &'t generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	) -> Result<ContiguousInput<'t, T>, ErrPack<ExecutorError>>
+		tensor: &'t generic::Tensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
+	) -> Result<generic::Tensor<&'t ND<2>, &'t [T]>, ErrPack<TensorOpError>>
 	where
 		T: 'static,
 	{
 		tensor.ensure_safe()?;
 		let feature_dim = tensor.map().dims[1];
 		if !feature_dim.is_contiguous() {
-			return Err(ExecutorError::not_contiguous());
+			return Err(TensorOpError::not_contiguous());
 		}
-		Ok(ContiguousInput { tensor: tensor.view()? })
+		Ok(tensor.view()?)
 	}
 
 	pub fn view_contiguous_mut<'t, 'buf>(
-		tensor: &'t mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-	) -> Result<ContiguousOutput<'t, T>, ErrPack<ExecutorError>>
+		tensor: &'t mut generic::Tensor<ND<2>, BorrowMutGuard<'buf, DeviceBuffer>>,
+	) -> Result<generic::Tensor<&'t ND<2>, &'t mut [T]>, ErrPack<TensorOpError>>
 	where
 		T: 'static,
 	{
 		tensor.ensure_safe()?;
 		let feature_dim = tensor.map().dims[1];
 		if !feature_dim.is_contiguous() {
-			return Err(ExecutorError::not_contiguous());
+			return Err(TensorOpError::not_contiguous());
 		}
-		Ok(ContiguousOutput { tensor: tensor.view_mut()? })
+		Ok(tensor.view_mut()?)
 	}
 
 	pub fn attention_tile<const FIRST: bool>(
@@ -517,8 +500,8 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 
 	fn read_float<'buf>(
 		_this: NonNull<DeviceBufferVMT>,
-		src: &generic::Tensor<ND<0>, DeviceBufferRef<'buf>>,
-	) -> Result<f64, ErrPack<ExecutorError>> {
+		src: &generic::Tensor<ND<0>, BorrowGuard<'buf, DeviceBuffer>>,
+	) -> Result<f64, ErrPack<TensorOpError>> {
 		src.ensure_safe()?;
 		let view = src.view::<T>()?;
 		Ok(view[[]].to_f64())
@@ -526,13 +509,10 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 
 	fn read_bin<'buf>(
 		_this: NonNull<DeviceBufferVMT>,
-		dst: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		dst: &mut generic::Tensor<ND<2>, BorrowMutGuard<'buf, DeviceBuffer>>,
 		src: &mut dyn std::io::Read,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		for q in dst.iter_along_axis(0) {
-			//q.ensure_safe()?;
-		}
-		let (map, buf) = Self::view_contiguous_mut(dst)?.tensor.into_parts();
+	) -> Result<(), ErrPack<TensorOpError>> {
+		let (map, buf) = Self::view_contiguous_mut(dst)?.into_parts();
 		for j in 0..map.dims[0].size {
 			let b = map.index_to_offset([j, 0]).unwrap();
 			let e = b + map.dims[1].size;
@@ -547,9 +527,9 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 
 	fn write_bin<'buf>(
 		_this: NonNull<DeviceBufferVMT>,
-		_src: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		_src: &generic::Tensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
 		_dst: &mut dyn std::io::Write,
-	) -> Result<(), ErrPack<ExecutorError>> {
+	) -> Result<(), ErrPack<TensorOpError>> {
 		/*
 		#[cfg(target_endian = "big")]
 		{
@@ -576,11 +556,11 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 	#[allow(clippy::many_single_char_names)]
 	fn mm<'buf>(
 		_this: NonNull<DeviceBufferVMT>,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		o: &mut generic::Tensor<ND<2>, BorrowMutGuard<'buf, DeviceBuffer>>,
+		a: &generic::Tensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
+		b: &generic::Tensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
 		scale: f64,
-	) -> Result<(), ErrPack<ExecutorError>> {
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let m = o.map().dims[0].size;
 		let n = o.map().dims[1].size;
 		let k = a.map().dims[1].size;
@@ -624,12 +604,16 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 		Ok(()) // TODO
 	}
 
-	fn attention(
+	fn attention<'buf>(
 		_this: NonNull<DeviceBufferVMT>,
-		_o: &mut generic::Tensor<ND<3>, DeviceBufferRefMut>, // [inputs, qo_heads, vo_features]
-		_q: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, qo_heads, qk_features]
-		_k: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, k_heads, qk_features]
-		_v: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, v_heads, vo_features]
+		// [inputs, qo_heads, o_features]
+		_o: &mut generic::Tensor<ND<3>, BorrowMutGuard<'buf, DeviceBuffer>>,
+		// [inputs, qo_heads, qk_features]
+		_q: &generic::Tensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
+		// [inputs, k_heads, qk_features]
+		_k: &generic::Tensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
+		// [inputs, v_heads, vo_features]
+		_v: &generic::Tensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
 	) {
 		todo!("CPUFloatExecutor::attention is not implemented yet");
 	}
@@ -642,7 +626,7 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 		reduce_args: *const KernelReduceArg,
 		scalar_args: *const f64,
 		reduction_size: usize,
-	) -> Result<(), ErrPack<ExecutorError>> {
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let this = unsafe { Self::cast_this(this) };
 		let expr = kernel_data.expr.as_ref();
 		unsafe {

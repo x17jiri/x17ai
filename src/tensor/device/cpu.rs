@@ -14,6 +14,7 @@ use std::rc::Rc;
 use crate::tensor::HasDType;
 use crate::tensor::device::buffer::DeviceBufferVMT;
 use crate::tensor::device::kernel::runner::KernelRunner;
+use crate::util::mycell;
 
 pub mod cpu_float_vmt;
 pub mod math;
@@ -408,7 +409,7 @@ impl Device for CPUDevice {
 		self: Rc<Self>,
 		dtype: DType,
 		elems: usize,
-	) -> Result<Rc<DeviceBuffer>, NewDeviceBufferError> {
+	) -> Result<Rc<mycell::RefCell<DeviceBuffer>>, NewDeviceBufferError> {
 		#[allow(clippy::single_match_else)]
 		let vmt = match dtype {
 			f32::dtype => NonNull::from_ref(&self.f32_vmt),
@@ -436,6 +437,8 @@ impl Device for CPUDevice {
 		std::mem::forget(self);
 
 		let device_data = memory;
-		Ok(Rc::new(unsafe { DeviceBuffer::new(device_data, elems, vmt.cast()) }))
+		Ok(Rc::new(mycell::RefCell::new(unsafe {
+			DeviceBuffer::new(device_data, elems, vmt.cast())
+		})))
 	}
 }

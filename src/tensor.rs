@@ -10,19 +10,18 @@ use std::rc::Rc;
 
 pub use device::{DType, Device, HasDType};
 
-use crate::tensor::device::NewDeviceBufferError;
-use crate::tensor::device::buffer::{
-	BorrowError, BorrowMutError, DeviceBufferRef, DeviceBufferRefMut, DeviceBufferVMT,
-};
+use crate::tensor::device::buffer::DeviceBufferVMT;
 use crate::tensor::device::cpu::{CPUDevice, ViewError};
-use crate::tensor::device::executor::ExecutorError;
+use crate::tensor::device::{DeviceBuffer, NewDeviceBufferError};
 use crate::tensor::dim_merger::{DimMergerError, DimsDontMatchError, TooManyMergedDimensionsError};
+use crate::tensor::generic::TensorUnsafeError;
 use crate::tensor::generic::map::dd::ReplaceTailError;
 use crate::tensor::generic::map::{
 	DD, ElementsOverflowError, IncompatibleStridesError, IndexOutOfBoundsError, MergeDimsError, ND,
 	NotEnoughDimensionsError, ReshapeLastDimError, SelectError,
 };
 use crate::tensor::math::EvaluatesToTensor;
+use crate::util::mycell::{self, BorrowError, BorrowGuard, BorrowMutError, BorrowMutGuard};
 use crate::{ErrExtra, ErrPack};
 
 pub mod device;
@@ -36,12 +35,15 @@ mod tests;
 
 //--------------------------------------------------------------------------------------------------
 
-impl<M: generic::map::Map> generic::Tensor<M, Rc<device::DeviceBuffer>> {
+impl<M: generic::map::Map> generic::Tensor<M, Rc<mycell::RefCell<DeviceBuffer>>> {
 	/// # Errors
 	/// `BorrowError` if there is a mutable borrow preventing a shared borrow.
-	pub fn borrow(
-		&self,
-	) -> std::result::Result<generic::Tensor<&M::Deref, DeviceBufferRef<'_>>, BorrowError> {
+	pub fn borrow<'buf>(
+		&'buf self,
+	) -> std::result::Result<
+		generic::Tensor<&'buf M::Deref, BorrowGuard<'buf, DeviceBuffer>>,
+		BorrowError,
+	> {
 		let map = self.map().as_ref();
 		let buf = self.buf().try_borrow()?;
 		// SAFETY: We only change the type of buffer reference.
@@ -51,9 +53,12 @@ impl<M: generic::map::Map> generic::Tensor<M, Rc<device::DeviceBuffer>> {
 
 	/// # Errors
 	/// `BorrowMutError` if there already is any other borrow of the buffer.
-	pub fn borrow_mut(
-		&self,
-	) -> std::result::Result<generic::Tensor<&M::Deref, DeviceBufferRefMut<'_>>, BorrowMutError> {
+	pub fn borrow_mut<'buf>(
+		&'buf self,
+	) -> std::result::Result<
+		generic::Tensor<&'buf M::Deref, BorrowMutGuard<'buf, DeviceBuffer>>,
+		BorrowMutError,
+	> {
 		let map = self.map().as_ref();
 		let buf = self.buf().try_borrow_mut()?;
 		// SAFETY: We only change the type of buffer reference.
@@ -62,12 +67,12 @@ impl<M: generic::map::Map> generic::Tensor<M, Rc<device::DeviceBuffer>> {
 	}
 }
 
-impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRef<'buf>> {
+impl<'buf, M: generic::map::Map> generic::Tensor<M, BorrowGuard<'buf, DeviceBuffer>> {
 	/// Returns a "view" tensor which has a slice `&[T]` as its buffer.
 	pub fn view<T: HasDType>(&self) -> Result<generic::Tensor<&M::Deref, &[T]>, ViewError> {
 		let map = self.map().as_ref();
-		let buf = self.buf();
-		CPUDevice::ensure_can_view::<T>(buf.device_buffer())?;
+		let buf = &**self.buf();
+		CPUDevice::ensure_can_view::<T>(buf)?;
 		let data = buf.device_data();
 		let elems = buf.elems();
 		let slice = unsafe { std::slice::from_raw_parts(data.cast(), elems) };
@@ -76,22 +81,16 @@ impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRef<'buf>> {
 		// So if the map was safe before, it is still safe.
 		Ok(unsafe { generic::Tensor::new_unchecked(map, slice) })
 	}
-
-	pub unsafe fn buf_ptr<T: HasDType>(&self) -> *const T {
-		let buf = self.buf();
-		debug_assert!(CPUDevice::ensure_can_view::<T>(buf.device_buffer()).is_ok());
-		buf.device_data().cast()
-	}
 }
 
-impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRefMut<'buf>> {
+impl<'buf, M: generic::map::Map> generic::Tensor<M, BorrowMutGuard<'buf, DeviceBuffer>> {
 	/// Returns a "view" tensor which has a slice `&mut [T]` as its buffer.
 	pub fn view_mut<T: HasDType>(
 		&mut self,
 	) -> Result<generic::Tensor<&M::Deref, &mut [T]>, ViewError> {
 		let map = self.map().as_ref();
-		let buf = self.buf();
-		CPUDevice::ensure_can_view::<T>(buf.device_buffer())?;
+		let buf = &**self.buf();
+		CPUDevice::ensure_can_view::<T>(buf)?;
 		let data = buf.device_data();
 		let elems = buf.elems();
 		let slice = unsafe { std::slice::from_raw_parts_mut(data.cast(), elems) };
@@ -100,17 +99,11 @@ impl<'buf, M: generic::map::Map> generic::Tensor<M, DeviceBufferRefMut<'buf>> {
 		// So if the map was safe before, it is still safe.
 		Ok(unsafe { generic::Tensor::new_unchecked(map, slice) })
 	}
-
-	pub unsafe fn buf_ptr_mut<T: HasDType>(&mut self) -> *mut T {
-		let buf = self.buf();
-		debug_assert!(CPUDevice::ensure_can_view::<T>(buf.device_buffer()).is_ok());
-		buf.device_data().cast()
-	}
 }
 
 //--------------------------------------------------------------------------------------------------
 
-pub type Tensor = generic::Tensor<DD, Rc<device::DeviceBuffer>>;
+pub type Tensor = generic::Tensor<DD, Rc<mycell::RefCell<DeviceBuffer>>>;
 
 impl Tensor {
 	/// Allocate a new tensor on the provided device.
@@ -237,7 +230,7 @@ impl<T: HasDType> TensorLiteralFactory<T> {
 		let val_len = X * std::mem::size_of::<T>();
 		let val = unsafe { std::slice::from_raw_parts(val_ptr, val_len) };
 		let mut reader = std::io::Cursor::new(val);
-		io::read_bin(&tensor, &mut reader)?;
+		io::load_bin(&tensor, &mut reader)?;
 
 		Ok(tensor)
 	}
@@ -253,7 +246,7 @@ impl<T: HasDType> TensorLiteralFactory<T> {
 		let val_len = Y * X * std::mem::size_of::<T>();
 		let val = unsafe { std::slice::from_raw_parts(val_ptr, val_len) };
 		let mut reader = std::io::Cursor::new(val);
-		io::read_bin(&tensor, &mut reader)?;
+		io::load_bin(&tensor, &mut reader)?;
 
 		Ok(tensor)
 	}
@@ -269,7 +262,7 @@ impl<T: HasDType> TensorLiteralFactory<T> {
 		let val_len = Z * Y * X * std::mem::size_of::<T>();
 		let val = unsafe { std::slice::from_raw_parts(val_ptr, val_len) };
 		let mut reader = std::io::Cursor::new(val);
-		io::read_bin(&tensor, &mut reader)?;
+		io::load_bin(&tensor, &mut reader)?;
 
 		Ok(tensor)
 	}
@@ -295,6 +288,14 @@ pub enum TensorOpError {
 	IncompatibleStridesForMerge,
 	InvalidValue,
 	CannotBroadcastOutput,
+	ShapeMismatch,
+	UnsafeTensor,
+	NotContiguous,
+	NotContiguousOrBroadcasted,
+	InvalidShape,
+	InvalidDType,
+	InvalidDevice,
+	IOError,
 }
 
 impl TensorOpError {
@@ -311,22 +312,29 @@ impl TensorOpError {
 	#[cold]
 	#[inline(never)]
 	pub fn not_contiguous() -> ErrPack<Self> {
-		ExecutorError::not_contiguous().into()
+		let message = "Expected the tensor to have contiguous dimension -1, but it does not".into();
+		ErrPack {
+			code: Self::NotContiguous,
+			extra: Some(Box::new(ErrExtra { message, nested: None })),
+		}
 	}
 
 	#[cold]
 	#[inline(never)]
 	pub fn not_contiguous_or_broadcasted() -> ErrPack<Self> {
-		ExecutorError::not_contiguous_or_broadcasted().into()
+		let message =
+			"Expected the tensor to have contiguous or broadcasted dimension -1, but it does not"
+				.into();
+		ErrPack {
+			code: Self::NotContiguousOrBroadcasted,
+			extra: Some(Box::new(ErrExtra { message, nested: None })),
+		}
 	}
 
 	#[cold]
 	#[inline(never)]
 	pub fn invalid_shape() -> ErrPack<Self> {
-		let err = ErrPack {
-			code: ExecutorError::InvalidShape,
-			extra: None,
-		};
+		let err = ErrPack { code: Self::InvalidShape, extra: None };
 		err.into()
 	}
 
@@ -334,6 +342,18 @@ impl TensorOpError {
 		ErrPack {
 			code: Self::CannotBroadcastOutput,
 			extra: None,
+		}
+	}
+
+	#[cold]
+	#[inline(never)]
+	pub fn io_error(err: std::io::Error) -> ErrPack<Self> {
+		ErrPack {
+			code: Self::IOError,
+			extra: Some(Box::new(ErrExtra {
+				message: String::new(),
+				nested: Some(Box::new(err)),
+			})),
 		}
 	}
 }
@@ -425,20 +445,6 @@ impl From<BorrowMutError> for ErrPack<TensorOpError> {
 		Self {
 			code: TensorOpError::CannotBorrowMut,
 			extra: None,
-		}
-	}
-}
-
-impl From<ErrPack<ExecutorError>> for ErrPack<TensorOpError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: ErrPack<ExecutorError>) -> Self {
-		Self {
-			code: TensorOpError::ExecutorError,
-			extra: Some(Box::new(ErrExtra {
-				message: String::new(),
-				nested: Some(err.into()),
-			})),
 		}
 	}
 }
@@ -588,24 +594,50 @@ impl From<SelectError> for ErrPack<TensorOpError> {
 	}
 }
 
+impl From<IndexOutOfBoundsError> for ErrPack<TensorOpError> {
+	fn from(_: IndexOutOfBoundsError) -> Self {
+		Self {
+			code: TensorOpError::IndexOutOfBounds,
+			extra: None,
+		}
+	}
+}
+
+impl From<TensorUnsafeError> for TensorOpError {
+	fn from(_: TensorUnsafeError) -> Self {
+		Self::UnsafeTensor
+	}
+}
+
+impl From<ErrPack<TensorUnsafeError>> for ErrPack<TensorOpError> {
+	fn from(err: ErrPack<TensorUnsafeError>) -> Self {
+		Self { code: err.code.into(), extra: err.extra }
+	}
+}
+
+impl From<std::io::Error> for ErrPack<TensorOpError> {
+	fn from(err: std::io::Error) -> Self {
+		TensorOpError::io_error(err)
+	}
+}
+
+impl From<ViewError> for TensorOpError {
+	#[cold]
+	#[inline(never)]
+	fn from(err: ViewError) -> Self {
+		match err {
+			ViewError::InvalidDType => Self::InvalidDType,
+			ViewError::NotOnCPUDevice => Self::InvalidDevice,
+		}
+	}
+}
+
 impl From<ViewError> for ErrPack<TensorOpError> {
 	#[cold]
 	#[inline(never)]
 	fn from(err: ViewError) -> Self {
 		Self {
-			code: TensorOpError::ExecutorError,
-			extra: Some(Box::new(ErrExtra {
-				message: String::new(),
-				nested: Some(Box::new(ErrPack::<ExecutorError>::from(err))),
-			})),
-		}
-	}
-}
-
-impl From<IndexOutOfBoundsError> for ErrPack<TensorOpError> {
-	fn from(_: IndexOutOfBoundsError) -> Self {
-		Self {
-			code: TensorOpError::IndexOutOfBounds,
+			code: TensorOpError::from(err),
 			extra: None,
 		}
 	}

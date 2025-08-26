@@ -11,7 +11,6 @@ use crate::nn::layers::Layer;
 use crate::nn::layers::softmax::{Softmax, SoftmaxGradientMode};
 use crate::tensor::device::kernel::expr::TensorOps;
 use crate::tensor::{Tensor, TensorOpError};
-use crate::util::LossyInto;
 
 pub struct CrossEntropy {
 	softmax: Softmax,

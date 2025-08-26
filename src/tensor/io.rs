@@ -28,26 +28,26 @@ pub fn merge_dims<const N: usize>(tensor: &Tensor) -> Result<ND<N>, DimMergerErr
 
 //--------------------------------------------------------------------------------------------------
 
-pub fn write_bin(
+pub fn store_bin(
 	src: &Tensor,
 	writer: &mut dyn std::io::Write,
 ) -> Result<(), ErrPack<TensorOpError>> {
 	let vmt = src.vmt();
 	let nd = merge_dims::<2>(src)?;
 	let t = unsafe { generic::Tensor::new_unchecked(nd, src.buf().try_borrow()?) };
-	Ok(vmt.write_bin(&t, writer)?)
+	Ok(vmt.store_bin(&t, writer)?)
 }
 
 //--------------------------------------------------------------------------------------------------
 
-pub fn read_bin(
+pub fn load_bin(
 	dst: &Tensor,
 	reader: &mut dyn std::io::Read,
 ) -> Result<(), ErrPack<TensorOpError>> {
 	let vmt = dst.vmt();
 	let nd = merge_dims::<2>(dst)?;
 	let mut t = unsafe { generic::Tensor::new_unchecked(nd, dst.buf().try_borrow_mut()?) };
-	Ok(vmt.read_bin(&mut t, reader)?)
+	Ok(vmt.load_bin(&mut t, reader)?)
 }
 
 //--------------------------------------------------------------------------------------------------

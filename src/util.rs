@@ -8,6 +8,7 @@
 use std::convert::Infallible;
 
 pub mod array;
+pub mod mycell;
 
 pub trait LossyInto<T> {
 	fn lossy_into(self) -> T;

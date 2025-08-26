@@ -8,11 +8,11 @@
 use std::hint::cold_path;
 
 use crate::ErrPack;
-use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut, check_borrows};
 use crate::tensor::device::kernel::expr::TensorOps;
 use crate::tensor::dim_merger::DimMerger;
 use crate::tensor::generic::map::{ND, NotEnoughDimensionsError, SizeAndStride};
 use crate::tensor::{Tensor, TensorOpError, generic};
+use crate::util::mycell::{UnsafeBorrowFailFlag, UnsafeBorrowMutFailFlag};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -219,30 +219,31 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 
 			let dims = DimMerger::merge::<1>([col.batch_dims, row.batch_dims])?;
 
-			let mut c_fail = 0;
+			let mut c_fail = UnsafeBorrowFailFlag::new();
 			let col = generic::Tensor::new_unchecked(
 				ND {
 					dims: [col.rows, dims[0].get(COL)],
 					offset: col.tensor.map().offset,
 				},
-				DeviceBufferRef::new_unsafe(col.tensor.buf().as_ref(), &mut c_fail),
+				col.tensor.buf().unsafe_borrow(&mut c_fail),
 			);
 			let row = generic::Tensor::new_unchecked(
 				ND {
 					dims: [dims[0].get(ROW), row.cols],
 					offset: row.tensor.map().offset,
 				},
-				DeviceBufferRef::new_unsafe(row.tensor.buf().as_ref(), &mut c_fail),
+				row.tensor.buf().unsafe_borrow(&mut c_fail),
 			);
-			let mut m_fail = 0;
+			let mut m_fail = UnsafeBorrowMutFailFlag::new();
 			let mut to = generic::Tensor::new_unchecked(
 				ND {
 					dims: [to.rows, to.cols],
 					offset: to.tensor.map().offset,
 				},
-				DeviceBufferRefMut::new_unsafe(to.tensor.buf().as_ref(), &mut m_fail),
+				to.tensor.buf().unsafe_borrow_mut(&mut m_fail),
 			);
-			check_borrows(c_fail, m_fail)?;
+			c_fail.check()?;
+			m_fail.check()?;
 
 			let vmt = col.buf().vmt();
 			vmt.mm(&mut to, &col, &row, scale)?;
@@ -264,30 +265,31 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 			assert!(mat.batch_dims.is_empty());
 
 			let dims = DimMerger::merge::<1>([to.batch_dims, col.batch_dims])?;
-			let mut c_fail = 0;
+			let mut c_fail = UnsafeBorrowFailFlag::new();
 			let mat = generic::Tensor::new_unchecked(
 				ND {
 					dims: [mat.rows, mat.cols],
 					offset: mat.tensor.map().offset,
 				},
-				DeviceBufferRef::new_unsafe(mat.tensor.buf().as_ref(), &mut c_fail),
+				mat.tensor.buf().unsafe_borrow(&mut c_fail),
 			);
 			let col = generic::Tensor::new_unchecked(
 				ND {
 					dims: [col.rows, dims[0].get(COL)],
 					offset: col.tensor.map().offset,
 				},
-				DeviceBufferRef::new_unsafe(col.tensor.buf().as_ref(), &mut c_fail),
+				col.tensor.buf().unsafe_borrow(&mut c_fail),
 			);
-			let mut m_fail = 0;
+			let mut m_fail = UnsafeBorrowMutFailFlag::new();
 			let mut to = generic::Tensor::new_unchecked(
 				ND {
 					dims: [to.rows, dims[0].get(TO)],
 					offset: to.tensor.map().offset,
 				},
-				DeviceBufferRefMut::new_unsafe(to.tensor.buf().as_ref(), &mut m_fail),
+				to.tensor.buf().unsafe_borrow_mut(&mut m_fail),
 			);
-			check_borrows(c_fail, m_fail)?;
+			c_fail.check()?;
+			m_fail.check()?;
 
 			let vmt = mat.buf().vmt();
 			vmt.mm(&mut to, &mat, &col, scale)?;

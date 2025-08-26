@@ -11,11 +11,12 @@ pub mod buffer;
 pub mod cpu;
 //pub mod cuda;
 pub mod dtype;
-pub mod executor;
 pub mod kernel;
 
 pub use buffer::DeviceBuffer;
 pub use dtype::{DType, HasDType};
+
+use crate::util::mycell;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -31,5 +32,5 @@ pub trait Device {
 		self: Rc<Self>,
 		dtype: DType,
 		elems: usize,
-	) -> Result<Rc<DeviceBuffer>, NewDeviceBufferError>;
+	) -> Result<Rc<mycell::RefCell<DeviceBuffer>>, NewDeviceBufferError>;
 }

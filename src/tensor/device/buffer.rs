@@ -5,18 +5,16 @@
 //
 //------------------------------------------------------------------------------
 
-use std::cell::Cell;
-use std::hint::cold_path;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
 use crate::ErrPack;
 use crate::tensor::TensorOpError;
-use crate::tensor::device::executor::ExecutorError;
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
 use crate::tensor::generic::buffer::Buffer;
 use crate::tensor::generic::map::ND;
 use crate::tensor::generic::{self};
+use crate::util::mycell::{self, BorrowGuard, BorrowMutGuard};
 
 use super::Device;
 use super::dtype::DType;
@@ -52,35 +50,36 @@ pub type DropBufferFn =
 
 pub type ReadFloatFn = for<'buf> unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
-	src: &generic::Tensor<ND<0>, DeviceBufferRef<'buf>>,
-) -> Result<f64, ErrPack<ExecutorError>>;
+	src: &generic::Tensor<ND<0>, BorrowGuard<'buf, DeviceBuffer>>,
+) -> Result<f64, ErrPack<TensorOpError>>;
 
-pub type ReadBinFn = for<'buf> unsafe fn(
+pub type LoadBinFn = for<'buf> unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
-	dst: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+	dst: &mut generic::Tensor<ND<2>, BorrowMutGuard<'buf, DeviceBuffer>>,
 	src: &mut dyn std::io::Read,
-) -> Result<(), ErrPack<ExecutorError>>;
+) -> Result<(), ErrPack<TensorOpError>>;
 
-pub type WriteBinFn = for<'buf> unsafe fn(
+pub type StoreBinFn = for<'buf> unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
-	src: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+	src: &generic::Tensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
 	dst: &mut dyn std::io::Write,
-) -> Result<(), ErrPack<ExecutorError>>;
+) -> Result<(), ErrPack<TensorOpError>>;
 
 pub type MMFn = for<'buf> unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
-	o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-	a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-	b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+	o: &mut generic::Tensor<ND<2>, BorrowMutGuard<'buf, DeviceBuffer>>,
+	a: &generic::Tensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
+	b: &generic::Tensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
 	scale: f64,
-) -> Result<(), ErrPack<ExecutorError>>;
+) -> Result<(), ErrPack<TensorOpError>>;
 
-pub type AttentionFn = unsafe fn(
+pub type AttentionFn = for<'buf> unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
-	o: &mut generic::Tensor<ND<3>, DeviceBufferRefMut>, // [inputs, qo_heads, vo_features]
-	q: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, qo_heads, qk_features]
-	k: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, k_heads, qk_features]
-	v: &generic::Tensor<ND<3>, DeviceBufferRef>,        // [inputs, v_heads, vo_features]
+	o: &mut generic::Tensor<ND<3>, BorrowMutGuard<'buf, DeviceBuffer>>, /* [inputs, qo_heads,
+	                                                                     * vo_features] */
+	q: &generic::Tensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>, // [inputs, qo_heads, qk_features]
+	k: &generic::Tensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>, // [inputs, k_heads, qk_features]
+	v: &generic::Tensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>, // [inputs, v_heads, vo_features]
 );
 
 pub type RunKernelFn = unsafe fn(
@@ -91,7 +90,7 @@ pub type RunKernelFn = unsafe fn(
 	reduce_args: *const KernelReduceArg,
 	scalar_args: *const f64,
 	reduction_size: usize,
-) -> Result<(), ErrPack<ExecutorError>>;
+) -> Result<(), ErrPack<TensorOpError>>;
 
 pub struct DeviceBufferVMT {
 	device: NonNull<dyn Device>,
@@ -101,8 +100,8 @@ pub struct DeviceBufferVMT {
 
 	drop_buffer: DropBufferFn,
 	read_float: ReadFloatFn,
-	read_bin: ReadBinFn,
-	write_bin: WriteBinFn,
+	load_bin: LoadBinFn,
+	store_bin: StoreBinFn,
 	mm: MMFn,
 	attention: AttentionFn,
 	run_kernel: RunKernelFn,
@@ -122,8 +121,8 @@ impl DeviceBufferVMT {
 
 		drop_buffer: DropBufferFn,
 		read_float: ReadFloatFn,
-		read_bin: ReadBinFn,
-		write_bin: WriteBinFn,
+		load_bin: LoadBinFn,
+		store_bin: StoreBinFn,
 		mm: MMFn,
 		attention: AttentionFn,
 		run_kernel: RunKernelFn,
@@ -136,8 +135,8 @@ impl DeviceBufferVMT {
 
 			drop_buffer,
 			read_float,
-			read_bin,
-			write_bin,
+			load_bin,
+			store_bin,
 			mm,
 			attention,
 			run_kernel,
@@ -181,47 +180,47 @@ impl DeviceBufferVMT {
 	#[inline]
 	pub fn read_float<'buf>(
 		&self,
-		src: &generic::Tensor<ND<0>, DeviceBufferRef<'buf>>,
-	) -> Result<f64, ErrPack<ExecutorError>> {
+		src: &generic::Tensor<ND<0>, BorrowGuard<'buf, DeviceBuffer>>,
+	) -> Result<f64, ErrPack<TensorOpError>> {
 		unsafe { (self.read_float)(self.into(), src) }
 	}
 
 	#[inline]
-	pub fn read_bin<'buf>(
+	pub fn load_bin<'buf>(
 		&self,
-		dst: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
+		dst: &mut generic::Tensor<ND<2>, BorrowMutGuard<'buf, DeviceBuffer>>,
 		src: &mut dyn std::io::Read,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		unsafe { (self.read_bin)(self.into(), dst, src) }
+	) -> Result<(), ErrPack<TensorOpError>> {
+		unsafe { (self.load_bin)(self.into(), dst, src) }
 	}
 
 	#[inline]
-	pub fn write_bin<'buf>(
+	pub fn store_bin<'buf>(
 		&self,
-		src: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		src: &generic::Tensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
 		dst: &mut dyn std::io::Write,
-	) -> Result<(), ErrPack<ExecutorError>> {
-		unsafe { (self.write_bin)(self.into(), src, dst) }
+	) -> Result<(), ErrPack<TensorOpError>> {
+		unsafe { (self.store_bin)(self.into(), src, dst) }
 	}
 
 	#[inline]
 	pub fn mm<'buf>(
 		&self,
-		o: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,
-		a: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
-		b: &generic::Tensor<ND<2>, DeviceBufferRef<'buf>>,
+		o: &mut generic::Tensor<ND<2>, BorrowMutGuard<'buf, DeviceBuffer>>,
+		a: &generic::Tensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
+		b: &generic::Tensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
 		scale: f64,
-	) -> Result<(), ErrPack<ExecutorError>> {
+	) -> Result<(), ErrPack<TensorOpError>> {
 		unsafe { (self.mm)(self.into(), o, a, b, scale) }
 	}
 
 	#[inline]
-	pub fn attention(
+	pub fn attention<'buf>(
 		&self,
-		o: &mut generic::Tensor<ND<3>, DeviceBufferRefMut>,
-		q: &generic::Tensor<ND<3>, DeviceBufferRef>,
-		k: &generic::Tensor<ND<3>, DeviceBufferRef>,
-		v: &generic::Tensor<ND<3>, DeviceBufferRef>,
+		o: &mut generic::Tensor<ND<3>, BorrowMutGuard<'buf, DeviceBuffer>>,
+		q: &generic::Tensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
+		k: &generic::Tensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
+		v: &generic::Tensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
 	) {
 		unsafe { (self.attention)(self.into(), o, q, k, v) }
 	}
@@ -235,7 +234,7 @@ impl DeviceBufferVMT {
 		reduce_args: *const KernelReduceArg,
 		scalar_args: *const f64,
 		reduction_size: usize,
-	) -> Result<(), ErrPack<ExecutorError>> {
+	) -> Result<(), ErrPack<TensorOpError>> {
 		unsafe {
 			(self.run_kernel)(
 				self.into(),
@@ -253,24 +252,13 @@ impl DeviceBufferVMT {
 pub struct DeviceBuffer {
 	device_data: *mut u8,
 	elems: usize,
-	read_count: Cell<usize>,
-
-	// Yes, we can have multiple mutable borrows,
-	// see the function `reborrow_mut()` for details.
-	write_count: Cell<usize>,
 	vmt: NonNull<DeviceBufferVMT>,
 }
 
 impl DeviceBuffer {
 	#[inline]
 	pub unsafe fn new(device_data: *mut u8, elems: usize, vmt: NonNull<DeviceBufferVMT>) -> Self {
-		Self {
-			device_data,
-			elems,
-			read_count: Cell::new(0),
-			write_count: Cell::new(0),
-			vmt,
-		}
+		Self { device_data, elems, vmt }
 	}
 
 	#[inline]
@@ -281,16 +269,6 @@ impl DeviceBuffer {
 		let (dev, _) = NonNull::from_ref(device).to_raw_parts();
 
 		my_dev == dev
-	}
-
-	#[inline]
-	pub fn try_borrow(&self) -> Result<DeviceBufferRef<'_>, BorrowError> {
-		DeviceBufferRef::new(self)
-	}
-
-	#[inline]
-	pub fn try_borrow_mut(&self) -> Result<DeviceBufferRefMut<'_>, BorrowMutError> {
-		DeviceBufferRefMut::new(self)
 	}
 
 	#[inline]
@@ -324,224 +302,39 @@ impl Drop for DeviceBuffer {
 
 //--------------------------------------------------------------------------------------------------
 
-impl Buffer for Rc<DeviceBuffer> {
+impl Buffer for Rc<mycell::RefCell<DeviceBuffer>> {
 	fn len(&self) -> usize {
 		self.elems
 	}
 }
 
-impl Buffer for &DeviceBuffer {
+impl Buffer for &mycell::RefCell<DeviceBuffer> {
 	fn len(&self) -> usize {
 		self.elems
 	}
 }
 
-impl<'a> Buffer for DeviceBufferRef<'a> {
+impl<'a> Buffer for mycell::BorrowGuard<'a, DeviceBuffer> {
 	fn len(&self) -> usize {
-		self.device_buffer.elems
+		self.elems
 	}
 }
 
-impl<'a> Buffer for DeviceBufferRefMut<'a> {
+impl<'a> Buffer for mycell::Ref<'a, DeviceBuffer> {
 	fn len(&self) -> usize {
-		self.device_buffer.elems
+		self.elems
 	}
 }
 
-//--------------------------------------------------------------------------------------------------
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct BorrowError;
-
-impl std::error::Error for BorrowError {}
-
-impl std::fmt::Display for BorrowError {
-	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-		write!(f, "Cannot borrow the device buffer")
+impl<'a> Buffer for mycell::BorrowMutGuard<'a, DeviceBuffer> {
+	fn len(&self) -> usize {
+		self.elems
 	}
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct BorrowMutError;
-
-impl std::error::Error for BorrowMutError {}
-
-impl std::fmt::Display for BorrowMutError {
-	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-		write!(f, "Cannot borrow the device buffer mutably")
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
-pub struct DeviceBufferRef<'a> {
-	device_buffer: &'a DeviceBuffer,
-}
-
-impl<'a> DeviceBufferRef<'a> {
-	pub fn new(device_buffer: &'a DeviceBuffer) -> Result<Self, BorrowError> {
-		let read_count = device_buffer.read_count.get();
-		let write_count = device_buffer.write_count.get();
-
-		if write_count != 0 {
-			cold_path();
-			return Err(BorrowError);
-		}
-
-		device_buffer.read_count.set(read_count + 1);
-		Ok(Self { device_buffer })
-	}
-
-	pub unsafe fn new_unsafe(device_buffer: &'a DeviceBuffer, fail: &mut usize) -> Self {
-		let read_count = device_buffer.read_count.get();
-		let write_count = device_buffer.write_count.get();
-
-		*fail |= write_count;
-
-		device_buffer.read_count.set(read_count + 1);
-		Self { device_buffer }
-	}
-
-	pub fn device_buffer(&self) -> &'a DeviceBuffer {
-		self.device_buffer
-	}
-}
-
-impl<'a> Clone for DeviceBufferRef<'a> {
-	fn clone(&self) -> Self {
-		let read_count = self.device_buffer.read_count.get();
-
-		debug_assert!(read_count > 0, "DeviceBufferRef: invalid counter state");
-
-		self.device_buffer.read_count.set(read_count + 1);
-		Self { device_buffer: self.device_buffer }
-	}
-}
-
-impl<'a> Drop for DeviceBufferRef<'a> {
-	fn drop(&mut self) {
-		let read_count = self.device_buffer.read_count.get();
-
-		debug_assert!(read_count > 0, "DeviceBufferRef: invalid counter state");
-
-		self.device_buffer.read_count.set(read_count - 1);
-	}
-}
-
-impl<'a> std::ops::Deref for DeviceBufferRef<'a> {
-	type Target = DeviceBuffer;
-
-	#[inline]
-	fn deref(&self) -> &DeviceBuffer {
-		self.device_buffer
-	}
-}
-
-impl<'a> From<DeviceBufferRefMut<'a>> for DeviceBufferRef<'a> {
-	fn from(value: DeviceBufferRefMut<'a>) -> Self {
-		let read_count = value.device_buffer.read_count.get();
-		let write_count = value.device_buffer.write_count.get();
-
-		debug_assert!(write_count > 0, "DeviceBufferRefMut: invalid counter state");
-
-		value.device_buffer.read_count.set(read_count + 1);
-		value.device_buffer.write_count.set(write_count - 1);
-		let result = Self { device_buffer: value.device_buffer };
-
-		std::mem::forget(value);
-		result
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
-pub fn check_borrows(c_fail: usize, m_fail: usize) -> Result<(), ErrPack<TensorOpError>> {
-	if (c_fail | m_fail) != 0 {
-		cold_path();
-		#[allow(clippy::redundant_else)]
-		if m_fail == 0 {
-			return Err(ErrPack {
-				code: TensorOpError::CannotBorrow,
-				extra: None,
-			});
-		} else {
-			return Err(ErrPack {
-				code: TensorOpError::CannotBorrowMut,
-				extra: None,
-			});
-		}
-	}
-	Ok(())
-}
-
-//--------------------------------------------------------------------------------------------------
-
-pub struct DeviceBufferRefMut<'a> {
-	device_buffer: &'a DeviceBuffer,
-}
-
-impl<'a> DeviceBufferRefMut<'a> {
-	pub fn new(device_buffer: &'a DeviceBuffer) -> Result<Self, BorrowMutError> {
-		let read_count = device_buffer.read_count.get();
-		let write_count = device_buffer.write_count.get();
-
-		if (read_count | write_count) != 0 {
-			cold_path();
-			return Err(BorrowMutError);
-		}
-
-		device_buffer.write_count.set(1);
-		Ok(Self { device_buffer })
-	}
-
-	pub unsafe fn new_unsafe(device_buffer: &'a DeviceBuffer, fail: &mut usize) -> Self {
-		let read_count = device_buffer.read_count.get();
-		let write_count = device_buffer.write_count.get();
-
-		*fail |= read_count | write_count;
-
-		device_buffer.write_count.set(write_count + 1);
-		Self { device_buffer }
-	}
-
-	pub fn device_buffer(&self) -> &'a DeviceBuffer {
-		self.device_buffer
-	}
-
-	/// We create a second mutable reference to the same buffer,
-	/// but it is safe because we take a mutable borrow of the first reference,
-	/// so it cannot be used.
-	///
-	/// We do however need to increment the write counter, because `Drop` will
-	/// decrement it.
-	pub fn reborrow_mut<'t>(&'t mut self) -> DeviceBufferRefMut<'t> {
-		let write_count = self.device_buffer.write_count.get();
-
-		debug_assert!(write_count > 0, "DeviceBufferRefMut: invalid counter state");
-
-		self.device_buffer.write_count.set(write_count + 1);
-		DeviceBufferRefMut { device_buffer: self.device_buffer }
-	}
-}
-
-impl<'a> Drop for DeviceBufferRefMut<'a> {
-	fn drop(&mut self) {
-		let write_count = self.device_buffer.write_count.get();
-
-		debug_assert!(write_count > 0, "DeviceBufferRefMut: invalid counter state");
-
-		self.device_buffer.write_count.set(write_count - 1);
-	}
-}
-
-impl<'a> std::ops::Deref for DeviceBufferRefMut<'a> {
-	type Target = DeviceBuffer;
-
-	#[inline]
-	fn deref(&self) -> &DeviceBuffer {
-		self.device_buffer
+impl<'a> Buffer for mycell::RefMut<'a, DeviceBuffer> {
+	fn len(&self) -> usize {
+		self.elems
 	}
 }
 
