@@ -21,6 +21,7 @@ use crate::tensor::generic::map::{
 	NotEnoughDimensionsError, ReshapeLastDimError, SelectError,
 };
 use crate::tensor::math::EvaluatesToTensor;
+use crate::util::LossyInto;
 use crate::util::mycell::{self, BorrowError, BorrowGuard, BorrowMutError, BorrowMutGuard};
 use crate::{ErrExtra, ErrPack};
 
@@ -176,7 +177,17 @@ impl Tensor {
 		map.offset = self.map().offset;
 		let buf = self.buf().try_borrow()?;
 		let scalar_tensor = unsafe { generic::Tensor::new_unchecked(map, buf) };
-		Ok(self.vmt().read_float(&scalar_tensor)?)
+		self.vmt().read_float(&scalar_tensor)
+	}
+
+	/// Sometimes we want to calculate the mean of the last dimension,
+	/// but our kernels only support summing.
+	///
+	/// This function returns the factor by which we need to multiply
+	/// the sum to get the mean.
+	pub fn sum_to_mean(&self) -> f64 {
+		let n = self.size(-1).unwrap_or(1);
+		1.0 / (n.lossy_into())
 	}
 
 	/// Returns the device on which the tensor is allocated.

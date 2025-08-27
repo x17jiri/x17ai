@@ -14,8 +14,8 @@ use super::{
 use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;
 use crate::tensor::generic::map::{
 	ElementsOverflowError, IncompatibleStridesError, IndexOutOfBoundsError,
-	InvalidNumElementsError, NDShape, Narrow, NarrowError, Select, SelectError, SpanDims,
-	StrideCounter, StrideCounterUnchecked, merge_dims,
+	InvalidNumElementsError, NDShape, Narrow, NarrowError, Select, SelectError, StrideCounter,
+	StrideCounterUnchecked, merge_dims,
 };
 use crate::tensor::generic::universal_range::UniversalRange;
 use crate::util::array;
@@ -119,32 +119,6 @@ where
 		}
 		dims[N - M] = merge_dims(&self.dims[N - M..N])?;
 		Ok(ND { dims, offset: self.offset })
-	}
-}
-
-impl<const N: usize, const M: usize> SpanDims<M> for ND<N>
-where
-	[(); N - M]:,
-	[(); N - M + 1]:,
-{
-	type Output = ND<{ N - M + 1 }>;
-	type Error = Infallible;
-
-	fn span_dims(&self) -> Result<ND<{ N - M + 1 }>, Infallible> {
-		let (keep, span) = self.dims.split_at(N - M);
-		let elems = span.iter().map(|dim| dim.size).product::<usize>();
-		let size = if elems == 0 {
-			cold_path();
-			0
-		} else {
-			span.iter().map(|dim| (dim.size - 1) * dim.stride).sum::<usize>() + 1
-		};
-		Ok(ND {
-			dims: std::array::from_fn(|i| {
-				if i < keep.len() { keep[i] } else { SizeAndStride { size, stride: 1 } }
-			}),
-			offset: self.offset,
-		})
 	}
 }
 

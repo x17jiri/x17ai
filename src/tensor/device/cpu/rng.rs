@@ -23,6 +23,8 @@ pub struct Rng {
 	pos: usize,
 }
 
+#[allow(clippy::inline_always)]
+#[allow(clippy::indexing_slicing)]
 impl Rng {
 	pub fn new_default() -> Self {
 		#[rustfmt::skip]
@@ -136,7 +138,7 @@ impl Rng {
 
 		if result.abs() >= 10.0 {
 			cold_path();
-			log::warn!("Rng::get_normal(): clamping {} to (-10.0, 10.0)", result);
+			log::warn!("Rng::get_normal(): clamping {result} to (-10.0, 10.0)");
 			return 0.0;
 		}
 

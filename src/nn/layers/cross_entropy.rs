@@ -59,7 +59,7 @@ impl LossFn for CrossEntropyLossFn {
 		let err_sums = err_sums.merge_all_dims()?;
 
 		let result = err_sums.new_empty(&[1], value.dtype())?;
-		result.assign(err_sums.mean())?;
+		result.assign(err_sums.sum() * err_sums.sum_to_mean())?;
 
 		Ok(result)
 	}

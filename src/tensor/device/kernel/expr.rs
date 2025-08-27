@@ -778,7 +778,6 @@ pub trait TensorOps {
 	type E: const Expr + ExprToDyn;
 
 	fn sum(self) -> ExprWrapper<SumExpr<Self::E>>;
-	fn mean(self) -> ExprWrapper<MulExpr<SumExpr<Self::E>, Scalar>>;
 	fn max(self) -> ExprWrapper<MaxExpr<Self::E>>;
 
 	fn exp(self) -> ExprWrapper<ExpExpr<Self::E>>;
@@ -796,13 +795,6 @@ impl<T: Wrappable> TensorOps for T {
 
 	fn sum(self) -> ExprWrapper<SumExpr<T::E>> {
 		ExprWrapper(SumExpr(self.wrap().0))
-	}
-
-	fn mean(self) -> ExprWrapper<MulExpr<SumExpr<T::E>, Scalar>> {
-		let expr = self.wrap().0;
-		let n = expr.a_tensor().and_then(|t| t.size(-1).ok()).unwrap_or(1);
-		let sum_to_mean = 1.0 / n.lossy_into();
-		ExprWrapper(MulExpr(SumExpr(expr), Scalar(sum_to_mean)))
 	}
 
 	fn max(self) -> ExprWrapper<MaxExpr<T::E>> {

@@ -59,8 +59,10 @@ impl Layer for RMSNorm {
 
 	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
 		let (inp, inp_backward) = inp_node.take();
+		let sum_to_mean = inp.sum_to_mean();
+
 		let magn_recip = inp.new_replace_tail(1, &[1])?;
-		magn_recip.assign((&inp * &inp).mean().sqrt().recip(self.eps))?;
+		magn_recip.assign(((&inp * &inp).sum() * sum_to_mean).sqrt().recip(self.eps))?;
 
 		let out = inp.reuse_or_new_like()?;
 		out.assign(&inp * &magn_recip)?;
@@ -103,9 +105,10 @@ impl BackwardFn for RMSNormBackwardFn_Precise {
 		queue: &mut autograd::Queue,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let Self { out, magn_recip, inp_backward } = Box::into_inner(self);
+		let sum_to_mean = out.sum_to_mean();
 
 		let g = magn_recip.new_empty_like()?; // [..., 1]
-		g.assign((&out * &d_out).mean())?;
+		g.assign((&out * &d_out).sum() * sum_to_mean)?;
 
 		let d_inp = out.reuse_or_new_like()?;
 

@@ -63,20 +63,6 @@ pub trait MergeAllDims {
 	fn merge_all_dims(&self) -> Result<Self::Output, Self::Error>;
 }
 
-pub trait SpanDims<const M: usize> {
-	type Output: Map;
-	type Error;
-
-	fn span_dims(&self) -> Result<Self::Output, Self::Error>;
-}
-
-pub trait SpanAllDims {
-	type Output: Map;
-	type Error;
-
-	fn span_all_dims(&self) -> Result<Self::Output, Self::Error>;
-}
-
 pub trait ReshapeLastDim<const M: usize> {
 	type Output: Map;
 	type Error;
@@ -369,30 +355,6 @@ where
 
 	fn merge_all_dims(&self) -> Result<Self::Output, Self::Error> {
 		(*self).merge_all_dims()
-	}
-}
-
-impl<T, const M: usize> SpanDims<M> for &T
-where
-	T: SpanDims<M>,
-{
-	type Output = T::Output;
-	type Error = T::Error;
-
-	fn span_dims(&self) -> Result<Self::Output, Self::Error> {
-		(*self).span_dims()
-	}
-}
-
-impl<T> SpanAllDims for &T
-where
-	T: SpanAllDims,
-{
-	type Output = T::Output;
-	type Error = T::Error;
-
-	fn span_all_dims(&self) -> Result<Self::Output, Self::Error> {
-		(*self).span_all_dims()
 	}
 }
 

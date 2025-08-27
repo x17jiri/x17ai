@@ -17,7 +17,7 @@ use dim_index::DimIndex;
 use map::{IndexToOffset, Map, MergeAllDims, MergeDims, ReshapeLastDim};
 
 use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;
-use crate::tensor::generic::map::{NDShape, Narrow, Select, SpanAllDims, SpanDims, Transpose};
+use crate::tensor::generic::map::{NDShape, Narrow, Select, Transpose};
 use crate::tensor::generic::universal_range::UniversalRange;
 use crate::{ErrExtra, ErrPack};
 
@@ -109,24 +109,6 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		B: Clone,
 	{
 		let new_map = self.map.merge_all_dims()?;
-		Ok(Tensor { buf: self.buf.clone(), map: new_map })
-	}
-
-	pub fn span_dims<const K: usize>(&self) -> Result<Tensor<M::Output, B>, M::Error>
-	where
-		M: SpanDims<K>,
-		B: Clone,
-	{
-		let new_map = self.map.span_dims()?;
-		Ok(Tensor { buf: self.buf.clone(), map: new_map })
-	}
-
-	pub fn span_all_dims(&self) -> Result<Tensor<M::Output, B>, M::Error>
-	where
-		M: SpanAllDims,
-		B: Clone,
-	{
-		let new_map = self.map.span_all_dims()?;
 		Ok(Tensor { buf: self.buf.clone(), map: new_map })
 	}
 

@@ -86,9 +86,10 @@ impl<Nested: Layer> Layer for Wrapper<Nested> {
 
 	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
 		let (inp, backward_fn) = inp_node.take();
+		let sum_to_mean = inp.sum_to_mean();
 
 		let inp_magn_recip = inp.new_replace_tail(1, &[1])?;
-		inp_magn_recip.assign((&inp * &inp).mean().sqrt().recip(self.eps))?;
+		inp_magn_recip.assign(((&inp * &inp).sum() * sum_to_mean).sqrt().recip(self.eps))?;
 
 		let rms_norm = if self.norm_pos != NormPosition::Inside && inp.owns_buffer() {
 			inp.clone()
@@ -120,8 +121,9 @@ impl<Nested: Layer> Layer for Wrapper<Nested> {
 				})),
 			);
 			let (nested_out, nested_out_fn) = self.nested.forward(nested_inp)?.take();
+			let sum_to_mean = nested_out.sum_to_mean();
 
-			inner.ratio.assign((&nested_out * &nested_out).mean().sqrt())?;
+			inner.ratio.assign(((&nested_out * &nested_out).sum() * sum_to_mean).sqrt())?;
 			if self.norm_pos == NormPosition::Inside {
 				inner.ratio.assign(&inner.ratio * &inp_magn_recip)?;
 			}
@@ -190,13 +192,15 @@ impl BackwardFn for WrapperBackwardFn_Split {
 		let inner = refcell.into_inner();
 		let WrapperBackwardFn_Inner { d_residual, ratio } = inner;
 		let d_out = d_residual.unwrap();
+		let sum_to_mean = d_out.sum_to_mean();
 
 		let d_nested_magn_recip = ratio.new_empty_like()?;
-		d_nested_magn_recip.assign((&d_nested * &d_nested).mean().sqrt().recip(eps))?;
+		d_nested_magn_recip
+			.assign(((&d_nested * &d_nested).sum() * sum_to_mean).sqrt().recip(eps))?;
 		ratio.assign(&ratio * &d_nested_magn_recip)?;
 
 		let d_out_magn = d_nested_magn_recip; // reuse tensor with different variable name
-		d_out_magn.assign((&d_out * &d_out).mean().sqrt())?;
+		d_out_magn.assign(((&d_out * &d_out).sum() * sum_to_mean).sqrt())?;
 		ratio.assign(&ratio * &d_out_magn)?;
 
 		let d_inp = d_out.reuse_or_new_like()?;
@@ -205,7 +209,7 @@ impl BackwardFn for WrapperBackwardFn_Split {
 		std::mem::drop(d_nested);
 
 		let d_inp_magn_recip = ratio; // reuse tensor with different variable name
-		d_inp_magn_recip.assign((&d_inp * &d_inp).mean().sqrt().recip(eps))?;
+		d_inp_magn_recip.assign(((&d_inp * &d_inp).sum() * sum_to_mean).sqrt().recip(eps))?;
 		d_out_magn.assign(&d_out_magn * &d_inp_magn_recip)?;
 		std::mem::drop(d_inp_magn_recip);
 

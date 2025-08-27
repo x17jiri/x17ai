@@ -5,7 +5,6 @@
 //
 //------------------------------------------------------------------------------
 
-use core::borrow;
 use std::cell::Cell;
 use std::hint::cold_path;
 
@@ -64,6 +63,43 @@ impl<T> RefCell<T> {
 	}
 }
 
+impl<T: ?Sized> RefCell<T> {
+	pub fn try_borrow(&self) -> Result<BorrowGuard<T>, BorrowError> {
+		BorrowGuard::new(self)
+	}
+
+	/// # Safety
+	///
+	/// If `fail` flag is set to failed, the returned object must be dropped without being used.
+	pub unsafe fn unsafe_borrow(&self, fail: &mut UnsafeBorrowFailFlag) -> BorrowGuard<T> {
+		unsafe { BorrowGuard::new_unsafe(self, fail) }
+	}
+
+	pub fn try_borrow_mut(&self) -> Result<BorrowMutGuard<T>, BorrowMutError> {
+		BorrowMutGuard::new(self)
+	}
+
+	/// # Safety
+	///
+	/// If `fail` flag is set to failed, the returned object must be dropped without being used.
+	pub unsafe fn unsafe_borrow_mut(
+		&self,
+		fail: &mut UnsafeBorrowMutFailFlag,
+	) -> BorrowMutGuard<T> {
+		unsafe { BorrowMutGuard::new_unsafe(self, fail) }
+	}
+}
+
+impl<'a, T: ?Sized> std::ops::Deref for RefCell<T> {
+	type Target = T;
+
+	fn deref(&self) -> &T {
+		&self.value
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
 pub struct UnsafeBorrowFailFlag(isize);
 
 impl Default for UnsafeBorrowFailFlag {
@@ -90,6 +126,73 @@ impl UnsafeBorrowFailFlag {
 		}
 	}
 }
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct BorrowGuard<'a, T: ?Sized + 'a> {
+	value: &'a RefCell<T>,
+}
+
+impl<'a, T: ?Sized + 'a> BorrowGuard<'a, T> {
+	pub fn new(value: &'a RefCell<T>) -> Result<Self, BorrowError> {
+		let borrow_count = value.borrow_counter.get();
+		if borrow_count < 0 {
+			cold_path();
+			Err(BorrowError)
+		} else {
+			value.borrow_counter.set(borrow_count + 1);
+			Ok(BorrowGuard { value })
+		}
+	}
+
+	/// # Safety
+	///
+	/// If `fail` flag is set to failed, the returned object must be dropped without being used.
+	pub unsafe fn new_unsafe(value: &'a RefCell<T>, fail: &mut UnsafeBorrowFailFlag) -> Self {
+		let borrow_count = value.borrow_counter.get();
+		fail.0 |= borrow_count;
+
+		value.borrow_counter.set(borrow_count + 1);
+		BorrowGuard { value }
+	}
+
+	pub fn as_ref<'t>(&'t self) -> Ref<'t, T> {
+		Ref { value: self.value }
+	}
+}
+
+impl<'a, T: ?Sized> Drop for BorrowGuard<'a, T> {
+	fn drop(&mut self) {
+		let borrow_count = self.value.borrow_counter.get();
+		debug_assert!(borrow_count > 0);
+		self.value.borrow_counter.set(borrow_count - 1);
+	}
+}
+
+impl<'a, T: ?Sized> std::ops::Deref for BorrowGuard<'a, T> {
+	type Target = T;
+
+	fn deref(&self) -> &T {
+		&self.value.value
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+pub struct Ref<'a, T: ?Sized + 'a> {
+	value: &'a RefCell<T>,
+}
+
+impl<'a, T: ?Sized> std::ops::Deref for Ref<'a, T> {
+	type Target = T;
+
+	fn deref(&self) -> &T {
+		&self.value.value
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
 
 pub struct UnsafeBorrowMutFailFlag(isize);
 
@@ -118,99 +221,6 @@ impl UnsafeBorrowMutFailFlag {
 	}
 }
 
-impl<T: ?Sized> RefCell<T> {
-	pub unsafe fn unsafe_borrow(&self, fail: &mut UnsafeBorrowFailFlag) -> BorrowGuard<T> {
-		let borrow_count = self.borrow_counter.get();
-		fail.0 |= borrow_count;
-
-		self.borrow_counter.set(borrow_count + 1);
-		BorrowGuard { value: self }
-	}
-
-	pub fn try_borrow(&self) -> Result<BorrowGuard<T>, BorrowError> {
-		let borrow_count = self.borrow_counter.get();
-		if borrow_count < 0 {
-			cold_path();
-			Err(BorrowError)
-		} else {
-			self.borrow_counter.set(borrow_count + 1);
-			Ok(BorrowGuard { value: self })
-		}
-	}
-
-	pub unsafe fn unsafe_borrow_mut(
-		&self,
-		fail: &mut UnsafeBorrowMutFailFlag,
-	) -> BorrowMutGuard<T> {
-		let borrow_count = self.borrow_counter.get();
-		fail.0 |= borrow_count;
-
-		self.borrow_counter.set(borrow_count - 1);
-		BorrowMutGuard { value: self }
-	}
-
-	pub fn try_borrow_mut(&self) -> Result<BorrowMutGuard<T>, BorrowMutError> {
-		let borrow_count = self.borrow_counter.get();
-		if borrow_count != 0 {
-			cold_path();
-			Err(BorrowMutError)
-		} else {
-			self.borrow_counter.set(borrow_count - 1);
-			Ok(BorrowMutGuard { value: self })
-		}
-	}
-}
-
-impl<'a, T: ?Sized> std::ops::Deref for RefCell<T> {
-	type Target = T;
-
-	fn deref(&self) -> &T {
-		&self.value
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
-pub struct BorrowGuard<'a, T: ?Sized + 'a> {
-	value: &'a RefCell<T>,
-}
-
-impl<'a, T: ?Sized + 'a> BorrowGuard<'a, T> {
-	pub fn as_ref<'t>(&'t self) -> Ref<'t, T> {
-		Ref { value: self.value }
-	}
-}
-
-impl<'a, T: ?Sized> Drop for BorrowGuard<'a, T> {
-	fn drop(&mut self) {
-		let borrow_count = self.value.borrow_counter.get();
-		debug_assert!(borrow_count > 0);
-		self.value.borrow_counter.set(borrow_count - 1);
-	}
-}
-
-impl<'a, T: ?Sized> std::ops::Deref for BorrowGuard<'a, T> {
-	type Target = T;
-
-	fn deref(&self) -> &T {
-		&self.value.value
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
-pub struct Ref<'a, T: ?Sized + 'a> {
-	value: &'a RefCell<T>,
-}
-
-impl<'a, T: ?Sized> std::ops::Deref for Ref<'a, T> {
-	type Target = T;
-
-	fn deref(&self) -> &T {
-		&self.value.value
-	}
-}
-
 //--------------------------------------------------------------------------------------------------
 
 pub struct BorrowMutGuard<'a, T: ?Sized + 'a> {
@@ -218,6 +228,28 @@ pub struct BorrowMutGuard<'a, T: ?Sized + 'a> {
 }
 
 impl<'a, T: ?Sized + 'a> BorrowMutGuard<'a, T> {
+	pub fn new(value: &'a RefCell<T>) -> Result<Self, BorrowMutError> {
+		let borrow_count = value.borrow_counter.get();
+		if borrow_count != 0 {
+			cold_path();
+			Err(BorrowMutError)
+		} else {
+			value.borrow_counter.set(borrow_count - 1);
+			Ok(BorrowMutGuard { value })
+		}
+	}
+
+	/// # Safety
+	///
+	/// If `fail` flag is set to failed, the returned object must be dropped without being used.
+	pub unsafe fn new_unsafe(value: &'a RefCell<T>, fail: &mut UnsafeBorrowMutFailFlag) -> Self {
+		let borrow_count = value.borrow_counter.get();
+		fail.0 |= borrow_count;
+
+		value.borrow_counter.set(borrow_count - 1);
+		BorrowMutGuard { value }
+	}
+
 	pub fn as_mut<'t>(&'t mut self) -> RefMut<'t, T> {
 		RefMut { value: self.value }
 	}
