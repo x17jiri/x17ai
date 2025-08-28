@@ -7,12 +7,11 @@
 
 use std::hint::cold_path;
 
-use crate::ErrPack;
-use crate::tensor::device::kernel::expr::TensorOps;
 use crate::tensor::dim_merger::DimMerger;
 use crate::tensor::generic::map::{ND, NotEnoughDimensionsError, SizeAndStride};
 use crate::tensor::{Tensor, TensorOpError, generic};
 use crate::util::mycell::{UnsafeBorrowFailFlag, UnsafeBorrowMutFailFlag};
+use crate::{ErrPack, custom_kernel};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -35,10 +34,18 @@ pub trait EvaluatesToColMatrix {
 pub fn approx_eq(a: &Tensor, b: &Tensor, eps: f64) -> Result<bool, ErrPack<TensorOpError>> {
 	// TODO - `a` may be broadcasted in which case the `diff` shape is wrong
 	let diff = a.new_empty_like()?;
-	diff.assign((a - b).abs())?;
+	diff.assign(custom_kernel!(
+		[a: a, b: b], (), {
+			(a - b).abs()
+		}
+	))?;
 	let diff = diff.merge_all_dims()?;
 	let max = a.new_empty(&[1], diff.dtype())?;
-	max.assign(diff.max())?;
+	max.assign(custom_kernel!(
+		[diff: &diff], (), {
+			diff.max()
+		}
+	))?;
 	Ok(max.scalar()? <= eps)
 }
 

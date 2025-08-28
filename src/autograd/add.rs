@@ -5,9 +5,9 @@
 //
 //------------------------------------------------------------------------------
 
-use crate::ErrPack;
 use crate::autograd::{self, AutogradNode, BackwardFn};
 use crate::tensor::{Tensor, TensorOpError};
+use crate::{ErrPack, custom_kernel};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -22,7 +22,11 @@ pub fn add(
 		std::mem::swap(&mut a, &mut b);
 	}
 	let c = if a.owns_buffer() { a.clone() } else { a.new_empty_like()? };
-	c.assign(&a + &b)?;
+	c.assign(custom_kernel!(
+		[a: &a, b: &b], (), {
+			a + b
+		}
+	))?;
 
 	#[allow(clippy::collapsible_else_if)]
 	#[allow(clippy::option_if_let_else)]

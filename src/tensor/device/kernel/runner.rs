@@ -7,32 +7,17 @@
 
 use std::cell::UnsafeCell;
 use std::hint::{cold_path, likely};
-use std::mem::MaybeUninit;
 use std::sync::{Arc, RwLock};
 
 use crate::ErrPack;
 use crate::tensor::device::DeviceBuffer;
 use crate::tensor::device::buffer::{KernelElemArg, KernelOutput, KernelReduceArg};
-use crate::tensor::device::kernel::expr::{DynExpr, Expr, ExprDiscriminant, ExprToDyn};
+use crate::tensor::device::kernel::expr::{DynExpr, ExprToDyn, ExprTrait};
 use crate::tensor::device::kernel::registry::{KernelMap, KernelRegistry};
 use crate::tensor::dim_merger::DimMerger;
 use crate::tensor::generic::map::SizeAndStride;
 use crate::tensor::{Tensor, TensorOpError};
 use crate::util::mycell::{BorrowGuard, UnsafeBorrowFailFlag, UnsafeBorrowMutFailFlag};
-
-//--------------------------------------------------------------------------------------------------
-
-pub const KEY_BATCH_SIZE: usize =
-	std::mem::size_of::<u64>() / std::mem::size_of::<ExprDiscriminant>();
-
-union KeyUnion<const PADDED_KEY_LEN: usize, const BATCHED_KEY_LEN: usize>
-where
-	[(); PADDED_KEY_LEN]:,
-	[(); BATCHED_KEY_LEN]:,
-{
-	discriminants: [ExprDiscriminant; PADDED_KEY_LEN],
-	key: [u64; BATCHED_KEY_LEN],
-}
 
 //--------------------------------------------------------------------------------------------------
 
@@ -64,47 +49,9 @@ impl KernelRunner {
 		}
 	}
 
-	#[inline]
-	#[allow(clippy::panic_in_result_fn)]
-	pub fn run<E: const Expr + ExprToDyn>(
-		&self,
-		output: &Tensor,
-		expr: E,
-	) -> Result<(), ErrPack<TensorOpError>>
-	where
-		[(); 1 - E::REDUCE_OP_COUNT]:, // REDUCE_OP_COUNT <= 1
-		[(); E::ELEMWISE_COUNT]:,
-		[(); E::REDUCE_COUNT]:,
-		[(); E::SCALAR_COUNT]:,
-		[(); E::PADDED_KEY_LEN]:,
-		[(); E::BATCHED_KEY_LEN]:,
-		[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
-	{
-		if E::CONST {
-			let mut elem_args = [MaybeUninit::uninit(); E::ELEMWISE_COUNT];
-			let cnt = expr.elemwise_tensors(&mut elem_args, 0);
-			assert!(cnt == E::ELEMWISE_COUNT);
-			let elem_args = unsafe { MaybeUninit::array_assume_init(elem_args) };
-
-			let mut reduce_args = [MaybeUninit::uninit(); E::REDUCE_COUNT];
-			let cnt = expr.reduce_tensors(&mut reduce_args, 0);
-			assert!(cnt == E::REDUCE_COUNT);
-			let reduce_args = unsafe { MaybeUninit::array_assume_init(reduce_args) };
-
-			let mut scalar_args = [0_f64; E::SCALAR_COUNT];
-			let cnt = expr.scalars(&mut scalar_args, 0);
-			assert!(cnt == E::SCALAR_COUNT);
-			let scalar_args = scalar_args;
-
-			self.run_const(output, elem_args, reduce_args, scalar_args)
-		} else {
-			todo!("non-constant exprs not implemented yet");
-		}
-	}
-
 	#[inline(never)]
 	#[allow(clippy::panic_in_result_fn)]
-	fn run_const<E: const Expr + ExprToDyn>(
+	pub fn run<E: const ExprTrait + ExprToDyn>(
 		&self,
 		output: &Tensor,
 		elem_args: [&Tensor; E::ELEMWISE_COUNT],
@@ -116,17 +63,13 @@ impl KernelRunner {
 		[(); E::BATCHED_KEY_LEN]:,
 		[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
 	{
-		let (key, key_hash) = const { Self::const_key::<E>() };
+		let (key, key_hash) = const { E::key() };
 		let cache = unsafe { &mut *self.cache.get() };
 		let entry = if let Some(entry) = cache.find(&key, key_hash) {
 			entry
 		} else {
 			cold_path();
-			let (mut e, mut r, mut s) = (0, 0, 0);
-			let dyn_expr = E::to_dyn(&mut e, &mut r, &mut s, false);
-			assert!(e == E::ELEMWISE_COUNT);
-			assert!(r == E::REDUCE_COUNT);
-			assert!(s == E::SCALAR_COUNT);
+			let dyn_expr = E::to_dyn(E::ELEMWISE_MASK, E::REDUCE_MASK, E::SCALAR_MASK, false);
 
 			let mut registry = self.registry.write().unwrap();
 			let kernel = registry.add_kernel(&key, key_hash, |id| {
@@ -144,29 +87,13 @@ impl KernelRunner {
 			cache.insert_unique(key_hash, kernel)
 		};
 		let kernel = entry.value.as_ref();
-		Self::dispatch(kernel, output, elem_args, reduce_args, scalar_args)
-	}
-
-	#[allow(clippy::indexing_slicing)]
-	const fn const_key<E: const Expr>() -> ([u64; E::BATCHED_KEY_LEN], u64)
-	where
-		[(); E::PADDED_KEY_LEN]:,
-	{
-		let mut discriminants = [ExprDiscriminant::Invalid; E::PADDED_KEY_LEN];
-		let len = E::key(&mut discriminants, 0);
-		assert!(len == E::KEY_LEN);
-
-		let key_union = KeyUnion { discriminants };
-		let key = unsafe { key_union.key };
-		let key_hash = KernelMap::hash_key(&key);
-
-		(key, key_hash)
+		Self::__run(kernel, output, elem_args, reduce_args, scalar_args)
 	}
 
 	#[inline(never)]
 	#[allow(clippy::indexing_slicing)]
 	#[allow(clippy::too_many_lines)]
-	fn dispatch<const E: usize, const R: usize, const C: usize>(
+	fn __run<const E: usize, const R: usize, const C: usize>(
 		kernel_data: &KernelData,
 		output: &Tensor,
 		elem_args: [&Tensor; E],

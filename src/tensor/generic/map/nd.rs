@@ -194,7 +194,7 @@ where
 			return Err(SelectError::DimIndexOutOfBounds);
 		}
 
-		let removed_dim = &self.dims[dim];
+		let removed_dim = self.dims[dim];
 		if index >= removed_dim.size {
 			cold_path();
 			return Err(SelectError::IndexOutOfBounds);

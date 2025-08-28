@@ -5,12 +5,11 @@
 //
 //------------------------------------------------------------------------------
 
-use crate::ErrPack;
 use crate::autograd::{self, AutogradNode, BackwardFn, LossFn};
 use crate::nn::layers::Layer;
 use crate::nn::layers::softmax::{Softmax, SoftmaxGradientMode};
-use crate::tensor::device::kernel::expr::TensorOps;
 use crate::tensor::{Tensor, TensorOpError};
+use crate::{ErrPack, custom_kernel};
 
 pub struct CrossEntropy {
 	softmax: Softmax,
@@ -54,12 +53,20 @@ impl LossFn for CrossEntropyLossFn {
 		let target = &self.target;
 
 		let err_sums = value.new_replace_tail(1, &[1])?;
-		err_sums.assign((target * value.ln_clamped()).sum())?;
+		err_sums.assign(custom_kernel!(
+			[target: &target, value: &value], (), {
+				(target * value.ln()).sum()
+			}
+		))?;
 
 		let err_sums = err_sums.merge_all_dims()?;
 
 		let result = err_sums.new_empty(&[1], value.dtype())?;
-		result.assign(err_sums.sum() * err_sums.sum_to_mean())?;
+		result.assign(custom_kernel!(
+			[err_sums: &err_sums], (sum_to_mean: err_sums.sum_to_mean()), {
+				err_sums.sum() * sum_to_mean
+			}
+		))?;
 
 		Ok(result)
 	}
@@ -67,7 +74,11 @@ impl LossFn for CrossEntropyLossFn {
 	fn backward(self: Box<Self>) -> Result<(), ErrPack<TensorOpError>> {
 		let Self { value, target, inp_backward } = Box::into_inner(self);
 		let d_inp = value.new_empty_like()?;
-		d_inp.assign(&value - &target)?;
+		d_inp.assign(custom_kernel!(
+			[value: &value, target: &target], (), {
+				value - target
+			}
+		))?;
 		autograd::run(inp_backward, d_inp)?;
 		Ok(())
 	}

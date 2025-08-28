@@ -7,7 +7,6 @@
 
 use super::super::linear::*;
 
-use crate::ErrPack;
 use crate::autograd::{self, AutogradNode, GradientCapture};
 use crate::nn::ModelContext;
 use crate::nn::layers::Layer;
@@ -15,6 +14,7 @@ use crate::nn::layers::wrapper::Wrapper;
 use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::math::approx_eq;
 use crate::tensor::{HasDType, Tensor, TensorOpError};
+use crate::{ErrPack, custom_kernel};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -40,7 +40,9 @@ fn test_wrapper() -> Result<(), ErrPack<TensorOpError>> {
 		[-3.5822,  5.1029,  0.5198, -2.1559],
 	])?;
 
-	#[rustfmt::skip] wrapper.nested.weights().borrow().value().assign(&weights)?;
+	#[rustfmt::skip] wrapper.nested.weights().borrow().value().assign(custom_kernel!(
+		[w: &weights], (), w)
+	)?;
 
 	#[rustfmt::skip] let inp = lit.new_2d(&[
 		[-2.7016,  2.2977, -1.3401,  0.8465],

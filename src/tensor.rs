@@ -181,10 +181,14 @@ impl Tensor {
 	}
 
 	/// Sometimes we want to calculate the mean of the last dimension,
-	/// but our kernels only support summing.
+	/// but our custom kernels only support `sum()`.
 	///
 	/// This function returns the factor by which we need to multiply
 	/// the sum to get the mean.
+	///
+	/// I.e., it returns `1.0 / self.size(-1)`.
+	///
+	/// If the tensor has no dimensions, the return value is 1.0.
 	pub fn sum_to_mean(&self) -> f64 {
 		let n = self.size(-1).unwrap_or(1);
 		1.0 / (n.lossy_into())

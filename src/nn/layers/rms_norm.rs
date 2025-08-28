@@ -8,11 +8,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::ErrPack;
 use crate::autograd::{self, AutogradNode, BackwardFn, StraightThroughBackwardFn};
 use crate::nn::param::Param;
-use crate::tensor::device::kernel::expr::TensorOps;
 use crate::tensor::{Tensor, TensorOpError};
+use crate::{ErrPack, custom_kernel};
 
 use super::Layer;
 
@@ -62,10 +61,18 @@ impl Layer for RMSNorm {
 		let sum_to_mean = inp.sum_to_mean();
 
 		let magn_recip = inp.new_replace_tail(1, &[1])?;
-		magn_recip.assign(((&inp * &inp).sum() * sum_to_mean).sqrt().recip(self.eps))?;
+		magn_recip.assign(custom_kernel!(
+			[inp: &inp], (sum_to_mean: sum_to_mean, eps: self.eps), {
+				(((inp * inp).sum() * sum_to_mean).sqrt() + eps).recip()
+			}
+		))?;
 
 		let out = inp.reuse_or_new_like()?;
-		out.assign(&inp * &magn_recip)?;
+		out.assign(custom_kernel!(
+			[inp: &inp, magn_recip: &magn_recip], (), {
+				inp * magn_recip
+			}
+		))?;
 
 		let backward_fn = inp_backward.map(|inp_backward| match self.gradient_mode {
 			RMSNormGradientMode::Precise => {
@@ -108,11 +115,19 @@ impl BackwardFn for RMSNormBackwardFn_Precise {
 		let sum_to_mean = out.sum_to_mean();
 
 		let g = magn_recip.new_empty_like()?; // [..., 1]
-		g.assign((&out * &d_out).sum() * sum_to_mean)?;
+		g.assign(custom_kernel!(
+			[out: &out, d_out: &d_out], (sum_to_mean: sum_to_mean), {
+				(out * d_out).sum() * sum_to_mean
+			}
+		))?;
 
 		let d_inp = out.reuse_or_new_like()?;
 
-		d_inp.assign((&d_out - (&out * &g)) * &magn_recip)?;
+		d_inp.assign(custom_kernel!(
+			[d_out: &d_out, out: &out, g: &g, magn_recip: &magn_recip], (), {
+				(d_out - (out * g)) * magn_recip
+			}
+		))?;
 
 		queue.add(inp_backward, d_inp);
 		Ok(())

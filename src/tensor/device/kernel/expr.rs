@@ -5,20 +5,49 @@
 //
 //------------------------------------------------------------------------------
 
-use std::mem::MaybeUninit;
 use std::sync::Arc;
 
 use crate::ErrPack;
+use crate::tensor::device::kernel::registry::KernelMap;
 use crate::tensor::math::EvaluatesToTensor;
 use crate::tensor::{Tensor, TensorOpError};
-use crate::util::LossyInto;
+
+//--------------------------------------------------------------------------------------------------
+
+#[macro_export]
+macro_rules! custom_kernel {
+	(
+        [ $($tensor_id:ident : $tensor_expr:expr),* $(,)? ],
+        ( $($scalar_id:ident : $scalar_expr:expr),* $(,)? ),
+        $body:expr
+    ) => {{
+		$crate::tensor::device::kernel::expr::KernelCall::new(
+			[ $($tensor_expr),* ],
+			[ $($scalar_expr),* ],
+			{
+				$(
+					let $tensor_id = $crate::tensor::device::kernel::expr::Expr(
+						$crate::tensor::device::kernel::expr::TensorArg::<${index()}>
+					);
+				)*
+				$(
+					let $scalar_id = $crate::tensor::device::kernel::expr::Expr(
+						$crate::tensor::device::kernel::expr::ScalarArg::<${index()}>
+					);
+				)*
+				$body
+			}
+		)
+	}};
+}
 
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum ExprDiscriminant {
-	TensorArg,
+	ElemwiseTensorArg,
+	ReduceTensorArg,
 	ScalarArg,
 
 	SumExpr,
@@ -26,16 +55,16 @@ pub enum ExprDiscriminant {
 
 	RandnExpr,
 
+	NegExpr,
 	ExpExpr,
+	LnExpr,
 	AbsExpr,
-	SigmoidExpr,
-	SwishExpr,
 	SqrtExpr,
-	LnClampedExpr,
+	RecipExpr,
 
 	AddExpr,
+	SubExpr,
 	MulExpr,
-	RecipExpr,
 
 	Invalid,
 }
@@ -52,230 +81,198 @@ pub enum DynExpr {
 
 	RandnExpr(),
 
+	NegExpr(Arc<DynExpr>),
 	ExpExpr(Arc<DynExpr>),
+	LnExpr(Arc<DynExpr>),
 	AbsExpr(Arc<DynExpr>),
-	SigmoidExpr(Arc<DynExpr>),
-	SwishExpr(Arc<DynExpr>),
 	SqrtExpr(Arc<DynExpr>),
-	LnClampedExpr(Arc<DynExpr>),
+	RecipExpr(Arc<DynExpr>),
 
 	AddExpr(Arc<DynExpr>, Arc<DynExpr>),
+	SubExpr(Arc<DynExpr>, Arc<DynExpr>),
 	MulExpr(Arc<DynExpr>, Arc<DynExpr>),
-	RecipExpr(Arc<DynExpr>, Arc<DynExpr>),
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub const KEY_BATCH_SIZE: usize = std::mem::size_of::<u64>();
+
+union KeyUnion<const PADDED_KEY_LEN: usize, const BATCHED_KEY_LEN: usize>
+where
+	[(); PADDED_KEY_LEN]:,
+	[(); BATCHED_KEY_LEN]:,
+{
+	id: [u8; PADDED_KEY_LEN],
+	key: [u64; BATCHED_KEY_LEN],
 }
 
 //--------------------------------------------------------------------------------------------------
 
 #[const_trait]
-pub trait Expr {
-	const CONST: bool;
-	const ELEMWISE_COUNT: usize;
-	const REDUCE_COUNT: usize;
-	const SCALAR_COUNT: usize;
+pub trait ExprTrait {
+	const ELEMWISE_MASK: u64;
+	const REDUCE_MASK: u64;
+	const SCALAR_MASK: u64;
+
+	const ELEMWISE_COUNT: usize = Self::ELEMWISE_MASK.count_ones() as usize;
+	const REDUCE_COUNT: usize = Self::REDUCE_MASK.count_ones() as usize;
+	const SCALAR_COUNT: usize = Self::SCALAR_MASK.count_ones() as usize;
+
 	const REDUCE_OP_COUNT: usize;
+
 	const KEY_LEN: usize;
-	const PADDED_KEY_LEN: usize = Self::KEY_LEN.next_multiple_of(super::runner::KEY_BATCH_SIZE);
-	const BATCHED_KEY_LEN: usize = Self::PADDED_KEY_LEN / super::runner::KEY_BATCH_SIZE;
+	const PADDED_KEY_LEN: usize = Self::KEY_LEN.next_multiple_of(KEY_BATCH_SIZE);
+	const BATCHED_KEY_LEN: usize = Self::PADDED_KEY_LEN / KEY_BATCH_SIZE;
 
-	fn key(id: &mut [ExprDiscriminant], i: usize) -> usize;
-	fn elemwise_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't;
-	fn reduce_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't;
-	fn scalars(&self, scalars: &mut [f64], i: usize) -> usize;
+	fn set_key(em: u64, rm: u64, sm: u64, reduce: bool, id: &mut [u8], i: usize) -> usize;
 
-	fn a_tensor(&self) -> Option<&Tensor>;
+	#[allow(clippy::indexing_slicing)]
+	fn key() -> ([u64; Self::BATCHED_KEY_LEN], u64)
+	where
+		[(); Self::PADDED_KEY_LEN]:,
+	{
+		let mut id = [255; Self::PADDED_KEY_LEN];
+		let len = Self::set_key(
+			Self::ELEMWISE_MASK,
+			Self::REDUCE_MASK,
+			Self::SCALAR_MASK,
+			false,
+			&mut id,
+			0,
+		);
+		assert!(len == Self::KEY_LEN);
+
+		let key_union = KeyUnion { id };
+		let key = unsafe { key_union.key };
+		let key_hash = KernelMap::hash_key(&key);
+
+		(key, key_hash)
+	}
 }
 
 pub trait ExprToDyn {
-	fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr>;
+	fn to_dyn(e_mask: u64, r_mask: u64, s_mask: u64, reduce: bool) -> Arc<DynExpr>;
 }
 
-pub struct Scalar(pub f64);
+#[derive(Clone, Copy)]
+pub struct TensorArg<const Idx: usize>;
+#[derive(Clone, Copy)]
+pub struct ScalarArg<const Idx: usize>;
 
-pub struct SumExpr<A: Expr + ExprToDyn>(pub A);
-pub struct MaxExpr<A: Expr + ExprToDyn>(pub A);
+#[derive(Clone, Copy)]
+pub struct SumExpr<A: const ExprTrait + ExprToDyn>(pub A);
+#[derive(Clone, Copy)]
+pub struct MaxExpr<A: const ExprTrait + ExprToDyn>(pub A);
 
-pub struct RandnExpr();
+#[derive(Clone, Copy)]
+pub struct RandnExpr;
 
-pub struct ExpExpr<A: Expr + ExprToDyn>(pub A);
-pub struct AbsExpr<A: Expr + ExprToDyn>(pub A);
-pub struct SigmoidExpr<A: Expr + ExprToDyn>(pub A);
-pub struct SwishExpr<A: Expr + ExprToDyn>(pub A);
-pub struct SqrtExpr<A: Expr + ExprToDyn>(pub A);
-pub struct LnClampedExpr<A: Expr + ExprToDyn>(pub A);
+#[derive(Clone, Copy)]
+pub struct NegExpr<A: const ExprTrait + ExprToDyn>(pub A);
+#[derive(Clone, Copy)]
+pub struct ExpExpr<A: const ExprTrait + ExprToDyn>(pub A);
+#[derive(Clone, Copy)]
+pub struct LnExpr<A: const ExprTrait + ExprToDyn>(pub A);
+#[derive(Clone, Copy)]
+pub struct AbsExpr<A: const ExprTrait + ExprToDyn>(pub A);
+#[derive(Clone, Copy)]
+pub struct SqrtExpr<A: const ExprTrait + ExprToDyn>(pub A);
+#[derive(Clone, Copy)]
+pub struct RecipExpr<A: const ExprTrait + ExprToDyn>(pub A);
 
-pub struct AddExpr<A: Expr + ExprToDyn, B: Expr + ExprToDyn>(pub A, pub B);
-pub struct MulExpr<A: Expr + ExprToDyn, B: Expr + ExprToDyn>(pub A, pub B);
-pub struct RecipExpr<A: Expr + ExprToDyn, B: Expr + ExprToDyn>(pub A, pub B);
+#[derive(Clone, Copy)]
+pub struct AddExpr<A: const ExprTrait + ExprToDyn, B: const ExprTrait + ExprToDyn>(pub A, pub B);
+#[derive(Clone, Copy)]
+pub struct SubExpr<A: const ExprTrait + ExprToDyn, B: const ExprTrait + ExprToDyn>(pub A, pub B);
+#[derive(Clone, Copy)]
+pub struct MulExpr<A: const ExprTrait + ExprToDyn, B: const ExprTrait + ExprToDyn>(pub A, pub B);
 
 //--------------------------------------------------------------------------------------------------
 
-#[allow(clippy::inline_always)]
-#[allow(clippy::indexing_slicing)]
-impl<'a> const Expr for &'a Tensor {
-	const CONST: bool = true;
-	const ELEMWISE_COUNT: usize = 1;
-	const REDUCE_COUNT: usize = 0;
-	const SCALAR_COUNT: usize = 0;
+impl<const Idx: usize> const ExprTrait for TensorArg<Idx> {
+	const ELEMWISE_MASK: u64 = 1 << Idx;
+	const REDUCE_MASK: u64 = 0;
+	const SCALAR_MASK: u64 = 0;
+
 	const REDUCE_OP_COUNT: usize = 0;
-	const KEY_LEN: usize = 1;
 
-	#[inline(always)]
-	fn key(id: &mut [ExprDiscriminant], i: usize) -> usize {
-		id[i] = ExprDiscriminant::TensorArg;
-		i + 1
-	}
+	const KEY_LEN: usize = 2;
 
-	#[inline(always)]
-	fn elemwise_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't,
-	{
-		tensors[i].write(*self);
-		i + 1
-	}
-
-	#[inline(always)]
-	fn reduce_tensors<'t>(&self, _tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't,
-	{
-		i
-	}
-
-	#[inline(always)]
-	fn scalars(&self, _scalars: &mut [f64], i: usize) -> usize {
-		i
-	}
-
-	#[inline(always)]
-	fn a_tensor(&self) -> Option<&Tensor> {
-		Some(*self)
+	fn set_key(em: u64, rm: u64, _sm: u64, reduce: bool, id: &mut [u8], i: usize) -> usize {
+		let bit = 1_u64 << Idx;
+		if reduce {
+			let idx = (rm & (bit - 1)).count_ones() as usize;
+			id[i + 0] = ExprDiscriminant::ReduceTensorArg as u8;
+			id[i + 1] = idx as u8;
+		} else {
+			let idx = (em & (bit - 1)).count_ones() as usize;
+			id[i + 0] = ExprDiscriminant::ElemwiseTensorArg as u8;
+			id[i + 1] = idx as u8;
+		}
+		i + 2
 	}
 }
 
-impl ExprToDyn for &Tensor {
-	fn to_dyn(e: &mut usize, r: &mut usize, _s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+impl<const Idx: usize> ExprToDyn for TensorArg<Idx> {
+	fn to_dyn(em: u64, rm: u64, _sm: u64, reduce: bool) -> Arc<DynExpr> {
+		let bit = 1_u64 << Idx;
 		if reduce {
-			let node = Arc::new(DynExpr::ReduceTensorArg(*r));
-			*r += 1;
-			node
+			let idx = (rm & (bit - 1)).count_ones() as usize;
+			Arc::new(DynExpr::ReduceTensorArg(idx))
 		} else {
-			let node = Arc::new(DynExpr::ElemwiseTensorArg(*e));
-			*e += 1;
-			node
+			let idx = (em & (bit - 1)).count_ones() as usize;
+			Arc::new(DynExpr::ElemwiseTensorArg(idx))
 		}
 	}
 }
 
-#[allow(clippy::inline_always)]
-#[allow(clippy::indexing_slicing)]
-impl const Expr for Scalar {
-	const CONST: bool = true;
-	const ELEMWISE_COUNT: usize = 0;
-	const REDUCE_COUNT: usize = 0;
-	const SCALAR_COUNT: usize = 1;
+impl<const Idx: usize> const ExprTrait for ScalarArg<Idx> {
+	const ELEMWISE_MASK: u64 = 0;
+	const REDUCE_MASK: u64 = 0;
+	const SCALAR_MASK: u64 = 1 << Idx;
+
 	const REDUCE_OP_COUNT: usize = 0;
-	const KEY_LEN: usize = 1;
 
-	#[inline(always)]
-	fn key(id: &mut [ExprDiscriminant], i: usize) -> usize {
-		id[i] = ExprDiscriminant::ScalarArg;
-		i + 1
-	}
+	const KEY_LEN: usize = 2;
 
-	#[inline(always)]
-	fn elemwise_tensors<'t>(&self, _tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't,
-	{
-		i
-	}
-
-	#[inline(always)]
-	fn reduce_tensors<'t>(&self, _tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-	where
-		Self: 't,
-	{
-		i
-	}
-
-	#[inline(always)]
-	fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
-		scalars[i] = self.0;
-		i + 1
-	}
-
-	#[inline(always)]
-	fn a_tensor(&self) -> Option<&Tensor> {
-		None
+	fn set_key(_me: u64, _rm: u64, sm: u64, _reduce: bool, id: &mut [u8], i: usize) -> usize {
+		let bit = 1_u64 << Idx;
+		let idx = (sm & (bit - 1)).count_ones() as usize;
+		id[i + 0] = ExprDiscriminant::ScalarArg as u8;
+		id[i + 1] = idx as u8;
+		i + 2
 	}
 }
 
-impl ExprToDyn for Scalar {
-	fn to_dyn(_e: &mut usize, _r: &mut usize, s: &mut usize, _reduce: bool) -> Arc<DynExpr> {
-		let result = Arc::new(DynExpr::ScalarArg(*s));
-		*s += 1;
-		result
+impl<const Idx: usize> ExprToDyn for ScalarArg<Idx> {
+	fn to_dyn(_e_mask: u64, _r_mask: u64, s_mask: u64, _reduce: bool) -> Arc<DynExpr> {
+		let bit = 1_u64 << Idx;
+		let idx = (s_mask & (bit - 1)).count_ones() as usize;
+		Arc::new(DynExpr::ScalarArg(idx))
 	}
 }
 
 macro_rules! impl_expr_reduce {
 	($name:ident) => {
-		#[allow(clippy::inline_always)]
-		#[allow(clippy::indexing_slicing)]
-		impl<A: const Expr + ExprToDyn> const Expr for $name<A> {
-			const CONST: bool = A::CONST;
-			const ELEMWISE_COUNT: usize = 0;
-			const REDUCE_COUNT: usize = A::ELEMWISE_COUNT;
-			const SCALAR_COUNT: usize = A::SCALAR_COUNT;
+		impl<A: const ExprTrait + ExprToDyn> const ExprTrait for $name<A> {
+			const ELEMWISE_MASK: u64 = 0;
+			const REDUCE_MASK: u64 = A::REDUCE_MASK | A::ELEMWISE_MASK;
+			const SCALAR_MASK: u64 = A::SCALAR_MASK;
+
 			const REDUCE_OP_COUNT: usize = 1 + A::REDUCE_OP_COUNT;
+
 			const KEY_LEN: usize = 1 + A::KEY_LEN;
 
-			#[inline(always)]
-			fn key(id: &mut [ExprDiscriminant], i: usize) -> usize {
-				id[i] = ExprDiscriminant::$name;
-				A::key(id, i + 1)
-			}
-
-			#[inline(always)]
-			fn elemwise_tensors<'t>(
-				&self,
-				_tensors: &mut [MaybeUninit<&'t Tensor>],
-				i: usize,
-			) -> usize
-			where
-				Self: 't,
-			{
-				i
-			}
-
-			#[inline(always)]
-			fn reduce_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-			where
-				Self: 't,
-			{
-				self.0.elemwise_tensors(tensors, i)
-			}
-
-			#[inline(always)]
-			fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
-				self.0.scalars(scalars, i)
-			}
-
-			#[inline(always)]
-			fn a_tensor(&self) -> Option<&Tensor> {
-				self.0.a_tensor()
+			fn set_key(em: u64, rm: u64, sm: u64, _reduce: bool, id: &mut [u8], i: usize) -> usize {
+				id[i] = ExprDiscriminant::$name as u8;
+				A::set_key(em, rm, sm, true, id, i + 1)
 			}
 		}
 
-		impl<A: const Expr + ExprToDyn> ExprToDyn for $name<A> {
-			fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
+		impl<A: const ExprTrait + ExprToDyn> ExprToDyn for $name<A> {
+			fn to_dyn(e_mask: u64, r_mask: u64, s_mask: u64, reduce: bool) -> Arc<DynExpr> {
 				assert!(!reduce);
-				Arc::new(DynExpr::$name(A::to_dyn(e, r, s, true)))
+				Arc::new(DynExpr::$name(A::to_dyn(e_mask, r_mask, s_mask, true)))
 			}
 		}
 	};
@@ -283,64 +280,23 @@ macro_rules! impl_expr_reduce {
 
 macro_rules! impl_expr_nullary {
 	($name:ident) => {
-		#[allow(clippy::inline_always)]
-		#[allow(clippy::indexing_slicing)]
-		impl const Expr for $name {
-			const CONST: bool = true;
-			const ELEMWISE_COUNT: usize = 0;
-			const REDUCE_COUNT: usize = 0;
-			const SCALAR_COUNT: usize = 0;
+		impl const ExprTrait for $name {
+			const ELEMWISE_MASK: u64 = 0;
+			const REDUCE_MASK: u64 = 0;
+			const SCALAR_MASK: u64 = 0;
+
 			const REDUCE_OP_COUNT: usize = 0;
+
 			const KEY_LEN: usize = 1;
 
-			#[inline(always)]
-			fn key(id: &mut [ExprDiscriminant], i: usize) -> usize {
-				id[i] = ExprDiscriminant::$name;
+			fn set_key(_: u64, _: u64, _: u64, _: bool, id: &mut [u8], i: usize) -> usize {
+				id[i] = ExprDiscriminant::$name as u8;
 				i + 1
-			}
-
-			#[inline(always)]
-			fn elemwise_tensors<'t>(
-				&self,
-				_tensors: &mut [MaybeUninit<&'t Tensor>],
-				i: usize,
-			) -> usize
-			where
-				Self: 't,
-			{
-				i
-			}
-
-			#[inline(always)]
-			fn reduce_tensors<'t>(
-				&self,
-				_tensors: &mut [MaybeUninit<&'t Tensor>],
-				i: usize,
-			) -> usize
-			where
-				Self: 't,
-			{
-				i
-			}
-
-			#[inline(always)]
-			fn scalars(&self, _scalars: &mut [f64], i: usize) -> usize {
-				i
-			}
-
-			#[inline(always)]
-			fn a_tensor(&self) -> Option<&Tensor> {
-				None
 			}
 		}
 
 		impl ExprToDyn for $name {
-			fn to_dyn(
-				_e: &mut usize,
-				_r: &mut usize,
-				_s: &mut usize,
-				_reduce: bool,
-			) -> Arc<DynExpr> {
+			fn to_dyn(_em: u64, _rm: u64, _sm: u64, _reduce: bool) -> Arc<DynExpr> {
 				Arc::new(DynExpr::$name())
 			}
 		}
@@ -349,122 +305,93 @@ macro_rules! impl_expr_nullary {
 
 macro_rules! impl_expr_unary {
 	($name:ident) => {
-		#[allow(clippy::inline_always)]
-		#[allow(clippy::indexing_slicing)]
-		impl<A: const Expr + ExprToDyn> const Expr for $name<A> {
-			const CONST: bool = A::CONST;
-			const ELEMWISE_COUNT: usize = A::ELEMWISE_COUNT;
-			const REDUCE_COUNT: usize = A::REDUCE_COUNT;
-			const SCALAR_COUNT: usize = A::SCALAR_COUNT;
+		impl<A: const ExprTrait + ExprToDyn> const ExprTrait for $name<A> {
+			const ELEMWISE_MASK: u64 = A::ELEMWISE_MASK;
+			const REDUCE_MASK: u64 = A::REDUCE_MASK;
+			const SCALAR_MASK: u64 = A::SCALAR_MASK;
+
 			const REDUCE_OP_COUNT: usize = A::REDUCE_OP_COUNT;
+
 			const KEY_LEN: usize = 1 + A::KEY_LEN;
 
-			#[inline(always)]
-			fn key(id: &mut [ExprDiscriminant], i: usize) -> usize {
-				id[i] = ExprDiscriminant::$name;
-				A::key(id, i + 1)
-			}
-
-			#[inline(always)]
-			fn elemwise_tensors<'t>(
-				&self,
-				tensors: &mut [MaybeUninit<&'t Tensor>],
-				i: usize,
-			) -> usize
-			where
-				Self: 't,
-			{
-				self.0.elemwise_tensors(tensors, i)
-			}
-
-			#[inline(always)]
-			fn reduce_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-			where
-				Self: 't,
-			{
-				self.0.reduce_tensors(tensors, i)
-			}
-
-			#[inline(always)]
-			fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
-				self.0.scalars(scalars, i)
-			}
-
-			#[inline(always)]
-			fn a_tensor(&self) -> Option<&Tensor> {
-				self.0.a_tensor()
+			fn set_key(em: u64, rm: u64, sm: u64, reduce: bool, id: &mut [u8], i: usize) -> usize {
+				id[i + 0] = ExprDiscriminant::$name as u8;
+				A::set_key(em, rm, sm, reduce, id, i + 1)
 			}
 		}
 
-		impl<A: const Expr + ExprToDyn> ExprToDyn for $name<A> {
-			fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
-				Arc::new(DynExpr::$name(A::to_dyn(e, r, s, reduce)))
+		impl<A: const ExprTrait + ExprToDyn> ExprToDyn for $name<A> {
+			fn to_dyn(e_mask: u64, r_mask: u64, s_mask: u64, reduce: bool) -> Arc<DynExpr> {
+				Arc::new(DynExpr::$name(A::to_dyn(e_mask, r_mask, s_mask, reduce)))
 			}
 		}
 	};
 }
 
 macro_rules! impl_expr_binary {
-	($name:ident) => {
-		#[allow(clippy::inline_always)]
-		#[allow(clippy::indexing_slicing)]
-		impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> const Expr for $name<A, B> {
-			const CONST: bool = A::CONST && B::CONST;
-			const ELEMWISE_COUNT: usize = A::ELEMWISE_COUNT + B::ELEMWISE_COUNT;
-			const REDUCE_COUNT: usize = A::REDUCE_COUNT + B::REDUCE_COUNT;
-			const SCALAR_COUNT: usize = A::SCALAR_COUNT + B::SCALAR_COUNT;
+	($name:ident, $commutative:expr) => {
+		impl<A: const ExprTrait + ExprToDyn, B: const ExprTrait + ExprToDyn> const ExprTrait
+			for $name<A, B>
+		{
+			const ELEMWISE_MASK: u64 = A::ELEMWISE_MASK | B::ELEMWISE_MASK;
+			const REDUCE_MASK: u64 = A::REDUCE_MASK | B::REDUCE_MASK;
+			const SCALAR_MASK: u64 = A::SCALAR_MASK | B::SCALAR_MASK;
+
 			const REDUCE_OP_COUNT: usize = A::REDUCE_OP_COUNT + B::REDUCE_OP_COUNT;
+
 			const KEY_LEN: usize = 1 + A::KEY_LEN + B::KEY_LEN;
 
-			#[inline(always)]
-			fn key(id: &mut [ExprDiscriminant], i: usize) -> usize {
-				id[i] = ExprDiscriminant::$name;
-				let m = A::key(id, i + 1);
-				assert!(m == i + 1 + A::KEY_LEN);
-				B::key(id, i + 1 + A::KEY_LEN)
-			}
+			fn set_key(em: u64, rm: u64, sm: u64, reduce: bool, id: &mut [u8], i: usize) -> usize {
+				id[i + 0] = ExprDiscriminant::$name as u8;
+				let begin = i + 1;
+				let mid = A::set_key(em, rm, sm, reduce, id, begin);
+				assert!(mid == begin + A::KEY_LEN);
+				let end = B::set_key(em, rm, sm, reduce, id, mid);
+				assert!(end == mid + B::KEY_LEN);
+				if !($commutative) {
+					return end;
+				}
 
-			#[inline(always)]
-			fn elemwise_tensors<'t>(
-				&self,
-				tensors: &mut [MaybeUninit<&'t Tensor>],
-				i: usize,
-			) -> usize
-			where
-				Self: 't,
-			{
-				let m = self.0.elemwise_tensors(tensors, i);
-				assert!(m == i + A::ELEMWISE_COUNT);
-				self.1.elemwise_tensors(tensors, i + A::ELEMWISE_COUNT)
-			}
-
-			#[inline(always)]
-			fn reduce_tensors<'t>(&self, tensors: &mut [MaybeUninit<&'t Tensor>], i: usize) -> usize
-			where
-				Self: 't,
-			{
-				let m = self.0.reduce_tensors(tensors, i);
-				assert!(m == i + A::REDUCE_COUNT);
-				self.1.reduce_tensors(tensors, i + A::REDUCE_COUNT)
-			}
-
-			#[inline(always)]
-			fn scalars(&self, scalars: &mut [f64], i: usize) -> usize {
-				let m = self.0.scalars(scalars, i);
-				assert!(m == i + A::SCALAR_COUNT);
-				self.1.scalars(scalars, i + A::SCALAR_COUNT)
-			}
-
-			#[inline(always)]
-			fn a_tensor(&self) -> Option<&Tensor> {
-				self.0.a_tensor().or(self.1.a_tensor())
+				if A::KEY_LEN <= B::KEY_LEN {
+					if A::KEY_LEN == B::KEY_LEN {
+						let mut swap = false;
+						let mut i = 0;
+						while i < A::KEY_LEN {
+							let a = id[begin + i];
+							let b = id[mid + i];
+							if a != b {
+								swap = a > b;
+								break;
+							}
+							i += 1;
+						}
+						if swap {
+							let mut i = 0;
+							while i < A::KEY_LEN {
+								let tmp = id[begin + i];
+								id[begin + i] = id[mid + i];
+								id[mid + i] = tmp;
+								i += 1;
+							}
+						}
+					}
+					end
+				} else {
+					let mid = B::set_key(em, rm, sm, reduce, id, begin);
+					assert!(mid == begin + B::KEY_LEN);
+					let end = A::set_key(em, rm, sm, reduce, id, mid);
+					assert!(end == mid + A::KEY_LEN);
+					end
+				}
 			}
 		}
 
-		impl<A: const Expr + ExprToDyn, B: const Expr + ExprToDyn> ExprToDyn for $name<A, B> {
-			fn to_dyn(e: &mut usize, r: &mut usize, s: &mut usize, reduce: bool) -> Arc<DynExpr> {
-				let a = A::to_dyn(e, r, s, reduce);
-				let b = B::to_dyn(e, r, s, reduce);
+		impl<A: const ExprTrait + ExprToDyn, B: const ExprTrait + ExprToDyn> ExprToDyn
+			for $name<A, B>
+		{
+			fn to_dyn(e_mask: u64, r_mask: u64, s_mask: u64, reduce: bool) -> Arc<DynExpr> {
+				let a = A::to_dyn(e_mask, r_mask, s_mask, reduce);
+				let b = B::to_dyn(e_mask, r_mask, s_mask, reduce);
 				Arc::new(DynExpr::$name(a, b))
 			}
 		}
@@ -476,357 +403,165 @@ impl_expr_reduce!(MaxExpr);
 
 impl_expr_nullary!(RandnExpr);
 
+impl_expr_unary!(NegExpr);
 impl_expr_unary!(ExpExpr);
+impl_expr_unary!(LnExpr);
 impl_expr_unary!(AbsExpr);
-impl_expr_unary!(SigmoidExpr);
-impl_expr_unary!(SwishExpr);
 impl_expr_unary!(SqrtExpr);
-impl_expr_unary!(LnClampedExpr);
+impl_expr_unary!(RecipExpr);
 
-impl_expr_binary!(AddExpr);
-impl_expr_binary!(MulExpr);
-impl_expr_binary!(RecipExpr);
+impl_expr_binary!(AddExpr, true);
+impl_expr_binary!(SubExpr, false);
+impl_expr_binary!(MulExpr, true);
 
 //--------------------------------------------------------------------------------------------------
 
-impl<E: const Expr + ExprToDyn> EvaluatesToTensor for ExprWrapper<E>
+pub struct KernelCall<'a, E: const ExprTrait + ExprToDyn>
+where
+	[(); E::ELEMWISE_COUNT]:,
+	[(); E::REDUCE_COUNT]:,
+	[(); E::SCALAR_COUNT]:,
+{
+	elem_args: [&'a Tensor; E::ELEMWISE_COUNT],
+	reduce_args: [&'a Tensor; E::REDUCE_COUNT],
+	scalar_args: [f64; E::SCALAR_COUNT],
+}
+
+impl<'a, E: const ExprTrait + ExprToDyn + Copy> KernelCall<'a, E>
+where
+	[(); E::ELEMWISE_COUNT]:,
+	[(); E::REDUCE_COUNT]:,
+	[(); E::SCALAR_COUNT]:,
+{
+	const fn mask_to_indexes<const N: usize>(mut mask: u64) -> [usize; N] {
+		assert!(mask.count_ones() as usize == N);
+		let mut indexes = [0_usize; N];
+		let mut i = 0;
+		while i < N {
+			let idx = mask.trailing_zeros() as usize;
+			indexes[i] = idx;
+			mask &= !(1 << idx);
+			i += 1;
+		}
+		indexes
+	}
+
+	#[inline]
+	pub fn new<const TC: usize, const SC: usize>(
+		tensors: [&'a Tensor; TC],
+		scalars: [f64; SC],
+		_expr: Expr<E>,
+	) -> Self {
+		let elem_arg_indexes: [usize; E::ELEMWISE_COUNT] =
+			const { Self::mask_to_indexes(E::ELEMWISE_MASK) };
+		let reduce_arg_indexes: [usize; E::REDUCE_COUNT] =
+			const { Self::mask_to_indexes(E::REDUCE_MASK) };
+		let scalar_arg_indexes: [usize; E::SCALAR_COUNT] =
+			const { Self::mask_to_indexes(E::SCALAR_MASK) };
+		Self {
+			elem_args: std::array::from_fn(|i| tensors[elem_arg_indexes[i]]),
+			reduce_args: std::array::from_fn(|i| tensors[reduce_arg_indexes[i]]),
+			scalar_args: std::array::from_fn(|i| scalars[scalar_arg_indexes[i]]),
+		}
+	}
+}
+
+impl<'a, E: const ExprTrait + ExprToDyn> EvaluatesToTensor for KernelCall<'a, E>
 where
 	[(); 1 - E::REDUCE_OP_COUNT]:,
 	[(); E::ELEMWISE_COUNT]:,
 	[(); E::REDUCE_COUNT]:,
 	[(); E::SCALAR_COUNT]:,
+	[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
 	[(); E::PADDED_KEY_LEN]:,
 	[(); E::BATCHED_KEY_LEN]:,
-	[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
 {
 	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
-		to.vmt().kernel_runner().run(to, self.0)
-	}
-}
-
-impl EvaluatesToTensor for Scalar {
-	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
-		self.wrap().eval_to_tensor(to)
-	}
-}
-
-impl EvaluatesToTensor for f64 {
-	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
-		self.wrap().eval_to_tensor(to)
-	}
-}
-
-impl EvaluatesToTensor for &Tensor {
-	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
-		self.wrap().eval_to_tensor(to)
+		to.vmt().kernel_runner().run(to, self.elem_args, self.reduce_args, self.scalar_args)
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct ExprWrapper<E: const Expr + ExprToDyn>(E);
+#[derive(Clone, Copy)]
+pub struct Expr<E: const ExprTrait + ExprToDyn + Copy>(pub E);
 
-pub trait Wrappable {
-	type E: const Expr + ExprToDyn;
-
-	fn wrap(self) -> ExprWrapper<Self::E>;
+pub const fn randn() -> Expr<RandnExpr> {
+	Expr(RandnExpr)
 }
 
-impl<'t> Wrappable for &'t Tensor {
-	type E = Self;
+impl<E: const ExprTrait + ExprToDyn + Copy> Expr<E> {
+	/// Computes the sum along the last dimension.
+	///
+	/// This is equivalent to PyTorch's `tensor.sum(dim=-1, keepdim=True)`.
+	pub const fn sum(self) -> Expr<SumExpr<E>> {
+		Expr(SumExpr(self.0))
+	}
 
-	fn wrap(self) -> ExprWrapper<Self> {
-		ExprWrapper(self)
+	/// Computes the maximum along the last dimension.
+	///
+	/// This is equivalent to PyTorch's `tensor.max(dim=-1, keepdim=True)`.
+	pub const fn max(self) -> Expr<MaxExpr<E>> {
+		Expr(MaxExpr(self.0))
+	}
+
+	pub const fn exp(self) -> Expr<ExpExpr<E>> {
+		Expr(ExpExpr(self.0))
+	}
+
+	pub const fn ln(self) -> Expr<LnExpr<E>> {
+		Expr(LnExpr(self.0))
+	}
+
+	pub const fn abs(self) -> Expr<AbsExpr<E>> {
+		Expr(AbsExpr(self.0))
+	}
+
+	pub const fn sqrt(self) -> Expr<SqrtExpr<E>> {
+		Expr(SqrtExpr(self.0))
+	}
+
+	pub const fn recip(self) -> Expr<RecipExpr<E>> {
+		Expr(RecipExpr(self.0))
 	}
 }
 
-impl Wrappable for Scalar {
-	type E = Self;
+impl<E: const ExprTrait + ExprToDyn + Copy> std::ops::Neg for Expr<E> {
+	type Output = Expr<NegExpr<E>>;
 
-	fn wrap(self) -> ExprWrapper<Self> {
-		ExprWrapper(self)
+	fn neg(self) -> Expr<NegExpr<E>> {
+		Expr(NegExpr(self.0))
 	}
 }
 
-impl Wrappable for f64 {
-	type E = Scalar;
-
-	fn wrap(self) -> ExprWrapper<Self::E> {
-		ExprWrapper(Scalar(self))
-	}
-}
-
-impl<E: const Expr + ExprToDyn> Wrappable for ExprWrapper<E> {
-	type E = E;
-
-	fn wrap(self) -> ExprWrapper<E> {
-		self
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
-impl std::ops::Add<Self> for &Tensor {
-	type Output = ExprWrapper<AddExpr<Self, Self>>;
-
-	fn add(self, rhs: Self) -> ExprWrapper<AddExpr<Self, Self>> {
-		ExprWrapper(AddExpr(self, rhs))
-	}
-}
-
-impl std::ops::Add<f64> for &Tensor {
-	type Output = ExprWrapper<AddExpr<Self, Scalar>>;
-
-	fn add(self, rhs: f64) -> ExprWrapper<AddExpr<Self, Scalar>> {
-		ExprWrapper(AddExpr(self, Scalar(rhs)))
-	}
-}
-
-impl std::ops::Add<Scalar> for &Tensor {
-	type Output = ExprWrapper<AddExpr<Self, Scalar>>;
-
-	fn add(self, rhs: Scalar) -> ExprWrapper<AddExpr<Self, Scalar>> {
-		ExprWrapper(AddExpr(self, rhs))
-	}
-}
-
-impl<E: const Expr + ExprToDyn> std::ops::Add<ExprWrapper<E>> for &Tensor {
-	type Output = ExprWrapper<AddExpr<Self, E>>;
-
-	fn add(self, rhs: ExprWrapper<E>) -> ExprWrapper<AddExpr<Self, E>> {
-		ExprWrapper(AddExpr(self, rhs.0))
-	}
-}
-
-impl<'t, A: const Expr + ExprToDyn> std::ops::Add<&'t Tensor> for ExprWrapper<A> {
-	type Output = ExprWrapper<AddExpr<A, &'t Tensor>>;
-
-	fn add(self, rhs: &'t Tensor) -> ExprWrapper<AddExpr<A, &'t Tensor>> {
-		ExprWrapper(AddExpr(self.0, rhs))
-	}
-}
-
-impl<A: const Expr + ExprToDyn> std::ops::Add<f64> for ExprWrapper<A> {
-	type Output = ExprWrapper<AddExpr<A, Scalar>>;
-
-	fn add(self, rhs: f64) -> ExprWrapper<AddExpr<A, Scalar>> {
-		ExprWrapper(AddExpr(self.0, Scalar(rhs)))
-	}
-}
-
-impl<A: const Expr + ExprToDyn> std::ops::Add<Scalar> for ExprWrapper<A> {
-	type Output = ExprWrapper<AddExpr<A, Scalar>>;
-
-	fn add(self, rhs: Scalar) -> ExprWrapper<AddExpr<A, Scalar>> {
-		ExprWrapper(AddExpr(self.0, rhs))
-	}
-}
-
-impl<A: const Expr + ExprToDyn, E: const Expr + ExprToDyn> std::ops::Add<ExprWrapper<E>>
-	for ExprWrapper<A>
+impl<A: const ExprTrait + ExprToDyn + Copy, E: const ExprTrait + ExprToDyn + Copy>
+	std::ops::Add<Expr<E>> for Expr<A>
 {
-	type Output = ExprWrapper<AddExpr<A, E>>;
+	type Output = Expr<AddExpr<A, E>>;
 
-	fn add(self, rhs: ExprWrapper<E>) -> ExprWrapper<AddExpr<A, E>> {
-		ExprWrapper(AddExpr(self.0, rhs.0))
+	fn add(self, rhs: Expr<E>) -> Expr<AddExpr<A, E>> {
+		Expr(AddExpr(self.0, rhs.0))
 	}
 }
 
-//--------------------------------------------------------------------------------------------------
-
-impl std::ops::Sub<Self> for &Tensor {
-	type Output = ExprWrapper<AddExpr<Self, MulExpr<Self, Scalar>>>;
-
-	fn sub(self, rhs: Self) -> ExprWrapper<AddExpr<Self, MulExpr<Self, Scalar>>> {
-		ExprWrapper(AddExpr(self, MulExpr(rhs, Scalar(-1.0))))
-	}
-}
-
-impl std::ops::Sub<f64> for &Tensor {
-	type Output = ExprWrapper<AddExpr<Self, Scalar>>;
-
-	fn sub(self, rhs: f64) -> ExprWrapper<AddExpr<Self, Scalar>> {
-		ExprWrapper(AddExpr(self, Scalar(-rhs)))
-	}
-}
-
-impl std::ops::Sub<Scalar> for &Tensor {
-	type Output = ExprWrapper<AddExpr<Self, Scalar>>;
-
-	fn sub(self, rhs: Scalar) -> ExprWrapper<AddExpr<Self, Scalar>> {
-		ExprWrapper(AddExpr(self, Scalar(rhs.0 * -1.0)))
-	}
-}
-
-impl<E: const Expr + ExprToDyn> std::ops::Sub<ExprWrapper<E>> for &Tensor {
-	type Output = ExprWrapper<AddExpr<Self, MulExpr<E, Scalar>>>;
-
-	fn sub(self, rhs: ExprWrapper<E>) -> ExprWrapper<AddExpr<Self, MulExpr<E, Scalar>>> {
-		ExprWrapper(AddExpr(self, MulExpr(rhs.0, Scalar(-1.0))))
-	}
-}
-
-impl<'t, A: const Expr + ExprToDyn> std::ops::Sub<&'t Tensor> for ExprWrapper<A> {
-	type Output = ExprWrapper<AddExpr<A, MulExpr<&'t Tensor, Scalar>>>;
-
-	fn sub(self, rhs: &'t Tensor) -> ExprWrapper<AddExpr<A, MulExpr<&'t Tensor, Scalar>>> {
-		ExprWrapper(AddExpr(self.0, MulExpr(rhs, Scalar(-1.0))))
-	}
-}
-
-impl<A: const Expr + ExprToDyn> std::ops::Sub<f64> for ExprWrapper<A> {
-	type Output = ExprWrapper<AddExpr<A, Scalar>>;
-
-	fn sub(self, rhs: f64) -> ExprWrapper<AddExpr<A, Scalar>> {
-		ExprWrapper(AddExpr(self.0, Scalar(-rhs)))
-	}
-}
-
-impl<A: const Expr + ExprToDyn> std::ops::Sub<Scalar> for ExprWrapper<A> {
-	type Output = ExprWrapper<AddExpr<A, Scalar>>;
-
-	fn sub(self, rhs: Scalar) -> ExprWrapper<AddExpr<A, Scalar>> {
-		ExprWrapper(AddExpr(self.0, Scalar(rhs.0 * -1.0)))
-	}
-}
-
-impl<A: const Expr + ExprToDyn, E: const Expr + ExprToDyn> std::ops::Sub<ExprWrapper<E>>
-	for ExprWrapper<A>
+impl<A: const ExprTrait + ExprToDyn + Copy, E: const ExprTrait + ExprToDyn + Copy>
+	std::ops::Sub<Expr<E>> for Expr<A>
 {
-	type Output = ExprWrapper<AddExpr<A, MulExpr<E, Scalar>>>;
+	type Output = Expr<SubExpr<A, E>>;
 
-	fn sub(self, rhs: ExprWrapper<E>) -> ExprWrapper<AddExpr<A, MulExpr<E, Scalar>>> {
-		ExprWrapper(AddExpr(self.0, MulExpr(rhs.0, Scalar(-1.0))))
+	fn sub(self, rhs: Expr<E>) -> Expr<SubExpr<A, E>> {
+		Expr(SubExpr(self.0, rhs.0))
 	}
 }
 
-//--------------------------------------------------------------------------------------------------
-
-impl std::ops::Mul<Self> for &Tensor {
-	type Output = ExprWrapper<MulExpr<Self, Self>>;
-
-	fn mul(self, rhs: Self) -> ExprWrapper<MulExpr<Self, Self>> {
-		ExprWrapper(MulExpr(self, rhs))
-	}
-}
-
-impl std::ops::Mul<f64> for &Tensor {
-	type Output = ExprWrapper<MulExpr<Self, Scalar>>;
-
-	fn mul(self, rhs: f64) -> ExprWrapper<MulExpr<Self, Scalar>> {
-		ExprWrapper(MulExpr(self, Scalar(rhs)))
-	}
-}
-
-impl std::ops::Mul<Scalar> for &Tensor {
-	type Output = ExprWrapper<MulExpr<Self, Scalar>>;
-
-	fn mul(self, rhs: Scalar) -> ExprWrapper<MulExpr<Self, Scalar>> {
-		ExprWrapper(MulExpr(self, rhs))
-	}
-}
-
-impl<E: const Expr + ExprToDyn> std::ops::Mul<ExprWrapper<E>> for &Tensor {
-	type Output = ExprWrapper<MulExpr<Self, E>>;
-
-	fn mul(self, rhs: ExprWrapper<E>) -> ExprWrapper<MulExpr<Self, E>> {
-		ExprWrapper(MulExpr(self, rhs.0))
-	}
-}
-
-impl<'t, A: const Expr + ExprToDyn> std::ops::Mul<&'t Tensor> for ExprWrapper<A> {
-	type Output = ExprWrapper<MulExpr<A, &'t Tensor>>;
-
-	fn mul(self, rhs: &'t Tensor) -> ExprWrapper<MulExpr<A, &'t Tensor>> {
-		ExprWrapper(MulExpr(self.0, rhs))
-	}
-}
-
-impl<A: const Expr + ExprToDyn> std::ops::Mul<f64> for ExprWrapper<A> {
-	type Output = ExprWrapper<MulExpr<A, Scalar>>;
-
-	fn mul(self, rhs: f64) -> ExprWrapper<MulExpr<A, Scalar>> {
-		ExprWrapper(MulExpr(self.0, Scalar(rhs)))
-	}
-}
-
-impl<A: const Expr + ExprToDyn> std::ops::Mul<Scalar> for ExprWrapper<A> {
-	type Output = ExprWrapper<MulExpr<A, Scalar>>;
-
-	fn mul(self, rhs: Scalar) -> ExprWrapper<MulExpr<A, Scalar>> {
-		ExprWrapper(MulExpr(self.0, rhs))
-	}
-}
-
-impl<A: const Expr + ExprToDyn, E: const Expr + ExprToDyn> std::ops::Mul<ExprWrapper<E>>
-	for ExprWrapper<A>
+impl<A: const ExprTrait + ExprToDyn + Copy, E: const ExprTrait + ExprToDyn + Copy>
+	std::ops::Mul<Expr<E>> for Expr<A>
 {
-	type Output = ExprWrapper<MulExpr<A, E>>;
+	type Output = Expr<MulExpr<A, E>>;
 
-	fn mul(self, rhs: ExprWrapper<E>) -> ExprWrapper<MulExpr<A, E>> {
-		ExprWrapper(MulExpr(self.0, rhs.0))
+	fn mul(self, rhs: Expr<E>) -> Expr<MulExpr<A, E>> {
+		Expr(MulExpr(self.0, rhs.0))
 	}
 }
 
-//--------------------------------------------------------------------------------------------------
-
-pub fn randn() -> ExprWrapper<RandnExpr> {
-	ExprWrapper(RandnExpr())
-}
-
-pub trait TensorOps {
-	type E: const Expr + ExprToDyn;
-
-	fn sum(self) -> ExprWrapper<SumExpr<Self::E>>;
-	fn max(self) -> ExprWrapper<MaxExpr<Self::E>>;
-
-	fn exp(self) -> ExprWrapper<ExpExpr<Self::E>>;
-	fn abs(self) -> ExprWrapper<AbsExpr<Self::E>>;
-	fn sigmoid(self) -> ExprWrapper<SigmoidExpr<Self::E>>;
-	fn swish(self) -> ExprWrapper<SwishExpr<Self::E>>;
-	fn sqrt(self) -> ExprWrapper<SqrtExpr<Self::E>>;
-	fn ln_clamped(self) -> ExprWrapper<LnClampedExpr<Self::E>>;
-
-	fn recip<B: Wrappable>(self, b: B) -> ExprWrapper<RecipExpr<Self::E, B::E>>;
-}
-
-impl<T: Wrappable> TensorOps for T {
-	type E = T::E;
-
-	fn sum(self) -> ExprWrapper<SumExpr<T::E>> {
-		ExprWrapper(SumExpr(self.wrap().0))
-	}
-
-	fn max(self) -> ExprWrapper<MaxExpr<T::E>> {
-		ExprWrapper(MaxExpr(self.wrap().0))
-	}
-
-	fn exp(self) -> ExprWrapper<ExpExpr<T::E>> {
-		ExprWrapper(ExpExpr(self.wrap().0))
-	}
-
-	fn abs(self) -> ExprWrapper<AbsExpr<T::E>> {
-		ExprWrapper(AbsExpr(self.wrap().0))
-	}
-
-	fn sigmoid(self) -> ExprWrapper<SigmoidExpr<T::E>> {
-		ExprWrapper(SigmoidExpr(self.wrap().0))
-	}
-
-	fn swish(self) -> ExprWrapper<SwishExpr<T::E>> {
-		ExprWrapper(SwishExpr(self.wrap().0))
-	}
-
-	fn sqrt(self) -> ExprWrapper<SqrtExpr<T::E>> {
-		ExprWrapper(SqrtExpr(self.wrap().0))
-	}
-
-	fn ln_clamped(self) -> ExprWrapper<LnClampedExpr<T::E>> {
-		ExprWrapper(LnClampedExpr(self.wrap().0))
-	}
-
-	fn recip<B: Wrappable>(self, b: B) -> ExprWrapper<RecipExpr<T::E, B::E>> {
-		ExprWrapper(RecipExpr(self.wrap().0, b.wrap().0))
-	}
-}
 //--------------------------------------------------------------------------------------------------

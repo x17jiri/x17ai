@@ -8,12 +8,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::ErrPack;
 use crate::autograd::{self, AutogradNode, BackwardFn};
 use crate::nn::param::Param;
-use crate::tensor::device::kernel;
-use crate::tensor::device::kernel::expr::TensorOps;
 use crate::tensor::{Tensor, TensorOpError};
+use crate::{ErrPack, custom_kernel};
 
 use super::Layer;
 
@@ -54,7 +52,11 @@ impl Layer for SwiGLU {
 		let lin = inp.select(-2, 0)?;
 		let gate = inp.select(-2, 1)?;
 
-		out.assign(gate.swish() * &lin)?;
+		out.assign(custom_kernel!(
+			[lin: &lin, gate: &gate], (ONE: 1.0), {
+				lin * gate * (ONE + (-gate).exp()).recip()
+			}
+		))?;
 
 		let backward_fn = inp_backward.map(|inp_backward| {
 			Box::new(SwiGLUBackwardFn {
@@ -94,15 +96,19 @@ impl BackwardFn for SwiGLUBackwardFn {
 		let d_lin = d_inp.select(-2, 0)?;
 		let d_gate = d_inp.select(-2, 1)?;
 
-		d_lin.assign(gate.swish() * &d_out)?;
+		d_lin.assign(custom_kernel!(
+			[d_out: &d_out, gate: &gate], (ONE: 1.0), {
+				d_out * gate * (ONE + (-gate).exp()).recip()
+			}
+		))?;
 
-		// TODO - this generates a kernel where the `gate` input is repeated 4 times.
-		// This also blocks optimization because in the kernel we cannot assume the inputs
-		// are the same even if they are. And so we end up recalculating the sigmoid and swish.
-		// We really need a way to create variables with intermediate results that can be reused.
-		d_gate.assign(
-			(gate.sigmoid() + gate.swish() - (gate.sigmoid() * gate.swish())) * &lin * &d_out,
-		)?;
+		d_gate.assign(custom_kernel!(
+			[gate: &gate, lin: &lin, d_out: &d_out], (ONE: 1.0), {
+				let sigmoid = (ONE + (-gate).exp()).recip();
+				let swish = gate * sigmoid;
+				(sigmoid + swish - (sigmoid * swish)) * lin * d_out
+			}
+		))?;
 
 		queue.add(inp_backward, d_inp);
 		Ok(())

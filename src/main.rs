@@ -8,6 +8,7 @@
 #![allow(warnings)] // TODO - disabling warnings for main.rs. Remove this later.
 #![allow(non_snake_case)]
 #![feature(generic_const_exprs)]
+#![feature(macro_metavar_expr)]
 
 //use x17ai::nn::layers::{Layer, Linear, LossFunction, SoftmaxCrossEntropy};
 //use x17ai::nn::{EvalContext, ModelContext};
@@ -168,7 +169,7 @@ use x17ai::tensor::generic::Tensor;
 use x17ai::tensor::generic::map::ND;
 use x17ai::tensor::math::{col, mat, row};
 use x17ai::tensor::{Device, HasDType, TensorOpError};
-use x17ai::{ErrPack, tensor};
+use x17ai::{ErrPack, custom_kernel, tensor};
 
 #[cfg(false)]
 fn main() -> Result<(), ErrPack<TensorOpError>> {
@@ -250,7 +251,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let loss_layer = CrossEntropy::new(2);
 
 	let input = Tensor::new_empty_on(&[2, 3], f32::dtype, dev.clone())?;
-	input.assign(expr::randn())?;
+	input.assign(custom_kernel!([], (), expr::randn()))?;
 
 	let expected = lit.new_2d(&[[1.0, 0.0], [0.0, 1.0]])?;
 

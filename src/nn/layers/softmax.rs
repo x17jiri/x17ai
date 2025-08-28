@@ -8,11 +8,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::ErrPack;
 use crate::autograd::{self, AutogradNode, BackwardFn, StraightThroughBackwardFn};
 use crate::nn::param::Param;
-use crate::tensor::device::kernel::expr::TensorOps;
 use crate::tensor::{Tensor, TensorOpError};
+use crate::{ErrPack, custom_kernel};
 
 use super::Layer;
 
@@ -65,9 +64,21 @@ impl Layer for Softmax {
 		let max = inp.new_replace_tail(1, &[1])?; // [..., 1]
 		let sum_recip = max.new_empty_like()?;
 
-		max.assign(inp.max())?;
-		sum_recip.assign((&inp - &max).exp().sum().recip(0.0))?;
-		out.assign((&inp - &max).exp() * &sum_recip)?;
+		max.assign(custom_kernel!(
+			[inp: &inp], (), {
+				inp.max()
+			}
+		))?;
+		sum_recip.assign(custom_kernel!(
+			[inp: &inp, max: &max], (), {
+				(inp - max).exp().sum().recip()
+			}
+		))?;
+		out.assign(custom_kernel!(
+			[inp: &inp, max: &max, sum_recip: &sum_recip], (), {
+				(inp - max).exp() * sum_recip
+			}
+		))?;
 
 		let backward_fn = inp_backward.map(|inp_backward| match self.gradient_mode {
 			SoftmaxGradientMode::Precise => {
@@ -107,11 +118,19 @@ impl BackwardFn for SoftmaxBackwardFn_Precise {
 		let Self { out, inp_backward } = Box::into_inner(self);
 
 		let g = out.new_replace_tail(1, &[1])?; // [..., 1]
-		g.assign((&out * &d_out).sum())?;
+		g.assign(custom_kernel!(
+			[out: &out, d_out: &d_out], (), {
+				(out * d_out).sum()
+			}
+		))?;
 
 		let d_inp = d_out.reuse_or_new_like()?;
 
-		d_inp.assign((&d_out - &g) * &out)?;
+		d_inp.assign(custom_kernel!(
+			[d_out: &d_out, g: &g, out: &out], (), {
+				(d_out - g) * out
+			}
+		))?;
 
 		queue.add(inp_backward, d_inp);
 		Ok(())
@@ -133,7 +152,11 @@ impl BackwardFn for SoftmaxBackwardFn_Simplified {
 
 		let d_inp = d_out.reuse_or_new_like()?;
 
-		d_inp.assign(&d_out * &out)?;
+		d_inp.assign(custom_kernel!(
+			[d_out: &d_out, out: &out], (), {
+				d_out * out
+			}
+		))?;
 
 		queue.add(inp_backward, d_inp);
 		Ok(())

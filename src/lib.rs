@@ -38,6 +38,7 @@
 #![feature(const_option_ops)]
 #![feature(get_mut_unchecked)]
 #![feature(ptr_metadata)]
+#![feature(macro_metavar_expr)]
 // clippy
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]

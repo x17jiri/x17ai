@@ -153,6 +153,10 @@ impl<'a, T: 'static + Copy + HasDType + FromToF64> EvalExpr<'a, T> {
 						.fold(f64::NEG_INFINITY, f64::max)
 				},
 
+				DynExpr::NegExpr(a) => {
+					let a = self.eval_expr(a, j, i, k);
+					-a
+				},
 				DynExpr::ExpExpr(a) => {
 					let a = self.eval_expr(a, j, i, k);
 					a.exp()
@@ -161,19 +165,11 @@ impl<'a, T: 'static + Copy + HasDType + FromToF64> EvalExpr<'a, T> {
 					let a = self.eval_expr(a, j, i, k);
 					a.abs()
 				},
-				DynExpr::SigmoidExpr(a) => {
-					let a = self.eval_expr(a, j, i, k);
-					math::sigmoid(a)
-				},
-				DynExpr::SwishExpr(a) => {
-					let a = self.eval_expr(a, j, i, k);
-					math::swish(a)
-				},
 				DynExpr::SqrtExpr(a) => {
 					let a = self.eval_expr(a, j, i, k);
 					a.sqrt()
 				},
-				DynExpr::LnClampedExpr(a) => {
+				DynExpr::LnExpr(a) => {
 					let a = self.eval_expr(a, j, i, k);
 					a.ln().max(-1000.0)
 				},
@@ -182,15 +178,19 @@ impl<'a, T: 'static + Copy + HasDType + FromToF64> EvalExpr<'a, T> {
 					let b = self.eval_expr(b, j, i, k);
 					a + b
 				},
+				DynExpr::SubExpr(a, b) => {
+					let a = self.eval_expr(a, j, i, k);
+					let b = self.eval_expr(b, j, i, k);
+					a - b
+				},
 				DynExpr::MulExpr(a, b) => {
 					let a = self.eval_expr(a, j, i, k);
 					let b = self.eval_expr(b, j, i, k);
 					a * b
 				},
-				DynExpr::RecipExpr(a, eps) => {
+				DynExpr::RecipExpr(a) => {
 					let a = self.eval_expr(a, j, i, k);
-					let eps = self.eval_expr(eps, j, i, k);
-					1.0 / (a + eps)
+					1.0 / a
 				},
 			}
 		}

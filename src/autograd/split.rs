@@ -9,9 +9,9 @@ use std::cell::RefCell;
 use std::mem::MaybeUninit;
 use std::rc::Rc;
 
-use crate::ErrPack;
 use crate::autograd::{self, AutogradNode, BackwardFn};
 use crate::tensor::{Tensor, TensorOpError};
+use crate::{ErrPack, custom_kernel};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -99,11 +99,19 @@ impl BackwardFn for SplitBackwardFn {
 				}
 				if grad.owns_buffer() {
 					let grad = &*grad;
-					grad.assign(grad + &d_out)?;
+					grad.assign(custom_kernel!(
+						[grad: grad, d_out: &d_out], (), {
+							grad + d_out
+						}
+					))?;
 				} else {
 					let mut new_grad = grad.new_empty_like()?;
 					std::mem::swap(grad, &mut new_grad);
-					grad.assign(&new_grad + &d_out)?;
+					grad.assign(custom_kernel!(
+						[new_grad: &new_grad, d_out: &d_out], (), {
+							new_grad + d_out
+						}
+					))?;
 					std::mem::drop(new_grad);
 				}
 				std::mem::drop(d_out);

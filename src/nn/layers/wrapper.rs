@@ -9,11 +9,10 @@ use std::cell::RefCell;
 use std::hint::cold_path;
 use std::rc::Rc;
 
-use crate::ErrPack;
 use crate::autograd::{self, AutogradNode, BackwardFn};
 use crate::nn::param::Param;
-use crate::tensor::device::kernel::expr::TensorOps;
 use crate::tensor::{Tensor, TensorOpError};
+use crate::{ErrPack, custom_kernel};
 
 use super::Layer;
 
@@ -89,14 +88,22 @@ impl<Nested: Layer> Layer for Wrapper<Nested> {
 		let sum_to_mean = inp.sum_to_mean();
 
 		let inp_magn_recip = inp.new_replace_tail(1, &[1])?;
-		inp_magn_recip.assign(((&inp * &inp).sum() * sum_to_mean).sqrt().recip(self.eps))?;
+		inp_magn_recip.assign(custom_kernel!(
+			[inp: &inp], (sum_to_mean: sum_to_mean, eps: self.eps), {
+				(((inp * inp).sum() * sum_to_mean).sqrt() + eps).recip()
+			}
+		))?;
 
 		let rms_norm = if self.norm_pos != NormPosition::Inside && inp.owns_buffer() {
 			inp.clone()
 		} else {
 			inp.new_empty_like()?
 		};
-		rms_norm.assign(&inp * &inp_magn_recip)?;
+		rms_norm.assign(custom_kernel!(
+			[inp: &inp, inp_magn_recip:  &inp_magn_recip], (), {
+				inp * inp_magn_recip
+			}
+		))?;
 
 		let mut residual = if self.norm_pos == NormPosition::Inside {
 			inp
@@ -123,9 +130,17 @@ impl<Nested: Layer> Layer for Wrapper<Nested> {
 			let (nested_out, nested_out_fn) = self.nested.forward(nested_inp)?.take();
 			let sum_to_mean = nested_out.sum_to_mean();
 
-			inner.ratio.assign(((&nested_out * &nested_out).sum() * sum_to_mean).sqrt())?;
+			inner.ratio.assign(custom_kernel!(
+				[nested_out: &nested_out], (sum_to_mean: sum_to_mean), {
+					((nested_out * nested_out).sum() * sum_to_mean).sqrt()
+				}
+			))?;
 			if self.norm_pos == NormPosition::Inside {
-				inner.ratio.assign(&inner.ratio * &inp_magn_recip)?;
+				inner.ratio.assign(custom_kernel!(
+					[ratio: &inner.ratio, inp_magn_recip: &inp_magn_recip], (), {
+						ratio * inp_magn_recip
+					}
+				))?;
 			}
 			std::mem::drop(inner);
 
@@ -150,7 +165,11 @@ impl<Nested: Layer> Layer for Wrapper<Nested> {
 			std::mem::swap(&mut nested_out, &mut residual);
 		}
 		let out = nested_out.reuse_or_new_like()?;
-		out.assign(&nested_out + &residual)?;
+		out.assign(custom_kernel!(
+			[nested_out: &nested_out, residual: &residual], (), {
+				nested_out + residual
+			}
+		))?;
 		Ok(AutogradNode::new(out, nested_out_fn))
 	}
 
@@ -195,25 +214,56 @@ impl BackwardFn for WrapperBackwardFn_Split {
 		let sum_to_mean = d_out.sum_to_mean();
 
 		let d_nested_magn_recip = ratio.new_empty_like()?;
-		d_nested_magn_recip
-			.assign(((&d_nested * &d_nested).sum() * sum_to_mean).sqrt().recip(eps))?;
-		ratio.assign(&ratio * &d_nested_magn_recip)?;
+		d_nested_magn_recip.assign(custom_kernel!(
+			[d_nested: &d_nested], (sum_to_mean: sum_to_mean, eps: eps), {
+				(((d_nested * d_nested).sum() * sum_to_mean).sqrt() + eps).recip()
+			}
+		))?;
+		ratio.assign(custom_kernel!(
+			[ratio: &ratio, d_nested_magn_recip: &d_nested_magn_recip], (), {
+				ratio * d_nested_magn_recip
+			}
+		))?;
 
 		let d_out_magn = d_nested_magn_recip; // reuse tensor with different variable name
-		d_out_magn.assign(((&d_out * &d_out).sum() * sum_to_mean).sqrt())?;
-		ratio.assign(&ratio * &d_out_magn)?;
+		d_out_magn.assign(custom_kernel!(
+			[d_out: &d_out], (sum_to_mean: sum_to_mean), {
+				((d_out * d_out).sum() * sum_to_mean).sqrt()
+			}
+		))?;
+		ratio.assign(custom_kernel!(
+			[ratio: &ratio, d_out_magn: &d_out_magn], (), {
+				ratio * d_out_magn
+			}
+		))?;
 
 		let d_inp = d_out.reuse_or_new_like()?;
-		d_inp.assign(&d_out + (&d_nested * &ratio))?;
+		d_inp.assign(custom_kernel!(
+			[d_out: &d_out, d_nested: &d_nested, ratio: &ratio], (), {
+				d_out + (d_nested * ratio)
+			}
+		))?;
 		std::mem::drop(d_out);
 		std::mem::drop(d_nested);
 
 		let d_inp_magn_recip = ratio; // reuse tensor with different variable name
-		d_inp_magn_recip.assign(((&d_inp * &d_inp).sum() * sum_to_mean).sqrt().recip(eps))?;
-		d_out_magn.assign(&d_out_magn * &d_inp_magn_recip)?;
+		d_inp_magn_recip.assign(custom_kernel!(
+			[d_inp: &d_inp], (sum_to_mean: sum_to_mean, eps: eps), {
+				(((d_inp * d_inp).sum() * sum_to_mean).sqrt() + eps).recip()
+			}
+		))?;
+		d_out_magn.assign(custom_kernel!(
+			[d_out_magn: &d_out_magn, d_inp_magn_recip: &d_inp_magn_recip], (), {
+				d_out_magn * d_inp_magn_recip
+			}
+		))?;
 		std::mem::drop(d_inp_magn_recip);
 
-		d_inp.assign(&d_inp * &d_out_magn)?;
+		d_inp.assign(custom_kernel!(
+			[d_inp: &d_inp, d_out_magn: &d_out_magn], (), {
+				d_inp * d_out_magn
+			}
+		))?;
 		std::mem::drop(d_out_magn);
 
 		queue.add(backward_fn, d_inp);
