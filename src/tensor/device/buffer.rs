@@ -320,19 +320,7 @@ impl<'a> Buffer for mycell::BorrowGuard<'a, DeviceBuffer> {
 	}
 }
 
-impl<'a> Buffer for mycell::Ref<'a, DeviceBuffer> {
-	fn len(&self) -> usize {
-		self.elems
-	}
-}
-
 impl<'a> Buffer for mycell::BorrowMutGuard<'a, DeviceBuffer> {
-	fn len(&self) -> usize {
-		self.elems
-	}
-}
-
-impl<'a> Buffer for mycell::RefMut<'a, DeviceBuffer> {
 	fn len(&self) -> usize {
 		self.elems
 	}

@@ -18,6 +18,7 @@ use crate::{ErrPack, autograd};
 
 #[allow(clippy::panic_in_result_fn)]
 #[allow(clippy::approx_constant)]
+#[allow(clippy::unwrap_used)]
 #[test]
 fn test_swiglu() -> Result<(), ErrPack<TensorOpError>> {
 	let swiglu = SwiGLU::new(7);

@@ -155,10 +155,6 @@ impl<'a, T: ?Sized + 'a> BorrowGuard<'a, T> {
 		value.borrow_counter.set(borrow_count + 1);
 		BorrowGuard { value }
 	}
-
-	pub fn as_ref<'t>(&'t self) -> Ref<'t, T> {
-		Ref { value: self.value }
-	}
 }
 
 impl<'a, T: ?Sized> Drop for BorrowGuard<'a, T> {
@@ -170,21 +166,6 @@ impl<'a, T: ?Sized> Drop for BorrowGuard<'a, T> {
 }
 
 impl<'a, T: ?Sized> std::ops::Deref for BorrowGuard<'a, T> {
-	type Target = T;
-
-	fn deref(&self) -> &T {
-		&self.value.value
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
-#[derive(Clone, Copy)]
-pub struct Ref<'a, T: ?Sized + 'a> {
-	value: &'a RefCell<T>,
-}
-
-impl<'a, T: ?Sized> std::ops::Deref for Ref<'a, T> {
 	type Target = T;
 
 	fn deref(&self) -> &T {
@@ -249,10 +230,6 @@ impl<'a, T: ?Sized + 'a> BorrowMutGuard<'a, T> {
 		value.borrow_counter.set(borrow_count - 1);
 		BorrowMutGuard { value }
 	}
-
-	pub fn as_mut<'t>(&'t mut self) -> RefMut<'t, T> {
-		RefMut { value: self.value }
-	}
 }
 
 impl<'a, T: ?Sized> Drop for BorrowMutGuard<'a, T> {
@@ -264,20 +241,6 @@ impl<'a, T: ?Sized> Drop for BorrowMutGuard<'a, T> {
 }
 
 impl<'a, T: ?Sized> std::ops::Deref for BorrowMutGuard<'a, T> {
-	type Target = T;
-
-	fn deref(&self) -> &T {
-		&self.value.value
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
-pub struct RefMut<'a, T: ?Sized + 'a> {
-	value: &'a RefCell<T>,
-}
-
-impl<'a, T: ?Sized> std::ops::Deref for RefMut<'a, T> {
 	type Target = T;
 
 	fn deref(&self) -> &T {

@@ -105,7 +105,7 @@ impl OptParam {
 
 	#[cold]
 	#[inline(never)]
-	fn grad_error(&mut self) -> Result<(), ErrPack<TensorOpError>> {
+	fn grad_error() -> Result<(), ErrPack<TensorOpError>> {
 		Err(ErrPack {
 			code: TensorOpError::InvalidValue,
 			extra: Some(Box::new(ErrExtra {
@@ -121,7 +121,7 @@ impl OptParam {
 	pub fn step(&mut self, coef: &OptCoef) -> Result<(), ErrPack<TensorOpError>> {
 		if self.grad_error {
 			cold_path();
-			return self.grad_error();
+			return Self::grad_error();
 		}
 
 		let Some(grad) = &self.grad else {
