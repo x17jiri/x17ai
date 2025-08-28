@@ -17,10 +17,10 @@ use crate::tensor::{Tensor, TensorOpError};
 #[macro_export]
 macro_rules! custom_kernel {
 	(
-        [ $($tensor_id:ident : $tensor_expr:expr),* $(,)? ],
-        ( $($scalar_id:ident : $scalar_expr:expr),* $(,)? ),
-        $body:expr
-    ) => {{
+		[ $($tensor_id:ident : $tensor_expr:expr),* $(,)? ],
+		( $($scalar_id:ident : $scalar_expr:expr),* $(,)? ),
+		$body:expr
+	) => {{
 		$crate::tensor::device::kernel::expr::KernelCall::new(
 			[ $($tensor_expr),* ],
 			[ $($scalar_expr),* ],
@@ -39,6 +39,28 @@ macro_rules! custom_kernel {
 			}
 		)
 	}};
+}
+
+#[macro_export]
+macro_rules! custom_kernel_fn {
+	(
+		$name:ident,
+		[ $($tensor_id:ident),* $(,)? ],
+		( $($scalar_id:ident),* $(,)? ),
+		$body:expr
+	) => {
+		fn $name<'a>(
+			$($tensor_id: &'a $crate::tensor::Tensor),*,
+			$($scalar_id: f64),*
+		) -> $crate::tensor::device::kernel::expr::KernelCall<'a, impl const $crate::tensor::device::kernel::expr::ExprTrait + $crate::tensor::device::kernel::expr::ExprToDyn>
+		{
+			custom_kernel!(
+				[ $($tensor_id : $tensor_id),* ],
+				( $($scalar_id : $scalar_id),* ),
+				$body
+			)
+		}
+	};
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -108,15 +130,42 @@ where
 
 //--------------------------------------------------------------------------------------------------
 
+#[derive(Clone, Copy)]
+pub struct InputMasks {
+	pub elemwise: u64,
+	pub reduce: u64,
+	pub scalar: u64,
+}
+
+#[derive(Clone, Copy)]
+pub struct InputCounts {
+	pub elemwise: usize,
+	pub reduce: usize,
+	pub scalar: usize,
+}
+
+impl InputCounts {
+	pub const fn new(masks: InputMasks) -> Self {
+		Self {
+			elemwise: masks.elemwise.count_ones() as usize,
+			reduce: masks.reduce.count_ones() as usize,
+			scalar: masks.scalar.count_ones() as usize,
+		}
+	}
+}
+
 #[const_trait]
 pub trait ExprTrait {
-	const ELEMWISE_MASK: u64;
-	const REDUCE_MASK: u64;
-	const SCALAR_MASK: u64;
+	const MASKS: InputMasks;
+	const COUNTS: InputCounts = InputCounts::new(Self::MASKS);
 
-	const ELEMWISE_COUNT: usize = Self::ELEMWISE_MASK.count_ones() as usize;
-	const REDUCE_COUNT: usize = Self::REDUCE_MASK.count_ones() as usize;
-	const SCALAR_COUNT: usize = Self::SCALAR_MASK.count_ones() as usize;
+	const ELEMWISE_MASK: u64 = Self::MASKS.elemwise;
+	const REDUCE_MASK: u64 = Self::MASKS.reduce;
+	const SCALAR_MASK: u64 = Self::MASKS.scalar;
+
+	const ELEMWISE_COUNT: usize = Self::COUNTS.elemwise;
+	const REDUCE_COUNT: usize = Self::COUNTS.reduce;
+	const SCALAR_COUNT: usize = Self::COUNTS.scalar;
 
 	const REDUCE_OP_COUNT: usize;
 
@@ -124,7 +173,7 @@ pub trait ExprTrait {
 	const PADDED_KEY_LEN: usize = Self::KEY_LEN.next_multiple_of(KEY_BATCH_SIZE);
 	const BATCHED_KEY_LEN: usize = Self::PADDED_KEY_LEN / KEY_BATCH_SIZE;
 
-	fn set_key(em: u64, rm: u64, sm: u64, reduce: bool, id: &mut [u8], i: usize) -> usize;
+	fn set_key(masks: InputMasks, reduce: bool, id: &mut [u8], i: usize) -> usize;
 
 	#[allow(clippy::indexing_slicing)]
 	fn key() -> ([u64; Self::BATCHED_KEY_LEN], u64)
@@ -132,14 +181,7 @@ pub trait ExprTrait {
 		[(); Self::PADDED_KEY_LEN]:,
 	{
 		let mut id = [255; Self::PADDED_KEY_LEN];
-		let len = Self::set_key(
-			Self::ELEMWISE_MASK,
-			Self::REDUCE_MASK,
-			Self::SCALAR_MASK,
-			false,
-			&mut id,
-			0,
-		);
+		let len = Self::set_key(Self::MASKS, false, &mut id, 0);
 		assert!(len == Self::KEY_LEN);
 
 		let key_union = KeyUnion { id };
@@ -190,22 +232,20 @@ pub struct MulExpr<A: const ExprTrait + ExprToDyn, B: const ExprTrait + ExprToDy
 //--------------------------------------------------------------------------------------------------
 
 impl<const Idx: usize> const ExprTrait for TensorArg<Idx> {
-	const ELEMWISE_MASK: u64 = 1 << Idx;
-	const REDUCE_MASK: u64 = 0;
-	const SCALAR_MASK: u64 = 0;
+	const MASKS: InputMasks = InputMasks { elemwise: 1 << Idx, reduce: 0, scalar: 0 };
 
 	const REDUCE_OP_COUNT: usize = 0;
 
 	const KEY_LEN: usize = 2;
 
-	fn set_key(em: u64, rm: u64, _sm: u64, reduce: bool, id: &mut [u8], i: usize) -> usize {
+	fn set_key(masks: InputMasks, reduce: bool, id: &mut [u8], i: usize) -> usize {
 		let bit = 1_u64 << Idx;
 		if reduce {
-			let idx = (rm & (bit - 1)).count_ones() as usize;
+			let idx = (masks.reduce & (bit - 1)).count_ones() as usize;
 			id[i + 0] = ExprDiscriminant::ReduceTensorArg as u8;
 			id[i + 1] = idx as u8;
 		} else {
-			let idx = (em & (bit - 1)).count_ones() as usize;
+			let idx = (masks.elemwise & (bit - 1)).count_ones() as usize;
 			id[i + 0] = ExprDiscriminant::ElemwiseTensorArg as u8;
 			id[i + 1] = idx as u8;
 		}
@@ -227,17 +267,15 @@ impl<const Idx: usize> ExprToDyn for TensorArg<Idx> {
 }
 
 impl<const Idx: usize> const ExprTrait for ScalarArg<Idx> {
-	const ELEMWISE_MASK: u64 = 0;
-	const REDUCE_MASK: u64 = 0;
-	const SCALAR_MASK: u64 = 1 << Idx;
+	const MASKS: InputMasks = InputMasks { elemwise: 0, reduce: 0, scalar: 1 << Idx };
 
 	const REDUCE_OP_COUNT: usize = 0;
 
 	const KEY_LEN: usize = 2;
 
-	fn set_key(_me: u64, _rm: u64, sm: u64, _reduce: bool, id: &mut [u8], i: usize) -> usize {
+	fn set_key(masks: InputMasks, _reduce: bool, id: &mut [u8], i: usize) -> usize {
 		let bit = 1_u64 << Idx;
-		let idx = (sm & (bit - 1)).count_ones() as usize;
+		let idx = (masks.scalar & (bit - 1)).count_ones() as usize;
 		id[i + 0] = ExprDiscriminant::ScalarArg as u8;
 		id[i + 1] = idx as u8;
 		i + 2
@@ -255,17 +293,19 @@ impl<const Idx: usize> ExprToDyn for ScalarArg<Idx> {
 macro_rules! impl_expr_reduce {
 	($name:ident) => {
 		impl<A: const ExprTrait + ExprToDyn> const ExprTrait for $name<A> {
-			const ELEMWISE_MASK: u64 = 0;
-			const REDUCE_MASK: u64 = A::REDUCE_MASK | A::ELEMWISE_MASK;
-			const SCALAR_MASK: u64 = A::SCALAR_MASK;
+			const MASKS: InputMasks = InputMasks {
+				elemwise: 0,
+				reduce: A::MASKS.reduce | A::MASKS.elemwise,
+				scalar: A::MASKS.scalar,
+			};
 
 			const REDUCE_OP_COUNT: usize = 1 + A::REDUCE_OP_COUNT;
 
 			const KEY_LEN: usize = 1 + A::KEY_LEN;
 
-			fn set_key(em: u64, rm: u64, sm: u64, _reduce: bool, id: &mut [u8], i: usize) -> usize {
+			fn set_key(masks: InputMasks, _reduce: bool, id: &mut [u8], i: usize) -> usize {
 				id[i] = ExprDiscriminant::$name as u8;
-				A::set_key(em, rm, sm, true, id, i + 1)
+				A::set_key(masks, true, id, i + 1)
 			}
 		}
 
@@ -281,15 +321,13 @@ macro_rules! impl_expr_reduce {
 macro_rules! impl_expr_nullary {
 	($name:ident) => {
 		impl const ExprTrait for $name {
-			const ELEMWISE_MASK: u64 = 0;
-			const REDUCE_MASK: u64 = 0;
-			const SCALAR_MASK: u64 = 0;
+			const MASKS: InputMasks = InputMasks { elemwise: 0, reduce: 0, scalar: 0 };
 
 			const REDUCE_OP_COUNT: usize = 0;
 
 			const KEY_LEN: usize = 1;
 
-			fn set_key(_: u64, _: u64, _: u64, _: bool, id: &mut [u8], i: usize) -> usize {
+			fn set_key(_masks: InputMasks, _reduce: bool, id: &mut [u8], i: usize) -> usize {
 				id[i] = ExprDiscriminant::$name as u8;
 				i + 1
 			}
@@ -306,17 +344,15 @@ macro_rules! impl_expr_nullary {
 macro_rules! impl_expr_unary {
 	($name:ident) => {
 		impl<A: const ExprTrait + ExprToDyn> const ExprTrait for $name<A> {
-			const ELEMWISE_MASK: u64 = A::ELEMWISE_MASK;
-			const REDUCE_MASK: u64 = A::REDUCE_MASK;
-			const SCALAR_MASK: u64 = A::SCALAR_MASK;
+			const MASKS: InputMasks = A::MASKS;
 
 			const REDUCE_OP_COUNT: usize = A::REDUCE_OP_COUNT;
 
 			const KEY_LEN: usize = 1 + A::KEY_LEN;
 
-			fn set_key(em: u64, rm: u64, sm: u64, reduce: bool, id: &mut [u8], i: usize) -> usize {
+			fn set_key(masks: InputMasks, reduce: bool, id: &mut [u8], i: usize) -> usize {
 				id[i + 0] = ExprDiscriminant::$name as u8;
-				A::set_key(em, rm, sm, reduce, id, i + 1)
+				A::set_key(masks, reduce, id, i + 1)
 			}
 		}
 
@@ -333,20 +369,22 @@ macro_rules! impl_expr_binary {
 		impl<A: const ExprTrait + ExprToDyn, B: const ExprTrait + ExprToDyn> const ExprTrait
 			for $name<A, B>
 		{
-			const ELEMWISE_MASK: u64 = A::ELEMWISE_MASK | B::ELEMWISE_MASK;
-			const REDUCE_MASK: u64 = A::REDUCE_MASK | B::REDUCE_MASK;
-			const SCALAR_MASK: u64 = A::SCALAR_MASK | B::SCALAR_MASK;
+			const MASKS: InputMasks = InputMasks {
+				elemwise: A::MASKS.elemwise | B::MASKS.elemwise,
+				reduce: A::MASKS.reduce | B::MASKS.reduce,
+				scalar: A::MASKS.scalar | B::MASKS.scalar,
+			};
 
 			const REDUCE_OP_COUNT: usize = A::REDUCE_OP_COUNT + B::REDUCE_OP_COUNT;
 
 			const KEY_LEN: usize = 1 + A::KEY_LEN + B::KEY_LEN;
 
-			fn set_key(em: u64, rm: u64, sm: u64, reduce: bool, id: &mut [u8], i: usize) -> usize {
+			fn set_key(masks: InputMasks, reduce: bool, id: &mut [u8], i: usize) -> usize {
 				id[i + 0] = ExprDiscriminant::$name as u8;
 				let begin = i + 1;
-				let mid = A::set_key(em, rm, sm, reduce, id, begin);
+				let mid = A::set_key(masks, reduce, id, begin);
 				assert!(mid == begin + A::KEY_LEN);
-				let end = B::set_key(em, rm, sm, reduce, id, mid);
+				let end = B::set_key(masks, reduce, id, mid);
 				assert!(end == mid + B::KEY_LEN);
 				if !($commutative) {
 					return end;
@@ -377,9 +415,9 @@ macro_rules! impl_expr_binary {
 					}
 					end
 				} else {
-					let mid = B::set_key(em, rm, sm, reduce, id, begin);
+					let mid = B::set_key(masks, reduce, id, begin);
 					assert!(mid == begin + B::KEY_LEN);
-					let end = A::set_key(em, rm, sm, reduce, id, mid);
+					let end = A::set_key(masks, reduce, id, mid);
 					assert!(end == mid + A::KEY_LEN);
 					end
 				}
