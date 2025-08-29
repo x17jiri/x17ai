@@ -45,24 +45,28 @@ pub struct KernelOutput {
 
 //--------------------------------------------------------------------------------------------------
 
-pub type DropBufferFn =
-	unsafe fn(this: NonNull<DeviceBufferVMT>, elems: usize, device_data: *mut u8);
+pub type DropBufferFn = unsafe fn(
+	this: NonNull<DeviceBufferVMT>,
+	elems: usize,
+	device_data: *mut u8,
+	extra_data: Option<NonNull<()>>,
+);
 
 pub type ReadFloatFn = for<'buf> unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
 	src: &generic::Tensor<ND<0>, BorrowGuard<'buf, DeviceBuffer>>,
 ) -> Result<f64, ErrPack<TensorOpError>>;
 
-pub type LoadBinFn = for<'buf> unsafe fn(
+pub type LoadFromCPUMemoryFn = for<'buf> unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
-	dst: &mut generic::Tensor<ND<2>, BorrowMutGuard<'buf, DeviceBuffer>>,
-	src: &mut dyn std::io::Read,
+	src: &[u8],
+	dst: &mut generic::Tensor<ND<1>, BorrowMutGuard<'buf, DeviceBuffer>>,
 ) -> Result<(), ErrPack<TensorOpError>>;
 
-pub type StoreBinFn = for<'buf> unsafe fn(
+pub type StoreToCPUMemoryFn = for<'buf> unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
-	src: &generic::Tensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
-	dst: &mut dyn std::io::Write,
+	src: &generic::Tensor<ND<1>, BorrowGuard<'buf, DeviceBuffer>>,
+	dst: &mut [u8],
 ) -> Result<(), ErrPack<TensorOpError>>;
 
 pub type MMFn = for<'buf> unsafe fn(
@@ -75,11 +79,14 @@ pub type MMFn = for<'buf> unsafe fn(
 
 pub type AttentionFn = for<'buf> unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
-	o: &mut generic::Tensor<ND<3>, BorrowMutGuard<'buf, DeviceBuffer>>, /* [inputs, qo_heads,
-	                                                                     * vo_features] */
-	q: &generic::Tensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>, // [inputs, qo_heads, qk_features]
-	k: &generic::Tensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>, // [inputs, k_heads, qk_features]
-	v: &generic::Tensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>, // [inputs, v_heads, vo_features]
+	// [inputs, qo_heads, vo_features]
+	o: &mut generic::Tensor<ND<3>, BorrowMutGuard<'buf, DeviceBuffer>>,
+	// [inputs, qo_heads, qk_features]
+	q: &generic::Tensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
+	// [inputs, k_heads, qk_features]
+	k: &generic::Tensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
+	// [inputs, v_heads, vo_features]
+	v: &generic::Tensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
 );
 
 pub type RunKernelFn = unsafe fn(
@@ -100,8 +107,8 @@ pub struct DeviceBufferVMT {
 
 	drop_buffer: DropBufferFn,
 	read_float: ReadFloatFn,
-	load_bin: LoadBinFn,
-	store_bin: StoreBinFn,
+	load_from_cpu_memory: LoadFromCPUMemoryFn,
+	store_to_cpu_memory: StoreToCPUMemoryFn,
 	mm: MMFn,
 	attention: AttentionFn,
 	run_kernel: RunKernelFn,
@@ -121,8 +128,8 @@ impl DeviceBufferVMT {
 
 		drop_buffer: DropBufferFn,
 		read_float: ReadFloatFn,
-		load_bin: LoadBinFn,
-		store_bin: StoreBinFn,
+		load_from_cpu_memory: LoadFromCPUMemoryFn,
+		store_to_cpu_memory: StoreToCPUMemoryFn,
 		mm: MMFn,
 		attention: AttentionFn,
 		run_kernel: RunKernelFn,
@@ -135,8 +142,8 @@ impl DeviceBufferVMT {
 
 			drop_buffer,
 			read_float,
-			load_bin,
-			store_bin,
+			load_from_cpu_memory,
+			store_to_cpu_memory,
 			mm,
 			attention,
 			run_kernel,
@@ -186,21 +193,21 @@ impl DeviceBufferVMT {
 	}
 
 	#[inline]
-	pub fn load_bin<'buf>(
+	pub fn load_from_cpu_memory<'buf>(
 		&self,
-		dst: &mut generic::Tensor<ND<2>, BorrowMutGuard<'buf, DeviceBuffer>>,
-		src: &mut dyn std::io::Read,
+		src: &[u8],
+		dst: &mut generic::Tensor<ND<1>, BorrowMutGuard<'buf, DeviceBuffer>>,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		unsafe { (self.load_bin)(self.into(), dst, src) }
+		unsafe { (self.load_from_cpu_memory)(self.into(), src, dst) }
 	}
 
 	#[inline]
-	pub fn store_bin<'buf>(
+	pub fn store_to_cpu_memory<'buf>(
 		&self,
-		src: &generic::Tensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
-		dst: &mut dyn std::io::Write,
+		src: &generic::Tensor<ND<1>, BorrowGuard<'buf, DeviceBuffer>>,
+		dst: &mut [u8],
 	) -> Result<(), ErrPack<TensorOpError>> {
-		unsafe { (self.store_bin)(self.into(), src, dst) }
+		unsafe { (self.store_to_cpu_memory)(self.into(), src, dst) }
 	}
 
 	#[inline]
@@ -251,14 +258,20 @@ impl DeviceBufferVMT {
 
 pub struct DeviceBuffer {
 	device_data: *mut u8,
+	extra_data: Option<NonNull<()>>,
 	elems: usize,
 	vmt: NonNull<DeviceBufferVMT>,
 }
 
 impl DeviceBuffer {
 	#[inline]
-	pub unsafe fn new(device_data: *mut u8, elems: usize, vmt: NonNull<DeviceBufferVMT>) -> Self {
-		Self { device_data, elems, vmt }
+	pub unsafe fn new(
+		device_data: *mut u8,
+		extra_data: Option<NonNull<()>>,
+		elems: usize,
+		vmt: NonNull<DeviceBufferVMT>,
+	) -> Self {
+		Self { device_data, extra_data, elems, vmt }
 	}
 
 	#[inline]
@@ -295,7 +308,12 @@ impl DeviceBuffer {
 impl Drop for DeviceBuffer {
 	fn drop(&mut self) {
 		unsafe {
-			(self.vmt.as_ref().drop_buffer)(self.vmt, self.elems, self.device_data);
+			(self.vmt.as_ref().drop_buffer)(
+				self.vmt,
+				self.elems,
+				self.device_data,
+				self.extra_data,
+			);
 		}
 	}
 }

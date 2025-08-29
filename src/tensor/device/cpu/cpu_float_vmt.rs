@@ -220,8 +220,8 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 					kernel_runner,
 					CPUDevice::drop_buffer,
 					Self::read_float,
-					Self::load_bin,
-					Self::store_bin,
+					Self::load_from_cpu_memory,
+					Self::store_to_cpu_memory,
 					Self::mm,
 					Self::attention,
 					Self::run_kernel,
@@ -243,28 +243,28 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 		unsafe { cpu_device.as_ref() }
 	}
 
-	pub fn view_contiguous<'t, 'buf>(
-		tensor: &'t generic::Tensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
-	) -> Result<generic::Tensor<&'t ND<2>, &'t [T]>, ErrPack<TensorOpError>>
+	pub fn view_contiguous<'t, 'buf, const N: usize>(
+		tensor: &'t generic::Tensor<ND<N>, BorrowGuard<'buf, DeviceBuffer>>,
+	) -> Result<generic::Tensor<&'t ND<N>, &'t [T]>, ErrPack<TensorOpError>>
 	where
 		T: 'static,
 	{
 		tensor.ensure_safe()?;
-		let feature_dim = tensor.map().dims[1];
+		let feature_dim = tensor.map().dims[N - 1];
 		if !feature_dim.is_contiguous() {
 			return Err(TensorOpError::not_contiguous());
 		}
 		Ok(tensor.view()?)
 	}
 
-	pub fn view_contiguous_mut<'t, 'buf>(
-		tensor: &'t mut generic::Tensor<ND<2>, BorrowMutGuard<'buf, DeviceBuffer>>,
-	) -> Result<generic::Tensor<&'t ND<2>, &'t mut [T]>, ErrPack<TensorOpError>>
+	pub fn view_contiguous_mut<'t, 'buf, const N: usize>(
+		tensor: &'t mut generic::Tensor<ND<N>, BorrowMutGuard<'buf, DeviceBuffer>>,
+	) -> Result<generic::Tensor<&'t ND<N>, &'t mut [T]>, ErrPack<TensorOpError>>
 	where
 		T: 'static,
 	{
 		tensor.ensure_safe()?;
-		let feature_dim = tensor.map().dims[1];
+		let feature_dim = tensor.map().dims[N - 1];
 		if !feature_dim.is_contiguous() {
 			return Err(TensorOpError::not_contiguous());
 		}
@@ -374,39 +374,43 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 		Ok(view[[]].to_f64())
 	}
 
-	fn load_bin<'buf>(
+	fn load_from_cpu_memory<'buf>(
 		_this: NonNull<DeviceBufferVMT>,
-		dst: &mut generic::Tensor<ND<2>, BorrowMutGuard<'buf, DeviceBuffer>>,
-		src: &mut dyn std::io::Read,
+		src: &[u8],
+		dst: &mut generic::Tensor<ND<1>, BorrowMutGuard<'buf, DeviceBuffer>>,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let (map, buf) = Self::view_contiguous_mut(dst)?.into_parts();
-		for j in 0..map.dims[0].size {
-			let b = map.index_to_offset([j, 0]).unwrap();
-			let e = b + map.dims[1].size;
-			let buf = &mut buf[b..e];
-			let byte_slice = unsafe {
-				std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast::<u8>(), size_of_val(buf))
-			};
-			src.read_exact(byte_slice)?;
+		let dst_slice = &mut buf[map.span()];
+		let src_slice = unsafe {
+			std::slice::from_raw_parts(
+				src.as_ptr().cast::<T>(),
+				src.len() / std::mem::size_of::<T>(),
+			)
+		};
+		if dst_slice.len() != src_slice.len() {
+			todo!("better error");
 		}
+		dst_slice.copy_from_slice(src_slice);
 		Ok(())
 	}
 
-	fn store_bin<'buf>(
+	fn store_to_cpu_memory<'buf>(
 		_this: NonNull<DeviceBufferVMT>,
-		src: &generic::Tensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
-		dst: &mut dyn std::io::Write,
+		src: &generic::Tensor<ND<1>, BorrowGuard<'buf, DeviceBuffer>>,
+		dst: &mut [u8],
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let (map, buf) = Self::view_contiguous(src)?.into_parts();
-		for j in 0..map.dims[0].size {
-			let b = map.index_to_offset([j, 0]).unwrap();
-			let e = b + map.dims[1].size;
-			let buf = &buf[b..e];
-			let byte_slice = unsafe {
-				std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), std::mem::size_of_val(buf))
-			};
-			dst.write_all(byte_slice)?;
+		let src_slice = &buf[map.span()];
+		let dst_slice = unsafe {
+			std::slice::from_raw_parts_mut(
+				dst.as_mut_ptr().cast::<T>(),
+				dst.len() / std::mem::size_of::<T>(),
+			)
+		};
+		if dst_slice.len() != src_slice.len() {
+			todo!("better error");
 		}
+		dst_slice.copy_from_slice(src_slice);
 		Ok(())
 	}
 

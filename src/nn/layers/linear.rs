@@ -13,7 +13,6 @@ use crate::autograd::{self, AutogradNode, BackwardFn};
 use crate::nn::model_context::ModelContext;
 use crate::nn::optimizer::CurrentGradValue;
 use crate::nn::param::Param;
-use crate::tensor::device::kernel::expr;
 use crate::tensor::math::{col, mat, row};
 use crate::tensor::{self, DType, Tensor, TensorOpError};
 use crate::util::LossyInto;
