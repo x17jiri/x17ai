@@ -12,6 +12,7 @@ pub use device::{DType, Device, HasDType};
 
 use crate::tensor::device::buffer::DeviceBufferVMT;
 use crate::tensor::device::cpu::{CPUDevice, ViewError};
+use crate::tensor::device::kernel::expr::{self, EvaluatesToTensor};
 use crate::tensor::device::{DeviceBuffer, NewDeviceBufferError};
 use crate::tensor::dim_merger::{DimMergerError, DimsDontMatchError, TooManyMergedDimensionsError};
 use crate::tensor::generic::TensorUnsafeError;
@@ -20,10 +21,9 @@ use crate::tensor::generic::map::{
 	DD, ElementsOverflowError, IncompatibleStridesError, IndexOutOfBoundsError, MergeDimsError, ND,
 	NotEnoughDimensionsError, ReshapeLastDimError, SelectError,
 };
-use crate::tensor::math::EvaluatesToTensor;
 use crate::util::LossyInto;
 use crate::util::mycell::{self, BorrowError, BorrowGuard, BorrowMutError, BorrowMutGuard};
-use crate::{ErrExtra, ErrPack};
+use crate::{ErrExtra, ErrPack, custom_kernel};
 
 pub mod device;
 pub mod dim_merger;
@@ -213,6 +213,10 @@ impl Tensor {
 		expr: Expr,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		expr.eval_to_tensor(self)
+	}
+
+	pub fn randn_(&self) -> Result<(), ErrPack<TensorOpError>> {
+		self.assign(custom_kernel!([], (), expr::randn()))
 	}
 
 	/// I use this function because Rust doesn't allow specifying only some generic parameters.

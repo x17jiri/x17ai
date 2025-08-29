@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 use crate::ErrPack;
 use crate::tensor::device::kernel::registry::KernelMap;
-use crate::tensor::math::EvaluatesToTensor;
 use crate::tensor::{Tensor, TensorOpError};
 
 //--------------------------------------------------------------------------------------------------
@@ -41,26 +40,32 @@ macro_rules! custom_kernel {
 	}};
 }
 
-#[macro_export]
-macro_rules! custom_kernel_fn {
-	(
-		$name:ident,
-		[ $($tensor_id:ident),* $(,)? ],
-		( $($scalar_id:ident),* $(,)? ),
-		$body:expr
-	) => {
-		fn $name<'a>(
-			$($tensor_id: &'a $crate::tensor::Tensor),*,
-			$($scalar_id: f64),*
-		) -> $crate::tensor::device::kernel::expr::KernelCall<'a, impl const $crate::tensor::device::kernel::expr::ExprTrait + $crate::tensor::device::kernel::expr::ExprToDyn>
-		{
-			custom_kernel!(
-				[ $($tensor_id : $tensor_id),* ],
-				( $($scalar_id : $scalar_id),* ),
-				$body
-			)
-		}
-	};
+//--------------------------------------------------------------------------------------------------
+
+pub trait EvaluatesToTensor {
+	/// Calculate the result of the operation represented by `self`
+	/// and save it into the `to` tensor.
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>>;
+}
+
+impl EvaluatesToTensor for f64 {
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+		to.assign(custom_kernel!(
+			[], (VALUE: self), {
+				VALUE
+			}
+		))
+	}
+}
+
+impl EvaluatesToTensor for &Tensor {
+	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+		to.assign(custom_kernel!(
+			[src: self], (), {
+				src
+			}
+		))
+	}
 }
 
 //--------------------------------------------------------------------------------------------------

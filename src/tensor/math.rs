@@ -15,12 +15,6 @@ use crate::{ErrPack, custom_kernel};
 
 //--------------------------------------------------------------------------------------------------
 
-pub trait EvaluatesToTensor {
-	/// Calculate the result of the operation represented by `self`
-	/// and save it into the `to` tensor.
-	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>>;
-}
-
 pub trait ClearAccToMatrix {
 	fn clear_acc_to_matrix(self, to: &Matrix) -> Result<(), ErrPack<TensorOpError>>;
 }

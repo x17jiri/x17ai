@@ -103,10 +103,11 @@ impl BackwardFn for SwiGLUBackwardFn {
 		))?;
 
 		d_gate.assign(custom_kernel!(
-			[gate: &gate, lin: &lin, d_out: &d_out], (ONE: 1.0), {
+			[d_out: &d_out, lin: &lin, gate: &gate], (ONE: 1.0), {
 				let sigmoid = (ONE + (-gate).exp()).recip();
 				let swish = gate * sigmoid;
-				(sigmoid + swish - (sigmoid * swish)) * lin * d_out
+				let result = d_out * lin * (sigmoid + swish - (sigmoid * swish));
+				result
 			}
 		))?;
 

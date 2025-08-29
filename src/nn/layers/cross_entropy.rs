@@ -59,6 +59,7 @@ impl LossFn for CrossEntropyLossFn {
 			}
 		))?;
 
+		// We have a sum for each batch. Let's merge batch dimensions
 		let err_sums = err_sums.merge_all_dims()?;
 
 		let result = err_sums.new_empty(&[1], value.dtype())?;

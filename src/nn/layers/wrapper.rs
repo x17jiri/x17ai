@@ -239,7 +239,7 @@ impl BackwardFn for WrapperBackwardFn_Split {
 
 		let d_inp = d_out.reuse_or_new_like()?;
 		d_inp.assign(custom_kernel!(
-			[d_out: &d_out, d_nested: &d_nested, ratio: &ratio], (), {
+			[d_nested: &d_nested, ratio: &ratio, d_out: &d_out], (), {
 				d_out + (d_nested * ratio)
 			}
 		))?;

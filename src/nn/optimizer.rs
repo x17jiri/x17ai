@@ -13,7 +13,6 @@
 use std::hint::cold_path;
 
 use crate::tensor::{Tensor, TensorOpError};
-use crate::util::LossyInto;
 use crate::{ErrExtra, ErrPack, custom_kernel};
 
 //--------------------------------------------------------------------------------------------------
@@ -44,7 +43,6 @@ impl Default for OptCoef {
 pub struct OptParam {
 	pub(crate) parts: usize,
 	pub(crate) part_elems: usize,
-	pub(crate) part_elems_recip: f64, // `1.0 / (part_elems as f64)`
 
 	pub(crate) value: Tensor, // shape: `[parts, part_elems]`
 	pub(crate) m: Tensor,     // shape: `[parts, part_elems]`
@@ -70,23 +68,14 @@ impl OptParam {
 		let value = value.reshape_last_dim([parts, part_elems]).unwrap();
 
 		let m = value.new_empty_like()?;
-		m.assign(custom_kernel!(
-			[], (ZERO: 0.0), {
-				ZERO
-			}
-		))?;
+		m.assign(0.0)?;
 
 		let v = value.new_empty(&[parts, 1], value.dtype())?;
-		v.assign(custom_kernel!(
-			[], (ZERO: 0.0), {
-				ZERO
-			}
-		))?;
+		v.assign(0.0)?;
 
 		Ok(Self {
 			parts,
 			part_elems,
-			part_elems_recip: 1.0 / part_elems.lossy_into(),
 
 			value,
 			m,
@@ -132,30 +121,30 @@ impl OptParam {
 
 		// Update the first moment estimate
 		self.m.assign(custom_kernel!(
-			[m: &self.m, grad: &grad], (ONE: 1.0, m_decay: coef.m_decay), {
-				let m_decayed = m * m_decay;
-				let m_update = grad * (ONE - m_decay);
+			[m: &self.m, grad: &grad],
+			(
+				m_decay_coef: coef.m_decay,
+				m_update_coef: 1.0 - coef.m_decay,
+			), {
+				let m_decayed = m * m_decay_coef;
+				let m_update = grad * m_update_coef;
 				let new_m = m_decayed + m_update;
 				new_m
 			}
 		))?;
 
+		// Update the second moment estimate
 		self.v.assign(custom_kernel!(
-			[grad: &grad, v: &self.v],
+			[v: &self.v, grad: &grad],
 			(
-				ONE: 1.0,
-				part_elems_recip: self.part_elems_recip,
-				v_decay: coef.v_decay
+				v_decay_coef: coef.v_decay,
+				v_update_coef: grad.sum_to_mean() * (1.0 - coef.v_decay),
 			), {
 				// The original Adam uses just `grad * grad`. Adam-mini saves space
 				// required for `v` by computing the mean of `grad * grad` for each part
 				// of the parameter tensor.
-				// Dividing the sum by `part_elems` gives the mean.
-				let grad_squared = (grad * grad).sum() * part_elems_recip;
-
-				// Update the second moment estimate
-				let v_decayed = v * v_decay;
-				let v_update = grad_squared * (ONE - v_decay);
+				let v_decayed = v * v_decay_coef;
+				let v_update = (grad * grad).sum() * v_update_coef;
 				let new_v = v_decayed + v_update;
 				new_v
 			}
@@ -175,10 +164,10 @@ impl OptParam {
 				v_rsqrt: &v_rsqrt,
 				value: &self.value,
 			], (
-				learning_rate: coef.learning_rate,
+				update_coef: -coef.learning_rate,
 			), {
 				let update = m * v_rsqrt;
-				let new_value = value - update * learning_rate;
+				let new_value = value + update * update_coef;
 				new_value
 			}
 		))?;

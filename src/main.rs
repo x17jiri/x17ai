@@ -251,7 +251,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let loss_layer = CrossEntropy::new(2);
 
 	let input = Tensor::new_empty_on(&[2, 3], f32::dtype, dev.clone())?;
-	input.assign(custom_kernel!([], (), expr::randn()))?;
+	input.randn_();
 
 	let expected = lit.new_2d(&[[1.0, 0.0], [0.0, 1.0]])?;
 
