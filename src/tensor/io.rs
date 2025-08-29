@@ -9,7 +9,7 @@ use crate::ErrPack;
 use crate::tensor::device::cpu::math::FromToF64;
 use crate::tensor::dim_merger::{DimMerger, DimMergerError};
 use crate::tensor::generic::map::{DD, ND, SizeAndStride};
-use crate::tensor::{TensorOpError, generic};
+use crate::tensor::{HasDType, TensorOpError, generic};
 
 use super::Tensor;
 
@@ -28,26 +28,20 @@ pub fn merge_dims<const N: usize>(tensor: &Tensor) -> Result<ND<N>, DimMergerErr
 
 //--------------------------------------------------------------------------------------------------
 
-pub fn store_bin(
-	src: &Tensor,
-	writer: &mut dyn std::io::Write,
-) -> Result<(), ErrPack<TensorOpError>> {
+pub fn store_to_cpu_memory(src: &Tensor, dst: &mut [u8]) -> Result<(), ErrPack<TensorOpError>> {
 	let vmt = src.vmt();
-	let nd = merge_dims::<2>(src)?;
+	let nd = merge_dims::<1>(src)?;
 	let t = unsafe { generic::Tensor::new_unchecked(nd, src.buf().try_borrow()?) };
-	Ok(vmt.store_bin(&t, writer)?)
+	Ok(vmt.store_to_cpu_memory(&t, dst)?)
 }
 
 //--------------------------------------------------------------------------------------------------
 
-pub fn load_bin(
-	dst: &Tensor,
-	reader: &mut dyn std::io::Read,
-) -> Result<(), ErrPack<TensorOpError>> {
+pub fn load_from_cpu_memory(src: &[u8], dst: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 	let vmt = dst.vmt();
-	let nd = merge_dims::<2>(dst)?;
+	let nd = merge_dims::<1>(dst)?;
 	let mut t = unsafe { generic::Tensor::new_unchecked(nd, dst.buf().try_borrow_mut()?) };
-	Ok(vmt.load_bin(&mut t, reader)?)
+	Ok(vmt.load_from_cpu_memory(src, &mut t)?)
 }
 
 //--------------------------------------------------------------------------------------------------

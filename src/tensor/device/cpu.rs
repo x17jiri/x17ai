@@ -127,14 +127,7 @@ impl CPUDevice {
 		Ok(())
 	}
 
-	unsafe fn drop_buffer(
-		this: NonNull<DeviceBufferVMT>,
-		elems: usize,
-		device_data: *mut u8,
-		extra_data: Option<NonNull<()>>,
-	) {
-		assert!(extra_data.is_none()); // TODO
-
+	unsafe fn drop_buffer(this: NonNull<DeviceBufferVMT>, elems: usize, device_data: *mut u8) {
 		let this = unsafe { this.as_ref() };
 		let dtype = this.dtype();
 		let device_ptr = this.device_ptr();
@@ -445,7 +438,7 @@ impl Device for CPUDevice {
 
 		let device_data = memory;
 		Ok(Rc::new(mycell::RefCell::new(unsafe {
-			DeviceBuffer::new(device_data, None, elems, vmt.cast())
+			DeviceBuffer::new(device_data, elems, vmt.cast())
 		})))
 	}
 }

@@ -45,12 +45,8 @@ pub struct KernelOutput {
 
 //--------------------------------------------------------------------------------------------------
 
-pub type DropBufferFn = unsafe fn(
-	this: NonNull<DeviceBufferVMT>,
-	elems: usize,
-	device_data: *mut u8,
-	extra_data: Option<NonNull<()>>,
-);
+pub type DropBufferFn =
+	unsafe fn(this: NonNull<DeviceBufferVMT>, elems: usize, device_data: *mut u8);
 
 pub type ReadFloatFn = for<'buf> unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
@@ -258,20 +254,14 @@ impl DeviceBufferVMT {
 
 pub struct DeviceBuffer {
 	device_data: *mut u8,
-	extra_data: Option<NonNull<()>>,
 	elems: usize,
 	vmt: NonNull<DeviceBufferVMT>,
 }
 
 impl DeviceBuffer {
 	#[inline]
-	pub unsafe fn new(
-		device_data: *mut u8,
-		extra_data: Option<NonNull<()>>,
-		elems: usize,
-		vmt: NonNull<DeviceBufferVMT>,
-	) -> Self {
-		Self { device_data, extra_data, elems, vmt }
+	pub unsafe fn new(device_data: *mut u8, elems: usize, vmt: NonNull<DeviceBufferVMT>) -> Self {
+		Self { device_data, elems, vmt }
 	}
 
 	#[inline]
@@ -308,12 +298,7 @@ impl DeviceBuffer {
 impl Drop for DeviceBuffer {
 	fn drop(&mut self) {
 		unsafe {
-			(self.vmt.as_ref().drop_buffer)(
-				self.vmt,
-				self.elems,
-				self.device_data,
-				self.extra_data,
-			);
+			(self.vmt.as_ref().drop_buffer)(self.vmt, self.elems, self.device_data);
 		}
 	}
 }
