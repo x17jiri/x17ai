@@ -14,14 +14,13 @@ use crate::tensor::device::DeviceBuffer;
 use crate::tensor::device::buffer::{
 	DeviceBufferVMT, KernelElemArg, KernelOutput, KernelReduceArg,
 };
-use crate::tensor::device::cpu::CPUDevice;
+use crate::tensor::device::cpu::{CPUDevice, math};
 use crate::tensor::device::kernel::expr::DynExpr;
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
-use crate::tensor::generic::map::{IndexToOffset, Map, ND, Select};
+use crate::tensor::generic::map::{Map, ND, Select};
 use crate::tensor::{HasDType, TensorOpError, generic};
+use crate::util::FromToF64;
 use crate::util::mycell::{BorrowGuard, BorrowMutGuard};
-
-use super::math::{self, FromToF64};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -128,12 +127,6 @@ impl<'a, T: 'static + Copy + HasDType + FromToF64> EvalExpr<'a, T> {
 						.to_f64()
 				},
 				DynExpr::ScalarArg(index) => self.scalar_args[*index],
-
-				DynExpr::RandnExpr() => {
-					let mut rng = self.device.rng.borrow_mut();
-					let val = rng.get_normal_clamped();
-					val
-				},
 
 				DynExpr::SumExpr(a) => {
 					assert!(!self.reduce_args.is_empty());

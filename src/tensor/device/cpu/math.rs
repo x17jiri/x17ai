@@ -5,41 +5,9 @@
 //
 //------------------------------------------------------------------------------
 
-pub trait FromToF64: Copy {
-	const MIN: f64; // largest negative value of type
-
-	fn from_f64(val: f64) -> Self;
-	fn to_f64(&self) -> f64;
-}
-
-#[allow(clippy::use_self)]
-impl FromToF64 for f32 {
-	const MIN: f64 = f32::MIN as f64;
-
-	fn from_f64(val: f64) -> Self {
-		#[allow(clippy::cast_possible_truncation)]
-		(val as f32)
-	}
-
-	fn to_f64(&self) -> f64 {
-		f64::from(*self)
-	}
-}
-
-#[allow(clippy::use_self)]
-impl FromToF64 for f64 {
-	const MIN: f64 = f64::MIN;
-
-	fn from_f64(val: f64) -> Self {
-		val
-	}
-
-	fn to_f64(&self) -> f64 {
-		*self
-	}
-}
-
 //--------------------------------------------------------------------------------------------------
+
+use crate::util::FromToF64;
 
 /// Calculates `(a * b) + c`
 pub fn mul_add(a: f64, b: f64, c: f64) -> f64 {

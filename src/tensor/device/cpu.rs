@@ -5,7 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::hint::cold_path;
 use std::ops::{Range, RangeFull};
 use std::ptr::NonNull;
@@ -18,9 +18,6 @@ use crate::util::mycell;
 
 pub mod cpu_float_vmt;
 pub mod math;
-pub mod rng;
-
-use self::rng::Rng;
 
 use crate::tensor::device::cpu::cpu_float_vmt::CPUFloatVMT;
 use crate::tensor::device::{DeviceBuffer, NewDeviceBufferError};
@@ -90,7 +87,6 @@ impl<'a, T> View3D<'a, T> {
 
 pub struct CPUDevice {
 	name: String,
-	rng: RefCell<Rng>,
 	f32_vmt: CPUFloatVMT<f32>,
 }
 
@@ -105,7 +101,6 @@ impl CPUDevice {
 		let mut rc_uninit = Rc::new_uninit();
 		let instance = Self {
 			name,
-			rng: RefCell::new(Rng::new_default()),
 			f32_vmt: CPUFloatVMT::new(&rc_uninit, kernel_runner),
 		};
 		unsafe {

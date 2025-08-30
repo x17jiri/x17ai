@@ -63,12 +63,14 @@
 #![allow(clippy::large_digit_groups)]
 #![allow(clippy::many_single_char_names)]
 #![allow(clippy::let_and_return)]
+#![allow(clippy::inline_always)]
 
 use std::convert::Infallible;
 
 pub mod autograd;
 pub mod format;
 pub mod nn;
+pub mod rng;
 pub mod tensor;
 pub mod util;
 

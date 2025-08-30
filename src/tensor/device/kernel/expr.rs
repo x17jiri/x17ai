@@ -80,8 +80,6 @@ pub enum ExprDiscriminant {
 	SumExpr,
 	MaxExpr,
 
-	RandnExpr,
-
 	NegExpr,
 	ExpExpr,
 	LnExpr,
@@ -105,8 +103,6 @@ pub enum DynExpr {
 
 	SumExpr(Arc<DynExpr>),
 	MaxExpr(Arc<DynExpr>),
-
-	RandnExpr(),
 
 	NegExpr(Arc<DynExpr>),
 	ExpExpr(Arc<DynExpr>),
@@ -210,9 +206,6 @@ pub struct ScalarArg<const Idx: usize>;
 pub struct SumExpr<A: const ExprTrait + ExprToDyn>(pub A);
 #[derive(Clone, Copy)]
 pub struct MaxExpr<A: const ExprTrait + ExprToDyn>(pub A);
-
-#[derive(Clone, Copy)]
-pub struct RandnExpr;
 
 #[derive(Clone, Copy)]
 pub struct NegExpr<A: const ExprTrait + ExprToDyn>(pub A);
@@ -323,29 +316,6 @@ macro_rules! impl_expr_reduce {
 	};
 }
 
-macro_rules! impl_expr_nullary {
-	($name:ident) => {
-		impl const ExprTrait for $name {
-			const MASKS: InputMasks = InputMasks { elemwise: 0, reduce: 0, scalar: 0 };
-
-			const REDUCE_OP_COUNT: usize = 0;
-
-			const KEY_LEN: usize = 1;
-
-			fn set_key(_masks: InputMasks, _reduce: bool, id: &mut [u8], i: usize) -> usize {
-				id[i] = ExprDiscriminant::$name as u8;
-				i + 1
-			}
-		}
-
-		impl ExprToDyn for $name {
-			fn to_dyn(_em: u64, _rm: u64, _sm: u64, _reduce: bool) -> Arc<DynExpr> {
-				Arc::new(DynExpr::$name())
-			}
-		}
-	};
-}
-
 macro_rules! impl_expr_unary {
 	($name:ident) => {
 		impl<A: const ExprTrait + ExprToDyn> const ExprTrait for $name<A> {
@@ -444,8 +414,6 @@ macro_rules! impl_expr_binary {
 impl_expr_reduce!(SumExpr);
 impl_expr_reduce!(MaxExpr);
 
-impl_expr_nullary!(RandnExpr);
-
 impl_expr_unary!(NegExpr);
 impl_expr_unary!(ExpExpr);
 impl_expr_unary!(LnExpr);
@@ -528,10 +496,6 @@ where
 
 #[derive(Clone, Copy)]
 pub struct Expr<E: const ExprTrait + ExprToDyn + Copy>(pub E);
-
-pub const fn randn() -> Expr<RandnExpr> {
-	Expr(RandnExpr)
-}
 
 impl<E: const ExprTrait + ExprToDyn + Copy> Expr<E> {
 	/// Computes the sum along the last dimension.

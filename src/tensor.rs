@@ -10,9 +10,10 @@ use std::rc::Rc;
 
 pub use device::{DType, Device, HasDType};
 
+use crate::rng::Rng;
 use crate::tensor::device::buffer::DeviceBufferVMT;
 use crate::tensor::device::cpu::{CPUDevice, ViewError};
-use crate::tensor::device::kernel::expr::{self, EvaluatesToTensor};
+use crate::tensor::device::kernel::expr::EvaluatesToTensor;
 use crate::tensor::device::{DeviceBuffer, NewDeviceBufferError};
 use crate::tensor::dim_merger::{DimMergerError, DimsDontMatchError, TooManyMergedDimensionsError};
 use crate::tensor::generic::TensorUnsafeError;
@@ -21,9 +22,10 @@ use crate::tensor::generic::map::{
 	DD, ElementsOverflowError, IncompatibleStridesError, IndexOutOfBoundsError, MergeDimsError, ND,
 	NotEnoughDimensionsError, ReshapeLastDimError, SelectError,
 };
+use crate::tensor::io::merge_dims;
 use crate::util::LossyInto;
 use crate::util::mycell::{self, BorrowError, BorrowGuard, BorrowMutError, BorrowMutGuard};
-use crate::{ErrExtra, ErrPack, custom_kernel};
+use crate::{ErrExtra, ErrPack};
 
 pub mod device;
 pub mod dim_merger;
@@ -215,8 +217,40 @@ impl Tensor {
 		expr.eval_to_tensor(self)
 	}
 
-	pub fn randn_(&self) -> Result<(), ErrPack<TensorOpError>> {
-		self.assign(custom_kernel!([], (), expr::randn()))
+	#[inline(never)]
+	pub fn randn_(&self, rng: &mut Rng) -> Result<(), ErrPack<TensorOpError>> {
+		match self.dtype() {
+			f32::dtype => {
+				let mut array = vec![0.0_f32; self.elems()];
+				rng.randn(&mut array);
+				let bytes = unsafe {
+					std::slice::from_raw_parts(
+						array.as_ptr().cast::<u8>(),
+						array.len() * std::mem::size_of::<f32>(),
+					)
+				};
+				self.load_from_cpu_memory(&bytes)?;
+				Ok(())
+			},
+			_ => {
+				cold_path();
+				todo!("Implement tensor.randn_() for other dtypes");
+			},
+		}
+	}
+
+	pub fn store_to_cpu_memory(&self, dst: &mut [u8]) -> Result<(), ErrPack<TensorOpError>> {
+		let vmt = self.vmt();
+		let nd = merge_dims::<1>(self)?;
+		let t = unsafe { generic::Tensor::new_unchecked(nd, self.buf().try_borrow()?) };
+		Ok(vmt.store_to_cpu_memory(&t, dst)?)
+	}
+
+	pub fn load_from_cpu_memory(&self, src: &[u8]) -> Result<(), ErrPack<TensorOpError>> {
+		let vmt = self.vmt();
+		let nd = merge_dims::<1>(self)?;
+		let mut t = unsafe { generic::Tensor::new_unchecked(nd, self.buf().try_borrow_mut()?) };
+		Ok(vmt.load_from_cpu_memory(src, &mut t)?)
 	}
 
 	/// I use this function because Rust doesn't allow specifying only some generic parameters.
@@ -245,12 +279,11 @@ impl<T: HasDType> TensorLiteralFactory<T> {
 	pub fn new_1d<const X: usize>(&self, value: &[T; X]) -> Result<Tensor, ErrPack<TensorOpError>> {
 		let tensor = Tensor::new_empty_on(&[X], T::dtype, self.device.clone())?;
 
-		let val_ptr = value.as_ptr() as *const u8;
+		let val_ptr = value.as_ptr().cast::<u8>();
 		let val_len = X * std::mem::size_of::<T>();
 		let val = unsafe { std::slice::from_raw_parts(val_ptr, val_len) };
-		let mut reader = std::io::Cursor::new(val);
-		io::load_bin(&tensor, &mut reader)?;
 
+		tensor.load_from_cpu_memory(val)?;
 		Ok(tensor)
 	}
 
@@ -264,9 +297,8 @@ impl<T: HasDType> TensorLiteralFactory<T> {
 		let val_ptr = value.as_ptr() as *const u8;
 		let val_len = Y * X * std::mem::size_of::<T>();
 		let val = unsafe { std::slice::from_raw_parts(val_ptr, val_len) };
-		let mut reader = std::io::Cursor::new(val);
-		io::load_bin(&tensor, &mut reader)?;
 
+		tensor.load_from_cpu_memory(val)?;
 		Ok(tensor)
 	}
 
@@ -280,9 +312,8 @@ impl<T: HasDType> TensorLiteralFactory<T> {
 		let val_ptr = value.as_ptr() as *const u8;
 		let val_len = Z * Y * X * std::mem::size_of::<T>();
 		let val = unsafe { std::slice::from_raw_parts(val_ptr, val_len) };
-		let mut reader = std::io::Cursor::new(val);
-		io::load_bin(&tensor, &mut reader)?;
 
+		tensor.load_from_cpu_memory(val)?;
 		Ok(tensor)
 	}
 }

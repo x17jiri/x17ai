@@ -10,6 +10,7 @@ use std::rc::Rc;
 
 use crate::autograd::AutogradNode;
 use crate::nn::param::Param;
+use crate::rng::Rng;
 use crate::tensor::TensorOpError;
 use crate::{ErrPack, autograd};
 
@@ -48,7 +49,7 @@ impl<Nested: Layer> Layer for SkipConnection<Nested> {
 		autograd::add::add(nested_out, b)
 	}
 
-	fn randomize(&mut self) -> Result<(), ErrPack<TensorOpError>> {
-		self.nested.randomize()
+	fn randomize(&mut self, rng: &mut Rng) -> Result<(), ErrPack<TensorOpError>> {
+		self.nested.randomize(rng)
 	}
 }

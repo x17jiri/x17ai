@@ -11,6 +11,7 @@ use std::rc::Rc;
 
 use crate::autograd::{self, AutogradNode, BackwardFn};
 use crate::nn::param::Param;
+use crate::rng::Rng;
 use crate::tensor::{Tensor, TensorOpError};
 use crate::{ErrPack, custom_kernel};
 
@@ -173,8 +174,8 @@ impl<Nested: Layer> Layer for Wrapper<Nested> {
 		Ok(AutogradNode::new(out, nested_out_fn))
 	}
 
-	fn randomize(&mut self) -> Result<(), ErrPack<TensorOpError>> {
-		self.nested.randomize()
+	fn randomize(&mut self, rng: &mut Rng) -> Result<(), ErrPack<TensorOpError>> {
+		self.nested.randomize(rng)
 	}
 }
 

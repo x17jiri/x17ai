@@ -163,6 +163,7 @@ use x17ai::nn::ModelContext;
 use x17ai::nn::layers::linear::Linear;
 use x17ai::nn::layers::softmax::{Softmax, SoftmaxGradientMode};
 use x17ai::nn::layers::{CrossEntropy, Layer};
+use x17ai::rng::Rng;
 use x17ai::tensor::device::cpu::CPUDevice;
 use x17ai::tensor::device::kernel::expr;
 use x17ai::tensor::generic::Tensor;
@@ -233,6 +234,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let reshaped = t.view([2, 3]);*/
 
 	stderrlog::new().verbosity(10).init().unwrap();
+	let mut rng = Rng::default();
 
 	//let cuda_dev = cuda::CUDADevice::new().unwrap();
 
@@ -244,14 +246,14 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let mut sf = Softmax::new(5);
 	sf.set_gradient_mode(SoftmaxGradientMode::Precise);
 	let mut lin2 = Linear::new(5, 2, f32::dtype, &mut mctx)?;
-	lin1.randomize()?;
-	lin2.randomize()?;
+	lin1.randomize(&mut rng)?;
+	lin2.randomize(&mut rng)?;
 	mctx.init_optimizer()?;
 
 	let loss_layer = CrossEntropy::new(2);
 
 	let input = Tensor::new_empty_on(&[2, 3], f32::dtype, dev.clone())?;
-	input.randn_();
+	input.randn_(&mut rng)?;
 
 	let expected = lit.new_2d(&[[1.0, 0.0], [0.0, 1.0]])?;
 

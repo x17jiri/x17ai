@@ -22,6 +22,7 @@ mod tests;
 
 use crate::ErrPack;
 use crate::autograd::AutogradNode;
+use crate::rng::Rng;
 use crate::tensor::TensorOpError;
 
 use super::Param;
@@ -52,5 +53,5 @@ pub trait Layer {
 
 	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>>;
 
-	fn randomize(&mut self) -> Result<(), ErrPack<TensorOpError>>;
+	fn randomize(&mut self, rng: &mut Rng) -> Result<(), ErrPack<TensorOpError>>;
 }

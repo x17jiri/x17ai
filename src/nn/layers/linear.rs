@@ -13,6 +13,7 @@ use crate::autograd::{self, AutogradNode, BackwardFn};
 use crate::nn::model_context::ModelContext;
 use crate::nn::optimizer::CurrentGradValue;
 use crate::nn::param::Param;
+use crate::rng::Rng;
 use crate::tensor::math::{col, mat, row};
 use crate::tensor::{self, DType, Tensor, TensorOpError};
 use crate::util::LossyInto;
@@ -105,9 +106,12 @@ impl Layer for Linear {
 		Ok(AutogradNode::new(out, backward_fn))
 	}
 
-	fn randomize(&mut self) -> std::result::Result<(), ErrPack<tensor::TensorOpError>> {
+	fn randomize(
+		&mut self,
+		rng: &mut Rng,
+	) -> std::result::Result<(), ErrPack<tensor::TensorOpError>> {
 		let w = self.weights.borrow();
-		w.value().randn_()
+		w.value().randn_(rng)
 	}
 }
 
@@ -237,8 +241,11 @@ impl Layer for MultiheadLinear {
 		Ok(AutogradNode::new(out, backward_fn))
 	}
 
-	fn randomize(&mut self) -> std::result::Result<(), ErrPack<tensor::TensorOpError>> {
-		self.linear.randomize()
+	fn randomize(
+		&mut self,
+		rng: &mut Rng,
+	) -> std::result::Result<(), ErrPack<tensor::TensorOpError>> {
+		self.linear.randomize(rng)
 	}
 }
 

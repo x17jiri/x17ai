@@ -10,6 +10,7 @@ use std::rc::Rc;
 
 use crate::autograd::{self, AutogradNode, BackwardFn, StraightThroughBackwardFn};
 use crate::nn::param::Param;
+use crate::rng::Rng;
 use crate::tensor::{Tensor, TensorOpError};
 use crate::{ErrPack, custom_kernel};
 
@@ -98,7 +99,7 @@ impl Layer for Softmax {
 		Ok(AutogradNode::new(out, backward_fn))
 	}
 
-	fn randomize(&mut self) -> Result<(), ErrPack<TensorOpError>> {
+	fn randomize(&mut self, _rng: &mut Rng) -> Result<(), ErrPack<TensorOpError>> {
 		// no parameters to randomize
 		Ok(())
 	}
