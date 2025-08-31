@@ -64,33 +64,36 @@ impl<T> RefCell<T> {
 }
 
 impl<T: ?Sized> RefCell<T> {
-	pub fn try_borrow(&self) -> Result<BorrowGuard<T>, BorrowError> {
+	pub fn try_borrow<'a>(&'a self) -> Result<BorrowGuard<'a, T>, BorrowError> {
 		BorrowGuard::new(self)
 	}
 
 	/// # Safety
 	///
 	/// If `fail` flag is set to failed, the returned object must be dropped without being used.
-	pub unsafe fn unsafe_borrow(&self, fail: &mut UnsafeBorrowFailFlag) -> BorrowGuard<T> {
+	pub unsafe fn unsafe_borrow<'a>(
+		&'a self,
+		fail: &mut UnsafeBorrowFailFlag,
+	) -> BorrowGuard<'a, T> {
 		unsafe { BorrowGuard::new_unsafe(self, fail) }
 	}
 
-	pub fn try_borrow_mut(&self) -> Result<BorrowMutGuard<T>, BorrowMutError> {
+	pub fn try_borrow_mut<'a>(&'a self) -> Result<BorrowMutGuard<'a, T>, BorrowMutError> {
 		BorrowMutGuard::new(self)
 	}
 
 	/// # Safety
 	///
 	/// If `fail` flag is set to failed, the returned object must be dropped without being used.
-	pub unsafe fn unsafe_borrow_mut(
-		&self,
+	pub unsafe fn unsafe_borrow_mut<'a>(
+		&'a self,
 		fail: &mut UnsafeBorrowMutFailFlag,
-	) -> BorrowMutGuard<T> {
+	) -> BorrowMutGuard<'a, T> {
 		unsafe { BorrowMutGuard::new_unsafe(self, fail) }
 	}
 }
 
-impl<'a, T: ?Sized> std::ops::Deref for RefCell<T> {
+impl<T: ?Sized> std::ops::Deref for RefCell<T> {
 	type Target = T;
 
 	fn deref(&self) -> &T {

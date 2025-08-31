@@ -14,7 +14,7 @@ use std::hint::cold_path;
 
 use buffer::Buffer;
 use dim_index::DimIndex;
-use map::{IndexToOffset, Map, MergeAllDims, MergeDims, ReshapeLastDim};
+use map::{Map, MergeAllDims, MergeDims, ReshapeLastDim};
 
 use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;
 use crate::tensor::generic::map::{NDShape, Narrow, Select, SizeAndStride, Transpose};
@@ -142,10 +142,10 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		Ok(Tensor { buf: self.buf.clone(), map: new_map })
 	}
 
-	pub fn iter_along_axis<D: DimIndex>(
-		&self,
+	pub fn iter_along_axis<'a, D: DimIndex>(
+		&'a self,
 		dim: D,
-	) -> Result<AxisIter<'_, M, B>, DimIndexOutOfBoundsError>
+	) -> Result<AxisIter<'a, M, B>, DimIndexOutOfBoundsError>
 	where
 		M: Select,
 		B: Clone,
@@ -225,58 +225,6 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 			return Err(TensorUnsafeError::new(span, buf_len));
 		}
 		Ok(())
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
-impl<const K: usize, M: Map + IndexToOffset<K>, T> std::ops::Index<[usize; K]> for Tensor<M, &[T]> {
-	type Output = T;
-
-	fn index(&self, index: [usize; K]) -> &T {
-		// Justification for allowing indexing and unwrap:
-		// This is implementation of the index operator.
-		// It is expected that it may panic if the index is out of bounds.
-		#[allow(clippy::indexing_slicing)]
-		#[allow(clippy::unwrap_used)]
-		{
-			let offset = self.map.index_to_offset(index).unwrap();
-			&self.buf[offset]
-		}
-	}
-}
-
-impl<const K: usize, M: Map + IndexToOffset<K>, T> std::ops::Index<[usize; K]>
-	for Tensor<M, &mut [T]>
-{
-	type Output = T;
-
-	fn index(&self, index: [usize; K]) -> &T {
-		// Justification for allowing indexing and unwrap:
-		// This is implementation of the index operator.
-		// It is expected that it may panic if the index is out of bounds.
-		#[allow(clippy::indexing_slicing)]
-		#[allow(clippy::unwrap_used)]
-		{
-			let offset = self.map.index_to_offset(index).unwrap();
-			&self.buf[offset]
-		}
-	}
-}
-
-impl<const K: usize, M: Map + IndexToOffset<K>, T> std::ops::IndexMut<[usize; K]>
-	for Tensor<M, &mut [T]>
-{
-	fn index_mut(&mut self, index: [usize; K]) -> &mut T {
-		// Justification for allowing indexing and unwrap:
-		// This is implementation of the index operator.
-		// It is expected that it may panic if the index is out of bounds.
-		#[allow(clippy::indexing_slicing)]
-		#[allow(clippy::unwrap_used)]
-		{
-			let offset = self.map.index_to_offset(index).unwrap();
-			&mut self.buf[offset]
-		}
 	}
 }
 

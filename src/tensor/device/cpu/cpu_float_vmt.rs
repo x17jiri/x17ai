@@ -14,10 +14,10 @@ use crate::tensor::device::DeviceBuffer;
 use crate::tensor::device::buffer::{
 	DeviceBufferVMT, KernelElemArg, KernelOutput, KernelReduceArg,
 };
-use crate::tensor::device::cpu::{CPUDevice, math};
+use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::device::kernel::expr::DynExpr;
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
-use crate::tensor::generic::map::{Map, ND, Select};
+use crate::tensor::generic::map::{self, Map, ND};
 use crate::tensor::{HasDType, TensorOpError, generic};
 use crate::util::FromToF64;
 use crate::util::mycell::{BorrowGuard, BorrowMutGuard};
@@ -215,7 +215,8 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 	) -> Result<f64, ErrPack<TensorOpError>> {
 		src.ensure_safe()?;
 		let view = src.view::<T>()?;
-		Ok(view[[]].to_f64())
+		let (map, buf) = view.into_parts();
+		Ok(buf[map.offset].to_f64())
 	}
 
 	fn load_from_cpu_memory<'buf>(

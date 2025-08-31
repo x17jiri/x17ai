@@ -33,7 +33,8 @@ fn fmt_0d<T: Copy>(
 	tensor: generic::Tensor<ND<0>, &[T]>,
 	mut fmt_one: impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
 ) -> std::fmt::Result {
-	fmt_one(f, tensor[[]])?;
+	let (map, buf) = tensor.into_parts();
+	fmt_one(f, buf[map.offset])?;
 	Ok(())
 }
 
@@ -51,7 +52,8 @@ fn fmt_1d<T: Copy>(
 		}
 		first = false;
 
-		fmt_one(f, elem[[]])?;
+		let (map, buf) = elem.into_parts();
+		fmt_one(f, buf[map.offset])?;
 	}
 	write!(f, "]")?;
 	Ok(())

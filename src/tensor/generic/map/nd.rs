@@ -8,14 +8,11 @@
 use std::convert::Infallible;
 use std::hint::cold_path;
 
-use super::{
-	DD, IndexToOffset, Map, MergeAllDims, MergeDims, ReshapeLastDim, SizeAndStride, Transpose,
-};
+use super::{DD, Map, MergeAllDims, MergeDims, ReshapeLastDim, SizeAndStride, Transpose};
 use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;
 use crate::tensor::generic::map::{
-	ElementsOverflowError, IncompatibleStridesError, IndexOutOfBoundsError,
-	InvalidNumElementsError, NDShape, Narrow, NarrowError, Select, SelectError, StrideCounter,
-	StrideCounterUnchecked, merge_dims,
+	ElementsOverflowError, IncompatibleStridesError, InvalidNumElementsError, NDShape, Narrow,
+	NarrowError, Select, SelectError, StrideCounter, StrideCounterUnchecked, merge_dims,
 };
 use crate::tensor::generic::universal_range::UniversalRange;
 use crate::util::array;
@@ -164,20 +161,6 @@ where
 		}
 
 		Ok(ND { dims, offset: self.offset })
-	}
-}
-
-impl<const N: usize> IndexToOffset<N> for ND<N> {
-	fn index_to_offset(&self, index: [usize; N]) -> Result<usize, IndexOutOfBoundsError> {
-		let mut offset = self.offset;
-		for (&i, &dim) in index.iter().zip(self.dims.iter()) {
-			if i >= dim.size {
-				cold_path();
-				return Err(IndexOutOfBoundsError);
-			}
-			offset += i * dim.stride;
-		}
-		Ok(offset)
 	}
 }
 

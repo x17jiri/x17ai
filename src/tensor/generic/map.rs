@@ -70,10 +70,6 @@ pub trait ReshapeLastDim<const M: usize> {
 	fn reshape_last_dim(&self, to_shape: [usize; M]) -> Result<Self::Output, Self::Error>;
 }
 
-pub trait IndexToOffset<const K: usize> {
-	fn index_to_offset(&self, index: [usize; K]) -> Result<usize, IndexOutOfBoundsError>;
-}
-
 impl From<DimIndexOutOfBoundsError> for SelectError {
 	fn from(_: DimIndexOutOfBoundsError) -> Self {
 		Self::DimIndexOutOfBounds
@@ -367,15 +363,6 @@ where
 
 	fn reshape_last_dim(&self, to_shape: [usize; M]) -> Result<Self::Output, Self::Error> {
 		(*self).reshape_last_dim(to_shape)
-	}
-}
-
-impl<const N: usize, T> IndexToOffset<N> for &T
-where
-	T: IndexToOffset<N>,
-{
-	fn index_to_offset(&self, index: [usize; N]) -> Result<usize, IndexOutOfBoundsError> {
-		(*self).index_to_offset(index)
 	}
 }
 
