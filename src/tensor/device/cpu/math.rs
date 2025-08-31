@@ -41,37 +41,6 @@ pub fn dot<T: Copy + FromToF64>(a: &[T], b: &[T]) -> f64 {
 	})
 }
 
-pub fn approx_eq(a: f64, b: f64, eps: f64) -> bool {
-	(a - b).abs() < eps
-}
-
-pub fn rsqrt(a: f64, eps: f64) -> f64 {
-	1.0 / (a.sqrt() + eps)
-}
-
-pub fn sigmoid(x: f64) -> f64 {
-	1.0 / (1.0 + (-x).exp())
-}
-
-pub fn swish(x: f64) -> f64 {
-	let sigmoid = sigmoid(x);
-	x * sigmoid
-}
-
-pub fn swiglu(lin: f64, gate: f64) -> f64 {
-	let swish = swish(gate);
-	lin * swish
-}
-
-pub fn swiglu_backward(lin: f64, gate: f64, d_out: f64) -> (f64, f64) {
-	let sigmoid = sigmoid(gate);
-	let swish = gate * sigmoid;
-
-	let d_lin = swish * d_out;
-	let d_gate = mul_add(sigmoid, 1.0 - swish, swish) * lin * d_out;
-	(d_lin, d_gate)
-}
-
 pub fn softmax_part1<T: Copy + FromToF64, S: Copy + FromToF64>(
 	inp: &[T],
 	scratch: &mut [S],

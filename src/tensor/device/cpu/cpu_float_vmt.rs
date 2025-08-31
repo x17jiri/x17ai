@@ -24,66 +24,6 @@ use crate::util::mycell::{BorrowGuard, BorrowMutGuard};
 
 //--------------------------------------------------------------------------------------------------
 
-/*trait Slice2D<T> {
-	fn slice(&self, dim0: usize, dim1: std::ops::RangeFull) -> &[T];
-}
-
-impl<T: Copy + HasDType + FromToF64> Slice2D<T> for generic::Tensor<ND<2>, &[T]> {
-	fn slice(&self, dim0: usize, _dim1: std::ops::RangeFull) -> &[T] {
-		let map = self.map();
-		let map = map.select(0, dim0).unwrap();
-		let span = map.span();
-		assert!(map.dims[0].size == span.len());
-		self.buf().get(span).unwrap()
-	}
-}*/
-
-trait Slice3D<T> {
-	fn slice(&self, dim0: usize, dim1: usize, dim2: std::ops::RangeFull) -> &[T];
-}
-
-impl<T: Copy + HasDType + FromToF64> Slice3D<T> for generic::Tensor<ND<3>, &[T]> {
-	fn slice(&self, dim0: usize, dim1: usize, _dim2: std::ops::RangeFull) -> &[T] {
-		let map = self.map();
-		let map = map.select(0, dim0).unwrap();
-		let map = map.select(0, dim1).unwrap();
-		let span = map.span();
-		assert!(map.dims[0].size == span.len());
-		self.buf().get(span).unwrap()
-	}
-}
-
-trait SliceMut2D<T> {
-	fn slice_mut(&mut self, dim0: usize, dim1: std::ops::RangeFull) -> &mut [T];
-}
-
-impl<T: Copy + HasDType + FromToF64> SliceMut2D<T> for generic::Tensor<ND<2>, &mut [T]> {
-	fn slice_mut(&mut self, dim0: usize, _dim1: std::ops::RangeFull) -> &mut [T] {
-		let map = self.map();
-		let map = map.select(0, dim0).unwrap();
-		let span = map.span();
-		assert!(map.dims[0].size == span.len());
-		unsafe { self.buf_mut() }.get_mut(span).unwrap()
-	}
-}
-
-trait SliceMut3D<T> {
-	fn slice_mut(&mut self, dim0: usize, dim1: usize, dim2: std::ops::RangeFull) -> &mut [T];
-}
-
-impl<T: Copy + HasDType + FromToF64> SliceMut3D<T> for generic::Tensor<ND<3>, &mut [T]> {
-	fn slice_mut(&mut self, dim0: usize, dim1: usize, _dim2: std::ops::RangeFull) -> &mut [T] {
-		let map = self.map();
-		let map = map.select(0, dim0).unwrap();
-		let map = map.select(0, dim1).unwrap();
-		let span = map.span();
-		assert!(map.dims[0].size == span.len());
-		unsafe { self.buf_mut() }.get_mut(span).unwrap()
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
 pub struct EvalExpr<'a, T: 'static + Copy + HasDType + FromToF64> {
 	elemwise_args: &'a [KernelElemArg],
 	reduce_args: &'a [KernelReduceArg],
@@ -141,9 +81,14 @@ impl<'a, T: 'static + Copy + HasDType + FromToF64> EvalExpr<'a, T> {
 				DynExpr::MaxExpr(a) => {
 					assert!(!self.reduce_args.is_empty());
 					let a = a.as_ref();
-					(0..self.reduction_size)
-						.map(|k| self.eval_expr(a, j, i, k))
-						.fold(f64::NEG_INFINITY, f64::max)
+					let mut max = f64::NEG_INFINITY;
+					for k in 0..self.reduction_size {
+						let value = self.eval_expr(a, j, i, k);
+						if value > max {
+							max = value;
+						}
+					}
+					max
 				},
 
 				DynExpr::NegExpr(a) => {
@@ -262,100 +207,6 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 			return Err(TensorOpError::not_contiguous());
 		}
 		Ok(tensor.view_mut()?)
-	}
-
-	pub fn attention_tile<const FIRST: bool>(
-		acc: &mut generic::Tensor<ND<3>, &mut [f64]>, // [output, head, vo_feature]
-
-		q: &generic::Tensor<ND<3>, &[T]>, // [output, head, qk_feature]
-		k: &generic::Tensor<ND<3>, &[T]>, // [input, head, qk_feature]
-		v: &generic::Tensor<ND<3>, &[T]>, // [input, head, vo_feature]
-
-		// `acc`, `prev_max` and `prev_sum` will be initialized when processing the first tile.
-		prev_max: &mut generic::Tensor<ND<2>, &mut [f64]>, // [output, head]
-		prev_sum: &mut generic::Tensor<ND<2>, &mut [f64]>, // [output, head]
-
-		// Scratch space for storing scores. It doesn't need to be initialized.
-		// On GPU, its shape will be [output, head, input]. However, we process outputs
-		// sequentially, so we don't need separate space for each output.
-		scores: &mut generic::Tensor<ND<2>, &mut [f64]>, // [head, input]
-	) {
-		let O = q.size(0).unwrap();
-		let I = k.size(0).unwrap();
-		let H = q.size(1).unwrap();
-		let VO = v.size(2).unwrap();
-		for j in 0..O {
-			for i in 0..I {
-				for h in 0..H {
-					let q = q.slice(j, h, ..);
-					let k = k.slice(i, h, ..);
-					scores[[h, i]] = math::dot(q, k);
-					// scores[h][i].set(math::dot(q, k))
-				}
-			}
-			if FIRST {
-				for h in 0..H {
-					let prev_max = &mut prev_max[[j, h]];
-					let prev_sum = &mut prev_sum[[j, h]];
-
-					let scores = scores.slice_mut(h, ..);
-					let scores = &mut scores[..I]; // TODO
-					let (first_max, first_sum) = math::softmax_part1_(scores);
-
-					*prev_max = first_max;
-					*prev_sum = first_sum;
-
-					let acc = acc.slice_mut(j, h, ..);
-					for i in 0..1 {
-						let v = v.slice(i, h, ..);
-						let score = scores[i].to_f64();
-						for f in 0..VO {
-							acc[f] = score * v[f].to_f64();
-						}
-					}
-					for i in 1..I {
-						let v = v.slice(i, h, ..);
-						let score = scores[i].to_f64();
-						for f in 0..VO {
-							acc[f] += score * v[f].to_f64();
-						}
-					}
-				}
-			} else {
-				for h in 0..H {
-					let prev_max = &mut prev_max[[j, h]];
-					let prev_sum = &mut prev_sum[[j, h]];
-
-					let scores = scores.slice_mut(h, ..);
-					let scores = &mut scores[..I]; // TODO
-					let (new_max, new_sum) = math::softmax_part1_(scores);
-
-					let total_max = prev_max.max(new_max);
-					*prev_max = total_max;
-
-					let prev_weight = (*prev_max - total_max).exp();
-					let new_weight = (new_max - total_max).exp();
-
-					*prev_sum = (*prev_sum * prev_weight) + (new_sum * new_weight);
-
-					let acc = acc.slice_mut(j, h, ..);
-					for i in 0..1 {
-						let v = v.slice(i, h, ..);
-						let score = scores[i].to_f64() * new_weight;
-						for f in 0..VO {
-							acc[f] = (acc[f] * prev_weight) + (score * v[f].to_f64());
-						}
-					}
-					for i in 1..I {
-						let v = v.slice(i, h, ..);
-						let score = scores[i].to_f64() * new_weight;
-						for f in 0..VO {
-							acc[f] += score * v[f].to_f64();
-						}
-					}
-				}
-			}
-		}
 	}
 
 	fn read_float<'buf>(

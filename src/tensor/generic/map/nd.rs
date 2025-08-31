@@ -80,12 +80,12 @@ impl<const N: usize> Map for ND<N> {
 		N
 	}
 
-	fn size(&self, dim: usize) -> usize {
+	fn dim(&self, dim: usize) -> SizeAndStride {
 		if dim >= N {
 			cold_path();
-			return 1;
+			return SizeAndStride { size: 1, stride: 0 };
 		}
-		self.dims[dim].size
+		self.dims[dim]
 	}
 
 	fn elems(&self) -> usize {

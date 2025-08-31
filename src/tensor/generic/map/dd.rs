@@ -117,9 +117,9 @@ impl Map for DD {
 		self.dims.len()
 	}
 
-	fn size(&self, dim: usize) -> usize {
+	fn dim(&self, dim: usize) -> SizeAndStride {
 		let dims = self.dims.as_slice();
-		dims[dim].size
+		dims[dim]
 	}
 
 	fn elems(&self) -> usize {

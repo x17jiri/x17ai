@@ -148,11 +148,13 @@ impl Rng {
 		let result =
 			(
 				(
-						((normal[ 0] * normal[ 4]) * (normal[ 8] * normal[12]))
-					+	((normal[ 1] * normal[ 5]) * (normal[ 9] * normal[13]))
+					((normal[ 0] * normal[ 4]) * (normal[ 8] * normal[12]))
+					+
+					((normal[ 1] * normal[ 5]) * (normal[ 9] * normal[13]))
 				) + (
-						((normal[ 2] * normal[ 6]) * (normal[10] * normal[14]))
-					+	((normal[ 3] * normal[ 7]) * (normal[11] * normal[15]))
+					((normal[ 2] * normal[ 6]) * (normal[10] * normal[14]))
+					+
+					((normal[ 3] * normal[ 7]) * (normal[11] * normal[15]))
 				)
 			) * 0.5;
 

@@ -219,6 +219,7 @@ impl Tensor {
 
 	#[inline(never)]
 	pub fn randn_(&self, rng: &mut Rng) -> Result<(), ErrPack<TensorOpError>> {
+		#[allow(clippy::single_match_else)]
 		match self.dtype() {
 			f32::dtype => {
 				let mut array = vec![0.0_f32; self.elems()];
@@ -226,10 +227,10 @@ impl Tensor {
 				let bytes = unsafe {
 					std::slice::from_raw_parts(
 						array.as_ptr().cast::<u8>(),
-						array.len() * std::mem::size_of::<f32>(),
+						std::mem::size_of_val(array.as_slice()),
 					)
 				};
-				self.load_from_cpu_memory(&bytes)?;
+				self.load_from_cpu_memory(bytes)?;
 				Ok(())
 			},
 			_ => {

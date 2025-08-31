@@ -17,7 +17,7 @@ use dim_index::DimIndex;
 use map::{IndexToOffset, Map, MergeAllDims, MergeDims, ReshapeLastDim};
 
 use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;
-use crate::tensor::generic::map::{NDShape, Narrow, Select, Transpose};
+use crate::tensor::generic::map::{NDShape, Narrow, Select, SizeAndStride, Transpose};
 use crate::tensor::generic::universal_range::UniversalRange;
 use crate::{ErrExtra, ErrPack};
 
@@ -85,9 +85,14 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		self.map.ndim()
 	}
 
+	pub fn dim<D: DimIndex>(&self, dim: D) -> Result<SizeAndStride, DimIndexOutOfBoundsError> {
+		let dim = dim.resolve_index(self.ndim())?;
+		Ok(self.map.dim(dim))
+	}
+
 	pub fn size<D: DimIndex>(&self, dim: D) -> Result<usize, DimIndexOutOfBoundsError> {
 		let dim = dim.resolve_index(self.ndim())?;
-		Ok(self.map.size(dim))
+		Ok(self.map.dim(dim).size)
 	}
 
 	pub fn elems(&self) -> usize {

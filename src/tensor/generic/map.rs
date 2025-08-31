@@ -44,7 +44,7 @@ pub trait Map: Clone {
 	fn as_ref(&self) -> &Self::Deref;
 
 	fn ndim(&self) -> usize;
-	fn size(&self, dim: usize) -> usize;
+	fn dim(&self, dim: usize) -> SizeAndStride;
 	fn elems(&self) -> usize;
 	fn span(&self) -> std::ops::Range<usize>;
 }
@@ -321,8 +321,8 @@ impl<'a, T: Map> Map for &'a T {
 		(*self).ndim()
 	}
 
-	fn size(&self, dim: usize) -> usize {
-		(*self).size(dim)
+	fn dim(&self, dim: usize) -> SizeAndStride {
+		(*self).dim(dim)
 	}
 
 	fn elems(&self) -> usize {

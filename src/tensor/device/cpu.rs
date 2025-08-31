@@ -109,7 +109,7 @@ impl CPUDevice {
 		}
 	}
 
-	pub fn ensure_can_view<'a, T: HasDType>(buf: &DeviceBuffer) -> Result<(), ViewError> {
+	pub fn ensure_can_view<T: HasDType>(buf: &DeviceBuffer) -> Result<(), ViewError> {
 		if buf.dtype() != T::dtype {
 			cold_path();
 			return Err(ViewError::InvalidDType);
