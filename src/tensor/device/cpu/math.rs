@@ -41,31 +41,6 @@ pub fn dot<T: Copy + FromToF64>(a: &[T], b: &[T]) -> f64 {
 	})
 }
 
-pub fn softmax_part1<T: Copy + FromToF64, S: Copy + FromToF64>(
-	inp: &[T],
-	scratch: &mut [S],
-) -> (f64, f64) {
-	// TODO
-	// - calculating `max` is one loop
-	// - calculating `sum` is another loop
-	// - there are online algorithms for calculating `max` and `sum` simultaneously
-	// - would they be worth it?
-
-	let max: f64 = inp.iter().map(T::to_f64).fold(f64::MIN, f64::max);
-
-	let mut sum = 0.0;
-	for (i, s) in inp.iter().zip(scratch) {
-		let val = i.to_f64();
-		let val = val - max;
-		let e = val.exp();
-		*s = S::from_f64(e);
-
-		sum += e;
-	}
-
-	(max, sum)
-}
-
 pub fn softmax_part1_<T: Copy + FromToF64>(inp: &mut [T]) -> (f64, f64) {
 	// TODO
 	// - calculating `max` is one loop

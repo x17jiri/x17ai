@@ -64,11 +64,11 @@
 #![allow(clippy::many_single_char_names)]
 #![allow(clippy::let_and_return)]
 #![allow(clippy::inline_always)]
+#![allow(clippy::needless_lifetimes)]
 
 use std::convert::Infallible;
 
 pub mod autograd;
-pub mod format;
 pub mod nn;
 pub mod rng;
 pub mod tensor;

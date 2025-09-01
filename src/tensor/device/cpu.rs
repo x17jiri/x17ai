@@ -14,7 +14,7 @@ use crate::tensor::device::buffer::DeviceBufferVMT;
 use crate::tensor::device::kernel::runner::KernelRunner;
 use crate::util::mycell;
 
-//pub mod attention;
+pub mod attention;
 pub mod cpu_float_vmt;
 pub mod math;
 
@@ -130,3 +130,5 @@ impl Device for CPUDevice {
 		})))
 	}
 }
+
+//--------------------------------------------------------------------------------------------------

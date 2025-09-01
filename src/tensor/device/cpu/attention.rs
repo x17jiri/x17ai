@@ -8,6 +8,7 @@
 use std::cell::Cell;
 use std::ops::RangeFull;
 
+use crate::tensor::device::cpu::math;
 use crate::util::FromToF64;
 
 //--------------------------------------------------------------------------------------------------
@@ -99,7 +100,7 @@ fn attention_tile<T: Copy + FromToF64, const FIRST: bool>(
 			for h in 0..H {
 				let scores = scores.slice(h, ..);
 				let scores = &scores[..I]; // TODO
-				let (first_m, first_l) = math::softmax_part1(scores, scores);
+				let (first_m, first_l) = math::softmax_part1_(scores);
 
 				//let S: Vec<f64> = scores.iter().map(|s| s.get() / first_l).collect();
 				//println!("j = {}, h = {}, scores = {:.4?}", j, h, S.as_slice());
@@ -129,7 +130,7 @@ fn attention_tile<T: Copy + FromToF64, const FIRST: bool>(
 			for h in 0..H {
 				let scores = scores.slice(h, ..);
 				let scores = &scores[..I]; // TODO
-				let (new_m, new_l) = math::softmax_part1(scores, scores);
+				let (new_m, new_l) = math::softmax_part1_(scores);
 
 				//let S: Vec<f64> = scores.iter().map(|s| s.get() / new_l).collect();
 				//println!("j = {}, h = {}, ..scores = {:.4?}", j, h, S.as_slice());

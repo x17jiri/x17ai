@@ -24,6 +24,12 @@ pub struct KernelMap {
 	map: HashTable<KernelMapEntry>,
 }
 
+impl Default for KernelMap {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
 impl KernelMap {
 	pub fn new() -> Self {
 		Self { map: HashTable::new() }

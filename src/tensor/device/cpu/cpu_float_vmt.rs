@@ -17,7 +17,7 @@ use crate::tensor::device::buffer::{
 use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::device::kernel::expr::DynExpr;
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
-use crate::tensor::generic::map::{self, Map, ND};
+use crate::tensor::generic::map::{Map, ND};
 use crate::tensor::{HasDType, TensorOpError, generic};
 use crate::util::FromToF64;
 use crate::util::mycell::{BorrowGuard, BorrowMutGuard};
@@ -29,7 +29,6 @@ pub struct EvalExpr<'a, T: 'static + Copy + HasDType + FromToF64> {
 	reduce_args: &'a [KernelReduceArg],
 	scalar_args: &'a [f64],
 	reduction_size: usize,
-	device: &'a CPUDevice,
 	phantom: std::marker::PhantomData<T>,
 }
 
@@ -345,7 +344,6 @@ impl<T: 'static + Copy + HasDType + FromToF64> CPUFloatVMT<T> {
 				reduce_args: std::slice::from_raw_parts(reduce_args, kernel_data.reduce_count),
 				scalar_args: std::slice::from_raw_parts(scalar_args, kernel_data.scalar_count),
 				reduction_size,
-				device: this.device(),
 				phantom: std::marker::PhantomData,
 			};
 			let o = &*o;

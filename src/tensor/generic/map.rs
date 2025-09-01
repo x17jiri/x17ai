@@ -402,7 +402,7 @@ where
 	type Error = T::Error;
 
 	fn transposed(self, d0: usize, d1: usize) -> Result<Self::Output, Self::Error> {
-		self.transposed(d0, d1)
+		T::transposed(*self, d0, d1)
 	}
 }*/
 
