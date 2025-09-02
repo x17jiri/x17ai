@@ -88,38 +88,32 @@ fn attention_tile<T: Copy + FromToF64, const FIRST: bool>(
 	let H = q.heads;
 	let VO = v.features;
 	for j in 0..O {
-		for h in 0..H {
-			let scores = scores.slice(h, ..I);
-			for i in 0..I {
-				let q = q.slice(j, h, ..);
-				let k = k.slice(i, h, ..);
-				scores[i] = math::dot(q, k);
-			}
-			let (new_m, new_l) = math::softmax_part1_(scores);
+		let q = q.slice(j, h, ..);
+		let acc = acc.slice(j, h, 0..VO);
+		let scores = scores.slice(j, h, 0..I);
+		let prev_sum: &mut f64 = prev_sum.item_mut(j, h);
+		let prev_max: &mut f64 = prev_max.item_mut(j, h);
 
-			let prev_m = if FIRST { f64::NEG_INFINITY } else { prev_m.item(j, h) };
-			let max_m = if FIRST { new_m } else { new_m.max(prev_m) };
+		for i in 0..I {
+			let k = k.slice(i, h, ..);
+			scores[i] = math::dot(q, k);
+		}
+		let new_max = scores.fold(if FIRST { f64::MIN } else { *prev_max }, f64::max); ////// reduce
+		let prev_weight = (*prev_max - new_max).exp();
+		*prev_max = new_max;
 
-			let prev_weight = if FIRST { 0.0 } else { (prev_m - max_m).exp() };
-			let new_weight = if FIRST { 1.0 } else { (new_m - max_m).exp() };
-			prev_m.set(max_m);
-
-			let prev_l = if FIRST { 0.0 } else { prev_l.item(j, h) };
-			prev_l.set(prev_l * prev_weight + new_l * new_weight);
-
-			let acc = acc.slice(j, h, ..);
+		for i in 0..I {
+			let v = v.slice(i, h, ..);
+			scores[i] = (scores[i] - new_max).exp();
 			for f in 0..VO {
-				acc[f] = if FIRST { 0.0 } else { acc[f] * prev_weight };
-			}
-			for i in 0..I {
-				let v = v.slice(i, h, ..);
-				let score = scores[i].to_f64() * new_weight;
-				for f in 0..VO {
-					let v = v[f].to_f64();
-					acc[f] = acc[f] + (score * v);
+				if i == 0 {
+					acc[f] = if FIRST { 0.0 } else { acc[f] * prev_weight };
 				}
+				acc[f] += scores[i] * v[f].to_f64(); //// TODO - reduce ////////////////////////////
 			}
 		}
+		let new_sum = scores.sum(); ///////////////////////////////////////////////////////// reduce
+		*prev_sum = if FIRST { new_sum } else { prev_sum * prev_weight + new_sum };
 	}
 }
 
