@@ -65,6 +65,7 @@
 #![allow(clippy::let_and_return)]
 #![allow(clippy::inline_always)]
 #![allow(clippy::needless_lifetimes)]
+#![allow(unused_parens)]
 
 use std::convert::Infallible;
 

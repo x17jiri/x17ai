@@ -15,18 +15,18 @@ use crate::util::FromToF64;
 
 #[derive(Clone, Copy)]
 pub struct View2D<'a, T> {
-	pub data: &'a [Cell<T>],
+	pub data: &'a [T],
 	pub cols: usize,
 }
 
 impl<'a, T> View2D<'a, T> {
-	pub fn item(&self, row: usize, col: usize) -> &'a Cell<T> {
+	pub fn item(&self, row: usize, col: usize) -> &'a T {
 		debug_assert!(col < self.cols);
 		let index = row * self.cols + col;
 		&self.data[index]
 	}
 
-	pub fn slice(&self, head: usize, _: RangeFull) -> &'a [Cell<T>] {
+	pub fn slice(&self, head: usize, _: RangeFull) -> &'a [T] {
 		let begin = head * self.cols;
 		let end = begin + self.cols;
 		&self.data[begin..end]
@@ -37,7 +37,7 @@ impl<'a, T> View2D<'a, T> {
 
 #[derive(Clone, Copy)]
 pub struct View3D<'a, T> {
-	pub data: &'a [Cell<T>],
+	pub data: &'a [T],
 	pub seq_len: usize,
 	pub seq_stride: usize,
 	pub head_shift: usize,
@@ -46,7 +46,7 @@ pub struct View3D<'a, T> {
 }
 
 impl<'a, T> View3D<'a, T> {
-	pub fn slice(&self, input: usize, head: usize, _: RangeFull) -> &'a [Cell<T>] {
+	pub fn slice(&self, input: usize, head: usize, _: RangeFull) -> &'a [T] {
 		let head = head >> self.head_shift;
 		let begin = input * self.seq_stride + head * self.features;
 		let end = begin + self.features;
@@ -88,79 +88,35 @@ fn attention_tile<T: Copy + FromToF64, const FIRST: bool>(
 	let H = q.heads;
 	let VO = v.features;
 	for j in 0..O {
-		for i in 0..I {
-			for h in 0..H {
+		for h in 0..H {
+			let scores = scores.slice(h, ..I);
+			for i in 0..I {
 				let q = q.slice(j, h, ..);
 				let k = k.slice(i, h, ..);
-				scores.item(h, i).set(math::dot(q, k));
-				// scores[h][i].set(math::dot(q, k))
+				scores[i] = math::dot(q, k);
 			}
-		}
-		if FIRST {
-			for h in 0..H {
-				let scores = scores.slice(h, ..);
-				let scores = &scores[..I]; // TODO
-				let (first_m, first_l) = math::softmax_part1_(scores);
+			let (new_m, new_l) = math::softmax_part1_(scores);
 
-				//let S: Vec<f64> = scores.iter().map(|s| s.get() / first_l).collect();
-				//println!("j = {}, h = {}, scores = {:.4?}", j, h, S.as_slice());
+			let prev_m = if FIRST { f64::NEG_INFINITY } else { prev_m.item(j, h) };
+			let max_m = if FIRST { new_m } else { new_m.max(prev_m) };
 
-				prev_m.item(j, h).set(first_m);
-				prev_l.item(j, h).set(first_l);
+			let prev_weight = if FIRST { 0.0 } else { (prev_m - max_m).exp() };
+			let new_weight = if FIRST { 1.0 } else { (new_m - max_m).exp() };
+			prev_m.set(max_m);
 
-				let acc = acc.slice(j, h, ..);
-				for i in 0..1 {
-					let v = v.slice(i, h, ..);
-					let score = scores[i].get().to_f64();
-					for f in 0..VO {
-						let v = v[f].get().to_f64();
-						acc[f].set(score * v);
-					}
-				}
-				for i in 1..I {
-					let v = v.slice(i, h, ..);
-					let score = scores[i].get().to_f64();
-					for f in 0..VO {
-						let v = v[f].get().to_f64();
-						acc[f].set(acc[f].get() + score * v);
-					}
-				}
+			let prev_l = if FIRST { 0.0 } else { prev_l.item(j, h) };
+			prev_l.set(prev_l * prev_weight + new_l * new_weight);
+
+			let acc = acc.slice(j, h, ..);
+			for f in 0..VO {
+				acc[f] = if FIRST { 0.0 } else { acc[f] * prev_weight };
 			}
-		} else {
-			for h in 0..H {
-				let scores = scores.slice(h, ..);
-				let scores = &scores[..I]; // TODO
-				let (new_m, new_l) = math::softmax_part1_(scores);
-
-				//let S: Vec<f64> = scores.iter().map(|s| s.get() / new_l).collect();
-				//println!("j = {}, h = {}, ..scores = {:.4?}", j, h, S.as_slice());
-
-				let prev_m = prev_m.item(j, h);
-				let m = new_m.max(prev_m.get());
-
-				let prev_weight = (prev_m.get() - m).exp();
-				let new_weight = (new_m - m).exp();
-				prev_m.set(m);
-
-				let prev_l = prev_l.item(j, h);
-				prev_l.set(prev_l.get() * prev_weight + new_l * new_weight);
-
-				let acc = acc.slice(j, h, ..);
-				for i in 0..1 {
-					let v = v.slice(i, h, ..);
-					let score = scores[i].get().to_f64() * new_weight;
-					for f in 0..VO {
-						let v = v[f].get().to_f64();
-						acc[f].set(acc[f].get() * prev_weight + score * v);
-					}
-				}
-				for i in 1..I {
-					let v = v.slice(i, h, ..);
-					let score = scores[i].get().to_f64() * new_weight;
-					for f in 0..VO {
-						let v = v[f].get().to_f64();
-						acc[f].set(acc[f].get() + score * v);
-					}
+			for i in 0..I {
+				let v = v.slice(i, h, ..);
+				let score = scores[i].to_f64() * new_weight;
+				for f in 0..VO {
+					let v = v[f].to_f64();
+					acc[f] = acc[f] + (score * v);
 				}
 			}
 		}
