@@ -67,55 +67,63 @@ impl<'a, T> View3D<'a, T> {
 
 //--------------------------------------------------------------------------------------------------
 
-fn attention_tile<T: Copy + FromToF64, const FIRST: bool>(
-	acc: View3D<f64>, // [output, head, vo_feature]
-
-	q: View3D<T>, // [output, head, qk_feature]
-	k: View3D<T>, // [input, head, qk_feature]
-	v: View3D<T>, // [input, head, vo_feature]
-
-	// `acc`, `prev_m` and `prev_l` will be initialized when processing the first tile.
-	prev_m: View2D<f64>, // [output, head]
-	prev_l: View2D<f64>, // [output, head]
-
-	// Scratch space for storing scores. It doesn't need to be initialized.
-	// On GPU, its shape will be [output, head, input]. However, we process outputs
-	// sequentially, so we don't need separate space for each output.
-	scores: View2D<f64>, // [head, input]
+fn attention_thread<
+	T: Copy + FromToF64,
+	const V_FEATURES: usize,
+	const K_FEATURES: usize,
+	const TILE_WIDTH: usize, // number of inputs
+	const TILE_HEIGHT: usize, // number of outputs
+>(
+	N: usize,
+	j: usize, // vertical position along a tile
+	h: usize, // head index
+	q: View3D<T>, // [output, head, K_FEATURES]
+	k: View3D<T>, // [input, head, K_FEATURES]
+	v: View3D<T>, // [input, head, V_FEATURES]
+	o: View3D<T>, // [output, head, V_FEATURES]
 ) {
-	let O = q.seq_len;
-	let I = k.seq_len;
-	let H = q.heads;
-	let VO = v.features;
-	for j in 0..O {
-		let q = q.slice(j, h, ..);
-		let acc = acc.slice(j, h, 0..VO);
-		let scores = scores.slice(j, h, 0..I);
-		let prev_sum: &mut f64 = prev_sum.item_mut(j, h);
-		let prev_max: &mut f64 = prev_max.item_mut(j, h);
-
-		let mut new_max = if FIRST { f64::MIN } else { *prev_max };
-		for i in 0..I {
-			let k = k.slice(i, h, ..);
-			scores[i] = math::dot(q, k);
-			new_max = new_max.max(scores[i]); /////////////////////////////////////////////// reduce
-		}
-		let prev_weight = (*prev_max - new_max).exp();
-		*prev_max = new_max;
-
-		for f in 0..VO {
-			acc[f] = if FIRST { 0.0 } else { acc[f] * prev_weight };
-		}
-		let mut new_sum = 0.0;
-		for i in 0..I {
-			let v = v.slice(i, h, ..);
-			scores[i] = (scores[i] - new_max).exp();
-			new_sum += scores[i]; /////////////////////////////////////////////////////////// reduce
-			for f in 0..VO {
-				acc[f] += scores[i] * v[f].to_f64(); //////////////////////////////////////// reduce
+	let scores = [f64; TILE_WIDTH]; // uninit ------------------------------------------------- SRAM
+	for tile_j in (0..N).step_by(TILE_HEIGHT) {
+		let q = q.slice(tile_j + j, h, 0..K_FEATURES); //-------------------------------------- SRAM
+		let acc: [f64; V_FEATURES] = [0.0; V_FEATURES]; //------------------------------------- SRAM
+		let mut max = f64::MIN;
+		let mut sum = 0.0;
+		for tile_i in (0..N).step_by(TILE_WIDTH) {
+			let prev_max = max;
+			for i in 0..TILE_WIDTH {
+				let k = k.slice(tile_i + i, h, 0..K_FEATURES); //------------------------------ SRAM
+				scores[i] = math::dot(q, k);
+				max = max.max(scores[i]);
+			}
+			let prev_weight = (prev_max - max).exp();
+			sum *= prev_weight;
+			for f in 0..V_FEATURES {
+				acc[f] *= prev_weight;
+			}
+			for i in 0..TILE_WIDTH {
+				let v = v.slice(tile_i + i, h, 0..V_FEATURES);
+				let w = (scores[i] - new_max).exp();
+				sum += w;
+				for f in 0..V_FEATURES {
+					acc[f] += w * v[f].to_f64();
+				}
 			}
 		}
-		*prev_sum = if FIRST { new_sum } else { *prev_sum * prev_weight + new_sum };
+		let sum_recip = 1.0 / sum;
+		let o = o.slice(tile_j + j, h, 0..V_FEATURES);
+		for f in 0..V_FEATURES {
+			o[f] = acc[f] * sum_recip;
+		}
+	}
+}
+
+fn attention(...) {
+	for b in batch { // TODO - can I parallelize over batch?? The amount of SRAM used would not be bound
+		for h in heads {
+			for inner_j in 0..TILE_HEIGHT {
+				attention_thread(...)
+			}
+		}
 	}
 }
 
