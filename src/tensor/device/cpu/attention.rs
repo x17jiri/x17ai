@@ -94,26 +94,28 @@ fn attention_tile<T: Copy + FromToF64, const FIRST: bool>(
 		let prev_sum: &mut f64 = prev_sum.item_mut(j, h);
 		let prev_max: &mut f64 = prev_max.item_mut(j, h);
 
+		let mut new_max = if FIRST { f64::MIN } else { *prev_max };
 		for i in 0..I {
 			let k = k.slice(i, h, ..);
 			scores[i] = math::dot(q, k);
+			new_max = new_max.max(scores[i]); /////////////////////////////////////////////// reduce
 		}
-		let new_max = scores.fold(if FIRST { f64::MIN } else { *prev_max }, f64::max); ////// reduce
 		let prev_weight = (*prev_max - new_max).exp();
 		*prev_max = new_max;
 
+		for f in 0..VO {
+			acc[f] = if FIRST { 0.0 } else { acc[f] * prev_weight };
+		}
+		let mut new_sum = 0.0;
 		for i in 0..I {
 			let v = v.slice(i, h, ..);
 			scores[i] = (scores[i] - new_max).exp();
+			new_sum += scores[i]; /////////////////////////////////////////////////////////// reduce
 			for f in 0..VO {
-				if i == 0 {
-					acc[f] = if FIRST { 0.0 } else { acc[f] * prev_weight };
-				}
-				acc[f] += scores[i] * v[f].to_f64(); //// TODO - reduce ////////////////////////////
+				acc[f] += scores[i] * v[f].to_f64(); //////////////////////////////////////// reduce
 			}
 		}
-		let new_sum = scores.sum(); ///////////////////////////////////////////////////////// reduce
-		*prev_sum = if FIRST { new_sum } else { prev_sum * prev_weight + new_sum };
+		*prev_sum = if FIRST { new_sum } else { *prev_sum * prev_weight + new_sum };
 	}
 }
 
