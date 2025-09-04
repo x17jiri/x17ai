@@ -158,7 +158,7 @@ impl Rng {
 				)
 			) * 0.5;
 
-		if result.abs() >= 10.0 {
+		if result.abs() > 10.0 {
 			cold_path();
 			log::warn!("Rng::get_normal(): clamping {result} to (-10.0, 10.0)");
 			return 0.0;

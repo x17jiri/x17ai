@@ -47,7 +47,7 @@ impl<'a, T> View3DMut<'a, T> {
 
 //--------------------------------------------------------------------------------------------------
 
-#[allow(clippy::needless_range_loop)]
+#[allow(clippy::needless_range_loop)] // I want to see all the `for` loops in the algorithm
 #[allow(clippy::indexing_slicing)]
 fn attention_thread<
 	T: Copy + FromToF64,
@@ -72,14 +72,13 @@ fn attention_thread<
 		let q = q.slice(tile_j + j, h, 0..K_FEATURES); //-------------------------------------- SRAM
 		let mut acc: [f64; V_FEATURES] = [0.0; V_FEATURES]; //--------------------------------- SRAM
 		let mut max = f64::MIN;
-		let mut sum = 0.0;
+		let mut sum = 0.0; // TODO - use Kahan sum for `acc` and `sum`
 		for tile_i in (0..N).step_by(TILE_WIDTH) {
 			let prev_max = max;
 			for i in 0..TILE_WIDTH {
 				let k = k.slice(tile_i + i, h, 0..K_FEATURES); //------------------------------ SRAM
-				let s = math::dot(q, k);
-				scores[i] = if s.is_nan() { s } else { s.clamp(f64::MIN, f64::MAX) };
-				max = max.max(scores[i]);
+				scores[i] = math::dot(q, k).clamp(f64::MIN, f64::MAX); // `clamp()` propagates NaN
+				max = max.max(scores[i]); // `max()` doesn't propagate NaN
 			}
 			let prev_weight = (prev_max - max).exp();
 			sum *= prev_weight;
@@ -87,11 +86,11 @@ fn attention_thread<
 				acc[f] *= prev_weight;
 			}
 			for i in 0..TILE_WIDTH {
-				let v = v.slice(tile_i + i, h, 0..V_FEATURES);
-				let w = (scores[i] - max).exp();
-				sum += w;
+				scores[i] = (scores[i] - max).exp();
+				sum += scores[i];
+				let v = v.slice(tile_i + i, h, 0..V_FEATURES); //------------------------------ SRAM
 				for f in 0..V_FEATURES {
-					acc[f] += w * v[f].to_f64();
+					acc[f] += scores[i] * v[f].to_f64();
 				}
 			}
 		}
@@ -113,6 +112,7 @@ pub fn attention<T: Copy + FromToF64>(
 	const TILE_HEIGHT: usize = 32;
 	let N = o.seq_len;
 	let heads = o.heads;
+	// These 2 `for` loops can run in parallel
 	for inner_j in 0..TILE_HEIGHT {
 		for h in 0..heads {
 			attention_thread::<T, 64, 64, TILE_WIDTH, TILE_HEIGHT>(o, q, k, v, N, inner_j, h);
