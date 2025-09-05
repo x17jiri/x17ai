@@ -39,6 +39,7 @@
 #![feature(get_mut_unchecked)]
 #![feature(ptr_metadata)]
 #![feature(macro_metavar_expr)]
+#![feature(trait_alias)]
 // clippy
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]
