@@ -5,6 +5,8 @@
 //
 //------------------------------------------------------------------------------
 
+use crate::tensor::generic::map::ND;
+use crate::tensor::{TensorOpError, generic};
 use crate::util::LossyInto;
 
 //--------------------------------------------------------------------------------------------------
@@ -17,12 +19,12 @@ pub trait Float:
 	+ std::ops::Sub<Output = Self>
 {
 	const ZERO: Self;
-	const MAX_POSITIVE: Self;
-	const MAX_NEGATIVE: Self;
+	const ONE: Self;
+	const NEG_INFINITY: Self;
 
 	fn max(self, other: Self) -> Self; // does not propagate NaN
 	fn min(self, other: Self) -> Self; // does not propagate NaN
-	fn clamp(self, min: Self, max: Self) -> Self; // propagates NaN
+	fn clamp_to_finite(self) -> Self; // propagates NaN
 
 	fn exp(self) -> Self;
 	fn recip(self) -> Self;
@@ -56,38 +58,28 @@ pub fn dot<T: Float, U: Float + From<T>>(a: &[T], b: &[T]) -> U {
 }
 
 #[derive(Clone, Copy)]
-pub struct View3D<'a, T> {
+pub struct View2D<'a, T> {
 	pub data: &'a [T],
-	pub seq_len: usize,
 	pub seq_stride: usize,
-	pub head_shift: usize,
-	pub heads: usize,
-	pub features: usize,
 }
 
-impl<'a, T> View3D<'a, T> {
+impl<'a, T> View2D<'a, T> {
 	#[allow(clippy::indexing_slicing)]
-	pub fn slice(&self, i: usize, h: usize, f: std::ops::Range<usize>) -> &'a [T] {
-		let head = h >> self.head_shift;
-		let offset = i * self.seq_stride + head * self.features;
+	pub fn slice(&self, i: usize, f: std::ops::Range<usize>) -> &'a [T] {
+		let offset = i * self.seq_stride;
 		&self.data[(offset + f.start)..(offset + f.end)]
 	}
 }
 
-pub struct View3DMut<'a, T> {
+pub struct View2DMut<'a, T> {
 	pub data: &'a mut [T],
-	pub seq_len: usize,
 	pub seq_stride: usize,
-	pub head_shift: usize,
-	pub heads: usize,
-	pub features: usize,
 }
 
-impl<'a, T> View3DMut<'a, T> {
+impl<'a, T> View2DMut<'a, T> {
 	#[allow(clippy::indexing_slicing)]
-	pub fn slice_mut(&mut self, i: usize, h: usize, f: std::ops::Range<usize>) -> &mut [T] {
-		let head = h >> self.head_shift;
-		let offset = i * self.seq_stride + head * self.features;
+	pub fn slice_mut(&mut self, i: usize, f: std::ops::Range<usize>) -> &mut [T] {
+		let offset = i * self.seq_stride;
 		&mut self.data[(offset + f.start)..(offset + f.end)]
 	}
 }
@@ -135,34 +127,37 @@ impl<T: Float> KahanAcc<T> {
 fn attention_thread<
 	T: Float,
 	U: Float + From<T> + LossyInto<T>,
-	const V_FEATURES: usize,
-	const K_FEATURES: usize,
 	const TILE_WIDTH: usize,  // number of inputs
 	const TILE_HEIGHT: usize, // number of outputs
 >(
-	o: &mut View3DMut<T>,    // [output, head, V_FEATURES]
-	q: &View3D<T>,           // [output, head, K_FEATURES]
-	k: &View3D<T>,           // [input, head, K_FEATURES]
-	v: &View3D<T>,           // [input, head, V_FEATURES]
+	o: &mut View2DMut<T>,    // [output, head, V_FEATURES]
+	q: &View2D<T>,           // [output, head, K_FEATURES]
+	k: &View2D<T>,           // [input, head, K_FEATURES]
+	v: &View2D<T>,           // [input, head, V_FEATURES]
 	N: usize,                // sequence length
-	j: usize,                // vertical position along a tile
-	h: usize,                // head index
+	inner_j: usize,          // vertical position along a tile
 	acc: &mut [KahanAcc<U>], // [V_FEATURES] ------------------------------------------- acc - SRAM
+	V_FEATURES: usize,
+	K_FEATURES: usize,
 ) {
-	let mut scores = [U::ZERO; TILE_WIDTH]; //-- uninit ------------------------------ scores - SRAM
-	for tile_j in (0..N).step_by(TILE_HEIGHT) {
-		if j >= N - tile_j {
-			break;
+	let mut scores = [U::ZERO; TILE_WIDTH]; //-- uninit ----------------------------- scores - SRAM
+	for outer_j in (0..N).step_by(TILE_HEIGHT) {
+		if inner_j >= N - outer_j {
+			break; // This break is diverging
 		}
-		let q = q.slice(tile_j + j, h, 0..K_FEATURES); //---------------------------------- Q - SRAM
+		let j = outer_j + inner_j;
+
+		let q = q.slice(j, 0..K_FEATURES); //--------------------------------------------- Q - SRAM
 		acc.fill(KahanAcc::<U>::new());
-		let mut max = U::MAX_NEGATIVE;
+		let mut max = U::NEG_INFINITY.clamp_to_finite();
 		let mut sum = KahanAcc::<U>::new();
-		for tile_i in (0..N).step_by(TILE_WIDTH) {
+		for outer_i in (0..N).step_by(TILE_WIDTH) {
+			let CNT = (N - outer_i).min(TILE_WIDTH);
 			let prev_max = max;
-			for i in 0..TILE_WIDTH {
-				let k = k.slice(tile_i + i, h, 0..K_FEATURES); //-------------------------- K - SRAM
-				scores[i] = dot::<T, U>(q, k).clamp(U::MAX_NEGATIVE, U::MAX_POSITIVE);
+			for inner_i in 0..CNT {
+				let i = outer_i + inner_i;
+				let k = k.slice(i, 0..K_FEATURES); //------------------------------------- K - SRAM
+				scores[i] = dot::<T, U>(q, k).clamp_to_finite();
 				max = max.max(scores[i]);
 			}
 			let prev_weight = (prev_max - max).exp();
@@ -170,17 +165,18 @@ fn attention_thread<
 			for f in 0..V_FEATURES {
 				acc[f].scale_(prev_weight);
 			}
-			for i in 0..TILE_WIDTH {
+			for inner_i in 0..CNT {
+				let i = outer_i + inner_i;
 				let w = (scores[i] - max).exp();
 				sum.acc_(w);
-				let v = v.slice(tile_i + i, h, 0..V_FEATURES); //-------------------------- V - SRAM
+				let v = v.slice(i, 0..V_FEATURES); //------------------------------------- V - SRAM
 				for f in 0..V_FEATURES {
 					acc[f].acc_(w * v[f].into());
 				}
 			}
 		}
 		let sum_recip = sum.value().recip();
-		let o = o.slice_mut(tile_j + j, h, 0..V_FEATURES);
+		let o = o.slice_mut(j, 0..V_FEATURES);
 		for f in 0..V_FEATURES {
 			o[f] = (acc[f].value() * sum_recip).lossy_into();
 		}
@@ -188,21 +184,26 @@ fn attention_thread<
 }
 
 pub fn attention<T: Float + From<T> + LossyInto<T>, U: Float + From<T> + LossyInto<T>>(
-	o: &mut View3DMut<T>, // [output, head, V_FEATURES]
-	q: &View3D<T>,        // [output, head, K_FEATURES]
-	k: &View3D<T>,        // [input, head, K_FEATURES]
-	v: &View3D<T>,        // [input, head, V_FEATURES]
-) {
+	o: &mut generic::Tensor<ND<3>, &mut [T]>, // [output, head, V_FEATURES]
+	q: &generic::Tensor<ND<3>, &[T]>,         // [output, head, K_FEATURES]
+	k: &generic::Tensor<ND<3>, &[T]>,         // [input, head, K_FEATURES]
+	v: &generic::Tensor<ND<3>, &[T]>,         // [input, head, V_FEATURES]
+) -> Result<(), TensorOpError> {
 	const TILE_WIDTH: usize = 32;
 	const TILE_HEIGHT: usize = 32;
-	let N = o.seq_len;
-	let heads = o.heads;
+	let N = o.size(0).unwrap();
+	let H = o.size(1).unwrap();
+	let V_FEATURES = v.size(-1).unwrap();
+	let K_FEATURES = k.size(-1).unwrap();
 	// These 2 `for` loops can run in parallel
 	for inner_j in 0..TILE_HEIGHT {
-		for h in 0..heads {
-			attention_thread::<T, U, 64, 64, TILE_WIDTH, TILE_HEIGHT>(o, q, k, v, N, inner_j, h);
+		for h in 0..H {
+			attention_thread::<T, U, TILE_WIDTH, TILE_HEIGHT>(
+				o, q, k, v, N, inner_j, acc, V_FEATURES, K_FEATURES,
+			);
 		}
 	}
+	Ok(())
 }
 
 //--------------------------------------------------------------------------------------------------
