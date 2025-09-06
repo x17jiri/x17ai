@@ -5,30 +5,14 @@
 //
 //------------------------------------------------------------------------------
 
-use crate::tensor::generic::map::ND;
-use crate::tensor::{TensorOpError, generic};
+use crate::ErrPack;
+use crate::tensor::TensorOpError;
+use crate::tensor::device::cpu::math::Float;
+use crate::tensor::generic::GenericTensor;
+use crate::tensor::generic::map::{Map, ND};
 use crate::util::LossyInto;
 
 //--------------------------------------------------------------------------------------------------
-
-pub trait Float:
-	Copy
-	+ Default
-	+ std::ops::Mul<Output = Self>
-	+ std::ops::Add<Output = Self>
-	+ std::ops::Sub<Output = Self>
-{
-	const ZERO: Self;
-	const ONE: Self;
-	const NEG_INFINITY: Self;
-
-	fn max(self, other: Self) -> Self; // does not propagate NaN
-	fn min(self, other: Self) -> Self; // does not propagate NaN
-	fn clamp_to_finite(self) -> Self; // propagates NaN
-
-	fn exp(self) -> Self;
-	fn recip(self) -> Self;
-}
 
 #[allow(clippy::indexing_slicing)]
 pub fn dot<T: Float, U: Float + From<T>>(a: &[T], b: &[T]) -> U {
@@ -58,28 +42,49 @@ pub fn dot<T: Float, U: Float + From<T>>(a: &[T], b: &[T]) -> U {
 }
 
 #[derive(Clone, Copy)]
-pub struct View2D<'a, T> {
+pub struct View3D<'a, T> {
 	pub data: &'a [T],
 	pub seq_stride: usize,
+	pub head_stride: usize,
 }
 
-impl<'a, T> View2D<'a, T> {
+impl<'a, T> View3D<'a, T> {
+	pub fn new(tensor: &GenericTensor<&ND<3>, &'a [T]>) -> Self {
+		let (map, buf) = tensor.into_parts();
+		Self {
+			data: buf,
+			seq_stride: map.dim(0).stride,
+			head_stride: map.dim(1).stride,
+		}
+	}
+
 	#[allow(clippy::indexing_slicing)]
-	pub fn slice(&self, i: usize, f: std::ops::Range<usize>) -> &'a [T] {
-		let offset = i * self.seq_stride;
+	pub fn slice(&self, i: usize, h: usize, f: std::ops::Range<usize>) -> &'a [T] {
+		let offset = i * self.seq_stride + h * self.head_stride;
 		&self.data[(offset + f.start)..(offset + f.end)]
 	}
 }
 
-pub struct View2DMut<'a, T> {
+pub struct View3DMut<'a, T> {
 	pub data: &'a mut [T],
+	pub head_stride: usize,
 	pub seq_stride: usize,
 }
 
-impl<'a, T> View2DMut<'a, T> {
+impl<'a, T> View3DMut<'a, T> {
+	pub fn new(tensor: &'a mut GenericTensor<&ND<3>, &mut [T]>) -> Self {
+		let map = tensor.map().clone();
+		let buf = unsafe { tensor.buf_mut().get_mut(..) }.unwrap();
+		Self {
+			data: buf,
+			seq_stride: map.dim(0).stride,
+			head_stride: map.dim(1).stride,
+		}
+	}
+
 	#[allow(clippy::indexing_slicing)]
-	pub fn slice_mut(&mut self, i: usize, f: std::ops::Range<usize>) -> &mut [T] {
-		let offset = i * self.seq_stride;
+	pub fn slice_mut(&mut self, i: usize, h: usize, f: std::ops::Range<usize>) -> &mut [T] {
+		let offset = i * self.seq_stride + h * self.head_stride;
 		&mut self.data[(offset + f.start)..(offset + f.end)]
 	}
 }
@@ -124,17 +129,19 @@ impl<T: Float> KahanAcc<T> {
 
 #[allow(clippy::needless_range_loop)] // I want to see all the `for` loops in the algorithm
 #[allow(clippy::indexing_slicing)]
+#[allow(clippy::too_many_arguments)]
 fn attention_thread<
 	T: Float,
 	U: Float + From<T> + LossyInto<T>,
 	const TILE_WIDTH: usize,  // number of inputs
 	const TILE_HEIGHT: usize, // number of outputs
 >(
-	o: &mut View2DMut<T>,    // [output, head, V_FEATURES]
-	q: &View2D<T>,           // [output, head, K_FEATURES]
-	k: &View2D<T>,           // [input, head, K_FEATURES]
-	v: &View2D<T>,           // [input, head, V_FEATURES]
+	o: &mut View3DMut<T>,    // [output, head, V_FEATURES]
+	q: &View3D<T>,           // [output, head, K_FEATURES]
+	k: &View3D<T>,           // [input, head, K_FEATURES]
+	v: &View3D<T>,           // [input, head, V_FEATURES]
 	N: usize,                // sequence length
+	h: usize,                // head index
 	inner_j: usize,          // vertical position along a tile
 	acc: &mut [KahanAcc<U>], // [V_FEATURES] ------------------------------------------- acc - SRAM
 	V_FEATURES: usize,
@@ -147,7 +154,7 @@ fn attention_thread<
 		}
 		let j = outer_j + inner_j;
 
-		let q = q.slice(j, 0..K_FEATURES); //--------------------------------------------- Q - SRAM
+		let q = q.slice(j, h, 0..K_FEATURES); //--------------------------------------------- Q - SRAM
 		acc.fill(KahanAcc::<U>::new());
 		let mut max = U::NEG_INFINITY.clamp_to_finite();
 		let mut sum = KahanAcc::<U>::new();
@@ -156,7 +163,7 @@ fn attention_thread<
 			let prev_max = max;
 			for inner_i in 0..CNT {
 				let i = outer_i + inner_i;
-				let k = k.slice(i, 0..K_FEATURES); //------------------------------------- K - SRAM
+				let k = k.slice(i, h, 0..K_FEATURES); //------------------------------------- K - SRAM
 				scores[i] = dot::<T, U>(q, k).clamp_to_finite();
 				max = max.max(scores[i]);
 			}
@@ -169,37 +176,43 @@ fn attention_thread<
 				let i = outer_i + inner_i;
 				let w = (scores[i] - max).exp();
 				sum.acc_(w);
-				let v = v.slice(i, 0..V_FEATURES); //------------------------------------- V - SRAM
+				let v = v.slice(i, h, 0..V_FEATURES); //------------------------------------- V - SRAM
 				for f in 0..V_FEATURES {
 					acc[f].acc_(w * v[f].into());
 				}
 			}
 		}
 		let sum_recip = sum.value().recip();
-		let o = o.slice_mut(j, 0..V_FEATURES);
+		let o = o.slice_mut(j, h, 0..V_FEATURES);
 		for f in 0..V_FEATURES {
 			o[f] = (acc[f].value() * sum_recip).lossy_into();
 		}
 	}
 }
 
-pub fn attention<T: Float + From<T> + LossyInto<T>, U: Float + From<T> + LossyInto<T>>(
-	o: &mut generic::Tensor<ND<3>, &mut [T]>, // [output, head, V_FEATURES]
-	q: &generic::Tensor<ND<3>, &[T]>,         // [output, head, K_FEATURES]
-	k: &generic::Tensor<ND<3>, &[T]>,         // [input, head, K_FEATURES]
-	v: &generic::Tensor<ND<3>, &[T]>,         // [input, head, V_FEATURES]
-) -> Result<(), TensorOpError> {
+pub fn attention<T: Float, U: Float + From<T> + LossyInto<T>>(
+	o: &mut GenericTensor<&ND<3>, &mut [T]>, // [output, head, V_FEATURES]
+	q: &GenericTensor<&ND<3>, &[T]>,         // [output, head, K_FEATURES]
+	k: &GenericTensor<&ND<3>, &[T]>,         // [input, head, K_FEATURES]
+	v: &GenericTensor<&ND<3>, &[T]>,         // [input, head, V_FEATURES]
+) -> Result<(), ErrPack<TensorOpError>> {
 	const TILE_WIDTH: usize = 32;
 	const TILE_HEIGHT: usize = 32;
 	let N = o.size(0).unwrap();
 	let H = o.size(1).unwrap();
 	let V_FEATURES = v.size(-1).unwrap();
 	let K_FEATURES = k.size(-1).unwrap();
+
+	let mut acc = vec![KahanAcc::<U>::new(); V_FEATURES];
+	let mut o = View3DMut::new(o);
+	let q = View3D::new(q);
+	let k = View3D::new(k);
+	let v = View3D::new(v);
 	// These 2 `for` loops can run in parallel
 	for inner_j in 0..TILE_HEIGHT {
 		for h in 0..H {
 			attention_thread::<T, U, TILE_WIDTH, TILE_HEIGHT>(
-				o, q, k, v, N, inner_j, acc, V_FEATURES, K_FEATURES,
+				&mut o, &q, &k, &v, N, h, inner_j, &mut acc, V_FEATURES, K_FEATURES,
 			);
 		}
 	}

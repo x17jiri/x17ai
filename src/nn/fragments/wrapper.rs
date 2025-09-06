@@ -9,13 +9,14 @@ use std::cell::RefCell;
 use std::hint::cold_path;
 use std::rc::Rc;
 
-use crate::autograd::{self, AutogradNode, BackwardFn};
+use crate::autograd::{self, AutogradTensor, BackwardFn};
+use crate::nn::fragments::UnaryFragment;
 use crate::nn::param::Param;
 use crate::rng::Rng;
 use crate::tensor::{Tensor, TensorOpError};
 use crate::{ErrPack, custom_kernel};
 
-use super::Layer;
+use super::Fragment;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -44,38 +45,23 @@ pub enum NormPosition {
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct Wrapper<Nested: Layer> {
+pub struct Wrapper<Nested: UnaryFragment> {
 	pub nested: Nested,
 	eps: f64,
 	norm_pos: NormPosition,
 }
 
-impl<Nested: Layer> Wrapper<Nested> {
-	pub fn new(nested: Nested, eps: f64) -> Option<Self> {
-		let input_shape = nested.input_shape();
-		let output_shape = nested.output_shape();
-		if input_shape == output_shape && input_shape.last().is_some() {
-			Some(Self {
-				nested,
-				eps,
-				norm_pos: NormPosition::Inside,
-			})
-		} else {
-			cold_path();
-			None
+impl<Nested: UnaryFragment> Wrapper<Nested> {
+	pub fn new(nested: Nested, eps: f64) -> Self {
+		Self {
+			nested,
+			eps,
+			norm_pos: NormPosition::Inside,
 		}
 	}
 }
 
-impl<Nested: Layer> Layer for Wrapper<Nested> {
-	fn input_shape(&self) -> &[usize] {
-		self.nested.input_shape()
-	}
-
-	fn output_shape(&self) -> &[usize] {
-		self.nested.output_shape()
-	}
-
+impl<Nested: UnaryFragment> Fragment for Wrapper<Nested> {
 	fn collect_params(&self, f: &mut dyn FnMut(Rc<RefCell<Param>>)) {
 		self.nested.collect_params(f);
 	}
@@ -84,8 +70,14 @@ impl<Nested: Layer> Layer for Wrapper<Nested> {
 		self.nested.collect_named_params(prefix, f);
 	}
 
-	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
-		let (inp, backward_fn) = inp_node.take();
+	fn randomize(&mut self, rng: &mut Rng) -> Result<(), ErrPack<TensorOpError>> {
+		self.nested.randomize(rng)
+	}
+}
+
+impl<Nested: UnaryFragment> UnaryFragment for Wrapper<Nested> {
+	fn forward(&self, inp_node: AutogradTensor) -> Result<AutogradTensor, ErrPack<TensorOpError>> {
+		let (inp, backward_fn) = inp_node.into_parts();
 		let sum_to_mean = inp.sum_to_mean();
 
 		let inp_magn_recip = inp.new_replace_tail(1, &[1])?;
@@ -120,7 +112,7 @@ impl<Nested: Layer> Layer for Wrapper<Nested> {
 			}));
 			let inner = rc_inner.borrow();
 
-			let nested_inp = AutogradNode::new(
+			let nested_inp = AutogradTensor::new(
 				rms_norm,
 				Some(Box::new(WrapperBackwardFn_Split {
 					rc_inner: rc_inner.clone(),
@@ -128,7 +120,7 @@ impl<Nested: Layer> Layer for Wrapper<Nested> {
 					backward_fn,
 				})),
 			);
-			let (nested_out, nested_out_fn) = self.nested.forward(nested_inp)?.take();
+			let (nested_out, nested_out_fn) = self.nested.forward(nested_inp)?.into_parts();
 			let sum_to_mean = nested_out.sum_to_mean();
 
 			inner.ratio.assign(custom_kernel!(
@@ -158,8 +150,8 @@ impl<Nested: Layer> Layer for Wrapper<Nested> {
 			)
 		} else {
 			std::mem::drop(backward_fn);
-			let nested_inp = AutogradNode::new(rms_norm, None);
-			self.nested.forward(nested_inp)?.take()
+			let nested_inp = AutogradTensor::new(rms_norm, None);
+			self.nested.forward(nested_inp)?.into_parts()
 		};
 
 		if !nested_out.owns_buffer() {
@@ -171,11 +163,7 @@ impl<Nested: Layer> Layer for Wrapper<Nested> {
 				nested_out + residual
 			}
 		))?;
-		Ok(AutogradNode::new(out, nested_out_fn))
-	}
-
-	fn randomize(&mut self, rng: &mut Rng) -> Result<(), ErrPack<TensorOpError>> {
-		self.nested.randomize(rng)
+		Ok(AutogradTensor::new(out, nested_out_fn))
 	}
 }
 

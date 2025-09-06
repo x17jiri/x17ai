@@ -8,57 +8,37 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::autograd::{self, AutogradNode, BackwardFn, StraightThroughBackwardFn};
+use crate::autograd::{self, AutogradTensor, BackwardFn, StraightThroughBackwardFn};
+use crate::nn::fragments::UnaryFragment;
 use crate::nn::param::Param;
 use crate::rng::Rng;
 use crate::tensor::{Tensor, TensorOpError};
 use crate::{ErrPack, custom_kernel};
 
-use super::Layer;
+use super::Fragment;
 
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub enum RMSNormGradientMode {
+pub enum RMSNormGradMode {
 	Precise,
 	StraightThrough,
 }
 
 pub struct RMSNorm {
-	shape: [usize; 1],
-	gradient_mode: RMSNormGradientMode,
+	grad_mode: RMSNormGradMode,
 	eps: f64,
 }
 
 impl RMSNorm {
-	pub fn new(n_inputs: usize, eps: f64) -> Self {
-		Self {
-			shape: [n_inputs],
-			gradient_mode: RMSNormGradientMode::Precise,
-			eps,
-		}
+	pub fn new(eps: f64, grad_mode: RMSNormGradMode) -> Self {
+		Self { grad_mode, eps }
 	}
 }
 
-impl Layer for RMSNorm {
-	fn input_shape(&self) -> &[usize] {
-		&self.shape
-	}
-
-	fn output_shape(&self) -> &[usize] {
-		&self.shape
-	}
-
-	fn collect_params(&self, _f: &mut dyn FnMut(Rc<RefCell<Param>>)) {
-		// no parameters to collect
-	}
-
-	fn collect_named_params(&self, _prefix: &str, _f: &mut dyn FnMut(String, Rc<RefCell<Param>>)) {
-		// no parameters to collect
-	}
-
-	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
-		let (inp, inp_backward) = inp_node.take();
+impl UnaryFragment for RMSNorm {
+	fn forward(&self, inp: AutogradTensor) -> Result<AutogradTensor, ErrPack<TensorOpError>> {
+		let (inp, inp_backward) = inp.into_parts();
 		let sum_to_mean = inp.sum_to_mean();
 
 		let magn_recip = inp.new_replace_tail(1, &[1])?;
@@ -75,8 +55,8 @@ impl Layer for RMSNorm {
 			}
 		))?;
 
-		let backward_fn = inp_backward.map(|inp_backward| match self.gradient_mode {
-			RMSNormGradientMode::Precise => {
+		let backward_fn = inp_backward.map(|inp_backward| match self.grad_mode {
+			RMSNormGradMode::Precise => {
 				//
 				Box::new(RMSNormBackwardFn_Precise {
 					out: out.clone(),
@@ -84,12 +64,22 @@ impl Layer for RMSNorm {
 					inp_backward,
 				}) as Box<dyn BackwardFn>
 			},
-			RMSNormGradientMode::StraightThrough => {
+			RMSNormGradMode::StraightThrough => {
 				Box::new(StraightThroughBackwardFn::new(inp_backward)) as Box<dyn BackwardFn>
 			},
 		});
 
-		Ok(AutogradNode::new(out, backward_fn))
+		Ok(AutogradTensor::new(out, backward_fn))
+	}
+}
+
+impl Fragment for RMSNorm {
+	fn collect_params(&self, _f: &mut dyn FnMut(Rc<RefCell<Param>>)) {
+		// no parameters to collect
+	}
+
+	fn collect_named_params(&self, _prefix: &str, _f: &mut dyn FnMut(String, Rc<RefCell<Param>>)) {
+		// no parameters to collect
 	}
 
 	fn randomize(&mut self, _rng: &mut Rng) -> Result<(), ErrPack<TensorOpError>> {

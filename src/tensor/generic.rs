@@ -25,14 +25,14 @@ use crate::{ErrExtra, ErrPack};
 // Tensor
 
 #[derive(Clone, Debug)]
-pub struct Tensor<M: Map, B: Buffer> {
+pub struct GenericTensor<M: Map, B: Buffer> {
 	map: M,
 	buf: B,
 }
 
-impl<M: Map + Copy, B: Buffer + Copy> Copy for Tensor<M, B> {}
+impl<M: Map + Copy, B: Buffer + Copy> Copy for GenericTensor<M, B> {}
 
-impl<M: Map, B: Buffer> Tensor<M, B> {
+impl<M: Map, B: Buffer> GenericTensor<M, B> {
 	pub fn new(map: M, buf: B) -> Option<Self> {
 		let map_span = map.span();
 		let buf_len = buf.len();
@@ -99,47 +99,47 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		self.map.elems()
 	}
 
-	pub fn merge_dims<const K: usize>(&self) -> Result<Tensor<M::Output, B>, M::Error>
+	pub fn merge_dims<const K: usize>(&self) -> Result<GenericTensor<M::Output, B>, M::Error>
 	where
 		M: MergeDims<K>,
 		B: Clone,
 	{
 		let new_map = self.map.merge_dims()?;
-		Ok(Tensor { buf: self.buf.clone(), map: new_map })
+		Ok(GenericTensor { buf: self.buf.clone(), map: new_map })
 	}
 
-	pub fn merge_all_dims(&self) -> Result<Tensor<M::Output, B>, M::Error>
+	pub fn merge_all_dims(&self) -> Result<GenericTensor<M::Output, B>, M::Error>
 	where
 		M: MergeAllDims,
 		B: Clone,
 	{
 		let new_map = self.map.merge_all_dims()?;
-		Ok(Tensor { buf: self.buf.clone(), map: new_map })
+		Ok(GenericTensor { buf: self.buf.clone(), map: new_map })
 	}
 
 	pub fn reshape_last_dim<const K: usize>(
 		self,
 		to_shape: [usize; K],
-	) -> Result<Tensor<M::Output, B>, M::Error>
+	) -> Result<GenericTensor<M::Output, B>, M::Error>
 	where
 		M: ReshapeLastDim<K>,
 	{
 		let new_map = self.map.reshape_last_dim(to_shape)?;
-		Ok(Tensor { buf: self.buf, map: new_map })
+		Ok(GenericTensor { buf: self.buf, map: new_map })
 	}
 
 	pub fn select<D: DimIndex>(
 		&self,
 		dim: D,
 		index: usize,
-	) -> Result<Tensor<M::Output, B>, M::Error>
+	) -> Result<GenericTensor<M::Output, B>, M::Error>
 	where
 		M: Select,
 		B: Clone,
 	{
 		let dim = dim.resolve_index(self.ndim())?;
 		let new_map = self.map.select(dim, index)?;
-		Ok(Tensor { buf: self.buf.clone(), map: new_map })
+		Ok(GenericTensor { buf: self.buf.clone(), map: new_map })
 	}
 
 	pub fn iter_along_axis<'a, D: DimIndex>(
@@ -159,28 +159,28 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		self,
 		dim: D,
 		range: R,
-	) -> Result<Tensor<M::Output, B>, M::Error>
+	) -> Result<GenericTensor<M::Output, B>, M::Error>
 	where
 		M: Narrow,
 	{
 		let dim = dim.resolve_index(self.ndim())?;
 		let range = range.into();
 		let new_map = self.map.narrow(dim, range)?;
-		Ok(Tensor { buf: self.buf, map: new_map })
+		Ok(GenericTensor { buf: self.buf, map: new_map })
 	}
 
 	pub fn transposed<D0: DimIndex, D1: DimIndex>(
 		self,
 		d0: D0,
 		d1: D1,
-	) -> Result<Tensor<M::Output, B>, M::Error>
+	) -> Result<GenericTensor<M::Output, B>, M::Error>
 	where
 		M: Transpose,
 	{
 		let d0 = d0.resolve_index(self.ndim())?;
 		let d1 = d1.resolve_index(self.ndim())?;
 		let new_map = self.map.transposed(d0, d1)?;
-		Ok(Tensor { buf: self.buf, map: new_map })
+		Ok(GenericTensor { buf: self.buf, map: new_map })
 	}
 
 	pub fn nd_shape<const K: usize>(&self) -> std::result::Result<[usize; K], M::Error>
@@ -190,29 +190,33 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 		self.map.nd_shape()
 	}
 
-	pub fn conv_map<'a, NewMap>(&'a self) -> std::result::Result<Tensor<NewMap, B>, NewMap::Error>
+	pub fn conv_map<'a, NewMap>(
+		&'a self,
+	) -> std::result::Result<GenericTensor<NewMap, B>, NewMap::Error>
 	where
 		NewMap: Map + TryFrom<&'a M>,
 		B: Clone,
 	{
 		let map = NewMap::try_from(&self.map)?;
-		Ok(Tensor { map, buf: self.buf.clone() })
+		Ok(GenericTensor { map, buf: self.buf.clone() })
 	}
 
-	pub fn conv_map_ref<NewMap>(&self) -> std::result::Result<Tensor<NewMap, B>, NewMap::Error>
+	pub fn conv_map_ref<NewMap>(
+		&self,
+	) -> std::result::Result<GenericTensor<NewMap, B>, NewMap::Error>
 	where
 		NewMap: Map + TryFrom<M>,
 		B: Clone,
 	{
 		let map = NewMap::try_from(self.map.clone())?;
-		Ok(Tensor { map, buf: self.buf.clone() })
+		Ok(GenericTensor { map, buf: self.buf.clone() })
 	}
 
-	pub fn ref_map(&self) -> Tensor<&M, B>
+	pub fn ref_map(&self) -> GenericTensor<&M, B>
 	where
 		B: Clone,
 	{
-		Tensor { map: &self.map, buf: self.buf.clone() }
+		GenericTensor { map: &self.map, buf: self.buf.clone() }
 	}
 
 	/// # Errors
@@ -231,22 +235,22 @@ impl<M: Map, B: Buffer> Tensor<M, B> {
 //--------------------------------------------------------------------------------------------------
 
 pub struct AxisIter<'a, M: Map + Select, B: Buffer + Clone> {
-	tensor: &'a Tensor<M, B>,
+	tensor: &'a GenericTensor<M, B>,
 	dim: usize,
 	current: usize,
 	size: usize,
 }
 
 impl<'a, M: Map + Select, B: Buffer + Clone> Iterator for AxisIter<'a, M, B> {
-	type Item = Tensor<M::Output, B>;
+	type Item = GenericTensor<M::Output, B>;
 
-	fn next(&mut self) -> Option<Tensor<M::Output, B>> {
+	fn next(&mut self) -> Option<GenericTensor<M::Output, B>> {
 		if self.current >= self.size {
 			return None;
 		}
 		let index = self.current;
 		self.current += 1;
-		Some(Tensor {
+		Some(GenericTensor {
 			map: unsafe { self.tensor.map.clone().select_unchecked(self.dim, index) },
 			buf: self.tensor.buf.clone(),
 		})

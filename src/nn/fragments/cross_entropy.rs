@@ -5,9 +5,9 @@
 //
 //------------------------------------------------------------------------------
 
-use crate::autograd::{self, AutogradNode, BackwardFn, LossFn};
-use crate::nn::layers::Layer;
-use crate::nn::layers::softmax::{Softmax, SoftmaxGradientMode};
+use crate::autograd::{self, AutogradTensor, BackwardFn, LossFn};
+use crate::nn::fragments::UnaryFragment;
+use crate::nn::fragments::softmax::{Softmax, SoftmaxGradMode};
 use crate::tensor::{Tensor, TensorOpError};
 use crate::{ErrPack, custom_kernel};
 
@@ -16,19 +16,19 @@ pub struct CrossEntropy {
 }
 
 impl CrossEntropy {
-	pub fn new(n_inputs: usize) -> Self {
-		let mut softmax = Softmax::new(n_inputs);
-		softmax.set_gradient_mode(SoftmaxGradientMode::StraightThrough);
-		Self { softmax }
+	pub fn new() -> Self {
+		Self {
+			softmax: Softmax::new(SoftmaxGradMode::StraightThrough),
+		}
 	}
 
 	pub fn forward_with_target(
 		&self,
-		inp_node: AutogradNode,
+		inp_node: AutogradTensor,
 		target: Tensor,
 	) -> Result<Box<dyn LossFn>, ErrPack<TensorOpError>> {
 		let out_node = self.softmax.forward(inp_node)?;
-		let (value, inp_backward) = out_node.take();
+		let (value, inp_backward) = out_node.into_parts();
 		Ok(Box::new(CrossEntropyLossFn { value, target, inp_backward }))
 	}
 }

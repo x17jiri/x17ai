@@ -8,9 +8,9 @@
 use super::super::linear::*;
 
 use crate::ErrPack;
-use crate::autograd::{self, AutogradNode, GradientCapture};
+use crate::autograd::{self, AutogradTensor, GradientCapture};
 use crate::nn::ModelContext;
-use crate::nn::layers::Layer;
+use crate::nn::fragments::UnaryFragment;
 use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::math::approx_eq;
 use crate::tensor::{self, HasDType, Tensor, TensorOpError};
@@ -55,8 +55,8 @@ fn test_linear() -> Result<(), ErrPack<TensorOpError>> {
 
 	let d_inp_capture = GradientCapture::new();
 	let d_inp = d_inp_capture.storage();
-	let out = linear.forward(AutogradNode::new(inp, Some(d_inp_capture)))?;
-	let (out, backward_fn) = out.take();
+	let out = linear.forward(AutogradTensor::new(inp, Some(d_inp_capture)))?;
+	let (out, backward_fn) = out.into_parts();
 
 	println!("out = {}", out.borrow()?.view::<f32>()?);
 	println!("expected_out = {}", expected_out.borrow()?.view::<f32>()?);
@@ -141,8 +141,8 @@ fn test_multihead_linear() -> Result<(), ErrPack<tensor::TensorOpError>> {
 
 	let d_inp_capture = GradientCapture::new();
 	let d_inp = d_inp_capture.storage();
-	let out = linear.forward(AutogradNode::new(inp, Some(d_inp_capture)))?;
-	let (out, backward_fn) = out.take();
+	let out = linear.forward(AutogradTensor::new(inp, Some(d_inp_capture)))?;
+	let (out, backward_fn) = out.into_parts();
 
 	println!("out = {}", out.borrow()?.view::<f32>()?);
 	println!("expected_out = {}", expected_out.borrow()?.view::<f32>()?);

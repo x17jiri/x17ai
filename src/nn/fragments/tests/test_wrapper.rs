@@ -8,10 +8,10 @@
 use super::super::linear::*;
 
 use crate::ErrPack;
-use crate::autograd::{self, AutogradNode, GradientCapture};
+use crate::autograd::{self, AutogradTensor, GradientCapture};
 use crate::nn::ModelContext;
-use crate::nn::layers::Layer;
-use crate::nn::layers::wrapper::Wrapper;
+use crate::nn::fragments::UnaryFragment;
+use crate::nn::fragments::wrapper::Wrapper;
 use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::math::approx_eq;
 use crate::tensor::{HasDType, Tensor, TensorOpError};
@@ -28,7 +28,7 @@ fn test_wrapper() -> Result<(), ErrPack<TensorOpError>> {
 	let dev = CPUDevice::new();
 	let mut model_ctx = ModelContext::new(dev.clone());
 	let linear = Linear::new(4, 4, f32::dtype, &mut model_ctx)?;
-	let wrapper = Wrapper::new(linear, 1.0e-5).unwrap();
+	let wrapper = Wrapper::new(linear, 1.0e-5);
 	model_ctx.init_optimizer()?;
 
 	let lit = Tensor::literal_factory::<f32>(dev);
@@ -60,8 +60,8 @@ fn test_wrapper() -> Result<(), ErrPack<TensorOpError>> {
 
 	let d_inp_capture = GradientCapture::new();
 	let d_inp = d_inp_capture.storage();
-	let out = wrapper.forward(AutogradNode::new(inp, Some(d_inp_capture)))?;
-	let (out, backward_fn) = out.take();
+	let out = wrapper.forward(AutogradTensor::new(inp, Some(d_inp_capture)))?;
+	let (out, backward_fn) = out.into_parts();
 
 	println!("out = {}", out.borrow()?.view::<f32>()?);
 	println!("expected_out = {}", expected_out.borrow()?.view::<f32>()?);

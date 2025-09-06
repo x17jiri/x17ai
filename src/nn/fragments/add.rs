@@ -5,18 +5,18 @@
 //
 //------------------------------------------------------------------------------
 
-use crate::autograd::{self, AutogradNode, BackwardFn};
+use crate::autograd::{self, AutogradTensor, BackwardFn};
 use crate::tensor::{Tensor, TensorOpError};
 use crate::{ErrPack, custom_kernel};
 
 //--------------------------------------------------------------------------------------------------
 
 pub fn add(
-	a_node: AutogradNode,
-	b_node: AutogradNode,
-) -> Result<AutogradNode, ErrPack<TensorOpError>> {
-	let (mut a, a_fn) = a_node.take();
-	let (mut b, b_fn) = b_node.take();
+	a_node: AutogradTensor,
+	b_node: AutogradTensor,
+) -> Result<AutogradTensor, ErrPack<TensorOpError>> {
+	let (mut a, a_fn) = a_node.into_parts();
+	let (mut b, b_fn) = b_node.into_parts();
 	if !a.owns_buffer() {
 		// Note: we don't swap `a_fn` and `b_fn`, but that's ok. Their order is not important
 		std::mem::swap(&mut a, &mut b);
@@ -30,7 +30,7 @@ pub fn add(
 
 	#[allow(clippy::collapsible_else_if)]
 	#[allow(clippy::option_if_let_else)]
-	Ok(AutogradNode::new(
+	Ok(AutogradTensor::new(
 		c,
 		if let Some(a_fn) = a_fn {
 			if let Some(b_fn) = b_fn {

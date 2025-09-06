@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::mem::MaybeUninit;
 use std::rc::Rc;
 
-use crate::autograd::{self, AutogradNode, BackwardFn};
+use crate::autograd::{self, AutogradTensor, BackwardFn};
 use crate::tensor::{Tensor, TensorOpError};
 use crate::{ErrPack, custom_kernel};
 
@@ -17,9 +17,9 @@ use crate::{ErrPack, custom_kernel};
 
 #[allow(clippy::indexing_slicing)]
 #[allow(clippy::needless_range_loop)]
-pub fn split<const N: usize>(inp_node: AutogradNode) -> [AutogradNode; N] {
+pub fn split<const N: usize>(inp_node: AutogradTensor) -> [AutogradTensor; N] {
 	let mut output = [const { MaybeUninit::uninit() }; N];
-	let (inp, inp_fn) = inp_node.take();
+	let (inp, inp_fn) = inp_node.into_parts();
 	if N > 0 {
 		if let Some(inp_fn) = inp_fn {
 			let rc_inner =
@@ -27,21 +27,21 @@ pub fn split<const N: usize>(inp_node: AutogradNode) -> [AutogradNode; N] {
 			for i in 0..N - 1 {
 				let inp = inp.clone();
 				let rc_inner = rc_inner.clone();
-				output[i].write(AutogradNode::new(
+				output[i].write(AutogradTensor::new(
 					inp,
 					Some(Box::new(SplitBackwardFn { rc_inner }) as Box<dyn BackwardFn>),
 				));
 			}
-			output[N - 1].write(AutogradNode::new(
+			output[N - 1].write(AutogradTensor::new(
 				inp,
 				Some(Box::new(SplitBackwardFn { rc_inner }) as Box<dyn BackwardFn>),
 			));
 		} else {
 			for i in 0..N - 1 {
 				let inp = inp.clone();
-				output[i].write(AutogradNode::new(inp, None));
+				output[i].write(AutogradTensor::new(inp, None));
 			}
-			output[N - 1].write(AutogradNode::new(inp, None));
+			output[N - 1].write(AutogradTensor::new(inp, None));
 		}
 	}
 	unsafe { MaybeUninit::array_assume_init(output) }

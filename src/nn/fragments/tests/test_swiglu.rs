@@ -7,8 +7,8 @@
 
 use super::super::swiglu::*;
 
-use crate::autograd::{AutogradNode, GradientCapture};
-use crate::nn::layers::Layer;
+use crate::autograd::{AutogradTensor, GradientCapture};
+use crate::nn::fragments::UnaryFragment;
 use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::math::approx_eq;
 use crate::tensor::{Tensor, TensorOpError};
@@ -21,7 +21,7 @@ use crate::{ErrPack, autograd};
 #[allow(clippy::unwrap_used)]
 #[test]
 fn test_swiglu() -> Result<(), ErrPack<TensorOpError>> {
-	let swiglu = SwiGLU::new(7);
+	let swiglu = SwiGLU::new();
 	let dev = CPUDevice::new();
 
 	#[rustfmt::skip] let inp = Tensor::literal_factory::<f32>(dev.clone()).new_3d(&[
@@ -49,8 +49,8 @@ fn test_swiglu() -> Result<(), ErrPack<TensorOpError>> {
 
 	let d_inp_capture = GradientCapture::new();
 	let d_inp = d_inp_capture.storage();
-	let out = swiglu.forward(AutogradNode::new(inp, Some(d_inp_capture)))?;
-	let (out, backward_fn) = out.take();
+	let out = swiglu.forward(AutogradTensor::new(inp, Some(d_inp_capture)))?;
+	let (out, backward_fn) = out.into_parts();
 
 	println!("out = {}", out.borrow()?.view::<f32>()?);
 	println!("expected_out = {}", expected_out.borrow()?.view::<f32>()?);

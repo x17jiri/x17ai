@@ -8,12 +8,14 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-//pub mod attention;
+pub mod add;
+pub mod attention;
 pub mod cross_entropy;
 pub mod linear;
 pub mod rms_norm;
 pub mod skip_connection;
 pub mod softmax;
+pub mod split;
 pub mod swiglu;
 pub mod wrapper;
 
@@ -21,7 +23,7 @@ pub mod wrapper;
 mod tests;
 
 use crate::ErrPack;
-use crate::autograd::AutogradNode;
+use crate::autograd::AutogradTensor;
 use crate::rng::Rng;
 use crate::tensor::TensorOpError;
 
@@ -29,13 +31,12 @@ use super::Param;
 
 //pub use linear::{Linear, MultiheadLinear};
 pub use cross_entropy::CrossEntropy;
-pub use rms_norm::{RMSNorm, RMSNormGradientMode};
+pub use rms_norm::{RMSNorm, RMSNormGradMode};
 pub use swiglu::SwiGLU;
 
-pub trait Layer {
-	fn input_shape(&self) -> &[usize];
-	fn output_shape(&self) -> &[usize];
+pub struct NotEnoughArgumentsError;
 
+pub trait Fragment {
 	fn collect_params(&self, f: &mut dyn FnMut(Rc<RefCell<Param>>));
 	fn collect_named_params(&self, prefix: &str, f: &mut dyn FnMut(String, Rc<RefCell<Param>>));
 
@@ -51,7 +52,9 @@ pub trait Layer {
 		params
 	}
 
-	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>>;
-
 	fn randomize(&mut self, rng: &mut Rng) -> Result<(), ErrPack<TensorOpError>>;
+}
+
+pub trait UnaryFragment: Fragment {
+	fn forward(&self, inp: AutogradTensor) -> Result<AutogradTensor, ErrPack<TensorOpError>>;
 }

@@ -34,7 +34,7 @@ pub enum ViewError {
 
 pub struct CPUDevice {
 	name: String,
-	f32_vmt: CPUFloatVMT<f32>,
+	f32_vmt: CPUFloatVMT<f32, f64>,
 }
 
 impl CPUDevice {

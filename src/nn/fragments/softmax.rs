@@ -8,48 +8,33 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::autograd::{self, AutogradNode, BackwardFn, StraightThroughBackwardFn};
+use crate::autograd::{self, AutogradTensor, BackwardFn, StraightThroughBackwardFn};
+use crate::nn::fragments::UnaryFragment;
 use crate::nn::param::Param;
 use crate::rng::Rng;
 use crate::tensor::{Tensor, TensorOpError};
 use crate::{ErrPack, custom_kernel};
 
-use super::Layer;
+use super::Fragment;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum SoftmaxGradientMode {
+pub enum SoftmaxGradMode {
 	Precise,
 	Simplified,
 	StraightThrough,
 }
 
 pub struct Softmax {
-	shape: [usize; 1],
-	gradient_mode: SoftmaxGradientMode,
+	grad_mode: SoftmaxGradMode,
 }
 
 impl Softmax {
-	pub fn new(n_inputs: usize) -> Self {
-		Self {
-			shape: [n_inputs],
-			gradient_mode: SoftmaxGradientMode::Precise,
-		}
-	}
-
-	pub fn set_gradient_mode(&mut self, mode: SoftmaxGradientMode) {
-		self.gradient_mode = mode;
+	pub fn new(grad_mode: SoftmaxGradMode) -> Self {
+		Self { grad_mode }
 	}
 }
 
-impl Layer for Softmax {
-	fn input_shape(&self) -> &[usize] {
-		&self.shape
-	}
-
-	fn output_shape(&self) -> &[usize] {
-		&self.shape
-	}
-
+impl Fragment for Softmax {
 	fn collect_params(&self, _f: &mut dyn FnMut(Rc<RefCell<Param>>)) {
 		// no parameters to collect
 	}
@@ -58,8 +43,15 @@ impl Layer for Softmax {
 		// no parameters to collect
 	}
 
-	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
-		let (inp, inp_backward) = inp_node.take();
+	fn randomize(&mut self, _rng: &mut Rng) -> Result<(), ErrPack<TensorOpError>> {
+		// no parameters to randomize
+		Ok(())
+	}
+}
+
+impl UnaryFragment for Softmax {
+	fn forward(&self, inp_node: AutogradTensor) -> Result<AutogradTensor, ErrPack<TensorOpError>> {
+		let (inp, inp_backward) = inp_node.into_parts();
 		let out = inp.reuse_or_new_like()?;
 
 		let max = inp.new_replace_tail(1, &[1])?; // [..., 1]
@@ -81,27 +73,22 @@ impl Layer for Softmax {
 			}
 		))?;
 
-		let backward_fn = inp_backward.map(|inp_backward| match self.gradient_mode {
-			SoftmaxGradientMode::Precise => {
+		let backward_fn = inp_backward.map(|inp_backward| match self.grad_mode {
+			SoftmaxGradMode::Precise => {
 				Box::new(SoftmaxBackwardFn_Precise { out: out.clone(), inp_backward })
 					as Box<dyn BackwardFn>
 			},
-			SoftmaxGradientMode::Simplified => {
+			SoftmaxGradMode::Simplified => {
 				Box::new(SoftmaxBackwardFn_Simplified { out: out.clone(), inp_backward })
 					as Box<dyn BackwardFn>
 			},
-			SoftmaxGradientMode::StraightThrough => {
+			SoftmaxGradMode::StraightThrough => {
 				// TODO - could I just use inp_backward directly?
 				Box::new(StraightThroughBackwardFn::new(inp_backward)) as Box<dyn BackwardFn>
 			},
 		});
 
-		Ok(AutogradNode::new(out, backward_fn))
-	}
-
-	fn randomize(&mut self, _rng: &mut Rng) -> Result<(), ErrPack<TensorOpError>> {
-		// no parameters to randomize
-		Ok(())
+		Ok(AutogradTensor::new(out, backward_fn))
 	}
 }
 

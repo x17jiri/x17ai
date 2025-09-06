@@ -9,7 +9,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::autograd::{self, AutogradNode, BackwardFn};
+use crate::autograd::{self, AutogradTensor, BackwardFn};
+use crate::nn::fragments::UnaryFragment;
 use crate::nn::model_context::ModelContext;
 use crate::nn::optimizer::CurrentGradValue;
 use crate::nn::param::Param;
@@ -18,7 +19,7 @@ use crate::tensor::math::{col, mat, row};
 use crate::tensor::{self, DType, Tensor, TensorOpError};
 use crate::util::LossyInto;
 
-use super::Layer;
+use super::Fragment;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -62,15 +63,7 @@ impl Linear {
 	}
 }
 
-impl Layer for Linear {
-	fn input_shape(&self) -> &[usize] {
-		&self.input_shape
-	}
-
-	fn output_shape(&self) -> &[usize] {
-		&self.output_shape
-	}
-
+impl Fragment for Linear {
 	fn collect_params(&self, f: &mut dyn FnMut(Rc<RefCell<Param>>)) {
 		f(self.weights.clone());
 	}
@@ -79,8 +72,18 @@ impl Layer for Linear {
 		f(format!("{prefix}.weights"), self.weights.clone());
 	}
 
-	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
-		let (inp, inp_backward) = inp_node.take();
+	fn randomize(
+		&mut self,
+		rng: &mut Rng,
+	) -> std::result::Result<(), ErrPack<tensor::TensorOpError>> {
+		let w = self.weights.borrow();
+		w.value().randn_(rng)
+	}
+}
+
+impl UnaryFragment for Linear {
+	fn forward(&self, inp_node: AutogradTensor) -> Result<AutogradTensor, ErrPack<TensorOpError>> {
+		let (inp, inp_backward) = inp_node.into_parts();
 
 		// [..., inputs] -> [..., outputs]
 		let out = inp.new_replace_tail(1, &self.output_shape)?;
@@ -103,15 +106,7 @@ impl Layer for Linear {
 			None
 		};
 
-		Ok(AutogradNode::new(out, backward_fn))
-	}
-
-	fn randomize(
-		&mut self,
-		rng: &mut Rng,
-	) -> std::result::Result<(), ErrPack<tensor::TensorOpError>> {
-		let w = self.weights.borrow();
-		w.value().randn_(rng)
+		Ok(AutogradTensor::new(out, backward_fn))
 	}
 }
 
@@ -209,15 +204,7 @@ impl MultiheadLinear {
 	}
 }
 
-impl Layer for MultiheadLinear {
-	fn input_shape(&self) -> &[usize] {
-		&self.linear.input_shape
-	}
-
-	fn output_shape(&self) -> &[usize] {
-		&self.output_shape
-	}
-
+impl Fragment for MultiheadLinear {
 	fn collect_params(&self, f: &mut dyn FnMut(Rc<RefCell<Param>>)) {
 		self.linear.collect_params(f);
 	}
@@ -226,10 +213,19 @@ impl Layer for MultiheadLinear {
 		self.linear.collect_named_params(format!("{prefix}.linear").as_str(), f);
 	}
 
+	fn randomize(
+		&mut self,
+		rng: &mut Rng,
+	) -> std::result::Result<(), ErrPack<tensor::TensorOpError>> {
+		self.linear.randomize(rng)
+	}
+}
+
+impl UnaryFragment for MultiheadLinear {
 	#[inline(never)]
-	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
+	fn forward(&self, inp_node: AutogradTensor) -> Result<AutogradTensor, ErrPack<TensorOpError>> {
 		let out_node = self.linear.forward(inp_node)?;
-		let (out, backward_fn) = out_node.take();
+		let (out, backward_fn) = out_node.into_parts();
 
 		// [..., heads * outputs] -> [..., heads, outputs]
 		let out = out.reshape_last_dim(self.output_shape)?;
@@ -238,14 +234,7 @@ impl Layer for MultiheadLinear {
 			Box::new(MultiheadLinearBackwardFn { inp_backward }) as Box<dyn BackwardFn>
 		});
 
-		Ok(AutogradNode::new(out, backward_fn))
-	}
-
-	fn randomize(
-		&mut self,
-		rng: &mut Rng,
-	) -> std::result::Result<(), ErrPack<tensor::TensorOpError>> {
-		self.linear.randomize(rng)
+		Ok(AutogradTensor::new(out, backward_fn))
 	}
 }
 

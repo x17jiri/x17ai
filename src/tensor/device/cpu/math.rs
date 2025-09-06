@@ -5,7 +5,113 @@
 //
 //------------------------------------------------------------------------------
 
-use crate::util::FromToF64;
+//--------------------------------------------------------------------------------------------------
+
+pub trait FromToF64: Copy {
+	const MIN: f64; // largest negative value of type
+
+	fn from_f64(val: f64) -> Self;
+	fn to_f64(&self) -> f64;
+}
+
+#[allow(clippy::use_self)]
+impl FromToF64 for f32 {
+	const MIN: f64 = f32::MIN as f64;
+
+	fn from_f64(val: f64) -> Self {
+		#[allow(clippy::cast_possible_truncation)]
+		(val as f32)
+	}
+
+	fn to_f64(&self) -> f64 {
+		f64::from(*self)
+	}
+}
+
+#[allow(clippy::use_self)]
+impl FromToF64 for f64 {
+	const MIN: f64 = f64::MIN;
+
+	fn from_f64(val: f64) -> Self {
+		val
+	}
+
+	fn to_f64(&self) -> f64 {
+		*self
+	}
+}
+
+pub trait Float:
+	Copy
+	+ Default
+	+ std::ops::Mul<Output = Self>
+	+ std::ops::Add<Output = Self>
+	+ std::ops::Sub<Output = Self>
+	+ FromToF64
+{
+	const ZERO: Self;
+	const ONE: Self;
+	const NEG_INFINITY: Self;
+
+	fn max(self, other: Self) -> Self; // does not propagate NaN
+	fn min(self, other: Self) -> Self; // does not propagate NaN
+	fn clamp_to_finite(self) -> Self; // propagates NaN
+
+	fn exp(self) -> Self;
+	fn recip(self) -> Self;
+}
+
+impl Float for f32 {
+	const ZERO: Self = 0.0;
+	const ONE: Self = 1.0;
+	const NEG_INFINITY: Self = f32::NEG_INFINITY;
+
+	fn max(self, other: Self) -> Self {
+		f32::max(self, other)
+	}
+
+	fn min(self, other: Self) -> Self {
+		f32::min(self, other)
+	}
+
+	fn clamp_to_finite(self) -> Self {
+		f32::clamp(self, f32::MIN, f32::MAX)
+	}
+
+	fn exp(self) -> Self {
+		f32::exp(self)
+	}
+
+	fn recip(self) -> Self {
+		1.0 / self
+	}
+}
+
+impl Float for f64 {
+	const ZERO: Self = 0.0;
+	const ONE: Self = 1.0;
+	const NEG_INFINITY: Self = f64::NEG_INFINITY;
+
+	fn max(self, other: Self) -> Self {
+		f64::max(self, other)
+	}
+
+	fn min(self, other: Self) -> Self {
+		f64::min(self, other)
+	}
+
+	fn clamp_to_finite(self) -> Self {
+		f64::clamp(self, f64::MIN, f64::MAX)
+	}
+
+	fn exp(self) -> Self {
+		f64::exp(self)
+	}
+
+	fn recip(self) -> Self {
+		1.0 / self
+	}
+}
 
 //--------------------------------------------------------------------------------------------------
 

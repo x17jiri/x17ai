@@ -13,7 +13,7 @@ use crate::tensor::TensorOpError;
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
 use crate::tensor::generic::buffer::Buffer;
 use crate::tensor::generic::map::ND;
-use crate::tensor::generic::{self};
+use crate::tensor::generic::{self, GenericTensor};
 use crate::util::mycell::{self, BorrowGuard, BorrowMutGuard};
 
 use super::Device;
@@ -50,40 +50,40 @@ pub type DropBufferFn =
 
 pub type ReadFloatFn = for<'buf> unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
-	src: &generic::Tensor<ND<0>, BorrowGuard<'buf, DeviceBuffer>>,
+	src: &GenericTensor<ND<0>, BorrowGuard<'buf, DeviceBuffer>>,
 ) -> Result<f64, ErrPack<TensorOpError>>;
 
 pub type LoadFromCPUMemoryFn = for<'buf> unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
 	src: &[u8],
-	dst: &mut generic::Tensor<ND<1>, BorrowMutGuard<'buf, DeviceBuffer>>,
+	dst: &mut GenericTensor<ND<1>, BorrowMutGuard<'buf, DeviceBuffer>>,
 ) -> Result<(), ErrPack<TensorOpError>>;
 
 pub type StoreToCPUMemoryFn = for<'buf> unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
-	src: &generic::Tensor<ND<1>, BorrowGuard<'buf, DeviceBuffer>>,
+	src: &GenericTensor<ND<1>, BorrowGuard<'buf, DeviceBuffer>>,
 	dst: &mut [u8],
 ) -> Result<(), ErrPack<TensorOpError>>;
 
 pub type MMFn = for<'buf> unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
-	o: &mut generic::Tensor<ND<2>, BorrowMutGuard<'buf, DeviceBuffer>>,
-	a: &generic::Tensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
-	b: &generic::Tensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
+	o: &mut GenericTensor<ND<2>, BorrowMutGuard<'buf, DeviceBuffer>>,
+	a: &GenericTensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
+	b: &GenericTensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
 	scale: f64,
 ) -> Result<(), ErrPack<TensorOpError>>;
 
 pub type AttentionFn = for<'buf> unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
 	// [inputs, qo_heads, vo_features]
-	o: &mut generic::Tensor<ND<3>, BorrowMutGuard<'buf, DeviceBuffer>>,
+	o: &mut GenericTensor<ND<3>, BorrowMutGuard<'buf, DeviceBuffer>>,
 	// [inputs, qo_heads, qk_features]
-	q: &generic::Tensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
+	q: &GenericTensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
 	// [inputs, k_heads, qk_features]
-	k: &generic::Tensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
+	k: &GenericTensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
 	// [inputs, v_heads, vo_features]
-	v: &generic::Tensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
-);
+	v: &GenericTensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
+) -> Result<(), ErrPack<TensorOpError>>;
 
 pub type RunKernelFn = unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
@@ -183,7 +183,7 @@ impl DeviceBufferVMT {
 	#[inline]
 	pub fn read_float<'buf>(
 		&self,
-		src: &generic::Tensor<ND<0>, BorrowGuard<'buf, DeviceBuffer>>,
+		src: &GenericTensor<ND<0>, BorrowGuard<'buf, DeviceBuffer>>,
 	) -> Result<f64, ErrPack<TensorOpError>> {
 		unsafe { (self.read_float)(self.into(), src) }
 	}
@@ -192,7 +192,7 @@ impl DeviceBufferVMT {
 	pub fn load_from_cpu_memory<'buf>(
 		&self,
 		src: &[u8],
-		dst: &mut generic::Tensor<ND<1>, BorrowMutGuard<'buf, DeviceBuffer>>,
+		dst: &mut GenericTensor<ND<1>, BorrowMutGuard<'buf, DeviceBuffer>>,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		unsafe { (self.load_from_cpu_memory)(self.into(), src, dst) }
 	}
@@ -200,7 +200,7 @@ impl DeviceBufferVMT {
 	#[inline]
 	pub fn store_to_cpu_memory<'buf>(
 		&self,
-		src: &generic::Tensor<ND<1>, BorrowGuard<'buf, DeviceBuffer>>,
+		src: &GenericTensor<ND<1>, BorrowGuard<'buf, DeviceBuffer>>,
 		dst: &mut [u8],
 	) -> Result<(), ErrPack<TensorOpError>> {
 		unsafe { (self.store_to_cpu_memory)(self.into(), src, dst) }
@@ -209,9 +209,9 @@ impl DeviceBufferVMT {
 	#[inline]
 	pub fn mm<'buf>(
 		&self,
-		o: &mut generic::Tensor<ND<2>, BorrowMutGuard<'buf, DeviceBuffer>>,
-		a: &generic::Tensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
-		b: &generic::Tensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
+		o: &mut GenericTensor<ND<2>, BorrowMutGuard<'buf, DeviceBuffer>>,
+		a: &GenericTensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
+		b: &GenericTensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
 		scale: f64,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		unsafe { (self.mm)(self.into(), o, a, b, scale) }
@@ -220,11 +220,11 @@ impl DeviceBufferVMT {
 	#[inline]
 	pub fn attention<'buf>(
 		&self,
-		o: &mut generic::Tensor<ND<3>, BorrowMutGuard<'buf, DeviceBuffer>>,
-		q: &generic::Tensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
-		k: &generic::Tensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
-		v: &generic::Tensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
-	) {
+		o: &mut GenericTensor<ND<3>, BorrowMutGuard<'buf, DeviceBuffer>>,
+		q: &GenericTensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
+		k: &GenericTensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
+		v: &GenericTensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
+	) -> Result<(), ErrPack<TensorOpError>> {
 		unsafe { (self.attention)(self.into(), o, q, k, v) }
 	}
 

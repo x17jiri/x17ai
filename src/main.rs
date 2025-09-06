@@ -158,15 +158,15 @@ fn laplacian(v: &ArrayView2<f32>) -> Array2<f32> {
 		+ v.slice(s![2.., 1..-1])
 }*/
 
-use x17ai::autograd::{AutogradNode, LossFn};
+use x17ai::autograd::{AutogradTensor, LossFn};
 use x17ai::nn::ModelContext;
-use x17ai::nn::layers::linear::Linear;
-use x17ai::nn::layers::softmax::{Softmax, SoftmaxGradientMode};
-use x17ai::nn::layers::{CrossEntropy, Layer};
+use x17ai::nn::fragments::linear::Linear;
+use x17ai::nn::fragments::softmax::{Softmax, SoftmaxGradMode};
+use x17ai::nn::fragments::{CrossEntropy, Fragment, UnaryFragment};
 use x17ai::rng::Rng;
 use x17ai::tensor::device::cpu::CPUDevice;
 use x17ai::tensor::device::kernel::expr;
-use x17ai::tensor::generic::Tensor;
+use x17ai::tensor::generic::GenericTensor;
 use x17ai::tensor::generic::map::ND;
 use x17ai::tensor::math::{col, mat, row};
 use x17ai::tensor::{Device, HasDType, TensorOpError};
@@ -175,7 +175,7 @@ use x17ai::{ErrPack, custom_kernel, tensor};
 #[cfg(false)]
 fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let dev = CPUDevice::new();
-	let lit = Tensor::literal_factory::<f32>(dev.clone());
+	let lit = GenericTensor::literal_factory::<f32>(dev.clone());
 	let a = lit.new_2d(&[
 		[-1.5924, 0.7530, -0.2418, 0.3416],
 		[0.1225, -1.1488, 0.3338, -0.8102],
@@ -187,7 +187,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 		-0.2887, //
 		-0.2313, //
 	])?;
-	let c = Tensor::new_empty_on(&[3], f32::dtype, dev.clone())?;
+	let c = GenericTensor::new_empty_on(&[3], f32::dtype, dev.clone())?;
 	col(&c)?.assign(mat(&a)? * col(&b)?)?;
 
 	let a = lit.new_1d(&[
@@ -198,7 +198,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 		-0.2684, //
 	])?;
 	let b = lit.new_1d(&[0.3259, -2.2469, 0.8345, 0.6012])?;
-	let c = Tensor::new_empty_on(&[5, 4], f32::dtype, dev.clone())?;
+	let c = GenericTensor::new_empty_on(&[5, 4], f32::dtype, dev.clone())?;
 	mat(&c)?.clear_acc(col(&a)? * row(&b)?)?;
 
 	println!("a = {}", a.borrow()?.view::<f32>()?);
@@ -239,20 +239,19 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	//let cuda_dev = cuda::CUDADevice::new().unwrap();
 
 	let dev = CPUDevice::new();
-	let lit = Tensor::literal_factory::<f32>(dev.clone());
+	let lit = GenericTensor::literal_factory::<f32>(dev.clone());
 	let mut mctx = ModelContext::new(dev.clone());
 
 	let mut lin1 = Linear::new(3, 5, f32::dtype, &mut mctx)?;
-	let mut sf = Softmax::new(5);
-	sf.set_gradient_mode(SoftmaxGradientMode::Precise);
+	let mut sf = Softmax::new(SoftmaxGradMode::Precise);
 	let mut lin2 = Linear::new(5, 2, f32::dtype, &mut mctx)?;
 	lin1.randomize(&mut rng)?;
 	lin2.randomize(&mut rng)?;
 	mctx.init_optimizer()?;
 
-	let loss_layer = CrossEntropy::new(2);
+	let loss_layer = CrossEntropy::new();
 
-	let input = Tensor::new_empty_on(&[2, 3], f32::dtype, dev.clone())?;
+	let input = GenericTensor::new_empty_on(&[2, 3], f32::dtype, dev.clone())?;
 	input.randn_(&mut rng)?;
 
 	let expected = lit.new_2d(&[[1.0, 0.0], [0.0, 1.0]])?;
@@ -272,7 +271,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 		//		println!("Step {}", i);
 		//		println!();
 
-		let a = AutogradNode::new(input.clone(), None);
+		let a = AutogradTensor::new(input.clone(), None);
 		let b = lin1.forward(a)?;
 		let c = sf.forward(b)?;
 		let d = lin2.forward(c)?;

@@ -5,7 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
-pub mod layers;
+pub mod fragments;
 pub mod model_context;
 pub mod optimizer;
 pub mod param;

@@ -8,8 +8,9 @@
 use std::hint::cold_path;
 
 use crate::tensor::dim_merger::DimMerger;
+use crate::tensor::generic::GenericTensor;
 use crate::tensor::generic::map::{ND, NotEnoughDimensionsError, SizeAndStride};
-use crate::tensor::{Tensor, TensorOpError, generic};
+use crate::tensor::{Tensor, TensorOpError};
 use crate::util::mycell::{UnsafeBorrowFailFlag, UnsafeBorrowMutFailFlag};
 use crate::{ErrPack, custom_kernel};
 
@@ -221,14 +222,14 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 			let dims = DimMerger::merge::<1>([col.batch_dims, row.batch_dims])?;
 
 			let mut c_fail = UnsafeBorrowFailFlag::new();
-			let col = generic::Tensor::new_unchecked(
+			let col = GenericTensor::new_unchecked(
 				ND {
 					dims: [col.rows, dims[0].get(COL)],
 					offset: col.tensor.map().offset,
 				},
 				col.tensor.buf().unsafe_borrow(&mut c_fail),
 			);
-			let row = generic::Tensor::new_unchecked(
+			let row = GenericTensor::new_unchecked(
 				ND {
 					dims: [dims[0].get(ROW), row.cols],
 					offset: row.tensor.map().offset,
@@ -236,7 +237,7 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 				row.tensor.buf().unsafe_borrow(&mut c_fail),
 			);
 			let mut m_fail = UnsafeBorrowMutFailFlag::new();
-			let mut to = generic::Tensor::new_unchecked(
+			let mut to = GenericTensor::new_unchecked(
 				ND {
 					dims: [to.rows, to.cols],
 					offset: to.tensor.map().offset,
@@ -267,14 +268,14 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 
 			let dims = DimMerger::merge::<1>([to.batch_dims, col.batch_dims])?;
 			let mut c_fail = UnsafeBorrowFailFlag::new();
-			let mat = generic::Tensor::new_unchecked(
+			let mat = GenericTensor::new_unchecked(
 				ND {
 					dims: [mat.rows, mat.cols],
 					offset: mat.tensor.map().offset,
 				},
 				mat.tensor.buf().unsafe_borrow(&mut c_fail),
 			);
-			let col = generic::Tensor::new_unchecked(
+			let col = GenericTensor::new_unchecked(
 				ND {
 					dims: [col.rows, dims[0].get(COL)],
 					offset: col.tensor.map().offset,
@@ -282,7 +283,7 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 				col.tensor.buf().unsafe_borrow(&mut c_fail),
 			);
 			let mut m_fail = UnsafeBorrowMutFailFlag::new();
-			let mut to = generic::Tensor::new_unchecked(
+			let mut to = GenericTensor::new_unchecked(
 				ND {
 					dims: [to.rows, dims[0].get(TO)],
 					offset: to.tensor.map().offset,

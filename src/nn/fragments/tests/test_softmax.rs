@@ -8,8 +8,8 @@
 use super::super::softmax::*;
 
 use crate::ErrPack;
-use crate::autograd::{self, AutogradNode, GradientCapture};
-use crate::nn::layers::Layer;
+use crate::autograd::{self, AutogradTensor, GradientCapture};
+use crate::nn::fragments::UnaryFragment;
 use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::math::approx_eq;
 use crate::tensor::{Tensor, TensorOpError};
@@ -20,7 +20,7 @@ use crate::tensor::{Tensor, TensorOpError};
 #[allow(clippy::unwrap_used)]
 #[test]
 fn test_softmax() -> Result<(), ErrPack<TensorOpError>> {
-	let softmax = Softmax::new(5);
+	let softmax = Softmax::new(SoftmaxGradMode::Precise);
 	let dev = CPUDevice::new();
 
 	#[rustfmt::skip] let inp = Tensor::literal_factory::<f32>(dev.clone()).new_2d(&[
@@ -39,8 +39,8 @@ fn test_softmax() -> Result<(), ErrPack<TensorOpError>> {
 
 	let d_inp_capture = GradientCapture::new();
 	let d_inp = d_inp_capture.storage();
-	let out = softmax.forward(AutogradNode::new(inp, Some(d_inp_capture)))?;
-	let (out, backward_fn) = out.take();
+	let out = softmax.forward(AutogradTensor::new(inp, Some(d_inp_capture)))?;
+	let (out, backward_fn) = out.into_parts();
 
 	println!("out = {}", out.borrow()?.view::<f32>()?);
 	println!("expected_out = {}", expected_out.borrow()?.view::<f32>()?);

@@ -13,17 +13,14 @@ use smallvec::SmallVec;
 use crate::ErrPack;
 use crate::tensor::{Tensor, TensorOpError};
 
-pub mod add;
-pub mod split;
-
 //--------------------------------------------------------------------------------------------------
 
-pub struct AutogradNode {
+pub struct AutogradTensor {
 	pub value: Tensor,
 	pub backward_fn: Option<Box<dyn BackwardFn>>,
 }
 
-impl AutogradNode {
+impl AutogradTensor {
 	pub fn new(value: Tensor, backward_fn: Option<Box<dyn BackwardFn>>) -> Self {
 		Self { value, backward_fn }
 	}
@@ -32,7 +29,7 @@ impl AutogradNode {
 		self.backward_fn.is_some()
 	}
 
-	pub fn take(self) -> (Tensor, Option<Box<dyn BackwardFn>>) {
+	pub fn into_parts(self) -> (Tensor, Option<Box<dyn BackwardFn>>) {
 		let backward_fn = self.backward_fn;
 		(self.value, backward_fn)
 	}

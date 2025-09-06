@@ -8,37 +8,23 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::autograd::{self, AutogradNode, BackwardFn};
+use crate::autograd::{self, AutogradTensor, BackwardFn};
 use crate::nn::param::Param;
 use crate::rng::Rng;
 use crate::tensor::{Tensor, TensorOpError};
 use crate::{ErrPack, custom_kernel};
 
-use super::Layer;
+use super::Fragment;
 
-pub struct SwiGLU {
-	input_shape: [usize; 2],
-	output_shape: [usize; 1],
-}
+pub struct SwiGLU;
 
 impl SwiGLU {
-	pub fn new(n_outputs: usize) -> Self {
-		Self {
-			input_shape: [2, n_outputs],
-			output_shape: [n_outputs],
-		}
+	pub fn new() -> Self {
+		Self
 	}
 }
 
-impl Layer for SwiGLU {
-	fn input_shape(&self) -> &[usize] {
-		&self.input_shape
-	}
-
-	fn output_shape(&self) -> &[usize] {
-		&self.output_shape
-	}
-
+impl Fragment for SwiGLU {
 	fn collect_params(&self, _f: &mut dyn FnMut(Rc<RefCell<Param>>)) {
 		// no parameters to collect
 	}
@@ -47,33 +33,30 @@ impl Layer for SwiGLU {
 		// no parameters to collect
 	}
 
-	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
-		let (inp, inp_backward) = inp_node.take();
-		let out = inp.new_replace_tail(2, &self.output_shape)?;
+	fn randomize(&mut self, _rng: &mut Rng) -> Result<(), ErrPack<TensorOpError>> {
+		// no parameters to randomize
+		Ok(())
+	}
+}
+
+impl super::UnaryFragment for SwiGLU {
+	fn forward(&self, inp_node: AutogradTensor) -> Result<AutogradTensor, ErrPack<TensorOpError>> {
+		let (inp, inp_backward) = inp_node.into_parts();
+		let out = inp.new_replace_tail(2, &[inp.size(-1)?])?;
 		let lin = inp.select(-2, 0)?;
 		let gate = inp.select(-2, 1)?;
 
 		out.assign(custom_kernel!(
 			[lin: &lin, gate: &gate], (ONE: 1.0), {
-				lin * gate * (ONE + (-gate).exp()).recip()
+				lin * gate * ((-gate).exp() + ONE).recip()
 			}
 		))?;
 
 		let backward_fn = inp_backward.map(|inp_backward| {
-			Box::new(SwiGLUBackwardFn {
-				lin,
-				gate,
-				inp_backward,
-				output_shape: self.output_shape,
-			}) as Box<dyn BackwardFn>
+			Box::new(SwiGLUBackwardFn { lin, gate, inp_backward }) as Box<dyn BackwardFn>
 		});
 
-		Ok(AutogradNode::new(out, backward_fn))
-	}
-
-	fn randomize(&mut self, _rng: &mut Rng) -> Result<(), ErrPack<TensorOpError>> {
-		// no parameters to randomize
-		Ok(())
+		Ok(AutogradTensor::new(out, backward_fn))
 	}
 }
 
@@ -81,7 +64,6 @@ pub struct SwiGLUBackwardFn {
 	pub lin: Tensor,
 	pub gate: Tensor,
 	pub inp_backward: Box<dyn BackwardFn>,
-	pub output_shape: [usize; 1],
 }
 
 impl BackwardFn for SwiGLUBackwardFn {
@@ -90,9 +72,9 @@ impl BackwardFn for SwiGLUBackwardFn {
 		d_out: Tensor,
 		queue: &mut autograd::Queue,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		let Self { lin, gate, inp_backward, output_shape } = Box::into_inner(self);
+		let Self { lin, gate, inp_backward } = Box::into_inner(self);
 
-		let input_shape = [2, output_shape[0]];
+		let input_shape = [2, d_out.size(-1)?];
 		let d_inp = d_out.new_replace_tail(1, &input_shape)?;
 		let d_lin = d_inp.select(-2, 0)?;
 		let d_gate = d_inp.select(-2, 1)?;

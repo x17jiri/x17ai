@@ -8,33 +8,28 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::autograd::AutogradNode;
+use crate::ErrPack;
+use crate::autograd::AutogradTensor;
+use crate::nn::fragments::add::add;
+use crate::nn::fragments::split::split;
+use crate::nn::fragments::{Fragment, UnaryFragment};
 use crate::nn::param::Param;
 use crate::rng::Rng;
 use crate::tensor::TensorOpError;
-use crate::{ErrPack, autograd};
 
-use super::Layer;
+//--------------------------------------------------------------------------------------------------
 
-pub struct SkipConnection<Nested: Layer> {
+pub struct SkipConnection<Nested: UnaryFragment> {
 	nested: Nested,
 }
 
-impl<Nested: Layer> SkipConnection<Nested> {
+impl<Nested: UnaryFragment> SkipConnection<Nested> {
 	pub fn new(nested: Nested) -> Self {
 		Self { nested }
 	}
 }
 
-impl<Nested: Layer> Layer for SkipConnection<Nested> {
-	fn input_shape(&self) -> &[usize] {
-		self.nested.input_shape()
-	}
-
-	fn output_shape(&self) -> &[usize] {
-		self.nested.output_shape()
-	}
-
+impl<Nested: UnaryFragment> Fragment for SkipConnection<Nested> {
 	fn collect_params(&self, f: &mut dyn FnMut(Rc<RefCell<Param>>)) {
 		self.nested.collect_params(f);
 	}
@@ -43,13 +38,17 @@ impl<Nested: Layer> Layer for SkipConnection<Nested> {
 		self.nested.collect_named_params(prefix, f);
 	}
 
-	fn forward(&self, inp_node: AutogradNode) -> Result<AutogradNode, ErrPack<TensorOpError>> {
-		let [a, b] = autograd::split::split(inp_node);
-		let nested_out = self.nested.forward(a)?;
-		autograd::add::add(nested_out, b)
-	}
-
 	fn randomize(&mut self, rng: &mut Rng) -> Result<(), ErrPack<TensorOpError>> {
 		self.nested.randomize(rng)
 	}
 }
+
+impl<Nested: UnaryFragment> UnaryFragment for SkipConnection<Nested> {
+	fn forward(&self, inp_node: AutogradTensor) -> Result<AutogradTensor, ErrPack<TensorOpError>> {
+		let [a, b] = split(inp_node);
+		let nested_out = self.nested.forward(a)?;
+		add(nested_out, b)
+	}
+}
+
+//--------------------------------------------------------------------------------------------------

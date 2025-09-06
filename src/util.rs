@@ -30,6 +30,12 @@ impl LossyInto<f64> for u64 {
 	}
 }
 
+impl LossyInto<f32> for f64 {
+	fn lossy_into(self) -> f32 {
+		self as f32
+	}
+}
+
 pub trait UnwrapInfallible<T> {
 	fn unwrap_infallible(self) -> T;
 }
@@ -37,42 +43,6 @@ pub trait UnwrapInfallible<T> {
 impl<T> UnwrapInfallible<T> for Result<T, Infallible> {
 	fn unwrap_infallible(self) -> T {
 		self.unwrap()
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
-pub trait FromToF64: Copy {
-	const MIN: f64; // largest negative value of type
-
-	fn from_f64(val: f64) -> Self;
-	fn to_f64(&self) -> f64;
-}
-
-#[allow(clippy::use_self)]
-impl FromToF64 for f32 {
-	const MIN: f64 = f32::MIN as f64;
-
-	fn from_f64(val: f64) -> Self {
-		#[allow(clippy::cast_possible_truncation)]
-		(val as f32)
-	}
-
-	fn to_f64(&self) -> f64 {
-		f64::from(*self)
-	}
-}
-
-#[allow(clippy::use_self)]
-impl FromToF64 for f64 {
-	const MIN: f64 = f64::MIN;
-
-	fn from_f64(val: f64) -> Self {
-		val
-	}
-
-	fn to_f64(&self) -> f64 {
-		*self
 	}
 }
 
