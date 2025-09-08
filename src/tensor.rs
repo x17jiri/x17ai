@@ -341,6 +341,7 @@ pub enum TensorOpError {
 	InvalidValue,
 	CannotBroadcastOutput,
 	ShapeMismatch,
+	DTypeMismatch,
 	UnsafeTensor,
 	NotContiguous,
 	NotContiguousOrBroadcasted,
@@ -410,6 +411,10 @@ impl TensorOpError {
 
 	pub fn shape_mismatch() -> ErrPack<Self> {
 		ErrPack { code: Self::ShapeMismatch, extra: None }
+	}
+
+	pub fn dtype_mismatch() -> ErrPack<Self> {
+		ErrPack { code: Self::DTypeMismatch, extra: None }
 	}
 }
 

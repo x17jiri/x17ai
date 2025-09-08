@@ -12,7 +12,7 @@ use std::rc::Rc;
 use crate::ErrPack;
 use crate::tensor::device::DeviceBuffer;
 use crate::tensor::device::buffer::{
-	DeviceBufferVMT, KernelElemArg, KernelOutput, KernelReduceArg,
+	AttentionArgs, DeviceBufferVMT, KernelElemArg, KernelOutput, KernelReduceArg,
 };
 use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::device::cpu::math::Float;
@@ -328,14 +328,7 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 
 	fn attention<'buf>(
 		_this: NonNull<DeviceBufferVMT>,
-		// [inputs, qo_heads, o_features]
-		o: &mut GenericTensor<ND<3>, BorrowMutGuard<'buf, DeviceBuffer>>,
-		// [inputs, qo_heads, qk_features]
-		q: &GenericTensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
-		// [inputs, k_heads, qk_features]
-		k: &GenericTensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
-		// [inputs, v_heads, vo_features]
-		v: &GenericTensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
+		args: &AttentionArgs,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let mut o = Self::view_contiguous_mut(o)?;
 		let q = Self::view_contiguous(q)?;

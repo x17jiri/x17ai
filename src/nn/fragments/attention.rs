@@ -6,20 +6,20 @@
 //------------------------------------------------------------------------------
 
 use std::cell::RefCell;
-use std::hint::{cold_path, likely};
+use std::hint::cold_path;
 use std::rc::Rc;
 
 use smallvec::{SmallVec, smallvec};
 
 use crate::autograd::{AutogradTensor, BackwardFn};
 use crate::nn::Param;
-use crate::nn::fragments::{Fragment, UnaryFragment};
+use crate::nn::fragments::Fragment;
 use crate::rng::Rng;
 use crate::tensor::device::buffer::AttentionArgs;
-use crate::tensor::generic::map::dd::{DimVecBuilder, INLINE_DIMS};
-use crate::tensor::generic::map::{Map, SizeAndStride};
+use crate::tensor::dim_merger::DimMerger;
+use crate::tensor::generic::map::dd::INLINE_DIMS;
 use crate::tensor::{Tensor, TensorOpError};
-use crate::util::mycell::UnsafeBorrowFailFlag;
+use crate::util::mycell::{UnsafeBorrowFailFlag, UnsafeBorrowMutFailFlag};
 use crate::{ErrPack, autograd};
 
 //--------------------------------------------------------------------------------------------------
@@ -86,83 +86,105 @@ impl Attention {
 		let (v, v_backward) = v.into_parts();
 		let o = Self::alloc_output(&q, &k, &v)?;
 
+		q.ensure_safe()?;
+		k.ensure_safe()?;
+		v.ensure_safe()?;
+		o.ensure_safe()?;
+
 		let (q_batch, q_map) = q.map().nd_split::<3>()?;
 		let (k_batch, k_map) = k.map().nd_split::<3>()?;
 		let (v_batch, v_map) = v.map().nd_split::<3>()?;
 		let (o_batch, o_map) = o.map().nd_split::<3>()?;
 
-		let q_count = q_map.dims[0].size;
-		let k_count = k_map.dims[0].size;
-		let v_count = v_map.dims[0].size;
-		let o_count = o_map.dims[0].size;
+		let [q_count, q_heads, q_width] = q_map.dims;
+		let [k_count, k_heads, k_width] = k_map.dims;
+		let [v_count, v_heads, v_width] = v_map.dims;
+		let [o_count, o_heads, o_width] = o_map.dims;
 
-		let q_width = q_map.dims[2].size;
-		let k_width = k_map.dims[2].size;
-		let v_width = v_map.dims[2].size;
-		let o_width = o_map.dims[2].size;
-
-		let q_heads = q_map.dims[1].size;
-		let k_heads = k_map.dims[1].size;
-		let v_heads = v_map.dims[1].size;
-		let o_heads = o_map.dims[1].size;
-		let group_shift = q_heads.trailing_zeros().wrapping_sub(k_heads.trailing_zeros());
-		if k_heads > q_heads
-			|| k_heads != v_heads
-			|| (k_heads << group_shift) != q_heads
-			|| k_heads == 0
-			|| q_width != k_width
-			|| v_count != k_count
-			|| o_count != q_count
-			|| o_heads != q_heads
-			|| o_width != v_width
+		let group_shift = q_heads.size.trailing_zeros().wrapping_sub(k_heads.size.trailing_zeros());
+		if k_heads.size > q_heads.size
+			|| k_heads.size != v_heads.size
+			|| (k_heads.size << group_shift) != q_heads.size
+			|| k_heads.size == 0
+			|| q_width.size != k_width.size
+			|| v_count.size != k_count.size
+			|| o_count.size != q_count.size
+			|| o_heads.size != q_heads.size
+			|| o_width.size != v_width.size
 		{
 			cold_path();
 			return Err(TensorOpError::shape_mismatch());
 		}
+		if !q_width.is_contiguous()
+			|| !k_width.is_contiguous()
+			|| !v_width.is_contiguous()
+			|| !o_width.is_contiguous()
+		{
+			cold_path();
+			return Err(TensorOpError::not_contiguous());
+		}
+		if q.dtype() != k.dtype() || q.dtype() != v.dtype() || q.dtype() != o.dtype() {
+			cold_path();
+			return Err(TensorOpError::dtype_mismatch());
+		}
+		let dtype_bytes = q.dtype().bytes();
 
-		let attention_args = AttentionArgs {
-			q_count,
-			head_count: q_heads,
-			q_width,
-			q_offset: q_map.offset,
-			q_item_stride: q_map.dims[0].stride,
-			q_head_stride: q_map.dims[1].stride,
+		let mut attention_args = AttentionArgs {
+			q_count: q_count.size,
+			head_count: q_heads.size,
+			q_width: q_width.size,
+			q_offset: q_map.offset * dtype_bytes,
+			q_item_stride: q_count.stride * dtype_bytes,
+			q_head_stride: q_heads.stride * dtype_bytes,
 			q: q.buf().device_data(),
 
-			k_count,
+			k_count: k_count.size,
 			group_shift: group_shift as usize,
 			// k_width == q_width
-			k_offset: k_map.offset,
-			k_item_stride: k_map.dims[0].stride,
-			k_head_stride: k_map.dims[1].stride,
+			k_offset: k_map.offset * dtype_bytes,
+			k_item_stride: k_count.stride * dtype_bytes,
+			k_head_stride: k_heads.stride * dtype_bytes,
 			k: k.buf().device_data(),
 
 			// v_count == k_count
 			// v_head_count == head_count >> group_shift
-			v_width,
-			v_offset: v_map.offset,
-			v_item_stride: v_map.dims[0].stride,
-			v_head_stride: v_map.dims[1].stride,
+			v_width: v_width.size,
+			v_offset: v_map.offset * dtype_bytes,
+			v_item_stride: v_count.stride * dtype_bytes,
+			v_head_stride: v_heads.stride * dtype_bytes,
 			v: v.buf().device_data(),
 
 			// o_count == q_count
 			// o_head_count == head_count
 			// o_width == v_width
-			o_offset: o_map.offset,
-			o_head_stride: o_map.dims[1].stride,
-			o_item_stride: o_map.dims[0].stride,
+			o_offset: o_map.offset * dtype_bytes,
+			o_item_stride: o_count.stride * dtype_bytes,
+			o_head_stride: o_heads.stride * dtype_bytes,
 			o: o.buf().device_data(),
 		};
 
-		// TODO:
-		// - merge batch dims (0..-3) into one batch dim
-		// - add batch loop
-		// - borrow tensors
+		{
+			let mut inp_fail = UnsafeBorrowFailFlag::new();
+			let _q_borrow = unsafe { q.buf().unsafe_borrow(&mut inp_fail) };
+			let _k_borrow = unsafe { k.buf().unsafe_borrow(&mut inp_fail) };
+			let _v_borrow = unsafe { v.buf().unsafe_borrow(&mut inp_fail) };
+			inp_fail.check()?;
+			let mut out_fail = UnsafeBorrowMutFailFlag::new();
+			let _o_borrow = unsafe { o.buf().unsafe_borrow_mut(&mut out_fail) };
+			out_fail.check()?;
 
-		let mut inp_fail = UnsafeBorrowFailFlag::new();
-		q.borrow();
-		o.vmt().attention(&attention_args)?;
-		Ok(())
+			let m = DimMerger::merge::<1>([&q_batch, &k_batch, &v_batch, &o_batch])?;
+
+			for _ in 0..m[0].size {
+				o.vmt().attention(&attention_args)?;
+				attention_args.q_offset += m[0].strides[0];
+				attention_args.k_offset += m[0].strides[1];
+				attention_args.v_offset += m[0].strides[2];
+				attention_args.o_offset += m[0].strides[3];
+			}
+		}
+
+		Ok(AutogradTensor::new(o, None)) // TODO: backward
 	}
 }
 
