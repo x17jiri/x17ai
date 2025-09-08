@@ -11,9 +11,9 @@ use std::ptr::NonNull;
 
 use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;
 use crate::tensor::generic::map::{
-	ElementsOverflowError, IncompatibleStridesError, MergeAllDims, MergeDims, MergeDimsError,
-	ReshapeLastDim, ReshapeLastDimError, Select, SelectError, StrideCounter,
-	StrideCounterUnchecked, merge_dims,
+	ElementsOverflowError, IncompatibleStridesError, MergeAllDims, MergeDims, MergeDimsError, ND,
+	NotEnoughDimensionsError, ReshapeLastDim, ReshapeLastDimError, Select, SelectError,
+	StrideCounter, StrideCounterUnchecked, merge_dims,
 };
 
 use super::{Map, SizeAndStride, Transpose};
@@ -104,6 +104,23 @@ impl DD {
 
 		let dims = unsafe { dims.assume_init() };
 		Ok((Self { dims, offset: 0 }, elems))
+	}
+
+	pub fn nd_split<const N: usize>(
+		&self,
+	) -> Result<(&[SizeAndStride], ND<N>), NotEnoughDimensionsError> {
+		let slice = self.dims.as_slice();
+		if slice.len() < N {
+			cold_path();
+			return Err(NotEnoughDimensionsError);
+		}
+		let split_at = slice.len() - N;
+		let (prefix, nd) = slice.split_at(split_at);
+		let mut dims = [SizeAndStride::default(); N];
+		for i in 0..N {
+			dims[i] = nd[i];
+		}
+		Ok((prefix, ND { dims, offset: self.offset }))
 	}
 }
 

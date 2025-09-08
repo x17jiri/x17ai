@@ -407,6 +407,10 @@ impl TensorOpError {
 			})),
 		}
 	}
+
+	pub fn shape_mismatch() -> ErrPack<Self> {
+		ErrPack { code: Self::ShapeMismatch, extra: None }
+	}
 }
 
 impl From<DimMergerError> for TensorOpError {

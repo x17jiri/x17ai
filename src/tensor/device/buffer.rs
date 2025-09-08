@@ -43,6 +43,40 @@ pub struct KernelOutput {
 	pub device_data: *mut u8,
 }
 
+pub struct AttentionArgs {
+	pub q_count: usize,
+	pub head_count: usize,
+	pub q_width: usize,
+	pub q_offset: usize,
+	pub q_item_stride: usize,
+	pub q_head_stride: usize,
+	pub q: *const u8, // [q_count, head_count, q_width]
+
+	pub k_count: usize,
+	pub group_shift: usize,
+	// k_width == q_width
+	pub k_offset: usize,
+	pub k_item_stride: usize,
+	pub k_head_stride: usize,
+	pub k: *const u8, // [kv_count, head_count >> group_shift, q_width]
+
+	// v_count == k_count
+	// v_head_count == head_count >> group_shift
+	pub v_width: usize,
+	pub v_offset: usize,
+	pub v_item_stride: usize,
+	pub v_head_stride: usize,
+	pub v: *const u8, // [kv_count, head_count >> group_shift, v_width]
+
+	// o_count == q_count
+	// o_head_count == head_count
+	// o_width == v_width
+	pub o_offset: usize,
+	pub o_head_stride: usize,
+	pub o_item_stride: usize,
+	pub o: *mut u8, // [q_count, head_count, v_width]
+}
+
 //--------------------------------------------------------------------------------------------------
 
 pub type DropBufferFn =
@@ -75,14 +109,7 @@ pub type MMFn = for<'buf> unsafe fn(
 
 pub type AttentionFn = for<'buf> unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
-	// [inputs, qo_heads, vo_features]
-	o: &mut GenericTensor<ND<3>, BorrowMutGuard<'buf, DeviceBuffer>>,
-	// [inputs, qo_heads, qk_features]
-	q: &GenericTensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
-	// [inputs, k_heads, qk_features]
-	k: &GenericTensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
-	// [inputs, v_heads, vo_features]
-	v: &GenericTensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
+	args: &AttentionArgs,
 ) -> Result<(), ErrPack<TensorOpError>>;
 
 pub type RunKernelFn = unsafe fn(
@@ -218,14 +245,8 @@ impl DeviceBufferVMT {
 	}
 
 	#[inline]
-	pub fn attention<'buf>(
-		&self,
-		o: &mut GenericTensor<ND<3>, BorrowMutGuard<'buf, DeviceBuffer>>,
-		q: &GenericTensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
-		k: &GenericTensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
-		v: &GenericTensor<ND<3>, BorrowGuard<'buf, DeviceBuffer>>,
-	) -> Result<(), ErrPack<TensorOpError>> {
-		unsafe { (self.attention)(self.into(), o, q, k, v) }
+	pub fn attention<'buf>(&self, args: &AttentionArgs) -> Result<(), ErrPack<TensorOpError>> {
+		unsafe { (self.attention)(self.into(), args) }
 	}
 
 	#[inline]
