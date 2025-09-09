@@ -7,8 +7,8 @@
 
 use crate::ErrPack;
 use crate::tensor::TensorOpError;
+use crate::tensor::device::buffer::AttentionArgs;
 use crate::tensor::device::cpu::math::Float;
-use crate::tensor::generic::GenericTensor;
 use crate::tensor::generic::map::{Map, ND};
 use crate::util::LossyInto;
 
@@ -42,50 +42,61 @@ pub fn dot<T: Float, U: Float + From<T>>(a: &[T], b: &[T]) -> U {
 }
 
 #[derive(Clone, Copy)]
-pub struct View3D<'a, T> {
-	pub data: &'a [T],
+pub struct View3D<T> {
+	pub data: *const T,
+	pub data_len: usize,
 	pub seq_stride: usize,
 	pub head_stride: usize,
 }
 
-impl<'a, T> View3D<'a, T> {
-	pub fn new(tensor: &GenericTensor<&ND<3>, &'a [T]>) -> Self {
-		let (map, buf) = tensor.into_parts();
+impl<T> View3D<T> {
+	pub fn new(map: ND<3>, data: *const T) -> Self {
+		let span = map.span();
 		Self {
-			data: buf,
+			data: unsafe { data.add(span.start) },
+			data_len: span.len(),
 			seq_stride: map.dim(0).stride,
 			head_stride: map.dim(1).stride,
 		}
 	}
 
-	#[allow(clippy::indexing_slicing)]
-	pub fn slice(&self, i: usize, h: usize, f: std::ops::Range<usize>) -> &'a [T] {
+	/// # Panics
+	/// - If the slice is out of bounds of the underlying data.
+	pub fn slice(&self, i: usize, h: usize, f: std::ops::Range<usize>) -> &[T] {
 		let offset = i * self.seq_stride + h * self.head_stride;
-		&self.data[(offset + f.start)..(offset + f.end)]
+		let begin = offset + f.start;
+		let end = offset + f.end;
+		assert!(begin <= end && end <= self.data_len);
+		unsafe { std::slice::from_raw_parts(self.data.add(begin), end - begin) }
 	}
 }
 
-pub struct View3DMut<'a, T> {
-	pub data: &'a mut [T],
+pub struct View3DMut<T> {
+	pub data: *mut T,
+	pub data_len: usize,
 	pub head_stride: usize,
 	pub seq_stride: usize,
 }
 
-impl<'a, T> View3DMut<'a, T> {
-	pub fn new(tensor: &'a mut GenericTensor<&ND<3>, &mut [T]>) -> Self {
-		let map = tensor.map().clone();
-		let buf = unsafe { tensor.buf_mut().get_mut(..) }.unwrap();
+impl<T> View3DMut<T> {
+	pub fn new(map: ND<3>, data: *mut T) -> Self {
+		let span = map.span();
 		Self {
-			data: buf,
+			data: unsafe { data.add(span.start) },
+			data_len: span.len(),
 			seq_stride: map.dim(0).stride,
 			head_stride: map.dim(1).stride,
 		}
 	}
 
-	#[allow(clippy::indexing_slicing)]
+	/// # Panics
+	/// - If the slice is out of bounds of the underlying data.
 	pub fn slice_mut(&mut self, i: usize, h: usize, f: std::ops::Range<usize>) -> &mut [T] {
 		let offset = i * self.seq_stride + h * self.head_stride;
-		&mut self.data[(offset + f.start)..(offset + f.end)]
+		let begin = offset + f.start;
+		let end = offset + f.end;
+		assert!(begin <= end && end <= self.data_len);
+		unsafe { std::slice::from_raw_parts_mut(self.data.add(begin), end - begin) }
 	}
 }
 
@@ -140,30 +151,32 @@ fn attention_thread<
 	q: &View3D<T>,           // [output, head, K_FEATURES]
 	k: &View3D<T>,           // [input, head, K_FEATURES]
 	v: &View3D<T>,           // [input, head, V_FEATURES]
-	N: usize,                // sequence length
-	h: usize,                // head index
+	QN: usize,               // number of queries and outputs
+	KN: usize,               // number of keys/values
+	qh: usize,               // q head index
+	kvh: usize,              // k/v head index
 	inner_j: usize,          // vertical position along a tile
 	acc: &mut [KahanAcc<U>], // [V_FEATURES] ------------------------------------------- acc - SRAM
 	V_FEATURES: usize,
 	K_FEATURES: usize,
 ) {
 	let mut scores = [U::ZERO; TILE_WIDTH]; //-- uninit ----------------------------- scores - SRAM
-	for outer_j in (0..N).step_by(TILE_HEIGHT) {
-		if inner_j >= N - outer_j {
+	for outer_j in (0..QN).step_by(TILE_HEIGHT) {
+		if inner_j >= QN - outer_j {
 			break; // This break is diverging
 		}
 		let j = outer_j + inner_j;
 
-		let q = q.slice(j, h, 0..K_FEATURES); //--------------------------------------------- Q - SRAM
+		let q = q.slice(j, qh, 0..K_FEATURES); //--------------------------------------------- Q - SRAM
 		acc.fill(KahanAcc::<U>::new());
 		let mut max = U::NEG_INFINITY.clamp_to_finite();
 		let mut sum = KahanAcc::<U>::new();
-		for outer_i in (0..N).step_by(TILE_WIDTH) {
-			let CNT = (N - outer_i).min(TILE_WIDTH);
+		for outer_i in (0..KN).step_by(TILE_WIDTH) {
+			let CNT = (KN - outer_i).min(TILE_WIDTH);
 			let prev_max = max;
 			for inner_i in 0..CNT {
 				let i = outer_i + inner_i;
-				let k = k.slice(i, h, 0..K_FEATURES); //------------------------------------- K - SRAM
+				let k = k.slice(i, kvh, 0..K_FEATURES); //------------------------------------- K - SRAM
 				scores[i] = dot::<T, U>(q, k).clamp_to_finite();
 				max = max.max(scores[i]);
 			}
@@ -176,14 +189,14 @@ fn attention_thread<
 				let i = outer_i + inner_i;
 				let w = (scores[i] - max).exp();
 				sum.acc_(w);
-				let v = v.slice(i, h, 0..V_FEATURES); //------------------------------------- V - SRAM
+				let v = v.slice(i, kvh, 0..V_FEATURES); //------------------------------------- V - SRAM
 				for f in 0..V_FEATURES {
 					acc[f].acc_(w * v[f].into());
 				}
 			}
 		}
 		let sum_recip = sum.value().recip();
-		let o = o.slice_mut(j, h, 0..V_FEATURES);
+		let o = o.slice_mut(j, qh, 0..V_FEATURES);
 		for f in 0..V_FEATURES {
 			o[f] = (acc[f].value() * sum_recip).lossy_into();
 		}
@@ -191,28 +204,34 @@ fn attention_thread<
 }
 
 pub fn attention<T: Float, U: Float + From<T> + LossyInto<T>>(
-	o: &mut GenericTensor<&ND<3>, &mut [T]>, // [output, head, V_FEATURES]
-	q: &GenericTensor<&ND<3>, &[T]>,         // [output, head, K_FEATURES]
-	k: &GenericTensor<&ND<3>, &[T]>,         // [input, head, K_FEATURES]
-	v: &GenericTensor<&ND<3>, &[T]>,         // [input, head, V_FEATURES]
+	args: &AttentionArgs,
 ) -> Result<(), ErrPack<TensorOpError>> {
 	const TILE_WIDTH: usize = 32;
 	const TILE_HEIGHT: usize = 32;
-	let N = o.size(0).unwrap();
-	let H = o.size(1).unwrap();
-	let V_FEATURES = v.size(-1).unwrap();
-	let K_FEATURES = k.size(-1).unwrap();
 
-	let mut acc = vec![KahanAcc::<U>::new(); V_FEATURES];
-	let mut o = View3DMut::new(o);
-	let q = View3D::new(q);
-	let k = View3D::new(k);
-	let v = View3D::new(v);
+	let q = View3D::<T>::new(args.q_map(), args.q.cast());
+	let k = View3D::<T>::new(args.k_map(), args.k.cast());
+	let v = View3D::<T>::new(args.v_map(), args.v.cast());
+	let mut o = View3DMut::<T>::new(args.o_map(), args.o.cast());
+
+	let mut acc = vec![KahanAcc::<U>::new(); args.v_width];
+
 	// These 2 `for` loops can run in parallel
 	for inner_j in 0..TILE_HEIGHT {
-		for h in 0..H {
+		for qh in 0..args.head_count {
 			attention_thread::<T, U, TILE_WIDTH, TILE_HEIGHT>(
-				&mut o, &q, &k, &v, N, h, inner_j, &mut acc, V_FEATURES, K_FEATURES,
+				&mut o,
+				&q,
+				&k,
+				&v,
+				args.q_count,
+				args.k_count,
+				qh,
+				qh >> args.group_shift,
+				inner_j,
+				&mut acc,
+				args.v_width,
+				args.q_width,
 			);
 		}
 	}

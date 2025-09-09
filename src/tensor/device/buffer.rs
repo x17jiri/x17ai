@@ -11,9 +11,9 @@ use std::rc::Rc;
 use crate::ErrPack;
 use crate::tensor::TensorOpError;
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
+use crate::tensor::generic::GenericTensor;
 use crate::tensor::generic::buffer::Buffer;
-use crate::tensor::generic::map::ND;
-use crate::tensor::generic::{self, GenericTensor};
+use crate::tensor::generic::map::{ND, SizeAndStride};
 use crate::util::mycell::{self, BorrowGuard, BorrowMutGuard};
 
 use super::Device;
@@ -75,6 +75,50 @@ pub struct AttentionArgs {
 	pub o_head_stride: usize,
 	pub o_item_stride: usize,
 	pub o: *mut u8, // [q_count, head_count, v_width]
+}
+
+#[rustfmt::skip]
+impl AttentionArgs {
+	pub fn q_map(&self) -> ND<3> {
+		ND {
+			dims: [
+				SizeAndStride { size: self.q_count, stride: self.q_item_stride },
+				SizeAndStride { size: self.head_count, stride: self.q_head_stride },
+				SizeAndStride { size: self.q_width, stride: 1 },
+			],
+			offset: self.q_offset,
+		}
+	}
+	pub fn k_map(&self) -> ND<3> {
+		ND {
+			dims: [
+				SizeAndStride { size: self.k_count, stride: self.k_item_stride },
+				SizeAndStride { size: self.head_count >> self.group_shift, stride: self.k_head_stride },
+				SizeAndStride { size: self.q_width, stride: 1 },
+			],
+			offset: self.k_offset,
+		}
+	}
+	pub fn v_map(&self) -> ND<3> {
+		ND {
+			dims: [
+				SizeAndStride { size: self.k_count, stride: self.v_item_stride },
+				SizeAndStride { size: self.head_count >> self.group_shift, stride: self.v_head_stride },
+				SizeAndStride { size: self.v_width, stride: 1 },
+			],
+			offset: self.v_offset,
+		}
+	}
+	pub fn o_map(&self) -> ND<3> {
+		ND {
+			dims: [
+				SizeAndStride { size: self.q_count, stride: self.o_item_stride },
+				SizeAndStride { size: self.head_count, stride: self.o_head_stride },
+				SizeAndStride { size: self.v_width, stride: 1 },
+			],
+			offset: self.o_offset,
+		}
+	}
 }
 
 //--------------------------------------------------------------------------------------------------

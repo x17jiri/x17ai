@@ -7,8 +7,8 @@
 
 use crate::tensor::device::cpu::math::FromToF64;
 use crate::tensor::dim_merger::{DimMerger, DimMergerError};
+use crate::tensor::generic::GenericTensor;
 use crate::tensor::generic::map::{DD, ND, SizeAndStride};
-use crate::tensor::generic::{self, GenericTensor};
 
 use super::Tensor;
 

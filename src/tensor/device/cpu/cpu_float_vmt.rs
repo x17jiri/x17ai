@@ -330,11 +330,7 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 		_this: NonNull<DeviceBufferVMT>,
 		args: &AttentionArgs,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		let mut o = Self::view_contiguous_mut(o)?;
-		let q = Self::view_contiguous(q)?;
-		let k = Self::view_contiguous(k)?;
-		let v = Self::view_contiguous(v)?;
-		super::attention::attention::<T, U>(&mut o, &q, &k, &v)
+		super::attention::attention::<T, U>(args)
 	}
 
 	unsafe fn run_kernel(

@@ -89,7 +89,6 @@ impl Attention {
 		q.ensure_safe()?;
 		k.ensure_safe()?;
 		v.ensure_safe()?;
-		o.ensure_safe()?;
 
 		let (q_batch, q_map) = q.map().nd_split::<3>()?;
 		let (k_batch, k_map) = k.map().nd_split::<3>()?;
@@ -127,39 +126,38 @@ impl Attention {
 			cold_path();
 			return Err(TensorOpError::dtype_mismatch());
 		}
-		let dtype_bytes = q.dtype().bytes();
 
 		let mut attention_args = AttentionArgs {
 			q_count: q_count.size,
 			head_count: q_heads.size,
 			q_width: q_width.size,
-			q_offset: q_map.offset * dtype_bytes,
-			q_item_stride: q_count.stride * dtype_bytes,
-			q_head_stride: q_heads.stride * dtype_bytes,
+			q_offset: q_map.offset,
+			q_item_stride: q_count.stride,
+			q_head_stride: q_heads.stride,
 			q: q.buf().device_data(),
 
 			k_count: k_count.size,
 			group_shift: group_shift as usize,
 			// k_width == q_width
-			k_offset: k_map.offset * dtype_bytes,
-			k_item_stride: k_count.stride * dtype_bytes,
-			k_head_stride: k_heads.stride * dtype_bytes,
+			k_offset: k_map.offset,
+			k_item_stride: k_count.stride,
+			k_head_stride: k_heads.stride,
 			k: k.buf().device_data(),
 
 			// v_count == k_count
 			// v_head_count == head_count >> group_shift
 			v_width: v_width.size,
-			v_offset: v_map.offset * dtype_bytes,
-			v_item_stride: v_count.stride * dtype_bytes,
-			v_head_stride: v_heads.stride * dtype_bytes,
+			v_offset: v_map.offset,
+			v_item_stride: v_count.stride,
+			v_head_stride: v_heads.stride,
 			v: v.buf().device_data(),
 
 			// o_count == q_count
 			// o_head_count == head_count
 			// o_width == v_width
-			o_offset: o_map.offset * dtype_bytes,
-			o_item_stride: o_count.stride * dtype_bytes,
-			o_head_stride: o_heads.stride * dtype_bytes,
+			o_offset: o_map.offset,
+			o_item_stride: o_count.stride,
+			o_head_stride: o_heads.stride,
 			o: o.buf().device_data(),
 		};
 
@@ -173,7 +171,7 @@ impl Attention {
 			let _o_borrow = unsafe { o.buf().unsafe_borrow_mut(&mut out_fail) };
 			out_fail.check()?;
 
-			let m = DimMerger::merge::<1>([&q_batch, &k_batch, &v_batch, &o_batch])?;
+			let m = DimMerger::merge::<1>([q_batch, k_batch, v_batch, o_batch])?;
 
 			for _ in 0..m[0].size {
 				o.vmt().attention(&attention_args)?;
