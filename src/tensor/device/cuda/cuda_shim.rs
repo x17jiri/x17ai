@@ -16,7 +16,7 @@ unsafe extern "C" {
 	// Returns 0 on success
 	fn x17ai_cuda_init() -> std::ffi::c_int;
 
-	fn x17ai_cuda_alloc_f32(count: i64) -> *mut std::ffi::c_void;
+	fn x17ai_cuda_alloc(bytes: i64) -> *mut std::ffi::c_void;
 	fn x17ai_cuda_free(ptr: *mut std::ffi::c_void);
 
 	fn x17ai_cuda_new_kernel(
@@ -61,9 +61,9 @@ pub fn init() -> Result<(), CudaInitError> {
 ///
 /// The allocated block of memory may or may not be initialized.
 #[allow(clippy::option_if_let_else)]
-pub unsafe fn alloc_f32(count: usize) -> Result<NonNull<u8>, CudaAllocError> {
-	if let Ok(size) = count.try_into()
-		&& let ptr = unsafe { x17ai_cuda_alloc_f32(size) }.cast()
+pub unsafe fn alloc(bytes: usize) -> Result<NonNull<u8>, CudaAllocError> {
+	if let Ok(size) = bytes.try_into()
+		&& let ptr = unsafe { x17ai_cuda_alloc(size) }.cast()
 		&& let Some(nonnull) = NonNull::new(ptr)
 	{
 		Ok(nonnull)

@@ -6,15 +6,22 @@
 //------------------------------------------------------------------------------
 
 use std::hint::cold_path;
+use std::mem::MaybeUninit;
+use std::ptr::NonNull;
+use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut};
+use crate::tensor::device::buffer::{DeviceBufferRef, DeviceBufferRefMut, DeviceBufferVMT};
+use crate::tensor::device::cpu::CPUDevice;
+use crate::tensor::device::cpu::math::Float;
+use crate::tensor::device::cuda::CUDADevice;
 use crate::tensor::device::executor::{
 	Executor, ExecutorError, KernelElemArg, KernelOutput, KernelReduceArg,
 };
-use crate::tensor::device::kernel::runner::KernelData;
+use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
 use crate::tensor::generic::map::ND;
 use crate::tensor::{HasDType, generic};
+use crate::util::LossyInto;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -22,21 +29,46 @@ pub struct CompiledKernel {
 	handle: *const std::ffi::c_void,
 }
 
-pub struct CUDAFloatExecutor<T: Copy + HasDType> {
+pub(super) struct CUDAFloatVMT<
+	T: 'static + HasDType + Float,
+	U: 'static + HasDType + Float + From<T> + LossyInto<T>,
+> {
+	vmt: DeviceBufferVMT,
 	compiled_kernels: Vec<Option<Box<CompiledKernel>>>,
-	phantom: std::marker::PhantomData<T>,
+	phantom_t: std::marker::PhantomData<T>,
+	phantom_u: std::marker::PhantomData<U>,
 }
 
-impl<T: 'static + Copy + HasDType> CUDAFloatExecutor<T> {
-	pub fn new() -> Self {
+impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + LossyInto<T>>
+	CUDAFloatVMT<T, U>
+{
+	pub fn new(device: &Rc<MaybeUninit<CPUDevice>>, kernel_runner: Rc<KernelRunner>) -> Self {
+		let device = device.as_ptr();
+		let device = unsafe { NonNull::new_unchecked(device.cast_mut()) };
+		let device_is_cpu = true;
+		let dtype = T::dtype;
 		Self {
+			vmt: unsafe {
+				DeviceBufferVMT::new(
+					device,
+					device_is_cpu,
+					dtype,
+					kernel_runner,
+					CUDADevice::drop_buffer,
+					Self::read_float,
+					Self::load_from_cpu_memory,
+					Self::store_to_cpu_memory,
+					Self::mm,
+					Self::attention,
+					Self::run_kernel,
+				)
+			},
 			compiled_kernels: Vec::new(),
-			phantom: std::marker::PhantomData,
+			phantom_t: std::marker::PhantomData,
+			phantom_u: std::marker::PhantomData,
 		}
 	}
-}
 
-impl<T: 'static + HasDType + Copy> Executor for CUDAFloatExecutor<T> {
 	fn read_bin<'buf>(
 		&self,
 		_dst: &mut generic::Tensor<ND<2>, DeviceBufferRefMut<'buf>>,

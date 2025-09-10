@@ -70,13 +70,13 @@ impl CPUDevice {
 	}
 
 	unsafe fn drop_buffer(this: NonNull<DeviceBufferVMT>, elems: usize, device_data: *mut u8) {
-		let this = unsafe { this.as_ref() };
-		let dtype = this.dtype();
-		let device_ptr = this.device_ptr();
-
-		let align = dtype.bytes().min(1);
-		let size = dtype.array_bytes(elems).unwrap();
 		unsafe {
+			let this = this.as_ref();
+			let dtype = this.dtype();
+			let device_ptr = this.device_ptr();
+
+			let align = dtype.bytes().min(1);
+			let size = dtype.array_bytes(elems).unwrap();
 			let layout = std::alloc::Layout::from_size_align(size, align).unwrap_unchecked();
 			std::alloc::dealloc(device_data, layout);
 
@@ -106,6 +106,7 @@ impl Device for CPUDevice {
 				return Err(NewDeviceBufferError::UnsupportedDType);
 			},
 		};
+
 		let align = dtype.bytes().min(1);
 		let Some(size) = dtype.array_bytes(elems) else {
 			cold_path();
