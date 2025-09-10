@@ -6,7 +6,7 @@
 //------------------------------------------------------------------------------
 
 use std::cell::RefCell;
-use std::hint::cold_path;
+use std::hint::{cold_path, likely};
 use std::rc::Rc;
 
 use smallvec::{SmallVec, smallvec};
@@ -39,6 +39,8 @@ impl Attention {
 }
 
 impl Attention {
+	#[allow(clippy::indexing_slicing)]
+	#[allow(clippy::needless_range_loop)]
 	#[inline(never)]
 	fn alloc_output(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor, ErrPack<TensorOpError>> {
 		let q_ndim = q.ndim();
@@ -56,10 +58,11 @@ impl Attention {
 		// TODO - could rewrite using DimVecBuilder
 		let mut shape: SmallVec<[usize; INLINE_DIMS]> = smallvec![0; ndim];
 		let shape = shape.as_mut_slice();
+		shape[ndim - 3] = q.size(-3).unwrap();
 		shape[ndim - 2] = q.size(-2).unwrap();
 		shape[ndim - 1] = v.size(-1).unwrap();
 		let mut can_reuse = shape[ndim - 1] == q.size(-1).unwrap();
-		for i in 0..ndim - 2 {
+		for i in 0..ndim - 3 {
 			let q_size = q.size(i).unwrap_or(1);
 			let k_size = k.size(i).unwrap_or(1);
 			let v_size = v.size(i).unwrap_or(1);
@@ -127,7 +130,7 @@ impl Attention {
 			return Err(TensorOpError::dtype_mismatch());
 		}
 
-		let mut attention_args = AttentionArgs {
+		let mut args = AttentionArgs {
 			q_count: q_count.size,
 			head_count: q_heads.size,
 			q_width: q_width.size,
@@ -163,7 +166,15 @@ impl Attention {
 
 		{
 			let mut inp_fail = UnsafeBorrowFailFlag::new();
-			let _q_borrow = unsafe { q.buf().unsafe_borrow(&mut inp_fail) };
+			let _q_borrow = unsafe {
+				let same_as_output = std::ptr::eq(q.buf().as_ref(), o.buf().as_ref())
+					&& likely(
+						args.q_offset == args.o_offset
+							&& (args.q_item_stride == args.o_item_stride || args.q_count == 1)
+							&& (args.q_head_stride == args.o_head_stride || args.head_count == 1),
+					);
+				if same_as_output { None } else { Some(q.buf().unsafe_borrow(&mut inp_fail)) }
+			};
 			let _k_borrow = unsafe { k.buf().unsafe_borrow(&mut inp_fail) };
 			let _v_borrow = unsafe { v.buf().unsafe_borrow(&mut inp_fail) };
 			inp_fail.check()?;
@@ -174,11 +185,11 @@ impl Attention {
 			let m = DimMerger::merge::<1>([q_batch, k_batch, v_batch, o_batch])?;
 
 			for _ in 0..m[0].size {
-				o.vmt().attention(&attention_args)?;
-				attention_args.q_offset += m[0].strides[0];
-				attention_args.k_offset += m[0].strides[1];
-				attention_args.v_offset += m[0].strides[2];
-				attention_args.o_offset += m[0].strides[3];
+				o.vmt().attention(&args)?;
+				args.q_offset += m[0].strides[0];
+				args.k_offset += m[0].strides[1];
+				args.v_offset += m[0].strides[2];
+				args.o_offset += m[0].strides[3];
 			}
 		}
 

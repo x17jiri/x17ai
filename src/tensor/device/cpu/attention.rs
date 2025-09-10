@@ -122,7 +122,7 @@ impl<T: Float> KahanAcc<T> {
 		let b = self.sum.min(value);
 		let y = b - self.c;
 		let t = a + y;
-		self.c = (t - b) - y;
+		self.c = (t - a) - y;
 		self.sum = t;
 	}
 
@@ -177,8 +177,8 @@ fn attention_thread<
 			for inner_i in 0..CNT {
 				let i = outer_i + inner_i;
 				let k = k.slice(i, kvh, 0..K_FEATURES); //------------------------------------- K - SRAM
-				scores[i] = dot::<T, U>(q, k).clamp_to_finite();
-				max = max.max(scores[i]);
+				scores[inner_i] = dot::<T, U>(q, k).clamp_to_finite();
+				max = max.max(scores[inner_i]);
 			}
 			let prev_weight = (prev_max - max).exp();
 			sum.scale_(prev_weight);
@@ -187,7 +187,7 @@ fn attention_thread<
 			}
 			for inner_i in 0..CNT {
 				let i = outer_i + inner_i;
-				let w = (scores[i] - max).exp();
+				let w = (scores[inner_i] - max).exp();
 				sum.acc_(w);
 				let v = v.slice(i, kvh, 0..V_FEATURES); //------------------------------------- V - SRAM
 				for f in 0..V_FEATURES {
@@ -206,8 +206,8 @@ fn attention_thread<
 pub fn attention<T: Float, U: Float + From<T> + LossyInto<T>>(
 	args: &AttentionArgs,
 ) -> Result<(), ErrPack<TensorOpError>> {
-	const TILE_WIDTH: usize = 32;
-	const TILE_HEIGHT: usize = 32;
+	const TILE_WIDTH: usize = 5;
+	const TILE_HEIGHT: usize = 3;
 
 	let q = View3D::<T>::new(args.q_map(), args.q.cast());
 	let k = View3D::<T>::new(args.k_map(), args.k.cast());

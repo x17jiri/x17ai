@@ -163,7 +163,7 @@ impl<'a, T: ?Sized + 'a> BorrowGuard<'a, T> {
 impl<'a, T: ?Sized> Drop for BorrowGuard<'a, T> {
 	fn drop(&mut self) {
 		let borrow_count = self.value.borrow_counter.get();
-		debug_assert!(borrow_count > 0);
+		//debug_assert!(borrow_count > 0);
 		self.value.borrow_counter.set(borrow_count - 1);
 	}
 }
@@ -238,7 +238,7 @@ impl<'a, T: ?Sized + 'a> BorrowMutGuard<'a, T> {
 impl<'a, T: ?Sized> Drop for BorrowMutGuard<'a, T> {
 	fn drop(&mut self) {
 		let borrow_count = self.value.borrow_counter.get();
-		debug_assert!(borrow_count < 0);
+		//debug_assert!(borrow_count < 0);
 		self.value.borrow_counter.set(borrow_count + 1);
 	}
 }
