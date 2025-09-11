@@ -7,17 +7,18 @@
 
 use std::ptr::NonNull;
 
-use crate::tensor::device::executor::{KernelElemArg, KernelOutput, KernelReduceArg};
+use crate::tensor::device::buffer::{KernelElemArg, KernelOutput, KernelReduceArg};
 
 //--------------------------------------------------------------------------------------------------
 
 #[link(name = "cuda_shim")]
 unsafe extern "C" {
 	// Returns 0 on success
-	fn x17ai_cuda_init() -> std::ffi::c_int;
+	fn x17ai_cuda_open_stream() -> *mut std::ffi::c_void;
+	fn x17ai_cuda_close_stream(stream: *mut std::ffi::c_void);
 
-	fn x17ai_cuda_alloc(bytes: i64) -> *mut std::ffi::c_void;
-	fn x17ai_cuda_free(ptr: *mut std::ffi::c_void);
+	fn x17ai_cuda_alloc(stream: *mut std::ffi::c_void, bytes: usize) -> *mut std::ffi::c_void;
+	fn x17ai_cuda_free(stream: *mut std::ffi::c_void, ptr: *mut std::ffi::c_void);
 
 	fn x17ai_cuda_new_kernel(
 		source: *const std::ffi::c_char,
@@ -62,13 +63,12 @@ pub fn init() -> Result<(), CudaInitError> {
 /// The allocated block of memory may or may not be initialized.
 #[allow(clippy::option_if_let_else)]
 pub unsafe fn alloc(bytes: usize) -> Result<NonNull<u8>, CudaAllocError> {
-	if let Ok(size) = bytes.try_into()
-		&& let ptr = unsafe { x17ai_cuda_alloc(size) }.cast()
+	if let ptr = unsafe { x17ai_cuda_alloc(bytes) }.cast()
 		&& let Some(nonnull) = NonNull::new(ptr)
 	{
 		Ok(nonnull)
 	} else {
-		Err(CudaAllocError) //
+		Err(CudaAllocError)
 	}
 }
 

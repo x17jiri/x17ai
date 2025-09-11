@@ -43,6 +43,7 @@ pub struct KernelOutput {
 	pub device_data: *mut u8,
 }
 
+#[repr(C)]
 pub struct AttentionArgs {
 	pub q_count: usize,
 	pub head_count: usize,

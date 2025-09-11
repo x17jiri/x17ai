@@ -2,9 +2,8 @@
 #include <cuda_runtime.h>
 #include <nvrtc.h>
 
-#include <torch/csrc/jit/tensorexpr/tensor.h>
-#include <torch/torch.h>
-
+#include <atomic>
+#include <cassert>
 #include <memory>
 #include <sstream>
 #include <stdio.h>
@@ -29,77 +28,76 @@ using u32 = uint32_t;
 using u64 = uint64_t;
 
 using usize = size_t;
-using isize = std::common_type_t<
-	std::make_signed_t<std::ptrdiff_t>,
-	std::make_signed_t<std::size_t>>;
+using isize =
+	std::common_type_t<std::make_signed_t<std::ptrdiff_t>, std::make_signed_t<std::size_t>>;
 
 static std::atomic<bool> cuda_initialized = false;
 static std::mutex cuda_init_mutex;
 
 namespace x17ai {
 
-	int cuda_init() {
-		if (cuda_initialized.load(std::memory_order_acquire)) [[likely]] {
-			return 0;
+	void *cuda_open_stream() {
+		if (!cuda_initialized.load(std::memory_order_acquire)) [[unlikely]] {
+			std::lock_guard<std::mutex> lock(cuda_init_mutex);
+			if (!cuda_initialized.load(std::memory_order_relaxed)) {
+				CUresult result = cuInit(0);
+				if (result != CUDA_SUCCESS) [[unlikely]] {
+					fmt::print(stderr, "Failed to initialize CUDA\n");
+					return nullptr;
+				}
+
+				int cuda_device_count;
+				cudaError_t error = cudaGetDeviceCount(&cuda_device_count);
+				if (error != cudaSuccess || cuda_device_count <= 0) [[unlikely]] {
+					fmt::print(stderr, "No CUDA devices found\n");
+					return nullptr;
+				}
+				cuda_initialized.store(true, std::memory_order_release);
+			}
 		}
 
-		std::lock_guard<std::mutex> lock(cuda_init_mutex);
-		if (cuda_initialized.load(std::memory_order_relaxed)) {
-			return 0;
-		}
-
-		CUresult result = cuInit(0);
-		if (result != CUDA_SUCCESS) {
-			fmt::print(stderr, "Failed to initialize CUDA\n");
-			return 1;
-		}
-
-		int cuda_device_count;
-		cudaError_t error = cudaGetDeviceCount(&cuda_device_count);
-		std::cout << "cudaGetDeviceCount(): " << cuda_device_count << std::endl;
-		std::cout << "CUDA Error: " << cudaGetErrorString(error) << std::endl;
-
-		/*void *handle = dlopen("libATen_cuda.so", RTLD_LAZY | RTLD_GLOBAL);
-		if (!handle) {
-			fprintf(stderr, "Failed to load libATen_cuda.so: %s\n", dlerror());
-		}
-
-		if (!torch::cuda::is_available()) {
-			fmt::print(stderr, "TORCH_VERSION: {}\n", TORCH_VERSION);
-			fmt::print(stderr, "CUDA is not available in Torch\n");
-			fmt::print(
-				stderr,
-				"Torch CUDA device count: {}\n",
-				torch::cuda::device_count()
-			);
-			return 1;
-		}*/
-
-		cuda_initialized.store(true, std::memory_order_release);
-		return 0;
-	}
-
-	void *cuda_alloc_f32(i64 count) {
-		assert(cuda_initialized);
-		if (count <= 0) [[unlikely]] {
-			fmt::print("Invalid count for CUDA allocation: {}\n", count);
+		int device_id = 0;
+		cudaError_t error = cudaSetDevice(device_id);
+		if (error != cudaSuccess) [[unlikely]] {
+			fmt::print(stderr, "Failed to set CUDA device {}\n", device_id);
 			return nullptr;
 		}
 
-		torch::Device device(torch::kCUDA, 0);
+		cudaStream_t stream;
+		error = cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+		if (error != cudaSuccess) [[unlikely]] {
+			fmt::print(stderr, "Failed to create CUDA stream\n");
+			return nullptr;
+		}
 
-		torch::TensorOptions options =
-			torch::TensorOptions().device(device).dtype(torch::kFloat32);
-
-		auto tensor =
-			std::make_unique<torch::Tensor>(torch::empty({count}, options));
-
-		return tensor.release();
+		return stream;
 	}
 
-	void cuda_free(void *ptr) {
-		auto tensor =
-			std::unique_ptr<torch::Tensor>(static_cast<torch::Tensor *>(ptr));
+	void cuda_close_stream(void *stream) {
+		if (stream != nullptr) {
+			cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
+			cudaStreamDestroy(cuda_stream);
+		}
+	}
+
+	void *cuda_alloc(void *stream, usize bytes) {
+		assert(cuda_initialized);
+		cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
+
+		void *memory = nullptr;
+		cudaError_t err = cudaMallocAsync(&memory, bytes, cuda_stream);
+		if (err != cudaSuccess) [[unlikely]] {
+			return nullptr;
+		}
+		return memory;
+	}
+
+	void cuda_free(void *stream, void *ptr) {
+		assert(cuda_initialized);
+		if (ptr != nullptr) {
+			cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
+			cudaFreeAsync(ptr, cuda_stream);
+		}
 	}
 
 	/*
@@ -118,27 +116,35 @@ namespace x17ai {
 } // namespace x17ai
 
 extern "C" {
-	int x17ai_cuda_init() {
+	void *x17ai_cuda_open_stream() {
 		try {
-			return x17ai::cuda_init();
+			return x17ai::cuda_open_stream();
 		} catch (...) {
 			fmt::print(stderr, "CUDA initialization threw an exception\n");
-			return 1;
+			return nullptr;
 		}
 	}
 
-	void *x17ai_cuda_alloc_f32(i64 count) {
+	void cuda_close_stream(void *stream) {
 		try {
-			return x17ai::cuda_alloc_f32(count);
+			x17ai::cuda_close_stream(stream);
+		} catch (...) {
+			fmt::print(stderr, "CUDA stream close threw an exception\n");
+		}
+	}
+
+	void *x17ai_cuda_alloc(void *stream, usize count) {
+		try {
+			return x17ai::cuda_alloc(stream, count);
 		} catch (...) {
 			fmt::print(stderr, "CUDA allocation threw an exception\n");
 			return nullptr;
 		}
 	}
 
-	void x17ai_cuda_free(void *ptr) {
+	void x17ai_cuda_free(void *stream, void *ptr) {
 		try {
-			x17ai::cuda_free(ptr);
+			x17ai::cuda_free(stream, ptr);
 		} catch (...) {
 			fmt::print(stderr, "CUDA free threw an exception\n");
 		}
