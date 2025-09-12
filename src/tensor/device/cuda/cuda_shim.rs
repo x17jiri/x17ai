@@ -14,7 +14,8 @@ use crate::tensor::device::buffer::{KernelElemArg, KernelOutput, KernelReduceArg
 #[link(name = "cuda_shim")]
 unsafe extern "C" {
 	// Returns 0 on success
-	fn x17ai_cuda_open_stream() -> *mut std::ffi::c_void;
+	fn x17ai_cuda_open_stream1() -> *mut std::ffi::c_void;
+	fn x17ai_cuda_open_stream2() -> CudaStream;
 	fn x17ai_cuda_close_stream(stream: *mut std::ffi::c_void);
 
 	fn x17ai_cuda_alloc(stream: *mut std::ffi::c_void, bytes: usize) -> *mut std::ffi::c_void;
@@ -43,41 +44,51 @@ pub struct CudaInitError;
 #[derive(Clone, Copy, Debug)]
 pub struct CudaAllocError;
 
+//--------------------------------------------------------------------------------------------------
+
+pub struct CudaStream {
+	ptr: NonNull<std::ffi::c_void>,
+}
+
+impl CudaStream {
+	pub fn new() -> Result<Self, CudaInitError> {
+		let ptr = unsafe { x17ai_cuda_open_stream1() };
+		if let Some(nonnull) = NonNull::new(ptr) {
+			Ok(Self { ptr: nonnull })
+		} else {
+			Err(CudaInitError)
+		}
+	}
+
+	/// # Safety
+	///
+	/// The allocated block of memory may or may not be initialized.
+	pub unsafe fn alloc(&self, bytes: usize) -> Result<NonNull<u8>, CudaAllocError> {
+		let ptr = unsafe { x17ai_cuda_alloc(self.ptr.as_ptr(), bytes) }.cast();
+		if let Some(nonnull) = NonNull::new(ptr) { Ok(nonnull) } else { Err(CudaAllocError) }
+	}
+
+	/// # Safety
+	///
+	/// The pointer must be a valid pointer returned by `alloc_f32`.
+	pub unsafe fn free(&self, ptr: NonNull<u8>) {
+		unsafe { x17ai_cuda_free(self.ptr.as_ptr(), ptr.as_ptr().cast()) };
+	}
+}
+
+impl Drop for CudaStream {
+	fn drop(&mut self) {
+		unsafe { x17ai_cuda_close_stream(self.ptr.as_ptr()) };
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
 #[derive(Clone, Copy, Debug)]
 pub struct CudaNewKernelError;
 
 #[derive(Clone, Copy, Debug)]
 pub struct CudaRunKernelError;
-
-pub fn init() -> Result<(), CudaInitError> {
-	let err = unsafe { x17ai_cuda_init() };
-	if err == 0 {
-		Ok(())
-	} else {
-		Err(CudaInitError) //
-	}
-}
-
-/// # Safety
-///
-/// The allocated block of memory may or may not be initialized.
-#[allow(clippy::option_if_let_else)]
-pub unsafe fn alloc(bytes: usize) -> Result<NonNull<u8>, CudaAllocError> {
-	if let ptr = unsafe { x17ai_cuda_alloc(bytes) }.cast()
-		&& let Some(nonnull) = NonNull::new(ptr)
-	{
-		Ok(nonnull)
-	} else {
-		Err(CudaAllocError)
-	}
-}
-
-/// # Safety
-///
-/// The pointer must be a valid pointer returned by `alloc_f32`.
-pub unsafe fn free(ptr: *mut u8) {
-	unsafe { x17ai_cuda_free(ptr.cast()) };
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CudaKernelHandle(NonNull<std::ffi::c_void>);

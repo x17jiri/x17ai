@@ -184,18 +184,6 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 		}
 	}
 
-	unsafe fn cast_this<'a>(vmt: NonNull<DeviceBufferVMT>) -> &'a Self {
-		debug_assert!(std::mem::offset_of!(Self, vmt) == 0);
-		let vmt = vmt.cast::<Self>();
-		unsafe { &*vmt.as_ptr() }
-	}
-
-	fn device(&self) -> &CPUDevice {
-		let (device, _) = self.vmt.device_ptr().to_raw_parts();
-		let cpu_device = device.cast::<CPUDevice>();
-		unsafe { cpu_device.as_ref() }
-	}
-
 	pub fn view_contiguous<'t, 'buf, const N: usize>(
 		tensor: &'t GenericTensor<ND<N>, BorrowGuard<'buf, DeviceBuffer>>,
 	) -> Result<GenericTensor<&'t ND<N>, &'t [T]>, ErrPack<TensorOpError>>

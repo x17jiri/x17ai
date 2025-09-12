@@ -36,6 +36,14 @@ impl LossyInto<f32> for f64 {
 	}
 }
 
+impl<T> LossyInto<T> for T {
+	fn lossy_into(self) -> T {
+		self
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
 pub trait UnwrapInfallible<T> {
 	fn unwrap_infallible(self) -> T;
 }

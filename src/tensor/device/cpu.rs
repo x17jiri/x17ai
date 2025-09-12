@@ -69,7 +69,7 @@ impl CPUDevice {
 		Ok(())
 	}
 
-	unsafe fn drop_buffer(this: NonNull<DeviceBufferVMT>, elems: usize, device_data: *mut u8) {
+	unsafe fn drop_buffer(this: NonNull<DeviceBufferVMT>, elems: usize, device_data: NonNull<u8>) {
 		unsafe {
 			let this = this.as_ref();
 			let dtype = this.dtype();
@@ -78,7 +78,7 @@ impl CPUDevice {
 			let align = dtype.bytes().min(1);
 			let size = dtype.array_bytes(elems).unwrap();
 			let layout = std::alloc::Layout::from_size_align(size, align).unwrap_unchecked();
-			std::alloc::dealloc(device_data, layout);
+			std::alloc::dealloc(device_data.as_ptr(), layout);
 
 			// Recreate the `Rc` that we forgot in `new_buffer()`
 			let rc_device: Rc<dyn Device> = Rc::from_raw(device_ptr.as_ptr());

@@ -17,11 +17,11 @@ use crate::tensor::device::buffer::{
 };
 use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::device::cpu::math::Float;
-use crate::tensor::device::cuda::CUDADevice;
+use crate::tensor::device::cuda::CudaDevice;
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
 use crate::tensor::generic::GenericTensor;
 use crate::tensor::generic::map::ND;
-use crate::tensor::{HasDType, TensorOpError};
+use crate::tensor::{Device, HasDType, TensorOpError};
 use crate::util::LossyInto;
 use crate::util::mycell::{BorrowGuard, BorrowMutGuard};
 
@@ -31,7 +31,8 @@ pub struct CompiledKernel {
 	handle: *const std::ffi::c_void,
 }
 
-pub(super) struct CUDAFloatVMT<
+#[repr(C)]
+pub(super) struct CudaFloatVMT<
 	T: 'static + HasDType + Float,
 	U: 'static + HasDType + Float + From<T> + LossyInto<T>,
 > {
@@ -42,9 +43,9 @@ pub(super) struct CUDAFloatVMT<
 }
 
 impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + LossyInto<T>>
-	CUDAFloatVMT<T, U>
+	CudaFloatVMT<T, U>
 {
-	pub fn new(device: &Rc<MaybeUninit<CPUDevice>>, kernel_runner: Rc<KernelRunner>) -> Self {
+	pub fn new(device: &Rc<MaybeUninit<CudaDevice>>, kernel_runner: Rc<KernelRunner>) -> Self {
 		let device = device.as_ptr();
 		let device = unsafe { NonNull::new_unchecked(device.cast_mut()) };
 		let device_is_cpu = true;
@@ -56,7 +57,7 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 					device_is_cpu,
 					dtype,
 					kernel_runner,
-					CUDADevice::drop_buffer,
+					CudaDevice::drop_buffer,
 					Self::read_float,
 					Self::load_from_cpu_memory,
 					Self::store_to_cpu_memory,
@@ -71,16 +72,17 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 		}
 	}
 
-	unsafe fn cast_this<'a>(vmt: NonNull<DeviceBufferVMT>) -> &'a Self {
+	unsafe fn cast_this(vmt: &DeviceBufferVMT) -> &Self {
 		debug_assert!(std::mem::offset_of!(Self, vmt) == 0);
+		let vmt = NonNull::from(vmt);
 		let vmt = vmt.cast::<Self>();
 		unsafe { &*vmt.as_ptr() }
 	}
 
-	fn device(&self) -> &CPUDevice {
+	fn device(&self) -> &CudaDevice {
 		let (device, _) = self.vmt.device_ptr().to_raw_parts();
-		let cpu_device = device.cast::<CPUDevice>();
-		unsafe { cpu_device.as_ref() }
+		let device = device.cast();
+		unsafe { device.as_ref() }
 	}
 
 	fn read_float<'buf>(

@@ -3,7 +3,6 @@
 #include <nvrtc.h>
 
 #include <atomic>
-#include <cassert>
 #include <memory>
 #include <sstream>
 #include <stdio.h>
@@ -36,69 +35,7 @@ static std::mutex cuda_init_mutex;
 
 namespace x17ai {
 
-	void *cuda_open_stream() {
-		if (!cuda_initialized.load(std::memory_order_acquire)) [[unlikely]] {
-			std::lock_guard<std::mutex> lock(cuda_init_mutex);
-			if (!cuda_initialized.load(std::memory_order_relaxed)) {
-				CUresult result = cuInit(0);
-				if (result != CUDA_SUCCESS) [[unlikely]] {
-					fmt::print(stderr, "Failed to initialize CUDA\n");
-					return nullptr;
-				}
-
-				int cuda_device_count;
-				cudaError_t error = cudaGetDeviceCount(&cuda_device_count);
-				if (error != cudaSuccess || cuda_device_count <= 0) [[unlikely]] {
-					fmt::print(stderr, "No CUDA devices found\n");
-					return nullptr;
-				}
-				cuda_initialized.store(true, std::memory_order_release);
-			}
-		}
-
-		int device_id = 0;
-		cudaError_t error = cudaSetDevice(device_id);
-		if (error != cudaSuccess) [[unlikely]] {
-			fmt::print(stderr, "Failed to set CUDA device {}\n", device_id);
-			return nullptr;
-		}
-
-		cudaStream_t stream;
-		error = cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
-		if (error != cudaSuccess) [[unlikely]] {
-			fmt::print(stderr, "Failed to create CUDA stream\n");
-			return nullptr;
-		}
-
-		return stream;
-	}
-
-	void cuda_close_stream(void *stream) {
-		if (stream != nullptr) {
-			cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
-			cudaStreamDestroy(cuda_stream);
-		}
-	}
-
-	void *cuda_alloc(void *stream, usize bytes) {
-		assert(cuda_initialized);
-		cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
-
-		void *memory = nullptr;
-		cudaError_t err = cudaMallocAsync(&memory, bytes, cuda_stream);
-		if (err != cudaSuccess) [[unlikely]] {
-			return nullptr;
-		}
-		return memory;
-	}
-
-	void cuda_free(void *stream, void *ptr) {
-		assert(cuda_initialized);
-		if (ptr != nullptr) {
-			cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
-			cudaFreeAsync(ptr, cuda_stream);
-		}
-	}
+	void cuda_free(void *stream, void *ptr) {}
 
 	/*
 	fn x17ai_cuda_new_kernel(source
@@ -118,7 +55,40 @@ namespace x17ai {
 extern "C" {
 	void *x17ai_cuda_open_stream() {
 		try {
-			return x17ai::cuda_open_stream();
+			if (!cuda_initialized.load(std::memory_order_acquire)) [[unlikely]] {
+				std::lock_guard<std::mutex> lock(cuda_init_mutex);
+				if (!cuda_initialized.load(std::memory_order_relaxed)) {
+					CUresult result = cuInit(0);
+					if (result != CUDA_SUCCESS) [[unlikely]] {
+						fmt::print(stderr, "Failed to initialize CUDA\n");
+						return nullptr;
+					}
+
+					int cuda_device_count;
+					cudaError_t error = cudaGetDeviceCount(&cuda_device_count);
+					if (error != cudaSuccess || cuda_device_count <= 0) [[unlikely]] {
+						fmt::print(stderr, "No CUDA devices found\n");
+						return nullptr;
+					}
+					cuda_initialized.store(true, std::memory_order_release);
+				}
+			}
+
+			int device_id = 0;
+			cudaError_t error = cudaSetDevice(device_id);
+			if (error != cudaSuccess) [[unlikely]] {
+				fmt::print(stderr, "Failed to set CUDA device {}\n", device_id);
+				return nullptr;
+			}
+
+			cudaStream_t stream;
+			error = cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+			if (error != cudaSuccess) [[unlikely]] {
+				fmt::print(stderr, "Failed to create CUDA stream\n");
+				return nullptr;
+			}
+
+			return stream;
 		} catch (...) {
 			fmt::print(stderr, "CUDA initialization threw an exception\n");
 			return nullptr;
@@ -127,15 +97,36 @@ extern "C" {
 
 	void cuda_close_stream(void *stream) {
 		try {
-			x17ai::cuda_close_stream(stream);
+			if (stream == nullptr) [[unlikely]] {
+				fmt::print(stderr, "CUDA stream is null\n");
+				return;
+			}
+
+			cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
+			cudaStreamDestroy(cuda_stream);
 		} catch (...) {
 			fmt::print(stderr, "CUDA stream close threw an exception\n");
 		}
 	}
 
-	void *x17ai_cuda_alloc(void *stream, usize count) {
+	void *x17ai_cuda_alloc(void *stream, usize bytes) {
 		try {
-			return x17ai::cuda_alloc(stream, count);
+			if (!cuda_initialized) [[unlikely]] {
+				fmt::print(stderr, "CUDA not initialized\n");
+				return nullptr;
+			}
+			if (stream == nullptr) [[unlikely]] {
+				fmt::print(stderr, "CUDA stream is null\n");
+				return nullptr;
+			}
+			cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
+
+			void *memory = nullptr;
+			cudaError_t err = cudaMallocAsync(&memory, bytes, cuda_stream);
+			if (err != cudaSuccess) [[unlikely]] {
+				return nullptr;
+			}
+			return memory;
 		} catch (...) {
 			fmt::print(stderr, "CUDA allocation threw an exception\n");
 			return nullptr;
@@ -144,7 +135,20 @@ extern "C" {
 
 	void x17ai_cuda_free(void *stream, void *ptr) {
 		try {
-			x17ai::cuda_free(stream, ptr);
+			if (!cuda_initialized) [[unlikely]] {
+				fmt::print(stderr, "CUDA not initialized\n");
+				return;
+			}
+			if (stream == nullptr) [[unlikely]] {
+				fmt::print(stderr, "CUDA stream is null\n");
+				return;
+			}
+			if (ptr == nullptr) [[unlikely]] {
+				fmt::print(stderr, "CUDA free pointer is null\n");
+				return;
+			}
+			cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
+			cudaFreeAsync(ptr, cuda_stream);
 		} catch (...) {
 			fmt::print(stderr, "CUDA free threw an exception\n");
 		}

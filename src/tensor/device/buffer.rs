@@ -125,7 +125,7 @@ impl AttentionArgs {
 //--------------------------------------------------------------------------------------------------
 
 pub type DropBufferFn =
-	unsafe fn(this: NonNull<DeviceBufferVMT>, elems: usize, device_data: *mut u8);
+	unsafe fn(this: NonNull<DeviceBufferVMT>, elems: usize, device_data: NonNull<u8>);
 
 pub type ReadFloatFn = for<'buf> unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
@@ -243,6 +243,13 @@ impl DeviceBufferVMT {
 	}
 
 	#[inline]
+	pub unsafe fn cast_device<T: Device>(&self) -> &T {
+		let (device, _) = self.device_ptr().to_raw_parts();
+		let device = device.cast();
+		unsafe { device.as_ref() }
+	}
+
+	#[inline]
 	pub fn dtype(&self) -> DType {
 		self.dtype
 	}
@@ -319,14 +326,18 @@ impl DeviceBufferVMT {
 }
 
 pub struct DeviceBuffer {
-	device_data: *mut u8,
+	device_data: NonNull<u8>,
 	elems: usize,
 	vmt: NonNull<DeviceBufferVMT>,
 }
 
 impl DeviceBuffer {
 	#[inline]
-	pub unsafe fn new(device_data: *mut u8, elems: usize, vmt: NonNull<DeviceBufferVMT>) -> Self {
+	pub unsafe fn new(
+		device_data: NonNull<u8>,
+		elems: usize,
+		vmt: NonNull<DeviceBufferVMT>,
+	) -> Self {
 		Self { device_data, elems, vmt }
 	}
 
@@ -341,7 +352,7 @@ impl DeviceBuffer {
 	}
 
 	#[inline]
-	pub fn device_data(&self) -> *mut u8 {
+	pub fn device_data(&self) -> NonNull<u8> {
 		self.device_data
 	}
 

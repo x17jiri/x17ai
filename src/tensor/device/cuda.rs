@@ -5,13 +5,13 @@
 //
 //------------------------------------------------------------------------------
 
-use std::cell::Cell;
 use std::hint::cold_path;
-use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
 use crate::tensor::device::buffer::DeviceBufferVMT;
+use crate::tensor::device::cuda::cuda_shim::CudaStream;
+use crate::tensor::device::kernel::runner::KernelRunner;
 use crate::tensor::device::{DeviceBuffer, NewDeviceBufferError};
 use crate::tensor::{DType, Device, HasDType};
 use crate::util::mycell;
@@ -19,40 +19,51 @@ use crate::util::mycell;
 pub mod cuda_float_vmt;
 pub mod cuda_shim;
 
-use self::cuda_float_vmt::CUDAFloatVMT;
+use self::cuda_float_vmt::CudaFloatVMT;
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct CUDADevice {
+pub struct CudaDevice {
 	pub name: String,
-	pub f32_vmt: CUDAFloatVMT<f32>,
+	pub f32_vmt: CudaFloatVMT<f32, f32>,
+	pub cuda_stream: CudaStream,
 }
 
-impl CUDADevice {
+impl CudaDevice {
 	pub fn new() -> Result<Rc<Self>, cuda_shim::CudaInitError> {
 		Self::new_named("CUDA".to_string())
 	}
 
 	pub fn new_named(name: String) -> Result<Rc<Self>, cuda_shim::CudaInitError> {
-		cuda_shim::init()?;
-		Ok(Rc::new(Self { name, f32_vmt: CUDAFloatVMT::new() }))
+		let cuda_stream = CudaStream::new()?;
+		let kernel_runner = Rc::new(KernelRunner::new());
+
+		let mut rc_uninit = Rc::new_uninit();
+		let instance = Self {
+			name,
+			f32_vmt: CudaFloatVMT::new(&rc_uninit, kernel_runner),
+			cuda_stream,
+		};
+		unsafe {
+			Rc::get_mut_unchecked(&mut rc_uninit).write(instance);
+			Ok(rc_uninit.assume_init())
+		}
 	}
 
-	unsafe fn drop_buffer(this: NonNull<DeviceBufferVMT>, elems: usize, device_data: *mut u8) {
+	unsafe fn drop_buffer(this: NonNull<DeviceBufferVMT>, _elems: usize, device_data: NonNull<u8>) {
 		unsafe {
 			let this = this.as_ref();
-			let device_ptr = this.device_ptr();
 
-			cuda_shim::free(device_data);
+			this.cast_device::<Self>().cuda_stream.free(device_data);
 
 			// Recreate the `Rc` that we forgot in `new_buffer()`
-			let rc_device: Rc<dyn Device> = Rc::from_raw(device_ptr.as_ptr());
+			let rc_device: Rc<dyn Device> = Rc::from_raw(this.device_ptr().as_ptr());
 			std::mem::drop(rc_device);
 		}
 	}
 }
 
-impl Device for CUDADevice {
+impl Device for CudaDevice {
 	fn name(&self) -> &str {
 		&self.name
 	}
