@@ -83,18 +83,17 @@ impl Device for CudaDevice {
 			},
 		};
 
-		let memory = unsafe { cuda_shim::alloc(dtype.array_bytes(elems).unwrap()) };
-		let Ok(memory) = memory else {
+		if let Ok(memory) = unsafe { self.cuda_stream.alloc(dtype.array_bytes(elems).unwrap()) } {
+			// We will recreate the `Rc` and drop it in `CPUDevice::drop_buffer()`
+			std::mem::forget(self);
+
+			let device_data = memory;
+			Ok(Rc::new(mycell::RefCell::new(unsafe {
+				DeviceBuffer::new(device_data, elems, vmt.cast())
+			})))
+		} else {
 			cold_path();
-			return Err(NewDeviceBufferError::AllocationFailed);
-		};
-
-		// We will recreate the `Rc` and drop it in `CPUDevice::drop_buffer()`
-		std::mem::forget(self);
-
-		let device_data = memory;
-		Ok(Rc::new(mycell::RefCell::new(unsafe {
-			DeviceBuffer::new(device_data, elems, vmt.cast())
-		})))
+			Err(NewDeviceBufferError::AllocationFailed)
+		}
 	}
 }

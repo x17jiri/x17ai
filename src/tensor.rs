@@ -176,11 +176,13 @@ impl Tensor {
 			cold_path();
 			return Err(IndexOutOfBoundsError.into());
 		}
-		let (mut map, _) = ND::new(&[])?;
+		self.ensure_safe()?;
+
+		let (mut map, _elems) = ND::new(&[])?;
 		map.offset = self.map().offset;
 		let buf = self.buf().try_borrow()?;
-		let scalar_tensor = unsafe { GenericTensor::new_unchecked(map, buf) };
-		self.vmt().read_float(&scalar_tensor)
+		let vmt = self.vmt();
+		unsafe { (vmt.read_float)(vmt.into(), (map, &*buf)) }
 	}
 
 	/// Sometimes we want to calculate the mean of the last dimension,

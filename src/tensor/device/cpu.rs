@@ -108,27 +108,21 @@ impl Device for CPUDevice {
 		};
 
 		let align = dtype.bytes().min(1);
-		let Some(size) = dtype.array_bytes(elems) else {
-			cold_path();
-			return Err(NewDeviceBufferError::AllocationFailed);
-		};
-		let Ok(layout) = std::alloc::Layout::from_size_align(size, align) else {
-			cold_path();
-			return Err(NewDeviceBufferError::AllocationFailed);
-		};
-		let memory = unsafe { std::alloc::alloc(layout) };
-		if memory.is_null() {
-			cold_path();
-			return Err(NewDeviceBufferError::AllocationFailed);
-		};
+		if let Some(size) = dtype.array_bytes(elems)
+			&& let Ok(layout) = std::alloc::Layout::from_size_align(size, align)
+			&& let Some(memory) = NonNull::new(unsafe { std::alloc::alloc(layout) })
+		{
+			// We will recreate the `Rc` and drop it in `CPUDevice::drop_buffer()`
+			std::mem::forget(self);
 
-		// We will recreate the `Rc` and drop it in `CPUDevice::drop_buffer()`
-		std::mem::forget(self);
-
-		let device_data = memory;
-		Ok(Rc::new(mycell::RefCell::new(unsafe {
-			DeviceBuffer::new(device_data, elems, vmt.cast())
-		})))
+			let device_data = memory;
+			Ok(Rc::new(mycell::RefCell::new(unsafe {
+				DeviceBuffer::new(device_data, elems, vmt.cast())
+			})))
+		} else {
+			cold_path();
+			Err(NewDeviceBufferError::AllocationFailed)
+		}
 	}
 }
 

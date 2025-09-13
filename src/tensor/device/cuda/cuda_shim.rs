@@ -70,9 +70,29 @@ impl CudaStream {
 
 	/// # Safety
 	///
-	/// The pointer must be a valid pointer returned by `alloc_f32`.
+	/// The pointer must be a valid pointer returned by `alloc`.
 	pub unsafe fn free(&self, ptr: NonNull<u8>) {
 		unsafe { x17ai_cuda_free(self.ptr.as_ptr(), ptr.as_ptr().cast()) };
+	}
+
+	pub fn load_from_cpu_memory(
+		&self,
+		cpu_src: NonNull<u8>,
+		cuda_dst: NonNull<u8>,
+		offset: usize,
+		bytes: usize,
+	) -> std::ffi::c_int {
+		todo!("Implement CudaStream::load_from_cpu_memory");
+	}
+
+	pub fn store_to_cpu_memory(
+		&self,
+		cuda_src: NonNull<u8>,
+		cpu_dst: NonNull<u8>,
+		offset: usize,
+		bytes: usize,
+	) -> std::ffi::c_int {
+		todo!("Implement CudaStream::store_to_cpu_memory");
 	}
 }
 

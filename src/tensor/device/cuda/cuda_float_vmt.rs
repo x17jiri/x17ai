@@ -85,19 +85,39 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 		unsafe { device.as_ref() }
 	}
 
-	fn read_float<'buf>(
-		_this: NonNull<DeviceBufferVMT>,
-		_src: &GenericTensor<ND<0>, BorrowGuard<'buf, DeviceBuffer>>,
+	unsafe fn read_float<'buf>(
+		this: NonNull<DeviceBufferVMT>,
+		cuda_src: &GenericTensor<ND<0>, BorrowGuard<'buf, DeviceBuffer>>,
 	) -> Result<f64, ErrPack<TensorOpError>> {
-		todo!("CUDAFloatVMT::read_float is not implemented yet");
+		let dev = unsafe { Self::cast_this(this.as_ref()) }.device();
+		let cpu_dst = T::default();
+		dev.cuda_stream.store_to_cpu_memory(
+			cuda_src.buf().device_data(),
+			NonNull::from(&cpu_dst).cast(),
+			cuda_src.map().offset,
+			std::mem::size_of::<T>(),
+		);
+		Ok(cpu_dst.to_f64())
 	}
 
-	fn load_from_cpu_memory<'buf>(
-		_this: NonNull<DeviceBufferVMT>,
-		_src: &[u8],
-		_dst: &mut GenericTensor<ND<1>, BorrowMutGuard<'buf, DeviceBuffer>>,
+	unsafe fn load_from_cpu_memory<'buf>(
+		this: NonNull<DeviceBufferVMT>,
+		cpu_src: &[u8],
+		cuda_dst: &mut GenericTensor<ND<1>, BorrowMutGuard<'buf, DeviceBuffer>>,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		todo!("CUDAFloatVMT::load_from_cpu_memory is not implemented yet");
+		cuda_dst.ensure_safe()?;
+		let dev = unsafe { Self::cast_this(this.as_ref()) }.device();
+		if cpu_src.len() != cuda_dst.map().elems * T::dtype.bytes() {
+			cold_path();
+			return Err(ErrPack::new(TensorOpError::SizeMismatch));
+		}
+		dev.cuda_stream.load_from_cpu_memory(
+			NonNull::from(cpu_src).cast(),
+			cuda_dst.buf().device_data(),
+			cuda_dst.map().offset,
+			cpu_src.len(),
+		);
+		Ok(())
 	}
 
 	fn store_to_cpu_memory<'buf>(

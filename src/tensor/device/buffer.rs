@@ -129,7 +129,7 @@ pub type DropBufferFn =
 
 pub type ReadFloatFn = for<'buf> unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
-	src: &GenericTensor<ND<0>, BorrowGuard<'buf, DeviceBuffer>>,
+	device_src: (ND<0>, &DeviceBuffer),
 ) -> Result<f64, ErrPack<TensorOpError>>;
 
 pub type LoadFromCPUMemoryFn = for<'buf> unsafe fn(
@@ -174,12 +174,12 @@ pub struct DeviceBufferVMT {
 	kernel_runner: Rc<KernelRunner>,
 
 	drop_buffer: DropBufferFn,
-	read_float: ReadFloatFn,
-	load_from_cpu_memory: LoadFromCPUMemoryFn,
-	store_to_cpu_memory: StoreToCPUMemoryFn,
-	mm: MMFn,
-	attention: AttentionFn,
-	run_kernel: RunKernelFn,
+	pub read_float: ReadFloatFn,
+	pub load_from_cpu_memory: LoadFromCPUMemoryFn,
+	pub store_to_cpu_memory: StoreToCPUMemoryFn,
+	pub mm: MMFn,
+	pub attention: AttentionFn,
+	pub run_kernel: RunKernelFn,
 }
 
 impl DeviceBufferVMT {
@@ -257,71 +257,6 @@ impl DeviceBufferVMT {
 	#[inline]
 	pub fn kernel_runner(&self) -> &KernelRunner {
 		&self.kernel_runner
-	}
-
-	#[inline]
-	pub fn read_float<'buf>(
-		&self,
-		src: &GenericTensor<ND<0>, BorrowGuard<'buf, DeviceBuffer>>,
-	) -> Result<f64, ErrPack<TensorOpError>> {
-		unsafe { (self.read_float)(self.into(), src) }
-	}
-
-	#[inline]
-	pub fn load_from_cpu_memory<'buf>(
-		&self,
-		src: &[u8],
-		dst: &mut GenericTensor<ND<1>, BorrowMutGuard<'buf, DeviceBuffer>>,
-	) -> Result<(), ErrPack<TensorOpError>> {
-		unsafe { (self.load_from_cpu_memory)(self.into(), src, dst) }
-	}
-
-	#[inline]
-	pub fn store_to_cpu_memory<'buf>(
-		&self,
-		src: &GenericTensor<ND<1>, BorrowGuard<'buf, DeviceBuffer>>,
-		dst: &mut [u8],
-	) -> Result<(), ErrPack<TensorOpError>> {
-		unsafe { (self.store_to_cpu_memory)(self.into(), src, dst) }
-	}
-
-	#[inline]
-	pub fn mm<'buf>(
-		&self,
-		o: &mut GenericTensor<ND<2>, BorrowMutGuard<'buf, DeviceBuffer>>,
-		a: &GenericTensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
-		b: &GenericTensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
-		scale: f64,
-	) -> Result<(), ErrPack<TensorOpError>> {
-		unsafe { (self.mm)(self.into(), o, a, b, scale) }
-	}
-
-	#[inline]
-	pub fn attention<'buf>(&self, args: &AttentionArgs) -> Result<(), ErrPack<TensorOpError>> {
-		unsafe { (self.attention)(self.into(), args) }
-	}
-
-	#[inline]
-	pub unsafe fn run_kernel(
-		&self,
-		kernel_data: &KernelData,
-		o: *const KernelOutput,
-		elemwise_args: *const KernelElemArg,
-		reduce_args: *const KernelReduceArg,
-		scalar_args: *const f64,
-		reduction_size: usize,
-	) -> Result<(), ErrPack<TensorOpError>> {
-		unsafe {
-			(self.run_kernel)(
-				self.into(),
-				kernel_data,
-				o,
-				elemwise_args,
-				reduce_args,
-				scalar_args,
-				reduction_size,
-			)
-		}
 	}
 }
 

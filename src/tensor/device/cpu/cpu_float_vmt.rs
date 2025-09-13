@@ -212,11 +212,10 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 		Ok(tensor.view_mut()?)
 	}
 
-	fn read_float<'buf>(
+	unsafe fn read_float<'buf>(
 		_this: NonNull<DeviceBufferVMT>,
 		src: &GenericTensor<ND<0>, BorrowGuard<'buf, DeviceBuffer>>,
 	) -> Result<f64, ErrPack<TensorOpError>> {
-		src.ensure_safe()?;
 		let view = src.view::<T>()?;
 		let (map, buf) = view.into_parts();
 		Ok(buf[map.offset].to_f64())
@@ -224,15 +223,15 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 
 	fn load_from_cpu_memory<'buf>(
 		_this: NonNull<DeviceBufferVMT>,
-		src: &[u8],
-		dst: &mut GenericTensor<ND<1>, BorrowMutGuard<'buf, DeviceBuffer>>,
+		cpu_src: &[u8],
+		device_dst: &mut GenericTensor<ND<1>, BorrowMutGuard<'buf, DeviceBuffer>>,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		let (map, buf) = Self::view_contiguous_mut(dst)?.into_parts();
+		let (map, buf) = Self::view_contiguous_mut(device_dst)?.into_parts();
 		let dst_slice = &mut buf[map.span()];
 		let src_slice = unsafe {
 			std::slice::from_raw_parts(
-				src.as_ptr().cast::<T>(),
-				src.len() / std::mem::size_of::<T>(),
+				cpu_src.as_ptr().cast::<T>(),
+				cpu_src.len() / std::mem::size_of::<T>(),
 			)
 		};
 		if dst_slice.len() != src_slice.len() {
@@ -244,15 +243,15 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 
 	fn store_to_cpu_memory<'buf>(
 		_this: NonNull<DeviceBufferVMT>,
-		src: &GenericTensor<ND<1>, BorrowGuard<'buf, DeviceBuffer>>,
-		dst: &mut [u8],
+		device_src: &GenericTensor<ND<1>, BorrowGuard<'buf, DeviceBuffer>>,
+		cpu_dst: &mut [u8],
 	) -> Result<(), ErrPack<TensorOpError>> {
-		let (map, buf) = Self::view_contiguous(src)?.into_parts();
+		let (map, buf) = Self::view_contiguous(device_src)?.into_parts();
 		let src_slice = &buf[map.span()];
 		let dst_slice = unsafe {
 			std::slice::from_raw_parts_mut(
-				dst.as_mut_ptr().cast::<T>(),
-				dst.len() / std::mem::size_of::<T>(),
+				cpu_dst.as_mut_ptr().cast::<T>(),
+				cpu_dst.len() / std::mem::size_of::<T>(),
 			)
 		};
 		if dst_slice.len() != src_slice.len() {
