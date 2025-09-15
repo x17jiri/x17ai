@@ -17,7 +17,7 @@ use crate::nn::param::Param;
 use crate::rng::Rng;
 use crate::tensor::math::{col, mat, row};
 use crate::tensor::{self, DType, Tensor, TensorOpError};
-use crate::util::LossyInto;
+use crate::util::LossyFrom;
 
 use super::Fragment;
 
@@ -53,7 +53,7 @@ impl Linear {
 
 			weights: ctx.new_param(&[outputs, inputs], dtype)?,
 
-			forward_scale: 1.0 / inputs.lossy_into().sqrt(),
+			forward_scale: 1.0 / f64::lossy_from(inputs).sqrt(),
 			backward_scale: 1.0,
 		})
 	}

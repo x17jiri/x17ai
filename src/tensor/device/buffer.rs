@@ -127,30 +127,30 @@ impl AttentionArgs {
 pub type DropBufferFn =
 	unsafe fn(this: NonNull<DeviceBufferVMT>, elems: usize, device_data: NonNull<u8>);
 
-pub type ReadFloatFn = for<'buf> unsafe fn(
+pub type ReadFloatFn = unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
 	dev_src: (ND<0>, &DeviceBuffer),
 ) -> Result<f64, ErrPack<TensorOpError>>;
 
-pub type LoadFromCPUMemoryFn = for<'buf> unsafe fn(
+pub type LoadFromCPUMemoryFn = unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
 	cpu_src: NonNull<u8>,
 	dev_dst: (ND<0>, &DeviceBuffer),
 	count: usize,
 ) -> Result<(), ErrPack<TensorOpError>>;
 
-pub type StoreToCPUMemoryFn = for<'buf> unsafe fn(
+pub type StoreToCPUMemoryFn = unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
 	dev_src: (ND<0>, &DeviceBuffer),
 	cpu_dst: NonNull<u8>,
 	count: usize,
 ) -> Result<(), ErrPack<TensorOpError>>;
 
-pub type MMFn = for<'buf> unsafe fn(
+pub type MMFn = unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
-	o: &mut GenericTensor<ND<2>, BorrowMutGuard<'buf, DeviceBuffer>>,
-	a: &GenericTensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
-	b: &GenericTensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
+	o: &(ND<2>, &DeviceBuffer),
+	a: &(ND<2>, &DeviceBuffer),
+	b: &(ND<2>, &DeviceBuffer),
 	scale: f64,
 ) -> Result<(), ErrPack<TensorOpError>>;
 

@@ -12,33 +12,48 @@ pub mod mycell;
 
 //--------------------------------------------------------------------------------------------------
 
+pub trait LossyFrom<T> {
+	fn lossy_from(value: T) -> Self;
+}
+
+#[allow(clippy::cast_precision_loss)]
+impl LossyFrom<usize> for f64 {
+	fn lossy_from(value: usize) -> Self {
+		value as f64
+	}
+}
+
+#[allow(clippy::cast_precision_loss)]
+impl LossyFrom<u64> for f64 {
+	fn lossy_from(value: u64) -> Self {
+		value as f64
+	}
+}
+
+impl LossyFrom<f64> for f32 {
+	fn lossy_from(value: f64) -> Self {
+		value as f32
+	}
+}
+
+impl<T> LossyFrom<T> for T {
+	fn lossy_from(value: T) -> Self {
+		value
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
 pub trait LossyInto<T> {
 	fn lossy_into(self) -> T;
 }
 
-#[allow(clippy::cast_precision_loss)]
-impl LossyInto<f64> for usize {
-	fn lossy_into(self) -> f64 {
-		self as f64
-	}
-}
-
-#[allow(clippy::cast_precision_loss)]
-impl LossyInto<f64> for u64 {
-	fn lossy_into(self) -> f64 {
-		self as f64
-	}
-}
-
-impl LossyInto<f32> for f64 {
-	fn lossy_into(self) -> f32 {
-		self as f32
-	}
-}
-
-impl<T> LossyInto<T> for T {
-	fn lossy_into(self) -> T {
-		self
+impl<T, U> LossyInto<U> for T
+where
+	U: LossyFrom<T>,
+{
+	fn lossy_into(self) -> U {
+		U::lossy_from(self)
 	}
 }
 

@@ -25,7 +25,7 @@ use crate::tensor::generic::map::{
 };
 use crate::tensor::generic::{GenericTensor, TensorUnsafeError};
 use crate::tensor::io::merge_dims;
-use crate::util::LossyInto;
+use crate::util::LossyFrom;
 use crate::util::mycell::{self, BorrowError, BorrowGuard, BorrowMutError, BorrowMutGuard};
 use crate::{ErrExtra, ErrPack};
 
@@ -197,7 +197,7 @@ impl Tensor {
 	/// If the tensor has no dimensions, the return value is 1.0.
 	pub fn sum_to_mean(&self) -> f64 {
 		let n = self.size(-1).unwrap_or(1);
-		1.0 / (n.lossy_into())
+		1.0 / f64::lossy_from(n)
 	}
 
 	/// Returns the device on which the tensor is allocated.
@@ -258,17 +258,26 @@ impl Tensor {
 		}
 		let borrow = self.buf().try_borrow()?;
 		let src = (ND::<0> { offset: nd.offset, dims: [] }, &*borrow);
-		unsafe {
-			let dst = NonNull::new_unchecked(dst.as_mut_ptr().cast());
-			(vmt.store_to_cpu_memory)(vmt.into(), src, dst, count)
-		}
+		let dst = NonNull::from_ref(dst).cast::<u8>();
+		unsafe { (vmt.store_to_cpu_memory)(vmt.into(), src, dst, count) }
 	}
 
 	pub fn load_from_cpu_memory(&self, src: &[u8]) -> Result<(), ErrPack<TensorOpError>> {
 		let vmt = self.vmt();
 		let nd = merge_dims::<1>(self)?;
-		let mut t = unsafe { GenericTensor::new_unchecked(nd, self.buf().try_borrow_mut()?) };
-		unsafe { (vmt.load_from_cpu_memory)(vmt.into(), src, &mut t) }
+		if !nd.dims[0].is_contiguous() {
+			cold_path();
+			return Err(TensorOpError::not_contiguous());
+		}
+		let count = nd.dims[0].size;
+		if src.len() != count * self.dtype().bytes() {
+			cold_path();
+			return Err(TensorOpError::invalid_buffer_size());
+		}
+		let borrow = self.buf().try_borrow_mut()?;
+		let dst = (ND::<0> { offset: nd.offset, dims: [] }, &*borrow);
+		let src = NonNull::from_ref(src).cast::<u8>();
+		unsafe { (vmt.load_from_cpu_memory)(vmt.into(), src, dst, count) }
 	}
 
 	/// I use this function because Rust doesn't allow specifying only some generic parameters.

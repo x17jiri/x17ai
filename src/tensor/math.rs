@@ -211,46 +211,50 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 	#[allow(clippy::panic_in_result_fn)]
 	#[inline(never)]
 	fn clear_acc_to_matrix(self, to: &Matrix) -> Result<(), ErrPack<TensorOpError>> {
-		unsafe {
-			const COL: usize = 0;
-			const ROW: usize = 1;
+		const COL: usize = 0;
+		const ROW: usize = 1;
 
-			let Self { col, row, scale } = self;
+		let Self { col, row, scale } = self;
 
-			assert!(to.batch_dims.is_empty());
-
-			let dims = DimMerger::merge::<1>([col.batch_dims, row.batch_dims])?;
-
-			let mut c_fail = UnsafeBorrowFailFlag::new();
-			let col = GenericTensor::new_unchecked(
-				ND {
-					dims: [col.rows, dims[0].get(COL)],
-					offset: col.tensor.map().offset,
-				},
-				col.tensor.buf().unsafe_borrow(&mut c_fail),
-			);
-			let row = GenericTensor::new_unchecked(
-				ND {
-					dims: [dims[0].get(ROW), row.cols],
-					offset: row.tensor.map().offset,
-				},
-				row.tensor.buf().unsafe_borrow(&mut c_fail),
-			);
-			let mut m_fail = UnsafeBorrowMutFailFlag::new();
-			let mut to = GenericTensor::new_unchecked(
-				ND {
-					dims: [to.rows, to.cols],
-					offset: to.tensor.map().offset,
-				},
-				to.tensor.buf().unsafe_borrow_mut(&mut m_fail),
-			);
-			c_fail.check()?;
-			m_fail.check()?;
-
-			let vmt = col.buf().vmt();
-			(vmt.mm)(vmt.into(), &mut to, &col, &row, scale)?;
-			Ok(())
+		if !to.batch_dims.is_empty() {
+			cold_path();
+			return Err(TensorOpError::shape_mismatch());
 		}
+
+		let dims = DimMerger::merge::<1>([col.batch_dims, row.batch_dims])?;
+
+		let mut borrow_fail = UnsafeBorrowFailFlag::new();
+		let col_borrow = unsafe { col.tensor.buf().unsafe_borrow(&mut borrow_fail) };
+		let row_borrow = unsafe { row.tensor.buf().unsafe_borrow(&mut borrow_fail) };
+		borrow_fail.check()?;
+		let to_borrow = to.tensor.buf().try_borrow_mut()?;
+
+		let col = (
+			ND {
+				dims: [col.rows, dims[0].get(COL)],
+				offset: col.tensor.map().offset,
+			},
+			&*col_borrow,
+		);
+		let row = (
+			ND {
+				dims: [dims[0].get(ROW), row.cols],
+				offset: row.tensor.map().offset,
+			},
+			&*row_borrow,
+		);
+
+		let to = (
+			ND {
+				dims: [to.rows, to.cols],
+				offset: to.tensor.map().offset,
+			},
+			&*to_borrow,
+		);
+
+		let vmt = to.1.vmt();
+		unsafe { (vmt.mm)(vmt.into(), &to, &col, &row, scale) }?;
+		Ok(())
 	}
 }
 
