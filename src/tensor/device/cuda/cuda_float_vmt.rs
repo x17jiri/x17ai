@@ -15,13 +15,12 @@ use crate::tensor::device::DeviceBuffer;
 use crate::tensor::device::buffer::{
 	AttentionArgs, DeviceBufferVMT, KernelElemArg, KernelOutput, KernelReduceArg,
 };
-use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::device::cpu::math::Float;
 use crate::tensor::device::cuda::CudaDevice;
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
 use crate::tensor::generic::GenericTensor;
 use crate::tensor::generic::map::ND;
-use crate::tensor::{Device, HasDType, TensorOpError};
+use crate::tensor::{HasDType, TensorOpError};
 use crate::util::LossyInto;
 use crate::util::mycell::{BorrowGuard, BorrowMutGuard};
 
@@ -72,11 +71,9 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 		}
 	}
 
-	unsafe fn cast_this(vmt: &DeviceBufferVMT) -> &Self {
+	unsafe fn cast_this<'a>(vmt: NonNull<DeviceBufferVMT>) -> &'a Self {
 		debug_assert!(std::mem::offset_of!(Self, vmt) == 0);
-		let vmt = NonNull::from(vmt);
-		let vmt = vmt.cast::<Self>();
-		unsafe { &*vmt.as_ptr() }
+		unsafe { &*vmt.as_ptr().cast::<Self>() }
 	}
 
 	fn device(&self) -> &CudaDevice {
@@ -87,45 +84,52 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 
 	unsafe fn read_float<'buf>(
 		this: NonNull<DeviceBufferVMT>,
-		cuda_src: &GenericTensor<ND<0>, BorrowGuard<'buf, DeviceBuffer>>,
+		dev_src: (ND<0>, &DeviceBuffer),
 	) -> Result<f64, ErrPack<TensorOpError>> {
-		let dev = unsafe { Self::cast_this(this.as_ref()) }.device();
-		let cpu_dst = T::default();
+		let dev = unsafe { Self::cast_this(this) }.device();
+		let (map, buf) = dev_src;
+		let val = T::default();
 		dev.cuda_stream.store_to_cpu_memory(
-			cuda_src.buf().device_data(),
-			NonNull::from(&cpu_dst).cast(),
-			cuda_src.map().offset,
+			buf.device_data(),
+			NonNull::from(&val).cast(),
+			map.offset,
 			std::mem::size_of::<T>(),
 		);
-		Ok(cpu_dst.to_f64())
+		Ok(val.to_f64())
 	}
 
 	unsafe fn load_from_cpu_memory<'buf>(
 		this: NonNull<DeviceBufferVMT>,
-		cpu_src: &[u8],
-		cuda_dst: &mut GenericTensor<ND<1>, BorrowMutGuard<'buf, DeviceBuffer>>,
+		cpu_src: NonNull<u8>,
+		dev_dst: (ND<0>, &DeviceBuffer),
+		count: usize,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		cuda_dst.ensure_safe()?;
-		let dev = unsafe { Self::cast_this(this.as_ref()) }.device();
-		if cpu_src.len() != cuda_dst.map().elems * T::dtype.bytes() {
-			cold_path();
-			return Err(ErrPack::new(TensorOpError::SizeMismatch));
-		}
+		let dev = unsafe { Self::cast_this(this) }.device();
+		let (map, buf) = dev_dst;
 		dev.cuda_stream.load_from_cpu_memory(
-			NonNull::from(cpu_src).cast(),
-			cuda_dst.buf().device_data(),
-			cuda_dst.map().offset,
-			cpu_src.len(),
+			cpu_src,
+			NonNull::from(buf.device_data()),
+			map.offset * std::mem::size_of::<T>(),
+			count * std::mem::size_of::<T>(),
 		);
 		Ok(())
 	}
 
 	fn store_to_cpu_memory<'buf>(
-		_this: NonNull<DeviceBufferVMT>,
-		_src: &GenericTensor<ND<1>, BorrowGuard<'buf, DeviceBuffer>>,
-		_dst: &mut [u8],
+		this: NonNull<DeviceBufferVMT>,
+		dev_src: (ND<0>, &DeviceBuffer),
+		cpu_dst: NonNull<u8>,
+		count: usize,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		todo!("CUDAFloatVMT::store_to_cpu_memory is not implemented yet");
+		let dev = unsafe { Self::cast_this(this) }.device();
+		let (map, buf) = dev_src;
+		dev.cuda_stream.store_to_cpu_memory(
+			NonNull::from(buf.device_data()),
+			cpu_dst,
+			map.offset * std::mem::size_of::<T>(),
+			count * std::mem::size_of::<T>(),
+		);
+		Ok(())
 	}
 
 	#[allow(clippy::panic_in_result_fn)]

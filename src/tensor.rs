@@ -6,6 +6,7 @@
 //------------------------------------------------------------------------------
 
 use std::hint::cold_path;
+use std::ptr::NonNull;
 use std::rc::Rc;
 
 pub use device::{DType, Device, HasDType};
@@ -79,7 +80,7 @@ impl<'buf, M: generic::map::Map> GenericTensor<M, BorrowGuard<'buf, DeviceBuffer
 		CPUDevice::ensure_can_view::<T>(buf)?;
 		let data = buf.device_data();
 		let elems = buf.elems();
-		let slice = unsafe { std::slice::from_raw_parts(data.cast(), elems) };
+		let slice = unsafe { std::slice::from_raw_parts(data.as_ptr().cast(), elems) };
 
 		// SAFETY: We only change the type of buffer reference.
 		// So if the map was safe before, it is still safe.
@@ -97,7 +98,7 @@ impl<'buf, M: generic::map::Map> GenericTensor<M, BorrowMutGuard<'buf, DeviceBuf
 		CPUDevice::ensure_can_view::<T>(buf)?;
 		let data = buf.device_data();
 		let elems = buf.elems();
-		let slice = unsafe { std::slice::from_raw_parts_mut(data.cast(), elems) };
+		let slice = unsafe { std::slice::from_raw_parts_mut(data.as_ptr().cast(), elems) };
 
 		// SAFETY: We only change the type of buffer reference.
 		// So if the map was safe before, it is still safe.
@@ -246,15 +247,28 @@ impl Tensor {
 	pub fn store_to_cpu_memory(&self, dst: &mut [u8]) -> Result<(), ErrPack<TensorOpError>> {
 		let vmt = self.vmt();
 		let nd = merge_dims::<1>(self)?;
-		let t = unsafe { GenericTensor::new_unchecked(nd, self.buf().try_borrow()?) };
-		vmt.store_to_cpu_memory(&t, dst)
+		if !nd.dims[0].is_contiguous() {
+			cold_path();
+			return Err(TensorOpError::not_contiguous());
+		}
+		let count = nd.dims[0].size;
+		if dst.len() != count * self.dtype().bytes() {
+			cold_path();
+			return Err(TensorOpError::invalid_buffer_size());
+		}
+		let borrow = self.buf().try_borrow()?;
+		let src = (ND::<0> { offset: nd.offset, dims: [] }, &*borrow);
+		unsafe {
+			let dst = NonNull::new_unchecked(dst.as_mut_ptr().cast());
+			(vmt.store_to_cpu_memory)(vmt.into(), src, dst, count)
+		}
 	}
 
 	pub fn load_from_cpu_memory(&self, src: &[u8]) -> Result<(), ErrPack<TensorOpError>> {
 		let vmt = self.vmt();
 		let nd = merge_dims::<1>(self)?;
 		let mut t = unsafe { GenericTensor::new_unchecked(nd, self.buf().try_borrow_mut()?) };
-		vmt.load_from_cpu_memory(src, &mut t)
+		unsafe { (vmt.load_from_cpu_memory)(vmt.into(), src, &mut t) }
 	}
 
 	/// I use this function because Rust doesn't allow specifying only some generic parameters.
@@ -350,6 +364,7 @@ pub enum TensorOpError {
 	InvalidShape,
 	InvalidDType,
 	InvalidDevice,
+	InvalidBufferSize,
 	IOError,
 }
 
@@ -386,10 +401,15 @@ impl TensorOpError {
 		}
 	}
 
-	#[cold]
-	#[inline(never)]
 	pub fn invalid_shape() -> ErrPack<Self> {
 		ErrPack { code: Self::InvalidShape, extra: None }
+	}
+
+	pub fn invalid_buffer_size() -> ErrPack<Self> {
+		ErrPack {
+			code: Self::InvalidBufferSize,
+			extra: None,
+		}
 	}
 
 	pub fn cannot_broadcast_output() -> ErrPack<Self> {

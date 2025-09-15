@@ -5,6 +5,8 @@
 //
 //------------------------------------------------------------------------------
 
+use std::ptr::NonNull;
+
 use crate::ErrPack;
 use crate::tensor::TensorOpError;
 use crate::tensor::device::buffer::AttentionArgs;
@@ -43,14 +45,14 @@ pub fn dot<T: Float, U: Float + From<T>>(a: &[T], b: &[T]) -> U {
 
 #[derive(Clone, Copy)]
 pub struct View3D<T> {
-	pub data: *const T,
+	pub data: NonNull<T>,
 	pub data_len: usize,
 	pub seq_stride: usize,
 	pub head_stride: usize,
 }
 
 impl<T> View3D<T> {
-	pub fn new(map: ND<3>, data: *const T) -> Self {
+	pub fn new(map: ND<3>, data: NonNull<T>) -> Self {
 		let span = map.span();
 		Self {
 			data: unsafe { data.add(span.start) },
@@ -67,19 +69,19 @@ impl<T> View3D<T> {
 		let begin = offset + f.start;
 		let end = offset + f.end;
 		assert!(begin <= end && end <= self.data_len);
-		unsafe { std::slice::from_raw_parts(self.data.add(begin), end - begin) }
+		unsafe { std::slice::from_raw_parts(self.data.as_ptr().add(begin), end - begin) }
 	}
 }
 
 pub struct View3DMut<T> {
-	pub data: *mut T,
+	pub data: NonNull<T>,
 	pub data_len: usize,
 	pub head_stride: usize,
 	pub seq_stride: usize,
 }
 
 impl<T> View3DMut<T> {
-	pub fn new(map: ND<3>, data: *mut T) -> Self {
+	pub fn new(map: ND<3>, data: NonNull<T>) -> Self {
 		let span = map.span();
 		Self {
 			data: unsafe { data.add(span.start) },
@@ -96,7 +98,7 @@ impl<T> View3DMut<T> {
 		let begin = offset + f.start;
 		let end = offset + f.end;
 		assert!(begin <= end && end <= self.data_len);
-		unsafe { std::slice::from_raw_parts_mut(self.data.add(begin), end - begin) }
+		unsafe { std::slice::from_raw_parts_mut(self.data.as_ptr().add(begin), end - begin) }
 	}
 }
 

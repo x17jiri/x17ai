@@ -8,8 +8,7 @@
 use super::super::attention::*;
 
 use crate::ErrPack;
-use crate::autograd::{self, AutogradTensor, GradientCapture};
-use crate::nn::fragments::UnaryFragment;
+use crate::autograd::AutogradTensor;
 use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::math::approx_eq;
 use crate::tensor::{Tensor, TensorOpError};

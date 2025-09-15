@@ -51,7 +51,7 @@ pub struct AttentionArgs {
 	pub q_offset: usize,
 	pub q_item_stride: usize,
 	pub q_head_stride: usize,
-	pub q: *const u8, // [q_count, head_count, q_width]
+	pub q: NonNull<u8>, // [q_count, head_count, q_width]
 
 	pub k_count: usize,
 	pub group_shift: usize,
@@ -59,7 +59,7 @@ pub struct AttentionArgs {
 	pub k_offset: usize,
 	pub k_item_stride: usize,
 	pub k_head_stride: usize,
-	pub k: *const u8, // [kv_count, head_count >> group_shift, q_width]
+	pub k: NonNull<u8>, // [kv_count, head_count >> group_shift, q_width]
 
 	// v_count == k_count
 	// v_head_count == head_count >> group_shift
@@ -67,7 +67,7 @@ pub struct AttentionArgs {
 	pub v_offset: usize,
 	pub v_item_stride: usize,
 	pub v_head_stride: usize,
-	pub v: *const u8, // [kv_count, head_count >> group_shift, v_width]
+	pub v: NonNull<u8>, // [kv_count, head_count >> group_shift, v_width]
 
 	// o_count == q_count
 	// o_head_count == head_count
@@ -75,7 +75,7 @@ pub struct AttentionArgs {
 	pub o_offset: usize,
 	pub o_head_stride: usize,
 	pub o_item_stride: usize,
-	pub o: *mut u8, // [q_count, head_count, v_width]
+	pub o: NonNull<u8>, // [q_count, head_count, v_width]
 }
 
 #[rustfmt::skip]
@@ -129,19 +129,21 @@ pub type DropBufferFn =
 
 pub type ReadFloatFn = for<'buf> unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
-	device_src: (ND<0>, &DeviceBuffer),
+	dev_src: (ND<0>, &DeviceBuffer),
 ) -> Result<f64, ErrPack<TensorOpError>>;
 
 pub type LoadFromCPUMemoryFn = for<'buf> unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
-	src: &[u8],
-	dst: &mut GenericTensor<ND<1>, BorrowMutGuard<'buf, DeviceBuffer>>,
+	cpu_src: NonNull<u8>,
+	dev_dst: (ND<0>, &DeviceBuffer),
+	count: usize,
 ) -> Result<(), ErrPack<TensorOpError>>;
 
 pub type StoreToCPUMemoryFn = for<'buf> unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
-	src: &GenericTensor<ND<1>, BorrowGuard<'buf, DeviceBuffer>>,
-	dst: &mut [u8],
+	dev_src: (ND<0>, &DeviceBuffer),
+	cpu_dst: NonNull<u8>,
+	count: usize,
 ) -> Result<(), ErrPack<TensorOpError>>;
 
 pub type MMFn = for<'buf> unsafe fn(

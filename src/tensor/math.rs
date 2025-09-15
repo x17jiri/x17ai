@@ -248,7 +248,7 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 			m_fail.check()?;
 
 			let vmt = col.buf().vmt();
-			vmt.mm(&mut to, &col, &row, scale)?;
+			(vmt.mm)(vmt.into(), &mut to, &col, &row, scale)?;
 			Ok(())
 		}
 	}
@@ -294,7 +294,7 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 			m_fail.check()?;
 
 			let vmt = mat.buf().vmt();
-			vmt.mm(&mut to, &mat, &col, scale)?;
+			(vmt.mm)(vmt.into(), &mut to, &mat, &col, scale)?;
 			Ok(())
 		}
 	}

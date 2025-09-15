@@ -7,6 +7,7 @@
 
 use std::cell::RefCell;
 use std::hint::{cold_path, likely};
+use std::ptr::NonNull;
 use std::rc::Rc;
 
 use smallvec::{SmallVec, smallvec};
@@ -184,8 +185,9 @@ impl Attention {
 
 			let m = DimMerger::merge::<1>([q_batch, k_batch, v_batch, o_batch])?;
 
+			let vmt = o.vmt();
 			for _ in 0..m[0].size {
-				o.vmt().attention(&args)?;
+				unsafe { (vmt.attention)(NonNull::from_ref(vmt), &args) }?;
 				args.q_offset += m[0].strides[0];
 				args.k_offset += m[0].strides[1];
 				args.v_offset += m[0].strides[2];

@@ -165,7 +165,7 @@ impl KernelRunner {
 					reduce_args_top_dim.strides[i] * dtype_bytes,
 				],
 				offset_bytes: arg.map().offset * dtype_bytes,
-				device_data: arg.buf().device_data(),
+				device_data: arg.buf().device_data().as_ptr(),
 			}
 		});
 
@@ -177,7 +177,7 @@ impl KernelRunner {
 					merged[1].strides[1 + i] * dtype_bytes,
 				],
 				offset_bytes: arg.map().offset * dtype_bytes,
-				device_data: arg.buf().device_data(),
+				device_data: arg.buf().device_data().as_ptr(),
 			}
 		});
 
@@ -193,7 +193,7 @@ impl KernelRunner {
 				merged[1].strides[0] * dtype_bytes,
 			],
 			offset_bytes: output.map().offset * dtype_bytes,
-			device_data: output.buf().device_data(),
+			device_data: output.buf().device_data().as_ptr(),
 		}];
 
 		unsafe {
@@ -220,7 +220,9 @@ impl KernelRunner {
 			// TODO - ensure all on same device
 			// TODO - other things may need to be checked before running the kernel
 
-			output.vmt().run_kernel(
+			let vmt = output.vmt();
+			(vmt.run_kernel)(
+				vmt.into(),
 				kernel_data,
 				out.as_ptr(),
 				inp.as_ptr(),

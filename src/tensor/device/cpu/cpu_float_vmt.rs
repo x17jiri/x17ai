@@ -19,7 +19,7 @@ use crate::tensor::device::cpu::math::Float;
 use crate::tensor::device::kernel::expr::DynExpr;
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
 use crate::tensor::generic::GenericTensor;
-use crate::tensor::generic::map::{Map, ND};
+use crate::tensor::generic::map::ND;
 use crate::tensor::{HasDType, TensorOpError};
 use crate::util::LossyInto;
 use crate::util::mycell::{BorrowGuard, BorrowMutGuard};
@@ -162,13 +162,12 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 		let device = device.as_ptr();
 		let device = unsafe { NonNull::new_unchecked(device.cast_mut()) };
 		let device_is_cpu = true;
-		let dtype = T::dtype;
 		Self {
 			vmt: unsafe {
 				DeviceBufferVMT::new(
 					device,
 					device_is_cpu,
-					dtype,
+					T::dtype,
 					kernel_runner,
 					CPUDevice::drop_buffer,
 					Self::read_float,
@@ -214,49 +213,45 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 
 	unsafe fn read_float<'buf>(
 		_this: NonNull<DeviceBufferVMT>,
-		src: &GenericTensor<ND<0>, BorrowGuard<'buf, DeviceBuffer>>,
+		dev_src: (ND<0>, &DeviceBuffer),
 	) -> Result<f64, ErrPack<TensorOpError>> {
-		let view = src.view::<T>()?;
-		let (map, buf) = view.into_parts();
-		Ok(buf[map.offset].to_f64())
+		let (map, buf) = dev_src;
+		debug_assert!(buf.vmt().device_is_cpu());
+		debug_assert!(buf.vmt().dtype() == T::dtype);
+		let mem = buf.device_data().cast::<T>();
+		let val = unsafe { mem.add(map.offset).read() };
+		Ok(val.to_f64())
 	}
 
 	fn load_from_cpu_memory<'buf>(
 		_this: NonNull<DeviceBufferVMT>,
-		cpu_src: &[u8],
-		device_dst: &mut GenericTensor<ND<1>, BorrowMutGuard<'buf, DeviceBuffer>>,
+		cpu_src: NonNull<u8>,
+		dev_dst: (ND<0>, &DeviceBuffer),
+		count: usize,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		let (map, buf) = Self::view_contiguous_mut(device_dst)?.into_parts();
-		let dst_slice = &mut buf[map.span()];
-		let src_slice = unsafe {
-			std::slice::from_raw_parts(
-				cpu_src.as_ptr().cast::<T>(),
-				cpu_src.len() / std::mem::size_of::<T>(),
-			)
+		let (map, buf) = dev_dst;
+		let buf = unsafe {
+			std::slice::from_raw_parts_mut(buf.device_data().as_ptr().cast::<T>(), buf.elems())
 		};
-		if dst_slice.len() != src_slice.len() {
-			todo!("better error");
-		}
+		let dst_slice = &mut buf[map.offset..map.offset + count];
+		let src_slice = unsafe { std::slice::from_raw_parts(cpu_src.as_ptr().cast::<T>(), count) };
 		dst_slice.copy_from_slice(src_slice);
 		Ok(())
 	}
 
 	fn store_to_cpu_memory<'buf>(
 		_this: NonNull<DeviceBufferVMT>,
-		device_src: &GenericTensor<ND<1>, BorrowGuard<'buf, DeviceBuffer>>,
-		cpu_dst: &mut [u8],
+		dev_src: (ND<0>, &DeviceBuffer),
+		cpu_dst: NonNull<u8>,
+		count: usize,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		let (map, buf) = Self::view_contiguous(device_src)?.into_parts();
-		let src_slice = &buf[map.span()];
-		let dst_slice = unsafe {
-			std::slice::from_raw_parts_mut(
-				cpu_dst.as_mut_ptr().cast::<T>(),
-				cpu_dst.len() / std::mem::size_of::<T>(),
-			)
+		let (map, buf) = dev_src;
+		let buf = unsafe {
+			std::slice::from_raw_parts(buf.device_data().as_ptr().cast::<T>(), buf.elems())
 		};
-		if dst_slice.len() != src_slice.len() {
-			todo!("better error");
-		}
+		let src_slice = &buf[map.offset..map.offset + count];
+		let dst_slice =
+			unsafe { std::slice::from_raw_parts_mut(cpu_dst.as_ptr().cast::<T>(), count) };
 		dst_slice.copy_from_slice(src_slice);
 		Ok(())
 	}
