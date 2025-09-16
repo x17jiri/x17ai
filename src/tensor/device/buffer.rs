@@ -24,23 +24,23 @@ use super::dtype::DType;
 #[repr(C)]
 pub struct KernelElemArg {
 	pub stride_bytes: [usize; 2],
+	pub buf: NonNull<u8>,
 	pub offset_bytes: usize,
-	pub device_data: *const u8,
 }
 
 #[repr(C)]
 pub struct KernelReduceArg {
 	pub stride_bytes: [usize; 3],
+	pub buf: NonNull<u8>,
 	pub offset_bytes: usize,
-	pub device_data: *const u8,
 }
 
 #[repr(C)]
 pub struct KernelOutput {
 	pub size: [usize; 2],
 	pub stride_bytes: [usize; 2],
+	pub buf: NonNull<u8>,
 	pub offset_bytes: usize,
-	pub device_data: *mut u8,
 }
 
 #[repr(C)]
@@ -66,7 +66,10 @@ pub struct MatMulArgs {
 	pub b_offset: usize,
 	pub b_buf: NonNull<u8>, // [a_cols, o_cols]
 
-	pub scale: f64,
+	pub o_buf_elems: usize,
+	pub a_buf_elems: usize,
+	pub b_buf_elems: usize,
+	pub dtype: DType,
 }
 
 #[repr(C)]
@@ -102,6 +105,12 @@ pub struct AttentionArgs {
 	pub o_head_stride: usize,
 	pub o_item_stride: usize,
 	pub o: NonNull<u8>, // [q_count, head_count, v_width]
+
+	pub q_buf_elems: usize,
+	pub k_buf_elems: usize,
+	pub v_buf_elems: usize,
+	pub o_buf_elems: usize,
+	pub dtype: DType,
 }
 
 #[rustfmt::skip]
@@ -154,38 +163,37 @@ pub type DropBufferFn =
 	unsafe fn(this: NonNull<DeviceBufferVMT>, elems: usize, device_data: NonNull<u8>);
 
 pub type ReadFloatFn = unsafe fn(
-	this: NonNull<DeviceBufferVMT>,
+	this: &DeviceBufferVMT,
 	dev_src: (ND<0>, &DeviceBuffer),
 ) -> Result<f64, ErrPack<TensorOpError>>;
 
 pub type LoadFromCPUMemoryFn = unsafe fn(
-	this: NonNull<DeviceBufferVMT>,
+	this: &DeviceBufferVMT,
 	cpu_src: NonNull<u8>,
 	dev_dst: (ND<0>, &DeviceBuffer),
 	count: usize,
 ) -> Result<(), ErrPack<TensorOpError>>;
 
 pub type StoreToCPUMemoryFn = unsafe fn(
-	this: NonNull<DeviceBufferVMT>,
+	this: &DeviceBufferVMT,
 	dev_src: (ND<0>, &DeviceBuffer),
 	cpu_dst: NonNull<u8>,
 	count: usize,
 ) -> Result<(), ErrPack<TensorOpError>>;
 
 pub type MMFn = unsafe fn(
-	this: NonNull<DeviceBufferVMT>,
+	this: &DeviceBufferVMT,
 	args: &MatMulArgs,
+	scale: f64,
 ) -> Result<(), ErrPack<TensorOpError>>;
 
-pub type AttentionFn = unsafe fn(
-	this: NonNull<DeviceBufferVMT>,
-	args: &AttentionArgs,
-) -> Result<(), ErrPack<TensorOpError>>;
+pub type AttentionFn =
+	unsafe fn(this: &DeviceBufferVMT, args: &AttentionArgs) -> Result<(), ErrPack<TensorOpError>>;
 
 pub type RunKernelFn = unsafe fn(
-	this: NonNull<DeviceBufferVMT>,
+	this: &DeviceBufferVMT,
 	kernel_data: &KernelData,
-	o: *const KernelOutput,
+	o: &KernelOutput,
 	elemwise_args: *const KernelElemArg,
 	reduce_args: *const KernelReduceArg,
 	scalar_args: *const f64,

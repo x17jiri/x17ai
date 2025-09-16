@@ -165,7 +165,7 @@ impl KernelRunner {
 					reduce_args_top_dim.strides[i] * dtype_bytes,
 				],
 				offset_bytes: arg.map().offset * dtype_bytes,
-				device_data: arg.buf().device_data().as_ptr(),
+				buf: arg.buf().device_data(),
 			}
 		});
 
@@ -177,7 +177,7 @@ impl KernelRunner {
 					merged[1].strides[1 + i] * dtype_bytes,
 				],
 				offset_bytes: arg.map().offset * dtype_bytes,
-				device_data: arg.buf().device_data().as_ptr(),
+				buf: arg.buf().device_data(),
 			}
 		});
 
@@ -186,15 +186,15 @@ impl KernelRunner {
 			return Err(TensorOpError::cannot_broadcast_output());
 		}
 
-		let out = [KernelOutput {
+		let out = KernelOutput {
 			size: [merged[0].size, merged[1].size],
 			stride_bytes: [
 				merged[0].strides[0] * dtype_bytes, //
 				merged[1].strides[0] * dtype_bytes,
 			],
 			offset_bytes: output.map().offset * dtype_bytes,
-			device_data: output.buf().device_data().as_ptr(),
-		}];
+			buf: output.buf().device_data(),
+		};
 
 		unsafe {
 			let mut inp_fail = UnsafeBorrowFailFlag::new();
@@ -204,8 +204,8 @@ impl KernelRunner {
 				let arg = &elem_args[i];
 				let same_as_output = std::ptr::eq(arg.buf().as_ref(), output.buf().as_ref())
 					&& likely(
-						inp[i].offset_bytes == out[0].offset_bytes
-							&& inp[i].stride_bytes == out[0].stride_bytes,
+						inp[i].offset_bytes == out.offset_bytes
+							&& inp[i].stride_bytes == out.stride_bytes,
 					);
 				if same_as_output { None } else { Some(arg.buf().unsafe_borrow(&mut inp_fail)) }
 			});
@@ -222,9 +222,9 @@ impl KernelRunner {
 
 			let vmt = output.vmt();
 			(vmt.run_kernel)(
-				vmt.into(),
+				vmt,
 				kernel_data,
-				out.as_ptr(),
+				&out,
 				inp.as_ptr(),
 				reduce_inp.as_ptr(),
 				scalar_args.as_ptr(),

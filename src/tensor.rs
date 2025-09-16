@@ -183,7 +183,7 @@ impl Tensor {
 		map.offset = self.map().offset;
 		let buf = self.buf().try_borrow()?;
 		let vmt = self.vmt();
-		unsafe { (vmt.read_float)(vmt.into(), (map, &*buf)) }
+		unsafe { (vmt.read_float)(vmt, (map, &*buf)) }
 	}
 
 	/// Sometimes we want to calculate the mean of the last dimension,
@@ -259,7 +259,7 @@ impl Tensor {
 		let borrow = self.buf().try_borrow()?;
 		let src = (ND::<0> { offset: nd.offset, dims: [] }, &*borrow);
 		let dst = NonNull::from_ref(dst).cast::<u8>();
-		unsafe { (vmt.store_to_cpu_memory)(vmt.into(), src, dst, count) }
+		unsafe { (vmt.store_to_cpu_memory)(vmt, src, dst, count) }
 	}
 
 	pub fn load_from_cpu_memory(&self, src: &[u8]) -> Result<(), ErrPack<TensorOpError>> {
@@ -277,7 +277,7 @@ impl Tensor {
 		let borrow = self.buf().try_borrow_mut()?;
 		let dst = (ND::<0> { offset: nd.offset, dims: [] }, &*borrow);
 		let src = NonNull::from_ref(src).cast::<u8>();
-		unsafe { (vmt.load_from_cpu_memory)(vmt.into(), src, dst, count) }
+		unsafe { (vmt.load_from_cpu_memory)(vmt, src, dst, count) }
 	}
 
 	/// I use this function because Rust doesn't allow specifying only some generic parameters.

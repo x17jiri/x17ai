@@ -71,9 +71,9 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 		}
 	}
 
-	unsafe fn cast_this<'a>(vmt: NonNull<DeviceBufferVMT>) -> &'a Self {
+	unsafe fn cast_this<'a>(vmt: &DeviceBufferVMT) -> &'a Self {
 		debug_assert!(std::mem::offset_of!(Self, vmt) == 0);
-		unsafe { &*vmt.as_ptr().cast::<Self>() }
+		unsafe { &*NonNull::from_ref(vmt).as_ptr().cast::<Self>() }
 	}
 
 	fn device(&self) -> &CudaDevice {
@@ -83,7 +83,7 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 	}
 
 	unsafe fn read_float<'buf>(
-		this: NonNull<DeviceBufferVMT>,
+		this: &DeviceBufferVMT,
 		dev_src: (ND<0>, &DeviceBuffer),
 	) -> Result<f64, ErrPack<TensorOpError>> {
 		let dev = unsafe { Self::cast_this(this) }.device();
@@ -99,7 +99,7 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 	}
 
 	unsafe fn load_from_cpu_memory<'buf>(
-		this: NonNull<DeviceBufferVMT>,
+		this: &DeviceBufferVMT,
 		cpu_src: NonNull<u8>,
 		dev_dst: (ND<0>, &DeviceBuffer),
 		count: usize,
@@ -116,7 +116,7 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 	}
 
 	fn store_to_cpu_memory<'buf>(
-		this: NonNull<DeviceBufferVMT>,
+		this: &DeviceBufferVMT,
 		dev_src: (ND<0>, &DeviceBuffer),
 		cpu_dst: NonNull<u8>,
 		count: usize,
@@ -135,23 +135,24 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 	#[allow(clippy::panic_in_result_fn)]
 	#[allow(clippy::many_single_char_names)]
 	fn mm<'buf>(
-		_this: NonNull<DeviceBufferVMT>,
+		_this: &DeviceBufferVMT,
 		_args: &MatMulArgs,
+		_scale: f64,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		todo!("CUDAFloatVMT::mm is not implemented yet");
 	}
 
 	fn attention<'buf>(
-		_this: NonNull<DeviceBufferVMT>,
+		_this: &DeviceBufferVMT,
 		_args: &AttentionArgs,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		todo!("CUDAFloatVMT::attention is not implemented yet");
 	}
 
 	unsafe fn run_kernel(
-		this: NonNull<DeviceBufferVMT>,
+		this: &DeviceBufferVMT,
 		kernel_data: &KernelData,
-		_o: *const KernelOutput,
+		_o: &KernelOutput,
 		_elemwise_args: *const KernelElemArg,
 		_reduce_args: *const KernelReduceArg,
 		_scalar_args: *const f64,

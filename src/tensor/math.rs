@@ -217,13 +217,17 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 			cold_path();
 			return Err(TensorOpError::shape_mismatch());
 		}
-		debug_assert!(col.tensor.ensure_safe().is_ok());
-		debug_assert!(row.tensor.ensure_safe().is_ok());
-		debug_assert!(to.tensor.ensure_safe().is_ok());
+		if to.tensor.dtype() != row.tensor.dtype() || to.tensor.dtype() != col.tensor.dtype() {
+			cold_path();
+			return Err(TensorOpError::dtype_mismatch());
+		}
 		if col.rows.size != to.rows.size || row.cols.size != to.cols.size {
 			cold_path();
 			return Err(TensorOpError::shape_mismatch());
 		}
+		debug_assert!(col.tensor.ensure_safe().is_ok());
+		debug_assert!(row.tensor.ensure_safe().is_ok());
+		debug_assert!(to.tensor.ensure_safe().is_ok());
 
 		let dims = DimMerger::merge::<1>([col.batch_dims, row.batch_dims])?;
 		let col_cols = dims[0].get(0);
@@ -257,11 +261,14 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 			b_offset: row.tensor.map().offset,
 			b_buf: row_borrow.device_data(),
 
-			scale,
+			o_buf_elems: to_borrow.elems(),
+			a_buf_elems: col_borrow.elems(),
+			b_buf_elems: row_borrow.elems(),
+			dtype: to.tensor.dtype(),
 		};
 
 		let vmt = to_borrow.vmt();
-		unsafe { (vmt.mm)(vmt.into(), &args) }?;
+		unsafe { (vmt.mm)(vmt, &args, scale) }?;
 		Ok(())
 	}
 }
@@ -276,9 +283,10 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 			cold_path();
 			return Err(TensorOpError::shape_mismatch());
 		}
-		debug_assert!(mat.tensor.ensure_safe().is_ok());
-		debug_assert!(col.tensor.ensure_safe().is_ok());
-		debug_assert!(to.tensor.ensure_safe().is_ok());
+		if to.tensor.dtype() != mat.tensor.dtype() || to.tensor.dtype() != col.tensor.dtype() {
+			cold_path();
+			return Err(TensorOpError::dtype_mismatch());
+		}
 		#[allow(clippy::suspicious_operation_groupings)]
 		if mat.rows.size != to.rows.size
 			|| col.rows.size != to.rows.size
@@ -287,6 +295,9 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 			cold_path();
 			return Err(TensorOpError::shape_mismatch());
 		}
+		debug_assert!(mat.tensor.ensure_safe().is_ok());
+		debug_assert!(col.tensor.ensure_safe().is_ok());
+		debug_assert!(to.tensor.ensure_safe().is_ok());
 
 		let dims = DimMerger::merge::<1>([to.batch_dims, col.batch_dims])?;
 		let to_cols = dims[0].get(0);
@@ -320,11 +331,14 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 			b_offset: col.tensor.map().offset,
 			b_buf: col_borrow.device_data(),
 
-			scale,
+			o_buf_elems: to_borrow.elems(),
+			a_buf_elems: mat_borrow.elems(),
+			b_buf_elems: col_borrow.elems(),
+			dtype: to.tensor.dtype(),
 		};
 
 		let vmt = to_borrow.vmt();
-		unsafe { (vmt.mm)(vmt.into(), &args) }?;
+		unsafe { (vmt.mm)(vmt.into(), &args, scale) }?;
 		Ok(())
 	}
 }

@@ -163,6 +163,12 @@ impl Attention {
 			o_item_stride: o_count.stride,
 			o_head_stride: o_heads.stride,
 			o: o.buf().device_data(),
+
+			q_buf_elems: q.buf().elems(),
+			k_buf_elems: k.buf().elems(),
+			v_buf_elems: v.buf().elems(),
+			o_buf_elems: o.buf().elems(),
+			dtype: q.dtype(),
 		};
 
 		{
@@ -187,7 +193,7 @@ impl Attention {
 
 			let vmt = o.vmt();
 			for _ in 0..m[0].size {
-				unsafe { (vmt.attention)(NonNull::from_ref(vmt), &args) }?;
+				unsafe { (vmt.attention)(vmt, &args) }?;
 				args.q_offset += m[0].strides[0];
 				args.k_offset += m[0].strides[1];
 				args.v_offset += m[0].strides[2];

@@ -18,11 +18,9 @@ use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::device::cpu::math::Float;
 use crate::tensor::device::kernel::expr::DynExpr;
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
-use crate::tensor::generic::GenericTensor;
 use crate::tensor::generic::map::ND;
 use crate::tensor::{HasDType, TensorOpError};
 use crate::util::LossyInto;
-use crate::util::mycell::{BorrowGuard, BorrowMutGuard};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -49,7 +47,7 @@ impl<'a, T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> 
 					assert!(k == 0);
 					let elemwise_arg = &self.elemwise_args[*index];
 					elemwise_arg
-						.device_data
+						.buf
 						.add(
 							elemwise_arg.offset_bytes
 								+ j * elemwise_arg.stride_bytes[0]
@@ -63,7 +61,7 @@ impl<'a, T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> 
 					let reduce_arg = &self.reduce_args[*index];
 					assert!(k < self.reduction_size);
 					reduce_arg
-						.device_data
+						.buf
 						.add(
 							reduce_arg.offset_bytes
 								+ j * reduce_arg.stride_bytes[0]
@@ -185,7 +183,7 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 	}
 
 	unsafe fn read_float(
-		_this: NonNull<DeviceBufferVMT>,
+		_this: &DeviceBufferVMT,
 		dev_src: (ND<0>, &DeviceBuffer),
 	) -> Result<f64, ErrPack<TensorOpError>> {
 		let (map, buf) = dev_src;
@@ -197,7 +195,7 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 	}
 
 	fn load_from_cpu_memory(
-		_this: NonNull<DeviceBufferVMT>,
+		_this: &DeviceBufferVMT,
 		cpu_src: NonNull<u8>,
 		dev_dst: (ND<0>, &DeviceBuffer),
 		count: usize,
@@ -213,7 +211,7 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 	}
 
 	fn store_to_cpu_memory(
-		_this: NonNull<DeviceBufferVMT>,
+		_this: &DeviceBufferVMT,
 		dev_src: (ND<0>, &DeviceBuffer),
 		cpu_dst: NonNull<u8>,
 		count: usize,
@@ -230,8 +228,9 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 	}
 
 	unsafe fn mm(
-		_this: NonNull<DeviceBufferVMT>,
+		_this: &DeviceBufferVMT,
 		args: &MatMulArgs,
+		scale: f64,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		unsafe {
 			let a = args.a_buf.cast::<T>().add(args.a_offset);
@@ -245,7 +244,7 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 						let b = b.add(k * args.b_row_stride + i * args.b_col_stride).read();
 						t += a.to_f64() * b.to_f64();
 					}
-					let t = T::from_f64(t * args.scale);
+					let t = T::from_f64(t * scale);
 					o.add(j * args.o_row_stride + i * args.o_col_stride).write(t);
 				}
 			}
@@ -254,16 +253,16 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 	}
 
 	fn attention(
-		_this: NonNull<DeviceBufferVMT>,
+		_this: &DeviceBufferVMT,
 		args: &AttentionArgs,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		super::attention::attention::<T, U>(args)
 	}
 
 	unsafe fn run_kernel(
-		_this: NonNull<DeviceBufferVMT>,
+		_this: &DeviceBufferVMT,
 		kernel_data: &KernelData,
-		o: *const KernelOutput,
+		o: &KernelOutput,
 		elemwise_args: *const KernelElemArg,
 		reduce_args: *const KernelReduceArg,
 		scalar_args: *const f64,
@@ -282,11 +281,10 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 				phantom_t: std::marker::PhantomData,
 				phantom_u: std::marker::PhantomData,
 			};
-			let o = &*o;
 			for j in 0..o.size[0] {
 				for i in 0..o.size[1] {
 					let o = o
-						.device_data
+						.buf
 						.add(o.offset_bytes + j * o.stride_bytes[0] + i * o.stride_bytes[1])
 						.cast::<T>();
 					let v = eval_expr.eval_expr(expr, j, i, 0);
