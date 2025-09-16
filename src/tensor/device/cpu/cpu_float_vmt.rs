@@ -12,7 +12,7 @@ use std::rc::Rc;
 use crate::ErrPack;
 use crate::tensor::device::DeviceBuffer;
 use crate::tensor::device::buffer::{
-	AttentionArgs, DeviceBufferVMT, KernelElemArg, KernelOutput, KernelReduceArg,
+	AttentionArgs, DeviceBufferVMT, KernelElemArg, KernelOutput, KernelReduceArg, MatMulArgs,
 };
 use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::device::cpu::math::Float;
@@ -155,6 +155,7 @@ pub(super) struct CPUFloatVMT<
 	phantom_u: std::marker::PhantomData<U>,
 }
 
+#[allow(clippy::unnecessary_wraps)]
 impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + LossyInto<T>>
 	CPUFloatVMT<T, U>
 {
@@ -183,35 +184,7 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 		}
 	}
 
-	pub fn view_contiguous<'t, 'buf, const N: usize>(
-		tensor: &'t GenericTensor<ND<N>, BorrowGuard<'buf, DeviceBuffer>>,
-	) -> Result<GenericTensor<&'t ND<N>, &'t [T]>, ErrPack<TensorOpError>>
-	where
-		T: 'static,
-	{
-		tensor.ensure_safe()?;
-		let feature_dim = tensor.map().dims[N - 1];
-		if !feature_dim.is_contiguous() {
-			return Err(TensorOpError::not_contiguous());
-		}
-		Ok(tensor.view()?)
-	}
-
-	pub fn view_contiguous_mut<'t, 'buf, const N: usize>(
-		tensor: &'t mut GenericTensor<ND<N>, BorrowMutGuard<'buf, DeviceBuffer>>,
-	) -> Result<GenericTensor<&'t ND<N>, &'t mut [T]>, ErrPack<TensorOpError>>
-	where
-		T: 'static,
-	{
-		tensor.ensure_safe()?;
-		let feature_dim = tensor.map().dims[N - 1];
-		if !feature_dim.is_contiguous() {
-			return Err(TensorOpError::not_contiguous());
-		}
-		Ok(tensor.view_mut()?)
-	}
-
-	unsafe fn read_float<'buf>(
+	unsafe fn read_float(
 		_this: NonNull<DeviceBufferVMT>,
 		dev_src: (ND<0>, &DeviceBuffer),
 	) -> Result<f64, ErrPack<TensorOpError>> {
@@ -223,7 +196,7 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 		Ok(val.to_f64())
 	}
 
-	fn load_from_cpu_memory<'buf>(
+	fn load_from_cpu_memory(
 		_this: NonNull<DeviceBufferVMT>,
 		cpu_src: NonNull<u8>,
 		dev_dst: (ND<0>, &DeviceBuffer),
@@ -239,7 +212,7 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 		Ok(())
 	}
 
-	fn store_to_cpu_memory<'buf>(
+	fn store_to_cpu_memory(
 		_this: NonNull<DeviceBufferVMT>,
 		dev_src: (ND<0>, &DeviceBuffer),
 		cpu_dst: NonNull<u8>,
@@ -256,59 +229,31 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 		Ok(())
 	}
 
-	#[allow(clippy::panic_in_result_fn)]
-	#[allow(clippy::many_single_char_names)]
-	fn mm<'buf>(
+	unsafe fn mm(
 		_this: NonNull<DeviceBufferVMT>,
-		o: &mut GenericTensor<ND<2>, BorrowMutGuard<'buf, DeviceBuffer>>,
-		a: &GenericTensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
-		b: &GenericTensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
-		scale: f64,
+		args: &MatMulArgs,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		let m = o.map().dims[0].size;
-		let n = o.map().dims[1].size;
-		let k = a.map().dims[1].size;
-
-		assert!(a.map().dims[0].size == m);
-		assert!(b.map().dims[0].size == k);
-		assert!(b.map().dims[1].size == n);
-
-		o.ensure_safe()?;
-		let o_row_stride = o.map().dims[0].stride;
-		let o_col_stride = o.map().dims[1].stride;
-		let mut o = o.view_mut::<T>()?;
-		let o_off = o.map().offset;
-		let o = unsafe { &mut o.buf_mut()[o_off..] };
-
-		a.ensure_safe()?;
-		let a_row_stride = a.map().dims[0].stride;
-		let a_col_stride = a.map().dims[1].stride;
-		let a = a.view::<T>()?;
-		let a = &a.buf()[a.map().offset..];
-
-		b.ensure_safe()?;
-		let b_row_stride = b.map().dims[0].stride;
-		let b_col_stride = b.map().dims[1].stride;
-		let b = b.view::<T>()?;
-		let b = &b.buf()[b.map().offset..];
-
-		for j in 0..m {
-			for i in 0..n {
-				let mut t = 0.0;
-				for k in 0..k {
-					let a = a[j * a_row_stride + k * a_col_stride];
-					let b = b[k * b_row_stride + i * b_col_stride];
-					t += a.to_f64() * b.to_f64();
+		unsafe {
+			let a = args.a_buf.cast::<T>().add(args.a_offset);
+			let b = args.b_buf.cast::<T>().add(args.b_offset);
+			let o = args.o_buf.cast::<T>().add(args.o_offset);
+			for j in 0..args.o_rows {
+				for i in 0..args.o_cols {
+					let mut t = 0.0;
+					for k in 0..args.a_cols {
+						let a = a.add(j * args.a_row_stride + k * args.a_col_stride).read();
+						let b = b.add(k * args.b_row_stride + i * args.b_col_stride).read();
+						t += a.to_f64() * b.to_f64();
+					}
+					let t = T::from_f64(t * args.scale);
+					o.add(j * args.o_row_stride + i * args.o_col_stride).write(t);
 				}
-				let t = T::from_f64(t * scale);
-				o[j * o_row_stride + i * o_col_stride] = t;
 			}
 		}
-
 		Ok(()) // TODO
 	}
 
-	fn attention<'buf>(
+	fn attention(
 		_this: NonNull<DeviceBufferVMT>,
 		args: &AttentionArgs,
 	) -> Result<(), ErrPack<TensorOpError>> {

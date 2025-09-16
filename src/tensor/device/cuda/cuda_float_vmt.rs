@@ -13,7 +13,7 @@ use std::rc::Rc;
 use crate::ErrPack;
 use crate::tensor::device::DeviceBuffer;
 use crate::tensor::device::buffer::{
-	AttentionArgs, DeviceBufferVMT, KernelElemArg, KernelOutput, KernelReduceArg,
+	AttentionArgs, DeviceBufferVMT, KernelElemArg, KernelOutput, KernelReduceArg, MatMulArgs,
 };
 use crate::tensor::device::cpu::math::Float;
 use crate::tensor::device::cuda::CudaDevice;
@@ -136,10 +136,7 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 	#[allow(clippy::many_single_char_names)]
 	fn mm<'buf>(
 		_this: NonNull<DeviceBufferVMT>,
-		_o: &mut GenericTensor<ND<2>, BorrowMutGuard<'buf, DeviceBuffer>>,
-		_a: &GenericTensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
-		_b: &GenericTensor<ND<2>, BorrowGuard<'buf, DeviceBuffer>>,
-		_scale: f64,
+		_args: &MatMulArgs,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		todo!("CUDAFloatVMT::mm is not implemented yet");
 	}

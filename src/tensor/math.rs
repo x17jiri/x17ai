@@ -7,11 +7,11 @@
 
 use std::hint::cold_path;
 
+use crate::tensor::device::buffer::MatMulArgs;
 use crate::tensor::dim_merger::DimMerger;
-use crate::tensor::generic::GenericTensor;
 use crate::tensor::generic::map::{ND, NotEnoughDimensionsError, SizeAndStride};
 use crate::tensor::{Tensor, TensorOpError};
-use crate::util::mycell::{UnsafeBorrowFailFlag, UnsafeBorrowMutFailFlag};
+use crate::util::mycell::UnsafeBorrowFailFlag;
 use crate::{ErrPack, custom_kernel};
 
 //--------------------------------------------------------------------------------------------------
@@ -211,17 +211,23 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 	#[allow(clippy::panic_in_result_fn)]
 	#[inline(never)]
 	fn clear_acc_to_matrix(self, to: &Matrix) -> Result<(), ErrPack<TensorOpError>> {
-		const COL: usize = 0;
-		const ROW: usize = 1;
-
 		let Self { col, row, scale } = self;
 
 		if !to.batch_dims.is_empty() {
 			cold_path();
 			return Err(TensorOpError::shape_mismatch());
 		}
+		debug_assert!(col.tensor.ensure_safe().is_ok());
+		debug_assert!(row.tensor.ensure_safe().is_ok());
+		debug_assert!(to.tensor.ensure_safe().is_ok());
+		if col.rows.size != to.rows.size || row.cols.size != to.cols.size {
+			cold_path();
+			return Err(TensorOpError::shape_mismatch());
+		}
 
 		let dims = DimMerger::merge::<1>([col.batch_dims, row.batch_dims])?;
+		let col_cols = dims[0].get(0);
+		let row_rows = dims[0].get(1);
 
 		let mut borrow_fail = UnsafeBorrowFailFlag::new();
 		let col_borrow = unsafe { col.tensor.buf().unsafe_borrow(&mut borrow_fail) };
@@ -229,31 +235,33 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 		borrow_fail.check()?;
 		let to_borrow = to.tensor.buf().try_borrow_mut()?;
 
-		let col = (
-			ND {
-				dims: [col.rows, dims[0].get(COL)],
-				offset: col.tensor.map().offset,
-			},
-			&*col_borrow,
-		);
-		let row = (
-			ND {
-				dims: [dims[0].get(ROW), row.cols],
-				offset: row.tensor.map().offset,
-			},
-			&*row_borrow,
-		);
+		let args = MatMulArgs {
+			o_row_stride: to.rows.stride,
+			o_col_stride: to.cols.stride,
+			o_rows: to.rows.size,
+			o_cols: to.cols.size,
+			o_offset: to.tensor.map().offset,
+			o_buf: to_borrow.device_data(),
 
-		let to = (
-			ND {
-				dims: [to.rows, to.cols],
-				offset: to.tensor.map().offset,
-			},
-			&*to_borrow,
-		);
+			a_row_stride: col.rows.stride,
+			a_col_stride: col_cols.stride,
+			// a_rows == o_rows
+			a_cols: col_cols.size,
+			a_offset: col.tensor.map().offset,
+			a_buf: col_borrow.device_data(),
 
-		let vmt = to.1.vmt();
-		unsafe { (vmt.mm)(vmt.into(), &to, &col, &row, scale) }?;
+			b_row_stride: row_rows.stride,
+			b_col_stride: row.cols.stride,
+			// b_rows == a_cols - this condition is ensured by DimMerger
+			// b_cols == o_cols
+			b_offset: row.tensor.map().offset,
+			b_buf: row_borrow.device_data(),
+
+			scale,
+		};
+
+		let vmt = to_borrow.vmt();
+		unsafe { (vmt.mm)(vmt.into(), &args) }?;
 		Ok(())
 	}
 }
@@ -262,45 +270,62 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 	#[allow(clippy::panic_in_result_fn)]
 	#[inline(never)]
 	fn eval_to_col_matrix(self, to: &ColMatrix) -> Result<(), ErrPack<TensorOpError>> {
-		unsafe {
-			const TO: usize = 0;
-			const COL: usize = 1;
+		let Self { mat, col, scale } = self;
 
-			let Self { mat, col, scale } = self;
-
-			assert!(mat.batch_dims.is_empty());
-
-			let dims = DimMerger::merge::<1>([to.batch_dims, col.batch_dims])?;
-			let mut c_fail = UnsafeBorrowFailFlag::new();
-			let mat = GenericTensor::new_unchecked(
-				ND {
-					dims: [mat.rows, mat.cols],
-					offset: mat.tensor.map().offset,
-				},
-				mat.tensor.buf().unsafe_borrow(&mut c_fail),
-			);
-			let col = GenericTensor::new_unchecked(
-				ND {
-					dims: [col.rows, dims[0].get(COL)],
-					offset: col.tensor.map().offset,
-				},
-				col.tensor.buf().unsafe_borrow(&mut c_fail),
-			);
-			let mut m_fail = UnsafeBorrowMutFailFlag::new();
-			let mut to = GenericTensor::new_unchecked(
-				ND {
-					dims: [to.rows, dims[0].get(TO)],
-					offset: to.tensor.map().offset,
-				},
-				to.tensor.buf().unsafe_borrow_mut(&mut m_fail),
-			);
-			c_fail.check()?;
-			m_fail.check()?;
-
-			let vmt = mat.buf().vmt();
-			(vmt.mm)(vmt.into(), &mut to, &mat, &col, scale)?;
-			Ok(())
+		if !mat.batch_dims.is_empty() {
+			cold_path();
+			return Err(TensorOpError::shape_mismatch());
 		}
+		debug_assert!(mat.tensor.ensure_safe().is_ok());
+		debug_assert!(col.tensor.ensure_safe().is_ok());
+		debug_assert!(to.tensor.ensure_safe().is_ok());
+		#[allow(clippy::suspicious_operation_groupings)]
+		if mat.rows.size != to.rows.size
+			|| col.rows.size != to.rows.size
+			|| mat.cols.size != col.rows.size
+		{
+			cold_path();
+			return Err(TensorOpError::shape_mismatch());
+		}
+
+		let dims = DimMerger::merge::<1>([to.batch_dims, col.batch_dims])?;
+		let to_cols = dims[0].get(0);
+		let col_cols = dims[0].get(1);
+
+		let mut borrow_fail = UnsafeBorrowFailFlag::new();
+		let mat_borrow = unsafe { mat.tensor.buf().unsafe_borrow(&mut borrow_fail) };
+		let col_borrow = unsafe { col.tensor.buf().unsafe_borrow(&mut borrow_fail) };
+		borrow_fail.check()?;
+		let to_borrow = to.tensor.buf().try_borrow_mut()?;
+
+		let args = MatMulArgs {
+			o_row_stride: to.rows.stride,
+			o_col_stride: to_cols.stride,
+			o_rows: to.rows.size,
+			o_cols: to_cols.size,
+			o_offset: to.tensor.map().offset,
+			o_buf: to_borrow.device_data(),
+
+			a_row_stride: mat.rows.stride,
+			a_col_stride: mat.cols.stride,
+			// a_rows == o_rows
+			a_cols: mat.cols.size,
+			a_offset: mat.tensor.map().offset,
+			a_buf: mat_borrow.device_data(),
+
+			b_row_stride: col.rows.stride,
+			b_col_stride: col_cols.stride,
+			// b_rows == a_cols
+			// b_cols == o_cols
+			b_offset: col.tensor.map().offset,
+			b_buf: col_borrow.device_data(),
+
+			scale,
+		};
+
+		let vmt = to_borrow.vmt();
+		unsafe { (vmt.mm)(vmt.into(), &args) }?;
+		Ok(())
 	}
 }
 

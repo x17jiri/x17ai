@@ -44,6 +44,32 @@ pub struct KernelOutput {
 }
 
 #[repr(C)]
+pub struct MatMulArgs {
+	pub o_row_stride: usize,
+	pub o_col_stride: usize,
+	pub o_rows: usize,
+	pub o_cols: usize,
+	pub o_offset: usize,
+	pub o_buf: NonNull<u8>, // [o_rows, o_cols]
+
+	pub a_row_stride: usize,
+	pub a_col_stride: usize,
+	// a_rows == o_rows
+	pub a_cols: usize,
+	pub a_offset: usize,
+	pub a_buf: NonNull<u8>, // [o_rows, a_cols]
+
+	pub b_row_stride: usize,
+	pub b_col_stride: usize,
+	// b_rows == a_cols
+	// b_cols == o_cols
+	pub b_offset: usize,
+	pub b_buf: NonNull<u8>, // [a_cols, o_cols]
+
+	pub scale: f64,
+}
+
+#[repr(C)]
 pub struct AttentionArgs {
 	pub q_count: usize,
 	pub head_count: usize,
@@ -148,13 +174,10 @@ pub type StoreToCPUMemoryFn = unsafe fn(
 
 pub type MMFn = unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
-	o: &(ND<2>, &DeviceBuffer),
-	a: &(ND<2>, &DeviceBuffer),
-	b: &(ND<2>, &DeviceBuffer),
-	scale: f64,
+	args: &MatMulArgs,
 ) -> Result<(), ErrPack<TensorOpError>>;
 
-pub type AttentionFn = for<'buf> unsafe fn(
+pub type AttentionFn = unsafe fn(
 	this: NonNull<DeviceBufferVMT>,
 	args: &AttentionArgs,
 ) -> Result<(), ErrPack<TensorOpError>>;
