@@ -110,7 +110,7 @@ impl Device for CPUDevice {
 			&& let Ok(layout) = std::alloc::Layout::from_size_align(size, dtype.align())
 			&& let Some(memory) = NonNull::new(unsafe { std::alloc::alloc(layout) })
 		{
-			// We will recreate the `Rc` and drop it in `CPUDevice::drop_buffer()`
+			// We will recreate the `Rc` and drop it in `drop_buffer()`
 			std::mem::forget(self);
 
 			let device_data = memory;

@@ -199,7 +199,7 @@ pub type RunKernelFn = unsafe fn(
 ) -> Result<(), ErrPack<TensorOpError>>;
 
 /// I use this helper struct to make sure that
-/// `DeviceBufferVMT` is only created via the unsafe `new()` function.
+/// `DeviceBufferVMT` can only be created via the unsafe `new()` function.
 pub struct DeviceBufferVMTData {
 	pub device: NonNull<dyn Device>,
 	pub device_is_cpu: bool,
@@ -268,6 +268,8 @@ impl DeviceBufferVMT {
 		}
 	}
 
+	/// # Safety
+	/// - `T` must be the actual type of the device
 	#[inline]
 	pub unsafe fn cast_device<T: Device>(&self) -> &T {
 		let (device, _) = self.data.device.to_raw_parts();

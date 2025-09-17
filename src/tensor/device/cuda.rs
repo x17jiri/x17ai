@@ -24,9 +24,9 @@ use self::cuda_float_vmt::CudaFloatVMT;
 //--------------------------------------------------------------------------------------------------
 
 pub struct CudaDevice {
-	pub name: String,
-	pub f32_vmt: CudaFloatVMT<f32, f32>,
-	pub cuda_stream: CudaStream,
+	name: String,
+	f32_vmt: CudaFloatVMT<f32, f32>,
+	cuda_stream: CudaStream,
 }
 
 impl CudaDevice {
@@ -81,8 +81,10 @@ impl Device for CudaDevice {
 			},
 		};
 
-		if let Ok(memory) = unsafe { self.cuda_stream.alloc(dtype.array_bytes(elems).unwrap()) } {
-			// We will recreate the `Rc` and drop it in `CPUDevice::drop_buffer()`
+		if let Some(size) = dtype.array_bytes(elems)
+			&& let Ok(memory) = unsafe { self.cuda_stream.alloc(size) }
+		{
+			// We will recreate the `Rc` and drop it in `drop_buffer()`
 			std::mem::forget(self);
 
 			let device_data = memory;
