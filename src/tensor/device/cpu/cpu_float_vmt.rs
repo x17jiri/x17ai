@@ -12,7 +12,8 @@ use std::rc::Rc;
 use crate::ErrPack;
 use crate::tensor::device::DeviceBuffer;
 use crate::tensor::device::buffer::{
-	AttentionArgs, DeviceBufferVMT, KernelElemArg, KernelOutput, KernelReduceArg, MatMulArgs,
+	AttentionArgs, DeviceBufferVMT, DeviceBufferVMTData, KernelElemArg, KernelOutput,
+	KernelReduceArg, MatMulArgs,
 };
 use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::device::cpu::math::Float;
@@ -159,23 +160,21 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 {
 	pub fn new(device: &Rc<MaybeUninit<CPUDevice>>, kernel_runner: Rc<KernelRunner>) -> Self {
 		let device = device.as_ptr();
-		let device = unsafe { NonNull::new_unchecked(device.cast_mut()) };
-		let device_is_cpu = true;
 		Self {
 			vmt: unsafe {
-				DeviceBufferVMT::new(
-					device,
-					device_is_cpu,
-					T::dtype,
+				DeviceBufferVMT::new(DeviceBufferVMTData {
+					device: NonNull::new_unchecked(device.cast_mut()),
+					device_is_cpu: true,
+					dtype: T::dtype,
 					kernel_runner,
-					CPUDevice::drop_buffer,
-					Self::read_float,
-					Self::load_from_cpu_memory,
-					Self::store_to_cpu_memory,
-					Self::mm,
-					Self::attention,
-					Self::run_kernel,
-				)
+					drop_buffer: CPUDevice::drop_buffer,
+					read_float: Self::read_float,
+					load_from_cpu_memory: Self::load_from_cpu_memory,
+					store_to_cpu_memory: Self::store_to_cpu_memory,
+					mm: Self::mm,
+					attention: Self::attention,
+					run_kernel: Self::run_kernel,
+				})
 			},
 			phantom_t: std::marker::PhantomData,
 			phantom_u: std::marker::PhantomData,
@@ -187,8 +186,8 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 		dev_src: (ND<0>, &DeviceBuffer),
 	) -> Result<f64, ErrPack<TensorOpError>> {
 		let (map, buf) = dev_src;
-		debug_assert!(buf.vmt().device_is_cpu());
-		debug_assert!(buf.vmt().dtype() == T::dtype);
+		debug_assert!(buf.vmt().device_is_cpu);
+		debug_assert!(buf.vmt().dtype == T::dtype);
 		let mem = buf.device_data().cast::<T>();
 		let val = unsafe { mem.add(map.offset).read() };
 		Ok(val.to_f64())

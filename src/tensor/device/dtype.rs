@@ -75,12 +75,24 @@ impl DType {
 		usize::from(self.bits.get()) / 8
 	}
 
+	pub fn align(&self) -> usize {
+		self.bytes().max(1)
+	}
+
 	pub fn array_bytes(&self, elems: usize) -> Option<usize> {
 		debug_assert!(self.bits.is_power_of_two());
 		if self.bits.get() < 8 {
 			todo!("bitfields");
 		}
 		self.bytes().checked_mul(elems)
+	}
+
+	pub unsafe fn array_bytes_unchecked(&self, elems: usize) -> usize {
+		debug_assert!(self.bits.is_power_of_two());
+		if self.bits.get() < 8 {
+			todo!("bitfields");
+		}
+		self.bytes() * elems
 	}
 }
 

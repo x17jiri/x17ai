@@ -50,14 +50,12 @@ impl CudaDevice {
 		}
 	}
 
-	unsafe fn drop_buffer(this: NonNull<DeviceBufferVMT>, _elems: usize, device_data: NonNull<u8>) {
+	unsafe fn drop_buffer(this: &DeviceBufferVMT, _elems: usize, device_data: NonNull<u8>) {
 		unsafe {
-			let this = this.as_ref();
-
 			this.cast_device::<Self>().cuda_stream.free(device_data);
 
 			// Recreate the `Rc` that we forgot in `new_buffer()`
-			let rc_device: Rc<dyn Device> = Rc::from_raw(this.device_ptr().as_ptr());
+			let rc_device: Rc<dyn Device> = Rc::from_raw(this.device.as_ptr());
 			std::mem::drop(rc_device);
 		}
 	}

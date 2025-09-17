@@ -9,7 +9,7 @@ use std::hint::cold_path;
 
 use crate::tensor::device::buffer::MatMulArgs;
 use crate::tensor::dim_merger::DimMerger;
-use crate::tensor::generic::map::{ND, NotEnoughDimensionsError, SizeAndStride};
+use crate::tensor::generic::map::{NotEnoughDimensionsError, SizeAndStride};
 use crate::tensor::{Tensor, TensorOpError};
 use crate::util::mycell::UnsafeBorrowFailFlag;
 use crate::{ErrPack, custom_kernel};
@@ -213,17 +213,16 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 	fn clear_acc_to_matrix(self, to: &Matrix) -> Result<(), ErrPack<TensorOpError>> {
 		let Self { col, row, scale } = self;
 
-		if !to.batch_dims.is_empty() {
+		if col.rows.size != to.rows.size
+			|| row.cols.size != to.cols.size
+			|| !to.batch_dims.is_empty()
+		{
 			cold_path();
 			return Err(TensorOpError::shape_mismatch());
 		}
 		if to.tensor.dtype() != row.tensor.dtype() || to.tensor.dtype() != col.tensor.dtype() {
 			cold_path();
 			return Err(TensorOpError::dtype_mismatch());
-		}
-		if col.rows.size != to.rows.size || row.cols.size != to.cols.size {
-			cold_path();
-			return Err(TensorOpError::shape_mismatch());
 		}
 		debug_assert!(col.tensor.ensure_safe().is_ok());
 		debug_assert!(row.tensor.ensure_safe().is_ok());
@@ -279,21 +278,17 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 	fn eval_to_col_matrix(self, to: &ColMatrix) -> Result<(), ErrPack<TensorOpError>> {
 		let Self { mat, col, scale } = self;
 
-		if !mat.batch_dims.is_empty() {
+		#[allow(clippy::suspicious_operation_groupings)]
+		if mat.rows.size != to.rows.size
+			|| mat.cols.size != col.rows.size
+			|| !mat.batch_dims.is_empty()
+		{
 			cold_path();
 			return Err(TensorOpError::shape_mismatch());
 		}
 		if to.tensor.dtype() != mat.tensor.dtype() || to.tensor.dtype() != col.tensor.dtype() {
 			cold_path();
 			return Err(TensorOpError::dtype_mismatch());
-		}
-		#[allow(clippy::suspicious_operation_groupings)]
-		if mat.rows.size != to.rows.size
-			|| col.rows.size != to.rows.size
-			|| mat.cols.size != col.rows.size
-		{
-			cold_path();
-			return Err(TensorOpError::shape_mismatch());
 		}
 		debug_assert!(mat.tensor.ensure_safe().is_ok());
 		debug_assert!(col.tensor.ensure_safe().is_ok());

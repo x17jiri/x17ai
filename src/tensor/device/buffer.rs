@@ -11,10 +11,9 @@ use std::rc::Rc;
 use crate::ErrPack;
 use crate::tensor::TensorOpError;
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
-use crate::tensor::generic::GenericTensor;
 use crate::tensor::generic::buffer::Buffer;
 use crate::tensor::generic::map::{ND, SizeAndStride};
-use crate::util::mycell::{self, BorrowGuard, BorrowMutGuard};
+use crate::util::mycell;
 
 use super::Device;
 use super::dtype::DType;
@@ -159,8 +158,7 @@ impl AttentionArgs {
 
 //--------------------------------------------------------------------------------------------------
 
-pub type DropBufferFn =
-	unsafe fn(this: NonNull<DeviceBufferVMT>, elems: usize, device_data: NonNull<u8>);
+pub type DropBufferFn = unsafe fn(this: &DeviceBufferVMT, elems: usize, device_data: NonNull<u8>);
 
 pub type ReadFloatFn = unsafe fn(
 	this: &DeviceBufferVMT,
@@ -200,13 +198,15 @@ pub type RunKernelFn = unsafe fn(
 	reduction_size: usize,
 ) -> Result<(), ErrPack<TensorOpError>>;
 
-pub struct DeviceBufferVMT {
-	device: NonNull<dyn Device>,
-	device_is_cpu: bool,
-	dtype: DType,
-	kernel_runner: Rc<KernelRunner>,
+/// I use this helper struct to make sure that
+/// `DeviceBufferVMT` is only created via the unsafe `new()` function.
+pub struct DeviceBufferVMTData {
+	pub device: NonNull<dyn Device>,
+	pub device_is_cpu: bool,
+	pub dtype: DType,
+	pub kernel_runner: Rc<KernelRunner>,
 
-	drop_buffer: DropBufferFn,
+	pub drop_buffer: DropBufferFn,
 	pub read_float: ReadFloatFn,
 	pub load_from_cpu_memory: LoadFromCPUMemoryFn,
 	pub store_to_cpu_memory: StoreToCPUMemoryFn,
@@ -215,81 +215,64 @@ pub struct DeviceBufferVMT {
 	pub run_kernel: RunKernelFn,
 }
 
+#[repr(transparent)]
+pub struct DeviceBufferVMT {
+	data: DeviceBufferVMTData,
+}
+
+impl std::ops::Deref for DeviceBufferVMT {
+	type Target = DeviceBufferVMTData;
+
+	#[inline]
+	fn deref(&self) -> &DeviceBufferVMTData {
+		&self.data
+	}
+}
+
 impl DeviceBufferVMT {
 	/// # Safety
 	///
 	/// - `device` must be a valid pointer that outlives `self`
 	/// - calling the provided functions with pointer to `self` as `this` must be safe
-	#[allow(clippy::too_many_arguments)]
-	pub unsafe fn new(
-		device: NonNull<dyn Device>,
-		device_is_cpu: bool,
-		dtype: DType,
-		kernel_runner: Rc<KernelRunner>,
+	pub unsafe fn new(data: DeviceBufferVMTData) -> Self {
+		Self { data }
+	}
 
-		drop_buffer: DropBufferFn,
-		read_float: ReadFloatFn,
-		load_from_cpu_memory: LoadFromCPUMemoryFn,
-		store_to_cpu_memory: StoreToCPUMemoryFn,
-		mm: MMFn,
-		attention: AttentionFn,
-		run_kernel: RunKernelFn,
-	) -> Self {
-		Self {
-			device,
-			device_is_cpu,
-			dtype,
-			kernel_runner,
-
-			drop_buffer,
-			read_float,
-			load_from_cpu_memory,
-			store_to_cpu_memory,
-			mm,
-			attention,
-			run_kernel,
-		}
+	/// # Safety
+	/// - `T` must be a struct that has `DeviceBufferVMT` as its first field
+	///
+	/// Example:
+	/// ```
+	/// #[repr(C)]
+	/// struct CPUFloatVMT {
+	/// 	vmt: DeviceBufferVMT,
+	/// 	...
+	/// }
+	/// ```
+	#[inline]
+	pub unsafe fn cast<T>(&self) -> &T {
+		unsafe { &*NonNull::from_ref(self).as_ptr().cast::<T>() }
 	}
 
 	#[inline]
 	pub fn device(&self) -> &dyn Device {
-		unsafe { self.device.as_ref() }
+		unsafe { self.data.device.as_ref() }
 	}
 
 	#[inline]
 	pub fn rc_device(&self) -> Rc<dyn Device> {
 		unsafe {
-			let device = self.device.as_ptr();
+			let device = self.data.device.as_ptr();
 			Rc::increment_strong_count(device);
 			Rc::from_raw(device)
 		}
 	}
 
 	#[inline]
-	pub fn device_ptr(&self) -> NonNull<dyn Device> {
-		self.device
-	}
-
-	#[inline]
-	pub fn device_is_cpu(&self) -> bool {
-		self.device_is_cpu
-	}
-
-	#[inline]
 	pub unsafe fn cast_device<T: Device>(&self) -> &T {
-		let (device, _) = self.device_ptr().to_raw_parts();
+		let (device, _) = self.data.device.to_raw_parts();
 		let device = device.cast();
 		unsafe { device.as_ref() }
-	}
-
-	#[inline]
-	pub fn dtype(&self) -> DType {
-		self.dtype
-	}
-
-	#[inline]
-	pub fn kernel_runner(&self) -> &KernelRunner {
-		&self.kernel_runner
 	}
 }
 
@@ -343,7 +326,8 @@ impl DeviceBuffer {
 impl Drop for DeviceBuffer {
 	fn drop(&mut self) {
 		unsafe {
-			(self.vmt.as_ref().drop_buffer)(self.vmt, self.elems, self.device_data);
+			let vmt = self.vmt();
+			(vmt.drop_buffer)(vmt, self.elems, self.device_data);
 		}
 	}
 }

@@ -207,7 +207,7 @@ impl Tensor {
 
 	/// Returns the data type of the tensor elements.
 	pub fn dtype(&self) -> DType {
-		self.vmt().dtype()
+		self.vmt().dtype
 	}
 
 	pub fn vmt(&self) -> &DeviceBufferVMT {
@@ -252,7 +252,7 @@ impl Tensor {
 			return Err(TensorOpError::not_contiguous());
 		}
 		let count = nd.dims[0].size;
-		if dst.len() != count * self.dtype().bytes() {
+		if dst.len() != unsafe { self.dtype().array_bytes_unchecked(count) } {
 			cold_path();
 			return Err(TensorOpError::invalid_buffer_size());
 		}
@@ -270,7 +270,7 @@ impl Tensor {
 			return Err(TensorOpError::not_contiguous());
 		}
 		let count = nd.dims[0].size;
-		if src.len() != count * self.dtype().bytes() {
+		if src.len() != unsafe { self.dtype().array_bytes_unchecked(count) } {
 			cold_path();
 			return Err(TensorOpError::invalid_buffer_size());
 		}

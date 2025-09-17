@@ -62,26 +62,25 @@ impl CPUDevice {
 			return Err(ViewError::InvalidDType);
 		}
 		debug_assert!(T::dtype.bytes() == std::mem::size_of::<T>());
-		if !buf.vmt().device_is_cpu() {
+		if !buf.vmt().device_is_cpu {
 			cold_path();
 			return Err(ViewError::NotOnCPUDevice);
 		}
 		Ok(())
 	}
 
-	unsafe fn drop_buffer(this: NonNull<DeviceBufferVMT>, elems: usize, device_data: NonNull<u8>) {
+	unsafe fn drop_buffer(this: &DeviceBufferVMT, elems: usize, device_data: NonNull<u8>) {
 		unsafe {
-			let this = this.as_ref();
-			let dtype = this.dtype();
-			let device_ptr = this.device_ptr();
-
-			let align = dtype.bytes().min(1);
-			let size = dtype.array_bytes(elems).unwrap();
-			let layout = std::alloc::Layout::from_size_align(size, align).unwrap_unchecked();
+			let dtype = this.dtype;
+			let layout = std::alloc::Layout::from_size_align(
+				dtype.array_bytes_unchecked(elems),
+				dtype.align(),
+			)
+			.unwrap_unchecked();
 			std::alloc::dealloc(device_data.as_ptr(), layout);
 
 			// Recreate the `Rc` that we forgot in `new_buffer()`
-			let rc_device: Rc<dyn Device> = Rc::from_raw(device_ptr.as_ptr());
+			let rc_device: Rc<dyn Device> = Rc::from_raw(this.device.as_ptr());
 			std::mem::drop(rc_device);
 		}
 	}
@@ -107,9 +106,8 @@ impl Device for CPUDevice {
 			},
 		};
 
-		let align = dtype.bytes().min(1);
 		if let Some(size) = dtype.array_bytes(elems)
-			&& let Ok(layout) = std::alloc::Layout::from_size_align(size, align)
+			&& let Ok(layout) = std::alloc::Layout::from_size_align(size, dtype.align())
 			&& let Some(memory) = NonNull::new(unsafe { std::alloc::alloc(layout) })
 		{
 			// We will recreate the `Rc` and drop it in `CPUDevice::drop_buffer()`
