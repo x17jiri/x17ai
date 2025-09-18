@@ -285,15 +285,15 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 
 		mctx.step()?;
 
-		println!("{}", loss.borrow()?.view::<f32>()?);
+		println!("{}", &loss);
 		//println!("--------------------------------------------------");
 	}
 
 	//	for (name, param) in model.named_params("model_params") {
 	//		println!("{}: {}", name, param.borrow().value().borrow()?.view::<f32>()?);
 	//	}
-	println!("input = {}", input.borrow()?.view::<f32>()?);
-	println!("expected = {}", expected.borrow()?.view::<f32>()?);
+	println!("input = {}", &input);
+	println!("expected = {}", &expected);
 
 	/*	let t = Tensor::new_empty_on(&[5, 7], f32::dtype, dev.clone());
 	let _ = t.read_from_file("tensor.bin");

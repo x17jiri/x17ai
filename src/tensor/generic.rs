@@ -190,35 +190,6 @@ impl<M: Map, B: Buffer> GenericTensor<M, B> {
 		self.map.nd_shape()
 	}
 
-	pub fn conv_map<'a, NewMap>(
-		&'a self,
-	) -> std::result::Result<GenericTensor<NewMap, B>, NewMap::Error>
-	where
-		NewMap: Map + TryFrom<&'a M>,
-		B: Clone,
-	{
-		let map = NewMap::try_from(&self.map)?;
-		Ok(GenericTensor { map, buf: self.buf.clone() })
-	}
-
-	pub fn conv_map_ref<NewMap>(
-		&self,
-	) -> std::result::Result<GenericTensor<NewMap, B>, NewMap::Error>
-	where
-		NewMap: Map + TryFrom<M>,
-		B: Clone,
-	{
-		let map = NewMap::try_from(self.map.clone())?;
-		Ok(GenericTensor { map, buf: self.buf.clone() })
-	}
-
-	pub fn ref_map(&self) -> GenericTensor<&M, B>
-	where
-		B: Clone,
-	{
-		GenericTensor { map: &self.map, buf: self.buf.clone() }
-	}
-
 	/// # Errors
 	/// - If the map is not safe, i.e., if some index may be mapped to an out-of-bounds offset.
 	pub fn ensure_safe(&self) -> Result<(), ErrPack<TensorUnsafeError>> {

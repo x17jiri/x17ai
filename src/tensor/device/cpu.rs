@@ -12,7 +12,7 @@ use std::rc::Rc;
 use crate::tensor::HasDType;
 use crate::tensor::device::buffer::DeviceBufferVMT;
 use crate::tensor::device::kernel::runner::KernelRunner;
-use crate::util::mycell;
+use crate::util::mycell::{self, BorrowGuard};
 
 pub mod attention;
 pub mod cpu_float_vmt;
@@ -25,11 +25,10 @@ use crate::tensor::{DType, Device};
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum ViewError {
+pub enum BufAsSliceError {
 	InvalidDType,
 	NotOnCPUDevice,
 }
-
 //--------------------------------------------------------------------------------------------------
 
 pub struct CPUDevice {
@@ -56,17 +55,22 @@ impl CPUDevice {
 		}
 	}
 
-	pub fn ensure_can_view<T: HasDType>(buf: &DeviceBuffer) -> Result<(), ViewError> {
+	pub fn buf_as_slice<'guard, 'buf, T: HasDType>(
+		buf: &BorrowGuard<'buf, DeviceBuffer>,
+	) -> Result<&'guard [T], BufAsSliceError> {
 		if buf.dtype() != T::dtype {
 			cold_path();
-			return Err(ViewError::InvalidDType);
+			return Err(BufAsSliceError::InvalidDType);
 		}
 		debug_assert!(T::dtype.bytes() == std::mem::size_of::<T>());
 		if !buf.vmt().device_is_cpu {
 			cold_path();
-			return Err(ViewError::NotOnCPUDevice);
+			return Err(BufAsSliceError::NotOnCPUDevice);
 		}
-		Ok(())
+		let data = buf.device_data();
+		let elems = buf.elems();
+		let slice = unsafe { std::slice::from_raw_parts(data.as_ptr().cast(), elems) };
+		Ok(slice)
 	}
 
 	unsafe fn drop_buffer(this: &DeviceBufferVMT, elems: usize, device_data: NonNull<u8>) {

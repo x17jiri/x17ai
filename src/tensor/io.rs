@@ -5,16 +5,18 @@
 //
 //------------------------------------------------------------------------------
 
+use std::hint::cold_path;
+
+use crate::tensor::HasDType;
+use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::device::cpu::math::FromToF64;
 use crate::tensor::dim_merger::{DimMerger, DimMergerError};
-use crate::tensor::generic::GenericTensor;
-use crate::tensor::generic::map::{DD, ND, SizeAndStride};
+use crate::tensor::generic::map::{DD, Map, ND, SizeAndStride};
 
 use super::Tensor;
 
 //--------------------------------------------------------------------------------------------------
 
-// TODO - replace with something like tensor.to_nd()
 pub fn merge_dims<const N: usize>(tensor: &Tensor) -> Result<ND<N>, DimMergerError> {
 	let dims = DimMerger::merge::<N>([tensor.map().dims.as_slice()])?;
 	Ok(ND {
@@ -30,30 +32,25 @@ pub fn merge_dims<const N: usize>(tensor: &Tensor) -> Result<ND<N>, DimMergerErr
 
 fn fmt_0d<T: Copy>(
 	f: &mut std::fmt::Formatter,
-	tensor: GenericTensor<ND<0>, &[T]>,
+	(map, buf): (ND<0>, &[T]),
 	mut fmt_one: impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
 ) -> std::fmt::Result {
-	let (map, buf) = tensor.into_parts();
 	fmt_one(f, buf[map.offset])?;
 	Ok(())
 }
 
 fn fmt_1d<T: Copy>(
 	f: &mut std::fmt::Formatter,
-	tensor: GenericTensor<ND<1>, &[T]>,
+	(map, buf): (ND<1>, &[T]),
 	mut fmt_one: impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
 ) -> std::fmt::Result {
 	write!(f, "[")?;
-	let mut first = true;
-	#[allow(clippy::unwrap_used)]
-	for elem in tensor.iter_along_axis(0).unwrap() {
-		if !first {
+	let dim = map.dims[0];
+	for i in 0..dim.size {
+		if i != 0 {
 			write!(f, ", ")?;
 		}
-		first = false;
-
-		let (map, buf) = elem.into_parts();
-		fmt_one(f, buf[map.offset])?;
+		fmt_one(f, buf[map.offset + i * dim.stride])?;
 	}
 	write!(f, "]")?;
 	Ok(())
@@ -61,47 +58,86 @@ fn fmt_1d<T: Copy>(
 
 fn fmt_Nd<T: Copy>(
 	f: &mut std::fmt::Formatter,
-	tensor: &GenericTensor<&DD, &[T]>,
+	(dd_map, buf): (&DD, &[T]),
+	dim_index: usize,
+	offset: usize,
 	indent: usize,
 	fmt_one: &mut impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
 ) -> std::fmt::Result {
-	#[allow(clippy::unwrap_used)]
-	match tensor.ndim() {
-		0 => {
-			let tensor = tensor.conv_map_ref().unwrap();
-			fmt_0d(f, tensor, fmt_one)?;
-		},
-		1 => {
-			let tensor = tensor.conv_map_ref().unwrap();
-			fmt_1d(f, tensor, fmt_one)?;
-		},
-		_ => {
-			let indent_str = "\t".repeat(indent);
-			writeln!(f, "{indent_str}[")?;
-			for sub_tensor in tensor.iter_along_axis(0).unwrap() {
-				write!(f, "{indent_str}\t")?;
-				fmt_Nd(f, &sub_tensor.ref_map(), indent + 1, fmt_one)?;
-				writeln!(f, ",")?;
+	let ndim = dd_map.ndim();
+	if dim_index >= ndim {
+		let map = ND { dims: [], offset };
+		fmt_0d(f, (map, buf), fmt_one)?;
+	} else if dim_index == ndim - 1 {
+		let dims = dd_map.dims.as_slice();
+		let dim = dims[dim_index];
+		let map = ND { dims: [dim], offset };
+		fmt_1d(f, (map, buf), fmt_one)?;
+	} else {
+		let dims = dd_map.dims.as_slice();
+		let dim = dims[dim_index];
+		for _ in 0..indent {
+			write!(f, "\t")?;
+		}
+		for i in 0..dim.size {
+			for _ in 0..indent + 1 {
+				write!(f, "\t")?;
 			}
-			write!(f, "{indent_str}]")?;
-		},
+			fmt_Nd(f, (dd_map, buf), dim_index + 1, offset + i * dim.stride, indent + 1, fmt_one)?;
+			writeln!(f, ",")?;
+		}
+		for _ in 0..indent {
+			write!(f, "\t")?;
+		}
 	}
 	Ok(())
 }
 
 fn fmt_one<T: FromToF64>(f: &mut std::fmt::Formatter, val: T) -> std::fmt::Result {
 	let val = val.to_f64();
-	if val >= 0.0 {
-		write!(f, " ")?;
-	}
-	write!(f, "{val:.7}")
+	let alignment = if val < 0.0 { "" } else { " " };
+	write!(f, "{alignment}{val:.7}")
 }
 
-impl<T: FromToF64> std::fmt::Display for GenericTensor<&DD, &[T]> {
+pub fn fmt_tensor<T: FromToF64>(
+	f: &mut std::fmt::Formatter,
+	map: &DD,
+	buf: &[T],
+) -> std::fmt::Result {
+	write!(f, "Tensor(")?;
+	fmt_Nd(f, (map, buf), 0, map.offset, 0, &mut fmt_one)?;
+	write!(f, ")")
+}
+
+impl std::fmt::Display for Tensor {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-		write!(f, "Tensor(")?;
-		fmt_Nd(f, self, 0, &mut fmt_one)?;
-		write!(f, ")")
+		let map = self.map();
+		let buf = self.buf();
+		if let Ok(buf) = buf.try_borrow() {
+			let dtype = buf.dtype();
+			#[allow(clippy::single_match_else)]
+			match dtype {
+				f32::dtype => {
+					if let Ok(slice) = CPUDevice::buf_as_slice::<f32>(&buf) {
+						fmt_tensor(f, map, slice)
+					} else {
+						// TODO - could move to CPU
+						cold_path();
+						write!(f, "Tensor(<tensor is not on CPU>)")?;
+						Err(std::fmt::Error)
+					}
+				},
+				_ => {
+					cold_path();
+					write!(f, "Tensor(<unsupported dtype {dtype}>)")?;
+					Err(std::fmt::Error)
+				},
+			}
+		} else {
+			cold_path();
+			write!(f, "Tensor(<cannot borrow>)")?;
+			Err(std::fmt::Error)
+		}
 	}
 }
 

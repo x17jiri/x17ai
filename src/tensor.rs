@@ -13,7 +13,6 @@ pub use device::{DType, Device, HasDType};
 
 use crate::rng::Rng;
 use crate::tensor::device::buffer::DeviceBufferVMT;
-use crate::tensor::device::cpu::{CPUDevice, ViewError};
 use crate::tensor::device::kernel::expr::EvaluatesToTensor;
 use crate::tensor::device::{DeviceBuffer, NewDeviceBufferError};
 use crate::tensor::dim_merger::{DimMergerError, DimsDontMatchError, TooManyMergedDimensionsError};
@@ -69,40 +68,6 @@ impl<M: generic::map::Map> GenericTensor<M, Rc<mycell::RefCell<DeviceBuffer>>> {
 		// SAFETY: We only change the type of buffer reference.
 		// So if the map was safe before, it is still safe.
 		Ok(unsafe { GenericTensor::new_unchecked(map, buf) })
-	}
-}
-
-impl<'buf, M: generic::map::Map> GenericTensor<M, BorrowGuard<'buf, DeviceBuffer>> {
-	/// Returns a "view" tensor which has a slice `&[T]` as its buffer.
-	pub fn view<T: HasDType>(&self) -> Result<GenericTensor<&M::Deref, &[T]>, ViewError> {
-		let map = self.map().as_ref();
-		let buf = &**self.buf();
-		CPUDevice::ensure_can_view::<T>(buf)?;
-		let data = buf.device_data();
-		let elems = buf.elems();
-		let slice = unsafe { std::slice::from_raw_parts(data.as_ptr().cast(), elems) };
-
-		// SAFETY: We only change the type of buffer reference.
-		// So if the map was safe before, it is still safe.
-		Ok(unsafe { GenericTensor::new_unchecked(map, slice) })
-	}
-}
-
-impl<'buf, M: generic::map::Map> GenericTensor<M, BorrowMutGuard<'buf, DeviceBuffer>> {
-	/// Returns a "view" tensor which has a slice `&mut [T]` as its buffer.
-	pub fn view_mut<T: HasDType>(
-		&mut self,
-	) -> Result<GenericTensor<&M::Deref, &mut [T]>, ViewError> {
-		let map = self.map().as_ref();
-		let buf = &**self.buf();
-		CPUDevice::ensure_can_view::<T>(buf)?;
-		let data = buf.device_data();
-		let elems = buf.elems();
-		let slice = unsafe { std::slice::from_raw_parts_mut(data.as_ptr().cast(), elems) };
-
-		// SAFETY: We only change the type of buffer reference.
-		// So if the map was safe before, it is still safe.
-		Ok(unsafe { GenericTensor::new_unchecked(map, slice) })
 	}
 }
 
@@ -709,28 +674,6 @@ impl From<ErrPack<TensorUnsafeError>> for ErrPack<TensorOpError> {
 impl From<std::io::Error> for ErrPack<TensorOpError> {
 	fn from(err: std::io::Error) -> Self {
 		TensorOpError::io_error(err)
-	}
-}
-
-impl From<ViewError> for TensorOpError {
-	#[cold]
-	#[inline(never)]
-	fn from(err: ViewError) -> Self {
-		match err {
-			ViewError::InvalidDType => Self::InvalidDType,
-			ViewError::NotOnCPUDevice => Self::InvalidDevice,
-		}
-	}
-}
-
-impl From<ViewError> for ErrPack<TensorOpError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: ViewError) -> Self {
-		Self {
-			code: TensorOpError::from(err),
-			extra: None,
-		}
 	}
 }
 
