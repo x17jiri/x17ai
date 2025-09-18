@@ -113,30 +113,28 @@ impl std::fmt::Display for Tensor {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		let map = self.map();
 		let buf = self.buf();
-		if let Ok(buf) = buf.try_borrow() {
-			let dtype = buf.dtype();
-			#[allow(clippy::single_match_else)]
-			match dtype {
-				f32::dtype => {
-					if let Ok(slice) = CPUDevice::buf_as_slice::<f32>(&buf) {
-						fmt_tensor(f, map, slice)
-					} else {
-						// TODO - could move to CPU
-						cold_path();
-						write!(f, "Tensor(<tensor is not on CPU>)")?;
-						Err(std::fmt::Error)
-					}
-				},
-				_ => {
-					cold_path();
-					write!(f, "Tensor(<unsupported dtype {dtype}>)")?;
-					Err(std::fmt::Error)
-				},
-			}
-		} else {
+		let Ok(buf) = buf.try_borrow() else {
 			cold_path();
 			write!(f, "Tensor(<cannot borrow>)")?;
-			Err(std::fmt::Error)
+			return Err(std::fmt::Error);
+		};
+		let dtype = buf.dtype();
+		#[allow(clippy::single_match_else)]
+		match dtype {
+			f32::dtype => {
+				let Ok(slice) = CPUDevice::buf_as_slice::<f32>(&buf) else {
+					// TODO - could move to CPU
+					cold_path();
+					write!(f, "Tensor(<tensor is not on CPU>)")?;
+					return Err(std::fmt::Error);
+				};
+				fmt_tensor(f, map, slice)
+			},
+			_ => {
+				cold_path();
+				write!(f, "Tensor(<unsupported dtype {dtype}>)")?;
+				Err(std::fmt::Error)
+			},
 		}
 	}
 }

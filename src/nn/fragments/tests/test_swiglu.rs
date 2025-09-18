@@ -52,8 +52,8 @@ fn test_swiglu() -> Result<(), ErrPack<TensorOpError>> {
 	let out = swiglu.forward(AutogradTensor::new(inp, Some(d_inp_capture)))?;
 	let (out, backward_fn) = out.into_parts();
 
-	println!("out = {}", out.borrow()?.view::<f32>()?);
-	println!("expected_out = {}", expected_out.borrow()?.view::<f32>()?);
+	println!("out = {}", &out);
+	println!("expected_out = {}", &expected_out);
 
 	assert!(approx_eq(&out, &expected_out, 1e-4)?);
 
@@ -83,8 +83,8 @@ fn test_swiglu() -> Result<(), ErrPack<TensorOpError>> {
 	autograd::run(backward_fn, d_out)?;
 	let d_inp = d_inp.borrow_mut().take().unwrap();
 
-	println!("d_inp = {}", d_inp.borrow()?.view::<f32>()?);
-	println!("expected_d_inp = {}", expected_d_inp.borrow()?.view::<f32>()?);
+	println!("d_inp = {}", &d_inp);
+	println!("expected_d_inp = {}", &expected_d_inp);
 
 	assert!(approx_eq(&d_inp, &expected_d_inp, 1e-4)?);
 	Ok(())
