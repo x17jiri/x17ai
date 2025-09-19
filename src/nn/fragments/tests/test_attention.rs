@@ -62,7 +62,7 @@ fn test_attention() -> Result<(), ErrPack<TensorOpError>> {
 	let (out, _backward_fn) = out.into_parts();
 
 	println!("out = {}", &out);
-	println!("expected_out = {}", &expected_out);
+		println!("expected_out = {}", &expected_out);
 
 	assert!(approx_eq(&out, &expected_out, 1e-4)?);
 	Ok(())

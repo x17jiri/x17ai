@@ -10,7 +10,7 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 
 use crate::tensor::device::buffer::DeviceBufferVMT;
-use crate::tensor::device::cuda::cuda_shim::CudaStream;
+use crate::tensor::device::cuda::cuda_shim::{CudaError, CudaStream};
 use crate::tensor::device::kernel::runner::KernelRunner;
 use crate::tensor::device::{DeviceBuffer, NewDeviceBufferError};
 use crate::tensor::{DType, Device, HasDType};
@@ -30,11 +30,11 @@ pub struct CudaDevice {
 }
 
 impl CudaDevice {
-	pub fn new() -> Result<Rc<Self>, cuda_shim::CudaInitError> {
+	pub fn new() -> Result<Rc<Self>, CudaError> {
 		Self::new_named("CUDA".to_string())
 	}
 
-	pub fn new_named(name: String) -> Result<Rc<Self>, cuda_shim::CudaInitError> {
+	pub fn new_named(name: String) -> Result<Rc<Self>, CudaError> {
 		let cuda_stream = CudaStream::new()?;
 		let kernel_runner = Rc::new(KernelRunner::new());
 

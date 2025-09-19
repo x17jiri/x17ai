@@ -84,12 +84,14 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 		let dev = unsafe { Self::cast_this(this) }.device();
 		let (map, buf) = dev_src;
 		let val = T::default();
-		dev.cuda_stream.store_to_cpu_memory(
-			buf.device_data(),
-			NonNull::from(&val).cast(),
-			map.offset,
-			std::mem::size_of::<T>(),
-		);
+		unsafe {
+			dev.cuda_stream.store_to_cpu_memory(
+				buf.device_data(),
+				NonNull::from(&val).cast(),
+				map.offset,
+				std::mem::size_of::<T>(),
+			)?;
+		}
 		Ok(val.to_f64())
 	}
 
@@ -101,16 +103,18 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let dev = unsafe { Self::cast_this(this) }.device();
 		let (map, buf) = dev_dst;
-		dev.cuda_stream.load_from_cpu_memory(
-			cpu_src,
-			buf.device_data(),
-			map.offset * std::mem::size_of::<T>(),
-			count * std::mem::size_of::<T>(),
-		);
+		unsafe {
+			dev.cuda_stream.load_from_cpu_memory(
+				cpu_src,
+				buf.device_data(),
+				map.offset * std::mem::size_of::<T>(),
+				count * std::mem::size_of::<T>(),
+			)?;
+		}
 		Ok(())
 	}
 
-	fn store_to_cpu_memory(
+	unsafe fn store_to_cpu_memory(
 		this: &DeviceBufferVMT,
 		dev_src: (ND<0>, &DeviceBuffer),
 		cpu_dst: NonNull<u8>,
@@ -118,18 +122,20 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let dev = unsafe { Self::cast_this(this) }.device();
 		let (map, buf) = dev_src;
-		dev.cuda_stream.store_to_cpu_memory(
-			buf.device_data(),
-			cpu_dst,
-			map.offset * std::mem::size_of::<T>(),
-			count * std::mem::size_of::<T>(),
-		);
+		unsafe {
+			dev.cuda_stream.store_to_cpu_memory(
+				buf.device_data(),
+				cpu_dst,
+				map.offset * std::mem::size_of::<T>(),
+				count * std::mem::size_of::<T>(),
+			)?;
+		}
 		Ok(())
 	}
 
 	#[allow(clippy::panic_in_result_fn)]
 	#[allow(clippy::many_single_char_names)]
-	fn mm(
+	unsafe fn mm(
 		_this: &DeviceBufferVMT,
 		_args: &MatMulArgs,
 		_scale: f64,
@@ -137,7 +143,7 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 		todo!("CUDAFloatVMT::mm is not implemented yet");
 	}
 
-	fn attention(
+	unsafe fn attention(
 		_this: &DeviceBufferVMT,
 		_args: &AttentionArgs,
 	) -> Result<(), ErrPack<TensorOpError>> {

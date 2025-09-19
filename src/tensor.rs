@@ -340,6 +340,7 @@ pub enum TensorOpError {
 	InvalidDevice,
 	InvalidBufferSize,
 	IOError,
+	DeviceError,
 }
 
 impl TensorOpError {
@@ -411,6 +412,18 @@ impl TensorOpError {
 
 	pub fn dtype_mismatch() -> ErrPack<Self> {
 		ErrPack { code: Self::DTypeMismatch, extra: None }
+	}
+
+	#[cold]
+	#[inline(never)]
+	pub fn device_error(message: &str) -> ErrPack<Self> {
+		ErrPack {
+			code: Self::DeviceError,
+			extra: Some(Box::new(ErrExtra {
+				message: message.to_string(),
+				nested: None,
+			})),
+		}
 	}
 }
 
