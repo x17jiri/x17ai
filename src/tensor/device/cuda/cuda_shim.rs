@@ -15,24 +15,67 @@ use crate::tensor::device::buffer::{KernelElemArg, KernelOutput, KernelReduceArg
 //--------------------------------------------------------------------------------------------------
 
 #[repr(C)]
-struct PointerResult {
-	// TODO - the decision of ok or err should be based on `result == null`,
-	// not on `error == null`.
-	// That way:
-	// - we can avoid reading `error` most of the time.
-	// - we can safely convert result to NonNull in Rust.
-	// - We can use something like `return (stream, "Err: Cuda returned null")` in the C code.
-	result: *mut std::ffi::c_void,
-	error: *const std::ffi::c_char,
+pub struct StaticString {
+	data: *const std::ffi::c_char,
+	len: usize,
 }
 
-struct VoidResult {
-	error: *const std::ffi::c_char,
+impl StaticString {
+	pub fn to_str(&self) -> &'static str {
+		unsafe {
+			let data = self.data.cast::<u8>();
+			let len = self.len;
+			let slice = std::slice::from_raw_parts(data, len);
+			std::str::from_utf8_unchecked(slice)
+		}
+	}
+}
+
+// The decision of whether the result is ok or not
+// is based on `result == null`, not on `error == null`.
+// That way:
+// - we can avoid reading `error` most of the time.
+// - we can safely convert result to NonNull in Rust.
+// - we can use something like `Ok(result, "Err: Cuda returned null")` in the C++ code,
+// avoiding one condition.
+#[repr(C)]
+struct PointerResult {
+	result: *mut std::ffi::c_void,
+	error: *const StaticString,
+}
+
+impl PointerResult {
+	pub fn into_result<U, F>(self, map: F) -> Result<U, CudaError>
+	where
+		F: FnOnce(NonNull<std::ffi::c_void>) -> U,
+	{
+		if let Some(nonnull) = NonNull::new(self.result) {
+			Ok(map(nonnull))
+		} else {
+			cold_path();
+			Err(CudaError { msg: unsafe { &*self.error } })
+		}
+	}
+}
+
+#[repr(C)]
+pub struct VoidResult {
+	error: *const StaticString,
+}
+
+impl VoidResult {
+	pub fn into_result(self) -> Result<(), CudaError> {
+		if self.error.is_null() {
+			Ok(())
+		} else {
+			cold_path();
+			Err(CudaError { msg: unsafe { &*self.error } })
+		}
+	}
 }
 
 #[link(name = "cuda_shim")]
 unsafe extern "C" {
-	// Returns 0 on success
 	fn x17ai_cuda_open_stream() -> PointerResult;
 	fn x17ai_cuda_close_stream(stream: *mut std::ffi::c_void) -> VoidResult;
 
@@ -69,14 +112,14 @@ unsafe extern "C" {
 
 //--------------------------------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct CudaError {
-	pub msg: &'static str,
+	pub msg: &'static StaticString,
 }
 
 impl From<CudaError> for ErrPack<TensorOpError> {
 	fn from(err: CudaError) -> Self {
-		TensorOpError::device_error(err.msg)
+		TensorOpError::device_error(err.msg.to_str())
 	}
 }
 
@@ -88,26 +131,14 @@ pub struct CudaStream {
 
 impl CudaStream {
 	pub fn new() -> Result<Self, CudaError> {
-		let ptr = unsafe { x17ai_cuda_open_stream() };
-		if let Some(nonnull) = NonNull::new(ptr) {
-			Ok(Self { ptr: nonnull })
-		} else {
-			cold_path();
-			Err(CudaError { msg: "Failed to open CUDA stream" })
-		}
+		unsafe { x17ai_cuda_open_stream() }.into_result(|ptr| Self { ptr })
 	}
 
 	/// # Safety
 	///
 	/// The allocated block of memory may or may not be initialized.
 	pub unsafe fn alloc(&self, bytes: usize) -> Result<NonNull<u8>, CudaError> {
-		let ptr = unsafe { x17ai_cuda_alloc(self.ptr.as_ptr(), bytes) }.cast();
-		if let Some(nonnull) = NonNull::new(ptr) {
-			Ok(nonnull)
-		} else {
-			cold_path();
-			Err(CudaError { msg: "Failed to allocate CUDA memory" })
-		}
+		unsafe { x17ai_cuda_alloc(self.ptr.as_ptr(), bytes) }.into_result(NonNull::cast)
 	}
 
 	/// # Safety
@@ -117,6 +148,9 @@ impl CudaStream {
 		unsafe { x17ai_cuda_free(self.ptr.as_ptr(), ptr.as_ptr().cast()) };
 	}
 
+	/// # Safety
+	///
+	/// TODO
 	pub unsafe fn load_from_cpu_memory(
 		&self,
 		cpu_src: NonNull<u8>,
@@ -124,7 +158,7 @@ impl CudaStream {
 		offset_bytes: usize,
 		size_bytes: usize,
 	) -> Result<(), CudaError> {
-		let err = unsafe {
+		unsafe {
 			x17ai_cuda_load_from_cpu_memory(
 				self.ptr.as_ptr(),
 				cpu_src.as_ptr(),
@@ -132,17 +166,13 @@ impl CudaStream {
 				offset_bytes,
 				size_bytes,
 			)
-		};
-		if err == 0 {
-			Ok(())
-		} else {
-			cold_path();
-			Err(CudaError {
-				msg: "Failed to load from CPU memory to CUDA memory",
-			})
 		}
+		.into_result()
 	}
 
+	/// # Safety
+	///
+	/// TODO
 	pub unsafe fn store_to_cpu_memory(
 		&self,
 		cuda_src: NonNull<u8>,
@@ -150,7 +180,7 @@ impl CudaStream {
 		offset_bytes: usize,
 		size_bytes: usize,
 	) -> Result<(), CudaError> {
-		let err = unsafe {
+		unsafe {
 			x17ai_cuda_store_to_cpu_memory(
 				self.ptr.as_ptr(),
 				cuda_src.as_ptr(),
@@ -158,15 +188,8 @@ impl CudaStream {
 				offset_bytes,
 				size_bytes,
 			)
-		};
-		if err == 0 {
-			Ok(())
-		} else {
-			cold_path();
-			Err(CudaError {
-				msg: "Failed to store from CUDA memory to CPU memory",
-			})
 		}
+		.into_result()
 	}
 }
 
@@ -178,23 +201,13 @@ impl Drop for CudaStream {
 
 //--------------------------------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug)]
-pub struct CudaNewKernelError;
-
-#[derive(Clone, Copy, Debug)]
-pub struct CudaRunKernelError;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CudaKernelHandle(NonNull<std::ffi::c_void>);
 
 #[allow(clippy::option_if_let_else)]
-pub fn new_kernel(source: &str) -> Result<CudaKernelHandle, CudaNewKernelError> {
-	let kernel = unsafe { x17ai_cuda_new_kernel(source.as_ptr().cast(), source.len()) };
-	if let Some(nonnull) = NonNull::new(kernel.cast_mut()) {
-		Ok(CudaKernelHandle(nonnull))
-	} else {
-		Err(CudaNewKernelError) //
-	}
+pub fn new_kernel(source: &str) -> Result<CudaKernelHandle, CudaError> {
+	unsafe { x17ai_cuda_new_kernel(source.as_ptr().cast(), source.len()) }
+		.into_result(CudaKernelHandle)
 }
 
 /// # Safety
@@ -204,20 +217,18 @@ pub unsafe fn del_kernel(handle: CudaKernelHandle) {
 	unsafe { x17ai_cuda_del_kernel(handle.0.as_ptr()) };
 }
 
+/// # Safety
+///
+/// TODO
 pub unsafe fn run_kernel(
 	handle: &CudaKernelHandle,
 	o: *const KernelOutput,
 	elem_args: *const KernelElemArg,
 	reduce_args: *const KernelReduceArg,
 	const_args: *const f64,
-) -> Result<(), CudaRunKernelError> {
-	let err =
-		unsafe { x17ai_cuda_run_kernel(handle.0.as_ptr(), o, elem_args, reduce_args, const_args) };
-	if err == 0 {
-		Ok(())
-	} else {
-		Err(CudaRunKernelError) //
-	}
+) -> Result<(), CudaError> {
+	unsafe { x17ai_cuda_run_kernel(handle.0.as_ptr(), o, elem_args, reduce_args, const_args) }
+		.into_result()
 }
 
 //--------------------------------------------------------------------------------------------------

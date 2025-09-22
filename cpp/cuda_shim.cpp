@@ -34,28 +34,69 @@ using isize =
 static std::atomic<bool> cuda_initialized = false;
 static std::mutex cuda_init_mutex;
 
-struct Err {
-	char const *message;
+struct StaticString {
+	const char *data;
+	usize len;
 
-	Err(char const *msg): message(msg) {}
+	consteval StaticString(char const *str): data(str), len(strlen(str)) {}
 };
 
+struct Err {
+	StaticString const *message;
+
+	Err(StaticString const *m): message(m) {}
+};
+
+// The decision of whether the result is ok or not
+// is based on `result == null`, not on `error == null`.
+// That way:
+// - we can avoid reading `error` most of the time.
+// - we can safely convert result to NonNull in Rust.
+// - we can use something like `Ok(result, "Err: Cuda returned null")` in the C++ code,
+// avoiding one condition.
 struct PointerResult {
 	void *result;
-	char const *error;
+	StaticString const *error;
 
-	PointerResult(void *res): result(res), error(nullptr) {}
+	PointerResult(void *ptr, StaticString const *err): result(ptr), error(err) {
+		assert(err != nullptr);
+	}
 
 	PointerResult(Err err): result(nullptr), error(err.message) {}
+
+	inline bool is_ok() const {
+		return result != nullptr;
+	}
+
+	inline bool is_err() const {
+		return result == nullptr;
+	}
 };
+
+// `err` will be used if `ptr == nullptr`
+PointerResult Ok(void *ptr, StaticString const *err) {
+	return PointerResult(ptr, err);
+}
 
 struct VoidResult {
-	char const *error;
+	StaticString const *error;
 
-	VoidResult(): error(nullptr) {}
+	VoidResult(StaticString const *err): error(err) {}
 
 	VoidResult(Err err): error(err.message) {}
+
+	inline bool is_ok() const {
+		return error == nullptr;
+	}
+
+	inline bool is_err() const {
+		return error != nullptr;
+	}
 };
+
+VoidResult Ok() {
+	return VoidResult(nullptr);
+}
 
 extern "C" {
 	PointerResult x17ai_cuda_open_stream() {
@@ -65,13 +106,15 @@ extern "C" {
 				if (!cuda_initialized.load(std::memory_order_relaxed)) {
 					CUresult result = cuInit(0);
 					if (result != CUDA_SUCCESS) [[unlikely]] {
-						return Err("Failed to initialize CUDA");
+						static StaticString const message = "Failed to initialize CUDA";
+						return Err(&message);
 					}
 
 					int cuda_device_count;
 					cudaError_t error = cudaGetDeviceCount(&cuda_device_count);
 					if (error != cudaSuccess || cuda_device_count <= 0) [[unlikely]] {
-						return Err("No CUDA devices found");
+						static StaticString const message = "No CUDA devices found";
+						return Err(&message);
 					}
 					cuda_initialized.store(true, std::memory_order_release);
 				}
@@ -80,29 +123,34 @@ extern "C" {
 			int device_id = 0;
 			cudaError_t error = cudaSetDevice(device_id);
 			if (error != cudaSuccess) [[unlikely]] {
-				return Err("Failed to set CUDA device");
+				static StaticString const message = "Failed to set CUDA device";
+				return Err(&message);
 			}
 
 			cudaStream_t stream;
 			error = cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
 			if (error != cudaSuccess) [[unlikely]] {
-				return Err("Failed to create CUDA stream");
+				static StaticString const message = "Failed to create CUDA stream";
+				return Err(&message);
 			}
 
-			return stream;
+			static StaticString const message = "`cudaStreamCreateWithFlags()` returned nullptr";
+			return Ok(stream, &message);
 		} catch (...) {
-			return Err("CUDA initialization threw an exception");
+			static StaticString const message = "CUDA initialization threw an exception";
+			return Err(&message);
 		}
 	}
 
-	VoidResult cuda_close_stream(void *stream) {
+	VoidResult x17ai_cuda_close_stream(void *stream) {
 		assert(stream != nullptr);
 		cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
 		try {
 			cudaStreamDestroy(cuda_stream);
-			return VoidResult();
+			return Ok();
 		} catch (...) {
-			return Err("CUDA stream close threw an exception");
+			static StaticString const message = "CUDA stream close threw an exception";
+			return Err(&message);
 		}
 	}
 
@@ -114,11 +162,14 @@ extern "C" {
 			void *memory = nullptr;
 			cudaError_t err = cudaMallocAsync(&memory, bytes, cuda_stream);
 			if (err != cudaSuccess) [[unlikely]] {
-				return Err("CUDA malloc failed");
+				static StaticString const message = "CUDA malloc failed";
+				return Err(&message);
 			}
-			return memory;
+			static StaticString const message = "`cudaMallocAsync()` returned nullptr";
+			return Ok(memory, &message);
 		} catch (...) {
-			return Err("CUDA allocation threw an exception");
+			static StaticString const message = "CUDA allocation threw an exception";
+			return Err(&message);
 		}
 	}
 
@@ -129,28 +180,12 @@ extern "C" {
 		cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
 		try {
 			cudaFreeAsync(ptr, cuda_stream);
-			return VoidResult();
+			return Ok();
 		} catch (...) {
-			return Err("CUDA free threw an exception");
+			static StaticString const message = "CUDA free threw an exception";
+			return Err(&message);
 		}
 	}
-
-	/*
-	pub fn x17ai_cuda_load_from_cpu_memory(
-		stream: *mut std::ffi::c_void,
-		cpu_src: *const u8,
-		cuda_dst: *mut u8,
-		offset_bytes: usize,
-		size_bytes: usize,
-	) -> std::ffi::c_int;
-	pub fn x17ai_cuda_store_to_cpu_memory(
-		stream: *mut std::ffi::c_void,
-		cuda_src: *const u8,
-		cpu_dst: *mut u8,
-		offset_bytes: usize,
-		size_bytes: usize,
-	) -> std::ffi::c_int;
-	*/
 
 	VoidResult x17ai_cuda_load_from_cpu_memory(
 		void *stream,
@@ -173,11 +208,44 @@ extern "C" {
 				cuda_stream
 			);
 			if (err != cudaSuccess) [[unlikely]] {
-				return Err("CUDA host to device memcpy failed");
+				static StaticString const message = "CUDA host to device memcpy failed";
+				return Err(&message);
 			}
-			return VoidResult();
+			return Ok();
 		} catch (...) {
-			return Err("CUDA host to device memcpy threw an exception");
+			static StaticString const message = "CUDA host to device memcpy threw an exception";
+			return Err(&message);
+		}
+	}
+
+	VoidResult x17ai_cuda_store_to_cpu_memory(
+		void *stream,
+		const u8 *cuda_src,
+		u8 *cpu_dst,
+		usize offset_bytes,
+		usize size_bytes
+	) {
+		assert(stream != nullptr);
+		assert(cuda_src != nullptr);
+		assert(cpu_dst != nullptr);
+		assert(cuda_initialized.load(std::memory_order_acquire));
+		cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
+		try {
+			cudaError_t err = cudaMemcpyAsync(
+				cpu_dst,
+				cuda_src + offset_bytes,
+				size_bytes,
+				cudaMemcpyDeviceToHost,
+				cuda_stream
+			);
+			if (err != cudaSuccess) [[unlikely]] {
+				static StaticString const message = "CUDA device to host memcpy failed";
+				return Err(&message);
+			}
+			return Ok();
+		} catch (...) {
+			static StaticString const message = "CUDA device to host memcpy threw an exception";
+			return Err(&message);
 		}
 	}
 

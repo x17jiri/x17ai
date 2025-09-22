@@ -68,6 +68,7 @@
 #![allow(clippy::needless_lifetimes)]
 #![allow(unused_parens)]
 #![allow(clippy::tabs_in_doc_comments)]
+#![allow(clippy::doc_markdown)]
 
 use std::convert::Infallible;
 

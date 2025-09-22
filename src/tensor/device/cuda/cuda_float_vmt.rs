@@ -162,9 +162,9 @@ impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + Lo
 		let this = unsafe { Self::cast_this(this) };
 		let Some(Some(compiled_kernel)) = this.compiled_kernels.get(kernel_data.id) else {
 			cold_path();
-			todo!("CUDAFloatExecutor::run_kernel: need to compile kernel");
+			todo!("CUDAFloatVMT::run_kernel: need to compile kernel");
 		};
 		let _compiled_kernel = compiled_kernel.as_ref();
-		todo!("CUDAFloatExecutor::run_kernel is not implemented yet");
+		todo!("CUDAFloatVMT::run_kernel is not implemented yet");
 	}
 }

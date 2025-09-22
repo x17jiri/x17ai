@@ -320,7 +320,6 @@ pub enum TensorOpError {
 	CannotBorrow,
 	CannotBorrowMut,
 	MissingReduceDimension,
-	ExecutorError,
 	DimIndexOutOfBounds,
 	IndexOutOfBounds,
 	ElementsOverflow,
