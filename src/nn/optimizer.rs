@@ -12,7 +12,7 @@
 
 use std::hint::cold_path;
 
-use crate::tensor::{Tensor, TensorOpError};
+use crate::tensor::{HasDType, Tensor, TensorOpError};
 use crate::{ErrExtra, ErrPack, custom_kernel};
 
 //--------------------------------------------------------------------------------------------------
@@ -67,9 +67,11 @@ impl OptParam {
 		let value = value_orig_shape.merge_all_dims().unwrap(); // if fails, tensor is not contiguous
 		let value = value.reshape_last_dim([parts, part_elems]).unwrap();
 
+		let m_dtype = value.dtype().max(f32::dtype); // TODO
 		let m = value.new_empty_like()?;
 		m.assign(0.0)?;
 
+		let v_dtype = m_dtype; // TODO
 		let v = value.new_empty(&[parts, 1], value.dtype())?;
 		v.assign(0.0)?;
 

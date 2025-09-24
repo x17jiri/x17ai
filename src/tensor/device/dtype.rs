@@ -105,6 +105,14 @@ impl DType {
 		}
 		self.bytes() * elems
 	}
+
+	pub fn max(self, other: Self) -> Option<Self> {
+		if self.kind != other.kind {
+			cold_path();
+			return None;
+		}
+		Some(if self.bits >= other.bits { self } else { other })
+	}
 }
 
 #[repr(u8)]
