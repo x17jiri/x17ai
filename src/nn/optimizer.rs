@@ -67,12 +67,12 @@ impl OptParam {
 		let value = value_orig_shape.merge_all_dims().unwrap(); // if fails, tensor is not contiguous
 		let value = value.reshape_last_dim([parts, part_elems]).unwrap();
 
-		let m_dtype = value.dtype().max(f32::dtype); // TODO
-		let m = value.new_empty_like()?;
+		let m_dtype = value.dtype().max(f32::dtype).unwrap(); // TODO - replace `unwrap` with error?
+		let m = value.new_empty_like(m_dtype)?;
 		m.assign(0.0)?;
 
-		let v_dtype = m_dtype; // TODO
-		let v = value.new_empty(&[parts, 1], value.dtype())?;
+		let v_dtype = m_dtype;
+		let v = value.new_empty(&[parts, 1], v_dtype)?;
 		v.assign(0.0)?;
 
 		Ok(Self {

@@ -94,10 +94,10 @@ impl Tensor {
 		Self::new_empty_on(shape, dtype, self.device())
 	}
 
-	/// Allocate a new tensor on the same device with the same shape and dtype as `self`.
-	pub fn new_empty_like(&self) -> Result<Self, ErrPack<TensorOpError>> {
+	/// Allocate a new tensor on the same device and with the same shape as `self`.
+	pub fn new_empty_like(&self, dtype: DType) -> Result<Self, ErrPack<TensorOpError>> {
 		let (map, elems) = self.map().new_like();
-		let buf = self.device().new_buffer(self.buf().dtype(), elems)?;
+		let buf = self.device().new_buffer(dtype, elems)?;
 
 		// SAFETY: We created the buffer to be as big as the mapping.
 		Ok(unsafe { Self::new_unchecked(map, buf) })
