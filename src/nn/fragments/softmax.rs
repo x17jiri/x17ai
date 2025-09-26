@@ -12,6 +12,7 @@ use crate::autograd::{self, AutogradTensor, BackwardFn, StraightThroughBackwardF
 use crate::nn::fragments::UnaryFragment;
 use crate::nn::param::Param;
 use crate::rng::Rng;
+use crate::tensor::device::dtype::common_dtype;
 use crate::tensor::{DType, Tensor, TensorOpError};
 use crate::{ErrPack, custom_kernel};
 
@@ -56,7 +57,7 @@ impl UnaryFragment for Softmax {
 	fn forward(&self, inp_node: AutogradTensor) -> Result<AutogradTensor, ErrPack<TensorOpError>> {
 		let (inp, inp_backward) = inp_node.into_parts();
 		let out = inp.reuse_or_new_like()?;
-		let internal_dtype = self.internal_dtype.max(inp.dtype())?;
+		let internal_dtype = common_dtype(inp.dtype(), self.internal_dtype)?;
 
 		let max = inp.new_replace_tail(1, &[1], inp.dtype())?; // [..., 1]
 		let sum_recip = max.new_empty_like(internal_dtype)?;
@@ -112,7 +113,7 @@ impl BackwardFn for SoftmaxBackwardFn_Precise {
 		queue: &mut autograd::Queue,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let Self { out, internal_dtype, inp_backward } = Box::into_inner(self);
-		let internal_dtype = internal_dtype.max(d_out.dtype())?;
+		let internal_dtype = common_dtype(d_out.dtype(), internal_dtype)?;
 
 		let g = out.new_replace_tail(1, &[1], internal_dtype)?; // [..., 1]
 		g.assign(custom_kernel!(

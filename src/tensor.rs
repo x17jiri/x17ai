@@ -12,7 +12,7 @@ use std::rc::Rc;
 pub use device::{DType, Device, HasDType};
 
 use crate::rng::Rng;
-use crate::tensor::device::dtype::IncomparableDTypesError;
+use crate::tensor::device::dtype::DTypeMismatch;
 use crate::tensor::device::kernel::expr::EvaluatesToTensor;
 use crate::tensor::device::{DeviceBuffer, NewDeviceBufferError};
 use crate::tensor::dim_merger::{DimMergerError, DimsDontMatchError, TooManyMergedDimensionsError};
@@ -699,8 +699,8 @@ impl From<DimIndexOutOfBoundsError> for ErrPack<TensorOpError> {
 	}
 }
 
-impl From<IncomparableDTypesError> for ErrPack<TensorOpError> {
-	fn from(_: IncomparableDTypesError) -> Self {
+impl From<DTypeMismatch> for ErrPack<TensorOpError> {
+	fn from(_: DTypeMismatch) -> Self {
 		Self {
 			code: TensorOpError::DTypeMismatch,
 			extra: None,

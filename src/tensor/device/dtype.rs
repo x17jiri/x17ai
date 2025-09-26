@@ -51,7 +51,7 @@ pub struct DType {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct IncomparableDTypesError;
+pub struct DTypeMismatch;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -109,14 +109,14 @@ impl DType {
 		}
 		self.bytes() * elems
 	}
+}
 
-	pub fn max(self, other: Self) -> Result<Self, IncomparableDTypesError> {
-		if self.kind != other.kind {
-			cold_path();
-			return Err(IncomparableDTypesError);
-		}
-		Ok(if self.bits >= other.bits { self } else { other })
+pub fn common_dtype(a: DType, b: DType) -> Result<DType, DTypeMismatch> {
+	if a.kind != b.kind {
+		cold_path();
+		return Err(DTypeMismatch); // TODO - we can probably always convert to f64
 	}
+	Ok(if a.bits >= b.bits { a } else { b })
 }
 
 #[repr(u8)]
