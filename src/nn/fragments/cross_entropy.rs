@@ -8,7 +8,7 @@
 use crate::autograd::{self, AutogradTensor, BackwardFn, LossFn};
 use crate::nn::fragments::UnaryFragment;
 use crate::nn::fragments::softmax::{Softmax, SoftmaxGradMode};
-use crate::tensor::{Tensor, TensorOpError};
+use crate::tensor::{DType, HasDType, Tensor, TensorOpError};
 use crate::{ErrPack, custom_kernel};
 
 pub struct CrossEntropy {
@@ -52,7 +52,8 @@ impl LossFn for CrossEntropyLossFn {
 		let value = &self.value;
 		let target = &self.target;
 
-		let err_sums = value.new_replace_tail(1, &[1])?;
+		let sum_dtype = value.dtype().max(f32::dtype)?;
+		let err_sums = value.new_replace_tail(1, &[1], sum_dtype)?;
 		err_sums.assign(custom_kernel!(
 			[target: &target, value: &value], (), {
 				(target * value.ln()).sum()
@@ -72,9 +73,9 @@ impl LossFn for CrossEntropyLossFn {
 		Ok(result)
 	}
 
-	fn backward(self: Box<Self>) -> Result<(), ErrPack<TensorOpError>> {
+	fn backward(self: Box<Self>, grad_dtype: DType) -> Result<(), ErrPack<TensorOpError>> {
 		let Self { value, target, inp_backward } = Box::into_inner(self);
-		let d_inp = value.new_empty_like()?;
+		let d_inp = value.new_empty_like(grad_dtype)?;
 		d_inp.assign(custom_kernel!(
 			[value: &value, target: &target], (), {
 				value - target

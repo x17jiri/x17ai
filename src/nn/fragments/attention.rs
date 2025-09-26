@@ -7,7 +7,6 @@
 
 use std::cell::RefCell;
 use std::hint::{cold_path, likely};
-use std::ptr::NonNull;
 use std::rc::Rc;
 
 use smallvec::{SmallVec, smallvec};
@@ -16,7 +15,7 @@ use crate::autograd::{AutogradTensor, BackwardFn};
 use crate::nn::Param;
 use crate::nn::fragments::Fragment;
 use crate::rng::Rng;
-use crate::tensor::device::buffer::AttentionArgs;
+use crate::tensor::device::AttentionArgs;
 use crate::tensor::dim_merger::DimMerger;
 use crate::tensor::generic::map::dd::INLINE_DIMS;
 use crate::tensor::{Tensor, TensorOpError};
@@ -138,7 +137,7 @@ impl Attention {
 			q_offset: q_map.offset,
 			q_item_stride: q_count.stride,
 			q_head_stride: q_heads.stride,
-			q: q.buf().device_data(),
+			q: q.buf().memory(),
 
 			k_count: k_count.size,
 			group_shift: group_shift as usize,
@@ -146,7 +145,7 @@ impl Attention {
 			k_offset: k_map.offset,
 			k_item_stride: k_count.stride,
 			k_head_stride: k_heads.stride,
-			k: k.buf().device_data(),
+			k: k.buf().memory(),
 
 			// v_count == k_count
 			// v_head_count == head_count >> group_shift
@@ -154,7 +153,7 @@ impl Attention {
 			v_offset: v_map.offset,
 			v_item_stride: v_count.stride,
 			v_head_stride: v_heads.stride,
-			v: v.buf().device_data(),
+			v: v.buf().memory(),
 
 			// o_count == q_count
 			// o_head_count == head_count
@@ -162,7 +161,7 @@ impl Attention {
 			o_offset: o_map.offset,
 			o_item_stride: o_count.stride,
 			o_head_stride: o_heads.stride,
-			o: o.buf().device_data(),
+			o: o.buf().memory(),
 
 			q_buf_elems: q.buf().elems(),
 			k_buf_elems: k.buf().elems(),

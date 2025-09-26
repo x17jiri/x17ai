@@ -11,7 +11,7 @@ use std::rc::Rc;
 use smallvec::SmallVec;
 
 use crate::ErrPack;
-use crate::tensor::{Tensor, TensorOpError};
+use crate::tensor::{DType, Tensor, TensorOpError};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -84,7 +84,7 @@ pub trait LossFn {
 	fn value(&self) -> Tensor;
 	fn target(&self) -> Tensor;
 	fn loss(&self) -> Result<Tensor, ErrPack<TensorOpError>>;
-	fn backward(self: Box<Self>) -> Result<(), ErrPack<TensorOpError>>;
+	fn backward(self: Box<Self>, grad_dtype: DType) -> Result<(), ErrPack<TensorOpError>>;
 }
 
 //--------------------------------------------------------------------------------------------------

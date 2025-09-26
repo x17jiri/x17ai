@@ -10,7 +10,6 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 
 use crate::tensor::HasDType;
-use crate::tensor::device::buffer::DeviceBufferVMT;
 use crate::tensor::device::kernel::runner::KernelRunner;
 use crate::util::mycell::{self, BorrowGuard};
 
@@ -63,30 +62,14 @@ impl CPUDevice {
 			return Err(BufAsSliceError::InvalidDType);
 		}
 		debug_assert!(T::dtype.bytes() == std::mem::size_of::<T>());
-		if !buf.vmt().device_is_cpu {
+		if !buf.device_base().is_cpu() {
 			cold_path();
 			return Err(BufAsSliceError::NotOnCPUDevice);
 		}
-		let data = buf.device_data();
+		let memory = buf.memory();
 		let elems = buf.elems();
-		let slice = unsafe { std::slice::from_raw_parts(data.as_ptr().cast(), elems) };
+		let slice = unsafe { std::slice::from_raw_parts(memory.as_ptr().cast(), elems) };
 		Ok(slice)
-	}
-
-	unsafe fn drop_buffer(this: &DeviceBufferVMT, elems: usize, device_data: NonNull<u8>) {
-		unsafe {
-			let dtype = this.dtype;
-			let layout = std::alloc::Layout::from_size_align(
-				dtype.array_bytes_unchecked(elems),
-				dtype.align(),
-			)
-			.unwrap_unchecked();
-			std::alloc::dealloc(device_data.as_ptr(), layout);
-
-			// Recreate the `Rc` that we forgot in `new_buffer()`
-			let rc_device: Rc<dyn Device> = Rc::from_raw(this.device.as_ptr());
-			std::mem::drop(rc_device);
-		}
 	}
 }
 
@@ -101,29 +84,28 @@ impl Device for CPUDevice {
 		dtype: DType,
 		elems: usize,
 	) -> Result<Rc<mycell::RefCell<DeviceBuffer>>, NewDeviceBufferError> {
-		#[allow(clippy::single_match_else)]
-		let vmt = match dtype {
-			f32::dtype => NonNull::from_ref(&self.f32_vmt),
-			_ => {
-				cold_path();
-				return Err(NewDeviceBufferError::UnsupportedDType);
-			},
-		};
-
+		// TODO - do i need `NewDeviceBufferError` as error type? I never return unsupported dtype
 		if let Some(size) = dtype.array_bytes(elems)
 			&& let Ok(layout) = std::alloc::Layout::from_size_align(size, dtype.align())
 			&& let Some(memory) = NonNull::new(unsafe { std::alloc::alloc(layout) })
 		{
-			// We will recreate the `Rc` and drop it in `drop_buffer()`
-			std::mem::forget(self);
-
-			let device_data = memory;
 			Ok(Rc::new(mycell::RefCell::new(unsafe {
-				DeviceBuffer::new(device_data, elems, vmt.cast())
+				DeviceBuffer::new(memory, dtype, elems, self)
 			})))
 		} else {
 			cold_path();
 			Err(NewDeviceBufferError::AllocationFailed)
+		}
+	}
+
+	unsafe fn drop_buffer(&self, data: NonNull<u8>, dtype: DType, elems: usize) {
+		unsafe {
+			let layout = std::alloc::Layout::from_size_align(
+				dtype.array_bytes_unchecked(elems),
+				dtype.align(),
+			)
+			.unwrap_unchecked();
+			std::alloc::dealloc(data.as_ptr(), layout);
 		}
 	}
 }

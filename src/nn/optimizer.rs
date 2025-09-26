@@ -12,7 +12,7 @@
 
 use std::hint::cold_path;
 
-use crate::tensor::{HasDType, Tensor, TensorOpError};
+use crate::tensor::{DType, HasDType, Tensor, TensorOpError};
 use crate::{ErrExtra, ErrPack, custom_kernel};
 
 //--------------------------------------------------------------------------------------------------
@@ -50,6 +50,7 @@ pub struct OptParam {
 
 	pub(crate) value_orig_shape: Tensor, // shape: user defined
 	pub(crate) grad: Option<Tensor>,     // shape: same as `value_orig_shape`
+	pub(crate) grad_dtype: DType,
 	pub(crate) grad_error: bool,
 }
 
@@ -67,7 +68,7 @@ impl OptParam {
 		let value = value_orig_shape.merge_all_dims().unwrap(); // if fails, tensor is not contiguous
 		let value = value.reshape_last_dim([parts, part_elems]).unwrap();
 
-		let m_dtype = value.dtype().max(f32::dtype).unwrap(); // TODO - replace `unwrap` with error?
+		let m_dtype = value.dtype().max(f32::dtype)?;
 		let m = value.new_empty_like(m_dtype)?;
 		m.assign(0.0)?;
 
@@ -85,6 +86,7 @@ impl OptParam {
 
 			value_orig_shape,
 			grad: None,
+			grad_dtype: m_dtype,
 			grad_error: false,
 		})
 	}
@@ -108,7 +110,6 @@ impl OptParam {
 		})
 	}
 
-	#[allow(clippy::panic_in_result_fn)]
 	pub fn step(&mut self, coef: &OptCoef) -> Result<(), ErrPack<TensorOpError>> {
 		if self.grad_error {
 			cold_path();
@@ -116,7 +117,7 @@ impl OptParam {
 		}
 
 		let Some(grad) = &self.grad else {
-			return Ok(());
+			return Ok(()); // we didn't get gradient this step; nothing to do
 		};
 		let grad = grad.merge_all_dims()?;
 		let grad = grad.reshape_last_dim([self.parts, self.part_elems])?;
@@ -152,7 +153,7 @@ impl OptParam {
 			}
 		))?;
 
-		let v_rsqrt = self.v.new_empty_like()?;
+		let v_rsqrt = self.v.new_empty_like(self.v.dtype())?;
 		v_rsqrt.assign(custom_kernel!(
 			[v: &self.v], (eps: coef.eps), {
 				(v.sqrt() + eps).recip()
@@ -206,7 +207,7 @@ impl OptParam {
 			self.grad_error |= result.is_err();
 			result
 		} else {
-			match self.value_orig_shape.new_empty_like() {
+			match self.value_orig_shape.new_empty_like(self.grad_dtype) {
 				Ok(grad) => {
 					let grad = self.grad.insert(grad);
 					let result = f(CurrentGradValue::Uninit(grad));

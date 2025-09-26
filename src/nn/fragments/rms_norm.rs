@@ -12,7 +12,7 @@ use crate::autograd::{self, AutogradTensor, BackwardFn, StraightThroughBackwardF
 use crate::nn::fragments::UnaryFragment;
 use crate::nn::param::Param;
 use crate::rng::Rng;
-use crate::tensor::{Tensor, TensorOpError};
+use crate::tensor::{DType, Tensor, TensorOpError};
 use crate::{ErrPack, custom_kernel};
 
 use super::Fragment;
@@ -26,22 +26,24 @@ pub enum RMSNormGradMode {
 }
 
 pub struct RMSNorm {
-	grad_mode: RMSNormGradMode,
 	eps: f64,
+	internal_dtype: DType,
+	grad_mode: RMSNormGradMode,
 }
 
 impl RMSNorm {
-	pub fn new(eps: f64, grad_mode: RMSNormGradMode) -> Self {
-		Self { grad_mode, eps }
+	pub fn new(eps: f64, internal_dtype: DType, grad_mode: RMSNormGradMode) -> Self {
+		Self { eps, internal_dtype, grad_mode }
 	}
 }
 
 impl UnaryFragment for RMSNorm {
 	fn forward(&self, inp: AutogradTensor) -> Result<AutogradTensor, ErrPack<TensorOpError>> {
 		let (inp, inp_backward) = inp.into_parts();
+		let internal_dtype = self.internal_dtype.max(inp.dtype())?;
 		let sum_to_mean = inp.sum_to_mean();
 
-		let magn_recip = inp.new_replace_tail(1, &[1])?;
+		let magn_recip = inp.new_replace_tail(1, &[1], internal_dtype)?;
 		magn_recip.assign(custom_kernel!(
 			[inp: &inp], (sum_to_mean: sum_to_mean, eps: self.eps), {
 				(((inp * inp).sum() * sum_to_mean).sqrt() + eps).recip()
@@ -103,9 +105,10 @@ impl BackwardFn for RMSNormBackwardFn_Precise {
 		queue: &mut autograd::Queue,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let Self { out, magn_recip, inp_backward } = Box::into_inner(self);
+		let internal_dtype = d_out.dtype().max(magn_recip.dtype())?;
 		let sum_to_mean = out.sum_to_mean();
 
-		let g = magn_recip.new_empty_like()?; // [..., 1]
+		let g = magn_recip.new_empty_like(internal_dtype)?; // [..., 1]
 		g.assign(custom_kernel!(
 			[out: &out, d_out: &d_out], (sum_to_mean: sum_to_mean), {
 				(out * d_out).sum() * sum_to_mean

@@ -5,7 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
-use std::ptr::NonNull;
+use std::ptr::{DynMetadata, NonNull};
 use std::rc::Rc;
 
 pub mod buffer;
@@ -172,11 +172,48 @@ pub enum NewDeviceBufferError {
 
 //--------------------------------------------------------------------------------------------------
 
+#[repr(C)] // to make sure that `metadata` is the first field
 pub struct DeviceBase {
-	pub metadata: <dyn Device as std::ptr::Pointee>::Metadata,
+	metadata: DynMetadata<dyn Device>,
+	kernel_runner: Rc<KernelRunner>,
+	is_cpu: bool,
 
-	pub device_is_cpu: bool,
-	pub kernel_runner: Rc<KernelRunner>,
+	#[cfg(debug_assertions)]
+	obj_ptr: *const (),
+}
+
+impl DeviceBase {
+	pub fn new(device: &dyn Device, is_cpu: bool, kernel_runner: Rc<KernelRunner>) -> Self {
+		let device = device as *const dyn Device;
+		let device = device as *const dyn Device;
+		let metadata = std::ptr::metadata(device);
+		Self {
+			metadata,
+			kernel_runner,
+			is_cpu,
+
+			#[cfg(debug_assertions)]
+			obj_ptr: device as *const dyn Device as *const (),
+		}
+	}
+
+	/// # Safety
+	///
+	/// The address of `self` must be exactly equal to the address of the `device` passed to `new()`
+	pub unsafe fn device(&self) -> &dyn Device {
+		let obj_ptr = self as *const Self as *const ();
+		debug_assert!(obj_ptr == self.obj_ptr);
+
+		unsafe { &*std::ptr::from_raw_parts(obj_ptr, self.metadata) }
+	}
+
+	pub fn kernel_runner(&self) -> &KernelRunner {
+		&self.kernel_runner
+	}
+
+	pub fn is_cpu(&self) -> bool {
+		self.is_cpu
+	}
 }
 
 pub trait Device {
@@ -190,9 +227,7 @@ pub trait Device {
 
 	/// # Safety
 	/// This should only be called from `DeviceBuffer::drop()`
-	///
-	/// TODO - should we recreate and drop `Rc<dyn Device>` in `DeviceBuffer::drop()`???
-	unsafe fn drop_buffer(&self, buffer: &DeviceBuffer);
+	unsafe fn drop_buffer(&self, data: NonNull<u8>, dtype: DType, elems: usize);
 
 	unsafe fn read_float(
 		&self,

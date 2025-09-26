@@ -12,7 +12,7 @@ use std::rc::Rc;
 pub use device::{DType, Device, HasDType};
 
 use crate::rng::Rng;
-use crate::tensor::device::buffer::DeviceBufferVMT;
+use crate::tensor::device::dtype::IncomparableDTypesError;
 use crate::tensor::device::kernel::expr::EvaluatesToTensor;
 use crate::tensor::device::{DeviceBuffer, NewDeviceBufferError};
 use crate::tensor::dim_merger::{DimMergerError, DimsDontMatchError, TooManyMergedDimensionsError};
@@ -128,9 +128,10 @@ impl Tensor {
 		&self,
 		tail_len: usize,
 		replace_with: &[usize],
+		dtype: DType,
 	) -> Result<Self, ErrPack<TensorOpError>> {
 		let (map, elems) = self.map().new_replace_tail(tail_len, replace_with)?;
-		let buf = self.device().new_buffer(self.buf().dtype(), elems)?;
+		let buf = self.device().new_buffer(dtype, elems)?;
 
 		// SAFETY: We created the buffer to be as big as the mapping.
 		Ok(unsafe { Self::new_unchecked(map, buf) })
@@ -693,6 +694,15 @@ impl From<DimIndexOutOfBoundsError> for ErrPack<TensorOpError> {
 	fn from(_: DimIndexOutOfBoundsError) -> Self {
 		Self {
 			code: TensorOpError::DimIndexOutOfBounds,
+			extra: None,
+		}
+	}
+}
+
+impl From<IncomparableDTypesError> for ErrPack<TensorOpError> {
+	fn from(_: IncomparableDTypesError) -> Self {
+		Self {
+			code: TensorOpError::DTypeMismatch,
 			extra: None,
 		}
 	}

@@ -86,7 +86,7 @@ impl UnaryFragment for Linear {
 		let (inp, inp_backward) = inp_node.into_parts();
 
 		// [..., inputs] -> [..., outputs]
-		let out = inp.new_replace_tail(1, &self.output_shape)?;
+		let out = inp.new_replace_tail(1, &self.output_shape, inp.dtype())?;
 
 		let weights = self.weights.borrow();
 		let w = mat(weights.value())?;
@@ -163,7 +163,7 @@ impl BackwardFn for LinearBackwardFn {
 			let w = mat(weights.value())?;
 			let d_i = (w.T() * d_o).scale(backward_scale);
 			// [... , outputs] -> [... , inputs]
-			let d_inp = d_out.new_replace_tail(1, &input_shape)?;
+			let d_inp = d_out.new_replace_tail(1, &input_shape, d_out.dtype())?;
 			col(&d_inp)?.assign(d_i)?;
 			queue.add(inp_backward, d_inp);
 		}

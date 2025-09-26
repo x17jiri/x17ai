@@ -21,7 +21,7 @@ pub fn add(
 		// Note: we don't swap `a_fn` and `b_fn`, but that's ok. Their order is not important
 		std::mem::swap(&mut a, &mut b);
 	}
-	let c = if a.owns_buffer() { a.clone() } else { a.new_empty_like()? };
+	let c = if a.owns_buffer() { a.clone() } else { a.new_empty_like(a.dtype())? };
 	c.assign(custom_kernel!(
 		[a: &a, b: &b], (), {
 			a + b

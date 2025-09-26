@@ -51,6 +51,10 @@ pub struct DType {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+pub struct IncomparableDTypesError;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UnknownDTypeError;
 
 impl std::str::FromStr for DType {
@@ -106,12 +110,12 @@ impl DType {
 		self.bytes() * elems
 	}
 
-	pub fn max(self, other: Self) -> Option<Self> {
+	pub fn max(self, other: Self) -> Result<Self, IncomparableDTypesError> {
 		if self.kind != other.kind {
 			cold_path();
-			return None;
+			return Err(IncomparableDTypesError);
 		}
-		Some(if self.bits >= other.bits { self } else { other })
+		Ok(if self.bits >= other.bits { self } else { other })
 	}
 }
 
