@@ -36,6 +36,10 @@ impl Softmax {
 	pub fn new(internal_dtype: DType, grad_mode: SoftmaxGradMode) -> Self {
 		Self { internal_dtype, grad_mode }
 	}
+
+	pub fn internal_dtype(&self) -> DType {
+		self.internal_dtype
+	}
 }
 
 impl Fragment for Softmax {

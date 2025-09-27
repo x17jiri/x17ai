@@ -147,7 +147,7 @@ impl BackwardFn for LinearBackwardFn {
 		{
 			let i = row(&inp)?;
 			let d_w = (d_o * i).scale(1.0);
-			weights.update_grad(|current_grad| match current_grad {
+			weights.update_grad(d_out.dtype(), |current_grad| match current_grad {
 				CurrentGradValue::Uninit(tensor) => {
 					let grad = mat(tensor)?;
 					grad.clear_acc(d_w)

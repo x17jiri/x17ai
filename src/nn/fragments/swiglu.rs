@@ -42,7 +42,7 @@ impl Fragment for SwiGLU {
 impl super::UnaryFragment for SwiGLU {
 	fn forward(&self, inp_node: AutogradTensor) -> Result<AutogradTensor, ErrPack<TensorOpError>> {
 		let (inp, inp_backward) = inp_node.into_parts();
-		let out = inp.new_replace_tail(2, &[inp.size(-1)?])?;
+		let out = inp.new_replace_tail(2, &[inp.size(-1)?], inp.dtype())?;
 		let lin = inp.select(-2, 0)?;
 		let gate = inp.select(-2, 1)?;
 
@@ -75,7 +75,7 @@ impl BackwardFn for SwiGLUBackwardFn {
 		let Self { lin, gate, inp_backward } = Box::into_inner(self);
 
 		let input_shape = [2, d_out.size(-1)?];
-		let d_inp = d_out.new_replace_tail(1, &input_shape)?;
+		let d_inp = d_out.new_replace_tail(1, &input_shape, d_out.dtype())?;
 		let d_lin = d_inp.select(-2, 0)?;
 		let d_gate = d_inp.select(-2, 1)?;
 

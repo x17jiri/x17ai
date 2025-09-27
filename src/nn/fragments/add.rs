@@ -5,7 +5,10 @@
 //
 //------------------------------------------------------------------------------
 
+use std::hint::likely;
+
 use crate::autograd::{self, AutogradTensor, BackwardFn};
+use crate::tensor::device::dtype::common_dtype;
 use crate::tensor::{Tensor, TensorOpError};
 use crate::{ErrPack, custom_kernel};
 
@@ -15,13 +18,16 @@ pub fn add(
 	a_node: AutogradTensor,
 	b_node: AutogradTensor,
 ) -> Result<AutogradTensor, ErrPack<TensorOpError>> {
-	let (mut a, a_fn) = a_node.into_parts();
-	let (mut b, b_fn) = b_node.into_parts();
-	if !a.owns_buffer() {
-		// Note: we don't swap `a_fn` and `b_fn`, but that's ok. Their order is not important
-		std::mem::swap(&mut a, &mut b);
-	}
-	let c = if a.owns_buffer() { a.clone() } else { a.new_empty_like(a.dtype())? };
+	let (a, a_fn) = a_node.into_parts();
+	let (b, b_fn) = b_node.into_parts();
+	let c_dtype = common_dtype(a.dtype(), b.dtype())?;
+	let c = if a.owns_buffer() && likely(c_dtype == a.dtype()) {
+		a.clone()
+	} else if b.owns_buffer() && likely(c_dtype == b.dtype()) {
+		b.clone()
+	} else {
+		a.new_empty_like(c_dtype)?
+	};
 	c.assign(custom_kernel!(
 		[a: &a, b: &b], (), {
 			a + b

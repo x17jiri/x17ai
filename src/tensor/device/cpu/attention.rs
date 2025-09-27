@@ -9,7 +9,7 @@ use std::ptr::NonNull;
 
 use crate::ErrPack;
 use crate::tensor::TensorOpError;
-use crate::tensor::device::buffer::AttentionArgs;
+use crate::tensor::device::AttentionArgs;
 use crate::tensor::device::cpu::math::Float;
 use crate::tensor::generic::map::{Map, ND};
 use crate::util::LossyInto;

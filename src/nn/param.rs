@@ -65,8 +65,16 @@ impl Param {
 	}
 
 	#[inline(never)]
-	pub fn init_optimizer(&mut self) -> Result<&mut OptParam, ErrPack<TensorOpError>> {
-		let opt_param = Box::new(OptParam::new(self.value.clone(), self.parts, self.part_elems)?);
+	pub fn init_optimizer(
+		&mut self,
+		momentum_dtype: DType,
+	) -> Result<&mut OptParam, ErrPack<TensorOpError>> {
+		let opt_param = Box::new(OptParam::new(
+			self.value.clone(),
+			self.parts,
+			self.part_elems,
+			momentum_dtype,
+		)?);
 		Ok(self.opt_param.insert(opt_param))
 	}
 
@@ -87,11 +95,12 @@ impl Param {
 
 	pub fn update_grad(
 		&mut self,
+		grad_dtype: DType,
 		f: impl FnMut(CurrentGradValue) -> Result<(), ErrPack<TensorOpError>>,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		#[allow(clippy::option_if_let_else)]
 		if let Some(opt_param) = &mut self.opt_param {
-			opt_param.update_grad(f) //
+			opt_param.update_grad(grad_dtype, f) //
 		} else {
 			Ok(())
 		}

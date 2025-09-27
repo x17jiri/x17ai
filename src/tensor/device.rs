@@ -20,7 +20,7 @@ pub use dtype::{DType, HasDType};
 use crate::ErrPack;
 use crate::tensor::TensorOpError;
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
-use crate::tensor::generic::map::ND;
+use crate::tensor::generic::map::{ND, SizeAndStride};
 use crate::util::mycell;
 
 //--------------------------------------------------------------------------------------------------
@@ -199,12 +199,29 @@ impl DeviceBase {
 
 	/// # Safety
 	///
-	/// The address of `self` must be exactly equal to the address of the `device` passed to `new()`
+	/// - The address of `self` must be exactly equal to the address of the `device` passed to
+	///   `new()`
 	pub unsafe fn device(&self) -> &dyn Device {
 		let obj_ptr = self as *const Self as *const ();
 		debug_assert!(obj_ptr == self.obj_ptr);
 
 		unsafe { &*std::ptr::from_raw_parts(obj_ptr, self.metadata) }
+	}
+
+	/// # Safety
+	///
+	/// - The address of `self` must be exactly equal to the address of the `device` passed to
+	///   `new()`
+	/// - The device must be insode an `Rc`
+	pub unsafe fn rc_device(&self) -> Rc<dyn Device> {
+		let obj_ptr = self as *const Self as *const ();
+		debug_assert!(obj_ptr == self.obj_ptr);
+
+		let dev_ptr = std::ptr::from_raw_parts(obj_ptr, self.metadata);
+		unsafe {
+			Rc::increment_strong_count(dev_ptr);
+			Rc::from_raw(dev_ptr)
+		}
 	}
 
 	pub fn kernel_runner(&self) -> &KernelRunner {

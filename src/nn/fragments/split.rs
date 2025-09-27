@@ -94,6 +94,7 @@ impl BackwardFn for SplitBackwardFn {
 		{
 			let mut inner = rc_inner.borrow_mut();
 			if let Some(ref mut grad) = inner.grad {
+				// not the first gradient
 				if !grad.owns_buffer() {
 					std::mem::swap(grad, &mut d_out);
 				}
@@ -105,7 +106,7 @@ impl BackwardFn for SplitBackwardFn {
 						}
 					))?;
 				} else {
-					let mut new_grad = grad.new_empty_like()?;
+					let mut new_grad = grad.new_empty_like(grad.dtype())?;
 					std::mem::swap(grad, &mut new_grad);
 					grad.assign(custom_kernel!(
 						[new_grad: &new_grad, d_out: &d_out], (), {

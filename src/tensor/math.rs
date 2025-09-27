@@ -7,10 +7,11 @@
 
 use std::hint::cold_path;
 
-use crate::tensor::device::buffer::MatMulArgs;
+use crate::tensor::device::MatMulArgs;
+use crate::tensor::device::dtype::common_dtype;
 use crate::tensor::dim_merger::DimMerger;
 use crate::tensor::generic::map::{NotEnoughDimensionsError, SizeAndStride};
-use crate::tensor::{Tensor, TensorOpError};
+use crate::tensor::{HasDType, Tensor, TensorOpError};
 use crate::util::mycell::UnsafeBorrowFailFlag;
 use crate::{ErrPack, custom_kernel};
 
@@ -27,8 +28,9 @@ pub trait EvaluatesToColMatrix {
 //--------------------------------------------------------------------------------------------------
 
 pub fn approx_eq(a: &Tensor, b: &Tensor, eps: f64) -> Result<bool, ErrPack<TensorOpError>> {
+	let diff_dtype = common_dtype(common_dtype(a.dtype(), b.dtype())?, f32::dtype)?;
 	// TODO - `a` may be broadcasted in which case the `diff` shape is wrong
-	let diff = a.new_empty_like()?;
+	let diff = a.new_empty_like(diff_dtype)?;
 	diff.assign(custom_kernel!(
 		[a: a, b: b], (), {
 			(a - b).abs()
@@ -244,21 +246,21 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 			o_rows: to.rows.size,
 			o_cols: to.cols.size,
 			o_offset: to.tensor.map().offset,
-			o_buf: to_borrow.device_data(),
+			o_buf: to_borrow.memory(),
 
 			a_row_stride: col.rows.stride,
 			a_col_stride: col_cols.stride,
 			// a_rows == o_rows
 			a_cols: col_cols.size,
 			a_offset: col.tensor.map().offset,
-			a_buf: col_borrow.device_data(),
+			a_buf: col_borrow.memory(),
 
 			b_row_stride: row_rows.stride,
 			b_col_stride: row.cols.stride,
 			// b_rows == a_cols - this condition is ensured by DimMerger
 			// b_cols == o_cols
 			b_offset: row.tensor.map().offset,
-			b_buf: row_borrow.device_data(),
+			b_buf: row_borrow.memory(),
 
 			o_buf_elems: to_borrow.elems(),
 			a_buf_elems: col_borrow.elems(),
@@ -266,8 +268,8 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 			dtype: to.tensor.dtype(),
 		};
 
-		let vmt = to_borrow.vmt();
-		unsafe { (vmt.mm)(vmt, &args, scale) }?;
+		let device = to_borrow.device();
+		unsafe { device.mm(&args, scale) }?;
 		Ok(())
 	}
 }
@@ -310,21 +312,21 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 			o_rows: to.rows.size,
 			o_cols: to_cols.size,
 			o_offset: to.tensor.map().offset,
-			o_buf: to_borrow.device_data(),
+			o_buf: to_borrow.memory(),
 
 			a_row_stride: mat.rows.stride,
 			a_col_stride: mat.cols.stride,
 			// a_rows == o_rows
 			a_cols: mat.cols.size,
 			a_offset: mat.tensor.map().offset,
-			a_buf: mat_borrow.device_data(),
+			a_buf: mat_borrow.memory(),
 
 			b_row_stride: col.rows.stride,
 			b_col_stride: col_cols.stride,
 			// b_rows == a_cols
 			// b_cols == o_cols
 			b_offset: col.tensor.map().offset,
-			b_buf: col_borrow.device_data(),
+			b_buf: col_borrow.memory(),
 
 			o_buf_elems: to_borrow.elems(),
 			a_buf_elems: mat_borrow.elems(),
@@ -332,8 +334,8 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 			dtype: to.tensor.dtype(),
 		};
 
-		let vmt = to_borrow.vmt();
-		unsafe { (vmt.mm)(vmt.into(), &args, scale) }?;
+		let device = to_borrow.device();
+		unsafe { device.mm(&args, scale) }?;
 		Ok(())
 	}
 }

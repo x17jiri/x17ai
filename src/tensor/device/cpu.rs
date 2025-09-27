@@ -9,16 +9,21 @@ use std::hint::cold_path;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-use crate::tensor::HasDType;
-use crate::tensor::device::kernel::runner::KernelRunner;
+use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
+use crate::tensor::generic::map::ND;
+use crate::tensor::{HasDType, TensorOpError, UnsupportedDTypeError};
 use crate::util::mycell::{self, BorrowGuard};
 
 pub mod attention;
 pub mod cpu_float_vmt;
 pub mod math;
 
+use crate::ErrPack;
 use crate::tensor::device::cpu::cpu_float_vmt::CPUFloatVMT;
-use crate::tensor::device::{DeviceBuffer, NewDeviceBufferError};
+use crate::tensor::device::{
+	AttentionArgs, DeviceBuffer, KernelElemArg, KernelOutput, KernelReduceArg, MatMulArgs,
+	NewDeviceBufferError,
+};
 use crate::tensor::{DType, Device};
 
 //--------------------------------------------------------------------------------------------------
@@ -107,6 +112,62 @@ impl Device for CPUDevice {
 			.unwrap_unchecked();
 			std::alloc::dealloc(data.as_ptr(), layout);
 		}
+	}
+
+	unsafe fn read_float(
+		&self,
+		(map, buf): (ND<0>, &DeviceBuffer),
+	) -> Result<f64, ErrPack<TensorOpError>> {
+		match buf.dtype() {
+			dtype if dtype == f32::dtype => unsafe {
+				cpu_float_vmt::read_float::<f32>((map, buf.memory()))
+			},
+			dtype if dtype == f64::dtype => unsafe {
+				cpu_float_vmt::read_float::<f64>((map, buf.memory()))
+			},
+			_ => {
+				cold_path();
+				Err(UnsupportedDTypeError.into())
+			},
+		}
+	}
+
+	unsafe fn load_from_cpu_memory(
+		&self,
+		cpu_src: NonNull<u8>,
+		dev_dst: (ND<0>, &DeviceBuffer),
+		count: usize,
+	) -> Result<(), ErrPack<TensorOpError>> {
+		todo!("implement load_from_cpu_memory for CPUDevice");
+	}
+
+	unsafe fn store_to_cpu_memory(
+		&self,
+		dev_src: (ND<0>, &DeviceBuffer),
+		cpu_dst: NonNull<u8>,
+		count: usize,
+	) -> Result<(), ErrPack<TensorOpError>> {
+		todo!("implement store_to_cpu_memory for CPUDevice");
+	}
+
+	unsafe fn mm(&self, args: &MatMulArgs, scale: f64) -> Result<(), ErrPack<TensorOpError>> {
+		todo!("implement mm for CPUDevice");
+	}
+
+	unsafe fn attention(&self, args: &AttentionArgs) -> Result<(), ErrPack<TensorOpError>> {
+		todo!("implement attention for CPUDevice");
+	}
+
+	unsafe fn run_kernel(
+		&self,
+		kernel_data: &KernelData,
+		o: &KernelOutput,
+		elemwise_args: *const KernelElemArg,
+		reduce_args: *const KernelReduceArg,
+		scalar_args: *const f64,
+		reduction_size: usize,
+	) -> Result<(), ErrPack<TensorOpError>> {
+		todo!("implement run_kernel for CPUDevice");
 	}
 }
 

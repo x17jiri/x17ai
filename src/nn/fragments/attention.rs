@@ -84,9 +84,9 @@ impl Attention {
 		k: AutogradTensor,
 		v: AutogradTensor,
 	) -> Result<AutogradTensor, ErrPack<TensorOpError>> {
-		let (q, q_backward) = q.into_parts();
-		let (k, k_backward) = k.into_parts();
-		let (v, v_backward) = v.into_parts();
+		let (q, _q_backward) = q.into_parts();
+		let (k, _k_backward) = k.into_parts();
+		let (v, _v_backward) = v.into_parts();
 		let o = Self::alloc_output(&q, &k, &v)?;
 
 		q.ensure_safe()?;
@@ -190,9 +190,9 @@ impl Attention {
 
 			let m = DimMerger::merge::<1>([q_batch, k_batch, v_batch, o_batch])?;
 
-			let vmt = o.vmt();
+			let device = o.device();
 			for _ in 0..m[0].size {
-				unsafe { (vmt.attention)(vmt, &args) }?;
+				unsafe { device.attention(&args) }?;
 				args.q_offset += m[0].strides[0];
 				args.k_offset += m[0].strides[1];
 				args.v_offset += m[0].strides[2];
@@ -200,7 +200,7 @@ impl Attention {
 			}
 		}
 
-		Ok(AutogradTensor::new(o, None)) // TODO: backward
+		Ok(AutogradTensor::new(o, None)) // TODO: backward fn
 	}
 }
 

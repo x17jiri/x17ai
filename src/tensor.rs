@@ -14,7 +14,7 @@ pub use device::{DType, Device, HasDType};
 use crate::rng::Rng;
 use crate::tensor::device::dtype::DTypeMismatch;
 use crate::tensor::device::kernel::expr::EvaluatesToTensor;
-use crate::tensor::device::{DeviceBuffer, NewDeviceBufferError};
+use crate::tensor::device::{DeviceBase, DeviceBuffer, NewDeviceBufferError};
 use crate::tensor::dim_merger::{DimMergerError, DimsDontMatchError, TooManyMergedDimensionsError};
 use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;
 use crate::tensor::generic::map::dd::ReplaceTailError;
@@ -91,13 +91,13 @@ impl Tensor {
 
 	/// Allocate a new tensor on the same device as `self`.
 	pub fn new_empty(&self, shape: &[usize], dtype: DType) -> Result<Self, ErrPack<TensorOpError>> {
-		Self::new_empty_on(shape, dtype, self.device())
+		Self::new_empty_on(shape, dtype, self.rc_device())
 	}
 
 	/// Allocate a new tensor on the same device and with the same shape as `self`.
 	pub fn new_empty_like(&self, dtype: DType) -> Result<Self, ErrPack<TensorOpError>> {
 		let (map, elems) = self.map().new_like();
-		let buf = self.device().new_buffer(dtype, elems)?;
+		let buf = self.rc_device().new_buffer(dtype, elems)?;
 
 		// SAFETY: We created the buffer to be as big as the mapping.
 		Ok(unsafe { Self::new_unchecked(map, buf) })
@@ -113,7 +113,7 @@ impl Tensor {
 	/// If the tensor does not own its buffer, we allocate a new empty tensor
 	/// with the same shape and dtype as `self`.
 	pub fn reuse_or_new_like(&self) -> Result<Self, ErrPack<TensorOpError>> {
-		if self.owns_buffer() { Ok(self.clone()) } else { self.new_empty_like() }
+		if self.owns_buffer() { Ok(self.clone()) } else { self.new_empty_like(self.dtype()) }
 	}
 
 	#[inline]
@@ -131,7 +131,7 @@ impl Tensor {
 		dtype: DType,
 	) -> Result<Self, ErrPack<TensorOpError>> {
 		let (map, elems) = self.map().new_replace_tail(tail_len, replace_with)?;
-		let buf = self.device().new_buffer(dtype, elems)?;
+		let buf = self.rc_device().new_buffer(dtype, elems)?;
 
 		// SAFETY: We created the buffer to be as big as the mapping.
 		Ok(unsafe { Self::new_unchecked(map, buf) })
@@ -148,8 +148,7 @@ impl Tensor {
 		let (mut map, _elems) = ND::new(&[])?;
 		map.offset = self.map().offset;
 		let buf = self.buf().try_borrow()?;
-		let vmt = self.vmt();
-		unsafe { (vmt.read_float)(vmt, (map, &*buf)) }
+		unsafe { self.device().read_float((map, &*buf)) }
 	}
 
 	/// Sometimes we want to calculate the mean of the last dimension,
@@ -166,18 +165,22 @@ impl Tensor {
 		1.0 / f64::lossy_from(n)
 	}
 
+	pub fn device_base(&self) -> &DeviceBase {
+		self.buf().device_base()
+	}
+
+	pub fn device(&self) -> &dyn Device {
+		unsafe { self.device_base().device() }
+	}
+
 	/// Returns the device on which the tensor is allocated.
-	pub fn device(&self) -> Rc<dyn Device> {
-		self.vmt().rc_device()
+	pub fn rc_device(&self) -> Rc<dyn Device> {
+		unsafe { self.device_base().rc_device() }
 	}
 
 	/// Returns the data type of the tensor elements.
 	pub fn dtype(&self) -> DType {
-		self.vmt().dtype
-	}
-
-	pub fn vmt(&self) -> &DeviceBufferVMT {
-		self.buf().vmt()
+		self.buf().dtype()
 	}
 
 	pub fn assign<Expr: EvaluatesToTensor>(
@@ -211,7 +214,6 @@ impl Tensor {
 	}
 
 	pub fn store_to_cpu_memory(&self, dst: &mut [u8]) -> Result<(), ErrPack<TensorOpError>> {
-		let vmt = self.vmt();
 		let nd = merge_dims::<1>(self)?;
 		if !nd.dims[0].is_contiguous() {
 			cold_path();
@@ -225,11 +227,10 @@ impl Tensor {
 		let borrow = self.buf().try_borrow()?;
 		let src = (ND::<0> { offset: nd.offset, dims: [] }, &*borrow);
 		let dst = NonNull::from_ref(dst).cast::<u8>();
-		unsafe { (vmt.store_to_cpu_memory)(vmt, src, dst, count) }
+		unsafe { self.device().store_to_cpu_memory(src, dst, count) }
 	}
 
 	pub fn load_from_cpu_memory(&self, src: &[u8]) -> Result<(), ErrPack<TensorOpError>> {
-		let vmt = self.vmt();
 		let nd = merge_dims::<1>(self)?;
 		if !nd.dims[0].is_contiguous() {
 			cold_path();
@@ -243,7 +244,7 @@ impl Tensor {
 		let borrow = self.buf().try_borrow_mut()?;
 		let dst = (ND::<0> { offset: nd.offset, dims: [] }, &*borrow);
 		let src = NonNull::from_ref(src).cast::<u8>();
-		unsafe { (vmt.load_from_cpu_memory)(vmt, src, dst, count) }
+		unsafe { self.device().load_from_cpu_memory(src, dst, count) }
 	}
 
 	/// I use this function because Rust doesn't allow specifying only some generic parameters.
@@ -315,6 +316,10 @@ impl<T: HasDType> TensorLiteralFactory<T> {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+pub struct UnsupportedDTypeError;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TensorOpError {
 	DimsDontMatch,
 	TooManyMergedDimensions,
@@ -326,6 +331,7 @@ pub enum TensorOpError {
 	ElementsOverflow,
 	NotEnoughDimensions,
 	NewBufUnsupportedDType,
+	UnsupportedDType,
 	NewBufAllocationFailed,
 	IncompatibleStridesForMerge,
 	InvalidValue,
@@ -703,6 +709,15 @@ impl From<DTypeMismatch> for ErrPack<TensorOpError> {
 	fn from(_: DTypeMismatch) -> Self {
 		Self {
 			code: TensorOpError::DTypeMismatch,
+			extra: None,
+		}
+	}
+}
+
+impl From<UnsupportedDTypeError> for ErrPack<TensorOpError> {
+	fn from(_: UnsupportedDTypeError) -> Self {
+		Self {
+			code: TensorOpError::UnsupportedDType,
 			extra: None,
 		}
 	}

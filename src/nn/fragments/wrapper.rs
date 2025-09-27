@@ -13,7 +13,8 @@ use crate::autograd::{self, AutogradTensor, BackwardFn};
 use crate::nn::fragments::UnaryFragment;
 use crate::nn::param::Param;
 use crate::rng::Rng;
-use crate::tensor::{Tensor, TensorOpError};
+use crate::tensor::device::dtype::common_dtype;
+use crate::tensor::{DType, Tensor, TensorOpError};
 use crate::{ErrPack, custom_kernel};
 
 use super::Fragment;
@@ -49,14 +50,16 @@ pub struct Wrapper<Nested: UnaryFragment> {
 	pub nested: Nested,
 	eps: f64,
 	norm_pos: NormPosition,
+	internal_dtype: DType,
 }
 
 impl<Nested: UnaryFragment> Wrapper<Nested> {
-	pub fn new(nested: Nested, eps: f64) -> Self {
+	pub fn new(nested: Nested, eps: f64, internal_dtype: DType) -> Self {
 		Self {
 			nested,
 			eps,
 			norm_pos: NormPosition::Inside,
+			internal_dtype,
 		}
 	}
 }
@@ -78,9 +81,10 @@ impl<Nested: UnaryFragment> Fragment for Wrapper<Nested> {
 impl<Nested: UnaryFragment> UnaryFragment for Wrapper<Nested> {
 	fn forward(&self, inp_node: AutogradTensor) -> Result<AutogradTensor, ErrPack<TensorOpError>> {
 		let (inp, backward_fn) = inp_node.into_parts();
+		let internal_dtype = common_dtype(inp.dtype(), self.internal_dtype)?;
 		let sum_to_mean = inp.sum_to_mean();
 
-		let inp_magn_recip = inp.new_replace_tail(1, &[1])?;
+		let inp_magn_recip = inp.new_replace_tail(1, &[1], internal_dtype)?;
 		inp_magn_recip.assign(custom_kernel!(
 			[inp: &inp], (sum_to_mean: sum_to_mean, eps: self.eps), {
 				(((inp * inp).sum() * sum_to_mean).sqrt() + eps).recip()
@@ -90,7 +94,7 @@ impl<Nested: UnaryFragment> UnaryFragment for Wrapper<Nested> {
 		let rms_norm = if self.norm_pos != NormPosition::Inside && inp.owns_buffer() {
 			inp.clone()
 		} else {
-			inp.new_empty_like()?
+			inp.new_empty_like(inp.dtype())?
 		};
 		rms_norm.assign(custom_kernel!(
 			[inp: &inp, inp_magn_recip:  &inp_magn_recip], (), {
@@ -108,7 +112,7 @@ impl<Nested: UnaryFragment> UnaryFragment for Wrapper<Nested> {
 		let (mut nested_out, nested_out_fn) = if let Some(backward_fn) = backward_fn {
 			let rc_inner = Rc::new(RefCell::new(WrapperBackwardFn_Inner {
 				d_residual: None,
-				ratio: inp_magn_recip.new_empty_like()?,
+				ratio: inp_magn_recip.new_empty_like(inp_magn_recip.dtype())?,
 			}));
 			let inner = rc_inner.borrow();
 
@@ -201,8 +205,10 @@ impl BackwardFn for WrapperBackwardFn_Split {
 		let WrapperBackwardFn_Inner { d_residual, ratio } = inner;
 		let d_out = d_residual.unwrap();
 		let sum_to_mean = d_out.sum_to_mean();
+		let internal_dtype =
+			common_dtype(common_dtype(d_nested.dtype(), d_out.dtype())?, ratio.dtype())?;
 
-		let d_nested_magn_recip = ratio.new_empty_like()?;
+		let d_nested_magn_recip = ratio.new_empty_like(internal_dtype)?;
 		d_nested_magn_recip.assign(custom_kernel!(
 			[d_nested: &d_nested], (sum_to_mean: sum_to_mean, eps: eps), {
 				(((d_nested * d_nested).sum() * sum_to_mean).sqrt() + eps).recip()
