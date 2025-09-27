@@ -9,7 +9,6 @@ use std::hint::cold_path;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-use crate::tensor::device::buffer::DeviceBufferVMT;
 use crate::tensor::device::cuda::cuda_shim::{CudaError, CudaStream};
 use crate::tensor::device::kernel::runner::KernelRunner;
 use crate::tensor::device::{DeviceBuffer, NewDeviceBufferError};

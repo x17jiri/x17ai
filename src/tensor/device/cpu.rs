@@ -9,20 +9,18 @@ use std::hint::cold_path;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
+use crate::tensor::device::dtype::common_dtype;
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
-use crate::tensor::generic::map::ND;
 use crate::tensor::{HasDType, TensorOpError, UnsupportedDTypeError};
 use crate::util::mycell::{self, BorrowGuard};
 
-pub mod attention;
-pub mod cpu_float_vmt;
+pub mod cpu_float_methods;
 pub mod math;
 
 use crate::ErrPack;
-use crate::tensor::device::cpu::cpu_float_vmt::CPUFloatVMT;
 use crate::tensor::device::{
-	AttentionArgs, DeviceBuffer, KernelElemArg, KernelOutput, KernelReduceArg, MatMulArgs,
-	NewDeviceBufferError,
+	AttentionArgs, DeviceBase, DeviceBuffer, KernelElemArg, KernelOutput, KernelReduceArg,
+	MatMulArgs, NewDeviceBufferError,
 };
 use crate::tensor::{DType, Device};
 
@@ -35,9 +33,10 @@ pub enum BufAsSliceError {
 }
 //--------------------------------------------------------------------------------------------------
 
+#[repr(C)]
 pub struct CPUDevice {
+	base: DeviceBase,
 	name: String,
-	f32_vmt: CPUFloatVMT<f32, f64>,
 }
 
 impl CPUDevice {
@@ -48,15 +47,17 @@ impl CPUDevice {
 	pub fn new_named(name: String) -> Rc<Self> {
 		let kernel_runner = Rc::new(KernelRunner::new());
 
-		let mut rc_uninit = Rc::new_uninit();
-		let instance = Self {
+		let mut instance = Rc::new(Self {
+			base: DeviceBase::new(true, kernel_runner),
 			name,
-			f32_vmt: CPUFloatVMT::new(&rc_uninit, kernel_runner),
-		};
+		});
 		unsafe {
-			Rc::get_mut_unchecked(&mut rc_uninit).write(instance);
-			rc_uninit.assume_init()
+			let inst_ref = Rc::get_mut_unchecked(&mut instance);
+			let dyn_ref: &dyn Device = inst_ref;
+			let dyn_ptr = NonNull::from(dyn_ref);
+			inst_ref.base.init_metadata(dyn_ptr);
 		}
+		instance
 	}
 
 	pub fn buf_as_slice<'guard, 'buf, T: HasDType>(
@@ -116,46 +117,57 @@ impl Device for CPUDevice {
 
 	unsafe fn read_float(
 		&self,
-		(map, buf): (ND<0>, &DeviceBuffer),
+		buf: &DeviceBuffer,
+		offset: usize,
 	) -> Result<f64, ErrPack<TensorOpError>> {
-		match buf.dtype() {
-			dtype if dtype == f32::dtype => unsafe {
-				cpu_float_vmt::read_float::<f32>((map, buf.memory()))
-			},
-			dtype if dtype == f64::dtype => unsafe {
-				cpu_float_vmt::read_float::<f64>((map, buf.memory()))
-			},
-			_ => {
-				cold_path();
-				Err(UnsupportedDTypeError.into())
-			},
-		}
+		unsafe { cpu_float_methods::read_float(buf.memory(), buf.dtype(), offset) }
 	}
 
 	unsafe fn load_from_cpu_memory(
 		&self,
 		cpu_src: NonNull<u8>,
-		dev_dst: (ND<0>, &DeviceBuffer),
-		count: usize,
+		dev_dst: &DeviceBuffer,
+		offset_bytes: usize,
+		count_bytes: usize,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		todo!("implement load_from_cpu_memory for CPUDevice");
+		unsafe {
+			std::ptr::copy_nonoverlapping(
+				cpu_src.as_ptr(),
+				dev_dst.memory().add(offset_bytes).as_ptr(),
+				count_bytes,
+			);
+		}
+		Ok(())
 	}
 
 	unsafe fn store_to_cpu_memory(
 		&self,
-		dev_src: (ND<0>, &DeviceBuffer),
+		dev_src: &DeviceBuffer,
 		cpu_dst: NonNull<u8>,
-		count: usize,
+		offset_bytes: usize,
+		count_bytes: usize,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		todo!("implement store_to_cpu_memory for CPUDevice");
+		unsafe {
+			std::ptr::copy_nonoverlapping(
+				dev_src.memory().add(offset_bytes).as_ptr(),
+				cpu_dst.as_ptr(),
+				count_bytes,
+			);
+		}
+		Ok(())
 	}
 
 	unsafe fn mm(&self, args: &MatMulArgs, scale: f64) -> Result<(), ErrPack<TensorOpError>> {
-		todo!("implement mm for CPUDevice");
+		let internal_dtype = common_dtype(args.internal_dtype, f64::dtype)?;
+		if internal_dtype != f64::dtype {
+			cold_path();
+			return Err(UnsupportedDTypeError.into());
+		}
+		unsafe { cpu_float_methods::mm::<f64>(args, scale) }
 	}
 
 	unsafe fn attention(&self, args: &AttentionArgs) -> Result<(), ErrPack<TensorOpError>> {
-		todo!("implement attention for CPUDevice");
+		cpu_float_methods::attention(args)
 	}
 
 	unsafe fn run_kernel(

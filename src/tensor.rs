@@ -217,34 +217,50 @@ impl Tensor {
 		let nd = merge_dims::<1>(self)?;
 		if !nd.dims[0].is_contiguous() {
 			cold_path();
-			return Err(TensorOpError::not_contiguous());
+			return Err(NotContiguousError.into());
 		}
+		let offset = nd.offset;
 		let count = nd.dims[0].size;
-		if dst.len() != unsafe { self.dtype().array_bytes_unchecked(count) } {
+		let offset_bytes = unsafe { self.dtype().array_bytes_unchecked(offset) };
+		let size_bytes = unsafe { self.dtype().array_bytes_unchecked(count) };
+		if dst.len() != size_bytes {
 			cold_path();
 			return Err(TensorOpError::invalid_buffer_size());
 		}
 		let borrow = self.buf().try_borrow()?;
-		let src = (ND::<0> { offset: nd.offset, dims: [] }, &*borrow);
-		let dst = NonNull::from_ref(dst).cast::<u8>();
-		unsafe { self.device().store_to_cpu_memory(src, dst, count) }
+		unsafe {
+			self.device().store_to_cpu_memory(
+				&*borrow,
+				NonNull::from_ref(dst).cast(),
+				offset_bytes,
+				size_bytes,
+			)
+		}
 	}
 
 	pub fn load_from_cpu_memory(&self, src: &[u8]) -> Result<(), ErrPack<TensorOpError>> {
 		let nd = merge_dims::<1>(self)?;
 		if !nd.dims[0].is_contiguous() {
 			cold_path();
-			return Err(TensorOpError::not_contiguous());
+			return Err(NotContiguousError.into());
 		}
+		let offset = nd.offset;
 		let count = nd.dims[0].size;
-		if src.len() != unsafe { self.dtype().array_bytes_unchecked(count) } {
+		let offset_bytes = unsafe { self.dtype().array_bytes_unchecked(offset) };
+		let size_bytes = unsafe { self.dtype().array_bytes_unchecked(count) };
+		if src.len() != size_bytes {
 			cold_path();
 			return Err(TensorOpError::invalid_buffer_size());
 		}
 		let borrow = self.buf().try_borrow_mut()?;
-		let dst = (ND::<0> { offset: nd.offset, dims: [] }, &*borrow);
-		let src = NonNull::from_ref(src).cast::<u8>();
-		unsafe { self.device().load_from_cpu_memory(src, dst, count) }
+		unsafe {
+			self.device().load_from_cpu_memory(
+				NonNull::from_ref(src).cast(),
+				&*borrow,
+				offset_bytes,
+				size_bytes,
+			)
+		}
 	}
 
 	/// I use this function because Rust doesn't allow specifying only some generic parameters.
@@ -320,6 +336,10 @@ pub struct UnsupportedDTypeError;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+pub struct NotContiguousError;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TensorOpError {
 	DimsDontMatch,
 	TooManyMergedDimensions,
@@ -356,16 +376,6 @@ impl TensorOpError {
 		let message = "At least one dimension is required for reducing operations".into();
 		ErrPack {
 			code: Self::MissingReduceDimension,
-			extra: Some(Box::new(ErrExtra { message, nested: None })),
-		}
-	}
-
-	#[cold]
-	#[inline(never)]
-	pub fn not_contiguous() -> ErrPack<Self> {
-		let message = "Expected the tensor to have contiguous dimension -1, but it does not".into();
-		ErrPack {
-			code: Self::NotContiguous,
 			extra: Some(Box::new(ErrExtra { message, nested: None })),
 		}
 	}
@@ -718,6 +728,15 @@ impl From<UnsupportedDTypeError> for ErrPack<TensorOpError> {
 	fn from(_: UnsupportedDTypeError) -> Self {
 		Self {
 			code: TensorOpError::UnsupportedDType,
+			extra: None,
+		}
+	}
+}
+
+impl From<NotContiguousError> for ErrPack<TensorOpError> {
+	fn from(_: NotContiguousError) -> Self {
+		Self {
+			code: TensorOpError::NotContiguous,
 			extra: None,
 		}
 	}

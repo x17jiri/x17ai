@@ -5,19 +5,20 @@
 //
 //------------------------------------------------------------------------------
 
-use std::mem::MaybeUninit;
+use std::hint::cold_path;
 use std::ptr::NonNull;
-use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::device::cpu::math::{Float, FromToF64};
 use crate::tensor::device::kernel::expr::DynExpr;
-use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
-use crate::tensor::device::{DeviceBuffer, KernelElemArg, KernelReduceArg};
-use crate::tensor::generic::map::ND;
-use crate::tensor::{HasDType, TensorOpError};
+use crate::tensor::device::kernel::runner::KernelData;
+use crate::tensor::device::{KernelElemArg, KernelReduceArg, MatMulArgs};
+use crate::tensor::{DType, HasDType, TensorOpError, UnsupportedDTypeError};
 use crate::util::LossyInto;
+
+pub use attention::attention;
+
+mod attention;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -140,93 +141,78 @@ impl<'a, T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> 
 
 //--------------------------------------------------------------------------------------------------
 
-pub unsafe fn read_float<T: FromToF64>(
-	(map, buf): (ND<0>, NonNull<u8>),
+pub unsafe fn read_float(
+	buf: NonNull<u8>,
+	dtype: DType,
+	offset: usize,
 ) -> Result<f64, ErrPack<TensorOpError>> {
-	unsafe {
-		let ptr = buf.cast::<T>().add(map.offset);
-		Ok(ptr.read().to_f64())
+	match dtype {
+		dtype if dtype == f32::dtype => unsafe {
+			let ptr = buf.cast::<f32>().add(offset);
+			Ok(ptr.read().to_f64())
+		},
+		dtype if dtype == f64::dtype => unsafe {
+			let ptr = buf.cast::<f64>().add(offset);
+			Ok(ptr.read().to_f64())
+		},
+		_ => {
+			cold_path();
+			Err(UnsupportedDTypeError.into())
+		},
 	}
 }
 
-#[repr(C)]
-pub(super) struct CPUFloatVMT<
-	T: 'static + HasDType + Float,
-	U: 'static + HasDType + Float + From<T> + LossyInto<T>,
-> {
-	phantom_t: std::marker::PhantomData<T>,
-	phantom_u: std::marker::PhantomData<U>,
+pub unsafe fn write_float(
+	buf: NonNull<u8>,
+	dtype: DType,
+	offset: usize,
+	value: f64,
+) -> Result<(), ErrPack<TensorOpError>> {
+	match dtype {
+		dtype if dtype == f32::dtype => unsafe {
+			let ptr = buf.cast::<f32>().add(offset);
+			ptr.write(f32::from_f64(value));
+			Ok(())
+		},
+		dtype if dtype == f64::dtype => unsafe {
+			let ptr = buf.cast::<f64>().add(offset);
+			ptr.write(f64::from_f64(value));
+			Ok(())
+		},
+		_ => {
+			cold_path();
+			Err(UnsupportedDTypeError.into())
+		},
+	}
+}
+
+pub unsafe fn mm<T: 'static + HasDType + Float>(
+	args: &MatMulArgs,
+	scale: f64,
+) -> Result<(), ErrPack<TensorOpError>> {
+	unsafe {
+		for j in 0..args.o_rows {
+			for i in 0..args.o_cols {
+				let mut t = 0.0;
+				for k in 0..args.a_cols {
+					let a_offset = args.a_offset + j * args.a_row_stride + k * args.a_col_stride;
+					let b_offset = args.b_offset + k * args.b_row_stride + i * args.b_col_stride;
+					t += read_float(args.a_buf, args.a_dtype, a_offset)?
+						* read_float(args.b_buf, args.b_dtype, b_offset)?;
+				}
+				let t = T::from_f64(t * scale);
+				let o_offset = args.o_offset + j * args.o_row_stride + i * args.o_col_stride;
+				write_float(args.o_buf, args.o_dtype, o_offset, t.to_f64())?;
+			}
+		}
+	}
+	Ok(())
 }
 
 #[allow(clippy::unnecessary_wraps)]
 impl<T: 'static + HasDType + Float, U: 'static + HasDType + Float + From<T> + LossyInto<T>>
 	CPUFloatVMT<T, U>
 {
-	fn load_from_cpu_memory(
-		_this: &DeviceBufferVMT,
-		cpu_src: NonNull<u8>,
-		dev_dst: (ND<0>, &DeviceBuffer),
-		count: usize,
-	) -> Result<(), ErrPack<TensorOpError>> {
-		let (map, buf) = dev_dst;
-		let buf = unsafe {
-			std::slice::from_raw_parts_mut(buf.device_data().as_ptr().cast::<T>(), buf.elems())
-		};
-		let dst_slice = &mut buf[map.offset..map.offset + count];
-		let src_slice = unsafe { std::slice::from_raw_parts(cpu_src.as_ptr().cast::<T>(), count) };
-		dst_slice.copy_from_slice(src_slice);
-		Ok(())
-	}
-
-	fn store_to_cpu_memory(
-		_this: &DeviceBufferVMT,
-		dev_src: (ND<0>, &DeviceBuffer),
-		cpu_dst: NonNull<u8>,
-		count: usize,
-	) -> Result<(), ErrPack<TensorOpError>> {
-		let (map, buf) = dev_src;
-		let buf = unsafe {
-			std::slice::from_raw_parts(buf.device_data().as_ptr().cast::<T>(), buf.elems())
-		};
-		let src_slice = &buf[map.offset..map.offset + count];
-		let dst_slice =
-			unsafe { std::slice::from_raw_parts_mut(cpu_dst.as_ptr().cast::<T>(), count) };
-		dst_slice.copy_from_slice(src_slice);
-		Ok(())
-	}
-
-	unsafe fn mm(
-		_this: &DeviceBufferVMT,
-		args: &MatMulArgs,
-		scale: f64,
-	) -> Result<(), ErrPack<TensorOpError>> {
-		unsafe {
-			let a = args.a_buf.cast::<T>().add(args.a_offset);
-			let b = args.b_buf.cast::<T>().add(args.b_offset);
-			let o = args.o_buf.cast::<T>().add(args.o_offset);
-			for j in 0..args.o_rows {
-				for i in 0..args.o_cols {
-					let mut t = 0.0;
-					for k in 0..args.a_cols {
-						let a = a.add(j * args.a_row_stride + k * args.a_col_stride).read();
-						let b = b.add(k * args.b_row_stride + i * args.b_col_stride).read();
-						t += a.to_f64() * b.to_f64();
-					}
-					let t = T::from_f64(t * scale);
-					o.add(j * args.o_row_stride + i * args.o_col_stride).write(t);
-				}
-			}
-		}
-		Ok(()) // TODO
-	}
-
-	fn attention(
-		_this: &DeviceBufferVMT,
-		args: &AttentionArgs,
-	) -> Result<(), ErrPack<TensorOpError>> {
-		super::attention::attention::<T, U>(args)
-	}
-
 	unsafe fn run_kernel(
 		_this: &DeviceBufferVMT,
 		kernel_data: &KernelData,

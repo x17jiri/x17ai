@@ -192,7 +192,7 @@ extern "C" {
 		const u8 *cpu_src,
 		u8 *cuda_dst,
 		usize offset_bytes,
-		usize size_bytes
+		usize count_bytes
 	) {
 		assert(stream != nullptr);
 		assert(cpu_src != nullptr);
@@ -203,7 +203,7 @@ extern "C" {
 			cudaError_t err = cudaMemcpyAsync(
 				cuda_dst + offset_bytes,
 				cpu_src,
-				size_bytes,
+				count_bytes,
 				cudaMemcpyHostToDevice,
 				cuda_stream
 			);
@@ -223,7 +223,7 @@ extern "C" {
 		const u8 *cuda_src,
 		u8 *cpu_dst,
 		usize offset_bytes,
-		usize size_bytes
+		usize count_bytes
 	) {
 		assert(stream != nullptr);
 		assert(cuda_src != nullptr);
@@ -234,7 +234,7 @@ extern "C" {
 			cudaError_t err = cudaMemcpyAsync(
 				cpu_dst,
 				cuda_src + offset_bytes,
-				size_bytes,
+				count_bytes,
 				cudaMemcpyDeviceToHost,
 				cuda_stream
 			);

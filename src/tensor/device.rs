@@ -5,6 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::ptr::{DynMetadata, NonNull};
 use std::rc::Rc;
 
@@ -70,10 +71,14 @@ pub struct MatMulArgs {
 	pub b_offset: usize,
 	pub b_buf: NonNull<u8>, // [a_cols, o_cols]
 
+	pub o_dtype: DType,
+	pub a_dtype: DType,
+	pub b_dtype: DType,
+	pub internal_dtype: DType,
+
 	pub o_buf_elems: usize,
 	pub a_buf_elems: usize,
 	pub b_buf_elems: usize,
-	pub dtype: DType,
 }
 
 #[repr(C)]
@@ -174,7 +179,7 @@ pub enum NewDeviceBufferError {
 
 #[repr(C)] // to make sure that `metadata` is the first field
 pub struct DeviceBase {
-	metadata: DynMetadata<dyn Device>,
+	metadata: Option<DynMetadata<dyn Device>>,
 	kernel_runner: Rc<KernelRunner>,
 	is_cpu: bool,
 
@@ -183,9 +188,7 @@ pub struct DeviceBase {
 }
 
 impl DeviceBase {
-	pub fn new(device: &dyn Device, is_cpu: bool, kernel_runner: Rc<KernelRunner>) -> Self {
-		let device = device as *const dyn Device;
-		let device = device as *const dyn Device;
+	pub fn new(is_cpu: bool, kernel_runner: Rc<KernelRunner>) -> Self {
 		let metadata = std::ptr::metadata(device);
 		Self {
 			metadata,
@@ -193,19 +196,32 @@ impl DeviceBase {
 			is_cpu,
 
 			#[cfg(debug_assertions)]
-			obj_ptr: device as *const dyn Device as *const (),
+			obj_ptr: std::ptr::null(),
+		}
+	}
+
+	pub fn init_metadata(&mut self, device: NonNull<dyn Device>) {
+		self.metadata = Some(std::ptr::metadata(device));
+
+		#[cfg(debug_assertions)]
+		{
+			self.obj_ptr = device.cast();
 		}
 	}
 
 	/// # Safety
 	///
+	/// - `init_metadata()` must have been called before this
 	/// - The address of `self` must be exactly equal to the address of the `device` passed to
-	///   `new()`
+	///   `init_metadata()`
 	pub unsafe fn device(&self) -> &dyn Device {
+		debug_assert!(self.metadata.is_some());
+		let metadata = unsafe { self.metadata.unwrap_unchecked() };
+
 		let obj_ptr = self as *const Self as *const ();
 		debug_assert!(obj_ptr == self.obj_ptr);
 
-		unsafe { &*std::ptr::from_raw_parts(obj_ptr, self.metadata) }
+		unsafe { &*std::ptr::from_raw_parts(obj_ptr, metadata) }
 	}
 
 	/// # Safety
@@ -214,11 +230,9 @@ impl DeviceBase {
 	///   `new()`
 	/// - The device must be insode an `Rc`
 	pub unsafe fn rc_device(&self) -> Rc<dyn Device> {
-		let obj_ptr = self as *const Self as *const ();
-		debug_assert!(obj_ptr == self.obj_ptr);
-
-		let dev_ptr = std::ptr::from_raw_parts(obj_ptr, self.metadata);
 		unsafe {
+			let dev_ptr = self.device() as *const dyn Device;
+			let dev_ptr = dev_ptr as *const dyn Device; // TODO - borrow checker bug
 			Rc::increment_strong_count(dev_ptr);
 			Rc::from_raw(dev_ptr)
 		}
@@ -248,21 +262,24 @@ pub trait Device {
 
 	unsafe fn read_float(
 		&self,
-		dev_src: (ND<0>, &DeviceBuffer),
+		buf: &DeviceBuffer,
+		offset: usize,
 	) -> Result<f64, ErrPack<TensorOpError>>;
 
 	unsafe fn load_from_cpu_memory(
 		&self,
 		cpu_src: NonNull<u8>,
-		dev_dst: (ND<0>, &DeviceBuffer),
-		count: usize,
+		dev_dst: &DeviceBuffer,
+		offset_bytes: usize,
+		count_bytes: usize,
 	) -> Result<(), ErrPack<TensorOpError>>;
 
 	unsafe fn store_to_cpu_memory(
 		&self,
-		dev_src: (ND<0>, &DeviceBuffer),
+		dev_src: &DeviceBuffer,
 		cpu_dst: NonNull<u8>,
-		count: usize,
+		offset_bytes: usize,
+		count_bytes: usize,
 	) -> Result<(), ErrPack<TensorOpError>>;
 
 	unsafe fn mm(&self, args: &MatMulArgs, scale: f64) -> Result<(), ErrPack<TensorOpError>>;
