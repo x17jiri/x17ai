@@ -35,7 +35,7 @@ pub struct Linear {
 	output_shape: [usize; 1],
 
 	weights: Rc<RefCell<Param>>,
-
+	internal_dtype: DType,
 	forward_scale: f64,
 	backward_scale: f64,
 }
@@ -45,14 +45,14 @@ impl Linear {
 		inputs: usize,
 		outputs: usize,
 		dtype: DType,
+		internal_dtype: DType,
 		ctx: &mut ModelContext,
 	) -> Result<Self, ErrPack<TensorOpError>> {
 		Ok(Self {
 			input_shape: [inputs],
 			output_shape: [outputs],
-
 			weights: ctx.new_param(&[outputs, inputs], dtype)?,
-
+			internal_dtype,
 			forward_scale: 1.0 / f64::lossy_from(inputs).sqrt(),
 			backward_scale: 1.0,
 		})
@@ -92,7 +92,7 @@ impl UnaryFragment for Linear {
 		let w = mat(weights.value())?;
 		let i = col(&inp)?;
 		let o = col(&out)?;
-		o.assign((w * i).scale(self.forward_scale))?;
+		o.assign((w * i).scale(self.forward_scale), self.internal_dtype)?;
 
 		let backward_fn = if inp_backward.is_some() || weights.requires_grad() {
 			Some(Box::new(LinearBackwardFn {
@@ -100,6 +100,7 @@ impl UnaryFragment for Linear {
 				inp: if weights.requires_grad() { Some(inp) } else { None },
 				inp_backward,
 				backward_scale: self.backward_scale,
+				internal_dtype: self.internal_dtype,
 				input_shape: self.input_shape,
 			}) as Box<dyn BackwardFn>)
 		} else {
@@ -120,7 +121,7 @@ pub struct LinearBackwardFn {
 	inp_backward: Option<Box<dyn BackwardFn>>,
 
 	backward_scale: f64,
-
+	internal_dtype: DType,
 	input_shape: [usize; 1],
 }
 
@@ -135,6 +136,7 @@ impl BackwardFn for LinearBackwardFn {
 			inp,
 			inp_backward,
 			backward_scale,
+			internal_dtype,
 			input_shape,
 		} = Box::into_inner(self);
 
@@ -150,7 +152,7 @@ impl BackwardFn for LinearBackwardFn {
 			weights.update_grad(d_out.dtype(), |current_grad| match current_grad {
 				CurrentGradValue::Uninit(tensor) => {
 					let grad = mat(tensor)?;
-					grad.clear_acc(d_w)
+					grad.clear_acc(d_w, internal_dtype)
 				},
 				CurrentGradValue::Value(_tensor) => {
 					todo!("Linear layer backward with existing gradient is not implemented yet");
@@ -164,7 +166,7 @@ impl BackwardFn for LinearBackwardFn {
 			let d_i = (w.T() * d_o).scale(backward_scale);
 			// [... , outputs] -> [... , inputs]
 			let d_inp = d_out.new_replace_tail(1, &input_shape, d_out.dtype())?;
-			col(&d_inp)?.assign(d_i)?;
+			col(&d_inp)?.assign(d_i, internal_dtype)?;
 			queue.add(inp_backward, d_inp);
 		}
 
@@ -192,9 +194,10 @@ impl MultiheadLinear {
 		outputs: usize,
 		heads: usize,
 		dtype: DType,
+		internal_dtype: DType,
 		ctx: &mut ModelContext,
 	) -> Result<Self, ErrPack<TensorOpError>> {
-		let linear = Linear::new(inputs, heads * outputs, dtype, ctx)?;
+		let linear = Linear::new(inputs, heads * outputs, dtype, internal_dtype, ctx)?;
 		linear.weights.borrow_mut().partition(heads, inputs * outputs).unwrap(); // TODO: unwrap
 
 		// TODO - should we change the backward scale?

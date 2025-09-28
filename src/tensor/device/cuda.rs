@@ -10,6 +10,7 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 
 use crate::ErrPack;
+use crate::tensor::device::cpu::math::FromToF64;
 use crate::tensor::device::cuda::cuda_shim::{CudaError, CudaStream};
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
 use crate::tensor::device::{
@@ -19,7 +20,6 @@ use crate::tensor::device::{
 use crate::tensor::{DType, Device, HasDType, TensorOpError, UnsupportedDTypeError};
 use crate::util::mycell;
 
-pub mod cuda_float_methods;
 pub mod cuda_shim;
 
 //--------------------------------------------------------------------------------------------------
@@ -53,6 +53,24 @@ impl CudaDevice {
 			compiled_kernels: Vec::new(),
 			name,
 		}))
+	}
+
+	unsafe fn __read_float<T: HasDType + Default + FromToF64>(
+		&self,
+		buf: &DeviceBuffer,
+		offset: usize,
+	) -> Result<f64, ErrPack<TensorOpError>> {
+		debug_assert!(buf.dtype() == T::dtype);
+		let val = T::default();
+		unsafe {
+			self.cuda_stream.store_to_cpu_memory(
+				buf.memory(),
+				NonNull::from(&val).cast(),
+				offset,
+				std::mem::size_of::<T>(),
+			)?;
+		}
+		Ok(val.to_f64())
 	}
 }
 
@@ -89,8 +107,8 @@ impl Device for CudaDevice {
 		offset: usize,
 	) -> Result<f64, ErrPack<TensorOpError>> {
 		match buf.dtype() {
-			f32::dtype => unsafe { cuda_float_methods::read_float::<f32>(self, buf, offset) },
-			f64::dtype => unsafe { cuda_float_methods::read_float::<f64>(self, buf, offset) },
+			f32::dtype => unsafe { self.__read_float::<f32>(buf, offset) },
+			f64::dtype => unsafe { self.__read_float::<f64>(buf, offset) },
 			_ => {
 				cold_path();
 				Err(UnsupportedDTypeError.into())

@@ -10,13 +10,12 @@ use std::hint::{cold_path, likely};
 use std::sync::{Arc, RwLock};
 
 use crate::ErrPack;
-use crate::tensor::device::DeviceBuffer;
-use crate::tensor::device::buffer::{KernelElemArg, KernelOutput, KernelReduceArg};
 use crate::tensor::device::kernel::expr::{DynExpr, ExprToDyn, ExprTrait};
 use crate::tensor::device::kernel::registry::{KernelMap, KernelRegistry};
+use crate::tensor::device::{DeviceBuffer, KernelElemArg, KernelOutput, KernelReduceArg};
 use crate::tensor::dim_merger::DimMerger;
 use crate::tensor::generic::map::SizeAndStride;
-use crate::tensor::{Tensor, TensorOpError};
+use crate::tensor::{NotContiguousError, Tensor, TensorOpError};
 use crate::util::mycell::{BorrowGuard, UnsafeBorrowFailFlag, UnsafeBorrowMutFailFlag};
 
 //--------------------------------------------------------------------------------------------------
@@ -145,7 +144,7 @@ impl KernelRunner {
 			}
 			if reduce_args_top_dim.iter().any(|vec| vec.stride != 1) {
 				cold_path();
-				return Err(TensorOpError::not_contiguous());
+				return Err(NotContiguousError.into());
 			}
 		}
 
@@ -165,7 +164,7 @@ impl KernelRunner {
 					reduce_args_top_dim.strides[i] * dtype_bytes,
 				],
 				offset_bytes: arg.map().offset * dtype_bytes,
-				buf: arg.buf().device_data(),
+				buf: arg.buf().memory(),
 			}
 		});
 
@@ -177,7 +176,7 @@ impl KernelRunner {
 					merged[1].strides[1 + i] * dtype_bytes,
 				],
 				offset_bytes: arg.map().offset * dtype_bytes,
-				buf: arg.buf().device_data(),
+				buf: arg.buf().memory(),
 			}
 		});
 
@@ -193,7 +192,7 @@ impl KernelRunner {
 				merged[1].strides[0] * dtype_bytes,
 			],
 			offset_bytes: output.map().offset * dtype_bytes,
-			buf: output.buf().device_data(),
+			buf: output.buf().memory(),
 		};
 
 		unsafe {
@@ -220,9 +219,7 @@ impl KernelRunner {
 			// TODO - ensure all on same device
 			// TODO - other things may need to be checked before running the kernel
 
-			let vmt = output.vmt();
-			(vmt.run_kernel)(
-				vmt,
+			output.device().run_kernel(
 				kernel_data,
 				&out,
 				inp.as_ptr(),

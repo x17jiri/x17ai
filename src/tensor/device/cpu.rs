@@ -173,8 +173,24 @@ impl Device for CPUDevice {
 		reduce_args: *const KernelReduceArg,
 		scalar_args: *const f64,
 		reduction_size: usize,
+		internal_dtype: DType,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		todo!("implement run_kernel for CPUDevice");
+		let internal_dtype = common_dtype(internal_dtype, f64::dtype)?;
+		if internal_dtype != f64::dtype {
+			cold_path();
+			return Err(UnsupportedDTypeError.into());
+		}
+		unsafe {
+			cpu_float_methods::run_kernel(
+				kernel_data,
+				o,
+				elemwise_args,
+				reduce_args,
+				scalar_args,
+				reduction_size,
+			);
+		}
+		Ok(())
 	}
 }
 

@@ -30,6 +30,7 @@ pub struct KernelElemArg {
 	pub stride_bytes: [usize; 2],
 	pub buf: NonNull<u8>,
 	pub offset_bytes: usize,
+	pub dtype: DType,
 }
 
 #[repr(C)]
@@ -37,6 +38,7 @@ pub struct KernelReduceArg {
 	pub stride_bytes: [usize; 3],
 	pub buf: NonNull<u8>,
 	pub offset_bytes: usize,
+	pub dtype: DType,
 }
 
 #[repr(C)]
@@ -312,5 +314,6 @@ pub trait Device: DerivesDeviceBase {
 		reduce_args: *const KernelReduceArg,
 		scalar_args: *const f64,
 		reduction_size: usize,
+		internal_dtype: DType,
 	) -> Result<(), ErrPack<TensorOpError>>;
 }

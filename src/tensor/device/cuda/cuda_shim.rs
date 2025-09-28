@@ -10,7 +10,7 @@ use std::ptr::NonNull;
 
 use crate::ErrPack;
 use crate::tensor::TensorOpError;
-use crate::tensor::device::buffer::{KernelElemArg, KernelOutput, KernelReduceArg};
+use crate::tensor::device::{KernelElemArg, KernelOutput, KernelReduceArg};
 
 //--------------------------------------------------------------------------------------------------
 

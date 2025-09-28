@@ -11,18 +11,26 @@ use crate::tensor::device::MatMulArgs;
 use crate::tensor::device::dtype::common_dtype;
 use crate::tensor::dim_merger::DimMerger;
 use crate::tensor::generic::map::{NotEnoughDimensionsError, SizeAndStride};
-use crate::tensor::{HasDType, Tensor, TensorOpError};
+use crate::tensor::{DType, HasDType, Tensor, TensorOpError};
 use crate::util::mycell::UnsafeBorrowFailFlag;
 use crate::{ErrPack, custom_kernel};
 
 //--------------------------------------------------------------------------------------------------
 
 pub trait ClearAccToMatrix {
-	fn clear_acc_to_matrix(self, to: &Matrix) -> Result<(), ErrPack<TensorOpError>>;
+	fn clear_acc_to_matrix(
+		self,
+		to: &Matrix,
+		internal_dtype: DType,
+	) -> Result<(), ErrPack<TensorOpError>>;
 }
 
 pub trait EvaluatesToColMatrix {
-	fn eval_to_col_matrix(self, to: &ColMatrix) -> Result<(), ErrPack<TensorOpError>>;
+	fn eval_to_col_matrix(
+		self,
+		to: &ColMatrix,
+		internal_dtype: DType,
+	) -> Result<(), ErrPack<TensorOpError>>;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -66,8 +74,9 @@ impl<'a> Matrix<'a> {
 	pub fn clear_acc<Expr: ClearAccToMatrix>(
 		&self,
 		expr: Expr,
+		internal_dtype: DType,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		expr.clear_acc_to_matrix(self)
+		expr.clear_acc_to_matrix(self, internal_dtype)
 	}
 }
 
@@ -137,8 +146,9 @@ impl<'a> ColMatrix<'a> {
 	pub fn assign<Expr: EvaluatesToColMatrix>(
 		&self,
 		expr: Expr,
+		internal_dtype: DType,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		expr.eval_to_col_matrix(self)
+		expr.eval_to_col_matrix(self, internal_dtype)
 	}
 }
 
@@ -212,7 +222,11 @@ impl<'a> std::ops::Mul<ColMatrix<'a>> for Matrix<'a> {
 impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 	#[allow(clippy::panic_in_result_fn)]
 	#[inline(never)]
-	fn clear_acc_to_matrix(self, to: &Matrix) -> Result<(), ErrPack<TensorOpError>> {
+	fn clear_acc_to_matrix(
+		self,
+		to: &Matrix,
+		internal_dtype: DType,
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let Self { col, row, scale } = self;
 
 		if col.rows.size != to.rows.size
@@ -262,10 +276,14 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 			b_offset: row.tensor.map().offset,
 			b_buf: row_borrow.memory(),
 
+			o_dtype: to.tensor.dtype(),
+			a_dtype: col.tensor.dtype(),
+			b_dtype: row.tensor.dtype(),
+			internal_dtype,
+
 			o_buf_elems: to_borrow.elems(),
 			a_buf_elems: col_borrow.elems(),
 			b_buf_elems: row_borrow.elems(),
-			dtype: to.tensor.dtype(),
 		};
 
 		let device = to_borrow.device();
@@ -277,7 +295,11 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 	#[allow(clippy::panic_in_result_fn)]
 	#[inline(never)]
-	fn eval_to_col_matrix(self, to: &ColMatrix) -> Result<(), ErrPack<TensorOpError>> {
+	fn eval_to_col_matrix(
+		self,
+		to: &ColMatrix,
+		internal_dtype: DType,
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let Self { mat, col, scale } = self;
 
 		#[allow(clippy::suspicious_operation_groupings)]
@@ -328,10 +350,14 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 			b_offset: col.tensor.map().offset,
 			b_buf: col_borrow.memory(),
 
+			o_dtype: to.tensor.dtype(),
+			a_dtype: mat.tensor.dtype(),
+			b_dtype: col.tensor.dtype(),
+			internal_dtype,
+
 			o_buf_elems: to_borrow.elems(),
 			a_buf_elems: mat_borrow.elems(),
 			b_buf_elems: col_borrow.elems(),
-			dtype: to.tensor.dtype(),
 		};
 
 		let device = to_borrow.device();

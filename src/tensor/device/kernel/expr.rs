@@ -488,7 +488,7 @@ where
 	[(); E::BATCHED_KEY_LEN]:,
 {
 	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
-		to.vmt().kernel_runner.run(to, self.elem_args, self.reduce_args, self.scalar_args)
+		to.device_base().kernel_runner.run(to, self.elem_args, self.reduce_args, self.scalar_args)
 	}
 }
 
