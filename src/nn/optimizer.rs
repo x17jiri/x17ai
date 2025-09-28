@@ -44,6 +44,7 @@ impl Default for OptCoef {
 pub struct OptParam {
 	pub(crate) parts: usize,
 	pub(crate) part_elems: usize,
+	pub(crate) internal_dtype: DType,
 
 	pub(crate) value: Tensor, // shape: `[parts, part_elems]`
 	pub(crate) m: Tensor,     // shape: `[parts, part_elems]`
@@ -64,6 +65,7 @@ impl OptParam {
 		parts: usize,
 		part_elems: usize,
 		momentum_dtype: DType,
+		internal_dtype: DType,
 	) -> Result<Self, ErrPack<TensorOpError>> {
 		let value_orig_shape = value;
 		let value = value_orig_shape.merge_all_dims().unwrap(); // if fails, tensor is not contiguous
@@ -79,6 +81,7 @@ impl OptParam {
 		Ok(Self {
 			parts,
 			part_elems,
+			internal_dtype,
 
 			value,
 			m,
@@ -123,6 +126,7 @@ impl OptParam {
 
 		// Update the first moment estimate
 		self.m.assign(custom_kernel!(
+			self.internal_dtype,
 			[m: &self.m, grad: &grad],
 			(
 				m_decay_coef: coef.m_decay,
@@ -137,6 +141,7 @@ impl OptParam {
 
 		// Update the second moment estimate
 		self.v.assign(custom_kernel!(
+			self.internal_dtype,
 			[v: &self.v, grad: &grad],
 			(
 				v_decay_coef: coef.v_decay,
@@ -154,6 +159,7 @@ impl OptParam {
 
 		let v_rsqrt = self.v.new_empty_like(self.v.dtype())?;
 		v_rsqrt.assign(custom_kernel!(
+			self.internal_dtype,
 			[v: &self.v], (eps: coef.eps), {
 				(v.sqrt() + eps).recip()
 			}
@@ -161,6 +167,7 @@ impl OptParam {
 
 		// Update value
 		self.value.assign(custom_kernel!(
+			self.internal_dtype,
 			[
 				m: &self.m,
 				v_rsqrt: &v_rsqrt,

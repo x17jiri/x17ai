@@ -11,16 +11,19 @@ use std::rc::Rc;
 use crate::autograd::{self, AutogradTensor, BackwardFn};
 use crate::nn::param::Param;
 use crate::rng::Rng;
-use crate::tensor::{Tensor, TensorOpError};
+use crate::tensor::device::dtype::common_dtype;
+use crate::tensor::{DType, Tensor, TensorOpError};
 use crate::{ErrPack, custom_kernel};
 
 use super::Fragment;
 
-pub struct SwiGLU;
+pub struct SwiGLU {
+	internal_dtype: DType,
+}
 
 impl SwiGLU {
-	pub fn new() -> Self {
-		Self
+	pub fn new(internal_dtype: DType) -> Self {
+		Self { internal_dtype }
 	}
 }
 
@@ -45,15 +48,18 @@ impl super::UnaryFragment for SwiGLU {
 		let out = inp.new_replace_tail(2, &[inp.size(-1)?], inp.dtype())?;
 		let lin = inp.select(-2, 0)?;
 		let gate = inp.select(-2, 1)?;
+		let internal_dtype = common_dtype(inp.dtype(), self.internal_dtype)?;
 
 		out.assign(custom_kernel!(
+			internal_dtype,
 			[lin: &lin, gate: &gate], (ONE: 1.0), {
 				lin * gate * ((-gate).exp() + ONE).recip()
 			}
 		))?;
 
 		let backward_fn = inp_backward.map(|inp_backward| {
-			Box::new(SwiGLUBackwardFn { lin, gate, inp_backward }) as Box<dyn BackwardFn>
+			Box::new(SwiGLUBackwardFn { lin, gate, internal_dtype, inp_backward })
+				as Box<dyn BackwardFn>
 		});
 
 		Ok(AutogradTensor::new(out, backward_fn))
@@ -63,6 +69,7 @@ impl super::UnaryFragment for SwiGLU {
 pub struct SwiGLUBackwardFn {
 	pub lin: Tensor,
 	pub gate: Tensor,
+	pub internal_dtype: DType,
 	pub inp_backward: Box<dyn BackwardFn>,
 }
 
@@ -72,7 +79,8 @@ impl BackwardFn for SwiGLUBackwardFn {
 		d_out: Tensor,
 		queue: &mut autograd::Queue,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		let Self { lin, gate, inp_backward } = Box::into_inner(self);
+		let Self { lin, gate, internal_dtype, inp_backward } = Box::into_inner(self);
+		let internal_dtype = common_dtype(d_out.dtype(), internal_dtype)?;
 
 		let input_shape = [2, d_out.size(-1)?];
 		let d_inp = d_out.new_replace_tail(1, &input_shape, d_out.dtype())?;
@@ -80,12 +88,14 @@ impl BackwardFn for SwiGLUBackwardFn {
 		let d_gate = d_inp.select(-2, 1)?;
 
 		d_lin.assign(custom_kernel!(
+			internal_dtype,
 			[d_out: &d_out, gate: &gate], (ONE: 1.0), {
 				d_out * gate * (ONE + (-gate).exp()).recip()
 			}
 		))?;
 
 		d_gate.assign(custom_kernel!(
+			internal_dtype,
 			[d_out: &d_out, lin: &lin, gate: &gate], (ONE: 1.0), {
 				let sigmoid = (ONE + (-gate).exp()).recip();
 				let swish = gate * sigmoid;

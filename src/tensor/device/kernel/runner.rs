@@ -15,7 +15,7 @@ use crate::tensor::device::kernel::registry::{KernelMap, KernelRegistry};
 use crate::tensor::device::{DeviceBuffer, KernelElemArg, KernelOutput, KernelReduceArg};
 use crate::tensor::dim_merger::DimMerger;
 use crate::tensor::generic::map::SizeAndStride;
-use crate::tensor::{NotContiguousError, Tensor, TensorOpError};
+use crate::tensor::{DType, NotContiguousError, Tensor, TensorOpError};
 use crate::util::mycell::{BorrowGuard, UnsafeBorrowFailFlag, UnsafeBorrowMutFailFlag};
 
 //--------------------------------------------------------------------------------------------------
@@ -56,6 +56,7 @@ impl KernelRunner {
 		elem_args: [&Tensor; E::ELEMWISE_COUNT],
 		reduce_args: [&Tensor; E::REDUCE_COUNT],
 		scalar_args: [f64; E::SCALAR_COUNT],
+		internal_dtype: DType,
 	) -> Result<(), ErrPack<TensorOpError>>
 	where
 		[(); E::PADDED_KEY_LEN]:,
@@ -86,7 +87,7 @@ impl KernelRunner {
 			cache.insert_unique(key_hash, kernel)
 		};
 		let kernel = entry.value.as_ref();
-		Self::__run(kernel, output, elem_args, reduce_args, scalar_args)
+		Self::__run(kernel, output, elem_args, reduce_args, scalar_args, internal_dtype)
 	}
 
 	#[inline(never)]
@@ -98,6 +99,7 @@ impl KernelRunner {
 		elem_args: [&Tensor; E],
 		reduce_args: [&Tensor; R],
 		scalar_args: [f64; C],
+		internal_dtype: DType,
 	) -> Result<(), ErrPack<TensorOpError>>
 	where
 		[(); 1 + E + R]:,
@@ -165,6 +167,7 @@ impl KernelRunner {
 				],
 				offset_bytes: arg.map().offset * dtype_bytes,
 				buf: arg.buf().memory(),
+				dtype: arg.dtype(),
 			}
 		});
 
@@ -177,6 +180,7 @@ impl KernelRunner {
 				],
 				offset_bytes: arg.map().offset * dtype_bytes,
 				buf: arg.buf().memory(),
+				dtype: arg.dtype(),
 			}
 		});
 
@@ -193,6 +197,8 @@ impl KernelRunner {
 			],
 			offset_bytes: output.map().offset * dtype_bytes,
 			buf: output.buf().memory(),
+			dtype: output.buf().dtype(),
+			internal_dtype,
 		};
 
 		unsafe {

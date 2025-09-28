@@ -29,6 +29,7 @@ pub fn add(
 		a.new_empty_like(c_dtype)?
 	};
 	c.assign(custom_kernel!(
+		c_dtype,
 		[a: &a, b: &b], (), {
 			a + b
 		}

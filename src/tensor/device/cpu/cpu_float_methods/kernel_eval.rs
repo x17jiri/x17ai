@@ -96,7 +96,7 @@ impl<'a> EvalExpr<'a> {
 					let mut sum = KahanAcc::<f64>::new();
 					for k in 0..self.reduction_size {
 						let value = self.eval_expr(a, j, i, k)?;
-						sum += value;
+						sum.acc_(value);
 					}
 					Ok(sum.value())
 				},

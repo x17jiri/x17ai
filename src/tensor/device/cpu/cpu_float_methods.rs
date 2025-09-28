@@ -5,11 +5,11 @@
 //
 //------------------------------------------------------------------------------
 
-mod attention;
+//mod attention;
 mod kernel_eval;
 mod mm;
 
-pub use attention::attention;
+//pub use attention::attention;
 pub use kernel_eval::run_kernel;
 pub use mm::mm;
 

@@ -145,10 +145,8 @@ impl Tensor {
 		}
 		self.ensure_safe()?;
 
-		let (mut map, _elems) = ND::new(&[])?;
-		map.offset = self.map().offset;
 		let buf = self.buf().try_borrow()?;
-		unsafe { self.device().read_float((map, &*buf)) }
+		unsafe { self.device().read_float(&buf, self.map().offset) }
 	}
 
 	/// Sometimes we want to calculate the mean of the last dimension,

@@ -18,7 +18,7 @@ use crate::rng::Rng;
 use crate::tensor::device::AttentionArgs;
 use crate::tensor::dim_merger::DimMerger;
 use crate::tensor::generic::map::dd::INLINE_DIMS;
-use crate::tensor::{Tensor, TensorOpError};
+use crate::tensor::{NotContiguousError, Tensor, TensorOpError};
 use crate::util::mycell::{UnsafeBorrowFailFlag, UnsafeBorrowMutFailFlag};
 use crate::{ErrPack, autograd};
 
@@ -123,7 +123,7 @@ impl Attention {
 			|| !o_width.is_contiguous()
 		{
 			cold_path();
-			return Err(TensorOpError::not_contiguous());
+			return Err(NotContiguousError.into());
 		}
 		if q.dtype() != k.dtype() || q.dtype() != v.dtype() || q.dtype() != o.dtype() {
 			cold_path();

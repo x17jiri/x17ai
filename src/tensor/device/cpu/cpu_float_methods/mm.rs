@@ -10,7 +10,6 @@ use crate::tensor::TensorOpError;
 use crate::tensor::device::MatMulArgs;
 use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::device::cpu::cpu_float_methods::KahanAcc;
-use crate::tensor::device::cpu::math::Float;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -24,8 +23,10 @@ pub unsafe fn mm(args: &MatMulArgs, scale: f64) -> Result<(), ErrPack<TensorOpEr
 					let a_offset_bytes = args.a_dtype.array_bytes_unchecked(a_offset);
 					let b_offset = args.b_offset + k * args.b_row_stride + i * args.b_col_stride;
 					let b_offset_bytes = args.b_dtype.array_bytes_unchecked(b_offset);
-					t += CPUDevice::__read_float(args.a_buf, args.a_dtype, a_offset_bytes)?
-						* CPUDevice::__read_float(args.b_buf, args.b_dtype, b_offset_bytes)?;
+					t.acc_(
+						CPUDevice::__read_float(args.a_buf, args.a_dtype, a_offset_bytes)?
+							* CPUDevice::__read_float(args.b_buf, args.b_dtype, b_offset_bytes)?,
+					);
 				}
 				t.scale_(scale);
 				let o_offset = args.o_offset + j * args.o_row_stride + i * args.o_col_stride;

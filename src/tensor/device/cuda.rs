@@ -10,7 +10,7 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::tensor::device::cpu::math::FromToF64;
+use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
 use crate::tensor::device::cuda::cuda_shim::{CudaError, CudaStream};
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
 use crate::tensor::device::{

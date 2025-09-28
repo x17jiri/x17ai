@@ -9,14 +9,13 @@ use std::hint::cold_path;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-use crate::tensor::device::cpu::math::FromToF64;
+use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
 use crate::tensor::device::dtype::common_dtype;
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
 use crate::tensor::{HasDType, TensorOpError, UnsupportedDTypeError};
 use crate::util::mycell::{self, BorrowGuard};
 
 pub mod cpu_float_methods;
-pub mod math;
 
 use crate::ErrPack;
 use crate::tensor::device::{
@@ -207,7 +206,7 @@ impl Device for CPUDevice {
 			cold_path();
 			return Err(UnsupportedDTypeError.into());
 		}
-		unsafe { cpu_float_methods::mm::<f64>(args, scale) }
+		unsafe { cpu_float_methods::mm(args, scale) }
 	}
 
 	unsafe fn attention(&self, args: &AttentionArgs) -> Result<(), ErrPack<TensorOpError>> {
@@ -222,9 +221,8 @@ impl Device for CPUDevice {
 		reduce_args: *const KernelReduceArg,
 		scalar_args: *const f64,
 		reduction_size: usize,
-		internal_dtype: DType,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		let internal_dtype = common_dtype(internal_dtype, f64::dtype)?;
+		let internal_dtype = common_dtype(o.internal_dtype, f64::dtype)?;
 		if internal_dtype != f64::dtype {
 			cold_path();
 			return Err(UnsupportedDTypeError.into());

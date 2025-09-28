@@ -46,6 +46,7 @@ impl UnaryFragment for RMSNorm {
 
 		let magn_recip = inp.new_replace_tail(1, &[1], internal_dtype)?;
 		magn_recip.assign(custom_kernel!(
+			internal_dtype,
 			[inp: &inp], (sum_to_mean: sum_to_mean, eps: self.eps), {
 				(((inp * inp).sum() * sum_to_mean).sqrt() + eps).recip()
 			}
@@ -53,6 +54,7 @@ impl UnaryFragment for RMSNorm {
 
 		let out = inp.reuse_or_new_like()?;
 		out.assign(custom_kernel!(
+			internal_dtype,
 			[inp: &inp, magn_recip: &magn_recip], (), {
 				inp * magn_recip
 			}
@@ -111,6 +113,7 @@ impl BackwardFn for RMSNormBackwardFn_Precise {
 
 		let g = magn_recip.new_empty_like(internal_dtype)?; // [..., 1]
 		g.assign(custom_kernel!(
+			internal_dtype,
 			[out: &out, d_out: &d_out], (sum_to_mean: sum_to_mean), {
 				(out * d_out).sum() * sum_to_mean
 			}
@@ -119,6 +122,7 @@ impl BackwardFn for RMSNormBackwardFn_Precise {
 		let d_inp = out.reuse_or_new_like()?;
 
 		d_inp.assign(custom_kernel!(
+			internal_dtype,
 			[d_out: &d_out, out: &out, g: &g, magn_recip: &magn_recip], (), {
 				(d_out - (out * g)) * magn_recip
 			}

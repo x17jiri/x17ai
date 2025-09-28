@@ -67,16 +67,19 @@ impl UnaryFragment for Softmax {
 		let sum_recip = max.new_empty_like(internal_dtype)?;
 
 		max.assign(custom_kernel!(
+			internal_dtype,
 			[inp: &inp], (), {
 				inp.max()
 			}
 		))?;
 		sum_recip.assign(custom_kernel!(
+			internal_dtype,
 			[inp: &inp, max: &max], (), {
 				(inp - max).exp().sum().recip()
 			}
 		))?;
 		out.assign(custom_kernel!(
+			internal_dtype,
 			[inp: &inp, max: &max, sum_recip: &sum_recip], (), {
 				(inp - max).exp() * sum_recip
 			}
@@ -88,10 +91,11 @@ impl UnaryFragment for Softmax {
 				internal_dtype: self.internal_dtype,
 				inp_backward,
 			}) as Box<dyn BackwardFn>,
-			SoftmaxGradMode::Simplified => {
-				Box::new(SoftmaxBackwardFn_Simplified { out: out.clone(), inp_backward })
-					as Box<dyn BackwardFn>
-			},
+			SoftmaxGradMode::Simplified => Box::new(SoftmaxBackwardFn_Simplified {
+				out: out.clone(),
+				internal_dtype: self.internal_dtype,
+				inp_backward,
+			}) as Box<dyn BackwardFn>,
 			SoftmaxGradMode::StraightThrough => {
 				// TODO - could I just use inp_backward directly?
 				Box::new(StraightThroughBackwardFn::new(inp_backward)) as Box<dyn BackwardFn>
@@ -121,6 +125,7 @@ impl BackwardFn for SoftmaxBackwardFn_Precise {
 
 		let g = out.new_replace_tail(1, &[1], internal_dtype)?; // [..., 1]
 		g.assign(custom_kernel!(
+			internal_dtype,
 			[out: &out, d_out: &d_out], (), {
 				(out * d_out).sum()
 			}
@@ -129,6 +134,7 @@ impl BackwardFn for SoftmaxBackwardFn_Precise {
 		let d_inp = d_out.reuse_or_new_like()?;
 
 		d_inp.assign(custom_kernel!(
+			internal_dtype,
 			[d_out: &d_out, g: &g, out: &out], (), {
 				(d_out - g) * out
 			}
@@ -143,6 +149,7 @@ impl BackwardFn for SoftmaxBackwardFn_Precise {
 
 pub struct SoftmaxBackwardFn_Simplified {
 	pub out: Tensor,
+	pub internal_dtype: DType,
 	pub inp_backward: Box<dyn BackwardFn>,
 }
 
@@ -152,11 +159,13 @@ impl BackwardFn for SoftmaxBackwardFn_Simplified {
 		d_out: Tensor,
 		queue: &mut autograd::Queue,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		let Self { out, inp_backward } = Box::into_inner(self);
+		let Self { out, internal_dtype, inp_backward } = Box::into_inner(self);
+		let internal_dtype = common_dtype(d_out.dtype(), internal_dtype)?;
 
 		let d_inp = d_out.reuse_or_new_like()?;
 
 		d_inp.assign(custom_kernel!(
+			internal_dtype,
 			[d_out: &d_out, out: &out], (), {
 				d_out * out
 			}

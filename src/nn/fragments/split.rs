@@ -101,6 +101,7 @@ impl BackwardFn for SplitBackwardFn {
 				if grad.owns_buffer() {
 					let grad = &*grad;
 					grad.assign(custom_kernel!(
+						grad.dtype(),
 						[grad: grad, d_out: &d_out], (), {
 							grad + d_out
 						}
@@ -109,6 +110,7 @@ impl BackwardFn for SplitBackwardFn {
 					let mut new_grad = grad.new_empty_like(grad.dtype())?;
 					std::mem::swap(grad, &mut new_grad);
 					grad.assign(custom_kernel!(
+						grad.dtype(),
 						[new_grad: &new_grad, d_out: &d_out], (), {
 							new_grad + d_out
 						}

@@ -68,12 +68,14 @@ impl Param {
 	pub fn init_optimizer(
 		&mut self,
 		momentum_dtype: DType,
+		internal_dtype: DType,
 	) -> Result<&mut OptParam, ErrPack<TensorOpError>> {
 		let opt_param = Box::new(OptParam::new(
 			self.value.clone(),
 			self.parts,
 			self.part_elems,
 			momentum_dtype,
+			internal_dtype,
 		)?);
 		Ok(self.opt_param.insert(opt_param))
 	}

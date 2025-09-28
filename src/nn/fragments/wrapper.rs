@@ -86,6 +86,7 @@ impl<Nested: UnaryFragment> UnaryFragment for Wrapper<Nested> {
 
 		let inp_magn_recip = inp.new_replace_tail(1, &[1], internal_dtype)?;
 		inp_magn_recip.assign(custom_kernel!(
+			internal_dtype,
 			[inp: &inp], (sum_to_mean: sum_to_mean, eps: self.eps), {
 				(((inp * inp).sum() * sum_to_mean).sqrt() + eps).recip()
 			}
@@ -97,6 +98,7 @@ impl<Nested: UnaryFragment> UnaryFragment for Wrapper<Nested> {
 			inp.new_empty_like(inp.dtype())?
 		};
 		rms_norm.assign(custom_kernel!(
+			internal_dtype,
 			[inp: &inp, inp_magn_recip:  &inp_magn_recip], (), {
 				inp * inp_magn_recip
 			}
@@ -128,12 +130,14 @@ impl<Nested: UnaryFragment> UnaryFragment for Wrapper<Nested> {
 			let sum_to_mean = nested_out.sum_to_mean();
 
 			inner.ratio.assign(custom_kernel!(
+				internal_dtype,
 				[nested_out: &nested_out], (sum_to_mean: sum_to_mean), {
 					((nested_out * nested_out).sum() * sum_to_mean).sqrt()
 				}
 			))?;
 			if self.norm_pos == NormPosition::Inside {
 				inner.ratio.assign(custom_kernel!(
+					internal_dtype,
 					[ratio: &inner.ratio, inp_magn_recip: &inp_magn_recip], (), {
 						ratio * inp_magn_recip
 					}
@@ -163,6 +167,7 @@ impl<Nested: UnaryFragment> UnaryFragment for Wrapper<Nested> {
 		}
 		let out = nested_out.reuse_or_new_like()?;
 		out.assign(custom_kernel!(
+			internal_dtype,
 			[nested_out: &nested_out, residual: &residual], (), {
 				nested_out + residual
 			}
@@ -210,11 +215,13 @@ impl BackwardFn for WrapperBackwardFn_Split {
 
 		let d_nested_magn_recip = ratio.new_empty_like(internal_dtype)?;
 		d_nested_magn_recip.assign(custom_kernel!(
+			internal_dtype,
 			[d_nested: &d_nested], (sum_to_mean: sum_to_mean, eps: eps), {
 				(((d_nested * d_nested).sum() * sum_to_mean).sqrt() + eps).recip()
 			}
 		))?;
 		ratio.assign(custom_kernel!(
+			internal_dtype,
 			[ratio: &ratio, d_nested_magn_recip: &d_nested_magn_recip], (), {
 				ratio * d_nested_magn_recip
 			}
@@ -222,11 +229,13 @@ impl BackwardFn for WrapperBackwardFn_Split {
 
 		let d_out_magn = d_nested_magn_recip; // reuse tensor with different variable name
 		d_out_magn.assign(custom_kernel!(
+			internal_dtype,
 			[d_out: &d_out], (sum_to_mean: sum_to_mean), {
 				((d_out * d_out).sum() * sum_to_mean).sqrt()
 			}
 		))?;
 		ratio.assign(custom_kernel!(
+			internal_dtype,
 			[ratio: &ratio, d_out_magn: &d_out_magn], (), {
 				ratio * d_out_magn
 			}
@@ -234,6 +243,7 @@ impl BackwardFn for WrapperBackwardFn_Split {
 
 		let d_inp = d_out.reuse_or_new_like()?;
 		d_inp.assign(custom_kernel!(
+			internal_dtype,
 			[d_nested: &d_nested, ratio: &ratio, d_out: &d_out], (), {
 				d_out + (d_nested * ratio)
 			}
@@ -243,11 +253,13 @@ impl BackwardFn for WrapperBackwardFn_Split {
 
 		let d_inp_magn_recip = ratio; // reuse tensor with different variable name
 		d_inp_magn_recip.assign(custom_kernel!(
+			internal_dtype,
 			[d_inp: &d_inp], (sum_to_mean: sum_to_mean, eps: eps), {
 				(((d_inp * d_inp).sum() * sum_to_mean).sqrt() + eps).recip()
 			}
 		))?;
 		d_out_magn.assign(custom_kernel!(
+			internal_dtype,
 			[d_out_magn: &d_out_magn, d_inp_magn_recip: &d_inp_magn_recip], (), {
 				d_out_magn * d_inp_magn_recip
 			}
@@ -255,6 +267,7 @@ impl BackwardFn for WrapperBackwardFn_Split {
 		std::mem::drop(d_inp_magn_recip);
 
 		d_inp.assign(custom_kernel!(
+			internal_dtype,
 			[d_inp: &d_inp, d_out_magn: &d_out_magn], (), {
 				d_inp * d_out_magn
 			}

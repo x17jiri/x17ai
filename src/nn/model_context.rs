@@ -39,9 +39,13 @@ impl ModelContext {
 		Ok(param)
 	}
 
-	pub fn init_optimizer(&mut self, momentum_dtype: DType) -> Result<(), ErrPack<TensorOpError>> {
+	pub fn init_optimizer(
+		&mut self,
+		momentum_dtype: DType,
+		internal_dtype: DType,
+	) -> Result<(), ErrPack<TensorOpError>> {
 		for param in &self.params {
-			param.borrow_mut().init_optimizer(momentum_dtype)?;
+			param.borrow_mut().init_optimizer(momentum_dtype, internal_dtype)?;
 		}
 		Ok(())
 	}

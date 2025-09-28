@@ -8,14 +8,16 @@
 use std::sync::Arc;
 
 use crate::ErrPack;
+use crate::tensor::device::dtype::common_dtype;
 use crate::tensor::device::kernel::registry::KernelMap;
-use crate::tensor::{Tensor, TensorOpError};
+use crate::tensor::{DType, Tensor, TensorOpError};
 
 //--------------------------------------------------------------------------------------------------
 
 #[macro_export]
 macro_rules! custom_kernel {
 	(
+		$internal_dtype:expr,
 		[ $($tensor_id:ident : $tensor_expr:expr),* $(,)? ],
 		( $($scalar_id:ident : $scalar_expr:expr),* $(,)? ),
 		$body:expr
@@ -35,7 +37,8 @@ macro_rules! custom_kernel {
 					);
 				)*
 				$body
-			}
+			},
+			$internal_dtype
 		)
 	}};
 }
@@ -50,7 +53,9 @@ pub trait EvaluatesToTensor {
 
 impl EvaluatesToTensor for f64 {
 	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+		let internal_dtype = to.dtype();
 		to.assign(custom_kernel!(
+			internal_dtype,
 			[], (VALUE: self), {
 				VALUE
 			}
@@ -60,7 +65,9 @@ impl EvaluatesToTensor for f64 {
 
 impl EvaluatesToTensor for &Tensor {
 	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+		let internal_dtype = common_dtype(self.dtype(), to.dtype())?;
 		to.assign(custom_kernel!(
+			internal_dtype,
 			[src: self], (), {
 				src
 			}
@@ -436,6 +443,7 @@ where
 	elem_args: [&'a Tensor; E::ELEMWISE_COUNT],
 	reduce_args: [&'a Tensor; E::REDUCE_COUNT],
 	scalar_args: [f64; E::SCALAR_COUNT],
+	internal_dtype: DType,
 }
 
 impl<'a, E: const ExprTrait + ExprToDyn + Copy> KernelCall<'a, E>
@@ -462,6 +470,7 @@ where
 		tensors: [&'a Tensor; TC],
 		scalars: [f64; SC],
 		_expr: Expr<E>,
+		internal_dtype: DType,
 	) -> Self {
 		let elem_arg_indexes: [usize; E::ELEMWISE_COUNT] =
 			const { Self::mask_to_indexes(E::ELEMWISE_MASK) };
@@ -473,6 +482,7 @@ where
 			elem_args: std::array::from_fn(|i| tensors[elem_arg_indexes[i]]),
 			reduce_args: std::array::from_fn(|i| tensors[reduce_arg_indexes[i]]),
 			scalar_args: std::array::from_fn(|i| scalars[scalar_arg_indexes[i]]),
+			internal_dtype,
 		}
 	}
 }
@@ -488,7 +498,13 @@ where
 	[(); E::BATCHED_KEY_LEN]:,
 {
 	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
-		to.device_base().kernel_runner.run(to, self.elem_args, self.reduce_args, self.scalar_args)
+		to.device_base().kernel_runner.run(
+			to,
+			self.elem_args,
+			self.reduce_args,
+			self.scalar_args,
+			self.internal_dtype,
+		)
 	}
 }
 

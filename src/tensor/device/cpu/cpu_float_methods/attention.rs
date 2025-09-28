@@ -11,7 +11,6 @@ use crate::ErrPack;
 use crate::tensor::TensorOpError;
 use crate::tensor::device::AttentionArgs;
 use crate::tensor::device::cpu::cpu_float_methods::{KahanAcc, dot};
-use crate::tensor::device::cpu::math::Float;
 use crate::tensor::generic::map::{Map, ND};
 use crate::util::LossyInto;
 

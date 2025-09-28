@@ -8,7 +8,9 @@
 use log;
 use std::hint::cold_path;
 
-use crate::tensor::device::cpu::math::FromToF64;
+use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
+
+//--------------------------------------------------------------------------------------------------
 
 // State initialization constant ("expand 32-byte k")
 const CONST: [u32; 4] = [0x_6170_7865, 0x_3320_646e, 0x_7962_2d32, 0x_6b20_6574];
@@ -169,3 +171,5 @@ impl Rng {
 		}
 	}
 }
+
+//--------------------------------------------------------------------------------------------------

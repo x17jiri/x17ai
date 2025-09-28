@@ -9,7 +9,7 @@ use std::hint::cold_path;
 
 use crate::tensor::HasDType;
 use crate::tensor::device::cpu::CPUDevice;
-use crate::tensor::device::cpu::math::FromToF64;
+use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
 use crate::tensor::dim_merger::{DimMerger, DimMergerError};
 use crate::tensor::generic::map::{DD, Map, ND, SizeAndStride};
 

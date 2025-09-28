@@ -63,6 +63,7 @@ impl LossFn for CrossEntropyLossFn {
 			common_dtype(common_dtype(value.dtype(), target.dtype())?, self.internal_dtype)?;
 		let err_sums = value.new_replace_tail(1, &[1], internal_dtype)?;
 		err_sums.assign(custom_kernel!(
+			internal_dtype,
 			[target: &target, value: &value], (), {
 				(target * value.ln()).sum()
 			}
@@ -73,6 +74,7 @@ impl LossFn for CrossEntropyLossFn {
 
 		let result = err_sums.new_empty(&[1], value.dtype())?;
 		result.assign(custom_kernel!(
+			internal_dtype,
 			[err_sums: &err_sums], (sum_to_mean: err_sums.sum_to_mean()), {
 				err_sums.sum() * sum_to_mean
 			}
@@ -85,11 +87,12 @@ impl LossFn for CrossEntropyLossFn {
 		let Self {
 			value,
 			target,
-			internal_dtype: _,
+			internal_dtype,
 			inp_backward,
 		} = Box::into_inner(self);
 		let d_inp = value.new_empty_like(grad_dtype)?;
 		d_inp.assign(custom_kernel!(
+			internal_dtype,
 			[value: &value, target: &target], (), {
 				value - target
 			}

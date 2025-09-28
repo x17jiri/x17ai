@@ -40,6 +40,7 @@ pub fn approx_eq(a: &Tensor, b: &Tensor, eps: f64) -> Result<bool, ErrPack<Tenso
 	// TODO - `a` may be broadcasted in which case the `diff` shape is wrong
 	let diff = a.new_empty_like(diff_dtype)?;
 	diff.assign(custom_kernel!(
+		diff_dtype,
 		[a: a, b: b], (), {
 			(a - b).abs()
 		}
@@ -47,6 +48,7 @@ pub fn approx_eq(a: &Tensor, b: &Tensor, eps: f64) -> Result<bool, ErrPack<Tenso
 	let diff = diff.merge_all_dims()?;
 	let max = a.new_empty(&[1], diff.dtype())?;
 	max.assign(custom_kernel!(
+		diff_dtype,
 		[diff: &diff], (), {
 			diff.max()
 		}
