@@ -19,8 +19,8 @@ pub mod math;
 
 use crate::ErrPack;
 use crate::tensor::device::{
-	AttentionArgs, DeviceBase, DeviceBuffer, KernelElemArg, KernelOutput, KernelReduceArg,
-	MatMulArgs, NewDeviceBufferError,
+	AttentionArgs, DerivesDeviceBase, DeviceBase, DeviceBuffer, KernelElemArg, KernelOutput,
+	KernelReduceArg, MatMulArgs, NewDeviceBufferError,
 };
 use crate::tensor::{DType, Device};
 
@@ -39,6 +39,8 @@ pub struct CPUDevice {
 	name: String,
 }
 
+unsafe impl DerivesDeviceBase for CPUDevice {}
+
 impl CPUDevice {
 	pub fn new() -> Rc<Self> {
 		Self::new_named("CPU".to_string())
@@ -47,17 +49,10 @@ impl CPUDevice {
 	pub fn new_named(name: String) -> Rc<Self> {
 		let kernel_runner = Rc::new(KernelRunner::new());
 
-		let mut instance = Rc::new(Self {
+		DeviceBase::new_device(Self {
 			base: DeviceBase::new(true, kernel_runner),
 			name,
-		});
-		unsafe {
-			let inst_ref = Rc::get_mut_unchecked(&mut instance);
-			let dyn_ref: &dyn Device = inst_ref;
-			let dyn_ptr = NonNull::from(dyn_ref);
-			inst_ref.base.init_metadata(dyn_ptr);
-		}
-		instance
+		})
 	}
 
 	pub fn buf_as_slice<'guard, 'buf, T: HasDType>(
@@ -90,7 +85,7 @@ impl Device for CPUDevice {
 		dtype: DType,
 		elems: usize,
 	) -> Result<Rc<mycell::RefCell<DeviceBuffer>>, NewDeviceBufferError> {
-		// TODO - do i need `NewDeviceBufferError` as error type? I never return unsupported dtype
+		// TODO - do I need `NewDeviceBufferError` as error type? I never return unsupported dtype
 		if let Some(size) = dtype.array_bytes(elems)
 			&& let Ok(layout) = std::alloc::Layout::from_size_align(size, dtype.align())
 			&& let Some(memory) = NonNull::new(unsafe { std::alloc::alloc(layout) })
@@ -104,14 +99,14 @@ impl Device for CPUDevice {
 		}
 	}
 
-	unsafe fn drop_buffer(&self, data: NonNull<u8>, dtype: DType, elems: usize) {
+	unsafe fn drop_buffer(&self, memory: NonNull<u8>, dtype: DType, elems: usize) {
 		unsafe {
 			let layout = std::alloc::Layout::from_size_align(
 				dtype.array_bytes_unchecked(elems),
 				dtype.align(),
 			)
 			.unwrap_unchecked();
-			std::alloc::dealloc(data.as_ptr(), layout);
+			std::alloc::dealloc(memory.as_ptr(), layout);
 		}
 	}
 
@@ -167,7 +162,7 @@ impl Device for CPUDevice {
 	}
 
 	unsafe fn attention(&self, args: &AttentionArgs) -> Result<(), ErrPack<TensorOpError>> {
-		cpu_float_methods::attention(args)
+		todo!("implement attention for CPUDevice");
 	}
 
 	unsafe fn run_kernel(

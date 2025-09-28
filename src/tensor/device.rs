@@ -5,7 +5,6 @@
 //
 //------------------------------------------------------------------------------
 
-use std::mem::{ManuallyDrop, MaybeUninit};
 use std::ptr::{DynMetadata, NonNull};
 use std::rc::Rc;
 
@@ -177,6 +176,21 @@ pub enum NewDeviceBufferError {
 
 //--------------------------------------------------------------------------------------------------
 
+/// # Safety
+///
+/// This trait indicates that the type `T` has `DeviceBase` as its first field.
+/// This is required for the safe operation of `DeviceBase` methods.
+///
+/// # Example
+/// ```rust
+/// #[repr(C)]
+/// pub struct MyDevice {
+/// 	base: DeviceBase,
+/// 	// ... other fields
+/// }
+/// ```
+pub unsafe trait DerivesDeviceBase {}
+
 #[repr(C)] // to make sure that `metadata` is the first field
 pub struct DeviceBase {
 	metadata: Option<DynMetadata<dyn Device>>,
@@ -189,9 +203,8 @@ pub struct DeviceBase {
 
 impl DeviceBase {
 	pub fn new(is_cpu: bool, kernel_runner: Rc<KernelRunner>) -> Self {
-		let metadata = std::ptr::metadata(device);
 		Self {
-			metadata,
+			metadata: None,
 			kernel_runner,
 			is_cpu,
 
@@ -200,20 +213,27 @@ impl DeviceBase {
 		}
 	}
 
-	pub fn init_metadata(&mut self, device: NonNull<dyn Device>) {
-		self.metadata = Some(std::ptr::metadata(device));
+	pub fn new_device<T: Device>(device: T) -> Rc<T> {
+		let instance = Rc::new(device);
+		unsafe {
+			let inst_ptr = Rc::as_ptr(&instance);
+			let dyn_ptr = inst_ptr as *const dyn Device;
 
-		#[cfg(debug_assertions)]
-		{
-			self.obj_ptr = device.cast();
+			let base_ptr = inst_ptr as *const DeviceBase as *mut DeviceBase;
+			let base = &mut *base_ptr;
+			base.metadata = Some(std::ptr::metadata(dyn_ptr));
+
+			#[cfg(debug_assertions)]
+			{
+				base.obj_ptr = inst_ptr.cast();
+			}
 		}
+		instance
 	}
 
 	/// # Safety
 	///
-	/// - `init_metadata()` must have been called before this
-	/// - The address of `self` must be exactly equal to the address of the `device` passed to
-	///   `init_metadata()`
+	/// - `self` must be at memory offset 0 of Rc'ed object returned by `Self::new_device()`
 	pub unsafe fn device(&self) -> &dyn Device {
 		debug_assert!(self.metadata.is_some());
 		let metadata = unsafe { self.metadata.unwrap_unchecked() };
@@ -226,9 +246,7 @@ impl DeviceBase {
 
 	/// # Safety
 	///
-	/// - The address of `self` must be exactly equal to the address of the `device` passed to
-	///   `new()`
-	/// - The device must be insode an `Rc`
+	/// - `self` must be at memory offset 0 of Rc'ed object returned by `Self::new_device()`
 	pub unsafe fn rc_device(&self) -> Rc<dyn Device> {
 		unsafe {
 			let dev_ptr = self.device() as *const dyn Device;
@@ -247,7 +265,7 @@ impl DeviceBase {
 	}
 }
 
-pub trait Device {
+pub trait Device: DerivesDeviceBase {
 	fn name(&self) -> &str;
 
 	fn new_buffer(
@@ -258,7 +276,7 @@ pub trait Device {
 
 	/// # Safety
 	/// This should only be called from `DeviceBuffer::drop()`
-	unsafe fn drop_buffer(&self, data: NonNull<u8>, dtype: DType, elems: usize);
+	unsafe fn drop_buffer(&self, memory: NonNull<u8>, dtype: DType, elems: usize);
 
 	unsafe fn read_float(
 		&self,

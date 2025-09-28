@@ -147,11 +147,11 @@ pub unsafe fn read_float(
 	offset: usize,
 ) -> Result<f64, ErrPack<TensorOpError>> {
 	match dtype {
-		dtype if dtype == f32::dtype => unsafe {
+		f32::dtype => unsafe {
 			let ptr = buf.cast::<f32>().add(offset);
 			Ok(ptr.read().to_f64())
 		},
-		dtype if dtype == f64::dtype => unsafe {
+		f64::dtype => unsafe {
 			let ptr = buf.cast::<f64>().add(offset);
 			Ok(ptr.read().to_f64())
 		},

@@ -26,7 +26,7 @@ unstable_features = true
 use_field_init_shorthand = true
 #fn_args_layout = "Compressed"
 comment_width = 100
-wrap_comments = true
+wrap_comments = false
 #spaces_around_ranges = true
 
 fn_params_layout = "tall"
