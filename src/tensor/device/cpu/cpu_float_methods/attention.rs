@@ -10,38 +10,12 @@ use std::ptr::NonNull;
 use crate::ErrPack;
 use crate::tensor::TensorOpError;
 use crate::tensor::device::AttentionArgs;
+use crate::tensor::device::cpu::cpu_float_methods::{KahanAcc, dot};
 use crate::tensor::device::cpu::math::Float;
 use crate::tensor::generic::map::{Map, ND};
 use crate::util::LossyInto;
 
 //--------------------------------------------------------------------------------------------------
-
-#[allow(clippy::indexing_slicing)]
-pub fn dot<T: Float, U: Float + From<T>>(a: &[T], b: &[T]) -> U {
-	debug_assert!(a.len() == b.len());
-	let L = a.len().min(b.len());
-	match L {
-		0 => U::ZERO,
-		1 => {
-			let a0: U = a[0].into();
-			let b0: U = b[0].into();
-			a0 * b0
-		},
-		2 => {
-			let a0: U = a[0].into();
-			let b0: U = b[0].into();
-			let a1: U = a[1].into();
-			let b1: U = b[1].into();
-			a0 * b0 + a1 * b1
-		},
-		_ => {
-			let mid = (a.len() / 2).next_power_of_two();
-			let (a1, a2) = a.split_at(mid);
-			let (b1, b2) = b.split_at(mid);
-			dot::<T, U>(a1, b1) + dot::<T, U>(a2, b2)
-		},
-	}
-}
 
 #[derive(Clone, Copy)]
 pub struct View3D<T> {
@@ -99,42 +73,6 @@ impl<T> View3DMut<T> {
 		let end = offset + f.end;
 		assert!(begin <= end && end <= self.data_len);
 		unsafe { std::slice::from_raw_parts_mut(self.data.as_ptr().add(begin), end - begin) }
-	}
-}
-
-#[derive(Clone, Copy)]
-pub struct KahanAcc<T: Float> {
-	sum: T,
-	c: T,
-}
-
-impl<T: Float> Default for KahanAcc<T> {
-	fn default() -> Self {
-		Self::new()
-	}
-}
-
-impl<T: Float> KahanAcc<T> {
-	pub fn new() -> Self {
-		Self { sum: T::default(), c: T::default() }
-	}
-
-	pub fn acc_(&mut self, value: T) {
-		let a = self.sum.max(value);
-		let b = self.sum.min(value);
-		let y = b - self.c;
-		let t = a + y;
-		self.c = (t - a) - y;
-		self.sum = t;
-	}
-
-	pub fn scale_(&mut self, factor: T) {
-		self.sum = self.sum * factor;
-		self.c = self.c * factor;
-	}
-
-	pub fn value(&self) -> T {
-		self.sum
 	}
 }
 

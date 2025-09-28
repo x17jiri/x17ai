@@ -47,6 +47,8 @@ pub struct KernelOutput {
 	pub stride_bytes: [usize; 2],
 	pub buf: NonNull<u8>,
 	pub offset_bytes: usize,
+	pub dtype: DType,
+	pub internal_dtype: DType,
 }
 
 #[repr(C)]
@@ -314,6 +316,5 @@ pub trait Device: DerivesDeviceBase {
 		reduce_args: *const KernelReduceArg,
 		scalar_args: *const f64,
 		reduction_size: usize,
-		internal_dtype: DType,
 	) -> Result<(), ErrPack<TensorOpError>>;
 }

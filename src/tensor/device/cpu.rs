@@ -9,6 +9,7 @@ use std::hint::cold_path;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
+use crate::tensor::device::cpu::math::FromToF64;
 use crate::tensor::device::dtype::common_dtype;
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
 use crate::tensor::{HasDType, TensorOpError, UnsupportedDTypeError};
@@ -72,6 +73,51 @@ impl CPUDevice {
 		let slice = unsafe { std::slice::from_raw_parts(memory.as_ptr().cast(), elems) };
 		Ok(slice)
 	}
+
+	unsafe fn __read_float(
+		buf: NonNull<u8>,
+		dtype: DType,
+		offset_bytes: usize,
+	) -> Result<f64, ErrPack<TensorOpError>> {
+		match dtype {
+			f32::dtype => unsafe {
+				let ptr = buf.cast::<u8>().add(offset_bytes).cast::<f32>();
+				Ok(ptr.read().to_f64())
+			},
+			f64::dtype => unsafe {
+				let ptr = buf.cast::<u8>().add(offset_bytes).cast::<f64>();
+				Ok(ptr.read().to_f64())
+			},
+			_ => {
+				cold_path();
+				Err(UnsupportedDTypeError.into())
+			},
+		}
+	}
+
+	unsafe fn __write_float(
+		buf: NonNull<u8>,
+		dtype: DType,
+		offset_bytes: usize,
+		value: f64,
+	) -> Result<(), ErrPack<TensorOpError>> {
+		match dtype {
+			dtype if dtype == f32::dtype => unsafe {
+				let ptr = buf.cast::<u8>().add(offset_bytes).cast::<f32>();
+				ptr.write(f32::from_f64(value));
+				Ok(())
+			},
+			dtype if dtype == f64::dtype => unsafe {
+				let ptr = buf.cast::<u8>().add(offset_bytes).cast::<f64>();
+				ptr.write(f64::from_f64(value));
+				Ok(())
+			},
+			_ => {
+				cold_path();
+				Err(UnsupportedDTypeError.into())
+			},
+		}
+	}
 }
 
 impl Device for CPUDevice {
@@ -115,7 +161,10 @@ impl Device for CPUDevice {
 		buf: &DeviceBuffer,
 		offset: usize,
 	) -> Result<f64, ErrPack<TensorOpError>> {
-		unsafe { cpu_float_methods::read_float(buf.memory(), buf.dtype(), offset) }
+		unsafe {
+			let offset_bytes = buf.dtype().array_bytes_unchecked(offset);
+			Self::__read_float(buf.memory(), buf.dtype(), offset_bytes)
+		}
 	}
 
 	unsafe fn load_from_cpu_memory(
