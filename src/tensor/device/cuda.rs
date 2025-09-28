@@ -10,10 +10,12 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::tensor::device::cpu::math::FromToF64;
 use crate::tensor::device::cuda::cuda_shim::{CudaError, CudaStream};
-use crate::tensor::device::kernel::runner::KernelRunner;
-use crate::tensor::device::{DerivesDeviceBase, DeviceBase, DeviceBuffer, NewDeviceBufferError};
+use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
+use crate::tensor::device::{
+	AttentionArgs, DerivesDeviceBase, DeviceBase, DeviceBuffer, KernelElemArg, KernelOutput,
+	KernelReduceArg, MatMulArgs, NewDeviceBufferError,
+};
 use crate::tensor::{DType, Device, HasDType, TensorOpError, UnsupportedDTypeError};
 use crate::util::mycell;
 
@@ -48,6 +50,7 @@ impl CudaDevice {
 		Ok(DeviceBase::new_device(Self {
 			base: DeviceBase::new(true, kernel_runner),
 			cuda_stream,
+			compiled_kernels: Vec::new(),
 			name,
 		}))
 	}
@@ -86,26 +89,8 @@ impl Device for CudaDevice {
 		offset: usize,
 	) -> Result<f64, ErrPack<TensorOpError>> {
 		match buf.dtype() {
-			f32::dtype => unsafe {
-				let val = f32::default();
-				self.cuda_stream.store_to_cpu_memory(
-					buf.memory(),
-					NonNull::from(&val).cast(),
-					offset,
-					std::mem::size_of::<f32>(),
-				)?;
-				Ok(val.to_f64())
-			},
-			f64::dtype => unsafe {
-				let val = f64::default();
-				self.cuda_stream.store_to_cpu_memory(
-					buf.memory(),
-					NonNull::from(&val).cast(),
-					offset,
-					std::mem::size_of::<f64>(),
-				)?;
-				Ok(val.to_f64())
-			},
+			f32::dtype => unsafe { cuda_float_methods::read_float::<f32>(self, buf, offset) },
+			f64::dtype => unsafe { cuda_float_methods::read_float::<f64>(self, buf, offset) },
 			_ => {
 				cold_path();
 				Err(UnsupportedDTypeError.into())
@@ -120,7 +105,15 @@ impl Device for CudaDevice {
 		offset_bytes: usize,
 		count_bytes: usize,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		todo!("implement load_from_cpu_memory for CudaDevice");
+		unsafe {
+			self.cuda_stream.load_from_cpu_memory(
+				cpu_src,
+				dev_dst.memory(),
+				offset_bytes,
+				count_bytes,
+			)?;
+		}
+		Ok(())
 	}
 
 	unsafe fn store_to_cpu_memory(
@@ -130,7 +123,15 @@ impl Device for CudaDevice {
 		offset_bytes: usize,
 		count_bytes: usize,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		todo!("implement store_to_cpu_memory for CudaDevice");
+		unsafe {
+			self.cuda_stream.store_to_cpu_memory(
+				dev_src.memory(),
+				cpu_dst,
+				offset_bytes,
+				count_bytes,
+			)?;
+		}
+		Ok(())
 	}
 
 	unsafe fn mm(&self, args: &MatMulArgs, scale: f64) -> Result<(), ErrPack<TensorOpError>> {
@@ -150,6 +151,11 @@ impl Device for CudaDevice {
 		scalar_args: *const f64,
 		reduction_size: usize,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		todo!("implement run_kernel for CudaDevice");
+		let Some(Some(compiled_kernel)) = self.compiled_kernels.get(kernel_data.id) else {
+			cold_path();
+			todo!("CudaDevice::run_kernel: need to compile kernel");
+		};
+		let _compiled_kernel = compiled_kernel.as_ref();
+		todo!("CudaDevice::run_kernel is not implemented yet");
 	}
 }
