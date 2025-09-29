@@ -25,11 +25,15 @@ use crate::tensor::{HasDType, Tensor, TensorOpError};
 #[allow(clippy::approx_constant)]
 #[test]
 fn test_wrapper() -> Result<(), ErrPack<TensorOpError>> {
+	let param_dtype = f32::dtype;
+	let internal_dtype = f32::dtype;
+	let momentum_dtype = f32::dtype;
+
 	let dev = CPUDevice::new();
 	let mut model_ctx = ModelContext::new(dev.clone());
-	let linear = Linear::new(4, 4, f32::dtype, &mut model_ctx)?;
-	let wrapper = Wrapper::new(linear, 1.0e-5);
-	model_ctx.init_optimizer()?;
+	let linear = Linear::new(4, 4, param_dtype, internal_dtype, &mut model_ctx)?;
+	let wrapper = Wrapper::new(linear, 1.0e-5, internal_dtype);
+	model_ctx.init_optimizer(momentum_dtype, internal_dtype)?;
 
 	let lit = Tensor::literal_factory::<f32>(dev);
 

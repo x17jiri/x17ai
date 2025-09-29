@@ -39,7 +39,7 @@ pub unsafe fn run_kernel(
 					o.dtype,
 					o.offset_bytes + j * o.stride_bytes[0] + i * o.stride_bytes[1],
 					value,
-				);
+				)?;
 			}
 		}
 	}
@@ -56,6 +56,8 @@ pub struct EvalExpr<'a> {
 }
 
 impl<'a> EvalExpr<'a> {
+	#[allow(clippy::panic_in_result_fn)]
+	#[allow(clippy::indexing_slicing)]
 	pub unsafe fn eval_expr(
 		&self,
 		expr: &DynExpr,

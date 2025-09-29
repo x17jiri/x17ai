@@ -16,20 +16,21 @@ pub trait LossyFrom<T> {
 	fn lossy_from(value: T) -> Self;
 }
 
-#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::cast_precision_loss, clippy::use_self)]
 impl LossyFrom<usize> for f64 {
 	fn lossy_from(value: usize) -> Self {
 		value as f64
 	}
 }
 
-#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::cast_precision_loss, clippy::use_self)]
 impl LossyFrom<u64> for f64 {
 	fn lossy_from(value: u64) -> Self {
 		value as f64
 	}
 }
 
+#[allow(clippy::cast_possible_truncation, clippy::use_self)]
 impl LossyFrom<f64> for f32 {
 	fn lossy_from(value: f64) -> Self {
 		value as f32

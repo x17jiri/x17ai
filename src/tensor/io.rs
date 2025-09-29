@@ -19,6 +19,7 @@ use super::Tensor;
 
 pub fn merge_dims<const N: usize>(tensor: &Tensor) -> Result<ND<N>, DimMergerError> {
 	let dims = DimMerger::merge::<N>([tensor.map().dims.as_slice()])?;
+	#[allow(clippy::indexing_slicing)]
 	Ok(ND {
 		dims: std::array::from_fn(|i| SizeAndStride {
 			size: dims[i].size,
@@ -30,35 +31,37 @@ pub fn merge_dims<const N: usize>(tensor: &Tensor) -> Result<ND<N>, DimMergerErr
 
 //--------------------------------------------------------------------------------------------------
 
+#[allow(clippy::indexing_slicing)]
 fn fmt_0d<T: Copy>(
 	f: &mut std::fmt::Formatter,
-	(map, buf): (ND<0>, &[T]),
+	(buf, offset): (&[T], usize),
 	mut fmt_one: impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
 ) -> std::fmt::Result {
-	fmt_one(f, buf[map.offset])?;
+	fmt_one(f, buf[offset])?;
 	Ok(())
 }
 
+#[allow(clippy::indexing_slicing)]
 fn fmt_1d<T: Copy>(
 	f: &mut std::fmt::Formatter,
-	(map, buf): (ND<1>, &[T]),
+	(buf, offset, dim): (&[T], usize, SizeAndStride),
 	mut fmt_one: impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
 ) -> std::fmt::Result {
 	write!(f, "[")?;
-	let dim = map.dims[0];
 	for i in 0..dim.size {
 		if i != 0 {
 			write!(f, ", ")?;
 		}
-		fmt_one(f, buf[map.offset + i * dim.stride])?;
+		fmt_one(f, buf[offset + i * dim.stride])?;
 	}
 	write!(f, "]")?;
 	Ok(())
 }
 
+#[allow(clippy::indexing_slicing)]
 fn fmt_Nd<T: Copy>(
 	f: &mut std::fmt::Formatter,
-	(dd_map, buf): (&DD, &[T]),
+	(buf, dd_map): (&[T], &DD),
 	dim_index: usize,
 	offset: usize,
 	indent: usize,
@@ -66,13 +69,11 @@ fn fmt_Nd<T: Copy>(
 ) -> std::fmt::Result {
 	let ndim = dd_map.ndim();
 	if dim_index >= ndim {
-		let map = ND { dims: [], offset };
-		fmt_0d(f, (map, buf), fmt_one)?;
+		fmt_0d(f, (buf, offset), fmt_one)?;
 	} else if dim_index == ndim - 1 {
 		let dims = dd_map.dims.as_slice();
 		let dim = dims[dim_index];
-		let map = ND { dims: [dim], offset };
-		fmt_1d(f, (map, buf), fmt_one)?;
+		fmt_1d(f, (buf, offset, dim), fmt_one)?;
 	} else {
 		let dims = dd_map.dims.as_slice();
 		let dim = dims[dim_index];
@@ -83,7 +84,7 @@ fn fmt_Nd<T: Copy>(
 			for _ in 0..indent + 1 {
 				write!(f, "\t")?;
 			}
-			fmt_Nd(f, (dd_map, buf), dim_index + 1, offset + i * dim.stride, indent + 1, fmt_one)?;
+			fmt_Nd(f, (buf, dd_map), dim_index + 1, offset + i * dim.stride, indent + 1, fmt_one)?;
 			writeln!(f, ",")?;
 		}
 		for _ in 0..indent {
@@ -105,7 +106,7 @@ pub fn fmt_tensor<T: FromToF64>(
 	buf: &[T],
 ) -> std::fmt::Result {
 	write!(f, "Tensor(")?;
-	fmt_Nd(f, (map, buf), 0, map.offset, 0, &mut fmt_one)?;
+	fmt_Nd(f, (buf, map), 0, map.offset, 0, &mut fmt_one)?;
 	write!(f, ")")
 }
 

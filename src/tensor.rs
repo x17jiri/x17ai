@@ -19,7 +19,7 @@ use crate::tensor::dim_merger::{DimMergerError, DimsDontMatchError, TooManyMerge
 use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;
 use crate::tensor::generic::map::dd::ReplaceTailError;
 use crate::tensor::generic::map::{
-	DD, ElementsOverflowError, IncompatibleStridesError, IndexOutOfBoundsError, MergeDimsError, ND,
+	DD, ElementsOverflowError, IncompatibleStridesError, IndexOutOfBoundsError, MergeDimsError,
 	NotEnoughDimensionsError, ReshapeLastDimError, SelectError,
 };
 use crate::tensor::generic::{GenericTensor, TensorUnsafeError};
@@ -228,7 +228,7 @@ impl Tensor {
 		let borrow = self.buf().try_borrow()?;
 		unsafe {
 			self.device().store_to_cpu_memory(
-				&*borrow,
+				&borrow,
 				NonNull::from_ref(dst).cast(),
 				offset_bytes,
 				size_bytes,
@@ -254,7 +254,7 @@ impl Tensor {
 		unsafe {
 			self.device().load_from_cpu_memory(
 				NonNull::from_ref(src).cast(),
-				&*borrow,
+				&borrow,
 				offset_bytes,
 				size_bytes,
 			)

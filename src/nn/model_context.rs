@@ -9,10 +9,28 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::tensor::{DType, Device, TensorOpError};
+use crate::tensor::{DType, Device, HasDType, TensorOpError};
 
 use super::optimizer::OptCoef;
 use super::param::Param;
+
+pub struct DTypeConfig {
+	pub param_dtype: DType,
+	pub internal_dtype: DType,
+	pub momentum_dtype: DType,
+	pub grad_dtype: DType,
+}
+
+impl Default for DTypeConfig {
+	fn default() -> Self {
+		Self {
+			param_dtype: f32::dtype,
+			internal_dtype: f32::dtype,
+			momentum_dtype: f32::dtype,
+			grad_dtype: f32::dtype,
+		}
+	}
+}
 
 pub struct ModelContext {
 	pub opt_coef: OptCoef,

@@ -23,9 +23,13 @@ use crate::tensor::{self, Device, HasDType, Tensor, TensorOpError};
 #[allow(clippy::panic_in_result_fn)]
 #[allow(clippy::unwrap_used)]
 fn __test_linear(dev: Rc<dyn Device>) -> Result<(), ErrPack<TensorOpError>> {
+	let param_dtype = f32::dtype;
+	let internal_dtype = f32::dtype;
+	let momentum_dtype = f32::dtype;
+
 	let mut model_ctx = ModelContext::new(dev.clone());
-	let linear = Linear::new(5, 6, f32::dtype, &mut model_ctx)?;
-	model_ctx.init_optimizer()?;
+	let linear = Linear::new(5, 6, param_dtype, internal_dtype, &mut model_ctx)?;
+	model_ctx.init_optimizer(momentum_dtype, internal_dtype)?;
 
 	let lit = Tensor::literal_factory::<f32>(dev);
 
@@ -105,8 +109,13 @@ fn __test_linear(dev: Rc<dyn Device>) -> Result<(), ErrPack<TensorOpError>> {
 }
 
 #[test]
-fn test_linear() -> Result<(), ErrPack<TensorOpError>> {
+fn test_linear_cpu() -> Result<(), ErrPack<TensorOpError>> {
 	__test_linear(CPUDevice::new())?;
+	Ok(())
+}
+
+#[test]
+fn test_linear_cuda() -> Result<(), ErrPack<TensorOpError>> {
 	__test_linear(CudaDevice::new()?)?;
 	Ok(())
 }
@@ -117,8 +126,12 @@ fn test_linear() -> Result<(), ErrPack<TensorOpError>> {
 fn test_multihead_linear() -> Result<(), ErrPack<tensor::TensorOpError>> {
 	let dev = CPUDevice::new();
 	let mut model_ctx = ModelContext::new(dev.clone());
-	let linear = MultiheadLinear::new(5, 3, 2, f32::dtype, &mut model_ctx)?;
-	model_ctx.init_optimizer()?;
+	let param_dtype = f32::dtype;
+	let internal_dtype = f32::dtype;
+	let momentum_dtype = f32::dtype;
+
+	let linear = MultiheadLinear::new(5, 3, 2, param_dtype, internal_dtype, &mut model_ctx)?;
+	model_ctx.init_optimizer(momentum_dtype, internal_dtype)?;
 
 	let lit = Tensor::literal_factory::<f32>(dev);
 

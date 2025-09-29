@@ -42,6 +42,7 @@ impl HasDType for f64 {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[repr(C)]
 pub struct DType {
 	kind: DTypeKind,
 	bits: NonZeroU8,

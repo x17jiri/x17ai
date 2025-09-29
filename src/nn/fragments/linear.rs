@@ -198,7 +198,11 @@ impl MultiheadLinear {
 		ctx: &mut ModelContext,
 	) -> Result<Self, ErrPack<TensorOpError>> {
 		let linear = Linear::new(inputs, heads * outputs, dtype, internal_dtype, ctx)?;
-		linear.weights.borrow_mut().partition(heads, inputs * outputs).unwrap(); // TODO: unwrap
+
+		// This `unwrap()` should never fail unsless we have a bug
+		#[allow(clippy::missing_panics_doc)]
+		#[allow(clippy::unwrap_used)]
+		linear.weights.borrow_mut().partition(heads, inputs * outputs).unwrap();
 
 		// TODO - should we change the backward scale?
 		//linear.backward_scale = 1.0 / (outputs as f64).sqrt();

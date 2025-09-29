@@ -88,6 +88,7 @@ pub fn mat<'a>(tensor: &'a Tensor) -> Result<Matrix<'a>, NotEnoughDimensionsErro
 		cold_path();
 		Err(NotEnoughDimensionsError)
 	} else {
+		#[allow(clippy::indexing_slicing)]
 		Ok(Matrix {
 			tensor,
 			batch_dims: &dims[..dims.len() - 2],
@@ -121,6 +122,7 @@ pub fn row<'a>(tensor: &'a Tensor) -> Result<RowMatrix<'a>, NotEnoughDimensionsE
 		cold_path();
 		Err(NotEnoughDimensionsError)
 	} else {
+		#[allow(clippy::indexing_slicing)]
 		Ok(RowMatrix {
 			tensor,
 			batch_dims: &dims[..dims.len() - 1],
@@ -161,6 +163,7 @@ pub fn col<'a>(tensor: &'a Tensor) -> Result<ColMatrix<'a>, NotEnoughDimensionsE
 		cold_path();
 		Err(NotEnoughDimensionsError)
 	} else {
+		#[allow(clippy::indexing_slicing)]
 		Ok(ColMatrix {
 			tensor,
 			batch_dims: &dims[..dims.len() - 1],

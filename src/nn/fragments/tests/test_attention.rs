@@ -47,7 +47,7 @@ fn test_attention() -> Result<(), ErrPack<TensorOpError>> {
 		[[-0.4956,  0.7299,  0.4323, -0.7839, -0.3641, -0.1709,  0.2184,  0.4475]],
 	])?;
 
-	#[rustfmt::skip] let expected_out = Tensor::literal_factory::<f32>(dev.clone()).new_3d(&[
+	#[rustfmt::skip] let expected_out = Tensor::literal_factory::<f32>(dev).new_3d(&[
 		[[-0.5518, -0.1719,  0.9235, -0.2605, -0.5154, -0.2914,  0.1115, -0.1630]],
 		[[-1.6000,  0.9751,  0.7090, -1.4884,  0.6884, -0.3585, -0.6294, -1.0568]],
 		[[-1.8142, -0.2372, -0.3767, -0.2228, -0.2896, -0.4150, -0.5811, -0.1087]],
@@ -62,7 +62,7 @@ fn test_attention() -> Result<(), ErrPack<TensorOpError>> {
 	let (out, _backward_fn) = out.into_parts();
 
 	println!("out = {}", &out);
-		println!("expected_out = {}", &expected_out);
+	println!("expected_out = {}", &expected_out);
 
 	assert!(approx_eq(&out, &expected_out, 1e-4)?);
 	Ok(())

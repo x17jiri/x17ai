@@ -41,8 +41,8 @@ impl Param {
 
 	/// Defines the partitioning of the parameter.
 	///
-	/// All elements in a part will share the same second moment estimate (the `v` parameter in
-	/// Adam).
+	/// All elements in a part will share the same second moment estimate
+	/// (the `v` parameter in Adam).
 	///
 	/// # Errors
 	/// - if `parts * part_elems != self.value().elems()`

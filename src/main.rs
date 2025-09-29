@@ -244,12 +244,12 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let lit = GenericTensor::literal_factory::<f32>(dev.clone());
 	let mut mctx = ModelContext::new(dev.clone());
 
-	let mut lin1 = Linear::new(3, 5, f32::dtype, &mut mctx)?;
+	let mut lin1 = Linear::new(3, 5, f32::dtype, internal_dtype, &mut mctx)?;
 	let mut sf = Softmax::new(internal_dtype, SoftmaxGradMode::Precise);
-	let mut lin2 = Linear::new(5, 2, f32::dtype, &mut mctx)?;
+	let mut lin2 = Linear::new(5, 2, f32::dtype, internal_dtype, &mut mctx)?;
 	lin1.randomize(&mut rng)?;
 	lin2.randomize(&mut rng)?;
-	mctx.init_optimizer(momentum_dtype)?;
+	mctx.init_optimizer(momentum_dtype, internal_dtype)?;
 
 	let loss_layer = CrossEntropy::new(internal_dtype);
 
@@ -283,7 +283,8 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 
 		mctx.zero_grad();
 
-		loss_fn.backward()?;
+		let grad_dtype = f32::dtype;
+		loss_fn.backward(grad_dtype)?;
 
 		mctx.step()?;
 
