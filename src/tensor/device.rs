@@ -273,7 +273,7 @@ pub trait Device: DerivesDeviceBase {
 	fn name(&self) -> &str;
 
 	fn new_buffer(
-		self: Rc<Self>,
+		self: Rc<Fat<dyn Device, Self>>,
 		dtype: DType,
 		elems: usize,
 	) -> Result<Rc<mycell::RefCell<DeviceBuffer>>, NewDeviceBufferError>;
