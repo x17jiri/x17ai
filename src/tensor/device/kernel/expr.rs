@@ -494,11 +494,12 @@ where
 	[(); E::REDUCE_COUNT]:,
 	[(); E::SCALAR_COUNT]:,
 	[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
+	[(); 2 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
 	[(); E::PADDED_KEY_LEN]:,
 	[(); E::BATCHED_KEY_LEN]:,
 {
 	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
-		to.device_base().kernel_runner.run(
+		to.device().base().kernel_runner.run(
 			to,
 			self.elem_args,
 			self.reduce_args,

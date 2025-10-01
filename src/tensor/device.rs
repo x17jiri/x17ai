@@ -5,7 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
-use std::ptr::{DynMetadata, NonNull};
+use std::ptr::NonNull;
 use std::rc::Rc;
 
 pub mod buffer;
@@ -19,6 +19,7 @@ pub use dtype::{DType, HasDType};
 
 use crate::ErrPack;
 use crate::tensor::TensorOpError;
+use crate::tensor::device::dtype::DTypeId;
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
 use crate::tensor::generic::map::{ND, SizeAndStride};
 use crate::util::mycell;
@@ -49,6 +50,7 @@ pub struct KernelOutput {
 	pub offset_bytes: usize,
 	pub dtype: DType,
 	pub internal_dtype: DType,
+	pub reduction_size: usize,
 }
 
 #[repr(C)]
@@ -180,100 +182,19 @@ pub enum NewDeviceBufferError {
 
 //--------------------------------------------------------------------------------------------------
 
-/// # Safety
-///
-/// This trait indicates that the type `T` has `DeviceBase` as its first field.
-/// This is required for the safe operation of `DeviceBase` methods.
-///
-/// # Example
-/// ```rust
-/// #[repr(C)]
-/// pub struct MyDevice {
-/// 	base: DeviceBase,
-/// 	// ... other fields
-/// }
-/// ```
-pub unsafe trait DerivesDeviceBase {}
-
 #[repr(C)] // to make sure that `metadata` is the first field
 pub struct DeviceBase {
-	metadata: Option<DynMetadata<dyn Device>>,
-	kernel_runner: Rc<KernelRunner>,
-	is_cpu: bool,
-
-	#[cfg(debug_assertions)]
-	obj_ptr: *const (),
+	pub kernel_runner: Rc<KernelRunner>,
+	pub is_cpu: bool,
 }
 
-impl DeviceBase {
-	pub fn new(is_cpu: bool, kernel_runner: Rc<KernelRunner>) -> Self {
-		Self {
-			metadata: None,
-			kernel_runner,
-			is_cpu,
-
-			#[cfg(debug_assertions)]
-			obj_ptr: std::ptr::null(),
-		}
-	}
-
-	pub fn new_device<T: Device>(device: T) -> Rc<T> {
-		let instance = Rc::new(device);
-		unsafe {
-			let inst_ptr = Rc::as_ptr(&instance);
-			let dyn_ptr = inst_ptr as *const dyn Device;
-
-			let base_ptr = inst_ptr as *const DeviceBase as *mut DeviceBase;
-			let base = &mut *base_ptr;
-			base.metadata = Some(std::ptr::metadata(dyn_ptr));
-
-			#[cfg(debug_assertions)]
-			{
-				base.obj_ptr = inst_ptr.cast();
-			}
-		}
-		instance
-	}
-
-	/// # Safety
-	///
-	/// - `self` must be at memory offset 0 of Rc'ed object returned by `Self::new_device()`
-	pub unsafe fn device(&self) -> &dyn Device {
-		debug_assert!(self.metadata.is_some());
-		let metadata = unsafe { self.metadata.unwrap_unchecked() };
-
-		let obj_ptr = self as *const Self as *const ();
-		debug_assert!(obj_ptr == self.obj_ptr);
-
-		unsafe { &*std::ptr::from_raw_parts(obj_ptr, metadata) }
-	}
-
-	/// # Safety
-	///
-	/// - `self` must be at memory offset 0 of Rc'ed object returned by `Self::new_device()`
-	pub unsafe fn rc_device(&self) -> Rc<dyn Device> {
-		unsafe {
-			let dev_ptr = self.device() as *const dyn Device;
-			let dev_ptr = dev_ptr as *const dyn Device; // TODO - borrow checker bug
-			Rc::increment_strong_count(dev_ptr);
-			Rc::from_raw(dev_ptr)
-		}
-	}
-
-	pub fn kernel_runner(&self) -> &KernelRunner {
-		&self.kernel_runner
-	}
-
-	pub fn is_cpu(&self) -> bool {
-		self.is_cpu
-	}
-}
-
-pub trait Device: DerivesDeviceBase {
+pub trait Device {
 	fn name(&self) -> &str;
 
+	fn base(&self) -> &DeviceBase;
+
 	fn new_buffer(
-		self: Rc<Fat<dyn Device, Self>>,
+		self: Rc<Self>,
 		dtype: DType,
 		elems: usize,
 	) -> Result<Rc<mycell::RefCell<DeviceBuffer>>, NewDeviceBufferError>;
@@ -315,6 +236,6 @@ pub trait Device: DerivesDeviceBase {
 		elemwise_args: *const KernelElemArg,
 		reduce_args: *const KernelReduceArg,
 		scalar_args: *const f64,
-		reduction_size: usize,
+		dtype_config: *const DTypeId,
 	) -> Result<(), ErrPack<TensorOpError>>;
 }

@@ -10,6 +10,7 @@ use std::hint::{cold_path, likely};
 use std::sync::{Arc, RwLock};
 
 use crate::ErrPack;
+use crate::tensor::device::dtype::DTypeId;
 use crate::tensor::device::kernel::expr::{DynExpr, ExprToDyn, ExprTrait};
 use crate::tensor::device::kernel::registry::{KernelMap, KernelRegistry};
 use crate::tensor::device::{DeviceBuffer, KernelElemArg, KernelOutput, KernelReduceArg};
@@ -27,6 +28,21 @@ pub struct KernelData {
 	pub elemwise_count: usize,
 	pub reduce_count: usize,
 	pub scalar_count: usize,
+}
+
+impl KernelData {
+	pub unsafe fn elemwise_args<'a>(&self, args: *const KernelElemArg) -> &'a [KernelElemArg] {
+		unsafe { std::slice::from_raw_parts(args, self.elemwise_count) }
+	}
+	pub unsafe fn reduce_args<'a>(&self, args: *const KernelReduceArg) -> &'a [KernelReduceArg] {
+		unsafe { std::slice::from_raw_parts(args, self.reduce_count) }
+	}
+	pub unsafe fn scalar_args<'a>(&self, args: *const f64) -> &'a [f64] {
+		unsafe { std::slice::from_raw_parts(args, self.scalar_count) }
+	}
+	pub unsafe fn dtype_config<'a>(&self, config: *const DTypeId) -> &'a [DTypeId] {
+		unsafe { std::slice::from_raw_parts(config, 2 + self.elemwise_count + self.reduce_count) }
+	}
 }
 
 pub struct KernelRunner {
@@ -62,6 +78,7 @@ impl KernelRunner {
 		[(); E::PADDED_KEY_LEN]:,
 		[(); E::BATCHED_KEY_LEN]:,
 		[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
+		[(); 2 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
 	{
 		let (key, key_hash) = const { E::key() };
 		let cache = unsafe { &mut *self.cache.get() };
@@ -103,6 +120,7 @@ impl KernelRunner {
 	) -> Result<(), ErrPack<TensorOpError>>
 	where
 		[(); 1 + E + R]:,
+		[(); 2 + E + R]:,
 	{
 		debug_assert!(kernel_data.elemwise_count == E);
 		debug_assert!(kernel_data.reduce_count == R);
@@ -199,7 +217,20 @@ impl KernelRunner {
 			buf: output.buf().memory(),
 			dtype: output.buf().dtype(),
 			internal_dtype,
+			reduction_size: reduce_args_top_dim.size,
 		};
+
+		let dtype_config: [DTypeId; 2 + E + R] = std::array::from_fn(|i| {
+			if i == 0 {
+				out.internal_dtype.id()
+			} else if i == 1 {
+				out.dtype.id()
+			} else if i < 2 + E {
+				inp[i - 2].dtype.id()
+			} else {
+				reduce_inp[i - 2 - E].dtype.id()
+			}
+		});
 
 		unsafe {
 			let mut inp_fail = UnsafeBorrowFailFlag::new();
@@ -231,7 +262,7 @@ impl KernelRunner {
 				inp.as_ptr(),
 				reduce_inp.as_ptr(),
 				scalar_args.as_ptr(),
-				reduce_args_top_dim.size,
+				dtype_config.as_ptr(),
 			)?;
 
 			std::mem::drop(out_borrow);

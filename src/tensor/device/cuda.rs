@@ -12,10 +12,11 @@ use std::rc::Rc;
 use crate::ErrPack;
 use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
 use crate::tensor::device::cuda::cuda_shim::{CudaError, CudaStream};
+use crate::tensor::device::dtype::DTypeId;
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
 use crate::tensor::device::{
-	AttentionArgs, DerivesDeviceBase, DeviceBase, DeviceBuffer, KernelElemArg, KernelOutput,
-	KernelReduceArg, MatMulArgs, NewDeviceBufferError,
+	AttentionArgs, DeviceBase, DeviceBuffer, KernelElemArg, KernelOutput, KernelReduceArg,
+	MatMulArgs, NewDeviceBufferError,
 };
 use crate::tensor::{DType, Device, HasDType, TensorOpError, UnsupportedDTypeError};
 use crate::util::mycell;
@@ -25,10 +26,9 @@ pub mod cuda_shim;
 //--------------------------------------------------------------------------------------------------
 
 pub struct CompiledKernel {
-	handle: *const std::ffi::c_void,
+	_handle: *const std::ffi::c_void,
 }
 
-#[repr(C)]
 pub struct CudaDevice {
 	base: DeviceBase,
 	cuda_stream: CudaStream,
@@ -36,20 +36,18 @@ pub struct CudaDevice {
 	name: String,
 }
 
-unsafe impl DerivesDeviceBase for CudaDevice {}
-
 impl CudaDevice {
 	pub fn new() -> Result<Rc<Self>, CudaError> {
 		Self::new_named("CUDA".to_string())
 	}
 
 	pub fn new_named(name: String) -> Result<Rc<Self>, CudaError> {
-		let cuda_stream = CudaStream::new()?;
-		let kernel_runner = Rc::new(KernelRunner::new());
-
-		Ok(DeviceBase::new_device(Self {
-			base: DeviceBase::new(true, kernel_runner),
-			cuda_stream,
+		Ok(Rc::new(Self {
+			base: DeviceBase {
+				kernel_runner: Rc::new(KernelRunner::new()),
+				is_cpu: false,
+			},
+			cuda_stream: CudaStream::new()?,
 			compiled_kernels: Vec::new(),
 			name,
 		}))
@@ -77,6 +75,10 @@ impl CudaDevice {
 impl Device for CudaDevice {
 	fn name(&self) -> &str {
 		&self.name
+	}
+
+	fn base(&self) -> &DeviceBase {
+		&self.base
 	}
 
 	#[inline(never)]
@@ -152,23 +154,24 @@ impl Device for CudaDevice {
 		Ok(())
 	}
 
-	unsafe fn mm(&self, args: &MatMulArgs, scale: f64) -> Result<(), ErrPack<TensorOpError>> {
+	unsafe fn mm(&self, _args: &MatMulArgs, _scale: f64) -> Result<(), ErrPack<TensorOpError>> {
 		todo!("implement mm for CudaDevice");
 	}
 
-	unsafe fn attention(&self, args: &AttentionArgs) -> Result<(), ErrPack<TensorOpError>> {
+	unsafe fn attention(&self, _args: &AttentionArgs) -> Result<(), ErrPack<TensorOpError>> {
 		todo!("implement attention for CudaDevice");
 	}
 
 	unsafe fn run_kernel(
 		&self,
 		kernel_data: &KernelData,
-		o: &KernelOutput,
-		elemwise_args: *const KernelElemArg,
-		reduce_args: *const KernelReduceArg,
-		scalar_args: *const f64,
-		reduction_size: usize,
+		_o: &KernelOutput,
+		_elemwise_args: *const KernelElemArg,
+		_reduce_args: *const KernelReduceArg,
+		_scalar_args: *const f64,
+		_dtype_config: *const DTypeId,
 	) -> Result<(), ErrPack<TensorOpError>> {
+		// TODO - need to hash dtype_config and find kernel for that specific configuration
 		let Some(Some(compiled_kernel)) = self.compiled_kernels.get(kernel_data.id) else {
 			cold_path();
 			todo!("CudaDevice::run_kernel: need to compile kernel");

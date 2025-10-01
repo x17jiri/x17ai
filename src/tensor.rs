@@ -14,7 +14,7 @@ pub use device::{DType, Device, HasDType};
 use crate::rng::Rng;
 use crate::tensor::device::dtype::DTypeMismatch;
 use crate::tensor::device::kernel::expr::EvaluatesToTensor;
-use crate::tensor::device::{DeviceBase, DeviceBuffer, NewDeviceBufferError};
+use crate::tensor::device::{DeviceBuffer, NewDeviceBufferError};
 use crate::tensor::dim_merger::{DimMergerError, DimsDontMatchError, TooManyMergedDimensionsError};
 use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;
 use crate::tensor::generic::map::dd::ReplaceTailError;
@@ -163,17 +163,13 @@ impl Tensor {
 		1.0 / f64::lossy_from(n)
 	}
 
-	pub fn device_base(&self) -> &DeviceBase {
-		self.buf().device_base()
-	}
-
 	pub fn device(&self) -> &dyn Device {
-		unsafe { self.device_base().device() }
+		self.buf().device()
 	}
 
 	/// Returns the device on which the tensor is allocated.
 	pub fn rc_device(&self) -> Rc<dyn Device> {
-		unsafe { self.device_base().rc_device() }
+		self.buf().rc_device()
 	}
 
 	/// Returns the data type of the tensor elements.

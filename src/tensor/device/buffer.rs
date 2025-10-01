@@ -8,7 +8,6 @@
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-use crate::tensor::device::DeviceBase;
 use crate::tensor::generic::buffer::Buffer;
 use crate::util::mycell;
 
@@ -21,7 +20,7 @@ pub struct DeviceBuffer {
 	memory: NonNull<u8>,
 	dtype: DType,
 	elems: usize,
-	device: NonNull<DeviceBase>,
+	device: Rc<dyn Device>, // TODO - use thin_rc
 }
 
 impl DeviceBuffer {
@@ -30,18 +29,15 @@ impl DeviceBuffer {
 		memory: NonNull<u8>,
 		dtype: DType,
 		elems: usize,
-		rc_device: Rc<dyn Device>,
+		device: Rc<dyn Device>,
 	) -> Self {
-		let device = Rc::into_raw(rc_device); // we will recreate the `Rc` in `drop()`
-		let device = unsafe { NonNull::new_unchecked(device as *mut DeviceBase) };
 		Self { memory, dtype, elems, device }
 	}
 
 	#[inline]
 	pub fn is_on_device(&self, device: &dyn Device) -> bool {
-		let device = device as *const dyn Device as *const DeviceBase;
-		let my_device = self.device_base() as *const DeviceBase;
-
+		let device = device as *const dyn Device as *const ();
+		let my_device = self.device() as *const dyn Device as *const ();
 		my_device == device
 	}
 
@@ -61,24 +57,20 @@ impl DeviceBuffer {
 	}
 
 	#[inline]
-	pub fn device_base(&self) -> &DeviceBase {
-		unsafe { self.device.as_ref() }
+	pub fn device(&self) -> &dyn Device {
+		Rc::as_ref(&self.device)
 	}
 
 	#[inline]
-	pub fn device(&self) -> &dyn Device {
-		unsafe { self.device_base().device() }
+	pub fn rc_device(&self) -> Rc<dyn Device> {
+		self.device.clone()
 	}
 }
 
 impl Drop for DeviceBuffer {
 	fn drop(&mut self) {
 		unsafe {
-			let device_base = self.device.as_ref();
-			let device = device_base.device();
-			device.drop_buffer(self.memory, self.dtype, self.elems);
-			let rc_device = Rc::from_raw(self.device.as_ptr());
-			std::mem::drop(rc_device);
+			self.device.drop_buffer(self.memory, self.dtype, self.elems);
 		}
 	}
 }

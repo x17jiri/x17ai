@@ -222,9 +222,9 @@ impl Fragment for Attention {
 //--------------------------------------------------------------------------------------------------
 
 pub struct AttentionBackwardFn_Precise {
-	q_backward: Box<dyn BackwardFn>,
-	k_backward: Box<dyn BackwardFn>,
-	v_backward: Box<dyn BackwardFn>,
+	_q_backward: Box<dyn BackwardFn>,
+	_k_backward: Box<dyn BackwardFn>,
+	_v_backward: Box<dyn BackwardFn>,
 }
 
 impl BackwardFn for AttentionBackwardFn_Precise {

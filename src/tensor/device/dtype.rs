@@ -6,7 +6,9 @@
 //------------------------------------------------------------------------------
 
 use std::hint::cold_path;
-use std::num::NonZeroU8;
+use std::num::NonZeroU32;
+
+//--------------------------------------------------------------------------------------------------
 
 pub const MAX_DTYPE_ALIGN: usize = 8; // 64-bit
 
@@ -15,40 +17,42 @@ pub trait HasDType {
 }
 
 impl HasDType for u8 {
-	const dtype: DType = DType {
+	const dtype: DType = DType::from_struct(DTypeStruct {
 		kind: DTypeKind::Uint,
-		bits: NonZeroU8::new(8).unwrap(),
+		bits: 8,
 		bytes: 1,
-		reserved: 0,
-	};
+		id: DTypeId::U8,
+	});
 }
 
 impl HasDType for f32 {
-	const dtype: DType = DType {
+	const dtype: DType = DType::from_struct(DTypeStruct {
 		kind: DTypeKind::Float,
-		bits: NonZeroU8::new(32).unwrap(),
+		bits: 32,
 		bytes: 4,
-		reserved: 0,
-	};
+		id: DTypeId::F32,
+	});
 }
 
 impl HasDType for f64 {
-	const dtype: DType = DType {
+	const dtype: DType = DType::from_struct(DTypeStruct {
 		kind: DTypeKind::Float,
-		bits: NonZeroU8::new(64).unwrap(),
+		bits: 64,
 		bytes: 8,
-		reserved: 0,
-	};
+		id: DTypeId::F64,
+	});
+}
+
+pub struct DTypeStruct {
+	kind: DTypeKind,
+	bits: u8,
+	bytes: u8,
+	id: DTypeId,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-#[repr(C)]
-pub struct DType {
-	kind: DTypeKind,
-	bits: NonZeroU8,
-	bytes: u8,
-	reserved: u8,
-}
+#[repr(transparent)]
+pub struct DType(NonZeroU32);
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -73,51 +77,84 @@ impl std::str::FromStr for DType {
 	}
 }
 
+impl DTypeStruct {
+	pub const fn from_dtype(dtype: DType) -> Self {
+		let bytes = dtype.0.get().to_le_bytes();
+		Self {
+			kind: unsafe { std::mem::transmute(bytes[0]) },
+			bits: bytes[1],
+			bytes: bytes[2],
+			id: unsafe { std::mem::transmute(bytes[3]) },
+		}
+	}
+}
+
 impl DType {
-	pub fn is_float(&self) -> bool {
-		self.kind == DTypeKind::Float
+	pub const fn from_struct(data: DTypeStruct) -> DType {
+		let val = u32::from_le_bytes([data.kind as u8, data.bits, data.bytes, data.id as u8]);
+		// SAFETY: DTypeId starts at 1, so val is never 0
+		DType(unsafe { NonZeroU32::new_unchecked(val) })
 	}
 
-	pub fn bits(&self) -> usize {
-		usize::from(self.bits.get())
+	pub fn is_float(self) -> bool {
+		DTypeStruct::from_dtype(self).kind == DTypeKind::Float
+	}
+
+	pub fn kind(self) -> DTypeKind {
+		DTypeStruct::from_dtype(self).kind
+	}
+
+	pub fn id(self) -> DTypeId {
+		DTypeStruct::from_dtype(self).id
+	}
+
+	pub fn bits(self) -> usize {
+		let data = DTypeStruct::from_dtype(self);
+		usize::from(data.bits)
 	}
 
 	/// NOTE: We don't support types with size 0.
 	/// However, this function will return 0 if the type uses 1, 2 or 4 bits.
-	pub fn bytes(&self) -> usize {
-		self.bytes as usize
+	pub fn bytes(self) -> usize {
+		let data = DTypeStruct::from_dtype(self);
+		usize::from(data.bytes)
 	}
 
-	pub fn align(&self) -> usize {
-		self.bytes().max(1)
+	pub fn align(self) -> usize {
+		let data = DTypeStruct::from_dtype(self);
+		usize::from(data.bytes).max(1)
 	}
 
-	pub fn array_bytes(&self, elems: usize) -> Option<usize> {
-		debug_assert!(self.bits.is_power_of_two());
-		if self.bytes < 1 {
+	pub fn array_bytes(self, elems: usize) -> Option<usize> {
+		let data = DTypeStruct::from_dtype(self);
+		debug_assert!(data.bits.is_power_of_two());
+		if data.bytes < 1 {
 			todo!("bitfields");
 		}
-		self.bytes().checked_mul(elems)
+		usize::from(data.bytes).checked_mul(elems)
 	}
 
 	/// # Safety
 	///
 	/// `elems` must be such that the total size in bytes does not overflow.
-	pub unsafe fn array_bytes_unchecked(&self, elems: usize) -> usize {
-		debug_assert!(self.bits.is_power_of_two());
-		if self.bytes < 1 {
+	pub unsafe fn array_bytes_unchecked(self, elems: usize) -> usize {
+		let data = DTypeStruct::from_dtype(self);
+		debug_assert!(data.bits.is_power_of_two());
+		if data.bytes < 1 {
 			todo!("bitfields");
 		}
-		self.bytes() * elems
+		usize::from(data.bytes) * elems
 	}
 }
 
 pub fn common_dtype(a: DType, b: DType) -> Result<DType, DTypeMismatch> {
-	if a.kind != b.kind {
+	let a_data = DTypeStruct::from_dtype(a);
+	let b_data = DTypeStruct::from_dtype(b);
+	if a_data.kind != b_data.kind {
 		cold_path();
 		return Err(DTypeMismatch); // TODO - we can probably always convert to f64
 	}
-	Ok(if a.bits >= b.bits { a } else { b })
+	Ok(if a_data.bits >= b_data.bits { a } else { b })
 }
 
 #[repr(u8)]
@@ -128,13 +165,19 @@ pub enum DTypeKind {
 	Uint,
 }
 
+#[repr(u8)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum DTypeId {
+	U8 = 1,
+	F32 = 2,
+	F64 = 3,
+}
+
 impl std::fmt::Display for DType {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-		let kind = match self.kind {
-			DTypeKind::Float => "f",
-			DTypeKind::Int => "i",
-			DTypeKind::Uint => "u",
-		};
-		write!(f, "{}{}", kind, self.bits)
+		let data = DTypeStruct::from_dtype(*self);
+		write!(f, "{:?}", data.id)
 	}
 }
+
+//--------------------------------------------------------------------------------------------------

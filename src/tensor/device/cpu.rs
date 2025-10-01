@@ -10,7 +10,7 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 
 use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
-use crate::tensor::device::dtype::common_dtype;
+use crate::tensor::device::dtype::{DTypeId, common_dtype};
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
 use crate::tensor::{HasDType, TensorOpError, UnsupportedDTypeError};
 use crate::util::mycell::{self, BorrowGuard};
@@ -19,8 +19,8 @@ pub mod cpu_float_methods;
 
 use crate::ErrPack;
 use crate::tensor::device::{
-	AttentionArgs, DerivesDeviceBase, DeviceBase, DeviceBuffer, KernelElemArg, KernelOutput,
-	KernelReduceArg, MatMulArgs, NewDeviceBufferError,
+	AttentionArgs, DeviceBase, DeviceBuffer, KernelElemArg, KernelOutput, KernelReduceArg,
+	MatMulArgs, NewDeviceBufferError,
 };
 use crate::tensor::{DType, Device};
 
@@ -33,13 +33,10 @@ pub enum BufAsSliceError {
 }
 //--------------------------------------------------------------------------------------------------
 
-#[repr(C)]
 pub struct CPUDevice {
 	base: DeviceBase,
 	name: String,
 }
-
-unsafe impl DerivesDeviceBase for CPUDevice {}
 
 impl CPUDevice {
 	pub fn new() -> Rc<Self> {
@@ -47,10 +44,11 @@ impl CPUDevice {
 	}
 
 	pub fn new_named(name: String) -> Rc<Self> {
-		let kernel_runner = Rc::new(KernelRunner::new());
-
-		DeviceBase::new_device(Self {
-			base: DeviceBase::new(true, kernel_runner),
+		Rc::new(Self {
+			base: DeviceBase {
+				kernel_runner: Rc::new(KernelRunner::new()),
+				is_cpu: true,
+			},
 			name,
 		})
 	}
@@ -63,7 +61,7 @@ impl CPUDevice {
 			return Err(BufAsSliceError::InvalidDType);
 		}
 		debug_assert!(T::dtype.bytes() == std::mem::size_of::<T>());
-		if !buf.device_base().is_cpu() {
+		if !buf.device().base().is_cpu {
 			cold_path();
 			return Err(BufAsSliceError::NotOnCPUDevice);
 		}
@@ -122,6 +120,10 @@ impl CPUDevice {
 impl Device for CPUDevice {
 	fn name(&self) -> &str {
 		&self.name
+	}
+
+	fn base(&self) -> &DeviceBase {
+		&self.base
 	}
 
 	#[inline(never)]
@@ -209,7 +211,7 @@ impl Device for CPUDevice {
 		unsafe { cpu_float_methods::mm(args, scale) }
 	}
 
-	unsafe fn attention(&self, args: &AttentionArgs) -> Result<(), ErrPack<TensorOpError>> {
+	unsafe fn attention(&self, _args: &AttentionArgs) -> Result<(), ErrPack<TensorOpError>> {
 		todo!("implement attention for CPUDevice");
 	}
 
@@ -220,7 +222,7 @@ impl Device for CPUDevice {
 		elemwise_args: *const KernelElemArg,
 		reduce_args: *const KernelReduceArg,
 		scalar_args: *const f64,
-		reduction_size: usize,
+		_dtype_config: *const DTypeId,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let internal_dtype = common_dtype(o.internal_dtype, f64::dtype)?;
 		if internal_dtype != f64::dtype {
@@ -234,10 +236,9 @@ impl Device for CPUDevice {
 				elemwise_args,
 				reduce_args,
 				scalar_args,
-				reduction_size,
-			);
+				o.reduction_size,
+			)
 		}
-		Ok(())
 	}
 }
 
