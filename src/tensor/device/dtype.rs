@@ -180,4 +180,15 @@ impl std::fmt::Display for DType {
 	}
 }
 
+impl DTypeId {
+	pub fn to_dtype(self) -> DType {
+		static map: [DType; 3] = [
+			u8::dtype, //
+			f32::dtype,
+			f64::dtype,
+		];
+		map[(self as u8 as usize) - 1]
+	}
+}
+
 //--------------------------------------------------------------------------------------------------

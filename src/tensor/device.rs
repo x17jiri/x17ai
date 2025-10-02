@@ -29,9 +29,8 @@ use crate::util::mycell;
 #[repr(C)]
 pub struct KernelElemArg {
 	pub stride_bytes: [usize; 2],
-	pub buf: NonNull<u8>,
+	pub buf: NonNull<u8>, // TODO - is this FFI safe?
 	pub offset_bytes: usize,
-	pub dtype: DType,
 }
 
 #[repr(C)]
@@ -39,7 +38,6 @@ pub struct KernelReduceArg {
 	pub stride_bytes: [usize; 3],
 	pub buf: NonNull<u8>,
 	pub offset_bytes: usize,
-	pub dtype: DType,
 }
 
 #[repr(C)]
@@ -48,8 +46,6 @@ pub struct KernelOutput {
 	pub stride_bytes: [usize; 2],
 	pub buf: NonNull<u8>,
 	pub offset_bytes: usize,
-	pub dtype: DType,
-	pub internal_dtype: DType,
 	pub reduction_size: usize,
 }
 
@@ -182,16 +178,40 @@ pub enum NewDeviceBufferError {
 
 //--------------------------------------------------------------------------------------------------
 
-#[repr(C)] // to make sure that `metadata` is the first field
 pub struct DeviceBase {
 	pub kernel_runner: Rc<KernelRunner>,
 	pub is_cpu: bool,
 }
 
-pub trait Device {
-	fn name(&self) -> &str;
+impl DeviceBase {
+	#[inline]
+	pub fn from_device(device: &dyn Device) -> &Self {
+		// SAFETY: `device` implements `DerivesDeviceBase`, so it must be properly aligned and
+		// `DeviceBase` must be its first field.
+		let device = device as *const dyn Device;
+		#[allow(clippy::cast_ptr_alignment)]
+		let device = device.cast::<Self>();
+		unsafe { &*device }
+	}
+}
 
-	fn base(&self) -> &DeviceBase;
+/// # Safety
+/// - Any type implementing this trait must have `DeviceBase` as its first field.
+/// - Alignment of the type must be compatible with `DeviceBase`. So don't use `repr(packed)`.
+///
+/// The way to ensure this is:
+/// ```rust
+/// #[repr(C)]
+/// struct MyDevice {
+///     base: DeviceBase,
+///     // other fields...
+/// }
+/// unsafe impl DerivesDeviceBase for MyDevice {}
+/// ```
+pub unsafe trait DerivesDeviceBase {}
+
+pub trait Device: DerivesDeviceBase {
+	fn name(&self) -> &str;
 
 	fn new_buffer(
 		self: Rc<Self>,

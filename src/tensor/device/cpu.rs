@@ -19,8 +19,8 @@ pub mod cpu_float_methods;
 
 use crate::ErrPack;
 use crate::tensor::device::{
-	AttentionArgs, DeviceBase, DeviceBuffer, KernelElemArg, KernelOutput, KernelReduceArg,
-	MatMulArgs, NewDeviceBufferError,
+	AttentionArgs, DerivesDeviceBase, DeviceBase, DeviceBuffer, KernelElemArg, KernelOutput,
+	KernelReduceArg, MatMulArgs, NewDeviceBufferError,
 };
 use crate::tensor::{DType, Device};
 
@@ -33,6 +33,7 @@ pub enum BufAsSliceError {
 }
 //--------------------------------------------------------------------------------------------------
 
+#[repr(C)]
 pub struct CPUDevice {
 	base: DeviceBase,
 	name: String,
@@ -61,7 +62,7 @@ impl CPUDevice {
 			return Err(BufAsSliceError::InvalidDType);
 		}
 		debug_assert!(T::dtype.bytes() == std::mem::size_of::<T>());
-		if !buf.device().base().is_cpu {
+		if !DeviceBase::from_device(buf.device()).is_cpu {
 			cold_path();
 			return Err(BufAsSliceError::NotOnCPUDevice);
 		}
@@ -117,13 +118,11 @@ impl CPUDevice {
 	}
 }
 
+unsafe impl DerivesDeviceBase for CPUDevice {}
+
 impl Device for CPUDevice {
 	fn name(&self) -> &str {
 		&self.name
-	}
-
-	fn base(&self) -> &DeviceBase {
-		&self.base
 	}
 
 	#[inline(never)]

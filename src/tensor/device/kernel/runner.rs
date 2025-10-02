@@ -31,6 +31,25 @@ pub struct KernelData {
 }
 
 impl KernelData {
+	pub fn new_dtype_config<const E: usize, const R: usize>(
+		internal_dtype: DType,
+		output: &Tensor,
+		elem_args: [&Tensor; E],
+		reduce_args: [&Tensor; R],
+	) -> [DTypeId; 2 + E + R] {
+		std::array::from_fn(|i| {
+			if i == 0 {
+				internal_dtype.id()
+			} else if i == 1 {
+				output.dtype().id()
+			} else if i < 2 + E {
+				elem_args[i - 2].dtype().id()
+			} else {
+				reduce_args[i - 2 - E].dtype().id()
+			}
+		})
+	}
+
 	pub unsafe fn elemwise_args<'a>(&self, args: *const KernelElemArg) -> &'a [KernelElemArg] {
 		unsafe { std::slice::from_raw_parts(args, self.elemwise_count) }
 	}
@@ -40,8 +59,30 @@ impl KernelData {
 	pub unsafe fn scalar_args<'a>(&self, args: *const f64) -> &'a [f64] {
 		unsafe { std::slice::from_raw_parts(args, self.scalar_count) }
 	}
-	pub unsafe fn dtype_config<'a>(&self, config: *const DTypeId) -> &'a [DTypeId] {
-		unsafe { std::slice::from_raw_parts(config, 2 + self.elemwise_count + self.reduce_count) }
+
+	pub unsafe fn elemwise_dtypes<'a>(&self, dtype_config: *const DTypeId) -> &'a [DTypeId] {
+		unsafe { std::slice::from_raw_parts(dtype_config.add(2), self.elemwise_count) }
+	}
+	pub unsafe fn reduce_dtypes<'a>(&self, dtype_config: *const DTypeId) -> &'a [DTypeId] {
+		unsafe {
+			std::slice::from_raw_parts(dtype_config.add(2 + self.elemwise_count), self.reduce_count)
+		}
+	}
+
+	pub unsafe fn internal_dtype(&self, dtype_config: *const DTypeId) -> DType {
+		unsafe { *dtype_config }.to_dtype()
+	}
+	pub unsafe fn output_dtype(&self, dtype_config: *const DTypeId) -> DType {
+		unsafe { *dtype_config.add(1) }.to_dtype()
+	}
+
+	pub unsafe fn dtype_config<'a>(&self, dtype_config: *const DTypeId) -> &'a [u8] {
+		unsafe {
+			std::slice::from_raw_parts(
+				dtype_config.cast(),
+				(2 + self.elemwise_count + self.reduce_count) * std::mem::size_of::<DTypeId>(),
+			)
+		}
 	}
 }
 
@@ -185,7 +226,6 @@ impl KernelRunner {
 				],
 				offset_bytes: arg.map().offset * dtype_bytes,
 				buf: arg.buf().memory(),
-				dtype: arg.dtype(),
 			}
 		});
 
@@ -198,7 +238,6 @@ impl KernelRunner {
 				],
 				offset_bytes: arg.map().offset * dtype_bytes,
 				buf: arg.buf().memory(),
-				dtype: arg.dtype(),
 			}
 		});
 
@@ -215,22 +254,11 @@ impl KernelRunner {
 			],
 			offset_bytes: output.map().offset * dtype_bytes,
 			buf: output.buf().memory(),
-			dtype: output.buf().dtype(),
-			internal_dtype,
 			reduction_size: reduce_args_top_dim.size,
 		};
 
-		let dtype_config: [DTypeId; 2 + E + R] = std::array::from_fn(|i| {
-			if i == 0 {
-				out.internal_dtype.id()
-			} else if i == 1 {
-				out.dtype.id()
-			} else if i < 2 + E {
-				inp[i - 2].dtype.id()
-			} else {
-				reduce_inp[i - 2 - E].dtype.id()
-			}
-		});
+		let dtype_config =
+			KernelData::new_dtype_config(internal_dtype, output, elem_args, reduce_args);
 
 		unsafe {
 			let mut inp_fail = UnsafeBorrowFailFlag::new();

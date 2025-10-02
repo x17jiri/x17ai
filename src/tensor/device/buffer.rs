@@ -16,11 +16,16 @@ use super::dtype::DType;
 
 //--------------------------------------------------------------------------------------------------
 
+// TODO
+// - currently we use Rc for refcounting buffer references. It has two counters, but we
+// only need the strong count. We could save 8 bytes per buffer by using some lite Rc.
+// - also, the `device` field could use some thin rc that stores metadata in the pointee
+// not in the pointer itself. This would save another 8 bytes per buffer.
 pub struct DeviceBuffer {
 	memory: NonNull<u8>,
 	dtype: DType,
 	elems: usize,
-	device: Rc<dyn Device>, // TODO - use thin_rc
+	device: Rc<dyn Device>,
 }
 
 impl DeviceBuffer {

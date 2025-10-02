@@ -15,8 +15,8 @@ use crate::tensor::device::cuda::cuda_shim::{CudaError, CudaStream};
 use crate::tensor::device::dtype::DTypeId;
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
 use crate::tensor::device::{
-	AttentionArgs, DeviceBase, DeviceBuffer, KernelElemArg, KernelOutput, KernelReduceArg,
-	MatMulArgs, NewDeviceBufferError,
+	AttentionArgs, DerivesDeviceBase, DeviceBase, DeviceBuffer, KernelElemArg, KernelOutput,
+	KernelReduceArg, MatMulArgs, NewDeviceBufferError,
 };
 use crate::tensor::{DType, Device, HasDType, TensorOpError, UnsupportedDTypeError};
 use crate::util::mycell;
@@ -29,6 +29,7 @@ pub struct CompiledKernel {
 	_handle: *const std::ffi::c_void,
 }
 
+#[repr(C)]
 pub struct CudaDevice {
 	base: DeviceBase,
 	cuda_stream: CudaStream,
@@ -72,13 +73,11 @@ impl CudaDevice {
 	}
 }
 
+unsafe impl DerivesDeviceBase for CudaDevice {}
+
 impl Device for CudaDevice {
 	fn name(&self) -> &str {
 		&self.name
-	}
-
-	fn base(&self) -> &DeviceBase {
-		&self.base
 	}
 
 	#[inline(never)]

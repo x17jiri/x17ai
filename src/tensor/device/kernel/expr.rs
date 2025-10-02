@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use crate::ErrPack;
+use crate::tensor::device::DeviceBase;
 use crate::tensor::device::dtype::common_dtype;
 use crate::tensor::device::kernel::registry::KernelMap;
 use crate::tensor::{DType, Tensor, TensorOpError};
@@ -499,7 +500,7 @@ where
 	[(); E::BATCHED_KEY_LEN]:,
 {
 	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
-		to.device().base().kernel_runner.run(
+		DeviceBase::from_device(to.device()).kernel_runner.run(
 			to,
 			self.elem_args,
 			self.reduce_args,
