@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::ErrPack;
 use crate::tensor::device::DeviceBase;
-use crate::tensor::device::dtype::common_dtype;
+use crate::tensor::device::dtype::{DTypeId, common_dtype};
 use crate::tensor::device::kernel::registry::KernelMap;
 use crate::tensor::{DType, Tensor, TensorOpError};
 
@@ -495,7 +495,7 @@ where
 	[(); E::REDUCE_COUNT]:,
 	[(); E::SCALAR_COUNT]:,
 	[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
-	[(); 2 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
+	[(); ((2 + E::ELEMWISE_COUNT + E::REDUCE_COUNT) * std::mem::size_of::<DTypeId>() + 7) / 8]:,
 	[(); E::PADDED_KEY_LEN]:,
 	[(); E::BATCHED_KEY_LEN]:,
 {

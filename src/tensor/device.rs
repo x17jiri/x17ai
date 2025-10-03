@@ -256,6 +256,6 @@ pub trait Device: DerivesDeviceBase {
 		elemwise_args: *const KernelElemArg,
 		reduce_args: *const KernelReduceArg,
 		scalar_args: *const f64,
-		dtype_config: *const DTypeId,
+		dtype_config: *const u64,
 	) -> Result<(), ErrPack<TensorOpError>>;
 }

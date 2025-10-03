@@ -36,18 +36,20 @@ impl KernelData {
 		output: &Tensor,
 		elem_args: [&Tensor; E],
 		reduce_args: [&Tensor; R],
-	) -> [DTypeId; 2 + E + R] {
-		std::array::from_fn(|i| {
-			if i == 0 {
-				internal_dtype.id()
-			} else if i == 1 {
-				output.dtype().id()
-			} else if i < 2 + E {
-				elem_args[i - 2].dtype().id()
-			} else {
-				reduce_args[i - 2 - E].dtype().id()
+	) -> [u64; ((2 + E + R) * std::mem::size_of::<DTypeId>() + 7) / 8] {
+		let mut result = [0; ((2 + E + R) * std::mem::size_of::<DTypeId>() + 7) / 8];
+		let ptr = result.as_mut_ptr().cast::<DTypeId>();
+		unsafe {
+			*ptr = internal_dtype.id();
+			*ptr.add(1) = output.dtype().id();
+			for i in 0..E {
+				*ptr.add(2 + i) = elem_args[i].dtype().id();
 			}
-		})
+			for i in 0..R {
+				*ptr.add(2 + E + i) = reduce_args[i].dtype().id();
+			}
+		}
+		result
 	}
 
 	pub unsafe fn elemwise_args<'a>(&self, args: *const KernelElemArg) -> &'a [KernelElemArg] {
@@ -60,29 +62,43 @@ impl KernelData {
 		unsafe { std::slice::from_raw_parts(args, self.scalar_count) }
 	}
 
-	pub unsafe fn elemwise_dtypes<'a>(&self, dtype_config: *const DTypeId) -> &'a [DTypeId] {
-		unsafe { std::slice::from_raw_parts(dtype_config.add(2), self.elemwise_count) }
+	pub fn elemwise_dtype<'a>(&self, dtype_config: &[u64], i: usize) -> DType {
+		assert!(dtype_config.len() == self.dtype_config_len());
+		assert!(i < self.elemwise_count);
+		let dtype_config = dtype_config as *const [u64];
+		let dtype_config = dtype_config.cast::<u64>().cast::<DTypeId>();
+		unsafe { *dtype_config.add(2 + i) }.to_dtype()
 	}
-	pub unsafe fn reduce_dtypes<'a>(&self, dtype_config: *const DTypeId) -> &'a [DTypeId] {
-		unsafe {
-			std::slice::from_raw_parts(dtype_config.add(2 + self.elemwise_count), self.reduce_count)
-		}
+	pub fn reduce_dtype<'a>(&self, dtype_config: &[u64], i: usize) -> DType {
+		assert!(dtype_config.len() == self.dtype_config_len());
+		assert!(i < self.reduce_count);
+		let dtype_config = dtype_config as *const [u64];
+		let dtype_config = dtype_config.cast::<u64>().cast::<DTypeId>();
+		unsafe { *dtype_config.add(2 + self.elemwise_count + i) }.to_dtype()
 	}
 
-	pub unsafe fn internal_dtype(&self, dtype_config: *const DTypeId) -> DType {
+	pub fn internal_dtype(&self, dtype_config: &[u64]) -> DType {
+		assert!(dtype_config.len() == self.dtype_config_len());
+		let dtype_config = dtype_config as *const [u64];
+		let dtype_config = dtype_config.cast::<u64>().cast::<DTypeId>();
 		unsafe { *dtype_config }.to_dtype()
 	}
-	pub unsafe fn output_dtype(&self, dtype_config: *const DTypeId) -> DType {
+	pub fn output_dtype(&self, dtype_config: &[u64]) -> DType {
+		assert!(dtype_config.len() == self.dtype_config_len());
+		let dtype_config = dtype_config as *const [u64];
+		let dtype_config = dtype_config.cast::<u64>().cast::<DTypeId>();
 		unsafe { *dtype_config.add(1) }.to_dtype()
 	}
 
-	pub unsafe fn dtype_config<'a>(&self, dtype_config: *const DTypeId) -> &'a [u8] {
-		unsafe {
-			std::slice::from_raw_parts(
-				dtype_config.cast(),
-				(2 + self.elemwise_count + self.reduce_count) * std::mem::size_of::<DTypeId>(),
-			)
-		}
+	pub fn dtype_config_len(&self) -> usize {
+		let bytes = (2 + self.elemwise_count + self.reduce_count) * std::mem::size_of::<DTypeId>();
+		let items = (bytes + 7) / 8;
+		items
+	}
+
+	pub unsafe fn dtype_config<'a>(&self, dtype_config: *const u64) -> &'a [u64] {
+		let items = self.dtype_config_len();
+		unsafe { std::slice::from_raw_parts(dtype_config, items) }
 	}
 }
 
@@ -119,7 +135,7 @@ impl KernelRunner {
 		[(); E::PADDED_KEY_LEN]:,
 		[(); E::BATCHED_KEY_LEN]:,
 		[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
-		[(); 2 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
+		[(); ((2 + E::ELEMWISE_COUNT + E::REDUCE_COUNT) * std::mem::size_of::<DTypeId>() + 7) / 8]:,
 	{
 		let (key, key_hash) = const { E::key() };
 		let cache = unsafe { &mut *self.cache.get() };
@@ -161,7 +177,7 @@ impl KernelRunner {
 	) -> Result<(), ErrPack<TensorOpError>>
 	where
 		[(); 1 + E + R]:,
-		[(); 2 + E + R]:,
+		[(); ((2 + E + R) * std::mem::size_of::<DTypeId>() + 7) / 8]:,
 	{
 		debug_assert!(kernel_data.elemwise_count == E);
 		debug_assert!(kernel_data.reduce_count == R);

@@ -40,6 +40,7 @@
 #![feature(ptr_metadata)]
 #![feature(macro_metavar_expr)]
 #![feature(trait_alias)]
+#![feature(thin_box)]
 // clippy
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]

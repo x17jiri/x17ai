@@ -18,18 +18,20 @@ use crate::tensor::device::{KernelElemArg, KernelOutput, KernelReduceArg};
 pub unsafe fn run_kernel(
 	kernel_data: &KernelData,
 	o: &KernelOutput,
-	elemwise_args: *const KernelElemArg,
-	reduce_args: *const KernelReduceArg,
-	scalar_args: *const f64,
+	elemwise_args: &[KernelElemArg],
+	reduce_args: &[KernelReduceArg],
+	scalar_args: &[f64],
 	reduction_size: usize,
+	dtype_config: &[u64],
 ) -> Result<(), ErrPack<TensorOpError>> {
 	let expr = kernel_data.expr.as_ref();
 	unsafe {
 		let eval_expr = EvalExpr {
-			elemwise_args: std::slice::from_raw_parts(elemwise_args, kernel_data.elemwise_count),
-			reduce_args: std::slice::from_raw_parts(reduce_args, kernel_data.reduce_count),
-			scalar_args: std::slice::from_raw_parts(scalar_args, kernel_data.scalar_count),
+			elemwise_args,
+			reduce_args,
+			scalar_args,
 			reduction_size,
+			dtype_config,
 		};
 		for j in 0..o.size[0] {
 			for i in 0..o.size[1] {
@@ -53,6 +55,7 @@ pub struct EvalExpr<'a> {
 	reduce_args: &'a [KernelReduceArg],
 	scalar_args: &'a [f64],
 	reduction_size: usize,
+	dtype_config: &'a [u64],
 }
 
 impl<'a> EvalExpr<'a> {

@@ -5,14 +5,17 @@
 //
 //------------------------------------------------------------------------------
 
+use std::boxed::ThinBox;
 use std::hint::cold_path;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
+use hashbrown::HashTable;
+
 use crate::ErrPack;
 use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
 use crate::tensor::device::cuda::cuda_shim::{CudaError, CudaStream};
-use crate::tensor::device::dtype::DTypeId;
+use crate::tensor::device::kernel::registry::KernelMap;
 use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
 use crate::tensor::device::{
 	AttentionArgs, DerivesDeviceBase, DeviceBase, DeviceBuffer, KernelElemArg, KernelOutput,
@@ -25,15 +28,34 @@ pub mod cuda_shim;
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct CompiledKernel {
-	_handle: *const std::ffi::c_void,
+struct CompiledKernel {
+	handle: *const std::ffi::c_void,
+	dtype_config_len: usize,
+	// followed by dtype_config array
+}
+
+impl CompiledKernel {
+	fn dtype_config<'a>(&self) -> &'a [u64] {
+		unsafe {
+			std::slice::from_raw_parts(
+				// TODO - if Self has less alignment than u64, this may be unaligned
+				(self as *const CompiledKernel).add(1) as *const u64,
+				self.dtype_config_len,
+			)
+		}
+	}
+}
+
+struct CompiledKernelEntry {
+	pub key_hash: u64,
+	pub value: ThinBox<CompiledKernel>,
 }
 
 #[repr(C)]
 pub struct CudaDevice {
 	base: DeviceBase,
 	cuda_stream: CudaStream,
-	compiled_kernels: Vec<Option<Box<CompiledKernel>>>,
+	compiled_kernels: Vec<Option<Box<HashTable<CompiledKernelEntry>>>>,
 	name: String,
 }
 
@@ -164,18 +186,22 @@ impl Device for CudaDevice {
 	unsafe fn run_kernel(
 		&self,
 		kernel_data: &KernelData,
-		_o: &KernelOutput,
-		_elemwise_args: *const KernelElemArg,
-		_reduce_args: *const KernelReduceArg,
-		_scalar_args: *const f64,
-		_dtype_config: *const DTypeId,
+		o: &KernelOutput,
+		elemwise_args: *const KernelElemArg,
+		reduce_args: *const KernelReduceArg,
+		scalar_args: *const f64,
+		dtype_config: *const u64,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		// TODO - need to hash dtype_config and find kernel for that specific configuration
-		let Some(Some(compiled_kernel)) = self.compiled_kernels.get(kernel_data.id) else {
+		let dtype_config = unsafe { kernel_data.dtype_config(dtype_config) };
+		let dtype_config_hash = KernelMap::hash_key(dtype_config);
+		if let Some(Some(compiled_kernel_table)) = self.compiled_kernels.get(kernel_data.id)
+			&& let Some(compiled_kernel) = compiled_kernel_table.find(dtype_config_hash, |entry| {
+				entry.key_hash == dtype_config_hash && entry.value.dtype_config() == dtype_config
+			}) {
+			todo!("CudaDevice::run_kernel(): run kernel");
+		} else {
 			cold_path();
-			todo!("CudaDevice::run_kernel: need to compile kernel");
+			todo!("CudaDevice::run_kernel(): compile and run kernel");
 		};
-		let _compiled_kernel = compiled_kernel.as_ref();
-		todo!("CudaDevice::run_kernel is not implemented yet");
 	}
 }
