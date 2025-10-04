@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::ErrPack;
 use crate::tensor::device::DeviceBase;
 use crate::tensor::device::dtype::common_dtype;
+use crate::tensor::device::kernel::runner::KernelData;
 use crate::tensor::{DType, Tensor, TensorOpError};
 
 //--------------------------------------------------------------------------------------------------
@@ -175,7 +176,6 @@ pub trait ExprTrait {
 
 	const REDUCE_OP_COUNT: usize;
 
-	const DTYPE_CONFIG_LEN: usize = 2 + Self::ELEMWISE_COUNT + Self::REDUCE_COUNT;
 	const EXPR_KEY_LEN: usize;
 
 	// The total key consists of:
@@ -185,21 +185,25 @@ pub trait ExprTrait {
 	// - expression key (EXPR_KEY_LEN bytes)
 	// - padding to the next multiple of KEY_TYPE_SIZE with value 0
 	// Note that both DTypeId and ExprDiscriminant start from 1, so 0 is never a valid value.
-	const EXPR_KEY_OFFSET: usize = (Self::DTYPE_CONFIG_LEN + 1).next_multiple_of(KEY_TYPE_SIZE);
-	const EXPR_KEY_BYTES: usize = Self::EXPR_KEY_LEN.next_multiple_of(KEY_TYPE_SIZE);
-	const KEY_BYTES: usize = Self::EXPR_KEY_OFFSET + Self::EXPR_KEY_BYTES;
-	const KEY_LEN: usize = Self::KEY_BYTES / KEY_TYPE_SIZE;
+	const DTYPE_CONFIG_BYTES: usize = Self::DTYPE_CONFIG_WORDS * KEY_TYPE_SIZE;
+	const EXPR_KEY_BYTES: usize = Self::EXPR_KEY_WORDS * KEY_TYPE_SIZE;
+
+	const DTYPE_CONFIG_WORDS: usize =
+		KernelData::dtype_config_words(Self::ELEMWISE_COUNT, Self::REDUCE_COUNT);
+	const EXPR_KEY_WORDS: usize = (Self::EXPR_KEY_LEN + KEY_TYPE_SIZE - 1) / KEY_TYPE_SIZE;
+
+	const KEY_WORDS: usize = Self::DTYPE_CONFIG_WORDS + Self::EXPR_KEY_WORDS;
 
 	fn set_key(masks: InputMasks, reduce: bool, id: &mut [u8], i: usize) -> usize;
 
 	#[allow(clippy::indexing_slicing)]
-	fn key() -> [u64; Self::KEY_LEN]
+	fn key() -> [u64; Self::KEY_WORDS]
 	where
-		[(); KEY_TYPE_SIZE * Self::KEY_LEN]:,
+		[(); KEY_TYPE_SIZE * Self::KEY_WORDS]:,
 	{
-		let mut u = KeyUnion { id: [0; KEY_TYPE_SIZE * Self::KEY_LEN] };
+		let mut u = KeyUnion { key: [0; Self::KEY_WORDS] };
 		let bytes = unsafe { &mut u.id };
-		let id = &mut bytes[Self::EXPR_KEY_OFFSET..];
+		let id = &mut bytes[Self::DTYPE_CONFIG_BYTES..];
 		let len = Self::set_key(Self::MASKS, false, id, 0);
 		assert!(len == Self::EXPR_KEY_LEN);
 		unsafe { u.key }
@@ -265,7 +269,7 @@ impl<const Idx: usize> const ExprTrait for TensorArg<Idx> {
 }
 
 impl<const Idx: usize> ExprToDyn for TensorArg<Idx> {
-	fn to_dyn(em: u64, rm: u64, _sm: u64, reduce: bool) -> Arc<DynExpr> {
+	fn to_dyn(&self, em: u64, rm: u64, _sm: u64, reduce: bool) -> Arc<DynExpr> {
 		let bit = 1_u64 << Idx;
 		if reduce {
 			let idx = (rm & (bit - 1)).count_ones() as usize;
@@ -294,7 +298,7 @@ impl<const Idx: usize> const ExprTrait for ScalarArg<Idx> {
 }
 
 impl<const Idx: usize> ExprToDyn for ScalarArg<Idx> {
-	fn to_dyn(_e_mask: u64, _r_mask: u64, s_mask: u64, _reduce: bool) -> Arc<DynExpr> {
+	fn to_dyn(&self, _e_mask: u64, _r_mask: u64, s_mask: u64, _reduce: bool) -> Arc<DynExpr> {
 		let bit = 1_u64 << Idx;
 		let idx = (s_mask & (bit - 1)).count_ones() as usize;
 		Arc::new(DynExpr::ScalarArg(idx))
@@ -321,9 +325,9 @@ macro_rules! impl_expr_reduce {
 		}
 
 		impl<A: const ExprTrait + ExprToDyn> ExprToDyn for $name<A> {
-			fn to_dyn(e_mask: u64, r_mask: u64, s_mask: u64, reduce: bool) -> Arc<DynExpr> {
+			fn to_dyn(&self, e_mask: u64, r_mask: u64, s_mask: u64, reduce: bool) -> Arc<DynExpr> {
 				assert!(!reduce);
-				Arc::new(DynExpr::$name(A::to_dyn(e_mask, r_mask, s_mask, true)))
+				Arc::new(DynExpr::$name(self.0.to_dyn(e_mask, r_mask, s_mask, true)))
 			}
 		}
 	};
@@ -345,8 +349,8 @@ macro_rules! impl_expr_unary {
 		}
 
 		impl<A: const ExprTrait + ExprToDyn> ExprToDyn for $name<A> {
-			fn to_dyn(e_mask: u64, r_mask: u64, s_mask: u64, reduce: bool) -> Arc<DynExpr> {
-				Arc::new(DynExpr::$name(A::to_dyn(e_mask, r_mask, s_mask, reduce)))
+			fn to_dyn(&self, e_mask: u64, r_mask: u64, s_mask: u64, reduce: bool) -> Arc<DynExpr> {
+				Arc::new(DynExpr::$name(self.0.to_dyn(e_mask, r_mask, s_mask, reduce)))
 			}
 		}
 	};
@@ -415,9 +419,9 @@ macro_rules! impl_expr_binary {
 		impl<A: const ExprTrait + ExprToDyn, B: const ExprTrait + ExprToDyn> ExprToDyn
 			for $name<A, B>
 		{
-			fn to_dyn(e_mask: u64, r_mask: u64, s_mask: u64, reduce: bool) -> Arc<DynExpr> {
-				let a = A::to_dyn(e_mask, r_mask, s_mask, reduce);
-				let b = B::to_dyn(e_mask, r_mask, s_mask, reduce);
+			fn to_dyn(&self, e_mask: u64, r_mask: u64, s_mask: u64, reduce: bool) -> Arc<DynExpr> {
+				let a = self.0.to_dyn(e_mask, r_mask, s_mask, reduce);
+				let b = self.1.to_dyn(e_mask, r_mask, s_mask, reduce);
 				Arc::new(DynExpr::$name(a, b))
 			}
 		}
@@ -500,8 +504,8 @@ where
 	[(); E::REDUCE_COUNT]:,
 	[(); E::SCALAR_COUNT]:,
 	[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
-	[(); E::KEY_LEN]:,
-	[(); KEY_TYPE_SIZE * E::KEY_LEN]:,
+	[(); E::KEY_WORDS]:,
+	[(); KEY_TYPE_SIZE * E::KEY_WORDS]:,
 {
 	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		DeviceBase::from_device(to.device()).kernel_runner.run(

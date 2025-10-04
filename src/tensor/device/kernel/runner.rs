@@ -10,7 +10,7 @@ use std::hint::{cold_path, likely};
 use std::sync::{Arc, RwLock};
 
 use crate::ErrPack;
-use crate::tensor::device::dtype::DTypeId;
+use crate::tensor::device::dtype::{self, DTypeId};
 use crate::tensor::device::kernel::expr::{DynExpr, ExprToDyn, ExprTrait, KEY_TYPE_SIZE, KeyType};
 use crate::tensor::device::kernel::registry::{KernelMap, KernelRegistry};
 use crate::tensor::device::{DeviceBuffer, KernelElemArg, KernelOutput, KernelReduceArg};
@@ -29,13 +29,17 @@ pub struct KernelData<'a> {
 	pub key: &'a [KeyType],
 }
 
-impl KernelData {
+impl<'a> KernelData<'a> {
+	pub const fn dtype_config_words(E: usize, R: usize) -> usize {
+		(2 + E + R + KEY_TYPE_SIZE) / KEY_TYPE_SIZE
+	}
+
 	pub fn new_dtype_config<const E: usize, const R: usize>(
 		internal_dtype: DType,
 		output: &Tensor,
 		elem_args: [&Tensor; E],
 		reduce_args: [&Tensor; R],
-	) -> [u64; ((2 + E + R) * std::mem::size_of::<DTypeId>() + 7) / 8] {
+	) -> [u64; Self::dtype_config_words(E, R)] {
 		let mut result = [0; ((2 + E + R) * std::mem::size_of::<DTypeId>() + 7) / 8];
 		let ptr = result.as_mut_ptr().cast::<DTypeId>();
 		unsafe {
@@ -131,11 +135,14 @@ impl KernelRunner {
 		internal_dtype: DType,
 	) -> Result<(), ErrPack<TensorOpError>>
 	where
-		[(); E::KEY_LEN]:,
-		[(); KEY_TYPE_SIZE * E::KEY_LEN]:,
-		[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
+		[(); E::KEY_WORDS]:,
+		[(); KEY_TYPE_SIZE * E::KEY_WORDS]:,
+		[(); E::DTYPE_CONFIG_WORDS]:,
+		[(); 2 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
 	{
 		let mut key = const { E::key() };
+		let dtype_config =
+			KernelData::new_dtype_config(internal_dtype, output, elem_args, reduce_args);
 
 		Ok(())
 		/*
