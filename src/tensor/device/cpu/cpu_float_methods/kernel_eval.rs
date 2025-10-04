@@ -27,6 +27,7 @@ pub unsafe fn run_kernel(
 	let expr = kernel_data.expr.as_ref();
 	unsafe {
 		let eval_expr = EvalExpr {
+			kernel_data,
 			elemwise_args,
 			reduce_args,
 			scalar_args,
@@ -38,7 +39,7 @@ pub unsafe fn run_kernel(
 				let value = eval_expr.eval_expr(expr, j, i, 0)?;
 				CPUDevice::__write_float(
 					o.buf,
-					o.dtype,
+					kernel_data.output_dtype(dtype_config),
 					o.offset_bytes + j * o.stride_bytes[0] + i * o.stride_bytes[1],
 					value,
 				)?;
@@ -51,6 +52,7 @@ pub unsafe fn run_kernel(
 //--------------------------------------------------------------------------------------------------
 
 pub struct EvalExpr<'a> {
+	kernel_data: &'a KernelData,
 	elemwise_args: &'a [KernelElemArg],
 	reduce_args: &'a [KernelReduceArg],
 	scalar_args: &'a [f64],
@@ -73,9 +75,10 @@ impl<'a> EvalExpr<'a> {
 				DynExpr::ElemwiseTensorArg(index) => {
 					assert!(k == 0);
 					let elemwise_arg = &self.elemwise_args[*index];
+					let dtype = self.kernel_data.elemwise_dtype(self.dtype_config, *index);
 					CPUDevice::__read_float(
 						elemwise_arg.buf,
-						elemwise_arg.dtype,
+						dtype,
 						elemwise_arg.offset_bytes
 							+ j * elemwise_arg.stride_bytes[0]
 							+ i * elemwise_arg.stride_bytes[1],
@@ -83,10 +86,11 @@ impl<'a> EvalExpr<'a> {
 				},
 				DynExpr::ReduceTensorArg(index) => {
 					let reduce_arg = &self.reduce_args[*index];
+					let dtype = self.kernel_data.reduce_dtype(self.dtype_config, *index);
 					assert!(k < self.reduction_size);
 					CPUDevice::__read_float(
 						reduce_arg.buf,
-						reduce_arg.dtype,
+						dtype,
 						reduce_arg.offset_bytes
 							+ j * reduce_arg.stride_bytes[0]
 							+ i * reduce_arg.stride_bytes[1]

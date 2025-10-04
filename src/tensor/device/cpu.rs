@@ -234,10 +234,11 @@ impl Device for CPUDevice {
 			cpu_float_methods::run_kernel(
 				kernel_data,
 				o,
-				elemwise_args,
-				reduce_args,
-				scalar_args,
+				kernel_data.elemwise_args(elemwise_args),
+				kernel_data.reduce_args(reduce_args),
+				kernel_data.scalar_args(scalar_args),
 				o.reduction_size,
+				dtype_config,
 			)
 		}
 	}

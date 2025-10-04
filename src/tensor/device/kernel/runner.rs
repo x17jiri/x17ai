@@ -11,7 +11,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::ErrPack;
 use crate::tensor::device::dtype::DTypeId;
-use crate::tensor::device::kernel::expr::{DynExpr, ExprToDyn, ExprTrait};
+use crate::tensor::device::kernel::expr::{DynExpr, ExprToDyn, ExprTrait, KEY_TYPE_SIZE, KeyType};
 use crate::tensor::device::kernel::registry::{KernelMap, KernelRegistry};
 use crate::tensor::device::{DeviceBuffer, KernelElemArg, KernelOutput, KernelReduceArg};
 use crate::tensor::dim_merger::DimMerger;
@@ -21,13 +21,12 @@ use crate::util::mycell::{BorrowGuard, UnsafeBorrowFailFlag, UnsafeBorrowMutFail
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct KernelData {
-	pub id: usize,
-	pub key: Box<[u64]>,
-	pub expr: Arc<DynExpr>,
+pub struct KernelData<'a> {
 	pub elemwise_count: usize,
 	pub reduce_count: usize,
 	pub scalar_count: usize,
+	pub expr: &'a dyn ExprToDyn,
+	pub key: &'a [KeyType],
 }
 
 impl KernelData {
@@ -103,8 +102,8 @@ impl KernelData {
 }
 
 pub struct KernelRunner {
-	registry: Arc<RwLock<KernelRegistry>>,
-	cache: UnsafeCell<KernelMap>,
+	//	registry: Arc<RwLock<KernelRegistry>>,
+	//	cache: UnsafeCell<KernelMap>,
 }
 
 impl Default for KernelRunner {
@@ -116,8 +115,8 @@ impl Default for KernelRunner {
 impl KernelRunner {
 	pub fn new() -> Self {
 		Self {
-			registry: KernelRegistry::instance(),
-			cache: UnsafeCell::new(KernelMap::new()),
+//			registry: KernelRegistry::instance(),
+//			cache: UnsafeCell::new(KernelMap::new()),
 		}
 	}
 
@@ -132,12 +131,14 @@ impl KernelRunner {
 		internal_dtype: DType,
 	) -> Result<(), ErrPack<TensorOpError>>
 	where
-		[(); E::PADDED_KEY_LEN]:,
-		[(); E::BATCHED_KEY_LEN]:,
+		[(); E::KEY_LEN]:,
+		[(); KEY_TYPE_SIZE * E::KEY_LEN]:,
 		[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
-		[(); ((2 + E::ELEMWISE_COUNT + E::REDUCE_COUNT) * std::mem::size_of::<DTypeId>() + 7) / 8]:,
 	{
-		let (key, key_hash) = const { E::key() };
+		let mut key = const { E::key() };
+
+		Ok(())
+		/*
 		let cache = unsafe { &mut *self.cache.get() };
 		let entry = if let Some(entry) = cache.find(&key, key_hash) {
 			entry
@@ -162,6 +163,7 @@ impl KernelRunner {
 		};
 		let kernel = entry.value.as_ref();
 		Self::__run(kernel, output, elem_args, reduce_args, scalar_args, internal_dtype)
+		*/
 	}
 
 	#[inline(never)]
@@ -177,7 +179,6 @@ impl KernelRunner {
 	) -> Result<(), ErrPack<TensorOpError>>
 	where
 		[(); 1 + E + R]:,
-		[(); ((2 + E + R) * std::mem::size_of::<DTypeId>() + 7) / 8]:,
 	{
 		debug_assert!(kernel_data.elemwise_count == E);
 		debug_assert!(kernel_data.reduce_count == R);

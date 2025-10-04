@@ -41,6 +41,7 @@
 #![feature(macro_metavar_expr)]
 #![feature(trait_alias)]
 #![feature(thin_box)]
+#![feature(const_index)]
 // clippy
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]

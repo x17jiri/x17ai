@@ -9,8 +9,7 @@ use std::sync::Arc;
 
 use crate::ErrPack;
 use crate::tensor::device::DeviceBase;
-use crate::tensor::device::dtype::{DTypeId, common_dtype};
-use crate::tensor::device::kernel::registry::KernelMap;
+use crate::tensor::device::dtype::common_dtype;
 use crate::tensor::{DType, Tensor, TensorOpError};
 
 //--------------------------------------------------------------------------------------------------
@@ -81,7 +80,7 @@ impl EvaluatesToTensor for &Tensor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum ExprDiscriminant {
-	ElemwiseTensorArg,
+	ElemwiseTensorArg = 1,
 	ReduceTensorArg,
 	ScalarArg,
 
@@ -98,8 +97,6 @@ pub enum ExprDiscriminant {
 	AddExpr,
 	SubExpr,
 	MulExpr,
-
-	Invalid,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -126,15 +123,15 @@ pub enum DynExpr {
 
 //--------------------------------------------------------------------------------------------------
 
-pub const KEY_BATCH_SIZE: usize = std::mem::size_of::<u64>();
+pub type KeyType = u64;
+pub const KEY_TYPE_SIZE: usize = std::mem::size_of::<KeyType>();
 
-union KeyUnion<const PADDED_KEY_LEN: usize, const BATCHED_KEY_LEN: usize>
+union KeyUnion<const KEY_LEN: usize>
 where
-	[(); PADDED_KEY_LEN]:,
-	[(); BATCHED_KEY_LEN]:,
+	[(); KEY_TYPE_SIZE * KEY_LEN]:,
 {
-	id: [u8; PADDED_KEY_LEN],
-	key: [u64; BATCHED_KEY_LEN],
+	id: [u8; KEY_TYPE_SIZE * KEY_LEN],
+	key: [KeyType; KEY_LEN],
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -178,31 +175,39 @@ pub trait ExprTrait {
 
 	const REDUCE_OP_COUNT: usize;
 
-	const KEY_LEN: usize;
-	const PADDED_KEY_LEN: usize = Self::KEY_LEN.next_multiple_of(KEY_BATCH_SIZE);
-	const BATCHED_KEY_LEN: usize = Self::PADDED_KEY_LEN / KEY_BATCH_SIZE;
+	const DTYPE_CONFIG_LEN: usize = 2 + Self::ELEMWISE_COUNT + Self::REDUCE_COUNT;
+	const EXPR_KEY_LEN: usize;
+
+	// The total key consists of:
+	// - dtype configuration (2 + ELEMWISE_COUNT + REDUCE_COUNT bytes)
+	// - 1 byte separator with value 0
+	// - padding to the next multiple of KEY_TYPE_SIZE with value 0
+	// - expression key (EXPR_KEY_LEN bytes)
+	// - padding to the next multiple of KEY_TYPE_SIZE with value 0
+	// Note that both DTypeId and ExprDiscriminant start from 1, so 0 is never a valid value.
+	const EXPR_KEY_OFFSET: usize = (Self::DTYPE_CONFIG_LEN + 1).next_multiple_of(KEY_TYPE_SIZE);
+	const EXPR_KEY_BYTES: usize = Self::EXPR_KEY_LEN.next_multiple_of(KEY_TYPE_SIZE);
+	const KEY_BYTES: usize = Self::EXPR_KEY_OFFSET + Self::EXPR_KEY_BYTES;
+	const KEY_LEN: usize = Self::KEY_BYTES / KEY_TYPE_SIZE;
 
 	fn set_key(masks: InputMasks, reduce: bool, id: &mut [u8], i: usize) -> usize;
 
 	#[allow(clippy::indexing_slicing)]
-	fn key() -> ([u64; Self::BATCHED_KEY_LEN], u64)
+	fn key() -> [u64; Self::KEY_LEN]
 	where
-		[(); Self::PADDED_KEY_LEN]:,
+		[(); KEY_TYPE_SIZE * Self::KEY_LEN]:,
 	{
-		let mut id = [255; Self::PADDED_KEY_LEN];
-		let len = Self::set_key(Self::MASKS, false, &mut id, 0);
-		assert!(len == Self::KEY_LEN);
-
-		let key_union = KeyUnion { id };
-		let key = unsafe { key_union.key };
-		let key_hash = KernelMap::hash_key(&key);
-
-		(key, key_hash)
+		let mut u = KeyUnion { id: [0; KEY_TYPE_SIZE * Self::KEY_LEN] };
+		let bytes = unsafe { &mut u.id };
+		let id = &mut bytes[Self::EXPR_KEY_OFFSET..];
+		let len = Self::set_key(Self::MASKS, false, id, 0);
+		assert!(len == Self::EXPR_KEY_LEN);
+		unsafe { u.key }
 	}
 }
 
 pub trait ExprToDyn {
-	fn to_dyn(e_mask: u64, r_mask: u64, s_mask: u64, reduce: bool) -> Arc<DynExpr>;
+	fn to_dyn(&self, e_mask: u64, r_mask: u64, s_mask: u64, reduce: bool) -> Arc<DynExpr>;
 }
 
 #[derive(Clone, Copy)]
@@ -242,7 +247,7 @@ impl<const Idx: usize> const ExprTrait for TensorArg<Idx> {
 
 	const REDUCE_OP_COUNT: usize = 0;
 
-	const KEY_LEN: usize = 2;
+	const EXPR_KEY_LEN: usize = 2;
 
 	fn set_key(masks: InputMasks, reduce: bool, id: &mut [u8], i: usize) -> usize {
 		let bit = 1_u64 << Idx;
@@ -277,7 +282,7 @@ impl<const Idx: usize> const ExprTrait for ScalarArg<Idx> {
 
 	const REDUCE_OP_COUNT: usize = 0;
 
-	const KEY_LEN: usize = 2;
+	const EXPR_KEY_LEN: usize = 2;
 
 	fn set_key(masks: InputMasks, _reduce: bool, id: &mut [u8], i: usize) -> usize {
 		let bit = 1_u64 << Idx;
@@ -307,7 +312,7 @@ macro_rules! impl_expr_reduce {
 
 			const REDUCE_OP_COUNT: usize = 1 + A::REDUCE_OP_COUNT;
 
-			const KEY_LEN: usize = 1 + A::KEY_LEN;
+			const EXPR_KEY_LEN: usize = 1 + A::EXPR_KEY_LEN;
 
 			fn set_key(masks: InputMasks, _reduce: bool, id: &mut [u8], i: usize) -> usize {
 				id[i] = ExprDiscriminant::$name as u8;
@@ -331,7 +336,7 @@ macro_rules! impl_expr_unary {
 
 			const REDUCE_OP_COUNT: usize = A::REDUCE_OP_COUNT;
 
-			const KEY_LEN: usize = 1 + A::KEY_LEN;
+			const EXPR_KEY_LEN: usize = 1 + A::EXPR_KEY_LEN;
 
 			fn set_key(masks: InputMasks, reduce: bool, id: &mut [u8], i: usize) -> usize {
 				id[i + 0] = ExprDiscriminant::$name as u8;
@@ -360,24 +365,24 @@ macro_rules! impl_expr_binary {
 
 			const REDUCE_OP_COUNT: usize = A::REDUCE_OP_COUNT + B::REDUCE_OP_COUNT;
 
-			const KEY_LEN: usize = 1 + A::KEY_LEN + B::KEY_LEN;
+			const EXPR_KEY_LEN: usize = 1 + A::EXPR_KEY_LEN + B::EXPR_KEY_LEN;
 
 			fn set_key(masks: InputMasks, reduce: bool, id: &mut [u8], i: usize) -> usize {
 				id[i + 0] = ExprDiscriminant::$name as u8;
 				let begin = i + 1;
 				let mid = A::set_key(masks, reduce, id, begin);
-				assert!(mid == begin + A::KEY_LEN);
+				assert!(mid == begin + A::EXPR_KEY_LEN);
 				let end = B::set_key(masks, reduce, id, mid);
-				assert!(end == mid + B::KEY_LEN);
+				assert!(end == mid + B::EXPR_KEY_LEN);
 				if !($commutative) {
 					return end;
 				}
 
-				if A::KEY_LEN <= B::KEY_LEN {
-					if A::KEY_LEN == B::KEY_LEN {
+				if A::EXPR_KEY_LEN <= B::EXPR_KEY_LEN {
+					if A::EXPR_KEY_LEN == B::EXPR_KEY_LEN {
 						let mut swap = false;
 						let mut i = 0;
-						while i < A::KEY_LEN {
+						while i < A::EXPR_KEY_LEN {
 							let a = id[begin + i];
 							let b = id[mid + i];
 							if a != b {
@@ -388,7 +393,7 @@ macro_rules! impl_expr_binary {
 						}
 						if swap {
 							let mut i = 0;
-							while i < A::KEY_LEN {
+							while i < A::EXPR_KEY_LEN {
 								let tmp = id[begin + i];
 								id[begin + i] = id[mid + i];
 								id[mid + i] = tmp;
@@ -399,9 +404,9 @@ macro_rules! impl_expr_binary {
 					end
 				} else {
 					let mid = B::set_key(masks, reduce, id, begin);
-					assert!(mid == begin + B::KEY_LEN);
+					assert!(mid == begin + B::EXPR_KEY_LEN);
 					let end = A::set_key(masks, reduce, id, mid);
-					assert!(end == mid + A::KEY_LEN);
+					assert!(end == mid + A::EXPR_KEY_LEN);
 					end
 				}
 			}
@@ -495,9 +500,8 @@ where
 	[(); E::REDUCE_COUNT]:,
 	[(); E::SCALAR_COUNT]:,
 	[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
-	[(); ((2 + E::ELEMWISE_COUNT + E::REDUCE_COUNT) * std::mem::size_of::<DTypeId>() + 7) / 8]:,
-	[(); E::PADDED_KEY_LEN]:,
-	[(); E::BATCHED_KEY_LEN]:,
+	[(); E::KEY_LEN]:,
+	[(); KEY_TYPE_SIZE * E::KEY_LEN]:,
 {
 	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		DeviceBase::from_device(to.device()).kernel_runner.run(
