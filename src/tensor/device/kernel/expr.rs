@@ -124,15 +124,15 @@ pub enum DynExpr {
 
 //--------------------------------------------------------------------------------------------------
 
-pub type KeyType = u64;
-pub const KEY_TYPE_SIZE: usize = std::mem::size_of::<KeyType>();
+pub type KernelKeyType = u64;
+pub const KEY_TYPE_SIZE: usize = std::mem::size_of::<KernelKeyType>();
 
 union KeyUnion<const KEY_LEN: usize>
 where
 	[(); KEY_TYPE_SIZE * KEY_LEN]:,
 {
 	id: [u8; KEY_TYPE_SIZE * KEY_LEN],
-	key: [KeyType; KEY_LEN],
+	key: [KernelKeyType; KEY_LEN],
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -176,6 +176,7 @@ pub trait ExprTrait {
 
 	const REDUCE_OP_COUNT: usize;
 
+	const DTYPE_CONFIG_LEN: usize = 2 + Self::ELEMWISE_COUNT + Self::REDUCE_COUNT;
 	const EXPR_KEY_LEN: usize;
 
 	// The total key consists of:
@@ -189,8 +190,9 @@ pub trait ExprTrait {
 	const EXPR_KEY_BYTES: usize = Self::EXPR_KEY_WORDS * KEY_TYPE_SIZE;
 
 	const DTYPE_CONFIG_WORDS: usize =
-		KernelData::dtype_config_words(Self::ELEMWISE_COUNT, Self::REDUCE_COUNT);
-	const EXPR_KEY_WORDS: usize = (Self::EXPR_KEY_LEN + KEY_TYPE_SIZE - 1) / KEY_TYPE_SIZE;
+		(Self::DTYPE_CONFIG_LEN + 1).next_multiple_of(KEY_TYPE_SIZE) / KEY_TYPE_SIZE;
+	const EXPR_KEY_WORDS: usize =
+		Self::EXPR_KEY_LEN.next_multiple_of(KEY_TYPE_SIZE) / KEY_TYPE_SIZE;
 
 	const KEY_WORDS: usize = Self::DTYPE_CONFIG_WORDS + Self::EXPR_KEY_WORDS;
 
@@ -211,7 +213,8 @@ pub trait ExprTrait {
 }
 
 pub trait ExprToDyn {
-	fn to_dyn(&self, e_mask: u64, r_mask: u64, s_mask: u64, reduce: bool) -> Arc<DynExpr>;
+	fn to_dyn_internal(&self, e_mask: u64, r_mask: u64, s_mask: u64, reduce: bool) -> Arc<DynExpr>;
+	fn to_dyn(&self) -> Arc<DynExpr>;
 }
 
 #[derive(Clone, Copy)]
@@ -269,7 +272,7 @@ impl<const Idx: usize> const ExprTrait for TensorArg<Idx> {
 }
 
 impl<const Idx: usize> ExprToDyn for TensorArg<Idx> {
-	fn to_dyn(&self, em: u64, rm: u64, _sm: u64, reduce: bool) -> Arc<DynExpr> {
+	fn to_dyn_internal(&self, em: u64, rm: u64, _sm: u64, reduce: bool) -> Arc<DynExpr> {
 		let bit = 1_u64 << Idx;
 		if reduce {
 			let idx = (rm & (bit - 1)).count_ones() as usize;
@@ -278,6 +281,9 @@ impl<const Idx: usize> ExprToDyn for TensorArg<Idx> {
 			let idx = (em & (bit - 1)).count_ones() as usize;
 			Arc::new(DynExpr::ElemwiseTensorArg(idx))
 		}
+	}
+	fn to_dyn(&self) -> Arc<DynExpr> {
+		self.to_dyn_internal(Self::ELEMWISE_MASK, Self::REDUCE_MASK, Self::SCALAR_MASK, false)
 	}
 }
 
@@ -298,10 +304,19 @@ impl<const Idx: usize> const ExprTrait for ScalarArg<Idx> {
 }
 
 impl<const Idx: usize> ExprToDyn for ScalarArg<Idx> {
-	fn to_dyn(&self, _e_mask: u64, _r_mask: u64, s_mask: u64, _reduce: bool) -> Arc<DynExpr> {
+	fn to_dyn_internal(
+		&self,
+		_e_mask: u64,
+		_r_mask: u64,
+		s_mask: u64,
+		_reduce: bool,
+	) -> Arc<DynExpr> {
 		let bit = 1_u64 << Idx;
 		let idx = (s_mask & (bit - 1)).count_ones() as usize;
 		Arc::new(DynExpr::ScalarArg(idx))
+	}
+	fn to_dyn(&self) -> Arc<DynExpr> {
+		self.to_dyn_internal(Self::ELEMWISE_MASK, Self::REDUCE_MASK, Self::SCALAR_MASK, false)
 	}
 }
 
@@ -325,9 +340,23 @@ macro_rules! impl_expr_reduce {
 		}
 
 		impl<A: const ExprTrait + ExprToDyn> ExprToDyn for $name<A> {
-			fn to_dyn(&self, e_mask: u64, r_mask: u64, s_mask: u64, reduce: bool) -> Arc<DynExpr> {
+			fn to_dyn_internal(
+				&self,
+				e_mask: u64,
+				r_mask: u64,
+				s_mask: u64,
+				reduce: bool,
+			) -> Arc<DynExpr> {
 				assert!(!reduce);
-				Arc::new(DynExpr::$name(self.0.to_dyn(e_mask, r_mask, s_mask, true)))
+				Arc::new(DynExpr::$name(self.0.to_dyn_internal(e_mask, r_mask, s_mask, true)))
+			}
+			fn to_dyn(&self) -> Arc<DynExpr> {
+				self.to_dyn_internal(
+					Self::ELEMWISE_MASK,
+					Self::REDUCE_MASK,
+					Self::SCALAR_MASK,
+					false,
+				)
 			}
 		}
 	};
@@ -349,8 +378,22 @@ macro_rules! impl_expr_unary {
 		}
 
 		impl<A: const ExprTrait + ExprToDyn> ExprToDyn for $name<A> {
-			fn to_dyn(&self, e_mask: u64, r_mask: u64, s_mask: u64, reduce: bool) -> Arc<DynExpr> {
-				Arc::new(DynExpr::$name(self.0.to_dyn(e_mask, r_mask, s_mask, reduce)))
+			fn to_dyn_internal(
+				&self,
+				e_mask: u64,
+				r_mask: u64,
+				s_mask: u64,
+				reduce: bool,
+			) -> Arc<DynExpr> {
+				Arc::new(DynExpr::$name(self.0.to_dyn_internal(e_mask, r_mask, s_mask, reduce)))
+			}
+			fn to_dyn(&self) -> Arc<DynExpr> {
+				self.to_dyn_internal(
+					Self::ELEMWISE_MASK,
+					Self::REDUCE_MASK,
+					Self::SCALAR_MASK,
+					false,
+				)
 			}
 		}
 	};
@@ -419,10 +462,24 @@ macro_rules! impl_expr_binary {
 		impl<A: const ExprTrait + ExprToDyn, B: const ExprTrait + ExprToDyn> ExprToDyn
 			for $name<A, B>
 		{
-			fn to_dyn(&self, e_mask: u64, r_mask: u64, s_mask: u64, reduce: bool) -> Arc<DynExpr> {
-				let a = self.0.to_dyn(e_mask, r_mask, s_mask, reduce);
-				let b = self.1.to_dyn(e_mask, r_mask, s_mask, reduce);
+			fn to_dyn_internal(
+				&self,
+				e_mask: u64,
+				r_mask: u64,
+				s_mask: u64,
+				reduce: bool,
+			) -> Arc<DynExpr> {
+				let a = self.0.to_dyn_internal(e_mask, r_mask, s_mask, reduce);
+				let b = self.1.to_dyn_internal(e_mask, r_mask, s_mask, reduce);
 				Arc::new(DynExpr::$name(a, b))
+			}
+			fn to_dyn(&self) -> Arc<DynExpr> {
+				self.to_dyn_internal(
+					Self::ELEMWISE_MASK,
+					Self::REDUCE_MASK,
+					Self::SCALAR_MASK,
+					false,
+				)
 			}
 		}
 	};
@@ -453,6 +510,7 @@ where
 	elem_args: [&'a Tensor; E::ELEMWISE_COUNT],
 	reduce_args: [&'a Tensor; E::REDUCE_COUNT],
 	scalar_args: [f64; E::SCALAR_COUNT],
+	expr: E,
 	internal_dtype: DType,
 }
 
@@ -479,7 +537,7 @@ where
 	pub fn new<const TC: usize, const SC: usize>(
 		tensors: [&'a Tensor; TC],
 		scalars: [f64; SC],
-		_expr: Expr<E>,
+		expr: Expr<E>,
 		internal_dtype: DType,
 	) -> Self {
 		let elem_arg_indexes: [usize; E::ELEMWISE_COUNT] =
@@ -492,9 +550,184 @@ where
 			elem_args: std::array::from_fn(|i| tensors[elem_arg_indexes[i]]),
 			reduce_args: std::array::from_fn(|i| tensors[reduce_arg_indexes[i]]),
 			scalar_args: std::array::from_fn(|i| scalars[scalar_arg_indexes[i]]),
+			expr: expr.0,
 			internal_dtype,
 		}
 	}
+
+	pub fn call(
+		&self,
+		output: &Tensor,
+		elem_args: [&Tensor; E::ELEMWISE_COUNT],
+		reduce_args: [&Tensor; E::REDUCE_COUNT],
+		scalar_args: [f64; E::SCALAR_COUNT],
+		internal_dtype: DType,
+	) -> Result<(), ErrPack<TensorOpError>>
+	where
+		[(); E::KEY_WORDS]:,
+		[(); KEY_TYPE_SIZE * E::KEY_WORDS]:,
+		[(); KernelData::dtype_config_words(E::ELEMWISE_COUNT, E::REDUCE_COUNT)]:,
+		[(); E::DTYPE_CONFIG_WORDS
+			- KernelData::dtype_config_words(E::ELEMWISE_COUNT, E::REDUCE_COUNT)]:,
+		[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
+	{
+		let mut key = const { E::key() };
+		let dtype_config =
+			KernelData::new_dtype_config(internal_dtype, output, elem_args, reduce_args);
+		key[..dtype_config.len()].copy_from_slice(&dtype_config);
+
+		__run_kernel(&self.expr, &key, output, elem_args, reduce_args, scalar_args, internal_dtype)
+	}
+}
+
+#[inline(never)]
+#[allow(clippy::indexing_slicing)]
+#[allow(clippy::too_many_lines)]
+fn __run_kernel<const E: usize, const R: usize, const C: usize>(
+	expr: &dyn ExprToDyn,
+	key: &[u64],
+	output: &Tensor,
+	elem_args: [&Tensor; E],
+	reduce_args: [&Tensor; R],
+	scalar_args: [f64; C],
+	internal_dtype: DType,
+) -> Result<(), ErrPack<TensorOpError>>
+where
+	[(); 1 + E + R]:,
+{
+	debug_assert!(kernel_data.elemwise_count == E);
+	debug_assert!(kernel_data.reduce_count == R);
+	debug_assert!(kernel_data.scalar_count == C);
+
+	let dtype_bytes = output.buf().dtype().bytes();
+	debug_assert!(dtype_bytes > 0);
+
+	let output_batch_dims: &[SizeAndStride];
+	let elem_args_batch_dims: [&[SizeAndStride]; E];
+	let reduce_args_batch_dims: [&[SizeAndStride]; R];
+	let reduce_args_top_dim: [SizeAndStride; R];
+	if R == 0 {
+		reduce_args_top_dim = [SizeAndStride::default(); R];
+		reduce_args_batch_dims = [&[]; R];
+
+		output_batch_dims = output.map().dims.as_slice();
+		elem_args_batch_dims = elem_args.map(|t| t.map().dims.as_slice());
+	} else {
+		let output_dims = output.map().dims.as_slice().split_last();
+		let elem_args_dims = elem_args.try_map(|t| t.map().dims.as_slice().split_last());
+		let reduce_args_dims = reduce_args.try_map(|t| t.map().dims.as_slice().split_last());
+
+		let (Some(output_dims), Some(elem_dims), Some(reduce_dims)) =
+			(output_dims, elem_args_dims, reduce_args_dims)
+		else {
+			cold_path();
+			return Err(TensorOpError::missing_reduce_dimension());
+		};
+
+		let output_top_dim = output_dims.0;
+		output_batch_dims = output_dims.1;
+		let elem_args_top_dim = elem_dims.map(|(&top_dim, _)| top_dim);
+		elem_args_batch_dims = elem_dims.map(|(_, batch_dim)| batch_dim);
+		reduce_args_top_dim = reduce_dims.map(|(&top_dim, _)| top_dim);
+		reduce_args_batch_dims = reduce_dims.map(|(_, batch_dim)| batch_dim);
+
+		if output_top_dim.size != 1 || elem_args_top_dim.iter().any(|dim| dim.size != 1) {
+			cold_path();
+			return Err(TensorOpError::cannot_broadcast_output());
+		}
+		if reduce_args_top_dim.iter().any(|vec| vec.stride != 1) {
+			cold_path();
+			return Err(NotContiguousError.into());
+		}
+	}
+
+	let all_dims_tmp = crate::util::array::concat_arrays([output_batch_dims], elem_args_batch_dims);
+	let all_dims = crate::util::array::concat_arrays(all_dims_tmp, reduce_args_batch_dims);
+
+	let merged = DimMerger::merge::<2>(all_dims)?;
+
+	let reduce_args_top_dim = DimMerger::merge_single_dim(reduce_args_top_dim)?;
+	let reduce_inp: [KernelReduceArg; R] = std::array::from_fn(|i| {
+		let arg = reduce_args[i];
+		KernelReduceArg {
+			stride_bytes: [
+				merged[0].strides[1 + E + i] * dtype_bytes,
+				merged[1].strides[1 + E + i] * dtype_bytes,
+				reduce_args_top_dim.strides[i] * dtype_bytes,
+			],
+			offset_bytes: arg.map().offset * dtype_bytes,
+			buf: arg.buf().memory(),
+		}
+	});
+
+	let inp: [KernelElemArg; E] = std::array::from_fn(|i| {
+		let arg = elem_args[i];
+		KernelElemArg {
+			stride_bytes: [
+				merged[0].strides[1 + i] * dtype_bytes,
+				merged[1].strides[1 + i] * dtype_bytes,
+			],
+			offset_bytes: arg.map().offset * dtype_bytes,
+			buf: arg.buf().memory(),
+		}
+	});
+
+	if merged.iter().any(|m| m.get(0).is_broadcasted()) {
+		cold_path();
+		return Err(TensorOpError::cannot_broadcast_output());
+	}
+
+	let out = KernelOutput {
+		size: [merged[0].size, merged[1].size],
+		stride_bytes: [
+			merged[0].strides[0] * dtype_bytes, //
+			merged[1].strides[0] * dtype_bytes,
+		],
+		offset_bytes: output.map().offset * dtype_bytes,
+		buf: output.buf().memory(),
+		reduction_size: reduce_args_top_dim.size,
+	};
+
+	let dtype_config = KernelData::new_dtype_config(internal_dtype, output, elem_args, reduce_args);
+
+	unsafe {
+		let mut inp_fail = UnsafeBorrowFailFlag::new();
+		let reduce_borrows: [BorrowGuard<DeviceBuffer>; R] =
+			std::array::from_fn(|i| reduce_args[i].buf().unsafe_borrow(&mut inp_fail));
+		let elem_borrows: [Option<BorrowGuard<DeviceBuffer>>; E] = std::array::from_fn(|i| {
+			let arg = &elem_args[i];
+			let same_as_output = std::ptr::eq(arg.buf().as_ref(), output.buf().as_ref())
+				&& likely(
+					inp[i].offset_bytes == out.offset_bytes
+						&& inp[i].stride_bytes == out.stride_bytes,
+				);
+			if same_as_output { None } else { Some(arg.buf().unsafe_borrow(&mut inp_fail)) }
+		});
+
+		let mut out_fail = UnsafeBorrowMutFailFlag::new();
+		let out_borrow = output.buf().unsafe_borrow_mut(&mut out_fail);
+
+		inp_fail.check()?;
+		out_fail.check()?;
+
+		// TODO - ensure_safe
+		// TODO - ensure all on same device
+		// TODO - other things may need to be checked before running the kernel
+
+		output.device().run_kernel(
+			kernel_data,
+			&out,
+			inp.as_ptr(),
+			reduce_inp.as_ptr(),
+			scalar_args.as_ptr(),
+			dtype_config.as_ptr(),
+		)?;
+
+		std::mem::drop(out_borrow);
+		std::mem::drop(elem_borrows);
+		std::mem::drop(reduce_borrows);
+	}
+	Ok(())
 }
 
 impl<'a, E: const ExprTrait + ExprToDyn> EvaluatesToTensor for KernelCall<'a, E>
