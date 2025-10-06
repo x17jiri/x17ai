@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
 use crate::tensor::device::dtype::common_dtype;
-use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
+use crate::tensor::device::kernel::expr::DynKernelCall;
 use crate::tensor::{HasDType, TensorOpError, UnsupportedDTypeError};
 use crate::util::mycell::{self, BorrowGuard};
 
@@ -19,8 +19,7 @@ pub mod cpu_float_methods;
 
 use crate::ErrPack;
 use crate::tensor::device::{
-	AttentionArgs, DerivesDeviceBase, DeviceBase, DeviceBuffer, KernelElemArg, KernelOutput,
-	KernelReduceArg, MatMulArgs, NewDeviceBufferError,
+	AttentionArgs, DerivesDeviceBase, DeviceBase, DeviceBuffer, MatMulArgs, NewDeviceBufferError,
 };
 use crate::tensor::{DType, Device};
 
@@ -45,13 +44,7 @@ impl CPUDevice {
 	}
 
 	pub fn new_named(name: String) -> Rc<Self> {
-		Rc::new(Self {
-			base: DeviceBase {
-				kernel_runner: Rc::new(KernelRunner::new()),
-				is_cpu: true,
-			},
-			name,
-		})
+		Rc::new(Self { base: DeviceBase { is_cpu: true }, name })
 	}
 
 	pub fn buf_as_slice<'guard, 'buf, T: HasDType>(
@@ -214,33 +207,13 @@ impl Device for CPUDevice {
 		todo!("implement attention for CPUDevice");
 	}
 
-	unsafe fn run_kernel(
-		&self,
-		kernel_data: &KernelData,
-		o: &KernelOutput,
-		elemwise_args: *const KernelElemArg,
-		reduce_args: *const KernelReduceArg,
-		scalar_args: *const f64,
-		dtype_config: *const u64,
-	) -> Result<(), ErrPack<TensorOpError>> {
-		let dtype_config = unsafe { kernel_data.dtype_config(dtype_config) };
-		let internal_dtype = kernel_data.internal_dtype(dtype_config);
-		let internal_dtype = common_dtype(internal_dtype, f64::dtype)?;
+	unsafe fn run_kernel(&self, data: &DynKernelCall) -> Result<(), ErrPack<TensorOpError>> {
+		let internal_dtype = common_dtype(data.internal_dtype(), f64::dtype)?;
 		if internal_dtype != f64::dtype {
 			cold_path();
 			return Err(UnsupportedDTypeError.into());
 		}
-		unsafe {
-			cpu_float_methods::run_kernel(
-				kernel_data,
-				o,
-				kernel_data.elemwise_args(elemwise_args),
-				kernel_data.reduce_args(reduce_args),
-				kernel_data.scalar_args(scalar_args),
-				o.reduction_size,
-				dtype_config,
-			)
-		}
+		unsafe { cpu_float_methods::run_kernel(data) }
 	}
 }
 

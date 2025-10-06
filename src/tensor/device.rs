@@ -18,11 +18,9 @@ pub use buffer::DeviceBuffer;
 pub use dtype::{DType, HasDType};
 
 use crate::ErrPack;
-use crate::tensor::device::dtype::DTypeId;
-use crate::tensor::device::kernel::expr::{ExprToDyn, KEY_TYPE_SIZE, KernelKeyType};
-use crate::tensor::device::kernel::runner::KernelRunner;
+use crate::tensor::TensorOpError;
+use crate::tensor::device::kernel::expr::DynKernelCall;
 use crate::tensor::generic::map::{ND, SizeAndStride};
-use crate::tensor::{Tensor, TensorOpError};
 use crate::util::mycell;
 
 //--------------------------------------------------------------------------------------------------
@@ -180,7 +178,6 @@ pub enum NewDeviceBufferError {
 //--------------------------------------------------------------------------------------------------
 
 pub struct DeviceBase {
-	pub kernel_runner: Rc<KernelRunner>,
 	pub is_cpu: bool,
 }
 
@@ -250,13 +247,5 @@ pub trait Device: DerivesDeviceBase {
 
 	unsafe fn attention(&self, args: &AttentionArgs) -> Result<(), ErrPack<TensorOpError>>;
 
-	unsafe fn run_kernel(
-		&self,
-		kernel_data: &KernelData,
-		o: &KernelOutput,
-		elemwise_args: *const KernelElemArg,
-		reduce_args: *const KernelReduceArg,
-		scalar_args: *const f64,
-		dtype_config: *const u64,
-	) -> Result<(), ErrPack<TensorOpError>>;
+	unsafe fn run_kernel(&self, data: &DynKernelCall) -> Result<(), ErrPack<TensorOpError>>;
 }

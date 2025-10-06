@@ -11,8 +11,6 @@ use std::sync::{Arc, OnceLock, RwLock};
 use const_siphasher::sip::SipHasher13;
 use hashbrown::HashTable;
 
-use crate::tensor::device::kernel::runner::KernelData;
-
 //--------------------------------------------------------------------------------------------------
 
 pub struct KernelMapEntry {

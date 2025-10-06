@@ -5,12 +5,16 @@
 //
 //------------------------------------------------------------------------------
 
+use std::hint::{cold_path, likely};
 use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::tensor::device::dtype::common_dtype;
-use crate::tensor::device::{DeviceBase, KernelElemArg, KernelOutput, KernelReduceArg};
-use crate::tensor::{DType, Tensor, TensorOpError};
+use crate::tensor::device::dtype::{DTypeId, common_dtype};
+use crate::tensor::device::{DeviceBuffer, KernelElemArg, KernelOutput, KernelReduceArg};
+use crate::tensor::dim_merger::DimMerger;
+use crate::tensor::generic::map::SizeAndStride;
+use crate::tensor::{DType, NotContiguousError, Tensor, TensorOpError};
+use crate::util::mycell::{BorrowGuard, UnsafeBorrowFailFlag, UnsafeBorrowMutFailFlag};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -518,32 +522,27 @@ where
 		[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
 	{
 		let mut key = const { E::key() };
-		let dtype_config = DynKernelCall::new_dtype_config(
-			self.internal_dtype,
+		__run_kernel(
+			&mut key,
+			&|| E::to_dyn(E::ELEMWISE_MASK, E::REDUCE_MASK, E::SCALAR_MASK, false),
 			output,
 			self.elem_args,
 			self.reduce_args,
-		);
-		key[..dtype_config.len()].copy_from_slice(&dtype_config);
-
-		//fn to_dyn(&self) -> Arc<DynExpr> {
-		//	self.to_dyn_internal(Self::ELEMWISE_MASK, Self::REDUCE_MASK, Self::SCALAR_MASK, false)
-		//}
-
-		//__run_kernel(&self.expr, &key, output, elem_args, reduce_args, scalar_args, internal_dtype)
-
-		let t = DynKernelCall {
-			key: &key,
-			expr: || E::to_dyn(E::ELEMWISE_MASK, E::REDUCE_MASK, E::SCALAR_MASK, false)
-			output: &output,
-			elemwise_args: &self.elem_args,
-			reduce_args: &self.reduce_args,
-			scalar_args: &self.scalar_args,
-		}
+			&self.scalar_args,
+			self.internal_dtype,
+		)
 	}
 }
 
 impl<'a> DynKernelCall<'a> {
+	pub fn generate_expr(&self) -> Rc<DynExpr> {
+		(self.expr)()
+	}
+
+	pub fn output(&self) -> &KernelOutput {
+		self.output
+	}
+
 	pub unsafe fn elemwise_args(&self) -> &'a [KernelElemArg] {
 		self.elemwise_args
 	}
@@ -624,22 +623,19 @@ impl<'a> DynKernelCall<'a> {
 #[inline(never)]
 #[allow(clippy::indexing_slicing)]
 #[allow(clippy::too_many_lines)]
-fn __run_kernel<const E: usize, const R: usize, const C: usize>(
-	expr: &dyn ExprToDyn,
-	key: &[u64],
-	output: &Tensor,
-	elem_args: [&Tensor; E],
-	reduce_args: [&Tensor; R],
-	scalar_args: [f64; C], // TODO - pass slice and make this function independent of C
+fn __run_kernel<'a, const E: usize, const R: usize>(
+	key: &'a mut [u64],
+	expr: &'a (dyn Fn() -> Rc<DynExpr> + 'a),
+	output: &'a Tensor,
+	elem_args: [&'a Tensor; E],
+	reduce_args: [&'a Tensor; R],
+	scalar_args: &'a [f64],
 	internal_dtype: DType,
 ) -> Result<(), ErrPack<TensorOpError>>
 where
 	[(); 1 + E + R]:,
+	[(); DynKernelCall::dtype_config_words(E, R)]:,
 {
-	debug_assert!(kernel_data.elemwise_count == E);
-	debug_assert!(kernel_data.reduce_count == R);
-	debug_assert!(kernel_data.scalar_count == C);
-
 	let dtype_bytes = output.buf().dtype().bytes();
 	debug_assert!(dtype_bytes > 0);
 
@@ -661,6 +657,8 @@ where
 		let (Some(output_dims), Some(elem_dims), Some(reduce_dims)) =
 			(output_dims, elem_args_dims, reduce_args_dims)
 		else {
+			// TODO - should we accept rand 0 tensors?
+			// I think that for example `rank_0.sum()` makes sense.
 			cold_path();
 			return Err(TensorOpError::missing_reduce_dimension());
 		};
@@ -729,8 +727,6 @@ where
 		reduction_size: reduce_args_top_dim.size,
 	};
 
-	let dtype_config = KernelData::new_dtype_config(internal_dtype, output, elem_args, reduce_args);
-
 	unsafe {
 		let mut inp_fail = UnsafeBorrowFailFlag::new();
 		let reduce_borrows: [BorrowGuard<DeviceBuffer>; R] =
@@ -755,14 +751,18 @@ where
 		// TODO - ensure all on same device
 		// TODO - other things may need to be checked before running the kernel
 
-		output.device().run_kernel(
-			kernel_data,
-			&out,
-			inp.as_ptr(),
-			reduce_inp.as_ptr(),
-			scalar_args.as_ptr(),
-			dtype_config.as_ptr(),
-		)?;
+		let dtype_config =
+			DynKernelCall::new_dtype_config(internal_dtype, output, elem_args, reduce_args);
+		key[..dtype_config.len()].copy_from_slice(&dtype_config);
+
+		output.device().run_kernel(&DynKernelCall {
+			key,
+			expr,
+			output: &out,
+			elemwise_args: &inp,
+			reduce_args: &reduce_inp,
+			scalar_args,
+		})?;
 
 		std::mem::drop(out_borrow);
 		std::mem::drop(elem_borrows);
@@ -771,24 +771,20 @@ where
 	Ok(())
 }
 
-impl<'a, E: const ExprTrait + ExprToDyn> EvaluatesToTensor for KernelCall<'a, E>
+impl<'a, E: const ExprTrait + ExprToDyn + Copy> EvaluatesToTensor for KernelCall<'a, E>
 where
-	[(); 1 - E::REDUCE_OP_COUNT]:,
 	[(); E::ELEMWISE_COUNT]:,
 	[(); E::REDUCE_COUNT]:,
 	[(); E::SCALAR_COUNT]:,
-	[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
 	[(); E::KEY_WORDS]:,
 	[(); KEY_TYPE_SIZE * E::KEY_WORDS]:,
+	[(); DynKernelCall::dtype_config_words(E::ELEMWISE_COUNT, E::REDUCE_COUNT)]:,
+	[(); E::DTYPE_CONFIG_WORDS
+		- DynKernelCall::dtype_config_words(E::ELEMWISE_COUNT, E::REDUCE_COUNT)]:,
+	[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
 {
 	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
-		DeviceBase::from_device(to.device()).kernel_runner.run(
-			to,
-			self.elem_args,
-			self.reduce_args,
-			self.scalar_args,
-			self.internal_dtype,
-		)
+		self.call(to)
 	}
 }
 

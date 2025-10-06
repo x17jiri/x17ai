@@ -9,37 +9,21 @@ use crate::ErrPack;
 use crate::tensor::TensorOpError;
 use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::device::cpu::cpu_float_methods::KahanAcc;
-use crate::tensor::device::kernel::expr::DynExpr;
-use crate::tensor::device::kernel::runner::KernelData;
-use crate::tensor::device::{KernelElemArg, KernelOutput, KernelReduceArg};
+use crate::tensor::device::kernel::expr::{DynExpr, DynKernelCall};
 
 //--------------------------------------------------------------------------------------------------
 
-pub unsafe fn run_kernel(
-	kernel_data: &KernelData,
-	o: &KernelOutput,
-	elemwise_args: &[KernelElemArg],
-	reduce_args: &[KernelReduceArg],
-	scalar_args: &[f64],
-	reduction_size: usize,
-	dtype_config: &[u64],
-) -> Result<(), ErrPack<TensorOpError>> {
-	let expr = kernel_data.expr.as_ref();
+pub unsafe fn run_kernel(data: &DynKernelCall) -> Result<(), ErrPack<TensorOpError>> {
+	let expr = data.generate_expr();
 	unsafe {
-		let eval_expr = EvalExpr {
-			kernel_data,
-			elemwise_args,
-			reduce_args,
-			scalar_args,
-			reduction_size,
-			dtype_config,
-		};
+		let eval_expr = EvalExpr { data };
+		let o = data.output();
 		for j in 0..o.size[0] {
 			for i in 0..o.size[1] {
-				let value = eval_expr.eval_expr(expr, j, i, 0)?;
+				let value = eval_expr.eval_expr(expr.as_ref(), j, i, 0)?;
 				CPUDevice::__write_float(
 					o.buf,
-					kernel_data.output_dtype(dtype_config),
+					data.output_dtype(),
 					o.offset_bytes + j * o.stride_bytes[0] + i * o.stride_bytes[1],
 					value,
 				)?;
@@ -52,12 +36,7 @@ pub unsafe fn run_kernel(
 //--------------------------------------------------------------------------------------------------
 
 pub struct EvalExpr<'a> {
-	kernel_data: &'a KernelData,
-	elemwise_args: &'a [KernelElemArg],
-	reduce_args: &'a [KernelReduceArg],
-	scalar_args: &'a [f64],
-	reduction_size: usize,
-	dtype_config: &'a [u64],
+	data: &'a DynKernelCall<'a>,
 }
 
 impl<'a> EvalExpr<'a> {
@@ -74,8 +53,8 @@ impl<'a> EvalExpr<'a> {
 			match expr {
 				DynExpr::ElemwiseTensorArg(index) => {
 					assert!(k == 0);
-					let elemwise_arg = &self.elemwise_args[*index];
-					let dtype = self.kernel_data.elemwise_dtype(self.dtype_config, *index);
+					let elemwise_arg = &self.data.elemwise_args()[*index];
+					let dtype = self.data.elemwise_dtype(*index);
 					CPUDevice::__read_float(
 						elemwise_arg.buf,
 						dtype,
@@ -85,9 +64,9 @@ impl<'a> EvalExpr<'a> {
 					)
 				},
 				DynExpr::ReduceTensorArg(index) => {
-					let reduce_arg = &self.reduce_args[*index];
-					let dtype = self.kernel_data.reduce_dtype(self.dtype_config, *index);
-					assert!(k < self.reduction_size);
+					let reduce_arg = &self.data.reduce_args()[*index];
+					let dtype = self.data.reduce_dtype(*index);
+					assert!(k < self.data.output().reduction_size);
 					CPUDevice::__read_float(
 						reduce_arg.buf,
 						dtype,
@@ -97,23 +76,23 @@ impl<'a> EvalExpr<'a> {
 							+ k * reduce_arg.stride_bytes[2],
 					)
 				},
-				DynExpr::ScalarArg(index) => Ok(self.scalar_args[*index]),
+				DynExpr::ScalarArg(index) => Ok(self.data.scalar_args()[*index]),
 
 				DynExpr::SumExpr(a) => {
-					assert!(!self.reduce_args.is_empty());
+					assert!(!self.data.reduce_args().is_empty());
 					let a = a.as_ref();
 					let mut sum = KahanAcc::<f64>::new();
-					for k in 0..self.reduction_size {
+					for k in 0..self.data.output().reduction_size {
 						let value = self.eval_expr(a, j, i, k)?;
 						sum.acc_(value);
 					}
 					Ok(sum.value())
 				},
 				DynExpr::MaxExpr(a) => {
-					assert!(!self.reduce_args.is_empty());
+					assert!(!self.data.reduce_args().is_empty());
 					let a = a.as_ref();
 					let mut max = f64::NEG_INFINITY;
-					for k in 0..self.reduction_size {
+					for k in 0..self.data.output().reduction_size {
 						let value = self.eval_expr(a, j, i, k)?;
 						if value > max {
 							max = value;

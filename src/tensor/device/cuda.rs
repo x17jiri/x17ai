@@ -15,11 +15,9 @@ use hashbrown::HashTable;
 use crate::ErrPack;
 use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
 use crate::tensor::device::cuda::cuda_shim::{CudaError, CudaStream};
-use crate::tensor::device::kernel::registry::KernelMap;
-use crate::tensor::device::kernel::runner::{KernelData, KernelRunner};
+use crate::tensor::device::kernel::expr::DynKernelCall;
 use crate::tensor::device::{
-	AttentionArgs, DerivesDeviceBase, DeviceBase, DeviceBuffer, KernelElemArg, KernelOutput,
-	KernelReduceArg, MatMulArgs, NewDeviceBufferError,
+	AttentionArgs, DerivesDeviceBase, DeviceBase, DeviceBuffer, MatMulArgs, NewDeviceBufferError,
 };
 use crate::tensor::{DType, Device, HasDType, TensorOpError, UnsupportedDTypeError};
 use crate::util::mycell;
@@ -66,10 +64,7 @@ impl CudaDevice {
 
 	pub fn new_named(name: String) -> Result<Rc<Self>, CudaError> {
 		Ok(Rc::new(Self {
-			base: DeviceBase {
-				kernel_runner: Rc::new(KernelRunner::new()),
-				is_cpu: false,
-			},
+			base: DeviceBase { is_cpu: false },
 			cuda_stream: CudaStream::new()?,
 			compiled_kernels: Vec::new(),
 			name,
@@ -183,16 +178,8 @@ impl Device for CudaDevice {
 		todo!("implement attention for CudaDevice");
 	}
 
-	unsafe fn run_kernel(
-		&self,
-		kernel_data: &KernelData,
-		o: &KernelOutput,
-		elemwise_args: *const KernelElemArg,
-		reduce_args: *const KernelReduceArg,
-		scalar_args: *const f64,
-		dtype_config: *const u64,
-	) -> Result<(), ErrPack<TensorOpError>> {
-		let dtype_config = unsafe { kernel_data.dtype_config(dtype_config) };
+	unsafe fn run_kernel(&self, _data: &DynKernelCall) -> Result<(), ErrPack<TensorOpError>> {
+		/*let dtype_config = unsafe { kernel_data.dtype_config(dtype_config) };
 		let dtype_config_hash = KernelMap::hash_key(dtype_config);
 		if let Some(Some(compiled_kernel_table)) = self.compiled_kernels.get(kernel_data.id)
 			&& let Some(compiled_kernel) = compiled_kernel_table.find(dtype_config_hash, |entry| {
@@ -202,6 +189,7 @@ impl Device for CudaDevice {
 		} else {
 			cold_path();
 			todo!("CudaDevice::run_kernel(): compile and run kernel");
-		};
+		};*/
+		todo!("implement run_kernel for CudaDevice");
 	}
 }
