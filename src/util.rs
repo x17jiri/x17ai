@@ -8,6 +8,7 @@
 use std::convert::Infallible;
 
 pub mod array;
+pub mod hasher;
 pub mod mycell;
 //pub mod thin_rc; - TODO
 

@@ -5,6 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
+use std::hash::Hash;
 use std::hint::{cold_path, likely};
 use std::rc::Rc;
 
@@ -14,6 +15,7 @@ use crate::tensor::device::{DeviceBuffer, KernelElemArg, KernelOutput, KernelRed
 use crate::tensor::dim_merger::DimMerger;
 use crate::tensor::generic::map::SizeAndStride;
 use crate::tensor::{DType, NotContiguousError, Tensor, TensorOpError};
+use crate::util::hasher::{HASH_WORD_SIZE, HashWord, HashWordSlice};
 use crate::util::mycell::{BorrowGuard, UnsafeBorrowFailFlag, UnsafeBorrowMutFailFlag};
 
 //--------------------------------------------------------------------------------------------------
@@ -127,19 +129,6 @@ pub enum DynExpr {
 
 //--------------------------------------------------------------------------------------------------
 
-pub type KernelKeyType = u64;
-pub const KEY_TYPE_SIZE: usize = std::mem::size_of::<KernelKeyType>();
-
-union KeyUnion<const KEY_LEN: usize>
-where
-	[(); KEY_TYPE_SIZE * KEY_LEN]:,
-{
-	id: [u8; KEY_TYPE_SIZE * KEY_LEN],
-	key: [KernelKeyType; KEY_LEN],
-}
-
-//--------------------------------------------------------------------------------------------------
-
 #[derive(Clone, Copy)]
 pub struct InputMasks {
 	pub elemwise: u64,
@@ -185,33 +174,29 @@ pub trait ExprTrait {
 	// The total key consists of:
 	// - dtype configuration (2 + ELEMWISE_COUNT + REDUCE_COUNT bytes)
 	// - 1 byte separator with value 0
-	// - padding to the next multiple of KEY_TYPE_SIZE with value 0
+	// - padding to the next multiple of HASH_WORD_SIZE with value 0
 	// - expression key (EXPR_KEY_LEN bytes)
-	// - padding to the next multiple of KEY_TYPE_SIZE with value 0
+	// - padding to the next multiple of HASH_WORD_SIZE with value 0
 	// Note that both DTypeId and ExprDiscriminant start from 1, so 0 is never a valid value.
-	const DTYPE_CONFIG_BYTES: usize = Self::DTYPE_CONFIG_WORDS * KEY_TYPE_SIZE;
-	const EXPR_KEY_BYTES: usize = Self::EXPR_KEY_WORDS * KEY_TYPE_SIZE;
+	const DTYPE_CONFIG_BYTES: usize = Self::DTYPE_CONFIG_WORDS * HASH_WORD_SIZE;
+	const EXPR_KEY_BYTES: usize = Self::EXPR_KEY_WORDS * HASH_WORD_SIZE;
 
 	const DTYPE_CONFIG_WORDS: usize =
-		(Self::DTYPE_CONFIG_LEN + 1).next_multiple_of(KEY_TYPE_SIZE) / KEY_TYPE_SIZE;
+		(Self::DTYPE_CONFIG_LEN + 1).next_multiple_of(HASH_WORD_SIZE) / HASH_WORD_SIZE;
 	const EXPR_KEY_WORDS: usize =
-		Self::EXPR_KEY_LEN.next_multiple_of(KEY_TYPE_SIZE) / KEY_TYPE_SIZE;
+		Self::EXPR_KEY_LEN.next_multiple_of(HASH_WORD_SIZE) / HASH_WORD_SIZE;
 
 	const KEY_WORDS: usize = Self::DTYPE_CONFIG_WORDS + Self::EXPR_KEY_WORDS;
 
-	fn set_key(masks: InputMasks, reduce: bool, id: &mut [u8], i: usize) -> usize;
+	fn set_key(masks: InputMasks, reduce: bool, expr_id: &mut HashWordSlice, i: usize) -> usize;
 
 	#[allow(clippy::indexing_slicing)]
-	fn key() -> [u64; Self::KEY_WORDS]
-	where
-		[(); KEY_TYPE_SIZE * Self::KEY_WORDS]:,
-	{
-		let mut u = KeyUnion { key: [0; Self::KEY_WORDS] };
-		let bytes = unsafe { &mut u.id };
-		let id = &mut bytes[Self::DTYPE_CONFIG_BYTES..];
-		let len = Self::set_key(Self::MASKS, false, id, 0);
+	fn key() -> [HashWord; Self::KEY_WORDS] {
+		let mut result = [HashWord::zero(); Self::KEY_WORDS];
+		let mut expr_id = HashWordSlice::new(&mut result[Self::DTYPE_CONFIG_WORDS..]);
+		let len = Self::set_key(Self::MASKS, false, &mut expr_id, 0);
 		assert!(len == Self::EXPR_KEY_LEN);
-		unsafe { u.key }
+		result
 	}
 }
 
@@ -258,16 +243,16 @@ impl<const Idx: usize> const ExprTrait for TensorArg<Idx> {
 
 	const EXPR_KEY_LEN: usize = 2;
 
-	fn set_key(masks: InputMasks, reduce: bool, id: &mut [u8], i: usize) -> usize {
+	fn set_key(masks: InputMasks, reduce: bool, expr_id: &mut HashWordSlice, i: usize) -> usize {
 		let bit = 1_u64 << Idx;
 		if reduce {
 			let idx = (masks.reduce & (bit - 1)).count_ones() as usize;
-			id[i + 0] = ExprDiscriminant::ReduceTensorArg as u8;
-			id[i + 1] = idx as u8;
+			expr_id.set_byte(i + 0, ExprDiscriminant::ReduceTensorArg as u8);
+			expr_id.set_byte(i + 1, idx as u8);
 		} else {
 			let idx = (masks.elemwise & (bit - 1)).count_ones() as usize;
-			id[i + 0] = ExprDiscriminant::ElemwiseTensorArg as u8;
-			id[i + 1] = idx as u8;
+			expr_id.set_byte(i + 0, ExprDiscriminant::ElemwiseTensorArg as u8);
+			expr_id.set_byte(i + 1, idx as u8);
 		}
 		i + 2
 	}
@@ -293,11 +278,11 @@ impl<const Idx: usize> const ExprTrait for ScalarArg<Idx> {
 
 	const EXPR_KEY_LEN: usize = 2;
 
-	fn set_key(masks: InputMasks, _reduce: bool, id: &mut [u8], i: usize) -> usize {
+	fn set_key(masks: InputMasks, _reduce: bool, expr_id: &mut HashWordSlice, i: usize) -> usize {
 		let bit = 1_u64 << Idx;
 		let idx = (masks.scalar & (bit - 1)).count_ones() as usize;
-		id[i + 0] = ExprDiscriminant::ScalarArg as u8;
-		id[i + 1] = idx as u8;
+		expr_id.set_byte(i + 0, ExprDiscriminant::ScalarArg as u8);
+		expr_id.set_byte(i + 1, idx as u8);
 		i + 2
 	}
 }
@@ -323,9 +308,14 @@ macro_rules! impl_expr_reduce {
 
 			const EXPR_KEY_LEN: usize = 1 + A::EXPR_KEY_LEN;
 
-			fn set_key(masks: InputMasks, _reduce: bool, id: &mut [u8], i: usize) -> usize {
-				id[i] = ExprDiscriminant::$name as u8;
-				A::set_key(masks, true, id, i + 1)
+			fn set_key(
+				masks: InputMasks,
+				_reduce: bool,
+				expr_id: &mut HashWordSlice,
+				i: usize,
+			) -> usize {
+				expr_id.set_byte(i, ExprDiscriminant::$name as u8);
+				A::set_key(masks, true, expr_id, i + 1)
 			}
 		}
 
@@ -347,9 +337,14 @@ macro_rules! impl_expr_unary {
 
 			const EXPR_KEY_LEN: usize = 1 + A::EXPR_KEY_LEN;
 
-			fn set_key(masks: InputMasks, reduce: bool, id: &mut [u8], i: usize) -> usize {
-				id[i + 0] = ExprDiscriminant::$name as u8;
-				A::set_key(masks, reduce, id, i + 1)
+			fn set_key(
+				masks: InputMasks,
+				reduce: bool,
+				expr_id: &mut HashWordSlice,
+				i: usize,
+			) -> usize {
+				expr_id.set_byte(i, ExprDiscriminant::$name as u8);
+				A::set_key(masks, reduce, expr_id, i + 1)
 			}
 		}
 
@@ -376,46 +371,43 @@ macro_rules! impl_expr_binary {
 
 			const EXPR_KEY_LEN: usize = 1 + A::EXPR_KEY_LEN + B::EXPR_KEY_LEN;
 
-			fn set_key(masks: InputMasks, reduce: bool, id: &mut [u8], i: usize) -> usize {
-				id[i + 0] = ExprDiscriminant::$name as u8;
+			fn set_key(
+				masks: InputMasks,
+				reduce: bool,
+				expr_id: &mut HashWordSlice,
+				i: usize,
+			) -> usize {
+				expr_id.set_byte(i, ExprDiscriminant::$name as u8);
 				let begin = i + 1;
-				let mid = A::set_key(masks, reduce, id, begin);
+				let mid = A::set_key(masks, reduce, expr_id, begin);
 				assert!(mid == begin + A::EXPR_KEY_LEN);
-				let end = B::set_key(masks, reduce, id, mid);
+				let end = B::set_key(masks, reduce, expr_id, mid);
 				assert!(end == mid + B::EXPR_KEY_LEN);
 				if !($commutative) {
 					return end;
 				}
 
-				if A::EXPR_KEY_LEN <= B::EXPR_KEY_LEN {
-					if A::EXPR_KEY_LEN == B::EXPR_KEY_LEN {
-						let mut swap = false;
-						let mut i = 0;
-						while i < A::EXPR_KEY_LEN {
-							let a = id[begin + i];
-							let b = id[mid + i];
-							if a != b {
-								swap = a > b;
-								break;
-							}
-							i += 1;
+				let mut swap = A::EXPR_KEY_LEN > B::EXPR_KEY_LEN;
+				if A::EXPR_KEY_LEN == B::EXPR_KEY_LEN {
+					let mut i = 0;
+					while i < A::EXPR_KEY_LEN {
+						let a = expr_id.get_byte(begin + i);
+						let b = expr_id.get_byte(mid + i);
+						if a != b {
+							swap = a > b;
+							break;
 						}
-						if swap {
-							let mut i = 0;
-							while i < A::EXPR_KEY_LEN {
-								let tmp = id[begin + i];
-								id[begin + i] = id[mid + i];
-								id[mid + i] = tmp;
-								i += 1;
-							}
-						}
+						i += 1;
 					}
+				}
+
+				if swap {
+					let mid = B::set_key(masks, reduce, expr_id, begin);
+					assert!(mid == begin + B::EXPR_KEY_LEN);
+					let end = A::set_key(masks, reduce, expr_id, mid);
+					assert!(end == mid + A::EXPR_KEY_LEN);
 					end
 				} else {
-					let mid = B::set_key(masks, reduce, id, begin);
-					assert!(mid == begin + B::EXPR_KEY_LEN);
-					let end = A::set_key(masks, reduce, id, mid);
-					assert!(end == mid + A::EXPR_KEY_LEN);
 					end
 				}
 			}
