@@ -9,7 +9,7 @@ use crate::ErrPack;
 use crate::tensor::TensorOpError;
 use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::device::cpu::cpu_float_methods::KahanAcc;
-use crate::tensor::device::kernel::expr::{DynExpr, DynKernelCall};
+use crate::tensor::device::kernel::{DynExpr, DynKernelCall};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -17,7 +17,7 @@ pub unsafe fn run_kernel(data: &DynKernelCall) -> Result<(), ErrPack<TensorOpErr
 	let expr = data.generate_expr();
 	unsafe {
 		let eval_expr = EvalExpr { data };
-		let o = data.output();
+		let o = &data.output;
 		for j in 0..o.size[0] {
 			for i in 0..o.size[1] {
 				let value = eval_expr.eval_expr(expr.as_ref(), j, i, 0)?;
@@ -53,7 +53,7 @@ impl<'a> EvalExpr<'a> {
 			match expr {
 				DynExpr::ElemwiseTensorArg(index) => {
 					assert!(k == 0);
-					let elemwise_arg = &self.data.elemwise_args()[*index];
+					let elemwise_arg = &self.data.elemwise_args[*index];
 					let dtype = self.data.elemwise_dtype(*index);
 					CPUDevice::__read_float(
 						elemwise_arg.buf,
@@ -64,9 +64,9 @@ impl<'a> EvalExpr<'a> {
 					)
 				},
 				DynExpr::ReduceTensorArg(index) => {
-					let reduce_arg = &self.data.reduce_args()[*index];
+					let reduce_arg = &self.data.reduce_args[*index];
 					let dtype = self.data.reduce_dtype(*index);
-					assert!(k < self.data.output().reduction_size);
+					assert!(k < self.data.output.reduction_size);
 					CPUDevice::__read_float(
 						reduce_arg.buf,
 						dtype,
@@ -76,23 +76,23 @@ impl<'a> EvalExpr<'a> {
 							+ k * reduce_arg.stride_bytes[2],
 					)
 				},
-				DynExpr::ScalarArg(index) => Ok(self.data.scalar_args()[*index]),
+				DynExpr::ScalarArg(index) => Ok(self.data.scalar_args[*index]),
 
 				DynExpr::SumExpr(a) => {
-					assert!(!self.data.reduce_args().is_empty());
+					assert!(!self.data.reduce_args.is_empty());
 					let a = a.as_ref();
 					let mut sum = KahanAcc::<f64>::new();
-					for k in 0..self.data.output().reduction_size {
+					for k in 0..self.data.output.reduction_size {
 						let value = self.eval_expr(a, j, i, k)?;
 						sum.acc_(value);
 					}
 					Ok(sum.value())
 				},
 				DynExpr::MaxExpr(a) => {
-					assert!(!self.data.reduce_args().is_empty());
+					assert!(!self.data.reduce_args.is_empty());
 					let a = a.as_ref();
 					let mut max = f64::NEG_INFINITY;
-					for k in 0..self.data.output().reduction_size {
+					for k in 0..self.data.output.reduction_size {
 						let value = self.eval_expr(a, j, i, k)?;
 						if value > max {
 							max = value;

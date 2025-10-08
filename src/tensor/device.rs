@@ -19,7 +19,7 @@ pub use dtype::{DType, HasDType};
 
 use crate::ErrPack;
 use crate::tensor::TensorOpError;
-use crate::tensor::device::kernel::expr::DynKernelCall;
+use crate::tensor::device::kernel::DynKernelCall;
 use crate::tensor::generic::map::{ND, SizeAndStride};
 use crate::util::mycell;
 
@@ -177,39 +177,12 @@ pub enum NewDeviceBufferError {
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct DeviceBase {
-	pub is_cpu: bool,
-}
-
-impl DeviceBase {
-	#[inline]
-	pub fn from_device(device: &dyn Device) -> &Self {
-		// SAFETY: `device` implements `DerivesDeviceBase`, so it must be properly aligned and
-		// `DeviceBase` must be its first field.
-		let device = device as *const dyn Device;
-		#[allow(clippy::cast_ptr_alignment)]
-		let device = device.cast::<Self>();
-		unsafe { &*device }
-	}
-}
-
-/// # Safety
-/// - Any type implementing this trait must have `DeviceBase` as its first field.
-/// - Alignment of the type must be compatible with `DeviceBase`. So don't use `repr(packed)`.
-///
-/// The way to ensure this is:
-/// ```rust
-/// #[repr(C)]
-/// struct MyDevice {
-///     base: DeviceBase,
-///     // other fields...
-/// }
-/// unsafe impl DerivesDeviceBase for MyDevice {}
-/// ```
-pub unsafe trait DerivesDeviceBase {}
-
-pub trait Device: DerivesDeviceBase {
+pub trait Device {
 	fn name(&self) -> &str;
+
+	fn is_cpu(&self) -> bool {
+		false
+	}
 
 	fn new_buffer(
 		self: Rc<Self>,

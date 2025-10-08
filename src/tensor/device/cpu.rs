@@ -11,16 +11,14 @@ use std::rc::Rc;
 
 use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
 use crate::tensor::device::dtype::common_dtype;
-use crate::tensor::device::kernel::expr::DynKernelCall;
+use crate::tensor::device::kernel::DynKernelCall;
 use crate::tensor::{HasDType, TensorOpError, UnsupportedDTypeError};
 use crate::util::mycell::{self, BorrowGuard};
 
 pub mod cpu_float_methods;
 
 use crate::ErrPack;
-use crate::tensor::device::{
-	AttentionArgs, DerivesDeviceBase, DeviceBase, DeviceBuffer, MatMulArgs, NewDeviceBufferError,
-};
+use crate::tensor::device::{AttentionArgs, DeviceBuffer, MatMulArgs, NewDeviceBufferError};
 use crate::tensor::{DType, Device};
 
 //--------------------------------------------------------------------------------------------------
@@ -32,9 +30,7 @@ pub enum BufAsSliceError {
 }
 //--------------------------------------------------------------------------------------------------
 
-#[repr(C)]
 pub struct CPUDevice {
-	base: DeviceBase,
 	name: String,
 }
 
@@ -44,7 +40,7 @@ impl CPUDevice {
 	}
 
 	pub fn new_named(name: String) -> Rc<Self> {
-		Rc::new(Self { base: DeviceBase { is_cpu: true }, name })
+		Rc::new(Self { name })
 	}
 
 	pub fn buf_as_slice<'guard, 'buf, T: HasDType>(
@@ -55,7 +51,7 @@ impl CPUDevice {
 			return Err(BufAsSliceError::InvalidDType);
 		}
 		debug_assert!(T::dtype.bytes() == std::mem::size_of::<T>());
-		if !DeviceBase::from_device(buf.device()).is_cpu {
+		if !buf.device().is_cpu() {
 			cold_path();
 			return Err(BufAsSliceError::NotOnCPUDevice);
 		}
@@ -111,11 +107,13 @@ impl CPUDevice {
 	}
 }
 
-unsafe impl DerivesDeviceBase for CPUDevice {}
-
 impl Device for CPUDevice {
 	fn name(&self) -> &str {
 		&self.name
+	}
+
+	fn is_cpu(&self) -> bool {
+		true
 	}
 
 	#[inline(never)]

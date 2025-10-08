@@ -13,7 +13,7 @@ pub use device::{DType, Device, HasDType};
 
 use crate::rng::Rng;
 use crate::tensor::device::dtype::DTypeMismatch;
-use crate::tensor::device::kernel::expr::EvaluatesToTensor;
+use crate::tensor::device::kernel::EvaluatesToTensor;
 use crate::tensor::device::{DeviceBuffer, NewDeviceBufferError};
 use crate::tensor::dim_merger::{DimMergerError, DimsDontMatchError, TooManyMergedDimensionsError};
 use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;

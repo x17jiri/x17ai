@@ -165,7 +165,7 @@ use x17ai::nn::fragments::softmax::{Softmax, SoftmaxGradMode};
 use x17ai::nn::fragments::{CrossEntropy, Fragment, UnaryFragment};
 use x17ai::rng::Rng;
 use x17ai::tensor::device::cpu::CPUDevice;
-use x17ai::tensor::device::kernel::expr;
+use x17ai::tensor::device::kernel;
 use x17ai::tensor::generic::GenericTensor;
 use x17ai::tensor::generic::map::ND;
 use x17ai::tensor::math::{col, mat, row};

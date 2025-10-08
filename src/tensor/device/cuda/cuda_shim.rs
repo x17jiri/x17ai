@@ -221,7 +221,7 @@ pub unsafe fn del_kernel(handle: CudaKernelHandle) {
 ///
 /// TODO
 pub unsafe fn run_kernel(
-	handle: &CudaKernelHandle,
+	handle: CudaKernelHandle,
 	o: *const KernelOutput,
 	elem_args: *const KernelElemArg,
 	reduce_args: *const KernelReduceArg,

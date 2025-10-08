@@ -22,6 +22,7 @@ safetensors = "0.5.3"
 hashbrown = "0.15.5"
 const-siphasher = "1"
 # fat_type = "0.3.0"
+# num_enum = "0.7.4"
 
 [build-dependencies]
 cc = "1.0"

@@ -5,8 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
-use std::boxed::ThinBox;
-use std::hint::cold_path;
+use std::hint::{cold_path, likely};
 use std::ptr::NonNull;
 use std::rc::Rc;
 
@@ -14,12 +13,11 @@ use hashbrown::HashTable;
 
 use crate::ErrPack;
 use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
-use crate::tensor::device::cuda::cuda_shim::{CudaError, CudaStream};
-use crate::tensor::device::kernel::expr::DynKernelCall;
-use crate::tensor::device::{
-	AttentionArgs, DerivesDeviceBase, DeviceBase, DeviceBuffer, MatMulArgs, NewDeviceBufferError,
-};
+use crate::tensor::device::cuda::cuda_shim::{CudaError, CudaKernelHandle, CudaStream};
+use crate::tensor::device::kernel::DynKernelCall;
+use crate::tensor::device::{AttentionArgs, DeviceBuffer, MatMulArgs, NewDeviceBufferError, cuda};
 use crate::tensor::{DType, Device, HasDType, TensorOpError, UnsupportedDTypeError};
+use crate::util::hasher::HashWord;
 use crate::util::mycell;
 
 pub mod cuda_shim;
@@ -27,33 +25,19 @@ pub mod cuda_shim;
 //--------------------------------------------------------------------------------------------------
 
 struct CompiledKernel {
-	handle: *const std::ffi::c_void,
-	dtype_config_len: usize,
-	// followed by dtype_config array
-}
-
-impl CompiledKernel {
-	fn dtype_config<'a>(&self) -> &'a [u64] {
-		unsafe {
-			std::slice::from_raw_parts(
-				// TODO - if Self has less alignment than u64, this may be unaligned
-				(self as *const CompiledKernel).add(1) as *const u64,
-				self.dtype_config_len,
-			)
-		}
-	}
+	key: Box<[HashWord]>, // TODO - allocate `key` inline at the end of the struct
+	handle: CudaKernelHandle,
 }
 
 struct CompiledKernelEntry {
 	pub key_hash: u64,
-	pub value: ThinBox<CompiledKernel>,
+	pub value: Box<CompiledKernel>,
 }
 
-#[repr(C)]
 pub struct CudaDevice {
-	base: DeviceBase,
 	cuda_stream: CudaStream,
-	compiled_kernels: Vec<Option<Box<HashTable<CompiledKernelEntry>>>>,
+	hash_random_state: crate::util::hasher::RandomState,
+	compiled_kernels: HashTable<CompiledKernelEntry>,
 	name: String,
 }
 
@@ -64,9 +48,9 @@ impl CudaDevice {
 
 	pub fn new_named(name: String) -> Result<Rc<Self>, CudaError> {
 		Ok(Rc::new(Self {
-			base: DeviceBase { is_cpu: false },
 			cuda_stream: CudaStream::new()?,
-			compiled_kernels: Vec::new(),
+			hash_random_state: crate::util::hasher::RandomState::new(),
+			compiled_kernels: HashTable::with_capacity(20),
 			name,
 		}))
 	}
@@ -89,8 +73,6 @@ impl CudaDevice {
 		Ok(val.to_f64())
 	}
 }
-
-unsafe impl DerivesDeviceBase for CudaDevice {}
 
 impl Device for CudaDevice {
 	fn name(&self) -> &str {
@@ -178,18 +160,25 @@ impl Device for CudaDevice {
 		todo!("implement attention for CudaDevice");
 	}
 
-	unsafe fn run_kernel(&self, _data: &DynKernelCall) -> Result<(), ErrPack<TensorOpError>> {
-		/*let dtype_config = unsafe { kernel_data.dtype_config(dtype_config) };
-		let dtype_config_hash = KernelMap::hash_key(dtype_config);
-		if let Some(Some(compiled_kernel_table)) = self.compiled_kernels.get(kernel_data.id)
-			&& let Some(compiled_kernel) = compiled_kernel_table.find(dtype_config_hash, |entry| {
-				entry.key_hash == dtype_config_hash && entry.value.dtype_config() == dtype_config
-			}) {
-			todo!("CudaDevice::run_kernel(): run kernel");
+	unsafe fn run_kernel(&self, data: &DynKernelCall) -> Result<(), ErrPack<TensorOpError>> {
+		let key = data.key;
+		let key_hash = self.hash_random_state.hash_one(key);
+		if let Some(kernel) = self.compiled_kernels.find(key_hash, |item| {
+			item.key_hash == key_hash && likely(item.value.key.as_ref() == key)
+		}) {
+			unsafe {
+				cuda_shim::run_kernel(
+					kernel.value.handle,
+					std::ptr::from_ref(data.output),
+					data.elemwise_args.as_ptr(),
+					data.reduce_args.as_ptr(),
+					data.scalar_args.as_ptr(),
+				)?;
+				Ok(())
+			}
 		} else {
 			cold_path();
 			todo!("CudaDevice::run_kernel(): compile and run kernel");
-		};*/
-		todo!("implement run_kernel for CudaDevice");
+		}
 	}
 }
