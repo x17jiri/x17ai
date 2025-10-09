@@ -197,7 +197,7 @@ impl Tensor {
 						std::mem::size_of_val(array.as_slice()),
 					)
 				};
-				self.load_from_cpu_memory(bytes)?;
+				self.upload_data(bytes)?;
 				Ok(())
 			},
 			_ => {
@@ -207,7 +207,7 @@ impl Tensor {
 		}
 	}
 
-	pub fn store_to_cpu_memory(&self, dst: &mut [u8]) -> Result<(), ErrPack<TensorOpError>> {
+	pub fn download_data(&self, dst: &mut [u8]) -> Result<(), ErrPack<TensorOpError>> {
 		let nd = merge_dims::<1>(self)?;
 		if !nd.dims[0].is_contiguous() {
 			cold_path();
@@ -223,7 +223,7 @@ impl Tensor {
 		}
 		let borrow = self.buf().try_borrow()?;
 		unsafe {
-			self.device().store_to_cpu_memory(
+			self.device().download_data(
 				&borrow,
 				NonNull::from_ref(dst).cast(),
 				offset_bytes,
@@ -232,7 +232,7 @@ impl Tensor {
 		}
 	}
 
-	pub fn load_from_cpu_memory(&self, src: &[u8]) -> Result<(), ErrPack<TensorOpError>> {
+	pub fn upload_data(&self, src: &[u8]) -> Result<(), ErrPack<TensorOpError>> {
 		let nd = merge_dims::<1>(self)?;
 		if !nd.dims[0].is_contiguous() {
 			cold_path();
@@ -248,7 +248,7 @@ impl Tensor {
 		}
 		let borrow = self.buf().try_borrow_mut()?;
 		unsafe {
-			self.device().load_from_cpu_memory(
+			self.device().upload_data(
 				NonNull::from_ref(src).cast(),
 				&borrow,
 				offset_bytes,
@@ -287,7 +287,7 @@ impl<T: HasDType> TensorLiteralFactory<T> {
 		let val_len = X * std::mem::size_of::<T>();
 		let val = unsafe { std::slice::from_raw_parts(val_ptr, val_len) };
 
-		tensor.load_from_cpu_memory(val)?;
+		tensor.upload_data(val)?;
 		Ok(tensor)
 	}
 
@@ -302,7 +302,7 @@ impl<T: HasDType> TensorLiteralFactory<T> {
 		let val_len = Y * X * std::mem::size_of::<T>();
 		let val = unsafe { std::slice::from_raw_parts(val_ptr, val_len) };
 
-		tensor.load_from_cpu_memory(val)?;
+		tensor.upload_data(val)?;
 		Ok(tensor)
 	}
 
@@ -317,7 +317,7 @@ impl<T: HasDType> TensorLiteralFactory<T> {
 		let val_len = Z * Y * X * std::mem::size_of::<T>();
 		let val = unsafe { std::slice::from_raw_parts(val_ptr, val_len) };
 
-		tensor.load_from_cpu_memory(val)?;
+		tensor.upload_data(val)?;
 		Ok(tensor)
 	}
 }

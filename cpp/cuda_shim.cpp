@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <unordered_map>
 #include <cassert>
+#include <span>
 
 #include <dlfcn.h>
 
@@ -98,6 +99,41 @@ VoidResult Ok() {
 	return VoidResult(nullptr);
 }
 
+struct FfiSpan {
+	u8 *ptr;
+	usize len;
+};
+
+struct FfiBufferVMT {
+	FfiSpan (*span)(void *self);
+	FfiSpan (*buf_span)(void *self);
+	int (*reserve_exact)(void *self, usize new_capacity);
+	int (*set_len)(void *self, usize new_len);
+};
+
+struct FfiBuffer {
+	void *instance;
+	FfiBufferVMT const *vmt;
+
+	inline std::span<u8> span() {
+		FfiSpan s = vmt->span(instance);
+		return std::span(s.ptr, s.len);
+	}
+
+	inline std::span<u8> buf_span() {
+		FfiSpan s = vmt->buf_span(instance);
+		return std::span(s.ptr, s.len);
+	}
+
+	inline bool reserve_exact(usize new_capacity) {
+		return vmt->reserve_exact(instance, new_capacity);
+	}
+
+	inline bool set_len(usize new_len) {
+		return vmt->set_len(instance, new_len);
+	}
+};
+
 extern "C" {
 	PointerResult x17ai_cuda_open_stream() {
 		try {
@@ -187,7 +223,7 @@ extern "C" {
 		}
 	}
 
-	VoidResult x17ai_cuda_load_from_cpu_memory(
+	VoidResult x17ai_cuda_upload_data(
 		void *stream,
 		const u8 *cpu_src,
 		u8 *cuda_dst,
@@ -218,7 +254,7 @@ extern "C" {
 		}
 	}
 
-	VoidResult x17ai_cuda_store_to_cpu_memory(
+	VoidResult x17ai_cuda_download_data(
 		void *stream,
 		const u8 *cuda_src,
 		u8 *cpu_dst,

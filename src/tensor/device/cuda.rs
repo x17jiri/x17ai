@@ -15,7 +15,7 @@ use crate::ErrPack;
 use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
 use crate::tensor::device::cuda::cuda_shim::{CudaError, CudaKernelHandle, CudaStream};
 use crate::tensor::device::kernel::DynKernelCall;
-use crate::tensor::device::{AttentionArgs, DeviceBuffer, MatMulArgs, NewDeviceBufferError, cuda};
+use crate::tensor::device::{AttentionArgs, DeviceBuffer, MatMulArgs, NewDeviceBufferError};
 use crate::tensor::{DType, Device, HasDType, TensorOpError, UnsupportedDTypeError};
 use crate::util::hasher::HashWord;
 use crate::util::mycell;
@@ -63,7 +63,7 @@ impl CudaDevice {
 		debug_assert!(buf.dtype() == T::dtype);
 		let val = T::default();
 		unsafe {
-			self.cuda_stream.store_to_cpu_memory(
+			self.cuda_stream.download_data(
 				buf.memory(),
 				NonNull::from(&val).cast(),
 				offset,
@@ -116,7 +116,7 @@ impl Device for CudaDevice {
 		}
 	}
 
-	unsafe fn load_from_cpu_memory(
+	unsafe fn upload_data(
 		&self,
 		cpu_src: NonNull<u8>,
 		dev_dst: &DeviceBuffer,
@@ -124,17 +124,12 @@ impl Device for CudaDevice {
 		count_bytes: usize,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		unsafe {
-			self.cuda_stream.load_from_cpu_memory(
-				cpu_src,
-				dev_dst.memory(),
-				offset_bytes,
-				count_bytes,
-			)?;
+			self.cuda_stream.upload_data(cpu_src, dev_dst.memory(), offset_bytes, count_bytes)?;
 		}
 		Ok(())
 	}
 
-	unsafe fn store_to_cpu_memory(
+	unsafe fn download_data(
 		&self,
 		dev_src: &DeviceBuffer,
 		cpu_dst: NonNull<u8>,
@@ -142,12 +137,7 @@ impl Device for CudaDevice {
 		count_bytes: usize,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		unsafe {
-			self.cuda_stream.store_to_cpu_memory(
-				dev_src.memory(),
-				cpu_dst,
-				offset_bytes,
-				count_bytes,
-			)?;
+			self.cuda_stream.download_data(dev_src.memory(), cpu_dst, offset_bytes, count_bytes)?;
 		}
 		Ok(())
 	}

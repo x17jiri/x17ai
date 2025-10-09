@@ -446,11 +446,11 @@ where
 	[(); E::REDUCE_COUNT]:,
 	[(); E::SCALAR_COUNT]:,
 {
-	expr: E,
 	elem_args: [&'a Tensor; E::ELEMWISE_COUNT],
 	reduce_args: [&'a Tensor; E::REDUCE_COUNT],
 	scalar_args: [f64; E::SCALAR_COUNT],
 	internal_dtype: DType,
+	_expr: E,
 }
 
 pub struct DynKernelCall<'a> {
@@ -498,8 +498,8 @@ where
 			elem_args: std::array::from_fn(|i| tensors[elem_arg_indexes[i]]),
 			reduce_args: std::array::from_fn(|i| tensors[reduce_arg_indexes[i]]),
 			scalar_args: std::array::from_fn(|i| scalars[scalar_arg_indexes[i]]),
-			expr: expr.0,
 			internal_dtype,
+			_expr: expr.0,
 		}
 	}
 

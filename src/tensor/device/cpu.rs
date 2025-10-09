@@ -158,7 +158,7 @@ impl Device for CPUDevice {
 		}
 	}
 
-	unsafe fn load_from_cpu_memory(
+	unsafe fn upload_data(
 		&self,
 		cpu_src: NonNull<u8>,
 		dev_dst: &DeviceBuffer,
@@ -175,7 +175,7 @@ impl Device for CPUDevice {
 		Ok(())
 	}
 
-	unsafe fn store_to_cpu_memory(
+	unsafe fn download_data(
 		&self,
 		dev_src: &DeviceBuffer,
 		cpu_dst: NonNull<u8>,

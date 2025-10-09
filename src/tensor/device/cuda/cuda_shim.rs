@@ -11,6 +11,7 @@ use std::ptr::NonNull;
 use crate::ErrPack;
 use crate::tensor::TensorOpError;
 use crate::tensor::device::{KernelElemArg, KernelOutput, KernelReduceArg};
+use crate::util::ffi_buffer::FfiBuffer;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -82,7 +83,7 @@ unsafe extern "C" {
 	fn x17ai_cuda_alloc(stream: *mut std::ffi::c_void, bytes: usize) -> PointerResult;
 	fn x17ai_cuda_free(stream: *mut std::ffi::c_void, ptr: *mut std::ffi::c_void) -> VoidResult;
 
-	pub fn x17ai_cuda_load_from_cpu_memory(
+	pub fn x17ai_cuda_upload_data(
 		stream: *mut std::ffi::c_void,
 		cpu_src: *const u8,
 		cuda_dst: *mut u8,
@@ -90,13 +91,15 @@ unsafe extern "C" {
 		size_bytes: usize,
 	) -> VoidResult;
 
-	pub fn x17ai_cuda_store_to_cpu_memory(
+	pub fn x17ai_cuda_download_data(
 		stream: *mut std::ffi::c_void,
 		cuda_src: *const u8,
 		cpu_dst: *mut u8,
 		offset_bytes: usize,
 		size_bytes: usize,
 	) -> VoidResult;
+
+	fn x17ai_cuda_compile_kernel(source: *const std::ffi::c_char, result: FfiBuffer) -> VoidResult;
 
 	fn x17ai_cuda_new_kernel(source: *const std::ffi::c_char, len: usize) -> PointerResult;
 	fn x17ai_cuda_del_kernel(kernel: *const std::ffi::c_void);
@@ -151,7 +154,7 @@ impl CudaStream {
 	/// # Safety
 	///
 	/// TODO
-	pub unsafe fn load_from_cpu_memory(
+	pub unsafe fn upload_data(
 		&self,
 		cpu_src: NonNull<u8>,
 		cuda_dst: NonNull<u8>,
@@ -159,7 +162,7 @@ impl CudaStream {
 		size_bytes: usize,
 	) -> Result<(), CudaError> {
 		unsafe {
-			x17ai_cuda_load_from_cpu_memory(
+			x17ai_cuda_upload_data(
 				self.ptr.as_ptr(),
 				cpu_src.as_ptr(),
 				cuda_dst.as_ptr(),
@@ -173,7 +176,7 @@ impl CudaStream {
 	/// # Safety
 	///
 	/// TODO
-	pub unsafe fn store_to_cpu_memory(
+	pub unsafe fn download_data(
 		&self,
 		cuda_src: NonNull<u8>,
 		cpu_dst: NonNull<u8>,
@@ -181,7 +184,7 @@ impl CudaStream {
 		size_bytes: usize,
 	) -> Result<(), CudaError> {
 		unsafe {
-			x17ai_cuda_store_to_cpu_memory(
+			x17ai_cuda_download_data(
 				self.ptr.as_ptr(),
 				cuda_src.as_ptr(),
 				cpu_dst.as_ptr(),
@@ -203,6 +206,17 @@ impl Drop for CudaStream {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CudaKernelHandle(NonNull<std::ffi::c_void>);
+
+pub fn compile_kernel(source: &str) -> Result<(), CudaError> {
+	let c_source = Vec::with_capacity(source.len() + 1);
+	// TODO
+
+	source.to_vec();
+	let c_source = std::ffi::CString::new_unchecked(source).unwrap();
+	let mut result = Vec::new();
+	unsafe { x17ai_cuda_compile_kernel(c_source.as_ptr(), FfiBuffer::new(&mut result)) }
+		.into_result()
+}
 
 #[allow(clippy::option_if_let_else)]
 pub fn new_kernel(source: &str) -> Result<CudaKernelHandle, CudaError> {

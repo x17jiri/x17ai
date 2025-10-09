@@ -200,7 +200,7 @@ pub trait Device {
 		offset: usize,
 	) -> Result<f64, ErrPack<TensorOpError>>;
 
-	unsafe fn load_from_cpu_memory(
+	unsafe fn upload_data(
 		&self,
 		cpu_src: NonNull<u8>,
 		dev_dst: &DeviceBuffer,
@@ -208,7 +208,7 @@ pub trait Device {
 		count_bytes: usize,
 	) -> Result<(), ErrPack<TensorOpError>>;
 
-	unsafe fn store_to_cpu_memory(
+	unsafe fn download_data(
 		&self,
 		dev_src: &DeviceBuffer,
 		cpu_dst: NonNull<u8>,
