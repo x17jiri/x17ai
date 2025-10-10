@@ -25,15 +25,20 @@ pub struct FfiBufferVMT {
 	/// Returns span (data, capacity)
 	pub buf_span: unsafe extern "C" fn(this: *mut c_void) -> FfiSpan,
 
-	/// Returns false on allocation failure instead of panicking/aborting.
+	/// Tries to reserve at least new_capacity. Returns buf_span(), i.e., (data, capacity).
+	/// On success, the returned capacity will be >= new_capacity.
 	///
-	/// This function may invalidate existing pointers into the buffer.
-	pub reserve_exact: unsafe extern "C" fn(this: *mut c_void, new_capacity: usize) -> c_int,
+	/// This will not deliberately over-allocate, but the allocator may still do so.
+	/// Additionally, this function doesn't ever shrink the buffer.
+	///
+	/// If reallocation happens, only items up to len are preserved.
+	pub reserve_exact: unsafe extern "C" fn(this: *mut c_void, new_capacity: usize) -> FfiSpan,
 
 	/// Forces the length of the vector to new_len.
-	/// If new_len > capacity, returns false and length is unchanged.
+	/// On success (if new_len <= capacity), returns true.
+	/// Otherwise, returns false and does nothing.
 	///
-	/// This finction doesn't invalidate existing pointers into the buffer.
+	/// This function doesn't invalidate existing pointers into the buffer.
 	pub set_len: unsafe extern "C" fn(this: *mut c_void, new_len: usize) -> c_int,
 }
 
@@ -63,16 +68,17 @@ impl<'a> FfiBuffer<'a> {
 			}
 		}
 
-		extern "C" fn reserve_exact(this: *mut c_void, new_capacity: usize) -> c_int {
+		extern "C" fn reserve_exact(this: *mut c_void, new_capacity: usize) -> FfiSpan {
 			let this = this.cast::<Vec<u8>>();
 			let this = unsafe { &mut *this };
 			if new_capacity > this.capacity() {
-				let additional = new_capacity - this.capacity();
-				if this.try_reserve_exact(additional).is_err() {
-					return 0;
-				}
+				let additional = new_capacity - this.len();
+				this.try_reserve_exact(additional);
 			}
-			1
+			FfiSpan {
+				ptr: this.as_mut_ptr(),
+				len: this.capacity(),
+			}
 		}
 
 		extern "C" fn set_len(this: *mut c_void, new_len: usize) -> c_int {

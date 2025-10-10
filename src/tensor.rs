@@ -426,13 +426,10 @@ impl TensorOpError {
 
 	#[cold]
 	#[inline(never)]
-	pub fn device_error(message: &str) -> ErrPack<Self> {
+	pub fn device_error(message: String) -> ErrPack<Self> {
 		ErrPack {
 			code: Self::DeviceError,
-			extra: Some(Box::new(ErrExtra {
-				message: message.to_string(),
-				nested: None,
-			})),
+			extra: Some(Box::new(ErrExtra { message, nested: None })),
 		}
 	}
 }

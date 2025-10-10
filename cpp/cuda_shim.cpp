@@ -107,7 +107,7 @@ struct FfiSpan {
 struct FfiBufferVMT {
 	FfiSpan (*span)(void *self);
 	FfiSpan (*buf_span)(void *self);
-	int (*reserve_exact)(void *self, usize new_capacity);
+	FfiSpan (*reserve_exact)(void *self, usize new_capacity);
 	int (*set_len)(void *self, usize new_len);
 };
 
@@ -115,22 +115,33 @@ struct FfiBuffer {
 	void *instance;
 	FfiBufferVMT const *vmt;
 
-	inline std::span<u8> span() {
+	inline std::span<char> span() {
 		FfiSpan s = vmt->span(instance);
 		return std::span(s.ptr, s.len);
 	}
 
-	inline std::span<u8> buf_span() {
+	inline std::span<char> buf_span() {
 		FfiSpan s = vmt->buf_span(instance);
 		return std::span(s.ptr, s.len);
 	}
 
-	inline bool reserve_exact(usize new_capacity) {
-		return vmt->reserve_exact(instance, new_capacity);
+	inline std::span<char> reserve_exact(usize new_capacity) {
+		FfiSpan s = vmt->reserve_exact(instance, new_capacity);
+		return std::span(s.ptr, s.len);
 	}
 
 	inline bool set_len(usize new_len) {
 		return vmt->set_len(instance, new_len);
+	}
+
+	bool set_data(std::string const &data) {
+		auto len = data.size();
+		auto buf = reserve_exact(len);
+		if (!set_len(data.size())) [[unlikely]] {
+			return false;
+		}
+		std::copy(data.begin(), data.end(), buf.data());
+		return true;
 	}
 };
 
@@ -285,6 +296,70 @@ extern "C" {
 		}
 	}
 
+	int x17ai_cuda_compile_kernel(void *stream, char const *source, FfiBuffer buffer) {
+		assert(stream != nullptr);
+		assert(cuda_initialized.load(std::memory_order_acquire));
+
+		// Create NVRTC program
+		nvrtcProgram prog;
+		nvrtcResult result = nvrtcCreateProgram(&prog, source, "kernel.cu", 0, nullptr, nullptr);
+		if (result != NVRTC_SUCCESS) {
+			auto message =
+				fmt::format("Failed to create NVRTC program: {}\n", nvrtcGetErrorString(result));
+			buffer.set_data(message);
+			return 1;
+		}
+
+		// Compile the program
+		auto options = std::to_array<const char *>(
+			{"--gpu-architecture=compute_75", // Adjust for your GPU
+			 "--use_fast_math",
+			 "--std=c++17"}
+		);
+		result = nvrtcCompileProgram(prog, options.size(), options.data());
+		if (result != NVRTC_SUCCESS) {
+			// Get compilation log
+			usize log_size;
+			result = nvrtcGetProgramLogSize(prog, &log_size);
+			if (result != NVRTC_SUCCESS) {
+				// TODO
+			}
+			auto log = buffer.reserve_exact(log_size);
+			if (buffer.set_len(log_size)) [[likely]] {
+				result = nvrtcGetProgramLog(prog, log.data());
+				if (result != NVRTC_SUCCESS) {
+					// TODO
+				}
+			}
+			result = nvrtcDestroyProgram(&prog);
+			if (result != NVRTC_SUCCESS) {
+				// TODO
+			}
+			return 1;
+		}
+
+		// Get PTX
+		usize ptx_size;
+		result = nvrtcGetPTXSize(prog, &ptx_size);
+		if (result != NVRTC_SUCCESS) {
+			// TODO
+		}
+		auto ptx = buffer.reserve_exact(ptx_size);
+		if (!buffer.set_len(ptx_size)) [[unlikely]] {
+			// TODO - try to log error
+			return 1;
+		}
+		result = nvrtcGetPTX(prog, ptx.data());
+		if (result != NVRTC_SUCCESS) {
+			// TODO
+		}
+		result = nvrtcDestroyProgram(&prog);
+		if (result != NVRTC_SUCCESS) {
+			// TODO
+		}
+		return 0;
+	}
+
 	/*
 	fn x17ai_cuda_new_kernel(source
 							 : *const std::ffi::c_char, len
@@ -301,9 +376,6 @@ extern "C" {
 }
 
 /*
-// Cache for compiled modules
-static std::unordered_map<std::string, CUmodule> module_cache;
-
 // Compile CUDA source code at runtime
 extern "C" bool
 compile_cuda_kernel(const char *source_code, const char *kernel_name) {

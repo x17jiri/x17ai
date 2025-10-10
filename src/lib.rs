@@ -42,6 +42,7 @@
 #![feature(trait_alias)]
 #![feature(thin_box)]
 #![feature(const_index)]
+#![feature(string_from_utf8_lossy_owned)]
 // clippy
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]
