@@ -11,7 +11,7 @@ use std::ptr::NonNull;
 
 use crate::ErrPack;
 use crate::tensor::TensorOpError;
-use crate::tensor::device::{KernelElemArg, KernelOutput, KernelReduceArg};
+use crate::tensor::device::{DevicePtr, KernelElemArg, KernelOutput, KernelReduceArg};
 use crate::util::ffi_buffer::FfiBuffer;
 
 //--------------------------------------------------------------------------------------------------
@@ -30,11 +30,6 @@ impl StaticCppString {
 		String::from_utf8_lossy(slice).into_owned()
 	}
 }
-
-//--------------------------------------------------------------------------------------------------
-
-#[repr(transparent)]
-struct DevicePtr(u64);
 
 //--------------------------------------------------------------------------------------------------
 
@@ -58,25 +53,6 @@ impl PtrResult {
 	{
 		if let Some(nonnull) = NonNull::new(self.result) {
 			Ok(map(nonnull))
-		} else {
-			cold_path();
-			Err(CudaError { msg: unsafe { &*self.error } })
-		}
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
-#[repr(C)]
-pub struct DevicePtrResult {
-	result: DevicePtr,
-	error: *const StaticCppString,
-}
-
-impl DevicePtrResult {
-	pub fn into_result(self) -> Result<DevicePtr, CudaError> {
-		if self.error.is_null() {
-			Ok(self.result)
 		} else {
 			cold_path();
 			Err(CudaError { msg: unsafe { &*self.error } })
@@ -114,8 +90,8 @@ unsafe extern "C" {
 	fn x17ai_cuda_open_stream(ctx: *mut c_void) -> PtrResult;
 	fn x17ai_cuda_close_stream(stream: *mut c_void) -> VoidResult;
 
-	fn x17ai_cuda_alloc(stream: *mut c_void, bytes: usize) -> DevicePtrResult;
-	fn x17ai_cuda_free(stream: *mut c_void, ptr: DevicePtr) -> VoidResult;
+	fn x17ai_cuda_alloc(stream: *mut c_void, bytes: usize) -> PtrResult;
+	fn x17ai_cuda_free(stream: *mut c_void, ptr: *mut c_void) -> VoidResult;
 
 	pub fn x17ai_cuda_upload_data(
 		stream: *mut c_void,
@@ -202,16 +178,16 @@ impl CudaStream {
 	/// TODO
 	pub unsafe fn upload_data(
 		&self,
-		cpu_src: NonNull<u8>,
-		cuda_dst: NonNull<u8>,
+		src: NonNull<u8>,
+		dst: DevicePtr,
 		offset_bytes: usize,
 		size_bytes: usize,
 	) -> Result<(), CudaError> {
 		unsafe {
 			x17ai_cuda_upload_data(
-				self.ptr.as_ptr(),
-				cpu_src.as_ptr(),
-				cuda_dst.as_ptr(),
+				self.stream.as_ptr(),
+				src.as_ptr(),
+				dst,
 				offset_bytes,
 				size_bytes,
 			)
@@ -224,16 +200,16 @@ impl CudaStream {
 	/// TODO
 	pub unsafe fn download_data(
 		&self,
-		cuda_src: NonNull<u8>,
-		cpu_dst: NonNull<u8>,
+		src: DevicePtr,
+		dst: NonNull<u8>,
 		offset_bytes: usize,
 		size_bytes: usize,
 	) -> Result<(), CudaError> {
 		unsafe {
 			x17ai_cuda_download_data(
-				self.ptr.as_ptr(),
-				cuda_src.as_ptr(),
-				cpu_dst.as_ptr(),
+				self.stream.as_ptr(),
+				src,
+				dst.as_ptr(),
 				offset_bytes,
 				size_bytes,
 			)

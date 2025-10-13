@@ -358,7 +358,7 @@ extern "C" {
 				return Err(&message);
 			}
 
-			cuCtxPopCurrent(&ctx);
+			[[maybe_unused]] auto _result = cuCtxPopCurrent(&ctx);
 
 			static StaticString const message =
 				"x17ai_cuda_open_stream(): cuStreamCreate() returned nullptr";

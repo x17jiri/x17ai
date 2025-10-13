@@ -8,6 +8,7 @@
 use std::ptr::NonNull;
 use std::rc::Rc;
 
+use crate::tensor::device::DevicePtr;
 use crate::tensor::generic::buffer::Buffer;
 use crate::util::mycell;
 
@@ -22,7 +23,7 @@ use super::dtype::DType;
 // - also, the `device` field could use some thin rc that stores metadata in the pointee
 // not in the pointer itself. This would save another 8 bytes per buffer.
 pub struct DeviceBuffer {
-	memory: NonNull<u8>,
+	device_ptr: DevicePtr,
 	dtype: DType,
 	elems: usize,
 	device: Rc<dyn Device>,
@@ -31,12 +32,12 @@ pub struct DeviceBuffer {
 impl DeviceBuffer {
 	#[inline]
 	pub unsafe fn new(
-		memory: NonNull<u8>,
+		device_ptr: DevicePtr,
 		dtype: DType,
 		elems: usize,
 		device: Rc<dyn Device>,
 	) -> Self {
-		Self { memory, dtype, elems, device }
+		Self { device_ptr, dtype, elems, device }
 	}
 
 	#[inline]
@@ -47,8 +48,8 @@ impl DeviceBuffer {
 	}
 
 	#[inline]
-	pub fn memory(&self) -> NonNull<u8> {
-		self.memory
+	pub fn device_ptr(&self) -> DevicePtr {
+		self.device_ptr
 	}
 
 	#[inline]
@@ -75,7 +76,7 @@ impl DeviceBuffer {
 impl Drop for DeviceBuffer {
 	fn drop(&mut self) {
 		unsafe {
-			self.device.drop_buffer(self.memory, self.dtype, self.elems);
+			self.device.drop_buffer(self.device_ptr, self.dtype, self.elems);
 		}
 	}
 }

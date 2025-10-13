@@ -18,7 +18,9 @@ use crate::util::mycell::{self, BorrowGuard};
 pub mod cpu_float_methods;
 
 use crate::ErrPack;
-use crate::tensor::device::{AttentionArgs, DeviceBuffer, MatMulArgs, NewDeviceBufferError};
+use crate::tensor::device::{
+	AttentionArgs, DeviceBuffer, DevicePtr, MatMulArgs, NewDeviceBufferError,
+};
 use crate::tensor::{DType, Device};
 
 //--------------------------------------------------------------------------------------------------
@@ -55,24 +57,26 @@ impl CPUDevice {
 			cold_path();
 			return Err(BufAsSliceError::NotOnCPUDevice);
 		}
-		let memory = buf.memory();
-		let elems = buf.elems();
-		let slice = unsafe { std::slice::from_raw_parts(memory.as_ptr().cast(), elems) };
-		Ok(slice)
+		unsafe {
+			let memory = buf.device_ptr().get_as::<T>();
+			let elems = buf.elems();
+			let slice = std::slice::from_raw_parts(memory, elems);
+			Ok(slice)
+		}
 	}
 
 	unsafe fn __read_float(
-		buf: NonNull<u8>,
+		buf: DevicePtr,
 		dtype: DType,
 		offset_bytes: usize,
 	) -> Result<f64, ErrPack<TensorOpError>> {
 		match dtype {
 			f32::dtype => unsafe {
-				let ptr = buf.cast::<u8>().add(offset_bytes).cast::<f32>();
+				let ptr = buf.get_as::<u8>().add(offset_bytes).cast::<f32>();
 				Ok(ptr.read().to_f64())
 			},
 			f64::dtype => unsafe {
-				let ptr = buf.cast::<u8>().add(offset_bytes).cast::<f64>();
+				let ptr = buf.get_as::<u8>().add(offset_bytes).cast::<f64>();
 				Ok(ptr.read().to_f64())
 			},
 			_ => {
@@ -128,7 +132,7 @@ impl Device for CPUDevice {
 			&& let Some(memory) = NonNull::new(unsafe { std::alloc::alloc(layout) })
 		{
 			Ok(Rc::new(mycell::RefCell::new(unsafe {
-				DeviceBuffer::new(memory, dtype, elems, self)
+				DeviceBuffer::new(DevicePtr::new(memory.as_ptr().cast()), dtype, elems, self)
 			})))
 		} else {
 			cold_path();
@@ -136,14 +140,14 @@ impl Device for CPUDevice {
 		}
 	}
 
-	unsafe fn drop_buffer(&self, memory: NonNull<u8>, dtype: DType, elems: usize) {
+	unsafe fn drop_buffer(&self, device_ptr: DevicePtr, dtype: DType, elems: usize) {
 		unsafe {
 			let layout = std::alloc::Layout::from_size_align(
 				dtype.array_bytes_unchecked(elems),
 				dtype.align(),
 			)
 			.unwrap_unchecked();
-			std::alloc::dealloc(memory.as_ptr(), layout);
+			std::alloc::dealloc(device_ptr.get_as::<u8>(), layout);
 		}
 	}
 
@@ -154,7 +158,7 @@ impl Device for CPUDevice {
 	) -> Result<f64, ErrPack<TensorOpError>> {
 		unsafe {
 			let offset_bytes = buf.dtype().array_bytes_unchecked(offset);
-			Self::__read_float(buf.memory(), buf.dtype(), offset_bytes)
+			Self::__read_float(buf.device_ptr(), buf.dtype(), offset_bytes)
 		}
 	}
 
