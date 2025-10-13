@@ -5,7 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
-use std::ffi::{c_char, c_int, c_uint, c_void};
+use std::ffi::{c_char, c_void};
 use std::hint::cold_path;
 use std::ptr::NonNull;
 
@@ -170,7 +170,7 @@ impl From<CudaError> for ErrPack<TensorOpError> {
 //--------------------------------------------------------------------------------------------------
 
 pub struct CudaStream {
-	device_id: c_uint,
+	device_id: usize,
 	ctx: NonNull<c_void>,
 	stream: NonNull<c_void>,
 }
@@ -186,15 +186,15 @@ impl CudaStream {
 	/// # Safety
 	///
 	/// The allocated block of memory may or may not be initialized.
-	pub unsafe fn alloc(&self, bytes: usize) -> Result<NonNull<u8>, CudaError> {
-		unsafe { x17ai_cuda_alloc(self.ptr.as_ptr(), bytes) }.into_result(NonNull::cast)
+	pub unsafe fn alloc(&self, bytes: usize) -> Result<DevicePtr, CudaError> {
+		unsafe { x17ai_cuda_alloc(self.stream.as_ptr(), bytes) }.into_result()
 	}
 
 	/// # Safety
 	///
 	/// The pointer must be a valid pointer returned by `alloc`.
-	pub unsafe fn free(&self, ptr: NonNull<u8>) {
-		unsafe { x17ai_cuda_free(self.ptr.as_ptr(), ptr.as_ptr().cast()) };
+	pub unsafe fn free(&self, ptr: DevicePtr) {
+		unsafe { x17ai_cuda_free(self.stream.as_ptr(), ptr) };
 	}
 
 	/// # Safety

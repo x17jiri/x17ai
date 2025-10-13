@@ -487,8 +487,9 @@ extern "C" {
 		}
 	}
 
-	auto x17ai_cuda_compile_kernel(void *stream, char const *source, FfiBuffer ptx, FfiBuffer log)
-		-> VoidResult {
+	auto x17ai_cuda_compile_kernel(
+		void *stream, char const *source, FfiBuffer ptx, FfiBuffer log
+	) -> VoidResult {
 		assert(stream != nullptr);
 		assert(cuda_initialized.load(std::memory_order_acquire));
 
@@ -498,7 +499,9 @@ extern "C" {
 		if (result != NVRTC_SUCCESS) {
 			log.write("nvrtcCreateProgram() failed with error: ");
 			log.writeln(nvrtcGetErrorString(result));
-			return 1;
+			static StaticString const message =
+				"x17ai_cuda_compile_kernel(): nvrtcCreateProgram() failed";
+			return Err(&message);
 		}
 
 		// Compile the program
@@ -509,46 +512,51 @@ extern "C" {
 		);
 		result = nvrtcCompileProgram(prog, options.size(), options.data());
 		if (result != NVRTC_SUCCESS) {
+			log.write("nvrtcCompileProgram() failed with error: ");
+			log.writeln(nvrtcGetErrorString(result));
+
 			// Get compilation log
-			usize log_size;
+			usize log_size = 0;
 			result = nvrtcGetProgramLogSize(prog, &log_size);
-			if (result != NVRTC_SUCCESS) {
-				// TODO
-			}
-			auto log = buffer.reserve_exact(log_size);
-			if (buffer.set_len(log_size)) [[likely]] {
-				result = nvrtcGetProgramLog(prog, log.data());
-				if (result != NVRTC_SUCCESS) {
-					// TODO
+			if (result == NVRTC_SUCCESS) {
+				std::span log_span = log.extend(log_size);
+				if (log_span.size() == log_size) [[likely]] {
+					[[maybe_unused]] auto _result = nvrtcGetProgramLog(prog, log_span.data());
 				}
 			}
-			result = nvrtcDestroyProgram(&prog);
-			if (result != NVRTC_SUCCESS) {
-				// TODO
-			}
-			return 1;
+
+			[[maybe_unused]] auto _result = nvrtcDestroyProgram(&prog);
+
+			static StaticString const message =
+				"x17ai_cuda_compile_kernel(): nvrtcCompileProgram() failed";
+			return Err(&message);
 		}
 
 		// Get PTX
-		usize ptx_size;
+		usize ptx_size = 0;
 		result = nvrtcGetPTXSize(prog, &ptx_size);
 		if (result != NVRTC_SUCCESS) {
-			// TODO
+			ptx_size = 0;
+		} else {
+			std::span ptx_span = ptx.extend(ptx_size);
+			if (ptx_span.size() != ptx_size) [[unlikely]] {
+				ptx_size = 0;
+			} else {
+				result = nvrtcGetPTX(prog, ptx_span.data());
+				if (result != NVRTC_SUCCESS) [[unlikely]] {
+					ptx_size = 0;
+				}
+			}
 		}
-		auto ptx = buffer.reserve_exact(ptx_size);
-		if (!buffer.set_len(ptx_size)) [[unlikely]] {
-			// TODO - try to log error
-			return 1;
+
+		[[maybe_unused]] auto _result = nvrtcDestroyProgram(&prog);
+
+		if (ptx_size == 0) [[unlikely]] {
+			static StaticString const message =
+				"x17ai_cuda_compile_kernel(): Failed to get PTX from compiled program";
+			return Err(&message);
 		}
-		result = nvrtcGetPTX(prog, ptx.data());
-		if (result != NVRTC_SUCCESS) {
-			// TODO
-		}
-		result = nvrtcDestroyProgram(&prog);
-		if (result != NVRTC_SUCCESS) {
-			// TODO
-		}
-		return 0;
+		return Ok();
 	}
 
 	/*
