@@ -5,14 +5,14 @@
 //
 //------------------------------------------------------------------------------
 
-use std::ffi::{c_char, c_int, c_void};
+use std::ffi::{c_char, c_int, c_uint, c_void};
 use std::hint::cold_path;
 use std::ptr::NonNull;
 
+use crate::ErrPack;
 use crate::tensor::TensorOpError;
 use crate::tensor::device::{KernelElemArg, KernelOutput, KernelReduceArg};
 use crate::util::ffi_buffer::FfiBuffer;
-use crate::{ErrExtra, ErrPack};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -31,6 +31,13 @@ impl StaticCppString {
 	}
 }
 
+//--------------------------------------------------------------------------------------------------
+
+#[repr(transparent)]
+struct DevicePtr(u64);
+
+//--------------------------------------------------------------------------------------------------
+
 // The decision of whether the result is ok or not
 // is based on `result == null`, not on `error == null`.
 // That way:
@@ -39,12 +46,12 @@ impl StaticCppString {
 // - we can use something like `Ok(result, "Err: Cuda returned null")` in the C++ code,
 // avoiding one condition.
 #[repr(C)]
-struct PointerResult {
+struct PtrResult {
 	result: *mut c_void,
 	error: *const StaticCppString,
 }
 
-impl PointerResult {
+impl PtrResult {
 	pub fn into_result<U, F>(self, map: F) -> Result<U, CudaError>
 	where
 		F: FnOnce(NonNull<c_void>) -> U,
@@ -57,6 +64,27 @@ impl PointerResult {
 		}
 	}
 }
+
+//--------------------------------------------------------------------------------------------------
+
+#[repr(C)]
+pub struct DevicePtrResult {
+	result: DevicePtr,
+	error: *const StaticCppString,
+}
+
+impl DevicePtrResult {
+	pub fn into_result(self) -> Result<DevicePtr, CudaError> {
+		if self.error.is_null() {
+			Ok(self.result)
+		} else {
+			cold_path();
+			Err(CudaError { msg: unsafe { &*self.error } })
+		}
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
 
 #[repr(C)]
 pub struct VoidResult {
@@ -74,26 +102,33 @@ impl VoidResult {
 	}
 }
 
+//--------------------------------------------------------------------------------------------------
+
 #[link(name = "cuda_shim")]
 unsafe extern "C" {
-	fn x17ai_cuda_open_stream() -> PointerResult;
+	pub fn x17ai_test();
+
+	fn x17ai_cuda_open_context(device_id: usize) -> PtrResult;
+	fn x17ai_cuda_close_context(device_id: usize) -> VoidResult;
+
+	fn x17ai_cuda_open_stream(ctx: *mut c_void) -> PtrResult;
 	fn x17ai_cuda_close_stream(stream: *mut c_void) -> VoidResult;
 
-	fn x17ai_cuda_alloc(stream: *mut c_void, bytes: usize) -> PointerResult;
-	fn x17ai_cuda_free(stream: *mut c_void, ptr: *mut c_void) -> VoidResult;
+	fn x17ai_cuda_alloc(stream: *mut c_void, bytes: usize) -> DevicePtrResult;
+	fn x17ai_cuda_free(stream: *mut c_void, ptr: DevicePtr) -> VoidResult;
 
 	pub fn x17ai_cuda_upload_data(
 		stream: *mut c_void,
-		cpu_src: *const u8,
-		cuda_dst: *mut u8,
+		src: *const u8,
+		dst: DevicePtr,
 		offset_bytes: usize,
 		size_bytes: usize,
 	) -> VoidResult;
 
 	pub fn x17ai_cuda_download_data(
 		stream: *mut c_void,
-		cuda_src: *const u8,
-		cpu_dst: *mut u8,
+		src: DevicePtr,
+		dst: *mut u8,
 		offset_bytes: usize,
 		size_bytes: usize,
 	) -> VoidResult;
@@ -103,10 +138,11 @@ unsafe extern "C" {
 	fn x17ai_cuda_compile_kernel(
 		stream: *mut c_void,
 		source: *const c_char,
-		buffer: FfiBuffer,
-	) -> c_int;
+		ptx: FfiBuffer,
+		log: FfiBuffer,
+	) -> VoidResult;
 
-	fn x17ai_cuda_new_kernel(source: *const c_char, len: usize) -> PointerResult;
+	fn x17ai_cuda_new_kernel(source: *const c_char, len: usize) -> PtrResult;
 	fn x17ai_cuda_del_kernel(kernel: *const c_void);
 
 	fn x17ai_cuda_run_kernel(
@@ -134,12 +170,17 @@ impl From<CudaError> for ErrPack<TensorOpError> {
 //--------------------------------------------------------------------------------------------------
 
 pub struct CudaStream {
-	ptr: NonNull<c_void>,
+	device_id: c_uint,
+	ctx: NonNull<c_void>,
+	stream: NonNull<c_void>,
 }
 
 impl CudaStream {
 	pub fn new() -> Result<Self, CudaError> {
-		unsafe { x17ai_cuda_open_stream() }.into_result(|ptr| Self { ptr })
+		let device_id = 0;
+		let ctx = unsafe { x17ai_cuda_open_context(device_id) }.into_result(|ptr| ptr)?;
+		let stream = unsafe { x17ai_cuda_open_stream(ctx.as_ptr()) }.into_result(|ptr| ptr)?;
+		Ok(Self { device_id, ctx, stream })
 	}
 
 	/// # Safety
@@ -220,7 +261,10 @@ impl CudaStream {
 
 impl Drop for CudaStream {
 	fn drop(&mut self) {
-		unsafe { x17ai_cuda_close_stream(self.ptr.as_ptr()) };
+		unsafe {
+			x17ai_cuda_close_stream(self.ctx.as_ptr(), self.stream.as_ptr());
+			x17ai_cuda_close_context(self.device_id);
+		};
 	}
 }
 

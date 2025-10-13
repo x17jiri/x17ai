@@ -25,21 +25,15 @@ pub struct FfiBufferVMT {
 	/// Returns span (data, capacity)
 	pub buf_span: unsafe extern "C" fn(this: *mut c_void) -> FfiSpan,
 
-	/// Tries to reserve at least new_capacity. Returns buf_span(), i.e., (data, capacity).
-	/// On success, the returned capacity will be >= new_capacity.
+	/// Tries to reserve space for `additional` new elements.
 	///
-	/// This will not deliberately over-allocate, but the allocator may still do so.
-	/// Additionally, this function doesn't ever shrink the buffer.
+	/// On success, adds `additional` to `len` and returns a span of the extended area.
+	/// The area is uninitialized.
+	///
+	/// On failure, returns a span with `ptr == null` and `len == 0`.
 	///
 	/// If reallocation happens, only items up to len are preserved.
-	pub reserve_exact: unsafe extern "C" fn(this: *mut c_void, new_capacity: usize) -> FfiSpan,
-
-	/// Forces the length of the vector to new_len.
-	/// On success (if new_len <= capacity), returns true.
-	/// Otherwise, returns false and does nothing.
-	///
-	/// This function doesn't invalidate existing pointers into the buffer.
-	pub set_len: unsafe extern "C" fn(this: *mut c_void, new_len: usize) -> c_int,
+	pub extend: unsafe extern "C" fn(this: *mut c_void, additional: usize) -> FfiSpan,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -68,31 +62,19 @@ impl<'a> FfiBuffer<'a> {
 			}
 		}
 
-		extern "C" fn reserve_exact(this: *mut c_void, new_capacity: usize) -> FfiSpan {
+		extern "C" fn extend(this: *mut c_void, additional: usize) -> FfiSpan {
 			let this = this.cast::<Vec<u8>>();
 			let this = unsafe { &mut *this };
-			if new_capacity > this.capacity() {
-				let additional = new_capacity - this.len();
-				this.try_reserve_exact(additional);
-			}
-			FfiSpan {
-				ptr: this.as_mut_ptr(),
-				len: this.capacity(),
-			}
-		}
-
-		extern "C" fn set_len(this: *mut c_void, new_len: usize) -> c_int {
-			let this = this.cast::<Vec<u8>>();
-			let this = unsafe { &mut *this };
-			if new_len > this.capacity() {
+			if this.try_reserve(additional).is_err() {
 				cold_path();
-				return 0;
+				return FfiSpan { ptr: std::ptr::null_mut(), len: 0 };
 			}
-			unsafe { this.set_len(new_len) };
-			1
+			let ptr = this.as_mut_ptr().add(this.len());
+			unsafe { this.set_len(this.len() + additional) };
+			FfiSpan { ptr, len: additional }
 		}
 
-		static VMT: FfiBufferVMT = FfiBufferVMT { span, buf_span, reserve_exact, set_len };
+		static VMT: FfiBufferVMT = FfiBufferVMT { span, buf_span };
 
 		Self {
 			instance: std::ptr::from_mut(vec).cast(),
