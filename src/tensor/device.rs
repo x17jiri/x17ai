@@ -47,7 +47,7 @@ impl DevicePtr {
 	///
 	/// These operations should only be done by device-specific code that knows what the pointer is.
 	#[inline]
-	pub unsafe fn get_as<T>(&self) -> *mut T {
+	pub unsafe fn as_ptr<T>(&self) -> *mut T {
 		self.ptr.cast::<T>()
 	}
 }

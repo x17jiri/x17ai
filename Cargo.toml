@@ -10,7 +10,7 @@ opt-level = 3
 [dependencies]
 smallvec = { version = "1.15.0", features = ["union"] }
 # bit-set = "0.6.0"
-# thin-vec = "0.2.13"
+thin-vec = "0.2.14"
 # arrayvec = "0.7.4"
 # matrixmultiply = "0.3.8"
 # ndarray = "0.16.1"

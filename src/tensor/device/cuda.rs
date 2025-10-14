@@ -15,7 +15,9 @@ use crate::ErrPack;
 use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
 use crate::tensor::device::cuda::cuda_shim::{CudaError, CudaKernelHandle, CudaStream};
 use crate::tensor::device::kernel::DynKernelCall;
-use crate::tensor::device::{AttentionArgs, DeviceBuffer, MatMulArgs, NewDeviceBufferError};
+use crate::tensor::device::{
+	AttentionArgs, DeviceBuffer, DevicePtr, MatMulArgs, NewDeviceBufferError,
+};
 use crate::tensor::{DType, Device, HasDType, TensorOpError, UnsupportedDTypeError};
 use crate::util::hasher::HashWord;
 use crate::util::mycell;
@@ -64,7 +66,7 @@ impl CudaDevice {
 		let val = T::default();
 		unsafe {
 			self.cuda_stream.download_data(
-				buf.memory(),
+				buf.device_ptr(),
 				NonNull::from(&val).cast(),
 				offset,
 				std::mem::size_of::<T>(),
@@ -97,8 +99,8 @@ impl Device for CudaDevice {
 		}
 	}
 
-	unsafe fn drop_buffer(&self, memory: NonNull<u8>, _dtype: DType, _elems: usize) {
-		unsafe { self.cuda_stream.free(memory) }
+	unsafe fn drop_buffer(&self, device_ptr: DevicePtr, _dtype: DType, _elems: usize) {
+		unsafe { self.cuda_stream.free(device_ptr) }
 	}
 
 	unsafe fn read_float(
@@ -118,26 +120,26 @@ impl Device for CudaDevice {
 
 	unsafe fn upload_data(
 		&self,
-		cpu_src: NonNull<u8>,
-		dev_dst: &DeviceBuffer,
+		src: NonNull<u8>,
+		dst: &DeviceBuffer,
 		offset_bytes: usize,
 		count_bytes: usize,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		unsafe {
-			self.cuda_stream.upload_data(cpu_src, dev_dst.memory(), offset_bytes, count_bytes)?;
+			self.cuda_stream.upload_data(src, dst.device_ptr(), offset_bytes, count_bytes)?;
 		}
 		Ok(())
 	}
 
 	unsafe fn download_data(
 		&self,
-		dev_src: &DeviceBuffer,
-		cpu_dst: NonNull<u8>,
+		src: &DeviceBuffer,
+		dst: NonNull<u8>,
 		offset_bytes: usize,
 		count_bytes: usize,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		unsafe {
-			self.cuda_stream.download_data(dev_src.memory(), cpu_dst, offset_bytes, count_bytes)?;
+			self.cuda_stream.download_data(src.device_ptr(), dst, offset_bytes, count_bytes)?;
 		}
 		Ok(())
 	}

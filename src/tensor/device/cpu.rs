@@ -57,12 +57,7 @@ impl CPUDevice {
 			cold_path();
 			return Err(BufAsSliceError::NotOnCPUDevice);
 		}
-		unsafe {
-			let memory = buf.device_ptr().get_as::<T>();
-			let elems = buf.elems();
-			let slice = std::slice::from_raw_parts(memory, elems);
-			Ok(slice)
-		}
+		unsafe { Ok(std::slice::from_raw_parts(buf.device_ptr().as_ptr::<T>(), buf.elems())) }
 	}
 
 	unsafe fn __read_float(
@@ -72,11 +67,11 @@ impl CPUDevice {
 	) -> Result<f64, ErrPack<TensorOpError>> {
 		match dtype {
 			f32::dtype => unsafe {
-				let ptr = buf.get_as::<u8>().add(offset_bytes).cast::<f32>();
+				let ptr = buf.as_ptr::<u8>().add(offset_bytes).cast::<f32>();
 				Ok(ptr.read().to_f64())
 			},
 			f64::dtype => unsafe {
-				let ptr = buf.get_as::<u8>().add(offset_bytes).cast::<f64>();
+				let ptr = buf.as_ptr::<u8>().add(offset_bytes).cast::<f64>();
 				Ok(ptr.read().to_f64())
 			},
 			_ => {
@@ -87,19 +82,19 @@ impl CPUDevice {
 	}
 
 	unsafe fn __write_float(
-		buf: NonNull<u8>,
+		buf: DevicePtr,
 		dtype: DType,
 		offset_bytes: usize,
 		value: f64,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		match dtype {
 			dtype if dtype == f32::dtype => unsafe {
-				let ptr = buf.cast::<u8>().add(offset_bytes).cast::<f32>();
+				let ptr = buf.as_ptr::<u8>().add(offset_bytes).cast::<f32>();
 				ptr.write(f32::from_f64(value));
 				Ok(())
 			},
 			dtype if dtype == f64::dtype => unsafe {
-				let ptr = buf.cast::<u8>().add(offset_bytes).cast::<f64>();
+				let ptr = buf.as_ptr::<u8>().add(offset_bytes).cast::<f64>();
 				ptr.write(f64::from_f64(value));
 				Ok(())
 			},
@@ -147,7 +142,7 @@ impl Device for CPUDevice {
 				dtype.align(),
 			)
 			.unwrap_unchecked();
-			std::alloc::dealloc(device_ptr.get_as::<u8>(), layout);
+			std::alloc::dealloc(device_ptr.as_ptr::<u8>(), layout);
 		}
 	}
 
@@ -164,15 +159,15 @@ impl Device for CPUDevice {
 
 	unsafe fn upload_data(
 		&self,
-		cpu_src: NonNull<u8>,
-		dev_dst: &DeviceBuffer,
+		src: NonNull<u8>,
+		dst: &DeviceBuffer,
 		offset_bytes: usize,
 		count_bytes: usize,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		unsafe {
 			std::ptr::copy_nonoverlapping(
-				cpu_src.as_ptr(),
-				dev_dst.memory().add(offset_bytes).as_ptr(),
+				src.as_ptr(),
+				dst.device_ptr().as_ptr::<u8>().add(offset_bytes),
 				count_bytes,
 			);
 		}
@@ -181,15 +176,15 @@ impl Device for CPUDevice {
 
 	unsafe fn download_data(
 		&self,
-		dev_src: &DeviceBuffer,
-		cpu_dst: NonNull<u8>,
+		src: &DeviceBuffer,
+		dst: NonNull<u8>,
 		offset_bytes: usize,
 		count_bytes: usize,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		unsafe {
 			std::ptr::copy_nonoverlapping(
-				dev_src.memory().add(offset_bytes).as_ptr(),
-				cpu_dst.as_ptr(),
+				src.device_ptr().as_ptr::<u8>().add(offset_bytes),
+				dst.as_ptr(),
 				count_bytes,
 			);
 		}

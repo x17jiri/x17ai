@@ -34,119 +34,8 @@ using isize = std::common_type_t<
 	std::make_signed_t<std::size_t>
 >;
 
-using DevicePtr = u64;
-
-static_assert(std::is_unsigned_v<CUdeviceptr>);
-static_assert(sizeof(DevicePtr) >= sizeof(CUdeviceptr));
-
 static std::atomic<bool> cuda_initialized = false;
 static std::mutex cuda_init_mutex;
-
-struct StaticString {
-	const char *data;
-	usize len;
-
-	consteval StaticString(char const *str):
-		data(str),
-		len(strlen(str))
-	{}
-};
-
-struct Err {
-	StaticString const *message;
-
-	inline Err(StaticString const *m):
-		message(m)
-	{}
-};
-
-// The decision of whether the result is ok or not
-// is based on `result == null`, not on `error == null`.
-// That way:
-// - we can avoid reading `error` most of the time.
-// - we can safely convert result to NonNull in Rust.
-// - we can use something like `Ok(result, "Err: Cuda returned null")` in the C++ code,
-// avoiding one condition.
-struct PtrResult {
-	void *result;
-	StaticString const *error;
-
-	inline PtrResult(void *ptr, StaticString const *err):
-		result(ptr),
-		error(err)
-	{
-		assert(err != nullptr);
-	}
-
-	inline PtrResult(Err err):
-		result(nullptr),
-		error(err.message)
-	{}
-
-	inline bool is_ok() const {
-		return result != nullptr;
-	}
-
-	inline bool is_err() const {
-		return result == nullptr;
-	}
-};
-
-// `err` will be used if `ptr == nullptr`
-inline PtrResult Ok(void *ptr, StaticString const *err) {
-	return PtrResult(ptr, err);
-}
-
-struct DevicePtrResult {
-	DevicePtr result;
-	StaticString const *error;
-
-	inline DevicePtrResult(DevicePtr ptr):
-		result(ptr),
-		error(nullptr)
-	{}
-
-	inline DevicePtrResult(Err err):
-		result(0),
-		error(err.message)
-	{}
-
-	inline bool is_ok() const {
-		return error == nullptr;
-	}
-
-	inline bool is_err() const {
-		return error != nullptr;
-	}
-};
-
-inline DevicePtrResult Ok(DevicePtr ptr) {
-	return DevicePtrResult(ptr);
-}
-
-struct VoidResult {
-	StaticString const *error;
-
-	inline VoidResult(StaticString const *err):
-		error(err)
-	{}
-
-	inline VoidResult(Err err):
-		error(err.message)
-	{}
-
-	inline bool is_ok() const {
-		return error == nullptr;
-	}
-
-	inline bool is_err() const {
-		return error != nullptr;
-	}
-};
-
-inline VoidResult Ok() {
-	return VoidResult(nullptr);
-}
 
 struct FfiSpan {
 	u8 *ptr;
@@ -199,6 +88,21 @@ struct FfiBuffer {
 		return true;
 	}
 };
+
+struct CudaContext;
+struct CudaStream;
+
+inline CUdeviceptr to_device_ptr(void *ptr) {
+	using U = std::make_unsigned_t<CUdeviceptr>;
+	return CUdeviceptr(U(reinterpret_cast<uintptr_t>(ptr)));
+}
+
+inline void *from_device_ptr(CUdeviceptr ptr) {
+	using U = std::make_unsigned_t<CUdeviceptr>;
+	static_assert(sizeof(uintptr_t) >= sizeof(CUdeviceptr));
+	static_assert(sizeof(void *) >= sizeof(CUdeviceptr));
+	return reinterpret_cast<void *>(uintptr_t(U(ptr)));
+}
 
 extern "C" {
 	std::string_view cuErrStr(CUresult result) {
@@ -263,7 +167,7 @@ extern "C" {
 		fmt::print("cuDevicePrimaryCtxRelease result: {}\n", cuErrStr(result));
 	}
 
-	auto x17ai_cuda_open_context(usize device_id) -> PtrResult {
+	auto x17ai_cuda_open_context(usize device_id, FfiBuffer err) -> CudaContext * {
 		try {
 			CUresult result;
 			if (!cuda_initialized.load(std::memory_order_acquire)) [[unlikely]] {
@@ -271,9 +175,9 @@ extern "C" {
 				if (!cuda_initialized.load(std::memory_order_relaxed)) {
 					result = cuInit(0);
 					if (result != CUDA_SUCCESS) [[unlikely]] {
-						static StaticString const message =
-							"x17ai_cuda_open_context(): Failed to initialize CUDA";
-						return Err(&message);
+						err.write("x17ai_cuda_open_context(): cuInit() failed: ");
+						err.write(cuErrStr(result));
+						return nullptr;
 					}
 					cuda_initialized.store(true, std::memory_order_release);
 				}
@@ -286,29 +190,30 @@ extern "C" {
 			constexpr CommonId MAX_ID = CuUnsignedId(std::numeric_limits<CUdevice>::max());
 
 			if (CommonId(device_id) > MAX_ID) [[unlikely]] {
-				static StaticString const message =
-					"x17ai_cuda_open_context(): CUDA device ID out of range";
-				return Err(&message);
+				err.write("x17ai_cuda_open_context(): CUDA device ID out of range");
+				return nullptr;
 			}
 
-			CUcontext ctx;
+			CUcontext ctx = nullptr;
 			result = cuDevicePrimaryCtxRetain(&ctx, device_id);
 			if (result != CUDA_SUCCESS) [[unlikely]] {
-				static StaticString const message =
-					"x17ai_cuda_open_context(): Failed to retain primary CUDA context";
-				return Err(&message);
+				err.write("x17ai_cuda_open_context(): cuDevicePrimaryCtxRetain() failed: ");
+				err.write(cuErrStr(result));
+				return nullptr;
+			}
+			if (ctx == nullptr) [[unlikely]] {
+				err.write("x17ai_cuda_open_context(): cuDevicePrimaryCtxRetain() returned nullptr");
+				return nullptr;
 			}
 
-			static StaticString const message =
-				"x17ai_cuda_open_context(): cuDevicePrimaryCtxRetain() returned nullptr";
-			return Ok(ctx, &message);
+			return reinterpret_cast<CudaContext *>(ctx);
 		} catch (...) {
-			static StaticString const message = "x17ai_cuda_close_context(): exception thrown";
-			return Err(&message);
+			err.write("x17ai_cuda_open_context(): exception thrown");
+			return nullptr;
 		}
 	}
 
-	auto x17ai_cuda_close_context(usize device_id) -> VoidResult {
+	auto x17ai_cuda_close_context(usize device_id, FfiBuffer err) -> int {
 		try {
 			assert(cuda_initialized.load(std::memory_order_acquire));
 
@@ -319,57 +224,59 @@ extern "C" {
 			constexpr CommonId MAX_ID = CuUnsignedId(std::numeric_limits<CUdevice>::max());
 
 			if (CommonId(device_id) > MAX_ID) [[unlikely]] {
-				static StaticString const message =
-					"x17ai_cuda_close_context(): CUDA device ID out of range";
-				return Err(&message);
+				err.write("x17ai_cuda_close_context(): CUDA device ID out of range");
+				return -1;
 			}
 
 			CUresult result = cuDevicePrimaryCtxRelease(device_id);
 			if (result != CUDA_SUCCESS) [[unlikely]] {
-				static StaticString const message =
-					"x17ai_cuda_close_context(): Failed to release primary CUDA context";
-				return Err(&message);
+				err.write("x17ai_cuda_close_context(): cuDevicePrimaryCtxRelease() failed: ");
+				err.write(cuErrStr(result));
+				return -1;
 			}
-			return Ok();
+			return 0;
 		} catch (...) {
-			static StaticString const message = "x17ai_cuda_close_context(): exception thrown";
-			return Err(&message);
+			err.write("x17ai_cuda_close_context(): exception thrown");
+			return -1;
 		}
 	}
 
-	auto x17ai_cuda_open_stream(void *context) -> PtrResult {
+	auto x17ai_cuda_open_stream(CudaContext *context, FfiBuffer err) -> CudaStream * {
 		try {
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(context != nullptr);
-			CUcontext ctx = static_cast<CUcontext>(context);
+			CUcontext ctx = reinterpret_cast<CUcontext>(context);
 
 			CUresult result = cuCtxPushCurrent(ctx);
 			if (result != CUDA_SUCCESS) [[unlikely]] {
-				static StaticString const message =
-					"x17ai_cuda_open_stream(): Failed to push CUDA context";
-				return Err(&message);
+				err.write("x17ai_cuda_open_stream(): cuCtxPushCurrent() failed: ");
+				err.write(cuErrStr(result));
+				return nullptr;
 			}
 
 			CUstream cu_stream;
 			result = cuStreamCreate(&cu_stream, CU_STREAM_NON_BLOCKING);
-			if (result != CUDA_SUCCESS) [[unlikely]] {
-				static StaticString const message =
-					"x17ai_cuda_open_stream(): Failed to create CUDA stream";
-				return Err(&message);
-			}
 
 			[[maybe_unused]] auto _result = cuCtxPopCurrent(&ctx);
 
-			static StaticString const message =
-				"x17ai_cuda_open_stream(): cuStreamCreate() returned nullptr";
-			return Ok(cu_stream, &message);
+			if (result != CUDA_SUCCESS) [[unlikely]] {
+				err.write("x17ai_cuda_open_stream(): cuStreamCreate() failed: ");
+				err.write(cuErrStr(result));
+				return nullptr;
+			}
+			if (cu_stream == nullptr) [[unlikely]] {
+				err.write("x17ai_cuda_open_stream(): cuStreamCreate() returned nullptr");
+				return nullptr;
+			}
+
+			return reinterpret_cast<CudaStream *>(cu_stream);
 		} catch (...) {
-			static StaticString const message = "x17ai_cuda_open_stream(): exception thrown";
-			return Err(&message);
+			err.write("x17ai_cuda_open_stream(): exception thrown");
+			return nullptr;
 		}
 	}
 
-	auto x17ai_cuda_close_stream(void *stream) -> VoidResult {
+	auto x17ai_cuda_close_stream(void *stream, FfiBuffer err) -> int {
 		try {
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(stream != nullptr);
@@ -377,82 +284,88 @@ extern "C" {
 
 			CUresult result = cuStreamDestroy(cu_stream);
 			if (result != CUDA_SUCCESS) [[unlikely]] {
-				static StaticString const message =
-					"x17ai_cuda_close_stream(): Failed to destroy CUDA stream";
-				return Err(&message);
+				err.write("x17ai_cuda_close_stream(): cuStreamDestroy() failed: ");
+				err.write(cuErrStr(result));
+				return -1;
 			}
-			return Ok();
+			return 0;
 		} catch (...) {
-			static StaticString const message = "x17ai_cuda_close_stream(): exception thrown";
-			return Err(&message);
+			err.write("x17ai_cuda_close_stream(): exception thrown");
+			return -1;
 		}
 	}
 
-	auto x17ai_cuda_alloc(void *stream, usize bytes) -> DevicePtrResult {
+	auto x17ai_cuda_alloc(CudaStream *stream, usize bytes, FfiBuffer err) -> void * {
 		try {
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(stream != nullptr);
-			CUstream cu_stream = static_cast<CUstream>(stream);
+			CUstream cu_stream = reinterpret_cast<CUstream>(stream);
 
 			CUdeviceptr memory = 0;
 			CUresult result = cuMemAllocAsync(&memory, bytes, cu_stream);
 			if (result != CUDA_SUCCESS) [[unlikely]] {
-				static StaticString const message = "x17ai_cuda_alloc(): cuMemAllocAsync() failed";
-				return Err(&message);
+				err.write("x17ai_cuda_alloc(): cuMemAllocAsync() failed: ");
+				err.write(cuErrStr(result));
+				return nullptr;
 			}
-			return Ok(memory);
+			if (memory == 0) [[unlikely]] {
+				err.write("x17ai_cuda_alloc(): cuMemAllocAsync() returned null pointer");
+			}
+			return from_device_ptr(memory);
 		} catch (...) {
-			static StaticString const message = "x17ai_cuda_alloc(): exception thrown";
-			return Err(&message);
+			err.write("x17ai_cuda_alloc(): exception thrown");
+			return nullptr;
 		}
 	}
 
-	auto x17ai_cuda_free(void *stream, DevicePtr ptr) -> VoidResult {
+	auto x17ai_cuda_free(CudaStream *stream, void *ptr, FfiBuffer err) -> int {
 		try {
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(stream != nullptr);
-			CUstream cu_stream = static_cast<CUstream>(stream);
+			CUstream cu_stream = reinterpret_cast<CUstream>(stream);
 
-			CUresult result = cuMemFreeAsync(static_cast<CUdeviceptr>(ptr), cu_stream);
+			CUresult result = cuMemFreeAsync(to_device_ptr(ptr), cu_stream);
 			if (result != CUDA_SUCCESS) [[unlikely]] {
-				static StaticString const message = "x17ai_cuda_free(): cuMemFreeAsync() failed";
-				return Err(&message);
+				err.write("x17ai_cuda_free(): cuMemFreeAsync() failed: ");
+				err.write(cuErrStr(result));
+				return -1;
 			}
-			return Ok();
+			return 0;
 		} catch (...) {
-			static StaticString const message = "x17ai_cuda_free(): exception thrown";
-			return Err(&message);
+			err.write("x17ai_cuda_free(): exception thrown");
+			return -1;
 		}
 	}
 
 	auto x17ai_cuda_upload_data(
-		void *stream,
+		CudaStream *stream,
 		const u8 *src,
-		DevicePtr dst,
+		void *dst,
 		usize offset_bytes,
-		usize count_bytes
-	) -> VoidResult {
+		usize count_bytes,
+		FfiBuffer err
+	) -> int {
 		try {
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(stream != nullptr);
 			assert(src != nullptr);
-			CUstream cu_stream = static_cast<CUstream>(stream);
+			CUstream cu_stream = reinterpret_cast<CUstream>(stream);
 
 			CUresult result = cuMemcpyHtoDAsync(
-				static_cast<CUdeviceptr>(dst) + static_cast<CUdeviceptr>(offset_bytes),
+				to_device_ptr(dst) + offset_bytes,
 				src,
 				count_bytes,
 				cu_stream
 			);
 			if (result != CUDA_SUCCESS) [[unlikely]] {
-				static StaticString const message =
-					"x17ai_cuda_upload_data(): cuMemcpyHtoDAsync() failed";
-				return Err(&message);
+				err.write("x17ai_cuda_upload_data(): cuMemcpyHtoDAsync() failed: ");
+				err.write(cuErrStr(result));
+				return -1;
 			}
-			return Ok();
+			return 0;
 		} catch (...) {
-			static StaticString const message = "x17ai_cuda_upload_data(): exception thrown";
-			return Err(&message);
+			err.write("x17ai_cuda_upload_data(): exception thrown");
+			return -1;
 		}
 	}
 
