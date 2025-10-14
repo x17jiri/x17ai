@@ -19,30 +19,38 @@ use crate::util::ffi_buffer::FfiBuffer;
 //--------------------------------------------------------------------------------------------------
 
 #[repr(C)]
-pub struct CudaContext;
+pub struct CudaContextHandle;
 
 #[repr(C)]
-pub struct CudaStream;
+pub struct CudaStreamHandle;
+
+#[repr(C)]
+pub struct CudaDeviceData;
 
 #[link(name = "cuda_shim")]
 unsafe extern "C" {
 	pub fn x17ai_test();
 
 	/// On error, returns null and fills `err` with the error message.
-	fn x17ai_cuda_open_context(device_id: usize, err: FfiBuffer) -> *mut CudaContext;
+	fn x17ai_cuda_open_context(device_id: usize, err: FfiBuffer) -> *mut CudaContextHandle;
 	/// On error, returns != 0 and fills `err` with the error message.
 	fn x17ai_cuda_close_context(device_id: usize, err: FfiBuffer) -> c_int;
 
-	fn x17ai_cuda_open_stream(ctx: *mut CudaContext, err: FfiBuffer) -> *mut CudaStream;
-	fn x17ai_cuda_close_stream(stream: *mut CudaStream, err: FfiBuffer) -> c_int;
+	fn x17ai_cuda_open_stream(ctx: *mut CudaContextHandle, err: FfiBuffer)
+	-> *mut CudaStreamHandle;
+	fn x17ai_cuda_close_stream(stream: *mut CudaStreamHandle, err: FfiBuffer) -> c_int;
 
-	fn x17ai_cuda_alloc(stream: *mut CudaStream, bytes: usize, err: FfiBuffer) -> DevicePtr;
-	fn x17ai_cuda_free(stream: *mut CudaStream, ptr: DevicePtr) -> c_int;
+	fn x17ai_cuda_alloc(
+		stream: *mut CudaStreamHandle,
+		bytes: usize,
+		err: FfiBuffer,
+	) -> *mut CudaDeviceData;
+	fn x17ai_cuda_free(stream: *mut CudaStreamHandle, ptr: *mut CudaDeviceData) -> c_int;
 
 	pub fn x17ai_cuda_upload_data(
-		stream: *mut CudaStream,
-		src: *const u8,
-		dst: DevicePtr,
+		stream: *mut CudaStreamHandle,
+		src: *mut u8,
+		dst: *mut CudaDeviceData,
 		offset_bytes: usize,
 		size_bytes: usize,
 		err: FfiBuffer,
@@ -50,7 +58,7 @@ unsafe extern "C" {
 
 	pub fn x17ai_cuda_download_data(
 		stream: *mut CudaStream,
-		src: DevicePtr,
+		src: *const CudaDeviceData,
 		dst: *mut u8,
 		offset_bytes: usize,
 		size_bytes: usize,
