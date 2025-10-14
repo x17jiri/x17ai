@@ -9,8 +9,6 @@ use std::ffi::{c_char, c_int, c_void};
 use std::hint::cold_path;
 use std::ptr::NonNull;
 
-use thin_vec::ThinVec;
-
 use crate::ErrPack;
 use crate::tensor::TensorOpError;
 use crate::tensor::device::{DevicePtr, KernelElemArg, KernelOutput, KernelReduceArg};
@@ -65,15 +63,16 @@ unsafe extern "C" {
 		err: FfiBuffer,
 	) -> c_int;
 
-	/// On success, returns 0 and fills `buffer` with the compiled PTX code.
-	/// On failure, returns != 0 and fills `buffer` with the error message.
+	/// On success, returns 0 and fills `ptx` with the compiled PTX code.
+	/// On failure, returns != 0 and fills `log` with the error message.
 	fn x17ai_cuda_compile_kernel(
 		stream: *mut c_void,
 		source: *const c_char,
 		ptx: FfiBuffer,
 		log: FfiBuffer,
-	) -> VoidResult;
+	) -> c_int;
 
+	/*
 	fn x17ai_cuda_new_kernel(source: *const c_char, len: usize) -> PtrResult;
 	fn x17ai_cuda_del_kernel(kernel: *const c_void);
 
@@ -83,14 +82,14 @@ unsafe extern "C" {
 		elem_args: *const KernelElemArg,
 		reduce_args: *const KernelReduceArg,
 		const_args: *const f64,
-	) -> VoidResult;
+	) -> VoidResult;*/
 }
 
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct CudaError {
-	pub msg: ThinVec<u8>,
+	pub msg: Vec<u8>,
 }
 
 impl From<CudaError> for ErrPack<TensorOpError> {
@@ -104,14 +103,15 @@ impl From<CudaError> for ErrPack<TensorOpError> {
 
 pub struct CudaStream {
 	device_id: usize,
-	ctx: NonNull<c_void>,
-	stream: NonNull<c_void>,
+	ctx: NonNull<CudaContextHandle>,
+	stream: NonNull<CudaStreamHandle>,
 }
 
 impl CudaStream {
 	pub fn new() -> Result<Self, CudaError> {
+		let err = Vec::new();
 		let device_id = 0;
-		let ctx = unsafe { x17ai_cuda_open_context(device_id) }.into_result(|ptr| ptr)?;
+		let ctx = unsafe { x17ai_cuda_open_context(device_id, FfiBuffer::new(&mut err)) };
 		let stream = unsafe { x17ai_cuda_open_stream(ctx.as_ptr()) }.into_result(|ptr| ptr)?;
 		Ok(Self { device_id, ctx, stream })
 	}

@@ -94,12 +94,16 @@ struct FfiBuffer {
 		}
 	}
 
-	template<typename T,typename... TS>
-	bool write(T const &first, TS const &... rest) {
-		if (!write(first)) {
+	bool write(nvrtcResult result) {
+		return write(nvrtcGetErrorString(result));
+	}
+
+	template<typename A, typename B, typename... CS>
+	bool write(A const &a, B const &b, CS const &... cs) {
+		if (!write(a)) {
 			return false;
 		}
-		return write(rest...);
+		return write(b, cs...);
 	}
 
 	/*bool writeln(std::string_view str) {
@@ -434,19 +438,20 @@ extern "C" {
 	}
 
 	auto x17ai_cuda_compile_kernel(
-		CudaStreamHandle *stream, char const *source, FfiBuffer ptx, FfiBuffer log
-	) -> VoidResult {
+		CudaStreamHandle *stream,
+		char const *source,
+		FfiBuffer ptx,
+		FfiBuffer log
+	) -> int {
 		assert(stream != nullptr);
 		assert(cuda_initialized.load(std::memory_order_acquire));
 
 		// Create NVRTC program
 		nvrtcProgram prog;
 		nvrtcResult result = nvrtcCreateProgram(&prog, source, "kernel.cu", 0, nullptr, nullptr);
-		if (result != NVRTC_SUCCESS) {
-			log.write("nvrtcCreateProgram() failed with error: ", result, "\n");
-			static StaticString const message =
-				"x17ai_cuda_compile_kernel(): nvrtcCreateProgram() failed";
-			return Err(&message);
+		if (result != NVRTC_SUCCESS) [[unlikely]] {
+			log.write("x17ai_cuda_compile_kernel(): nvrtcCreateProgram() failed: ", result);
+			return -1;
 		}
 
 		// Compile the program
@@ -456,52 +461,65 @@ extern "C" {
 			 "--std=c++17"}
 		);
 		result = nvrtcCompileProgram(prog, options.size(), options.data());
-		if (result != NVRTC_SUCCESS) {
-			log.write("nvrtcCompileProgram() failed with error: ");
-			log.writeln(nvrtcGetErrorString(result));
+		if (result != NVRTC_SUCCESS) [[unlikely]] {
+			log.write("x17ai_cuda_compile_kernel(): nvrtcCompileProgram() failed: ", result, "\n");
 
 			// Get compilation log
 			usize log_size = 0;
 			result = nvrtcGetProgramLogSize(prog, &log_size);
-			if (result == NVRTC_SUCCESS) {
+			if (result != NVRTC_SUCCESS) [[unlikely]] {
+				log.write(
+					"x17ai_cuda_compile_kernel(): nvrtcGetProgramLogSize() failed: ", result, "\n"
+				);
+			} else {
 				std::span log_span = log.extend(log_size);
 				if (log_span.size() == log_size) [[likely]] {
-					[[maybe_unused]] auto _result = nvrtcGetProgramLog(prog, log_span.data());
+					result = nvrtcGetProgramLog(prog, log_span.data());
+					if (result != NVRTC_SUCCESS) [[unlikely]] {
+						log.write(
+							"x17ai_cuda_compile_kernel(): nvrtcGetProgramLog() failed: ",
+							result, "\n"
+						);
+					}
 				}
 			}
 
-			[[maybe_unused]] auto _result = nvrtcDestroyProgram(&prog);
+			result = nvrtcDestroyProgram(&prog);
+			if (result != NVRTC_SUCCESS) [[unlikely]] {
+				log.write(
+					"x17ai_cuda_compile_kernel(): nvrtcDestroyProgram() failed: ", result, "\n"
+				);
+			}
 
-			static StaticString const message =
-				"x17ai_cuda_compile_kernel(): nvrtcCompileProgram() failed";
-			return Err(&message);
+			return -1;
 		}
 
 		// Get PTX
 		usize ptx_size = 0;
 		result = nvrtcGetPTXSize(prog, &ptx_size);
-		if (result != NVRTC_SUCCESS) {
+		if (result != NVRTC_SUCCESS) [[unlikely]] {
+			log.write("x17ai_cuda_compile_kernel(): nvrtcGetPTXSize() failed: ", result, "\n");
 			ptx_size = 0;
 		} else {
 			std::span ptx_span = ptx.extend(ptx_size);
 			if (ptx_span.size() != ptx_size) [[unlikely]] {
+				log.write("x17ai_cuda_compile_kernel(): failed to extend PTX buffer\n");
 				ptx_size = 0;
 			} else {
 				result = nvrtcGetPTX(prog, ptx_span.data());
 				if (result != NVRTC_SUCCESS) [[unlikely]] {
+					log.write("x17ai_cuda_compile_kernel(): nvrtcGetPTX() failed: ", result, "\n");
 					ptx_size = 0;
 				}
 			}
 		}
 
-		[[maybe_unused]] auto _result = nvrtcDestroyProgram(&prog);
-
-		if (ptx_size == 0) [[unlikely]] {
-			static StaticString const message =
-				"x17ai_cuda_compile_kernel(): Failed to get PTX from compiled program";
-			return Err(&message);
+		result = nvrtcDestroyProgram(&prog);
+		if (result != NVRTC_SUCCESS) [[unlikely]] {
+			log.write("x17ai_cuda_compile_kernel(): nvrtcDestroyProgram() failed: ", result, "\n");
 		}
-		return Ok();
+
+		return ptx_size > 0 ? 0 : -1;
 	}
 
 	/*
