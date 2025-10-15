@@ -34,6 +34,9 @@ pub struct FfiBufferVMT {
 	///
 	/// If reallocation happens, only items up to len are preserved.
 	pub extend: unsafe extern "C" fn(this: *mut c_void, additional: usize) -> FfiSpan,
+
+	/// Resets len to zero. Capacity is unchanged.
+	pub clear: unsafe extern "C" fn(this: *mut c_void),
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -69,12 +72,18 @@ impl<'a> FfiBuffer<'a> {
 				cold_path();
 				return FfiSpan { ptr: std::ptr::null_mut(), len: 0 };
 			}
-			let ptr = this.as_mut_ptr().add(this.len());
+			let ptr = unsafe { this.as_mut_ptr().add(this.len()) };
 			unsafe { this.set_len(this.len() + additional) };
 			FfiSpan { ptr, len: additional }
 		}
 
-		static VMT: FfiBufferVMT = FfiBufferVMT { span, buf_span };
+		extern "C" fn clear(this: *mut c_void) {
+			let this = this.cast::<Vec<u8>>();
+			let this = unsafe { &mut *this };
+			this.clear();
+		}
+
+		static VMT: FfiBufferVMT = FfiBufferVMT { span, buf_span, extend, clear };
 
 		Self {
 			instance: std::ptr::from_mut(vec).cast(),

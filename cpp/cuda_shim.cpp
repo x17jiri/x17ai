@@ -46,6 +46,7 @@ struct FfiBufferVMT {
 	FfiSpan (*span)(void *self);
 	FfiSpan (*buf_span)(void *self);
 	FfiSpan (*extend)(void *self, usize additional);
+	void (*clear)(void *self);
 };
 
 struct FfiBuffer {
@@ -106,16 +107,9 @@ struct FfiBuffer {
 		return write(b, cs...);
 	}
 
-	/*bool writeln(std::string_view str) {
-		size_t len = str.size();
-		std::span buf = extend(len + 1);
-		if (buf.size() != len) [[unlikely]] {
-			return false;
-		}
-		std::copy(str.begin(), str.end(), buf.data());
-		buf[len] = '\n';
-		return true;
-	}*/
+	void clear() {
+		vmt->clear(instance);
+	}
 };
 
 struct CudaContextHandle;
@@ -442,7 +436,7 @@ extern "C" {
 		char const *source,
 		FfiBuffer ptx,
 		FfiBuffer log
-	) -> int {
+	) {
 		assert(stream != nullptr);
 		assert(cuda_initialized.load(std::memory_order_acquire));
 
@@ -451,7 +445,7 @@ extern "C" {
 		nvrtcResult result = nvrtcCreateProgram(&prog, source, "kernel.cu", 0, nullptr, nullptr);
 		if (result != NVRTC_SUCCESS) [[unlikely]] {
 			log.write("x17ai_cuda_compile_kernel(): nvrtcCreateProgram() failed: ", result);
-			return -1;
+			return;
 		}
 
 		// Compile the program
@@ -491,7 +485,7 @@ extern "C" {
 				);
 			}
 
-			return -1;
+			return;
 		}
 
 		// Get PTX
@@ -499,17 +493,19 @@ extern "C" {
 		result = nvrtcGetPTXSize(prog, &ptx_size);
 		if (result != NVRTC_SUCCESS) [[unlikely]] {
 			log.write("x17ai_cuda_compile_kernel(): nvrtcGetPTXSize() failed: ", result, "\n");
-			ptx_size = 0;
+		} else if (ptx_size == 0) [[unlikely]] {
+			log.write("x17ai_cuda_compile_kernel(): nvrtcGetPTXSize() returned size 0\n");
 		} else {
-			std::span ptx_span = ptx.extend(ptx_size);
-			if (ptx_span.size() != ptx_size) [[unlikely]] {
+			std::span ptx_span = ptx.extend(ptx_size + 1);
+			if (ptx_span.size() != ptx_size + 1) [[unlikely]] {
 				log.write("x17ai_cuda_compile_kernel(): failed to extend PTX buffer\n");
-				ptx_size = 0;
+				ptx.clear();
 			} else {
 				result = nvrtcGetPTX(prog, ptx_span.data());
+				ptx_span[ptx_size] = '\0';
 				if (result != NVRTC_SUCCESS) [[unlikely]] {
 					log.write("x17ai_cuda_compile_kernel(): nvrtcGetPTX() failed: ", result, "\n");
-					ptx_size = 0;
+					ptx.clear();
 				}
 			}
 		}
@@ -518,8 +514,6 @@ extern "C" {
 		if (result != NVRTC_SUCCESS) [[unlikely]] {
 			log.write("x17ai_cuda_compile_kernel(): nvrtcDestroyProgram() failed: ", result, "\n");
 		}
-
-		return ptx_size > 0 ? 0 : -1;
 	}
 
 	/*

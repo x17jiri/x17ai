@@ -13,7 +13,7 @@ use hashbrown::HashTable;
 
 use crate::ErrPack;
 use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
-use crate::tensor::device::cuda::cuda_shim::{CudaError, CudaKernelHandle, CudaStream};
+use crate::tensor::device::cuda::cuda_shim::{CudaError, CudaKernel, CudaStream};
 use crate::tensor::device::kernel::DynKernelCall;
 use crate::tensor::device::{
 	AttentionArgs, DeviceBuffer, DevicePtr, MatMulArgs, NewDeviceBufferError,
@@ -28,7 +28,7 @@ pub mod cuda_shim;
 
 struct CompiledKernel {
 	key: Box<[HashWord]>, // TODO - allocate `key` inline at the end of the struct
-	handle: CudaKernelHandle,
+	kernel: CudaKernel,
 }
 
 struct CompiledKernelEntry {
