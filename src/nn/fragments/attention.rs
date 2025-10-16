@@ -137,7 +137,7 @@ impl Attention {
 			q_offset: q_map.offset,
 			q_item_stride: q_count.stride,
 			q_head_stride: q_heads.stride,
-			q: q.buf().memory(),
+			q: q.buf().device_ptr(),
 
 			k_count: k_count.size,
 			group_shift: group_shift as usize,
@@ -145,7 +145,7 @@ impl Attention {
 			k_offset: k_map.offset,
 			k_item_stride: k_count.stride,
 			k_head_stride: k_heads.stride,
-			k: k.buf().memory(),
+			k: k.buf().device_ptr(),
 
 			// v_count == k_count
 			// v_head_count == head_count >> group_shift
@@ -153,7 +153,7 @@ impl Attention {
 			v_offset: v_map.offset,
 			v_item_stride: v_count.stride,
 			v_head_stride: v_heads.stride,
-			v: v.buf().memory(),
+			v: v.buf().device_ptr(),
 
 			// o_count == q_count
 			// o_head_count == head_count
@@ -161,7 +161,7 @@ impl Attention {
 			o_offset: o_map.offset,
 			o_item_stride: o_count.stride,
 			o_head_stride: o_heads.stride,
-			o: o.buf().memory(),
+			o: o.buf().device_ptr(),
 
 			q_buf_elems: q.buf().elems(),
 			k_buf_elems: k.buf().elems(),

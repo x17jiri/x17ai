@@ -265,21 +265,21 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 			o_rows: to.rows.size,
 			o_cols: to.cols.size,
 			o_offset: to.tensor.map().offset,
-			o_buf: to_borrow.memory(),
+			o_buf: to_borrow.device_ptr(),
 
 			a_row_stride: col.rows.stride,
 			a_col_stride: col_cols.stride,
 			// a_rows == o_rows
 			a_cols: col_cols.size,
 			a_offset: col.tensor.map().offset,
-			a_buf: col_borrow.memory(),
+			a_buf: col_borrow.device_ptr(),
 
 			b_row_stride: row_rows.stride,
 			b_col_stride: row.cols.stride,
 			// b_rows == a_cols - this condition is ensured by DimMerger
 			// b_cols == o_cols
 			b_offset: row.tensor.map().offset,
-			b_buf: row_borrow.memory(),
+			b_buf: row_borrow.device_ptr(),
 
 			o_dtype: to.tensor.dtype(),
 			a_dtype: col.tensor.dtype(),
@@ -339,21 +339,21 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 			o_rows: to.rows.size,
 			o_cols: to_cols.size,
 			o_offset: to.tensor.map().offset,
-			o_buf: to_borrow.memory(),
+			o_buf: to_borrow.device_ptr(),
 
 			a_row_stride: mat.rows.stride,
 			a_col_stride: mat.cols.stride,
 			// a_rows == o_rows
 			a_cols: mat.cols.size,
 			a_offset: mat.tensor.map().offset,
-			a_buf: mat_borrow.memory(),
+			a_buf: mat_borrow.device_ptr(),
 
 			b_row_stride: col.rows.stride,
 			b_col_stride: col_cols.stride,
 			// b_rows == a_cols
 			// b_cols == o_cols
 			b_offset: col.tensor.map().offset,
-			b_buf: col_borrow.memory(),
+			b_buf: col_borrow.device_ptr(),
 
 			o_dtype: to.tensor.dtype(),
 			a_dtype: mat.tensor.dtype(),

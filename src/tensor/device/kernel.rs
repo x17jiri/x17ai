@@ -659,7 +659,7 @@ where
 				reduce_args_top_dim.strides[i] * dtype_bytes,
 			],
 			offset_bytes: arg.map().offset * dtype_bytes,
-			buf: arg.buf().memory(),
+			buf: arg.buf().device_ptr(),
 		}
 	});
 
@@ -671,7 +671,7 @@ where
 				merged[1].strides[1 + i] * dtype_bytes,
 			],
 			offset_bytes: arg.map().offset * dtype_bytes,
-			buf: arg.buf().memory(),
+			buf: arg.buf().device_ptr(),
 		}
 	});
 
@@ -687,7 +687,7 @@ where
 			merged[1].strides[0] * dtype_bytes,
 		],
 		offset_bytes: output.map().offset * dtype_bytes,
-		buf: output.buf().memory(),
+		buf: output.buf().device_ptr(),
 		reduction_size: reduce_args_top_dim.size,
 	};
 

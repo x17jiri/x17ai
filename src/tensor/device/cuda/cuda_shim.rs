@@ -23,10 +23,10 @@ pub struct CudaContextHandle;
 pub struct CudaStreamHandle;
 
 #[repr(C)]
-pub struct CudaDeviceData;
+pub struct CudaKernelHandle;
 
 #[repr(C)]
-pub struct CudaKernelHandle;
+pub struct CudaDeviceData;
 
 #[link(name = "cuda_shim")]
 unsafe extern "C" {
@@ -80,7 +80,11 @@ unsafe extern "C" {
 		log: FfiBuffer,
 	);
 
-	fn x17ai_cuda_new_kernel(source: *const c_char, err: FfiBuffer) -> *mut CudaKernelHandle;
+	fn x17ai_cuda_new_kernel(
+		ctx: *mut CudaContextHandle,
+		ptx: *const c_char,
+		err: FfiBuffer,
+	) -> *mut CudaKernelHandle;
 	fn x17ai_cuda_del_kernel(kernel: *mut CudaKernelHandle, err: FfiBuffer) -> c_int;
 
 	fn x17ai_cuda_run_kernel(
@@ -298,10 +302,22 @@ impl CudaKernel {
 		reduce_args: *const KernelReduceArg,
 		const_args: *const f64,
 	) -> Result<(), CudaError> {
-		unsafe {
-			x17ai_cuda_run_kernel(self.handle.as_ptr(), o, elem_args, reduce_args, const_args)
+		let mut err = Vec::new();
+		let result = unsafe {
+			x17ai_cuda_run_kernel(
+				self.handle.as_ptr(),
+				o,
+				elem_args,
+				reduce_args,
+				const_args,
+				FfiBuffer::new(&mut err),
+			)
+		};
+		if result != 0 {
+			cold_path();
+			return Err(CudaError { msg: err });
 		}
-		.into_result()
+		Ok(())
 	}
 }
 

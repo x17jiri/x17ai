@@ -28,6 +28,9 @@ using u16 = uint16_t;
 using u32 = uint32_t;
 using u64 = uint64_t;
 
+using f32 = float;
+using f64 = double;
+
 using usize = size_t;
 using isize = std::common_type_t<
 	std::make_signed_t<std::ptrdiff_t>,
@@ -43,36 +46,36 @@ struct FfiSpan {
 };
 
 struct FfiBufferVMT {
-	FfiSpan (*span)(void *self);
-	FfiSpan (*buf_span)(void *self);
-	FfiSpan (*extend)(void *self, usize additional);
-	void (*clear)(void *self);
+	FfiSpan (*span)(void *self) noexcept;
+	FfiSpan (*buf_span)(void *self) noexcept;
+	FfiSpan (*extend)(void *self, usize additional) noexcept;
+	void (*clear)(void *self) noexcept;
 };
 
 struct FfiBuffer {
 	void *instance;
 	FfiBufferVMT const *vmt;
 
-	inline std::span<char> span() {
+	inline std::span<char> span() noexcept {
 		FfiSpan s = vmt->span(instance);
 		return std::span(reinterpret_cast<char *>(s.ptr), s.len);
 	}
 
-	inline std::span<char> buf_span() {
+	inline std::span<char> buf_span() noexcept {
 		FfiSpan s = vmt->buf_span(instance);
 		return std::span(reinterpret_cast<char *>(s.ptr), s.len);
 	}
 
-	inline std::span<char> extend(usize additional) {
+	inline std::span<char> extend(usize additional) noexcept {
 		FfiSpan s = vmt->extend(instance, additional);
 		return std::span(reinterpret_cast<char *>(s.ptr), s.len);
 	}
 
-	bool write() {
+	bool write() noexcept {
 		return true;
 	}
 
-	bool write(std::string_view str) {
+	bool write(std::string_view str) noexcept {
 		size_t len = str.size();
 		std::span buf = extend(len);
 		if (buf.size() != len) [[unlikely]] {
@@ -82,46 +85,92 @@ struct FfiBuffer {
 		return true;
 	}
 
-	bool write(int value) {
+	bool write(int value) noexcept {
 		return write(fmt::to_string(value));
 	}
 
-	bool write(CUresult result) {
+	bool write(CUresult e) noexcept {
 		const char *err_str = nullptr;
-		if (cuGetErrorString(result, &err_str) == CUDA_SUCCESS) [[likely]] {
+		if (cuGetErrorString(e, &err_str) == CUDA_SUCCESS) [[likely]] {
 			return write(err_str);
 		} else {
-			return write("Unknown CUDA error code ", int(result));
+			return write("Unknown CUDA error code ", int(e));
 		}
 	}
 
-	bool write(nvrtcResult result) {
-		return write(nvrtcGetErrorString(result));
+	bool write(nvrtcResult e) noexcept {
+		return write(nvrtcGetErrorString(e));
 	}
 
 	template<typename A, typename B, typename... CS>
-	bool write(A const &a, B const &b, CS const &... cs) {
+	bool write(A const &a, B const &b, CS const &... cs) noexcept {
 		if (!write(a)) {
 			return false;
 		}
 		return write(b, cs...);
 	}
 
-	void clear() {
+	void clear() noexcept {
 		vmt->clear(instance);
 	}
 };
 
+// #[repr(C)]
+// pub struct KernelOutput {
+// 	pub size: [usize; 2],
+// 	pub stride_bytes: [usize; 2],
+// 	pub buf: DevicePtr,
+// 	pub offset_bytes: usize,
+// 	pub reduction_size: usize,
+// }
+
+struct KernelOutput {
+	usize size[2];
+	usize stride_bytes[2];
+	void *buf;
+	usize offset_bytes;
+	usize reduction_size;
+};
+
+// #[repr(C)]
+// pub struct KernelElemArg {
+// 	pub stride_bytes: [usize; 2],
+// 	pub buf: DevicePtr,
+// 	pub offset_bytes: usize,
+// }
+
+struct KernelElemArg {
+	usize stride_bytes[2];
+	void *buf;
+	usize offset_bytes;
+};
+
+// #[repr(C)]
+// pub struct KernelReduceArg {
+// 	pub stride_bytes: [usize; 3],
+// 	pub buf: DevicePtr,
+// 	pub offset_bytes: usize,
+// }
+
+struct KernelReduceArg {
+	usize stride_bytes[3];
+	void *buf;
+	usize offset_bytes;
+};
+
+
+
 struct CudaContextHandle;
 struct CudaStreamHandle;
+struct CudaKernelHandle;
 struct CudaDeviceData;
 
-inline CUdeviceptr to_dev_ptr(CudaDeviceData *ptr) {
+inline CUdeviceptr to_dev_ptr(CudaDeviceData *ptr) noexcept {
 	using U = std::make_unsigned_t<CUdeviceptr>;
 	return CUdeviceptr(U(reinterpret_cast<uintptr_t>(ptr)));
 }
 
-inline CudaDeviceData *from_dev_ptr(CUdeviceptr ptr) {
+inline CudaDeviceData *from_dev_ptr(CUdeviceptr ptr) noexcept {
 	using U = std::make_unsigned_t<CUdeviceptr>;
 	static_assert(sizeof(uintptr_t) >= sizeof(CUdeviceptr));
 	static_assert(sizeof(CudaDeviceData *) >= sizeof(CUdeviceptr));
@@ -183,15 +232,15 @@ extern "C" {
 		fmt::print("cuDevicePrimaryCtxRelease result: {}\n", cuErrStr(result));
 	}*/
 
-	auto x17ai_cuda_open_context(usize device_id, FfiBuffer err) -> CudaContextHandle * {
+	CudaContextHandle *x17ai_cuda_open_context(usize device_id, FfiBuffer err) noexcept {
 		try {
-			CUresult result;
+			CUresult e;
 			if (!cuda_initialized.load(std::memory_order_acquire)) [[unlikely]] {
 				std::lock_guard<std::mutex> lock(cuda_init_mutex);
 				if (!cuda_initialized.load(std::memory_order_relaxed)) {
-					result = cuInit(0);
-					if (result != CUDA_SUCCESS) [[unlikely]] {
-						err.write("x17ai_cuda_open_context(): cuInit() failed: ", result);
+					e = cuInit(0);
+					if (e != CUDA_SUCCESS) [[unlikely]] {
+						err.write("x17ai_cuda_open_context(): cuInit() failed: ", e);
 						return nullptr;
 					}
 					cuda_initialized.store(true, std::memory_order_release);
@@ -210,9 +259,9 @@ extern "C" {
 			}
 
 			CUcontext ctx = nullptr;
-			result = cuDevicePrimaryCtxRetain(&ctx, device_id);
-			if (result != CUDA_SUCCESS) [[unlikely]] {
-				err.write("x17ai_cuda_open_context(): cuDevicePrimaryCtxRetain() failed: ", result);
+			e = cuDevicePrimaryCtxRetain(&ctx, device_id);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				err.write("x17ai_cuda_open_context(): cuDevicePrimaryCtxRetain() failed: ", e);
 				return nullptr;
 			}
 			if (ctx == nullptr) [[unlikely]] {
@@ -230,9 +279,10 @@ extern "C" {
 		}
 	}
 
-	auto x17ai_cuda_close_context(usize device_id, FfiBuffer err) -> int {
+	int x17ai_cuda_close_context(usize device_id, FfiBuffer err) noexcept {
 		try {
 			assert(cuda_initialized.load(std::memory_order_acquire));
+			CUresult e;
 
 			using MyUnsignedId = decltype(device_id);
 			static_assert(std::is_unsigned_v<MyUnsignedId>);
@@ -245,9 +295,9 @@ extern "C" {
 				return -1;
 			}
 
-			CUresult result = cuDevicePrimaryCtxRelease(device_id);
-			if (result != CUDA_SUCCESS) [[unlikely]] {
-				err.write("x17ai_cuda_close_context(): cuDevicePrimaryCtxRelease() failed: ", result);
+			e = cuDevicePrimaryCtxRelease(device_id);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				err.write("x17ai_cuda_close_context(): cuDevicePrimaryCtxRelease() failed: ", e);
 				return -1;
 			}
 			return 0;
@@ -260,25 +310,26 @@ extern "C" {
 		}
 	}
 
-	auto x17ai_cuda_open_stream(CudaContextHandle *context, FfiBuffer err) -> CudaStreamHandle * {
+	CudaStreamHandle *x17ai_cuda_open_stream(CudaContextHandle *context, FfiBuffer err) noexcept {
 		try {
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(context != nullptr);
 			CUcontext ctx = reinterpret_cast<CUcontext>(context);
+			CUresult e;
 
-			CUresult result = cuCtxPushCurrent(ctx);
-			if (result != CUDA_SUCCESS) [[unlikely]] {
-				err.write("x17ai_cuda_open_stream(): cuCtxPushCurrent() failed: ", result);
+			e = cuCtxPushCurrent(ctx);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				err.write("x17ai_cuda_open_stream(): cuCtxPushCurrent() failed: ", e);
 				return nullptr;
 			}
 
 			CUstream cu_stream;
-			result = cuStreamCreate(&cu_stream, CU_STREAM_NON_BLOCKING);
+			e = cuStreamCreate(&cu_stream, CU_STREAM_NON_BLOCKING);
 
-			[[maybe_unused]] auto _result = cuCtxPopCurrent(&ctx);
+			[[maybe_unused]] auto _e = cuCtxPopCurrent(&ctx);
 
-			if (result != CUDA_SUCCESS) [[unlikely]] {
-				err.write("x17ai_cuda_open_stream(): cuStreamCreate() failed: ", result);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				err.write("x17ai_cuda_open_stream(): cuStreamCreate() failed: ", e);
 				return nullptr;
 			}
 			if (cu_stream == nullptr) [[unlikely]] {
@@ -296,15 +347,16 @@ extern "C" {
 		}
 	}
 
-	auto x17ai_cuda_close_stream(CudaStreamHandle *stream, FfiBuffer err) -> int {
+	int x17ai_cuda_close_stream(CudaStreamHandle *stream, FfiBuffer err) noexcept {
 		try {
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(stream != nullptr);
 			CUstream cu_stream = reinterpret_cast<CUstream>(stream);
+			CUresult e;
 
-			CUresult result = cuStreamDestroy(cu_stream);
-			if (result != CUDA_SUCCESS) [[unlikely]] {
-				err.write("x17ai_cuda_close_stream(): cuStreamDestroy() failed: ", result);
+			e = cuStreamDestroy(cu_stream);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				err.write("x17ai_cuda_close_stream(): cuStreamDestroy() failed: ", e);
 				return -1;
 			}
 			return 0;
@@ -317,16 +369,17 @@ extern "C" {
 		}
 	}
 
-	auto x17ai_cuda_alloc(CudaStreamHandle *stream, usize bytes, FfiBuffer err) -> CudaDeviceData * {
+	CudaDeviceData *x17ai_cuda_alloc(CudaStreamHandle *stream, usize bytes, FfiBuffer err) noexcept {
 		try {
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(stream != nullptr);
 			CUstream cu_stream = reinterpret_cast<CUstream>(stream);
+			CUresult e;
 
 			CUdeviceptr memory = 0;
-			CUresult result = cuMemAllocAsync(&memory, bytes, cu_stream);
-			if (result != CUDA_SUCCESS) [[unlikely]] {
-				err.write("x17ai_cuda_alloc(): cuMemAllocAsync() failed: ", result);
+			e = cuMemAllocAsync(&memory, bytes, cu_stream);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				err.write("x17ai_cuda_alloc(): cuMemAllocAsync() failed: ", e);
 				return nullptr;
 			}
 			if (memory == 0) [[unlikely]] {
@@ -342,15 +395,16 @@ extern "C" {
 		}
 	}
 
-	auto x17ai_cuda_free(CudaStreamHandle *stream, CudaDeviceData *ptr, FfiBuffer err) -> int {
+	int x17ai_cuda_free(CudaStreamHandle *stream, CudaDeviceData *ptr, FfiBuffer err) noexcept {
 		try {
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(stream != nullptr);
 			CUstream cu_stream = reinterpret_cast<CUstream>(stream);
+			CUresult e;
 
-			CUresult result = cuMemFreeAsync(to_dev_ptr(ptr), cu_stream);
-			if (result != CUDA_SUCCESS) [[unlikely]] {
-				err.write("x17ai_cuda_free(): cuMemFreeAsync() failed: ", result);
+			e = cuMemFreeAsync(to_dev_ptr(ptr), cu_stream);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				err.write("x17ai_cuda_free(): cuMemFreeAsync() failed: ", e);
 				return -1;
 			}
 			return 0;
@@ -363,28 +417,29 @@ extern "C" {
 		}
 	}
 
-	auto x17ai_cuda_upload_data(
+	int x17ai_cuda_upload_data(
 		CudaStreamHandle *stream,
 		u8 const *src,
 		CudaDeviceData *dst,
 		usize offset_bytes,
 		usize size_bytes,
 		FfiBuffer err
-	) -> int {
+	) noexcept {
 		try {
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(stream != nullptr);
 			assert(src != nullptr);
 			CUstream cu_stream = reinterpret_cast<CUstream>(stream);
+			CUresult e;
 
-			CUresult result = cuMemcpyHtoDAsync(
+			e = cuMemcpyHtoDAsync(
 				to_dev_ptr(dst) + offset_bytes,
 				src,
 				size_bytes,
 				cu_stream
 			);
-			if (result != CUDA_SUCCESS) [[unlikely]] {
-				err.write("x17ai_cuda_upload_data(): cuMemcpyHtoDAsync() failed: ", result);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				err.write("x17ai_cuda_upload_data(): cuMemcpyHtoDAsync() failed: ", e);
 				return -1;
 			}
 			return 0;
@@ -397,28 +452,29 @@ extern "C" {
 		}
 	}
 
-	auto x17ai_cuda_download_data(
+	int x17ai_cuda_download_data(
 		CudaStreamHandle *stream,
 		CudaDeviceData *src,
 		u8 *dst,
 		usize offset_bytes,
 		usize size_bytes,
 		FfiBuffer err
-	) -> int {
+	) noexcept {
 		try {
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(stream != nullptr);
 			assert(dst != nullptr);
 			CUstream cu_stream = reinterpret_cast<CUstream>(stream);
+			CUresult e;
 
-			CUresult result = cuMemcpyDtoHAsync(
+			e = cuMemcpyDtoHAsync(
 				dst,
 				to_dev_ptr(src) + offset_bytes,
 				size_bytes,
 				cu_stream
 			);
-			if (result != CUDA_SUCCESS) [[unlikely]] {
-				err.write("x17ai_cuda_download_data(): cuMemcpyDtoHAsync() failed: ", result);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				err.write("x17ai_cuda_download_data(): cuMemcpyDtoHAsync() failed: ", e);
 				return -1;
 			}
 			return 0;
@@ -431,20 +487,21 @@ extern "C" {
 		}
 	}
 
-	auto x17ai_cuda_compile_kernel(
+	void x17ai_cuda_compile_kernel(
 		CudaStreamHandle *stream,
 		char const *source,
 		FfiBuffer ptx,
 		FfiBuffer log
-	) {
+	) noexcept {
 		assert(stream != nullptr);
 		assert(cuda_initialized.load(std::memory_order_acquire));
+		nvrtcResult e;
 
 		// Create NVRTC program
 		nvrtcProgram prog;
-		nvrtcResult result = nvrtcCreateProgram(&prog, source, "kernel.cu", 0, nullptr, nullptr);
-		if (result != NVRTC_SUCCESS) [[unlikely]] {
-			log.write("x17ai_cuda_compile_kernel(): nvrtcCreateProgram() failed: ", result);
+		e = nvrtcCreateProgram(&prog, source, "kernel.cu", 0, nullptr, nullptr);
+		if (e != NVRTC_SUCCESS) [[unlikely]] {
+			log.write("x17ai_cuda_compile_kernel(): nvrtcCreateProgram() failed: ", e);
 			return;
 		}
 
@@ -454,34 +511,34 @@ extern "C" {
 			 "--use_fast_math",
 			 "--std=c++17"}
 		);
-		result = nvrtcCompileProgram(prog, options.size(), options.data());
-		if (result != NVRTC_SUCCESS) [[unlikely]] {
-			log.write("x17ai_cuda_compile_kernel(): nvrtcCompileProgram() failed: ", result, "\n");
+		e = nvrtcCompileProgram(prog, options.size(), options.data());
+		if (e != NVRTC_SUCCESS) [[unlikely]] {
+			log.write("x17ai_cuda_compile_kernel(): nvrtcCompileProgram() failed: ", e, "\n");
 
 			// Get compilation log
 			usize log_size = 0;
-			result = nvrtcGetProgramLogSize(prog, &log_size);
-			if (result != NVRTC_SUCCESS) [[unlikely]] {
+			e = nvrtcGetProgramLogSize(prog, &log_size);
+			if (e != NVRTC_SUCCESS) [[unlikely]] {
 				log.write(
-					"x17ai_cuda_compile_kernel(): nvrtcGetProgramLogSize() failed: ", result, "\n"
+					"x17ai_cuda_compile_kernel(): nvrtcGetProgramLogSize() failed: ", e, "\n"
 				);
 			} else {
 				std::span log_span = log.extend(log_size);
 				if (log_span.size() == log_size) [[likely]] {
-					result = nvrtcGetProgramLog(prog, log_span.data());
-					if (result != NVRTC_SUCCESS) [[unlikely]] {
+					e = nvrtcGetProgramLog(prog, log_span.data());
+					if (e != NVRTC_SUCCESS) [[unlikely]] {
 						log.write(
 							"x17ai_cuda_compile_kernel(): nvrtcGetProgramLog() failed: ",
-							result, "\n"
+							e, "\n"
 						);
 					}
 				}
 			}
 
-			result = nvrtcDestroyProgram(&prog);
-			if (result != NVRTC_SUCCESS) [[unlikely]] {
+			e = nvrtcDestroyProgram(&prog);
+			if (e != NVRTC_SUCCESS) [[unlikely]] {
 				log.write(
-					"x17ai_cuda_compile_kernel(): nvrtcDestroyProgram() failed: ", result, "\n"
+					"x17ai_cuda_compile_kernel(): nvrtcDestroyProgram() failed: ", e, "\n"
 				);
 			}
 
@@ -490,9 +547,9 @@ extern "C" {
 
 		// Get PTX
 		usize ptx_size = 0;
-		result = nvrtcGetPTXSize(prog, &ptx_size);
-		if (result != NVRTC_SUCCESS) [[unlikely]] {
-			log.write("x17ai_cuda_compile_kernel(): nvrtcGetPTXSize() failed: ", result, "\n");
+		e = nvrtcGetPTXSize(prog, &ptx_size);
+		if (e != NVRTC_SUCCESS) [[unlikely]] {
+			log.write("x17ai_cuda_compile_kernel(): nvrtcGetPTXSize() failed: ", e, "\n");
 		} else if (ptx_size == 0) [[unlikely]] {
 			log.write("x17ai_cuda_compile_kernel(): nvrtcGetPTXSize() returned size 0\n");
 		} else {
@@ -501,112 +558,95 @@ extern "C" {
 				log.write("x17ai_cuda_compile_kernel(): failed to extend PTX buffer\n");
 				ptx.clear();
 			} else {
-				result = nvrtcGetPTX(prog, ptx_span.data());
+				e = nvrtcGetPTX(prog, ptx_span.data());
 				ptx_span[ptx_size] = '\0';
-				if (result != NVRTC_SUCCESS) [[unlikely]] {
-					log.write("x17ai_cuda_compile_kernel(): nvrtcGetPTX() failed: ", result, "\n");
+				if (e != NVRTC_SUCCESS) [[unlikely]] {
+					log.write("x17ai_cuda_compile_kernel(): nvrtcGetPTX() failed: ", e, "\n");
 					ptx.clear();
 				}
 			}
 		}
 
-		result = nvrtcDestroyProgram(&prog);
-		if (result != NVRTC_SUCCESS) [[unlikely]] {
-			log.write("x17ai_cuda_compile_kernel(): nvrtcDestroyProgram() failed: ", result, "\n");
+		e = nvrtcDestroyProgram(&prog);
+		if (e != NVRTC_SUCCESS) [[unlikely]] {
+			log.write("x17ai_cuda_compile_kernel(): nvrtcDestroyProgram() failed: ", e, "\n");
 		}
 	}
 
-	/*
-	fn x17ai_cuda_new_kernel(source
-							 : *const std::ffi::c_char, len
-							 : usize, ) -> *const std::ffi::c_void;
-	fn x17ai_cuda_del_kernel(kernel : *const std::ffi::c_void);
+	CudaKernelHandle *x17ai_cuda_new_kernel(
+		CudaContextHandle *context,
+		char const *ptx,
+		FfiBuffer err
+	) noexcept {
+		// TODO - need to also return CUfunction
+		try {
+			assert(cuda_initialized.load(std::memory_order_acquire));
+			assert(context != nullptr);
+			assert(ptx != nullptr);
+			CUcontext ctx = reinterpret_cast<CUcontext>(context);
+			CUresult e;
 
-	fn x17ai_cuda_run_kernel(kernel
-							 : *const std::ffi::c_void, o
-							 : *const KernelOutput, elem_args
-							 : *const KernelElemArg, reduce_args
-							 : *const KernelReduceArg, const_args
-							 : *const f64, ) -> std::ffi::c_int;
-	*/
+			e = cuCtxPushCurrent(ctx);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				err.write("x17ai_cuda_new_kernel(): cuCtxPushCurrent() failed: ", e);
+				return nullptr;
+			}
+
+			CUmodule module;
+			e = cuModuleLoadDataEx(&module, ptx, 0, nullptr, nullptr);
+
+			[[maybe_unused]] auto _e = cuCtxPopCurrent(&ctx);
+
+			if (e != CUDA_SUCCESS) {
+				err.write("x17ai_cuda_new_kernel(): cuModuleLoadDataEx() failed: ", e);
+				return nullptr;
+			}
+
+			return reinterpret_cast<CudaKernelHandle *>(module);
+		} catch (std::exception const &e) {
+			err.write("x17ai_cuda_new_kernel(): exception thrown: ", e.what());
+			return nullptr;
+		} catch (...) {
+			err.write("x17ai_cuda_new_kernel(): unknown exception thrown");
+			return nullptr;
+		}
+	}
+
+	int x17ai_cuda_del_kernel(CudaKernelHandle *kernel, FfiBuffer err) noexcept {
+		try {
+			assert(cuda_initialized.load(std::memory_order_acquire));
+			assert(kernel != nullptr);
+			CUmodule module = reinterpret_cast<CUmodule>(kernel);
+			CUresult e;
+
+			e = cuModuleUnload(module);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				err.write("x17ai_cuda_del_kernel(): cuModuleUnload() failed: ", e);
+				return -1;
+			}
+			return 0;
+		} catch (std::exception const &e) {
+			err.write("x17ai_cuda_del_kernel(): exception thrown: ", e.what());
+			return -1;
+		} catch (...) {
+			err.write("x17ai_cuda_del_kernel(): unknown exception thrown");
+			return -1;
+		}
+	}
+
+	int x17ai_cuda_run_kernel(CudaKernelHandle *kernel,
+		KernelOutput const *o,
+		KernelElemArg const *elem_args,
+		KernelReduceArg const *reduce_args,
+		f64 const *const_args,
+		FfiBuffer err
+	) noexcept {
+		// TODO
+		return -1;
+	}
 }
 
 /*
-// Compile CUDA source code at runtime
-extern "C" bool
-compile_cuda_kernel(const char *source_code, const char *kernel_name) {
-	if (!x17ai::cuda_init())
-		return false;
-
-	// Check if already compiled
-	std::string key(kernel_name);
-	if (module_cache.find(key) != module_cache.end()) {
-		return true; // Already compiled
-	}
-
-	// Create NVRTC program
-	nvrtcProgram prog;
-	nvrtcResult result = nvrtcCreateProgram(
-		&prog,
-		source_code,
-		"kernel.cu",
-		0,
-		nullptr,
-		nullptr
-	);
-	if (result != NVRTC_SUCCESS) {
-		fmt::print(
-			stderr,
-			"Failed to create NVRTC program: {}\n",
-			nvrtcGetErrorString(result)
-		);
-		return false;
-	}
-
-	// Compile options
-	const char *opts[] = {
-		"--gpu-architecture=compute_75", // Adjust for your GPU
-		"--use_fast_math",
-		"--std=c++17"
-	};
-
-	// Compile the program
-	result = nvrtcCompileProgram(prog, 3, opts);
-	if (result != NVRTC_SUCCESS) {
-		// Get compilation log
-		usize log_size;
-		nvrtcGetProgramLogSize(prog, &log_size);
-		std::string log(log_size, '\0');
-		nvrtcGetProgramLog(prog, &log[0]);
-		fmt::print(stderr, "Compilation failed:\n{}\n", log);
-		nvrtcDestroyProgram(&prog);
-		return false;
-	}
-
-	// Get PTX
-	usize ptx_size;
-	nvrtcGetPTXSize(prog, &ptx_size);
-	std::string ptx(ptx_size, '\0');
-	nvrtcGetPTX(prog, &ptx[0]);
-
-	// Load module
-	CUmodule module;
-	CUresult cu_result =
-		cuModuleLoadDataEx(&module, ptx.c_str(), 0, nullptr, nullptr);
-	if (cu_result != CUDA_SUCCESS) {
-		fmt::print(stderr, "Failed to load CUDA module\n");
-		nvrtcDestroyProgram(&prog);
-		return false;
-	}
-
-	// Cache the module
-	module_cache[key] = module;
-
-	// Cleanup
-	nvrtcDestroyProgram(&prog);
-	return true;
-}
-
 // Execute a compiled kernel
 extern "C" bool execute_kernel(
 	const char *kernel_name,
@@ -620,17 +660,6 @@ extern "C" bool execute_kernel(
 	int block_y,
 	int block_z
 ) {
-	if (!cuda_initialized)
-		return false;
-
-	std::string key(kernel_name);
-	auto it = module_cache.find(key);
-	if (it == module_cache.end()) {
-		fmt::print(stderr, "Kernel not found: {}\n", kernel_name);
-		return false;
-	}
-
-	CUmodule module = it->second;
 	CUfunction function;
 
 	CUresult result = cuModuleGetFunction(&function, module, function_name);
@@ -696,37 +725,6 @@ extern "C" bool tensor_multiply_dynamic(
 		block_size,
 		1,
 		1 // block dimensions
-	);
-}
-
-// Existing libtorch tensor wrapper (simplified)
-extern "C" bool multiply_tensors_with_dynamic_kernel(
-	void *tensor_a_ptr,
-	void *tensor_b_ptr,
-	void *result_ptr,
-	const char *kernel_source
-) {
-	auto *tensor_a = static_cast<torch::Tensor *>(tensor_a_ptr);
-	auto *tensor_b = static_cast<torch::Tensor *>(tensor_b_ptr);
-	auto *result = static_cast<torch::Tensor *>(result_ptr);
-
-	// Ensure tensors are on CUDA and contiguous
-	auto a_cuda = tensor_a->to(torch::kCUDA).contiguous();
-	auto b_cuda = tensor_b->to(torch::kCUDA).contiguous();
-	*result = torch::empty_like(a_cuda);
-
-	// Get raw pointers
-	const float *a_ptr = a_cuda.data_ptr<float>();
-	const float *b_ptr = b_cuda.data_ptr<float>();
-	float *result_ptr_raw = result->data_ptr<float>();
-	int size = a_cuda.numel();
-
-	return tensor_multiply_dynamic(
-		a_ptr,
-		b_ptr,
-		result_ptr_raw,
-		size,
-		kernel_source
 	);
 }
 */
