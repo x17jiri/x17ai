@@ -5,7 +5,6 @@
 //
 //------------------------------------------------------------------------------
 
-use std::ptr::NonNull;
 use std::rc::Rc;
 
 use crate::tensor::device::DevicePtr;

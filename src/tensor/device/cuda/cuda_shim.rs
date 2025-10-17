@@ -5,7 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
-use std::ffi::{c_char, c_int, c_void};
+use std::ffi::{c_char, c_int};
 use std::hint::cold_path;
 use std::ptr::NonNull;
 
@@ -17,28 +17,47 @@ use crate::util::ffi_buffer::FfiBuffer;
 //--------------------------------------------------------------------------------------------------
 
 #[repr(C)]
-pub struct CudaContextHandle;
+pub struct CudaContextHandle {
+	_private: [u8; 0],
+}
 
 #[repr(C)]
-pub struct CudaStreamHandle;
+pub struct CudaStreamHandle {
+	_private: [u8; 0],
+}
 
 #[repr(C)]
-pub struct CudaKernelHandle;
+pub struct CudaModuleHandle {
+	_private: [u8; 0],
+}
 
 #[repr(C)]
-pub struct CudaDeviceData;
+pub struct CudaKernelHandle {
+	_private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct CudaDeviceData {
+	_private: [u8; 0],
+}
 
 #[link(name = "cuda_shim")]
 unsafe extern "C" {
-	pub fn x17ai_test();
+	// Error behavior of these functions:
+	// - functions returning pointers:
+	//   - on success: return valid pointer
+	//   - on error: return null and fill `err` with the error message
+	// - functions returning c_int:
+	//   - on success: return 0
+	//   - on error: return != 0 and fill `err` with the error message
 
-	/// On error, returns null and fills `err` with the error message.
 	fn x17ai_cuda_open_context(device_id: usize, err: FfiBuffer) -> *mut CudaContextHandle;
-	/// On error, returns != 0 and fills `err` with the error message.
+
 	fn x17ai_cuda_close_context(device_id: usize, err: FfiBuffer) -> c_int;
 
 	fn x17ai_cuda_open_stream(ctx: *mut CudaContextHandle, err: FfiBuffer)
 	-> *mut CudaStreamHandle;
+
 	fn x17ai_cuda_close_stream(stream: *mut CudaStreamHandle, err: FfiBuffer) -> c_int;
 
 	fn x17ai_cuda_alloc(
@@ -46,6 +65,7 @@ unsafe extern "C" {
 		bytes: usize,
 		err: FfiBuffer,
 	) -> *mut CudaDeviceData;
+
 	fn x17ai_cuda_free(
 		stream: *mut CudaStreamHandle,
 		ptr: *mut CudaDeviceData,
@@ -73,19 +93,26 @@ unsafe extern "C" {
 	/// On success, `ptx` will contain the compiled PTX code terminated by a zero byte.
 	/// On failure, `ptx` will be empty and `log` will contain error messages.
 	/// Note that `log` may contain warnings even on success.
-	fn x17ai_cuda_compile_kernel(
+	fn x17ai_cuda_compile_module(
 		stream: *mut CudaStreamHandle,
 		source: *const c_char,
 		ptx: FfiBuffer,
 		log: FfiBuffer,
 	);
 
-	fn x17ai_cuda_new_kernel(
+	fn x17ai_cuda_load_module(
 		ctx: *mut CudaContextHandle,
 		ptx: *const c_char,
 		err: FfiBuffer,
+	) -> *mut CudaModuleHandle;
+
+	fn x17ai_cuda_del_module(module: *mut CudaModuleHandle, err: FfiBuffer) -> c_int;
+
+	fn x17ai_cuda_get_kernel(
+		kernel: *mut CudaModuleHandle,
+		name: *const c_char,
+		err: FfiBuffer,
 	) -> *mut CudaKernelHandle;
-	fn x17ai_cuda_del_kernel(kernel: *mut CudaKernelHandle, err: FfiBuffer) -> c_int;
 
 	fn x17ai_cuda_run_kernel(
 		kernel: *mut CudaKernelHandle,
@@ -120,22 +147,22 @@ pub struct CudaStream {
 }
 
 impl CudaStream {
-	pub fn new() -> Result<Self, CudaError> {
-		let mut err = Vec::new();
-		let device_id = 0;
-		let Some(ctx) =
-			NonNull::new(unsafe { x17ai_cuda_open_context(device_id, FfiBuffer::new(&mut err)) })
-		else {
+	pub fn new(device_id: usize) -> Result<Self, CudaError> {
+		let mut err = CudaError { msg: Vec::new() };
+
+		let ctx = unsafe { x17ai_cuda_open_context(device_id, FfiBuffer::new(&mut err.msg)) };
+		let Some(ctx) = NonNull::new(ctx) else {
 			cold_path();
-			return Err(CudaError { msg: err });
+			return Err(err);
 		};
-		let Some(stream) =
-			NonNull::new(unsafe { x17ai_cuda_open_stream(ctx.as_ptr(), FfiBuffer::new(&mut err)) })
-		else {
+
+		let stream = unsafe { x17ai_cuda_open_stream(ctx.as_ptr(), FfiBuffer::new(&mut err.msg)) };
+		let Some(stream) = NonNull::new(stream) else {
 			cold_path();
-			unsafe { x17ai_cuda_close_context(device_id, FfiBuffer::new(&mut err)) };
-			return Err(CudaError { msg: err });
+			unsafe { x17ai_cuda_close_context(device_id, FfiBuffer::new(&mut err.msg)) };
+			return Err(err);
 		};
+
 		Ok(Self { device_id, ctx, stream })
 	}
 
@@ -143,13 +170,15 @@ impl CudaStream {
 	///
 	/// The allocated block of memory may or may not be initialized.
 	pub unsafe fn alloc(&self, bytes: usize) -> Result<DevicePtr, CudaError> {
-		let mut err = Vec::new();
-		let Some(ptr) = NonNull::new(unsafe {
-			x17ai_cuda_alloc(self.stream.as_ptr(), bytes, FfiBuffer::new(&mut err))
-		}) else {
+		let mut err = CudaError { msg: Vec::new() };
+
+		let ptr =
+			unsafe { x17ai_cuda_alloc(self.stream.as_ptr(), bytes, FfiBuffer::new(&mut err.msg)) };
+		let Some(ptr) = NonNull::new(ptr) else {
 			cold_path();
-			return Err(CudaError { msg: err });
+			return Err(err);
 		};
+
 		Ok(DevicePtr::new(ptr.as_ptr().cast()))
 	}
 
@@ -157,12 +186,12 @@ impl CudaStream {
 	///
 	/// The pointer must be a valid pointer returned by `alloc`.
 	pub unsafe fn free(&self, ptr: DevicePtr) {
-		let mut err = Vec::new();
+		let mut err = CudaError { msg: Vec::new() };
 		unsafe {
 			x17ai_cuda_free(
 				self.stream.as_ptr(),
 				ptr.as_ptr::<CudaDeviceData>(),
-				FfiBuffer::new(&mut err),
+				FfiBuffer::new(&mut err.msg),
 			);
 		}
 	}
@@ -177,7 +206,7 @@ impl CudaStream {
 		offset_bytes: usize,
 		size_bytes: usize,
 	) -> Result<(), CudaError> {
-		let mut err = Vec::new();
+		let mut err = CudaError { msg: Vec::new() };
 		let result = unsafe {
 			x17ai_cuda_upload_data(
 				self.stream.as_ptr(),
@@ -185,12 +214,12 @@ impl CudaStream {
 				dst.as_ptr::<CudaDeviceData>(),
 				offset_bytes,
 				size_bytes,
-				FfiBuffer::new(&mut err),
+				FfiBuffer::new(&mut err.msg),
 			)
 		};
 		if result != 0 {
 			cold_path();
-			return Err(CudaError { msg: err });
+			return Err(err);
 		}
 		Ok(())
 	}
@@ -205,7 +234,7 @@ impl CudaStream {
 		offset_bytes: usize,
 		size_bytes: usize,
 	) -> Result<(), CudaError> {
-		let mut err = Vec::new();
+		let mut err = CudaError { msg: Vec::new() };
 		let result = unsafe {
 			x17ai_cuda_download_data(
 				self.stream.as_ptr(),
@@ -213,17 +242,17 @@ impl CudaStream {
 				dst.as_ptr(),
 				offset_bytes,
 				size_bytes,
-				FfiBuffer::new(&mut err),
+				FfiBuffer::new(&mut err.msg),
 			)
 		};
 		if result != 0 {
 			cold_path();
-			return Err(CudaError { msg: err });
+			return Err(err);
 		}
 		Ok(())
 	}
 
-	pub fn compile_kernel(&self, source: &str) -> Result<Vec<u8>, CudaError> {
+	pub fn compile_module(&self, source: &str) -> Result<Vec<u8>, CudaError> {
 		let mut c_source = Vec::with_capacity(source.len() + 1);
 		c_source.extend_from_slice(source.as_bytes());
 		c_source.push(0);
@@ -231,7 +260,7 @@ impl CudaStream {
 		let mut ptx = Vec::new();
 		let mut log = Vec::new();
 		unsafe {
-			x17ai_cuda_compile_kernel(
+			x17ai_cuda_compile_module(
 				self.stream.as_ptr(),
 				c_source.as_ptr().cast(),
 				FfiBuffer::new(&mut ptx),
@@ -245,32 +274,37 @@ impl CudaStream {
 		Ok(ptx) // TODO - should we return log as well?
 	}
 
-	pub fn new_kernel(&self, mut source: Vec<u8>) -> Result<CudaKernel, CudaError> {
-		if let Some(&last) = source.last()
+	pub fn load_module(&self, mut ptx: Vec<u8>) -> Result<CudaModule, CudaError> {
+		if let Some(&last) = ptx.last()
 			&& last == 0
 		{
 			// already null-terminated
 		} else {
-			source.push(0);
+			ptx.push(0);
 		}
 
-		let mut err = Vec::new();
-		let Some(handle) = NonNull::new(unsafe {
-			x17ai_cuda_new_kernel(source.as_ptr().cast(), FfiBuffer::new(&mut err))
-		}) else {
-			cold_path();
-			return Err(CudaError { msg: err });
+		let mut err = CudaError { msg: Vec::new() };
+		let handle = unsafe {
+			x17ai_cuda_load_module(
+				self.ctx.as_ptr(),
+				ptx.as_ptr().cast(),
+				FfiBuffer::new(&mut err.msg),
+			)
 		};
-		Ok(CudaKernel { handle })
+		let Some(handle) = NonNull::new(handle) else {
+			cold_path();
+			return Err(err);
+		};
+		Ok(CudaModule { handle })
 	}
 }
 
 impl Drop for CudaStream {
 	fn drop(&mut self) {
-		let mut err = Vec::new();
+		let mut err = CudaError { msg: Vec::new() };
 		unsafe {
-			x17ai_cuda_close_stream(self.stream.as_ptr(), FfiBuffer::new(&mut err));
-			x17ai_cuda_close_context(self.device_id, FfiBuffer::new(&mut err));
+			x17ai_cuda_close_stream(self.stream.as_ptr(), FfiBuffer::new(&mut err.msg));
+			x17ai_cuda_close_context(self.device_id, FfiBuffer::new(&mut err.msg));
 		};
 	}
 }
@@ -278,17 +312,44 @@ impl Drop for CudaStream {
 //--------------------------------------------------------------------------------------------------
 
 #[repr(transparent)]
-pub struct CudaKernel {
-	pub handle: NonNull<CudaKernelHandle>,
+pub struct CudaModule {
+	pub handle: NonNull<CudaModuleHandle>,
 }
 
-impl Drop for CudaKernel {
+impl Drop for CudaModule {
 	fn drop(&mut self) {
-		let mut err = Vec::new();
+		let mut err = CudaError { msg: Vec::new() };
 		unsafe {
-			x17ai_cuda_del_kernel(self.handle.as_ptr(), FfiBuffer::new(&mut err));
+			x17ai_cuda_del_module(self.handle.as_ptr(), FfiBuffer::new(&mut err.msg));
 		};
 	}
+}
+
+impl CudaModule {
+	pub fn get_kernel(self, name: &str) -> Result<CudaKernel, CudaError> {
+		let mut c_name = Vec::with_capacity(name.len() + 1);
+		c_name.extend_from_slice(name.as_bytes());
+		c_name.push(0);
+
+		let mut err = CudaError { msg: Vec::new() };
+		let kernel = unsafe {
+			x17ai_cuda_get_kernel(
+				self.handle.as_ptr(),
+				c_name.as_ptr().cast(),
+				FfiBuffer::new(&mut err.msg),
+			)
+		};
+		let Some(kernel) = NonNull::new(kernel) else {
+			cold_path();
+			return Err(err);
+		};
+		Ok(CudaKernel { _module: self, kernel })
+	}
+}
+
+pub struct CudaKernel {
+	_module: CudaModule, // we need module to keep the kernel alive
+	kernel: NonNull<CudaKernelHandle>,
 }
 
 impl CudaKernel {
@@ -302,20 +363,20 @@ impl CudaKernel {
 		reduce_args: *const KernelReduceArg,
 		const_args: *const f64,
 	) -> Result<(), CudaError> {
-		let mut err = Vec::new();
+		let mut err = CudaError { msg: Vec::new() };
 		let result = unsafe {
 			x17ai_cuda_run_kernel(
-				self.handle.as_ptr(),
+				self.kernel.as_ptr(),
 				o,
 				elem_args,
 				reduce_args,
 				const_args,
-				FfiBuffer::new(&mut err),
+				FfiBuffer::new(&mut err.msg),
 			)
 		};
 		if result != 0 {
 			cold_path();
-			return Err(CudaError { msg: err });
+			return Err(err);
 		}
 		Ok(())
 	}

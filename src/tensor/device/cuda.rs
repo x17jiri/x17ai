@@ -27,8 +27,8 @@ pub mod cuda_shim;
 //--------------------------------------------------------------------------------------------------
 
 struct CompiledKernel {
-	key: Box<[HashWord]>, // TODO - allocate `key` inline at the end of the struct
 	kernel: CudaKernel,
+	key: Box<[HashWord]>, // TODO - allocate `key` inline at the end of the struct
 }
 
 struct CompiledKernelEntry {
@@ -44,13 +44,13 @@ pub struct CudaDevice {
 }
 
 impl CudaDevice {
-	pub fn new() -> Result<Rc<Self>, CudaError> {
-		Self::new_named("CUDA".to_string())
+	pub fn new(device_id: usize) -> Result<Rc<Self>, CudaError> {
+		Self::new_named(device_id, format!("CUDA Device {}", device_id))
 	}
 
-	pub fn new_named(name: String) -> Result<Rc<Self>, CudaError> {
+	pub fn new_named(device_id: usize, name: String) -> Result<Rc<Self>, CudaError> {
 		Ok(Rc::new(Self {
-			cuda_stream: CudaStream::new()?,
+			cuda_stream: CudaStream::new(device_id)?,
 			hash_random_state: crate::util::hasher::RandomState::new(),
 			compiled_kernels: HashTable::with_capacity(20),
 			name,
@@ -159,8 +159,7 @@ impl Device for CudaDevice {
 			item.key_hash == key_hash && likely(item.value.key.as_ref() == key)
 		}) {
 			unsafe {
-				cuda_shim::run_kernel(
-					kernel.value.handle,
+				kernel.value.kernel.run(
 					std::ptr::from_ref(data.output),
 					data.elemwise_args.as_ptr(),
 					data.reduce_args.as_ptr(),

@@ -165,7 +165,6 @@ use x17ai::nn::fragments::softmax::{Softmax, SoftmaxGradMode};
 use x17ai::nn::fragments::{CrossEntropy, Fragment, UnaryFragment};
 use x17ai::rng::Rng;
 use x17ai::tensor::device::cpu::CPUDevice;
-use x17ai::tensor::device::cuda::cuda_shim::x17ai_test;
 use x17ai::tensor::device::kernel;
 use x17ai::tensor::generic::GenericTensor;
 use x17ai::tensor::generic::map::ND;
@@ -221,9 +220,6 @@ unsafe extern "C" {
 }
 
 fn main() -> Result<(), ErrPack<TensorOpError>> {
-	unsafe {
-		x17ai_test();
-	}
 	return Ok(());
 	let mut a = [1, 2, 3, 4, 5, 6, 7, 8];
 	let b = a.get_mut(2..5);
