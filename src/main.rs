@@ -171,7 +171,7 @@ use x17ai::tensor::device::kernel;
 use x17ai::tensor::generic::GenericTensor;
 use x17ai::tensor::generic::map::ND;
 use x17ai::tensor::math::{col, mat, row};
-use x17ai::tensor::{Device, HasDType, TensorOpError};
+use x17ai::tensor::{Device, HasDType, Tensor, TensorOpError};
 use x17ai::{ErrPack, custom_kernel, tensor};
 
 #[cfg(false)]
@@ -223,7 +223,14 @@ unsafe extern "C" {
 
 fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let dev = CudaDevice::new(0)?;
-	let kernel_bytes = std::fs::read("/home/spock/prog/x17ai/kernel.cu").unwrap();
+	#[rustfmt::skip] let inp = Tensor::literal_factory::<f32>(dev.clone()).new_2d(&[
+		[-1.2719, -0.6884, -0.6477, -1.3343, -1.7648],
+		[-1.9440,  0.9989,  2.8260, -0.3503, -0.5406],
+		[ 0.1619, -0.9744, -0.6539,  1.9764,  0.7423],
+		[ 0.0689,  1.1983,  0.0077, -0.6580, -0.4917],
+	])?;
+	println!("inp = {}", &inp);
+	/*	let kernel_bytes = std::fs::read("/home/spock/prog/x17ai/kernel.cu").unwrap();
 	let kernel_str = String::from_utf8_lossy_owned(kernel_bytes);
 	let e = dev.compile(&kernel_str);
 	if let Err(e) = e {
@@ -231,7 +238,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 		return Ok(());
 	}
 	let ptx = e?;
-	print!("PTX code:\n{}\nPtx log:\n{}\n", ptx.code(), ptx.log());
+	print!("PTX code:\n{}\nPtx log:\n{}\n", ptx.code(), ptx.log());*/
 	return Ok(());
 	let mut a = [1, 2, 3, 4, 5, 6, 7, 8];
 	let b = a.get_mut(2..5);

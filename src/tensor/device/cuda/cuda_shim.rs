@@ -5,13 +5,13 @@
 //
 //------------------------------------------------------------------------------
 
-use std::ffi::{c_char, c_int};
+use std::ffi::{c_char, c_int, c_void};
 use std::hint::cold_path;
 use std::ptr::NonNull;
 
 use crate::ErrPack;
 use crate::tensor::TensorOpError;
-use crate::tensor::device::{DevicePtr, KernelElemArg, KernelOutput, KernelReduceArg};
+use crate::tensor::device::DevicePtr;
 use crate::util::ffi_buffer::FfiBuffer;
 
 //--------------------------------------------------------------------------------------------------
@@ -24,7 +24,22 @@ pub struct CudaCapability {
 }
 
 #[repr(C)]
+pub struct CudaCube {
+	pub x: usize,
+	pub y: usize,
+	pub z: usize,
+}
+
+#[repr(C)]
+pub struct CudaLaunchConfig {
+	pub grid_dim: CudaCube,
+	pub block_dim: CudaCube,
+	pub shared_mem_bytes: usize,
+}
+
+#[repr(C)]
 pub struct CudaContextHandle {
+	refcnt_munus_one: usize, // TODO - use Atomic?
 	device_id: usize,
 	capability: CudaCapability,
 	_private: [u8; 0],
@@ -142,11 +157,10 @@ unsafe extern "C" {
 	) -> *mut CudaKernelHandle;
 
 	fn x17ai_cuda_run_kernel(
+		stream: *mut CudaStreamHandle,
 		kernel: *mut CudaKernelHandle,
-		o: *const KernelOutput,
-		elem_args: *const KernelElemArg,
-		reduce_args: *const KernelReduceArg,
-		const_args: *const f64,
+		config: *const CudaLaunchConfig,
+		args: *const *const c_void,
 		err: FfiBuffer,
 	) -> c_int;
 }
@@ -282,20 +296,21 @@ impl CudaStream {
 		Ok(())
 	}
 
-	pub fn load_module(&self, mut ptx: Vec<u8>) -> Result<CudaModule, CudaError> {
-		if let Some(&last) = ptx.last()
-			&& last == 0
+	pub fn load_module(&self, ptx: &Ptx) -> Result<CudaModule, CudaError> {
+		if ptx.code.capacity() <= ptx.code.len()
+			|| unsafe { ptx.code.as_ptr().wrapping_add(ptx.code.len()).cast::<u8>().read() } != 0
 		{
-			// already null-terminated
-		} else {
-			ptx.push(0);
+			cold_path();
+			return Err(CudaError {
+				msg: b"PTX code is not null-terminated".to_vec(),
+			});
 		}
 
 		let mut err = CudaError { msg: Vec::new() };
 		let handle = unsafe {
 			x17ai_cuda_load_module(
 				self.ctx.as_ptr(),
-				ptx.as_ptr().cast(),
+				ptx.code.as_ptr().cast(),
 				FfiBuffer::new(&mut err.msg),
 			)
 		};
@@ -303,7 +318,35 @@ impl CudaStream {
 			cold_path();
 			return Err(err);
 		};
-		Ok(CudaModule { handle })
+		let mut ctx = self.ctx;
+		unsafe { ctx.as_mut() }.refcnt_munus_one += 1;
+		Ok(CudaModule { context: self.ctx, handle })
+	}
+
+	/// # Safety
+	///
+	/// TODO
+	pub unsafe fn run_kernel(
+		&self,
+		kernel: &CudaKernel,
+		config: &CudaLaunchConfig,
+		args: &[*const ()],
+	) -> Result<(), CudaError> {
+		let mut err = CudaError { msg: Vec::new() };
+		let result = unsafe {
+			x17ai_cuda_run_kernel(
+				self.stream.as_ptr(),
+				kernel.kernel.as_ptr(),
+				config as *const CudaLaunchConfig,
+				args.as_ptr().cast(),
+				FfiBuffer::new(&mut err.msg),
+			)
+		};
+		if result != 0 {
+			cold_path();
+			return Err(err);
+		}
+		Ok(())
 	}
 }
 
@@ -319,8 +362,8 @@ impl Drop for CudaStream {
 
 //--------------------------------------------------------------------------------------------------
 
-#[repr(transparent)]
 pub struct CudaModule {
+	pub context: NonNull<CudaContextHandle>,
 	pub handle: NonNull<CudaModuleHandle>,
 }
 
@@ -329,6 +372,7 @@ impl Drop for CudaModule {
 		let mut err = CudaError { msg: Vec::new() };
 		unsafe {
 			x17ai_cuda_del_module(self.handle.as_ptr(), FfiBuffer::new(&mut err.msg));
+			x17ai_cuda_close_context(self.context.as_ptr(), FfiBuffer::new(&mut err.msg));
 		};
 	}
 }
@@ -358,36 +402,6 @@ impl CudaModule {
 pub struct CudaKernel {
 	_module: CudaModule, // we need module to keep the kernel alive
 	kernel: NonNull<CudaKernelHandle>,
-}
-
-impl CudaKernel {
-	/// # Safety
-	///
-	/// TODO
-	pub unsafe fn run(
-		&self,
-		o: *const KernelOutput,
-		elem_args: *const KernelElemArg,
-		reduce_args: *const KernelReduceArg,
-		const_args: *const f64,
-	) -> Result<(), CudaError> {
-		let mut err = CudaError { msg: Vec::new() };
-		let result = unsafe {
-			x17ai_cuda_run_kernel(
-				self.kernel.as_ptr(),
-				o,
-				elem_args,
-				reduce_args,
-				const_args,
-				FfiBuffer::new(&mut err.msg),
-			)
-		};
-		if result != 0 {
-			cold_path();
-			return Err(err);
-		}
-		Ok(())
-	}
 }
 
 //--------------------------------------------------------------------------------------------------

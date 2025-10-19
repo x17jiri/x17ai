@@ -121,49 +121,6 @@ struct FfiBuffer {
 };
 
 // #[repr(C)]
-// pub struct KernelOutput {
-// 	pub size: [usize; 2],
-// 	pub stride_bytes: [usize; 2],
-// 	pub buf: DevicePtr,
-// 	pub offset_bytes: usize,
-// 	pub reduction_size: usize,
-// }
-
-struct KernelOutput {
-	usize size[2];
-	usize stride_bytes[2];
-	void *buf;
-	usize offset_bytes;
-	usize reduction_size;
-};
-
-// #[repr(C)]
-// pub struct KernelElemArg {
-// 	pub stride_bytes: [usize; 2],
-// 	pub buf: DevicePtr,
-// 	pub offset_bytes: usize,
-// }
-
-struct KernelElemArg {
-	usize stride_bytes[2];
-	void *buf;
-	usize offset_bytes;
-};
-
-// #[repr(C)]
-// pub struct KernelReduceArg {
-// 	pub stride_bytes: [usize; 3],
-// 	pub buf: DevicePtr,
-// 	pub offset_bytes: usize,
-// }
-
-struct KernelReduceArg {
-	usize stride_bytes[3];
-	void *buf;
-	usize offset_bytes;
-};
-
-// #[repr(C)]
 // pub struct CudaCapability {
 // 	pub major: usize,
 // 	pub minor: usize,
@@ -174,7 +131,20 @@ struct CudaCapability {
 	usize minor;
 };
 
+struct CudaCube {
+	usize x;
+	usize y;
+	usize z;
+};
+
+struct CudaLaunchConfig {
+	CudaCube grid_dim;
+	CudaCube block_dim;
+	usize shared_mem_bytes;
+};
+
 struct CudaContextHandle {
+	usize refcnt_munus_one;
 	usize device_id;
 	CudaCapability capability;
 	CUdevice device;
@@ -202,6 +172,7 @@ extern "C" {
 	CudaContextHandle *x17ai_cuda_open_context(usize device_id, FfiBuffer err) noexcept {
 		try {
 			auto result = std::make_unique<CudaContextHandle>();
+			result->refcnt_munus_one = 0;
 			result->device_id = device_id;
 
 			CUresult e;
@@ -217,10 +188,7 @@ extern "C" {
 				}
 			}
 
-			using CommonId = std::common_type_t<usize, unsigned>;
-			constexpr CommonId MAX_ID = unsigned(std::numeric_limits<int>::max());
-
-			if (CommonId(device_id) > MAX_ID) [[unlikely]] {
+			if (!std::in_range<int>(device_id)) [[unlikely]] {
 				err.write("x17ai_cuda_open_context(): CUDA device ID out of range");
 				return nullptr;
 			}
@@ -285,8 +253,13 @@ extern "C" {
 
 	int x17ai_cuda_close_context(CudaContextHandle *context, FfiBuffer err) noexcept {
 		try {
-			auto ctx = std::unique_ptr<CudaContextHandle>(context);
 			assert(cuda_initialized.load(std::memory_order_acquire));
+			assert(context != nullptr);
+			if (context->refcnt_munus_one > 0) {
+				--context->refcnt_munus_one;
+				return 0;
+			}
+			auto ctx = std::unique_ptr<CudaContextHandle>(context);
 			CUresult e;
 
 			e = cuDevicePrimaryCtxRelease(ctx->device);
@@ -678,31 +651,58 @@ extern "C" {
 	}
 
 	int x17ai_cuda_run_kernel(
-		[[maybe_unused]] CudaKernelHandle *kernel,
-		[[maybe_unused]] KernelOutput const *o,
-		[[maybe_unused]] KernelElemArg const *elem_args,
-		[[maybe_unused]] KernelReduceArg const *reduce_args,
-		[[maybe_unused]] f64 const *const_args,
-		[[maybe_unused]] FfiBuffer err
+		CudaStreamHandle *stream,
+		CudaKernelHandle *kernel,
+		CudaLaunchConfig const *config,
+		void const* const*args,
+		FfiBuffer err
 	) noexcept {
-		// TODO
+		try {
+			assert(cuda_initialized.load(std::memory_order_acquire));
+			assert(stream != nullptr);
+			assert(kernel != nullptr);
+			assert(config != nullptr);
+			CUstream cu_stream = reinterpret_cast<CUstream>(stream);
+			CUfunction function = reinterpret_cast<CUfunction>(kernel);
+			CUresult result;
 
-		/*
-		result = cuLaunchKernel(
-			function,
-			grid_x,
-			grid_y,
-			grid_z, // grid dimensions
-			block_x,
-			block_y,
-			block_z, // block dimensions
-			0, // shared memory
-			0, // stream
-			args, // arguments
-			nullptr // extra
-		);
-		*/
+			size_t t =
+				config->block_dim.x
+				| config->block_dim.y
+				| config->block_dim.z
+				| config->grid_dim.x
+				| config->grid_dim.y
+				| config->grid_dim.z
+				| config->shared_mem_bytes;
+			if (!std::in_range<unsigned int>(t)) [[unlikely]] {
+				err.write("x17ai_cuda_run_kernel(): launch configuration values out of range");
+				return -1;
+			}
 
-		return -1;
+			result = cuLaunchKernel(
+				function,
+				static_cast<unsigned int>(config->grid_dim.x),
+				static_cast<unsigned int>(config->grid_dim.y),
+				static_cast<unsigned int>(config->grid_dim.z),
+				static_cast<unsigned int>(config->block_dim.x),
+				static_cast<unsigned int>(config->block_dim.y),
+				static_cast<unsigned int>(config->block_dim.z),
+				static_cast<unsigned int>(config->shared_mem_bytes),
+				cu_stream,
+				const_cast<void **>(args),
+				nullptr
+			);
+			if (result != CUDA_SUCCESS) [[unlikely]] {
+				err.write("x17ai_cuda_run_kernel(): cuLaunchKernel() failed: ", result);
+				return -1;
+			}
+			return 0;
+		} catch (std::exception const &e) {
+			err.write("x17ai_cuda_run_kernel(): exception thrown: ", e.what());
+			return -1;
+		} catch (...) {
+			err.write("x17ai_cuda_run_kernel(): unknown exception thrown");
+			return -1;
+		}
 	}
 }

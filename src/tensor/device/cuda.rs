@@ -5,6 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
+use std::cell::RefCell;
 use std::hint::{cold_path, likely};
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -14,7 +15,8 @@ use hashbrown::HashTable;
 use crate::ErrPack;
 use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
 use crate::tensor::device::cuda::cuda_shim::{
-	CudaCapability, CudaError, CudaKernel, CudaStream, Ptx, cuda_compile,
+	CudaCapability, CudaCube, CudaError, CudaKernel, CudaLaunchConfig, CudaStream, Ptx,
+	cuda_compile,
 };
 use crate::tensor::device::kernel::DynKernelCall;
 use crate::tensor::device::{
@@ -43,6 +45,7 @@ pub struct CudaDevice {
 	hash_random_state: crate::util::hasher::RandomState,
 	compiled_kernels: HashTable<CompiledKernelEntry>,
 	name: String,
+	test_kernel: RefCell<Option<CudaKernel>>,
 }
 
 impl CudaDevice {
@@ -56,6 +59,7 @@ impl CudaDevice {
 			hash_random_state: crate::util::hasher::RandomState::new(),
 			compiled_kernels: HashTable::with_capacity(20),
 			name,
+			test_kernel: RefCell::new(None),
 		}))
 	}
 
@@ -168,6 +172,8 @@ impl Device for CudaDevice {
 		if let Some(kernel) = self.compiled_kernels.find(key_hash, |item| {
 			item.key_hash == key_hash && likely(item.value.key.as_ref() == key)
 		}) {
+			todo!("CudaDevice::run_kernel(): run compiled kernel");
+			/*
 			unsafe {
 				kernel.value.kernel.run(
 					std::ptr::from_ref(data.output),
@@ -176,22 +182,40 @@ impl Device for CudaDevice {
 					data.scalar_args.as_ptr(),
 				)?;
 				Ok(())
-			}
+			}*/
 		} else {
-			/*
-			pub key: &'a [HashWord],
-			pub expr: &'a (dyn Fn() -> Rc<DynExpr> + 'a),
-			pub output: &'a KernelOutput,
-			pub elemwise_args: &'a [KernelElemArg],
-			pub reduce_args: &'a [KernelReduceArg],
-			pub scalar_args: &'a [f64],
-			*/
 			cold_path();
+			#[allow(clippy::unwrap_used)]
 			if data.elemwise_args.len() == 2
 				&& data.reduce_args.is_empty()
 				&& data.output.size[0] == 1
 			{
-				todo!("CudaDevice::run_kernel(): simple kernel");
+				let mut test_kernel = self.test_kernel.borrow_mut();
+				let kernel = test_kernel.get_or_insert_with(|| {
+					let kernel_bytes = std::fs::read("/home/spock/prog/x17ai/kernel.cu").unwrap();
+					let kernel_str = String::from_utf8_lossy_owned(kernel_bytes);
+					let ptx = self.compile(&kernel_str).ok().unwrap();
+					let module = self.cuda_stream.load_module(&ptx).ok().unwrap();
+					let kernel = module.get_kernel("x17ai_kernel").ok().unwrap();
+					kernel
+				});
+				let blocks = (data.output.size[1] + 255) / 256;
+				let config = CudaLaunchConfig {
+					grid_dim: CudaCube { x: blocks, y: 1, z: 1 },
+					block_dim: CudaCube { x: 256, y: 1, z: 1 },
+					shared_mem_bytes: 0,
+				};
+				unsafe {
+					self.cuda_stream.run_kernel(
+						kernel,
+						&config,
+						&[
+							std::ptr::from_ref(data.output).cast(),
+							std::ptr::from_ref(data.elemwise_args).cast(),
+						],
+					)?;
+				}
+				Ok(())
 			} else {
 				todo!("CudaDevice::run_kernel(): compile and run kernel");
 			}
