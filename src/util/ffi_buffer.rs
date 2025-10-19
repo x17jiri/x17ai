@@ -37,6 +37,9 @@ pub struct FfiBufferVMT {
 
 	/// Resets len to zero. Capacity is unchanged.
 	pub clear: unsafe extern "C" fn(this: *mut c_void),
+
+	/// Sets len to new_len. Assumes new_len <= capacity.
+	pub set_len: unsafe extern "C" fn(this: *mut c_void, new_len: usize),
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -83,7 +86,13 @@ impl<'a> FfiBuffer<'a> {
 			this.clear();
 		}
 
-		static VMT: FfiBufferVMT = FfiBufferVMT { span, buf_span, extend, clear };
+		extern "C" fn set_len(this: *mut c_void, new_len: usize) {
+			let this = this.cast::<Vec<u8>>();
+			let this = unsafe { &mut *this };
+			unsafe { this.set_len(new_len) };
+		}
+
+		static VMT: FfiBufferVMT = FfiBufferVMT { span, buf_span, extend, clear, set_len };
 
 		Self {
 			instance: std::ptr::from_mut(vec).cast(),

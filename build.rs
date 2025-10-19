@@ -24,6 +24,7 @@ fn main() {
 	println!("cargo:rustc-link-lib=dylib=c10_cuda");
 	println!("cargo:rustc-link-lib=cuda");
 	println!("cargo:rustc-link-lib=cudart");
+	println!("cargo:rustc-link-lib=nvrtc");
 
 	println!("cargo:rerun-if-changed=build.rs");
 	println!("cargo:rerun-if-changed=cpp/cuda_shim.cpp");

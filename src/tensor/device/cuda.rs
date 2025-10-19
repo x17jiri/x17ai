@@ -13,7 +13,9 @@ use hashbrown::HashTable;
 
 use crate::ErrPack;
 use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
-use crate::tensor::device::cuda::cuda_shim::{CudaError, CudaKernel, CudaStream};
+use crate::tensor::device::cuda::cuda_shim::{
+	CudaCapability, CudaError, CudaKernel, CudaStream, Ptx, cuda_compile,
+};
 use crate::tensor::device::kernel::DynKernelCall;
 use crate::tensor::device::{
 	AttentionArgs, DeviceBuffer, DevicePtr, MatMulArgs, NewDeviceBufferError,
@@ -45,7 +47,7 @@ pub struct CudaDevice {
 
 impl CudaDevice {
 	pub fn new(device_id: usize) -> Result<Rc<Self>, CudaError> {
-		Self::new_named(device_id, format!("CUDA Device {}", device_id))
+		Self::new_named(device_id, format!("CUDA Device {device_id}"))
 	}
 
 	pub fn new_named(device_id: usize, name: String) -> Result<Rc<Self>, CudaError> {
@@ -55,6 +57,14 @@ impl CudaDevice {
 			compiled_kernels: HashTable::with_capacity(20),
 			name,
 		}))
+	}
+
+	pub fn capability(&self) -> CudaCapability {
+		self.cuda_stream.capability()
+	}
+
+	pub fn compile(&self, src: &str) -> Result<Ptx, CudaError> {
+		cuda_compile(self.capability(), src)
 	}
 
 	unsafe fn __read_float<T: HasDType + Default + FromToF64>(
@@ -168,8 +178,23 @@ impl Device for CudaDevice {
 				Ok(())
 			}
 		} else {
+			/*
+			pub key: &'a [HashWord],
+			pub expr: &'a (dyn Fn() -> Rc<DynExpr> + 'a),
+			pub output: &'a KernelOutput,
+			pub elemwise_args: &'a [KernelElemArg],
+			pub reduce_args: &'a [KernelReduceArg],
+			pub scalar_args: &'a [f64],
+			*/
 			cold_path();
-			todo!("CudaDevice::run_kernel(): compile and run kernel");
+			if data.elemwise_args.len() == 2
+				&& data.reduce_args.is_empty()
+				&& data.output.size[0] == 1
+			{
+				todo!("CudaDevice::run_kernel(): simple kernel");
+			} else {
+				todo!("CudaDevice::run_kernel(): compile and run kernel");
+			}
 		}
 	}
 }

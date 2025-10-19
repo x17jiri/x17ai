@@ -16,8 +16,17 @@ use crate::util::ffi_buffer::FfiBuffer;
 
 //--------------------------------------------------------------------------------------------------
 
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub struct CudaCapability {
+	pub major: usize,
+	pub minor: usize,
+}
+
 #[repr(C)]
 pub struct CudaContextHandle {
+	device_id: usize,
+	capability: CudaCapability,
 	_private: [u8; 0],
 }
 
@@ -41,6 +50,21 @@ pub struct CudaDeviceData {
 	_private: [u8; 0],
 }
 
+pub struct Ptx {
+	code: String,
+	log: String,
+}
+
+impl Ptx {
+	pub fn code(&self) -> &str {
+		&self.code
+	}
+
+	pub fn log(&self) -> &str {
+		&self.log
+	}
+}
+
 #[link(name = "cuda_shim")]
 unsafe extern "C" {
 	// Error behavior of these functions:
@@ -53,7 +77,7 @@ unsafe extern "C" {
 
 	fn x17ai_cuda_open_context(device_id: usize, err: FfiBuffer) -> *mut CudaContextHandle;
 
-	fn x17ai_cuda_close_context(device_id: usize, err: FfiBuffer) -> c_int;
+	fn x17ai_cuda_close_context(ctx: *mut CudaContextHandle, err: FfiBuffer) -> c_int;
 
 	fn x17ai_cuda_open_stream(ctx: *mut CudaContextHandle, err: FfiBuffer)
 	-> *mut CudaStreamHandle;
@@ -91,10 +115,13 @@ unsafe extern "C" {
 	) -> c_int;
 
 	/// On success, `ptx` will contain the compiled PTX code terminated by a zero byte.
+	/// The zero byte is NOT included in the length of the buffer.
+	///
 	/// On failure, `ptx` will be empty and `log` will contain error messages.
+	///
 	/// Note that `log` may contain warnings even on success.
 	fn x17ai_cuda_compile_module(
-		stream: *mut CudaStreamHandle,
+		device_capability: CudaCapability,
 		source: *const c_char,
 		ptx: FfiBuffer,
 		log: FfiBuffer,
@@ -141,9 +168,8 @@ impl From<CudaError> for ErrPack<TensorOpError> {
 //--------------------------------------------------------------------------------------------------
 
 pub struct CudaStream {
-	device_id: usize,
-	ctx: NonNull<CudaContextHandle>,
 	stream: NonNull<CudaStreamHandle>,
+	ctx: NonNull<CudaContextHandle>,
 }
 
 impl CudaStream {
@@ -159,11 +185,15 @@ impl CudaStream {
 		let stream = unsafe { x17ai_cuda_open_stream(ctx.as_ptr(), FfiBuffer::new(&mut err.msg)) };
 		let Some(stream) = NonNull::new(stream) else {
 			cold_path();
-			unsafe { x17ai_cuda_close_context(device_id, FfiBuffer::new(&mut err.msg)) };
+			unsafe { x17ai_cuda_close_context(ctx.as_ptr(), FfiBuffer::new(&mut err.msg)) };
 			return Err(err);
 		};
 
-		Ok(Self { device_id, ctx, stream })
+		Ok(Self { stream, ctx })
+	}
+
+	pub fn capability(&self) -> CudaCapability {
+		unsafe { self.ctx.as_ref().capability }
 	}
 
 	/// # Safety
@@ -252,28 +282,6 @@ impl CudaStream {
 		Ok(())
 	}
 
-	pub fn compile_module(&self, source: &str) -> Result<Vec<u8>, CudaError> {
-		let mut c_source = Vec::with_capacity(source.len() + 1);
-		c_source.extend_from_slice(source.as_bytes());
-		c_source.push(0);
-
-		let mut ptx = Vec::new();
-		let mut log = Vec::new();
-		unsafe {
-			x17ai_cuda_compile_module(
-				self.stream.as_ptr(),
-				c_source.as_ptr().cast(),
-				FfiBuffer::new(&mut ptx),
-				FfiBuffer::new(&mut log),
-			);
-		}
-		if ptx.is_empty() {
-			cold_path();
-			return Err(CudaError { msg: log });
-		}
-		Ok(ptx) // TODO - should we return log as well?
-	}
-
 	pub fn load_module(&self, mut ptx: Vec<u8>) -> Result<CudaModule, CudaError> {
 		if let Some(&last) = ptx.last()
 			&& last == 0
@@ -304,7 +312,7 @@ impl Drop for CudaStream {
 		let mut err = CudaError { msg: Vec::new() };
 		unsafe {
 			x17ai_cuda_close_stream(self.stream.as_ptr(), FfiBuffer::new(&mut err.msg));
-			x17ai_cuda_close_context(self.device_id, FfiBuffer::new(&mut err.msg));
+			x17ai_cuda_close_context(self.ctx.as_ptr(), FfiBuffer::new(&mut err.msg));
 		};
 	}
 }
@@ -380,6 +388,35 @@ impl CudaKernel {
 		}
 		Ok(())
 	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub fn cuda_compile(capability: CudaCapability, source: &str) -> Result<Ptx, CudaError> {
+	let mut c_source = Vec::with_capacity(source.len() + 1);
+	c_source.extend_from_slice(source.as_bytes());
+	c_source.push(0);
+
+	let mut ptx = Vec::new();
+	let mut log = Vec::new();
+	unsafe {
+		x17ai_cuda_compile_module(
+			capability,
+			c_source.as_ptr().cast(),
+			FfiBuffer::new(&mut ptx),
+			FfiBuffer::new(&mut log),
+		);
+	}
+	if ptx.is_empty() {
+		cold_path();
+		return Err(CudaError { msg: log });
+	}
+
+	let mut ptx = String::from_utf8_lossy_owned(ptx);
+	ptx.push('\0');
+	ptx.pop();
+	let log = String::from_utf8_lossy_owned(log);
+	Ok(Ptx { code: ptx, log })
 }
 
 //--------------------------------------------------------------------------------------------------

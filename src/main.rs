@@ -9,6 +9,7 @@
 #![allow(non_snake_case)]
 #![feature(generic_const_exprs)]
 #![feature(macro_metavar_expr)]
+#![feature(string_from_utf8_lossy_owned)]
 
 //use x17ai::nn::layers::{Layer, Linear, LossFunction, SoftmaxCrossEntropy};
 //use x17ai::nn::{EvalContext, ModelContext};
@@ -165,6 +166,7 @@ use x17ai::nn::fragments::softmax::{Softmax, SoftmaxGradMode};
 use x17ai::nn::fragments::{CrossEntropy, Fragment, UnaryFragment};
 use x17ai::rng::Rng;
 use x17ai::tensor::device::cpu::CPUDevice;
+use x17ai::tensor::device::cuda::CudaDevice;
 use x17ai::tensor::device::kernel;
 use x17ai::tensor::generic::GenericTensor;
 use x17ai::tensor::generic::map::ND;
@@ -220,6 +222,16 @@ unsafe extern "C" {
 }
 
 fn main() -> Result<(), ErrPack<TensorOpError>> {
+	let dev = CudaDevice::new(0)?;
+	let kernel_bytes = std::fs::read("/home/spock/prog/x17ai/kernel.cu").unwrap();
+	let kernel_str = String::from_utf8_lossy_owned(kernel_bytes);
+	let e = dev.compile(&kernel_str);
+	if let Err(e) = e {
+		println!("PTX compilation failed:\n\n{}", String::from_utf8_lossy_owned(e.msg));
+		return Ok(());
+	}
+	let ptx = e?;
+	print!("PTX code:\n{}\nPtx log:\n{}\n", ptx.code(), ptx.log());
 	return Ok(());
 	let mut a = [1, 2, 3, 4, 5, 6, 7, 8];
 	let b = a.get_mut(2..5);
