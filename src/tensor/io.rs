@@ -80,6 +80,7 @@ fn fmt_Nd<T: Copy>(
 		for _ in 0..indent {
 			write!(f, "\t")?;
 		}
+		writeln!(f, "[")?;
 		for i in 0..dim.size {
 			for _ in 0..indent + 1 {
 				write!(f, "\t")?;
@@ -90,6 +91,7 @@ fn fmt_Nd<T: Copy>(
 		for _ in 0..indent {
 			write!(f, "\t")?;
 		}
+		write!(f, "]")?;
 	}
 	Ok(())
 }

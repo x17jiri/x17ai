@@ -224,14 +224,31 @@ unsafe extern "C" {
 fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let cpu = CPUDevice::new();
 	let dev = CudaDevice::new(0)?;
-	#[rustfmt::skip] let inp = Tensor::literal_factory::<f32>(dev.clone()).new_2d(&[
+	#[rustfmt::skip] let a = Tensor::literal_factory::<f32>(dev.clone()).new_2d(&[
 		[-1.2719, -0.6884, -0.6477, -1.3343, -1.7648],
 		[-1.9440,  0.9989,  2.8260, -0.3503, -0.5406],
 		[ 0.1619, -0.9744, -0.6539,  1.9764,  0.7423],
 		[ 0.0689,  1.1983,  0.0077, -0.6580, -0.4917],
 	])?;
-	let inp_cpu = inp.to_device(cpu.clone())?;
-	println!("inp = {}", &inp_cpu);
+	#[rustfmt::skip] let b = Tensor::literal_factory::<f32>(dev.clone()).new_2d(&[
+		[ 0.1610,  0.2886,  0.3006,  0.1513,  0.0984],
+		[ 0.0068,  0.1292,  0.8028,  0.0335,  0.0277],
+		[ 0.1032,  0.0331,  0.0457,  0.6336,  0.1844],
+		[ 0.1642,  0.5081,  0.1545,  0.0794,  0.0938],
+	])?;
+	let c = a.new_empty_like(a.dtype())?;
+	c.assign(custom_kernel!(
+		c.dtype(),
+		[a: &a, b: &b], (), {
+			a + b
+		}
+	))?;
+	let a_cpu = a.to_device(cpu.clone())?;
+	let b_cpu = b.to_device(cpu.clone())?;
+	let c_cpu = c.to_device(cpu.clone())?;
+	println!("a = {}", &a_cpu);
+	println!("b = {}", &b_cpu);
+	println!("c = {}", &c_cpu);
 	/*	let kernel_bytes = std::fs::read("/home/spock/prog/x17ai/kernel.cu").unwrap();
 	let kernel_str = String::from_utf8_lossy_owned(kernel_bytes);
 	let e = dev.compile(&kernel_str);

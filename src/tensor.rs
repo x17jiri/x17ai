@@ -39,6 +39,42 @@ mod tests;
 
 //--------------------------------------------------------------------------------------------------
 
+pub trait Shape {
+	fn to_map(self) -> Result<(DD, usize), ElementsOverflowError>;
+}
+
+impl Shape for &DD {
+	fn to_map(self) -> Result<(DD, usize), ElementsOverflowError> {
+		Ok(self.new_like())
+	}
+}
+
+impl Shape for &[usize] {
+	fn to_map(self) -> Result<(DD, usize), ElementsOverflowError> {
+		DD::new(self)
+	}
+}
+
+impl<const N: usize> Shape for &[usize; N] {
+	fn to_map(self) -> Result<(DD, usize), ElementsOverflowError> {
+		DD::new(self)
+	}
+}
+
+impl Shape for &mut [usize] {
+	fn to_map(self) -> Result<(DD, usize), ElementsOverflowError> {
+		DD::new(self)
+	}
+}
+
+impl<const N: usize> Shape for &mut [usize; N] {
+	fn to_map(self) -> Result<(DD, usize), ElementsOverflowError> {
+		DD::new(self)
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
 impl<M: generic::map::Map> GenericTensor<M, Rc<mycell::RefCell<DeviceBuffer>>> {
 	/// # Errors
 	/// `BorrowError` if there is a mutable borrow preventing a shared borrow.
@@ -78,11 +114,11 @@ pub type Tensor = GenericTensor<DD, Rc<mycell::RefCell<DeviceBuffer>>>;
 impl Tensor {
 	/// Allocate a new tensor on the provided device.
 	pub fn new_empty_on(
-		shape: &[usize],
+		shape: impl Shape,
 		dtype: DType,
 		device: Rc<dyn Device>,
 	) -> Result<Self, ErrPack<TensorOpError>> {
-		let (map, elems) = DD::new(shape)?;
+		let (map, elems) = shape.to_map()?;
 		let buf = device.new_buffer(dtype, elems)?;
 
 		// SAFETY: We created the buffer to be as big as the mapping.
@@ -90,7 +126,11 @@ impl Tensor {
 	}
 
 	/// Allocate a new tensor on the same device as `self`.
-	pub fn new_empty(&self, shape: &[usize], dtype: DType) -> Result<Self, ErrPack<TensorOpError>> {
+	pub fn new_empty(
+		&self,
+		shape: impl Shape,
+		dtype: DType,
+	) -> Result<Self, ErrPack<TensorOpError>> {
 		Self::new_empty_on(shape, dtype, self.rc_device())
 	}
 
@@ -286,17 +326,16 @@ impl Tensor {
 		let size_bytes = unsafe { dtype.array_bytes_unchecked(count) };
 		let borrow = self.buf().try_borrow()?;
 
-		todo!("TODO - need to create on `device`!");
-		let tensor = self.new_empty_like(dtype)?;
+		let tensor = Self::new_empty_on(self.map(), dtype, device)?;
 		let output_offset_bytes = unsafe { dtype.array_bytes_unchecked(tensor.map().offset) };
 
 		if self.device().is_cpu() {
 			unsafe {
 				let src =
 					NonNull::new_unchecked(borrow.device_ptr().as_ptr::<u8>()).add(offset_bytes);
-				device.upload_data(src, tensor.buf(), output_offset_bytes, size_bytes)?;
+				tensor.device().upload_data(src, tensor.buf(), output_offset_bytes, size_bytes)?;
 			}
-		} else if device.is_cpu() {
+		} else if tensor.device().is_cpu() {
 			unsafe {
 				let dst = NonNull::new_unchecked(tensor.buf().device_ptr().as_ptr::<u8>())
 					.add(output_offset_bytes);
