@@ -271,6 +271,42 @@ impl Tensor {
 			phantom: std::marker::PhantomData,
 		}
 	}
+
+	pub fn to_device(&self, device: Rc<dyn Device>) -> Result<Self, ErrPack<TensorOpError>> {
+		let dtype = self.dtype();
+
+		let nd = merge_dims::<1>(self)?;
+		if !nd.dims[0].is_contiguous() {
+			cold_path();
+			return Err(NotContiguousError.into());
+		}
+		let offset = nd.offset;
+		let count = nd.dims[0].size;
+		let offset_bytes = unsafe { dtype.array_bytes_unchecked(offset) };
+		let size_bytes = unsafe { dtype.array_bytes_unchecked(count) };
+		let borrow = self.buf().try_borrow()?;
+
+		todo!("TODO - need to create on `device`!");
+		let tensor = self.new_empty_like(dtype)?;
+		let output_offset_bytes = unsafe { dtype.array_bytes_unchecked(tensor.map().offset) };
+
+		if self.device().is_cpu() {
+			unsafe {
+				let src =
+					NonNull::new_unchecked(borrow.device_ptr().as_ptr::<u8>()).add(offset_bytes);
+				device.upload_data(src, tensor.buf(), output_offset_bytes, size_bytes)?;
+			}
+		} else if device.is_cpu() {
+			unsafe {
+				let dst = NonNull::new_unchecked(tensor.buf().device_ptr().as_ptr::<u8>())
+					.add(output_offset_bytes);
+				self.device().download_data(&borrow, dst, offset_bytes, size_bytes)?;
+			}
+		} else {
+			todo!("Implement tensor.to_device() between two non-CPU devices");
+		}
+		Ok(tensor)
+	}
 }
 
 pub struct TensorLiteralFactory<T: HasDType> {

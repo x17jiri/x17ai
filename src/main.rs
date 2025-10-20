@@ -222,6 +222,7 @@ unsafe extern "C" {
 }
 
 fn main() -> Result<(), ErrPack<TensorOpError>> {
+	let cpu = CPUDevice::new();
 	let dev = CudaDevice::new(0)?;
 	#[rustfmt::skip] let inp = Tensor::literal_factory::<f32>(dev.clone()).new_2d(&[
 		[-1.2719, -0.6884, -0.6477, -1.3343, -1.7648],
@@ -229,7 +230,8 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 		[ 0.1619, -0.9744, -0.6539,  1.9764,  0.7423],
 		[ 0.0689,  1.1983,  0.0077, -0.6580, -0.4917],
 	])?;
-	println!("inp = {}", &inp);
+	let inp_cpu = inp.to_device(cpu.clone())?;
+	println!("inp = {}", &inp_cpu);
 	/*	let kernel_bytes = std::fs::read("/home/spock/prog/x17ai/kernel.cu").unwrap();
 	let kernel_str = String::from_utf8_lossy_owned(kernel_bytes);
 	let e = dev.compile(&kernel_str);
