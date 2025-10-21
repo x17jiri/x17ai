@@ -18,7 +18,7 @@ use crate::tensor::device::cuda::cuda_shim::{
 	CudaCapability, CudaCppError, CudaCube, CudaError, CudaKernel, CudaLaunchConfig, CudaStream,
 	Ptx, cuda_compile,
 };
-use crate::tensor::device::kernel::DynKernelCall;
+use crate::tensor::device::kernel::{self, DynKernelCall};
 use crate::tensor::device::{
 	AttentionArgs, DeviceBuffer, DevicePtr, MatMulArgs, NewDeviceBufferError,
 };
@@ -104,29 +104,36 @@ impl CudaDevice {
 		};
 		let key = data.key;
 		let key_hash = self.hash_random_state.hash_one(key);
-		let entry: &mut CompiledKernelEntry;
-		if let Some(found) = compiled_kernels.find_mut(key_hash, |item| {
-			item.key_hash == key_hash && likely(item.value.key.as_ref() == key)
-		}) {
-			entry = found;
-		} else {
-			cold_path();
-			let new_entry = CompiledKernelEntry {
-				key_hash,
-				value: Box::new(CompiledKernel {
-					d1: None,
-					d2: None,
-					key: key.to_boxed_slice(),
-				}),
+		let mut entry = //.
+			if let Some(found) = compiled_kernels.find_mut(key_hash, |item| {
+				item.key_hash == key_hash && likely(item.value.key.as_ref() == key)
+			}) {
+				NonNull::from_mut(found.value.as_mut())
+			} else {
+				cold_path();
+				NonNull::from_mut(
+					compiled_kernels
+						.insert_unique(
+							key_hash,
+							CompiledKernelEntry {
+								key_hash,
+								value: Box::new(CompiledKernel {
+									d1: None,
+									d2: None,
+									key: key.to_boxed_slice(),
+								}),
+							},
+							|item| item.key_hash,
+						)
+						.get_mut().value.as_mut(),
+				)
 			};
-			entry =
-				compiled_kernels.insert_unique(key_hash, new_entry, |item| item.key_hash).get_mut();
-		}
+		let entry = unsafe { entry.as_mut() };
 		if data.output.size[0] == 1 {
-			if let None = entry.value.d1 {
-				entry.value.d1 = Some(Self::compile_d1(data)?);
+			if let None = entry.d1 {
+				entry.d1 = Some(Self::compile_d1(data)?);
 			}
-			Ok(unsafe { entry.value.d1.as_ref().unwrap_unchecked() })
+			Ok(unsafe { entry.d1.as_ref().unwrap_unchecked() })
 		} else {
 			todo!("implement get_kernel for d2 kernels");
 		}
@@ -210,58 +217,30 @@ impl Device for CudaDevice {
 	}
 
 	unsafe fn run_kernel(&self, data: &DynKernelCall) -> Result<(), ErrPack<TensorOpError>> {
-		let key = data.key;
-		let key_hash = self.hash_random_state.hash_one(key);
-		if let Some(kernel) = self.compiled_kernels.find(key_hash, |item| {
-			item.key_hash == key_hash && likely(item.value.key.as_ref() == key)
-		}) {
-			todo!("CudaDevice::run_kernel(): run compiled kernel");
-			/*
-			unsafe {
-				kernel.value.kernel.run(
-					std::ptr::from_ref(data.output),
-					data.elemwise_args.as_ptr(),
-					data.reduce_args.as_ptr(),
-					data.scalar_args.as_ptr(),
-				)?;
-				Ok(())
-			}*/
-		} else {
-			cold_path();
-			#[allow(clippy::unwrap_used)]
-			if data.elemwise_args.len() == 2
-				&& data.reduce_args.is_empty()
-				&& data.output.size[0] == 1
-			{
-				let mut test_kernel = self.test_kernel.borrow_mut();
-				let kernel = test_kernel.get_or_insert_with(|| {
-					let kernel_bytes = std::fs::read("/home/spock/prog/x17ai/kernel.cu").unwrap();
-					let kernel_str = String::from_utf8_lossy_owned(kernel_bytes);
-					let ptx = self.compile(&kernel_str).ok().unwrap();
-					let module = self.cuda_stream.load_module(&ptx).ok().unwrap();
-					let kernel = module.get_kernel("x17ai_kernel").ok().unwrap();
-					kernel
-				});
-				let blocks = data.output.size[1].div_ceil(256);
-				let config = CudaLaunchConfig {
-					grid_dim: CudaCube { x: blocks, y: 1, z: 1 },
-					block_dim: CudaCube { x: 256, y: 1, z: 1 },
-					shared_mem_bytes: 0,
-				};
-				unsafe {
-					self.cuda_stream.run_kernel(
-						kernel,
-						&config,
-						&[
-							std::ptr::from_ref(data.output).cast(),
-							std::ptr::from_ref(data.elemwise_args).cast(),
-						],
-					)?;
-				}
-				Ok(())
-			} else {
-				todo!("CudaDevice::run_kernel(): compile and run kernel");
-			}
+		/*
+		let kernel_bytes = std::fs::read("/home/spock/prog/x17ai/kernel.cu").unwrap();
+		let kernel_str = String::from_utf8_lossy_owned(kernel_bytes);
+		let ptx = self.compile(&kernel_str).ok().unwrap();
+		let module = self.cuda_stream.load_module(&ptx).ok().unwrap();
+		let kernel = module.get_kernel("x17ai_kernel").ok().unwrap();
+		*/
+		let kernel = self.get_kernel(data)?;
+		let blocks = data.output.size[1].div_ceil(256);
+		let config = CudaLaunchConfig {
+			grid_dim: CudaCube { x: blocks, y: 1, z: 1 },
+			block_dim: CudaCube { x: 256, y: 1, z: 1 },
+			shared_mem_bytes: 0,
+		};
+		unsafe {
+			self.cuda_stream.run_kernel(
+				kernel,
+				&config,
+				&[
+					std::ptr::from_ref(data.output).cast(),
+					std::ptr::from_ref(data.elemwise_args).cast(),
+				],
+			)?;
 		}
+		Ok(())
 	}
 }
