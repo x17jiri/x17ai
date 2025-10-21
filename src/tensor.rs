@@ -498,15 +498,6 @@ impl TensorOpError {
 	pub fn dtype_mismatch() -> ErrPack<Self> {
 		ErrPack { code: Self::DTypeMismatch, extra: None }
 	}
-
-	#[cold]
-	#[inline(never)]
-	pub fn device_error(message: String) -> ErrPack<Self> {
-		ErrPack {
-			code: Self::DeviceError,
-			extra: Some(Box::new(ErrExtra { message, nested: None })),
-		}
-	}
 }
 
 impl From<DimMergerError> for TensorOpError {

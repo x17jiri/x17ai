@@ -15,8 +15,8 @@ use hashbrown::HashTable;
 use crate::ErrPack;
 use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
 use crate::tensor::device::cuda::cuda_shim::{
-	CudaCapability, CudaCube, CudaError, CudaKernel, CudaLaunchConfig, CudaStream, Ptx,
-	cuda_compile,
+	CudaCapability, CudaCppError, CudaCube, CudaError, CudaKernel, CudaLaunchConfig, CudaStream,
+	Ptx, cuda_compile,
 };
 use crate::tensor::device::kernel::DynKernelCall;
 use crate::tensor::device::{
@@ -24,14 +24,15 @@ use crate::tensor::device::{
 };
 use crate::tensor::{DType, Device, HasDType, TensorOpError, UnsupportedDTypeError};
 use crate::util::hasher::HashWord;
-use crate::util::mycell;
+use crate::util::{ToBoxedSlice, mycell};
 
 pub mod cuda_shim;
 
 //--------------------------------------------------------------------------------------------------
 
 struct CompiledKernel {
-	kernel: CudaKernel,
+	d1: Option<CudaKernel>,
+	d2: Option<CudaKernel>,
 	key: Box<[HashWord]>, // TODO - allocate `key` inline at the end of the struct
 }
 
@@ -43,21 +44,21 @@ struct CompiledKernelEntry {
 pub struct CudaDevice {
 	cuda_stream: CudaStream,
 	hash_random_state: crate::util::hasher::RandomState,
-	compiled_kernels: HashTable<CompiledKernelEntry>,
+	compiled_kernels: RefCell<HashTable<CompiledKernelEntry>>,
 	name: String,
 	test_kernel: RefCell<Option<CudaKernel>>,
 }
 
 impl CudaDevice {
-	pub fn new(device_id: usize) -> Result<Rc<Self>, CudaError> {
+	pub fn new(device_id: usize) -> Result<Rc<Self>, CudaCppError> {
 		Self::new_named(device_id, format!("CUDA Device {device_id}"))
 	}
 
-	pub fn new_named(device_id: usize, name: String) -> Result<Rc<Self>, CudaError> {
+	pub fn new_named(device_id: usize, name: String) -> Result<Rc<Self>, CudaCppError> {
 		Ok(Rc::new(Self {
 			cuda_stream: CudaStream::new(device_id)?,
 			hash_random_state: crate::util::hasher::RandomState::new(),
-			compiled_kernels: HashTable::with_capacity(20),
+			compiled_kernels: RefCell::new(HashTable::with_capacity(20)),
 			name,
 			test_kernel: RefCell::new(None),
 		}))
@@ -67,7 +68,7 @@ impl CudaDevice {
 		self.cuda_stream.capability()
 	}
 
-	pub fn compile(&self, src: &str) -> Result<Ptx, CudaError> {
+	pub fn compile(&self, src: &str) -> Result<Ptx, CudaCppError> {
 		cuda_compile(self.capability(), src)
 	}
 
@@ -87,6 +88,48 @@ impl CudaDevice {
 			)?;
 		}
 		Ok(val.to_f64())
+	}
+
+	fn compile_d1(data: &DynKernelCall) -> Result<CudaKernel, ErrPack<TensorOpError>> {
+		todo!("implement compile_d1 for CudaDevice");
+	}
+
+	fn get_kernel(&self, data: &DynKernelCall) -> Result<&CudaKernel, ErrPack<TensorOpError>> {
+		let Ok(mut compiled_kernels) = self.compiled_kernels.try_borrow_mut() else {
+			cold_path();
+			let err = CudaError {
+				msg: "Internal error: compiled_kernels is already borrowed",
+			};
+			return Err(err.into());
+		};
+		let key = data.key;
+		let key_hash = self.hash_random_state.hash_one(key);
+		let entry: &mut CompiledKernelEntry;
+		if let Some(found) = compiled_kernels.find_mut(key_hash, |item| {
+			item.key_hash == key_hash && likely(item.value.key.as_ref() == key)
+		}) {
+			entry = found;
+		} else {
+			cold_path();
+			let new_entry = CompiledKernelEntry {
+				key_hash,
+				value: Box::new(CompiledKernel {
+					d1: None,
+					d2: None,
+					key: key.to_boxed_slice(),
+				}),
+			};
+			entry =
+				compiled_kernels.insert_unique(key_hash, new_entry, |item| item.key_hash).get_mut();
+		}
+		if data.output.size[0] == 1 {
+			if let None = entry.value.d1 {
+				entry.value.d1 = Some(Self::compile_d1(data)?);
+			}
+			Ok(unsafe { entry.value.d1.as_ref().unwrap_unchecked() })
+		} else {
+			todo!("implement get_kernel for d2 kernels");
+		}
 	}
 }
 
@@ -199,7 +242,7 @@ impl Device for CudaDevice {
 					let kernel = module.get_kernel("x17ai_kernel").ok().unwrap();
 					kernel
 				});
-				let blocks = (data.output.size[1] + 255) / 256;
+				let blocks = data.output.size[1].div_ceil(256);
 				let config = CudaLaunchConfig {
 					grid_dim: CudaCube { x: blocks, y: 1, z: 1 },
 					block_dim: CudaCube { x: 256, y: 1, z: 1 },

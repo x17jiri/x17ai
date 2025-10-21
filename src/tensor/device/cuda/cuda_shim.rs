@@ -9,10 +9,10 @@ use std::ffi::{c_char, c_int, c_void};
 use std::hint::cold_path;
 use std::ptr::NonNull;
 
-use crate::ErrPack;
-use crate::tensor::TensorOpError;
 use crate::tensor::device::DevicePtr;
+use crate::tensor::{Tensor, TensorOpError};
 use crate::util::ffi_buffer::FfiBuffer;
+use crate::{ErrExtra, ErrPack};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -168,14 +168,40 @@ unsafe extern "C" {
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
-pub struct CudaError {
+pub struct CudaCppError {
 	pub msg: Vec<u8>,
 }
 
-impl From<CudaError> for ErrPack<TensorOpError> {
+impl From<CudaCppError> for ErrPack<TensorOpError> {
 	#[inline(never)]
+	#[cold]
+	fn from(err: CudaCppError) -> Self {
+		ErrPack {
+			code: TensorOpError::DeviceError,
+			extra: Some(Box::new(ErrExtra {
+				message: String::from_utf8_lossy(&err.msg).into_owned(),
+				nested: None,
+			})),
+		}
+	}
+}
+
+#[derive(Clone, Copy)]
+pub struct CudaError<'a> {
+	pub msg: &'a str,
+}
+
+impl From<CudaError<'_>> for ErrPack<TensorOpError> {
+	#[inline(never)]
+	#[cold]
 	fn from(err: CudaError) -> Self {
-		TensorOpError::device_error(String::from_utf8_lossy(&err.msg).into_owned())
+		ErrPack {
+			code: TensorOpError::DeviceError,
+			extra: Some(Box::new(ErrExtra {
+				message: err.msg.to_string(),
+				nested: None,
+			})),
+		}
 	}
 }
 
@@ -187,8 +213,8 @@ pub struct CudaStream {
 }
 
 impl CudaStream {
-	pub fn new(device_id: usize) -> Result<Self, CudaError> {
-		let mut err = CudaError { msg: Vec::new() };
+	pub fn new(device_id: usize) -> Result<Self, CudaCppError> {
+		let mut err = CudaCppError { msg: Vec::new() };
 
 		let ctx = unsafe { x17ai_cuda_open_context(device_id, FfiBuffer::new(&mut err.msg)) };
 		let Some(ctx) = NonNull::new(ctx) else {
@@ -213,8 +239,8 @@ impl CudaStream {
 	/// # Safety
 	///
 	/// The allocated block of memory may or may not be initialized.
-	pub unsafe fn alloc(&self, bytes: usize) -> Result<DevicePtr, CudaError> {
-		let mut err = CudaError { msg: Vec::new() };
+	pub unsafe fn alloc(&self, bytes: usize) -> Result<DevicePtr, CudaCppError> {
+		let mut err = CudaCppError { msg: Vec::new() };
 
 		let ptr =
 			unsafe { x17ai_cuda_alloc(self.stream.as_ptr(), bytes, FfiBuffer::new(&mut err.msg)) };
@@ -230,7 +256,7 @@ impl CudaStream {
 	///
 	/// The pointer must be a valid pointer returned by `alloc`.
 	pub unsafe fn free(&self, ptr: DevicePtr) {
-		let mut err = CudaError { msg: Vec::new() };
+		let mut err = CudaCppError { msg: Vec::new() };
 		unsafe {
 			x17ai_cuda_free(
 				self.stream.as_ptr(),
@@ -249,8 +275,8 @@ impl CudaStream {
 		dst: DevicePtr,
 		offset_bytes: usize,
 		size_bytes: usize,
-	) -> Result<(), CudaError> {
-		let mut err = CudaError { msg: Vec::new() };
+	) -> Result<(), CudaCppError> {
+		let mut err = CudaCppError { msg: Vec::new() };
 		let result = unsafe {
 			x17ai_cuda_upload_data(
 				self.stream.as_ptr(),
@@ -277,8 +303,8 @@ impl CudaStream {
 		dst: NonNull<u8>,
 		offset_bytes: usize,
 		size_bytes: usize,
-	) -> Result<(), CudaError> {
-		let mut err = CudaError { msg: Vec::new() };
+	) -> Result<(), CudaCppError> {
+		let mut err = CudaCppError { msg: Vec::new() };
 		let result = unsafe {
 			x17ai_cuda_download_data(
 				self.stream.as_ptr(),
@@ -296,17 +322,17 @@ impl CudaStream {
 		Ok(())
 	}
 
-	pub fn load_module(&self, ptx: &Ptx) -> Result<CudaModule, CudaError> {
+	pub fn load_module(&self, ptx: &Ptx) -> Result<CudaModule, CudaCppError> {
 		if ptx.code.capacity() <= ptx.code.len()
 			|| unsafe { ptx.code.as_ptr().wrapping_add(ptx.code.len()).cast::<u8>().read() } != 0
 		{
 			cold_path();
-			return Err(CudaError {
+			return Err(CudaCppError {
 				msg: b"PTX code is not null-terminated".to_vec(),
 			});
 		}
 
-		let mut err = CudaError { msg: Vec::new() };
+		let mut err = CudaCppError { msg: Vec::new() };
 		let handle = unsafe {
 			x17ai_cuda_load_module(
 				self.ctx.as_ptr(),
@@ -331,8 +357,8 @@ impl CudaStream {
 		kernel: &CudaKernel,
 		config: &CudaLaunchConfig,
 		args: &[*const ()],
-	) -> Result<(), CudaError> {
-		let mut err = CudaError { msg: Vec::new() };
+	) -> Result<(), CudaCppError> {
+		let mut err = CudaCppError { msg: Vec::new() };
 		let result = unsafe {
 			x17ai_cuda_run_kernel(
 				self.stream.as_ptr(),
@@ -352,7 +378,7 @@ impl CudaStream {
 
 impl Drop for CudaStream {
 	fn drop(&mut self) {
-		let mut err = CudaError { msg: Vec::new() };
+		let mut err = CudaCppError { msg: Vec::new() };
 		unsafe {
 			x17ai_cuda_close_stream(self.stream.as_ptr(), FfiBuffer::new(&mut err.msg));
 			x17ai_cuda_close_context(self.ctx.as_ptr(), FfiBuffer::new(&mut err.msg));
@@ -369,7 +395,7 @@ pub struct CudaModule {
 
 impl Drop for CudaModule {
 	fn drop(&mut self) {
-		let mut err = CudaError { msg: Vec::new() };
+		let mut err = CudaCppError { msg: Vec::new() };
 		unsafe {
 			x17ai_cuda_del_module(self.handle.as_ptr(), FfiBuffer::new(&mut err.msg));
 			x17ai_cuda_close_context(self.context.as_ptr(), FfiBuffer::new(&mut err.msg));
@@ -378,12 +404,12 @@ impl Drop for CudaModule {
 }
 
 impl CudaModule {
-	pub fn get_kernel(self, name: &str) -> Result<CudaKernel, CudaError> {
+	pub fn get_kernel(self, name: &str) -> Result<CudaKernel, CudaCppError> {
 		let mut c_name = Vec::with_capacity(name.len() + 1);
 		c_name.extend_from_slice(name.as_bytes());
 		c_name.push(0);
 
-		let mut err = CudaError { msg: Vec::new() };
+		let mut err = CudaCppError { msg: Vec::new() };
 		let kernel = unsafe {
 			x17ai_cuda_get_kernel(
 				self.handle.as_ptr(),
@@ -406,7 +432,7 @@ pub struct CudaKernel {
 
 //--------------------------------------------------------------------------------------------------
 
-pub fn cuda_compile(capability: CudaCapability, source: &str) -> Result<Ptx, CudaError> {
+pub fn cuda_compile(capability: CudaCapability, source: &str) -> Result<Ptx, CudaCppError> {
 	let mut c_source = Vec::with_capacity(source.len() + 1);
 	c_source.extend_from_slice(source.as_bytes());
 	c_source.push(0);
@@ -423,7 +449,7 @@ pub fn cuda_compile(capability: CudaCapability, source: &str) -> Result<Ptx, Cud
 	}
 	if ptx.is_empty() {
 		cold_path();
-		return Err(CudaError { msg: log });
+		return Err(CudaCppError { msg: log });
 	}
 
 	let mut ptx = String::from_utf8_lossy_owned(ptx);

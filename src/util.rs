@@ -74,3 +74,16 @@ impl<T> UnwrapInfallible<T> for Result<T, Infallible> {
 }
 
 //--------------------------------------------------------------------------------------------------
+
+pub trait ToBoxedSlice<T> {
+	fn to_boxed_slice(self) -> Box<[T]>;
+}
+
+impl<T: Clone> ToBoxedSlice<T> for &[T] {
+	fn to_boxed_slice(self) -> Box<[T]> {
+		// TODO - implement without the intermediate Vec to avoid code bloat
+		self.to_vec().into_boxed_slice()
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
