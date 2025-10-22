@@ -5,12 +5,15 @@
 //
 //------------------------------------------------------------------------------
 
+use std::borrow::Cow;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::hint::{cold_path, likely};
 use std::ptr::NonNull;
 use std::rc::Rc;
 
 use hashbrown::HashTable;
+use regex::Regex;
 
 use crate::ErrPack;
 use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
@@ -18,7 +21,7 @@ use crate::tensor::device::cuda::cuda_shim::{
 	CudaCapability, CudaCppError, CudaCube, CudaError, CudaKernel, CudaLaunchConfig, CudaStream,
 	Ptx, cuda_compile,
 };
-use crate::tensor::device::kernel::{self, DynKernelCall};
+use crate::tensor::device::kernel::DynKernelCall;
 use crate::tensor::device::{
 	AttentionArgs, DeviceBuffer, DevicePtr, MatMulArgs, NewDeviceBufferError,
 };
@@ -46,7 +49,7 @@ pub struct CudaDevice {
 	hash_random_state: crate::util::hasher::RandomState,
 	compiled_kernels: RefCell<HashTable<CompiledKernelEntry>>,
 	name: String,
-	test_kernel: RefCell<Option<CudaKernel>>,
+	template_regex: Regex,
 }
 
 impl CudaDevice {
@@ -60,7 +63,7 @@ impl CudaDevice {
 			hash_random_state: crate::util::hasher::RandomState::new(),
 			compiled_kernels: RefCell::new(HashTable::with_capacity(20)),
 			name,
-			test_kernel: RefCell::new(None),
+			template_regex: Regex::new(r"\{\{([A-Za-z0-9_]+)\}\}").unwrap(),
 		}))
 	}
 
@@ -90,8 +93,32 @@ impl CudaDevice {
 		Ok(val.to_f64())
 	}
 
+	fn render(&self, template: &str, vars: &HashMap<&str, String>) -> Result<String, CudaError> {
+		let mut fail = false;
+		let rendered = self.template_regex.replace_all(template, |caps: &regex::Captures| {
+			if let Some(val) = vars.get(&caps[1]) {
+				val.as_str()
+			} else {
+				fail = true;
+				""
+			}
+		});
+		if fail {
+			cold_path();
+			let err = CudaError {
+				msg: "Failed to render template: missing variable",
+			};
+			return Err(err);
+		}
+		Ok(rendered.into_owned())
+	}
+
 	fn compile_d1(data: &DynKernelCall) -> Result<CudaKernel, ErrPack<TensorOpError>> {
 		todo!("implement compile_d1 for CudaDevice");
+	}
+
+	fn compile_d2(_data: &DynKernelCall) -> Result<CudaKernel, ErrPack<TensorOpError>> {
+		todo!("implement compile_d2 for CudaDevice");
 	}
 
 	fn get_kernel(&self, data: &DynKernelCall) -> Result<&CudaKernel, ErrPack<TensorOpError>> {
@@ -104,10 +131,11 @@ impl CudaDevice {
 		};
 		let key = data.key;
 		let key_hash = self.hash_random_state.hash_one(key);
+		let found = compiled_kernels.find_mut(key_hash, |item| {
+			item.key_hash == key_hash && likely(item.value.key.as_ref() == key)
+		});
 		let mut entry = //.
-			if let Some(found) = compiled_kernels.find_mut(key_hash, |item| {
-				item.key_hash == key_hash && likely(item.value.key.as_ref() == key)
-			}) {
+			if let Some(found) = found {
 				NonNull::from_mut(found.value.as_mut())
 			} else {
 				cold_path();
@@ -130,12 +158,15 @@ impl CudaDevice {
 			};
 		let entry = unsafe { entry.as_mut() };
 		if data.output.size[0] == 1 {
-			if let None = entry.d1 {
+			if entry.d1.is_none() {
 				entry.d1 = Some(Self::compile_d1(data)?);
 			}
 			Ok(unsafe { entry.d1.as_ref().unwrap_unchecked() })
 		} else {
-			todo!("implement get_kernel for d2 kernels");
+			if entry.d2.is_none() {
+				entry.d2 = Some(Self::compile_d2(data)?);
+			}
+			Ok(unsafe { entry.d2.as_ref().unwrap_unchecked() })
 		}
 	}
 }

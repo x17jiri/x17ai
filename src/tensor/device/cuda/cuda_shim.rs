@@ -187,15 +187,15 @@ impl From<CudaCppError> for ErrPack<TensorOpError> {
 }
 
 #[derive(Clone, Copy)]
-pub struct CudaError<'a> {
-	pub msg: &'a str,
+pub struct CudaError {
+	pub msg: &'static str,
 }
 
-impl From<CudaError<'_>> for ErrPack<TensorOpError> {
+impl From<CudaError> for ErrPack<TensorOpError> {
 	#[inline(never)]
 	#[cold]
 	fn from(err: CudaError) -> Self {
-		ErrPack {
+		Self {
 			code: TensorOpError::DeviceError,
 			extra: Some(Box::new(ErrExtra {
 				message: err.msg.to_string(),
