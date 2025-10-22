@@ -5,7 +5,6 @@
 //
 //------------------------------------------------------------------------------
 
-use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hint::{cold_path, likely};
@@ -13,7 +12,7 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 
 use hashbrown::HashTable;
-use regex::Regex;
+use minijinja::Template;
 
 use crate::ErrPack;
 use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
@@ -49,12 +48,18 @@ pub struct CudaDevice {
 	hash_random_state: crate::util::hasher::RandomState,
 	compiled_kernels: RefCell<HashTable<CompiledKernelEntry>>,
 	name: String,
-	template_regex: Regex,
+	template_env: minijinja::Environment<'static>,
 }
 
 impl CudaDevice {
 	pub fn new(device_id: usize) -> Result<Rc<Self>, CudaCppError> {
 		Self::new_named(device_id, format!("CUDA Device {device_id}"))
+	}
+
+	fn make_templates() -> Result<minijinja::Environment<'static>, minijinja::Error> {
+		let mut template_env = minijinja::Environment::new();
+		template_env.add_template("elemwise_1d", include_str!("cuda/kernels/elemwise_1d.cu"))?;
+		Ok(template_env)
 	}
 
 	pub fn new_named(device_id: usize, name: String) -> Result<Rc<Self>, CudaCppError> {
@@ -63,7 +68,9 @@ impl CudaDevice {
 			hash_random_state: crate::util::hasher::RandomState::new(),
 			compiled_kernels: RefCell::new(HashTable::with_capacity(20)),
 			name,
-			template_regex: Regex::new(r"\{\{([A-Za-z0-9_]+)\}\}").unwrap(),
+			template_env: Self::make_templates().map_err(|e| CudaError {
+				msg: &format!("Failed to create template environment: {}", e),
+			})?,
 		}))
 	}
 
@@ -96,7 +103,7 @@ impl CudaDevice {
 	fn render(&self, template: &str, vars: &HashMap<&str, String>) -> Result<String, CudaError> {
 		let mut fail = false;
 		let rendered = self.template_regex.replace_all(template, |caps: &regex::Captures| {
-			if let Some(val) = vars.get(&caps[1]) {
+			if let Some(val) = vars.get(&caps[0]) {
 				val.as_str()
 			} else {
 				fail = true;
@@ -113,11 +120,13 @@ impl CudaDevice {
 		Ok(rendered.into_owned())
 	}
 
-	fn compile_d1(data: &DynKernelCall) -> Result<CudaKernel, ErrPack<TensorOpError>> {
-		todo!("implement compile_d1 for CudaDevice");
+	fn compile_d1(&self, data: &DynKernelCall) -> Result<CudaKernel, ErrPack<TensorOpError>> {
+		let vars = HashMap::new();
+		vars["{{E}}"] = data.elemwise_args.len().to_string();
+		let kernel_src = self.render(include_str!("cuda/kernels/elemwise_1d.cu"), &vars)?;
 	}
 
-	fn compile_d2(_data: &DynKernelCall) -> Result<CudaKernel, ErrPack<TensorOpError>> {
+	fn compile_d2(&self, _data: &DynKernelCall) -> Result<CudaKernel, ErrPack<TensorOpError>> {
 		todo!("implement compile_d2 for CudaDevice");
 	}
 
