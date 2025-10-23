@@ -10,6 +10,7 @@
 //     Original Adam: https://arxiv.org/abs/1412.6980
 //     Adam-mini: https://arxiv.org/abs/2406.16793
 
+use std::borrow::Cow;
 use std::hint::cold_path;
 
 use crate::tensor::device::dtype::common_dtype;
@@ -104,9 +105,10 @@ impl OptParam {
 		Err(ErrPack {
 			code: TensorOpError::InvalidValue,
 			extra: Some(Box::new(ErrExtra {
-				message: "There was an error while computing the gradient. \
-					We don't have a valid value to use"
-					.to_string(),
+				message: Cow::from(
+					"There was an error while computing the gradient. \
+					We don't have a valid value to use",
+				),
 				nested: None,
 			})),
 		})
@@ -242,9 +244,9 @@ impl PartitionError {
 	#[cold]
 	#[inline(never)]
 	pub fn new(parts: usize, part_elems: usize, total_elems: usize) -> ErrPack<Self> {
-		let message = format!(
+		let message = Cow::from(format!(
 			"Invalid parameter partition: parts * part_elems must equal the total number of elements in the tensor. parts = {parts}, part_elems = {part_elems}, total_elems = {total_elems}"
-		);
+		));
 		ErrPack {
 			code: Self,
 			extra: Some(Box::new(ErrExtra { message, nested: None })),

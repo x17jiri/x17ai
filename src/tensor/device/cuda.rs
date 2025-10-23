@@ -12,7 +12,7 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 
 use hashbrown::HashTable;
-use minijinja::Template;
+use minijinja::context;
 
 use crate::ErrPack;
 use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
@@ -52,7 +52,7 @@ pub struct CudaDevice {
 }
 
 impl CudaDevice {
-	pub fn new(device_id: usize) -> Result<Rc<Self>, CudaCppError> {
+	pub fn new(device_id: usize) -> Result<Rc<Self>, CudaError> {
 		Self::new_named(device_id, format!("CUDA Device {device_id}"))
 	}
 
@@ -62,15 +62,14 @@ impl CudaDevice {
 		Ok(template_env)
 	}
 
-	pub fn new_named(device_id: usize, name: String) -> Result<Rc<Self>, CudaCppError> {
+	pub fn new_named(device_id: usize, name: String) -> Result<Rc<Self>, CudaError> {
 		Ok(Rc::new(Self {
 			cuda_stream: CudaStream::new(device_id)?,
 			hash_random_state: crate::util::hasher::RandomState::new(),
 			compiled_kernels: RefCell::new(HashTable::with_capacity(20)),
 			name,
-			template_env: Self::make_templates().map_err(|e| CudaError {
-				msg: &format!("Failed to create template environment: {}", e),
-			})?,
+			template_env: Self::make_templates()
+				.map_err(|e| CudaError::new(format!("Failed to create kernel templates: {}", e)))?,
 		}))
 	}
 
@@ -100,30 +99,21 @@ impl CudaDevice {
 		Ok(val.to_f64())
 	}
 
-	fn render(&self, template: &str, vars: &HashMap<&str, String>) -> Result<String, CudaError> {
-		let mut fail = false;
-		let rendered = self.template_regex.replace_all(template, |caps: &regex::Captures| {
-			if let Some(val) = vars.get(&caps[0]) {
-				val.as_str()
-			} else {
-				fail = true;
-				""
-			}
-		});
-		if fail {
-			cold_path();
-			let err = CudaError {
-				msg: "Failed to render template: missing variable",
-			};
-			return Err(err);
-		}
-		Ok(rendered.into_owned())
-	}
-
 	fn compile_d1(&self, data: &DynKernelCall) -> Result<CudaKernel, ErrPack<TensorOpError>> {
-		let vars = HashMap::new();
-		vars["{{E}}"] = data.elemwise_args.len().to_string();
-		let kernel_src = self.render(include_str!("cuda/kernels/elemwise_1d.cu"), &vars)?;
+		let template = self
+			.template_env
+			.get_template("elemwise_1d")
+			.map_err(|e| CudaError::new2("Failed to get kernel template", e))?;
+		let code = template
+			.render(HashMap::<&str, String>::new())
+			.map_err(|e| CudaError::new2("Failed to render kernel template", e))?;
+		let kernel_src = template
+			.render(context! {
+				code => code,
+			})
+			.map_err(|e| CudaError::new2("Failed to render kernel source", e))?;
+		println!("Compiled kernel source:\n{}", kernel_src);
+		todo!("... unfinished");
 	}
 
 	fn compile_d2(&self, _data: &DynKernelCall) -> Result<CudaKernel, ErrPack<TensorOpError>> {
@@ -133,9 +123,7 @@ impl CudaDevice {
 	fn get_kernel(&self, data: &DynKernelCall) -> Result<&CudaKernel, ErrPack<TensorOpError>> {
 		let Ok(mut compiled_kernels) = self.compiled_kernels.try_borrow_mut() else {
 			cold_path();
-			let err = CudaError {
-				msg: "Internal error: compiled_kernels is already borrowed",
-			};
+			let err = CudaError::new("Internal error: compiled_kernels is already borrowed");
 			return Err(err.into());
 		};
 		let key = data.key;
@@ -168,12 +156,12 @@ impl CudaDevice {
 		let entry = unsafe { entry.as_mut() };
 		if data.output.size[0] == 1 {
 			if entry.d1.is_none() {
-				entry.d1 = Some(Self::compile_d1(data)?);
+				entry.d1 = Some(self.compile_d1(data)?);
 			}
 			Ok(unsafe { entry.d1.as_ref().unwrap_unchecked() })
 		} else {
 			if entry.d2.is_none() {
-				entry.d2 = Some(Self::compile_d2(data)?);
+				entry.d2 = Some(self.compile_d2(data)?);
 			}
 			Ok(unsafe { entry.d2.as_ref().unwrap_unchecked() })
 		}

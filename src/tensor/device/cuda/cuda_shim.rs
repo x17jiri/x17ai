@@ -5,12 +5,13 @@
 //
 //------------------------------------------------------------------------------
 
+use std::borrow::Cow;
 use std::ffi::{c_char, c_int, c_void};
 use std::hint::cold_path;
 use std::ptr::NonNull;
 
+use crate::tensor::TensorOpError;
 use crate::tensor::device::DevicePtr;
-use crate::tensor::{Tensor, TensorOpError};
 use crate::util::ffi_buffer::FfiBuffer;
 use crate::{ErrExtra, ErrPack};
 
@@ -179,28 +180,55 @@ impl From<CudaCppError> for ErrPack<TensorOpError> {
 		ErrPack {
 			code: TensorOpError::DeviceError,
 			extra: Some(Box::new(ErrExtra {
-				message: String::from_utf8_lossy(&err.msg).into_owned(),
+				message: Cow::from(String::from_utf8_lossy(&err.msg).into_owned()),
 				nested: None,
 			})),
 		}
 	}
 }
 
-#[derive(Clone, Copy)]
+impl From<CudaCppError> for CudaError {
+	#[inline(never)]
+	#[cold]
+	fn from(err: CudaCppError) -> Self {
+		Self {
+			extra: Some(Box::new(ErrExtra {
+				message: Cow::from(String::from_utf8_lossy(&err.msg).into_owned()),
+				nested: None,
+			})),
+		}
+	}
+}
+
 pub struct CudaError {
-	pub msg: &'static str,
+	pub extra: Option<Box<ErrExtra>>,
+}
+
+impl CudaError {
+	pub fn new<T: Into<Cow<'static, str>>>(message: T) -> Self {
+		Self {
+			extra: Some(Box::new(ErrExtra { message: message.into(), nested: None })),
+		}
+	}
+
+	pub fn new2<T: Into<Cow<'static, str>>, N: 'static + std::error::Error + Send + Sync>(
+		message: T,
+		nested: N,
+	) -> Self {
+		Self {
+			extra: Some(Box::new(ErrExtra {
+				message: message.into(),
+				nested: Some(Box::new(nested)),
+			})),
+		}
+	}
 }
 
 impl From<CudaError> for ErrPack<TensorOpError> {
-	#[inline(never)]
-	#[cold]
 	fn from(err: CudaError) -> Self {
 		Self {
 			code: TensorOpError::DeviceError,
-			extra: Some(Box::new(ErrExtra {
-				message: err.msg.to_string(),
-				nested: None,
-			})),
+			extra: err.extra,
 		}
 	}
 }

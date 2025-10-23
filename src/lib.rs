@@ -75,6 +75,7 @@
 #![allow(clippy::range_plus_one)]
 //#![allow(clippy::len_zero)]
 
+use std::borrow::Cow;
 use std::convert::Infallible;
 
 pub mod autograd;
@@ -85,7 +86,7 @@ pub mod util;
 
 #[derive(Debug)]
 pub struct ErrExtra {
-	pub message: String,
+	pub message: Cow<'static, str>,
 	pub nested: Option<Box<dyn std::error::Error + Send + Sync>>,
 }
 
@@ -115,7 +116,7 @@ impl<Code: Copy + std::fmt::Debug> std::fmt::Display for ErrPack<Code> {
 		let code = self.code;
 		write!(f, "(ErrPack: code={code:?}")?;
 		if let Some(ref extra) = self.extra {
-			let msg = extra.message.as_str();
+			let msg = extra.message.as_ref();
 			if !msg.is_empty() {
 				write!(f, ", message={msg}")?;
 			}

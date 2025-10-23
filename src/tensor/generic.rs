@@ -10,6 +10,7 @@ pub mod dim_index;
 pub mod map;
 pub mod universal_range;
 
+use std::borrow::Cow;
 use std::hint::cold_path;
 
 use buffer::Buffer;
@@ -243,9 +244,9 @@ impl TensorUnsafeError {
 	#[cold]
 	#[inline(never)]
 	fn new(span: std::ops::Range<usize>, buf_len: usize) -> ErrPack<Self> {
-		let message = format!(
+		let message = Cow::from(format!(
 			"Tensor map is not safe: span {span:?} is out of bounds for buffer of length {buf_len}."
-		);
+		));
 		ErrPack {
 			code: Self,
 			extra: Some(Box::new(ErrExtra { message, nested: None })),

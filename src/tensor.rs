@@ -5,6 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
+use std::borrow::Cow;
 use std::hint::cold_path;
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -485,7 +486,7 @@ impl TensorOpError {
 		ErrPack {
 			code: Self::IOError,
 			extra: Some(Box::new(ErrExtra {
-				message: String::new(),
+				message: Cow::from("IO error occurred"),
 				nested: Some(Box::new(err)),
 			})),
 		}
