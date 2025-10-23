@@ -104,15 +104,17 @@ impl CudaDevice {
 			.template_env
 			.get_template("elemwise_1d")
 			.map_err(|e| CudaError::new2("Failed to get kernel template", e))?;
-		let code = template
-			.render(HashMap::<&str, String>::new())
-			.map_err(|e| CudaError::new2("Failed to render kernel template", e))?;
 		let kernel_src = template
 			.render(context! {
-				code => code,
+				INTERNAL_TYPE => "float",
+				O_TYPE => "xyz",
+				ES => vec![
+					context! {type => "floatA"},
+					context! {type => "floatB"},
+				],
 			})
 			.map_err(|e| CudaError::new2("Failed to render kernel source", e))?;
-		println!("Compiled kernel source:\n{}", kernel_src);
+		println!("Rendered kernel source:\n{kernel_src}");
 		todo!("... unfinished");
 	}
 

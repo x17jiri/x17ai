@@ -33,13 +33,12 @@ struct Array {
 using Internal = {{INTERNAL_TYPE}};
 using O = {{O_TYPE}};
 
-{% for e in ES %}
-using E{{loop.index0}} = {{e.type}};
+{% for e in ES %}using E{{loop.index0}} = {{e.type}};
 {% endfor %}
 
-constexpr usize E = {{ES|length}};
+constexpr usize E_CNT = {{ES|length}};
 
-extern "C" __global__ void x17ai_kernel(KernelOutput o_arg, Array<KernelElemArg, E> e_args) {
+extern "C" __global__ void x17ai_kernel(KernelOutput o_arg, Array<KernelElemArg, E_CNT> e_args) {
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
 	if (idx >= o_arg.size[1]) {
 		return;
@@ -51,12 +50,12 @@ extern "C" __global__ void x17ai_kernel(KernelOutput o_arg, Array<KernelElemArg,
 		+ idx * o_arg.stride_bytes[1]
 	);
 
-	{% for e in ES %}
+	{% for e in ES %}KernelElemArg e_arg{{loop.index0}} = e_args.items[{{loop.index0}}];
 	Internal e{{loop.index0}} = Internal(
 		*reinterpret_cast<E{{loop.index0}} *>(
-			reinterpret_cast<char *>(e_args.items[0].buf)
-			+ e_args.items[{{loop.index0}}].offset_bytes
-			+ idx * e_args.items[{{loop.index0}}].stride_bytes[1]
+			reinterpret_cast<char *>(e_arg{{loop.index0}}.buf)
+			+ e_arg{{loop.index0}}.offset_bytes
+			+ idx * e_arg{{loop.index0}}.stride_bytes[1]
 		)
 	);
 	{% endfor %}
