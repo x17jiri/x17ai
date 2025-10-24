@@ -6,13 +6,12 @@
 //------------------------------------------------------------------------------
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::fmt::Write;
 use std::hint::{cold_path, likely};
 use std::ptr::NonNull;
 use std::rc::Rc;
 
 use hashbrown::HashTable;
-use minijinja::context;
 
 use crate::ErrPack;
 use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
@@ -20,7 +19,8 @@ use crate::tensor::device::cuda::cuda_shim::{
 	CudaCapability, CudaCppError, CudaCube, CudaError, CudaKernel, CudaLaunchConfig, CudaStream,
 	Ptx, cuda_compile,
 };
-use crate::tensor::device::kernel::DynKernelCall;
+use crate::tensor::device::cuda::kernel_templates::{Elemwise1DTemplate, ElemwiseArgTemplate};
+use crate::tensor::device::kernel::{DynExpr, DynKernelCall};
 use crate::tensor::device::{
 	AttentionArgs, DeviceBuffer, DevicePtr, MatMulArgs, NewDeviceBufferError,
 };
@@ -29,6 +29,7 @@ use crate::util::hasher::HashWord;
 use crate::util::{ToBoxedSlice, mycell};
 
 pub mod cuda_shim;
+pub mod kernel_templates;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -48,18 +49,11 @@ pub struct CudaDevice {
 	hash_random_state: crate::util::hasher::RandomState,
 	compiled_kernels: RefCell<HashTable<CompiledKernelEntry>>,
 	name: String,
-	template_env: minijinja::Environment<'static>,
 }
 
 impl CudaDevice {
 	pub fn new(device_id: usize) -> Result<Rc<Self>, CudaError> {
 		Self::new_named(device_id, format!("CUDA Device {device_id}"))
-	}
-
-	fn make_templates() -> Result<minijinja::Environment<'static>, minijinja::Error> {
-		let mut template_env = minijinja::Environment::new();
-		template_env.add_template("elemwise_1d", include_str!("cuda/kernels/elemwise_1d.cu"))?;
-		Ok(template_env)
 	}
 
 	pub fn new_named(device_id: usize, name: String) -> Result<Rc<Self>, CudaError> {
@@ -68,8 +62,6 @@ impl CudaDevice {
 			hash_random_state: crate::util::hasher::RandomState::new(),
 			compiled_kernels: RefCell::new(HashTable::with_capacity(20)),
 			name,
-			template_env: Self::make_templates()
-				.map_err(|e| CudaError::new(format!("Failed to create kernel templates: {}", e)))?,
 		}))
 	}
 
@@ -99,22 +91,102 @@ impl CudaDevice {
 		Ok(val.to_f64())
 	}
 
+	fn print_expr(&self, out: &mut String, expr: &DynExpr) -> std::fmt::Result {
+		match expr {
+			DynExpr::ElemwiseTensorArg(index) => {
+				write!(out, "e{index}")
+			},
+			DynExpr::ReduceTensorArg(index) => {
+				write!(out, "r{index}")
+			},
+			DynExpr::ScalarArg(index) => {
+				write!(out, "s{index}")
+			},
+
+			DynExpr::NegExpr(inner) => {
+				write!(out, "-")?;
+				self.print_expr(out, inner.as_ref())
+			},
+			DynExpr::ExpExpr(inner) => {
+				write!(out, "exp(")?;
+				self.print_expr(out, inner.as_ref())?;
+				write!(out, ")")
+			},
+			DynExpr::LnExpr(inner) => {
+				write!(out, "ln(")?;
+				self.print_expr(out, inner.as_ref())?;
+				write!(out, ")")
+			},
+			DynExpr::AbsExpr(inner) => {
+				write!(out, "abs(")?;
+				self.print_expr(out, inner.as_ref())?;
+				write!(out, ")")
+			},
+			DynExpr::SqrtExpr(inner) => {
+				write!(out, "sqrt(")?;
+				self.print_expr(out, inner.as_ref())?;
+				write!(out, ")")
+			},
+			DynExpr::RecipExpr(inner) => {
+				write!(out, "(1.0 / ")?;
+				self.print_expr(out, inner.as_ref())?;
+				write!(out, ")")
+			},
+
+			DynExpr::AddExpr(lhs, rhs) => {
+				write!(out, "(")?;
+				self.print_expr(out, lhs.as_ref())?;
+				write!(out, " + ")?;
+				self.print_expr(out, rhs.as_ref())?;
+				write!(out, ")")
+			},
+			DynExpr::SubExpr(lhs, rhs) => {
+				write!(out, "(")?;
+				self.print_expr(out, lhs.as_ref())?;
+				write!(out, " - ")?;
+				self.print_expr(out, rhs.as_ref())?;
+				write!(out, ")")
+			},
+			DynExpr::MulExpr(lhs, rhs) => {
+				write!(out, "(")?;
+				self.print_expr(out, lhs.as_ref())?;
+				write!(out, " * ")?;
+				self.print_expr(out, rhs.as_ref())?;
+				write!(out, ")")
+			},
+			_ => {
+				cold_path();
+				write!(out, "TODO")
+			},
+		}
+	}
+
 	fn compile_d1(&self, data: &DynKernelCall) -> Result<CudaKernel, ErrPack<TensorOpError>> {
-		let template = self
-			.template_env
-			.get_template("elemwise_1d")
-			.map_err(|e| CudaError::new2("Failed to get kernel template", e))?;
-		let kernel_src = template
-			.render(context! {
-				INTERNAL_TYPE => "float",
-				O_TYPE => "xyz",
-				ES => vec![
-					context! {type => "floatA"},
-					context! {type => "floatB"},
-				],
-			})
-			.map_err(|e| CudaError::new2("Failed to render kernel source", e))?;
+		let expr = data.generate_expr();
+		let mut expr_str = String::new();
+		self.print_expr(&mut expr_str, &expr)
+			.map_err(|e| CudaError::new(format!("Failed to render expression: {e}")))?;
+		let mut src_data = Elemwise1DTemplate {
+			internal_dtype: data.internal_dtype().to_string(),
+			out_dtype: data.output_dtype().to_string(),
+			elem_args: Vec::with_capacity(data.elemwise_args.len()),
+			scalar_args_count: data.scalar_args.len(),
+			expr: expr_str,
+		};
+		for i in 0..data.elemwise_args.len() {
+			src_data.elem_args.push(ElemwiseArgTemplate {
+				dtype: data.elemwise_dtype(i).to_string(),
+			});
+		}
+		let kernel_src = src_data.to_string();
 		println!("Rendered kernel source:\n{kernel_src}");
+		let ptx = self.compile(&kernel_src)?;
+		println!("Compiled PTX:\n{}", ptx.code());
+		println!("Compilation log:\n{}", ptx.log());
+		/*
+		let module = self.cuda_stream.load_module(&ptx).ok().unwrap();
+		let kernel = module.get_kernel("x17ai_kernel").ok().unwrap();
+		*/
 		todo!("... unfinished");
 	}
 
@@ -247,13 +319,6 @@ impl Device for CudaDevice {
 	}
 
 	unsafe fn run_kernel(&self, data: &DynKernelCall) -> Result<(), ErrPack<TensorOpError>> {
-		/*
-		let kernel_bytes = std::fs::read("/home/spock/prog/x17ai/kernel.cu").unwrap();
-		let kernel_str = String::from_utf8_lossy_owned(kernel_bytes);
-		let ptx = self.compile(&kernel_str).ok().unwrap();
-		let module = self.cuda_stream.load_module(&ptx).ok().unwrap();
-		let kernel = module.get_kernel("x17ai_kernel").ok().unwrap();
-		*/
 		let kernel = self.get_kernel(data)?;
 		let blocks = data.output.size[1].div_ceil(256);
 		let config = CudaLaunchConfig {

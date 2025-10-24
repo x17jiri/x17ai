@@ -239,8 +239,8 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let c = a.new_empty_like(a.dtype())?;
 	c.assign(custom_kernel!(
 		c.dtype(),
-		[a: &a, b: &b], (), {
-			a + b
+		[a: &a, b: &b], (c: 4.0), {
+			(a + b) * -c
 		}
 	))?;
 	let a_cpu = a.to_device(cpu.clone())?;

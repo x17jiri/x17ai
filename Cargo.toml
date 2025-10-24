@@ -23,7 +23,8 @@ hashbrown = "0.15.5"
 const-siphasher = "1"
 # fat_type = "0.3.0"
 # num_enum = "0.7.4"
-minijinja = "2.12.0"
+# minijinja = "2.12.0"
+askama = "0.14.0"
 
 [build-dependencies]
 cc = "1.0"
