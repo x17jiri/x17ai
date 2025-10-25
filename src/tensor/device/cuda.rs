@@ -33,21 +33,21 @@ pub mod kernel_templates;
 
 //--------------------------------------------------------------------------------------------------
 
-struct CompiledKernel {
+struct KernelCacheEntry {
 	d1: Option<CudaKernel>,
 	d2: Option<CudaKernel>,
 	key: Box<[HashWord]>, // TODO - allocate `key` inline at the end of the struct
 }
 
-struct CompiledKernelEntry {
+struct KernelCacheEntryRef {
 	pub key_hash: u64,
-	pub value: Box<CompiledKernel>,
+	pub value: Box<KernelCacheEntry>,
 }
 
 pub struct CudaDevice {
 	cuda_stream: CudaStream,
 	hash_random_state: crate::util::hasher::RandomState,
-	compiled_kernels: RefCell<HashTable<CompiledKernelEntry>>,
+	kernel_cache: RefCell<HashTable<KernelCacheEntryRef>>,
 	name: String,
 }
 
@@ -60,7 +60,7 @@ impl CudaDevice {
 		Ok(Rc::new(Self {
 			cuda_stream: CudaStream::new(device_id)?,
 			hash_random_state: crate::util::hasher::RandomState::new(),
-			compiled_kernels: RefCell::new(HashTable::with_capacity(20)),
+			kernel_cache: RefCell::new(HashTable::with_capacity(20)),
 			name,
 		}))
 	}
@@ -161,7 +161,10 @@ impl CudaDevice {
 		}
 	}
 
-	fn compile_d1(&self, data: &DynKernelCall) -> Result<CudaKernel, ErrPack<TensorOpError>> {
+	fn compile_elemwise_1d(
+		&self,
+		data: &DynKernelCall,
+	) -> Result<CudaKernel, ErrPack<TensorOpError>> {
 		let expr = data.generate_expr();
 		let mut expr_str = String::new();
 		self.print_expr(&mut expr_str, &expr)
@@ -183,62 +186,89 @@ impl CudaDevice {
 		let ptx = self.compile(&kernel_src)?;
 		println!("Compiled PTX:\n{}", ptx.code());
 		println!("Compilation log:\n{}", ptx.log());
-		/*
-		let module = self.cuda_stream.load_module(&ptx).ok().unwrap();
-		let kernel = module.get_kernel("x17ai_kernel").ok().unwrap();
-		*/
-		todo!("... unfinished");
+
+		let module = self.cuda_stream.load_module(&ptx)?;
+		let kernel = module.get_kernel("x17ai_kernel")?;
+		Ok(kernel)
 	}
 
-	fn compile_d2(&self, _data: &DynKernelCall) -> Result<CudaKernel, ErrPack<TensorOpError>> {
-		todo!("implement compile_d2 for CudaDevice");
-	}
-
-	fn get_kernel(&self, data: &DynKernelCall) -> Result<&CudaKernel, ErrPack<TensorOpError>> {
-		let Ok(mut compiled_kernels) = self.compiled_kernels.try_borrow_mut() else {
-			cold_path();
-			let err = CudaError::new("Internal error: compiled_kernels is already borrowed");
-			return Err(err.into());
-		};
-		let key = data.key;
+	fn get_cache_entry<'cache>(
+		&self,
+		kernel_cache: &'cache mut HashTable<KernelCacheEntryRef>,
+		key: &[HashWord],
+	) -> &'cache mut KernelCacheEntry {
 		let key_hash = self.hash_random_state.hash_one(key);
-		let found = compiled_kernels.find_mut(key_hash, |item| {
+		let entry = kernel_cache.find_entry(key_hash, |item| {
 			item.key_hash == key_hash && likely(item.value.key.as_ref() == key)
 		});
-		let mut entry = //.
-			if let Some(found) = found {
-				NonNull::from_mut(found.value.as_mut())
-			} else {
+		match entry {
+			Ok(occupied_entry) => occupied_entry.into_mut().value.as_mut(),
+			Err(absent_entry) => {
 				cold_path();
-				NonNull::from_mut(
-					compiled_kernels
-						.insert_unique(
-							key_hash,
-							CompiledKernelEntry {
-								key_hash,
-								value: Box::new(CompiledKernel {
-									d1: None,
-									d2: None,
-									key: key.to_boxed_slice(),
-								}),
-							},
-							|item| item.key_hash,
-						)
-						.get_mut().value.as_mut(),
-				)
-			};
-		let entry = unsafe { entry.as_mut() };
-		if data.output.size[0] == 1 {
-			if entry.d1.is_none() {
-				entry.d1 = Some(self.compile_d1(data)?);
-			}
-			Ok(unsafe { entry.d1.as_ref().unwrap_unchecked() })
-		} else {
-			if entry.d2.is_none() {
-				entry.d2 = Some(self.compile_d2(data)?);
-			}
-			Ok(unsafe { entry.d2.as_ref().unwrap_unchecked() })
+				let new_cache_entry = KernelCacheEntryRef {
+					key_hash,
+					value: Box::new(KernelCacheEntry {
+						d1: None,
+						d2: None,
+						key: key.to_boxed_slice(),
+					}),
+				};
+				let rehash_hasher = |item: &KernelCacheEntryRef| item.key_hash;
+				#[rustfmt::skip]
+				absent_entry
+					.into_table()
+					.insert_unique(key_hash, new_cache_entry, rehash_hasher)
+					.into_mut().value.as_mut()
+			},
 		}
+	}
+
+	/// This is similar to `Option::get_or_insert_with`,
+	/// but works with functions that return `Result`.
+	fn get_or(
+		option: &mut Option<CudaKernel>,
+		f: impl FnOnce() -> Result<CudaKernel, ErrPack<TensorOpError>>,
+	) -> Result<&CudaKernel, ErrPack<TensorOpError>> {
+		if option.is_none() {
+			cold_path();
+			*option = Some(f()?);
+		}
+		// SAFETY: we just ensured that the option is `Some`
+		Ok(unsafe { option.as_ref().unwrap_unchecked() })
+	}
+
+	unsafe fn run_elemwise_1d(
+		&self,
+		data: &DynKernelCall,
+		cache_entry: &mut KernelCacheEntry,
+	) -> Result<(), ErrPack<TensorOpError>> {
+		let kernel = Self::get_or(&mut cache_entry.d1, || self.compile_elemwise_1d(data))?;
+
+		const BLOCK_SIZE: usize = 256;
+		let block_cnt = data.output.size[1].div_ceil(BLOCK_SIZE);
+		let config = CudaLaunchConfig {
+			grid_dim: CudaCube { x: block_cnt, y: 1, z: 1 },
+			block_dim: CudaCube { x: BLOCK_SIZE, y: 1, z: 1 },
+			shared_mem_bytes: 0,
+		};
+		unsafe {
+			let output_arg = std::ptr::from_ref(data.output).cast();
+			let elemwise_args = std::ptr::from_ref(data.elemwise_args).cast();
+			let scalar_args = std::ptr::from_ref(data.scalar_args).cast();
+			self.cuda_stream.run_kernel(
+				kernel,
+				&config,
+				// Note: It is ok to pass more arguments than the kernel actually uses.
+				// If `elemwise_args` is empty, we pass `scalar_args` as the second argument
+				// and the third argument is unused.
+				&[
+					output_arg,
+					if data.elemwise_args.is_empty() { scalar_args } else { elemwise_args },
+					scalar_args,
+				],
+			)?;
+		}
+		Ok(())
 	}
 }
 
@@ -319,23 +349,20 @@ impl Device for CudaDevice {
 	}
 
 	unsafe fn run_kernel(&self, data: &DynKernelCall) -> Result<(), ErrPack<TensorOpError>> {
-		let kernel = self.get_kernel(data)?;
-		let blocks = data.output.size[1].div_ceil(256);
-		let config = CudaLaunchConfig {
-			grid_dim: CudaCube { x: blocks, y: 1, z: 1 },
-			block_dim: CudaCube { x: 256, y: 1, z: 1 },
-			shared_mem_bytes: 0,
+		let Ok(mut kernel_cache) = self.kernel_cache.try_borrow_mut() else {
+			cold_path();
+			let err = CudaError::new("Internal error: compiled_kernels is already borrowed");
+			return Err(err.into());
 		};
-		unsafe {
-			self.cuda_stream.run_kernel(
-				kernel,
-				&config,
-				&[
-					std::ptr::from_ref(data.output).cast(),
-					std::ptr::from_ref(data.elemwise_args).cast(),
-				],
-			)?;
+		let cache_entry = self.get_cache_entry(&mut kernel_cache, data.key);
+		if data.reduce_args.is_empty() {
+			if data.output.size[0] == 1 {
+				unsafe { self.run_elemwise_1d(data, cache_entry) }
+			} else {
+				todo!("implement other dimensionalities in run_kernel for CudaDevice");
+			}
+		} else {
+			todo!("implement reduce args in run_kernel for CudaDevice");
 		}
-		Ok(())
 	}
 }

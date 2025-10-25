@@ -74,6 +74,7 @@
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::range_plus_one)]
 //#![allow(clippy::len_zero)]
+#![allow(clippy::items_after_statements)]
 
 use std::borrow::Cow;
 use std::convert::Infallible;
