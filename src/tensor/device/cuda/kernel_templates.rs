@@ -12,7 +12,7 @@ pub struct ElemwiseArgTemplate {
 }
 
 #[derive(Template)]
-#[template(escape = "none", path = "elemwise_1d.cu")]
+#[template(escape = "none", path = "elemwise.cu")]
 pub struct Elemwise1DTemplate {
 	pub internal_dtype: String,
 	pub out_dtype: String,

@@ -258,9 +258,11 @@ impl CudaDevice {
 			self.cuda_stream.run_kernel(
 				kernel,
 				&config,
-				// Note: It is ok to pass more arguments than the kernel actually uses.
-				// If `elemwise_args` is empty, we pass `scalar_args` as the second argument
-				// and the third argument is unused.
+				// Note: Passing `elemwise_args` when it is empty could cause problems because C++
+				// doesn't support zero-sized types.
+				// So if it is empty, we pass `scalar_args` as the second argument. We also pass it
+				// as the third argument, but the third position is unused in that case.
+				// It is ok to pass more arguments than the kernel actually uses.
 				&[
 					output_arg,
 					if data.elemwise_args.is_empty() { scalar_args } else { elemwise_args },
