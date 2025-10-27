@@ -34,8 +34,7 @@ pub mod kernel_templates;
 //--------------------------------------------------------------------------------------------------
 
 struct KernelCacheEntry {
-	d1: Option<CudaKernel>,
-	d2: Option<CudaKernel>,
+	kernel1: Option<CudaKernel>,
 	key: Box<[HashWord]>, // TODO - allocate `key` inline at the end of the struct
 }
 
@@ -161,37 +160,6 @@ impl CudaDevice {
 		}
 	}
 
-	fn compile_elemwise_1d(
-		&self,
-		data: &DynKernelCall,
-	) -> Result<CudaKernel, ErrPack<TensorOpError>> {
-		let expr = data.generate_expr();
-		let mut expr_str = String::new();
-		self.print_expr(&mut expr_str, &expr)
-			.map_err(|e| CudaError::new(format!("Failed to render expression: {e}")))?;
-		let mut src_data = Elemwise1DTemplate {
-			internal_dtype: data.internal_dtype().to_string(),
-			out_dtype: data.output_dtype().to_string(),
-			elem_args: Vec::with_capacity(data.elemwise_args.len()),
-			scalar_args_count: data.scalar_args.len(),
-			expr: expr_str,
-		};
-		for i in 0..data.elemwise_args.len() {
-			src_data.elem_args.push(ElemwiseArgTemplate {
-				dtype: data.elemwise_dtype(i).to_string(),
-			});
-		}
-		let kernel_src = src_data.to_string();
-		println!("Rendered kernel source:\n{kernel_src}");
-		let ptx = self.compile(&kernel_src)?;
-		println!("Compiled PTX:\n{}", ptx.code());
-		println!("Compilation log:\n{}", ptx.log());
-
-		let module = self.cuda_stream.load_module(&ptx)?;
-		let kernel = module.get_kernel("x17ai_kernel")?;
-		Ok(kernel)
-	}
-
 	fn get_cache_entry<'cache>(
 		&self,
 		kernel_cache: &'cache mut HashTable<KernelCacheEntryRef>,
@@ -207,11 +175,7 @@ impl CudaDevice {
 				cold_path();
 				let new_cache_entry = KernelCacheEntryRef {
 					key_hash,
-					value: Box::new(KernelCacheEntry {
-						d1: None,
-						d2: None,
-						key: key.to_boxed_slice(),
-					}),
+					value: Box::new(KernelCacheEntry { kernel1: None, key: key.to_boxed_slice() }),
 				};
 				let rehash_hasher = |item: &KernelCacheEntryRef| item.key_hash;
 				#[rustfmt::skip]
@@ -237,15 +201,15 @@ impl CudaDevice {
 		Ok(unsafe { option.as_ref().unwrap_unchecked() })
 	}
 
-	unsafe fn run_elemwise_1d(
+	unsafe fn run_elemwise(
 		&self,
 		data: &DynKernelCall,
 		cache_entry: &mut KernelCacheEntry,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		let kernel = Self::get_or(&mut cache_entry.d1, || self.compile_elemwise_1d(data))?;
+		let kernel = Self::get_or(&mut cache_entry.kernel1, || self.compile_elemwise(data))?;
 
-		const BLOCK_SIZE: usize = 256;
-		let block_cnt = data.output.size[1].div_ceil(BLOCK_SIZE);
+		const BLOCK_SIZE: usize = 1024;
+		let block_cnt = (data.output.size[0] * data.output.size[1]).div_ceil(BLOCK_SIZE);
 		let config = CudaLaunchConfig {
 			grid_dim: CudaCube { x: block_cnt, y: 1, z: 1 },
 			block_dim: CudaCube { x: BLOCK_SIZE, y: 1, z: 1 },
@@ -271,6 +235,35 @@ impl CudaDevice {
 			)?;
 		}
 		Ok(())
+	}
+
+	#[inline(never)]
+	fn compile_elemwise(&self, data: &DynKernelCall) -> Result<CudaKernel, ErrPack<TensorOpError>> {
+		let expr = data.generate_expr();
+		let mut expr_str = String::new();
+		self.print_expr(&mut expr_str, &expr)
+			.map_err(|e| CudaError::new(format!("Failed to render expression: {e}")))?;
+		let mut src_data = Elemwise1DTemplate {
+			internal_dtype: data.internal_dtype().to_string(),
+			out_dtype: data.output_dtype().to_string(),
+			elem_args: Vec::with_capacity(data.elemwise_args.len()),
+			scalar_args_count: data.scalar_args.len(),
+			expr: expr_str,
+		};
+		for i in 0..data.elemwise_args.len() {
+			src_data.elem_args.push(ElemwiseArgTemplate {
+				dtype: data.elemwise_dtype(i).to_string(),
+			});
+		}
+		let kernel_src = src_data.to_string();
+		println!("Rendered kernel source:\n{kernel_src}");
+		let ptx = self.compile(&kernel_src)?;
+		println!("Compiled PTX:\n{}", ptx.code());
+		println!("Compilation log:\n{}", ptx.log());
+
+		let module = self.cuda_stream.load_module(&ptx)?;
+		let kernel = module.get_kernel("x17ai_kernel")?;
+		Ok(kernel)
 	}
 }
 
@@ -358,11 +351,7 @@ impl Device for CudaDevice {
 		};
 		let cache_entry = self.get_cache_entry(&mut kernel_cache, data.key);
 		if data.reduce_args.is_empty() {
-			if data.output.size[0] == 1 {
-				unsafe { self.run_elemwise_1d(data, cache_entry) }
-			} else {
-				todo!("implement other dimensionalities in run_kernel for CudaDevice");
-			}
+			unsafe { self.run_elemwise(data, cache_entry) }
 		} else {
 			todo!("implement reduce args in run_kernel for CudaDevice");
 		}
