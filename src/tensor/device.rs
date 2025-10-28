@@ -73,6 +73,10 @@ pub struct KernelOutput {
 	pub buf: DevicePtr,
 	pub offset_bytes: usize,
 	pub reduction_size: usize,
+
+	/// If == 0, then size[2] == 1
+	/// If > 0, then size[2] == reduction_size
+	pub reduction_stride_bytes: usize,
 }
 
 #[repr(C)]

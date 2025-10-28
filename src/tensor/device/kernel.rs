@@ -724,6 +724,7 @@ where
 		offset_bytes: output.map().offset * dtype_bytes,
 		buf: output.buf().device_ptr(),
 		reduction_size: reduce_args_top_dim.size,
+		reduction_stride_bytes: 0, // TODO
 	};
 
 	unsafe {

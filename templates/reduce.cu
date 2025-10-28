@@ -28,9 +28,10 @@ namespace {
 		void *buf;
 		usize offset_bytes;
 		usize reduction_size;
+		usize reduction_stride_bytes;
 	};
 
-	static_assert(sizeof(KernelOutput) == 56, "KernelOutput must be 56 bytes");
+	static_assert(sizeof(KernelOutput) == 64, "KernelOutput must be 64 bytes");
 	static_assert(alignof(KernelOutput) == 8, "KernelOutput must be 8 bytes aligned");
 
 	struct KernelReduceArg {
@@ -113,7 +114,7 @@ extern "C" __global__ void x17ai_kernel(
 	{% if scalar_args_count > 0 %}, Array<f64, S_CNT> scalars{% endif %}
 ) {
 	// `x`, `y` are the indices along the output dimensions
-	usize idx = usize(threadIdx.x);
+	usize idx = usize(blockIdx.x);
 	usize w = o_arg.size[1];
 	usize h = o_arg.size[0];
 	usize x, y;
@@ -129,7 +130,7 @@ extern "C" __global__ void x17ai_kernel(
 	}
 
 	// `z` is the index along the reduction dimension
-	usize z = usize(blockIdx.x);
+	usize z = usize(threadIdx.x);
 
 	// Calculate output pointer
 	OutputDtype *o = reinterpret_cast<OutputDtype *>(
@@ -184,6 +185,7 @@ extern "C" __global__ void x17ai_kernel(
 		}
 		val = kahan_sum.result();
 	}
+	unsigned mask = __activemask();
 	for (int t = WARP_SIZE / 2; t > 0; t /= 2) {
 		val = pairwise_sum(val, __shfl_down_sync(0xFFFFFFFF, val, t));
 	}
@@ -195,44 +197,45 @@ extern "C" __global__ void x17ai_kernel(
 	__syncthreads();
 
 	if (z < WARP_SIZE) {
-		InternalDtype x = {{zero}};
+		InternalDtype new_val = {{zero}};
 		if (z < (blockDim.x + WARP_SIZE - 1) / WARP_SIZE) {
-			x = shared[z];
+			new_val = shared[z];
 		}
 		for (int t = WARP_SIZE / 2; t > 0; t /= 2) {
-			x += pairwise_sum(x, __shfl_down_sync(0xFFFFFFFF, x, t));
+			new_val = pairwise_sum(new_val, __shfl_down_sync(0xFFFFFFFF, new_val, t));
 		}
+		val = new_val;
+	}
+
+	if (o_arg.reduction_stride_bytes == 0) {
 		if (z == 0) {
 			val = {{post_reduce_expr}};
 			*o = static_cast<OutputDtype>(val);
-			return;
-
+		}
+	} else {
+		if (z == 0) {
 			shared[0] = val;
 		}
+		__syncthreads();
+		val = shared[0];
+
+		// TODO
+		/*
+		// Calculate elementwise argument pointers
+		{%- for i in 0..elem_args.len() %}
+		KernelElemArg &e_arg{{i}} = e_args.items[{{i}}];
+		InternalDtype e{{i}} = static_cast<InternalDtype>(
+			*reinterpret_cast<E{{i}}Dtype *>(
+				reinterpret_cast<char *>(e_arg{{i}}.buf)
+				+ e_arg{{i}}.offset_bytes
+				+ y * e_arg{{i}}.stride_bytes[0]
+				+ x * e_arg{{i}}.stride_bytes[1]
+			)
+		);
+		{%- endfor %}
+
+		// Store the result
+		*o = static_cast<OutputDtype>(value);
+		*/
 	}
-
-/*
-	__syncthreads();
-	val = shared[0];
-
-
-
-
-	// Calculate elementwise argument pointers
-	{%- for i in 0..elem_args.len() %}
-	KernelElemArg &e_arg{{i}} = e_args.items[{{i}}];
-	InternalDtype e{{i}} = static_cast<InternalDtype>(
-		*reinterpret_cast<E{{i}}Dtype *>(
-			reinterpret_cast<char *>(e_arg{{i}}.buf)
-			+ e_arg{{i}}.offset_bytes
-			+ y * e_arg{{i}}.stride_bytes[0]
-			+ x * e_arg{{i}}.stride_bytes[1]
-		)
-	);
-	{%- endfor %}
-
-
-	// Store the result
-	*o = static_cast<OutputDtype>(value);
-*/
 }
