@@ -35,6 +35,7 @@ pub struct ReduceTemplate {
 	pub scalar_args_count: usize,
 	pub pre_reduce_expr: String,
 	pub post_reduce_expr: String,
+	pub post_reduce_common: String,
 	pub zero: String,
 	pub warp_size: usize,
 }

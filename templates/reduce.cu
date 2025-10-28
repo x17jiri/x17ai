@@ -157,18 +157,18 @@ extern "C" __global__ void x17ai_kernel(
 	InternalDtype s{{s}} = static_cast<InternalDtype>(scalars.items[{{s}}]);
 	{%- endfor %}
 
-	InternalDtype val = {{zero}};
+	InternalDtype reduce_val = {{zero}};
 	if (z < o_arg.reduction_size) {
 		{%- for i in 0..reduce_args.len() %}
 		InternalDtype r{{i}} = static_cast<InternalDtype>(*r{{i}}_ptr);
 		{%- endfor %}
-		val = {{pre_reduce_expr}};
+		reduce_val = {{pre_reduce_expr}};
 	}
 	if (blockDim.x < o_arg.reduction_size) {
 		{%- for i in 0..reduce_args.len() %}
 		usize r{{i}}_stride = r_arg{{i}}.stride_bytes[2] * blockDim.x;
 		{%- endfor %}
-		KahanSum<InternalDtype> kahan_sum(val);
+		KahanSum<InternalDtype> kahan_sum(reduce_val);
 		for (usize i = blockDim.x; i < o_arg.reduction_size; i += blockDim.x) {
 			{%- for i in 0..reduce_args.len() %}
 			r{{i}}_ptr = reinterpret_cast<R{{i}}Dtype *>(
@@ -183,16 +183,16 @@ extern "C" __global__ void x17ai_kernel(
 				kahan_sum.add({{pre_reduce_expr}});
 			}
 		}
-		val = kahan_sum.result();
+		reduce_val = kahan_sum.result();
 	}
 	unsigned mask = __activemask();
 	for (int t = WARP_SIZE / 2; t > 0; t /= 2) {
-		val = pairwise_sum(val, __shfl_down_sync(0xFFFFFFFF, val, t));
+		reduce_val = pairwise_sum(reduce_val, __shfl_down_sync(0xFFFFFFFF, reduce_val, t));
 	}
 
 	static __shared__ InternalDtype shared[WARP_SIZE];
 	if (z % WARP_SIZE == 0) {
-		shared[z / WARP_SIZE] = val;
+		shared[z / WARP_SIZE] = reduce_val;
 	}
 	__syncthreads();
 
@@ -204,20 +204,21 @@ extern "C" __global__ void x17ai_kernel(
 		for (int t = WARP_SIZE / 2; t > 0; t /= 2) {
 			new_val = pairwise_sum(new_val, __shfl_down_sync(0xFFFFFFFF, new_val, t));
 		}
-		val = new_val;
+		reduce_val = new_val;
 	}
 
 	if (o_arg.reduction_stride_bytes == 0) {
 		if (z == 0) {
-			val = {{post_reduce_expr}};
-			*o = static_cast<OutputDtype>(val);
+			*o = static_cast<OutputDtype>(
+				{{post_reduce_expr}}
+			);
 		}
 	} else {
 		if (z == 0) {
-			shared[0] = val;
+			shared[0] = {{post_reduce_common}};
 		}
 		__syncthreads();
-		val = shared[0];
+		InternalDtype post_reduce_common = shared[0];
 
 		// TODO
 		/*

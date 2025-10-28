@@ -96,7 +96,7 @@ impl CudaDevice {
 		Ok(val.to_f64())
 	}
 
-	fn print_expr(&self, out: &mut String, expr: &DynExpr) -> std::fmt::Result {
+	fn print_expr(out: &mut String, expr: &DynExpr) -> std::fmt::Result {
 		match &expr.kind {
 			&DynExprKind::ElemwiseTensorArg(index) => {
 				write!(out, "e{index}")
@@ -108,60 +108,60 @@ impl CudaDevice {
 				write!(out, "s{index}")
 			},
 
+			DynExprKind::SumExpr(..) | DynExprKind::MaxExpr(..) => {
+				write!(out, "reduce_val")
+			},
+
 			DynExprKind::NegExpr(inner) => {
 				write!(out, "-")?;
-				self.print_expr(out, inner.as_ref())
+				Self::print_expr(out, inner.as_ref())
 			},
 			DynExprKind::ExpExpr(inner) => {
 				write!(out, "exp(")?;
-				self.print_expr(out, inner.as_ref())?;
+				Self::print_expr(out, inner.as_ref())?;
 				write!(out, ")")
 			},
 			DynExprKind::LnExpr(inner) => {
 				write!(out, "ln(")?;
-				self.print_expr(out, inner.as_ref())?;
+				Self::print_expr(out, inner.as_ref())?;
 				write!(out, ")")
 			},
 			DynExprKind::AbsExpr(inner) => {
 				write!(out, "abs(")?;
-				self.print_expr(out, inner.as_ref())?;
+				Self::print_expr(out, inner.as_ref())?;
 				write!(out, ")")
 			},
 			DynExprKind::SqrtExpr(inner) => {
 				write!(out, "sqrt(")?;
-				self.print_expr(out, inner.as_ref())?;
+				Self::print_expr(out, inner.as_ref())?;
 				write!(out, ")")
 			},
 			DynExprKind::RecipExpr(inner) => {
 				write!(out, "(1.0 / ")?;
-				self.print_expr(out, inner.as_ref())?;
+				Self::print_expr(out, inner.as_ref())?;
 				write!(out, ")")
 			},
 
 			DynExprKind::AddExpr(lhs, rhs) => {
 				write!(out, "(")?;
-				self.print_expr(out, lhs.as_ref())?;
+				Self::print_expr(out, lhs.as_ref())?;
 				write!(out, " + ")?;
-				self.print_expr(out, rhs.as_ref())?;
+				Self::print_expr(out, rhs.as_ref())?;
 				write!(out, ")")
 			},
 			DynExprKind::SubExpr(lhs, rhs) => {
 				write!(out, "(")?;
-				self.print_expr(out, lhs.as_ref())?;
+				Self::print_expr(out, lhs.as_ref())?;
 				write!(out, " - ")?;
-				self.print_expr(out, rhs.as_ref())?;
+				Self::print_expr(out, rhs.as_ref())?;
 				write!(out, ")")
 			},
 			DynExprKind::MulExpr(lhs, rhs) => {
 				write!(out, "(")?;
-				self.print_expr(out, lhs.as_ref())?;
+				Self::print_expr(out, lhs.as_ref())?;
 				write!(out, " * ")?;
-				self.print_expr(out, rhs.as_ref())?;
+				Self::print_expr(out, rhs.as_ref())?;
 				write!(out, ")")
-			},
-			_ => {
-				cold_path();
-				write!(out, "TODO")
 			},
 		}
 	}
@@ -247,7 +247,7 @@ impl CudaDevice {
 	fn compile_elemwise(&self, data: &DynKernelCall) -> Result<CudaKernel, ErrPack<TensorOpError>> {
 		let expr = data.generate_expr();
 		let mut expr_str = String::new();
-		self.print_expr(&mut expr_str, &expr)
+		Self::print_expr(&mut expr_str, &expr)
 			.map_err(|e| CudaError::new(format!("Failed to render expression: {e}")))?;
 		let mut src_data = ElemwiseTemplate {
 			internal_dtype: data.internal_dtype().to_string(),
@@ -310,7 +310,13 @@ impl CudaDevice {
 		let expr = data.generate_expr();
 		let mut pre_reduce_expr = String::new();
 		#[allow(clippy::unwrap_used)]
-		self.print_expr(&mut pre_reduce_expr, expr.pre_reduce().unwrap())
+		Self::print_expr(&mut pre_reduce_expr, expr.pre_reduce().unwrap())
+			.map_err(|e| CudaError::new(format!("Failed to render expression: {e}")))?;
+		let mut post_reduce_expr = String::new();
+		Self::print_expr(&mut post_reduce_expr, expr.as_ref())
+			.map_err(|e| CudaError::new(format!("Failed to render expression: {e}")))?;
+		let mut post_reduce_common = String::new();
+		Self::print_expr(&mut post_reduce_common, expr.post_reduce_common())
 			.map_err(|e| CudaError::new(format!("Failed to render expression: {e}")))?;
 		let mut src_data = ReduceTemplate {
 			internal_dtype: data.internal_dtype().to_string(),
@@ -319,8 +325,9 @@ impl CudaDevice {
 			elem_args: Vec::with_capacity(data.elemwise_args.len()),
 			scalar_args_count: data.scalar_args.len(),
 			pre_reduce_expr,
-			post_reduce_expr: "val".to_string(), // TODO
-			zero: "0".to_string(),               // TODO
+			post_reduce_expr,
+			post_reduce_common,
+			zero: "0".to_string(), // TODO
 			warp_size: self.warp_size(),
 		};
 		for i in 0..data.reduce_args.len() {

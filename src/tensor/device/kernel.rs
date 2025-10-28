@@ -172,6 +172,48 @@ impl DynExpr {
 			},
 		}
 	}
+
+	pub fn post_reduce_common(&self) -> &Self {
+		#[rustfmt::skip]
+		match &self.kind {
+			DynExprKind::NegExpr(e)
+			| DynExprKind::ExpExpr(e)
+			| DynExprKind::LnExpr(e)
+			| DynExprKind::AbsExpr(e)
+			| DynExprKind::SqrtExpr(e)
+			| DynExprKind::RecipExpr(e) => {
+				if self.uses_elemwise_args {
+					e.post_reduce_common()
+				} else {
+					&self
+				}
+			},
+
+			DynExprKind::AddExpr(a, b)
+			| DynExprKind::SubExpr(a, b)
+			| DynExprKind::MulExpr(a, b) => {
+				if self.uses_elemwise_args {
+					if a.has_reduction {
+						a.post_reduce_common()
+					} else {
+						b.post_reduce_common()
+					}
+				} else {
+					&self
+				}
+			},
+
+			// Args should be unreachable
+			DynExprKind::ElemwiseTensorArg(..)
+			| DynExprKind::ReduceTensorArg(..)
+			| DynExprKind::ScalarArg(..)
+
+			| DynExprKind::SumExpr(..)
+			| DynExprKind::MaxExpr(..) => {
+				&self
+			},
+		}
+	}
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -314,6 +356,7 @@ impl<const Idx: usize> ExprToDyn for TensorArg<Idx> {
 				kind: DynExprKind::ReduceTensorArg(idx),
 				is_reduction: false,
 				has_reduction: false,
+				uses_elemwise_args: false,
 			})
 		} else {
 			let idx = (em & (bit - 1)).count_ones() as usize;
@@ -321,6 +364,7 @@ impl<const Idx: usize> ExprToDyn for TensorArg<Idx> {
 				kind: DynExprKind::ElemwiseTensorArg(idx),
 				is_reduction: false,
 				has_reduction: false,
+				uses_elemwise_args: true,
 			})
 		}
 	}
@@ -350,6 +394,7 @@ impl<const Idx: usize> ExprToDyn for ScalarArg<Idx> {
 			kind: DynExprKind::ScalarArg(idx),
 			is_reduction: false,
 			has_reduction: false,
+			uses_elemwise_args: false,
 		})
 	}
 }
@@ -385,6 +430,7 @@ macro_rules! impl_expr_reduce {
 					kind: DynExprKind::$name(A::to_dyn(e_mask, r_mask, s_mask, true)),
 					is_reduction: true,
 					has_reduction: true,
+					uses_elemwise_args: false,
 				})
 			}
 		}
@@ -415,10 +461,12 @@ macro_rules! impl_expr_unary {
 			fn to_dyn(e_mask: u64, r_mask: u64, s_mask: u64, reduce: bool) -> Rc<DynExpr> {
 				let a = A::to_dyn(e_mask, r_mask, s_mask, reduce);
 				let a_has_reduction = a.has_reduction;
+				let a_uses_elemwise = a.uses_elemwise_args;
 				Rc::new(DynExpr {
 					kind: DynExprKind::$name(a),
 					is_reduction: false,
 					has_reduction: a_has_reduction,
+					uses_elemwise_args: a_uses_elemwise,
 				})
 			}
 		}
@@ -490,10 +538,13 @@ macro_rules! impl_expr_binary {
 				let b = B::to_dyn(e_mask, r_mask, s_mask, reduce);
 				let a_has_reduction = a.has_reduction;
 				let b_has_reduction = b.has_reduction;
+				let a_uses_elemwise = a.uses_elemwise_args;
+				let b_uses_elemwise = b.uses_elemwise_args;
 				Rc::new(DynExpr {
 					kind: DynExprKind::$name(a, b),
 					is_reduction: false,
 					has_reduction: a_has_reduction || b_has_reduction,
+					uses_elemwise_args: a_uses_elemwise || b_uses_elemwise,
 				})
 			}
 		}
