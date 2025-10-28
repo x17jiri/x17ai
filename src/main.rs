@@ -243,12 +243,21 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 			(a + b) * -c
 		}
 	))?;
+	let d = a.new_replace_tail(1, &[1], a.dtype())?;
+	d.assign(custom_kernel!(
+		d.dtype(),
+		[a: &a], (c: 2.0), {
+			(a * c).sum()
+		}
+	))?;
 	let a_cpu = a.to_device(cpu.clone())?;
 	let b_cpu = b.to_device(cpu.clone())?;
 	let c_cpu = c.to_device(cpu.clone())?;
+	let d_cpu = d.to_device(cpu.clone())?;
 	println!("a = {}", &a_cpu);
 	println!("b = {}", &b_cpu);
 	println!("c = {}", &c_cpu);
+	println!("d = {}", &d_cpu);
 	/*	let kernel_bytes = std::fs::read("/home/spock/prog/x17ai/kernel.cu").unwrap();
 	let kernel_str = String::from_utf8_lossy_owned(kernel_bytes);
 	let e = dev.compile(&kernel_str);

@@ -147,6 +147,7 @@ struct CudaContextHandle {
 	usize refcnt_munus_one;
 	usize device_id;
 	CudaCapability capability;
+	usize warp_size;
 	CUdevice device;
 	CUcontext context;
 };
@@ -230,6 +231,26 @@ extern "C" {
 				return nullptr;
 			}
 			result->capability.minor = usize(minor);
+
+			int warp_size = 0;
+			e = cuDeviceGetAttribute(
+				&warp_size,
+				CU_DEVICE_ATTRIBUTE_WARP_SIZE,
+				result->device
+			);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				err.write("x17ai_cuda_open_context(): cuDeviceGetAttribute(WARP_SIZE) failed: ", e);
+				return nullptr;
+			}
+			if (!std::in_range<usize>(warp_size)) [[unlikely]] {
+				err.write("x17ai_cuda_open_context(): warp size out of range");
+				return nullptr;
+			}
+			result->warp_size = usize(warp_size);
+			if (!std::has_single_bit(result->warp_size)) [[unlikely]] {
+				err.write("x17ai_cuda_open_context(): warp size is not a power of two");
+				return nullptr;
+			}
 
 			e = cuDevicePrimaryCtxRetain(&result->context, result->device);
 			if (e != CUDA_SUCCESS) [[unlikely]] {

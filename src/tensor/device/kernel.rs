@@ -126,6 +126,41 @@ pub enum DynExpr {
 	MulExpr(Rc<DynExpr>, Rc<DynExpr>),
 }
 
+impl DynExpr {
+	pub fn pre_reduce(&self) -> Option<&Self> {
+		#[rustfmt::skip]
+		match self {
+			DynExpr::ElemwiseTensorArg(_)
+			| DynExpr::ReduceTensorArg(_)
+			| DynExpr::ScalarArg(_) => {
+				None
+			},
+
+			DynExpr::SumExpr(e)
+			| DynExpr::MaxExpr(e) => {
+				Some(e.as_ref())
+			},
+
+			DynExpr::NegExpr(e)
+			| DynExpr::ExpExpr(e)
+			| DynExpr::LnExpr(e)
+			| DynExpr::AbsExpr(e)
+			| DynExpr::SqrtExpr(e)
+			| DynExpr::RecipExpr(e) => {
+				e.pre_reduce()
+			},
+
+			DynExpr::AddExpr(a, b)
+			| DynExpr::SubExpr(a, b)
+			| DynExpr::MulExpr(a, b) => {
+				// There should only be one reduction,
+				// so it shouldn't happen that both sides return value.
+				a.pre_reduce().or(b.pre_reduce())
+			},
+		}
+	}
+}
+
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]

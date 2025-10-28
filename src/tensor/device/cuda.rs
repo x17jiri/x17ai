@@ -19,7 +19,9 @@ use crate::tensor::device::cuda::cuda_shim::{
 	CudaCapability, CudaCppError, CudaCube, CudaError, CudaKernel, CudaLaunchConfig, CudaStream,
 	Ptx, cuda_compile,
 };
-use crate::tensor::device::cuda::kernel_templates::{Elemwise1DTemplate, ElemwiseArgTemplate};
+use crate::tensor::device::cuda::kernel_templates::{
+	ElemwiseArgTemplate, ElemwiseTemplate, ReduceArgTemplate, ReduceTemplate,
+};
 use crate::tensor::device::kernel::{DynExpr, DynKernelCall};
 use crate::tensor::device::{
 	AttentionArgs, DeviceBuffer, DevicePtr, MatMulArgs, NewDeviceBufferError,
@@ -66,6 +68,10 @@ impl CudaDevice {
 
 	pub fn capability(&self) -> CudaCapability {
 		self.cuda_stream.capability()
+	}
+
+	pub fn warp_size(&self) -> usize {
+		self.cuda_stream.warp_size()
 	}
 
 	pub fn compile(&self, src: &str) -> Result<Ptx, CudaCppError> {
@@ -243,7 +249,7 @@ impl CudaDevice {
 		let mut expr_str = String::new();
 		self.print_expr(&mut expr_str, &expr)
 			.map_err(|e| CudaError::new(format!("Failed to render expression: {e}")))?;
-		let mut src_data = Elemwise1DTemplate {
+		let mut src_data = ElemwiseTemplate {
 			internal_dtype: data.internal_dtype().to_string(),
 			out_dtype: data.output_dtype().to_string(),
 			elem_args: Vec::with_capacity(data.elemwise_args.len()),
@@ -251,9 +257,79 @@ impl CudaDevice {
 			expr: expr_str,
 		};
 		for i in 0..data.elemwise_args.len() {
-			src_data.elem_args.push(ElemwiseArgTemplate {
-				dtype: data.elemwise_dtype(i).to_string(),
-			});
+			let dtype = data.elemwise_dtype(i).to_string();
+			src_data.elem_args.push(ElemwiseArgTemplate { dtype });
+		}
+		let kernel_src = src_data.to_string();
+		println!("Rendered kernel source:\n{kernel_src}");
+		let ptx = self.compile(&kernel_src)?;
+		println!("Compiled PTX:\n{}", ptx.code());
+		println!("Compilation log:\n{}", ptx.log());
+
+		let module = self.cuda_stream.load_module(&ptx)?;
+		let kernel = module.get_kernel("x17ai_kernel")?;
+		Ok(kernel)
+	}
+
+	unsafe fn run_reduce(
+		&self,
+		data: &DynKernelCall,
+		cache_entry: &mut KernelCacheEntry,
+	) -> Result<(), ErrPack<TensorOpError>> {
+		let kernel = Self::get_or(&mut cache_entry.kernel1, || self.compile_reduce(data))?;
+
+		let WARP_SIZE = self.warp_size();
+		let BLOCK_SIZE = 1024.min((data.output.reduction_size + WARP_SIZE - 1) & !(WARP_SIZE - 1));
+		let block_cnt = data.output.size[0] * data.output.size[1];
+		let config = CudaLaunchConfig {
+			grid_dim: CudaCube { x: block_cnt, y: 1, z: 1 },
+			block_dim: CudaCube { x: BLOCK_SIZE, y: 1, z: 1 },
+			shared_mem_bytes: unsafe { data.internal_dtype().array_bytes_unchecked(WARP_SIZE) },
+		};
+		unsafe {
+			let output_arg = std::ptr::from_ref(data.output).cast();
+			let reduce_args = std::ptr::from_ref(data.reduce_args).cast();
+			let elemwise_args = std::ptr::from_ref(data.elemwise_args).cast();
+			let scalar_args = std::ptr::from_ref(data.scalar_args).cast();
+			self.cuda_stream.run_kernel(
+				kernel,
+				&config,
+				&[
+					output_arg,
+					reduce_args,
+					if data.elemwise_args.is_empty() { scalar_args } else { elemwise_args },
+					scalar_args,
+				],
+			)?;
+		}
+		Ok(())
+	}
+
+	#[inline(never)]
+	fn compile_reduce(&self, data: &DynKernelCall) -> Result<CudaKernel, ErrPack<TensorOpError>> {
+		let expr = data.generate_expr();
+		let mut pre_reduce_expr = String::new();
+		#[allow(clippy::unwrap_used)]
+		self.print_expr(&mut pre_reduce_expr, expr.pre_reduce().unwrap())
+			.map_err(|e| CudaError::new(format!("Failed to render expression: {e}")))?;
+		let mut src_data = ReduceTemplate {
+			internal_dtype: data.internal_dtype().to_string(),
+			out_dtype: data.output_dtype().to_string(),
+			reduce_args: Vec::with_capacity(data.reduce_args.len()),
+			elem_args: Vec::with_capacity(data.elemwise_args.len()),
+			scalar_args_count: data.scalar_args.len(),
+			pre_reduce_expr,
+			post_reduce_expr: "val".to_string(), // TODO
+			zero: "0".to_string(),               // TODO
+			warp_size: self.warp_size(),
+		};
+		for i in 0..data.reduce_args.len() {
+			let dtype = data.reduce_dtype(i).to_string();
+			src_data.reduce_args.push(ReduceArgTemplate { dtype });
+		}
+		for i in 0..data.elemwise_args.len() {
+			let dtype = data.elemwise_dtype(i).to_string();
+			src_data.elem_args.push(ElemwiseArgTemplate { dtype });
 		}
 		let kernel_src = src_data.to_string();
 		println!("Rendered kernel source:\n{kernel_src}");
@@ -353,7 +429,7 @@ impl Device for CudaDevice {
 		if data.reduce_args.is_empty() {
 			unsafe { self.run_elemwise(data, cache_entry) }
 		} else {
-			todo!("implement reduce args in run_kernel for CudaDevice");
+			unsafe { self.run_reduce(data, cache_entry) }
 		}
 	}
 }

@@ -43,6 +43,7 @@ pub struct CudaContextHandle {
 	refcnt_munus_one: usize, // TODO - use Atomic?
 	device_id: usize,
 	capability: CudaCapability,
+	warp_size: usize,
 	_private: [u8; 0],
 }
 
@@ -262,6 +263,10 @@ impl CudaStream {
 
 	pub fn capability(&self) -> CudaCapability {
 		unsafe { self.ctx.as_ref().capability }
+	}
+
+	pub fn warp_size(&self) -> usize {
+		unsafe { self.ctx.as_ref().warp_size }
 	}
 
 	/// # Safety
