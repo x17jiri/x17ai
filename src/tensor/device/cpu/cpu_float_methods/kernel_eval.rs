@@ -9,7 +9,7 @@ use crate::ErrPack;
 use crate::tensor::TensorOpError;
 use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::device::cpu::cpu_float_methods::KahanAcc;
-use crate::tensor::device::kernel::{DynExpr, DynKernelCall};
+use crate::tensor::device::kernel::{DynExpr, DynExprKind, DynKernelCall};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -50,11 +50,11 @@ impl<'a> EvalExpr<'a> {
 		k: usize,
 	) -> Result<f64, ErrPack<TensorOpError>> {
 		unsafe {
-			match expr {
-				DynExpr::ElemwiseTensorArg(index) => {
+			match &expr.kind {
+				&DynExprKind::ElemwiseTensorArg(index) => {
 					assert!(k == 0);
-					let elemwise_arg = &self.data.elemwise_args[*index];
-					let dtype = self.data.elemwise_dtype(*index);
+					let elemwise_arg = &self.data.elemwise_args[index];
+					let dtype = self.data.elemwise_dtype(index);
 					CPUDevice::__read_float(
 						elemwise_arg.buf,
 						dtype,
@@ -63,9 +63,9 @@ impl<'a> EvalExpr<'a> {
 							+ i * elemwise_arg.stride_bytes[1],
 					)
 				},
-				DynExpr::ReduceTensorArg(index) => {
-					let reduce_arg = &self.data.reduce_args[*index];
-					let dtype = self.data.reduce_dtype(*index);
+				&DynExprKind::ReduceTensorArg(index) => {
+					let reduce_arg = &self.data.reduce_args[index];
+					let dtype = self.data.reduce_dtype(index);
 					assert!(k < self.data.output.reduction_size);
 					CPUDevice::__read_float(
 						reduce_arg.buf,
@@ -76,9 +76,9 @@ impl<'a> EvalExpr<'a> {
 							+ k * reduce_arg.stride_bytes[2],
 					)
 				},
-				DynExpr::ScalarArg(index) => Ok(self.data.scalar_args[*index]),
+				&DynExprKind::ScalarArg(index) => Ok(self.data.scalar_args[index]),
 
-				DynExpr::SumExpr(a) => {
+				DynExprKind::SumExpr(a) => {
 					assert!(!self.data.reduce_args.is_empty());
 					let a = a.as_ref();
 					let mut sum = KahanAcc::<f64>::new();
@@ -88,7 +88,7 @@ impl<'a> EvalExpr<'a> {
 					}
 					Ok(sum.value())
 				},
-				DynExpr::MaxExpr(a) => {
+				DynExprKind::MaxExpr(a) => {
 					assert!(!self.data.reduce_args.is_empty());
 					let a = a.as_ref();
 					let mut max = f64::NEG_INFINITY;
@@ -101,42 +101,42 @@ impl<'a> EvalExpr<'a> {
 					Ok(max)
 				},
 
-				DynExpr::NegExpr(a) => {
+				DynExprKind::NegExpr(a) => {
 					let a = self.eval_expr(a, j, i, k)?;
 					Ok(-a)
 				},
-				DynExpr::ExpExpr(a) => {
+				DynExprKind::ExpExpr(a) => {
 					let a = self.eval_expr(a, j, i, k)?;
 					Ok(a.exp())
 				},
-				DynExpr::AbsExpr(a) => {
+				DynExprKind::AbsExpr(a) => {
 					let a = self.eval_expr(a, j, i, k)?;
 					Ok(a.abs())
 				},
-				DynExpr::SqrtExpr(a) => {
+				DynExprKind::SqrtExpr(a) => {
 					let a = self.eval_expr(a, j, i, k)?;
 					Ok(a.sqrt())
 				},
-				DynExpr::LnExpr(a) => {
+				DynExprKind::LnExpr(a) => {
 					let a = self.eval_expr(a, j, i, k)?;
 					Ok(a.ln().max(-1000.0))
 				},
-				DynExpr::AddExpr(a, b) => {
+				DynExprKind::AddExpr(a, b) => {
 					let a = self.eval_expr(a, j, i, k)?;
 					let b = self.eval_expr(b, j, i, k)?;
 					Ok(a + b)
 				},
-				DynExpr::SubExpr(a, b) => {
+				DynExprKind::SubExpr(a, b) => {
 					let a = self.eval_expr(a, j, i, k)?;
 					let b = self.eval_expr(b, j, i, k)?;
 					Ok(a - b)
 				},
-				DynExpr::MulExpr(a, b) => {
+				DynExprKind::MulExpr(a, b) => {
 					let a = self.eval_expr(a, j, i, k)?;
 					let b = self.eval_expr(b, j, i, k)?;
 					Ok(a * b)
 				},
-				DynExpr::RecipExpr(a) => {
+				DynExprKind::RecipExpr(a) => {
 					let a = self.eval_expr(a, j, i, k)?;
 					Ok(1.0 / a)
 				},

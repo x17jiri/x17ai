@@ -22,7 +22,7 @@ use crate::tensor::device::cuda::cuda_shim::{
 use crate::tensor::device::cuda::kernel_templates::{
 	ElemwiseArgTemplate, ElemwiseTemplate, ReduceArgTemplate, ReduceTemplate,
 };
-use crate::tensor::device::kernel::{DynExpr, DynKernelCall};
+use crate::tensor::device::kernel::{DynExpr, DynExprKind, DynKernelCall};
 use crate::tensor::device::{
 	AttentionArgs, DeviceBuffer, DevicePtr, MatMulArgs, NewDeviceBufferError,
 };
@@ -97,62 +97,62 @@ impl CudaDevice {
 	}
 
 	fn print_expr(&self, out: &mut String, expr: &DynExpr) -> std::fmt::Result {
-		match expr {
-			DynExpr::ElemwiseTensorArg(index) => {
+		match &expr.kind {
+			&DynExprKind::ElemwiseTensorArg(index) => {
 				write!(out, "e{index}")
 			},
-			DynExpr::ReduceTensorArg(index) => {
+			&DynExprKind::ReduceTensorArg(index) => {
 				write!(out, "r{index}")
 			},
-			DynExpr::ScalarArg(index) => {
+			&DynExprKind::ScalarArg(index) => {
 				write!(out, "s{index}")
 			},
 
-			DynExpr::NegExpr(inner) => {
+			DynExprKind::NegExpr(inner) => {
 				write!(out, "-")?;
 				self.print_expr(out, inner.as_ref())
 			},
-			DynExpr::ExpExpr(inner) => {
+			DynExprKind::ExpExpr(inner) => {
 				write!(out, "exp(")?;
 				self.print_expr(out, inner.as_ref())?;
 				write!(out, ")")
 			},
-			DynExpr::LnExpr(inner) => {
+			DynExprKind::LnExpr(inner) => {
 				write!(out, "ln(")?;
 				self.print_expr(out, inner.as_ref())?;
 				write!(out, ")")
 			},
-			DynExpr::AbsExpr(inner) => {
+			DynExprKind::AbsExpr(inner) => {
 				write!(out, "abs(")?;
 				self.print_expr(out, inner.as_ref())?;
 				write!(out, ")")
 			},
-			DynExpr::SqrtExpr(inner) => {
+			DynExprKind::SqrtExpr(inner) => {
 				write!(out, "sqrt(")?;
 				self.print_expr(out, inner.as_ref())?;
 				write!(out, ")")
 			},
-			DynExpr::RecipExpr(inner) => {
+			DynExprKind::RecipExpr(inner) => {
 				write!(out, "(1.0 / ")?;
 				self.print_expr(out, inner.as_ref())?;
 				write!(out, ")")
 			},
 
-			DynExpr::AddExpr(lhs, rhs) => {
+			DynExprKind::AddExpr(lhs, rhs) => {
 				write!(out, "(")?;
 				self.print_expr(out, lhs.as_ref())?;
 				write!(out, " + ")?;
 				self.print_expr(out, rhs.as_ref())?;
 				write!(out, ")")
 			},
-			DynExpr::SubExpr(lhs, rhs) => {
+			DynExprKind::SubExpr(lhs, rhs) => {
 				write!(out, "(")?;
 				self.print_expr(out, lhs.as_ref())?;
 				write!(out, " - ")?;
 				self.print_expr(out, rhs.as_ref())?;
 				write!(out, ")")
 			},
-			DynExpr::MulExpr(lhs, rhs) => {
+			DynExprKind::MulExpr(lhs, rhs) => {
 				write!(out, "(")?;
 				self.print_expr(out, lhs.as_ref())?;
 				write!(out, " * ")?;

@@ -106,7 +106,20 @@ pub enum ExprDiscriminant {
 
 //--------------------------------------------------------------------------------------------------
 
-pub enum DynExpr {
+pub struct DynExpr {
+	pub kind: DynExprKind,
+
+	/// This node is a reduction op (sum, max, ...),
+	pub is_reduction: bool,
+
+	/// Either this node itself is a reduction op (sum, max, ...),
+	/// or it contains a reduction in its sub-expressions.
+	pub has_reduction: bool,
+
+	pub uses_elemwise_args: bool,
+}
+
+pub enum DynExprKind {
 	ElemwiseTensorArg(usize),
 	ReduceTensorArg(usize),
 	ScalarArg(usize),
@@ -129,30 +142,30 @@ pub enum DynExpr {
 impl DynExpr {
 	pub fn pre_reduce(&self) -> Option<&Self> {
 		#[rustfmt::skip]
-		match self {
-			DynExpr::ElemwiseTensorArg(_)
-			| DynExpr::ReduceTensorArg(_)
-			| DynExpr::ScalarArg(_) => {
+		match &self.kind {
+			DynExprKind::ElemwiseTensorArg(_)
+			| DynExprKind::ReduceTensorArg(_)
+			| DynExprKind::ScalarArg(_) => {
 				None
 			},
 
-			DynExpr::SumExpr(e)
-			| DynExpr::MaxExpr(e) => {
+			DynExprKind::SumExpr(e)
+			| DynExprKind::MaxExpr(e) => {
 				Some(e.as_ref())
 			},
 
-			DynExpr::NegExpr(e)
-			| DynExpr::ExpExpr(e)
-			| DynExpr::LnExpr(e)
-			| DynExpr::AbsExpr(e)
-			| DynExpr::SqrtExpr(e)
-			| DynExpr::RecipExpr(e) => {
+			DynExprKind::NegExpr(e)
+			| DynExprKind::ExpExpr(e)
+			| DynExprKind::LnExpr(e)
+			| DynExprKind::AbsExpr(e)
+			| DynExprKind::SqrtExpr(e)
+			| DynExprKind::RecipExpr(e) => {
 				e.pre_reduce()
 			},
 
-			DynExpr::AddExpr(a, b)
-			| DynExpr::SubExpr(a, b)
-			| DynExpr::MulExpr(a, b) => {
+			DynExprKind::AddExpr(a, b)
+			| DynExprKind::SubExpr(a, b)
+			| DynExprKind::MulExpr(a, b) => {
 				// There should only be one reduction,
 				// so it shouldn't happen that both sides return value.
 				a.pre_reduce().or(b.pre_reduce())
@@ -297,10 +310,18 @@ impl<const Idx: usize> ExprToDyn for TensorArg<Idx> {
 		let bit = 1_u64 << Idx;
 		if reduce {
 			let idx = (rm & (bit - 1)).count_ones() as usize;
-			Rc::new(DynExpr::ReduceTensorArg(idx))
+			Rc::new(DynExpr {
+				kind: DynExprKind::ReduceTensorArg(idx),
+				is_reduction: false,
+				has_reduction: false,
+			})
 		} else {
 			let idx = (em & (bit - 1)).count_ones() as usize;
-			Rc::new(DynExpr::ElemwiseTensorArg(idx))
+			Rc::new(DynExpr {
+				kind: DynExprKind::ElemwiseTensorArg(idx),
+				is_reduction: false,
+				has_reduction: false,
+			})
 		}
 	}
 }
@@ -325,7 +346,11 @@ impl<const Idx: usize> ExprToDyn for ScalarArg<Idx> {
 	fn to_dyn(_e_mask: u64, _r_mask: u64, s_mask: u64, _reduce: bool) -> Rc<DynExpr> {
 		let bit = 1_u64 << Idx;
 		let idx = (s_mask & (bit - 1)).count_ones() as usize;
-		Rc::new(DynExpr::ScalarArg(idx))
+		Rc::new(DynExpr {
+			kind: DynExprKind::ScalarArg(idx),
+			is_reduction: false,
+			has_reduction: false,
+		})
 	}
 }
 
@@ -356,7 +381,11 @@ macro_rules! impl_expr_reduce {
 		impl<A: const ExprTrait + ExprToDyn> ExprToDyn for $name<A> {
 			fn to_dyn(e_mask: u64, r_mask: u64, s_mask: u64, reduce: bool) -> Rc<DynExpr> {
 				assert!(!reduce);
-				Rc::new(DynExpr::$name(A::to_dyn(e_mask, r_mask, s_mask, true)))
+				Rc::new(DynExpr {
+					kind: DynExprKind::$name(A::to_dyn(e_mask, r_mask, s_mask, true)),
+					is_reduction: true,
+					has_reduction: true,
+				})
 			}
 		}
 	};
@@ -384,7 +413,13 @@ macro_rules! impl_expr_unary {
 
 		impl<A: const ExprTrait + ExprToDyn> ExprToDyn for $name<A> {
 			fn to_dyn(e_mask: u64, r_mask: u64, s_mask: u64, reduce: bool) -> Rc<DynExpr> {
-				Rc::new(DynExpr::$name(A::to_dyn(e_mask, r_mask, s_mask, reduce)))
+				let a = A::to_dyn(e_mask, r_mask, s_mask, reduce);
+				let a_has_reduction = a.has_reduction;
+				Rc::new(DynExpr {
+					kind: DynExprKind::$name(a),
+					is_reduction: false,
+					has_reduction: a_has_reduction,
+				})
 			}
 		}
 	};
@@ -453,7 +488,13 @@ macro_rules! impl_expr_binary {
 			fn to_dyn(e_mask: u64, r_mask: u64, s_mask: u64, reduce: bool) -> Rc<DynExpr> {
 				let a = A::to_dyn(e_mask, r_mask, s_mask, reduce);
 				let b = B::to_dyn(e_mask, r_mask, s_mask, reduce);
-				Rc::new(DynExpr::$name(a, b))
+				let a_has_reduction = a.has_reduction;
+				let b_has_reduction = b.has_reduction;
+				Rc::new(DynExpr {
+					kind: DynExprKind::$name(a, b),
+					is_reduction: false,
+					has_reduction: a_has_reduction || b_has_reduction,
+				})
 			}
 		}
 	};

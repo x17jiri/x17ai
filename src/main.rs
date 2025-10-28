@@ -1112,8 +1112,8 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let q_sum = q.new_replace_tail(1, &[1], q.dtype())?;
 	q_sum.assign(custom_kernel!(
 		q_sum.dtype(),
-		[a: &q], (), {
-			(a).sum()
+		[a: &q], (c: 2.0), {
+			(a * c).sum() * c
 		}
 	))?;
 	let a_cpu = a.to_device(cpu.clone())?;
