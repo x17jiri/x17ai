@@ -410,6 +410,10 @@ pub struct NotContiguousError;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
+pub struct CannotBroadcastOutputError;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TensorOpError {
 	DimsDontMatch,
 	TooManyMergedDimensions,
@@ -469,13 +473,6 @@ impl TensorOpError {
 	pub fn invalid_buffer_size() -> ErrPack<Self> {
 		ErrPack {
 			code: Self::InvalidBufferSize,
-			extra: None,
-		}
-	}
-
-	pub fn cannot_broadcast_output() -> ErrPack<Self> {
-		ErrPack {
-			code: Self::CannotBroadcastOutput,
 			extra: None,
 		}
 	}
@@ -795,6 +792,15 @@ impl From<NotContiguousError> for ErrPack<TensorOpError> {
 	fn from(_: NotContiguousError) -> Self {
 		Self {
 			code: TensorOpError::NotContiguous,
+			extra: None,
+		}
+	}
+}
+
+impl From<CannotBroadcastOutputError> for ErrPack<TensorOpError> {
+	fn from(_: CannotBroadcastOutputError) -> Self {
+		Self {
+			code: TensorOpError::CannotBroadcastOutput,
 			extra: None,
 		}
 	}
