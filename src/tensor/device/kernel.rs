@@ -11,9 +11,9 @@ use std::rc::Rc;
 use crate::ErrPack;
 use crate::tensor::device::dtype::{DTypeId, common_dtype};
 use crate::tensor::device::{DeviceBuffer, KernelElemArg, KernelOutput, KernelReduceArg};
-use crate::tensor::dim_merger::DimMerger;
+use crate::tensor::dim_merger::{DimMerger, DimsDontMatchError, MergedDim};
 use crate::tensor::generic::map::SizeAndStride;
-use crate::tensor::{DType, NotContiguousError, Tensor, TensorOpError};
+use crate::tensor::{DType, Tensor, TensorOpError};
 use crate::util::hasher::{HASH_WORD_SIZE, HashWord};
 use crate::util::mycell::{BorrowGuard, UnsafeBorrowFailFlag, UnsafeBorrowMutFailFlag};
 
@@ -168,7 +168,7 @@ impl DynExpr {
 			| DynExprKind::MulExpr(a, b) => {
 				// There should only be one reduction,
 				// so it shouldn't happen that both sides return value.
-				a.pre_reduce().or(b.pre_reduce())
+				a.pre_reduce().or_else(|| b.pre_reduce())
 			},
 		}
 	}
@@ -185,7 +185,7 @@ impl DynExpr {
 				if self.uses_elemwise_args {
 					e.post_reduce_common()
 				} else {
-					&self
+					self
 				}
 			},
 
@@ -199,7 +199,7 @@ impl DynExpr {
 						b.post_reduce_common()
 					}
 				} else {
-					&self
+					self
 				}
 			},
 
@@ -210,7 +210,7 @@ impl DynExpr {
 
 			| DynExprKind::SumExpr(..)
 			| DynExprKind::MaxExpr(..) => {
-				&self
+				self
 			},
 		}
 	}
@@ -733,9 +733,9 @@ where
 	let output_batch_dims: &[SizeAndStride];
 	let elem_args_batch_dims: [&[SizeAndStride]; E];
 	let reduce_args_batch_dims: [&[SizeAndStride]; R];
-	let reduce_args_top_dim: [SizeAndStride; R];
+	let reduce_args_top_dim: MergedDim<R>;
 	if R == 0 {
-		reduce_args_top_dim = [SizeAndStride::default(); R];
+		reduce_args_top_dim = MergedDim { size: 1, strides: [0; R] };
 		reduce_args_batch_dims = [&[]; R];
 
 		output_batch_dims = output.map().dims.as_slice();
@@ -758,16 +758,24 @@ where
 		output_batch_dims = output_dims.1;
 		let elem_args_top_dim = elem_dims.map(|(&top_dim, _)| top_dim);
 		elem_args_batch_dims = elem_dims.map(|(_, batch_dim)| batch_dim);
-		reduce_args_top_dim = reduce_dims.map(|(&top_dim, _)| top_dim);
+		reduce_args_top_dim =
+			DimMerger::merge_single_dim(reduce_dims.map(|(&top_dim, _)| top_dim))?;
 		reduce_args_batch_dims = reduce_dims.map(|(_, batch_dim)| batch_dim);
 
-		if output_top_dim.size != 1 || elem_args_top_dim.iter().any(|dim| dim.size != 1) {
+		let check_top_dim: [SizeAndStride; 1 + E] =
+			std::array::from_fn(
+				|i| if i == 0 { *output_top_dim } else { elem_args_top_dim[i - 1] },
+			);
+		let check_top_dim = DimMerger::merge_single_dim(check_top_dim)?;
+		// TODO - could this cond be combined with the other cond returning cannot_broadcast_output()?
+		let check_top_dim = check_top_dim.get(0);
+		if check_top_dim.is_broadcasted() {
 			cold_path();
 			return Err(TensorOpError::cannot_broadcast_output());
 		}
-		if reduce_args_top_dim.iter().any(|vec| vec.stride != 1) {
+		if check_top_dim.size != 1 && check_top_dim.size != reduce_args_top_dim.size {
 			cold_path();
-			return Err(NotContiguousError.into());
+			return Err(DimsDontMatchError.into());
 		}
 	}
 
@@ -775,8 +783,11 @@ where
 	let all_dims = crate::util::array::concat_arrays(all_dims_tmp, reduce_args_batch_dims);
 
 	let merged = DimMerger::merge::<2>(all_dims)?;
+	if merged.iter().any(|m| m.get(0).is_broadcasted()) {
+		cold_path();
+		return Err(TensorOpError::cannot_broadcast_output());
+	}
 
-	let reduce_args_top_dim = DimMerger::merge_single_dim(reduce_args_top_dim)?;
 	let reduce_inp: [KernelReduceArg; R] = std::array::from_fn(|i| {
 		let arg = reduce_args[i];
 		KernelReduceArg {
@@ -801,11 +812,6 @@ where
 			buf: arg.buf().device_ptr(),
 		}
 	});
-
-	if merged.iter().any(|m| m.get(0).is_broadcasted()) {
-		cold_path();
-		return Err(TensorOpError::cannot_broadcast_output());
-	}
 
 	let out = KernelOutput {
 		size: [merged[0].size, merged[1].size],

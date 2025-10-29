@@ -1110,7 +1110,9 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
          -7.4204e-03, -1.0534e+00, -1.0164e+00,  8.5037e-01, -5.2722e-01,
           5.2405e-01, -1.6929e+00]
 	])?;
-	let q_sum = q.new_replace_tail(1, &[1], q.dtype())?;
+	//let q_sum = q.new_replace_tail(1, &[1], q.dtype())?;
+	let q_sum = q.new_empty_like(q.dtype())?;
+	//let q_sum = q.new_replace_tail(1, &[1000], q.dtype())?;
 	q_sum.assign(custom_kernel!(
 		q_sum.dtype(),
 		[a: &q], (c: 2.0), {
