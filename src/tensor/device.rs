@@ -53,38 +53,25 @@ impl DevicePtr {
 }
 
 #[repr(C)]
-pub struct ElemwiseKernelArg {
-	pub stride_bytes: [usize; 2],
-	pub buf: DevicePtr,
-	pub offset_bytes: usize,
-}
-
-#[repr(C)]
-pub struct ReduceKernelArg {
+pub struct KernelArg {
 	pub stride_bytes: [usize; 3],
-	pub buf: DevicePtr,
 	pub offset_bytes: usize,
+	pub buf: DevicePtr,
 }
 
+/// For reduce kernels:
+/// - reduction_size = size[2] = the size of the reduced dimension. All tensors
+/// that are inputs to the reduction must have this size in dimension 2.
+/// - if stride_bytes[2] == 0, the output tensor and all tensors NOT used in reduction
+/// have size[2] == 1
+/// - if stride_bytes[2] > 0, the output tensor and all tensors NOT used in reduction
+/// have size[2] == reduction_size
 #[repr(C)]
-pub struct ElemwiseKernelOutput {
-	pub size: [usize; 2],
-	pub stride_bytes: [usize; 2],
-	pub buf: DevicePtr,
+pub struct KernelOutput {
+	pub size: [usize; 3],
+	pub stride_bytes: [usize; 3],
 	pub offset_bytes: usize,
-}
-
-#[repr(C)]
-pub struct ReduceKernelOutput {
-	pub size: [usize; 2],
-	pub stride_bytes: [usize; 2],
 	pub buf: DevicePtr,
-	pub offset_bytes: usize,
-	pub reduction_size: usize,
-
-	/// If == 0, then size[2] == 1
-	/// If > 0, then size[2] == reduction_size
-	pub reduction_stride_bytes: usize,
 }
 
 #[repr(C)]
@@ -259,5 +246,10 @@ pub trait Device {
 
 	unsafe fn attention(&self, args: &AttentionArgs) -> Result<(), ErrPack<TensorOpError>>;
 
-	unsafe fn run_kernel(&self, data: &DynKernelCall) -> Result<(), ErrPack<TensorOpError>>;
+	unsafe fn run_elemwise_kernel(
+		&self,
+		data: &DynKernelCall,
+	) -> Result<(), ErrPack<TensorOpError>>;
+
+	unsafe fn run_reduce_kernel(&self, data: &DynKernelCall) -> Result<(), ErrPack<TensorOpError>>;
 }
