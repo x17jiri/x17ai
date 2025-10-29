@@ -53,21 +53,29 @@ impl DevicePtr {
 }
 
 #[repr(C)]
-pub struct KernelElemArg {
+pub struct ElemwiseKernelArg {
 	pub stride_bytes: [usize; 2],
 	pub buf: DevicePtr,
 	pub offset_bytes: usize,
 }
 
 #[repr(C)]
-pub struct KernelReduceArg {
+pub struct ReduceKernelArg {
 	pub stride_bytes: [usize; 3],
 	pub buf: DevicePtr,
 	pub offset_bytes: usize,
 }
 
 #[repr(C)]
-pub struct KernelOutput {
+pub struct ElemwiseKernelOutput {
+	pub size: [usize; 2],
+	pub stride_bytes: [usize; 2],
+	pub buf: DevicePtr,
+	pub offset_bytes: usize,
+}
+
+#[repr(C)]
+pub struct ReduceKernelOutput {
 	pub size: [usize; 2],
 	pub stride_bytes: [usize; 2],
 	pub buf: DevicePtr,

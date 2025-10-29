@@ -10,7 +10,9 @@ use std::rc::Rc;
 
 use crate::ErrPack;
 use crate::tensor::device::dtype::{DTypeId, common_dtype};
-use crate::tensor::device::{DeviceBuffer, KernelElemArg, KernelOutput, KernelReduceArg};
+use crate::tensor::device::{
+	DeviceBuffer, ElemwiseKernelArg, ElemwiseKernelOutput, ReduceKernelArg, ReduceKernelOutput,
+};
 use crate::tensor::dim_merger::{DimMerger, DimsDontMatchError, MergedDim};
 use crate::tensor::generic::map::SizeAndStride;
 use crate::tensor::{DType, Tensor, TensorOpError};
@@ -580,12 +582,19 @@ where
 	_expr: E,
 }
 
-pub struct DynKernelCall<'a> {
+pub struct DynElemwiseKernelCall<'a> {
 	pub key: &'a [HashWord],
 	pub expr: &'a (dyn Fn() -> Rc<DynExpr> + 'a),
-	pub output: &'a KernelOutput,
-	pub elemwise_args: &'a [KernelElemArg],
-	pub reduce_args: &'a [KernelReduceArg],
+	pub output: &'a ElemwiseKernelOutput,
+	pub tensor_args: &'a [ElemwiseKernelArg],
+	pub scalar_args: &'a [f64],
+}
+
+pub struct DynReduceKernelCall<'a> {
+	pub key: &'a [HashWord],
+	pub expr: &'a (dyn Fn() -> Rc<DynExpr> + 'a),
+	pub output: &'a ReduceKernelOutput,
+	pub tensor_args: &'a [ReduceKernelArg],
 	pub scalar_args: &'a [f64],
 }
 
@@ -651,63 +660,69 @@ where
 	}
 }
 
-impl<'a> DynKernelCall<'a> {
-	pub fn generate_expr(&self) -> Rc<DynExpr> {
-		(self.expr)()
+pub struct KernelDtypeConfigHelper;
+
+impl KernelDtypeConfigHelper {
+	pub const fn items(T: usize) -> usize {
+		// value of T + Internal dtype + output dtype + T tensor dtypes
+		(3 + T)
 	}
 
-	pub const fn dtype_config_items(E: usize, R: usize) -> usize {
-		(2 + E + R)
-	}
-	pub const fn dtype_config_words(E: usize, R: usize) -> usize {
-		(Self::dtype_config_items(E, R) * std::mem::size_of::<DTypeId>())
-			.next_multiple_of(HASH_WORD_SIZE)
+	pub const fn hash_words(T: usize) -> usize {
+		(Self::items(T) * std::mem::size_of::<DTypeId>()).next_multiple_of(HASH_WORD_SIZE)
 			/ HASH_WORD_SIZE
 	}
-	pub fn my_dtype_config_words(&self) -> usize {
-		Self::dtype_config_words(self.elemwise_args.len(), self.reduce_args.len())
-	}
 
-	pub fn new_dtype_config<const E: usize, const R: usize>(
+	pub fn new<const T: usize>(
 		internal_dtype: DType,
 		output: &Tensor,
-		elem_args: [&Tensor; E],
-		reduce_args: [&Tensor; R],
-	) -> [HashWord; Self::dtype_config_words(E, R)] {
+		tensors: [&Tensor; T],
+	) -> [HashWord; Self::hash_words(T)]
+	where
+		[(); 63 - T]:, // asserts that T <= 63
+	{
 		// TODO - we do indexing in set_byte()
 		// check that there are no panics
-		let mut result = [HashWord::zero(); Self::dtype_config_words(E, R)];
-		HashWord::set_byte(&mut result, 0, internal_dtype.id().into());
-		HashWord::set_byte(&mut result, 1, output.dtype().id().into());
-		for (i, a) in elem_args.iter().enumerate() {
-			HashWord::set_byte(&mut result, 2 + i, a.dtype().id().into());
-		}
-		for (i, a) in reduce_args.iter().enumerate() {
-			HashWord::set_byte(&mut result, 2 + E + i, a.dtype().id().into());
+		let mut result = [HashWord::zero(); Self::hash_words(T)];
+		HashWord::set_byte(&mut result, 0, T as u8);
+		HashWord::set_byte(&mut result, 1, internal_dtype.id().into());
+		HashWord::set_byte(&mut result, 2, output.dtype().id().into());
+		for (i, t) in tensors.iter().enumerate() {
+			HashWord::set_byte(&mut result, 3 + i, t.dtype().id().into());
 		}
 		result
 	}
 
-	pub fn internal_dtype(&self) -> DType {
+	pub fn internal_dtype(config: &[HashWord]) -> DType {
+		assert!(config.len() >= Self::hash_words(0));
 		// TODO: should use safe cast instead of `transmute()`
-		let id: DTypeId = unsafe { std::mem::transmute(HashWord::get_byte(self.key, 0)) };
+		let id: DTypeId = unsafe { std::mem::transmute(HashWord::get_byte(config, 1)) };
 		id.to_dtype()
 	}
-	pub fn output_dtype(&self) -> DType {
-		let id: DTypeId = unsafe { std::mem::transmute(HashWord::get_byte(self.key, 1)) };
+	pub fn output_dtype(config: &[HashWord]) -> DType {
+		assert!(config.len() >= Self::hash_words(0));
+		let id: DTypeId = unsafe { std::mem::transmute(HashWord::get_byte(config, 2)) };
 		id.to_dtype()
 	}
-	pub fn elemwise_dtype(&self, i: usize) -> DType {
-		assert!(i < self.elemwise_args.len());
-		let i = 2 + i;
-		let id: DTypeId = unsafe { std::mem::transmute(HashWord::get_byte(self.key, i)) };
+	pub fn arg_dtype(config: &[HashWord], i: usize) -> DType {
+		assert!(config.len() >= Self::hash_words(i + 1));
+		let i = 3 + i;
+		let id: DTypeId = unsafe { std::mem::transmute(HashWord::get_byte(config, i)) };
 		id.to_dtype()
 	}
-	pub fn reduce_dtype(&self, i: usize) -> DType {
-		assert!(i < self.reduce_args.len());
-		let i = 2 + self.elemwise_args.len() + i;
-		let id: DTypeId = unsafe { std::mem::transmute(HashWord::get_byte(self.key, i)) };
-		id.to_dtype()
+}
+
+impl<'a> DynElemwiseKernelCall<'a> {
+	#[inline]
+	pub fn generate_expr(&self) -> Rc<DynExpr> {
+		(self.expr)()
+	}
+}
+
+impl<'a> DynReduceKernelCall<'a> {
+	#[inline]
+	pub fn generate_expr(&self) -> Rc<DynExpr> {
+		(self.expr)()
 	}
 }
 
@@ -788,9 +803,9 @@ where
 		return Err(TensorOpError::cannot_broadcast_output());
 	}
 
-	let reduce_inp: [KernelReduceArg; R] = std::array::from_fn(|i| {
+	let reduce_inp: [ReduceKernelArg; R] = std::array::from_fn(|i| {
 		let arg = reduce_args[i];
-		KernelReduceArg {
+		ReduceKernelArg {
 			stride_bytes: [
 				merged[0].strides[1 + E + i] * dtype_bytes,
 				merged[1].strides[1 + E + i] * dtype_bytes,
@@ -801,9 +816,9 @@ where
 		}
 	});
 
-	let inp: [KernelElemArg; E] = std::array::from_fn(|i| {
+	let inp: [ElemwiseKernelArg; E] = std::array::from_fn(|i| {
 		let arg = elem_args[i];
-		KernelElemArg {
+		ElemwiseKernelArg {
 			stride_bytes: [
 				merged[0].strides[1 + i] * dtype_bytes,
 				merged[1].strides[1 + i] * dtype_bytes,
