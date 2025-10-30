@@ -26,7 +26,7 @@ use crate::util::mycell;
 //--------------------------------------------------------------------------------------------------
 
 #[repr(transparent)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub struct DevicePtr {
 	ptr: *mut (),
 }

@@ -9,12 +9,10 @@ use std::hint::{cold_path, likely};
 use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::nn::fragments::split;
-use crate::tensor::device::dtype::{self, DTypeId, common_dtype};
+use crate::tensor::device::dtype::{DTypeId, common_dtype};
 use crate::tensor::device::{DeviceBuffer, KernelArg, KernelOutput};
-use crate::tensor::dim_merger::{DimMerger, DimsDontMatchError, MergedDim};
+use crate::tensor::dim_merger::{DimMerger, DimsDontMatchError};
 use crate::tensor::generic::map::SizeAndStride;
-use crate::tensor::math::col;
 use crate::tensor::{CannotBroadcastOutputError, DType, Tensor, TensorOpError};
 use crate::util::hasher::{HASH_WORD_SIZE, HashWord};
 use crate::util::mycell::{BorrowGuard, UnsafeBorrowFailFlag, UnsafeBorrowMutFailFlag};
@@ -634,21 +632,39 @@ where
 	pub fn call(&self, output: &Tensor) -> Result<(), ErrPack<TensorOpError>>
 	where
 		[(); E::KEY_WORDS]:,
-		[(); DynKernelCall::dtype_config_words(E::ELEMWISE_COUNT, E::REDUCE_COUNT)]:,
+		[(); DynKernelCall::dtype_config_words(E::ELEMWISE_COUNT + E::REDUCE_COUNT)]:,
 		[(); E::DTYPE_CONFIG_WORDS
-			- DynKernelCall::dtype_config_words(E::ELEMWISE_COUNT, E::REDUCE_COUNT)]:,
+			- DynKernelCall::dtype_config_words(E::ELEMWISE_COUNT + E::REDUCE_COUNT)]:,
 		[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
 	{
 		let mut key = const { E::key() };
-		__run_kernel(
-			&mut key,
-			&|| E::to_dyn(E::ELEMWISE_MASK, E::REDUCE_MASK, E::SCALAR_MASK, false),
-			output,
-			self.elem_args,
-			self.reduce_args,
-			&self.scalar_args,
-			self.internal_dtype,
-		)
+		let tensor_args: [&Tensor; E::ELEMWISE_COUNT + E::REDUCE_COUNT] =
+			std::array::from_fn(|i| {
+				if i < E::ELEMWISE_COUNT {
+					self.elem_args[i]
+				} else {
+					self.reduce_args[i - E::ELEMWISE_COUNT]
+				}
+			});
+		if E::REDUCE_COUNT == 0 {
+			__run_elemwise_kernel::<{ E::ELEMWISE_COUNT }, { E::REDUCE_COUNT }>(
+				&mut key,
+				&|| E::to_dyn(E::ELEMWISE_MASK, E::REDUCE_MASK, E::SCALAR_MASK, false),
+				output,
+				tensor_args,
+				&self.scalar_args,
+				self.internal_dtype,
+			)
+		} else {
+			__run_reduce_kernel::<{ E::ELEMWISE_COUNT }, { E::REDUCE_COUNT }>(
+				&mut key,
+				&|| E::to_dyn(E::ELEMWISE_MASK, E::REDUCE_MASK, E::SCALAR_MASK, false),
+				output,
+				tensor_args,
+				&self.scalar_args,
+				self.internal_dtype,
+			)
+		}
 	}
 }
 
@@ -678,7 +694,7 @@ impl<'a> DynKernelCall<'a> {
 	) -> [HashWord; Self::dtype_config_words(T_CNT)] {
 		// TODO - we do indexing in set_byte()
 		// check that there are no panics
-		let mut result = [HashWord::zero(); Self::dtype_config_words(T)];
+		let mut result = [HashWord::zero(); Self::dtype_config_words(T_CNT)];
 		HashWord::set_byte(&mut result, 0, internal_dtype.id().into());
 		HashWord::set_byte(&mut result, 1, output.dtype().id().into());
 		for (i, t) in tensors.iter().enumerate() {
@@ -711,20 +727,19 @@ impl<'a> DynKernelCall<'a> {
 
 #[inline(never)]
 #[allow(clippy::indexing_slicing)]
-#[allow(clippy::too_many_lines)]
-fn __run_elemwise_kernel<'a, const T_CNT: usize>(
+fn __run_elemwise_kernel<'a, const E: usize, const R: usize>(
 	key: &'a mut [HashWord],
 	expr: &'a (dyn Fn() -> Rc<DynExpr> + 'a),
 	output: &'a Tensor,
-	tensor_args: [&'a Tensor; T_CNT],
+	tensor_args: [&'a Tensor; E + R],
 	scalar_args: &'a [f64],
 	internal_dtype: DType,
 ) -> Result<(), ErrPack<TensorOpError>>
 where
-	[(); 1 + T_CNT]:,
-	[(); DynKernelCall::dtype_config_words(T_CNT)]:,
+	[(); 1 + E + R]:,
+	[(); DynKernelCall::dtype_config_words(E + R)]:,
 {
-	let merged = DimMerger::<{ 1 + T_CNT }>::merge::<2>(std::array::from_fn(|i| {
+	let merged = DimMerger::<{ 1 + E + R }>::merge::<2>(std::array::from_fn(|i| {
 		if i == 0 { output.map().dims.as_slice() } else { tensor_args[i - 1].map().dims.as_slice() }
 	}))?;
 	if merged.iter().any(|m| m.get(0).is_broadcasted()) {
@@ -732,8 +747,8 @@ where
 		return Err(CannotBroadcastOutputError.into());
 	}
 
-	let tensors: [KernelArg; T_CNT] = std::array::from_fn(|i| {
-		let arg = &tensor_args[i];
+	let args: [KernelArg; E + R] = std::array::from_fn(|i| {
+		let arg = tensor_args[i];
 		let arg_dtype_bytes = arg.dtype().bytes();
 		debug_assert!(arg_dtype_bytes > 0);
 		KernelArg {
@@ -750,7 +765,7 @@ where
 	let out_dtype_bytes = output.dtype().bytes();
 	debug_assert!(out_dtype_bytes > 0);
 	let out = KernelOutput {
-		size: [merged[0].size, merged[1].size],
+		size: [merged[0].size, merged[1].size, merged[2].size],
 		stride_bytes: [
 			merged[0].strides[0] * out_dtype_bytes,
 			merged[1].strides[0] * out_dtype_bytes,
@@ -762,14 +777,14 @@ where
 
 	unsafe {
 		let mut inp_fail = UnsafeBorrowFailFlag::new();
-		let inp_borrows: [Option<BorrowGuard<DeviceBuffer>>; T_CNT] = std::array::from_fn(|i| {
-			let arg = &tensor_args[i];
-			let same_as_output = std::ptr::eq(arg.buf().as_ref(), output.buf().as_ref())
+		let inp_borrows: [Option<BorrowGuard<DeviceBuffer>>; E + R] = std::array::from_fn(|i| {
+			let tensor = tensor_args[i];
+			let arg = &args[i];
+			let same_as_output = std::ptr::eq(tensor.buf().as_ref(), output.buf().as_ref())
 				&& likely(
-					inp[i].offset_bytes == out.offset_bytes
-						&& inp[i].stride_bytes == out.stride_bytes,
+					arg.offset_bytes == out.offset_bytes && arg.stride_bytes == out.stride_bytes,
 				);
-			if same_as_output { None } else { Some(arg.buf().unsafe_borrow(&mut inp_fail)) }
+			if same_as_output { None } else { Some(tensor.buf().unsafe_borrow(&mut inp_fail)) }
 		});
 
 		let mut out_fail = UnsafeBorrowMutFailFlag::new();
@@ -789,7 +804,7 @@ where
 			key,
 			expr,
 			output: &out,
-			tensor_args: &inp,
+			tensor_args: &args,
 			scalar_args,
 		})?;
 
@@ -803,8 +818,7 @@ fn __run_reduce_kernel<'a, const E: usize, const R: usize>(
 	key: &'a mut [HashWord],
 	expr: &'a (dyn Fn() -> Rc<DynExpr> + 'a),
 	output: &'a Tensor,
-	elem_args: [&'a Tensor; E],
-	reduce_args: [&'a Tensor; R],
+	tensor_args: [&'a Tensor; E + R],
 	scalar_args: &'a [f64],
 	internal_dtype: DType,
 ) -> Result<(), ErrPack<TensorOpError>>
@@ -812,101 +826,99 @@ where
 	[(); 1 + E + R]:,
 	[(); DynKernelCall::dtype_config_words(E + R)]:,
 {
-	fn split_last(tensor: &Tensor) -> (SizeAndStride, &[SizeAndStride]) {
+	#[derive(Clone, Copy)]
+	struct Split<'b> {
+		top: SizeAndStride,
+		batch: &'b [SizeAndStride],
+	}
+	fn split_last<'b>(tensor: &'b Tensor) -> Split<'b> {
 		let dims = tensor.map().dims.as_slice();
 		match dims.split_last() {
-			Some((&top, rest)) => (top, rest),
+			Some((&top, batch)) => Split { top, batch },
 			None => {
 				cold_path();
-				(SizeAndStride { size: 1, stride: 0 }, dims)
+				Split {
+					top: SizeAndStride { size: 1, stride: 0 },
+					batch: dims,
+				}
 			},
 		}
 	}
 
-	let (output_top_dim, output_batch_dims) = split_last(output);
-	let elem_args_dims = elem_args.map(split_last);
-	let reduce_args_dims = reduce_args.map(split_last);
+	let output_split = split_last(output);
+	let elem_args_split: [Split; E] = std::array::from_fn(|i| split_last(tensor_args[i]));
+	let reduce_args_split: [Split; R] = std::array::from_fn(|i| split_last(tensor_args[E + i]));
 
-	let reduce_args_top_dims =
-		DimMerger::<R>::merge_single_dim(reduce_args_dims.map(|(top, _)| top))?;
-	let elem_args_top_dims = DimMerger::<{ 1 + E }>::merge_single_dim(std::array::from_fn(|i| {
-		if i == 0 { output_top_dim } else { elem_args_dims[i - 1].0 }
+	let reduce_args_top = DimMerger::<R>::merge_single_dim(reduce_args_split.map(|r| r.top))?;
+	let post_reduce_top = DimMerger::<{ 1 + E }>::merge_single_dim(std::array::from_fn(|i| {
+		if i == 0 { output_split.top } else { elem_args_split[i - 1].top }
 	}))?;
 
 	let batch_dims = DimMerger::<{ 1 + E + R }>::merge::<2>(std::array::from_fn(|i| {
 		if i == 0 {
-			output_batch_dims
+			output_split.batch
 		} else if i <= E {
-			elem_args_dims[i - 1].1
+			elem_args_split[i - 1].batch
 		} else {
-			reduce_args_dims[i - 1 - E].1
+			reduce_args_split[i - 1 - E].batch
 		}
 	}))?;
 
-	// TODO - could this cond be combined with the other cond returning cannot_broadcast_output()?
-	let check_top_dim = check_top_dim.get(0);
-	if check_top_dim.size != 1 && check_top_dim.size != reduce_args_top_dim.size {
+	let output_top = post_reduce_top.get(0);
+	let output_batch = batch_dims.map(|m| m.get(0));
+	if output_top.is_broadcasted() || output_batch.iter().any(|dim| dim.is_broadcasted()) {
+		cold_path();
+		return Err(CannotBroadcastOutputError.into());
+	}
+	let reduction_size = reduce_args_top.size;
+	if output_top.size != 1 && output_top.size != reduction_size {
 		cold_path();
 		return Err(DimsDontMatchError.into());
 	}
 
-	if elem_args_top_dims.get(0).is_broadcasted()
-		|| batch_dims.iter().any(|m| m.get(0).is_broadcasted())
-	{
-		cold_path();
-		return Err(CannotBroadcastOutputError.into());
-	}
-
-	let reduce_inp: [ReduceKernelArg; R] = std::array::from_fn(|i| {
-		let arg = reduce_args[i];
-		ReduceKernelArg {
+	let args: [KernelArg; E + R] = std::array::from_fn(|i| {
+		let arg = tensor_args[i];
+		let arg_dtype_bytes = arg.dtype().bytes();
+		debug_assert!(arg_dtype_bytes > 0);
+		let top_stride =
+			if i < E { post_reduce_top.strides[1 + i] } else { reduce_args_top.strides[i - E] };
+		KernelArg {
 			stride_bytes: [
-				merged[0].strides[1 + E + i] * dtype_bytes,
-				merged[1].strides[1 + E + i] * dtype_bytes,
-				reduce_args_top_dim.strides[i] * dtype_bytes,
+				batch_dims[0].strides[1 + i] * arg_dtype_bytes,
+				batch_dims[1].strides[1 + i] * arg_dtype_bytes,
+				top_stride * arg_dtype_bytes,
 			],
-			offset_bytes: arg.map().offset * dtype_bytes,
+			offset_bytes: arg.map().offset * arg_dtype_bytes,
 			buf: arg.buf().device_ptr(),
 		}
 	});
 
-	let inp: [ElemwiseKernelArg; E] = std::array::from_fn(|i| {
-		let arg = elem_args[i];
-		ElemwiseKernelArg {
-			stride_bytes: [
-				merged[0].strides[1 + i] * dtype_bytes,
-				merged[1].strides[1 + i] * dtype_bytes,
-			],
-			offset_bytes: arg.map().offset * dtype_bytes,
-			buf: arg.buf().device_ptr(),
-		}
-	});
-
+	let out_dtype_bytes = output.dtype().bytes();
+	debug_assert!(out_dtype_bytes > 0);
 	let out = KernelOutput {
-		size: [merged[0].size, merged[1].size],
+		size: [batch_dims[0].size, batch_dims[1].size, reduction_size],
 		stride_bytes: [
-			merged[0].strides[0] * dtype_bytes, //
-			merged[1].strides[0] * dtype_bytes,
+			batch_dims[0].strides[0] * out_dtype_bytes,
+			batch_dims[1].strides[0] * out_dtype_bytes,
+			if output_top.size == 1 { 0 } else { output_top.stride * out_dtype_bytes },
 		],
-		offset_bytes: output.map().offset * dtype_bytes,
+		offset_bytes: output.map().offset * out_dtype_bytes,
 		buf: output.buf().device_ptr(),
-		reduction_size: reduce_args_top_dim.size,
-		reduction_stride_bytes: 0, // TODO
 	};
 
 	unsafe {
 		let mut inp_fail = UnsafeBorrowFailFlag::new();
-		let reduce_borrows: [BorrowGuard<DeviceBuffer>; R] =
-			std::array::from_fn(|i| reduce_args[i].buf().unsafe_borrow(&mut inp_fail));
 		let elem_borrows: [Option<BorrowGuard<DeviceBuffer>>; E] = std::array::from_fn(|i| {
-			let arg = &elem_args[i];
-			let same_as_output = std::ptr::eq(arg.buf().as_ref(), output.buf().as_ref())
+			let tensor = tensor_args[i];
+			let arg = &args[i];
+			let same_as_output = std::ptr::eq(tensor.buf().as_ref(), output.buf().as_ref())
 				&& likely(
-					inp[i].offset_bytes == out.offset_bytes
-						&& inp[i].stride_bytes == out.stride_bytes,
+					arg.offset_bytes == out.offset_bytes && arg.stride_bytes == out.stride_bytes,
 				);
-			if same_as_output { None } else { Some(arg.buf().unsafe_borrow(&mut inp_fail)) }
+			if same_as_output { None } else { Some(tensor.buf().unsafe_borrow(&mut inp_fail)) }
 		});
+		let reduce_borrows: [BorrowGuard<DeviceBuffer>; R] =
+			std::array::from_fn(|i| tensor_args[E + i].buf().unsafe_borrow(&mut inp_fail));
 
 		let mut out_fail = UnsafeBorrowMutFailFlag::new();
 		let out_borrow = output.buf().unsafe_borrow_mut(&mut out_fail);
@@ -918,16 +930,14 @@ where
 		// TODO - ensure all on same device
 		// TODO - other things may need to be checked before running the kernel
 
-		let dtype_config =
-			DynKernelCall::new_dtype_config(internal_dtype, output, elem_args, reduce_args);
+		let dtype_config = DynKernelCall::new_dtype_config(internal_dtype, output, tensor_args);
 		key[..dtype_config.len()].copy_from_slice(&dtype_config);
 
-		output.device().run_kernel(&DynKernelCall {
+		output.device().run_reduce_kernel(&DynKernelCall {
 			key,
 			expr,
 			output: &out,
-			elemwise_args: &inp,
-			reduce_args: &reduce_inp,
+			tensor_args: &args,
 			scalar_args,
 		})?;
 
@@ -944,11 +954,11 @@ where
 	[(); E::REDUCE_COUNT]:,
 	[(); E::SCALAR_COUNT]:,
 	[(); E::KEY_WORDS]:,
-	[(); DynKernelCall::dtype_config_words(E::ELEMWISE_COUNT, E::REDUCE_COUNT)]:,
+	[(); DynKernelCall::dtype_config_words(E::ELEMWISE_COUNT + E::REDUCE_COUNT)]:,
 	[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
 	// DTYPE_CONFIG_WORDS >= dtype_config_words()
 	[(); E::DTYPE_CONFIG_WORDS
-		- DynKernelCall::dtype_config_words(E::ELEMWISE_COUNT, E::REDUCE_COUNT)]:,
+		- DynKernelCall::dtype_config_words(E::ELEMWISE_COUNT + E::REDUCE_COUNT)]:,
 {
 	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		self.call(to)
