@@ -23,34 +23,23 @@ namespace {
 	static_assert(alignof(void *) == 8, "pointer must be 8 bytes aligned");
 
 	struct KernelOutput {
-		usize size[2];
-		usize stride_bytes[2];
-		void *buf;
+		usize size[3];
+		usize stride_bytes[3];
 		usize offset_bytes;
-		usize reduction_size;
-		usize reduction_stride_bytes;
+		void *buf;
 	};
 
-	static_assert(sizeof(KernelOutput) == 64, "KernelOutput must be 64 bytes");
+	static_assert(sizeof(KernelOutput) == 64, "KernelOutput must be 56 bytes");
 	static_assert(alignof(KernelOutput) == 8, "KernelOutput must be 8 bytes aligned");
 
-	struct KernelReduceArg {
+	struct KernelArg {
 		usize stride_bytes[3];
-		void *buf;
 		usize offset_bytes;
+		void *buf;
 	};
 
-	static_assert(sizeof(KernelReduceArg) == 40, "KernelReduceArg must be 40 bytes");
-	static_assert(alignof(KernelReduceArg) == 8, "KernelReduceArg must be 8 bytes aligned");
-
-	struct KernelElemArg {
-		usize stride_bytes[2];
-		void *buf;
-		usize offset_bytes;
-	};
-
-	static_assert(sizeof(KernelElemArg) == 32, "KernelElemArg must be 32 bytes");
-	static_assert(alignof(KernelElemArg) == 8, "KernelElemArg must be 8 bytes aligned");
+	static_assert(sizeof(KernelArg) == 40, "KernelElemArg must be 32 bytes");
+	static_assert(alignof(KernelArg) == 8, "KernelElemArg must be 8 bytes aligned");
 
 	template<typename T, const usize N>
 	struct Array {
@@ -59,6 +48,8 @@ namespace {
 
 	using InternalDtype = {{internal_dtype}};
 	using OutputDtype = {{out_dtype}};
+
+	{% let (elem_args, reduce_args) = tensor_args.split_at(tensor_args.len() - reduce_args_count) -%}
 
 	{% for e in elem_args -%}
 	using E{{loop.index0}}Dtype = {{e.dtype}};
@@ -109,8 +100,7 @@ namespace {
 
 extern "C" __global__ void x17ai_kernel(
 	KernelOutput o_arg
-	, Array<KernelReduceArg, R_CNT> r_args
-	{% if elem_args.len() > 0 %}, Array<KernelElemArg, E_CNT> e_args{% endif %}
+	{% if tensor_args.len() > 0 %}, Array<KernelArg, E_CNT + R_CNT> t_args{% endif %}
 	{% if scalar_args_count > 0 %}, Array<f64, S_CNT> scalars{% endif %}
 ) {
 	// `x`, `y` are the indices along the output dimensions
@@ -142,7 +132,7 @@ extern "C" __global__ void x17ai_kernel(
 
 	// Calculate reduce argument pointers
 	{%- for i in 0..reduce_args.len() %}
-	KernelReduceArg &r_arg{{i}} = r_args.items[{{i}}];
+	KernelReduceArg &r_arg{{i}} = t_args.items[E_CNT + {{i}}];
 	R{{i}}Dtype *r{{i}}_ptr = reinterpret_cast<R{{i}}Dtype *>(
 		reinterpret_cast<char *>(r_arg{{i}}.buf)
 		+ r_arg{{i}}.offset_bytes

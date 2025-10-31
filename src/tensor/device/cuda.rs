@@ -20,7 +20,7 @@ use crate::tensor::device::cuda::cuda_shim::{
 	Ptx, cuda_compile,
 };
 use crate::tensor::device::cuda::kernel_templates::{
-	ElemwiseArgTemplate, ElemwiseTemplate, ReduceArgTemplate, ReduceTemplate,
+	ElemwiseTemplate, ReduceTemplate, TensorArgTemplate,
 };
 use crate::tensor::device::kernel::{DynExpr, DynExprKind, DynKernelCall};
 use crate::tensor::device::{
@@ -214,8 +214,14 @@ impl CudaDevice {
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let kernel = Self::get_or(&mut cache_entry.kernel1, || self.compile_elemwise(data))?;
 
+		if data.output.size[0] != 1 {
+			todo!("3d input not supported yet");
+		}
+
+		let total_elems = data.output.size[0] * data.output.size[1] * data.output.size[2];
 		const BLOCK_SIZE: usize = 1024;
-		let block_cnt = (data.output.size[0] * data.output.size[1]).div_ceil(BLOCK_SIZE);
+		let block_cnt = total_elems.div_ceil(BLOCK_SIZE);
+		// TODO - `block_cnt` could exceed dim-x limit
 		let config = CudaLaunchConfig {
 			grid_dim: CudaCube { x: block_cnt, y: 1, z: 1 },
 			block_dim: CudaCube { x: BLOCK_SIZE, y: 1, z: 1 },
@@ -223,19 +229,19 @@ impl CudaDevice {
 		};
 		unsafe {
 			let output_arg = std::ptr::from_ref(data.output).cast();
-			let elemwise_args = std::ptr::from_ref(data.elemwise_args).cast();
+			let tensor_args = std::ptr::from_ref(data.tensor_args).cast();
 			let scalar_args = std::ptr::from_ref(data.scalar_args).cast();
 			self.cuda_stream.run_kernel(
 				kernel,
 				&config,
-				// Note: Passing `elemwise_args` when it is empty could cause problems because C++
+				// Note: Passing `tensor_args` when it is empty could cause problems because C++
 				// doesn't support zero-sized types.
 				// So if it is empty, we pass `scalar_args` as the second argument. We also pass it
 				// as the third argument, but the third position is unused in that case.
 				// It is ok to pass more arguments than the kernel actually uses.
 				&[
 					output_arg,
-					if data.elemwise_args.is_empty() { scalar_args } else { elemwise_args },
+					if data.tensor_args.is_empty() { scalar_args } else { tensor_args },
 					scalar_args,
 				],
 			)?;
@@ -252,13 +258,13 @@ impl CudaDevice {
 		let mut src_data = ElemwiseTemplate {
 			internal_dtype: data.internal_dtype().to_string(),
 			out_dtype: data.output_dtype().to_string(),
-			elem_args: Vec::with_capacity(data.elemwise_args.len()),
+			tensor_args: Vec::with_capacity(data.tensor_args.len()),
 			scalar_args_count: data.scalar_args.len(),
 			expr: expr_str,
 		};
-		for i in 0..data.elemwise_args.len() {
-			let dtype = data.elemwise_dtype(i).to_string();
-			src_data.elem_args.push(ElemwiseArgTemplate { dtype });
+		for i in 0..data.tensor_args.len() {
+			let dtype = data.arg_dtype(i).to_string();
+			src_data.tensor_args.push(TensorArgTemplate { dtype });
 		}
 		let kernel_src = src_data.to_string();
 		println!("Rendered kernel source:\n{kernel_src}");
@@ -278,9 +284,16 @@ impl CudaDevice {
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let kernel = Self::get_or(&mut cache_entry.kernel1, || self.compile_reduce(data))?;
 
+		if data.output.size[0] != 1 {
+			todo!("3d input not supported yet");
+		}
+
+		let cols = data.output.size[2];
+		let rows = data.output.size[0] * data.output.size[1];
 		let WARP_SIZE = self.warp_size();
-		let BLOCK_SIZE = 1024.min((data.output.reduction_size + WARP_SIZE - 1) & !(WARP_SIZE - 1));
-		let block_cnt = data.output.size[0] * data.output.size[1];
+		let BLOCK_SIZE = 1024.min((cols + WARP_SIZE - 1) & !(WARP_SIZE - 1));
+		let block_cnt = rows;
+		// TODO - `block_cnt` could exceed dim-x limit
 		let config = CudaLaunchConfig {
 			grid_dim: CudaCube { x: block_cnt, y: 1, z: 1 },
 			block_dim: CudaCube { x: BLOCK_SIZE, y: 1, z: 1 },
@@ -288,16 +301,14 @@ impl CudaDevice {
 		};
 		unsafe {
 			let output_arg = std::ptr::from_ref(data.output).cast();
-			let reduce_args = std::ptr::from_ref(data.reduce_args).cast();
-			let elemwise_args = std::ptr::from_ref(data.elemwise_args).cast();
+			let tensor_args = std::ptr::from_ref(data.tensor_args).cast();
 			let scalar_args = std::ptr::from_ref(data.scalar_args).cast();
 			self.cuda_stream.run_kernel(
 				kernel,
 				&config,
 				&[
 					output_arg,
-					reduce_args,
-					if data.elemwise_args.is_empty() { scalar_args } else { elemwise_args },
+					if data.tensor_args.is_empty() { scalar_args } else { tensor_args },
 					scalar_args,
 				],
 			)?;
@@ -321,8 +332,8 @@ impl CudaDevice {
 		let mut src_data = ReduceTemplate {
 			internal_dtype: data.internal_dtype().to_string(),
 			out_dtype: data.output_dtype().to_string(),
-			reduce_args: Vec::with_capacity(data.reduce_args.len()),
-			elem_args: Vec::with_capacity(data.elemwise_args.len()),
+			tensor_args: Vec::with_capacity(data.tensor_args.len()),
+			reduce_args_count: data.reduce_count,
 			scalar_args_count: data.scalar_args.len(),
 			pre_reduce_expr,
 			post_reduce_expr,
@@ -330,13 +341,9 @@ impl CudaDevice {
 			zero: "0".to_string(), // TODO
 			warp_size: self.warp_size(),
 		};
-		for i in 0..data.reduce_args.len() {
-			let dtype = data.reduce_dtype(i).to_string();
-			src_data.reduce_args.push(ReduceArgTemplate { dtype });
-		}
-		for i in 0..data.elemwise_args.len() {
-			let dtype = data.elemwise_dtype(i).to_string();
-			src_data.elem_args.push(ElemwiseArgTemplate { dtype });
+		for i in 0..data.tensor_args.len() {
+			let dtype = data.arg_dtype(i).to_string();
+			src_data.tensor_args.push(TensorArgTemplate { dtype });
 		}
 		let kernel_src = src_data.to_string();
 		println!("Rendered kernel source:\n{kernel_src}");
@@ -426,17 +433,26 @@ impl Device for CudaDevice {
 		todo!("implement attention for CudaDevice");
 	}
 
-	unsafe fn run_kernel(&self, data: &DynKernelCall) -> Result<(), ErrPack<TensorOpError>> {
+	unsafe fn run_elemwise_kernel(
+		&self,
+		data: &DynKernelCall,
+	) -> Result<(), ErrPack<TensorOpError>> {
 		let Ok(mut kernel_cache) = self.kernel_cache.try_borrow_mut() else {
 			cold_path();
 			let err = CudaError::new("Internal error: compiled_kernels is already borrowed");
 			return Err(err.into());
 		};
 		let cache_entry = self.get_cache_entry(&mut kernel_cache, data.key);
-		if data.reduce_args.is_empty() {
-			unsafe { self.run_elemwise(data, cache_entry) }
-		} else {
-			unsafe { self.run_reduce(data, cache_entry) }
-		}
+		unsafe { self.run_elemwise(data, cache_entry) }
+	}
+
+	unsafe fn run_reduce_kernel(&self, data: &DynKernelCall) -> Result<(), ErrPack<TensorOpError>> {
+		let Ok(mut kernel_cache) = self.kernel_cache.try_borrow_mut() else {
+			cold_path();
+			let err = CudaError::new("Internal error: compiled_kernels is already borrowed");
+			return Err(err.into());
+		};
+		let cache_entry = self.get_cache_entry(&mut kernel_cache, data.key);
+		unsafe { self.run_reduce(data, cache_entry) }
 	}
 }

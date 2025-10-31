@@ -585,6 +585,7 @@ pub struct DynKernelCall<'a> {
 	pub expr: &'a (dyn Fn() -> Rc<DynExpr> + 'a),
 	pub output: &'a KernelOutput,
 	pub tensor_args: &'a [KernelArg],
+	pub reduce_count: usize,
 	pub scalar_args: &'a [f64],
 }
 
@@ -739,7 +740,7 @@ where
 	[(); 1 + E + R]:,
 	[(); DynKernelCall::dtype_config_words(E + R)]:,
 {
-	let merged = DimMerger::<{ 1 + E + R }>::merge::<2>(std::array::from_fn(|i| {
+	let merged = DimMerger::<{ 1 + E + R }>::merge::<3>(std::array::from_fn(|i| {
 		if i == 0 { output.map().dims.as_slice() } else { tensor_args[i - 1].map().dims.as_slice() }
 	}))?;
 	if merged.iter().any(|m| m.get(0).is_broadcasted()) {
@@ -805,6 +806,7 @@ where
 			expr,
 			output: &out,
 			tensor_args: &args,
+			reduce_count: R,
 			scalar_args,
 		})?;
 
@@ -938,6 +940,7 @@ where
 			expr,
 			output: &out,
 			tensor_args: &args,
+			reduce_count: R,
 			scalar_args,
 		})?;
 

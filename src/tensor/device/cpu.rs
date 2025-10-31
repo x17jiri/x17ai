@@ -204,7 +204,21 @@ impl Device for CPUDevice {
 		todo!("implement attention for CPUDevice");
 	}
 
-	unsafe fn run_kernel(&self, data: &DynKernelCall) -> Result<(), ErrPack<TensorOpError>> {
+	unsafe fn run_elemwise_kernel(
+		&self,
+		data: &DynKernelCall,
+	) -> Result<(), ErrPack<TensorOpError>> {
+		assert!(data.reduce_count == 0);
+		let internal_dtype = common_dtype(data.internal_dtype(), f64::dtype)?;
+		if internal_dtype != f64::dtype {
+			cold_path();
+			return Err(UnsupportedDTypeError.into());
+		}
+		unsafe { cpu_float_methods::run_kernel(data) }
+	}
+
+	unsafe fn run_reduce_kernel(&self, data: &DynKernelCall) -> Result<(), ErrPack<TensorOpError>> {
+		assert!(data.reduce_count > 0);
 		let internal_dtype = common_dtype(data.internal_dtype(), f64::dtype)?;
 		if internal_dtype != f64::dtype {
 			cold_path();

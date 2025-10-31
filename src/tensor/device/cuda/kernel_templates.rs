@@ -7,11 +7,7 @@
 
 use askama::Template;
 
-pub struct ElemwiseArgTemplate {
-	pub dtype: String,
-}
-
-pub struct ReduceArgTemplate {
+pub struct TensorArgTemplate {
 	pub dtype: String,
 }
 
@@ -20,7 +16,7 @@ pub struct ReduceArgTemplate {
 pub struct ElemwiseTemplate {
 	pub internal_dtype: String,
 	pub out_dtype: String,
-	pub elem_args: Vec<ElemwiseArgTemplate>,
+	pub tensor_args: Vec<TensorArgTemplate>,
 	pub scalar_args_count: usize,
 	pub expr: String,
 }
@@ -30,8 +26,8 @@ pub struct ElemwiseTemplate {
 pub struct ReduceTemplate {
 	pub internal_dtype: String,
 	pub out_dtype: String,
-	pub reduce_args: Vec<ReduceArgTemplate>,
-	pub elem_args: Vec<ElemwiseArgTemplate>,
+	pub tensor_args: Vec<TensorArgTemplate>,
+	pub reduce_args_count: usize,
 	pub scalar_args_count: usize,
 	pub pre_reduce_expr: String,
 	pub post_reduce_expr: String,
