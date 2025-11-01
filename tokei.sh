@@ -1,3 +1,3 @@
 #!/bin/sh
-echo tokei -C -e tests src
-tokei -C -e tests src
+echo tokei -C -e tests -e main.rs src
+tokei -C -e tests -e main.rs src

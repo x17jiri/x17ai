@@ -96,7 +96,17 @@ impl CudaDevice {
 		Ok(val.to_f64())
 	}
 
-	fn print_expr(out: &mut String, expr: &DynExpr) -> std::fmt::Result {
+	fn print_expr(
+		out: &mut String,
+		expr: &DynExpr,
+		replace: &[(&DynExpr, &str)],
+	) -> std::fmt::Result {
+		for (e, replacement) in replace.iter().copied() {
+			if std::ptr::eq(e, expr) {
+				return write!(out, "{replacement}");
+			}
+		}
+
 		match &expr.kind {
 			&DynExprKind::ElemwiseTensorArg(index) => {
 				write!(out, "e{index}")
@@ -114,53 +124,53 @@ impl CudaDevice {
 
 			DynExprKind::NegExpr(inner) => {
 				write!(out, "-")?;
-				Self::print_expr(out, inner.as_ref())
+				Self::print_expr(out, inner.as_ref(), replace)
 			},
 			DynExprKind::ExpExpr(inner) => {
 				write!(out, "exp(")?;
-				Self::print_expr(out, inner.as_ref())?;
+				Self::print_expr(out, inner.as_ref(), replace)?;
 				write!(out, ")")
 			},
 			DynExprKind::LnExpr(inner) => {
 				write!(out, "ln(")?;
-				Self::print_expr(out, inner.as_ref())?;
+				Self::print_expr(out, inner.as_ref(), replace)?;
 				write!(out, ")")
 			},
 			DynExprKind::AbsExpr(inner) => {
 				write!(out, "abs(")?;
-				Self::print_expr(out, inner.as_ref())?;
+				Self::print_expr(out, inner.as_ref(), replace)?;
 				write!(out, ")")
 			},
 			DynExprKind::SqrtExpr(inner) => {
 				write!(out, "sqrt(")?;
-				Self::print_expr(out, inner.as_ref())?;
+				Self::print_expr(out, inner.as_ref(), replace)?;
 				write!(out, ")")
 			},
 			DynExprKind::RecipExpr(inner) => {
 				write!(out, "(1.0 / ")?;
-				Self::print_expr(out, inner.as_ref())?;
+				Self::print_expr(out, inner.as_ref(), replace)?;
 				write!(out, ")")
 			},
 
 			DynExprKind::AddExpr(lhs, rhs) => {
 				write!(out, "(")?;
-				Self::print_expr(out, lhs.as_ref())?;
+				Self::print_expr(out, lhs.as_ref(), replace)?;
 				write!(out, " + ")?;
-				Self::print_expr(out, rhs.as_ref())?;
+				Self::print_expr(out, rhs.as_ref(), replace)?;
 				write!(out, ")")
 			},
 			DynExprKind::SubExpr(lhs, rhs) => {
 				write!(out, "(")?;
-				Self::print_expr(out, lhs.as_ref())?;
+				Self::print_expr(out, lhs.as_ref(), replace)?;
 				write!(out, " - ")?;
-				Self::print_expr(out, rhs.as_ref())?;
+				Self::print_expr(out, rhs.as_ref(), replace)?;
 				write!(out, ")")
 			},
 			DynExprKind::MulExpr(lhs, rhs) => {
 				write!(out, "(")?;
-				Self::print_expr(out, lhs.as_ref())?;
+				Self::print_expr(out, lhs.as_ref(), replace)?;
 				write!(out, " * ")?;
-				Self::print_expr(out, rhs.as_ref())?;
+				Self::print_expr(out, rhs.as_ref(), replace)?;
 				write!(out, ")")
 			},
 		}
@@ -253,7 +263,7 @@ impl CudaDevice {
 	fn compile_elemwise(&self, data: &DynKernelCall) -> Result<CudaKernel, ErrPack<TensorOpError>> {
 		let expr = data.generate_expr();
 		let mut expr_str = String::new();
-		Self::print_expr(&mut expr_str, &expr)
+		Self::print_expr(&mut expr_str, &expr, &[])
 			.map_err(|e| CudaError::new(format!("Failed to render expression: {e}")))?;
 		let mut src_data = ElemwiseTemplate {
 			internal_dtype: data.internal_dtype().to_string(),
@@ -321,13 +331,18 @@ impl CudaDevice {
 		let expr = data.generate_expr();
 		let mut pre_reduce_expr = String::new();
 		#[allow(clippy::unwrap_used)]
-		Self::print_expr(&mut pre_reduce_expr, expr.pre_reduce().unwrap())
+		Self::print_expr(&mut pre_reduce_expr, expr.pre_reduce().unwrap(), &[])
 			.map_err(|e| CudaError::new(format!("Failed to render expression: {e}")))?;
+		let common_expr = expr.post_reduce_common();
 		let mut post_reduce_expr = String::new();
-		Self::print_expr(&mut post_reduce_expr, expr.as_ref())
-			.map_err(|e| CudaError::new(format!("Failed to render expression: {e}")))?;
+		Self::print_expr(
+			&mut post_reduce_expr,
+			expr.as_ref(),
+			&[(&common_expr, "post_reduce_common")],
+		)
+		.map_err(|e| CudaError::new(format!("Failed to render expression: {e}")))?;
 		let mut post_reduce_common = String::new();
-		Self::print_expr(&mut post_reduce_common, expr.post_reduce_common())
+		Self::print_expr(&mut post_reduce_common, common_expr, &[])
 			.map_err(|e| CudaError::new(format!("Failed to render expression: {e}")))?;
 		let mut src_data = ReduceTemplate {
 			internal_dtype: data.internal_dtype().to_string(),

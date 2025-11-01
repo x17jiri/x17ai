@@ -45,6 +45,7 @@ fn fmt_0d<T: Copy>(
 fn fmt_1d<T: Copy>(
 	f: &mut std::fmt::Formatter,
 	(buf, offset, dim): (&[T], usize, SizeAndStride),
+	indent: usize,
 	mut fmt_one: impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
 ) -> std::fmt::Result {
 	write!(f, "[")?;
@@ -52,7 +53,19 @@ fn fmt_1d<T: Copy>(
 		if i != 0 {
 			write!(f, ", ")?;
 		}
+		if dim.size > 4 && i % 4 == 0 {
+			writeln!(f)?;
+			for _ in 0..indent + 1 {
+				write!(f, "\t")?;
+			}
+		}
 		fmt_one(f, buf[offset + i * dim.stride])?;
+	}
+	if dim.size > 4 {
+		writeln!(f)?;
+		for _ in 0..indent {
+			write!(f, "\t")?;
+		}
 	}
 	write!(f, "]")?;
 	Ok(())
@@ -73,7 +86,7 @@ fn fmt_Nd<T: Copy>(
 	} else if dim_index == ndim - 1 {
 		let dims = dd_map.dims.as_slice();
 		let dim = dims[dim_index];
-		fmt_1d(f, (buf, offset, dim), fmt_one)?;
+		fmt_1d(f, (buf, offset, dim), indent, fmt_one)?;
 	} else {
 		let dims = dd_map.dims.as_slice();
 		let dim = dims[dim_index];
@@ -99,7 +112,7 @@ fn fmt_Nd<T: Copy>(
 fn fmt_one<T: FromToF64>(f: &mut std::fmt::Formatter, val: T) -> std::fmt::Result {
 	let val = val.to_f64();
 	let alignment = if val < 0.0 { "" } else { " " };
-	write!(f, "{alignment}{val:.7}")
+	write!(f, "{alignment}{val:.7e}")
 }
 
 pub fn fmt_tensor<T: FromToF64>(

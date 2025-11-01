@@ -798,7 +798,8 @@ where
 		// TODO - ensure all on same device
 		// TODO - other things may need to be checked before running the kernel
 
-		let dtype_config = DynKernelCall::new_dtype_config(internal_dtype, output, tensor_args);
+		let dtype_config =
+			DynKernelCall::new_dtype_config::<{ E + R }>(internal_dtype, output, tensor_args);
 		key[..dtype_config.len()].copy_from_slice(&dtype_config);
 
 		output.device().run_elemwise_kernel(&DynKernelCall {
@@ -816,6 +817,9 @@ where
 	Ok(())
 }
 
+#[inline(never)]
+#[allow(clippy::indexing_slicing)]
+#[allow(clippy::too_many_lines)]
 fn __run_reduce_kernel<'a, const E: usize, const R: usize>(
 	key: &'a mut [HashWord],
 	expr: &'a (dyn Fn() -> Rc<DynExpr> + 'a),
@@ -835,15 +839,14 @@ where
 	}
 	fn split_last<'b>(tensor: &'b Tensor) -> Split<'b> {
 		let dims = tensor.map().dims.as_slice();
-		match dims.split_last() {
-			Some((&top, batch)) => Split { top, batch },
-			None => {
-				cold_path();
-				Split {
-					top: SizeAndStride { size: 1, stride: 0 },
-					batch: dims,
-				}
-			},
+		if let Some((&top, batch)) = dims.split_last() {
+			Split { top, batch }
+		} else {
+			cold_path();
+			Split {
+				top: SizeAndStride { size: 1, stride: 0 },
+				batch: dims,
+			}
 		}
 	}
 
@@ -932,7 +935,8 @@ where
 		// TODO - ensure all on same device
 		// TODO - other things may need to be checked before running the kernel
 
-		let dtype_config = DynKernelCall::new_dtype_config(internal_dtype, output, tensor_args);
+		let dtype_config =
+			DynKernelCall::new_dtype_config::<{ E + R }>(internal_dtype, output, tensor_args);
 		key[..dtype_config.len()].copy_from_slice(&dtype_config);
 
 		output.device().run_reduce_kernel(&DynKernelCall {

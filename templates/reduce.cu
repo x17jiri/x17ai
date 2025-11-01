@@ -38,8 +38,8 @@ namespace {
 		void *buf;
 	};
 
-	static_assert(sizeof(KernelArg) == 40, "KernelElemArg must be 32 bytes");
-	static_assert(alignof(KernelArg) == 8, "KernelElemArg must be 8 bytes aligned");
+	static_assert(sizeof(KernelArg) == 40, "KernelArg must be 32 bytes");
+	static_assert(alignof(KernelArg) == 8, "KernelArg must be 8 bytes aligned");
 
 	template<typename T, const usize N>
 	struct Array {
@@ -103,42 +103,22 @@ extern "C" __global__ void x17ai_kernel(
 	{% if tensor_args.len() > 0 %}, Array<KernelArg, E_CNT + R_CNT> t_args{% endif %}
 	{% if scalar_args_count > 0 %}, Array<f64, S_CNT> scalars{% endif %}
 ) {
-	// `x`, `y` are the indices along the output dimensions
-	usize idx = usize(blockIdx.x);
-	usize w = o_arg.size[1];
-	usize h = o_arg.size[0];
-	usize x, y;
-	if (is_power_of_two(w)) {
-		x = idx & (w - 1);
-		y = idx >> trailing_zeros(w);
-	} else {
-		x = idx % w;
-		y = idx / w;
-	}
-	if (x >= w || y >= h) {
+	usize w = o_arg.size[2];
+	usize h = o_arg.size[1];
+	usize x = threadIdx.x;
+	usize y = blockIdx.x;
+	if (y >= h) {
 		return;
 	}
 
-	// `z` is the index along the reduction dimension
-	usize z = usize(threadIdx.x);
-
-	// Calculate output pointer
-	OutputDtype *o = reinterpret_cast<OutputDtype *>(
-		reinterpret_cast<char *>(o_arg.buf)
-		+ o_arg.offset_bytes
-		+ y * o_arg.stride_bytes[0]
-		+ x * o_arg.stride_bytes[1]
-	);
-
 	// Calculate reduce argument pointers
 	{%- for i in 0..reduce_args.len() %}
-	KernelReduceArg &r_arg{{i}} = t_args.items[E_CNT + {{i}}];
+	KernelArg &r_arg{{i}} = t_args.items[E_CNT + {{i}}];
 	R{{i}}Dtype *r{{i}}_ptr = reinterpret_cast<R{{i}}Dtype *>(
 		reinterpret_cast<char *>(r_arg{{i}}.buf)
 		+ r_arg{{i}}.offset_bytes
-		+ y * r_arg{{i}}.stride_bytes[0]
-		+ x * r_arg{{i}}.stride_bytes[1]
-		+ z * r_arg{{i}}.stride_bytes[2]
+		+ y * r_arg{{i}}.stride_bytes[1]
+		+ x * r_arg{{i}}.stride_bytes[2]
 	);
 	{%- endfor %}
 
@@ -148,85 +128,143 @@ extern "C" __global__ void x17ai_kernel(
 	{%- endfor %}
 
 	InternalDtype reduce_val = {{zero}};
-	if (z < o_arg.reduction_size) {
+	if (x < w) {
 		{%- for i in 0..reduce_args.len() %}
 		InternalDtype r{{i}} = static_cast<InternalDtype>(*r{{i}}_ptr);
 		{%- endfor %}
 		reduce_val = {{pre_reduce_expr}};
 	}
-	if (blockDim.x < o_arg.reduction_size) {
+	if (blockDim.x < w) {
 		{%- for i in 0..reduce_args.len() %}
 		usize r{{i}}_stride = r_arg{{i}}.stride_bytes[2] * blockDim.x;
 		{%- endfor %}
 		KahanSum<InternalDtype> kahan_sum(reduce_val);
-		for (usize i = blockDim.x; i < o_arg.reduction_size; i += blockDim.x) {
+		for (usize i = blockDim.x; i < w; i += blockDim.x) {
 			{%- for i in 0..reduce_args.len() %}
 			r{{i}}_ptr = reinterpret_cast<R{{i}}Dtype *>(
 				reinterpret_cast<char *>(r{{i}}_ptr)
 				+ r{{i}}_stride
 			);
 			{%- endfor %}
-			{%- for i in 0..reduce_args.len() %}
-			InternalDtype r{{i}} = static_cast<InternalDtype>(*r{{i}}_ptr);
-			{%- endfor %}
-			if (i + z < o_arg.reduction_size) {
+			if (i + x < w) {
+				{%- for i in 0..reduce_args.len() %}
+				InternalDtype r{{i}} = static_cast<InternalDtype>(*r{{i}}_ptr);
+				{%- endfor %}
 				kahan_sum.add({{pre_reduce_expr}});
 			}
 		}
 		reduce_val = kahan_sum.result();
 	}
-	unsigned mask = __activemask();
+
+	// First warp-level reduction
+	auto warp_mask = __activemask();
 	for (int t = WARP_SIZE / 2; t > 0; t /= 2) {
-		reduce_val = pairwise_sum(reduce_val, __shfl_down_sync(0xFFFFFFFF, reduce_val, t));
+		reduce_val = pairwise_sum(reduce_val, __shfl_down_sync(warp_mask, reduce_val, t));
 	}
 
 	static __shared__ InternalDtype shared[WARP_SIZE];
-	if (z % WARP_SIZE == 0) {
-		shared[z / WARP_SIZE] = reduce_val;
+	if (x % WARP_SIZE == 0) {
+		shared[x / WARP_SIZE] = reduce_val;
 	}
 	__syncthreads();
 
-	if (z < WARP_SIZE) {
-		InternalDtype new_val = {{zero}};
-		if (z < (blockDim.x + WARP_SIZE - 1) / WARP_SIZE) {
-			new_val = shared[z];
+	// Second warp-level reduction
+	if (x < WARP_SIZE) {
+		InternalDtype new_val = shared[x];
+		if (x >= (blockDim.x + WARP_SIZE - 1) / WARP_SIZE) {
+			new_val = {{zero}};
 		}
 		for (int t = WARP_SIZE / 2; t > 0; t /= 2) {
-			new_val = pairwise_sum(new_val, __shfl_down_sync(0xFFFFFFFF, new_val, t));
+			new_val = pairwise_sum(new_val, __shfl_down_sync(warp_mask, new_val, t));
 		}
 		reduce_val = new_val;
 	}
 
-	if (o_arg.reduction_stride_bytes == 0) {
-		if (z == 0) {
+	if (o_arg.stride_bytes[2] == 0) {
+		if (x == 0) {
+			InternalDtype post_reduce_common = {{post_reduce_common}};
+
+			// Calculate elementwise argument pointers
+			{%- for i in 0..elem_args.len() %}
+			KernelArg &e_arg{{i}} = t_args.items[{{i}}];
+			E{{i}}Dtype *e{{i}}_ptr = reinterpret_cast<E{{i}}Dtype *>(
+				reinterpret_cast<char *>(e_arg{{i}}.buf)
+				+ e_arg{{i}}.offset_bytes
+				+ y * e_arg{{i}}.stride_bytes[1]
+				// + x * e_arg{{i}}.stride_bytes[2] // x is 0 here
+			);
+			InternalDtype e{{i}} = static_cast<InternalDtype>(*e{{i}}_ptr);
+			{%- endfor %}
+
+			// Calculate output pointer
+			OutputDtype *o = reinterpret_cast<OutputDtype *>(
+				reinterpret_cast<char *>(o_arg.buf)
+				+ o_arg.offset_bytes
+				+ y * o_arg.stride_bytes[1]
+				// + x * o_arg.stride_bytes[2] // x is 0 here
+			);
+
 			*o = static_cast<OutputDtype>(
 				{{post_reduce_expr}}
 			);
 		}
 	} else {
-		if (z == 0) {
+		if (x == 0) {
 			shared[0] = {{post_reduce_common}};
 		}
 		__syncthreads();
 		InternalDtype post_reduce_common = shared[0];
 
-		// TODO
-		/*
 		// Calculate elementwise argument pointers
 		{%- for i in 0..elem_args.len() %}
-		KernelElemArg &e_arg{{i}} = e_args.items[{{i}}];
-		InternalDtype e{{i}} = static_cast<InternalDtype>(
-			*reinterpret_cast<E{{i}}Dtype *>(
-				reinterpret_cast<char *>(e_arg{{i}}.buf)
-				+ e_arg{{i}}.offset_bytes
-				+ y * e_arg{{i}}.stride_bytes[0]
-				+ x * e_arg{{i}}.stride_bytes[1]
-			)
+		KernelArg &e_arg{{i}} = t_args.items[{{i}}];
+		E{{i}}Dtype *e{{i}}_ptr = reinterpret_cast<E{{i}}Dtype *>(
+			reinterpret_cast<char *>(e_arg{{i}}.buf)
+			+ e_arg{{i}}.offset_bytes
+			+ y * e_arg{{i}}.stride_bytes[1]
+			+ x * e_arg{{i}}.stride_bytes[2]
 		);
 		{%- endfor %}
 
-		// Store the result
-		*o = static_cast<OutputDtype>(value);
-		*/
+		// Calculate output pointer
+		OutputDtype *o = reinterpret_cast<OutputDtype *>(
+			reinterpret_cast<char *>(o_arg.buf)
+			+ o_arg.offset_bytes
+			+ y * o_arg.stride_bytes[1]
+			+ x * o_arg.stride_bytes[2]
+		);
+
+		if (x < w) {
+			{%- for i in 0..elem_args.len() %}
+			InternalDtype e{{i}} = static_cast<InternalDtype>(*e{{i}}_ptr);
+			{%- endfor %}
+			*o = static_cast<OutputDtype>(
+				{{post_reduce_expr}}
+			);
+		}
+		if (blockDim.x < w) {
+			{%- for i in 0..elem_args.len() %}
+			usize e{{i}}_stride = e_arg{{i}}.stride_bytes[2] * blockDim.x;
+			{%- endfor %}
+			usize o_stride = o_arg.stride_bytes[2] * blockDim.x;
+			for (usize i = blockDim.x; i < w; i += blockDim.x) {
+				{%- for i in 0..elem_args.len() %}
+				e{{i}}_ptr = reinterpret_cast<E{{i}}Dtype *>(
+					reinterpret_cast<char *>(e{{i}}_ptr)
+					+ e{{i}}_stride
+				);
+				InternalDtype e{{i}} = static_cast<InternalDtype>(*e{{i}}_ptr);
+				{%- endfor %}
+				o = reinterpret_cast<OutputDtype *>(
+					reinterpret_cast<char *>(o)
+					+ o_stride
+				);
+				if (i + x < w) {
+					*o = static_cast<OutputDtype>(
+						{{post_reduce_expr}}
+					);
+				}
+			}
+		}
 	}
 }
