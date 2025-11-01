@@ -32,6 +32,7 @@ use crate::util::{ToBoxedSlice, mycell};
 
 pub mod cuda_shim;
 pub mod kernel_templates;
+mod tests;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -302,8 +303,8 @@ impl CudaDevice {
 		let rows = data.output.size[0] * data.output.size[1];
 		let WARP_SIZE = self.warp_size();
 		let BLOCK_SIZE = 1024.min((cols + WARP_SIZE - 1) & !(WARP_SIZE - 1));
-		let block_cnt = rows;
-		// TODO - `block_cnt` could exceed dim-x limit
+		let block_cnt = rows; // TODO - `block_cnt` could exceed dim-x limit
+		debug_assert!(BLOCK_SIZE % WARP_SIZE == 0);
 		let config = CudaLaunchConfig {
 			grid_dim: CudaCube { x: block_cnt, y: 1, z: 1 },
 			block_dim: CudaCube { x: BLOCK_SIZE, y: 1, z: 1 },
@@ -338,7 +339,7 @@ impl CudaDevice {
 		Self::print_expr(
 			&mut post_reduce_expr,
 			expr.as_ref(),
-			&[(&common_expr, "post_reduce_common")],
+			&[(common_expr, "post_reduce_common")],
 		)
 		.map_err(|e| CudaError::new(format!("Failed to render expression: {e}")))?;
 		let mut post_reduce_common = String::new();

@@ -17,10 +17,10 @@ namespace {
 	using F32 = f32;
 	using F64 = f64;
 
-	static_assert(sizeof(usize) == 8, "usize must be 8 bytes");
-	static_assert(alignof(usize) == 8, "usize must be 8 bytes aligned");
-	static_assert(sizeof(void *) == 8, "pointer must be 8 bytes");
-	static_assert(alignof(void *) == 8, "pointer must be 8 bytes aligned");
+	static_assert(sizeof(usize) == 8, "usize: invalid size");
+	static_assert(alignof(usize) == 8, "usize: invalid alignment");
+	static_assert(sizeof(void *) == 8, "pointer: invalid size");
+	static_assert(alignof(void *) == 8, "pointer: invalid alignment");
 
 	struct KernelOutput {
 		usize size[3];
@@ -29,8 +29,8 @@ namespace {
 		void *buf;
 	};
 
-	static_assert(sizeof(KernelOutput) == 64, "KernelOutput must be 56 bytes");
-	static_assert(alignof(KernelOutput) == 8, "KernelOutput must be 8 bytes aligned");
+	static_assert(sizeof(KernelOutput) == 64, "KernelOutput: invalid size");
+	static_assert(alignof(KernelOutput) == 8, "KernelOutput: invalid alignment");
 
 	struct KernelArg {
 		usize stride_bytes[3];
@@ -38,8 +38,8 @@ namespace {
 		void *buf;
 	};
 
-	static_assert(sizeof(KernelArg) == 40, "KernelArg must be 32 bytes");
-	static_assert(alignof(KernelArg) == 8, "KernelArg must be 8 bytes aligned");
+	static_assert(sizeof(KernelArg) == 40, "KernelArg: invalid size");
+	static_assert(alignof(KernelArg) == 8, "KernelArg: invalid alignment");
 
 	template<typename T, const usize N>
 	struct Array {
@@ -157,12 +157,21 @@ extern "C" __global__ void x17ai_kernel(
 	}
 
 	// First warp-level reduction
-	auto warp_mask = __activemask();
+	using WarpMask = decltype(__activemask());
+	WarpMask warp_mask;
+	if constexpr (8*sizeof(WarpMask) > WARP_SIZE) {
+		warp_mask = (WarpMask(1) << WARP_SIZE) - WarpMask(1);
+	} else {
+		warp_mask = ~WarpMask(0);
+	}
+	// assert(warp_mask == __activemask());
+
+	#pragma unroll
 	for (int t = WARP_SIZE / 2; t > 0; t /= 2) {
 		reduce_val = pairwise_sum(reduce_val, __shfl_down_sync(warp_mask, reduce_val, t));
 	}
 
-	static __shared__ InternalDtype shared[WARP_SIZE];
+	__shared__ InternalDtype shared[WARP_SIZE];
 	if (x % WARP_SIZE == 0) {
 		shared[x / WARP_SIZE] = reduce_val;
 	}
@@ -174,6 +183,7 @@ extern "C" __global__ void x17ai_kernel(
 		if (x >= (blockDim.x + WARP_SIZE - 1) / WARP_SIZE) {
 			new_val = {{zero}};
 		}
+		#pragma unroll
 		for (int t = WARP_SIZE / 2; t > 0; t /= 2) {
 			new_val = pairwise_sum(new_val, __shfl_down_sync(warp_mask, new_val, t));
 		}
@@ -248,18 +258,18 @@ extern "C" __global__ void x17ai_kernel(
 			{%- endfor %}
 			usize o_stride = o_arg.stride_bytes[2] * blockDim.x;
 			for (usize i = blockDim.x; i < w; i += blockDim.x) {
-				{%- for i in 0..elem_args.len() %}
-				e{{i}}_ptr = reinterpret_cast<E{{i}}Dtype *>(
-					reinterpret_cast<char *>(e{{i}}_ptr)
-					+ e{{i}}_stride
-				);
-				InternalDtype e{{i}} = static_cast<InternalDtype>(*e{{i}}_ptr);
-				{%- endfor %}
-				o = reinterpret_cast<OutputDtype *>(
-					reinterpret_cast<char *>(o)
-					+ o_stride
-				);
 				if (i + x < w) {
+					{%- for i in 0..elem_args.len() %}
+					e{{i}}_ptr = reinterpret_cast<E{{i}}Dtype *>(
+						reinterpret_cast<char *>(e{{i}}_ptr)
+						+ e{{i}}_stride
+					);
+					InternalDtype e{{i}} = static_cast<InternalDtype>(*e{{i}}_ptr);
+					{%- endfor %}
+					o = reinterpret_cast<OutputDtype *>(
+						reinterpret_cast<char *>(o)
+						+ o_stride
+					);
 					*o = static_cast<OutputDtype>(
 						{{post_reduce_expr}}
 					);

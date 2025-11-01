@@ -16,10 +16,10 @@ namespace {
 	using F32 = f32;
 	using F64 = f64;
 
-	static_assert(sizeof(usize) == 8, "usize must be 8 bytes");
-	static_assert(alignof(usize) == 8, "usize must be 8 bytes aligned");
-	static_assert(sizeof(void *) == 8, "pointer must be 8 bytes");
-	static_assert(alignof(void *) == 8, "pointer must be 8 bytes aligned");
+	static_assert(sizeof(usize) == 8, "usize: invalid size");
+	static_assert(alignof(usize) == 8, "usize: invalid alignment");
+	static_assert(sizeof(void *) == 8, "pointer: invalid size");
+	static_assert(alignof(void *) == 8, "pointer: invalid alignment");
 
 	struct KernelOutput {
 		usize size[3];
@@ -28,8 +28,8 @@ namespace {
 		void *buf;
 	};
 
-	static_assert(sizeof(KernelOutput) == 64, "KernelOutput must be 56 bytes");
-	static_assert(alignof(KernelOutput) == 8, "KernelOutput must be 8 bytes aligned");
+	static_assert(sizeof(KernelOutput) == 64, "KernelOutput: invalid size");
+	static_assert(alignof(KernelOutput) == 8, "KernelOutput: invalid alignment");
 
 	struct KernelArg {
 		usize stride_bytes[3];
@@ -37,8 +37,8 @@ namespace {
 		void *buf;
 	};
 
-	static_assert(sizeof(KernelArg) == 40, "KernelElemArg must be 32 bytes");
-	static_assert(alignof(KernelArg) == 8, "KernelElemArg must be 8 bytes aligned");
+	static_assert(sizeof(KernelArg) == 40, "KernelArg: invalid size");
+	static_assert(alignof(KernelArg) == 8, "KernelArg: invalid alignment");
 
 	template<typename T, const usize N>
 	struct Array {
@@ -99,7 +99,7 @@ extern "C" __global__ void x17ai_kernel(
 
 	// Calculate elementwise argument pointers
 	{%- for i in 0..elem_args.len() %}
-	KernelElemArg e_arg{{i}} = t_args.items[{{i}}];
+	KernelArg e_arg{{i}} = t_args.items[{{i}}];
 	InternalDtype e{{i}} = static_cast<InternalDtype>(
 		*reinterpret_cast<E{{i}}Dtype *>(
 			reinterpret_cast<char *>(e_arg{{i}}.buf)
