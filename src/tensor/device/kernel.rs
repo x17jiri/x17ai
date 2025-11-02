@@ -800,17 +800,15 @@ where
 			let tensor = tensor_args[i];
 			let arg = &args[i];
 			let same_as_output = std::ptr::eq(tensor.buf().as_ref(), output.buf().as_ref())
-				&& likely(
-					arg.offset_bytes == out.offset_bytes && arg.stride_bytes == out.stride_bytes,
-				);
+				&& likely(arg.offset_bytes == out.offset_bytes)
+				&& likely(arg.stride_bytes[0] == out.stride_bytes[0] || out.size[0] <= 1)
+				&& likely(arg.stride_bytes[1] == out.stride_bytes[1] || out.size[1] <= 1)
+				&& likely(arg.stride_bytes[2] == out.stride_bytes[2] || out.size[2] <= 1);
 			if same_as_output { None } else { Some(tensor.buf().unsafe_borrow(&mut inp_fail)) }
 		});
-
-		let mut out_fail = UnsafeBorrowMutFailFlag::new();
-		let out_borrow = output.buf().unsafe_borrow_mut(&mut out_fail);
-
 		inp_fail.check()?;
-		out_fail.check()?;
+
+		let out_borrow = output.buf().try_borrow_mut()?;
 
 		// TODO - ensure_safe
 		// TODO - ensure all on same device
@@ -931,28 +929,19 @@ where
 
 	unsafe {
 		let mut inp_fail = UnsafeBorrowFailFlag::new();
-		let elem_borrows: [Option<BorrowGuard<DeviceBuffer>>; E] = std::array::from_fn(|i| {
+		let inp_borrows: [Option<BorrowGuard<DeviceBuffer>>; E + R] = std::array::from_fn(|i| {
 			let tensor = tensor_args[i];
 			let arg = &args[i];
 			let same_as_output = std::ptr::eq(tensor.buf().as_ref(), output.buf().as_ref())
-				&& likely(
-					arg.offset_bytes == out.offset_bytes
-						// TODO TODO TODO
-						TODO TODO TODO
-						&& (arg.stride_bytes[0] == out.stride_bytes[0] || out.size[0] <= 1)
-						&& (arg.stride_bytes[1] == out.stride_bytes[1] || out.size[1] <= 1)
-						&& (arg.stride_bytes[2] == out.stride_bytes[2] || out.size[2] <= 1),
-				);
+				&& likely(arg.offset_bytes == out.offset_bytes)
+				&& likely(arg.stride_bytes[0] == out.stride_bytes[0] || out.size[0] <= 1)
+				&& likely(arg.stride_bytes[1] == out.stride_bytes[1] || out.size[1] <= 1)
+				&& likely(arg.stride_bytes[2] == out.stride_bytes[2] || out.size[2] <= 1);
 			if same_as_output { None } else { Some(tensor.buf().unsafe_borrow(&mut inp_fail)) }
 		});
-		let reduce_borrows: [BorrowGuard<DeviceBuffer>; R] =
-			std::array::from_fn(|i| tensor_args[E + i].buf().unsafe_borrow(&mut inp_fail));
-
-		let mut out_fail = UnsafeBorrowMutFailFlag::new();
-		let out_borrow = output.buf().unsafe_borrow_mut(&mut out_fail);
-
 		inp_fail.check()?;
-		out_fail.check()?;
+
+		let out_borrow = output.buf().try_borrow_mut()?;
 
 		// TODO - ensure_safe
 		// TODO - ensure all on same device
@@ -972,8 +961,7 @@ where
 		})?;
 
 		std::mem::drop(out_borrow);
-		std::mem::drop(elem_borrows);
-		std::mem::drop(reduce_borrows);
+		std::mem::drop(inp_borrows);
 	}
 	Ok(())
 }

@@ -64,7 +64,6 @@ impl UnaryFragment for Softmax {
 		let internal_dtype = common_dtype(inp.dtype(), self.internal_dtype)?;
 
 		let max = inp.new_replace_tail(1, &[1], inp.dtype())?; // [..., 1]
-		let sum_recip = max.new_empty_like(internal_dtype)?;
 
 		max.assign(custom_kernel!(
 			internal_dtype,
@@ -72,16 +71,10 @@ impl UnaryFragment for Softmax {
 				inp.max()
 			}
 		))?;
-		sum_recip.assign(custom_kernel!(
-			internal_dtype,
-			[inp: &inp, max: &max], (), {
-				(inp - max).exp().sum().recip()
-			}
-		))?;
 		out.assign(custom_kernel!(
 			internal_dtype,
-			[inp: &inp, max: &max, sum_recip: &sum_recip], (), {
-				(inp - max).exp() * sum_recip
+			[inp: &inp, max: &max], (), {
+				(inp - max).exp().sum().recip() * (inp - max).exp()
 			}
 		))?;
 
