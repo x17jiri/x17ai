@@ -582,6 +582,7 @@ impl From<BorrowMutError> for ErrPack<TensorOpError> {
 	#[cold]
 	#[inline(never)]
 	fn from(_: BorrowMutError) -> Self {
+		debug_assert!(false);
 		Self {
 			code: TensorOpError::CannotBorrowMut,
 			extra: None,

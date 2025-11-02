@@ -32,6 +32,8 @@ pub struct ReduceTemplate {
 	pub pre_reduce_expr: String,
 	pub post_reduce_expr: String,
 	pub post_reduce_common: String,
-	pub zero: String,
 	pub warp_size: usize,
+	pub identity: &'static str,
+	pub loop_reduce: &'static str,
+	pub pairwise_reduce: &'static str,
 }

@@ -79,7 +79,7 @@ namespace {
 
 		inline __device__ KahanSum(T value): sum(value), c(0) {}
 
-		inline __device__ void add(T value) {
+		inline __device__ void append(T value) {
 			T y = value - c;
 			T t = sum + y;
 			c = (t - sum) - y;
@@ -96,6 +96,29 @@ namespace {
 		return a + b;
 	}
 
+	template<typename T>
+	struct Max {
+		T max;
+
+		inline __device__ Max(T value): max(value) {}
+
+		inline __device__ void append(T value) {
+			max = fmax(max, value);
+		}
+
+		inline __device__ T result() const {
+			return max;
+		}
+	};
+
+	template<typename T>
+	inline __device__ T pairwise_max(T a, T b) {
+		return fmax(a, b);
+	}
+
+	__device__ __forceinline__ double inf() {
+		return __longlong_as_double(0x7ff0000000000000ULL);
+	}
 }
 
 extern "C" __global__ void x17ai_kernel(
@@ -127,7 +150,7 @@ extern "C" __global__ void x17ai_kernel(
 	InternalDtype s{{s}} = static_cast<InternalDtype>(scalars.items[{{s}}]);
 	{%- endfor %}
 
-	InternalDtype reduce_val = {{zero}};
+	InternalDtype reduce_val = {{identity}};
 	if (x < w) {
 		{%- for i in 0..reduce_args.len() %}
 		InternalDtype r{{i}} = static_cast<InternalDtype>(*r{{i}}_ptr);
@@ -138,7 +161,7 @@ extern "C" __global__ void x17ai_kernel(
 		{%- for i in 0..reduce_args.len() %}
 		usize r{{i}}_stride = r_arg{{i}}.stride_bytes[2] * blockDim.x;
 		{%- endfor %}
-		KahanSum<InternalDtype> kahan_sum(reduce_val);
+		{{loop_reduce}}<InternalDtype> kahan_sum(reduce_val);
 		for (usize i = blockDim.x; i < w; i += blockDim.x) {
 			{%- for i in 0..reduce_args.len() %}
 			r{{i}}_ptr = reinterpret_cast<R{{i}}Dtype *>(
@@ -150,7 +173,7 @@ extern "C" __global__ void x17ai_kernel(
 				{%- for i in 0..reduce_args.len() %}
 				InternalDtype r{{i}} = static_cast<InternalDtype>(*r{{i}}_ptr);
 				{%- endfor %}
-				kahan_sum.add({{pre_reduce_expr}});
+				kahan_sum.append({{pre_reduce_expr}});
 			}
 		}
 		reduce_val = kahan_sum.result();
@@ -168,7 +191,7 @@ extern "C" __global__ void x17ai_kernel(
 
 	#pragma unroll
 	for (int t = WARP_SIZE / 2; t > 0; t /= 2) {
-		reduce_val = pairwise_sum(reduce_val, __shfl_down_sync(warp_mask, reduce_val, t));
+		reduce_val = {{pairwise_reduce}}(reduce_val, __shfl_down_sync(warp_mask, reduce_val, t));
 	}
 
 	__shared__ InternalDtype shared[WARP_SIZE];
@@ -181,11 +204,11 @@ extern "C" __global__ void x17ai_kernel(
 	if (x < WARP_SIZE) {
 		InternalDtype new_val = shared[x];
 		if (x >= (blockDim.x + WARP_SIZE - 1) / WARP_SIZE) {
-			new_val = {{zero}};
+			new_val = {{identity}};
 		}
 		#pragma unroll
 		for (int t = WARP_SIZE / 2; t > 0; t /= 2) {
-			new_val = pairwise_sum(new_val, __shfl_down_sync(warp_mask, new_val, t));
+			new_val = {{pairwise_reduce}}(new_val, __shfl_down_sync(warp_mask, new_val, t));
 		}
 		reduce_val = new_val;
 	}

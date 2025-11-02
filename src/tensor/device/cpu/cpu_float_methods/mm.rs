@@ -13,6 +13,9 @@ use crate::tensor::device::cpu::cpu_float_methods::KahanAcc;
 
 //--------------------------------------------------------------------------------------------------
 
+/// # Safety
+///
+/// TODO
 pub unsafe fn mm(args: &MatMulArgs, scale: f64) -> Result<(), ErrPack<TensorOpError>> {
 	unsafe {
 		for j in 0..args.o_rows {

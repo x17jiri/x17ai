@@ -22,7 +22,10 @@ use crate::tensor::device::cuda::cuda_shim::{
 use crate::tensor::device::cuda::kernel_templates::{
 	ElemwiseTemplate, ReduceTemplate, TensorArgTemplate,
 };
-use crate::tensor::device::kernel::{DynExpr, DynExprKind, DynKernelCall};
+use crate::tensor::device::kernel::{
+	DynExpr, DynExprArgKind, DynExprBinaryKind, DynExprKind, DynExprReductionKind,
+	DynExprUnaryKind, DynKernelCall,
+};
 use crate::tensor::device::{
 	AttentionArgs, DeviceBuffer, DevicePtr, MatMulArgs, NewDeviceBufferError,
 };
@@ -32,6 +35,8 @@ use crate::util::{ToBoxedSlice, mycell};
 
 pub mod cuda_shim;
 pub mod kernel_templates;
+
+#[cfg(test)]
 mod tests;
 
 //--------------------------------------------------------------------------------------------------
@@ -109,70 +114,70 @@ impl CudaDevice {
 		}
 
 		match &expr.kind {
-			&DynExprKind::ElemwiseTensorArg(index) => {
-				write!(out, "e{index}")
+			DynExprKind::Arg(a) => {
+				match a.kind {
+					DynExprArgKind::ElemwiseTensor => write!(out, "e"),
+					DynExprArgKind::ReduceTensor => write!(out, "r"),
+					DynExprArgKind::Scalar => write!(out, "s"),
+				}?;
+				write!(out, "{}", a.index)
 			},
-			&DynExprKind::ReduceTensorArg(index) => {
-				write!(out, "r{index}")
-			},
-			&DynExprKind::ScalarArg(index) => {
-				write!(out, "s{index}")
-			},
-
-			DynExprKind::SumExpr(..) | DynExprKind::MaxExpr(..) => {
+			DynExprKind::Reduction(..) => {
 				write!(out, "reduce_val")
 			},
-
-			DynExprKind::NegExpr(inner) => {
-				write!(out, "-")?;
-				Self::print_expr(out, inner.as_ref(), replace)
+			DynExprKind::Unary(un) => match un.kind {
+				DynExprUnaryKind::Neg => {
+					write!(out, "-")?;
+					Self::print_expr(out, un.expr.as_ref(), replace)
+				},
+				DynExprUnaryKind::Exp => {
+					write!(out, "exp(")?;
+					Self::print_expr(out, un.expr.as_ref(), replace)?;
+					write!(out, ")")
+				},
+				DynExprUnaryKind::Ln => {
+					write!(out, "ln(")?;
+					Self::print_expr(out, un.expr.as_ref(), replace)?;
+					write!(out, ")")
+				},
+				DynExprUnaryKind::Abs => {
+					write!(out, "abs(")?;
+					Self::print_expr(out, un.expr.as_ref(), replace)?;
+					write!(out, ")")
+				},
+				DynExprUnaryKind::Sqrt => {
+					write!(out, "sqrt(")?;
+					Self::print_expr(out, un.expr.as_ref(), replace)?;
+					write!(out, ")")
+				},
+				DynExprUnaryKind::Recip => {
+					write!(out, "(1.0 / ")?;
+					Self::print_expr(out, un.expr.as_ref(), replace)?;
+					write!(out, ")")
+				},
 			},
-			DynExprKind::ExpExpr(inner) => {
-				write!(out, "exp(")?;
-				Self::print_expr(out, inner.as_ref(), replace)?;
-				write!(out, ")")
-			},
-			DynExprKind::LnExpr(inner) => {
-				write!(out, "ln(")?;
-				Self::print_expr(out, inner.as_ref(), replace)?;
-				write!(out, ")")
-			},
-			DynExprKind::AbsExpr(inner) => {
-				write!(out, "abs(")?;
-				Self::print_expr(out, inner.as_ref(), replace)?;
-				write!(out, ")")
-			},
-			DynExprKind::SqrtExpr(inner) => {
-				write!(out, "sqrt(")?;
-				Self::print_expr(out, inner.as_ref(), replace)?;
-				write!(out, ")")
-			},
-			DynExprKind::RecipExpr(inner) => {
-				write!(out, "(1.0 / ")?;
-				Self::print_expr(out, inner.as_ref(), replace)?;
-				write!(out, ")")
-			},
-
-			DynExprKind::AddExpr(lhs, rhs) => {
-				write!(out, "(")?;
-				Self::print_expr(out, lhs.as_ref(), replace)?;
-				write!(out, " + ")?;
-				Self::print_expr(out, rhs.as_ref(), replace)?;
-				write!(out, ")")
-			},
-			DynExprKind::SubExpr(lhs, rhs) => {
-				write!(out, "(")?;
-				Self::print_expr(out, lhs.as_ref(), replace)?;
-				write!(out, " - ")?;
-				Self::print_expr(out, rhs.as_ref(), replace)?;
-				write!(out, ")")
-			},
-			DynExprKind::MulExpr(lhs, rhs) => {
-				write!(out, "(")?;
-				Self::print_expr(out, lhs.as_ref(), replace)?;
-				write!(out, " * ")?;
-				Self::print_expr(out, rhs.as_ref(), replace)?;
-				write!(out, ")")
+			DynExprKind::Binary(bin) => match bin.kind {
+				DynExprBinaryKind::Add => {
+					write!(out, "(")?;
+					Self::print_expr(out, bin.lhs.as_ref(), replace)?;
+					write!(out, " + ")?;
+					Self::print_expr(out, bin.rhs.as_ref(), replace)?;
+					write!(out, ")")
+				},
+				DynExprBinaryKind::Sub => {
+					write!(out, "(")?;
+					Self::print_expr(out, bin.lhs.as_ref(), replace)?;
+					write!(out, " - ")?;
+					Self::print_expr(out, bin.rhs.as_ref(), replace)?;
+					write!(out, ")")
+				},
+				DynExprBinaryKind::Mul => {
+					write!(out, "(")?;
+					Self::print_expr(out, bin.lhs.as_ref(), replace)?;
+					write!(out, " * ")?;
+					Self::print_expr(out, bin.rhs.as_ref(), replace)?;
+					write!(out, ")")
+				},
 			},
 		}
 	}
@@ -278,10 +283,10 @@ impl CudaDevice {
 			src_data.tensor_args.push(TensorArgTemplate { dtype });
 		}
 		let kernel_src = src_data.to_string();
-		println!("Rendered kernel source:\n{kernel_src}");
+		// println!("Rendered kernel source:\n{kernel_src}");
 		let ptx = self.compile(&kernel_src)?;
-		println!("Compiled PTX:\n{}", ptx.code());
-		println!("Compilation log:\n{}", ptx.log());
+		// println!("Compiled PTX:\n{}", ptx.code());
+		// println!("Compilation log:\n{}", ptx.log());
 
 		let module = self.cuda_stream.load_module(&ptx)?;
 		let kernel = module.get_kernel("x17ai_kernel")?;
@@ -331,8 +336,9 @@ impl CudaDevice {
 	fn compile_reduce(&self, data: &DynKernelCall) -> Result<CudaKernel, ErrPack<TensorOpError>> {
 		let expr = data.generate_expr();
 		let mut pre_reduce_expr = String::new();
+		let reduction = expr.find_reduction().unwrap();
 		#[allow(clippy::unwrap_used)]
-		Self::print_expr(&mut pre_reduce_expr, expr.pre_reduce().unwrap(), &[])
+		Self::print_expr(&mut pre_reduce_expr, reduction.expr.as_ref(), &[])
 			.map_err(|e| CudaError::new(format!("Failed to render expression: {e}")))?;
 		let common_expr = expr.post_reduce_common();
 		let mut post_reduce_expr = String::new();
@@ -345,6 +351,12 @@ impl CudaDevice {
 		let mut post_reduce_common = String::new();
 		Self::print_expr(&mut post_reduce_common, common_expr, &[])
 			.map_err(|e| CudaError::new(format!("Failed to render expression: {e}")))?;
+
+		let (identity, loop_reduce, pairwise_reduce) = match reduction.kind {
+			DynExprReductionKind::Sum => ("0", "KahanSum", "pairwise_sum"),
+			DynExprReductionKind::Max => ("-inf()", "Max", "pairwise_max"),
+		};
+
 		let mut src_data = ReduceTemplate {
 			internal_dtype: data.internal_dtype().to_string(),
 			out_dtype: data.output_dtype().to_string(),
@@ -354,18 +366,20 @@ impl CudaDevice {
 			pre_reduce_expr,
 			post_reduce_expr,
 			post_reduce_common,
-			zero: "0".to_string(), // TODO
 			warp_size: self.warp_size(),
+			identity,
+			loop_reduce,
+			pairwise_reduce,
 		};
 		for i in 0..data.tensor_args.len() {
 			let dtype = data.arg_dtype(i).to_string();
 			src_data.tensor_args.push(TensorArgTemplate { dtype });
 		}
 		let kernel_src = src_data.to_string();
-		println!("Rendered kernel source:\n{kernel_src}");
+		// println!("Rendered kernel source:\n{kernel_src}");
 		let ptx = self.compile(&kernel_src)?;
-		println!("Compiled PTX:\n{}", ptx.code());
-		println!("Compilation log:\n{}", ptx.log());
+		// println!("Compiled PTX:\n{}", ptx.code());
+		// println!("Compilation log:\n{}", ptx.log());
 
 		let module = self.cuda_stream.load_module(&ptx)?;
 		let kernel = module.get_kernel("x17ai_kernel")?;

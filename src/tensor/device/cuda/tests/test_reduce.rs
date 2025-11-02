@@ -8,7 +8,7 @@
 use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::device::cuda::CudaDevice;
 use crate::tensor::math::approx_eq;
-use crate::tensor::{HasDType, Tensor, TensorOpError};
+use crate::tensor::{Tensor, TensorOpError};
 use crate::{ErrPack, custom_kernel};
 
 //--------------------------------------------------------------------------------------------------
@@ -21,6 +21,7 @@ use crate::{ErrPack, custom_kernel};
 #[allow(clippy::approx_constant)]
 #[allow(clippy::unreadable_literal)]
 #[allow(clippy::excessive_precision)]
+#[allow(clippy::similar_names)]
 #[test]
 fn test_reduce() -> Result<(), ErrPack<TensorOpError>> {
 	let cpu = CPUDevice::new();
@@ -1919,9 +1920,8 @@ fn test_reduce() -> Result<(), ErrPack<TensorOpError>> {
 	println!("expected_b = {}", &expected_b_cpu);
 	println!("b = {}", &b_cpu);
 
-	assert!(false);
 	assert!(approx_eq(&a, &expected_a, 1e-4)?);
-	assert!(approx_eq(&b, &expected_b, 1e-4)?);
+	assert!(approx_eq(&b, &expected_b, 1e-7)?);
 
 	Ok(())
 }

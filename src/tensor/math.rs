@@ -8,6 +8,7 @@
 use std::hint::cold_path;
 
 use crate::tensor::device::MatMulArgs;
+use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::device::dtype::common_dtype;
 use crate::tensor::dim_merger::DimMerger;
 use crate::tensor::generic::map::{NotEnoughDimensionsError, SizeAndStride};
@@ -46,6 +47,9 @@ pub fn approx_eq(a: &Tensor, b: &Tensor, eps: f64) -> Result<bool, ErrPack<Tenso
 		}
 	))?;
 	let diff = diff.merge_all_dims()?;
+	let cpu = CPUDevice::new();
+	let diff_cpu = diff.to_device(cpu)?;
+	println!("diff = {}", &diff_cpu);
 	let max = a.new_empty(&[1], diff.dtype())?;
 	max.assign(custom_kernel!(
 		diff_dtype,
@@ -53,7 +57,8 @@ pub fn approx_eq(a: &Tensor, b: &Tensor, eps: f64) -> Result<bool, ErrPack<Tenso
 			diff.max()
 		}
 	))?;
-	Ok(max.scalar()? <= eps)
+	let value = max.scalar()?;
+	Ok(value <= eps)
 }
 
 //--------------------------------------------------------------------------------------------------

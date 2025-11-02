@@ -178,7 +178,7 @@ impl From<CudaCppError> for ErrPack<TensorOpError> {
 	#[inline(never)]
 	#[cold]
 	fn from(err: CudaCppError) -> Self {
-		ErrPack {
+		Self {
 			code: TensorOpError::DeviceError,
 			extra: Some(Box::new(ErrExtra {
 				message: Cow::from(String::from_utf8_lossy(&err.msg).into_owned()),
@@ -396,7 +396,7 @@ impl CudaStream {
 			x17ai_cuda_run_kernel(
 				self.stream.as_ptr(),
 				kernel.kernel.as_ptr(),
-				config as *const CudaLaunchConfig,
+				std::ptr::from_ref(config),
 				args.as_ptr().cast(),
 				FfiBuffer::new(&mut err.msg),
 			)

@@ -119,97 +119,99 @@ pub struct DynExpr {
 	pub uses_elemwise_args: bool,
 }
 
+pub struct DynExprArg {
+	pub kind: DynExprArgKind,
+	pub index: usize,
+}
+
+pub enum DynExprArgKind {
+	ElemwiseTensor,
+	ReduceTensor,
+	Scalar,
+}
+
+pub struct DynExprReduction {
+	pub kind: DynExprReductionKind,
+	pub expr: Rc<DynExpr>,
+}
+
+pub enum DynExprReductionKind {
+	Sum,
+	Max,
+}
+
+pub struct DynExprUnary {
+	pub kind: DynExprUnaryKind,
+	pub expr: Rc<DynExpr>,
+}
+
+pub enum DynExprUnaryKind {
+	Neg,
+	Exp,
+	Ln,
+	Abs,
+	Sqrt,
+	Recip,
+}
+
+pub struct DynExprBinary {
+	pub kind: DynExprBinaryKind,
+	pub lhs: Rc<DynExpr>,
+	pub rhs: Rc<DynExpr>,
+}
+
+pub enum DynExprBinaryKind {
+	Add,
+	Sub,
+	Mul,
+}
+
 pub enum DynExprKind {
-	ElemwiseTensorArg(usize),
-	ReduceTensorArg(usize),
-	ScalarArg(usize),
-
-	SumExpr(Rc<DynExpr>),
-	MaxExpr(Rc<DynExpr>),
-
-	NegExpr(Rc<DynExpr>),
-	ExpExpr(Rc<DynExpr>),
-	LnExpr(Rc<DynExpr>),
-	AbsExpr(Rc<DynExpr>),
-	SqrtExpr(Rc<DynExpr>),
-	RecipExpr(Rc<DynExpr>),
-
-	AddExpr(Rc<DynExpr>, Rc<DynExpr>),
-	SubExpr(Rc<DynExpr>, Rc<DynExpr>),
-	MulExpr(Rc<DynExpr>, Rc<DynExpr>),
+	Arg(DynExprArg),
+	Reduction(DynExprReduction),
+	Unary(DynExprUnary),
+	Binary(DynExprBinary),
 }
 
 impl DynExpr {
-	pub fn pre_reduce(&self) -> Option<&Self> {
+	pub fn find_reduction(&self) -> Option<&DynExprReduction> {
 		#[rustfmt::skip]
 		match &self.kind {
-			DynExprKind::ElemwiseTensorArg(_)
-			| DynExprKind::ReduceTensorArg(_)
-			| DynExprKind::ScalarArg(_) => {
-				None
-			},
+			DynExprKind::Arg(..) => None,
+			DynExprKind::Reduction(r) => Some(r),
+			DynExprKind::Unary(un) => un.expr.find_reduction(),
 
-			DynExprKind::SumExpr(e)
-			| DynExprKind::MaxExpr(e) => {
-				Some(e.as_ref())
-			},
-
-			DynExprKind::NegExpr(e)
-			| DynExprKind::ExpExpr(e)
-			| DynExprKind::LnExpr(e)
-			| DynExprKind::AbsExpr(e)
-			| DynExprKind::SqrtExpr(e)
-			| DynExprKind::RecipExpr(e) => {
-				e.pre_reduce()
-			},
-
-			DynExprKind::AddExpr(a, b)
-			| DynExprKind::SubExpr(a, b)
-			| DynExprKind::MulExpr(a, b) => {
-				// There should only be one reduction,
-				// so it shouldn't happen that both sides return value.
-				a.pre_reduce().or_else(|| b.pre_reduce())
-			},
+			// There should only be one reduction,
+			// so it shouldn't happen that both sides return value.
+			DynExprKind::Binary(bin) =>
+				bin.lhs.find_reduction().or_else(|| bin.rhs.find_reduction())
+			,
 		}
 	}
 
 	pub fn post_reduce_common(&self) -> &Self {
 		#[rustfmt::skip]
 		match &self.kind {
-			DynExprKind::NegExpr(e)
-			| DynExprKind::ExpExpr(e)
-			| DynExprKind::LnExpr(e)
-			| DynExprKind::AbsExpr(e)
-			| DynExprKind::SqrtExpr(e)
-			| DynExprKind::RecipExpr(e) => {
+			DynExprKind::Unary(un) => {
 				if self.uses_elemwise_args {
-					e.post_reduce_common()
+					un.expr.post_reduce_common()
 				} else {
 					self
 				}
 			},
-
-			DynExprKind::AddExpr(a, b)
-			| DynExprKind::SubExpr(a, b)
-			| DynExprKind::MulExpr(a, b) => {
+			DynExprKind::Binary(bin) => {
 				if self.uses_elemwise_args {
-					if a.has_reduction {
-						a.post_reduce_common()
+					if bin.lhs.has_reduction {
+						bin.lhs.post_reduce_common()
 					} else {
-						b.post_reduce_common()
+						bin.rhs.post_reduce_common()
 					}
 				} else {
 					self
 				}
 			},
-
-			// Args should be unreachable
-			DynExprKind::ElemwiseTensorArg(..)
-			| DynExprKind::ReduceTensorArg(..)
-			| DynExprKind::ScalarArg(..)
-
-			| DynExprKind::SumExpr(..)
-			| DynExprKind::MaxExpr(..) => {
+			DynExprKind::Arg(..)
+			| DynExprKind::Reduction(..) => {
 				self
 			},
 		}
@@ -351,17 +353,23 @@ impl<const Idx: usize> ExprToDyn for TensorArg<Idx> {
 	fn to_dyn(em: u64, rm: u64, _sm: u64, reduce: bool) -> Rc<DynExpr> {
 		let bit = 1_u64 << Idx;
 		if reduce {
-			let idx = (rm & (bit - 1)).count_ones() as usize;
+			let index = (rm & (bit - 1)).count_ones() as usize;
 			Rc::new(DynExpr {
-				kind: DynExprKind::ReduceTensorArg(idx),
+				kind: DynExprKind::Arg(DynExprArg {
+					kind: DynExprArgKind::ReduceTensor,
+					index,
+				}),
 				is_reduction: false,
 				has_reduction: false,
 				uses_elemwise_args: false,
 			})
 		} else {
-			let idx = (em & (bit - 1)).count_ones() as usize;
+			let index = (em & (bit - 1)).count_ones() as usize;
 			Rc::new(DynExpr {
-				kind: DynExprKind::ElemwiseTensorArg(idx),
+				kind: DynExprKind::Arg(DynExprArg {
+					kind: DynExprArgKind::ElemwiseTensor,
+					index,
+				}),
 				is_reduction: false,
 				has_reduction: false,
 				uses_elemwise_args: true,
@@ -389,9 +397,9 @@ impl<const Idx: usize> const ExprTrait for ScalarArg<Idx> {
 impl<const Idx: usize> ExprToDyn for ScalarArg<Idx> {
 	fn to_dyn(_e_mask: u64, _r_mask: u64, s_mask: u64, _reduce: bool) -> Rc<DynExpr> {
 		let bit = 1_u64 << Idx;
-		let idx = (s_mask & (bit - 1)).count_ones() as usize;
+		let index = (s_mask & (bit - 1)).count_ones() as usize;
 		Rc::new(DynExpr {
-			kind: DynExprKind::ScalarArg(idx),
+			kind: DynExprKind::Arg(DynExprArg { kind: DynExprArgKind::Scalar, index }),
 			is_reduction: false,
 			has_reduction: false,
 			uses_elemwise_args: false,
@@ -400,7 +408,7 @@ impl<const Idx: usize> ExprToDyn for ScalarArg<Idx> {
 }
 
 macro_rules! impl_expr_reduce {
-	($name:ident) => {
+	($name:ident, $red_name:ident) => {
 		impl<A: const ExprTrait + ExprToDyn> const ExprTrait for $name<A> {
 			const MASKS: InputMasks = InputMasks {
 				elemwise: 0,
@@ -427,7 +435,10 @@ macro_rules! impl_expr_reduce {
 			fn to_dyn(e_mask: u64, r_mask: u64, s_mask: u64, reduce: bool) -> Rc<DynExpr> {
 				assert!(!reduce);
 				Rc::new(DynExpr {
-					kind: DynExprKind::$name(A::to_dyn(e_mask, r_mask, s_mask, true)),
+					kind: DynExprKind::Reduction(DynExprReduction {
+						kind: DynExprReductionKind::$red_name,
+						expr: A::to_dyn(e_mask, r_mask, s_mask, true),
+					}),
 					is_reduction: true,
 					has_reduction: true,
 					uses_elemwise_args: false,
@@ -438,7 +449,7 @@ macro_rules! impl_expr_reduce {
 }
 
 macro_rules! impl_expr_unary {
-	($name:ident) => {
+	($name:ident, $un_name:ident) => {
 		impl<A: const ExprTrait + ExprToDyn> const ExprTrait for $name<A> {
 			const MASKS: InputMasks = A::MASKS;
 
@@ -459,14 +470,17 @@ macro_rules! impl_expr_unary {
 
 		impl<A: const ExprTrait + ExprToDyn> ExprToDyn for $name<A> {
 			fn to_dyn(e_mask: u64, r_mask: u64, s_mask: u64, reduce: bool) -> Rc<DynExpr> {
-				let a = A::to_dyn(e_mask, r_mask, s_mask, reduce);
-				let a_has_reduction = a.has_reduction;
-				let a_uses_elemwise = a.uses_elemwise_args;
+				let expr = A::to_dyn(e_mask, r_mask, s_mask, reduce);
+				let e_has_reduction = expr.has_reduction;
+				let e_uses_elemwise = expr.uses_elemwise_args;
 				Rc::new(DynExpr {
-					kind: DynExprKind::$name(a),
+					kind: DynExprKind::Unary(DynExprUnary {
+						kind: DynExprUnaryKind::$un_name,
+						expr,
+					}),
 					is_reduction: false,
-					has_reduction: a_has_reduction,
-					uses_elemwise_args: a_uses_elemwise,
+					has_reduction: e_has_reduction,
+					uses_elemwise_args: e_uses_elemwise,
 				})
 			}
 		}
@@ -474,7 +488,7 @@ macro_rules! impl_expr_unary {
 }
 
 macro_rules! impl_expr_binary {
-	($name:ident, $commutative:expr) => {
+	($name:ident, $bin_name:ident, $commutative:expr) => {
 		impl<A: const ExprTrait + ExprToDyn, B: const ExprTrait + ExprToDyn> const ExprTrait
 			for $name<A, B>
 		{
@@ -534,36 +548,40 @@ macro_rules! impl_expr_binary {
 			for $name<A, B>
 		{
 			fn to_dyn(e_mask: u64, r_mask: u64, s_mask: u64, reduce: bool) -> Rc<DynExpr> {
-				let a = A::to_dyn(e_mask, r_mask, s_mask, reduce);
-				let b = B::to_dyn(e_mask, r_mask, s_mask, reduce);
-				let a_has_reduction = a.has_reduction;
-				let b_has_reduction = b.has_reduction;
-				let a_uses_elemwise = a.uses_elemwise_args;
-				let b_uses_elemwise = b.uses_elemwise_args;
+				let lhs = A::to_dyn(e_mask, r_mask, s_mask, reduce);
+				let rhs = B::to_dyn(e_mask, r_mask, s_mask, reduce);
+				let l_has_reduction = lhs.has_reduction;
+				let r_has_reduction = rhs.has_reduction;
+				let l_uses_elemwise = lhs.uses_elemwise_args;
+				let r_uses_elemwise = rhs.uses_elemwise_args;
 				Rc::new(DynExpr {
-					kind: DynExprKind::$name(a, b),
+					kind: DynExprKind::Binary(DynExprBinary {
+						kind: DynExprBinaryKind::$bin_name,
+						lhs,
+						rhs,
+					}),
 					is_reduction: false,
-					has_reduction: a_has_reduction || b_has_reduction,
-					uses_elemwise_args: a_uses_elemwise || b_uses_elemwise,
+					has_reduction: l_has_reduction || r_has_reduction,
+					uses_elemwise_args: l_uses_elemwise || r_uses_elemwise,
 				})
 			}
 		}
 	};
 }
 
-impl_expr_reduce!(SumExpr);
-impl_expr_reduce!(MaxExpr);
+impl_expr_reduce!(SumExpr, Sum);
+impl_expr_reduce!(MaxExpr, Max);
 
-impl_expr_unary!(NegExpr);
-impl_expr_unary!(ExpExpr);
-impl_expr_unary!(LnExpr);
-impl_expr_unary!(AbsExpr);
-impl_expr_unary!(SqrtExpr);
-impl_expr_unary!(RecipExpr);
+impl_expr_unary!(NegExpr, Neg);
+impl_expr_unary!(ExpExpr, Exp);
+impl_expr_unary!(LnExpr, Ln);
+impl_expr_unary!(AbsExpr, Abs);
+impl_expr_unary!(SqrtExpr, Sqrt);
+impl_expr_unary!(RecipExpr, Recip);
 
-impl_expr_binary!(AddExpr, true);
-impl_expr_binary!(SubExpr, false);
-impl_expr_binary!(MulExpr, true);
+impl_expr_binary!(AddExpr, Add, true);
+impl_expr_binary!(SubExpr, Sub, false);
+impl_expr_binary!(MulExpr, Mul, true);
 
 //--------------------------------------------------------------------------------------------------
 
@@ -871,7 +889,7 @@ where
 
 	let output_top = post_reduce_top.get(0);
 	let output_batch = batch_dims.map(|m| m.get(0));
-	if output_top.is_broadcasted() || output_batch.iter().any(|dim| dim.is_broadcasted()) {
+	if output_top.is_broadcasted() || output_batch.iter().any(SizeAndStride::is_broadcasted) {
 		cold_path();
 		return Err(CannotBroadcastOutputError.into());
 	}
@@ -918,7 +936,12 @@ where
 			let arg = &args[i];
 			let same_as_output = std::ptr::eq(tensor.buf().as_ref(), output.buf().as_ref())
 				&& likely(
-					arg.offset_bytes == out.offset_bytes && arg.stride_bytes == out.stride_bytes,
+					arg.offset_bytes == out.offset_bytes
+						// TODO TODO TODO
+						TODO TODO TODO
+						&& (arg.stride_bytes[0] == out.stride_bytes[0] || out.size[0] <= 1)
+						&& (arg.stride_bytes[1] == out.stride_bytes[1] || out.size[1] <= 1)
+						&& (arg.stride_bytes[2] == out.stride_bytes[2] || out.size[2] <= 1),
 				);
 			if same_as_output { None } else { Some(tensor.buf().unsafe_borrow(&mut inp_fail)) }
 		});
