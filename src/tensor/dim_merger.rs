@@ -7,7 +7,9 @@
 
 use std::hint::cold_path;
 
-use crate::tensor::generic::map::SizeAndStride;
+use super::map::SizeAndStride;
+
+//--------------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MergedDim<const N: usize> {
@@ -144,3 +146,5 @@ impl<const N: usize> DimMerger<N> {
 		Ok(dims)
 	}
 }
+
+//--------------------------------------------------------------------------------------------------

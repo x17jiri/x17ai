@@ -20,7 +20,6 @@ pub use dtype::{DType, HasDType};
 use crate::ErrPack;
 use crate::tensor::TensorOpError;
 use crate::tensor::device::kernel::DynKernelCall;
-use crate::tensor::generic::map::{ND, SizeAndStride};
 use crate::util::mycell;
 
 //--------------------------------------------------------------------------------------------------
@@ -148,6 +147,7 @@ pub struct AttentionArgs {
 	pub dtype: DType,
 }
 
+/*
 #[rustfmt::skip]
 impl AttentionArgs {
 	pub fn q_map(&self) -> ND<3> {
@@ -191,6 +191,7 @@ impl AttentionArgs {
 		}
 	}
 }
+*/
 
 //--------------------------------------------------------------------------------------------------
 

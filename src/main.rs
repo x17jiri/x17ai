@@ -169,7 +169,6 @@ use x17ai::tensor::device::cpu::CPUDevice;
 use x17ai::tensor::device::cuda::CudaDevice;
 use x17ai::tensor::device::kernel;
 use x17ai::tensor::generic::GenericTensor;
-use x17ai::tensor::generic::map::ND;
 use x17ai::tensor::math::{col, mat, row};
 use x17ai::tensor::{Device, HasDType, Tensor, TensorOpError};
 use x17ai::{ErrPack, custom_kernel, tensor};

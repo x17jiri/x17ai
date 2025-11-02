@@ -93,15 +93,15 @@ impl Attention {
 		k.ensure_safe()?;
 		v.ensure_safe()?;
 
-		let (q_batch, q_map) = q.map().nd_split::<3>()?;
-		let (k_batch, k_map) = k.map().nd_split::<3>()?;
-		let (v_batch, v_map) = v.map().nd_split::<3>()?;
-		let (o_batch, o_map) = o.map().nd_split::<3>()?;
+		let (q_batch, q_dims, q_offset) = q.map().nd_split::<3>()?;
+		let (k_batch, k_dims, k_offset) = k.map().nd_split::<3>()?;
+		let (v_batch, v_dims, v_offset) = v.map().nd_split::<3>()?;
+		let (o_batch, o_dims, o_offset) = o.map().nd_split::<3>()?;
 
-		let [q_count, q_heads, q_width] = q_map.dims;
-		let [k_count, k_heads, k_width] = k_map.dims;
-		let [v_count, v_heads, v_width] = v_map.dims;
-		let [o_count, o_heads, o_width] = o_map.dims;
+		let [q_count, q_heads, q_width] = q_dims;
+		let [k_count, k_heads, k_width] = k_dims;
+		let [v_count, v_heads, v_width] = v_dims;
+		let [o_count, o_heads, o_width] = o_dims;
 
 		let group_shift = q_heads.size.trailing_zeros().wrapping_sub(k_heads.size.trailing_zeros());
 		if k_heads.size > q_heads.size
@@ -134,7 +134,7 @@ impl Attention {
 			q_count: q_count.size,
 			head_count: q_heads.size,
 			q_width: q_width.size,
-			q_offset: q_map.offset,
+			q_offset,
 			q_item_stride: q_count.stride,
 			q_head_stride: q_heads.stride,
 			q: q.buf().device_ptr(),
@@ -142,7 +142,7 @@ impl Attention {
 			k_count: k_count.size,
 			group_shift: group_shift as usize,
 			// k_width == q_width
-			k_offset: k_map.offset,
+			k_offset,
 			k_item_stride: k_count.stride,
 			k_head_stride: k_heads.stride,
 			k: k.buf().device_ptr(),
@@ -150,7 +150,7 @@ impl Attention {
 			// v_count == k_count
 			// v_head_count == head_count >> group_shift
 			v_width: v_width.size,
-			v_offset: v_map.offset,
+			v_offset,
 			v_item_stride: v_count.stride,
 			v_head_stride: v_heads.stride,
 			v: v.buf().device_ptr(),
@@ -158,7 +158,7 @@ impl Attention {
 			// o_count == q_count
 			// o_head_count == head_count
 			// o_width == v_width
-			o_offset: o_map.offset,
+			o_offset,
 			o_item_stride: o_count.stride,
 			o_head_stride: o_heads.stride,
 			o: o.buf().device_ptr(),

@@ -15,10 +15,9 @@ use std::hint::cold_path;
 
 use buffer::Buffer;
 use dim_index::DimIndex;
-use map::{Map, MergeAllDims, MergeDims, ReshapeLastDim};
 
 use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;
-use crate::tensor::generic::map::{NDShape, Narrow, Select, SizeAndStride, Transpose};
+use crate::tensor::generic::map::SizeAndStride;
 use crate::tensor::generic::universal_range::UniversalRange;
 use crate::{ErrExtra, ErrPack};
 

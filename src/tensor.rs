@@ -12,105 +12,37 @@ use std::rc::Rc;
 
 pub use device::{DType, Device, HasDType};
 
+use self::shape::Shape;
+
 use crate::rng::Rng;
 use crate::tensor::device::dtype::DTypeMismatch;
 use crate::tensor::device::kernel::EvaluatesToTensor;
 use crate::tensor::device::{DeviceBuffer, NewDeviceBufferError};
-use crate::tensor::dim_merger::{DimMergerError, DimsDontMatchError, TooManyMergedDimensionsError};
-use crate::tensor::generic::dim_index::DimIndexOutOfBoundsError;
-use crate::tensor::generic::map::dd::ReplaceTailError;
-use crate::tensor::generic::map::{
-	DD, ElementsOverflowError, IncompatibleStridesError, IndexOutOfBoundsError, MergeDimsError,
-	NotEnoughDimensionsError, ReshapeLastDimError, SelectError,
+use crate::tensor::dim_merger::{
+	DimMerger, DimMergerError, DimsDontMatchError, TooManyMergedDimensionsError,
 };
-use crate::tensor::generic::{GenericTensor, TensorUnsafeError};
-use crate::tensor::io::merge_dims;
 use crate::util::LossyFrom;
-use crate::util::mycell::{self, BorrowError, BorrowGuard, BorrowMutError, BorrowMutGuard};
+use crate::util::mycell::{self, BorrowError, BorrowMutError};
 use crate::{ErrExtra, ErrPack};
 
 pub mod device;
 pub mod dim_merger;
-pub mod generic;
+//pub mod generic;
+pub mod dim_index;
 pub mod io;
+pub mod map;
 pub mod math;
+pub mod shape;
 
 #[cfg(test)]
 mod tests;
 
 //--------------------------------------------------------------------------------------------------
 
-pub trait Shape {
-	fn to_map(self) -> Result<(DD, usize), ElementsOverflowError>;
+pub struct Tensor {
+	map: DD,
+	buf: Rc<mycell::RefCell<DeviceBuffer>>,
 }
-
-impl Shape for &DD {
-	fn to_map(self) -> Result<(DD, usize), ElementsOverflowError> {
-		Ok(self.new_like())
-	}
-}
-
-impl Shape for &[usize] {
-	fn to_map(self) -> Result<(DD, usize), ElementsOverflowError> {
-		DD::new(self)
-	}
-}
-
-impl<const N: usize> Shape for &[usize; N] {
-	fn to_map(self) -> Result<(DD, usize), ElementsOverflowError> {
-		DD::new(self)
-	}
-}
-
-impl Shape for &mut [usize] {
-	fn to_map(self) -> Result<(DD, usize), ElementsOverflowError> {
-		DD::new(self)
-	}
-}
-
-impl<const N: usize> Shape for &mut [usize; N] {
-	fn to_map(self) -> Result<(DD, usize), ElementsOverflowError> {
-		DD::new(self)
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
-impl<M: generic::map::Map> GenericTensor<M, Rc<mycell::RefCell<DeviceBuffer>>> {
-	/// # Errors
-	/// `BorrowError` if there is a mutable borrow preventing a shared borrow.
-	pub fn borrow<'buf>(
-		&'buf self,
-	) -> std::result::Result<
-		GenericTensor<&'buf M::Deref, BorrowGuard<'buf, DeviceBuffer>>,
-		BorrowError,
-	> {
-		let map = self.map().as_ref();
-		let buf = self.buf().try_borrow()?;
-		// SAFETY: We only change the type of buffer reference.
-		// So if the map was safe before, it is still safe.
-		Ok(unsafe { GenericTensor::new_unchecked(map, buf) })
-	}
-
-	/// # Errors
-	/// `BorrowMutError` if there already is any other borrow of the buffer.
-	pub fn borrow_mut<'buf>(
-		&'buf self,
-	) -> std::result::Result<
-		GenericTensor<&'buf M::Deref, BorrowMutGuard<'buf, DeviceBuffer>>,
-		BorrowMutError,
-	> {
-		let map = self.map().as_ref();
-		let buf = self.buf().try_borrow_mut()?;
-		// SAFETY: We only change the type of buffer reference.
-		// So if the map was safe before, it is still safe.
-		Ok(unsafe { GenericTensor::new_unchecked(map, buf) })
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
-pub type Tensor = GenericTensor<DD, Rc<mycell::RefCell<DeviceBuffer>>>;
 
 impl Tensor {
 	/// Allocate a new tensor on the provided device.
@@ -249,15 +181,15 @@ impl Tensor {
 	}
 
 	pub fn download_data(&self, dst: &mut [u8]) -> Result<(), ErrPack<TensorOpError>> {
-		let nd = merge_dims::<1>(self)?;
-		if !nd.dims[0].is_contiguous() {
+		let merged = DimMerger::merge::<1>([self.map().dims.as_slice()])?;
+		let merged = merged[0].get(0);
+		if !merged.is_contiguous() {
 			cold_path();
 			return Err(NotContiguousError.into());
 		}
-		let offset = nd.offset;
-		let count = nd.dims[0].size;
+		let offset = self.map().offset;
 		let offset_bytes = unsafe { self.dtype().array_bytes_unchecked(offset) };
-		let size_bytes = unsafe { self.dtype().array_bytes_unchecked(count) };
+		let size_bytes = unsafe { self.dtype().array_bytes_unchecked(merged.size) };
 		if dst.len() != size_bytes {
 			cold_path();
 			return Err(TensorOpError::invalid_buffer_size());
@@ -274,15 +206,15 @@ impl Tensor {
 	}
 
 	pub fn upload_data(&self, src: &[u8]) -> Result<(), ErrPack<TensorOpError>> {
-		let nd = merge_dims::<1>(self)?;
-		if !nd.dims[0].is_contiguous() {
+		let merged = DimMerger::merge::<1>([self.map().dims.as_slice()])?;
+		let merged = merged[0].get(0);
+		if !merged.is_contiguous() {
 			cold_path();
 			return Err(NotContiguousError.into());
 		}
-		let offset = nd.offset;
-		let count = nd.dims[0].size;
+		let offset = self.map().offset;
 		let offset_bytes = unsafe { self.dtype().array_bytes_unchecked(offset) };
-		let size_bytes = unsafe { self.dtype().array_bytes_unchecked(count) };
+		let size_bytes = unsafe { self.dtype().array_bytes_unchecked(merged.size) };
 		if src.len() != size_bytes {
 			cold_path();
 			return Err(TensorOpError::invalid_buffer_size());
@@ -316,15 +248,15 @@ impl Tensor {
 	pub fn to_device(&self, device: Rc<dyn Device>) -> Result<Self, ErrPack<TensorOpError>> {
 		let dtype = self.dtype();
 
-		let nd = merge_dims::<1>(self)?;
-		if !nd.dims[0].is_contiguous() {
+		let merged = DimMerger::merge::<1>([self.map().dims.as_slice()])?;
+		let merged = merged[0].get(0);
+		if !merged.is_contiguous() {
 			cold_path();
 			return Err(NotContiguousError.into());
 		}
-		let offset = nd.offset;
-		let count = nd.dims[0].size;
+		let offset = self.map().offset;
 		let offset_bytes = unsafe { dtype.array_bytes_unchecked(offset) };
-		let size_bytes = unsafe { dtype.array_bytes_unchecked(count) };
+		let size_bytes = unsafe { dtype.array_bytes_unchecked(merged.size) };
 		let borrow = self.buf().try_borrow()?;
 
 		let tensor = Self::new_empty_on(self.map(), dtype, device)?;

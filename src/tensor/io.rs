@@ -7,27 +7,10 @@
 
 use std::hint::cold_path;
 
-use crate::tensor::HasDType;
-use crate::tensor::device::cpu::CPUDevice;
-use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
-use crate::tensor::dim_merger::{DimMerger, DimMergerError};
-use crate::tensor::generic::map::{DD, Map, ND, SizeAndStride};
-
-use super::Tensor;
-
-//--------------------------------------------------------------------------------------------------
-
-pub fn merge_dims<const N: usize>(tensor: &Tensor) -> Result<ND<N>, DimMergerError> {
-	let dims = DimMerger::merge::<N>([tensor.map().dims.as_slice()])?;
-	#[allow(clippy::indexing_slicing)]
-	Ok(ND {
-		dims: std::array::from_fn(|i| SizeAndStride {
-			size: dims[i].size,
-			stride: dims[i].strides[0],
-		}),
-		offset: tensor.map().offset,
-	})
-}
+use super::device::cpu::CPUDevice;
+use super::device::cpu::cpu_float_methods::FromToF64;
+use super::map::{Map, SizeAndStride};
+use super::{HasDType, Tensor};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -74,21 +57,20 @@ fn fmt_1d<T: Copy>(
 #[allow(clippy::indexing_slicing)]
 fn fmt_Nd<T: Copy>(
 	f: &mut std::fmt::Formatter,
-	(buf, dd_map): (&[T], &DD),
+	(buf, map): (&[T], &Map),
 	dim_index: usize,
 	offset: usize,
 	indent: usize,
 	fmt_one: &mut impl FnMut(&mut std::fmt::Formatter, T) -> std::fmt::Result,
 ) -> std::fmt::Result {
-	let ndim = dd_map.ndim();
+	let dims = map.dims();
+	let ndim = dims.len();
 	if dim_index >= ndim {
 		fmt_0d(f, (buf, offset), fmt_one)?;
 	} else if dim_index == ndim - 1 {
-		let dims = dd_map.dims.as_slice();
 		let dim = dims[dim_index];
 		fmt_1d(f, (buf, offset, dim), indent, fmt_one)?;
 	} else {
-		let dims = dd_map.dims.as_slice();
 		let dim = dims[dim_index];
 		for _ in 0..indent {
 			write!(f, "\t")?;
@@ -98,7 +80,7 @@ fn fmt_Nd<T: Copy>(
 			for _ in 0..indent + 1 {
 				write!(f, "\t")?;
 			}
-			fmt_Nd(f, (buf, dd_map), dim_index + 1, offset + i * dim.stride, indent + 1, fmt_one)?;
+			fmt_Nd(f, (buf, map), dim_index + 1, offset + i * dim.stride, indent + 1, fmt_one)?;
 			writeln!(f, ",")?;
 		}
 		for _ in 0..indent {
@@ -117,11 +99,11 @@ fn fmt_one<T: FromToF64>(f: &mut std::fmt::Formatter, val: T) -> std::fmt::Resul
 
 pub fn fmt_tensor<T: FromToF64>(
 	f: &mut std::fmt::Formatter,
-	map: &DD,
+	map: &Map,
 	buf: &[T],
 ) -> std::fmt::Result {
 	write!(f, "Tensor(")?;
-	fmt_Nd(f, (buf, map), 0, map.offset, 0, &mut fmt_one)?;
+	fmt_Nd(f, (buf, map), 0, map.offset(), 0, &mut fmt_one)?;
 	write!(f, ")")
 }
 
