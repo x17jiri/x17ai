@@ -12,14 +12,14 @@ use std::rc::Rc;
 use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
 use crate::tensor::device::dtype::common_dtype;
 use crate::tensor::device::kernel::DynKernelCall;
-use crate::tensor::{HasDType, TensorOpError, UnsupportedDTypeError};
+use crate::tensor::{HasDType, TensorOpError};
 use crate::util::mycell::{self, BorrowGuard};
 
 pub mod cpu_float_methods;
 
 use crate::ErrPack;
 use crate::tensor::device::{
-	AttentionArgs, DeviceBuffer, DevicePtr, MatMulArgs, NewDeviceBufferError,
+	AttentionArgs, DevBufAllocFailedError, DeviceBuffer, DevicePtr, MatMulArgs,
 };
 use crate::tensor::{DType, Device};
 
@@ -120,7 +120,7 @@ impl Device for CPUDevice {
 		self: Rc<Self>,
 		dtype: DType,
 		elems: usize,
-	) -> Result<Rc<mycell::RefCell<DeviceBuffer>>, NewDeviceBufferError> {
+	) -> Result<Rc<mycell::RefCell<DeviceBuffer>>, DevBufAllocFailedError> {
 		// TODO - do I need `NewDeviceBufferError` as error type? I never return unsupported dtype
 		if let Some(size) = dtype.array_bytes(elems)
 			&& let Ok(layout) = std::alloc::Layout::from_size_align(size, dtype.align())
@@ -131,7 +131,7 @@ impl Device for CPUDevice {
 			})))
 		} else {
 			cold_path();
-			Err(NewDeviceBufferError::AllocationFailed)
+			Err(DevBufAllocFailedError::AllocationFailed)
 		}
 	}
 

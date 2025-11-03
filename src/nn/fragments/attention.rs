@@ -17,7 +17,7 @@ use crate::nn::fragments::Fragment;
 use crate::rng::Rng;
 use crate::tensor::device::AttentionArgs;
 use crate::tensor::dim_merger::DimMerger;
-use crate::tensor::generic::map::dd::INLINE_DIMS;
+use crate::tensor::map::INLINE_DIMS;
 use crate::tensor::{NotContiguousError, Tensor, TensorOpError};
 use crate::util::mycell::{UnsafeBorrowFailFlag, UnsafeBorrowMutFailFlag};
 use crate::{ErrPack, autograd};

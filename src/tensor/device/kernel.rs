@@ -12,10 +12,11 @@ use crate::ErrPack;
 use crate::tensor::device::dtype::{DTypeId, common_dtype};
 use crate::tensor::device::{DeviceBuffer, KernelArg, KernelOutput};
 use crate::tensor::dim_merger::{DimMerger, DimsDontMatchError};
-use crate::tensor::generic::map::SizeAndStride;
-use crate::tensor::{CannotBroadcastOutputError, DType, Tensor, TensorOpError};
+use crate::tensor::error::CannotBroadcastOutputError;
+use crate::tensor::map::SizeAndStride;
+use crate::tensor::{DType, Tensor, TensorOpError};
 use crate::util::hasher::{HASH_WORD_SIZE, HashWord};
-use crate::util::mycell::{BorrowGuard, UnsafeBorrowFailFlag, UnsafeBorrowMutFailFlag};
+use crate::util::mycell::{BorrowGuard, UnsafeBorrowFailFlag};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -759,7 +760,7 @@ where
 	[(); DynKernelCall::dtype_config_words(E + R)]:,
 {
 	let merged = DimMerger::<{ 1 + E + R }>::merge::<3>(std::array::from_fn(|i| {
-		if i == 0 { output.map().dims.as_slice() } else { tensor_args[i - 1].map().dims.as_slice() }
+		if i == 0 { output.map().dims() } else { tensor_args[i - 1].map().dims() }
 	}))?;
 	if merged.iter().any(|m| m.get(0).is_broadcasted()) {
 		cold_path();
@@ -776,7 +777,7 @@ where
 				merged[1].strides[1 + i] * arg_dtype_bytes,
 				merged[2].strides[1 + i] * arg_dtype_bytes,
 			],
-			offset_bytes: arg.map().offset * arg_dtype_bytes,
+			offset_bytes: arg.map().offset() * arg_dtype_bytes,
 			buf: arg.buf().device_ptr(),
 		}
 	});
@@ -790,7 +791,7 @@ where
 			merged[1].strides[0] * out_dtype_bytes,
 			merged[2].strides[0] * out_dtype_bytes,
 		],
-		offset_bytes: output.map().offset * out_dtype_bytes,
+		offset_bytes: output.map().offset() * out_dtype_bytes,
 		buf: output.buf().device_ptr(),
 	};
 
@@ -854,7 +855,7 @@ where
 		batch: &'b [SizeAndStride],
 	}
 	fn split_last<'b>(tensor: &'b Tensor) -> Split<'b> {
-		let dims = tensor.map().dims.as_slice();
+		let dims = tensor.map().dims();
 		if let Some((&top, batch)) = dims.split_last() {
 			Split { top, batch }
 		} else {
@@ -909,7 +910,7 @@ where
 				batch_dims[1].strides[1 + i] * arg_dtype_bytes,
 				top_stride * arg_dtype_bytes,
 			],
-			offset_bytes: arg.map().offset * arg_dtype_bytes,
+			offset_bytes: arg.map().offset() * arg_dtype_bytes,
 			buf: arg.buf().device_ptr(),
 		}
 	});
@@ -923,7 +924,7 @@ where
 			batch_dims[1].strides[0] * out_dtype_bytes,
 			if output_top.size == 1 { 0 } else { output_top.stride * out_dtype_bytes },
 		],
-		offset_bytes: output.map().offset * out_dtype_bytes,
+		offset_bytes: output.map().offset() * out_dtype_bytes,
 		buf: output.buf().device_ptr(),
 	};
 

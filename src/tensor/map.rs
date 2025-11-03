@@ -10,7 +10,6 @@ use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
 use super::DType;
-use super::dim_index::DimIndexOutOfBoundsError;
 use super::dim_merger::DimMerger;
 
 //--------------------------------------------------------------------------------------------------
@@ -215,13 +214,9 @@ impl Map {
 		tail_len: usize,
 		replace_with: &[usize],
 		dtype: DType,
-	) -> Result<(Self, usize), ReplaceTailError> {
+	) -> Result<(Self, usize), ElementsOverflowError> {
 		let src_slice = self.dims.as_slice();
-		if tail_len > src_slice.len() {
-			cold_path();
-			return Err(ReplaceTailError::NotEnoughDimensions);
-		}
-		let n_keep = src_slice.len() - tail_len;
+		let n_keep = src_slice.len().saturating_sub(tail_len);
 		let src_slice = unsafe { &src_slice.get_unchecked(..n_keep) };
 		let ndim = n_keep + replace_with.len();
 
@@ -286,8 +281,10 @@ impl Map {
 		dims.iter().map(|dim| dim.size).product()
 	}
 
-	pub fn span(&self) -> std::ops::Range<usize> {
-		let start = self.offset;
+	pub fn byte_span(&self) -> std::ops::Range<usize> {
+		let dtype_bytes = self.dtype.bytes();
+		debug_assert!(dtype_bytes > 0); // TODO
+		let start = self.offset * dtype_bytes;
 		let mut elems = 1;
 		let mut len = 1;
 		for dim in self.dims.as_slice() {
@@ -297,7 +294,7 @@ impl Map {
 		if elems == 0 {
 			len = 0;
 		}
-		start..start + len
+		start..start + (len * dtype_bytes)
 	}
 
 	/// Merges the last `n` dimensions into a single dimension.
@@ -565,17 +562,5 @@ pub struct InvalidNDimError;
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ElementsOverflowError;
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum ReplaceTailError {
-	ElementsOverflow,
-	NotEnoughDimensions,
-}
-
-impl From<ElementsOverflowError> for ReplaceTailError {
-	fn from(_: ElementsOverflowError) -> Self {
-		Self::ElementsOverflow
-	}
-}
 
 //--------------------------------------------------------------------------------------------------

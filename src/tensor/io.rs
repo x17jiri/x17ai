@@ -109,6 +109,7 @@ pub fn fmt_tensor<T: FromToF64>(
 
 impl std::fmt::Display for Tensor {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+		let dtype = self.dtype();
 		let map = self.map();
 		let buf = self.buf();
 		let Ok(buf) = buf.try_borrow() else {
@@ -116,7 +117,6 @@ impl std::fmt::Display for Tensor {
 			write!(f, "Tensor(<cannot borrow>)")?;
 			return Err(std::fmt::Error);
 		};
-		let dtype = buf.dtype();
 		#[allow(clippy::single_match_else)]
 		match dtype {
 			f32::dtype => {

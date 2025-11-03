@@ -197,10 +197,7 @@ impl AttentionArgs {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum NewDeviceBufferError {
-	UnsupportedDType,
-	AllocationFailed,
-}
+pub struct DevBufAllocFailedError;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -213,13 +210,12 @@ pub trait Device {
 
 	fn new_buffer(
 		self: Rc<Self>,
-		dtype: DType,
-		elems: usize,
-	) -> Result<Rc<mycell::RefCell<DeviceBuffer>>, NewDeviceBufferError>;
+		bytes: usize,
+	) -> Result<Rc<mycell::RefCell<DeviceBuffer>>, DevBufAllocFailedError>;
 
 	/// # Safety
 	/// This should only be called from `DeviceBuffer::drop()`
-	unsafe fn drop_buffer(&self, device_ptr: DevicePtr, dtype: DType, elems: usize);
+	unsafe fn drop_buffer(&self, device_ptr: DevicePtr, bytes: usize);
 
 	unsafe fn read_float(
 		&self,

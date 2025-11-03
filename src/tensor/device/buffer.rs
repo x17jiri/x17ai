@@ -8,11 +8,8 @@
 use std::rc::Rc;
 
 use crate::tensor::device::DevicePtr;
-use crate::tensor::generic::buffer::Buffer;
-use crate::util::mycell;
 
 use super::Device;
-use super::dtype::DType;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -23,20 +20,14 @@ use super::dtype::DType;
 // not in the pointer itself. This would save another 8 bytes per buffer.
 pub struct DeviceBuffer {
 	device_ptr: DevicePtr,
-	dtype: DType,
-	elems: usize,
+	bytes: usize,
 	device: Rc<dyn Device>,
 }
 
 impl DeviceBuffer {
 	#[inline]
-	pub unsafe fn new(
-		device_ptr: DevicePtr,
-		dtype: DType,
-		elems: usize,
-		device: Rc<dyn Device>,
-	) -> Self {
-		Self { device_ptr, dtype, elems, device }
+	pub unsafe fn new(device_ptr: DevicePtr, bytes: usize, device: Rc<dyn Device>) -> Self {
+		Self { device_ptr, bytes, device }
 	}
 
 	#[inline]
@@ -52,13 +43,8 @@ impl DeviceBuffer {
 	}
 
 	#[inline]
-	pub fn dtype(&self) -> DType {
-		self.dtype
-	}
-
-	#[inline]
-	pub fn elems(&self) -> usize {
-		self.elems
+	pub fn byte_len(&self) -> usize {
+		self.bytes
 	}
 
 	#[inline]
@@ -75,34 +61,8 @@ impl DeviceBuffer {
 impl Drop for DeviceBuffer {
 	fn drop(&mut self) {
 		unsafe {
-			self.device.drop_buffer(self.device_ptr, self.dtype, self.elems);
+			self.device.drop_buffer(self.device_ptr, self.bytes);
 		}
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
-impl Buffer for Rc<mycell::RefCell<DeviceBuffer>> {
-	fn len(&self) -> usize {
-		self.elems
-	}
-}
-
-impl Buffer for &mycell::RefCell<DeviceBuffer> {
-	fn len(&self) -> usize {
-		self.elems
-	}
-}
-
-impl<'a> Buffer for mycell::BorrowGuard<'a, DeviceBuffer> {
-	fn len(&self) -> usize {
-		self.elems
-	}
-}
-
-impl<'a> Buffer for mycell::BorrowMutGuard<'a, DeviceBuffer> {
-	fn len(&self) -> usize {
-		self.elems
 	}
 }
 

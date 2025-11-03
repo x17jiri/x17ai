@@ -56,7 +56,7 @@ pub struct DType(NonZeroU32);
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct DTypeMismatch;
+pub struct DTypeMismatchError;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -147,12 +147,12 @@ impl DType {
 	}
 }
 
-pub fn common_dtype(a: DType, b: DType) -> Result<DType, DTypeMismatch> {
+pub fn common_dtype(a: DType, b: DType) -> Result<DType, DTypeMismatchError> {
 	let a_data = DTypeStruct::from_dtype(a);
 	let b_data = DTypeStruct::from_dtype(b);
 	if a_data.kind != b_data.kind {
 		cold_path();
-		return Err(DTypeMismatch); // TODO - we can probably always convert to f64
+		return Err(DTypeMismatchError); // TODO - we can probably always convert to f64
 	}
 	Ok(if a_data.bits >= b_data.bits { a } else { b })
 }

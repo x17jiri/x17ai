@@ -27,7 +27,7 @@ use crate::tensor::device::kernel::{
 	DynExprUnaryKind, DynKernelCall,
 };
 use crate::tensor::device::{
-	AttentionArgs, DeviceBuffer, DevicePtr, MatMulArgs, NewDeviceBufferError,
+	AttentionArgs, DevBufAllocFailedError, DeviceBuffer, DevicePtr, MatMulArgs,
 };
 use crate::tensor::{DType, Device, HasDType, TensorOpError, UnsupportedDTypeError};
 use crate::util::hasher::HashWord;
@@ -397,7 +397,7 @@ impl Device for CudaDevice {
 		self: Rc<Self>,
 		dtype: DType,
 		elems: usize,
-	) -> Result<Rc<mycell::RefCell<DeviceBuffer>>, NewDeviceBufferError> {
+	) -> Result<Rc<mycell::RefCell<DeviceBuffer>>, DevBufAllocFailedError> {
 		if let Some(size) = dtype.array_bytes(elems)
 			&& let Ok(memory) = unsafe { self.cuda_stream.alloc(size) }
 		{
@@ -406,7 +406,7 @@ impl Device for CudaDevice {
 			})))
 		} else {
 			cold_path();
-			Err(NewDeviceBufferError::AllocationFailed)
+			Err(DevBufAllocFailedError::AllocationFailed)
 		}
 	}
 

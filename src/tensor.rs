@@ -5,30 +5,32 @@
 //
 //------------------------------------------------------------------------------
 
-use std::borrow::Cow;
 use std::hint::cold_path;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-pub use device::{DType, Device, HasDType};
+use crate::ErrPack;
+use crate::rng::Rng;
+use crate::tensor::error::InvalidBufferSizeError;
+use crate::util::LossyFrom;
+use crate::util::mycell::{self};
 
+use self::device::DeviceBuffer;
+use self::device::kernel::EvaluatesToTensor;
+use self::dim_index::{DimIndex, DimIndexOutOfBoundsError};
+use self::dim_merger::DimMerger;
+use self::error::NotContiguousError;
+use self::map::{IndexOutOfBoundsError, Map, SizeAndStride};
 use self::shape::Shape;
 
-use crate::rng::Rng;
-use crate::tensor::device::dtype::DTypeMismatch;
-use crate::tensor::device::kernel::EvaluatesToTensor;
-use crate::tensor::device::{DeviceBuffer, NewDeviceBufferError};
-use crate::tensor::dim_merger::{
-	DimMerger, DimMergerError, DimsDontMatchError, TooManyMergedDimensionsError,
-};
-use crate::util::LossyFrom;
-use crate::util::mycell::{self, BorrowError, BorrowMutError};
-use crate::{ErrExtra, ErrPack};
+pub use self::device::{DType, Device, HasDType};
+pub use self::error::TensorOpError;
 
 pub mod device;
 pub mod dim_merger;
 //pub mod generic;
 pub mod dim_index;
+pub mod error;
 pub mod io;
 pub mod map;
 pub mod math;
@@ -39,19 +41,30 @@ mod tests;
 
 //--------------------------------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct Tensor {
-	map: DD,
+	map: Map,
 	buf: Rc<mycell::RefCell<DeviceBuffer>>,
 }
 
 impl Tensor {
+	/// # Safety
+	/// The map must be safe, i.e., the span of the map must be within the bounds of the buffer.
+	pub unsafe fn new_unchecked(map: Map, buf: Rc<mycell::RefCell<DeviceBuffer>>) -> Self {
+		let map_span = map.byte_span();
+		let buf_len = buf.byte_len();
+		let safe = map_span.start <= map_span.end && map_span.end <= buf_len;
+		debug_assert!(safe);
+		Self { map, buf }
+	}
+
 	/// Allocate a new tensor on the provided device.
 	pub fn new_empty_on(
 		shape: impl Shape,
 		dtype: DType,
 		device: Rc<dyn Device>,
 	) -> Result<Self, ErrPack<TensorOpError>> {
-		let (map, elems) = shape.to_map()?;
+		let (map, elems) = shape.to_map(dtype)?;
 		let buf = device.new_buffer(dtype, elems)?;
 
 		// SAFETY: We created the buffer to be as big as the mapping.
@@ -69,7 +82,7 @@ impl Tensor {
 
 	/// Allocate a new tensor on the same device and with the same shape as `self`.
 	pub fn new_empty_like(&self, dtype: DType) -> Result<Self, ErrPack<TensorOpError>> {
-		let (map, elems) = self.map().new_like();
+		let (map, elems) = self.map().new_like(dtype);
 		let buf = self.rc_device().new_buffer(dtype, elems)?;
 
 		// SAFETY: We created the buffer to be as big as the mapping.
@@ -92,6 +105,7 @@ impl Tensor {
 	#[inline]
 	pub fn owns_buffer(&self) -> bool {
 		let buf = self.buf();
+		// TODO - should I test weak? Also why do I add 1 to weak count?
 		let weak = Rc::weak_count(buf) + 1;
 		let strong = Rc::strong_count(buf);
 		(weak | strong) <= 1
@@ -103,23 +117,48 @@ impl Tensor {
 		replace_with: &[usize],
 		dtype: DType,
 	) -> Result<Self, ErrPack<TensorOpError>> {
-		let (map, elems) = self.map().new_replace_tail(tail_len, replace_with)?;
+		let (map, elems) = self.map().new_replace_tail(tail_len, replace_with, dtype)?;
 		let buf = self.rc_device().new_buffer(dtype, elems)?;
 
 		// SAFETY: We created the buffer to be as big as the mapping.
 		Ok(unsafe { Self::new_unchecked(map, buf) })
 	}
 
+	pub fn map(&self) -> &Map {
+		&self.map
+	}
+
+	pub fn buf(&self) -> &Rc<mycell::RefCell<DeviceBuffer>> {
+		&self.buf
+	}
+
+	pub fn ndim(&self) -> usize {
+		self.map.ndim()
+	}
+
+	pub fn dim<D: DimIndex>(&self, dim: D) -> Result<SizeAndStride, DimIndexOutOfBoundsError> {
+		let dim = dim.resolve_index(self.ndim())?;
+		Ok(self.map.dim(dim))
+	}
+
+	pub fn size<D: DimIndex>(&self, dim: D) -> Result<usize, DimIndexOutOfBoundsError> {
+		let dim = dim.resolve_index(self.ndim())?;
+		Ok(self.map.dim(dim).size)
+	}
+
+	pub fn elems(&self) -> usize {
+		self.map.elems()
+	}
+
 	/// Returns float at index [0, 0, ..., 0].
 	pub fn scalar(&self) -> Result<f64, ErrPack<TensorOpError>> {
+		debug_assert!(self.is_map_safe());
 		if self.elems() == 0 {
 			cold_path();
 			return Err(IndexOutOfBoundsError.into());
 		}
-		self.ensure_safe()?;
-
 		let buf = self.buf().try_borrow()?;
-		unsafe { self.device().read_float(&buf, self.map().offset) }
+		unsafe { self.device().read_float(&buf, self.map().offset()) }
 	}
 
 	/// Sometimes we want to calculate the mean of the last dimension,
@@ -147,7 +186,7 @@ impl Tensor {
 
 	/// Returns the data type of the tensor elements.
 	pub fn dtype(&self) -> DType {
-		self.buf().dtype()
+		self.map().dtype()
 	}
 
 	pub fn assign<Expr: EvaluatesToTensor>(
@@ -181,18 +220,17 @@ impl Tensor {
 	}
 
 	pub fn download_data(&self, dst: &mut [u8]) -> Result<(), ErrPack<TensorOpError>> {
-		let merged = DimMerger::merge::<1>([self.map().dims.as_slice()])?;
+		let merged = DimMerger::merge::<1>([self.map.dims()])?;
 		let merged = merged[0].get(0);
 		if !merged.is_contiguous() {
 			cold_path();
 			return Err(NotContiguousError.into());
 		}
-		let offset = self.map().offset;
-		let offset_bytes = unsafe { self.dtype().array_bytes_unchecked(offset) };
+		let offset_bytes = unsafe { self.dtype().array_bytes_unchecked(self.map.offset()) };
 		let size_bytes = unsafe { self.dtype().array_bytes_unchecked(merged.size) };
 		if dst.len() != size_bytes {
 			cold_path();
-			return Err(TensorOpError::invalid_buffer_size());
+			return Err(InvalidBufferSizeError.into());
 		}
 		let borrow = self.buf().try_borrow()?;
 		unsafe {
@@ -206,18 +244,17 @@ impl Tensor {
 	}
 
 	pub fn upload_data(&self, src: &[u8]) -> Result<(), ErrPack<TensorOpError>> {
-		let merged = DimMerger::merge::<1>([self.map().dims.as_slice()])?;
+		let merged = DimMerger::merge::<1>([self.map.dims()])?;
 		let merged = merged[0].get(0);
 		if !merged.is_contiguous() {
 			cold_path();
 			return Err(NotContiguousError.into());
 		}
-		let offset = self.map().offset;
-		let offset_bytes = unsafe { self.dtype().array_bytes_unchecked(offset) };
+		let offset_bytes = unsafe { self.dtype().array_bytes_unchecked(self.map.offset()) };
 		let size_bytes = unsafe { self.dtype().array_bytes_unchecked(merged.size) };
 		if src.len() != size_bytes {
 			cold_path();
-			return Err(TensorOpError::invalid_buffer_size());
+			return Err(InvalidBufferSizeError.into());
 		}
 		let borrow = self.buf().try_borrow_mut()?;
 		unsafe {
@@ -248,19 +285,18 @@ impl Tensor {
 	pub fn to_device(&self, device: Rc<dyn Device>) -> Result<Self, ErrPack<TensorOpError>> {
 		let dtype = self.dtype();
 
-		let merged = DimMerger::merge::<1>([self.map().dims.as_slice()])?;
+		let merged = DimMerger::merge::<1>([self.map.dims()])?;
 		let merged = merged[0].get(0);
 		if !merged.is_contiguous() {
 			cold_path();
 			return Err(NotContiguousError.into());
 		}
-		let offset = self.map().offset;
-		let offset_bytes = unsafe { dtype.array_bytes_unchecked(offset) };
+		let offset_bytes = unsafe { dtype.array_bytes_unchecked(self.map.offset()) };
 		let size_bytes = unsafe { dtype.array_bytes_unchecked(merged.size) };
 		let borrow = self.buf().try_borrow()?;
 
 		let tensor = Self::new_empty_on(self.map(), dtype, device)?;
-		let output_offset_bytes = unsafe { dtype.array_bytes_unchecked(tensor.map().offset) };
+		let output_offset_bytes = unsafe { dtype.array_bytes_unchecked(tensor.map.offset()) };
 
 		if self.device().is_cpu() {
 			unsafe {
@@ -278,6 +314,94 @@ impl Tensor {
 			todo!("Implement tensor.to_device() between two non-CPU devices");
 		}
 		Ok(tensor)
+	}
+
+	/// # Errors
+	/// - If the map is not safe, i.e., if some index may be mapped to an out-of-bounds offset.
+	pub fn is_map_safe(&self) -> bool {
+		let span = self.map.byte_span();
+		let buf_len = self.buf.byte_len();
+		span.start <= span.end && span.end <= buf_len
+	}
+
+	pub fn merge_dims(&self, n: usize) -> Result<Self, ErrPack<TensorOpError>> {
+		let new_map = self.map.merge_dims(n)?;
+		Ok(unsafe { Self::new_unchecked(new_map, self.buf.clone()) })
+	}
+
+	pub fn merge_all_dims(&self) -> Result<GenericTensor<M::Output, B>, M::Error>
+	where
+		M: MergeAllDims,
+		B: Clone,
+	{
+		let new_map = self.map.merge_all_dims()?;
+		Ok(GenericTensor { buf: self.buf.clone(), map: new_map })
+	}
+
+	pub fn reshape_last_dim<const K: usize>(
+		self,
+		to_shape: [usize; K],
+	) -> Result<GenericTensor<M::Output, B>, M::Error>
+	where
+		M: ReshapeLastDim<K>,
+	{
+		let new_map = self.map.reshape_last_dim(to_shape)?;
+		Ok(GenericTensor { buf: self.buf, map: new_map })
+	}
+
+	pub fn select<D: DimIndex>(
+		&self,
+		dim: D,
+		index: usize,
+	) -> Result<GenericTensor<M::Output, B>, M::Error>
+	where
+		M: Select,
+		B: Clone,
+	{
+		let dim = dim.resolve_index(self.ndim())?;
+		let new_map = self.map.select(dim, index)?;
+		Ok(GenericTensor { buf: self.buf.clone(), map: new_map })
+	}
+
+	pub fn iter_along_axis<'a, D: DimIndex>(
+		&'a self,
+		dim: D,
+	) -> Result<AxisIter<'a, M, B>, DimIndexOutOfBoundsError>
+	where
+		M: Select,
+		B: Clone,
+	{
+		let dim = dim.resolve_index(self.ndim())?;
+		let size = self.size(dim)?;
+		Ok(AxisIter { tensor: self, dim, current: 0, size })
+	}
+
+	pub fn narrow<D: DimIndex, R: Into<UniversalRange>>(
+		self,
+		dim: D,
+		range: R,
+	) -> Result<GenericTensor<M::Output, B>, M::Error>
+	where
+		M: Narrow,
+	{
+		let dim = dim.resolve_index(self.ndim())?;
+		let range = range.into();
+		let new_map = self.map.narrow(dim, range)?;
+		Ok(GenericTensor { buf: self.buf, map: new_map })
+	}
+
+	pub fn transposed<D0: DimIndex, D1: DimIndex>(
+		self,
+		d0: D0,
+		d1: D1,
+	) -> Result<GenericTensor<M::Output, B>, M::Error>
+	where
+		M: Transpose,
+	{
+		let d0 = d0.resolve_index(self.ndim())?;
+		let d1 = d1.resolve_index(self.ndim())?;
+		let new_map = self.map.transposed(d0, d1)?;
+		Ok(GenericTensor { buf: self.buf, map: new_map })
 	}
 }
 
@@ -327,415 +451,6 @@ impl<T: HasDType> TensorLiteralFactory<T> {
 
 		tensor.upload_data(val)?;
 		Ok(tensor)
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct UnsupportedDTypeError;
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct NotContiguousError;
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct CannotBroadcastOutputError;
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum TensorOpError {
-	DimsDontMatch,
-	TooManyMergedDimensions,
-	CannotBorrow,
-	CannotBorrowMut,
-	MissingReduceDimension,
-	DimIndexOutOfBounds,
-	IndexOutOfBounds,
-	ElementsOverflow,
-	NotEnoughDimensions,
-	NewBufUnsupportedDType,
-	UnsupportedDType,
-	NewBufAllocationFailed,
-	IncompatibleStridesForMerge,
-	InvalidValue,
-	CannotBroadcastOutput,
-	ShapeMismatch,
-	DTypeMismatch,
-	UnsafeTensor,
-	NotContiguous,
-	NotContiguousOrBroadcasted,
-	InvalidShape,
-	InvalidDType,
-	InvalidDevice,
-	InvalidBufferSize,
-	IOError,
-	DeviceError,
-}
-
-impl TensorOpError {
-	#[cold]
-	#[inline(never)]
-	pub fn missing_reduce_dimension() -> ErrPack<Self> {
-		let message = "At least one dimension is required for reducing operations".into();
-		ErrPack {
-			code: Self::MissingReduceDimension,
-			extra: Some(Box::new(ErrExtra { message, nested: None })),
-		}
-	}
-
-	#[cold]
-	#[inline(never)]
-	pub fn not_contiguous_or_broadcasted() -> ErrPack<Self> {
-		let message =
-			"Expected the tensor to have contiguous or broadcasted dimension -1, but it does not"
-				.into();
-		ErrPack {
-			code: Self::NotContiguousOrBroadcasted,
-			extra: Some(Box::new(ErrExtra { message, nested: None })),
-		}
-	}
-
-	pub fn invalid_shape() -> ErrPack<Self> {
-		ErrPack { code: Self::InvalidShape, extra: None }
-	}
-
-	pub fn invalid_buffer_size() -> ErrPack<Self> {
-		ErrPack {
-			code: Self::InvalidBufferSize,
-			extra: None,
-		}
-	}
-
-	#[cold]
-	#[inline(never)]
-	pub fn io_error(err: std::io::Error) -> ErrPack<Self> {
-		ErrPack {
-			code: Self::IOError,
-			extra: Some(Box::new(ErrExtra {
-				message: Cow::from("IO error occurred"),
-				nested: Some(Box::new(err)),
-			})),
-		}
-	}
-
-	pub fn shape_mismatch() -> ErrPack<Self> {
-		ErrPack { code: Self::ShapeMismatch, extra: None }
-	}
-
-	pub fn dtype_mismatch() -> ErrPack<Self> {
-		ErrPack { code: Self::DTypeMismatch, extra: None }
-	}
-}
-
-impl From<DimMergerError> for TensorOpError {
-	#[cold]
-	#[inline(never)]
-	fn from(err: DimMergerError) -> Self {
-		match err {
-			DimMergerError::DimsDontMatch => Self::DimsDontMatch,
-			DimMergerError::TooManyMergedDimensions => Self::TooManyMergedDimensions,
-		}
-	}
-}
-
-impl From<DimMergerError> for ErrPack<TensorOpError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: DimMergerError) -> Self {
-		Self { code: err.into(), extra: None }
-	}
-}
-
-impl From<DimsDontMatchError> for TensorOpError {
-	#[cold]
-	#[inline(never)]
-	fn from(_: DimsDontMatchError) -> Self {
-		Self::DimsDontMatch
-	}
-}
-
-impl From<DimsDontMatchError> for ErrPack<TensorOpError> {
-	#[cold]
-	#[inline(never)]
-	fn from(_: DimsDontMatchError) -> Self {
-		Self {
-			code: TensorOpError::DimsDontMatch,
-			extra: None,
-		}
-	}
-}
-
-impl From<TooManyMergedDimensionsError> for TensorOpError {
-	#[cold]
-	#[inline(never)]
-	fn from(_: TooManyMergedDimensionsError) -> Self {
-		Self::TooManyMergedDimensions
-	}
-}
-
-impl From<TooManyMergedDimensionsError> for ErrPack<TensorOpError> {
-	#[cold]
-	#[inline(never)]
-	fn from(_: TooManyMergedDimensionsError) -> Self {
-		Self {
-			code: TensorOpError::TooManyMergedDimensions,
-			extra: None,
-		}
-	}
-}
-
-impl From<BorrowError> for TensorOpError {
-	fn from(_: BorrowError) -> Self {
-		Self::CannotBorrow
-	}
-}
-
-impl From<BorrowError> for ErrPack<TensorOpError> {
-	fn from(_: BorrowError) -> Self {
-		Self {
-			code: TensorOpError::CannotBorrow,
-			extra: None,
-		}
-	}
-}
-
-impl From<BorrowMutError> for TensorOpError {
-	#[cold]
-	#[inline(never)]
-	fn from(_: BorrowMutError) -> Self {
-		Self::CannotBorrowMut
-	}
-}
-
-impl From<BorrowMutError> for ErrPack<TensorOpError> {
-	#[cold]
-	#[inline(never)]
-	fn from(_: BorrowMutError) -> Self {
-		debug_assert!(false, "Cannot get mutable borrow");
-		Self {
-			code: TensorOpError::CannotBorrowMut,
-			extra: None,
-		}
-	}
-}
-
-impl From<NewDeviceBufferError> for TensorOpError {
-	#[cold]
-	#[inline(never)]
-	fn from(err: NewDeviceBufferError) -> Self {
-		match err {
-			NewDeviceBufferError::AllocationFailed => Self::NewBufAllocationFailed,
-			NewDeviceBufferError::UnsupportedDType => Self::NewBufUnsupportedDType,
-		}
-	}
-}
-
-impl From<NewDeviceBufferError> for ErrPack<TensorOpError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: NewDeviceBufferError) -> Self {
-		Self { code: err.into(), extra: None }
-	}
-}
-
-impl From<NotEnoughDimensionsError> for TensorOpError {
-	fn from(_: NotEnoughDimensionsError) -> Self {
-		Self::NotEnoughDimensions
-	}
-}
-
-impl From<NotEnoughDimensionsError> for ErrPack<TensorOpError> {
-	fn from(_: NotEnoughDimensionsError) -> Self {
-		Self {
-			code: TensorOpError::NotEnoughDimensions,
-			extra: None,
-		}
-	}
-}
-
-impl From<MergeDimsError> for TensorOpError {
-	#[cold]
-	#[inline(never)]
-	fn from(err: MergeDimsError) -> Self {
-		match err {
-			MergeDimsError::NotEnoughDimensions => Self::NotEnoughDimensions,
-			MergeDimsError::IncompatibleStrides => Self::IncompatibleStridesForMerge,
-		}
-	}
-}
-
-impl From<MergeDimsError> for ErrPack<TensorOpError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: MergeDimsError) -> Self {
-		Self { code: err.into(), extra: None }
-	}
-}
-
-impl From<IncompatibleStridesError> for TensorOpError {
-	#[cold]
-	#[inline(never)]
-	fn from(_: IncompatibleStridesError) -> Self {
-		Self::IncompatibleStridesForMerge
-	}
-}
-
-impl From<IncompatibleStridesError> for ErrPack<TensorOpError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: IncompatibleStridesError) -> Self {
-		Self { code: err.into(), extra: None }
-	}
-}
-
-impl From<ReshapeLastDimError> for TensorOpError {
-	#[cold]
-	#[inline(never)]
-	fn from(err: ReshapeLastDimError) -> Self {
-		match err {
-			ReshapeLastDimError::NotEnoughDimensions => Self::NotEnoughDimensions,
-			ReshapeLastDimError::InvalidNumElements => Self::ElementsOverflow,
-		}
-	}
-}
-
-impl From<ReshapeLastDimError> for ErrPack<TensorOpError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: ReshapeLastDimError) -> Self {
-		Self { code: err.into(), extra: None }
-	}
-}
-
-impl From<ElementsOverflowError> for TensorOpError {
-	#[cold]
-	#[inline(never)]
-	fn from(_: ElementsOverflowError) -> Self {
-		Self::ElementsOverflow
-	}
-}
-
-impl From<ElementsOverflowError> for ErrPack<TensorOpError> {
-	#[cold]
-	#[inline(never)]
-	fn from(_: ElementsOverflowError) -> Self {
-		Self {
-			code: TensorOpError::ElementsOverflow,
-			extra: None,
-		}
-	}
-}
-
-impl From<ReplaceTailError> for TensorOpError {
-	#[cold]
-	#[inline(never)]
-	fn from(err: ReplaceTailError) -> Self {
-		match err {
-			ReplaceTailError::ElementsOverflow => Self::ElementsOverflow,
-			ReplaceTailError::NotEnoughDimensions => Self::NotEnoughDimensions,
-		}
-	}
-}
-
-impl From<ReplaceTailError> for ErrPack<TensorOpError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: ReplaceTailError) -> Self {
-		Self { code: err.into(), extra: None }
-	}
-}
-
-impl From<SelectError> for TensorOpError {
-	#[cold]
-	#[inline(never)]
-	fn from(err: SelectError) -> Self {
-		match err {
-			SelectError::DimIndexOutOfBounds => Self::DimIndexOutOfBounds,
-			SelectError::IndexOutOfBounds => Self::IndexOutOfBounds,
-		}
-	}
-}
-
-impl From<SelectError> for ErrPack<TensorOpError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: SelectError) -> Self {
-		Self { code: err.into(), extra: None }
-	}
-}
-
-impl From<IndexOutOfBoundsError> for ErrPack<TensorOpError> {
-	fn from(_: IndexOutOfBoundsError) -> Self {
-		Self {
-			code: TensorOpError::IndexOutOfBounds,
-			extra: None,
-		}
-	}
-}
-
-impl From<TensorUnsafeError> for TensorOpError {
-	fn from(_: TensorUnsafeError) -> Self {
-		Self::UnsafeTensor
-	}
-}
-
-impl From<ErrPack<TensorUnsafeError>> for ErrPack<TensorOpError> {
-	fn from(err: ErrPack<TensorUnsafeError>) -> Self {
-		Self { code: err.code.into(), extra: err.extra }
-	}
-}
-
-impl From<std::io::Error> for ErrPack<TensorOpError> {
-	fn from(err: std::io::Error) -> Self {
-		TensorOpError::io_error(err)
-	}
-}
-
-impl From<DimIndexOutOfBoundsError> for ErrPack<TensorOpError> {
-	fn from(_: DimIndexOutOfBoundsError) -> Self {
-		Self {
-			code: TensorOpError::DimIndexOutOfBounds,
-			extra: None,
-		}
-	}
-}
-
-impl From<DTypeMismatch> for ErrPack<TensorOpError> {
-	fn from(_: DTypeMismatch) -> Self {
-		Self {
-			code: TensorOpError::DTypeMismatch,
-			extra: None,
-		}
-	}
-}
-
-impl From<UnsupportedDTypeError> for ErrPack<TensorOpError> {
-	fn from(_: UnsupportedDTypeError) -> Self {
-		Self {
-			code: TensorOpError::UnsupportedDType,
-			extra: None,
-		}
-	}
-}
-
-impl From<NotContiguousError> for ErrPack<TensorOpError> {
-	fn from(_: NotContiguousError) -> Self {
-		Self {
-			code: TensorOpError::NotContiguous,
-			extra: None,
-		}
-	}
-}
-
-impl From<CannotBroadcastOutputError> for ErrPack<TensorOpError> {
-	fn from(_: CannotBroadcastOutputError) -> Self {
-		Self {
-			code: TensorOpError::CannotBroadcastOutput,
-			extra: None,
-		}
 	}
 }
 

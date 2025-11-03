@@ -11,7 +11,7 @@ use crate::tensor::device::MatMulArgs;
 use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::device::dtype::common_dtype;
 use crate::tensor::dim_merger::DimMerger;
-use crate::tensor::generic::map::{NotEnoughDimensionsError, SizeAndStride};
+use crate::tensor::map::{NotEnoughDimensionsError, SizeAndStride};
 use crate::tensor::{DType, HasDType, Tensor, TensorOpError};
 use crate::util::mycell::UnsafeBorrowFailFlag;
 use crate::{ErrPack, custom_kernel};

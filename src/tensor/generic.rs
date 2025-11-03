@@ -99,90 +99,6 @@ impl<M: Map, B: Buffer> GenericTensor<M, B> {
 		self.map.elems()
 	}
 
-	pub fn merge_dims<const K: usize>(&self) -> Result<GenericTensor<M::Output, B>, M::Error>
-	where
-		M: MergeDims<K>,
-		B: Clone,
-	{
-		let new_map = self.map.merge_dims()?;
-		Ok(GenericTensor { buf: self.buf.clone(), map: new_map })
-	}
-
-	pub fn merge_all_dims(&self) -> Result<GenericTensor<M::Output, B>, M::Error>
-	where
-		M: MergeAllDims,
-		B: Clone,
-	{
-		let new_map = self.map.merge_all_dims()?;
-		Ok(GenericTensor { buf: self.buf.clone(), map: new_map })
-	}
-
-	pub fn reshape_last_dim<const K: usize>(
-		self,
-		to_shape: [usize; K],
-	) -> Result<GenericTensor<M::Output, B>, M::Error>
-	where
-		M: ReshapeLastDim<K>,
-	{
-		let new_map = self.map.reshape_last_dim(to_shape)?;
-		Ok(GenericTensor { buf: self.buf, map: new_map })
-	}
-
-	pub fn select<D: DimIndex>(
-		&self,
-		dim: D,
-		index: usize,
-	) -> Result<GenericTensor<M::Output, B>, M::Error>
-	where
-		M: Select,
-		B: Clone,
-	{
-		let dim = dim.resolve_index(self.ndim())?;
-		let new_map = self.map.select(dim, index)?;
-		Ok(GenericTensor { buf: self.buf.clone(), map: new_map })
-	}
-
-	pub fn iter_along_axis<'a, D: DimIndex>(
-		&'a self,
-		dim: D,
-	) -> Result<AxisIter<'a, M, B>, DimIndexOutOfBoundsError>
-	where
-		M: Select,
-		B: Clone,
-	{
-		let dim = dim.resolve_index(self.ndim())?;
-		let size = self.size(dim)?;
-		Ok(AxisIter { tensor: self, dim, current: 0, size })
-	}
-
-	pub fn narrow<D: DimIndex, R: Into<UniversalRange>>(
-		self,
-		dim: D,
-		range: R,
-	) -> Result<GenericTensor<M::Output, B>, M::Error>
-	where
-		M: Narrow,
-	{
-		let dim = dim.resolve_index(self.ndim())?;
-		let range = range.into();
-		let new_map = self.map.narrow(dim, range)?;
-		Ok(GenericTensor { buf: self.buf, map: new_map })
-	}
-
-	pub fn transposed<D0: DimIndex, D1: DimIndex>(
-		self,
-		d0: D0,
-		d1: D1,
-	) -> Result<GenericTensor<M::Output, B>, M::Error>
-	where
-		M: Transpose,
-	{
-		let d0 = d0.resolve_index(self.ndim())?;
-		let d1 = d1.resolve_index(self.ndim())?;
-		let new_map = self.map.transposed(d0, d1)?;
-		Ok(GenericTensor { buf: self.buf, map: new_map })
-	}
-
 	pub fn nd_shape<const K: usize>(&self) -> std::result::Result<[usize; K], M::Error>
 	where
 		M: NDShape<K>,
@@ -235,22 +151,4 @@ impl<'a, M: Map + Select, B: Buffer + Clone> ExactSizeIterator for AxisIter<'a, 
 }
 
 //--------------------------------------------------------------------------------------------------
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct TensorUnsafeError;
-
-impl TensorUnsafeError {
-	#[cold]
-	#[inline(never)]
-	fn new(span: std::ops::Range<usize>, buf_len: usize) -> ErrPack<Self> {
-		let message = Cow::from(format!(
-			"Tensor map is not safe: span {span:?} is out of bounds for buffer of length {buf_len}."
-		));
-		ErrPack {
-			code: Self,
-			extra: Some(Box::new(ErrExtra { message, nested: None })),
-		}
-	}
-}
-
 //--------------------------------------------------------------------------------------------------
