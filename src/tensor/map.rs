@@ -94,10 +94,6 @@ impl StrideCounterUnchecked {
 		Self { elems: 1 }
 	}
 
-	pub fn with_stride(stride: usize) -> Self {
-		Self { elems: stride }
-	}
-
 	pub fn prepend_dim(&mut self, size: usize) -> SizeAndStride {
 		let stride = self.elems;
 		self.elems *= size;
@@ -111,7 +107,7 @@ impl StrideCounterUnchecked {
 
 //--------------------------------------------------------------------------------------------------
 
-pub fn merge_dims(dims: &[SizeAndStride]) -> Result<SizeAndStride, IncompatibleStridesError> {
+pub fn merge_dims(dims: &[SizeAndStride]) -> Result<SizeAndStride, ReshapeError> {
 	let mut merged = SizeAndStride { size: 1, stride: 1 };
 	for dim in dims.iter().rev() {
 		if dim.stride == merged.size * merged.stride || dim.size <= 1 {
@@ -122,18 +118,20 @@ pub fn merge_dims(dims: &[SizeAndStride]) -> Result<SizeAndStride, IncompatibleS
 				merged = *dim;
 			} else if merged.size > 1 {
 				cold_path();
-				return Err(IncompatibleStridesError);
+				return Err(ReshapeError);
 			}
 		}
 	}
 	Ok(merged)
 }
 
+/// When this returns `Ok(())`, `result` can be assumed initialized.
 pub fn reshape_dims(
-	dims: &[SizeAndStride],
-	into: &mut [SizeAndStride],
+	from: &[SizeAndStride],
+	to: &[usize],
+	result: &mut [MaybeUninit<SizeAndStride>],
 ) -> Result<(), ReshapeError> {
-	let Ok(dims) = DimMerger::merge::<5>([dims]) else {
+	let Ok(dims) = DimMerger::merge::<INLINE_DIMS>([from]) else {
 		cold_path();
 		return Err(ReshapeError);
 	};
@@ -300,7 +298,7 @@ impl Map {
 	/// Merges the last `n` dimensions into a single dimension.
 	///
 	/// If ndim < n, the missing dimensions are treated as size 1 dimensions.
-	pub fn merge_dims(&self, n: usize) -> Result<Self, IncompatibleStridesError> {
+	pub fn merge_dims(&self, n: usize) -> Result<Self, ReshapeError> {
 		let old_slice = self.dims.as_slice();
 		let n_keep = old_slice.len().saturating_sub(n);
 		let ndim = n_keep + 1;
@@ -319,7 +317,7 @@ impl Map {
 	}
 
 	/// Merges all dimensions into a single dimension.
-	pub fn merge_all_dims(&self) -> Result<Self, IncompatibleStridesError> {
+	pub fn merge_all_dims(&self) -> Result<Self, ReshapeError> {
 		let merged = merge_dims(self.dims.as_slice())?;
 
 		let mut dims = DimVecBuilder::new(1);
@@ -355,7 +353,7 @@ impl Map {
 		for i in 0..n_keep {
 			slice[i].write(old_slice[i]);
 		}
-		let mut stride_counter = StrideCounterUnchecked::with_stride(last_dim.stride);
+		let mut stride_counter = StrideCounter::with_stride(last_dim.stride);
 		for i in (n_keep..ndim).rev() {
 			slice[i].write(stride_counter.prepend_dim(to_shape[i - n_keep]));
 		}
@@ -531,14 +529,6 @@ impl std::fmt::Debug for DimVec {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct NotEnoughDimensionsError;
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct IncompatibleStridesError;
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct InvalidNumElementsError;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]

@@ -329,24 +329,14 @@ impl Tensor {
 		Ok(unsafe { Self::new_unchecked(new_map, self.buf.clone()) })
 	}
 
-	pub fn merge_all_dims(&self) -> Result<GenericTensor<M::Output, B>, M::Error>
-	where
-		M: MergeAllDims,
-		B: Clone,
-	{
+	pub fn merge_all_dims(&self) -> Result<Self, ErrPack<TensorOpError>> {
 		let new_map = self.map.merge_all_dims()?;
-		Ok(GenericTensor { buf: self.buf.clone(), map: new_map })
+		Ok(unsafe { Self::new_unchecked(new_map, self.buf.clone()) })
 	}
 
-	pub fn reshape_last_dim<const K: usize>(
-		self,
-		to_shape: [usize; K],
-	) -> Result<GenericTensor<M::Output, B>, M::Error>
-	where
-		M: ReshapeLastDim<K>,
-	{
+	pub fn reshape_last_dim(self, to_shape: &[usize]) -> Result<Self, ErrPack<TensorOpError>> {
 		let new_map = self.map.reshape_last_dim(to_shape)?;
-		Ok(GenericTensor { buf: self.buf, map: new_map })
+		Ok(unsafe { Self::new_unchecked(new_map, self.buf) })
 	}
 
 	pub fn select<D: DimIndex>(
