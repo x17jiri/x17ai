@@ -12,6 +12,7 @@ use std::rc::Rc;
 use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
 use crate::tensor::device::dtype::common_dtype;
 use crate::tensor::device::kernel::DynKernelCall;
+use crate::tensor::error::UnsupportedDTypeError;
 use crate::tensor::{HasDType, TensorOpError};
 use crate::util::mycell::{self, BorrowGuard};
 
@@ -26,10 +27,8 @@ use crate::tensor::{DType, Device};
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum BufAsSliceError {
-	InvalidDType,
-	NotOnCPUDevice,
-}
+pub struct NotOnCPUDeviceError;
+
 //--------------------------------------------------------------------------------------------------
 
 pub struct CPUDevice {
@@ -47,17 +46,17 @@ impl CPUDevice {
 
 	pub fn buf_as_slice<'guard, 'buf, T: HasDType>(
 		buf: &BorrowGuard<'buf, DeviceBuffer>,
-	) -> Result<&'guard [T], BufAsSliceError> {
-		if buf.dtype() != T::dtype {
-			cold_path();
-			return Err(BufAsSliceError::InvalidDType);
-		}
-		debug_assert!(T::dtype.bytes() == std::mem::size_of::<T>());
+	) -> Result<&'guard [T], NotOnCPUDeviceError> {
 		if !buf.device().is_cpu() {
 			cold_path();
-			return Err(BufAsSliceError::NotOnCPUDevice);
+			return Err(NotOnCPUDeviceError);
 		}
-		unsafe { Ok(std::slice::from_raw_parts(buf.device_ptr().as_ptr::<T>(), buf.elems())) }
+		unsafe {
+			Ok(std::slice::from_raw_parts(
+				buf.device_ptr().as_ptr::<T>(),
+				buf.byte_len() / std::mem::size_of::<T>(),
+			))
+		}
 	}
 
 	unsafe fn __read_float(
@@ -118,42 +117,25 @@ impl Device for CPUDevice {
 	#[inline(never)]
 	fn new_buffer(
 		self: Rc<Self>,
-		dtype: DType,
-		elems: usize,
+		bytes: usize,
 	) -> Result<Rc<mycell::RefCell<DeviceBuffer>>, DevBufAllocFailedError> {
-		// TODO - do I need `NewDeviceBufferError` as error type? I never return unsupported dtype
-		if let Some(size) = dtype.array_bytes(elems)
-			&& let Ok(layout) = std::alloc::Layout::from_size_align(size, dtype.align())
+		if let Ok(layout) = std::alloc::Layout::from_size_align(bytes, std::mem::align_of::<u64>())
 			&& let Some(memory) = NonNull::new(unsafe { std::alloc::alloc(layout) })
 		{
 			Ok(Rc::new(mycell::RefCell::new(unsafe {
-				DeviceBuffer::new(DevicePtr::new(memory.as_ptr().cast()), dtype, elems, self)
+				DeviceBuffer::new(DevicePtr::new(memory.as_ptr().cast()), bytes, self)
 			})))
 		} else {
 			cold_path();
-			Err(DevBufAllocFailedError::AllocationFailed)
+			Err(DevBufAllocFailedError)
 		}
 	}
 
-	unsafe fn drop_buffer(&self, device_ptr: DevicePtr, dtype: DType, elems: usize) {
+	unsafe fn drop_buffer(&self, device_ptr: DevicePtr, bytes: usize) {
 		unsafe {
-			let layout = std::alloc::Layout::from_size_align(
-				dtype.array_bytes_unchecked(elems),
-				dtype.align(),
-			)
-			.unwrap_unchecked();
+			let layout = std::alloc::Layout::from_size_align(bytes, std::mem::align_of::<u64>())
+				.unwrap_unchecked();
 			std::alloc::dealloc(device_ptr.as_ptr::<u8>(), layout);
-		}
-	}
-
-	unsafe fn read_float(
-		&self,
-		buf: &DeviceBuffer,
-		offset: usize,
-	) -> Result<f64, ErrPack<TensorOpError>> {
-		unsafe {
-			let offset_bytes = buf.dtype().array_bytes_unchecked(offset);
-			Self::__read_float(buf.device_ptr(), buf.dtype(), offset_bytes)
 		}
 	}
 
