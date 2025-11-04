@@ -11,9 +11,12 @@ use std::rc::Rc;
 
 use crate::ErrPack;
 use crate::rng::Rng;
+use crate::tensor::dim_merger::ReshapeError;
 use crate::tensor::error::InvalidBufferSizeError;
+use crate::tensor::map::SelectError;
 use crate::util::LossyFrom;
 use crate::util::mycell::{self};
+use crate::util::universal_range::UniversalRange;
 
 use self::device::DeviceBuffer;
 use self::device::kernel::EvaluatesToTensor;
@@ -339,59 +342,31 @@ impl Tensor {
 		Ok(unsafe { Self::new_unchecked(new_map, self.buf) })
 	}
 
-	pub fn select<D: DimIndex>(
-		&self,
-		dim: D,
-		index: usize,
-	) -> Result<GenericTensor<M::Output, B>, M::Error>
-	where
-		M: Select,
-		B: Clone,
-	{
-		let dim = dim.resolve_index(self.ndim())?;
-		let new_map = self.map.select(dim, index)?;
-		Ok(GenericTensor { buf: self.buf.clone(), map: new_map })
+	pub fn reshape_dims(&self, n: usize, to_shape: &[usize]) -> Result<Self, ReshapeError> {
+		let new_map = self.map.reshape_dims(n, to_shape)?;
+		Ok(unsafe { Self::new_unchecked(new_map, self.buf.clone()) })
 	}
 
-	pub fn iter_along_axis<'a, D: DimIndex>(
-		&'a self,
-		dim: D,
-	) -> Result<AxisIter<'a, M, B>, DimIndexOutOfBoundsError>
-	where
-		M: Select,
-		B: Clone,
-	{
+	pub fn reshape_all_dims(&self, to_shape: &[usize]) -> Result<Self, ReshapeError> {
+		let new_map = self.map.reshape_all_dims(to_shape)?;
+		Ok(unsafe { Self::new_unchecked(new_map, self.buf.clone()) })
+	}
+
+	pub fn select<D: DimIndex>(&self, dim: D, index: usize) -> Result<Self, SelectError> {
 		let dim = dim.resolve_index(self.ndim())?;
-		let size = self.size(dim)?;
-		Ok(AxisIter { tensor: self, dim, current: 0, size })
+		let new_map = self.map.select(dim, index)?;
+		Ok(unsafe { Self::new_unchecked(new_map, self.buf.clone()) })
 	}
 
 	pub fn narrow<D: DimIndex, R: Into<UniversalRange>>(
 		self,
 		dim: D,
 		range: R,
-	) -> Result<GenericTensor<M::Output, B>, M::Error>
-	where
-		M: Narrow,
-	{
+	) -> Result<Self, SelectError> {
 		let dim = dim.resolve_index(self.ndim())?;
 		let range = range.into();
 		let new_map = self.map.narrow(dim, range)?;
-		Ok(GenericTensor { buf: self.buf, map: new_map })
-	}
-
-	pub fn transposed<D0: DimIndex, D1: DimIndex>(
-		self,
-		d0: D0,
-		d1: D1,
-	) -> Result<GenericTensor<M::Output, B>, M::Error>
-	where
-		M: Transpose,
-	{
-		let d0 = d0.resolve_index(self.ndim())?;
-		let d1 = d1.resolve_index(self.ndim())?;
-		let new_map = self.map.transposed(d0, d1)?;
-		Ok(GenericTensor { buf: self.buf, map: new_map })
+		Ok(unsafe { Self::new_unchecked(new_map, self.buf) })
 	}
 }
 

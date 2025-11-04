@@ -11,6 +11,10 @@ use super::map::SizeAndStride;
 
 //--------------------------------------------------------------------------------------------------
 
+// TODO - could this be more efficient if it worked similar to the
+// `merge_dims(dims: &[SizeAndStride]) -> (SizeAndStride, &[SizeAndStride])` function?
+// I.e., processing as much as possible in 1 dim and returning the rest?
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MergedDim<const N: usize> {
 	pub size: usize,
@@ -46,6 +50,10 @@ impl From<TooManyMergedDimensionsError> for DimMergerError {
 		Self::TooManyMergedDimensions
 	}
 }
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ReshapeError;
 
 pub struct DimMerger<const N: usize>;
 
@@ -145,6 +153,62 @@ impl<const N: usize> DimMerger<N> {
 		Self::merge_impl(inputs, &mut dims)?;
 		Ok(dims)
 	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub fn merge_dims(dims: &[SizeAndStride]) -> (SizeAndStride, &[SizeAndStride]) {
+	let mut merged = SizeAndStride { size: 1, stride: 1 };
+	for i in (0..dims.len()).rev() {
+		let dim = *unsafe { dims.get_unchecked(i) };
+		if dim.stride == merged.size * merged.stride || dim.size <= 1 {
+			merged.size *= dim.size;
+		} else {
+			if merged.size == 1 {
+				merged = *dim;
+			} else if merged.size > 1 {
+				return (merged, unsafe { dims.get_unchecked(..=i) });
+			}
+		}
+	}
+	Ok((merged, &dims[0..0]))
+}
+
+pub fn reshape_dims(
+	from: &[SizeAndStride],
+	into: &mut [SizeAndStride],
+) -> Result<(), ReshapeError> {
+	let (mut inp, mut rest) = (SizeAndStride::default(), from);
+	let mut j = into.len();
+	loop {
+		(inp, rest) = merge_dims(rest);
+		let mut acc = SizeAndStride { size: 1, stride: inp.stride };
+		while j > 0 && acc.size < inp.size {
+			j -= 1;
+			let mut out = unsafe { into.get_unchecked_mut(j) };
+			out.stride = acc.stride;
+			acc.stride *= out.size;
+
+			let Some(mul) = acc.size.checked_mul(out.size) else {
+				cold_path();
+				return Err(ReshapeError);
+			};
+			acc.size = mul;
+		}
+		if acc.size != inp.size {
+			cold_path();
+			return Err(ReshapeError);
+		}
+		if j == 0 {
+			break;
+		}
+	}
+	return if rest.is_empty() {
+		Ok(());
+	} else {
+		cold_path();
+		Err(ReshapeError);
+	};
 }
 
 //--------------------------------------------------------------------------------------------------

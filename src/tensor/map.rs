@@ -9,8 +9,10 @@ use std::hint::{cold_path, likely};
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
+use crate::tensor::dim_index::DimIndexOutOfBoundsError;
+use crate::tensor::dim_merger::{self, ReshapeError};
+
 use super::DType;
-use super::dim_merger::DimMerger;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -48,6 +50,12 @@ impl Default for StrideCounter {
 impl StrideCounter {
 	pub fn new() -> Self {
 		Self { elems: 1, nonzero_elems: 1 }
+	}
+
+	/// When this constructor is used, `elems()` will be the product of all prepended
+	/// dimensions multiplied by this `stride`.
+	pub fn with_stride(stride: usize) -> Self {
+		Self { elems: stride, nonzero_elems: 1 }
 	}
 
 	pub fn prepend_dim(&mut self, size: usize) -> Result<SizeAndStride, ElementsOverflowError> {
@@ -102,66 +110,6 @@ impl StrideCounterUnchecked {
 
 	pub fn elems(&self) -> usize {
 		self.elems
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
-
-pub fn merge_dims(dims: &[SizeAndStride]) -> Result<SizeAndStride, ReshapeError> {
-	let mut merged = SizeAndStride { size: 1, stride: 1 };
-	for dim in dims.iter().rev() {
-		if dim.stride == merged.size * merged.stride || dim.size <= 1 {
-			merged.size *= dim.size;
-		} else {
-			cold_path();
-			if merged.size == 1 {
-				merged = *dim;
-			} else if merged.size > 1 {
-				cold_path();
-				return Err(ReshapeError);
-			}
-		}
-	}
-	Ok(merged)
-}
-
-/// When this returns `Ok(())`, `result` can be assumed initialized.
-pub fn reshape_dims(
-	from: &[SizeAndStride],
-	to: &[usize],
-	result: &mut [MaybeUninit<SizeAndStride>],
-) -> Result<(), ReshapeError> {
-	let Ok(dims) = DimMerger::merge::<INLINE_DIMS>([from]) else {
-		cold_path();
-		return Err(ReshapeError);
-	};
-	let mut inp_iter =
-		dims.iter().rev().map(|i| SizeAndStride { size: i.size, stride: i.strides[0] });
-	let mut inp = inp_iter.next().unwrap_or(SizeAndStride { size: 1, stride: 0 });
-	let mut out_acc = SizeAndStride { size: 1, stride: inp.stride };
-	for out in into.iter_mut().rev() {
-		let Some(mul) = out_acc.size.checked_mul(out.size) else {
-			cold_path();
-			return Err(ReshapeError);
-		};
-		out_acc.size = mul;
-		if out_acc.size < inp.size {
-			out.stride = out_acc.stride;
-			out_acc.stride *= out.size;
-		} else if out_acc.size == inp.size {
-			out.stride = out_acc.stride;
-			inp = inp_iter.next().unwrap_or(SizeAndStride { size: 1, stride: 0 });
-			out_acc = SizeAndStride { size: 1, stride: inp.stride };
-		} else {
-			cold_path();
-			return Err(ReshapeError);
-		}
-	}
-	if inp.size == 1 {
-		Ok(())
-	} else {
-		cold_path();
-		Err(ReshapeError)
 	}
 }
 
@@ -303,7 +251,11 @@ impl Map {
 		let n_keep = old_slice.len().saturating_sub(n);
 		let ndim = n_keep + 1;
 
-		let merged = merge_dims(&old_slice[n_keep..])?;
+		let (merged, rest) = dim_merger::merge_dims(unsafe { old_slice.get_unchecked(n_keep..) });
+		if (!rest.is_empty()) {
+			cold_path();
+			return Err(ReshapeError);
+		}
 
 		let mut dims = DimVecBuilder::new(ndim);
 		let slice = dims.as_slice_mut();
@@ -318,7 +270,11 @@ impl Map {
 
 	/// Merges all dimensions into a single dimension.
 	pub fn merge_all_dims(&self) -> Result<Self, ReshapeError> {
-		let merged = merge_dims(self.dims.as_slice())?;
+		let (merged, rest) = dim_merger::merge_dims(self.dims.as_slice());
+		if (!rest.is_empty()) {
+			cold_path();
+			return Err(ReshapeError);
+		}
 
 		let mut dims = DimVecBuilder::new(1);
 		let slice = dims.as_slice_mut();
@@ -328,38 +284,39 @@ impl Map {
 		Ok(Self { dims, offset: 0, dtype: self.dtype })
 	}
 
-	/// Reshapes single last dimension into `to_shape.len()` dimensions.
-	///
-	/// If there are no dimensions, it works as if there was a single dimension of size 1.
-	pub fn reshape_last_dim(&self, to_shape: &[usize]) -> Result<Self, ReshapeError> {
+	pub fn reshape_dims(&self, n: usize, to_shape: &[usize]) -> Result<Self, ReshapeError> {
 		let old_slice = self.dims.as_slice();
-		let (n_keep, last_dim) = if let Some(&last) = old_slice.last() {
-			(old_slice.len() - 1, last)
-		} else {
-			(0, SizeAndStride { size: 1, stride: 0 })
-		};
-
-		let elems = to_shape.iter().copied().product::<usize>();
-		if elems != last_dim.size {
-			cold_path();
-			return Err(ReshapeError);
-		}
-
+		let n_keep = old_slice.len().saturating_sub(n);
 		let ndim = n_keep + to_shape.len();
 
-		let mut dims = DimVecBuilder::new(ndim);
-		let slice = dims.as_slice_mut();
+		let mut new_dims = DimVecBuilder::new(ndim);
+		let new_slice = new_dims.as_slice_mut();
 
-		for i in 0..n_keep {
-			slice[i].write(old_slice[i]);
-		}
-		let mut stride_counter = StrideCounter::with_stride(last_dim.stride);
-		for i in (n_keep..ndim).rev() {
-			slice[i].write(stride_counter.prepend_dim(to_shape[i - n_keep]));
-		}
-
-		let dims = unsafe { dims.assume_init() };
+		let dims = unsafe {
+			for i in 0..n_keep {
+				new_slice.get_unchecked_mut(i).write(*old_slice.get_unchecked(i));
+			}
+			for i in (n_keep..ndim).rev() {
+				new_slice.get_unchecked_mut(i).write(SizeAndStride {
+					size: *to_shape.get_unchecked(i - n_keep),
+					stride: 0,
+				});
+			}
+			dim_merger::reshape_dims(
+				old_slice.get_unchecked(n_keep..),
+				new_slice.get_unchecked_mut(n_keep..),
+			)?;
+			new_dims.assume_init();
+		};
 		Ok(Self { dims, offset: 0, dtype: self.dtype })
+	}
+
+	pub fn reshape_last_dim(&self, to_shape: &[usize]) -> Result<Self, ReshapeError> {
+		self.reshape_dims(1, to_shape)
+	}
+
+	pub fn reshape_all_dims(&self, to_shape: &[usize]) -> Result<Self, ReshapeError> {
+		self.reshape_dims(self.ndim(), to_shape)
 	}
 
 	pub fn select(&self, dim: usize, index: usize) -> Result<Self, SelectError> {
@@ -532,16 +489,24 @@ pub struct NotEnoughDimensionsError;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct ReshapeError;
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct IndexOutOfBoundsError;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum SelectError {
 	DimIndexOutOfBounds,
 	IndexOutOfBounds,
+}
+
+impl From<DimIndexOutOfBoundsError> for SelectError {
+	fn from(_: DimIndexOutOfBoundsError) -> Self {
+		Self::DimIndexOutOfBounds
+	}
+}
+
+impl From<IndexOutOfBoundsError> for SelectError {
+	fn from(_: IndexOutOfBoundsError) -> Self {
+		Self::IndexOutOfBounds
+	}
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]

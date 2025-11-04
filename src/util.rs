@@ -12,6 +12,7 @@ pub mod hasher;
 pub mod mycell;
 //pub mod thin_rc; - TODO
 pub mod ffi_buffer;
+pub mod universal_range;
 
 //--------------------------------------------------------------------------------------------------
 
