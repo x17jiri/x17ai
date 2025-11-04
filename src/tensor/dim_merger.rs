@@ -6,6 +6,8 @@
 //------------------------------------------------------------------------------
 
 use std::hint::cold_path;
+use std::intrinsics::discriminant_value;
+use std::mem::MaybeUninit;
 
 use super::map::SizeAndStride;
 
@@ -175,40 +177,52 @@ pub fn merge_dims(dims: &[SizeAndStride]) -> (SizeAndStride, &[SizeAndStride]) {
 }
 
 pub fn reshape_dims(
-	from: &[SizeAndStride],
-	into: &mut [SizeAndStride],
+	(mut inp, rest_inp): (SizeAndStride, &[SizeAndStride]),
+	to: &[usize],
+	dims: *mut MaybeUninit<SizeAndStride>,
 ) -> Result<(), ReshapeError> {
-	let (mut inp, mut rest) = (SizeAndStride::default(), from);
-	let mut j = into.len();
-	loop {
-		(inp, rest) = merge_dims(rest);
-		let mut acc = SizeAndStride { size: 1, stride: inp.stride };
-		while j > 0 && acc.size < inp.size {
-			j -= 1;
-			let mut out = unsafe { into.get_unchecked_mut(j) };
-			out.stride = acc.stride;
-			acc.stride *= out.size;
-
-			let Some(mul) = acc.size.checked_mul(out.size) else {
-				cold_path();
-				return Err(ReshapeError);
-			};
-			acc.size = mul;
-		}
-		if acc.size != inp.size {
+	let mut j = to.len();
+	if j == 0 {
+		if inp.size != 1 || !rest_inp.is_empty() {
 			cold_path();
 			return Err(ReshapeError);
 		}
-		if j == 0 {
-			break;
-		}
+		return Ok(());
 	}
-	return if rest.is_empty() {
-		Ok(());
-	} else {
+
+	'next_inp: loop {
+		let mut acc = SizeAndStride { size: 1, stride: inp.stride };
+		'next_out: loop {
+			j -= 1;
+			let dim_size = unsafe { to.get_unchecked(j) };
+			let Some(mul) = acc.size.checked_mul(*dim_size) else {
+				cold_path();
+				return Err(ReshapeError);
+			};
+
+			let w = unsafe { &mut *dims.add(j) };
+			w.write(SizeAndStride { size: *dim_size, stride: acc.stride });
+
+			if mul == inp.size {
+				break 'next_out;
+			} else if mul > inp.size || j == 0 {
+				cold_path();
+				return Err(ReshapeError);
+			}
+			acc.stride *= dim_size;
+			acc.size = mul;
+		}
+		if j == 0 {
+			break 'next_inp;
+		}
+		(inp, rest_inp) = merge_dims(rest_inp);
+	}
+
+	if !rest_inp.is_empty() {
 		cold_path();
-		Err(ReshapeError);
-	};
+		return Err(ReshapeError);
+	}
+	Ok(())
 }
 
 //--------------------------------------------------------------------------------------------------
