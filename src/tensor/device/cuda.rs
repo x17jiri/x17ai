@@ -14,7 +14,6 @@ use std::rc::Rc;
 use hashbrown::HashTable;
 
 use crate::ErrPack;
-use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
 use crate::tensor::device::cuda::cuda_shim::{
 	CudaCapability, CudaCppError, CudaCube, CudaError, CudaKernel, CudaLaunchConfig, CudaStream,
 	Ptx, cuda_compile,
@@ -29,7 +28,7 @@ use crate::tensor::device::kernel::{
 use crate::tensor::device::{
 	AttentionArgs, DevBufAllocFailedError, DeviceBuffer, DevicePtr, MatMulArgs,
 };
-use crate::tensor::{DType, Device, HasDType, TensorOpError, UnsupportedDTypeError};
+use crate::tensor::{Device, TensorOpError};
 use crate::util::hasher::HashWord;
 use crate::util::{ToBoxedSlice, mycell};
 
@@ -82,24 +81,6 @@ impl CudaDevice {
 
 	pub fn compile(&self, src: &str) -> Result<Ptx, CudaCppError> {
 		cuda_compile(self.capability(), src)
-	}
-
-	unsafe fn __read_float<T: HasDType + Default + FromToF64>(
-		&self,
-		buf: &DeviceBuffer,
-		offset: usize,
-	) -> Result<f64, ErrPack<TensorOpError>> {
-		debug_assert!(buf.dtype() == T::dtype);
-		let val = T::default();
-		unsafe {
-			self.cuda_stream.download_data(
-				buf.device_ptr(),
-				NonNull::from(&val).cast(),
-				offset,
-				std::mem::size_of::<T>(),
-			)?;
-		}
-		Ok(val.to_f64())
 	}
 
 	fn print_expr(
@@ -395,38 +376,17 @@ impl Device for CudaDevice {
 	#[inline(never)]
 	fn new_buffer(
 		self: Rc<Self>,
-		dtype: DType,
-		elems: usize,
+		bytes: usize,
 	) -> Result<Rc<mycell::RefCell<DeviceBuffer>>, DevBufAllocFailedError> {
-		if let Some(size) = dtype.array_bytes(elems)
-			&& let Ok(memory) = unsafe { self.cuda_stream.alloc(size) }
-		{
-			Ok(Rc::new(mycell::RefCell::new(unsafe {
-				DeviceBuffer::new(memory, dtype, elems, self)
-			})))
-		} else {
+		let Ok(memory) = (unsafe { self.cuda_stream.alloc(bytes) }) else {
 			cold_path();
-			Err(DevBufAllocFailedError::AllocationFailed)
-		}
+			return Err(DevBufAllocFailedError);
+		};
+		Ok(Rc::new(mycell::RefCell::new(unsafe { DeviceBuffer::new(memory, bytes, self) })))
 	}
 
-	unsafe fn drop_buffer(&self, device_ptr: DevicePtr, _dtype: DType, _elems: usize) {
+	unsafe fn drop_buffer(&self, device_ptr: DevicePtr, _bytes: usize) {
 		unsafe { self.cuda_stream.free(device_ptr) }
-	}
-
-	unsafe fn read_float(
-		&self,
-		buf: &DeviceBuffer,
-		offset: usize,
-	) -> Result<f64, ErrPack<TensorOpError>> {
-		match buf.dtype() {
-			f32::dtype => unsafe { self.__read_float::<f32>(buf, offset) },
-			f64::dtype => unsafe { self.__read_float::<f64>(buf, offset) },
-			_ => {
-				cold_path();
-				Err(UnsupportedDTypeError.into())
-			},
-		}
 	}
 
 	unsafe fn upload_data(
@@ -436,9 +396,7 @@ impl Device for CudaDevice {
 		offset_bytes: usize,
 		count_bytes: usize,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		unsafe {
-			self.cuda_stream.upload_data(src, dst.device_ptr(), offset_bytes, count_bytes)?;
-		}
+		unsafe { self.cuda_stream.upload_data(src, dst.device_ptr(), offset_bytes, count_bytes)? };
 		Ok(())
 	}
 
@@ -450,8 +408,8 @@ impl Device for CudaDevice {
 		count_bytes: usize,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		unsafe {
-			self.cuda_stream.download_data(src.device_ptr(), dst, offset_bytes, count_bytes)?;
-		}
+			self.cuda_stream.download_data(src.device_ptr(), dst, offset_bytes, count_bytes)?
+		};
 		Ok(())
 	}
 

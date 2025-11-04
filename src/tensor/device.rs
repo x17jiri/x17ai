@@ -217,12 +217,6 @@ pub trait Device {
 	/// This should only be called from `DeviceBuffer::drop()`
 	unsafe fn drop_buffer(&self, device_ptr: DevicePtr, bytes: usize);
 
-	unsafe fn read_float(
-		&self,
-		buf: &DeviceBuffer,
-		offset: usize,
-	) -> Result<f64, ErrPack<TensorOpError>>;
-
 	unsafe fn upload_data(
 		&self,
 		src: NonNull<u8>,

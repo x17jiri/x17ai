@@ -177,7 +177,7 @@ pub fn merge_dims(dims: &[SizeAndStride]) -> (SizeAndStride, &[SizeAndStride]) {
 }
 
 pub fn reshape_dims(
-	(mut inp, rest_inp): (SizeAndStride, &[SizeAndStride]),
+	(mut inp, mut rest_inp): (SizeAndStride, &[SizeAndStride]),
 	to: &[usize],
 	dims: *mut MaybeUninit<SizeAndStride>,
 ) -> Result<(), ReshapeError> {
@@ -194,14 +194,14 @@ pub fn reshape_dims(
 		let mut acc = SizeAndStride { size: 1, stride: inp.stride };
 		'next_out: loop {
 			j -= 1;
-			let dim_size = unsafe { to.get_unchecked(j) };
-			let Some(mul) = acc.size.checked_mul(*dim_size) else {
+			let dim_size = *unsafe { to.get_unchecked(j) };
+			let Some(mul) = acc.size.checked_mul(dim_size) else {
 				cold_path();
 				return Err(ReshapeError);
 			};
 
 			let w = unsafe { &mut *dims.add(j) };
-			w.write(SizeAndStride { size: *dim_size, stride: acc.stride });
+			w.write(SizeAndStride { size: dim_size, stride: acc.stride });
 
 			if mul == inp.size {
 				break 'next_out;

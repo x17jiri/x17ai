@@ -14,10 +14,7 @@ use super::device::DevBufAllocFailedError;
 use super::device::dtype::DTypeMismatchError;
 use super::dim_index::DimIndexOutOfBoundsError;
 use super::dim_merger::{DimMergerError, DimsDontMatchError, TooManyMergedDimensionsError};
-use super::map::{
-	ElementsOverflowError, IncompatibleStridesError, IndexOutOfBoundsError,
-	NotEnoughDimensionsError,
-};
+use super::map::{ElementsOverflowError, IndexOutOfBoundsError, NotEnoughDimensionsError};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -179,20 +176,6 @@ impl From<NotEnoughDimensionsError> for ErrPack<TensorOpError> {
 			code: TensorOpError::NotEnoughDimensions,
 			extra: None,
 		}
-	}
-}
-
-impl From<IncompatibleStridesError> for TensorOpError {
-	fn from(_: IncompatibleStridesError) -> Self {
-		Self::IncompatibleStridesForMerge
-	}
-}
-
-impl From<IncompatibleStridesError> for ErrPack<TensorOpError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: IncompatibleStridesError) -> Self {
-		Self { code: err.into(), extra: None }
 	}
 }
 
