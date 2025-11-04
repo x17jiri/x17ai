@@ -11,6 +11,7 @@ use std::ptr::NonNull;
 
 use crate::tensor::dim_index::DimIndexOutOfBoundsError;
 use crate::tensor::dim_merger::{self, ReshapeError};
+use crate::util::universal_range::UniversalRange;
 
 use super::DType;
 
@@ -263,25 +264,14 @@ impl Map {
 			slice[i].write(old_slice[i]);
 		}
 		slice[n_keep].write(merged);
-		let dims = unsafe { dims.assume_init() };
 
+		let dims = unsafe { dims.assume_init() };
 		Ok(Self { dims, offset: 0, dtype: self.dtype })
 	}
 
 	/// Merges all dimensions into a single dimension.
 	pub fn merge_all_dims(&self) -> Result<Self, ReshapeError> {
-		let (merged, rest) = dim_merger::merge_dims(self.dims.as_slice());
-		if (!rest.is_empty()) {
-			cold_path();
-			return Err(ReshapeError);
-		}
-
-		let mut dims = DimVecBuilder::new(1);
-		let slice = dims.as_slice_mut();
-		slice[0].write(merged);
-
-		let dims = unsafe { dims.assume_init() };
-		Ok(Self { dims, offset: 0, dtype: self.dtype })
+		self.merge_dims(self.ndim())
 	}
 
 	pub fn reshape_dims(&self, n: usize, to_shape: &[usize]) -> Result<Self, ReshapeError> {
@@ -320,6 +310,10 @@ impl Map {
 	}
 
 	pub fn select(&self, dim: usize, index: usize) -> Result<Self, SelectError> {
+		self.narrow(dim, UniversalRange::Index(index))
+	}
+
+	pub fn narrow(&self, dim: usize, range: UniversalRange) -> Result<Self, SelectError> {
 		let old_slice = self.dims.as_slice();
 
 		let Some(removed_dim) = old_slice.get(dim) else {
