@@ -158,63 +158,24 @@ impl<const N: usize> DimMerger<N> {
 
 //--------------------------------------------------------------------------------------------------
 
-#[allow(clippy::redundant_else)]
-#[inline(never)]
-fn merge_impl(input: &[SizeAndStride]) -> (SizeAndStride, &[SizeAndStride]) {
-	let ndim = input.len();
-
-	let mut merged = SizeAndStride { size: 1, stride: 1 };
-	for index_from_end in 1..=ndim {
-		let dim = input[input.len() - index_from_end];
-
-		if dim.size > 1 {
-			if dim.stride == merged.size * merged.stride {
-				merged.size *= dim.size;
-			} else {
-				cold_path();
-				if merged.size != 1 {
-					return (merged, &input[..input.len() - index_from_end + 1]);
-				}
-				merged = dim;
-			}
-		} else {
-			cold_path();
-			if dim.size < 1 {
-				cold_path();
-				break;
-			} else {
-				// next_dim.size == 1, we can ignore it
-			}
-		}
-	}
-
-	Ok(())
-}
-
-#[allow(clippy::collapsible_else_if)]
 pub fn merge_dims(dims: &[SizeAndStride]) -> (SizeAndStride, &[SizeAndStride]) {
 	let mut i = dims.len();
-	if i == 0 {
-		return (SizeAndStride { size: 1, stride: 0 }, dims);
-	}
-
-	i -= 1;
-	let mut merged = *unsafe { dims.get_unchecked(i) };
-	while i > 0 {
+	let mut merged = SizeAndStride { size: 1, stride: 0 };
+	if i > 0 {
 		i -= 1;
-		let dim = *unsafe { dims.get_unchecked(i) };
+		merged = *unsafe { dims.get_unchecked(i) };
+		while i > 0 {
+			i -= 1;
+			let dim = *unsafe { dims.get_unchecked(i) };
 
-		if dim.stride == merged.size * merged.stride || dim.size <= 1 {
-			merged.size *= dim.size;
-		} else {
-			if merged.size == 1 {
-				merged = dim;
-			} else if merged.size > 1 {
-				return (merged, unsafe { dims.get_unchecked(..=i) });
-			} else {
-				// merged.size == 0 => will stay 0
-				break;
+			if dim.stride != merged.size * merged.stride && dim.size > 1 {
+				if merged.size > 1 {
+					return (merged, unsafe { dims.get_unchecked(0..=i) });
+				}
+				merged.stride = dim.stride;
 			}
+
+			merged.size *= dim.size;
 		}
 	}
 	(merged, unsafe { dims.get_unchecked(0..0) })
