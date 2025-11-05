@@ -974,8 +974,7 @@ where
 	[(); E::SCALAR_COUNT]:,
 	[(); E::KEY_WORDS]:,
 	[(); DynKernelCall::dtype_config_words(E::ELEMWISE_COUNT + E::REDUCE_COUNT)]:,
-	[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
-	// DTYPE_CONFIG_WORDS >= dtype_config_words()
+	[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:, // DTYPE_CONFIG_WORDS >= dtype_config_words()
 	[(); E::DTYPE_CONFIG_WORDS
 		- DynKernelCall::dtype_config_words(E::ELEMWISE_COUNT + E::REDUCE_COUNT)]:,
 {

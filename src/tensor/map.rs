@@ -59,14 +59,14 @@ impl StrideCounter {
 		Self { elems: stride, nonzero_elems: 1 }
 	}
 
-	pub fn prepend_dim(&mut self, size: usize) -> Result<SizeAndStride, ElementsOverflowError> {
+	pub fn prepend_dim(&mut self, size: usize) -> Result<SizeAndStride, TensorSizeOverflowError> {
 		// Check that if we ignore zero length dimensions, the number of elements does not
 		// overflow. This is done to make sure our calculations would not overflow even if we
 		// had the same dimensions but in different order.
 		if likely(size != 0) {
 			let Some(e) = self.nonzero_elems.checked_mul(size) else {
 				cold_path();
-				return Err(ElementsOverflowError);
+				return Err(TensorSizeOverflowError);
 			};
 			self.nonzero_elems = e;
 		}
@@ -124,7 +124,7 @@ pub struct Map {
 }
 
 impl Map {
-	pub fn new(shape: &[usize], dtype: DType) -> Result<(Self, usize), ElementsOverflowError> {
+	pub fn new(shape: &[usize], dtype: DType) -> Result<(Self, usize), TensorSizeOverflowError> {
 		let mut dims = DimVecBuilder::new(shape.len());
 		let slice = dims.as_slice_mut();
 
@@ -133,14 +133,18 @@ impl Map {
 			dim.write(stride_counter.prepend_dim(size)?);
 		}
 		let elems = stride_counter.elems();
+		let Some(bytes) = dtype.array_bytes(elems) else {
+			cold_path();
+			return Err(TensorSizeOverflowError);
+		};
 
 		let dims = unsafe { dims.assume_init() };
-		Ok((Self { dims, offset: 0, dtype }, elems))
+		Ok((Self { dims, offset: 0, dtype }, bytes))
 	}
 
 	// NOTE: This is not a clone. We keep dimension sizes, but
 	// initialize strides so the new map is contiguous.
-	pub fn new_like(&self, dtype: DType) -> (Self, usize) {
+	pub fn new_like(&self, dtype: DType) -> Result<(Self, usize), TensorSizeOverflowError> {
 		let src_slice = self.dims.as_slice();
 
 		let mut dims = DimVecBuilder::new(src_slice.len());
@@ -151,9 +155,13 @@ impl Map {
 			dim.write(stride_counter.prepend_dim(src_dim.size));
 		}
 		let elems = stride_counter.elems();
+		let Some(bytes) = dtype.array_bytes(elems) else {
+			cold_path();
+			return Err(TensorSizeOverflowError);
+		};
 
 		let dims = unsafe { dims.assume_init() };
-		(Self { dims, offset: 0, dtype }, elems)
+		Ok((Self { dims, offset: 0, dtype }, bytes))
 	}
 
 	pub fn new_replace_tail(
@@ -161,7 +169,7 @@ impl Map {
 		tail_len: usize,
 		replace_with: &[usize],
 		dtype: DType,
-	) -> Result<(Self, usize), ElementsOverflowError> {
+	) -> Result<(Self, usize), TensorSizeOverflowError> {
 		let src_slice = self.dims.as_slice();
 		let n_keep = src_slice.len().saturating_sub(tail_len);
 		let src_slice = unsafe { &src_slice.get_unchecked(..n_keep) };
@@ -180,9 +188,13 @@ impl Map {
 			dim.write(stride_counter.prepend_dim(src_dim.size)?);
 		}
 		let elems = stride_counter.elems();
+		let Some(bytes) = dtype.array_bytes(elems) else {
+			cold_path();
+			return Err(TensorSizeOverflowError);
+		};
 
 		let dims = unsafe { dims.assume_init() };
-		Ok((Self { dims, offset: 0, dtype }, elems))
+		Ok((Self { dims, offset: 0, dtype }, bytes))
 	}
 
 	pub fn split_last_n<const N: usize>(
@@ -204,6 +216,10 @@ impl Map {
 
 	pub fn offset(&self) -> usize {
 		self.offset
+	}
+
+	pub fn offset_bytes(&self) -> usize {
+		unsafe { self.dtype.array_bytes_unchecked(self.offset) }
 	}
 
 	pub fn dtype(&self) -> DType {
@@ -293,10 +309,11 @@ impl Map {
 				});
 			}
 			dim_merger::reshape_dims(
-				old_slice.get_unchecked(n_keep..),
-				new_slice.get_unchecked_mut(n_keep..),
+				dim_merger::merge_dims(old_slice.get_unchecked(n_keep..)),
+				to_shape,
+				std::ptr::from_mut(new_slice.get_unchecked_mut(n_keep)),
 			)?;
-			new_dims.assume_init();
+			new_dims.assume_init()
 		};
 		Ok(Self { dims, offset: 0, dtype: self.dtype })
 	}
@@ -310,10 +327,6 @@ impl Map {
 	}
 
 	pub fn select(&self, dim: usize, index: usize) -> Result<Self, SelectError> {
-		self.narrow(dim, UniversalRange::Index(index))
-	}
-
-	pub fn narrow(&self, dim: usize, range: UniversalRange) -> Result<Self, SelectError> {
 		let old_slice = self.dims.as_slice();
 
 		let Some(removed_dim) = old_slice.get(dim) else {
@@ -343,6 +356,10 @@ impl Map {
 			offset: self.offset + index * removed_dim.stride,
 			dtype: self.dtype,
 		})
+	}
+
+	pub fn narrow(&self, _dim: usize, _range: UniversalRange) -> Result<Self, SelectError> {
+		todo!();
 	}
 }
 
@@ -510,6 +527,6 @@ pub struct InvalidNDimError;
 /// The total nubmer of elements in a tensor is larger than the maximum allowed.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct ElementsOverflowError;
+pub struct TensorSizeOverflowError;
 
 //--------------------------------------------------------------------------------------------------

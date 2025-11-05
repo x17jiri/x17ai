@@ -70,7 +70,7 @@ impl OptParam {
 	) -> Result<Self, ErrPack<TensorOpError>> {
 		let value_orig_shape = value;
 		let value = value_orig_shape.merge_all_dims().unwrap(); // if fails, tensor is not contiguous
-		let value = value.reshape_last_dim([parts, part_elems]).unwrap();
+		let value = value.reshape_last_dim(&[parts, part_elems]).unwrap();
 
 		let momentum_dtype = common_dtype(value.dtype(), momentum_dtype)?;
 		let m = value.new_empty_like(momentum_dtype)?;
@@ -124,7 +124,7 @@ impl OptParam {
 			return Ok(()); // we didn't get gradient this step; nothing to do
 		};
 		let grad = grad.merge_all_dims()?;
-		let grad = grad.reshape_last_dim([self.parts, self.part_elems])?;
+		let grad = grad.reshape_last_dim(&[self.parts, self.part_elems])?;
 
 		// Update the first moment estimate
 		self.m.assign(custom_kernel!(

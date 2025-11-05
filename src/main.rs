@@ -168,7 +168,6 @@ use x17ai::rng::Rng;
 use x17ai::tensor::device::cpu::CPUDevice;
 use x17ai::tensor::device::cuda::CudaDevice;
 use x17ai::tensor::device::kernel;
-use x17ai::tensor::generic::GenericTensor;
 use x17ai::tensor::math::{col, mat, row};
 use x17ai::tensor::{Device, HasDType, Tensor, TensorOpError};
 use x17ai::{ErrPack, custom_kernel, tensor};
@@ -245,7 +244,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let dev = CPUDevice::new();
 	let internal_dtype = f32::dtype;
 	let momentum_dtype = f32::dtype;
-	let lit = GenericTensor::literal_factory::<f32>(dev.clone());
+	let lit = Tensor::literal_factory::<f32>(dev.clone());
 	let mut mctx = ModelContext::new(dev.clone());
 
 	let mut lin1 = Linear::new(3, 5, f32::dtype, internal_dtype, &mut mctx)?;
@@ -257,7 +256,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 
 	let loss_layer = CrossEntropy::new(internal_dtype);
 
-	let input = GenericTensor::new_empty_on(&[2, 3], f32::dtype, dev.clone())?;
+	let input = Tensor::new_empty_on(&[2, 3], f32::dtype, dev.clone())?;
 	input.randn_(&mut rng)?;
 
 	let expected = lit.new_2d(&[[1.0, 0.0], [0.0, 1.0]])?;

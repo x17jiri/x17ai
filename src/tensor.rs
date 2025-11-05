@@ -11,8 +11,9 @@ use std::rc::Rc;
 
 use crate::ErrPack;
 use crate::rng::Rng;
+use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
 use crate::tensor::dim_merger::ReshapeError;
-use crate::tensor::error::InvalidBufferSizeError;
+use crate::tensor::error::{InvalidBufferSizeError, UnsupportedDTypeError};
 use crate::tensor::map::SelectError;
 use crate::util::LossyFrom;
 use crate::util::mycell::{self};
@@ -67,8 +68,8 @@ impl Tensor {
 		dtype: DType,
 		device: Rc<dyn Device>,
 	) -> Result<Self, ErrPack<TensorOpError>> {
-		let (map, elems) = shape.to_map(dtype)?;
-		let buf = device.new_buffer(dtype, elems)?;
+		let (map, bytes) = shape.to_map(dtype)?;
+		let buf = device.new_buffer(bytes)?;
 
 		// SAFETY: We created the buffer to be as big as the mapping.
 		Ok(unsafe { Self::new_unchecked(map, buf) })
@@ -85,8 +86,8 @@ impl Tensor {
 
 	/// Allocate a new tensor on the same device and with the same shape as `self`.
 	pub fn new_empty_like(&self, dtype: DType) -> Result<Self, ErrPack<TensorOpError>> {
-		let (map, elems) = self.map().new_like(dtype);
-		let buf = self.rc_device().new_buffer(dtype, elems)?;
+		let (map, bytes) = self.map().new_like(dtype)?;
+		let buf = self.rc_device().new_buffer(bytes)?;
 
 		// SAFETY: We created the buffer to be as big as the mapping.
 		Ok(unsafe { Self::new_unchecked(map, buf) })
@@ -120,8 +121,8 @@ impl Tensor {
 		replace_with: &[usize],
 		dtype: DType,
 	) -> Result<Self, ErrPack<TensorOpError>> {
-		let (map, elems) = self.map().new_replace_tail(tail_len, replace_with, dtype)?;
-		let buf = self.rc_device().new_buffer(dtype, elems)?;
+		let (map, bytes) = self.map().new_replace_tail(tail_len, replace_with, dtype)?;
+		let buf = self.rc_device().new_buffer(bytes)?;
 
 		// SAFETY: We created the buffer to be as big as the mapping.
 		Ok(unsafe { Self::new_unchecked(map, buf) })
@@ -161,7 +162,32 @@ impl Tensor {
 			return Err(IndexOutOfBoundsError.into());
 		}
 		let buf = self.buf().try_borrow()?;
-		unsafe { self.device().read_float(&buf, self.map().offset()) }
+		match self.dtype() {
+			f32::dtype => unsafe {
+				let mut value: f32 = 0.0;
+				self.device().download_data(
+					&buf,
+					NonNull::from_mut(&mut value).cast(),
+					self.map().offset_bytes(),
+					std::mem::size_of::<f32>(),
+				)?;
+				Ok(value.to_f64())
+			},
+			f64::dtype => unsafe {
+				let mut value: f64 = 0.0;
+				self.device().download_data(
+					&buf,
+					NonNull::from_mut(&mut value).cast(),
+					self.map().offset_bytes(),
+					std::mem::size_of::<f64>(),
+				)?;
+				Ok(value)
+			},
+			_ => {
+				cold_path();
+				Err(UnsupportedDTypeError.into())
+			},
+		}
 	}
 
 	/// Sometimes we want to calculate the mean of the last dimension,

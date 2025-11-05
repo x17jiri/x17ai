@@ -9,8 +9,9 @@ use std::hint::cold_path;
 
 use crate::tensor::device::MatMulArgs;
 use crate::tensor::device::cpu::CPUDevice;
-use crate::tensor::device::dtype::common_dtype;
+use crate::tensor::device::dtype::{DTypeMismatchError, common_dtype};
 use crate::tensor::dim_merger::DimMerger;
+use crate::tensor::error::ShapeMismatchError;
 use crate::tensor::map::{NotEnoughDimensionsError, SizeAndStride};
 use crate::tensor::{DType, HasDType, Tensor, TensorOpError};
 use crate::util::mycell::UnsafeBorrowFailFlag;
@@ -88,7 +89,7 @@ impl<'a> Matrix<'a> {
 }
 
 pub fn mat<'a>(tensor: &'a Tensor) -> Result<Matrix<'a>, NotEnoughDimensionsError> {
-	let dims = tensor.map().dims.as_slice();
+	let dims = tensor.map().dims();
 	if dims.len() < 2 {
 		cold_path();
 		Err(NotEnoughDimensionsError)
@@ -121,7 +122,7 @@ impl<'a> RowMatrix<'a> {
 }
 
 pub fn row<'a>(tensor: &'a Tensor) -> Result<RowMatrix<'a>, NotEnoughDimensionsError> {
-	let dims = tensor.map().dims.as_slice();
+	let dims = tensor.map().dims();
 	#[allow(clippy::len_zero)]
 	if dims.len() < 1 {
 		cold_path();
@@ -162,7 +163,7 @@ impl<'a> ColMatrix<'a> {
 }
 
 pub fn col<'a>(tensor: &'a Tensor) -> Result<ColMatrix<'a>, NotEnoughDimensionsError> {
-	let dims = tensor.map().dims.as_slice();
+	let dims = tensor.map().dims();
 	#[allow(clippy::len_zero)]
 	if dims.len() < 1 {
 		cold_path();
@@ -244,15 +245,12 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 			|| !to.batch_dims.is_empty()
 		{
 			cold_path();
-			return Err(TensorOpError::shape_mismatch());
+			return Err(ShapeMismatchError.into());
 		}
 		if to.tensor.dtype() != row.tensor.dtype() || to.tensor.dtype() != col.tensor.dtype() {
 			cold_path();
-			return Err(TensorOpError::dtype_mismatch());
+			return Err(DTypeMismatchError.into());
 		}
-		debug_assert!(col.tensor.ensure_safe().is_ok());
-		debug_assert!(row.tensor.ensure_safe().is_ok());
-		debug_assert!(to.tensor.ensure_safe().is_ok());
 
 		let dims = DimMerger::merge::<1>([col.batch_dims, row.batch_dims])?;
 		let col_cols = dims[0].get(0);
@@ -269,21 +267,21 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 			o_col_stride: to.cols.stride,
 			o_rows: to.rows.size,
 			o_cols: to.cols.size,
-			o_offset: to.tensor.map().offset,
+			o_offset: to.tensor.map().offset(),
 			o_buf: to_borrow.device_ptr(),
 
 			a_row_stride: col.rows.stride,
 			a_col_stride: col_cols.stride,
 			// a_rows == o_rows
 			a_cols: col_cols.size,
-			a_offset: col.tensor.map().offset,
+			a_offset: col.tensor.map().offset(),
 			a_buf: col_borrow.device_ptr(),
 
 			b_row_stride: row_rows.stride,
 			b_col_stride: row.cols.stride,
 			// b_rows == a_cols - this condition is ensured by DimMerger
 			// b_cols == o_cols
-			b_offset: row.tensor.map().offset,
+			b_offset: row.tensor.map().offset(),
 			b_buf: row_borrow.device_ptr(),
 
 			o_dtype: to.tensor.dtype(),
@@ -291,9 +289,9 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 			b_dtype: row.tensor.dtype(),
 			internal_dtype,
 
-			o_buf_elems: to_borrow.elems(),
-			a_buf_elems: col_borrow.elems(),
-			b_buf_elems: row_borrow.elems(),
+			o_buf_bytes: to_borrow.byte_len(),
+			a_buf_bytes: col_borrow.byte_len(),
+			b_buf_bytes: row_borrow.byte_len(),
 		};
 
 		let device = to_borrow.device();
@@ -318,15 +316,12 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 			|| !mat.batch_dims.is_empty()
 		{
 			cold_path();
-			return Err(TensorOpError::shape_mismatch());
+			return Err(ShapeMismatchError.into());
 		}
 		if to.tensor.dtype() != mat.tensor.dtype() || to.tensor.dtype() != col.tensor.dtype() {
 			cold_path();
-			return Err(TensorOpError::dtype_mismatch());
+			return Err(DTypeMismatchError.into());
 		}
-		debug_assert!(mat.tensor.ensure_safe().is_ok());
-		debug_assert!(col.tensor.ensure_safe().is_ok());
-		debug_assert!(to.tensor.ensure_safe().is_ok());
 
 		let dims = DimMerger::merge::<1>([to.batch_dims, col.batch_dims])?;
 		let to_cols = dims[0].get(0);
@@ -343,21 +338,21 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 			o_col_stride: to_cols.stride,
 			o_rows: to.rows.size,
 			o_cols: to_cols.size,
-			o_offset: to.tensor.map().offset,
+			o_offset: to.tensor.map().offset(),
 			o_buf: to_borrow.device_ptr(),
 
 			a_row_stride: mat.rows.stride,
 			a_col_stride: mat.cols.stride,
 			// a_rows == o_rows
 			a_cols: mat.cols.size,
-			a_offset: mat.tensor.map().offset,
+			a_offset: mat.tensor.map().offset(),
 			a_buf: mat_borrow.device_ptr(),
 
 			b_row_stride: col.rows.stride,
 			b_col_stride: col_cols.stride,
 			// b_rows == a_cols
 			// b_cols == o_cols
-			b_offset: col.tensor.map().offset,
+			b_offset: col.tensor.map().offset(),
 			b_buf: col_borrow.device_ptr(),
 
 			o_dtype: to.tensor.dtype(),
@@ -365,9 +360,9 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 			b_dtype: col.tensor.dtype(),
 			internal_dtype,
 
-			o_buf_elems: to_borrow.elems(),
-			a_buf_elems: mat_borrow.elems(),
-			b_buf_elems: col_borrow.elems(),
+			o_buf_bytes: to_borrow.byte_len(),
+			a_buf_bytes: mat_borrow.byte_len(),
+			b_buf_bytes: col_borrow.byte_len(),
 		};
 
 		let device = to_borrow.device();

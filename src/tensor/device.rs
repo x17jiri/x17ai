@@ -101,9 +101,9 @@ pub struct MatMulArgs {
 	pub b_dtype: DType,
 	pub internal_dtype: DType,
 
-	pub o_buf_elems: usize,
-	pub a_buf_elems: usize,
-	pub b_buf_elems: usize,
+	pub o_buf_bytes: usize,
+	pub a_buf_bytes: usize,
+	pub b_buf_bytes: usize,
 }
 
 #[repr(C)]
@@ -140,10 +140,10 @@ pub struct AttentionArgs {
 	pub o_item_stride: usize,
 	pub o: DevicePtr, // [q_count, head_count, v_width]
 
-	pub q_buf_elems: usize,
-	pub k_buf_elems: usize,
-	pub v_buf_elems: usize,
-	pub o_buf_elems: usize,
+	pub q_buf_bytes: usize,
+	pub k_buf_bytes: usize,
+	pub v_buf_bytes: usize,
+	pub o_buf_bytes: usize,
 	pub dtype: DType,
 }
 

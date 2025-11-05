@@ -16,9 +16,11 @@ use crate::nn::Param;
 use crate::nn::fragments::Fragment;
 use crate::rng::Rng;
 use crate::tensor::device::AttentionArgs;
+use crate::tensor::device::dtype::DTypeMismatchError;
 use crate::tensor::dim_merger::DimMerger;
+use crate::tensor::error::{NotContiguousError, ShapeMismatchError};
 use crate::tensor::map::INLINE_DIMS;
-use crate::tensor::{NotContiguousError, Tensor, TensorOpError};
+use crate::tensor::{Tensor, TensorOpError};
 use crate::util::mycell::{UnsafeBorrowFailFlag, UnsafeBorrowMutFailFlag};
 use crate::{ErrPack, autograd};
 
@@ -89,14 +91,10 @@ impl Attention {
 		let (v, _v_backward) = v.into_parts();
 		let o = Self::alloc_output(&q, &k, &v)?;
 
-		q.ensure_safe()?;
-		k.ensure_safe()?;
-		v.ensure_safe()?;
-
-		let (q_batch, q_dims, q_offset) = q.map().nd_split::<3>()?;
-		let (k_batch, k_dims, k_offset) = k.map().nd_split::<3>()?;
-		let (v_batch, v_dims, v_offset) = v.map().nd_split::<3>()?;
-		let (o_batch, o_dims, o_offset) = o.map().nd_split::<3>()?;
+		let (q_batch, q_dims, q_offset) = q.map().split_last_n::<3>()?;
+		let (k_batch, k_dims, k_offset) = k.map().split_last_n::<3>()?;
+		let (v_batch, v_dims, v_offset) = v.map().split_last_n::<3>()?;
+		let (o_batch, o_dims, o_offset) = o.map().split_last_n::<3>()?;
 
 		let [q_count, q_heads, q_width] = q_dims;
 		let [k_count, k_heads, k_width] = k_dims;
@@ -115,7 +113,7 @@ impl Attention {
 			|| o_width.size != v_width.size
 		{
 			cold_path();
-			return Err(TensorOpError::shape_mismatch());
+			return Err(ShapeMismatchError.into());
 		}
 		if !q_width.is_contiguous()
 			|| !k_width.is_contiguous()
@@ -127,7 +125,7 @@ impl Attention {
 		}
 		if q.dtype() != k.dtype() || q.dtype() != v.dtype() || q.dtype() != o.dtype() {
 			cold_path();
-			return Err(TensorOpError::dtype_mismatch());
+			return Err(DTypeMismatchError.into());
 		}
 
 		let mut args = AttentionArgs {
@@ -163,10 +161,10 @@ impl Attention {
 			o_head_stride: o_heads.stride,
 			o: o.buf().device_ptr(),
 
-			q_buf_elems: q.buf().elems(),
-			k_buf_elems: k.buf().elems(),
-			v_buf_elems: v.buf().elems(),
-			o_buf_elems: o.buf().elems(),
+			q_buf_bytes: q.buf().byte_len(),
+			k_buf_bytes: k.buf().byte_len(),
+			v_buf_bytes: v.buf().byte_len(),
+			o_buf_bytes: o.buf().byte_len(),
 			dtype: q.dtype(),
 		};
 

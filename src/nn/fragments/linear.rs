@@ -235,7 +235,7 @@ impl UnaryFragment for MultiheadLinear {
 		let (out, backward_fn) = out_node.into_parts();
 
 		// [..., heads * outputs] -> [..., heads, outputs]
-		let out = out.reshape_last_dim(self.output_shape)?;
+		let out = out.reshape_last_dim(&self.output_shape)?;
 
 		let backward_fn = backward_fn.map(|inp_backward| {
 			Box::new(MultiheadLinearBackwardFn { inp_backward }) as Box<dyn BackwardFn>
@@ -257,7 +257,7 @@ impl BackwardFn for MultiheadLinearBackwardFn {
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let Self { inp_backward } = Box::into_inner(self);
 		// [..., heads, outputs] -> [..., heads * outputs]
-		let d_out = d_out.merge_dims::<2>()?;
+		let d_out = d_out.merge_dims(2)?;
 		queue.add(inp_backward, d_out);
 		Ok(())
 	}

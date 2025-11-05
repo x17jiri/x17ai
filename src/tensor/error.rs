@@ -7,6 +7,8 @@
 
 use std::borrow::Cow;
 
+use crate::tensor::dim_merger::ReshapeError;
+use crate::tensor::map::SelectError;
 use crate::util::mycell::{BorrowError, BorrowMutError};
 use crate::{ErrExtra, ErrPack};
 
@@ -14,7 +16,7 @@ use super::device::DevBufAllocFailedError;
 use super::device::dtype::DTypeMismatchError;
 use super::dim_index::DimIndexOutOfBoundsError;
 use super::dim_merger::{DimMergerError, DimsDontMatchError, TooManyMergedDimensionsError};
-use super::map::{ElementsOverflowError, IndexOutOfBoundsError, NotEnoughDimensionsError};
+use super::map::{IndexOutOfBoundsError, NotEnoughDimensionsError, TensorSizeOverflowError};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -37,6 +39,10 @@ pub struct CannotBroadcastOutputError;
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct InvalidBufferSizeError;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ShapeMismatchError;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -65,6 +71,7 @@ pub enum TensorOpError {
 	InvalidDType,
 	InvalidDevice,
 	InvalidBufferSize,
+	InvalidReshape,
 	IOError,
 	DeviceError,
 }
@@ -179,14 +186,14 @@ impl From<NotEnoughDimensionsError> for ErrPack<TensorOpError> {
 	}
 }
 
-impl From<ElementsOverflowError> for TensorOpError {
-	fn from(_: ElementsOverflowError) -> Self {
+impl From<TensorSizeOverflowError> for TensorOpError {
+	fn from(_: TensorSizeOverflowError) -> Self {
 		Self::ElementsOverflow
 	}
 }
 
-impl From<ElementsOverflowError> for ErrPack<TensorOpError> {
-	fn from(_: ElementsOverflowError) -> Self {
+impl From<TensorSizeOverflowError> for ErrPack<TensorOpError> {
+	fn from(_: TensorSizeOverflowError) -> Self {
 		Self {
 			code: TensorOpError::ElementsOverflow,
 			extra: None,
@@ -285,6 +292,15 @@ impl From<DTypeMismatchError> for ErrPack<TensorOpError> {
 	}
 }
 
+impl From<ShapeMismatchError> for ErrPack<TensorOpError> {
+	fn from(_: ShapeMismatchError) -> Self {
+		Self {
+			code: TensorOpError::ShapeMismatch,
+			extra: None,
+		}
+	}
+}
+
 impl From<UnsupportedDTypeError> for ErrPack<TensorOpError> {
 	fn from(_: UnsupportedDTypeError) -> Self {
 		Self {
@@ -317,6 +333,32 @@ impl From<InvalidBufferSizeError> for ErrPack<TensorOpError> {
 		Self {
 			code: TensorOpError::InvalidBufferSize,
 			extra: None,
+		}
+	}
+}
+
+impl From<ReshapeError> for ErrPack<TensorOpError> {
+	fn from(_: ReshapeError) -> Self {
+		Self {
+			code: TensorOpError::InvalidReshape,
+			extra: None,
+		}
+	}
+}
+
+impl From<SelectError> for ErrPack<TensorOpError> {
+	#[cold]
+	#[inline(never)]
+	fn from(err: SelectError) -> Self {
+		match err {
+			SelectError::DimIndexOutOfBounds => Self {
+				code: TensorOpError::DimIndexOutOfBounds,
+				extra: None,
+			},
+			SelectError::IndexOutOfBounds => Self {
+				code: TensorOpError::IndexOutOfBounds,
+				extra: None,
+			},
 		}
 	}
 }

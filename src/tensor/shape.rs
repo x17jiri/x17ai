@@ -6,40 +6,45 @@
 //------------------------------------------------------------------------------
 
 use super::DType;
-use super::map::{ElementsOverflowError, Map};
+use super::map::{Map, TensorSizeOverflowError};
 
 //--------------------------------------------------------------------------------------------------
 
 pub trait Shape {
-	fn to_map(self, dtype: DType) -> Result<(Map, usize), ElementsOverflowError>;
+	/// Converts the shape to a `Map` with the specified `dtype`.
+	///
+	/// The new map is contiguous and has the same number of elements as specified by the shape.
+	///
+	/// Returns the new map and required buffer size in bytes.
+	fn to_map(self, dtype: DType) -> Result<(Map, usize), TensorSizeOverflowError>;
 }
 
 impl Shape for &Map {
-	fn to_map(self, dtype: DType) -> Result<(Map, usize), ElementsOverflowError> {
-		Ok(self.new_like(dtype))
+	fn to_map(self, dtype: DType) -> Result<(Map, usize), TensorSizeOverflowError> {
+		self.new_like(dtype)
 	}
 }
 
 impl Shape for &[usize] {
-	fn to_map(self, dtype: DType) -> Result<(Map, usize), ElementsOverflowError> {
+	fn to_map(self, dtype: DType) -> Result<(Map, usize), TensorSizeOverflowError> {
 		Map::new(self, dtype)
 	}
 }
 
 impl<const N: usize> Shape for &[usize; N] {
-	fn to_map(self, dtype: DType) -> Result<(Map, usize), ElementsOverflowError> {
+	fn to_map(self, dtype: DType) -> Result<(Map, usize), TensorSizeOverflowError> {
 		Map::new(self, dtype)
 	}
 }
 
 impl Shape for &mut [usize] {
-	fn to_map(self, dtype: DType) -> Result<(Map, usize), ElementsOverflowError> {
+	fn to_map(self, dtype: DType) -> Result<(Map, usize), TensorSizeOverflowError> {
 		Map::new(self, dtype)
 	}
 }
 
 impl<const N: usize> Shape for &mut [usize; N] {
-	fn to_map(self, dtype: DType) -> Result<(Map, usize), ElementsOverflowError> {
+	fn to_map(self, dtype: DType) -> Result<(Map, usize), TensorSizeOverflowError> {
 		Map::new(self, dtype)
 	}
 }
