@@ -12,10 +12,6 @@ use super::map::SizeAndStride;
 
 //--------------------------------------------------------------------------------------------------
 
-// TODO - could this be more efficient if it worked similar to the
-// `merge_dims(dims: &[SizeAndStride]) -> (SizeAndStride, &[SizeAndStride])` function?
-// I.e., processing as much as possible in 1 dim and returning the rest?
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MergedDim<const N: usize> {
 	pub size: usize,
@@ -59,13 +55,12 @@ pub struct ReshapeError;
 pub struct DimMerger<'a, const N: usize> {
 	inputs: [&'a [SizeAndStride]; N],
 	i: usize,
-	n: usize,
 }
 
 impl<'a, const N: usize> DimMerger<'a, N> {
 	pub fn new(inputs: [&'a [SizeAndStride]; N]) -> Self {
 		let n = inputs.iter().map(|inp| inp.len()).max().unwrap_or(0);
-		Self { inputs, i: n, n }
+		Self { inputs, i: n }
 	}
 
 	pub fn load_joint_dims(inputs: [&[SizeAndStride]; N], i: usize) -> [SizeAndStride; N] {
@@ -100,10 +95,12 @@ impl<'a, const N: usize> DimMerger<'a, N> {
 	}
 
 	#[allow(clippy::redundant_else)]
+	#[allow(clippy::should_implement_trait)]
+	#[allow(clippy::indexing_slicing)]
 	#[inline(never)]
 	pub fn next<const K: usize>(&mut self) -> Result<[MergedDim<N>; K], DimsDontMatchError> {
-		let mut i = self.i;
 		let mut result = [MergedDim { size: 1, strides: [0; N] }; K];
+		let mut i = self.i;
 		if i > 0 && K > 0 {
 			i -= 1;
 			let mut k = K - 1;
@@ -132,8 +129,8 @@ impl<'a, const N: usize> DimMerger<'a, N> {
 
 				merged.size *= joint_dim.size;
 			}
+			self.i = i;
 		}
-		self.i = i;
 		Ok(result)
 	}
 
@@ -176,7 +173,9 @@ pub fn merge_dims(dims: &[SizeAndStride]) -> (SizeAndStride, &[SizeAndStride]) {
 	(merged, unsafe { dims.get_unchecked(0..0) })
 }
 
-pub fn reshape_dims(
+//--------------------------------------------------------------------------------------------------
+
+pub unsafe fn reshape_dims(
 	(mut inp, mut rest_inp): (SizeAndStride, &[SizeAndStride]),
 	to: &[usize],
 	dims: *mut MaybeUninit<SizeAndStride>,

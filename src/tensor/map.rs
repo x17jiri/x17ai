@@ -24,12 +24,12 @@ pub struct SizeAndStride {
 }
 
 impl SizeAndStride {
-	/// Returns true if the dimension can be treated as contiguous.
+	// TODO
 	pub fn is_contiguous(&self) -> bool {
 		self.size <= 1 || self.stride == 1
 	}
 
-	/// Returns true if the dimension is broadcasted.
+	// TODO
 	pub fn is_broadcasted(&self) -> bool {
 		self.size > 1 && self.stride == 0
 	}
