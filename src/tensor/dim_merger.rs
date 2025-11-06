@@ -56,15 +56,36 @@ impl From<TooManyMergedDimensionsError> for DimMergerError {
 #[non_exhaustive]
 pub struct ReshapeError;
 
-pub struct DimMerger<const N: usize>;
+pub struct DimMerger<'a, const N: usize> {
+	inputs: [&'a [SizeAndStride]; N],
+	i: usize,
+	n: usize,
+}
 
-impl<const N: usize> DimMerger<N> {
+impl<'a, const N: usize> DimMerger<'a, N> {
+	pub fn new(inputs: [&'a [SizeAndStride]; N]) -> Self {
+		let n = inputs.iter().map(|inp| inp.len()).max().unwrap_or(0);
+		Self { inputs, i: n, n }
+	}
+
+	pub fn load_joint_dims(inputs: [&[SizeAndStride]; N], i: usize) -> [SizeAndStride; N] {
+		inputs.map(|inp| {
+			if i < inp.len() {
+				unsafe { *inp.get_unchecked(inp.len() - 1 - i) }
+			} else {
+				SizeAndStride { size: 1, stride: 0 }
+			}
+		})
+	}
+
 	/// Finds common size and resets stride to 0 for broadcasted inputs
 	///
 	/// If there are no inputs (N == 0), this function always returns size = 1.
-	pub fn merge_single_dim(dim: [SizeAndStride; N]) -> Result<MergedDim<N>, DimsDontMatchError> {
-		let size = dim.iter().fold(1, |size, inp| if size == 1 { inp.size } else { size });
-		let strides = dim.try_map(|inp| {
+	pub fn broadcast_joint_dims(
+		dims: [SizeAndStride; N],
+	) -> Result<MergedDim<N>, DimsDontMatchError> {
+		let size = dims.iter().fold(1, |size, inp| if size == 1 { inp.size } else { size });
+		let strides = dims.try_map(|inp| {
 			if inp.size == size {
 				Ok(inp.stride)
 			} else {
@@ -78,81 +99,55 @@ impl<const N: usize> DimMerger<N> {
 		Ok(MergedDim { size, strides })
 	}
 
+	#[allow(clippy::redundant_else)]
 	#[inline(never)]
-	fn merge_impl(
-		inputs: [&[SizeAndStride]; N],
-		dims: &mut [MergedDim<N>],
-	) -> Result<(), DimMergerError> {
-		if dims.is_empty() {
-			cold_path();
-			return Err(DimMergerError::TooManyMergedDimensions);
-		}
+	pub fn next<const K: usize>(&mut self) -> Result<[MergedDim<N>; K], DimsDontMatchError> {
+		let mut i = self.i;
+		let mut result = [MergedDim { size: 1, strides: [0; N] }; K];
+		if i > 0 && K > 0 {
+			i -= 1;
+			let mut k = K - 1;
+			let mut merged = unsafe { result.get_unchecked_mut(k) };
+			*merged = Self::broadcast_joint_dims(Self::load_joint_dims(self.inputs, i))?;
+			while i > 0 {
+				i -= 1;
+				let joint_dim = Self::broadcast_joint_dims(Self::load_joint_dims(self.inputs, i))?;
 
-		// Get the max len of the input slices, or 0 if N == 0.
-		let ndim = inputs.iter().map(|inp| inp.len()).max().unwrap_or(0);
-
-		// We assume the caller initialized `dims.last()` with `size == 1` and
-		// `strides = [1; N]`. This way if the real first dimension is contiguous,
-		// we will extend the initial value and not take the cold path in the loop.
-		let mut prev_dim_pos = dims.len() - 1;
-		let mut prev_dim = unsafe { dims.get_unchecked_mut(prev_dim_pos) };
-
-		for index_from_end in 1..=ndim {
-			// Get input data. Some inputs may be shorter. We extend them with dummy dimensions.
-			let next_dim = inputs.map(|inp| {
-				if index_from_end <= inp.len() {
-					// SAFETY: index_from_end >= 1 && index_from_end <= inp.len(),
-					// Unfortunately, Rust generates bounds check with safe code
-					unsafe { *inp.get_unchecked(inp.len() - index_from_end) }
-				} else {
-					SizeAndStride { size: 1, stride: 0 }
-				}
-			});
-
-			// Find common size and reset stride to 0 for broadcasted inputs
-			let next_dim = Self::merge_single_dim(next_dim)?;
-
-			if next_dim.size > 1 {
-				// Can we extend previous dimension?
-				if (0..N).all(|i| next_dim.strides[i] == prev_dim.size * prev_dim.strides[i]) {
-					// Fast path: Extend the previous dimension
-					prev_dim.size *= next_dim.size;
-				} else {
-					// Slow path: Add a new dimension
-					cold_path();
-					if prev_dim.size != 1 {
-						if prev_dim_pos == 0 {
-							cold_path();
-							return Err(DimMergerError::TooManyMergedDimensions);
+				if (0..N).any(|i| joint_dim.strides[i] != merged.size * merged.strides[i])
+					&& joint_dim.size > 1
+				{
+					if merged.size > 1 {
+						if k > 0 {
+							k -= 1;
+							merged = unsafe { result.get_unchecked_mut(k) };
+							*merged = joint_dim;
+							continue;
+						} else {
+							self.i = i + 1;
+							return Ok(result);
 						}
-						prev_dim_pos -= 1;
-						prev_dim = unsafe { dims.get_unchecked_mut(prev_dim_pos) };
 					}
-					*prev_dim = next_dim;
+					merged.strides = joint_dim.strides;
 				}
-			} else {
-				cold_path();
-				#[allow(clippy::redundant_else)]
-				if next_dim.size < 1 {
-					cold_path();
-					prev_dim.size = 0;
-					prev_dim.strides = [0; N];
-					break;
-				} else {
-					// next_dim.size == 1, we can ignore it
-				}
+
+				merged.size *= joint_dim.size;
 			}
 		}
-
-		Ok(())
+		self.i = i;
+		Ok(result)
 	}
 
-	pub fn merge<const K: usize>(
-		inputs: [&[SizeAndStride]; N],
-	) -> Result<[MergedDim<N>; K], DimMergerError> {
-		let mut dims = [MergedDim { size: 1, strides: [1; N] }; K];
-		Self::merge_impl(inputs, &mut dims)?;
-		Ok(dims)
+	pub fn is_done(&self) -> bool {
+		self.i == 0
+	}
+
+	pub fn finish(&self) -> Result<(), TooManyMergedDimensionsError> {
+		if self.i == 0 {
+			Ok(())
+		} else {
+			cold_path();
+			Err(TooManyMergedDimensionsError)
+		}
 	}
 }
 

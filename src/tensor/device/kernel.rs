@@ -759,9 +759,11 @@ where
 	[(); 1 + E + R]:,
 	[(); DynKernelCall::dtype_config_words(E + R)]:,
 {
-	let merged = DimMerger::<{ 1 + E + R }>::merge::<3>(std::array::from_fn(|i| {
+	let mut dim_merger = DimMerger::<{ 1 + E + R }>::new(std::array::from_fn(|i| {
 		if i == 0 { output.map().dims() } else { tensor_args[i - 1].map().dims() }
-	}))?;
+	}));
+	let merged = dim_merger.next::<3>()?;
+	dim_merger.finish()?;
 	if merged.iter().any(|m| m.get(0).is_broadcasted()) {
 		cold_path();
 		return Err(CannotBroadcastOutputError.into());
@@ -871,12 +873,12 @@ where
 	let elem_args_split: [Split; E] = std::array::from_fn(|i| split_last(tensor_args[i]));
 	let reduce_args_split: [Split; R] = std::array::from_fn(|i| split_last(tensor_args[E + i]));
 
-	let reduce_args_top = DimMerger::<R>::merge_single_dim(reduce_args_split.map(|r| r.top))?;
-	let post_reduce_top = DimMerger::<{ 1 + E }>::merge_single_dim(std::array::from_fn(|i| {
+	let reduce_args_top = DimMerger::<R>::broadcast_joint_dims(reduce_args_split.map(|r| r.top))?;
+	let post_reduce_top = DimMerger::<{ 1 + E }>::broadcast_joint_dims(std::array::from_fn(|i| {
 		if i == 0 { output_split.top } else { elem_args_split[i - 1].top }
 	}))?;
 
-	let batch_dims = DimMerger::<{ 1 + E + R }>::merge::<2>(std::array::from_fn(|i| {
+	let mut dim_merger = DimMerger::<{ 1 + E + R }>::new(std::array::from_fn(|i| {
 		if i == 0 {
 			output_split.batch
 		} else if i <= E {
@@ -884,7 +886,9 @@ where
 		} else {
 			reduce_args_split[i - 1 - E].batch
 		}
-	}))?;
+	}));
+	let batch_dims = dim_merger.next::<2>()?;
+	dim_merger.finish()?;
 
 	let output_top = post_reduce_top.get(0);
 	let output_batch = batch_dims.map(|m| m.get(0));

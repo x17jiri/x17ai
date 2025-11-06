@@ -5,7 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
-use crate::tensor::generic::map::SizeAndStride;
+use crate::tensor::map::SizeAndStride;
 
 use super::super::dim_merger::*;
 

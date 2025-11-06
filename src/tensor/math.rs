@@ -252,7 +252,9 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 			return Err(DTypeMismatchError.into());
 		}
 
-		let dims = DimMerger::merge::<1>([col.batch_dims, row.batch_dims])?;
+		let mut dim_merger = DimMerger::<2>::new([col.batch_dims, row.batch_dims]);
+		let dims = dim_merger.next::<1>()?;
+		dim_merger.finish()?;
 		let col_cols = dims[0].get(0);
 		let row_rows = dims[0].get(1);
 
@@ -323,7 +325,9 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 			return Err(DTypeMismatchError.into());
 		}
 
-		let dims = DimMerger::merge::<1>([to.batch_dims, col.batch_dims])?;
+		let mut dim_merger = DimMerger::<2>::new([to.batch_dims, col.batch_dims]);
+		let dims = dim_merger.next::<1>()?;
+		dim_merger.finish()?;
 		let to_cols = dims[0].get(0);
 		let col_cols = dims[0].get(1);
 

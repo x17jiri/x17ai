@@ -186,7 +186,9 @@ impl Attention {
 			let _o_borrow = unsafe { o.buf().unsafe_borrow_mut(&mut out_fail) };
 			out_fail.check()?;
 
-			let m = DimMerger::merge::<1>([q_batch, k_batch, v_batch, o_batch])?;
+			let mut dim_merger = DimMerger::new([q_batch, k_batch, v_batch, o_batch]);
+			let m = dim_merger.next::<1>()?;
+			dim_merger.finish()?;
 
 			let device = o.device();
 			for _ in 0..m[0].size {

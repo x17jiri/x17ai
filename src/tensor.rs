@@ -22,7 +22,6 @@ use crate::util::universal_range::UniversalRange;
 use self::device::DeviceBuffer;
 use self::device::kernel::EvaluatesToTensor;
 use self::dim_index::{DimIndex, DimIndexOutOfBoundsError};
-use self::dim_merger::DimMerger;
 use self::error::NotContiguousError;
 use self::map::{IndexOutOfBoundsError, Map, SizeAndStride};
 use self::shape::Shape;
@@ -249,9 +248,8 @@ impl Tensor {
 	}
 
 	pub fn download_data(&self, dst: &mut [u8]) -> Result<(), ErrPack<TensorOpError>> {
-		let merged = DimMerger::merge::<1>([self.map.dims()])?;
-		let merged = merged[0].get(0);
-		if !merged.is_contiguous() {
+		let (merged, rest) = dim_merger::merge_dims(self.map.dims());
+		if !merged.is_contiguous() || !rest.is_empty() {
 			cold_path();
 			return Err(NotContiguousError.into());
 		}
@@ -273,9 +271,8 @@ impl Tensor {
 	}
 
 	pub fn upload_data(&self, src: &[u8]) -> Result<(), ErrPack<TensorOpError>> {
-		let merged = DimMerger::merge::<1>([self.map.dims()])?;
-		let merged = merged[0].get(0);
-		if !merged.is_contiguous() {
+		let (merged, rest) = dim_merger::merge_dims(self.map.dims());
+		if !merged.is_contiguous() || !rest.is_empty() {
 			cold_path();
 			return Err(NotContiguousError.into());
 		}
@@ -314,9 +311,8 @@ impl Tensor {
 	pub fn to_device(&self, device: Rc<dyn Device>) -> Result<Self, ErrPack<TensorOpError>> {
 		let dtype = self.dtype();
 
-		let merged = DimMerger::merge::<1>([self.map.dims()])?;
-		let merged = merged[0].get(0);
-		if !merged.is_contiguous() {
+		let (merged, rest) = dim_merger::merge_dims(self.map.dims());
+		if !merged.is_contiguous() || !rest.is_empty() {
 			cold_path();
 			return Err(NotContiguousError.into());
 		}
