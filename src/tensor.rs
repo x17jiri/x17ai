@@ -249,7 +249,7 @@ impl Tensor {
 
 	pub fn download_data(&self, dst: &mut [u8]) -> Result<(), ErrPack<TensorOpError>> {
 		let (merged, rest) = dim_merger::merge_dims(self.map.dims());
-		if !merged.is_contiguous() || !rest.is_empty() {
+		if !merged.is_contiguous(self.map.dtype().bits()) || !rest.is_empty() {
 			cold_path();
 			return Err(NotContiguousError.into());
 		}
@@ -272,7 +272,7 @@ impl Tensor {
 
 	pub fn upload_data(&self, src: &[u8]) -> Result<(), ErrPack<TensorOpError>> {
 		let (merged, rest) = dim_merger::merge_dims(self.map.dims());
-		if !merged.is_contiguous() || !rest.is_empty() {
+		if !merged.is_contiguous(self.map.dtype().bits()) || !rest.is_empty() {
 			cold_path();
 			return Err(NotContiguousError.into());
 		}
@@ -312,7 +312,7 @@ impl Tensor {
 		let dtype = self.dtype();
 
 		let (merged, rest) = dim_merger::merge_dims(self.map.dims());
-		if !merged.is_contiguous() || !rest.is_empty() {
+		if !merged.is_contiguous(self.map.dtype().bits()) || !rest.is_empty() {
 			cold_path();
 			return Err(NotContiguousError.into());
 		}

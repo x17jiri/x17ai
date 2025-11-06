@@ -8,6 +8,8 @@
 use std::hint::cold_path;
 use std::mem::MaybeUninit;
 
+use crate::tensor::TensorOpError;
+
 use super::map::SizeAndStride;
 
 //--------------------------------------------------------------------------------------------------
@@ -29,24 +31,6 @@ pub struct DimsDontMatchError;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct TooManyMergedDimensionsError;
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum DimMergerError {
-	DimsDontMatch,
-	TooManyMergedDimensions,
-}
-
-impl From<DimsDontMatchError> for DimMergerError {
-	fn from(_: DimsDontMatchError) -> Self {
-		Self::DimsDontMatch
-	}
-}
-
-impl From<TooManyMergedDimensionsError> for DimMergerError {
-	fn from(_: TooManyMergedDimensionsError) -> Self {
-		Self::TooManyMergedDimensions
-	}
-}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -145,6 +129,15 @@ impl<'a, const N: usize> DimMerger<'a, N> {
 			cold_path();
 			Err(TooManyMergedDimensionsError)
 		}
+	}
+
+	pub fn merge<const K: usize>(
+		inputs: [&'a [SizeAndStride]; N],
+	) -> Result<[MergedDim<N>; K], TensorOpError> {
+		let mut merger = Self::new(inputs);
+		let result = merger.next::<K>()?;
+		merger.finish()?;
+		Ok(result)
 	}
 }
 

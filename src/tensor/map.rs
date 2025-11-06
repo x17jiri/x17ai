@@ -24,9 +24,8 @@ pub struct SizeAndStride {
 }
 
 impl SizeAndStride {
-	// TODO
-	pub fn is_contiguous(&self) -> bool {
-		self.size <= 1 || self.stride == 1
+	pub fn is_contiguous(&self, item_size: usize) -> bool {
+		self.size <= 1 || self.stride == item_size
 	}
 
 	// TODO

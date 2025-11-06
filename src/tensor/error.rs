@@ -15,7 +15,7 @@ use crate::{ErrExtra, ErrPack};
 use super::device::DevBufAllocFailedError;
 use super::device::dtype::DTypeMismatchError;
 use super::dim_index::DimIndexOutOfBoundsError;
-use super::dim_merger::{DimMergerError, DimsDontMatchError, TooManyMergedDimensionsError};
+use super::dim_merger::{DimsDontMatchError, TooManyMergedDimensionsError};
 use super::map::{IndexOutOfBoundsError, NotEnoughDimensionsError, TensorSizeOverflowError};
 
 //--------------------------------------------------------------------------------------------------
@@ -74,25 +74,6 @@ pub enum TensorOpError {
 	InvalidReshape,
 	IOError,
 	DeviceError,
-}
-
-impl From<DimMergerError> for TensorOpError {
-	#[cold]
-	#[inline(never)]
-	fn from(err: DimMergerError) -> Self {
-		match err {
-			DimMergerError::DimsDontMatch => Self::DimsDontMatch,
-			DimMergerError::TooManyMergedDimensions => Self::TooManyMergedDimensions,
-		}
-	}
-}
-
-impl From<DimMergerError> for ErrPack<TensorOpError> {
-	#[cold]
-	#[inline(never)]
-	fn from(err: DimMergerError) -> Self {
-		Self { code: err.into(), extra: None }
-	}
 }
 
 impl From<DevBufAllocFailedError> for TensorOpError {
@@ -360,6 +341,12 @@ impl From<SelectError> for ErrPack<TensorOpError> {
 				extra: None,
 			},
 		}
+	}
+}
+
+impl From<TensorOpError> for ErrPack<TensorOpError> {
+	fn from(err: TensorOpError) -> Self {
+		Self { code: err, extra: None }
 	}
 }
 

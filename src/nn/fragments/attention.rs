@@ -115,10 +115,10 @@ impl Attention {
 			cold_path();
 			return Err(ShapeMismatchError.into());
 		}
-		if !q_width.is_contiguous()
-			|| !k_width.is_contiguous()
-			|| !v_width.is_contiguous()
-			|| !o_width.is_contiguous()
+		if !q_width.is_contiguous(q.dtype().bits())
+			|| !k_width.is_contiguous(k.dtype().bits())
+			|| !v_width.is_contiguous(v.dtype().bits())
+			|| !o_width.is_contiguous(o.dtype().bits())
 		{
 			cold_path();
 			return Err(NotContiguousError.into());
@@ -186,9 +186,7 @@ impl Attention {
 			let _o_borrow = unsafe { o.buf().unsafe_borrow_mut(&mut out_fail) };
 			out_fail.check()?;
 
-			let mut dim_merger = DimMerger::new([q_batch, k_batch, v_batch, o_batch]);
-			let m = dim_merger.next::<1>()?;
-			dim_merger.finish()?;
+			let m = DimMerger::<4>::merge::<1>([q_batch, k_batch, v_batch, o_batch])?;
 
 			let device = o.device();
 			for _ in 0..m[0].size {
