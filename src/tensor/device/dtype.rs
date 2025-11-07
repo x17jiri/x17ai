@@ -20,7 +20,7 @@ impl HasDType for u8 {
 	const dtype: DType = DType::from_struct(DTypeStruct {
 		kind: DTypeKind::Uint,
 		shift: 3,
-		reserved: 0,
+		is_fractional: 0,
 		id: DTypeId::U8,
 	});
 }
@@ -29,7 +29,7 @@ impl HasDType for f32 {
 	const dtype: DType = DType::from_struct(DTypeStruct {
 		kind: DTypeKind::Float,
 		shift: 5,
-		reserved: 0,
+		is_fractional: 0,
 		id: DTypeId::F32,
 	});
 }
@@ -38,7 +38,7 @@ impl HasDType for f64 {
 	const dtype: DType = DType::from_struct(DTypeStruct {
 		kind: DTypeKind::Float,
 		shift: 6,
-		reserved: 0,
+		is_fractional: 0,
 		id: DTypeId::F64,
 	});
 }
@@ -50,7 +50,7 @@ pub struct DTypeStruct {
 	/// Shifting left by this value will convert number of elements to number of bits
 	shift: u8,
 
-	reserved: u8,
+	is_fractional: u8,
 
 	id: DTypeId,
 }
@@ -88,7 +88,7 @@ impl DTypeStruct {
 		Self {
 			kind: unsafe { std::mem::transmute(bytes[0]) },
 			shift: bytes[1],
-			reserved: bytes[2],
+			is_fractional: bytes[2],
 			id: unsafe { std::mem::transmute(bytes[3]) },
 		}
 	}
@@ -96,7 +96,8 @@ impl DTypeStruct {
 
 impl DType {
 	pub const fn from_struct(data: DTypeStruct) -> Self {
-		let val = u32::from_le_bytes([data.kind as u8, data.shift, data.reserved, data.id as u8]);
+		let val =
+			u32::from_le_bytes([data.kind as u8, data.shift, data.is_fractional, data.id as u8]);
 		// SAFETY: DTypeId starts at 1, so val is never 0
 		Self(unsafe { NonZeroU32::new_unchecked(val) })
 	}
@@ -126,8 +127,13 @@ impl DType {
 		(self.bits() + 7) / 8
 	}
 
-	pub fn exact_bytes_or_zero(self) -> usize {
-		self.floor_bytes()
+	pub fn exact_bytes(self) -> Option<NonZeroUsize> {
+		NonZeroUsize::new(self.floor_bytes())
+	}
+
+	pub fn is_fractional(self) -> usize {
+		let data = DTypeStruct::from_dtype(self);
+		data.is_fractional.into()
 	}
 
 	pub fn array_bits(self, elems: usize) -> Option<usize> {

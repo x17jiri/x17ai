@@ -75,25 +75,25 @@ pub struct KernelOutput {
 
 #[repr(C)]
 pub struct MatMulArgs {
-	pub o_row_stride: usize,
-	pub o_col_stride: usize,
+	pub o_row_stride_bytes: usize,
+	pub o_col_stride_bytes: usize,
 	pub o_rows: usize,
 	pub o_cols: usize,
-	pub o_offset: usize,
+	pub o_offset_bytes: usize,
 	pub o_buf: DevicePtr, // [o_rows, o_cols]
 
-	pub a_row_stride: usize,
-	pub a_col_stride: usize,
+	pub a_row_stride_bytes: usize,
+	pub a_col_stride_bytes: usize,
 	// a_rows == o_rows
 	pub a_cols: usize,
-	pub a_offset: usize,
+	pub a_offset_bytes: usize,
 	pub a_buf: DevicePtr, // [o_rows, a_cols]
 
-	pub b_row_stride: usize,
-	pub b_col_stride: usize,
+	pub b_row_stride_bytes: usize,
+	pub b_col_stride_bytes: usize,
 	// b_rows == a_cols
 	// b_cols == o_cols
-	pub b_offset: usize,
+	pub b_offset_bytes: usize,
 	pub b_buf: DevicePtr, // [a_cols, o_cols]
 
 	pub o_dtype: DType,

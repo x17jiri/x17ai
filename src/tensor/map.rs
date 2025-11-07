@@ -127,13 +127,13 @@ impl Map {
 			dim.write(stride_counter.prepend_dim(size)?);
 		}
 		let elems = stride_counter.elems();
-		let Some(bytes) = dtype.array_bytes(elems) else {
+		let Some(bits) = dtype.array_bits(elems).and_then(|b| b.checked_add(7)) else {
 			cold_path();
 			return Err(TensorSizeOverflowError);
 		};
 
 		let dims = unsafe { dims.assume_init() };
-		Ok((Self { dims, offset: 0, dtype }, bytes))
+		Ok((Self { dims, offset: 0, dtype }, bits / 8))
 	}
 
 	// NOTE: This is not a clone. We keep dimension sizes, but
@@ -149,13 +149,13 @@ impl Map {
 			dim.write(stride_counter.prepend_dim(src_dim.size));
 		}
 		let elems = stride_counter.elems();
-		let Some(bytes) = dtype.array_bytes(elems) else {
+		let Some(bits) = dtype.array_bits(elems).and_then(|b| b.checked_add(7)) else {
 			cold_path();
 			return Err(TensorSizeOverflowError);
 		};
 
 		let dims = unsafe { dims.assume_init() };
-		Ok((Self { dims, offset: 0, dtype }, bytes))
+		Ok((Self { dims, offset: 0, dtype }, bits / 8))
 	}
 
 	pub fn new_replace_tail(
@@ -182,13 +182,13 @@ impl Map {
 			dim.write(stride_counter.prepend_dim(src_dim.size)?);
 		}
 		let elems = stride_counter.elems();
-		let Some(bytes) = dtype.array_bytes(elems) else {
+		let Some(bits) = dtype.array_bits(elems).and_then(|b| b.checked_add(7)) else {
 			cold_path();
 			return Err(TensorSizeOverflowError);
 		};
 
 		let dims = unsafe { dims.assume_init() };
-		Ok((Self { dims, offset: 0, dtype }, bytes))
+		Ok((Self { dims, offset: 0, dtype }, bits / 8))
 	}
 
 	pub fn split_last_n<const N: usize>(

@@ -125,31 +125,36 @@ impl<'a, const N: usize> DimMerger<'a, N> {
 		if K > 0 && i > 0 {
 			i -= 1;
 			let mut k = K - 1;
-			let mut merged = unsafe { result.get_unchecked_mut(k) };
-			*merged = Self::broadcast_joint_dims(Self::load_joint_dims(self.inputs, n - i))?;
+			let mut merged = MergedDim { size: 1, strides: [0; N] };
 			while i > 0 {
 				i -= 1;
 				let joint_dim =
 					Self::broadcast_joint_dims(Self::load_joint_dims(self.inputs, n - i))?;
 
-				if (0..N).any(|i| joint_dim.strides[i] != merged.size * merged.strides[i])
-					&& joint_dim.size > 1
-				{
-					if merged.size > 1 {
-						if k > 0 {
-							k -= 1;
-							merged = unsafe { result.get_unchecked_mut(k) };
-							*merged = joint_dim;
-							continue;
-						} else {
+				if merged.size > 1 {
+					if joint_dim.size > 1
+						&& (0..N).any(|i| joint_dim.strides[i] != merged.size * merged.strides[i])
+					{
+						// Strides do not match
+						// Either start a new dimension, or return
+						let slot = unsafe { result.get_unchecked_mut(k) };
+						*slot = merged;
+						if k == 0 {
 							self.i = n - (i + 1);
 							return Ok((result, false));
 						}
+						k -= 1;
+						merged = joint_dim;
+					} else {
+						// Extend the merged dimension
+						merged.size *= joint_dim.size;
 					}
+				} else {
+					// If merged.size == 1, this is equivalent to `merged = joint_dim`
+					// If merged.size == 0, the strides are not important and size will stay 0
+					merged.size *= joint_dim.size;
 					merged.strides = joint_dim.strides;
 				}
-
-				merged.size *= joint_dim.size;
 			}
 			self.i = n; // i == 0
 		}

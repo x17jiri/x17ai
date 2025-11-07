@@ -22,18 +22,20 @@ pub unsafe fn mm(args: &MatMulArgs, scale: f64) -> Result<(), ErrPack<TensorOpEr
 			for i in 0..args.o_cols {
 				let mut t = KahanAcc::<f64>::new();
 				for k in 0..args.a_cols {
-					let a_offset = args.a_offset + j * args.a_row_stride + k * args.a_col_stride;
-					let a_offset_bytes = args.a_dtype.array_bytes_unchecked(a_offset);
-					let b_offset = args.b_offset + k * args.b_row_stride + i * args.b_col_stride;
-					let b_offset_bytes = args.b_dtype.array_bytes_unchecked(b_offset);
+					let a_offset_bytes = args.a_offset_bytes
+						+ j * args.a_row_stride_bytes
+						+ k * args.a_col_stride_bytes;
+					let b_offset_bytes = args.b_offset_bytes
+						+ k * args.b_row_stride_bytes
+						+ i * args.b_col_stride_bytes;
 					t.acc_(
 						CPUDevice::__read_float(args.a_buf, args.a_dtype, a_offset_bytes)?
 							* CPUDevice::__read_float(args.b_buf, args.b_dtype, b_offset_bytes)?,
 					);
 				}
 				t.scale_(scale);
-				let o_offset = args.o_offset + j * args.o_row_stride + i * args.o_col_stride;
-				let o_offset_bytes = args.o_dtype.array_bytes_unchecked(o_offset);
+				let o_offset_bytes =
+					args.o_offset_bytes + j * args.o_row_stride_bytes + i * args.o_col_stride_bytes;
 				CPUDevice::__write_float(args.o_buf, args.o_dtype, o_offset_bytes, t.value())?;
 			}
 		}

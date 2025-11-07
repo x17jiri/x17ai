@@ -767,16 +767,16 @@ where
 		return Err(OverlappingOutputError.into());
 	}
 
-	let out_dtype_bytes = output.dtype().exact_bytes_or_zero();
-	let arg_dtype_bytes = tensor_args.map(|t| t.dtype().exact_bytes_or_zero());
-	if out_dtype_bytes == 0 || arg_dtype_bytes.iter().any(|&b| b == 0) {
+	let frac = output.dtype().is_fractional();
+	let frac = tensor_args.iter().fold(frac, |frac, a| frac | a.dtype().is_fractional());
+	if frac != 0 {
 		cold_path();
 		return Err(UnsupportedDTypeError.into());
 	}
 
 	let args: [KernelArg; E + R] = std::array::from_fn(|i| {
 		let arg = tensor_args[i];
-		let dtype_bytes = arg_dtype_bytes[i];
+		let dtype_bytes = arg.dtype().floor_bytes();
 		KernelArg {
 			stride_bytes: [
 				merged[0].strides[1 + i] * dtype_bytes,
@@ -788,6 +788,7 @@ where
 		}
 	});
 
+	let out_dtype_bytes = output.dtype().floor_bytes();
 	let out = KernelOutput {
 		size: [merged[0].size, merged[1].size, merged[2].size],
 		stride_bytes: [
@@ -901,16 +902,16 @@ where
 		return Err(DimsDontMatchError.into());
 	}
 
-	let out_dtype_bytes = output.dtype().exact_bytes_or_zero();
-	let arg_dtype_bytes = tensor_args.map(|t| t.dtype().exact_bytes_or_zero());
-	if out_dtype_bytes == 0 || arg_dtype_bytes.iter().any(|&b| b == 0) {
+	let frac = output.dtype().is_fractional();
+	let frac = tensor_args.iter().fold(frac, |frac, a| frac | a.dtype().is_fractional());
+	if frac != 0 {
 		cold_path();
 		return Err(UnsupportedDTypeError.into());
 	}
 
 	let args: [KernelArg; E + R] = std::array::from_fn(|i| {
 		let arg = tensor_args[i];
-		let dtype_bytes = arg_dtype_bytes[i];
+		let dtype_bytes = arg.dtype().floor_bytes();
 		let top_stride =
 			if i < E { post_reduce_top.strides[1 + i] } else { reduce_args_top.strides[i - E] };
 		KernelArg {
@@ -924,6 +925,7 @@ where
 		}
 	});
 
+	let out_dtype_bytes = output.dtype().floor_bytes();
 	let out = KernelOutput {
 		size: [batch_dims[0].size, batch_dims[1].size, reduction_size],
 		stride_bytes: [

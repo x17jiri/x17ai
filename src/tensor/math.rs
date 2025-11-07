@@ -10,7 +10,7 @@ use std::hint::cold_path;
 use crate::tensor::device::MatMulArgs;
 use crate::tensor::device::cpu::CPUDevice;
 use crate::tensor::device::dtype::{DTypeMismatchError, common_dtype};
-use crate::tensor::error::ShapeMismatchError;
+use crate::tensor::error::{ShapeMismatchError, UnsupportedDTypeError};
 use crate::tensor::map::{NotEnoughDimensionsError, SizeAndStride};
 use crate::tensor::shape::DimMerger;
 use crate::tensor::{DType, HasDType, Tensor, TensorOpError};
@@ -318,10 +318,6 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 			cold_path();
 			return Err(ShapeMismatchError.into());
 		}
-		if to.tensor.dtype() != mat.tensor.dtype() || to.tensor.dtype() != col.tensor.dtype() {
-			cold_path();
-			return Err(DTypeMismatchError.into());
-		}
 
 		let dims = DimMerger::<2>::merge::<1>([to.batch_dims, col.batch_dims])?;
 		let to_cols = dims[0].get(0);
@@ -333,26 +329,37 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 		borrow_fail.check()?;
 		let to_borrow = to.tensor.buf().try_borrow_mut()?;
 
+		let frac = to.tensor.dtype().is_fractional()
+			| col.tensor.dtype().is_fractional()
+			| mat.tensor.dtype().is_fractional();
+		if frac != 0 {
+			cold_path();
+			return Err(UnsupportedDTypeError.into());
+		}
+		let to_dtype_bytes = to.tensor.dtype().floor_bytes();
+		let mat_dtype_bytes = mat.tensor.dtype().floor_bytes();
+		let col_dtype_bytes = col.tensor.dtype().floor_bytes();
+
 		let args = MatMulArgs {
-			o_row_stride: to.rows.stride,
-			o_col_stride: to_cols.stride,
+			o_row_stride_bytes: to.rows.stride * to_dtype_bytes,
+			o_col_stride_bytes: to_cols.stride * to_dtype_bytes,
 			o_rows: to.rows.size,
 			o_cols: to_cols.size,
-			o_offset: to.tensor.map().offset(),
+			o_offset_bytes: to.tensor.map().offset() * to_dtype_bytes,
 			o_buf: to_borrow.device_ptr(),
 
-			a_row_stride: mat.rows.stride,
-			a_col_stride: mat.cols.stride,
+			a_row_stride_bytes: mat.rows.stride * mat_dtype_bytes,
+			a_col_stride_bytes: mat.cols.stride * mat_dtype_bytes,
 			// a_rows == o_rows
 			a_cols: mat.cols.size,
-			a_offset: mat.tensor.map().offset(),
+			a_offset_bytes: mat.tensor.map().offset() * mat_dtype_bytes,
 			a_buf: mat_borrow.device_ptr(),
 
-			b_row_stride: col.rows.stride,
-			b_col_stride: col_cols.stride,
+			b_row_stride_bytes: col.rows.stride * col_dtype_bytes,
+			b_col_stride_bytes: col_cols.stride * col_dtype_bytes,
 			// b_rows == a_cols
 			// b_cols == o_cols
-			b_offset: col.tensor.map().offset(),
+			b_offset_bytes: col.tensor.map().offset() * col_dtype_bytes,
 			b_buf: col_borrow.device_ptr(),
 
 			o_dtype: to.tensor.dtype(),

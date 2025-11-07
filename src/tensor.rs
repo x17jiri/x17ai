@@ -251,8 +251,12 @@ impl Tensor {
 			cold_path();
 			return Err(NotContiguousError.into());
 		}
-		let offset_bytes = unsafe { self.dtype().array_bytes_unchecked(self.map.offset()) };
-		let size_bytes = unsafe { self.dtype().array_bytes_unchecked(merged.size) };
+		let Some(dtype_bytes) = self.dtype().exact_bytes() else {
+			cold_path();
+			return Err(UnsupportedDTypeError.into());
+		};
+		let offset_bytes = self.map.offset() * dtype_bytes.get();
+		let size_bytes = merged.size * dtype_bytes.get();
 		if dst.len() != size_bytes {
 			cold_path();
 			return Err(InvalidBufferSizeError.into());
@@ -274,8 +278,12 @@ impl Tensor {
 			cold_path();
 			return Err(NotContiguousError.into());
 		}
-		let offset_bytes = unsafe { self.dtype().array_bytes_unchecked(self.map.offset()) };
-		let size_bytes = unsafe { self.dtype().array_bytes_unchecked(merged.size) };
+		let Some(dtype_bytes) = self.dtype().exact_bytes() else {
+			cold_path();
+			return Err(UnsupportedDTypeError.into());
+		};
+		let offset_bytes = self.map.offset() * dtype_bytes.get();
+		let size_bytes = merged.size * dtype_bytes.get();
 		if src.len() != size_bytes {
 			cold_path();
 			return Err(InvalidBufferSizeError.into());
@@ -314,12 +322,16 @@ impl Tensor {
 			cold_path();
 			return Err(NotContiguousError.into());
 		}
-		let offset_bytes = unsafe { dtype.array_bytes_unchecked(self.map.offset()) };
-		let size_bytes = unsafe { dtype.array_bytes_unchecked(merged.size) };
+		let Some(dtype_bytes) = dtype.exact_bytes() else {
+			cold_path();
+			return Err(UnsupportedDTypeError.into());
+		};
+		let offset_bytes = self.map.offset() * dtype_bytes.get();
+		let size_bytes = merged.size * dtype_bytes.get();
 		let borrow = self.buf().try_borrow()?;
 
 		let tensor = Self::new_empty_on(self.map(), dtype, device)?;
-		let output_offset_bytes = unsafe { dtype.array_bytes_unchecked(tensor.map.offset()) };
+		let output_offset_bytes = tensor.map.offset() * dtype_bytes.get();
 
 		if self.device().is_cpu() {
 			unsafe {
