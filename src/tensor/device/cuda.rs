@@ -294,7 +294,7 @@ impl CudaDevice {
 		let config = CudaLaunchConfig {
 			grid_dim: CudaCube { x: block_cnt, y: 1, z: 1 },
 			block_dim: CudaCube { x: BLOCK_SIZE, y: 1, z: 1 },
-			shared_mem_bytes: unsafe { data.internal_dtype().array_bytes_unchecked(WARP_SIZE) },
+			shared_mem_bytes: data.internal_dtype().ceil_bytes() * WARP_SIZE,
 		};
 		unsafe {
 			let output_arg = std::ptr::from_ref(data.output).cast();

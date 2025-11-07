@@ -7,16 +7,16 @@
 
 use std::borrow::Cow;
 
-use crate::tensor::dim_merger::ReshapeError;
-use crate::tensor::map::SelectError;
 use crate::util::mycell::{BorrowError, BorrowMutError};
 use crate::{ErrExtra, ErrPack};
 
 use super::device::DevBufAllocFailedError;
 use super::device::dtype::DTypeMismatchError;
 use super::dim_index::DimIndexOutOfBoundsError;
-use super::dim_merger::{DimsDontMatchError, TooManyMergedDimensionsError};
-use super::map::{IndexOutOfBoundsError, NotEnoughDimensionsError, TensorSizeOverflowError};
+use super::map::{
+	IndexOutOfBoundsError, NotEnoughDimensionsError, SelectError, TensorSizeOverflowError,
+};
+use super::shape::{DimsDontMatchError, ReshapeError, TooManyMergedDimensionsError};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -34,7 +34,7 @@ pub struct NotContiguousError;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct CannotBroadcastOutputError;
+pub struct OverlappingOutputError;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -61,7 +61,7 @@ pub enum TensorOpError {
 	DevBufAllocFailed,
 	IncompatibleStridesForMerge,
 	InvalidValue,
-	CannotBroadcastOutput,
+	OverlappingOutput,
 	ShapeMismatch,
 	DTypeMismatch,
 	UnsafeTensor,
@@ -300,10 +300,10 @@ impl From<NotContiguousError> for ErrPack<TensorOpError> {
 	}
 }
 
-impl From<CannotBroadcastOutputError> for ErrPack<TensorOpError> {
-	fn from(_: CannotBroadcastOutputError) -> Self {
+impl From<OverlappingOutputError> for ErrPack<TensorOpError> {
+	fn from(_: OverlappingOutputError) -> Self {
 		Self {
-			code: TensorOpError::CannotBroadcastOutput,
+			code: TensorOpError::OverlappingOutput,
 			extra: None,
 		}
 	}

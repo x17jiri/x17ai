@@ -17,10 +17,9 @@ use crate::nn::fragments::Fragment;
 use crate::rng::Rng;
 use crate::tensor::device::AttentionArgs;
 use crate::tensor::device::dtype::DTypeMismatchError;
-use crate::tensor::dim_merger::DimMerger;
 use crate::tensor::error::{NotContiguousError, ShapeMismatchError};
 use crate::tensor::map::INLINE_DIMS;
-use crate::tensor::{Tensor, TensorOpError};
+use crate::tensor::{Tensor, TensorOpError, shape};
 use crate::util::mycell::{UnsafeBorrowFailFlag, UnsafeBorrowMutFailFlag};
 use crate::{ErrPack, autograd};
 
@@ -115,10 +114,10 @@ impl Attention {
 			cold_path();
 			return Err(ShapeMismatchError.into());
 		}
-		if !q_width.is_contiguous(q.dtype().bits())
-			|| !k_width.is_contiguous(k.dtype().bits())
-			|| !v_width.is_contiguous(v.dtype().bits())
-			|| !o_width.is_contiguous(o.dtype().bits())
+		if !q_width.is_contiguous()
+			|| !k_width.is_contiguous()
+			|| !v_width.is_contiguous()
+			|| !o_width.is_contiguous()
 		{
 			cold_path();
 			return Err(NotContiguousError.into());
@@ -186,7 +185,7 @@ impl Attention {
 			let _o_borrow = unsafe { o.buf().unsafe_borrow_mut(&mut out_fail) };
 			out_fail.check()?;
 
-			let m = DimMerger::<4>::merge::<1>([q_batch, k_batch, v_batch, o_batch])?;
+			let m = shape::DimMerger::<4>::merge::<1>([q_batch, k_batch, v_batch, o_batch])?;
 
 			let device = o.device();
 			for _ in 0..m[0].size {

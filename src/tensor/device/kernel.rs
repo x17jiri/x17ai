@@ -11,9 +11,9 @@ use std::rc::Rc;
 use crate::ErrPack;
 use crate::tensor::device::dtype::{DTypeId, common_dtype};
 use crate::tensor::device::{DeviceBuffer, KernelArg, KernelOutput};
-use crate::tensor::dim_merger::{DimMerger, DimsDontMatchError};
-use crate::tensor::error::CannotBroadcastOutputError;
+use crate::tensor::error::{OverlappingOutputError, UnsupportedDTypeError};
 use crate::tensor::map::SizeAndStride;
+use crate::tensor::shape::{self, DimMerger, DimsDontMatchError};
 use crate::tensor::{DType, Tensor, TensorOpError};
 use crate::util::hasher::{HASH_WORD_SIZE, HashWord};
 use crate::util::mycell::{BorrowGuard, UnsafeBorrowFailFlag};
@@ -762,28 +762,32 @@ where
 	let merged = DimMerger::<{ 1 + E + R }>::merge::<3>(std::array::from_fn(|i| {
 		if i == 0 { output.map().dims() } else { tensor_args[i - 1].map().dims() }
 	}))?;
-	if merged.iter().any(|m| m.get(0).is_broadcasted()) {
+	if shape::is_overlapping(merged.map(|m| m.get(0))) {
 		cold_path();
-		return Err(CannotBroadcastOutputError.into());
+		return Err(OverlappingOutputError.into());
+	}
+
+	let out_dtype_bytes = output.dtype().exact_bytes_or_zero();
+	let arg_dtype_bytes = tensor_args.map(|t| t.dtype().exact_bytes_or_zero());
+	if out_dtype_bytes == 0 || arg_dtype_bytes.iter().any(|&b| b == 0) {
+		cold_path();
+		return Err(UnsupportedDTypeError.into());
 	}
 
 	let args: [KernelArg; E + R] = std::array::from_fn(|i| {
 		let arg = tensor_args[i];
-		let arg_dtype_bytes = arg.dtype().bytes();
-		debug_assert!(arg_dtype_bytes > 0);
+		let dtype_bytes = arg_dtype_bytes[i];
 		KernelArg {
 			stride_bytes: [
-				merged[0].strides[1 + i] * arg_dtype_bytes,
-				merged[1].strides[1 + i] * arg_dtype_bytes,
-				merged[2].strides[1 + i] * arg_dtype_bytes,
+				merged[0].strides[1 + i] * dtype_bytes,
+				merged[1].strides[1 + i] * dtype_bytes,
+				merged[2].strides[1 + i] * dtype_bytes,
 			],
-			offset_bytes: arg.map().offset() * arg_dtype_bytes,
+			offset_bytes: arg.map().offset() * dtype_bytes,
 			buf: arg.buf().device_ptr(),
 		}
 	});
 
-	let out_dtype_bytes = output.dtype().bytes();
-	debug_assert!(out_dtype_bytes > 0);
 	let out = KernelOutput {
 		size: [merged[0].size, merged[1].size, merged[2].size],
 		stride_bytes: [
@@ -887,10 +891,9 @@ where
 	}))?;
 
 	let output_top = post_reduce_top.get(0);
-	let output_batch = batch_dims.map(|m| m.get(0));
-	if output_top.is_broadcasted() || output_batch.iter().any(SizeAndStride::is_broadcasted) {
+	if shape::is_overlapping([batch_dims[0].get(0), batch_dims[1].get(0), output_top]) {
 		cold_path();
-		return Err(CannotBroadcastOutputError.into());
+		return Err(OverlappingOutputError.into());
 	}
 	let reduction_size = reduce_args_top.size;
 	if output_top.size != 1 && output_top.size != reduction_size {
@@ -898,25 +901,29 @@ where
 		return Err(DimsDontMatchError.into());
 	}
 
+	let out_dtype_bytes = output.dtype().exact_bytes_or_zero();
+	let arg_dtype_bytes = tensor_args.map(|t| t.dtype().exact_bytes_or_zero());
+	if out_dtype_bytes == 0 || arg_dtype_bytes.iter().any(|&b| b == 0) {
+		cold_path();
+		return Err(UnsupportedDTypeError.into());
+	}
+
 	let args: [KernelArg; E + R] = std::array::from_fn(|i| {
 		let arg = tensor_args[i];
-		let arg_dtype_bytes = arg.dtype().bytes();
-		debug_assert!(arg_dtype_bytes > 0);
+		let dtype_bytes = arg_dtype_bytes[i];
 		let top_stride =
 			if i < E { post_reduce_top.strides[1 + i] } else { reduce_args_top.strides[i - E] };
 		KernelArg {
 			stride_bytes: [
-				batch_dims[0].strides[1 + i] * arg_dtype_bytes,
-				batch_dims[1].strides[1 + i] * arg_dtype_bytes,
-				top_stride * arg_dtype_bytes,
+				batch_dims[0].strides[1 + i] * dtype_bytes,
+				batch_dims[1].strides[1 + i] * dtype_bytes,
+				top_stride * dtype_bytes,
 			],
-			offset_bytes: arg.map().offset() * arg_dtype_bytes,
+			offset_bytes: arg.map().offset() * dtype_bytes,
 			buf: arg.buf().device_ptr(),
 		}
 	});
 
-	let out_dtype_bytes = output.dtype().bytes();
-	debug_assert!(out_dtype_bytes > 0);
 	let out = KernelOutput {
 		size: [batch_dims[0].size, batch_dims[1].size, reduction_size],
 		stride_bytes: [

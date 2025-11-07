@@ -10,7 +10,7 @@ use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
 use crate::tensor::dim_index::DimIndexOutOfBoundsError;
-use crate::tensor::dim_merger::{self, ReshapeError};
+use crate::tensor::shape::{self, ReshapeError};
 use crate::util::universal_range::UniversalRange;
 
 use super::DType;
@@ -24,13 +24,8 @@ pub struct SizeAndStride {
 }
 
 impl SizeAndStride {
-	pub fn is_contiguous(&self, item_size: usize) -> bool {
-		self.size <= 1 || self.stride == item_size
-	}
-
-	// TODO
-	pub fn is_broadcasted(&self) -> bool {
-		self.size > 1 && self.stride == 0
+	pub fn is_contiguous(&self) -> bool {
+		self.size <= 1 || self.stride == 1
 	}
 }
 
@@ -267,7 +262,7 @@ impl Map {
 		let n_keep = old_slice.len().saturating_sub(n);
 		let ndim = n_keep + 1;
 
-		let (merged, rest) = dim_merger::merge_dims(unsafe { old_slice.get_unchecked(n_keep..) });
+		let (merged, rest) = shape::merge_dims(unsafe { old_slice.get_unchecked(n_keep..) });
 		if (!rest.is_empty()) {
 			cold_path();
 			return Err(ReshapeError);
@@ -307,8 +302,8 @@ impl Map {
 					stride: 0,
 				});
 			}
-			dim_merger::reshape_dims(
-				dim_merger::merge_dims(old_slice.get_unchecked(n_keep..)),
+			shape::reshape_dims(
+				shape::merge_dims(old_slice.get_unchecked(n_keep..)),
 				to_shape,
 				std::ptr::from_mut(new_slice.get_unchecked_mut(n_keep)),
 			)?;

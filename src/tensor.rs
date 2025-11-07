@@ -12,9 +12,9 @@ use std::rc::Rc;
 use crate::ErrPack;
 use crate::rng::Rng;
 use crate::tensor::device::cpu::cpu_float_methods::FromToF64;
-use crate::tensor::dim_merger::ReshapeError;
 use crate::tensor::error::{InvalidBufferSizeError, UnsupportedDTypeError};
 use crate::tensor::map::SelectError;
+use crate::tensor::shape::ReshapeError;
 use crate::util::LossyFrom;
 use crate::util::mycell::{self};
 use crate::util::universal_range::UniversalRange;
@@ -30,8 +30,6 @@ pub use self::device::{DType, Device, HasDType};
 pub use self::error::TensorOpError;
 
 pub mod device;
-pub mod dim_merger;
-//pub mod generic;
 pub mod dim_index;
 pub mod error;
 pub mod io;
@@ -248,8 +246,8 @@ impl Tensor {
 	}
 
 	pub fn download_data(&self, dst: &mut [u8]) -> Result<(), ErrPack<TensorOpError>> {
-		let (merged, rest) = dim_merger::merge_dims(self.map.dims());
-		if !merged.is_contiguous(self.map.dtype().bits()) || !rest.is_empty() {
+		let (merged, rest) = shape::merge_dims(self.map.dims());
+		if !merged.is_contiguous() || !rest.is_empty() {
 			cold_path();
 			return Err(NotContiguousError.into());
 		}
@@ -271,8 +269,8 @@ impl Tensor {
 	}
 
 	pub fn upload_data(&self, src: &[u8]) -> Result<(), ErrPack<TensorOpError>> {
-		let (merged, rest) = dim_merger::merge_dims(self.map.dims());
-		if !merged.is_contiguous(self.map.dtype().bits()) || !rest.is_empty() {
+		let (merged, rest) = shape::merge_dims(self.map.dims());
+		if !merged.is_contiguous() || !rest.is_empty() {
 			cold_path();
 			return Err(NotContiguousError.into());
 		}
@@ -311,8 +309,8 @@ impl Tensor {
 	pub fn to_device(&self, device: Rc<dyn Device>) -> Result<Self, ErrPack<TensorOpError>> {
 		let dtype = self.dtype();
 
-		let (merged, rest) = dim_merger::merge_dims(self.map.dims());
-		if !merged.is_contiguous(self.map.dtype().bits()) || !rest.is_empty() {
+		let (merged, rest) = shape::merge_dims(self.map.dims());
+		if !merged.is_contiguous() || !rest.is_empty() {
 			cold_path();
 			return Err(NotContiguousError.into());
 		}
