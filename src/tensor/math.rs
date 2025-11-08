@@ -256,7 +256,7 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 		let col_borrow = unsafe { col.tensor.buf().unsafe_borrow(&mut borrow_fail) };
 		let row_borrow = unsafe { row.tensor.buf().unsafe_borrow(&mut borrow_fail) };
 		borrow_fail.check()?;
-		let to_borrow = to.tensor.buf().try_borrow_mut()?;
+		let to_borrow = to.tensor.buf().try_borrow_mut(0)?;
 
 		let frac = to.tensor.dtype().is_fractional()
 			| col.tensor.dtype().is_fractional()
@@ -334,7 +334,7 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 		let mat_borrow = unsafe { mat.tensor.buf().unsafe_borrow(&mut borrow_fail) };
 		let col_borrow = unsafe { col.tensor.buf().unsafe_borrow(&mut borrow_fail) };
 		borrow_fail.check()?;
-		let to_borrow = to.tensor.buf().try_borrow_mut()?;
+		let to_borrow = to.tensor.buf().try_borrow_mut(0)?;
 
 		let frac = to.tensor.dtype().is_fractional()
 			| mat.tensor.dtype().is_fractional()

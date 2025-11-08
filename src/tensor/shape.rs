@@ -123,7 +123,6 @@ impl<'a, const N: usize> DimMerger<'a, N> {
 		let mut i = n - self.i;
 		let mut result = [MergedDim { size: 1, strides: [0; N] }; K];
 		if K > 0 && i > 0 {
-			i -= 1;
 			let mut k = K - 1;
 			let mut merged = MergedDim { size: 1, strides: [0; N] };
 			while i > 0 {
@@ -157,6 +156,12 @@ impl<'a, const N: usize> DimMerger<'a, N> {
 				}
 			}
 			self.i = n; // i == 0
+
+			let slot = unsafe { result.get_unchecked_mut(k) };
+			slot.size = merged.size;
+			if merged.size > 1 {
+				slot.strides = merged.strides;
+			}
 		}
 		Ok((result, true))
 	}

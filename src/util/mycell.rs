@@ -78,8 +78,11 @@ impl<T: ?Sized> RefCell<T> {
 		unsafe { BorrowGuard::new_unsafe(self, fail) }
 	}
 
-	pub fn try_borrow_mut<'a>(&'a self) -> Result<BorrowMutGuard<'a, T>, BorrowMutError> {
-		BorrowMutGuard::new(self)
+	pub fn try_borrow_mut<'a>(
+		&'a self,
+		allowed: usize,
+	) -> Result<BorrowMutGuard<'a, T>, BorrowMutError> {
+		BorrowMutGuard::new(self, allowed)
 	}
 
 	/// # Safety
@@ -87,9 +90,10 @@ impl<T: ?Sized> RefCell<T> {
 	/// If `fail` flag is set to failed, the returned object must be dropped without being used.
 	pub unsafe fn unsafe_borrow_mut<'a>(
 		&'a self,
+		allowed: usize,
 		fail: &mut UnsafeBorrowMutFailFlag,
 	) -> BorrowMutGuard<'a, T> {
-		unsafe { BorrowMutGuard::new_unsafe(self, fail) }
+		unsafe { BorrowMutGuard::new_unsafe(self, allowed, fail) }
 	}
 }
 
@@ -209,29 +213,38 @@ impl UnsafeBorrowMutFailFlag {
 
 pub struct BorrowMutGuard<'a, T: ?Sized + 'a> {
 	value: &'a RefCell<T>,
+	restore: isize,
 }
 
 impl<'a, T: ?Sized + 'a> BorrowMutGuard<'a, T> {
-	pub fn new(value: &'a RefCell<T>) -> Result<Self, BorrowMutError> {
+	pub fn new(value: &'a RefCell<T>, allowed: usize) -> Result<Self, BorrowMutError> {
+		let allowed = allowed as isize;
 		let borrow_count = value.borrow_counter.get();
-		if borrow_count != 0 {
+		if borrow_count != allowed {
 			cold_path();
 			Err(BorrowMutError)
 		} else {
-			value.borrow_counter.set(borrow_count - 1);
-			Ok(BorrowMutGuard { value })
+			let restore = allowed + 1;
+			value.borrow_counter.set(borrow_count - restore);
+			Ok(BorrowMutGuard { value, restore })
 		}
 	}
 
 	/// # Safety
 	///
 	/// If `fail` flag is set to failed, the returned object must be dropped without being used.
-	pub unsafe fn new_unsafe(value: &'a RefCell<T>, fail: &mut UnsafeBorrowMutFailFlag) -> Self {
+	pub unsafe fn new_unsafe(
+		value: &'a RefCell<T>,
+		allowed: usize,
+		fail: &mut UnsafeBorrowMutFailFlag,
+	) -> Self {
+		let allowed = allowed as isize;
 		let borrow_count = value.borrow_counter.get();
-		fail.0 |= borrow_count;
+		fail.0 |= borrow_count - allowed;
 
-		value.borrow_counter.set(borrow_count - 1);
-		BorrowMutGuard { value }
+		let restore = allowed + 1;
+		value.borrow_counter.set(borrow_count - restore);
+		BorrowMutGuard { value, restore }
 	}
 }
 
@@ -239,7 +252,7 @@ impl<'a, T: ?Sized> Drop for BorrowMutGuard<'a, T> {
 	fn drop(&mut self) {
 		let borrow_count = self.value.borrow_counter.get();
 		//debug_assert!(borrow_count < 0);
-		self.value.borrow_counter.set(borrow_count + 1);
+		self.value.borrow_counter.set(borrow_count + self.restore);
 	}
 }
 

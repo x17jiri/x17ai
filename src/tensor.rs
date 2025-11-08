@@ -290,7 +290,7 @@ impl Tensor {
 			cold_path();
 			return Err(InvalidBufferSizeError.into());
 		}
-		let borrow = self.buf().try_borrow_mut()?;
+		let borrow = self.buf().try_borrow_mut(0)?;
 		unsafe {
 			self.device().upload_data(
 				NonNull::from_ref(src).cast(),

@@ -20,7 +20,7 @@ use crate::tensor::device::dtype::DTypeMismatchError;
 use crate::tensor::error::{NotContiguousError, ShapeMismatchError};
 use crate::tensor::map::INLINE_DIMS;
 use crate::tensor::{Tensor, TensorOpError, shape};
-use crate::util::mycell::{UnsafeBorrowFailFlag, UnsafeBorrowMutFailFlag};
+use crate::util::mycell::UnsafeBorrowFailFlag;
 use crate::{ErrPack, autograd};
 
 //--------------------------------------------------------------------------------------------------
@@ -181,9 +181,8 @@ impl Attention {
 			let _k_borrow = unsafe { k.buf().unsafe_borrow(&mut inp_fail) };
 			let _v_borrow = unsafe { v.buf().unsafe_borrow(&mut inp_fail) };
 			inp_fail.check()?;
-			let mut out_fail = UnsafeBorrowMutFailFlag::new();
-			let _o_borrow = unsafe { o.buf().unsafe_borrow_mut(&mut out_fail) };
-			out_fail.check()?;
+
+			let _o_borrow = o.buf().try_borrow_mut(0);
 
 			let m = shape::DimMerger::<4>::merge::<1>([q_batch, k_batch, v_batch, o_batch])?;
 

@@ -16,7 +16,7 @@ use super::super::shape::*;
 
 #[allow(clippy::panic_in_result_fn)]
 #[test]
-fn test_dim_merger() -> Result<(), TensorOpError> {
+fn test_shape() -> Result<(), TensorOpError> {
 	// This was a real use case that failed in the past.
 
 	let d_lin = [

@@ -801,8 +801,9 @@ where
 	};
 
 	unsafe {
+		let mut same_as_output_count = 0;
 		let mut inp_fail = UnsafeBorrowFailFlag::new();
-		let inp_borrows: [Option<BorrowGuard<DeviceBuffer>>; E + R] = std::array::from_fn(|i| {
+		let inp_borrows: [BorrowGuard<DeviceBuffer>; E + R] = std::array::from_fn(|i| {
 			let tensor = tensor_args[i];
 			let arg = &args[i];
 			let same_as_output = std::ptr::eq(tensor.buf().as_ref(), output.buf().as_ref())
@@ -810,11 +811,14 @@ where
 				&& likely(arg.stride_bytes[0] == out.stride_bytes[0] || out.size[0] <= 1)
 				&& likely(arg.stride_bytes[1] == out.stride_bytes[1] || out.size[1] <= 1)
 				&& likely(arg.stride_bytes[2] == out.stride_bytes[2] || out.size[2] <= 1);
-			if same_as_output { None } else { Some(tensor.buf().unsafe_borrow(&mut inp_fail)) }
+			if same_as_output {
+				same_as_output_count += 1;
+			}
+			tensor.buf().unsafe_borrow(&mut inp_fail)
 		});
 		inp_fail.check()?;
 
-		let out_borrow = output.buf().try_borrow_mut()?;
+		let out_borrow = output.buf().try_borrow_mut(same_as_output_count);
 
 		// TODO - ensure_safe
 		// TODO - ensure all on same device
@@ -931,27 +935,47 @@ where
 		stride_bytes: [
 			batch_dims[0].strides[0] * out_dtype_bytes,
 			batch_dims[1].strides[0] * out_dtype_bytes,
-			if output_top.size == 1 { 0 } else { output_top.stride * out_dtype_bytes },
+			// Note: If output_top.size == 1, the DimMerger guarantees that stride is 0
+			//output_top.stride * out_dtype_bytes,
+			if output_top.size == 1 {
+				if output_top.stride != 0 {
+					debug_assert!(output_top.stride == 0);
+				}
+				0
+			} else {
+				output_top.stride * out_dtype_bytes
+			},
 		],
 		offset_bytes: output.map().offset() * out_dtype_bytes,
 		buf: output.buf().device_ptr(),
 	};
 
+	#[allow(clippy::if_same_then_else)]
+	#[allow(clippy::branches_sharing_code)]
 	unsafe {
+		let mut same_as_output_count = 0;
 		let mut inp_fail = UnsafeBorrowFailFlag::new();
-		let inp_borrows: [Option<BorrowGuard<DeviceBuffer>>; E + R] = std::array::from_fn(|i| {
+		let inp_borrows: [BorrowGuard<DeviceBuffer>; E + R] = std::array::from_fn(|i| {
 			let tensor = tensor_args[i];
 			let arg = &args[i];
 			let same_as_output = std::ptr::eq(tensor.buf().as_ref(), output.buf().as_ref())
-				&& likely(arg.offset_bytes == out.offset_bytes)
-				&& likely(arg.stride_bytes[0] == out.stride_bytes[0] || out.size[0] <= 1)
-				&& likely(arg.stride_bytes[1] == out.stride_bytes[1] || out.size[1] <= 1)
-				&& likely(arg.stride_bytes[2] == out.stride_bytes[2] || out.size[2] <= 1);
-			if same_as_output { None } else { Some(tensor.buf().unsafe_borrow(&mut inp_fail)) }
+				&& likely(arg.stride_bytes[0] == out.stride_bytes[0])
+				&& likely(arg.stride_bytes[1] == out.stride_bytes[1])
+				&& if i < E {
+					likely(arg.offset_bytes == out.offset_bytes)
+						&& likely(arg.stride_bytes[2] == out.stride_bytes[2])
+				} else {
+					likely(out.offset_bytes >= arg.offset_bytes)
+						&& likely(out.offset_bytes <= (reduction_size - 1) * arg.stride_bytes[2])
+				};
+			if same_as_output {
+				same_as_output_count += 1;
+			}
+			tensor.buf().unsafe_borrow(&mut inp_fail)
 		});
 		inp_fail.check()?;
 
-		let out_borrow = output.buf().try_borrow_mut()?;
+		let out_borrow = output.buf().try_borrow_mut(same_as_output_count)?;
 
 		// TODO - ensure_safe
 		// TODO - ensure all on same device
