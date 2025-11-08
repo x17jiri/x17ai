@@ -162,21 +162,23 @@ impl Tensor {
 		match self.dtype() {
 			f32::dtype => unsafe {
 				let mut value: f32 = 0.0;
+				let dtype_bytes = std::mem::size_of::<f32>();
 				self.device().download_data(
 					&buf,
 					NonNull::from_mut(&mut value).cast(),
-					self.map().offset_bytes(),
-					std::mem::size_of::<f32>(),
+					self.map().offset() * dtype_bytes,
+					dtype_bytes,
 				)?;
 				Ok(value.to_f64())
 			},
 			f64::dtype => unsafe {
 				let mut value: f64 = 0.0;
+				let dtype_bytes = std::mem::size_of::<f64>();
 				self.device().download_data(
 					&buf,
 					NonNull::from_mut(&mut value).cast(),
-					self.map().offset_bytes(),
-					std::mem::size_of::<f64>(),
+					self.map().offset() * dtype_bytes,
+					dtype_bytes,
 				)?;
 				Ok(value)
 			},

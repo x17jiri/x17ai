@@ -212,10 +212,6 @@ impl Map {
 		self.offset
 	}
 
-	pub fn offset_bytes(&self) -> usize {
-		unsafe { self.dtype.array_bytes_unchecked(self.offset) }
-	}
-
 	pub fn dtype(&self) -> DType {
 		self.dtype
 	}
@@ -239,9 +235,8 @@ impl Map {
 	}
 
 	pub fn byte_span(&self) -> std::ops::Range<usize> {
-		let dtype_bytes = self.dtype.bytes();
-		debug_assert!(dtype_bytes > 0); // TODO
-		let start = self.offset * dtype_bytes;
+		let dtype_bits = self.dtype.bits();
+		let start = self.offset * dtype_bits;
 		let mut elems = 1;
 		let mut len = 1;
 		for dim in self.dims.as_slice() {
@@ -251,7 +246,7 @@ impl Map {
 		if elems == 0 {
 			len = 0;
 		}
-		start..start + (len * dtype_bytes)
+		(start / 8)..(start + (len * dtype_bits) + 7) / 8
 	}
 
 	/// Merges the last `n` dimensions into a single dimension.

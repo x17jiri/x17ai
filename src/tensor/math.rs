@@ -9,7 +9,7 @@ use std::hint::cold_path;
 
 use crate::tensor::device::MatMulArgs;
 use crate::tensor::device::cpu::CPUDevice;
-use crate::tensor::device::dtype::{DTypeMismatchError, common_dtype};
+use crate::tensor::device::dtype::common_dtype;
 use crate::tensor::error::{ShapeMismatchError, UnsupportedDTypeError};
 use crate::tensor::map::{NotEnoughDimensionsError, SizeAndStride};
 use crate::tensor::shape::DimMerger;
@@ -247,10 +247,6 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 			cold_path();
 			return Err(ShapeMismatchError.into());
 		}
-		if to.tensor.dtype() != row.tensor.dtype() || to.tensor.dtype() != col.tensor.dtype() {
-			cold_path();
-			return Err(DTypeMismatchError.into());
-		}
 
 		let dims = DimMerger::<2>::merge::<1>([col.batch_dims, row.batch_dims])?;
 		let col_cols = dims[0].get(0);
@@ -262,26 +258,37 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 		borrow_fail.check()?;
 		let to_borrow = to.tensor.buf().try_borrow_mut()?;
 
+		let frac = to.tensor.dtype().is_fractional()
+			| col.tensor.dtype().is_fractional()
+			| row.tensor.dtype().is_fractional();
+		if frac != 0 {
+			cold_path();
+			return Err(UnsupportedDTypeError.into());
+		}
+		let to_dtype_bytes = to.tensor.dtype().floor_bytes();
+		let col_dtype_bytes = col.tensor.dtype().floor_bytes();
+		let row_dtype_bytes = row.tensor.dtype().floor_bytes();
+
 		let args = MatMulArgs {
-			o_row_stride: to.rows.stride,
-			o_col_stride: to.cols.stride,
+			o_row_stride_bytes: to.rows.stride * to_dtype_bytes,
+			o_col_stride_bytes: to.cols.stride * to_dtype_bytes,
 			o_rows: to.rows.size,
 			o_cols: to.cols.size,
-			o_offset: to.tensor.map().offset(),
+			o_offset_bytes: to.tensor.map().offset() * to_dtype_bytes,
 			o_buf: to_borrow.device_ptr(),
 
-			a_row_stride: col.rows.stride,
-			a_col_stride: col_cols.stride,
+			a_row_stride_bytes: col.rows.stride * col_dtype_bytes,
+			a_col_stride_bytes: col_cols.stride * col_dtype_bytes,
 			// a_rows == o_rows
 			a_cols: col_cols.size,
-			a_offset: col.tensor.map().offset(),
+			a_offset_bytes: col.tensor.map().offset() * col_dtype_bytes,
 			a_buf: col_borrow.device_ptr(),
 
-			b_row_stride: row_rows.stride,
-			b_col_stride: row.cols.stride,
+			b_row_stride_bytes: row_rows.stride * row_dtype_bytes,
+			b_col_stride_bytes: row.cols.stride * row_dtype_bytes,
 			// b_rows == a_cols - this condition is ensured by DimMerger
 			// b_cols == o_cols
-			b_offset: row.tensor.map().offset(),
+			b_offset_bytes: row.tensor.map().offset() * row_dtype_bytes,
 			b_buf: row_borrow.device_ptr(),
 
 			o_dtype: to.tensor.dtype(),
@@ -330,8 +337,8 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 		let to_borrow = to.tensor.buf().try_borrow_mut()?;
 
 		let frac = to.tensor.dtype().is_fractional()
-			| col.tensor.dtype().is_fractional()
-			| mat.tensor.dtype().is_fractional();
+			| mat.tensor.dtype().is_fractional()
+			| col.tensor.dtype().is_fractional();
 		if frac != 0 {
 			cold_path();
 			return Err(UnsupportedDTypeError.into());
