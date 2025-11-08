@@ -808,9 +808,9 @@ where
 			let arg = &args[i];
 			let same_as_output = std::ptr::eq(tensor.buf().as_ref(), output.buf().as_ref())
 				&& likely(arg.offset_bytes == out.offset_bytes)
-				&& likely(arg.stride_bytes[0] == out.stride_bytes[0] || out.size[0] <= 1)
-				&& likely(arg.stride_bytes[1] == out.stride_bytes[1] || out.size[1] <= 1)
-				&& likely(arg.stride_bytes[2] == out.stride_bytes[2] || out.size[2] <= 1);
+				&& likely(arg.stride_bytes[0] == out.stride_bytes[0])
+				&& likely(arg.stride_bytes[1] == out.stride_bytes[1])
+				&& likely(arg.stride_bytes[2] == out.stride_bytes[2]);
 			if same_as_output {
 				same_as_output_count += 1;
 			}
@@ -880,10 +880,12 @@ where
 	let elem_args_split: [Split; E] = std::array::from_fn(|i| split_last(tensor_args[i]));
 	let reduce_args_split: [Split; R] = std::array::from_fn(|i| split_last(tensor_args[E + i]));
 
-	let reduce_args_top = DimMerger::<R>::broadcast_joint_dims(reduce_args_split.map(|r| r.top))?;
-	let post_reduce_top = DimMerger::<{ 1 + E }>::broadcast_joint_dims(std::array::from_fn(|i| {
-		if i == 0 { output_split.top } else { elem_args_split[i - 1].top }
-	}))?;
+	let reduce_args_top =
+		DimMerger::<R>::broadcast_joint_dims::<true>(reduce_args_split.map(|r| r.top))?;
+	let post_reduce_top =
+		DimMerger::<{ 1 + E }>::broadcast_joint_dims::<true>(std::array::from_fn(|i| {
+			if i == 0 { output_split.top } else { elem_args_split[i - 1].top }
+		}))?;
 
 	let batch_dims = DimMerger::<{ 1 + E + R }>::merge::<2>(std::array::from_fn(|i| {
 		if i == 0 {
@@ -950,8 +952,6 @@ where
 		buf: output.buf().device_ptr(),
 	};
 
-	#[allow(clippy::if_same_then_else)]
-	#[allow(clippy::branches_sharing_code)]
 	unsafe {
 		let mut same_as_output_count = 0;
 		let mut inp_fail = UnsafeBorrowFailFlag::new();
@@ -965,8 +965,11 @@ where
 					likely(arg.offset_bytes == out.offset_bytes)
 						&& likely(arg.stride_bytes[2] == out.stride_bytes[2])
 				} else {
-					likely(out.offset_bytes >= arg.offset_bytes)
-						&& likely(out.offset_bytes <= (reduction_size - 1) * arg.stride_bytes[2])
+					// When reduction_size == 0, stride is 0, so the wrapping_sub() will underflow
+					// but we will multiply it by 0
+					let begin = arg.offset_bytes;
+					let end = begin + reduction_size.wrapping_sub(1) * arg.stride_bytes[2];
+					likely(out.offset_bytes >= begin) && likely(out.offset_bytes <= end)
 				};
 			if same_as_output {
 				same_as_output_count += 1;

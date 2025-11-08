@@ -94,22 +94,33 @@ impl<'a, const N: usize> DimMerger<'a, N> {
 	/// Finds common size and resets stride to 0 for broadcasted inputs
 	///
 	/// If there are no inputs (N == 0), this function always returns size = 1.
-	pub fn broadcast_joint_dims(
+	pub fn broadcast_joint_dims<const normalize_strides: bool>(
 		dims: [SizeAndStride; N],
 	) -> Result<MergedDim<N>, DimsDontMatchError> {
 		let size = dims.iter().fold(1, |size, inp| if size == 1 { inp.size } else { size });
+		let mut broadcast_check = 0;
 		let strides = dims.try_map(|inp| {
 			if inp.size == size {
 				Ok(inp.stride)
 			} else {
-				if inp.size != 1 {
-					cold_path();
-					return Err(DimsDontMatchError);
-				}
+				broadcast_check |= inp.size - 1;
 				Ok(0)
 			}
 		})?;
-		Ok(MergedDim { size, strides })
+		if broadcast_check != 0 {
+			cold_path();
+			return Err(DimsDontMatchError);
+		}
+		if normalize_strides && size <= 1 {
+			Ok(MergedDim { size, strides: [0; N] })
+		} else {
+			Ok(MergedDim { size, strides })
+		}
+	}
+
+	pub fn pop(&mut self) -> Result<MergedDim<N>, DimsDontMatchError> {
+		self.i += 1;
+		Self::broadcast_joint_dims::<true>(Self::load_joint_dims(self.inputs, self.i))
 	}
 
 	#[allow(clippy::redundant_else)]
@@ -120,15 +131,16 @@ impl<'a, const N: usize> DimMerger<'a, N> {
 		&mut self,
 	) -> Result<([MergedDim<N>; K], bool), DimsDontMatchError> {
 		let n = self.inputs.iter().map(|inp| inp.len()).max().unwrap_or(0);
-		let mut i = n - self.i;
 		let mut result = [MergedDim { size: 1, strides: [0; N] }; K];
-		if K > 0 && i > 0 {
+		if K > 0 && self.i < n {
 			let mut k = K - 1;
 			let mut merged = MergedDim { size: 1, strides: [0; N] };
-			while i > 0 {
-				i -= 1;
-				let joint_dim =
-					Self::broadcast_joint_dims(Self::load_joint_dims(self.inputs, n - i))?;
+			while self.i < n {
+				self.i += 1;
+				let joint_dim = Self::broadcast_joint_dims::<false>(Self::load_joint_dims(
+					self.inputs,
+					self.i,
+				))?;
 
 				if merged.size > 1 {
 					if joint_dim.size > 1
@@ -139,7 +151,6 @@ impl<'a, const N: usize> DimMerger<'a, N> {
 						let slot = unsafe { result.get_unchecked_mut(k) };
 						*slot = merged;
 						if k == 0 {
-							self.i = n - (i + 1);
 							return Ok((result, false));
 						}
 						k -= 1;
@@ -155,7 +166,6 @@ impl<'a, const N: usize> DimMerger<'a, N> {
 					merged.strides = joint_dim.strides;
 				}
 			}
-			self.i = n; // i == 0
 
 			let slot = unsafe { result.get_unchecked_mut(k) };
 			slot.size = merged.size;
