@@ -45,7 +45,7 @@ fn test_shape() -> Result<(), TensorOpError> {
 		SizeAndStride { size: 7, stride: 1 },
 	];
 
-	let dims = DimMerger::<5>::merge::<4>([&d_lin, &d_gate, &lin, &gate, &out])?;
+	let dims = DimMerger::<5>::merge::<4>(&[&d_lin, &d_gate, &lin, &gate, &out], 0)?;
 
 	let expected_dims = [
 		MergedDim { size: 1, strides: [0, 0, 0, 0, 0] },

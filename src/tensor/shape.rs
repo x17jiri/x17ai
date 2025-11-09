@@ -67,24 +67,14 @@ impl<const N: usize> MergedDim<N> {
 	}
 }
 
-pub struct DimMerger<'a, const N: usize> {
-	inputs: [&'a [SizeAndStride]; N],
-	i: usize,
-}
+pub struct DimMerger<const N: usize>;
 
-impl<'a, const N: usize> DimMerger<'a, N> {
-	pub fn new(inputs: [&'a [SizeAndStride]; N]) -> Self {
-		Self { inputs, i: 0 }
-	}
-
-	pub fn load_joint_dims(
-		inputs: [&[SizeAndStride]; N],
-		dist_from_end: usize,
-	) -> [SizeAndStride; N] {
-		debug_assert!(dist_from_end > 0);
+impl<const N: usize> DimMerger<N> {
+	pub fn load_joint_dims(inputs: &[&[SizeAndStride]; N], i: usize) -> [SizeAndStride; N] {
+		let i = i + 1;
 		inputs.map(|inp| {
-			if dist_from_end <= inp.len() {
-				unsafe { *inp.get_unchecked(inp.len() - dist_from_end) }
+			if i <= inp.len() {
+				unsafe { *inp.get_unchecked(inp.len() - i) }
 			} else {
 				SizeAndStride { size: 1, stride: 0 }
 			}
@@ -118,29 +108,26 @@ impl<'a, const N: usize> DimMerger<'a, N> {
 		}
 	}
 
-	pub fn pop(&mut self) -> Result<MergedDim<N>, DimsDontMatchError> {
-		self.i += 1;
-		Self::broadcast_joint_dims::<true>(Self::load_joint_dims(self.inputs, self.i))
+	pub fn load_and_broadcast<const normalize_strides: bool>(
+		inputs: &[&[SizeAndStride]; N],
+		i: usize,
+	) -> Result<MergedDim<N>, DimsDontMatchError> {
+		Self::broadcast_joint_dims::<normalize_strides>(Self::load_joint_dims(inputs, i))
 	}
 
-	#[allow(clippy::redundant_else)]
-	#[allow(clippy::should_implement_trait)]
 	#[allow(clippy::indexing_slicing)]
 	#[inline(never)]
 	pub fn next<const K: usize>(
-		&mut self,
-	) -> Result<([MergedDim<N>; K], bool), DimsDontMatchError> {
-		let n = self.inputs.iter().map(|inp| inp.len()).max().unwrap_or(0);
+		inputs: &[&[SizeAndStride]; N],
+		mut i: usize,
+	) -> Result<([MergedDim<N>; K], usize, bool), DimsDontMatchError> {
+		let n = inputs.iter().map(|inp| inp.len()).max().unwrap_or(0);
 		let mut result = [MergedDim { size: 1, strides: [0; N] }; K];
-		if K > 0 && self.i < n {
+		if K > 0 && i < n {
 			let mut k = K - 1;
 			let mut merged = MergedDim { size: 1, strides: [0; N] };
-			while self.i < n {
-				self.i += 1;
-				let joint_dim = Self::broadcast_joint_dims::<false>(Self::load_joint_dims(
-					self.inputs,
-					self.i,
-				))?;
+			while i < n {
+				let joint_dim = Self::load_and_broadcast::<false>(inputs, i)?;
 
 				if merged.size > 1 {
 					if joint_dim.size > 1
@@ -151,7 +138,7 @@ impl<'a, const N: usize> DimMerger<'a, N> {
 						let slot = unsafe { result.get_unchecked_mut(k) };
 						*slot = merged;
 						if k == 0 {
-							return Ok((result, false));
+							return Ok((result, i, false));
 						}
 						k -= 1;
 						merged = joint_dim;
@@ -160,11 +147,13 @@ impl<'a, const N: usize> DimMerger<'a, N> {
 						merged.size *= joint_dim.size;
 					}
 				} else {
-					// If merged.size == 1, this is equivalent to `merged = joint_dim`
-					// If merged.size == 0, the strides are not important and size will stay 0
+					// If merged.size == 1, this replaces `merged` with `joint_dim`
+					// If merged.size == 0, it will not change
 					merged.size *= joint_dim.size;
 					merged.strides = joint_dim.strides;
 				}
+
+				i += 1;
 			}
 
 			let slot = unsafe { result.get_unchecked_mut(k) };
@@ -173,15 +162,15 @@ impl<'a, const N: usize> DimMerger<'a, N> {
 				slot.strides = merged.strides;
 			}
 		}
-		Ok((result, true))
+		Ok((result, i, true))
 	}
 
 	pub fn merge<const K: usize>(
-		inputs: [&'a [SizeAndStride]; N],
+		inputs: &[&[SizeAndStride]; N],
+		i: usize,
 	) -> Result<[MergedDim<N>; K], TensorOpError> {
-		let mut merger = Self::new(inputs);
-		let Ok((result, finished)) = merger.next::<K>() else {
-			cold_path();
+		cold_path();
+		let Ok((result, _new_i, finished)) = Self::next::<K>(inputs, i) else {
 			return Err(DimsDontMatchError.into());
 		};
 		if !finished {

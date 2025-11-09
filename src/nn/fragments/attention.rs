@@ -184,7 +184,7 @@ impl Attention {
 
 			let _o_borrow = o.buf().try_borrow_mut(0);
 
-			let m = shape::DimMerger::<4>::merge::<1>([q_batch, k_batch, v_batch, o_batch])?;
+			let m = shape::DimMerger::<4>::merge::<1>(&[q_batch, k_batch, v_batch, o_batch], 0)?;
 
 			let device = o.device();
 			for _ in 0..m[0].size {

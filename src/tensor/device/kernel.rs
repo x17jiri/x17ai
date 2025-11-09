@@ -759,9 +759,12 @@ where
 	[(); 1 + E + R]:,
 	[(); DynKernelCall::dtype_config_words(E + R)]:,
 {
-	let merged = DimMerger::<{ 1 + E + R }>::merge::<3>(std::array::from_fn(|i| {
-		if i == 0 { output.map().dims() } else { tensor_args[i - 1].map().dims() }
-	}))?;
+	let merged = DimMerger::<{ 1 + E + R }>::merge::<3>(
+		&std::array::from_fn(|i| {
+			if i == 0 { output.map().dims() } else { tensor_args[i - 1].map().dims() }
+		}),
+		0,
+	)?;
 	if shape::is_overlapping(merged.map(|m| m.get(0))) {
 		cold_path();
 		return Err(OverlappingOutputError.into());
@@ -858,44 +861,30 @@ where
 	[(); 1 + E + R]:,
 	[(); DynKernelCall::dtype_config_words(E + R)]:,
 {
-	#[derive(Clone, Copy)]
-	struct Split<'b> {
-		top: SizeAndStride,
-		batch: &'b [SizeAndStride],
-	}
-	fn split_last<'b>(tensor: &'b Tensor) -> Split<'b> {
-		let dims = tensor.map().dims();
-		if let Some((&top, batch)) = dims.split_last() {
-			Split { top, batch }
-		} else {
-			cold_path();
-			Split {
-				top: SizeAndStride { size: 1, stride: 0 },
-				batch: dims,
+	let output_dims: &[SizeAndStride] = output.map().dims();
+	let elem_args_dims: [&[SizeAndStride]; E] =
+		std::array::from_fn(|i| tensor_args[i].map().dims());
+	let reduce_args_dims: [&[SizeAndStride]; R] =
+		std::array::from_fn(|i| tensor_args[E + i].map().dims());
+
+	let reduce_args_top = DimMerger::<R>::load_and_broadcast::<true>(&reduce_args_dims, 0)?;
+	let post_reduce_top = DimMerger::<{ 1 + E }>::load_and_broadcast::<true>(
+		&std::array::from_fn(|i| if i == 0 { output_dims } else { elem_args_dims[i - 1] }),
+		0,
+	)?;
+
+	let batch_dims = DimMerger::<{ 1 + E + R }>::merge::<2>(
+		&std::array::from_fn(|i| {
+			if i == 0 {
+				output_dims
+			} else if i <= E {
+				elem_args_dims[i - 1]
+			} else {
+				reduce_args_dims[i - 1 - E]
 			}
-		}
-	}
-
-	let output_split = split_last(output);
-	let elem_args_split: [Split; E] = std::array::from_fn(|i| split_last(tensor_args[i]));
-	let reduce_args_split: [Split; R] = std::array::from_fn(|i| split_last(tensor_args[E + i]));
-
-	let reduce_args_top =
-		DimMerger::<R>::broadcast_joint_dims::<true>(reduce_args_split.map(|r| r.top))?;
-	let post_reduce_top =
-		DimMerger::<{ 1 + E }>::broadcast_joint_dims::<true>(std::array::from_fn(|i| {
-			if i == 0 { output_split.top } else { elem_args_split[i - 1].top }
-		}))?;
-
-	let batch_dims = DimMerger::<{ 1 + E + R }>::merge::<2>(std::array::from_fn(|i| {
-		if i == 0 {
-			output_split.batch
-		} else if i <= E {
-			elem_args_split[i - 1].batch
-		} else {
-			reduce_args_split[i - 1 - E].batch
-		}
-	}))?;
+		}),
+		1,
+	)?;
 
 	let output_top = post_reduce_top.get(0);
 	if shape::is_overlapping([batch_dims[0].get(0), batch_dims[1].get(0), output_top]) {
