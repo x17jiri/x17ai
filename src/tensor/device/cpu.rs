@@ -14,7 +14,8 @@ use crate::tensor::device::dtype::common_dtype;
 use crate::tensor::device::kernel::DynKernelCall;
 use crate::tensor::error::UnsupportedDTypeError;
 use crate::tensor::{HasDType, TensorOpError};
-use crate::util::mycell::{self, BorrowGuard};
+use crate::util::intrusive_rc::IntrusiveRc;
+use crate::util::intrusive_ref_cell::BorrowGuard;
 
 pub mod cpu_float_methods;
 
@@ -44,8 +45,8 @@ impl CPUDevice {
 		Rc::new(Self { name })
 	}
 
-	pub fn buf_as_slice<'guard, 'buf, T: HasDType>(
-		buf: &BorrowGuard<'buf, DeviceBuffer>,
+	pub fn buf_as_slice<'buf, 'guard, T: HasDType>(
+		buf: &'guard BorrowGuard<'buf, DeviceBuffer>,
 	) -> Result<&'guard [T], NotOnCPUDeviceError> {
 		if !buf.device().is_cpu() {
 			cold_path();
@@ -105,6 +106,8 @@ impl CPUDevice {
 	}
 }
 
+const BUFFER_ALIGN: usize = std::mem::align_of::<u64>();
+
 impl Device for CPUDevice {
 	fn name(&self) -> &str {
 		&self.name
@@ -118,24 +121,42 @@ impl Device for CPUDevice {
 	fn new_buffer(
 		self: Rc<Self>,
 		bytes: usize,
-	) -> Result<Rc<mycell::RefCell<DeviceBuffer>>, DevBufAllocFailedError> {
-		if let Ok(layout) = std::alloc::Layout::from_size_align(bytes, std::mem::align_of::<u64>())
+	) -> Result<IntrusiveRc<DeviceBuffer>, DevBufAllocFailedError> {
+		let struct_layout = std::alloc::Layout::new::<DeviceBuffer>();
+		if let Ok(buffer_layout) = std::alloc::Layout::from_size_align(bytes, BUFFER_ALIGN)
+			&& let Ok((layout, buffer_offset)) = struct_layout.extend(buffer_layout)
 			&& let Some(memory) = NonNull::new(unsafe { std::alloc::alloc(layout) })
 		{
-			Ok(Rc::new(mycell::RefCell::new(unsafe {
-				DeviceBuffer::new(DevicePtr::new(memory.as_ptr().cast()), bytes, self)
-			})))
+			let inst = memory.cast::<DeviceBuffer>();
+			unsafe {
+				inst.write(DeviceBuffer::new(
+					DevicePtr::new(memory.add(buffer_offset).as_ptr().cast()),
+					bytes,
+					self,
+				));
+				Ok(IntrusiveRc::new(inst))
+			}
 		} else {
 			cold_path();
 			Err(DevBufAllocFailedError)
 		}
 	}
 
-	unsafe fn drop_buffer(&self, device_ptr: DevicePtr, bytes: usize) {
+	unsafe fn drop_buffer(
+		self: Rc<Self>,
+		device_ptr: DevicePtr,
+		bytes: usize,
+		inst: NonNull<DeviceBuffer>,
+	) {
 		unsafe {
-			let layout = std::alloc::Layout::from_size_align(bytes, std::mem::align_of::<u64>())
-				.unwrap_unchecked();
-			std::alloc::dealloc(device_ptr.as_ptr::<u8>(), layout);
+			let struct_layout = std::alloc::Layout::new::<DeviceBuffer>();
+			let buffer_layout =
+				std::alloc::Layout::from_size_align(bytes, BUFFER_ALIGN).unwrap_unchecked();
+			let (layout, buffer_offset) = struct_layout.extend(buffer_layout).unwrap_unchecked();
+			debug_assert!(
+				device_ptr.as_ptr::<u8>() == inst.cast::<u8>().add(buffer_offset).as_ptr()
+			);
+			std::alloc::dealloc(inst.as_ptr().cast(), layout);
 		}
 	}
 

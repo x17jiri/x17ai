@@ -29,8 +29,9 @@ use crate::tensor::device::{
 	AttentionArgs, DevBufAllocFailedError, DeviceBuffer, DevicePtr, MatMulArgs,
 };
 use crate::tensor::{Device, TensorOpError};
+use crate::util::ToBoxedSlice;
 use crate::util::hasher::HashWord;
-use crate::util::{ToBoxedSlice, mycell};
+use crate::util::intrusive_rc::IntrusiveRc;
 
 pub mod cuda_shim;
 pub mod kernel_templates;
@@ -377,16 +378,33 @@ impl Device for CudaDevice {
 	fn new_buffer(
 		self: Rc<Self>,
 		bytes: usize,
-	) -> Result<Rc<mycell::RefCell<DeviceBuffer>>, DevBufAllocFailedError> {
-		let Ok(memory) = (unsafe { self.cuda_stream.alloc(bytes) }) else {
+	) -> Result<IntrusiveRc<DeviceBuffer>, DevBufAllocFailedError> {
+		let struct_layout = std::alloc::Layout::new::<DeviceBuffer>();
+		unsafe {
+			if let Some(inst_mem) = NonNull::new(std::alloc::alloc(struct_layout)) {
+				if let Ok(memory) = self.cuda_stream.alloc(bytes) {
+					let inst = inst_mem.cast::<DeviceBuffer>();
+					inst.write(DeviceBuffer::new(memory, bytes, self));
+					return Ok(IntrusiveRc::new(inst));
+				}
+				std::alloc::dealloc(inst_mem.as_ptr().cast(), struct_layout);
+			}
 			cold_path();
-			return Err(DevBufAllocFailedError);
-		};
-		Ok(Rc::new(mycell::RefCell::new(unsafe { DeviceBuffer::new(memory, bytes, self) })))
+			Err(DevBufAllocFailedError)
+		}
 	}
 
-	unsafe fn drop_buffer(&self, device_ptr: DevicePtr, _bytes: usize) {
-		unsafe { self.cuda_stream.free(device_ptr) }
+	unsafe fn drop_buffer(
+		self: Rc<Self>,
+		device_ptr: DevicePtr,
+		_bytes: usize,
+		inst: NonNull<DeviceBuffer>,
+	) {
+		unsafe {
+			self.cuda_stream.free(device_ptr);
+			let struct_layout = std::alloc::Layout::new::<DeviceBuffer>();
+			std::alloc::dealloc(inst.as_ptr().cast(), struct_layout);
+		}
 	}
 
 	unsafe fn upload_data(

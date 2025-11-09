@@ -20,7 +20,7 @@ pub use dtype::{DType, HasDType};
 use crate::ErrPack;
 use crate::tensor::TensorOpError;
 use crate::tensor::device::kernel::DynKernelCall;
-use crate::util::mycell;
+use crate::util::intrusive_rc::IntrusiveRc;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -211,11 +211,19 @@ pub trait Device {
 	fn new_buffer(
 		self: Rc<Self>,
 		bytes: usize,
-	) -> Result<Rc<mycell::RefCell<DeviceBuffer>>, DevBufAllocFailedError>;
+	) -> Result<IntrusiveRc<DeviceBuffer>, DevBufAllocFailedError>;
 
 	/// # Safety
-	/// This should only be called from `DeviceBuffer::drop()`
-	unsafe fn drop_buffer(&self, device_ptr: DevicePtr, bytes: usize);
+	/// This should only be called from `DeviceBuffer::destroy()`
+	///
+	/// When this is called, the `DeviceBuffer` instance has already been dismantled,
+	/// so the implementor should only drop any extra fields and free memory.
+	unsafe fn drop_buffer(
+		self: Rc<Self>,
+		device_ptr: DevicePtr,
+		bytes: usize,
+		inst: NonNull<DeviceBuffer>,
+	);
 
 	unsafe fn upload_data(
 		&self,

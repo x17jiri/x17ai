@@ -8,26 +8,63 @@
 use std::rc::Rc;
 
 use crate::tensor::device::DevicePtr;
+use crate::util::intrusive_rc::{self, IntrusiveRcTrait};
+use crate::util::intrusive_ref_cell::{BorrowCounter, IntrusiveRefCellTrait};
 
 use super::Device;
 
 //--------------------------------------------------------------------------------------------------
 
-// TODO
-// - currently we use Rc for refcounting buffer references. It has two counters, but we
-// only need the strong count. We could save 8 bytes per buffer by using some lite Rc.
-// - also, the `device` field could use some thin rc that stores metadata in the pointee
-// not in the pointer itself. This would save another 8 bytes per buffer.
 pub struct DeviceBuffer {
+	refcount: intrusive_rc::RefCount,
+	borrow_counter: BorrowCounter,
 	device_ptr: DevicePtr,
 	bytes: usize,
+
+	// TODO
+	// - could this be replace with some thin rc that stores
+	// metadata in the pointee not in the pointer itself?
+	// This would save another 8 bytes per buffer.
 	device: Rc<dyn Device>,
+}
+
+impl IntrusiveRcTrait for DeviceBuffer {
+	unsafe fn refcount(&self) -> &intrusive_rc::RefCount {
+		&self.refcount
+	}
+
+	unsafe fn destroy(this: std::ptr::NonNull<Self>) {
+		unsafe {
+			let Self {
+				refcount,
+				borrow_counter,
+				device_ptr,
+				bytes,
+				device,
+			} = this.read();
+			std::mem::drop(refcount);
+			std::mem::drop(borrow_counter);
+			device.drop_buffer(device_ptr, bytes, this);
+		}
+	}
+}
+
+impl IntrusiveRefCellTrait for DeviceBuffer {
+	fn borrow_counter(&self) -> &BorrowCounter {
+		&self.borrow_counter
+	}
 }
 
 impl DeviceBuffer {
 	#[inline]
 	pub unsafe fn new(device_ptr: DevicePtr, bytes: usize, device: Rc<dyn Device>) -> Self {
-		Self { device_ptr, bytes, device }
+		Self {
+			refcount: intrusive_rc::RefCount::new(),
+			borrow_counter: BorrowCounter::new(),
+			device_ptr,
+			bytes,
+			device,
+		}
 	}
 
 	#[inline]
@@ -55,14 +92,6 @@ impl DeviceBuffer {
 	#[inline]
 	pub fn rc_device(&self) -> Rc<dyn Device> {
 		self.device.clone()
-	}
-}
-
-impl Drop for DeviceBuffer {
-	fn drop(&mut self) {
-		unsafe {
-			self.device.drop_buffer(self.device_ptr, self.bytes);
-		}
 	}
 }
 

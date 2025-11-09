@@ -9,10 +9,10 @@ use std::convert::Infallible;
 
 pub mod array;
 pub mod hasher;
-pub mod mycell;
+pub mod intrusive_ref_cell;
 //pub mod thin_rc; - TODO
 pub mod ffi_buffer;
-pub mod rc_cell;
+pub mod intrusive_rc;
 pub mod universal_range;
 
 //--------------------------------------------------------------------------------------------------

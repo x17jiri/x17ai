@@ -20,7 +20,7 @@ use crate::tensor::device::dtype::DTypeMismatchError;
 use crate::tensor::error::{NotContiguousError, ShapeMismatchError};
 use crate::tensor::map::INLINE_DIMS;
 use crate::tensor::{Tensor, TensorOpError, shape};
-use crate::util::mycell::UnsafeBorrowFailFlag;
+use crate::util::intrusive_ref_cell::{BorrowFailFlag, IntrusiveRefCellTrait};
 use crate::{ErrPack, autograd};
 
 //--------------------------------------------------------------------------------------------------
@@ -168,21 +168,20 @@ impl Attention {
 		};
 
 		{
-			let mut inp_fail = UnsafeBorrowFailFlag::new();
-			let _q_borrow = unsafe {
-				let same_as_output = std::ptr::eq(q.buf().as_ref(), o.buf().as_ref())
-					&& likely(
-						args.q_offset == args.o_offset
-							&& (args.q_item_stride == args.o_item_stride || args.q_count == 1)
-							&& (args.q_head_stride == args.o_head_stride || args.head_count == 1),
-					);
-				if same_as_output { None } else { Some(q.buf().unsafe_borrow(&mut inp_fail)) }
-			};
-			let _k_borrow = unsafe { k.buf().unsafe_borrow(&mut inp_fail) };
-			let _v_borrow = unsafe { v.buf().unsafe_borrow(&mut inp_fail) };
+			let mut inp_fail = BorrowFailFlag::new();
+
+			let same_as_output = std::ptr::eq(q.buf(), o.buf())
+				&& likely(
+					args.q_offset == args.o_offset
+						&& (args.q_item_stride == args.o_item_stride || args.q_count == 1)
+						&& (args.q_head_stride == args.o_head_stride || args.head_count == 1),
+				);
+			let _q_borrow = q.buf().borrow(&mut inp_fail);
+			let _k_borrow = k.buf().borrow(&mut inp_fail);
+			let _v_borrow = v.buf().borrow(&mut inp_fail);
 			inp_fail.check()?;
 
-			let _o_borrow = o.buf().try_borrow_mut(0);
+			let _o_borrow = o.buf().try_borrow_mut(same_as_output.into());
 
 			let m = shape::DimMerger::<4>::merge::<1>(&[q_batch, k_batch, v_batch, o_batch], 0)?;
 

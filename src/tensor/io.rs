@@ -7,6 +7,8 @@
 
 use std::hint::cold_path;
 
+use crate::util::intrusive_ref_cell::IntrusiveRefCellTrait;
+
 use super::device::cpu::CPUDevice;
 use super::device::cpu::cpu_float_methods::FromToF64;
 use super::map::{Map, SizeAndStride};
@@ -126,7 +128,7 @@ impl std::fmt::Display for Tensor {
 					write!(f, "Tensor(<tensor is not on CPU>)")?;
 					return Err(std::fmt::Error);
 				};
-				fmt_tensor(f, map, slice)
+				fmt_tensor(f, map, &slice)
 			},
 			_ => {
 				cold_path();

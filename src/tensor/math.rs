@@ -14,7 +14,7 @@ use crate::tensor::error::{ShapeMismatchError, UnsupportedDTypeError};
 use crate::tensor::map::{NotEnoughDimensionsError, SizeAndStride};
 use crate::tensor::shape::DimMerger;
 use crate::tensor::{DType, HasDType, Tensor, TensorOpError};
-use crate::util::mycell::UnsafeBorrowFailFlag;
+use crate::util::intrusive_ref_cell::{BorrowFailFlag, IntrusiveRefCellTrait};
 use crate::{ErrPack, custom_kernel};
 
 //--------------------------------------------------------------------------------------------------
@@ -252,11 +252,11 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 		let col_cols = dims[0].get(0);
 		let row_rows = dims[0].get(1);
 
-		let mut borrow_fail = UnsafeBorrowFailFlag::new();
-		let col_borrow = unsafe { col.tensor.buf().unsafe_borrow(&mut borrow_fail) };
-		let row_borrow = unsafe { row.tensor.buf().unsafe_borrow(&mut borrow_fail) };
+		let mut borrow_fail = BorrowFailFlag::new();
+		let _col_borrow = col.tensor.buf().borrow(&mut borrow_fail);
+		let _row_borrow = row.tensor.buf().borrow(&mut borrow_fail);
 		borrow_fail.check()?;
-		let to_borrow = to.tensor.buf().try_borrow_mut(0)?;
+		let _to_borrow = to.tensor.buf().try_borrow_mut(0)?;
 
 		let frac = to.tensor.dtype().is_fractional()
 			| col.tensor.dtype().is_fractional()
@@ -275,33 +275,33 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 			o_rows: to.rows.size,
 			o_cols: to.cols.size,
 			o_offset_bytes: to.tensor.map().offset() * to_dtype_bytes,
-			o_buf: to_borrow.device_ptr(),
+			o_buf: to.tensor.buf().device_ptr(),
 
 			a_row_stride_bytes: col.rows.stride * col_dtype_bytes,
 			a_col_stride_bytes: col_cols.stride * col_dtype_bytes,
 			// a_rows == o_rows
 			a_cols: col_cols.size,
 			a_offset_bytes: col.tensor.map().offset() * col_dtype_bytes,
-			a_buf: col_borrow.device_ptr(),
+			a_buf: col.tensor.buf().device_ptr(),
 
 			b_row_stride_bytes: row_rows.stride * row_dtype_bytes,
 			b_col_stride_bytes: row.cols.stride * row_dtype_bytes,
 			// b_rows == a_cols - this condition is ensured by DimMerger
 			// b_cols == o_cols
 			b_offset_bytes: row.tensor.map().offset() * row_dtype_bytes,
-			b_buf: row_borrow.device_ptr(),
+			b_buf: row.tensor.buf().device_ptr(),
 
 			o_dtype: to.tensor.dtype(),
 			a_dtype: col.tensor.dtype(),
 			b_dtype: row.tensor.dtype(),
 			internal_dtype,
 
-			o_buf_bytes: to_borrow.byte_len(),
-			a_buf_bytes: col_borrow.byte_len(),
-			b_buf_bytes: row_borrow.byte_len(),
+			o_buf_bytes: to.tensor.buf().byte_len(),
+			a_buf_bytes: col.tensor.buf().byte_len(),
+			b_buf_bytes: row.tensor.buf().byte_len(),
 		};
 
-		let device = to_borrow.device();
+		let device = to.tensor.device();
 		unsafe { device.mm(&args, scale) }?;
 		Ok(())
 	}
@@ -330,11 +330,11 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 		let to_cols = dims[0].get(0);
 		let col_cols = dims[0].get(1);
 
-		let mut borrow_fail = UnsafeBorrowFailFlag::new();
-		let mat_borrow = unsafe { mat.tensor.buf().unsafe_borrow(&mut borrow_fail) };
-		let col_borrow = unsafe { col.tensor.buf().unsafe_borrow(&mut borrow_fail) };
+		let mut borrow_fail = BorrowFailFlag::new();
+		let _mat_borrow = mat.tensor.buf().borrow(&mut borrow_fail);
+		let _col_borrow = col.tensor.buf().borrow(&mut borrow_fail);
 		borrow_fail.check()?;
-		let to_borrow = to.tensor.buf().try_borrow_mut(0)?;
+		let _to_borrow = to.tensor.buf().try_borrow_mut(0)?;
 
 		let frac = to.tensor.dtype().is_fractional()
 			| mat.tensor.dtype().is_fractional()
@@ -353,33 +353,33 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 			o_rows: to.rows.size,
 			o_cols: to_cols.size,
 			o_offset_bytes: to.tensor.map().offset() * to_dtype_bytes,
-			o_buf: to_borrow.device_ptr(),
+			o_buf: to.tensor.buf().device_ptr(),
 
 			a_row_stride_bytes: mat.rows.stride * mat_dtype_bytes,
 			a_col_stride_bytes: mat.cols.stride * mat_dtype_bytes,
 			// a_rows == o_rows
 			a_cols: mat.cols.size,
 			a_offset_bytes: mat.tensor.map().offset() * mat_dtype_bytes,
-			a_buf: mat_borrow.device_ptr(),
+			a_buf: mat.tensor.buf().device_ptr(),
 
 			b_row_stride_bytes: col.rows.stride * col_dtype_bytes,
 			b_col_stride_bytes: col_cols.stride * col_dtype_bytes,
 			// b_rows == a_cols
 			// b_cols == o_cols
 			b_offset_bytes: col.tensor.map().offset() * col_dtype_bytes,
-			b_buf: col_borrow.device_ptr(),
+			b_buf: col.tensor.buf().device_ptr(),
 
 			o_dtype: to.tensor.dtype(),
 			a_dtype: mat.tensor.dtype(),
 			b_dtype: col.tensor.dtype(),
 			internal_dtype,
 
-			o_buf_bytes: to_borrow.byte_len(),
-			a_buf_bytes: mat_borrow.byte_len(),
-			b_buf_bytes: col_borrow.byte_len(),
+			o_buf_bytes: to.tensor.buf().byte_len(),
+			a_buf_bytes: mat.tensor.buf().byte_len(),
+			b_buf_bytes: col.tensor.buf().byte_len(),
 		};
 
-		let device = to_borrow.device();
+		let device = to.tensor.device();
 		unsafe { device.mm(&args, scale) }?;
 		Ok(())
 	}

@@ -7,7 +7,7 @@
 
 use std::borrow::Cow;
 
-use crate::util::mycell::{BorrowError, BorrowMutError};
+use crate::util::intrusive_ref_cell::{BorrowError, BorrowMutError};
 use crate::{ErrExtra, ErrPack};
 
 use super::device::DevBufAllocFailedError;

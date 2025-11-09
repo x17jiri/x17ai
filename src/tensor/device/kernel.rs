@@ -16,7 +16,7 @@ use crate::tensor::map::SizeAndStride;
 use crate::tensor::shape::{self, DimMerger, DimsDontMatchError};
 use crate::tensor::{DType, Tensor, TensorOpError};
 use crate::util::hasher::{HASH_WORD_SIZE, HashWord};
-use crate::util::mycell::{BorrowGuard, UnsafeBorrowFailFlag};
+use crate::util::intrusive_ref_cell::{BorrowFailFlag, BorrowGuard, IntrusiveRefCellTrait};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -803,34 +803,34 @@ where
 		buf: output.buf().device_ptr(),
 	};
 
+	let mut same_as_output_count = 0;
+	let mut inp_fail = BorrowFailFlag::new();
+	let inp_borrows: [BorrowGuard<DeviceBuffer>; E + R] = std::array::from_fn(|i| {
+		let tensor = tensor_args[i];
+		let arg = &args[i];
+		let same_as_output = std::ptr::eq(tensor.buf(), output.buf())
+			&& likely(arg.offset_bytes == out.offset_bytes)
+			&& likely(arg.stride_bytes[0] == out.stride_bytes[0])
+			&& likely(arg.stride_bytes[1] == out.stride_bytes[1])
+			&& likely(arg.stride_bytes[2] == out.stride_bytes[2]);
+		if same_as_output {
+			same_as_output_count += 1;
+		}
+		tensor.buf().borrow(&mut inp_fail)
+	});
+	inp_fail.check()?;
+
+	let out_borrow = output.buf().try_borrow_mut(same_as_output_count);
+
+	// TODO - ensure_safe
+	// TODO - ensure all on same device
+	// TODO - other things may need to be checked before running the kernel
+
+	let dtype_config =
+		DynKernelCall::new_dtype_config::<{ E + R }>(internal_dtype, output, tensor_args);
+	key[..dtype_config.len()].copy_from_slice(&dtype_config);
+
 	unsafe {
-		let mut same_as_output_count = 0;
-		let mut inp_fail = UnsafeBorrowFailFlag::new();
-		let inp_borrows: [BorrowGuard<DeviceBuffer>; E + R] = std::array::from_fn(|i| {
-			let tensor = tensor_args[i];
-			let arg = &args[i];
-			let same_as_output = std::ptr::eq(tensor.buf().as_ref(), output.buf().as_ref())
-				&& likely(arg.offset_bytes == out.offset_bytes)
-				&& likely(arg.stride_bytes[0] == out.stride_bytes[0])
-				&& likely(arg.stride_bytes[1] == out.stride_bytes[1])
-				&& likely(arg.stride_bytes[2] == out.stride_bytes[2]);
-			if same_as_output {
-				same_as_output_count += 1;
-			}
-			tensor.buf().unsafe_borrow(&mut inp_fail)
-		});
-		inp_fail.check()?;
-
-		let out_borrow = output.buf().try_borrow_mut(same_as_output_count);
-
-		// TODO - ensure_safe
-		// TODO - ensure all on same device
-		// TODO - other things may need to be checked before running the kernel
-
-		let dtype_config =
-			DynKernelCall::new_dtype_config::<{ E + R }>(internal_dtype, output, tensor_args);
-		key[..dtype_config.len()].copy_from_slice(&dtype_config);
-
 		output.device().run_elemwise_kernel(&DynKernelCall {
 			key,
 			expr,
@@ -839,10 +839,10 @@ where
 			reduce_count: R,
 			scalar_args,
 		})?;
-
-		std::mem::drop(out_borrow);
-		std::mem::drop(inp_borrows);
 	}
+
+	std::mem::drop(out_borrow);
+	std::mem::drop(inp_borrows);
 	Ok(())
 }
 
@@ -941,42 +941,42 @@ where
 		buf: output.buf().device_ptr(),
 	};
 
+	let mut same_as_output_count = 0;
+	let mut inp_fail = BorrowFailFlag::new();
+	let inp_borrows: [BorrowGuard<DeviceBuffer>; E + R] = std::array::from_fn(|i| {
+		let tensor = tensor_args[i];
+		let arg = &args[i];
+		let same_as_output = std::ptr::eq(tensor.buf(), output.buf())
+			&& likely(arg.stride_bytes[0] == out.stride_bytes[0])
+			&& likely(arg.stride_bytes[1] == out.stride_bytes[1])
+			&& if i < E {
+				likely(arg.offset_bytes == out.offset_bytes)
+					&& likely(arg.stride_bytes[2] == out.stride_bytes[2])
+			} else {
+				// When reduction_size == 0, stride is 0, so the wrapping_sub() will underflow
+				// but we will multiply it by 0
+				let begin = arg.offset_bytes;
+				let end = begin + reduction_size.wrapping_sub(1) * arg.stride_bytes[2];
+				likely(out.offset_bytes >= begin) && likely(out.offset_bytes <= end)
+			};
+		if same_as_output {
+			same_as_output_count += 1;
+		}
+		tensor.buf().borrow(&mut inp_fail)
+	});
+	inp_fail.check()?;
+
+	let out_borrow = output.buf().try_borrow_mut(same_as_output_count)?;
+
+	// TODO - ensure_safe
+	// TODO - ensure all on same device
+	// TODO - other things may need to be checked before running the kernel
+
+	let dtype_config =
+		DynKernelCall::new_dtype_config::<{ E + R }>(internal_dtype, output, tensor_args);
+	key[..dtype_config.len()].copy_from_slice(&dtype_config);
+
 	unsafe {
-		let mut same_as_output_count = 0;
-		let mut inp_fail = UnsafeBorrowFailFlag::new();
-		let inp_borrows: [BorrowGuard<DeviceBuffer>; E + R] = std::array::from_fn(|i| {
-			let tensor = tensor_args[i];
-			let arg = &args[i];
-			let same_as_output = std::ptr::eq(tensor.buf().as_ref(), output.buf().as_ref())
-				&& likely(arg.stride_bytes[0] == out.stride_bytes[0])
-				&& likely(arg.stride_bytes[1] == out.stride_bytes[1])
-				&& if i < E {
-					likely(arg.offset_bytes == out.offset_bytes)
-						&& likely(arg.stride_bytes[2] == out.stride_bytes[2])
-				} else {
-					// When reduction_size == 0, stride is 0, so the wrapping_sub() will underflow
-					// but we will multiply it by 0
-					let begin = arg.offset_bytes;
-					let end = begin + reduction_size.wrapping_sub(1) * arg.stride_bytes[2];
-					likely(out.offset_bytes >= begin) && likely(out.offset_bytes <= end)
-				};
-			if same_as_output {
-				same_as_output_count += 1;
-			}
-			tensor.buf().unsafe_borrow(&mut inp_fail)
-		});
-		inp_fail.check()?;
-
-		let out_borrow = output.buf().try_borrow_mut(same_as_output_count)?;
-
-		// TODO - ensure_safe
-		// TODO - ensure all on same device
-		// TODO - other things may need to be checked before running the kernel
-
-		let dtype_config =
-			DynKernelCall::new_dtype_config::<{ E + R }>(internal_dtype, output, tensor_args);
-		key[..dtype_config.len()].copy_from_slice(&dtype_config);
-
 		output.device().run_reduce_kernel(&DynKernelCall {
 			key,
 			expr,
@@ -985,10 +985,10 @@ where
 			reduce_count: R,
 			scalar_args,
 		})?;
-
-		std::mem::drop(out_borrow);
-		std::mem::drop(inp_borrows);
 	}
+
+	std::mem::drop(out_borrow);
+	std::mem::drop(inp_borrows);
 	Ok(())
 }
 

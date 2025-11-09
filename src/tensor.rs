@@ -16,7 +16,8 @@ use crate::tensor::error::{InvalidBufferSizeError, UnsupportedDTypeError};
 use crate::tensor::map::SelectError;
 use crate::tensor::shape::ReshapeError;
 use crate::util::LossyFrom;
-use crate::util::mycell::{self};
+use crate::util::intrusive_rc::{IntrusiveRc, IntrusiveRcTrait};
+use crate::util::intrusive_ref_cell::IntrusiveRefCellTrait;
 use crate::util::universal_range::UniversalRange;
 
 use self::device::DeviceBuffer;
@@ -45,13 +46,13 @@ mod tests;
 #[derive(Clone)]
 pub struct Tensor {
 	map: Map,
-	buf: Rc<mycell::RefCell<DeviceBuffer>>,
+	buf: IntrusiveRc<DeviceBuffer>,
 }
 
 impl Tensor {
 	/// # Safety
 	/// The map must be safe, i.e., the span of the map must be within the bounds of the buffer.
-	pub unsafe fn new_unchecked(map: Map, buf: Rc<mycell::RefCell<DeviceBuffer>>) -> Self {
+	pub unsafe fn new_unchecked(map: Map, buf: IntrusiveRc<DeviceBuffer>) -> Self {
 		let map_span = map.byte_span();
 		let buf_len = buf.byte_len();
 		let safe = map_span.start <= map_span.end && map_span.end <= buf_len;
@@ -105,11 +106,7 @@ impl Tensor {
 
 	#[inline]
 	pub fn owns_buffer(&self) -> bool {
-		let buf = self.buf();
-		// TODO - should I test weak? Also why do I add 1 to weak count?
-		let weak = Rc::weak_count(buf) + 1;
-		let strong = Rc::strong_count(buf);
-		(weak | strong) <= 1
+		self.buf().has_single_ref()
 	}
 
 	pub fn new_replace_tail(
@@ -129,7 +126,7 @@ impl Tensor {
 		&self.map
 	}
 
-	pub fn buf(&self) -> &Rc<mycell::RefCell<DeviceBuffer>> {
+	pub fn buf(&self) -> &DeviceBuffer {
 		&self.buf
 	}
 
