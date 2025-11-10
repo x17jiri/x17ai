@@ -766,7 +766,7 @@ where
 		}),
 		0,
 	)?;
-	if shape::is_overlapping(merged.map(|m| m.get(0))) {
+	if shape::is_overlapping(merged.map(|m| m.expand()[0])) {
 		cold_path();
 		return Err(OverlappingOutputError.into());
 	}
@@ -887,8 +887,8 @@ where
 		1,
 	)?;
 
-	let output_top = post_reduce_top.get(0);
-	if shape::is_overlapping([batch_dims[0].get(0), batch_dims[1].get(0), output_top]) {
+	let output_top = post_reduce_top.expand()[0];
+	if shape::is_overlapping([batch_dims[0].expand()[0], batch_dims[1].expand()[0], output_top]) {
 		cold_path();
 		return Err(OverlappingOutputError.into());
 	}

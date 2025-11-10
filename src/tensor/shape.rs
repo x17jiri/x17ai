@@ -62,8 +62,8 @@ pub struct MergedDim<const N: usize> {
 }
 
 impl<const N: usize> MergedDim<N> {
-	pub fn get(&self, i: usize) -> SizeAndStride {
-		SizeAndStride { size: self.size, stride: self.strides[i] }
+	pub fn expand(&self) -> [SizeAndStride; N] {
+		std::array::from_fn(|i| SizeAndStride { size: self.size, stride: self.strides[i] })
 	}
 }
 
@@ -148,7 +148,7 @@ impl<const N: usize> DimMerger<N> {
 					}
 				} else {
 					// If merged.size == 1, this replaces `merged` with `joint_dim`
-					// If merged.size == 0, it will not change
+					// If merged.size == 0, then both merged.size and merged.strides will stay 0
 					merged.size *= joint_dim.size;
 					merged.strides = joint_dim.strides;
 				}

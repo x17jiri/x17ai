@@ -249,8 +249,8 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 		}
 
 		let dims = DimMerger::<2>::merge::<1>(&[col.batch_dims, row.batch_dims], 0)?;
-		let col_cols = dims[0].get(0);
-		let row_rows = dims[0].get(1);
+		let col_cols = dims[0].expand()[0];
+		let row_rows = dims[0].expand()[1];
 
 		let mut borrow_fail = BorrowFailFlag::new();
 		let _col_borrow = col.tensor.buf().borrow(&mut borrow_fail);
@@ -326,9 +326,8 @@ impl<'a> EvaluatesToColMatrix for MatTimesCol<'a> {
 			return Err(ShapeMismatchError.into());
 		}
 
-		let dims = DimMerger::<2>::merge::<1>(&[to.batch_dims, col.batch_dims], 0)?;
-		let to_cols = dims[0].get(0);
-		let col_cols = dims[0].get(1);
+		let [to_cols, col_cols] =
+			DimMerger::<2>::merge::<1>(&[to.batch_dims, col.batch_dims], 0)?[0].expand();
 
 		let mut borrow_fail = BorrowFailFlag::new();
 		let _mat_borrow = mat.tensor.buf().borrow(&mut borrow_fail);

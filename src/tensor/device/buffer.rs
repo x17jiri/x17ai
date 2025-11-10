@@ -22,9 +22,8 @@ pub struct DeviceBuffer {
 	bytes: usize,
 
 	// TODO
-	// - could this be replace with some thin rc that stores
-	// metadata in the pointee not in the pointer itself?
-	// This would save another 8 bytes per buffer.
+	// - could this be replaced with some sort of thin rc that stores metadata in the pointee
+	//   not in the pointer itself? This would save 8 bytes per buffer.
 	device: Rc<dyn Device>,
 }
 
@@ -33,6 +32,7 @@ impl IntrusiveRcTrait for DeviceBuffer {
 		&self.refcount
 	}
 
+	#[allow(clippy::drop_non_drop)]
 	unsafe fn destroy(this: std::ptr::NonNull<Self>) {
 		unsafe {
 			let Self {
