@@ -57,6 +57,7 @@ impl DimIndex for usize {
 
 impl DimIndex for isize {
 	fn resolve_index(self, ndim: usize) -> Result<usize, DimIndexOutOfBoundsError> {
+		#[allow(clippy::cast_sign_loss)]
 		let dim = if self >= 0 { self as usize } else { ndim.wrapping_add(self as usize) };
 		if dim < ndim {
 			Ok(dim)
@@ -66,6 +67,7 @@ impl DimIndex for isize {
 		}
 	}
 	fn resolve_range_bound(self, ndim: usize) -> Result<usize, DimIndexOutOfBoundsError> {
+		#[allow(clippy::cast_sign_loss)]
 		let dim = if self >= 0 { self as usize } else { ndim.wrapping_add(self as usize) };
 		if dim <= ndim {
 			Ok(dim)

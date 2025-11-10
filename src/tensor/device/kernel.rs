@@ -627,6 +627,7 @@ where
 		indexes
 	}
 
+	#[allow(clippy::indexing_slicing)]
 	#[inline]
 	pub fn new<const TC: usize, const SC: usize>(
 		tensors: [&'a Tensor; TC],
@@ -658,14 +659,14 @@ where
 		[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
 	{
 		let mut key = const { E::key() };
-		let tensor_args: [&Tensor; E::ELEMWISE_COUNT + E::REDUCE_COUNT] =
-			std::array::from_fn(|i| {
-				if i < E::ELEMWISE_COUNT {
-					self.elem_args[i]
-				} else {
-					self.reduce_args[i - E::ELEMWISE_COUNT]
-				}
-			});
+		#[allow(clippy::indexing_slicing)]
+		let tensor_args: [&Tensor; E::ELEMWISE_COUNT + E::REDUCE_COUNT] = std::array::from_fn(|i| {
+			if i < E::ELEMWISE_COUNT {
+				self.elem_args[i]
+			} else {
+				self.reduce_args[i - E::ELEMWISE_COUNT]
+			}
+		});
 		if E::REDUCE_COUNT == 0 {
 			__run_elemwise_kernel::<{ E::ELEMWISE_COUNT }, { E::REDUCE_COUNT }>(
 				&mut key,

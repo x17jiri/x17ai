@@ -5,6 +5,9 @@
 //
 //------------------------------------------------------------------------------
 
+// TODO: find all uses of `#[allow(clippy::indexing_slicing)]`
+// and make sure Rust doesn't generate any panics
+
 #![allow(non_snake_case)]
 #![allow(incomplete_features)]
 #![allow(internal_features)]
@@ -43,6 +46,7 @@
 #![feature(thin_box)]
 #![feature(const_index)]
 #![feature(string_from_utf8_lossy_owned)]
+#![feature(int_roundings)]
 // clippy
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]

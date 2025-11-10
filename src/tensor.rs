@@ -135,13 +135,15 @@ impl Tensor {
 	}
 
 	pub fn dim<D: DimIndex>(&self, dim: D) -> Result<SizeAndStride, DimIndexOutOfBoundsError> {
-		let dim = dim.resolve_index(self.ndim())?;
-		Ok(self.map.dim(dim))
+		let dims = self.map.dims();
+		let dim = dim.resolve_index(dims.len())?;
+		Ok(unsafe { *dims.get_unchecked(dim) })
 	}
 
 	pub fn size<D: DimIndex>(&self, dim: D) -> Result<usize, DimIndexOutOfBoundsError> {
-		let dim = dim.resolve_index(self.ndim())?;
-		Ok(self.map.dim(dim).size)
+		let dims = self.map.dims();
+		let dim = dim.resolve_index(dims.len())?;
+		Ok(unsafe { dims.get_unchecked(dim) }.size)
 	}
 
 	pub fn elems(&self) -> usize {

@@ -7,7 +7,6 @@
 
 use std::convert::Infallible;
 
-pub mod array;
 pub mod hasher;
 pub mod intrusive_ref_cell;
 //pub mod thin_rc; - TODO

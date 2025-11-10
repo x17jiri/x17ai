@@ -191,6 +191,8 @@ impl Map {
 		Ok((Self { dims, offset: 0, dtype }, bits / 8))
 	}
 
+	#[allow(clippy::expect_used)]
+	#[allow(clippy::missing_panics_doc)]
 	pub fn split_last_n<const N: usize>(
 		&self,
 	) -> Result<(&[SizeAndStride], [SizeAndStride; N], usize), NotEnoughDimensionsError> {
@@ -201,10 +203,7 @@ impl Map {
 		}
 		let split_at = slice.len() - N;
 		let (prefix, nd) = slice.split_at(split_at);
-		let mut dims = [SizeAndStride::default(); N];
-		for i in 0..N {
-			dims[i] = nd[i];
-		}
+		let dims = nd.try_into().expect("Infallible conversion");
 		Ok((prefix, dims, self.offset))
 	}
 
@@ -224,11 +223,6 @@ impl Map {
 		self.dims.as_slice()
 	}
 
-	pub fn dim(&self, dim: usize) -> SizeAndStride {
-		let dims = self.dims.as_slice();
-		dims[dim]
-	}
-
 	pub fn elems(&self) -> usize {
 		let dims = self.dims.as_slice();
 		dims.iter().map(|dim| dim.size).product()
@@ -246,12 +240,13 @@ impl Map {
 		if elems == 0 {
 			len = 0;
 		}
-		(start / 8)..(start + (len * dtype_bits) + 7) / 8
+		start.div_floor(8)..(start + (len * dtype_bits)).div_ceil(8)
 	}
 
 	/// Merges the last `n` dimensions into a single dimension.
 	///
 	/// If ndim < n, the missing dimensions are treated as size 1 dimensions.
+	#[allow(clippy::indexing_slicing)]
 	pub fn merge_dims(&self, n: usize) -> Result<Self, ReshapeError> {
 		let old_slice = self.dims.as_slice();
 		let n_keep = old_slice.len().saturating_sub(n);
@@ -315,6 +310,7 @@ impl Map {
 		self.reshape_dims(self.ndim(), to_shape)
 	}
 
+	#[allow(clippy::indexing_slicing)]
 	pub fn select(&self, dim: usize, index: usize) -> Result<Self, SelectError> {
 		let old_slice = self.dims.as_slice();
 
@@ -368,7 +364,6 @@ pub struct DimVecBuilder {
 }
 
 impl DimVecBuilder {
-	#[inline(never)]
 	fn new_heap_items(len: usize) -> NonNull<MaybeUninit<SizeAndStride>> {
 		let layout = std::alloc::Layout::array::<MaybeUninit<SizeAndStride>>(len)
 			.expect("Failed to create layout for DimVecBuilderItems");

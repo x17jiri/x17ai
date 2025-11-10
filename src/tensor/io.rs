@@ -128,7 +128,7 @@ impl std::fmt::Display for Tensor {
 					write!(f, "Tensor(<tensor is not on CPU>)")?;
 					return Err(std::fmt::Error);
 				};
-				fmt_tensor(f, map, &slice)
+				fmt_tensor(f, map, slice)
 			},
 			_ => {
 				cold_path();

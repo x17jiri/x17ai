@@ -36,20 +36,23 @@ impl DevicePtr {
 		Self { ptr }
 	}
 
-	/// For a CPU device, `self.ptr` is probably just a pointer to the memory.
-	/// For other devices, it could be the device pointer casted to `*mut ()`, or
+	/// # Safety
+	/// The pointer should only be used by device-specific code that knows what the pointer is.
+	///
+	/// For a CPU device, it is probably just a pointer to the memory.
+	/// For other devices, it could be the device pointer casted to host pointer, or
 	/// even some handle that can be used to get the device pointer.
 	///
 	/// Since it can be a casted device pointer, dereferencing it may be undefined behavior.
 	///
 	/// And since it can be some handle, pointer arithmetic on it may not make sense.
-	///
-	/// These operations should only be done by device-specific code that knows what the pointer is.
 	#[inline]
 	pub unsafe fn as_ptr<T>(&self) -> *mut T {
 		self.ptr.cast::<T>()
 	}
 }
+
+//--------------------------------------------------------------------------------------------------
 
 #[repr(C)]
 pub struct KernelArg {
@@ -60,11 +63,11 @@ pub struct KernelArg {
 
 /// For reduce kernels:
 /// - reduction_size = size[2] = the size of the reduced dimension. All tensors
-/// that are inputs to the reduction must have this size in dimension 2.
+///   that are inputs to the reduction must have this size in dimension 2.
 /// - if stride_bytes[2] == 0, the output tensor and all tensors NOT used in reduction
-/// have size[2] == 1
+///   have size[2] == 1
 /// - if stride_bytes[2] > 0, the output tensor and all tensors NOT used in reduction
-/// have size[2] == reduction_size
+///   have size[2] == reduction_size
 #[repr(C)]
 pub struct KernelOutput {
 	pub size: [usize; 3],
@@ -225,6 +228,9 @@ pub trait Device {
 		inst: NonNull<DeviceBuffer>,
 	);
 
+	/// # Safety
+	/// - tensors must be properly borrowed
+	/// - other things TODO
 	unsafe fn upload_data(
 		&self,
 		src: NonNull<u8>,
@@ -233,6 +239,8 @@ pub trait Device {
 		count_bytes: usize,
 	) -> Result<(), ErrPack<TensorOpError>>;
 
+	/// # Safety
+	/// TODO
 	unsafe fn download_data(
 		&self,
 		src: &DeviceBuffer,
@@ -241,14 +249,24 @@ pub trait Device {
 		count_bytes: usize,
 	) -> Result<(), ErrPack<TensorOpError>>;
 
+	/// # Safety
+	/// TODO
 	unsafe fn mm(&self, args: &MatMulArgs, scale: f64) -> Result<(), ErrPack<TensorOpError>>;
 
+	/// # Safety
+	/// TODO
 	unsafe fn attention(&self, args: &AttentionArgs) -> Result<(), ErrPack<TensorOpError>>;
 
+	/// # Safety
+	/// TODO
 	unsafe fn run_elemwise_kernel(
 		&self,
 		data: &DynKernelCall,
 	) -> Result<(), ErrPack<TensorOpError>>;
 
+	/// # Safety
+	/// TODO
 	unsafe fn run_reduce_kernel(&self, data: &DynKernelCall) -> Result<(), ErrPack<TensorOpError>>;
 }
+
+//--------------------------------------------------------------------------------------------------

@@ -208,6 +208,8 @@ pub fn merge_dims(dims: &[SizeAndStride]) -> (SizeAndStride, &[SizeAndStride]) {
 
 //--------------------------------------------------------------------------------------------------
 
+/// # Safety
+/// `dims` must point to a buffer with the same length as `to`
 pub unsafe fn reshape_dims(
 	(mut inp, mut rest_inp): (SizeAndStride, &[SizeAndStride]),
 	to: &[usize],
@@ -259,6 +261,10 @@ pub unsafe fn reshape_dims(
 
 //--------------------------------------------------------------------------------------------------
 
+/// This can be used to check if the elements of an output tensor may overlap
+/// with each other. It assumes the dimensions are sorted in descending order of stride.
+///
+/// If they are not sorted, it may report overlap even if there is none.
 pub fn is_overlapping<const N: usize>(dims: [SizeAndStride; N]) -> bool {
 	let mut item_size = 1;
 	for dim in dims.iter().rev() {
