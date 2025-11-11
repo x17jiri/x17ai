@@ -52,6 +52,7 @@ pub struct Tensor {
 impl Tensor {
 	/// # Safety
 	/// The map must be safe, i.e., the span of the map must be within the bounds of the buffer.
+	#[inline(never)]
 	pub unsafe fn new_unchecked(map: Map, buf: IntrusiveRc<DeviceBuffer>) -> Self {
 		let map_span = map.byte_span();
 		let buf_len = buf.byte_len();
@@ -61,6 +62,7 @@ impl Tensor {
 	}
 
 	/// Allocate a new tensor on the provided device.
+	#[inline(never)]
 	pub fn new_empty_on(
 		shape: impl Shape,
 		dtype: DType,
@@ -74,6 +76,7 @@ impl Tensor {
 	}
 
 	/// Allocate a new tensor on the same device as `self`.
+	#[inline(never)]
 	pub fn new_empty(
 		&self,
 		shape: impl Shape,
@@ -83,6 +86,7 @@ impl Tensor {
 	}
 
 	/// Allocate a new tensor on the same device and with the same shape as `self`.
+	#[inline(never)]
 	pub fn new_empty_like(&self, dtype: DType) -> Result<Self, ErrPack<TensorOpError>> {
 		let (map, bytes) = self.map().new_like(dtype)?;
 		let buf = self.rc_device().new_buffer(bytes)?;
@@ -100,6 +104,7 @@ impl Tensor {
 	///
 	/// If the tensor does not own its buffer, we allocate a new empty tensor
 	/// with the same shape and dtype as `self`.
+	#[inline(never)]
 	pub fn reuse_or_new_like(&self) -> Result<Self, ErrPack<TensorOpError>> {
 		if self.owns_buffer() { Ok(self.clone()) } else { self.new_empty_like(self.dtype()) }
 	}
@@ -109,6 +114,7 @@ impl Tensor {
 		self.buf().has_single_ref()
 	}
 
+	#[inline(never)]
 	pub fn new_replace_tail(
 		&self,
 		tail_len: usize,

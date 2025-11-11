@@ -32,8 +32,8 @@ impl IntrusiveRcTrait for DeviceBuffer {
 		&self.refcount
 	}
 
-	#[allow(clippy::drop_non_drop)]
 	unsafe fn destroy(this: std::ptr::NonNull<Self>) {
+		#[allow(clippy::drop_non_drop)]
 		unsafe {
 			let Self {
 				refcount,

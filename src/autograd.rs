@@ -50,6 +50,7 @@ pub struct Queue {
 }
 
 impl Queue {
+	#[inline(never)]
 	pub fn add(&mut self, node: Box<dyn BackwardFn>, grad: Tensor) {
 		self.nodes.push((node, grad));
 	}

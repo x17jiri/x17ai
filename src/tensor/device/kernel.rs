@@ -588,12 +588,10 @@ impl_expr_binary!(MulExpr, Mul, true);
 
 pub struct KernelCall<'a, E: const ExprTrait + ExprToDyn>
 where
-	[(); E::ELEMWISE_COUNT]:,
-	[(); E::REDUCE_COUNT]:,
+	[(); E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
 	[(); E::SCALAR_COUNT]:,
 {
-	elem_args: [&'a Tensor; E::ELEMWISE_COUNT],
-	reduce_args: [&'a Tensor; E::REDUCE_COUNT],
+	tensor_args: [&'a Tensor; E::ELEMWISE_COUNT + E::REDUCE_COUNT],
 	scalar_args: [f64; E::SCALAR_COUNT],
 	internal_dtype: DType,
 	_expr: E,
@@ -610,8 +608,7 @@ pub struct DynKernelCall<'a> {
 
 impl<'a, E: const ExprTrait + ExprToDyn + Copy> KernelCall<'a, E>
 where
-	[(); E::ELEMWISE_COUNT]:,
-	[(); E::REDUCE_COUNT]:,
+	[(); E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
 	[(); E::SCALAR_COUNT]:,
 {
 	const fn mask_to_indexes<const N: usize>(mut mask: u64) -> [usize; N] {
@@ -642,8 +639,13 @@ where
 		let scalar_arg_indexes: [usize; E::SCALAR_COUNT] =
 			const { Self::mask_to_indexes(E::SCALAR_MASK) };
 		Self {
-			elem_args: std::array::from_fn(|i| tensors[elem_arg_indexes[i]]),
-			reduce_args: std::array::from_fn(|i| tensors[reduce_arg_indexes[i]]),
+			tensor_args: std::array::from_fn(|i| {
+				if i < E::ELEMWISE_COUNT {
+					tensors[elem_arg_indexes[i]]
+				} else {
+					tensors[reduce_arg_indexes[i - E::ELEMWISE_COUNT]]
+				}
+			}),
 			scalar_args: std::array::from_fn(|i| scalars[scalar_arg_indexes[i]]),
 			internal_dtype,
 			_expr: expr.0,
@@ -659,20 +661,12 @@ where
 		[(); 1 + E::ELEMWISE_COUNT + E::REDUCE_COUNT]:,
 	{
 		let mut key = const { E::key() };
-		#[allow(clippy::indexing_slicing)]
-		let tensor_args: [&Tensor; E::ELEMWISE_COUNT + E::REDUCE_COUNT] = std::array::from_fn(|i| {
-			if i < E::ELEMWISE_COUNT {
-				self.elem_args[i]
-			} else {
-				self.reduce_args[i - E::ELEMWISE_COUNT]
-			}
-		});
 		if E::REDUCE_COUNT == 0 {
 			__run_elemwise_kernel::<{ E::ELEMWISE_COUNT }, { E::REDUCE_COUNT }>(
 				&mut key,
 				&|| E::to_dyn(E::ELEMWISE_MASK, E::REDUCE_MASK, E::SCALAR_MASK, false),
 				output,
-				tensor_args,
+				&self.tensor_args,
 				&self.scalar_args,
 				self.internal_dtype,
 			)
@@ -681,7 +675,7 @@ where
 				&mut key,
 				&|| E::to_dyn(E::ELEMWISE_MASK, E::REDUCE_MASK, E::SCALAR_MASK, false),
 				output,
-				tensor_args,
+				&self.tensor_args,
 				&self.scalar_args,
 				self.internal_dtype,
 			)
@@ -711,7 +705,7 @@ impl<'a> DynKernelCall<'a> {
 	pub fn new_dtype_config<const T_CNT: usize>(
 		internal_dtype: DType,
 		output: &Tensor,
-		tensors: [&Tensor; T_CNT],
+		tensors: &[&Tensor; T_CNT],
 	) -> [HashWord; Self::dtype_config_words(T_CNT)] {
 		// TODO - we do indexing in set_byte()
 		// check that there are no panics
@@ -752,7 +746,7 @@ fn __run_elemwise_kernel<'a, const E: usize, const R: usize>(
 	key: &'a mut [HashWord],
 	expr: &'a (dyn Fn() -> Rc<DynExpr> + 'a),
 	output: &'a Tensor,
-	tensor_args: [&'a Tensor; E + R],
+	tensor_args: &'a [&'a Tensor; E + R],
 	scalar_args: &'a [f64],
 	internal_dtype: DType,
 ) -> Result<(), ErrPack<TensorOpError>>
@@ -854,7 +848,7 @@ fn __run_reduce_kernel<'a, const E: usize, const R: usize>(
 	key: &'a mut [HashWord],
 	expr: &'a (dyn Fn() -> Rc<DynExpr> + 'a),
 	output: &'a Tensor,
-	tensor_args: [&'a Tensor; E + R],
+	tensor_args: &'a [&'a Tensor; E + R],
 	scalar_args: &'a [f64],
 	internal_dtype: DType,
 ) -> Result<(), ErrPack<TensorOpError>>

@@ -248,9 +248,8 @@ impl<'a> ClearAccToMatrix for ColTimesRow<'a> {
 			return Err(ShapeMismatchError.into());
 		}
 
-		let dims = DimMerger::<2>::merge::<1>(&[col.batch_dims, row.batch_dims], 0)?;
-		let col_cols = dims[0].expand()[0];
-		let row_rows = dims[0].expand()[1];
+		let [col_cols, row_rows] =
+			DimMerger::<2>::merge::<1>(&[col.batch_dims, row.batch_dims], 0)?[0].expand();
 
 		let mut borrow_fail = BorrowFailFlag::new();
 		let _col_borrow = col.tensor.buf().borrow(&mut borrow_fail);
