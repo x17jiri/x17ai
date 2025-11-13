@@ -44,6 +44,31 @@ impl UnaryFragment for RMSNorm {
 		let internal_dtype = common_dtype(inp.dtype(), self.internal_dtype)?;
 		let sum_to_mean = inp.sum_to_mean();
 
+		/*
+		// no need to handle:
+		// - borrowing
+		// - reuse of inp for output
+
+		decref(inp); // but don't delete yet
+		if inp.prefcnt() == 0 {
+			// try to reuse inp for output
+		}
+
+		let magn_recip = kernel_fragment!(
+			internal_dtype,
+			[inp: &inp], (sum_to_mean: sum_to_mean, eps: self.eps), {
+				(((inp * inp).sum() * sum_to_mean).sqrt() + eps).recip()
+			}
+		))?;
+
+		let out = kernel_fragment!(
+			internal_dtype,
+			[inp: &inp, magn_recip: &magn_recip], (), {
+				inp * magn_recip
+			}
+		))?;
+		*/
+
 		let magn_recip = inp.new_replace_tail(1, &[1], internal_dtype)?;
 		magn_recip.assign(custom_kernel!(
 			internal_dtype,

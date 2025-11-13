@@ -82,6 +82,20 @@ impl BackwardFn for SwiGLUBackwardFn {
 		let Self { lin, gate, internal_dtype, inp_backward } = Box::into_inner(self);
 		let internal_dtype = common_dtype(d_out.dtype(), internal_dtype)?;
 
+		/*
+		let input_shape = [2, d_out.size(-1)?];
+		let d_inp = d_out.new_replace_tail(1, &input_shape, d_out.dtype())?;
+		let d_lin = d_inp.select(-2, 0)?;
+		let d_gate = d_inp.select(-2, 1)?;
+
+		d_lin.assign(custom_kernel!(
+			internal_dtype,
+			[d_out: &d_out, gate: &gate], (ONE: 1.0), {
+				d_out * gate * (ONE + (-gate).exp()).recip()
+			}
+		))?;
+		*/
+
 		let input_shape = [2, d_out.size(-1)?];
 		let d_inp = d_out.new_replace_tail(1, &input_shape, d_out.dtype())?;
 		let d_lin = d_inp.select(-2, 0)?;
