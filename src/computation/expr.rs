@@ -10,7 +10,10 @@
 #![allow(clippy::indexing_slicing)]
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::implicit_hasher)]
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::missing_panics_doc)]
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -26,6 +29,57 @@ pub struct Node<'a> {
 
 	/// `fragment_head` is a node whose result we may have to store into a tensor.
 	pub fragment_head: bool,
+}
+
+impl<'a> Node<'a> {
+	pub fn graphviz_label(&self) -> String {
+		match self.expr {
+			Expr::Input(input) => match input {
+				ExprInput::Tensor(tensor_ref) => {
+					if let Some(name) = &tensor_ref.name {
+						format!("Tensor '{}'", name)
+					} else {
+						format!("Tensor: {:?}", std::ptr::from_ref(tensor_ref.as_ref()))
+					}
+				},
+				ExprInput::Scalar(scalar_ref) => {
+					if let Some(name) = &scalar_ref.name {
+						format!("Scalar: '{}'", name)
+					} else {
+						format!("Scalar: {:?}", std::ptr::from_ref(scalar_ref.as_ref()))
+					}
+				},
+			},
+			Expr::Capture(..) => {
+				unreachable!() // `clone_expr()` removes Capture nodes
+			},
+			Expr::Cast(cast) => format!("Cast to {:?}", cast.dtype),
+			Expr::Unary(unary) => match unary.kind {
+				ExprUnaryKind::Neg => "Neg".to_string(),
+				ExprUnaryKind::Exp => "Exp".to_string(),
+				ExprUnaryKind::Ln => "Ln".to_string(),
+				ExprUnaryKind::Abs => "Abs".to_string(),
+				ExprUnaryKind::Sqrt => "Sqrt".to_string(),
+				ExprUnaryKind::Recip => "Recip".to_string(),
+			},
+			Expr::Binary(binary) => match binary.kind {
+				ExprBinaryKind::Add => "+".to_string(),
+				ExprBinaryKind::Sub => "-".to_string(),
+				ExprBinaryKind::Mul => "*".to_string(),
+				ExprBinaryKind::First => "First".to_string(),
+			},
+			Expr::Reduction(reduction) => match reduction.kind {
+				ExprReductionKind::Sum => "Sum".to_string(),
+				ExprReductionKind::Max => "Max".to_string(),
+			},
+		}
+	}
+
+	pub fn is_input(&self) -> bool {
+		let result = self.children.is_empty();
+		debug_assert!(result == matches!(self.expr, Expr::Input(_)));
+		result
+	}
 }
 
 #[repr(transparent)]
@@ -66,6 +120,7 @@ impl<'a> std::ops::IndexMut<NodeIndex> for NodeVec<'a> {
 
 //--------------------------------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct RcExpr {
 	pub rc_expr: Rc<Expr>,
 }
@@ -110,10 +165,12 @@ pub enum ExprInput {
 pub struct ExprTensorRef {
 	pub tensor: RefCell<Option<Tensor>>,
 	pub dtype: DType,
+	pub name: Option<Cow<'static, str>>,
 }
 
 pub struct ExprScalarRef {
 	pub value: RefCell<Option<f64>>,
+	pub name: Option<Cow<'static, str>>,
 }
 
 pub struct ExprCapture {
@@ -166,20 +223,30 @@ pub enum ExprReductionKind {
 
 //--------------------------------------------------------------------------------------------------
 
+impl ExprTensorRef {
+	pub fn new(name: Option<Cow<'static, str>>, dtype: DType) -> Rc<ExprTensorRef> {
+		Rc::new(ExprTensorRef { tensor: RefCell::new(None), dtype, name })
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
 impl RcExpr {
-	pub fn new_tensor_input(dtype: DType) -> RcExpr {
+	pub fn new_tensor_input(dtype: DType, name: Cow<'static, str>) -> RcExpr {
 		RcExpr {
 			rc_expr: Rc::new(Expr::Input(ExprInput::Tensor(Rc::new(ExprTensorRef {
 				tensor: RefCell::new(None),
 				dtype,
+				name: Some(name),
 			})))),
 		}
 	}
 
-	pub fn new_scalar_input() -> RcExpr {
+	pub fn new_scalar_input(name: Cow<'static, str>) -> RcExpr {
 		RcExpr {
 			rc_expr: Rc::new(Expr::Input(ExprInput::Scalar(Rc::new(ExprScalarRef {
 				value: RefCell::new(None),
+				name: Some(name),
 			})))),
 		}
 	}
@@ -251,6 +318,12 @@ impl RcExpr {
 			})),
 		}
 	}
+
+	pub fn capture(self, tensor_ref: Rc<ExprTensorRef>) -> RcExpr {
+		RcExpr {
+			rc_expr: Rc::new(Expr::Capture(ExprCapture { expr: self, tensor_ref })),
+		}
+	}
 }
 
 impl std::ops::Add for RcExpr {
@@ -311,14 +384,20 @@ pub fn __clone_expr<'a>(
 	processed: &mut std::collections::HashMap<ExprRef<'a>, NodeIndex>,
 	nodes: &mut NodeVec<'a>,
 	expr: &'a Expr,
-	need_result: bool, // TODO - will this work with 2 parents where only one needs the result?
 ) -> NodeIndex {
+	fn add_child<'a>(nodes: &mut NodeVec<'a>, parent: NodeIndex, child: NodeIndex) {
+		nodes[parent].children.push(child);
+		nodes[child].parents.push(parent);
+		if nodes[child].parents.len() > 1
+			&& !nodes[child].is_input()
+			&& nodes[child].parents[0] != parent
+		{
+			nodes[child].fragment_head = true;
+		}
+	}
+
 	match processed.entry(ExprRef { expr }) {
-		std::collections::hash_map::Entry::Occupied(entry) => {
-			let index = *entry.get();
-			nodes[index].fragment_head = true; // TODO
-			index
-		},
+		std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
 		std::collections::hash_map::Entry::Vacant(entry) => {
 			if let Expr::Capture(capture) = expr {
 				let child = __clone_expr(processed, nodes, capture.expr.as_ref());
@@ -331,33 +410,32 @@ pub fn __clone_expr<'a>(
 					parents: Vec::new(),
 					children: Vec::new(),
 					capture: Vec::new(),
+					fragment_head: false,
 				});
 				entry.insert(index);
 				match expr {
-					Expr::Input(..) | Expr::Capture(..) => {},
+					Expr::Input(..) => {},
+					Expr::Capture(..) => {
+						unreachable!() // handled above
+					},
 					Expr::Cast(cast) => {
 						let child = __clone_expr(processed, nodes, cast.expr.as_ref());
-						nodes[index].children.push(child);
-						nodes[child].parents.push(index);
+						add_child(nodes, index, child);
 					},
 					Expr::Unary(unary) => {
 						let child = __clone_expr(processed, nodes, unary.expr.as_ref());
-						nodes[index].children.push(child);
-						nodes[child].parents.push(index);
+						add_child(nodes, index, child);
 					},
 					Expr::Binary(binary) => {
 						let left_child = __clone_expr(processed, nodes, binary.lhs.as_ref());
-						nodes[index].children.push(left_child);
-						nodes[left_child].parents.push(index);
+						add_child(nodes, index, left_child);
 						let right_child = __clone_expr(processed, nodes, binary.rhs.as_ref());
-						nodes[index].children.push(right_child);
-						nodes[right_child].parents.push(index);
+						add_child(nodes, index, right_child);
 					},
 					Expr::Reduction(reduction) => {
-						let child = __clone_expr(processed, nodes, reduction.expr.as_ref());
 						nodes[index].fragment_head = true;
-						nodes[index].children.push(child);
-						nodes[child].parents.push(index);
+						let child = __clone_expr(processed, nodes, reduction.expr.as_ref());
+						add_child(nodes, index, child);
 					},
 				}
 				index
@@ -369,8 +447,64 @@ pub fn __clone_expr<'a>(
 pub fn clone_expr<'a>(expr: &'a Expr) -> NodeVec<'a> {
 	let mut processed = std::collections::HashMap::new();
 	let mut nodes = NodeVec::with_capacity(32);
-	__clone_expr(&mut processed, &mut nodes, expr);
+	let top_node = __clone_expr(&mut processed, &mut nodes, expr);
+	assert!(top_node.0 == 0);
+	nodes[top_node].fragment_head = true;
 	nodes
+}
+
+pub fn compile(expr: &Expr) {
+	let mut nodes = clone_expr(expr);
+
+	let mut tensor_ref_map = std::collections::HashMap::new(); // *ExprTensorRef -> Index
+	let mut tensor_ref_vec = Vec::new(); // Index -> &ExprTensorRef
+	for node in nodes.0 {
+		if let Expr::Input(ExprInput::Tensor(tensor_ref)) = &node.expr {
+			let tensor_ref = tensor_ref.as_ref();
+			if let std::collections::hash_map::Entry::Vacant(entry) =
+				tensor_ref_map.entry(std::ptr::from_ref(tensor_ref))
+			{
+				let index = tensor_ref_vec.len();
+				entry.insert(index);
+				tensor_ref_vec.push(tensor_ref);
+			}
+		}
+	}
+}
+
+pub fn print_graphviz<'a, W: std::fmt::Write>(w: &mut W, nodes: &NodeVec<'a>) -> std::fmt::Result {
+	writeln!(w, "digraph G {{")?;
+	writeln!(w, "\trankdir=LR;")?;
+	for (i, node) in nodes.0.iter().enumerate() {
+		writeln!(w, "\t{} [label=\"{}\"];", i, node.graphviz_label())?;
+		if node.fragment_head {
+			writeln!(w, "\t{} [style=filled, fillcolor=\"#ffcccc\"];", i)?;
+		}
+		for &child_index in &node.children {
+			writeln!(w, "\t{} -> {};", child_index.0, i)?;
+		}
+		for cap in &node.capture {
+			let cap_label = if let Some(name) = &cap.name {
+				format!("Capture '{}'", name)
+			} else {
+				format!("Capture {:?}", std::ptr::from_ref(cap.as_ref()))
+			};
+			writeln!(
+				w,
+				"\tcap_{} [label=\"{}\", shape=box];",
+				std::ptr::from_ref(cap.as_ref()) as usize,
+				cap_label
+			)?;
+			writeln!(
+				w,
+				"\t{} -> cap_{} [style=dashed];",
+				i,
+				std::ptr::from_ref(cap.as_ref()) as usize,
+			)?;
+		}
+	}
+	writeln!(w, "}}")?;
+	Ok(())
 }
 
 //--------------------------------------------------------------------------------------------------

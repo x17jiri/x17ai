@@ -160,6 +160,7 @@ fn laplacian(v: &ArrayView2<f32>) -> Array2<f32> {
 }*/
 
 use x17ai::autograd::{AutogradTensor, LossFn};
+use x17ai::computation::expr::{ExprTensorRef, RcExpr, clone_expr, print_graphviz};
 use x17ai::nn::ModelContext;
 use x17ai::nn::fragments::linear::Linear;
 use x17ai::nn::fragments::softmax::{Softmax, SoftmaxGradMode};
@@ -220,6 +221,18 @@ unsafe extern "C" {
 }
 
 fn main() -> Result<(), ErrPack<TensorOpError>> {
+	let inp = RcExpr::new_tensor_input(f32::dtype, "inp".into());
+	let max = inp.clone().max();
+	let max = max.capture(ExprTensorRef::new(Some("max".into()), f64::dtype));
+	let t = (inp - max).exp();
+	let out = t.clone().sum().recip() * t;
+	let cap = out.capture(ExprTensorRef::new(Some("out".into()), f64::dtype));
+	let nodes = clone_expr(cap.as_ref());
+	let mut graphviz = String::new();
+	print_graphviz(&mut graphviz, &nodes);
+	println!("{}", graphviz);
+	return Ok(());
+
 	let cpu = CPUDevice::new();
 	let dev = CudaDevice::new(0)?;
 
