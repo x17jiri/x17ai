@@ -29,6 +29,8 @@ pub struct Node<'a> {
 
 	/// `fragment_head` is a node whose result we may have to store into a tensor.
 	pub fragment_head: bool,
+
+	pub shape_group: usize,
 }
 
 impl<'a> Node<'a> {
@@ -411,6 +413,7 @@ pub fn __clone_expr<'a>(
 					children: Vec::new(),
 					capture: Vec::new(),
 					fragment_head: false,
+					shape_group: usize::MAX,
 				});
 				entry.insert(index);
 				match expr {
