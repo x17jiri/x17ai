@@ -5,17 +5,21 @@
 //
 //------------------------------------------------------------------------------
 
-//--------------------------------------------------------------------------------------------------
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::cast_possible_wrap)]
 
+//--------------------------------------------------------------------------------------------------
 #[derive(Clone)]
 pub struct UnionFind {
-	link_parent: Vec<isize>,
+	link_parent: Vec<usize>,
 }
 
 #[allow(clippy::indexing_slicing)]
 impl UnionFind {
 	pub fn new(size: usize) -> Self {
-		Self { link_parent: vec![-1; size] }
+		Self {
+			link_parent: vec![(-1_isize) as usize; size],
+		}
 	}
 
 	#[inline]
@@ -31,42 +35,42 @@ impl UnionFind {
 		}
 
 		if neg_rank0 == neg_rank1 {
-			self.link_parent[parent0] = neg_rank0 - 1;
-			self.link_parent[parent1] = parent0 as isize;
+			self.link_parent[parent0] = (neg_rank0 - 1) as usize;
+			self.link_parent[parent1] = parent0;
 		} else {
 			let (parent0, parent1) =
 				if neg_rank0 < neg_rank1 { (parent0, parent1) } else { (parent1, parent0) };
-			self.link_parent[parent1] = parent0 as isize;
+			self.link_parent[parent1] = parent0;
 		}
 		parent0
 	}
 
 	#[inline]
 	fn __find(&mut self, key: usize) -> (usize, isize) {
+		let size = self.link_parent.len();
 		let mut key: usize = key;
-		let mut parent: isize = self.link_parent[key];
-		if parent < 0 {
-			let neg_rank = parent;
-			return (key, neg_rank);
+		let mut parent: usize = self.link_parent[key];
+		if parent >= size {
+			return (key, parent as isize);
 		}
 		loop {
-			let grand_parent = self.link_parent[parent as usize];
-			if grand_parent < 0 {
-				let neg_rank = grand_parent;
-				return (parent as usize, neg_rank);
+			let grand_parent = self.link_parent[parent];
+			if grand_parent >= size {
+				return (parent, grand_parent as isize);
 			}
 			self.link_parent[key] = grand_parent;
-			key = parent as usize;
+			key = parent;
 			parent = grand_parent;
 		}
 	}
 
 	pub fn compact_ids(mut self) -> (Vec<usize>, usize) {
+		let size = self.link_parent.len();
 		let mut sets = 0;
-		for i in 0..self.link_parent.len() {
+		for i in 0..size {
 			let mut key = i;
 			let mut parent = self.link_parent[key];
-			while key >= i && parent != key {
+			while key >= i && parent < size {
 				let grand_parent = self.link_parent[parent];
 				self.link_parent[key] = i;
 				key = parent;

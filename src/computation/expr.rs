@@ -18,6 +18,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::tensor::{DType, Tensor};
+use crate::util::union_find::UnionFind;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -27,10 +28,10 @@ pub struct Node<'a> {
 	pub children: Vec<NodeIndex>,
 	pub capture: Vec<Rc<ExprTensorRef>>,
 
-	/// `fragment_head` is a node whose result we may have to store into a tensor.
-	pub fragment_head: bool,
+	pub scalar_used_by_nonscalar: bool,
 
-	pub shape_group: usize,
+	pub op_shape_group: usize,
+	pub out_shape_group: usize,
 }
 
 impl<'a> Node<'a> {
@@ -52,7 +53,7 @@ impl<'a> Node<'a> {
 					}
 				},
 			},
-			Expr::Capture(..) => {
+			Expr::Capture(..) | Expr::First(..) => {
 				unreachable!() // `clone_expr()` removes Capture nodes
 			},
 			Expr::Cast(cast) => format!("Cast to {:?}", cast.dtype),
@@ -65,10 +66,9 @@ impl<'a> Node<'a> {
 				ExprUnaryKind::Recip => "Recip".to_string(),
 			},
 			Expr::Binary(binary) => match binary.kind {
-				ExprBinaryKind::Add => "+".to_string(),
-				ExprBinaryKind::Sub => "-".to_string(),
-				ExprBinaryKind::Mul => "*".to_string(),
-				ExprBinaryKind::First => "First".to_string(),
+				ExprBinaryKind::Add => "Add".to_string(),
+				ExprBinaryKind::Sub => "Sub".to_string(),
+				ExprBinaryKind::Mul => "Mul".to_string(),
 			},
 			Expr::Reduction(reduction) => match reduction.kind {
 				ExprReductionKind::Sum => "Sum".to_string(),
@@ -82,27 +82,151 @@ impl<'a> Node<'a> {
 		debug_assert!(result == matches!(self.expr, Expr::Input(_)));
 		result
 	}
+
+	pub fn is_reduction(&self) -> bool {
+		matches!(self.expr, Expr::Reduction(_))
+	}
+
+	/// `fragment_head` is a node whose result we may have to store into a tensor.
+	#[allow(clippy::nonminimal_bool)]
+	#[rustfmt::skip]
+	pub fn is_fragment_head(&self, nodes: &NodeVec<'a>) -> bool {
+		!self.is_input()
+			&& (
+				self.parents.len() != 1 // TODO - check for duplicate parents
+				|| !self.capture.is_empty()
+				|| (
+					self.is_reduction()
+					&& (
+						self.parents.len() != 1
+						|| nodes[self.parents[0]].op_shape_group != self.out_shape_group
+					)
+				)
+				|| self.scalar_used_by_nonscalar
+			)
+	}
 }
 
 #[repr(transparent)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeIndex(usize);
 
-pub struct NodeVec<'a>(Vec<Node<'a>>);
+pub struct NodeVec<'a> {
+	vec: Vec<Node<'a>>,
+	roots: Vec<NodeIndex>,
+}
 
 impl<'a> NodeVec<'a> {
 	pub fn with_capacity(capacity: usize) -> Self {
-		Self(Vec::with_capacity(capacity))
+		Self {
+			vec: Vec::with_capacity(capacity),
+			roots: Vec::new(),
+		}
 	}
 
 	pub fn add(&mut self, node: Node<'a>) -> NodeIndex {
-		let index = NodeIndex(self.0.len());
-		self.0.push(node);
+		let index = NodeIndex(self.vec.len());
+		self.vec.push(node);
 		index
 	}
 
 	pub fn get(&self, index: NodeIndex) -> &Node<'a> {
-		&self.0[index.0]
+		&self.vec[index.0]
+	}
+
+	pub fn new_from_expr(expr: &'a Expr) -> NodeVec<'a> {
+		let mut processed = std::collections::HashMap::new();
+		let mut nodes = Self::with_capacity(32);
+		let mut roots = Vec::with_capacity(1);
+		let root = Self::__new_from_expr(&mut processed, &mut nodes, expr, &mut roots);
+		roots.push(root);
+		roots.sort();
+		roots.dedup();
+		roots.retain(|&r| nodes[r].parents.is_empty());
+		nodes.roots = roots;
+		nodes
+	}
+
+	pub fn root_cnt(&self) -> usize {
+		self.roots.len()
+	}
+
+	pub fn root(&self, i: usize) -> NodeIndex {
+		self.roots[i]
+	}
+
+	pub fn __new_from_expr(
+		processed: &mut std::collections::HashMap<ExprRef<'a>, NodeIndex>,
+		nodes: &mut NodeVec<'a>,
+		expr: &'a Expr,
+		roots: &mut Vec<NodeIndex>,
+	) -> NodeIndex {
+		fn add_child<'a>(nodes: &mut NodeVec<'a>, parent: NodeIndex, child: NodeIndex) {
+			nodes[parent].children.push(child);
+			nodes[child].parents.push(parent);
+		}
+
+		let expr_ref = ExprRef { expr };
+		if let Some(index) = processed.get(&expr_ref) {
+			return *index;
+		}
+
+		match expr {
+			Expr::Capture(capture) => {
+				let child = Self::__new_from_expr(processed, nodes, capture.expr.as_ref(), roots);
+				nodes[child].capture.push(capture.tensor_ref.clone());
+				processed.insert(expr_ref, child);
+				return child;
+			},
+			Expr::First(first) => {
+				let first_child =
+					Self::__new_from_expr(processed, nodes, first.lhs.as_ref(), roots);
+				let second_child =
+					Self::__new_from_expr(processed, nodes, first.rhs.as_ref(), roots);
+				processed.insert(expr_ref, first_child);
+				roots.push(second_child);
+				return first_child;
+			},
+			_ => {},
+		};
+
+		let index = nodes.add(Node {
+			expr,
+			parents: Vec::new(),
+			children: Vec::new(),
+			capture: Vec::new(),
+			scalar_used_by_nonscalar: false,
+			op_shape_group: usize::MAX,
+			out_shape_group: usize::MAX,
+		});
+		processed.insert(expr_ref, index);
+		match expr {
+			Expr::Input(..) => {},
+			Expr::Capture(..) | Expr::First(..) => {
+				unreachable!() // handled above
+			},
+			Expr::Cast(cast) => {
+				let child = Self::__new_from_expr(processed, nodes, cast.expr.as_ref(), roots);
+				add_child(nodes, index, child);
+			},
+			Expr::Unary(unary) => {
+				let child = Self::__new_from_expr(processed, nodes, unary.expr.as_ref(), roots);
+				add_child(nodes, index, child);
+			},
+			Expr::Binary(binary) => {
+				let left_child =
+					Self::__new_from_expr(processed, nodes, binary.lhs.as_ref(), roots);
+				add_child(nodes, index, left_child);
+				let right_child =
+					Self::__new_from_expr(processed, nodes, binary.rhs.as_ref(), roots);
+				add_child(nodes, index, right_child);
+			},
+			Expr::Reduction(reduction) => {
+				let child = Self::__new_from_expr(processed, nodes, reduction.expr.as_ref(), roots);
+				add_child(nodes, index, child);
+			},
+		}
+		index
 	}
 }
 
@@ -110,13 +234,13 @@ impl<'a> std::ops::Index<NodeIndex> for NodeVec<'a> {
 	type Output = Node<'a>;
 
 	fn index(&self, index: NodeIndex) -> &Node<'a> {
-		&self.0[index.0]
+		&self.vec[index.0]
 	}
 }
 
 impl<'a> std::ops::IndexMut<NodeIndex> for NodeVec<'a> {
 	fn index_mut(&mut self, index: NodeIndex) -> &mut Node<'a> {
-		&mut self.0[index.0]
+		&mut self.vec[index.0]
 	}
 }
 
@@ -155,6 +279,7 @@ pub enum Expr {
 	Unary(ExprUnary),
 	Binary(ExprBinary),
 	Reduction(ExprReduction),
+	First(ExprFirst),
 }
 
 pub enum ExprInput {
@@ -199,6 +324,11 @@ pub enum ExprUnaryKind {
 	Recip,
 }
 
+pub struct ExprFirst {
+	pub lhs: RcExpr,
+	pub rhs: RcExpr,
+}
+
 pub struct ExprBinary {
 	pub kind: ExprBinaryKind,
 	pub lhs: RcExpr,
@@ -209,8 +339,6 @@ pub enum ExprBinaryKind {
 	Add,
 	Sub,
 	Mul,
-
-	First,
 }
 
 pub struct ExprReduction {
@@ -313,11 +441,7 @@ impl RcExpr {
 
 	pub fn first(first: RcExpr, second: RcExpr) -> RcExpr {
 		RcExpr {
-			rc_expr: Rc::new(Expr::Binary(ExprBinary {
-				kind: ExprBinaryKind::First,
-				lhs: first,
-				rhs: second,
-			})),
+			rc_expr: Rc::new(Expr::First(ExprFirst { lhs: first, rhs: second })),
 		}
 	}
 
@@ -382,105 +506,95 @@ impl std::ops::Neg for RcExpr {
 
 //--------------------------------------------------------------------------------------------------
 
-pub fn __clone_expr<'a>(
-	processed: &mut std::collections::HashMap<ExprRef<'a>, NodeIndex>,
-	nodes: &mut NodeVec<'a>,
-	expr: &'a Expr,
-) -> NodeIndex {
-	fn add_child<'a>(nodes: &mut NodeVec<'a>, parent: NodeIndex, child: NodeIndex) {
-		nodes[parent].children.push(child);
-		nodes[child].parents.push(parent);
-		if nodes[child].parents.len() > 1
-			&& !nodes[child].is_input()
-			&& nodes[child].parents[0] != parent
-		{
-			nodes[child].fragment_head = true;
-		}
+pub fn __calc_shape_groups(nodes: &mut NodeVec, node: NodeIndex, uf: &mut UnionFind) -> usize {
+	let out_shape_group = nodes[node].out_shape_group;
+	if out_shape_group != usize::MAX {
+		return out_shape_group; // already visited
 	}
-
-	match processed.entry(ExprRef { expr }) {
-		std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
-		std::collections::hash_map::Entry::Vacant(entry) => {
-			if let Expr::Capture(capture) = expr {
-				let child = __clone_expr(processed, nodes, capture.expr.as_ref());
-				nodes[child].capture.push(capture.tensor_ref.clone());
-				nodes[child].fragment_head = true;
-				child
+	match &nodes[node].expr {
+		Expr::Input(input) => match input {
+			ExprInput::Tensor(..) => {
+				unreachable!(); // shape group of tensor inputs should be set already
+			},
+			ExprInput::Scalar(..) => usize::MAX - 1,
+		},
+		Expr::Capture(..) | Expr::Cast(..) | Expr::Unary(..) => {
+			assert!(nodes[node].children.len() == 1);
+			let g = __calc_shape_groups(nodes, nodes[node].children[0], uf);
+			nodes[node].op_shape_group = g;
+			nodes[node].out_shape_group = g;
+			g
+		},
+		#[allow(clippy::collapsible_else_if)]
+		Expr::Binary(..) => {
+			assert!(nodes[node].children.len() == 2);
+			let c1 = nodes[node].children[0];
+			let c2 = nodes[node].children[1];
+			let g1 = __calc_shape_groups(nodes, c1, uf);
+			let g2 = __calc_shape_groups(nodes, c2, uf);
+			let g = if g2 >= uf.size() {
+				nodes[c2].scalar_used_by_nonscalar = true;
+				g1
+			} else if g1 >= uf.size() {
+				nodes[c1].scalar_used_by_nonscalar = true;
+				g2
 			} else {
-				let index = nodes.add(Node {
-					expr,
-					parents: Vec::new(),
-					children: Vec::new(),
-					capture: Vec::new(),
-					fragment_head: false,
-					shape_group: usize::MAX,
-				});
-				entry.insert(index);
-				match expr {
-					Expr::Input(..) => {},
-					Expr::Capture(..) => {
-						unreachable!() // handled above
-					},
-					Expr::Cast(cast) => {
-						let child = __clone_expr(processed, nodes, cast.expr.as_ref());
-						add_child(nodes, index, child);
-					},
-					Expr::Unary(unary) => {
-						let child = __clone_expr(processed, nodes, unary.expr.as_ref());
-						add_child(nodes, index, child);
-					},
-					Expr::Binary(binary) => {
-						let left_child = __clone_expr(processed, nodes, binary.lhs.as_ref());
-						add_child(nodes, index, left_child);
-						let right_child = __clone_expr(processed, nodes, binary.rhs.as_ref());
-						add_child(nodes, index, right_child);
-					},
-					Expr::Reduction(reduction) => {
-						nodes[index].fragment_head = true;
-						let child = __clone_expr(processed, nodes, reduction.expr.as_ref());
-						add_child(nodes, index, child);
-					},
-				}
-				index
-			}
+				uf.union(g1, g2)
+			};
+			nodes[node].op_shape_group = g;
+			nodes[node].out_shape_group = g;
+			g
+		},
+		Expr::First(..) => {
+			unreachable!();
+		},
+		Expr::Reduction(..) => {
+			assert!(nodes[node].children.len() == 1);
+			let g1 = __calc_shape_groups(nodes, nodes[node].children[0], uf);
+			let g = usize::MAX - 1;
+			nodes[node].op_shape_group = g1;
+			nodes[node].out_shape_group = g;
+			g
 		},
 	}
 }
 
-pub fn clone_expr<'a>(expr: &'a Expr) -> NodeVec<'a> {
-	let mut processed = std::collections::HashMap::new();
-	let mut nodes = NodeVec::with_capacity(32);
-	let top_node = __clone_expr(&mut processed, &mut nodes, expr);
-	assert!(top_node.0 == 0);
-	nodes[top_node].fragment_head = true;
-	nodes
+pub fn calc_shape_groups(nodes: &mut NodeVec) {
+	let mut tensor_ref_map = std::collections::HashMap::new(); // *ExprTensorRef -> Index
+	let mut tensor_ref_vec = Vec::new(); // Index -> &ExprTensorRef
+	for node in &mut nodes.vec {
+		if let Expr::Input(ExprInput::Tensor(tensor_ref)) = &node.expr {
+			let tensor_ref = tensor_ref.as_ref();
+			let index = match tensor_ref_map.entry(std::ptr::from_ref(tensor_ref)) {
+				std::collections::hash_map::Entry::Vacant(entry) => {
+					let index = tensor_ref_vec.len();
+					entry.insert(index);
+					tensor_ref_vec.push(tensor_ref);
+					index
+				},
+				std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+			};
+			node.op_shape_group = index;
+			node.out_shape_group = index;
+		}
+	}
+	let mut uf = UnionFind::new(tensor_ref_vec.len());
+	for root in 0..nodes.root_cnt() {
+		__calc_shape_groups(nodes, nodes.root(root), &mut uf);
+	}
 }
 
 pub fn compile(expr: &Expr) {
-	let mut nodes = clone_expr(expr);
-
-	let mut tensor_ref_map = std::collections::HashMap::new(); // *ExprTensorRef -> Index
-	let mut tensor_ref_vec = Vec::new(); // Index -> &ExprTensorRef
-	for node in nodes.0 {
-		if let Expr::Input(ExprInput::Tensor(tensor_ref)) = &node.expr {
-			let tensor_ref = tensor_ref.as_ref();
-			if let std::collections::hash_map::Entry::Vacant(entry) =
-				tensor_ref_map.entry(std::ptr::from_ref(tensor_ref))
-			{
-				let index = tensor_ref_vec.len();
-				entry.insert(index);
-				tensor_ref_vec.push(tensor_ref);
-			}
-		}
-	}
+	let mut nodes = NodeVec::new_from_expr(expr);
+	calc_shape_groups(&mut nodes);
 }
 
 pub fn print_graphviz<'a, W: std::fmt::Write>(w: &mut W, nodes: &NodeVec<'a>) -> std::fmt::Result {
 	writeln!(w, "digraph G {{")?;
-	writeln!(w, "\trankdir=LR;")?;
-	for (i, node) in nodes.0.iter().enumerate() {
-		writeln!(w, "\t{} [label=\"{}\"];", i, node.graphviz_label())?;
-		if node.fragment_head {
+	writeln!(w, "\trankdir=BT;")?;
+	for (i, node) in nodes.vec.iter().enumerate() {
+		writeln!(w, "\t\t{} [label=\"{}\"];", i, node.graphviz_label())?;
+		if node.is_fragment_head(nodes) {
 			writeln!(w, "\t{} [style=filled, fillcolor=\"#ffcccc\"];", i)?;
 		}
 		for &child_index in &node.children {
