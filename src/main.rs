@@ -230,6 +230,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let m_decayed = m * m_decay_coef;
 	let m_update = grad.clone() * m_update_coef;
 	let new_m = m_decayed + m_update;
+	let new_m = new_m.capture(ExprTensorRef::new(Some("new_m".into()), f32::dtype));
 
 	let v = RcExpr::new_tensor_input(f32::dtype, "v".into());
 	let v_decay_coef = RcExpr::new_scalar_input("v_decay_coef".into());
@@ -238,6 +239,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let v_decayed = v * v_decay_coef;
 	let v_update = (grad.clone() * grad).sum() * v_update_coef;
 	let new_v = v_decayed + v_update;
+	let new_v = new_v.capture(ExprTensorRef::new(Some("new_v".into()), f32::dtype));
 
 	let eps = RcExpr::new_scalar_input("eps".into());
 	let v_rsqrt = (new_v.sqrt() + eps).recip();
@@ -246,6 +248,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let update_coef = RcExpr::new_scalar_input("update_coef".into());
 	let update = new_m * v_rsqrt;
 	let new_value = value + update * update_coef;
+	let new_value = new_value.capture(ExprTensorRef::new(Some("new_value".into()), f32::dtype));
 
 	let mut nodes = NodeVec::new_from_expr(new_value.as_ref());
 	calc_shape_groups(&mut nodes);
