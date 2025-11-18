@@ -40,16 +40,16 @@ impl<'a> Node<'a> {
 			Expr::Input(input) => match input {
 				ExprInput::Tensor(tensor_ref) => {
 					if let Some(name) = &tensor_ref.name {
-						format!("Tensor '{}'", name)
+						format!("Tensor\\n'{}'", name)
 					} else {
-						format!("Tensor: {:?}", std::ptr::from_ref(tensor_ref.as_ref()))
+						format!("Tensor\\n{:?}", std::ptr::from_ref(tensor_ref.as_ref()))
 					}
 				},
 				ExprInput::Scalar(scalar_ref) => {
 					if let Some(name) = &scalar_ref.name {
-						format!("Scalar: '{}'", name)
+						format!("Scalar\\n'{}'", name)
 					} else {
-						format!("Scalar: {:?}", std::ptr::from_ref(scalar_ref.as_ref()))
+						format!("Scalar\\n{:?}", std::ptr::from_ref(scalar_ref.as_ref()))
 					}
 				},
 			},
@@ -88,20 +88,14 @@ impl<'a> Node<'a> {
 	}
 
 	/// `fragment_head` is a node whose result we may have to store into a tensor.
-	#[allow(clippy::nonminimal_bool)]
+	//	#[allow(clippy::nonminimal_bool)]
 	#[rustfmt::skip]
 	pub fn is_fragment_head(&self, nodes: &NodeVec<'a>) -> bool {
-		!self.is_input()
+		self.is_reduction()
+		|| !self.is_input()
 			&& (
 				self.parents.len() != 1 // TODO - check for duplicate parents
 				|| !self.capture.is_empty()
-				|| (
-					self.is_reduction()
-					&& (
-						self.parents.len() != 1
-						|| nodes[self.parents[0]].op_shape_group != self.out_shape_group
-					)
-				)
 				|| self.scalar_used_by_nonscalar
 			)
 	}

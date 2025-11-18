@@ -221,6 +221,39 @@ unsafe extern "C" {
 }
 
 fn main() -> Result<(), ErrPack<TensorOpError>> {
+	let grad = RcExpr::new_tensor_input(f32::dtype, "grad".into());
+
+	let m = RcExpr::new_tensor_input(f32::dtype, "m".into());
+	let m_decay_coef = RcExpr::new_scalar_input("m_decay_coef".into());
+	let m_update_coef = RcExpr::new_scalar_input("m_update_coef".into());
+
+	let m_decayed = m * m_decay_coef;
+	let m_update = grad.clone() * m_update_coef;
+	let new_m = m_decayed + m_update;
+
+	let v = RcExpr::new_tensor_input(f32::dtype, "v".into());
+	let v_decay_coef = RcExpr::new_scalar_input("v_decay_coef".into());
+	let v_update_coef = RcExpr::new_scalar_input("v_update_coef".into());
+
+	let v_decayed = v * v_decay_coef;
+	let v_update = (grad.clone() * grad).sum() * v_update_coef;
+	let new_v = v_decayed + v_update;
+
+	let eps = RcExpr::new_scalar_input("eps".into());
+	let v_rsqrt = (new_v.sqrt() + eps).recip();
+
+	let value = RcExpr::new_tensor_input(f32::dtype, "value".into());
+	let update_coef = RcExpr::new_scalar_input("update_coef".into());
+	let update = new_m * v_rsqrt;
+	let new_value = value + update * update_coef;
+
+	let mut nodes = NodeVec::new_from_expr(new_value.as_ref());
+	calc_shape_groups(&mut nodes);
+
+	let mut graphviz = String::new();
+	print_graphviz(&mut graphviz, &nodes);
+	println!("{}", graphviz);
+	/*
 	let inp = RcExpr::new_tensor_input(f32::dtype, "inp".into());
 	let max = inp.clone().max();
 	let max = max.capture(ExprTensorRef::new(Some("max".into()), f64::dtype));
@@ -232,6 +265,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let mut graphviz = String::new();
 	print_graphviz(&mut graphviz, &nodes);
 	println!("{}", graphviz);
+	*/
 	return Ok(());
 
 	let cpu = CPUDevice::new();
