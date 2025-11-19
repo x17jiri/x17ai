@@ -32,6 +32,8 @@ pub struct Node<'a> {
 
 	pub op_shape_group: usize,
 	pub out_shape_group: usize,
+
+	pub out_shape: Vec<usize>,
 }
 
 impl<'a> Node<'a> {
@@ -90,7 +92,7 @@ impl<'a> Node<'a> {
 	/// `fragment_head` is a node whose result we may have to store into a tensor.
 	//	#[allow(clippy::nonminimal_bool)]
 	#[rustfmt::skip]
-	pub fn is_fragment_head(&self, nodes: &NodeVec<'a>) -> bool {
+	pub fn is_fragment_head(&self) -> bool {
 		self.is_reduction()
 		|| !self.is_input()
 			&& (
@@ -99,6 +101,16 @@ impl<'a> Node<'a> {
 				|| self.scalar_used_by_nonscalar
 			)
 	}
+
+	pub fn out_shape_as_str(&self) -> String {
+		let dims: Vec<String> = self.out_shape.iter().map(|d| d.to_string()).collect();
+		format!("[{}]", dims.join(", "))
+	}
+}
+
+#[derive(Clone)]
+pub struct MergeGroup {
+	pub tensors: Vec<Rc<ExprTensorRef>>,
 }
 
 #[repr(transparent)]
@@ -108,6 +120,7 @@ pub struct NodeIndex(usize);
 pub struct NodeVec<'a> {
 	vec: Vec<Node<'a>>,
 	roots: Vec<NodeIndex>,
+	merge_groups: Vec<MergeGroup>,
 }
 
 impl<'a> NodeVec<'a> {
@@ -115,6 +128,7 @@ impl<'a> NodeVec<'a> {
 		Self {
 			vec: Vec::with_capacity(capacity),
 			roots: Vec::new(),
+			merge_groups: Vec::new(),
 		}
 	}
 
@@ -192,6 +206,7 @@ impl<'a> NodeVec<'a> {
 			scalar_used_by_nonscalar: false,
 			op_shape_group: usize::MAX,
 			out_shape_group: usize::MAX,
+			out_shape: Vec::new(),
 		});
 		processed.insert(expr_ref, index);
 		match expr {
@@ -286,6 +301,7 @@ pub enum ExprInput {
 pub struct ExprTensorRef {
 	pub tensor: RefCell<Option<Tensor>>,
 	pub dtype: DType,
+	pub shape: Vec<usize>,
 	pub name: Option<Cow<'static, str>>,
 }
 
@@ -348,30 +364,38 @@ pub enum ExprReductionKind {
 //--------------------------------------------------------------------------------------------------
 
 impl ExprTensorRef {
-	pub fn new(name: Option<Cow<'static, str>>, dtype: DType) -> Rc<ExprTensorRef> {
-		Rc::new(ExprTensorRef { tensor: RefCell::new(None), dtype, name })
+	pub fn new(
+		name: Option<Cow<'static, str>>,
+		dtype: DType,
+		shape: Vec<usize>,
+	) -> Rc<ExprTensorRef> {
+		Rc::new(ExprTensorRef {
+			tensor: RefCell::new(None),
+			dtype,
+			shape,
+			name,
+		})
+	}
+}
+
+impl ExprScalarRef {
+	pub fn new(name: Option<Cow<'static, str>>) -> Rc<ExprScalarRef> {
+		Rc::new(ExprScalarRef { value: RefCell::new(None), name })
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
 
 impl RcExpr {
-	pub fn new_tensor_input(dtype: DType, name: Cow<'static, str>) -> RcExpr {
+	pub fn new_tensor_input(tensor_ref: Rc<ExprTensorRef>) -> RcExpr {
 		RcExpr {
-			rc_expr: Rc::new(Expr::Input(ExprInput::Tensor(Rc::new(ExprTensorRef {
-				tensor: RefCell::new(None),
-				dtype,
-				name: Some(name),
-			})))),
+			rc_expr: Rc::new(Expr::Input(ExprInput::Tensor(tensor_ref))),
 		}
 	}
 
-	pub fn new_scalar_input(name: Cow<'static, str>) -> RcExpr {
+	pub fn new_scalar_input(scalar_ref: Rc<ExprScalarRef>) -> RcExpr {
 		RcExpr {
-			rc_expr: Rc::new(Expr::Input(ExprInput::Scalar(Rc::new(ExprScalarRef {
-				value: RefCell::new(None),
-				name: Some(name),
-			})))),
+			rc_expr: Rc::new(Expr::Input(ExprInput::Scalar(scalar_ref))),
 		}
 	}
 
@@ -517,6 +541,9 @@ pub fn __calc_shape_groups(nodes: &mut NodeVec, node: NodeIndex, uf: &mut UnionF
 			let g = __calc_shape_groups(nodes, nodes[node].children[0], uf);
 			nodes[node].op_shape_group = g;
 			nodes[node].out_shape_group = g;
+			if g < uf.size() {
+				nodes[node].out_shape = nodes[nodes[node].children[0]].out_shape.clone();
+			}
 			g
 		},
 		#[allow(clippy::collapsible_else_if)]
@@ -528,11 +555,28 @@ pub fn __calc_shape_groups(nodes: &mut NodeVec, node: NodeIndex, uf: &mut UnionF
 			let g2 = __calc_shape_groups(nodes, c2, uf);
 			let g = if g2 >= uf.size() {
 				nodes[c2].scalar_used_by_nonscalar = true;
+				if g1 < uf.size() {
+					nodes[node].out_shape = nodes[c1].out_shape.clone();
+				}
 				g1
 			} else if g1 >= uf.size() {
 				nodes[c1].scalar_used_by_nonscalar = true;
+				if g2 < uf.size() {
+					nodes[node].out_shape = nodes[c2].out_shape.clone();
+				}
 				g2
 			} else {
+				let l1 = nodes[c1].out_shape.len();
+				let l2 = nodes[c2].out_shape.len();
+				for i in (1..=l1.min(l2)).rev() {
+					let d1 = nodes[c1].out_shape[l1 - i];
+					let d2 = nodes[c2].out_shape[l2 - i];
+					if d1 != d2 {
+						break;
+					}
+					nodes[node].out_shape.push(d1);
+				}
+				nodes[node].out_shape.reverse();
 				uf.union(g1, g2)
 			};
 			nodes[node].op_shape_group = g;
@@ -555,11 +599,12 @@ pub fn __calc_shape_groups(nodes: &mut NodeVec, node: NodeIndex, uf: &mut UnionF
 
 pub fn calc_shape_groups(nodes: &mut NodeVec) {
 	let mut tensor_ref_map = std::collections::HashMap::new(); // *ExprTensorRef -> Index
-	let mut tensor_ref_vec = Vec::new(); // Index -> &ExprTensorRef
+	let mut tensor_ref_vec = Vec::new(); // Index -> Rc<ExprTensorRef>
 	for node in &mut nodes.vec {
 		if let Expr::Input(ExprInput::Tensor(tensor_ref)) = &node.expr {
-			let tensor_ref = tensor_ref.as_ref();
-			let index = match tensor_ref_map.entry(std::ptr::from_ref(tensor_ref)) {
+			node.out_shape.clone_from(&tensor_ref.shape);
+			let tensor_ref = tensor_ref.clone();
+			let index = match tensor_ref_map.entry(std::ptr::from_ref(tensor_ref.as_ref())) {
 				std::collections::hash_map::Entry::Vacant(entry) => {
 					let index = tensor_ref_vec.len();
 					entry.insert(index);
@@ -576,6 +621,20 @@ pub fn calc_shape_groups(nodes: &mut NodeVec) {
 	for root in 0..nodes.root_cnt() {
 		__calc_shape_groups(nodes, nodes.root(root), &mut uf);
 	}
+	let (compact_ids, sets_cnt) = uf.compact_ids();
+	nodes.merge_groups = vec![MergeGroup { tensors: Vec::new() }; sets_cnt];
+	for (i, tensor_ref) in tensor_ref_vec.into_iter().enumerate() {
+		let group_id = compact_ids[i];
+		nodes.merge_groups[group_id].tensors.push(tensor_ref);
+	}
+	for node in &mut nodes.vec {
+		if node.op_shape_group < compact_ids.len() {
+			node.op_shape_group = compact_ids[node.op_shape_group];
+		}
+		if node.out_shape_group < compact_ids.len() {
+			node.out_shape_group = compact_ids[node.out_shape_group];
+		}
+	}
 }
 
 pub fn compile(expr: &Expr) {
@@ -588,11 +647,12 @@ pub fn print_graphviz<'a, W: std::fmt::Write>(w: &mut W, nodes: &NodeVec<'a>) ->
 	writeln!(w, "\trankdir=BT;")?;
 	for (i, node) in nodes.vec.iter().enumerate() {
 		writeln!(w, "\t\t{} [label=\"{}\"];", i, node.graphviz_label())?;
-		if node.is_fragment_head(nodes) {
+		if node.is_fragment_head() {
 			writeln!(w, "\t{} [style=filled, fillcolor=\"#ffcccc\"];", i)?;
 		}
 		for &child_index in &node.children {
-			writeln!(w, "\t{} -> {};", child_index.0, i)?;
+			let label = nodes[child_index].out_shape_as_str();
+			writeln!(w, "\t{} -> {} [label=\"{}\"];", child_index.0, i, label)?;
 		}
 		for cap in &node.capture {
 			let cap_label = if let Some(name) = &cap.name {

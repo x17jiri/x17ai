@@ -160,7 +160,9 @@ fn laplacian(v: &ArrayView2<f32>) -> Array2<f32> {
 }*/
 
 use x17ai::autograd::{AutogradTensor, LossFn};
-use x17ai::computation::expr::{ExprTensorRef, NodeVec, RcExpr, calc_shape_groups, print_graphviz};
+use x17ai::computation::expr::{
+	ExprScalarRef, ExprTensorRef, NodeVec, RcExpr, calc_shape_groups, print_graphviz,
+};
 use x17ai::nn::ModelContext;
 use x17ai::nn::fragments::linear::Linear;
 use x17ai::nn::fragments::softmax::{Softmax, SoftmaxGradMode};
@@ -221,34 +223,37 @@ unsafe extern "C" {
 }
 
 fn main() -> Result<(), ErrPack<TensorOpError>> {
-	let grad = RcExpr::new_tensor_input(f32::dtype, "grad".into());
+	let grad =
+		RcExpr::new_tensor_input(ExprTensorRef::new(Some("grad".into()), f32::dtype, vec![]));
 
-	let m = RcExpr::new_tensor_input(f32::dtype, "m".into());
-	let m_decay_coef = RcExpr::new_scalar_input("m_decay_coef".into());
-	let m_update_coef = RcExpr::new_scalar_input("m_update_coef".into());
+	let m = RcExpr::new_tensor_input(ExprTensorRef::new(Some("m".into()), f32::dtype, vec![]));
+	let m_decay_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("m_decay_coef".into())));
+	let m_update_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("m_update_coef".into())));
 
 	let m_decayed = m * m_decay_coef;
 	let m_update = grad.clone() * m_update_coef;
 	let new_m = m_decayed + m_update;
-	let new_m = new_m.capture(ExprTensorRef::new(Some("new_m".into()), f32::dtype));
+	let new_m = new_m.capture(ExprTensorRef::new(Some("new_m".into()), f32::dtype, vec![]));
 
-	let v = RcExpr::new_tensor_input(f32::dtype, "v".into());
-	let v_decay_coef = RcExpr::new_scalar_input("v_decay_coef".into());
-	let v_update_coef = RcExpr::new_scalar_input("v_update_coef".into());
+	let v = RcExpr::new_tensor_input(ExprTensorRef::new(Some("v".into()), f32::dtype, vec![1]));
+	let v_decay_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("v_decay_coef".into())));
+	let v_update_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("v_update_coef".into())));
 
 	let v_decayed = v * v_decay_coef;
 	let v_update = (grad.clone() * grad).sum() * v_update_coef;
 	let new_v = v_decayed + v_update;
-	let new_v = new_v.capture(ExprTensorRef::new(Some("new_v".into()), f32::dtype));
+	let new_v = new_v.capture(ExprTensorRef::new(Some("new_v".into()), f32::dtype, vec![]));
 
-	let eps = RcExpr::new_scalar_input("eps".into());
+	let eps = RcExpr::new_scalar_input(ExprScalarRef::new(Some("eps".into())));
 	let v_rsqrt = (new_v.sqrt() + eps).recip();
 
-	let value = RcExpr::new_tensor_input(f32::dtype, "value".into());
-	let update_coef = RcExpr::new_scalar_input("update_coef".into());
+	let value =
+		RcExpr::new_tensor_input(ExprTensorRef::new(Some("value".into()), f32::dtype, vec![]));
+	let update_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("update_coef".into())));
 	let update = new_m * v_rsqrt;
 	let new_value = value + update * update_coef;
-	let new_value = new_value.capture(ExprTensorRef::new(Some("new_value".into()), f32::dtype));
+	let new_value =
+		new_value.capture(ExprTensorRef::new(Some("new_value".into()), f32::dtype, vec![]));
 
 	let mut nodes = NodeVec::new_from_expr(new_value.as_ref());
 	calc_shape_groups(&mut nodes);
