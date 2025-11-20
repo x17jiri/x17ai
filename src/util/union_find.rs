@@ -22,6 +22,12 @@ impl UnionFind {
 		}
 	}
 
+	pub fn add(&mut self) -> usize {
+		let key = self.link_parent.len();
+		self.link_parent.push((-1_isize) as usize);
+		key
+	}
+
 	#[inline]
 	pub fn size(&self) -> usize {
 		self.link_parent.len()

@@ -30,10 +30,9 @@ pub struct Node<'a> {
 
 	pub scalar_used_by_nonscalar: bool,
 
-	pub op_shape_group: usize,
-	pub out_shape_group: usize,
-
+	pub shape_group: usize,
 	pub out_shape: Vec<usize>,
+	pub out_is_scalar: bool,
 }
 
 impl<'a> Node<'a> {
@@ -168,6 +167,7 @@ impl<'a> NodeVec<'a> {
 		nodes: &mut NodeVec<'a>,
 		expr: &'a Expr,
 		roots: &mut Vec<NodeIndex>,
+		uf: &mut UnionFind,
 	) -> NodeIndex {
 		fn add_child<'a>(nodes: &mut NodeVec<'a>, parent: NodeIndex, child: NodeIndex) {
 			nodes[parent].children.push(child);
@@ -204,34 +204,55 @@ impl<'a> NodeVec<'a> {
 			children: Vec::new(),
 			capture: Vec::new(),
 			scalar_used_by_nonscalar: false,
-			op_shape_group: usize::MAX,
-			out_shape_group: usize::MAX,
+			shape_group: usize::MAX,
 			out_shape: Vec::new(),
+			out_is_scalar: false,
 		});
 		processed.insert(expr_ref, index);
 		match expr {
-			Expr::Input(..) => {},
+			Expr::Input(input) => match input {
+				ExprInput::Tensor(tensor_ref) => {
+					nodes[index].shape_group = uf.add();
+					nodes[index].out_shape.clone_from(&tensor_ref.shape);
+				},
+				ExprInput::Scalar(..) => {
+					nodes[index].out_is_scalar = true;
+				},
+			},
 			Expr::Capture(..) | Expr::First(..) => {
 				unreachable!() // handled above
 			},
 			Expr::Cast(cast) => {
-				let child = Self::__new_from_expr(processed, nodes, cast.expr.as_ref(), roots);
+				let child = Self::__new_from_expr(processed, nodes, cast.expr.as_ref(), roots, uf);
+				nodes[index].out_is_scalar = nodes[child].out_is_scalar;
+				nodes[index].out_shape.clone_from(&nodes[child].out_shape);
+				nodes[index].shape_group = nodes[child].shape_group;
 				add_child(nodes, index, child);
 			},
 			Expr::Unary(unary) => {
-				let child = Self::__new_from_expr(processed, nodes, unary.expr.as_ref(), roots);
+				let child = Self::__new_from_expr(processed, nodes, unary.expr.as_ref(), roots, uf);
+				nodes[index].out_is_scalar = nodes[child].out_is_scalar;
+				nodes[index].out_shape.clone_from(&nodes[child].out_shape);
+				nodes[index].shape_group = nodes[child].shape_group;
 				add_child(nodes, index, child);
 			},
 			Expr::Binary(binary) => {
 				let left_child =
-					Self::__new_from_expr(processed, nodes, binary.lhs.as_ref(), roots);
+					Self::__new_from_expr(processed, nodes, binary.lhs.as_ref(), roots, uf);
 				add_child(nodes, index, left_child);
 				let right_child =
-					Self::__new_from_expr(processed, nodes, binary.rhs.as_ref(), roots);
+					Self::__new_from_expr(processed, nodes, binary.rhs.as_ref(), roots, uf);
 				add_child(nodes, index, right_child);
+				let out_is_scalar =
+					nodes[left_child].out_is_scalar && nodes[right_child].out_is_scalar;
+				nodes[index].out_is_scalar = out_is_scalar;
+				if !out_is_scalar {
+					// TODO - out_shape, shape_group
+				}
 			},
 			Expr::Reduction(reduction) => {
-				let child = Self::__new_from_expr(processed, nodes, reduction.expr.as_ref(), roots);
+				let child =
+					Self::__new_from_expr(processed, nodes, reduction.expr.as_ref(), roots, uf);
 				add_child(nodes, index, child);
 			},
 		}
@@ -546,7 +567,6 @@ pub fn __calc_shape_groups(nodes: &mut NodeVec, node: NodeIndex, uf: &mut UnionF
 			}
 			g
 		},
-		#[allow(clippy::collapsible_else_if)]
 		Expr::Binary(..) => {
 			assert!(nodes[node].children.len() == 2);
 			let c1 = nodes[node].children[0];
