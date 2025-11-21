@@ -28,11 +28,10 @@ pub struct Node<'a> {
 	pub children: Vec<NodeIndex>,
 	pub capture: Vec<Rc<ExprTensorRef>>,
 
-	pub scalar_used_by_nonscalar: bool,
-
-	pub shape_group: usize,
+	pub merge_group: usize,
 	pub out_shape: Vec<usize>,
 	pub out_is_scalar: bool,
+	pub reduction_head: bool,
 }
 
 impl<'a> Node<'a> {
@@ -92,24 +91,72 @@ impl<'a> Node<'a> {
 	//	#[allow(clippy::nonminimal_bool)]
 	#[rustfmt::skip]
 	pub fn is_fragment_head(&self) -> bool {
-		self.is_reduction()
-		|| !self.is_input()
-			&& (
-				self.parents.len() != 1 // TODO - check for duplicate parents
-				|| !self.capture.is_empty()
-				|| self.scalar_used_by_nonscalar
-			)
+		self.reduction_head
+		|| !self.capture.is_empty()
+		|| (self.parents.len() != 1 && !self.is_input())
 	}
 
 	pub fn out_shape_as_str(&self) -> String {
-		let dims: Vec<String> = self.out_shape.iter().map(|d| d.to_string()).collect();
-		format!("[{}]", dims.join(", "))
+		if self.out_is_scalar {
+			String::new()
+		} else {
+			let dims: Vec<String> = self.out_shape.iter().map(|d| d.to_string()).collect();
+			format!("[{}]", dims.join(", "))
+		}
 	}
 }
 
 #[derive(Clone)]
 pub struct MergeGroup {
 	pub tensors: Vec<Rc<ExprTensorRef>>,
+}
+
+pub struct MergeGroupBuilder {
+	tensor_ref_map: std::collections::HashMap<*const ExprTensorRef, usize>, // *ExprTensorRef -> Index
+	tensor_ref_vec: Vec<Rc<ExprTensorRef>>, // Index -> Rc<ExprTensorRef>
+	union_find: UnionFind,
+}
+
+impl MergeGroupBuilder {
+	pub fn new() -> Self {
+		Self {
+			tensor_ref_map: std::collections::HashMap::new(),
+			tensor_ref_vec: Vec::new(),
+			union_find: UnionFind::new(0),
+		}
+	}
+
+	pub fn add(&mut self, tensor_ref: &Rc<ExprTensorRef>) -> usize {
+		let key = std::ptr::from_ref(tensor_ref.as_ref());
+		match self.tensor_ref_map.entry(key) {
+			std::collections::hash_map::Entry::Vacant(entry) => {
+				let index = self.tensor_ref_vec.len();
+				entry.insert(index);
+				self.tensor_ref_vec.push(tensor_ref.clone());
+				self.union_find.add();
+				index
+			},
+			std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+		}
+	}
+
+	pub fn union(&mut self, index0: usize, index1: usize) -> usize {
+		self.union_find.union(index0, index1)
+	}
+
+	pub fn build(self, nodes: &mut NodeVec) {
+		let (compact_ids, sets_cnt) = self.union_find.compact_ids();
+		nodes.merge_groups = vec![MergeGroup { tensors: Vec::new() }; sets_cnt];
+		for (i, tensor_ref) in self.tensor_ref_vec.into_iter().enumerate() {
+			let group_id = compact_ids[i];
+			nodes.merge_groups[group_id].tensors.push(tensor_ref);
+		}
+		for node in &mut nodes.vec {
+			if node.merge_group < compact_ids.len() {
+				node.merge_group = compact_ids[node.merge_group];
+			}
+		}
+	}
 }
 
 #[repr(transparent)]
@@ -145,13 +192,40 @@ impl<'a> NodeVec<'a> {
 		let mut processed = std::collections::HashMap::new();
 		let mut nodes = Self::with_capacity(32);
 		let mut roots = Vec::with_capacity(1);
-		let root = Self::__new_from_expr(&mut processed, &mut nodes, expr, &mut roots);
+		let mut merge_group_builder = MergeGroupBuilder::new();
+		let root = Self::__new_from_expr(
+			&mut processed,
+			&mut nodes,
+			expr,
+			&mut roots,
+			&mut merge_group_builder,
+		);
+		merge_group_builder.build(&mut nodes);
+		nodes.move_reduction_heads();
 		roots.push(root);
 		roots.sort();
 		roots.dedup();
 		roots.retain(|&r| nodes[r].parents.is_empty());
 		nodes.roots = roots;
 		nodes
+	}
+
+	fn move_reduction_heads(&mut self) {
+		for mut i in 0..self.vec.len() {
+			if !self.vec[i].is_reduction() {
+				continue;
+			}
+			self.vec[i].reduction_head = false;
+			while let [parent] = &self.vec[i].parents[..]
+				&& self.vec[parent.0].out_shape.last() == Some(&1)
+			{
+				// TODO - what to do when the node is bin with two reduction children?
+				// how do I even properly recignize that case?
+				// I cannot use reduction_count because we have DAG, not tree.
+				i = parent.0;
+			}
+			self.vec[i].reduction_head = true;
+		}
 	}
 
 	pub fn root_cnt(&self) -> usize {
@@ -162,12 +236,15 @@ impl<'a> NodeVec<'a> {
 		self.roots[i]
 	}
 
+	#[allow(clippy::too_many_lines)]
+	#[allow(clippy::cast_possible_wrap)]
+	#[allow(clippy::collapsible_else_if)]
 	pub fn __new_from_expr(
 		processed: &mut std::collections::HashMap<ExprRef<'a>, NodeIndex>,
 		nodes: &mut NodeVec<'a>,
 		expr: &'a Expr,
 		roots: &mut Vec<NodeIndex>,
-		uf: &mut UnionFind,
+		merge_group_builder: &mut MergeGroupBuilder,
 	) -> NodeIndex {
 		fn add_child<'a>(nodes: &mut NodeVec<'a>, parent: NodeIndex, child: NodeIndex) {
 			nodes[parent].children.push(child);
@@ -181,16 +258,32 @@ impl<'a> NodeVec<'a> {
 
 		match expr {
 			Expr::Capture(capture) => {
-				let child = Self::__new_from_expr(processed, nodes, capture.expr.as_ref(), roots);
+				let child = Self::__new_from_expr(
+					processed,
+					nodes,
+					capture.expr.as_ref(),
+					roots,
+					merge_group_builder,
+				);
 				nodes[child].capture.push(capture.tensor_ref.clone());
 				processed.insert(expr_ref, child);
 				return child;
 			},
 			Expr::First(first) => {
-				let first_child =
-					Self::__new_from_expr(processed, nodes, first.lhs.as_ref(), roots);
-				let second_child =
-					Self::__new_from_expr(processed, nodes, first.rhs.as_ref(), roots);
+				let first_child = Self::__new_from_expr(
+					processed,
+					nodes,
+					first.lhs.as_ref(),
+					roots,
+					merge_group_builder,
+				);
+				let second_child = Self::__new_from_expr(
+					processed,
+					nodes,
+					first.rhs.as_ref(),
+					roots,
+					merge_group_builder,
+				);
 				processed.insert(expr_ref, first_child);
 				roots.push(second_child);
 				return first_child;
@@ -203,16 +296,16 @@ impl<'a> NodeVec<'a> {
 			parents: Vec::new(),
 			children: Vec::new(),
 			capture: Vec::new(),
-			scalar_used_by_nonscalar: false,
-			shape_group: usize::MAX,
+			merge_group: usize::MAX,
 			out_shape: Vec::new(),
 			out_is_scalar: false,
+			reduction_head: false,
 		});
 		processed.insert(expr_ref, index);
 		match expr {
 			Expr::Input(input) => match input {
 				ExprInput::Tensor(tensor_ref) => {
-					nodes[index].shape_group = uf.add();
+					nodes[index].merge_group = merge_group_builder.add(tensor_ref);
 					nodes[index].out_shape.clone_from(&tensor_ref.shape);
 				},
 				ExprInput::Scalar(..) => {
@@ -223,37 +316,108 @@ impl<'a> NodeVec<'a> {
 				unreachable!() // handled above
 			},
 			Expr::Cast(cast) => {
-				let child = Self::__new_from_expr(processed, nodes, cast.expr.as_ref(), roots, uf);
+				let child = Self::__new_from_expr(
+					processed,
+					nodes,
+					cast.expr.as_ref(),
+					roots,
+					merge_group_builder,
+				);
 				nodes[index].out_is_scalar = nodes[child].out_is_scalar;
-				nodes[index].out_shape.clone_from(&nodes[child].out_shape);
-				nodes[index].shape_group = nodes[child].shape_group;
+				nodes[index].out_shape = nodes[child].out_shape.clone();
+				nodes[index].merge_group = nodes[child].merge_group;
 				add_child(nodes, index, child);
 			},
 			Expr::Unary(unary) => {
-				let child = Self::__new_from_expr(processed, nodes, unary.expr.as_ref(), roots, uf);
+				let child = Self::__new_from_expr(
+					processed,
+					nodes,
+					unary.expr.as_ref(),
+					roots,
+					merge_group_builder,
+				);
 				nodes[index].out_is_scalar = nodes[child].out_is_scalar;
-				nodes[index].out_shape.clone_from(&nodes[child].out_shape);
-				nodes[index].shape_group = nodes[child].shape_group;
+				nodes[index].out_shape = nodes[child].out_shape.clone();
+				nodes[index].merge_group = nodes[child].merge_group;
 				add_child(nodes, index, child);
 			},
 			Expr::Binary(binary) => {
-				let left_child =
-					Self::__new_from_expr(processed, nodes, binary.lhs.as_ref(), roots, uf);
+				let left_child = Self::__new_from_expr(
+					processed,
+					nodes,
+					binary.lhs.as_ref(),
+					roots,
+					merge_group_builder,
+				);
 				add_child(nodes, index, left_child);
-				let right_child =
-					Self::__new_from_expr(processed, nodes, binary.rhs.as_ref(), roots, uf);
+				let right_child = Self::__new_from_expr(
+					processed,
+					nodes,
+					binary.rhs.as_ref(),
+					roots,
+					merge_group_builder,
+				);
 				add_child(nodes, index, right_child);
-				let out_is_scalar =
-					nodes[left_child].out_is_scalar && nodes[right_child].out_is_scalar;
-				nodes[index].out_is_scalar = out_is_scalar;
-				if !out_is_scalar {
-					// TODO - out_shape, shape_group
+				if nodes[left_child].out_is_scalar {
+					nodes[index].out_is_scalar = nodes[right_child].out_is_scalar;
+					if !nodes[index].out_is_scalar {
+						nodes[index].out_is_scalar = false;
+						nodes[index].out_shape = nodes[right_child].out_shape.clone();
+						nodes[index].merge_group = nodes[right_child].merge_group;
+					}
+				} else {
+					nodes[index].out_is_scalar = false;
+					if nodes[right_child].out_is_scalar {
+						nodes[index].out_shape = nodes[left_child].out_shape.clone();
+						nodes[index].merge_group = nodes[left_child].merge_group;
+					} else {
+						// shape group
+						nodes[index].merge_group = if (nodes[right_child].merge_group as isize) < 0
+						{
+							nodes[left_child].merge_group
+						} else if (nodes[left_child].merge_group as isize) < 0 {
+							nodes[right_child].merge_group
+						} else {
+							merge_group_builder.union(
+								nodes[left_child].merge_group,
+								nodes[right_child].merge_group,
+							)
+						};
+						// shape
+						let l1 = nodes[left_child].out_shape.len();
+						let l2 = nodes[right_child].out_shape.len();
+						for i in (1..=l1.min(l2)).rev() {
+							let d1 = nodes[left_child].out_shape[l1 - i];
+							let d2 = nodes[right_child].out_shape[l2 - i];
+							if d1 != d2 {
+								break;
+							}
+							nodes[index].out_shape.push(d1);
+						}
+						nodes[index].out_shape.reverse();
+					}
 				}
 			},
 			Expr::Reduction(reduction) => {
-				let child =
-					Self::__new_from_expr(processed, nodes, reduction.expr.as_ref(), roots, uf);
+				nodes[index].reduction_head = true;
+				let child = Self::__new_from_expr(
+					processed,
+					nodes,
+					reduction.expr.as_ref(),
+					roots,
+					merge_group_builder,
+				);
 				add_child(nodes, index, child);
+				nodes[index].out_is_scalar = nodes[child].out_is_scalar;
+				if !nodes[index].out_is_scalar {
+					nodes[index].merge_group = nodes[child].merge_group;
+					if nodes[child].out_shape.is_empty() {
+						nodes[index].out_shape.push(1);
+					} else {
+						nodes[index].out_shape = nodes[child].out_shape.clone();
+						*nodes[index].out_shape.last_mut().unwrap() = 1;
+					}
+				}
 			},
 		}
 		index
@@ -544,123 +708,6 @@ impl std::ops::Neg for RcExpr {
 }
 
 //--------------------------------------------------------------------------------------------------
-
-pub fn __calc_shape_groups(nodes: &mut NodeVec, node: NodeIndex, uf: &mut UnionFind) -> usize {
-	let out_shape_group = nodes[node].out_shape_group;
-	if out_shape_group != usize::MAX {
-		return out_shape_group; // already visited
-	}
-	match &nodes[node].expr {
-		Expr::Input(input) => match input {
-			ExprInput::Tensor(..) => {
-				unreachable!(); // shape group of tensor inputs should be set already
-			},
-			ExprInput::Scalar(..) => usize::MAX - 1,
-		},
-		Expr::Capture(..) | Expr::Cast(..) | Expr::Unary(..) => {
-			assert!(nodes[node].children.len() == 1);
-			let g = __calc_shape_groups(nodes, nodes[node].children[0], uf);
-			nodes[node].op_shape_group = g;
-			nodes[node].out_shape_group = g;
-			if g < uf.size() {
-				nodes[node].out_shape = nodes[nodes[node].children[0]].out_shape.clone();
-			}
-			g
-		},
-		Expr::Binary(..) => {
-			assert!(nodes[node].children.len() == 2);
-			let c1 = nodes[node].children[0];
-			let c2 = nodes[node].children[1];
-			let g1 = __calc_shape_groups(nodes, c1, uf);
-			let g2 = __calc_shape_groups(nodes, c2, uf);
-			let g = if g2 >= uf.size() {
-				nodes[c2].scalar_used_by_nonscalar = true;
-				if g1 < uf.size() {
-					nodes[node].out_shape = nodes[c1].out_shape.clone();
-				}
-				g1
-			} else if g1 >= uf.size() {
-				nodes[c1].scalar_used_by_nonscalar = true;
-				if g2 < uf.size() {
-					nodes[node].out_shape = nodes[c2].out_shape.clone();
-				}
-				g2
-			} else {
-				let l1 = nodes[c1].out_shape.len();
-				let l2 = nodes[c2].out_shape.len();
-				for i in (1..=l1.min(l2)).rev() {
-					let d1 = nodes[c1].out_shape[l1 - i];
-					let d2 = nodes[c2].out_shape[l2 - i];
-					if d1 != d2 {
-						break;
-					}
-					nodes[node].out_shape.push(d1);
-				}
-				nodes[node].out_shape.reverse();
-				uf.union(g1, g2)
-			};
-			nodes[node].op_shape_group = g;
-			nodes[node].out_shape_group = g;
-			g
-		},
-		Expr::First(..) => {
-			unreachable!();
-		},
-		Expr::Reduction(..) => {
-			assert!(nodes[node].children.len() == 1);
-			let g1 = __calc_shape_groups(nodes, nodes[node].children[0], uf);
-			let g = usize::MAX - 1;
-			nodes[node].op_shape_group = g1;
-			nodes[node].out_shape_group = g;
-			g
-		},
-	}
-}
-
-pub fn calc_shape_groups(nodes: &mut NodeVec) {
-	let mut tensor_ref_map = std::collections::HashMap::new(); // *ExprTensorRef -> Index
-	let mut tensor_ref_vec = Vec::new(); // Index -> Rc<ExprTensorRef>
-	for node in &mut nodes.vec {
-		if let Expr::Input(ExprInput::Tensor(tensor_ref)) = &node.expr {
-			node.out_shape.clone_from(&tensor_ref.shape);
-			let tensor_ref = tensor_ref.clone();
-			let index = match tensor_ref_map.entry(std::ptr::from_ref(tensor_ref.as_ref())) {
-				std::collections::hash_map::Entry::Vacant(entry) => {
-					let index = tensor_ref_vec.len();
-					entry.insert(index);
-					tensor_ref_vec.push(tensor_ref);
-					index
-				},
-				std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
-			};
-			node.op_shape_group = index;
-			node.out_shape_group = index;
-		}
-	}
-	let mut uf = UnionFind::new(tensor_ref_vec.len());
-	for root in 0..nodes.root_cnt() {
-		__calc_shape_groups(nodes, nodes.root(root), &mut uf);
-	}
-	let (compact_ids, sets_cnt) = uf.compact_ids();
-	nodes.merge_groups = vec![MergeGroup { tensors: Vec::new() }; sets_cnt];
-	for (i, tensor_ref) in tensor_ref_vec.into_iter().enumerate() {
-		let group_id = compact_ids[i];
-		nodes.merge_groups[group_id].tensors.push(tensor_ref);
-	}
-	for node in &mut nodes.vec {
-		if node.op_shape_group < compact_ids.len() {
-			node.op_shape_group = compact_ids[node.op_shape_group];
-		}
-		if node.out_shape_group < compact_ids.len() {
-			node.out_shape_group = compact_ids[node.out_shape_group];
-		}
-	}
-}
-
-pub fn compile(expr: &Expr) {
-	let mut nodes = NodeVec::new_from_expr(expr);
-	calc_shape_groups(&mut nodes);
-}
 
 pub fn print_graphviz<'a, W: std::fmt::Write>(w: &mut W, nodes: &NodeVec<'a>) -> std::fmt::Result {
 	writeln!(w, "digraph G {{")?;

@@ -160,9 +160,7 @@ fn laplacian(v: &ArrayView2<f32>) -> Array2<f32> {
 }*/
 
 use x17ai::autograd::{AutogradTensor, LossFn};
-use x17ai::computation::expr::{
-	ExprScalarRef, ExprTensorRef, NodeVec, RcExpr, calc_shape_groups, print_graphviz,
-};
+use x17ai::computation::expr::{ExprScalarRef, ExprTensorRef, NodeVec, RcExpr, print_graphviz};
 use x17ai::nn::ModelContext;
 use x17ai::nn::fragments::linear::Linear;
 use x17ai::nn::fragments::softmax::{Softmax, SoftmaxGradMode};
@@ -256,7 +254,6 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 		new_value.capture(ExprTensorRef::new(Some("new_value".into()), f32::dtype, vec![]));
 
 	let mut nodes = NodeVec::new_from_expr(new_value.as_ref());
-	calc_shape_groups(&mut nodes);
 
 	let mut graphviz = String::new();
 	print_graphviz(&mut graphviz, &nodes);
