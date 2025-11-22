@@ -113,20 +113,20 @@ impl<'a> Node<'a> {
 			Expr::Input(input) => match input {
 				ExprInput::Tensor(tensor_ref) => {
 					if let Some(name) = &tensor_ref.name {
-						format!("<b>Tensor</b><br/><font color='blue'>{}</font>", name)
+						format!("<b>Tensor</b><br/><font color='blue'><b>{}</b></font>", name)
 					} else {
 						format!(
-							"<b>Tensor</b><br/><font color='blue'>{:?}</font>",
+							"<b>Tensor</b><br/><font color='blue'><b>{:?}</b></font>",
 							std::ptr::from_ref(tensor_ref.as_ref())
 						)
 					}
 				},
 				ExprInput::Scalar(scalar_ref) => {
 					if let Some(name) = &scalar_ref.name {
-						format!("<b>Scalar</b><br/><font color='blue'>{}</font>", name)
+						format!("<b>Scalar</b><br/><font color='blue'><b>{}</b></font>", name)
 					} else {
 						format!(
-							"<b>Scalar</b><br/><font color='blue'>{:?}</font>",
+							"<b>Scalar</b><br/><font color='blue'><b>{:?}</b></font>",
 							std::ptr::from_ref(scalar_ref.as_ref())
 						)
 					}
@@ -160,6 +160,14 @@ impl<'a> Node<'a> {
 		let result = self.children.is_empty();
 		debug_assert!(result == matches!(self.expr, Expr::Input(_)));
 		result
+	}
+
+	pub fn is_scalar_input(&self) -> bool {
+		matches!(self.expr, Expr::Input(ExprInput::Scalar(_)))
+	}
+
+	pub fn is_tensor_input(&self) -> bool {
+		matches!(self.expr, Expr::Input(ExprInput::Tensor(_)))
 	}
 
 	pub fn is_reduction(&self) -> bool {
@@ -509,7 +517,7 @@ impl<'a> NodeVec<'a> {
 					nodes[child].reduction_bitmap.clone_and_set(index.0);
 				nodes[index].out_is_scalar = nodes[child].out_is_scalar;
 				if !nodes[index].out_is_scalar {
-					nodes[index].merge_group = nodes[child].merge_group;
+					nodes[index].merge_group = usize::MAX;
 					if nodes[child].out_shape.is_empty() {
 						nodes[index].out_shape.push(1);
 					} else {
@@ -812,12 +820,20 @@ pub fn print_graphviz<'a, W: std::fmt::Write>(w: &mut W, nodes: &NodeVec<'a>) ->
 	writeln!(w, "digraph G {{")?;
 	writeln!(w, "\trankdir=BT;")?;
 	for (i, node) in nodes.vec.iter().enumerate() {
-		let extra_label = if node.is_fragment_head() {
-			format!("<br/>m-group: {}", node.merge_group)
+		let extra_label = if node.is_tensor_input() {
+			format!("<br/>group: {}", node.merge_group)
 		} else {
 			String::new()
 		};
 		writeln!(w, "\t\t{} [label=<{}{}>];", i, node.graphviz_label(), extra_label)?;
+		if node.is_input() {
+			writeln!(w, "\t{} [shape=box];", i)?;
+			if node.is_scalar_input() {
+				writeln!(w, "\t{} [style=filled, fillcolor=\"#ffffc0\"];", i)?;
+			} else {
+				writeln!(w, "\t{} [style=filled, fillcolor=\"#a0f0ff\"];", i)?;
+			}
+		}
 		if node.is_fork() {
 			writeln!(w, "\t{} [style=filled, fillcolor=\"#ffcccc\"];", i)?;
 		} else if node.is_reduction_head() {
