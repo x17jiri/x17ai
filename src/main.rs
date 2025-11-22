@@ -228,7 +228,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let m_decay_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("m_decay_coef".into())));
 	let m_update_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("m_update_coef".into())));
 
-	let m_decayed = m * m_decay_coef;
+	let m_decayed = (m * m_decay_coef).sum(); // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	let m_update = grad.clone() * m_update_coef;
 	let new_m = m_decayed + m_update;
 	let new_m = new_m.capture(ExprTensorRef::new(Some("new_m".into()), f32::dtype, vec![]));

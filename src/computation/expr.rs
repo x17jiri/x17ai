@@ -12,6 +12,7 @@
 #![allow(clippy::implicit_hasher)]
 #![allow(clippy::uninlined_format_args)]
 #![allow(clippy::missing_panics_doc)]
+#![allow(clippy::new_without_default)]
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -19,6 +20,77 @@ use std::rc::Rc;
 
 use crate::tensor::{DType, Tensor};
 use crate::util::union_find::UnionFind;
+
+//--------------------------------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub struct ReductionBitmap {
+	bitmap: Vec<u64>,
+}
+
+impl ReductionBitmap {
+	pub fn new() -> Self {
+		Self { bitmap: Vec::new() }
+	}
+
+	pub fn union<'a>(mut a: &'a ReductionBitmap, mut b: &'a ReductionBitmap) -> ReductionBitmap {
+		if a.bitmap.len() > b.bitmap.len() {
+			std::mem::swap(&mut a, &mut b);
+		}
+		let mut result = ReductionBitmap {
+			bitmap: Vec::with_capacity(b.bitmap.len()),
+		};
+		let ptr = result.bitmap.as_mut_ptr();
+		unsafe {
+			for i in 0..a.bitmap.len() {
+				ptr.add(i).write(*a.bitmap.get_unchecked(i) | *b.bitmap.get_unchecked(i));
+			}
+			for i in a.bitmap.len()..b.bitmap.len() {
+				ptr.add(i).write(*b.bitmap.get_unchecked(i));
+			}
+			result.bitmap.set_len(b.bitmap.len());
+		}
+		result
+	}
+
+	pub fn clone_and_set(&self, index: usize) -> ReductionBitmap {
+		let word_index = index / 64;
+		let bit_index = index % 64;
+		let min_len = word_index + 1;
+		let len = self.bitmap.len().max(min_len);
+		let mut result = ReductionBitmap { bitmap: Vec::with_capacity(len) };
+		let ptr = result.bitmap.as_mut_ptr();
+		unsafe {
+			for i in 0..self.bitmap.len() {
+				ptr.add(i).write(*self.bitmap.get_unchecked(i));
+			}
+			for i in self.bitmap.len()..len {
+				ptr.add(i).write(0);
+			}
+			*ptr.add(word_index) |= 1 << bit_index;
+			result.bitmap.set_len(len);
+		}
+		result
+	}
+
+	pub fn is_equal(&self, other: &ReductionBitmap) -> bool {
+		let (mut a, mut b) = (&self.bitmap[..], &other.bitmap[..]);
+		if a.len() > b.len() {
+			std::mem::swap(&mut a, &mut b);
+		}
+		for i in 0..a.len() {
+			if a[i] != b[i] {
+				return false;
+			}
+		}
+		for b in &b[a.len()..] {
+			if *b != 0 {
+				return false;
+			}
+		}
+		true
+	}
+}
 
 //--------------------------------------------------------------------------------------------------
 
@@ -32,6 +104,7 @@ pub struct Node<'a> {
 	pub out_shape: Vec<usize>,
 	pub out_is_scalar: bool,
 	pub reduction_head: bool,
+	pub reduction_bitmap: ReductionBitmap,
 }
 
 impl<'a> Node<'a> {
@@ -40,16 +113,22 @@ impl<'a> Node<'a> {
 			Expr::Input(input) => match input {
 				ExprInput::Tensor(tensor_ref) => {
 					if let Some(name) = &tensor_ref.name {
-						format!("Tensor\\n'{}'", name)
+						format!("<b>Tensor</b><br/><font color='blue'>{}</font>", name)
 					} else {
-						format!("Tensor\\n{:?}", std::ptr::from_ref(tensor_ref.as_ref()))
+						format!(
+							"<b>Tensor</b><br/><font color='blue'>{:?}</font>",
+							std::ptr::from_ref(tensor_ref.as_ref())
+						)
 					}
 				},
 				ExprInput::Scalar(scalar_ref) => {
 					if let Some(name) = &scalar_ref.name {
-						format!("Scalar\\n'{}'", name)
+						format!("<b>Scalar</b><br/><font color='blue'>{}</font>", name)
 					} else {
-						format!("Scalar\\n{:?}", std::ptr::from_ref(scalar_ref.as_ref()))
+						format!(
+							"<b>Scalar</b><br/><font color='blue'>{:?}</font>",
+							std::ptr::from_ref(scalar_ref.as_ref())
+						)
 					}
 				},
 			},
@@ -58,21 +137,21 @@ impl<'a> Node<'a> {
 			},
 			Expr::Cast(cast) => format!("Cast to {:?}", cast.dtype),
 			Expr::Unary(unary) => match unary.kind {
-				ExprUnaryKind::Neg => "Neg".to_string(),
-				ExprUnaryKind::Exp => "Exp".to_string(),
-				ExprUnaryKind::Ln => "Ln".to_string(),
-				ExprUnaryKind::Abs => "Abs".to_string(),
-				ExprUnaryKind::Sqrt => "Sqrt".to_string(),
-				ExprUnaryKind::Recip => "Recip".to_string(),
+				ExprUnaryKind::Neg => "<b>Neg</b>".to_string(),
+				ExprUnaryKind::Exp => "<b>Exp</b>".to_string(),
+				ExprUnaryKind::Ln => "<b>Ln</b>".to_string(),
+				ExprUnaryKind::Abs => "<b>Abs</b>".to_string(),
+				ExprUnaryKind::Sqrt => "<b>Sqrt</b>".to_string(),
+				ExprUnaryKind::Recip => "<b>Recip</b>".to_string(),
 			},
 			Expr::Binary(binary) => match binary.kind {
-				ExprBinaryKind::Add => "Add".to_string(),
-				ExprBinaryKind::Sub => "Sub".to_string(),
-				ExprBinaryKind::Mul => "Mul".to_string(),
+				ExprBinaryKind::Add => "<b>Add</b>".to_string(),
+				ExprBinaryKind::Sub => "<b>Sub</b>".to_string(),
+				ExprBinaryKind::Mul => "<b>Mul</b>".to_string(),
 			},
 			Expr::Reduction(reduction) => match reduction.kind {
-				ExprReductionKind::Sum => "Sum".to_string(),
-				ExprReductionKind::Max => "Max".to_string(),
+				ExprReductionKind::Sum => "<b>Sum</b>".to_string(),
+				ExprReductionKind::Max => "<b>Max</b>".to_string(),
 			},
 		}
 	}
@@ -87,13 +166,26 @@ impl<'a> Node<'a> {
 		matches!(self.expr, Expr::Reduction(_))
 	}
 
+	pub fn is_reduction_head(&self) -> bool {
+		self.reduction_head
+	}
+
+	pub fn is_captured(&self) -> bool {
+		!self.capture.is_empty()
+	}
+
+	pub fn is_fork(&self) -> bool {
+		// TODO - should check for duplicated parents
+		self.parents.len() != 1 && !self.is_input()
+	}
+
 	/// `fragment_head` is a node whose result we may have to store into a tensor.
 	//	#[allow(clippy::nonminimal_bool)]
 	#[rustfmt::skip]
 	pub fn is_fragment_head(&self) -> bool {
-		self.reduction_head
-		|| !self.capture.is_empty()
-		|| (self.parents.len() != 1 && !self.is_input())
+		self.is_reduction_head()
+		|| self.is_captured()
+		|| self.is_fork()
 	}
 
 	pub fn out_shape_as_str(&self) -> String {
@@ -101,7 +193,7 @@ impl<'a> Node<'a> {
 			String::new()
 		} else {
 			let dims: Vec<String> = self.out_shape.iter().map(|d| d.to_string()).collect();
-			format!("[{}]", dims.join(", "))
+			if dims.is_empty() { "[..]".to_string() } else { format!("[..,{}]", dims.join(", ")) }
 		}
 	}
 }
@@ -216,12 +308,10 @@ impl<'a> NodeVec<'a> {
 				continue;
 			}
 			self.vec[i].reduction_head = false;
-			while let [parent] = &self.vec[i].parents[..]
+			while let [parent] = &self.vec[i].parents[..] // has exactly one parent
 				&& self.vec[parent.0].out_shape.last() == Some(&1)
+				&& self.vec[i].reduction_bitmap.is_equal(&self.vec[parent.0].reduction_bitmap)
 			{
-				// TODO - what to do when the node is bin with two reduction children?
-				// how do I even properly recignize that case?
-				// I cannot use reduction_count because we have DAG, not tree.
 				i = parent.0;
 			}
 			self.vec[i].reduction_head = true;
@@ -300,6 +390,7 @@ impl<'a> NodeVec<'a> {
 			out_shape: Vec::new(),
 			out_is_scalar: false,
 			reduction_head: false,
+			reduction_bitmap: ReductionBitmap::new(),
 		});
 		processed.insert(expr_ref, index);
 		match expr {
@@ -326,6 +417,7 @@ impl<'a> NodeVec<'a> {
 				nodes[index].out_is_scalar = nodes[child].out_is_scalar;
 				nodes[index].out_shape = nodes[child].out_shape.clone();
 				nodes[index].merge_group = nodes[child].merge_group;
+				nodes[index].reduction_bitmap = nodes[child].reduction_bitmap.clone();
 				add_child(nodes, index, child);
 			},
 			Expr::Unary(unary) => {
@@ -339,6 +431,7 @@ impl<'a> NodeVec<'a> {
 				nodes[index].out_is_scalar = nodes[child].out_is_scalar;
 				nodes[index].out_shape = nodes[child].out_shape.clone();
 				nodes[index].merge_group = nodes[child].merge_group;
+				nodes[index].reduction_bitmap = nodes[child].reduction_bitmap.clone();
 				add_child(nodes, index, child);
 			},
 			Expr::Binary(binary) => {
@@ -358,6 +451,10 @@ impl<'a> NodeVec<'a> {
 					merge_group_builder,
 				);
 				add_child(nodes, index, right_child);
+				nodes[index].reduction_bitmap = ReductionBitmap::union(
+					&nodes[left_child].reduction_bitmap,
+					&nodes[right_child].reduction_bitmap,
+				);
 				if nodes[left_child].out_is_scalar {
 					nodes[index].out_is_scalar = nodes[right_child].out_is_scalar;
 					if !nodes[index].out_is_scalar {
@@ -408,6 +505,8 @@ impl<'a> NodeVec<'a> {
 					merge_group_builder,
 				);
 				add_child(nodes, index, child);
+				nodes[index].reduction_bitmap =
+					nodes[child].reduction_bitmap.clone_and_set(index.0);
 				nodes[index].out_is_scalar = nodes[child].out_is_scalar;
 				if !nodes[index].out_is_scalar {
 					nodes[index].merge_group = nodes[child].merge_group;
@@ -713,9 +812,20 @@ pub fn print_graphviz<'a, W: std::fmt::Write>(w: &mut W, nodes: &NodeVec<'a>) ->
 	writeln!(w, "digraph G {{")?;
 	writeln!(w, "\trankdir=BT;")?;
 	for (i, node) in nodes.vec.iter().enumerate() {
-		writeln!(w, "\t\t{} [label=\"{}\"];", i, node.graphviz_label())?;
-		if node.is_fragment_head() {
+		let extra_label = if node.is_fragment_head() {
+			format!("<br/>m-group: {}", node.merge_group)
+		} else {
+			String::new()
+		};
+		writeln!(w, "\t\t{} [label=<{}{}>];", i, node.graphviz_label(), extra_label)?;
+		if node.is_fork() {
 			writeln!(w, "\t{} [style=filled, fillcolor=\"#ffcccc\"];", i)?;
+		} else if node.is_reduction_head() {
+			writeln!(w, "\t{} [style=filled, fillcolor=\"#ccccff\"];", i)?;
+		} else if node.is_reduction() {
+			writeln!(w, "\t{} [style=filled, fillcolor=\"#f0f0ff\"];", i)?;
+		} else if node.is_captured() {
+			writeln!(w, "\t{} [style=filled, fillcolor=\"#ccffcc\"];", i)?;
 		}
 		for &child_index in &node.children {
 			let label = nodes[child_index].out_shape_as_str();
@@ -729,7 +839,7 @@ pub fn print_graphviz<'a, W: std::fmt::Write>(w: &mut W, nodes: &NodeVec<'a>) ->
 			};
 			writeln!(
 				w,
-				"\tcap_{} [label=\"{}\", shape=box];",
+				"\tcap_{} [label=\"{}\", shape=box, style=filled, fillcolor=\"#cceecc\"];",
 				std::ptr::from_ref(cap.as_ref()) as usize,
 				cap_label
 			)?;
