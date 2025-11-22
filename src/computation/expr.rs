@@ -94,6 +94,72 @@ impl ReductionBitmap {
 
 //--------------------------------------------------------------------------------------------------
 
+#[derive(Clone)]
+pub struct ShapeConstraint {
+	pub constraint: Vec<Option<usize>>,
+}
+
+impl ShapeConstraint {
+	pub fn new() -> Self {
+		Self { constraint: Vec::new() }
+	}
+
+	pub fn as_str(&self) -> String {
+		let dims: Vec<String> = self
+			.constraint
+			.iter()
+			.map(|d| match d {
+				Some(d) => d.to_string(),
+				None => "-".to_string(),
+			})
+			.collect();
+		if dims.is_empty() { "[..]".to_string() } else { format!("[..,{}]", dims.join(", ")) }
+	}
+
+	pub fn last(&self) -> Option<usize> {
+		match self.constraint.last() {
+			Some(d) => *d,
+			None => None,
+		}
+	}
+
+	pub fn set_last(&mut self, value: Option<usize>) {
+		if let Some(last) = self.constraint.last_mut() {
+			*last = value;
+		} else if value.is_some() {
+			self.constraint.push(value);
+		}
+	}
+
+	pub fn merge(a: &ShapeConstraint, b: &ShapeConstraint) -> ShapeConstraint {
+		let mut result = ShapeConstraint::new();
+		let (l1, l2) = (a.constraint.len(), b.constraint.len());
+		for i in 1..=l1.min(l2) {
+			let d1 = a.constraint[l1 - i];
+			let d2 = b.constraint[l2 - i];
+			result.constraint.push(
+				//
+				if let Some(d1) = d1 {
+					if let Some(d2) = d2 {
+						if d1 == d2 {
+							Some(d1) //
+						} else {
+							None //
+						}
+					} else {
+						Some(d1)
+					}
+				} else {
+					d2
+				},
+			);
+		}
+		result
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
 pub struct Node<'a> {
 	pub expr: &'a Expr,
 	pub parents: Vec<NodeIndex>,
@@ -101,7 +167,7 @@ pub struct Node<'a> {
 	pub capture: Vec<Rc<ExprTensorRef>>,
 
 	pub merge_group: usize,
-	pub out_shape: Vec<usize>,
+	pub out_shape: ShapeConstraint,
 	pub out_is_scalar: bool,
 	pub reduction_head: bool,
 	pub reduction_bitmap: ReductionBitmap,
@@ -194,15 +260,6 @@ impl<'a> Node<'a> {
 		self.is_reduction_head()
 		|| self.is_captured()
 		|| self.is_fork()
-	}
-
-	pub fn out_shape_as_str(&self) -> String {
-		if self.out_is_scalar {
-			String::new()
-		} else {
-			let dims: Vec<String> = self.out_shape.iter().map(|d| d.to_string()).collect();
-			if dims.is_empty() { "[..]".to_string() } else { format!("[..,{}]", dims.join(", ")) }
-		}
 	}
 }
 
@@ -317,7 +374,7 @@ impl<'a> NodeVec<'a> {
 			}
 			self.vec[i].reduction_head = false;
 			while let [parent] = &self.vec[i].parents[..] // has exactly one parent
-				&& self.vec[parent.0].out_shape.last() == Some(&1)
+				&& self.vec[parent.0].out_shape.last() == Some(1)
 				&& self.vec[i].reduction_bitmap.is_equal(&self.vec[parent.0].reduction_bitmap)
 			{
 				i = parent.0;
@@ -337,6 +394,8 @@ impl<'a> NodeVec<'a> {
 	#[allow(clippy::too_many_lines)]
 	#[allow(clippy::cast_possible_wrap)]
 	#[allow(clippy::collapsible_else_if)]
+	#[allow(clippy::manual_assert)]
+	#[allow(clippy::panic)]
 	pub fn __new_from_expr(
 		processed: &mut std::collections::HashMap<ExprRef<'a>, NodeIndex>,
 		nodes: &mut NodeVec<'a>,
@@ -363,6 +422,8 @@ impl<'a> NodeVec<'a> {
 					roots,
 					merge_group_builder,
 				);
+				nodes[child].out_shape = TODO TODO TODO // TODO
+					ShapeConstraint::merge(&nodes[child].out_shape, &capture.tensor_ref.shape);
 				nodes[child].capture.push(capture.tensor_ref.clone());
 				processed.insert(expr_ref, child);
 				return child;
@@ -395,7 +456,7 @@ impl<'a> NodeVec<'a> {
 			children: Vec::new(),
 			capture: Vec::new(),
 			merge_group: usize::MAX,
-			out_shape: Vec::new(),
+			out_shape: ShapeConstraint::new(),
 			out_is_scalar: false,
 			reduction_head: false,
 			reduction_bitmap: ReductionBitmap::new(),
@@ -489,17 +550,10 @@ impl<'a> NodeVec<'a> {
 							)
 						};
 						// shape
-						let l1 = nodes[left_child].out_shape.len();
-						let l2 = nodes[right_child].out_shape.len();
-						for i in (1..=l1.min(l2)).rev() {
-							let d1 = nodes[left_child].out_shape[l1 - i];
-							let d2 = nodes[right_child].out_shape[l2 - i];
-							if d1 != d2 {
-								break;
-							}
-							nodes[index].out_shape.push(d1);
-						}
-						nodes[index].out_shape.reverse();
+						nodes[index].out_shape = ShapeConstraint::merge(
+							&nodes[left_child].out_shape,
+							&nodes[right_child].out_shape,
+						);
 					}
 				}
 			},
@@ -518,12 +572,7 @@ impl<'a> NodeVec<'a> {
 				nodes[index].out_is_scalar = nodes[child].out_is_scalar;
 				if !nodes[index].out_is_scalar {
 					nodes[index].merge_group = usize::MAX;
-					if nodes[child].out_shape.is_empty() {
-						nodes[index].out_shape.push(1);
-					} else {
-						nodes[index].out_shape = nodes[child].out_shape.clone();
-						*nodes[index].out_shape.last_mut().unwrap() = 1;
-					}
+					nodes[child].out_shape.set_last(Some(1));
 				}
 			},
 		}
@@ -593,7 +642,7 @@ pub enum ExprInput {
 pub struct ExprTensorRef {
 	pub tensor: RefCell<Option<Tensor>>,
 	pub dtype: DType,
-	pub shape: Vec<usize>,
+	pub shape: ShapeConstraint,
 	pub name: Option<Cow<'static, str>>,
 }
 
@@ -664,7 +713,9 @@ impl ExprTensorRef {
 		Rc::new(ExprTensorRef {
 			tensor: RefCell::new(None),
 			dtype,
-			shape,
+			shape: ShapeConstraint {
+				constraint: shape.into_iter().map(|d| Some(d)).collect(),
+			},
 			name,
 		})
 	}
@@ -844,18 +895,21 @@ pub fn print_graphviz<'a, W: std::fmt::Write>(w: &mut W, nodes: &NodeVec<'a>) ->
 			writeln!(w, "\t{} [style=filled, fillcolor=\"#ccffcc\"];", i)?;
 		}
 		for &child_index in &node.children {
-			let label = nodes[child_index].out_shape_as_str();
+			let label = nodes[child_index].out_shape.as_str();
 			writeln!(w, "\t{} -> {} [label=\"{}\"];", child_index.0, i, label)?;
 		}
 		for cap in &node.capture {
 			let cap_label = if let Some(name) = &cap.name {
-				format!("Capture '{}'", name)
+				format!("<b>Capture</b><br/><font color='blue'><b>{}</b></font>", name)
 			} else {
-				format!("Capture {:?}", std::ptr::from_ref(cap.as_ref()))
+				format!(
+					"<b>Capture</b><br/><font color='blue'><b>{:?}</b></font>",
+					std::ptr::from_ref(cap.as_ref())
+				)
 			};
 			writeln!(
 				w,
-				"\tcap_{} [label=\"{}\", shape=box, style=filled, fillcolor=\"#cceecc\"];",
+				"\tcap_{} [label=<{}>, shape=box, style=filled, fillcolor=\"#cceecc\"];",
 				std::ptr::from_ref(cap.as_ref()) as usize,
 				cap_label
 			)?;
