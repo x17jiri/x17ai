@@ -212,6 +212,7 @@ pub struct Node<'a> {
 	pub out_is_scalar: bool,
 	pub reduction_head: bool,
 	pub reduction_bitmap: ReductionBitmap,
+	pub fragment: NodeIndex,
 }
 
 impl<'a> Node<'a> {
@@ -299,7 +300,6 @@ impl<'a> Node<'a> {
 	#[rustfmt::skip]
 	pub fn is_fragment_head(&self) -> bool {
 		self.is_reduction_head()
-		|| self.is_captured()
 		|| self.is_fork()
 	}
 }
@@ -361,10 +361,21 @@ impl MergeGroupBuilder {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeIndex(usize);
 
+impl NodeIndex {
+	pub fn invalid() -> Self {
+		NodeIndex(usize::MAX)
+	}
+
+	pub fn is_valid(&self) -> bool {
+		(self.0 as isize) >= 0
+	}
+}
+
 pub struct NodeVec<'a> {
 	vec: Vec<Node<'a>>,
 	roots: Vec<NodeIndex>,
 	merge_groups: Vec<MergeGroup>,
+	fragments: Vec<NodeIndex>,
 }
 
 impl<'a> NodeVec<'a> {
@@ -373,6 +384,7 @@ impl<'a> NodeVec<'a> {
 			vec: Vec::with_capacity(capacity),
 			roots: Vec::new(),
 			merge_groups: Vec::new(),
+			fragments: Vec::new(),
 		}
 	}
 
@@ -405,6 +417,7 @@ impl<'a> NodeVec<'a> {
 		roots.dedup();
 		roots.retain(|&r| nodes[r].parents.is_empty());
 		nodes.roots = roots;
+		nodes.mark_fragments();
 		nodes
 	}
 
@@ -421,6 +434,31 @@ impl<'a> NodeVec<'a> {
 				i = parent.0;
 			}
 			self.vec[i].reduction_head = true;
+		}
+	}
+
+	fn __mark_fragments(&mut self, mut current: NodeIndex, node: NodeIndex) {
+		if self[node].is_input() {
+			return; // TODO - what to do when input is captured?
+		}
+		if self[node].is_fragment_head() {
+			if self[node].fragment.is_valid() {
+				return;
+			}
+			self.fragments.push(node);
+			current = node;
+		} else {
+			assert!(!self[node].fragment.is_valid());
+		}
+		self[node].fragment = current;
+		for i in 0..self[node].children.len() {
+			self.__mark_fragments(current, self[node].children[i]);
+		}
+	}
+
+	fn mark_fragments(&mut self) {
+		for i in 0..self.roots.len() {
+			self.__mark_fragments(NodeIndex::invalid(), self.roots[i]);
 		}
 	}
 
@@ -502,6 +540,7 @@ impl<'a> NodeVec<'a> {
 			out_is_scalar: false,
 			reduction_head: false,
 			reduction_bitmap: ReductionBitmap::new(),
+			fragment: NodeIndex::invalid(),
 		});
 		processed.insert(expr_ref, index);
 		match expr {
@@ -947,13 +986,24 @@ pub fn print_graphviz<'a, W: std::fmt::Write>(w: &mut W, nodes: &NodeVec<'a>) ->
 		} else if node.is_captured() {
 			writeln!(w, "\t{} [style=filled, fillcolor=\"#ccffcc\"];", i)?;
 		}
+		if node.fragment.is_valid() {
+			writeln!(w, "subgraph cluster_{} {{ {} }}", node.fragment.0, i)?;
+		}
 		for &child_index in &node.children {
 			let label = if nodes[child_index].out_is_scalar {
 				String::new()
 			} else {
 				nodes[child_index].out_shape.as_str()
 			};
-			writeln!(w, "\t{} -> {} [label=\"{}\"];", child_index.0, i, label)?;
+			let extra_style = if node.fragment.is_valid()
+				&& nodes[child_index].fragment.is_valid()
+				&& node.fragment != nodes[child_index].fragment
+			{
+				", color=red, style=bold"
+			} else {
+				""
+			};
+			writeln!(w, "\t{} -> {} [label=\"{}\"{}];", child_index.0, i, label, extra_style)?;
 		}
 		for cap in &node.capture {
 			let cap_label = if let Some(name) = &cap.name {
@@ -971,6 +1021,14 @@ pub fn print_graphviz<'a, W: std::fmt::Write>(w: &mut W, nodes: &NodeVec<'a>) ->
 				cap_label
 			)?;
 			writeln!(w, "\t{} -> cap_{};", i, std::ptr::from_ref(cap.as_ref()) as usize,)?;
+			if node.fragment.is_valid() {
+				writeln!(
+					w,
+					"subgraph cluster_{} {{ cap_{} }}",
+					node.fragment.0,
+					std::ptr::from_ref(cap.as_ref()) as usize
+				)?;
+			}
 		}
 	}
 	writeln!(w, "}}")?;
