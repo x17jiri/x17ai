@@ -251,6 +251,7 @@ impl<'a> Node<'a> {
 				ExprUnaryKind::Abs => "<b>Abs</b>".to_string(),
 				ExprUnaryKind::Sqrt => "<b>Sqrt</b>".to_string(),
 				ExprUnaryKind::Recip => "<b>Recip</b>".to_string(),
+				ExprUnaryKind::Identity => "<b>Identity</b>".to_string(),
 			},
 			Expr::Binary(binary) => match binary.kind {
 				ExprBinaryKind::Add => "<b>Add</b>".to_string(),
@@ -504,7 +505,11 @@ impl<'a> NodeVec<'a> {
 				let capture_shape_constraint = capture.tensor_ref.shape_constraint();
 				nodes[child].out_shape =
 					ShapeConstraint::union(&nodes[child].out_shape, &capture_shape_constraint);
-				nodes[child].capture.push(capture.tensor_ref.clone());
+				if nodes[child].is_input() {
+					// TODO
+				} else {
+					nodes[child].capture.push(capture.tensor_ref.clone());
+				}
 				processed.insert(expr_ref, child);
 				return child;
 			},
@@ -756,6 +761,7 @@ pub enum ExprUnaryKind {
 	Abs,
 	Sqrt,
 	Recip,
+	Identity,
 }
 
 pub struct ExprFirst {

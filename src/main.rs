@@ -225,6 +225,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 		RcExpr::new_tensor_input(ExprTensorRef::new(Some("grad".into()), f32::dtype, vec![]));
 
 	let m = RcExpr::new_tensor_input(ExprTensorRef::new(Some("m".into()), f32::dtype, vec![]));
+	let m = m.capture(ExprTensorRef::new(Some("m_captured".into()), f32::dtype, vec![]));
 	let m_decay_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("m_decay_coef".into())));
 	let m_update_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("m_update_coef".into())));
 
