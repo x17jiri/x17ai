@@ -95,8 +95,14 @@ impl ReductionBitmap {
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
+pub struct DimConstraint {
+	pub source: String,
+	pub size: usize,
+}
+
+#[derive(Clone)]
 pub struct ShapeConstraint {
-	pub constraint: Vec<Option<usize>>,
+	pub constraint: Vec<Option<DimConstraint>>,
 }
 
 impl ShapeConstraint {
@@ -108,22 +114,23 @@ impl ShapeConstraint {
 		let dims: Vec<String> = self
 			.constraint
 			.iter()
+			.skip_while(|d| d.is_none())
 			.map(|d| match d {
-				Some(d) => d.to_string(),
+				Some(d) => d.size.to_string(),
 				None => "-".to_string(),
 			})
 			.collect();
-		if dims.is_empty() { "[..]".to_string() } else { format!("[..,{}]", dims.join(", ")) }
+		if dims.is_empty() { "[..]".to_string() } else { format!("[..,{}]", dims.join(",")) }
 	}
 
 	pub fn last(&self) -> Option<usize> {
 		match self.constraint.last() {
-			Some(d) => *d,
+			Some(d) => d.as_ref().map(|d| d.size),
 			None => None,
 		}
 	}
 
-	pub fn set_last(&mut self, value: Option<usize>) {
+	pub fn set_last(&mut self, value: Option<DimConstraint>) {
 		if let Some(last) = self.constraint.last_mut() {
 			*last = value;
 		} else if value.is_some() {
@@ -131,26 +138,60 @@ impl ShapeConstraint {
 		}
 	}
 
-	pub fn merge(a: &ShapeConstraint, b: &ShapeConstraint) -> ShapeConstraint {
+	// Result dimension will be constrained only if both `a` and `b` have the same constraint.
+	pub fn intersection(a: &ShapeConstraint, b: &ShapeConstraint) -> ShapeConstraint {
 		let mut result = ShapeConstraint::new();
 		let (l1, l2) = (a.constraint.len(), b.constraint.len());
-		for i in 1..=l1.min(l2) {
-			let d1 = a.constraint[l1 - i];
-			let d2 = b.constraint[l2 - i];
+		for i in (1..=l1.min(l2)).rev() {
+			let d1 = &a.constraint[l1 - i];
+			let d2 = &b.constraint[l2 - i];
 			result.constraint.push(
 				//
 				if let Some(d1) = d1 {
 					if let Some(d2) = d2 {
-						if d1 == d2 {
-							Some(d1) //
+						if d1.size == d2.size {
+							Some(DimConstraint {
+								source: format!("{} & {}", d1.source, d2.source),
+								size: d1.size,
+							})
 						} else {
 							None //
 						}
 					} else {
-						Some(d1)
+						Some(d1.clone())
 					}
 				} else {
-					d2
+					d2.clone()
+				},
+			);
+		}
+		result
+	}
+
+	// Result dimension will be constrained if either `a` or `b` has the constraint.
+	pub fn union(a: &ShapeConstraint, b: &ShapeConstraint) -> ShapeConstraint {
+		let mut result = ShapeConstraint::new();
+		let (l1, l2) = (a.constraint.len(), b.constraint.len());
+		for i in (1..=l1.max(l2)).rev() {
+			let d1 = a.constraint.get(l1.wrapping_sub(i)).unwrap_or(&None);
+			let d2 = b.constraint.get(l2.wrapping_sub(i)).unwrap_or(&None);
+			result.constraint.push(
+				//
+				if let Some(d1) = d1 {
+					if let Some(d2) = d2 {
+						if d1.size == d2.size {
+							Some(DimConstraint {
+								source: format!("{} & {}", d1.source, d2.source),
+								size: d1.size,
+							})
+						} else {
+							panic!("ShapeConstraint::union(): conflicting dimension constraints. Dimension -{}. Sizes: {} vs {}. The value {} comes from '{}'; the value {} comes from '{}'.", i, d1.size, d2.size, d1.size, d1.source, d2.size, d2.source);
+						}
+					} else {
+						Some(d1.clone())
+					}
+				} else {
+					d2.clone()
 				},
 			);
 		}
@@ -422,8 +463,9 @@ impl<'a> NodeVec<'a> {
 					roots,
 					merge_group_builder,
 				);
-				nodes[child].out_shape = TODO TODO TODO // TODO
-					ShapeConstraint::merge(&nodes[child].out_shape, &capture.tensor_ref.shape);
+				let capture_shape_constraint = capture.tensor_ref.shape_constraint();
+				nodes[child].out_shape =
+					ShapeConstraint::union(&nodes[child].out_shape, &capture_shape_constraint);
 				nodes[child].capture.push(capture.tensor_ref.clone());
 				processed.insert(expr_ref, child);
 				return child;
@@ -466,7 +508,7 @@ impl<'a> NodeVec<'a> {
 			Expr::Input(input) => match input {
 				ExprInput::Tensor(tensor_ref) => {
 					nodes[index].merge_group = merge_group_builder.add(tensor_ref);
-					nodes[index].out_shape.clone_from(&tensor_ref.shape);
+					nodes[index].out_shape = tensor_ref.shape_constraint();
 				},
 				ExprInput::Scalar(..) => {
 					nodes[index].out_is_scalar = true;
@@ -550,7 +592,7 @@ impl<'a> NodeVec<'a> {
 							)
 						};
 						// shape
-						nodes[index].out_shape = ShapeConstraint::merge(
+						nodes[index].out_shape = ShapeConstraint::intersection(
 							&nodes[left_child].out_shape,
 							&nodes[right_child].out_shape,
 						);
@@ -572,7 +614,9 @@ impl<'a> NodeVec<'a> {
 				nodes[index].out_is_scalar = nodes[child].out_is_scalar;
 				if !nodes[index].out_is_scalar {
 					nodes[index].merge_group = usize::MAX;
-					nodes[child].out_shape.set_last(Some(1));
+					nodes[index]
+						.out_shape
+						.set_last(Some(DimConstraint { source: "reduction".to_string(), size: 1 }));
 				}
 			},
 		}
@@ -642,7 +686,7 @@ pub enum ExprInput {
 pub struct ExprTensorRef {
 	pub tensor: RefCell<Option<Tensor>>,
 	pub dtype: DType,
-	pub shape: ShapeConstraint,
+	pub shape_constraint: Vec<usize>,
 	pub name: Option<Cow<'static, str>>,
 }
 
@@ -713,11 +757,20 @@ impl ExprTensorRef {
 		Rc::new(ExprTensorRef {
 			tensor: RefCell::new(None),
 			dtype,
-			shape: ShapeConstraint {
-				constraint: shape.into_iter().map(|d| Some(d)).collect(),
-			},
+			shape_constraint: shape,
 			name,
 		})
+	}
+
+	pub fn shape_constraint(&self) -> ShapeConstraint {
+		let source = if let Some(name) = &self.name { name.as_ref() } else { "unnamed tensor" };
+		ShapeConstraint {
+			constraint: self
+				.shape_constraint
+				.iter()
+				.map(|&d| Some(DimConstraint { source: source.to_string(), size: d }))
+				.collect(),
+		}
 	}
 }
 
@@ -895,7 +948,11 @@ pub fn print_graphviz<'a, W: std::fmt::Write>(w: &mut W, nodes: &NodeVec<'a>) ->
 			writeln!(w, "\t{} [style=filled, fillcolor=\"#ccffcc\"];", i)?;
 		}
 		for &child_index in &node.children {
-			let label = nodes[child_index].out_shape.as_str();
+			let label = if nodes[child_index].out_is_scalar {
+				String::new()
+			} else {
+				nodes[child_index].out_shape.as_str()
+			};
 			writeln!(w, "\t{} -> {} [label=\"{}\"];", child_index.0, i, label)?;
 		}
 		for cap in &node.capture {
@@ -913,12 +970,7 @@ pub fn print_graphviz<'a, W: std::fmt::Write>(w: &mut W, nodes: &NodeVec<'a>) ->
 				std::ptr::from_ref(cap.as_ref()) as usize,
 				cap_label
 			)?;
-			writeln!(
-				w,
-				"\t{} -> cap_{} [style=dashed];",
-				i,
-				std::ptr::from_ref(cap.as_ref()) as usize,
-			)?;
+			writeln!(w, "\t{} -> cap_{};", i, std::ptr::from_ref(cap.as_ref()) as usize,)?;
 		}
 	}
 	writeln!(w, "}}")?;
