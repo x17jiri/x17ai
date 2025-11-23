@@ -254,7 +254,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let new_value =
 		new_value.capture(ExprTensorRef::new(Some("new_value".into()), f32::dtype, vec![]));
 
-	let mut nodes = NodeVec::new_from_expr(new_value.as_ref());
+	let mut nodes = NodeVec::new_from_expr(new_value);
 
 	let mut graphviz = String::new();
 	print_graphviz(&mut graphviz, &nodes);
