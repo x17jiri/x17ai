@@ -160,7 +160,7 @@ fn laplacian(v: &ArrayView2<f32>) -> Array2<f32> {
 }*/
 
 use x17ai::autograd::{AutogradTensor, LossFn};
-use x17ai::computation::expr::{ExprScalarRef, ExprTensorRef, NodeVec, RcExpr, print_graphviz};
+use x17ai::computation::expr::{Compilation, ExprScalarRef, ExprTensorRef, RcExpr};
 use x17ai::nn::ModelContext;
 use x17ai::nn::fragments::linear::Linear;
 use x17ai::nn::fragments::softmax::{Softmax, SoftmaxGradMode};
@@ -221,8 +221,10 @@ unsafe extern "C" {
 }
 
 fn main() -> Result<(), ErrPack<TensorOpError>> {
-	let grad =
-		RcExpr::new_tensor_input(ExprTensorRef::new(Some("grad".into()), f32::dtype, vec![]));
+	let grad_tensor_ref = ExprTensorRef::new(Some("grad".into()), f32::dtype, vec![]);
+	let grad1 = RcExpr::new_tensor_input(grad_tensor_ref.clone());
+	let grad2 = RcExpr::new_tensor_input(grad_tensor_ref.clone());
+	let grad3 = RcExpr::new_tensor_input(grad_tensor_ref.clone());
 
 	let m = RcExpr::new_tensor_input(ExprTensorRef::new(Some("m".into()), f32::dtype, vec![]));
 	let m = m.capture(ExprTensorRef::new(Some("m_captured".into()), f32::dtype, vec![]));
@@ -230,7 +232,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let m_update_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("m_update_coef".into())));
 
 	let m_decayed = (m * m_decay_coef); //.max(); // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-	let m_update = grad.clone() * m_update_coef;
+	let m_update = grad1.clone() * m_update_coef;
 	let new_m = m_decayed + m_update;
 	let new_m = new_m.capture(ExprTensorRef::new(Some("new_m".into()), f32::dtype, vec![]));
 
@@ -239,7 +241,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let v_update_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("v_update_coef".into())));
 
 	let v_decayed = v * v_decay_coef;
-	let v_update = (grad.clone() * grad).sum() * v_update_coef;
+	let v_update = (grad2.clone() * grad3).sum() * v_update_coef;
 	let new_v = v_decayed + v_update;
 	let new_v = new_v.capture(ExprTensorRef::new(Some("new_v".into()), f32::dtype, vec![1]));
 
@@ -254,10 +256,10 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let new_value =
 		new_value.capture(ExprTensorRef::new(Some("new_value".into()), f32::dtype, vec![]));
 
-	let mut nodes = NodeVec::new_from_expr(new_value);
+	let mut comp = Compilation::new_from_expr(new_value);
 
 	let mut graphviz = String::new();
-	print_graphviz(&mut graphviz, &nodes);
+	comp.print_graphviz(&mut graphviz);
 	println!("{}", graphviz);
 	/*
 	let inp = RcExpr::new_tensor_input(f32::dtype, "inp".into());
