@@ -236,14 +236,15 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let new_m = m_decayed + m_update;
 	let new_m = new_m.capture(ExprTensorRef::new(Some("new_m".into()), f32::dtype, vec![]));
 
-	let v = RcExpr::new_tensor_input(ExprTensorRef::new(Some("v".into()), f32::dtype, vec![1]));
+	let v_ten = ExprTensorRef::new(Some("v".into()), f32::dtype, vec![1]);
+	let v = RcExpr::new_tensor_input(v_ten.clone());
 	let v_decay_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("v_decay_coef".into())));
 	let v_update_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("v_update_coef".into())));
 
 	let v_decayed = v * v_decay_coef;
 	let v_update = (grad2.clone() * grad3).sum() * v_update_coef;
 	let new_v = v_decayed + v_update;
-	let new_v = new_v.capture(ExprTensorRef::new(Some("new_v".into()), f32::dtype, vec![1]));
+	let new_v = new_v.capture(v_ten);
 
 	let eps = RcExpr::new_scalar_input(ExprScalarRef::new(Some("eps".into())));
 	let v_rsqrt = (new_v.sqrt() + eps).recip();

@@ -343,18 +343,12 @@ impl MergeGroupBuilder {
 		self.union_find.union(index0, index1)
 	}
 
-	pub fn build(self, compilation: &mut Compilation) {
+	pub fn finish(mut self) -> (std::collections::HashMap<*const ExprTensorRef, usize>, usize) {
 		let (compact_ids, sets_cnt) = self.union_find.compact_ids();
-		compilation.merge_groups = vec![MergeGroup { tensors: Vec::new() }; sets_cnt];
-		for (i, tensor_ref) in self.tensor_ref_vec.into_iter().enumerate() {
-			let group_id = compact_ids[i];
-			compilation.merge_groups[group_id].tensors.push(tensor_ref);
+		for i in self.tensor_ref_map.values_mut() {
+			*i = compact_ids[*i];
 		}
-		for node in &mut compilation.nodes {
-			if node.merge_group < compact_ids.len() {
-				node.merge_group = compact_ids[node.merge_group];
-			}
-		}
+		(self.tensor_ref_map, sets_cnt)
 	}
 }
 
@@ -433,6 +427,7 @@ pub struct Compilation {
 	tensor_inputs: std::collections::HashMap<*const ExprTensorRef, NodeIndex>,
 	scalar_inputs: std::collections::HashMap<*const ExprScalarRef, NodeIndex>,
 	merge_group_builder: Option<MergeGroupBuilder>,
+	tensor_refs: std::collections::HashMap<*const ExprTensorRef, usize>,
 }
 
 impl Compilation {
@@ -447,9 +442,10 @@ impl Compilation {
 			tensor_inputs: std::collections::HashMap::new(),
 			scalar_inputs: std::collections::HashMap::new(),
 			merge_group_builder: Some(MergeGroupBuilder::new()),
+			tensor_refs: std::collections::HashMap::new(),
 		};
 		let root = compilation.__new_from_expr(expr.rc_expr);
-		compilation.merge_group_builder.take().unwrap().build(&mut compilation);
+		compilation.build_merge_groups();
 		compilation.move_reduction_heads();
 		compilation.roots.push(root);
 		compilation.roots.sort();
@@ -457,6 +453,20 @@ impl Compilation {
 		compilation.roots.retain(|&r| compilation.nodes[r].parents.is_empty());
 		compilation.mark_fragments();
 		compilation
+	}
+
+	fn build_merge_groups(&mut self) {
+		let (tensor_refs, sets_cnt) = self.merge_group_builder.take().unwrap().finish();
+		self.merge_groups = vec![MergeGroup { tensors: Vec::new() }; sets_cnt];
+		for (i, tensor_ref) in self.merge_group_builder.tensor_ref_vec.iter().enumerate() {
+			let group_id = compact_ids[i];
+			self.merge_groups[group_id].tensors.push(tensor_ref);
+		}
+		for node in &mut self.nodes {
+			if node.merge_group < compact_ids.len() {
+				node.merge_group = compact_ids[node.merge_group];
+			}
+		}
 	}
 
 	fn move_reduction_heads(&mut self) {
@@ -699,31 +709,34 @@ impl Compilation {
 		writeln!(w, "digraph G {{")?;
 		writeln!(w, "\trankdir=BT;")?;
 		for (i, node) in self.nodes.vec.iter().enumerate() {
-			let extra_label = if node.is_tensor_input() {
-				format!("<br/>group: {}", node.merge_group)
+			let (extra_label, node_id);
+			if let Expr::Input(ExprInput::Tensor(tensor_ref)) = node.expr.as_ref() {
+				extra_label = format!("<br/>group: {}", node.merge_group);
+				node_id = format!("ten_{}", std::ptr::from_ref(tensor_ref.as_ref()) as usize);
 			} else {
-				String::new()
-			};
-			writeln!(w, "\t\t{} [label=<{}{}>];", i, node.graphviz_label(), extra_label)?;
+				extra_label = String::new();
+				node_id = format!("{}", i);
+			}
+			writeln!(w, "\t\t{node_id} [label=<{}{extra_label}>];", node.graphviz_label())?;
 			if node.is_input() {
-				writeln!(w, "\t{} [shape=box];", i)?;
+				writeln!(w, "\t{node_id} [shape=box];")?;
 				if node.is_scalar_input() {
-					writeln!(w, "\t{} [style=filled, fillcolor=\"#ffffc0\"];", i)?;
+					writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ffffc0\"];")?;
 				} else {
-					writeln!(w, "\t{} [style=filled, fillcolor=\"#a0f0ff\"];", i)?;
+					writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#cceecc\"];")?;
 				}
 			}
 			if node.is_fork() {
-				writeln!(w, "\t{} [style=filled, fillcolor=\"#ffcccc\"];", i)?;
+				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ffcccc\"];")?;
 			} else if node.is_reduction_head() {
-				writeln!(w, "\t{} [style=filled, fillcolor=\"#ccccff\"];", i)?;
+				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccccff\"];")?;
 			} else if node.is_reduction() {
-				writeln!(w, "\t{} [style=filled, fillcolor=\"#f0f0ff\"];", i)?;
+				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#f0f0ff\"];")?;
 			} else if node.is_captured() {
-				writeln!(w, "\t{} [style=filled, fillcolor=\"#ccffcc\"];", i)?;
+				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccffcc\"];")?;
 			}
 			if node.fragment.is_valid() {
-				writeln!(w, "subgraph cluster_{} {{ {} }}", node.fragment.0, i)?;
+				writeln!(w, "subgraph cluster_{} {{ {node_id} }}", node.fragment.0)?;
 			}
 			for &child_index in &node.children {
 				let label = if self.nodes[child_index].out_is_scalar {
@@ -739,7 +752,11 @@ impl Compilation {
 				} else {
 					""
 				};
-				writeln!(w, "\t{} -> {} [label=\"{}\"{}];", child_index.0, i, label, extra_style)?;
+				writeln!(
+					w,
+					"\t{} -> {node_id} [label=\"{}\"{}];",
+					child_index.0, label, extra_style
+				)?;
 			}
 			for cap in &node.capture {
 				let cap_label = if let Some(name) = &cap.name {
@@ -756,7 +773,7 @@ impl Compilation {
 					std::ptr::from_ref(cap.as_ref()) as usize,
 					cap_label
 				)?;
-				writeln!(w, "\t{} -> cap_{};", i, std::ptr::from_ref(cap.as_ref()) as usize,)?;
+				writeln!(w, "\t{node_id} -> cap_{};", std::ptr::from_ref(cap.as_ref()) as usize)?;
 				if node.fragment.is_valid() {
 					writeln!(
 						w,
