@@ -13,6 +13,7 @@
 #![allow(clippy::uninlined_format_args)]
 #![allow(clippy::missing_panics_doc)]
 #![allow(clippy::new_without_default)]
+#![allow(clippy::cast_possible_wrap)]
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -310,48 +311,6 @@ pub struct MergeGroup {
 	pub tensors: Vec<Rc<ExprTensorRef>>,
 }
 
-pub struct MergeGroupBuilder {
-	tensor_ref_map: std::collections::HashMap<*const ExprTensorRef, usize>, // *ExprTensorRef -> Index
-	tensor_ref_vec: Vec<Rc<ExprTensorRef>>, // Index -> Rc<ExprTensorRef>
-	union_find: UnionFind,
-}
-
-impl MergeGroupBuilder {
-	pub fn new() -> Self {
-		Self {
-			tensor_ref_map: std::collections::HashMap::new(),
-			tensor_ref_vec: Vec::new(),
-			union_find: UnionFind::new(0),
-		}
-	}
-
-	pub fn add(&mut self, tensor_ref: &Rc<ExprTensorRef>) -> usize {
-		let key = std::ptr::from_ref(tensor_ref.as_ref());
-		match self.tensor_ref_map.entry(key) {
-			std::collections::hash_map::Entry::Vacant(entry) => {
-				let index = self.tensor_ref_vec.len();
-				entry.insert(index);
-				self.tensor_ref_vec.push(tensor_ref.clone());
-				self.union_find.add();
-				index
-			},
-			std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
-		}
-	}
-
-	pub fn union(&mut self, index0: usize, index1: usize) -> usize {
-		self.union_find.union(index0, index1)
-	}
-
-	pub fn finish(mut self) -> (std::collections::HashMap<*const ExprTensorRef, usize>, usize) {
-		let (compact_ids, sets_cnt) = self.union_find.compact_ids();
-		for i in self.tensor_ref_map.values_mut() {
-			*i = compact_ids[*i];
-		}
-		(self.tensor_ref_map, sets_cnt)
-	}
-}
-
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeIndex(usize);
@@ -424,10 +383,10 @@ pub struct Compilation {
 	fragments: Vec<NodeIndex>,
 
 	processed: std::collections::HashMap<*const Expr, NodeIndex>,
-	tensor_inputs: std::collections::HashMap<*const ExprTensorRef, NodeIndex>,
-	scalar_inputs: std::collections::HashMap<*const ExprScalarRef, NodeIndex>,
-	merge_group_builder: Option<MergeGroupBuilder>,
-	tensor_refs: std::collections::HashMap<*const ExprTensorRef, usize>,
+	scalar_ref_map: std::collections::HashMap<*const ExprScalarRef, Rc<ExprScalarRef>>,
+	tensor_ref_map: std::collections::HashMap<*const ExprTensorRef, usize>, // *ExprTensorRef -> Index
+	tensor_ref_vec: Vec<Rc<ExprTensorRef>>, // Index -> Rc<ExprTensorRef>
+	merge_group_builder: Option<UnionFind>,
 }
 
 impl Compilation {
@@ -439,10 +398,10 @@ impl Compilation {
 			fragments: Vec::new(),
 
 			processed: std::collections::HashMap::new(),
-			tensor_inputs: std::collections::HashMap::new(),
-			scalar_inputs: std::collections::HashMap::new(),
-			merge_group_builder: Some(MergeGroupBuilder::new()),
-			tensor_refs: std::collections::HashMap::new(),
+			scalar_ref_map: std::collections::HashMap::new(),
+			tensor_ref_map: std::collections::HashMap::new(),
+			tensor_ref_vec: Vec::new(),
+			merge_group_builder: Some(UnionFind::new(0)),
 		};
 		let root = compilation.__new_from_expr(expr.rc_expr);
 		compilation.build_merge_groups();
@@ -455,17 +414,54 @@ impl Compilation {
 		compilation
 	}
 
-	fn build_merge_groups(&mut self) {
-		let (tensor_refs, sets_cnt) = self.merge_group_builder.take().unwrap().finish();
-		self.merge_groups = vec![MergeGroup { tensors: Vec::new() }; sets_cnt];
-		for (i, tensor_ref) in self.merge_group_builder.tensor_ref_vec.iter().enumerate() {
-			let group_id = compact_ids[i];
-			self.merge_groups[group_id].tensors.push(tensor_ref);
+	fn add_scalar_ref(&mut self, scalar_ref: Rc<ExprScalarRef>) {
+		let key = std::ptr::from_ref(scalar_ref.as_ref());
+		match self.scalar_ref_map.entry(key) {
+			std::collections::hash_map::Entry::Vacant(entry) => {
+				entry.insert(scalar_ref);
+			},
+			_ => {},
 		}
-		for node in &mut self.nodes {
-			if node.merge_group < compact_ids.len() {
-				node.merge_group = compact_ids[node.merge_group];
+	}
+
+	fn add_tensor_ref(&mut self, tensor_ref: Rc<ExprTensorRef>) -> usize {
+		let key = std::ptr::from_ref(tensor_ref.as_ref());
+		match self.tensor_ref_map.entry(key) {
+			std::collections::hash_map::Entry::Vacant(entry) => {
+				let index = self.tensor_ref_vec.len();
+				entry.insert(index);
+				self.tensor_ref_vec.push(tensor_ref);
+				self.merge_group_builder.as_mut().unwrap().add();
+				index
+			},
+			std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+		}
+	}
+
+	fn build_merge_groups(&mut self) {
+		let (compact_ids, mut sets_cnt) = self.merge_group_builder.take().unwrap().compact_ids();
+		let mut counts = vec![0_usize; sets_cnt];
+		for &group_id in &compact_ids {
+			counts[group_id] += 1;
+		}
+		sets_cnt = 0;
+		for count in &mut counts {
+			if *count > 1 {
+				*count = sets_cnt;
+				sets_cnt += 1;
+			} else {
+				*count = usize::MAX;
 			}
+		}
+		self.merge_groups = vec![MergeGroup { tensors: Vec::new() }; sets_cnt];
+		for i in 0..compact_ids.len() {
+			let group_id = compact_ids[i];
+			let group_id = counts[group_id];
+			if (group_id as isize) >= 0 {
+				self.merge_groups[group_id].tensors.push(self.tensor_ref_vec[i].clone());
+			}
+			let tensor_key = std::ptr::from_ref(self.tensor_ref_vec[i].as_ref());
+			self.tensor_ref_map.insert(tensor_key, group_id);
 		}
 	}
 
@@ -525,7 +521,6 @@ impl Compilation {
 	}
 
 	#[allow(clippy::too_many_lines)]
-	#[allow(clippy::cast_possible_wrap)]
 	#[allow(clippy::collapsible_else_if)]
 	#[allow(clippy::manual_assert)]
 	#[allow(clippy::panic)]
@@ -538,7 +533,9 @@ impl Compilation {
 		match expr.as_ref() {
 			Expr::Capture(capture) => {
 				let child = self.__new_from_expr(capture.expr.clone());
-				let capture_shape_constraint = capture.tensor_ref.shape_constraint();
+				let tensor_ref = capture.tensor_ref.clone();
+				let capture_shape_constraint = tensor_ref.shape_constraint();
+				self.add_tensor_ref(tensor_ref.clone());
 				self.nodes[child].out_shape =
 					ShapeConstraint::union(&self.nodes[child].out_shape, &capture_shape_constraint);
 				if self.nodes[child].is_input() {
@@ -559,10 +556,10 @@ impl Compilation {
 						fragment: NodeIndex::invalid(),
 					});
 					self.add_child(id, child);
-					self.nodes[id].capture.push(capture.tensor_ref.clone());
+					self.nodes[id].capture.push(tensor_ref);
 					self.roots.push(id);
 				} else {
-					self.nodes[child].capture.push(capture.tensor_ref.clone());
+					self.nodes[child].capture.push(tensor_ref);
 				}
 				self.processed.insert(expr_key, child);
 				return child;
@@ -574,26 +571,8 @@ impl Compilation {
 				self.roots.push(second_child);
 				return first_child;
 			},
-			Expr::Input(input) => match input {
-				ExprInput::Tensor(tensor_ref) => {
-					if let Some(index) =
-						self.tensor_inputs.get(&std::ptr::from_ref(tensor_ref.as_ref()))
-					{
-						self.processed.insert(expr_key, *index);
-						return *index;
-					}
-				},
-				ExprInput::Scalar(scalar_ref) => {
-					if let Some(index) =
-						self.scalar_inputs.get(&std::ptr::from_ref(scalar_ref.as_ref()))
-					{
-						self.processed.insert(expr_key, *index);
-						return *index;
-					}
-				},
-			},
 			_ => {},
-		};
+		}
 
 		let index = self.nodes.add_node(Node {
 			expr,
@@ -612,14 +591,14 @@ impl Compilation {
 		match expr_ref {
 			Expr::Input(input) => match input {
 				ExprInput::Tensor(tensor_ref) => {
-					self.tensor_inputs.insert(std::ptr::from_ref(tensor_ref.as_ref()), index);
-					let merge_group = self.merge_group_builder.as_mut().unwrap().add(tensor_ref);
+					let tensor_ref = tensor_ref.clone();
 					let shape_constraint = tensor_ref.shape_constraint();
-					self.nodes[index].merge_group = merge_group;
+					let merge_group = self.add_tensor_ref(tensor_ref);
 					self.nodes[index].out_shape = shape_constraint;
+					self.nodes[index].merge_group = merge_group;
 				},
 				ExprInput::Scalar(scalar_ref) => {
-					self.scalar_inputs.insert(std::ptr::from_ref(scalar_ref.as_ref()), index);
+					self.add_scalar_ref(scalar_ref.clone());
 					self.nodes[index].out_is_scalar = true;
 				},
 			},
@@ -705,27 +684,35 @@ impl Compilation {
 		index
 	}
 
-	pub fn print_graphviz<'a, W: std::fmt::Write>(&self, w: &mut W) -> std::fmt::Result {
+	fn graphviz_tensor_id(&self, tensor_ref: &Rc<ExprTensorRef>) -> String {
+		format!("ten_{}", std::ptr::from_ref(tensor_ref.as_ref()) as usize)
+	}
+
+	fn graphviz_scalar_id(&self, scalar_ref: &Rc<ExprScalarRef>) -> String {
+		format!("sca_{}", std::ptr::from_ref(scalar_ref.as_ref()) as usize)
+	}
+
+	fn graphviz_node_id(&self, node_index: NodeIndex) -> String {
+		match self.nodes[node_index].expr.as_ref() {
+			Expr::Input(ExprInput::Tensor(tensor_ref)) => self.graphviz_tensor_id(tensor_ref),
+			Expr::Input(ExprInput::Scalar(scalar_ref)) => self.graphviz_scalar_id(scalar_ref),
+			_ => {
+				format!("expr_{}", node_index.0)
+			},
+		}
+	}
+
+	pub fn print_graphviz<W: std::fmt::Write>(&self, w: &mut W) -> std::fmt::Result {
 		writeln!(w, "digraph G {{")?;
 		writeln!(w, "\trankdir=BT;")?;
-		for (i, node) in self.nodes.vec.iter().enumerate() {
-			let (extra_label, node_id);
-			if let Expr::Input(ExprInput::Tensor(tensor_ref)) = node.expr.as_ref() {
-				extra_label = format!("<br/>group: {}", node.merge_group);
-				node_id = format!("ten_{}", std::ptr::from_ref(tensor_ref.as_ref()) as usize);
-			} else {
-				extra_label = String::new();
-				node_id = format!("{}", i);
+		for i in self.nodes.indexes() {
+			let node = &self.nodes[i];
+			let node_id = self.graphviz_node_id(i);
+			let extra_label = "";
+			if node.is_input() {
+				continue;
 			}
 			writeln!(w, "\t\t{node_id} [label=<{}{extra_label}>];", node.graphviz_label())?;
-			if node.is_input() {
-				writeln!(w, "\t{node_id} [shape=box];")?;
-				if node.is_scalar_input() {
-					writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ffffc0\"];")?;
-				} else {
-					writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#cceecc\"];")?;
-				}
-			}
 			if node.is_fork() {
 				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ffcccc\"];")?;
 			} else if node.is_reduction_head() {
@@ -739,6 +726,7 @@ impl Compilation {
 				writeln!(w, "subgraph cluster_{} {{ {node_id} }}", node.fragment.0)?;
 			}
 			for &child_index in &node.children {
+				let child_id = self.graphviz_node_id(child_index);
 				let label = if self.nodes[child_index].out_is_scalar {
 					String::new()
 				} else {
@@ -752,37 +740,45 @@ impl Compilation {
 				} else {
 					""
 				};
-				writeln!(
-					w,
-					"\t{} -> {node_id} [label=\"{}\"{}];",
-					child_index.0, label, extra_style
-				)?;
+				writeln!(w, "\t{child_id} -> {node_id} [label=\"{}\"{}];", label, extra_style)?;
 			}
 			for cap in &node.capture {
-				let cap_label = if let Some(name) = &cap.name {
-					format!("<b>Capture</b><br/><font color='blue'><b>{}</b></font>", name)
-				} else {
-					format!(
-						"<b>Capture</b><br/><font color='blue'><b>{:?}</b></font>",
-						std::ptr::from_ref(cap.as_ref())
-					)
-				};
-				writeln!(
-					w,
-					"\tcap_{} [label=<{}>, shape=box, style=filled, fillcolor=\"#cceecc\"];",
-					std::ptr::from_ref(cap.as_ref()) as usize,
-					cap_label
-				)?;
-				writeln!(w, "\t{node_id} -> cap_{};", std::ptr::from_ref(cap.as_ref()) as usize)?;
-				if node.fragment.is_valid() {
-					writeln!(
-						w,
-						"subgraph cluster_{} {{ cap_{} }}",
-						node.fragment.0,
-						std::ptr::from_ref(cap.as_ref()) as usize
-					)?;
-				}
+				let label =
+					if node.out_is_scalar { String::new() } else { node.out_shape.as_str() };
+				let cap_id = self.graphviz_tensor_id(cap);
+				writeln!(w, "\t{node_id} -> {cap_id} [label=\"{label}\"];")?;
 			}
+		}
+		for tensor_ref in &self.tensor_ref_vec {
+			let tensor_key = std::ptr::from_ref(tensor_ref.as_ref());
+			let merge_group = *self.tensor_ref_map.get(&tensor_key).unwrap_or(&usize::MAX);
+			let extra_label = if (merge_group as isize) >= 0 {
+				format!("<br/>group: {merge_group}")
+			} else {
+				String::new()
+			};
+			let id = self.graphviz_tensor_id(tensor_ref);
+			let tensor_name = if let Some(name) = &tensor_ref.name {
+				name.as_ref().to_string()
+			} else {
+				format!("{:?}", std::ptr::from_ref(tensor_ref.as_ref()))
+			};
+			writeln!(
+				w,
+				"\t{id} [label=<<b>Tensor</b><br/><font color='blue'><b>{tensor_name}</b></font>{extra_label}>, shape=box, style=filled, fillcolor=\"#cceecc\"];",
+			)?;
+		}
+		for scalar_ref in self.scalar_ref_map.values() {
+			let id = self.graphviz_scalar_id(scalar_ref);
+			let label = if let Some(name) = &scalar_ref.name {
+				name.to_string()
+			} else {
+				format!("{:?}", std::ptr::from_ref(scalar_ref.as_ref()))
+			};
+			writeln!(
+				w,
+				"\t\t{id} [label=<{label}>, shape=box, style=filled, fillcolor=\"#ffffc0\"];"
+			)?;
 		}
 		writeln!(w, "}}")?;
 		Ok(())

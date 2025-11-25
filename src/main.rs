@@ -221,22 +221,25 @@ unsafe extern "C" {
 }
 
 fn main() -> Result<(), ErrPack<TensorOpError>> {
-	let grad_tensor_ref = ExprTensorRef::new(Some("grad".into()), f32::dtype, vec![]);
-	let grad1 = RcExpr::new_tensor_input(grad_tensor_ref.clone());
-	let grad2 = RcExpr::new_tensor_input(grad_tensor_ref.clone());
-	let grad3 = RcExpr::new_tensor_input(grad_tensor_ref.clone());
+	let v_ten = ExprTensorRef::new(Some("v".into()), f32::dtype, vec![1]);
+	let m_ten = ExprTensorRef::new(Some("m".into()), f32::dtype, vec![]);
+	let grad_ten = ExprTensorRef::new(Some("grad".into()), f32::dtype, vec![]);
+	let value_ten = ExprTensorRef::new(Some("value".into()), f32::dtype, vec![]);
 
-	let m = RcExpr::new_tensor_input(ExprTensorRef::new(Some("m".into()), f32::dtype, vec![]));
-	let m = m.capture(ExprTensorRef::new(Some("m_captured".into()), f32::dtype, vec![]));
+	let grad1 = RcExpr::new_tensor_input(grad_ten.clone());
+	let grad2 = RcExpr::new_tensor_input(grad_ten.clone());
+	let grad3 = RcExpr::new_tensor_input(grad_ten.clone());
+
+	let m = RcExpr::new_tensor_input(m_ten.clone());
+	//let m = m.capture(ExprTensorRef::new(Some("m_captured".into()), f32::dtype, vec![]));
 	let m_decay_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("m_decay_coef".into())));
 	let m_update_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("m_update_coef".into())));
 
 	let m_decayed = (m * m_decay_coef); //.max(); // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	let m_update = grad1.clone() * m_update_coef;
 	let new_m = m_decayed + m_update;
-	let new_m = new_m.capture(ExprTensorRef::new(Some("new_m".into()), f32::dtype, vec![]));
+	let new_m = new_m.capture(m_ten);
 
-	let v_ten = ExprTensorRef::new(Some("v".into()), f32::dtype, vec![1]);
 	let v = RcExpr::new_tensor_input(v_ten.clone());
 	let v_decay_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("v_decay_coef".into())));
 	let v_update_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("v_update_coef".into())));
@@ -249,13 +252,11 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let eps = RcExpr::new_scalar_input(ExprScalarRef::new(Some("eps".into())));
 	let v_rsqrt = (new_v.sqrt() + eps).recip();
 
-	let value =
-		RcExpr::new_tensor_input(ExprTensorRef::new(Some("value".into()), f32::dtype, vec![]));
+	let value = RcExpr::new_tensor_input(value_ten.clone());
 	let update_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("update_coef".into())));
 	let update = new_m * v_rsqrt;
 	let new_value = value + update * update_coef;
-	let new_value =
-		new_value.capture(ExprTensorRef::new(Some("new_value".into()), f32::dtype, vec![]));
+	let new_value = new_value.capture(value_ten.clone());
 
 	let mut comp = Compilation::new_from_expr(new_value);
 
