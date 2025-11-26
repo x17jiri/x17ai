@@ -160,7 +160,7 @@ fn laplacian(v: &ArrayView2<f32>) -> Array2<f32> {
 }*/
 
 use x17ai::autograd::{AutogradTensor, LossFn};
-use x17ai::computation::expr::{Compilation, ExprScalarRef, ExprTensorRef, RcExpr};
+use x17ai::computation::expr::{ExprScalarRef, ExprTensorRef, RcExpr};
 use x17ai::nn::ModelContext;
 use x17ai::nn::fragments::linear::Linear;
 use x17ai::nn::fragments::softmax::{Softmax, SoftmaxGradMode};
@@ -255,10 +255,11 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let value = RcExpr::new_tensor_input(value_ten.clone());
 	let update_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("update_coef".into())));
 	let update = new_m * v_rsqrt;
-	let new_value = value + update * update_coef;
+	let new_value = value + update.clone() * update_coef;
 	let new_value = new_value.capture(value_ten.clone());
+	let new_value = new_value.clone() + update.sqrt();
 
-	let mut comp = Compilation::new_from_expr(new_value);
+	let mut comp = new_value.compile();
 
 	let mut graphviz = String::new();
 	comp.print_graphviz(&mut graphviz);
