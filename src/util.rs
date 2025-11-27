@@ -11,6 +11,7 @@ pub mod hasher;
 pub mod intrusive_ref_cell;
 //pub mod thin_rc; - TODO
 pub mod ffi_buffer;
+pub mod index_vec;
 pub mod intrusive_rc;
 pub mod union_find;
 pub mod universal_range;

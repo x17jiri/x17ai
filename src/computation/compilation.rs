@@ -11,7 +11,9 @@ use crate::computation::expr::{
 	Expr, ExprBinaryKind, ExprInput, ExprReductionKind, ExprScalarRef, ExprTensorRef, ExprUnary,
 	ExprUnaryKind, RcExpr,
 };
+use crate::define_index_type;
 use crate::tensor::HasDType;
+use crate::util::index_vec::IndexVec;
 use crate::util::union_find::UnionFind;
 
 //--------------------------------------------------------------------------------------------------
@@ -303,76 +305,21 @@ pub struct MergeGroup {
 	pub tensors: Vec<Rc<ExprTensorRef>>,
 }
 
-#[repr(transparent)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct NodeIndex(usize);
+define_index_type!(NodeIndex);
+type NodeVec = IndexVec<NodeIndex, Node>;
 
-impl NodeIndex {
-	pub fn invalid() -> Self {
-		NodeIndex(usize::MAX)
-	}
-
-	pub fn is_valid(&self) -> bool {
-		(self.0 as isize) >= 0
-	}
+pub struct Fragment {
+	pub head: NodeIndex,
 }
 
-pub struct NodeVec {
-	vec: Vec<Node>,
-}
-
-impl NodeVec {
-	pub fn add_node(&mut self, node: Node) -> NodeIndex {
-		let index = NodeIndex(self.vec.len());
-		self.vec.push(node);
-		index
-	}
-
-	pub fn get(&self, index: NodeIndex) -> &Node {
-		&self.vec[index.0]
-	}
-
-	pub fn indexes(&self) -> impl Iterator<Item = NodeIndex> + use<> {
-		let len = self.vec.len();
-		(0..len).map(NodeIndex)
-	}
-}
-
-impl std::ops::Index<NodeIndex> for NodeVec {
-	type Output = Node;
-
-	fn index(&self, index: NodeIndex) -> &Node {
-		&self.vec[index.0]
-	}
-}
-
-impl std::ops::IndexMut<NodeIndex> for NodeVec {
-	fn index_mut(&mut self, index: NodeIndex) -> &mut Node {
-		&mut self.vec[index.0]
-	}
-}
-
-impl<'a> IntoIterator for &'a NodeVec {
-	type Item = &'a Node;
-	type IntoIter = std::slice::Iter<'a, Node>;
-	fn into_iter(self) -> Self::IntoIter {
-		self.vec.iter()
-	}
-}
-
-impl<'a> IntoIterator for &'a mut NodeVec {
-	type Item = &'a mut Node;
-	type IntoIter = std::slice::IterMut<'a, Node>;
-	fn into_iter(self) -> Self::IntoIter {
-		self.vec.iter_mut()
-	}
-}
+define_index_type!(FragmentIndex);
+type FragmentVec = IndexVec<FragmentIndex, Fragment>;
 
 pub struct Compilation {
 	nodes: NodeVec,
 	roots: Vec<NodeIndex>,
 	merge_groups: Vec<MergeGroup>,
-	fragments: Vec<NodeIndex>,
+	fragments: FragmentVec,
 
 	processed: std::collections::HashMap<*const Expr, NodeIndex>,
 	scalar_ref_map: std::collections::HashMap<*const ExprScalarRef, Rc<ExprScalarRef>>,
@@ -382,12 +329,12 @@ pub struct Compilation {
 }
 
 impl Compilation {
-	pub fn new_from_expr(expr: RcExpr) -> Compilation {
+	pub fn new_from_expr(expr: RcExpr) -> Self {
 		let mut compilation = Self {
-			nodes: NodeVec { vec: Vec::with_capacity(32) },
+			nodes: NodeVec::with_capacity(32),
 			roots: Vec::with_capacity(1),
 			merge_groups: Vec::new(),
-			fragments: Vec::new(),
+			fragments: FragmentVec::new(),
 
 			processed: std::collections::HashMap::new(),
 			scalar_ref_map: std::collections::HashMap::new(),
@@ -508,7 +455,7 @@ impl Compilation {
 			if self.nodes[node].fragment.is_valid() {
 				return;
 			}
-			self.fragments.push(node);
+			self.fragments.push(Fragment { head: node });
 			current = node;
 		} else {
 			assert!(!self.nodes[node].fragment.is_valid());
@@ -527,9 +474,9 @@ impl Compilation {
 
 	fn add_temp_captures(&mut self) {
 		let mut cnt = 0;
-		for i in 0..self.fragments.len() {
-			let f = self.fragments[i];
-			if self.nodes[f].is_captured() {
+		for i in self.fragments.indexes() {
+			let f = &self.fragments[i];
+			if self.nodes[f.head].is_captured() {
 				continue;
 			}
 			let tensor_ref = Rc::new(ExprTensorRef {
@@ -544,16 +491,8 @@ impl Compilation {
 			self.tensor_ref_map.insert(key, usize::MAX);
 			self.tensor_ref_vec.push(tensor_ref.clone());
 
-			self.nodes[f].capture.push(tensor_ref);
+			self.nodes[f.head].capture.push(tensor_ref);
 		}
-	}
-
-	pub fn root_cnt(&self) -> usize {
-		self.roots.len()
-	}
-
-	pub fn root(&self, i: usize) -> NodeIndex {
-		self.roots[i]
 	}
 
 	fn add_child(&mut self, parent: NodeIndex, child: NodeIndex) {
@@ -584,7 +523,7 @@ impl Compilation {
 						kind: ExprUnaryKind::Identity,
 						expr: self.nodes[child].expr.clone(),
 					}));
-					let id = self.nodes.add_node(Node {
+					let id = self.nodes.push(Node {
 						expr: id_expr,
 						parents: Vec::new(),
 						children: Vec::new(),
@@ -615,7 +554,7 @@ impl Compilation {
 			_ => {},
 		}
 
-		let index = self.nodes.add_node(Node {
+		let index = self.nodes.push(Node {
 			expr,
 			parents: Vec::new(),
 			children: Vec::new(),
