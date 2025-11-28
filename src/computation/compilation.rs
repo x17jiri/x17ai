@@ -326,9 +326,41 @@ pub struct Fragment {
 	pub head: NodeIndex,
 	pub reduction: NodeIndex,
 	pub depends_on: HashSet<FragmentIndex>,
-	pub scalar_inputs: HashMap<*const ExprScalarRef, usize>,
-	pub tensor_inputs: HashMap<*const ExprTensorRef, usize>,
-	pub tensor_outputs: HashMap<*const ExprTensorRef, usize>,
+	pub scalar_inputs_map: HashMap<*const ExprScalarRef, usize>,
+	pub scalar_inputs_vec: Vec<Rc<ExprScalarRef>>,
+	pub tensor_inputs_map: HashMap<*const ExprTensorRef, usize>,
+	pub tensor_inputs_vec: Vec<Rc<ExprTensorRef>>,
+	pub tensor_outputs_map: HashMap<*const ExprTensorRef, usize>,
+	pub tensor_outputs_vec: Vec<Rc<ExprTensorRef>>,
+}
+
+impl Fragment {
+	pub fn add_scalar_input(&mut self, scalar_ref: &Rc<ExprScalarRef>) {
+		let key = std::ptr::from_ref(scalar_ref.as_ref());
+		if let hash_map::Entry::Vacant(entry) = self.scalar_inputs_map.entry(key) {
+			let index = self.scalar_inputs_vec.len();
+			self.scalar_inputs_vec.push(scalar_ref.clone());
+			entry.insert(index);
+		}
+	}
+
+	pub fn add_tensor_input(&mut self, tensor_ref: &Rc<ExprTensorRef>) {
+		let key = std::ptr::from_ref(tensor_ref.as_ref());
+		if let hash_map::Entry::Vacant(entry) = self.tensor_inputs_map.entry(key) {
+			let index = self.tensor_inputs_vec.len();
+			self.tensor_inputs_vec.push(tensor_ref.clone());
+			entry.insert(index);
+		}
+	}
+
+	pub fn add_tensor_output(&mut self, tensor_ref: &Rc<ExprTensorRef>) {
+		let key = std::ptr::from_ref(tensor_ref.as_ref());
+		if let hash_map::Entry::Vacant(entry) = self.tensor_outputs_map.entry(key) {
+			let index = self.tensor_outputs_vec.len();
+			self.tensor_outputs_vec.push(tensor_ref.clone());
+			entry.insert(index);
+		}
+	}
 }
 
 define_index_type!(FragmentIndex);
@@ -464,54 +496,44 @@ impl Compilation {
 	}
 
 	fn __mark_fragments(&mut self, mut frag: FragmentIndex, node: NodeIndex) {
+		let is_root = !frag.is_valid();
 		if let Expr::Input(input) = self.nodes[node].expr.as_ref() {
+			assert!(!is_root);
 			match input {
 				ExprInput::Scalar(scalar_ref) => {
-					let key = std::ptr::from_ref(scalar_ref.as_ref());
-					let index = self.fragments[frag].scalar_inputs.len();
-					if let hash_map::Entry::Vacant(entry) =
-						self.fragments[frag].scalar_inputs.entry(key)
-					{
-						entry.insert(index);
-					}
+					self.fragments[frag].add_scalar_input(scalar_ref);
 				},
 				ExprInput::Tensor(tensor_ref) => {
-					let key = std::ptr::from_ref(tensor_ref.as_ref());
-					let index = self.fragments[frag].tensor_inputs.len();
-					if let hash_map::Entry::Vacant(entry) =
-						self.fragments[frag].tensor_inputs.entry(key)
-					{
-						entry.insert(index);
-					}
+					self.fragments[frag].add_tensor_input(tensor_ref);
 				},
 			}
 			return;
-		}
-		for i in 0..self.nodes[node].capture.len() {
-			let tensor_ref = &self.nodes[node].capture[i];
-			let key = std::ptr::from_ref(tensor_ref.as_ref());
-			let index = self.fragments[frag].tensor_outputs.len();
-			if let hash_map::Entry::Vacant(entry) = self.fragments[frag].tensor_outputs.entry(key) {
-				entry.insert(index);
-			}
 		}
 		if self.nodes[node].is_fragment_head() {
 			if self.nodes[node].fragment.is_valid() {
 				return;
 			}
 			let child_frag = self.fragments.push(Fragment {
-				is_root: false,
+				is_root,
 				head: node,
 				reduction: NodeIndex::invalid(),
 				depends_on: HashSet::new(),
-				scalar_inputs: HashMap::new(),
-				tensor_inputs: HashMap::new(),
-				tensor_outputs: HashMap::new(),
+				scalar_inputs_map: HashMap::new(),
+				scalar_inputs_vec: Vec::new(),
+				tensor_inputs_map: HashMap::new(),
+				tensor_inputs_vec: Vec::new(),
+				tensor_outputs_map: HashMap::new(),
+				tensor_outputs_vec: Vec::new(),
 			});
-			self.fragments[frag].depends_on.insert(child_frag);
+			if !is_root {
+				self.fragments[frag].depends_on.insert(child_frag);
+			}
 			frag = child_frag;
 		} else {
 			assert!(!self.nodes[node].fragment.is_valid());
+		}
+		for i in 0..self.nodes[node].capture.len() {
+			self.fragments[frag].add_tensor_output(&self.nodes[node].capture[i]);
 		}
 		if self.nodes[node].is_reduction() {
 			assert!(!self.fragments[frag].reduction.is_valid());
@@ -525,19 +547,7 @@ impl Compilation {
 
 	fn mark_fragments(&mut self) {
 		for i in 0..self.roots.len() {
-			let root = self.roots[i];
-			let root_frag = self.fragments.push(Fragment {
-				is_root: true,
-				head: root,
-				reduction: NodeIndex::invalid(),
-				depends_on: HashSet::new(),
-				scalar_inputs: HashMap::new(),
-				tensor_inputs: HashMap::new(),
-				tensor_outputs: HashMap::new(),
-			});
-			for i in 0..self.nodes[root].children.len() {
-				self.__mark_fragments(root_frag, self.nodes[root].children[i]);
-			}
+			self.__mark_fragments(FragmentIndex::invalid(), self.roots[i]);
 		}
 	}
 
