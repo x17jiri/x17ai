@@ -24,6 +24,7 @@ macro_rules! define_index_type {
 				$name(usize::MAX)
 			}
 
+			#[allow(clippy::cast_possible_wrap)]
 			pub fn is_valid(&self) -> bool {
 				(self.0 as isize) >= 0
 			}
@@ -48,6 +49,12 @@ pub struct IndexVec<Index: IndexTrait, T> {
 	_marker: std::marker::PhantomData<Index>,
 }
 
+impl<Index: IndexTrait, T> Default for IndexVec<Index, T> {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
 impl<Index: IndexTrait, T> IndexVec<Index, T> {
 	pub fn new() -> Self {
 		Self {
@@ -69,16 +76,29 @@ impl<Index: IndexTrait, T> IndexVec<Index, T> {
 		index
 	}
 
-	pub fn get(&self, index: Index) -> &T {
-		&self.raw[index.to_raw()]
-	}
-
 	pub fn indexes(&self) -> impl Iterator<Item = Index> + use<Index, T> {
 		let len = self.raw.len();
 		(0..len).map(Index::from_raw)
 	}
+
+	pub fn len(&self) -> usize {
+		self.raw.len()
+	}
+
+	pub fn is_empty(&self) -> bool {
+		self.raw.is_empty()
+	}
+
+	pub fn iter(&self) -> std::slice::Iter<'_, T> {
+		self.raw.iter()
+	}
+
+	pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
+		self.raw.iter_mut()
+	}
 }
 
+#[allow(clippy::indexing_slicing)]
 impl<Index: IndexTrait, T> std::ops::Index<Index> for IndexVec<Index, T> {
 	type Output = T;
 
@@ -87,6 +107,7 @@ impl<Index: IndexTrait, T> std::ops::Index<Index> for IndexVec<Index, T> {
 	}
 }
 
+#[allow(clippy::indexing_slicing)]
 impl<Index: IndexTrait, T> std::ops::IndexMut<Index> for IndexVec<Index, T> {
 	fn index_mut(&mut self, index: Index) -> &mut T {
 		&mut self.raw[index.to_raw()]

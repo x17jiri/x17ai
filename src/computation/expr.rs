@@ -73,6 +73,7 @@ pub struct ExprUnary {
 	pub expr: Rc<Expr>,
 }
 
+#[derive(Clone, Copy)]
 pub enum ExprUnaryKind {
 	Neg,
 	Exp,
@@ -94,6 +95,7 @@ pub struct ExprBinary {
 	pub rhs: Rc<Expr>,
 }
 
+#[derive(Clone, Copy)]
 pub enum ExprBinaryKind {
 	Add,
 	Sub,
@@ -105,6 +107,7 @@ pub struct ExprReduction {
 	pub expr: Rc<Expr>,
 }
 
+#[derive(Clone, Copy)]
 pub enum ExprReductionKind {
 	Sum,
 	Max,

@@ -5,6 +5,19 @@
 //
 //------------------------------------------------------------------------------
 
+#![allow(clippy::mutable_key_type)]
+#![allow(clippy::panic)]
+#![allow(clippy::unused_self)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::indexing_slicing)]
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::implicit_hasher)]
+#![allow(clippy::uninlined_format_args)]
+#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::new_without_default)]
+#![allow(clippy::cast_possible_wrap)]
+
+use std::collections::{HashMap, HashSet, hash_map};
 use std::rc::Rc;
 
 use crate::computation::expr::{
@@ -28,11 +41,11 @@ impl ReductionBitmap {
 		Self { bitmap: Vec::new() }
 	}
 
-	pub fn union<'a>(mut a: &'a ReductionBitmap, mut b: &'a ReductionBitmap) -> ReductionBitmap {
+	pub fn union<'a>(mut a: &'a Self, mut b: &'a Self) -> Self {
 		if a.bitmap.len() > b.bitmap.len() {
 			std::mem::swap(&mut a, &mut b);
 		}
-		let mut result = ReductionBitmap {
+		let mut result = Self {
 			bitmap: Vec::with_capacity(b.bitmap.len()),
 		};
 		let ptr = result.bitmap.as_mut_ptr();
@@ -48,12 +61,12 @@ impl ReductionBitmap {
 		result
 	}
 
-	pub fn clone_and_set(&self, index: usize) -> ReductionBitmap {
+	pub fn clone_and_set(&self, index: usize) -> Self {
 		let word_index = index / 64;
 		let bit_index = index % 64;
 		let min_len = word_index + 1;
 		let len = self.bitmap.len().max(min_len);
-		let mut result = ReductionBitmap { bitmap: Vec::with_capacity(len) };
+		let mut result = Self { bitmap: Vec::with_capacity(len) };
 		let ptr = result.bitmap.as_mut_ptr();
 		unsafe {
 			for i in 0..self.bitmap.len() {
@@ -68,7 +81,7 @@ impl ReductionBitmap {
 		result
 	}
 
-	pub fn is_equal(&self, other: &ReductionBitmap) -> bool {
+	pub fn is_equal(&self, other: &Self) -> bool {
 		let (mut a, mut b) = (&self.bitmap[..], &other.bitmap[..]);
 		if a.len() > b.len() {
 			std::mem::swap(&mut a, &mut b);
@@ -134,8 +147,8 @@ impl ShapeConstraint {
 	}
 
 	// Result dimension will be constrained only if both `a` and `b` have the same constraint.
-	pub fn intersection(a: &ShapeConstraint, b: &ShapeConstraint) -> ShapeConstraint {
-		let mut result = ShapeConstraint::new();
+	pub fn intersection(a: &Self, b: &Self) -> Self {
+		let mut result = Self::new();
 		let (l1, l2) = (a.constraint.len(), b.constraint.len());
 		for i in (1..=l1.min(l2)).rev() {
 			let d1 = &a.constraint[l1 - i];
@@ -164,8 +177,8 @@ impl ShapeConstraint {
 	}
 
 	// Result dimension will be constrained if either `a` or `b` has the constraint.
-	pub fn union(a: &ShapeConstraint, b: &ShapeConstraint) -> ShapeConstraint {
-		let mut result = ShapeConstraint::new();
+	pub fn union(a: &Self, b: &Self) -> Self {
+		let mut result = Self::new();
 		let (l1, l2) = (a.constraint.len(), b.constraint.len());
 		for i in (1..=l1.max(l2)).rev() {
 			let d1 = a.constraint.get(l1.wrapping_sub(i)).unwrap_or(&None);
@@ -207,7 +220,7 @@ pub struct Node {
 	pub out_is_scalar: bool,
 	pub reduction_head: bool,
 	pub reduction_bitmap: ReductionBitmap,
-	pub fragment: NodeIndex,
+	pub fragment: FragmentIndex,
 }
 
 impl Node {
@@ -309,7 +322,13 @@ define_index_type!(NodeIndex);
 type NodeVec = IndexVec<NodeIndex, Node>;
 
 pub struct Fragment {
+	pub is_root: bool,
 	pub head: NodeIndex,
+	pub reduction: NodeIndex,
+	pub depends_on: HashSet<FragmentIndex>,
+	pub scalar_inputs: HashMap<*const ExprScalarRef, usize>,
+	pub tensor_inputs: HashMap<*const ExprTensorRef, usize>,
+	pub tensor_outputs: HashMap<*const ExprTensorRef, usize>,
 }
 
 define_index_type!(FragmentIndex);
@@ -321,10 +340,10 @@ pub struct Compilation {
 	merge_groups: Vec<MergeGroup>,
 	fragments: FragmentVec,
 
-	processed: std::collections::HashMap<*const Expr, NodeIndex>,
-	scalar_ref_map: std::collections::HashMap<*const ExprScalarRef, Rc<ExprScalarRef>>,
-	tensor_ref_map: std::collections::HashMap<*const ExprTensorRef, usize>, // *ExprTensorRef -> Index
-	tensor_ref_vec: Vec<Rc<ExprTensorRef>>, // Index -> Rc<ExprTensorRef>
+	processed: HashMap<*const Expr, NodeIndex>,
+	scalar_ref_map: HashMap<*const ExprScalarRef, Rc<ExprScalarRef>>,
+	tensor_ref_map: HashMap<*const ExprTensorRef, usize>, // *ExprTensorRef -> Index
+	tensor_ref_vec: Vec<Rc<ExprTensorRef>>,               // Index -> Rc<ExprTensorRef>
 	merge_group_builder: UnionFind,
 }
 
@@ -336,9 +355,9 @@ impl Compilation {
 			merge_groups: Vec::new(),
 			fragments: FragmentVec::new(),
 
-			processed: std::collections::HashMap::new(),
-			scalar_ref_map: std::collections::HashMap::new(),
-			tensor_ref_map: std::collections::HashMap::new(),
+			processed: HashMap::new(),
+			scalar_ref_map: HashMap::new(),
+			tensor_ref_map: HashMap::new(),
 			tensor_ref_vec: Vec::new(),
 			merge_group_builder: UnionFind::new(0),
 		};
@@ -357,25 +376,22 @@ impl Compilation {
 
 	fn add_scalar_ref(&mut self, scalar_ref: Rc<ExprScalarRef>) {
 		let key = std::ptr::from_ref(scalar_ref.as_ref());
-		match self.scalar_ref_map.entry(key) {
-			std::collections::hash_map::Entry::Vacant(entry) => {
-				entry.insert(scalar_ref);
-			},
-			_ => {},
+		if let hash_map::Entry::Vacant(entry) = self.scalar_ref_map.entry(key) {
+			entry.insert(scalar_ref);
 		}
 	}
 
 	fn add_tensor_ref(&mut self, tensor_ref: Rc<ExprTensorRef>) -> usize {
 		let key = std::ptr::from_ref(tensor_ref.as_ref());
 		match self.tensor_ref_map.entry(key) {
-			std::collections::hash_map::Entry::Vacant(entry) => {
+			hash_map::Entry::Vacant(entry) => {
 				let index = self.tensor_ref_vec.len();
 				entry.insert(index);
 				self.tensor_ref_vec.push(tensor_ref);
 				self.merge_group_builder.add();
 				index
 			},
-			std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+			hash_map::Entry::Occupied(entry) => *entry.get(),
 		}
 	}
 
@@ -447,28 +463,81 @@ impl Compilation {
 		}
 	}
 
-	fn __mark_fragments(&mut self, mut current: NodeIndex, node: NodeIndex) {
-		if self.nodes[node].is_input() {
+	fn __mark_fragments(&mut self, mut frag: FragmentIndex, node: NodeIndex) {
+		if let Expr::Input(input) = self.nodes[node].expr.as_ref() {
+			match input {
+				ExprInput::Scalar(scalar_ref) => {
+					let key = std::ptr::from_ref(scalar_ref.as_ref());
+					let index = self.fragments[frag].scalar_inputs.len();
+					if let hash_map::Entry::Vacant(entry) =
+						self.fragments[frag].scalar_inputs.entry(key)
+					{
+						entry.insert(index);
+					}
+				},
+				ExprInput::Tensor(tensor_ref) => {
+					let key = std::ptr::from_ref(tensor_ref.as_ref());
+					let index = self.fragments[frag].tensor_inputs.len();
+					if let hash_map::Entry::Vacant(entry) =
+						self.fragments[frag].tensor_inputs.entry(key)
+					{
+						entry.insert(index);
+					}
+				},
+			}
 			return;
+		}
+		for i in 0..self.nodes[node].capture.len() {
+			let tensor_ref = &self.nodes[node].capture[i];
+			let key = std::ptr::from_ref(tensor_ref.as_ref());
+			let index = self.fragments[frag].tensor_outputs.len();
+			if let hash_map::Entry::Vacant(entry) = self.fragments[frag].tensor_outputs.entry(key) {
+				entry.insert(index);
+			}
 		}
 		if self.nodes[node].is_fragment_head() {
 			if self.nodes[node].fragment.is_valid() {
 				return;
 			}
-			self.fragments.push(Fragment { head: node });
-			current = node;
+			let child_frag = self.fragments.push(Fragment {
+				is_root: false,
+				head: node,
+				reduction: NodeIndex::invalid(),
+				depends_on: HashSet::new(),
+				scalar_inputs: HashMap::new(),
+				tensor_inputs: HashMap::new(),
+				tensor_outputs: HashMap::new(),
+			});
+			self.fragments[frag].depends_on.insert(child_frag);
+			frag = child_frag;
 		} else {
 			assert!(!self.nodes[node].fragment.is_valid());
 		}
-		self.nodes[node].fragment = current;
+		if self.nodes[node].is_reduction() {
+			assert!(!self.fragments[frag].reduction.is_valid());
+			self.fragments[frag].reduction = node;
+		}
+		self.nodes[node].fragment = frag;
 		for i in 0..self.nodes[node].children.len() {
-			self.__mark_fragments(current, self.nodes[node].children[i]);
+			self.__mark_fragments(frag, self.nodes[node].children[i]);
 		}
 	}
 
 	fn mark_fragments(&mut self) {
 		for i in 0..self.roots.len() {
-			self.__mark_fragments(NodeIndex::invalid(), self.roots[i]);
+			let root = self.roots[i];
+			let root_frag = self.fragments.push(Fragment {
+				is_root: true,
+				head: root,
+				reduction: NodeIndex::invalid(),
+				depends_on: HashSet::new(),
+				scalar_inputs: HashMap::new(),
+				tensor_inputs: HashMap::new(),
+				tensor_outputs: HashMap::new(),
+			});
+			for i in 0..self.nodes[root].children.len() {
+				self.__mark_fragments(root_frag, self.nodes[root].children[i]);
+			}
 		}
 	}
 
@@ -533,7 +602,7 @@ impl Compilation {
 						out_is_scalar: false,
 						reduction_head: false,
 						reduction_bitmap: ReductionBitmap::new(),
-						fragment: NodeIndex::invalid(),
+						fragment: FragmentIndex::invalid(),
 					});
 					self.add_child(id, child);
 					self.nodes[id].capture.push(tensor_ref);
@@ -564,7 +633,7 @@ impl Compilation {
 			out_is_scalar: false,
 			reduction_head: false,
 			reduction_bitmap: ReductionBitmap::new(),
-			fragment: NodeIndex::invalid(),
+			fragment: FragmentIndex::invalid(),
 		});
 		self.processed.insert(expr_key, index);
 		let expr_ref = self.nodes[index].expr.as_ref();
