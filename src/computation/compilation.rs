@@ -379,17 +379,30 @@ impl Fragment {
 define_index_type!(FragmentIndex);
 type FragmentVec = IndexVec<FragmentIndex, Fragment>;
 
+pub struct TensorNode {
+	pub tensor_ref: Rc<ExprTensorRef>,
+	pub is_input: bool,
+	pub is_output: bool,
+}
+
+define_index_type!(TensorNodeIndex);
+type TensorNodeVec = IndexVec<TensorNodeIndex, TensorNode>;
+
+define_index_type!(MergeGroupIndex);
+type MergeGroupVec = IndexVec<MergeGroupIndex, MergeGroup>;
+
 pub struct Compilation {
 	nodes: NodeVec,
 	roots: Vec<NodeIndex>,
-	merge_groups: Vec<MergeGroup>,
 	fragments: FragmentVec,
 	captures: HashSet<*const ExprTensorRef>,
 
 	processed: HashMap<*const Expr, NodeIndex>,
 	scalar_ref_map: HashMap<*const ExprScalarRef, Rc<ExprScalarRef>>,
-	tensor_ref_map: HashMap<*const ExprTensorRef, usize>, // *ExprTensorRef -> Index
-	tensor_ref_vec: Vec<Rc<ExprTensorRef>>,               // Index -> Rc<ExprTensorRef>
+	tensor_ref_map: HashMap<*const ExprTensorRef, TensorNodeIndex>,
+	merge_group_map: HashMap<*const ExprTensorRef, MergeGroupIndex>,
+	merge_group_vec: MergeGroupVec,
+	tensor_ref_vec: TensorNodeVec,
 	merge_group_builder: UnionFind,
 }
 
@@ -398,14 +411,15 @@ impl Compilation {
 		let mut compilation = Self {
 			nodes: NodeVec::with_capacity(32),
 			roots: Vec::with_capacity(1),
-			merge_groups: Vec::new(),
 			fragments: FragmentVec::new(),
 			captures: HashSet::new(),
 
 			processed: HashMap::new(),
 			scalar_ref_map: HashMap::new(),
 			tensor_ref_map: HashMap::new(),
-			tensor_ref_vec: Vec::new(),
+			tensor_ref_vec: TensorNodeVec::with_capacity(4),
+			merge_group_map: HashMap::new(),
+			merge_group_vec: MergeGroupVec::new(),
 			merge_group_builder: UnionFind::new(0),
 		};
 		let root = compilation.__new_from_expr(expr.rc_expr);
@@ -428,44 +442,67 @@ impl Compilation {
 		}
 	}
 
-	fn add_tensor_ref(&mut self, tensor_ref: Rc<ExprTensorRef>) -> usize {
+	fn add_tensor_ref(
+		&mut self,
+		tensor_ref: Rc<ExprTensorRef>,
+		is_input: bool,
+		is_output: bool,
+	) -> TensorNodeIndex {
 		let key = std::ptr::from_ref(tensor_ref.as_ref());
 		match self.tensor_ref_map.entry(key) {
 			hash_map::Entry::Vacant(entry) => {
-				let index = self.tensor_ref_vec.len();
+				let index =
+					self.tensor_ref_vec.push(TensorNode { tensor_ref, is_input, is_output });
 				entry.insert(index);
-				self.tensor_ref_vec.push(tensor_ref);
 				self.merge_group_builder.add();
 				index
 			},
-			hash_map::Entry::Occupied(entry) => *entry.get(),
+			hash_map::Entry::Occupied(entry) => {
+				let index = *entry.get();
+				if is_input {
+					self.tensor_ref_vec[index].is_input = true;
+				}
+				if is_output {
+					assert!(!self.tensor_ref_vec[index].is_output);
+					self.tensor_ref_vec[index].is_output = true;
+				}
+				index
+			},
 		}
 	}
 
 	fn build_merge_groups(&mut self) {
-		let (compact_ids, mut sets_cnt) = self.merge_group_builder.clone().compact_ids();
+		let (compact_ids, sets_cnt) = self.merge_group_builder.clone().compact_ids();
+		// count the number of items in each set
 		let mut counts = vec![0_usize; sets_cnt];
 		for &group_id in &compact_ids {
 			counts[group_id] += 1;
 		}
-		sets_cnt = 0;
+		// preserve only sets with more than one item
+		// if counts[i] > 1:
+		//     counts[i] = new group id
+		// else:
+		//     counts[i] = invalid group id
+		let mut sets_cnt = 0;
 		for count in &mut counts {
 			if *count > 1 {
 				*count = sets_cnt;
 				sets_cnt += 1;
 			} else {
-				*count = usize::MAX;
+				*count = MergeGroupIndex::new_invalid().raw;
 			}
 		}
-		self.merge_groups = vec![MergeGroup { tensors: Vec::new() }; sets_cnt];
+		self.merge_group_vec =
+			MergeGroupVec::from(vec![MergeGroup { tensors: Vec::new() }; sets_cnt]);
 		for i in 0..compact_ids.len() {
 			let group_id = compact_ids[i];
-			let group_id = counts[group_id];
-			if (group_id as isize) >= 0 {
-				self.merge_groups[group_id].tensors.push(self.tensor_ref_vec[i].clone());
+			let group_id = MergeGroupIndex::new(counts[group_id]);
+			let tensor_ref = &self.tensor_ref_vec[TensorNodeIndex::new(i)].tensor_ref;
+			if group_id.is_valid() {
+				self.merge_group_vec[group_id].tensors.push(tensor_ref.clone());
 			}
-			let tensor_key = std::ptr::from_ref(self.tensor_ref_vec[i].as_ref());
-			self.tensor_ref_map.insert(tensor_key, group_id);
+			let tensor_key = std::ptr::from_ref(tensor_ref.as_ref());
+			self.merge_group_map.insert(tensor_key, group_id);
 		}
 	}
 
@@ -473,7 +510,7 @@ impl Compilation {
 	fn remove_dead_code(&mut self) {
 		let old_roots = std::mem::replace(&mut self.roots, Vec::new());
 		for root in old_roots {
-			self.__find_live_code(root, NodeIndex::invalid());
+			self.__find_live_code(root, NodeIndex::new_invalid());
 		}
 	}
 
@@ -531,7 +568,7 @@ impl Compilation {
 			let child_frag = self.fragments.push(Fragment {
 				is_root,
 				head: node,
-				reduction: NodeIndex::invalid(),
+				reduction: NodeIndex::new_invalid(),
 				depends_on: HashSet::new(),
 				scalar_inputs_map: HashMap::new(),
 				scalar_inputs_vec: Vec::new(),
@@ -562,7 +599,7 @@ impl Compilation {
 
 	fn mark_fragments(&mut self) {
 		for i in 0..self.roots.len() {
-			self.__mark_fragments(FragmentIndex::invalid(), self.roots[i]);
+			self.__mark_fragments(FragmentIndex::new_invalid(), self.roots[i]);
 		}
 	}
 
@@ -582,8 +619,13 @@ impl Compilation {
 			cnt += 1;
 
 			let key = std::ptr::from_ref(tensor_ref.as_ref());
-			self.tensor_ref_map.insert(key, usize::MAX);
-			self.tensor_ref_vec.push(tensor_ref.clone());
+			let index = self.tensor_ref_vec.push(TensorNode {
+				tensor_ref: tensor_ref.clone(),
+				is_input: false,
+				is_output: true,
+			});
+			self.tensor_ref_map.insert(key, index);
+			self.merge_group_map.insert(key, MergeGroupIndex::new_invalid());
 
 			self.nodes[f.head].capture.push(tensor_ref);
 		}
@@ -614,7 +656,7 @@ impl Compilation {
 						tensor_ref.name.as_deref().unwrap_or("unnamed tensor")
 					);
 				}
-				self.add_tensor_ref(tensor_ref.clone());
+				self.add_tensor_ref(tensor_ref.clone(), false, true);
 				let child_shape_constraint = &self.nodes[child].out_shape;
 				let capture_shape_constraint = tensor_ref.shape_constraint();
 				self.nodes[child].out_shape =
@@ -634,7 +676,7 @@ impl Compilation {
 						out_is_scalar: false,
 						reduction_head: false,
 						reduction_bitmap: ReductionBitmap::new(),
-						fragment: FragmentIndex::invalid(),
+						fragment: FragmentIndex::new_invalid(),
 					});
 					self.add_child(id, child);
 					self.nodes[id].capture.push(tensor_ref);
@@ -665,7 +707,7 @@ impl Compilation {
 			out_is_scalar: false,
 			reduction_head: false,
 			reduction_bitmap: ReductionBitmap::new(),
-			fragment: FragmentIndex::invalid(),
+			fragment: FragmentIndex::new_invalid(),
 		});
 		self.processed.insert(expr_key, index);
 		let expr_ref = self.nodes[index].expr.as_ref();
@@ -674,9 +716,9 @@ impl Compilation {
 				ExprInput::Tensor(tensor_ref) => {
 					let tensor_ref = tensor_ref.clone();
 					let shape_constraint = tensor_ref.shape_constraint();
-					let merge_group = self.add_tensor_ref(tensor_ref);
+					let merge_group = self.add_tensor_ref(tensor_ref, true, false);
 					self.nodes[index].out_shape = shape_constraint;
-					self.nodes[index].merge_group = merge_group;
+					self.nodes[index].merge_group = merge_group.raw;
 				},
 				ExprInput::Scalar(scalar_ref) => {
 					self.add_scalar_ref(scalar_ref.clone());
@@ -752,7 +794,7 @@ impl Compilation {
 				let child = self.__new_from_expr(reduction_expr);
 				self.add_child(index, child);
 				self.nodes[index].reduction_bitmap =
-					self.nodes[child].reduction_bitmap.clone_and_set(index.0);
+					self.nodes[child].reduction_bitmap.clone_and_set(index.raw);
 				self.nodes[index].out_is_scalar = self.nodes[child].out_is_scalar;
 				if !self.nodes[index].out_is_scalar {
 					self.nodes[index].merge_group = usize::MAX;
@@ -779,13 +821,14 @@ impl Compilation {
 			Expr::Input(ExprInput::Tensor(tensor_ref)) => self.graphviz_tensor_id(tensor_ref),
 			Expr::Input(ExprInput::Scalar(scalar_ref)) => self.graphviz_scalar_id(scalar_ref),
 			_ => {
-				format!("expr_{}", node_index.0)
+				format!("expr_{}", node_index.raw)
 			},
 		}
 	}
 
 	pub fn print_graphviz<W: std::fmt::Write>(&self, w: &mut W) -> std::fmt::Result {
 		writeln!(w, "digraph G {{")?;
+		//writeln!(w, "\tgraph [splines=line];")?;
 		writeln!(w, "\trankdir=BT;")?;
 		for i in self.nodes.indexes() {
 			let node = &self.nodes[i];
@@ -810,7 +853,7 @@ impl Compilation {
 				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccffcc\"];")?;
 			}
 			if node.fragment.is_valid() {
-				writeln!(w, "subgraph cluster_{} {{ {node_id} }}", node.fragment.0)?;
+				writeln!(w, "subgraph cluster_{} {{ {node_id} }}", node.fragment.raw)?;
 			}
 			for &child_index in &node.children {
 				let child_id = self.graphviz_node_id(child_index);
@@ -833,22 +876,29 @@ impl Compilation {
 				let label =
 					if node.out_is_scalar { String::new() } else { node.out_shape.as_str() };
 				let cap_id = self.graphviz_tensor_id(cap);
-				writeln!(w, "\t{node_id} -> {cap_id} [label=\"{label}\"];")?;
+				let key = std::ptr::from_ref(cap.as_ref());
+				let index = self.tensor_ref_map[&key];
+				if self.tensor_ref_vec[index].is_input {
+					writeln!(w, "\t{node_id} -> {cap_id} [label=\"{label}\", constraint=false];")?;
+				} else {
+					writeln!(w, "\t{node_id} -> {cap_id} [label=\"{label}\"];")?;
+				}
 			}
 		}
 		for tensor_ref in &self.tensor_ref_vec {
-			let tensor_key = std::ptr::from_ref(tensor_ref.as_ref());
-			let merge_group = *self.tensor_ref_map.get(&tensor_key).unwrap_or(&usize::MAX);
-			let extra_label = if (merge_group as isize) >= 0 {
-				format!("<br/>group: {merge_group}")
+			let tensor_key = std::ptr::from_ref(tensor_ref.tensor_ref.as_ref());
+			let merge_group =
+				*self.merge_group_map.get(&tensor_key).unwrap_or(&MergeGroupIndex::new_invalid());
+			let extra_label = if merge_group.is_valid() {
+				format!("<br/>group: {}", merge_group.raw)
 			} else {
 				String::new()
 			};
-			let id = self.graphviz_tensor_id(tensor_ref);
-			let tensor_name = if let Some(name) = &tensor_ref.name {
+			let id = self.graphviz_tensor_id(&tensor_ref.tensor_ref);
+			let tensor_name = if let Some(name) = &tensor_ref.tensor_ref.name {
 				name.as_ref().to_string()
 			} else {
-				format!("{:?}", std::ptr::from_ref(tensor_ref.as_ref()))
+				format!("{:?}", std::ptr::from_ref(tensor_ref.tensor_ref.as_ref()))
 			};
 			let color = if tensor_name.starts_with("__tmp__[") { "#00eeee" } else { "#cceecc" };
 			writeln!(

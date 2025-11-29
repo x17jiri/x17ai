@@ -86,6 +86,7 @@ use std::convert::Infallible;
 
 pub mod autograd;
 pub mod computation;
+pub mod new_tensor;
 pub mod nn;
 pub mod rng;
 pub mod tensor;

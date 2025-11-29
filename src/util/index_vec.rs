@@ -17,26 +17,32 @@ macro_rules! define_index_type {
 	($name:ident) => {
 		#[repr(transparent)]
 		#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-		pub struct $name(usize);
+		pub struct $name {
+			pub raw: usize,
+		}
 
 		impl $name {
-			pub fn invalid() -> Self {
-				$name(usize::MAX)
+			pub fn new(raw: usize) -> Self {
+				$name { raw }
+			}
+
+			pub fn new_invalid() -> Self {
+				$name { raw: usize::MAX }
 			}
 
 			#[allow(clippy::cast_possible_wrap)]
 			pub fn is_valid(&self) -> bool {
-				(self.0 as isize) >= 0
+				(self.raw as isize) >= 0
 			}
 		}
 
 		impl $crate::util::index_vec::IndexTrait for $name {
 			fn to_raw(self) -> usize {
-				self.0
+				self.raw
 			}
 
 			fn from_raw(raw: usize) -> Self {
-				$name(raw)
+				$name { raw }
 			}
 		}
 	};
@@ -95,6 +101,12 @@ impl<Index: IndexTrait, T> IndexVec<Index, T> {
 
 	pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
 		self.raw.iter_mut()
+	}
+}
+
+impl<Index: IndexTrait, T> From<Vec<T>> for IndexVec<Index, T> {
+	fn from(raw: Vec<T>) -> Self {
+		Self { raw, _marker: std::marker::PhantomData }
 	}
 }
 
