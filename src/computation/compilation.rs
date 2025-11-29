@@ -16,6 +16,7 @@
 #![allow(clippy::missing_panics_doc)]
 #![allow(clippy::new_without_default)]
 #![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::collapsible_else_if)]
 
 use std::collections::{HashMap, HashSet, hash_map};
 use std::rc::Rc;
@@ -146,13 +147,13 @@ impl ShapeConstraint {
 		}
 	}
 
-	// Result dimension will be constrained only if both `a` and `b` have the same constraint.
-	pub fn intersection(a: &Self, b: &Self) -> Self {
+	// Calculates shape constraint for element-wise binary operation.
+	pub fn bin_op(a: &Self, b: &Self) -> Self {
 		let mut result = Self::new();
 		let (l1, l2) = (a.constraint.len(), b.constraint.len());
-		for i in (1..=l1.min(l2)).rev() {
-			let d1 = &a.constraint[l1 - i];
-			let d2 = &b.constraint[l2 - i];
+		for i in (1..=l1.max(l2)).rev() {
+			let d1 = a.constraint.get(l1.wrapping_sub(i)).unwrap_or(&None);
+			let d2 = b.constraint.get(l2.wrapping_sub(i)).unwrap_or(&None);
 			result.constraint.push(
 				//
 				if let Some(d1) = d1 {
@@ -162,22 +163,34 @@ impl ShapeConstraint {
 								source: format!("{} & {}", d1.source, d2.source),
 								size: d1.size,
 							})
+						} else if d1.size == 1 {
+							Some(d2.clone())
+						} else if d2.size == 1 {
+							Some(d1.clone())
 						} else {
-							None //
+							panic!("ShapeConstraint::bin_op(): conflicting dimension constraints. Dimension -{}. Sizes: {} vs {}. The value {} comes from '{}'; the value {} comes from '{}'.", i, d1.size, d2.size, d1.size, d1.source, d2.size, d2.source);
 						}
 					} else {
-						Some(d1.clone())
+						if d1.size != 1 {
+							Some(d1.clone())
+						} else {
+							None
+						}
 					}
 				} else {
-					d2.clone()
+					if let Some(d2) = d2 && d2.size != 1 {
+						Some(d2.clone())
+					} else {
+						None
+					}
 				},
 			);
 		}
 		result
 	}
 
-	// Result dimension will be constrained if either `a` or `b` has the constraint.
-	pub fn union(a: &Self, b: &Self) -> Self {
+	// As opposed to `bin_op()`, there is no broadcasting, so both shapes must match.
+	pub fn capture(a: &Self, b: &Self) -> Self {
 		let mut result = Self::new();
 		let (l1, l2) = (a.constraint.len(), b.constraint.len());
 		for i in (1..=l1.max(l2)).rev() {
@@ -371,6 +384,7 @@ pub struct Compilation {
 	roots: Vec<NodeIndex>,
 	merge_groups: Vec<MergeGroup>,
 	fragments: FragmentVec,
+	captures: HashSet<*const ExprTensorRef>,
 
 	processed: HashMap<*const Expr, NodeIndex>,
 	scalar_ref_map: HashMap<*const ExprScalarRef, Rc<ExprScalarRef>>,
@@ -386,6 +400,7 @@ impl Compilation {
 			roots: Vec::with_capacity(1),
 			merge_groups: Vec::new(),
 			fragments: FragmentVec::new(),
+			captures: HashSet::new(),
 
 			processed: HashMap::new(),
 			scalar_ref_map: HashMap::new(),
@@ -593,10 +608,17 @@ impl Compilation {
 			Expr::Capture(capture) => {
 				let child = self.__new_from_expr(capture.expr.clone());
 				let tensor_ref = capture.tensor_ref.clone();
-				let capture_shape_constraint = tensor_ref.shape_constraint();
+				if !self.captures.insert(std::ptr::from_ref(tensor_ref.as_ref())) {
+					panic!(
+						"Compilation::new_from_expr(): Capturing multiple values into the same tensor '{}'.",
+						tensor_ref.name.as_deref().unwrap_or("unnamed tensor")
+					);
+				}
 				self.add_tensor_ref(tensor_ref.clone());
+				let child_shape_constraint = &self.nodes[child].out_shape;
+				let capture_shape_constraint = tensor_ref.shape_constraint();
 				self.nodes[child].out_shape =
-					ShapeConstraint::union(&self.nodes[child].out_shape, &capture_shape_constraint);
+					ShapeConstraint::capture(child_shape_constraint, &capture_shape_constraint);
 				if self.nodes[child].is_input() {
 					let id_expr = Rc::new(Expr::Unary(ExprUnary {
 						kind: ExprUnaryKind::Identity,
@@ -717,7 +739,7 @@ impl Compilation {
 								)
 							};
 						// shape
-						self.nodes[index].out_shape = ShapeConstraint::intersection(
+						self.nodes[index].out_shape = ShapeConstraint::bin_op(
 							&self.nodes[left_child].out_shape,
 							&self.nodes[right_child].out_shape,
 						);
@@ -734,6 +756,7 @@ impl Compilation {
 				self.nodes[index].out_is_scalar = self.nodes[child].out_is_scalar;
 				if !self.nodes[index].out_is_scalar {
 					self.nodes[index].merge_group = usize::MAX;
+					self.nodes[index].out_shape = self.nodes[child].out_shape.clone();
 					self.nodes[index]
 						.out_shape
 						.set_last(Some(DimConstraint { source: "reduction".to_string(), size: 1 }));

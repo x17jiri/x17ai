@@ -168,7 +168,7 @@ use x17ai::nn::fragments::{CrossEntropy, Fragment, UnaryFragment};
 use x17ai::rng::Rng;
 use x17ai::tensor::device::cpu::CPUDevice;
 use x17ai::tensor::device::cuda::CudaDevice;
-use x17ai::tensor::device::kernel;
+use x17ai::tensor::device::kernel::{self, Expr};
 use x17ai::tensor::math::{col, mat, row};
 use x17ai::tensor::{Device, HasDType, Tensor, TensorOpError};
 use x17ai::{ErrPack, custom_kernel, tensor};
@@ -220,7 +220,7 @@ unsafe extern "C" {
 	fn x17ai_hello_torch() -> std::ffi::c_int;
 }
 
-fn main() -> Result<(), ErrPack<TensorOpError>> {
+fn test1_opt() -> RcExpr {
 	let v_ten = ExprTensorRef::new(Some("v".into()), f32::dtype, vec![1]);
 	let m_ten = ExprTensorRef::new(Some("m".into()), f32::dtype, vec![]);
 	let grad_ten = ExprTensorRef::new(Some("grad".into()), f32::dtype, vec![]);
@@ -248,6 +248,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let v_update = (grad2.clone() * grad3).sum() * v_update_coef;
 	let new_v = v_decayed + v_update;
 	let new_v = new_v.capture(v_ten);
+	//let new_v = new_v.capture(value_ten.clone());
 
 	let eps = RcExpr::new_scalar_input(ExprScalarRef::new(Some("eps".into())));
 	let v_rsqrt = (new_v.sqrt() + eps).recip();
@@ -259,7 +260,35 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let new_value = new_value.capture(value_ten.clone());
 	let new_value = new_value.clone() + update.sqrt();
 
-	let mut comp = new_value.compile();
+	new_value
+}
+
+fn test2_rms_norm() -> RcExpr {
+	let inp_ten = ExprTensorRef::new(Some("inp".into()), f32::dtype, Vec::new());
+	let inp = RcExpr::new_tensor_input(inp_ten.clone());
+	let sum_to_mean = ExprScalarRef::new(Some("sum_to_mean".into()));
+	let sum_to_mean = RcExpr::new_scalar_input(sum_to_mean.clone());
+	let eps = ExprScalarRef::new(Some("eps".into()));
+	let eps = RcExpr::new_scalar_input(eps.clone());
+	let magn_recip = (((inp.clone() * inp.clone()).sum() * sum_to_mean).sqrt() + eps).recip();
+
+	(inp * magn_recip).capture(inp_ten)
+}
+
+fn test3_softmax() -> RcExpr {
+	let inp_ten = ExprTensorRef::new(Some("inp".into()), f32::dtype, vec![15, 32]);
+	let inp = RcExpr::new_tensor_input(inp_ten.clone());
+	let max = inp.clone().max();
+	let t = (inp - max).exp();
+	let out = t.clone().sum().recip() * t;
+	let out = out.capture(inp_ten.clone());
+	out
+}
+
+fn main() -> Result<(), ErrPack<TensorOpError>> {
+	let mut comp = test1_opt().compile();
+	let mut comp = test2_rms_norm().compile();
+	let mut comp = test3_softmax().compile();
 
 	let mut graphviz = String::new();
 	comp.print_graphviz(&mut graphviz);
