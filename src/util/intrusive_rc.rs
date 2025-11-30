@@ -73,6 +73,10 @@ impl<T: IntrusiveRcTrait> IntrusiveRc<T> {
 	pub unsafe fn from_box(value: Box<T>) -> Self {
 		Self { ptr: NonNull::from(Box::leak(value)) }
 	}
+
+	pub fn as_ptr(this: &Self) -> *const T {
+		this.ptr.as_ptr()
+	}
 }
 
 impl<T: IntrusiveRcTrait> Clone for IntrusiveRc<T> {
