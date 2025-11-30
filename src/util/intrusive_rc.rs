@@ -51,6 +51,10 @@ pub trait IntrusiveRcTrait {
 	fn has_single_ref(&self) -> bool {
 		unsafe { self.refcount().has_single_ref() }
 	}
+
+	fn get_mut(&mut self) -> Option<&mut Self> {
+		if self.has_single_ref() { Some(self) } else { None }
+	}
 }
 
 pub struct IntrusiveRc<T: IntrusiveRcTrait> {

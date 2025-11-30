@@ -12,6 +12,7 @@
 #![allow(incomplete_features)]
 #![allow(internal_features)]
 #![allow(non_upper_case_globals)]
+#![feature(slice_ptr_get)]
 #![feature(new_range_api)]
 #![feature(core_intrinsics)]
 #![feature(inherent_associated_types)]

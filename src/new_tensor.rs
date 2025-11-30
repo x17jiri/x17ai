@@ -5,82 +5,153 @@
 //
 //------------------------------------------------------------------------------
 
+use std::hint::cold_path;
 use std::ptr::NonNull;
+use std::rc::Rc;
 
-use crate::tensor::DType;
-use crate::tensor::device::DeviceBuffer;
-use crate::util::intrusive_rc::IntrusiveRc;
+use crate::tensor::device::{DeviceBuffer, DevicePtr};
+use crate::tensor::shape::Shape;
+use crate::tensor::{DType, Device, HasDType};
+use crate::util::intrusive_rc::{self, IntrusiveRc, IntrusiveRcTrait};
 
 //--------------------------------------------------------------------------------------------------
 
-#[derive(Clone, Copy)]
-#[repr(transparent)]
-pub struct ShapeLen(u32);
+const INLINE_DIMS: usize = 5;
 
-#[allow(clippy::cast_possible_truncation)]
-#[allow(clippy::len_without_is_empty)]
-#[allow(clippy::missing_panics_doc)]
-impl ShapeLen {
-	pub fn new_inline(len: usize) -> Self {
-		assert!(len <= u32::MAX as usize / 2);
-		let len = len as u32;
-		Self(len << 1)
+pub struct ShapeHelper<'a> {
+	dtype: DType,
+	shape: &'a [usize],
+	bytes: usize,
+}
+
+impl<'a> ShapeHelper<'a> {
+	pub fn new(dtype: DType, shape: &'a [usize]) -> Result<Self, ()> {
+		let Ok(_ndim) = TryInto::<u8>::try_into(shape.len()) else {
+			return Err(()); // too many dimensions
+		};
+		let mut bits = dtype.bits();
+		let mut nonzero_bits = dtype.bits();
+		for &dim in shape {
+			if dim != 0 {
+				let Some(new) = nonzero_bits.checked_mul(dim) else {
+					return Err(()); // overflow
+				};
+				nonzero_bits = new;
+			}
+			bits *= dim;
+		}
+		let Some(_nonzero_bits) = nonzero_bits.checked_add(7) else {
+			return Err(()); // overflow
+		};
+		let bytes = (bits + 7) / 8;
+		Ok(ShapeHelper { dtype, shape, bytes })
 	}
 
-	pub fn new_heap(len: usize) -> Self {
-		assert!(len <= u32::MAX as usize / 2);
-		let len = len as u32;
-		Self((len << 1) | 1)
-	}
-
-	pub fn is_inline(&self) -> bool {
-		(self.0 & 1) == 0
-	}
-
-	pub fn is_heap(&self) -> bool {
-		(self.0 & 1) != 0
-	}
-
-	pub fn get(&self) -> usize {
-		(self.0 as usize) >> 1
+	pub fn ndim(&self) -> u8 {
+		self.shape.len() as u8
 	}
 }
 
 //--------------------------------------------------------------------------------------------------
 
-const INLINE_DIMS: usize = 4;
+#[repr(C)]
+struct TensorData {
+	dtype: DType,
+	ndim: u8,
+	_reserved: [u8; 3],
+	shape: NonNull<usize>,
+	inline_shape: [usize; INLINE_DIMS],
 
-#[derive(Clone, Copy)]
-pub union ShapeData {
-	inline: [usize; INLINE_DIMS],
-	heap: NonNull<[usize]>,
+	refcount: intrusive_rc::RefCount,
+	device_ptr: DevicePtr,
+	bytes: usize,
+
+	// TODO
+	// - could this be replaced with some sort of thin rc that stores metadata in the pointee
+	//   not in the pointer itself? This would save 8 bytes per buffer.
+	device: Rc<dyn Device>,
+}
+
+impl IntrusiveRcTrait for TensorData {
+	unsafe fn refcount(&self) -> &intrusive_rc::RefCount {
+		&self.refcount
+	}
+
+	unsafe fn destroy(_this: std::ptr::NonNull<Self>) {
+		todo!() // TODO
+	}
 }
 
 //--------------------------------------------------------------------------------------------------
 
 pub struct Tensor {
-	shape_len: ShapeLen,
-	shape_data: ShapeData,
-	dtype: DType,
-	buf: IntrusiveRc<DeviceBuffer>,
+	data: IntrusiveRc<TensorData>,
 }
 
 impl Tensor {
+	pub fn new(device: Rc<dyn Device>, device_ptr: DevicePtr, bytes: usize) -> Self {
+		let mut instance = Box::new(TensorData {
+			dtype: f32::dtype,
+			ndim: 1,
+			_reserved: [0; 3],
+			shape: NonNull::dangling(),
+			inline_shape: [0; INLINE_DIMS],
+
+			refcount: intrusive_rc::RefCount::new(),
+			device_ptr,
+			bytes,
+
+			device,
+		});
+		instance.as_mut().shape = NonNull::from_mut(&mut instance.inline_shape[0]);
+		Tensor {
+			data: unsafe { IntrusiveRc::from_box(instance) },
+		}
+	}
+
+	pub fn set_shape<'a>(&mut self, dtype: DType, shape: ShapeHelper<'a>) -> Result<(), ()> {
+		let Some(m) = self.data.get_mut() else {
+			return Err(()); // cannot borrow
+		};
+
+		if (m.ndim as usize) > INLINE_DIMS {
+			cold_path();
+			unsafe {
+				let layout = std::alloc::Layout::array::<usize>(m.ndim as usize).unwrap_unchecked();
+				std::alloc::dealloc(m.shape.as_ptr().cast(), layout);
+			}
+			m.inline_shape[0] = 0;
+			m.ndim = 1;
+			m.shape = NonNull::from_mut(&mut m.inline_shape[0]);
+		}
+		debug_assert!(m.shape == NonNull::from_mut(&mut m.inline_shape[0]));
+
+		if (ndim as usize) > INLINE_DIMS {
+			cold_path();
+			let shape: Option<NonNull<usize>> = unsafe {
+				let layout = std::alloc::Layout::array::<usize>(shape.len()).unwrap_unchecked();
+				NonNull::new(std::alloc::alloc(layout).cast())
+			};
+			let Some(shape) = shape else {
+				return Err(());
+			};
+			m.shape = shape;
+		}
+		m.dtype = dtype;
+		m.ndim = ndim;
+		Ok(())
+	}
+
 	pub fn dtype(&self) -> DType {
-		self.dtype
+		self.data.dtype
 	}
 
 	pub fn ndim(&self) -> usize {
-		self.shape_len.get()
+		self.data.ndim as usize
 	}
 
 	pub fn shape(&self) -> &[usize] {
-		let len = self.shape_len.get();
-		if self.shape_len.is_inline() {
-			unsafe { self.shape_data.inline.get_unchecked(..len) }
-		} else {
-			unsafe { self.shape_data.heap.as_ref().get_unchecked(..len) }
-		}
+		unsafe { std::slice::from_raw_parts(self.data.shape.as_ptr(), self.data.ndim as usize) }
 	}
 }
 
