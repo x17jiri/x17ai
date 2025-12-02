@@ -160,7 +160,7 @@ fn laplacian(v: &ArrayView2<f32>) -> Array2<f32> {
 }*/
 
 use x17ai::autograd::{AutogradTensor, LossFn};
-use x17ai::computation::expr::{ExprScalarRef, ExprTensorRef, RcExpr};
+use x17ai::new::expr::{ExprScalarRef, ExprTensorRef, RcExpr};
 use x17ai::nn::ModelContext;
 use x17ai::nn::fragments::linear::Linear;
 use x17ai::nn::fragments::softmax::{Softmax, SoftmaxGradMode};

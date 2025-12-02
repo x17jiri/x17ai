@@ -19,8 +19,11 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::computation::compilation::{Compilation, DimConstraint, ShapeConstraint};
 use crate::tensor::{DType, Tensor};
+
+use compilation::{Compilation, DimConstraint, ShapeConstraint};
+
+pub mod compilation;
 
 //--------------------------------------------------------------------------------------------------
 

@@ -21,7 +21,7 @@
 use std::collections::{HashMap, HashSet, hash_map};
 use std::rc::Rc;
 
-use crate::computation::expr::{
+use super::{
 	Expr, ExprBinaryKind, ExprInput, ExprReductionKind, ExprScalarRef, ExprTensorRef, ExprUnary,
 	ExprUnaryKind, RcExpr,
 };
