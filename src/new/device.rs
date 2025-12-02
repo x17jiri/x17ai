@@ -65,6 +65,7 @@ pub struct KernelOutput {
 #[repr(C)]
 pub struct KernelArgs {
 	shape: [usize; 3],
+	extra_memory: usize,
 	arg_count: usize,
 	output_count: usize,
 	args: [MaybeUninit<KernelArg>; 0],
@@ -112,6 +113,26 @@ impl KernelArgs {
 			std::slice::from_raw_parts_mut(outputs_ptr, output_count)
 		}
 	}
+
+	pub fn extra_memory(arg_count: usize, output_count: usize) -> usize {
+		const {
+			assert!(std::mem::align_of::<KernelArg>() <= std::mem::align_of::<KernelArgs>());
+			assert!(std::mem::align_of::<KernelOutput>() <= std::mem::align_of::<KernelArg>());
+		}
+		arg_count * std::mem::size_of::<KernelArg>()
+			+ output_count * std::mem::size_of::<KernelOutput>()
+	}
+
+	pub fn set_counts(&mut self, arg_count: usize, output_count: usize) -> Reuslt<(), ()> {
+		if self.extra_memory >= Self::extra_memory(arg_count, output_count) {
+			self.arg_count = arg_count;
+			self.output_count = output_count;
+			Ok(())
+		} else {
+			cold_path();
+			Err(())
+		}
+	}
 }
 
 #[repr(transparent)]
@@ -122,23 +143,22 @@ pub struct KernelArgsBox {
 impl KernelArgsBox {
 	/// # Panics
 	/// Panics if allocation fails.
-	pub fn new(arg_count: usize, output_count: usize) -> Self {
-		#[allow(irrefutable_let_patterns)]
+	pub fn new(extra_memory: usize) -> Self {
+		let layout = std::alloc::Layout::from_size_align(
+			std::mem::size_of::<KernelArgs>() + extra_memory,
+			std::mem::align_of::<KernelArgs>(),
+		);
 		#[allow(clippy::panic)]
-		if let struct_layout = std::alloc::Layout::new::<KernelArgs>()
-			&& let Ok(args_layout) = std::alloc::Layout::array::<MaybeUninit<KernelArg>>(arg_count)
-			&& let Ok(outputs_layout) =
-				std::alloc::Layout::array::<MaybeUninit<KernelOutput>>(output_count)
-			&& let Ok((layout, _args_offset)) = struct_layout.extend(args_layout)
-			&& let Ok((layout, _outputs_offset)) = layout.extend(outputs_layout)
+		if let Ok(layout) = layout
 			&& let Some(raw_ptr) = NonNull::new(unsafe { std::alloc::alloc(layout) })
 		{
 			let ptr = raw_ptr.cast();
 			unsafe {
 				ptr.write(KernelArgs {
 					shape: [0; 3],
-					arg_count,
-					output_count,
+					extra_memory,
+					arg_count: 0,
+					output_count: 0,
 					args: [],
 					outputs: [],
 				});
@@ -154,16 +174,11 @@ impl KernelArgsBox {
 impl Drop for KernelArgsBox {
 	fn drop(&mut self) {
 		unsafe {
-			let struct_layout = std::alloc::Layout::new::<KernelArgs>();
-			let arg_count = self.ptr.as_ref().arg_count;
-			let output_count = self.ptr.as_ref().output_count;
-			let args_layout =
-				std::alloc::Layout::array::<MaybeUninit<KernelArg>>(arg_count).unwrap_unchecked();
-			let outputs_layout =
-				std::alloc::Layout::array::<MaybeUninit<KernelOutput>>(output_count)
-					.unwrap_unchecked();
-			let (layout, _args_offset) = struct_layout.extend(args_layout).unwrap_unchecked();
-			let (layout, _outputs_offset) = layout.extend(outputs_layout).unwrap_unchecked();
+			let extra_memory = self.ptr.as_ref().extra_memory;
+			let layout = std::alloc::Layout::from_size_align_unchecked(
+				std::mem::size_of::<KernelArgs>() + extra_memory,
+				std::mem::align_of::<KernelArgs>(),
+			);
 			let raw_ptr = self.ptr.as_ptr().cast::<u8>();
 			std::alloc::dealloc(raw_ptr, layout);
 		}
