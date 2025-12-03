@@ -11,7 +11,8 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::new::device::{Device, DevicePtr};
+use crate::new::device::{Device, DeviceAllocError, DevicePtr};
+use crate::tensor::map::TensorSizeOverflowError;
 use crate::tensor::{DType, HasDType, TensorOpError};
 use crate::util::intrusive_rc::{self, IntrusiveRc, IntrusiveRcTrait};
 
@@ -123,7 +124,7 @@ impl<'a, T: HasDType> TensorLiteral for TensorLiteral1D<'a, T> {
 		unsafe {
 			std::slice::from_raw_parts(
 				self.data.as_ptr().cast::<u8>(),
-				self.data.len() * std::mem::size_of::<T>(),
+				std::mem::size_of_val(self.data),
 			)
 		}
 	}
@@ -154,7 +155,7 @@ impl<'a, T: HasDType> TensorLiteral for TensorLiteral2D<'a, T> {
 		unsafe {
 			std::slice::from_raw_parts(
 				self.data.as_ptr().cast::<u8>(),
-				self.data.len() * std::mem::size_of::<T>(),
+				std::mem::size_of_val(self.data),
 			)
 		}
 	}
@@ -186,7 +187,7 @@ impl<'a, T: HasDType> TensorLiteral for TensorLiteral3D<'a, T> {
 		unsafe {
 			std::slice::from_raw_parts(
 				self.data.as_ptr().cast::<u8>(),
-				self.data.len() * std::mem::size_of::<T>(),
+				std::mem::size_of_val(self.data),
 			)
 		}
 	}
@@ -241,13 +242,13 @@ impl Tensor {
 	) -> Result<Self, ErrPack<TensorOpError>> {
 		let Ok(shape) = ShapeHelper::new(literal.dtype(), literal.shape()) else {
 			cold_path();
-			return Err(TensorOpError::ElementsOverflow.into());
+			return Err(TensorSizeOverflowError.into());
 		};
 		let bytes = shape.bytes();
 		unsafe {
 			let Ok(device_ptr) = device.new_buffer(bytes) else {
 				cold_path();
-				return Err(TensorOpError::DevBufAllocFailed.into());
+				return Err(DeviceAllocError.into());
 			};
 			device.upload_data(NonNull::from_ref(literal.data()).cast(), device_ptr, bytes)?;
 			match Self::with_buffer(device, device_ptr, shape) {
@@ -256,7 +257,7 @@ impl Tensor {
 					cold_path();
 					device.drop_buffer(device_ptr);
 					std::mem::drop(device);
-					Err(TensorOpError::DevBufAllocFailed.into())
+					Err(TensorOpError::Alloc.into())
 				},
 			}
 		}

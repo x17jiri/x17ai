@@ -200,7 +200,7 @@ impl AttentionArgs {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct DevBufAllocFailedError;
+pub struct DeviceAllocError;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -214,7 +214,7 @@ pub trait Device {
 	fn new_buffer(
 		self: Rc<Self>,
 		bytes: usize,
-	) -> Result<IntrusiveRc<DeviceBuffer>, DevBufAllocFailedError>;
+	) -> Result<IntrusiveRc<DeviceBuffer>, DeviceAllocError>;
 
 	/// # Safety
 	/// This should only be called from `DeviceBuffer::destroy()`

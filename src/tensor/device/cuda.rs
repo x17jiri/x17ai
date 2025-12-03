@@ -25,9 +25,7 @@ use crate::tensor::device::kernel::{
 	DynExpr, DynExprArgKind, DynExprBinaryKind, DynExprKind, DynExprReductionKind,
 	DynExprUnaryKind, DynKernelCall,
 };
-use crate::tensor::device::{
-	AttentionArgs, DevBufAllocFailedError, DeviceBuffer, DevicePtr, MatMulArgs,
-};
+use crate::tensor::device::{AttentionArgs, DeviceAllocError, DeviceBuffer, DevicePtr, MatMulArgs};
 use crate::tensor::{Device, TensorOpError};
 use crate::util::ToBoxedSlice;
 use crate::util::hasher::HashWord;
@@ -378,7 +376,7 @@ impl Device for CudaDevice {
 	fn new_buffer(
 		self: Rc<Self>,
 		bytes: usize,
-	) -> Result<IntrusiveRc<DeviceBuffer>, DevBufAllocFailedError> {
+	) -> Result<IntrusiveRc<DeviceBuffer>, DeviceAllocError> {
 		let struct_layout = std::alloc::Layout::new::<DeviceBuffer>();
 		unsafe {
 			if let Some(inst_mem) = NonNull::new(std::alloc::alloc(struct_layout)) {
@@ -390,7 +388,7 @@ impl Device for CudaDevice {
 				std::alloc::dealloc(inst_mem.as_ptr().cast(), struct_layout);
 			}
 			cold_path();
-			Err(DevBufAllocFailedError)
+			Err(DeviceAllocError)
 		}
 	}
 

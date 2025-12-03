@@ -20,9 +20,7 @@ use crate::util::intrusive_ref_cell::BorrowGuard;
 pub mod cpu_float_methods;
 
 use crate::ErrPack;
-use crate::tensor::device::{
-	AttentionArgs, DevBufAllocFailedError, DeviceBuffer, DevicePtr, MatMulArgs,
-};
+use crate::tensor::device::{AttentionArgs, DeviceAllocError, DeviceBuffer, DevicePtr, MatMulArgs};
 use crate::tensor::{DType, Device};
 
 //--------------------------------------------------------------------------------------------------
@@ -121,7 +119,7 @@ impl Device for CPUDevice {
 	fn new_buffer(
 		self: Rc<Self>,
 		bytes: usize,
-	) -> Result<IntrusiveRc<DeviceBuffer>, DevBufAllocFailedError> {
+	) -> Result<IntrusiveRc<DeviceBuffer>, DeviceAllocError> {
 		let struct_layout = std::alloc::Layout::new::<DeviceBuffer>();
 		if let Ok(buffer_layout) = std::alloc::Layout::from_size_align(bytes, BUFFER_ALIGN)
 			&& let Ok((layout, buffer_offset)) = struct_layout.extend(buffer_layout)
@@ -138,7 +136,7 @@ impl Device for CPUDevice {
 			}
 		} else {
 			cold_path();
-			Err(DevBufAllocFailedError)
+			Err(DeviceAllocError)
 		}
 	}
 

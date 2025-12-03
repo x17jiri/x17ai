@@ -8,11 +8,11 @@
 use std::hint::cold_path;
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
-use std::rc::Rc;
 
 use crate::ErrPack;
 use crate::new::expr::compilation::{Compilation, FragmentIndex};
 use crate::tensor::TensorOpError;
+use crate::tensor::device::DeviceAllocError;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -42,12 +42,6 @@ impl DevicePtr {
 		self.ptr.cast::<T>()
 	}
 }
-
-//--------------------------------------------------------------------------------------------------
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct DeviceAllocError;
 
 //--------------------------------------------------------------------------------------------------
 

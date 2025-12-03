@@ -10,7 +10,7 @@ use std::borrow::Cow;
 use crate::util::intrusive_ref_cell::{BorrowError, BorrowMutError};
 use crate::{ErrExtra, ErrPack};
 
-use super::device::DevBufAllocFailedError;
+use super::device::DeviceAllocError;
 use super::device::dtype::DTypeMismatchError;
 use super::dim_index::DimIndexOutOfBoundsError;
 use super::map::{
@@ -58,7 +58,8 @@ pub enum TensorOpError {
 	NotEnoughDimensions,
 	NewBufUnsupportedDType,
 	UnsupportedDType,
-	DevBufAllocFailed,
+	Alloc,
+	DeviceAlloc,
 	IncompatibleStridesForMerge,
 	InvalidValue,
 	OverlappingOutput,
@@ -76,16 +77,22 @@ pub enum TensorOpError {
 	DeviceError,
 }
 
-impl From<DevBufAllocFailedError> for TensorOpError {
-	fn from(_: DevBufAllocFailedError) -> Self {
-		Self::DevBufAllocFailed
+impl From<std::alloc::AllocError> for TensorOpError {
+	fn from(_: std::alloc::AllocError) -> Self {
+		Self::Alloc
 	}
 }
 
-impl From<DevBufAllocFailedError> for ErrPack<TensorOpError> {
-	fn from(_: DevBufAllocFailedError) -> Self {
+impl From<DeviceAllocError> for TensorOpError {
+	fn from(_: DeviceAllocError) -> Self {
+		Self::DeviceAlloc
+	}
+}
+
+impl From<DeviceAllocError> for ErrPack<TensorOpError> {
+	fn from(_: DeviceAllocError) -> Self {
 		Self {
-			code: TensorOpError::DevBufAllocFailed,
+			code: TensorOpError::DeviceAlloc,
 			extra: None,
 		}
 	}
