@@ -77,53 +77,47 @@ impl KernelArgs {
 		self.shape = shape;
 	}
 
-	pub fn args_mut(&mut self) -> &mut [MaybeUninit<KernelArg>] {
+	fn args_ptr(&self) -> *const [MaybeUninit<KernelArg>] {
 		unsafe {
-			let arg_count = self.arg_count;
-			let struct_layout = std::alloc::Layout::new::<Self>();
-			let args_layout = std::alloc::Layout::array::<MaybeUninit<KernelArg>>(self.arg_count)
-				.unwrap_unchecked();
-			let (_layout, args_offset) = struct_layout.extend(args_layout).unwrap_unchecked();
-			#[allow(clippy::cast_ptr_alignment)]
-			let args_ptr = std::ptr::from_mut(self)
-				.cast::<u8>()
-				.add(args_offset)
-				.cast::<MaybeUninit<KernelArg>>();
-			std::slice::from_raw_parts_mut(args_ptr, arg_count)
+			let ptr = std::ptr::from_ref(self).add(1).cast();
+			std::ptr::slice_from_raw_parts(ptr, self.arg_count)
 		}
 	}
 
-	pub fn outputs_mut(&mut self) -> &mut [MaybeUninit<KernelOutput>] {
+	pub fn args(&self) -> &[MaybeUninit<KernelArg>] {
+		unsafe { &*self.args_ptr() }
+	}
+
+	pub fn args_mut(&mut self) -> &mut [MaybeUninit<KernelArg>] {
+		unsafe { &mut *self.args_ptr().cast_mut() }
+	}
+
+	fn outputs_ptr(&self) -> *const [MaybeUninit<KernelOutput>] {
 		unsafe {
-			let arg_count = self.arg_count;
-			let output_count = self.output_count;
-			let struct_layout = std::alloc::Layout::new::<Self>();
-			let args_layout =
-				std::alloc::Layout::array::<MaybeUninit<KernelArg>>(arg_count).unwrap_unchecked();
-			let outputs_layout =
-				std::alloc::Layout::array::<MaybeUninit<KernelOutput>>(output_count)
-					.unwrap_unchecked();
-			let (layout, _args_offset) = struct_layout.extend(args_layout).unwrap_unchecked();
-			let (_layout, outputs_offset) = layout.extend(outputs_layout).unwrap_unchecked();
-			#[allow(clippy::cast_ptr_alignment)]
-			let outputs_ptr = std::ptr::from_mut(self)
-				.cast::<u8>()
-				.add(outputs_offset)
-				.cast::<MaybeUninit<KernelOutput>>();
-			std::slice::from_raw_parts_mut(outputs_ptr, output_count)
+			let ptr =
+				std::ptr::from_ref(self).add(1).cast::<KernelArg>().add(self.arg_count).cast();
+			std::ptr::slice_from_raw_parts(ptr, self.output_count)
 		}
+	}
+
+	pub fn outputs(&self) -> &[MaybeUninit<KernelOutput>] {
+		unsafe { &*self.outputs_ptr() }
+	}
+
+	pub fn outputs_mut(&mut self) -> &mut [MaybeUninit<KernelOutput>] {
+		unsafe { &mut *self.outputs_ptr().cast_mut() }
 	}
 
 	pub fn extra_memory(arg_count: usize, output_count: usize) -> usize {
 		const {
-			assert!(std::mem::align_of::<KernelArg>() <= std::mem::align_of::<KernelArgs>());
-			assert!(std::mem::align_of::<KernelOutput>() <= std::mem::align_of::<KernelArg>());
+			assert!(std::mem::align_of::<Self>() >= std::mem::align_of::<KernelArg>());
+			assert!(std::mem::align_of::<KernelArg>() >= std::mem::align_of::<KernelOutput>());
 		}
 		arg_count * std::mem::size_of::<KernelArg>()
 			+ output_count * std::mem::size_of::<KernelOutput>()
 	}
 
-	pub fn set_counts(&mut self, arg_count: usize, output_count: usize) -> Reuslt<(), ()> {
+	pub fn set_counts(&mut self, arg_count: usize, output_count: usize) -> Result<(), ()> {
 		if self.extra_memory >= Self::extra_memory(arg_count, output_count) {
 			self.arg_count = arg_count;
 			self.output_count = output_count;
@@ -194,16 +188,18 @@ pub trait Device {
 		false
 	}
 
-	fn new_buffer(self: Rc<Self>, bytes: usize) -> Result<DevicePtr, DeviceAllocError>;
+	/// # Safety
+	/// - The returned buffer can only be used by this device.
+	unsafe fn new_buffer(&self, bytes: usize) -> Result<DevicePtr, DeviceAllocError>;
 
 	/// # Safety
 	/// TODO
-	unsafe fn drop_buffer(self: Rc<Self>, device_ptr: DevicePtr);
+	unsafe fn drop_buffer(&self, device_ptr: DevicePtr);
 
 	/// # Safety
 	/// TODO
 	unsafe fn upload_data(
-		self: Rc<Self>,
+		&self,
 		src: NonNull<u8>,
 		dst: DevicePtr,
 		bytes: usize,
@@ -224,7 +220,7 @@ pub trait Device {
 		&self,
 		compilation: &Compilation,
 		fragment: FragmentIndex,
-		args: *const KernelArgs,
+		args: &KernelArgs,
 	) -> Result<(), ErrPack<TensorOpError>>;
 }
 

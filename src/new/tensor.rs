@@ -10,8 +10,9 @@ use std::hint::{cold_path, likely};
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-use crate::tensor::device::DevicePtr;
-use crate::tensor::{DType, Device};
+use crate::ErrPack;
+use crate::new::device::{Device, DevicePtr};
+use crate::tensor::{DType, HasDType, TensorOpError};
 use crate::util::intrusive_rc::{self, IntrusiveRc, IntrusiveRcTrait};
 
 //--------------------------------------------------------------------------------------------------
@@ -92,6 +93,107 @@ impl<'a> ShapeHelper<'a> {
 
 //--------------------------------------------------------------------------------------------------
 
+pub trait TensorLiteral {
+	fn dtype(&self) -> DType;
+	fn shape(&self) -> &[usize];
+	fn data(&self) -> &[u8];
+}
+
+pub struct TensorLiteral1D<'a, T: HasDType> {
+	shape: [usize; 1],
+	data: &'a [T],
+}
+
+impl<'a, T: HasDType> TensorLiteral1D<'a, T> {
+	pub fn new<const X: usize>(data: &'a [T; X]) -> Self {
+		Self { shape: [X], data }
+	}
+}
+
+impl<'a, T: HasDType> TensorLiteral for TensorLiteral1D<'a, T> {
+	fn dtype(&self) -> DType {
+		T::dtype
+	}
+
+	fn shape(&self) -> &[usize] {
+		&self.shape
+	}
+
+	fn data(&self) -> &[u8] {
+		unsafe {
+			std::slice::from_raw_parts(
+				self.data.as_ptr().cast::<u8>(),
+				self.data.len() * std::mem::size_of::<T>(),
+			)
+		}
+	}
+}
+
+pub struct TensorLiteral2D<'a, T: HasDType> {
+	shape: [usize; 2],
+	data: &'a [T],
+}
+
+impl<'a, T: HasDType> TensorLiteral2D<'a, T> {
+	pub fn new<const Y: usize, const X: usize>(data: &'a [[T; X]; Y]) -> Self {
+		let flat_data: &'a [T] = unsafe { std::slice::from_raw_parts(data.as_ptr().cast(), X * Y) };
+		Self { shape: [Y, X], data: flat_data }
+	}
+}
+
+impl<'a, T: HasDType> TensorLiteral for TensorLiteral2D<'a, T> {
+	fn dtype(&self) -> DType {
+		T::dtype
+	}
+
+	fn shape(&self) -> &[usize] {
+		&self.shape
+	}
+
+	fn data(&self) -> &[u8] {
+		unsafe {
+			std::slice::from_raw_parts(
+				self.data.as_ptr().cast::<u8>(),
+				self.data.len() * std::mem::size_of::<T>(),
+			)
+		}
+	}
+}
+
+pub struct TensorLiteral3D<'a, T: HasDType> {
+	shape: [usize; 3],
+	data: &'a [T],
+}
+
+impl<'a, T: HasDType> TensorLiteral3D<'a, T> {
+	pub fn new<const Z: usize, const Y: usize, const X: usize>(data: &'a [[[T; X]; Y]; Z]) -> Self {
+		let flat_data: &'a [T] =
+			unsafe { std::slice::from_raw_parts(data.as_ptr().cast(), X * Y * Z) };
+		Self { shape: [Z, Y, X], data: flat_data }
+	}
+}
+
+impl<'a, T: HasDType> TensorLiteral for TensorLiteral3D<'a, T> {
+	fn dtype(&self) -> DType {
+		T::dtype
+	}
+
+	fn shape(&self) -> &[usize] {
+		&self.shape
+	}
+
+	fn data(&self) -> &[u8] {
+		unsafe {
+			std::slice::from_raw_parts(
+				self.data.as_ptr().cast::<u8>(),
+				self.data.len() * std::mem::size_of::<T>(),
+			)
+		}
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
 pub const MIN_SHAPE_LEN: usize = 1;
 
 #[repr(C)]
@@ -117,8 +219,11 @@ impl IntrusiveRcTrait for TensorData {
 		&self.refcount
 	}
 
-	unsafe fn destroy(_this: std::ptr::NonNull<Self>) {
-		todo!() // TODO
+	unsafe fn destroy(this: std::ptr::NonNull<Self>) {
+		unsafe {
+			let Self { device_ptr, device, .. } = this.read();
+			device.drop_buffer(device_ptr);
+		}
 	}
 }
 
@@ -132,9 +237,43 @@ impl Tensor {
 	#[inline(never)]
 	pub fn new(
 		device: Rc<dyn Device>,
+		literal: &dyn TensorLiteral,
+	) -> Result<Self, ErrPack<TensorOpError>> {
+		let Ok(shape) = ShapeHelper::new(literal.dtype(), literal.shape()) else {
+			cold_path();
+			return Err(TensorOpError::ElementsOverflow.into());
+		};
+		let bytes = shape.bytes();
+		unsafe {
+			let Ok(device_ptr) = device.new_buffer(bytes) else {
+				cold_path();
+				return Err(TensorOpError::DevBufAllocFailed.into());
+			};
+			device.upload_data(NonNull::from_ref(literal.data()).cast(), device_ptr, bytes)?;
+			match Self::with_buffer(device, device_ptr, shape) {
+				Ok(tensor) => Ok(tensor),
+				Err(device) => {
+					cold_path();
+					device.drop_buffer(device_ptr);
+					std::mem::drop(device);
+					Err(TensorOpError::DevBufAllocFailed.into())
+				},
+			}
+		}
+	}
+
+	/// # Safety
+	/// - device_ptr must be valid for device
+	/// - size of buffer must be at least shape.bytes()
+	///
+	/// # Errors
+	/// - gives back the consumed `device` if allocation fails
+	#[inline(never)]
+	pub unsafe fn with_buffer(
+		device: Rc<dyn Device>,
 		device_ptr: DevicePtr,
 		shape: ShapeHelper,
-	) -> Result<Self, AllocError> {
+	) -> Result<Self, Rc<dyn Device>> {
 		const {
 			assert!(MIN_SHAPE_LEN > 0);
 		}
@@ -149,7 +288,7 @@ impl Tensor {
 
 			let Some(raw_ptr) = NonNull::new(std::alloc::alloc(layout)) else {
 				cold_path();
-				return Err(AllocError);
+				return Err(device);
 			};
 
 			let struct_ptr = raw_ptr.cast::<TensorData>();

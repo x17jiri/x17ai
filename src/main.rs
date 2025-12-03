@@ -161,6 +161,7 @@ fn laplacian(v: &ArrayView2<f32>) -> Array2<f32> {
 
 use x17ai::autograd::{AutogradTensor, LossFn};
 use x17ai::new::expr::{ExprScalarRef, ExprTensorRef, RcExpr};
+use x17ai::new::tensor::TensorLiteral1D;
 use x17ai::nn::ModelContext;
 use x17ai::nn::fragments::linear::Linear;
 use x17ai::nn::fragments::softmax::{Softmax, SoftmaxGradMode};
@@ -221,6 +222,8 @@ unsafe extern "C" {
 }
 
 fn test1_opt() -> RcExpr {
+	let my_lit = TensorLiteral1D::<f32>::new(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+
 	let v_ten = ExprTensorRef::new(Some("v".into()), f32::dtype, vec![1]);
 	let m_ten = ExprTensorRef::new(Some("m".into()), f32::dtype, vec![]);
 	let grad_ten = ExprTensorRef::new(Some("grad".into()), f32::dtype, vec![]);
