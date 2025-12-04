@@ -14,6 +14,8 @@ use crate::new::expr::compilation::{Compilation, FragmentIndex};
 use crate::tensor::TensorOpError;
 use crate::tensor::device::DeviceAllocError;
 
+pub mod cpu;
+
 //--------------------------------------------------------------------------------------------------
 
 #[repr(transparent)]

@@ -5,13 +5,13 @@
 //
 //------------------------------------------------------------------------------
 
-use std::alloc::AllocError;
 use std::hint::{cold_path, likely};
 use std::ptr::NonNull;
 use std::rc::Rc;
 
 use crate::ErrPack;
-use crate::new::device::{Device, DeviceAllocError, DevicePtr};
+use crate::new::device::{Device, DevicePtr};
+use crate::tensor::device::DeviceAllocError;
 use crate::tensor::map::TensorSizeOverflowError;
 use crate::tensor::{DType, HasDType, TensorOpError};
 use crate::util::intrusive_rc::{self, IntrusiveRc, IntrusiveRcTrait};

@@ -83,6 +83,7 @@
 //#![allow(clippy::len_zero)]
 #![allow(clippy::items_after_statements)]
 #![allow(clippy::if_not_else)]
+#![allow(irrefutable_let_patterns)]
 
 use std::borrow::Cow;
 use std::convert::Infallible;
