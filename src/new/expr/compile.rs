@@ -391,7 +391,7 @@ type TensorNodeVec = IndexVec<TensorNodeIndex, TensorNode>;
 define_index_type!(MergeGroupIndex);
 type MergeGroupVec = IndexVec<MergeGroupIndex, MergeGroup>;
 
-pub struct Compilation {
+pub struct CompiledExpr {
 	nodes: NodeVec,
 	roots: Vec<NodeIndex>,
 	fragments: FragmentVec,
@@ -406,9 +406,9 @@ pub struct Compilation {
 	merge_group_builder: UnionFind,
 }
 
-impl Compilation {
-	pub fn new_from_expr(expr: RcExpr) -> Self {
-		let mut compilation = Self {
+impl CompiledExpr {
+	pub fn new(expr: RcExpr) -> Self {
+		let mut comp = Self {
 			nodes: NodeVec::with_capacity(32),
 			roots: Vec::with_capacity(1),
 			fragments: FragmentVec::new(),
@@ -422,17 +422,17 @@ impl Compilation {
 			merge_group_vec: MergeGroupVec::new(),
 			merge_group_builder: UnionFind::new(0),
 		};
-		let root = compilation.__new_from_expr(expr.rc_expr);
-		compilation.build_merge_groups();
-		compilation.roots.push(root);
-		compilation.roots.sort();
-		compilation.roots.dedup();
-		compilation.roots.retain(|&r| compilation.nodes[r].parents.is_empty());
-		compilation.remove_dead_code();
-		compilation.move_reduction_heads();
-		compilation.mark_fragments();
-		compilation.add_temp_captures();
-		compilation
+		let root = comp.__new(expr.rc_expr);
+		comp.build_merge_groups();
+		comp.roots.push(root);
+		comp.roots.sort();
+		comp.roots.dedup();
+		comp.roots.retain(|&r| comp.nodes[r].parents.is_empty());
+		comp.remove_dead_code();
+		comp.move_reduction_heads();
+		comp.mark_fragments();
+		comp.add_temp_captures();
+		comp
 	}
 
 	fn add_scalar_ref(&mut self, scalar_ref: Rc<ExprScalarRef>) {
@@ -640,7 +640,7 @@ impl Compilation {
 	#[allow(clippy::collapsible_else_if)]
 	#[allow(clippy::manual_assert)]
 	#[allow(clippy::panic)]
-	pub fn __new_from_expr(&mut self, expr: Rc<Expr>) -> NodeIndex {
+	pub fn __new(&mut self, expr: Rc<Expr>) -> NodeIndex {
 		let expr_key = std::ptr::from_ref(expr.as_ref());
 		if let Some(index) = self.processed.get(&expr_key) {
 			return *index;
@@ -648,11 +648,11 @@ impl Compilation {
 
 		match expr.as_ref() {
 			Expr::Capture(capture) => {
-				let child = self.__new_from_expr(capture.expr.clone());
+				let child = self.__new(capture.expr.clone());
 				let tensor_ref = capture.tensor_ref.clone();
 				if !self.captures.insert(std::ptr::from_ref(tensor_ref.as_ref())) {
 					panic!(
-						"Compilation::new_from_expr(): Capturing multiple values into the same tensor '{}'.",
+						"CompiledExpr::new(): Capturing multiple values into the same tensor '{}'.",
 						tensor_ref.name.as_deref().unwrap_or("unnamed tensor")
 					);
 				}
@@ -688,8 +688,8 @@ impl Compilation {
 				return child;
 			},
 			Expr::First(first) => {
-				let first_child = self.__new_from_expr(first.lhs.clone());
-				let second_child = self.__new_from_expr(first.rhs.clone());
+				let first_child = self.__new(first.lhs.clone());
+				let second_child = self.__new(first.rhs.clone());
 				self.processed.insert(expr_key, first_child);
 				self.roots.push(second_child);
 				return first_child;
@@ -729,7 +729,7 @@ impl Compilation {
 				unreachable!() // handled above
 			},
 			Expr::Cast(cast) => {
-				let child = self.__new_from_expr(cast.expr.clone());
+				let child = self.__new(cast.expr.clone());
 				self.nodes[index].out_is_scalar = self.nodes[child].out_is_scalar;
 				self.nodes[index].out_shape = self.nodes[child].out_shape.clone();
 				self.nodes[index].merge_group = self.nodes[child].merge_group;
@@ -737,7 +737,7 @@ impl Compilation {
 				self.add_child(index, child);
 			},
 			Expr::Unary(unary) => {
-				let child = self.__new_from_expr(unary.expr.clone());
+				let child = self.__new(unary.expr.clone());
 				self.nodes[index].out_is_scalar = self.nodes[child].out_is_scalar;
 				self.nodes[index].out_shape = self.nodes[child].out_shape.clone();
 				self.nodes[index].merge_group = self.nodes[child].merge_group;
@@ -747,8 +747,8 @@ impl Compilation {
 			Expr::Binary(binary) => {
 				let lhs = binary.lhs.clone();
 				let rhs = binary.rhs.clone();
-				let left_child = self.__new_from_expr(lhs);
-				let right_child = self.__new_from_expr(rhs);
+				let left_child = self.__new(lhs);
+				let right_child = self.__new(rhs);
 				self.add_child(index, left_child);
 				self.add_child(index, right_child);
 				self.nodes[index].reduction_bitmap = ReductionBitmap::union(
@@ -791,7 +791,7 @@ impl Compilation {
 			Expr::Reduction(reduction) => {
 				let reduction_expr = reduction.expr.clone();
 				self.nodes[index].reduction_head = true;
-				let child = self.__new_from_expr(reduction_expr);
+				let child = self.__new(reduction_expr);
 				self.add_child(index, child);
 				self.nodes[index].reduction_bitmap =
 					self.nodes[child].reduction_bitmap.clone_and_set(index.raw);
@@ -920,6 +920,10 @@ impl Compilation {
 		}
 		writeln!(w, "}}")?;
 		Ok(())
+	}
+
+	pub fn fragments(&self) -> &FragmentVec {
+		&self.fragments
 	}
 }
 

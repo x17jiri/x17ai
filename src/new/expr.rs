@@ -21,9 +21,10 @@ use std::rc::Rc;
 
 use crate::tensor::{DType, Tensor};
 
-use compilation::{Compilation, DimConstraint, ShapeConstraint};
+use compile::{CompiledExpr, DimConstraint, ShapeConstraint};
 
-pub mod compilation;
+pub mod compile;
+pub mod eval;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -250,8 +251,8 @@ impl RcExpr {
 		}
 	}
 
-	pub fn compile(self) -> Compilation {
-		Compilation::new_from_expr(self)
+	pub fn compile(self) -> CompiledExpr {
+		CompiledExpr::new(self)
 	}
 }
 

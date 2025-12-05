@@ -5,9 +5,11 @@
 //
 //------------------------------------------------------------------------------
 
-pub mod device;
-pub mod expr;
-pub mod tensor;
-pub mod tests;
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::panic_in_result_fn)]
+#![allow(clippy::redundant_clone)]
+#![allow(clippy::unnecessary_wraps)]
+
+pub mod test_simple_elemwise;
 
 //--------------------------------------------------------------------------------------------------

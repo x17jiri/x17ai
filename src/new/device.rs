@@ -10,7 +10,7 @@ use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
 use crate::ErrPack;
-use crate::new::expr::compilation::{Compilation, FragmentIndex};
+use crate::new::expr::compile::{CompiledExpr, FragmentIndex};
 use crate::tensor::TensorOpError;
 use crate::tensor::device::DeviceAllocError;
 
@@ -48,12 +48,17 @@ impl DevicePtr {
 //--------------------------------------------------------------------------------------------------
 
 #[repr(C)]
-pub struct KernelArg {
+pub struct KernelInput {
 	pub stride_bytes: [usize; 3],
 	pub buf: DevicePtr,
 }
 
-#[repr(C)]
+#[repr(transparent)]
+pub struct KernelScalarInput {
+	pub scalar: f64,
+}
+
+#[repr(transparent)]
 pub struct KernelOutput {
 	pub buf: DevicePtr,
 }
@@ -62,37 +67,73 @@ pub struct KernelOutput {
 pub struct KernelArgs {
 	shape: [usize; 3],
 	extra_memory: usize,
-	arg_count: usize,
-	output_count: usize,
-	args: [MaybeUninit<KernelArg>; 0],
+	inp_count: usize,
+	out_count: usize,
+	scalar_count: usize,
+	inputs: [MaybeUninit<KernelInput>; 0],
+	scalars: [MaybeUninit<KernelScalarInput>; 0],
 	outputs: [MaybeUninit<KernelOutput>; 0],
 }
 
 impl KernelArgs {
+	/// # Panics
+	/// Panics if allocation fails.
+	#[allow(clippy::new_ret_no_self)]
+	pub fn new(extra_memory: usize) -> KernelArgsBox {
+		let input_align = std::mem::align_of::<KernelInput>();
+		let scalar_align = std::mem::align_of::<KernelScalarInput>();
+		let output_align = std::mem::align_of::<KernelOutput>();
+		let extra_align = input_align.max(scalar_align).max(output_align);
+		#[allow(clippy::panic)]
+		if let struct_layout = std::alloc::Layout::new::<Self>()
+			&& let Ok(extra_layout) = std::alloc::Layout::from_size_align(extra_memory, extra_align)
+			&& let Ok((layout, _offset)) = struct_layout.extend(extra_layout)
+			&& let Some(raw_ptr) = NonNull::new(unsafe { std::alloc::alloc(layout) })
+		{
+			let ptr = raw_ptr.cast();
+			unsafe {
+				ptr.write(Self {
+					shape: [0; 3],
+					extra_memory,
+					inp_count: 0,
+					out_count: 0,
+					scalar_count: 0,
+					inputs: [],
+					scalars: [],
+					outputs: [],
+				});
+			}
+			KernelArgsBox { ptr }
+		} else {
+			cold_path();
+			panic!("allocation error");
+		}
+	}
+
 	pub fn set_shape(&mut self, shape: [usize; 3]) {
 		self.shape = shape;
 	}
 
-	fn args_ptr(&self) -> *const [MaybeUninit<KernelArg>] {
+	fn inputs_ptr(&self) -> *const [MaybeUninit<KernelInput>] {
 		unsafe {
 			let ptr = std::ptr::from_ref(self).add(1).cast();
-			std::ptr::slice_from_raw_parts(ptr, self.arg_count)
+			std::ptr::slice_from_raw_parts(ptr, self.inp_count)
 		}
 	}
 
-	pub fn args(&self) -> &[MaybeUninit<KernelArg>] {
-		unsafe { &*self.args_ptr() }
+	pub fn inputs(&self) -> &[MaybeUninit<KernelInput>] {
+		unsafe { &*self.inputs_ptr() }
 	}
 
-	pub fn args_mut(&mut self) -> &mut [MaybeUninit<KernelArg>] {
-		unsafe { &mut *self.args_ptr().cast_mut() }
+	pub fn inputs_mut(&mut self) -> &mut [MaybeUninit<KernelInput>] {
+		unsafe { &mut *self.inputs_ptr().cast_mut() }
 	}
 
 	fn outputs_ptr(&self) -> *const [MaybeUninit<KernelOutput>] {
 		unsafe {
 			let ptr =
-				std::ptr::from_ref(self).add(1).cast::<KernelArg>().add(self.arg_count).cast();
-			std::ptr::slice_from_raw_parts(ptr, self.output_count)
+				std::ptr::from_ref(self).add(1).cast::<KernelInput>().add(self.inp_count).cast();
+			std::ptr::slice_from_raw_parts(ptr, self.out_count)
 		}
 	}
 
@@ -104,19 +145,50 @@ impl KernelArgs {
 		unsafe { &mut *self.outputs_ptr().cast_mut() }
 	}
 
-	pub fn extra_memory(arg_count: usize, output_count: usize) -> usize {
-		const {
-			assert!(std::mem::align_of::<Self>() >= std::mem::align_of::<KernelArg>());
-			assert!(std::mem::align_of::<KernelArg>() >= std::mem::align_of::<KernelOutput>());
+	pub fn scalars_ptr(&self) -> *const [MaybeUninit<KernelScalarInput>] {
+		unsafe {
+			let ptr = std::ptr::from_ref(self)
+				.add(1)
+				.cast::<KernelInput>()
+				.add(self.inp_count)
+				.cast::<KernelOutput>()
+				.add(self.out_count)
+				.cast();
+			std::ptr::slice_from_raw_parts(ptr, self.scalar_count)
 		}
-		arg_count * std::mem::size_of::<KernelArg>()
-			+ output_count * std::mem::size_of::<KernelOutput>()
 	}
 
-	pub fn set_counts(&mut self, arg_count: usize, output_count: usize) -> Result<(), ()> {
-		if self.extra_memory >= Self::extra_memory(arg_count, output_count) {
-			self.arg_count = arg_count;
-			self.output_count = output_count;
+	pub fn scalars(&self) -> &[MaybeUninit<KernelScalarInput>] {
+		unsafe { &*self.scalars_ptr() }
+	}
+
+	pub fn scalars_mut(&mut self) -> &mut [MaybeUninit<KernelScalarInput>] {
+		unsafe { &mut *self.scalars_ptr().cast_mut() }
+	}
+
+	pub fn extra_memory(inp_count: usize, out_count: usize, scalar_count: usize) -> usize {
+		const {
+			assert!(std::mem::align_of::<Self>() >= std::mem::align_of::<KernelInput>());
+			assert!(std::mem::align_of::<KernelInput>() >= std::mem::align_of::<KernelOutput>());
+			assert!(
+				std::mem::align_of::<KernelOutput>() >= std::mem::align_of::<KernelScalarInput>()
+			);
+		}
+		inp_count * std::mem::size_of::<KernelInput>()
+			+ out_count * std::mem::size_of::<KernelOutput>()
+			+ scalar_count * std::mem::size_of::<KernelScalarInput>()
+	}
+
+	pub fn set_counts(
+		&mut self,
+		inp_count: usize,
+		out_count: usize,
+		scalar_count: usize,
+	) -> Result<(), ()> {
+		if self.extra_memory >= Self::extra_memory(inp_count, out_count, scalar_count) {
+			self.inp_count = inp_count;
+			self.out_count = out_count;
+			self.scalar_count = scalar_count;
 			Ok(())
 		} else {
 			cold_path();
@@ -130,37 +202,6 @@ pub struct KernelArgsBox {
 	pub ptr: NonNull<KernelArgs>,
 }
 
-impl KernelArgsBox {
-	/// # Panics
-	/// Panics if allocation fails.
-	pub fn new(extra_memory: usize) -> Self {
-		let layout = std::alloc::Layout::from_size_align(
-			std::mem::size_of::<KernelArgs>() + extra_memory,
-			std::mem::align_of::<KernelArgs>(),
-		);
-		#[allow(clippy::panic)]
-		if let Ok(layout) = layout
-			&& let Some(raw_ptr) = NonNull::new(unsafe { std::alloc::alloc(layout) })
-		{
-			let ptr = raw_ptr.cast();
-			unsafe {
-				ptr.write(KernelArgs {
-					shape: [0; 3],
-					extra_memory,
-					arg_count: 0,
-					output_count: 0,
-					args: [],
-					outputs: [],
-				});
-			}
-			Self { ptr }
-		} else {
-			cold_path();
-			panic!("allocation error");
-		}
-	}
-}
-
 impl Drop for KernelArgsBox {
 	fn drop(&mut self) {
 		unsafe {
@@ -172,6 +213,20 @@ impl Drop for KernelArgsBox {
 			let raw_ptr = self.ptr.as_ptr().cast::<u8>();
 			std::alloc::dealloc(raw_ptr, layout);
 		}
+	}
+}
+
+impl std::ops::Deref for KernelArgsBox {
+	type Target = KernelArgs;
+
+	fn deref(&self) -> &KernelArgs {
+		unsafe { self.ptr.as_ref() }
+	}
+}
+
+impl std::ops::DerefMut for KernelArgsBox {
+	fn deref_mut(&mut self) -> &mut KernelArgs {
+		unsafe { self.ptr.as_mut() }
 	}
 }
 
@@ -214,7 +269,7 @@ pub trait Device {
 	/// TODO
 	unsafe fn run_fragment(
 		&self,
-		compilation: &Compilation,
+		compilation: &CompiledExpr,
 		fragment: FragmentIndex,
 		args: &KernelArgs,
 	) -> Result<(), ErrPack<TensorOpError>>;

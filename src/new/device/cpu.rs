@@ -12,7 +12,7 @@ use std::rc::Rc;
 use super::{Device, DevicePtr, KernelArgs};
 
 use crate::ErrPack;
-use crate::new::expr::compilation::{Compilation, FragmentIndex};
+use crate::new::expr::compile::{CompiledExpr, FragmentIndex};
 use crate::tensor::TensorOpError;
 use crate::tensor::device::DeviceAllocError;
 
@@ -93,8 +93,8 @@ impl Device for CPUDevice {
 			let header_ptr = dst.as_ptr::<CPUBuffer>();
 			let buffer: *mut u8 = (*header_ptr).buffer.cast();
 			std::ptr::copy_nonoverlapping(src, buffer, bytes);
+			Ok(())
 		}
-		Ok(())
 	}
 
 	unsafe fn download_data(
@@ -108,13 +108,13 @@ impl Device for CPUDevice {
 			let buffer: *const u8 = (*header_ptr).buffer.cast();
 			let dst: *mut u8 = dst.as_ptr();
 			std::ptr::copy_nonoverlapping(buffer, dst, bytes);
+			Ok(())
 		}
-		Ok(())
 	}
 
 	unsafe fn run_fragment(
 		&self,
-		_compilation: &Compilation,
+		_compilation: &CompiledExpr,
 		_fragment: FragmentIndex,
 		_args: &KernelArgs,
 	) -> Result<(), ErrPack<TensorOpError>> {
