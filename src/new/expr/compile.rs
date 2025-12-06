@@ -28,7 +28,6 @@ use super::{
 use crate::define_index_type;
 use crate::tensor::HasDType;
 use crate::util::index_vec::IndexVec;
-use crate::util::union_find::UnionFind;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -226,12 +225,12 @@ pub struct Node {
 	pub expr: Rc<Expr>,
 	pub parents: Vec<NodeIndex>,
 	pub children: Vec<NodeIndex>,
-	pub capture: Vec<Rc<ExprTensorRef>>,
+	pub capture: Vec<Rc<ExprTensorRef>>, // TODO: `Vec<TensorNodeIndex>`?
 
-	pub merge_group: usize,
-	pub out_shape: ShapeConstraint,
 	pub out_is_scalar: bool,
-	pub reduction_head: bool,
+	pub out_shape: ShapeConstraint,
+	pub is_reduction_head: bool,
+	pub is_reduction_input: bool,
 	pub reduction_bitmap: ReductionBitmap,
 	pub fragment: FragmentIndex,
 }
@@ -305,7 +304,11 @@ impl Node {
 	}
 
 	pub fn is_reduction_head(&self) -> bool {
-		self.reduction_head
+		self.is_reduction_head
+	}
+
+	pub fn is_reduction_input(&self) -> bool {
+		self.is_reduction_input
 	}
 
 	pub fn is_captured(&self) -> bool {
@@ -322,23 +325,25 @@ impl Node {
 	#[rustfmt::skip]
 	pub fn is_fragment_head(&self) -> bool {
 		self.is_reduction_head()
+		|| self.is_reduction_input()
 		|| self.is_fork()
 	}
-}
-
-#[derive(Clone)]
-pub struct MergeGroup {
-	pub tensors: Vec<Rc<ExprTensorRef>>,
 }
 
 define_index_type!(NodeIndex);
 type NodeVec = IndexVec<NodeIndex, Node>;
 
+pub enum FragmentKind {
+	ElementWise,
+	Reduction,
+}
+
 pub struct Fragment {
 	pub is_root: bool,
 	pub head: NodeIndex,
+	pub kind: FragmentKind,
 	pub reduction: NodeIndex,
-	pub depends_on: HashSet<FragmentIndex>,
+	pub input_into: HashSet<FragmentIndex>,
 	pub scalar_inputs_map: HashMap<*const ExprScalarRef, usize>,
 	pub scalar_inputs_vec: Vec<Rc<ExprScalarRef>>,
 	pub tensor_inputs_map: HashMap<*const ExprTensorRef, usize>,
@@ -388,22 +393,15 @@ pub struct TensorNode {
 define_index_type!(TensorNodeIndex);
 type TensorNodeVec = IndexVec<TensorNodeIndex, TensorNode>;
 
-define_index_type!(MergeGroupIndex);
-type MergeGroupVec = IndexVec<MergeGroupIndex, MergeGroup>;
-
 pub struct CompiledExpr {
 	nodes: NodeVec,
 	roots: Vec<NodeIndex>,
 	fragments: FragmentVec,
 	captures: HashSet<*const ExprTensorRef>,
-
 	processed: HashMap<*const Expr, NodeIndex>,
 	scalar_ref_map: HashMap<*const ExprScalarRef, Rc<ExprScalarRef>>,
 	tensor_ref_map: HashMap<*const ExprTensorRef, TensorNodeIndex>,
-	merge_group_map: HashMap<*const ExprTensorRef, MergeGroupIndex>,
-	merge_group_vec: MergeGroupVec,
 	tensor_ref_vec: TensorNodeVec,
-	merge_group_builder: UnionFind,
 }
 
 impl CompiledExpr {
@@ -413,17 +411,12 @@ impl CompiledExpr {
 			roots: Vec::with_capacity(1),
 			fragments: FragmentVec::new(),
 			captures: HashSet::new(),
-
 			processed: HashMap::new(),
 			scalar_ref_map: HashMap::new(),
 			tensor_ref_map: HashMap::new(),
 			tensor_ref_vec: TensorNodeVec::with_capacity(4),
-			merge_group_map: HashMap::new(),
-			merge_group_vec: MergeGroupVec::new(),
-			merge_group_builder: UnionFind::new(0),
 		};
 		let root = comp.__new(expr.rc_expr);
-		comp.build_merge_groups();
 		comp.roots.push(root);
 		comp.roots.sort();
 		comp.roots.dedup();
@@ -454,7 +447,6 @@ impl CompiledExpr {
 				let index =
 					self.tensor_ref_vec.push(TensorNode { tensor_ref, is_input, is_output });
 				entry.insert(index);
-				self.merge_group_builder.add();
 				index
 			},
 			hash_map::Entry::Occupied(entry) => {
@@ -468,41 +460,6 @@ impl CompiledExpr {
 				}
 				index
 			},
-		}
-	}
-
-	fn build_merge_groups(&mut self) {
-		let (compact_ids, sets_cnt) = self.merge_group_builder.clone().compact_ids();
-		// count the number of items in each set
-		let mut counts = vec![0_usize; sets_cnt];
-		for &group_id in &compact_ids {
-			counts[group_id] += 1;
-		}
-		// preserve only sets with more than one item
-		// if counts[i] > 1:
-		//     counts[i] = new group id
-		// else:
-		//     counts[i] = invalid group id
-		let mut sets_cnt = 0;
-		for count in &mut counts {
-			if *count > 1 {
-				*count = sets_cnt;
-				sets_cnt += 1;
-			} else {
-				*count = MergeGroupIndex::new_invalid().raw;
-			}
-		}
-		self.merge_group_vec =
-			MergeGroupVec::from(vec![MergeGroup { tensors: Vec::new() }; sets_cnt]);
-		for i in 0..compact_ids.len() {
-			let group_id = compact_ids[i];
-			let group_id = MergeGroupIndex::new(counts[group_id]);
-			let tensor_ref = &self.tensor_ref_vec[TensorNodeIndex::new(i)].tensor_ref;
-			if group_id.is_valid() {
-				self.merge_group_vec[group_id].tensors.push(tensor_ref.clone());
-			}
-			let tensor_key = std::ptr::from_ref(tensor_ref.as_ref());
-			self.merge_group_map.insert(tensor_key, group_id);
 		}
 	}
 
@@ -535,15 +492,16 @@ impl CompiledExpr {
 			if !self.nodes[i].is_reduction() {
 				continue;
 			}
-			self.nodes[i].reduction_head = false;
-			while let [parent] = &self.nodes[i].parents[..] // has exactly one parent
-			&& let parent = *parent
+			self.nodes[i].is_reduction_head = false;
+			while let [one_parent] = &self.nodes[i].parents[..]
+				&& let parent = *one_parent
+				&& !self.nodes[i].is_reduction_input()
 				&& self.nodes[parent].out_shape.last() == Some(1)
 				&& self.nodes[i].reduction_bitmap.is_equal(&self.nodes[parent].reduction_bitmap)
 			{
 				i = parent;
 			}
-			self.nodes[i].reduction_head = true;
+			self.nodes[i].is_reduction_head = true;
 		}
 	}
 
@@ -563,13 +521,22 @@ impl CompiledExpr {
 		}
 		if self.nodes[node].is_fragment_head() {
 			if self.nodes[node].fragment.is_valid() {
+				if !is_root {
+					let child_frag = self.nodes[node].fragment;
+					self.fragments[child_frag].input_into.insert(frag);
+				}
 				return;
 			}
 			let child_frag = self.fragments.push(Fragment {
 				is_root,
 				head: node,
+				kind: if self.nodes[node].is_reduction_head() {
+					FragmentKind::Reduction
+				} else {
+					FragmentKind::ElementWise
+				},
 				reduction: NodeIndex::new_invalid(),
-				depends_on: HashSet::new(),
+				input_into: if is_root { HashSet::new() } else { HashSet::from([frag]) },
 				scalar_inputs_map: HashMap::new(),
 				scalar_inputs_vec: Vec::new(),
 				tensor_inputs_map: HashMap::new(),
@@ -577,9 +544,6 @@ impl CompiledExpr {
 				tensor_outputs_map: HashMap::new(),
 				tensor_outputs_vec: Vec::new(),
 			});
-			if !is_root {
-				self.fragments[frag].depends_on.insert(child_frag);
-			}
 			frag = child_frag;
 		} else {
 			assert!(!self.nodes[node].fragment.is_valid());
@@ -625,7 +589,6 @@ impl CompiledExpr {
 				is_output: true,
 			});
 			self.tensor_ref_map.insert(key, index);
-			self.merge_group_map.insert(key, MergeGroupIndex::new_invalid());
 
 			self.nodes[f.head].capture.push(tensor_ref);
 		}
@@ -671,10 +634,11 @@ impl CompiledExpr {
 						parents: Vec::new(),
 						children: Vec::new(),
 						capture: Vec::new(),
-						merge_group: usize::MAX,
-						out_shape: ShapeConstraint::new(),
+
 						out_is_scalar: false,
-						reduction_head: false,
+						out_shape: ShapeConstraint::new(),
+						is_reduction_head: false,
+						is_reduction_input: false,
 						reduction_bitmap: ReductionBitmap::new(),
 						fragment: FragmentIndex::new_invalid(),
 					});
@@ -702,10 +666,11 @@ impl CompiledExpr {
 			parents: Vec::new(),
 			children: Vec::new(),
 			capture: Vec::new(),
-			merge_group: usize::MAX,
-			out_shape: ShapeConstraint::new(),
+
 			out_is_scalar: false,
-			reduction_head: false,
+			out_shape: ShapeConstraint::new(),
+			is_reduction_head: false,
+			is_reduction_input: false,
 			reduction_bitmap: ReductionBitmap::new(),
 			fragment: FragmentIndex::new_invalid(),
 		});
@@ -716,9 +681,8 @@ impl CompiledExpr {
 				ExprInput::Tensor(tensor_ref) => {
 					let tensor_ref = tensor_ref.clone();
 					let shape_constraint = tensor_ref.shape_constraint();
-					let merge_group = self.add_tensor_ref(tensor_ref, true, false);
+					self.add_tensor_ref(tensor_ref, true, false);
 					self.nodes[index].out_shape = shape_constraint;
-					self.nodes[index].merge_group = merge_group.raw;
 				},
 				ExprInput::Scalar(scalar_ref) => {
 					self.add_scalar_ref(scalar_ref.clone());
@@ -732,7 +696,6 @@ impl CompiledExpr {
 				let child = self.__new(cast.expr.clone());
 				self.nodes[index].out_is_scalar = self.nodes[child].out_is_scalar;
 				self.nodes[index].out_shape = self.nodes[child].out_shape.clone();
-				self.nodes[index].merge_group = self.nodes[child].merge_group;
 				self.nodes[index].reduction_bitmap = self.nodes[child].reduction_bitmap.clone();
 				self.add_child(index, child);
 			},
@@ -740,7 +703,6 @@ impl CompiledExpr {
 				let child = self.__new(unary.expr.clone());
 				self.nodes[index].out_is_scalar = self.nodes[child].out_is_scalar;
 				self.nodes[index].out_shape = self.nodes[child].out_shape.clone();
-				self.nodes[index].merge_group = self.nodes[child].merge_group;
 				self.nodes[index].reduction_bitmap = self.nodes[child].reduction_bitmap.clone();
 				self.add_child(index, child);
 			},
@@ -755,32 +717,18 @@ impl CompiledExpr {
 					&self.nodes[left_child].reduction_bitmap,
 					&self.nodes[right_child].reduction_bitmap,
 				);
-				if self.nodes[left_child].out_is_scalar {
-					self.nodes[index].out_is_scalar = self.nodes[right_child].out_is_scalar;
-					if !self.nodes[index].out_is_scalar {
-						self.nodes[index].out_is_scalar = false;
+				let left_is_scalar = self.nodes[left_child].out_is_scalar;
+				let right_is_scalar = self.nodes[right_child].out_is_scalar;
+				if left_is_scalar {
+					self.nodes[index].out_is_scalar = right_is_scalar;
+					if !right_is_scalar {
 						self.nodes[index].out_shape = self.nodes[right_child].out_shape.clone();
-						self.nodes[index].merge_group = self.nodes[right_child].merge_group;
 					}
 				} else {
 					self.nodes[index].out_is_scalar = false;
-					if self.nodes[right_child].out_is_scalar {
+					if right_is_scalar {
 						self.nodes[index].out_shape = self.nodes[left_child].out_shape.clone();
-						self.nodes[index].merge_group = self.nodes[left_child].merge_group;
 					} else {
-						// shape group
-						self.nodes[index].merge_group =
-							if (self.nodes[right_child].merge_group as isize) < 0 {
-								self.nodes[left_child].merge_group
-							} else if (self.nodes[left_child].merge_group as isize) < 0 {
-								self.nodes[right_child].merge_group
-							} else {
-								self.merge_group_builder.union(
-									self.nodes[left_child].merge_group,
-									self.nodes[right_child].merge_group,
-								)
-							};
-						// shape
 						self.nodes[index].out_shape = ShapeConstraint::bin_op(
 							&self.nodes[left_child].out_shape,
 							&self.nodes[right_child].out_shape,
@@ -790,14 +738,14 @@ impl CompiledExpr {
 			},
 			Expr::Reduction(reduction) => {
 				let reduction_expr = reduction.expr.clone();
-				self.nodes[index].reduction_head = true;
+				self.nodes[index].is_reduction_head = true;
 				let child = self.__new(reduction_expr);
+				self.nodes[child].is_reduction_input = true;
 				self.add_child(index, child);
 				self.nodes[index].reduction_bitmap =
 					self.nodes[child].reduction_bitmap.clone_and_set(index.raw);
 				self.nodes[index].out_is_scalar = self.nodes[child].out_is_scalar;
 				if !self.nodes[index].out_is_scalar {
-					self.nodes[index].merge_group = usize::MAX;
 					self.nodes[index].out_shape = self.nodes[child].out_shape.clone();
 					self.nodes[index]
 						.out_shape
@@ -837,23 +785,31 @@ impl CompiledExpr {
 			if node.is_input() {
 				continue;
 			}
-			writeln!(w, "\t\t{node_id} [label=<{}{extra_label}>];", node.graphviz_label())?;
-			if node.is_fork() {
+			writeln!(w, "\t\t{node_id} [label=<{}{extra_label}>];", node.graphviz_label(),)?;
+			if node.is_reduction_head() {
+				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccccff\"];")?;
+			} else if node.is_fork() {
 				if node.parents.is_empty() && !self.roots.contains(&i) {
 					// dead code
 					writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#cccccc\"];")?;
 				} else {
 					writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ffcccc\"];")?;
 				}
-			} else if node.is_reduction_head() {
-				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccccff\"];")?;
 			} else if node.is_reduction() {
 				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#f0f0ff\"];")?;
 			} else if node.is_captured() {
 				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccffcc\"];")?;
 			}
 			if node.fragment.is_valid() {
-				writeln!(w, "subgraph cluster_{} {{ {node_id} }}", node.fragment.raw)?;
+				let fragment_kind = match self.fragments[node.fragment].kind {
+					FragmentKind::ElementWise => "Element-wise",
+					FragmentKind::Reduction => "Reduction",
+				};
+				writeln!(
+					w,
+					"subgraph cluster_{} {{ label=\"{fragment_kind}\" labelloc=\"b\" labeljust=\"l\" {node_id} }}",
+					node.fragment.raw
+				)?;
 			}
 			for &child_index in &node.children {
 				let child_id = self.graphviz_node_id(child_index);
@@ -886,14 +842,6 @@ impl CompiledExpr {
 			}
 		}
 		for tensor_ref in &self.tensor_ref_vec {
-			let tensor_key = std::ptr::from_ref(tensor_ref.tensor_ref.as_ref());
-			let merge_group =
-				*self.merge_group_map.get(&tensor_key).unwrap_or(&MergeGroupIndex::new_invalid());
-			let extra_label = if merge_group.is_valid() {
-				format!("<br/>group: {}", merge_group.raw)
-			} else {
-				String::new()
-			};
 			let id = self.graphviz_tensor_id(&tensor_ref.tensor_ref);
 			let tensor_name = if let Some(name) = &tensor_ref.tensor_ref.name {
 				name.as_ref().to_string()
@@ -903,7 +851,7 @@ impl CompiledExpr {
 			let color = if tensor_name.starts_with("__tmp__[") { "#00eeee" } else { "#cceecc" };
 			writeln!(
 				w,
-				"\t{id} [label=<<b>Tensor</b><br/><font color='blue'><b>{tensor_name}</b></font>{extra_label}>, shape=box, style=filled, fillcolor=\"{color}\"];",
+				"\t{id} [label=<<b>Tensor</b><br/><font color='blue'><b>{tensor_name}</b></font>>, shape=box, style=filled, fillcolor=\"{color}\"];",
 			)?;
 		}
 		for scalar_ref in self.scalar_ref_map.values() {

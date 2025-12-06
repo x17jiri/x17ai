@@ -248,13 +248,15 @@ fn test1_opt() -> RcExpr {
 	let v_update_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("v_update_coef".into())));
 
 	let v_decayed = v * v_decay_coef;
-	let v_update = (grad2.clone() * grad3).sum() * v_update_coef;
+	let v_update = (grad2.clone() * grad3).sum() * v_update_coef.clone();
+	//let v_update = v_update.sum() * v_update_coef;
 	let new_v = v_decayed + v_update;
 	let new_v = new_v.capture(v_ten);
 	//let new_v = new_v.capture(value_ten.clone());
 
 	let eps = RcExpr::new_scalar_input(ExprScalarRef::new(Some("eps".into())));
 	let v_rsqrt = (new_v.sqrt() + eps).recip();
+	return v_rsqrt;
 
 	let value = RcExpr::new_tensor_input(value_ten.clone());
 	let update_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("update_coef".into())));
@@ -290,8 +292,8 @@ fn test3_softmax() -> RcExpr {
 
 fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let mut comp = test1_opt().compile();
-	let mut comp = test2_rms_norm().compile();
-	let mut comp = test3_softmax().compile();
+	//let mut comp = test2_rms_norm().compile();
+	//let mut comp = test3_softmax().compile();
 
 	let mut graphviz = String::new();
 	comp.print_graphviz(&mut graphviz);
