@@ -82,6 +82,10 @@ impl<Index: IndexTrait, T> IndexVec<Index, T> {
 		index
 	}
 
+	pub fn next_index(&self) -> Index {
+		Index::from_raw(self.raw.len())
+	}
+
 	pub fn indexes(&self) -> impl Iterator<Item = Index> + use<Index, T> {
 		let len = self.raw.len();
 		(0..len).map(Index::from_raw)

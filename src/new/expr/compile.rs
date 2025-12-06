@@ -26,6 +26,7 @@ use super::{
 	ExprUnaryKind, RcExpr,
 };
 use crate::define_index_type;
+use crate::new::expr::{ExprCapture, ExprCast};
 use crate::tensor::HasDType;
 use crate::util::index_vec::IndexVec;
 
@@ -394,11 +395,10 @@ define_index_type!(TensorNodeIndex);
 type TensorNodeVec = IndexVec<TensorNodeIndex, TensorNode>;
 
 pub struct CompiledExpr {
-	nodes: NodeVec,
+	postorder: NodeVec,
 	roots: Vec<NodeIndex>,
 	fragments: FragmentVec,
 	captures: HashSet<*const ExprTensorRef>,
-	processed: HashMap<*const Expr, NodeIndex>,
 	scalar_ref_map: HashMap<*const ExprScalarRef, Rc<ExprScalarRef>>,
 	tensor_ref_map: HashMap<*const ExprTensorRef, TensorNodeIndex>,
 	tensor_ref_vec: TensorNodeVec,
@@ -407,20 +407,19 @@ pub struct CompiledExpr {
 impl CompiledExpr {
 	pub fn new(expr: RcExpr) -> Self {
 		let mut comp = Self {
-			nodes: NodeVec::with_capacity(32),
+			postorder: NodeVec::with_capacity(32),
 			roots: Vec::with_capacity(1),
 			fragments: FragmentVec::new(),
 			captures: HashSet::new(),
-			processed: HashMap::new(),
 			scalar_ref_map: HashMap::new(),
 			tensor_ref_map: HashMap::new(),
 			tensor_ref_vec: TensorNodeVec::with_capacity(4),
 		};
-		let root = comp.__new(expr.rc_expr);
+		let root = comp.__new(expr.rc_expr, &mut HashMap::new());
 		comp.roots.push(root);
 		comp.roots.sort();
 		comp.roots.dedup();
-		comp.roots.retain(|&r| comp.nodes[r].parents.is_empty());
+		comp.roots.retain(|&r| comp.postorder[r].parents.is_empty());
 		comp.remove_dead_code();
 		comp.move_reduction_heads();
 		comp.mark_fragments();
@@ -472,15 +471,15 @@ impl CompiledExpr {
 	}
 
 	fn __find_live_code(&mut self, node: NodeIndex, parent: NodeIndex) {
-		if let Some(pos) = self.nodes[node].parents.iter().position(|&p| p == parent) {
-			self.nodes[node].parents.swap_remove(pos);
+		if let Some(pos) = self.postorder[node].parents.iter().position(|&p| p == parent) {
+			self.postorder[node].parents.swap_remove(pos);
 		}
-		if !self.nodes[node].parents.is_empty() {
+		if !self.postorder[node].parents.is_empty() {
 			return;
 		}
-		if self.nodes[node].capture.is_empty() {
-			for child in 0..self.nodes[node].children.len() {
-				self.__find_live_code(self.nodes[node].children[child], node);
+		if self.postorder[node].capture.is_empty() {
+			for child in 0..self.postorder[node].children.len() {
+				self.__find_live_code(self.postorder[node].children[child], node);
 			}
 		} else {
 			self.roots.push(node);
@@ -488,26 +487,28 @@ impl CompiledExpr {
 	}
 
 	fn move_reduction_heads(&mut self) {
-		for mut i in self.nodes.indexes() {
-			if !self.nodes[i].is_reduction() {
+		for mut i in self.postorder.indexes() {
+			if !self.postorder[i].is_reduction() {
 				continue;
 			}
-			self.nodes[i].is_reduction_head = false;
-			while let [one_parent] = &self.nodes[i].parents[..]
+			self.postorder[i].is_reduction_head = false;
+			while let [one_parent] = &self.postorder[i].parents[..]
 				&& let parent = *one_parent
-				&& !self.nodes[i].is_reduction_input()
-				&& self.nodes[parent].out_shape.last() == Some(1)
-				&& self.nodes[i].reduction_bitmap.is_equal(&self.nodes[parent].reduction_bitmap)
+				&& !self.postorder[i].is_reduction_input()
+				&& self.postorder[parent].out_shape.last() == Some(1)
+				&& self.postorder[i]
+					.reduction_bitmap
+					.is_equal(&self.postorder[parent].reduction_bitmap)
 			{
 				i = parent;
 			}
-			self.nodes[i].is_reduction_head = true;
+			self.postorder[i].is_reduction_head = true;
 		}
 	}
 
 	fn __mark_fragments(&mut self, mut frag: FragmentIndex, node: NodeIndex) {
 		let is_root = !frag.is_valid();
-		if let Expr::Input(input) = self.nodes[node].expr.as_ref() {
+		if let Expr::Input(input) = self.postorder[node].expr.as_ref() {
 			assert!(!is_root);
 			match input {
 				ExprInput::Scalar(scalar_ref) => {
@@ -519,10 +520,10 @@ impl CompiledExpr {
 			}
 			return;
 		}
-		if self.nodes[node].is_fragment_head() {
-			if self.nodes[node].fragment.is_valid() {
+		if self.postorder[node].is_fragment_head() {
+			if self.postorder[node].fragment.is_valid() {
 				if !is_root {
-					let child_frag = self.nodes[node].fragment;
+					let child_frag = self.postorder[node].fragment;
 					self.fragments[child_frag].input_into.insert(frag);
 				}
 				return;
@@ -530,7 +531,7 @@ impl CompiledExpr {
 			let child_frag = self.fragments.push(Fragment {
 				is_root,
 				head: node,
-				kind: if self.nodes[node].is_reduction_head() {
+				kind: if self.postorder[node].is_reduction_head() {
 					FragmentKind::Reduction
 				} else {
 					FragmentKind::ElementWise
@@ -546,18 +547,18 @@ impl CompiledExpr {
 			});
 			frag = child_frag;
 		} else {
-			assert!(!self.nodes[node].fragment.is_valid());
+			assert!(!self.postorder[node].fragment.is_valid());
 		}
-		for i in 0..self.nodes[node].capture.len() {
-			self.fragments[frag].add_tensor_output(&self.nodes[node].capture[i]);
+		for i in 0..self.postorder[node].capture.len() {
+			self.fragments[frag].add_tensor_output(&self.postorder[node].capture[i]);
 		}
-		if self.nodes[node].is_reduction() {
+		if self.postorder[node].is_reduction() {
 			assert!(!self.fragments[frag].reduction.is_valid());
 			self.fragments[frag].reduction = node;
 		}
-		self.nodes[node].fragment = frag;
-		for i in 0..self.nodes[node].children.len() {
-			self.__mark_fragments(frag, self.nodes[node].children[i]);
+		self.postorder[node].fragment = frag;
+		for i in 0..self.postorder[node].children.len() {
+			self.__mark_fragments(frag, self.postorder[node].children[i]);
 		}
 	}
 
@@ -571,7 +572,7 @@ impl CompiledExpr {
 		let mut cnt = 0;
 		for i in self.fragments.indexes() {
 			let f = &self.fragments[i];
-			if self.nodes[f.head].is_captured() {
+			if self.postorder[f.head].is_captured() {
 				continue;
 			}
 			let tensor_ref = Rc::new(ExprTensorRef {
@@ -590,29 +591,34 @@ impl CompiledExpr {
 			});
 			self.tensor_ref_map.insert(key, index);
 
-			self.nodes[f.head].capture.push(tensor_ref);
+			self.postorder[f.head].capture.push(tensor_ref);
 		}
-	}
-
-	fn add_child(&mut self, parent: NodeIndex, child: NodeIndex) {
-		self.nodes[parent].children.push(child);
-		self.nodes[child].parents.push(parent);
 	}
 
 	#[allow(clippy::too_many_lines)]
 	#[allow(clippy::collapsible_else_if)]
 	#[allow(clippy::manual_assert)]
 	#[allow(clippy::panic)]
-	pub fn __new(&mut self, expr: Rc<Expr>) -> NodeIndex {
+	pub fn __new(
+		&mut self,
+		mut expr: Rc<Expr>,
+		visited: &mut HashMap<*const Expr, NodeIndex>,
+	) -> NodeIndex {
 		let expr_key = std::ptr::from_ref(expr.as_ref());
-		if let Some(index) = self.processed.get(&expr_key) {
+		if let Some(index) = visited.get(&expr_key) {
 			return *index;
 		}
 
+		let out_is_scalar: bool;
+		let out_shape: ShapeConstraint;
+		let reduction_bitmap: ReductionBitmap;
+		let children: Vec<NodeIndex>;
+		let mut capture: Vec<Rc<ExprTensorRef>> = Vec::new();
+		let mut is_reduction_head = false;
 		match expr.as_ref() {
-			Expr::Capture(capture) => {
-				let child = self.__new(capture.expr.clone());
-				let tensor_ref = capture.tensor_ref.clone();
+			Expr::Capture(ExprCapture { expr: x, tensor_ref }) => {
+				let child = self.__new(x.clone(), visited);
+				let tensor_ref = tensor_ref.clone();
 				if !self.captures.insert(std::ptr::from_ref(tensor_ref.as_ref())) {
 					panic!(
 						"CompiledExpr::new(): Capturing multiple values into the same tensor '{}'.",
@@ -620,139 +626,128 @@ impl CompiledExpr {
 					);
 				}
 				self.add_tensor_ref(tensor_ref.clone(), false, true);
-				let child_shape_constraint = &self.nodes[child].out_shape;
+				let child_shape_constraint = &self.postorder[child].out_shape;
 				let capture_shape_constraint = tensor_ref.shape_constraint();
-				self.nodes[child].out_shape =
+				self.postorder[child].out_shape =
 					ShapeConstraint::capture(child_shape_constraint, &capture_shape_constraint);
-				if self.nodes[child].is_input() {
-					let id_expr = Rc::new(Expr::Unary(ExprUnary {
-						kind: ExprUnaryKind::Identity,
-						expr: self.nodes[child].expr.clone(),
-					}));
-					let id = self.nodes.push(Node {
-						expr: id_expr,
-						parents: Vec::new(),
-						children: Vec::new(),
-						capture: Vec::new(),
-
-						out_is_scalar: false,
-						out_shape: ShapeConstraint::new(),
-						is_reduction_head: false,
-						is_reduction_input: false,
-						reduction_bitmap: ReductionBitmap::new(),
-						fragment: FragmentIndex::new_invalid(),
-					});
-					self.add_child(id, child);
-					self.nodes[id].capture.push(tensor_ref);
-					self.roots.push(id);
-				} else {
-					self.nodes[child].capture.push(tensor_ref);
+				if !self.postorder[child].is_input() {
+					self.postorder[child].capture.push(tensor_ref);
+					visited.insert(expr_key, child);
+					return child;
 				}
-				self.processed.insert(expr_key, child);
-				return child;
+				expr = Rc::new(Expr::Unary(ExprUnary {
+					kind: ExprUnaryKind::Identity,
+					expr: self.postorder[child].expr.clone(),
+				}));
+				out_is_scalar = self.postorder[child].out_is_scalar;
+				out_shape = self.postorder[child].out_shape.clone();
+				reduction_bitmap = ReductionBitmap::new();
+				children = vec![child];
+				capture.push(tensor_ref);
+				self.roots.push(self.postorder.next_index());
 			},
 			Expr::First(first) => {
-				let first_child = self.__new(first.lhs.clone());
-				let second_child = self.__new(first.rhs.clone());
-				self.processed.insert(expr_key, first_child);
+				let first_child = self.__new(first.lhs.clone(), visited);
+				let second_child = self.__new(first.rhs.clone(), visited);
+				visited.insert(expr_key, first_child);
 				self.roots.push(second_child);
 				return first_child;
 			},
-			_ => {},
-		}
-
-		let index = self.nodes.push(Node {
-			expr,
-			parents: Vec::new(),
-			children: Vec::new(),
-			capture: Vec::new(),
-
-			out_is_scalar: false,
-			out_shape: ShapeConstraint::new(),
-			is_reduction_head: false,
-			is_reduction_input: false,
-			reduction_bitmap: ReductionBitmap::new(),
-			fragment: FragmentIndex::new_invalid(),
-		});
-		self.processed.insert(expr_key, index);
-		let expr_ref = self.nodes[index].expr.as_ref();
-		match expr_ref {
 			Expr::Input(input) => match input {
 				ExprInput::Tensor(tensor_ref) => {
-					let tensor_ref = tensor_ref.clone();
-					let shape_constraint = tensor_ref.shape_constraint();
-					self.add_tensor_ref(tensor_ref, true, false);
-					self.nodes[index].out_shape = shape_constraint;
+					out_is_scalar = false;
+					out_shape = tensor_ref.shape_constraint();
+					reduction_bitmap = ReductionBitmap::new();
+					children = Vec::new();
+					self.add_tensor_ref(tensor_ref.clone(), true, false);
 				},
 				ExprInput::Scalar(scalar_ref) => {
+					out_is_scalar = true;
+					out_shape = ShapeConstraint::new();
+					reduction_bitmap = ReductionBitmap::new();
+					children = Vec::new();
 					self.add_scalar_ref(scalar_ref.clone());
-					self.nodes[index].out_is_scalar = true;
 				},
 			},
-			Expr::Capture(..) | Expr::First(..) => {
-				unreachable!() // handled above
-			},
-			Expr::Cast(cast) => {
-				let child = self.__new(cast.expr.clone());
-				self.nodes[index].out_is_scalar = self.nodes[child].out_is_scalar;
-				self.nodes[index].out_shape = self.nodes[child].out_shape.clone();
-				self.nodes[index].reduction_bitmap = self.nodes[child].reduction_bitmap.clone();
-				self.add_child(index, child);
-			},
-			Expr::Unary(unary) => {
-				let child = self.__new(unary.expr.clone());
-				self.nodes[index].out_is_scalar = self.nodes[child].out_is_scalar;
-				self.nodes[index].out_shape = self.nodes[child].out_shape.clone();
-				self.nodes[index].reduction_bitmap = self.nodes[child].reduction_bitmap.clone();
-				self.add_child(index, child);
+			Expr::Cast(ExprCast { expr, .. }) | Expr::Unary(ExprUnary { expr, .. }) => {
+				let child = self.__new(expr.clone(), visited);
+				out_is_scalar = self.postorder[child].out_is_scalar;
+				out_shape = self.postorder[child].out_shape.clone();
+				reduction_bitmap = self.postorder[child].reduction_bitmap.clone();
+				children = vec![child];
 			},
 			Expr::Binary(binary) => {
 				let lhs = binary.lhs.clone();
 				let rhs = binary.rhs.clone();
-				let left_child = self.__new(lhs);
-				let right_child = self.__new(rhs);
-				self.add_child(index, left_child);
-				self.add_child(index, right_child);
-				self.nodes[index].reduction_bitmap = ReductionBitmap::union(
-					&self.nodes[left_child].reduction_bitmap,
-					&self.nodes[right_child].reduction_bitmap,
+				let left_child = self.__new(lhs, visited);
+				let right_child = self.__new(rhs, visited);
+				reduction_bitmap = ReductionBitmap::union(
+					&self.postorder[left_child].reduction_bitmap,
+					&self.postorder[right_child].reduction_bitmap,
 				);
-				let left_is_scalar = self.nodes[left_child].out_is_scalar;
-				let right_is_scalar = self.nodes[right_child].out_is_scalar;
+				let left_is_scalar = self.postorder[left_child].out_is_scalar;
+				let right_is_scalar = self.postorder[right_child].out_is_scalar;
 				if left_is_scalar {
-					self.nodes[index].out_is_scalar = right_is_scalar;
-					if !right_is_scalar {
-						self.nodes[index].out_shape = self.nodes[right_child].out_shape.clone();
+					out_is_scalar = right_is_scalar;
+					if right_is_scalar {
+						out_shape = ShapeConstraint::new();
+					} else {
+						out_shape = self.postorder[right_child].out_shape.clone();
 					}
 				} else {
-					self.nodes[index].out_is_scalar = false;
+					out_is_scalar = false;
 					if right_is_scalar {
-						self.nodes[index].out_shape = self.nodes[left_child].out_shape.clone();
+						out_shape = self.postorder[left_child].out_shape.clone();
 					} else {
-						self.nodes[index].out_shape = ShapeConstraint::bin_op(
-							&self.nodes[left_child].out_shape,
-							&self.nodes[right_child].out_shape,
+						out_shape = ShapeConstraint::bin_op(
+							&self.postorder[left_child].out_shape,
+							&self.postorder[right_child].out_shape,
 						);
 					}
 				}
+				children = vec![left_child, right_child];
 			},
 			Expr::Reduction(reduction) => {
 				let reduction_expr = reduction.expr.clone();
-				self.nodes[index].is_reduction_head = true;
-				let child = self.__new(reduction_expr);
-				self.nodes[child].is_reduction_input = true;
-				self.add_child(index, child);
-				self.nodes[index].reduction_bitmap =
-					self.nodes[child].reduction_bitmap.clone_and_set(index.raw);
-				self.nodes[index].out_is_scalar = self.nodes[child].out_is_scalar;
-				if !self.nodes[index].out_is_scalar {
-					self.nodes[index].out_shape = self.nodes[child].out_shape.clone();
-					self.nodes[index]
-						.out_shape
+				is_reduction_head = true;
+				let child = self.__new(reduction_expr, visited);
+				self.postorder[child].is_reduction_input = true;
+				reduction_bitmap = self.postorder[child]
+					.reduction_bitmap
+					.clone_and_set(self.postorder.next_index().raw);
+				out_is_scalar = self.postorder[child].out_is_scalar;
+				if out_is_scalar {
+					out_shape = ShapeConstraint::new();
+				} else {
+					let mut shape = self.postorder[child].out_shape.clone();
+					shape
 						.set_last(Some(DimConstraint { source: "reduction".to_string(), size: 1 }));
+					out_shape = shape;
 				}
+				children = vec![child];
 			},
 		}
+
+		let next_index = self.postorder.next_index();
+		for &child in &children {
+			self.postorder[child].parents.push(next_index);
+		}
+
+		let index = self.postorder.push(Node {
+			expr,
+			parents: Vec::new(),
+			children,
+			capture,
+
+			out_is_scalar,
+			out_shape,
+			is_reduction_head,
+			is_reduction_input: false,
+			reduction_bitmap,
+			fragment: FragmentIndex::new_invalid(),
+		});
+		debug_assert!(index == next_index);
+		visited.insert(expr_key, index);
 		index
 	}
 
@@ -765,7 +760,7 @@ impl CompiledExpr {
 	}
 
 	fn graphviz_node_id(&self, node_index: NodeIndex) -> String {
-		match self.nodes[node_index].expr.as_ref() {
+		match self.postorder[node_index].expr.as_ref() {
 			Expr::Input(ExprInput::Tensor(tensor_ref)) => self.graphviz_tensor_id(tensor_ref),
 			Expr::Input(ExprInput::Scalar(scalar_ref)) => self.graphviz_scalar_id(scalar_ref),
 			_ => {
@@ -778,8 +773,8 @@ impl CompiledExpr {
 		writeln!(w, "digraph G {{")?;
 		//writeln!(w, "\tgraph [splines=line];")?;
 		writeln!(w, "\trankdir=BT;")?;
-		for i in self.nodes.indexes() {
-			let node = &self.nodes[i];
+		for i in self.postorder.indexes() {
+			let node = &self.postorder[i];
 			let node_id = self.graphviz_node_id(i);
 			let extra_label = "";
 			if node.is_input() {
@@ -813,14 +808,14 @@ impl CompiledExpr {
 			}
 			for &child_index in &node.children {
 				let child_id = self.graphviz_node_id(child_index);
-				let label = if self.nodes[child_index].out_is_scalar {
+				let label = if self.postorder[child_index].out_is_scalar {
 					String::new()
 				} else {
-					self.nodes[child_index].out_shape.as_str()
+					self.postorder[child_index].out_shape.as_str()
 				};
 				let extra_style = if node.fragment.is_valid()
-					&& self.nodes[child_index].fragment.is_valid()
-					&& node.fragment != self.nodes[child_index].fragment
+					&& self.postorder[child_index].fragment.is_valid()
+					&& node.fragment != self.postorder[child_index].fragment
 				{
 					", color=red, style=bold"
 				} else {
