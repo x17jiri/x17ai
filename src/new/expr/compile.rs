@@ -222,6 +222,7 @@ impl ShapeConstraint {
 
 //--------------------------------------------------------------------------------------------------
 
+#[allow(clippy::struct_excessive_bools)]
 pub struct Node {
 	pub expr: Rc<Expr>,
 	pub parents: Vec<NodeIndex>,
@@ -234,6 +235,7 @@ pub struct Node {
 	pub is_reduction_input: bool,
 	pub reduction_bitmap: ReductionBitmap,
 	pub fragment: FragmentIndex,
+	pub is_dead: bool,
 }
 
 impl Node {
@@ -396,7 +398,6 @@ type TensorNodeVec = IndexVec<TensorNodeIndex, TensorNode>;
 
 pub struct CompiledExpr {
 	postorder: NodeVec,
-	roots: Vec<NodeIndex>,
 	fragments: FragmentVec,
 	captures: HashSet<*const ExprTensorRef>,
 	scalar_ref_map: HashMap<*const ExprScalarRef, Rc<ExprScalarRef>>,
@@ -408,18 +409,13 @@ impl CompiledExpr {
 	pub fn new(expr: RcExpr) -> Self {
 		let mut comp = Self {
 			postorder: NodeVec::with_capacity(32),
-			roots: Vec::with_capacity(1),
 			fragments: FragmentVec::new(),
 			captures: HashSet::new(),
 			scalar_ref_map: HashMap::new(),
 			tensor_ref_map: HashMap::new(),
 			tensor_ref_vec: TensorNodeVec::with_capacity(4),
 		};
-		let root = comp.__new(expr.rc_expr, &mut HashMap::new());
-		comp.roots.push(root);
-		comp.roots.sort();
-		comp.roots.dedup();
-		comp.roots.retain(|&r| comp.postorder[r].parents.is_empty());
+		let _root = comp.__new(expr.rc_expr, &mut HashMap::new());
 		comp.remove_dead_code();
 		comp.move_reduction_heads();
 		comp.mark_fragments();
@@ -464,25 +460,16 @@ impl CompiledExpr {
 
 	#[allow(clippy::mem_replace_with_default)]
 	fn remove_dead_code(&mut self) {
-		let old_roots = std::mem::replace(&mut self.roots, Vec::new());
-		for root in old_roots {
-			self.__find_live_code(root, NodeIndex::new_invalid());
-		}
-	}
-
-	fn __find_live_code(&mut self, node: NodeIndex, parent: NodeIndex) {
-		if let Some(pos) = self.postorder[node].parents.iter().position(|&p| p == parent) {
-			self.postorder[node].parents.swap_remove(pos);
-		}
-		if !self.postorder[node].parents.is_empty() {
-			return;
-		}
-		if self.postorder[node].capture.is_empty() {
-			for child in 0..self.postorder[node].children.len() {
-				self.__find_live_code(self.postorder[node].children[child], node);
+		for i in self.postorder.indexes().rev() {
+			let mut parents = std::mem::replace(&mut self.postorder[i].parents, Vec::new());
+			parents.retain(|&p| !self.postorder[p].is_dead);
+			if parents.is_empty() {
+				if self.postorder[i].capture.is_empty() {
+					self.postorder[i].is_dead = true;
+				}
+			} else {
+				self.postorder[i].parents = parents;
 			}
-		} else {
-			self.roots.push(node);
 		}
 	}
 
@@ -635,6 +622,8 @@ impl CompiledExpr {
 					visited.insert(expr_key, child);
 					return child;
 				}
+				// Insert `Identity` node to perform the capture.
+				// This node is also a root.
 				expr = Rc::new(Expr::Unary(ExprUnary {
 					kind: ExprUnaryKind::Identity,
 					expr: self.postorder[child].expr.clone(),
@@ -644,13 +633,11 @@ impl CompiledExpr {
 				reduction_bitmap = ReductionBitmap::new();
 				children = vec![child];
 				capture.push(tensor_ref);
-				self.roots.push(self.postorder.next_index());
 			},
 			Expr::First(first) => {
 				let first_child = self.__new(first.lhs.clone(), visited);
 				let second_child = self.__new(first.rhs.clone(), visited);
 				visited.insert(expr_key, first_child);
-				self.roots.push(second_child);
 				return first_child;
 			},
 			Expr::Input(input) => match input {
@@ -745,6 +732,7 @@ impl CompiledExpr {
 			is_reduction_input: false,
 			reduction_bitmap,
 			fragment: FragmentIndex::new_invalid(),
+			is_dead: false,
 		});
 		debug_assert!(index == next_index);
 		visited.insert(expr_key, index);
@@ -784,8 +772,7 @@ impl CompiledExpr {
 			if node.is_reduction_head() {
 				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccccff\"];")?;
 			} else if node.is_fork() {
-				if node.parents.is_empty() && !self.roots.contains(&i) {
-					// dead code
+				if node.is_dead {
 					writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#cccccc\"];")?;
 				} else {
 					writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ffcccc\"];")?;
