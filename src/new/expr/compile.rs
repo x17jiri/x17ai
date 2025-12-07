@@ -234,7 +234,6 @@ pub struct Node {
 	pub out_shape: ShapeConstraint,
 	pub is_reduction_head: bool,
 	pub is_reduction_input: bool,
-	pub reduction_bitmap: ReductionBitmap,
 	pub fragment: FragmentIndex,
 	pub is_dead: bool,
 }
@@ -466,7 +465,6 @@ impl Compilation {
 
 		let out_is_scalar: bool;
 		let out_shape: ShapeConstraint;
-		let reduction_bitmap: ReductionBitmap;
 		let children: Vec<NodeIndex>;
 		let mut capture: Vec<Rc<ExprTensorRef>> = Vec::new();
 		match expr.as_ref() {
@@ -497,7 +495,6 @@ impl Compilation {
 				}));
 				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
 				out_shape = self.nodes_postorder[child].out_shape.clone();
-				reduction_bitmap = ReductionBitmap::new();
 				children = vec![child];
 				capture.push(tensor_ref);
 			},
@@ -511,14 +508,12 @@ impl Compilation {
 				ExprInput::Tensor(tensor_ref) => {
 					out_is_scalar = false;
 					out_shape = tensor_ref.shape_constraint();
-					reduction_bitmap = ReductionBitmap::new();
 					children = Vec::new();
 					self.add_tensor_ref(tensor_ref.clone(), true, false);
 				},
 				ExprInput::Scalar(scalar_ref) => {
 					out_is_scalar = true;
 					out_shape = ShapeConstraint::new();
-					reduction_bitmap = ReductionBitmap::new();
 					children = Vec::new();
 					self.add_scalar_ref(scalar_ref.clone());
 				},
@@ -527,7 +522,6 @@ impl Compilation {
 				let child = self.load_expr(expr.clone(), visited);
 				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
 				out_shape = self.nodes_postorder[child].out_shape.clone();
-				reduction_bitmap = self.nodes_postorder[child].reduction_bitmap.clone();
 				children = vec![child];
 			},
 			Expr::Binary(binary) => {
@@ -535,10 +529,6 @@ impl Compilation {
 				let rhs = binary.rhs.clone();
 				let left_child = self.load_expr(lhs, visited);
 				let right_child = self.load_expr(rhs, visited);
-				reduction_bitmap = ReductionBitmap::union(
-					&self.nodes_postorder[left_child].reduction_bitmap,
-					&self.nodes_postorder[right_child].reduction_bitmap,
-				);
 				let left_is_scalar = self.nodes_postorder[left_child].out_is_scalar;
 				let right_is_scalar = self.nodes_postorder[right_child].out_is_scalar;
 				if left_is_scalar {
@@ -565,9 +555,6 @@ impl Compilation {
 				let reduction_expr = reduction.expr.clone();
 				let child = self.load_expr(reduction_expr, visited);
 				self.nodes_postorder[child].is_reduction_input = true;
-				reduction_bitmap = self.nodes_postorder[child]
-					.reduction_bitmap
-					.clone_and_set(self.nodes_postorder.next_index().raw);
 				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
 				if out_is_scalar {
 					out_shape = ShapeConstraint::new();
@@ -591,12 +578,10 @@ impl Compilation {
 			parents: Vec::new(),
 			children,
 			capture,
-
 			out_is_scalar,
 			out_shape,
 			is_reduction_head: false,
 			is_reduction_input: false,
-			reduction_bitmap,
 			fragment: FragmentIndex::new_invalid(),
 			is_dead: false,
 		});
@@ -656,17 +641,45 @@ impl Compilation {
 	}
 
 	fn find_reduction_heads(&mut self) {
+		let mut reduction_bitmap: Vec<ReductionBitmap> =
+			Vec::with_capacity(self.nodes_postorder.len());
 		'nodes: for parent in self.nodes_postorder.indexes() {
 			if self.nodes_postorder[parent].is_reduction() {
 				self.nodes_postorder[parent].is_reduction_head = true;
+
+				let child = self.nodes_postorder[parent].children[0];
+				reduction_bitmap.push(reduction_bitmap[child.raw].clone_and_set(parent.raw));
 			} else {
+				let children_cnt = self.nodes_postorder[parent].children.len();
+				let current_bitmap = match children_cnt {
+					0 => {
+						reduction_bitmap.push(ReductionBitmap::new());
+						continue 'nodes;
+					},
+					1 => {
+						let child = self.nodes_postorder[parent].children[0];
+						reduction_bitmap.push(reduction_bitmap[child.raw].clone());
+						reduction_bitmap.last().unwrap()
+					},
+					_ => {
+						assert!(children_cnt == 2);
+						let child0 = self.nodes_postorder[parent].children[0];
+						let child1 = self.nodes_postorder[parent].children[1];
+						reduction_bitmap.push(ReductionBitmap::union(
+							&reduction_bitmap[child0.raw],
+							&reduction_bitmap[child1.raw],
+						));
+						reduction_bitmap.last().unwrap()
+					},
+				};
+
 				if self.nodes_postorder[parent].out_shape.last() != Some(1) {
 					continue 'nodes;
 				}
 
 				// Check if we have exactly one child that is a reduction head
 				let mut child = NodeIndex::new_invalid();
-				for c in 0..self.nodes_postorder[parent].children.len() {
+				for c in 0..children_cnt {
 					let child_index = self.nodes_postorder[parent].children[c];
 					if self.nodes_postorder[child_index].is_reduction_head {
 						if child.is_valid() {
@@ -680,9 +693,7 @@ impl Compilation {
 				}
 
 				if self.nodes_postorder[child].parents == [parent]
-					&& self.nodes_postorder[child]
-						.reduction_bitmap
-						.is_equal(&self.nodes_postorder[parent].reduction_bitmap)
+					&& reduction_bitmap[child.raw].is_equal(current_bitmap)
 				{
 					self.nodes_postorder[child].is_reduction_head = false;
 					self.nodes_postorder[parent].is_reduction_head = true;
