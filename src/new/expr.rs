@@ -251,9 +251,9 @@ impl RcExpr {
 		}
 	}
 
-	pub fn compile(self) -> CompiledExpr {
+/*	pub fn compile(self) -> CompiledExpr {
 		CompiledExpr::new(self)
-	}
+	}*/
 }
 
 impl std::ops::Add for RcExpr {

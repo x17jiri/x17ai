@@ -160,6 +160,7 @@ fn laplacian(v: &ArrayView2<f32>) -> Array2<f32> {
 }*/
 
 use x17ai::autograd::{AutogradTensor, LossFn};
+use x17ai::new::expr::compile::Compilation;
 use x17ai::new::expr::{ExprScalarRef, ExprTensorRef, RcExpr};
 use x17ai::new::tensor::TensorLiteral1D;
 use x17ai::nn::ModelContext;
@@ -256,7 +257,7 @@ fn test1_opt() -> RcExpr {
 
 	let eps = RcExpr::new_scalar_input(ExprScalarRef::new(Some("eps".into())));
 	let v_rsqrt = (new_v.sqrt() + eps).recip();
-	return v_rsqrt;
+	//return v_rsqrt;
 
 	let value = RcExpr::new_tensor_input(value_ten.clone());
 	let update_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("update_coef".into())));
@@ -291,7 +292,7 @@ fn test3_softmax() -> RcExpr {
 }
 
 fn main() -> Result<(), ErrPack<TensorOpError>> {
-	let mut comp = test1_opt().compile();
+	let mut comp = Compilation::new(test1_opt());
 	//let mut comp = test2_rms_norm().compile();
 	//let mut comp = test3_softmax().compile();
 

@@ -396,7 +396,7 @@ pub struct TensorNode {
 define_index_type!(TensorNodeIndex);
 type TensorNodeVec = IndexVec<TensorNodeIndex, TensorNode>;
 
-pub struct CompiledExpr {
+pub struct Compilation {
 	nodes_postorder: NodeVec,
 	frag_preorder: FragmentVec,
 	captures: HashSet<*const ExprTensorRef>,
@@ -405,9 +405,35 @@ pub struct CompiledExpr {
 	tensor_ref_vec: TensorNodeVec,
 }
 
+pub struct CompiledExpr {
+	nodes_postorder: NodeVec,
+	frag_preorder: FragmentVec,
+}
+
 impl CompiledExpr {
+	pub fn new(comp: Compilation) -> Self {
+		Self {
+			nodes_postorder: comp.nodes_postorder,
+			frag_preorder: comp.frag_preorder,
+		}
+	}
+
+	pub fn nodes(&self) -> &NodeVec {
+		&self.nodes_postorder
+	}
+
+	pub fn fragments(&self) -> &FragmentVec {
+		&self.frag_preorder
+	}
+
+	pub fn fragments_postorder(&self) -> impl DoubleEndedIterator<Item = FragmentIndex> {
+		self.frag_preorder.indexes().rev()
+	}
+}
+
+impl Compilation {
 	pub fn new(expr: RcExpr) -> Self {
-		let mut comp = Self {
+		let mut comp = Compilation {
 			nodes_postorder: NodeVec::with_capacity(32),
 			frag_preorder: FragmentVec::new(),
 			captures: HashSet::new(),
@@ -415,12 +441,168 @@ impl CompiledExpr {
 			tensor_ref_map: HashMap::new(),
 			tensor_ref_vec: TensorNodeVec::with_capacity(4),
 		};
-		let _root = comp.__new(expr.rc_expr, &mut HashMap::new());
+		let _root = comp.load_expr(expr.rc_expr, &mut HashMap::new());
 		comp.remove_dead_code();
-		comp.move_reduction_heads();
+		comp.find_reduction_heads();
 		comp.mark_fragments();
 		comp.add_temp_captures();
 		comp
+	}
+
+	#[allow(clippy::too_many_lines)]
+	#[allow(clippy::collapsible_else_if)]
+	#[allow(clippy::manual_assert)]
+	#[allow(clippy::panic)]
+	// TODO - refactor to make non recursive
+	fn load_expr(
+		&mut self,
+		mut expr: Rc<Expr>,
+		visited: &mut HashMap<*const Expr, NodeIndex>,
+	) -> NodeIndex {
+		let expr_key = std::ptr::from_ref(expr.as_ref());
+		if let Some(index) = visited.get(&expr_key) {
+			return *index;
+		}
+
+		let out_is_scalar: bool;
+		let out_shape: ShapeConstraint;
+		let reduction_bitmap: ReductionBitmap;
+		let children: Vec<NodeIndex>;
+		let mut capture: Vec<Rc<ExprTensorRef>> = Vec::new();
+		match expr.as_ref() {
+			Expr::Capture(ExprCapture { expr: x, tensor_ref }) => {
+				let child = self.load_expr(x.clone(), visited);
+				let tensor_ref = tensor_ref.clone();
+				if !self.captures.insert(std::ptr::from_ref(tensor_ref.as_ref())) {
+					panic!(
+						"CompiledExpr::new(): Capturing multiple values into the same tensor '{}'.",
+						tensor_ref.name.as_deref().unwrap_or("unnamed tensor")
+					);
+				}
+				self.add_tensor_ref(tensor_ref.clone(), false, true);
+				let child_shape_constraint = &self.nodes_postorder[child].out_shape;
+				let capture_shape_constraint = tensor_ref.shape_constraint();
+				self.nodes_postorder[child].out_shape =
+					ShapeConstraint::capture(child_shape_constraint, &capture_shape_constraint);
+				if !self.nodes_postorder[child].is_input() {
+					self.nodes_postorder[child].capture.push(tensor_ref);
+					visited.insert(expr_key, child);
+					return child;
+				}
+				// Insert `Identity` node to perform the capture.
+				// This node is also a root.
+				expr = Rc::new(Expr::Unary(ExprUnary {
+					kind: ExprUnaryKind::Identity,
+					expr: self.nodes_postorder[child].expr.clone(),
+				}));
+				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
+				out_shape = self.nodes_postorder[child].out_shape.clone();
+				reduction_bitmap = ReductionBitmap::new();
+				children = vec![child];
+				capture.push(tensor_ref);
+			},
+			Expr::First(first) => {
+				let first_child = self.load_expr(first.lhs.clone(), visited);
+				let _second_child = self.load_expr(first.rhs.clone(), visited);
+				visited.insert(expr_key, first_child);
+				return first_child;
+			},
+			Expr::Input(input) => match input {
+				ExprInput::Tensor(tensor_ref) => {
+					out_is_scalar = false;
+					out_shape = tensor_ref.shape_constraint();
+					reduction_bitmap = ReductionBitmap::new();
+					children = Vec::new();
+					self.add_tensor_ref(tensor_ref.clone(), true, false);
+				},
+				ExprInput::Scalar(scalar_ref) => {
+					out_is_scalar = true;
+					out_shape = ShapeConstraint::new();
+					reduction_bitmap = ReductionBitmap::new();
+					children = Vec::new();
+					self.add_scalar_ref(scalar_ref.clone());
+				},
+			},
+			Expr::Cast(ExprCast { expr, .. }) | Expr::Unary(ExprUnary { expr, .. }) => {
+				let child = self.load_expr(expr.clone(), visited);
+				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
+				out_shape = self.nodes_postorder[child].out_shape.clone();
+				reduction_bitmap = self.nodes_postorder[child].reduction_bitmap.clone();
+				children = vec![child];
+			},
+			Expr::Binary(binary) => {
+				let lhs = binary.lhs.clone();
+				let rhs = binary.rhs.clone();
+				let left_child = self.load_expr(lhs, visited);
+				let right_child = self.load_expr(rhs, visited);
+				reduction_bitmap = ReductionBitmap::union(
+					&self.nodes_postorder[left_child].reduction_bitmap,
+					&self.nodes_postorder[right_child].reduction_bitmap,
+				);
+				let left_is_scalar = self.nodes_postorder[left_child].out_is_scalar;
+				let right_is_scalar = self.nodes_postorder[right_child].out_is_scalar;
+				if left_is_scalar {
+					out_is_scalar = right_is_scalar;
+					if right_is_scalar {
+						out_shape = ShapeConstraint::new();
+					} else {
+						out_shape = self.nodes_postorder[right_child].out_shape.clone();
+					}
+				} else {
+					out_is_scalar = false;
+					if right_is_scalar {
+						out_shape = self.nodes_postorder[left_child].out_shape.clone();
+					} else {
+						out_shape = ShapeConstraint::bin_op(
+							&self.nodes_postorder[left_child].out_shape,
+							&self.nodes_postorder[right_child].out_shape,
+						);
+					}
+				}
+				children = vec![left_child, right_child];
+			},
+			Expr::Reduction(reduction) => {
+				let reduction_expr = reduction.expr.clone();
+				let child = self.load_expr(reduction_expr, visited);
+				self.nodes_postorder[child].is_reduction_input = true;
+				reduction_bitmap = self.nodes_postorder[child]
+					.reduction_bitmap
+					.clone_and_set(self.nodes_postorder.next_index().raw);
+				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
+				if out_is_scalar {
+					out_shape = ShapeConstraint::new();
+				} else {
+					let mut shape = self.nodes_postorder[child].out_shape.clone();
+					shape
+						.set_last(Some(DimConstraint { source: "reduction".to_string(), size: 1 }));
+					out_shape = shape;
+				}
+				children = vec![child];
+			},
+		}
+
+		let next_index = self.nodes_postorder.next_index();
+		for &child in &children {
+			self.nodes_postorder[child].parents.push(next_index);
+		}
+
+		let index = self.nodes_postorder.push(Node {
+			expr,
+			parents: Vec::new(),
+			children,
+			capture,
+
+			out_is_scalar,
+			out_shape,
+			is_reduction_head: false,
+			is_reduction_input: false,
+			reduction_bitmap,
+			fragment: FragmentIndex::new_invalid(),
+			is_dead: false,
+		});
+		debug_assert!(index == next_index);
+		visited.insert(expr_key, index);
+		index
 	}
 
 	fn add_scalar_ref(&mut self, scalar_ref: Rc<ExprScalarRef>) {
@@ -473,23 +655,39 @@ impl CompiledExpr {
 		}
 	}
 
-	fn move_reduction_heads(&mut self) {
-		for mut i in self.nodes_postorder.indexes() {
-			if !self.nodes_postorder[i].is_reduction() {
-				continue;
+	fn find_reduction_heads(&mut self) {
+		'nodes: for parent in self.nodes_postorder.indexes() {
+			if self.nodes_postorder[parent].is_reduction() {
+				self.nodes_postorder[parent].is_reduction_head = true;
+			} else {
+				if self.nodes_postorder[parent].out_shape.last() != Some(1) {
+					continue 'nodes;
+				}
+
+				// Check if we have exactly one child that is a reduction head
+				let mut child = NodeIndex::new_invalid();
+				for c in 0..self.nodes_postorder[parent].children.len() {
+					let child_index = self.nodes_postorder[parent].children[c];
+					if self.nodes_postorder[child_index].is_reduction_head {
+						if child.is_valid() {
+							continue 'nodes;
+						}
+						child = child_index;
+					}
+				}
+				if !child.is_valid() {
+					continue 'nodes;
+				}
+
+				if self.nodes_postorder[child].parents == [parent]
+					&& self.nodes_postorder[child]
+						.reduction_bitmap
+						.is_equal(&self.nodes_postorder[parent].reduction_bitmap)
+				{
+					self.nodes_postorder[child].is_reduction_head = false;
+					self.nodes_postorder[parent].is_reduction_head = true;
+				}
 			}
-			self.nodes_postorder[i].is_reduction_head = false;
-			while let [one_parent] = &self.nodes_postorder[i].parents[..]
-				&& let parent = *one_parent
-				&& !self.nodes_postorder[i].is_reduction_input()
-				&& self.nodes_postorder[parent].out_shape.last() == Some(1)
-				&& self.nodes_postorder[i]
-					.reduction_bitmap
-					.is_equal(&self.nodes_postorder[parent].reduction_bitmap)
-			{
-				i = parent;
-			}
-			self.nodes_postorder[i].is_reduction_head = true;
 		}
 	}
 
@@ -581,163 +779,6 @@ impl CompiledExpr {
 
 			self.nodes_postorder[f.head].capture.push(tensor_ref);
 		}
-	}
-
-	#[allow(clippy::too_many_lines)]
-	#[allow(clippy::collapsible_else_if)]
-	#[allow(clippy::manual_assert)]
-	#[allow(clippy::panic)]
-	pub fn __new(
-		&mut self,
-		mut expr: Rc<Expr>,
-		visited: &mut HashMap<*const Expr, NodeIndex>,
-	) -> NodeIndex {
-		let expr_key = std::ptr::from_ref(expr.as_ref());
-		if let Some(index) = visited.get(&expr_key) {
-			return *index;
-		}
-
-		let out_is_scalar: bool;
-		let out_shape: ShapeConstraint;
-		let reduction_bitmap: ReductionBitmap;
-		let children: Vec<NodeIndex>;
-		let mut capture: Vec<Rc<ExprTensorRef>> = Vec::new();
-		let mut is_reduction_head = false;
-		match expr.as_ref() {
-			Expr::Capture(ExprCapture { expr: x, tensor_ref }) => {
-				let child = self.__new(x.clone(), visited);
-				let tensor_ref = tensor_ref.clone();
-				if !self.captures.insert(std::ptr::from_ref(tensor_ref.as_ref())) {
-					panic!(
-						"CompiledExpr::new(): Capturing multiple values into the same tensor '{}'.",
-						tensor_ref.name.as_deref().unwrap_or("unnamed tensor")
-					);
-				}
-				self.add_tensor_ref(tensor_ref.clone(), false, true);
-				let child_shape_constraint = &self.nodes_postorder[child].out_shape;
-				let capture_shape_constraint = tensor_ref.shape_constraint();
-				self.nodes_postorder[child].out_shape =
-					ShapeConstraint::capture(child_shape_constraint, &capture_shape_constraint);
-				if !self.nodes_postorder[child].is_input() {
-					self.nodes_postorder[child].capture.push(tensor_ref);
-					visited.insert(expr_key, child);
-					return child;
-				}
-				// Insert `Identity` node to perform the capture.
-				// This node is also a root.
-				expr = Rc::new(Expr::Unary(ExprUnary {
-					kind: ExprUnaryKind::Identity,
-					expr: self.nodes_postorder[child].expr.clone(),
-				}));
-				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
-				out_shape = self.nodes_postorder[child].out_shape.clone();
-				reduction_bitmap = ReductionBitmap::new();
-				children = vec![child];
-				capture.push(tensor_ref);
-			},
-			Expr::First(first) => {
-				let first_child = self.__new(first.lhs.clone(), visited);
-				let _second_child = self.__new(first.rhs.clone(), visited);
-				visited.insert(expr_key, first_child);
-				return first_child;
-			},
-			Expr::Input(input) => match input {
-				ExprInput::Tensor(tensor_ref) => {
-					out_is_scalar = false;
-					out_shape = tensor_ref.shape_constraint();
-					reduction_bitmap = ReductionBitmap::new();
-					children = Vec::new();
-					self.add_tensor_ref(tensor_ref.clone(), true, false);
-				},
-				ExprInput::Scalar(scalar_ref) => {
-					out_is_scalar = true;
-					out_shape = ShapeConstraint::new();
-					reduction_bitmap = ReductionBitmap::new();
-					children = Vec::new();
-					self.add_scalar_ref(scalar_ref.clone());
-				},
-			},
-			Expr::Cast(ExprCast { expr, .. }) | Expr::Unary(ExprUnary { expr, .. }) => {
-				let child = self.__new(expr.clone(), visited);
-				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
-				out_shape = self.nodes_postorder[child].out_shape.clone();
-				reduction_bitmap = self.nodes_postorder[child].reduction_bitmap.clone();
-				children = vec![child];
-			},
-			Expr::Binary(binary) => {
-				let lhs = binary.lhs.clone();
-				let rhs = binary.rhs.clone();
-				let left_child = self.__new(lhs, visited);
-				let right_child = self.__new(rhs, visited);
-				reduction_bitmap = ReductionBitmap::union(
-					&self.nodes_postorder[left_child].reduction_bitmap,
-					&self.nodes_postorder[right_child].reduction_bitmap,
-				);
-				let left_is_scalar = self.nodes_postorder[left_child].out_is_scalar;
-				let right_is_scalar = self.nodes_postorder[right_child].out_is_scalar;
-				if left_is_scalar {
-					out_is_scalar = right_is_scalar;
-					if right_is_scalar {
-						out_shape = ShapeConstraint::new();
-					} else {
-						out_shape = self.nodes_postorder[right_child].out_shape.clone();
-					}
-				} else {
-					out_is_scalar = false;
-					if right_is_scalar {
-						out_shape = self.nodes_postorder[left_child].out_shape.clone();
-					} else {
-						out_shape = ShapeConstraint::bin_op(
-							&self.nodes_postorder[left_child].out_shape,
-							&self.nodes_postorder[right_child].out_shape,
-						);
-					}
-				}
-				children = vec![left_child, right_child];
-			},
-			Expr::Reduction(reduction) => {
-				let reduction_expr = reduction.expr.clone();
-				is_reduction_head = true;
-				let child = self.__new(reduction_expr, visited);
-				self.nodes_postorder[child].is_reduction_input = true;
-				reduction_bitmap = self.nodes_postorder[child]
-					.reduction_bitmap
-					.clone_and_set(self.nodes_postorder.next_index().raw);
-				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
-				if out_is_scalar {
-					out_shape = ShapeConstraint::new();
-				} else {
-					let mut shape = self.nodes_postorder[child].out_shape.clone();
-					shape
-						.set_last(Some(DimConstraint { source: "reduction".to_string(), size: 1 }));
-					out_shape = shape;
-				}
-				children = vec![child];
-			},
-		}
-
-		let next_index = self.nodes_postorder.next_index();
-		for &child in &children {
-			self.nodes_postorder[child].parents.push(next_index);
-		}
-
-		let index = self.nodes_postorder.push(Node {
-			expr,
-			parents: Vec::new(),
-			children,
-			capture,
-
-			out_is_scalar,
-			out_shape,
-			is_reduction_head,
-			is_reduction_input: false,
-			reduction_bitmap,
-			fragment: FragmentIndex::new_invalid(),
-			is_dead: false,
-		});
-		debug_assert!(index == next_index);
-		visited.insert(expr_key, index);
-		index
 	}
 
 	fn graphviz_tensor_id(&self, tensor_ref: &Rc<ExprTensorRef>) -> String {
