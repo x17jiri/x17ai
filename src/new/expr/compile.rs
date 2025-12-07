@@ -156,7 +156,6 @@ impl ShapeConstraint {
 			let d1 = a.constraint.get(l1.wrapping_sub(i)).unwrap_or(&None);
 			let d2 = b.constraint.get(l2.wrapping_sub(i)).unwrap_or(&None);
 			result.constraint.push(
-				//
 				if let Some(d1) = d1 {
 					if let Some(d2) = d2 {
 						if d1.size == d2.size {
@@ -198,7 +197,6 @@ impl ShapeConstraint {
 			let d1 = a.constraint.get(l1.wrapping_sub(i)).unwrap_or(&None);
 			let d2 = b.constraint.get(l2.wrapping_sub(i)).unwrap_or(&None);
 			result.constraint.push(
-				//
 				if let Some(d1) = d1 {
 					if let Some(d2) = d2 {
 						if d1.size == d2.size {
@@ -228,7 +226,7 @@ pub struct Node {
 	pub expr: Rc<Expr>,
 	pub parents: Vec<NodeIndex>,
 	pub children: Vec<NodeIndex>,
-	pub capture: Vec<Rc<ExprTensorRef>>, // TODO: `Vec<TensorNodeIndex>`?
+	pub capture: Vec<TensorRefIndex>,
 
 	pub out_is_scalar: bool,
 	pub out_shape: ShapeConstraint,
@@ -236,6 +234,7 @@ pub struct Node {
 	pub is_reduction_input: bool,
 	pub fragment: FragmentIndex,
 	pub is_dead: bool,
+	pub input_index_raw: usize,
 }
 
 impl Node {
@@ -324,12 +323,8 @@ impl Node {
 	}
 
 	/// `fragment_head` is a node whose result we may have to store into a tensor.
-	//	#[allow(clippy::nonminimal_bool)]
-	#[rustfmt::skip]
 	pub fn is_fragment_head(&self) -> bool {
-		self.is_reduction_head()
-		|| self.is_reduction_input()
-		|| self.is_fork()
+		self.is_reduction_head() || self.is_reduction_input() || self.is_fork()
 	}
 }
 
@@ -346,40 +341,19 @@ pub struct Fragment {
 	pub kind: FragmentKind,
 	pub reduction: NodeIndex,
 	pub input_into: HashSet<FragmentIndex>,
-	pub scalar_inputs_map: HashMap<*const ExprScalarRef, usize>,
-	pub scalar_inputs_vec: Vec<Rc<ExprScalarRef>>,
-	pub tensor_inputs_map: HashMap<*const ExprTensorRef, usize>,
-	pub tensor_inputs_vec: Vec<Rc<ExprTensorRef>>,
-	pub tensor_outputs_map: HashMap<*const ExprTensorRef, usize>,
-	pub tensor_outputs_vec: Vec<Rc<ExprTensorRef>>,
+	pub scalar_inputs: Vec<ScalarRefIndex>,
+	pub tensor_inputs: Vec<TensorRefIndex>,
+	pub tensor_outputs: Vec<TensorRefIndex>,
 }
 
 impl Fragment {
-	pub fn add_scalar_input(&mut self, scalar_ref: &Rc<ExprScalarRef>) {
-		let key = std::ptr::from_ref(scalar_ref.as_ref());
-		if let hash_map::Entry::Vacant(entry) = self.scalar_inputs_map.entry(key) {
-			let index = self.scalar_inputs_vec.len();
-			self.scalar_inputs_vec.push(scalar_ref.clone());
-			entry.insert(index);
-		}
-	}
-
-	pub fn add_tensor_input(&mut self, tensor_ref: &Rc<ExprTensorRef>) {
-		let key = std::ptr::from_ref(tensor_ref.as_ref());
-		if let hash_map::Entry::Vacant(entry) = self.tensor_inputs_map.entry(key) {
-			let index = self.tensor_inputs_vec.len();
-			self.tensor_inputs_vec.push(tensor_ref.clone());
-			entry.insert(index);
-		}
-	}
-
-	pub fn add_tensor_output(&mut self, tensor_ref: &Rc<ExprTensorRef>) {
-		let key = std::ptr::from_ref(tensor_ref.as_ref());
-		if let hash_map::Entry::Vacant(entry) = self.tensor_outputs_map.entry(key) {
-			let index = self.tensor_outputs_vec.len();
-			self.tensor_outputs_vec.push(tensor_ref.clone());
-			entry.insert(index);
-		}
+	pub fn dedup_refs(&mut self) {
+		self.scalar_inputs.sort();
+		self.scalar_inputs.dedup();
+		self.tensor_inputs.sort();
+		self.tensor_inputs.dedup();
+		self.tensor_outputs.sort();
+		self.tensor_outputs.dedup();
 	}
 }
 
@@ -392,21 +366,27 @@ pub struct TensorNode {
 	pub is_output: bool,
 }
 
-define_index_type!(TensorNodeIndex);
-type TensorNodeVec = IndexVec<TensorNodeIndex, TensorNode>;
+define_index_type!(TensorRefIndex);
+type TensorRefVec = IndexVec<TensorRefIndex, TensorNode>;
+
+define_index_type!(ScalarRefIndex);
+type ScalarRefVec = IndexVec<ScalarRefIndex, Rc<ExprScalarRef>>;
 
 pub struct Compilation {
 	nodes_postorder: NodeVec,
 	frag_preorder: FragmentVec,
 	captures: HashSet<*const ExprTensorRef>,
-	scalar_ref_map: HashMap<*const ExprScalarRef, Rc<ExprScalarRef>>,
-	tensor_ref_map: HashMap<*const ExprTensorRef, TensorNodeIndex>,
-	tensor_ref_vec: TensorNodeVec,
+	scalar_ref_map: HashMap<*const ExprScalarRef, ScalarRefIndex>,
+	scalar_ref_vec: ScalarRefVec,
+	tensor_ref_map: HashMap<*const ExprTensorRef, TensorRefIndex>,
+	tensor_ref_vec: TensorRefVec,
 }
 
 pub struct CompiledExpr {
 	nodes_postorder: NodeVec,
 	frag_preorder: FragmentVec,
+	scalar_ref_vec: ScalarRefVec,
+	tensor_ref_vec: TensorRefVec,
 }
 
 impl CompiledExpr {
@@ -414,6 +394,8 @@ impl CompiledExpr {
 		Self {
 			nodes_postorder: comp.nodes_postorder,
 			frag_preorder: comp.frag_preorder,
+			scalar_ref_vec: comp.scalar_ref_vec,
+			tensor_ref_vec: comp.tensor_ref_vec,
 		}
 	}
 
@@ -428,6 +410,34 @@ impl CompiledExpr {
 	pub fn fragments_postorder(&self) -> impl DoubleEndedIterator<Item = FragmentIndex> {
 		self.frag_preorder.indexes().rev()
 	}
+
+	/*pub fn frag_shapes(&self) -> Result<IndexVec<FragmentIndex, Vec<usize>>, TensorOpError> {
+		let mut inputs = Vec::with_capacity(15);
+		let result = IndexVec::from_vec(vec![Vec::new(); self.frag_preorder.len()]);
+		for i in self.frag_preorder.indexes() {
+			match self.frag_preorder[i].kind {
+				FragmentKind::ElementWise => {
+					inputs.clear();
+					for tensor_ref in &self.frag_preorder[i].tensor_inputs_vec {
+						let Ok(tensor) = tensor_ref.tensor.try_borrow() else {
+							cold_path();
+							return Err(TensorOpError::CannotBorrow);
+						};
+						let Some(tensor) = &*tensor else {
+							cold_path();
+							return Err(TensorOpError::MissingInput);
+						};
+						inputs.push(tensor.shape());
+					}
+					//result.raw[i.raw] = inputs.clone();
+				},
+				FragmentKind::Reduction => {
+					todo!("frag_shapes(): FragmentKind::Reduction");
+				},
+			}
+		}
+		Ok(result)
+	}*/
 }
 
 impl Compilation {
@@ -437,8 +447,9 @@ impl Compilation {
 			frag_preorder: FragmentVec::new(),
 			captures: HashSet::new(),
 			scalar_ref_map: HashMap::new(),
+			scalar_ref_vec: ScalarRefVec::with_capacity(4),
 			tensor_ref_map: HashMap::new(),
-			tensor_ref_vec: TensorNodeVec::with_capacity(4),
+			tensor_ref_vec: TensorRefVec::with_capacity(4),
 		};
 		let _root = comp.load_expr(expr.rc_expr, &mut HashMap::new());
 		comp.remove_dead_code();
@@ -463,10 +474,11 @@ impl Compilation {
 			return *index;
 		}
 
+		let mut input_index_raw: usize = usize::MAX;
 		let out_is_scalar: bool;
 		let out_shape: ShapeConstraint;
 		let children: Vec<NodeIndex>;
-		let mut capture: Vec<Rc<ExprTensorRef>> = Vec::new();
+		let mut capture: Vec<TensorRefIndex> = Vec::new();
 		match expr.as_ref() {
 			Expr::Capture(ExprCapture { expr: x, tensor_ref }) => {
 				let child = self.load_expr(x.clone(), visited);
@@ -477,13 +489,13 @@ impl Compilation {
 						tensor_ref.name.as_deref().unwrap_or("unnamed tensor")
 					);
 				}
-				self.add_tensor_ref(tensor_ref.clone(), false, true);
-				let child_shape_constraint = &self.nodes_postorder[child].out_shape;
 				let capture_shape_constraint = tensor_ref.shape_constraint();
+				let tensor_ref_index = self.add_tensor_ref(tensor_ref, false, true);
+				let child_shape_constraint = &self.nodes_postorder[child].out_shape;
 				self.nodes_postorder[child].out_shape =
 					ShapeConstraint::capture(child_shape_constraint, &capture_shape_constraint);
 				if !self.nodes_postorder[child].is_input() {
-					self.nodes_postorder[child].capture.push(tensor_ref);
+					self.nodes_postorder[child].capture.push(tensor_ref_index);
 					visited.insert(expr_key, child);
 					return child;
 				}
@@ -496,7 +508,7 @@ impl Compilation {
 				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
 				out_shape = self.nodes_postorder[child].out_shape.clone();
 				children = vec![child];
-				capture.push(tensor_ref);
+				capture.push(tensor_ref_index);
 			},
 			Expr::First(first) => {
 				let first_child = self.load_expr(first.lhs.clone(), visited);
@@ -509,13 +521,13 @@ impl Compilation {
 					out_is_scalar = false;
 					out_shape = tensor_ref.shape_constraint();
 					children = Vec::new();
-					self.add_tensor_ref(tensor_ref.clone(), true, false);
+					input_index_raw = self.add_tensor_ref(tensor_ref.clone(), true, false).raw;
 				},
 				ExprInput::Scalar(scalar_ref) => {
 					out_is_scalar = true;
 					out_shape = ShapeConstraint::new();
 					children = Vec::new();
-					self.add_scalar_ref(scalar_ref.clone());
+					input_index_raw = self.add_scalar_ref(scalar_ref.clone()).raw;
 				},
 			},
 			Expr::Cast(ExprCast { expr, .. }) | Expr::Unary(ExprUnary { expr, .. }) => {
@@ -584,16 +596,25 @@ impl Compilation {
 			is_reduction_input: false,
 			fragment: FragmentIndex::new_invalid(),
 			is_dead: false,
+			input_index_raw,
 		});
 		debug_assert!(index == next_index);
 		visited.insert(expr_key, index);
 		index
 	}
 
-	fn add_scalar_ref(&mut self, scalar_ref: Rc<ExprScalarRef>) {
+	fn add_scalar_ref(&mut self, scalar_ref: Rc<ExprScalarRef>) -> ScalarRefIndex {
 		let key = std::ptr::from_ref(scalar_ref.as_ref());
-		if let hash_map::Entry::Vacant(entry) = self.scalar_ref_map.entry(key) {
-			entry.insert(scalar_ref);
+		match self.scalar_ref_map.entry(key) {
+			hash_map::Entry::Vacant(entry) => {
+				let index = self.scalar_ref_vec.push(scalar_ref);
+				entry.insert(index);
+				index
+			},
+			hash_map::Entry::Occupied(entry) => {
+				let index = *entry.get();
+				index
+			},
 		}
 	}
 
@@ -602,7 +623,7 @@ impl Compilation {
 		tensor_ref: Rc<ExprTensorRef>,
 		is_input: bool,
 		is_output: bool,
-	) -> TensorNodeIndex {
+	) -> TensorRefIndex {
 		let key = std::ptr::from_ref(tensor_ref.as_ref());
 		match self.tensor_ref_map.entry(key) {
 			hash_map::Entry::Vacant(entry) => {
@@ -708,20 +729,27 @@ impl Compilation {
 				cold_path();
 				continue;
 			}
-			if let Expr::Input(input) = self.nodes_postorder[i].expr.as_ref() {
-				match input {
-					ExprInput::Scalar(scalar_ref) => {
-						for &parent in &self.nodes_postorder[i].parents {
-							let parent_frag = self.nodes_postorder[parent].fragment;
-							self.frag_preorder[parent_frag].add_scalar_input(scalar_ref);
-						}
-					},
-					ExprInput::Tensor(tensor_ref) => {
-						for &parent in &self.nodes_postorder[i].parents {
-							let parent_frag = self.nodes_postorder[parent].fragment;
-							self.frag_preorder[parent_frag].add_tensor_input(tensor_ref);
-						}
-					},
+			if self.nodes_postorder[i].children.is_empty() {
+				if self.nodes_postorder[i].out_is_scalar {
+					debug_assert!(matches!(
+						self.nodes_postorder[i].expr.as_ref(),
+						Expr::Input(ExprInput::Scalar(_))
+					));
+					for &parent in &self.nodes_postorder[i].parents {
+						let parent_frag = self.nodes_postorder[parent].fragment;
+						let index = ScalarRefIndex::new(self.nodes_postorder[i].input_index_raw);
+						self.frag_preorder[parent_frag].scalar_inputs.push(index);
+					}
+				} else {
+					debug_assert!(matches!(
+						self.nodes_postorder[i].expr.as_ref(),
+						Expr::Input(ExprInput::Tensor(_))
+					));
+					for &parent in &self.nodes_postorder[i].parents {
+						let parent_frag = self.nodes_postorder[parent].fragment;
+						let index = TensorRefIndex::new(self.nodes_postorder[i].input_index_raw);
+						self.frag_preorder[parent_frag].tensor_inputs.push(index);
+					}
 				}
 				continue;
 			}
@@ -741,12 +769,9 @@ impl Compilation {
 					kind,
 					reduction: NodeIndex::new_invalid(),
 					input_into,
-					scalar_inputs_map: HashMap::new(),
-					scalar_inputs_vec: Vec::new(),
-					tensor_inputs_map: HashMap::new(),
-					tensor_inputs_vec: Vec::new(),
-					tensor_outputs_map: HashMap::new(),
-					tensor_outputs_vec: Vec::new(),
+					scalar_inputs: Vec::new(),
+					tensor_inputs: Vec::new(),
+					tensor_outputs: Vec::new(),
 				})
 			} else {
 				debug_assert!(self.nodes_postorder[i].parents.len() == 1);
@@ -756,12 +781,16 @@ impl Compilation {
 			};
 			self.nodes_postorder[i].fragment = frag;
 			for cap in 0..self.nodes_postorder[i].capture.len() {
-				self.frag_preorder[frag].add_tensor_output(&self.nodes_postorder[i].capture[cap]);
+				let index = self.nodes_postorder[i].capture[cap];
+				self.frag_preorder[frag].tensor_outputs.push(index);
 			}
 			if self.nodes_postorder[i].is_reduction() {
 				assert!(!self.frag_preorder[frag].reduction.is_valid());
 				self.frag_preorder[frag].reduction = i;
 			}
+		}
+		for i in self.frag_preorder.indexes() {
+			self.frag_preorder[i].dedup_refs();
 		}
 	}
 
@@ -782,13 +811,13 @@ impl Compilation {
 
 			let key = std::ptr::from_ref(tensor_ref.as_ref());
 			let index = self.tensor_ref_vec.push(TensorNode {
-				tensor_ref: tensor_ref.clone(),
+				tensor_ref,
 				is_input: false,
 				is_output: true,
 			});
 			self.tensor_ref_map.insert(key, index);
 
-			self.nodes_postorder[f.head].capture.push(tensor_ref);
+			self.nodes_postorder[f.head].capture.push(index);
 		}
 	}
 
@@ -863,11 +892,12 @@ impl Compilation {
 				};
 				writeln!(w, "\t{child_id} -> {node_id} [label=\"{}\"{}];", label, extra_style)?;
 			}
-			for cap in &node.capture {
+			for &capt_idx in &node.capture {
 				let label =
 					if node.out_is_scalar { String::new() } else { node.out_shape.as_str() };
-				let cap_id = self.graphviz_tensor_id(cap);
-				let key = std::ptr::from_ref(cap.as_ref());
+				let capt = &self.tensor_ref_vec[capt_idx].tensor_ref;
+				let cap_id = self.graphviz_tensor_id(capt);
+				let key = std::ptr::from_ref(capt.as_ref());
 				let index = self.tensor_ref_map[&key];
 				if self.tensor_ref_vec[index].is_input {
 					writeln!(w, "\t{node_id} -> {cap_id} [label=\"{label}\", constraint=false];")?;
@@ -889,7 +919,7 @@ impl Compilation {
 				"\t{id} [label=<<b>Tensor</b><br/><font color='blue'><b>{tensor_name}</b></font>>, shape=box, style=filled, fillcolor=\"{color}\"];",
 			)?;
 		}
-		for scalar_ref in self.scalar_ref_map.values() {
+		for scalar_ref in &self.scalar_ref_vec {
 			let id = self.graphviz_scalar_id(scalar_ref);
 			let label = if let Some(name) = &scalar_ref.name {
 				name.to_string()

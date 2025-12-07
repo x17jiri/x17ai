@@ -76,6 +76,10 @@ impl<Index: IndexTrait, T> IndexVec<Index, T> {
 		}
 	}
 
+	pub fn from_vec(raw: Vec<T>) -> Self {
+		Self { raw, _marker: std::marker::PhantomData }
+	}
+
 	pub fn push(&mut self, item: T) -> Index {
 		let index = Index::from_raw(self.raw.len());
 		self.raw.push(item);

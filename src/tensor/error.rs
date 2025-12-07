@@ -51,6 +51,7 @@ pub enum TensorOpError {
 	TooManyMergedDimensions,
 	CannotBorrow,
 	CannotBorrowMut,
+	MissingInput,
 	MissingReduceDimension,
 	DimIndexOutOfBounds,
 	IndexOutOfBounds,

@@ -19,9 +19,10 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::tensor::{DType, Tensor};
+use crate::new::tensor::Tensor;
+use crate::tensor::DType;
 
-use compile::{CompiledExpr, DimConstraint, ShapeConstraint};
+use compile::{DimConstraint, ShapeConstraint};
 
 pub mod compile;
 pub mod eval;
@@ -251,7 +252,7 @@ impl RcExpr {
 		}
 	}
 
-/*	pub fn compile(self) -> CompiledExpr {
+	/*	pub fn compile(self) -> CompiledExpr {
 		CompiledExpr::new(self)
 	}*/
 }
