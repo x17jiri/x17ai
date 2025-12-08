@@ -86,6 +86,11 @@ impl<Index: IndexTrait, T> IndexVec<Index, T> {
 		index
 	}
 
+	pub fn push_within_capacity(&mut self, item: T) -> Result<Index, T> {
+		let index = Index::from_raw(self.raw.len());
+		if let Ok(()) = self.raw.push_within_capacity(item) { Ok(index) } else { Err(item) }
+	}
+
 	pub fn next_index(&self) -> Index {
 		Index::from_raw(self.raw.len())
 	}

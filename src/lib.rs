@@ -12,6 +12,7 @@
 #![allow(incomplete_features)]
 #![allow(internal_features)]
 #![allow(non_upper_case_globals)]
+#![feature(vec_push_within_capacity)]
 #![feature(try_blocks)]
 #![feature(allocator_api)]
 #![feature(slice_ptr_get)]

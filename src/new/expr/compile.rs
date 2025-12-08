@@ -19,7 +19,7 @@
 #![allow(clippy::collapsible_else_if)]
 
 use std::collections::{HashMap, HashSet, hash_map};
-use std::hint::cold_path;
+use std::hint::{cold_path, unreachable_unchecked};
 use std::rc::Rc;
 
 use super::{
@@ -28,8 +28,43 @@ use super::{
 };
 use crate::define_index_type;
 use crate::new::expr::{ExprCapture, ExprCast};
-use crate::tensor::HasDType;
+use crate::tensor::error::ShapeMismatchError;
+use crate::tensor::{HasDType, TensorOpError};
 use crate::util::index_vec::IndexVec;
+
+//--------------------------------------------------------------------------------------------------
+
+pub fn common_shape(shapes: &[&[usize]]) -> Result<Vec<usize>, ShapeMismatchError> {
+	let max_rank = shapes.iter().map(|s| s.len()).max().unwrap_or(0);
+	let mut result: Vec<usize> = Vec::with_capacity(max_rank);
+	let result_ptr = result.as_mut_ptr();
+	let mut mismatch: usize = 0;
+	for i in 0..max_rank {
+		let mut common_size: usize = 1;
+		for shp in shapes {
+			let skip = max_rank - shp.len();
+			if i < skip {
+				continue;
+			}
+			let size: usize = unsafe { *shp.get_unchecked(i - skip) };
+			if size == 1 {
+				continue;
+			}
+			if common_size == 1 {
+				common_size = size;
+			} else {
+				mismatch |= common_size.wrapping_sub(size);
+			}
+		}
+		unsafe { result_ptr.add(i).write(common_size) };
+	}
+	if mismatch != 0 {
+		cold_path();
+		return Err(ShapeMismatchError);
+	}
+	unsafe { result.set_len(max_rank) };
+	Ok(result)
+}
 
 //--------------------------------------------------------------------------------------------------
 
@@ -360,14 +395,14 @@ impl Fragment {
 define_index_type!(FragmentIndex);
 type FragmentVec = IndexVec<FragmentIndex, Fragment>;
 
-pub struct TensorNode {
+pub struct TensorRef {
 	pub tensor_ref: Rc<ExprTensorRef>,
 	pub is_input: bool,
 	pub is_output: bool,
 }
 
 define_index_type!(TensorRefIndex);
-type TensorRefVec = IndexVec<TensorRefIndex, TensorNode>;
+type TensorRefVec = IndexVec<TensorRefIndex, TensorRef>;
 
 define_index_type!(ScalarRefIndex);
 type ScalarRefVec = IndexVec<ScalarRefIndex, Rc<ExprScalarRef>>;
@@ -411,25 +446,28 @@ impl CompiledExpr {
 		self.frag_preorder.indexes().rev()
 	}
 
-	/*pub fn frag_shapes(&self) -> Result<IndexVec<FragmentIndex, Vec<usize>>, TensorOpError> {
+	pub fn frag_shapes(&self) -> Result<IndexVec<FragmentIndex, Vec<usize>>, TensorOpError> {
 		let mut inputs = Vec::with_capacity(15);
-		let result = IndexVec::from_vec(vec![Vec::new(); self.frag_preorder.len()]);
+		let mut result = IndexVec::from_vec(Vec::with_capacity(self.frag_preorder.len()));
 		for i in self.frag_preorder.indexes() {
 			match self.frag_preorder[i].kind {
 				FragmentKind::ElementWise => {
 					inputs.clear();
-					for tensor_ref in &self.frag_preorder[i].tensor_inputs_vec {
-						let Ok(tensor) = tensor_ref.tensor.try_borrow() else {
-							cold_path();
-							return Err(TensorOpError::CannotBorrow);
-						};
+					inputs.reserve(self.frag_preorder[i].tensor_inputs.len());
+					for &inp in &self.frag_preorder[i].tensor_inputs {
+						let tensor = self.tensor_ref_vec[inp].tensor_ref.tensor.as_ptr();
+						let tensor = unsafe { &*tensor };
 						let Some(tensor) = &*tensor else {
 							cold_path();
 							return Err(TensorOpError::MissingInput);
 						};
-						inputs.push(tensor.shape());
+						let Ok(()) = inputs.push_within_capacity(tensor.shape()) else {
+							unsafe { unreachable_unchecked() }
+						};
 					}
-					//result.raw[i.raw] = inputs.clone();
+					let Ok(_) = result.push_within_capacity(common_shape(&inputs)?) else {
+						unsafe { unreachable_unchecked() }
+					};
 				},
 				FragmentKind::Reduction => {
 					todo!("frag_shapes(): FragmentKind::Reduction");
@@ -437,7 +475,7 @@ impl CompiledExpr {
 			}
 		}
 		Ok(result)
-	}*/
+	}
 }
 
 impl Compilation {
@@ -627,8 +665,7 @@ impl Compilation {
 		let key = std::ptr::from_ref(tensor_ref.as_ref());
 		match self.tensor_ref_map.entry(key) {
 			hash_map::Entry::Vacant(entry) => {
-				let index =
-					self.tensor_ref_vec.push(TensorNode { tensor_ref, is_input, is_output });
+				let index = self.tensor_ref_vec.push(TensorRef { tensor_ref, is_input, is_output });
 				entry.insert(index);
 				index
 			},
@@ -802,7 +839,7 @@ impl Compilation {
 				continue;
 			}
 			let tensor_ref = Rc::new(ExprTensorRef {
-				tensor: std::cell::RefCell::new(None),
+				tensor: std::cell::Cell::new(None),
 				dtype: f32::dtype,
 				shape_constraint: Vec::new(),
 				name: Some(format!("__tmp__[{cnt}]").into()),
@@ -810,7 +847,7 @@ impl Compilation {
 			cnt += 1;
 
 			let key = std::ptr::from_ref(tensor_ref.as_ref());
-			let index = self.tensor_ref_vec.push(TensorNode {
+			let index = self.tensor_ref_vec.push(TensorRef {
 				tensor_ref,
 				is_input: false,
 				is_output: true,

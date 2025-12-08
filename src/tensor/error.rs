@@ -281,10 +281,16 @@ impl From<DTypeMismatchError> for ErrPack<TensorOpError> {
 	}
 }
 
+impl From<ShapeMismatchError> for TensorOpError {
+	fn from(_: ShapeMismatchError) -> Self {
+		Self::ShapeMismatch
+	}
+}
+
 impl From<ShapeMismatchError> for ErrPack<TensorOpError> {
 	fn from(_: ShapeMismatchError) -> Self {
 		Self {
-			code: TensorOpError::ShapeMismatch,
+			code: ShapeMismatchError.into(),
 			extra: None,
 		}
 	}
