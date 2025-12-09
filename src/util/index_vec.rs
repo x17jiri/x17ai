@@ -7,6 +7,8 @@
 
 //--------------------------------------------------------------------------------------------------
 
+use std::hint::cold_path;
+
 pub trait IndexTrait {
 	fn to_raw(self) -> usize;
 	fn from_raw(raw: usize) -> Self;
@@ -88,7 +90,13 @@ impl<Index: IndexTrait, T> IndexVec<Index, T> {
 
 	pub fn push_within_capacity(&mut self, item: T) -> Result<Index, T> {
 		let index = Index::from_raw(self.raw.len());
-		if let Ok(()) = self.raw.push_within_capacity(item) { Ok(index) } else { Err(item) }
+		match self.raw.push_within_capacity(item) {
+			Ok(()) => Ok(index),
+			Err(item) => {
+				cold_path();
+				Err(item)
+			},
+		}
 	}
 
 	pub fn next_index(&self) -> Index {

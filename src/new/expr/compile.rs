@@ -34,36 +34,101 @@ use crate::util::index_vec::IndexVec;
 
 //--------------------------------------------------------------------------------------------------
 
-pub fn common_shape(shapes: &[&[usize]]) -> Result<Vec<usize>, ShapeMismatchError> {
-	let max_rank = shapes.iter().map(|s| s.len()).max().unwrap_or(0);
-	let mut result: Vec<usize> = Vec::with_capacity(max_rank);
-	let result_ptr = result.as_mut_ptr();
-	let mut mismatch: usize = 0;
-	for i in 0..max_rank {
-		let mut common_size: usize = 1;
-		for shp in shapes {
-			let skip = max_rank - shp.len();
-			if i < skip {
-				continue;
-			}
-			let size: usize = unsafe { *shp.get_unchecked(i - skip) };
-			if size == 1 {
-				continue;
-			}
-			if common_size == 1 {
-				common_size = size;
-			} else {
-				mismatch |= common_size.wrapping_sub(size);
-			}
+pub struct CommonShape {
+	pub shape: Vec<usize>,
+
+	/// For two tensors A and B, adjacent dimensions in each tensor with compatible
+	/// strides can be merged into a single dimension. `merge_run_lengths` stores
+	/// the run-lengths of consecutive original dimensions that were merged.
+	///
+	/// Invariant: sum(merge_run_lengths) == shape.len().
+	/// Example:
+	///   original dims: [d0, d1, d2, d3]
+	///   merge_run_lengths: [1, 2, 1]
+	///   => merged dims: [d0, d1 * d2, d3]
+	pub merge_run_lengths: Vec<usize>,
+}
+
+impl CommonShape {
+	pub fn new() -> Self {
+		Self {
+			shape: Vec::new(),
+			merge_run_lengths: Vec::new(),
 		}
-		unsafe { result_ptr.add(i).write(common_size) };
 	}
-	if mismatch != 0 {
-		cold_path();
-		return Err(ShapeMismatchError);
+
+	pub fn init(&mut self, shapes: &[&[usize]]) -> Result<(), ShapeMismatchError> {
+		self.shape.clear();
+		self.merge_run_lengths.clear();
+
+		let max_rank = shapes.iter().map(|s| s.len()).max().unwrap_or(0);
+		if max_rank == 0 {
+			return Ok(());
+		}
+
+		let mut mismatch = 0;
+
+		let mut prev_broadcast_mask: u64 = 0;
+		if shapes.len() > 64 {
+			todo!("CommonShape::init(): more than 64 input shapes not supported yet");
+		}
+
+		// A run is trivial if all dimensions so far are size 1.
+		// For a trivial run, the mask is all 0 bits. For a non-trivial run, the mask is all 1 bits.
+		let mut trivial_run_mask = 0;
+		let mut run_len = 0;
+
+		for i in 0..max_rank {
+			let mut common_size = 1;
+			let mut broadcast_mask: u64 = 0;
+
+			for (tensor_idx, shp) in shapes.iter().enumerate() {
+				let skip = max_rank - shp.len();
+				let size = if i < skip { 1 } else { unsafe { *shp.get_unchecked(i - skip) } };
+
+				if size == 1 {
+					broadcast_mask |= 1u64 << tensor_idx;
+					continue;
+				}
+				if common_size == 1 {
+					common_size = size;
+				} else {
+					mismatch |= common_size.wrapping_sub(size);
+				}
+			}
+			self.shape.push(common_size);
+
+			run_len += 1;
+			if common_size == 1 {
+				continue;
+			}
+
+			if prev_broadcast_mask.wrapping_sub(broadcast_mask) & trivial_run_mask != 0 {
+				self.merge_run_lengths.push(run_len - 1);
+				run_len = 1;
+			}
+
+			prev_broadcast_mask = broadcast_mask;
+			trivial_run_mask = u64::MAX;
+		}
+
+		self.merge_run_lengths.push(run_len);
+		debug_assert!(
+			self.merge_run_lengths.iter().all(|&r| r > 0),
+			"CommonShape::init(): internal error - run_len == 0 should only be possible if max_rank == 0, which is handled earlier"
+		);
+		debug_assert!(
+			self.merge_run_lengths.iter().sum::<usize>() == self.shape.len(),
+			"CommonShape::init(): internal error - merge_run_lengths do not sum to shape length"
+		);
+
+		if mismatch == 0 {
+			Ok(())
+		} else {
+			cold_path();
+			Err(ShapeMismatchError)
+		}
 	}
-	unsafe { result.set_len(max_rank) };
-	Ok(result)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -379,6 +444,7 @@ pub struct Fragment {
 	pub scalar_inputs: Vec<ScalarRefIndex>,
 	pub tensor_inputs: Vec<TensorRefIndex>,
 	pub tensor_outputs: Vec<TensorRefIndex>,
+	pub shape: CommonShape,
 }
 
 impl Fragment {
@@ -446,9 +512,8 @@ impl CompiledExpr {
 		self.frag_preorder.indexes().rev()
 	}
 
-	pub fn frag_shapes(&self) -> Result<IndexVec<FragmentIndex, Vec<usize>>, TensorOpError> {
+	pub fn frag_shapes(&mut self) -> Result<(), TensorOpError> {
 		let mut inputs = Vec::with_capacity(15);
-		let mut result = IndexVec::from_vec(Vec::with_capacity(self.frag_preorder.len()));
 		for i in self.frag_preorder.indexes() {
 			match self.frag_preorder[i].kind {
 				FragmentKind::ElementWise => {
@@ -465,16 +530,15 @@ impl CompiledExpr {
 							unsafe { unreachable_unchecked() }
 						};
 					}
-					let Ok(_) = result.push_within_capacity(common_shape(&inputs)?) else {
-						unsafe { unreachable_unchecked() }
-					};
+					self.frag_preorder[i].shape.init(&inputs)?;
+					todo!();
 				},
 				FragmentKind::Reduction => {
 					todo!("frag_shapes(): FragmentKind::Reduction");
 				},
 			}
 		}
-		Ok(result)
+		Ok(())
 	}
 }
 
