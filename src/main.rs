@@ -159,8 +159,10 @@ fn laplacian(v: &ArrayView2<f32>) -> Array2<f32> {
 		+ v.slice(s![2.., 1..-1])
 }*/
 
+use std::rc::Rc;
+
 use x17ai::autograd::{AutogradTensor, LossFn};
-use x17ai::new::expr::compile::Compilation;
+use x17ai::new::expr::compile::{Compilation, CompiledExpr};
 use x17ai::new::expr::{ExprScalarRef, ExprTensorRef, RcExpr};
 use x17ai::new::tensor::TensorLiteral1D;
 use x17ai::nn::ModelContext;
@@ -269,7 +271,7 @@ fn test1_opt() -> RcExpr {
 	new_value
 }
 
-fn test2_rms_norm() -> RcExpr {
+fn test2_rms_norm() -> (RcExpr, Rc<ExprTensorRef>) {
 	let inp_ten = ExprTensorRef::new(Some("inp".into()), f32::dtype, Vec::new());
 	let inp = RcExpr::new_tensor_input(inp_ten.clone());
 	let sum_to_mean = ExprScalarRef::new(Some("sum_to_mean".into()));
@@ -278,7 +280,7 @@ fn test2_rms_norm() -> RcExpr {
 	let eps = RcExpr::new_scalar_input(eps.clone());
 	let magn_recip = (((inp.clone() * inp.clone()).sum() * sum_to_mean).sqrt() + eps).recip();
 
-	(inp * magn_recip).capture(inp_ten)
+	((inp * magn_recip).capture(inp_ten.clone()), inp_ten)
 }
 
 fn test3_softmax() -> RcExpr {
@@ -293,12 +295,22 @@ fn test3_softmax() -> RcExpr {
 
 fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let mut comp = Compilation::new(test1_opt());
-	//let mut comp = test2_rms_norm().compile();
-	//let mut comp = test3_softmax().compile();
+
+	let (expr, inp) = test2_rms_norm();
+	let mut comp = Compilation::new(expr);
+
+	//let mut comp = Compilation::new(test3_softmax());
 
 	let mut graphviz = String::new();
 	comp.print_graphviz(&mut graphviz);
 	println!("{}", graphviz);
+
+	let mut comp = CompiledExpr::new(comp);
+	let dev = x17ai::new::device::cpu::CPUDevice::new();
+	let inp_lit = TensorLiteral1D::<f32>::new(&[1.0, 2.0, 3.0]);
+	let inp_ten = x17ai::new::tensor::Tensor::new(dev, &inp_lit)?;
+	inp.tensor.borrow_mut().replace(inp_ten);
+	comp.frag_shapes();
 	/*
 	let inp = RcExpr::new_tensor_input(f32::dtype, "inp".into());
 	let max = inp.clone().max();

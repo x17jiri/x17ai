@@ -520,9 +520,14 @@ impl CompiledExpr {
 					inputs.clear();
 					inputs.reserve(self.frag_preorder[i].tensor_inputs.len());
 					for &inp in &self.frag_preorder[i].tensor_inputs {
-						let tensor = self.tensor_ref_vec[inp].tensor_ref.tensor.as_ptr();
-						let tensor = unsafe { &*tensor };
-						let Some(tensor) = &*tensor else {
+						let tensor_borrow = unsafe {
+							self.tensor_ref_vec[inp].tensor_ref.tensor.try_borrow_unguarded()
+						};
+						let Ok(tensor) = tensor_borrow else {
+							cold_path();
+							return Err(TensorOpError::CannotBorrow);
+						};
+						let Some(tensor) = tensor else {
 							cold_path();
 							return Err(TensorOpError::MissingInput);
 						};
@@ -531,7 +536,6 @@ impl CompiledExpr {
 						};
 					}
 					self.frag_preorder[i].shape.init(&inputs)?;
-					todo!();
 				},
 				FragmentKind::Reduction => {
 					todo!("frag_shapes(): FragmentKind::Reduction");
@@ -849,12 +853,17 @@ impl Compilation {
 					for &parent in &self.nodes_postorder[i].parents {
 						let parent_frag = self.nodes_postorder[parent].fragment;
 						let index = TensorRefIndex::new(self.nodes_postorder[i].input_index_raw);
+						// TODO - need to add differently depending on whether it is an intput
+						// into reduction, or to the element-wise part
 						self.frag_preorder[parent_frag].tensor_inputs.push(index);
 					}
 				}
 				continue;
 			}
 			let frag = if self.nodes_postorder[i].is_fragment_head() {
+				// TODO - instead of input_into, we should have depends_on
+				// TODO 2 - need to add differently depending on whether it is an intput
+				// into reduction, or to the element-wise part
 				let input_into = self.nodes_postorder[i]
 					.parents
 					.iter()
@@ -873,6 +882,7 @@ impl Compilation {
 					scalar_inputs: Vec::new(),
 					tensor_inputs: Vec::new(),
 					tensor_outputs: Vec::new(),
+					shape: CommonShape::new(),
 				})
 			} else {
 				debug_assert!(self.nodes_postorder[i].parents.len() == 1);
@@ -903,7 +913,7 @@ impl Compilation {
 				continue;
 			}
 			let tensor_ref = Rc::new(ExprTensorRef {
-				tensor: std::cell::Cell::new(None),
+				tensor: std::cell::RefCell::new(None),
 				dtype: f32::dtype,
 				shape_constraint: Vec::new(),
 				name: Some(format!("__tmp__[{cnt}]").into()),

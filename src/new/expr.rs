@@ -16,7 +16,7 @@
 #![allow(clippy::cast_possible_wrap)]
 
 use std::borrow::Cow;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::new::tensor::Tensor;
@@ -52,7 +52,7 @@ pub enum ExprInput {
 // The tensor may be replaced before running the computation,
 // but the dtype needs to be correct.
 pub struct ExprTensorRef {
-	pub tensor: Cell<Option<Tensor>>,
+	pub tensor: RefCell<Option<Tensor>>,
 	pub dtype: DType,
 	pub shape_constraint: Vec<usize>,
 	pub name: Option<Cow<'static, str>>,
@@ -127,7 +127,7 @@ impl ExprTensorRef {
 		shape: Vec<usize>,
 	) -> Rc<ExprTensorRef> {
 		Rc::new(ExprTensorRef {
-			tensor: Cell::new(None),
+			tensor: RefCell::new(None),
 			dtype,
 			shape_constraint: shape,
 			name,
