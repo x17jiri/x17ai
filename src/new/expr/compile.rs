@@ -331,7 +331,7 @@ pub struct Node {
 	pub out_is_scalar: bool,
 	pub out_shape: ShapeConstraint,
 	pub is_reduction_head: bool,
-	pub is_reduction_input: bool,
+	pub is_extra_head: bool,
 	pub fragment: FragmentIndex,
 	pub is_dead: bool,
 	pub input_index_raw: usize,
@@ -409,8 +409,8 @@ impl Node {
 		self.is_reduction_head
 	}
 
-	pub fn is_reduction_input(&self) -> bool {
-		self.is_reduction_input
+	pub fn is_extra_head(&self) -> bool {
+		self.is_extra_head
 	}
 
 	pub fn is_captured(&self) -> bool {
@@ -424,7 +424,7 @@ impl Node {
 
 	/// `fragment_head` is a node whose result we may have to store into a tensor.
 	pub fn is_fragment_head(&self) -> bool {
-		self.is_reduction_head() || self.is_reduction_input() || self.is_fork()
+		self.is_reduction_head() || self.is_reduction() || self.is_extra_head() || self.is_fork()
 	}
 }
 
@@ -440,9 +440,9 @@ pub struct Fragment {
 	pub head: NodeIndex,
 	pub kind: FragmentKind,
 	pub reduction: NodeIndex,
-	pub input_into: HashSet<FragmentIndex>,
 	pub scalar_inputs: Vec<ScalarRefIndex>,
 	pub tensor_inputs: Vec<TensorRefIndex>,
+	pub fragment_inputs: Vec<FragmentIndex>,
 	pub tensor_outputs: Vec<TensorRefIndex>,
 	pub shape: CommonShape,
 }
@@ -453,6 +453,8 @@ impl Fragment {
 		self.scalar_inputs.dedup();
 		self.tensor_inputs.sort();
 		self.tensor_inputs.dedup();
+		self.fragment_inputs.sort();
+		self.fragment_inputs.dedup();
 		self.tensor_outputs.sort();
 		self.tensor_outputs.dedup();
 	}
@@ -672,7 +674,6 @@ impl Compilation {
 			Expr::Reduction(reduction) => {
 				let reduction_expr = reduction.expr.clone();
 				let child = self.load_expr(reduction_expr, visited);
-				self.nodes_postorder[child].is_reduction_input = true;
 				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
 				if out_is_scalar {
 					out_shape = ShapeConstraint::new();
@@ -699,7 +700,7 @@ impl Compilation {
 			out_is_scalar,
 			out_shape,
 			is_reduction_head: false,
-			is_reduction_input: false,
+			is_extra_head: false,
 			fragment: FragmentIndex::new_invalid(),
 			is_dead: false,
 			input_index_raw,
@@ -861,29 +862,25 @@ impl Compilation {
 				continue;
 			}
 			let frag = if self.nodes_postorder[i].is_fragment_head() {
-				// TODO - instead of input_into, we should have depends_on
-				// TODO 2 - need to add differently depending on whether it is an intput
-				// into reduction, or to the element-wise part
-				let input_into = self.nodes_postorder[i]
-					.parents
-					.iter()
-					.map(|&p| self.nodes_postorder[p].fragment)
-					.collect();
-				let kind = if self.nodes_postorder[i].is_reduction_head() {
-					FragmentKind::Reduction
-				} else {
-					FragmentKind::ElementWise
-				};
-				self.frag_preorder.push(Fragment {
+				let new_frag_index = self.frag_preorder.push(Fragment {
 					head: i,
-					kind,
+					kind: if self.nodes_postorder[i].is_reduction() {
+						FragmentKind::Reduction
+					} else {
+						FragmentKind::ElementWise
+					},
 					reduction: NodeIndex::new_invalid(),
-					input_into,
 					scalar_inputs: Vec::new(),
 					tensor_inputs: Vec::new(),
+					fragment_inputs: Vec::new(),
 					tensor_outputs: Vec::new(),
 					shape: CommonShape::new(),
-				})
+				});
+				for &parent in &self.nodes_postorder[i].parents {
+					let parent_frag = self.nodes_postorder[parent].fragment;
+					self.frag_preorder[parent_frag].fragment_inputs.push(new_frag_index);
+				}
+				new_frag_index
 			} else {
 				debug_assert!(self.nodes_postorder[i].parents.len() == 1);
 				let parent = self.nodes_postorder[i].parents[0];
@@ -971,7 +968,7 @@ impl Compilation {
 					writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ffcccc\"];")?;
 				}
 			} else if node.is_reduction() {
-				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#f0f0ff\"];")?;
+				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ffccff\"];")?;
 			} else if node.is_captured() {
 				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccffcc\"];")?;
 			}

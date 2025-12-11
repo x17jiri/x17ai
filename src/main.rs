@@ -296,8 +296,8 @@ fn test3_softmax() -> RcExpr {
 fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let mut comp = Compilation::new(test1_opt());
 
-	let (expr, inp) = test2_rms_norm();
-	let mut comp = Compilation::new(expr);
+	//let (expr, inp) = test2_rms_norm();
+	//let mut comp = Compilation::new(expr);
 
 	//let mut comp = Compilation::new(test3_softmax());
 
@@ -309,8 +309,8 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let dev = x17ai::new::device::cpu::CPUDevice::new();
 	let inp_lit = TensorLiteral1D::<f32>::new(&[1.0, 2.0, 3.0]);
 	let inp_ten = x17ai::new::tensor::Tensor::new(dev, &inp_lit)?;
-	inp.tensor.borrow_mut().replace(inp_ten);
-	comp.frag_shapes();
+	//inp.tensor.borrow_mut().replace(inp_ten);
+	//comp.frag_shapes();
 	/*
 	let inp = RcExpr::new_tensor_input(f32::dtype, "inp".into());
 	let max = inp.clone().max();
