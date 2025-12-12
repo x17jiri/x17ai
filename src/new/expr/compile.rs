@@ -31,6 +31,7 @@ use crate::new::expr::{ExprCapture, ExprCast};
 use crate::tensor::error::ShapeMismatchError;
 use crate::tensor::{HasDType, TensorOpError};
 use crate::util::index_vec::IndexVec;
+use crate::util::union_find::UnionFind;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -325,7 +326,7 @@ impl ShapeConstraint {
 pub struct Node {
 	pub expr: Rc<Expr>,
 	pub parents: Vec<NodeIndex>,
-	pub children: Vec<NodeIndex>,
+	pub children: [NodeIndex; 2],
 	pub capture: Vec<TensorRefIndex>,
 
 	pub out_is_scalar: bool,
@@ -388,9 +389,7 @@ impl Node {
 	}
 
 	pub fn is_input(&self) -> bool {
-		let result = self.children.is_empty();
-		debug_assert!(result == matches!(self.expr.as_ref(), Expr::Input(_)));
-		result
+		self.is_nullary()
 	}
 
 	pub fn is_scalar_input(&self) -> bool {
@@ -415,6 +414,22 @@ impl Node {
 
 	pub fn is_captured(&self) -> bool {
 		!self.capture.is_empty()
+	}
+
+	pub fn is_nullary(&self) -> bool {
+		(self.children[0].raw as isize) < 0
+	}
+
+	pub fn is_unary(&self) -> bool {
+		(self.children[0].raw | !self.children[1].raw) as isize >= 0
+	}
+
+	pub fn is_binary(&self) -> bool {
+		(self.children[1].raw as isize) >= 0
+	}
+
+	pub fn is_root(&self) -> bool {
+		self.parents.is_empty()
 	}
 
 	pub fn is_fork(&self) -> bool {
@@ -516,7 +531,7 @@ impl CompiledExpr {
 
 	pub fn frag_shapes(&mut self) -> Result<(), TensorOpError> {
 		let mut inputs = Vec::with_capacity(15);
-		for i in self.frag_preorder.indexes() {
+		for i in self.frag_preorder.indexes().rev() {
 			match self.frag_preorder[i].kind {
 				FragmentKind::ElementWise => {
 					inputs.clear();
@@ -585,7 +600,7 @@ impl Compilation {
 		let mut input_index_raw: usize = usize::MAX;
 		let out_is_scalar: bool;
 		let out_shape: ShapeConstraint;
-		let children: Vec<NodeIndex>;
+		let children: [NodeIndex; 2];
 		let mut capture: Vec<TensorRefIndex> = Vec::new();
 		match expr.as_ref() {
 			Expr::Capture(ExprCapture { expr: x, tensor_ref }) => {
@@ -615,7 +630,7 @@ impl Compilation {
 				}));
 				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
 				out_shape = self.nodes_postorder[child].out_shape.clone();
-				children = vec![child];
+				children = [child, NodeIndex::new_invalid()];
 				capture.push(tensor_ref_index);
 			},
 			Expr::First(first) => {
@@ -628,13 +643,13 @@ impl Compilation {
 				ExprInput::Tensor(tensor_ref) => {
 					out_is_scalar = false;
 					out_shape = tensor_ref.shape_constraint();
-					children = Vec::new();
+					children = [NodeIndex::new_invalid(), NodeIndex::new_invalid()];
 					input_index_raw = self.add_tensor_ref(tensor_ref.clone(), true, false).raw;
 				},
 				ExprInput::Scalar(scalar_ref) => {
 					out_is_scalar = true;
 					out_shape = ShapeConstraint::new();
-					children = Vec::new();
+					children = [NodeIndex::new_invalid(), NodeIndex::new_invalid()];
 					input_index_raw = self.add_scalar_ref(scalar_ref.clone()).raw;
 				},
 			},
@@ -642,7 +657,7 @@ impl Compilation {
 				let child = self.load_expr(expr.clone(), visited);
 				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
 				out_shape = self.nodes_postorder[child].out_shape.clone();
-				children = vec![child];
+				children = [child, NodeIndex::new_invalid()];
 			},
 			Expr::Binary(binary) => {
 				let lhs = binary.lhs.clone();
@@ -669,7 +684,7 @@ impl Compilation {
 						);
 					}
 				}
-				children = vec![left_child, right_child];
+				children = [left_child, right_child];
 			},
 			Expr::Reduction(reduction) => {
 				let reduction_expr = reduction.expr.clone();
@@ -683,12 +698,15 @@ impl Compilation {
 						.set_last(Some(DimConstraint { source: "reduction".to_string(), size: 1 }));
 					out_shape = shape;
 				}
-				children = vec![child];
+				children = [child, NodeIndex::new_invalid()];
 			},
 		}
 
 		let next_index = self.nodes_postorder.next_index();
 		for &child in &children {
+			if !child.is_valid() {
+				break;
+			}
 			self.nodes_postorder[child].parents.push(next_index);
 		}
 
@@ -768,60 +786,21 @@ impl Compilation {
 	}
 
 	fn find_reduction_heads(&mut self) {
-		let mut reduction_bitmap: Vec<ReductionBitmap> =
-			Vec::with_capacity(self.nodes_postorder.len());
-		'nodes: for parent in self.nodes_postorder.indexes() {
+		for parent in self.nodes_postorder.indexes() {
 			if self.nodes_postorder[parent].is_reduction() {
 				self.nodes_postorder[parent].is_reduction_head = true;
+				continue;
+			}
 
-				let child = self.nodes_postorder[parent].children[0];
-				reduction_bitmap.push(reduction_bitmap[child.raw].clone_and_set(parent.raw));
-			} else {
-				let children_cnt = self.nodes_postorder[parent].children.len();
-				let current_bitmap = match children_cnt {
-					0 => {
-						reduction_bitmap.push(ReductionBitmap::new());
-						continue 'nodes;
-					},
-					1 => {
-						let child = self.nodes_postorder[parent].children[0];
-						reduction_bitmap.push(reduction_bitmap[child.raw].clone());
-						reduction_bitmap.last().unwrap()
-					},
-					_ => {
-						assert!(children_cnt == 2);
-						let child0 = self.nodes_postorder[parent].children[0];
-						let child1 = self.nodes_postorder[parent].children[1];
-						reduction_bitmap.push(ReductionBitmap::union(
-							&reduction_bitmap[child0.raw],
-							&reduction_bitmap[child1.raw],
-						));
-						reduction_bitmap.last().unwrap()
-					},
-				};
+			if self.nodes_postorder[parent].out_shape.last() != Some(1) {
+				continue;
+			}
 
-				if self.nodes_postorder[parent].out_shape.last() != Some(1) {
-					continue 'nodes;
-				}
-
-				// Check if we have exactly one child that is a reduction head
-				let mut child = NodeIndex::new_invalid();
-				for c in 0..children_cnt {
-					let child_index = self.nodes_postorder[parent].children[c];
-					if self.nodes_postorder[child_index].is_reduction_head {
-						if child.is_valid() {
-							continue 'nodes;
-						}
-						child = child_index;
-					}
-				}
+			for child in self.nodes_postorder[parent].children {
 				if !child.is_valid() {
-					continue 'nodes;
+					continue;
 				}
-
-				if self.nodes_postorder[child].parents == [parent]
-					&& reduction_bitmap[child.raw].is_equal(current_bitmap)
-				{
+				if self.nodes_postorder[child].parents == [parent] {
 					self.nodes_postorder[child].is_reduction_head = false;
 					self.nodes_postorder[parent].is_reduction_head = true;
 				}
@@ -829,13 +808,54 @@ impl Compilation {
 		}
 	}
 
+	#[allow(clippy::too_many_lines)]
 	fn mark_fragments(&mut self) {
+		let mut uf = UnionFind::new(0);
+		let mut is_elemwise: IndexVec<FragmentIndex, bool> = IndexVec::new();
+		for i in self.nodes_postorder.indexes().rev() {
+			if self.nodes_postorder[i].is_dead || self.nodes_postorder[i].is_input() {
+				cold_path();
+				continue;
+			}
+			let cnt_parents = self.nodes_postorder[i].parents.len();
+			let is_reduction = self.nodes_postorder[i].is_reduction();
+			self.nodes_postorder[i].fragment = if cnt_parents == 0 || is_reduction {
+				uf.add();
+				is_elemwise.push(!is_reduction)
+			} else if cnt_parents == 1 {
+				let parent = self.nodes_postorder[i].parents[0];
+				self.nodes_postorder[parent].fragment
+			} else {
+				let mut all_parents_elemwise = true;
+				for parent in &self.nodes_postorder[i].parents {
+					let parent_frag = self.nodes_postorder[*parent].fragment;
+					if !is_elemwise[parent_frag] {
+						all_parents_elemwise = false;
+						break;
+					}
+				}
+				if all_parents_elemwise {
+					let first_parent = self.nodes_postorder[i].parents[0];
+					let first_frag = self.nodes_postorder[first_parent].fragment;
+					for next_parent in &self.nodes_postorder[i].parents[1..] {
+						let next_frag = self.nodes_postorder[*next_parent].fragment;
+						uf.union(first_frag.raw, next_frag.raw);
+					}
+					first_frag
+				} else {
+					uf.add();
+					is_elemwise.push(true)
+				}
+			};
+		}
+		std::mem::drop(is_elemwise);
+		let (uf, fragment_cnt) = uf.compact_ids();
 		for i in self.nodes_postorder.indexes().rev() {
 			if self.nodes_postorder[i].is_dead {
 				cold_path();
 				continue;
 			}
-			if self.nodes_postorder[i].children.is_empty() {
+			if self.nodes_postorder[i].is_nullary() {
 				if self.nodes_postorder[i].out_is_scalar {
 					debug_assert!(matches!(
 						self.nodes_postorder[i].expr.as_ref(),
@@ -984,6 +1004,9 @@ impl Compilation {
 				)?;
 			}
 			for &child_index in &node.children {
+				if !child_index.is_valid() {
+					break;
+				}
 				let child_id = self.graphviz_node_id(child_index);
 				let label = if self.nodes_postorder[child_index].out_is_scalar {
 					String::new()

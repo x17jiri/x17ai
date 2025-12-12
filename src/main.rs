@@ -263,12 +263,14 @@ fn test1_opt() -> RcExpr {
 
 	let value = RcExpr::new_tensor_input(value_ten.clone());
 	let update_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("update_coef".into())));
-	let update = new_m * v_rsqrt;
+	let update = new_m.clone() * v_rsqrt;
 	let new_value = value + update.clone() * update_coef;
 	let new_value = new_value.capture(value_ten.clone());
 	let new_value = new_value.clone() + update.sqrt();
 
-	new_value
+	let x_ten = ExprTensorRef::new(Some("x".into()), f32::dtype, vec![]);
+
+	RcExpr::first(new_value.clone(), (new_value + new_m).capture(x_ten))
 }
 
 fn test2_rms_norm() -> (RcExpr, Rc<ExprTensorRef>) {
