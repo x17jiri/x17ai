@@ -144,6 +144,14 @@ impl ReductionBitmap {
 		Self { bitmap: Vec::new() }
 	}
 
+	pub fn new_single_bit(index: usize) -> Self {
+		let word_index = index / 64;
+		let bit_index = index % 64;
+		let mut bitmap = vec![0; word_index + 1];
+		bitmap[word_index] |= 1 << bit_index;
+		Self { bitmap }
+	}
+
 	pub fn union<'a>(mut a: &'a Self, mut b: &'a Self) -> Self {
 		if a.bitmap.len() > b.bitmap.len() {
 			std::mem::swap(&mut a, &mut b);
@@ -810,33 +818,45 @@ impl Compilation {
 
 	#[allow(clippy::too_many_lines)]
 	fn mark_fragments(&mut self) {
+		#[derive(PartialEq, Eq, Clone, Copy)]
+		enum FragKind {
+			ElementWise,
+			ReductionHead,
+			Reduction,
+		}
 		let mut uf = UnionFind::new(0);
-		let mut is_elemwise: IndexVec<FragmentIndex, bool> = IndexVec::new();
+		let mut frag_kind: IndexVec<FragmentIndex, FragKind> = IndexVec::new();
 		for i in self.nodes_postorder.indexes().rev() {
 			if self.nodes_postorder[i].is_dead || self.nodes_postorder[i].is_input() {
 				cold_path();
 				continue;
 			}
 			let cnt_parents = self.nodes_postorder[i].parents.len();
-			let is_reduction = self.nodes_postorder[i].is_reduction();
-			self.nodes_postorder[i].fragment = if cnt_parents == 0 || is_reduction {
-				uf.add();
-				is_elemwise.push(!is_reduction)
-			} else if cnt_parents == 1 {
-				let parent = self.nodes_postorder[i].parents[0];
-				self.nodes_postorder[parent].fragment
+			let k = if self.nodes_postorder[i].is_reduction() {
+				FragKind::Reduction
+			} else if self.nodes_postorder[i].is_reduction_head() {
+				FragKind::ReductionHead
 			} else {
-				let mut all_parents_elemwise = true;
-				for parent in &self.nodes_postorder[i].parents {
-					let parent_frag = self.nodes_postorder[*parent].fragment;
-					if !is_elemwise[parent_frag] {
-						all_parents_elemwise = false;
+				FragKind::ElementWise
+			};
+			self.nodes_postorder[i].fragment = if cnt_parents == 0 || k == FragKind::Reduction {
+				uf.add();
+				frag_kind.push(k)
+			} else {
+				let first_parent = self.nodes_postorder[i].parents[0];
+				let first_frag = self.nodes_postorder[first_parent].fragment;
+				let first_kind = frag_kind[first_frag];
+				let mut all_parents_same = true;
+				for next_parent in &self.nodes_postorder[i].parents[1..] {
+					let next_frag = self.nodes_postorder[*next_parent].fragment;
+					if frag_kind[next_frag] != first_kind {
+						all_parents_same = false;
 						break;
 					}
 				}
-				if all_parents_elemwise {
-					let first_parent = self.nodes_postorder[i].parents[0];
-					let first_frag = self.nodes_postorder[first_parent].fragment;
+				if all_parents_same
+					&& !(first_kind == FragKind::ElementWise && k == FragKind::ReductionHead)
+				{
 					for next_parent in &self.nodes_postorder[i].parents[1..] {
 						let next_frag = self.nodes_postorder[*next_parent].fragment;
 						uf.union(first_frag.raw, next_frag.raw);
@@ -844,18 +864,14 @@ impl Compilation {
 					first_frag
 				} else {
 					uf.add();
-					is_elemwise.push(true)
+					frag_kind.push(k)
 				}
 			};
 		}
-		std::mem::drop(is_elemwise);
-		let (uf, fragment_cnt) = uf.compact_ids();
+		let (uf, frag_cnt) = uf.flatten();
+		let mut frag_map: HashMap<FragmentIndex, FragmentIndex> = HashMap::with_capacity(frag_cnt);
 		for i in self.nodes_postorder.indexes().rev() {
-			if self.nodes_postorder[i].is_dead {
-				cold_path();
-				continue;
-			}
-			if self.nodes_postorder[i].is_nullary() {
+			if self.nodes_postorder[i].is_input() {
 				if self.nodes_postorder[i].out_is_scalar {
 					debug_assert!(matches!(
 						self.nodes_postorder[i].expr.as_ref(),
@@ -881,40 +897,45 @@ impl Compilation {
 				}
 				continue;
 			}
-			let frag = if self.nodes_postorder[i].is_fragment_head() {
-				let new_frag_index = self.frag_preorder.push(Fragment {
-					head: i,
-					kind: if self.nodes_postorder[i].is_reduction() {
-						FragmentKind::Reduction
-					} else {
-						FragmentKind::ElementWise
-					},
-					reduction: NodeIndex::new_invalid(),
-					scalar_inputs: Vec::new(),
-					tensor_inputs: Vec::new(),
-					fragment_inputs: Vec::new(),
-					tensor_outputs: Vec::new(),
-					shape: CommonShape::new(),
-				});
-				for &parent in &self.nodes_postorder[i].parents {
-					let parent_frag = self.nodes_postorder[parent].fragment;
-					self.frag_preorder[parent_frag].fragment_inputs.push(new_frag_index);
-				}
-				new_frag_index
-			} else {
-				debug_assert!(self.nodes_postorder[i].parents.len() == 1);
-				let parent = self.nodes_postorder[i].parents[0];
-				debug_assert!(self.nodes_postorder[parent].fragment.is_valid());
-				self.nodes_postorder[parent].fragment
-			};
-			self.nodes_postorder[i].fragment = frag;
-			for cap in 0..self.nodes_postorder[i].capture.len() {
-				let index = self.nodes_postorder[i].capture[cap];
-				self.frag_preorder[frag].tensor_outputs.push(index);
+			if !self.nodes_postorder[i].fragment.is_valid() {
+				debug_assert!(self.nodes_postorder[i].is_dead);
+				cold_path();
+				continue;
 			}
-			if self.nodes_postorder[i].is_reduction() {
-				assert!(!self.frag_preorder[frag].reduction.is_valid());
-				self.frag_preorder[frag].reduction = i;
+			let original_frag_idx = FragmentIndex::new(uf[self.nodes_postorder[i].fragment.raw]);
+			let new_frag_idx = match frag_map.entry(original_frag_idx) {
+				hash_map::Entry::Vacant(entry) => {
+					// Fragment head
+					let new_frag_idx = self.frag_preorder.push(Fragment {
+						head: i,
+						kind: if frag_kind[original_frag_idx] == FragKind::Reduction {
+							FragmentKind::Reduction
+						} else {
+							FragmentKind::ElementWise
+						},
+						reduction: NodeIndex::new_invalid(),
+						scalar_inputs: Vec::new(),
+						tensor_inputs: Vec::new(),
+						fragment_inputs: Vec::new(),
+						tensor_outputs: Vec::new(),
+						shape: CommonShape::new(),
+					});
+					entry.insert(new_frag_idx);
+					for &parent in &self.nodes_postorder[i].parents {
+						let parent_frag = self.nodes_postorder[parent].fragment;
+						self.frag_preorder[parent_frag].fragment_inputs.push(new_frag_idx);
+					}
+					new_frag_idx
+				},
+				hash_map::Entry::Occupied(entry) => {
+					let new_frag_idx = *entry.get();
+					new_frag_idx
+				},
+			};
+			self.nodes_postorder[i].fragment = new_frag_idx;
+			for cap in 0..self.nodes_postorder[i].capture.len() {
+				let cap_index = self.nodes_postorder[i].capture[cap];
+				self.frag_preorder[new_frag_idx].tensor_outputs.push(cap_index);
 			}
 		}
 		for i in self.frag_preorder.indexes() {

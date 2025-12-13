@@ -70,6 +70,29 @@ impl UnionFind {
 		}
 	}
 
+	pub fn flatten(mut self) -> (Vec<usize>, usize) {
+		let size = self.link_parent.len();
+		let mut sets = 0;
+		for i in 0..size {
+			let mut key = i;
+			let mut parent = self.link_parent[key];
+			while key >= i && parent < size {
+				let grand_parent = self.link_parent[parent];
+				self.link_parent[key] = i;
+				key = parent;
+				parent = grand_parent;
+			}
+			if key < i {
+				self.link_parent[i] = self.link_parent[key];
+			} else {
+				self.link_parent[key] = i;
+				self.link_parent[i] = i;
+				sets += 1;
+			}
+		}
+		(self.link_parent, sets)
+	}
+
 	pub fn compact_ids(mut self) -> (Vec<usize>, usize) {
 		let size = self.link_parent.len();
 		let mut sets = 0;
