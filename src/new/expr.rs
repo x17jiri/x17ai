@@ -25,6 +25,7 @@ use crate::tensor::DType;
 use compile::{DimConstraint, ShapeConstraint};
 
 pub mod compile;
+pub mod compile2;
 pub mod eval;
 
 //--------------------------------------------------------------------------------------------------

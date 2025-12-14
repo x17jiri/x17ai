@@ -236,6 +236,34 @@ pub struct Tensor {
 
 impl Tensor {
 	#[inline(never)]
+	pub fn new_empty(
+		shape: &[usize],
+		dtype: DType,
+		device: Rc<dyn Device>,
+	) -> Result<Self, ErrPack<TensorOpError>> {
+		let Ok(shape_helper) = ShapeHelper::new(dtype, shape) else {
+			cold_path();
+			return Err(TensorSizeOverflowError.into());
+		};
+		let bytes = shape_helper.bytes();
+		unsafe {
+			let Ok(device_ptr) = device.new_buffer(bytes) else {
+				cold_path();
+				return Err(DeviceAllocError.into());
+			};
+			match Self::with_buffer(device, device_ptr, shape_helper) {
+				Ok(tensor) => Ok(tensor),
+				Err(device) => {
+					cold_path();
+					device.drop_buffer(device_ptr);
+					std::mem::drop(device);
+					Err(TensorOpError::Alloc.into())
+				},
+			}
+		}
+	}
+
+	#[inline(never)]
 	pub fn new(
 		device: Rc<dyn Device>,
 		literal: &dyn TensorLiteral,

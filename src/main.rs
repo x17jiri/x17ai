@@ -163,6 +163,7 @@ use std::rc::Rc;
 
 use x17ai::autograd::{AutogradTensor, LossFn};
 use x17ai::new::expr::compile::{Compilation, CompiledExpr};
+use x17ai::new::expr::compile2::PreCompilation;
 use x17ai::new::expr::{ExprScalarRef, ExprTensorRef, RcExpr};
 use x17ai::new::tensor::TensorLiteral1D;
 use x17ai::nn::ModelContext;
@@ -217,11 +218,6 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	exec.mm(&t, &t, &t, 1.0)?;*/
 
 	Ok(())
-}
-
-#[link(name = "cuda_shim")]
-unsafe extern "C" {
-	fn x17ai_hello_torch() -> std::ffi::c_int;
 }
 
 fn test1_opt() -> RcExpr {
@@ -295,6 +291,31 @@ fn test3_softmax() -> RcExpr {
 	out
 }
 
+fn test4_x(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
+	let mut inp_a = ExprTensorRef::new(Some("a".into()), f32::dtype, vec![]);
+	let mut inb_b = ExprTensorRef::new(Some("b".into()), f32::dtype, vec![]);
+	let mut inp_c = ExprTensorRef::new(Some("c".into()), f32::dtype, vec![]);
+	let out = ExprTensorRef::new(Some("out".into()), f32::dtype, vec![]);
+	let a = RcExpr::new_tensor_input(inp_a.clone());
+	let b = -RcExpr::new_tensor_input(inb_b.clone());
+	let c = RcExpr::new_tensor_input(inp_c.clone());
+	let max = (a + b.clone()).max();
+	let sum = (b + c).sum();
+	let out = (max * sum).capture(out);
+
+	inp_a.tensor.borrow_mut().replace(
+		x17ai::new::tensor::Tensor::new_empty(&[1000, 512], f32::dtype, dev.clone()).unwrap(),
+	);
+	inb_b.tensor.borrow_mut().replace(
+		x17ai::new::tensor::Tensor::new_empty(&[1000, 512], f32::dtype, dev.clone()).unwrap(),
+	);
+	inp_c.tensor.borrow_mut().replace(
+		x17ai::new::tensor::Tensor::new_empty(&[1, 512], f32::dtype, dev.clone()).unwrap(),
+	);
+
+	out
+}
+
 fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let mut comp = Compilation::new(test1_opt());
 
@@ -303,14 +324,18 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 
 	//let mut comp = Compilation::new(test3_softmax());
 
+	let dev = x17ai::new::device::cpu::CPUDevice::new();
+	let mut comp = PreCompilation::new(test4_x(dev));
+	comp.calc_shapes()?;
+
 	let mut graphviz = String::new();
 	comp.print_graphviz(&mut graphviz);
 	println!("{}", graphviz);
 
-	let mut comp = CompiledExpr::new(comp);
+	/*let mut comp = CompiledExpr::new(comp);
 	let dev = x17ai::new::device::cpu::CPUDevice::new();
 	let inp_lit = TensorLiteral1D::<f32>::new(&[1.0, 2.0, 3.0]);
-	let inp_ten = x17ai::new::tensor::Tensor::new(dev, &inp_lit)?;
+	let inp_ten = x17ai::new::tensor::Tensor::new(dev, &inp_lit)?;*/
 	//inp.tensor.borrow_mut().replace(inp_ten);
 	//comp.frag_shapes();
 	/*

@@ -498,6 +498,14 @@ type TensorRefVec = IndexVec<TensorRefIndex, TensorRef>;
 define_index_type!(ScalarRefIndex);
 type ScalarRefVec = IndexVec<ScalarRefIndex, Rc<ExprScalarRef>>;
 
+pub struct PreCompilation {
+	nodes_postorder: NodeVec,
+	scalar_ref_map: HashMap<*const ExprScalarRef, ScalarRefIndex>,
+	scalar_ref_vec: ScalarRefVec,
+	tensor_ref_map: HashMap<*const ExprTensorRef, TensorRefIndex>,
+	tensor_ref_vec: TensorRefVec,
+}
+
 pub struct Compilation {
 	nodes_postorder: NodeVec,
 	frag_preorder: FragmentVec,
@@ -556,7 +564,7 @@ impl CompiledExpr {
 							cold_path();
 							return Err(TensorOpError::MissingInput);
 						};
-						let Ok(()) = inputs.push_within_capacity(tensor.shape()) else {
+						let Ok(_) = inputs.push_within_capacity(tensor.shape()) else {
 							unsafe { unreachable_unchecked() }
 						};
 					}
@@ -990,7 +998,6 @@ impl Compilation {
 
 	pub fn print_graphviz<W: std::fmt::Write>(&self, w: &mut W) -> std::fmt::Result {
 		writeln!(w, "digraph G {{")?;
-		//writeln!(w, "\tgraph [splines=line];")?;
 		writeln!(w, "\trankdir=BT;")?;
 		for i in self.nodes_postorder.indexes() {
 			let node = &self.nodes_postorder[i];

@@ -5,11 +5,12 @@
 //
 //------------------------------------------------------------------------------
 
-//--------------------------------------------------------------------------------------------------
-
+use std::hash::Hash;
 use std::hint::cold_path;
 
-pub trait IndexTrait {
+//--------------------------------------------------------------------------------------------------
+
+pub trait IndexTrait: Copy + Clone + PartialEq + Eq + Hash + Ord {
 	fn to_raw(self) -> usize;
 	fn from_raw(raw: usize) -> Self;
 }
@@ -91,7 +92,7 @@ impl<Index: IndexTrait, T> IndexVec<Index, T> {
 	pub fn push_within_capacity(&mut self, item: T) -> Result<Index, T> {
 		let index = Index::from_raw(self.raw.len());
 		match self.raw.push_within_capacity(item) {
-			Ok(()) => Ok(index),
+			Ok(_) => Ok(index),
 			Err(item) => {
 				cold_path();
 				Err(item)
@@ -122,6 +123,12 @@ impl<Index: IndexTrait, T> IndexVec<Index, T> {
 
 	pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
 		self.raw.iter_mut()
+	}
+
+	pub fn borrow_multiple(&mut self, index: Index) -> (&mut [T], &mut T, &mut [T]) {
+		let (prefix, t) = self.raw.split_at_mut(index.to_raw());
+		let (t, suffix) = t.split_at_mut(1);
+		(prefix, &mut t[0], suffix)
 	}
 }
 
