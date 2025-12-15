@@ -30,3 +30,4 @@ wrap_comments = false
 #spaces_around_ranges = true
 
 fn_params_layout = "tall"
+empty_item_single_line = false

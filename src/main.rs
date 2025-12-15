@@ -220,13 +220,13 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	Ok(())
 }
 
-fn test1_opt() -> RcExpr {
+fn test1_opt(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 	let my_lit = TensorLiteral1D::<f32>::new(&[1.0, 2.0, 3.0, 4.0, 5.0]);
 
-	let v_ten = ExprTensorRef::new(Some("v".into()), f32::dtype, vec![1]);
-	let m_ten = ExprTensorRef::new(Some("m".into()), f32::dtype, vec![]);
-	let grad_ten = ExprTensorRef::new(Some("grad".into()), f32::dtype, vec![]);
-	let value_ten = ExprTensorRef::new(Some("value".into()), f32::dtype, vec![]);
+	let mut v_ten = ExprTensorRef::new(Some("v".into()), f32::dtype, vec![1]);
+	let mut m_ten = ExprTensorRef::new(Some("m".into()), f32::dtype, vec![]);
+	let mut grad_ten = ExprTensorRef::new(Some("grad".into()), f32::dtype, vec![]);
+	let mut value_ten = ExprTensorRef::new(Some("value".into()), f32::dtype, vec![]);
 
 	let grad1 = RcExpr::new_tensor_input(grad_ten.clone());
 	let grad2 = RcExpr::new_tensor_input(grad_ten.clone());
@@ -240,7 +240,7 @@ fn test1_opt() -> RcExpr {
 	let m_decayed = (m * m_decay_coef); //.max(); // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	let m_update = grad1.clone() * m_update_coef;
 	let new_m = m_decayed + m_update;
-	let new_m = new_m.capture(m_ten);
+	let new_m = new_m.capture(m_ten.clone());
 
 	let v = RcExpr::new_tensor_input(v_ten.clone());
 	let v_decay_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("v_decay_coef".into())));
@@ -250,7 +250,7 @@ fn test1_opt() -> RcExpr {
 	let v_update = (grad2.clone() * grad3).sum() * v_update_coef.clone();
 	//let v_update = v_update.sum() * v_update_coef;
 	let new_v = v_decayed + v_update;
-	let new_v = new_v.capture(v_ten);
+	let new_v = new_v.capture(v_ten.clone());
 	//let new_v = new_v.capture(value_ten.clone());
 
 	let eps = RcExpr::new_scalar_input(ExprScalarRef::new(Some("eps".into())));
@@ -264,9 +264,25 @@ fn test1_opt() -> RcExpr {
 	let new_value = new_value.capture(value_ten.clone());
 	let new_value = new_value.clone() + update.sqrt();
 
+	v_ten.tensor.borrow_mut().replace(
+		x17ai::new::tensor::Tensor::new_empty(&[500, 1], f32::dtype, dev.clone()).unwrap(),
+	);
+	m_ten.tensor.borrow_mut().replace(
+		x17ai::new::tensor::Tensor::new_empty(&[500, 300], f32::dtype, dev.clone()).unwrap(),
+	);
+	grad_ten.tensor.borrow_mut().replace(
+		x17ai::new::tensor::Tensor::new_empty(&[500, 300], f32::dtype, dev.clone()).unwrap(),
+	);
+	value_ten.tensor.borrow_mut().replace(
+		x17ai::new::tensor::Tensor::new_empty(&[500, 300], f32::dtype, dev.clone()).unwrap(),
+	);
+
+	new_value
+
+	/*
 	let x_ten = ExprTensorRef::new(Some("x".into()), f32::dtype, vec![]);
 
-	RcExpr::first(new_value.clone(), (new_value + new_m).capture(x_ten))
+	RcExpr::first(new_value.clone(), (new_value + new_m).capture(x_ten))*/
 }
 
 fn test2_rms_norm() -> (RcExpr, Rc<ExprTensorRef>) {
@@ -317,16 +333,20 @@ fn test4_x(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 }
 
 fn main() -> Result<(), ErrPack<TensorOpError>> {
-	let mut comp = Compilation::new(test1_opt());
+	let dev = x17ai::new::device::cpu::CPUDevice::new();
+
+	let expr = test1_opt(dev);
 
 	//let (expr, inp) = test2_rms_norm();
 	//let mut comp = Compilation::new(expr);
 
 	//let mut comp = Compilation::new(test3_softmax());
 
-	let dev = x17ai::new::device::cpu::CPUDevice::new();
-	let mut comp = PreCompilation::new(test4_x(dev));
+	//let mut comp = PreCompilation::new(test4_x(dev));
+
+	let mut comp = PreCompilation::new(expr);
 	comp.calc_shapes()?;
+	comp.find_fragments();
 
 	let mut graphviz = String::new();
 	comp.print_graphviz(&mut graphviz);

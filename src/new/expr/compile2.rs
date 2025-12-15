@@ -30,12 +30,45 @@ use super::{
 };
 use crate::define_index_type;
 use crate::new::expr::{ExprCapture, ExprCast};
-use crate::tensor::error::ShapeMismatchError;
-use crate::tensor::{HasDType, TensorOpError};
+use crate::tensor::TensorOpError;
 use crate::util::index_vec::IndexVec;
-use crate::util::union_find::UnionFind;
 
 //--------------------------------------------------------------------------------------------------
+
+pub struct ShapeRef<'a> {
+	pub shape: &'a [usize],
+}
+
+impl<'a> ShapeRef<'a> {
+	pub fn new(shape: &'a [usize]) -> Self {
+		Self { shape }
+	}
+
+	pub fn zip_with<'b>(
+		&'a self,
+		other: &'b ShapeRef,
+	) -> impl ExactSizeIterator<Item = (usize, usize)> + DoubleEndedIterator {
+		let shape_len = self.shape.len().max(other.shape.len());
+		let skip_self = shape_len - self.shape.len();
+		let skip_other = shape_len - other.shape.len();
+		(0..shape_len).map(move |d| {
+			let idx_self = d.wrapping_sub(skip_self);
+			let dim_self = *self.shape.get(idx_self).unwrap_or(&1);
+			let idx_other = d.wrapping_sub(skip_other);
+			let dim_other = *other.shape.get(idx_other).unwrap_or(&1);
+			(dim_self, dim_other)
+		})
+	}
+}
+
+impl<'a> std::cmp::PartialEq for ShapeRef<'a> {
+	fn eq(&self, other: &Self) -> bool {
+		self.zip_with(other).all(|(a, b)| a == b)
+	}
+}
+
+impl<'a> std::cmp::Eq for ShapeRef<'a> {
+}
 
 #[allow(clippy::struct_excessive_bools)]
 pub struct Node {
@@ -43,7 +76,8 @@ pub struct Node {
 	pub shape: ThinVec<usize>,
 	pub parents: ThinVec<NodeIndex>,
 	pub children: [NodeIndex; 2],
-	pub capture: Vec<TensorRefIndex>,
+	pub capture: ThinVec<TensorRefIndex>,
+	pub fragment_head: NodeIndex,
 
 	pub out_is_scalar: bool,
 	pub is_dead: bool,
@@ -53,7 +87,7 @@ pub struct Node {
 
 impl Node {
 	pub fn is_input(&self) -> bool {
-		self.is_nullary()
+		(self.input_index_raw as isize) >= 0
 	}
 
 	pub fn is_scalar_input(&self) -> bool {
@@ -153,7 +187,7 @@ impl PreCompilation {
 		let mut input_index_raw: usize = usize::MAX;
 		let out_is_scalar: bool;
 		let children: [NodeIndex; 2];
-		let mut capture: Vec<TensorRefIndex> = Vec::new();
+		let mut capture: ThinVec<TensorRefIndex> = ThinVec::new();
 		match expr.as_ref() {
 			Expr::Capture(ExprCapture { expr: x, tensor_ref }) => {
 				let child = self.load_expr(x.clone(), visited, captures);
@@ -164,7 +198,6 @@ impl PreCompilation {
 						tensor_ref.name.as_deref().unwrap_or("unnamed tensor")
 					);
 				}
-				let capture_shape_constraint = tensor_ref.shape_constraint();
 				let tensor_ref_index = self.add_tensor_ref(tensor_ref, false, true);
 				if !self.nodes_postorder[child].is_input() {
 					self.nodes_postorder[child].capture.push(tensor_ref_index);
@@ -236,6 +269,7 @@ impl PreCompilation {
 			parents: ThinVec::new(),
 			children,
 			capture,
+			fragment_head: NodeIndex::new_invalid(),
 			out_is_scalar,
 			is_dead: false,
 			is_reduction_head: false,
@@ -387,20 +421,39 @@ impl PreCompilation {
 			if parent.is_reduction() {
 				parent.is_reduction_head = true;
 			} else {
-				let shape: &[usize] = &parent.shape;
+				parent.is_reduction_head = false;
+				let parent_shape = ShapeRef::new(&parent.shape);
 				for child in parent.children {
 					if !child.is_valid() {
 						break;
 					}
-					let child = &mut prev[child.raw];
+					let child: &mut Node = &mut prev[child.raw];
+					let child_shape = ShapeRef::new(&child.shape);
 					if child.is_reduction_head
-						&& &child.parents == &[parent_idx]
-						&& child.shape == shape
+						&& child.parents == [parent_idx]
+						&& parent_shape == child_shape
 					{
 						child.is_reduction_head = false;
 						parent.is_reduction_head = true;
 					}
 				}
+			}
+		}
+	}
+
+	pub fn find_fragments(&mut self) {
+		self.find_reduction_heads();
+		for idx in self.nodes_postorder.indexes().rev() {
+			let (_, item, prev) = self.nodes_postorder.borrow_multiple(idx);
+			if item.is_input() || item.is_dead {
+				continue;
+			}
+			if item.parents.len() != 1 || item.is_reduction_head || item.is_reduction() {
+				item.fragment_head = idx;
+			} else {
+				let parent_idx = item.parents[0];
+				let parent = &prev[parent_idx.raw - idx.raw - 1];
+				item.fragment_head = parent.fragment_head;
 			}
 		}
 	}
@@ -512,19 +565,18 @@ impl PreCompilation {
 			} else if node.is_captured() {
 				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccffcc\"];")?;
 			}
-			/*
-			if node.fragment.is_valid() {
-				let fragment_kind = match self.frag_preorder[node.fragment].kind {
-					FragmentKind::ElementWise => "Element-wise",
-					FragmentKind::Reduction => "Reduction",
+			if node.fragment_head.is_valid() {
+				let fragment_kind = if self.nodes_postorder[node.fragment_head].is_reduction() {
+					"Reduction"
+				} else {
+					"Element-wise"
 				};
 				writeln!(
 					w,
 					"subgraph cluster_{} {{ label=\"{fragment_kind}\" labelloc=\"b\" labeljust=\"l\" {node_id} }}",
-					node.fragment.raw
+					node.fragment_head.raw
 				)?;
 			}
-			*/
 			for &child_index in &node.children {
 				if !child_index.is_valid() {
 					break;
@@ -535,12 +587,13 @@ impl PreCompilation {
 				} else {
 					self.shape_to_str(&self.nodes_postorder[child_index].shape)
 				};
-				let extra_style = /*if node.fragment.is_valid()
-					&& self.nodes_postorder[child_index].fragment.is_valid()
-					&& node.fragment != self.nodes_postorder[child_index].fragment
+				let extra_style = if node.fragment_head.is_valid()
+					&& self.nodes_postorder[child_index].fragment_head.is_valid()
+					&& node.fragment_head != self.nodes_postorder[child_index].fragment_head
 				{
+					// Edge crosses fragment boundary
 					", color=red, style=bold"
-				} else*/ {
+				} else {
 					""
 				};
 				writeln!(w, "\t{child_id} -> {node_id} [label=\"{}\"{}];", label, extra_style)?;

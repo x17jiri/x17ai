@@ -245,8 +245,7 @@ impl InputCounts {
 	}
 }
 
-#[const_trait]
-pub trait ExprTrait {
+pub const trait ExprTrait {
 	const MASKS: InputMasks;
 	const COUNTS: InputCounts = InputCounts::new(Self::MASKS);
 
