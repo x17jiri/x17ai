@@ -125,10 +125,25 @@ impl<Index: IndexTrait, T> IndexVec<Index, T> {
 		self.raw.iter_mut()
 	}
 
-	pub fn borrow_multiple(&mut self, index: Index) -> (&mut [T], &mut T, &mut [T]) {
+	pub fn borrow_multiple<'a>(
+		&'a mut self,
+		index: Index,
+	) -> (IndexSliceMut<'a, Index, T>, &mut T, IndexSliceMut<'a, Index, T>) {
 		let (prefix, t) = self.raw.split_at_mut(index.to_raw());
 		let (t, suffix) = t.split_at_mut(1);
-		(prefix, &mut t[0], suffix)
+		(
+			IndexSliceMut {
+				raw: prefix,
+				offset: 0,
+				_marker: std::marker::PhantomData,
+			},
+			&mut t[0],
+			IndexSliceMut {
+				raw: suffix,
+				offset: index.to_raw() + 1,
+				_marker: std::marker::PhantomData,
+			},
+		)
 	}
 }
 
@@ -167,6 +182,28 @@ impl<'a, Index: IndexTrait, T> IntoIterator for &'a mut IndexVec<Index, T> {
 	type IntoIter = std::slice::IterMut<'a, T>;
 	fn into_iter(self) -> Self::IntoIter {
 		self.raw.iter_mut()
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct IndexSliceMut<'a, Index: IndexTrait, T> {
+	pub raw: &'a mut [T],
+	offset: usize,
+	_marker: std::marker::PhantomData<Index>,
+}
+
+impl<'a, Index: IndexTrait, T> std::ops::Index<Index> for IndexSliceMut<'a, Index, T> {
+	type Output = T;
+
+	fn index(&self, index: Index) -> &T {
+		&self.raw[index.to_raw() - self.offset]
+	}
+}
+
+impl<'a, Index: IndexTrait, T> std::ops::IndexMut<Index> for IndexSliceMut<'a, Index, T> {
+	fn index_mut(&mut self, index: Index) -> &mut T {
+		&mut self.raw[index.to_raw() - self.offset]
 	}
 }
 

@@ -29,6 +29,7 @@ use super::{
 	ExprUnaryKind, RcExpr,
 };
 use crate::define_index_type;
+use crate::new::expr::compile::ReductionBitmap;
 use crate::new::expr::{ExprCapture, ExprCast};
 use crate::tensor::TensorOpError;
 use crate::util::index_vec::IndexVec;
@@ -81,7 +82,8 @@ pub struct Node {
 
 	pub out_is_scalar: bool,
 	pub is_dead: bool,
-	pub is_reduction_head: bool,
+	pub reduction_head_for: NodeIndex,
+	pub diverging_reductions: bool,
 	pub input_index_raw: usize, // Either ScalarRefIndex or TensorRefIndex, depending on out_is_scalar
 }
 
@@ -100,6 +102,10 @@ impl Node {
 
 	pub fn is_reduction(&self) -> bool {
 		matches!(self.expr.as_ref(), Expr::Reduction(_))
+	}
+
+	pub fn is_reduction_head(&self) -> bool {
+		self.reduction_head_for.is_valid()
 	}
 
 	pub fn is_captured(&self) -> bool {
@@ -153,6 +159,12 @@ pub struct PreCompilation {
 	tensor_ref_vec: TensorRefVec,
 }
 
+struct LoadExprState {
+	visited: HashMap<*const Expr, NodeIndex>,
+	captures: HashSet<*const ExprTensorRef>,
+	reductions: IndexVec<NodeIndex, ReductionBitmap>,
+}
+
 impl PreCompilation {
 	pub fn new(expr: RcExpr) -> Self {
 		let mut comp = PreCompilation {
@@ -163,7 +175,14 @@ impl PreCompilation {
 			tensor_ref_map: HashMap::new(),
 			tensor_ref_vec: TensorRefVec::with_capacity(4),
 		};
-		let _root = comp.load_expr(expr.rc_expr, &mut HashMap::new(), &mut HashSet::new());
+		let _root = comp.load_expr(
+			expr.rc_expr,
+			&mut LoadExprState {
+				visited: HashMap::new(),
+				captures: HashSet::new(),
+				reductions: IndexVec::new(),
+			},
+		);
 		comp.remove_dead_code();
 		comp
 	}
@@ -173,14 +192,9 @@ impl PreCompilation {
 	#[allow(clippy::manual_assert)]
 	#[allow(clippy::panic)]
 	// TODO - refactor to make non recursive
-	fn load_expr(
-		&mut self,
-		mut expr: Rc<Expr>,
-		visited: &mut HashMap<*const Expr, NodeIndex>,
-		captures: &mut HashSet<*const ExprTensorRef>,
-	) -> NodeIndex {
+	fn load_expr(&mut self, mut expr: Rc<Expr>, state: &mut LoadExprState) -> NodeIndex {
 		let expr_key = std::ptr::from_ref(expr.as_ref());
-		if let Some(index) = visited.get(&expr_key) {
+		if let Some(index) = state.visited.get(&expr_key) {
 			return *index;
 		}
 
@@ -188,11 +202,13 @@ impl PreCompilation {
 		let out_is_scalar: bool;
 		let children: [NodeIndex; 2];
 		let mut capture: ThinVec<TensorRefIndex> = ThinVec::new();
+		let reduction_bitmap;
+		let mut diverging_reductions = false;
 		match expr.as_ref() {
 			Expr::Capture(ExprCapture { expr: x, tensor_ref }) => {
-				let child = self.load_expr(x.clone(), visited, captures);
+				let child = self.load_expr(x.clone(), state);
 				let tensor_ref = tensor_ref.clone();
-				if !captures.insert(std::ptr::from_ref(tensor_ref.as_ref())) {
+				if !state.captures.insert(std::ptr::from_ref(tensor_ref.as_ref())) {
 					panic!(
 						"CompiledExpr::new(): Capturing multiple values into the same tensor '{}'.",
 						tensor_ref.name.as_deref().unwrap_or("unnamed tensor")
@@ -201,7 +217,7 @@ impl PreCompilation {
 				let tensor_ref_index = self.add_tensor_ref(tensor_ref, false, true);
 				if !self.nodes_postorder[child].is_input() {
 					self.nodes_postorder[child].capture.push(tensor_ref_index);
-					visited.insert(expr_key, child);
+					state.visited.insert(expr_key, child);
 					return child;
 				}
 				// Insert `Identity` node to perform the capture.
@@ -213,47 +229,59 @@ impl PreCompilation {
 				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
 				children = [child, NodeIndex::new_invalid()];
 				capture.push(tensor_ref_index);
+				reduction_bitmap = state.reductions[child].clone();
 			},
 			Expr::First(first) => {
-				let first_child = self.load_expr(first.lhs.clone(), visited, captures);
-				let _second_child = self.load_expr(first.rhs.clone(), visited, captures);
-				visited.insert(expr_key, first_child);
+				let first_child = self.load_expr(first.lhs.clone(), state);
+				let _second_child = self.load_expr(first.rhs.clone(), state);
+				state.visited.insert(expr_key, first_child);
 				return first_child;
 			},
-			Expr::Input(input) => match input {
-				ExprInput::Tensor(tensor_ref) => {
-					out_is_scalar = false;
-					children = [NodeIndex::new_invalid(), NodeIndex::new_invalid()];
-					input_index_raw = self.add_tensor_ref(tensor_ref.clone(), true, false).raw;
-				},
-				ExprInput::Scalar(scalar_ref) => {
-					out_is_scalar = true;
-					children = [NodeIndex::new_invalid(), NodeIndex::new_invalid()];
-					input_index_raw = self.add_scalar_ref(scalar_ref.clone()).raw;
-				},
+			Expr::Input(input) => {
+				match input {
+					ExprInput::Tensor(tensor_ref) => {
+						out_is_scalar = false;
+						children = [NodeIndex::new_invalid(), NodeIndex::new_invalid()];
+						input_index_raw = self.add_tensor_ref(tensor_ref.clone(), true, false).raw;
+					},
+					ExprInput::Scalar(scalar_ref) => {
+						out_is_scalar = true;
+						children = [NodeIndex::new_invalid(), NodeIndex::new_invalid()];
+						input_index_raw = self.add_scalar_ref(scalar_ref.clone()).raw;
+					},
+				}
+				reduction_bitmap = ReductionBitmap::new();
 			},
 			Expr::Cast(ExprCast { expr, .. }) | Expr::Unary(ExprUnary { expr, .. }) => {
-				let child = self.load_expr(expr.clone(), visited, captures);
+				let child = self.load_expr(expr.clone(), state);
 				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
 				children = [child, NodeIndex::new_invalid()];
+				reduction_bitmap = state.reductions[child].clone();
 			},
 			Expr::Binary(binary) => {
 				let lhs = binary.lhs.clone();
 				let rhs = binary.rhs.clone();
-				let left_child = self.load_expr(lhs, visited, captures);
-				let right_child = self.load_expr(rhs, visited, captures);
+				let left_child = self.load_expr(lhs, state);
+				let right_child = self.load_expr(rhs, state);
 				let left_is_scalar = self.nodes_postorder[left_child].out_is_scalar;
 				let right_is_scalar = self.nodes_postorder[right_child].out_is_scalar;
 				out_is_scalar = left_is_scalar && right_is_scalar;
 				children = [left_child, right_child];
+				let left_bitmap = &state.reductions[left_child];
+				let right_bitmap = &state.reductions[right_child];
+				diverging_reductions = !left_bitmap.is_equal(right_bitmap);
+				reduction_bitmap = ReductionBitmap::union(left_bitmap, right_bitmap);
 			},
 			Expr::Reduction(reduction) => {
 				let reduction_expr = reduction.expr.clone();
-				let child = self.load_expr(reduction_expr, visited, captures);
+				let child = self.load_expr(reduction_expr, state);
 				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
 				children = [child, NodeIndex::new_invalid()];
+				reduction_bitmap =
+					state.reductions[child].clone_and_set(self.nodes_postorder.next_index().raw);
 			},
 		}
+		state.reductions.push(reduction_bitmap);
 
 		let next_index = self.nodes_postorder.next_index();
 		for &child in &children {
@@ -272,11 +300,12 @@ impl PreCompilation {
 			fragment_head: NodeIndex::new_invalid(),
 			out_is_scalar,
 			is_dead: false,
-			is_reduction_head: false,
+			reduction_head_for: NodeIndex::new_invalid(),
+			diverging_reductions,
 			input_index_raw,
 		});
 		debug_assert!(index == next_index);
-		visited.insert(expr_key, index);
+		state.visited.insert(expr_key, index);
 		index
 	}
 
@@ -368,7 +397,7 @@ impl PreCompilation {
 		}
 
 		for i in self.nodes_postorder.indexes() {
-			let (prev, me, _) = self.nodes_postorder.borrow_multiple(i);
+			let (all_children, me, _) = self.nodes_postorder.borrow_multiple(i);
 			me.shape.clear();
 			if me.is_tensor_input() {
 				// For input nodes, get shape from tensor_ref
@@ -377,7 +406,7 @@ impl PreCompilation {
 			} else if me.is_unary() {
 				// For unary operations, shape is the same as input
 				let child = me.children[0];
-				let child = &prev[child.raw];
+				let child = &all_children[child];
 				me.shape.extend_from_slice(&child.shape);
 				if me.is_reduction() {
 					if let Some(last) = me.shape.last_mut() {
@@ -390,8 +419,8 @@ impl PreCompilation {
 				// For binary operations, use broadcast to get output shape
 				let left = me.children[0];
 				let right = me.children[1];
-				let left = &prev[left.raw];
-				let right = &prev[right.raw];
+				let left = &all_children[left];
+				let right = &all_children[right];
 				let shape_len = left.shape.len().max(right.shape.len());
 				let skip_left = shape_len - left.shape.len();
 				let skip_right = shape_len - right.shape.len();
@@ -416,26 +445,43 @@ impl PreCompilation {
 	}
 
 	fn find_reduction_heads(&mut self) {
-		for parent_idx in self.nodes_postorder.indexes() {
-			let (prev, parent, _) = self.nodes_postorder.borrow_multiple(parent_idx);
-			if parent.is_reduction() {
-				parent.is_reduction_head = true;
+		let mut tokens: IndexVec<NodeIndex, NodeIndex> =
+			IndexVec::from_vec(vec![NodeIndex::new_invalid(); self.nodes_postorder.len()]);
+		let mut token_counts: IndexVec<NodeIndex, usize> =
+			IndexVec::from_vec(vec![0; self.nodes_postorder.len()]);
+		for idx in self.nodes_postorder.indexes() {
+			let (_, child, all_parents) = self.nodes_postorder.borrow_multiple(idx);
+			if child.is_reduction() {
+				tokens[idx] = idx;
+				token_counts[idx] = 1;
+			}
+			let token = tokens[idx];
+			if !token.is_valid() {
+				continue;
+			}
+
+			// The current node has a token; try to propagate it to parents
+			let mut eligible_parents = 0;
+			for &p in &child.parents {
+				let parent = &all_parents[p];
+				if !parent.is_reduction()
+					&& !parent.diverging_reductions
+					&& ShapeRef::new(&parent.shape) == ShapeRef::new(&child.shape)
+				{
+					eligible_parents += 1;
+				}
+			}
+
+			if eligible_parents > 0 && eligible_parents == child.parents.len() {
+				token_counts[token] = token_counts[token] - token_counts[idx] + eligible_parents;
+				tokens[idx] = NodeIndex::new_invalid();
+				for &p in &child.parents {
+					tokens[p] = token;
+					token_counts[p] += 1;
+				}
 			} else {
-				parent.is_reduction_head = false;
-				let parent_shape = ShapeRef::new(&parent.shape);
-				for child in parent.children {
-					if !child.is_valid() {
-						break;
-					}
-					let child: &mut Node = &mut prev[child.raw];
-					let child_shape = ShapeRef::new(&child.shape);
-					if child.is_reduction_head
-						&& child.parents == [parent_idx]
-						&& parent_shape == child_shape
-					{
-						child.is_reduction_head = false;
-						parent.is_reduction_head = true;
-					}
+				if token_counts[token] == token_counts[idx] {
+					child.reduction_head_for = token;
 				}
 			}
 		}
@@ -444,16 +490,19 @@ impl PreCompilation {
 	pub fn find_fragments(&mut self) {
 		self.find_reduction_heads();
 		for idx in self.nodes_postorder.indexes().rev() {
-			let (_, item, prev) = self.nodes_postorder.borrow_multiple(idx);
+			let (_, item, all_parents) = self.nodes_postorder.borrow_multiple(idx);
 			if item.is_input() || item.is_dead {
 				continue;
 			}
-			if item.parents.len() != 1 || item.is_reduction_head || item.is_reduction() {
-				item.fragment_head = idx;
+			if let Some((&first_parent, other_parents)) = item.parents.split_first()
+				&& let parent_frag = all_parents[first_parent].fragment_head
+				&& other_parents.iter().all(|&p| all_parents[p].fragment_head == parent_frag)
+				&& !item.is_reduction_head()
+			{
+				item.fragment_head = parent_frag;
 			} else {
-				let parent_idx = item.parents[0];
-				let parent = &prev[parent_idx.raw - idx.raw - 1];
-				item.fragment_head = parent.fragment_head;
+				item.fragment_head = idx;
+				//self.fragments_postorder.push(idx);
 			}
 		}
 	}
@@ -552,7 +601,7 @@ impl PreCompilation {
 				"\t\t{node_id} [label=<{}{extra_label}>];",
 				self.graphviz_node_label(node),
 			)?;
-			if node.is_reduction_head {
+			if node.is_reduction_head() {
 				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccccff\"];")?;
 			} else if node.is_fork() {
 				if node.is_dead {
