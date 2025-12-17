@@ -445,25 +445,38 @@ impl PreCompilation {
 	}
 
 	fn find_reduction_heads(&mut self) {
-		let mut tokens: IndexVec<NodeIndex, NodeIndex> =
-			IndexVec::from_vec(vec![NodeIndex::new_invalid(); self.nodes_postorder.len()]);
-		let mut token_counts: IndexVec<NodeIndex, usize> =
-			IndexVec::from_vec(vec![0; self.nodes_postorder.len()]);
-		let mut heads: IndexVec<NodeIndex, NodeIndex> =
-			IndexVec::from_vec(vec![NodeIndex::new_invalid(); self.nodes_postorder.len()]);
+		#[derive(Clone, Copy)]
+		struct Item {
+			token: NodeIndex,
+			count: usize,
+			head: NodeIndex,
+		}
+		let mut t: IndexVec<NodeIndex, Item> = IndexVec::from_vec(vec![
+			Item {
+				token: NodeIndex::new_invalid(),
+				count: 0,
+				head: NodeIndex::new_invalid()
+			};
+			self.nodes_postorder.len()
+		]);
 		for idx in self.nodes_postorder.indexes() {
-			let (_, child, all_parents) = self.nodes_postorder.borrow_multiple(idx);
+			let (mut prev, child, all_parents) = self.nodes_postorder.borrow_multiple(idx);
 			child.reduction_head_for = NodeIndex::new_invalid();
 			if child.is_reduction() {
-				tokens[idx] = idx;
-				token_counts[idx] = 1;
+				t[idx].token = idx;
+				t[idx].count = 1;
 			}
-			let token = tokens[idx];
+			let token = t[idx].token;
 			if !token.is_valid() {
 				continue;
 			}
-			if token_counts[idx] == token_counts[token] {
-				heads[token] = idx;
+			if t[idx].count == t[token].count {
+				let head = t[token].head;
+				if head.is_valid() {
+					prev[head].reduction_head_for = NodeIndex::new_invalid();
+				}
+				t[token].head = idx;
+				child.reduction_head_for = token;
 			}
 
 			// The current node has a token; try to propagate it to parents
@@ -483,19 +496,12 @@ impl PreCompilation {
 			}
 
 			if eligible_parents > 0 && eligible_parents == child.parents.len() {
-				token_counts[token] = token_counts[token] - token_counts[idx] + eligible_parents;
-				tokens[idx] = NodeIndex::new_invalid();
+				t[token].count = t[token].count - t[idx].count + eligible_parents;
+				t[idx].token = NodeIndex::new_invalid();
 				for &p in &child.parents {
-					tokens[p] = token;
-					token_counts[p] += 1;
+					t[p].token = token;
+					t[p].count += 1;
 				}
-			}
-		}
-		for idx in self.nodes_postorder.indexes() {
-			let head = heads[idx];
-			if head.is_valid() {
-				debug_assert!(!self.nodes_postorder[head].reduction_head_for.is_valid());
-				self.nodes_postorder[head].reduction_head_for = idx;
 			}
 		}
 	}

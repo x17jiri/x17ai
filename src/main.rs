@@ -285,7 +285,7 @@ fn test1_opt(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 	RcExpr::first(new_value.clone(), (new_value + new_m).capture(x_ten))*/
 }
 
-fn test2_rms_norm() -> (RcExpr, Rc<ExprTensorRef>) {
+fn test2_rms_norm(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 	let inp_ten = ExprTensorRef::new(Some("inp".into()), f32::dtype, Vec::new());
 	let inp = RcExpr::new_tensor_input(inp_ten.clone());
 	let sum_to_mean = ExprScalarRef::new(Some("sum_to_mean".into()));
@@ -294,16 +294,23 @@ fn test2_rms_norm() -> (RcExpr, Rc<ExprTensorRef>) {
 	let eps = RcExpr::new_scalar_input(eps.clone());
 	let magn_recip = (((inp.clone() * inp.clone()).sum() * sum_to_mean).sqrt() + eps).recip();
 
-	((inp * magn_recip).capture(inp_ten.clone()), inp_ten)
+	inp_ten.tensor.borrow_mut().replace(
+		x17ai::new::tensor::Tensor::new_empty(&[1000, 512], f32::dtype, dev.clone()).unwrap(),
+	);
+
+	(inp * magn_recip).capture(inp_ten.clone())
 }
 
-fn test3_softmax() -> RcExpr {
+fn test3_softmax(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 	let inp_ten = ExprTensorRef::new(Some("inp".into()), f32::dtype, vec![15, 32]);
 	let inp = RcExpr::new_tensor_input(inp_ten.clone());
 	let max = inp.clone().max();
 	let t = (inp - max).exp();
 	let out = t.clone().sum().recip() * t;
 	let out = out.capture(inp_ten.clone());
+	inp_ten.tensor.borrow_mut().replace(
+		x17ai::new::tensor::Tensor::new_empty(&[1000, 512], f32::dtype, dev.clone()).unwrap(),
+	);
 	out
 }
 
@@ -335,12 +342,11 @@ fn test4_x(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let dev = x17ai::new::device::cpu::CPUDevice::new();
 
-	let expr = test1_opt(dev);
+	let expr = test1_opt(dev.clone());
+	let expr = test2_rms_norm(dev.clone());
+	let expr = test3_softmax(dev.clone());
 
-	//let (expr, inp) = test2_rms_norm();
-	//let mut comp = Compilation::new(expr);
-
-	//let mut comp = Compilation::new(test3_softmax());
+	//let mut comp = Compilation::new();
 
 	//let mut comp = PreCompilation::new(test4_x(dev));
 
