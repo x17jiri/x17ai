@@ -192,6 +192,10 @@ impl ReductionBitmap {
 		result
 	}
 
+	pub fn is_empty(&self) -> bool {
+		self.bitmap.iter().all(|&b| b == 0)
+	}
+
 	pub fn is_equal(&self, other: &Self) -> bool {
 		let (mut a, mut b) = (&self.bitmap[..], &other.bitmap[..]);
 		if a.len() > b.len() {
@@ -208,6 +212,35 @@ impl ReductionBitmap {
 			}
 		}
 		true
+	}
+
+	pub fn is_superset_of(&self, other: &Self) -> bool {
+		let (a, b) = (&self.bitmap[..], &other.bitmap[..]);
+		for i in 0..a.len().max(b.len()) {
+			let a = a.get(i).copied().unwrap_or(0);
+			let b = b.get(i).copied().unwrap_or(0);
+			if (a | b) != a {
+				return false;
+			}
+		}
+		true
+	}
+
+	pub fn check_inclusion(&self, other: &Self) -> [bool; 2] {
+		let (a, b) = (&self.bitmap[..], &other.bitmap[..]);
+		let mut a_has_all = true;
+		let mut b_has_all = true;
+		for i in 0..a.len().max(b.len()) {
+			let a = a.get(i).copied().unwrap_or(0);
+			let b = b.get(i).copied().unwrap_or(0);
+			if (a | b) != a {
+				a_has_all = false;
+			}
+			if (a | b) != b {
+				b_has_all = false;
+			}
+		}
+		[a_has_all, b_has_all]
 	}
 }
 

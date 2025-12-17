@@ -83,7 +83,7 @@ pub struct Node {
 	pub out_is_scalar: bool,
 	pub is_dead: bool,
 	pub reduction_head_for: NodeIndex,
-	pub diverging_reductions: bool,
+	pub has_all_reductions: [bool; 2],
 	pub input_index_raw: usize, // Either ScalarRefIndex or TensorRefIndex, depending on out_is_scalar
 }
 
@@ -203,7 +203,7 @@ impl PreCompilation {
 		let children: [NodeIndex; 2];
 		let mut capture: ThinVec<TensorRefIndex> = ThinVec::new();
 		let reduction_bitmap;
-		let mut diverging_reductions = false;
+		let mut has_all_reductions = [true; 2];
 		match expr.as_ref() {
 			Expr::Capture(ExprCapture { expr: x, tensor_ref }) => {
 				let child = self.load_expr(x.clone(), state);
@@ -269,7 +269,7 @@ impl PreCompilation {
 				children = [left_child, right_child];
 				let left_bitmap = &state.reductions[left_child];
 				let right_bitmap = &state.reductions[right_child];
-				diverging_reductions = !left_bitmap.is_equal(right_bitmap);
+				has_all_reductions = left_bitmap.check_inclusion(right_bitmap);
 				reduction_bitmap = ReductionBitmap::union(left_bitmap, right_bitmap);
 			},
 			Expr::Reduction(reduction) => {
@@ -301,7 +301,7 @@ impl PreCompilation {
 			out_is_scalar,
 			is_dead: false,
 			reduction_head_for: NodeIndex::new_invalid(),
-			diverging_reductions,
+			has_all_reductions,
 			input_index_raw,
 		});
 		debug_assert!(index == next_index);
@@ -449,8 +449,11 @@ impl PreCompilation {
 			IndexVec::from_vec(vec![NodeIndex::new_invalid(); self.nodes_postorder.len()]);
 		let mut token_counts: IndexVec<NodeIndex, usize> =
 			IndexVec::from_vec(vec![0; self.nodes_postorder.len()]);
+		let mut heads: IndexVec<NodeIndex, NodeIndex> =
+			IndexVec::from_vec(vec![NodeIndex::new_invalid(); self.nodes_postorder.len()]);
 		for idx in self.nodes_postorder.indexes() {
 			let (_, child, all_parents) = self.nodes_postorder.borrow_multiple(idx);
+			child.reduction_head_for = NodeIndex::new_invalid();
 			if child.is_reduction() {
 				tokens[idx] = idx;
 				token_counts[idx] = 1;
@@ -459,13 +462,20 @@ impl PreCompilation {
 			if !token.is_valid() {
 				continue;
 			}
+			if token_counts[idx] == token_counts[token] {
+				heads[token] = idx;
+			}
 
 			// The current node has a token; try to propagate it to parents
 			let mut eligible_parents = 0;
 			for &p in &child.parents {
 				let parent = &all_parents[p];
 				if !parent.is_reduction()
-					&& !parent.diverging_reductions
+					&& parent
+						.children
+						.iter()
+						.zip(parent.has_all_reductions)
+						.any(|(&c, has_all)| c == idx && has_all)
 					&& ShapeRef::new(&parent.shape) == ShapeRef::new(&child.shape)
 				{
 					eligible_parents += 1;
@@ -479,10 +489,13 @@ impl PreCompilation {
 					tokens[p] = token;
 					token_counts[p] += 1;
 				}
-			} else {
-				if token_counts[token] == token_counts[idx] {
-					child.reduction_head_for = token;
-				}
+			}
+		}
+		for idx in self.nodes_postorder.indexes() {
+			let head = heads[idx];
+			if head.is_valid() {
+				debug_assert!(!self.nodes_postorder[head].reduction_head_for.is_valid());
+				self.nodes_postorder[head].reduction_head_for = idx;
 			}
 		}
 	}
@@ -498,6 +511,7 @@ impl PreCompilation {
 				&& let parent_frag = all_parents[first_parent].fragment_head
 				&& other_parents.iter().all(|&p| all_parents[p].fragment_head == parent_frag)
 				&& !item.is_reduction_head()
+				&& !item.is_reduction()
 			{
 				item.fragment_head = parent_frag;
 			} else {
