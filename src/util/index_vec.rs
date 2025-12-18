@@ -128,7 +128,7 @@ impl<Index: IndexTrait, T> IndexVec<Index, T> {
 	pub fn borrow_multiple<'a>(
 		&'a mut self,
 		index: Index,
-	) -> (IndexSliceMut<'a, Index, T>, &mut T, IndexSliceMut<'a, Index, T>) {
+	) -> (IndexSliceMut<'a, Index, T>, &'a mut T, IndexSliceMut<'a, Index, T>) {
 		let (prefix, t) = self.raw.split_at_mut(index.to_raw());
 		let (t, suffix) = t.split_at_mut(1);
 		(
@@ -204,6 +204,20 @@ impl<'a, Index: IndexTrait, T> std::ops::Index<Index> for IndexSliceMut<'a, Inde
 impl<'a, Index: IndexTrait, T> std::ops::IndexMut<Index> for IndexSliceMut<'a, Index, T> {
 	fn index_mut(&mut self, index: Index) -> &mut T {
 		&mut self.raw[index.to_raw() - self.offset]
+	}
+}
+
+impl<'a, Index: IndexTrait, T> std::ops::Deref for IndexSliceMut<'a, Index, T> {
+	type Target = [T];
+
+	fn deref(&self) -> &[T] {
+		self.raw
+	}
+}
+
+impl<'a, Index: IndexTrait, T> std::ops::DerefMut for IndexSliceMut<'a, Index, T> {
+	fn deref_mut(&mut self) -> &mut [T] {
+		self.raw
 	}
 }
 

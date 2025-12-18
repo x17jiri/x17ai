@@ -28,11 +28,11 @@ use super::{
 	Expr, ExprBinaryKind, ExprInput, ExprReductionKind, ExprScalarRef, ExprTensorRef, ExprUnary,
 	ExprUnaryKind, RcExpr,
 };
-use crate::define_index_type;
 use crate::new::expr::compile::ReductionBitmap;
 use crate::new::expr::{ExprCapture, ExprCast};
 use crate::tensor::TensorOpError;
 use crate::util::index_vec::IndexVec;
+use crate::{define_index_type};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -78,18 +78,43 @@ pub struct Node {
 	pub parents: ThinVec<NodeIndex>,
 	pub children: [NodeIndex; 2],
 	pub capture: ThinVec<TensorRefIndex>,
-	pub fragment_head: NodeIndex,
 
 	pub out_is_scalar: bool,
 	pub is_dead: bool,
 	pub reduction_head_for: NodeIndex,
 	pub has_all_reductions: [bool; 2],
-	pub input_index_raw: usize, // Either ScalarRefIndex or TensorRefIndex, depending on out_is_scalar
+
+	// This is one of:
+	// - ScalarRefIndex
+	// - TensorRefIndex
+	// - FragmentIndex
+	// depending on the node type.
+	pub x_index: usize,
 }
 
 impl Node {
 	pub fn is_input(&self) -> bool {
-		(self.input_index_raw as isize) >= 0
+		self.is_nullary()
+	}
+
+	pub fn scalar_index(&self) -> ScalarRefIndex {
+		debug_assert!(self.is_scalar_input());
+		ScalarRefIndex::new(self.x_index)
+	}
+
+	pub fn tensor_index(&self) -> TensorRefIndex {
+		debug_assert!(self.is_tensor_input());
+		TensorRefIndex::new(self.x_index)
+	}
+
+	pub fn fragment_index(&self) -> FragmentIndex {
+		debug_assert!(!self.is_input());
+		FragmentIndex::new(self.x_index)
+	}
+
+	pub fn set_fragment_index(&mut self, fragment_index: FragmentIndex) {
+		debug_assert!(!self.is_input());
+		self.x_index = fragment_index.raw;
 	}
 
 	pub fn is_scalar_input(&self) -> bool {
@@ -150,8 +175,16 @@ type TensorShapeVec = IndexVec<TensorRefIndex, ThinVec<usize>>;
 define_index_type!(ScalarRefIndex);
 type ScalarRefVec = IndexVec<ScalarRefIndex, Rc<ExprScalarRef>>;
 
+pub struct Fragment {
+	pub head: NodeIndex,
+}
+
+define_index_type!(FragmentIndex);
+type FragmentVec = IndexVec<FragmentIndex, Fragment>;
+
 pub struct PreCompilation {
 	nodes_postorder: NodeVec,
+	fragments_preorder: FragmentVec,
 	tensor_shapes: TensorShapeVec,
 	scalar_ref_map: HashMap<*const ExprScalarRef, ScalarRefIndex>,
 	scalar_ref_vec: ScalarRefVec,
@@ -169,6 +202,7 @@ impl PreCompilation {
 	pub fn new(expr: RcExpr) -> Self {
 		let mut comp = PreCompilation {
 			nodes_postorder: NodeVec::with_capacity(32),
+			fragments_preorder: FragmentVec::with_capacity(8),
 			tensor_shapes: TensorShapeVec::with_capacity(32),
 			scalar_ref_map: HashMap::new(),
 			scalar_ref_vec: ScalarRefVec::with_capacity(4),
@@ -198,7 +232,7 @@ impl PreCompilation {
 			return *index;
 		}
 
-		let mut input_index_raw: usize = usize::MAX;
+		let mut x_index: usize = usize::MAX;
 		let out_is_scalar: bool;
 		let children: [NodeIndex; 2];
 		let mut capture: ThinVec<TensorRefIndex> = ThinVec::new();
@@ -242,12 +276,12 @@ impl PreCompilation {
 					ExprInput::Tensor(tensor_ref) => {
 						out_is_scalar = false;
 						children = [NodeIndex::new_invalid(), NodeIndex::new_invalid()];
-						input_index_raw = self.add_tensor_ref(tensor_ref.clone(), true, false).raw;
+						x_index = self.add_tensor_ref(tensor_ref.clone(), true, false).raw;
 					},
 					ExprInput::Scalar(scalar_ref) => {
 						out_is_scalar = true;
 						children = [NodeIndex::new_invalid(), NodeIndex::new_invalid()];
-						input_index_raw = self.add_scalar_ref(scalar_ref.clone()).raw;
+						x_index = self.add_scalar_ref(scalar_ref.clone()).raw;
 					},
 				}
 				reduction_bitmap = ReductionBitmap::new();
@@ -297,12 +331,11 @@ impl PreCompilation {
 			parents: ThinVec::new(),
 			children,
 			capture,
-			fragment_head: NodeIndex::new_invalid(),
 			out_is_scalar,
 			is_dead: false,
 			reduction_head_for: NodeIndex::new_invalid(),
 			has_all_reductions,
-			input_index_raw,
+			x_index,
 		});
 		debug_assert!(index == next_index);
 		state.visited.insert(expr_key, index);
@@ -401,8 +434,7 @@ impl PreCompilation {
 			me.shape.clear();
 			if me.is_tensor_input() {
 				// For input nodes, get shape from tensor_ref
-				let tensor_ref_index = TensorRefIndex::new(me.input_index_raw);
-				me.shape.extend_from_slice(&self.tensor_shapes[tensor_ref_index]);
+				me.shape.extend_from_slice(&self.tensor_shapes[me.tensor_index()]);
 			} else if me.is_unary() {
 				// For unary operations, shape is the same as input
 				let child = me.children[0];
@@ -508,21 +540,21 @@ impl PreCompilation {
 
 	pub fn find_fragments(&mut self) {
 		self.find_reduction_heads();
+		self.fragments_preorder.raw.clear();
 		for idx in self.nodes_postorder.indexes().rev() {
 			let (_, item, all_parents) = self.nodes_postorder.borrow_multiple(idx);
 			if item.is_input() || item.is_dead {
 				continue;
 			}
 			if let Some((&first_parent, other_parents)) = item.parents.split_first()
-				&& let parent_frag = all_parents[first_parent].fragment_head
-				&& other_parents.iter().all(|&p| all_parents[p].fragment_head == parent_frag)
+				&& let parent_frag = all_parents[first_parent].fragment_index()
 				&& !item.is_reduction_head()
-				&& !item.is_reduction()
+				&& other_parents.iter().all(|&p| all_parents[p].fragment_index() == parent_frag)
 			{
-				item.fragment_head = parent_frag;
+				item.set_fragment_index(parent_frag);
 			} else {
-				item.fragment_head = idx;
-				//self.fragments_postorder.push(idx);
+				let new_frag = self.fragments_preorder.push(Fragment { head: idx });
+				item.set_fragment_index(new_frag);
 			}
 		}
 	}
@@ -606,6 +638,7 @@ impl PreCompilation {
 		result
 	}
 
+	#[allow(clippy::too_many_lines)]
 	pub fn print_graphviz<W: std::fmt::Write>(&self, w: &mut W) -> std::fmt::Result {
 		writeln!(w, "digraph G {{")?;
 		writeln!(w, "\trankdir=BT;")?;
@@ -634,8 +667,10 @@ impl PreCompilation {
 			} else if node.is_captured() {
 				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccffcc\"];")?;
 			}
-			if node.fragment_head.is_valid() {
-				let fragment_kind = if self.nodes_postorder[node.fragment_head].is_reduction() {
+			let frag_index = node.fragment_index();
+			if frag_index.is_valid() {
+				let frag_head = self.fragments_preorder[frag_index].head;
+				let fragment_kind = if self.nodes_postorder[frag_head].is_reduction_head() {
 					"Reduction"
 				} else {
 					"Element-wise"
@@ -643,7 +678,7 @@ impl PreCompilation {
 				writeln!(
 					w,
 					"subgraph cluster_{} {{ label=\"{fragment_kind}\" labelloc=\"b\" labeljust=\"l\" {node_id} }}",
-					node.fragment_head.raw
+					frag_head.raw
 				)?;
 			}
 			for &child_index in &node.children {
@@ -651,14 +686,15 @@ impl PreCompilation {
 					break;
 				}
 				let child_id = self.graphviz_node_id(child_index);
-				let label = if self.nodes_postorder[child_index].out_is_scalar {
+				let child = &self.nodes_postorder[child_index];
+				let label = if child.out_is_scalar {
 					String::new()
 				} else {
-					self.shape_to_str(&self.nodes_postorder[child_index].shape)
+					self.shape_to_str(&child.shape)
 				};
-				let extra_style = if node.fragment_head.is_valid()
-					&& self.nodes_postorder[child_index].fragment_head.is_valid()
-					&& node.fragment_head != self.nodes_postorder[child_index].fragment_head
+				let extra_style = if frag_index.is_valid()
+					&& !child.is_input()
+					&& frag_index != child.fragment_index()
 				{
 					// Edge crosses fragment boundary
 					", color=red, style=bold"

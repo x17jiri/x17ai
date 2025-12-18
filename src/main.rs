@@ -339,16 +339,32 @@ fn test4_x(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 	out
 }
 
+fn test5(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
+	let mut inp_a = ExprTensorRef::new(Some("a".into()), f32::dtype, vec![]);
+	let mut inp_b = ExprTensorRef::new(Some("b".into()), f32::dtype, vec![]);
+	let a = RcExpr::new_tensor_input(inp_a.clone());
+	let b = RcExpr::new_tensor_input(inp_b.clone());
+	let out = ExprTensorRef::new(Some("out".into()), f32::dtype, vec![]);
+	let out = (a + b).capture(out);
+
+	inp_a.tensor.borrow_mut().replace(
+		x17ai::new::tensor::Tensor::new_empty(&[1000, 512], f32::dtype, dev.clone()).unwrap(),
+	);
+	inp_b.tensor.borrow_mut().replace(
+		x17ai::new::tensor::Tensor::new_empty(&[1000, 300], f32::dtype, dev.clone()).unwrap(),
+	);
+
+	out
+}
+
 fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let dev = x17ai::new::device::cpu::CPUDevice::new();
 
 	let expr = test1_opt(dev.clone());
 	let expr = test2_rms_norm(dev.clone());
 	let expr = test3_softmax(dev.clone());
-
-	//let mut comp = Compilation::new();
-
-	//let mut comp = PreCompilation::new(test4_x(dev));
+	//let expr = test4_x(dev.clone());
+	let expr = test5(dev.clone());
 
 	let mut comp = PreCompilation::new(expr);
 	comp.calc_shapes()?;
