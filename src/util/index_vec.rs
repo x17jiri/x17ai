@@ -11,9 +11,13 @@ use std::hint::cold_path;
 //--------------------------------------------------------------------------------------------------
 
 pub trait IndexTrait: Copy + Clone + PartialEq + Eq + Hash + Ord {
+	const MAX: usize;
 	fn to_raw(self) -> usize;
+	fn to_raw_isize(self) -> isize;
 	fn from_raw(raw: usize) -> Self;
 }
+
+//--------------------------------------------------------------------------------------------------
 
 #[macro_export]
 macro_rules! define_index_type {
@@ -26,6 +30,7 @@ macro_rules! define_index_type {
 
 		impl $name {
 			pub fn new(raw: usize) -> Self {
+				debug_assert!(isize::try_from(raw).is_ok());
 				$name { raw }
 			}
 
@@ -35,20 +40,141 @@ macro_rules! define_index_type {
 
 			#[allow(clippy::cast_possible_wrap)]
 			pub fn is_valid(&self) -> bool {
-				(self.raw as isize) >= 0
+				isize::try_from(self.raw).is_ok()
+			}
+
+			pub fn to_untyped(&self) -> $crate::util::index_vec::UntypedIndex {
+				$crate::util::index_vec::UntypedIndex { raw: self.raw }
 			}
 		}
 
 		impl $crate::util::index_vec::IndexTrait for $name {
+			const MAX: usize = isize::MAX as usize;
+
 			fn to_raw(self) -> usize {
 				self.raw
 			}
 
 			fn from_raw(raw: usize) -> Self {
+				debug_assert!(raw <= Self::MAX);
 				$name { raw }
+			}
+
+			fn to_raw_isize(self) -> isize {
+				self.raw as isize
+			}
+		}
+
+		impl From<$crate::util::index_vec::UntypedIndex> for $name {
+			fn from(value: $crate::util::index_vec::UntypedIndex) -> Self {
+				$name { raw: value.raw }
 			}
 		}
 	};
+}
+
+//--------------------------------------------------------------------------------------------------
+
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct UntypedIndex {
+	pub raw: usize,
+}
+
+impl UntypedIndex {
+	const MAX: usize = isize::MAX as usize;
+
+	pub fn new(raw: usize) -> Self {
+		debug_assert!(raw <= Self::MAX);
+		Self { raw }
+	}
+
+	pub fn new_invalid() -> Self {
+		Self { raw: usize::MAX }
+	}
+
+	#[allow(clippy::cast_possible_wrap)]
+	pub fn is_valid(&self) -> bool {
+		isize::try_from(self.raw).is_ok()
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+#[macro_export]
+macro_rules! define_index_type32 {
+	($name:ident) => {
+		#[repr(transparent)]
+		#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+		pub struct $name {
+			pub raw: u32,
+		}
+
+		impl $name {
+			pub fn new(raw: u32) -> Self {
+				debug_assert!(i32::try_from(raw).is_ok());
+				$name { raw }
+			}
+
+			pub fn new_invalid() -> Self {
+				$name { raw: u32::MAX }
+			}
+
+			#[allow(clippy::cast_possible_wrap)]
+			pub fn is_valid(&self) -> bool {
+				i32::try_from(self.raw).is_ok()
+			}
+
+			pub fn to_untyped(&self) -> $crate::util::index_vec::UntypedIndex32 {
+				$crate::util::index_vec::UntypedIndex32 { raw: self.raw }
+			}
+		}
+
+		impl $crate::util::index_vec::IndexTrait for $name {
+			const MAX: usize = i32::MAX as usize;
+
+			fn to_raw(self) -> usize {
+				self.raw as usize
+			}
+
+			fn from_raw(raw: usize) -> Self {
+				debug_assert!(raw <= Self::MAX);
+				#[allow(clippy::cast_possible_truncation)]
+				$name { raw: raw as u32 }
+			}
+
+			fn to_raw_isize(self) -> isize {
+				(self.raw as i32) as isize
+			}
+		}
+
+		impl From<$crate::util::index_vec::UntypedIndex32> for $name {
+			fn from(value: $crate::util::index_vec::UntypedIndex32) -> Self {
+				$name { raw: value.raw }
+			}
+		}
+	};
+}
+
+//--------------------------------------------------------------------------------------------------
+
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct UntypedIndex32 {
+	pub raw: u32,
+}
+
+impl UntypedIndex32 {
+	pub const MAX: u32 = i32::MAX as u32;
+
+	pub fn new_invalid() -> Self {
+		Self { raw: u32::MAX }
+	}
+
+	#[allow(clippy::cast_possible_wrap)]
+	pub fn is_valid(&self) -> bool {
+		i32::try_from(self.raw).is_ok()
+	}
 }
 
 //--------------------------------------------------------------------------------------------------

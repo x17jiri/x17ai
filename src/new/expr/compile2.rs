@@ -28,11 +28,11 @@ use super::{
 	Expr, ExprBinaryKind, ExprInput, ExprReductionKind, ExprScalarRef, ExprTensorRef, ExprUnary,
 	ExprUnaryKind, RcExpr,
 };
+use crate::define_index_type32;
 use crate::new::expr::compile::ReductionBitmap;
 use crate::new::expr::{ExprCapture, ExprCast};
 use crate::tensor::TensorOpError;
-use crate::util::index_vec::IndexVec;
-use crate::{define_index_type};
+use crate::util::index_vec::{IndexTrait, IndexVec, UntypedIndex32};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -89,7 +89,7 @@ pub struct Node {
 	// - TensorRefIndex
 	// - FragmentIndex
 	// depending on the node type.
-	pub x_index: usize,
+	pub x_index: UntypedIndex32,
 }
 
 impl Node {
@@ -99,22 +99,22 @@ impl Node {
 
 	pub fn scalar_index(&self) -> ScalarRefIndex {
 		debug_assert!(self.is_scalar_input());
-		ScalarRefIndex::new(self.x_index)
+		ScalarRefIndex::from(self.x_index)
 	}
 
 	pub fn tensor_index(&self) -> TensorRefIndex {
 		debug_assert!(self.is_tensor_input());
-		TensorRefIndex::new(self.x_index)
+		TensorRefIndex::from(self.x_index)
 	}
 
 	pub fn fragment_index(&self) -> FragmentIndex {
 		debug_assert!(!self.is_input());
-		FragmentIndex::new(self.x_index)
+		FragmentIndex::from(self.x_index)
 	}
 
 	pub fn set_fragment_index(&mut self, fragment_index: FragmentIndex) {
 		debug_assert!(!self.is_input());
-		self.x_index = fragment_index.raw;
+		self.x_index = fragment_index.to_untyped();
 	}
 
 	pub fn is_scalar_input(&self) -> bool {
@@ -138,15 +138,15 @@ impl Node {
 	}
 
 	pub fn is_nullary(&self) -> bool {
-		(self.children[0].raw as isize) < 0
+		self.children[0].to_raw_isize() < 0
 	}
 
 	pub fn is_unary(&self) -> bool {
-		(self.children[0].raw | !self.children[1].raw) as isize >= 0
+		(self.children[0].to_raw_isize() | !self.children[1].to_raw_isize()) >= 0
 	}
 
 	pub fn is_binary(&self) -> bool {
-		(self.children[1].raw as isize) >= 0
+		self.children[1].to_raw_isize() >= 0
 	}
 
 	pub fn is_root(&self) -> bool {
@@ -158,7 +158,7 @@ impl Node {
 	}
 }
 
-define_index_type!(NodeIndex);
+define_index_type32!(NodeIndex);
 type NodeVec = IndexVec<NodeIndex, Node>;
 
 pub struct TensorRef {
@@ -167,19 +167,19 @@ pub struct TensorRef {
 	pub is_output: bool,
 }
 
-define_index_type!(TensorRefIndex);
+define_index_type32!(TensorRefIndex);
 type TensorRefVec = IndexVec<TensorRefIndex, TensorRef>;
 
 type TensorShapeVec = IndexVec<TensorRefIndex, ThinVec<usize>>;
 
-define_index_type!(ScalarRefIndex);
+define_index_type32!(ScalarRefIndex);
 type ScalarRefVec = IndexVec<ScalarRefIndex, Rc<ExprScalarRef>>;
 
 pub struct Fragment {
 	pub head: NodeIndex,
 }
 
-define_index_type!(FragmentIndex);
+define_index_type32!(FragmentIndex);
 type FragmentVec = IndexVec<FragmentIndex, Fragment>;
 
 pub struct PreCompilation {
@@ -232,7 +232,7 @@ impl PreCompilation {
 			return *index;
 		}
 
-		let mut x_index: usize = usize::MAX;
+		let mut x_index = UntypedIndex32::new_invalid();
 		let out_is_scalar: bool;
 		let children: [NodeIndex; 2];
 		let mut capture: ThinVec<TensorRefIndex> = ThinVec::new();
@@ -276,12 +276,12 @@ impl PreCompilation {
 					ExprInput::Tensor(tensor_ref) => {
 						out_is_scalar = false;
 						children = [NodeIndex::new_invalid(), NodeIndex::new_invalid()];
-						x_index = self.add_tensor_ref(tensor_ref.clone(), true, false).raw;
+						x_index = self.add_tensor_ref(tensor_ref.clone(), true, false).to_untyped();
 					},
 					ExprInput::Scalar(scalar_ref) => {
 						out_is_scalar = true;
 						children = [NodeIndex::new_invalid(), NodeIndex::new_invalid()];
-						x_index = self.add_scalar_ref(scalar_ref.clone()).raw;
+						x_index = self.add_scalar_ref(scalar_ref.clone()).to_untyped();
 					},
 				}
 				reduction_bitmap = ReductionBitmap::new();
@@ -311,8 +311,8 @@ impl PreCompilation {
 				let child = self.load_expr(reduction_expr, state);
 				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
 				children = [child, NodeIndex::new_invalid()];
-				reduction_bitmap =
-					state.reductions[child].clone_and_set(self.nodes_postorder.next_index().raw);
+				reduction_bitmap = state.reductions[child]
+					.clone_and_set(self.nodes_postorder.next_index().to_raw());
 			},
 		}
 		state.reductions.push(reduction_bitmap);
@@ -432,10 +432,15 @@ impl PreCompilation {
 		for i in self.nodes_postorder.indexes() {
 			let (all_children, me, _) = self.nodes_postorder.borrow_multiple(i);
 			me.shape.clear();
-			if me.is_tensor_input() {
-				// For input nodes, get shape from tensor_ref
-				me.shape.extend_from_slice(&self.tensor_shapes[me.tensor_index()]);
-			} else if me.is_unary() {
+			if me.is_input() {
+				if me.is_tensor_input() {
+					// For input nodes, get shape from tensor_ref
+					me.shape.extend_from_slice(&self.tensor_shapes[me.tensor_index()]);
+				}
+				continue;
+			}
+
+			if me.is_unary() {
 				// For unary operations, shape is the same as input
 				let child = me.children[0];
 				let child = &all_children[child];
@@ -447,7 +452,9 @@ impl PreCompilation {
 						me.shape.push(1);
 					}
 				}
-			} else if me.is_binary() {
+			} else {
+				debug_assert!(me.is_binary());
+
 				// For binary operations, use broadcast to get output shape
 				let left = me.children[0];
 				let right = me.children[1];
@@ -464,12 +471,23 @@ impl PreCompilation {
 					} else if dim_left == 1 {
 						dim_right
 					} else {
+						cold_path();
 						return Err(TensorOpError::ShapeMismatch);
 					};
 					me.shape.push(dim);
 				}
-			} else {
-				debug_assert!(self.nodes_postorder[i].is_scalar_input());
+			}
+
+			// If we store back into inputs, make sure captures have correct shape
+			let my_shape = me.shape.as_slice();
+			for &idx in &me.capture {
+				if self.tensor_ref_vec[idx].is_input {
+					let tensor_shape = self.tensor_shapes[idx].as_slice();
+					if tensor_shape != my_shape {
+						cold_path();
+						return Err(TensorOpError::ShapeMismatch);
+					}
+				}
 			}
 		}
 
@@ -560,11 +578,21 @@ impl PreCompilation {
 	}
 
 	fn graphviz_tensor_id(&self, tensor_ref: &Rc<ExprTensorRef>) -> String {
-		format!("ten_{}", std::ptr::from_ref(tensor_ref.as_ref()) as usize)
+		let key = std::ptr::from_ref(tensor_ref.as_ref());
+		if let Some(&index) = self.tensor_ref_map.get(&key) {
+			format!("ten_{}", index.raw)
+		} else {
+			format!("ten_{}", key as usize)
+		}
 	}
 
 	fn graphviz_scalar_id(&self, scalar_ref: &Rc<ExprScalarRef>) -> String {
-		format!("sca_{}", std::ptr::from_ref(scalar_ref.as_ref()) as usize)
+		let key = std::ptr::from_ref(scalar_ref.as_ref());
+		if let Some(&index) = self.scalar_ref_map.get(&key) {
+			format!("sca_{}", index.raw)
+		} else {
+			format!("sca_{}", key as usize)
+		}
 	}
 
 	fn graphviz_node_id(&self, node_index: NodeIndex) -> String {
@@ -649,11 +677,7 @@ impl PreCompilation {
 			if node.is_input() {
 				continue;
 			}
-			writeln!(
-				w,
-				"\t\t{node_id} [label=<{}{extra_label}>];",
-				self.graphviz_node_label(node),
-			)?;
+			writeln!(w, "\t{node_id} [label=<{}{extra_label}>];", self.graphviz_node_label(node),)?;
 			if node.is_reduction_head() {
 				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccccff\"];")?;
 			} else if node.is_fork() {
@@ -677,7 +701,7 @@ impl PreCompilation {
 				};
 				writeln!(
 					w,
-					"subgraph cluster_{} {{ label=\"{fragment_kind}\" labelloc=\"b\" labeljust=\"l\" {node_id} }}",
+					"\tsubgraph cluster_{} {{ label=\"{fragment_kind}\" labelloc=\"b\" labeljust=\"l\" {node_id} }}",
 					frag_head.raw
 				)?;
 			}
@@ -739,7 +763,7 @@ impl PreCompilation {
 			};
 			writeln!(
 				w,
-				"\t\t{id} [label=<<b>Scalar</b><br/><font color='blue'><b>{label}</b></font>>, shape=box, style=filled, fillcolor=\"#ffffc0\"];"
+				"\t{id} [label=<<b>Scalar</b><br/><font color='blue'><b>{label}</b></font>>, shape=box, style=filled, fillcolor=\"#ffffc0\"];"
 			)?;
 		}
 		writeln!(w, "}}")?;

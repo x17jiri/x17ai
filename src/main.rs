@@ -287,15 +287,21 @@ fn test1_opt(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 
 fn test2_rms_norm(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 	let inp_ten = ExprTensorRef::new(Some("inp".into()), f32::dtype, Vec::new());
+	let inp2_ten = ExprTensorRef::new(Some("inp2".into()), f32::dtype, Vec::new());
 	let inp = RcExpr::new_tensor_input(inp_ten.clone());
+	let inp2 = RcExpr::new_tensor_input(inp2_ten.clone());
 	let sum_to_mean = ExprScalarRef::new(Some("sum_to_mean".into()));
 	let sum_to_mean = RcExpr::new_scalar_input(sum_to_mean.clone());
 	let eps = ExprScalarRef::new(Some("eps".into()));
 	let eps = RcExpr::new_scalar_input(eps.clone());
-	let magn_recip = (((inp.clone() * inp.clone()).sum() * sum_to_mean).sqrt() + eps).recip();
+	let magn_recip = (((inp.clone() * inp2.clone()).sum() * sum_to_mean).sqrt() + eps).recip();
 
 	inp_ten.tensor.borrow_mut().replace(
-		x17ai::new::tensor::Tensor::new_empty(&[1000, 512], f32::dtype, dev.clone()).unwrap(),
+		x17ai::new::tensor::Tensor::new_empty(&[2, 1000, 512], f32::dtype, dev.clone()).unwrap(),
+	);
+
+	inp2_ten.tensor.borrow_mut().replace(
+		x17ai::new::tensor::Tensor::new_empty(&[1, 1000, 512], f32::dtype, dev.clone()).unwrap(),
 	);
 
 	(inp * magn_recip).capture(inp_ten.clone())
@@ -361,10 +367,10 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let dev = x17ai::new::device::cpu::CPUDevice::new();
 
 	let expr = test1_opt(dev.clone());
-	let expr = test2_rms_norm(dev.clone());
-	let expr = test3_softmax(dev.clone());
+	//let expr = test2_rms_norm(dev.clone());
+	//let expr = test3_softmax(dev.clone());
 	//let expr = test4_x(dev.clone());
-	let expr = test5(dev.clone());
+	//let expr = test5(dev.clone());
 
 	let mut comp = PreCompilation::new(expr);
 	comp.calc_shapes()?;
