@@ -75,21 +75,22 @@ impl<'a> std::cmp::Eq for ShapeRef<'a> {
 pub struct Node {
 	pub expr: Rc<Expr>,
 	pub shape: ThinVec<usize>,
-	pub parents: ThinVec<NodeIndex>,
-	pub children: [NodeIndex; 2],
-	pub capture: ThinVec<TensorRefIndex>,
+	pub parents: ThinVec<NodeIndex32>,
+	pub children: [NodeIndex32; 2],
+	pub capture: ThinVec<TensorRefIndex32>,
 
 	pub out_is_scalar: bool,
 	pub is_dead: bool,
-	pub reduction_head_for: NodeIndex,
+	pub reduction_head_for: NodeIndex32,
 	pub has_all_reductions: [bool; 2],
 
 	// This is one of:
-	// - ScalarRefIndex
-	// - TensorRefIndex
-	// - FragmentIndex
+	// - ScalarRefIndex32
+	// - TensorRefIndex32
+	// - FragmentIndex32
 	// depending on the node type.
 	pub x_index: UntypedIndex32,
+	pub bitmap_index: u32,
 }
 
 impl Node {
@@ -97,22 +98,22 @@ impl Node {
 		self.is_nullary()
 	}
 
-	pub fn scalar_index(&self) -> ScalarRefIndex {
+	pub fn scalar_index(&self) -> ScalarRefIndex32 {
 		debug_assert!(self.is_scalar_input());
-		ScalarRefIndex::from(self.x_index)
+		ScalarRefIndex32::from(self.x_index)
 	}
 
-	pub fn tensor_index(&self) -> TensorRefIndex {
+	pub fn tensor_index(&self) -> TensorRefIndex32 {
 		debug_assert!(self.is_tensor_input());
-		TensorRefIndex::from(self.x_index)
+		TensorRefIndex32::from(self.x_index)
 	}
 
-	pub fn fragment_index(&self) -> FragmentIndex {
+	pub fn fragment_index(&self) -> FragmentIndex32 {
 		debug_assert!(!self.is_input());
-		FragmentIndex::from(self.x_index)
+		FragmentIndex32::from(self.x_index)
 	}
 
-	pub fn set_fragment_index(&mut self, fragment_index: FragmentIndex) {
+	pub fn set_fragment_index(&mut self, fragment_index: FragmentIndex32) {
 		debug_assert!(!self.is_input());
 		self.x_index = fragment_index.to_untyped();
 	}
@@ -158,8 +159,8 @@ impl Node {
 	}
 }
 
-define_index_type32!(NodeIndex);
-type NodeVec = IndexVec<NodeIndex, Node>;
+define_index_type32!(NodeIndex32);
+type NodeVec = IndexVec<NodeIndex32, Node>;
 
 pub struct TensorRef {
 	pub tensor_ref: Rc<ExprTensorRef>,
@@ -167,35 +168,36 @@ pub struct TensorRef {
 	pub is_output: bool,
 }
 
-define_index_type32!(TensorRefIndex);
-type TensorRefVec = IndexVec<TensorRefIndex, TensorRef>;
+define_index_type32!(TensorRefIndex32);
+type TensorRefVec = IndexVec<TensorRefIndex32, TensorRef>;
 
-type TensorShapeVec = IndexVec<TensorRefIndex, ThinVec<usize>>;
+type TensorShapeVec = IndexVec<TensorRefIndex32, ThinVec<usize>>;
 
-define_index_type32!(ScalarRefIndex);
-type ScalarRefVec = IndexVec<ScalarRefIndex, Rc<ExprScalarRef>>;
+define_index_type32!(ScalarRefIndex32);
+type ScalarRefVec = IndexVec<ScalarRefIndex32, Rc<ExprScalarRef>>;
 
 pub struct Fragment {
-	pub head: NodeIndex,
+	pub head: NodeIndex32,
 }
 
-define_index_type32!(FragmentIndex);
-type FragmentVec = IndexVec<FragmentIndex, Fragment>;
+define_index_type32!(FragmentIndex32);
+type FragmentVec = IndexVec<FragmentIndex32, Fragment>;
 
 pub struct PreCompilation {
 	nodes_postorder: NodeVec,
 	fragments_preorder: FragmentVec,
 	tensor_shapes: TensorShapeVec,
-	scalar_ref_map: HashMap<*const ExprScalarRef, ScalarRefIndex>,
+	scalar_ref_map: HashMap<*const ExprScalarRef, ScalarRefIndex32>,
 	scalar_ref_vec: ScalarRefVec,
-	tensor_ref_map: HashMap<*const ExprTensorRef, TensorRefIndex>,
+	tensor_ref_map: HashMap<*const ExprTensorRef, TensorRefIndex32>,
 	tensor_ref_vec: TensorRefVec,
 }
 
 struct LoadExprState {
-	visited: HashMap<*const Expr, NodeIndex>,
+	visited: HashMap<*const Expr, NodeIndex32>,
 	captures: HashSet<*const ExprTensorRef>,
-	reductions: IndexVec<NodeIndex, ReductionBitmap>,
+	n_reductions: u32,
+	reductions: IndexVec<NodeIndex32, ReductionBitmap>,
 }
 
 impl PreCompilation {
@@ -214,6 +216,7 @@ impl PreCompilation {
 			&mut LoadExprState {
 				visited: HashMap::new(),
 				captures: HashSet::new(),
+				n_reductions: 0,
 				reductions: IndexVec::new(),
 			},
 		);
@@ -226,7 +229,7 @@ impl PreCompilation {
 	#[allow(clippy::manual_assert)]
 	#[allow(clippy::panic)]
 	// TODO - refactor to make non recursive
-	fn load_expr(&mut self, mut expr: Rc<Expr>, state: &mut LoadExprState) -> NodeIndex {
+	fn load_expr(&mut self, mut expr: Rc<Expr>, state: &mut LoadExprState) -> NodeIndex32 {
 		let expr_key = std::ptr::from_ref(expr.as_ref());
 		if let Some(index) = state.visited.get(&expr_key) {
 			return *index;
@@ -234,10 +237,11 @@ impl PreCompilation {
 
 		let mut x_index = UntypedIndex32::new_invalid();
 		let out_is_scalar: bool;
-		let children: [NodeIndex; 2];
-		let mut capture: ThinVec<TensorRefIndex> = ThinVec::new();
+		let children: [NodeIndex32; 2];
+		let mut capture: ThinVec<TensorRefIndex32> = ThinVec::new();
 		let reduction_bitmap;
 		let mut has_all_reductions = [true; 2];
+		let reduction_index = state.n_reductions;
 		match expr.as_ref() {
 			Expr::Capture(ExprCapture { expr: x, tensor_ref }) => {
 				let child = self.load_expr(x.clone(), state);
@@ -261,7 +265,7 @@ impl PreCompilation {
 					expr: self.nodes_postorder[child].expr.clone(),
 				}));
 				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
-				children = [child, NodeIndex::new_invalid()];
+				children = [child, NodeIndex32::new_invalid()];
 				capture.push(tensor_ref_index);
 				reduction_bitmap = state.reductions[child].clone();
 			},
@@ -275,12 +279,12 @@ impl PreCompilation {
 				match input {
 					ExprInput::Tensor(tensor_ref) => {
 						out_is_scalar = false;
-						children = [NodeIndex::new_invalid(), NodeIndex::new_invalid()];
+						children = [NodeIndex32::new_invalid(), NodeIndex32::new_invalid()];
 						x_index = self.add_tensor_ref(tensor_ref.clone(), true, false).to_untyped();
 					},
 					ExprInput::Scalar(scalar_ref) => {
 						out_is_scalar = true;
-						children = [NodeIndex::new_invalid(), NodeIndex::new_invalid()];
+						children = [NodeIndex32::new_invalid(), NodeIndex32::new_invalid()];
 						x_index = self.add_scalar_ref(scalar_ref.clone()).to_untyped();
 					},
 				}
@@ -289,7 +293,7 @@ impl PreCompilation {
 			Expr::Cast(ExprCast { expr, .. }) | Expr::Unary(ExprUnary { expr, .. }) => {
 				let child = self.load_expr(expr.clone(), state);
 				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
-				children = [child, NodeIndex::new_invalid()];
+				children = [child, NodeIndex32::new_invalid()];
 				reduction_bitmap = state.reductions[child].clone();
 			},
 			Expr::Binary(binary) => {
@@ -310,9 +314,10 @@ impl PreCompilation {
 				let reduction_expr = reduction.expr.clone();
 				let child = self.load_expr(reduction_expr, state);
 				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
-				children = [child, NodeIndex::new_invalid()];
+				children = [child, NodeIndex32::new_invalid()];
 				reduction_bitmap = state.reductions[child]
 					.clone_and_set(self.nodes_postorder.next_index().to_raw());
+				state.n_reductions += 1;
 			},
 		}
 		state.reductions.push(reduction_bitmap);
@@ -333,16 +338,17 @@ impl PreCompilation {
 			capture,
 			out_is_scalar,
 			is_dead: false,
-			reduction_head_for: NodeIndex::new_invalid(),
+			reduction_head_for: NodeIndex32::new_invalid(),
 			has_all_reductions,
 			x_index,
+			bitmap_index: reduction_index,
 		});
 		debug_assert!(index == next_index);
 		state.visited.insert(expr_key, index);
 		index
 	}
 
-	fn add_scalar_ref(&mut self, scalar_ref: Rc<ExprScalarRef>) -> ScalarRefIndex {
+	fn add_scalar_ref(&mut self, scalar_ref: Rc<ExprScalarRef>) -> ScalarRefIndex32 {
 		let key = std::ptr::from_ref(scalar_ref.as_ref());
 		match self.scalar_ref_map.entry(key) {
 			hash_map::Entry::Vacant(entry) => {
@@ -362,7 +368,7 @@ impl PreCompilation {
 		tensor_ref: Rc<ExprTensorRef>,
 		is_input: bool,
 		is_output: bool,
-	) -> TensorRefIndex {
+	) -> TensorRefIndex32 {
 		let key = std::ptr::from_ref(tensor_ref.as_ref());
 		match self.tensor_ref_map.entry(key) {
 			hash_map::Entry::Vacant(entry) => {
@@ -497,21 +503,21 @@ impl PreCompilation {
 	fn find_reduction_heads(&mut self) {
 		#[derive(Clone, Copy)]
 		struct Item {
-			token: NodeIndex,
+			token: NodeIndex32,
 			count: usize,
-			head: NodeIndex,
+			head: NodeIndex32,
 		}
-		let mut t: IndexVec<NodeIndex, Item> = IndexVec::from_vec(vec![
+		let mut t: IndexVec<NodeIndex32, Item> = IndexVec::from_vec(vec![
 			Item {
-				token: NodeIndex::new_invalid(),
+				token: NodeIndex32::new_invalid(),
 				count: 0,
-				head: NodeIndex::new_invalid()
+				head: NodeIndex32::new_invalid()
 			};
 			self.nodes_postorder.len()
 		]);
 		for idx in self.nodes_postorder.indexes() {
 			let (mut prev, child, all_parents) = self.nodes_postorder.borrow_multiple(idx);
-			child.reduction_head_for = NodeIndex::new_invalid();
+			child.reduction_head_for = NodeIndex32::new_invalid();
 			if child.is_reduction() {
 				t[idx].token = idx;
 				t[idx].count = 1;
@@ -523,7 +529,7 @@ impl PreCompilation {
 			if t[idx].count == t[token].count {
 				let head = t[token].head;
 				if head.is_valid() {
-					prev[head].reduction_head_for = NodeIndex::new_invalid();
+					prev[head].reduction_head_for = NodeIndex32::new_invalid();
 				}
 				t[token].head = idx;
 				child.reduction_head_for = token;
@@ -547,7 +553,7 @@ impl PreCompilation {
 
 			if eligible_parents > 0 && eligible_parents == child.parents.len() {
 				t[token].count = t[token].count - t[idx].count + eligible_parents;
-				t[idx].token = NodeIndex::new_invalid();
+				t[idx].token = NodeIndex32::new_invalid();
 				for &p in &child.parents {
 					t[p].token = token;
 					t[p].count += 1;
@@ -595,7 +601,7 @@ impl PreCompilation {
 		}
 	}
 
-	fn graphviz_node_id(&self, node_index: NodeIndex) -> String {
+	fn graphviz_node_id(&self, node_index: NodeIndex32) -> String {
 		match self.nodes_postorder[node_index].expr.as_ref() {
 			Expr::Input(ExprInput::Tensor(tensor_ref)) => self.graphviz_tensor_id(tensor_ref),
 			Expr::Input(ExprInput::Scalar(scalar_ref)) => self.graphviz_scalar_id(scalar_ref),

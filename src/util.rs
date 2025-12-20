@@ -7,12 +7,12 @@
 
 use std::convert::Infallible;
 
-pub mod hasher;
-pub mod intrusive_ref_cell;
-//pub mod thin_rc; - TODO
+pub mod bitmap;
 pub mod ffi_buffer;
+pub mod hasher;
 pub mod index_vec;
 pub mod intrusive_rc;
+pub mod intrusive_ref_cell;
 pub mod union_find;
 pub mod universal_range;
 
