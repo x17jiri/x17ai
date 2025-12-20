@@ -5,14 +5,25 @@
 //
 //------------------------------------------------------------------------------
 
-use thin_vec::{ThinVec, thin_vec};
+use crate::util::index_vec::{IndexTrait, IndexVec};
 
 //--------------------------------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct Bitmap {
 	pub rows: usize,
 	pub words_per_row: usize,
 	pub data: Vec<usize>,
+}
+
+impl Default for Bitmap {
+	fn default() -> Self {
+		Self {
+			rows: 0,
+			words_per_row: 0,
+			data: Vec::new(),
+		}
+	}
 }
 
 impl Bitmap {
@@ -27,7 +38,7 @@ impl Bitmap {
 		}
 	}
 
-	pub fn resize(&mut self, rows: usize, cols: usize) {
+	pub fn clear_and_resize(&mut self, rows: usize, cols: usize) {
 		self.words_per_row = (cols + Self::WORD_BITS - 1) / Self::WORD_BITS;
 		self.rows = rows;
 		let words = rows * self.words_per_row;
@@ -62,7 +73,7 @@ impl Bitmap {
 		self.data[offset..offset + self.words_per_row].as_mut_ptr()
 	}
 
-	pub fn copy_row(&mut self, src_row: usize, dst_row: usize) {
+	pub fn copy_row(&mut self, dst_row: usize, src_row: usize) {
 		let src_row = self.row_raw(src_row);
 		let dst_row = self.row_raw_mut(dst_row);
 		if src_row == dst_row {
@@ -73,10 +84,22 @@ impl Bitmap {
 		}
 	}
 
-	pub fn set_bit(&mut self, row: usize, col: usize) {
+	pub fn get_bit(&self, row: usize, col: usize) -> bool {
 		let word_index = col / Self::WORD_BITS;
 		let bit_index = col % Self::WORD_BITS;
-		self.data[row * self.words_per_row + word_index] |= 1 << bit_index;
+		let word = self.data[row * self.words_per_row + word_index];
+		let mask = 1 << bit_index;
+		(word & mask) != 0
+	}
+
+	pub fn set_bit(&mut self, row: usize, col: usize) -> bool {
+		let word_index = col / Self::WORD_BITS;
+		let bit_index = col % Self::WORD_BITS;
+		let word = &mut self.data[row * self.words_per_row + word_index];
+		let mask = 1 << bit_index;
+		let was_set = (*word & mask) != 0;
+		*word |= mask;
+		was_set
 	}
 
 	pub fn union(&mut self, dst_row: usize, src_row1: usize, src_row2: usize) {
@@ -88,6 +111,101 @@ impl Bitmap {
 				dst_row.add(i).write(src_row1.add(i).read() | src_row2.add(i).read());
 			}
 		}
+	}
+
+	pub fn and_not(&mut self, dst_row: usize, src_row1: usize, src_row2: usize) {
+		let dst_row = self.row_raw_mut(dst_row);
+		let src_row1 = self.row_raw(src_row1);
+		let src_row2 = self.row_raw(src_row2);
+		unsafe {
+			for i in 0..self.words_per_row {
+				dst_row.add(i).write(src_row1.add(i).read() & !src_row2.add(i).read());
+			}
+		}
+	}
+
+	pub fn check_inclusion(&self, row_a: usize, row_b: usize) -> [bool; 2] {
+		let a = self.row_raw(row_a);
+		let b = self.row_raw(row_b);
+		let mut a_has_all = true;
+		let mut b_has_all = true;
+		unsafe {
+			for i in 0..self.words_per_row {
+				let a_word = a.add(i).read();
+				let b_word = b.add(i).read();
+				if (a_word | b_word) != a_word {
+					a_has_all = false;
+				}
+				if (a_word | b_word) != b_word {
+					b_has_all = false;
+				}
+			}
+		}
+		[a_has_all, b_has_all]
+	}
+
+	pub fn have_common_bits(&self, row_a: usize, row_b: usize) -> bool {
+		let a = self.row_raw(row_a);
+		let b = self.row_raw(row_b);
+		unsafe {
+			for i in 0..self.words_per_row {
+				let a_word = a.add(i).read();
+				let b_word = b.add(i).read();
+				if (a_word & b_word) != 0 {
+					return true;
+				}
+			}
+		}
+		false
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+#[derive(Clone, Default)]
+pub struct IndexBitmap<Index: IndexTrait> {
+	pub raw: Bitmap,
+	_marker: std::marker::PhantomData<Index>,
+}
+
+impl<Index: IndexTrait> IndexBitmap<Index> {
+	pub fn new() -> Self {
+		Self {
+			raw: Bitmap::new(0, 0),
+			_marker: std::marker::PhantomData,
+		}
+	}
+
+	pub fn clear_and_resize<T>(&mut self, rows_model: &IndexVec<Index, T>, cols: usize) {
+		self.raw.clear_and_resize(rows_model.raw.len(), cols);
+	}
+
+	pub fn copy_row(&mut self, dst_row: Index, src_row: Index) {
+		self.raw.copy_row(dst_row.to_raw(), src_row.to_raw());
+	}
+
+	pub fn get_bit(&self, row: Index, col: usize) -> bool {
+		self.raw.get_bit(row.to_raw(), col)
+	}
+
+	pub fn set_bit(&mut self, row: Index, col: usize) -> bool {
+		self.raw.set_bit(row.to_raw(), col)
+	}
+
+	pub fn union(&mut self, dst_row: Index, src_row1: Index, src_row2: Index) {
+		self.raw.union(dst_row.to_raw(), src_row1.to_raw(), src_row2.to_raw());
+	}
+
+	pub fn and_not(&mut self, dst_row: Index, src_row1: Index, src_row2: Index) {
+		self.raw.and_not(dst_row.to_raw(), src_row1.to_raw(), src_row2.to_raw());
+	}
+
+	pub fn check_inclusion(&self, row_a: Index, row_b: Index) -> [bool; 2] {
+		self.raw.check_inclusion(row_a.to_raw(), row_b.to_raw())
+	}
+
+	pub fn have_common_bits(&self, row_a: Index, row_b: Index) -> bool {
+		self.raw.have_common_bits(row_a.to_raw(), row_b.to_raw())
 	}
 }
 

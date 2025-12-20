@@ -18,7 +18,8 @@
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::collapsible_else_if)]
 
-use std::collections::{HashMap, HashSet, hash_map};
+use std::borrow::Cow;
+use std::collections::{HashMap, hash_map};
 use std::hint::cold_path;
 use std::rc::Rc;
 
@@ -28,11 +29,11 @@ use super::{
 	Expr, ExprBinaryKind, ExprInput, ExprReductionKind, ExprScalarRef, ExprTensorRef, ExprUnary,
 	ExprUnaryKind, RcExpr,
 };
-use crate::define_index_type32;
-use crate::new::expr::compile::ReductionBitmap;
 use crate::new::expr::{ExprCapture, ExprCast};
 use crate::tensor::TensorOpError;
+use crate::util::bitmap::IndexBitmap;
 use crate::util::index_vec::{IndexTrait, IndexVec, UntypedIndex32};
+use crate::{ErrPack, define_index_type32};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -90,7 +91,6 @@ pub struct Node {
 	// - FragmentIndex32
 	// depending on the node type.
 	pub x_index: UntypedIndex32,
-	pub bitmap_index: u32,
 }
 
 impl Node {
@@ -193,15 +193,14 @@ pub struct PreCompilation {
 	tensor_ref_vec: TensorRefVec,
 }
 
-struct LoadExprState {
+pub struct LoadExprState {
 	visited: HashMap<*const Expr, NodeIndex32>,
-	captures: HashSet<*const ExprTensorRef>,
 	n_reductions: u32,
-	reductions: IndexVec<NodeIndex32, ReductionBitmap>,
+	bitmap: IndexBitmap<NodeIndex32>,
 }
 
 impl PreCompilation {
-	pub fn new(expr: RcExpr) -> Self {
+	pub fn new(expr: RcExpr) -> Result<Self, ErrPack<TensorOpError>> {
 		let mut comp = PreCompilation {
 			nodes_postorder: NodeVec::with_capacity(32),
 			fragments_preorder: FragmentVec::with_capacity(8),
@@ -211,20 +210,21 @@ impl PreCompilation {
 			tensor_ref_map: HashMap::new(),
 			tensor_ref_vec: TensorRefVec::with_capacity(4),
 		};
-		let _root = comp.load_expr(
-			expr.rc_expr,
-			&mut LoadExprState {
-				visited: HashMap::new(),
-				captures: HashSet::new(),
-				n_reductions: 0,
-				reductions: IndexVec::new(),
-			},
-		);
+		let mut state = LoadExprState {
+			visited: HashMap::new(),
+			n_reductions: 0,
+			bitmap: IndexBitmap::new(),
+		};
+		comp.load_expr(expr.rc_expr, &mut state);
 		comp.remove_dead_code();
-		comp
+		comp.find_reduction_uses(&mut state);
+		comp.find_races(&mut state)?;
+		/*let mut graphviz = String::new();
+		comp.print_graphviz(&mut graphviz, Some(&mut state));
+		println!("{}", graphviz);*/
+		Ok(comp)
 	}
 
-	#[allow(clippy::too_many_lines)]
 	#[allow(clippy::collapsible_else_if)]
 	#[allow(clippy::manual_assert)]
 	#[allow(clippy::panic)]
@@ -239,19 +239,10 @@ impl PreCompilation {
 		let out_is_scalar: bool;
 		let children: [NodeIndex32; 2];
 		let mut capture: ThinVec<TensorRefIndex32> = ThinVec::new();
-		let reduction_bitmap;
-		let mut has_all_reductions = [true; 2];
-		let reduction_index = state.n_reductions;
 		match expr.as_ref() {
 			Expr::Capture(ExprCapture { expr: x, tensor_ref }) => {
 				let child = self.load_expr(x.clone(), state);
 				let tensor_ref = tensor_ref.clone();
-				if !state.captures.insert(std::ptr::from_ref(tensor_ref.as_ref())) {
-					panic!(
-						"CompiledExpr::new(): Capturing multiple values into the same tensor '{}'.",
-						tensor_ref.name.as_deref().unwrap_or("unnamed tensor")
-					);
-				}
 				let tensor_ref_index = self.add_tensor_ref(tensor_ref, false, true);
 				if !self.nodes_postorder[child].is_input() {
 					self.nodes_postorder[child].capture.push(tensor_ref_index);
@@ -267,7 +258,6 @@ impl PreCompilation {
 				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
 				children = [child, NodeIndex32::new_invalid()];
 				capture.push(tensor_ref_index);
-				reduction_bitmap = state.reductions[child].clone();
 			},
 			Expr::First(first) => {
 				let first_child = self.load_expr(first.lhs.clone(), state);
@@ -275,26 +265,22 @@ impl PreCompilation {
 				state.visited.insert(expr_key, first_child);
 				return first_child;
 			},
-			Expr::Input(input) => {
-				match input {
-					ExprInput::Tensor(tensor_ref) => {
-						out_is_scalar = false;
-						children = [NodeIndex32::new_invalid(), NodeIndex32::new_invalid()];
-						x_index = self.add_tensor_ref(tensor_ref.clone(), true, false).to_untyped();
-					},
-					ExprInput::Scalar(scalar_ref) => {
-						out_is_scalar = true;
-						children = [NodeIndex32::new_invalid(), NodeIndex32::new_invalid()];
-						x_index = self.add_scalar_ref(scalar_ref.clone()).to_untyped();
-					},
-				}
-				reduction_bitmap = ReductionBitmap::new();
+			Expr::Input(input) => match input {
+				ExprInput::Tensor(tensor_ref) => {
+					out_is_scalar = false;
+					children = [NodeIndex32::new_invalid(), NodeIndex32::new_invalid()];
+					x_index = self.add_tensor_ref(tensor_ref.clone(), true, false).to_untyped();
+				},
+				ExprInput::Scalar(scalar_ref) => {
+					out_is_scalar = true;
+					children = [NodeIndex32::new_invalid(), NodeIndex32::new_invalid()];
+					x_index = self.add_scalar_ref(scalar_ref.clone()).to_untyped();
+				},
 			},
 			Expr::Cast(ExprCast { expr, .. }) | Expr::Unary(ExprUnary { expr, .. }) => {
 				let child = self.load_expr(expr.clone(), state);
 				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
 				children = [child, NodeIndex32::new_invalid()];
-				reduction_bitmap = state.reductions[child].clone();
 			},
 			Expr::Binary(binary) => {
 				let lhs = binary.lhs.clone();
@@ -305,22 +291,15 @@ impl PreCompilation {
 				let right_is_scalar = self.nodes_postorder[right_child].out_is_scalar;
 				out_is_scalar = left_is_scalar && right_is_scalar;
 				children = [left_child, right_child];
-				let left_bitmap = &state.reductions[left_child];
-				let right_bitmap = &state.reductions[right_child];
-				has_all_reductions = left_bitmap.check_inclusion(right_bitmap);
-				reduction_bitmap = ReductionBitmap::union(left_bitmap, right_bitmap);
 			},
 			Expr::Reduction(reduction) => {
 				let reduction_expr = reduction.expr.clone();
 				let child = self.load_expr(reduction_expr, state);
 				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
 				children = [child, NodeIndex32::new_invalid()];
-				reduction_bitmap = state.reductions[child]
-					.clone_and_set(self.nodes_postorder.next_index().to_raw());
 				state.n_reductions += 1;
 			},
 		}
-		state.reductions.push(reduction_bitmap);
 
 		let next_index = self.nodes_postorder.next_index();
 		for &child in &children {
@@ -339,9 +318,8 @@ impl PreCompilation {
 			out_is_scalar,
 			is_dead: false,
 			reduction_head_for: NodeIndex32::new_invalid(),
-			has_all_reductions,
+			has_all_reductions: [true; 2],
 			x_index,
-			bitmap_index: reduction_index,
 		});
 		debug_assert!(index == next_index);
 		state.visited.insert(expr_key, index);
@@ -382,7 +360,6 @@ impl PreCompilation {
 					self.tensor_ref_vec[index].is_input = true;
 				}
 				if is_output {
-					assert!(!self.tensor_ref_vec[index].is_output);
 					self.tensor_ref_vec[index].is_output = true;
 				}
 				index
@@ -390,7 +367,106 @@ impl PreCompilation {
 		}
 	}
 
-	#[allow(clippy::mem_replace_with_default)]
+	fn find_reduction_uses(&mut self, state: &mut LoadExprState) {
+		let bitmap = &mut state.bitmap;
+		bitmap.clear_and_resize(&self.nodes_postorder, state.n_reductions as usize);
+		let mut n_reductions = 0;
+		for i in self.nodes_postorder.indexes() {
+			let me = &mut self.nodes_postorder[i];
+			if me.is_dead {
+				continue;
+			}
+			if me.is_binary() {
+				let left_child = me.children[0];
+				let right_child = me.children[1];
+				me.has_all_reductions = bitmap.check_inclusion(left_child, right_child);
+				bitmap.union(i, left_child, right_child);
+			} else if me.is_unary() {
+				let child = me.children[0];
+				bitmap.copy_row(i, child);
+				if me.is_reduction() {
+					bitmap.set_bit(i, n_reductions);
+					n_reductions += 1;
+				}
+			}
+		}
+		debug_assert!(n_reductions == (state.n_reductions as usize));
+	}
+
+	#[allow(clippy::manual_assert)]
+	fn find_races(&self, state: &mut LoadExprState) -> Result<(), ErrPack<TensorOpError>> {
+		let kills = NodeIndex32::from_raw(self.nodes_postorder.len());
+		let rows = self.nodes_postorder.len() + 1;
+		let cols = self.tensor_ref_vec.len();
+		let bitmap = &mut state.bitmap;
+		bitmap.raw.clear_and_resize(rows, cols);
+		for i in self.nodes_postorder.indexes() {
+			let me = &self.nodes_postorder[i];
+			if me.is_nullary() {
+				if me.is_tensor_input() {
+					let tensor_index = me.tensor_index();
+					bitmap.set_bit(i, tensor_index.to_raw());
+				}
+			} else {
+				if me.is_binary() {
+					let left_child = me.children[0];
+					let right_child = me.children[1];
+					bitmap.union(i, left_child, right_child);
+				} else if me.is_unary() {
+					let child = me.children[0];
+					bitmap.copy_row(i, child);
+				}
+				if bitmap.have_common_bits(i, kills) {
+					cold_path();
+					let mut message = String::new();
+					let w: &mut dyn std::fmt::Write = &mut message;
+					for c in 0..cols {
+						if bitmap.get_bit(i, c) && bitmap.get_bit(kills, c) {
+							let _ = writeln!(
+								w,
+								"Ambiguous use of tensor {}. Not clear whether to use the version before or after write.",
+								self.tensor_ref_vec[TensorRefIndex32::from_raw(c)]
+									.tensor_ref
+									.name
+									.as_deref()
+									.unwrap_or("<unnamed>")
+							);
+						}
+					}
+					return Err(ErrPack {
+						code: TensorOpError::WriteReadRace,
+						extra: Some(Box::new(crate::ErrExtra {
+							message: Cow::from(message),
+							nested: None,
+						})),
+					});
+				}
+				for &tensor_index in &me.capture {
+					let was_killed = bitmap.set_bit(kills, tensor_index.to_raw());
+					if was_killed {
+						cold_path();
+						return Err(ErrPack {
+							code: TensorOpError::DoubleWrite,
+							extra: Some(Box::new(crate::ErrExtra {
+								message: Cow::from(format!(
+									"Double write to tensor {}",
+									self.tensor_ref_vec[tensor_index]
+										.tensor_ref
+										.name
+										.as_deref()
+										.unwrap_or("<unnamed>")
+								)),
+								nested: None,
+							})),
+						});
+					}
+				}
+				bitmap.and_not(i, i, kills);
+			}
+		}
+		Ok(())
+	}
+
 	fn remove_dead_code(&mut self) {
 		for i in self.nodes_postorder.indexes().rev() {
 			let mut parents =
@@ -673,13 +749,31 @@ impl PreCompilation {
 	}
 
 	#[allow(clippy::too_many_lines)]
-	pub fn print_graphviz<W: std::fmt::Write>(&self, w: &mut W) -> std::fmt::Result {
+	pub fn print_graphviz<W: std::fmt::Write>(
+		&self,
+		w: &mut W,
+		mut state: Option<&mut LoadExprState>,
+	) -> std::fmt::Result {
 		writeln!(w, "digraph G {{")?;
 		writeln!(w, "\trankdir=BT;")?;
 		for i in self.nodes_postorder.indexes() {
 			let node = &self.nodes_postorder[i];
 			let node_id = self.graphviz_node_id(i);
-			let extra_label = "";
+			let mut extra_label = String::new();
+			if let Some(state) = &mut state {
+				let mut names = Vec::new();
+				for (idx, ten) in self.tensor_ref_vec.iter().enumerate() {
+					if state.bitmap.get_bit(i, idx) {
+						let ten_name = if let Some(name) = &ten.tensor_ref.name {
+							name.as_ref().to_string()
+						} else {
+							format!("{:?}", std::ptr::from_ref(ten.tensor_ref.as_ref()))
+						};
+						names.push(ten_name);
+					}
+				}
+				extra_label = format!("<br/><font color='red'>In use: {}</font>", names.join(", "));
+			}
 			if node.is_input() {
 				continue;
 			}

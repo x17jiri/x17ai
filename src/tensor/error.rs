@@ -76,6 +76,8 @@ pub enum TensorOpError {
 	InvalidReshape,
 	IOError,
 	DeviceError,
+	WriteReadRace,
+	DoubleWrite,
 }
 
 impl From<std::alloc::AllocError> for TensorOpError {

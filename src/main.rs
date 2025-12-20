@@ -246,7 +246,7 @@ fn test1_opt(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 	let v_decay_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("v_decay_coef".into())));
 	let v_update_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("v_update_coef".into())));
 
-	let v_decayed = v * v_decay_coef;
+	let v_decayed = v.clone() * v_decay_coef;
 	let v_update = (grad2.clone() * grad3).sum() * v_update_coef.clone();
 	//let v_update = v_update.sum() * v_update_coef;
 	let new_v = v_decayed + v_update;
@@ -372,12 +372,12 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	//let expr = test4_x(dev.clone());
 	//let expr = test5(dev.clone());
 
-	let mut comp = PreCompilation::new(expr);
+	let mut comp = PreCompilation::new(expr)?;
 	comp.calc_shapes()?;
 	comp.find_fragments();
 
 	let mut graphviz = String::new();
-	comp.print_graphviz(&mut graphviz);
+	comp.print_graphviz(&mut graphviz, None);
 	println!("{}", graphviz);
 
 	/*let mut comp = CompiledExpr::new(comp);
