@@ -28,6 +28,8 @@ macro_rules! define_index_type {
 		}
 
 		impl $name {
+			pub type RawType = usize;
+
 			pub fn new(raw: usize) -> Self {
 				debug_assert!(isize::try_from(raw).is_ok());
 				$name { raw }
@@ -77,7 +79,8 @@ pub struct UntypedIndex {
 }
 
 impl UntypedIndex {
-	const MAX: usize = isize::MAX as usize;
+	pub const MAX: usize = isize::MAX as usize;
+	pub type RawType = usize;
 
 	pub fn new(raw: usize) -> Self {
 		debug_assert!(raw <= Self::MAX);
@@ -106,6 +109,8 @@ macro_rules! define_index_type32 {
 		}
 
 		impl $name {
+			pub type RawType = u32;
+
 			pub fn new(raw: u32) -> Self {
 				debug_assert!(i32::try_from(raw).is_ok());
 				$name { raw }
@@ -156,6 +161,7 @@ pub struct UntypedIndex32 {
 
 impl UntypedIndex32 {
 	pub const MAX: u32 = i32::MAX as u32;
+	pub type RawType = u32;
 
 	pub fn new_sentinel() -> Self {
 		Self { raw: u32::MAX }

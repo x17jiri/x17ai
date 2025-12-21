@@ -288,7 +288,7 @@ fn test2_rms_norm(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 	let inp_ten = ExprTensorRef::new(Some("inp".into()), f32::dtype, Vec::new());
 	let inp2_ten = ExprTensorRef::new(Some("inp2".into()), f32::dtype, Vec::new());
 	let inp = RcExpr::new_tensor_input(inp_ten.clone());
-	let inp2 = RcExpr::new_tensor_input(inp2_ten.clone());
+	let inp2 = RcExpr::new_tensor_input(inp_ten.clone());
 	let sum_to_mean = ExprScalarRef::new(Some("sum_to_mean".into()));
 	let sum_to_mean = RcExpr::new_scalar_input(sum_to_mean.clone());
 	let eps = ExprScalarRef::new(Some("eps".into()));
@@ -303,7 +303,7 @@ fn test2_rms_norm(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 		x17ai::new::tensor::Tensor::new_empty(&[1, 1000, 512], f32::dtype, dev.clone()).unwrap(),
 	);
 
-	(inp * magn_recip).capture(inp_ten.clone())
+	(inp * magn_recip).capture(inp_ten.clone()).capture(inp2_ten.clone())
 }
 
 fn test3_softmax(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {

@@ -280,7 +280,7 @@ impl PreCompilation {
 				ExprInput::Scalar(scalar_ref) => {
 					out_is_scalar = true;
 					children = [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()];
-					x_index = self.add_scalar_ref(scalar_ref.clone()).to_untyped();
+					x_index = self.add_scalar_input(scalar_ref.clone()).to_untyped();
 				},
 			},
 			Expr::Cast(ExprCast { expr, .. }) | Expr::Unary(ExprUnary { expr, .. }) => {
@@ -333,7 +333,7 @@ impl PreCompilation {
 		index
 	}
 
-	fn add_scalar_ref(&mut self, scalar_ref: Rc<ExprScalarRef>) -> ScalarRefIndex32 {
+	fn add_scalar_input(&mut self, scalar_ref: Rc<ExprScalarRef>) -> ScalarRefIndex32 {
 		let key = std::ptr::from_ref(scalar_ref.as_ref());
 		match self.scalar_map.entry(key) {
 			hash_map::Entry::Vacant(entry) => {
@@ -419,7 +419,8 @@ impl PreCompilation {
 		let mut fingerprints: HashMap<&[usize], u32> = HashMap::new();
 		for idx in self.nodes_postorder.indexes() {
 			let row: &[usize] = bitmap.row(idx);
-			let next_fingerprint = fingerprints.len() as u32;
+			#[allow(clippy::cast_possible_truncation)]
+			let next_fingerprint = fingerprints.len() as NodeIndex32::RawType;
 			let fingerprint = match fingerprints.entry(row) {
 				hash_map::Entry::Vacant(entry) => {
 					entry.insert(next_fingerprint);
@@ -539,10 +540,10 @@ impl PreCompilation {
 						self.nodes_postorder[idx].dominator = self.nodes_postorder[idx].parents[0];
 					},
 					_ => {
-						let dominator = self.nodes_postorder[idx].parents[1..].iter().fold(
-							self.nodes_postorder[self.nodes_postorder[idx].parents[0]].dominator,
-							|mut d1, &p| {
-								let mut d2 = self.nodes_postorder[p].dominator;
+						let dominator = self.nodes_postorder[idx].parents[1..]
+							.iter()
+							.copied()
+							.fold(self.nodes_postorder[idx].parents[0], |mut d1, mut d2| {
 								while d1 != d2 {
 									if d1.to_raw() < d2.to_raw() {
 										d1 = self.nodes_postorder[d1].dominator;
@@ -551,8 +552,7 @@ impl PreCompilation {
 									}
 								}
 								d1
-							},
-						);
+							});
 						if self.nodes_postorder[idx].dominator != dominator {
 							self.nodes_postorder[idx].dominator = dominator;
 							changed = true;
@@ -706,24 +706,12 @@ impl PreCompilation {
 		match node.expr.as_ref() {
 			Expr::Input(input) => match input {
 				ExprInput::Tensor(tensor_ref) => {
-					if let Some(name) = &tensor_ref.name {
-						format!("<b>Tensor</b><br/><font color='blue'><b>{}</b></font>", name)
-					} else {
-						format!(
-							"<b>Tensor</b><br/><font color='blue'><b>{:?}</b></font>",
-							std::ptr::from_ref(tensor_ref.as_ref())
-						)
-					}
+					let name = tensor_ref.name.as_deref().unwrap_or("<unnamed>");
+					format!("<b>Tensor</b><br/><font color='blue'><b>{name}</b></font>")
 				},
 				ExprInput::Scalar(scalar_ref) => {
-					if let Some(name) = &scalar_ref.name {
-						format!("<b>Scalar</b><br/><font color='blue'><b>{}</b></font>", name)
-					} else {
-						format!(
-							"<b>Scalar</b><br/><font color='blue'><b>{:?}</b></font>",
-							std::ptr::from_ref(scalar_ref.as_ref())
-						)
-					}
+					let name = scalar_ref.name.as_deref().unwrap_or("<unnamed>");
+					format!("<b>Scalar</b><br/><font color='blue'><b>{name}</b></font>")
 				},
 			},
 			Expr::Capture(..) | Expr::First(..) => {
@@ -771,11 +759,11 @@ impl PreCompilation {
 	) -> std::fmt::Result {
 		writeln!(w, "digraph G {{")?;
 		writeln!(w, "\trankdir=BT;")?;
+		//writeln!(w, "\tsplines=polyline;")?;
 		for i in self.nodes_postorder.indexes() {
 			let node = &self.nodes_postorder[i];
 			let node_id = format!("node_{}", i.raw);
-			let mut extra_label = String::new();
-			if let Some(state) = &mut state {
+			let extra_label = if let Some(state) = &mut state {
 				let mut names = Vec::new();
 				for (idx, ten) in self.tensor_vec.iter().enumerate() {
 					if state.bitmap.get_bit(i, idx) {
@@ -787,11 +775,10 @@ impl PreCompilation {
 						names.push(ten_name);
 					}
 				}
-				extra_label = format!("<br/><font color='red'>In use: {}</font>", names.join(", "));
-			}
-			/*if node.is_input() {
-				continue;
-			}*/
+				format!("<br/><font color='red'>In use: {}</font>", names.join(", "))
+			} else {
+				String::new()
+			};
 			writeln!(w, "\t{node_id} [label=<{}{extra_label}>];", self.graphviz_node_label(node),)?;
 			if node.is_input() {
 				if node.is_tensor_input() {
@@ -811,6 +798,13 @@ impl PreCompilation {
 				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ffccff\"];")?;
 			} else if node.is_captured() {
 				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccffcc\"];")?;
+			}
+			if !node.dominator.is_sentinel() {
+				let dom_id = format!("node_{}", node.dominator.raw);
+				writeln!(
+					w,
+					"\t{node_id} -> {dom_id} [label=< > style=dashed, color=\"#8080ff\", constraint=false, weight=2];"
+				)?;
 			}
 			if !node.is_input() {
 				let frag_index = node.fragment_index();
@@ -850,19 +844,24 @@ impl PreCompilation {
 					writeln!(w, "\t{child_id} -> {node_id} [label=\"{}\"{}];", label, extra_style)?;
 				}
 			}
-			/*for &capt_idx in &node.capture {
+			for &capt_idx in &node.capture {
 				let label =
 					if node.out_is_scalar { String::new() } else { self.shape_to_str(&node.shape) };
-				let capt = &self.tensor_vec[capt_idx].tensor_ref;
-				let cap_id = self.graphviz_tensor_id(capt);
-				let key = std::ptr::from_ref(capt.as_ref());
-				let index = self.tensor_map[&key];
-				if !self.tensor_vec[index].input_node.is_sentinel() {
-					writeln!(w, "\t{node_id} -> {cap_id} [label=\"{label}\", constraint=false];")?;
-				} else {
+				let input_node = self.tensor_vec[capt_idx].input_node;
+				if input_node.is_sentinel() {
+					let cap_id = format!("ten_{}", capt_idx.raw);
 					writeln!(w, "\t{node_id} -> {cap_id} [label=\"{label}\"];")?;
+					let tensor_ref = &self.tensor_vec[capt_idx].tensor_ref;
+					let name = tensor_ref.name.as_deref().unwrap_or("<unnamed>");
+					writeln!(
+						w,
+						"{cap_id} [label=<<b>Tensor</b><br/><font color='blue'><b>{name}</b></font>>, shape=box, style=filled, fillcolor=\"#cceeff\"];"
+					)?;
+				} else {
+					let cap_id = format!("node_{}", input_node.raw);
+					writeln!(w, "\t{node_id} -> {cap_id} [label=\"{label}\", constraint=false];")?;
 				}
-			}*/
+			}
 		}
 		writeln!(w, "}}")?;
 		Ok(())
