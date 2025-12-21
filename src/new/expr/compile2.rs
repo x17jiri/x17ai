@@ -20,7 +20,7 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, hash_map};
-use std::hint::cold_path;
+use std::hint::{cold_path, unlikely};
 use std::rc::Rc;
 
 use thin_vec::ThinVec;
@@ -77,6 +77,7 @@ pub struct Node {
 	pub expr: Rc<Expr>,
 	pub shape: ThinVec<usize>,
 	pub parents: ThinVec<NodeIndex32>,
+	pub dominator: NodeIndex32,
 	pub children: [NodeIndex32; 2],
 	pub capture: ThinVec<TensorRefIndex32>,
 
@@ -166,15 +167,14 @@ pub struct TensorRef {
 	pub tensor_ref: Rc<ExprTensorRef>,
 	pub is_input: bool,
 	pub is_output: bool,
+	pub shape: ThinVec<usize>,
 }
 
 define_index_type32!(TensorRefIndex32);
-type TensorRefVec = IndexVec<TensorRefIndex32, TensorRef>;
-
-type TensorShapeVec = IndexVec<TensorRefIndex32, ThinVec<usize>>;
+type TensorVec = IndexVec<TensorRefIndex32, TensorRef>;
 
 define_index_type32!(ScalarRefIndex32);
-type ScalarRefVec = IndexVec<ScalarRefIndex32, Rc<ExprScalarRef>>;
+type ScalarVec = IndexVec<ScalarRefIndex32, Rc<ExprScalarRef>>;
 
 pub struct Fragment {
 	pub head: NodeIndex32,
@@ -186,11 +186,10 @@ type FragmentVec = IndexVec<FragmentIndex32, Fragment>;
 pub struct PreCompilation {
 	nodes_postorder: NodeVec,
 	fragments_preorder: FragmentVec,
-	tensor_shapes: TensorShapeVec,
-	scalar_ref_map: HashMap<*const ExprScalarRef, ScalarRefIndex32>,
-	scalar_ref_vec: ScalarRefVec,
-	tensor_ref_map: HashMap<*const ExprTensorRef, TensorRefIndex32>,
-	tensor_ref_vec: TensorRefVec,
+	scalar_map: HashMap<*const ExprScalarRef, ScalarRefIndex32>,
+	scalar_vec: ScalarVec,
+	tensor_map: HashMap<*const ExprTensorRef, TensorRefIndex32>,
+	tensor_vec: TensorVec,
 }
 
 pub struct LoadExprState {
@@ -204,11 +203,10 @@ impl PreCompilation {
 		let mut comp = PreCompilation {
 			nodes_postorder: NodeVec::with_capacity(32),
 			fragments_preorder: FragmentVec::with_capacity(8),
-			tensor_shapes: TensorShapeVec::with_capacity(32),
-			scalar_ref_map: HashMap::new(),
-			scalar_ref_vec: ScalarRefVec::with_capacity(4),
-			tensor_ref_map: HashMap::new(),
-			tensor_ref_vec: TensorRefVec::with_capacity(4),
+			scalar_map: HashMap::new(),
+			scalar_vec: ScalarVec::with_capacity(4),
+			tensor_map: HashMap::new(),
+			tensor_vec: TensorVec::with_capacity(4),
 		};
 		let mut state = LoadExprState {
 			visited: HashMap::new(),
@@ -217,11 +215,9 @@ impl PreCompilation {
 		};
 		comp.load_expr(expr.rc_expr, &mut state);
 		comp.remove_dead_code();
+		comp.find_dominators();
 		comp.find_reduction_uses(&mut state);
 		comp.find_races(&mut state)?;
-		/*let mut graphviz = String::new();
-		comp.print_graphviz(&mut graphviz, Some(&mut state));
-		println!("{}", graphviz);*/
 		Ok(comp)
 	}
 
@@ -313,6 +309,7 @@ impl PreCompilation {
 			expr,
 			shape: ThinVec::new(),
 			parents: ThinVec::new(),
+			dominator: NodeIndex32::new_invalid(),
 			children,
 			capture,
 			out_is_scalar,
@@ -328,9 +325,9 @@ impl PreCompilation {
 
 	fn add_scalar_ref(&mut self, scalar_ref: Rc<ExprScalarRef>) -> ScalarRefIndex32 {
 		let key = std::ptr::from_ref(scalar_ref.as_ref());
-		match self.scalar_ref_map.entry(key) {
+		match self.scalar_map.entry(key) {
 			hash_map::Entry::Vacant(entry) => {
-				let index = self.scalar_ref_vec.push(scalar_ref);
+				let index = self.scalar_vec.push(scalar_ref);
 				entry.insert(index);
 				index
 			},
@@ -348,19 +345,24 @@ impl PreCompilation {
 		is_output: bool,
 	) -> TensorRefIndex32 {
 		let key = std::ptr::from_ref(tensor_ref.as_ref());
-		match self.tensor_ref_map.entry(key) {
+		match self.tensor_map.entry(key) {
 			hash_map::Entry::Vacant(entry) => {
-				let index = self.tensor_ref_vec.push(TensorRef { tensor_ref, is_input, is_output });
+				let index = self.tensor_vec.push(TensorRef {
+					tensor_ref,
+					is_input,
+					is_output,
+					shape: ThinVec::new(),
+				});
 				entry.insert(index);
 				index
 			},
 			hash_map::Entry::Occupied(entry) => {
 				let index = *entry.get();
 				if is_input {
-					self.tensor_ref_vec[index].is_input = true;
+					self.tensor_vec[index].is_input = true;
 				}
 				if is_output {
-					self.tensor_ref_vec[index].is_output = true;
+					self.tensor_vec[index].is_output = true;
 				}
 				index
 			},
@@ -373,7 +375,7 @@ impl PreCompilation {
 		let mut n_reductions = 0;
 		for i in self.nodes_postorder.indexes() {
 			let me = &mut self.nodes_postorder[i];
-			if me.is_dead {
+			if unlikely(me.is_dead) {
 				continue;
 			}
 			if me.is_binary() {
@@ -397,7 +399,7 @@ impl PreCompilation {
 	fn find_races(&self, state: &mut LoadExprState) -> Result<(), ErrPack<TensorOpError>> {
 		let kills = NodeIndex32::from_raw(self.nodes_postorder.len());
 		let rows = self.nodes_postorder.len() + 1;
-		let cols = self.tensor_ref_vec.len();
+		let cols = self.tensor_vec.len();
 		let bitmap = &mut state.bitmap;
 		bitmap.raw.clear_and_resize(rows, cols);
 		for i in self.nodes_postorder.indexes() {
@@ -425,7 +427,7 @@ impl PreCompilation {
 							let _ = writeln!(
 								w,
 								"Ambiguous use of tensor {}. Not clear whether to use the version before or after write.",
-								self.tensor_ref_vec[TensorRefIndex32::from_raw(c)]
+								self.tensor_vec[TensorRefIndex32::from_raw(c)]
 									.tensor_ref
 									.name
 									.as_deref()
@@ -450,7 +452,7 @@ impl PreCompilation {
 							extra: Some(Box::new(crate::ErrExtra {
 								message: Cow::from(format!(
 									"Double write to tensor {}",
-									self.tensor_ref_vec[tensor_index]
+									self.tensor_vec[tensor_index]
 										.tensor_ref
 										.name
 										.as_deref()
@@ -485,21 +487,55 @@ impl PreCompilation {
 		}
 	}
 
-	pub fn calc_shapes(&mut self) -> Result<(), TensorOpError> {
-		if self.tensor_shapes.len() != self.tensor_ref_vec.len() {
-			self.tensor_shapes =
-				IndexVec::from_vec(vec![ThinVec::new(); self.tensor_ref_vec.len()]);
+	fn find_dominators(&mut self) {
+		let mut changed = true;
+		while (changed) {
+			changed = false;
+			for idx in self.nodes_postorder.indexes().rev() {
+				match self.nodes_postorder[idx].parents.len() {
+					0 => {
+						// root
+						debug_assert!(
+							self.nodes_postorder[idx].dominator.to_raw() == u32::MAX as usize
+						);
+					},
+					1 => {
+						self.nodes_postorder[idx].dominator = self.nodes_postorder[idx].parents[0];
+					},
+					_ => {
+						let dominator = self.nodes_postorder[idx].parents[1..].iter().fold(
+							self.nodes_postorder[self.nodes_postorder[idx].parents[0]].dominator,
+							|mut d1, &p| {
+								let mut d2 = self.nodes_postorder[p].dominator;
+								while d1 != d2 {
+									if d1.to_raw() < d2.to_raw() {
+										d1 = self.nodes_postorder[d1].dominator;
+									} else {
+										d2 = self.nodes_postorder[d2].dominator;
+									}
+								}
+								d1
+							},
+						);
+						if self.nodes_postorder[idx].dominator != dominator {
+							self.nodes_postorder[idx].dominator = dominator;
+							changed = true;
+						}
+					},
+				}
+			}
 		}
+	}
 
-		for i in self.tensor_ref_vec.indexes() {
-			self.tensor_shapes[i].clear();
-			if !self.tensor_ref_vec[i].is_input {
+	fn calc_shapes(&mut self) -> Result<(), TensorOpError> {
+		for t in &mut self.tensor_vec {
+			t.shape.clear();
+			if !t.is_input {
 				continue;
 			}
 
-			let tensor_borrow =
-				unsafe { self.tensor_ref_vec[i].tensor_ref.tensor.try_borrow_unguarded() };
-			let Ok(tensor) = tensor_borrow else {
+			let borrow = unsafe { t.tensor_ref.tensor.try_borrow_unguarded() };
+			let Ok(tensor) = borrow else {
 				cold_path();
 				return Err(TensorOpError::CannotBorrow);
 			};
@@ -508,7 +544,7 @@ impl PreCompilation {
 				return Err(TensorOpError::MissingInput);
 			};
 
-			self.tensor_shapes[i].extend_from_slice(tensor.shape());
+			t.shape.extend_from_slice(tensor.shape());
 		}
 
 		for i in self.nodes_postorder.indexes() {
@@ -517,7 +553,7 @@ impl PreCompilation {
 			if me.is_input() {
 				if me.is_tensor_input() {
 					// For input nodes, get shape from tensor_ref
-					me.shape.extend_from_slice(&self.tensor_shapes[me.tensor_index()]);
+					me.shape.extend_from_slice(&self.tensor_vec[me.tensor_index()].shape);
 				}
 				continue;
 			}
@@ -563,8 +599,8 @@ impl PreCompilation {
 			// If we store back into inputs, make sure captures have correct shape
 			let my_shape = me.shape.as_slice();
 			for &idx in &me.capture {
-				if self.tensor_ref_vec[idx].is_input {
-					let tensor_shape = self.tensor_shapes[idx].as_slice();
+				if self.tensor_vec[idx].is_input {
+					let tensor_shape = self.tensor_vec[idx].shape.as_slice();
 					if tensor_shape != my_shape {
 						cold_path();
 						return Err(TensorOpError::ShapeMismatch);
@@ -638,12 +674,13 @@ impl PreCompilation {
 		}
 	}
 
-	pub fn find_fragments(&mut self) {
+	pub fn find_fragments(&mut self) -> Result<(), TensorOpError> {
+		self.calc_shapes()?;
 		self.find_reduction_heads();
 		self.fragments_preorder.raw.clear();
 		for idx in self.nodes_postorder.indexes().rev() {
 			let (_, item, all_parents) = self.nodes_postorder.borrow_multiple(idx);
-			if item.is_input() || item.is_dead {
+			if item.is_input() || unlikely(item.is_dead) {
 				continue;
 			}
 			if let Some((&first_parent, other_parents)) = item.parents.split_first()
@@ -657,11 +694,12 @@ impl PreCompilation {
 				item.set_fragment_index(new_frag);
 			}
 		}
+		Ok(())
 	}
 
 	fn graphviz_tensor_id(&self, tensor_ref: &Rc<ExprTensorRef>) -> String {
 		let key = std::ptr::from_ref(tensor_ref.as_ref());
-		if let Some(&index) = self.tensor_ref_map.get(&key) {
+		if let Some(&index) = self.tensor_map.get(&key) {
 			format!("ten_{}", index.raw)
 		} else {
 			format!("ten_{}", key as usize)
@@ -670,7 +708,7 @@ impl PreCompilation {
 
 	fn graphviz_scalar_id(&self, scalar_ref: &Rc<ExprScalarRef>) -> String {
 		let key = std::ptr::from_ref(scalar_ref.as_ref());
-		if let Some(&index) = self.scalar_ref_map.get(&key) {
+		if let Some(&index) = self.scalar_map.get(&key) {
 			format!("sca_{}", index.raw)
 		} else {
 			format!("sca_{}", key as usize)
@@ -762,7 +800,7 @@ impl PreCompilation {
 			let mut extra_label = String::new();
 			if let Some(state) = &mut state {
 				let mut names = Vec::new();
-				for (idx, ten) in self.tensor_ref_vec.iter().enumerate() {
+				for (idx, ten) in self.tensor_vec.iter().enumerate() {
 					if state.bitmap.get_bit(i, idx) {
 						let ten_name = if let Some(name) = &ten.tensor_ref.name {
 							name.as_ref().to_string()
@@ -781,7 +819,7 @@ impl PreCompilation {
 			if node.is_reduction_head() {
 				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccccff\"];")?;
 			} else if node.is_fork() {
-				if node.is_dead {
+				if unlikely(node.is_dead) {
 					writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#cccccc\"];")?;
 				} else {
 					writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ffcccc\"];")?;
@@ -830,18 +868,18 @@ impl PreCompilation {
 			for &capt_idx in &node.capture {
 				let label =
 					if node.out_is_scalar { String::new() } else { self.shape_to_str(&node.shape) };
-				let capt = &self.tensor_ref_vec[capt_idx].tensor_ref;
+				let capt = &self.tensor_vec[capt_idx].tensor_ref;
 				let cap_id = self.graphviz_tensor_id(capt);
 				let key = std::ptr::from_ref(capt.as_ref());
-				let index = self.tensor_ref_map[&key];
-				if self.tensor_ref_vec[index].is_input {
+				let index = self.tensor_map[&key];
+				if self.tensor_vec[index].is_input {
 					writeln!(w, "\t{node_id} -> {cap_id} [label=\"{label}\", constraint=false];")?;
 				} else {
 					writeln!(w, "\t{node_id} -> {cap_id} [label=\"{label}\"];")?;
 				}
 			}
 		}
-		for tensor_ref in &self.tensor_ref_vec {
+		for tensor_ref in &self.tensor_vec {
 			let id = self.graphviz_tensor_id(&tensor_ref.tensor_ref);
 			let tensor_name = if let Some(name) = &tensor_ref.tensor_ref.name {
 				name.as_ref().to_string()
@@ -854,7 +892,7 @@ impl PreCompilation {
 				"\t{id} [label=<<b>Tensor</b><br/><font color='blue'><b>{tensor_name}</b></font>>, shape=box, style=filled, fillcolor=\"{color}\"];",
 			)?;
 		}
-		for scalar_ref in &self.scalar_ref_vec {
+		for scalar_ref in &self.scalar_vec {
 			let id = self.graphviz_scalar_id(scalar_ref);
 			let label = if let Some(name) = &scalar_ref.name {
 				name.to_string()

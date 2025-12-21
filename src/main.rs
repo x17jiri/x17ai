@@ -373,8 +373,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	//let expr = test5(dev.clone());
 
 	let mut comp = PreCompilation::new(expr)?;
-	comp.calc_shapes()?;
-	comp.find_fragments();
+	comp.find_fragments()?;
 
 	let mut graphviz = String::new();
 	comp.print_graphviz(&mut graphviz, None);
