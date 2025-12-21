@@ -83,8 +83,8 @@ pub struct Node {
 
 	pub out_is_scalar: bool,
 	pub is_dead: bool,
+	pub reduction_fingerprint: u32,
 	pub reduction_head_for: NodeIndex32,
-	pub has_all_reductions: [bool; 2],
 
 	// This is one of:
 	// - ScalarRefIndex32
@@ -216,7 +216,7 @@ impl PreCompilation {
 		comp.load_expr(expr.rc_expr, &mut state);
 		comp.remove_dead_code();
 		comp.find_dominators();
-		comp.find_reduction_uses(&mut state);
+		comp.find_reduction_fingerprints(&mut state);
 		comp.find_races(&mut state)?;
 		Ok(comp)
 	}
@@ -314,8 +314,8 @@ impl PreCompilation {
 			capture,
 			out_is_scalar,
 			is_dead: false,
+			reduction_fingerprint: 0,
 			reduction_head_for: NodeIndex32::new_invalid(),
-			has_all_reductions: [true; 2],
 			x_index,
 		});
 		debug_assert!(index == next_index);
@@ -369,30 +369,42 @@ impl PreCompilation {
 		}
 	}
 
-	fn find_reduction_uses(&mut self, state: &mut LoadExprState) {
+	fn find_reduction_fingerprints(&mut self, state: &mut LoadExprState) {
 		let bitmap = &mut state.bitmap;
 		bitmap.clear_and_resize(&self.nodes_postorder, state.n_reductions as usize);
 		let mut n_reductions = 0;
-		for i in self.nodes_postorder.indexes() {
-			let me = &mut self.nodes_postorder[i];
+		for idx in self.nodes_postorder.indexes() {
+			let me = &mut self.nodes_postorder[idx];
 			if unlikely(me.is_dead) {
 				continue;
 			}
 			if me.is_binary() {
 				let left_child = me.children[0];
 				let right_child = me.children[1];
-				me.has_all_reductions = bitmap.check_inclusion(left_child, right_child);
-				bitmap.union(i, left_child, right_child);
+				bitmap.union(idx, left_child, right_child);
 			} else if me.is_unary() {
 				let child = me.children[0];
-				bitmap.copy_row(i, child);
+				bitmap.copy_row(idx, child);
 				if me.is_reduction() {
-					bitmap.set_bit(i, n_reductions);
+					bitmap.set_bit(idx, n_reductions);
 					n_reductions += 1;
 				}
 			}
 		}
 		debug_assert!(n_reductions == (state.n_reductions as usize));
+		let mut fingerprints: HashMap<&[usize], u32> = HashMap::new();
+		for idx in self.nodes_postorder.indexes() {
+			let row: &[usize] = bitmap.row(idx);
+			let next_fingerprint = fingerprints.len() as u32;
+			let fingerprint = match fingerprints.entry(row) {
+				hash_map::Entry::Vacant(entry) => {
+					entry.insert(next_fingerprint);
+					next_fingerprint
+				},
+				hash_map::Entry::Occupied(entry) => *entry.get(),
+			};
+			self.nodes_postorder[idx].reduction_fingerprint = fingerprint;
+		}
 	}
 
 	#[allow(clippy::manual_assert)]
@@ -489,14 +501,14 @@ impl PreCompilation {
 
 	fn find_dominators(&mut self) {
 		let mut changed = true;
-		while (changed) {
+		while changed {
 			changed = false;
 			for idx in self.nodes_postorder.indexes().rev() {
 				match self.nodes_postorder[idx].parents.len() {
 					0 => {
 						// root
 						debug_assert!(
-							self.nodes_postorder[idx].dominator.to_raw() == u32::MAX as usize
+							self.nodes_postorder[idx].dominator == NodeIndex32::new_invalid()
 						);
 					},
 					1 => {
@@ -613,64 +625,33 @@ impl PreCompilation {
 	}
 
 	fn find_reduction_heads(&mut self) {
-		#[derive(Clone, Copy)]
-		struct Item {
-			token: NodeIndex32,
-			count: usize,
-			head: NodeIndex32,
-		}
-		let mut t: IndexVec<NodeIndex32, Item> = IndexVec::from_vec(vec![
-			Item {
-				token: NodeIndex32::new_invalid(),
-				count: 0,
-				head: NodeIndex32::new_invalid()
-			};
-			self.nodes_postorder.len()
-		]);
 		for idx in self.nodes_postorder.indexes() {
-			let (mut prev, child, all_parents) = self.nodes_postorder.borrow_multiple(idx);
-			child.reduction_head_for = NodeIndex32::new_invalid();
-			if child.is_reduction() {
-				t[idx].token = idx;
-				t[idx].count = 1;
-			}
-			let token = t[idx].token;
-			if !token.is_valid() {
+			if !self.nodes_postorder[idx].is_reduction() {
 				continue;
 			}
-			if t[idx].count == t[token].count {
-				let head = t[token].head;
-				if head.is_valid() {
-					prev[head].reduction_head_for = NodeIndex32::new_invalid();
+
+			let start = &self.nodes_postorder[idx];
+			let start_shape = ShapeRef::new(&start.shape);
+			let start_fingerprint = start.reduction_fingerprint;
+
+			let mut head_idx = idx;
+			let mut head = start;
+			loop {
+				let parent_idx = head.dominator;
+				if !parent_idx.is_valid() {
+					break;
 				}
-				t[token].head = idx;
-				child.reduction_head_for = token;
+				let parent = &self.nodes_postorder[parent_idx];
+				let parent_shape = ShapeRef::new(&parent.shape);
+				let parent_fingerprint = parent.reduction_fingerprint;
+				if parent_shape != start_shape || parent_fingerprint != start_fingerprint {
+					break;
+				}
+				head_idx = parent_idx;
+				head = parent;
 			}
 
-			// The current node has a token; try to propagate it to parents
-			let mut eligible_parents = 0;
-			for &p in &child.parents {
-				let parent = &all_parents[p];
-				if !parent.is_reduction()
-					&& parent
-						.children
-						.iter()
-						.zip(parent.has_all_reductions)
-						.any(|(&c, has_all)| c == idx && has_all)
-					&& ShapeRef::new(&parent.shape) == ShapeRef::new(&child.shape)
-				{
-					eligible_parents += 1;
-				}
-			}
-
-			if eligible_parents > 0 && eligible_parents == child.parents.len() {
-				t[token].count = t[token].count - t[idx].count + eligible_parents;
-				t[idx].token = NodeIndex32::new_invalid();
-				for &p in &child.parents {
-					t[p].token = token;
-					t[p].count += 1;
-				}
-			}
+			self.nodes_postorder[head_idx].reduction_head_for = idx;
 		}
 	}
 

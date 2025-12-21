@@ -124,26 +124,6 @@ impl Bitmap {
 		}
 	}
 
-	pub fn check_inclusion(&self, row_a: usize, row_b: usize) -> [bool; 2] {
-		let a = self.row_raw(row_a);
-		let b = self.row_raw(row_b);
-		let mut a_has_all = true;
-		let mut b_has_all = true;
-		unsafe {
-			for i in 0..self.words_per_row {
-				let a_word = a.add(i).read();
-				let b_word = b.add(i).read();
-				if (a_word | b_word) != a_word {
-					a_has_all = false;
-				}
-				if (a_word | b_word) != b_word {
-					b_has_all = false;
-				}
-			}
-		}
-		[a_has_all, b_has_all]
-	}
-
 	pub fn have_common_bits(&self, row_a: usize, row_b: usize) -> bool {
 		let a = self.row_raw(row_a);
 		let b = self.row_raw(row_b);
@@ -180,6 +160,10 @@ impl<Index: IndexTrait> IndexBitmap<Index> {
 		self.raw.clear_and_resize(rows_model.raw.len(), cols);
 	}
 
+	pub fn row(&self, row: Index) -> &[usize] {
+		self.raw.row(row.to_raw())
+	}
+
 	pub fn copy_row(&mut self, dst_row: Index, src_row: Index) {
 		self.raw.copy_row(dst_row.to_raw(), src_row.to_raw());
 	}
@@ -198,10 +182,6 @@ impl<Index: IndexTrait> IndexBitmap<Index> {
 
 	pub fn and_not(&mut self, dst_row: Index, src_row1: Index, src_row2: Index) {
 		self.raw.and_not(dst_row.to_raw(), src_row1.to_raw(), src_row2.to_raw());
-	}
-
-	pub fn check_inclusion(&self, row_a: Index, row_b: Index) -> [bool; 2] {
-		self.raw.check_inclusion(row_a.to_raw(), row_b.to_raw())
 	}
 
 	pub fn have_common_bits(&self, row_a: Index, row_b: Index) -> bool {

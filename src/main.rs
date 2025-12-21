@@ -357,7 +357,7 @@ fn test5(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 		x17ai::new::tensor::Tensor::new_empty(&[1000, 512], f32::dtype, dev.clone()).unwrap(),
 	);
 	inp_b.tensor.borrow_mut().replace(
-		x17ai::new::tensor::Tensor::new_empty(&[1000, 300], f32::dtype, dev.clone()).unwrap(),
+		x17ai::new::tensor::Tensor::new_empty(&[1000, 1], f32::dtype, dev.clone()).unwrap(),
 	);
 
 	out
@@ -367,7 +367,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let dev = x17ai::new::device::cpu::CPUDevice::new();
 
 	let expr = test1_opt(dev.clone());
-	//let expr = test2_rms_norm(dev.clone());
+	let expr = test2_rms_norm(dev.clone());
 	//let expr = test3_softmax(dev.clone());
 	//let expr = test4_x(dev.clone());
 	//let expr = test5(dev.clone());
