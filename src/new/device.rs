@@ -10,7 +10,6 @@ use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
 use crate::ErrPack;
-use crate::new::expr::compile::{CompiledExpr, FragmentIndex};
 use crate::tensor::TensorOpError;
 use crate::tensor::device::DeviceAllocError;
 
@@ -265,6 +264,7 @@ pub trait Device {
 		bytes: usize,
 	) -> Result<(), ErrPack<TensorOpError>>;
 
+	/*
 	/// # Safety
 	/// TODO
 	unsafe fn run_fragment(
@@ -273,6 +273,7 @@ pub trait Device {
 		fragment: FragmentIndex,
 		args: &KernelArgs,
 	) -> Result<(), ErrPack<TensorOpError>>;
+	*/
 }
 
 //--------------------------------------------------------------------------------------------------

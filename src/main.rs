@@ -162,7 +162,6 @@ fn laplacian(v: &ArrayView2<f32>) -> Array2<f32> {
 use std::rc::Rc;
 
 use x17ai::autograd::{AutogradTensor, LossFn};
-use x17ai::new::expr::compile::{Compilation, CompiledExpr};
 use x17ai::new::expr::compile2::PreCompilation;
 use x17ai::new::expr::{ExprScalarRef, ExprTensorRef, RcExpr};
 use x17ai::new::tensor::TensorLiteral1D;

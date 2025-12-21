@@ -132,7 +132,7 @@ impl Node {
 	}
 
 	pub fn is_reduction_head(&self) -> bool {
-		self.reduction_head_for.is_valid()
+		!self.reduction_head_for.is_sentinel()
 	}
 
 	pub fn is_captured(&self) -> bool {
@@ -140,15 +140,15 @@ impl Node {
 	}
 
 	pub fn is_nullary(&self) -> bool {
-		self.children[0].to_raw_isize() < 0
+		self.children[0].is_sentinel()
 	}
 
 	pub fn is_unary(&self) -> bool {
-		(self.children[0].to_raw_isize() | !self.children[1].to_raw_isize()) >= 0
+		!self.children[0].is_sentinel() && self.children[1].is_sentinel()
 	}
 
 	pub fn is_binary(&self) -> bool {
-		self.children[1].to_raw_isize() >= 0
+		!self.children[1].is_sentinel()
 	}
 
 	pub fn is_root(&self) -> bool {
@@ -165,8 +165,8 @@ type NodeVec = IndexVec<NodeIndex32, Node>;
 
 pub struct TensorRef {
 	pub tensor_ref: Rc<ExprTensorRef>,
-	pub is_input: bool,
-	pub is_output: bool,
+	pub input_node: NodeIndex32,
+	pub output_node: NodeIndex32,
 	pub shape: ThinVec<usize>,
 }
 
@@ -231,15 +231,15 @@ impl PreCompilation {
 			return *index;
 		}
 
-		let mut x_index = UntypedIndex32::new_invalid();
+		let mut x_index = UntypedIndex32::new_sentinel();
 		let out_is_scalar: bool;
 		let children: [NodeIndex32; 2];
 		let mut capture: ThinVec<TensorRefIndex32> = ThinVec::new();
 		match expr.as_ref() {
 			Expr::Capture(ExprCapture { expr: x, tensor_ref }) => {
 				let child = self.load_expr(x.clone(), state);
-				let tensor_ref = tensor_ref.clone();
-				let tensor_ref_index = self.add_tensor_ref(tensor_ref, false, true);
+				let tensor_ref_index =
+					self.add_tensor_output(tensor_ref.clone(), self.nodes_postorder.next_index());
 				if !self.nodes_postorder[child].is_input() {
 					self.nodes_postorder[child].capture.push(tensor_ref_index);
 					state.visited.insert(expr_key, child);
@@ -252,7 +252,7 @@ impl PreCompilation {
 					expr: self.nodes_postorder[child].expr.clone(),
 				}));
 				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
-				children = [child, NodeIndex32::new_invalid()];
+				children = [child, NodeIndex32::new_sentinel()];
 				capture.push(tensor_ref_index);
 			},
 			Expr::First(first) => {
@@ -264,19 +264,29 @@ impl PreCompilation {
 			Expr::Input(input) => match input {
 				ExprInput::Tensor(tensor_ref) => {
 					out_is_scalar = false;
-					children = [NodeIndex32::new_invalid(), NodeIndex32::new_invalid()];
-					x_index = self.add_tensor_ref(tensor_ref.clone(), true, false).to_untyped();
+					children = [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()];
+					match self
+						.add_tensor_input(tensor_ref.clone(), self.nodes_postorder.next_index())
+					{
+						Ok(tensor_index) => {
+							x_index = tensor_index.to_untyped();
+						},
+						Err(existing_node) => {
+							state.visited.insert(expr_key, existing_node);
+							return existing_node;
+						},
+					}
 				},
 				ExprInput::Scalar(scalar_ref) => {
 					out_is_scalar = true;
-					children = [NodeIndex32::new_invalid(), NodeIndex32::new_invalid()];
+					children = [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()];
 					x_index = self.add_scalar_ref(scalar_ref.clone()).to_untyped();
 				},
 			},
 			Expr::Cast(ExprCast { expr, .. }) | Expr::Unary(ExprUnary { expr, .. }) => {
 				let child = self.load_expr(expr.clone(), state);
 				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
-				children = [child, NodeIndex32::new_invalid()];
+				children = [child, NodeIndex32::new_sentinel()];
 			},
 			Expr::Binary(binary) => {
 				let lhs = binary.lhs.clone();
@@ -292,14 +302,14 @@ impl PreCompilation {
 				let reduction_expr = reduction.expr.clone();
 				let child = self.load_expr(reduction_expr, state);
 				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
-				children = [child, NodeIndex32::new_invalid()];
+				children = [child, NodeIndex32::new_sentinel()];
 				state.n_reductions += 1;
 			},
 		}
 
 		let next_index = self.nodes_postorder.next_index();
 		for &child in &children {
-			if !child.is_valid() {
+			if !self.nodes_postorder.is_valid(child) {
 				break;
 			}
 			self.nodes_postorder[child].parents.push(next_index);
@@ -309,13 +319,13 @@ impl PreCompilation {
 			expr,
 			shape: ThinVec::new(),
 			parents: ThinVec::new(),
-			dominator: NodeIndex32::new_invalid(),
+			dominator: NodeIndex32::new_sentinel(),
 			children,
 			capture,
 			out_is_scalar,
 			is_dead: false,
 			reduction_fingerprint: 0,
-			reduction_head_for: NodeIndex32::new_invalid(),
+			reduction_head_for: NodeIndex32::new_sentinel(),
 			x_index,
 		});
 		debug_assert!(index == next_index);
@@ -338,34 +348,48 @@ impl PreCompilation {
 		}
 	}
 
-	fn add_tensor_ref(
+	fn add_tensor_input(
 		&mut self,
 		tensor_ref: Rc<ExprTensorRef>,
-		is_input: bool,
-		is_output: bool,
+		node: NodeIndex32,
+	) -> Result<TensorRefIndex32, NodeIndex32> {
+		let key = std::ptr::from_ref(tensor_ref.as_ref());
+		match self.tensor_map.entry(key) {
+			hash_map::Entry::Vacant(entry) => {
+				let index = self.tensor_vec.push(TensorRef {
+					tensor_ref,
+					input_node: node,
+					output_node: NodeIndex32::new_sentinel(),
+					shape: ThinVec::new(),
+				});
+				entry.insert(index);
+				Ok(index)
+			},
+			hash_map::Entry::Occupied(entry) => {
+				let index = *entry.get();
+				Err(self.tensor_vec[index].input_node)
+			},
+		}
+	}
+
+	fn add_tensor_output(
+		&mut self,
+		tensor_ref: Rc<ExprTensorRef>,
+		node: NodeIndex32,
 	) -> TensorRefIndex32 {
 		let key = std::ptr::from_ref(tensor_ref.as_ref());
 		match self.tensor_map.entry(key) {
 			hash_map::Entry::Vacant(entry) => {
 				let index = self.tensor_vec.push(TensorRef {
 					tensor_ref,
-					is_input,
-					is_output,
+					input_node: NodeIndex32::new_sentinel(),
+					output_node: node,
 					shape: ThinVec::new(),
 				});
 				entry.insert(index);
 				index
 			},
-			hash_map::Entry::Occupied(entry) => {
-				let index = *entry.get();
-				if is_input {
-					self.tensor_vec[index].is_input = true;
-				}
-				if is_output {
-					self.tensor_vec[index].is_output = true;
-				}
-				index
-			},
+			hash_map::Entry::Occupied(entry) => *entry.get(),
 		}
 	}
 
@@ -508,7 +532,7 @@ impl PreCompilation {
 					0 => {
 						// root
 						debug_assert!(
-							self.nodes_postorder[idx].dominator == NodeIndex32::new_invalid()
+							self.nodes_postorder[idx].dominator == NodeIndex32::new_sentinel()
 						);
 					},
 					1 => {
@@ -542,7 +566,7 @@ impl PreCompilation {
 	fn calc_shapes(&mut self) -> Result<(), TensorOpError> {
 		for t in &mut self.tensor_vec {
 			t.shape.clear();
-			if !t.is_input {
+			if t.input_node.is_sentinel() {
 				continue;
 			}
 
@@ -611,7 +635,7 @@ impl PreCompilation {
 			// If we store back into inputs, make sure captures have correct shape
 			let my_shape = me.shape.as_slice();
 			for &idx in &me.capture {
-				if self.tensor_vec[idx].is_input {
+				if !self.tensor_vec[idx].input_node.is_sentinel() {
 					let tensor_shape = self.tensor_vec[idx].shape.as_slice();
 					if tensor_shape != my_shape {
 						cold_path();
@@ -638,7 +662,7 @@ impl PreCompilation {
 			let mut head = start;
 			loop {
 				let parent_idx = head.dominator;
-				if !parent_idx.is_valid() {
+				if !self.nodes_postorder.is_valid(parent_idx) {
 					break;
 				}
 				let parent = &self.nodes_postorder[parent_idx];
@@ -676,34 +700,6 @@ impl PreCompilation {
 			}
 		}
 		Ok(())
-	}
-
-	fn graphviz_tensor_id(&self, tensor_ref: &Rc<ExprTensorRef>) -> String {
-		let key = std::ptr::from_ref(tensor_ref.as_ref());
-		if let Some(&index) = self.tensor_map.get(&key) {
-			format!("ten_{}", index.raw)
-		} else {
-			format!("ten_{}", key as usize)
-		}
-	}
-
-	fn graphviz_scalar_id(&self, scalar_ref: &Rc<ExprScalarRef>) -> String {
-		let key = std::ptr::from_ref(scalar_ref.as_ref());
-		if let Some(&index) = self.scalar_map.get(&key) {
-			format!("sca_{}", index.raw)
-		} else {
-			format!("sca_{}", key as usize)
-		}
-	}
-
-	fn graphviz_node_id(&self, node_index: NodeIndex32) -> String {
-		match self.nodes_postorder[node_index].expr.as_ref() {
-			Expr::Input(ExprInput::Tensor(tensor_ref)) => self.graphviz_tensor_id(tensor_ref),
-			Expr::Input(ExprInput::Scalar(scalar_ref)) => self.graphviz_scalar_id(scalar_ref),
-			_ => {
-				format!("expr_{}", node_index.raw)
-			},
-		}
 	}
 
 	pub fn graphviz_node_label(&self, node: &Node) -> String {
@@ -777,7 +773,7 @@ impl PreCompilation {
 		writeln!(w, "\trankdir=BT;")?;
 		for i in self.nodes_postorder.indexes() {
 			let node = &self.nodes_postorder[i];
-			let node_id = self.graphviz_node_id(i);
+			let node_id = format!("node_{}", i.raw);
 			let mut extra_label = String::new();
 			if let Some(state) = &mut state {
 				let mut names = Vec::new();
@@ -793,11 +789,17 @@ impl PreCompilation {
 				}
 				extra_label = format!("<br/><font color='red'>In use: {}</font>", names.join(", "));
 			}
-			if node.is_input() {
+			/*if node.is_input() {
 				continue;
-			}
+			}*/
 			writeln!(w, "\t{node_id} [label=<{}{extra_label}>];", self.graphviz_node_label(node),)?;
-			if node.is_reduction_head() {
+			if node.is_input() {
+				if node.is_tensor_input() {
+					writeln!(w, "\t{node_id} [shape=box, style=filled, fillcolor=\"#cceecc\"];")?;
+				} else {
+					writeln!(w, "\t{node_id} [shape=box, style=filled, fillcolor=\"#ffffc0\"];")?;
+				}
+			} else if node.is_reduction_head() {
 				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccccff\"];")?;
 			} else if node.is_fork() {
 				if unlikely(node.is_dead) {
@@ -810,80 +812,57 @@ impl PreCompilation {
 			} else if node.is_captured() {
 				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccffcc\"];")?;
 			}
-			let frag_index = node.fragment_index();
-			if frag_index.is_valid() {
-				let frag_head = self.fragments_preorder[frag_index].head;
-				let fragment_kind = if self.nodes_postorder[frag_head].is_reduction_head() {
-					"Reduction"
-				} else {
-					"Element-wise"
-				};
-				writeln!(
-					w,
-					"\tsubgraph cluster_{} {{ label=\"{fragment_kind}\" labelloc=\"b\" labeljust=\"l\" {node_id} }}",
-					frag_head.raw
-				)?;
-			}
-			for &child_index in &node.children {
-				if !child_index.is_valid() {
-					break;
+			if !node.is_input() {
+				let frag_index = node.fragment_index();
+				if self.fragments_preorder.is_valid(frag_index) {
+					let frag_head = self.fragments_preorder[frag_index].head;
+					let fragment_kind = if self.nodes_postorder[frag_head].is_reduction_head() {
+						"Reduction"
+					} else {
+						"Element-wise"
+					};
+					writeln!(
+						w,
+						"\tsubgraph cluster_{} {{ label=\"{fragment_kind}\" labelloc=\"b\" labeljust=\"l\" {node_id} }}",
+						frag_head.raw
+					)?;
 				}
-				let child_id = self.graphviz_node_id(child_index);
-				let child = &self.nodes_postorder[child_index];
-				let label = if child.out_is_scalar {
-					String::new()
-				} else {
-					self.shape_to_str(&child.shape)
-				};
-				let extra_style = if frag_index.is_valid()
-					&& !child.is_input()
-					&& frag_index != child.fragment_index()
-				{
-					// Edge crosses fragment boundary
-					", color=red, style=bold"
-				} else {
-					""
-				};
-				writeln!(w, "\t{child_id} -> {node_id} [label=\"{}\"{}];", label, extra_style)?;
+				for &child_index in &node.children {
+					if !self.nodes_postorder.is_valid(child_index) {
+						break;
+					}
+					let child_id = format!("node_{}", child_index.raw);
+					let child = &self.nodes_postorder[child_index];
+					let label = if child.out_is_scalar {
+						String::new()
+					} else {
+						self.shape_to_str(&child.shape)
+					};
+					let extra_style = if self.fragments_preorder.is_valid(frag_index)
+						&& !child.is_input()
+						&& frag_index != child.fragment_index()
+					{
+						// Edge crosses fragment boundary
+						", color=red, style=bold"
+					} else {
+						""
+					};
+					writeln!(w, "\t{child_id} -> {node_id} [label=\"{}\"{}];", label, extra_style)?;
+				}
 			}
-			for &capt_idx in &node.capture {
+			/*for &capt_idx in &node.capture {
 				let label =
 					if node.out_is_scalar { String::new() } else { self.shape_to_str(&node.shape) };
 				let capt = &self.tensor_vec[capt_idx].tensor_ref;
 				let cap_id = self.graphviz_tensor_id(capt);
 				let key = std::ptr::from_ref(capt.as_ref());
 				let index = self.tensor_map[&key];
-				if self.tensor_vec[index].is_input {
+				if !self.tensor_vec[index].input_node.is_sentinel() {
 					writeln!(w, "\t{node_id} -> {cap_id} [label=\"{label}\", constraint=false];")?;
 				} else {
 					writeln!(w, "\t{node_id} -> {cap_id} [label=\"{label}\"];")?;
 				}
-			}
-		}
-		for tensor_ref in &self.tensor_vec {
-			let id = self.graphviz_tensor_id(&tensor_ref.tensor_ref);
-			let tensor_name = if let Some(name) = &tensor_ref.tensor_ref.name {
-				name.as_ref().to_string()
-			} else {
-				format!("{:?}", std::ptr::from_ref(tensor_ref.tensor_ref.as_ref()))
-			};
-			let color = if tensor_name.starts_with("__tmp__[") { "#00eeee" } else { "#cceecc" };
-			writeln!(
-				w,
-				"\t{id} [label=<<b>Tensor</b><br/><font color='blue'><b>{tensor_name}</b></font>>, shape=box, style=filled, fillcolor=\"{color}\"];",
-			)?;
-		}
-		for scalar_ref in &self.scalar_vec {
-			let id = self.graphviz_scalar_id(scalar_ref);
-			let label = if let Some(name) = &scalar_ref.name {
-				name.to_string()
-			} else {
-				format!("{:?}", std::ptr::from_ref(scalar_ref.as_ref()))
-			};
-			writeln!(
-				w,
-				"\t{id} [label=<<b>Scalar</b><br/><font color='blue'><b>{label}</b></font>>, shape=box, style=filled, fillcolor=\"#ffffc0\"];"
-			)?;
+			}*/
 		}
 		writeln!(w, "}}")?;
 		Ok(())

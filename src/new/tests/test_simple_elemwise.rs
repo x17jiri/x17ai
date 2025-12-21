@@ -4,7 +4,7 @@
 // License: GPL 3.0 or later. See LICENSE.txt for details.
 //
 //------------------------------------------------------------------------------
-
+/*
 use crate::ErrPack;
 use crate::new::device::cpu::CPUDevice;
 use crate::new::device::{Device, KernelArgs};
@@ -12,9 +12,9 @@ use crate::new::expr::compile::FragmentIndex;
 use crate::new::expr::{ExprTensorRef, RcExpr};
 use crate::new::tensor::{Tensor, TensorLiteral1D};
 use crate::tensor::{HasDType, TensorOpError};
-
+*/
 //--------------------------------------------------------------------------------------------------
-
+/*
 #[test]
 fn test_simple_elemwise() -> Result<(), ErrPack<TensorOpError>> {
 	let dev = CPUDevice::new();
@@ -53,5 +53,5 @@ fn test_simple_elemwise() -> Result<(), ErrPack<TensorOpError>> {
 
 	Ok(())
 }
-
+*/
 //--------------------------------------------------------------------------------------------------

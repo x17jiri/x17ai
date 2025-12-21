@@ -22,9 +22,6 @@ use std::rc::Rc;
 use crate::new::tensor::Tensor;
 use crate::tensor::DType;
 
-use compile::{DimConstraint, ShapeConstraint};
-
-pub mod compile;
 pub mod compile2;
 pub mod eval;
 
@@ -133,17 +130,6 @@ impl ExprTensorRef {
 			shape_constraint: shape,
 			name,
 		})
-	}
-
-	pub fn shape_constraint(&self) -> ShapeConstraint {
-		let source = if let Some(name) = &self.name { name.as_ref() } else { "unnamed tensor" };
-		ShapeConstraint {
-			constraint: self
-				.shape_constraint
-				.iter()
-				.map(|&d| Some(DimConstraint { source: source.to_string(), size: d }))
-				.collect(),
-		}
 	}
 }
 

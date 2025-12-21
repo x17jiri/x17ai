@@ -12,7 +12,6 @@ use std::rc::Rc;
 use super::{Device, DevicePtr, KernelArgs};
 
 use crate::ErrPack;
-use crate::new::expr::compile::{CompiledExpr, FragmentIndex};
 use crate::tensor::TensorOpError;
 use crate::tensor::device::DeviceAllocError;
 
@@ -111,7 +110,7 @@ impl Device for CPUDevice {
 			Ok(())
 		}
 	}
-
+	/*
 	unsafe fn run_fragment(
 		&self,
 		_compilation: &CompiledExpr,
@@ -120,6 +119,7 @@ impl Device for CPUDevice {
 	) -> Result<(), ErrPack<TensorOpError>> {
 		todo!("CPU device kernel execution is not implemented yet");
 	}
+	*/
 }
 
 //--------------------------------------------------------------------------------------------------

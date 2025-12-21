@@ -13,7 +13,6 @@ use std::hint::cold_path;
 pub trait IndexTrait: Copy + Clone + PartialEq + Eq + Hash + Ord {
 	const MAX: usize;
 	fn to_raw(self) -> usize;
-	fn to_raw_isize(self) -> isize;
 	fn from_raw(raw: usize) -> Self;
 }
 
@@ -34,13 +33,13 @@ macro_rules! define_index_type {
 				$name { raw }
 			}
 
-			pub fn new_invalid() -> Self {
+			pub fn new_sentinel() -> Self {
 				$name { raw: usize::MAX }
 			}
 
 			#[allow(clippy::cast_possible_wrap)]
-			pub fn is_valid(&self) -> bool {
-				isize::try_from(self.raw).is_ok()
+			pub fn is_sentinel(&self) -> bool {
+				self.raw >= usize::MAX
 			}
 
 			pub fn to_untyped(&self) -> $crate::util::index_vec::UntypedIndex {
@@ -58,10 +57,6 @@ macro_rules! define_index_type {
 			fn from_raw(raw: usize) -> Self {
 				debug_assert!(raw <= Self::MAX);
 				$name { raw }
-			}
-
-			fn to_raw_isize(self) -> isize {
-				self.raw as isize
 			}
 		}
 
@@ -89,13 +84,13 @@ impl UntypedIndex {
 		Self { raw }
 	}
 
-	pub fn new_invalid() -> Self {
+	pub fn new_sentinel() -> Self {
 		Self { raw: usize::MAX }
 	}
 
 	#[allow(clippy::cast_possible_wrap)]
-	pub fn is_valid(&self) -> bool {
-		isize::try_from(self.raw).is_ok()
+	pub fn is_sentinel(&self) -> bool {
+		self.raw >= Self::MAX
 	}
 }
 
@@ -116,13 +111,12 @@ macro_rules! define_index_type32 {
 				$name { raw }
 			}
 
-			pub fn new_invalid() -> Self {
+			pub fn new_sentinel() -> Self {
 				$name { raw: u32::MAX }
 			}
 
-			#[allow(clippy::cast_possible_wrap)]
-			pub fn is_valid(&self) -> bool {
-				i32::try_from(self.raw).is_ok()
+			pub fn is_sentinel(&self) -> bool {
+				self.raw >= u32::MAX
 			}
 
 			pub fn to_untyped(&self) -> $crate::util::index_vec::UntypedIndex32 {
@@ -141,10 +135,6 @@ macro_rules! define_index_type32 {
 				debug_assert!(raw <= Self::MAX);
 				#[allow(clippy::cast_possible_truncation)]
 				$name { raw: raw as u32 }
-			}
-
-			fn to_raw_isize(self) -> isize {
-				(self.raw as i32) as isize
 			}
 		}
 
@@ -167,13 +157,13 @@ pub struct UntypedIndex32 {
 impl UntypedIndex32 {
 	pub const MAX: u32 = i32::MAX as u32;
 
-	pub fn new_invalid() -> Self {
+	pub fn new_sentinel() -> Self {
 		Self { raw: u32::MAX }
 	}
 
 	#[allow(clippy::cast_possible_wrap)]
-	pub fn is_valid(&self) -> bool {
-		i32::try_from(self.raw).is_ok()
+	pub fn is_sentinel(&self) -> bool {
+		self.raw >= Self::MAX
 	}
 }
 
@@ -270,6 +260,10 @@ impl<Index: IndexTrait, T> IndexVec<Index, T> {
 				_marker: std::marker::PhantomData,
 			},
 		)
+	}
+
+	pub fn is_valid(&self, index: Index) -> bool {
+		index.to_raw() < self.raw.len()
 	}
 }
 
