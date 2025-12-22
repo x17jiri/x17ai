@@ -26,11 +26,11 @@ use std::rc::Rc;
 use thin_vec::ThinVec;
 
 use super::{
-	Expr, ExprBinaryKind, ExprInput, ExprReductionKind, ExprScalarRef, ExprTensorRef, ExprUnary,
+	Expr, ExprBinaryKind, ExprInput, ExprReductionKind, ExprScalarRef, ExprTensorRef,
 	ExprUnaryKind, RcExpr,
 };
-use crate::new::expr::{ExprCapture, ExprCast};
-use crate::tensor::TensorOpError;
+use crate::new::expr::ExprCapture;
+use crate::tensor::{DType, TensorOpError};
 use crate::util::bitmap::IndexBitmap;
 use crate::util::index_vec::{IndexTrait, IndexVec, UntypedIndex32};
 use crate::{ErrPack, define_index_type32};
@@ -72,9 +72,17 @@ impl<'a> std::cmp::PartialEq for ShapeRef<'a> {
 impl<'a> std::cmp::Eq for ShapeRef<'a> {
 }
 
+pub enum NodeKind {
+	Input,
+	Cast(DType),
+	Unary(ExprUnaryKind),
+	Binary(ExprBinaryKind),
+	Reduction(ExprReductionKind),
+}
+
 #[allow(clippy::struct_excessive_bools)]
 pub struct Node {
-	pub expr: Rc<Expr>,
+	pub node_kind: NodeKind,
 	pub shape: ThinVec<usize>,
 	pub parents: ThinVec<NodeIndex32>,
 	pub dominator: NodeIndex32,
@@ -128,7 +136,7 @@ impl Node {
 	}
 
 	pub fn is_reduction(&self) -> bool {
-		matches!(self.expr.as_ref(), Expr::Reduction(_))
+		matches!(self.node_kind, NodeKind::Reduction(_))
 	}
 
 	pub fn is_reduction_head(&self) -> bool {
@@ -170,11 +178,16 @@ pub struct TensorRef {
 	pub shape: ThinVec<usize>,
 }
 
+pub struct ScalarRef {
+	pub scalar_ref: Rc<ExprScalarRef>,
+	pub input_node: NodeIndex32,
+}
+
 define_index_type32!(TensorRefIndex32);
 type TensorVec = IndexVec<TensorRefIndex32, TensorRef>;
 
 define_index_type32!(ScalarRefIndex32);
-type ScalarVec = IndexVec<ScalarRefIndex32, Rc<ExprScalarRef>>;
+type ScalarVec = IndexVec<ScalarRefIndex32, ScalarRef>;
 
 pub struct Fragment {
 	pub head: NodeIndex32,
@@ -194,6 +207,7 @@ pub struct PreCompilation {
 
 pub struct LoadExprState {
 	visited: HashMap<*const Expr, NodeIndex32>,
+	node_cache: HashMap<String, NodeIndex32>,
 	n_reductions: u32,
 	bitmap: IndexBitmap<NodeIndex32>,
 }
@@ -210,10 +224,11 @@ impl PreCompilation {
 		};
 		let mut state = LoadExprState {
 			visited: HashMap::new(),
+			node_cache: HashMap::new(),
 			n_reductions: 0,
 			bitmap: IndexBitmap::new(),
 		};
-		comp.load_expr(expr.rc_expr, &mut state);
+		comp.load_expr(&expr.rc_expr, &mut state);
 		comp.remove_dead_code();
 		comp.find_dominators();
 		comp.find_reduction_fingerprints(&mut state);
@@ -224,9 +239,10 @@ impl PreCompilation {
 	#[allow(clippy::collapsible_else_if)]
 	#[allow(clippy::manual_assert)]
 	#[allow(clippy::panic)]
+	#[allow(clippy::too_many_lines)]
 	// TODO - refactor to make non recursive
-	fn load_expr(&mut self, mut expr: Rc<Expr>, state: &mut LoadExprState) -> NodeIndex32 {
-		let expr_key = std::ptr::from_ref(expr.as_ref());
+	fn load_expr(&mut self, expr: &Expr, state: &mut LoadExprState) -> NodeIndex32 {
+		let expr_key = std::ptr::from_ref(expr);
 		if let Some(index) = state.visited.get(&expr_key) {
 			return *index;
 		}
@@ -235,9 +251,11 @@ impl PreCompilation {
 		let out_is_scalar: bool;
 		let children: [NodeIndex32; 2];
 		let mut capture: ThinVec<TensorRefIndex32> = ThinVec::new();
-		match expr.as_ref() {
+		let node_kind: NodeKind;
+		let cache_key: String;
+		match expr {
 			Expr::Capture(ExprCapture { expr: x, tensor_ref }) => {
-				let child = self.load_expr(x.clone(), state);
+				let child = self.load_expr(x, state);
 				let tensor_ref_index =
 					self.add_tensor_output(tensor_ref.clone(), self.nodes_postorder.next_index());
 				if !self.nodes_postorder[child].is_input() {
@@ -247,67 +265,105 @@ impl PreCompilation {
 				}
 				// Insert `Identity` node to perform the capture.
 				// This node is also a root.
-				expr = Rc::new(Expr::Unary(ExprUnary {
-					kind: ExprUnaryKind::Identity,
-					expr: self.nodes_postorder[child].expr.clone(),
-				}));
+				node_kind = NodeKind::Unary(ExprUnaryKind::Identity);
 				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
 				children = [child, NodeIndex32::new_sentinel()];
 				capture.push(tensor_ref_index);
+				cache_key = format!("identity:{:?}", child.raw);
 			},
 			Expr::First(first) => {
-				let first_child = self.load_expr(first.lhs.clone(), state);
-				let _second_child = self.load_expr(first.rhs.clone(), state);
+				let first_child = self.load_expr(&first.lhs, state);
+				let _second_child = self.load_expr(&first.rhs, state);
 				state.visited.insert(expr_key, first_child);
 				return first_child;
 			},
-			Expr::Input(input) => match input {
-				ExprInput::Tensor(tensor_ref) => {
-					out_is_scalar = false;
-					children = [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()];
-					match self
-						.add_tensor_input(tensor_ref.clone(), self.nodes_postorder.next_index())
-					{
-						Ok(tensor_index) => {
-							x_index = tensor_index.to_untyped();
-						},
-						Err(existing_node) => {
-							state.visited.insert(expr_key, existing_node);
-							return existing_node;
-						},
-					}
-				},
-				ExprInput::Scalar(scalar_ref) => {
-					out_is_scalar = true;
-					children = [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()];
-					x_index = self.add_scalar_input(scalar_ref.clone()).to_untyped();
-				},
+			Expr::Input(input) => {
+				match input {
+					ExprInput::Tensor(tensor_ref) => {
+						out_is_scalar = false;
+						children = [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()];
+						match self
+							.add_tensor_input(tensor_ref.clone(), self.nodes_postorder.next_index())
+						{
+							Ok(tensor_index) => {
+								x_index = tensor_index.to_untyped();
+							},
+							Err(existing_node) => {
+								state.visited.insert(expr_key, existing_node);
+								return existing_node;
+							},
+						}
+					},
+					ExprInput::Scalar(scalar_ref) => {
+						out_is_scalar = true;
+						children = [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()];
+						match self
+							.add_scalar_input(scalar_ref.clone(), self.nodes_postorder.next_index())
+						{
+							Ok(scalar_index) => {
+								x_index = scalar_index.to_untyped();
+							},
+							Err(existing_node) => {
+								state.visited.insert(expr_key, existing_node);
+								return existing_node;
+							},
+						}
+					},
+				}
+				node_kind = NodeKind::Input;
+				cache_key = String::new();
 			},
-			Expr::Cast(ExprCast { expr, .. }) | Expr::Unary(ExprUnary { expr, .. }) => {
-				let child = self.load_expr(expr.clone(), state);
+			Expr::Cast(cast) => {
+				let child = self.load_expr(&cast.expr, state);
 				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
 				children = [child, NodeIndex32::new_sentinel()];
+				node_kind = NodeKind::Cast(cast.dtype);
+				cache_key = format!("cast:{:?}:{:?}", cast.dtype, child.raw);
+			},
+			Expr::Unary(unary) => {
+				let child = self.load_expr(&unary.expr, state);
+				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
+				children = [child, NodeIndex32::new_sentinel()];
+				node_kind = NodeKind::Unary(unary.kind);
+				cache_key = format!("unary:{:?}:{:?}", unary.kind, child.raw);
 			},
 			Expr::Binary(binary) => {
-				let lhs = binary.lhs.clone();
-				let rhs = binary.rhs.clone();
-				let left_child = self.load_expr(lhs, state);
-				let right_child = self.load_expr(rhs, state);
+				let left_child = self.load_expr(&binary.lhs, state);
+				let right_child = self.load_expr(&binary.rhs, state);
 				let left_is_scalar = self.nodes_postorder[left_child].out_is_scalar;
 				let right_is_scalar = self.nodes_postorder[right_child].out_is_scalar;
 				out_is_scalar = left_is_scalar && right_is_scalar;
 				children = [left_child, right_child];
+				node_kind = NodeKind::Binary(binary.kind);
+
+				let a = left_child.raw;
+				let b = right_child.raw;
+				let (a, b) = if binary.kind.is_commutative() && a > b { (b, a) } else { (a, b) };
+				cache_key = format!("binary:{:?}:{:?}:{:?}", binary.kind, a, b);
 			},
 			Expr::Reduction(reduction) => {
-				let reduction_expr = reduction.expr.clone();
-				let child = self.load_expr(reduction_expr, state);
+				let child = self.load_expr(&reduction.expr, state);
 				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
 				children = [child, NodeIndex32::new_sentinel()];
 				state.n_reductions += 1;
+				node_kind = NodeKind::Reduction(reduction.kind);
+				cache_key = format!("reduction:{:?}:{:?}", reduction.kind, child.raw);
 			},
 		}
 
 		let next_index = self.nodes_postorder.next_index();
+		if !cache_key.is_empty() {
+			match state.node_cache.get(&cache_key) {
+				Some(&cached_index) => {
+					state.visited.insert(expr_key, cached_index);
+					return cached_index;
+				},
+				None => {
+					state.node_cache.insert(cache_key, next_index);
+				},
+			}
+		}
+
 		for &child in &children {
 			if !self.nodes_postorder.is_valid(child) {
 				break;
@@ -316,7 +372,7 @@ impl PreCompilation {
 		}
 
 		let index = self.nodes_postorder.push(Node {
-			expr,
+			node_kind,
 			shape: ThinVec::new(),
 			parents: ThinVec::new(),
 			dominator: NodeIndex32::new_sentinel(),
@@ -333,17 +389,21 @@ impl PreCompilation {
 		index
 	}
 
-	fn add_scalar_input(&mut self, scalar_ref: Rc<ExprScalarRef>) -> ScalarRefIndex32 {
+	fn add_scalar_input(
+		&mut self,
+		scalar_ref: Rc<ExprScalarRef>,
+		node: NodeIndex32,
+	) -> Result<ScalarRefIndex32, NodeIndex32> {
 		let key = std::ptr::from_ref(scalar_ref.as_ref());
 		match self.scalar_map.entry(key) {
 			hash_map::Entry::Vacant(entry) => {
-				let index = self.scalar_vec.push(scalar_ref);
+				let index = self.scalar_vec.push(ScalarRef { scalar_ref, input_node: node });
 				entry.insert(index);
-				index
+				Ok(index)
 			},
 			hash_map::Entry::Occupied(entry) => {
 				let index = *entry.get();
-				index
+				Err(self.scalar_vec[index].input_node)
 			},
 		}
 	}
@@ -703,22 +763,20 @@ impl PreCompilation {
 	}
 
 	pub fn graphviz_node_label(&self, node: &Node) -> String {
-		match node.expr.as_ref() {
-			Expr::Input(input) => match input {
-				ExprInput::Tensor(tensor_ref) => {
+		match node.node_kind {
+			NodeKind::Input => {
+				if node.is_tensor_input() {
+					let tensor_ref = &self.tensor_vec[node.tensor_index()].tensor_ref;
 					let name = tensor_ref.name.as_deref().unwrap_or("<unnamed>");
 					format!("<b>Tensor</b><br/><font color='blue'><b>{name}</b></font>")
-				},
-				ExprInput::Scalar(scalar_ref) => {
+				} else {
+					let scalar_ref = &self.scalar_vec[node.scalar_index()].scalar_ref;
 					let name = scalar_ref.name.as_deref().unwrap_or("<unnamed>");
 					format!("<b>Scalar</b><br/><font color='blue'><b>{name}</b></font>")
-				},
+				}
 			},
-			Expr::Capture(..) | Expr::First(..) => {
-				unreachable!() // Compilation removes these nodes nodes
-			},
-			Expr::Cast(cast) => format!("Cast to {:?}", cast.dtype),
-			Expr::Unary(unary) => match unary.kind {
+			NodeKind::Cast(dtype) => format!("Cast to {:?}", dtype),
+			NodeKind::Unary(unary) => match unary {
 				ExprUnaryKind::Neg => "<b>Neg</b>".to_string(),
 				ExprUnaryKind::Exp => "<b>Exp</b>".to_string(),
 				ExprUnaryKind::Ln => "<b>Ln</b>".to_string(),
@@ -727,12 +785,12 @@ impl PreCompilation {
 				ExprUnaryKind::Recip => "<b>Recip</b>".to_string(),
 				ExprUnaryKind::Identity => "<b>Identity</b>".to_string(),
 			},
-			Expr::Binary(binary) => match binary.kind {
+			NodeKind::Binary(binary) => match binary {
 				ExprBinaryKind::Add => "<b>Add</b>".to_string(),
 				ExprBinaryKind::Sub => "<b>Sub</b>".to_string(),
 				ExprBinaryKind::Mul => "<b>Mul</b>".to_string(),
 			},
-			Expr::Reduction(reduction) => match reduction.kind {
+			NodeKind::Reduction(reduction) => match reduction {
 				ExprReductionKind::Sum => "<b>Sum</b>".to_string(),
 				ExprReductionKind::Max => "<b>Max</b>".to_string(),
 			},

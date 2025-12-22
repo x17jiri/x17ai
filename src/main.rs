@@ -320,7 +320,7 @@ fn test3_softmax(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 	let coef1 = RcExpr::new_scalar_input(sca.clone());
 	let coef2 = RcExpr::new_scalar_input(sca.clone());
 
-	((out.clone() * coef1.clone()) - (coef2 * out.clone())).capture(inp_ten.clone())
+	((out.clone() + coef1) - (coef2 + out.clone())).capture(inp_ten.clone())
 }
 
 fn test4_x(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {

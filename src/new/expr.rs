@@ -76,7 +76,7 @@ pub struct ExprUnary {
 	pub expr: Rc<Expr>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExprUnaryKind {
 	Neg,
 	Exp,
@@ -98,11 +98,20 @@ pub struct ExprBinary {
 	pub rhs: Rc<Expr>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExprBinaryKind {
 	Add,
 	Sub,
 	Mul,
+}
+
+impl ExprBinaryKind {
+	pub fn is_commutative(&self) -> bool {
+		match self {
+			ExprBinaryKind::Add | ExprBinaryKind::Mul => true,
+			ExprBinaryKind::Sub => false,
+		}
+	}
 }
 
 pub struct ExprReduction {
@@ -110,7 +119,7 @@ pub struct ExprReduction {
 	pub expr: Rc<Expr>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExprReductionKind {
 	Sum,
 	Max,
