@@ -312,11 +312,15 @@ fn test3_softmax(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 	let max = inp.clone().max();
 	let t = (inp - max).exp();
 	let out = t.clone().sum().recip() * t;
-	let out = out.capture(inp_ten.clone());
+	let out = out;
 	inp_ten.tensor.borrow_mut().replace(
 		x17ai::new::tensor::Tensor::new_empty(&[1000, 512], f32::dtype, dev.clone()).unwrap(),
 	);
-	out
+	let sca = ExprScalarRef::new(Some("m_decay_coef".into()));
+	let coef1 = RcExpr::new_scalar_input(sca.clone());
+	let coef2 = RcExpr::new_scalar_input(sca.clone());
+
+	((out.clone() * coef1.clone()) - (coef2 * out.clone())).capture(inp_ten.clone())
 }
 
 fn test4_x(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
@@ -366,8 +370,8 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let dev = x17ai::new::device::cpu::CPUDevice::new();
 
 	let expr = test1_opt(dev.clone());
-	let expr = test2_rms_norm(dev.clone());
-	//let expr = test3_softmax(dev.clone());
+	//let expr = test2_rms_norm(dev.clone());
+	let expr = test3_softmax(dev.clone());
 	//let expr = test4_x(dev.clone());
 	//let expr = test5(dev.clone());
 

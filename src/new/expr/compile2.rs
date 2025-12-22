@@ -803,10 +803,12 @@ impl PreCompilation {
 				let dom_id = format!("node_{}", node.dominator.raw);
 				writeln!(
 					w,
-					"\t{node_id} -> {dom_id} [label=< > style=dashed, color=\"#8080ff\", constraint=false, weight=2];"
+					"\t{node_id} -> {dom_id} [label=< > style=dashed, color=\"#8080ff\", constraint=true];"
 				)?;
 			}
-			if !node.is_input() {
+			if node.is_input() {
+				//writeln!(w, "\t{{ rank = min; {node_id} }}")?;
+			} else {
 				let frag_index = node.fragment_index();
 				if self.fragments_preorder.is_valid(frag_index) {
 					let frag_head = self.fragments_preorder[frag_index].head;
@@ -841,7 +843,11 @@ impl PreCompilation {
 					} else {
 						""
 					};
-					writeln!(w, "\t{child_id} -> {node_id} [label=\"{}\"{}];", label, extra_style)?;
+					writeln!(
+						w,
+						"\t{child_id} -> {node_id} [label=\"{}\"{}, constraint=true];",
+						label, extra_style
+					)?;
 				}
 			}
 			for &capt_idx in &node.capture {
@@ -850,7 +856,7 @@ impl PreCompilation {
 				let input_node = self.tensor_vec[capt_idx].input_node;
 				if input_node.is_sentinel() {
 					let cap_id = format!("ten_{}", capt_idx.raw);
-					writeln!(w, "\t{node_id} -> {cap_id} [label=\"{label}\"];")?;
+					writeln!(w, "\t{node_id} -> {cap_id} [label=\"{label}\", constraint=true];")?;
 					let tensor_ref = &self.tensor_vec[capt_idx].tensor_ref;
 					let name = tensor_ref.name.as_deref().unwrap_or("<unnamed>");
 					writeln!(
@@ -859,7 +865,7 @@ impl PreCompilation {
 					)?;
 				} else {
 					let cap_id = format!("node_{}", input_node.raw);
-					writeln!(w, "\t{node_id} -> {cap_id} [label=\"{label}\", constraint=false];")?;
+					writeln!(w, "\t{node_id} -> {cap_id} [label=\"{label}\", constraint=true];")?;
 				}
 			}
 		}
