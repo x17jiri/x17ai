@@ -290,16 +290,17 @@ fn test1_opt(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 	RcExpr::first(new_value.clone(), (new_value + new_m).capture(x_ten))*/
 }
 
-fn x_rms_norm(inp: RcExpr, internal_dtype: DType) -> Result<RcExpr, ErrPack<TensorOpError>> {
+fn x_rms_norm(
+	inp: RcExpr,
+	eps: Rc<ExprScalarRef>,
+	internal_dtype: DType,
+) -> Result<RcExpr, ErrPack<TensorOpError>> {
+	let internal_dtype = common_dtype(inp.dtype(), eps.dtype())?;
 	let internal_dtype = common_dtype(inp.dtype(), internal_dtype)?;
 
-	let sum_to_mean = ExprScalarRef::new(Some("sum_to_mean".into()), internal_dtype);
-	let sum_to_mean = RcExpr::new_scalar_input(sum_to_mean.clone());
-
-	let eps = ExprScalarRef::new(Some("eps".into()), internal_dtype);
 	let eps = RcExpr::new_scalar_input(eps.clone());
 
-	let magn_recip = (((inp.clone() * inp.clone()).sum() * sum_to_mean).sqrt() + eps).recip();
+	let magn_recip = ((inp.clone() * inp.clone()).mean().sqrt() + eps).recip();
 
 	Ok(inp * magn_recip)
 }
@@ -390,11 +391,16 @@ fn test5(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let dev = x17ai::new::device::cpu::CPUDevice::new();
 
+	let internal_dtype = f32::dtype;
+	let eps = ExprScalarRef::new(Some("eps".into()), internal_dtype);
+
 	let expr = test1_opt(dev.clone());
-	//let expr = test2_rms_norm(dev.clone());
+	let expr = test2_rms_norm(dev.clone());
 	//let expr = test3_softmax(dev.clone());
 	//let expr = test4_x(dev.clone());
 	//let expr = test5(dev.clone());
+
+	let expr = x_rms_norm(expr, eps, internal_dtype)?;
 
 	let mut comp = PreCompilation::new(expr)?;
 	comp.find_fragments()?;

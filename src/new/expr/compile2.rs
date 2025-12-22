@@ -197,6 +197,11 @@ pub struct Fragment {
 define_index_type32!(FragmentIndex32);
 type FragmentVec = IndexVec<FragmentIndex32, Fragment>;
 
+pub struct SumToMean {
+	pub node: NodeIndex32,
+	pub scalar: ScalarRefIndex32,
+}
+
 pub struct PreCompilation {
 	nodes_postorder: NodeVec,
 	fragments_preorder: FragmentVec,
@@ -204,6 +209,7 @@ pub struct PreCompilation {
 	scalar_vec: ScalarVec,
 	tensor_map: HashMap<*const ExprTensorRef, TensorRefIndex32>,
 	tensor_vec: TensorVec,
+	sum_to_mean: Vec<SumToMean>,
 }
 
 pub struct LoadExprState {
@@ -222,6 +228,7 @@ impl PreCompilation {
 			scalar_vec: ScalarVec::with_capacity(4),
 			tensor_map: HashMap::new(),
 			tensor_vec: TensorVec::with_capacity(4),
+			sum_to_mean: Vec::new(),
 		};
 		let mut state = LoadExprState {
 			visited: HashMap::new(),
@@ -323,8 +330,29 @@ impl PreCompilation {
 				node_kind = NodeKind::Input;
 				cache_key = String::new();
 			},
+			ExprKind::SumToMean(val) => {
+				let child_idx = self.load_expr(&val, state)?;
+				let child = &self.nodes_postorder[child_idx];
+
+				// Insert `ScalarInput` node.
+				out_is_scalar = true;
+				dtype = child.dtype;
+				children = [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()];
+				let scalar_ref = ExprScalarRef::new(Some("__sum_to_mean__".into()), dtype);
+				match self.add_scalar_input(scalar_ref, self.nodes_postorder.next_index()) {
+					Ok(scalar_idx) => {
+						self.sum_to_mean.push(SumToMean { node: child_idx, scalar: scalar_idx });
+						x_index = scalar_idx.to_untyped();
+					},
+					Err(_) => {
+						unreachable!();
+					},
+				}
+				node_kind = NodeKind::Input;
+				cache_key = String::new();
+			},
 			ExprKind::Cast(cast) => {
-				let child_idx = self.load_expr(&cast.expr, state)?;
+				let child_idx = self.load_expr(&cast, state)?;
 				let child = &self.nodes_postorder[child_idx];
 				out_is_scalar = child.out_is_scalar;
 				dtype = expr.dtype;
@@ -482,9 +510,13 @@ impl PreCompilation {
 		let bitmap = &mut state.bitmap;
 		bitmap.clear_and_resize(&self.nodes_postorder, state.n_reductions as usize);
 		let mut n_reductions = 0;
+		let mut n_dead_reductions = 0;
 		for idx in self.nodes_postorder.indexes() {
 			let me = &mut self.nodes_postorder[idx];
 			if unlikely(me.is_dead) {
+				if me.is_reduction() {
+					n_dead_reductions += 1;
+				}
 				continue;
 			}
 			if me.is_binary() {
@@ -500,7 +532,7 @@ impl PreCompilation {
 				}
 			}
 		}
-		debug_assert!(n_reductions == (state.n_reductions as usize));
+		debug_assert_eq!(n_reductions + n_dead_reductions, (state.n_reductions as usize));
 		let mut fingerprints: HashMap<&[usize], u32> = HashMap::new();
 		for idx in self.nodes_postorder.indexes() {
 			let row: &[usize] = bitmap.row(idx);
@@ -867,7 +899,6 @@ impl PreCompilation {
 	) -> std::fmt::Result {
 		writeln!(w, "digraph G {{")?;
 		writeln!(w, "\trankdir=BT;")?;
-		//writeln!(w, "\tsplines=polyline;")?;
 		for i in self.nodes_postorder.indexes() {
 			let node = &self.nodes_postorder[i];
 			let node_id = format!("node_{}", i.raw);
@@ -981,6 +1012,14 @@ impl PreCompilation {
 					writeln!(w, "\t{node_id} -> {cap_id} [label=<{label}>, constraint=true];")?;
 				}
 			}
+		}
+		for sum_to_mean in &self.sum_to_mean {
+			let node_id = format!("node_{}", sum_to_mean.node.raw);
+			let scalar_id = format!("node_{}", self.scalar_vec[sum_to_mean.scalar].input_node.raw);
+			writeln!(
+				w,
+				"\t{node_id} -> {scalar_id} [label=< >, style=dotted, color=\"#008000\", constraint=true];"
+			)?;
 		}
 		writeln!(w, "}}")?;
 		Ok(())

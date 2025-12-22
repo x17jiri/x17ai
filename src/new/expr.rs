@@ -40,7 +40,8 @@ pub struct Expr {
 pub enum ExprKind {
 	Input(ExprInput),
 	Capture(ExprCapture),
-	Cast(ExprCast),
+	Cast(Rc<Expr>),
+	SumToMean(Rc<Expr>),
 	Unary(ExprUnary),
 	Binary(ExprBinary),
 	Reduction(ExprReduction),
@@ -70,10 +71,6 @@ pub struct ExprScalarRef {
 pub struct ExprCapture {
 	pub expr: Rc<Expr>,
 	pub tensor_ref: Rc<ExprTensorRef>,
-}
-
-pub struct ExprCast {
-	pub expr: Rc<Expr>,
 }
 
 pub struct ExprUnary {
@@ -151,6 +148,10 @@ impl ExprScalarRef {
 	pub fn new(name: Option<Cow<'static, str>>, dtype: DType) -> Rc<ExprScalarRef> {
 		Rc::new(ExprScalarRef { value: Cell::new(None), dtype, name })
 	}
+
+	pub fn dtype(&self) -> DType {
+		self.dtype
+	}
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -187,7 +188,7 @@ impl RcExpr {
 	pub fn cast(self, dtype: DType) -> RcExpr {
 		RcExpr {
 			rc_expr: Rc::new(Expr {
-				kind: ExprKind::Cast(ExprCast { expr: self.rc_expr }),
+				kind: ExprKind::Cast(self.rc_expr),
 				dtype,
 			}),
 		}
@@ -269,6 +270,20 @@ impl RcExpr {
 				dtype,
 			}),
 		}
+	}
+
+	pub fn sum_to_mean(self) -> RcExpr {
+		let dtype = self.rc_expr.dtype;
+		RcExpr {
+			rc_expr: Rc::new(Expr {
+				kind: ExprKind::SumToMean(self.rc_expr),
+				dtype,
+			}),
+		}
+	}
+
+	pub fn mean(self) -> RcExpr {
+		self.clone().sum() * self.sum_to_mean()
 	}
 
 	pub fn max(self) -> RcExpr {
