@@ -29,7 +29,7 @@ use super::{
 	Expr, ExprBinaryKind, ExprInput, ExprReductionKind, ExprScalarRef, ExprTensorRef,
 	ExprUnaryKind, RcExpr,
 };
-use crate::new::expr::ExprCapture;
+use crate::new::expr::{ExprCapture, ExprKind};
 use crate::tensor::{DType, TensorOpError};
 use crate::util::bitmap::IndexBitmap;
 use crate::util::index_vec::{IndexTrait, IndexVec, UntypedIndex32};
@@ -74,7 +74,7 @@ impl<'a> std::cmp::Eq for ShapeRef<'a> {
 
 pub enum NodeKind {
 	Input,
-	Cast(DType),
+	Cast,
 	Unary(ExprUnaryKind),
 	Binary(ExprBinaryKind),
 	Reduction(ExprReductionKind),
@@ -83,6 +83,7 @@ pub enum NodeKind {
 #[allow(clippy::struct_excessive_bools)]
 pub struct Node {
 	pub node_kind: NodeKind,
+	pub dtype: DType,
 	pub shape: ThinVec<usize>,
 	pub parents: ThinVec<NodeIndex32>,
 	pub dominator: NodeIndex32,
@@ -228,7 +229,7 @@ impl PreCompilation {
 			n_reductions: 0,
 			bitmap: IndexBitmap::new(),
 		};
-		comp.load_expr(&expr.rc_expr, &mut state);
+		comp.load_expr(&expr.rc_expr, &mut state)?;
 		comp.remove_dead_code();
 		comp.find_dominators();
 		comp.find_reduction_fingerprints(&mut state);
@@ -241,10 +242,14 @@ impl PreCompilation {
 	#[allow(clippy::panic)]
 	#[allow(clippy::too_many_lines)]
 	// TODO - refactor to make non recursive
-	fn load_expr(&mut self, expr: &Expr, state: &mut LoadExprState) -> NodeIndex32 {
+	fn load_expr(
+		&mut self,
+		expr: &Expr,
+		state: &mut LoadExprState,
+	) -> Result<NodeIndex32, TensorOpError> {
 		let expr_key = std::ptr::from_ref(expr);
 		if let Some(index) = state.visited.get(&expr_key) {
-			return *index;
+			return Ok(*index);
 		}
 
 		let mut x_index = UntypedIndex32::new_sentinel();
@@ -253,34 +258,38 @@ impl PreCompilation {
 		let mut capture: ThinVec<TensorRefIndex32> = ThinVec::new();
 		let node_kind: NodeKind;
 		let cache_key: String;
-		match expr {
-			Expr::Capture(ExprCapture { expr: x, tensor_ref }) => {
-				let child = self.load_expr(x, state);
-				let tensor_ref_index =
+		let dtype: DType;
+		match &expr.kind {
+			ExprKind::Capture(ExprCapture { expr: x, tensor_ref }) => {
+				let child_idx = self.load_expr(x, state)?;
+				let tensor_idx =
 					self.add_tensor_output(tensor_ref.clone(), self.nodes_postorder.next_index());
-				if !self.nodes_postorder[child].is_input() {
-					self.nodes_postorder[child].capture.push(tensor_ref_index);
-					state.visited.insert(expr_key, child);
-					return child;
+				let child = &mut self.nodes_postorder[child_idx];
+				if !child.is_input() {
+					child.capture.push(tensor_idx);
+					state.visited.insert(expr_key, child_idx);
+					return Ok(child_idx);
 				}
 				// Insert `Identity` node to perform the capture.
 				// This node is also a root.
 				node_kind = NodeKind::Unary(ExprUnaryKind::Identity);
-				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
-				children = [child, NodeIndex32::new_sentinel()];
-				capture.push(tensor_ref_index);
-				cache_key = format!("identity:{:?}", child.raw);
+				out_is_scalar = child.out_is_scalar;
+				dtype = child.dtype;
+				children = [child_idx, NodeIndex32::new_sentinel()];
+				capture.push(tensor_idx);
+				cache_key = format!("identity:{:?}", child_idx.raw);
 			},
-			Expr::First(first) => {
-				let first_child = self.load_expr(&first.lhs, state);
-				let _second_child = self.load_expr(&first.rhs, state);
+			ExprKind::First(first) => {
+				let first_child = self.load_expr(&first.lhs, state)?;
+				let _second_child = self.load_expr(&first.rhs, state)?;
 				state.visited.insert(expr_key, first_child);
-				return first_child;
+				return Ok(first_child);
 			},
-			Expr::Input(input) => {
+			ExprKind::Input(input) => {
 				match input {
 					ExprInput::Tensor(tensor_ref) => {
 						out_is_scalar = false;
+						dtype = tensor_ref.dtype;
 						children = [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()];
 						match self
 							.add_tensor_input(tensor_ref.clone(), self.nodes_postorder.next_index())
@@ -290,12 +299,13 @@ impl PreCompilation {
 							},
 							Err(existing_node) => {
 								state.visited.insert(expr_key, existing_node);
-								return existing_node;
+								return Ok(existing_node);
 							},
 						}
 					},
 					ExprInput::Scalar(scalar_ref) => {
 						out_is_scalar = true;
+						dtype = scalar_ref.dtype;
 						children = [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()];
 						match self
 							.add_scalar_input(scalar_ref.clone(), self.nodes_postorder.next_index())
@@ -305,7 +315,7 @@ impl PreCompilation {
 							},
 							Err(existing_node) => {
 								state.visited.insert(expr_key, existing_node);
-								return existing_node;
+								return Ok(existing_node);
 							},
 						}
 					},
@@ -313,41 +323,55 @@ impl PreCompilation {
 				node_kind = NodeKind::Input;
 				cache_key = String::new();
 			},
-			Expr::Cast(cast) => {
-				let child = self.load_expr(&cast.expr, state);
-				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
-				children = [child, NodeIndex32::new_sentinel()];
-				node_kind = NodeKind::Cast(cast.dtype);
-				cache_key = format!("cast:{:?}:{:?}", cast.dtype, child.raw);
+			ExprKind::Cast(cast) => {
+				let child_idx = self.load_expr(&cast.expr, state)?;
+				let child = &self.nodes_postorder[child_idx];
+				out_is_scalar = child.out_is_scalar;
+				dtype = expr.dtype;
+				children = [child_idx, NodeIndex32::new_sentinel()];
+				node_kind = NodeKind::Cast;
+				cache_key = format!("cast:{:?}:{:?}", expr.dtype, child_idx.raw);
 			},
-			Expr::Unary(unary) => {
-				let child = self.load_expr(&unary.expr, state);
-				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
-				children = [child, NodeIndex32::new_sentinel()];
+			ExprKind::Unary(unary) => {
+				let child_idx = self.load_expr(&unary.expr, state)?;
+				let child = &self.nodes_postorder[child_idx];
+				out_is_scalar = child.out_is_scalar;
+				dtype = child.dtype;
+				children = [child_idx, NodeIndex32::new_sentinel()];
 				node_kind = NodeKind::Unary(unary.kind);
-				cache_key = format!("unary:{:?}:{:?}", unary.kind, child.raw);
+				cache_key = format!("unary:{:?}:{:?}", unary.kind, child_idx.raw);
 			},
-			Expr::Binary(binary) => {
-				let left_child = self.load_expr(&binary.lhs, state);
-				let right_child = self.load_expr(&binary.rhs, state);
-				let left_is_scalar = self.nodes_postorder[left_child].out_is_scalar;
-				let right_is_scalar = self.nodes_postorder[right_child].out_is_scalar;
-				out_is_scalar = left_is_scalar && right_is_scalar;
-				children = [left_child, right_child];
+			ExprKind::Binary(binary) => {
+				let a_idx = self.load_expr(&binary.lhs, state)?;
+				let b_idx = self.load_expr(&binary.rhs, state)?;
+				let (a_idx, b_idx) = if binary.kind.is_commutative() && a_idx > b_idx {
+					(b_idx, a_idx)
+				} else {
+					(a_idx, b_idx)
+				};
+				let a = &self.nodes_postorder[a_idx];
+				let b = &self.nodes_postorder[b_idx];
+				if a.dtype != b.dtype {
+					cold_path();
+					return Err(TensorOpError::DTypeMismatch);
+				}
+				dtype = a.dtype;
+
+				out_is_scalar = a.out_is_scalar && b.out_is_scalar;
+				children = [a_idx, b_idx];
 				node_kind = NodeKind::Binary(binary.kind);
 
-				let a = left_child.raw;
-				let b = right_child.raw;
-				let (a, b) = if binary.kind.is_commutative() && a > b { (b, a) } else { (a, b) };
-				cache_key = format!("binary:{:?}:{:?}:{:?}", binary.kind, a, b);
+				cache_key = format!("binary:{:?}:{:?}:{:?}", binary.kind, a_idx.raw, b_idx.raw);
 			},
-			Expr::Reduction(reduction) => {
-				let child = self.load_expr(&reduction.expr, state);
-				out_is_scalar = self.nodes_postorder[child].out_is_scalar;
-				children = [child, NodeIndex32::new_sentinel()];
+			ExprKind::Reduction(reduction) => {
+				let child_idx = self.load_expr(&reduction.expr, state)?;
+				let child = &self.nodes_postorder[child_idx];
+				out_is_scalar = child.out_is_scalar;
+				dtype = child.dtype;
+				children = [child_idx, NodeIndex32::new_sentinel()];
 				state.n_reductions += 1;
 				node_kind = NodeKind::Reduction(reduction.kind);
-				cache_key = format!("reduction:{:?}:{:?}", reduction.kind, child.raw);
+				cache_key = format!("reduction:{:?}:{:?}", reduction.kind, child_idx.raw);
 			},
 		}
 
@@ -356,7 +380,7 @@ impl PreCompilation {
 			match state.node_cache.get(&cache_key) {
 				Some(&cached_index) => {
 					state.visited.insert(expr_key, cached_index);
-					return cached_index;
+					return Ok(cached_index);
 				},
 				None => {
 					state.node_cache.insert(cache_key, next_index);
@@ -374,6 +398,7 @@ impl PreCompilation {
 		let index = self.nodes_postorder.push(Node {
 			node_kind,
 			shape: ThinVec::new(),
+			dtype,
 			parents: ThinVec::new(),
 			dominator: NodeIndex32::new_sentinel(),
 			children,
@@ -386,7 +411,7 @@ impl PreCompilation {
 		});
 		debug_assert!(index == next_index);
 		state.visited.insert(expr_key, index);
-		index
+		Ok(index)
 	}
 
 	fn add_scalar_input(
@@ -692,11 +717,16 @@ impl PreCompilation {
 				}
 			}
 
-			// If we store back into inputs, make sure captures have correct shape
+			// If we store back into inputs, make sure captures have correct shape and dtype
 			let my_shape = me.shape.as_slice();
 			for &idx in &me.capture {
-				if !self.tensor_vec[idx].input_node.is_sentinel() {
-					let tensor_shape = self.tensor_vec[idx].shape.as_slice();
+				let tensor = &self.tensor_vec[idx];
+				if tensor.tensor_ref.dtype != me.dtype {
+					cold_path();
+					return Err(TensorOpError::DTypeMismatch);
+				}
+				if !tensor.input_node.is_sentinel() {
+					let tensor_shape = tensor.shape.as_slice();
 					if tensor_shape != my_shape {
 						cold_path();
 						return Err(TensorOpError::ShapeMismatch);
@@ -775,7 +805,7 @@ impl PreCompilation {
 					format!("<b>Scalar</b><br/><font color='blue'><b>{name}</b></font>")
 				}
 			},
-			NodeKind::Cast(dtype) => format!("Cast to {:?}", dtype),
+			NodeKind::Cast => format!("Cast to {:?}", node.dtype),
 			NodeKind::Unary(unary) => match unary {
 				ExprUnaryKind::Neg => "<b>Neg</b>".to_string(),
 				ExprUnaryKind::Exp => "<b>Exp</b>".to_string(),
@@ -797,18 +827,38 @@ impl PreCompilation {
 		}
 	}
 
-	fn shape_to_str(&self, shape: &[usize]) -> String {
-		let mut result = String::from("[");
+	fn shape_to_str(&self, dtype: DType, shape: &[usize]) -> String {
+		let mut result = format!("<font color='teal'>{}</font>&#91;", dtype);
 		for (i, &dim) in shape.iter().enumerate() {
 			if i > 0 {
 				result.push(',');
 			}
+			result.push_str("<font color='blue'>");
 			result.push_str(&dim.to_string());
+			result.push_str("</font>");
 		}
-		result.push(']');
+		result.push_str("&#93;");
 		result
 	}
 
+	pub fn sanitize_for_graphviz_html(s: &str) -> String {
+		let mut result = String::with_capacity(s.len() * 2); // Pre-allocate
+
+		for c in s.chars() {
+			match c {
+				'<' => result.push_str("&lt;"),
+				'>' => result.push_str("&gt;"),
+				'&' => result.push_str("&amp;"),
+				'"' => result.push_str("&quot;"),
+				'\n' => result.push_str("<BR/>"),
+				'[' => result.push_str("&#91;"),
+				']' => result.push_str("&#93;"),
+				c => result.push(c),
+			}
+		}
+
+		result
+	}
 	#[allow(clippy::too_many_lines)]
 	pub fn print_graphviz<W: std::fmt::Write>(
 		&self,
@@ -837,7 +887,9 @@ impl PreCompilation {
 			} else {
 				String::new()
 			};
-			writeln!(w, "\t{node_id} [label=<{}{extra_label}>];", self.graphviz_node_label(node),)?;
+			let label =
+				self.graphviz_node_label(node) + &Self::sanitize_for_graphviz_html(&extra_label);
+			writeln!(w, "\t{node_id} [label=<{label}>];")?;
 			if node.is_input() {
 				if node.is_tensor_input() {
 					writeln!(w, "\t{node_id} [shape=box, style=filled, fillcolor=\"#cceecc\"];")?;
@@ -861,7 +913,7 @@ impl PreCompilation {
 				let dom_id = format!("node_{}", node.dominator.raw);
 				writeln!(
 					w,
-					"\t{node_id} -> {dom_id} [label=< > style=dashed, color=\"#8080ff\", constraint=true];"
+					"\t{node_id} -> {dom_id} [label=< >, style=dashed, color=\"#808080\", constraint=true];"
 				)?;
 			}
 			if node.is_input() {
@@ -890,7 +942,7 @@ impl PreCompilation {
 					let label = if child.out_is_scalar {
 						String::new()
 					} else {
-						self.shape_to_str(&child.shape)
+						self.shape_to_str(child.dtype, &child.shape)
 					};
 					let extra_style = if self.fragments_preorder.is_valid(frag_index)
 						&& !child.is_input()
@@ -903,27 +955,30 @@ impl PreCompilation {
 					};
 					writeln!(
 						w,
-						"\t{child_id} -> {node_id} [label=\"{}\"{}, constraint=true];",
-						label, extra_style
+						"\t{child_id} -> {node_id} [label=<{label}>{extra_style}, constraint=true];",
 					)?;
 				}
 			}
 			for &capt_idx in &node.capture {
-				let label =
-					if node.out_is_scalar { String::new() } else { self.shape_to_str(&node.shape) };
+				let label = if node.out_is_scalar {
+					String::new()
+				} else {
+					self.shape_to_str(node.dtype, &node.shape)
+				};
 				let input_node = self.tensor_vec[capt_idx].input_node;
 				if input_node.is_sentinel() {
 					let cap_id = format!("ten_{}", capt_idx.raw);
-					writeln!(w, "\t{node_id} -> {cap_id} [label=\"{label}\", constraint=true];")?;
+					writeln!(w, "\t{node_id} -> {cap_id} [label=<{label}>, constraint=true];")?;
 					let tensor_ref = &self.tensor_vec[capt_idx].tensor_ref;
 					let name = tensor_ref.name.as_deref().unwrap_or("<unnamed>");
+					let name = Self::sanitize_for_graphviz_html(name);
 					writeln!(
 						w,
 						"{cap_id} [label=<<b>Tensor</b><br/><font color='blue'><b>{name}</b></font>>, shape=box, style=filled, fillcolor=\"#cceeff\"];"
 					)?;
 				} else {
 					let cap_id = format!("node_{}", input_node.raw);
-					writeln!(w, "\t{node_id} -> {cap_id} [label=\"{label}\", constraint=true];")?;
+					writeln!(w, "\t{node_id} -> {cap_id} [label=<{label}>, constraint=true];")?;
 				}
 			}
 		}

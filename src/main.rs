@@ -172,9 +172,10 @@ use x17ai::nn::fragments::{CrossEntropy, Fragment, UnaryFragment};
 use x17ai::rng::Rng;
 use x17ai::tensor::device::cpu::CPUDevice;
 use x17ai::tensor::device::cuda::CudaDevice;
+use x17ai::tensor::device::dtype::common_dtype;
 use x17ai::tensor::device::kernel::{self, Expr};
 use x17ai::tensor::math::{col, mat, row};
-use x17ai::tensor::{Device, HasDType, Tensor, TensorOpError};
+use x17ai::tensor::{DType, Device, HasDType, Tensor, TensorOpError};
 use x17ai::{ErrPack, custom_kernel, tensor};
 
 #[cfg(false)]
@@ -233,8 +234,10 @@ fn test1_opt(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 
 	let m = RcExpr::new_tensor_input(m_ten.clone());
 	//let m = m.capture(ExprTensorRef::new(Some("m_captured".into()), f32::dtype, vec![]));
-	let m_decay_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("m_decay_coef".into())));
-	let m_update_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("m_update_coef".into())));
+	let m_decay_coef =
+		RcExpr::new_scalar_input(ExprScalarRef::new(Some("m_decay_coef".into()), f32::dtype));
+	let m_update_coef =
+		RcExpr::new_scalar_input(ExprScalarRef::new(Some("m_update_coef".into()), f32::dtype));
 
 	let m_decayed = (m * m_decay_coef); //.max(); // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	let m_update = grad1.clone() * m_update_coef;
@@ -242,8 +245,10 @@ fn test1_opt(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 	let new_m = new_m.capture(m_ten.clone());
 
 	let v = RcExpr::new_tensor_input(v_ten.clone());
-	let v_decay_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("v_decay_coef".into())));
-	let v_update_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("v_update_coef".into())));
+	let v_decay_coef =
+		RcExpr::new_scalar_input(ExprScalarRef::new(Some("v_decay_coef".into()), f32::dtype));
+	let v_update_coef =
+		RcExpr::new_scalar_input(ExprScalarRef::new(Some("v_update_coef".into()), f32::dtype));
 
 	let v_decayed = v.clone() * v_decay_coef;
 	let v_update = (grad2.clone() * grad3).sum() * v_update_coef.clone();
@@ -252,12 +257,13 @@ fn test1_opt(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 	let new_v = new_v.capture(v_ten.clone());
 	//let new_v = new_v.capture(value_ten.clone());
 
-	let eps = RcExpr::new_scalar_input(ExprScalarRef::new(Some("eps".into())));
+	let eps = RcExpr::new_scalar_input(ExprScalarRef::new(Some("eps".into()), f32::dtype));
 	let v_rsqrt = (new_v.sqrt() + eps).recip();
 	//return v_rsqrt;
 
 	let value = RcExpr::new_tensor_input(value_ten.clone());
-	let update_coef = RcExpr::new_scalar_input(ExprScalarRef::new(Some("update_coef".into())));
+	let update_coef =
+		RcExpr::new_scalar_input(ExprScalarRef::new(Some("update_coef".into()), f32::dtype));
 	let update = new_m.clone() * v_rsqrt;
 	let new_value = value + update.clone() * update_coef;
 	let new_value = new_value.capture(value_ten.clone());
@@ -284,14 +290,28 @@ fn test1_opt(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 	RcExpr::first(new_value.clone(), (new_value + new_m).capture(x_ten))*/
 }
 
+fn x_rms_norm(inp: RcExpr, internal_dtype: DType) -> Result<RcExpr, ErrPack<TensorOpError>> {
+	let internal_dtype = common_dtype(inp.dtype(), internal_dtype)?;
+
+	let sum_to_mean = ExprScalarRef::new(Some("sum_to_mean".into()), internal_dtype);
+	let sum_to_mean = RcExpr::new_scalar_input(sum_to_mean.clone());
+
+	let eps = ExprScalarRef::new(Some("eps".into()), internal_dtype);
+	let eps = RcExpr::new_scalar_input(eps.clone());
+
+	let magn_recip = (((inp.clone() * inp.clone()).sum() * sum_to_mean).sqrt() + eps).recip();
+
+	Ok(inp * magn_recip)
+}
+
 fn test2_rms_norm(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 	let inp_ten = ExprTensorRef::new(Some("inp".into()), f32::dtype, Vec::new());
 	let inp2_ten = ExprTensorRef::new(Some("inp2".into()), f32::dtype, Vec::new());
 	let inp = RcExpr::new_tensor_input(inp_ten.clone());
 	let inp2 = RcExpr::new_tensor_input(inp_ten.clone());
-	let sum_to_mean = ExprScalarRef::new(Some("sum_to_mean".into()));
+	let sum_to_mean = ExprScalarRef::new(Some("sum_to_mean".into()), f32::dtype);
 	let sum_to_mean = RcExpr::new_scalar_input(sum_to_mean.clone());
-	let eps = ExprScalarRef::new(Some("eps".into()));
+	let eps = ExprScalarRef::new(Some("eps".into()), f32::dtype);
 	let eps = RcExpr::new_scalar_input(eps.clone());
 	let magn_recip = (((inp.clone() * inp2.clone()).sum() * sum_to_mean).sqrt() + eps).recip();
 
@@ -316,11 +336,12 @@ fn test3_softmax(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 	inp_ten.tensor.borrow_mut().replace(
 		x17ai::new::tensor::Tensor::new_empty(&[1000, 512], f32::dtype, dev.clone()).unwrap(),
 	);
-	let sca = ExprScalarRef::new(Some("m_decay_coef".into()));
+	let sca = ExprScalarRef::new(Some("m_decay_coef".into()), f32::dtype);
 	let coef1 = RcExpr::new_scalar_input(sca.clone());
 	let coef2 = RcExpr::new_scalar_input(sca.clone());
 
-	((out.clone() + coef1) - (coef2 + out.clone())).capture(inp_ten.clone())
+	((out.clone() + coef1).capture(inp_ten.clone())
+		- (coef2 + out.clone()).capture(inp_ten.clone()))
 }
 
 fn test4_x(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
@@ -371,7 +392,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 
 	let expr = test1_opt(dev.clone());
 	//let expr = test2_rms_norm(dev.clone());
-	let expr = test3_softmax(dev.clone());
+	//let expr = test3_softmax(dev.clone());
 	//let expr = test4_x(dev.clone());
 	//let expr = test5(dev.clone());
 

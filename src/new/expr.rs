@@ -32,7 +32,12 @@ pub struct RcExpr {
 	pub rc_expr: Rc<Expr>,
 }
 
-pub enum Expr {
+pub struct Expr {
+	kind: ExprKind,
+	dtype: DType,
+}
+
+pub enum ExprKind {
 	Input(ExprInput),
 	Capture(ExprCapture),
 	Cast(ExprCast),
@@ -58,6 +63,7 @@ pub struct ExprTensorRef {
 
 pub struct ExprScalarRef {
 	pub value: Cell<Option<f64>>,
+	pub dtype: DType,
 	pub name: Option<Cow<'static, str>>,
 }
 
@@ -68,7 +74,6 @@ pub struct ExprCapture {
 
 pub struct ExprCast {
 	pub expr: Rc<Expr>,
-	pub dtype: DType,
 }
 
 pub struct ExprUnary {
@@ -143,8 +148,8 @@ impl ExprTensorRef {
 }
 
 impl ExprScalarRef {
-	pub fn new(name: Option<Cow<'static, str>>) -> Rc<ExprScalarRef> {
-		Rc::new(ExprScalarRef { value: Cell::new(None), name })
+	pub fn new(name: Option<Cow<'static, str>>, dtype: DType) -> Rc<ExprScalarRef> {
+		Rc::new(ExprScalarRef { value: Cell::new(None), dtype, name })
 	}
 }
 
@@ -152,15 +157,27 @@ impl ExprScalarRef {
 
 impl RcExpr {
 	pub fn new_tensor_input(tensor_ref: Rc<ExprTensorRef>) -> RcExpr {
+		let dtype = tensor_ref.dtype;
 		RcExpr {
-			rc_expr: Rc::new(Expr::Input(ExprInput::Tensor(tensor_ref))),
+			rc_expr: Rc::new(Expr {
+				kind: ExprKind::Input(ExprInput::Tensor(tensor_ref)),
+				dtype,
+			}),
 		}
 	}
 
 	pub fn new_scalar_input(scalar_ref: Rc<ExprScalarRef>) -> RcExpr {
+		let dtype = scalar_ref.dtype;
 		RcExpr {
-			rc_expr: Rc::new(Expr::Input(ExprInput::Scalar(scalar_ref))),
+			rc_expr: Rc::new(Expr {
+				kind: ExprKind::Input(ExprInput::Scalar(scalar_ref)),
+				dtype,
+			}),
 		}
+	}
+
+	pub fn dtype(&self) -> DType {
+		self.rc_expr.dtype
 	}
 
 	pub fn as_ref(&self) -> &Expr {
@@ -169,82 +186,121 @@ impl RcExpr {
 
 	pub fn cast(self, dtype: DType) -> RcExpr {
 		RcExpr {
-			rc_expr: Rc::new(Expr::Cast(ExprCast { expr: self.rc_expr, dtype })),
+			rc_expr: Rc::new(Expr {
+				kind: ExprKind::Cast(ExprCast { expr: self.rc_expr }),
+				dtype,
+			}),
 		}
 	}
 
 	pub fn exp(self) -> RcExpr {
+		let dtype = self.rc_expr.dtype;
 		RcExpr {
-			rc_expr: Rc::new(Expr::Unary(ExprUnary {
-				kind: ExprUnaryKind::Exp,
-				expr: self.rc_expr,
-			})),
+			rc_expr: Rc::new(Expr {
+				kind: ExprKind::Unary(ExprUnary {
+					kind: ExprUnaryKind::Exp,
+					expr: self.rc_expr,
+				}),
+				dtype,
+			}),
 		}
 	}
 
 	pub fn ln(self) -> RcExpr {
+		let dtype = self.rc_expr.dtype;
 		RcExpr {
-			rc_expr: Rc::new(Expr::Unary(ExprUnary {
-				kind: ExprUnaryKind::Ln,
-				expr: self.rc_expr,
-			})),
+			rc_expr: Rc::new(Expr {
+				kind: ExprKind::Unary(ExprUnary {
+					kind: ExprUnaryKind::Ln,
+					expr: self.rc_expr,
+				}),
+				dtype,
+			}),
 		}
 	}
 
 	pub fn abs(self) -> RcExpr {
+		let dtype = self.rc_expr.dtype;
 		RcExpr {
-			rc_expr: Rc::new(Expr::Unary(ExprUnary {
-				kind: ExprUnaryKind::Abs,
-				expr: self.rc_expr,
-			})),
+			rc_expr: Rc::new(Expr {
+				kind: ExprKind::Unary(ExprUnary {
+					kind: ExprUnaryKind::Abs,
+					expr: self.rc_expr,
+				}),
+				dtype,
+			}),
 		}
 	}
 
 	pub fn sqrt(self) -> RcExpr {
+		let dtype = self.rc_expr.dtype;
 		RcExpr {
-			rc_expr: Rc::new(Expr::Unary(ExprUnary {
-				kind: ExprUnaryKind::Sqrt,
-				expr: self.rc_expr,
-			})),
+			rc_expr: Rc::new(Expr {
+				kind: ExprKind::Unary(ExprUnary {
+					kind: ExprUnaryKind::Sqrt,
+					expr: self.rc_expr,
+				}),
+				dtype,
+			}),
 		}
 	}
 
 	pub fn recip(self) -> RcExpr {
+		let dtype = self.rc_expr.dtype;
 		RcExpr {
-			rc_expr: Rc::new(Expr::Unary(ExprUnary {
-				kind: ExprUnaryKind::Recip,
-				expr: self.rc_expr,
-			})),
+			rc_expr: Rc::new(Expr {
+				kind: ExprKind::Unary(ExprUnary {
+					kind: ExprUnaryKind::Recip,
+					expr: self.rc_expr,
+				}),
+				dtype,
+			}),
 		}
 	}
 
 	pub fn sum(self) -> RcExpr {
+		let dtype = self.rc_expr.dtype;
 		RcExpr {
-			rc_expr: Rc::new(Expr::Reduction(ExprReduction {
-				kind: ExprReductionKind::Sum,
-				expr: self.rc_expr,
-			})),
+			rc_expr: Rc::new(Expr {
+				kind: ExprKind::Reduction(ExprReduction {
+					kind: ExprReductionKind::Sum,
+					expr: self.rc_expr,
+				}),
+				dtype,
+			}),
 		}
 	}
 
 	pub fn max(self) -> RcExpr {
+		let dtype = self.rc_expr.dtype;
 		RcExpr {
-			rc_expr: Rc::new(Expr::Reduction(ExprReduction {
-				kind: ExprReductionKind::Max,
-				expr: self.rc_expr,
-			})),
+			rc_expr: Rc::new(Expr {
+				kind: ExprKind::Reduction(ExprReduction {
+					kind: ExprReductionKind::Max,
+					expr: self.rc_expr,
+				}),
+				dtype,
+			}),
 		}
 	}
 
 	pub fn first(first: RcExpr, second: RcExpr) -> RcExpr {
+		let dtype = first.rc_expr.dtype;
 		RcExpr {
-			rc_expr: Rc::new(Expr::First(ExprFirst { lhs: first.rc_expr, rhs: second.rc_expr })),
+			rc_expr: Rc::new(Expr {
+				kind: ExprKind::First(ExprFirst { lhs: first.rc_expr, rhs: second.rc_expr }),
+				dtype,
+			}),
 		}
 	}
 
 	pub fn capture(self, tensor_ref: Rc<ExprTensorRef>) -> RcExpr {
+		let dtype = self.rc_expr.dtype;
 		RcExpr {
-			rc_expr: Rc::new(Expr::Capture(ExprCapture { expr: self.rc_expr, tensor_ref })),
+			rc_expr: Rc::new(Expr {
+				kind: ExprKind::Capture(ExprCapture { expr: self.rc_expr, tensor_ref }),
+				dtype,
+			}),
 		}
 	}
 
@@ -257,12 +313,16 @@ impl std::ops::Add for RcExpr {
 	type Output = RcExpr;
 
 	fn add(self, rhs: RcExpr) -> RcExpr {
+		let dtype = self.rc_expr.dtype;
 		RcExpr {
-			rc_expr: Rc::new(Expr::Binary(ExprBinary {
-				kind: ExprBinaryKind::Add,
-				lhs: self.rc_expr,
-				rhs: rhs.rc_expr,
-			})),
+			rc_expr: Rc::new(Expr {
+				kind: ExprKind::Binary(ExprBinary {
+					kind: ExprBinaryKind::Add,
+					lhs: self.rc_expr,
+					rhs: rhs.rc_expr,
+				}),
+				dtype,
+			}),
 		}
 	}
 }
@@ -271,12 +331,16 @@ impl std::ops::Sub for RcExpr {
 	type Output = RcExpr;
 
 	fn sub(self, rhs: RcExpr) -> RcExpr {
+		let dtype = self.rc_expr.dtype;
 		RcExpr {
-			rc_expr: Rc::new(Expr::Binary(ExprBinary {
-				kind: ExprBinaryKind::Sub,
-				lhs: self.rc_expr,
-				rhs: rhs.rc_expr,
-			})),
+			rc_expr: Rc::new(Expr {
+				kind: ExprKind::Binary(ExprBinary {
+					kind: ExprBinaryKind::Sub,
+					lhs: self.rc_expr,
+					rhs: rhs.rc_expr,
+				}),
+				dtype,
+			}),
 		}
 	}
 }
@@ -285,12 +349,16 @@ impl std::ops::Mul for RcExpr {
 	type Output = RcExpr;
 
 	fn mul(self, rhs: RcExpr) -> RcExpr {
+		let dtype = self.rc_expr.dtype;
 		RcExpr {
-			rc_expr: Rc::new(Expr::Binary(ExprBinary {
-				kind: ExprBinaryKind::Mul,
-				lhs: self.rc_expr,
-				rhs: rhs.rc_expr,
-			})),
+			rc_expr: Rc::new(Expr {
+				kind: ExprKind::Binary(ExprBinary {
+					kind: ExprBinaryKind::Mul,
+					lhs: self.rc_expr,
+					rhs: rhs.rc_expr,
+				}),
+				dtype,
+			}),
 		}
 	}
 }
@@ -299,11 +367,15 @@ impl std::ops::Neg for RcExpr {
 	type Output = RcExpr;
 
 	fn neg(self) -> RcExpr {
+		let dtype = self.rc_expr.dtype;
 		RcExpr {
-			rc_expr: Rc::new(Expr::Unary(ExprUnary {
-				kind: ExprUnaryKind::Neg,
-				expr: self.rc_expr,
-			})),
+			rc_expr: Rc::new(Expr {
+				kind: ExprKind::Unary(ExprUnary {
+					kind: ExprUnaryKind::Neg,
+					expr: self.rc_expr,
+				}),
+				dtype,
+			}),
 		}
 	}
 }

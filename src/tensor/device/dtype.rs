@@ -179,7 +179,11 @@ pub enum DTypeId {
 impl std::fmt::Display for DType {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 		let data = DTypeStruct::from_dtype(*self);
-		write!(f, "{:?}", data.id)
+		match data.id {
+			DTypeId::U8 => write!(f, "u8"),
+			DTypeId::F32 => write!(f, "f32"),
+			DTypeId::F64 => write!(f, "f64"),
+		}
 	}
 }
 
