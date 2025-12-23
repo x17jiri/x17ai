@@ -150,14 +150,28 @@ impl DType {
 	}
 }
 
-pub fn common_dtype(a: DType, b: DType) -> Result<DType, DTypeMismatchError> {
-	let a_data = DTypeStruct::from_dtype(a);
-	let b_data = DTypeStruct::from_dtype(b);
+fn to_float_dtype(dtype: DType) -> DType {
+	let data = DTypeStruct::from_dtype(dtype);
+	match data.id {
+		// Already float
+		DTypeId::F32 | DTypeId::F64 => dtype,
+		// Convert to float without loss of precision
+		DTypeId::U8 => f32::dtype,
+		// For large ints such as u64, we should just convert to f64 accepting the loss
+	}
+}
+
+pub fn common_dtype(mut a: DType, mut b: DType) -> DType {
+	let mut a_data = DTypeStruct::from_dtype(a);
+	let mut b_data = DTypeStruct::from_dtype(b);
 	if a_data.kind != b_data.kind {
 		cold_path();
-		return Err(DTypeMismatchError); // TODO - we can probably always convert to f64
+		a = to_float_dtype(a);
+		b = to_float_dtype(b);
+		a_data = DTypeStruct::from_dtype(a);
+		b_data = DTypeStruct::from_dtype(b);
 	}
-	Ok(if a_data.shift >= b_data.shift { a } else { b })
+	if a_data.shift >= b_data.shift { a } else { b }
 }
 
 #[repr(u8)]

@@ -38,7 +38,7 @@ pub trait EvaluatesToColMatrix {
 //--------------------------------------------------------------------------------------------------
 
 pub fn approx_eq(a: &Tensor, b: &Tensor, eps: f64) -> Result<bool, ErrPack<TensorOpError>> {
-	let diff_dtype = common_dtype(common_dtype(a.dtype(), b.dtype())?, f32::dtype)?;
+	let diff_dtype = common_dtype(common_dtype(a.dtype(), b.dtype()), f32::dtype);
 	// TODO - `a` may be broadcasted in which case the `diff` shape is wrong
 	let diff = a.new_empty_like(diff_dtype)?;
 	diff.assign(custom_kernel!(

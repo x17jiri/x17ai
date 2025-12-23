@@ -193,7 +193,7 @@ impl Device for CPUDevice {
 	}
 
 	unsafe fn mm(&self, args: &MatMulArgs, scale: f64) -> Result<(), ErrPack<TensorOpError>> {
-		let internal_dtype = common_dtype(args.internal_dtype, f64::dtype)?;
+		let internal_dtype = common_dtype(args.internal_dtype, f64::dtype);
 		if internal_dtype != f64::dtype {
 			cold_path();
 			return Err(UnsupportedDTypeError.into());
@@ -210,7 +210,7 @@ impl Device for CPUDevice {
 		data: &DynKernelCall,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		assert!(data.reduce_count == 0);
-		let internal_dtype = common_dtype(data.internal_dtype(), f64::dtype)?;
+		let internal_dtype = common_dtype(data.internal_dtype(), f64::dtype);
 		if internal_dtype != f64::dtype {
 			cold_path();
 			return Err(UnsupportedDTypeError.into());
@@ -220,7 +220,7 @@ impl Device for CPUDevice {
 
 	unsafe fn run_reduce_kernel(&self, data: &DynKernelCall) -> Result<(), ErrPack<TensorOpError>> {
 		assert!(data.reduce_count > 0);
-		let internal_dtype = common_dtype(data.internal_dtype(), f64::dtype)?;
+		let internal_dtype = common_dtype(data.internal_dtype(), f64::dtype);
 		if internal_dtype != f64::dtype {
 			cold_path();
 			return Err(UnsupportedDTypeError.into());

@@ -295,14 +295,34 @@ fn x_rms_norm(
 	eps: Rc<ExprScalarRef>,
 	internal_dtype: DType,
 ) -> Result<RcExpr, ErrPack<TensorOpError>> {
-	let internal_dtype = common_dtype(inp.dtype(), eps.dtype())?;
-	let internal_dtype = common_dtype(inp.dtype(), internal_dtype)?;
-
-	let eps = RcExpr::new_scalar_input(eps.clone());
+	let eps = RcExpr::new_scalar_input(eps.clone()).cast(internal_dtype);
+	let inp = inp.cast(internal_dtype);
 
 	let magn_recip = ((inp.clone() * inp.clone()).mean().sqrt() + eps).recip();
 
 	Ok(inp * magn_recip)
+}
+
+fn x_softmax(inp: RcExpr, internal_dtype: DType) -> Result<RcExpr, ErrPack<TensorOpError>> {
+	let inp = inp.cast(internal_dtype);
+
+	let max = inp.clone().max();
+	let t = (inp - max).exp();
+	let out = t.clone().sum().recip() * t;
+
+	Ok(out)
+}
+
+pub fn x_swiglu(inp: RcExpr, internal_dtype: DType) -> Result<RcExpr, ErrPack<TensorOpError>> {
+	let inp = inp.cast(internal_dtype);
+	let lin = inp.clone().select_even();
+	let gate = inp.select_odd();
+
+	let one = RcExpr::new_scalar_input(ExprScalarRef::new(Some("ONE".into()), internal_dtype));
+
+	let out = lin * gate.clone() * ((-gate).exp() + one).recip();
+
+	Ok(out)
 }
 
 fn test2_rms_norm(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
@@ -400,9 +420,24 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	//let expr = test4_x(dev.clone());
 	//let expr = test5(dev.clone());
 
-	let expr = x_rms_norm(expr, eps, internal_dtype)?;
+	let t = ExprTensorRef::new(Some("t".into()), f32::dtype, vec![15, 32]);
+	let m = ExprTensorRef::new(Some("m".into()), f32::dtype, vec![15, 32]);
+	let expr = RcExpr::new_tensor_input(t.clone());
 
-	let mut comp = PreCompilation::new(expr)?;
+	let expr = x_rms_norm(expr, eps, internal_dtype)?;
+	let expr = expr.row_times_mat(RcExpr::new_tensor_input(m.clone()));
+	//let expr = x_softmax(expr, internal_dtype)?;
+	let expr = x_swiglu(expr, internal_dtype)?;
+
+	let expr = expr.capture(t.clone());
+	t.tensor.borrow_mut().replace(
+		x17ai::new::tensor::Tensor::new_empty(&[1024, 256], f32::dtype, dev.clone()).unwrap(),
+	);
+	m.tensor.borrow_mut().replace(
+		x17ai::new::tensor::Tensor::new_empty(&[256, 512], f32::dtype, dev.clone()).unwrap(),
+	);
+
+	let mut comp = PreCompilation::new(&expr.rc_expr)?;
 	comp.find_fragments()?;
 
 	let mut graphviz = String::new();

@@ -71,7 +71,7 @@ impl EvaluatesToTensor for f64 {
 
 impl EvaluatesToTensor for &Tensor {
 	fn eval_to_tensor(self, to: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
-		let internal_dtype = common_dtype(self.dtype(), to.dtype())?;
+		let internal_dtype = common_dtype(self.dtype(), to.dtype());
 		to.assign(custom_kernel!(
 			internal_dtype,
 			[src: self], (), {

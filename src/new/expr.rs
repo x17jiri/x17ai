@@ -42,8 +42,10 @@ pub enum ExprKind {
 	Capture(ExprCapture),
 	Cast(Rc<Expr>),
 	SumToMean(Rc<Expr>),
+	Select(ExprSelect),
 	Unary(ExprUnary),
 	Binary(ExprBinary),
+	MatMul(ExprMatMul),
 	Reduction(ExprReduction),
 	First(ExprFirst),
 }
@@ -71,6 +73,17 @@ pub struct ExprScalarRef {
 pub struct ExprCapture {
 	pub expr: Rc<Expr>,
 	pub tensor_ref: Rc<ExprTensorRef>,
+}
+
+pub struct ExprSelect {
+	pub kind: ExprSelectKind,
+	pub expr: Rc<Expr>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExprSelectKind {
+	Even,
+	Odd,
 }
 
 pub struct ExprUnary {
@@ -114,6 +127,17 @@ impl ExprBinaryKind {
 			ExprBinaryKind::Sub => false,
 		}
 	}
+}
+
+pub struct ExprMatMul {
+	pub kind: ExprMatMulKind,
+	pub lhs: Rc<Expr>,
+	pub rhs: Rc<Expr>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExprMatMulKind {
+	RowTimesMat,
 }
 
 pub struct ExprReduction {
@@ -186,11 +210,16 @@ impl RcExpr {
 	}
 
 	pub fn cast(self, dtype: DType) -> RcExpr {
-		RcExpr {
-			rc_expr: Rc::new(Expr {
-				kind: ExprKind::Cast(self.rc_expr),
-				dtype,
-			}),
+		let input_dtype = self.rc_expr.dtype;
+		if input_dtype == dtype {
+			self
+		} else {
+			RcExpr {
+				rc_expr: Rc::new(Expr {
+					kind: ExprKind::Cast(self.rc_expr),
+					dtype,
+				}),
+			}
 		}
 	}
 
@@ -259,6 +288,32 @@ impl RcExpr {
 		}
 	}
 
+	pub fn select_odd(self) -> RcExpr {
+		let dtype = self.rc_expr.dtype;
+		RcExpr {
+			rc_expr: Rc::new(Expr {
+				kind: ExprKind::Select(ExprSelect {
+					kind: ExprSelectKind::Odd,
+					expr: self.rc_expr,
+				}),
+				dtype,
+			}),
+		}
+	}
+
+	pub fn select_even(self) -> RcExpr {
+		let dtype = self.rc_expr.dtype;
+		RcExpr {
+			rc_expr: Rc::new(Expr {
+				kind: ExprKind::Select(ExprSelect {
+					kind: ExprSelectKind::Even,
+					expr: self.rc_expr,
+				}),
+				dtype,
+			}),
+		}
+	}
+
 	pub fn sum(self) -> RcExpr {
 		let dtype = self.rc_expr.dtype;
 		RcExpr {
@@ -314,6 +369,20 @@ impl RcExpr {
 		RcExpr {
 			rc_expr: Rc::new(Expr {
 				kind: ExprKind::Capture(ExprCapture { expr: self.rc_expr, tensor_ref }),
+				dtype,
+			}),
+		}
+	}
+
+	pub fn row_times_mat(self, mat: RcExpr) -> RcExpr {
+		let dtype = self.rc_expr.dtype;
+		RcExpr {
+			rc_expr: Rc::new(Expr {
+				kind: ExprKind::MatMul(ExprMatMul {
+					kind: ExprMatMulKind::RowTimesMat,
+					lhs: self.rc_expr,
+					rhs: mat.rc_expr,
+				}),
 				dtype,
 			}),
 		}

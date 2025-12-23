@@ -60,7 +60,7 @@ impl LossFn for CrossEntropyLossFn {
 		let target = &self.target;
 
 		let internal_dtype =
-			common_dtype(common_dtype(value.dtype(), target.dtype())?, self.internal_dtype)?;
+			common_dtype(common_dtype(value.dtype(), target.dtype()), self.internal_dtype);
 		let err_sums = value.new_replace_tail(1, &[1], internal_dtype)?;
 		err_sums.assign(custom_kernel!(
 			internal_dtype,

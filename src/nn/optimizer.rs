@@ -72,7 +72,7 @@ impl OptParam {
 		let value = value_orig_shape.merge_all_dims().unwrap(); // if fails, tensor is not contiguous
 		let value = value.reshape_last_dim(&[parts, part_elems]).unwrap();
 
-		let momentum_dtype = common_dtype(value.dtype(), momentum_dtype)?;
+		let momentum_dtype = common_dtype(value.dtype(), momentum_dtype);
 		let m = value.new_empty_like(momentum_dtype)?;
 		m.assign(0.0)?;
 

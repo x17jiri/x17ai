@@ -48,7 +48,7 @@ impl super::UnaryFragment for SwiGLU {
 		let out = inp.new_replace_tail(2, &[inp.size(-1)?], inp.dtype())?;
 		let lin = inp.select(-2, 0)?;
 		let gate = inp.select(-2, 1)?;
-		let internal_dtype = common_dtype(inp.dtype(), self.internal_dtype)?;
+		let internal_dtype = common_dtype(inp.dtype(), self.internal_dtype);
 
 		out.assign(custom_kernel!(
 			internal_dtype,
@@ -80,7 +80,7 @@ impl BackwardFn for SwiGLUBackwardFn {
 		queue: &mut autograd::Queue,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let Self { lin, gate, internal_dtype, inp_backward } = Box::into_inner(self);
-		let internal_dtype = common_dtype(d_out.dtype(), internal_dtype)?;
+		let internal_dtype = common_dtype(d_out.dtype(), internal_dtype);
 
 		/*
 		let input_shape = [2, d_out.size(-1)?];

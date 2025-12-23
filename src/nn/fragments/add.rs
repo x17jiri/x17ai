@@ -20,7 +20,7 @@ pub fn add(
 ) -> Result<AutogradTensor, ErrPack<TensorOpError>> {
 	let (a, a_fn) = a_node.into_parts();
 	let (b, b_fn) = b_node.into_parts();
-	let c_dtype = common_dtype(a.dtype(), b.dtype())?;
+	let c_dtype = common_dtype(a.dtype(), b.dtype());
 	let c = if a.owns_buffer() && likely(c_dtype == a.dtype()) {
 		a.clone()
 	} else if b.owns_buffer() && likely(c_dtype == b.dtype()) {

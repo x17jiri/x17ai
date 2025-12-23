@@ -41,7 +41,7 @@ impl RMSNorm {
 impl UnaryFragment for RMSNorm {
 	fn forward(&self, inp: AutogradTensor) -> Result<AutogradTensor, ErrPack<TensorOpError>> {
 		let (inp, inp_backward) = inp.into_parts();
-		let internal_dtype = common_dtype(inp.dtype(), self.internal_dtype)?;
+		let internal_dtype = common_dtype(inp.dtype(), self.internal_dtype);
 		let sum_to_mean = inp.sum_to_mean();
 
 		/*
@@ -133,7 +133,7 @@ impl BackwardFn for RMSNormBackwardFn_Precise {
 		queue: &mut autograd::Queue,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let Self { out, magn_recip, inp_backward } = Box::into_inner(self);
-		let internal_dtype = common_dtype(d_out.dtype(), magn_recip.dtype())?;
+		let internal_dtype = common_dtype(d_out.dtype(), magn_recip.dtype());
 		let sum_to_mean = out.sum_to_mean();
 
 		let g = magn_recip.new_empty_like(internal_dtype)?; // [..., 1]

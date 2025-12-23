@@ -26,10 +26,10 @@ use std::rc::Rc;
 use thin_vec::ThinVec;
 
 use super::{
-	Expr, ExprBinaryKind, ExprInput, ExprReductionKind, ExprScalarRef, ExprTensorRef,
-	ExprUnaryKind, RcExpr,
+	Expr, ExprBinaryKind, ExprInput, ExprReductionKind, ExprScalarRef, ExprTensorRef, ExprUnaryKind,
 };
-use crate::new::expr::{ExprCapture, ExprKind};
+use crate::new::expr::{ExprCapture, ExprKind, ExprMatMulKind, ExprSelectKind};
+use crate::tensor::device::dtype::common_dtype;
 use crate::tensor::{DType, TensorOpError};
 use crate::util::bitmap::IndexBitmap;
 use crate::util::index_vec::{IndexTrait, IndexVec, UntypedIndex32};
@@ -75,8 +75,10 @@ impl<'a> std::cmp::Eq for ShapeRef<'a> {
 pub enum NodeKind {
 	Input,
 	Cast,
+	Select(ExprSelectKind),
 	Unary(ExprUnaryKind),
 	Binary(ExprBinaryKind),
+	MatMul(ExprMatMulKind),
 	Reduction(ExprReductionKind),
 }
 
@@ -220,7 +222,7 @@ pub struct LoadExprState {
 }
 
 impl PreCompilation {
-	pub fn new(expr: RcExpr) -> Result<Self, ErrPack<TensorOpError>> {
+	pub fn new(expr: &Expr) -> Result<Self, ErrPack<TensorOpError>> {
 		let mut comp = PreCompilation {
 			nodes_postorder: NodeVec::with_capacity(32),
 			fragments_preorder: FragmentVec::with_capacity(8),
@@ -236,7 +238,7 @@ impl PreCompilation {
 			n_reductions: 0,
 			bitmap: IndexBitmap::new(),
 		};
-		comp.load_expr(&expr.rc_expr, &mut state)?;
+		comp.load_expr(expr, &mut state)?;
 		comp.remove_dead_code();
 		comp.find_dominators();
 		comp.find_reduction_fingerprints(&mut state);
@@ -330,8 +332,17 @@ impl PreCompilation {
 				node_kind = NodeKind::Input;
 				cache_key = String::new();
 			},
+			ExprKind::Select(select) => {
+				let child_idx = self.load_expr(&select.expr, state)?;
+				let child = &self.nodes_postorder[child_idx];
+				out_is_scalar = false;
+				dtype = child.dtype;
+				children = [child_idx, NodeIndex32::new_sentinel()];
+				node_kind = NodeKind::Select(select.kind);
+				cache_key = format!("select:{:?}:{:?}", select.kind, child_idx.raw);
+			},
 			ExprKind::SumToMean(val) => {
-				let child_idx = self.load_expr(&val, state)?;
+				let child_idx = self.load_expr(val, state)?;
 				let child = &self.nodes_postorder[child_idx];
 
 				// Insert `ScalarInput` node.
@@ -352,7 +363,7 @@ impl PreCompilation {
 				cache_key = String::new();
 			},
 			ExprKind::Cast(cast) => {
-				let child_idx = self.load_expr(&cast, state)?;
+				let child_idx = self.load_expr(cast, state)?;
 				let child = &self.nodes_postorder[child_idx];
 				out_is_scalar = child.out_is_scalar;
 				dtype = expr.dtype;
@@ -379,17 +390,29 @@ impl PreCompilation {
 				};
 				let a = &self.nodes_postorder[a_idx];
 				let b = &self.nodes_postorder[b_idx];
-				if a.dtype != b.dtype {
-					cold_path();
-					return Err(TensorOpError::DTypeMismatch);
-				}
-				dtype = a.dtype;
+				dtype = common_dtype(a.dtype, b.dtype);
 
 				out_is_scalar = a.out_is_scalar && b.out_is_scalar;
 				children = [a_idx, b_idx];
 				node_kind = NodeKind::Binary(binary.kind);
 
 				cache_key = format!("binary:{:?}:{:?}:{:?}", binary.kind, a_idx.raw, b_idx.raw);
+			},
+			ExprKind::MatMul(matmul) => {
+				let a_idx = self.load_expr(&matmul.lhs, state)?;
+				let b_idx = self.load_expr(&matmul.rhs, state)?;
+				let a = &self.nodes_postorder[a_idx];
+				let b = &self.nodes_postorder[b_idx];
+				dtype = common_dtype(a.dtype, b.dtype);
+
+				out_is_scalar = a.out_is_scalar && b.out_is_scalar;
+				children = [a_idx, b_idx];
+				node_kind = NodeKind::MatMul(matmul.kind);
+				match matmul.kind {
+					ExprMatMulKind::RowTimesMat => {
+						cache_key = format!("row_times_mat:{:?}:{:?}", a_idx.raw, b_idx.raw);
+					},
+				}
 			},
 			ExprKind::Reduction(reduction) => {
 				let child_idx = self.load_expr(&reduction.expr, state)?;
@@ -680,6 +703,30 @@ impl PreCompilation {
 		}
 	}
 
+	fn broadcast_shapes(
+		result: &mut ThinVec<usize>,
+		a: &[usize],
+		b: &[usize],
+	) -> Result<(), TensorOpError> {
+		let len = a.len().max(b.len());
+		let skip_a = len - a.len();
+		let skip_b = len - b.len();
+		for d in 0..len {
+			let dim_a = if d < skip_a { 1 } else { a[d - skip_a] };
+			let dim_b = if d < skip_b { 1 } else { b[d - skip_b] };
+			let dim = if dim_a == dim_b || dim_b == 1 {
+				dim_a
+			} else if dim_a == 1 {
+				dim_b
+			} else {
+				cold_path();
+				return Err(TensorOpError::ShapeMismatch);
+			};
+			result.push(dim);
+		}
+		Ok(())
+	}
+
 	fn calc_shapes(&mut self) -> Result<(), TensorOpError> {
 		for t in &mut self.tensor_vec {
 			t.shape.clear();
@@ -716,36 +763,57 @@ impl PreCompilation {
 				let child = me.children[0];
 				let child = &all_children[child];
 				me.shape.extend_from_slice(&child.shape);
-				if me.is_reduction() {
-					if let Some(last) = me.shape.last_mut() {
-						*last = 1;
-					} else {
-						me.shape.push(1);
-					}
+				match me.node_kind {
+					NodeKind::Reduction(_) => {
+						if let Some(last) = me.shape.last_mut() {
+							*last = 1;
+						} else {
+							me.shape.push(1);
+						}
+					},
+					NodeKind::Select(_) => {
+						if let Some(last) = me.shape.last_mut() {
+							*last /= 2;
+						} else {
+							me.shape.push(0);
+						}
+					},
+					_ => continue,
 				}
 			} else {
 				debug_assert!(me.is_binary());
 
 				// For binary operations, use broadcast to get output shape
-				let left = me.children[0];
-				let right = me.children[1];
-				let left = &all_children[left];
-				let right = &all_children[right];
-				let shape_len = left.shape.len().max(right.shape.len());
-				let skip_left = shape_len - left.shape.len();
-				let skip_right = shape_len - right.shape.len();
-				for d in 0..shape_len {
-					let dim_left = if d < skip_left { 1 } else { left.shape[d - skip_left] };
-					let dim_right = if d < skip_right { 1 } else { right.shape[d - skip_right] };
-					let dim = if dim_left == dim_right || dim_right == 1 {
-						dim_left
-					} else if dim_left == 1 {
-						dim_right
-					} else {
-						cold_path();
-						return Err(TensorOpError::ShapeMismatch);
-					};
-					me.shape.push(dim);
+				let a = me.children[0];
+				let b = me.children[1];
+				let a_shape: &[usize] = &all_children[a].shape;
+				let b_shape: &[usize] = &all_children[b].shape;
+				#[allow(clippy::single_match_else)]
+				#[allow(clippy::len_zero)]
+				match me.node_kind {
+					NodeKind::MatMul(ExprMatMulKind::RowTimesMat) => {
+						let (a_len, a_rest) = if a_shape.len() > 0 {
+							(a_shape[a_shape.len() - 1], &a_shape[..a_shape.len() - 1])
+						} else {
+							(1, a_shape)
+						};
+						let (b_row, b_col, b_rest) = if b_shape.len() >= 2 {
+							(
+								b_shape[b_shape.len() - 2],
+								b_shape[b_shape.len() - 1],
+								&b_shape[..b_shape.len() - 2],
+							)
+						} else if b_shape.len() == 1 {
+							(1, b_shape[b_shape.len() - 1], &b_shape[..0])
+						} else {
+							(1, 1, b_shape)
+						};
+						Self::broadcast_shapes(&mut me.shape, a_rest, b_rest)?;
+						TODO TODO TODO
+					},
+					_ => {
+						Self::broadcast_shapes(&mut me.shape, a_shape, b_shape)?;
+					},
 				}
 			}
 
@@ -838,6 +906,10 @@ impl PreCompilation {
 				}
 			},
 			NodeKind::Cast => format!("Cast to {:?}", node.dtype),
+			NodeKind::Select(select) => match select {
+				ExprSelectKind::Even => "<b>Select Even</b>".to_string(),
+				ExprSelectKind::Odd => "<b>Select Odd</b>".to_string(),
+			},
 			NodeKind::Unary(unary) => match unary {
 				ExprUnaryKind::Neg => "<b>Neg</b>".to_string(),
 				ExprUnaryKind::Exp => "<b>Exp</b>".to_string(),
@@ -851,6 +923,9 @@ impl PreCompilation {
 				ExprBinaryKind::Add => "<b>Add</b>".to_string(),
 				ExprBinaryKind::Sub => "<b>Sub</b>".to_string(),
 				ExprBinaryKind::Mul => "<b>Mul</b>".to_string(),
+			},
+			NodeKind::MatMul(matmul) => match matmul {
+				ExprMatMulKind::RowTimesMat => "<b>row * mat</b>".to_string(),
 			},
 			NodeKind::Reduction(reduction) => match reduction {
 				ExprReductionKind::Sum => "<b>Sum</b>".to_string(),

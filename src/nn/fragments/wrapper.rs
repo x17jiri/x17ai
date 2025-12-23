@@ -81,7 +81,7 @@ impl<Nested: UnaryFragment> Fragment for Wrapper<Nested> {
 impl<Nested: UnaryFragment> UnaryFragment for Wrapper<Nested> {
 	fn forward(&self, inp_node: AutogradTensor) -> Result<AutogradTensor, ErrPack<TensorOpError>> {
 		let (inp, backward_fn) = inp_node.into_parts();
-		let internal_dtype = common_dtype(inp.dtype(), self.internal_dtype)?;
+		let internal_dtype = common_dtype(inp.dtype(), self.internal_dtype);
 		let sum_to_mean = inp.sum_to_mean();
 
 		let inp_magn_recip = inp.new_replace_tail(1, &[1], internal_dtype)?;
@@ -211,7 +211,7 @@ impl BackwardFn for WrapperBackwardFn_Split {
 		let d_out = d_residual.unwrap();
 		let sum_to_mean = d_out.sum_to_mean();
 		let internal_dtype =
-			common_dtype(common_dtype(d_nested.dtype(), d_out.dtype())?, ratio.dtype())?;
+			common_dtype(common_dtype(d_nested.dtype(), d_out.dtype()), ratio.dtype());
 
 		let d_nested_magn_recip = ratio.new_empty_like(internal_dtype)?;
 		d_nested_magn_recip.assign(custom_kernel!(
