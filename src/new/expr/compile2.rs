@@ -95,7 +95,7 @@ pub struct Node {
 	pub out_is_scalar: bool,
 	pub is_dead: bool,
 	pub reduction_fingerprint: u32,
-	pub reduction_head_for: NodeIndex32,
+	pub config_head_for: NodeIndex32,
 
 	// This is one of:
 	// - ScalarRefIndex32
@@ -142,8 +142,12 @@ impl Node {
 		matches!(self.node_kind, NodeKind::Reduction(_))
 	}
 
-	pub fn is_reduction_head(&self) -> bool {
-		!self.reduction_head_for.is_sentinel()
+	pub fn is_matmul(&self) -> bool {
+		matches!(self.node_kind, NodeKind::MatMul(_))
+	}
+
+	pub fn is_config_head(&self) -> bool {
+		!self.config_head_for.is_sentinel()
 	}
 
 	pub fn is_captured(&self) -> bool {
@@ -217,7 +221,7 @@ pub struct PreCompilation {
 pub struct LoadExprState {
 	visited: HashMap<*const Expr, NodeIndex32>,
 	node_cache: HashMap<String, NodeIndex32>,
-	n_reductions: u32,
+	n_config_driving: u32,
 	bitmap: IndexBitmap<NodeIndex32>,
 }
 
@@ -235,13 +239,13 @@ impl PreCompilation {
 		let mut state = LoadExprState {
 			visited: HashMap::new(),
 			node_cache: HashMap::new(),
-			n_reductions: 0,
+			n_config_driving: 0,
 			bitmap: IndexBitmap::new(),
 		};
 		comp.load_expr(expr, &mut state)?;
 		comp.remove_dead_code();
 		comp.find_dominators();
-		comp.find_reduction_fingerprints(&mut state);
+		comp.find_config_fingerprints(&mut state);
 		comp.find_races(&mut state)?;
 		Ok(comp)
 	}
@@ -268,6 +272,7 @@ impl PreCompilation {
 		let node_kind: NodeKind;
 		let cache_key: String;
 		let dtype: DType;
+		let mut n_config_driving = 0;
 		match &expr.kind {
 			ExprKind::Capture(ExprCapture { expr: x, tensor_ref }) => {
 				let child_idx = self.load_expr(x, state)?;
@@ -407,6 +412,7 @@ impl PreCompilation {
 
 				out_is_scalar = a.out_is_scalar && b.out_is_scalar;
 				children = [a_idx, b_idx];
+				n_config_driving = 1;
 				node_kind = NodeKind::MatMul(matmul.kind);
 				match matmul.kind {
 					ExprMatMulKind::RowTimesMat => {
@@ -420,7 +426,7 @@ impl PreCompilation {
 				out_is_scalar = child.out_is_scalar;
 				dtype = child.dtype;
 				children = [child_idx, NodeIndex32::new_sentinel()];
-				state.n_reductions += 1;
+				n_config_driving = 1;
 				node_kind = NodeKind::Reduction(reduction.kind);
 				cache_key = format!("reduction:{:?}:{:?}", reduction.kind, child_idx.raw);
 			},
@@ -428,16 +434,18 @@ impl PreCompilation {
 
 		let next_index = self.nodes_postorder.next_index();
 		if !cache_key.is_empty() {
-			match state.node_cache.get(&cache_key) {
-				Some(&cached_index) => {
+			match state.node_cache.entry(cache_key) {
+				hash_map::Entry::Occupied(entry) => {
+					let cached_index = *entry.get();
 					state.visited.insert(expr_key, cached_index);
 					return Ok(cached_index);
 				},
-				None => {
-					state.node_cache.insert(cache_key, next_index);
+				hash_map::Entry::Vacant(entry) => {
+					entry.insert(next_index);
 				},
 			}
 		}
+		state.n_config_driving += n_config_driving;
 
 		for &child in &children {
 			if !self.nodes_postorder.is_valid(child) {
@@ -457,7 +465,7 @@ impl PreCompilation {
 			out_is_scalar,
 			is_dead: false,
 			reduction_fingerprint: 0,
-			reduction_head_for: NodeIndex32::new_sentinel(),
+			config_head_for: NodeIndex32::new_sentinel(),
 			x_index,
 		});
 		debug_assert!(index == next_index);
@@ -529,16 +537,16 @@ impl PreCompilation {
 		}
 	}
 
-	fn find_reduction_fingerprints(&mut self, state: &mut LoadExprState) {
+	fn find_config_fingerprints(&mut self, state: &mut LoadExprState) {
 		let bitmap = &mut state.bitmap;
-		bitmap.clear_and_resize(&self.nodes_postorder, state.n_reductions as usize);
-		let mut n_reductions = 0;
-		let mut n_dead_reductions = 0;
+		bitmap.clear_and_resize(&self.nodes_postorder, state.n_config_driving as usize);
+		let mut n_config_driving = 0;
+		let mut n_dead_config_driving = 0;
 		for idx in self.nodes_postorder.indexes() {
 			let me = &mut self.nodes_postorder[idx];
 			if unlikely(me.is_dead) {
-				if me.is_reduction() {
-					n_dead_reductions += 1;
+				if me.is_reduction() || me.is_matmul() {
+					n_dead_config_driving += 1;
 				}
 				continue;
 			}
@@ -546,16 +554,23 @@ impl PreCompilation {
 				let left_child = me.children[0];
 				let right_child = me.children[1];
 				bitmap.union(idx, left_child, right_child);
+				if me.is_matmul() {
+					bitmap.set_bit(idx, n_config_driving);
+					n_config_driving += 1;
+				}
 			} else if me.is_unary() {
 				let child = me.children[0];
 				bitmap.copy_row(idx, child);
 				if me.is_reduction() {
-					bitmap.set_bit(idx, n_reductions);
-					n_reductions += 1;
+					bitmap.set_bit(idx, n_config_driving);
+					n_config_driving += 1;
 				}
 			}
 		}
-		debug_assert_eq!(n_reductions + n_dead_reductions, (state.n_reductions as usize));
+		debug_assert_eq!(
+			n_config_driving + n_dead_config_driving,
+			(state.n_config_driving as usize)
+		);
 		let mut fingerprints: HashMap<&[usize], u32> = HashMap::new();
 		for idx in self.nodes_postorder.indexes() {
 			let row: &[usize] = bitmap.row(idx);
@@ -808,8 +823,12 @@ impl PreCompilation {
 						} else {
 							(1, 1, b_shape)
 						};
+						if a_len != b_row {
+							cold_path();
+							return Err(TensorOpError::ShapeMismatch);
+						}
 						Self::broadcast_shapes(&mut me.shape, a_rest, b_rest)?;
-						TODO TODO TODO
+						me.shape.push(b_col);
 					},
 					_ => {
 						Self::broadcast_shapes(&mut me.shape, a_shape, b_shape)?;
@@ -838,9 +857,9 @@ impl PreCompilation {
 		Ok(())
 	}
 
-	fn find_reduction_heads(&mut self) {
+	fn find_config_heads(&mut self) {
 		for idx in self.nodes_postorder.indexes() {
-			if !self.nodes_postorder[idx].is_reduction() {
+			if !self.nodes_postorder[idx].is_reduction() && !self.nodes_postorder[idx].is_matmul() {
 				continue;
 			}
 
@@ -865,13 +884,13 @@ impl PreCompilation {
 				head = parent;
 			}
 
-			self.nodes_postorder[head_idx].reduction_head_for = idx;
+			self.nodes_postorder[head_idx].config_head_for = idx;
 		}
 	}
 
 	pub fn find_fragments(&mut self) -> Result<(), TensorOpError> {
 		self.calc_shapes()?;
-		self.find_reduction_heads();
+		self.find_config_heads();
 		self.fragments_preorder.raw.clear();
 		for idx in self.nodes_postorder.indexes().rev() {
 			let (_, item, all_parents) = self.nodes_postorder.borrow_multiple(idx);
@@ -879,10 +898,12 @@ impl PreCompilation {
 				continue;
 			}
 			if let Some((&first_parent, other_parents)) = item.parents.split_first()
+				&& !all_parents[first_parent].is_matmul()
 				&& let parent_frag = all_parents[first_parent].fragment_index()
-				&& !item.is_reduction_head()
-				&& other_parents.iter().all(|&p| all_parents[p].fragment_index() == parent_frag)
-			{
+				&& !item.is_config_head()
+				&& other_parents.iter().all(|&p| {
+					!all_parents[p].is_matmul() && all_parents[p].fragment_index() == parent_frag
+				}) {
 				item.set_fragment_index(parent_frag);
 			} else {
 				let new_frag = self.fragments_preorder.push(Fragment { head: idx });
@@ -1002,7 +1023,7 @@ impl PreCompilation {
 				} else {
 					writeln!(w, "\t{node_id} [shape=box, style=filled, fillcolor=\"#ffffc0\"];")?;
 				}
-			} else if node.is_reduction_head() {
+			} else if node.is_config_head() {
 				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccccff\"];")?;
 			} else if node.is_fork() {
 				if unlikely(node.is_dead) {
@@ -1010,7 +1031,7 @@ impl PreCompilation {
 				} else {
 					writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ffcccc\"];")?;
 				}
-			} else if node.is_reduction() {
+			} else if node.is_reduction() || node.is_matmul() {
 				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ffccff\"];")?;
 			} else if node.is_captured() {
 				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccffcc\"];")?;
@@ -1028,8 +1049,16 @@ impl PreCompilation {
 				let frag_index = node.fragment_index();
 				if self.fragments_preorder.is_valid(frag_index) {
 					let frag_head = self.fragments_preorder[frag_index].head;
-					let fragment_kind = if self.nodes_postorder[frag_head].is_reduction_head() {
-						"Reduction"
+					let frag_node = &self.nodes_postorder[frag_head];
+					let fragment_kind = if frag_node.is_config_head() {
+						let frag_node = &self.nodes_postorder[frag_node.config_head_for];
+						if frag_node.is_reduction() {
+							"Reduction"
+						} else if frag_node.is_matmul() {
+							"MatMul"
+						} else {
+							"<config head>"
+						}
 					} else {
 						"Element-wise"
 					};
@@ -1039,6 +1068,11 @@ impl PreCompilation {
 						frag_head.raw
 					)?;
 				}
+				let ordered = match node.node_kind {
+					NodeKind::Binary(bin) => !bin.is_commutative(),
+					NodeKind::MatMul(_) => true,
+					_ => false,
+				};
 				for &child_index in &node.children {
 					if !self.nodes_postorder.is_valid(child_index) {
 						break;
@@ -1050,14 +1084,23 @@ impl PreCompilation {
 					} else {
 						self.shape_to_str(child.dtype, &child.shape)
 					};
-					let extra_style = if self.fragments_preorder.is_valid(frag_index)
-						&& !child.is_input()
-						&& frag_index != child.fragment_index()
-					{
-						// Edge crosses fragment boundary
-						", color=red, style=bold"
+					let extra_style = if ordered {
+						if child_index == node.children[0] {
+							", color=\"#aa0000\""
+						} else if child_index == node.children[1] {
+							", color=\"#00aa00\""
+						} else {
+							", color=\"#0000aa\""
+						}
 					} else {
-						""
+						", color=\"#000000\""
+					};
+					let extra_style = if self.fragments_preorder.is_valid(frag_index)
+						&& (child.is_input() || frag_index != child.fragment_index())
+					{
+						format!("{extra_style}, style=bold")
+					} else {
+						extra_style.to_string()
 					};
 					writeln!(
 						w,
@@ -1074,7 +1117,10 @@ impl PreCompilation {
 				let input_node = self.tensor_vec[capt_idx].input_node;
 				if input_node.is_sentinel() {
 					let cap_id = format!("ten_{}", capt_idx.raw);
-					writeln!(w, "\t{node_id} -> {cap_id} [label=<{label}>, constraint=true];")?;
+					writeln!(
+						w,
+						"\t{node_id} -> {cap_id} [label=<{label}>, style=bold, constraint=true];"
+					)?;
 					let tensor_ref = &self.tensor_vec[capt_idx].tensor_ref;
 					let name = tensor_ref.name.as_deref().unwrap_or("<unnamed>");
 					let name = Self::sanitize_for_graphviz_html(name);

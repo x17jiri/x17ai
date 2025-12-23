@@ -420,21 +420,30 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	//let expr = test4_x(dev.clone());
 	//let expr = test5(dev.clone());
 
+	let q = ExprTensorRef::new(Some("q".into()), f32::dtype, vec![15, 32]);
+	let kv = ExprTensorRef::new(Some("kv".into()), f32::dtype, vec![15, 32]);
+
 	let t = ExprTensorRef::new(Some("t".into()), f32::dtype, vec![15, 32]);
-	let m = ExprTensorRef::new(Some("m".into()), f32::dtype, vec![15, 32]);
+	let mq = ExprTensorRef::new(Some("mq".into()), f32::dtype, vec![15, 32]);
+	let mkv = ExprTensorRef::new(Some("mkv".into()), f32::dtype, vec![15, 32]);
 	let expr = RcExpr::new_tensor_input(t.clone());
 
-	let expr = x_rms_norm(expr, eps, internal_dtype)?;
-	let expr = expr.row_times_mat(RcExpr::new_tensor_input(m.clone()));
-	//let expr = x_softmax(expr, internal_dtype)?;
-	let expr = x_swiglu(expr, internal_dtype)?;
+	let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?;
+	let q = expr.clone().row_times_mat(RcExpr::new_tensor_input(mq.clone())).capture(q.clone());
+	let kv = expr.clone().row_times_mat(RcExpr::new_tensor_input(mkv.clone())).capture(kv.clone());
 
-	let expr = expr.capture(t.clone());
+	let expr = RcExpr::first(q, kv);
+	//let expr = x_softmax(expr, internal_dtype)?;
+	//	let expr = x_swiglu(expr, internal_dtype)?;
+
 	t.tensor.borrow_mut().replace(
-		x17ai::new::tensor::Tensor::new_empty(&[1024, 256], f32::dtype, dev.clone()).unwrap(),
+		x17ai::new::tensor::Tensor::new_empty(&[3333, 1024], f32::dtype, dev.clone()).unwrap(),
 	);
-	m.tensor.borrow_mut().replace(
-		x17ai::new::tensor::Tensor::new_empty(&[256, 512], f32::dtype, dev.clone()).unwrap(),
+	mq.tensor.borrow_mut().replace(
+		x17ai::new::tensor::Tensor::new_empty(&[1024, 1024], f32::dtype, dev.clone()).unwrap(),
+	);
+	mkv.tensor.borrow_mut().replace(
+		x17ai::new::tensor::Tensor::new_empty(&[1024, 1024], f32::dtype, dev.clone()).unwrap(),
 	);
 
 	let mut comp = PreCompilation::new(&expr.rc_expr)?;
