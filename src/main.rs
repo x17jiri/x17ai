@@ -161,6 +161,7 @@ fn laplacian(v: &ArrayView2<f32>) -> Array2<f32> {
 
 use std::rc::Rc;
 
+use thin_vec::thin_vec;
 use x17ai::autograd::{AutogradTensor, LossFn};
 use x17ai::new::expr::compile2::PreCompilation;
 use x17ai::new::expr::{ExprScalarRef, ExprTensorRef, RcExpr};
@@ -429,8 +430,18 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let expr = RcExpr::new_tensor_input(t.clone());
 
 	let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?;
-	let q = expr.clone().row_times_mat(RcExpr::new_tensor_input(mq.clone())).capture(q.clone());
-	let kv = expr.clone().row_times_mat(RcExpr::new_tensor_input(mkv.clone())).capture(kv.clone());
+	let q = expr
+		.clone()
+		.row_times_mat(RcExpr::new_tensor_input(mq.clone()))
+		.cast(f64::dtype)
+		.reshape(1, &[4, 4, 64])
+		.capture(q.clone());
+	let kv = expr
+		.clone()
+		.row_times_mat(RcExpr::new_tensor_input(mkv.clone()))
+		.reshape(1, &[2, 4, 64])
+		.cast(f64::dtype)
+		.capture(kv.clone());
 
 	let expr = RcExpr::first(q, kv);
 	//let expr = x_softmax(expr, internal_dtype)?;
@@ -443,7 +454,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 		x17ai::new::tensor::Tensor::new_empty(&[1024, 1024], f32::dtype, dev.clone()).unwrap(),
 	);
 	mkv.tensor.borrow_mut().replace(
-		x17ai::new::tensor::Tensor::new_empty(&[1024, 1024], f32::dtype, dev.clone()).unwrap(),
+		x17ai::new::tensor::Tensor::new_empty(&[1024, 512], f32::dtype, dev.clone()).unwrap(),
 	);
 
 	let mut comp = PreCompilation::new(&expr.rc_expr)?;

@@ -74,8 +74,8 @@ impl<'a> std::cmp::Eq for ShapeRef<'a> {
 
 pub enum NodeKind {
 	Input,
-	Cast,
 	Select(ExprSelectKind),
+	Format,
 	Unary(ExprUnaryKind),
 	Binary(ExprBinaryKind),
 	MatMul(ExprMatMulKind),
@@ -96,6 +96,10 @@ pub struct Node {
 	pub is_dead: bool,
 	pub reduction_fingerprint: u32,
 	pub config_head_for: NodeIndex32,
+
+	// `reshape_n` and `reshape_to` are used only if is_format()
+	pub reshape_n: u8,
+	pub reshape_to: ThinVec<usize>,
 
 	// This is one of:
 	// - ScalarRefIndex32
@@ -148,6 +152,10 @@ impl Node {
 
 	pub fn is_config_head(&self) -> bool {
 		!self.config_head_for.is_sentinel()
+	}
+
+	pub fn is_format(&self) -> bool {
+		matches!(self.node_kind, NodeKind::Format)
 	}
 
 	pub fn is_captured(&self) -> bool {
@@ -273,6 +281,8 @@ impl PreCompilation {
 		let cache_key: String;
 		let dtype: DType;
 		let mut n_config_driving = 0;
+		let mut reshape_n = 0;
+		let mut reshape_to = ThinVec::new();
 		match &expr.kind {
 			ExprKind::Capture(ExprCapture { expr: x, tensor_ref }) => {
 				let child_idx = self.load_expr(x, state)?;
@@ -284,9 +294,9 @@ impl PreCompilation {
 					state.visited.insert(expr_key, child_idx);
 					return Ok(child_idx);
 				}
-				// Insert `Identity` node to perform the capture.
+				// Insert identity node to perform the capture.
 				// This node is also a root.
-				node_kind = NodeKind::Unary(ExprUnaryKind::Identity);
+				node_kind = NodeKind::Format;
 				out_is_scalar = child.out_is_scalar;
 				dtype = child.dtype;
 				children = [child_idx, NodeIndex32::new_sentinel()];
@@ -368,13 +378,35 @@ impl PreCompilation {
 				cache_key = String::new();
 			},
 			ExprKind::Cast(cast) => {
-				let child_idx = self.load_expr(cast, state)?;
+				let mut child_idx = self.load_expr(cast, state)?;
 				let child = &self.nodes_postorder[child_idx];
 				out_is_scalar = child.out_is_scalar;
 				dtype = expr.dtype;
+				if child.is_format() {
+					child_idx = child.children[0];
+					reshape_n = child.reshape_n;
+					reshape_to = child.reshape_to.clone();
+				}
 				children = [child_idx, NodeIndex32::new_sentinel()];
-				node_kind = NodeKind::Cast;
+				node_kind = NodeKind::Format;
 				cache_key = format!("cast:{:?}:{:?}", expr.dtype, child_idx.raw);
+			},
+			ExprKind::Reshape(reshape) => {
+				let mut child_idx = self.load_expr(&reshape.expr, state)?;
+				reshape_n = reshape.reshape_n;
+				reshape_to = reshape.reshape_to.clone();
+				out_is_scalar = false;
+				dtype = expr.dtype;
+				let child = &self.nodes_postorder[child_idx];
+				if child.is_format() && child.reshape_n == 0 && child.reshape_to.is_empty() {
+					child_idx = child.children[0];
+				}
+				children = [child_idx, NodeIndex32::new_sentinel()];
+				node_kind = NodeKind::Format;
+				cache_key = format!(
+					"reshape:{:?}:{:?}:{:?}",
+					reshape.reshape_n, reshape.reshape_to, child_idx.raw
+				);
 			},
 			ExprKind::Unary(unary) => {
 				let child_idx = self.load_expr(&unary.expr, state)?;
@@ -466,6 +498,8 @@ impl PreCompilation {
 			is_dead: false,
 			reduction_fingerprint: 0,
 			config_head_for: NodeIndex32::new_sentinel(),
+			reshape_n,
+			reshape_to,
 			x_index,
 		});
 		debug_assert!(index == next_index);
@@ -926,7 +960,21 @@ impl PreCompilation {
 					format!("<b>Scalar</b><br/><font color='blue'><b>{name}</b></font>")
 				}
 			},
-			NodeKind::Cast => format!("Cast to {:?}", node.dtype),
+			NodeKind::Format => {
+				let child = &self.nodes_postorder[node.children[0]];
+				let mut result = format!("<b>Format</b>");
+				if child.dtype != node.dtype {
+					result = format!("{result}<br/>- cast to {:?}", node.dtype)
+				};
+				if node.reshape_n != 0 || !node.reshape_to.is_empty() {
+					result = format!(
+						"{result}<br/>- reshape {} dims to {}",
+						node.reshape_n,
+						self.shape_to_str(node.dtype, &node.reshape_to)
+					);
+				}
+				result
+			},
 			NodeKind::Select(select) => match select {
 				ExprSelectKind::Even => "<b>Select Even</b>".to_string(),
 				ExprSelectKind::Odd => "<b>Select Odd</b>".to_string(),
@@ -938,7 +986,6 @@ impl PreCompilation {
 				ExprUnaryKind::Abs => "<b>Abs</b>".to_string(),
 				ExprUnaryKind::Sqrt => "<b>Sqrt</b>".to_string(),
 				ExprUnaryKind::Recip => "<b>Recip</b>".to_string(),
-				ExprUnaryKind::Identity => "<b>Identity</b>".to_string(),
 			},
 			NodeKind::Binary(binary) => match binary {
 				ExprBinaryKind::Add => "<b>Add</b>".to_string(),
@@ -946,7 +993,7 @@ impl PreCompilation {
 				ExprBinaryKind::Mul => "<b>Mul</b>".to_string(),
 			},
 			NodeKind::MatMul(matmul) => match matmul {
-				ExprMatMulKind::RowTimesMat => "<b>row * mat</b>".to_string(),
+				ExprMatMulKind::RowTimesMat => "<b>row * MAT</b>".to_string(),
 			},
 			NodeKind::Reduction(reduction) => match reduction {
 				ExprReductionKind::Sum => "<b>Sum</b>".to_string(),

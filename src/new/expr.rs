@@ -19,6 +19,8 @@ use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use thin_vec::ThinVec;
+
 use crate::new::tensor::Tensor;
 use crate::tensor::DType;
 
@@ -41,6 +43,7 @@ pub enum ExprKind {
 	Input(ExprInput),
 	Capture(ExprCapture),
 	Cast(Rc<Expr>),
+	Reshape(ExprReshape),
 	SumToMean(Rc<Expr>),
 	Select(ExprSelect),
 	Unary(ExprUnary),
@@ -75,6 +78,12 @@ pub struct ExprCapture {
 	pub tensor_ref: Rc<ExprTensorRef>,
 }
 
+pub struct ExprReshape {
+	pub expr: Rc<Expr>,
+	pub reshape_n: u8,
+	pub reshape_to: ThinVec<usize>,
+}
+
 pub struct ExprSelect {
 	pub kind: ExprSelectKind,
 	pub expr: Rc<Expr>,
@@ -99,7 +108,6 @@ pub enum ExprUnaryKind {
 	Abs,
 	Sqrt,
 	Recip,
-	Identity,
 }
 
 pub struct ExprFirst {
@@ -220,6 +228,20 @@ impl RcExpr {
 					dtype,
 				}),
 			}
+		}
+	}
+
+	pub fn reshape(self, reshape_n: usize, reshape_to: &[usize]) -> RcExpr {
+		let dtype = self.rc_expr.dtype;
+		RcExpr {
+			rc_expr: Rc::new(Expr {
+				kind: ExprKind::Reshape(ExprReshape {
+					expr: self.rc_expr,
+					reshape_n: u8::try_from(reshape_n).unwrap_or(255),
+					reshape_to: ThinVec::from(reshape_to.to_vec()),
+				}),
+				dtype,
+			}),
 		}
 	}
 
