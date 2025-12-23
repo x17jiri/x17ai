@@ -433,14 +433,12 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let q = expr
 		.clone()
 		.row_times_mat(RcExpr::new_tensor_input(mq.clone()))
-		.cast(f64::dtype)
 		.reshape(1, &[4, 4, 64])
 		.capture(q.clone());
 	let kv = expr
 		.clone()
 		.row_times_mat(RcExpr::new_tensor_input(mkv.clone()))
 		.reshape(1, &[2, 4, 64])
-		.cast(f64::dtype)
 		.capture(kv.clone());
 
 	let expr = RcExpr::first(q, kv);

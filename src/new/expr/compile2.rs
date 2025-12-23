@@ -158,6 +158,10 @@ impl Node {
 		matches!(self.node_kind, NodeKind::Format)
 	}
 
+	pub fn is_reshape(&self) -> bool {
+		self.reshape_n != 0 || !self.reshape_to.is_empty()
+	}
+
 	pub fn is_captured(&self) -> bool {
 		!self.capture.is_empty()
 	}
@@ -776,6 +780,7 @@ impl PreCompilation {
 		Ok(())
 	}
 
+	#[allow(clippy::too_many_lines)]
 	fn calc_shapes(&mut self) -> Result<(), TensorOpError> {
 		for t in &mut self.tensor_vec {
 			t.shape.clear();
@@ -826,6 +831,17 @@ impl PreCompilation {
 						} else {
 							me.shape.push(0);
 						}
+					},
+					NodeKind::Format if me.is_reshape() => {
+						let keep = me.shape.len().saturating_sub(me.reshape_n as usize);
+						let elems = me.shape.iter().skip(keep).product::<usize>();
+						let new_elems = me.reshape_to.iter().product::<usize>();
+						if elems != new_elems {
+							cold_path();
+							return Err(TensorOpError::InvalidReshape);
+						}
+						me.shape.truncate(keep);
+						me.shape.extend_from_slice(&me.reshape_to);
 					},
 					_ => continue,
 				}
@@ -891,7 +907,7 @@ impl PreCompilation {
 		Ok(())
 	}
 
-	fn find_config_heads(&mut self) {
+	fn find_heads(&mut self) {
 		for idx in self.nodes_postorder.indexes() {
 			if !self.nodes_postorder[idx].is_reduction() && !self.nodes_postorder[idx].is_matmul() {
 				continue;
@@ -911,7 +927,9 @@ impl PreCompilation {
 				let parent = &self.nodes_postorder[parent_idx];
 				let parent_shape = ShapeRef::new(&parent.shape);
 				let parent_fingerprint = parent.reduction_fingerprint;
-				if parent_shape != start_shape || parent_fingerprint != start_fingerprint {
+				if (!parent.is_format() && parent_shape != start_shape)
+					|| parent_fingerprint != start_fingerprint
+				{
 					break;
 				}
 				head_idx = parent_idx;
@@ -924,7 +942,7 @@ impl PreCompilation {
 
 	pub fn find_fragments(&mut self) -> Result<(), TensorOpError> {
 		self.calc_shapes()?;
-		self.find_config_heads();
+		self.find_heads();
 		self.fragments_preorder.raw.clear();
 		for idx in self.nodes_postorder.indexes().rev() {
 			let (_, item, all_parents) = self.nodes_postorder.borrow_multiple(idx);
@@ -964,9 +982,9 @@ impl PreCompilation {
 				let child = &self.nodes_postorder[node.children[0]];
 				let mut result = format!("<b>Format</b>");
 				if child.dtype != node.dtype {
-					result = format!("{result}<br/>- cast to {:?}", node.dtype)
+					result = format!("{result}<br/>- cast to {}", node.dtype);
 				};
-				if node.reshape_n != 0 || !node.reshape_to.is_empty() {
+				if node.is_reshape() {
 					result = format!(
 						"{result}<br/>- reshape {} dims to {}",
 						node.reshape_n,

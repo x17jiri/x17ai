@@ -84,7 +84,7 @@
 #![allow(clippy::items_after_statements)]
 #![allow(clippy::if_not_else)]
 #![allow(irrefutable_let_patterns)]
-
+#![allow(clippy::useless_format)]
 use std::borrow::Cow;
 use std::convert::Infallible;
 
@@ -120,7 +120,8 @@ impl<Code: Copy + std::fmt::Debug> From<Infallible> for ErrPack<Code> {
 	}
 }
 
-impl<Code: Copy + std::fmt::Debug> std::error::Error for ErrPack<Code> {}
+impl<Code: Copy + std::fmt::Debug> std::error::Error for ErrPack<Code> {
+}
 
 impl<Code: Copy + std::fmt::Debug> std::fmt::Display for ErrPack<Code> {
 	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
