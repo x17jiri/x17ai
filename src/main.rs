@@ -425,6 +425,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let kv = ExprTensorRef::new(Some("kv".into()), f32::dtype, vec![15, 32]);
 
 	let t = ExprTensorRef::new(Some("t".into()), f32::dtype, vec![15, 32]);
+	let r = ExprTensorRef::new(Some("r".into()), f32::dtype, vec![15, 32]);
 	let mq = ExprTensorRef::new(Some("mq".into()), f32::dtype, vec![15, 32]);
 	let mkv = ExprTensorRef::new(Some("mkv".into()), f32::dtype, vec![15, 32]);
 	let expr = RcExpr::new_tensor_input(t.clone());
@@ -438,12 +439,14 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let kv = expr
 		.clone()
 		.row_times_mat(RcExpr::new_tensor_input(mkv.clone()))
-		.reshape(1, &[2, 4, 64])
+		.reshape(1, &[1, 4, 64 + 64])
 		.capture(kv.clone());
 
-	let expr = RcExpr::first(q, kv);
+	//let expr = RcExpr::first(q, kv);
 	//let expr = x_softmax(expr, internal_dtype)?;
 	//	let expr = x_swiglu(expr, internal_dtype)?;
+
+	let expr = q.attention(kv).reshape(3, &[1024]).capture(r.clone());
 
 	t.tensor.borrow_mut().replace(
 		x17ai::new::tensor::Tensor::new_empty(&[3333, 1024], f32::dtype, dev.clone()).unwrap(),
@@ -452,7 +455,8 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 		x17ai::new::tensor::Tensor::new_empty(&[1024, 1024], f32::dtype, dev.clone()).unwrap(),
 	);
 	mkv.tensor.borrow_mut().replace(
-		x17ai::new::tensor::Tensor::new_empty(&[1024, 512], f32::dtype, dev.clone()).unwrap(),
+		x17ai::new::tensor::Tensor::new_empty(&[1024, 4 * (64 + 64)], f32::dtype, dev.clone())
+			.unwrap(),
 	);
 
 	let mut comp = PreCompilation::new(&expr.rc_expr)?;

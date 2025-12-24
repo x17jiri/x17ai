@@ -42,15 +42,9 @@ pub struct Expr {
 pub enum ExprKind {
 	Input(ExprInput),
 	Capture(ExprCapture),
-	Cast(Rc<Expr>),
 	Reshape(ExprReshape),
-	SumToMean(Rc<Expr>),
-	Select(ExprSelect),
 	Unary(ExprUnary),
 	Binary(ExprBinary),
-	MatMul(ExprMatMul),
-	Reduction(ExprReduction),
-	First(ExprFirst),
 }
 
 pub enum ExprInput {
@@ -84,17 +78,6 @@ pub struct ExprReshape {
 	pub reshape_to: ThinVec<usize>,
 }
 
-pub struct ExprSelect {
-	pub kind: ExprSelectKind,
-	pub expr: Rc<Expr>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExprSelectKind {
-	Even,
-	Odd,
-}
-
 pub struct ExprUnary {
 	pub kind: ExprUnaryKind,
 	pub expr: Rc<Expr>,
@@ -108,6 +91,15 @@ pub enum ExprUnaryKind {
 	Abs,
 	Sqrt,
 	Recip,
+	Cast,
+
+	Sum,
+	Max,
+
+	SelectEven,
+	SelectOdd,
+
+	SumToMean,
 }
 
 pub struct ExprFirst {
@@ -126,37 +118,10 @@ pub enum ExprBinaryKind {
 	Add,
 	Sub,
 	Mul,
-}
 
-impl ExprBinaryKind {
-	pub fn is_commutative(&self) -> bool {
-		match self {
-			ExprBinaryKind::Add | ExprBinaryKind::Mul => true,
-			ExprBinaryKind::Sub => false,
-		}
-	}
-}
-
-pub struct ExprMatMul {
-	pub kind: ExprMatMulKind,
-	pub lhs: Rc<Expr>,
-	pub rhs: Rc<Expr>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExprMatMulKind {
+	First,
 	RowTimesMat,
-}
-
-pub struct ExprReduction {
-	pub kind: ExprReductionKind,
-	pub expr: Rc<Expr>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExprReductionKind {
-	Sum,
-	Max,
+	Attention,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -224,7 +189,10 @@ impl RcExpr {
 		} else {
 			RcExpr {
 				rc_expr: Rc::new(Expr {
-					kind: ExprKind::Cast(self.rc_expr),
+					kind: ExprKind::Unary(ExprUnary {
+						kind: ExprUnaryKind::Cast,
+						expr: self.rc_expr,
+					}),
 					dtype,
 				}),
 			}
@@ -314,8 +282,8 @@ impl RcExpr {
 		let dtype = self.rc_expr.dtype;
 		RcExpr {
 			rc_expr: Rc::new(Expr {
-				kind: ExprKind::Select(ExprSelect {
-					kind: ExprSelectKind::Odd,
+				kind: ExprKind::Unary(ExprUnary {
+					kind: ExprUnaryKind::SelectOdd,
 					expr: self.rc_expr,
 				}),
 				dtype,
@@ -327,8 +295,8 @@ impl RcExpr {
 		let dtype = self.rc_expr.dtype;
 		RcExpr {
 			rc_expr: Rc::new(Expr {
-				kind: ExprKind::Select(ExprSelect {
-					kind: ExprSelectKind::Even,
+				kind: ExprKind::Unary(ExprUnary {
+					kind: ExprUnaryKind::SelectEven,
 					expr: self.rc_expr,
 				}),
 				dtype,
@@ -340,8 +308,8 @@ impl RcExpr {
 		let dtype = self.rc_expr.dtype;
 		RcExpr {
 			rc_expr: Rc::new(Expr {
-				kind: ExprKind::Reduction(ExprReduction {
-					kind: ExprReductionKind::Sum,
+				kind: ExprKind::Unary(ExprUnary {
+					kind: ExprUnaryKind::Sum,
 					expr: self.rc_expr,
 				}),
 				dtype,
@@ -353,7 +321,10 @@ impl RcExpr {
 		let dtype = self.rc_expr.dtype;
 		RcExpr {
 			rc_expr: Rc::new(Expr {
-				kind: ExprKind::SumToMean(self.rc_expr),
+				kind: ExprKind::Unary(ExprUnary {
+					kind: ExprUnaryKind::SumToMean,
+					expr: self.rc_expr,
+				}),
 				dtype,
 			}),
 		}
@@ -367,8 +338,8 @@ impl RcExpr {
 		let dtype = self.rc_expr.dtype;
 		RcExpr {
 			rc_expr: Rc::new(Expr {
-				kind: ExprKind::Reduction(ExprReduction {
-					kind: ExprReductionKind::Max,
+				kind: ExprKind::Unary(ExprUnary {
+					kind: ExprUnaryKind::Max,
 					expr: self.rc_expr,
 				}),
 				dtype,
@@ -380,7 +351,11 @@ impl RcExpr {
 		let dtype = first.rc_expr.dtype;
 		RcExpr {
 			rc_expr: Rc::new(Expr {
-				kind: ExprKind::First(ExprFirst { lhs: first.rc_expr, rhs: second.rc_expr }),
+				kind: ExprKind::Binary(ExprBinary {
+					kind: ExprBinaryKind::First,
+					lhs: first.rc_expr,
+					rhs: second.rc_expr,
+				}),
 				dtype,
 			}),
 		}
@@ -400,10 +375,24 @@ impl RcExpr {
 		let dtype = self.rc_expr.dtype;
 		RcExpr {
 			rc_expr: Rc::new(Expr {
-				kind: ExprKind::MatMul(ExprMatMul {
-					kind: ExprMatMulKind::RowTimesMat,
+				kind: ExprKind::Binary(ExprBinary {
+					kind: ExprBinaryKind::RowTimesMat,
 					lhs: self.rc_expr,
 					rhs: mat.rc_expr,
+				}),
+				dtype,
+			}),
+		}
+	}
+
+	pub fn attention(self, kv: RcExpr) -> RcExpr {
+		let dtype = self.rc_expr.dtype;
+		RcExpr {
+			rc_expr: Rc::new(Expr {
+				kind: ExprKind::Binary(ExprBinary {
+					kind: ExprBinaryKind::Attention,
+					lhs: self.rc_expr,
+					rhs: kv.rc_expr,
 				}),
 				dtype,
 			}),

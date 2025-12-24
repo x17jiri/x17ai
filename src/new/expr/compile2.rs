@@ -25,10 +25,8 @@ use std::rc::Rc;
 
 use thin_vec::ThinVec;
 
-use super::{
-	Expr, ExprBinaryKind, ExprInput, ExprReductionKind, ExprScalarRef, ExprTensorRef, ExprUnaryKind,
-};
-use crate::new::expr::{ExprCapture, ExprKind, ExprMatMulKind, ExprSelectKind};
+use super::{Expr, ExprBinaryKind, ExprInput, ExprScalarRef, ExprTensorRef, ExprUnaryKind};
+use crate::new::expr::{ExprCapture, ExprKind};
 use crate::tensor::device::dtype::common_dtype;
 use crate::tensor::{DType, TensorOpError};
 use crate::util::bitmap::IndexBitmap;
@@ -72,14 +70,58 @@ impl<'a> std::cmp::PartialEq for ShapeRef<'a> {
 impl<'a> std::cmp::Eq for ShapeRef<'a> {
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnaryKind {
+	Neg,
+	Exp,
+	Ln,
+	Abs,
+	Sqrt,
+	Recip,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReductionKind {
+	Sum,
+	Max,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectKind {
+	Even,
+	Odd,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BinaryKind {
+	Add,
+	Sub,
+	Mul,
+}
+
+impl BinaryKind {
+	pub fn is_commutative(&self) -> bool {
+		match self {
+			BinaryKind::Add | BinaryKind::Mul => true,
+			BinaryKind::Sub => false,
+		}
+	}
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatMulKind {
+	RowTimesMat,
+}
+
 pub enum NodeKind {
 	Input,
-	Select(ExprSelectKind),
+	Select(SelectKind),
 	Format,
-	Unary(ExprUnaryKind),
-	Binary(ExprBinaryKind),
-	MatMul(ExprMatMulKind),
-	Reduction(ExprReductionKind),
+	Unary(UnaryKind),
+	Binary(BinaryKind),
+	MatMul(MatMulKind),
+	Attention,
+	Reduction(ReductionKind),
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -148,6 +190,10 @@ impl Node {
 
 	pub fn is_matmul(&self) -> bool {
 		matches!(self.node_kind, NodeKind::MatMul(_))
+	}
+
+	pub fn is_attention(&self) -> bool {
+		matches!(self.node_kind, NodeKind::Attention)
 	}
 
 	pub fn is_config_head(&self) -> bool {
@@ -288,31 +334,6 @@ impl PreCompilation {
 		let mut reshape_n = 0;
 		let mut reshape_to = ThinVec::new();
 		match &expr.kind {
-			ExprKind::Capture(ExprCapture { expr: x, tensor_ref }) => {
-				let child_idx = self.load_expr(x, state)?;
-				let tensor_idx =
-					self.add_tensor_output(tensor_ref.clone(), self.nodes_postorder.next_index());
-				let child = &mut self.nodes_postorder[child_idx];
-				if !child.is_input() {
-					child.capture.push(tensor_idx);
-					state.visited.insert(expr_key, child_idx);
-					return Ok(child_idx);
-				}
-				// Insert identity node to perform the capture.
-				// This node is also a root.
-				node_kind = NodeKind::Format;
-				out_is_scalar = child.out_is_scalar;
-				dtype = child.dtype;
-				children = [child_idx, NodeIndex32::new_sentinel()];
-				capture.push(tensor_idx);
-				cache_key = format!("identity:{:?}", child_idx.raw);
-			},
-			ExprKind::First(first) => {
-				let first_child = self.load_expr(&first.lhs, state)?;
-				let _second_child = self.load_expr(&first.rhs, state)?;
-				state.visited.insert(expr_key, first_child);
-				return Ok(first_child);
-			},
 			ExprKind::Input(input) => {
 				match input {
 					ExprInput::Tensor(tensor_ref) => {
@@ -351,49 +372,24 @@ impl PreCompilation {
 				node_kind = NodeKind::Input;
 				cache_key = String::new();
 			},
-			ExprKind::Select(select) => {
-				let child_idx = self.load_expr(&select.expr, state)?;
-				let child = &self.nodes_postorder[child_idx];
-				out_is_scalar = false;
-				dtype = child.dtype;
-				children = [child_idx, NodeIndex32::new_sentinel()];
-				node_kind = NodeKind::Select(select.kind);
-				cache_key = format!("select:{:?}:{:?}", select.kind, child_idx.raw);
-			},
-			ExprKind::SumToMean(val) => {
-				let child_idx = self.load_expr(val, state)?;
-				let child = &self.nodes_postorder[child_idx];
-
-				// Insert `ScalarInput` node.
-				out_is_scalar = true;
-				dtype = child.dtype;
-				children = [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()];
-				let scalar_ref = ExprScalarRef::new(Some("__sum_to_mean__".into()), dtype);
-				match self.add_scalar_input(scalar_ref, self.nodes_postorder.next_index()) {
-					Ok(scalar_idx) => {
-						self.sum_to_mean.push(SumToMean { node: child_idx, scalar: scalar_idx });
-						x_index = scalar_idx.to_untyped();
-					},
-					Err(_) => {
-						unreachable!();
-					},
+			ExprKind::Capture(ExprCapture { expr: x, tensor_ref }) => {
+				let child_idx = self.load_expr(x, state)?;
+				let tensor_idx =
+					self.add_tensor_output(tensor_ref.clone(), self.nodes_postorder.next_index());
+				let child = &mut self.nodes_postorder[child_idx];
+				if !child.is_input() {
+					child.capture.push(tensor_idx);
+					state.visited.insert(expr_key, child_idx);
+					return Ok(child_idx);
 				}
-				node_kind = NodeKind::Input;
-				cache_key = String::new();
-			},
-			ExprKind::Cast(cast) => {
-				let mut child_idx = self.load_expr(cast, state)?;
-				let child = &self.nodes_postorder[child_idx];
-				out_is_scalar = child.out_is_scalar;
-				dtype = expr.dtype;
-				if child.is_format() {
-					child_idx = child.children[0];
-					reshape_n = child.reshape_n;
-					reshape_to = child.reshape_to.clone();
-				}
-				children = [child_idx, NodeIndex32::new_sentinel()];
+				// Insert identity node to perform the capture.
+				// This node is also a root.
 				node_kind = NodeKind::Format;
-				cache_key = format!("cast:{:?}:{:?}", expr.dtype, child_idx.raw);
+				out_is_scalar = child.out_is_scalar;
+				dtype = child.dtype;
+				children = [child_idx, NodeIndex32::new_sentinel()];
+				capture.push(tensor_idx);
+				cache_key = format!("identity:{:?}", child_idx.raw);
 			},
 			ExprKind::Reshape(reshape) => {
 				let mut child_idx = self.load_expr(&reshape.expr, state)?;
@@ -415,56 +411,143 @@ impl PreCompilation {
 			ExprKind::Unary(unary) => {
 				let child_idx = self.load_expr(&unary.expr, state)?;
 				let child = &self.nodes_postorder[child_idx];
-				out_is_scalar = child.out_is_scalar;
-				dtype = child.dtype;
-				children = [child_idx, NodeIndex32::new_sentinel()];
-				node_kind = NodeKind::Unary(unary.kind);
-				cache_key = format!("unary:{:?}:{:?}", unary.kind, child_idx.raw);
+				match unary.kind {
+					ExprUnaryKind::Cast => {
+						out_is_scalar = child.out_is_scalar;
+						dtype = expr.dtype;
+						let mut child_idx = child_idx;
+						if child.is_format() {
+							child_idx = child.children[0];
+							reshape_n = child.reshape_n;
+							reshape_to = child.reshape_to.clone();
+						}
+						children = [child_idx, NodeIndex32::new_sentinel()];
+						node_kind = NodeKind::Format;
+						cache_key = format!("cast:{:?}:{:?}", expr.dtype, child_idx.raw);
+					},
+					ExprUnaryKind::Neg
+					| ExprUnaryKind::Exp
+					| ExprUnaryKind::Ln
+					| ExprUnaryKind::Abs
+					| ExprUnaryKind::Sqrt
+					| ExprUnaryKind::Recip => {
+						out_is_scalar = child.out_is_scalar;
+						dtype = child.dtype;
+						children = [child_idx, NodeIndex32::new_sentinel()];
+						let unary_kind = match unary.kind {
+							ExprUnaryKind::Neg => UnaryKind::Neg,
+							ExprUnaryKind::Exp => UnaryKind::Exp,
+							ExprUnaryKind::Ln => UnaryKind::Ln,
+							ExprUnaryKind::Abs => UnaryKind::Abs,
+							ExprUnaryKind::Sqrt => UnaryKind::Sqrt,
+							ExprUnaryKind::Recip => UnaryKind::Recip,
+							_ => unreachable!(),
+						};
+						node_kind = NodeKind::Unary(unary_kind);
+						cache_key = format!("unary:{:?}:{:?}", unary_kind, child_idx.raw);
+					},
+					ExprUnaryKind::Sum | ExprUnaryKind::Max => {
+						out_is_scalar = child.out_is_scalar;
+						dtype = child.dtype;
+						children = [child_idx, NodeIndex32::new_sentinel()];
+						n_config_driving = 1;
+						let reduction_kind = match unary.kind {
+							ExprUnaryKind::Sum => ReductionKind::Sum,
+							ExprUnaryKind::Max => ReductionKind::Max,
+							_ => unreachable!(),
+						};
+						node_kind = NodeKind::Reduction(reduction_kind);
+						cache_key = format!("reduction:{:?}:{:?}", reduction_kind, child_idx.raw);
+					},
+					ExprUnaryKind::SelectEven | ExprUnaryKind::SelectOdd => {
+						out_is_scalar = false;
+						dtype = child.dtype;
+						children = [child_idx, NodeIndex32::new_sentinel()];
+						let select_kind = match unary.kind {
+							ExprUnaryKind::SelectEven => SelectKind::Even,
+							ExprUnaryKind::SelectOdd => SelectKind::Odd,
+							_ => unreachable!(),
+						};
+						node_kind = NodeKind::Select(select_kind);
+						cache_key = format!("select:{:?}:{:?}", select_kind, child_idx.raw);
+					},
+					ExprUnaryKind::SumToMean => {
+						// Insert `ScalarInput` node.
+						out_is_scalar = true;
+						dtype = child.dtype;
+						children = [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()];
+						let scalar_ref = ExprScalarRef::new(Some("__sum_to_mean__".into()), dtype);
+						match self.add_scalar_input(scalar_ref, self.nodes_postorder.next_index()) {
+							Ok(scalar_idx) => {
+								self.sum_to_mean
+									.push(SumToMean { node: child_idx, scalar: scalar_idx });
+								x_index = scalar_idx.to_untyped();
+							},
+							Err(_) => {
+								unreachable!();
+							},
+						}
+						node_kind = NodeKind::Input;
+						cache_key = String::new();
+					},
+				}
 			},
 			ExprKind::Binary(binary) => {
 				let a_idx = self.load_expr(&binary.lhs, state)?;
 				let b_idx = self.load_expr(&binary.rhs, state)?;
-				let (a_idx, b_idx) = if binary.kind.is_commutative() && a_idx > b_idx {
-					(b_idx, a_idx)
-				} else {
-					(a_idx, b_idx)
-				};
-				let a = &self.nodes_postorder[a_idx];
-				let b = &self.nodes_postorder[b_idx];
-				dtype = common_dtype(a.dtype, b.dtype);
+				match binary.kind {
+					ExprBinaryKind::Add | ExprBinaryKind::Sub | ExprBinaryKind::Mul => {
+						let (binary_kind, commutative) = match binary.kind {
+							ExprBinaryKind::Add => (BinaryKind::Add, true),
+							ExprBinaryKind::Sub => (BinaryKind::Sub, false),
+							ExprBinaryKind::Mul => (BinaryKind::Mul, true),
+							_ => unreachable!(),
+						};
+						let (a_idx, b_idx) = if commutative && a_idx > b_idx {
+							(b_idx, a_idx)
+						} else {
+							(a_idx, b_idx)
+						};
+						let a = &self.nodes_postorder[a_idx];
+						let b = &self.nodes_postorder[b_idx];
+						dtype = common_dtype(a.dtype, b.dtype);
 
-				out_is_scalar = a.out_is_scalar && b.out_is_scalar;
-				children = [a_idx, b_idx];
-				node_kind = NodeKind::Binary(binary.kind);
+						out_is_scalar = a.out_is_scalar && b.out_is_scalar;
+						children = [a_idx, b_idx];
+						node_kind = NodeKind::Binary(binary_kind);
 
-				cache_key = format!("binary:{:?}:{:?}:{:?}", binary.kind, a_idx.raw, b_idx.raw);
-			},
-			ExprKind::MatMul(matmul) => {
-				let a_idx = self.load_expr(&matmul.lhs, state)?;
-				let b_idx = self.load_expr(&matmul.rhs, state)?;
-				let a = &self.nodes_postorder[a_idx];
-				let b = &self.nodes_postorder[b_idx];
-				dtype = common_dtype(a.dtype, b.dtype);
+						cache_key =
+							format!("binary:{:?}:{:?}:{:?}", binary_kind, a_idx.raw, b_idx.raw);
+					},
+					ExprBinaryKind::First => {
+						state.visited.insert(expr_key, a_idx);
+						return Ok(a_idx);
+					},
+					ExprBinaryKind::RowTimesMat => {
+						let matmul_kind = MatMulKind::RowTimesMat;
+						let a = &self.nodes_postorder[a_idx];
+						let b = &self.nodes_postorder[b_idx];
+						dtype = common_dtype(a.dtype, b.dtype);
 
-				out_is_scalar = a.out_is_scalar && b.out_is_scalar;
-				children = [a_idx, b_idx];
-				n_config_driving = 1;
-				node_kind = NodeKind::MatMul(matmul.kind);
-				match matmul.kind {
-					ExprMatMulKind::RowTimesMat => {
-						cache_key = format!("row_times_mat:{:?}:{:?}", a_idx.raw, b_idx.raw);
+						out_is_scalar = a.out_is_scalar && b.out_is_scalar;
+						children = [a_idx, b_idx];
+						n_config_driving = 1;
+						node_kind = NodeKind::MatMul(matmul_kind);
+						cache_key =
+							format!("matmul:{:?}:{:?}:{:?}", matmul_kind, a_idx.raw, b_idx.raw);
+					},
+					ExprBinaryKind::Attention => {
+						let a = &self.nodes_postorder[a_idx];
+						let b = &self.nodes_postorder[b_idx];
+						dtype = common_dtype(a.dtype, b.dtype);
+
+						out_is_scalar = false;
+						children = [a_idx, b_idx];
+						n_config_driving = 1;
+						node_kind = NodeKind::Attention;
+						cache_key = format!("attention:{:?}:{:?}", a_idx.raw, b_idx.raw);
 					},
 				}
-			},
-			ExprKind::Reduction(reduction) => {
-				let child_idx = self.load_expr(&reduction.expr, state)?;
-				let child = &self.nodes_postorder[child_idx];
-				out_is_scalar = child.out_is_scalar;
-				dtype = child.dtype;
-				children = [child_idx, NodeIndex32::new_sentinel()];
-				n_config_driving = 1;
-				node_kind = NodeKind::Reduction(reduction.kind);
-				cache_key = format!("reduction:{:?}:{:?}", reduction.kind, child_idx.raw);
 			},
 		}
 
@@ -583,7 +666,7 @@ impl PreCompilation {
 		for idx in self.nodes_postorder.indexes() {
 			let me = &mut self.nodes_postorder[idx];
 			if unlikely(me.is_dead) {
-				if me.is_reduction() || me.is_matmul() {
+				if me.is_reduction() || me.is_matmul() || me.is_attention() {
 					n_dead_config_driving += 1;
 				}
 				continue;
@@ -592,7 +675,7 @@ impl PreCompilation {
 				let left_child = me.children[0];
 				let right_child = me.children[1];
 				bitmap.union(idx, left_child, right_child);
-				if me.is_matmul() {
+				if me.is_matmul() || me.is_attention() {
 					bitmap.set_bit(idx, n_config_driving);
 					n_config_driving += 1;
 				}
@@ -756,6 +839,19 @@ impl PreCompilation {
 		}
 	}
 
+	fn split_shape<const N: usize>(shape: &[usize]) -> (&[usize], [usize; N]) {
+		let len = shape.len();
+		let cnt = len.min(N);
+		let rest = len - cnt;
+		let mut a = [1; N];
+		for i in 0..N {
+			if i < cnt {
+				a[N - 1 - i] = shape[len - 1 - i];
+			}
+		}
+		(&shape[..rest], a)
+	}
+
 	fn broadcast_shapes(
 		result: &mut ThinVec<usize>,
 		a: &[usize],
@@ -856,29 +952,27 @@ impl PreCompilation {
 				#[allow(clippy::single_match_else)]
 				#[allow(clippy::len_zero)]
 				match me.node_kind {
-					NodeKind::MatMul(ExprMatMulKind::RowTimesMat) => {
-						let (a_len, a_rest) = if a_shape.len() > 0 {
-							(a_shape[a_shape.len() - 1], &a_shape[..a_shape.len() - 1])
-						} else {
-							(1, a_shape)
-						};
-						let (b_row, b_col, b_rest) = if b_shape.len() >= 2 {
-							(
-								b_shape[b_shape.len() - 2],
-								b_shape[b_shape.len() - 1],
-								&b_shape[..b_shape.len() - 2],
-							)
-						} else if b_shape.len() == 1 {
-							(1, b_shape[b_shape.len() - 1], &b_shape[..0])
-						} else {
-							(1, 1, b_shape)
-						};
+					NodeKind::MatMul(MatMulKind::RowTimesMat) => {
+						let (a_rest, [a_len]) = Self::split_shape::<1>(a_shape);
+						let (b_rest, [b_row, b_col]) = Self::split_shape::<2>(b_shape);
 						if a_len != b_row {
 							cold_path();
 							return Err(TensorOpError::ShapeMismatch);
 						}
 						Self::broadcast_shapes(&mut me.shape, a_rest, b_rest)?;
 						me.shape.push(b_col);
+					},
+					NodeKind::Attention => {
+						let (q_rest, [q1, q2, q3]) = Self::split_shape::<3>(a_shape);
+						let (kv_rest, [kv1, kv2, kv3]) = Self::split_shape::<3>(b_shape);
+						if kv1 != 1 || q2 != kv2 || q3 >= kv3 {
+							cold_path();
+							return Err(TensorOpError::ShapeMismatch);
+						}
+						Self::broadcast_shapes(&mut me.shape, q_rest, kv_rest)?;
+						me.shape.push(q1);
+						me.shape.push(q2);
+						me.shape.push(kv3 - q3);
 					},
 					_ => {
 						Self::broadcast_shapes(&mut me.shape, a_shape, b_shape)?;
@@ -909,7 +1003,10 @@ impl PreCompilation {
 
 	fn find_heads(&mut self) {
 		for idx in self.nodes_postorder.indexes() {
-			if !self.nodes_postorder[idx].is_reduction() && !self.nodes_postorder[idx].is_matmul() {
+			if !self.nodes_postorder[idx].is_reduction()
+				&& !self.nodes_postorder[idx].is_matmul()
+				&& !self.nodes_postorder[idx].is_attention()
+			{
 				continue;
 			}
 
@@ -994,28 +1091,29 @@ impl PreCompilation {
 				result
 			},
 			NodeKind::Select(select) => match select {
-				ExprSelectKind::Even => "<b>Select Even</b>".to_string(),
-				ExprSelectKind::Odd => "<b>Select Odd</b>".to_string(),
+				SelectKind::Even => "<b>Select Even</b>".to_string(),
+				SelectKind::Odd => "<b>Select Odd</b>".to_string(),
 			},
 			NodeKind::Unary(unary) => match unary {
-				ExprUnaryKind::Neg => "<b>Neg</b>".to_string(),
-				ExprUnaryKind::Exp => "<b>Exp</b>".to_string(),
-				ExprUnaryKind::Ln => "<b>Ln</b>".to_string(),
-				ExprUnaryKind::Abs => "<b>Abs</b>".to_string(),
-				ExprUnaryKind::Sqrt => "<b>Sqrt</b>".to_string(),
-				ExprUnaryKind::Recip => "<b>Recip</b>".to_string(),
+				UnaryKind::Neg => "<b>Neg</b>".to_string(),
+				UnaryKind::Exp => "<b>Exp</b>".to_string(),
+				UnaryKind::Ln => "<b>Ln</b>".to_string(),
+				UnaryKind::Abs => "<b>Abs</b>".to_string(),
+				UnaryKind::Sqrt => "<b>Sqrt</b>".to_string(),
+				UnaryKind::Recip => "<b>Recip</b>".to_string(),
 			},
 			NodeKind::Binary(binary) => match binary {
-				ExprBinaryKind::Add => "<b>Add</b>".to_string(),
-				ExprBinaryKind::Sub => "<b>Sub</b>".to_string(),
-				ExprBinaryKind::Mul => "<b>Mul</b>".to_string(),
+				BinaryKind::Add => "<b>Add</b>".to_string(),
+				BinaryKind::Sub => "<b>Sub</b>".to_string(),
+				BinaryKind::Mul => "<b>Mul</b>".to_string(),
 			},
 			NodeKind::MatMul(matmul) => match matmul {
-				ExprMatMulKind::RowTimesMat => "<b>row * MAT</b>".to_string(),
+				MatMulKind::RowTimesMat => "<b>row * MAT</b>".to_string(),
 			},
+			NodeKind::Attention => "<b>ATTN</b>".to_string(),
 			NodeKind::Reduction(reduction) => match reduction {
-				ExprReductionKind::Sum => "<b>Sum</b>".to_string(),
-				ExprReductionKind::Max => "<b>Max</b>".to_string(),
+				ReductionKind::Sum => "<b>Sum</b>".to_string(),
+				ReductionKind::Max => "<b>Max</b>".to_string(),
 			},
 		}
 	}
@@ -1096,7 +1194,7 @@ impl PreCompilation {
 				} else {
 					writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ffcccc\"];")?;
 				}
-			} else if node.is_reduction() || node.is_matmul() {
+			} else if node.is_reduction() || node.is_matmul() || node.is_attention() {
 				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ffccff\"];")?;
 			} else if node.is_captured() {
 				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccffcc\"];")?;
@@ -1121,6 +1219,8 @@ impl PreCompilation {
 							"Reduction"
 						} else if frag_node.is_matmul() {
 							"MatMul"
+						} else if frag_node.is_attention() {
+							"Attention"
 						} else {
 							"<config head>"
 						}
@@ -1135,7 +1235,7 @@ impl PreCompilation {
 				}
 				let ordered = match node.node_kind {
 					NodeKind::Binary(bin) => !bin.is_commutative(),
-					NodeKind::MatMul(_) => true,
+					NodeKind::MatMul(_) | NodeKind::Attention => true,
 					_ => false,
 				};
 				for &child_index in &node.children {
@@ -1151,11 +1251,11 @@ impl PreCompilation {
 					};
 					let extra_style = if ordered {
 						if child_index == node.children[0] {
-							", color=\"#aa0000\""
-						} else if child_index == node.children[1] {
-							", color=\"#00aa00\""
-						} else {
 							", color=\"#0000aa\""
+						} else if child_index == node.children[1] {
+							", color=\"#aa0000\""
+						} else {
+							", color=\"#00aa00\""
 						}
 					} else {
 						", color=\"#000000\""
