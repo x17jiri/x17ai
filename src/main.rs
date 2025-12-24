@@ -299,7 +299,7 @@ fn x_rms_norm(
 	let eps = RcExpr::new_scalar_input(eps.clone()).cast(internal_dtype);
 	let inp = inp.cast(internal_dtype);
 
-	let magn_recip = ((inp.clone() * inp.clone()).mean().sqrt() + eps).recip();
+	let magn_recip = ((inp.clone() * inp.clone()).mean().sqrt() + eps).recip().cast(f32::dtype);
 
 	Ok(inp * magn_recip)
 }
@@ -428,6 +428,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let r = ExprTensorRef::new(Some("r".into()), f32::dtype, vec![15, 32]);
 	let mq = ExprTensorRef::new(Some("mq".into()), f32::dtype, vec![15, 32]);
 	let mkv = ExprTensorRef::new(Some("mkv".into()), f32::dtype, vec![15, 32]);
+	let mw = ExprTensorRef::new(Some("mw".into()), f32::dtype, vec![15, 32]);
 	let expr = RcExpr::new_tensor_input(t.clone());
 
 	let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?;
@@ -435,18 +436,23 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 		.clone()
 		.row_times_mat(RcExpr::new_tensor_input(mq.clone()))
 		.reshape(1, &[4, 4, 64])
+		//.cast(f64::dtype)
 		.capture(q.clone());
 	let kv = expr
 		.clone()
 		.row_times_mat(RcExpr::new_tensor_input(mkv.clone()))
 		.reshape(1, &[1, 4, 64 + 64])
+		//.cast(f64::dtype)
 		.capture(kv.clone());
 
 	//let expr = RcExpr::first(q, kv);
 	//let expr = x_softmax(expr, internal_dtype)?;
 	//	let expr = x_swiglu(expr, internal_dtype)?;
 
-	let expr = q.attention(kv).reshape(3, &[1024]).capture(r.clone());
+	let expr = q.attention(kv).reshape(3, &[1024]).cast(f32::dtype);
+	let expr = expr.row_times_mat(RcExpr::new_tensor_input(mw.clone()));
+	let expr = x_swiglu(expr, internal_dtype)?;
+	let expr = expr.capture(r.clone());
 
 	t.tensor.borrow_mut().replace(
 		x17ai::new::tensor::Tensor::new_empty(&[3333, 1024], f32::dtype, dev.clone()).unwrap(),
@@ -457,6 +463,9 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	mkv.tensor.borrow_mut().replace(
 		x17ai::new::tensor::Tensor::new_empty(&[1024, 4 * (64 + 64)], f32::dtype, dev.clone())
 			.unwrap(),
+	);
+	mw.tensor.borrow_mut().replace(
+		x17ai::new::tensor::Tensor::new_empty(&[1024, 2048], f32::dtype, dev.clone()).unwrap(),
 	);
 
 	let mut comp = PreCompilation::new(&expr.rc_expr)?;

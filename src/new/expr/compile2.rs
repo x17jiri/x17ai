@@ -116,7 +116,7 @@ pub enum MatMulKind {
 pub enum NodeKind {
 	Input,
 	Select(SelectKind),
-	Format,
+	View,
 	Unary(UnaryKind),
 	Binary(BinaryKind),
 	MatMul(MatMulKind),
@@ -139,7 +139,7 @@ pub struct Node {
 	pub reduction_fingerprint: u32,
 	pub config_head_for: NodeIndex32,
 
-	// `reshape_n` and `reshape_to` are used only if is_format()
+	// `reshape_n` and `reshape_to` are used only if is_view()
 	pub reshape_n: u8,
 	pub reshape_to: ThinVec<usize>,
 
@@ -200,8 +200,8 @@ impl Node {
 		!self.config_head_for.is_sentinel()
 	}
 
-	pub fn is_format(&self) -> bool {
-		matches!(self.node_kind, NodeKind::Format)
+	pub fn is_view(&self) -> bool {
+		matches!(self.node_kind, NodeKind::View)
 	}
 
 	pub fn is_reshape(&self) -> bool {
@@ -384,7 +384,7 @@ impl PreCompilation {
 				}
 				// Insert identity node to perform the capture.
 				// This node is also a root.
-				node_kind = NodeKind::Format;
+				node_kind = NodeKind::View;
 				out_is_scalar = child.out_is_scalar;
 				dtype = child.dtype;
 				children = [child_idx, NodeIndex32::new_sentinel()];
@@ -398,11 +398,11 @@ impl PreCompilation {
 				out_is_scalar = false;
 				dtype = expr.dtype;
 				let child = &self.nodes_postorder[child_idx];
-				if child.is_format() && child.reshape_n == 0 && child.reshape_to.is_empty() {
+				if child.is_view() && child.reshape_n == 0 && child.reshape_to.is_empty() {
 					child_idx = child.children[0];
 				}
 				children = [child_idx, NodeIndex32::new_sentinel()];
-				node_kind = NodeKind::Format;
+				node_kind = NodeKind::View;
 				cache_key = format!(
 					"reshape:{:?}:{:?}:{:?}",
 					reshape.reshape_n, reshape.reshape_to, child_idx.raw
@@ -416,13 +416,13 @@ impl PreCompilation {
 						out_is_scalar = child.out_is_scalar;
 						dtype = expr.dtype;
 						let mut child_idx = child_idx;
-						if child.is_format() {
+						if child.is_view() {
 							child_idx = child.children[0];
 							reshape_n = child.reshape_n;
 							reshape_to = child.reshape_to.clone();
 						}
 						children = [child_idx, NodeIndex32::new_sentinel()];
-						node_kind = NodeKind::Format;
+						node_kind = NodeKind::View;
 						cache_key = format!("cast:{:?}:{:?}", expr.dtype, child_idx.raw);
 					},
 					ExprUnaryKind::Neg
@@ -928,7 +928,7 @@ impl PreCompilation {
 							me.shape.push(0);
 						}
 					},
-					NodeKind::Format if me.is_reshape() => {
+					NodeKind::View if me.is_reshape() => {
 						let keep = me.shape.len().saturating_sub(me.reshape_n as usize);
 						let elems = me.shape.iter().skip(keep).product::<usize>();
 						let new_elems = me.reshape_to.iter().product::<usize>();
@@ -1024,7 +1024,7 @@ impl PreCompilation {
 				let parent = &self.nodes_postorder[parent_idx];
 				let parent_shape = ShapeRef::new(&parent.shape);
 				let parent_fingerprint = parent.reduction_fingerprint;
-				if (!parent.is_format() && parent_shape != start_shape)
+				if (!parent.is_view() && parent_shape != start_shape)
 					|| parent_fingerprint != start_fingerprint
 				{
 					break;
@@ -1050,6 +1050,7 @@ impl PreCompilation {
 				&& !all_parents[first_parent].is_matmul()
 				&& let parent_frag = all_parents[first_parent].fragment_index()
 				&& !item.is_config_head()
+				&& !item.is_reshape()
 				&& other_parents.iter().all(|&p| {
 					!all_parents[p].is_matmul() && all_parents[p].fragment_index() == parent_frag
 				}) {
@@ -1075,19 +1076,21 @@ impl PreCompilation {
 					format!("<b>Scalar</b><br/><font color='blue'><b>{name}</b></font>")
 				}
 			},
-			NodeKind::Format => {
+			NodeKind::View => {
 				let child = &self.nodes_postorder[node.children[0]];
-				let mut result = format!("<b>Format</b>");
+				let mut result = format!("<b>View</b>");
+				let mut from = String::new();
+				let mut to = String::new();
 				if child.dtype != node.dtype {
-					result = format!("{result}<br/>- cast to {}", node.dtype);
-				};
-				if node.is_reshape() {
-					result = format!(
-						"{result}<br/>- reshape {} dims to {}",
-						node.reshape_n,
-						self.shape_to_str(node.dtype, &node.reshape_to)
-					);
+					from = self.dtype_to_str(child.dtype);
+					to = self.dtype_to_str(node.dtype);
 				}
+				if node.is_reshape() {
+					from =
+						format!("{from}&#91;<font color='blue'>-{}</font>..&#93;", node.reshape_n);
+					to = format!("{to}{}", self.shape_to_str(&node.reshape_to));
+				}
+				result = format!("{from} -&gt; {to}");
 				result
 			},
 			NodeKind::Select(select) => match select {
@@ -1118,8 +1121,12 @@ impl PreCompilation {
 		}
 	}
 
-	fn shape_to_str(&self, dtype: DType, shape: &[usize]) -> String {
-		let mut result = format!("<font color='teal'>{}</font>&#91;", dtype);
+	fn dtype_to_str(&self, dtype: DType) -> String {
+		format!("<font color='teal'>{dtype}</font>")
+	}
+
+	fn shape_to_str(&self, shape: &[usize]) -> String {
+		let mut result = format!("&#91;");
 		for (i, &dim) in shape.iter().enumerate() {
 			if i > 0 {
 				result.push(',');
@@ -1247,7 +1254,11 @@ impl PreCompilation {
 					let label = if child.out_is_scalar {
 						String::new()
 					} else {
-						self.shape_to_str(child.dtype, &child.shape)
+						format!(
+							"{}{}",
+							self.dtype_to_str(child.dtype),
+							self.shape_to_str(&child.shape)
+						)
 					};
 					let extra_style = if ordered {
 						if child_index == node.children[0] {
@@ -1277,7 +1288,7 @@ impl PreCompilation {
 				let label = if node.out_is_scalar {
 					String::new()
 				} else {
-					self.shape_to_str(node.dtype, &node.shape)
+					format!("{}{}", self.dtype_to_str(node.dtype), self.shape_to_str(&node.shape))
 				};
 				let input_node = self.tensor_vec[capt_idx].input_node;
 				if input_node.is_sentinel() {
