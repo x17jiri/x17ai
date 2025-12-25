@@ -82,89 +82,109 @@ impl Ptx {
 	}
 }
 
-#[link(name = "cuda_shim")]
-unsafe extern "C" {
-	// Error behavior of these functions:
-	// - functions returning pointers:
-	//   - on success: return valid pointer
-	//   - on error: return null and fill `err` with the error message
-	// - functions returning c_int:
-	//   - on success: return 0
-	//   - on error: return != 0 and fill `err` with the error message
+// Stub implementations for CUDA functions (no external library required)
+// These return default/error values since CUDA is not available
 
-	fn x17ai_cuda_open_context(device_id: usize, err: FfiBuffer) -> *mut CudaContextHandle;
+unsafe fn x17ai_cuda_open_context(_device_id: usize, _err: FfiBuffer) -> *mut CudaContextHandle {
+	std::ptr::null_mut()
+}
 
-	fn x17ai_cuda_close_context(ctx: *mut CudaContextHandle, err: FfiBuffer) -> c_int;
+unsafe fn x17ai_cuda_close_context(_ctx: *mut CudaContextHandle, _err: FfiBuffer) -> c_int {
+	0
+}
 
-	fn x17ai_cuda_open_stream(ctx: *mut CudaContextHandle, err: FfiBuffer)
-	-> *mut CudaStreamHandle;
+unsafe fn x17ai_cuda_open_stream(
+	_ctx: *mut CudaContextHandle,
+	_err: FfiBuffer,
+) -> *mut CudaStreamHandle {
+	std::ptr::null_mut()
+}
 
-	fn x17ai_cuda_close_stream(stream: *mut CudaStreamHandle, err: FfiBuffer) -> c_int;
+unsafe fn x17ai_cuda_close_stream(_stream: *mut CudaStreamHandle, _err: FfiBuffer) -> c_int {
+	0
+}
 
-	fn x17ai_cuda_alloc(
-		stream: *mut CudaStreamHandle,
-		bytes: usize,
-		err: FfiBuffer,
-	) -> *mut CudaDeviceData;
+unsafe fn x17ai_cuda_alloc(
+	_stream: *mut CudaStreamHandle,
+	_bytes: usize,
+	_err: FfiBuffer,
+) -> *mut CudaDeviceData {
+	std::ptr::null_mut()
+}
 
-	fn x17ai_cuda_free(
-		stream: *mut CudaStreamHandle,
-		ptr: *mut CudaDeviceData,
-		err: FfiBuffer,
-	) -> c_int;
+unsafe fn x17ai_cuda_free(
+	_stream: *mut CudaStreamHandle,
+	_ptr: *mut CudaDeviceData,
+	_err: FfiBuffer,
+) -> c_int {
+	0
+}
 
-	pub fn x17ai_cuda_upload_data(
-		stream: *mut CudaStreamHandle,
-		src: *mut u8,
-		dst: *mut CudaDeviceData,
-		offset_bytes: usize,
-		size_bytes: usize,
-		err: FfiBuffer,
-	) -> c_int;
+pub unsafe fn x17ai_cuda_upload_data(
+	_stream: *mut CudaStreamHandle,
+	_src: *mut u8,
+	_dst: *mut CudaDeviceData,
+	_offset_bytes: usize,
+	_size_bytes: usize,
+	_err: FfiBuffer,
+) -> c_int {
+	0
+}
 
-	pub fn x17ai_cuda_download_data(
-		stream: *mut CudaStreamHandle,
-		src: *const CudaDeviceData,
-		dst: *mut u8,
-		offset_bytes: usize,
-		size_bytes: usize,
-		err: FfiBuffer,
-	) -> c_int;
+pub unsafe fn x17ai_cuda_download_data(
+	_stream: *mut CudaStreamHandle,
+	_src: *const CudaDeviceData,
+	_dst: *mut u8,
+	_offset_bytes: usize,
+	_size_bytes: usize,
+	_err: FfiBuffer,
+) -> c_int {
+	0
+}
 
-	/// On success, `ptx` will contain the compiled PTX code terminated by a zero byte.
-	/// The zero byte is NOT included in the length of the buffer.
-	///
-	/// On failure, `ptx` will be empty and `log` will contain error messages.
-	///
-	/// Note that `log` may contain warnings even on success.
-	fn x17ai_cuda_compile_module(
-		device_capability: CudaCapability,
-		source: *const c_char,
-		ptx: FfiBuffer,
-		log: FfiBuffer,
-	);
+/// On success, `ptx` will contain the compiled PTX code terminated by a zero byte.
+/// The zero byte is NOT included in the length of the buffer.
+///
+/// On failure, `ptx` will be empty and `log` will contain error messages.
+///
+/// Note that `log` may contain warnings even on success.
+unsafe fn x17ai_cuda_compile_module(
+	_device_capability: CudaCapability,
+	_source: *const c_char,
+	_ptx: FfiBuffer,
+	_log: FfiBuffer,
+) {
+	// Stub: does nothing
+}
 
-	fn x17ai_cuda_load_module(
-		ctx: *mut CudaContextHandle,
-		ptx: *const c_char,
-		err: FfiBuffer,
-	) -> *mut CudaModuleHandle;
+unsafe fn x17ai_cuda_load_module(
+	_ctx: *mut CudaContextHandle,
+	_ptx: *const c_char,
+	_err: FfiBuffer,
+) -> *mut CudaModuleHandle {
+	std::ptr::null_mut()
+}
 
-	fn x17ai_cuda_del_module(module: *mut CudaModuleHandle, err: FfiBuffer) -> c_int;
+unsafe fn x17ai_cuda_del_module(_module: *mut CudaModuleHandle, _err: FfiBuffer) -> c_int {
+	0
+}
 
-	fn x17ai_cuda_get_kernel(
-		kernel: *mut CudaModuleHandle,
-		name: *const c_char,
-		err: FfiBuffer,
-	) -> *mut CudaKernelHandle;
+unsafe fn x17ai_cuda_get_kernel(
+	_kernel: *mut CudaModuleHandle,
+	_name: *const c_char,
+	_err: FfiBuffer,
+) -> *mut CudaKernelHandle {
+	std::ptr::null_mut()
+}
 
-	fn x17ai_cuda_run_kernel(
-		stream: *mut CudaStreamHandle,
-		kernel: *mut CudaKernelHandle,
-		config: *const CudaLaunchConfig,
-		args: *const *const c_void,
-		err: FfiBuffer,
-	) -> c_int;
+unsafe fn x17ai_cuda_run_kernel(
+	_stream: *mut CudaStreamHandle,
+	_kernel: *mut CudaKernelHandle,
+	_config: *const CudaLaunchConfig,
+	_args: *const *const c_void,
+	_err: FfiBuffer,
+) -> c_int {
+	0
 }
 
 //--------------------------------------------------------------------------------------------------

@@ -321,7 +321,7 @@ pub fn x_swiglu(inp: Expr, internal_dtype: DType) -> Result<Expr, ErrPack<Tensor
 	let lin = inp.clone().select_even();
 	let gate = inp.select_odd();
 
-	let one = Expr::new_scalar_input(ScalarRef::new(Some("ONE".into()), internal_dtype));
+	let one = Expr::new_scalar_input(ScalarRef::new(Some("ONE".into())));
 
 	let out = lin * gate.clone() * ((-gate).exp() + one).recip();
 
@@ -418,7 +418,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 
 	let io_dtype = f16::dtype;
 	let internal_dtype = f32::dtype;
-	let eps = ScalarRef::new(Some("eps".into()), internal_dtype);
+	let eps = ScalarRef::new(Some("eps".into()));
 
 	//let expr = test1_opt(dev.clone());
 	//let expr = test2_rms_norm(dev.clone());

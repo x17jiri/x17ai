@@ -53,6 +53,7 @@ pub enum TensorOpError {
 	CannotBorrowMut,
 	MissingInput,
 	MissingReduceDimension,
+	InvalidSelectDimension,
 	DimIndexOutOfBounds,
 	IndexOutOfBounds,
 	ElementsOverflow,
@@ -78,6 +79,7 @@ pub enum TensorOpError {
 	DeviceError,
 	WriteReadRace,
 	DoubleWrite,
+	UnknownDType,
 }
 
 impl From<std::alloc::AllocError> for TensorOpError {
