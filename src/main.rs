@@ -460,7 +460,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let expr = x_swiglu(expr, internal_dtype)?;
 	let expr = expr.capture(r.clone());
 
-	let mut comp = PreCompilation::new(&expr.node)?;
+	let mut comp = PreCompilation::new(&expr.node);
 
 	let mut graphviz = String::new();
 	comp.print_graphviz(&mut graphviz, None);

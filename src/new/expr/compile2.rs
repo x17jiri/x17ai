@@ -18,7 +18,6 @@
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::panic_in_result_fn)]
 
-use std::borrow::Cow;
 use std::collections::{HashMap, hash_map};
 use std::hint::{cold_path, unlikely};
 use std::rc::Rc;
@@ -27,49 +26,15 @@ use thin_vec::{ThinVec, thin_vec};
 
 use super::super::expr;
 use super::{ExprBinaryKind, ExprInput, ExprNode, ExprUnaryKind};
+use crate::define_index_type32;
 use crate::new::expr::{ExprBinary, ExprCapture, ExprCast, ExprReshape, ExprUnary};
+use crate::tensor::error::ShapeMismatchError;
 use crate::tensor::{DType, TensorOpError};
 use crate::util::LossyFrom;
 use crate::util::bitmap::IndexBitmap;
 use crate::util::index_vec::{IndexTrait, IndexVec, UntypedIndex32};
-use crate::{ErrPack, define_index_type32};
 
 //--------------------------------------------------------------------------------------------------
-
-pub struct ShapeRef<'a> {
-	pub shape: &'a [usize],
-}
-
-impl<'a> ShapeRef<'a> {
-	pub fn new(shape: &'a [usize]) -> Self {
-		Self { shape }
-	}
-
-	pub fn zip_with<'b>(
-		&'a self,
-		other: &'b ShapeRef,
-	) -> impl ExactSizeIterator<Item = (usize, usize)> + DoubleEndedIterator {
-		let shape_len = self.shape.len().max(other.shape.len());
-		let skip_self = shape_len - self.shape.len();
-		let skip_other = shape_len - other.shape.len();
-		(0..shape_len).map(move |d| {
-			let idx_self = d.wrapping_sub(skip_self);
-			let dim_self = *self.shape.get(idx_self).unwrap_or(&1);
-			let idx_other = d.wrapping_sub(skip_other);
-			let dim_other = *other.shape.get(idx_other).unwrap_or(&1);
-			(dim_self, dim_other)
-		})
-	}
-}
-
-impl<'a> std::cmp::PartialEq for ShapeRef<'a> {
-	fn eq(&self, other: &Self) -> bool {
-		self.zip_with(other).all(|(a, b)| a == b)
-	}
-}
-
-impl<'a> std::cmp::Eq for ShapeRef<'a> {
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnaryKind {
@@ -311,12 +276,15 @@ pub struct PreCompilation {
 	tensor_map: HashMap<*const expr::TensorRef, TensorRefIndex32>,
 	tensor_vec: TensorVec,
 	sum_to_mean: Vec<SumToMean>,
+
+	err_map: HashMap<NodeIndex32, (usize, Vec<String>)>,
 }
 
 struct LoadedNode {
 	node: Node,
 	complex: bool,
 	cache_key: String,
+	err: Vec<String>,
 }
 
 pub struct LoadExprState {
@@ -327,7 +295,7 @@ pub struct LoadExprState {
 }
 
 impl PreCompilation {
-	pub fn new(expr: &ExprNode) -> Result<Self, ErrPack<TensorOpError>> {
+	pub fn new(expr: &ExprNode) -> Self {
 		let mut comp = PreCompilation {
 			nodes_postorder: NodeVec::with_capacity(32),
 			fragments_preorder: FragmentVec::with_capacity(8),
@@ -336,6 +304,7 @@ impl PreCompilation {
 			tensor_map: HashMap::new(),
 			tensor_vec: TensorVec::with_capacity(4),
 			sum_to_mean: Vec::new(),
+			err_map: HashMap::new(),
 		};
 		let mut state = LoadExprState {
 			visited: HashMap::new(),
@@ -343,26 +312,51 @@ impl PreCompilation {
 			n_complex: 0,
 			bitmap: IndexBitmap::new(),
 		};
-		comp.load_expr(expr, &mut state)?;
+		comp.load_expr(expr, &mut state);
+		if comp.have_errors() {
+			return comp;
+		}
 		comp.remove_dead_code();
+		if comp.have_errors() {
+			return comp;
+		}
 		comp.find_dominators();
+		if comp.have_errors() {
+			return comp;
+		}
 		comp.find_reduction_fingerprints(&mut state);
-		comp.find_races(&mut state)?;
-		/*comp.calc_shapes()?;
-		comp.find_heads();
-		comp.find_fragments()?;*/
-		Ok(comp)
+		if comp.have_errors() {
+			return comp;
+		}
+		//comp.find_races(&mut state);
+		//comp.calc_shapes()?;
+		//comp.find_heads();
+		//comp.find_fragments()?;
+		comp
+	}
+
+	pub fn have_errors(&self) -> bool {
+		!self.err_map.is_empty()
+	}
+
+	fn log_error(&mut self, node_index: NodeIndex32, message: String) {
+		let L = self.err_map.len();
+		match self.err_map.entry(node_index) {
+			hash_map::Entry::Occupied(mut entry) => {
+				let (_count, vec) = entry.get_mut();
+				vec.push(message);
+			},
+			hash_map::Entry::Vacant(entry) => {
+				entry.insert((L, vec![message]));
+			},
+		}
 	}
 
 	// TODO - refactor to make non recursive
-	fn load_expr(
-		&mut self,
-		expr: &ExprNode,
-		state: &mut LoadExprState,
-	) -> Result<NodeIndex32, TensorOpError> {
+	fn load_expr(&mut self, expr: &ExprNode, state: &mut LoadExprState) -> NodeIndex32 {
 		let expr_key = std::ptr::from_ref(expr);
 		if let Some(index) = state.visited.get(&expr_key) {
-			return Ok(*index);
+			return *index;
 		}
 
 		let t = match expr {
@@ -370,33 +364,33 @@ impl PreCompilation {
 				self.load_input(input) //
 			},
 			ExprNode::Capture(capture) => {
-				let child_idx = self.load_expr(&capture.expr, state)?;
+				let child_idx = self.load_expr(&capture.expr, state);
 				self.load_capture(capture, child_idx)
 			},
 			ExprNode::Cast(cast) => {
-				let child_idx = self.load_expr(&cast.expr, state)?;
+				let child_idx = self.load_expr(&cast.expr, state);
 				self.load_cast(cast, child_idx)
 			},
 			ExprNode::Reshape(reshape) => {
-				let child_idx = self.load_expr(&reshape.expr, state)?;
+				let child_idx = self.load_expr(&reshape.expr, state);
 				self.load_reshape(reshape, child_idx)
 			},
 			ExprNode::Unary(unary) => {
-				let child_idx = self.load_expr(&unary.expr, state)?;
+				let child_idx = self.load_expr(&unary.expr, state);
 				self.load_unary(unary, child_idx)
 			},
 			ExprNode::Binary(binary) => {
-				let a_idx = self.load_expr(&binary.lhs, state)?;
-				let b_idx = self.load_expr(&binary.rhs, state)?;
+				let a_idx = self.load_expr(&binary.lhs, state);
+				let b_idx = self.load_expr(&binary.rhs, state);
 				self.load_binary(binary, a_idx, b_idx)
 			},
-		}?;
+		};
 
 		let loaded = match t {
 			Ok(loaded) => loaded,
 			Err(existing_node) => {
 				state.visited.insert(expr_key, existing_node);
-				return Ok(existing_node);
+				return existing_node;
 			},
 		};
 
@@ -406,12 +400,15 @@ impl PreCompilation {
 				hash_map::Entry::Occupied(entry) => {
 					let cached_index = *entry.get();
 					state.visited.insert(expr_key, cached_index);
-					return Ok(cached_index);
+					return cached_index;
 				},
 				hash_map::Entry::Vacant(entry) => {
 					entry.insert(next_index);
 				},
 			}
+		}
+		for err in loaded.err {
+			self.log_error(next_index, err);
 		}
 
 		if loaded.complex {
@@ -428,13 +425,10 @@ impl PreCompilation {
 		let real_index = self.nodes_postorder.push(loaded.node);
 		debug_assert!(next_index == real_index);
 		state.visited.insert(expr_key, next_index);
-		Ok(next_index)
+		next_index
 	}
 
-	fn load_input(
-		&mut self,
-		input: &ExprInput,
-	) -> Result<Result<LoadedNode, NodeIndex32>, TensorOpError> {
+	fn load_input(&mut self, input: &ExprInput) -> Result<LoadedNode, NodeIndex32> {
 		let dtype;
 		let x_index;
 		let shape;
@@ -450,7 +444,7 @@ impl PreCompilation {
 						can_be_batched = t.can_be_batched;
 					},
 					Err(existing_node) => {
-						return Ok(Err(existing_node));
+						return Err(existing_node);
 					},
 				}
 			},
@@ -463,12 +457,12 @@ impl PreCompilation {
 						shape = None;
 					},
 					Err(existing_node) => {
-						return Ok(Err(existing_node));
+						return Err(existing_node);
 					},
 				}
 			},
 		}
-		Ok(Ok(LoadedNode {
+		Ok(LoadedNode {
 			node: Node {
 				node_kind: NodeKind::Input,
 				dtype,
@@ -480,24 +474,25 @@ impl PreCompilation {
 			},
 			complex: false,
 			cache_key: String::new(),
-		}))
+			err: Vec::new(),
+		})
 	}
 
 	fn load_capture(
 		&mut self,
 		capture: &ExprCapture,
 		child_idx: NodeIndex32,
-	) -> Result<Result<LoadedNode, NodeIndex32>, TensorOpError> {
+	) -> Result<LoadedNode, NodeIndex32> {
 		let tensor_idx =
 			self.add_tensor_output(capture.tensor_ref.clone(), self.nodes_postorder.next_index());
 		let child = &mut self.nodes_postorder[child_idx];
 		if !child.is_input() {
 			child.capture.push(tensor_idx);
-			return Ok(Err(child_idx));
+			return Err(child_idx);
 		}
 		// Insert identity node to perform the capture.
 		// This node is also a root.
-		Ok(Ok(LoadedNode {
+		Ok(LoadedNode {
 			node: Node {
 				node_kind: NodeKind::View,
 				dtype: child.dtype,
@@ -509,19 +504,20 @@ impl PreCompilation {
 			},
 			complex: false,
 			cache_key: format!("identity:{:?}", child_idx.raw),
-		}))
+			err: Vec::new(),
+		})
 	}
 
 	fn load_reshape(
 		&self,
 		reshape: &ExprReshape,
 		mut child_idx: NodeIndex32,
-	) -> Result<Result<LoadedNode, NodeIndex32>, TensorOpError> {
+	) -> Result<LoadedNode, NodeIndex32> {
 		let child = &self.nodes_postorder[child_idx];
 		if child.is_view() && child.reshape_n == 0 && child.reshape_to.is_empty() {
 			child_idx = child.children[0];
 		}
-		Ok(Ok(LoadedNode {
+		Ok(LoadedNode {
 			node: Node {
 				node_kind: NodeKind::View,
 				dtype: child.dtype,
@@ -537,14 +533,15 @@ impl PreCompilation {
 				"reshape:{:?}:{:?}:{:?}",
 				reshape.reshape_n, reshape.reshape_to, child_idx.raw
 			),
-		}))
+			err: Vec::new(),
+		})
 	}
 
 	fn load_cast(
 		&self,
 		cast: &ExprCast,
 		mut child_idx: NodeIndex32,
-	) -> Result<Result<LoadedNode, NodeIndex32>, TensorOpError> {
+	) -> Result<LoadedNode, NodeIndex32> {
 		let child = &self.nodes_postorder[child_idx];
 		let reshape_n;
 		let reshape_to;
@@ -556,7 +553,7 @@ impl PreCompilation {
 			reshape_n = 0;
 			reshape_to = ThinVec::new();
 		}
-		Ok(Ok(LoadedNode {
+		Ok(LoadedNode {
 			node: Node {
 				node_kind: NodeKind::View,
 				dtype: Some(cast.dtype),
@@ -569,22 +566,22 @@ impl PreCompilation {
 			},
 			complex: false,
 			cache_key: format!("cast:{:?}:{:?}", cast.dtype, child_idx.raw),
-		}))
+			err: Vec::new(),
+		})
 	}
 
-	fn load_sum_to_mean(
-		&mut self,
-		child_idx: NodeIndex32,
-	) -> Result<Result<LoadedNode, NodeIndex32>, TensorOpError> {
+	fn load_sum_to_mean(&mut self, child_idx: NodeIndex32) -> Result<LoadedNode, NodeIndex32> {
+		let mut err = Vec::new();
 		let child = &self.nodes_postorder[child_idx];
-		let Some(&width) = child.shape.last() else {
+		let width = if let Some(&w) = child.shape.as_ref().and_then(|vec| vec.last()) {
+			w
+		} else {
 			cold_path();
-			panic!("missing reduce dimension");
-			return Err(TensorOpError::MissingReduceDimension);
+			err.push("SumToMean: missing reduce dimension".into());
+			1
 		};
 		// Insert `ScalarInput` node.
 		// TODO - should create `Const` node
-		// TODO - should immediately assign value `1.0 / N`
 		let scalar_ref = expr::ScalarRef::new(Some("__sum_to_mean__".into()));
 		*scalar_ref.value.borrow_mut() = Some(1.0 / f64::lossy_from(width));
 		let x_index = match self.add_scalar_input(scalar_ref, self.nodes_postorder.next_index()) {
@@ -596,25 +593,25 @@ impl PreCompilation {
 				unreachable!();
 			},
 		};
-		Ok(Ok(LoadedNode {
+		Ok(LoadedNode {
 			node: Node {
 				node_kind: NodeKind::Input,
 				dtype: None,
 				can_be_batched: false,
-				out_is_scalar: true,
 				x_index,
 				..Default::default()
 			},
 			complex: false,
 			cache_key: String::new(),
-		}))
+			err,
+		})
 	}
 
 	fn load_unary(
 		&mut self,
 		unary: &ExprUnary,
 		child_idx: NodeIndex32,
-	) -> Result<Result<LoadedNode, NodeIndex32>, TensorOpError> {
+	) -> Result<LoadedNode, NodeIndex32> {
 		match unary.kind {
 			ExprUnaryKind::Neg
 			| ExprUnaryKind::Exp
@@ -632,19 +629,19 @@ impl PreCompilation {
 					_ => unreachable!(),
 				};
 				let child = &self.nodes_postorder[child_idx];
-				Ok(Ok(LoadedNode {
+				Ok(LoadedNode {
 					node: Node {
 						node_kind: NodeKind::Unary(unary_kind),
 						dtype: child.dtype,
 						shape: child.shape.clone(),
 						can_be_batched: child.can_be_batched,
 						children: [child_idx, NodeIndex32::new_sentinel()],
-						out_is_scalar: child.out_is_scalar,
 						..Default::default()
 					},
 					complex: false,
 					cache_key: format!("unary:{:?}:{:?}", unary_kind, child_idx.raw),
-				}))
+					err: Vec::new(),
+				})
 			},
 			ExprUnaryKind::Sum | ExprUnaryKind::Max => {
 				let reduction_kind = match unary.kind {
@@ -652,25 +649,29 @@ impl PreCompilation {
 					ExprUnaryKind::Max => ReductionKind::Max,
 					_ => unreachable!(),
 				};
+				let mut err = Vec::new();
 				let child = &self.nodes_postorder[child_idx];
-				if child.shape.is_empty() {
+				let mut shape = child.shape.clone();
+				if let Some(last_dim) = shape.as_mut().and_then(|vec| vec.last_mut()) {
+					*last_dim = 1;
+				} else {
 					cold_path();
-					panic!("missing reduce dimension");
-					return Err(TensorOpError::MissingReduceDimension);
-				}
-				Ok(Ok(LoadedNode {
+					err.push("missing reduce dimension".into());
+					shape = Some(thin_vec![1]);
+				};
+				Ok(LoadedNode {
 					node: Node {
 						node_kind: NodeKind::Reduction(reduction_kind),
 						dtype: child.dtype,
-						shape: child.shape.clone(),
+						shape,
 						can_be_batched: child.can_be_batched,
 						children: [child_idx, NodeIndex32::new_sentinel()],
-						out_is_scalar: child.out_is_scalar,
 						..Default::default()
 					},
 					complex: true,
 					cache_key: format!("reduction:{:?}:{:?}", reduction_kind, child_idx.raw),
-				}))
+					err,
+				})
 			},
 			ExprUnaryKind::SelectEven | ExprUnaryKind::SelectOdd => {
 				let select_kind = match unary.kind {
@@ -678,31 +679,33 @@ impl PreCompilation {
 					ExprUnaryKind::SelectOdd => SelectKind::Odd,
 					_ => unreachable!(),
 				};
+				let mut err = Vec::new();
 				let child = &self.nodes_postorder[child_idx];
 				let mut shape = child.shape.clone();
-				let Some(last_dim) = shape.last_mut() else {
+				if let Some(last_dim) = shape.as_mut().and_then(|vec| vec.last_mut()) {
+					if *last_dim < 2 || (*last_dim % 2 != 0) {
+						cold_path();
+						err.push("select dimension not even".into());
+					}
+					*last_dim /= 2;
+				} else {
 					cold_path();
-					panic!("missing reduce dimension");
-					return Err(TensorOpError::MissingReduceDimension);
+					err.push("missing select dimension".into());
+					shape = Some(thin_vec![0]);
 				};
-				if *last_dim < 2 || (*last_dim % 2 != 0) {
-					cold_path();
-					return Err(TensorOpError::InvalidSelectDimension);
-				}
-				*last_dim /= 2;
-				Ok(Ok(LoadedNode {
+				Ok(LoadedNode {
 					node: Node {
 						node_kind: NodeKind::Select(select_kind),
 						dtype: child.dtype,
 						shape,
 						can_be_batched: child.can_be_batched,
 						children: [child_idx, NodeIndex32::new_sentinel()],
-						out_is_scalar: false,
 						..Default::default()
 					},
 					complex: false,
 					cache_key: format!("select:{:?}:{:?}", select_kind, child_idx.raw),
-				}))
+					err,
+				})
 			},
 			ExprUnaryKind::SumToMean => self.load_sum_to_mean(child_idx),
 		}
@@ -720,12 +723,15 @@ impl PreCompilation {
 		}
 	}
 
-	fn common_shape(a: &[usize], b: &[usize]) -> Result<ThinVec<usize>, TensorOpError> {
+	fn common_shape(mut a: &[usize], mut b: &[usize], err: &mut Vec<String>) -> ThinVec<usize> {
 		if a.len() != b.len() {
 			cold_path();
-			let msg = format!("shape length mismatch: {:?} vs {:?}", a, b);
-			panic!("{}", msg);
-			return Err(TensorOpError::ShapeMismatch);
+			err.push(format!("shape length mismatch: {:?} vs {:?}", a, b));
+			let len = a.len().min(b.len()); // TODO - shoud use larger of the 2, not the smaller
+			let skip_a = a.len() - len;
+			let skip_b = b.len() - len;
+			a = &a[skip_a..];
+			b = &b[skip_b..];
 		}
 		let mut shape = ThinVec::with_capacity(a.len());
 		for (a_dim, b_dim) in a.iter().zip(b.iter()) {
@@ -737,11 +743,23 @@ impl PreCompilation {
 				shape.push(*a_dim);
 			} else {
 				cold_path();
-				panic!("shape dimension mismatch");
-				return Err(TensorOpError::ShapeMismatch);
+				err.push(format!("shape dimension mismatch: {:?} vs {:?}", a_dim, b_dim));
 			}
 		}
-		Ok(shape)
+		shape
+	}
+
+	fn common_shape_opt(
+		a: Option<&[usize]>,
+		b: Option<&[usize]>,
+		err: &mut Vec<String>,
+	) -> Option<ThinVec<usize>> {
+		match (a, b) {
+			(None, None) => None,
+			(None, Some(sh)) => Some(ThinVec::from(sh)),
+			(Some(sh), None) => Some(ThinVec::from(sh)),
+			(Some(a), Some(b)) => Some(Self::common_shape(a, b, err)),
+		}
 	}
 
 	fn load_binary(
@@ -749,7 +767,7 @@ impl PreCompilation {
 		binary: &ExprBinary,
 		a_idx: NodeIndex32,
 		b_idx: NodeIndex32,
-	) -> Result<Result<LoadedNode, NodeIndex32>, TensorOpError> {
+	) -> Result<LoadedNode, NodeIndex32> {
 		match binary.kind {
 			ExprBinaryKind::Add | ExprBinaryKind::Sub | ExprBinaryKind::Mul => {
 				let (binary_kind, commutative) = match binary.kind {
@@ -762,55 +780,86 @@ impl PreCompilation {
 					if commutative && a_idx > b_idx { (b_idx, a_idx) } else { (a_idx, b_idx) };
 				let a = &self.nodes_postorder[a_idx];
 				let b = &self.nodes_postorder[b_idx];
-				Ok(Ok(LoadedNode {
+				let mut err = Vec::new();
+				Ok(LoadedNode {
 					node: Node {
 						node_kind: NodeKind::Binary(binary_kind),
 						dtype: Self::common_dtype(a.dtype, b.dtype),
-						shape: Self::common_shape(&a.shape, &b.shape)?,
+						shape: Self::common_shape_opt(
+							a.shape.as_ref().map(|sh| &sh[..]),
+							b.shape.as_ref().map(|sh| &sh[..]),
+							&mut err,
+						),
 						can_be_batched: a.can_be_batched || b.can_be_batched,
 						children: [a_idx, b_idx],
-						out_is_scalar: a.out_is_scalar && b.out_is_scalar,
 						..Default::default()
 					},
 					complex: false,
 					cache_key: format!("binary:{:?}:{:?}:{:?}", binary_kind, a_idx.raw, b_idx.raw),
-				}))
+					err,
+				})
 			},
-			ExprBinaryKind::First => Ok(Err(a_idx)),
+			ExprBinaryKind::First => Err(a_idx),
 			ExprBinaryKind::RowTimesMat => {
 				let a = &self.nodes_postorder[a_idx];
 				let b = &self.nodes_postorder[b_idx];
 				let matmul_kind = MatMulKind::RowTimesMat;
-				Ok(Ok(LoadedNode {
+
+				let mut err = Vec::new();
+				let a_shape: &[usize] = a.shape.as_ref().map_or(&[], |vec| &vec[..]);
+				let b_shape: &[usize] = b.shape.as_ref().map_or(&[], |vec| &vec[..]);
+				if a_shape.len() < 1 || b_shape.len() < 2 {
+					cold_path();
+					err.push(format!("matmul: not enough dimensions"));
+				}
+				let (a_rest, [a_len]) = Self::split_shape::<1>(a_shape);
+				let (b_rest, [b_row, b_col]) = Self::split_shape::<2>(b_shape);
+				if a_len != b_row {
+					cold_path();
+					err.push(format!("matmul: shape mismatch"));
+				}
+				let mut shape = ThinVec::new();
+				if Self::broadcast_shapes(&mut shape, a_rest, b_rest).is_err() {
+					cold_path();
+					err.push(format!("matmul: batch shape mismatch"));
+				}
+				shape.push(b_col);
+
+				if b.can_be_batched {
+					cold_path();
+					err.push("row times mat: mat cannot be batched".into());
+				}
+
+				Ok(LoadedNode {
 					node: Node {
 						node_kind: NodeKind::MatMul(matmul_kind),
 						dtype: Self::common_dtype(a.dtype, b.dtype),
-						//TODO: shape: child.shape.clone(),
-						//TODO:can_be_batched: child.can_be_batched,
+						shape: Some(shape),
+						can_be_batched: a.can_be_batched,
 						children: [a_idx, b_idx],
-						out_is_scalar: a.out_is_scalar && b.out_is_scalar,
 						..Default::default()
 					},
 					complex: true,
 					cache_key: format!("matmul:{:?}:{:?}:{:?}", matmul_kind, a_idx.raw, b_idx.raw),
-				}))
+					err,
+				})
 			},
 			ExprBinaryKind::Attention => {
 				let a = &self.nodes_postorder[a_idx];
 				let b = &self.nodes_postorder[b_idx];
-				Ok(Ok(LoadedNode {
+				Ok(LoadedNode {
 					node: Node {
 						node_kind: NodeKind::Attention,
 						dtype: Self::common_dtype(a.dtype, b.dtype),
 						//TODO: shape: child.shape.clone(),
 						//TODO:can_be_batched: child.can_be_batched,
 						children: [a_idx, b_idx],
-						out_is_scalar: false,
 						..Default::default()
 					},
 					complex: true,
 					cache_key: format!("attention:{:?}:{:?}", a_idx.raw, b_idx.raw),
-				}))
+					err: Vec::new(),
+				})
 			},
 		}
 	}
@@ -989,8 +1038,9 @@ impl PreCompilation {
 		}
 	}
 
+	/*
 	#[allow(clippy::manual_assert)]
-	fn find_races(&self, state: &mut LoadExprState) -> Result<(), ErrPack<TensorOpError>> {
+	fn find_races(&self, state: &mut LoadExprState) {
 		let kills = NodeIndex32::from_raw(self.nodes_postorder.len());
 		let rows = self.nodes_postorder.len() + 1;
 		let cols = self.tensor_vec.len();
@@ -1061,7 +1111,7 @@ impl PreCompilation {
 			}
 		}
 		Ok(())
-	}
+	}*/
 
 	fn split_shape<const N: usize>(shape: &[usize]) -> (&[usize], [usize; N]) {
 		let len = shape.len();
@@ -1080,7 +1130,8 @@ impl PreCompilation {
 		result: &mut ThinVec<usize>,
 		a: &[usize],
 		b: &[usize],
-	) -> Result<(), TensorOpError> {
+	) -> Result<(), ShapeMismatchError> {
+		let mut err = Ok(());
 		let len = a.len().max(b.len());
 		let skip_a = len - a.len();
 		let skip_b = len - b.len();
@@ -1093,13 +1144,15 @@ impl PreCompilation {
 				dim_b
 			} else {
 				cold_path();
-				return Err(TensorOpError::ShapeMismatch);
+				err = Err(ShapeMismatchError);
+				dim_a.max(dim_b)
 			};
 			result.push(dim);
 		}
-		Ok(())
+		err
 	}
 
+	/*
 	#[allow(clippy::too_many_lines)]
 	fn calc_shapes(&mut self) -> Result<(), TensorOpError> {
 		for i in self.nodes_postorder.indexes() {
@@ -1207,6 +1260,7 @@ impl PreCompilation {
 
 		Ok(())
 	}
+	*/
 
 	fn find_heads(&mut self) {
 		for idx in self.nodes_postorder.indexes() {
@@ -1218,7 +1272,7 @@ impl PreCompilation {
 			}
 
 			let start = &self.nodes_postorder[idx];
-			let start_shape = ShapeRef::new(&start.shape);
+			let start_shape: Option<&[usize]> = start.shape.as_ref().map(|sh| &sh[..]);
 			let start_fingerprint = start.reduction_fingerprint;
 
 			let mut head_idx = idx;
@@ -1229,7 +1283,7 @@ impl PreCompilation {
 					break;
 				}
 				let parent = &self.nodes_postorder[parent_idx];
-				let parent_shape = ShapeRef::new(&parent.shape);
+				let parent_shape: Option<&[usize]> = parent.shape.as_ref().map(|sh| &sh[..]);
 				let parent_fingerprint = parent.reduction_fingerprint;
 				if (!parent.is_view() && parent_shape != start_shape)
 					|| parent_fingerprint != start_fingerprint
@@ -1327,7 +1381,7 @@ impl PreCompilation {
 	}
 
 	fn dtype_to_str(&self, dtype: Option<DType>) -> String {
-		let dtype = if let Some(dt) = dtype { dt.to_string() } else { "unknown".to_string() };
+		let dtype = if let Some(dt) = dtype { dt.to_string() } else { "T".to_string() };
 		format!("<font color='teal'>{dtype}</font>")
 	}
 
@@ -1457,14 +1511,11 @@ impl PreCompilation {
 					}
 					let child_id = format!("node_{}", child_index.raw);
 					let child = &self.nodes_postorder[child_index];
-					let label = if child.out_is_scalar {
-						String::new()
+					let label = self.dtype_to_str(child.dtype);
+					let label = if let Some(shape) = &child.shape {
+						format!("{label}{}", self.shape_to_str(shape))
 					} else {
-						format!(
-							"{}{}",
-							self.dtype_to_str(child.dtype),
-							self.shape_to_str(&child.shape)
-						)
+						label
 					};
 					let extra_style = if ordered {
 						if child_index == node.children[0] {
@@ -1491,10 +1542,11 @@ impl PreCompilation {
 				}
 			}
 			for &capt_idx in &node.capture {
-				let label = if node.out_is_scalar {
-					String::new()
+				let label = self.dtype_to_str(node.dtype);
+				let label = if let Some(shape) = &node.shape {
+					format!("{label}{}", self.shape_to_str(shape))
 				} else {
-					format!("{}{}", self.dtype_to_str(node.dtype), self.shape_to_str(&node.shape))
+					label
 				};
 				let input_node = self.tensor_vec[capt_idx].input_node;
 				if input_node.is_sentinel() {
@@ -1522,6 +1574,17 @@ impl PreCompilation {
 			writeln!(
 				w,
 				"\t{node_id} -> {scalar_id} [label=< >, style=dotted, color=\"#008000\", constraint=true];"
+			)?;
+		}
+		for (node_idx, (idx, _msgs)) in &self.err_map {
+			writeln!(
+				w,
+				"\terr_{idx} [label=<<b><font color='yellow'>{idx}</font></b>>, shape=box, style=filled, fillcolor=\"#ff0000\"];"
+			)?;
+			writeln!(
+				w,
+				"\tnode_{} -> err_{idx} [style=bold, color=\"#ff0000\", constraint=true];",
+				node_idx.raw
 			)?;
 		}
 		writeln!(w, "}}")?;
