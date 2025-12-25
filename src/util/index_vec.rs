@@ -292,7 +292,7 @@ impl<Index: IndexTrait, T> std::ops::Index<Index> for IndexVec<Index, T> {
 impl<Index: IndexTrait, T> std::ops::IndexMut<Index> for IndexVec<Index, T> {
 	fn index_mut(&mut self, index: Index) -> &mut T {
 		&mut self.raw[index.to_raw()]
-	}	
+	}
 }
 
 impl<'a, Index: IndexTrait, T> IntoIterator for &'a IndexVec<Index, T> {

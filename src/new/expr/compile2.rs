@@ -16,19 +16,19 @@
 #![allow(clippy::missing_panics_doc)]
 #![allow(clippy::new_without_default)]
 #![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::collapsible_else_if)]
 
 use std::borrow::Cow;
 use std::collections::{HashMap, hash_map};
 use std::hint::{cold_path, unlikely};
 use std::rc::Rc;
 
-use thin_vec::ThinVec;
+use thin_vec::{ThinVec, thin_vec};
 
-use super::{Expr, ExprBinaryKind, ExprInput, ExprScalarRef, ExprTensorRef, ExprUnaryKind};
-use crate::new::expr::{ExprCapture, ExprKind};
+use super::super::expr;
+use super::{ExprBinaryKind, ExprInput, ExprNode, ExprUnaryKind};
+use crate::new::expr::{ExprBinary, ExprCapture, ExprKind, ExprReshape, ExprUnary};
 use crate::tensor::device::dtype::common_dtype;
-use crate::tensor::{DType, TensorOpError};
+use crate::tensor::{DType, HasDType, TensorOpError};
 use crate::util::bitmap::IndexBitmap;
 use crate::util::index_vec::{IndexTrait, IndexVec, UntypedIndex32};
 use crate::{ErrPack, define_index_type32};
@@ -124,21 +124,21 @@ pub enum NodeKind {
 	Reduction(ReductionKind),
 }
 
-#[allow(clippy::struct_excessive_bools)]
 pub struct Node {
 	pub node_kind: NodeKind,
 	pub dtype: DType,
 	pub shape: ThinVec<usize>,
+	pub can_be_batched: bool,
+	pub children: [NodeIndex32; 2],
+	pub out_is_scalar: bool,
+
 	pub parents: ThinVec<NodeIndex32>,
 	pub dominator: NodeIndex32,
-	pub children: [NodeIndex32; 2],
 	pub capture: ThinVec<TensorRefIndex32>,
 
-	pub out_is_scalar: bool,
 	pub is_dead: bool,
 	pub reduction_fingerprint: u32,
 	pub config_head_for: NodeIndex32,
-
 	// `reshape_n` and `reshape_to` are used only if is_view()
 	pub reshape_n: u8,
 	pub reshape_to: ThinVec<usize>,
@@ -149,6 +149,28 @@ pub struct Node {
 	// - FragmentIndex32
 	// depending on the node type.
 	pub x_index: UntypedIndex32,
+}
+
+impl Default for Node {
+	fn default() -> Self {
+		Self {
+			node_kind: NodeKind::Input,
+			shape: ThinVec::new(),
+			can_be_batched: false,
+			dtype: f32::dtype,
+			parents: ThinVec::new(),
+			dominator: NodeIndex32::new_sentinel(),
+			children: [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()],
+			capture: ThinVec::new(),
+			out_is_scalar: false,
+			is_dead: false,
+			reduction_fingerprint: 0,
+			config_head_for: NodeIndex32::new_sentinel(),
+			reshape_n: 0,
+			reshape_to: ThinVec::new(),
+			x_index: UntypedIndex32::new_sentinel(),
+		}
+	}
 }
 
 impl Node {
@@ -237,14 +259,25 @@ define_index_type32!(NodeIndex32);
 type NodeVec = IndexVec<NodeIndex32, Node>;
 
 pub struct TensorRef {
-	pub tensor_ref: Rc<ExprTensorRef>,
+	pub tensor_ref: Rc<expr::TensorRef>,
 	pub input_node: NodeIndex32,
 	pub output_node: NodeIndex32,
 	pub shape: ThinVec<usize>,
+	pub can_be_batched: bool,
+}
+
+impl TensorRef {
+	pub fn is_input(&self) -> bool {
+		!self.input_node.is_sentinel()
+	}
+
+	pub fn is_output(&self) -> bool {
+		!self.output_node.is_sentinel()
+	}
 }
 
 pub struct ScalarRef {
-	pub scalar_ref: Rc<ExprScalarRef>,
+	pub scalar_ref: Rc<expr::ScalarRef>,
 	pub input_node: NodeIndex32,
 }
 
@@ -269,22 +302,28 @@ pub struct SumToMean {
 pub struct PreCompilation {
 	nodes_postorder: NodeVec,
 	fragments_preorder: FragmentVec,
-	scalar_map: HashMap<*const ExprScalarRef, ScalarRefIndex32>,
+	scalar_map: HashMap<*const expr::ScalarRef, ScalarRefIndex32>,
 	scalar_vec: ScalarVec,
-	tensor_map: HashMap<*const ExprTensorRef, TensorRefIndex32>,
+	tensor_map: HashMap<*const expr::TensorRef, TensorRefIndex32>,
 	tensor_vec: TensorVec,
 	sum_to_mean: Vec<SumToMean>,
 }
 
+struct LoadedNode {
+	node: Node,
+	complex: bool,
+	cache_key: String,
+}
+
 pub struct LoadExprState {
-	visited: HashMap<*const Expr, NodeIndex32>,
+	visited: HashMap<*const ExprNode, NodeIndex32>,
 	node_cache: HashMap<String, NodeIndex32>,
-	n_config_driving: u32,
+	n_complex: u32,
 	bitmap: IndexBitmap<NodeIndex32>,
 }
 
 impl PreCompilation {
-	pub fn new(expr: &Expr) -> Result<Self, ErrPack<TensorOpError>> {
+	pub fn new(expr: &ExprNode) -> Result<Self, ErrPack<TensorOpError>> {
 		let mut comp = PreCompilation {
 			nodes_postorder: NodeVec::with_capacity(32),
 			fragments_preorder: FragmentVec::with_capacity(8),
@@ -297,25 +336,24 @@ impl PreCompilation {
 		let mut state = LoadExprState {
 			visited: HashMap::new(),
 			node_cache: HashMap::new(),
-			n_config_driving: 0,
+			n_complex: 0,
 			bitmap: IndexBitmap::new(),
 		};
 		comp.load_expr(expr, &mut state)?;
 		comp.remove_dead_code();
 		comp.find_dominators();
-		comp.find_config_fingerprints(&mut state);
+		comp.find_reduction_fingerprints(&mut state);
 		comp.find_races(&mut state)?;
+		/*comp.calc_shapes()?;
+		comp.find_heads();
+		comp.find_fragments()?;*/
 		Ok(comp)
 	}
 
-	#[allow(clippy::collapsible_else_if)]
-	#[allow(clippy::manual_assert)]
-	#[allow(clippy::panic)]
-	#[allow(clippy::too_many_lines)]
 	// TODO - refactor to make non recursive
 	fn load_expr(
 		&mut self,
-		expr: &Expr,
+		expr: &ExprNode,
 		state: &mut LoadExprState,
 	) -> Result<NodeIndex32, TensorOpError> {
 		let expr_key = std::ptr::from_ref(expr);
@@ -323,237 +361,40 @@ impl PreCompilation {
 			return Ok(*index);
 		}
 
-		let mut x_index = UntypedIndex32::new_sentinel();
-		let out_is_scalar: bool;
-		let children: [NodeIndex32; 2];
-		let mut capture: ThinVec<TensorRefIndex32> = ThinVec::new();
-		let node_kind: NodeKind;
-		let cache_key: String;
-		let dtype: DType;
-		let mut n_config_driving = 0;
-		let mut reshape_n = 0;
-		let mut reshape_to = ThinVec::new();
-		match &expr.kind {
+		let t = match &expr.kind {
 			ExprKind::Input(input) => {
-				match input {
-					ExprInput::Tensor(tensor_ref) => {
-						out_is_scalar = false;
-						dtype = tensor_ref.dtype;
-						children = [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()];
-						match self
-							.add_tensor_input(tensor_ref.clone(), self.nodes_postorder.next_index())
-						{
-							Ok(tensor_index) => {
-								x_index = tensor_index.to_untyped();
-							},
-							Err(existing_node) => {
-								state.visited.insert(expr_key, existing_node);
-								return Ok(existing_node);
-							},
-						}
-					},
-					ExprInput::Scalar(scalar_ref) => {
-						out_is_scalar = true;
-						dtype = scalar_ref.dtype;
-						children = [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()];
-						match self
-							.add_scalar_input(scalar_ref.clone(), self.nodes_postorder.next_index())
-						{
-							Ok(scalar_index) => {
-								x_index = scalar_index.to_untyped();
-							},
-							Err(existing_node) => {
-								state.visited.insert(expr_key, existing_node);
-								return Ok(existing_node);
-							},
-						}
-					},
-				}
-				node_kind = NodeKind::Input;
-				cache_key = String::new();
+				self.load_input(input) //
 			},
-			ExprKind::Capture(ExprCapture { expr: x, tensor_ref }) => {
-				let child_idx = self.load_expr(x, state)?;
-				let tensor_idx =
-					self.add_tensor_output(tensor_ref.clone(), self.nodes_postorder.next_index());
-				let child = &mut self.nodes_postorder[child_idx];
-				if !child.is_input() {
-					child.capture.push(tensor_idx);
-					state.visited.insert(expr_key, child_idx);
-					return Ok(child_idx);
-				}
-				// Insert identity node to perform the capture.
-				// This node is also a root.
-				node_kind = NodeKind::View;
-				out_is_scalar = child.out_is_scalar;
-				dtype = child.dtype;
-				children = [child_idx, NodeIndex32::new_sentinel()];
-				capture.push(tensor_idx);
-				cache_key = format!("identity:{:?}", child_idx.raw);
+			ExprKind::Capture(capture) => {
+				let child_idx = self.load_expr(&capture.expr, state)?;
+				self.load_capture(capture, child_idx)
 			},
 			ExprKind::Reshape(reshape) => {
-				let mut child_idx = self.load_expr(&reshape.expr, state)?;
-				reshape_n = reshape.reshape_n;
-				reshape_to = reshape.reshape_to.clone();
-				out_is_scalar = false;
-				dtype = expr.dtype;
-				let child = &self.nodes_postorder[child_idx];
-				if child.is_view() && child.reshape_n == 0 && child.reshape_to.is_empty() {
-					child_idx = child.children[0];
-				}
-				children = [child_idx, NodeIndex32::new_sentinel()];
-				node_kind = NodeKind::View;
-				cache_key = format!(
-					"reshape:{:?}:{:?}:{:?}",
-					reshape.reshape_n, reshape.reshape_to, child_idx.raw
-				);
+				let child_idx = self.load_expr(&reshape.expr, state)?;
+				self.load_reshape(reshape, child_idx)
 			},
 			ExprKind::Unary(unary) => {
 				let child_idx = self.load_expr(&unary.expr, state)?;
-				let child = &self.nodes_postorder[child_idx];
-				match unary.kind {
-					ExprUnaryKind::Cast => {
-						out_is_scalar = child.out_is_scalar;
-						dtype = expr.dtype;
-						let mut child_idx = child_idx;
-						if child.is_view() {
-							child_idx = child.children[0];
-							reshape_n = child.reshape_n;
-							reshape_to = child.reshape_to.clone();
-						}
-						children = [child_idx, NodeIndex32::new_sentinel()];
-						node_kind = NodeKind::View;
-						cache_key = format!("cast:{:?}:{:?}", expr.dtype, child_idx.raw);
-					},
-					ExprUnaryKind::Neg
-					| ExprUnaryKind::Exp
-					| ExprUnaryKind::Ln
-					| ExprUnaryKind::Abs
-					| ExprUnaryKind::Sqrt
-					| ExprUnaryKind::Recip => {
-						out_is_scalar = child.out_is_scalar;
-						dtype = child.dtype;
-						children = [child_idx, NodeIndex32::new_sentinel()];
-						let unary_kind = match unary.kind {
-							ExprUnaryKind::Neg => UnaryKind::Neg,
-							ExprUnaryKind::Exp => UnaryKind::Exp,
-							ExprUnaryKind::Ln => UnaryKind::Ln,
-							ExprUnaryKind::Abs => UnaryKind::Abs,
-							ExprUnaryKind::Sqrt => UnaryKind::Sqrt,
-							ExprUnaryKind::Recip => UnaryKind::Recip,
-							_ => unreachable!(),
-						};
-						node_kind = NodeKind::Unary(unary_kind);
-						cache_key = format!("unary:{:?}:{:?}", unary_kind, child_idx.raw);
-					},
-					ExprUnaryKind::Sum | ExprUnaryKind::Max => {
-						out_is_scalar = child.out_is_scalar;
-						dtype = child.dtype;
-						children = [child_idx, NodeIndex32::new_sentinel()];
-						n_config_driving = 1;
-						let reduction_kind = match unary.kind {
-							ExprUnaryKind::Sum => ReductionKind::Sum,
-							ExprUnaryKind::Max => ReductionKind::Max,
-							_ => unreachable!(),
-						};
-						node_kind = NodeKind::Reduction(reduction_kind);
-						cache_key = format!("reduction:{:?}:{:?}", reduction_kind, child_idx.raw);
-					},
-					ExprUnaryKind::SelectEven | ExprUnaryKind::SelectOdd => {
-						out_is_scalar = false;
-						dtype = child.dtype;
-						children = [child_idx, NodeIndex32::new_sentinel()];
-						let select_kind = match unary.kind {
-							ExprUnaryKind::SelectEven => SelectKind::Even,
-							ExprUnaryKind::SelectOdd => SelectKind::Odd,
-							_ => unreachable!(),
-						};
-						node_kind = NodeKind::Select(select_kind);
-						cache_key = format!("select:{:?}:{:?}", select_kind, child_idx.raw);
-					},
-					ExprUnaryKind::SumToMean => {
-						// Insert `ScalarInput` node.
-						out_is_scalar = true;
-						dtype = child.dtype;
-						children = [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()];
-						let scalar_ref = ExprScalarRef::new(Some("__sum_to_mean__".into()), dtype);
-						match self.add_scalar_input(scalar_ref, self.nodes_postorder.next_index()) {
-							Ok(scalar_idx) => {
-								self.sum_to_mean
-									.push(SumToMean { node: child_idx, scalar: scalar_idx });
-								x_index = scalar_idx.to_untyped();
-							},
-							Err(_) => {
-								unreachable!();
-							},
-						}
-						node_kind = NodeKind::Input;
-						cache_key = String::new();
-					},
-				}
+				self.load_unary(expr, unary, child_idx)
 			},
 			ExprKind::Binary(binary) => {
 				let a_idx = self.load_expr(&binary.lhs, state)?;
 				let b_idx = self.load_expr(&binary.rhs, state)?;
-				match binary.kind {
-					ExprBinaryKind::Add | ExprBinaryKind::Sub | ExprBinaryKind::Mul => {
-						let (binary_kind, commutative) = match binary.kind {
-							ExprBinaryKind::Add => (BinaryKind::Add, true),
-							ExprBinaryKind::Sub => (BinaryKind::Sub, false),
-							ExprBinaryKind::Mul => (BinaryKind::Mul, true),
-							_ => unreachable!(),
-						};
-						let (a_idx, b_idx) = if commutative && a_idx > b_idx {
-							(b_idx, a_idx)
-						} else {
-							(a_idx, b_idx)
-						};
-						let a = &self.nodes_postorder[a_idx];
-						let b = &self.nodes_postorder[b_idx];
-						dtype = common_dtype(a.dtype, b.dtype);
-
-						out_is_scalar = a.out_is_scalar && b.out_is_scalar;
-						children = [a_idx, b_idx];
-						node_kind = NodeKind::Binary(binary_kind);
-
-						cache_key =
-							format!("binary:{:?}:{:?}:{:?}", binary_kind, a_idx.raw, b_idx.raw);
-					},
-					ExprBinaryKind::First => {
-						state.visited.insert(expr_key, a_idx);
-						return Ok(a_idx);
-					},
-					ExprBinaryKind::RowTimesMat => {
-						let matmul_kind = MatMulKind::RowTimesMat;
-						let a = &self.nodes_postorder[a_idx];
-						let b = &self.nodes_postorder[b_idx];
-						dtype = common_dtype(a.dtype, b.dtype);
-
-						out_is_scalar = a.out_is_scalar && b.out_is_scalar;
-						children = [a_idx, b_idx];
-						n_config_driving = 1;
-						node_kind = NodeKind::MatMul(matmul_kind);
-						cache_key =
-							format!("matmul:{:?}:{:?}:{:?}", matmul_kind, a_idx.raw, b_idx.raw);
-					},
-					ExprBinaryKind::Attention => {
-						let a = &self.nodes_postorder[a_idx];
-						let b = &self.nodes_postorder[b_idx];
-						dtype = common_dtype(a.dtype, b.dtype);
-
-						out_is_scalar = false;
-						children = [a_idx, b_idx];
-						n_config_driving = 1;
-						node_kind = NodeKind::Attention;
-						cache_key = format!("attention:{:?}:{:?}", a_idx.raw, b_idx.raw);
-					},
-				}
+				self.load_binary(binary, a_idx, b_idx)
 			},
-		}
+		}?;
+
+		let loaded = match t {
+			Ok(loaded) => loaded,
+			Err(existing_node) => {
+				state.visited.insert(expr_key, existing_node);
+				return Ok(existing_node);
+			},
+		};
 
 		let next_index = self.nodes_postorder.next_index();
-		if !cache_key.is_empty() {
-			match state.node_cache.entry(cache_key) {
+		if !loaded.cache_key.is_empty() {
+			match state.node_cache.entry(loaded.cache_key) {
 				hash_map::Entry::Occupied(entry) => {
 					let cached_index = *entry.get();
 					state.visited.insert(expr_key, cached_index);
@@ -564,39 +405,367 @@ impl PreCompilation {
 				},
 			}
 		}
-		state.n_config_driving += n_config_driving;
 
-		for &child in &children {
+		if loaded.complex {
+			state.n_complex += 1;
+		}
+
+		for &child in &loaded.node.children {
 			if !self.nodes_postorder.is_valid(child) {
 				break;
 			}
 			self.nodes_postorder[child].parents.push(next_index);
 		}
 
-		let index = self.nodes_postorder.push(Node {
-			node_kind,
-			shape: ThinVec::new(),
-			dtype,
-			parents: ThinVec::new(),
-			dominator: NodeIndex32::new_sentinel(),
-			children,
-			capture,
-			out_is_scalar,
-			is_dead: false,
-			reduction_fingerprint: 0,
-			config_head_for: NodeIndex32::new_sentinel(),
-			reshape_n,
-			reshape_to,
-			x_index,
-		});
-		debug_assert!(index == next_index);
-		state.visited.insert(expr_key, index);
-		Ok(index)
+		let real_index = self.nodes_postorder.push(loaded.node);
+		debug_assert!(next_index == real_index);
+		state.visited.insert(expr_key, next_index);
+		Ok(next_index)
+	}
+
+	fn load_input(
+		&mut self,
+		input: &ExprInput,
+	) -> Result<Result<LoadedNode, NodeIndex32>, TensorOpError> {
+		let out_is_scalar;
+		let dtype;
+		let x_index;
+		let shape;
+		let can_be_batched;
+		match input {
+			ExprInput::Tensor(tensor_ref) => {
+				out_is_scalar = false;
+				dtype = tensor_ref.dtype;
+				match self.add_tensor_input(tensor_ref.clone(), self.nodes_postorder.next_index()) {
+					Ok(tensor_index) => {
+						x_index = tensor_index.to_untyped();
+						let t = &self.tensor_vec[tensor_index];
+						shape = t.shape.clone();
+						can_be_batched = t.can_be_batched;
+					},
+					Err(existing_node) => {
+						return Ok(Err(existing_node));
+					},
+				}
+			},
+			ExprInput::Scalar(scalar_ref) => {
+				out_is_scalar = true;
+				dtype = scalar_ref.dtype;
+				can_be_batched = false;
+				match self.add_scalar_input(scalar_ref.clone(), self.nodes_postorder.next_index()) {
+					Ok(scalar_index) => {
+						x_index = scalar_index.to_untyped();
+						shape = ThinVec::new();
+					},
+					Err(existing_node) => {
+						return Ok(Err(existing_node));
+					},
+				}
+			},
+		}
+		Ok(Ok(LoadedNode {
+			node: Node {
+				node_kind: NodeKind::Input,
+				dtype,
+				shape,
+				can_be_batched,
+				children: [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()],
+				out_is_scalar,
+				x_index,
+				..Default::default()
+			},
+			complex: false,
+			cache_key: String::new(),
+		}))
+	}
+
+	fn load_capture(
+		&mut self,
+		capture: &ExprCapture,
+		child_idx: NodeIndex32,
+	) -> Result<Result<LoadedNode, NodeIndex32>, TensorOpError> {
+		let tensor_idx =
+			self.add_tensor_output(capture.tensor_ref.clone(), self.nodes_postorder.next_index());
+		let child = &mut self.nodes_postorder[child_idx];
+		if !child.is_input() {
+			child.capture.push(tensor_idx);
+			return Ok(Err(child_idx));
+		}
+		// Insert identity node to perform the capture.
+		// This node is also a root.
+		Ok(Ok(LoadedNode {
+			node: Node {
+				node_kind: NodeKind::View,
+				dtype: child.dtype,
+				shape: child.shape.clone(),
+				can_be_batched: child.can_be_batched,
+				children: [child_idx, NodeIndex32::new_sentinel()],
+				out_is_scalar: child.out_is_scalar,
+				capture: thin_vec![tensor_idx],
+				..Default::default()
+			},
+			complex: false,
+			cache_key: format!("identity:{:?}", child_idx.raw),
+		}))
+	}
+
+	fn load_reshape(
+		&self,
+		reshape: &ExprReshape,
+		mut child_idx: NodeIndex32,
+	) -> Result<Result<LoadedNode, NodeIndex32>, TensorOpError> {
+		let child = &self.nodes_postorder[child_idx];
+		if child.is_view() && child.reshape_n == 0 && child.reshape_to.is_empty() {
+			child_idx = child.children[0];
+		}
+		Ok(Ok(LoadedNode {
+			node: Node {
+				node_kind: NodeKind::View,
+				dtype: child.dtype,
+				shape: child.shape.clone(),
+				can_be_batched: child.can_be_batched,
+				children: [child_idx, NodeIndex32::new_sentinel()],
+				out_is_scalar: false,
+				reshape_n: reshape.reshape_n,
+				reshape_to: reshape.reshape_to.clone(),
+				..Default::default()
+			},
+			complex: false,
+			cache_key: format!(
+				"reshape:{:?}:{:?}:{:?}",
+				reshape.reshape_n, reshape.reshape_to, child_idx.raw
+			),
+		}))
+	}
+
+	fn load_cast(
+		&self,
+		expr: &ExprNode,
+		mut child_idx: NodeIndex32,
+	) -> Result<Result<LoadedNode, NodeIndex32>, TensorOpError> {
+		let child = &self.nodes_postorder[child_idx];
+		let reshape_n;
+		let reshape_to;
+		if child.is_view() {
+			child_idx = child.children[0];
+			reshape_n = child.reshape_n;
+			reshape_to = child.reshape_to.clone();
+		} else {
+			reshape_n = 0;
+			reshape_to = ThinVec::new();
+		}
+		Ok(Ok(LoadedNode {
+			node: Node {
+				node_kind: NodeKind::View,
+				dtype: expr.dtype,
+				shape: child.shape.clone(),
+				can_be_batched: child.can_be_batched,
+				children: [child_idx, NodeIndex32::new_sentinel()],
+				out_is_scalar: child.out_is_scalar,
+				reshape_n,
+				reshape_to,
+				..Default::default()
+			},
+			complex: false,
+			cache_key: format!("cast:{:?}:{:?}", expr.dtype, child_idx.raw),
+		}))
+	}
+
+	fn load_sum_to_mean(
+		&mut self,
+		child_idx: NodeIndex32,
+	) -> Result<Result<LoadedNode, NodeIndex32>, TensorOpError> {
+		let child = &self.nodes_postorder[child_idx];
+		// Insert `ScalarInput` node.
+		// TODO - should create `Const` node
+		// TODO - for correct dtype, we may need to look at parents
+		// TODO - should immediately assign value `1.0 / N`
+		let dtype = child.dtype;
+		let scalar_ref = expr::ScalarRef::new(Some("__sum_to_mean__".into()), dtype);
+		let x_index = match self.add_scalar_input(scalar_ref, self.nodes_postorder.next_index()) {
+			Ok(scalar_idx) => {
+				self.sum_to_mean.push(SumToMean { node: child_idx, scalar: scalar_idx });
+				scalar_idx.to_untyped()
+			},
+			Err(_) => {
+				unreachable!();
+			},
+		};
+		Ok(Ok(LoadedNode {
+			node: Node {
+				node_kind: NodeKind::Input,
+				dtype,
+				can_be_batched: false,
+				out_is_scalar: true,
+				x_index,
+				..Default::default()
+			},
+			complex: false,
+			cache_key: String::new(),
+		}))
+	}
+
+	fn load_unary(
+		&mut self,
+		expr: &ExprNode,
+		unary: &ExprUnary,
+		child_idx: NodeIndex32,
+	) -> Result<Result<LoadedNode, NodeIndex32>, TensorOpError> {
+		match unary.kind {
+			ExprUnaryKind::Cast => self.load_cast(expr, child_idx),
+			ExprUnaryKind::Neg
+			| ExprUnaryKind::Exp
+			| ExprUnaryKind::Ln
+			| ExprUnaryKind::Abs
+			| ExprUnaryKind::Sqrt
+			| ExprUnaryKind::Recip => {
+				let unary_kind = match unary.kind {
+					ExprUnaryKind::Neg => UnaryKind::Neg,
+					ExprUnaryKind::Exp => UnaryKind::Exp,
+					ExprUnaryKind::Ln => UnaryKind::Ln,
+					ExprUnaryKind::Abs => UnaryKind::Abs,
+					ExprUnaryKind::Sqrt => UnaryKind::Sqrt,
+					ExprUnaryKind::Recip => UnaryKind::Recip,
+					_ => unreachable!(),
+				};
+				let child = &self.nodes_postorder[child_idx];
+				Ok(Ok(LoadedNode {
+					node: Node {
+						node_kind: NodeKind::Unary(unary_kind),
+						dtype: child.dtype,
+						shape: child.shape.clone(),
+						can_be_batched: child.can_be_batched,
+						children: [child_idx, NodeIndex32::new_sentinel()],
+						out_is_scalar: child.out_is_scalar,
+						..Default::default()
+					},
+					complex: false,
+					cache_key: format!("unary:{:?}:{:?}", unary_kind, child_idx.raw),
+				}))
+			},
+			ExprUnaryKind::Sum | ExprUnaryKind::Max => {
+				let reduction_kind = match unary.kind {
+					ExprUnaryKind::Sum => ReductionKind::Sum,
+					ExprUnaryKind::Max => ReductionKind::Max,
+					_ => unreachable!(),
+				};
+				let child = &self.nodes_postorder[child_idx];
+				Ok(Ok(LoadedNode {
+					node: Node {
+						node_kind: NodeKind::Reduction(reduction_kind),
+						dtype: child.dtype,
+						shape: child.shape.clone(),
+						can_be_batched: child.can_be_batched,
+						children: [child_idx, NodeIndex32::new_sentinel()],
+						out_is_scalar: child.out_is_scalar,
+						..Default::default()
+					},
+					complex: true,
+					cache_key: format!("reduction:{:?}:{:?}", reduction_kind, child_idx.raw),
+				}))
+			},
+			ExprUnaryKind::SelectEven | ExprUnaryKind::SelectOdd => {
+				let select_kind = match unary.kind {
+					ExprUnaryKind::SelectEven => SelectKind::Even,
+					ExprUnaryKind::SelectOdd => SelectKind::Odd,
+					_ => unreachable!(),
+				};
+				let child = &self.nodes_postorder[child_idx];
+				Ok(Ok(LoadedNode {
+					node: Node {
+						node_kind: NodeKind::Select(select_kind),
+						dtype: child.dtype,
+						shape: child.shape.clone(),
+						can_be_batched: child.can_be_batched,
+						children: [child_idx, NodeIndex32::new_sentinel()],
+						out_is_scalar: false,
+						..Default::default()
+					},
+					complex: false,
+					cache_key: format!("select:{:?}:{:?}", select_kind, child_idx.raw),
+				}))
+			},
+			ExprUnaryKind::SumToMean => self.load_sum_to_mean(child_idx),
+		}
+	}
+
+	fn load_binary(
+		&self,
+		binary: &ExprBinary,
+		a_idx: NodeIndex32,
+		b_idx: NodeIndex32,
+	) -> Result<Result<LoadedNode, NodeIndex32>, TensorOpError> {
+		match binary.kind {
+			ExprBinaryKind::Add | ExprBinaryKind::Sub | ExprBinaryKind::Mul => {
+				let (binary_kind, commutative) = match binary.kind {
+					ExprBinaryKind::Add => (BinaryKind::Add, true),
+					ExprBinaryKind::Sub => (BinaryKind::Sub, false),
+					ExprBinaryKind::Mul => (BinaryKind::Mul, true),
+					_ => unreachable!(),
+				};
+				let (a_idx, b_idx) =
+					if commutative && a_idx > b_idx { (b_idx, a_idx) } else { (a_idx, b_idx) };
+				let a = &self.nodes_postorder[a_idx];
+				let b = &self.nodes_postorder[b_idx];
+				let dtype = common_dtype(a.dtype, b.dtype);
+				Ok(Ok(LoadedNode {
+					node: Node {
+						node_kind: NodeKind::Binary(binary_kind),
+						dtype,
+						//TODO: shape: child.shape.clone(),
+						//TODO:can_be_batched: child.can_be_batched,
+						children: [a_idx, b_idx],
+						out_is_scalar: a.out_is_scalar && b.out_is_scalar,
+						..Default::default()
+					},
+					complex: false,
+					cache_key: format!("binary:{:?}:{:?}:{:?}", binary_kind, a_idx.raw, b_idx.raw),
+				}))
+			},
+			ExprBinaryKind::First => Ok(Err(a_idx)),
+			ExprBinaryKind::RowTimesMat => {
+				let a = &self.nodes_postorder[a_idx];
+				let b = &self.nodes_postorder[b_idx];
+				let dtype = common_dtype(a.dtype, b.dtype);
+				let matmul_kind = MatMulKind::RowTimesMat;
+				Ok(Ok(LoadedNode {
+					node: Node {
+						node_kind: NodeKind::MatMul(matmul_kind),
+						dtype,
+						//TODO: shape: child.shape.clone(),
+						//TODO:can_be_batched: child.can_be_batched,
+						children: [a_idx, b_idx],
+						out_is_scalar: a.out_is_scalar && b.out_is_scalar,
+						..Default::default()
+					},
+					complex: true,
+					cache_key: format!("matmul:{:?}:{:?}:{:?}", matmul_kind, a_idx.raw, b_idx.raw),
+				}))
+			},
+			ExprBinaryKind::Attention => {
+				let a = &self.nodes_postorder[a_idx];
+				let b = &self.nodes_postorder[b_idx];
+				let dtype = common_dtype(a.dtype, b.dtype);
+				Ok(Ok(LoadedNode {
+					node: Node {
+						node_kind: NodeKind::Attention,
+						dtype,
+						//TODO: shape: child.shape.clone(),
+						//TODO:can_be_batched: child.can_be_batched,
+						children: [a_idx, b_idx],
+						out_is_scalar: false,
+						..Default::default()
+					},
+					complex: true,
+					cache_key: format!("attention:{:?}:{:?}", a_idx.raw, b_idx.raw),
+				}))
+			},
+		}
 	}
 
 	fn add_scalar_input(
 		&mut self,
-		scalar_ref: Rc<ExprScalarRef>,
+		scalar_ref: Rc<expr::ScalarRef>,
 		node: NodeIndex32,
 	) -> Result<ScalarRefIndex32, NodeIndex32> {
 		let key = std::ptr::from_ref(scalar_ref.as_ref());
@@ -615,17 +784,20 @@ impl PreCompilation {
 
 	fn add_tensor_input(
 		&mut self,
-		tensor_ref: Rc<ExprTensorRef>,
+		tensor_ref: Rc<expr::TensorRef>,
 		node: NodeIndex32,
 	) -> Result<TensorRefIndex32, NodeIndex32> {
 		let key = std::ptr::from_ref(tensor_ref.as_ref());
 		match self.tensor_map.entry(key) {
 			hash_map::Entry::Vacant(entry) => {
+				let shape = ThinVec::from(&tensor_ref.shape[..]);
+				let can_be_batched = tensor_ref.batched != expr::CanBeBatched::No;
 				let index = self.tensor_vec.push(TensorRef {
 					tensor_ref,
 					input_node: node,
 					output_node: NodeIndex32::new_sentinel(),
-					shape: ThinVec::new(),
+					shape,
+					can_be_batched,
 				});
 				entry.insert(index);
 				Ok(index)
@@ -639,17 +811,20 @@ impl PreCompilation {
 
 	fn add_tensor_output(
 		&mut self,
-		tensor_ref: Rc<ExprTensorRef>,
+		tensor_ref: Rc<expr::TensorRef>,
 		node: NodeIndex32,
 	) -> TensorRefIndex32 {
 		let key = std::ptr::from_ref(tensor_ref.as_ref());
 		match self.tensor_map.entry(key) {
 			hash_map::Entry::Vacant(entry) => {
+				let shape = ThinVec::from(&tensor_ref.shape[..]);
+				let can_be_batched = tensor_ref.batched != expr::CanBeBatched::No;
 				let index = self.tensor_vec.push(TensorRef {
 					tensor_ref,
 					input_node: NodeIndex32::new_sentinel(),
 					output_node: node,
-					shape: ThinVec::new(),
+					shape,
+					can_be_batched,
 				});
 				entry.insert(index);
 				index
@@ -658,9 +833,66 @@ impl PreCompilation {
 		}
 	}
 
-	fn find_config_fingerprints(&mut self, state: &mut LoadExprState) {
+	fn remove_dead_code(&mut self) {
+		for i in self.nodes_postorder.indexes().rev() {
+			let mut parents =
+				std::mem::replace(&mut self.nodes_postorder[i].parents, ThinVec::new());
+			parents.retain(|&p| !self.nodes_postorder[p].is_dead);
+			if parents.is_empty() {
+				if self.nodes_postorder[i].capture.is_empty() {
+					self.nodes_postorder[i].is_dead = true;
+				}
+			} else {
+				parents.sort_unstable();
+				parents.dedup();
+				parents.shrink_to_fit();
+				self.nodes_postorder[i].parents = parents;
+			}
+		}
+	}
+
+	fn find_dominators(&mut self) {
+		let mut changed = true;
+		while changed {
+			changed = false;
+			for idx in self.nodes_postorder.indexes().rev() {
+				match self.nodes_postorder[idx].parents.len() {
+					0 => {
+						// root
+						debug_assert!(
+							self.nodes_postorder[idx].dominator == NodeIndex32::new_sentinel()
+						);
+					},
+					1 => {
+						self.nodes_postorder[idx].dominator = self.nodes_postorder[idx].parents[0];
+					},
+					_ => {
+						let dominator = self.nodes_postorder[idx].parents[1..]
+							.iter()
+							.copied()
+							.fold(self.nodes_postorder[idx].parents[0], |mut d1, mut d2| {
+								while d1 != d2 {
+									if d1.to_raw() < d2.to_raw() {
+										d1 = self.nodes_postorder[d1].dominator;
+									} else {
+										d2 = self.nodes_postorder[d2].dominator;
+									}
+								}
+								d1
+							});
+						if self.nodes_postorder[idx].dominator != dominator {
+							self.nodes_postorder[idx].dominator = dominator;
+							changed = true;
+						}
+					},
+				}
+			}
+		}
+	}
+
+	fn find_reduction_fingerprints(&mut self, state: &mut LoadExprState) {
 		let bitmap = &mut state.bitmap;
-		bitmap.clear_and_resize(&self.nodes_postorder, state.n_config_driving as usize);
+		bitmap.clear_and_resize(&self.nodes_postorder, state.n_complex as usize);
 		let mut n_config_driving = 0;
 		let mut n_dead_config_driving = 0;
 		for idx in self.nodes_postorder.indexes() {
@@ -688,10 +920,7 @@ impl PreCompilation {
 				}
 			}
 		}
-		debug_assert_eq!(
-			n_config_driving + n_dead_config_driving,
-			(state.n_config_driving as usize)
-		);
+		debug_assert_eq!(n_config_driving + n_dead_config_driving, (state.n_complex as usize));
 		let mut fingerprints: HashMap<&[usize], u32> = HashMap::new();
 		for idx in self.nodes_postorder.indexes() {
 			let row: &[usize] = bitmap.row(idx);
@@ -782,63 +1011,6 @@ impl PreCompilation {
 		Ok(())
 	}
 
-	fn remove_dead_code(&mut self) {
-		for i in self.nodes_postorder.indexes().rev() {
-			let mut parents =
-				std::mem::replace(&mut self.nodes_postorder[i].parents, ThinVec::new());
-			parents.retain(|&p| !self.nodes_postorder[p].is_dead);
-			if parents.is_empty() {
-				if self.nodes_postorder[i].capture.is_empty() {
-					self.nodes_postorder[i].is_dead = true;
-				}
-			} else {
-				parents.sort_unstable();
-				parents.dedup();
-				parents.shrink_to_fit();
-				self.nodes_postorder[i].parents = parents;
-			}
-		}
-	}
-
-	fn find_dominators(&mut self) {
-		let mut changed = true;
-		while changed {
-			changed = false;
-			for idx in self.nodes_postorder.indexes().rev() {
-				match self.nodes_postorder[idx].parents.len() {
-					0 => {
-						// root
-						debug_assert!(
-							self.nodes_postorder[idx].dominator == NodeIndex32::new_sentinel()
-						);
-					},
-					1 => {
-						self.nodes_postorder[idx].dominator = self.nodes_postorder[idx].parents[0];
-					},
-					_ => {
-						let dominator = self.nodes_postorder[idx].parents[1..]
-							.iter()
-							.copied()
-							.fold(self.nodes_postorder[idx].parents[0], |mut d1, mut d2| {
-								while d1 != d2 {
-									if d1.to_raw() < d2.to_raw() {
-										d1 = self.nodes_postorder[d1].dominator;
-									} else {
-										d2 = self.nodes_postorder[d2].dominator;
-									}
-								}
-								d1
-							});
-						if self.nodes_postorder[idx].dominator != dominator {
-							self.nodes_postorder[idx].dominator = dominator;
-							changed = true;
-						}
-					},
-				}
-			}
-		}
-	}
-
 	fn split_shape<const N: usize>(shape: &[usize]) -> (&[usize], [usize; N]) {
 		let len = shape.len();
 		let cnt = len.min(N);
@@ -878,25 +1050,6 @@ impl PreCompilation {
 
 	#[allow(clippy::too_many_lines)]
 	fn calc_shapes(&mut self) -> Result<(), TensorOpError> {
-		for t in &mut self.tensor_vec {
-			t.shape.clear();
-			if t.input_node.is_sentinel() {
-				continue;
-			}
-
-			let borrow = unsafe { t.tensor_ref.tensor.try_borrow_unguarded() };
-			let Ok(tensor) = borrow else {
-				cold_path();
-				return Err(TensorOpError::CannotBorrow);
-			};
-			let Some(tensor) = tensor else {
-				cold_path();
-				return Err(TensorOpError::MissingInput);
-			};
-
-			t.shape.extend_from_slice(tensor.shape());
-		}
-
 		for i in self.nodes_postorder.indexes() {
 			let (all_children, me, _) = self.nodes_postorder.borrow_multiple(i);
 			me.shape.clear();
@@ -1037,9 +1190,7 @@ impl PreCompilation {
 		}
 	}
 
-	pub fn find_fragments(&mut self) -> Result<(), TensorOpError> {
-		self.calc_shapes()?;
-		self.find_heads();
+	fn find_fragments(&mut self) -> Result<(), TensorOpError> {
 		self.fragments_preorder.raw.clear();
 		for idx in self.nodes_postorder.indexes().rev() {
 			let (_, item, all_parents) = self.nodes_postorder.borrow_multiple(idx);

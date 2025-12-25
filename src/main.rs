@@ -10,6 +10,7 @@
 #![feature(generic_const_exprs)]
 #![feature(macro_metavar_expr)]
 #![feature(string_from_utf8_lossy_owned)]
+#![feature(f16)]
 
 //use x17ai::nn::layers::{Layer, Linear, LossFunction, SoftmaxCrossEntropy};
 //use x17ai::nn::{EvalContext, ModelContext};
@@ -164,7 +165,7 @@ use std::rc::Rc;
 use thin_vec::thin_vec;
 use x17ai::autograd::{AutogradTensor, LossFn};
 use x17ai::new::expr::compile2::PreCompilation;
-use x17ai::new::expr::{ExprScalarRef, ExprTensorRef, RcExpr};
+use x17ai::new::expr::{CanBeBatched, Expr, ScalarRef, TensorRef};
 use x17ai::new::tensor::TensorLiteral1D;
 use x17ai::nn::ModelContext;
 use x17ai::nn::fragments::linear::Linear;
@@ -174,7 +175,6 @@ use x17ai::rng::Rng;
 use x17ai::tensor::device::cpu::CPUDevice;
 use x17ai::tensor::device::cuda::CudaDevice;
 use x17ai::tensor::device::dtype::common_dtype;
-use x17ai::tensor::device::kernel::{self, Expr};
 use x17ai::tensor::math::{col, mat, row};
 use x17ai::tensor::{DType, Device, HasDType, Tensor, TensorOpError};
 use x17ai::{ErrPack, custom_kernel, tensor};
@@ -221,35 +221,36 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	Ok(())
 }
 
-fn test1_opt(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
+/*
+fn test1_opt(dev: Rc<dyn x17ai::new::device::Device>) -> Expr {
 	let my_lit = TensorLiteral1D::<f32>::new(&[1.0, 2.0, 3.0, 4.0, 5.0]);
 
-	let mut v_ten = ExprTensorRef::new(Some("v".into()), f32::dtype, vec![1]);
-	let mut m_ten = ExprTensorRef::new(Some("m".into()), f32::dtype, vec![]);
-	let mut grad_ten = ExprTensorRef::new(Some("grad".into()), f32::dtype, vec![]);
-	let mut value_ten = ExprTensorRef::new(Some("value".into()), f32::dtype, vec![]);
+	let mut v_ten = TensorRef::new(Some("v".into()), f32::dtype, vec![1]);
+	let mut m_ten = TensorRef::new(Some("m".into()), f32::dtype, vec![]);
+	let mut grad_ten = TensorRef::new(Some("grad".into()), f32::dtype, vec![]);
+	let mut value_ten = TensorRef::new(Some("value".into()), f32::dtype, vec![]);
 
-	let grad1 = RcExpr::new_tensor_input(grad_ten.clone());
-	let grad2 = RcExpr::new_tensor_input(grad_ten.clone());
-	let grad3 = RcExpr::new_tensor_input(grad_ten.clone());
+	let grad1 = Expr::new_tensor_input(grad_ten.clone());
+	let grad2 = Expr::new_tensor_input(grad_ten.clone());
+	let grad3 = Expr::new_tensor_input(grad_ten.clone());
 
-	let m = RcExpr::new_tensor_input(m_ten.clone());
+	let m = Expr::new_tensor_input(m_ten.clone());
 	//let m = m.capture(ExprTensorRef::new(Some("m_captured".into()), f32::dtype, vec![]));
 	let m_decay_coef =
-		RcExpr::new_scalar_input(ExprScalarRef::new(Some("m_decay_coef".into()), f32::dtype));
+		Expr::new_scalar_input(ScalarRef::new(Some("m_decay_coef".into()), f32::dtype));
 	let m_update_coef =
-		RcExpr::new_scalar_input(ExprScalarRef::new(Some("m_update_coef".into()), f32::dtype));
+		Expr::new_scalar_input(ScalarRef::new(Some("m_update_coef".into()), f32::dtype));
 
 	let m_decayed = (m * m_decay_coef); //.max(); // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	let m_update = grad1.clone() * m_update_coef;
 	let new_m = m_decayed + m_update;
 	let new_m = new_m.capture(m_ten.clone());
 
-	let v = RcExpr::new_tensor_input(v_ten.clone());
+	let v = Expr::new_tensor_input(v_ten.clone());
 	let v_decay_coef =
-		RcExpr::new_scalar_input(ExprScalarRef::new(Some("v_decay_coef".into()), f32::dtype));
+		Expr::new_scalar_input(ScalarRef::new(Some("v_decay_coef".into()), f32::dtype));
 	let v_update_coef =
-		RcExpr::new_scalar_input(ExprScalarRef::new(Some("v_update_coef".into()), f32::dtype));
+		Expr::new_scalar_input(ScalarRef::new(Some("v_update_coef".into()), f32::dtype));
 
 	let v_decayed = v.clone() * v_decay_coef;
 	let v_update = (grad2.clone() * grad3).sum() * v_update_coef.clone();
@@ -258,13 +259,13 @@ fn test1_opt(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 	let new_v = new_v.capture(v_ten.clone());
 	//let new_v = new_v.capture(value_ten.clone());
 
-	let eps = RcExpr::new_scalar_input(ExprScalarRef::new(Some("eps".into()), f32::dtype));
+	let eps = Expr::new_scalar_input(ScalarRef::new(Some("eps".into()), f32::dtype));
 	let v_rsqrt = (new_v.sqrt() + eps).recip();
 	//return v_rsqrt;
 
-	let value = RcExpr::new_tensor_input(value_ten.clone());
+	let value = Expr::new_tensor_input(value_ten.clone());
 	let update_coef =
-		RcExpr::new_scalar_input(ExprScalarRef::new(Some("update_coef".into()), f32::dtype));
+		Expr::new_scalar_input(ScalarRef::new(Some("update_coef".into()), f32::dtype));
 	let update = new_m.clone() * v_rsqrt;
 	let new_value = value + update.clone() * update_coef;
 	let new_value = new_value.capture(value_ten.clone());
@@ -290,13 +291,14 @@ fn test1_opt(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 
 	RcExpr::first(new_value.clone(), (new_value + new_m).capture(x_ten))*/
 }
+*/
 
 fn x_rms_norm(
-	inp: RcExpr,
-	eps: Rc<ExprScalarRef>,
+	inp: Expr,
+	eps: Rc<ScalarRef>,
 	internal_dtype: DType,
-) -> Result<RcExpr, ErrPack<TensorOpError>> {
-	let eps = RcExpr::new_scalar_input(eps.clone()).cast(internal_dtype);
+) -> Result<Expr, ErrPack<TensorOpError>> {
+	let eps = Expr::new_scalar_input(eps.clone()).cast(internal_dtype);
 	let inp = inp.cast(internal_dtype);
 
 	let magn_recip = ((inp.clone() * inp.clone()).mean().sqrt() + eps).recip().cast(f32::dtype);
@@ -304,7 +306,7 @@ fn x_rms_norm(
 	Ok(inp * magn_recip)
 }
 
-fn x_softmax(inp: RcExpr, internal_dtype: DType) -> Result<RcExpr, ErrPack<TensorOpError>> {
+fn x_softmax(inp: Expr, internal_dtype: DType) -> Result<Expr, ErrPack<TensorOpError>> {
 	let inp = inp.cast(internal_dtype);
 
 	let max = inp.clone().max();
@@ -314,27 +316,28 @@ fn x_softmax(inp: RcExpr, internal_dtype: DType) -> Result<RcExpr, ErrPack<Tenso
 	Ok(out)
 }
 
-pub fn x_swiglu(inp: RcExpr, internal_dtype: DType) -> Result<RcExpr, ErrPack<TensorOpError>> {
+pub fn x_swiglu(inp: Expr, internal_dtype: DType) -> Result<Expr, ErrPack<TensorOpError>> {
 	let inp = inp.cast(internal_dtype);
 	let lin = inp.clone().select_even();
 	let gate = inp.select_odd();
 
-	let one = RcExpr::new_scalar_input(ExprScalarRef::new(Some("ONE".into()), internal_dtype));
+	let one = Expr::new_scalar_input(ScalarRef::new(Some("ONE".into()), internal_dtype));
 
 	let out = lin * gate.clone() * ((-gate).exp() + one).recip();
 
 	Ok(out)
 }
 
-fn test2_rms_norm(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
-	let inp_ten = ExprTensorRef::new(Some("inp".into()), f32::dtype, Vec::new());
-	let inp2_ten = ExprTensorRef::new(Some("inp2".into()), f32::dtype, Vec::new());
-	let inp = RcExpr::new_tensor_input(inp_ten.clone());
-	let inp2 = RcExpr::new_tensor_input(inp_ten.clone());
-	let sum_to_mean = ExprScalarRef::new(Some("sum_to_mean".into()), f32::dtype);
-	let sum_to_mean = RcExpr::new_scalar_input(sum_to_mean.clone());
-	let eps = ExprScalarRef::new(Some("eps".into()), f32::dtype);
-	let eps = RcExpr::new_scalar_input(eps.clone());
+/*
+fn test2_rms_norm(dev: Rc<dyn x17ai::new::device::Device>) -> Expr {
+	let inp_ten = TensorRef::new(Some("inp".into()), f32::dtype, Vec::new());
+	let inp2_ten = TensorRef::new(Some("inp2".into()), f32::dtype, Vec::new());
+	let inp = Expr::new_tensor_input(inp_ten.clone());
+	let inp2 = Expr::new_tensor_input(inp_ten.clone());
+	let sum_to_mean = ScalarRef::new(Some("sum_to_mean".into()), f32::dtype);
+	let sum_to_mean = Expr::new_scalar_input(sum_to_mean.clone());
+	let eps = ScalarRef::new(Some("eps".into()), f32::dtype);
+	let eps = Expr::new_scalar_input(eps.clone());
 	let magn_recip = (((inp.clone() * inp2.clone()).sum() * sum_to_mean).sqrt() + eps).recip();
 
 	inp_ten.tensor.borrow_mut().replace(
@@ -348,9 +351,9 @@ fn test2_rms_norm(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 	(inp * magn_recip).capture(inp_ten.clone()).capture(inp2_ten.clone())
 }
 
-fn test3_softmax(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
-	let inp_ten = ExprTensorRef::new(Some("inp".into()), f32::dtype, vec![15, 32]);
-	let inp = RcExpr::new_tensor_input(inp_ten.clone());
+fn test3_softmax(dev: Rc<dyn x17ai::new::device::Device>) -> Expr {
+	let inp_ten = TensorRef::new(Some("inp".into()), f32::dtype, vec![15, 32]);
+	let inp = Expr::new_tensor_input(inp_ten.clone());
 	let max = inp.clone().max();
 	let t = (inp - max).exp();
 	let out = t.clone().sum().recip() * t;
@@ -358,22 +361,22 @@ fn test3_softmax(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 	inp_ten.tensor.borrow_mut().replace(
 		x17ai::new::tensor::Tensor::new_empty(&[1000, 512], f32::dtype, dev.clone()).unwrap(),
 	);
-	let sca = ExprScalarRef::new(Some("m_decay_coef".into()), f32::dtype);
-	let coef1 = RcExpr::new_scalar_input(sca.clone());
-	let coef2 = RcExpr::new_scalar_input(sca.clone());
+	let sca = ScalarRef::new(Some("m_decay_coef".into()), f32::dtype);
+	let coef1 = Expr::new_scalar_input(sca.clone());
+	let coef2 = Expr::new_scalar_input(sca.clone());
 
 	((out.clone() + coef1).capture(inp_ten.clone())
 		- (coef2 + out.clone()).capture(inp_ten.clone()))
 }
 
-fn test4_x(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
-	let mut inp_a = ExprTensorRef::new(Some("a".into()), f32::dtype, vec![]);
-	let mut inb_b = ExprTensorRef::new(Some("b".into()), f32::dtype, vec![]);
-	let mut inp_c = ExprTensorRef::new(Some("c".into()), f32::dtype, vec![]);
-	let out = ExprTensorRef::new(Some("out".into()), f32::dtype, vec![]);
-	let a = RcExpr::new_tensor_input(inp_a.clone());
-	let b = -RcExpr::new_tensor_input(inb_b.clone());
-	let c = RcExpr::new_tensor_input(inp_c.clone());
+fn test4_x(dev: Rc<dyn x17ai::new::device::Device>) -> Expr {
+	let mut inp_a = TensorRef::new(Some("a".into()), f32::dtype, vec![]);
+	let mut inb_b = TensorRef::new(Some("b".into()), f32::dtype, vec![]);
+	let mut inp_c = TensorRef::new(Some("c".into()), f32::dtype, vec![]);
+	let out = TensorRef::new(Some("out".into()), f32::dtype, vec![]);
+	let a = Expr::new_tensor_input(inp_a.clone());
+	let b = -Expr::new_tensor_input(inb_b.clone());
+	let c = Expr::new_tensor_input(inp_c.clone());
 	let max = (a + b.clone()).max();
 	let sum = (b + c).sum();
 	let out = (max * sum).capture(out);
@@ -391,12 +394,12 @@ fn test4_x(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 	out
 }
 
-fn test5(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
-	let mut inp_a = ExprTensorRef::new(Some("a".into()), f32::dtype, vec![]);
-	let mut inp_b = ExprTensorRef::new(Some("b".into()), f32::dtype, vec![]);
-	let a = RcExpr::new_tensor_input(inp_a.clone());
-	let b = RcExpr::new_tensor_input(inp_b.clone());
-	let out = ExprTensorRef::new(Some("out".into()), f32::dtype, vec![]);
+fn test5(dev: Rc<dyn x17ai::new::device::Device>) -> Expr {
+	let mut inp_a = TensorRef::new(Some("a".into()), f32::dtype, vec![]);
+	let mut inp_b = TensorRef::new(Some("b".into()), f32::dtype, vec![]);
+	let a = Expr::new_tensor_input(inp_a.clone());
+	let b = Expr::new_tensor_input(inp_b.clone());
+	let out = TensorRef::new(Some("out".into()), f32::dtype, vec![]);
 	let out = (a + b).capture(out);
 
 	inp_a.tensor.borrow_mut().replace(
@@ -408,39 +411,42 @@ fn test5(dev: Rc<dyn x17ai::new::device::Device>) -> RcExpr {
 
 	out
 }
+*/
 
 fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let dev = x17ai::new::device::cpu::CPUDevice::new();
 
+	let io_dtype = f16::dtype;
 	let internal_dtype = f32::dtype;
-	let eps = ExprScalarRef::new(Some("eps".into()), internal_dtype);
+	let eps = ScalarRef::new(Some("eps".into()), internal_dtype);
 
-	let expr = test1_opt(dev.clone());
-	let expr = test2_rms_norm(dev.clone());
+	//let expr = test1_opt(dev.clone());
+	//let expr = test2_rms_norm(dev.clone());
 	//let expr = test3_softmax(dev.clone());
 	//let expr = test4_x(dev.clone());
 	//let expr = test5(dev.clone());
 
-	let q = ExprTensorRef::new(Some("q".into()), f32::dtype, vec![15, 32]);
-	let kv = ExprTensorRef::new(Some("kv".into()), f32::dtype, vec![15, 32]);
+	let q = TensorRef::new(Some("q".into()), io_dtype, vec![4, 4, 64], CanBeBatched::Yes);
+	let kv = TensorRef::new(Some("kv".into()), io_dtype, vec![1, 4, 64 + 64], CanBeBatched::Yes);
 
-	let t = ExprTensorRef::new(Some("t".into()), f32::dtype, vec![15, 32]);
-	let r = ExprTensorRef::new(Some("r".into()), f32::dtype, vec![15, 32]);
-	let mq = ExprTensorRef::new(Some("mq".into()), f32::dtype, vec![15, 32]);
-	let mkv = ExprTensorRef::new(Some("mkv".into()), f32::dtype, vec![15, 32]);
-	let mw = ExprTensorRef::new(Some("mw".into()), f32::dtype, vec![15, 32]);
-	let expr = RcExpr::new_tensor_input(t.clone());
+	let t = TensorRef::new(Some("t".into()), io_dtype, vec![1024], CanBeBatched::Yes);
+	let r = TensorRef::new(Some("r".into()), io_dtype, vec![1024], CanBeBatched::Yes);
+	let mq = TensorRef::new(Some("mq".into()), io_dtype, vec![1024, 1024], CanBeBatched::No);
+	let mkv =
+		TensorRef::new(Some("mkv".into()), io_dtype, vec![1024, 4 * (64 + 64)], CanBeBatched::No);
+	let mw = TensorRef::new(Some("mw".into()), io_dtype, vec![1024, 2048], CanBeBatched::No);
+	let expr = Expr::new_tensor_input(t.clone());
 
 	let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?;
 	let q = expr
 		.clone()
-		.row_times_mat(RcExpr::new_tensor_input(mq.clone()))
+		.row_times_mat(Expr::new_tensor_input(mq.clone()))
 		.reshape(1, &[4, 4, 64])
 		//.cast(f64::dtype)
 		.capture(q.clone());
 	let kv = expr
 		.clone()
-		.row_times_mat(RcExpr::new_tensor_input(mkv.clone()))
+		.row_times_mat(Expr::new_tensor_input(mkv.clone()))
 		.reshape(1, &[1, 4, 64 + 64])
 		//.cast(f64::dtype)
 		.capture(kv.clone());
@@ -450,26 +456,11 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	//	let expr = x_swiglu(expr, internal_dtype)?;
 
 	let expr = q.attention(kv).reshape(3, &[1024]).cast(f32::dtype);
-	let expr = expr.row_times_mat(RcExpr::new_tensor_input(mw.clone()));
+	let expr = expr.row_times_mat(Expr::new_tensor_input(mw.clone()));
 	let expr = x_swiglu(expr, internal_dtype)?;
 	let expr = expr.capture(r.clone());
 
-	t.tensor.borrow_mut().replace(
-		x17ai::new::tensor::Tensor::new_empty(&[3333, 1024], f32::dtype, dev.clone()).unwrap(),
-	);
-	mq.tensor.borrow_mut().replace(
-		x17ai::new::tensor::Tensor::new_empty(&[1024, 1024], f32::dtype, dev.clone()).unwrap(),
-	);
-	mkv.tensor.borrow_mut().replace(
-		x17ai::new::tensor::Tensor::new_empty(&[1024, 4 * (64 + 64)], f32::dtype, dev.clone())
-			.unwrap(),
-	);
-	mw.tensor.borrow_mut().replace(
-		x17ai::new::tensor::Tensor::new_empty(&[1024, 2048], f32::dtype, dev.clone()).unwrap(),
-	);
-
-	let mut comp = PreCompilation::new(&expr.rc_expr)?;
-	comp.find_fragments()?;
+	let mut comp = PreCompilation::new(&expr.node)?;
 
 	let mut graphviz = String::new();
 	comp.print_graphviz(&mut graphviz, None);

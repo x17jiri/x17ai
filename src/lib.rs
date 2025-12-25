@@ -15,6 +15,7 @@
 #![feature(vec_push_within_capacity)]
 #![feature(try_blocks)]
 #![feature(allocator_api)]
+#![feature(f16)]
 #![feature(slice_ptr_get)]
 #![feature(new_range_api)]
 #![feature(core_intrinsics)]
@@ -85,6 +86,8 @@
 #![allow(clippy::if_not_else)]
 #![allow(irrefutable_let_patterns)]
 #![allow(clippy::useless_format)]
+#![allow(clippy::unnecessary_wraps)]
+#![allow(clippy::useless_let_if_seq)]
 use std::borrow::Cow;
 use std::convert::Infallible;
 

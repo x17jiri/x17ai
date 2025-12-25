@@ -25,6 +25,15 @@ impl HasDType for u8 {
 	});
 }
 
+impl HasDType for f16 {
+	const dtype: DType = DType::from_struct(DTypeStruct {
+		kind: DTypeKind::Float,
+		shift: 4,
+		is_fractional: 0,
+		id: DTypeId::F16,
+	});
+}
+
 impl HasDType for f32 {
 	const dtype: DType = DType::from_struct(DTypeStruct {
 		kind: DTypeKind::Float,
@@ -154,9 +163,9 @@ fn to_float_dtype(dtype: DType) -> DType {
 	let data = DTypeStruct::from_dtype(dtype);
 	match data.id {
 		// Already float
-		DTypeId::F32 | DTypeId::F64 => dtype,
+		DTypeId::F16 | DTypeId::F32 | DTypeId::F64 => dtype,
 		// Convert to float without loss of precision
-		DTypeId::U8 => f32::dtype,
+		DTypeId::U8 => f16::dtype,
 		// For large ints such as u64, we should just convert to f64 accepting the loss
 	}
 }
@@ -186,8 +195,9 @@ pub enum DTypeKind {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum DTypeId {
 	U8 = 1,
-	F32 = 2,
-	F64 = 3,
+	F16 = 2,
+	F32 = 3,
+	F64 = 4,
 }
 
 impl std::fmt::Display for DType {
@@ -195,6 +205,7 @@ impl std::fmt::Display for DType {
 		let data = DTypeStruct::from_dtype(*self);
 		match data.id {
 			DTypeId::U8 => write!(f, "u8"),
+			DTypeId::F16 => write!(f, "f16"),
 			DTypeId::F32 => write!(f, "f32"),
 			DTypeId::F64 => write!(f, "f64"),
 		}
