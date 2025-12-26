@@ -83,7 +83,8 @@ pub enum MatMulKind {
 pub enum NodeKind {
 	Input,
 	Select(SelectKind),
-	View,
+	Cast,
+	Reshape,
 	Unary(UnaryKind),
 	Binary(BinaryKind),
 	MatMul(MatMulKind),
@@ -110,9 +111,6 @@ pub struct Node {
 	pub is_dead: bool,
 	pub reduction_fingerprint: u32,
 	pub config_head_for: NodeIndex32,
-	// `reshape_n` and `reshape_to` are used only if is_view()
-	pub reshape_n: u8,
-	pub reshape_to: ThinVec<usize>,
 
 	// This is one of:
 	// - ScalarRefIndex32
@@ -136,8 +134,6 @@ impl Default for Node {
 			is_dead: false,
 			reduction_fingerprint: 0,
 			config_head_for: NodeIndex32::new_sentinel(),
-			reshape_n: 0,
-			reshape_to: ThinVec::new(),
 			x_index: UntypedIndex32::new_sentinel(),
 		}
 	}
@@ -192,12 +188,12 @@ impl Node {
 		!self.config_head_for.is_sentinel()
 	}
 
-	pub fn is_view(&self) -> bool {
-		matches!(self.node_kind, NodeKind::View)
+	pub fn is_cast(&self) -> bool {
+		matches!(self.node_kind, NodeKind::Cast)
 	}
 
 	pub fn is_reshape(&self) -> bool {
-		self.reshape_n != 0 || !self.reshape_to.is_empty()
+		matches!(self.node_kind, NodeKind::Reshape)
 	}
 
 	pub fn is_captured(&self) -> bool {
@@ -497,7 +493,7 @@ impl PreCompilation {
 		// This node is also a root.
 		Ok(LoadedNode {
 			node: Node {
-				node_kind: NodeKind::View,
+				node_kind: NodeKind::Cast,
 				dtype: child.dtype,
 				shape: child.shape.clone(),
 				can_be_batched: child.can_be_batched,
@@ -517,10 +513,6 @@ impl PreCompilation {
 		mut child_idx: NodeIndex32,
 	) -> Result<LoadedNode, NodeIndex32> {
 		let child = &self.nodes_postorder[child_idx];
-		if child.is_view() && child.reshape_n == 0 && child.reshape_to.is_empty() {
-			child_idx = child.children[0];
-		}
-
 		let mut err = Vec::new();
 		let old_shape: &[usize] = child.shape.as_ref().map_or(&[], |vec| &vec);
 		let mut shape = ThinVec::from(old_shape);
@@ -538,13 +530,11 @@ impl PreCompilation {
 
 		Ok(LoadedNode {
 			node: Node {
-				node_kind: NodeKind::View,
+				node_kind: NodeKind::Reshape,
 				dtype: child.dtype,
 				shape: Some(shape),
 				can_be_batched: child.can_be_batched,
 				children: [child_idx, NodeIndex32::new_sentinel()],
-				reshape_n: reshape.reshape_n,
-				reshape_to: reshape.reshape_to.clone(),
 				..Default::default()
 			},
 			complex: false,
@@ -559,28 +549,16 @@ impl PreCompilation {
 	fn load_cast(
 		&self,
 		cast: &ExprCast,
-		mut child_idx: NodeIndex32,
+		child_idx: NodeIndex32,
 	) -> Result<LoadedNode, NodeIndex32> {
 		let child = &self.nodes_postorder[child_idx];
-		let reshape_n;
-		let reshape_to;
-		if child.is_view() {
-			child_idx = child.children[0];
-			reshape_n = child.reshape_n;
-			reshape_to = child.reshape_to.clone();
-		} else {
-			reshape_n = 0;
-			reshape_to = ThinVec::new();
-		}
 		Ok(LoadedNode {
 			node: Node {
-				node_kind: NodeKind::View,
+				node_kind: NodeKind::Cast,
 				dtype: Some(cast.dtype),
 				shape: child.shape.clone(),
 				can_be_batched: child.can_be_batched,
 				children: [child_idx, NodeIndex32::new_sentinel()],
-				reshape_n,
-				reshape_to,
 				..Default::default()
 			},
 			complex: false,
@@ -1336,7 +1314,7 @@ impl PreCompilation {
 				let parent = &self.nodes_postorder[parent_idx];
 				let parent_shape: Option<&[usize]> = parent.shape.as_ref().map(|sh| &sh[..]);
 				let parent_fingerprint = parent.reduction_fingerprint;
-				if (!parent.is_view() && parent_shape != start_shape)
+				if (!parent.is_reshape() && parent_shape != start_shape)
 					|| parent_fingerprint != start_fingerprint
 				{
 					break;
@@ -1386,22 +1364,17 @@ impl PreCompilation {
 					format!("<b>Scalar</b><br/><font color='blue'><b>{name}</b></font>")
 				}
 			},
-			NodeKind::View => {
+			NodeKind::Cast => {
 				let child = &self.nodes_postorder[node.children[0]];
-				let mut result = format!("<b>View</b>");
-				let mut from = String::new();
-				let mut to = String::new();
-				if child.dtype != node.dtype {
-					from = self.dtype_to_str(child.dtype);
-					to = self.dtype_to_str(node.dtype);
-				}
-				if node.is_reshape() {
-					from =
-						format!("{from}&#91;<font color='blue'>-{}</font>..&#93;", node.reshape_n);
-					to = format!("{to}{}", self.shape_to_str(&node.reshape_to));
-				}
-				result = format!("{from} -&gt; {to}");
-				result
+				let from = self.dtype_to_str(child.dtype);
+				let to = self.dtype_to_str(node.dtype);
+				format!("<b>Cast</b><br/>{from} -&gt; {to}")
+			},
+			NodeKind::Reshape => {
+				let child = &self.nodes_postorder[node.children[0]];
+				let from = self.shape_to_str(&child.shape);
+				let to = self.shape_to_str(&node.shape);
+				format!("<b>Reshape</b><br/>{from} -&gt; {to}")
 			},
 			NodeKind::Select(select) => match select {
 				SelectKind::Even => "<b>Select Even</b>".to_string(),
@@ -1436,18 +1409,22 @@ impl PreCompilation {
 		format!("<font color='teal'>{dtype}</font>")
 	}
 
-	fn shape_to_str(&self, shape: &[usize]) -> String {
-		let mut result = format!("&#91;");
-		for (i, &dim) in shape.iter().enumerate() {
-			if i > 0 {
-				result.push(',');
+	fn shape_to_str(&self, shape: &Option<ThinVec<usize>>) -> String {
+		if let Some(shape) = shape {
+			let mut result = format!("&#91;");
+			for (i, &dim) in shape.iter().enumerate() {
+				if i > 0 {
+					result.push(',');
+				}
+				result.push_str("<font color='blue'>");
+				result.push_str(&dim.to_string());
+				result.push_str("</font>");
 			}
-			result.push_str("<font color='blue'>");
-			result.push_str(&dim.to_string());
-			result.push_str("</font>");
+			result.push_str("&#93;");
+			result
+		} else {
+			String::new()
 		}
-		result.push_str("&#93;");
-		result
 	}
 
 	pub fn sanitize_for_graphviz_html(s: &str) -> String {
@@ -1562,12 +1539,11 @@ impl PreCompilation {
 					}
 					let child_id = format!("node_{}", child_index.raw);
 					let child = &self.nodes_postorder[child_index];
-					let label = self.dtype_to_str(child.dtype);
-					let label = if let Some(shape) = &child.shape {
-						format!("{label}{}", self.shape_to_str(shape))
-					} else {
-						label
-					};
+					let label = format!(
+						"{}{}",
+						self.dtype_to_str(child.dtype),
+						self.shape_to_str(&child.shape)
+					);
 					let extra_style = if ordered {
 						if child_index == node.children[0] {
 							", color=\"#0000aa\""
@@ -1593,12 +1569,7 @@ impl PreCompilation {
 				}
 			}
 			for &capt_idx in &node.capture {
-				let label = self.dtype_to_str(node.dtype);
-				let label = if let Some(shape) = &node.shape {
-					format!("{label}{}", self.shape_to_str(shape))
-				} else {
-					label
-				};
+				let label = format!("{}{}", self.dtype_to_str(node.dtype), self.shape_to_str(&node.shape));
 				let input_node = self.tensor_vec[capt_idx].input_node;
 				if input_node.is_sentinel() {
 					let cap_id = format!("ten_{}", capt_idx.raw);

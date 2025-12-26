@@ -442,7 +442,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let q = expr
 		.clone()
 		.cast(internal_dtype)
-		.row_times_mat(Expr::new_tensor_input(mq.clone()))
+		.row_times_mat(Expr::new_tensor_input(mq.clone()).cast(internal_dtype))
 		.reshape(1, &[4, 4, 64])
 		//.cast(io_dtype)
 		.capture(q.clone());
