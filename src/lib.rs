@@ -89,6 +89,8 @@
 #![allow(clippy::unnecessary_wraps)]
 #![allow(clippy::useless_let_if_seq)]
 #![allow(clippy::len_zero)]
+#![allow(clippy::ref_option)]
+#![allow(clippy::result_unit_err)]
 use std::borrow::Cow;
 use std::convert::Infallible;
 

@@ -35,6 +35,7 @@ pub struct Expr {
 }
 
 pub enum ExprNode {
+	Const(ExprConst),
 	Input(ExprInput),
 	Capture(ExprCapture),
 	Cast(ExprCast),
@@ -43,6 +44,10 @@ pub enum ExprNode {
 	Binary(ExprBinary),
 }
 
+pub struct ExprConst {
+	pub name: String,
+	pub value: f64,
+}
 pub enum ExprInput {
 	Tensor(Rc<TensorRef>),
 	Scalar(Rc<ScalarRef>),
@@ -167,6 +172,12 @@ impl Expr {
 	pub fn new_scalar_input(scalar_ref: Rc<ScalarRef>) -> Expr {
 		Expr {
 			node: Rc::new(ExprNode::Input(ExprInput::Scalar(scalar_ref))),
+		}
+	}
+
+	pub fn new_const(name: String, value: f64) -> Expr {
+		Expr {
+			node: Rc::new(ExprNode::Const(ExprConst { name, value })),
 		}
 	}
 

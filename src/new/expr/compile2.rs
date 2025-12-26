@@ -22,6 +22,7 @@ use std::collections::{HashMap, hash_map};
 use std::hint::{cold_path, unlikely};
 use std::rc::Rc;
 
+use ordered_float::OrderedFloat;
 use thin_vec::{ThinVec, thin_vec};
 
 use super::super::expr;
@@ -81,6 +82,7 @@ pub enum MatMulKind {
 }
 
 pub enum NodeKind {
+	Const,
 	Input,
 	Select(SelectKind),
 	Cast,
@@ -110,9 +112,10 @@ pub struct Node {
 
 	pub is_dead: bool,
 	pub reduction_fingerprint: u32,
-	pub config_head_for: NodeIndex32,
+	pub head_for: NodeIndex32,
 
 	// This is one of:
+	// - ConstRefIndex32
 	// - ScalarRefIndex32
 	// - TensorRefIndex32
 	// - FragmentIndex32
@@ -133,7 +136,7 @@ impl Default for Node {
 			capture: ThinVec::new(),
 			is_dead: false,
 			reduction_fingerprint: 0,
-			config_head_for: NodeIndex32::new_sentinel(),
+			head_for: NodeIndex32::new_sentinel(),
 			x_index: UntypedIndex32::new_sentinel(),
 		}
 	}
@@ -142,6 +145,11 @@ impl Default for Node {
 impl Node {
 	pub fn is_input(&self) -> bool {
 		self.is_nullary()
+	}
+
+	pub fn const_index(&self) -> ConstRefIndex32 {
+		debug_assert!(self.is_const());
+		ConstRefIndex32::from(self.x_index)
 	}
 
 	pub fn scalar_index(&self) -> ScalarRefIndex32 {
@@ -164,8 +172,12 @@ impl Node {
 		self.x_index = fragment_index.to_untyped();
 	}
 
+	pub fn is_const(&self) -> bool {
+		matches!(self.node_kind, NodeKind::Const)
+	}
+
 	pub fn is_scalar_input(&self) -> bool {
-		self.is_input() && self.shape.is_none()
+		self.is_input() && self.shape.is_none() && !self.is_const()
 	}
 
 	pub fn is_tensor_input(&self) -> bool {
@@ -185,7 +197,7 @@ impl Node {
 	}
 
 	pub fn is_config_head(&self) -> bool {
-		!self.config_head_for.is_sentinel()
+		!self.head_for.is_sentinel()
 	}
 
 	pub fn is_cast(&self) -> bool {
@@ -247,11 +259,20 @@ pub struct ScalarRef {
 	pub input_node: NodeIndex32,
 }
 
+pub struct ConstRef {
+	pub name: String,
+	pub value: f64,
+	pub input_node: NodeIndex32,
+}
+
 define_index_type32!(TensorRefIndex32);
 type TensorVec = IndexVec<TensorRefIndex32, TensorRef>;
 
 define_index_type32!(ScalarRefIndex32);
 type ScalarVec = IndexVec<ScalarRefIndex32, ScalarRef>;
+
+define_index_type32!(ConstRefIndex32);
+type ConstVec = IndexVec<ConstRefIndex32, ConstRef>;
 
 pub struct Fragment {
 	pub head: NodeIndex32,
@@ -262,12 +283,14 @@ type FragmentVec = IndexVec<FragmentIndex32, Fragment>;
 
 pub struct SumToMean {
 	pub node: NodeIndex32,
-	pub scalar: ScalarRefIndex32,
+	pub const_idx: ConstRefIndex32,
 }
 
 pub struct PreCompilation {
 	nodes_postorder: NodeVec,
 	fragments_preorder: FragmentVec,
+	const_map: HashMap<OrderedFloat<f64>, ConstRefIndex32>,
+	const_vec: ConstVec,
 	scalar_map: HashMap<*const expr::ScalarRef, ScalarRefIndex32>,
 	scalar_vec: ScalarVec,
 	tensor_map: HashMap<*const expr::TensorRef, TensorRefIndex32>,
@@ -297,6 +320,8 @@ impl PreCompilation {
 		let mut comp = PreCompilation {
 			nodes_postorder: NodeVec::with_capacity(32),
 			fragments_preorder: FragmentVec::with_capacity(8),
+			const_map: HashMap::new(),
+			const_vec: ConstVec::with_capacity(4),
 			scalar_map: HashMap::new(),
 			scalar_vec: ScalarVec::with_capacity(4),
 			tensor_map: HashMap::new(),
@@ -305,37 +330,40 @@ impl PreCompilation {
 			err_map: HashMap::new(),
 			err_vec: Vec::new(),
 		};
+		comp.analyze(expr);
+		comp
+	}
+
+	pub fn analyze(&mut self, expr: &ExprNode) -> Result<(), ()> {
 		let mut state = LoadExprState {
 			visited: HashMap::new(),
 			node_cache: HashMap::new(),
 			n_complex: 0,
 			bitmap: IndexBitmap::new(),
 		};
-		comp.load_expr(expr, &mut state);
-		if comp.have_errors() {
-			return comp;
-		}
-		comp.remove_dead_code();
-		if comp.have_errors() {
-			return comp;
-		}
-		comp.find_dominators();
-		if comp.have_errors() {
-			return comp;
-		}
-		comp.find_reduction_fingerprints(&mut state);
-		if comp.have_errors() {
-			return comp;
-		}
-		//comp.find_races(&mut state);
-		//comp.calc_shapes()?;
+
+		self.load_expr(expr, &mut state);
+		self.check_errors()?;
+
+		self.remove_dead_code();
+		self.check_errors()?;
+
+		self.find_dominators();
+		self.check_errors()?;
+
+		self.find_complex_op_fingerprints(&mut state);
+		self.check_errors()?;
+
+		self.find_races(&mut state);
+		self.check_errors()?;
+
 		//comp.find_heads();
 		//comp.find_fragments()?;
-		comp
+		Ok(())
 	}
 
-	pub fn have_errors(&self) -> bool {
-		!self.err_map.is_empty()
+	pub fn check_errors(&self) -> Result<(), ()> {
+		if self.err_map.is_empty() { Ok(()) } else { Err(()) }
 	}
 
 	fn log_error(&mut self, node_index: NodeIndex32, message: String) {
@@ -359,6 +387,22 @@ impl PreCompilation {
 		}
 
 		let t = match expr {
+			ExprNode::Const(cst) => {
+				match self.add_const(cst.name.clone(), cst.value, self.nodes_postorder.next_index())
+				{
+					Ok(idx) => Ok(LoadedNode {
+						node: Node {
+							node_kind: NodeKind::Const,
+							x_index: idx.to_untyped(),
+							..Default::default()
+						},
+						complex: false,
+						cache_key: String::new(),
+						err: Vec::new(),
+					}),
+					Err(existing_node) => Err(existing_node),
+				}
+			},
 			ExprNode::Input(input) => {
 				self.load_input(input) //
 			},
@@ -510,7 +554,7 @@ impl PreCompilation {
 	fn load_reshape(
 		&self,
 		reshape: &ExprReshape,
-		mut child_idx: NodeIndex32,
+		child_idx: NodeIndex32,
 	) -> Result<LoadedNode, NodeIndex32> {
 		let child = &self.nodes_postorder[child_idx];
 		let mut err = Vec::new();
@@ -527,6 +571,10 @@ impl PreCompilation {
 		}
 		shape.truncate(keep);
 		shape.extend_from_slice(&reshape.reshape_to);
+
+		if shape == old_shape {
+			return Err(child_idx);
+		}
 
 		Ok(LoadedNode {
 			node: Node {
@@ -552,6 +600,9 @@ impl PreCompilation {
 		child_idx: NodeIndex32,
 	) -> Result<LoadedNode, NodeIndex32> {
 		let child = &self.nodes_postorder[child_idx];
+		if child.dtype == Some(cast.dtype) {
+			return Err(child_idx);
+		}
 		Ok(LoadedNode {
 			node: Node {
 				node_kind: NodeKind::Cast,
@@ -577,25 +628,22 @@ impl PreCompilation {
 			err.push("SumToMean: missing reduce dimension".into());
 			1
 		};
-		// Insert `ScalarInput` node.
-		// TODO - should create `Const` node
-		let scalar_ref = expr::ScalarRef::new(Some("__sum_to_mean__".into()));
-		*scalar_ref.value.borrow_mut() = Some(1.0 / f64::lossy_from(width));
-		let x_index = match self.add_scalar_input(scalar_ref, self.nodes_postorder.next_index()) {
-			Ok(scalar_idx) => {
-				self.sum_to_mean.push(SumToMean { node: child_idx, scalar: scalar_idx });
-				scalar_idx.to_untyped()
-			},
-			Err(_) => {
-				unreachable!();
-			},
-		};
+		// Insert `Const` node.
+		let c = 1.0 / f64::lossy_from(width);
+		let x_index =
+			match self.add_const(format!("1.0 / {width}"), c, self.nodes_postorder.next_index()) {
+				Ok(idx) => {
+					self.sum_to_mean.push(SumToMean { node: child_idx, const_idx: idx });
+					idx
+				},
+				Err(_) => {
+					unreachable!();
+				},
+			};
 		Ok(LoadedNode {
 			node: Node {
-				node_kind: NodeKind::Input,
-				dtype: None,
-				can_be_batched: false,
-				x_index,
+				node_kind: NodeKind::Const,
+				x_index: x_index.to_untyped(),
 				..Default::default()
 			},
 			complex: false,
@@ -893,6 +941,26 @@ impl PreCompilation {
 		}
 	}
 
+	fn add_const(
+		&mut self,
+		name: String,
+		value: f64,
+		node: NodeIndex32,
+	) -> Result<ConstRefIndex32, NodeIndex32> {
+		let key = OrderedFloat(value);
+		match self.const_map.entry(key) {
+			hash_map::Entry::Vacant(entry) => {
+				let index = self.const_vec.push(ConstRef { name, value, input_node: node });
+				entry.insert(index);
+				Ok(index)
+			},
+			hash_map::Entry::Occupied(entry) => {
+				let index = *entry.get();
+				Err(self.const_vec[index].input_node)
+			},
+		}
+	}
+
 	fn add_scalar_input(
 		&mut self,
 		scalar_ref: Rc<expr::ScalarRef>,
@@ -1020,7 +1088,7 @@ impl PreCompilation {
 		}
 	}
 
-	fn find_reduction_fingerprints(&mut self, state: &mut LoadExprState) {
+	fn find_complex_op_fingerprints(&mut self, state: &mut LoadExprState) {
 		let bitmap = &mut state.bitmap;
 		bitmap.clear_and_resize(&self.nodes_postorder, state.n_complex as usize);
 		let mut n_config_driving = 0;
@@ -1067,7 +1135,6 @@ impl PreCompilation {
 		}
 	}
 
-	/*
 	#[allow(clippy::manual_assert)]
 	fn find_races(&self, state: &mut LoadExprState) {
 		let kills = NodeIndex32::from_raw(self.nodes_postorder.len());
@@ -1140,7 +1207,7 @@ impl PreCompilation {
 			}
 		}
 		Ok(())
-	}*/
+	}
 
 	fn split_shape<const N: usize>(shape: &[usize]) -> (&[usize], [usize; N]) {
 		let len = shape.len();
@@ -1181,116 +1248,6 @@ impl PreCompilation {
 		err
 	}
 
-	/*
-	#[allow(clippy::too_many_lines)]
-	fn calc_shapes(&mut self) -> Result<(), TensorOpError> {
-		for i in self.nodes_postorder.indexes() {
-			let (all_children, me, _) = self.nodes_postorder.borrow_multiple(i);
-			me.shape.clear();
-			if me.is_input() {
-				if me.is_tensor_input() {
-					// For input nodes, get shape from tensor_ref
-					me.shape.extend_from_slice(&self.tensor_vec[me.tensor_index()].shape);
-				}
-				continue;
-			}
-
-			if me.is_unary() {
-				// For unary operations, shape is the same as input
-				let child = me.children[0];
-				let child = &all_children[child];
-				me.shape.extend_from_slice(&child.shape);
-				match me.node_kind {
-					NodeKind::Reduction(_) => {
-						if let Some(last) = me.shape.last_mut() {
-							*last = 1;
-						} else {
-							me.shape.push(1);
-						}
-					},
-					NodeKind::Select(_) => {
-						if let Some(last) = me.shape.last_mut() {
-							*last /= 2;
-						} else {
-							me.shape.push(0);
-						}
-					},
-					NodeKind::View if me.is_reshape() => {
-						let keep = me.shape.len().saturating_sub(me.reshape_n as usize);
-						let elems = me.shape.iter().skip(keep).product::<usize>();
-						let new_elems = me.reshape_to.iter().product::<usize>();
-						if elems != new_elems {
-							cold_path();
-							return Err(TensorOpError::InvalidReshape);
-						}
-						me.shape.truncate(keep);
-						me.shape.extend_from_slice(&me.reshape_to);
-					},
-					_ => continue,
-				}
-			} else {
-				debug_assert!(me.is_binary());
-
-				// For binary operations, use broadcast to get output shape
-				let a = me.children[0];
-				let b = me.children[1];
-				let a_shape: &[usize] = &all_children[a].shape;
-				let b_shape: &[usize] = &all_children[b].shape;
-				#[allow(clippy::single_match_else)]
-				#[allow(clippy::len_zero)]
-				match me.node_kind {
-					NodeKind::MatMul(MatMulKind::RowTimesMat) => {
-						let (a_rest, [a_len]) = Self::split_shape::<1>(a_shape);
-						let (b_rest, [b_row, b_col]) = Self::split_shape::<2>(b_shape);
-						if a_len != b_row {
-							cold_path();
-							return Err(TensorOpError::ShapeMismatch);
-						}
-						Self::broadcast_shapes(&mut me.shape, a_rest, b_rest)?;
-						me.shape.push(b_col);
-					},
-					NodeKind::Attention => {
-						let (q_rest, [q1, q2, q3]) = Self::split_shape::<3>(a_shape);
-						let (kv_rest, [kv1, kv2, kv3]) = Self::split_shape::<3>(b_shape);
-						if kv1 != 1 || q2 != kv2 || q3 >= kv3 {
-							cold_path();
-							return Err(TensorOpError::ShapeMismatch);
-						}
-						Self::broadcast_shapes(&mut me.shape, q_rest, kv_rest)?;
-						me.shape.push(q1);
-						me.shape.push(q2);
-						me.shape.push(kv3 - q3);
-					},
-					_ => {
-						Self::broadcast_shapes(&mut me.shape, a_shape, b_shape)?;
-					},
-				}
-			}
-
-			// If we store back into inputs, make sure captures have correct shape and dtype
-			let my_shape = me.shape.as_slice();
-			for &idx in &me.capture {
-				let tensor = &self.tensor_vec[idx];
-				if let Some(my_dtype) = me.dtype
-					&& my_dtype != tensor.tensor_ref.dtype
-				{
-					cold_path();
-					return Err(TensorOpError::DTypeMismatch);
-				}
-				if !tensor.input_node.is_sentinel() {
-					let tensor_shape = tensor.shape.as_slice();
-					if tensor_shape != my_shape {
-						cold_path();
-						return Err(TensorOpError::ShapeMismatch);
-					}
-				}
-			}
-		}
-
-		Ok(())
-	}
-	*/
-
 	fn find_heads(&mut self) {
 		for idx in self.nodes_postorder.indexes() {
 			if !self.nodes_postorder[idx].is_reduction()
@@ -1323,7 +1280,7 @@ impl PreCompilation {
 				head = parent;
 			}
 
-			self.nodes_postorder[head_idx].config_head_for = idx;
+			self.nodes_postorder[head_idx].head_for = idx;
 		}
 	}
 
@@ -1353,15 +1310,22 @@ impl PreCompilation {
 
 	pub fn graphviz_node_label(&self, node: &Node) -> String {
 		match node.node_kind {
+			NodeKind::Const => {
+				let name = &self.const_vec[node.const_index()].name;
+				let value = self.const_vec[node.const_index()].value;
+				format!(
+					"<b>Const</b><br/><font color='#800080'><b>{name}</b></font><br/><font color='blue'><b>{value}</b></font>"
+				)
+			},
 			NodeKind::Input => {
 				if node.is_tensor_input() {
 					let tensor_ref = &self.tensor_vec[node.tensor_index()].tensor_ref;
 					let name = tensor_ref.name.as_deref().unwrap_or("<unnamed>");
-					format!("<b>Tensor</b><br/><font color='blue'><b>{name}</b></font>")
+					format!("<b>Tensor</b><br/><font color='#800080'><b>{name}</b></font>")
 				} else {
 					let scalar_ref = &self.scalar_vec[node.scalar_index()].scalar_ref;
 					let name = scalar_ref.name.as_deref().unwrap_or("<unnamed>");
-					format!("<b>Scalar</b><br/><font color='blue'><b>{name}</b></font>")
+					format!("<b>Scalar</b><br/><font color='#800080'><b>{name}</b></font>")
 				}
 			},
 			NodeKind::Cast => {
@@ -1372,8 +1336,8 @@ impl PreCompilation {
 			},
 			NodeKind::Reshape => {
 				let child = &self.nodes_postorder[node.children[0]];
-				let from = self.shape_to_str(&child.shape);
-				let to = self.shape_to_str(&node.shape);
+				let from = self.shape_to_str(child.can_be_batched, &child.shape);
+				let to = self.shape_to_str(node.can_be_batched, &node.shape);
 				format!("<b>Reshape</b><br/>{from} -&gt; {to}")
 			},
 			NodeKind::Select(select) => match select {
@@ -1409,9 +1373,12 @@ impl PreCompilation {
 		format!("<font color='teal'>{dtype}</font>")
 	}
 
-	fn shape_to_str(&self, shape: &Option<ThinVec<usize>>) -> String {
+	fn shape_to_str(&self, can_be_batched: bool, shape: &Option<ThinVec<usize>>) -> String {
 		if let Some(shape) = shape {
 			let mut result = format!("&#91;");
+			if can_be_batched {
+				result.push_str("*,");
+			}
 			for (i, &dim) in shape.iter().enumerate() {
 				if i > 0 {
 					result.push(',');
@@ -1478,8 +1445,11 @@ impl PreCompilation {
 			if node.is_input() {
 				if node.is_tensor_input() {
 					writeln!(w, "\t{node_id} [shape=box, style=filled, fillcolor=\"#cceecc\"];")?;
-				} else {
+				} else if node.is_scalar_input() {
 					writeln!(w, "\t{node_id} [shape=box, style=filled, fillcolor=\"#ffffc0\"];")?;
+				} else {
+					debug_assert!(node.is_const());
+					writeln!(w, "\t{node_id} [shape=box, style=filled, fillcolor=\"#ffff00\"];")?;
 				}
 			} else if node.is_config_head() {
 				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccccff\"];")?;
@@ -1509,7 +1479,7 @@ impl PreCompilation {
 					let frag_head = self.fragments_preorder[frag_index].head;
 					let frag_node = &self.nodes_postorder[frag_head];
 					let fragment_kind = if frag_node.is_config_head() {
-						let frag_node = &self.nodes_postorder[frag_node.config_head_for];
+						let frag_node = &self.nodes_postorder[frag_node.head_for];
 						if frag_node.is_reduction() {
 							"Reduction"
 						} else if frag_node.is_matmul() {
@@ -1542,7 +1512,7 @@ impl PreCompilation {
 					let label = format!(
 						"{}{}",
 						self.dtype_to_str(child.dtype),
-						self.shape_to_str(&child.shape)
+						self.shape_to_str(child.can_be_batched, &child.shape)
 					);
 					let extra_style = if ordered {
 						if child_index == node.children[0] {
@@ -1569,7 +1539,11 @@ impl PreCompilation {
 				}
 			}
 			for &capt_idx in &node.capture {
-				let label = format!("{}{}", self.dtype_to_str(node.dtype), self.shape_to_str(&node.shape));
+				let label = format!(
+					"{}{}",
+					self.dtype_to_str(node.dtype),
+					self.shape_to_str(node.can_be_batched, &node.shape)
+				);
 				let input_node = self.tensor_vec[capt_idx].input_node;
 				if input_node.is_sentinel() {
 					let cap_id = format!("ten_{}", capt_idx.raw);
@@ -1592,10 +1566,11 @@ impl PreCompilation {
 		}
 		for sum_to_mean in &self.sum_to_mean {
 			let node_id = format!("node_{}", sum_to_mean.node.raw);
-			let scalar_id = format!("node_{}", self.scalar_vec[sum_to_mean.scalar].input_node.raw);
+			let const_idx =
+				format!("node_{}", self.const_vec[sum_to_mean.const_idx].input_node.raw);
 			writeln!(
 				w,
-				"\t{node_id} -> {scalar_id} [label=< >, style=dotted, color=\"#008000\", constraint=true];"
+				"\t{node_id} -> {const_idx} [label=< >, style=dotted, color=\"#008000\", constraint=true];"
 			)?;
 		}
 		for (node_idx, msgs) in &self.err_vec {

@@ -321,7 +321,7 @@ pub fn x_swiglu(inp: Expr, internal_dtype: DType) -> Result<Expr, ErrPack<Tensor
 	let lin = inp.clone().select_even();
 	let gate = inp.select_odd();
 
-	let one = Expr::new_scalar_input(ScalarRef::new(Some("ONE".into())));
+	let one = Expr::new_const("ONE".into(), 1.0);
 
 	let out = lin * gate.clone() * ((-gate).exp() + one).recip();
 
@@ -444,24 +444,28 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 		.cast(internal_dtype)
 		.row_times_mat(Expr::new_tensor_input(mq.clone()).cast(internal_dtype))
 		.reshape(1, &[4, 4, 64])
-		//.cast(io_dtype)
+		.cast(io_dtype)
+		.cast(internal_dtype)
 		.capture(q.clone());
 	let kv = expr
 		.clone()
 		.cast(internal_dtype)
-		.row_times_mat(Expr::new_tensor_input(mkv.clone()))
+		.row_times_mat(Expr::new_tensor_input(mkv.clone()).cast(internal_dtype))
+		.cast(io_dtype)
+		.cast(internal_dtype)
 		.reshape(1, &[1, 4, 64 + 64])
-		//.cast(f64::dtype)
 		.capture(kv.clone());
 
 	//let expr = RcExpr::first(q, kv);
 	//let expr = x_softmax(expr, internal_dtype)?;
 	//	let expr = x_swiglu(expr, internal_dtype)?;
 
-	let expr = q.attention(kv).reshape(3, &[1024]).cast(f32::dtype);
-	let expr = expr.row_times_mat(Expr::new_tensor_input(mw.clone()));
+	let expr = q.attention(kv).reshape(3, &[1024]).cast(io_dtype);
+	let expr = expr
+		.cast(internal_dtype)
+		.row_times_mat(Expr::new_tensor_input(mw.clone()).cast(internal_dtype));
 	let expr = x_swiglu(expr, internal_dtype)?;
-	let expr = expr.capture(r.clone());
+	let expr = expr.cast(io_dtype).capture(r.clone());
 
 	let mut comp = PreCompilation::new(&expr.node);
 
