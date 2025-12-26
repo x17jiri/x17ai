@@ -298,7 +298,7 @@ fn x_rms_norm(
 	eps: Rc<ScalarRef>,
 	internal_dtype: DType,
 ) -> Result<Expr, ErrPack<TensorOpError>> {
-	let eps = Expr::new_scalar_input(eps.clone()).cast(internal_dtype);
+	let eps = Expr::new_scalar_input(eps.clone());
 	let inp = inp.cast(internal_dtype);
 
 	let magn_recip = ((inp.clone() * inp.clone()).mean().sqrt() + eps).recip().cast(f32::dtype);
@@ -437,15 +437,18 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let mw = TensorRef::new(Some("mw".into()), io_dtype, vec![1024, 2048], CanBeBatched::No);
 	let expr = Expr::new_tensor_input(t.clone());
 
-	let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?;
+	let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?.cast(io_dtype);
+
 	let q = expr
 		.clone()
+		.cast(internal_dtype)
 		.row_times_mat(Expr::new_tensor_input(mq.clone()))
 		.reshape(1, &[4, 4, 64])
-		//.cast(f64::dtype)
+		//.cast(io_dtype)
 		.capture(q.clone());
 	let kv = expr
 		.clone()
+		.cast(internal_dtype)
 		.row_times_mat(Expr::new_tensor_input(mkv.clone()))
 		.reshape(1, &[1, 4, 64 + 64])
 		//.cast(f64::dtype)

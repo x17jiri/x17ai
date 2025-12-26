@@ -28,6 +28,7 @@ use super::super::expr;
 use super::{ExprBinaryKind, ExprInput, ExprNode, ExprUnaryKind};
 use crate::define_index_type32;
 use crate::new::expr::{ExprBinary, ExprCapture, ExprCast, ExprReshape, ExprUnary};
+use crate::tensor::device::dtype::common_dtype;
 use crate::tensor::error::ShapeMismatchError;
 use crate::tensor::{DType, TensorOpError};
 use crate::util::LossyFrom;
@@ -277,7 +278,8 @@ pub struct PreCompilation {
 	tensor_vec: TensorVec,
 	sum_to_mean: Vec<SumToMean>,
 
-	err_map: HashMap<NodeIndex32, (usize, Vec<String>)>,
+	err_map: HashMap<NodeIndex32, usize>,
+	err_vec: Vec<(NodeIndex32, Vec<String>)>,
 }
 
 struct LoadedNode {
@@ -305,6 +307,7 @@ impl PreCompilation {
 			tensor_vec: TensorVec::with_capacity(4),
 			sum_to_mean: Vec::new(),
 			err_map: HashMap::new(),
+			err_vec: Vec::new(),
 		};
 		let mut state = LoadExprState {
 			visited: HashMap::new(),
@@ -340,16 +343,16 @@ impl PreCompilation {
 	}
 
 	fn log_error(&mut self, node_index: NodeIndex32, message: String) {
-		let L = self.err_map.len();
-		match self.err_map.entry(node_index) {
-			hash_map::Entry::Occupied(mut entry) => {
-				let (_count, vec) = entry.get_mut();
-				vec.push(message);
-			},
+		let idx = match self.err_map.entry(node_index) {
+			hash_map::Entry::Occupied(entry) => *entry.get(),
 			hash_map::Entry::Vacant(entry) => {
-				entry.insert((L, vec![message]));
+				let next_idx = self.err_vec.len();
+				entry.insert(next_idx);
+				self.err_vec.push((node_index, Vec::new()));
+				next_idx
 			},
-		}
+		};
+		self.err_vec[idx].1.push(message);
 	}
 
 	// TODO - refactor to make non recursive
@@ -517,11 +520,27 @@ impl PreCompilation {
 		if child.is_view() && child.reshape_n == 0 && child.reshape_to.is_empty() {
 			child_idx = child.children[0];
 		}
+
+		let mut err = Vec::new();
+		let old_shape: &[usize] = child.shape.as_ref().map_or(&[], |vec| &vec);
+		let mut shape = ThinVec::from(old_shape);
+		let keep = shape.len().saturating_sub(reshape.reshape_n as usize);
+		let old_elems = old_shape.iter().skip(keep).product::<usize>();
+		let new_elems = reshape.reshape_to.iter().product::<usize>();
+		if old_elems != new_elems {
+			cold_path();
+			err.push(format!(
+				"Reshape: element count mismatch (got {new_elems}, expected {old_elems})",
+			));
+		}
+		shape.truncate(keep);
+		shape.extend_from_slice(&reshape.reshape_to);
+
 		Ok(LoadedNode {
 			node: Node {
 				node_kind: NodeKind::View,
 				dtype: child.dtype,
-				shape: child.shape.clone(),
+				shape: Some(shape),
 				can_be_batched: child.can_be_batched,
 				children: [child_idx, NodeIndex32::new_sentinel()],
 				reshape_n: reshape.reshape_n,
@@ -533,7 +552,7 @@ impl PreCompilation {
 				"reshape:{:?}:{:?}:{:?}",
 				reshape.reshape_n, reshape.reshape_to, child_idx.raw
 			),
-			err: Vec::new(),
+			err,
 		})
 	}
 
@@ -711,14 +730,23 @@ impl PreCompilation {
 		}
 	}
 
-	fn common_dtype(a_dtype: Option<DType>, b_dtype: Option<DType>) -> Option<DType> {
+	fn common_dtype(
+		a_dtype: Option<DType>,
+		b_dtype: Option<DType>,
+		err: &mut Vec<String>,
+	) -> Option<DType> {
 		match (a_dtype, b_dtype) {
-			(None, dt) => dt,
-			(dt, None) => dt,
-			(Some(a_dt), Some(b_dt)) if a_dt == b_dt => Some(a_dt),
-			_ => {
-				cold_path();
-				None
+			(None, None) => None,
+			(Some(a_dt), None) => Some(a_dt),
+			(None, Some(b_dt)) => Some(b_dt),
+			(Some(a_dt), Some(b_dt)) => {
+				if a_dt == b_dt {
+					Some(a_dt)
+				} else {
+					cold_path();
+					err.push(format!("dtype mismatch: {} vs {}", a_dt, b_dt));
+					Some(common_dtype(a_dt, b_dt))
+				}
 			},
 		}
 	}
@@ -784,7 +812,7 @@ impl PreCompilation {
 				Ok(LoadedNode {
 					node: Node {
 						node_kind: NodeKind::Binary(binary_kind),
-						dtype: Self::common_dtype(a.dtype, b.dtype),
+						dtype: Self::common_dtype(a.dtype, b.dtype, &mut err),
 						shape: Self::common_shape_opt(
 							a.shape.as_ref().map(|sh| &sh[..]),
 							b.shape.as_ref().map(|sh| &sh[..]),
@@ -833,7 +861,7 @@ impl PreCompilation {
 				Ok(LoadedNode {
 					node: Node {
 						node_kind: NodeKind::MatMul(matmul_kind),
-						dtype: Self::common_dtype(a.dtype, b.dtype),
+						dtype: Self::common_dtype(a.dtype, b.dtype, &mut err),
 						shape: Some(shape),
 						can_be_batched: a.can_be_batched,
 						children: [a_idx, b_idx],
@@ -847,18 +875,41 @@ impl PreCompilation {
 			ExprBinaryKind::Attention => {
 				let a = &self.nodes_postorder[a_idx];
 				let b = &self.nodes_postorder[b_idx];
+
+				let mut err = Vec::new();
+				let a_shape: &[usize] = a.shape.as_ref().map_or(&[], |vec| &vec[..]);
+				let b_shape: &[usize] = b.shape.as_ref().map_or(&[], |vec| &vec[..]);
+				if a_shape.len() < 3 || b_shape.len() < 3 {
+					cold_path();
+					err.push(format!("attention: not enough dimensions"));
+				}
+				let (q_rest, [q1, q2, q3]) = Self::split_shape::<3>(a_shape);
+				let (kv_rest, [kv1, kv2, kv3]) = Self::split_shape::<3>(b_shape);
+				if kv1 != 1 || q2 != kv2 || q3 >= kv3 {
+					cold_path();
+					err.push(format!("attention: shape mismatch"));
+				}
+				let mut shape = ThinVec::new();
+				if Self::broadcast_shapes(&mut shape, q_rest, kv_rest).is_err() {
+					cold_path();
+					err.push(format!("attention: batch shape mismatch"));
+				}
+				shape.push(q1);
+				shape.push(q2);
+				shape.push(kv3.saturating_sub(q3));
+
 				Ok(LoadedNode {
 					node: Node {
 						node_kind: NodeKind::Attention,
-						dtype: Self::common_dtype(a.dtype, b.dtype),
-						//TODO: shape: child.shape.clone(),
-						//TODO:can_be_batched: child.can_be_batched,
+						dtype: Self::common_dtype(a.dtype, b.dtype, &mut err),
+						shape: Some(shape),
+						can_be_batched: a.can_be_batched || b.can_be_batched,
 						children: [a_idx, b_idx],
 						..Default::default()
 					},
 					complex: true,
 					cache_key: format!("attention:{:?}:{:?}", a_idx.raw, b_idx.raw),
-					err: Vec::new(),
+					err,
 				})
 			},
 		}
@@ -1576,16 +1627,19 @@ impl PreCompilation {
 				"\t{node_id} -> {scalar_id} [label=< >, style=dotted, color=\"#008000\", constraint=true];"
 			)?;
 		}
-		for (node_idx, (idx, _msgs)) in &self.err_map {
+		for (node_idx, msgs) in &self.err_vec {
+			let idx = node_idx.raw;
 			writeln!(
 				w,
 				"\terr_{idx} [label=<<b><font color='yellow'>{idx}</font></b>>, shape=box, style=filled, fillcolor=\"#ff0000\"];"
 			)?;
 			writeln!(
 				w,
-				"\tnode_{} -> err_{idx} [style=bold, color=\"#ff0000\", constraint=true];",
-				node_idx.raw
+				"\tnode_{idx} -> err_{idx} [style=bold, color=\"#ff0000\", constraint=true];",
 			)?;
+			for msg in msgs {
+				eprintln!("Node {idx}: error: {msg}");
+			}
 		}
 		writeln!(w, "}}")?;
 		Ok(())
