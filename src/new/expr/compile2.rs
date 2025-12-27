@@ -202,6 +202,10 @@ impl Node {
 		self.is_reduction() || self.is_matmul() || self.is_attention()
 	}
 
+	pub fn is_select(&self) -> bool {
+		matches!(self.node_kind, NodeKind::Select(_))
+	}
+
 	pub fn is_head(&self) -> bool {
 		!self.head_for.is_sentinel()
 	}
@@ -1153,6 +1157,10 @@ impl PreCompilation {
 		})
 	}
 
+	fn is_selected(&self, node_idx: NodeIndex32) -> bool {
+		self.nodes_postorder[node_idx].parents.iter().any(|&p| self.nodes_postorder[p].is_select())
+	}
+
 	fn split_shape<const N: usize>(shape: &[usize]) -> (&[usize], [usize; N]) {
 		let len = shape.len();
 		let cnt = len.min(N);
@@ -1254,11 +1262,13 @@ impl PreCompilation {
 		self.fragments_preorder.raw.clear();
 		for idx in self.nodes_postorder.indexes().rev() {
 			let is_broadcasted = self.is_broadcasted(idx);
+			let is_selected = self.is_selected(idx);
 			let (_, item, all_parents) = self.nodes_postorder.borrow_multiple(idx);
 			if item.is_input() || unlikely(item.is_dead) {
 				continue;
 			}
 			if !is_broadcasted
+				&& !is_selected
 				&& let Some((&first_parent, other_parents)) = item.parents.split_first()
 				&& !(all_parents[first_parent].is_matmul()
 					|| all_parents[first_parent].is_attention())
