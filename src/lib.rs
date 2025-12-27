@@ -91,6 +91,7 @@
 #![allow(clippy::len_zero)]
 #![allow(clippy::ref_option)]
 #![allow(clippy::result_unit_err)]
+#![allow(clippy::match_same_arms)]
 use std::borrow::Cow;
 use std::convert::Infallible;
 

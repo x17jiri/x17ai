@@ -18,6 +18,8 @@
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::panic_in_result_fn)]
 
+use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::{HashMap, hash_map};
 use std::hint::{cold_path, unlikely};
 use std::rc::Rc;
@@ -29,9 +31,9 @@ use super::super::expr;
 use super::{ExprBinaryKind, ExprInput, ExprNode, ExprUnaryKind};
 use crate::define_index_type32;
 use crate::new::expr::{ExprBinary, ExprCapture, ExprCast, ExprReshape, ExprUnary};
+use crate::tensor::DType;
 use crate::tensor::device::dtype::common_dtype;
 use crate::tensor::error::ShapeMismatchError;
-use crate::tensor::{DType, TensorOpError};
 use crate::util::LossyFrom;
 use crate::util::bitmap::IndexBitmap;
 use crate::util::index_vec::{IndexTrait, IndexVec, UntypedIndex32};
@@ -260,7 +262,7 @@ pub struct ScalarRef {
 }
 
 pub struct ConstRef {
-	pub name: String,
+	pub name: Cow<'static, str>,
 	pub value: f64,
 	pub input_node: NodeIndex32,
 }
@@ -297,6 +299,10 @@ pub struct PreCompilation {
 	tensor_vec: TensorVec,
 	sum_to_mean: Vec<SumToMean>,
 
+	err_log: RefCell<ErrorLog>,
+}
+
+pub struct ErrorLog {
 	err_map: HashMap<NodeIndex32, usize>,
 	err_vec: Vec<(NodeIndex32, Vec<String>)>,
 }
@@ -327,10 +333,12 @@ impl PreCompilation {
 			tensor_map: HashMap::new(),
 			tensor_vec: TensorVec::with_capacity(4),
 			sum_to_mean: Vec::new(),
-			err_map: HashMap::new(),
-			err_vec: Vec::new(),
+			err_log: RefCell::new(ErrorLog {
+				err_map: HashMap::new(),
+				err_vec: Vec::new(),
+			}),
 		};
-		comp.analyze(expr);
+		let _ = comp.analyze(expr);
 		comp
 	}
 
@@ -343,40 +351,34 @@ impl PreCompilation {
 		};
 
 		self.load_expr(expr, &mut state);
-		self.check_errors()?;
-
 		self.remove_dead_code();
-		self.check_errors()?;
-
 		self.find_dominators();
-		self.check_errors()?;
-
 		self.find_complex_op_fingerprints(&mut state);
-		self.check_errors()?;
-
 		self.find_races(&mut state);
-		self.check_errors()?;
+		self.find_heads();
+		self.find_fragments();
 
-		//comp.find_heads();
-		//comp.find_fragments()?;
-		Ok(())
+		self.check_errors()
 	}
 
 	pub fn check_errors(&self) -> Result<(), ()> {
-		if self.err_map.is_empty() { Ok(()) } else { Err(()) }
+		let err_log = self.err_log.borrow();
+		if err_log.err_vec.is_empty() { Ok(()) } else { Err(()) }
 	}
 
-	fn log_error(&mut self, node_index: NodeIndex32, message: String) {
-		let idx = match self.err_map.entry(node_index) {
+	fn log_error(&self, node_index: NodeIndex32, message: String) {
+		let mut err_log = self.err_log.borrow_mut();
+		let ErrorLog { err_map, err_vec } = &mut *err_log;
+		let idx = match err_map.entry(node_index) {
 			hash_map::Entry::Occupied(entry) => *entry.get(),
 			hash_map::Entry::Vacant(entry) => {
-				let next_idx = self.err_vec.len();
+				let next_idx = err_vec.len();
 				entry.insert(next_idx);
-				self.err_vec.push((node_index, Vec::new()));
+				err_vec.push((node_index, Vec::new()));
 				next_idx
 			},
 		};
-		self.err_vec[idx].1.push(message);
+		err_vec[idx].1.push(message);
 	}
 
 	// TODO - refactor to make non recursive
@@ -558,7 +560,7 @@ impl PreCompilation {
 	) -> Result<LoadedNode, NodeIndex32> {
 		let child = &self.nodes_postorder[child_idx];
 		let mut err = Vec::new();
-		let old_shape: &[usize] = child.shape.as_ref().map_or(&[], |vec| &vec);
+		let old_shape: &[usize] = child.shape.as_ref().map_or(&[], |vec| vec);
 		let mut shape = ThinVec::from(old_shape);
 		let keep = shape.len().saturating_sub(reshape.reshape_n as usize);
 		let old_elems = old_shape.iter().skip(keep).product::<usize>();
@@ -625,21 +627,24 @@ impl PreCompilation {
 			w
 		} else {
 			cold_path();
-			err.push("SumToMean: missing reduce dimension".into());
+			err.push(format!("SumToMean: missing reduce dimension"));
 			1
 		};
 		// Insert `Const` node.
 		let c = 1.0 / f64::lossy_from(width);
-		let x_index =
-			match self.add_const(format!("1.0 / {width}"), c, self.nodes_postorder.next_index()) {
-				Ok(idx) => {
-					self.sum_to_mean.push(SumToMean { node: child_idx, const_idx: idx });
-					idx
-				},
-				Err(_) => {
-					unreachable!();
-				},
-			};
+		let x_index = match self.add_const(
+			format!("1.0 / {width}").into(),
+			c,
+			self.nodes_postorder.next_index(),
+		) {
+			Ok(idx) => {
+				self.sum_to_mean.push(SumToMean { node: child_idx, const_idx: idx });
+				idx
+			},
+			Err(_) => {
+				unreachable!();
+			},
+		};
 		Ok(LoadedNode {
 			node: Node {
 				node_kind: NodeKind::Const,
@@ -701,9 +706,9 @@ impl PreCompilation {
 					*last_dim = 1;
 				} else {
 					cold_path();
-					err.push("missing reduce dimension".into());
+					err.push(format!("missing reduce dimension"));
 					shape = Some(thin_vec![1]);
-				};
+				}
 				Ok(LoadedNode {
 					node: Node {
 						node_kind: NodeKind::Reduction(reduction_kind),
@@ -730,14 +735,14 @@ impl PreCompilation {
 				if let Some(last_dim) = shape.as_mut().and_then(|vec| vec.last_mut()) {
 					if *last_dim < 2 || (*last_dim % 2 != 0) {
 						cold_path();
-						err.push("select dimension not even".into());
+						err.push(format!("select dimension not even"));
 					}
 					*last_dim /= 2;
 				} else {
 					cold_path();
-					err.push("missing select dimension".into());
+					err.push(format!("missing select dimension"));
 					shape = Some(thin_vec![0]);
-				};
+				}
 				Ok(LoadedNode {
 					node: Node {
 						node_kind: NodeKind::Select(select_kind),
@@ -943,7 +948,7 @@ impl PreCompilation {
 
 	fn add_const(
 		&mut self,
-		name: String,
+		name: Cow<'static, str>,
 		value: f64,
 		node: NodeIndex32,
 	) -> Result<ConstRefIndex32, NodeIndex32> {
@@ -1160,53 +1165,25 @@ impl PreCompilation {
 				}
 				if bitmap.have_common_bits(i, kills) {
 					cold_path();
-					let mut message = String::new();
-					let w: &mut dyn std::fmt::Write = &mut message;
 					for c in 0..cols {
 						if bitmap.get_bit(i, c) && bitmap.get_bit(kills, c) {
-							let _ = writeln!(
-								w,
-								"Ambiguous use of tensor {}. Not clear whether to use the version before or after write.",
-								self.tensor_vec[TensorRefIndex32::from_raw(c)]
-									.tensor_ref
-									.name
-									.as_deref()
-									.unwrap_or("<unnamed>")
-							);
+							let name =
+								&self.tensor_vec[TensorRefIndex32::from_raw(c)].tensor_ref.name;
+							self.log_error(i, format!("Ambiguous use of tensor {name}. Not clear whether to use the version before or after write."));
 						}
 					}
-					return Err(ErrPack {
-						code: TensorOpError::WriteReadRace,
-						extra: Some(Box::new(crate::ErrExtra {
-							message: Cow::from(message),
-							nested: None,
-						})),
-					});
 				}
 				for &tensor_index in &me.capture {
 					let was_killed = bitmap.set_bit(kills, tensor_index.to_raw());
 					if was_killed {
 						cold_path();
-						return Err(ErrPack {
-							code: TensorOpError::DoubleWrite,
-							extra: Some(Box::new(crate::ErrExtra {
-								message: Cow::from(format!(
-									"Double write to tensor {}",
-									self.tensor_vec[tensor_index]
-										.tensor_ref
-										.name
-										.as_deref()
-										.unwrap_or("<unnamed>")
-								)),
-								nested: None,
-							})),
-						});
+						let name = &self.tensor_vec[tensor_index].tensor_ref.name;
+						self.log_error(i, format!("Double write to tensor {name}."));
 					}
 				}
 				bitmap.and_not(i, i, kills);
 			}
 		}
-		Ok(())
 	}
 
 	fn split_shape<const N: usize>(shape: &[usize]) -> (&[usize], [usize; N]) {
@@ -1284,7 +1261,7 @@ impl PreCompilation {
 		}
 	}
 
-	fn find_fragments(&mut self) -> Result<(), TensorOpError> {
+	fn find_fragments(&mut self) {
 		self.fragments_preorder.raw.clear();
 		for idx in self.nodes_postorder.indexes().rev() {
 			let (_, item, all_parents) = self.nodes_postorder.borrow_multiple(idx);
@@ -1305,7 +1282,6 @@ impl PreCompilation {
 				item.set_fragment_index(new_frag);
 			}
 		}
-		Ok(())
 	}
 
 	pub fn graphviz_node_label(&self, node: &Node) -> String {
@@ -1319,12 +1295,10 @@ impl PreCompilation {
 			},
 			NodeKind::Input => {
 				if node.is_tensor_input() {
-					let tensor_ref = &self.tensor_vec[node.tensor_index()].tensor_ref;
-					let name = tensor_ref.name.as_deref().unwrap_or("<unnamed>");
+					let name = &self.tensor_vec[node.tensor_index()].tensor_ref.name;
 					format!("<b>Tensor</b><br/><font color='#800080'><b>{name}</b></font>")
 				} else {
-					let scalar_ref = &self.scalar_vec[node.scalar_index()].scalar_ref;
-					let name = scalar_ref.name.as_deref().unwrap_or("<unnamed>");
+					let name = &self.scalar_vec[node.scalar_index()].scalar_ref.name;
 					format!("<b>Scalar</b><br/><font color='#800080'><b>{name}</b></font>")
 				}
 			},
@@ -1424,15 +1398,10 @@ impl PreCompilation {
 			let node = &self.nodes_postorder[i];
 			let node_id = format!("node_{}", i.raw);
 			let extra_label = if let Some(state) = &mut state {
-				let mut names = Vec::new();
+				let mut names = Vec::<String>::new();
 				for (idx, ten) in self.tensor_vec.iter().enumerate() {
 					if state.bitmap.get_bit(i, idx) {
-						let ten_name = if let Some(name) = &ten.tensor_ref.name {
-							name.as_ref().to_string()
-						} else {
-							format!("{:?}", std::ptr::from_ref(ten.tensor_ref.as_ref()))
-						};
-						names.push(ten_name);
+						names.push(ten.tensor_ref.name.to_string());
 					}
 				}
 				format!("<br/><font color='red'>In use: {}</font>", names.join(", "))
@@ -1551,8 +1520,7 @@ impl PreCompilation {
 						w,
 						"\t{node_id} -> {cap_id} [label=<{label}>, style=bold, constraint=true];"
 					)?;
-					let tensor_ref = &self.tensor_vec[capt_idx].tensor_ref;
-					let name = tensor_ref.name.as_deref().unwrap_or("<unnamed>");
+					let name = &self.tensor_vec[capt_idx].tensor_ref.name;
 					let name = Self::sanitize_for_graphviz_html(name);
 					writeln!(
 						w,
@@ -1573,7 +1541,8 @@ impl PreCompilation {
 				"\t{node_id} -> {const_idx} [label=< >, style=dotted, color=\"#008000\", constraint=true];"
 			)?;
 		}
-		for (node_idx, msgs) in &self.err_vec {
+		let err_log = self.err_log.borrow();
+		for (node_idx, msgs) in &err_log.err_vec {
 			let idx = node_idx.raw;
 			writeln!(
 				w,

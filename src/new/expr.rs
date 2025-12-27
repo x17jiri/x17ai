@@ -45,7 +45,7 @@ pub enum ExprNode {
 }
 
 pub struct ExprConst {
-	pub name: String,
+	pub name: Cow<'static, str>,
 	pub value: f64,
 }
 pub enum ExprInput {
@@ -66,12 +66,12 @@ pub struct TensorRef {
 	pub dtype: DType,
 	pub shape: Vec<usize>,
 	pub batched: CanBeBatched,
-	pub name: Option<Cow<'static, str>>,
+	pub name: Cow<'static, str>,
 }
 
 pub struct ScalarRef {
 	pub value: RefCell<Option<f64>>,
-	pub name: Option<Cow<'static, str>>,
+	pub name: Cow<'static, str>,
 }
 
 pub struct ExprCapture {
@@ -139,7 +139,7 @@ pub enum ExprBinaryKind {
 
 impl TensorRef {
 	pub fn new(
-		name: Option<Cow<'static, str>>,
+		name: Cow<'static, str>,
 		dtype: DType,
 		shape: Vec<usize>,
 		batched: CanBeBatched,
@@ -155,7 +155,7 @@ impl TensorRef {
 }
 
 impl ScalarRef {
-	pub fn new(name: Option<Cow<'static, str>>) -> Rc<ScalarRef> {
+	pub fn new(name: Cow<'static, str>) -> Rc<ScalarRef> {
 		Rc::new(ScalarRef { value: RefCell::new(None), name })
 	}
 }
@@ -175,7 +175,7 @@ impl Expr {
 		}
 	}
 
-	pub fn new_const(name: String, value: f64) -> Expr {
+	pub fn new_const(name: Cow<'static, str>, value: f64) -> Expr {
 		Expr {
 			node: Rc::new(ExprNode::Const(ExprConst { name, value })),
 		}

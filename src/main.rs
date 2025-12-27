@@ -418,7 +418,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 
 	let io_dtype = f16::dtype;
 	let internal_dtype = f32::dtype;
-	let eps = ScalarRef::new(Some("eps".into()));
+	let eps = ScalarRef::new("eps".into());
 
 	//let expr = test1_opt(dev.clone());
 	//let expr = test2_rms_norm(dev.clone());
@@ -426,20 +426,19 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	//let expr = test4_x(dev.clone());
 	//let expr = test5(dev.clone());
 
-	let q = TensorRef::new(Some("q".into()), io_dtype, vec![4, 4, 64], CanBeBatched::Yes);
-	let kv = TensorRef::new(Some("kv".into()), io_dtype, vec![1, 4, 64 + 64], CanBeBatched::Yes);
+	let q = TensorRef::new("q".into(), io_dtype, vec![4, 4, 64], CanBeBatched::Yes);
+	let kv = TensorRef::new("kv".into(), io_dtype, vec![1, 4, 64 + 64], CanBeBatched::Yes);
 
-	let t = TensorRef::new(Some("t".into()), io_dtype, vec![1024], CanBeBatched::Yes);
-	let r = TensorRef::new(Some("r".into()), io_dtype, vec![1024], CanBeBatched::Yes);
-	let mq = TensorRef::new(Some("mq".into()), io_dtype, vec![1024, 1024], CanBeBatched::No);
-	let mkv =
-		TensorRef::new(Some("mkv".into()), io_dtype, vec![1024, 4 * (64 + 64)], CanBeBatched::No);
-	let mw = TensorRef::new(Some("mw".into()), io_dtype, vec![1024, 2048], CanBeBatched::No);
+	let t = TensorRef::new("t".into(), io_dtype, vec![1024], CanBeBatched::Yes);
+	let r = TensorRef::new("r".into(), io_dtype, vec![1024], CanBeBatched::Yes);
+	let mq = TensorRef::new("mq".into(), io_dtype, vec![1024, 1024], CanBeBatched::No);
+	let mkv = TensorRef::new("mkv".into(), io_dtype, vec![1024, 4 * (64 + 64)], CanBeBatched::No);
+	let mw = TensorRef::new("mw".into(), io_dtype, vec![1024, 2048], CanBeBatched::No);
 	let expr = Expr::new_tensor_input(t.clone());
 
 	let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?.cast(io_dtype);
 
-	let q = expr
+	let qq = expr
 		.clone()
 		.cast(internal_dtype)
 		.row_times_mat(Expr::new_tensor_input(mq.clone()).cast(internal_dtype))
@@ -454,13 +453,14 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 		.cast(io_dtype)
 		.cast(internal_dtype)
 		.reshape(1, &[1, 4, 64 + 64])
-		.capture(kv.clone());
+		.capture(kv.clone())
+		.capture(q.clone());
 
 	//let expr = RcExpr::first(q, kv);
 	//let expr = x_softmax(expr, internal_dtype)?;
 	//	let expr = x_swiglu(expr, internal_dtype)?;
 
-	let expr = q.attention(kv).reshape(3, &[1024]).cast(io_dtype);
+	let expr = qq.attention(kv).reshape(3, &[1024]).cast(io_dtype);
 	let expr = expr
 		.cast(internal_dtype)
 		.row_times_mat(Expr::new_tensor_input(mw.clone()).cast(internal_dtype));
