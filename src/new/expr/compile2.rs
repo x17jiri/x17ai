@@ -19,7 +19,6 @@
 #![allow(clippy::panic_in_result_fn)]
 
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::collections::{HashMap, hash_map};
 use std::hint::{cold_path, unlikely};
 use std::rc::Rc;
@@ -33,7 +32,6 @@ use crate::define_index_type32;
 use crate::new::expr::{ExprBinary, ExprCapture, ExprCast, ExprReshape, ExprUnary};
 use crate::tensor::DType;
 use crate::tensor::device::dtype::common_dtype;
-use crate::tensor::error::ShapeMismatchError;
 use crate::util::LossyFrom;
 use crate::util::bitmap::IndexBitmap;
 use crate::util::index_vec::{IndexTrait, IndexVec, UntypedIndex32};
@@ -107,6 +105,7 @@ pub struct Node {
 
 	pub can_be_batched: bool,
 	pub children: [NodeIndex32; 2],
+	pub children_broadcast: [bool; 2],
 
 	pub parents: ThinVec<NodeIndex32>,
 	pub dominator: NodeIndex32,
@@ -135,6 +134,7 @@ impl Default for Node {
 			parents: ThinVec::new(),
 			dominator: NodeIndex32::new_sentinel(),
 			children: [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()],
+			children_broadcast: [false, false],
 			capture: ThinVec::new(),
 			is_dead: false,
 			reduction_fingerprint: 0,
@@ -198,7 +198,11 @@ impl Node {
 		matches!(self.node_kind, NodeKind::Attention)
 	}
 
-	pub fn is_config_head(&self) -> bool {
+	pub fn is_complex(&self) -> bool {
+		self.is_reduction() || self.is_matmul() || self.is_attention()
+	}
+
+	pub fn is_head(&self) -> bool {
 		!self.head_for.is_sentinel()
 	}
 
@@ -299,17 +303,11 @@ pub struct PreCompilation {
 	tensor_vec: TensorVec,
 	sum_to_mean: Vec<SumToMean>,
 
-	err_log: RefCell<ErrorLog>,
-}
-
-pub struct ErrorLog {
-	err_map: HashMap<NodeIndex32, usize>,
-	err_vec: Vec<(NodeIndex32, Vec<String>)>,
+	err_log: ErrorLog,
 }
 
 struct LoadedNode {
 	node: Node,
-	complex: bool,
 	cache_key: String,
 	err: Vec<String>,
 }
@@ -319,6 +317,42 @@ pub struct LoadExprState {
 	node_cache: HashMap<String, NodeIndex32>,
 	n_complex: u32,
 	bitmap: IndexBitmap<NodeIndex32>,
+}
+
+pub struct ErrorLog {
+	err_map: HashMap<NodeIndex32, usize>,
+	err_vec: Vec<(NodeIndex32, Vec<String>)>,
+}
+
+impl ErrorLog {
+	pub fn new() -> Self {
+		Self {
+			err_map: HashMap::new(),
+			err_vec: Vec::new(),
+		}
+	}
+
+	pub fn is_empty(&self) -> bool {
+		self.err_vec.is_empty()
+	}
+
+	pub fn check_errors(&self) -> Result<(), ()> {
+		if self.is_empty() { Ok(()) } else { Err(()) }
+	}
+
+	fn log_error(&mut self, node_index: NodeIndex32, message: String) {
+		let Self { err_map, err_vec } = self;
+		let idx = match err_map.entry(node_index) {
+			hash_map::Entry::Occupied(entry) => *entry.get(),
+			hash_map::Entry::Vacant(entry) => {
+				let next_idx = err_vec.len();
+				entry.insert(next_idx);
+				err_vec.push((node_index, Vec::new()));
+				next_idx
+			},
+		};
+		err_vec[idx].1.push(message);
+	}
 }
 
 impl PreCompilation {
@@ -333,10 +367,7 @@ impl PreCompilation {
 			tensor_map: HashMap::new(),
 			tensor_vec: TensorVec::with_capacity(4),
 			sum_to_mean: Vec::new(),
-			err_log: RefCell::new(ErrorLog {
-				err_map: HashMap::new(),
-				err_vec: Vec::new(),
-			}),
+			err_log: ErrorLog::new(),
 		};
 		let _ = comp.analyze(expr);
 		comp
@@ -358,27 +389,7 @@ impl PreCompilation {
 		self.find_heads();
 		self.find_fragments();
 
-		self.check_errors()
-	}
-
-	pub fn check_errors(&self) -> Result<(), ()> {
-		let err_log = self.err_log.borrow();
-		if err_log.err_vec.is_empty() { Ok(()) } else { Err(()) }
-	}
-
-	fn log_error(&self, node_index: NodeIndex32, message: String) {
-		let mut err_log = self.err_log.borrow_mut();
-		let ErrorLog { err_map, err_vec } = &mut *err_log;
-		let idx = match err_map.entry(node_index) {
-			hash_map::Entry::Occupied(entry) => *entry.get(),
-			hash_map::Entry::Vacant(entry) => {
-				let next_idx = err_vec.len();
-				entry.insert(next_idx);
-				err_vec.push((node_index, Vec::new()));
-				next_idx
-			},
-		};
-		err_vec[idx].1.push(message);
+		self.err_log.check_errors()
 	}
 
 	// TODO - refactor to make non recursive
@@ -398,7 +409,6 @@ impl PreCompilation {
 							x_index: idx.to_untyped(),
 							..Default::default()
 						},
-						complex: false,
 						cache_key: String::new(),
 						err: Vec::new(),
 					}),
@@ -453,10 +463,10 @@ impl PreCompilation {
 			}
 		}
 		for err in loaded.err {
-			self.log_error(next_index, err);
+			self.err_log.log_error(next_index, err);
 		}
 
-		if loaded.complex {
+		if loaded.node.is_complex() {
 			state.n_complex += 1;
 		}
 
@@ -517,7 +527,6 @@ impl PreCompilation {
 				x_index,
 				..Default::default()
 			},
-			complex: false,
 			cache_key: String::new(),
 			err: Vec::new(),
 		})
@@ -547,7 +556,6 @@ impl PreCompilation {
 				capture: thin_vec![tensor_idx],
 				..Default::default()
 			},
-			complex: false,
 			cache_key: format!("identity:{:?}", child_idx.raw),
 			err: Vec::new(),
 		})
@@ -587,7 +595,6 @@ impl PreCompilation {
 				children: [child_idx, NodeIndex32::new_sentinel()],
 				..Default::default()
 			},
-			complex: false,
 			cache_key: format!(
 				"reshape:{:?}:{:?}:{:?}",
 				reshape.reshape_n, reshape.reshape_to, child_idx.raw
@@ -614,7 +621,6 @@ impl PreCompilation {
 				children: [child_idx, NodeIndex32::new_sentinel()],
 				..Default::default()
 			},
-			complex: false,
 			cache_key: format!("cast:{:?}:{:?}", cast.dtype, child_idx.raw),
 			err: Vec::new(),
 		})
@@ -651,7 +657,6 @@ impl PreCompilation {
 				x_index: x_index.to_untyped(),
 				..Default::default()
 			},
-			complex: false,
 			cache_key: String::new(),
 			err,
 		})
@@ -688,7 +693,6 @@ impl PreCompilation {
 						children: [child_idx, NodeIndex32::new_sentinel()],
 						..Default::default()
 					},
-					complex: false,
 					cache_key: format!("unary:{:?}:{:?}", unary_kind, child_idx.raw),
 					err: Vec::new(),
 				})
@@ -718,7 +722,6 @@ impl PreCompilation {
 						children: [child_idx, NodeIndex32::new_sentinel()],
 						..Default::default()
 					},
-					complex: true,
 					cache_key: format!("reduction:{:?}:{:?}", reduction_kind, child_idx.raw),
 					err,
 				})
@@ -752,7 +755,6 @@ impl PreCompilation {
 						children: [child_idx, NodeIndex32::new_sentinel()],
 						..Default::default()
 					},
-					complex: false,
 					cache_key: format!("select:{:?}:{:?}", select_kind, child_idx.raw),
 					err,
 				})
@@ -782,45 +784,6 @@ impl PreCompilation {
 		}
 	}
 
-	fn common_shape(mut a: &[usize], mut b: &[usize], err: &mut Vec<String>) -> ThinVec<usize> {
-		if a.len() != b.len() {
-			cold_path();
-			err.push(format!("shape length mismatch: {:?} vs {:?}", a, b));
-			let len = a.len().min(b.len()); // TODO - shoud use larger of the 2, not the smaller
-			let skip_a = a.len() - len;
-			let skip_b = b.len() - len;
-			a = &a[skip_a..];
-			b = &b[skip_b..];
-		}
-		let mut shape = ThinVec::with_capacity(a.len());
-		for (a_dim, b_dim) in a.iter().zip(b.iter()) {
-			if *a_dim == *b_dim {
-				shape.push(*a_dim);
-			} else if *a_dim == 1 {
-				shape.push(*b_dim);
-			} else if *b_dim == 1 {
-				shape.push(*a_dim);
-			} else {
-				cold_path();
-				err.push(format!("shape dimension mismatch: {:?} vs {:?}", a_dim, b_dim));
-			}
-		}
-		shape
-	}
-
-	fn common_shape_opt(
-		a: Option<&[usize]>,
-		b: Option<&[usize]>,
-		err: &mut Vec<String>,
-	) -> Option<ThinVec<usize>> {
-		match (a, b) {
-			(None, None) => None,
-			(None, Some(sh)) => Some(ThinVec::from(sh)),
-			(Some(sh), None) => Some(ThinVec::from(sh)),
-			(Some(a), Some(b)) => Some(Self::common_shape(a, b, err)),
-		}
-	}
-
 	fn load_binary(
 		&self,
 		binary: &ExprBinary,
@@ -840,20 +803,22 @@ impl PreCompilation {
 				let a = &self.nodes_postorder[a_idx];
 				let b = &self.nodes_postorder[b_idx];
 				let mut err = Vec::new();
+				let dtype = Self::common_dtype(a.dtype, b.dtype, &mut err);
+				let (shape, is_broadcasted) = Self::common_shape(
+					a.shape.as_ref().map(|sh| &sh[..]),
+					b.shape.as_ref().map(|sh| &sh[..]),
+					&mut err,
+				);
 				Ok(LoadedNode {
 					node: Node {
 						node_kind: NodeKind::Binary(binary_kind),
-						dtype: Self::common_dtype(a.dtype, b.dtype, &mut err),
-						shape: Self::common_shape_opt(
-							a.shape.as_ref().map(|sh| &sh[..]),
-							b.shape.as_ref().map(|sh| &sh[..]),
-							&mut err,
-						),
+						dtype,
+						shape,
 						can_be_batched: a.can_be_batched || b.can_be_batched,
 						children: [a_idx, b_idx],
+						children_broadcast: is_broadcasted,
 						..Default::default()
 					},
-					complex: false,
 					cache_key: format!("binary:{:?}:{:?}:{:?}", binary_kind, a_idx.raw, b_idx.raw),
 					err,
 				})
@@ -871,20 +836,16 @@ impl PreCompilation {
 					cold_path();
 					err.push(format!("matmul: not enough dimensions"));
 				}
-				let (a_rest, [a_len]) = Self::split_shape::<1>(a_shape);
+				let (_a_rest, [a_len]) = Self::split_shape::<1>(a_shape);
 				let (b_rest, [b_row, b_col]) = Self::split_shape::<2>(b_shape);
 				if a_len != b_row {
 					cold_path();
 					err.push(format!("matmul: shape mismatch"));
 				}
-				let mut shape = ThinVec::new();
-				if Self::broadcast_shapes(&mut shape, a_rest, b_rest).is_err() {
-					cold_path();
-					err.push(format!("matmul: batch shape mismatch"));
-				}
-				shape.push(b_col);
+				let mut shape = ThinVec::from(a_shape);
+				*shape.last_mut().unwrap() = b_col;
 
-				if b.can_be_batched {
+				if !b_rest.is_empty() || b.can_be_batched {
 					cold_path();
 					err.push("row times mat: mat cannot be batched".into());
 				}
@@ -898,7 +859,6 @@ impl PreCompilation {
 						children: [a_idx, b_idx],
 						..Default::default()
 					},
-					complex: true,
 					cache_key: format!("matmul:{:?}:{:?}:{:?}", matmul_kind, a_idx.raw, b_idx.raw),
 					err,
 				})
@@ -920,14 +880,14 @@ impl PreCompilation {
 					cold_path();
 					err.push(format!("attention: shape mismatch"));
 				}
-				let mut shape = ThinVec::new();
-				if Self::broadcast_shapes(&mut shape, q_rest, kv_rest).is_err() {
-					cold_path();
-					err.push(format!("attention: batch shape mismatch"));
-				}
+				let (mut shape, is_broadcasted) = Self::broadcast_shapes(q_rest, kv_rest, &mut err);
 				shape.push(q1);
 				shape.push(q2);
 				shape.push(kv3.saturating_sub(q3));
+				if is_broadcasted[0] || is_broadcasted[1] {
+					cold_path();
+					err.push(format!("attention inputs cannot be broadcasted"));
+				}
 
 				Ok(LoadedNode {
 					node: Node {
@@ -938,7 +898,6 @@ impl PreCompilation {
 						children: [a_idx, b_idx],
 						..Default::default()
 					},
-					complex: true,
 					cache_key: format!("attention:{:?}:{:?}", a_idx.raw, b_idx.raw),
 					err,
 				})
@@ -1059,35 +1018,31 @@ impl PreCompilation {
 		while changed {
 			changed = false;
 			for idx in self.nodes_postorder.indexes().rev() {
-				match self.nodes_postorder[idx].parents.len() {
-					0 => {
-						// root
-						debug_assert!(
-							self.nodes_postorder[idx].dominator == NodeIndex32::new_sentinel()
-						);
-					},
-					1 => {
-						self.nodes_postorder[idx].dominator = self.nodes_postorder[idx].parents[0];
-					},
-					_ => {
-						let dominator = self.nodes_postorder[idx].parents[1..]
-							.iter()
-							.copied()
-							.fold(self.nodes_postorder[idx].parents[0], |mut d1, mut d2| {
-								while d1 != d2 {
-									if d1.to_raw() < d2.to_raw() {
-										d1 = self.nodes_postorder[d1].dominator;
-									} else {
-										d2 = self.nodes_postorder[d2].dominator;
-									}
-								}
-								d1
-							});
-						if self.nodes_postorder[idx].dominator != dominator {
-							self.nodes_postorder[idx].dominator = dominator;
-							changed = true;
+				if self.nodes_postorder[idx].parents.is_empty() {
+					// root
+					debug_assert!(
+						self.nodes_postorder[idx].dominator == NodeIndex32::new_sentinel()
+					);
+					continue;
+				}
+
+				let p0 = self.nodes_postorder[idx].parents[0];
+				let dominator = self.nodes_postorder[idx].parents[1..].iter().copied().fold(
+					p0,
+					|mut d, mut p| {
+						while d != p {
+							if d.to_raw() < p.to_raw() {
+								d = self.nodes_postorder[d].dominator;
+							} else {
+								p = self.nodes_postorder[p].dominator;
+							}
 						}
+						d
 					},
+				);
+				if self.nodes_postorder[idx].dominator != dominator {
+					self.nodes_postorder[idx].dominator = dominator;
+					changed = true;
 				}
 			}
 		}
@@ -1141,7 +1096,7 @@ impl PreCompilation {
 	}
 
 	#[allow(clippy::manual_assert)]
-	fn find_races(&self, state: &mut LoadExprState) {
+	fn find_races(&mut self, state: &mut LoadExprState) {
 		let kills = NodeIndex32::from_raw(self.nodes_postorder.len());
 		let rows = self.nodes_postorder.len() + 1;
 		let cols = self.tensor_vec.len();
@@ -1169,7 +1124,7 @@ impl PreCompilation {
 						if bitmap.get_bit(i, c) && bitmap.get_bit(kills, c) {
 							let name =
 								&self.tensor_vec[TensorRefIndex32::from_raw(c)].tensor_ref.name;
-							self.log_error(i, format!("Ambiguous use of tensor {name}. Not clear whether to use the version before or after write."));
+							self.err_log.log_error(i, format!("Ambiguous use of tensor {name}. Not clear whether to use the version before or after write."));
 						}
 					}
 				}
@@ -1178,7 +1133,7 @@ impl PreCompilation {
 					if was_killed {
 						cold_path();
 						let name = &self.tensor_vec[tensor_index].tensor_ref.name;
-						self.log_error(i, format!("Double write to tensor {name}."));
+						self.err_log.log_error(i, format!("Double write to tensor {name}."));
 					}
 				}
 				bitmap.and_not(i, i, kills);
@@ -1200,42 +1155,63 @@ impl PreCompilation {
 	}
 
 	fn broadcast_shapes(
-		result: &mut ThinVec<usize>,
 		a: &[usize],
 		b: &[usize],
-	) -> Result<(), ShapeMismatchError> {
-		let mut err = Ok(());
+		err: &mut Vec<String>,
+	) -> (ThinVec<usize>, [bool; 2]) {
+		let mut is_broadcasted = [false, false];
+		let mut result = ThinVec::new();
 		let len = a.len().max(b.len());
 		let skip_a = len - a.len();
 		let skip_b = len - b.len();
 		for d in 0..len {
 			let dim_a = if d < skip_a { 1 } else { a[d - skip_a] };
 			let dim_b = if d < skip_b { 1 } else { b[d - skip_b] };
-			let dim = if dim_a == dim_b || dim_b == 1 {
+			let dim = if dim_a == dim_b {
+				dim_a
+			} else if dim_b == 1 {
+				is_broadcasted[1] = true;
 				dim_a
 			} else if dim_a == 1 {
+				is_broadcasted[0] = true;
 				dim_b
 			} else {
 				cold_path();
-				err = Err(ShapeMismatchError);
+				err.push(format!("broadcast dimension mismatch: {:?} vs {:?}", dim_a, dim_b));
 				dim_a.max(dim_b)
 			};
 			result.push(dim);
 		}
-		err
+		(result, is_broadcasted)
+	}
+
+	fn common_shape(
+		a: Option<&[usize]>,
+		b: Option<&[usize]>,
+		err: &mut Vec<String>,
+	) -> (Option<ThinVec<usize>>, [bool; 2]) {
+		match (a, b) {
+			(None, None) => (None, [false, false]),
+			(None, Some(sh)) => (Some(ThinVec::from(sh)), [false, false]),
+			(Some(sh), None) => (Some(ThinVec::from(sh)), [false, false]),
+			(Some(a), Some(b)) => {
+				if a.len() != b.len() {
+					cold_path();
+					err.push(format!("shape length mismatch: {:?} vs {:?}", a, b));
+				}
+				let (shape, is_broadcasted) = Self::broadcast_shapes(a, b, err);
+				(Some(shape), is_broadcasted)
+			},
+		}
 	}
 
 	fn find_heads(&mut self) {
 		for idx in self.nodes_postorder.indexes() {
-			if !self.nodes_postorder[idx].is_reduction()
-				&& !self.nodes_postorder[idx].is_matmul()
-				&& !self.nodes_postorder[idx].is_attention()
-			{
+			if !self.nodes_postorder[idx].is_complex() {
 				continue;
 			}
 
 			let start = &self.nodes_postorder[idx];
-			let start_shape: Option<&[usize]> = start.shape.as_ref().map(|sh| &sh[..]);
 			let start_fingerprint = start.reduction_fingerprint;
 
 			let mut head_idx = idx;
@@ -1246,9 +1222,10 @@ impl PreCompilation {
 					break;
 				}
 				let parent = &self.nodes_postorder[parent_idx];
+				let head_shape: Option<&[usize]> = head.shape.as_ref().map(|sh| &sh[..]);
 				let parent_shape: Option<&[usize]> = parent.shape.as_ref().map(|sh| &sh[..]);
 				let parent_fingerprint = parent.reduction_fingerprint;
-				if (!parent.is_reshape() && parent_shape != start_shape)
+				if (!parent.is_reshape() && parent_shape != head_shape)
 					|| parent_fingerprint != start_fingerprint
 				{
 					break;
@@ -1271,8 +1248,7 @@ impl PreCompilation {
 			if let Some((&first_parent, other_parents)) = item.parents.split_first()
 				&& !all_parents[first_parent].is_matmul()
 				&& let parent_frag = all_parents[first_parent].fragment_index()
-				&& !item.is_config_head()
-				&& !item.is_reshape()
+				&& !item.is_head()
 				&& other_parents.iter().all(|&p| {
 					!all_parents[p].is_matmul() && all_parents[p].fragment_index() == parent_frag
 				}) {
@@ -1420,7 +1396,7 @@ impl PreCompilation {
 					debug_assert!(node.is_const());
 					writeln!(w, "\t{node_id} [shape=box, style=filled, fillcolor=\"#ffff00\"];")?;
 				}
-			} else if node.is_config_head() {
+			} else if node.is_head() {
 				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccccff\"];")?;
 			} else if node.is_fork() {
 				if unlikely(node.is_dead) {
@@ -1437,7 +1413,7 @@ impl PreCompilation {
 				let dom_id = format!("node_{}", node.dominator.raw);
 				writeln!(
 					w,
-					"\t{node_id} -> {dom_id} [label=< >, style=dashed, color=\"#808080\", constraint=true];"
+					"\t{node_id} -> {dom_id} [label=< >, style=dashed, color=\"#808080\", constraint=true];",
 				)?;
 			}
 			if node.is_input() {
@@ -1447,7 +1423,7 @@ impl PreCompilation {
 				if self.fragments_preorder.is_valid(frag_index) {
 					let frag_head = self.fragments_preorder[frag_index].head;
 					let frag_node = &self.nodes_postorder[frag_head];
-					let fragment_kind = if frag_node.is_config_head() {
+					let fragment_kind = if frag_node.is_head() {
 						let frag_node = &self.nodes_postorder[frag_node.head_for];
 						if frag_node.is_reduction() {
 							"Reduction"
@@ -1472,16 +1448,21 @@ impl PreCompilation {
 					NodeKind::MatMul(_) | NodeKind::Attention => true,
 					_ => false,
 				};
-				for &child_index in &node.children {
+				for (j, &child_index) in node.children.iter().enumerate() {
 					if !self.nodes_postorder.is_valid(child_index) {
 						break;
 					}
 					let child_id = format!("node_{}", child_index.raw);
 					let child = &self.nodes_postorder[child_index];
 					let label = format!(
-						"{}{}",
+						"{}{}{}",
 						self.dtype_to_str(child.dtype),
-						self.shape_to_str(child.can_be_batched, &child.shape)
+						self.shape_to_str(child.can_be_batched, &child.shape),
+						if node.children_broadcast[j] {
+							" <font color='red'>(broadcasted)</font>"
+						} else {
+							""
+						}
 					);
 					let extra_style = if ordered {
 						if child_index == node.children[0] {
@@ -1541,8 +1522,7 @@ impl PreCompilation {
 				"\t{node_id} -> {const_idx} [label=< >, style=dotted, color=\"#008000\", constraint=true];"
 			)?;
 		}
-		let err_log = self.err_log.borrow();
-		for (node_idx, msgs) in &err_log.err_vec {
+		for (node_idx, msgs) in &self.err_log.err_vec {
 			let idx = node_idx.raw;
 			writeln!(
 				w,
