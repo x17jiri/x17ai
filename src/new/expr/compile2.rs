@@ -241,6 +241,12 @@ impl Node {
 	pub fn is_fork(&self) -> bool {
 		self.parents.len() != 1 && !self.is_input()
 	}
+
+	fn broadcasts_child(&self, node_idx: NodeIndex32) -> bool {
+		self.children.iter().zip(self.children_broadcast).any(|(&child_idx, broadcast)| {
+			child_idx == node_idx && broadcast
+		})
+	}
 }
 
 define_index_type32!(NodeIndex32);
@@ -1145,22 +1151,6 @@ impl PreCompilation {
 		}
 	}
 
-	fn is_broadcasted(&self, node_idx: NodeIndex32) -> bool {
-		self.nodes_postorder[node_idx].parents.iter().any(|&p| {
-			let parent = &self.nodes_postorder[p];
-			for i in 0..parent.children.len() {
-				if parent.children[i] == node_idx && parent.children_broadcast[i] {
-					return true;
-				}
-			}
-			false
-		})
-	}
-
-	fn is_selected(&self, node_idx: NodeIndex32) -> bool {
-		self.nodes_postorder[node_idx].parents.iter().any(|&p| self.nodes_postorder[p].is_select())
-	}
-
 	fn split_shape<const N: usize>(shape: &[usize]) -> (&[usize], [usize; N]) {
 		let len = shape.len();
 		let cnt = len.min(N);
@@ -1261,21 +1251,24 @@ impl PreCompilation {
 	fn find_fragments(&mut self) {
 		self.fragments_preorder.raw.clear();
 		for idx in self.nodes_postorder.indexes().rev() {
-			let is_broadcasted = self.is_broadcasted(idx);
-			let is_selected = self.is_selected(idx);
 			let (_, item, all_parents) = self.nodes_postorder.borrow_multiple(idx);
 			if item.is_input() || unlikely(item.is_dead) {
 				continue;
 			}
-			if !is_broadcasted
-				&& !is_selected
-				&& let Some((&first_parent, other_parents)) = item.parents.split_first()
-				&& !(all_parents[first_parent].is_matmul()
-					|| all_parents[first_parent].is_attention())
-				&& let parent_frag = all_parents[first_parent].fragment_index()
+			if let Some((&first_parent, other_parents)) = item.parents.split_first()
+				&& let first_parent = &all_parents[first_parent]
+				&& !(first_parent.is_matmul()
+					|| first_parent.is_attention()
+					|| first_parent.is_select()
+					|| first_parent.broadcasts_child(idx))
+				&& let parent_frag = first_parent.fragment_index()
 				&& other_parents.iter().all(|&p| {
-					!(all_parents[p].is_matmul() || all_parents[p].is_attention())
-						&& all_parents[p].fragment_index() == parent_frag
+					let parent = &all_parents[p];
+					!(parent.is_matmul()
+						|| parent.is_attention()
+						|| parent.is_select()
+						|| parent.broadcasts_child(idx))
+						&& parent.fragment_index() == parent_frag
 				}) {
 				item.set_fragment_index(parent_frag);
 			} else {
