@@ -386,7 +386,7 @@ impl PreCompilation {
 		self.find_dominators();
 		self.find_complex_op_fingerprints(&mut state);
 		self.find_races(&mut state);
-		self.find_heads();
+		//self.find_heads();
 		self.find_fragments();
 
 		self.err_log.check_errors()
@@ -1141,6 +1141,18 @@ impl PreCompilation {
 		}
 	}
 
+	fn is_broadcasted(&self, node_idx: NodeIndex32) -> bool {
+		self.nodes_postorder[node_idx].parents.iter().any(|&p| {
+			let parent = &self.nodes_postorder[p];
+			for i in 0..parent.children.len() {
+				if parent.children[i] == node_idx && parent.children_broadcast[i] {
+					return true;
+				}
+			}
+			false
+		})
+	}
+
 	fn split_shape<const N: usize>(shape: &[usize]) -> (&[usize], [usize; N]) {
 		let len = shape.len();
 		let cnt = len.min(N);
@@ -1205,7 +1217,7 @@ impl PreCompilation {
 		}
 	}
 
-	fn find_heads(&mut self) {
+	/*fn find_heads(&mut self) {
 		for idx in self.nodes_postorder.indexes() {
 			if !self.nodes_postorder[idx].is_complex() {
 				continue;
@@ -1236,21 +1248,24 @@ impl PreCompilation {
 
 			self.nodes_postorder[head_idx].head_for = idx;
 		}
-	}
+	}*/
 
 	fn find_fragments(&mut self) {
 		self.fragments_preorder.raw.clear();
 		for idx in self.nodes_postorder.indexes().rev() {
+			let is_broadcasted = self.is_broadcasted(idx);
 			let (_, item, all_parents) = self.nodes_postorder.borrow_multiple(idx);
 			if item.is_input() || unlikely(item.is_dead) {
 				continue;
 			}
-			if let Some((&first_parent, other_parents)) = item.parents.split_first()
-				&& !all_parents[first_parent].is_matmul()
+			if !is_broadcasted
+				&& let Some((&first_parent, other_parents)) = item.parents.split_first()
+				&& !(all_parents[first_parent].is_matmul()
+					|| all_parents[first_parent].is_attention())
 				&& let parent_frag = all_parents[first_parent].fragment_index()
-				&& !item.is_head()
 				&& other_parents.iter().all(|&p| {
-					!all_parents[p].is_matmul() && all_parents[p].fragment_index() == parent_frag
+					!(all_parents[p].is_matmul() || all_parents[p].is_attention())
+						&& all_parents[p].fragment_index() == parent_frag
 				}) {
 				item.set_fragment_index(parent_frag);
 			} else {
