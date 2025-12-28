@@ -32,9 +32,9 @@ use crate::define_index_type32;
 use crate::new::expr::{ExprBinary, ExprCapture, ExprCast, ExprReshape, ExprUnary};
 use crate::tensor::DType;
 use crate::tensor::device::dtype::common_dtype;
-use crate::util::LossyFrom;
 use crate::util::bitmap::IndexBitmap;
 use crate::util::index_vec::{IndexTrait, IndexVec, UntypedIndex32};
+use crate::util::{LossyFrom, ToBoxedSlice};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -662,8 +662,8 @@ impl PreCompilation {
 				self.sum_to_mean.push(SumToMean { node: child_idx, const_idx: idx });
 				idx
 			},
-			Err(_) => {
-				unreachable!();
+			Err(existing_node) => {
+				return Err(existing_node);
 			},
 		};
 		Ok(LoadedNode {
@@ -1254,54 +1254,11 @@ impl PreCompilation {
 	}
 
 	fn find_fragments(&mut self) {
-		//let mut trivial_trail = Vec::new();
 		for idx in self.nodes_postorder.indexes().rev() {
 			let (_, item, all_parents) = self.nodes_postorder.borrow_multiple(idx);
 			if item.is_input() || unlikely(item.is_dead) {
-				/*if !trivial_trail.is_empty() {
-					let head = trivial_trail[0];
-					let head_frag = all_parents[head].fragment_index();
-					self.fragments_preorder[head_frag].is_trivial = true;
-					trivial_trail.clear();
-				}*/
 				continue;
 			}
-
-			/*if !trivial_trail.is_empty() {
-				if item.is_trivial() && item.dtype.is_some() && item.parents.len() == 1 {
-					trivial_trail.push(idx);
-				} else {
-					let mut split = 0;
-					let mut min_bits = usize::MAX;
-					for t in 0..trivial_trail.len() {
-						let n = &all_parents[trivial_trail[t]];
-						if n.is_captured() {
-							split = t;
-							break;
-						}
-						let bits = n.dtype.unwrap().bits();
-						if bits < min_bits {
-							min_bits = bits;
-							split = t;
-						}
-					}
-					if split > 0 {
-						let head = trivial_trail[0];
-						let head_frag = all_parents[head].fragment_index();
-						self.fragments_preorder[head_frag].is_trivial = true;
-
-						let new_frag = self.fragments_preorder.push(Fragment {
-							head: trivial_trail[split],
-							is_trivial: false,
-						});
-						for t in split..trivial_trail.len() {
-							let n = &mut all_parents[trivial_trail[t]];
-							n.set_fragment_index(new_frag);
-						}
-					}
-					trivial_trail.clear();
-				}
-			}*/
 
 			if !item.is_head()
 				&& let Some((&first_parent, other_parents)) = item.parents.split_first()
@@ -1321,24 +1278,68 @@ impl PreCompilation {
 				}) {
 				item.set_fragment_index(parent_frag);
 			} else {
-				/*if !trivial_trail.is_empty() {
-					let head = trivial_trail[0];
-					let head_frag = all_parents[head].fragment_index();
-					self.fragments_preorder[head_frag].is_trivial = true;
-					trivial_trail.clear();
-				}
-				if item.is_trivial() && item.dtype.is_some() {
-					trivial_trail.push(idx);
-				}*/
 				item.set_fragment_index(idx);
 			}
 		}
 	}
 
 	fn find_trivial_fragments(&mut self) {
-		//for frag in &self.fragments_preorder {
-		//
-		//}
+		let mut trails: Vec<Box<[NodeIndex32]>> = Vec::new();
+		let mut trail = Vec::new();
+		for idx in self.nodes_postorder.indexes().rev() {
+			let item = &self.nodes_postorder[idx];
+			if item.is_input() || unlikely(item.is_dead) {
+				continue;
+			}
+
+			if item.fragment_index() == idx {
+				trail.clear();
+				let mut idx = idx;
+				let mut item = item;
+				let mut split = 0;
+				let mut min_bits = usize::MAX;
+				while item.is_trivial() && !item.is_captured() {
+					if let Some(dtype) = item.dtype
+						&& dtype.bits() < min_bits
+					{
+						min_bits = dtype.bits();
+						split = trail.len();
+					}
+					trail.push(idx);
+					idx = item.children[0];
+					item = &self.nodes_postorder[idx];
+				}
+				if !item.is_input() && !item.is_captured() {
+					unsafe { trail.set_len(split) }
+				}
+				if let Some(&last_idx) = trail.last() {
+					let first_idx = trail[0];
+					let inp_idx = self.nodes_postorder[last_idx].children[0];
+
+					self.nodes_postorder[inp_idx].head_for =
+						self.nodes_postorder[first_idx].head_for;
+					self.nodes_postorder[first_idx].head_for = last_idx;
+					self.nodes_postorder[first_idx].set_fragment_index(inp_idx);
+
+					let trail = &trail[..];
+					trails.push(trail.to_boxed_slice());
+				}
+			} else {
+				let frag = item.fragment_index();
+				let new_frag = self.nodes_postorder[frag].fragment_index();
+				if new_frag != frag {
+					self.nodes_postorder[idx].set_fragment_index(new_frag);
+				}
+			}
+		}
+
+		std::mem::drop(trail);
+		for trail in trails {
+			let head = trail[0];
+			for idx in trail {
+				self.nodes_postorder[idx].set_fragment_index(head);
+			}
+		}
 	}
 
 	pub fn graphviz_node_label(&self, node: &Node) -> String {

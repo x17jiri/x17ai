@@ -465,7 +465,9 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 		.cast(internal_dtype)
 		.row_times_mat(Expr::new_tensor_input(mw.clone()).cast(internal_dtype));
 	let expr = x_swiglu(expr, internal_dtype)?;
-	let expr = expr.cast(io_dtype).capture(r.clone());
+	let expr = expr.cast(io_dtype);
+	let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?.cast(io_dtype);
+	let expr = expr.capture(r.clone());
 
 	let mut comp = PreCompilation::new(&expr.node);
 
