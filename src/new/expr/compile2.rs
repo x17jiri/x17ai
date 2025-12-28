@@ -116,11 +116,12 @@ pub struct Node {
 	pub head_for: NodeIndex32,
 
 	// This is one of:
-	// - ConstRefIndex32
-	// - ScalarRefIndex32
-	// - TensorRefIndex32
-	// - FragmentIndex32
-	// depending on the node type.
+	// - For input nodes:
+	//   - ConstRefIndex32
+	//   - ScalarRefIndex32
+	//   - TensorRefIndex32
+	// - For non-input nodes:
+	//   - NodeIndex32 (head node of the current fragment)
 	pub x_index: UntypedIndex32,
 }
 
@@ -164,12 +165,12 @@ impl Node {
 		TensorRefIndex32::from(self.x_index)
 	}
 
-	pub fn fragment_index(&self) -> FragmentIndex32 {
+	pub fn fragment_index(&self) -> NodeIndex32 {
 		debug_assert!(!self.is_input());
-		FragmentIndex32::from(self.x_index)
+		NodeIndex32::from(self.x_index)
 	}
 
-	pub fn set_fragment_index(&mut self, fragment_index: FragmentIndex32) {
+	pub fn set_fragment_index(&mut self, fragment_index: NodeIndex32) {
 		debug_assert!(!self.is_input());
 		self.x_index = fragment_index.to_untyped();
 	}
@@ -200,6 +201,13 @@ impl Node {
 
 	pub fn is_complex(&self) -> bool {
 		self.is_reduction() || self.is_matmul() || self.is_attention()
+	}
+
+	pub fn is_trivial(&self) -> bool {
+		matches!(
+			self.node_kind,
+			NodeKind::Cast | NodeKind::Reshape | NodeKind::Unary(UnaryKind::Neg)
+		)
 	}
 
 	pub fn is_select(&self) -> bool {
@@ -243,9 +251,10 @@ impl Node {
 	}
 
 	fn broadcasts_child(&self, node_idx: NodeIndex32) -> bool {
-		self.children.iter().zip(self.children_broadcast).any(|(&child_idx, broadcast)| {
-			child_idx == node_idx && broadcast
-		})
+		self.children
+			.iter()
+			.zip(self.children_broadcast)
+			.any(|(&child_idx, broadcast)| child_idx == node_idx && broadcast)
 	}
 }
 
@@ -294,9 +303,6 @@ pub struct Fragment {
 	pub head: NodeIndex32,
 }
 
-define_index_type32!(FragmentIndex32);
-type FragmentVec = IndexVec<FragmentIndex32, Fragment>;
-
 pub struct SumToMean {
 	pub node: NodeIndex32,
 	pub const_idx: ConstRefIndex32,
@@ -304,7 +310,6 @@ pub struct SumToMean {
 
 pub struct PreCompilation {
 	nodes_postorder: NodeVec,
-	fragments_preorder: FragmentVec,
 	const_map: HashMap<OrderedFloat<f64>, ConstRefIndex32>,
 	const_vec: ConstVec,
 	scalar_map: HashMap<*const expr::ScalarRef, ScalarRefIndex32>,
@@ -369,7 +374,6 @@ impl PreCompilation {
 	pub fn new(expr: &ExprNode) -> Self {
 		let mut comp = PreCompilation {
 			nodes_postorder: NodeVec::with_capacity(32),
-			fragments_preorder: FragmentVec::with_capacity(8),
 			const_map: HashMap::new(),
 			const_vec: ConstVec::with_capacity(4),
 			scalar_map: HashMap::new(),
@@ -396,8 +400,9 @@ impl PreCompilation {
 		self.find_dominators();
 		self.find_complex_op_fingerprints(&mut state);
 		self.find_races(&mut state);
-		//self.find_heads();
+		self.find_heads();
 		self.find_fragments();
+		self.find_trivial_fragments();
 
 		self.err_log.check_errors()
 	}
@@ -1215,7 +1220,7 @@ impl PreCompilation {
 		}
 	}
 
-	/*fn find_heads(&mut self) {
+	fn find_heads(&mut self) {
 		for idx in self.nodes_postorder.indexes() {
 			if !self.nodes_postorder[idx].is_complex() {
 				continue;
@@ -1246,16 +1251,60 @@ impl PreCompilation {
 
 			self.nodes_postorder[head_idx].head_for = idx;
 		}
-	}*/
+	}
 
 	fn find_fragments(&mut self) {
-		self.fragments_preorder.raw.clear();
+		//let mut trivial_trail = Vec::new();
 		for idx in self.nodes_postorder.indexes().rev() {
 			let (_, item, all_parents) = self.nodes_postorder.borrow_multiple(idx);
 			if item.is_input() || unlikely(item.is_dead) {
+				/*if !trivial_trail.is_empty() {
+					let head = trivial_trail[0];
+					let head_frag = all_parents[head].fragment_index();
+					self.fragments_preorder[head_frag].is_trivial = true;
+					trivial_trail.clear();
+				}*/
 				continue;
 			}
-			if let Some((&first_parent, other_parents)) = item.parents.split_first()
+
+			/*if !trivial_trail.is_empty() {
+				if item.is_trivial() && item.dtype.is_some() && item.parents.len() == 1 {
+					trivial_trail.push(idx);
+				} else {
+					let mut split = 0;
+					let mut min_bits = usize::MAX;
+					for t in 0..trivial_trail.len() {
+						let n = &all_parents[trivial_trail[t]];
+						if n.is_captured() {
+							split = t;
+							break;
+						}
+						let bits = n.dtype.unwrap().bits();
+						if bits < min_bits {
+							min_bits = bits;
+							split = t;
+						}
+					}
+					if split > 0 {
+						let head = trivial_trail[0];
+						let head_frag = all_parents[head].fragment_index();
+						self.fragments_preorder[head_frag].is_trivial = true;
+
+						let new_frag = self.fragments_preorder.push(Fragment {
+							head: trivial_trail[split],
+							is_trivial: false,
+						});
+						for t in split..trivial_trail.len() {
+							let n = &mut all_parents[trivial_trail[t]];
+							n.set_fragment_index(new_frag);
+						}
+					}
+					trivial_trail.clear();
+				}
+			}*/
+
+			if !item.is_head()
+				&& let Some((&first_parent, other_parents)) = item.parents.split_first()
 				&& let first_parent = &all_parents[first_parent]
 				&& !(first_parent.is_matmul()
 					|| first_parent.is_attention()
@@ -1272,10 +1321,24 @@ impl PreCompilation {
 				}) {
 				item.set_fragment_index(parent_frag);
 			} else {
-				let new_frag = self.fragments_preorder.push(Fragment { head: idx });
-				item.set_fragment_index(new_frag);
+				/*if !trivial_trail.is_empty() {
+					let head = trivial_trail[0];
+					let head_frag = all_parents[head].fragment_index();
+					self.fragments_preorder[head_frag].is_trivial = true;
+					trivial_trail.clear();
+				}
+				if item.is_trivial() && item.dtype.is_some() {
+					trivial_trail.push(idx);
+				}*/
+				item.set_fragment_index(idx);
 			}
 		}
+	}
+
+	fn find_trivial_fragments(&mut self) {
+		//for frag in &self.fragments_preorder {
+		//
+		//}
 	}
 
 	pub fn graphviz_node_label(&self, node: &Node) -> String {
@@ -1438,27 +1501,29 @@ impl PreCompilation {
 				//writeln!(w, "\t{{ rank = min; {node_id} }}")?;
 			} else {
 				let frag_index = node.fragment_index();
-				if self.fragments_preorder.is_valid(frag_index) {
-					let frag_head = self.fragments_preorder[frag_index].head;
-					let frag_node = &self.nodes_postorder[frag_head];
-					let fragment_kind = if frag_node.is_head() {
-						let frag_node = &self.nodes_postorder[frag_node.head_for];
-						if frag_node.is_reduction() {
-							"Reduction"
-						} else if frag_node.is_matmul() {
-							"MatMul"
-						} else if frag_node.is_attention() {
-							"Attention"
+				if self.nodes_postorder.is_valid(frag_index) {
+					let frag_node = &self.nodes_postorder[frag_index];
+					let (fragment_kind, color) =
+						if self.nodes_postorder.is_valid(frag_node.head_for) {
+							let frag_node = &self.nodes_postorder[frag_node.head_for];
+							if frag_node.is_trivial() {
+								("Trivial", "#a0a0a0")
+							} else if frag_node.is_reduction() {
+								("Reduction", "#c00000")
+							} else if frag_node.is_matmul() {
+								("MatMul", "#c00000")
+							} else if frag_node.is_attention() {
+								("Attention", "#c00000")
+							} else {
+								("<Complex Op>", "#c00000")
+							}
 						} else {
-							"<config head>"
-						}
-					} else {
-						"Element-wise"
-					};
+							("Element-wise", "black")
+						};
 					writeln!(
 						w,
-						"\tsubgraph cluster_{} {{ label=\"{fragment_kind}\" labelloc=\"b\" labeljust=\"l\" {node_id} }}",
-						frag_head.raw
+						"\tsubgraph cluster_{} {{ label=<<font color='{color}'>{fragment_kind}</font>> labelloc=\"b\" labeljust=\"l\" {node_id} color=\"{color}\"; }}",
+						frag_index.raw
 					)?;
 				}
 				let ordered = match node.node_kind {
@@ -1493,7 +1558,7 @@ impl PreCompilation {
 					} else {
 						", color=\"#000000\""
 					};
-					let extra_style = if self.fragments_preorder.is_valid(frag_index)
+					let extra_style = if self.nodes_postorder.is_valid(frag_index)
 						&& (child.is_input() || frag_index != child.fragment_index())
 					{
 						format!("{extra_style}, style=bold")

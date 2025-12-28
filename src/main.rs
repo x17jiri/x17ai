@@ -444,17 +444,17 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 		.row_times_mat(Expr::new_tensor_input(mq.clone()).cast(internal_dtype))
 		.reshape(1, &[4, 4, 64])
 		.cast(io_dtype)
-		.cast(internal_dtype)
-		.capture(q.clone());
+		.cast(internal_dtype);
+	//.capture(q.clone());
 	let kv = expr
 		.clone()
 		.cast(internal_dtype)
 		.row_times_mat(Expr::new_tensor_input(mkv.clone()).cast(internal_dtype))
 		.cast(io_dtype)
 		.cast(internal_dtype)
-		.reshape(1, &[1, 4, 64 + 64])
-		.capture(kv.clone())
-		.capture(q.clone());
+		.reshape(1, &[1, 4, 64 + 64]);
+	//.capture(kv.clone())
+	//.capture(q.clone());
 
 	//let expr = RcExpr::first(q, kv);
 	//let expr = x_softmax(expr, internal_dtype)?;
