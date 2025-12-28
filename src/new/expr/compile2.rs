@@ -112,7 +112,7 @@ pub struct Node {
 	pub capture: ThinVec<TensorRefIndex32>,
 
 	pub is_dead: bool,
-	pub reduction_fingerprint: u32,
+	pub complex_op_fingerprint: u32,
 	pub head_for: NodeIndex32,
 
 	// This is one of:
@@ -138,7 +138,7 @@ impl Default for Node {
 			children_broadcast: [false, false],
 			capture: ThinVec::new(),
 			is_dead: false,
-			reduction_fingerprint: 0,
+			complex_op_fingerprint: 0,
 			head_for: NodeIndex32::new_sentinel(),
 			x_index: UntypedIndex32::new_sentinel(),
 		}
@@ -1106,7 +1106,7 @@ impl PreCompilation {
 				},
 				hash_map::Entry::Occupied(entry) => *entry.get(),
 			};
-			self.nodes_postorder[idx].reduction_fingerprint = fingerprint;
+			self.nodes_postorder[idx].complex_op_fingerprint = fingerprint;
 		}
 	}
 
@@ -1227,7 +1227,7 @@ impl PreCompilation {
 			}
 
 			let start = &self.nodes_postorder[idx];
-			let start_fingerprint = start.reduction_fingerprint;
+			let start_fingerprint = start.complex_op_fingerprint;
 
 			let mut head_idx = idx;
 			let mut head = start;
@@ -1239,7 +1239,7 @@ impl PreCompilation {
 				let parent = &self.nodes_postorder[parent_idx];
 				let head_shape: Option<&[usize]> = head.shape.as_ref().map(|sh| &sh[..]);
 				let parent_shape: Option<&[usize]> = parent.shape.as_ref().map(|sh| &sh[..]);
-				let parent_fingerprint = parent.reduction_fingerprint;
+				let parent_fingerprint = parent.complex_op_fingerprint;
 				if (!parent.is_reshape() && parent_shape != head_shape)
 					|| parent_fingerprint != start_fingerprint
 				{
@@ -1523,8 +1523,8 @@ impl PreCompilation {
 						};
 					writeln!(
 						w,
-						"\tsubgraph cluster_{} {{ label=<<font color='{color}'>{fragment_kind}</font>> labelloc=\"b\" labeljust=\"l\" {node_id} color=\"{color}\"; }}",
-						frag_index.raw
+						"\tsubgraph cluster_{} {{ label=<<font color='{color}'>&#91;{}&#93; {fragment_kind}</font>> labelloc=\"b\" labeljust=\"l\" {node_id} color=\"{color}\"; }}",
+						frag_index.raw, frag_index.raw
 					)?;
 				}
 				let ordered = match node.node_kind {
