@@ -23,7 +23,6 @@ use std::collections::{HashMap, hash_map};
 use std::hint::{cold_path, unlikely};
 use std::rc::Rc;
 
-use ordered_float::OrderedFloat;
 use thin_vec::{ThinVec, thin_vec};
 
 use super::super::expr;
@@ -94,6 +93,16 @@ pub enum NodeKind {
 	Reduction(ReductionKind),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum XIndexState {
+	Uninitialized,
+	ConstRef,
+	ScalarRef,
+	TensorRef,
+	FragmentHead,
+	FragmentIndex,
+}
+
 pub struct Node {
 	pub node_kind: NodeKind,
 
@@ -115,14 +124,21 @@ pub struct Node {
 	pub complex_op_fingerprint: u32,
 	pub head_for: NodeIndex32,
 
-	// This is one of:
+	// This field is heavily overloaded in order to save space. It can have different meanings
+	// depending on the node type and the stage of compilation:
 	// - For input nodes:
-	//   - ConstRefIndex32
-	//   - ScalarRefIndex32
-	//   - TensorRefIndex32
+	//   - ConstRefIndex32 if is_const()
+	//   - ScalarRefIndex32 if is_scalar_input()
+	//   - TensorRefIndex32 if is_tensor_input()
 	// - For non-input nodes:
-	//   - NodeIndex32 (head node of the current fragment)
+	//   - Before the call of find_fragments():
+	//     - uninitialized / sentinel
+	//   - After the call of find_fragments():
+	//     - NodeIndex32 (head node of the current fragment)
+	//   - After the call of make_fragments():
+	//     - FragmentIndex32
 	pub x_index: UntypedIndex32,
+	pub x_index_state: XIndexState,
 }
 
 impl Default for Node {
@@ -141,6 +157,7 @@ impl Default for Node {
 			complex_op_fingerprint: 0,
 			head_for: NodeIndex32::new_sentinel(),
 			x_index: UntypedIndex32::new_sentinel(),
+			x_index_state: XIndexState::Uninitialized,
 		}
 	}
 }
@@ -152,27 +169,52 @@ impl Node {
 
 	pub fn const_index(&self) -> ConstRefIndex32 {
 		debug_assert!(self.is_const());
+		debug_assert!(self.x_index_state == XIndexState::ConstRef);
 		ConstRefIndex32::from(self.x_index)
 	}
 
 	pub fn scalar_index(&self) -> ScalarRefIndex32 {
 		debug_assert!(self.is_scalar_input());
+		debug_assert!(self.x_index_state == XIndexState::ScalarRef);
 		ScalarRefIndex32::from(self.x_index)
 	}
 
 	pub fn tensor_index(&self) -> TensorRefIndex32 {
 		debug_assert!(self.is_tensor_input());
+		debug_assert!(self.x_index_state == XIndexState::TensorRef);
 		TensorRefIndex32::from(self.x_index)
 	}
 
-	pub fn fragment_index(&self) -> NodeIndex32 {
+	pub fn fragment_head_index(&self) -> NodeIndex32 {
 		debug_assert!(!self.is_input());
+		debug_assert!(self.x_index_state == XIndexState::FragmentHead);
 		NodeIndex32::from(self.x_index)
 	}
 
-	pub fn set_fragment_index(&mut self, fragment_index: NodeIndex32) {
+	pub fn set_fragment_head_index(&mut self, fragment_index: NodeIndex32) {
 		debug_assert!(!self.is_input());
+		debug_assert!(
+			self.x_index_state == XIndexState::Uninitialized
+				|| self.x_index_state == XIndexState::FragmentHead
+		);
 		self.x_index = fragment_index.to_untyped();
+		self.x_index_state = XIndexState::FragmentHead;
+	}
+
+	pub fn fragment_index(&self) -> FragmentIndex32 {
+		debug_assert!(!self.is_input());
+		debug_assert!(self.x_index_state == XIndexState::FragmentIndex);
+		FragmentIndex32::from(self.x_index)
+	}
+
+	pub fn set_fragment_index(&mut self, fragment_index: FragmentIndex32) {
+		debug_assert!(!self.is_input());
+		debug_assert!(
+			self.x_index_state == XIndexState::FragmentHead
+				|| self.x_index_state == XIndexState::FragmentIndex
+		);
+		self.x_index = fragment_index.to_untyped();
+		self.x_index_state = XIndexState::FragmentIndex;
 	}
 
 	pub fn is_const(&self) -> bool {
@@ -301,7 +343,12 @@ type ConstVec = IndexVec<ConstRefIndex32, ConstRef>;
 
 pub struct Fragment {
 	pub head: NodeIndex32,
+	pub parents: ThinVec<FragmentIndex32>,
+	pub children: ThinVec<FragmentIndex32>,
 }
+
+define_index_type32!(FragmentIndex32);
+type FragmentVec = IndexVec<FragmentIndex32, Fragment>;
 
 pub struct SumToMean {
 	pub node: NodeIndex32,
@@ -310,12 +357,12 @@ pub struct SumToMean {
 
 pub struct PreCompilation {
 	nodes_postorder: NodeVec,
-	const_map: HashMap<OrderedFloat<f64>, ConstRefIndex32>,
 	const_vec: ConstVec,
 	scalar_map: HashMap<*const expr::ScalarRef, ScalarRefIndex32>,
 	scalar_vec: ScalarVec,
 	tensor_map: HashMap<*const expr::TensorRef, TensorRefIndex32>,
 	tensor_vec: TensorVec,
+	fragments: FragmentVec,
 	sum_to_mean: Vec<SumToMean>,
 
 	err_log: ErrorLog,
@@ -324,7 +371,7 @@ pub struct PreCompilation {
 struct LoadedNode {
 	node: Node,
 	cache_key: String,
-	err: Vec<String>,
+	err: ThinVec<String>,
 }
 
 pub struct LoadExprState {
@@ -336,14 +383,14 @@ pub struct LoadExprState {
 
 pub struct ErrorLog {
 	err_map: HashMap<NodeIndex32, usize>,
-	err_vec: Vec<(NodeIndex32, Vec<String>)>,
+	err_vec: ThinVec<(NodeIndex32, Vec<String>)>,
 }
 
 impl ErrorLog {
 	pub fn new() -> Self {
 		Self {
 			err_map: HashMap::new(),
-			err_vec: Vec::new(),
+			err_vec: ThinVec::new(),
 		}
 	}
 
@@ -374,12 +421,12 @@ impl PreCompilation {
 	pub fn new(expr: &ExprNode) -> Self {
 		let mut comp = PreCompilation {
 			nodes_postorder: NodeVec::with_capacity(32),
-			const_map: HashMap::new(),
 			const_vec: ConstVec::with_capacity(4),
 			scalar_map: HashMap::new(),
 			scalar_vec: ScalarVec::with_capacity(4),
 			tensor_map: HashMap::new(),
 			tensor_vec: TensorVec::with_capacity(4),
+			fragments: FragmentVec::with_capacity(4),
 			sum_to_mean: Vec::new(),
 			err_log: ErrorLog::new(),
 		};
@@ -403,6 +450,7 @@ impl PreCompilation {
 		self.find_heads();
 		self.find_fragments();
 		self.find_trivial_fragments();
+		self.make_fragments();
 
 		self.err_log.check_errors()
 	}
@@ -416,19 +464,18 @@ impl PreCompilation {
 
 		let t = match expr {
 			ExprNode::Const(cst) => {
-				match self.add_const(cst.name.clone(), cst.value, self.nodes_postorder.next_index())
-				{
-					Ok(idx) => Ok(LoadedNode {
-						node: Node {
-							node_kind: NodeKind::Const,
-							x_index: idx.to_untyped(),
-							..Default::default()
-						},
-						cache_key: String::new(),
-						err: Vec::new(),
-					}),
-					Err(existing_node) => Err(existing_node),
-				}
+				let idx =
+					self.add_const(cst.name.clone(), cst.value, self.nodes_postorder.next_index());
+				Ok(LoadedNode {
+					node: Node {
+						node_kind: NodeKind::Const,
+						x_index: idx.to_untyped(),
+						x_index_state: XIndexState::ConstRef,
+						..Default::default()
+					},
+					cache_key: String::new(),
+					err: ThinVec::new(),
+				})
 			},
 			ExprNode::Input(input) => {
 				self.load_input(input) //
@@ -501,6 +548,7 @@ impl PreCompilation {
 	fn load_input(&mut self, input: &ExprInput) -> Result<LoadedNode, NodeIndex32> {
 		let dtype;
 		let x_index;
+		let x_index_state;
 		let shape;
 		let can_be_batched;
 		match input {
@@ -509,6 +557,7 @@ impl PreCompilation {
 				match self.add_tensor_input(tensor_ref.clone(), self.nodes_postorder.next_index()) {
 					Ok(tensor_index) => {
 						x_index = tensor_index.to_untyped();
+						x_index_state = XIndexState::TensorRef;
 						let t = &self.tensor_vec[tensor_index];
 						shape = Some(t.shape.clone());
 						can_be_batched = t.can_be_batched;
@@ -524,6 +573,7 @@ impl PreCompilation {
 				match self.add_scalar_input(scalar_ref.clone(), self.nodes_postorder.next_index()) {
 					Ok(scalar_index) => {
 						x_index = scalar_index.to_untyped();
+						x_index_state = XIndexState::ScalarRef;
 						shape = None;
 					},
 					Err(existing_node) => {
@@ -540,10 +590,11 @@ impl PreCompilation {
 				can_be_batched,
 				children: [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()],
 				x_index,
+				x_index_state,
 				..Default::default()
 			},
 			cache_key: String::new(),
-			err: Vec::new(),
+			err: ThinVec::new(),
 		})
 	}
 
@@ -572,7 +623,7 @@ impl PreCompilation {
 				..Default::default()
 			},
 			cache_key: format!("identity:{:?}", child_idx.raw),
-			err: Vec::new(),
+			err: ThinVec::new(),
 		})
 	}
 
@@ -582,7 +633,7 @@ impl PreCompilation {
 		child_idx: NodeIndex32,
 	) -> Result<LoadedNode, NodeIndex32> {
 		let child = &self.nodes_postorder[child_idx];
-		let mut err = Vec::new();
+		let mut err = ThinVec::new();
 		let old_shape: &[usize] = child.shape.as_ref().map_or(&[], |vec| vec);
 		let mut shape = ThinVec::from(old_shape);
 		let keep = shape.len().saturating_sub(reshape.reshape_n as usize);
@@ -637,12 +688,12 @@ impl PreCompilation {
 				..Default::default()
 			},
 			cache_key: format!("cast:{:?}:{:?}", cast.dtype, child_idx.raw),
-			err: Vec::new(),
+			err: ThinVec::new(),
 		})
 	}
 
-	fn load_sum_to_mean(&mut self, child_idx: NodeIndex32) -> Result<LoadedNode, NodeIndex32> {
-		let mut err = Vec::new();
+	fn load_sum_to_mean(&mut self, child_idx: NodeIndex32) -> LoadedNode {
+		let mut err = ThinVec::new();
 		let child = &self.nodes_postorder[child_idx];
 		let width = if let Some(&w) = child.shape.as_ref().and_then(|vec| vec.last()) {
 			w
@@ -653,28 +704,19 @@ impl PreCompilation {
 		};
 		// Insert `Const` node.
 		let c = 1.0 / f64::lossy_from(width);
-		let x_index = match self.add_const(
-			format!("1.0 / {width}").into(),
-			c,
-			self.nodes_postorder.next_index(),
-		) {
-			Ok(idx) => {
-				self.sum_to_mean.push(SumToMean { node: child_idx, const_idx: idx });
-				idx
-			},
-			Err(existing_node) => {
-				return Err(existing_node);
-			},
-		};
-		Ok(LoadedNode {
+		let const_idx =
+			self.add_const(format!("1.0 / {width}").into(), c, self.nodes_postorder.next_index());
+		self.sum_to_mean.push(SumToMean { node: child_idx, const_idx });
+		LoadedNode {
 			node: Node {
 				node_kind: NodeKind::Const,
-				x_index: x_index.to_untyped(),
+				x_index: const_idx.to_untyped(),
+				x_index_state: XIndexState::ConstRef,
 				..Default::default()
 			},
 			cache_key: String::new(),
 			err,
-		})
+		}
 	}
 
 	fn load_unary(
@@ -709,7 +751,7 @@ impl PreCompilation {
 						..Default::default()
 					},
 					cache_key: format!("unary:{:?}:{:?}", unary_kind, child_idx.raw),
-					err: Vec::new(),
+					err: ThinVec::new(),
 				})
 			},
 			ExprUnaryKind::Sum | ExprUnaryKind::Max => {
@@ -718,7 +760,7 @@ impl PreCompilation {
 					ExprUnaryKind::Max => ReductionKind::Max,
 					_ => unreachable!(),
 				};
-				let mut err = Vec::new();
+				let mut err = ThinVec::new();
 				let child = &self.nodes_postorder[child_idx];
 				let mut shape = child.shape.clone();
 				if let Some(last_dim) = shape.as_mut().and_then(|vec| vec.last_mut()) {
@@ -747,7 +789,7 @@ impl PreCompilation {
 					ExprUnaryKind::SelectOdd => SelectKind::Odd,
 					_ => unreachable!(),
 				};
-				let mut err = Vec::new();
+				let mut err = ThinVec::new();
 				let child = &self.nodes_postorder[child_idx];
 				let mut shape = child.shape.clone();
 				if let Some(last_dim) = shape.as_mut().and_then(|vec| vec.last_mut()) {
@@ -774,14 +816,14 @@ impl PreCompilation {
 					err,
 				})
 			},
-			ExprUnaryKind::SumToMean => self.load_sum_to_mean(child_idx),
+			ExprUnaryKind::SumToMean => Ok(self.load_sum_to_mean(child_idx)),
 		}
 	}
 
 	fn common_dtype(
 		a_dtype: Option<DType>,
 		b_dtype: Option<DType>,
-		err: &mut Vec<String>,
+		err: &mut ThinVec<String>,
 	) -> Option<DType> {
 		match (a_dtype, b_dtype) {
 			(None, None) => None,
@@ -817,7 +859,7 @@ impl PreCompilation {
 					if commutative && a_idx > b_idx { (b_idx, a_idx) } else { (a_idx, b_idx) };
 				let a = &self.nodes_postorder[a_idx];
 				let b = &self.nodes_postorder[b_idx];
-				let mut err = Vec::new();
+				let mut err = ThinVec::new();
 				let dtype = Self::common_dtype(a.dtype, b.dtype, &mut err);
 				let (shape, is_broadcasted) = Self::common_shape(
 					a.shape.as_ref().map(|sh| &sh[..]),
@@ -844,7 +886,7 @@ impl PreCompilation {
 				let b = &self.nodes_postorder[b_idx];
 				let matmul_kind = MatMulKind::RowTimesMat;
 
-				let mut err = Vec::new();
+				let mut err = ThinVec::new();
 				let a_shape: &[usize] = a.shape.as_ref().map_or(&[], |vec| &vec[..]);
 				let b_shape: &[usize] = b.shape.as_ref().map_or(&[], |vec| &vec[..]);
 				if a_shape.len() < 1 || b_shape.len() < 2 {
@@ -882,7 +924,7 @@ impl PreCompilation {
 				let a = &self.nodes_postorder[a_idx];
 				let b = &self.nodes_postorder[b_idx];
 
-				let mut err = Vec::new();
+				let mut err = ThinVec::new();
 				let a_shape: &[usize] = a.shape.as_ref().map_or(&[], |vec| &vec[..]);
 				let b_shape: &[usize] = b.shape.as_ref().map_or(&[], |vec| &vec[..]);
 				if a_shape.len() < 3 || b_shape.len() < 3 {
@@ -925,19 +967,8 @@ impl PreCompilation {
 		name: Cow<'static, str>,
 		value: f64,
 		node: NodeIndex32,
-	) -> Result<ConstRefIndex32, NodeIndex32> {
-		let key = OrderedFloat(value);
-		match self.const_map.entry(key) {
-			hash_map::Entry::Vacant(entry) => {
-				let index = self.const_vec.push(ConstRef { name, value, input_node: node });
-				entry.insert(index);
-				Ok(index)
-			},
-			hash_map::Entry::Occupied(entry) => {
-				let index = *entry.get();
-				Err(self.const_vec[index].input_node)
-			},
-		}
+	) -> ConstRefIndex32 {
+		self.const_vec.push(ConstRef { name, value, input_node: node })
 	}
 
 	fn add_scalar_input(
@@ -1172,7 +1203,7 @@ impl PreCompilation {
 	fn broadcast_shapes(
 		a: &[usize],
 		b: &[usize],
-		err: &mut Vec<String>,
+		err: &mut ThinVec<String>,
 	) -> (ThinVec<usize>, [bool; 2]) {
 		let mut is_broadcasted = [false, false];
 		let mut result = ThinVec::new();
@@ -1203,7 +1234,7 @@ impl PreCompilation {
 	fn common_shape(
 		a: Option<&[usize]>,
 		b: Option<&[usize]>,
-		err: &mut Vec<String>,
+		err: &mut ThinVec<String>,
 	) -> (Option<ThinVec<usize>>, [bool; 2]) {
 		match (a, b) {
 			(None, None) => (None, [false, false]),
@@ -1267,18 +1298,18 @@ impl PreCompilation {
 					|| first_parent.is_attention()
 					|| first_parent.is_select()
 					|| first_parent.broadcasts_child(idx))
-				&& let parent_frag = first_parent.fragment_index()
+				&& let parent_frag = first_parent.fragment_head_index()
 				&& other_parents.iter().all(|&p| {
 					let parent = &all_parents[p];
 					!(parent.is_matmul()
 						|| parent.is_attention()
 						|| parent.is_select()
 						|| parent.broadcasts_child(idx))
-						&& parent.fragment_index() == parent_frag
+						&& parent.fragment_head_index() == parent_frag
 				}) {
-				item.set_fragment_index(parent_frag);
+				item.set_fragment_head_index(parent_frag);
 			} else {
-				item.set_fragment_index(idx);
+				item.set_fragment_head_index(idx);
 			}
 		}
 	}
@@ -1292,7 +1323,7 @@ impl PreCompilation {
 				continue;
 			}
 
-			if item.fragment_index() == idx {
+			if item.fragment_head_index() == idx {
 				trail.clear();
 				let mut idx = idx;
 				let mut item = item;
@@ -1319,16 +1350,16 @@ impl PreCompilation {
 					self.nodes_postorder[inp_idx].head_for =
 						self.nodes_postorder[first_idx].head_for;
 					self.nodes_postorder[first_idx].head_for = last_idx;
-					self.nodes_postorder[first_idx].set_fragment_index(inp_idx);
+					self.nodes_postorder[first_idx].set_fragment_head_index(inp_idx);
 
 					let trail = &trail[..];
 					trails.push(trail.to_boxed_slice());
 				}
 			} else {
-				let frag = item.fragment_index();
-				let new_frag = self.nodes_postorder[frag].fragment_index();
+				let frag = item.fragment_head_index();
+				let new_frag = self.nodes_postorder[frag].fragment_head_index();
 				if new_frag != frag {
-					self.nodes_postorder[idx].set_fragment_index(new_frag);
+					self.nodes_postorder[idx].set_fragment_head_index(new_frag);
 				}
 			}
 		}
@@ -1337,7 +1368,25 @@ impl PreCompilation {
 		for trail in trails {
 			let head = trail[0];
 			for idx in trail {
-				self.nodes_postorder[idx].set_fragment_index(head);
+				self.nodes_postorder[idx].set_fragment_head_index(head);
+			}
+		}
+	}
+
+	fn make_fragments(&mut self) {
+		for idx in self.nodes_postorder.indexes().rev() {
+			let item = &self.nodes_postorder[idx];
+			if item.is_input() || unlikely(item.is_dead) {
+				continue;
+			}
+
+			if item.fragment_head_index() == idx {
+				// Create new fragment and set index
+				// look at parents and update parent/child relationships
+			} else {
+				let frag_head = item.fragment_head_index();
+				let frag_index = self.nodes_postorder[frag_head].fragment_index();
+				self.nodes_postorder[idx].set_fragment_index(frag_index);
 			}
 		}
 	}
@@ -1501,7 +1550,7 @@ impl PreCompilation {
 			if node.is_input() {
 				//writeln!(w, "\t{{ rank = min; {node_id} }}")?;
 			} else {
-				let frag_index = node.fragment_index();
+				let frag_index = node.fragment_head_index();
 				if self.nodes_postorder.is_valid(frag_index) {
 					let frag_node = &self.nodes_postorder[frag_index];
 					let (fragment_kind, color) =
@@ -1560,7 +1609,7 @@ impl PreCompilation {
 						", color=\"#000000\""
 					};
 					let extra_style = if self.nodes_postorder.is_valid(frag_index)
-						&& (child.is_input() || frag_index != child.fragment_index())
+						&& (child.is_input() || frag_index != child.fragment_head_index())
 					{
 						format!("{extra_style}, style=bold")
 					} else {

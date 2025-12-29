@@ -437,6 +437,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let expr = Expr::new_tensor_input(t.clone());
 
 	let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?.cast(io_dtype);
+	let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?.cast(io_dtype);
 
 	let qq = expr
 		.clone()
