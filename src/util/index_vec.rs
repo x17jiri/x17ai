@@ -271,6 +271,10 @@ impl<Index: IndexTrait, T> IndexVec<Index, T> {
 	pub fn is_valid(&self, index: Index) -> bool {
 		index.to_raw() < self.raw.len()
 	}
+
+	pub fn get(&self, index: Index) -> Option<&T> {
+		self.raw.get(index.to_raw())
+	}
 }
 
 impl<Index: IndexTrait, T> From<Vec<T>> for IndexVec<Index, T> {

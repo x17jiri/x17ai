@@ -100,6 +100,7 @@ pub enum XIndexState {
 	ScalarRef,
 	TensorRef,
 	FragmentHead,
+	FragmentPreorderIndex,
 	FragmentIndex,
 }
 
@@ -201,19 +202,32 @@ impl Node {
 		self.x_index_state = XIndexState::FragmentHead;
 	}
 
+	pub fn fragment_preorder_index(&self) -> FragmentPreorderIndex32 {
+		debug_assert!(!self.is_input());
+		debug_assert!(self.x_index_state == XIndexState::FragmentPreorderIndex);
+		FragmentPreorderIndex32::from(self.x_index)
+	}
+
+	pub fn set_fragment_preorder_index(&mut self, preorder_index: FragmentPreorderIndex32) {
+		debug_assert!(!self.is_input());
+		debug_assert!(
+			self.x_index_state == XIndexState::FragmentHead
+				|| self.x_index_state == XIndexState::FragmentPreorderIndex
+		);
+		self.x_index = preorder_index.to_untyped();
+		self.x_index_state = XIndexState::FragmentPreorderIndex;
+	}
+
 	pub fn fragment_index(&self) -> FragmentIndex32 {
 		debug_assert!(!self.is_input());
 		debug_assert!(self.x_index_state == XIndexState::FragmentIndex);
 		FragmentIndex32::from(self.x_index)
 	}
 
-	pub fn set_fragment_index(&mut self, fragment_index: FragmentIndex32) {
+	pub fn set_fragment_index(&mut self, frag_count: u32) {
 		debug_assert!(!self.is_input());
-		debug_assert!(
-			self.x_index_state == XIndexState::FragmentHead
-				|| self.x_index_state == XIndexState::FragmentIndex
-		);
-		self.x_index = fragment_index.to_untyped();
+		debug_assert!(self.x_index_state == XIndexState::FragmentPreorderIndex);
+		self.x_index.raw = frag_count - 1 - self.x_index.raw;
 		self.x_index_state = XIndexState::FragmentIndex;
 	}
 
@@ -341,14 +355,27 @@ type ScalarVec = IndexVec<ScalarRefIndex32, ScalarRef>;
 define_index_type32!(ConstRefIndex32);
 type ConstVec = IndexVec<ConstRefIndex32, ConstRef>;
 
+pub enum FragmentKind {
+	Trivial,
+	Reduction,
+	MatMul,
+	Attention,
+	Elementwise,
+}
+
 pub struct Fragment {
 	pub head: NodeIndex32,
+	pub kind: FragmentKind,
+	pub dominator: FragmentIndex32,
 	pub parents: ThinVec<FragmentIndex32>,
 	pub children: ThinVec<FragmentIndex32>,
 }
 
 define_index_type32!(FragmentIndex32);
 type FragmentVec = IndexVec<FragmentIndex32, Fragment>;
+
+define_index_type32!(FragmentPreorderIndex32);
+type FragmentPreorderVec = IndexVec<FragmentPreorderIndex32, Fragment>;
 
 pub struct SumToMean {
 	pub node: NodeIndex32,
@@ -362,7 +389,7 @@ pub struct PreCompilation {
 	scalar_vec: ScalarVec,
 	tensor_map: HashMap<*const expr::TensorRef, TensorRefIndex32>,
 	tensor_vec: TensorVec,
-	fragments: FragmentVec,
+	fragments_postorder: FragmentVec,
 	sum_to_mean: Vec<SumToMean>,
 
 	err_log: ErrorLog,
@@ -426,7 +453,7 @@ impl PreCompilation {
 			scalar_vec: ScalarVec::with_capacity(4),
 			tensor_map: HashMap::new(),
 			tensor_vec: TensorVec::with_capacity(4),
-			fragments: FragmentVec::with_capacity(4),
+			fragments_postorder: FragmentVec::with_capacity(4),
 			sum_to_mean: Vec::new(),
 			err_log: ErrorLog::new(),
 		};
@@ -1374,19 +1401,75 @@ impl PreCompilation {
 	}
 
 	fn make_fragments(&mut self) {
+		let mut fragments_preorder = FragmentPreorderVec::new();
 		for idx in self.nodes_postorder.indexes().rev() {
-			let item = &self.nodes_postorder[idx];
+			let item = &mut self.nodes_postorder[idx];
 			if item.is_input() || unlikely(item.is_dead) {
 				continue;
 			}
 
 			if item.fragment_head_index() == idx {
-				// Create new fragment and set index
-				// look at parents and update parent/child relationships
+				let frag_idx = fragments_preorder.next_index();
+				self.nodes_postorder[idx].set_fragment_preorder_index(frag_idx);
+				let item = &self.nodes_postorder[idx];
+
+				fragments_preorder.push(Fragment {
+					head: idx,
+					kind: {
+						if let Some(item) = self.nodes_postorder.get(item.head_for) {
+							if item.is_trivial() {
+								FragmentKind::Trivial
+							} else if item.is_reduction() {
+								FragmentKind::Reduction
+							} else if item.is_matmul() {
+								FragmentKind::MatMul
+							} else if item.is_attention() {
+								FragmentKind::Attention
+							} else {
+								unreachable!()
+							}
+						} else {
+							FragmentKind::Elementwise
+						}
+					},
+					dominator: FragmentIndex32::new_sentinel(),
+					parents: ThinVec::new(),
+					children: ThinVec::new(),
+				});
+
+				self.nodes_postorder[idx].set_fragment_preorder_index(frag_idx);
 			} else {
 				let frag_head = item.fragment_head_index();
-				let frag_index = self.nodes_postorder[frag_head].fragment_index();
-				self.nodes_postorder[idx].set_fragment_index(frag_index);
+				let frag_index = self.nodes_postorder[frag_head].fragment_preorder_index();
+				self.nodes_postorder[idx].set_fragment_preorder_index(frag_index);
+			}
+		}
+
+		fragments_preorder.raw.reverse();
+		std::mem::swap(&mut self.fragments_postorder.raw, &mut fragments_preorder.raw);
+		let frag_count = self.fragments_postorder.len();
+
+		for idx in self.nodes_postorder.indexes().rev() {
+			let item = &mut self.nodes_postorder[idx];
+			if item.is_input() || unlikely(item.is_dead) {
+				continue;
+			}
+
+			item.set_fragment_index(frag_count as u32);
+			let item = &self.nodes_postorder[idx];
+			let frag_idx = item.fragment_index();
+			if self.fragments_postorder[frag_idx].head == idx {
+				let mut parents: ThinVec<FragmentIndex32> = item
+					.parents
+					.iter()
+					.map(|&p| self.nodes_postorder[p].fragment_index())
+					.collect();
+				parents.sort();
+				parents.dedup();
+				for &p in &parents {
+					self.fragments_postorder[p].children.push(frag_idx);
+				}
+				self.fragments_postorder[frag_idx].parents = parents;
 			}
 		}
 	}
@@ -1550,31 +1633,52 @@ impl PreCompilation {
 			if node.is_input() {
 				//writeln!(w, "\t{{ rank = min; {node_id} }}")?;
 			} else {
-				let frag_index = node.fragment_head_index();
-				if self.nodes_postorder.is_valid(frag_index) {
-					let frag_node = &self.nodes_postorder[frag_index];
-					let (fragment_kind, color) =
-						if self.nodes_postorder.is_valid(frag_node.head_for) {
-							let frag_node = &self.nodes_postorder[frag_node.head_for];
-							if frag_node.is_trivial() {
-								("Trivial", "#a0a0a0")
-							} else if frag_node.is_reduction() {
-								("Reduction", "#c00000")
-							} else if frag_node.is_matmul() {
-								("MatMul", "#c00000")
-							} else if frag_node.is_attention() {
-								("Attention", "#c00000")
-							} else {
-								("<Complex Op>", "#c00000")
-							}
-						} else {
-							("Element-wise", "black")
+				match node.x_index_state {
+					XIndexState::FragmentHead => {
+						let frag_index = node.fragment_head_index();
+						if self.nodes_postorder.is_valid(frag_index) {
+							let frag_node = &self.nodes_postorder[frag_index];
+							let (fragment_kind, color) =
+								if self.nodes_postorder.is_valid(frag_node.head_for) {
+									let frag_node = &self.nodes_postorder[frag_node.head_for];
+									if frag_node.is_trivial() {
+										("Trivial", "#a0a0a0")
+									} else if frag_node.is_reduction() {
+										("Reduction", "#c00000")
+									} else if frag_node.is_matmul() {
+										("MatMul", "#c00000")
+									} else if frag_node.is_attention() {
+										("Attention", "#c00000")
+									} else {
+										("<Complex Op>", "#c00000")
+									}
+								} else {
+									("Element-wise", "black")
+								};
+							writeln!(
+								w,
+								"\tsubgraph cluster_{} {{ label=<<font color='{color}'>&#91;{}&#93; {fragment_kind}</font>> labelloc=\"b\" labeljust=\"l\" {node_id} color=\"{color}\"; }}",
+								frag_index.raw, frag_index.raw
+							)?;
+						}
+					},
+					XIndexState::FragmentIndex => {
+						let frag_index = node.fragment_index();
+						let (fragment_kind, color) = match self.fragments_postorder[frag_index].kind
+						{
+							FragmentKind::Trivial => ("Trivial", "#a0a0a0"),
+							FragmentKind::Reduction => ("Reduction", "#c00000"),
+							FragmentKind::MatMul => ("MatMul", "#c00000"),
+							FragmentKind::Attention => ("Attention", "#c00000"),
+							FragmentKind::Elementwise => ("Element-wise", "black"),
 						};
-					writeln!(
-						w,
-						"\tsubgraph cluster_{} {{ label=<<font color='{color}'>&#91;{}&#93; {fragment_kind}</font>> labelloc=\"b\" labeljust=\"l\" {node_id} color=\"{color}\"; }}",
-						frag_index.raw, frag_index.raw
-					)?;
+						writeln!(
+							w,
+							"\tsubgraph cluster_{} {{ label=<<font color='{color}'>&#91;{}&#93; {fragment_kind}</font>> labelloc=\"b\" labeljust=\"l\" {node_id} color=\"{color}\"; }}",
+							frag_index.raw, frag_index.raw
+						)?;
+					},
+					_ => {},
 				}
 				let ordered = match node.node_kind {
 					NodeKind::Binary(bin) => !bin.is_commutative(),
@@ -1608,8 +1712,9 @@ impl PreCompilation {
 					} else {
 						", color=\"#000000\""
 					};
-					let extra_style = if self.nodes_postorder.is_valid(frag_index)
-						&& (child.is_input() || frag_index != child.fragment_head_index())
+					let frag_index = node.x_index;
+					let extra_style = if !frag_index.is_sentinel()
+						&& (child.is_input() || frag_index != child.x_index)
 					{
 						format!("{extra_style}, style=bold")
 					} else {
@@ -1667,6 +1772,36 @@ impl PreCompilation {
 			)?;
 			for msg in msgs {
 				eprintln!("Node {idx}: error: {msg}");
+			}
+		}
+		writeln!(w, "}}")?;
+		Ok(())
+	}
+
+	pub fn print_fragment_graphviz<W: std::fmt::Write>(&self, w: &mut W) -> std::fmt::Result {
+		writeln!(w, "digraph G {{")?;
+		writeln!(w, "\trankdir=BT;")?;
+		for i in self.fragments_postorder.indexes() {
+			let fragment = &self.fragments_postorder[i];
+			let node_id = format!("frag_{}", i.raw);
+			let (fragment_kind, color) = match fragment.kind {
+				FragmentKind::Trivial => ("Trivial", "#a0a0a0"),
+				FragmentKind::Reduction => ("Reduction", "#c00000"),
+				FragmentKind::MatMul => ("MatMul", "#c00000"),
+				FragmentKind::Attention => ("Attention", "#c00000"),
+				FragmentKind::Elementwise => ("Element-wise", "black"),
+			};
+			let label = format!("<b>&#91;{}&#93; {fragment_kind}</b>", i.raw);
+			writeln!(
+				w,
+				"\t{node_id} [label=<<font color='{color}'>{label}</font>>, color=\"{color}\"];"
+			)?;
+			for &child_index in &fragment.children {
+				let child_id = format!("frag_{}", child_index.raw);
+				writeln!(
+					w,
+					"\t{child_id} -> {node_id} [style=bold, color=\"#000000\", constraint=true];",
+				)?;
 			}
 		}
 		writeln!(w, "}}")?;

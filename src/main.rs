@@ -474,6 +474,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 
 	let mut graphviz = String::new();
 	comp.print_graphviz(&mut graphviz, None);
+	comp.print_fragment_graphviz(&mut graphviz);
 	println!("{}", graphviz);
 
 	/*let mut comp = CompiledExpr::new(comp);
