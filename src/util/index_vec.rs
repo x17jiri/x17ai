@@ -12,6 +12,8 @@ use std::hint::cold_path;
 
 pub trait IndexTrait: Copy + Clone + PartialEq + Eq + Hash + Ord {
 	const MAX: usize;
+	fn new_sentinel() -> Self;
+	fn is_sentinel(&self) -> bool;
 	fn to_raw(self) -> usize;
 	fn from_raw(raw: usize) -> Self;
 }
@@ -35,22 +37,21 @@ macro_rules! define_index_type {
 				$name { raw }
 			}
 
-			pub fn new_sentinel() -> Self {
-				$name { raw: usize::MAX }
-			}
-
-			#[allow(clippy::cast_possible_wrap)]
-			pub fn is_sentinel(&self) -> bool {
-				self.raw >= usize::MAX
-			}
-
 			pub fn to_untyped(&self) -> $crate::util::index_vec::UntypedIndex {
 				$crate::util::index_vec::UntypedIndex { raw: self.raw }
 			}
 		}
 
 		impl $crate::util::index_vec::IndexTrait for $name {
-			const MAX: usize = isize::MAX as usize;
+			const MAX: usize = usize::MAX;
+
+			fn new_sentinel() -> Self {
+				$name { raw: usize::MAX }
+			}
+
+			fn is_sentinel(&self) -> bool {
+				self.raw >= usize::MAX
+			}
 
 			fn to_raw(self) -> usize {
 				self.raw
@@ -79,7 +80,7 @@ pub struct UntypedIndex {
 }
 
 impl UntypedIndex {
-	pub const MAX: usize = isize::MAX as usize;
+	pub const MAX: usize = usize::MAX;
 	pub type RawType = usize;
 
 	pub fn new(raw: usize) -> Self {
@@ -91,7 +92,6 @@ impl UntypedIndex {
 		Self { raw: usize::MAX }
 	}
 
-	#[allow(clippy::cast_possible_wrap)]
 	pub fn is_sentinel(&self) -> bool {
 		self.raw >= Self::MAX
 	}
@@ -116,21 +116,21 @@ macro_rules! define_index_type32 {
 				$name { raw }
 			}
 
-			pub fn new_sentinel() -> Self {
-				$name { raw: u32::MAX }
-			}
-
-			pub fn is_sentinel(&self) -> bool {
-				self.raw >= u32::MAX
-			}
-
 			pub fn to_untyped(&self) -> $crate::util::index_vec::UntypedIndex32 {
 				$crate::util::index_vec::UntypedIndex32 { raw: self.raw }
 			}
 		}
 
 		impl $crate::util::index_vec::IndexTrait for $name {
-			const MAX: usize = i32::MAX as usize;
+			const MAX: usize = u32::MAX as usize;
+
+			fn new_sentinel() -> Self {
+				$name { raw: u32::MAX }
+			}
+
+			fn is_sentinel(&self) -> bool {
+				self.raw >= u32::MAX
+			}
 
 			fn to_raw(self) -> usize {
 				self.raw as usize
@@ -160,7 +160,7 @@ pub struct UntypedIndex32 {
 }
 
 impl UntypedIndex32 {
-	pub const MAX: u32 = i32::MAX as u32;
+	pub const MAX: u32 = u32::MAX;
 	pub type RawType = u32;
 
 	pub fn new_sentinel() -> Self {

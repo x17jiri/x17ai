@@ -23,6 +23,7 @@ use std::collections::{HashMap, hash_map};
 use std::hint::{cold_path, unlikely};
 use std::rc::Rc;
 
+use smallvec::SmallVec;
 use thin_vec::{ThinVec, thin_vec};
 
 use super::super::expr;
@@ -100,8 +101,6 @@ pub enum XIndexState {
 	ScalarRef,
 	TensorRef,
 	FragmentHead,
-	FragmentPreorderIndex,
-	FragmentIndex,
 }
 
 pub struct Node {
@@ -111,13 +110,13 @@ pub struct Node {
 	pub dtype: Option<DType>,
 
 	/// When `None`, the output is scalar.
-	pub shape: Option<ThinVec<usize>>,
+	pub shape: Option<ThinVec<usize>>, // TODO - replace with thin Box<[usize]>
 
 	pub can_be_batched: bool,
 	pub children: [NodeIndex32; 2],
 	pub children_broadcast: [bool; 2],
 
-	pub parents: ThinVec<NodeIndex32>,
+	pub parents: SmallVec<[NodeIndex32; 4]>,
 	pub dominator: NodeIndex32,
 	pub capture: ThinVec<TensorRefIndex32>,
 
@@ -125,19 +124,17 @@ pub struct Node {
 	pub complex_op_fingerprint: u32,
 	pub head_for: NodeIndex32,
 
-	// This field is heavily overloaded in order to save space. It can have different meanings
-	// depending on the node type and the stage of compilation:
-	// - For input nodes:
-	//   - ConstRefIndex32 if is_const()
-	//   - ScalarRefIndex32 if is_scalar_input()
-	//   - TensorRefIndex32 if is_tensor_input()
-	// - For non-input nodes:
-	//   - Before the call of find_fragments():
-	//     - uninitialized / sentinel
-	//   - After the call of find_fragments():
-	//     - NodeIndex32 (head node of the current fragment)
-	//   - After the call of make_fragments():
-	//     - FragmentIndex32
+	/// This field is overloaded in order to save space.
+	/// It can have different meanings depending on the node type:
+	/// - For input nodes:
+	///   - ConstRefIndex32 if is_const()
+	///   - ScalarRefIndex32 if is_scalar_input()
+	///   - TensorRefIndex32 if is_tensor_input()
+	/// - For non-input nodes:
+	///   - NodeIndex32 (head node of the current fragment)
+	///
+	/// The related field `x_index_state` is used in debug assertions
+	/// to make sure we use `x_index` correctly.
 	pub x_index: UntypedIndex32,
 	pub x_index_state: XIndexState,
 }
@@ -149,7 +146,7 @@ impl Default for Node {
 			shape: None,
 			can_be_batched: false,
 			dtype: None,
-			parents: ThinVec::new(),
+			parents: SmallVec::new(),
 			dominator: NodeIndex32::new_sentinel(),
 			children: [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()],
 			children_broadcast: [false, false],
@@ -200,35 +197,6 @@ impl Node {
 		);
 		self.x_index = fragment_index.to_untyped();
 		self.x_index_state = XIndexState::FragmentHead;
-	}
-
-	pub fn fragment_preorder_index(&self) -> FragmentPreorderIndex32 {
-		debug_assert!(!self.is_input());
-		debug_assert!(self.x_index_state == XIndexState::FragmentPreorderIndex);
-		FragmentPreorderIndex32::from(self.x_index)
-	}
-
-	pub fn set_fragment_preorder_index(&mut self, preorder_index: FragmentPreorderIndex32) {
-		debug_assert!(!self.is_input());
-		debug_assert!(
-			self.x_index_state == XIndexState::FragmentHead
-				|| self.x_index_state == XIndexState::FragmentPreorderIndex
-		);
-		self.x_index = preorder_index.to_untyped();
-		self.x_index_state = XIndexState::FragmentPreorderIndex;
-	}
-
-	pub fn fragment_index(&self) -> FragmentIndex32 {
-		debug_assert!(!self.is_input());
-		debug_assert!(self.x_index_state == XIndexState::FragmentIndex);
-		FragmentIndex32::from(self.x_index)
-	}
-
-	pub fn set_fragment_index(&mut self, frag_count: u32) {
-		debug_assert!(!self.is_input());
-		debug_assert!(self.x_index_state == XIndexState::FragmentPreorderIndex);
-		self.x_index.raw = frag_count - 1 - self.x_index.raw;
-		self.x_index_state = XIndexState::FragmentIndex;
 	}
 
 	pub fn is_const(&self) -> bool {
@@ -314,6 +282,26 @@ impl Node {
 	}
 }
 
+pub trait NodeWithDominator {
+	type IndexType: IndexTrait;
+	fn dominator(&self) -> Self::IndexType;
+	fn set_dominator(&mut self, dom: Self::IndexType);
+	fn parents(&self) -> &[Self::IndexType];
+}
+
+impl NodeWithDominator for Node {
+	type IndexType = NodeIndex32;
+	fn dominator(&self) -> NodeIndex32 {
+		self.dominator
+	}
+	fn set_dominator(&mut self, dom: NodeIndex32) {
+		self.dominator = dom;
+	}
+	fn parents(&self) -> &[NodeIndex32] {
+		&self.parents
+	}
+}
+
 define_index_type32!(NodeIndex32);
 type NodeVec = IndexVec<NodeIndex32, Node>;
 
@@ -366,16 +354,7 @@ pub enum FragmentKind {
 pub struct Fragment {
 	pub head: NodeIndex32,
 	pub kind: FragmentKind,
-	pub dominator: FragmentIndex32,
-	pub parents: ThinVec<FragmentIndex32>,
-	pub children: ThinVec<FragmentIndex32>,
 }
-
-define_index_type32!(FragmentIndex32);
-type FragmentVec = IndexVec<FragmentIndex32, Fragment>;
-
-define_index_type32!(FragmentPreorderIndex32);
-type FragmentPreorderVec = IndexVec<FragmentPreorderIndex32, Fragment>;
 
 pub struct SumToMean {
 	pub node: NodeIndex32,
@@ -389,7 +368,6 @@ pub struct PreCompilation {
 	scalar_vec: ScalarVec,
 	tensor_map: HashMap<*const expr::TensorRef, TensorRefIndex32>,
 	tensor_vec: TensorVec,
-	fragments_postorder: FragmentVec,
 	sum_to_mean: Vec<SumToMean>,
 
 	err_log: ErrorLog,
@@ -453,7 +431,6 @@ impl PreCompilation {
 			scalar_vec: ScalarVec::with_capacity(4),
 			tensor_map: HashMap::new(),
 			tensor_vec: TensorVec::with_capacity(4),
-			fragments_postorder: FragmentVec::with_capacity(4),
 			sum_to_mean: Vec::new(),
 			err_log: ErrorLog::new(),
 		};
@@ -471,13 +448,14 @@ impl PreCompilation {
 
 		self.load_expr(expr, &mut state);
 		self.remove_dead_code();
-		self.find_dominators();
+		Self::find_dominators(&mut self.nodes_postorder);
 		self.find_complex_op_fingerprints(&mut state);
 		self.find_races(&mut state);
 		self.find_heads();
 		self.find_fragments();
 		self.find_trivial_fragments();
-		self.make_fragments();
+		//self.make_fragments();
+		//Self::find_dominators(&mut self.fragments_postorder);
 
 		self.err_log.check_errors()
 	}
@@ -1071,8 +1049,8 @@ impl PreCompilation {
 	fn remove_dead_code(&mut self) {
 		for i in self.nodes_postorder.indexes().rev() {
 			let mut parents =
-				std::mem::replace(&mut self.nodes_postorder[i].parents, ThinVec::new());
-			parents.retain(|&p| !self.nodes_postorder[p].is_dead);
+				std::mem::replace(&mut self.nodes_postorder[i].parents, SmallVec::new());
+			parents.retain(|p| !self.nodes_postorder[*p].is_dead);
 			if parents.is_empty() {
 				if self.nodes_postorder[i].capture.is_empty() {
 					self.nodes_postorder[i].is_dead = true;
@@ -1086,35 +1064,31 @@ impl PreCompilation {
 		}
 	}
 
-	fn find_dominators(&mut self) {
+	fn find_dominators<T: NodeWithDominator>(postorder: &mut IndexVec<T::IndexType, T>) {
 		let mut changed = true;
 		while changed {
 			changed = false;
-			for idx in self.nodes_postorder.indexes().rev() {
-				if self.nodes_postorder[idx].parents.is_empty() {
+			for idx in postorder.indexes().rev() {
+				let parents = postorder[idx].parents();
+				if parents.is_empty() {
 					// root
-					debug_assert!(
-						self.nodes_postorder[idx].dominator == NodeIndex32::new_sentinel()
-					);
+					debug_assert!(postorder[idx].dominator() == T::IndexType::new_sentinel());
 					continue;
 				}
 
-				let p0 = self.nodes_postorder[idx].parents[0];
-				let dominator = self.nodes_postorder[idx].parents[1..].iter().copied().fold(
-					p0,
-					|mut d, mut p| {
-						while d != p {
-							if d.to_raw() < p.to_raw() {
-								d = self.nodes_postorder[d].dominator;
-							} else {
-								p = self.nodes_postorder[p].dominator;
-							}
+				let p0 = parents[0];
+				let dominator = parents[1..].iter().copied().fold(p0, |mut d, mut p| {
+					while d != p {
+						if d.to_raw() < p.to_raw() {
+							d = postorder[d].dominator();
+						} else {
+							p = postorder[p].dominator();
 						}
-						d
-					},
-				);
-				if self.nodes_postorder[idx].dominator != dominator {
-					self.nodes_postorder[idx].dominator = dominator;
+					}
+					d
+				});
+				if postorder[idx].dominator() != dominator {
+					postorder[idx].set_dominator(dominator);
 					changed = true;
 				}
 			}
@@ -1400,6 +1374,32 @@ impl PreCompilation {
 		}
 	}
 
+	fn fragment_kind(&self, idx: NodeIndex32) -> Option<FragmentKind> {
+		if let Some(item) = self.nodes_postorder.get(idx)
+			&& let head = item.fragment_head_index()
+			&& let Some(item) = self.nodes_postorder.get(head)
+		{
+			if let Some(item) = self.nodes_postorder.get(item.head_for) {
+				if item.is_trivial() {
+					Some(FragmentKind::Trivial)
+				} else if item.is_reduction() {
+					Some(FragmentKind::Reduction)
+				} else if item.is_matmul() {
+					Some(FragmentKind::MatMul)
+				} else if item.is_attention() {
+					Some(FragmentKind::Attention)
+				} else {
+					unreachable!()
+				}
+			} else {
+				Some(FragmentKind::Elementwise)
+			}
+		} else {
+			None
+		}
+	}
+
+	/*
 	fn make_fragments(&mut self) {
 		let mut fragments_preorder = FragmentPreorderVec::new();
 		for idx in self.nodes_postorder.indexes().rev() {
@@ -1446,7 +1446,7 @@ impl PreCompilation {
 		}
 
 		fragments_preorder.raw.reverse();
-		std::mem::swap(&mut self.fragments_postorder.raw, &mut fragments_preorder.raw);
+		self.fragments_postorder.raw = fragments_preorder.raw;
 		let frag_count = self.fragments_postorder.len();
 
 		for idx in self.nodes_postorder.indexes().rev() {
@@ -1455,7 +1455,9 @@ impl PreCompilation {
 				continue;
 			}
 
-			item.set_fragment_index(frag_count as u32);
+			item.set_fragment_index(FragmentIndex32::new(
+				frag_count as u32 - 1 - item.fragment_preorder_index().raw,
+			));
 			let item = &self.nodes_postorder[idx];
 			let frag_idx = item.fragment_index();
 			if self.fragments_postorder[frag_idx].head == idx {
@@ -1473,6 +1475,7 @@ impl PreCompilation {
 			}
 		}
 	}
+	*/
 
 	pub fn graphviz_node_label(&self, node: &Node) -> String {
 		match node.node_kind {
@@ -1633,52 +1636,20 @@ impl PreCompilation {
 			if node.is_input() {
 				//writeln!(w, "\t{{ rank = min; {node_id} }}")?;
 			} else {
-				match node.x_index_state {
-					XIndexState::FragmentHead => {
-						let frag_index = node.fragment_head_index();
-						if self.nodes_postorder.is_valid(frag_index) {
-							let frag_node = &self.nodes_postorder[frag_index];
-							let (fragment_kind, color) =
-								if self.nodes_postorder.is_valid(frag_node.head_for) {
-									let frag_node = &self.nodes_postorder[frag_node.head_for];
-									if frag_node.is_trivial() {
-										("Trivial", "#a0a0a0")
-									} else if frag_node.is_reduction() {
-										("Reduction", "#c00000")
-									} else if frag_node.is_matmul() {
-										("MatMul", "#c00000")
-									} else if frag_node.is_attention() {
-										("Attention", "#c00000")
-									} else {
-										("<Complex Op>", "#c00000")
-									}
-								} else {
-									("Element-wise", "black")
-								};
-							writeln!(
-								w,
-								"\tsubgraph cluster_{} {{ label=<<font color='{color}'>&#91;{}&#93; {fragment_kind}</font>> labelloc=\"b\" labeljust=\"l\" {node_id} color=\"{color}\"; }}",
-								frag_index.raw, frag_index.raw
-							)?;
-						}
-					},
-					XIndexState::FragmentIndex => {
-						let frag_index = node.fragment_index();
-						let (fragment_kind, color) = match self.fragments_postorder[frag_index].kind
-						{
-							FragmentKind::Trivial => ("Trivial", "#a0a0a0"),
-							FragmentKind::Reduction => ("Reduction", "#c00000"),
-							FragmentKind::MatMul => ("MatMul", "#c00000"),
-							FragmentKind::Attention => ("Attention", "#c00000"),
-							FragmentKind::Elementwise => ("Element-wise", "black"),
-						};
-						writeln!(
-							w,
-							"\tsubgraph cluster_{} {{ label=<<font color='{color}'>&#91;{}&#93; {fragment_kind}</font>> labelloc=\"b\" labeljust=\"l\" {node_id} color=\"{color}\"; }}",
-							frag_index.raw, frag_index.raw
-						)?;
-					},
-					_ => {},
+				let frag_idx = node.fragment_head_index();
+				if let Some(frag_kind) = self.fragment_kind(frag_idx) {
+					let (fragment_kind, color) = match frag_kind {
+						FragmentKind::Trivial => ("Trivial", "#a0a0a0"),
+						FragmentKind::Reduction => ("Reduction", "#c00000"),
+						FragmentKind::MatMul => ("MatMul", "#c00000"),
+						FragmentKind::Attention => ("Attention", "#c00000"),
+						FragmentKind::Elementwise => ("Element-wise", "black"),
+					};
+					writeln!(
+						w,
+						"\tsubgraph cluster_{} {{ label=<<font color='{color}'>&#91;{}&#93; {fragment_kind}</font>> labelloc=\"b\" labeljust=\"l\" {node_id} color=\"{color}\"; }}",
+						frag_idx.raw, frag_idx.raw
+					)?;
 				}
 				let ordered = match node.node_kind {
 					NodeKind::Binary(bin) => !bin.is_commutative(),
@@ -1778,6 +1749,7 @@ impl PreCompilation {
 		Ok(())
 	}
 
+	/*
 	pub fn print_fragment_graphviz<W: std::fmt::Write>(&self, w: &mut W) -> std::fmt::Result {
 		writeln!(w, "digraph G {{")?;
 		writeln!(w, "\trankdir=BT;")?;
@@ -1803,10 +1775,18 @@ impl PreCompilation {
 					"\t{child_id} -> {node_id} [style=bold, color=\"#000000\", constraint=true];",
 				)?;
 			}
+			if !fragment.dominator.is_sentinel() {
+				let dom_id = format!("frag_{}", fragment.dominator.raw);
+				writeln!(
+					w,
+					"\t{node_id} -> {dom_id} [label=< >, style=dashed, color=\"#808080\", constraint=true];",
+				)?;
+			}
 		}
 		writeln!(w, "}}")?;
 		Ok(())
 	}
+	*/
 }
 
 //--------------------------------------------------------------------------------------------------
