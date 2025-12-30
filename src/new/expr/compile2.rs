@@ -23,7 +23,7 @@ use std::collections::{HashMap, hash_map};
 use std::hint::{cold_path, unlikely};
 use std::rc::Rc;
 
-use smallvec::SmallVec;
+use smallvec::{SmallVec, smallvec};
 use thin_vec::{ThinVec, thin_vec};
 
 use super::super::expr;
@@ -343,6 +343,7 @@ type ScalarVec = IndexVec<ScalarRefIndex32, ScalarRef>;
 define_index_type32!(ConstRefIndex32);
 type ConstVec = IndexVec<ConstRefIndex32, ConstRef>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FragmentKind {
 	Trivial,
 	Reduction,
@@ -454,6 +455,7 @@ impl PreCompilation {
 		self.find_heads();
 		self.find_fragments();
 		self.find_trivial_fragments();
+		self.duplicate_trivial_fragments();
 		//self.make_fragments();
 		//Self::find_dominators(&mut self.fragments_postorder);
 
@@ -1348,8 +1350,12 @@ impl PreCompilation {
 					let first_idx = trail[0];
 					let inp_idx = self.nodes_postorder[last_idx].children[0];
 
-					self.nodes_postorder[inp_idx].head_for =
-						self.nodes_postorder[first_idx].head_for;
+					if !self.nodes_postorder[inp_idx].is_input()
+						&& !self.nodes_postorder.is_valid(self.nodes_postorder[inp_idx].head_for)
+					{
+						self.nodes_postorder[inp_idx].head_for =
+							self.nodes_postorder[first_idx].head_for;
+					}
 					self.nodes_postorder[first_idx].head_for = last_idx;
 					self.nodes_postorder[first_idx].set_fragment_head_index(inp_idx);
 
@@ -1372,6 +1378,90 @@ impl PreCompilation {
 				self.nodes_postorder[idx].set_fragment_head_index(head);
 			}
 		}
+	}
+
+	#[allow(clippy::expect_used)]
+	fn duplicate_trivial_fragments(&mut self) {
+		define_index_type32!(FragPreorderIndex32);
+		struct Frag {
+			head: NodeIndex32,
+			kind: FragmentKind,
+			parents: SmallVec<[FragPreorderIndex32; 4]>,
+		}
+		let mut frag_preorder = IndexVec::<FragPreorderIndex32, Frag>::new();
+		let mut frag_map: HashMap<NodeIndex32, SmallVec<[FragPreorderIndex32; 4]>> = HashMap::new();
+		let mut parent_frags = Vec::new();
+		for idx in self.nodes_postorder.indexes().rev() {
+			let item = &self.nodes_postorder[idx];
+			if item.is_input() || unlikely(item.is_dead) {
+				continue;
+			}
+
+			if item.fragment_head_index() == idx {
+				let frag_kind = self.fragment_kind(idx).unwrap();
+				parent_frags.clear();
+				for &p in &item.parents {
+					parent_frags.push(self.nodes_postorder[p].fragment_head_index());
+				}
+				parent_frags.sort_unstable();
+				parent_frags.dedup();
+				let mut parents = SmallVec::new();
+				for &parent_frag in &parent_frags {
+					let parent_vec = frag_map.get(&parent_frag).expect(
+						"we traverse in preorder, so parent fragments must have been created already",
+					);
+					parents.extend_from_slice(parent_vec);
+				}
+				parents.sort_unstable();
+				parents.dedup();
+				if frag_kind == FragmentKind::Trivial {
+					frag_map.insert(idx, parents);
+				} else {
+					let new_frag_idx =
+						frag_preorder.push(Frag { head: idx, kind: frag_kind, parents });
+					frag_map.insert(idx, smallvec![new_frag_idx]);
+				}
+			}
+		}
+
+		let mut graphviz = String::new();
+		let mut w: &mut dyn std::fmt::Write = &mut graphviz;
+		writeln!(w, "digraph G {{");
+		writeln!(w, "\trankdir=BT;");
+		for i in frag_preorder.indexes() {
+			let fragment = &frag_preorder[i];
+			let node_id = format!("frag_{}", i.raw);
+			let (fragment_kind, color) = match fragment.kind {
+				FragmentKind::Trivial => ("Trivial", "#a0a0a0"),
+				FragmentKind::Reduction => ("Reduction", "#c00000"),
+				FragmentKind::MatMul => ("MatMul", "#c00000"),
+				FragmentKind::Attention => ("Attention", "#c00000"),
+				FragmentKind::Elementwise => ("Element-wise", "black"),
+			};
+			let label = format!("<b>&#91;{}&#93; {fragment_kind}</b>", fragment.head.raw);
+			writeln!(
+				w,
+				"\t{node_id} [label=<<font color='{color}'>{label}</font>>, color=\"{color}\"];"
+			);
+			for &parent_index in &fragment.parents {
+				let parent_id = format!("frag_{}", parent_index.raw);
+				writeln!(
+					w,
+					"\t{node_id} -> {parent_id} [style=bold, color=\"#000000\", constraint=true];",
+				);
+			}
+			/*if !fragment.dominator.is_sentinel() {
+				let dom_id = format!("frag_{}", fragment.dominator.raw);
+				writeln!(
+					w,
+					"\t{node_id} -> {dom_id} [label=< >, style=dashed, color=\"#808080\", constraint=true];",
+				);
+			}*/
+		}
+		writeln!(w, "}}");
+
+		// write to `fragments.dot` for debugging
+		std::fs::write("fragments.dot", graphviz).unwrap();
 	}
 
 	fn fragment_kind(&self, idx: NodeIndex32) -> Option<FragmentKind> {
