@@ -474,8 +474,11 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 
 	let mut graphviz = String::new();
 	comp.print_graphviz(&mut graphviz, None);
-	//comp.print_fragment_graphviz(&mut graphviz);
-	println!("{}", graphviz);
+	std::fs::write("graph.dot", graphviz).unwrap();
+
+	let mut graphviz = String::new();
+	comp.print_fragment_graphviz(&mut graphviz);
+	std::fs::write("fragments.dot", graphviz).unwrap();
 
 	/*let mut comp = CompiledExpr::new(comp);
 	let dev = x17ai::new::device::cpu::CPUDevice::new();
