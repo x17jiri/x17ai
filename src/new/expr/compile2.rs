@@ -274,11 +274,19 @@ impl Node {
 		self.parents.len() != 1 && !self.is_input()
 	}
 
-	fn broadcasts_child(&self, node_idx: NodeIndex32) -> bool {
+	pub fn broadcasts_child(&self, node_idx: NodeIndex32) -> bool {
 		self.children
 			.iter()
 			.zip(self.children_broadcast)
 			.any(|(&child_idx, broadcast)| child_idx == node_idx && broadcast)
+	}
+
+	pub fn shape(&self) -> &[usize] {
+		self.shape.as_ref().map_or(&[], |vec| vec)
+	}
+
+	pub fn opt_shape(&self) -> Option<&[usize]> {
+		self.shape.as_ref().map(|vec| &vec[..])
 	}
 }
 
@@ -310,6 +318,7 @@ impl NodeWithDominator for Fragment {
 	fn set_dominator(&mut self, dom: FragIndex32) {
 		self.dominator = dom;
 	}
+	#[allow(clippy::misnamed_getters)]
 	fn parents(&self) -> &[FragIndex32] {
 		&self.nontrivial_parents
 	}
@@ -373,10 +382,13 @@ pub struct Fragment {
 	pub parents: SmallVec<[FragIndex32; 4]>,
 	pub children: SmallVec<[FragIndex32; 4]>,
 	pub dominator: FragIndex32,
+	pub kernel: KernelIndex32,
 }
 
 define_index_type32!(FragIndex32);
 type FragVec = IndexVec<FragIndex32, Fragment>;
+
+define_index_type32!(KernelIndex32);
 
 pub struct SumToMean {
 	pub node: NodeIndex32,
@@ -480,6 +492,7 @@ impl PreCompilation {
 		self.find_trivial_fragments();
 		self.make_fragment_graph();
 		Self::find_dominators(self.frags_postorder.indexes().rev(), &mut self.frags_postorder);
+		self.find_kernels();
 
 		self.err_log.check_errors()
 	}
@@ -663,7 +676,7 @@ impl PreCompilation {
 	) -> Result<LoadedNode, NodeIndex32> {
 		let child = &self.nodes_postorder[child_idx];
 		let mut err = ThinVec::new();
-		let old_shape: &[usize] = child.shape.as_ref().map_or(&[], |vec| vec);
+		let old_shape = child.shape();
 		let mut shape = ThinVec::from(old_shape);
 		let keep = shape.len().saturating_sub(reshape.reshape_n as usize);
 		let old_elems = old_shape.iter().skip(keep).product::<usize>();
@@ -890,11 +903,8 @@ impl PreCompilation {
 				let b = &self.nodes_postorder[b_idx];
 				let mut err = ThinVec::new();
 				let dtype = Self::common_dtype(a.dtype, b.dtype, &mut err);
-				let (shape, is_broadcasted) = Self::common_shape(
-					a.shape.as_ref().map(|sh| &sh[..]),
-					b.shape.as_ref().map(|sh| &sh[..]),
-					&mut err,
-				);
+				let (shape, is_broadcasted) =
+					Self::common_shape(a.opt_shape(), b.opt_shape(), &mut err);
 				Ok(LoadedNode {
 					node: Node {
 						node_kind: NodeKind::Binary(binary_kind),
@@ -916,8 +926,8 @@ impl PreCompilation {
 				let matmul_kind = MatMulKind::RowTimesMat;
 
 				let mut err = ThinVec::new();
-				let a_shape: &[usize] = a.shape.as_ref().map_or(&[], |vec| &vec[..]);
-				let b_shape: &[usize] = b.shape.as_ref().map_or(&[], |vec| &vec[..]);
+				let a_shape = a.shape();
+				let b_shape = b.shape();
 				if a_shape.len() < 1 || b_shape.len() < 2 {
 					cold_path();
 					err.push(format!("matmul: not enough dimensions"));
@@ -954,8 +964,8 @@ impl PreCompilation {
 				let b = &self.nodes_postorder[b_idx];
 
 				let mut err = ThinVec::new();
-				let a_shape: &[usize] = a.shape.as_ref().map_or(&[], |vec| &vec[..]);
-				let b_shape: &[usize] = b.shape.as_ref().map_or(&[], |vec| &vec[..]);
+				let a_shape = a.shape();
+				let b_shape = b.shape();
 				if a_shape.len() < 3 || b_shape.len() < 3 {
 					cold_path();
 					err.push(format!("attention: not enough dimensions"));
@@ -1297,8 +1307,8 @@ impl PreCompilation {
 					break;
 				}
 				let parent = &self.nodes_postorder[parent_idx];
-				let head_shape: Option<&[usize]> = head.shape.as_ref().map(|sh| &sh[..]);
-				let parent_shape: Option<&[usize]> = parent.shape.as_ref().map(|sh| &sh[..]);
+				let head_shape = head.opt_shape();
+				let parent_shape = parent.opt_shape();
 				let parent_fingerprint = parent.complex_op_fingerprint;
 				if (!parent.is_reshape() && parent_shape != head_shape)
 					|| parent_fingerprint != start_fingerprint
@@ -1449,6 +1459,7 @@ impl PreCompilation {
 						parents: smallvec![p],
 						children: SmallVec::new(),
 						dominator: FragIndex32::new_sentinel(),
+						kernel: KernelIndex32::new_sentinel(),
 					});
 					new_frag_vec.push(new_frag_idx);
 				}
@@ -1462,6 +1473,7 @@ impl PreCompilation {
 					parents,
 					children: SmallVec::new(),
 					dominator: FragIndex32::new_sentinel(),
+					kernel: KernelIndex32::new_sentinel(),
 				});
 				frag_map.insert(idx, smallvec![new_frag_idx]);
 			}
@@ -1471,12 +1483,15 @@ impl PreCompilation {
 		self.frags_postorder.raw.reverse();
 		let frag_count = self.frags_postorder.next_index().raw;
 		for i in self.frags_postorder.indexes().rev() {
+			let trivial = self.frags_postorder[i].kind == FragmentKind::Trivial;
 			let P = self.frags_postorder[i].nontrivial_parents.len();
 			for j in 0..P {
 				let p = &mut self.frags_postorder[i].nontrivial_parents[j];
 				p.raw = frag_count - 1 - p.raw;
 				let p = *p;
-				self.frags_postorder[p].nontrivial_children.push(i);
+				if !trivial {
+					self.frags_postorder[p].nontrivial_children.push(i);
+				}
 			}
 			let P = self.frags_postorder[i].parents.len();
 			for p in 0..P {
@@ -1484,6 +1499,138 @@ impl PreCompilation {
 				p.raw = frag_count - 1 - p.raw;
 				let p = *p;
 				self.frags_postorder[p].children.push(i);
+			}
+		}
+	}
+
+	#[allow(clippy::single_match_else)]
+	fn find_kernels(&mut self) {
+		enum KernelConfig {
+			Elementwise(usize),
+			Reduction(usize, usize),
+			MatMul(usize, usize, usize),
+			Attention(usize, usize, usize, usize),
+		}
+
+		impl KernelConfig {
+			fn merge(child: &KernelConfig, parent: &KernelConfig) -> Option<KernelConfig> {
+				match child {
+					KernelConfig::Elementwise(c_elems) => match parent {
+						KernelConfig::Elementwise(p_elems) if *c_elems == *p_elems => {
+							Some(KernelConfig::Elementwise(*c_elems))
+						},
+						KernelConfig::Reduction(p_elems, p_dim) if *c_elems == *p_elems => {
+							Some(KernelConfig::Reduction(*p_elems, *p_dim))
+						},
+						_ => None,
+					},
+					KernelConfig::Reduction(c_elems, c_dim) => match parent {
+						KernelConfig::Reduction(p_elems, p_dim)
+							if *c_elems == *p_elems && *c_dim == *p_dim =>
+						{
+							Some(KernelConfig::Reduction(*c_elems, *c_dim))
+						},
+						KernelConfig::Elementwise(p_elems) if *c_elems == *p_elems => {
+							Some(KernelConfig::Reduction(*c_elems, *c_dim))
+						},
+						_ => None,
+					},
+					KernelConfig::MatMul(c_elems, c_a_len, c_b_col) => match parent {
+						KernelConfig::MatMul(p_elems, p_a_len, p_b_col)
+							if *c_elems == *p_elems
+								&& *c_a_len == *p_a_len && *c_b_col == *p_b_col =>
+						{
+							Some(KernelConfig::MatMul(*c_elems, *c_a_len, *c_b_col))
+						},
+						KernelConfig::Elementwise(p_elems) if *c_elems == *p_elems => {
+							Some(KernelConfig::MatMul(*c_elems, *c_a_len, *c_b_col))
+						},
+						_ => None,
+					},
+					KernelConfig::Attention(c_elems, c_q1, c_q2, c_kv3) => match parent {
+						KernelConfig::Attention(p_elems, p_q1, p_q2, p_kv3)
+							if *c_elems == *p_elems
+								&& *c_q1 == *p_q1 && *c_q2 == *p_q2
+								&& *c_kv3 == *p_kv3 =>
+						{
+							Some(KernelConfig::Attention(*c_elems, *c_q1, *c_q2, *c_kv3))
+						},
+						KernelConfig::Elementwise(p_elems) if *c_elems == *p_elems => {
+							Some(KernelConfig::Attention(*c_elems, *c_q1, *c_q2, *c_kv3))
+						},
+						_ => None,
+					},
+				}
+			}
+		}
+
+		let mut kernels: IndexVec<KernelIndex32, KernelConfig> = IndexVec::new();
+		for idx in self.frags_postorder.indexes() {
+			let parent = &self.frags_postorder[idx];
+			let parent_config = match parent.kind {
+				FragmentKind::Trivial => {
+					continue;
+				},
+				FragmentKind::Elementwise => {
+					let head_node = &self.nodes_postorder[parent.head];
+					let shape = head_node.shape();
+					let elems = shape.iter().product();
+					KernelConfig::Elementwise(elems)
+				},
+				FragmentKind::Reduction => {
+					let head_node = &self.nodes_postorder[parent.head];
+					let head_node = &self.nodes_postorder[head_node.head_for];
+					let inp_node = &self.nodes_postorder[head_node.children[0]];
+					let shape = inp_node.shape();
+					let elems = shape.iter().product();
+					let (_, [reduced_dim]) = Self::split_shape::<1>(shape);
+					KernelConfig::Reduction(elems, reduced_dim)
+				},
+				FragmentKind::MatMul => {
+					let head_node = &self.nodes_postorder[parent.head];
+					let head_node = &self.nodes_postorder[head_node.head_for];
+					let shape = head_node.shape();
+					let elems = shape.iter().product();
+					let (_, [a_len, b_col]) = Self::split_shape::<2>(shape);
+					KernelConfig::MatMul(elems, a_len, b_col)
+				},
+				FragmentKind::Attention => {
+					let head_node = &self.nodes_postorder[parent.head];
+					let head_node = &self.nodes_postorder[head_node.head_for];
+					let shape = head_node.shape();
+					let elems = shape.iter().product();
+					let (_, [q1, q2, kv3]) = Self::split_shape::<3>(shape);
+					KernelConfig::Attention(elems, q1, q2, kv3)
+				},
+			};
+
+			let nt_children = parent.nontrivial_children.len();
+			for i in 0..nt_children {
+				println!("Fragment {} child {}", idx.raw, parent.nontrivial_children[i].raw);
+			}
+			let nt_parents = parent.nontrivial_parents.len();
+
+			if parent.nontrivial_children.len() == 1
+				&& let child = &self.frags_postorder[parent.nontrivial_children[0]]
+				&& let child_kernel = child.kernel
+				&& let child_config = &mut kernels[child_kernel]
+				&& child.nontrivial_parents.len() == 1
+				&& let Some(merged_config) = KernelConfig::merge(child_config, &parent_config)
+			{
+				*child_config = merged_config;
+				let frag = &mut self.frags_postorder[idx];
+				frag.kernel = child_kernel;
+			} else {
+				let frag = &mut self.frags_postorder[idx];
+				frag.kernel = kernels.push(parent_config);
+			}
+		}
+		for idx in self.frags_postorder.indexes() {
+			if self.frags_postorder[idx].kind == FragmentKind::Trivial {
+				debug_assert!(self.frags_postorder[idx].parents.len() == 1);
+				let parent_idx = self.frags_postorder[idx].parents[0];
+				debug_assert!(!self.frags_postorder[parent_idx].kernel.is_sentinel());
+				self.frags_postorder[idx].kernel = self.frags_postorder[parent_idx].kernel;
 			}
 		}
 	}
@@ -1803,8 +1950,18 @@ impl PreCompilation {
 				w,
 				"\t{node_id} [label=<<font color='{color}'>{label}</font>>, color=\"{color}\"];"
 			)?;
+			if !fragment.kernel.is_sentinel() {
+				writeln!(
+					w,
+					"\tsubgraph cluster_kernel_{} {{ {node_id} color=\"#0000ff\"; style=rounded; }}",
+					fragment.kernel.raw
+				)?;
+			}
 			if fragment.kind != FragmentKind::Trivial {
 				for &p in &fragment.nontrivial_parents {
+					if fragment.parents.contains(&p) {
+						continue;
+					}
 					let parent_id = format!("frag_{}", p.raw);
 					writeln!(
 						w,
@@ -1819,11 +1976,11 @@ impl PreCompilation {
 					"\t{node_id} -> {parent_id} [style=bold, color=\"#000000\", constraint=true];",
 				)?;
 			}
-			if !fragment.dominator.is_sentinel() {
+			if !fragment.dominator.is_sentinel() && fragment.kind != FragmentKind::Trivial {
 				let dom_id = format!("frag_{}", fragment.dominator.raw);
 				writeln!(
 					w,
-					"\t{node_id} -> {dom_id} [label=< >, style=dashed, color=\"#808080\", constraint=true];",
+					"\t{node_id} -> {dom_id} [style=dashed, color=\"#808080\", constraint=true];",
 				)?;
 			}
 		}
