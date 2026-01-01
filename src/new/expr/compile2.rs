@@ -1302,35 +1302,42 @@ impl PreCompilation {
 				phase2 = true;
 				continue;
 			};
+
 			let children: &[FragPreorderIndex32] = &item_data.children;
-			if phase2 {
-				phase2 = false;
-				let kind = self.fragment_kind(item_data.head).unwrap();
-				let children = &values[values.len() - children.len()..];
-				let postorder_idx = postorder.push(Fragment {
-					head: item_data.head,
-					kind,
-					nontrivial_parents: SmallVec::new(),
-					nontrivial_children: SmallVec::new(),
-					parents: SmallVec::new(),
-					children: SmallVec::from_slice(children),
-					kernel: KernelIndex32::new_sentinel(),
-				});
-				values.truncate(values.len() - children.len());
-				values.push(postorder_idx);
-				if kind != FragmentKind::Trivial {
-					preorder[item].postorder_idx = postorder_idx;
-				}
-			} else {
+			if !phase2 {
 				if postorder.is_valid(item_data.postorder_idx) {
 					values.push(item_data.postorder_idx);
-				} else {
+					continue;
+				}
+				if !children.is_empty() {
 					to_process.push(item);
 					to_process.push(FragPreorderIndex32::new_sentinel());
 					let x = to_process.len();
 					to_process.extend_from_slice(children);
 					to_process[x..].reverse();
+					continue;
 				}
+			}
+
+			phase2 = false;
+			let kind = self.fragment_kind(item_data.head).unwrap();
+			let children = &values[values.len() - children.len()..];
+			let postorder_idx = postorder.push(Fragment {
+				head: item_data.head,
+				kind,
+				nontrivial_parents: SmallVec::new(),
+				nontrivial_children: SmallVec::new(),
+				parents: SmallVec::new(),
+				children: SmallVec::from_slice(children),
+				kernel: KernelIndex32::new_sentinel(),
+			});
+			for &child in children {
+				postorder[child].parents.push(postorder_idx);
+			}
+			values.truncate(values.len() - children.len());
+			values.push(postorder_idx);
+			if kind != FragmentKind::Trivial {
+				preorder[item].postorder_idx = postorder_idx;
 			}
 		}
 		debug_assert!(!phase2);
