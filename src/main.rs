@@ -437,15 +437,15 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let expr = Expr::new_tensor_input(t.clone());
 
 	let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?.cast(io_dtype);
-	let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?.cast(io_dtype);
+	//	let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?.cast(io_dtype);
 
 	let qq = expr
 		.clone()
 		.cast(internal_dtype)
 		.row_times_mat(Expr::new_tensor_input(mq.clone()).cast(internal_dtype))
-		.reshape(1, &[4, 4, 64])
 		.cast(io_dtype)
-		.cast(internal_dtype);
+		.cast(internal_dtype)
+		.reshape(1, &[4, 4, 64]);
 	//.capture(q.clone());
 	let kv = expr
 		.clone()
@@ -461,9 +461,11 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	//let expr = x_softmax(expr, internal_dtype)?;
 	//	let expr = x_swiglu(expr, internal_dtype)?;
 
-	let expr = qq.attention(kv).reshape(3, &[1024]).cast(io_dtype);
+	let expr = qq.attention(kv);
 	let expr = expr
+		.cast(io_dtype)
 		.cast(internal_dtype)
+		.reshape(3, &[1024])
 		.row_times_mat(Expr::new_tensor_input(mw.clone()).cast(internal_dtype));
 	let expr = x_swiglu(expr, internal_dtype)?;
 	let expr = expr.cast(io_dtype);
