@@ -94,6 +94,7 @@
 #![allow(clippy::match_same_arms)]
 #![allow(clippy::if_same_then_else)]
 #![allow(clippy::needless_else)]
+#![allow(clippy::collapsible_else_if)]
 use std::borrow::Cow;
 use std::convert::Infallible;
 

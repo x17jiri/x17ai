@@ -345,6 +345,8 @@ pub struct Fragment {
 define_index_type32!(FragIndex32);
 type FragVec = IndexVec<FragIndex32, Fragment>;
 
+define_index_type32!(FragPreorderIndex32);
+
 define_index_type32!(KernelIndex32);
 
 pub struct SumToMean {
@@ -1254,6 +1256,86 @@ impl PreCompilation {
 
 	#[allow(clippy::expect_used)]
 	fn make_fragment_graph(&mut self) {
+		struct FragData {
+			head: NodeIndex32,
+			postorder_idx: FragIndex32,
+			children: SmallVec<[FragPreorderIndex32; 4]>,
+		}
+		let mut map: HashMap<NodeIndex32, FragPreorderIndex32> = HashMap::new();
+		let mut preorder: IndexVec<FragPreorderIndex32, FragData> = IndexVec::new();
+		let mut to_process: Vec<FragPreorderIndex32> = Vec::new();
+		for idx in self.nodes_postorder.indexes().rev() {
+			let item = &self.nodes_postorder[idx];
+			if item.is_input() || unlikely(item.is_dead) || item.fragment_head_index() != idx {
+				continue;
+			}
+
+			let preorder_idx = preorder.push(FragData {
+				head: idx,
+				postorder_idx: FragIndex32::new_sentinel(),
+				children: SmallVec::new(),
+			});
+			map.insert(idx, preorder_idx);
+
+			if item.is_root() {
+				to_process.push(preorder_idx);
+			} else {
+				for &p in &item.parents {
+					let parent_head = self.nodes_postorder[p].fragment_head_index();
+					let parent_preorder_idx = *map
+						.get(&parent_head)
+						.expect("parent fragment must have been created already");
+					preorder[parent_preorder_idx].children.push(preorder_idx);
+				}
+			}
+		}
+		to_process.reverse();
+		let root_count = to_process.len();
+
+		let mut postorder: IndexVec<FragIndex32, Fragment> = IndexVec::new();
+		let mut values: Vec<FragIndex32> = Vec::new();
+		let mut phase2 = false;
+		while let Some(item) = to_process.pop() {
+			let Some(item_data) = preorder.get(item) else {
+				// Sentinel item. Go to phase 2.
+				debug_assert!(!phase2);
+				phase2 = true;
+				continue;
+			};
+			let children: &[FragPreorderIndex32] = &item_data.children;
+			if phase2 {
+				phase2 = false;
+				let kind = self.fragment_kind(item_data.head).unwrap();
+				let children = &values[values.len() - children.len()..];
+				let postorder_idx = postorder.push(Fragment {
+					head: item_data.head,
+					kind,
+					nontrivial_parents: SmallVec::new(),
+					nontrivial_children: SmallVec::new(),
+					parents: SmallVec::new(),
+					children: SmallVec::from_slice(children),
+					kernel: KernelIndex32::new_sentinel(),
+				});
+				values.truncate(values.len() - children.len());
+				values.push(postorder_idx);
+				if kind != FragmentKind::Trivial {
+					preorder[item].postorder_idx = postorder_idx;
+				}
+			} else {
+				if postorder.is_valid(item_data.postorder_idx) {
+					values.push(item_data.postorder_idx);
+				} else {
+					to_process.push(item);
+					to_process.push(FragPreorderIndex32::new_sentinel());
+					let x = to_process.len();
+					to_process.extend_from_slice(children);
+					to_process[x..].reverse();
+				}
+			}
+		}
+		debug_assert!(!phase2);
+		debug_assert!(values.len() == root_count);
+
 		let mut frags_preorder = FragVec::new();
 		let mut frag_map: HashMap<NodeIndex32, SmallVec<[FragIndex32; 4]>> = HashMap::new();
 		for idx in self.nodes_postorder.indexes().rev() {
@@ -1812,5 +1894,9 @@ impl PreCompilation {
 		Ok(())
 	}
 }
+
+//--------------------------------------------------------------------------------------------------
+
+//pub fn tree_eval(
 
 //--------------------------------------------------------------------------------------------------
