@@ -121,8 +121,7 @@ pub struct Node {
 	pub capture: ThinVec<TensorRefIndex32>,
 
 	pub is_dead: bool,
-	pub complex_op_fingerprint: u32,
-	pub head_for: NodeIndex32,
+	pub is_trivial_head: bool,
 
 	/// This field is overloaded in order to save space.
 	/// It can have different meanings depending on the node type:
@@ -152,8 +151,7 @@ impl Default for Node {
 			children_broadcast: [false, false],
 			capture: ThinVec::new(),
 			is_dead: false,
-			complex_op_fingerprint: 0,
-			head_for: NodeIndex32::new_sentinel(),
+			is_trivial_head: false,
 			x_index: UntypedIndex32::new_sentinel(),
 			x_index_state: XIndexState::Uninitialized,
 		}
@@ -236,10 +234,6 @@ impl Node {
 
 	pub fn is_select(&self) -> bool {
 		matches!(self.node_kind, NodeKind::Select(_))
-	}
-
-	pub fn is_head(&self) -> bool {
-		!self.head_for.is_sentinel()
 	}
 
 	pub fn is_cast(&self) -> bool {
@@ -485,9 +479,9 @@ impl PreCompilation {
 		self.load_expr(expr, &mut state);
 		self.remove_dead_code();
 		Self::find_dominators(self.nodes_postorder.indexes().rev(), &mut self.nodes_postorder);
-		self.find_complex_op_fingerprints(&mut state);
+		//self.find_complex_op_fingerprints(&mut state);
 		self.find_races(&mut state);
-		self.find_heads();
+		//self.find_heads();
 		self.find_fragments();
 		self.find_trivial_fragments();
 		self.make_fragment_graph();
@@ -1133,7 +1127,7 @@ impl PreCompilation {
 		}
 	}
 
-	fn find_complex_op_fingerprints(&mut self, state: &mut LoadExprState) {
+	/*fn find_complex_op_fingerprints(&mut self, state: &mut LoadExprState) {
 		let bitmap = &mut state.bitmap;
 		bitmap.clear_and_resize(&self.nodes_postorder, state.n_complex as usize);
 		let mut n_config_driving = 0;
@@ -1178,7 +1172,7 @@ impl PreCompilation {
 			};
 			self.nodes_postorder[idx].complex_op_fingerprint = fingerprint;
 		}
-	}
+	}*/
 
 	#[allow(clippy::manual_assert)]
 	fn find_races(&mut self, state: &mut LoadExprState) {
@@ -1290,11 +1284,14 @@ impl PreCompilation {
 		}
 	}
 
-	fn find_heads(&mut self) {
+	/*fn find_heads(&mut self) {
 		for idx in self.nodes_postorder.indexes() {
 			if !self.nodes_postorder[idx].is_complex() {
 				continue;
 			}
+
+			self.nodes_postorder[idx].head_for = idx;
+			continue;
 
 			let start = &self.nodes_postorder[idx];
 			let start_fingerprint = start.complex_op_fingerprint;
@@ -1321,7 +1318,7 @@ impl PreCompilation {
 
 			self.nodes_postorder[head_idx].head_for = idx;
 		}
-	}
+	}*/
 
 	fn find_fragments(&mut self) {
 		for idx in self.nodes_postorder.indexes().rev() {
@@ -1330,21 +1327,19 @@ impl PreCompilation {
 				continue;
 			}
 
-			if !item.is_head()
+			if !item.is_complex()
 				&& let Some((&first_parent, other_parents)) = item.parents.split_first()
 				&& let first_parent = &all_parents[first_parent]
-				&& !(first_parent.is_matmul()
-					|| first_parent.is_attention()
-					|| first_parent.is_select()
-					|| first_parent.broadcasts_child(idx))
+				&& (!first_parent.is_complex() || first_parent.is_reduction())
+				&& !first_parent.is_select()
+				&& !first_parent.broadcasts_child(idx)
 				&& let parent_frag = first_parent.fragment_head_index()
 				&& other_parents.iter().all(|&p| {
 					let parent = &all_parents[p];
-					!(parent.is_matmul()
-						|| parent.is_attention()
-						|| parent.is_select()
-						|| parent.broadcasts_child(idx))
-						&& parent.fragment_head_index() == parent_frag
+					parent.fragment_head_index() == parent_frag
+						&& (!parent.is_complex() || parent.is_reduction())
+						&& !parent.is_select()
+						&& !parent.broadcasts_child(idx)
 				}) {
 				item.set_fragment_head_index(parent_frag);
 			} else {
@@ -1383,16 +1378,14 @@ impl PreCompilation {
 					unsafe { trail.set_len(split) }
 				}
 				if let Some(&last_idx) = trail.last() {
+					// Note: This looks like a bug, but it's actually very important.
+					// We need to fix the fragment_head_index of all nodes in the current
+					// fragment. We will redirect them to the new head, which is `inp_idx`.
+					// In the `else` branch, the head index of all nodes points to first_idx;
+					// we do:
+					//     node.fragment_head_index = nodes[first_idx].fragment_head_index
 					let first_idx = trail[0];
 					let inp_idx = self.nodes_postorder[last_idx].children[0];
-
-					if !self.nodes_postorder[inp_idx].is_input()
-						&& !self.nodes_postorder.is_valid(self.nodes_postorder[inp_idx].head_for)
-					{
-						self.nodes_postorder[inp_idx].head_for =
-							self.nodes_postorder[first_idx].head_for;
-					}
-					self.nodes_postorder[first_idx].head_for = last_idx;
 					self.nodes_postorder[first_idx].set_fragment_head_index(inp_idx);
 
 					let trail = &trail[..];
@@ -1410,6 +1403,7 @@ impl PreCompilation {
 		std::mem::drop(trail);
 		for trail in trails {
 			let head = trail[0];
+			self.nodes_postorder[head].is_trivial_head = true;
 			for idx in trail {
 				self.nodes_postorder[idx].set_fragment_head_index(head);
 			}
@@ -1505,10 +1499,11 @@ impl PreCompilation {
 
 	#[allow(clippy::single_match_else)]
 	fn find_kernels(&mut self) {
+		#[derive(Copy, Clone)]
 		enum KernelConfig {
 			Elementwise(usize),
 			Reduction(usize, usize),
-			MatMul(usize, usize, usize),
+			MatMul(usize, usize, usize, usize),
 			Attention(usize, usize, usize, usize),
 		}
 
@@ -1517,10 +1512,10 @@ impl PreCompilation {
 				match child {
 					KernelConfig::Elementwise(c_elems) => match parent {
 						KernelConfig::Elementwise(p_elems) if *c_elems == *p_elems => {
-							Some(KernelConfig::Elementwise(*c_elems))
+							Some(*parent) //
 						},
 						KernelConfig::Reduction(p_elems, p_dim) if *c_elems == *p_elems => {
-							Some(KernelConfig::Reduction(*p_elems, *p_dim))
+							Some(*parent)
 						},
 						_ => None,
 					},
@@ -1528,36 +1523,19 @@ impl PreCompilation {
 						KernelConfig::Reduction(p_elems, p_dim)
 							if *c_elems == *p_elems && *c_dim == *p_dim =>
 						{
-							Some(KernelConfig::Reduction(*c_elems, *c_dim))
+							Some(*child)
 						},
 						KernelConfig::Elementwise(p_elems) if *c_elems == *p_elems => {
-							Some(KernelConfig::Reduction(*c_elems, *c_dim))
+							Some(*child) //
 						},
 						_ => None,
 					},
-					KernelConfig::MatMul(c_elems, c_a_len, c_b_col) => match parent {
-						KernelConfig::MatMul(p_elems, p_a_len, p_b_col)
-							if *c_elems == *p_elems
-								&& *c_a_len == *p_a_len && *c_b_col == *p_b_col =>
-						{
-							Some(KernelConfig::MatMul(*c_elems, *c_a_len, *c_b_col))
-						},
-						KernelConfig::Elementwise(p_elems) if *c_elems == *p_elems => {
-							Some(KernelConfig::MatMul(*c_elems, *c_a_len, *c_b_col))
-						},
+					KernelConfig::MatMul(c_elems, _a_len, _b_row, _b_col) => match parent {
+						KernelConfig::Elementwise(p_elems) if *c_elems == *p_elems => Some(*child),
 						_ => None,
 					},
-					KernelConfig::Attention(c_elems, c_q1, c_q2, c_kv3) => match parent {
-						KernelConfig::Attention(p_elems, p_q1, p_q2, p_kv3)
-							if *c_elems == *p_elems
-								&& *c_q1 == *p_q1 && *c_q2 == *p_q2
-								&& *c_kv3 == *p_kv3 =>
-						{
-							Some(KernelConfig::Attention(*c_elems, *c_q1, *c_q2, *c_kv3))
-						},
-						KernelConfig::Elementwise(p_elems) if *c_elems == *p_elems => {
-							Some(KernelConfig::Attention(*c_elems, *c_q1, *c_q2, *c_kv3))
-						},
+					KernelConfig::Attention(c_elems, _q1, _q2, _kv3) => match parent {
+						KernelConfig::Elementwise(p_elems) if *c_elems == *p_elems => Some(*child),
 						_ => None,
 					},
 				}
@@ -1579,7 +1557,6 @@ impl PreCompilation {
 				},
 				FragmentKind::Reduction => {
 					let head_node = &self.nodes_postorder[parent.head];
-					let head_node = &self.nodes_postorder[head_node.head_for];
 					let inp_node = &self.nodes_postorder[head_node.children[0]];
 					let shape = inp_node.shape();
 					let elems = shape.iter().product();
@@ -1588,15 +1565,18 @@ impl PreCompilation {
 				},
 				FragmentKind::MatMul => {
 					let head_node = &self.nodes_postorder[parent.head];
-					let head_node = &self.nodes_postorder[head_node.head_for];
+					let inp_a = &self.nodes_postorder[head_node.children[0]];
+					let inp_b = &self.nodes_postorder[head_node.children[1]];
+					let shape_a = inp_a.shape();
+					let shape_b = inp_b.shape();
 					let shape = head_node.shape();
 					let elems = shape.iter().product();
-					let (_, [a_len, b_col]) = Self::split_shape::<2>(shape);
-					KernelConfig::MatMul(elems, a_len, b_col)
+					let (_, [a_len]) = Self::split_shape::<1>(shape_a);
+					let (_, [b_row, b_col]) = Self::split_shape::<2>(shape_b);
+					KernelConfig::MatMul(elems, a_len, b_row, b_col)
 				},
 				FragmentKind::Attention => {
 					let head_node = &self.nodes_postorder[parent.head];
-					let head_node = &self.nodes_postorder[head_node.head_for];
 					let shape = head_node.shape();
 					let elems = shape.iter().product();
 					let (_, [q1, q2, kv3]) = Self::split_shape::<3>(shape);
@@ -1610,6 +1590,11 @@ impl PreCompilation {
 			}
 			let nt_parents = parent.nontrivial_parents.len();
 
+			// - all nontrivial children are in the same kernel
+			// - each nontrivial child has 1 or 2 parents
+			//    - if 1 parent, it must be this parent
+			//    - if 2 parents, the other parent must be its dominator
+			//    - i have to be the dominator of all my nontrivial children
 			if parent.nontrivial_children.len() == 1
 				&& let child = &self.frags_postorder[parent.nontrivial_children[0]]
 				&& let child_kernel = child.kernel
@@ -1629,7 +1614,7 @@ impl PreCompilation {
 			if self.frags_postorder[idx].kind == FragmentKind::Trivial {
 				debug_assert!(self.frags_postorder[idx].parents.len() == 1);
 				let parent_idx = self.frags_postorder[idx].parents[0];
-				debug_assert!(!self.frags_postorder[parent_idx].kernel.is_sentinel());
+				//debug_assert!(!self.frags_postorder[parent_idx].kernel.is_sentinel());
 				self.frags_postorder[idx].kernel = self.frags_postorder[parent_idx].kernel;
 			}
 		}
@@ -1640,18 +1625,14 @@ impl PreCompilation {
 			&& let head = item.fragment_head_index()
 			&& let Some(item) = self.nodes_postorder.get(head)
 		{
-			if let Some(item) = self.nodes_postorder.get(item.head_for) {
-				if item.is_trivial() {
-					Some(FragmentKind::Trivial)
-				} else if item.is_reduction() {
-					Some(FragmentKind::Reduction)
-				} else if item.is_matmul() {
-					Some(FragmentKind::MatMul)
-				} else if item.is_attention() {
-					Some(FragmentKind::Attention)
-				} else {
-					unreachable!()
-				}
+			if item.is_trivial_head {
+				Some(FragmentKind::Trivial)
+			} else if item.is_reduction() {
+				Some(FragmentKind::Reduction)
+			} else if item.is_matmul() {
+				Some(FragmentKind::MatMul)
+			} else if item.is_attention() {
+				Some(FragmentKind::Attention)
 			} else {
 				Some(FragmentKind::Elementwise)
 			}
@@ -1796,8 +1777,8 @@ impl PreCompilation {
 					debug_assert!(node.is_const());
 					writeln!(w, "\t{node_id} [shape=box, style=filled, fillcolor=\"#ffff00\"];")?;
 				}
-			} else if node.is_head() {
-				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccccff\"];")?;
+			/*} else if node.is_head() {
+			writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccccff\"];")?;*/
 			} else if node.is_fork() {
 				if unlikely(node.is_dead) {
 					writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#cccccc\"];")?;
