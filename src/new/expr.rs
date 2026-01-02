@@ -21,7 +21,6 @@ use std::rc::Rc;
 
 use thin_vec::ThinVec;
 
-use crate::new::tensor::Tensor;
 use crate::tensor::DType;
 
 pub mod compile2;
@@ -49,7 +48,7 @@ pub struct ExprConst {
 	pub value: f64,
 }
 pub enum ExprInput {
-	Tensor(Rc<TensorRef>),
+	Tensor(Rc<TensorInput>),
 	Scalar(Rc<ScalarRef>),
 }
 
@@ -61,12 +60,11 @@ pub enum CanBeBatched {
 
 // The tensor may be replaced before running the computation,
 // but the dtype needs to be correct.
-pub struct TensorRef {
-	pub tensor: RefCell<Option<Tensor>>,
+pub struct TensorInput {
+	pub name: Cow<'static, str>,
 	pub dtype: DType,
 	pub shape: Vec<usize>,
-	pub batched: CanBeBatched,
-	pub name: Cow<'static, str>,
+	pub can_be_batched: bool,
 }
 
 pub struct ScalarRef {
@@ -76,7 +74,7 @@ pub struct ScalarRef {
 
 pub struct ExprCapture {
 	pub expr: Rc<ExprNode>,
-	pub tensor_ref: Rc<TensorRef>,
+	pub tensor_ref: Rc<TensorInput>,
 }
 
 pub struct ExprCast {
@@ -137,18 +135,17 @@ pub enum ExprBinaryKind {
 
 //--------------------------------------------------------------------------------------------------
 
-impl TensorRef {
+impl TensorInput {
 	pub fn new(
 		name: Cow<'static, str>,
 		dtype: DType,
 		shape: Vec<usize>,
-		batched: CanBeBatched,
-	) -> Rc<TensorRef> {
-		Rc::new(TensorRef {
-			tensor: RefCell::new(None),
+		can_be_batched: CanBeBatched,
+	) -> Rc<TensorInput> {
+		Rc::new(TensorInput {
 			dtype,
 			shape,
-			batched,
+			can_be_batched: can_be_batched != CanBeBatched::No,
 			name,
 		})
 	}
@@ -163,7 +160,7 @@ impl ScalarRef {
 //--------------------------------------------------------------------------------------------------
 
 impl Expr {
-	pub fn new_tensor_input(tensor_ref: Rc<TensorRef>) -> Expr {
+	pub fn new_tensor_input(tensor_ref: Rc<TensorInput>) -> Expr {
 		Expr {
 			node: Rc::new(ExprNode::Input(ExprInput::Tensor(tensor_ref))),
 		}
@@ -298,7 +295,7 @@ impl Expr {
 		}
 	}
 
-	pub fn capture(self, tensor_ref: Rc<TensorRef>) -> Expr {
+	pub fn capture(self, tensor_ref: Rc<TensorInput>) -> Expr {
 		Expr {
 			node: Rc::new(ExprNode::Capture(ExprCapture { expr: self.node, tensor_ref })),
 		}

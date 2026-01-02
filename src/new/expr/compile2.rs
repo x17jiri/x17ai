@@ -23,7 +23,7 @@ use std::collections::{HashMap, hash_map};
 use std::hint::{cold_path, unlikely};
 use std::rc::Rc;
 
-use smallvec::{SmallVec, smallvec};
+use smallvec::SmallVec;
 use thin_vec::{ThinVec, thin_vec};
 
 use super::super::expr;
@@ -286,7 +286,7 @@ define_index_type32!(NodeIndex32);
 type NodeVec = IndexVec<NodeIndex32, Node>;
 
 pub struct TensorRef {
-	pub tensor_ref: Rc<expr::TensorRef>,
+	pub tensor_ref: Rc<expr::TensorInput>,
 	pub input_node: NodeIndex32,
 	pub output_node: NodeIndex32,
 	pub shape: ThinVec<usize>,
@@ -335,8 +335,8 @@ pub enum FragmentKind {
 pub struct Fragment {
 	pub head: NodeIndex32,
 	pub kind: FragmentKind,
-	pub nontrivial_parents: SmallVec<[FragIndex32; 4]>,
-	pub nontrivial_children: SmallVec<[FragIndex32; 4]>,
+	pub reduced_children: SmallVec<[FragIndex32; 4]>,
+	pub reduced_parent_count: u32,
 	pub parents: SmallVec<[FragIndex32; 4]>,
 	pub children: SmallVec<[FragIndex32; 4]>,
 	pub kernel: KernelIndex32,
@@ -359,7 +359,7 @@ pub struct PreCompilation {
 	const_vec: ConstVec,
 	scalar_map: HashMap<*const expr::ScalarRef, ScalarRefIndex32>,
 	scalar_vec: ScalarVec,
-	tensor_map: HashMap<*const expr::TensorRef, TensorRefIndex32>,
+	tensor_map: HashMap<*const expr::TensorInput, TensorRefIndex32>,
 	tensor_vec: TensorVec,
 	sum_to_mean: Vec<SumToMean>,
 	frags_postorder: FragVec,
@@ -447,7 +447,7 @@ impl PreCompilation {
 		self.find_fragments();
 		self.find_trivial_fragments();
 		self.make_fragment_graph();
-		self.transitive_reduction();
+		self.find_reduced_children();
 		self.find_kernels();
 
 		self.err_log.check_errors()
@@ -839,6 +839,94 @@ impl PreCompilation {
 		}
 	}
 
+	fn load_binary_matmul(
+		&self,
+		a_idx: NodeIndex32,
+		b_idx: NodeIndex32,
+	) -> Result<LoadedNode, NodeIndex32> {
+		let a = &self.nodes_postorder[a_idx];
+		let b = &self.nodes_postorder[b_idx];
+		let matmul_kind = MatMulKind::RowTimesMat;
+
+		let mut err = ThinVec::new();
+		let a_shape = a.shape();
+		let b_shape = b.shape();
+		if a_shape.len() < 1 || b_shape.len() < 2 {
+			cold_path();
+			err.push(format!("matmul: not enough dimensions"));
+		}
+		let (_a_rest, [a_len]) = Self::split_shape::<1>(a_shape);
+		let (b_rest, [b_row, b_col]) = Self::split_shape::<2>(b_shape);
+		if a_len != b_row {
+			cold_path();
+			err.push(format!("matmul: shape mismatch"));
+		}
+		let mut shape = ThinVec::from(a_shape);
+		*shape.last_mut().unwrap() = b_col;
+
+		if !b_rest.is_empty() || b.can_be_batched {
+			cold_path();
+			err.push("row times mat: mat cannot be batched".into());
+		}
+
+		Ok(LoadedNode {
+			node: Node {
+				node_kind: NodeKind::MatMul(matmul_kind),
+				dtype: Self::common_dtype(a.dtype, b.dtype, &mut err),
+				shape: Some(shape),
+				can_be_batched: a.can_be_batched,
+				children: [a_idx, b_idx],
+				..Default::default()
+			},
+			cache_key: format!("matmul:{:?}:{:?}:{:?}", matmul_kind, a_idx.raw, b_idx.raw),
+			err,
+		})
+	}
+
+	fn load_binary_attention(
+		&self,
+		a_idx: NodeIndex32,
+		b_idx: NodeIndex32,
+	) -> Result<LoadedNode, NodeIndex32> {
+		let a = &self.nodes_postorder[a_idx];
+		let b = &self.nodes_postorder[b_idx];
+
+		let mut err = ThinVec::new();
+		let a_shape = a.shape();
+		let b_shape = b.shape();
+		if a_shape.len() < 3 || b_shape.len() < 3 {
+			cold_path();
+			err.push(format!("attention: not enough dimensions"));
+		}
+		let (q_rest, [q1, q2, q3]) = Self::split_shape::<3>(a_shape);
+		let (kv_rest, [kv1, kv2, kv3]) = Self::split_shape::<3>(b_shape);
+		if kv1 != 1 || q2 != kv2 || q3 >= kv3 {
+			cold_path();
+			err.push(format!("attention: shape mismatch"));
+		}
+		let (mut shape, is_broadcasted) = Self::broadcast_shapes(q_rest, kv_rest, &mut err);
+		shape.push(q1);
+		shape.push(q2);
+		shape.push(kv3.saturating_sub(q3));
+		if is_broadcasted[0] || is_broadcasted[1] {
+			cold_path();
+			err.push(format!("attention inputs cannot be broadcasted"));
+		}
+
+		Ok(LoadedNode {
+			node: Node {
+				node_kind: NodeKind::Attention,
+				dtype: Self::common_dtype(a.dtype, b.dtype, &mut err),
+				shape: Some(shape),
+				can_be_batched: a.can_be_batched || b.can_be_batched,
+				children: [a_idx, b_idx],
+				..Default::default()
+			},
+			cache_key: format!("attention:{:?}:{:?}", a_idx.raw, b_idx.raw),
+			err,
+		})
+	}
+
 	fn load_binary(
 		&self,
 		binary: &ExprBinary,
@@ -876,84 +964,8 @@ impl PreCompilation {
 				})
 			},
 			ExprBinaryKind::First => Err(a_idx),
-			ExprBinaryKind::RowTimesMat => {
-				let a = &self.nodes_postorder[a_idx];
-				let b = &self.nodes_postorder[b_idx];
-				let matmul_kind = MatMulKind::RowTimesMat;
-
-				let mut err = ThinVec::new();
-				let a_shape = a.shape();
-				let b_shape = b.shape();
-				if a_shape.len() < 1 || b_shape.len() < 2 {
-					cold_path();
-					err.push(format!("matmul: not enough dimensions"));
-				}
-				let (_a_rest, [a_len]) = Self::split_shape::<1>(a_shape);
-				let (b_rest, [b_row, b_col]) = Self::split_shape::<2>(b_shape);
-				if a_len != b_row {
-					cold_path();
-					err.push(format!("matmul: shape mismatch"));
-				}
-				let mut shape = ThinVec::from(a_shape);
-				*shape.last_mut().unwrap() = b_col;
-
-				if !b_rest.is_empty() || b.can_be_batched {
-					cold_path();
-					err.push("row times mat: mat cannot be batched".into());
-				}
-
-				Ok(LoadedNode {
-					node: Node {
-						node_kind: NodeKind::MatMul(matmul_kind),
-						dtype: Self::common_dtype(a.dtype, b.dtype, &mut err),
-						shape: Some(shape),
-						can_be_batched: a.can_be_batched,
-						children: [a_idx, b_idx],
-						..Default::default()
-					},
-					cache_key: format!("matmul:{:?}:{:?}:{:?}", matmul_kind, a_idx.raw, b_idx.raw),
-					err,
-				})
-			},
-			ExprBinaryKind::Attention => {
-				let a = &self.nodes_postorder[a_idx];
-				let b = &self.nodes_postorder[b_idx];
-
-				let mut err = ThinVec::new();
-				let a_shape = a.shape();
-				let b_shape = b.shape();
-				if a_shape.len() < 3 || b_shape.len() < 3 {
-					cold_path();
-					err.push(format!("attention: not enough dimensions"));
-				}
-				let (q_rest, [q1, q2, q3]) = Self::split_shape::<3>(a_shape);
-				let (kv_rest, [kv1, kv2, kv3]) = Self::split_shape::<3>(b_shape);
-				if kv1 != 1 || q2 != kv2 || q3 >= kv3 {
-					cold_path();
-					err.push(format!("attention: shape mismatch"));
-				}
-				let (mut shape, is_broadcasted) = Self::broadcast_shapes(q_rest, kv_rest, &mut err);
-				shape.push(q1);
-				shape.push(q2);
-				shape.push(kv3.saturating_sub(q3));
-				if is_broadcasted[0] || is_broadcasted[1] {
-					cold_path();
-					err.push(format!("attention inputs cannot be broadcasted"));
-				}
-
-				Ok(LoadedNode {
-					node: Node {
-						node_kind: NodeKind::Attention,
-						dtype: Self::common_dtype(a.dtype, b.dtype, &mut err),
-						shape: Some(shape),
-						can_be_batched: a.can_be_batched || b.can_be_batched,
-						children: [a_idx, b_idx],
-						..Default::default()
-					},
-					cache_key: format!("attention:{:?}:{:?}", a_idx.raw, b_idx.raw),
-					err,
-				})
-			},
+			ExprBinaryKind::RowTimesMat => self.load_binary_matmul(a_idx, b_idx),
+			ExprBinaryKind::Attention => self.load_binary_attention(a_idx, b_idx),
 		}
 	}
 
@@ -987,14 +999,14 @@ impl PreCompilation {
 
 	fn add_tensor_input(
 		&mut self,
-		tensor_ref: Rc<expr::TensorRef>,
+		tensor_ref: Rc<expr::TensorInput>,
 		node: NodeIndex32,
 	) -> Result<TensorRefIndex32, NodeIndex32> {
 		let key = std::ptr::from_ref(tensor_ref.as_ref());
 		match self.tensor_map.entry(key) {
 			hash_map::Entry::Vacant(entry) => {
 				let shape = ThinVec::from(&tensor_ref.shape[..]);
-				let can_be_batched = tensor_ref.batched != expr::CanBeBatched::No;
+				let can_be_batched = tensor_ref.can_be_batched;
 				let index = self.tensor_vec.push(TensorRef {
 					tensor_ref,
 					input_node: node,
@@ -1014,14 +1026,14 @@ impl PreCompilation {
 
 	fn add_tensor_output(
 		&mut self,
-		tensor_ref: Rc<expr::TensorRef>,
+		tensor_ref: Rc<expr::TensorInput>,
 		node: NodeIndex32,
 	) -> TensorRefIndex32 {
 		let key = std::ptr::from_ref(tensor_ref.as_ref());
 		match self.tensor_map.entry(key) {
 			hash_map::Entry::Vacant(entry) => {
 				let shape = ThinVec::from(&tensor_ref.shape[..]);
-				let can_be_batched = tensor_ref.batched != expr::CanBeBatched::No;
+				let can_be_batched = tensor_ref.can_be_batched;
 				let index = self.tensor_vec.push(TensorRef {
 					tensor_ref,
 					input_node: NodeIndex32::new_sentinel(),
@@ -1256,6 +1268,7 @@ impl PreCompilation {
 
 	#[allow(clippy::expect_used)]
 	fn make_fragment_graph(&mut self) {
+		// First find all fragments and their children.
 		struct FragData {
 			head: NodeIndex32,
 			postorder_idx: FragIndex32,
@@ -1292,7 +1305,9 @@ impl PreCompilation {
 		to_process.reverse();
 		let root_count = to_process.len();
 
-		let mut postorder: IndexVec<FragIndex32, Fragment> = IndexVec::new();
+		// Now use the children links to build the final graph.
+		// Trivial fragments are intentionally not cached, which means they will be duplicated if
+		// linked from multiple parents.
 		let mut values: Vec<FragIndex32> = Vec::new();
 		let mut phase2 = false;
 		while let Some(item) = to_process.pop() {
@@ -1305,7 +1320,7 @@ impl PreCompilation {
 
 			let children: &[FragPreorderIndex32] = &item_data.children;
 			if !phase2 {
-				if postorder.is_valid(item_data.postorder_idx) {
+				if self.frags_postorder.is_valid(item_data.postorder_idx) {
 					values.push(item_data.postorder_idx);
 					continue;
 				}
@@ -1322,17 +1337,17 @@ impl PreCompilation {
 			phase2 = false;
 			let kind = self.fragment_kind(item_data.head).unwrap();
 			let children = &values[values.len() - children.len()..];
-			let postorder_idx = postorder.push(Fragment {
+			let postorder_idx = self.frags_postorder.push(Fragment {
 				head: item_data.head,
 				kind,
-				nontrivial_parents: SmallVec::new(),
-				nontrivial_children: SmallVec::new(),
+				reduced_children: SmallVec::new(),
+				reduced_parent_count: 0,
 				parents: SmallVec::new(),
 				children: SmallVec::from_slice(children),
 				kernel: KernelIndex32::new_sentinel(),
 			});
 			for &child in children {
-				postorder[child].parents.push(postorder_idx);
+				self.frags_postorder[child].parents.push(postorder_idx);
 			}
 			values.truncate(values.len() - children.len());
 			values.push(postorder_idx);
@@ -1342,120 +1357,71 @@ impl PreCompilation {
 		}
 		debug_assert!(!phase2);
 		debug_assert!(values.len() == root_count);
+	}
 
-		let mut frags_preorder = FragVec::new();
-		let mut frag_map: HashMap<NodeIndex32, SmallVec<[FragIndex32; 4]>> = HashMap::new();
-		for idx in self.nodes_postorder.indexes().rev() {
-			let item = &self.nodes_postorder[idx];
-			if item.is_input() || unlikely(item.is_dead) || item.fragment_head_index() != idx {
-				continue;
-			}
+	fn find_reduced_children(&mut self) {
+		for idx in self.frags_postorder.indexes() {
+			self.frags_postorder[idx].children.sort_unstable();
+			self.frags_postorder[idx].children.dedup();
+			self.frags_postorder[idx].children.shrink_to_fit();
 
-			let frag_kind = self.fragment_kind(idx).unwrap();
-			let mut parents = SmallVec::new();
-			for &p in &item.parents {
-				let frag_head = self.nodes_postorder[p].fragment_head_index();
-				let frag_parent_vec = frag_map.get(&frag_head).expect(
-					"we traverse in preorder, so parent fragments must have been created already",
-				);
-				parents.extend_from_slice(frag_parent_vec);
-			}
-			parents.sort_unstable();
-			parents.dedup();
-			let mut nontrivial_parents = SmallVec::new();
-			for &parent_idx in &parents {
-				let parent_frag = &frags_preorder[parent_idx];
-				if parent_frag.kind == FragmentKind::Trivial {
-					nontrivial_parents.extend_from_slice(&parent_frag.nontrivial_parents);
+			self.frags_postorder[idx].parents.sort_unstable();
+			self.frags_postorder[idx].parents.dedup();
+			self.frags_postorder[idx].parents.shrink_to_fit();
+
+			let mut reduced_children = SmallVec::new();
+			for &child_idx in &self.frags_postorder[idx].children {
+				let child_frag = &self.frags_postorder[child_idx];
+				if child_frag.kind != FragmentKind::Trivial {
+					reduced_children.push(child_idx);
 				} else {
-					nontrivial_parents.push(parent_idx);
+					reduced_children.extend_from_slice(&child_frag.reduced_children);
 				}
 			}
-			nontrivial_parents.sort_unstable();
-			nontrivial_parents.dedup();
-			if frag_kind == FragmentKind::Trivial {
-				let mut new_frag_vec = SmallVec::with_capacity(parents.len());
-				for &p in &parents {
-					let new_frag_idx = frags_preorder.push(Fragment {
-						head: idx,
-						kind: frag_kind,
-						nontrivial_parents: nontrivial_parents.clone(),
-						nontrivial_children: SmallVec::new(),
-						parents: smallvec![p],
-						children: SmallVec::new(),
-						kernel: KernelIndex32::new_sentinel(),
-					});
-					new_frag_vec.push(new_frag_idx);
-				}
-				frag_map.insert(idx, new_frag_vec);
-			} else {
-				let new_frag_idx = frags_preorder.push(Fragment {
-					head: idx,
-					kind: frag_kind,
-					nontrivial_parents,
-					nontrivial_children: SmallVec::new(),
-					parents,
-					children: SmallVec::new(),
-					kernel: KernelIndex32::new_sentinel(),
-				});
-				frag_map.insert(idx, smallvec![new_frag_idx]);
-			}
+
+			reduced_children.sort_unstable();
+			reduced_children.dedup();
+			self.frags_postorder[idx].reduced_children = reduced_children;
 		}
 
-		self.frags_postorder.raw = frags_preorder.raw;
-		self.frags_postorder.raw.reverse();
-		let frag_count = self.frags_postorder.next_index().raw;
-		for i in self.frags_postorder.indexes().rev() {
-			let P = self.frags_postorder[i].nontrivial_parents.len();
-			for j in 0..P {
-				let p = &mut self.frags_postorder[i].nontrivial_parents[j];
-				p.raw = frag_count - 1 - p.raw;
-			}
-			let P = self.frags_postorder[i].parents.len();
-			for p in 0..P {
-				let p = &mut self.frags_postorder[i].parents[p];
-				p.raw = frag_count - 1 - p.raw;
-				let p = *p;
-				self.frags_postorder[p].children.push(i);
-			}
-		}
+		self.transitive_reduction();
 	}
 
 	fn transitive_reduction(&mut self) {
 		let mut reach: IndexVec<FragIndex32, bool> =
 			IndexVec::from_vec(vec![false; self.frags_postorder.len()]);
-		let mut kept_parents = Vec::new();
-		for src in self.frags_postorder.indexes() {
+		let mut kept_children = Vec::new();
+		for src in self.frags_postorder.indexes().rev() {
 			let src_frag = &mut self.frags_postorder[src];
 			if src_frag.kind == FragmentKind::Trivial {
 				continue;
 			}
-			let nontrivial_parents = std::mem::take(&mut src_frag.nontrivial_parents);
-			kept_parents.clear();
-			for &dst in &nontrivial_parents {
+			let reduced_children = std::mem::take(&mut src_frag.reduced_children);
+			kept_children.clear();
+			for &dst in &reduced_children {
 				reach.raw.fill(false);
 				reach[src] = true;
 				{
-					for &j in &nontrivial_parents {
+					for &j in &reduced_children {
 						if j != dst {
 							reach[j] = true;
 						}
 					}
 				}
-				for i in src.raw + 1..dst.raw {
+				for i in (dst.raw + 1..src.raw).rev() {
 					let i = FragIndex32::new(i);
 					if reach[i] {
-						for &j in &self.frags_postorder[i].nontrivial_parents {
+						for &j in &self.frags_postorder[i].reduced_children {
 							reach[j] = true;
 						}
 					}
 				}
 				if !reach[dst] {
-					kept_parents.push(dst);
-					self.frags_postorder[dst].nontrivial_children.push(src);
+					kept_children.push(dst);
+					self.frags_postorder[dst].reduced_parent_count += 1;
 				}
 			}
-			self.frags_postorder[src].nontrivial_parents = SmallVec::from(&kept_parents[..]);
+			self.frags_postorder[src].reduced_children = SmallVec::from(&kept_children[..]);
 		}
 	}
 
@@ -1472,15 +1438,20 @@ impl PreCompilation {
 				parent: &KernelConfig,
 				nodes: &NodeVec,
 			) -> Option<KernelConfig> {
-				let child_shape = &nodes[child.shape_node].shape();
-				let parent_shape = &nodes[parent.shape_node].shape();
-				let shape_eq = child_shape == parent_shape;
+				let child_node = &nodes[child.shape_node];
+				let parent_node = &nodes[parent.shape_node];
+				let child_shape = child_node.shape();
+				let child_elems = child_shape.iter().product::<usize>();
+				let parent_shape = parent_node.shape();
+				let parent_elems = parent_shape.iter().product::<usize>();
+				let elems_eq = child_elems == parent_elems
+					&& child_node.can_be_batched == parent_node.can_be_batched;
 				match child.kind {
 					FragmentKind::Elementwise | FragmentKind::Trivial => match parent.kind {
 						FragmentKind::Elementwise
 						| FragmentKind::Trivial
 						| FragmentKind::Reduction => {
-							if shape_eq {
+							if elems_eq {
 								Some(*parent)
 							} else {
 								None
@@ -1490,20 +1461,14 @@ impl PreCompilation {
 					},
 					FragmentKind::Reduction => match parent.kind {
 						FragmentKind::Reduction => {
-							if shape_eq {
+							if elems_eq && child_shape.last() == parent_shape.last() {
 								Some(*child)
 							} else {
 								None
 							}
 						},
 						FragmentKind::Elementwise | FragmentKind::Trivial => {
-							if shape_eq {
-								Some(*child)
-							} else if let Some((_, red_rest)) = child_shape.split_last()
-								&& let Some((&ewise_top, ewise_rest)) = parent_shape.split_last()
-								&& ewise_rest == red_rest
-								&& ewise_top == 1
-							{
+							if elems_eq {
 								Some(*child)
 							} else {
 								None
@@ -1513,7 +1478,7 @@ impl PreCompilation {
 					},
 					FragmentKind::MatMul | FragmentKind::Attention => match parent.kind {
 						FragmentKind::Elementwise | FragmentKind::Trivial => {
-							if shape_eq {
+							if elems_eq {
 								Some(*child)
 							} else {
 								None
@@ -1537,17 +1502,12 @@ impl PreCompilation {
 			};
 			let parent_config = KernelConfig { kind: parent.kind, shape_node };
 
-			// - all nontrivial children are in the same kernel
-			// - each nontrivial child has 1 or 2 parents
-			//    - if 1 parent, it must be this parent
-			//    - if 2 parents, the other parent must be its dominator
-			//    - i have to be the dominator of all my nontrivial children
-			if let [child_idx] = &parent.nontrivial_children[..]
+			if let [child_idx] = &parent.reduced_children[..]
 				&& let child_idx = *child_idx
 				&& let child = &self.frags_postorder[child_idx]
 				&& let child_kernel = child.kernel
 				&& let child_config = &mut kernels[child_kernel]
-				&& child.nontrivial_parents.len() == 1
+				&& child.reduced_parent_count == 1
 				&& let Some(merged_config) =
 					KernelConfig::merge(child_config, &parent_config, &self.nodes_postorder)
 			{
@@ -1881,11 +1841,11 @@ impl PreCompilation {
 				)?;
 			}
 			if fragment.kind != FragmentKind::Trivial {
-				for &p in &fragment.nontrivial_parents {
-					let parent_id = format!("frag_{}", p.raw);
+				for &c in &fragment.reduced_children {
+					let child_id = format!("frag_{}", c.raw);
 					writeln!(
 						w,
-						"\t{node_id} -> {parent_id} [label=< >, style=bold, color=\"#ff0000\", constraint=true];",
+						"\t{child_id} -> {node_id} [label=< >, style=bold, color=\"#ff0000\", constraint=true];",
 					)?;
 				}
 			}
@@ -1904,6 +1864,50 @@ impl PreCompilation {
 
 //--------------------------------------------------------------------------------------------------
 
-//pub fn tree_eval(
+pub fn dag_eval<'a, NodeHandle: Clone, Value>(
+	mut to_process: Vec<NodeHandle>,
+	sentinel: NodeHandle,
+	is_valid_handle: &'a mut dyn FnMut(NodeHandle) -> bool,
+	get_children: &'a mut dyn FnMut(NodeHandle) -> &'a [NodeHandle],
+	get_cached: &mut dyn FnMut(NodeHandle) -> Option<Value>,
+	make_node: &mut dyn FnMut(NodeHandle, &[Value]) -> Value,
+) {
+	let root_count = to_process.len();
+
+	let mut values: Vec<Value> = Vec::new();
+	let mut phase2 = false;
+	while let Some(item) = to_process.pop() {
+		if !is_valid_handle(item.clone()) {
+			// Sentinel item. Go to phase 2.
+			debug_assert!(!phase2);
+			phase2 = true;
+			continue;
+		}
+
+		let children = get_children(item.clone());
+		if !phase2 {
+			if let Some(value) = get_cached(item.clone()) {
+				values.push(value);
+				continue;
+			}
+			if !children.is_empty() {
+				to_process.push(item);
+				to_process.push(sentinel.clone());
+				let x = to_process.len();
+				to_process.extend_from_slice(children);
+				to_process[x..].reverse();
+				continue;
+			}
+		}
+
+		phase2 = false;
+		let children = &values[values.len() - children.len()..];
+		let postorder_idx = make_node(item, children);
+		values.truncate(values.len() - children.len());
+		values.push(postorder_idx);
+	}
+	debug_assert!(!phase2);
+	debug_assert!(values.len() == root_count);
+}
 
 //--------------------------------------------------------------------------------------------------
