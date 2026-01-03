@@ -38,6 +38,7 @@ pub enum ExprNode {
 	Input(ExprInput),
 	Capture(ExprCapture),
 	Cast(ExprCast),
+	Label(ExprLabel),
 	Reshape(ExprReshape),
 	Unary(ExprUnary),
 	Binary(ExprBinary),
@@ -48,7 +49,7 @@ pub struct ExprConst {
 	pub value: f64,
 }
 pub enum ExprInput {
-	Tensor(Rc<TensorInput>),
+	Tensor(Rc<TensorRef>),
 	Scalar(Rc<ScalarRef>),
 }
 
@@ -60,7 +61,7 @@ pub enum CanBeBatched {
 
 // The tensor may be replaced before running the computation,
 // but the dtype needs to be correct.
-pub struct TensorInput {
+pub struct TensorRef {
 	pub name: Cow<'static, str>,
 	pub dtype: DType,
 	pub shape: Vec<usize>,
@@ -74,12 +75,17 @@ pub struct ScalarRef {
 
 pub struct ExprCapture {
 	pub expr: Rc<ExprNode>,
-	pub tensor_ref: Rc<TensorInput>,
+	pub tensor_ref: Rc<TensorRef>,
 }
 
 pub struct ExprCast {
 	pub expr: Rc<ExprNode>,
 	pub dtype: DType,
+}
+
+pub struct ExprLabel {
+	pub label: Cow<'static, str>,
+	pub expr: Rc<ExprNode>,
 }
 
 pub struct ExprReshape {
@@ -135,14 +141,14 @@ pub enum ExprBinaryKind {
 
 //--------------------------------------------------------------------------------------------------
 
-impl TensorInput {
+impl TensorRef {
 	pub fn new(
 		name: Cow<'static, str>,
 		dtype: DType,
 		shape: Vec<usize>,
 		can_be_batched: CanBeBatched,
-	) -> Rc<TensorInput> {
-		Rc::new(TensorInput {
+	) -> Rc<TensorRef> {
+		Rc::new(TensorRef {
 			dtype,
 			shape,
 			can_be_batched: can_be_batched != CanBeBatched::No,
@@ -160,7 +166,7 @@ impl ScalarRef {
 //--------------------------------------------------------------------------------------------------
 
 impl Expr {
-	pub fn new_tensor_input(tensor_ref: Rc<TensorInput>) -> Expr {
+	pub fn new_tensor_input(tensor_ref: Rc<TensorRef>) -> Expr {
 		Expr {
 			node: Rc::new(ExprNode::Input(ExprInput::Tensor(tensor_ref))),
 		}
@@ -181,6 +187,12 @@ impl Expr {
 	pub fn cast(self, dtype: DType) -> Expr {
 		Expr {
 			node: Rc::new(ExprNode::Cast(ExprCast { expr: self.node, dtype })),
+		}
+	}
+
+	pub fn label(self, label: Cow<'static, str>) -> Expr {
+		Expr {
+			node: Rc::new(ExprNode::Label(ExprLabel { label, expr: self.node })),
 		}
 	}
 
@@ -295,10 +307,14 @@ impl Expr {
 		}
 	}
 
-	pub fn capture(self, tensor_ref: Rc<TensorInput>) -> Expr {
+	pub fn capture(self, tensor_ref: Rc<TensorRef>) -> Expr {
 		Expr {
 			node: Rc::new(ExprNode::Capture(ExprCapture { expr: self.node, tensor_ref })),
 		}
+	}
+
+	pub fn optional_capture(self, tensor_ref: Option<Rc<TensorRef>>) -> Expr {
+		if let Some(tensor_ref) = tensor_ref { self.capture(tensor_ref) } else { self }
 	}
 
 	pub fn row_times_mat(self, mat: Expr) -> Expr {

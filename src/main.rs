@@ -165,7 +165,8 @@ use std::rc::Rc;
 use thin_vec::thin_vec;
 use x17ai::autograd::{AutogradTensor, LossFn};
 use x17ai::new::expr::compile2::PreCompilation;
-use x17ai::new::expr::{CanBeBatched, Expr, ScalarRef, TensorInput};
+use x17ai::new::expr::{CanBeBatched, Expr, ScalarRef, TensorRef};
+use x17ai::new::nn::rms_norm::rms_norm;
 use x17ai::new::tensor::TensorLiteral1D;
 use x17ai::nn::ModelContext;
 use x17ai::nn::fragments::linear::Linear;
@@ -413,6 +414,7 @@ fn test5(dev: Rc<dyn x17ai::new::device::Device>) -> Expr {
 }
 */
 
+/*
 pub struct ModuleTemplate {
 	//
 }
@@ -438,6 +440,7 @@ pub fn model() {
 	model.connect(layer1["output"], layer2["input"]);
 	model.connect(layer2["output"], model.output());
 }
+*/
 
 fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let dev = x17ai::new::device::cpu::CPUDevice::new();
@@ -455,14 +458,14 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	//let q = TensorRef::new("q".into(), io_dtype, vec![4, 4, 64], CanBeBatched::Yes);
 	//let kv = TensorRef::new("kv".into(), io_dtype, vec![1, 4, 64 + 64], CanBeBatched::Yes);
 
-	let t = TensorInput::new("t".into(), io_dtype, vec![1024], CanBeBatched::Yes);
-	let r = TensorInput::new("r".into(), io_dtype, vec![1024], CanBeBatched::Yes);
-	let mq = TensorInput::new("mq".into(), io_dtype, vec![1024, 1024], CanBeBatched::No);
-	let mkv = TensorInput::new("mkv".into(), io_dtype, vec![1024, 4 * (64 + 64)], CanBeBatched::No);
-	let mw = TensorInput::new("mw".into(), io_dtype, vec![1024, 2048], CanBeBatched::No);
+	let t = TensorRef::new("t".into(), io_dtype, vec![1024], CanBeBatched::Yes);
+	let r = TensorRef::new("r".into(), io_dtype, vec![1024], CanBeBatched::Yes);
+	let mq = TensorRef::new("mq".into(), io_dtype, vec![1024, 1024], CanBeBatched::No);
+	let mkv = TensorRef::new("mkv".into(), io_dtype, vec![1024, 4 * (64 + 64)], CanBeBatched::No);
+	let mw = TensorRef::new("mw".into(), io_dtype, vec![1024, 2048], CanBeBatched::No);
 	let expr = Expr::new_tensor_input(t.clone());
 
-	let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?.cast(io_dtype);
+	let expr = rms_norm(expr, 0.001, internal_dtype, io_dtype);
 	//let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?.cast(io_dtype);
 
 	let qq = expr

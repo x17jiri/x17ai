@@ -29,7 +29,7 @@ use thin_vec::{ThinVec, thin_vec};
 use super::super::expr;
 use super::{ExprBinaryKind, ExprInput, ExprNode, ExprUnaryKind};
 use crate::define_index_type32;
-use crate::new::expr::{ExprBinary, ExprCapture, ExprCast, ExprReshape, ExprUnary};
+use crate::new::expr::{ExprBinary, ExprCapture, ExprCast, ExprLabel, ExprReshape, ExprUnary};
 use crate::tensor::DType;
 use crate::tensor::device::dtype::common_dtype;
 use crate::util::bitmap::IndexBitmap;
@@ -135,6 +135,8 @@ pub struct Node {
 	/// to make sure we use `x_index` correctly.
 	pub x_index: UntypedIndex32,
 	pub x_index_state: XIndexState,
+
+	pub labels: ThinVec<Cow<'static, str>>,
 }
 
 impl Default for Node {
@@ -152,6 +154,7 @@ impl Default for Node {
 			is_trivial_head: false,
 			x_index: UntypedIndex32::new_sentinel(),
 			x_index_state: XIndexState::Uninitialized,
+			labels: ThinVec::new(),
 		}
 	}
 }
@@ -286,7 +289,7 @@ define_index_type32!(NodeIndex32);
 type NodeVec = IndexVec<NodeIndex32, Node>;
 
 pub struct TensorRef {
-	pub tensor_ref: Rc<expr::TensorInput>,
+	pub tensor_ref: Rc<expr::TensorRef>,
 	pub input_node: NodeIndex32,
 	pub output_node: NodeIndex32,
 	pub shape: ThinVec<usize>,
@@ -359,7 +362,7 @@ pub struct PreCompilation {
 	const_vec: ConstVec,
 	scalar_map: HashMap<*const expr::ScalarRef, ScalarRefIndex32>,
 	scalar_vec: ScalarVec,
-	tensor_map: HashMap<*const expr::TensorInput, TensorRefIndex32>,
+	tensor_map: HashMap<*const expr::TensorRef, TensorRefIndex32>,
 	tensor_vec: TensorVec,
 	sum_to_mean: Vec<SumToMean>,
 	frags_postorder: FragVec,
@@ -485,6 +488,10 @@ impl PreCompilation {
 			ExprNode::Cast(cast) => {
 				let child_idx = self.load_expr(&cast.expr, state);
 				self.load_cast(cast, child_idx)
+			},
+			ExprNode::Label(label) => {
+				let child_idx = self.load_expr(&label.expr, state);
+				self.load_label(label, child_idx)
 			},
 			ExprNode::Reshape(reshape) => {
 				let child_idx = self.load_expr(&reshape.expr, state);
@@ -688,6 +695,16 @@ impl PreCompilation {
 			cache_key: format!("cast:{:?}:{:?}", cast.dtype, child_idx.raw),
 			err: ThinVec::new(),
 		})
+	}
+
+	fn load_label(
+		&mut self,
+		label: &ExprLabel,
+		child_idx: NodeIndex32,
+	) -> Result<LoadedNode, NodeIndex32> {
+		let child = &mut self.nodes_postorder[child_idx];
+		child.labels.push(label.label.clone());
+		Err(child_idx)
 	}
 
 	fn load_sum_to_mean(&mut self, child_idx: NodeIndex32) -> LoadedNode {
@@ -999,7 +1016,7 @@ impl PreCompilation {
 
 	fn add_tensor_input(
 		&mut self,
-		tensor_ref: Rc<expr::TensorInput>,
+		tensor_ref: Rc<expr::TensorRef>,
 		node: NodeIndex32,
 	) -> Result<TensorRefIndex32, NodeIndex32> {
 		let key = std::ptr::from_ref(tensor_ref.as_ref());
@@ -1026,7 +1043,7 @@ impl PreCompilation {
 
 	fn add_tensor_output(
 		&mut self,
-		tensor_ref: Rc<expr::TensorInput>,
+		tensor_ref: Rc<expr::TensorRef>,
 		node: NodeIndex32,
 	) -> TensorRefIndex32 {
 		let key = std::ptr::from_ref(tensor_ref.as_ref());
@@ -1441,51 +1458,61 @@ impl PreCompilation {
 				let child_node = &nodes[child.shape_node];
 				let parent_node = &nodes[parent.shape_node];
 				let child_shape = child_node.shape();
-				let child_elems = child_shape.iter().product::<usize>();
 				let parent_shape = parent_node.shape();
-				let parent_elems = parent_shape.iter().product::<usize>();
-				let elems_eq = child_elems == parent_elems
-					&& child_node.can_be_batched == parent_node.can_be_batched;
-				match child.kind {
-					FragmentKind::Elementwise | FragmentKind::Trivial => match parent.kind {
-						FragmentKind::Elementwise
-						| FragmentKind::Trivial
-						| FragmentKind::Reduction => {
-							if elems_eq {
-								Some(*parent)
-							} else {
-								None
-							}
-						},
-						_ => None,
-					},
-					FragmentKind::Reduction => match parent.kind {
+				if child.kind == FragmentKind::Reduction {
+					let (c_dims, [c_top]) = PreCompilation::split_shape::<1>(child_shape);
+					let (p_dims, [p_top]) = PreCompilation::split_shape::<1>(parent_shape);
+					let c_elems = c_dims.iter().product::<usize>();
+					let p_elems = p_dims.iter().product::<usize>();
+					let elems_eq = c_elems == p_elems
+						&& child_node.can_be_batched == parent_node.can_be_batched;
+					match parent.kind {
 						FragmentKind::Reduction => {
-							if elems_eq && child_shape.last() == parent_shape.last() {
+							if elems_eq && c_top == p_top {
 								Some(*child)
 							} else {
 								None
 							}
 						},
 						FragmentKind::Elementwise | FragmentKind::Trivial => {
-							if elems_eq {
+							if elems_eq && (c_top == p_top || p_top == 1) {
 								Some(*child)
 							} else {
 								None
 							}
 						},
 						_ => None,
-					},
-					FragmentKind::MatMul | FragmentKind::Attention => match parent.kind {
-						FragmentKind::Elementwise | FragmentKind::Trivial => {
-							if elems_eq {
-								Some(*child)
-							} else {
-								None
-							}
+					}
+				} else {
+					let child_elems = child_shape.iter().product::<usize>();
+					let parent_elems = parent_shape.iter().product::<usize>();
+					let elems_eq = child_elems == parent_elems
+						&& child_node.can_be_batched == parent_node.can_be_batched;
+					match child.kind {
+						FragmentKind::Reduction => unreachable!(),
+						FragmentKind::Elementwise | FragmentKind::Trivial => match parent.kind {
+							FragmentKind::Elementwise
+							| FragmentKind::Trivial
+							| FragmentKind::Reduction => {
+								if elems_eq {
+									Some(*parent)
+								} else {
+									None
+								}
+							},
+							_ => None,
 						},
-						_ => None,
-					},
+						FragmentKind::MatMul | FragmentKind::Attention => match parent.kind {
+							FragmentKind::Elementwise | FragmentKind::Trivial => {
+								if elems_eq {
+									Some(*child)
+								} else {
+									None
+								}
+							},
+							_ => None,
+						},
+					}
 				}
 			}
 		}
@@ -1660,6 +1687,7 @@ impl PreCompilation {
 	) -> std::fmt::Result {
 		writeln!(w, "digraph G {{")?;
 		writeln!(w, "\trankdir=BT;")?;
+		writeln!(w, "\tnewrank=true;")?;
 		for i in self.nodes_postorder.indexes() {
 			let node = &self.nodes_postorder[i];
 			let node_id = format!("node_{}", i.raw);
@@ -1763,6 +1791,19 @@ impl PreCompilation {
 					)?;
 				}
 			}
+			for (label_idx, label) in node.labels.iter().enumerate() {
+				let label = Self::sanitize_for_graphviz_html(label);
+				writeln!(w, "\t{{ rank=same; {node_id}; {node_id}_label_{label_idx}; }};")?;
+				writeln!(
+					w,
+					"\t{node_id}_label_{label_idx} [label=<<font color='purple'><b>{label}</b></font>>, shape=box, style=filled, fillcolor=\"#eeeeff\"];",
+				)?;
+				writeln!(
+					w,
+					"\t{node_id} -> {node_id}_label_{} [style=dashed, color=\"#800080\"];",
+					label_idx
+				)?;
+			}
 			for &capt_idx in &node.capture {
 				let label = format!(
 					"{}{}",
@@ -1782,6 +1823,7 @@ impl PreCompilation {
 						w,
 						"{cap_id} [label=<<b>Tensor</b><br/><font color='blue'><b>{name}</b></font>>, shape=box, style=filled, fillcolor=\"#cceeff\"];"
 					)?;
+					//writeln!(w, "\t{{ rank=same; {node_id}; {cap_id}; }};")?;
 				} else {
 					let cap_id = format!("node_{}", input_node.raw);
 					writeln!(w, "\t{node_id} -> {cap_id} [label=<{label}>, constraint=true];")?;
