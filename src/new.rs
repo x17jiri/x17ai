@@ -5,6 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
+pub mod autograd;
 pub mod device;
 pub mod expr;
 pub mod nn;

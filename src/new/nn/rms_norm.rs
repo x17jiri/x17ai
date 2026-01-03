@@ -5,12 +5,22 @@
 //
 //------------------------------------------------------------------------------
 
+use std::rc::Rc;
+
+use crate::new::autograd::{Autograd, AutogradExpr, BackwardFn};
 use crate::new::expr::{CanBeBatched, Expr, TensorRef};
 use crate::tensor::DType;
 
 //--------------------------------------------------------------------------------------------------
 
-pub fn rms_norm0(inp: Expr, eps: f64, internal_dtype: DType, output_dtype: DType) -> Expr {
+pub fn rms_norm(
+	inp: AutogradExpr,
+	eps: f64,
+	internal_dtype: DType,
+	output_dtype: DType,
+) -> AutogradExpr {
+	let (inp, inp_backward) = inp.unpack();
+
 	let eps = Expr::new_const("eps".into(), eps);
 	let inp = inp.label("rms_norm.inp".into());
 	let inp = inp.cast(internal_dtype);
@@ -18,46 +28,65 @@ pub fn rms_norm0(inp: Expr, eps: f64, internal_dtype: DType, output_dtype: DType
 	let magn_recip = ((inp.clone() * inp.clone()).mean().sqrt() + eps).recip();
 	let magn_recip = magn_recip.label("rms_norm.magn_recip".into());
 
-	let out = (inp * magn_recip).cast(output_dtype);
+	let out = (inp * magn_recip.clone()).cast(output_dtype);
 	let out = out.label("rms_norm.out".into());
-	out
-}
 
-pub fn rms_norm(
-	inp: Expr,
-	eps: f64,
-	internal_dtype: DType,
-	output_dtype: DType,
-	grad: bool,
-) -> Expr {
-	let out_capture = if grad {
-		Some(TensorRef::new("rms_norm.out".into(), output_dtype, vec![1024], CanBeBatched::Yes))
-	} else {
-		None
-	};
-	let magn_recip_capture = if grad {
-		Some(TensorRef::new(
+	if let Some(inp_backward) = inp_backward {
+		let out_capture =
+			TensorRef::new("rms_norm.out".into(), output_dtype, vec![1024], CanBeBatched::Yes);
+		let magn_recip_capture = TensorRef::new(
 			"rms_norm.magn_recip".into(),
 			internal_dtype,
 			vec![1024],
 			CanBeBatched::Yes,
-		))
+		);
+		let out = out.capture(out_capture);
+		let magn_recip = magn_recip.capture(magn_recip_capture);
+		AutogradExpr::new(out.first(magn_recip), None) // TODO: implement backward
 	} else {
-		None
-	};
-
-	let eps = Expr::new_const("eps".into(), eps);
-	let inp = inp.label("rms_norm.inp".into());
-	let inp = inp.cast(internal_dtype);
-
-	let magn_recip = ((inp.clone() * inp.clone()).mean().sqrt() + eps).recip();
-	let magn_recip = magn_recip.label("rms_norm.magn_recip".into());
-	let magn_recip = magn_recip.optional_capture(magn_recip_capture);
-
-	let out = (inp * magn_recip).cast(output_dtype);
-	let out = out.label("rms_norm.out".into());
-	let out = out.optional_capture(out_capture);
-	out
+		AutogradExpr::new(out, None)
+	}
 }
+
+pub struct RMSNormBackwardFn_Precise {
+	out: Rc<TensorRef>,
+	magn_recip: Rc<TensorRef>,
+	inp_backward: Box<dyn BackwardFn>,
+}
+
+pub struct FakeBackwardFn;
+
+impl BackwardFn for FakeBackwardFn {
+	fn run(self: Box<Self>, _d_out: Expr, _autograd: &mut Autograd) {
+	}
+}
+
+/*impl BackwardFn for RMSNormBackwardFn_Precise {
+	fn run(self: Box<Self>, d_out: Expr) -> Option<Box<dyn BackwardFn>> {
+		let Self { out, magn_recip, inp_backward } = Box::into_inner(self);
+		let internal_dtype = common_dtype(d_out.dtype(), magn_recip.dtype());
+		let sum_to_mean = out.sum_to_mean();
+
+		let g = magn_recip.new_empty_like(internal_dtype)?; // [..., 1]
+		g.assign(custom_kernel!(
+			internal_dtype,
+			[out: &out, d_out: &d_out], (sum_to_mean: sum_to_mean), {
+				(out * d_out).sum() * sum_to_mean
+			}
+		))?;
+
+		let d_inp = out.reuse_or_new_like()?;
+
+		d_inp.assign(custom_kernel!(
+			internal_dtype,
+			[d_out: &d_out, out: &out, g: &g, magn_recip: &magn_recip], (), {
+				(d_out - (out * g)) * magn_recip
+			}
+		))?;
+
+		queue.add(inp_backward, d_inp);
+		Ok(())
+	}
+}*/
 
 //--------------------------------------------------------------------------------------------------

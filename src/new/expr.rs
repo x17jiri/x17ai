@@ -297,11 +297,11 @@ impl Expr {
 		}
 	}
 
-	pub fn first(first: Expr, second: Expr) -> Expr {
+	pub fn first(self, second: Expr) -> Expr {
 		Expr {
 			node: Rc::new(ExprNode::Binary(ExprBinary {
 				kind: ExprBinaryKind::First,
-				lhs: first.node,
+				lhs: self.node,
 				rhs: second.node,
 			})),
 		}
@@ -311,10 +311,6 @@ impl Expr {
 		Expr {
 			node: Rc::new(ExprNode::Capture(ExprCapture { expr: self.node, tensor_ref })),
 		}
-	}
-
-	pub fn optional_capture(self, tensor_ref: Option<Rc<TensorRef>>) -> Expr {
-		if let Some(tensor_ref) = tensor_ref { self.capture(tensor_ref) } else { self }
 	}
 
 	pub fn row_times_mat(self, mat: Expr) -> Expr {

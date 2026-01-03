@@ -11,6 +11,7 @@
 #![feature(macro_metavar_expr)]
 #![feature(string_from_utf8_lossy_owned)]
 #![feature(f16)]
+#![feature(thin_box)]
 
 //use x17ai::nn::layers::{Layer, Linear, LossFunction, SoftmaxCrossEntropy};
 //use x17ai::nn::{EvalContext, ModelContext};
@@ -160,13 +161,15 @@ fn laplacian(v: &ArrayView2<f32>) -> Array2<f32> {
 		+ v.slice(s![2.., 1..-1])
 }*/
 
+use std::boxed::ThinBox;
 use std::rc::Rc;
 
 use thin_vec::thin_vec;
 use x17ai::autograd::{AutogradTensor, LossFn};
+use x17ai::new::autograd::{AutogradExpr, BackwardFn};
 use x17ai::new::expr::compile2::PreCompilation;
 use x17ai::new::expr::{CanBeBatched, Expr, ScalarRef, TensorRef};
-use x17ai::new::nn::rms_norm::rms_norm;
+use x17ai::new::nn::rms_norm::{FakeBackwardFn, rms_norm};
 use x17ai::new::tensor::TensorLiteral1D;
 use x17ai::nn::ModelContext;
 use x17ai::nn::fragments::linear::Linear;
@@ -465,7 +468,9 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let mw = TensorRef::new("mw".into(), io_dtype, vec![1024, 2048], CanBeBatched::No);
 	let expr = Expr::new_tensor_input(t.clone());
 
+	let expr = AutogradExpr::new(expr, Some(ThinBox::new_unsize(FakeBackwardFn)));
 	let expr = rms_norm(expr, 0.001, internal_dtype, io_dtype);
+	let expr = expr.expr;
 	//let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?.cast(io_dtype);
 
 	let qq = expr
