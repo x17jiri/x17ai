@@ -61,8 +61,8 @@ impl BackwardFn for FakeBackwardFn {
 	}
 }
 
-/*impl BackwardFn for RMSNormBackwardFn_Precise {
-	fn run(self: Box<Self>, d_out: Expr) -> Option<Box<dyn BackwardFn>> {
+impl BackwardFn for RMSNormBackwardFn_Precise {
+	fn run(self: Box<Self>, d_out: Expr, autograd: &mut Autograd) {
 		let Self { out, magn_recip, inp_backward } = Box::into_inner(self);
 		let internal_dtype = common_dtype(d_out.dtype(), magn_recip.dtype());
 		let sum_to_mean = out.sum_to_mean();
@@ -87,6 +87,6 @@ impl BackwardFn for FakeBackwardFn {
 		queue.add(inp_backward, d_inp);
 		Ok(())
 	}
-}*/
+}
 
 //--------------------------------------------------------------------------------------------------
