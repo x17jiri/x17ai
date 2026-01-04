@@ -29,9 +29,8 @@ use thin_vec::{ThinVec, thin_vec};
 use super::super::expr;
 use super::{ExprBinaryKind, ExprInput, ExprNode, ExprUnaryKind};
 use crate::define_index_type32;
-use crate::new::expr::{ExprBinary, ExprCapture, ExprCast, ExprLabel, ExprReshape, ExprUnary};
+use crate::new::expr::{ExprBinary, ExprCapture, ExprKind, ExprLabel, ExprUnary};
 use crate::tensor::DType;
-use crate::tensor::device::dtype::common_dtype;
 use crate::util::bitmap::IndexBitmap;
 use crate::util::index_vec::{IndexTrait, IndexVec, UntypedIndex32};
 use crate::util::{LossyFrom, ToBoxedSlice};
@@ -110,7 +109,7 @@ pub struct Node {
 	pub dtype: Option<DType>,
 
 	/// When `None`, the output is scalar.
-	pub shape: Option<ThinVec<usize>>, // TODO - replace with thin Box<[usize]>
+	pub shape: Rc<[usize]>,
 
 	pub can_be_batched: bool,
 	pub children: [NodeIndex32; 2],
@@ -137,26 +136,6 @@ pub struct Node {
 	pub x_index_state: XIndexState,
 
 	pub labels: ThinVec<Cow<'static, str>>,
-}
-
-impl Default for Node {
-	fn default() -> Self {
-		Self {
-			node_kind: NodeKind::Input,
-			shape: None,
-			can_be_batched: false,
-			dtype: None,
-			parents: SmallVec::new(),
-			children: [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()],
-			children_broadcast: [false, false],
-			capture: ThinVec::new(),
-			is_dead: false,
-			is_trivial_head: false,
-			x_index: UntypedIndex32::new_sentinel(),
-			x_index_state: XIndexState::Uninitialized,
-			labels: ThinVec::new(),
-		}
-	}
 }
 
 impl Node {
@@ -277,11 +256,7 @@ impl Node {
 	}
 
 	pub fn shape(&self) -> &[usize] {
-		self.shape.as_ref().map_or(&[], |vec| vec)
-	}
-
-	pub fn opt_shape(&self) -> Option<&[usize]> {
-		self.shape.as_ref().map(|vec| &vec[..])
+		self.shape.as_ref()
 	}
 }
 
@@ -292,7 +267,7 @@ pub struct TensorRef {
 	pub tensor_ref: Rc<expr::TensorRef>,
 	pub input_node: NodeIndex32,
 	pub output_node: NodeIndex32,
-	pub shape: ThinVec<usize>,
+	pub shape: Rc<[usize]>,
 	pub can_be_batched: bool,
 }
 
@@ -352,11 +327,6 @@ define_index_type32!(FragPreorderIndex32);
 
 define_index_type32!(KernelIndex32);
 
-pub struct SumToMean {
-	pub node: NodeIndex32,
-	pub const_idx: ConstRefIndex32,
-}
-
 pub struct PreCompilation {
 	nodes_postorder: NodeVec,
 	const_vec: ConstVec,
@@ -364,10 +334,10 @@ pub struct PreCompilation {
 	scalar_vec: ScalarVec,
 	tensor_map: HashMap<*const expr::TensorRef, TensorRefIndex32>,
 	tensor_vec: TensorVec,
-	sum_to_mean: Vec<SumToMean>,
 	frags_postorder: FragVec,
 
 	err_log: ErrorLog,
+	empty_shape: Rc<[usize]>,
 }
 
 struct LoadedNode {
@@ -428,9 +398,24 @@ impl PreCompilation {
 			scalar_vec: ScalarVec::with_capacity(4),
 			tensor_map: HashMap::new(),
 			tensor_vec: TensorVec::with_capacity(4),
-			sum_to_mean: Vec::new(),
 			frags_postorder: FragVec::with_capacity(16),
 			err_log: ErrorLog::new(),
+			/*node_defaults: Node {
+				node_kind: NodeKind::Input,
+				dtype: None,
+				shape: Rc::new([]),
+				can_be_batched: false,
+				parents: SmallVec::new(),
+				children: [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()],
+				children_broadcast: [false, false],
+				capture: ThinVec::new(),
+				is_dead: false,
+				is_trivial_head: false,
+				x_index: UntypedIndex32::new_sentinel(),
+				x_index_state: XIndexState::Uninitialized,
+				labels: ThinVec::new(),
+			},*/
+			empty_shape: Rc::new([]),
 		};
 		let _ = comp.analyze(expr);
 		comp
@@ -456,6 +441,71 @@ impl PreCompilation {
 		self.err_log.check_errors()
 	}
 
+	pub fn new_nullary_node(
+		expr: &ExprNode,
+		node_kind: NodeKind,
+		x_index: UntypedIndex32,
+		x_index_state: XIndexState,
+	) -> Node {
+		Node {
+			node_kind,
+			dtype: expr.dtype,
+			shape: expr.shape.clone(),
+			can_be_batched: expr.can_be_batched,
+			parents: SmallVec::new(),
+			children: [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()],
+			children_broadcast: [false, false],
+			capture: ThinVec::new(),
+			is_dead: false,
+			is_trivial_head: false,
+			x_index,
+			x_index_state,
+			labels: ThinVec::new(),
+		}
+	}
+
+	pub fn new_unary_node(expr: &ExprNode, node_kind: NodeKind, child_idx: NodeIndex32) -> Node {
+		Node {
+			node_kind,
+			dtype: expr.dtype,
+			shape: expr.shape.clone(),
+			can_be_batched: expr.can_be_batched,
+			parents: SmallVec::new(),
+			children: [child_idx, NodeIndex32::new_sentinel()],
+			children_broadcast: [false, false],
+			capture: ThinVec::new(),
+			is_dead: false,
+			is_trivial_head: false,
+			x_index: UntypedIndex32::new_sentinel(),
+			x_index_state: XIndexState::Uninitialized,
+			labels: ThinVec::new(),
+		}
+	}
+
+	pub fn new_binary_node(
+		expr: &ExprNode,
+		bin_expr: &ExprBinary,
+		node_kind: NodeKind,
+		lhs_idx: NodeIndex32,
+		rhs_idx: NodeIndex32,
+	) -> Node {
+		Node {
+			node_kind,
+			dtype: expr.dtype,
+			shape: expr.shape.clone(),
+			can_be_batched: expr.can_be_batched,
+			parents: SmallVec::new(),
+			children: [lhs_idx, rhs_idx],
+			children_broadcast: [bin_expr.lhs_broadcasted, bin_expr.rhs_broadcasted],
+			capture: ThinVec::new(),
+			is_dead: false,
+			is_trivial_head: false,
+			x_index: UntypedIndex32::new_sentinel(),
+			x_index_state: XIndexState::Uninitialized,
+			labels: ThinVec::new(),
+		}
+	}
+
 	// TODO - refactor to make non recursive
 	fn load_expr(&mut self, expr: &ExprNode, state: &mut LoadExprState) -> NodeIndex32 {
 		let expr_key = std::ptr::from_ref(expr);
@@ -463,45 +513,45 @@ impl PreCompilation {
 			return *index;
 		}
 
-		let t = match expr {
-			ExprNode::Const(cst) => {
+		let t = match &expr.kind {
+			ExprKind::Const(cst) => {
 				let idx =
 					self.add_const(cst.name.clone(), cst.value, self.nodes_postorder.next_index());
 				Ok(LoadedNode {
-					node: Node {
-						node_kind: NodeKind::Const,
-						x_index: idx.to_untyped(),
-						x_index_state: XIndexState::ConstRef,
-						..Default::default()
-					},
+					node: Self::new_nullary_node(
+						expr,
+						NodeKind::Const,
+						idx.to_untyped(),
+						XIndexState::ConstRef,
+					),
 					cache_key: String::new(),
 					err: ThinVec::new(),
 				})
 			},
-			ExprNode::Input(input) => {
-				self.load_input(input) //
+			ExprKind::Input(input) => {
+				self.load_input(expr, input) //
 			},
-			ExprNode::Capture(capture) => {
+			ExprKind::Capture(capture) => {
 				let child_idx = self.load_expr(&capture.expr, state);
 				self.load_capture(capture, child_idx)
 			},
-			ExprNode::Cast(cast) => {
+			ExprKind::Cast(cast) => {
 				let child_idx = self.load_expr(&cast.expr, state);
-				self.load_cast(cast, child_idx)
+				self.load_cast(expr, child_idx)
 			},
-			ExprNode::Label(label) => {
+			ExprKind::Label(label) => {
 				let child_idx = self.load_expr(&label.expr, state);
 				self.load_label(label, child_idx)
 			},
-			ExprNode::Reshape(reshape) => {
+			ExprKind::Reshape(reshape) => {
 				let child_idx = self.load_expr(&reshape.expr, state);
-				self.load_reshape(reshape, child_idx)
+				self.load_reshape(expr, child_idx)
 			},
-			ExprNode::Unary(unary) => {
+			ExprKind::Unary(unary) => {
 				let child_idx = self.load_expr(&unary.expr, state);
-				self.load_unary(unary, child_idx)
+				self.load_unary(expr, unary, child_idx)
 			},
-			ExprNode::Binary(binary) => {
+			ExprKind::Binary(binary) => {
 				let a_idx = self.load_expr(&binary.lhs, state);
 				let b_idx = self.load_expr(&binary.rhs, state);
 				self.load_binary(binary, a_idx, b_idx)
@@ -550,22 +600,19 @@ impl PreCompilation {
 		next_index
 	}
 
-	fn load_input(&mut self, input: &ExprInput) -> Result<LoadedNode, NodeIndex32> {
-		let dtype;
+	fn load_input(
+		&mut self,
+		expr: &ExprNode,
+		input: &ExprInput,
+	) -> Result<LoadedNode, NodeIndex32> {
 		let x_index;
 		let x_index_state;
-		let shape;
-		let can_be_batched;
 		match input {
 			ExprInput::Tensor(tensor_ref) => {
-				dtype = Some(tensor_ref.dtype);
 				match self.add_tensor_input(tensor_ref.clone(), self.nodes_postorder.next_index()) {
 					Ok(tensor_index) => {
 						x_index = tensor_index.to_untyped();
 						x_index_state = XIndexState::TensorRef;
-						let t = &self.tensor_vec[tensor_index];
-						shape = Some(t.shape.clone());
-						can_be_batched = t.can_be_batched;
 					},
 					Err(existing_node) => {
 						return Err(existing_node);
@@ -573,13 +620,10 @@ impl PreCompilation {
 				}
 			},
 			ExprInput::Scalar(scalar_ref) => {
-				dtype = None;
-				can_be_batched = false;
 				match self.add_scalar_input(scalar_ref.clone(), self.nodes_postorder.next_index()) {
 					Ok(scalar_index) => {
 						x_index = scalar_index.to_untyped();
 						x_index_state = XIndexState::ScalarRef;
-						shape = None;
 					},
 					Err(existing_node) => {
 						return Err(existing_node);
@@ -588,16 +632,7 @@ impl PreCompilation {
 			},
 		}
 		Ok(LoadedNode {
-			node: Node {
-				node_kind: NodeKind::Input,
-				dtype,
-				shape,
-				can_be_batched,
-				children: [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()],
-				x_index,
-				x_index_state,
-				..Default::default()
-			},
+			node: Self::new_nullary_node(expr, NodeKind::Input, x_index, x_index_state),
 			cache_key: String::new(),
 			err: ThinVec::new(),
 		})
@@ -623,9 +658,15 @@ impl PreCompilation {
 				dtype: child.dtype,
 				shape: child.shape.clone(),
 				can_be_batched: child.can_be_batched,
+				parents: SmallVec::new(),
 				children: [child_idx, NodeIndex32::new_sentinel()],
+				children_broadcast: [false, false],
 				capture: thin_vec![tensor_idx],
-				..Default::default()
+				is_dead: false,
+				is_trivial_head: false,
+				x_index: UntypedIndex32::new_sentinel(),
+				x_index_state: XIndexState::Uninitialized,
+				labels: ThinVec::new(),
 			},
 			cache_key: format!("identity:{:?}", child_idx.raw),
 			err: ThinVec::new(),
@@ -634,65 +675,24 @@ impl PreCompilation {
 
 	fn load_reshape(
 		&self,
-		reshape: &ExprReshape,
+		expr: &ExprNode,
 		child_idx: NodeIndex32,
 	) -> Result<LoadedNode, NodeIndex32> {
-		let child = &self.nodes_postorder[child_idx];
-		let mut err = ThinVec::new();
-		let old_shape = child.shape();
-		let mut shape = ThinVec::from(old_shape);
-		let keep = shape.len().saturating_sub(reshape.reshape_n as usize);
-		let old_elems = old_shape.iter().skip(keep).product::<usize>();
-		let new_elems = reshape.reshape_to.iter().product::<usize>();
-		if old_elems != new_elems {
-			cold_path();
-			err.push(format!(
-				"Reshape: element count mismatch (got {new_elems}, expected {old_elems})",
-			));
-		}
-		shape.truncate(keep);
-		shape.extend_from_slice(&reshape.reshape_to);
-
-		if shape == old_shape {
-			return Err(child_idx);
-		}
-
 		Ok(LoadedNode {
-			node: Node {
-				node_kind: NodeKind::Reshape,
-				dtype: child.dtype,
-				shape: Some(shape),
-				can_be_batched: child.can_be_batched,
-				children: [child_idx, NodeIndex32::new_sentinel()],
-				..Default::default()
-			},
-			cache_key: format!(
-				"reshape:{:?}:{:?}:{:?}",
-				reshape.reshape_n, reshape.reshape_to, child_idx.raw
-			),
-			err,
+			node: Self::new_unary_node(expr, NodeKind::Reshape, child_idx),
+			cache_key: format!("reshape:{:?}:{}", expr.shape(), child_idx.raw),
+			err: ThinVec::new(),
 		})
 	}
 
 	fn load_cast(
 		&self,
-		cast: &ExprCast,
+		expr: &ExprNode,
 		child_idx: NodeIndex32,
 	) -> Result<LoadedNode, NodeIndex32> {
-		let child = &self.nodes_postorder[child_idx];
-		if child.dtype == Some(cast.dtype) {
-			return Err(child_idx);
-		}
 		Ok(LoadedNode {
-			node: Node {
-				node_kind: NodeKind::Cast,
-				dtype: Some(cast.dtype),
-				shape: child.shape.clone(),
-				can_be_batched: child.can_be_batched,
-				children: [child_idx, NodeIndex32::new_sentinel()],
-				..Default::default()
-			},
-			cache_key: format!("cast:{:?}:{:?}", cast.dtype, child_idx.raw),
+			node: Self::new_unary_node(expr, NodeKind::Cast, child_idx),
+			cache_key: format!("cast:{:?}:{:?}", expr.dtype, child_idx.raw),
 			err: ThinVec::new(),
 		})
 	}
@@ -707,35 +707,9 @@ impl PreCompilation {
 		Err(child_idx)
 	}
 
-	fn load_sum_to_mean(&mut self, child_idx: NodeIndex32) -> LoadedNode {
-		let mut err = ThinVec::new();
-		let child = &self.nodes_postorder[child_idx];
-		let width = if let Some(&w) = child.shape.as_ref().and_then(|vec| vec.last()) {
-			w
-		} else {
-			cold_path();
-			err.push(format!("SumToMean: missing reduce dimension"));
-			1
-		};
-		// Insert `Const` node.
-		let c = 1.0 / f64::lossy_from(width);
-		let const_idx =
-			self.add_const(format!("1.0 / {width}").into(), c, self.nodes_postorder.next_index());
-		self.sum_to_mean.push(SumToMean { node: child_idx, const_idx });
-		LoadedNode {
-			node: Node {
-				node_kind: NodeKind::Const,
-				x_index: const_idx.to_untyped(),
-				x_index_state: XIndexState::ConstRef,
-				..Default::default()
-			},
-			cache_key: String::new(),
-			err,
-		}
-	}
-
 	fn load_unary(
 		&mut self,
+		expr: &ExprNode,
 		unary: &ExprUnary,
 		child_idx: NodeIndex32,
 	) -> Result<LoadedNode, NodeIndex32> {
@@ -755,16 +729,8 @@ impl PreCompilation {
 					ExprUnaryKind::Recip => UnaryKind::Recip,
 					_ => unreachable!(),
 				};
-				let child = &self.nodes_postorder[child_idx];
 				Ok(LoadedNode {
-					node: Node {
-						node_kind: NodeKind::Unary(unary_kind),
-						dtype: child.dtype,
-						shape: child.shape.clone(),
-						can_be_batched: child.can_be_batched,
-						children: [child_idx, NodeIndex32::new_sentinel()],
-						..Default::default()
-					},
+					node: Self::new_unary_node(expr, NodeKind::Unary(unary_kind), child_idx),
 					cache_key: format!("unary:{:?}:{:?}", unary_kind, child_idx.raw),
 					err: ThinVec::new(),
 				})
@@ -775,27 +741,14 @@ impl PreCompilation {
 					ExprUnaryKind::Max => ReductionKind::Max,
 					_ => unreachable!(),
 				};
-				let mut err = ThinVec::new();
-				let child = &self.nodes_postorder[child_idx];
-				let mut shape = child.shape.clone();
-				if let Some(last_dim) = shape.as_mut().and_then(|vec| vec.last_mut()) {
-					*last_dim = 1;
-				} else {
-					cold_path();
-					err.push(format!("missing reduce dimension"));
-					shape = Some(thin_vec![1]);
-				}
 				Ok(LoadedNode {
-					node: Node {
-						node_kind: NodeKind::Reduction(reduction_kind),
-						dtype: child.dtype,
-						shape,
-						can_be_batched: child.can_be_batched,
-						children: [child_idx, NodeIndex32::new_sentinel()],
-						..Default::default()
-					},
+					node: Self::new_unary_node(
+						expr,
+						NodeKind::Reduction(reduction_kind),
+						child_idx,
+					),
 					cache_key: format!("reduction:{:?}:{:?}", reduction_kind, child_idx.raw),
-					err,
+					err: ThinVec::new(),
 				})
 			},
 			ExprUnaryKind::SelectEven | ExprUnaryKind::SelectOdd => {
@@ -804,148 +757,19 @@ impl PreCompilation {
 					ExprUnaryKind::SelectOdd => SelectKind::Odd,
 					_ => unreachable!(),
 				};
-				let mut err = ThinVec::new();
 				let child = &self.nodes_postorder[child_idx];
-				let mut shape = child.shape.clone();
-				if let Some(last_dim) = shape.as_mut().and_then(|vec| vec.last_mut()) {
-					if *last_dim < 2 || (*last_dim % 2 != 0) {
-						cold_path();
-						err.push(format!("select dimension not even"));
-					}
-					*last_dim /= 2;
-				} else {
-					cold_path();
-					err.push(format!("missing select dimension"));
-					shape = Some(thin_vec![0]);
-				}
 				Ok(LoadedNode {
-					node: Node {
-						node_kind: NodeKind::Select(select_kind),
-						dtype: child.dtype,
-						shape,
-						can_be_batched: child.can_be_batched,
-						children: [child_idx, NodeIndex32::new_sentinel()],
-						..Default::default()
-					},
+					node: Self::new_unary_node(expr, NodeKind::Select(select_kind), child_idx),
 					cache_key: format!("select:{:?}:{:?}", select_kind, child_idx.raw),
-					err,
+					err: ThinVec::new(),
 				})
 			},
-			ExprUnaryKind::SumToMean => Ok(self.load_sum_to_mean(child_idx)),
 		}
-	}
-
-	fn common_dtype(
-		a_dtype: Option<DType>,
-		b_dtype: Option<DType>,
-		err: &mut ThinVec<String>,
-	) -> Option<DType> {
-		match (a_dtype, b_dtype) {
-			(None, None) => None,
-			(Some(a_dt), None) => Some(a_dt),
-			(None, Some(b_dt)) => Some(b_dt),
-			(Some(a_dt), Some(b_dt)) => {
-				if a_dt == b_dt {
-					Some(a_dt)
-				} else {
-					cold_path();
-					err.push(format!("dtype mismatch: {} vs {}", a_dt, b_dt));
-					Some(common_dtype(a_dt, b_dt))
-				}
-			},
-		}
-	}
-
-	fn load_binary_matmul(
-		&self,
-		a_idx: NodeIndex32,
-		b_idx: NodeIndex32,
-	) -> Result<LoadedNode, NodeIndex32> {
-		let a = &self.nodes_postorder[a_idx];
-		let b = &self.nodes_postorder[b_idx];
-		let matmul_kind = MatMulKind::RowTimesMat;
-
-		let mut err = ThinVec::new();
-		let a_shape = a.shape();
-		let b_shape = b.shape();
-		if a_shape.len() < 1 || b_shape.len() < 2 {
-			cold_path();
-			err.push(format!("matmul: not enough dimensions"));
-		}
-		let (_a_rest, [a_len]) = Self::split_shape::<1>(a_shape);
-		let (b_rest, [b_row, b_col]) = Self::split_shape::<2>(b_shape);
-		if a_len != b_row {
-			cold_path();
-			err.push(format!("matmul: shape mismatch"));
-		}
-		let mut shape = ThinVec::from(a_shape);
-		*shape.last_mut().unwrap() = b_col;
-
-		if !b_rest.is_empty() || b.can_be_batched {
-			cold_path();
-			err.push("row times mat: mat cannot be batched".into());
-		}
-
-		Ok(LoadedNode {
-			node: Node {
-				node_kind: NodeKind::MatMul(matmul_kind),
-				dtype: Self::common_dtype(a.dtype, b.dtype, &mut err),
-				shape: Some(shape),
-				can_be_batched: a.can_be_batched,
-				children: [a_idx, b_idx],
-				..Default::default()
-			},
-			cache_key: format!("matmul:{:?}:{:?}:{:?}", matmul_kind, a_idx.raw, b_idx.raw),
-			err,
-		})
-	}
-
-	fn load_binary_attention(
-		&self,
-		a_idx: NodeIndex32,
-		b_idx: NodeIndex32,
-	) -> Result<LoadedNode, NodeIndex32> {
-		let a = &self.nodes_postorder[a_idx];
-		let b = &self.nodes_postorder[b_idx];
-
-		let mut err = ThinVec::new();
-		let a_shape = a.shape();
-		let b_shape = b.shape();
-		if a_shape.len() < 3 || b_shape.len() < 3 {
-			cold_path();
-			err.push(format!("attention: not enough dimensions"));
-		}
-		let (q_rest, [q1, q2, q3]) = Self::split_shape::<3>(a_shape);
-		let (kv_rest, [kv1, kv2, kv3]) = Self::split_shape::<3>(b_shape);
-		if kv1 != 1 || q2 != kv2 || q3 >= kv3 {
-			cold_path();
-			err.push(format!("attention: shape mismatch"));
-		}
-		let (mut shape, is_broadcasted) = Self::broadcast_shapes(q_rest, kv_rest, &mut err);
-		shape.push(q1);
-		shape.push(q2);
-		shape.push(kv3.saturating_sub(q3));
-		if is_broadcasted[0] || is_broadcasted[1] {
-			cold_path();
-			err.push(format!("attention inputs cannot be broadcasted"));
-		}
-
-		Ok(LoadedNode {
-			node: Node {
-				node_kind: NodeKind::Attention,
-				dtype: Self::common_dtype(a.dtype, b.dtype, &mut err),
-				shape: Some(shape),
-				can_be_batched: a.can_be_batched || b.can_be_batched,
-				children: [a_idx, b_idx],
-				..Default::default()
-			},
-			cache_key: format!("attention:{:?}:{:?}", a_idx.raw, b_idx.raw),
-			err,
-		})
 	}
 
 	fn load_binary(
 		&self,
+		expr: &ExprNode,
 		binary: &ExprBinary,
 		a_idx: NodeIndex32,
 		b_idx: NodeIndex32,
@@ -960,29 +784,35 @@ impl PreCompilation {
 				};
 				let (a_idx, b_idx) =
 					if commutative && a_idx > b_idx { (b_idx, a_idx) } else { (a_idx, b_idx) };
-				let a = &self.nodes_postorder[a_idx];
-				let b = &self.nodes_postorder[b_idx];
-				let mut err = ThinVec::new();
-				let dtype = Self::common_dtype(a.dtype, b.dtype, &mut err);
-				let (shape, is_broadcasted) =
-					Self::common_shape(a.opt_shape(), b.opt_shape(), &mut err);
 				Ok(LoadedNode {
-					node: Node {
-						node_kind: NodeKind::Binary(binary_kind),
-						dtype,
-						shape,
-						can_be_batched: a.can_be_batched || b.can_be_batched,
-						children: [a_idx, b_idx],
-						children_broadcast: is_broadcasted,
-						..Default::default()
-					},
+					node: Self::new_binary_node(
+						expr,
+						binary,
+						NodeKind::Binary(binary_kind),
+						a_idx,
+						b_idx,
+					),
 					cache_key: format!("binary:{:?}:{:?}:{:?}", binary_kind, a_idx.raw, b_idx.raw),
-					err,
+					err: ThinVec::new(),
 				})
 			},
 			ExprBinaryKind::First => Err(a_idx),
-			ExprBinaryKind::RowTimesMat => self.load_binary_matmul(a_idx, b_idx),
-			ExprBinaryKind::Attention => self.load_binary_attention(a_idx, b_idx),
+			ExprBinaryKind::RowTimesMat => Ok(LoadedNode {
+				node: Self::new_binary_node(
+					expr,
+					binary,
+					NodeKind::MatMul(MatMulKind::RowTimesMat),
+					a_idx,
+					b_idx,
+				),
+				cache_key: format!("row_times_mat:{:?}:{:?}", a_idx.raw, b_idx.raw),
+				err: ThinVec::new(),
+			}),
+			ExprBinaryKind::Attention => Ok(LoadedNode {
+				node: Self::new_binary_node(expr, binary, NodeKind::Attention, a_idx, b_idx),
+				cache_key: format!("attention:{:?}:{:?}", a_idx.raw, b_idx.raw),
+				err: ThinVec::new(),
+			}),
 		}
 	}
 
@@ -1140,37 +970,6 @@ impl PreCompilation {
 			}
 		}
 		(&shape[..rest], a)
-	}
-
-	fn broadcast_shapes(
-		a: &[usize],
-		b: &[usize],
-		err: &mut ThinVec<String>,
-	) -> (ThinVec<usize>, [bool; 2]) {
-		let mut is_broadcasted = [false, false];
-		let mut result = ThinVec::new();
-		let len = a.len().max(b.len());
-		let skip_a = len - a.len();
-		let skip_b = len - b.len();
-		for d in 0..len {
-			let dim_a = if d < skip_a { 1 } else { a[d - skip_a] };
-			let dim_b = if d < skip_b { 1 } else { b[d - skip_b] };
-			let dim = if dim_a == dim_b {
-				dim_a
-			} else if dim_b == 1 {
-				is_broadcasted[1] = true;
-				dim_a
-			} else if dim_a == 1 {
-				is_broadcasted[0] = true;
-				dim_b
-			} else {
-				cold_path();
-				err.push(format!("broadcast dimension mismatch: {:?} vs {:?}", dim_a, dim_b));
-				dim_a.max(dim_b)
-			};
-			result.push(dim);
-		}
-		(result, is_broadcasted)
 	}
 
 	fn common_shape(
@@ -1829,15 +1628,6 @@ impl PreCompilation {
 					writeln!(w, "\t{node_id} -> {cap_id} [label=<{label}>, constraint=true];")?;
 				}
 			}
-		}
-		for sum_to_mean in &self.sum_to_mean {
-			let node_id = format!("node_{}", sum_to_mean.node.raw);
-			let const_idx =
-				format!("node_{}", self.const_vec[sum_to_mean.const_idx].input_node.raw);
-			writeln!(
-				w,
-				"\t{node_id} -> {const_idx} [label=< >, style=dotted, color=\"#008000\", constraint=true];"
-			)?;
 		}
 		for (node_idx, msgs) in &self.err_log.err_vec {
 			let idx = node_idx.raw;
