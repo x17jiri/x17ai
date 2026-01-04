@@ -16,6 +16,12 @@ use crate::tensor::DType;
 
 pub fn rms_norm(inp: AutogradExpr, eps: f64, internal_dtype: DType) -> AutogradExpr {
 	let (inp, inp_backward) = inp.unpack();
+	let (inp, io_dtype) = if let Some(inp_dtype) = inp.dtype() {
+		(inp, inp_dtype)
+	} else {
+		cold_path();
+		(inp.log_error(format!("RMSNorm: input has unknown dtype")), internal_dtype)
+	};
 
 	let eps = Expr::new_const("eps".into(), eps);
 	let inp = inp.label("rms_norm.inp".into());
@@ -24,24 +30,14 @@ pub fn rms_norm(inp: AutogradExpr, eps: f64, internal_dtype: DType) -> AutogradE
 	let magn_recip = ((inp.clone() * inp.clone()).mean().sqrt() + eps).recip();
 	let magn_recip = magn_recip.label("rms_norm.magn_recip".into());
 
-	let (inp, io_dtype) = if let Some(inp_dtype) = inp.dtype() {
-		(inp, inp_dtype)
-	} else {
-		cold_path();
-		(inp.log_error(format!("RMSNorm: input has unknown dtype")), internal_dtype)
-	};
 	let out = (inp * magn_recip.clone()).cast(io_dtype);
 	let out = out.label("rms_norm.out".into());
 
 	if let Some(inp_backward) = inp_backward {
 		let out_capture =
 			TensorRef::new("rms_norm.out".into(), io_dtype, &[1024], CanBeBatched::Yes);
-		let magn_recip_capture = TensorRef::new(
-			"rms_norm.magn_recip".into(),
-			internal_dtype,
-			&[1024],
-			CanBeBatched::Yes,
-		);
+		let magn_recip_capture =
+			TensorRef::new("rms_norm.magn_recip".into(), internal_dtype, &[1], CanBeBatched::Yes);
 		let out = out.capture(out_capture.clone());
 		let magn_recip = magn_recip.capture(magn_recip_capture.clone());
 		AutogradExpr::new(
