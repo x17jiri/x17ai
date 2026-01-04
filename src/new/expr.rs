@@ -267,13 +267,14 @@ impl Expr {
 		}
 	}
 
-	pub fn known_dtype_or(self, default: DType) -> (Self, DType) {
+	pub fn get_dtype_or_log_error(self) -> (Self, DType) {
 		if let Some(my_dtype) = self.node.dtype() {
 			(self, my_dtype)
 		} else {
 			cold_path();
-			let expr = self.log_error("input has unknown dtype").cast(default);
-			(expr, default)
+			let my_dtype = f64::dtype; // TODO: should use `poison` dtype instead of f64?
+			let expr = self.log_error("input has unknown dtype").cast(my_dtype);
+			(expr, my_dtype)
 		}
 	}
 	pub fn dtype(&self) -> Option<DType> {
@@ -589,13 +590,14 @@ impl Expr {
 	}
 
 	pub fn capture_into_new<S: Into<Cow<'static, str>>>(self, name: S) -> (Rc<TensorRef>, Expr) {
+		let (expr, dtype) = self.get_dtype_or_log_error();
 		let tensor_ref = TensorRef::new(
 			name.into(),
-			self.node.dtype.unwrap_or(f32::dtype), // TODO
-			self.node.shape(),
-			if self.node.can_be_batched { CanBeBatched::Yes } else { CanBeBatched::No },
+			dtype,
+			expr.node.shape(),
+			if expr.node.can_be_batched { CanBeBatched::Yes } else { CanBeBatched::No },
 		);
-		(tensor_ref.clone(), self.capture_into(tensor_ref))
+		(tensor_ref.clone(), expr.capture_into(tensor_ref))
 	}
 
 	pub fn row_times_mat(self, mat: Expr) -> Expr {

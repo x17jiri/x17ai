@@ -5,7 +5,6 @@
 //
 //------------------------------------------------------------------------------
 
-use std::hint::cold_path;
 use std::rc::Rc;
 
 use crate::new::autograd::{Autograd, AutogradExpr, BackwardFn};
@@ -16,7 +15,7 @@ use crate::tensor::DType;
 
 pub fn rms_norm(inp: AutogradExpr, eps: f64, internal_dtype: DType) -> AutogradExpr {
 	let (inp, inp_backward) = inp.unpack();
-	let (inp, io_dtype) = inp.known_dtype_or(internal_dtype);
+	let (inp, io_dtype) = inp.get_dtype_or_log_error();
 	let inp = inp.label("rms_norm.inp");
 	let inp = inp.cast(internal_dtype);
 
@@ -53,16 +52,18 @@ pub struct RMSNormBackwardFn_Precise {
 impl BackwardFn for RMSNormBackwardFn_Precise {
 	fn run(self: Box<Self>, d_out: Expr, autograd: &mut Autograd) {
 		let Self { out, magn_recip, inp_backward } = Box::into_inner(self);
+		let (d_out, io_dtype) = d_out.get_dtype_or_log_error();
 		let internal_dtype = magn_recip.dtype();
-		let (d_out, io_dtype) = d_out.known_dtype_or(internal_dtype);
 
-		let magn_recip = magn_recip.to_expr();
+		let magn_recip = magn_recip.to_expr().cast(internal_dtype);
 		let out = out.to_expr().cast(internal_dtype);
 		let d_out = d_out.cast(internal_dtype);
 		let g = (out.clone() * d_out.clone()).mean();
+		let g = g.label("rms_norm.backward.g");
 
 		let d_inp = (d_out - (out * g)) * magn_recip;
 		let d_inp = d_inp.cast(io_dtype);
+		let d_inp = d_inp.label("rms_norm.backward.d_inp");
 
 		autograd.enqueue(inp_backward, d_inp);
 	}
