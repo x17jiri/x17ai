@@ -31,9 +31,9 @@ use super::{ExprBinaryKind, ExprInput, ExprNode, ExprUnaryKind};
 use crate::define_index_type32;
 use crate::new::expr::{ExprBinary, ExprCapture, ExprKind, ExprLabel, ExprUnary};
 use crate::tensor::DType;
+use crate::util::ToBoxedSlice;
 use crate::util::bitmap::IndexBitmap;
 use crate::util::index_vec::{IndexTrait, IndexVec, UntypedIndex32};
-use crate::util::{LossyFrom, ToBoxedSlice};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -82,7 +82,7 @@ pub enum MatMulKind {
 
 pub enum NodeKind {
 	Const,
-	Input,
+	Input(InputKind),
 	Select(SelectKind),
 	Cast,
 	Reshape,
@@ -91,6 +91,11 @@ pub enum NodeKind {
 	MatMul(MatMulKind),
 	Attention,
 	Reduction(ReductionKind),
+}
+
+pub enum InputKind {
+	Tensor,
+	Scalar,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,7 +168,10 @@ impl Node {
 
 	pub fn fragment_head_index(&self) -> NodeIndex32 {
 		debug_assert!(!self.is_input());
-		debug_assert!(self.x_index_state == XIndexState::FragmentHead);
+		debug_assert!(
+			self.x_index_state == XIndexState::FragmentHead
+				|| self.x_index_state == XIndexState::Uninitialized
+		);
 		NodeIndex32::from(self.x_index)
 	}
 
@@ -182,11 +190,11 @@ impl Node {
 	}
 
 	pub fn is_scalar_input(&self) -> bool {
-		self.is_input() && self.shape.is_none() && !self.is_const()
+		matches!(self.node_kind, NodeKind::Input(InputKind::Scalar))
 	}
 
 	pub fn is_tensor_input(&self) -> bool {
-		self.is_input() && self.shape.is_some()
+		matches!(self.node_kind, NodeKind::Input(InputKind::Tensor))
 	}
 
 	pub fn is_reduction(&self) -> bool {
@@ -337,7 +345,6 @@ pub struct PreCompilation {
 	frags_postorder: FragVec,
 
 	err_log: ErrorLog,
-	empty_shape: Rc<[usize]>,
 }
 
 struct LoadedNode {
@@ -400,22 +407,6 @@ impl PreCompilation {
 			tensor_vec: TensorVec::with_capacity(4),
 			frags_postorder: FragVec::with_capacity(16),
 			err_log: ErrorLog::new(),
-			/*node_defaults: Node {
-				node_kind: NodeKind::Input,
-				dtype: None,
-				shape: Rc::new([]),
-				can_be_batched: false,
-				parents: SmallVec::new(),
-				children: [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()],
-				children_broadcast: [false, false],
-				capture: ThinVec::new(),
-				is_dead: false,
-				is_trivial_head: false,
-				x_index: UntypedIndex32::new_sentinel(),
-				x_index_state: XIndexState::Uninitialized,
-				labels: ThinVec::new(),
-			},*/
-			empty_shape: Rc::new([]),
 		};
 		let _ = comp.analyze(expr);
 		comp
@@ -554,7 +545,7 @@ impl PreCompilation {
 			ExprKind::Binary(binary) => {
 				let a_idx = self.load_expr(&binary.lhs, state);
 				let b_idx = self.load_expr(&binary.rhs, state);
-				self.load_binary(binary, a_idx, b_idx)
+				self.load_binary(expr, binary, a_idx, b_idx)
 			},
 		};
 
@@ -562,6 +553,9 @@ impl PreCompilation {
 			Ok(loaded) => loaded,
 			Err(existing_node) => {
 				state.visited.insert(expr_key, existing_node);
+				for err in &expr.local_errors {
+					self.err_log.log_error(existing_node, err.clone());
+				}
 				return existing_node;
 			},
 		};
@@ -581,6 +575,9 @@ impl PreCompilation {
 		}
 		for err in loaded.err {
 			self.err_log.log_error(next_index, err);
+		}
+		for err in &expr.local_errors {
+			self.err_log.log_error(next_index, err.clone());
 		}
 
 		if loaded.node.is_complex() {
@@ -607,12 +604,14 @@ impl PreCompilation {
 	) -> Result<LoadedNode, NodeIndex32> {
 		let x_index;
 		let x_index_state;
+		let node_kind;
 		match input {
 			ExprInput::Tensor(tensor_ref) => {
 				match self.add_tensor_input(tensor_ref.clone(), self.nodes_postorder.next_index()) {
 					Ok(tensor_index) => {
 						x_index = tensor_index.to_untyped();
 						x_index_state = XIndexState::TensorRef;
+						node_kind = NodeKind::Input(InputKind::Tensor);
 					},
 					Err(existing_node) => {
 						return Err(existing_node);
@@ -624,6 +623,7 @@ impl PreCompilation {
 					Ok(scalar_index) => {
 						x_index = scalar_index.to_untyped();
 						x_index_state = XIndexState::ScalarRef;
+						node_kind = NodeKind::Input(InputKind::Scalar);
 					},
 					Err(existing_node) => {
 						return Err(existing_node);
@@ -632,7 +632,7 @@ impl PreCompilation {
 			},
 		}
 		Ok(LoadedNode {
-			node: Self::new_nullary_node(expr, NodeKind::Input, x_index, x_index_state),
+			node: Self::new_nullary_node(expr, node_kind, x_index, x_index_state),
 			cache_key: String::new(),
 			err: ThinVec::new(),
 		})
@@ -708,12 +708,13 @@ impl PreCompilation {
 	}
 
 	fn load_unary(
-		&mut self,
+		&self,
 		expr: &ExprNode,
 		unary: &ExprUnary,
 		child_idx: NodeIndex32,
 	) -> Result<LoadedNode, NodeIndex32> {
 		match unary.kind {
+			ExprUnaryKind::NoOp => Err(child_idx),
 			ExprUnaryKind::Neg
 			| ExprUnaryKind::Exp
 			| ExprUnaryKind::Ln
@@ -757,7 +758,6 @@ impl PreCompilation {
 					ExprUnaryKind::SelectOdd => SelectKind::Odd,
 					_ => unreachable!(),
 				};
-				let child = &self.nodes_postorder[child_idx];
 				Ok(LoadedNode {
 					node: Self::new_unary_node(expr, NodeKind::Select(select_kind), child_idx),
 					cache_key: format!("select:{:?}:{:?}", select_kind, child_idx.raw),
@@ -852,14 +852,12 @@ impl PreCompilation {
 		let key = std::ptr::from_ref(tensor_ref.as_ref());
 		match self.tensor_map.entry(key) {
 			hash_map::Entry::Vacant(entry) => {
-				let shape = ThinVec::from(&tensor_ref.shape[..]);
-				let can_be_batched = tensor_ref.can_be_batched;
 				let index = self.tensor_vec.push(TensorRef {
-					tensor_ref,
 					input_node: node,
 					output_node: NodeIndex32::new_sentinel(),
-					shape,
-					can_be_batched,
+					shape: tensor_ref.shape.clone(),
+					can_be_batched: tensor_ref.can_be_batched,
+					tensor_ref,
 				});
 				entry.insert(index);
 				Ok(index)
@@ -879,14 +877,12 @@ impl PreCompilation {
 		let key = std::ptr::from_ref(tensor_ref.as_ref());
 		match self.tensor_map.entry(key) {
 			hash_map::Entry::Vacant(entry) => {
-				let shape = ThinVec::from(&tensor_ref.shape[..]);
-				let can_be_batched = tensor_ref.can_be_batched;
 				let index = self.tensor_vec.push(TensorRef {
-					tensor_ref,
 					input_node: NodeIndex32::new_sentinel(),
 					output_node: node,
-					shape,
-					can_be_batched,
+					shape: tensor_ref.shape.clone(),
+					can_be_batched: tensor_ref.can_be_batched,
+					tensor_ref,
 				});
 				entry.insert(index);
 				index
@@ -970,26 +966,6 @@ impl PreCompilation {
 			}
 		}
 		(&shape[..rest], a)
-	}
-
-	fn common_shape(
-		a: Option<&[usize]>,
-		b: Option<&[usize]>,
-		err: &mut ThinVec<String>,
-	) -> (Option<ThinVec<usize>>, [bool; 2]) {
-		match (a, b) {
-			(None, None) => (None, [false, false]),
-			(None, Some(sh)) => (Some(ThinVec::from(sh)), [false, false]),
-			(Some(sh), None) => (Some(ThinVec::from(sh)), [false, false]),
-			(Some(a), Some(b)) => {
-				if a.len() != b.len() {
-					cold_path();
-					err.push(format!("shape length mismatch: {:?} vs {:?}", a, b));
-				}
-				let (shape, is_broadcasted) = Self::broadcast_shapes(a, b, err);
-				(Some(shape), is_broadcasted)
-			},
-		}
 	}
 
 	fn find_fragments(&mut self) {
@@ -1241,6 +1217,7 @@ impl PreCompilation {
 		}
 	}
 
+	#[allow(clippy::too_many_lines)]
 	fn find_kernels(&mut self) {
 		#[derive(Copy, Clone)]
 		struct KernelConfig {
@@ -1385,14 +1362,13 @@ impl PreCompilation {
 					"<b>Const</b><br/><font color='#800080'><b>{name}</b></font><br/><font color='blue'><b>{value}</b></font>"
 				)
 			},
-			NodeKind::Input => {
-				if node.is_tensor_input() {
-					let name = &self.tensor_vec[node.tensor_index()].tensor_ref.name;
-					format!("<b>Tensor</b><br/><font color='#800080'><b>{name}</b></font>")
-				} else {
-					let name = &self.scalar_vec[node.scalar_index()].scalar_ref.name;
-					format!("<b>Scalar</b><br/><font color='#800080'><b>{name}</b></font>")
-				}
+			NodeKind::Input(InputKind::Tensor) => {
+				let name = &self.tensor_vec[node.tensor_index()].tensor_ref.name;
+				format!("<b>Tensor</b><br/><font color='#800080'><b>{name}</b></font>")
+			},
+			NodeKind::Input(InputKind::Scalar) => {
+				let name = &self.scalar_vec[node.scalar_index()].scalar_ref.name;
+				format!("<b>Scalar</b><br/><font color='#800080'><b>{name}</b></font>")
 			},
 			NodeKind::Cast => {
 				let child = &self.nodes_postorder[node.children[0]];
@@ -1402,8 +1378,8 @@ impl PreCompilation {
 			},
 			NodeKind::Reshape => {
 				let child = &self.nodes_postorder[node.children[0]];
-				let from = self.shape_to_str(child.can_be_batched, &child.shape);
-				let to = self.shape_to_str(node.can_be_batched, &node.shape);
+				let from = self.shape_to_str(child.can_be_batched, Some(child.shape.as_ref()));
+				let to = self.shape_to_str(node.can_be_batched, Some(node.shape.as_ref()));
 				format!("<b>Reshape</b><br/>{from} -&gt; {to}")
 			},
 			NodeKind::Select(select) => match select {
@@ -1439,7 +1415,7 @@ impl PreCompilation {
 		format!("<font color='teal'>{dtype}</font>")
 	}
 
-	fn shape_to_str(&self, can_be_batched: bool, shape: &Option<ThinVec<usize>>) -> String {
+	fn shape_to_str(&self, can_be_batched: bool, shape: Option<&[usize]>) -> String {
 		if let Some(shape) = shape {
 			let mut result = format!("&#91;");
 			if can_be_batched {
@@ -1478,8 +1454,15 @@ impl PreCompilation {
 
 		result
 	}
+
+	pub fn print_graphviz(&self) -> String {
+		let mut s = String::new();
+		let _ = self.__print_graphviz(&mut s, None);
+		s
+	}
+
 	#[allow(clippy::too_many_lines)]
-	pub fn print_graphviz<W: std::fmt::Write>(
+	pub fn __print_graphviz<W: std::fmt::Write>(
 		&self,
 		w: &mut W,
 		mut state: Option<&mut LoadExprState>,
@@ -1558,7 +1541,7 @@ impl PreCompilation {
 					let label = format!(
 						"{}{}{}",
 						self.dtype_to_str(child.dtype),
-						self.shape_to_str(child.can_be_batched, &child.shape),
+						self.shape_to_str(child.can_be_batched, Some(child.shape.as_ref())),
 						if node.children_broadcast[j] {
 							" <font color='red'>(broadcasted)</font>"
 						} else {
@@ -1607,7 +1590,7 @@ impl PreCompilation {
 				let label = format!(
 					"{}{}",
 					self.dtype_to_str(node.dtype),
-					self.shape_to_str(node.can_be_batched, &node.shape)
+					self.shape_to_str(node.can_be_batched, Some(node.shape.as_ref()))
 				);
 				let input_node = self.tensor_vec[capt_idx].input_node;
 				if input_node.is_sentinel() {
@@ -1647,7 +1630,13 @@ impl PreCompilation {
 		Ok(())
 	}
 
-	pub fn print_fragment_graphviz<W: std::fmt::Write>(&self, w: &mut W) -> std::fmt::Result {
+	pub fn print_fragment_graphviz(&self) -> String {
+		let mut s = String::new();
+		let _ = self.__print_fragment_graphviz(&mut s);
+		s
+	}
+
+	pub fn __print_fragment_graphviz<W: std::fmt::Write>(&self, w: &mut W) -> std::fmt::Result {
 		writeln!(w, "digraph G {{")?;
 		writeln!(w, "\trankdir=BT;")?;
 		for i in self.frags_postorder.indexes() {

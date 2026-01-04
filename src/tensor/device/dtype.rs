@@ -183,6 +183,22 @@ pub fn common_dtype(mut a: DType, mut b: DType) -> DType {
 	if a_data.shift >= b_data.shift { a } else { b }
 }
 
+pub fn common_dtype_opt(a_dtype: Option<DType>, b_dtype: Option<DType>) -> Option<DType> {
+	match (a_dtype, b_dtype) {
+		(None, None) => None,
+		(Some(a_dt), None) => Some(a_dt),
+		(None, Some(b_dt)) => Some(b_dt),
+		(Some(a_dt), Some(b_dt)) => {
+			if a_dt == b_dt {
+				Some(a_dt)
+			} else {
+				cold_path();
+				Some(common_dtype(a_dt, b_dt))
+			}
+		},
+	}
+}
+
 #[repr(u8)]
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum DTypeKind {

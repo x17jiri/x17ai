@@ -20,10 +20,12 @@ use std::cell::RefCell;
 use std::hint::cold_path;
 use std::rc::Rc;
 
+use safetensors::tensor;
 use thin_vec::ThinVec;
 
 use crate::tensor::DType;
-use crate::util::{LossyFrom, ToBoxedSlice};
+use crate::tensor::device::dtype::common_dtype;
+use crate::util::LossyFrom;
 
 pub mod compile2;
 pub mod eval;
@@ -125,6 +127,7 @@ pub struct ExprUnary {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExprUnaryKind {
+	NoOp,
 	Neg,
 	Exp,
 	Ln,
@@ -165,6 +168,18 @@ pub enum ExprBinaryKind {
 
 //--------------------------------------------------------------------------------------------------
 
+pub trait ToExpr {
+	fn to_expr(self) -> Expr;
+}
+
+impl ToExpr for Expr {
+	fn to_expr(self) -> Expr {
+		self
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
 impl TensorRef {
 	pub fn new(
 		name: Cow<'static, str>,
@@ -179,11 +194,35 @@ impl TensorRef {
 			name,
 		})
 	}
+
+	pub fn dtype(&self) -> DType {
+		self.dtype
+	}
+
+	pub fn shape(&self) -> &[usize] {
+		&self.shape
+	}
+
+	pub fn can_be_batched(&self) -> bool {
+		self.can_be_batched
+	}
+}
+
+impl ToExpr for Rc<TensorRef> {
+	fn to_expr(self) -> Expr {
+		Expr::new_tensor_input(self)
+	}
 }
 
 impl ScalarRef {
 	pub fn new(name: Cow<'static, str>) -> Rc<ScalarRef> {
 		Rc::new(ScalarRef { value: RefCell::new(None), name })
+	}
+}
+
+impl ToExpr for Rc<ScalarRef> {
+	fn to_expr(self) -> Expr {
+		Expr::new_scalar_input(self)
 	}
 }
 
@@ -227,6 +266,22 @@ impl Expr {
 				kind: ExprKind::Const(ExprConst { name, value }),
 			}),
 		}
+	}
+
+	pub fn dtype(&self) -> Option<DType> {
+		self.node.dtype
+	}
+
+	pub fn shape(&self) -> &[usize] {
+		&self.node.shape
+	}
+
+	pub fn can_be_batched(&self) -> bool {
+		self.node.can_be_batched
+	}
+
+	pub fn have_errors(&self) -> bool {
+		self.node.have_errors
 	}
 
 	pub fn cast(self, dtype: DType) -> Expr {
@@ -493,14 +548,33 @@ impl Expr {
 	}
 
 	pub fn capture(self, tensor_ref: Rc<TensorRef>) -> Expr {
-		// TODO - check shape and dtype?
+		let mut local_errors = ThinVec::new();
+		if let Some(node_dtype) = self.node.dtype
+			&& node_dtype != tensor_ref.dtype
+		{
+			cold_path();
+			local_errors.push(format!(
+				"capture: dtype mismatch (got {}, expected {})",
+				node_dtype, tensor_ref.dtype
+			));
+		}
+		if self.node.shape() != tensor_ref.shape()
+			|| self.node.can_be_batched() != tensor_ref.can_be_batched()
+		{
+			cold_path();
+			local_errors.push(format!(
+				"capture: shape mismatch (got {}, expected {})",
+				shape_to_str(self.node.can_be_batched(), self.node.shape()),
+				shape_to_str(tensor_ref.can_be_batched(), tensor_ref.shape()),
+			));
+		}
 		Expr {
 			node: Rc::new(ExprNode {
-				dtype: self.node.dtype,
-				shape: self.node.shape.clone(),
+				dtype: Some(tensor_ref.dtype),
+				shape: tensor_ref.shape.clone(),
 				can_be_batched: self.node.can_be_batched,
 				have_errors: self.node.have_errors,
-				local_errors: ThinVec::new(),
+				local_errors,
 				kind: ExprKind::Capture(ExprCapture { expr: self.node, tensor_ref }),
 			}),
 		}
@@ -530,7 +604,7 @@ impl Expr {
 		}
 		let m_broadcasted = !r_rest.is_empty();
 
-		let dtype = common_dtype(self.node.dtype(), mat.node.dtype(), &mut local_errors);
+		let dtype = same_dtype(self.node.dtype(), mat.node.dtype(), &mut local_errors);
 
 		Expr {
 			node: Rc::new(ExprNode {
@@ -575,7 +649,7 @@ impl Expr {
 			local_errors.push(format!("attention inputs cannot be broadcasted"));
 		}
 
-		let dtype = common_dtype(self.node.dtype(), kv.node.dtype(), &mut local_errors);
+		let dtype = same_dtype(self.node.dtype(), kv.node.dtype(), &mut local_errors);
 
 		Expr {
 			node: Rc::new(ExprNode {
@@ -599,7 +673,7 @@ impl Expr {
 
 	fn __binary_op(self, kind: ExprBinaryKind, rhs: Expr) -> Expr {
 		let mut local_errors = ThinVec::new();
-		let dtype = common_dtype(self.node.dtype, rhs.node.dtype, &mut local_errors);
+		let dtype = same_dtype(self.node.dtype, rhs.node.dtype, &mut local_errors);
 		let (shape, is_broadcasted) =
 			broadcast_shapes(self.node.shape(), rhs.node.shape(), &mut local_errors);
 		Expr {
@@ -617,6 +691,24 @@ impl Expr {
 					rhs: rhs.node,
 					lhs_broadcasted: is_broadcasted[0],
 					rhs_broadcasted: is_broadcasted[1],
+				}),
+			}),
+		}
+	}
+
+	pub fn log_error(self, msg: String) -> Expr {
+		let mut local_errors = ThinVec::new();
+		local_errors.push(msg);
+		Expr {
+			node: Rc::new(ExprNode {
+				dtype: self.node.dtype,
+				shape: self.node.shape.clone(),
+				can_be_batched: self.node.can_be_batched,
+				have_errors: true,
+				local_errors,
+				kind: ExprKind::Unary(ExprUnary {
+					kind: ExprUnaryKind::NoOp,
+					expr: self.node,
 				}),
 			}),
 		}
@@ -669,7 +761,7 @@ impl std::ops::Neg for Expr {
 
 //--------------------------------------------------------------------------------------------------
 
-fn split_shape<const N: usize>(shape: &[usize]) -> (&[usize], [usize; N]) {
+pub fn split_shape<const N: usize>(shape: &[usize]) -> (&[usize], [usize; N]) {
 	let len = shape.len();
 	let cnt = len.min(N);
 	let rest = len - cnt;
@@ -684,7 +776,7 @@ fn split_shape<const N: usize>(shape: &[usize]) -> (&[usize], [usize; N]) {
 
 //--------------------------------------------------------------------------------------------------
 
-fn common_dtype(
+fn same_dtype(
 	a_dtype: Option<DType>,
 	b_dtype: Option<DType>,
 	err: &mut ThinVec<String>,
@@ -699,7 +791,7 @@ fn common_dtype(
 			} else {
 				cold_path();
 				err.push(format!("dtype mismatch: {} vs {}", a_dt, b_dt));
-				Some(crate::tensor::device::dtype::common_dtype(a_dt, b_dt))
+				Some(common_dtype(a_dt, b_dt))
 			}
 		},
 	}
@@ -707,7 +799,7 @@ fn common_dtype(
 
 //--------------------------------------------------------------------------------------------------
 
-fn broadcast_shapes(
+pub fn broadcast_shapes(
 	a: &[usize],
 	b: &[usize],
 	err: &mut ThinVec<String>,
@@ -736,6 +828,23 @@ fn broadcast_shapes(
 		result.push(dim);
 	}
 	(result, is_broadcasted)
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub fn shape_to_str(can_be_batched: bool, shape: &[usize]) -> String {
+	let mut result = String::from("[");
+	if can_be_batched {
+		result.push_str("*, ");
+	}
+	for (i, &dim) in shape.iter().enumerate() {
+		if i > 0 {
+			result.push_str(", ");
+		}
+		result.push_str(&dim.to_string());
+	}
+	result.push(']');
+	result
 }
 
 //--------------------------------------------------------------------------------------------------

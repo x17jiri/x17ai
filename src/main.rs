@@ -166,7 +166,7 @@ use std::rc::Rc;
 
 use thin_vec::thin_vec;
 use x17ai::autograd::{AutogradTensor, LossFn};
-use x17ai::new::autograd::{AutogradExpr, BackwardFn};
+use x17ai::new::autograd::{Autograd, AutogradExpr, BackwardFn};
 use x17ai::new::expr::compile2::PreCompilation;
 use x17ai::new::expr::{CanBeBatched, Expr, ScalarRef, TensorRef};
 use x17ai::new::nn::rms_norm::{FakeBackwardFn, rms_norm};
@@ -450,6 +450,32 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 
 	let io_dtype = f16::dtype;
 	let internal_dtype = f32::dtype;
+	let inp = TensorRef::new("inp".into(), io_dtype, &[1024], CanBeBatched::Yes);
+	let out = TensorRef::new("out".into(), io_dtype, &[1024], CanBeBatched::Yes);
+	let fake_backward_fn = Box::new(FakeBackwardFn);
+	let fwd = rms_norm(AutogradExpr::new(inp, Some(fake_backward_fn)), 0.001, internal_dtype);
+	let fwd_captured = fwd.expr.capture(out);
+
+	let d_inp = TensorRef::new("d_inp".into(), io_dtype, &[1024], CanBeBatched::Yes);
+	let d_out = TensorRef::new("d_out".into(), io_dtype, &[1024], CanBeBatched::Yes);
+
+	let mut comp = PreCompilation::new(&fwd_captured.node);
+	let graphviz = comp.print_graphviz();
+	std::fs::write("graph.dot", graphviz).unwrap();
+	let graphviz = comp.print_fragment_graphviz();
+	std::fs::write("fragments.dot", graphviz).unwrap();
+
+	let bwd = Autograd::run(fwd.backward_fn, d_out);
+	let bwd = bwd.capture(d_inp.clone());
+
+	let mut comp = PreCompilation::new(&bwd.node);
+	let graphviz = comp.print_graphviz();
+	std::fs::write("graph2.dot", graphviz).unwrap();
+	let graphviz = comp.print_fragment_graphviz();
+	std::fs::write("fragments2.dot", graphviz).unwrap();
+
+	return Ok(());
+
 	let eps = ScalarRef::new("eps".into());
 
 	//let expr = test1_opt(dev.clone());
@@ -461,15 +487,15 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	//let q = TensorRef::new("q".into(), io_dtype, vec![4, 4, 64], CanBeBatched::Yes);
 	//let kv = TensorRef::new("kv".into(), io_dtype, vec![1, 4, 64 + 64], CanBeBatched::Yes);
 
-	let t = TensorRef::new("t".into(), io_dtype, vec![1024], CanBeBatched::Yes);
-	let r = TensorRef::new("r".into(), io_dtype, vec![1024], CanBeBatched::Yes);
-	let mq = TensorRef::new("mq".into(), io_dtype, vec![1024, 1024], CanBeBatched::No);
-	let mkv = TensorRef::new("mkv".into(), io_dtype, vec![1024, 4 * (64 + 64)], CanBeBatched::No);
-	let mw = TensorRef::new("mw".into(), io_dtype, vec![1024, 2048], CanBeBatched::No);
+	let t = TensorRef::new("t".into(), io_dtype, &[1024], CanBeBatched::Yes);
+	let r = TensorRef::new("r".into(), io_dtype, &[1024], CanBeBatched::Yes);
+	let mq = TensorRef::new("mq".into(), io_dtype, &[1024, 1024], CanBeBatched::No);
+	let mkv = TensorRef::new("mkv".into(), io_dtype, &[1024, 4 * (64 + 64)], CanBeBatched::No);
+	let mw = TensorRef::new("mw".into(), io_dtype, &[1024, 2048], CanBeBatched::No);
 	let expr = Expr::new_tensor_input(t.clone());
 
-	let expr = AutogradExpr::new(expr, Some(ThinBox::new_unsize(FakeBackwardFn)));
-	let expr = rms_norm(expr, 0.001, internal_dtype, io_dtype);
+	let expr = AutogradExpr::new(expr, Some(Box::new(FakeBackwardFn)));
+	let expr = rms_norm(expr, 0.001, internal_dtype);
 	let expr = expr.expr;
 	//let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?.cast(io_dtype);
 
@@ -478,7 +504,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 		.cast(internal_dtype)
 		.row_times_mat(Expr::new_tensor_input(mq.clone()).cast(internal_dtype))
 		.cast(io_dtype)
-		.reshape(1, &[4, 4, 64])
+		.reshape(&[4, 4, 64])
 		.cast(internal_dtype);
 	//.capture(q.clone());
 	let kv = expr
@@ -487,7 +513,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 		.row_times_mat(Expr::new_tensor_input(mkv.clone()).cast(internal_dtype))
 		.cast(io_dtype)
 		.cast(internal_dtype)
-		.reshape(1, &[1, 4, 64 + 64]);
+		.reshape(&[1, 4, 64 + 64]);
 	//.capture(kv.clone())
 	//.capture(q.clone());
 
@@ -499,7 +525,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let expr = expr
 		.cast(io_dtype)
 		.cast(internal_dtype)
-		.reshape(3, &[1024])
+		.reshape(&[1024])
 		.row_times_mat(Expr::new_tensor_input(mw.clone()).cast(internal_dtype));
 	let expr = x_swiglu(expr, internal_dtype)?;
 	let expr = expr.cast(io_dtype);
@@ -508,12 +534,10 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 
 	let mut comp = PreCompilation::new(&expr.node);
 
-	let mut graphviz = String::new();
-	comp.print_graphviz(&mut graphviz, None);
+	let graphviz = comp.print_graphviz();
 	std::fs::write("graph.dot", graphviz).unwrap();
 
-	let mut graphviz = String::new();
-	comp.print_fragment_graphviz(&mut graphviz);
+	let graphviz = comp.print_fragment_graphviz();
 	std::fs::write("fragments.dot", graphviz).unwrap();
 
 	/*let mut comp = CompiledExpr::new(comp);
