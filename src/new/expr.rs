@@ -20,11 +20,10 @@ use std::cell::RefCell;
 use std::hint::cold_path;
 use std::rc::Rc;
 
-use safetensors::tensor;
 use thin_vec::ThinVec;
 
-use crate::tensor::DType;
 use crate::tensor::device::dtype::common_dtype;
+use crate::tensor::{DType, HasDType};
 use crate::util::LossyFrom;
 
 pub mod compile2;
@@ -255,7 +254,7 @@ impl Expr {
 		}
 	}
 
-	pub fn new_const(name: Cow<'static, str>, value: f64) -> Expr {
+	pub fn new_const<S: Into<Cow<'static, str>>>(name: S, value: f64) -> Expr {
 		Expr {
 			node: Rc::new(ExprNode {
 				dtype: None,
@@ -263,11 +262,20 @@ impl Expr {
 				can_be_batched: false,
 				have_errors: false,
 				local_errors: ThinVec::new(),
-				kind: ExprKind::Const(ExprConst { name, value }),
+				kind: ExprKind::Const(ExprConst { name: name.into(), value }),
 			}),
 		}
 	}
 
+	pub fn known_dtype_or(self, default: DType) -> (Self, DType) {
+		if let Some(my_dtype) = self.node.dtype() {
+			(self, my_dtype)
+		} else {
+			cold_path();
+			let expr = self.log_error("input has unknown dtype").cast(default);
+			(expr, default)
+		}
+	}
 	pub fn dtype(&self) -> Option<DType> {
 		self.node.dtype
 	}
@@ -300,7 +308,7 @@ impl Expr {
 		}
 	}
 
-	pub fn label(self, label: Cow<'static, str>) -> Expr {
+	pub fn label<S: Into<Cow<'static, str>>>(self, label: S) -> Expr {
 		Expr {
 			node: Rc::new(ExprNode {
 				dtype: self.node.dtype,
@@ -308,7 +316,7 @@ impl Expr {
 				can_be_batched: self.node.can_be_batched,
 				have_errors: self.node.have_errors,
 				local_errors: ThinVec::new(),
-				kind: ExprKind::Label(ExprLabel { label, expr: self.node }),
+				kind: ExprKind::Label(ExprLabel { label: label.into(), expr: self.node }),
 			}),
 		}
 	}
@@ -521,7 +529,7 @@ impl Expr {
 		let shape = self.node.shape();
 		let last_dim = shape.last().copied().unwrap_or(1);
 		let c = 1.0 / f64::lossy_from(last_dim);
-		Expr::new_const(format!("1.0 / {last_dim}").into(), c)
+		Expr::new_const(format!("1.0 / {last_dim}"), c)
 	}
 
 	pub fn mean(self) -> Expr {
@@ -547,7 +555,7 @@ impl Expr {
 		}
 	}
 
-	pub fn capture(self, tensor_ref: Rc<TensorRef>) -> Expr {
+	pub fn capture_into(self, tensor_ref: Rc<TensorRef>) -> Expr {
 		let mut local_errors = ThinVec::new();
 		if let Some(node_dtype) = self.node.dtype
 			&& node_dtype != tensor_ref.dtype
@@ -578,6 +586,16 @@ impl Expr {
 				kind: ExprKind::Capture(ExprCapture { expr: self.node, tensor_ref }),
 			}),
 		}
+	}
+
+	pub fn capture_into_new<S: Into<Cow<'static, str>>>(self, name: S) -> (Rc<TensorRef>, Expr) {
+		let tensor_ref = TensorRef::new(
+			name.into(),
+			self.node.dtype.unwrap_or(f32::dtype), // TODO
+			self.node.shape(),
+			if self.node.can_be_batched { CanBeBatched::Yes } else { CanBeBatched::No },
+		);
+		(tensor_ref.clone(), self.capture_into(tensor_ref))
 	}
 
 	pub fn row_times_mat(self, mat: Expr) -> Expr {
@@ -696,9 +714,9 @@ impl Expr {
 		}
 	}
 
-	pub fn log_error(self, msg: String) -> Expr {
-		let mut local_errors = ThinVec::new();
-		local_errors.push(msg);
+	pub fn log_error<S: Into<String>>(self, msg: S) -> Expr {
+		let mut local_errors = ThinVec::<String>::new();
+		local_errors.push(msg.into());
 		Expr {
 			node: Rc::new(ExprNode {
 				dtype: self.node.dtype,

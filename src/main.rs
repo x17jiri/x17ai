@@ -169,7 +169,7 @@ use x17ai::autograd::{AutogradTensor, LossFn};
 use x17ai::new::autograd::{Autograd, AutogradExpr, BackwardFn};
 use x17ai::new::expr::compile2::PreCompilation;
 use x17ai::new::expr::{CanBeBatched, Expr, ScalarRef, TensorRef};
-use x17ai::new::nn::rms_norm::{FakeBackwardFn, rms_norm};
+use x17ai::new::nn::rms_norm::rms_norm;
 use x17ai::new::tensor::TensorLiteral1D;
 use x17ai::nn::ModelContext;
 use x17ai::nn::fragments::linear::Linear;
@@ -325,7 +325,7 @@ pub fn x_swiglu(inp: Expr, internal_dtype: DType) -> Result<Expr, ErrPack<Tensor
 	let lin = inp.clone().select_even();
 	let gate = inp.select_odd();
 
-	let one = Expr::new_const("ONE".into(), 1.0);
+	let one = Expr::new_const("ONE", 1.0);
 
 	let out = lin * gate.clone() * ((-gate).exp() + one).recip();
 
@@ -445,6 +445,14 @@ pub fn model() {
 }
 */
 
+pub struct FakeBackwardFn;
+
+impl BackwardFn for FakeBackwardFn {
+	fn run(self: Box<Self>, d_out: Expr, autograd: &mut Autograd) {
+		autograd.eval(d_out);
+	}
+}
+
 fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let dev = x17ai::new::device::cpu::CPUDevice::new();
 
@@ -454,7 +462,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let out = TensorRef::new("out".into(), io_dtype, &[1024], CanBeBatched::Yes);
 	let fake_backward_fn = Box::new(FakeBackwardFn);
 	let fwd = rms_norm(AutogradExpr::new(inp, Some(fake_backward_fn)), 0.001, internal_dtype);
-	let fwd_captured = fwd.expr.capture(out);
+	let fwd_captured = fwd.expr.capture_into(out);
 
 	let d_inp = TensorRef::new("d_inp".into(), io_dtype, &[1024], CanBeBatched::Yes);
 	let d_out = TensorRef::new("d_out".into(), io_dtype, &[1024], CanBeBatched::Yes);
@@ -466,7 +474,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	std::fs::write("fragments.dot", graphviz).unwrap();
 
 	let bwd = Autograd::run(fwd.backward_fn, d_out);
-	let bwd = bwd.capture(d_inp.clone());
+	let bwd = bwd.capture_into(d_inp.clone());
 
 	let mut comp = PreCompilation::new(&bwd.node);
 	let graphviz = comp.print_graphviz();
@@ -530,7 +538,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let expr = x_swiglu(expr, internal_dtype)?;
 	let expr = expr.cast(io_dtype);
 	//let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?.cast(io_dtype);
-	let expr = expr.capture(r.clone());
+	let expr = expr.capture_into(r.clone());
 
 	let mut comp = PreCompilation::new(&expr.node);
 

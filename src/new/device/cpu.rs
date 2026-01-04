@@ -9,7 +9,7 @@ use std::hint::cold_path;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-use super::{Device, DevicePtr, KernelArgs};
+use super::{Device, DevicePtr};
 
 use crate::ErrPack;
 use crate::tensor::TensorOpError;
