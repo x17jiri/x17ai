@@ -11,6 +11,7 @@ use std::rc::Rc;
 use crate::new::autograd::{Autograd, AutogradExpr, BackwardFn};
 use crate::new::expr::{CanBeBatched, Expr, TensorRef, ToExpr};
 use crate::tensor::DType;
+use crate::util::LossyFrom;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -22,8 +23,8 @@ pub struct Linear {
 impl Linear {
 	pub fn new<S: Into<Cow<'static, str>>>(
 		name: S,
-		n_inp: usize,
-		n_out: usize,
+		n_inputs: usize,
+		n_outputs: usize,
 		dtype: DType,
 	) -> Self {
 		let name = name.into();
@@ -31,7 +32,7 @@ impl Linear {
 			weights: TensorRef::new(
 				format!("{name}.weights"),
 				dtype,
-				&[n_inp, n_out],
+				&[n_inputs, n_outputs],
 				CanBeBatched::No,
 			),
 			name,
@@ -45,9 +46,16 @@ impl Linear {
 		let inp = inp.label(format!("{name}.I"));
 		let inp = inp.cast(internal_dtype);
 
-		let weights = self.weights.clone().to_expr().cast(internal_dtype);
+		let weights = self.weights.clone();
+		let &[n_inputs, _n_outputs] = weights.shape() else {
+			unreachable!("In `new()`, we always create weights with 2 dimensions")
+		};
+		let weights = weights.to_expr().cast(internal_dtype);
 
-		let out = inp.row_times_mat(weights).cast(io_dtype);
+		let scale = 1.0 / f64::lossy_from(n_inputs).sqrt();
+		let scale = Expr::new_const(format!("scale = 1.0 / √{n_inputs}"), scale);
+
+		let out = (inp.row_times_mat(weights) * scale).cast(io_dtype);
 		let out = out.label(format!("{name}.O"));
 
 		/*if let Some(inp_backward) = inp_backward {
