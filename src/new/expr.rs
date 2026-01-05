@@ -180,8 +180,8 @@ impl ToExpr for Expr {
 //--------------------------------------------------------------------------------------------------
 
 impl TensorRef {
-	pub fn new(
-		name: Cow<'static, str>,
+	pub fn new<S: Into<Cow<'static, str>>>(
+		name: S,
 		dtype: DType,
 		shape: &[usize],
 		can_be_batched: CanBeBatched,
@@ -190,7 +190,7 @@ impl TensorRef {
 			dtype,
 			shape: Rc::from(shape),
 			can_be_batched: can_be_batched != CanBeBatched::No,
-			name,
+			name: name.into(),
 		})
 	}
 
@@ -214,8 +214,11 @@ impl ToExpr for Rc<TensorRef> {
 }
 
 impl ScalarRef {
-	pub fn new(name: Cow<'static, str>) -> Rc<ScalarRef> {
-		Rc::new(ScalarRef { value: RefCell::new(None), name })
+	pub fn new<S: Into<Cow<'static, str>>>(name: S) -> Rc<ScalarRef> {
+		Rc::new(ScalarRef {
+			value: RefCell::new(None),
+			name: name.into(),
+		})
 	}
 }
 
@@ -336,7 +339,7 @@ impl Expr {
 		let mut local_errors = ThinVec::new();
 		if old_elems != new_elems {
 			local_errors.push(format!(
-				"Reshape: element count mismatch (got {new_elems}, expected {old_elems})",
+				"Reshape: element count mismatch (input has {old_elems} elements; replacement has {new_elems})",
 			));
 		}
 
@@ -367,7 +370,7 @@ impl Expr {
 		let mut local_errors = ThinVec::new();
 		if old_elems != new_elems {
 			local_errors.push(format!(
-				"Reshape: element count mismatch (got {new_elems}, expected {old_elems})",
+				"Reshape: element count mismatch (input has {old_elems} elements; replacement has {new_elems})",
 			));
 		}
 
@@ -563,7 +566,7 @@ impl Expr {
 		{
 			cold_path();
 			local_errors.push(format!(
-				"capture: dtype mismatch (got {}, expected {})",
+				"capture: dtype mismatch (input is {}; tensor is {})",
 				node_dtype, tensor_ref.dtype
 			));
 		}
@@ -572,7 +575,7 @@ impl Expr {
 		{
 			cold_path();
 			local_errors.push(format!(
-				"capture: shape mismatch (got {}, expected {})",
+				"capture: shape mismatch (input is {}; tensor is {})",
 				shape_to_str(self.node.can_be_batched(), self.node.shape()),
 				shape_to_str(tensor_ref.can_be_batched(), tensor_ref.shape()),
 			));

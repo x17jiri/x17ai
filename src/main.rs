@@ -169,10 +169,11 @@ use x17ai::autograd::{AutogradTensor, LossFn};
 use x17ai::new::autograd::{Autograd, AutogradExpr, BackwardFn};
 use x17ai::new::expr::compile2::PreCompilation;
 use x17ai::new::expr::{CanBeBatched, Expr, ScalarRef, TensorRef};
-use x17ai::new::nn::rms_norm::rms_norm;
+use x17ai::new::nn::linear::Linear;
+use x17ai::new::nn::rms_norm::{RMSNormGrad, rms_norm};
+use x17ai::new::nn::swiglu::swiglu;
 use x17ai::new::tensor::TensorLiteral1D;
 use x17ai::nn::ModelContext;
-use x17ai::nn::fragments::linear::Linear;
 use x17ai::nn::fragments::softmax::{Softmax, SoftmaxGradMode};
 use x17ai::nn::fragments::{CrossEntropy, Fragment, UnaryFragment};
 use x17ai::rng::Rng;
@@ -458,14 +459,22 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 
 	let io_dtype = f16::dtype;
 	let internal_dtype = f32::dtype;
-	let inp = TensorRef::new("inp".into(), io_dtype, &[1024], CanBeBatched::Yes);
-	let out = TensorRef::new("out".into(), io_dtype, &[1024], CanBeBatched::Yes);
+	let inp = TensorRef::new("inp", io_dtype, &[1024], CanBeBatched::Yes);
+	let out = TensorRef::new("out", io_dtype, &[1024], CanBeBatched::Yes);
 	let fake_backward_fn = Box::new(FakeBackwardFn);
-	let fwd = rms_norm(AutogradExpr::new(inp, Some(fake_backward_fn)), 0.001, internal_dtype);
+	let fwd = rms_norm(
+		AutogradExpr::new(inp, Some(fake_backward_fn)),
+		0.001,
+		internal_dtype,
+		RMSNormGrad::Precise,
+	);
+	let lin = Linear::new("lin", 1024, 2048, io_dtype);
+	let fwd = lin.forward(fwd, internal_dtype);
+	let fwd = swiglu(fwd, internal_dtype);
 	let fwd_captured = fwd.expr.capture_into(out);
 
-	let d_inp = TensorRef::new("d_inp".into(), io_dtype, &[1024], CanBeBatched::Yes);
-	let d_out = TensorRef::new("d_out".into(), io_dtype, &[1024], CanBeBatched::Yes);
+	let d_inp = TensorRef::new("d_inp", io_dtype, &[1024], CanBeBatched::Yes);
+	let d_out = TensorRef::new("d_out", io_dtype, &[1024], CanBeBatched::Yes);
 
 	let mut comp = PreCompilation::new(&fwd_captured.node);
 	let graphviz = comp.print_graphviz();
@@ -484,7 +493,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 
 	return Ok(());
 
-	let eps = ScalarRef::new("eps".into());
+	let eps = ScalarRef::new("eps");
 
 	//let expr = test1_opt(dev.clone());
 	//let expr = test2_rms_norm(dev.clone());
@@ -495,15 +504,15 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	//let q = TensorRef::new("q".into(), io_dtype, vec![4, 4, 64], CanBeBatched::Yes);
 	//let kv = TensorRef::new("kv".into(), io_dtype, vec![1, 4, 64 + 64], CanBeBatched::Yes);
 
-	let t = TensorRef::new("t".into(), io_dtype, &[1024], CanBeBatched::Yes);
-	let r = TensorRef::new("r".into(), io_dtype, &[1024], CanBeBatched::Yes);
-	let mq = TensorRef::new("mq".into(), io_dtype, &[1024, 1024], CanBeBatched::No);
-	let mkv = TensorRef::new("mkv".into(), io_dtype, &[1024, 4 * (64 + 64)], CanBeBatched::No);
-	let mw = TensorRef::new("mw".into(), io_dtype, &[1024, 2048], CanBeBatched::No);
+	let t = TensorRef::new("t", io_dtype, &[1024], CanBeBatched::Yes);
+	let r = TensorRef::new("r", io_dtype, &[1024], CanBeBatched::Yes);
+	let mq = TensorRef::new("mq", io_dtype, &[1024, 1024], CanBeBatched::No);
+	let mkv = TensorRef::new("mkv", io_dtype, &[1024, 4 * (64 + 64)], CanBeBatched::No);
+	let mw = TensorRef::new("mw", io_dtype, &[1024, 2048], CanBeBatched::No);
 	let expr = Expr::new_tensor_input(t.clone());
 
 	let expr = AutogradExpr::new(expr, Some(Box::new(FakeBackwardFn)));
-	let expr = rms_norm(expr, 0.001, internal_dtype);
+	let expr = rms_norm(expr, 0.001, internal_dtype, RMSNormGrad::Precise);
 	let expr = expr.expr;
 	//let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?.cast(io_dtype);
 
@@ -569,21 +578,12 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	*/
 	return Ok(());
 
+	/*
 	let cpu = CPUDevice::new();
 	let dev = CudaDevice::new(0)?;
 
 	let mut a = [1, 2, 3, 4, 5, 6, 7, 8];
 	let b = a.get_mut(2..5);
-	/*
-	let (builder, [c], [a, b], [x]) = KernelBuilder::new("my_kernel", ["c"], ["a", "b"], ["x"]);
-	let kernel = builder.build((a * b).sum() + c);
-
-	let x = unsafe { hello_torch() };
-	println!("Hello Torch result! {x}");
-	return Ok(());
-	*/
-	/*	let t: tch::Tensor; // = tch::Tensor::of_slice(&[1, 2, 3, 4, 5, 6]);
-	let reshaped = t.view([2, 3]);*/
 
 	stderrlog::new().verbosity(10).init().unwrap();
 	let mut rng = Rng::default();
@@ -614,13 +614,6 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	//		println!("{}: {}", name, param.borrow().value().borrow()?.view::<f32>()?);
 	//	}
 
-	/*	println!("input = {}", input.borrow()?.view::<f32>()?);
-	println!("output_logits = {}", logits.borrow()?.view::<f32>()?);
-	println!("output = {}", loss_fn.value().borrow()?.view::<f32>()?);
-	println!("expected = {}", expected.borrow()?.view::<f32>()?);
-	println!("loss = {loss}");
-	println!("--------------------------------------------------");*/
-
 	for _ in 0..10000 {
 		//		println!("Step {}", i);
 		//		println!();
@@ -649,6 +642,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	//	}
 	println!("input = {}", &input);
 	println!("expected = {}", &expected);
+	*/
 
 	/*	let t = Tensor::new_empty_on(&[5, 7], f32::dtype, dev.clone());
 	let _ = t.read_from_file("tensor.bin");

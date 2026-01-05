@@ -13,38 +13,23 @@ use crate::tensor::DType;
 
 //--------------------------------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub enum RMSNormGrad {
-	Precise,
-	StraightThrough,
-}
-
-//--------------------------------------------------------------------------------------------------
-
-pub fn rms_norm(
-	inp: AutogradExpr,
-	eps: f64,
-	internal_dtype: DType,
-	grad: RMSNormGrad,
-) -> AutogradExpr {
+pub fn swiglu(inp: AutogradExpr, internal_dtype: DType) -> AutogradExpr {
 	let (inp, inp_backward) = inp.unpack();
 	let (inp, io_dtype) = inp.get_dtype_or_log_error();
-	let inp = inp.label("rms_norm.I");
+	let inp = inp.label("swiglu.I");
 	let inp = inp.cast(internal_dtype);
 
-	let eps = Expr::new_const("eps", eps);
+	let lin = inp.clone().select_even();
+	let gate = inp.select_odd();
 
-	let magn_recip = ((inp.clone() * inp.clone()).mean().sqrt() + eps).recip();
-	let magn_recip = magn_recip.label("rms_norm.magn_recip");
+	let one = Expr::new_const("ONE", 1.0);
 
-	let out = inp * magn_recip.clone();
-	let out = out.cast(io_dtype).label("rms_norm.O");
+	let out = lin * gate.clone() * ((-gate).exp() + one).recip();
+	let out = out.cast(io_dtype).label("swiglu.O");
 
-	if grad == RMSNormGrad::Precise
-		&& let Some(inp_backward) = inp_backward
-	{
-		let (out_capture, out) = out.capture_into_new("rms_norm.O");
-		let (magn_recip_capture, magn_recip) = magn_recip.capture_into_new("rms_norm.magn_recip");
+	/*if let Some(inp_backward) = inp_backward {
+		let (out_capture, out) = out.capture_into_new("swiglu.out");
+		let (magn_recip_capture, magn_recip) = magn_recip.capture_into_new("swiglu.magn_recip");
 		let out = out.first(magn_recip);
 		let backward = Box::new(RMSNormBackwardFn_Precise {
 			out: out_capture,
@@ -52,9 +37,8 @@ pub fn rms_norm(
 			inp_backward,
 		});
 		AutogradExpr::new(out, Some(backward))
-	} else {
-		AutogradExpr::new(out, inp_backward)
-	}
+	} else*/
+	{ AutogradExpr::new(out, inp_backward) }
 }
 
 //--------------------------------------------------------------------------------------------------
