@@ -808,6 +808,28 @@ impl PreCompilation {
 				cache_key: format!("row_times_mat:{:?}:{:?}", a_idx.raw, b_idx.raw),
 				err: ThinVec::new(),
 			}),
+			ExprBinaryKind::MatTimesCol => Ok(LoadedNode {
+				node: Self::new_binary_node(
+					expr,
+					binary,
+					NodeKind::MatMul(MatMulKind::RowTimesMat),
+					b_idx,
+					a_idx,
+				),
+				cache_key: format!("mat_times_col:{:?}:{:?}", b_idx.raw, a_idx.raw),
+				err: ThinVec::new(),
+			}),
+			ExprBinaryKind::ColTimesRow => Ok(LoadedNode {
+				node: Self::new_binary_node(
+					expr,
+					binary,
+					NodeKind::MatMul(MatMulKind::RowTimesMat),
+					a_idx,
+					b_idx,
+				),
+				cache_key: format!("col_times_row:{:?}:{:?}", a_idx.raw, b_idx.raw),
+				err: ThinVec::new(),
+			}),
 			ExprBinaryKind::Attention => Ok(LoadedNode {
 				node: Self::new_binary_node(expr, binary, NodeKind::Attention, a_idx, b_idx),
 				cache_key: format!("attention:{:?}:{:?}", a_idx.raw, b_idx.raw),

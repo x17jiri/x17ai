@@ -5,101 +5,125 @@
 //
 //------------------------------------------------------------------------------
 
-use std::borrow::Cow;
 use std::rc::Rc;
 
-use crate::new::autograd::{Autograd, AutogradExpr, BackwardFn};
-use crate::new::expr::{CanBeBatched, Expr, TensorRef, ToExpr};
+use crate::new::autograd::{AutogradExpr, BackwardFn};
+use crate::new::expr::{Expr, TensorRef};
 use crate::tensor::DType;
 use crate::util::LossyFrom;
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct Linear {
-	name: Cow<'static, str>,
-	weights: Rc<TensorRef>,
-}
+pub fn linear(inp: AutogradExpr, weights: AutogradExpr, internal_dtype: DType) -> AutogradExpr {
+	let (mut inp, inp_backward) = inp.unpack();
+	let (weights, weights_backward) = weights.unpack();
 
-impl Linear {
-	pub fn new<S: Into<Cow<'static, str>>>(
-		name: S,
-		n_inputs: usize,
-		n_outputs: usize,
-		dtype: DType,
-	) -> Self {
-		let name = name.into();
-		Self {
-			weights: TensorRef::new(
-				format!("{name}.weights"),
-				dtype,
-				&[n_inputs, n_outputs],
-				CanBeBatched::No,
-			),
-			name,
-		}
-	}
+	let d_inp_data = inp_backward.map(|inp_backward| DInpData {
+		inp_backward,
+		weights: weights.clone(),
+		backward_scale: 1.0, // TODO
+	});
+	let d_w_data = weights_backward.map(|weights_backward| {
+		let (inp_capture, new_inp) = inp.clone().capture_into_new("linear.I");
+		inp = new_inp;
+		DWData { weights_backward, inp_capture }
+	});
 
-	pub fn forward(&self, inp: AutogradExpr, internal_dtype: DType) -> AutogradExpr {
-		let (inp, inp_backward) = inp.unpack();
-		let (inp, io_dtype) = inp.get_dtype_or_log_error();
-		let name: &str = &self.name;
-		let inp = inp.label(format!("{name}.I"));
-		let inp = inp.cast(internal_dtype);
+	let (inp, io_dtype) = inp.get_dtype_or_log_error();
+	let inp = inp.label("linear.I");
+	let inp = inp.cast(internal_dtype);
 
-		let weights = self.weights.clone();
-		let &[n_inputs, _n_outputs] = weights.shape() else {
-			unreachable!("In `new()`, we always create weights with 2 dimensions")
-		};
-		let weights = weights.to_expr().cast(internal_dtype);
+	let weights = weights.label("linear.W");
+	let weights = weights.cast(internal_dtype);
 
-		let scale = 1.0 / f64::lossy_from(n_inputs).sqrt();
-		let scale = Expr::new_const(format!("scale = 1.0 / √{n_inputs}"), scale);
+	let n_inputs = weights.size(-1);
+	let scale = 1.0 / f64::lossy_from(n_inputs).sqrt();
+	let scale = Expr::new_const(format!("scale = 1.0 / √{n_inputs}"), scale);
 
-		let out = (inp.row_times_mat(weights) * scale).cast(io_dtype);
-		let out = out.label(format!("{name}.O"));
+	let out = (weights.mat_times_col(inp) * scale).cast(io_dtype);
+	let out = out.label(format!("linear.O"));
 
-		/*if let Some(inp_backward) = inp_backward {
-			let (out_capture, out) = out.capture_into_new("rms_norm.out");
-			let (magn_recip_capture, magn_recip) =
-				magn_recip.capture_into_new("rms_norm.magn_recip");
-			let out = out.first(magn_recip);
-			let backward = Box::new(RMSNormBackwardFn_Precise {
-				out: out_capture,
-				magn_recip: magn_recip_capture,
-				inp_backward,
-			});
-			AutogradExpr::new(out, Some(backward))
-		} else*/
-		{ AutogradExpr::new(out, inp_backward) }
-	}
+	let backward_fn = if inp_backward.is_some() || weights_backward.is_some() {
+		Some(Box::new(LinearBackwardFn {
+			weights: weights.clone(),
+			inp: if weights.requires_grad() { Some(inp) } else { None },
+			inp_backward,
+			backward_scale: self.backward_scale,
+			internal_dtype: self.internal_dtype,
+			input_shape: self.input_shape,
+		}) as Box<dyn BackwardFn>)
+	} else {
+		None
+	};
+
+	Ok(AutogradTensor::new(out, backward_fn))
 }
 
 //--------------------------------------------------------------------------------------------------
 
-pub struct LinearBackwardFn {
-	out: Rc<TensorRef>,
-	magn_recip: Rc<TensorRef>,
+pub struct DInpData {
 	inp_backward: Box<dyn BackwardFn>,
+	weights: Expr,
+	backward_scale: f64,
+}
+
+pub struct DWData {
+	weights_backward: Box<dyn BackwardFn>,
+	inp_capture: Rc<TensorRef>,
+}
+
+pub struct LinearBackwardFn {
+	d_inp_data: Option<DInpData>,
+	d_w_data: Option<DWData>,
+	internal_dtype: DType,
 }
 
 impl BackwardFn for LinearBackwardFn {
-	fn run(self: Box<Self>, d_out: Expr, autograd: &mut Autograd) {
-		let Self { out, magn_recip, inp_backward } = Box::into_inner(self);
-		let d_out = d_out.label("rms_norm.backward.d_out");
-		let (d_out, io_dtype) = d_out.get_dtype_or_log_error();
-		let internal_dtype = magn_recip.dtype();
+	fn run(
+		self: Box<Self>,
+		d_out: Tensor,
+		queue: &mut autograd::Queue,
+	) -> Result<(), ErrPack<TensorOpError>> {
+		let Self {
+			weights,
+			inp,
+			inp_backward,
+			backward_scale,
+			internal_dtype,
+			input_shape,
+		} = Box::into_inner(self);
 
-		let magn_recip = magn_recip.to_expr().cast(internal_dtype);
-		let out = out.to_expr().cast(internal_dtype);
-		let d_out = d_out.cast(internal_dtype);
-		let g = (out.clone() * d_out.clone()).mean();
-		let g = g.label("rms_norm.backward.g");
+		let mut weights = weights.borrow_mut();
+		let d_o = col(&d_out)?;
 
-		let d_inp = (d_out - (out * g)) * magn_recip;
-		let d_inp = d_inp.cast(io_dtype);
-		let d_inp = d_inp.label("rms_norm.backward.d_inp");
+		// d_w
+		if let Some(inp) = inp
+			&& weights.requires_grad()
+		{
+			let i = row(&inp)?;
+			let d_w = (d_o * i).scale(1.0);
+			weights.update_grad(d_out.dtype(), |current_grad| match current_grad {
+				CurrentGradValue::Uninit(tensor) => {
+					let grad = mat(tensor)?;
+					grad.clear_acc(d_w, internal_dtype)
+				},
+				CurrentGradValue::Value(_tensor) => {
+					todo!("Linear layer backward with existing gradient is not implemented yet");
+				},
+			})?;
+		}
 
-		autograd.enqueue(inp_backward, d_inp);
+		// d_inp
+		if let Some(inp_backward) = inp_backward {
+			let w = mat(weights.value())?;
+			let d_i = (w.T() * d_o).scale(backward_scale);
+			// [... , outputs] -> [... , inputs]
+			let d_inp = d_out.new_replace_tail(1, &input_shape, d_out.dtype())?;
+			col(&d_inp)?.assign(d_i, internal_dtype)?;
+			queue.add(inp_backward, d_inp);
+		}
+
+		Ok(())
 	}
 }
 

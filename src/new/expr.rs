@@ -23,6 +23,7 @@ use std::rc::Rc;
 use thin_vec::ThinVec;
 
 use crate::tensor::device::dtype::common_dtype;
+use crate::tensor::dim_index::DimIndex;
 use crate::tensor::{DType, HasDType};
 use crate::util::LossyFrom;
 
@@ -52,6 +53,15 @@ impl ExprNode {
 
 	pub fn shape(&self) -> &[usize] {
 		&self.shape
+	}
+
+	pub fn size<D: DimIndex>(&self, i: D) -> usize {
+		let shape = self.shape();
+		if let Ok(resolved_i) = i.resolve_index(shape.len()) {
+			unsafe { *shape.get_unchecked(resolved_i) }
+		} else {
+			1
+		}
 	}
 
 	pub fn can_be_batched(&self) -> bool {
@@ -162,6 +172,8 @@ pub enum ExprBinaryKind {
 
 	First,
 	RowTimesMat,
+	MatTimesCol,
+	ColTimesRow,
 	Attention,
 }
 
@@ -200,6 +212,15 @@ impl TensorRef {
 
 	pub fn shape(&self) -> &[usize] {
 		&self.shape
+	}
+
+	pub fn size<D: DimIndex>(&self, i: D) -> usize {
+		let shape = self.shape();
+		if let Ok(resolved_i) = i.resolve_index(shape.len()) {
+			unsafe { *shape.get_unchecked(resolved_i) }
+		} else {
+			1
+		}
 	}
 
 	pub fn can_be_batched(&self) -> bool {
@@ -285,7 +306,11 @@ impl Expr {
 	}
 
 	pub fn shape(&self) -> &[usize] {
-		&self.node.shape
+		self.node.shape()
+	}
+
+	pub fn size<D: DimIndex>(&self, i: D) -> usize {
+		self.node.size(i)
 	}
 
 	pub fn can_be_batched(&self) -> bool {
@@ -606,7 +631,8 @@ impl Expr {
 	pub fn row_times_mat(self, mat: Expr) -> Expr {
 		let mut local_errors = ThinVec::new();
 
-		let r_shape = self.node.shape();
+		let row = self;
+		let r_shape = row.node.shape();
 		let m_shape = mat.node.shape();
 		if r_shape.len() < 1 || m_shape.len() < 2 {
 			cold_path();
@@ -627,23 +653,116 @@ impl Expr {
 		}
 		let m_broadcasted = !r_rest.is_empty();
 
-		let dtype = same_dtype(self.node.dtype(), mat.node.dtype(), &mut local_errors);
+		let dtype = same_dtype(row.node.dtype(), mat.node.dtype(), &mut local_errors);
 
 		Expr {
 			node: Rc::new(ExprNode {
 				dtype,
 				shape: Rc::from(&shape[..]),
-				can_be_batched: self.node.can_be_batched,
-				have_errors: self.node.have_errors
+				can_be_batched: row.node.can_be_batched,
+				have_errors: row.node.have_errors
 					|| mat.node.have_errors
 					|| !local_errors.is_empty(),
 				local_errors,
 				kind: ExprKind::Binary(ExprBinary {
 					kind: ExprBinaryKind::RowTimesMat,
-					lhs: self.node,
+					lhs: row.node,
 					rhs: mat.node,
 					lhs_broadcasted: false,
 					rhs_broadcasted: m_broadcasted,
+				}),
+			}),
+		}
+	}
+
+	pub fn mat_times_col(self, col: Expr) -> Expr {
+		let mut local_errors = ThinVec::new();
+
+		let mat = self;
+		let m_shape = mat.node.shape();
+		let c_shape = col.node.shape();
+		if m_shape.len() < 2 || c_shape.len() < 1 {
+			cold_path();
+			local_errors.push(format!("matmul: not enough dimensions"));
+		}
+		let (m_rest, [m_row, m_col]) = split_shape::<2>(m_shape);
+		let (c_rest, [c_len]) = split_shape::<1>(c_shape);
+		if m_col != c_len {
+			cold_path();
+			local_errors.push(format!("matmul: shape mismatch"));
+		}
+		let mut shape = Rc::<[usize]>::from(c_shape);
+		*Rc::make_mut(&mut shape).last_mut().unwrap() = m_row;
+
+		if !m_rest.is_empty() || mat.node.can_be_batched {
+			cold_path();
+			local_errors.push("mat times col: mat cannot be batched".into());
+		}
+		let m_broadcasted = !c_rest.is_empty();
+
+		let dtype = same_dtype(mat.node.dtype(), col.node.dtype(), &mut local_errors);
+
+		Expr {
+			node: Rc::new(ExprNode {
+				dtype,
+				shape: Rc::from(&shape[..]),
+				can_be_batched: col.node.can_be_batched,
+				have_errors: mat.node.have_errors
+					|| col.node.have_errors
+					|| !local_errors.is_empty(),
+				local_errors,
+				kind: ExprKind::Binary(ExprBinary {
+					kind: ExprBinaryKind::MatTimesCol,
+					lhs: mat.node,
+					rhs: col.node,
+					lhs_broadcasted: m_broadcasted,
+					rhs_broadcasted: false,
+				}),
+			}),
+		}
+	}
+
+	pub fn col_times_row(self, row: Expr) -> Expr {
+		let mut local_errors = ThinVec::new();
+
+		let col = self;
+		let c_shape = col.node.shape();
+		let r_shape = row.node.shape();
+		if c_shape.len() < 1 || r_shape.len() < 1 {
+			cold_path();
+			local_errors.push(format!("outer product: not enough dimensions"));
+		}
+		let (c_rest, [c_len]) = split_shape::<1>(c_shape);
+		let (r_rest, [r_len]) = split_shape::<1>(r_shape);
+
+		let (mut shape, is_broadcasted) = broadcast_shapes(c_rest, r_rest, &mut local_errors);
+		shape.push(c_len);
+		shape.push(r_len);
+		if is_broadcasted[0]
+			|| is_broadcasted[1]
+			|| col.node.can_be_batched != row.node.can_be_batched
+		{
+			cold_path();
+			local_errors.push(format!("outer product inputs cannot be broadcasted"));
+		}
+
+		let dtype = same_dtype(col.node.dtype(), row.node.dtype(), &mut local_errors);
+
+		Expr {
+			node: Rc::new(ExprNode {
+				dtype,
+				shape: Rc::from(&shape[..]),
+				can_be_batched: col.node.can_be_batched || row.node.can_be_batched,
+				have_errors: col.node.have_errors
+					|| row.node.have_errors
+					|| !local_errors.is_empty(),
+				local_errors,
+				kind: ExprKind::Binary(ExprBinary {
+					kind: ExprBinaryKind::ColTimesRow,
+					lhs: col.node,
+					rhs: row.node,
+					lhs_broadcasted: is_broadcasted[0],
+					rhs_broadcasted: is_broadcasted[1],
 				}),
 			}),
 		}
