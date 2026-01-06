@@ -14,20 +14,27 @@ use crate::util::LossyFrom;
 
 //--------------------------------------------------------------------------------------------------
 
+#[allow(clippy::manual_map)]
 pub fn linear(inp: AutogradExpr, weights: AutogradExpr, internal_dtype: DType) -> AutogradExpr {
 	let (mut inp, inp_backward) = inp.unpack();
 	let (weights, weights_backward) = weights.unpack();
 
-	let d_inp_data = inp_backward.map(|inp_backward| DInpData {
-		inp_backward,
-		weights: weights.clone(),
-		backward_scale: 1.0, // TODO
-	});
-	let d_w_data = weights_backward.map(|weights_backward| {
-		let (inp_capture, new_inp) = inp.clone().capture_into_new("linear.I");
+	let d_inp_data = if let Some(inp_backward) = inp_backward {
+		Some(DInpData {
+			inp_backward,
+			weights: weights.clone(),
+			backward_scale: 1.0, // TODO
+		})
+	} else {
+		None
+	};
+	let d_w_data = if let Some(weights_backward) = weights_backward {
+		let (inp_capture, new_inp) = inp.capture_into_new("linear.I");
 		inp = new_inp;
-		DWData { weights_backward, inp_capture }
-	});
+		Some(DWData { weights_backward, inp_capture })
+	} else {
+		None
+	};
 
 	let (inp, io_dtype) = inp.get_dtype_or_log_error();
 	let inp = inp.label("linear.I");
@@ -43,7 +50,9 @@ pub fn linear(inp: AutogradExpr, weights: AutogradExpr, internal_dtype: DType) -
 	let out = (weights.mat_times_col(inp) * scale).cast(io_dtype);
 	let out = out.label(format!("linear.O"));
 
-	let backward_fn = if inp_backward.is_some() || weights_backward.is_some() {
+	AutogradExpr::new(out, None) // TODO
+
+	/*let backward_fn = if inp_backward.is_some() || weights_backward.is_some() {
 		Some(Box::new(LinearBackwardFn {
 			weights: weights.clone(),
 			inp: if weights.requires_grad() { Some(inp) } else { None },
@@ -56,7 +65,7 @@ pub fn linear(inp: AutogradExpr, weights: AutogradExpr, internal_dtype: DType) -
 		None
 	};
 
-	Ok(AutogradTensor::new(out, backward_fn))
+	Ok(AutogradTensor::new(out, backward_fn))*/
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -78,6 +87,7 @@ pub struct LinearBackwardFn {
 	internal_dtype: DType,
 }
 
+/*
 impl BackwardFn for LinearBackwardFn {
 	fn run(
 		self: Box<Self>,
@@ -126,5 +136,6 @@ impl BackwardFn for LinearBackwardFn {
 		Ok(())
 	}
 }
+*/
 
 //--------------------------------------------------------------------------------------------------
