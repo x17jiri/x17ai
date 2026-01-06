@@ -36,8 +36,8 @@ pub fn linear(inp: AutogradExpr, weights: AutogradExpr, internal_dtype: DType) -
 		None
 	};
 
-	let (inp, io_dtype) = inp.get_dtype_or_log_error();
 	let inp = inp.label("linear.I");
+	let (inp, io_dtype) = inp.get_dtype_or_log_error();
 	let inp = inp.cast(internal_dtype);
 
 	let weights = weights.label("linear.W");
@@ -50,22 +50,12 @@ pub fn linear(inp: AutogradExpr, weights: AutogradExpr, internal_dtype: DType) -
 	let out = (weights.mat_times_col(inp) * scale).cast(io_dtype);
 	let out = out.label(format!("linear.O"));
 
-	AutogradExpr::new(out, None) // TODO
-
-	/*let backward_fn = if inp_backward.is_some() || weights_backward.is_some() {
-		Some(Box::new(LinearBackwardFn {
-			weights: weights.clone(),
-			inp: if weights.requires_grad() { Some(inp) } else { None },
-			inp_backward,
-			backward_scale: self.backward_scale,
-			internal_dtype: self.internal_dtype,
-			input_shape: self.input_shape,
-		}) as Box<dyn BackwardFn>)
+	if d_inp_data.is_some() || d_w_data.is_some() {
+		let backward = Box::new(LinearBackwardFn { d_inp_data, d_w_data, internal_dtype });
+		AutogradExpr::new(out, Some(backward))
 	} else {
-		None
-	};
-
-	Ok(AutogradTensor::new(out, backward_fn))*/
+		AutogradExpr::new(out, None)
+	}
 }
 
 //--------------------------------------------------------------------------------------------------
