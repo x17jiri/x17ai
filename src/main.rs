@@ -12,6 +12,7 @@
 #![feature(string_from_utf8_lossy_owned)]
 #![feature(f16)]
 #![feature(thin_box)]
+#![feature(box_into_inner)]
 
 //use x17ai::nn::layers::{Layer, Linear, LossFunction, SoftmaxCrossEntropy};
 //use x17ai::nn::{EvalContext, ModelContext};
@@ -168,8 +169,8 @@ use thin_vec::thin_vec;
 use x17ai::autograd::{AutogradTensor, LossFn};
 use x17ai::new::autograd::{Autograd, AutogradExpr, BackwardFn};
 use x17ai::new::expr::compile2::PreCompilation;
-use x17ai::new::expr::{CanBeBatched, Expr, ScalarRef, TensorRef};
-use x17ai::new::nn::linear::Linear;
+use x17ai::new::expr::{CanBeBatched, Expr, ScalarRef, TensorRef, ToExpr};
+use x17ai::new::nn::linear::linear;
 use x17ai::new::nn::rms_norm::{RMSNormGrad, rms_norm};
 use x17ai::new::nn::swiglu::swiglu;
 use x17ai::new::tensor::TensorLiteral1D;
@@ -446,10 +447,14 @@ pub fn model() {
 }
 */
 
-pub struct FakeBackwardFn;
+pub struct CapturingBackwardFn {
+	tensor_ref: Rc<TensorRef>,
+}
 
-impl BackwardFn for FakeBackwardFn {
+impl BackwardFn for CapturingBackwardFn {
 	fn run(self: Box<Self>, d_out: Expr, autograd: &mut Autograd) {
+		let Self { tensor_ref } = Box::into_inner(self);
+		let d_out = d_out.capture_into(tensor_ref);
 		autograd.eval(d_out);
 	}
 }
@@ -458,23 +463,27 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let dev = x17ai::new::device::cpu::CPUDevice::new();
 
 	let io_dtype = f16::dtype;
+
+	let d_inp = TensorRef::new("d_inp", io_dtype, &[1024], CanBeBatched::Yes);
+	let d_out = TensorRef::new("d_out", io_dtype, &[2048], CanBeBatched::Yes);
+	let d_weights = TensorRef::new("d_weights", io_dtype, &[2048, 1024], CanBeBatched::No);
+
 	let internal_dtype = f32::dtype;
 	let inp = TensorRef::new("inp", io_dtype, &[1024], CanBeBatched::Yes);
 	let out = TensorRef::new("out", io_dtype, &[1024], CanBeBatched::Yes);
-	let fake_backward_fn = Box::new(FakeBackwardFn);
+	let inp_backward_fn = Box::new(CapturingBackwardFn { tensor_ref: d_inp });
 	let fwd = rms_norm(
-		AutogradExpr::new(inp, Some(fake_backward_fn)),
+		AutogradExpr::new(inp, Some(inp_backward_fn)),
 		0.001,
 		internal_dtype,
 		RMSNormGrad::Precise,
 	);
-	let lin = Linear::new("lin", 1024, 2048, io_dtype);
-	let fwd = lin.forward(fwd, internal_dtype);
+	let weights = TensorRef::new("weights", io_dtype, &[2048, 1024], CanBeBatched::No);
+	let w_backward_fn = Box::new(CapturingBackwardFn { tensor_ref: d_weights });
+	let fwd =
+		linear(fwd, AutogradExpr::new(weights.to_expr(), Some(w_backward_fn)), internal_dtype);
 	let fwd = swiglu(fwd, internal_dtype);
 	let fwd_captured = fwd.expr.capture_into(out);
-
-	let d_inp = TensorRef::new("d_inp", io_dtype, &[1024], CanBeBatched::Yes);
-	let d_out = TensorRef::new("d_out", io_dtype, &[1024], CanBeBatched::Yes);
 
 	let mut comp = PreCompilation::new(&fwd_captured.node);
 	let graphviz = comp.print_graphviz();
@@ -483,7 +492,6 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	std::fs::write("fragments.dot", graphviz).unwrap();
 
 	let bwd = Autograd::run(fwd.backward_fn, d_out);
-	let bwd = bwd.capture_into(d_inp.clone());
 
 	let mut comp = PreCompilation::new(&bwd.node);
 	let graphviz = comp.print_graphviz();
@@ -511,7 +519,8 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let mw = TensorRef::new("mw", io_dtype, &[1024, 2048], CanBeBatched::No);
 	let expr = Expr::new_tensor_input(t.clone());
 
-	let expr = AutogradExpr::new(expr, Some(Box::new(FakeBackwardFn)));
+	//let expr = AutogradExpr::new(expr, Some(Box::new(CapturingBackwardFn)));
+	let expr = AutogradExpr::new(expr, None);
 	let expr = rms_norm(expr, 0.001, internal_dtype, RMSNormGrad::Precise);
 	let expr = expr.expr;
 	//let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?.cast(io_dtype);

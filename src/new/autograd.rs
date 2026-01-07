@@ -24,6 +24,12 @@ impl AutogradExpr {
 	}
 }
 
+impl From<Expr> for AutogradExpr {
+	fn from(expr: Expr) -> Self {
+		Self::new(expr, None)
+	}
+}
+
 //--------------------------------------------------------------------------------------------------
 
 pub trait BackwardFn {

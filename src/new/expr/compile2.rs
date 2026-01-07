@@ -78,6 +78,8 @@ impl BinaryKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MatMulKind {
 	RowTimesMat,
+	MatTimesCol,
+	ColsTimesRows,
 }
 
 pub enum NodeKind {
@@ -812,18 +814,18 @@ impl PreCompilation {
 				node: Self::new_binary_node(
 					expr,
 					binary,
-					NodeKind::MatMul(MatMulKind::RowTimesMat),
+					NodeKind::MatMul(MatMulKind::MatTimesCol),
 					b_idx,
 					a_idx,
 				),
 				cache_key: format!("mat_times_col:{:?}:{:?}", b_idx.raw, a_idx.raw),
 				err: ThinVec::new(),
 			}),
-			ExprBinaryKind::ColTimesRow => Ok(LoadedNode {
+			ExprBinaryKind::ColsTimesRows => Ok(LoadedNode {
 				node: Self::new_binary_node(
 					expr,
 					binary,
-					NodeKind::MatMul(MatMulKind::RowTimesMat),
+					NodeKind::MatMul(MatMulKind::ColsTimesRows),
 					a_idx,
 					b_idx,
 				),
@@ -1423,6 +1425,8 @@ impl PreCompilation {
 			},
 			NodeKind::MatMul(matmul) => match matmul {
 				MatMulKind::RowTimesMat => "<b>row * MAT</b>".to_string(),
+				MatMulKind::ColsTimesRows => "<b>col * row → MAT</b>".to_string(),
+				MatMulKind::MatTimesCol => "<b>MAT * col</b>".to_string(),
 			},
 			NodeKind::Attention => "<b>ATTN</b>".to_string(),
 			NodeKind::Reduction(reduction) => match reduction {

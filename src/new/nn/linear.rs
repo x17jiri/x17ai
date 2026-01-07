@@ -7,8 +7,8 @@
 
 use std::rc::Rc;
 
-use crate::new::autograd::{AutogradExpr, BackwardFn};
-use crate::new::expr::{Expr, TensorRef};
+use crate::new::autograd::{Autograd, AutogradExpr, BackwardFn};
+use crate::new::expr::{Expr, TensorRef, ToExpr};
 use crate::tensor::DType;
 use crate::util::LossyFrom;
 
@@ -77,55 +77,38 @@ pub struct LinearBackwardFn {
 	internal_dtype: DType,
 }
 
-/*
 impl BackwardFn for LinearBackwardFn {
-	fn run(
-		self: Box<Self>,
-		d_out: Tensor,
-		queue: &mut autograd::Queue,
-	) -> Result<(), ErrPack<TensorOpError>> {
-		let Self {
-			weights,
-			inp,
-			inp_backward,
-			backward_scale,
-			internal_dtype,
-			input_shape,
-		} = Box::into_inner(self);
+	fn run(self: Box<Self>, d_out: Expr, autograd: &mut Autograd) {
+		let Self { d_inp_data, d_w_data, internal_dtype } = Box::into_inner(self);
 
-		let mut weights = weights.borrow_mut();
-		let d_o = col(&d_out)?;
+		let d_out = d_out.label("linear.backward.d_out");
+		let (d_out, io_dtype) = d_out.get_dtype_or_log_error();
+		let d_out = d_out.cast(internal_dtype);
 
 		// d_w
-		if let Some(inp) = inp
-			&& weights.requires_grad()
-		{
-			let i = row(&inp)?;
-			let d_w = (d_o * i).scale(1.0);
-			weights.update_grad(d_out.dtype(), |current_grad| match current_grad {
-				CurrentGradValue::Uninit(tensor) => {
-					let grad = mat(tensor)?;
-					grad.clear_acc(d_w, internal_dtype)
-				},
-				CurrentGradValue::Value(_tensor) => {
-					todo!("Linear layer backward with existing gradient is not implemented yet");
-				},
-			})?;
+		if let Some(DWData { weights_backward, inp_capture }) = d_w_data {
+			let inp = inp_capture.to_expr().cast(internal_dtype);
+
+			let d_weights = d_out.clone().cols_times_rows(inp);
+
+			let d_weights = d_weights.cast(io_dtype);
+			let d_weights = d_weights.label("linear.backward.d_weights");
+			autograd.enqueue(weights_backward, d_weights);
 		}
 
 		// d_inp
-		if let Some(inp_backward) = inp_backward {
-			let w = mat(weights.value())?;
-			let d_i = (w.T() * d_o).scale(backward_scale);
-			// [... , outputs] -> [... , inputs]
-			let d_inp = d_out.new_replace_tail(1, &input_shape, d_out.dtype())?;
-			col(&d_inp)?.assign(d_i, internal_dtype)?;
-			queue.add(inp_backward, d_inp);
-		}
+		if let Some(DInpData { inp_backward, weights, backward_scale }) = d_inp_data {
+			let backward_scale = Expr::new_const("backward_scale", backward_scale);
+			let weights = weights.label("linear.backward.weights");
+			let weights = weights.cast(internal_dtype);
 
-		Ok(())
+			let d_inp = (d_out.row_times_mat(weights)) * backward_scale;
+
+			let d_inp = d_inp.cast(io_dtype);
+			let d_inp = d_inp.label("linear.backward.d_inp");
+			autograd.enqueue(inp_backward, d_inp);
+		}
 	}
 }
-*/
 
 //--------------------------------------------------------------------------------------------------

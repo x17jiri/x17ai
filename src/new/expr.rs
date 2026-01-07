@@ -173,7 +173,7 @@ pub enum ExprBinaryKind {
 	First,
 	RowTimesMat,
 	MatTimesCol,
-	ColTimesRow,
+	ColsTimesRows,
 	Attention,
 }
 
@@ -722,7 +722,8 @@ impl Expr {
 		}
 	}
 
-	pub fn col_times_row(self, row: Expr) -> Expr {
+	/// We use plural name `cols` and `rows` because the output is summed over the batch dimension.
+	pub fn cols_times_rows(self, row: Expr) -> Expr {
 		let mut local_errors = ThinVec::new();
 
 		let col = self;
@@ -752,13 +753,13 @@ impl Expr {
 			node: Rc::new(ExprNode {
 				dtype,
 				shape: Rc::from(&shape[..]),
-				can_be_batched: col.node.can_be_batched || row.node.can_be_batched,
+				can_be_batched: false, // we sum over the batch dimension
 				have_errors: col.node.have_errors
 					|| row.node.have_errors
 					|| !local_errors.is_empty(),
 				local_errors,
 				kind: ExprKind::Binary(ExprBinary {
-					kind: ExprBinaryKind::ColTimesRow,
+					kind: ExprBinaryKind::ColsTimesRows,
 					lhs: col.node,
 					rhs: row.node,
 					lhs_broadcasted: is_broadcasted[0],
