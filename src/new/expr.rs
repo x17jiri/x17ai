@@ -169,11 +169,12 @@ pub enum ExprBinaryKind {
 	Add,
 	Sub,
 	Mul,
+	EvenOdd,
 
 	First,
 	RowTimesMat,
 	MatTimesCol,
-	ColsTimesRows,
+	ColTimesRowAcc,
 	Attention,
 }
 
@@ -565,6 +566,43 @@ impl Expr {
 		self.clone().sum() * self.sum_to_mean()
 	}
 
+	pub fn even_odd(self, odd: Expr) -> Expr {
+		let mut local_errors = ThinVec::new();
+		let dtype = same_dtype(self.node.dtype, odd.node.dtype, &mut local_errors);
+		let (mut shape, is_broadcasted) =
+			broadcast_shapes(self.node.shape(), odd.node.shape(), &mut local_errors);
+		if let Some(last_dim) = shape.last_mut() {
+			*last_dim *= 2;
+		} else {
+			shape.push(2);
+		}
+		if is_broadcasted[0]
+			|| is_broadcasted[1]
+			|| self.node.can_be_batched != odd.node.can_be_batched
+		{
+			cold_path();
+			local_errors.push(format!("even_odd cannot broadcast inputs"));
+		}
+		Expr {
+			node: Rc::new(ExprNode {
+				dtype,
+				shape: Rc::from(&shape[..]),
+				can_be_batched: self.node.can_be_batched || odd.node.can_be_batched,
+				have_errors: self.node.have_errors
+					|| odd.node.have_errors
+					|| !local_errors.is_empty(),
+				local_errors,
+				kind: ExprKind::Binary(ExprBinary {
+					kind: ExprBinaryKind::EvenOdd,
+					lhs: self.node,
+					rhs: odd.node,
+					lhs_broadcasted: false,
+					rhs_broadcasted: false,
+				}),
+			}),
+		}
+	}
+
 	pub fn first(self, second: Expr) -> Expr {
 		Expr {
 			node: Rc::new(ExprNode {
@@ -723,7 +761,7 @@ impl Expr {
 	}
 
 	/// We use plural name `cols` and `rows` because the output is summed over the batch dimension.
-	pub fn cols_times_rows(self, row: Expr) -> Expr {
+	pub fn col_times_row_acc(self, row: Expr) -> Expr {
 		let mut local_errors = ThinVec::new();
 
 		let col = self;
@@ -759,7 +797,7 @@ impl Expr {
 					|| !local_errors.is_empty(),
 				local_errors,
 				kind: ExprKind::Binary(ExprBinary {
-					kind: ExprBinaryKind::ColsTimesRows,
+					kind: ExprBinaryKind::ColTimesRowAcc,
 					lhs: col.node,
 					rhs: row.node,
 					lhs_broadcasted: is_broadcasted[0],
@@ -787,7 +825,10 @@ impl Expr {
 		shape.push(q1);
 		shape.push(q2);
 		shape.push(kv3.saturating_sub(q3));
-		if is_broadcasted[0] || is_broadcasted[1] {
+		if is_broadcasted[0]
+			|| is_broadcasted[1]
+			|| self.node.can_be_batched != kv.node.can_be_batched
+		{
 			cold_path();
 			local_errors.push(format!("attention inputs cannot be broadcasted"));
 		}

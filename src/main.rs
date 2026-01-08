@@ -465,7 +465,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let io_dtype = f16::dtype;
 
 	let d_inp = TensorRef::new("d_inp", io_dtype, &[1024], CanBeBatched::Yes);
-	let d_out = TensorRef::new("d_out", io_dtype, &[2048], CanBeBatched::Yes);
+	let d_out = TensorRef::new("d_out", io_dtype, &[1024], CanBeBatched::Yes);
 	let d_weights = TensorRef::new("d_weights", io_dtype, &[2048, 1024], CanBeBatched::No);
 
 	let internal_dtype = f32::dtype;

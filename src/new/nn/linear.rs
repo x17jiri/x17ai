@@ -89,7 +89,7 @@ impl BackwardFn for LinearBackwardFn {
 		if let Some(DWData { weights_backward, inp_capture }) = d_w_data {
 			let inp = inp_capture.to_expr().cast(internal_dtype);
 
-			let d_weights = d_out.clone().cols_times_rows(inp);
+			let d_weights = d_out.clone().col_times_row_acc(inp);
 
 			let d_weights = d_weights.cast(io_dtype);
 			let d_weights = d_weights.label("linear.backward.d_weights");

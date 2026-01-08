@@ -28,8 +28,9 @@ pub fn rms_norm(
 	grad: RMSNormGrad,
 ) -> AutogradExpr {
 	let (inp, inp_backward) = inp.unpack();
-	let (inp, io_dtype) = inp.get_dtype_or_log_error();
+
 	let inp = inp.label("rms_norm.I");
+	let (inp, io_dtype) = inp.get_dtype_or_log_error();
 	let inp = inp.cast(internal_dtype);
 
 	let eps = Expr::new_const("eps", eps);

@@ -79,13 +79,14 @@ impl BinaryKind {
 pub enum MatMulKind {
 	RowTimesMat,
 	MatTimesCol,
-	ColsTimesRows,
+	ColTimesRowAcc,
 }
 
 pub enum NodeKind {
 	Const,
 	Input(InputKind),
 	Select(SelectKind),
+	EvenOdd,
 	Cast,
 	Reshape,
 	Unary(UnaryKind),
@@ -821,15 +822,20 @@ impl PreCompilation {
 				cache_key: format!("mat_times_col:{:?}:{:?}", b_idx.raw, a_idx.raw),
 				err: ThinVec::new(),
 			}),
-			ExprBinaryKind::ColsTimesRows => Ok(LoadedNode {
+			ExprBinaryKind::ColTimesRowAcc => Ok(LoadedNode {
 				node: Self::new_binary_node(
 					expr,
 					binary,
-					NodeKind::MatMul(MatMulKind::ColsTimesRows),
+					NodeKind::MatMul(MatMulKind::ColTimesRowAcc),
 					a_idx,
 					b_idx,
 				),
-				cache_key: format!("col_times_row:{:?}:{:?}", a_idx.raw, b_idx.raw),
+				cache_key: format!("col_times_row_acc:{:?}:{:?}", a_idx.raw, b_idx.raw),
+				err: ThinVec::new(),
+			}),
+			ExprBinaryKind::EvenOdd => Ok(LoadedNode {
+				node: Self::new_binary_node(expr, binary, NodeKind::EvenOdd, a_idx, b_idx),
+				cache_key: format!("even_odd:{:?}:{:?}", a_idx.raw, b_idx.raw),
 				err: ThinVec::new(),
 			}),
 			ExprBinaryKind::Attention => Ok(LoadedNode {
@@ -1410,6 +1416,7 @@ impl PreCompilation {
 				SelectKind::Even => "<b>Select Even</b>".to_string(),
 				SelectKind::Odd => "<b>Select Odd</b>".to_string(),
 			},
+			NodeKind::EvenOdd => "<b>EvenOdd</b>".to_string(),
 			NodeKind::Unary(unary) => match unary {
 				UnaryKind::Neg => "<b>Neg</b>".to_string(),
 				UnaryKind::Exp => "<b>Exp</b>".to_string(),
@@ -1425,7 +1432,7 @@ impl PreCompilation {
 			},
 			NodeKind::MatMul(matmul) => match matmul {
 				MatMulKind::RowTimesMat => "<b>row * MAT</b>".to_string(),
-				MatMulKind::ColsTimesRows => "<b>col * row → MAT</b>".to_string(),
+				MatMulKind::ColTimesRowAcc => "<b>ACC(col * row) → MAT</b>".to_string(),
 				MatMulKind::MatTimesCol => "<b>MAT * col</b>".to_string(),
 			},
 			NodeKind::Attention => "<b>ATTN</b>".to_string(),
@@ -1524,6 +1531,8 @@ impl PreCompilation {
 				}
 			/*} else if node.is_head() {
 			writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccccff\"];")?;*/
+			} else if node.is_captured() {
+				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#cceeff\"];")?;
 			} else if node.is_fork() {
 				if unlikely(node.is_dead) {
 					writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#cccccc\"];")?;
@@ -1532,8 +1541,6 @@ impl PreCompilation {
 				}
 			} else if node.is_reduction() || node.is_matmul() || node.is_attention() {
 				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ffccff\"];")?;
-			} else if node.is_captured() {
-				writeln!(w, "\t{node_id} [style=filled, fillcolor=\"#ccffcc\"];")?;
 			}
 			if node.is_input() {
 				//writeln!(w, "\t{{ rank = min; {node_id} }}")?;
