@@ -168,7 +168,7 @@ use std::rc::Rc;
 use thin_vec::thin_vec;
 use x17ai::autograd::{AutogradTensor, LossFn};
 use x17ai::new::autograd::{Autograd, AutogradExpr, BackwardFn};
-use x17ai::new::expr::compile2::PreCompilation;
+use x17ai::new::expr::compile2::KernelBuilder;
 use x17ai::new::expr::{CanBeBatched, Expr, ScalarRef, TensorRef, ToExpr};
 use x17ai::new::nn::linear::linear;
 use x17ai::new::nn::rms_norm::{RMSNormGrad, rms_norm};
@@ -485,7 +485,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let fwd = swiglu(fwd, internal_dtype);
 	let fwd_captured = fwd.expr.capture_into(out);
 
-	let mut comp = PreCompilation::new(&fwd_captured.node);
+	let mut comp = KernelBuilder::new(&fwd_captured.node);
 	let graphviz = comp.print_graphviz();
 	std::fs::write("graph.dot", graphviz).unwrap();
 	let graphviz = comp.print_fragment_graphviz();
@@ -493,7 +493,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 
 	let bwd = Autograd::run(fwd.backward_fn, d_out);
 
-	let mut comp = PreCompilation::new(&bwd.node);
+	let mut comp = KernelBuilder::new(&bwd.node);
 	let graphviz = comp.print_graphviz();
 	std::fs::write("graph2.dot", graphviz).unwrap();
 	let graphviz = comp.print_fragment_graphviz();
@@ -558,7 +558,7 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	//let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?.cast(io_dtype);
 	let expr = expr.capture_into(r.clone());
 
-	let mut comp = PreCompilation::new(&expr.node);
+	let mut comp = KernelBuilder::new(&expr.node);
 
 	let graphviz = comp.print_graphviz();
 	std::fs::write("graph.dot", graphviz).unwrap();

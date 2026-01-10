@@ -19,6 +19,7 @@
 #![allow(clippy::panic_in_result_fn)]
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::{HashMap, hash_map};
 use std::hint::{cold_path, unlikely};
 use std::rc::Rc;
@@ -26,10 +27,8 @@ use std::rc::Rc;
 use smallvec::SmallVec;
 use thin_vec::{ThinVec, thin_vec};
 
-use super::super::expr;
-use super::{ExprBinaryKind, ExprInput, ExprNode, ExprUnaryKind};
 use crate::define_index_type32;
-use crate::new::expr::{ExprBinary, ExprCapture, ExprKind, ExprLabel, ExprUnary};
+use crate::new::expr::{self, CanBeBatched};
 use crate::tensor::DType;
 use crate::util::ToBoxedSlice;
 use crate::util::bitmap::IndexBitmap;
@@ -119,6 +118,8 @@ pub struct Node {
 	/// When `None`, the output is scalar.
 	pub shape: Rc<[usize]>,
 
+	/// If true, the node can have different value for different batch indices.
+	/// This is by definition false for example for scalars.
 	pub can_be_batched: bool,
 	pub children: [NodeIndex32; 2],
 	pub children_broadcast: [bool; 2],
@@ -338,7 +339,7 @@ define_index_type32!(FragPreorderIndex32);
 
 define_index_type32!(KernelIndex32);
 
-pub struct PreCompilation {
+pub struct KernelBuilderData {
 	nodes_postorder: NodeVec,
 	const_vec: ConstVec,
 	scalar_map: HashMap<*const expr::ScalarRef, ScalarRefIndex32>,
@@ -346,8 +347,17 @@ pub struct PreCompilation {
 	tensor_map: HashMap<*const expr::TensorRef, TensorRefIndex32>,
 	tensor_vec: TensorVec,
 	frags_postorder: FragVec,
-
+	node_cache: HashMap<String, NodeIndex32>,
 	err_log: ErrorLog,
+}
+
+pub struct KernelBuilder {
+	data: RefCell<KernelBuilderData>,
+}
+
+pub struct Expr<'a> {
+	kernel_builder: &'a KernelBuilder,
+	node_index: NodeIndex32,
 }
 
 struct LoadedNode {
@@ -358,7 +368,6 @@ struct LoadedNode {
 
 pub struct LoadExprState {
 	visited: HashMap<*const ExprNode, NodeIndex32>,
-	node_cache: HashMap<String, NodeIndex32>,
 	n_complex: u32,
 	bitmap: IndexBitmap<NodeIndex32>,
 }
@@ -399,33 +408,104 @@ impl ErrorLog {
 	}
 }
 
-impl PreCompilation {
-	pub fn new(expr: &ExprNode) -> Self {
-		let mut comp = PreCompilation {
-			nodes_postorder: NodeVec::with_capacity(32),
-			const_vec: ConstVec::with_capacity(4),
-			scalar_map: HashMap::new(),
-			scalar_vec: ScalarVec::with_capacity(4),
-			tensor_map: HashMap::new(),
-			tensor_vec: TensorVec::with_capacity(4),
-			frags_postorder: FragVec::with_capacity(16),
-			err_log: ErrorLog::new(),
-		};
-		let _ = comp.analyze(expr);
-		comp
+impl KernelBuilder {
+	pub fn new() -> Self {
+		KernelBuilder {
+			data: RefCell::new(KernelBuilderData {
+				nodes_postorder: NodeVec::with_capacity(32),
+				const_vec: ConstVec::with_capacity(4),
+				scalar_map: HashMap::new(),
+				scalar_vec: ScalarVec::with_capacity(4),
+				tensor_map: HashMap::new(),
+				tensor_vec: TensorVec::with_capacity(4),
+				frags_postorder: FragVec::with_capacity(16),
+				node_cache: HashMap::new(),
+				err_log: ErrorLog::new(),
+			}),
+		}
 	}
 
-	pub fn analyze(&mut self, expr: &ExprNode) -> Result<(), ()> {
-		let mut state = LoadExprState {
-			visited: HashMap::new(),
-			node_cache: HashMap::new(),
-			n_complex: 0,
-			bitmap: IndexBitmap::new(),
-		};
+	pub fn new_const<S: Into<Cow<'static, str>>>(&self, name: S, value: f64) -> Expr {
+		let mut data = self.data.borrow_mut();
+		let next_index = data.nodes_postorder.next_index();
+		match data.add_const(name.into(), value, next_index) {
+			Err(existing_node) => {
+				//
+				Expr {
+					kernel_builder: self,
+					node_index: existing_node,
+				}
+			},
+			Ok(idx) => {
+				let real_next_index =
+					data.nodes_postorder.push(KernelBuilderData::new_nullary_node(
+						None,
+						Rc::from([]),
+						false,
+						NodeKind::Const,
+						idx.to_untyped(),
+						XIndexState::ConstRef,
+					));
+				debug_assert!(next_index == real_next_index);
+				Expr {
+					kernel_builder: self,
+					node_index: next_index,
+				}
+			},
+		}
+	}
 
-		self.load_expr(expr, &mut state);
+	pub fn new_tensor_input<S: Into<Cow<'static, str>>>(
+		&self,
+		name: S,
+		dtype: DType,
+		shape: &[usize],
+		can_be_batched: CanBeBatched,
+	) -> Expr {
+		let mut data = self.data.borrow_mut();
+		let next_index = data.nodes_postorder.next_index();
+		match data.tensor_map.entry(name.into()) {
+			hash_map::Entry::Vacant(entry) => {
+				let idx = data.tensor_vec.push(TensorRef {
+					input_node: next_index,
+					output_node: NodeIndex32::new_sentinel(),
+					shape,
+					can_be_batched,
+					tensor_ref,
+				});
+				entry.insert(idx);
+				let real_next_index =
+					data.nodes_postorder.push(KernelBuilderData::new_nullary_node(
+						Some(dtype),
+						shape,
+						can_be_batched != CanBeBatched::No,
+						NodeKind::Input(InputKind::Tensor),
+						idx.to_untyped(),
+						XIndexState::TensorRef,
+					));
+				debug_assert!(next_index == real_next_index);
+				Expr {
+					kernel_builder: self,
+					node_index: next_index,
+				}
+			},
+			hash_map::Entry::Occupied(entry) => {
+				let index = *entry.get();
+				let existing_node = self.tensor_vec[index].input_node;
+				Expr {
+					kernel_builder: self,
+					node_index: existing_node,
+				}
+			},
+		}
+	}
+}
+
+impl KernelBuilderData {
+	pub fn analyze(&mut self) -> Result<(), ()> {
+		//self.load_expr(expr, &mut state);
 		self.remove_dead_code();
-		self.find_races(&mut state);
+		//self.find_races(&mut state);
 		self.find_fragments();
 		self.find_trivial_fragments();
 		self.make_fragment_graph();
@@ -436,16 +516,18 @@ impl PreCompilation {
 	}
 
 	pub fn new_nullary_node(
-		expr: &ExprNode,
+		dtype: Option<DType>,
+		shape: Rc<[usize]>,
+		can_be_batched: bool,
 		node_kind: NodeKind,
 		x_index: UntypedIndex32,
 		x_index_state: XIndexState,
 	) -> Node {
 		Node {
 			node_kind,
-			dtype: expr.dtype,
-			shape: expr.shape.clone(),
-			can_be_batched: expr.can_be_batched,
+			dtype,
+			shape,
+			can_be_batched,
 			parents: SmallVec::new(),
 			children: [NodeIndex32::new_sentinel(), NodeIndex32::new_sentinel()],
 			children_broadcast: [false, false],
@@ -508,20 +590,6 @@ impl PreCompilation {
 		}
 
 		let t = match &expr.kind {
-			ExprKind::Const(cst) => {
-				let idx =
-					self.add_const(cst.name.clone(), cst.value, self.nodes_postorder.next_index());
-				Ok(LoadedNode {
-					node: Self::new_nullary_node(
-						expr,
-						NodeKind::Const,
-						idx.to_untyped(),
-						XIndexState::ConstRef,
-					),
-					cache_key: String::new(),
-					err: ThinVec::new(),
-				})
-			},
 			ExprKind::Input(input) => {
 				self.load_input(expr, input) //
 			},
@@ -851,8 +919,8 @@ impl PreCompilation {
 		name: Cow<'static, str>,
 		value: f64,
 		node: NodeIndex32,
-	) -> ConstRefIndex32 {
-		self.const_vec.push(ConstRef { name, value, input_node: node })
+	) -> Result<ConstRefIndex32, NodeIndex32> {
+		Ok(self.const_vec.push(ConstRef { name, value, input_node: node }))
 	}
 
 	fn add_scalar_input(
@@ -1266,8 +1334,8 @@ impl PreCompilation {
 				let child_shape = child_node.shape();
 				let parent_shape = parent_node.shape();
 				if child.kind == FragmentKind::Reduction {
-					let (c_dims, [c_top]) = PreCompilation::split_shape::<1>(child_shape);
-					let (p_dims, [p_top]) = PreCompilation::split_shape::<1>(parent_shape);
+					let (c_dims, [c_top]) = KernelBuilder::split_shape::<1>(child_shape);
+					let (p_dims, [p_top]) = KernelBuilder::split_shape::<1>(parent_shape);
 					let c_elems = c_dims.iter().product::<usize>();
 					let p_elems = p_dims.iter().product::<usize>();
 					let elems_eq = c_elems == p_elems
