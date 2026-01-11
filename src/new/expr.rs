@@ -384,34 +384,6 @@ impl Expr {
 		}
 	}
 
-	pub fn reshape(self, new_shape: &[usize]) -> Expr {
-		let old_shape = self.node.shape();
-		if old_shape == new_shape {
-			return self;
-		}
-
-		let old_elems = old_shape.iter().product::<usize>();
-		let new_elems = new_shape.iter().product::<usize>();
-
-		let mut local_errors = ThinVec::new();
-		if old_elems != new_elems {
-			local_errors.push(format!(
-				"Reshape: element count mismatch (input has {old_elems} elements; replacement has {new_elems})",
-			));
-		}
-
-		Expr {
-			node: Rc::new(ExprNode {
-				dtype: self.node.dtype,
-				shape: Rc::from(new_shape),
-				can_be_batched: self.node.can_be_batched,
-				have_errors: self.node.have_errors || !local_errors.is_empty(),
-				local_errors,
-				kind: ExprKind::Reshape(ExprReshape { expr: self.node }),
-			}),
-		}
-	}
-
 	pub fn exp(self) -> Expr {
 		Expr {
 			node: Rc::new(ExprNode {

@@ -30,6 +30,7 @@ use thin_vec::{ThinVec, thin_vec};
 use crate::define_index_type32;
 use crate::new::expr::{self, CanBeBatched};
 use crate::tensor::DType;
+use crate::tensor::device::dtype::common_dtype;
 use crate::util::ToBoxedSlice;
 use crate::util::bitmap::IndexBitmap;
 use crate::util::index_vec::{IndexTrait, IndexVec, UntypedIndex32};
@@ -275,15 +276,12 @@ impl Node {
 define_index_type32!(NodeIndex32);
 type NodeVec = IndexVec<NodeIndex32, Node>;
 
-pub struct TensorRef {
-	pub tensor_ref: Rc<expr::TensorRef>,
+pub struct TensorPort {
 	pub input_node: NodeIndex32,
 	pub output_node: NodeIndex32,
-	pub shape: Rc<[usize]>,
-	pub can_be_batched: bool,
 }
 
-impl TensorRef {
+impl TensorPort {
 	pub fn is_input(&self) -> bool {
 		!self.input_node.is_sentinel()
 	}
@@ -293,8 +291,7 @@ impl TensorRef {
 	}
 }
 
-pub struct ScalarRef {
-	pub scalar_ref: Rc<expr::ScalarRef>,
+pub struct ScalarPort {
 	pub input_node: NodeIndex32,
 }
 
@@ -305,10 +302,10 @@ pub struct ConstRef {
 }
 
 define_index_type32!(TensorRefIndex32);
-type TensorVec = IndexVec<TensorRefIndex32, TensorRef>;
+type TensorVec = IndexVec<TensorRefIndex32, TensorPort>;
 
 define_index_type32!(ScalarRefIndex32);
-type ScalarVec = IndexVec<ScalarRefIndex32, ScalarRef>;
+type ScalarVec = IndexVec<ScalarRefIndex32, ScalarPort>;
 
 define_index_type32!(ConstRefIndex32);
 type ConstVec = IndexVec<ConstRefIndex32, ConstRef>;
@@ -342,9 +339,9 @@ define_index_type32!(KernelIndex32);
 pub struct KernelBuilderData {
 	nodes_postorder: NodeVec,
 	const_vec: ConstVec,
-	scalar_map: HashMap<*const expr::ScalarRef, ScalarRefIndex32>,
+	scalar_map: HashMap<Cow<'static, str>, ScalarRefIndex32>,
 	scalar_vec: ScalarVec,
-	tensor_map: HashMap<*const expr::TensorRef, TensorRefIndex32>,
+	tensor_map: HashMap<Cow<'static, str>, TensorRefIndex32>,
 	tensor_vec: TensorVec,
 	frags_postorder: FragVec,
 	node_cache: HashMap<String, NodeIndex32>,
@@ -355,6 +352,7 @@ pub struct KernelBuilder {
 	data: RefCell<KernelBuilderData>,
 }
 
+#[derive(Clone, Copy)]
 pub struct Expr<'a> {
 	kernel_builder: &'a KernelBuilder,
 	node_index: NodeIndex32,
@@ -427,31 +425,24 @@ impl KernelBuilder {
 
 	pub fn new_const<S: Into<Cow<'static, str>>>(&self, name: S, value: f64) -> Expr {
 		let mut data = self.data.borrow_mut();
-		let next_index = data.nodes_postorder.next_index();
-		match data.add_const(name.into(), value, next_index) {
-			Err(existing_node) => {
-				//
-				Expr {
-					kernel_builder: self,
-					node_index: existing_node,
-				}
-			},
-			Ok(idx) => {
-				let real_next_index =
-					data.nodes_postorder.push(KernelBuilderData::new_nullary_node(
-						None,
-						Rc::from([]),
-						false,
-						NodeKind::Const,
-						idx.to_untyped(),
-						XIndexState::ConstRef,
-					));
-				debug_assert!(next_index == real_next_index);
-				Expr {
-					kernel_builder: self,
-					node_index: next_index,
-				}
-			},
+		let node_idx = data.nodes_postorder.next_index();
+		let const_idx = data.const_vec.push(ConstRef {
+			name: name.into(),
+			value,
+			input_node: node_idx,
+		});
+		let real_node_index = data.nodes_postorder.push(KernelBuilderData::new_nullary_node(
+			None,
+			Rc::from([]),
+			false,
+			NodeKind::Const,
+			const_idx.to_untyped(),
+			XIndexState::ConstRef,
+		));
+		debug_assert!(node_idx == real_node_index);
+		Expr {
+			kernel_builder: self,
+			node_index: node_idx,
 		}
 	}
 
@@ -463,41 +454,363 @@ impl KernelBuilder {
 		can_be_batched: CanBeBatched,
 	) -> Expr {
 		let mut data = self.data.borrow_mut();
-		let next_index = data.nodes_postorder.next_index();
+		let node_index = data.nodes_postorder.next_index();
+		let tensor_idx = data.tensor_vec.next_index();
 		match data.tensor_map.entry(name.into()) {
-			hash_map::Entry::Vacant(entry) => {
-				let idx = data.tensor_vec.push(TensorRef {
-					input_node: next_index,
-					output_node: NodeIndex32::new_sentinel(),
-					shape,
-					can_be_batched,
-					tensor_ref,
-				});
-				entry.insert(idx);
-				let real_next_index =
-					data.nodes_postorder.push(KernelBuilderData::new_nullary_node(
-						Some(dtype),
-						shape,
-						can_be_batched != CanBeBatched::No,
-						NodeKind::Input(InputKind::Tensor),
-						idx.to_untyped(),
-						XIndexState::TensorRef,
-					));
-				debug_assert!(next_index == real_next_index);
-				Expr {
-					kernel_builder: self,
-					node_index: next_index,
-				}
-			},
 			hash_map::Entry::Occupied(entry) => {
-				let index = *entry.get();
-				let existing_node = self.tensor_vec[index].input_node;
-				Expr {
+				let tensor_idx = TensorRefIndex32::from(*entry.get());
+				let existing_node = data.tensor_vec[tensor_idx].input_node;
+				return Expr {
 					kernel_builder: self,
 					node_index: existing_node,
-				}
+				};
+			},
+			hash_map::Entry::Vacant(entry) => {
+				entry.insert(tensor_idx);
+			},
+		};
+		let real_tensor_idx = data.tensor_vec.push(TensorPort {
+			input_node: node_index,
+			output_node: NodeIndex32::new_sentinel(),
+		});
+		debug_assert!(tensor_idx == real_tensor_idx);
+		let real_node_index = data.nodes_postorder.push(KernelBuilderData::new_nullary_node(
+			Some(dtype),
+			Rc::from(shape),
+			can_be_batched != CanBeBatched::No,
+			NodeKind::Input(InputKind::Tensor),
+			real_tensor_idx.to_untyped(),
+			XIndexState::TensorRef,
+		));
+		debug_assert!(node_index == real_node_index);
+		Expr { kernel_builder: self, node_index }
+	}
+
+	pub fn new_scalar_input<S: Into<Cow<'static, str>>>(&self, name: S) -> Expr {
+		let mut data = self.data.borrow_mut();
+		let node_index = data.nodes_postorder.next_index();
+		let scalar_idx = data.scalar_vec.next_index();
+		match data.scalar_map.entry(name.into()) {
+			hash_map::Entry::Occupied(entry) => {
+				let scalar_idx = *entry.get();
+				let existing_node = data.scalar_vec[scalar_idx].input_node;
+				return Expr {
+					kernel_builder: self,
+					node_index: existing_node,
+				};
+			},
+			hash_map::Entry::Vacant(entry) => {
+				entry.insert(scalar_idx);
 			},
 		}
+		let real_scalar_idx = data.scalar_vec.push(ScalarPort { input_node: node_index });
+		debug_assert!(scalar_idx == real_scalar_idx);
+		let real_node_index = data.nodes_postorder.push(KernelBuilderData::new_nullary_node(
+			None,
+			Rc::from([]),
+			false,
+			NodeKind::Input(InputKind::Tensor),
+			real_scalar_idx.to_untyped(),
+			XIndexState::TensorRef,
+		));
+		debug_assert!(node_index == real_node_index);
+		Expr { kernel_builder: self, node_index }
+	}
+}
+
+impl<'a> Expr<'a> {
+	fn cache_lookup(
+		self,
+		node_cache: &mut HashMap<String, NodeIndex32>,
+		cache_key: String,
+		new_node_index: NodeIndex32,
+	) -> Option<Self> {
+		if let Err(existing_node) = node_cache.try_insert(cache_key, new_node_index) {
+			Some(Expr {
+				kernel_builder: self.kernel_builder,
+				node_index: *existing_node.entry.get(),
+			})
+		} else {
+			None
+		}
+	}
+
+	pub fn reshape(self, new_shape: &[usize]) -> Self {
+		let mut data = self.kernel_builder.data.borrow_mut();
+		let KernelBuilderData { nodes_postorder, err_log, node_cache, .. } = &mut *data;
+
+		let node_index = nodes_postorder.next_index();
+		let child_idx = self.node_index;
+
+		let cache_key = format!("reshape:{:?}:{}", new_shape, child_idx.raw);
+		if let Some(existing_expr) = self.cache_lookup(node_cache, cache_key, node_index) {
+			return existing_expr;
+		}
+
+		let child_node = &nodes_postorder[child_idx];
+		let old_shape = child_node.shape();
+		if old_shape == new_shape {
+			return self;
+		}
+
+		let old_elems = old_shape.iter().product::<usize>();
+		let new_elems = new_shape.iter().product::<usize>();
+		if old_elems != new_elems {
+			err_log.log_error(node_index, format!(
+				"Reshape: element count mismatch (input has {old_elems} elements; replacement has {new_elems})",
+			));
+		}
+
+		let real_node_index = nodes_postorder.push(KernelBuilderData::new_unary_node(
+			child_node.dtype,
+			child_node.shape.clone(),
+			child_node.can_be_batched,
+			NodeKind::Reshape,
+			child_idx,
+		));
+		debug_assert!(node_index == real_node_index);
+		Expr {
+			kernel_builder: self.kernel_builder,
+			node_index,
+		}
+	}
+
+	pub fn cast(self, dtype: DType) -> Self {
+		let mut data = self.kernel_builder.data.borrow_mut();
+		let KernelBuilderData { nodes_postorder, node_cache, .. } = &mut *data;
+
+		let node_index = nodes_postorder.next_index();
+		let child_idx = self.node_index;
+
+		let cache_key = format!("cast:{dtype}:{:?}", child_idx.raw);
+		if let Some(existing_expr) = self.cache_lookup(node_cache, cache_key, node_index) {
+			return existing_expr;
+		}
+
+		let child_node = &nodes_postorder[child_idx];
+		if child_node.dtype == Some(dtype) {
+			return self;
+		}
+
+		let real_node_index = nodes_postorder.push(KernelBuilderData::new_unary_node(
+			Some(dtype),
+			child_node.shape.clone(),
+			child_node.can_be_batched,
+			NodeKind::Cast,
+			child_idx,
+		));
+		debug_assert!(node_index == real_node_index);
+		Expr {
+			kernel_builder: self.kernel_builder,
+			node_index,
+		}
+	}
+
+	pub fn __unary(self, unary_kind: UnaryKind) -> Self {
+		let mut data = self.kernel_builder.data.borrow_mut();
+		let KernelBuilderData { nodes_postorder, node_cache, .. } = &mut *data;
+
+		let node_index = nodes_postorder.next_index();
+		let child_idx = self.node_index;
+
+		let cache_key = format!("unary:{:?}:{:?}", unary_kind, child_idx.raw);
+		if let Some(existing_expr) = self.cache_lookup(node_cache, cache_key, node_index) {
+			return existing_expr;
+		}
+
+		let child_node = &nodes_postorder[child_idx];
+
+		let real_node_index = nodes_postorder.push(KernelBuilderData::new_unary_node(
+			child_node.dtype,
+			child_node.shape.clone(),
+			child_node.can_be_batched,
+			NodeKind::Unary(unary_kind),
+			child_idx,
+		));
+		debug_assert!(node_index == real_node_index);
+		Expr {
+			kernel_builder: self.kernel_builder,
+			node_index,
+		}
+	}
+
+	pub fn neg(self) -> Self {
+		self.__unary(UnaryKind::Neg)
+	}
+
+	pub fn exp(self) -> Self {
+		self.__unary(UnaryKind::Exp)
+	}
+
+	pub fn ln(self) -> Self {
+		self.__unary(UnaryKind::Ln)
+	}
+
+	pub fn abs(self) -> Self {
+		self.__unary(UnaryKind::Abs)
+	}
+
+	pub fn sqrt(self) -> Self {
+		self.__unary(UnaryKind::Sqrt)
+	}
+
+	pub fn recip(self) -> Self {
+		self.__unary(UnaryKind::Recip)
+	}
+
+	pub fn __reduction(self, reduction_kind: ReductionKind) -> Self {
+		let mut data = self.kernel_builder.data.borrow_mut();
+		let KernelBuilderData { nodes_postorder, err_log, node_cache, .. } = &mut *data;
+
+		let node_index = nodes_postorder.next_index();
+		let child_idx = self.node_index;
+
+		let cache_key = format!("reduction:{:?}:{:?}", reduction_kind, child_idx.raw);
+		if let Some(existing_expr) = self.cache_lookup(node_cache, cache_key, node_index) {
+			return existing_expr;
+		}
+
+		let child_node = &nodes_postorder[child_idx];
+
+		let mut shape = child_node.shape.clone();
+		if let Some(last_dim) = Rc::make_mut(&mut shape).last_mut() {
+			*last_dim = 1;
+		} else {
+			cold_path();
+			err_log.log_error(node_index, format!("missing reduce dimension"));
+			let shape_slice: &[usize] = &[1];
+			shape = Rc::from(shape_slice);
+		}
+
+		let real_node_index = nodes_postorder.push(KernelBuilderData::new_unary_node(
+			child_node.dtype,
+			shape,
+			child_node.can_be_batched,
+			NodeKind::Reduction(reduction_kind),
+			child_idx,
+		));
+		debug_assert!(node_index == real_node_index);
+		Expr {
+			kernel_builder: self.kernel_builder,
+			node_index,
+		}
+	}
+
+	pub fn sum(self) -> Self {
+		self.__reduction(ReductionKind::Sum)
+	}
+
+	pub fn max(self) -> Self {
+		self.__reduction(ReductionKind::Max)
+	}
+
+	pub fn __select(self, select_kind: SelectKind) -> Self {
+		let mut data = self.kernel_builder.data.borrow_mut();
+		let KernelBuilderData { nodes_postorder, err_log, node_cache, .. } = &mut *data;
+
+		let node_index = nodes_postorder.next_index();
+		let child_idx = self.node_index;
+
+		let cache_key = format!("select:{:?}:{:?}", select_kind, child_idx.raw);
+		if let Some(existing_expr) = self.cache_lookup(node_cache, cache_key, node_index) {
+			return existing_expr;
+		}
+
+		let child_node = &nodes_postorder[child_idx];
+
+		let mut shape = child_node.shape.clone();
+		if let Some(last_dim) = Rc::make_mut(&mut shape).last_mut() {
+			if *last_dim % 2 != 0 {
+				cold_path();
+				err_log.log_error(node_index, format!("select dimension not even"));
+			}
+			*last_dim /= 2;
+		} else {
+			cold_path();
+			err_log.log_error(node_index, format!("missing select dimension"));
+			let shape_slice: &[usize] = &[0];
+			shape = Rc::from(shape_slice);
+		}
+
+		let real_node_index = nodes_postorder.push(KernelBuilderData::new_unary_node(
+			child_node.dtype,
+			shape,
+			child_node.can_be_batched,
+			NodeKind::Select(select_kind),
+			child_idx,
+		));
+		debug_assert!(node_index == real_node_index);
+		Expr {
+			kernel_builder: self.kernel_builder,
+			node_index,
+		}
+	}
+
+	pub fn even(self) -> Self {
+		self.__select(SelectKind::Even)
+	}
+
+	pub fn odd(self) -> Self {
+		self.__select(SelectKind::Odd)
+	}
+
+	pub fn __binary(self, binary_kind: BinaryKind, rhs: Self) -> Self {
+		let mut data = self.kernel_builder.data.borrow_mut();
+		let KernelBuilderData { nodes_postorder, err_log, node_cache, .. } = &mut *data;
+
+		let node_index = nodes_postorder.next_index();
+		let l_child_idx = self.node_index;
+		let r_child_idx = rhs.node_index;
+
+		let (l_child_idx, r_child_idx) =
+			if binary_kind.is_commutative() && l_child_idx > r_child_idx {
+				(r_child_idx, l_child_idx)
+			} else {
+				(l_child_idx, r_child_idx)
+			};
+
+		let cache_key =
+			format!("binary:{:?}:{:?}:{:?}", binary_kind, l_child_idx.raw, r_child_idx.raw);
+		if let Some(existing_expr) = self.cache_lookup(node_cache, cache_key, node_index) {
+			return existing_expr;
+		}
+
+		let l_child_node = &nodes_postorder[l_child_idx];
+		let r_child_node = &nodes_postorder[r_child_idx];
+
+		let mut log_error = |msg: String| {
+			err_log.log_error(node_index, msg);
+		};
+
+		let dtype = same_dtype(l_child_node.dtype, r_child_node.dtype, &mut log_error);
+		let (shape, is_broadcasted) =
+			broadcast_shapes(l_child_node.shape(), r_child_node.shape(), &mut log_error);
+
+		let real_node_index = nodes_postorder.push(KernelBuilderData::new_binary_node(
+			dtype,
+			Rc::from(&shape[..]),
+			l_child_node.can_be_batched || r_child_node.can_be_batched,
+			NodeKind::Binary(binary_kind),
+			[l_child_idx, r_child_idx],
+			is_broadcasted,
+		));
+		debug_assert!(node_index == real_node_index);
+		Expr {
+			kernel_builder: self.kernel_builder,
+			node_index,
+		}
+	}
+
+	pub fn add(self, rhs: Self) -> Self {
+		self.__binary(BinaryKind::Add, rhs)
+	}
+
+	pub fn sub(self, rhs: Self) -> Self {
+		self.__binary(BinaryKind::Sub, rhs)
+	}
+
+	pub fn mul(self, rhs: Self) -> Self {
+		self.__binary(BinaryKind::Mul, rhs)
 	}
 }
 
@@ -540,12 +853,18 @@ impl KernelBuilderData {
 		}
 	}
 
-	pub fn new_unary_node(expr: &ExprNode, node_kind: NodeKind, child_idx: NodeIndex32) -> Node {
+	pub fn new_unary_node(
+		dtype: Option<DType>,
+		shape: Rc<[usize]>,
+		can_be_batched: bool,
+		node_kind: NodeKind,
+		child_idx: NodeIndex32,
+	) -> Node {
 		Node {
 			node_kind,
-			dtype: expr.dtype,
-			shape: expr.shape.clone(),
-			can_be_batched: expr.can_be_batched,
+			dtype,
+			shape,
+			can_be_batched,
 			parents: SmallVec::new(),
 			children: [child_idx, NodeIndex32::new_sentinel()],
 			children_broadcast: [false, false],
@@ -559,20 +878,21 @@ impl KernelBuilderData {
 	}
 
 	pub fn new_binary_node(
-		expr: &ExprNode,
-		bin_expr: &ExprBinary,
+		dtype: Option<DType>,
+		shape: Rc<[usize]>,
+		can_be_batched: bool,
 		node_kind: NodeKind,
-		lhs_idx: NodeIndex32,
-		rhs_idx: NodeIndex32,
+		children: [NodeIndex32; 2],
+		is_broadcasted: [bool; 2],
 	) -> Node {
 		Node {
 			node_kind,
-			dtype: expr.dtype,
-			shape: expr.shape.clone(),
-			can_be_batched: expr.can_be_batched,
+			dtype,
+			shape,
+			can_be_batched,
 			parents: SmallVec::new(),
-			children: [lhs_idx, rhs_idx],
-			children_broadcast: [bin_expr.lhs_broadcasted, bin_expr.rhs_broadcasted],
+			children,
+			children_broadcast: is_broadcasted,
 			capture: ThinVec::new(),
 			is_dead: false,
 			is_trivial_head: false,
@@ -744,30 +1064,6 @@ impl KernelBuilderData {
 		})
 	}
 
-	fn load_reshape(
-		&self,
-		expr: &ExprNode,
-		child_idx: NodeIndex32,
-	) -> Result<LoadedNode, NodeIndex32> {
-		Ok(LoadedNode {
-			node: Self::new_unary_node(expr, NodeKind::Reshape, child_idx),
-			cache_key: format!("reshape:{:?}:{}", expr.shape(), child_idx.raw),
-			err: ThinVec::new(),
-		})
-	}
-
-	fn load_cast(
-		&self,
-		expr: &ExprNode,
-		child_idx: NodeIndex32,
-	) -> Result<LoadedNode, NodeIndex32> {
-		Ok(LoadedNode {
-			node: Self::new_unary_node(expr, NodeKind::Cast, child_idx),
-			cache_key: format!("cast:{:?}:{:?}", expr.dtype, child_idx.raw),
-			err: ThinVec::new(),
-		})
-	}
-
 	fn load_label(
 		&mut self,
 		label: &ExprLabel,
@@ -778,66 +1074,6 @@ impl KernelBuilderData {
 		Err(child_idx)
 	}
 
-	fn load_unary(
-		&self,
-		expr: &ExprNode,
-		unary: &ExprUnary,
-		child_idx: NodeIndex32,
-	) -> Result<LoadedNode, NodeIndex32> {
-		match unary.kind {
-			ExprUnaryKind::NoOp => Err(child_idx),
-			ExprUnaryKind::Neg
-			| ExprUnaryKind::Exp
-			| ExprUnaryKind::Ln
-			| ExprUnaryKind::Abs
-			| ExprUnaryKind::Sqrt
-			| ExprUnaryKind::Recip => {
-				let unary_kind = match unary.kind {
-					ExprUnaryKind::Neg => UnaryKind::Neg,
-					ExprUnaryKind::Exp => UnaryKind::Exp,
-					ExprUnaryKind::Ln => UnaryKind::Ln,
-					ExprUnaryKind::Abs => UnaryKind::Abs,
-					ExprUnaryKind::Sqrt => UnaryKind::Sqrt,
-					ExprUnaryKind::Recip => UnaryKind::Recip,
-					_ => unreachable!(),
-				};
-				Ok(LoadedNode {
-					node: Self::new_unary_node(expr, NodeKind::Unary(unary_kind), child_idx),
-					cache_key: format!("unary:{:?}:{:?}", unary_kind, child_idx.raw),
-					err: ThinVec::new(),
-				})
-			},
-			ExprUnaryKind::Sum | ExprUnaryKind::Max => {
-				let reduction_kind = match unary.kind {
-					ExprUnaryKind::Sum => ReductionKind::Sum,
-					ExprUnaryKind::Max => ReductionKind::Max,
-					_ => unreachable!(),
-				};
-				Ok(LoadedNode {
-					node: Self::new_unary_node(
-						expr,
-						NodeKind::Reduction(reduction_kind),
-						child_idx,
-					),
-					cache_key: format!("reduction:{:?}:{:?}", reduction_kind, child_idx.raw),
-					err: ThinVec::new(),
-				})
-			},
-			ExprUnaryKind::SelectEven | ExprUnaryKind::SelectOdd => {
-				let select_kind = match unary.kind {
-					ExprUnaryKind::SelectEven => SelectKind::Even,
-					ExprUnaryKind::SelectOdd => SelectKind::Odd,
-					_ => unreachable!(),
-				};
-				Ok(LoadedNode {
-					node: Self::new_unary_node(expr, NodeKind::Select(select_kind), child_idx),
-					cache_key: format!("select:{:?}:{:?}", select_kind, child_idx.raw),
-					err: ThinVec::new(),
-				})
-			},
-		}
-	}
-
 	fn load_binary(
 		&self,
 		expr: &ExprNode,
@@ -846,27 +1082,6 @@ impl KernelBuilderData {
 		b_idx: NodeIndex32,
 	) -> Result<LoadedNode, NodeIndex32> {
 		match binary.kind {
-			ExprBinaryKind::Add | ExprBinaryKind::Sub | ExprBinaryKind::Mul => {
-				let (binary_kind, commutative) = match binary.kind {
-					ExprBinaryKind::Add => (BinaryKind::Add, true),
-					ExprBinaryKind::Sub => (BinaryKind::Sub, false),
-					ExprBinaryKind::Mul => (BinaryKind::Mul, true),
-					_ => unreachable!(),
-				};
-				let (a_idx, b_idx) =
-					if commutative && a_idx > b_idx { (b_idx, a_idx) } else { (a_idx, b_idx) };
-				Ok(LoadedNode {
-					node: Self::new_binary_node(
-						expr,
-						binary,
-						NodeKind::Binary(binary_kind),
-						a_idx,
-						b_idx,
-					),
-					cache_key: format!("binary:{:?}:{:?}:{:?}", binary_kind, a_idx.raw, b_idx.raw),
-					err: ThinVec::new(),
-				})
-			},
 			ExprBinaryKind::First => Err(a_idx),
 			ExprBinaryKind::RowTimesMat => Ok(LoadedNode {
 				node: Self::new_binary_node(
@@ -914,59 +1129,6 @@ impl KernelBuilderData {
 		}
 	}
 
-	fn add_const(
-		&mut self,
-		name: Cow<'static, str>,
-		value: f64,
-		node: NodeIndex32,
-	) -> Result<ConstRefIndex32, NodeIndex32> {
-		Ok(self.const_vec.push(ConstRef { name, value, input_node: node }))
-	}
-
-	fn add_scalar_input(
-		&mut self,
-		scalar_ref: Rc<expr::ScalarRef>,
-		node: NodeIndex32,
-	) -> Result<ScalarRefIndex32, NodeIndex32> {
-		let key = std::ptr::from_ref(scalar_ref.as_ref());
-		match self.scalar_map.entry(key) {
-			hash_map::Entry::Vacant(entry) => {
-				let index = self.scalar_vec.push(ScalarRef { scalar_ref, input_node: node });
-				entry.insert(index);
-				Ok(index)
-			},
-			hash_map::Entry::Occupied(entry) => {
-				let index = *entry.get();
-				Err(self.scalar_vec[index].input_node)
-			},
-		}
-	}
-
-	fn add_tensor_input(
-		&mut self,
-		tensor_ref: Rc<expr::TensorRef>,
-		node: NodeIndex32,
-	) -> Result<TensorRefIndex32, NodeIndex32> {
-		let key = std::ptr::from_ref(tensor_ref.as_ref());
-		match self.tensor_map.entry(key) {
-			hash_map::Entry::Vacant(entry) => {
-				let index = self.tensor_vec.push(TensorRef {
-					input_node: node,
-					output_node: NodeIndex32::new_sentinel(),
-					shape: tensor_ref.shape.clone(),
-					can_be_batched: tensor_ref.can_be_batched,
-					tensor_ref,
-				});
-				entry.insert(index);
-				Ok(index)
-			},
-			hash_map::Entry::Occupied(entry) => {
-				let index = *entry.get();
-				Err(self.tensor_vec[index].input_node)
-			},
-		}
-	}
-
 	fn add_tensor_output(
 		&mut self,
 		tensor_ref: Rc<expr::TensorRef>,
@@ -975,7 +1137,7 @@ impl KernelBuilderData {
 		let key = std::ptr::from_ref(tensor_ref.as_ref());
 		match self.tensor_map.entry(key) {
 			hash_map::Entry::Vacant(entry) => {
-				let index = self.tensor_vec.push(TensorRef {
+				let index = self.tensor_vec.push(TensorPort {
 					input_node: NodeIndex32::new_sentinel(),
 					output_node: node,
 					shape: tensor_ref.shape.clone(),
@@ -1830,6 +1992,62 @@ pub fn dag_eval<'a, NodeHandle: Clone, Value>(
 	}
 	debug_assert!(!phase2);
 	debug_assert!(values.len() == root_count);
+}
+
+//--------------------------------------------------------------------------------------------------
+
+fn same_dtype(
+	a_dtype: Option<DType>,
+	b_dtype: Option<DType>,
+	log_error: impl FnOnce(String),
+) -> Option<DType> {
+	match (a_dtype, b_dtype) {
+		(None, None) => None,
+		(Some(a_dt), None) => Some(a_dt),
+		(None, Some(b_dt)) => Some(b_dt),
+		(Some(a_dt), Some(b_dt)) => {
+			if a_dt == b_dt {
+				Some(a_dt)
+			} else {
+				cold_path();
+				log_error(format!("dtype mismatch: {} vs {}", a_dt, b_dt));
+				Some(common_dtype(a_dt, b_dt))
+			}
+		},
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub fn broadcast_shapes(
+	a: &[usize],
+	b: &[usize],
+	mut log_error: impl FnMut(String),
+) -> (Vec<usize>, [bool; 2]) {
+	let mut is_broadcasted = [false, false];
+	let mut result = Vec::new();
+	let len = a.len().max(b.len());
+	let skip_a = len - a.len();
+	let skip_b = len - b.len();
+	for d in 0..len {
+		let dim_a = if d < skip_a { 1 } else { a[d - skip_a] };
+		let dim_b = if d < skip_b { 1 } else { b[d - skip_b] };
+		let dim = if dim_a == dim_b {
+			dim_a
+		} else if dim_b == 1 {
+			is_broadcasted[1] = true;
+			dim_a
+		} else if dim_a == 1 {
+			is_broadcasted[0] = true;
+			dim_b
+		} else {
+			cold_path();
+			log_error(format!("broadcast dimension mismatch: {:?} vs {:?}", dim_a, dim_b));
+			dim_a.max(dim_b)
+		};
+		result.push(dim);
+	}
+	(result, is_broadcasted)
 }
 
 //--------------------------------------------------------------------------------------------------
