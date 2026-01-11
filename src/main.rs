@@ -459,8 +459,40 @@ impl BackwardFn for CapturingBackwardFn {
 	}
 }
 
+pub fn new_rms_norm(
+	n_inputs: usize,
+	eps: f64,
+	io_dtype: DType,
+	internal_dtype: DType,
+) -> KernelBuilder {
+	let builder = KernelBuilder::new();
+	let inp = builder.new_tensor_input("inp", io_dtype, &[n_inputs], CanBeBatched::Yes);
+	let inp = inp.cast(internal_dtype);
+
+	let eps = builder.new_const("eps", eps);
+
+	let magn_recip = ((inp * inp).mean().sqrt() + eps).recip();
+	let magn_recip = magn_recip.label("magn_recip");
+
+	let out = inp * magn_recip.clone();
+	let out = out.cast(io_dtype);
+	out.output("out");
+
+	let q = builder.new_const("q", 42.0);
+	q.output("q");
+
+	builder
+}
+
 fn main() -> Result<(), ErrPack<TensorOpError>> {
-	let dev = x17ai::new::device::cpu::CPUDevice::new();
+	let builder = new_rms_norm(64, 0.001, f16::dtype, f32::dtype);
+
+	let graphviz = builder.data.borrow_mut().analyze();
+
+	let graphviz = builder.data.borrow().print_graphviz();
+	std::fs::write("graph.dot", graphviz).unwrap();
+
+	/*	let dev = x17ai::new::device::cpu::CPUDevice::new();
 
 	let io_dtype = f16::dtype;
 
@@ -497,75 +529,75 @@ fn main() -> Result<(), ErrPack<TensorOpError>> {
 	let graphviz = comp.print_graphviz();
 	std::fs::write("graph2.dot", graphviz).unwrap();
 	let graphviz = comp.print_fragment_graphviz();
-	std::fs::write("fragments2.dot", graphviz).unwrap();
+	std::fs::write("fragments2.dot", graphviz).unwrap();*/
 
 	return Ok(());
+	/*
+	  let eps = ScalarRef::new("eps");
 
-	let eps = ScalarRef::new("eps");
+	  //let expr = test1_opt(dev.clone());
+	  //let expr = test2_rms_norm(dev.clone());
+	  //let expr = test3_softmax(dev.clone());
+	  //let expr = test4_x(dev.clone());
+	  //let expr = test5(dev.clone());
 
-	//let expr = test1_opt(dev.clone());
-	//let expr = test2_rms_norm(dev.clone());
-	//let expr = test3_softmax(dev.clone());
-	//let expr = test4_x(dev.clone());
-	//let expr = test5(dev.clone());
+	  //let q = TensorRef::new("q".into(), io_dtype, vec![4, 4, 64], CanBeBatched::Yes);
+	  //let kv = TensorRef::new("kv".into(), io_dtype, vec![1, 4, 64 + 64], CanBeBatched::Yes);
 
-	//let q = TensorRef::new("q".into(), io_dtype, vec![4, 4, 64], CanBeBatched::Yes);
-	//let kv = TensorRef::new("kv".into(), io_dtype, vec![1, 4, 64 + 64], CanBeBatched::Yes);
+	  let t = TensorRef::new("t", io_dtype, &[1024], CanBeBatched::Yes);
+	  let r = TensorRef::new("r", io_dtype, &[1024], CanBeBatched::Yes);
+	  let mq = TensorRef::new("mq", io_dtype, &[1024, 1024], CanBeBatched::No);
+	  let mkv = TensorRef::new("mkv", io_dtype, &[1024, 4 * (64 + 64)], CanBeBatched::No);
+	  let mw = TensorRef::new("mw", io_dtype, &[1024, 2048], CanBeBatched::No);
+	  let expr = Expr::new_tensor_input(t.clone());
 
-	let t = TensorRef::new("t", io_dtype, &[1024], CanBeBatched::Yes);
-	let r = TensorRef::new("r", io_dtype, &[1024], CanBeBatched::Yes);
-	let mq = TensorRef::new("mq", io_dtype, &[1024, 1024], CanBeBatched::No);
-	let mkv = TensorRef::new("mkv", io_dtype, &[1024, 4 * (64 + 64)], CanBeBatched::No);
-	let mw = TensorRef::new("mw", io_dtype, &[1024, 2048], CanBeBatched::No);
-	let expr = Expr::new_tensor_input(t.clone());
+	  //let expr = AutogradExpr::new(expr, Some(Box::new(CapturingBackwardFn)));
+	  let expr = AutogradExpr::new(expr, None);
+	  let expr = rms_norm(expr, 0.001, internal_dtype, RMSNormGrad::Precise);
+	  let expr = expr.expr;
+	  //let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?.cast(io_dtype);
 
-	//let expr = AutogradExpr::new(expr, Some(Box::new(CapturingBackwardFn)));
-	let expr = AutogradExpr::new(expr, None);
-	let expr = rms_norm(expr, 0.001, internal_dtype, RMSNormGrad::Precise);
-	let expr = expr.expr;
-	//let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?.cast(io_dtype);
+	  let qq = expr
+		  .clone()
+		  .cast(internal_dtype)
+		  .row_times_mat(Expr::new_tensor_input(mq.clone()).cast(internal_dtype))
+		  .cast(io_dtype)
+		  .reshape(&[4, 4, 64])
+		  .cast(internal_dtype);
+	  //.capture(q.clone());
+	  let kv = expr
+		  .clone()
+		  .cast(internal_dtype)
+		  .row_times_mat(Expr::new_tensor_input(mkv.clone()).cast(internal_dtype))
+		  .cast(io_dtype)
+		  .cast(internal_dtype)
+		  .reshape(&[1, 4, 64 + 64]);
+	  //.capture(kv.clone())
+	  //.capture(q.clone());
 
-	let qq = expr
-		.clone()
-		.cast(internal_dtype)
-		.row_times_mat(Expr::new_tensor_input(mq.clone()).cast(internal_dtype))
-		.cast(io_dtype)
-		.reshape(&[4, 4, 64])
-		.cast(internal_dtype);
-	//.capture(q.clone());
-	let kv = expr
-		.clone()
-		.cast(internal_dtype)
-		.row_times_mat(Expr::new_tensor_input(mkv.clone()).cast(internal_dtype))
-		.cast(io_dtype)
-		.cast(internal_dtype)
-		.reshape(&[1, 4, 64 + 64]);
-	//.capture(kv.clone())
-	//.capture(q.clone());
+	  //let expr = RcExpr::first(q, kv);
+	  //let expr = x_softmax(expr, internal_dtype)?;
+	  //	let expr = x_swiglu(expr, internal_dtype)?;
 
-	//let expr = RcExpr::first(q, kv);
-	//let expr = x_softmax(expr, internal_dtype)?;
-	//	let expr = x_swiglu(expr, internal_dtype)?;
+	  let expr = qq.attention(kv);
+	  let expr = expr
+		  .cast(io_dtype)
+		  .cast(internal_dtype)
+		  .reshape(&[1024])
+		  .row_times_mat(Expr::new_tensor_input(mw.clone()).cast(internal_dtype));
+	  let expr = x_swiglu(expr, internal_dtype)?;
+	  let expr = expr.cast(io_dtype);
+	  //let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?.cast(io_dtype);
+	  let expr = expr.capture_into(r.clone());
 
-	let expr = qq.attention(kv);
-	let expr = expr
-		.cast(io_dtype)
-		.cast(internal_dtype)
-		.reshape(&[1024])
-		.row_times_mat(Expr::new_tensor_input(mw.clone()).cast(internal_dtype));
-	let expr = x_swiglu(expr, internal_dtype)?;
-	let expr = expr.cast(io_dtype);
-	//let expr = x_rms_norm(expr, eps.clone(), internal_dtype)?.cast(io_dtype);
-	let expr = expr.capture_into(r.clone());
+	  let mut comp = KernelBuilder::new(&expr.node);
 
-	let mut comp = KernelBuilder::new(&expr.node);
+	  let graphviz = comp.print_graphviz();
+	  std::fs::write("graph.dot", graphviz).unwrap();
 
-	let graphviz = comp.print_graphviz();
-	std::fs::write("graph.dot", graphviz).unwrap();
-
-	let graphviz = comp.print_fragment_graphviz();
-	std::fs::write("fragments.dot", graphviz).unwrap();
-
+	  let graphviz = comp.print_fragment_graphviz();
+	  std::fs::write("fragments.dot", graphviz).unwrap();
+	*/
 	/*let mut comp = CompiledExpr::new(comp);
 	let dev = x17ai::new::device::cpu::CPUDevice::new();
 	let inp_lit = TensorLiteral1D::<f32>::new(&[1.0, 2.0, 3.0]);

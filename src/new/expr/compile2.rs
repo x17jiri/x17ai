@@ -29,16 +29,17 @@ use thin_vec::ThinVec;
 
 use crate::define_index_type32;
 use crate::new::expr::{CanBeBatched, split_shape};
-use crate::tensor::DType;
 use crate::tensor::device::dtype::common_dtype;
-use crate::util::ToBoxedSlice;
+use crate::tensor::{DType, HasDType};
 use crate::util::bitmap::IndexBitmap;
 use crate::util::index_vec::{IndexTrait, IndexVec, UntypedIndex32};
+use crate::util::{LossyFrom, ToBoxedSlice};
 
 //--------------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnaryKind {
+	Identity,
 	Neg,
 	Exp,
 	Ln,
@@ -221,7 +222,9 @@ impl Node {
 	pub fn is_trivial(&self) -> bool {
 		matches!(
 			self.node_kind,
-			NodeKind::Cast | NodeKind::Reshape | NodeKind::Unary(UnaryKind::Neg)
+			NodeKind::Cast
+				| NodeKind::Reshape
+				| NodeKind::Unary(UnaryKind::Identity | UnaryKind::Neg)
 		)
 	}
 
@@ -278,6 +281,7 @@ type NodeVec = IndexVec<NodeIndex32, Node>;
 
 pub struct TensorPort {
 	pub name: Cow<'static, str>,
+	pub dtype: DType,
 	pub input_node: NodeIndex32,
 	pub output_node: NodeIndex32,
 }
@@ -351,7 +355,7 @@ pub struct KernelBuilderData {
 }
 
 pub struct KernelBuilder {
-	data: RefCell<KernelBuilderData>,
+	pub data: RefCell<KernelBuilderData>,
 }
 
 #[derive(Clone, Copy)]
@@ -470,6 +474,7 @@ impl KernelBuilder {
 		}
 		let real_tensor_idx = tensor_vec.push(TensorPort {
 			name,
+			dtype,
 			input_node: node_index,
 			output_node: NodeIndex32::new_sentinel(),
 		});
@@ -544,7 +549,44 @@ impl<'a> Expr<'a> {
 		}
 	}
 
+	pub fn dtype(self) -> Option<DType> {
+		let data = self.kernel_builder.data.borrow();
+		let KernelBuilderData { nodes_postorder, .. } = &*data;
+		nodes_postorder[self.node_index].dtype
+	}
+
+	pub fn get_dtype_or_log_error(self) -> DType {
+		let mut data = self.kernel_builder.data.borrow_mut();
+		let KernelBuilderData { nodes_postorder, err_log, .. } = &mut *data;
+		if let Some(my_dtype) = nodes_postorder[self.node_index].dtype {
+			my_dtype
+		} else {
+			cold_path();
+			err_log.log_error(self.node_index, format!("node has unknown dtype"));
+			f64::dtype
+		}
+	}
+
 	pub fn output<S: Into<Cow<'static, str>>>(self, port_name: S) -> Self {
+		let dtype;
+		let mut need_identity = false;
+		{
+			let mut data = self.kernel_builder.data.borrow_mut();
+			let KernelBuilderData { nodes_postorder, err_log, .. } = &mut *data;
+			let node = &nodes_postorder[self.node_index];
+			need_identity = node.is_input();
+			if let Some(dt) = node.dtype {
+				dtype = dt;
+			} else {
+				cold_path();
+				err_log.log_error(self.node_index, format!("captured value has unknown dtype"));
+				dtype = f64::dtype;
+				need_identity = true;
+			};
+		}
+
+		let expr = if need_identity { self.__unary(UnaryKind::Identity) } else { self };
+
 		let mut data = self.kernel_builder.data.borrow_mut();
 		let KernelBuilderData {
 			nodes_postorder,
@@ -553,13 +595,14 @@ impl<'a> Expr<'a> {
 			err_log,
 			..
 		} = &mut *data;
-		let node_index = self.node_index;
+		let node_index = expr.node_index;
 		let tensor_idx;
 		let port_name = port_name.into();
 		match tensor_map.entry(port_name.clone()) {
 			hash_map::Entry::Vacant(entry) => {
 				tensor_idx = tensor_vec.push(TensorPort {
 					name: port_name,
+					dtype,
 					input_node: NodeIndex32::new_sentinel(),
 					output_node: node_index,
 				});
@@ -578,7 +621,7 @@ impl<'a> Expr<'a> {
 			},
 		}
 		nodes_postorder[node_index].capture.push(tensor_idx);
-		self
+		expr
 	}
 
 	pub fn label<S: Into<Cow<'static, str>>>(self, label: S) -> Self {
@@ -688,10 +731,6 @@ impl<'a> Expr<'a> {
 			kernel_builder: self.kernel_builder,
 			node_index,
 		}
-	}
-
-	pub fn neg(self) -> Self {
-		self.__unary(UnaryKind::Neg)
 	}
 
 	pub fn exp(self) -> Self {
@@ -815,6 +854,7 @@ impl<'a> Expr<'a> {
 	}
 
 	pub fn __binary(self, binary_kind: BinaryKind, rhs: Self) -> Self {
+		// TODO - rhs may be from different kernel builder
 		let mut data = self.kernel_builder.data.borrow_mut();
 		let KernelBuilderData { nodes_postorder, err_log, node_cache, .. } = &mut *data;
 
@@ -855,18 +895,6 @@ impl<'a> Expr<'a> {
 			kernel_builder: self.kernel_builder,
 			node_index,
 		}
-	}
-
-	pub fn add(self, rhs: Self) -> Self {
-		self.__binary(BinaryKind::Add, rhs)
-	}
-
-	pub fn sub(self, rhs: Self) -> Self {
-		self.__binary(BinaryKind::Sub, rhs)
-	}
-
-	pub fn mul(self, rhs: Self) -> Self {
-		self.__binary(BinaryKind::Mul, rhs)
 	}
 
 	pub fn row_times_mat(self, mat: Self) -> Self {
@@ -1140,6 +1168,56 @@ impl<'a> Expr<'a> {
 			kernel_builder: self.kernel_builder,
 			node_index,
 		}
+	}
+
+	pub fn sum_to_mean(self) -> Self {
+		let mut data = self.kernel_builder.data.borrow_mut();
+		let KernelBuilderData { nodes_postorder, .. } = &mut *data;
+
+		let node = &nodes_postorder[self.node_index];
+		let shape = node.shape();
+		let last_dim = shape.last().copied().unwrap_or(1);
+		let c = 1.0 / f64::lossy_from(last_dim);
+
+		std::mem::drop(data);
+
+		self.kernel_builder.new_const(format!("1.0 / {last_dim}"), c)
+	}
+
+	pub fn mean(self) -> Self {
+		self.sum() * self.sum_to_mean()
+	}
+}
+
+impl<'a> std::ops::Add for Expr<'a> {
+	type Output = Self;
+
+	fn add(self, rhs: Self) -> Self {
+		self.__binary(BinaryKind::Add, rhs)
+	}
+}
+
+impl<'a> std::ops::Sub for Expr<'a> {
+	type Output = Self;
+
+	fn sub(self, rhs: Self) -> Self {
+		self.__binary(BinaryKind::Sub, rhs)
+	}
+}
+
+impl<'a> std::ops::Mul for Expr<'a> {
+	type Output = Self;
+
+	fn mul(self, rhs: Self) -> Self {
+		self.__binary(BinaryKind::Mul, rhs)
+	}
+}
+
+impl<'a> std::ops::Neg for Expr<'a> {
+	type Output = Self;
+
+	fn neg(self) -> Self {
+		self.__unary(UnaryKind::Neg)
 	}
 }
 
@@ -1726,6 +1804,7 @@ impl KernelBuilderData {
 			},
 			NodeKind::EvenOdd => "<b>EvenOdd</b>".to_string(),
 			NodeKind::Unary(unary) => match unary {
+				UnaryKind::Identity => "<b>Identity</b>".to_string(),
 				UnaryKind::Neg => "<b>Neg</b>".to_string(),
 				UnaryKind::Exp => "<b>Exp</b>".to_string(),
 				UnaryKind::Ln => "<b>Ln</b>".to_string(),
@@ -1951,19 +2030,6 @@ impl KernelBuilderData {
 				eprintln!("Node {idx}: error: {msg}");
 			}
 		}
-		writeln!(w, "}}")?;
-		Ok(())
-	}
-
-	pub fn print_fragment_graphviz(&self) -> String {
-		let mut s = String::new();
-		let _ = self.__print_fragment_graphviz(&mut s);
-		s
-	}
-
-	pub fn __print_fragment_graphviz<W: std::fmt::Write>(&self, w: &mut W) -> std::fmt::Result {
-		writeln!(w, "digraph G {{")?;
-		writeln!(w, "\trankdir=BT;")?;
 		for i in self.frags_postorder.indexes() {
 			let fragment = &self.frags_postorder[i];
 			let node_id = format!("frag_{}", i.raw);
@@ -1974,6 +2040,7 @@ impl KernelBuilderData {
 				FragmentKind::Attention => ("Attention", "#c00000"),
 				FragmentKind::Elementwise => ("Element-wise", "black"),
 			};
+			writeln!(w, "\t{{ rank=same; {node_id}; node_{}; }};", fragment.head.raw)?;
 			let label = format!("<b>&#91;{}&#93; {fragment_kind}</b>", fragment.head.raw);
 			writeln!(
 				w,
