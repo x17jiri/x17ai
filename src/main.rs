@@ -518,19 +518,55 @@ pub fn new_rms_norm(
 	let magn_recip = ((inp * inp).mean().sqrt() + eps).recip();
 	let magn_recip = magn_recip.label("magn_recip");
 
-	let out = inp * magn_recip.clone();
+	let out = inp * magn_recip;
 	let out = out.cast(io_dtype);
 	out.output("out");
 
-	let q = builder.new_tensor_input("q", io_dtype, &[n_inputs], CanBeBatched::Yes);
-	q.output("q1");
-	q.output("q2");
+	builder
+}
+
+pub fn new_swiglu(n_inputs: usize, io_dtype: DType, internal_dtype: DType) -> KernelBuilder {
+	let builder = KernelBuilder::new();
+	let inp = builder.new_tensor_input("inp", io_dtype, &[n_inputs], CanBeBatched::Yes);
+	let inp = inp.cast(internal_dtype);
+
+	let lin = inp.select_even();
+	let gate = inp.select_odd();
+
+	let one = builder.new_const("ONE", 1.0);
+
+	let out = lin * gate * ((-gate).exp() + one).recip();
+	let out = out.cast(io_dtype);
+	out.output("out");
+
+	builder
+}
+
+pub fn new_linear(
+	n_inputs: usize,
+	n_outputs: usize,
+	io_dtype: DType,
+	internal_dtype: DType,
+) -> KernelBuilder {
+	let builder = KernelBuilder::new();
+	let inp = builder.new_tensor_input("inp", io_dtype, &[n_inputs], CanBeBatched::Yes);
+	let inp = inp.cast(internal_dtype);
+
+	let weights =
+		builder.new_tensor_input("weights", io_dtype, &[n_outputs, n_inputs], CanBeBatched::No);
+	let weights = weights.cast(internal_dtype);
+
+	let out = weights.mat_times_col(inp);
+	let out = out.cast(io_dtype);
+	out.output("out");
 
 	builder
 }
 
 fn main() -> Result<(), ErrPack<TensorOpError>> {
-	let builder = new_rms_norm(64, 0.001, f16::dtype, f32::dtype);
+	//let builder = new_rms_norm(64, 0.001, f16::dtype, f32::dtype);
+	//let builder = new_swiglu(2048, f16::dtype, f32::dtype);
+	let builder = new_linear(1024, 2048, f16::dtype, f32::dtype);
 
 	let graphviz = builder.data.borrow_mut().analyze();
 

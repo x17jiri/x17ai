@@ -78,7 +78,6 @@ impl BinaryKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MatMulKind {
-	RowTimesMat,
 	MatTimesCol,
 	ColTimesRowAcc,
 }
@@ -568,13 +567,6 @@ impl<'a> Expr<'a> {
 	}
 
 	pub fn output<S: Into<Cow<'static, str>>>(self, port_name: S) -> Self {
-		let need_identity = {
-			let data = self.kernel_builder.data.borrow();
-			let KernelBuilderData { nodes_postorder, .. } = &*data;
-			nodes_postorder[self.node_index].is_input()
-		};
-		let input = if need_identity { self.__unary(UnaryKind::Identity) } else { self };
-
 		let mut data = self.kernel_builder.data.borrow_mut();
 		let KernelBuilderData {
 			nodes_postorder,
@@ -583,8 +575,16 @@ impl<'a> Expr<'a> {
 			err_log,
 			..
 		} = &mut *data;
-		let node_index = input.node_index;
-		let dtype = if let Some(dt) = nodes_postorder[node_index].dtype {
+		let node_index = self.node_index;
+		let node = &nodes_postorder[node_index];
+		if node.is_input() {
+			cold_path();
+			err_log.log_error(
+				node_index,
+				format!("cannot directly capture an input. Use `Identity` node first."),
+			);
+		}
+		let dtype = if let Some(dt) = node.dtype {
 			dt
 		} else {
 			cold_path();
@@ -616,7 +616,7 @@ impl<'a> Expr<'a> {
 			},
 		}
 		nodes_postorder[node_index].capture.push(tensor_idx);
-		input
+		self
 	}
 
 	pub fn label<S: Into<Cow<'static, str>>>(self, label: S) -> Self {
@@ -726,6 +726,10 @@ impl<'a> Expr<'a> {
 			kernel_builder: self.kernel_builder,
 			node_index,
 		}
+	}
+
+	pub fn identity(self) -> Self {
+		self.__unary(UnaryKind::Identity)
 	}
 
 	pub fn exp(self) -> Self {
@@ -840,11 +844,11 @@ impl<'a> Expr<'a> {
 		}
 	}
 
-	pub fn even(self) -> Self {
+	pub fn select_even(self) -> Self {
 		self.__select(SelectKind::Even)
 	}
 
-	pub fn odd(self) -> Self {
+	pub fn select_odd(self) -> Self {
 		self.__select(SelectKind::Odd)
 	}
 
@@ -892,85 +896,27 @@ impl<'a> Expr<'a> {
 		}
 	}
 
-	pub fn row_times_mat(self, mat: Self) -> Self {
-		let mut data = self.kernel_builder.data.borrow_mut();
-		let KernelBuilderData { nodes_postorder, err_log, node_cache, .. } = &mut *data;
-
-		let node_index = nodes_postorder.next_index();
-		let a_idx = self.node_index;
-		let b_idx = mat.node_index;
-
-		let cache_key = format!("row_times_mat:{:?}:{:?}", a_idx.raw, b_idx.raw);
-		if let Some(existing_expr) = self.cache_lookup(node_cache, cache_key, node_index) {
-			return existing_expr;
-		}
-
-		let mut log_error = |msg: String| err_log.log_error(node_index, msg);
-
-		let a_node = &nodes_postorder[a_idx];
-		let b_node = &nodes_postorder[b_idx];
-
-		let r_shape = a_node.shape();
-		let m_shape = b_node.shape();
-		if r_shape.len() < 1 || m_shape.len() < 2 {
-			cold_path();
-			log_error(format!("matmul: not enough dimensions"));
-		}
-		let (r_rest, [r_len]) = split_shape::<1>(r_shape);
-		let (m_rest, [m_row, m_col]) = split_shape::<2>(m_shape);
-		if r_len != m_row {
-			cold_path();
-			log_error(format!("matmul: shape mismatch"));
-		}
-		let mut shape = Rc::<[usize]>::from(r_shape);
-		*Rc::make_mut(&mut shape).last_mut().unwrap() = m_col;
-
-		if !m_rest.is_empty() || b_node.can_be_batched {
-			cold_path();
-			log_error("row times mat: mat cannot be batched".into());
-		}
-		let m_broadcasted = !r_rest.is_empty();
-
-		let mut log_error = |msg: String| {
-			log_error(msg);
-		};
-		let dtype = same_dtype(a_node.dtype, b_node.dtype, &mut log_error);
-
-		let real_node_index = nodes_postorder.push(KernelBuilderData::new_binary_node(
-			dtype,
-			Rc::from(&shape[..]),
-			a_node.can_be_batched || b_node.can_be_batched,
-			NodeKind::MatMul(MatMulKind::RowTimesMat),
-			[a_idx, b_idx],
-			[false, m_broadcasted],
-		));
-		debug_assert!(node_index == real_node_index);
-		Expr {
-			kernel_builder: self.kernel_builder,
-			node_index,
-		}
-	}
-
 	pub fn mat_times_col(self, col: Self) -> Self {
 		let mut data = self.kernel_builder.data.borrow_mut();
 		let KernelBuilderData { nodes_postorder, err_log, node_cache, .. } = &mut *data;
 
+		let mat = self;
 		let node_index = nodes_postorder.next_index();
-		let a_idx = self.node_index;
-		let b_idx = col.node_index;
+		let m_idx = mat.node_index;
+		let c_idx = col.node_index;
 
-		let cache_key = format!("mat_times_col:{:?}:{:?}", a_idx.raw, b_idx.raw);
-		if let Some(existing_expr) = self.cache_lookup(node_cache, cache_key, node_index) {
+		let cache_key = format!("mat_times_col:{:?}:{:?}", m_idx.raw, c_idx.raw);
+		if let Some(existing_expr) = mat.cache_lookup(node_cache, cache_key, node_index) {
 			return existing_expr;
 		}
 
 		let mut log_error = |msg: String| err_log.log_error(node_index, msg);
 
-		let a_node = &nodes_postorder[a_idx];
-		let b_node = &nodes_postorder[b_idx];
+		let m_node = &nodes_postorder[m_idx];
+		let c_node = &nodes_postorder[c_idx];
 
-		let m_shape = a_node.shape();
-		let c_shape = b_node.shape();
+		let m_shape = m_node.shape();
+		let c_shape = c_node.shape();
 		if m_shape.len() < 2 || c_shape.len() < 1 {
 			cold_path();
 			log_error(format!("matmul: not enough dimensions"));
@@ -984,25 +930,25 @@ impl<'a> Expr<'a> {
 		let mut shape = Rc::<[usize]>::from(c_shape);
 		*Rc::make_mut(&mut shape).last_mut().unwrap() = m_row;
 
-		if !m_rest.is_empty() || b_node.can_be_batched {
+		if !m_rest.is_empty() || m_node.can_be_batched {
 			cold_path();
 			log_error("mat times col: mat cannot be batched".into());
 		}
 		let m_broadcasted = !c_rest.is_empty();
 
-		let dtype = same_dtype(a_node.dtype, b_node.dtype, &mut log_error);
+		let dtype = same_dtype(m_node.dtype, c_node.dtype, &mut log_error);
 
 		let real_node_index = nodes_postorder.push(KernelBuilderData::new_binary_node(
 			dtype,
 			Rc::from(&shape[..]),
-			a_node.can_be_batched || b_node.can_be_batched,
-			NodeKind::MatMul(MatMulKind::RowTimesMat),
-			[a_idx, b_idx],
+			m_node.can_be_batched || c_node.can_be_batched,
+			NodeKind::MatMul(MatMulKind::MatTimesCol),
+			[m_idx, c_idx],
 			[m_broadcasted, false],
 		));
 		debug_assert!(node_index == real_node_index);
 		Expr {
-			kernel_builder: self.kernel_builder,
+			kernel_builder: mat.kernel_builder,
 			node_index,
 		}
 	}
@@ -1011,22 +957,23 @@ impl<'a> Expr<'a> {
 		let mut data = self.kernel_builder.data.borrow_mut();
 		let KernelBuilderData { nodes_postorder, err_log, node_cache, .. } = &mut *data;
 
+		let col = self;
 		let node_index = nodes_postorder.next_index();
-		let a_idx = self.node_index;
-		let b_idx = row.node_index;
+		let c_idx = col.node_index;
+		let r_idx = row.node_index;
 
-		let cache_key = format!("col_times_row_acc:{:?}:{:?}", a_idx.raw, b_idx.raw);
-		if let Some(existing_expr) = self.cache_lookup(node_cache, cache_key, node_index) {
+		let cache_key = format!("col_times_row_acc:{:?}:{:?}", c_idx.raw, r_idx.raw);
+		if let Some(existing_expr) = col.cache_lookup(node_cache, cache_key, node_index) {
 			return existing_expr;
 		}
 
 		let mut log_error = |msg: String| err_log.log_error(node_index, msg);
 
-		let a_node = &nodes_postorder[a_idx];
-		let b_node = &nodes_postorder[b_idx];
+		let c_node = &nodes_postorder[c_idx];
+		let r_node = &nodes_postorder[r_idx];
 
-		let c_shape = a_node.shape();
-		let r_shape = b_node.shape();
+		let c_shape = c_node.shape();
+		let r_shape = r_node.shape();
 		if c_shape.len() < 1 || r_shape.len() < 1 {
 			cold_path();
 			log_error(format!("outer product: not enough dimensions"));
@@ -1037,25 +984,25 @@ impl<'a> Expr<'a> {
 		let (mut shape, is_broadcasted) = broadcast_shapes(c_rest, r_rest, &mut log_error);
 		shape.push(c_len);
 		shape.push(r_len);
-		if is_broadcasted[0] || is_broadcasted[1] || a_node.can_be_batched != b_node.can_be_batched
+		if is_broadcasted[0] || is_broadcasted[1] || c_node.can_be_batched != r_node.can_be_batched
 		{
 			cold_path();
 			log_error(format!("outer product inputs cannot be broadcasted"));
 		}
 
-		let dtype = same_dtype(a_node.dtype, b_node.dtype, &mut log_error);
+		let dtype = same_dtype(c_node.dtype, r_node.dtype, &mut log_error);
 
 		let real_node_index = nodes_postorder.push(KernelBuilderData::new_binary_node(
 			dtype,
 			Rc::from(&shape[..]),
 			false, // we sum over the batch dimension
 			NodeKind::MatMul(MatMulKind::ColTimesRowAcc),
-			[a_idx, b_idx],
+			[c_idx, r_idx],
 			is_broadcasted,
 		));
 		debug_assert!(node_index == real_node_index);
 		Expr {
-			kernel_builder: self.kernel_builder,
+			kernel_builder: col.kernel_builder,
 			node_index,
 		}
 	}
@@ -1097,7 +1044,7 @@ impl<'a> Expr<'a> {
 			dtype,
 			Rc::from(&shape[..]),
 			a_node.can_be_batched || b_node.can_be_batched,
-			NodeKind::MatMul(MatMulKind::RowTimesMat),
+			NodeKind::EvenOdd,
 			[a_idx, b_idx],
 			[false, false],
 		));
@@ -1813,9 +1760,8 @@ impl KernelBuilderData {
 				BinaryKind::Mul => "<b>Mul</b>".to_string(),
 			},
 			NodeKind::MatMul(matmul) => match matmul {
-				MatMulKind::RowTimesMat => "<b>row * MAT</b>".to_string(),
-				MatMulKind::ColTimesRowAcc => "<b>ACC(col * row) → MAT</b>".to_string(),
 				MatMulKind::MatTimesCol => "<b>MAT * col</b>".to_string(),
+				MatMulKind::ColTimesRowAcc => "<b>ACC(col * row) → MAT</b>".to_string(),
 			},
 			NodeKind::Attention => "<b>ATTN</b>".to_string(),
 			NodeKind::Reduction(reduction) => match reduction {
