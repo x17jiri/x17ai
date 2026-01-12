@@ -568,24 +568,12 @@ impl<'a> Expr<'a> {
 	}
 
 	pub fn output<S: Into<Cow<'static, str>>>(self, port_name: S) -> Self {
-		let dtype;
-		let mut need_identity = false;
-		{
-			let mut data = self.kernel_builder.data.borrow_mut();
-			let KernelBuilderData { nodes_postorder, err_log, .. } = &mut *data;
-			let node = &nodes_postorder[self.node_index];
-			need_identity = node.is_input();
-			if let Some(dt) = node.dtype {
-				dtype = dt;
-			} else {
-				cold_path();
-				err_log.log_error(self.node_index, format!("captured value has unknown dtype"));
-				dtype = f64::dtype;
-				need_identity = true;
-			};
-		}
-
-		let expr = if need_identity { self.__unary(UnaryKind::Identity) } else { self };
+		let need_identity = {
+			let data = self.kernel_builder.data.borrow();
+			let KernelBuilderData { nodes_postorder, .. } = &*data;
+			nodes_postorder[self.node_index].is_input()
+		};
+		let input = if need_identity { self.__unary(UnaryKind::Identity) } else { self };
 
 		let mut data = self.kernel_builder.data.borrow_mut();
 		let KernelBuilderData {
@@ -595,7 +583,14 @@ impl<'a> Expr<'a> {
 			err_log,
 			..
 		} = &mut *data;
-		let node_index = expr.node_index;
+		let node_index = input.node_index;
+		let dtype = if let Some(dt) = nodes_postorder[node_index].dtype {
+			dt
+		} else {
+			cold_path();
+			err_log.log_error(self.node_index, format!("captured value has unknown dtype"));
+			f64::dtype
+		};
 		let tensor_idx;
 		let port_name = port_name.into();
 		match tensor_map.entry(port_name.clone()) {
@@ -621,7 +616,7 @@ impl<'a> Expr<'a> {
 			},
 		}
 		nodes_postorder[node_index].capture.push(tensor_idx);
-		expr
+		input
 	}
 
 	pub fn label<S: Into<Cow<'static, str>>>(self, label: S) -> Self {
@@ -2041,6 +2036,11 @@ impl KernelBuilderData {
 				FragmentKind::Elementwise => ("Element-wise", "black"),
 			};
 			writeln!(w, "\t{{ rank=same; {node_id}; node_{}; }};", fragment.head.raw)?;
+			/*writeln!(
+				w,
+				"\tnode_{} -> {node_id} [style=dashed, color=\"#808080\", constraint=false];",
+				fragment.head.raw
+			)?;*/
 			let label = format!("<b>&#91;{}&#93; {fragment_kind}</b>", fragment.head.raw);
 			writeln!(
 				w,

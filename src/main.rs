@@ -162,9 +162,11 @@ fn laplacian(v: &ArrayView2<f32>) -> Array2<f32> {
 		+ v.slice(s![2.., 1..-1])
 }*/
 
+use std::borrow::Cow;
 use std::boxed::ThinBox;
 use std::rc::Rc;
 
+use hashbrown::HashMap;
 use thin_vec::thin_vec;
 use x17ai::autograd::{AutogradTensor, LossFn};
 use x17ai::new::autograd::{Autograd, AutogradExpr, BackwardFn};
@@ -459,6 +461,48 @@ impl BackwardFn for CapturingBackwardFn {
 	}
 }
 
+pub struct Kernel<const INP: usize, const OUT: usize> {
+	//
+}
+
+pub struct CalculationGraph {
+	//
+}
+
+impl CalculationGraph {
+	pub fn add<const INP: usize, const OUT: usize>(
+		&mut self,
+		kernel: &Kernel<INP, OUT>,
+		inputs: [Value; INP],
+	) -> [Value; OUT] {
+		//
+		[Value {}; OUT]
+	}
+
+	pub fn split<const OUT: usize>(&mut self, input: Value) -> [Value; OUT] {
+		//
+		[Value {}; OUT]
+	}
+}
+
+#[derive(Clone, Copy)]
+pub struct Value {
+	//
+}
+
+pub struct Model {
+	rms_norm: Kernel<1, 1>,
+}
+
+impl Model {
+	pub fn layer(&self, calc: &mut CalculationGraph, inp: Value) -> Value {
+		let [out] = calc.add(&self.rms_norm, [inp]);
+		let [q, kv] = calc.split(out);
+		//
+		Value {}
+	}
+}
+
 pub fn new_rms_norm(
 	n_inputs: usize,
 	eps: f64,
@@ -478,8 +522,9 @@ pub fn new_rms_norm(
 	let out = out.cast(io_dtype);
 	out.output("out");
 
-	let q = builder.new_const("q", 42.0);
-	q.output("q");
+	let q = builder.new_tensor_input("q", io_dtype, &[n_inputs], CanBeBatched::Yes);
+	q.output("q1");
+	q.output("q2");
 
 	builder
 }
