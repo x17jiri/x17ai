@@ -563,10 +563,59 @@ pub fn new_linear(
 	builder
 }
 
+pub fn new_rope(n_inputs: usize, io_dtype: DType, internal_dtype: DType) -> KernelBuilder {
+	let builder = KernelBuilder::new();
+	let inp = builder.new_tensor_input("inp", io_dtype, &[n_inputs], CanBeBatched::Yes);
+	let inp = inp.cast(internal_dtype);
+
+	let sin_cos = builder.new_tensor_input("sin_cos", io_dtype, &[n_inputs], CanBeBatched::No);
+	let sin_cos = sin_cos.cast(internal_dtype);
+
+	let x = inp.select_even();
+	let y = inp.select_odd();
+	let sin = sin_cos.select_even();
+	let cos = sin_cos.select_odd();
+
+	let out_x = x * cos - y * sin;
+	let out_y = x * sin + y * cos;
+
+	let out = out_x.interleave(out_y);
+
+	let out = out.cast(io_dtype);
+	out.output("inp");
+
+	builder
+}
+
+pub fn new_attn(
+	qk_size: usize,
+	v_size: usize,
+	n_heads: usize,
+	io_dtype: DType,
+	internal_dtype: DType,
+) -> KernelBuilder {
+	let builder = KernelBuilder::new();
+
+	let q = builder.new_tensor_input("q", io_dtype, &[n_heads, qk_size], CanBeBatched::Yes);
+	let kv = builder.new_tensor_input("kv", io_dtype, &[1, qk_size], CanBeBatched::Yes);
+
+	let q = q.cast(internal_dtype);
+	let kv = kv.cast(internal_dtype);
+
+	let out = q.attention(kv, v_size);
+
+	let out = out.cast(io_dtype);
+	out.output("out");
+
+	builder
+}
+
 fn main() -> Result<(), ErrPack<TensorOpError>> {
-	//let builder = new_rms_norm(64, 0.001, f16::dtype, f32::dtype);
+	let builder = new_rms_norm(64, 0.001, f16::dtype, f32::dtype);
 	//let builder = new_swiglu(2048, f16::dtype, f32::dtype);
 	let builder = new_linear(1024, 2048, f16::dtype, f32::dtype);
+	let builder = new_rope(1024, f16::dtype, f32::dtype);
+	let builder = new_attn(128, 64, 4, f16::dtype, f32::dtype);
 
 	let graphviz = builder.data.borrow_mut().analyze();
 

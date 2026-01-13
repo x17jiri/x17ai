@@ -86,7 +86,7 @@ pub enum NodeKind {
 	Const,
 	Input(InputKind),
 	Select(SelectKind),
-	EvenOdd,
+	Interleave,
 	Cast,
 	Reshape,
 	Unary(UnaryKind),
@@ -1007,7 +1007,7 @@ impl<'a> Expr<'a> {
 		}
 	}
 
-	pub fn even_odd(self, odd: Self) -> Self {
+	pub fn interleave(self, odd: Self) -> Self {
 		let mut data = self.kernel_builder.data.borrow_mut();
 		let KernelBuilderData { nodes_postorder, err_log, node_cache, .. } = &mut *data;
 
@@ -1015,7 +1015,7 @@ impl<'a> Expr<'a> {
 		let a_idx = self.node_index;
 		let b_idx = odd.node_index;
 
-		let cache_key = format!("even_odd:{:?}:{:?}", a_idx.raw, b_idx.raw);
+		let cache_key = format!("interleave:{:?}:{:?}", a_idx.raw, b_idx.raw);
 		if let Some(existing_expr) = self.cache_lookup(node_cache, cache_key, node_index) {
 			return existing_expr;
 		}
@@ -1035,7 +1035,7 @@ impl<'a> Expr<'a> {
 		if is_broadcasted[0] || is_broadcasted[1] || a_node.can_be_batched != b_node.can_be_batched
 		{
 			cold_path();
-			log_error(format!("even_odd cannot broadcast inputs"));
+			log_error(format!("interleave cannot broadcast inputs"));
 		}
 
 		let dtype = same_dtype(a_node.dtype, b_node.dtype, &mut log_error);
@@ -1044,7 +1044,7 @@ impl<'a> Expr<'a> {
 			dtype,
 			Rc::from(&shape[..]),
 			a_node.can_be_batched || b_node.can_be_batched,
-			NodeKind::EvenOdd,
+			NodeKind::Interleave,
 			[a_idx, b_idx],
 			[false, false],
 		));
@@ -1055,7 +1055,7 @@ impl<'a> Expr<'a> {
 		}
 	}
 
-	pub fn attention(self, kv: Self) -> Self {
+	pub fn attention(self, kv: Self, v_size: usize) -> Self {
 		let mut data = self.kernel_builder.data.borrow_mut();
 		let KernelBuilderData { nodes_postorder, err_log, node_cache, .. } = &mut *data;
 
@@ -1075,20 +1075,23 @@ impl<'a> Expr<'a> {
 
 		let q_shape = q_node.shape();
 		let kv_shape = kv_node.shape();
-		if q_shape.len() < 3 || kv_shape.len() < 3 {
+		if q_shape.len() < 2 || kv_shape.len() < 2 {
 			cold_path();
 			log_error(format!("attention: not enough dimensions"));
 		}
-		let (q_rest, [q1, q2, q3]) = split_shape::<3>(q_shape);
-		let (kv_rest, [kv1, kv2, kv3]) = split_shape::<3>(kv_shape);
-		if kv1 != 1 || q2 != kv2 || q3 >= kv3 {
+		let (q_rest, [q1, q2]) = split_shape::<2>(q_shape);
+		let (kv_rest, [kv1, kv2]) = split_shape::<2>(kv_shape);
+		if kv1 != 1 || q2 != kv2 {
 			cold_path();
 			log_error(format!("attention: shape mismatch"));
 		}
+		if v_size > kv2 {
+			cold_path();
+			log_error(format!("attention: v_size too large"));
+		}
 		let (mut shape, is_broadcasted) = broadcast_shapes(q_rest, kv_rest, &mut log_error);
 		shape.push(q1);
-		shape.push(q2);
-		shape.push(kv3.saturating_sub(q3));
+		shape.push(v_size);
 		if is_broadcasted[0] || is_broadcasted[1] || q_node.can_be_batched != kv_node.can_be_batched
 		{
 			cold_path();
@@ -1744,7 +1747,7 @@ impl KernelBuilderData {
 				SelectKind::Even => "<b>Select Even</b>".to_string(),
 				SelectKind::Odd => "<b>Select Odd</b>".to_string(),
 			},
-			NodeKind::EvenOdd => "<b>EvenOdd</b>".to_string(),
+			NodeKind::Interleave => "<b>Interleave</b>".to_string(),
 			NodeKind::Unary(unary) => match unary {
 				UnaryKind::Identity => "<b>Identity</b>".to_string(),
 				UnaryKind::Neg => "<b>Neg</b>".to_string(),
@@ -1872,45 +1875,49 @@ impl KernelBuilderData {
 						frag_idx.raw, frag_idx.raw
 					)?;
 				}
-				let ordered = match node.node_kind {
-					NodeKind::Binary(bin) => !bin.is_commutative(),
-					NodeKind::MatMul(_) | NodeKind::Attention => true,
-					_ => false,
-				};
 				for (j, &child_index) in node.children.iter().enumerate() {
 					if !self.nodes_postorder.is_valid(child_index) {
 						break;
 					}
 					let child_id = format!("node_{}", child_index.raw);
 					let child = &self.nodes_postorder[child_index];
+					#[rustfmt::skip]
+					let input_name = match node.node_kind {
+						NodeKind::Interleave => if j == 0 { "even" } else { "odd" },
+						NodeKind::Binary(bin) => match bin {
+							BinaryKind::Sub => if j == 0 { "sub" } else { "" },
+							_ => {
+								debug_assert!(bin.is_commutative());
+								""
+							},
+						},
+						NodeKind::MatMul(mm) => match mm {
+							MatMulKind::MatTimesCol => if j == 0 { "MAT" } else { "col" },
+							MatMulKind::ColTimesRowAcc => if j == 0 { "col" } else { "row" },
+						},
+						NodeKind::Attention => if j == 0 { "Q" } else { "KV" },
+						_ => "",
+					};
 					let label = format!(
-						"{}{}{}",
+						"{}{}{}{}{}{}",
 						self.dtype_to_str(child.dtype),
 						self.shape_to_str(child.can_be_batched, Some(child.shape.as_ref())),
 						if node.children_broadcast[j] {
-							" <font color='red'>(broadcasted)</font>"
+							"<br/><font color='red'>(broadcasted)</font>"
 						} else {
 							""
-						}
+						},
+						if input_name.is_empty() { "" } else { "<br/><font color='orange'>" },
+						input_name,
+						if input_name.is_empty() { "" } else { "</font>" }
 					);
-					let extra_style = if ordered {
-						if child_index == node.children[0] {
-							", color=\"#0000aa\""
-						} else if child_index == node.children[1] {
-							", color=\"#aa0000\""
-						} else {
-							", color=\"#00aa00\""
-						}
-					} else {
-						", color=\"#000000\""
-					};
 					let frag_index = node.x_index;
 					let extra_style = if !frag_index.is_sentinel()
 						&& (child.is_input() || frag_index != child.x_index)
 					{
-						format!("{extra_style}, style=bold")
+						", style=bold"
 					} else {
-						extra_style.to_string()
+						""
 					};
 					writeln!(
 						w,

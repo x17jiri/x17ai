@@ -96,6 +96,7 @@
 #![allow(clippy::if_same_then_else)]
 #![allow(clippy::needless_else)]
 #![allow(clippy::collapsible_else_if)]
+#![allow(clippy::single_match_else)]
 
 use std::borrow::Cow;
 use std::convert::Infallible;
