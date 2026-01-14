@@ -52,6 +52,7 @@
 #![feature(string_from_utf8_lossy_owned)]
 #![feature(int_roundings)]
 #![feature(map_try_insert)]
+#![feature(str_as_str)]
 // clippy
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]

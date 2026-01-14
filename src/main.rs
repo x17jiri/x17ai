@@ -642,6 +642,12 @@ pub fn build_layer() -> Graph {
 }
 
 fn main() -> Result<(), ErrPack<TensorOpError>> {
+	let g = build_layer();
+	let graphviz = g.print_graphviz();
+	std::fs::write("graph.dot", graphviz).unwrap();
+
+	return Ok(());
+
 	let builder = new_rms_norm(64, 0.001, f16::dtype, f32::dtype);
 	//let builder = new_swiglu(2048, f16::dtype, f32::dtype);
 	let builder = new_linear(1024, 2048, f16::dtype, f32::dtype);
