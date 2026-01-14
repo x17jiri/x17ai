@@ -8,6 +8,7 @@
 pub mod autograd;
 pub mod device;
 pub mod expr;
+pub mod graph;
 pub mod nn;
 pub mod tensor;
 pub mod tests;

@@ -129,7 +129,7 @@ impl BackwardFn for SoftmaxBackwardFn_Precise {
 		d_inp.assign(custom_kernel!(
 			internal_dtype,
 			[d_out: &d_out, g: &g, out: &out], (), {
-				(d_out - g) * out
+				(d_out - g) * out //  d_out * out - g * out
 			}
 		))?;
 
