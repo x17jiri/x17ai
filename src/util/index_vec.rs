@@ -275,6 +275,10 @@ impl<Index: IndexTrait, T> IndexVec<Index, T> {
 	pub fn get(&self, index: Index) -> Option<&T> {
 		self.raw.get(index.to_raw())
 	}
+
+	pub fn get_mut(&mut self, index: Index) -> Option<&mut T> {
+		self.raw.get_mut(index.to_raw())
+	}
 }
 
 impl<Index: IndexTrait, T> From<Vec<T>> for IndexVec<Index, T> {

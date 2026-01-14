@@ -9,55 +9,89 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::define_index_type;
-use crate::util::index_vec::IndexVec;
+use crate::util::index_vec::{IndexTrait, IndexVec};
+use crate::{ErrExtra, ErrPack, define_index_type};
 
 //--------------------------------------------------------------------------------------------------
 
 pub trait Node {
 	fn n_inputs(&self) -> usize;
 	fn n_outputs(&self) -> usize;
-	fn input_by_name(&self, name: &str) -> Option<usize>;
-	fn output_by_name(&self, name: &str) -> Option<usize>;
+
+	/// If not found, returns usize::MAX
+	fn input_by_name(&self, name: &str) -> usize;
+
+	/// If not found, returns usize::MAX
+	fn output_by_name(&self, name: &str) -> usize;
 }
 
 #[derive(Clone, Copy)]
-pub struct InputLink {
-	pub src_node: NodeIndex,
-	pub output_index: usize,
+pub struct InputPortReference {
+	pub node: NodeIndex,
+	pub port_index: usize,
 }
 
 #[derive(Clone, Copy)]
-pub struct OutputLink {
-	pub dst_node: NodeIndex,
-	pub input_index: usize,
+pub struct OutputPortReference {
+	pub node: NodeIndex,
+	pub port_index: usize,
 }
 
 struct NodeData {
 	node: Rc<dyn Node>,
-	inputs: Vec<Option<InputLink>>,
-	outputs: Vec<Vec<OutputLink>>,
+	inputs: Vec<Option<OutputPortReference>>,
+	outputs: Vec<Vec<InputPortReference>>,
 }
 
 define_index_type!(NodeIndex);
 type NodeVec = IndexVec<NodeIndex, NodeData>;
 
-pub struct Graph {
-	nodes_by_name: HashMap<Cow<'static, str>, NodeIndex>,
-	nodes: NodeVec,
+pub struct NodeReference {
+	index: NodeIndex,
+	node: Rc<dyn Node>,
 }
 
-impl Default for Graph {
-	fn default() -> Self {
-		Self::new()
+impl NodeReference {
+	pub fn input(&self) -> InputPortReference {
+		InputPortReference { node: self.index, port_index: 0 }
+	}
+
+	pub fn output(&self) -> OutputPortReference {
+		OutputPortReference { node: self.index, port_index: 0 }
+	}
+
+	pub fn named_input(&self, name: &str) -> InputPortReference {
+		InputPortReference {
+			node: self.index,
+			port_index: self.node.input_by_name(name),
+		}
+	}
+
+	pub fn named_output(&self, name: &str) -> OutputPortReference {
+		OutputPortReference {
+			node: self.index,
+			port_index: self.node.output_by_name(name),
+		}
 	}
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct GraphConnectError;
+
+pub struct Graph {
+	nodes_by_name: HashMap<Cow<'static, str>, NodeIndex>,
+	nodes: NodeVec,
+	inputs: Vec<Vec<InputPortReference>>,
+	outputs: Vec<Option<OutputPortReference>>,
+}
+
 impl Graph {
-	pub fn new() -> Self {
+	pub fn new(inputs: &[Cow<'static, str>], outputs: &[Cow<'static, str>]) -> Self {
 		Self {
 			nodes_by_name: std::collections::HashMap::new(),
 			nodes: NodeVec::new(),
+			inputs: vec![Vec::new(); outputs.len()],
+			outputs: vec![None; inputs.len()],
 		}
 	}
 
@@ -65,40 +99,56 @@ impl Graph {
 		&mut self,
 		name: S,
 		node: Rc<dyn Node>,
-	) -> NodeIndex {
-		let name = name.into();
-		if let Some(&index) = self.nodes_by_name.get(&name) {
-			return index;
-		}
-
+	) -> NodeReference {
 		let index = self.nodes.push(NodeData {
+			node: node.clone(),
 			inputs: vec![None; node.n_inputs()],
 			outputs: vec![Vec::new(); node.n_outputs()],
-			node,
 		});
+		let name = name.into();
 		self.nodes_by_name.insert(name, index);
-		index
+
+		NodeReference { index, node }
 	}
 
 	pub fn connect(
 		&mut self,
-		(src_node, src_port): (&str, &str),
-		(dst_node, dst_port): (&str, &str),
-	) -> Result<(), &'static str> {
-		/*let src_output_index = self.nodes_postorder.raw[src_node.0]
-			.node
-			.output_by_name(src_port)
-			.ok_or("Invalid source port name")?;
-		let dst_input_index = self.nodes_postorder.raw[dst_node.0]
-			.node
-			.input_by_name(dst_port)
-			.ok_or("Invalid destination port name")?;
+		from: OutputPortReference,
+		to: InputPortReference,
+	) -> Result<(), ErrPack<GraphConnectError>> {
+		let Some(from_node) = self.nodes.get_mut(from.node) else {
+			return Err(ErrPack {
+				code: GraphConnectError,
+				extra: Some(Box::new(ErrExtra {
+					message: format!("Source node {:?} not found", from.node).into(),
+					nested: None,
+				})),
+			});
+		};
+		let to_node = self.nodes.get_mut(to.node).ok_or(ErrPack::new(GraphConnectError))?;
 
-		self.nodes_postorder[dst_node].inputs[dst_input_index] =
-			Some(InputLink { src_node, output_index: src_output_index });
-		self.nodes_postorder[src_node].outputs[src_output_index]
-			.push(OutputLink { dst_node, input_index: dst_input_index });*/
+		if from.port_index >= from_node.outputs.len() || to.port_index >= to_node.inputs.len() {
+			return Err(ErrPack::new(GraphConnectError));
+		}
+
+		to_node.inputs[to.port_index] = Some(from);
+		from_node.outputs[from.port_index].push(to);
+
 		Ok(())
+	}
+
+	pub fn input(&self) -> OutputPortReference {
+		OutputPortReference {
+			node: NodeIndex::new_sentinel(),
+			port_index: 0,
+		}
+	}
+
+	pub fn output(&self) -> InputPortReference {
+		InputPortReference {
+			node: NodeIndex::new_sentinel(),
+			port_index: 0,
+		}
 	}
 }
 

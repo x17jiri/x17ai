@@ -611,37 +611,25 @@ pub fn new_attn(
 	builder
 }
 
-pub fn rms_norm_g() -> Box<dyn Node> {
+pub fn rms_norm_g() -> Rc<dyn Node> {
 	todo!()
 }
 
-pub fn linear_g() -> Box<dyn Node> {
+pub fn linear_g() -> Rc<dyn Node> {
 	todo!()
 }
 
-pub fn attn_g() -> Box<dyn Node> {
+pub fn attn_g() -> Rc<dyn Node> {
 	todo!()
 }
 
 pub fn build_layer() -> Graph {
-	let mut graph = Graph::new();
+	let mut graph = Graph::new(&["inp".into()], &["out".into()]);
 
-	let rms_norm = graph //
-		.add_node("rms_norm", rms_norm_g())
-		.with_input(graph.input());
-
-	let q_proj = graph //
-		.add_node("Q_proj", linear_g())
-		.with_input(rms_norm.output());
-
-	let kv_proj = graph //
-		.add_node("KV_proj", linear_g())
-		.with_input(rms_norm.output());
-
-	let attn = graph //
-		.add_node("attn", attn_g())
-		.with_named_input("q", q_proj.output())
-		.with_named_input("kv", kv_proj.output());
+	let rms_norm = graph.add_node("rms_norm", rms_norm_g());
+	let q_proj = graph.add_node("Q_proj", linear_g());
+	let kv_proj = graph.add_node("KV_proj", linear_g());
+	let attn = graph.add_node("attn", attn_g());
 
 	graph.connect(graph.input(), rms_norm.input());
 	graph.connect(rms_norm.output(), q_proj.input());
@@ -649,13 +637,6 @@ pub fn build_layer() -> Graph {
 	graph.connect(q_proj.output(), attn.named_input("q"));
 	graph.connect(kv_proj.output(), attn.named_input("kv"));
 	graph.connect(attn.output(), graph.output());
-
-	rms_norm.input().assign(graph.input());
-	q_proj.input().assign(rms_norm.output());
-	kv_proj.input().assign(rms_norm.output());
-	attn.named_input("q").assign(q_proj.output());
-	attn.named_input("kv").assign(kv_proj.output());
-	graph.output().assign(attn.output());
 
 	graph
 }
