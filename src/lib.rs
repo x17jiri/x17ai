@@ -98,6 +98,7 @@
 #![allow(clippy::needless_else)]
 #![allow(clippy::collapsible_else_if)]
 #![allow(clippy::single_match_else)]
+#![allow(clippy::manual_is_multiple_of)]
 
 use std::borrow::Cow;
 use std::convert::Infallible;

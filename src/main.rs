@@ -7,6 +7,7 @@
 
 #![allow(warnings)] // TODO - disabling warnings for main.rs. Remove this later.
 #![allow(non_snake_case)]
+#![allow(clippy::manual_is_multiple_of)]
 #![feature(generic_const_exprs)]
 #![feature(macro_metavar_expr)]
 #![feature(string_from_utf8_lossy_owned)]
@@ -172,10 +173,10 @@ use x17ai::autograd::{AutogradTensor, LossFn};
 use x17ai::new::autograd::{Autograd, AutogradExpr, BackwardFn};
 use x17ai::new::expr::compile2::KernelBuilder;
 use x17ai::new::expr::{CanBeBatched, Expr, ScalarRef, TensorRef, ToExpr};
-use x17ai::new::graph::{Graph, Node};
+use x17ai::new::graph::{self, Graph, GraphConnectError, Node};
 use x17ai::new::nn::linear::linear;
 use x17ai::new::nn::rms_norm::{RMSNormGrad, rms_norm};
-use x17ai::new::nn::swiglu::swiglu;
+use x17ai::new::nn::swiglu::{self, swiglu};
 use x17ai::new::tensor::TensorLiteral1D;
 use x17ai::nn::ModelContext;
 use x17ai::nn::fragments::softmax::{Softmax, SoftmaxGradMode};
@@ -611,43 +612,116 @@ pub fn new_attn(
 	builder
 }
 
-pub fn rms_norm_g() -> Rc<dyn Node> {
-	todo!()
+pub struct RmsNormG;
+
+impl graph::Node for RmsNormG {
+	fn input_names(&self) -> &[&str] {
+		&["inp"]
+	}
+	fn output_names(&self) -> &[&str] {
+		&["out"]
+	}
 }
 
-pub fn linear_g() -> Rc<dyn Node> {
-	todo!()
+pub struct LinearG;
+
+impl graph::Node for LinearG {
+	fn input_names(&self) -> &[&str] {
+		&["inp"]
+	}
+	fn output_names(&self) -> &[&str] {
+		&["out"]
+	}
 }
 
-pub fn attn_g() -> Rc<dyn Node> {
-	todo!()
+pub struct AttnG;
+
+impl graph::Node for AttnG {
+	fn input_names(&self) -> &[&str] {
+		&["q", "kv"]
+	}
+	fn output_names(&self) -> &[&str] {
+		&["out"]
+	}
 }
 
-pub fn build_layer() -> Graph {
+pub fn rms_norm_g() -> Rc<RmsNormG> {
+	Rc::new(RmsNormG)
+}
+
+pub fn linear_g() -> Rc<LinearG> {
+	Rc::new(LinearG)
+}
+
+pub struct RoPEG;
+
+impl graph::Node for RoPEG {
+	fn input_names(&self) -> &[&str] {
+		&["inp"]
+	}
+	fn output_names(&self) -> &[&str] {
+		&["out"]
+	}
+}
+
+pub fn rope_g() -> Rc<RoPEG> {
+	Rc::new(RoPEG)
+}
+
+pub struct SwiGluG;
+
+impl graph::Node for SwiGluG {
+	fn input_names(&self) -> &[&str] {
+		&["inp"]
+	}
+	fn output_names(&self) -> &[&str] {
+		&["out"]
+	}
+}
+
+pub fn swiglu_g() -> Rc<SwiGluG> {
+	Rc::new(SwiGluG)
+}
+
+pub fn attn_g() -> Rc<AttnG> {
+	Rc::new(AttnG)
+}
+
+pub fn build_layer() -> Result<Graph, ErrPack<GraphConnectError>> {
 	let mut graph = Graph::new(&["inp".into()], &["out".into()]);
 
 	let rms_norm = graph.add_node("rms_norm", rms_norm_g());
 	let q_proj = graph.add_node("Q_proj", linear_g());
+	let q_rope = graph.add_node("Q_rope", rope_g());
 	let kv_proj = graph.add_node("KV_proj", linear_g());
+	let kv_rope = graph.add_node("KV_rope", rope_g());
 	let attn = graph.add_node("attn", attn_g());
+	let w_proj = graph.add_node("W_proj", linear_g());
+	let swiglu = graph.add_node("swiglu", swiglu_g());
 
-	graph.connect(graph.input(), rms_norm.input());
-	graph.connect(rms_norm.output(), q_proj.input());
-	graph.connect(rms_norm.output(), kv_proj.input());
-	graph.connect(q_proj.output(), attn.named_input("q"));
-	graph.connect(kv_proj.output(), attn.named_input("kv"));
-	graph.connect(attn.output(), graph.output());
+	graph.connect(graph.input(), rms_norm.input())?;
+	graph.connect(rms_norm.output(), q_proj.input())?;
+	graph.connect(q_proj.output(), q_rope.input())?;
+	graph.connect(rms_norm.output(), kv_proj.input())?;
+	graph.connect(kv_proj.output(), kv_rope.input())?;
+	graph.connect(q_rope.output(), attn.named_input("q"))?;
+	graph.connect(kv_rope.output(), attn.named_input("kv"))?;
+	graph.connect(attn.output(), w_proj.input());
+	graph.connect(w_proj.output(), swiglu.input());
+	graph.connect(swiglu.output(), graph.output());
 
-	graph
+	Ok(graph)
 }
 
-fn main() -> Result<(), ErrPack<TensorOpError>> {
-	let g = build_layer();
+fn main() -> Result<(), ErrPack<GraphConnectError>> {
+	let g = build_layer()?;
 	let graphviz = g.print_graphviz();
 	std::fs::write("graph.dot", graphviz).unwrap();
 
 	return Ok(());
+}
 
+fn main1() -> Result<(), ErrPack<TensorOpError>> {
 	let builder = new_rms_norm(64, 0.001, f16::dtype, f32::dtype);
 	//let builder = new_swiglu(2048, f16::dtype, f32::dtype);
 	let builder = new_linear(1024, 2048, f16::dtype, f32::dtype);

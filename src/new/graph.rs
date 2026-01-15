@@ -269,8 +269,8 @@ pub struct GraphConnectError;
 pub struct Graph {
 	nodes_by_name: HashMap<String, NodeIndex>,
 	nodes: NodeVec,
-	inputs: Vec<Option<OutputPortReference>>,
-	outputs: Vec<Vec<InputPortReference>>,
+	inputs: Vec<Vec<InputPortReference>>,
+	outputs: Vec<Option<OutputPortReference>>,
 }
 
 impl Graph {
@@ -278,8 +278,8 @@ impl Graph {
 		Self {
 			nodes_by_name: std::collections::HashMap::new(),
 			nodes: NodeVec::new(),
-			inputs: vec![None; inputs.len()],
-			outputs: vec![Vec::new(); outputs.len()],
+			inputs: vec![Vec::new(); inputs.len()],
+			outputs: vec![None; outputs.len()],
 		}
 	}
 
@@ -336,7 +336,7 @@ impl Graph {
 				})),
 			});
 		}
-		if from.node_index >= to.node_index {
+		if !from.node_index.is_sentinel() && from.node_index >= to.node_index {
 			// TODO - we could allow this, but then we would need to check for cycles
 			cold_path();
 			return Err(ErrPack {
@@ -350,18 +350,27 @@ impl Graph {
 
 		#[allow(clippy::indexing_slicing)]
 		{
-			if self.nodes[to.node_index].inputs[to.port_index].connection.is_some() {
+			let to_conn = self.nodes.get_mut(to.node_index).map_or_else(
+				|| &mut self.outputs[to.port_index],
+				|node| &mut node.inputs[to.port_index].connection,
+			);
+			if to_conn.is_some() {
 				cold_path();
 				return Err(ErrPack {
 					code: GraphConnectError,
 					extra: Some(Box::new(ErrExtra {
-						message: "Input port is already connected".into(),
+						message: "Port already has an input".into(),
 						nested: None,
 					})),
 				});
 			}
-			self.nodes[to.node_index].inputs[to.port_index].connection = Some(from);
-			self.nodes[from.node_index].outputs[from.port_index].connections.push(to);
+			*to_conn = Some(from);
+
+			let from_conns = self.nodes.get_mut(from.node_index).map_or_else(
+				|| &mut self.inputs[from.port_index],
+				|node| &mut node.outputs[from.port_index].connections,
+			);
+			from_conns.push(to);
 		}
 
 		Ok(())
@@ -395,7 +404,61 @@ impl Graph {
 
 		for i in self.nodes.indexes() {
 			let node = &self.nodes[i];
-			writeln!(w, "\tnode_{} [label=\"{}\"]", i.raw, &node.node_name)?;
+
+			let inp_rows = 2 * node.inputs.len() + 1;
+			let out_rows = 2 * node.outputs.len() + 1;
+			let rows = inp_rows.max(out_rows);
+			let inp_skip = (rows - inp_rows) / 2 + 1;
+			let out_skip = (rows - out_rows) / 2 + 1;
+
+			let mut label = String::new();
+			let lw: &mut dyn std::fmt::Write = &mut label;
+			writeln!(lw, "<table border=\"0\" cellborder=\"0\" cellspacing=\"1\">")?;
+			for row in 0..rows {
+				writeln!(lw, "\t<tr>")?;
+				// Input port
+				if row >= inp_skip
+					&& (row - inp_skip) % 2 == 0
+					&& (row - inp_skip) / 2 < node.inputs.len()
+				{
+					writeln!(
+						lw,
+						"\t\t<td port=\"inp_{}\" border=\"1\" align=\"center\">{}</td>",
+						(row - inp_skip) / 2,
+						node.inputs[(row - inp_skip) / 2].name
+					)?;
+				} else {
+					writeln!(lw, "\t\t<td>&nbsp;</td>")?;
+				}
+				writeln!(lw, "\t\t<td></td>")?;
+				// Node name
+				if row == 0 {
+					writeln!(
+						lw,
+						"\t\t<td rowspan=\"{}\" align=\"center\">{}</td>",
+						rows, node.node_name
+					)?;
+				}
+				writeln!(lw, "\t\t<td></td>")?;
+				// Output port
+				if row >= out_skip
+					&& (row - out_skip) % 2 == 0
+					&& (row - out_skip) / 2 < node.outputs.len()
+				{
+					writeln!(
+						lw,
+						"\t\t<td port=\"out_{}\" border=\"1\" align=\"center\">{}</td>",
+						(row - out_skip) / 2,
+						node.outputs[(row - out_skip) / 2].name
+					)?;
+				} else {
+					writeln!(lw, "\t\t<td>&nbsp;</td>")?;
+				}
+				writeln!(lw, "\t</tr>")?;
+			}
+			writeln!(lw, "</table>")?;
+
+			writeln!(w, "\tnode_{} [label=<{label}>, shape=box]", i.raw)?;
 
 			for inp_idx in 0..node.inputs.len() {
 				if let Some(conn) = &node.inputs[inp_idx].connection {
@@ -413,6 +476,21 @@ impl Graph {
 							conn.node_index.raw, conn.port_index, i.raw, inp_idx
 						)?;
 					}
+				}
+			}
+		}
+
+		for out_idx in 0..self.outputs.len() {
+			if let Some(conn) = &self.outputs[out_idx] {
+				if conn.node_index.is_sentinel() {
+					// Graph input port -> Graph output port
+					writeln!(w, "\tgraph_inp_{} -> graph_out_{};", conn.port_index, out_idx)?;
+				} else {
+					writeln!(
+						w,
+						"\tnode_{}:out_{} -> graph_out_{};",
+						conn.node_index.raw, conn.port_index, out_idx
+					)?;
 				}
 			}
 		}
