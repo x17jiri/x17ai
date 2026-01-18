@@ -51,6 +51,8 @@
 #include <barrier>
 #include <mutex>
 #include <iostream>
+#include <array>
+#include <fstream>
 
 using MmaOp = cute::SM80_16x8x16_F32BF16BF16F32_TN;
 using MmaOpTraits = cute::MMA_Traits<MmaOp>;
@@ -74,17 +76,32 @@ struct Matrix {
 	size_t m_stride; // stride between rows
 	size_t n_stride; // stride between columns
 
+	Matrix():
+		data(nullptr),
+		offset(0),
+		m_stride(0),
+		n_stride(0)
+	{}
+
 	template<typename Tensor>
-	static Matrix from_tensor(T *base, Tensor tensor) {
+	Matrix(T *base, Tensor const &tensor) {
 		assert(cute::rank(tensor) == 2);
 		assert(cute::size<0>(tensor) == M);
 		assert(cute::size<1>(tensor) == N);
-		return Matrix{
-			.data = base,
-			.offset = tensor.data() - base,
-			.m_stride = cute::stride<0>(tensor),
-			.n_stride = cute::stride<1>(tensor)
-		};
+		data = base;
+		T *tensor_data = cute::raw_pointer_cast(tensor.data());
+		offset = tensor_data - base;
+		m_stride = cute::stride<0>(tensor);
+		n_stride = cute::stride<1>(tensor);
+	}
+
+	Matrix<T, N, M> transpose() const {
+		Matrix<T, N, M> result;
+		result.data = data;
+		result.offset = offset;
+		result.m_stride = n_stride;
+		result.n_stride = m_stride;
+		return result;
 	}
 };
 
@@ -106,32 +123,6 @@ namespace cpu_test {
 				c.data[c.offset + m * c.m_stride + n * c.n_stride] += sum;
 			}
 		}
-	}
-
-	// this function is equivalent of one CTA
-	template<typename TensorQ, typename TensorKV>
-	void attn_tile(
-		TensorQ q,
-		TensorKV kv,
-		size_t tile_q_start
-	) {
-		auto q_tile_sram = std::vector<half_t>(Q_TILE * QK_DIM);
-		Matrix<half_t, Q_TILE, QK_DIM> q_tile{
-			.data = q_tile_sram.data(),
-			.offset = 0,
-			.m_stride = QK_DIM,
-			.n_stride = 1
-		};
-
-		auto kv_tile_sram = std::vector<half_t>(KV_TILE * QK_DIM);
-		Matrix<half_t, KV_TILE, QK_DIM> kv_tile{
-			.data = kv_tile_sram.data(),
-			.offset = 0,
-			.m_stride = QK_DIM,
-			.n_stride = 1
-		};
-
-		// TODO
 	}
 
 	struct BlockShared {
@@ -164,9 +155,7 @@ namespace cpu_test {
 	// this function corresponds to one warp on GPU
 	template<typename TensorQ, typename TensorKV>
 	void attn_kernel(
-		uint3 gridDim,
 		uint3 blockIdx,
-		uint3 blockDim,
 		uint3 threadIdx,
 		BlockShared *shared,
 		TensorQ mQ,
@@ -187,8 +176,8 @@ namespace cpu_test {
 		);
 		assert(shared->q_sram.size() == size(sQ));
 
-		// Load my part of Q tile into SRAM
-		auto q_load_tiler = make_shape(Q_TILE / (blockDim.x / 32), QK_DIM / blockDim.y);
+		// Cooperate with other warps to load the Q tile into SRAM
+		auto q_load_tiler = make_shape(8, QK_DIM / (KV_TILE / 16));
 		auto q_load_coord = make_coord(threadIdx.x / 32, threadIdx.y);
 		Tensor load_gQ = local_tile(gQ, q_load_tiler, q_load_coord);
 		Tensor load_sQ = local_tile(sQ, q_load_tiler, q_load_coord);
@@ -207,12 +196,23 @@ namespace cpu_test {
 			std::cout << "\n";
 		}*/
 
-		size_t kv_tiles = cute::size<0>(mKV) / KV_TILE;
+		// Prepare accumulator for scores
+		std::array<float, 16 * 8> scores_registers{0};
+		Tensor mma_rScores = make_tensor(
+			scores_registers.data(),
+			make_layout(
+				make_shape(16, 8),
+				make_stride(8, 1)
+			)
+		);
+
+		size_t kv_len = cute::size<0>(mKV);
+		size_t kv_tiles = kv_len / KV_TILE;
 		size_t kv_step = KV_TILE / 16;
-		for (size_t kv = 0; kv < kv_tiles; kv += kv_step) {
+		for (size_t kv_pos = 0; kv_pos < kv_len; kv_pos += KV_TILE) {
 			// KV tile
 			auto kv_tiler = make_shape(KV_TILE);
-			auto kv_coord = make_coord(kv);
+			auto kv_coord = make_coord(kv_pos / KV_TILE);
 			Tensor gKV = local_tile(mKV, kv_tiler, kv_coord); // (KV_TILE, QK_DIM)
 			Tensor sKV = make_tensor(
 				make_smem_ptr(shared->kv_sram.data()),
@@ -223,8 +223,8 @@ namespace cpu_test {
 			);
 			assert(shared->kv_sram.size() == size(sKV));
 
-			// Load my part of KV tile into SRAM
-			auto kv_load_tiler = make_shape(KV_TILE / (blockDim.x / 32), QK_DIM / blockDim.y);
+			// Cooperate with other warps to load the KV tile into SRAM
+			auto kv_load_tiler = make_shape(8, QK_DIM / (KV_TILE / 16));
 			auto kv_load_coord = make_coord(threadIdx.x / 32, threadIdx.y);
 			Tensor load_gKV = local_tile(gKV, kv_load_tiler, kv_load_coord);
 			Tensor load_sKV = local_tile(sKV, kv_load_tiler, kv_load_coord);
@@ -238,22 +238,43 @@ namespace cpu_test {
 
 			// Use MMA to calculate `KV * Q^T`
 			auto kv_mma_tiler = make_shape(16, 16);
-			auto q_mma_tiler = make_shape(16, 8);
-			float scores_data[16 * 8] = {0};
-			Tensor mma_rScores = make_tensor(
-				scores_data,
-				make_layout(
-					make_shape(16, 8),
-					make_stride(8, 1)
-				)
-			); // (16, 8), accumulator
+			auto q_mma_tiler = make_shape(8, 16);
+			scores_registers.fill(0.0f);
+			Matrix<float, 16, 8> mma_rScores_mat(scores_registers.data(), mma_rScores);
 			for (size_t k = 0; k < QK_DIM / 16; ++k) {
 				auto kv_mma_coord = make_coord(0, k);
 				Tensor mma_sKV = local_tile(warp_sKV, kv_mma_tiler, kv_mma_coord); // (16, 16)
+				Matrix<half_t, 16, 16> mma_sKV_mat(shared->kv_sram.data(), mma_sKV);
 
 				auto q_mma_coord = make_coord(0, k);
 				Tensor mma_sQ = local_tile(warp_sQ, q_mma_tiler, q_mma_coord); // (8, 16)
-				Tensor mma_sQ_T = transpose(mma_sQ); // (16, 8)
+				Matrix<half_t, 8, 16> mma_sQ_mat(shared->q_sram.data(), mma_sQ);
+				Matrix<half_t, 16, 8> mma_sQ_T_mat = mma_sQ_mat.transpose(); // (16, 8)
+
+				run_mma(
+					mma_sKV_mat,
+					mma_sQ_T_mat,
+					mma_rScores_mat
+				);
+			}
+
+			/*{
+			auto lock = shared->lock_log();
+			std::cout << "blockIdx.x = " << blockIdx.x
+					  << ", threadIdx.x = " << threadIdx.x
+					  << ", threadIdx.y = " << threadIdx.y
+					  << ", kv_pos = " << kv_pos << "\n";
+			}*/
+			if (blockIdx.x == 63 && threadIdx.x == 7*32 && threadIdx.y == 3 && kv_pos == 4096-64) {
+				auto lock = shared->lock_log();
+				std::cout << "mma_rScores = ";
+				for (int j = 0; j < 16; ++j) {
+					for (int i = 0; i < 8; ++i) {
+						std::cout << scores_registers[j * 8 + i] << ", ";
+					}
+					std::cout << "\n";
+				}
+				std::cout << "\n";
 			}
 		}
 
@@ -299,9 +320,7 @@ namespace cpu_test {
 					uint3 threadIdx{threadIdxX, threadIdxY, 0};
 					threads.emplace_back(
 						attn_kernel<TensorQ, TensorKV>,
-						gridDim,
 						blockIdx,
-						blockDim,
 						threadIdx,
 						shared,
 						q,
@@ -324,6 +343,13 @@ namespace cpu_test {
 
 		// allocate q: f16 [Q_LEN, QK_DIM]
 		std::vector<half_t> q_data(Q_LEN * QK_DIM);
+		{
+			std::ifstream in("q.bin", std::ios::binary);
+			in.read(
+				reinterpret_cast<char*>(q_data.data()),
+				static_cast<std::streamsize>(q_data.size() * sizeof(*q_data.data()))
+			);
+		}
 		auto q = cute::make_tensor(
 			q_data.data(),
 			cute::make_shape(Q_LEN, QK_DIM),
@@ -332,6 +358,13 @@ namespace cpu_test {
 
 		// allocate kv: f16 [KV_LEN, QK_DIM]
 		std::vector<half_t> kv_data(KV_LEN * QK_DIM);
+		{
+			std::ifstream in("kv.bin", std::ios::binary);
+			in.read(
+				reinterpret_cast<char*>(kv_data.data()),
+				static_cast<std::streamsize>(kv_data.size() * sizeof(*kv_data.data()))
+			);
+		}
 		auto kv = cute::make_tensor(
 			kv_data.data(),
 			cute::make_shape(KV_LEN, QK_DIM),
