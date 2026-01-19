@@ -105,13 +105,43 @@ struct Matrix {
 	}
 };
 
+template<typename T>
+struct KahanAcc {
+	T sum;
+	T c;
+
+	KahanAcc()
+		: sum(0.0f)
+		, c(0.0f)
+	{}
+
+	void acc_(T value) {
+		T a = std::max(sum, value);
+		T b = std::min(sum, value);
+		T y = b - c;
+		T t = a + y;
+		c = (t - a) - y;
+		sum = t;
+	}
+
+	void scale_(T factor) {
+		sum = sum * factor;
+		c = c * factor;
+	}
+
+	T value() const {
+		return sum;
+	}
+};
+
 // implement things  manually on the CPU just for testing
 namespace cpu_test {
-	void run_mma(
+	void run_mma_tn(
 		Matrix<half_t, 16, 16> a,
 		Matrix<half_t, 16, 8> b,
 		Matrix<float, 16, 8> c
 	) {
+		a = a.transpose();
 		for (size_t m = 0; m < 16; ++m) {
 			for (size_t n = 0; n < 8; ++n) {
 				float sum = 0.0f;
@@ -155,8 +185,9 @@ namespace cpu_test {
 	// this function corresponds to one warp on GPU
 	template<typename TensorQ, typename TensorKV>
 	void attn_kernel(
-		uint3 blockIdx,
-		uint3 threadIdx,
+		size_t blockIdxX,
+		size_t warpIdxX,
+		size_t warpIdxY,
 		BlockShared *shared,
 		TensorQ mQ,
 		TensorKV mKV
@@ -165,7 +196,7 @@ namespace cpu_test {
 
 		// Q tile
   		auto q_tiler = make_shape(Q_TILE);
-		auto q_coord = make_coord(blockIdx.x);
+		auto q_coord = make_coord(blockIdxX);
 		Tensor gQ = local_tile(mQ, q_tiler, q_coord); // (Q_TILE, QK_DIM)
 		Tensor sQ = make_tensor(
 			make_smem_ptr(shared->q_sram.data()),
@@ -178,7 +209,7 @@ namespace cpu_test {
 
 		// Cooperate with other warps to load the Q tile into SRAM
 		auto q_load_tiler = make_shape(8, QK_DIM / (KV_TILE / 16));
-		auto q_load_coord = make_coord(threadIdx.x / 32, threadIdx.y);
+		auto q_load_coord = make_coord(warpIdxX, warpIdxY);
 		Tensor load_gQ = local_tile(gQ, q_load_tiler, q_load_coord);
 		Tensor load_sQ = local_tile(sQ, q_load_tiler, q_load_coord);
 		copy(load_gQ, load_sQ);
@@ -186,7 +217,7 @@ namespace cpu_test {
 
 		// Get rows of Q tile for this warp
 		auto q_warp_tiler = make_shape(8);
-		auto q_warp_coord = make_coord(threadIdx.x / 32);
+		auto q_warp_coord = make_coord(warpIdxX);
 		Tensor warp_sQ = local_tile(sQ, q_warp_tiler, q_warp_coord); // (8, QK_DIM)
 
 		/*{
@@ -196,16 +227,42 @@ namespace cpu_test {
 			std::cout << "\n";
 		}*/
 
-		// Prepare accumulator for scores
-		std::array<float, 16 * 8> scores_registers{0};
+		// Registers for softmax stats
+		std::array<float, 8> max_registers{};
+		max_registers.fill(-std::numeric_limits<float>::infinity());
+		std::array<KahanAcc<float>, 8> sum_exp_registers{{}};
+
+		// Registers for score calculation
+		std::array<float, 16 * 8> scores_registers_float{0.0};
 		Tensor mma_rScores = make_tensor(
-			scores_registers.data(),
+			scores_registers_float.data(),
+			make_layout(
+				make_shape(16, 8),
+				make_stride(8, 1)
+			)
+		);
+		std::array<half_t, 16 * 8> scores_registers_half{};
+		Tensor mma_rScores_half = make_tensor(
+			scores_registers_half.data(),
 			make_layout(
 				make_shape(16, 8),
 				make_stride(8, 1)
 			)
 		);
 
+		std::array<float, 8> exp_diff_registers{};
+
+		// Registers for attention output
+		std::array<float, 8 * V_DIM> output_registers{0.0};
+		Tensor rOutput = make_tensor(
+			output_registers.data(),
+			make_layout(
+				make_shape(V_DIM, 8),
+				make_stride(8, 1)
+			)
+		);
+
+		// Iterate over KV tiles
 		size_t kv_len = cute::size<0>(mKV);
 		size_t kv_tiles = kv_len / KV_TILE;
 		size_t kv_step = KV_TILE / 16;
@@ -225,7 +282,7 @@ namespace cpu_test {
 
 			// Cooperate with other warps to load the KV tile into SRAM
 			auto kv_load_tiler = make_shape(8, QK_DIM / (KV_TILE / 16));
-			auto kv_load_coord = make_coord(threadIdx.x / 32, threadIdx.y);
+			auto kv_load_coord = make_coord(warpIdxX, warpIdxY);
 			Tensor load_gKV = local_tile(gKV, kv_load_tiler, kv_load_coord);
 			Tensor load_sKV = local_tile(sKV, kv_load_tiler, kv_load_coord);
 			copy(load_gKV, load_sKV);
@@ -233,14 +290,14 @@ namespace cpu_test {
 
 			// Get rows of KV tile for this warp
 			auto kv_warp_tiler = make_shape(16);
-			auto kv_warp_coord = make_coord(threadIdx.y);
+			auto kv_warp_coord = make_coord(warpIdxY);
 			Tensor warp_sKV = local_tile(sKV, kv_warp_tiler, kv_warp_coord); // (16, QK_DIM)
 
 			// Use MMA to calculate `KV * Q^T`
 			auto kv_mma_tiler = make_shape(16, 16);
 			auto q_mma_tiler = make_shape(8, 16);
-			scores_registers.fill(0.0f);
-			Matrix<float, 16, 8> mma_rScores_mat(scores_registers.data(), mma_rScores);
+			scores_registers_float.fill(0.0f);
+			Matrix<float, 16, 8> mma_rScores_mat(scores_registers_float.data(), mma_rScores);
 			for (size_t k = 0; k < QK_DIM / 16; ++k) {
 				auto kv_mma_coord = make_coord(0, k);
 				Tensor mma_sKV = local_tile(warp_sKV, kv_mma_tiler, kv_mma_coord); // (16, 16)
@@ -251,26 +308,56 @@ namespace cpu_test {
 				Matrix<half_t, 8, 16> mma_sQ_mat(shared->q_sram.data(), mma_sQ);
 				Matrix<half_t, 16, 8> mma_sQ_T_mat = mma_sQ_mat.transpose(); // (16, 8)
 
-				run_mma(
-					mma_sKV_mat,
+				run_mma_tn(
+					mma_sKV_mat.transpose(),
 					mma_sQ_T_mat,
 					mma_rScores_mat
 				);
 			}
 
+			// Update max and sum_exp
+			for (int i = 0; i < 8; ++i) {
+				// find max
+				float old_max = max_registers[i];
+				float new_max = old_max;
+				for (int j = 0; j < 16; ++j) {
+					float score = scores_registers_float[j * 8 + i];
+					new_max = std::max(new_max, score);
+				}
+				max_registers[i] = new_max;
+
+				// coefficient for sum_exp scaling
+				exp_diff_registers[i] = std::exp(old_max - new_max);
+
+				// compute sum_exp
+				float sum_exp = 0.0f;
+				for (int j = 0; j < 16; ++j) {
+					float score = std::exp(scores_registers_float[j * 8 + i] - new_max);
+					scores_registers_half[j * 8 + i] = static_cast<half_t>(score);
+					sum_exp += score;
+				}
+				sum_exp_registers[i].scale_(exp_diff_registers[i]);
+				sum_exp_registers[i].acc_(sum_exp);
+			}
+
+			// TODO:
+			// - tile rOutput by 16 rows (i.e., 16 output features)
+			// - rescale each tile using sum_exp_registers
+			// - use MMA to compute rOutput += KV_tile * rScores_half
+
 			/*{
 			auto lock = shared->lock_log();
-			std::cout << "blockIdx.x = " << blockIdx.x
-					  << ", threadIdx.x = " << threadIdx.x
-					  << ", threadIdx.y = " << threadIdx.y
+			std::cout << "blockIdxX = " << blockIdxX
+					  << ", warpIdxX = " << warpIdxX
+					  << ", warpIdxY = " << warpIdxY
 					  << ", kv_pos = " << kv_pos << "\n";
 			}*/
-			if (blockIdx.x == 63 && threadIdx.x == 7*32 && threadIdx.y == 3 && kv_pos == 4096-64) {
+			if (blockIdxX == 63 && warpIdxX == 7 && warpIdxY == 3 && kv_pos == 4096-64) {
 				auto lock = shared->lock_log();
 				std::cout << "mma_rScores = ";
 				for (int j = 0; j < 16; ++j) {
 					for (int i = 0; i < 8; ++i) {
-						std::cout << scores_registers[j * 8 + i] << ", ";
+						std::cout << scores_registers_float[j * 8 + i] << ", ";
 					}
 					std::cout << "\n";
 				}
@@ -320,8 +407,9 @@ namespace cpu_test {
 					uint3 threadIdx{threadIdxX, threadIdxY, 0};
 					threads.emplace_back(
 						attn_kernel<TensorQ, TensorKV>,
-						blockIdx,
-						threadIdx,
+						blockIdx.x,
+						threadIdx.x / 32,
+						threadIdx.y,
 						shared,
 						q,
 						kv
