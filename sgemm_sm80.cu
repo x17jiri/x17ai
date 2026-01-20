@@ -65,43 +65,259 @@ constexpr size_t V_DIM = 128;
 constexpr size_t Q_TILE = 64;
 constexpr size_t KV_TILE = 64;
 
-template<
-	typename T,
-	const size_t M, // number of rows
-	const size_t N // number of columns
->
-struct Matrix {
-	T *data;
-	size_t offset;
-	size_t m_stride; // stride between rows
-	size_t n_stride; // stride between columns
+using ICount = std::common_type_t<
+	std::make_signed_t<std::ptrdiff_t>,
+	std::make_signed_t<std::size_t>
+>;
+using UCount = std::make_unsigned_t<ICount>;
 
-	Matrix():
-		data(nullptr),
-		offset(0),
-		m_stride(0),
-		n_stride(0)
+using f16 = cute::half_t;
+using f32 = float;
+
+template<const ICount V>
+struct Extent {
+	inline constexpr ICount value() const noexcept {
+		return V;
+	}
+};
+
+template<const ICount V>
+requires(V < 0)
+struct Extent<V> {
+	ICount v;
+	inline constexpr ICount value() const noexcept {
+		return v;
+	}
+};
+
+enum StrideType {
+	RowMajor,
+	ColumnMajor
+};
+
+template<typename T>
+struct DataPtr {
+	std::span<T> data;
+	size_t offset;
+
+	DataPtr()
+		: data{}
+		, offset{0}
 	{}
 
-	template<typename Tensor>
-	Matrix(T *base, Tensor const &tensor) {
-		assert(cute::rank(tensor) == 2);
-		assert(cute::size<0>(tensor) == M);
-		assert(cute::size<1>(tensor) == N);
-		data = base;
-		T *tensor_data = cute::raw_pointer_cast(tensor.data());
-		offset = tensor_data - base;
-		m_stride = cute::stride<0>(tensor);
-		n_stride = cute::stride<1>(tensor);
+	DataPtr(std::span<T> data_)
+		: data{data_}
+		, offset{0}
+	{}
+
+	DataPtr(std::span<T> data_, size_t offset_)
+		: data{data_}
+		, offset{offset_}
+	{}
+};
+
+template<
+	typename T,
+	const ICount M, // number of rows
+	const ICount N, // number of columns
+	const StrideType S = RowMajor
+>
+struct Matrix {
+	DataPtr<T> data;
+	std::tuple<Extent<M>, Extent<N>, ICount> layout;
+
+	Matrix()
+	requires(M >= 0 && N >= 0):
+		data{{}, 0},
+		layout(
+			Extent<M>{},
+			Extent<N>{},
+			(S == RowMajor) ? N : M
+		)
+	{}
+
+	Matrix(DataPtr<T> data_, ICount row_stride)
+	requires(M >= 0 && N >= 0 && S == RowMajor):
+		data(data_),
+		layout(
+			Extent<M>{},
+			Extent<N>{},
+			row_stride
+		)
+	{
+		assert(row_stride >= N);
+		assert(data_.data.size() >= static_cast<size_t>(data_.offset + M * row_stride));
 	}
 
-	Matrix<T, N, M> transpose() const {
-		Matrix<T, N, M> result;
-		result.data = data;
-		result.offset = offset;
-		result.m_stride = n_stride;
-		result.n_stride = m_stride;
-		return result;
+	Matrix(DataPtr<T> data_, ICount col_stride)
+	requires(M >= 0 && N >= 0 && S == ColumnMajor):
+		data(data_),
+		layout(
+			Extent<M>{},
+			Extent<N>{},
+			col_stride
+		)
+	{
+		assert(col_stride >= M);
+		assert(data_.data.size() >= static_cast<size_t>(data_.offset + N * col_stride));
+	}
+
+	Matrix(DataPtr<T> data_, ICount m_rows, ICount row_stride)
+	requires(M < 0 && N >= 0 && S == RowMajor):
+		data(data_),
+		layout(
+			Extent<M>{m_rows},
+			Extent<N>{},
+			row_stride
+		)
+	{
+		assert(row_stride >= N);
+		assert(data_.data.size() >= static_cast<size_t>(data_.offset + m_rows * row_stride));
+	}
+
+	Matrix(DataPtr<T> data_, ICount n_cols, ICount col_stride)
+	requires(M >= 0 && N < 0 && S == ColumnMajor):
+		data(data_),
+		layout(
+			Extent<M>{},
+			Extent<N>{n_cols},
+			col_stride
+		)
+	{
+		assert(col_stride >= M);
+		assert(data_.data.size() >= static_cast<size_t>(data_.offset + n_cols * col_stride));
+	}
+
+	inline ICount m_rows() const {
+		return std::get<0>(layout).value();
+	}
+
+	inline ICount n_cols() const {
+		return std::get<1>(layout).value();
+	}
+
+	inline ICount stride() const {
+		return std::get<2>(layout);
+	}
+
+	inline StrideType stride_type() const {
+		return S;
+	}
+
+	Matrix<T, N, M, ColumnMajor> transpose() const
+	requires(M >= 0 && N >= 0 && S == RowMajor) {
+		return Matrix<T, N, M, ColumnMajor>{
+			data,
+			stride()
+		};
+	}
+
+	template<const ICount M_TILE, const ICount N_TILE>
+	Matrix<T, M_TILE, N_TILE, S> tile(ICount m_tile_idx, ICount n_tile_idx) const
+	requires(M_TILE >= 0 && N_TILE >= 0 && M >= 0 && N >= 0 && M % M_TILE == 0 && N % N_TILE == 0) {
+		assert(m_tile_idx >= 0 && m_tile_idx < (m_rows() / M_TILE));
+		assert(n_tile_idx >= 0 && n_tile_idx < (n_cols() / N_TILE));
+		DataPtr<T> tile_data{
+			data.data,
+			data.offset + (S == RowMajor
+				? m_tile_idx * M_TILE * stride() + n_tile_idx * N_TILE
+				: n_tile_idx * N_TILE * stride() + m_tile_idx * M_TILE
+			)
+		};
+		return Matrix<T, M_TILE, N_TILE, S>{
+			tile_data,
+			stride()
+		};
+	}
+
+	template<const ICount M_TILE, const ICount N_TILE>
+	Matrix<T, M_TILE, N, S> tile(ICount m_tile_idx) const
+	requires(M_TILE >= 0 && N_TILE < 0 && M >= 0 && N >= 0 && M % M_TILE == 0 && N % N_TILE == 0) {
+		assert(m_tile_idx >= 0 && m_tile_idx < (m_rows() / M_TILE));
+		DataPtr<T> tile_data{
+			data.data,
+			data.offset + (S == RowMajor
+				? m_tile_idx * M_TILE * stride()
+				: m_tile_idx * M_TILE
+			)
+		};
+		return Matrix<T, M_TILE, N_TILE, S>{
+			tile_data,
+			stride()
+		};
+	}
+
+	template<const ICount M_TILE, const ICount N_TILE>
+	Matrix<T, M_TILE, N_TILE, RowMajor> tile(ICount m_tile_idx, ICount n_tile_idx) const
+	requires(M_TILE >= 0 && N_TILE >= 0 && M < 0 && N >= 0 && S == RowMajor && N % N_TILE == 0) {
+		assert(m_rows() % M_TILE == 0);
+		assert(m_tile_idx >= 0 && m_tile_idx < (m_rows() / M_TILE));
+		assert(n_tile_idx >= 0 && n_tile_idx < (n_cols() / N_TILE));
+		DataPtr<T> tile_data{
+			data.data,
+			data.offset + (m_tile_idx * M_TILE * stride() + n_tile_idx * N_TILE)
+		};
+		return Matrix<T, M_TILE, N_TILE, RowMajor>{
+			tile_data,
+			stride()
+		};
+	}
+
+	template<const ICount M_TILE, const ICount N_TILE>
+	Matrix<T, M_TILE, N, RowMajor> tile(ICount m_tile_idx) const
+	requires(M_TILE >= 0 && N_TILE < 0 && M < 0 && N >= 0 && S == RowMajor && N % N_TILE == 0) {
+		assert(m_rows() % M_TILE == 0);
+		assert(m_tile_idx >= 0 && m_tile_idx < (m_rows() / M_TILE));
+		DataPtr<T> tile_data{
+			data.data,
+			data.offset + (m_tile_idx * M_TILE * stride())
+		};
+		return Matrix<T, M_TILE, N_TILE, RowMajor>{
+			tile_data,
+			stride()
+		};
+	}
+
+	T get(ICount row, ICount col) const {
+		assert(row >= 0 && row < m_rows());
+		assert(col >= 0 && col < n_cols());
+		if (stride_type() == RowMajor) {
+			return data.data[data.offset + row * stride() + col];
+		} else {
+			return data.data[data.offset + col * stride() + row];
+		}
+	}
+
+	void set(ICount row, ICount col, T value) {
+		assert(row >= 0 && row < m_rows());
+		assert(col >= 0 && col < n_cols());
+		if (stride_type() == RowMajor) {
+			data.data[data.offset + row * stride() + col] = value;
+		} else {
+			data.data[data.offset + col * stride() + row] = value;
+		}
+	}
+
+	void copy_from(Matrix const &src) {
+		assert(m_rows() == src.m_rows());
+		assert(n_cols() == src.n_cols());
+		for (ICount m = 0; m < m_rows(); ++m) {
+			for (ICount n = 0; n < n_cols(); ++n) {
+				set(m, n, src.get(m, n));
+			}
+		}
+	}
+
+	void fill_(T value) {
+		for (ICount m = 0; m < m_rows(); ++m) {
+			for (ICount n = 0; n < n_cols(); ++n) {
+				set(m, n, value);
+			}
+		}
+	}
+
+	void zero_() {
+		fill(T());
 	}
 };
 
@@ -137,20 +353,17 @@ struct KahanAcc {
 // implement things  manually on the CPU just for testing
 namespace cpu_test {
 	void run_mma_tn(
-		Matrix<half_t, 16, 16> a,
-		Matrix<half_t, 16, 8> b,
-		Matrix<float, 16, 8> c
+		Matrix<f16, 16, 16, RowMajor> a,
+		Matrix<f16, 16, 8, ColumnMajor> b,
+		Matrix<f32, 16, 8, ColumnMajor> c
 	) {
-		a = a.transpose();
 		for (size_t m = 0; m < 16; ++m) {
 			for (size_t n = 0; n < 8; ++n) {
-				float sum = 0.0f;
+				f32 sum = 0.0f;
 				for (size_t k = 0; k < 16; ++k) {
-					half_t a_val = a.data[a.offset + m * a.m_stride + k * a.n_stride];
-					half_t b_val = b.data[b.offset + k * b.m_stride + n * b.n_stride];
-					sum += static_cast<float>(a_val) * static_cast<float>(b_val);
+					sum += static_cast<f32>(a.get(m, k)) * static_cast<f32>(b.get(k, n));
 				}
-				c.data[c.offset + m * c.m_stride + n * c.n_stride] += sum;
+				c.set(m, n, c.get(m, n) + sum);
 			}
 		}
 	}
@@ -183,135 +396,83 @@ namespace cpu_test {
 	};
 
 	// this function corresponds to one warp on GPU
-	template<typename TensorQ, typename TensorKV>
 	void attn_kernel(
-		size_t blockIdxX,
-		size_t warpIdxX,
-		size_t warpIdxY,
+		size_t QblockIdx,
+		size_t QwarpIdx,
+		size_t KVwarpIdx,
 		BlockShared *shared,
-		TensorQ mQ,
-		TensorKV mKV
+		Matrix<f16, -1, QK_DIM> gQ,
+		Matrix<f16, -1, QK_DIM> gKV
 	) {
 		using namespace cute;
 
-		// Q tile
-  		auto q_tiler = make_shape(Q_TILE);
-		auto q_coord = make_coord(blockIdxX);
-		Tensor gQ = local_tile(mQ, q_tiler, q_coord); // (Q_TILE, QK_DIM)
-		Tensor sQ = make_tensor(
-			make_smem_ptr(shared->q_sram.data()),
-			make_layout(
-				make_shape(Q_TILE, QK_DIM),
-				make_stride(QK_DIM, 1)
-			)
-		);
-		assert(shared->q_sram.size() == size(sQ));
+		// View of Q tile for this block
+		Matrix<f16, Q_TILE, QK_DIM> gQ_tile = gQ.tile<Q_TILE, -1>(QblockIdx);
+		// SRAM storage for Q tile for this block
+		Matrix<f16, Q_TILE, QK_DIM> sQ_tile{{shared->q_sram}, QK_DIM};
 
 		// Cooperate with other warps to load the Q tile into SRAM
-		auto q_load_tiler = make_shape(8, QK_DIM / (KV_TILE / 16));
-		auto q_load_coord = make_coord(warpIdxX, warpIdxY);
-		Tensor load_gQ = local_tile(gQ, q_load_tiler, q_load_coord);
-		Tensor load_sQ = local_tile(sQ, q_load_tiler, q_load_coord);
-		copy(load_gQ, load_sQ);
+		constexpr size_t KVwarpDim = KV_TILE / 16;
+		CUTE_UNROLL
+		for (size_t i = 0; i < QK_DIM; i += KVwarpDim * 8) {
+			if (i/8 + KVwarpIdx < QK_DIM / 8) {
+				Matrix<f16, 8, 8> q_src_tile = gQ_tile.tile<8, 8>(QwarpIdx, i/8 + KVwarpIdx);
+				Matrix<f16, 8, 8> q_dst_tile = sQ_tile.tile<8, 8>(QwarpIdx, i/8 + KVwarpIdx);
+				q_dst_tile.copy_from(q_src_tile);
+			}
+		}
 		shared->syncthreads();
 
 		// Get rows of Q tile for this warp
-		auto q_warp_tiler = make_shape(8);
-		auto q_warp_coord = make_coord(warpIdxX);
-		Tensor warp_sQ = local_tile(sQ, q_warp_tiler, q_warp_coord); // (8, QK_DIM)
-
-		/*{
-			auto lock = shared->lock_log();
-			std::cout << "warp_sKV = ";
-			cute::print(warp_sKV);
-			std::cout << "\n";
-		}*/
+		Matrix<f16, 8, QK_DIM> sQ_warp_tile = sQ_tile.tile<8, -1>(QwarpIdx);
 
 		// Registers for softmax stats
-		std::array<float, 8> max_registers{};
-		max_registers.fill(-std::numeric_limits<float>::infinity());
-		std::array<KahanAcc<float>, 8> sum_exp_registers{{}};
+		std::array<f32, 8> max_registers{};
+		max_registers.fill(-std::numeric_limits<f32>::infinity());
+		std::array<KahanAcc<f32>, 8> sum_exp_registers{{}};
 
 		// Registers for score calculation
-		std::array<float, 16 * 8> scores_registers_float{0.0};
-		Tensor mma_rScores = make_tensor(
-			scores_registers_float.data(),
-			make_layout(
-				make_shape(16, 8),
-				make_stride(8, 1)
-			)
-		);
-		std::array<half_t, 16 * 8> scores_registers_half{};
-		Tensor mma_rScores_half = make_tensor(
-			scores_registers_half.data(),
-			make_layout(
-				make_shape(16, 8),
-				make_stride(8, 1)
-			)
-		);
+		std::array<f32, 16 * 8> scores_registers_float{0.0};
+		Matrix<f32, 16, 8, ColumnMajor> rScores{{scores_registers_float}, 16};
 
-		std::array<float, 8> exp_diff_registers{};
+		std::array<f32, 8> exp_diff_registers{};
 
 		// Registers for attention output
-		std::array<float, 8 * V_DIM> output_registers{0.0};
-		Tensor rOutput = make_tensor(
-			output_registers.data(),
-			make_layout(
-				make_shape(V_DIM, 8),
-				make_stride(8, 1)
-			)
-		);
+		std::array<f32, 8 * V_DIM> output_registers{0.0};
+		Matrix<f32, 8, V_DIM> rOutput{{output_registers}, V_DIM};
 
 		// Iterate over KV tiles
-		size_t kv_len = cute::size<0>(mKV);
-		size_t kv_tiles = kv_len / KV_TILE;
-		size_t kv_step = KV_TILE / 16;
-		for (size_t kv_pos = 0; kv_pos < kv_len; kv_pos += KV_TILE) {
-			// KV tile
-			auto kv_tiler = make_shape(KV_TILE);
-			auto kv_coord = make_coord(kv_pos / KV_TILE);
-			Tensor gKV = local_tile(mKV, kv_tiler, kv_coord); // (KV_TILE, QK_DIM)
-			Tensor sKV = make_tensor(
-				make_smem_ptr(shared->kv_sram.data()),
-				make_layout(
-					make_shape(KV_TILE, QK_DIM),
-					make_stride(QK_DIM, 1)
-				)
-			);
-			assert(shared->kv_sram.size() == size(sKV));
+		size_t kv_len = gKV.m_rows();
+		for (size_t KVblockIdx = 0; KVblockIdx < kv_len / KV_TILE; ++KVblockIdx) {
+			// View of KV tile for this block
+			Matrix<f16, KV_TILE, QK_DIM> gKV_tile = gKV.tile<KV_TILE, -1>(KVblockIdx);
+			// SRAM storage for KV tile for this block
+			Matrix<f16, KV_TILE, QK_DIM> sKV_tile{{shared->kv_sram}, QK_DIM};
 
-			// Cooperate with other warps to load the KV tile into SRAM
-			auto kv_load_tiler = make_shape(8, QK_DIM / (KV_TILE / 16));
-			auto kv_load_coord = make_coord(warpIdxX, warpIdxY);
-			Tensor load_gKV = local_tile(gKV, kv_load_tiler, kv_load_coord);
-			Tensor load_sKV = local_tile(sKV, kv_load_tiler, kv_load_coord);
-			copy(load_gKV, load_sKV);
+			// Cooperate with other warps to load the Q tile into SRAM
+			CUTE_UNROLL
+			for (size_t i = 0; i < QK_DIM; i += KVwarpDim * 8) {
+				if (i/8 + QwarpIdx < QK_DIM / 8) {
+					Matrix<f16, 16, 8> kv_src_tile = gQ_tile.tile<16, 8>(KVwarpIdx, i/8 + QwarpIdx);
+					Matrix<f16, 16, 8> kv_dst_tile = sQ_tile.tile<16, 8>(KVwarpIdx, i/8 + QwarpIdx);
+					kv_dst_tile.copy_from(kv_src_tile);
+				}
+			}
 			shared->syncthreads();
 
 			// Get rows of KV tile for this warp
-			auto kv_warp_tiler = make_shape(16);
-			auto kv_warp_coord = make_coord(warpIdxY);
-			Tensor warp_sKV = local_tile(sKV, kv_warp_tiler, kv_warp_coord); // (16, QK_DIM)
+			Matrix<f16, 16, QK_DIM> sKV_warp_tile = sKV_tile.tile<16, -1>(KVwarpIdx);
 
 			// Use MMA to calculate `KV * Q^T`
-			auto kv_mma_tiler = make_shape(16, 16);
-			auto q_mma_tiler = make_shape(8, 16);
-			scores_registers_float.fill(0.0f);
-			Matrix<float, 16, 8> mma_rScores_mat(scores_registers_float.data(), mma_rScores);
+			rScores.zero_();
 			for (size_t k = 0; k < QK_DIM / 16; ++k) {
-				auto kv_mma_coord = make_coord(0, k);
-				Tensor mma_sKV = local_tile(warp_sKV, kv_mma_tiler, kv_mma_coord); // (16, 16)
-				Matrix<half_t, 16, 16> mma_sKV_mat(shared->kv_sram.data(), mma_sKV);
-
-				auto q_mma_coord = make_coord(0, k);
-				Tensor mma_sQ = local_tile(warp_sQ, q_mma_tiler, q_mma_coord); // (8, 16)
-				Matrix<half_t, 8, 16> mma_sQ_mat(shared->q_sram.data(), mma_sQ);
-				Matrix<half_t, 16, 8> mma_sQ_T_mat = mma_sQ_mat.transpose(); // (16, 8)
-
-				run_mma_tn(
-					mma_sKV_mat.transpose(),
-					mma_sQ_T_mat,
-					mma_rScores_mat
+				Matrix<f16, 16, 16> sKV_mma_tile = sKV_warp_tile.tile<16, 16>(0, k);
+				Matrix<f16, 8, 16> sQ_mma_tile = sQ_warp_tile.tile<8, 16>(0, k);
+				Matrix<f16, 16, 8, ColumnMajor> sQ_mma_tile_T = sQ_mma_tile.transpose();
+				run_mma(
+					sKV_mma_tile,
+					sQ_mma_tile_T,
+					rScores
 				);
 			}
 
