@@ -382,15 +382,21 @@ namespace cpu_test {
 	void tiny_gemm(
 		Matrix<f16, 16, 16, RowMajor> a,
 		Matrix<f16, 16, 8, ColumnMajor> b,
-		Matrix<f32, 16, 8, ColumnMajor> c
+		Matrix<f32, 16, 8, ColumnMajor> c,
+		bool debug = false
 	) {
 		for (size_t m = 0; m < 16; ++m) {
 			for (size_t n = 0; n < 8; ++n) {
 				f32 sum = 0.0f;
 				for (size_t k = 0; k < 16; ++k) {
 					sum += static_cast<f32>(a.get(m, k)) * static_cast<f32>(b.get(k, n));
+					if (m == 0 && n == 0 && debug) {
+						std::cout << "a[" << m << "," << k << "] = " << f32(a.get(m, k)) << "\n";
+						std::cout << "b[" << k << "," << n << "] = " << f32(b.get(k, n)) << "\n";
+						std::cout << "partial sum = " << (c.get(m, n) + sum) << "\n";
+					}
 				}
-				c.set(m, n, c.get(m, n) + sum);
+				//c.set(m, n, c.get(m, n) + sum);
 			}
 		}
 	}
@@ -411,7 +417,13 @@ namespace cpu_test {
 			, kv_sram(kv_sram_count)
 			, barrier(thread_count)
 			, log_mutex(log_mutex)
-		{}
+		{
+			std::cerr << "Allocated BlockShared with "
+					  << q_sram_count * sizeof(f16) / 1024 << " KB Q SRAM, "
+					  << kv_sram_count * sizeof(f16) / 1024 << " KB KV SRAM, "
+					  << thread_count << " threads.\n";
+			std::cerr << "barrier max count = " << barrier.max() << "\n";
+		}
 
 		void syncthreads() {
 			barrier.arrive_and_wait();
@@ -480,13 +492,11 @@ namespace cpu_test {
 			Matrix<f16, KV_TILE, QK_DIM> sKV_tile{{shared->kv_sram}, QK_DIM};
 
 			// Cooperate with other warps to load the KV tile into SRAM
-			CUTE_UNROLL
 			for (size_t i = 0; i < QK_DIM; i += KVwarpDim * QwarpDim * 8) {
 				if (i/8 + QwarpIdx < QK_DIM / 8) {
 					Matrix<f16, 16, 8> kv_src_tile = gKV_tile.tile<16, 8>(KVwarpIdx, i/8 + QwarpIdx);
 					Matrix<f16, 16, 8> kv_dst_tile = sKV_tile.tile<16, 8>(KVwarpIdx, i/8 + QwarpIdx);
 					kv_dst_tile.copy_from(kv_src_tile);
-			shared->syncthreads();
 					if (
 						QblockIdx == 0
 						&& KVblockIdx == 0
@@ -497,6 +507,23 @@ namespace cpu_test {
 					}
 				}
 			}
+			/*
+					if (
+						QblockIdx == 0
+						&& KVblockIdx == 0
+						&& QwarpIdx == 0
+						&& KVwarpIdx == 0
+					) {
+						sKV_tile.copy_from(gKV_tile);
+					}*/
+					if (
+						QblockIdx == 0
+						&& KVblockIdx == 0
+					){
+						auto lock = shared->lock_log();
+						std::cout << "before sync 1, thread here: " << QwarpIdx << ", " << KVwarpIdx << "\n";
+						std::cout << std::flush;
+					}
 			shared->syncthreads();
 					if (
 						QblockIdx == 0
@@ -504,44 +531,84 @@ namespace cpu_test {
 						&& QwarpIdx == 0
 						&& KVwarpIdx == 0
 					) {
-			std::cout << "----------------------------===============\n";
+						auto lock = shared->lock_log();
+						std::cout << "----------------------------===============\n";
+
+						for (int i = 0 ; i < 192; ++i){
+							sQ_tile.set(0, i, i);
+						}
+						for (int i = 0 ; i < 192; ++i){
+							std::cout << "q_tile[" << 0 << "," << i << "] = " << f32(sQ_tile.get(0, i)) << "\n";
+						}
+
+						for (int i = 0 ; i < 192; ++i){
+							sKV_tile.set(0, i, 100*i);
+						}
+						for (int i = 0 ; i < 192; ++i){
+							std::cout << "kv_tile[" << 0 << "," << i << "] = " << f32(sKV_tile.get(0, i)) << "\n";
+						}
+
+
+
+					}
+					if (
+						QblockIdx == 0
+						&& KVblockIdx == 0
+					){
+						auto lock = shared->lock_log();
+						std::cout << "*** before sync 2, thread here: " << QwarpIdx << ", " << KVwarpIdx << "\n";
+						std::cout << std::flush;
 					}
 			shared->syncthreads();
+					if (
+						QblockIdx == 0
+						&& KVblockIdx == 0
+						&& QwarpIdx == 0
+						&& KVwarpIdx == 0
+					) {
+						auto lock = shared->lock_log();
+						std::cout << "----------------------------===============\n";
+
+						for (int i = 0 ; i < 192; ++i){
+							std::cout << "**kv_tile[" << 0 << "," << i << "] = " << f32(sKV_tile.get(0, i)) << "\n";
+						}
+
+
+
+					}
 
 
 			// View rows of KV tile for this warp
 			Matrix<f16, 16, QK_DIM> sKV_warp_tile = sKV_tile.tile<16, -1>(KVwarpIdx);
 
+			// Use MMA to calculate `KV * Q^T`
+			//rScores_f32.zero_();
+			for (size_t k = 0; k < QK_DIM / 16; ++k) {
 					if (
 						QblockIdx == 0
-						&& KVblockIdx == 0 &&
-						QwarpIdx == 0
+						&& KVblockIdx == 0
+						&& QwarpIdx == 0
 						&& KVwarpIdx == 0
 					) {
 						auto lock = shared->lock_log();
-						std::cout << "first skv_tile = " << f32(sKV_tile.get(0, 0)) << "\n";
-						std::cout << "first sq_tile = " << f32(sQ_tile.get(0, 0)) << "\n";
+						for (int i = 16*k; i < 16*k+16; ++i){
+							std::cout << "sKV_tile[0, " << i << "] = " << f32(sKV_tile.get(0, i)) << "\n";
+						}
+						for (int i = 16*k; i < 16*k+16; ++i){
+							std::cout << "sKV_mma_tile[0, " << i << "] = " << f32(sKV_warp_tile.get(0, i)) << "\n";
+						}
 					}
-
-			// Use MMA to calculate `KV * Q^T`
-			rScores_f32.zero_();
-			for (size_t k = 0; k < QK_DIM / 16; ++k) {
 				Matrix<f16, 16, 16> sKV_mma_tile = sKV_warp_tile.tile<16, 16>(0, k);
 				Matrix<f16, 8, 16> sQ_mma_tile = sQ_warp_tile.tile<8, 16>(0, k);
 				Matrix<f16, 16, 8, ColumnMajor> sQ_mma_tile_T = sQ_mma_tile.transpose();
-				if (
+				tiny_gemm(
+					sKV_mma_tile,
+					sQ_mma_tile_T,
+					rScores_f32,
 					QblockIdx == 0
 					&& KVblockIdx == 0 &&
 					QwarpIdx == 0
 					&& KVwarpIdx == 0
-				) {
-					auto lock = shared->lock_log();
-					std::cout << "sKV_mma_tile = " << f32(sKV_mma_tile.get(0, 0)) << "\n";
-				}
-				tiny_gemm(
-					sKV_mma_tile,
-					sQ_mma_tile_T,
-					rScores_f32
 				);
 				if (
 					QblockIdx == 0
@@ -562,6 +629,7 @@ namespace cpu_test {
 			}
 
 			// Update max and sum_exp
+			/*
 			for (int i = 0; i < 8; ++i) {
 				// find max
 				float old_max = max_registers[i];
@@ -585,6 +653,7 @@ namespace cpu_test {
 				sum_exp_registers[i].scale_(exp_diff_registers[i]);
 				sum_exp_registers[i].acc_(sum_exp);
 			}
+				*/
 
 			// TODO:
 			// - tile rOutput by 16 rows (i.e., 16 output features)
@@ -676,7 +745,7 @@ namespace cpu_test {
 	}
 
 	void test_attn() {
-		constexpr size_t Q_LEN = 4096;
+		constexpr size_t Q_LEN = Q_TILE;
 		constexpr size_t KV_LEN = 4096;
 
 		// allocate q: f16 [Q_LEN, QK_DIM]
