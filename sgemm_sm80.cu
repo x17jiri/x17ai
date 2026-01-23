@@ -62,9 +62,10 @@ using half_t = cute::half_t;
 constexpr size_t QK_DIM = 192;
 constexpr size_t V_DIM = 128;
 
-constexpr size_t Q_TILE = 256;
-constexpr size_t Q_TINY_TILE = 8;
-constexpr size_t KV_TINY_TILE = 16;
+constexpr size_t Q_PER_BLOCK = 256;
+constexpr size_t Q_PER_WARP = 8;
+constexpr size_t KV_PER_STEP = 16;
+constexpr size_t FEATURE_TILE = 16;
 
 using ICount = std::common_type_t<
 	std::make_signed_t<std::ptrdiff_t>,
@@ -450,14 +451,14 @@ namespace cpu_test {
 		constexpr Dim3X(size_t x_) : x{x_} {}
 	};
 
-	constexpr Dim3X block_warps_dim{Q_TILE / Q_TINY_TILE};
+	constexpr Dim3X block_warps_dim{Q_PER_BLOCK / Q_PER_WARP};
     thread_local Dim3X block_idx{size_t(-1)};
 	thread_local Dim3X warp_idx{size_t(-1)};
 	thread_local BlockShared *shared = nullptr;
 
 	bool is_first_warp() {
 		return warp_idx.x == 0;
-		}
+	}
 
 	// this function corresponds to one warp on GPU
 	void attn_kernel(
@@ -474,9 +475,9 @@ namespace cpu_test {
 		using namespace cute;
 
 		// View of Q tile for this block
-		Matrix<f16, Q_TILE, QK_DIM> gQ_tile = gQ.tile<Q_TILE, -1>(block_idx.x);
+		Matrix<f16, Q_PER_BLOCK, QK_DIM> gQ_tile = gQ.tile<Q_PER_BLOCK, -1>(block_idx.x);
 		// SRAM storage for Q tile for this block
-		Matrix<f16, Q_TILE, QK_DIM> sQ_tile{{shared->q_sram}, QK_DIM};
+		Matrix<f16, Q_PER_BLOCK, QK_DIM> sQ_tile{{shared->q_sram}, QK_DIM};
 
 		// Cooperate with other warps to load the Q tile into SRAM
 		if (is_first_warp()) {
@@ -484,34 +485,34 @@ namespace cpu_test {
 		}
 
 		// View rows of Q tile for this warp
-		Matrix<f16, Q_TINY_TILE, QK_DIM> sQ_warp_tile = sQ_tile.tile<Q_TINY_TILE, -1>(warp_idx.x);
+		Matrix<f16, Q_PER_WARP, QK_DIM> sQ_warp_tile = sQ_tile.tile<Q_PER_WARP, -1>(warp_idx.x);
 
 		// Registers
-		std::array<f32, Q_TINY_TILE> max_registers{};
+		std::array<f32, Q_PER_WARP> max_registers{};
 		max_registers.fill(-std::numeric_limits<f32>::infinity());
-		std::array<f32, Q_TINY_TILE> sum_exp_registers{{}};
+		std::array<f32, Q_PER_WARP> sum_exp_registers{{}};
 
-		std::array<f32, KV_TINY_TILE * Q_TINY_TILE> scores_registers_f32{0.0};
-		Matrix<f32, KV_TINY_TILE, Q_TINY_TILE, ColumnMajor>
-			rScores_f32{{scores_registers_f32}, KV_TINY_TILE};
+		std::array<f32, KV_PER_STEP * Q_PER_WARP> scores_registers_f32{0.0};
+		Matrix<f32, KV_PER_STEP, Q_PER_WARP, ColumnMajor>
+			rScores_f32{{scores_registers_f32}, KV_PER_STEP};
 
-		std::array<f16, KV_TINY_TILE * Q_TINY_TILE> scores_registers_f16{};
-		Matrix<f16, KV_TINY_TILE, Q_TINY_TILE, ColumnMajor>
-			rScores_f16{{scores_registers_f16}, KV_TINY_TILE};
+		std::array<f16, KV_PER_STEP * Q_PER_WARP> scores_registers_f16{};
+		Matrix<f16, KV_PER_STEP, Q_PER_WARP, ColumnMajor>
+			rScores_f16{{scores_registers_f16}, KV_PER_STEP};
 
-		std::array<f32, Q_TINY_TILE> exp_diff_registers{};
+		std::array<f32, Q_PER_WARP> exp_diff_registers{};
 
-		std::array<f32, Q_TINY_TILE * V_DIM> output_registers{0.0};
-		Matrix<f32, Q_TINY_TILE, V_DIM> rOutput{{output_registers}, V_DIM};
+		std::array<f32, Q_PER_WARP * V_DIM> output_registers{0.0};
+		Matrix<f32, Q_PER_WARP, V_DIM> rOutput{{output_registers}, V_DIM};
 
 		// Iterate over KV tiles
 		size_t kv_len = gKV.m_rows();
-		for (size_t kv_idx = 0; kv_idx < kv_len / KV_TINY_TILE; ++kv_idx) {
+		for (size_t kv_idx = 0; kv_idx < kv_len / KV_PER_STEP; ++kv_idx) {
 			shared->syncthreads();
 
 			// View of KV tile for this iteration
 			Matrix<f16, KV_TINY_TILE, QK_DIM>
-				gKV_tile = gKV.tile<KV_TINY_TILE, -1>(kv_idx);
+				gKV_tile = gKV.tile<KV_PER_STEP, -1>(kv_idx);
 
 			// SRAM storage for KV tile for this iteration
 			Matrix<f16, KV_TINY_TILE, QK_DIM> sKV_tile{{shared->kv_sram}, QK_DIM};
@@ -581,8 +582,8 @@ namespace cpu_test {
 			) {
 				auto lock = shared->lock_log();
 				std::cout << "mma_rScores_f32 = ";
-				for (int j = 0; j < KV_TINY_TILE; ++j) {
-					for (int i = 0; i < Q_TINY_TILE; ++i) {
+				for (int j = 0; j < KV_PER_STEP; ++j) {
+					for (int i = 0; i < Q_PER_WARP; ++i) {
 						std::cout << rScores_f32.get(j, i) << " ";
 					}
 					std::cout << "\n";
@@ -638,7 +639,7 @@ namespace cpu_test {
 	}
 
 	void test_attn() {
-		constexpr size_t Q_LEN = Q_TILE;
+		constexpr size_t Q_LEN = Q_PER_BLOCK;
 		constexpr size_t KV_LEN = 4096;
 
 		// allocate q: f16 [Q_LEN, QK_DIM]
@@ -692,11 +693,11 @@ namespace cpu_test {
 
 		std::cerr << "Starting CPU attention kernel test..." << std::endl;
 
-		Dim3X gridDim(Q_LEN / Q_TILE);
+		Dim3X gridDim(Q_LEN / Q_PER_BLOCK);
 		start_attn_kernel(
 			gridDim,
-			/*q_sram_count=*/ Q_TILE * QK_DIM,
-			/*kv_sram_count=*/ KV_TINY_TILE * QK_DIM,
+			/*q_sram_count=*/ Q_PER_BLOCK * QK_DIM,
+			/*kv_sram_count=*/ KV_PER_STEP * QK_DIM,
 			q, kv
 		);
 	}
