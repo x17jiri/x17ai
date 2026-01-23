@@ -271,9 +271,9 @@ struct Matrix {
 		};
 	}
 
-	template<const ICount M_TILE, const ICount N_TILE>
-	Matrix<T, M_TILE, N, S> tile(ICount m_tile_idx) const
-	requires(M_TILE >= 0 && N_TILE < 0 && M >= 0 && N >= 0 && M % M_TILE == 0 && N % N_TILE == 0) {
+	template<const ICount M_TILE>
+	Matrix<T, M_TILE, N, S> tile_m(ICount m_tile_idx) const
+	requires(M_TILE >= 0 && M >= 0 && N >= 0 && M % M_TILE == 0) {
 		assert(m_tile_idx >= 0 && m_tile_idx < (m_rows() / M_TILE));
 		return Matrix<T, M_TILE, N, S>{
 			data.with_offset(S == RowMajor
@@ -483,7 +483,7 @@ namespace cpu_test {
 			sQ_tile.copy_from(gQ_tile);
 		}
 		// View rows of Q tile for this warp
-		Matrix<f16, Q_PER_WARP, QK_DIM> sQ_warp_tile = sQ_tile.tile<Q_PER_WARP, -1>(warp_idx.x);
+		Matrix sQ_warp_tile = sQ_tile.tile_m<Q_PER_WARP>(warp_idx.x);
 
 		// Registers
 		std::array<f32, Q_PER_WARP> max_registers{};
@@ -522,7 +522,7 @@ namespace cpu_test {
 			// Tile both `K` and `Q` along the feature dimension and accumulate gemm.
 			// This will result in `rScores = K * Q^T`
 			rScores_f32.zero_();
-			X17_UNROLL for (size_t f_step = 0; f_step < QK_DIM / 16; ++f_step) {
+			X17_UNROLL for (size_t f_step = 0; f_step < QK_DIM / FEATURE_TILE; ++f_step) {
 				tiny_gemm(
 					sKV_tile.tile<-1, FEATURE_TILE>(f_step),
 					sQ_warp_tile.tile<-1, FEATURE_TILE>(f_step).transpose(),
@@ -536,7 +536,7 @@ namespace cpu_test {
 				// find max
 				float old_max = max_registers[i];
 				float new_max = old_max;
-				for (int j = 0; j < KV_TINY_TILE; ++j) {
+				for (int j = 0; j < KV_PER_STEP; ++j) {
 					float score = rScores_f32.get(j, i);
 					new_max = std::max(new_max, score);
 				}
@@ -547,7 +547,7 @@ namespace cpu_test {
 
 				// compute sum_exp
 				float sum_exp = 0.0f;
-				for (int j = 0; j < KV_TINY_TILE; ++j) {
+				for (int j = 0; j < KV_PER_STEP; ++j) {
 				TODO - access registers via Matrix
 					float score = std::exp(scores_registers_f32[j * Q_PER_WARP + i] - new_max);
 					scores_registers_f16[j * Q_PER_WARP + i] = static_cast<f16>(score);
@@ -632,7 +632,7 @@ namespace cpu_test {
 	}
 
 	void test_attn() {
-		constexpr size_t Q_LEN = Q_PER_BLOCK;
+		constexpr size_t Q_LEN = 4096;
 		constexpr size_t KV_LEN = 4096;
 
 		// allocate q: f16 [Q_LEN, QK_DIM]
