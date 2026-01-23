@@ -508,10 +508,10 @@ namespace cpu_test {
 		for (size_t kv_step = 0; kv_step < kv_len / KV_PER_STEP; ++kv_step) {
 			shared->syncthreads();
 
-			// View of KV tile for this iteration
-			Matrix<f16, KV_TINY_TILE, QK_DIM> gKV_tile = gKV.tile<KV_PER_STEP, -1>(kv_step);
-			// SRAM storage for KV tile for this iteration
-			Matrix<f16, KV_TINY_TILE, QK_DIM> sKV_tile{{shared->kv_sram}, QK_DIM};
+			// View of KV tile for this step
+			Matrix<f16, KV_PER_STEP, QK_DIM> gKV_tile = gKV.tile<KV_PER_STEP, -1>(kv_step);
+			// SRAM storage for KV tile for this step
+			Matrix<f16, KV_PER_STEP, QK_DIM> sKV_tile{{shared->kv_sram}, QK_DIM};
 			// Cooperate with other warps to load the KV tile into SRAM
 			if (is_first_warp()) {
 				sKV_tile.copy_from(gKV_tile);
@@ -519,15 +519,13 @@ namespace cpu_test {
 
 			shared->syncthreads();
 
-			// Calculate `KV * Q^T`
+			// Tile both `K` and `Q` alongthe feature dimension and accumulate gemm.
+			// This will result in `rScores = K * Q^T`
 			rScores_f32.zero_();
-			for (size_t k = 0; k < QK_DIM / 16; ++k) {
-				Matrix<f16, KV_TINY_TILE, 16> sKV_mma_tile = sKV_tile.tile<-1, 16>(k);
-				Matrix<f16, Q_TINY_TILE, 16> sQ_mma_tile = sQ_warp_tile.tile<-1, 16>(k);
-				Matrix<f16, KV_TINY_TILE, Q_TINY_TILE, ColumnMajor> sQ_mma_tile_T = sQ_mma_tile.transpose();
+			for (size_t f_step = 0; f_step < QK_DIM / 16; ++f_step) {
 				tiny_gemm(
-					sKV_mma_tile,
-					sQ_mma_tile_T,
+					sKV_tile.tile<-1, 16>(f_step),
+					sQ_warp_tile.tile<-1, 16>(f_step).transpose(),
 					rScores_f32
 				);
 			}
