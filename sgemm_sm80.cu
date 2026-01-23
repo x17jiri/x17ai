@@ -519,20 +519,20 @@ namespace cpu_test {
 
 			shared->syncthreads();
 
-			// Tile both `K` and `Q` alongthe feature dimension and accumulate gemm.
+			// Tile both `K` and `Q` along the feature dimension and accumulate gemm.
 			// This will result in `rScores = K * Q^T`
 			rScores_f32.zero_();
-			for (size_t f_step = 0; f_step < QK_DIM / 16; ++f_step) {
+			X17_UNROLL for (size_t f_step = 0; f_step < QK_DIM / 16; ++f_step) {
 				tiny_gemm(
-					sKV_tile.tile<-1, 16>(f_step),
-					sQ_warp_tile.tile<-1, 16>(f_step).transpose(),
+					sKV_tile.tile<-1, FEATURE_TILE>(f_step),
+					sQ_warp_tile.tile<-1, FEATURE_TILE>(f_step).transpose(),
 					rScores_f32
 				);
 			}
 
 			// Update max and sum_exp
 			/*
-			for (int i = 0; i < Q_TINY_TILE; ++i) {
+			for (int i = 0; i < Q_PER_WARP; ++i) {
 				// find max
 				float old_max = max_registers[i];
 				float new_max = old_max;
@@ -549,8 +549,8 @@ namespace cpu_test {
 				float sum_exp = 0.0f;
 				for (int j = 0; j < KV_TINY_TILE; ++j) {
 				TODO - access registers via Matrix
-					float score = std::exp(scores_registers_f32[j * Q_TINY_TILE + i] - new_max);
-					scores_registers_f16[j * Q_TINY_TILE + i] = static_cast<f16>(score);
+					float score = std::exp(scores_registers_f32[j * Q_PER_WARP + i] - new_max);
+					scores_registers_f16[j * Q_PER_WARP + i] = static_cast<f16>(score);
 					sum_exp += score;
 				}
 				sum_exp_registers[i].scale_(exp_diff_registers[i]);
