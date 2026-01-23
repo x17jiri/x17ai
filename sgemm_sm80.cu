@@ -446,13 +446,15 @@ namespace cpu_test {
 		}
 	};
 
+	#define X17_UNROLL
+
 	struct Dim3X {
 		size_t x;
 		constexpr Dim3X(size_t x_) : x{x_} {}
 	};
 
 	constexpr Dim3X block_warps_dim{Q_PER_BLOCK / Q_PER_WARP};
-    thread_local Dim3X block_idx{size_t(-1)};
+	thread_local Dim3X block_idx{size_t(-1)};
 	thread_local Dim3X warp_idx{size_t(-1)};
 	thread_local BlockShared *shared = nullptr;
 
@@ -472,18 +474,14 @@ namespace cpu_test {
 		warp_idx.x = _warp_idx_x;
 		shared = _shared;
 
-		using namespace cute;
-
-		// View of Q tile for this block
+		// Part of Q for this block
 		Matrix<f16, Q_PER_BLOCK, QK_DIM> gQ_tile = gQ.tile<Q_PER_BLOCK, -1>(block_idx.x);
 		// SRAM storage for Q tile for this block
 		Matrix<f16, Q_PER_BLOCK, QK_DIM> sQ_tile{{shared->q_sram}, QK_DIM};
-
 		// Cooperate with other warps to load the Q tile into SRAM
 		if (is_first_warp()) {
 			sQ_tile.copy_from(gQ_tile);
 		}
-
 		// View rows of Q tile for this warp
 		Matrix<f16, Q_PER_WARP, QK_DIM> sQ_warp_tile = sQ_tile.tile<Q_PER_WARP, -1>(warp_idx.x);
 
@@ -505,18 +503,15 @@ namespace cpu_test {
 		std::array<f32, Q_PER_WARP * V_DIM> output_registers{0.0};
 		Matrix<f32, Q_PER_WARP, V_DIM> rOutput{{output_registers}, V_DIM};
 
-		// Iterate over KV tiles
+		// Iterate over KV
 		size_t kv_len = gKV.m_rows();
-		for (size_t kv_idx = 0; kv_idx < kv_len / KV_PER_STEP; ++kv_idx) {
+		for (size_t kv_step = 0; kv_step < kv_len / KV_PER_STEP; ++kv_step) {
 			shared->syncthreads();
 
 			// View of KV tile for this iteration
-			Matrix<f16, KV_TINY_TILE, QK_DIM>
-				gKV_tile = gKV.tile<KV_PER_STEP, -1>(kv_idx);
-
+			Matrix<f16, KV_TINY_TILE, QK_DIM> gKV_tile = gKV.tile<KV_PER_STEP, -1>(kv_step);
 			// SRAM storage for KV tile for this iteration
 			Matrix<f16, KV_TINY_TILE, QK_DIM> sKV_tile{{shared->kv_sram}, QK_DIM};
-
 			// Cooperate with other warps to load the KV tile into SRAM
 			if (is_first_warp()) {
 				sKV_tile.copy_from(gKV_tile);
@@ -578,7 +573,7 @@ namespace cpu_test {
 					  << ", kv_pos = " << kv_pos << "\n";
 			}*/
 			if (
-				is_first_warp() && block_idx.x == 0 && warp_idx.x == 0 && kv_idx == 0
+				is_first_warp() && block_idx.x == 0 && warp_idx.x == 0 && kv_step == 0
 			) {
 				auto lock = shared->lock_log();
 				std::cout << "mma_rScores_f32 = ";
