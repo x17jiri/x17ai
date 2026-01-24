@@ -141,14 +141,29 @@ struct DataPtr {
 	}
 };
 
+template<typename T>
+struct GPtr: DataPtr<T> {
+	using DataPtr<T>::DataPtr;
+};
+
+template<typename T>
+struct SPtr: DataPtr<T> {
+	using DataPtr<T>::DataPtr;
+};
+
+template<typename T>
+struct RPtr: DataPtr<T> {
+	using DataPtr<T>::DataPtr;
+};
+
 template<
-	typename T,
+	typename Data,
 	const ICount M, // number of rows
 	const ICount N, // number of columns
 	const StrideType S = RowMajor
 >
 struct Matrix {
-	DataPtr<T> data;
+	Data data;
 
 	using MExtent = std::conditional_t<
 		(M >= 0),
@@ -181,7 +196,7 @@ struct Matrix {
 		}
 	}
 
-	Matrix(DataPtr<T> data_, ICount row_stride)
+	Matrix(Data data_, ICount row_stride)
 	requires(M >= 0 && N >= 0 && S == RowMajor):
 		data(data_),
 		layout(
@@ -194,7 +209,7 @@ struct Matrix {
 		assert(data_.is_valid_index(__max_index()));
 	}
 
-	Matrix(DataPtr<T> data_, ICount col_stride)
+	Matrix(Data data_, ICount col_stride)
 	requires(M >= 0 && N >= 0 && S == ColumnMajor):
 		data(data_),
 		layout(
@@ -207,7 +222,7 @@ struct Matrix {
 		assert(data_.is_valid_index(__max_index()));
 	}
 
-	Matrix(DataPtr<T> data_, ICount m_rows, ICount row_stride)
+	Matrix(Data data_, ICount m_rows, ICount row_stride)
 	requires(M < 0 && N >= 0 && S == RowMajor):
 		data(data_),
 		layout(
@@ -220,7 +235,7 @@ struct Matrix {
 		assert(data_.is_valid_index(__max_index()));
 	}
 
-	Matrix(DataPtr<T> data_, ICount n_cols, ICount col_stride)
+	Matrix(Data data_, ICount n_cols, ICount col_stride)
 	requires(M >= 0 && N < 0 && S == ColumnMajor):
 		data(data_),
 		layout(
@@ -249,20 +264,20 @@ struct Matrix {
 		return S;
 	}
 
-	Matrix<T, N, M, ColumnMajor> transpose() const
+	Matrix<Data, N, M, ColumnMajor> transpose() const
 	requires(M >= 0 && N >= 0 && S == RowMajor) {
-		return Matrix<T, N, M, ColumnMajor>{
+		return Matrix<Data, N, M, ColumnMajor>{
 			data,
 			stride()
 		};
 	}
 
 	template<const ICount M_TILE, const ICount N_TILE>
-	Matrix<T, M_TILE, N_TILE, S> tile(ICount m_tile_idx, ICount n_tile_idx) const
+	Matrix<Data, M_TILE, N_TILE, S> tile(ICount m_tile_idx, ICount n_tile_idx) const
 	requires(M_TILE >= 0 && N_TILE >= 0 && M >= 0 && N >= 0 && M % M_TILE == 0 && N % N_TILE == 0) {
 		assert(m_tile_idx >= 0 && m_tile_idx < (m_rows() / M_TILE));
 		assert(n_tile_idx >= 0 && n_tile_idx < (n_cols() / N_TILE));
-		return Matrix<T, M_TILE, N_TILE, S>{
+		return Matrix<Data, M_TILE, N_TILE, S>{
 			data.with_offset(S == RowMajor
 				? m_tile_idx * M_TILE * stride() + n_tile_idx * N_TILE
 				: n_tile_idx * N_TILE * stride() + m_tile_idx * M_TILE
@@ -272,10 +287,24 @@ struct Matrix {
 	}
 
 	template<const ICount M_TILE>
-	Matrix<T, M_TILE, N, S> tile_m(ICount m_tile_idx) const
+	Matrix<Data, M_TILE, N, S> tile_m(ICount m_tile_idx) const
 	requires(M_TILE >= 0 && M >= 0 && N >= 0 && M % M_TILE == 0) {
 		assert(m_tile_idx >= 0 && m_tile_idx < (m_rows() / M_TILE));
-		return Matrix<T, M_TILE, N, S>{
+		return Matrix<Data, M_TILE, N, S>{
+			data.with_offset(S == RowMajor
+				? m_tile_idx * M_TILE * stride()
+				: m_tile_idx * M_TILE
+			),
+			stride()
+		};
+	}
+
+	template<const ICount M_TILE>
+	Matrix<Data, M_TILE, N, S> tile_m(ICount m_tile_idx) const
+	requires(M_TILE >= 0 && M < 0 && N >= 0) {
+		assert(m_tile_idx >= 0 && m_tile_idx < (m_rows() / M_TILE));
+		assert(m_rows() % M_TILE == 0);
+		return Matrix<Data, M_TILE, N, S>{
 			data.with_offset(S == RowMajor
 				? m_tile_idx * M_TILE * stride()
 				: m_tile_idx * M_TILE
@@ -285,39 +314,39 @@ struct Matrix {
 	}
 
 	template<const ICount M_TILE, const ICount N_TILE>
-	Matrix<T, M_TILE, N_TILE, RowMajor> tile(ICount m_tile_idx, ICount n_tile_idx) const
+	Matrix<Data, M_TILE, N_TILE, RowMajor> tile(ICount m_tile_idx, ICount n_tile_idx) const
 	requires(M_TILE >= 0 && N_TILE >= 0 && M < 0 && N >= 0 && S == RowMajor && N % N_TILE == 0) {
 		assert(m_rows() % M_TILE == 0);
 		assert(m_tile_idx >= 0 && m_tile_idx < (m_rows() / M_TILE));
 		assert(n_tile_idx >= 0 && n_tile_idx < (n_cols() / N_TILE));
-		return Matrix<T, M_TILE, N_TILE, RowMajor>{
+		return Matrix<Data, M_TILE, N_TILE, RowMajor>{
 			data.with_offset(m_tile_idx * M_TILE * stride() + n_tile_idx * N_TILE),
 			stride()
 		};
 	}
 
-	template<const ICount M_TILE, const ICount N_TILE>
-	Matrix<T, M_TILE, N, RowMajor> tile(ICount m_tile_idx) const
-	requires(M_TILE >= 0 && N_TILE < 0 && M < 0 && N >= 0 && S == RowMajor && N % N_TILE == 0) {
+	template<const ICount M_TILE>
+	Matrix<Data, M_TILE, N, RowMajor> tile(ICount m_tile_idx) const
+	requires(M_TILE >= 0 && M < 0 && N >= 0 && S == RowMajor) {
 		assert(m_rows() % M_TILE == 0);
 		assert(m_tile_idx >= 0 && m_tile_idx < (m_rows() / M_TILE));
-		return Matrix<T, M_TILE, N, RowMajor>{
+		return Matrix<Data, M_TILE, N, RowMajor>{
 			data.with_offset(m_tile_idx * M_TILE * stride()),
 			stride()
 		};
 	}
 
-	template<const ICount M_TILE, const ICount N_TILE>
-	Matrix<T, M, N_TILE, S> tile(ICount n_tile_idx) const
-	requires(M_TILE < 0 && N_TILE >= 0 && M >= 0 && N >= 0 && N % N_TILE == 0) {
+	template<const ICount N_TILE>
+	Matrix<Data, M, N_TILE, S> tile_n(ICount n_tile_idx) const
+	requires(N_TILE >= 0 && M >= 0 && N >= 0 && N % N_TILE == 0) {
 		assert(n_tile_idx >= 0 && n_tile_idx < (n_cols() / N_TILE));
-		return Matrix<T, M, N_TILE, S>{
+		return Matrix<Data, M, N_TILE, S>{
 			data.with_offset(n_tile_idx * N_TILE),
 			stride()
 		};
 	}
 
-	T get(ICount row, ICount col) const {
+	auto get(ICount row, ICount col) const -> decltype(data.get(0)) {
 		assert(row >= 0 && row < m_rows());
 		assert(col >= 0 && col < n_cols());
 		if (stride_type() == RowMajor) {
@@ -327,7 +356,7 @@ struct Matrix {
 		}
 	}
 
-	void set(ICount row, ICount col, T value) {
+	void set(ICount row, ICount col, decltype(data.get(0)) value) {
 		assert(row >= 0 && row < m_rows());
 		assert(col >= 0 && col < n_cols());
 		if (stride_type() == RowMajor) {
@@ -347,7 +376,18 @@ struct Matrix {
 		}
 	}
 
-	void fill_(T value) {
+	template<typename U>
+	void cast_from(Matrix<U, M, N, S> const &src) {
+		assert(m_rows() == src.m_rows());
+		assert(n_cols() == src.n_cols());
+		for (ICount m = 0; m < m_rows(); ++m) {
+			for (ICount n = 0; n < n_cols(); ++n) {
+				set(m, n, static_cast<U>(src.get(m, n)));
+			}
+		}
+	}
+
+	void fill_(decltype(data.get(0)) value) {
 		for (ICount m = 0; m < m_rows(); ++m) {
 			for (ICount n = 0; n < n_cols(); ++n) {
 				set(m, n, value);
@@ -356,7 +396,7 @@ struct Matrix {
 	}
 
 	void zero_() {
-		fill_(T());
+		fill_(decltype(data.get(0))());
 	}
 };
 
@@ -391,10 +431,11 @@ struct KahanAcc {
 
 // implement things  manually on the CPU just for testing
 namespace cpu_test {
+	template<const StrideType S>
 	void tiny_gemm(
-		Matrix<f16, 16, 16, RowMajor> a,
-		Matrix<f16, 16, 8, ColumnMajor> b,
-		Matrix<f32, 16, 8, ColumnMajor> c,
+		Matrix<GPtr<f16>, 16, 16, S> a,
+		Matrix<GPtr<f16>, 16, 8, ColumnMajor> b,
+		Matrix<GPtr<f32>, 16, 8, ColumnMajor> c,
 		bool debug = false
 	) {
 		for (size_t m = 0; m < 16; ++m) {
@@ -467,41 +508,42 @@ namespace cpu_test {
 		size_t _block_idx_x,
 		size_t _warp_idx_x,
 		BlockShared *_shared,
-		Matrix<f16, -1, QK_DIM> gQ,
-		Matrix<f16, -1, QK_DIM> gKV
+		Matrix<GPtr<f16>, -1, QK_DIM> gQ,
+		Matrix<GPtr<f16>, -1, QK_DIM> gKV,
+		Matrix<GPtr<f16>, -1, V_DIM> gOut
 	) {
 		block_idx.x = _block_idx_x;
 		warp_idx.x = _warp_idx_x;
 		shared = _shared;
 
 		// Part of Q for this block
-		Matrix<f16, Q_PER_BLOCK, QK_DIM> gQ_tile = gQ.tile<Q_PER_BLOCK, -1>(block_idx.x);
+		Matrix<GPtr<f16>, Q_PER_BLOCK, QK_DIM> gQ_tile = gQ.tile_m<Q_PER_BLOCK>(block_idx.x);
 		// SRAM storage for Q tile for this block
-		Matrix<f16, Q_PER_BLOCK, QK_DIM> sQ_tile{{shared->q_sram}, QK_DIM};
+		Matrix<SPtr<f16>, Q_PER_BLOCK, QK_DIM> sQ_tile{{shared->q_sram}, QK_DIM};
 		// Cooperate with other warps to load the Q tile into SRAM
 		if (is_first_warp()) {
 			sQ_tile.copy_from(gQ_tile);
 		}
 		// View rows of Q tile for this warp
-		Matrix sQ_warp_tile = sQ_tile.tile_m<Q_PER_WARP>(warp_idx.x);
+		Matrix<SPtr<f16>, Q_PER_WARP, QK_DIM> sQ_warp_tile = sQ_tile.tile_m<Q_PER_WARP>(warp_idx.x);
 
 		// Registers
 		std::array<f32, Q_PER_WARP> max_registers{};
 		max_registers.fill(-std::numeric_limits<f32>::infinity());
-		std::array<f32, Q_PER_WARP> sum_exp_registers{{}};
+		std::array<f32, Q_PER_WARP> sum_exp_registers{0.0};
 
 		std::array<f32, KV_PER_STEP * Q_PER_WARP> scores_registers_f32{0.0};
-		Matrix<f32, KV_PER_STEP, Q_PER_WARP, ColumnMajor>
+		Matrix<RPtr<f32>, KV_PER_STEP, Q_PER_WARP, ColumnMajor>
 			rScores_f32{{scores_registers_f32}, KV_PER_STEP};
 
 		std::array<f16, KV_PER_STEP * Q_PER_WARP> scores_registers_f16{};
-		Matrix<f16, KV_PER_STEP, Q_PER_WARP, ColumnMajor>
+		Matrix<RPtr<f16>, KV_PER_STEP, Q_PER_WARP, ColumnMajor>
 			rScores_f16{{scores_registers_f16}, KV_PER_STEP};
 
-		std::array<f32, Q_PER_WARP> exp_diff_registers{};
+		std::array<f32, Q_PER_WARP> rRescale{};
 
 		std::array<f32, Q_PER_WARP * V_DIM> output_registers{0.0};
-		Matrix<f32, Q_PER_WARP, V_DIM> rOutput{{output_registers}, V_DIM};
+		Matrix<RPtr<f32>, Q_PER_WARP, V_DIM> rOutput{{output_registers}, V_DIM};
 
 		// Iterate over KV
 		size_t kv_len = gKV.m_rows();
@@ -509,9 +551,9 @@ namespace cpu_test {
 			shared->syncthreads();
 
 			// View of KV tile for this step
-			Matrix<f16, KV_PER_STEP, QK_DIM> gKV_tile = gKV.tile<KV_PER_STEP, -1>(kv_step);
+			Matrix<GPtr<f16>, KV_PER_STEP, QK_DIM> gKV_tile = gKV.tile_m<KV_PER_STEP>(kv_step);
 			// SRAM storage for KV tile for this step
-			Matrix<f16, KV_PER_STEP, QK_DIM> sKV_tile{{shared->kv_sram}, QK_DIM};
+			Matrix<SPtr<f16>, KV_PER_STEP, QK_DIM> sKV_tile{{shared->kv_sram}, QK_DIM};
 			// Cooperate with other warps to load the KV tile into SRAM
 			if (is_first_warp()) {
 				sKV_tile.copy_from(gKV_tile);
@@ -524,52 +566,84 @@ namespace cpu_test {
 			rScores_f32.zero_();
 			X17_UNROLL for (size_t f_step = 0; f_step < QK_DIM / FEATURE_TILE; ++f_step) {
 				tiny_gemm(
-					sKV_tile.tile<-1, FEATURE_TILE>(f_step),
-					sQ_warp_tile.tile<-1, FEATURE_TILE>(f_step).transpose(),
+					sKV_tile.tile_n<FEATURE_TILE>(f_step),
+					sQ_warp_tile.tile_n<FEATURE_TILE>(f_step).transpose(),
 					rScores_f32
 				);
 			}
+			rScores_f16.cast_from(rScores_f32);
 
 			// Update max and sum_exp
-			/*
-			for (int i = 0; i < Q_PER_WARP; ++i) {
+			for (size_t i = 0; i < Q_PER_WARP; ++i) {
 				// find max
-				float old_max = max_registers[i];
-				float new_max = old_max;
-				for (int j = 0; j < KV_PER_STEP; ++j) {
-					float score = rScores_f32.get(j, i);
+				f32 old_max = max_registers[i];
+				f32 new_max = old_max;
+				for (size_t j = 0; j < KV_PER_STEP; ++j) {
+					float score = rScores_f16.get(j, i);
 					new_max = std::max(new_max, score);
 				}
 				max_registers[i] = new_max;
 
 				// coefficient for sum_exp scaling
-				exp_diff_registers[i] = std::exp(old_max - new_max);
+				rRescale[i] = std::exp(old_max - new_max);
+
+				if (is_first_warp() && kv_step == 0) {
+					auto lock = shared->lock_log();
+					std::cout << "new_max[" << i << "] = " << new_max << "\n";
+				}
 
 				// compute sum_exp
-				float sum_exp = 0.0f;
-				for (int j = 0; j < KV_PER_STEP; ++j) {
-				TODO - access registers via Matrix
-					float score = std::exp(scores_registers_f32[j * Q_PER_WARP + i] - new_max);
-					scores_registers_f16[j * Q_PER_WARP + i] = static_cast<f16>(score);
-					sum_exp += score;
+				f32 sum_exp = 0.0f;
+				for (size_t j = 0; j < KV_PER_STEP; ++j) {
+					f16 score = static_cast<f16>(
+						std::exp(f32(rScores_f16.get(j, i)) - new_max)
+					);
+					rScores_f16.set(j, i, score);
+					sum_exp += f32(score);
 				}
-				sum_exp_registers[i].scale_(exp_diff_registers[i]);
-				sum_exp_registers[i].acc_(sum_exp);
+				float sum_exp_old = sum_exp_registers[i];
+				sum_exp_registers[i] *= rRescale[i];
+				sum_exp_registers[i] += sum_exp;
+				/*if (is_first_warp() && i == 0) {
+					auto lock = shared->lock_log();
+					std::cout << "kv_step = " << kv_step;
+					std::cout << "; sum_exp_old = " << sum_exp_old;
+					std::cout << "; sum_exp_new = " << sum_exp;
+					std::cout << "; old_max = " << old_max;
+					std::cout << "; new_max = " << new_max;
+					std::cout << "; rescale = " << rRescale[i];
+					std::cout << "; new_final = " << sum_exp_registers[i] << "\n";
+				}*/
 			}
-				*/
 
-			// TODO:
-			// - tile rOutput by 16 rows (i.e., 16 output features)
-			// - rescale each tile using sum_exp_registers
-			// - use MMA to compute rOutput += KV_tile * rScores_f16
+			// rescale output accumulators
+			for (size_t j = 0; j < Q_PER_WARP; ++j) {
+				for (size_t i = 0; i < V_DIM; ++i) {
+					rOutput.set(j, i, rOutput.get(j, i) * rRescale[j]);
+				}
+			}
 
-			/*{
-			auto lock = shared->lock_log();
-			std::cout << "blockIdxX = " << blockIdxX
-					  << ", warpIdxX = " << warpIdxX
-					  << ", warpIdxY = " << warpIdxY
-					  << ", kv_pos = " << kv_pos << "\n";
+			/*if (
+				is_first_warp() && block_idx.x == 0 && warp_idx.x == 0 && kv_step == 0
+			) {
+				auto lock = shared->lock_log();
+				std::cout << "rOutput[" << 0 << "] = ";
+				for (size_t i = 0; i < V_DIM; ++i) {
+					std::cout << rOutput.get(0, i) << ", ";
+				}
+				std::cout << "\n";
 			}*/
+
+			// compute `rOutput += KV_tile * rScores`
+			X17_UNROLL for (size_t v_tile = 0; v_tile < V_DIM / FEATURE_TILE; ++v_tile) {
+				tiny_gemm(
+					sKV_tile.tile_n<FEATURE_TILE>(v_tile).transpose(),
+					rScores_f16,
+					rOutput.tile_n<FEATURE_TILE>(v_tile).transpose()
+					//, true
+				);
+			}
+
 			if (
 				is_first_warp() && block_idx.x == 0 && warp_idx.x == 0 && kv_step == 0
 			) {
@@ -582,10 +656,46 @@ namespace cpu_test {
 					std::cout << "\n";
 				}
 				std::cout << "\n";
+				std::cout << "mma_rScores_f16 = ";
+				for (int j = 0; j < KV_PER_STEP; ++j) {
+					for (int i = 0; i < Q_PER_WARP; ++i) {
+						std::cout << f32(rScores_f16.get(j, i)) << " ";
+					}
+					std::cout << "\n";
+				}
+				std::cout << "\n";
+			}
+
+			/*if (
+				is_first_warp() && block_idx.x == 0 && warp_idx.x == 0 && kv_step == 0
+			) {
+				auto lock = shared->lock_log();
+				std::cout << "**rOutput[" << 0 << "] = ";
+				for (size_t i = 0; i < V_DIM; ++i) {
+					std::cout << rOutput.get(0, i) << ", ";
+				}
+				std::cout << "\n";
+			}*/
+		}
+
+		// finalize output by normalizing with sum_exp
+		for (size_t i = 0; i < Q_PER_WARP; ++i) {
+			if (is_first_warp()) {
+				auto lock = shared->lock_log();
+				std::cout << "sum_exp[" << i << "] = " << sum_exp_registers[i] << "\n";
+			}
+			f32 inv_sum_exp = 1.0f / sum_exp_registers[i];
+			for (size_t j = 0; j < V_DIM; ++j) {
+				rOutput.set(i, j, rOutput.get(i, j) * inv_sum_exp);
 			}
 		}
 
-		//std::cout << "\n";
+		// Part of O for this block
+		Matrix<GPtr<f16>, Q_PER_BLOCK, V_DIM> gOut_tile = gOut.tile_m<Q_PER_BLOCK>(block_idx.x);
+		// View rows of O tile for this warp
+		Matrix<GPtr<f16>, Q_PER_WARP, V_DIM> gOut_warp_tile = gOut_tile.tile_m<Q_PER_WARP>(warp_idx.x);
+		// Write output
+		gOut_warp_tile.cast_from(rOutput);
 	}
 
 	void start_attn_kernel(
@@ -593,7 +703,8 @@ namespace cpu_test {
 		size_t q_sram_count,
 		size_t kv_sram_count,
 		Matrix<f16, -1, QK_DIM> Q,
-		Matrix<f16, -1, QK_DIM> KV
+		Matrix<f16, -1, QK_DIM> KV,
+		Matrix<f16, -1, V_DIM> gOut
 	) {
 		std::mutex log_mutex;
 
@@ -615,11 +726,9 @@ namespace cpu_test {
 			for (uint wX = 0; wX < block_warps_dim.x; ++wX) {
 				threads.emplace_back(
 					attn_kernel,
-					bX,
-					wX,
+					bX, wX,
 					shared,
-					Q,
-					KV
+					Q, KV, gOut
 				);
 			}
 		}
@@ -669,20 +778,20 @@ namespace cpu_test {
 			KV_LEN,
 			QK_DIM
 		};
-		std::cout << "first kv value = " << f32(kv.get(0, 0)) << "\n";
+		/*std::cout << "first kv value = " << f32(kv.get(0, 0)) << "\n";
 		for (size_t j = 0; j < 4; ++j) {
 			for (size_t i = 0; i < QK_DIM; ++i) {
 				std::cout << "kv[" << j << "," << i << "] = " << f32(kv.get(j, i)) << "\n";
 			}
-		}
+		}*/
 
 		// allocate output: f16 [Q_LEN, V_DIM]
-		std::vector<half_t> out_data(Q_LEN * V_DIM);
-		auto out = cute::make_tensor(
-			out_data.data(),
-			cute::make_shape(Q_LEN, V_DIM),
-			cute::make_stride(V_DIM, 1)
-		);
+		std::vector<f16> out_data(Q_LEN * V_DIM);
+		Matrix<f16, -1, V_DIM, RowMajor> out{
+			DataPtr<f16>{out_data},
+			Q_LEN,
+			V_DIM
+		};
 
 		std::cerr << "Starting CPU attention kernel test..." << std::endl;
 
@@ -691,8 +800,17 @@ namespace cpu_test {
 			gridDim,
 			/*q_sram_count=*/ Q_PER_BLOCK * QK_DIM,
 			/*kv_sram_count=*/ KV_PER_STEP * QK_DIM,
-			q, kv
+			q, kv, out
 		);
+
+		// write output to file
+		{
+			std::ofstream out_file("out_cpu.bin", std::ios::binary);
+			out_file.write(
+				reinterpret_cast<char*>(out_data.data()),
+				static_cast<std::streamsize>(out_data.size() * sizeof(*out_data.data()))
+			);
+		}
 	}
 }
 
