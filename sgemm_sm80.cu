@@ -62,10 +62,11 @@ using half_t = cute::half_t;
 constexpr size_t QK_DIM = 192;
 constexpr size_t V_DIM = 128;
 
-constexpr size_t Q_PER_BLOCK = 256;
+constexpr size_t Q_PER_BLOCK = 128;
 constexpr size_t Q_PER_WARP = 8;
 constexpr size_t KV_PER_STEP = 16;
 constexpr size_t FEATURE_TILE = 16;
+constexpr size_t KV_PRELOAD = 8;
 
 using ICount = std::common_type_t<
 	std::make_signed_t<std::ptrdiff_t>,
@@ -508,7 +509,7 @@ namespace cpu_test {
 				f32 sum = 0.0f;
 				for (size_t k = 0; k < 16; ++k) {
 					sum += static_cast<f32>(a.get(m, k)) * static_cast<f32>(b.get(k, n));
-					if (m == 0 && n == 1 && debug) {
+					if (m == 0 && n == 0 && debug) {
 						std::cout << "a[" << m << "," << k << "] = " << f32(a.get(m, k)) << "\n";
 						std::cout << "b[" << k << "," << n << "] = " << f32(b.get(k, n)) << "\n";
 						std::cout << "partial sum = " << (c.get(m, n) + sum) << "\n";
@@ -521,30 +522,38 @@ namespace cpu_test {
 
 	struct BlockShared {
 		std::vector<f16> q_sram;
-		std::vector<f16> kv_sram;
+		std::vector<std::vector<f16>> kv_sram;
 		std::barrier<> barrier;
 		std::mutex *log_mutex;
 
 		BlockShared(
 			size_t q_sram_count,
 			size_t kv_sram_count,
-			size_t thread_count,
+			size_t kv_preload,
+			size_t warp_count,
 			std::mutex *log_mutex
 		)
 			: q_sram(q_sram_count)
-			, kv_sram(kv_sram_count)
-			, barrier(thread_count)
+			, kv_sram()
+			, barrier(warp_count)
 			, log_mutex(log_mutex)
 		{
+			kv_sram.reserve(kv_preload);
+			for (size_t i = 0; i < kv_preload; ++i) {
+				kv_sram.emplace_back(kv_sram_count);
+			}
 			std::cerr << "Allocated BlockShared with "
-					  << q_sram_count * sizeof(f16) / 1024 << " KB Q SRAM, "
-					  << kv_sram_count * sizeof(f16) / 1024 << " KB KV SRAM, "
-					  << thread_count << " threads.\n";
-			std::cerr << "barrier max count = " << barrier.max() << "\n";
+					  << (q_sram_count + kv_sram_count * kv_preload) * sizeof(f16) / 1024
+					  << " KB SRAM, for " << warp_count << " warps ("
+					  << (warp_count * 32) << " threads)." << std::endl;
 		}
 
 		void syncthreads() {
 			barrier.arrive_and_wait();
+		}
+
+		void copy_fence() {
+			// no-op on CPU
 		}
 
 		std::lock_guard<std::mutex> lock_log() {
@@ -568,7 +577,7 @@ namespace cpu_test {
 		return warp_idx.x == 0;
 	}
 
-	Matrix<SPtr<f16>, Q_PER_WARP, QK_DIM> load_q_to_sram(
+	Matrix<SPtr<f16>, Q_PER_WARP, QK_DIM> copy_q_to_sram_async(
 		Matrix<GPtr<f16>, -1, QK_DIM> const &gQ
 	) {
 		// Part of Q for this block
@@ -576,37 +585,46 @@ namespace cpu_test {
 		// Part of Q for this warp
 		Matrix<GPtr<f16>, Q_PER_WARP, QK_DIM> gQ_warp_tile = gQ_tile.tile_m<Q_PER_WARP>(warp_idx.x);
 		// SRAM storage for Q tile for this warp
-		Matrix<SPtr<f16>, Q_PER_WARP, QK_DIM> sQ_warp_tile{{shared->q_sram}, QK_DIM};
+		Matrix<SPtr<f16>, Q_PER_BLOCK, QK_DIM> sQ{{shared->q_sram}, QK_DIM};
+		// View of SRAM for this warp
+		Matrix<SPtr<f16>, Q_PER_WARP, QK_DIM> sQ_warp_tile = sQ.tile_m<Q_PER_WARP>(warp_idx.x);
 
 		for (ICount m = 0; m < Q_PER_WARP; ++m) {
 			for (ICount n = 0; n < QK_DIM; ++n) {
 				sQ_warp_tile.set(m, n, gQ_warp_tile.get(m, n));
-				if (block_idx.x == 0 && warp_idx.x == 0) {
-					auto lock = shared->lock_log();
-					std::cout << "Loaded Q[" << m << "," << n << "] = " << f32(sQ_warp_tile.get(m, n)) << "\n";
-				}
 			}
 		}
 
 		return sQ_warp_tile;
 	}
 
-	Matrix<SPtr<f16>, KV_PER_STEP, QK_DIM> load_kv_to_sram(
+	void copy_kv_to_sram_async(
 		Matrix<GPtr<f16>, -1, QK_DIM> gKV,
 		size_t kv_step
 	) {
-		// View of KV tile for this step
-		Matrix<GPtr<f16>, KV_PER_STEP, QK_DIM> gKV_tile = gKV.tile_m<KV_PER_STEP>(kv_step);
-		// SRAM storage for KV tile for this step
-		Matrix<SPtr<f16>, KV_PER_STEP, QK_DIM> sKV_tile{{shared->kv_sram}, QK_DIM};
-		// On GPU, warps will need to cooperate to collectively load the KV tile into SRAM
-		if (is_first_warp()) {
-			for (ICount m = 0; m < KV_PER_STEP; ++m) {
-				for (ICount n = 0; n < QK_DIM; ++n) {
-					sKV_tile.set(m, n, gKV_tile.get(m, n));
+		if (kv_step * KV_PER_STEP < gKV.m_rows()) {
+			size_t p = kv_step % KV_PRELOAD;
+			// SRAM storage for KV tile for this step
+			Matrix<SPtr<f16>, KV_PER_STEP, QK_DIM> sKV_tile{{shared->kv_sram[p]}, QK_DIM};
+			// View of KV tile for this step
+			Matrix<GPtr<f16>, KV_PER_STEP, QK_DIM> gKV_tile = gKV.tile_m<KV_PER_STEP>(kv_step);
+			// On GPU, warps will need to cooperate to collectively load the KV tile into SRAM
+			if (is_first_warp()) {
+				for (ICount m = 0; m < KV_PER_STEP; ++m) {
+					for (ICount n = 0; n < QK_DIM; ++n) {
+						sKV_tile.set(m, n, gKV_tile.get(m, n));
+					}
 				}
 			}
 		}
+	}
+
+	Matrix<SPtr<f16>, KV_PER_STEP, QK_DIM> get_kv_in_sram(
+		size_t kv_step
+	) {
+		size_t p = kv_step % KV_PRELOAD;
+		// SRAM storage for KV tile for this step
+		Matrix<SPtr<f16>, KV_PER_STEP, QK_DIM> sKV_tile{{shared->kv_sram[p]}, QK_DIM};
 		return sKV_tile;
 	}
 
@@ -617,7 +635,7 @@ namespace cpu_test {
 		Matrix<GPtr<f16>, -1, V_DIM> const &gOut
 	) {
 		// Q tile for this warp
-		auto sQ_tile = load_q_to_sram(gQ);
+		auto sQ_tile = copy_q_to_sram_async(gQ);
 
 		// Registers
 		std::array<f32, Q_PER_WARP> max_score;
@@ -638,19 +656,26 @@ namespace cpu_test {
 			rO_tile.zero_();
 		}
 
+		// TODO - wait for Q to be ready in SRAM ??
 		std::array<
 			RMatrix<f16, FEATURE_TILE, Q_PER_WARP, ColumnMajor>,
 			2
 		> rQ;
 		rQ[0].read_from_sram(sQ_tile.tile_n<FEATURE_TILE>(0).transpose());
 
+		for (size_t p = 0; p < KV_PRELOAD - 1; ++p) {
+			copy_kv_to_sram_async(gKV, p);
+		}
+
 		// Iterate over KV
 		size_t kv_len = gKV.m_rows();
 		for (size_t kv_step = 0; kv_step < kv_len / KV_PER_STEP; ++kv_step) {
 			shared->syncthreads();
 
+			// Preload next KV tile
+			copy_kv_to_sram_async(gKV, kv_step + KV_PRELOAD - 1);
 			// KV tile for this step
-			auto sKV_tile = load_kv_to_sram(gKV, kv_step);
+			auto sKV_tile = get_kv_in_sram(kv_step);
 
 			shared->syncthreads();
 
@@ -659,12 +684,9 @@ namespace cpu_test {
 			RMatrix<f32, KV_PER_STEP, Q_PER_WARP, ColumnMajor> rScores_f32;
 			rScores_f32.zero_();
 			X17_UNROLL for (size_t f_step = 0; f_step < QK_DIM / FEATURE_TILE; ++f_step) {
-				rQ[f_step % 2].read_from_sram(
-					sQ_tile.tile_n<FEATURE_TILE>(f_step).transpose()
-				);
-				/*rQ[(f_step + 1) % 2].read_from_sram(
+				rQ[(f_step + 1) % 2].read_from_sram(
 					sQ_tile.tile_n<FEATURE_TILE>((f_step + 1) % (QK_DIM / FEATURE_TILE)).transpose()
-				);*/
+				);
 				tiny_gemm(
 					sKV_tile.tile_n<FEATURE_TILE>(f_step),
 					rQ[f_step % 2],
@@ -747,6 +769,7 @@ namespace cpu_test {
 		Dim3X grid_dim,
 		size_t q_sram_count,
 		size_t kv_sram_count,
+		size_t kv_preload,
 		Matrix<GPtr<f16>, -1, QK_DIM> gQ,
 		Matrix<GPtr<f16>, -1, QK_DIM> gKV,
 		Matrix<GPtr<f16>, -1, V_DIM> gO
@@ -759,6 +782,7 @@ namespace cpu_test {
 				std::make_unique<BlockShared>(
 					q_sram_count,
 					kv_sram_count,
+					kv_preload,
 					block_warps_dim.x,
 					&log_mutex
 				)
@@ -780,7 +804,7 @@ namespace cpu_test {
 			}
 		}
 
-		std::cerr << "Launched " << threads.size() << " CPU threads for attention kernel simulation." << std::endl;
+		std::cerr << "Launched " << threads.size() << " CPU warps for attention kernel simulation." << std::endl;
 
 		for (auto& t : threads) {
 			t.join();
@@ -805,11 +829,6 @@ namespace cpu_test {
 			Q_LEN,
 			QK_DIM
 		};
-		for (size_t j = 0; j < 4; ++j) {
-			for (size_t i = 0; i < QK_DIM; ++i) {
-				std::cout << "q[" << j << "," << i << "] = " << f32(q.get(j, i)) << "\n";
-			}
-		}
 
 		// allocate kv: f16 [KV_LEN, QK_DIM]
 		std::vector<f16> kv_data(KV_LEN * QK_DIM);
@@ -825,12 +844,6 @@ namespace cpu_test {
 			KV_LEN,
 			QK_DIM
 		};
-		/*std::cout << "first kv value = " << f32(kv.get(0, 0)) << "\n";
-		for (size_t j = 0; j < 4; ++j) {
-			for (size_t i = 0; i < QK_DIM; ++i) {
-				std::cout << "kv[" << j << "," << i << "] = " << f32(kv.get(j, i)) << "\n";
-			}
-		}*/
 
 		// allocate output: f16 [Q_LEN, V_DIM]
 		std::vector<f16> out_data(Q_LEN * V_DIM);
@@ -847,6 +860,7 @@ namespace cpu_test {
 			gridDim,
 			/*q_sram_count=*/ Q_PER_BLOCK * QK_DIM,
 			/*kv_sram_count=*/ KV_PER_STEP * QK_DIM,
+			/*kv_preload=*/ KV_PRELOAD,
 			q, kv, out
 		);
 
