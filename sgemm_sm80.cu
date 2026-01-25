@@ -675,25 +675,19 @@ namespace cpu_test {
 			shared->cp_async_commit();
 		}
 
+		shared->cp_async_wait_group(KV_PRELOAD - 2);
+		rQ[0].read_from_sram(sQ_tile.tile_n<FEATURE_TILE>(0).transpose());
+		shared->syncthreads();
+
 		// Iterate over KV
 		size_t kv_len = gKV.m_rows();
 		for (size_t kv_step = 0; kv_step < kv_len / KV_PER_STEP; ++kv_step) {
-			shared->syncthreads();
-
 			// Preload next KV tile
 			copy_kv_to_sram_async(gKV, kv_step + KV_PRELOAD - 1);
 			shared->cp_async_commit();
 
-			shared->cp_async_wait_group(KV_PRELOAD - 1);
-
-			if (kv_step == 0) {
-				rQ[0].read_from_sram(sQ_tile.tile_n<FEATURE_TILE>(0).transpose());
-			}
-
 			// KV tile for this step
 			auto sKV_tile = get_kv_in_sram(kv_step);
-
-			shared->syncthreads();
 
 			// Tile both `K` and `Q` along the feature dimension and accumulate gemm.
 			// This will result in `rScores = K * Q^T`
@@ -750,6 +744,13 @@ namespace cpu_test {
 			// compute `rO += KV_tile * rScores`
 			size_t v_tile = 0;
 			X17_UNROLL for (auto &rO_tile: rO) {
+				if (v_tile < rO.size() - 1) {
+					// TODO - preload kv.T to regs
+				} else {
+					shared->cp_async_wait_group(KV_PRELOAD - 2);
+					shared->syncthreads();
+					// TODO - preload kv to regs
+				}
 				tiny_gemm(
 					sKV_tile.tile_n<FEATURE_TILE>(v_tile).transpose(),
 					rScores,
