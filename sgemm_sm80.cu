@@ -552,7 +552,15 @@ namespace cpu_test {
 			barrier.arrive_and_wait();
 		}
 
-		void copy_fence() {
+		void cp_async_wait_all() {
+			// no-op on CPU
+		}
+
+		void cp_async_wait_group(size_t count) {
+			// no-op on CPU
+		}
+
+		void cp_async_commit() {
 			// no-op on CPU
 		}
 
@@ -589,6 +597,10 @@ namespace cpu_test {
 		// View of SRAM for this warp
 		Matrix<SPtr<f16>, Q_PER_WARP, QK_DIM> sQ_warp_tile = sQ.tile_m<Q_PER_WARP>(warp_idx.x);
 
+		// **Important**: We call cp.async to copy Qs from GMEM into SMEM.
+		// It is important that each warp copies its own Qs - the ones it will use later.
+		// This way when we later use `cp.async.wait_group`/`cp.async.wait_all`, all threads
+		// in a warp wait in a lockstep and so we know the inputs are ready without __syncthreads().
 		for (ICount m = 0; m < Q_PER_WARP; ++m) {
 			for (ICount n = 0; n < QK_DIM; ++n) {
 				sQ_warp_tile.set(m, n, gQ_warp_tile.get(m, n));
@@ -656,15 +668,11 @@ namespace cpu_test {
 			rO_tile.zero_();
 		}
 
-		// TODO - wait for Q to be ready in SRAM ??
-		std::array<
-			RMatrix<f16, FEATURE_TILE, Q_PER_WARP, ColumnMajor>,
-			2
-		> rQ;
-		rQ[0].read_from_sram(sQ_tile.tile_n<FEATURE_TILE>(0).transpose());
+		std::array<RMatrix<f16, FEATURE_TILE, Q_PER_WARP, ColumnMajor>, 2> rQ;
 
 		for (size_t p = 0; p < KV_PRELOAD - 1; ++p) {
 			copy_kv_to_sram_async(gKV, p);
+			shared->cp_async_commit();
 		}
 
 		// Iterate over KV
@@ -674,6 +682,14 @@ namespace cpu_test {
 
 			// Preload next KV tile
 			copy_kv_to_sram_async(gKV, kv_step + KV_PRELOAD - 1);
+			shared->cp_async_commit();
+
+			shared->cp_async_wait_group(KV_PRELOAD - 1);
+
+			if (kv_step == 0) {
+				rQ[0].read_from_sram(sQ_tile.tile_n<FEATURE_TILE>(0).transpose());
+			}
+
 			// KV tile for this step
 			auto sKV_tile = get_kv_in_sram(kv_step);
 
