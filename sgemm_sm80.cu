@@ -463,20 +463,15 @@ struct RMatrix {
 			}
 		}
 	}
-};
 
-template<typename T, const ICount M, const ICount N, const StrideType S>
-void copy_gmem_to_smem(Matrix<GPtr<T>, M, N, S> const &src, Matrix<SPtr<T>, M, N, S> &dst) {
-	size_t m_rows = dst.m_rows();
-	size_t n_cols = dst.n_cols();
-	assert(m_rows == src.m_rows());
-	assert(n_cols == src.n_cols());
-	for (ICount m = 0; m < m_rows; ++m) {
-		for (ICount n = 0; n < n_cols; ++n) {
-			dst.set(m, n, src.get(m, n));
+	void read_from_sram(Matrix<SPtr<T>, M, N, S> const &src) {
+		for (ICount m = 0; m < M; ++m) {
+			for (ICount n = 0; n < N; ++n) {
+				set(m, n, src.get(m, n));
+			}
 		}
 	}
-}
+};
 
 template<typename T, typename U, const ICount M, const ICount N, const StrideType S>
 void downcast(RMatrix<T, M, N, S> const &src, RMatrix<U, M, N, S> &dst) {
@@ -501,30 +496,9 @@ void downcast_store(
 
 // implement things  manually on the CPU just for testing
 namespace cpu_test {
+	template<const StrideType S>
 	void tiny_gemm(
-		Matrix<SPtr<f16>, 16, 16> const &a,
-		Matrix<SPtr<f16>, 16, 8, ColumnMajor> const &b,
-		RMatrix<f32, 16, 8, ColumnMajor> &c,
-		bool debug = false
-	) {
-		for (size_t m = 0; m < 16; ++m) {
-			for (size_t n = 0; n < 8; ++n) {
-				f32 sum = 0.0f;
-				for (size_t k = 0; k < 16; ++k) {
-					sum += static_cast<f32>(a.get(m, k)) * static_cast<f32>(b.get(k, n));
-					if (m == 0 && n == 1 && debug) {
-						std::cout << "a[" << m << "," << k << "] = " << f32(a.get(m, k)) << "\n";
-						std::cout << "b[" << k << "," << n << "] = " << f32(b.get(k, n)) << "\n";
-						std::cout << "partial sum = " << (c.get(m, n) + sum) << "\n";
-					}
-				}
-				c.set(m, n, c.get(m, n) + sum);
-			}
-		}
-	}
-
-	void tiny_gemm(
-		Matrix<SPtr<f16>, 16, 16, ColumnMajor> const &a,
+		Matrix<SPtr<f16>, 16, 16, S> const &a,
 		RMatrix<f16, 16, 8, ColumnMajor> const &b,
 		RMatrix<f32, 16, 8, ColumnMajor> &c,
 		bool debug = false
@@ -594,18 +568,27 @@ namespace cpu_test {
 		return warp_idx.x == 0;
 	}
 
-	Matrix<SPtr<f16>, Q_PER_BLOCK, QK_DIM> load_q_to_sram(
-		Matrix<GPtr<f16>, -1, QK_DIM> gQ
+	Matrix<SPtr<f16>, Q_PER_WARP, QK_DIM> load_q_to_sram(
+		Matrix<GPtr<f16>, -1, QK_DIM> const &gQ
 	) {
 		// Part of Q for this block
 		Matrix<GPtr<f16>, Q_PER_BLOCK, QK_DIM> gQ_tile = gQ.tile_m<Q_PER_BLOCK>(block_idx.x);
-		// SRAM storage for Q tile for this block
-		Matrix<SPtr<f16>, Q_PER_BLOCK, QK_DIM> sQ_tile{{shared->q_sram}, QK_DIM};
-		// Cooperate with other warps to load the Q tile into SRAM
-		if (is_first_warp()) {
-			copy_gmem_to_smem(gQ_tile, sQ_tile);
+		// Part of Q for this warp
+		Matrix<GPtr<f16>, Q_PER_WARP, QK_DIM> gQ_warp_tile = gQ_tile.tile_m<Q_PER_WARP>(warp_idx.x);
+		// SRAM storage for Q tile for this warp
+		Matrix<SPtr<f16>, Q_PER_WARP, QK_DIM> sQ_warp_tile{{shared->q_sram}, QK_DIM};
+
+		for (ICount m = 0; m < Q_PER_WARP; ++m) {
+			for (ICount n = 0; n < QK_DIM; ++n) {
+				sQ_warp_tile.set(m, n, gQ_warp_tile.get(m, n));
+				if (block_idx.x == 0 && warp_idx.x == 0) {
+					auto lock = shared->lock_log();
+					std::cout << "Loaded Q[" << m << "," << n << "] = " << f32(sQ_warp_tile.get(m, n)) << "\n";
+				}
+			}
 		}
-		return sQ_tile;
+
+		return sQ_warp_tile;
 	}
 
 	Matrix<SPtr<f16>, KV_PER_STEP, QK_DIM> load_kv_to_sram(
@@ -616,29 +599,25 @@ namespace cpu_test {
 		Matrix<GPtr<f16>, KV_PER_STEP, QK_DIM> gKV_tile = gKV.tile_m<KV_PER_STEP>(kv_step);
 		// SRAM storage for KV tile for this step
 		Matrix<SPtr<f16>, KV_PER_STEP, QK_DIM> sKV_tile{{shared->kv_sram}, QK_DIM};
-		// Cooperate with other warps to load the KV tile into SRAM
+		// On GPU, warps will need to cooperate to collectively load the KV tile into SRAM
 		if (is_first_warp()) {
-			copy_gmem_to_smem(gKV_tile, sKV_tile);
+			for (ICount m = 0; m < KV_PER_STEP; ++m) {
+				for (ICount n = 0; n < QK_DIM; ++n) {
+					sKV_tile.set(m, n, gKV_tile.get(m, n));
+				}
+			}
 		}
 		return sKV_tile;
 	}
 
-
 	// this function corresponds to one warp on GPU
 	void attn_kernel(
-		size_t _block_idx_x,
-		size_t _warp_idx_x,
-		BlockShared *_shared,
-		Matrix<GPtr<f16>, -1, QK_DIM> gQ,
-		Matrix<GPtr<f16>, -1, QK_DIM> gKV,
-		Matrix<GPtr<f16>, -1, V_DIM> gOut
+		Matrix<GPtr<f16>, -1, QK_DIM> const &gQ,
+		Matrix<GPtr<f16>, -1, QK_DIM> const &gKV,
+		Matrix<GPtr<f16>, -1, V_DIM> const &gOut
 	) {
-		block_idx.x = _block_idx_x;
-		warp_idx.x = _warp_idx_x;
-		shared = _shared;
-
 		// Q tile for this warp
-		auto sQ_warp_tile = load_q_to_sram(gQ).tile_m<Q_PER_WARP>(warp_idx.x);
+		auto sQ_tile = load_q_to_sram(gQ);
 
 		// Registers
 		std::array<f32, Q_PER_WARP> max_score;
@@ -654,10 +633,16 @@ namespace cpu_test {
 		std::array<
 			RMatrix<f32, FEATURE_TILE, Q_PER_WARP, ColumnMajor>,
 			V_DIM / FEATURE_TILE
-		> rOutput;
-		X17_UNROLL for (auto &rOut_tile: rOutput) {
-			rOut_tile.zero_();
+		> rO;
+		X17_UNROLL for (auto &rO_tile: rO) {
+			rO_tile.zero_();
 		}
+
+		std::array<
+			RMatrix<f16, FEATURE_TILE, Q_PER_WARP, ColumnMajor>,
+			2
+		> rQ;
+		rQ[0].read_from_sram(sQ_tile.tile_n<FEATURE_TILE>(0).transpose());
 
 		// Iterate over KV
 		size_t kv_len = gKV.m_rows();
@@ -674,9 +659,15 @@ namespace cpu_test {
 			RMatrix<f32, KV_PER_STEP, Q_PER_WARP, ColumnMajor> rScores_f32;
 			rScores_f32.zero_();
 			X17_UNROLL for (size_t f_step = 0; f_step < QK_DIM / FEATURE_TILE; ++f_step) {
+				rQ[f_step % 2].read_from_sram(
+					sQ_tile.tile_n<FEATURE_TILE>(f_step).transpose()
+				);
+				/*rQ[(f_step + 1) % 2].read_from_sram(
+					sQ_tile.tile_n<FEATURE_TILE>((f_step + 1) % (QK_DIM / FEATURE_TILE)).transpose()
+				);*/
 				tiny_gemm(
 					sKV_tile.tile_n<FEATURE_TILE>(f_step),
-					sQ_warp_tile.tile_n<FEATURE_TILE>(f_step).transpose(),
+					rQ[f_step % 2],
 					rScores_f32
 				);
 			}
@@ -688,8 +679,7 @@ namespace cpu_test {
 				f32 old_max = max_score[i];
 				f32 new_max = old_max;
 				for (size_t j = 0; j < KV_PER_STEP; ++j) {
-					float score = rScores.get(j, i);
-					new_max = std::max(new_max, score);
+					new_max = std::max(new_max, f32(rScores.get(j, i)));
 				}
 				max_score[i] = new_max;
 
@@ -705,38 +695,38 @@ namespace cpu_test {
 					rScores.set(j, i, score);
 					sum_exp += f32(score);
 				}
-				float sum_exp_old = score_sum[i];
+				f32 sum_exp_old = score_sum[i];
 				score_sum[i] *= rRescale[i];
 				score_sum[i] += sum_exp;
 			}
 
 			// rescale output accumulators
-			X17_UNROLL for (auto &rOut_tile: rOutput) {
+			X17_UNROLL for (auto &rO_tile: rO) {
 				for (size_t j = 0; j < Q_PER_WARP; ++j) {
 					for (size_t i = 0; i < FEATURE_TILE; ++i) {
-						rOut_tile.set(i, j, rOut_tile.get(i, j) * rRescale[j]);
+						rO_tile.set(i, j, rO_tile.get(i, j) * rRescale[j]);
 					}
 				}
 			}
 
-			// compute `rOutput += KV_tile * rScores`
+			// compute `rO += KV_tile * rScores`
 			size_t v_tile = 0;
-			X17_UNROLL for (auto &rOut_tile: rOutput) {
+			X17_UNROLL for (auto &rO_tile: rO) {
 				tiny_gemm(
 					sKV_tile.tile_n<FEATURE_TILE>(v_tile).transpose(),
 					rScores,
-					rOut_tile
+					rO_tile
 				);
 				++v_tile;
 			}
 		}
 
 		// finalize output by normalizing with sum_exp
-		X17_UNROLL for (auto &rOut_tile: rOutput) {
+		X17_UNROLL for (auto &rO_tile: rO) {
 			for (size_t j = 0; j < Q_PER_WARP; ++j) {
 				f32 inv_sum_exp = 1.0f / score_sum[j];
 				for (size_t i = 0; i < FEATURE_TILE; ++i) {
-					rOut_tile.set(i, j, rOut_tile.get(i, j) * inv_sum_exp);
+					rO_tile.set(i, j, rO_tile.get(i, j) * inv_sum_exp);
 				}
 			}
 		}
@@ -747,8 +737,8 @@ namespace cpu_test {
 		Matrix<GPtr<f16>, Q_PER_WARP, V_DIM> gOut_warp_tile = gOut_tile.tile_m<Q_PER_WARP>(warp_idx.x);
 		// Write output
 		size_t v_tile = 0;
-		X17_UNROLL for (auto &rOut_tile: rOutput) {
-			downcast_store(rOut_tile, gOut_warp_tile.tile_n<FEATURE_TILE>(v_tile));
+		X17_UNROLL for (auto &rO_tile: rO) {
+			downcast_store(rO_tile, gOut_warp_tile.tile_n<FEATURE_TILE>(v_tile));
 			++v_tile;
 		}
 	}
@@ -757,9 +747,9 @@ namespace cpu_test {
 		Dim3X grid_dim,
 		size_t q_sram_count,
 		size_t kv_sram_count,
-		Matrix<GPtr<f16>, -1, QK_DIM> Q,
-		Matrix<GPtr<f16>, -1, QK_DIM> KV,
-		Matrix<GPtr<f16>, -1, V_DIM> gOut
+		Matrix<GPtr<f16>, -1, QK_DIM> gQ,
+		Matrix<GPtr<f16>, -1, QK_DIM> gKV,
+		Matrix<GPtr<f16>, -1, V_DIM> gO
 	) {
 		std::mutex log_mutex;
 
@@ -777,13 +767,15 @@ namespace cpu_test {
 
 		std::vector<std::thread> threads;
 		for (size_t bX = 0; bX < grid_dim.x; ++bX) {
-			BlockShared *shared = all_shared[bX].get();
+			BlockShared *block_shared = all_shared[bX].get();
 			for (uint wX = 0; wX < block_warps_dim.x; ++wX) {
 				threads.emplace_back(
-					attn_kernel,
-					bX, wX,
-					shared,
-					Q, KV, gOut
+					[block_shared, bX, wX, gQ, gKV, gO] () {
+						block_idx.x = bX;
+						warp_idx.x = wX;
+						shared = block_shared;
+						attn_kernel(gQ, gKV, gO);
+					}
 				);
 			}
 		}
