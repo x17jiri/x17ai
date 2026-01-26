@@ -465,7 +465,8 @@ struct RMatrix {
 		}
 	}
 
-	void read_from_sram(Matrix<SPtr<T>, M, N, S> const &src) {
+	template<const StrideType S2>
+	void read_from_sram(Matrix<SPtr<T>, M, N, S2> const &src) {
 		for (ICount m = 0; m < M; ++m) {
 			for (ICount n = 0; n < N; ++n) {
 				set(m, n, src.get(m, n));
@@ -497,9 +498,8 @@ void downcast_store(
 
 // implement things  manually on the CPU just for testing
 namespace cpu_test {
-	template<const StrideType S>
 	void tiny_gemm(
-		Matrix<SPtr<f16>, 16, 16, S> const &a,
+		RMatrix<f16, 16, 16> const &a,
 		RMatrix<f16, 16, 8, ColumnMajor> const &b,
 		RMatrix<f32, 16, 8, ColumnMajor> &c,
 		bool debug = false
@@ -570,6 +570,7 @@ namespace cpu_test {
 	};
 
 	#define X17_UNROLL
+	#define X17_NO_UNROLL
 
 	struct Dim3X {
 		size_t x;
@@ -669,8 +670,9 @@ namespace cpu_test {
 		}
 
 		std::array<RMatrix<f16, FEATURE_TILE, Q_PER_WARP, ColumnMajor>, 2> rQ;
+		std::array<RMatrix<f16, KV_PER_STEP, FEATURE_TILE, RowMajor>, 2> rKV;
 
-		for (size_t p = 0; p < KV_PRELOAD - 1; ++p) {
+		X17_UNROLL for (size_t p = 0; p < KV_PRELOAD - 1; ++p) {
 			copy_kv_to_sram_async(gKV, p);
 			shared->cp_async_commit();
 		}
@@ -678,31 +680,47 @@ namespace cpu_test {
 		shared->cp_async_wait_group(KV_PRELOAD - 2);
 		rQ[0].read_from_sram(sQ_tile.tile_n<FEATURE_TILE>(0).transpose());
 		shared->syncthreads();
+		auto sKV_tile = get_kv_in_sram(0);
+		rKV[0].read_from_sram(get_kv_in_sram(0).tile_n<FEATURE_TILE>(0));
 
 		// Iterate over KV
 		size_t kv_len = gKV.m_rows();
-		for (size_t kv_step = 0; kv_step < kv_len / KV_PER_STEP; ++kv_step) {
+		X17_NO_UNROLL for (size_t kv_step = 0; kv_step < kv_len / KV_PER_STEP; ++kv_step) {
 			// Preload next KV tile
 			copy_kv_to_sram_async(gKV, kv_step + KV_PRELOAD - 1);
 			shared->cp_async_commit();
-
-			// KV tile for this step
-			auto sKV_tile = get_kv_in_sram(kv_step);
 
 			// Tile both `K` and `Q` along the feature dimension and accumulate gemm.
 			// This will result in `rScores = K * Q^T`
 			RMatrix<f32, KV_PER_STEP, Q_PER_WARP, ColumnMajor> rScores_f32;
 			rScores_f32.zero_();
 			X17_UNROLL for (size_t f_step = 0; f_step < QK_DIM / FEATURE_TILE; ++f_step) {
-				rQ[(f_step + 1) % 2].read_from_sram(
-					sQ_tile.tile_n<FEATURE_TILE>((f_step + 1) % (QK_DIM / FEATURE_TILE)).transpose()
-				);
+				bool last_step = (f_step == (QK_DIM / FEATURE_TILE) - 1);
+				if (!last_step) {
+					rQ[(f_step + 1) % 2].read_from_sram(
+						sQ_tile.tile_n<FEATURE_TILE>(f_step + 1).transpose()
+					);
+					rKV[(f_step + 1) % 2].read_from_sram(
+						sKV_tile.tile_n<FEATURE_TILE>(f_step + 1)
+					);
+				} else {
+					assert((f_step + 1) % 2 == 0);
+					rQ[0].read_from_sram(
+						sQ_tile.tile_n<FEATURE_TILE>(0).transpose()
+					);
+					rKV[0].read_from_sram(
+						sKV_tile.tile_n<FEATURE_TILE>(0).transpose()
+					);
+				}
 				tiny_gemm(
-					sKV_tile.tile_n<FEATURE_TILE>(f_step),
+					rKV[f_step % 2],
 					rQ[f_step % 2],
 					rScores_f32
 				);
 			}
+			// Immediately downcast scores to f16. We need them as f16 for the next gemm
+			// and we want to make sure we calculate the softmax stats from the values
+			// we actually use in the next gemm.
 			downcast(rScores_f32, rScores);
 
 			// Update max and sum_exp
@@ -744,15 +762,22 @@ namespace cpu_test {
 			// compute `rO += KV_tile * rScores`
 			size_t v_tile = 0;
 			X17_UNROLL for (auto &rO_tile: rO) {
-				if (v_tile < rO.size() - 1) {
-					// TODO - preload kv.T to regs
+				bool last_step = (v_tile == rO.size() - 1);
+				if (!last_step) {
+					rKV[(v_tile + 1) % 2].read_from_sram(
+						sKV_tile.tile_n<FEATURE_TILE>(v_tile + 1).transpose()
+					);
 				} else {
 					shared->cp_async_wait_group(KV_PRELOAD - 2);
 					shared->syncthreads();
-					// TODO - preload kv to regs
+					assert((v_tile + 1) % 2 == 0);
+					sKV_tile = get_kv_in_sram(kv_step + 1);
+					rKV[0].read_from_sram(
+						sKV_tile.tile_n<FEATURE_TILE>(0)
+					);
 				}
 				tiny_gemm(
-					sKV_tile.tile_n<FEATURE_TILE>(v_tile).transpose(),
+					rKV[v_tile % 2],
 					rScores,
 					rO_tile
 				);
