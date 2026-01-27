@@ -64,7 +64,7 @@ constexpr size_t V_DIM = 128;
 
 constexpr size_t Q_PER_BLOCK = 128;
 constexpr size_t Q_PER_WARP = 8;
-constexpr size_t KV_PER_STEP = 16;
+constexpr size_t KV_PER_STEP = 32;
 constexpr size_t FEATURE_TILE = 16;
 constexpr size_t KV_PRELOAD = 8;
 
@@ -577,28 +577,29 @@ namespace cpu_test {
 		return warp_idx.x == 0;
 	}
 
-	Matrix<SPtr<f16>, Q_PER_WARP, QK_DIM> copy_q_to_sram_async(
+	void copy_q_to_sram_async(
 		Matrix<GPtr<f16>, -1, QK_DIM> const &gQ
 	) {
 		// Part of Q for this block
 		Matrix<GPtr<f16>, Q_PER_BLOCK, QK_DIM> gQ_tile = gQ.tile_m<Q_PER_BLOCK>(block_idx.x);
-		// Part of Q for this warp
-		Matrix<GPtr<f16>, Q_PER_WARP, QK_DIM> gQ_warp_tile = gQ_tile.tile_m<Q_PER_WARP>(warp_idx.x);
+		// SRAM storage for Q tile for this warp
+		Matrix<SPtr<f16>, Q_PER_BLOCK, QK_DIM> sQ{{shared->q_sram}, QK_DIM};
+
+		// On GPU, warps will need to cooperate to collectively load the KV tile into SRAM
+		if (is_first_warp()) {
+			for (ICount m = 0; m < Q_PER_BLOCK; ++m) {
+				for (ICount n = 0; n < QK_DIM; ++n) {
+					sQ.set(m, n, gQ_tile.get(m, n));
+				}
+			}
+		}
+	}
+
+	Matrix<SPtr<f16>, Q_PER_WARP, QK_DIM> get_q_in_sram() {
 		// SRAM storage for Q tile for this warp
 		Matrix<SPtr<f16>, Q_PER_BLOCK, QK_DIM> sQ{{shared->q_sram}, QK_DIM};
 		// View of SRAM for this warp
 		Matrix<SPtr<f16>, Q_PER_WARP, QK_DIM> sQ_warp_tile = sQ.tile_m<Q_PER_WARP>(warp_idx.x);
-
-		// **Important**: We call cp.async to copy Qs from GMEM into SMEM.
-		// It is important that each warp copies its own Qs - the ones it will use later.
-		// This way when we later use `cp.async.wait_group`/`cp.async.wait_all`, all threads
-		// in a warp wait in a lockstep and so we know the inputs are ready without __syncthreads().
-		for (ICount m = 0; m < Q_PER_WARP; ++m) {
-			for (ICount n = 0; n < QK_DIM; ++n) {
-				sQ_warp_tile.set(m, n, gQ_warp_tile.get(m, n));
-			}
-		}
-
 		return sQ_warp_tile;
 	}
 
@@ -639,7 +640,8 @@ namespace cpu_test {
 		Matrix<GPtr<f16>, -1, V_DIM> const &gOut
 	) {
 		// Q tile for this warp
-		auto sQ_tile = copy_q_to_sram_async(gQ);
+		copy_q_to_sram_async(gQ);
+		auto sQ_tile = get_q_in_sram();
 
 		// Registers
 		std::array<f32, Q_PER_WARP> max_score;
@@ -661,7 +663,11 @@ namespace cpu_test {
 		}
 
 		std::array<RMatrix<f16, FEATURE_TILE, Q_PER_WARP, ColumnMajor>, 2> rQ;
-		std::array<RMatrix<f16, KV_PER_STEP, FEATURE_TILE, RowMajor>, 2> rKV;
+		union RKVUnion {
+			RMatrix<f16, KV_PER_STEP, FEATURE_TILE, RowMajor> gemm1;
+			RMatrix<f16, FEATURE_TILE, KV_PER_STEP, RowMajor> gemm2;
+		};
+		std::array<RKVUnion, 2> rKV;
 
 		X17_UNROLL for (size_t p = 0; p < KV_PRELOAD - 1; ++p) {
 			copy_kv_to_sram_async(gKV, p);
@@ -669,10 +675,11 @@ namespace cpu_test {
 		}
 
 		shared->cp_async_wait_group(KV_PRELOAD - 2);
-		rQ[0].read_from_sram(sQ_tile.tile_n<FEATURE_TILE>(0).transpose());
 		shared->syncthreads();
+
+		rQ[0].read_from_sram(sQ_tile.tile_n<FEATURE_TILE>(0).transpose());
 		auto sKV_tile = get_kv_in_sram(0);
-		rKV[0].read_from_sram(get_kv_in_sram(0).tile_n<FEATURE_TILE>(0));
+		rKV[0].gemm1.read_from_sram(sKV_tile.tile_n<FEATURE_TILE>(0));
 
 		// Iterate over KV
 		size_t kv_len = gKV.m_rows();
@@ -691,7 +698,7 @@ namespace cpu_test {
 					rQ[(f_step + 1) % 2].read_from_sram(
 						sQ_tile.tile_n<FEATURE_TILE>(f_step + 1).transpose()
 					);
-					rKV[(f_step + 1) % 2].read_from_sram(
+					rKV[(f_step + 1) % 2].gemm1.read_from_sram(
 						sKV_tile.tile_n<FEATURE_TILE>(f_step + 1)
 					);
 				} else {
@@ -699,7 +706,7 @@ namespace cpu_test {
 					rQ[0].read_from_sram(
 						sQ_tile.tile_n<FEATURE_TILE>(0).transpose()
 					);
-					rKV[0].read_from_sram(
+					rKV[0].gemm2.read_from_sram(
 						sKV_tile.tile_n<FEATURE_TILE>(0).transpose()
 					);
 				}
@@ -732,7 +739,6 @@ namespace cpu_test {
 					rScores.set(j, i, score);
 					sum_exp += f32(score);
 				}
-				f32 sum_exp_old = score_sum[i];
 				score_sum[i] *= rRescale[i];
 				score_sum[i] += sum_exp;
 			}
