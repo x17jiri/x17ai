@@ -475,15 +475,6 @@ struct RMatrix {
 	}
 };
 
-template<typename T, typename U, const ICount M, const ICount N, const StrideType S>
-void downcast(RMatrix<T, M, N, S> const &src, RMatrix<U, M, N, S> &dst) {
-	for (ICount m = 0; m < M; ++m) {
-		for (ICount n = 0; n < N; ++n) {
-			dst.set(m, n, static_cast<U>(src.get(m, n)));
-		}
-	}
-}
-
 template<typename T, typename U, const ICount M, const ICount N>
 void downcast_store(
 	RMatrix<T, N, M, ColumnMajor> const &src,
@@ -718,10 +709,6 @@ namespace cpu_test {
 					rScores_f32
 				);
 			}
-			// Immediately downcast scores to f16. We need them as f16 for the next gemm
-			// and we want to make sure we calculate the softmax stats from the values
-			// we actually use in the next gemm.
-			downcast(rScores_f32, rScores);
 
 			// Update max and sum_exp
 			for (size_t i = 0; i < Q_PER_WARP; ++i) {
@@ -729,7 +716,7 @@ namespace cpu_test {
 				f32 old_max = max_score[i];
 				f32 new_max = old_max;
 				for (size_t j = 0; j < KV_PER_STEP; ++j) {
-					new_max = std::max(new_max, f32(rScores.get(j, i)));
+					new_max = std::max(new_max, rScores_f32.get(j, i));
 				}
 				max_score[i] = new_max;
 
@@ -740,7 +727,7 @@ namespace cpu_test {
 				f32 sum_exp = 0.0f;
 				for (size_t j = 0; j < KV_PER_STEP; ++j) {
 					f16 score = static_cast<f16>(
-						std::exp(f32(rScores.get(j, i)) - new_max)
+						std::exp(rScores_f32.get(j, i) - new_max)
 					);
 					rScores.set(j, i, score);
 					sum_exp += f32(score);
