@@ -64,8 +64,9 @@ constexpr size_t V_DIM = 128;
 
 constexpr size_t Q_PER_BLOCK = 128;
 constexpr size_t Q_PER_WARP = 8;
-constexpr size_t KV_PER_STEP = 32;
-constexpr size_t FEATURE_TILE = 16;
+constexpr size_t GEMM_TILE = 16;
+constexpr size_t GEMMS_PER_STEP = 2;
+constexpr size_t KV_PER_STEP = (GEMM_TILE * GEMMS_PER_STEP);
 constexpr size_t KV_PRELOAD = 8;
 
 using ICount = std::common_type_t<
@@ -650,24 +651,29 @@ namespace cpu_test {
 		std::array<f32, Q_PER_WARP> score_sum;
 		score_sum.fill(0.0);
 
-		RMatrix<f16, KV_PER_STEP, Q_PER_WARP, ColumnMajor> rScores;
+		std::array<
+			RMatrix<f16, GEMM_TILE, Q_PER_WARP, ColumnMajor>,
+			KV_PER_STEP / GEMM_TILE
+		> rScores;
 
 		std::array<f32, Q_PER_WARP> rRescale;
 
 		std::array<
-			RMatrix<f32, FEATURE_TILE, Q_PER_WARP, ColumnMajor>,
-			V_DIM / FEATURE_TILE
+			RMatrix<f32, GEMM_TILE, Q_PER_WARP, ColumnMajor>,
+			V_DIM / GEMM_TILE
 		> rO;
 		X17_UNROLL for (auto &rO_tile: rO) {
 			rO_tile.zero_();
 		}
 
-		std::array<RMatrix<f16, FEATURE_TILE, Q_PER_WARP, ColumnMajor>, 2> rQ;
-		union RKVUnion {
-			RMatrix<f16, KV_PER_STEP, FEATURE_TILE, RowMajor> gemm1;
-			RMatrix<f16, FEATURE_TILE, KV_PER_STEP, RowMajor> gemm2;
-		};
-		std::array<RKVUnion, 2> rKV;
+		std::array<RMatrix<f16, GEMM_TILE, Q_PER_WARP, ColumnMajor>, 2> rQ;
+		std::array<
+			std::array<
+				RMatrix<f16, GEMM_TILE, GEMM_TILE, RowMajor>,
+				KV_PER_STEP / GEMM_TILE
+			>,
+			2 // will alternate buffers to be able to fetch next tile while computing
+		> rKV;
 
 		X17_UNROLL for (size_t p = 0; p < KV_PRELOAD - 1; ++p) {
 			copy_kv_to_sram_async(gKV, p);
@@ -677,9 +683,9 @@ namespace cpu_test {
 		shared->cp_async_wait_group(KV_PRELOAD - 2);
 		shared->syncthreads();
 
-		rQ[0].read_from_sram(sQ_tile.tile_n<FEATURE_TILE>(0).transpose());
+		rQ[0].read_from_sram(sQ_tile.tile_n<GEMM_TILE>(0).transpose());
 		auto sKV_tile = get_kv_in_sram(0);
-		rKV[0].gemm1.read_from_sram(sKV_tile.tile_n<FEATURE_TILE>(0));
+		rKV[0].gemm1.read_from_sram(sKV_tile.tile_n<GEMM_TILE>(0));
 
 		// Iterate over KV
 		size_t kv_len = gKV.m_rows();
@@ -692,22 +698,22 @@ namespace cpu_test {
 			// This will result in `rScores = K * Q^T`
 			RMatrix<f32, KV_PER_STEP, Q_PER_WARP, ColumnMajor> rScores_f32;
 			rScores_f32.zero_();
-			X17_UNROLL for (size_t f_step = 0; f_step < QK_DIM / FEATURE_TILE; ++f_step) {
-				bool last_step = (f_step == (QK_DIM / FEATURE_TILE) - 1);
+			X17_UNROLL for (size_t f_step = 0; f_step < QK_DIM / GEMM_TILE; ++f_step) {
+				bool last_step = (f_step == (QK_DIM / GEMM_TILE) - 1);
 				if (!last_step) {
 					rQ[(f_step + 1) % 2].read_from_sram(
-						sQ_tile.tile_n<FEATURE_TILE>(f_step + 1).transpose()
+						sQ_tile.tile_n<GEMM_TILE>(f_step + 1).transpose()
 					);
 					rKV[(f_step + 1) % 2].gemm1.read_from_sram(
-						sKV_tile.tile_n<FEATURE_TILE>(f_step + 1)
+						sKV_tile.tile_n<GEMM_TILE>(f_step + 1)
 					);
 				} else {
 					assert((f_step + 1) % 2 == 0);
 					rQ[0].read_from_sram(
-						sQ_tile.tile_n<FEATURE_TILE>(0).transpose()
+						sQ_tile.tile_n<GEMM_TILE>(0).transpose()
 					);
 					rKV[0].gemm2.read_from_sram(
-						sKV_tile.tile_n<FEATURE_TILE>(0).transpose()
+						sKV_tile.tile_n<GEMM_TILE>(0).transpose()
 					);
 				}
 				tiny_gemm(
@@ -746,7 +752,7 @@ namespace cpu_test {
 			// rescale output accumulators
 			X17_UNROLL for (auto &rO_tile: rO) {
 				for (size_t j = 0; j < Q_PER_WARP; ++j) {
-					for (size_t i = 0; i < FEATURE_TILE; ++i) {
+					for (size_t i = 0; i < GEMM_TILE; ++i) {
 						rO_tile.set(i, j, rO_tile.get(i, j) * rRescale[j]);
 					}
 				}
@@ -758,7 +764,7 @@ namespace cpu_test {
 				bool last_step = (v_tile == rO.size() - 1);
 				if (!last_step) {
 					rKV[(v_tile + 1) % 2].read_from_sram(
-						sKV_tile.tile_n<FEATURE_TILE>(v_tile + 1).transpose()
+						sKV_tile.tile_n<GEMM_TILE>(v_tile + 1).transpose()
 					);
 				} else {
 					shared->cp_async_wait_group(KV_PRELOAD - 2);
@@ -766,7 +772,7 @@ namespace cpu_test {
 					assert((v_tile + 1) % 2 == 0);
 					sKV_tile = get_kv_in_sram(kv_step + 1);
 					rKV[0].read_from_sram(
-						sKV_tile.tile_n<FEATURE_TILE>(0)
+						sKV_tile.tile_n<GEMM_TILE>(0)
 					);
 				}
 				tiny_gemm(
@@ -782,7 +788,7 @@ namespace cpu_test {
 		X17_UNROLL for (auto &rO_tile: rO) {
 			for (size_t j = 0; j < Q_PER_WARP; ++j) {
 				f32 inv_sum_exp = 1.0f / score_sum[j];
-				for (size_t i = 0; i < FEATURE_TILE; ++i) {
+				for (size_t i = 0; i < GEMM_TILE; ++i) {
 					rO_tile.set(i, j, rO_tile.get(i, j) * inv_sum_exp);
 				}
 			}
@@ -795,7 +801,7 @@ namespace cpu_test {
 		// Write output
 		size_t v_tile = 0;
 		X17_UNROLL for (auto &rO_tile: rO) {
-			downcast_store(rO_tile, gOut_warp_tile.tile_n<FEATURE_TILE>(v_tile));
+			downcast_store(rO_tile, gOut_warp_tile.tile_n<GEMM_TILE>(v_tile));
 			++v_tile;
 		}
 	}
