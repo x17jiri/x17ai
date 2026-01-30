@@ -454,18 +454,6 @@ struct RMatrix {
 template<typename T, const size_t CNT>
 struct Tiled;
 
-template<typename T, const size_t CNT, const size_t M, const size_t N, const StrideType S>
-void read_subtiles_from_sram(
-	Tiled<RMatrix<T, M, N, S>, CNT> &dst,
-	Matrix<SPtr<T>, M * CNT, N, S> const &sTile
-);
-
-template<typename T, const size_t CNT, const size_t M, const size_t N, const StrideType S1, const StrideType S2>
-void read_subtiles_from_sram(
-	Tiled<RMatrix<T, M, N, S1>, CNT> &dst,
-	Matrix<SPtr<T>, M, N * CNT, S2> const &sTile
-);
-
 template<typename T, const size_t CNT>
 struct Tiled {
 	T __array[CNT];
@@ -486,37 +474,12 @@ struct Tiled {
 			__array[i].zero_();
 		}
 	}
-
-	template<typename U, const ICount M, const ICount N, const StrideType S>
-	void read_from_sram(Matrix<SPtr<U>, M, N, S> const &sTile) {
-		read_subtiles_from_sram<T, CNT, M, N>(*this, sTile);
-	}
 };
-
-template<typename T, const size_t CNT, const size_t M, const size_t N, const StrideType S>
-void read_subtiles_from_sram(
-	Tiled<RMatrix<T, M, N, S>, CNT> &dst,
-	Matrix<SPtr<T>, M * CNT, N, S> const &sTile
-) {
-	X17_UNROLL for (size_t subtile = 0; subtile < CNT; ++subtile) {
-		dst.subtile(subtile).read_from_sram(sTile.tile_m<M>(subtile));
-	}
-}
-
-template<typename T, const size_t CNT, const size_t M, const size_t N, const StrideType S1, const StrideType S2>
-void read_subtiles_from_sram(
-	Tiled<RMatrix<T, M, N, S1>, CNT> &dst,
-	Matrix<SPtr<T>, M, N * CNT, S2> const &sTile
-) {
-	X17_UNROLL for (size_t subtile = 0; subtile < CNT; ++subtile) {
-		dst.subtile(subtile).read_from_sram(sTile.tile_n<N>(subtile));
-	}
-}
 
 template<typename T, const size_t N>
 struct PreloadArray {
 	T __array[N];
-	constexpr size_t count() const noexcept {
+	constexpr size_t preload_count() const noexcept {
 		return N;
 	}
 	T const &preload(size_t index) const {
@@ -701,101 +664,115 @@ namespace cpu_test {
 		std::array<f32, Q_PER_WARP> score_sum;
 		score_sum.fill(0.0);
 
-		Tiled<
-			RMatrix<f16, GEMM_TILE, Q_PER_WARP, ColumnMajor>,
-			KV_PER_STEP / GEMM_TILE
-		> rScores;
-
 		std::array<f32, Q_PER_WARP> rRescale;
 
-		Tiled<
-			RMatrix<f32, GEMM_TILE, Q_PER_WARP, ColumnMajor>,
-			V_DIM / GEMM_TILE
-		> rO;
+		Tiled<RMatrix<f32, GEMM_TILE, Q_PER_WARP, ColumnMajor>, V_DIM / GEMM_TILE> rO;
 		rO.zero_();
 
+		PreloadArray<RMatrix<f16, GEMM_TILE, Q_PER_WARP, ColumnMajor>, SMEM_PRELOAD> rQ;
 		PreloadArray<
-			RMatrix<f16, GEMM_TILE, Q_PER_WARP, ColumnMajor>,
-			SMEM_PRELOAD
-		> rQ;
-		PreloadArray<
-			Tiled<
-				RMatrix<f16, GEMM_TILE, GEMM_TILE, RowMajor>,
-				KV_PER_STEP / GEMM_TILE
-			>,
+			Tiled<RMatrix<f16, GEMM_TILE, GEMM_TILE, RowMajor>, GEMMS_PER_STEP>,
 			SMEM_PRELOAD
 		> rKV;
 
+		// Start preloading GMEM -> SMEM
 		X17_UNROLL for (size_t p = 0; p < GMEM_PRELOAD - 1; ++p) {
 			copy_kv_to_sram_async(gKV, p);
 			shared->cp_async_commit();
 		}
 
+		// Wait for the first batch of GMEM -> SMEM preloads to complete
 		shared->cp_async_wait_group(GMEM_PRELOAD - 2);
 		shared->syncthreads();
 
+		// Preload SMEM -> REG for the first step of GEMM 1
 		rQ.preload(0).read_from_sram(sQ_tile.tile_n<GEMM_TILE>(0).transpose());
 		auto sKV_tile = get_kv_in_sram(0);
-		rKV.preload(0).read_from_sram(sKV_tile.tile_n<GEMM_TILE>(0));
+		X17_UNROLL for (size_t i_gemm = 0; i_gemm < GEMMS_PER_STEP; ++i_gemm) {
+			rKV.preload(0).subtile(i_gemm).read_from_sram(
+				sKV_tile.tile<GEMM_TILE, GEMM_TILE>(i_gemm, 0)
+			);
+		}
 
-		// Iterate over KV
+		// Sequential loop over KV
 		size_t kv_len = gKV.m_rows();
 		X17_NO_UNROLL for (size_t kv_step = 0; kv_step < kv_len / KV_PER_STEP; ++kv_step) {
 			// Preload next KV tile from GMEM
 			copy_kv_to_sram_async(gKV, kv_step + GMEM_PRELOAD - 1);
 			shared->cp_async_commit();
 
-			// Tile both `K` and `Q` along the feature dimension and accumulate gemm.
+			//==== GEMM 1 ====
+
+			// Tile both `K` and `Q` along the feature dimension and accumulate GEMM 1.
 			// This will result in `rScores = K * Q^T`
-			Tiled<
-				RMatrix<f32, GEMM_TILE, Q_PER_WARP, ColumnMajor>,
-				KV_PER_STEP / GEMM_TILE
-			> rScores_f32;
+			Tiled<RMatrix<f32, GEMM_TILE, Q_PER_WARP, ColumnMajor>, GEMMS_PER_STEP> rScores_f32;
 			rScores_f32.zero_();
 			X17_UNROLL for (size_t feat_step = 0; feat_step < QK_DIM / GEMM_TILE; ++feat_step) {
-				if (feat_step < (QK_DIM / GEMM_TILE) - 1) {
-					rQ.preload(feat_step + 1)
-						.read_from_sram(sQ_tile.tile_n<GEMM_TILE>(feat_step + 1).transpose());
-					rKV.preload(feat_step + 1)
-						.read_from_sram(sKV_tile.tile_n<GEMM_TILE>(feat_step + 1));
-					// [32, 16] -> [16, 32, C]
+				// Preload SMEM -> REG
+				size_t preload_idx = feat_step + 1;
+				if (preload_idx < QK_DIM / GEMM_TILE) {
+					// Preload for the next iteration (not for this one)
+					// so the data can move while we calculate
+					rQ.preload(preload_idx % 2).read_from_sram(
+						sQ_tile.tile_n<GEMM_TILE>(preload_idx).transpose()
+					);
+					X17_UNROLL for (size_t i_gemm = 0; i_gemm < GEMMS_PER_STEP; ++i_gemm) {
+						rKV.preload(preload_idx % 2).subtile(i_gemm).read_from_sram(
+							sKV_tile.tile<GEMM_TILE, GEMM_TILE>(i_gemm, preload_idx)
+						);
+					}
 				} else {
-					assert((feat_step + 1) % 2 == 0);
+					// Last step
+					assert(preload_idx % 2 == 0);
+					// Preload Q for the first step of GEMM 1 of the next KV tile
 					rQ.preload(0).read_from_sram(sQ_tile.tile_n<GEMM_TILE>(0).transpose());
-					rKV.preload(0).read_from_sram(sKV_tile.tile_n<GEMM_TILE>(0).transpose());
+					// Preload KV for the first step of GEMM 2
+					X17_UNROLL for (size_t i_gemm = 0; i_gemm < GEMMS_PER_STEP; ++i_gemm) {
+						rKV.preload(0).subtile(i_gemm).read_from_sram(
+							sKV_tile.tile<GEMM_TILE, GEMM_TILE>(
+								i_gemm / rO.count(),
+								i_gemm % rO.count()
+							).transpose()
+						);
+					}
 				}
-				X17_UNROLL for (size_t subtile = 0; subtile < KV_PER_STEP / GEMM_TILE; ++subtile) {
+				// GEMM
+				X17_UNROLL for (size_t i_gemm = 0; i_gemm < GEMMS_PER_STEP; ++i_gemm) {
 					tiny_gemm(
-						rKV.preload(feat_step % 2).subtile(subtile),
+						rKV.preload(feat_step % 2).subtile(i_gemm),
 						rQ.preload(feat_step % 2),
-						rScores_f32.subtile(subtile)
+						rScores_f32.subtile(i_gemm)
 					);
 				}
 			}
 
-			// Update max and sum_exp
-			for (size_t i = 0; i < Q_PER_WARP; ++i) {
+			//==== Online Softmax ====
+
+			Tiled<RMatrix<f16, GEMM_TILE, Q_PER_WARP, ColumnMajor>, GEMMS_PER_STEP> rScores;
+
+			// Update max_score and score_sum
+			X17_UNROLL for (size_t i = 0; i < Q_PER_WARP; ++i) {
 				// find max
 				f32 old_max = max_score[i];
 				f32 new_max = old_max;
-				for (size_t subtile = 0; subtile < KV_PER_STEP / GEMM_TILE; ++subtile) {
+				X17_UNROLL for (size_t i_gemm = 0; i_gemm < GEMMS_PER_STEP; ++i_gemm) {
 					for (size_t j = 0; j < GEMM_TILE; ++j) {
-						new_max = std::max(new_max, rScores_f32.subtile(subtile).get(j, i));
+						new_max = std::max(new_max, rScores_f32.subtile(i_gemm).get(j, i));
 					}
 				}
 				max_score[i] = new_max;
 
-				// coefficient for sum_exp scaling
+				// coefficient for score_sum scaling
 				rRescale[i] = std::exp(old_max - new_max);
 
-				// compute sum_exp
+				// compute score_sum
 				f32 sum_exp = 0.0f;
-				for (size_t subtile = 0; subtile < KV_PER_STEP / GEMM_TILE; ++subtile) {
+				X17_UNROLL for (size_t i_gemm = 0; i_gemm < GEMMS_PER_STEP; ++i_gemm) {
 					for (size_t j = 0; j < GEMM_TILE; ++j) {
 						f16 score = static_cast<f16>(
-							std::exp(rScores_f32.subtile(subtile).get(j, i) - new_max)
+							std::exp(rScores_f32.subtile(i_gemm).get(j, i) - new_max)
 						);
-						rScores.subtile(subtile).set(j, i, score);
+						rScores.subtile(i_gemm).set(j, i, score);
 						sum_exp += f32(score);
 					}
 				}
@@ -806,36 +783,55 @@ namespace cpu_test {
 			// rescale output accumulators
 			X17_UNROLL for (size_t o_tile = 0; o_tile < rO.count(); ++o_tile) {
 				auto &rO_tile = rO.subtile(o_tile);
-				for (size_t j = 0; j < Q_PER_WARP; ++j) {
-					for (size_t i = 0; i < GEMM_TILE; ++i) {
+				X17_UNROLL for (size_t j = 0; j < Q_PER_WARP; ++j) {
+					X17_UNROLL for (size_t i = 0; i < GEMM_TILE; ++i) {
 						rO_tile.set(i, j, rO_tile.get(i, j) * rRescale[j]);
 					}
 				}
 			}
 
+			//==== GEMM 2 ====
+
 			// compute `rO += KV_tile * rScores`
-			X17_UNROLL for (size_t o_tile = 0; o_tile < rO.count(); ++o_tile) {
-				if (o_tile < rO.count() - 1) {
-					rKV.preload((o_tile + 1) % 2)
-						.read_from_sram(sKV_tile.tile_n<GEMM_TILE>(o_tile + 1).transpose());
+			X17_UNROLL for (size_t i = 0; i < rO.count(); ++i) {
+				// Preload SMEM -> REG
+				size_t preload_idx = i + 1;
+				if (preload_idx < rO.count()) {
+					// Preload for the next iteration (not for this one)
+					X17_UNROLL for (size_t i_gemm = 0; i_gemm < GEMMS_PER_STEP; ++i_gemm) {
+						rKV.preload(preload_idx % 2).subtile(i_gemm).read_from_sram(
+							sKV_tile.tile<GEMM_TILE, GEMM_TILE>(
+								((preload_idx * GEMMS_PER_STEP) + i_gemm) / rO.count(),
+								((preload_idx * GEMMS_PER_STEP) + i_gemm) % rO.count()
+							).transpose()
+						);
+					}
 				} else {
+					// Last step - preload KV for the first step of GEMM 1 of the next KV tile
 					shared->cp_async_wait_group(GMEM_PRELOAD - 2);
 					shared->syncthreads();
-					assert((o_tile + 1) % 2 == 0);
+					assert(preload_idx % 2 == 0);
 					sKV_tile = get_kv_in_sram(kv_step + 1);
-					rKV.preload(0)
-						.read_from_sram(sKV_tile.tile_n<GEMM_TILE>(0));
+					X17_UNROLL for (size_t i_gemm = 0; i_gemm < GEMMS_PER_STEP; ++i_gemm) {
+						rKV.preload(0).subtile(i_gemm).read_from_sram(
+							sKV_tile.tile<GEMM_TILE, GEMM_TILE>(i_gemm, 0)
+						);
+					}
 				}
-				tiny_gemm(
-					rKV.preload(o_tile % 2),
-					rScores,
-					rO.subtile(o_tile)
-				);
+				// GEMM
+				X17_UNROLL for (size_t i_gemm = 0; i_gemm < GEMMS_PER_STEP; ++i_gemm) {
+					tiny_gemm(
+						rKV.preload(i % 2).subtile(i_gemm),
+						rScores.subtile(((i * GEMMS_PER_STEP) + i_gemm) / rO.count()),
+						rO.subtile(((i * GEMMS_PER_STEP) + i_gemm) % rO.count())
+					);
+				}
 			}
 		}
 
-		// finalize output by normalizing with sum_exp
-		X17_UNROLL for (auto &rO_tile: rO) {
+		// finalize output by normalizing with score_sum
+		X17_UNROLL for (size_t o_tile = 0; o_tile < rO.count(); ++o_tile) {
+			auto &rO_tile = rO.subtile(o_tile);
 			for (size_t j = 0; j < Q_PER_WARP; ++j) {
 				f32 inv_sum_exp = 1.0f / score_sum[j];
 				for (size_t i = 0; i < GEMM_TILE; ++i) {
@@ -849,10 +845,8 @@ namespace cpu_test {
 		// View rows of O tile for this warp
 		Matrix<GPtr<f16>, Q_PER_WARP, V_DIM> gOut_warp_tile = gOut_tile.tile_m<Q_PER_WARP>(warp_idx.x);
 		// Write output
-		size_t v_tile = 0;
-		X17_UNROLL for (auto &rO_tile: rO) {
-			downcast_store(rO_tile, gOut_warp_tile.tile_n<GEMM_TILE>(v_tile));
-			++v_tile;
+		X17_UNROLL for (size_t o_tile = 0; o_tile < rO.count(); ++o_tile) {
+			downcast_store(rO.subtile(o_tile), gOut_warp_tile.tile_n<GEMM_TILE>(o_tile));
 		}
 	}
 
