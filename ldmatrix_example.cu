@@ -24,8 +24,8 @@ namespace sm75 {
 	using namespace sm0;
 
 	X17_DEVICE void ldmatrix_8x8xu16_x4(
-		u128 const* smem_src,
-		u32& dst0, u32& dst1, u32& dst2, u32& dst3
+		u128 const *smem_src,
+		u32 &dst0, u32 &dst1, u32 &dst2, u32 &dst3
 	) {
 		u32 smem_int_ptr = cast_smem_ptr_to_uint(smem_src);
 		asm volatile (
@@ -36,14 +36,26 @@ namespace sm75 {
 	}
 
 	X17_DEVICE void ldmatrix_8x8xu16_t_x4(
-		u128 const& smem_src,
-		u32& dst0, u32& dst1, u32& dst2, u32& dst3
+		u128 const *smem_src,
+		u32 &dst0, u32 &dst1, u32 &dst2, u32 &dst3
 	) {
-		u32 smem_int_ptr = cast_smem_ptr_to_uint(&smem_src);
+		u32 smem_int_ptr = cast_smem_ptr_to_uint(smem_src);
 		asm volatile (
 			"ldmatrix.sync.aligned.x4.trans.m8n8.shared.b16 {%0, %1, %2, %3}, [%4];\n"
 			: "=r"(dst0), "=r"(dst1), "=r"(dst2), "=r"(dst3)
 			: "r"(smem_int_ptr)
+		);
+	}
+
+	/// `smem_ptr` must be 16-byte aligned.
+	/// `offset * sizeof(T)` must be a multiple of 16.
+	template<typename T>
+	X17_DEVICE u128 *ldmatrix_swizzle(T *smem_ptr, u32 offset) {
+		offset *= sizeof(T);
+		// 111 000 0000
+		offset ^= ((offset & (7 << 7)) >> 3);
+		return reinterpret_cast<u128 *>(
+			reinterpret_cast<u8 *>(smem_ptr) + offset
 		);
 	}
 }
@@ -90,7 +102,7 @@ __global__ void ldmatrix_kernel(f16* gmem) {
 
 	cp_async(
 		reinterpret_cast<u128 const *>(gmem + 8*tid),
-		reinterpret_cast<u128 *>(smem + 8*tid)
+		ldmatrix_swizzle(smem, 8*tid)
 	);
 
 	// Wait for all async copies to complete
@@ -98,9 +110,32 @@ __global__ void ldmatrix_kernel(f16* gmem) {
 	cp_async_wait<0>();
 	__syncwarp();
 
-	for (int i = 0; i < 8; i++) {
-		printf("smem[%2d] = %.1f\n", 8*tid + i, __half2float(smem[8*tid + i]));
-	}
+	union {
+		u32 reg;
+		f16 halves[2];
+	} a, b, c, d;
+	u32 off = ((tid & 16) / 2) + ((tid & 15) * COLS);
+	ldmatrix_8x8xu16_x4(
+		ldmatrix_swizzle(smem, off),
+		a.reg, b.reg, c.reg, d.reg
+	);
+/*
+ncu --metrics l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum,l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum,l1tex__data_pipe_lsu_wavefronts_mem_shared_op_st.sum \
+--section SourceCounters \
+./your_application
+*/
+	printf("Thread %2d: [%.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f]; off = %d\n",
+		tid,
+		__half2float(a.halves[0]), __half2float(a.halves[1]),
+		__half2float(b.halves[0]), __half2float(b.halves[1]),
+		__half2float(c.halves[0]), __half2float(c.halves[1]),
+		__half2float(d.halves[0]), __half2float(d.halves[1]),
+		off
+	);
+
+	//for (int i = 0; i < 8; i++) {
+	//	printf("smem[%2d] = %.1f\n", 8*tid + i, __half2float(smem[8*tid + i]));
+	//}
 /*
 	//
 
