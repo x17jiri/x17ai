@@ -15,7 +15,7 @@ __global__ void ldmatrix_kernel(f16* gmem) {
 
 	Matrix<GPtr<f16>, ROWS, COLS> gmatrix{GPtr<f16>(gmem)};
 	Matrix<SPtr<f16>, ROWS, COLS> smatrix{SPtr<f16>(smem)};
-	cp_asyncx<32, ROWS, COLS>(tid, gmatrix, smatrix);
+	cp_async<32>(tid, gmatrix, smatrix);
 
 	/*cp_async(
 		reinterpret_cast<u128 const *>(gmem + 8*tid),

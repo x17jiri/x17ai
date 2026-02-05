@@ -253,36 +253,29 @@ struct Matrix:
 	}
 };
 
-template<const usize BLOCK_DIM, const isize M, const isize N, typename T>
-X17_DEVICE void cp_asyncx(
+template<const usize BLOCK_DIM, const isize M, const isize N, typename T, const usize S1, const usize S2>
+X17_DEVICE void cp_async(
 	usize thread_idx,
-	Matrix<GPtr<T>, M, N, RowMajor, N> const &src,
-	Matrix<SPtr<T>, M, N, RowMajor, N> const &dst
-) requires(M > 0 && N > 0) {
+	Matrix<GPtr<T>, M, N, RowMajor, S1> const &src,
+	Matrix<SPtr<T>, M, N, RowMajor, S2> const &dst
+) requires(BLOCK_DIM > 0 && M > 0 && N > 0 && S1 == N && S2 == N) {
 	T const *gptr = src.data.ptr;
 	T *sptr = dst.data.ptr;
 
 	constexpr usize BYTES = sizeof(T) * M * N;
-	static_assert(BYTES % 16 == 0, "cp.async size must be multiple of 16 bytes");
 	constexpr usize CP_ASYNC_CNT = BYTES / 16;
-	if constexpr (CP_ASYNC_CNT < BLOCK_DIM) {
-		if (thread_idx < CP_ASYNC_CNT) {
-			usize offset = thread_idx * (16 / sizeof(T));
-			sm80::cp_async(gptr + offset, sm80::ldmatrix_swizzle(sptr, offset));
-		}
-	} else if constexpr (CP_ASYNC_CNT == BLOCK_DIM) {
-		usize offset = thread_idx * (16 / sizeof(T));
+	static_assert(BYTES % 16 == 0, "cp.async size must be multiple of 16 bytes");
+
+	constexpr usize ITERATIONS = CP_ASYNC_CNT / BLOCK_DIM;
+	X17_UNROLL for (usize i = 0; i < ITERATIONS; i++) {
+		usize offset = (i * BLOCK_DIM + thread_idx) * (16 / sizeof(T));
 		sm80::cp_async(gptr + offset, sm80::ldmatrix_swizzle(sptr, offset));
-	} else {
-		constexpr usize ITERATIONS = CP_ASYNC_CNT / BLOCK_DIM;
-		X17_UNROLL
-		for (usize i = 0; i < ITERATIONS; i++) {
-			usize offset = (i * BLOCK_DIM + thread_idx) * (16 / sizeof(T));
-			sm80::cp_async(gptr + offset, sm80::ldmatrix_swizzle(sptr, offset));
-		}
-		if (thread_idx < CP_ASYNC_CNT % BLOCK_DIM) {
-			usize offset = (ITERATIONS * BLOCK_DIM + thread_idx) * (16 / sizeof(T));
-			sm80::cp_async(gptr + offset, sm80::ldmatrix_swizzle(sptr, offset));
-		}
+	}
+	if (thread_idx < CP_ASYNC_CNT % BLOCK_DIM) {
+		usize offset = (ITERATIONS * BLOCK_DIM + thread_idx) * (16 / sizeof(T));
+		sm80::cp_async(gptr + offset, sm80::ldmatrix_swizzle(sptr, offset));
 	}
 }
+
+using sm80::cp_async_commit;
+using sm80::cp_async_wait;
