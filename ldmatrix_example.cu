@@ -1,91 +1,4 @@
-#include <cuda_fp16.h>
-#include <cuda_runtime.h>
-#include <mma.h>
-#include <stdio.h>
-#include <stdint.h>
-
-using f16 = __half;
-using bf16 = __nv_bfloat16;
-using u8 = uint8_t;
-using u16 = uint16_t;
-using u32 = uint32_t;
-using u64 = uint64_t;
-using u128 = unsigned __int128;
-
-#define X17_DEVICE __forceinline__ __device__
-
-namespace sm0 {
-	X17_DEVICE u32 cast_smem_ptr_to_uint(void const *const ptr) {
-		return static_cast<u32>(__cvta_generic_to_shared(ptr));
-	}
-}
-
-namespace sm75 {
-	using namespace sm0;
-
-	X17_DEVICE void ldmatrix_8x8xu16_x4(
-		u128 const *smem_src,
-		u32 &dst0, u32 &dst1, u32 &dst2, u32 &dst3
-	) {
-		u32 smem_int_ptr = cast_smem_ptr_to_uint(smem_src);
-		asm volatile (
-			"ldmatrix.sync.aligned.x4.m8n8.shared.b16 {%0, %1, %2, %3}, [%4];\n"
-			: "=r"(dst0), "=r"(dst1), "=r"(dst2), "=r"(dst3)
-			: "r"(smem_int_ptr)
-		);
-	}
-
-	X17_DEVICE void ldmatrix_8x8xu16_t_x4(
-		u128 const *smem_src,
-		u32 &dst0, u32 &dst1, u32 &dst2, u32 &dst3
-	) {
-		u32 smem_int_ptr = cast_smem_ptr_to_uint(smem_src);
-		asm volatile (
-			"ldmatrix.sync.aligned.x4.trans.m8n8.shared.b16 {%0, %1, %2, %3}, [%4];\n"
-			: "=r"(dst0), "=r"(dst1), "=r"(dst2), "=r"(dst3)
-			: "r"(smem_int_ptr)
-		);
-	}
-
-	/// `smem_ptr` must be 16-byte aligned.
-	/// `offset * sizeof(T)` must be a multiple of 16.
-	template<typename T>
-	X17_DEVICE u128 *ldmatrix_swizzle(T *smem_ptr, u32 offset) {
-		offset *= sizeof(T);
-		// 111 000 0000
-		offset ^= ((offset & (7 << 7)) >> 3);
-		return reinterpret_cast<u128 *>(
-			reinterpret_cast<u8 *>(smem_ptr) + offset
-		);
-	}
-}
-
-namespace sm80 {
-	using namespace sm75;
-
-	X17_DEVICE void cp_async(u128 const *gmem_src, u128 *smem_dst) {
-		u32 smem_int_ptr = cast_smem_ptr_to_uint(smem_dst);
-		asm volatile (
-			"cp.async.ca.shared.global.L2::128B [%0], [%1], %2;\n"
-			:
-			: "r"(smem_int_ptr), "l"(gmem_src), "n"(sizeof(u128))
-		);
-	}
-
-	X17_DEVICE void cp_async_commit() {
-		asm volatile("cp.async.commit_group;\n" : :);
-	}
-
-	/// Blocks until all but N previous cp.async.commit_group operations have committed.
-	template<int N>
-	X17_DEVICE void cp_async_wait() {
-		if constexpr (N == 0) {
-			asm volatile("cp.async.wait_all;\n" : :);
-		} else {
-			asm volatile("cp.async.wait_group %0;\n" : : "n"(N));
-		}
-	}
-}
+#include "utils.cuh"
 
 // Matrix dimensions - hardcoded for simplicity
 #define ROWS 16
@@ -94,16 +7,20 @@ namespace sm80 {
 
 // Kernel that demonstrates cp.async and ldmatrix
 __global__ void ldmatrix_kernel(f16* gmem) {
-	using namespace sm80;
+	//using namespace sm80;
     // Shared memory for the 8x8 matrix
     __shared__ f16 smem[MATRIX_SIZE];
 
-    int tid = threadIdx.x;
+    usize tid = threadIdx.x;
 
-	cp_async(
+	Matrix<GPtr<f16>, ROWS, COLS> gmatrix{GPtr<f16>(gmem)};
+	Matrix<SPtr<f16>, ROWS, COLS> smatrix{SPtr<f16>(smem)};
+	cp_asyncx<32, ROWS, COLS>(tid, gmatrix, smatrix);
+
+	/*cp_async(
 		reinterpret_cast<u128 const *>(gmem + 8*tid),
 		ldmatrix_swizzle(smem, 8*tid)
-	);
+	);*/
 
 	// Wait for all async copies to complete
 	cp_async_commit();
@@ -115,7 +32,7 @@ __global__ void ldmatrix_kernel(f16* gmem) {
 		f16 halves[2];
 	} a, b, c, d;
 	u32 off = ((tid & 16) / 2) + ((tid & 15) * COLS);
-	ldmatrix_8x8xu16_x4(
+	ldmatrix_8x8xu16_t_x4(
 		ldmatrix_swizzle(smem, off),
 		a.reg, b.reg, c.reg, d.reg
 	);
