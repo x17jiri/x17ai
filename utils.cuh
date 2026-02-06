@@ -5,22 +5,24 @@
 //
 //------------------------------------------------------------------------------
 
+#pragma once
+
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <mma.h>
 #include <stdio.h>
 #include <stdint.h>
 
-#if defined(__CUDACC_RTC__) || defined(__clang__)
+/*#if defined(__CUDACC_RTC__) || defined(__clang__)
 	#define X17_UNROLL    _Pragma("unroll")
 	#define X17_NO_UNROLL _Pragma("unroll 1")
 #elif defined(__CUDA_ARCH__) || defined(_NVHPC_CUDA)
 	#define X17_UNROLL    #pragma unroll
 	#define X17_NO_UNROLL #pragma unroll 1
-#else
+#else*/
 	#define X17_UNROLL
 	#define X17_NO_UNROLL
-#endif
+/*#endif*/
 
 #define X17_DEVICE __forceinline__ __device__
 
@@ -47,8 +49,22 @@ X17_DEVICE u32 cast_smem_ptr_to_uint(void const *const ptr) {
 }
 
 namespace sm75 {
+	/// `smem_src` must be 16-byte aligned.
+	X17_DEVICE void ldmatrix_8x8xu16_x2(
+		void const *smem_src,
+		u32 &dst0, u32 &dst1
+	) {
+		u32 smem_int_ptr = cast_smem_ptr_to_uint(smem_src);
+		asm volatile (
+			"ldmatrix.sync.aligned.x2.m8n8.shared.b16 {%0, %1}, [%2];\n"
+			: "=r"(dst0), "=r"(dst1)
+			: "r"(smem_int_ptr)
+		);
+	}
+
+	/// `smem_src` must be 16-byte aligned.
 	X17_DEVICE void ldmatrix_8x8xu16_x4(
-		u128 const *smem_src,
+		void const *smem_src,
 		u32 &dst0, u32 &dst1, u32 &dst2, u32 &dst3
 	) {
 		u32 smem_int_ptr = cast_smem_ptr_to_uint(smem_src);
@@ -59,8 +75,9 @@ namespace sm75 {
 		);
 	}
 
-	X17_DEVICE void ldmatrix_8x8xu16_t_x4(
-		u128 const *smem_src,
+	/// `smem_src` must be 16-byte aligned.
+	X17_DEVICE void ldmatrix_t_8x8xu16_x4(
+		void const *smem_src,
 		u32 &dst0, u32 &dst1, u32 &dst2, u32 &dst3
 	) {
 		u32 smem_int_ptr = cast_smem_ptr_to_uint(smem_src);
@@ -115,23 +132,47 @@ namespace sm80 {
 
 template<typename T>
 struct GPtr {
-	T *ptr;
+	T *_ptr;
 
-	GPtr(T *p): ptr(p) {}
+	X17_DEVICE GPtr(T *p): _ptr(p) {}
 
-	GPtr with_offset(usize offset) const {
-		return GPtr(ptr + offset);
+	X17_DEVICE GPtr with_offset(usize offset) const {
+		return GPtr(_ptr + offset);
+	}
+
+	X17_DEVICE T const *get() const {
+		return _ptr;
 	}
 };
 
 template<typename T>
 struct SPtr {
-	T *ptr;
+	T *_ptr;
 
-	SPtr(T *p): ptr(p) {}
+	X17_DEVICE SPtr(T *p): _ptr(p) {}
 
-	SPtr with_offset(usize offset) const {
-		return SPtr(ptr + offset);
+	X17_DEVICE SPtr with_offset(usize offset) const {
+		return SPtr(_ptr + offset);
+	}
+
+	X17_DEVICE T *get() const {
+		return _ptr;
+	}
+};
+
+template<typename T>
+struct SwizzledSptr {
+	T *_ptr;
+	usize _offset;
+
+	X17_DEVICE SwizzledSptr(T *p, usize offset = 0): _ptr(p), _offset(offset) {}
+
+	X17_DEVICE SwizzledSptr with_offset(usize offset) const {
+		return SwizzledSptr(_ptr, _offset + offset);
+	}
+
+	X17_DEVICE T *get() const {
+		return sm80::ldmatrix_swizzle(_ptr, _offset);
 	}
 };
 
@@ -142,14 +183,14 @@ struct MatrixData {
 
 template<const isize V>
 struct ConstExtent {
-	inline constexpr usize value() const noexcept {
+	X17_DEVICE constexpr usize value() const noexcept {
 		return V;
 	}
 };
 
 struct DynamicExtent {
 	usize v;
-	inline constexpr usize value() const noexcept {
+	X17_DEVICE constexpr usize value() const noexcept {
 		return v;
 	}
 };
@@ -187,68 +228,76 @@ struct Matrix:
 	MatrixRowCount<M>,
 	MatrixColCount<N>
 {
-	inline Matrix(Data d) requires(M >= 0 && N >= 0):
+	X17_DEVICE Matrix(Data d) requires(M >= 0 && N >= 0):
 		MatrixData<Data>{d},
 		MatrixRowCount<M>{},
 		MatrixColCount<N>{}
 	{}
 
-	inline Matrix(Data d, usize m_rows) requires(M < 0 && N >= 0 && L == RowMajor):
+	X17_DEVICE Matrix(Data d, usize m_rows) requires(M < 0 && N >= 0 && L == RowMajor):
 		MatrixData<Data>{d},
 		MatrixRowCount<M>{m_rows},
 		MatrixColCount<N>{}
 	{}
 
-	inline Matrix(Data d, usize n_cols) requires(M >= 0 && N < 0 && L == ColumnMajor):
+	X17_DEVICE Matrix(Data d, usize n_cols) requires(M >= 0 && N < 0 && L == ColumnMajor):
 		MatrixData<Data>{d},
 		MatrixRowCount<M>{},
 		MatrixColCount<N>{n_cols}
 	{}
 
-	inline usize m_rows() const {
+	X17_DEVICE usize m_rows() const {
 		return MatrixRowCount<M>::value();
 	}
 
-	inline usize n_cols() const {
+	X17_DEVICE usize n_cols() const {
 		return MatrixColCount<N>::value();
 	}
 
-	inline constexpr usize stride() const {
+	X17_DEVICE constexpr usize stride() const {
 		return STRIDE;
 	}
 
-	inline constexpr MatrixLayout layout() const {
+	X17_DEVICE constexpr MatrixLayout layout() const {
 		return L;
 	}
 
-	inline Matrix<Data, N, M, ColumnMajor> transpose() const
-	requires(M >= 0 && N >= 0 && L == RowMajor) {
+	X17_DEVICE Matrix<Data, N, M, ColumnMajor> transpose() const requires(
+		M >= 0 && N >= 0
+		&& L == RowMajor
+	) {
 		return Matrix<Data, N, M, ColumnMajor, STRIDE>{MatrixData<Data>::data};
 	}
 
 	template<const isize M_TILE, const isize N_TILE>
-	Matrix<Data, M_TILE, N_TILE, L> tile(usize m_tile_idx, usize n_tile_idx) const
-	requires(M_TILE >= 0 && N_TILE >= 0 && M >= 0 && N >= 0 && M % M_TILE == 0 && N % N_TILE == 0) {
-		assert(m_tile_idx < (m_rows() / M_TILE));
-		assert(n_tile_idx < (n_cols() / N_TILE));
-		return Matrix<Data, M_TILE, N_TILE, L>{
-			MatrixData<Data>::data.with_offset(L == RowMajor
-				? m_tile_idx * M_TILE * stride() + n_tile_idx * N_TILE
-				: n_tile_idx * N_TILE * stride() + m_tile_idx * M_TILE
-			),
-			stride()
+	X17_DEVICE Matrix<Data, M_TILE, N_TILE, L, STRIDE> tile(
+		usize m_tile_idx, usize n_tile_idx
+	) const requires(
+		M_TILE >= 0 && N_TILE >= 0
+		&& M >= 0 && M % M_TILE == 0
+		&& N >= 0 && N % N_TILE == 0
+	) {
+		return Matrix<Data, M_TILE, N_TILE, L, STRIDE>{
+			MatrixData<Data>::data.with_offset(
+				L == RowMajor
+					? m_tile_idx * M_TILE * STRIDE + n_tile_idx * N_TILE
+					: m_tile_idx * M_TILE + n_tile_idx * N_TILE * STRIDE
+			)
 		};
 	}
 
 	template<const isize M_TILE, const isize N_TILE>
-	Matrix<Data, M_TILE, N_TILE, RowMajor> tile(usize m_tile_idx, usize n_tile_idx) const
-	requires(M_TILE >= 0 && N_TILE >= 0 && M < 0 && N >= 0 && L == RowMajor && N % N_TILE == 0) {
-		assert(m_rows() % M_TILE == 0);
-		assert(m_tile_idx < (m_rows() / M_TILE));
-		assert(n_tile_idx < (n_cols() / N_TILE));
+	X17_DEVICE Matrix<Data, M_TILE, N_TILE, RowMajor, STRIDE> tile(
+		usize m_tile_idx, usize n_tile_idx
+	) const requires(
+		M_TILE >= 0 && N_TILE >= 0
+		&& M < 0 && L == RowMajor
+		&& N >= 0 && N % N_TILE == 0
+	) {
 		return Matrix<Data, M_TILE, N_TILE, RowMajor>{
-			MatrixData<Data>::data.with_offset(m_tile_idx * M_TILE * stride() + n_tile_idx * N_TILE),
-			stride()
+			MatrixData<Data>::data.with_offset(
+				m_tile_idx * M_TILE * STRIDE + n_tile_idx * N_TILE
+			)
 		};
 	}
 };
@@ -257,11 +306,8 @@ template<const usize BLOCK_DIM, const isize M, const isize N, typename T, const 
 X17_DEVICE void cp_async(
 	usize thread_idx,
 	Matrix<GPtr<T>, M, N, RowMajor, S1> const &src,
-	Matrix<SPtr<T>, M, N, RowMajor, S2> const &dst
+	Matrix<SwizzledSptr<T>, M, N, RowMajor, S2> const &dst
 ) requires(BLOCK_DIM > 0 && M > 0 && N > 0 && S1 == N && S2 == N) {
-	T const *gptr = src.data.ptr;
-	T *sptr = dst.data.ptr;
-
 	constexpr usize BYTES = sizeof(T) * M * N;
 	constexpr usize CP_ASYNC_CNT = BYTES / 16;
 	static_assert(BYTES % 16 == 0, "cp.async size must be multiple of 16 bytes");
@@ -269,13 +315,116 @@ X17_DEVICE void cp_async(
 	constexpr usize ITERATIONS = CP_ASYNC_CNT / BLOCK_DIM;
 	X17_UNROLL for (usize i = 0; i < ITERATIONS; i++) {
 		usize offset = (i * BLOCK_DIM + thread_idx) * (16 / sizeof(T));
-		sm80::cp_async(gptr + offset, sm80::ldmatrix_swizzle(sptr, offset));
+		sm80::cp_async(
+			src.data.with_offset(offset).get(),
+			dst.data.with_offset(offset).get()
+		);
 	}
-	if (thread_idx < CP_ASYNC_CNT % BLOCK_DIM) {
-		usize offset = (ITERATIONS * BLOCK_DIM + thread_idx) * (16 / sizeof(T));
-		sm80::cp_async(gptr + offset, sm80::ldmatrix_swizzle(sptr, offset));
+	if constexpr (CP_ASYNC_CNT % BLOCK_DIM != 0) {
+		if (thread_idx < CP_ASYNC_CNT % BLOCK_DIM) {
+			usize offset = (ITERATIONS * BLOCK_DIM + thread_idx) * (16 / sizeof(T));
+			sm80::cp_async(
+				src.data.with_offset(offset).get(),
+				dst.data.with_offset(offset).get()
+			);
+		}
 	}
 }
 
 using sm80::cp_async_commit;
 using sm80::cp_async_wait;
+
+/// The whole warp holds one 8x8 matrix = 64 elements of u16.
+///
+/// So each thread holds 64 / 32 = 2 elements of u16 stored in one u32 register.
+///
+/// Which thread holds which matrix element:
+/// row 0: |  0 |  0 |  1 |  1 |  2 |  2 |  3 |  3 |
+/// row 1: |  4 |  4 |  5 |  5 |  6 |  6 |  7 |  7 |
+/// ...
+/// row 7: | 28 | 28 | 29 | 29 | 30 | 30 | 31 | 31 |
+struct Fragment_8x8_u16 {
+	u32 reg;
+
+	template<typename T>
+	requires(sizeof(T) == 2)
+	X17_DEVICE T first() const {
+		union {
+			u32 reg;
+			T halves[2];
+		} a;
+		a.reg = reg;
+		return a.halves[0];
+	}
+
+	template<typename T>
+	requires(sizeof(T) == 2)
+	X17_DEVICE T second() const {
+		union {
+			u32 reg;
+			T halves[2];
+		} a;
+		a.reg = reg;
+		return a.halves[1];
+	}
+};
+
+template<typename T, const isize M, const isize N>
+requires(
+	sizeof(T) == 2 // u16
+	&& M > 0 && M % 8 == 0
+	&& N > 0 && N % 8 == 0
+)
+struct RMatrix {
+	Fragment_8x8_u16 tiles[M / 8][N / 8];
+
+	X17_DEVICE constexpr usize m_rows() const {
+		return M;
+	}
+
+	X17_DEVICE constexpr usize n_cols() const {
+		return N;
+	}
+};
+
+template<typename T, const usize STRIDE>
+requires(sizeof(T) == 2)
+X17_DEVICE void ldmatrix(
+	usize thread_idx,
+	Matrix<SwizzledSptr<T>, 16, 8, RowMajor, STRIDE> const &src,
+	RMatrix<T, 16, 8> &dst
+) {
+	u32 off = (thread_idx & 15) * STRIDE;
+	sm80::ldmatrix_8x8xu16_x2(
+		src.data.with_offset(off).get(),
+		dst.tiles[0][0].reg, dst.tiles[1][0].reg
+	);
+}
+
+template<typename T, const usize STRIDE>
+requires(sizeof(T) == 2)
+X17_DEVICE void ldmatrix(
+	usize thread_idx,
+	Matrix<SwizzledSptr<T>, 16, 16, RowMajor, STRIDE> const &src,
+	RMatrix<T, 16, 16> &dst
+) {
+	u32 off = ((thread_idx & 16) / sizeof(T)) + ((thread_idx & 15) * STRIDE);
+	sm80::ldmatrix_8x8xu16_x4(
+		src.data.with_offset(off).get(),
+		dst.tiles[0][0].reg, dst.tiles[1][0].reg, dst.tiles[0][1].reg, dst.tiles[1][1].reg
+	);
+}
+
+template<typename T, const usize STRIDE>
+requires(sizeof(T) == 2)
+X17_DEVICE void ldmatrix(
+	usize thread_idx,
+	Matrix<SwizzledSptr<T>, 16, 16, ColumnMajor, STRIDE> const &src,
+	RMatrix<T, 16, 16> &dst
+) {
+	u32 off = ((thread_idx & 16) / sizeof(T)) + ((thread_idx & 15) * STRIDE);
+	sm80::ldmatrix_t_8x8xu16_x4(
+		src.data.with_offset(off).get(),
+		dst.tiles[0][0].reg, dst.tiles[0][1].reg, dst.tiles[1][0].reg, dst.tiles[1][1].reg
+	);
+}

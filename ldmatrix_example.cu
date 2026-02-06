@@ -14,7 +14,7 @@ __global__ void ldmatrix_kernel(f16* gmem) {
     usize tid = threadIdx.x;
 
 	Matrix<GPtr<f16>, ROWS, COLS> gmatrix{GPtr<f16>(gmem)};
-	Matrix<SPtr<f16>, ROWS, COLS> smatrix{SPtr<f16>(smem)};
+	Matrix<SwizzledSptr<f16>, ROWS, COLS> smatrix{SwizzledSptr<f16>(smem)};
 	cp_async<32>(tid, gmatrix, smatrix);
 
 	/*cp_async(
@@ -27,7 +27,7 @@ __global__ void ldmatrix_kernel(f16* gmem) {
 	cp_async_wait<0>();
 	__syncwarp();
 
-	union {
+	/*union {
 		u32 reg;
 		f16 halves[2];
 	} a, b, c, d;
@@ -35,19 +35,28 @@ __global__ void ldmatrix_kernel(f16* gmem) {
 	ldmatrix_8x8xu16_t_x4(
 		ldmatrix_swizzle(smem, off),
 		a.reg, b.reg, c.reg, d.reg
-	);
+	);*/
+	RMatrix<f16, 16, 16> rmatrix;
+	ldmatrix(tid, smatrix.transpose(), rmatrix);
+
+	RMatrix<f16, 16, 8> q;
+	ldmatrix(tid, smatrix.tile<16, 8>(0, 1), q);
 /*
 ncu --metrics l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum,l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum,l1tex__data_pipe_lsu_wavefronts_mem_shared_op_st.sum \
 --section SourceCounters \
 ./your_application
 */
-	printf("Thread %2d: [%.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f]; off = %d\n",
+	/*printf("Thread %2d: [%.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f]\n",
 		tid,
-		__half2float(a.halves[0]), __half2float(a.halves[1]),
-		__half2float(b.halves[0]), __half2float(b.halves[1]),
-		__half2float(c.halves[0]), __half2float(c.halves[1]),
-		__half2float(d.halves[0]), __half2float(d.halves[1]),
-		off
+		__half2float(rmatrix.tiles[0][0].first<f16>()), __half2float(rmatrix.tiles[0][0].second<f16>()),
+		__half2float(rmatrix.tiles[0][1].first<f16>()), __half2float(rmatrix.tiles[0][1].second<f16>()),
+		__half2float(rmatrix.tiles[1][0].first<f16>()), __half2float(rmatrix.tiles[1][0].second<f16>()),
+		__half2float(rmatrix.tiles[1][1].first<f16>()), __half2float(rmatrix.tiles[1][1].second<f16>())
+	);*/
+	printf("Thread %2d: q: [%.1f, %.1f, %.1f, %.1f]\n",
+		tid,
+		__half2float(q.tiles[0][0].first<f16>()), __half2float(q.tiles[0][0].second<f16>()),
+		__half2float(q.tiles[0][1].first<f16>()), __half2float(q.tiles[0][1].second<f16>())
 	);
 
 	//for (int i = 0; i < 8; i++) {
