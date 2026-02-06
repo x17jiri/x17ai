@@ -13,8 +13,8 @@ __global__ void ldmatrix_kernel(f16* gmem) {
 
     usize tid = threadIdx.x;
 
-	Matrix<GPtr<f16>, ROWS, COLS> gmatrix{GPtr<f16>(gmem)};
-	Matrix<SwizzledSptr<f16>, ROWS, COLS> smatrix{SwizzledSptr<f16>(smem)};
+	GMatrix<f16, ROWS, COLS> gmatrix{GPtr<f16>(gmem)};
+	SMatrix<f16, ROWS, COLS> smatrix{SwizzledSptr<f16>(smem)};
 	cp_async<32>(tid, gmatrix, smatrix);
 
 	/*cp_async(

@@ -302,11 +302,29 @@ struct Matrix:
 	}
 };
 
+template<
+	typename T,
+	const isize M, // number of rows
+	const isize N, // number of columns
+	const MatrixLayout L = RowMajor,
+	const usize STRIDE = (L == RowMajor ? N : M)
+>
+using GMatrix = Matrix<GPtr<T>, M, N, L, STRIDE>;
+
+template<
+	typename T,
+	const isize M, // number of rows
+	const isize N, // number of columns
+	const MatrixLayout L = RowMajor,
+	const usize STRIDE = (L == RowMajor ? N : M)
+>
+using SMatrix = Matrix<SwizzledSptr<T>, M, N, L, STRIDE>;
+
 template<const usize BLOCK_DIM, const isize M, const isize N, typename T, const usize S1, const usize S2>
 X17_DEVICE void cp_async(
 	usize thread_idx,
-	Matrix<GPtr<T>, M, N, RowMajor, S1> const &src,
-	Matrix<SwizzledSptr<T>, M, N, RowMajor, S2> const &dst
+	GMatrix<T, M, N, RowMajor, S1> const &src,
+	SMatrix<T, M, N, RowMajor, S2> const &dst
 ) requires(BLOCK_DIM > 0 && M > 0 && N > 0 && S1 == N && S2 == N) {
 	constexpr usize BYTES = sizeof(T) * M * N;
 	constexpr usize CP_ASYNC_CNT = BYTES / 16;
@@ -391,7 +409,7 @@ template<typename T, const usize STRIDE>
 requires(sizeof(T) == 2)
 X17_DEVICE void ldmatrix(
 	usize thread_idx,
-	Matrix<SwizzledSptr<T>, 16, 8, RowMajor, STRIDE> const &src,
+	SMatrix<T, 16, 8, RowMajor, STRIDE> const &src,
 	RMatrix<T, 16, 8> &dst
 ) {
 	u32 off = (thread_idx & 15) * STRIDE;
@@ -405,7 +423,7 @@ template<typename T, const usize STRIDE>
 requires(sizeof(T) == 2)
 X17_DEVICE void ldmatrix(
 	usize thread_idx,
-	Matrix<SwizzledSptr<T>, 16, 16, RowMajor, STRIDE> const &src,
+	SMatrix<T, 16, 16, RowMajor, STRIDE> const &src,
 	RMatrix<T, 16, 16> &dst
 ) {
 	u32 off = ((thread_idx & 16) / sizeof(T)) + ((thread_idx & 15) * STRIDE);
@@ -419,7 +437,7 @@ template<typename T, const usize STRIDE>
 requires(sizeof(T) == 2)
 X17_DEVICE void ldmatrix(
 	usize thread_idx,
-	Matrix<SwizzledSptr<T>, 16, 16, ColumnMajor, STRIDE> const &src,
+	SMatrix<T, 16, 16, ColumnMajor, STRIDE> const &src,
 	RMatrix<T, 16, 16> &dst
 ) {
 	u32 off = ((thread_idx & 16) / sizeof(T)) + ((thread_idx & 15) * STRIDE);
