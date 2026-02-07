@@ -58,12 +58,26 @@ class Tile:
 		self.row_range = row_range
 		self.col_range = col_range
 
+	def m_tiles(self):
+		m = self.matrix.m
+		n = self.matrix.n
+		if self.matrix.transposed:
+			m, n = n, m
+		return m // (self.row_range.stop - self.row_range.start)
+
+	def n_tiles(self):
+		m = self.matrix.m
+		n = self.matrix.n
+		if self.matrix.transposed:
+			m, n = n, m
+		return n // (self.col_range.stop - self.col_range.start)
+
 	def __str__(self):
 		result = self.matrix.name
 		m = self.matrix.m
 		n = self.matrix.n
 		if self.matrix.transposed:
-			result += ".transposed()"
+			result += ".t()"
 			m, n = n, m
 
 		tile_row_cnt = self.row_range.stop - self.row_range.start
@@ -74,13 +88,11 @@ class Tile:
 		tile_col_idx = self.col_range.start // tile_col_cnt
 		tiles_n = n // tile_col_cnt
 
-		result += ".tile<{tile_row_cnt}, {tile_col_cnt}>({tile_row_idx} /*..{tiles_m}*/, {tile_col_idx} /*..{tiles_n}*/)".format(
+		result += ".tile<{tile_row_cnt}, {tile_col_cnt}>({tile_row_idx}, {tile_col_idx})".format(
 			tile_row_cnt=tile_row_cnt,
 			tile_col_cnt=tile_col_cnt,
 			tile_row_idx=tile_row_idx,
-			tiles_m=tiles_m,
 			tile_col_idx=tile_col_idx,
-			tiles_n=tiles_n
 		)
 		return result
 
@@ -119,11 +131,11 @@ class AtomCall:
 
 	def __str__(self):
 		return "{name}({a}, {b}, {c})".format(
-				name=self.atom.name,
-				a=self.a,
-				b=self.b,
-				c=self.c
-			)
+			name=self.atom.name,
+			a=self.a,
+			b=self.b,
+			c=self.c
+		)
 
 class Preload:
 	def __init__(self, tile: Tile, register: str):
@@ -132,10 +144,12 @@ class Preload:
 		self.dist = 0
 
 	def __str__(self):
-		return "{reg} = {tile} // dist = {dist}".format(
+		return "ldmatrix(threadIdx.x, {tile}, {reg}); // of ({m_tiles}, {n_tiles}) dist = {dist}".format(
 			reg=self.register,
 			tile=self.tile,
-			dist=self.dist
+			dist=self.dist,
+			m_tiles=self.tile.m_tiles(),
+			n_tiles=self.tile.n_tiles()
 		)
 
 class Title:
@@ -344,13 +358,22 @@ code.loop({"sKV": "123"})
 code.finish()
 #for line in code.lines:
 #	print(line)
+
+# create `gemm` folder
+# store each section in a separate file named `gemm/{section_name}.txt`
+
+from pathlib import Path
+Path("gemm").mkdir(exist_ok=True)
+
 delay = 0.0
 for section_name in code.sections:
 	section = code.sections[section_name]
-	print("//=============================================")
-	for line in section:
-		print(line)
-		if section_name != "Init" and isinstance(line, Preload):
-			delay += max(0, 2-line.dist)
+	# normalize section name (convert to lowercase and replace spaces with underscores)
+	normalized_section_name = section_name.lower().replace(" ", "_")
+	with open("gemm/{name}.h".format(name=normalized_section_name), "w") as f:
+		for line in section:
+			f.write(str(line) + "\n")
+			if section_name != "Init" and isinstance(line, Preload):
+				delay += max(0, 2-line.dist)
 
-print("// delay per loop: {delay}".format(delay=delay))
+print("delay per loop: {delay}".format(delay=delay))

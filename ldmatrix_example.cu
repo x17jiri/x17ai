@@ -1,104 +1,60 @@
 #include "utils.cuh"
 
-// Matrix dimensions - hardcoded for simplicity
-#define ROWS 16
-#define COLS 16
-#define MATRIX_SIZE (ROWS * COLS)
+constexpr usize QK_DIM = 192;
+constexpr usize V_DIM = 128;
 
-// Kernel that demonstrates cp.async and ldmatrix
-__global__ void ldmatrix_kernel(f16* gmem) {
-	//using namespace sm80;
-    // Shared memory for the 8x8 matrix
-    __shared__ f16 smem[MATRIX_SIZE];
+constexpr usize Q_PER_BLOCK = 64;
+constexpr usize Q_PER_WARP = 8;
+constexpr usize GEMM_TILE = 16;
+constexpr usize GEMMS_PER_STEP = 2;
+constexpr usize KV_PER_STEP = (GEMM_TILE * GEMMS_PER_STEP);
+constexpr usize GMEM_PRELOAD = 3;
 
-    usize tid = threadIdx.x;
+constexpr usize BLOCK_DIM = Q_PER_BLOCK / Q_PER_WARP * 32;
 
-	GMatrix<f16, ROWS, COLS> gmatrix{GPtr<f16>(gmem)};
-	SMatrix<f16, ROWS, COLS> smatrix{SwizzledSptr<f16>(smem)};
-	cp_async<32>(tid, gmatrix, smatrix);
+__global__ void attn_kernel(
+	GMatrix<bf16, -1, QK_DIM> const &gQ,
+	GMatrix<bf16, -1, QK_DIM> const &gKV,
+	GMatrix<bf16, -1, V_DIM> const &gOut
+) {
+    extern __shared__ bf16 smem[];
 
-	/*cp_async(
-		reinterpret_cast<u128 const *>(gmem + 8*tid),
-		ldmatrix_swizzle(smem, 8*tid)
-	);*/
+	SMatrix<bf16, Q_PER_BLOCK, QK_DIM> sQ{smem};
+	SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, QK_DIM> sKV{smem + sQ.elems()};
 
-	// Wait for all async copies to complete
-	cp_async_commit();
-	cp_async_wait<0>();
-	__syncwarp();
-
-	/*union {
-		u32 reg;
-		f16 halves[2];
-	} a, b, c, d;
-	u32 off = ((tid & 16) / 2) + ((tid & 15) * COLS);
-	ldmatrix_8x8xu16_t_x4(
-		ldmatrix_swizzle(smem, off),
-		a.reg, b.reg, c.reg, d.reg
-	);*/
-	RMatrix<f16, 16, 16> rmatrix;
-	ldmatrix(tid, smatrix.transpose(), rmatrix);
-
-	RMatrix<f16, 16, 8> q;
-	ldmatrix(tid, smatrix.tile<16, 8>(0, 1), q);
-/*
-ncu --metrics l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum,l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum,l1tex__data_pipe_lsu_wavefronts_mem_shared_op_st.sum \
---section SourceCounters \
-./your_application
-*/
-	/*printf("Thread %2d: [%.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f]\n",
-		tid,
-		__half2float(rmatrix.tiles[0][0].first<f16>()), __half2float(rmatrix.tiles[0][0].second<f16>()),
-		__half2float(rmatrix.tiles[0][1].first<f16>()), __half2float(rmatrix.tiles[0][1].second<f16>()),
-		__half2float(rmatrix.tiles[1][0].first<f16>()), __half2float(rmatrix.tiles[1][0].second<f16>()),
-		__half2float(rmatrix.tiles[1][1].first<f16>()), __half2float(rmatrix.tiles[1][1].second<f16>())
-	);*/
-	printf("Thread %2d: q: [%.1f, %.1f, %.1f, %.1f]\n",
-		tid,
-		__half2float(q.tiles[0][0].first<f16>()), __half2float(q.tiles[0][0].second<f16>()),
-		__half2float(q.tiles[0][1].first<f16>()), __half2float(q.tiles[0][1].second<f16>())
+	// Preload Q from GMEM to SMEM
+	cp_async<BLOCK_DIM>(
+		threadIdx.x,
+		gQ.tile_m<Q_PER_BLOCK>(blockIdx.x),
+		sQ
 	);
+	// Sub-matrix with Qs for this warp. Note that this is just pointer arithmetic.
+	// The preload doesn't have to be finished yet.
+	SMatrix<bf16, Q_PER_WARP, QK_DIM> sQ_warp = sQ.tile_m<Q_PER_WARP>(threadIdx.x / 32);
 
-	//for (int i = 0; i < 8; i++) {
-	//	printf("smem[%2d] = %.1f\n", 8*tid + i, __half2float(smem[8*tid + i]));
-	//}
-/*
-	//
-
-	// Step 2: Use ldmatrix to load 8x8 block from shared memory to registers
-	// ldmatrix.sync.aligned.m8n8.x4.shared.b16 loads a matrix fragment
-	// The matrix must be stored in row-major format in shared memory
-	// Each thread will hold 8 half values (4 x 32-bit registers with 2 halves each)
-
-	unsigned reg[4];  // 4 x 32-bit registers = 8 x 16-bit halves
-
-	// Calculate shared memory address for ldmatrix
-	// ldmatrix expects 16-byte aligned address
-	unsigned smem_addr = __cvta_generic_to_shared(smem);
-
-	// Use ldmatrix to load 8x8 matrix fragment (m8n8)
-	// This loads 4 x 32-bit registers per thread
-	asm volatile(
-		"ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
-		: "=r"(reg[0]), "=r"(reg[1]), "=r"(reg[2]), "=r"(reg[3])
-		: "r"(smem_addr)
-	);
-
-	//__syncwarp();
-
-	// Step 3: Print the values held by each thread
-	// Each 32-bit register contains 2 half values
-	half* reg_as_half = (half*)reg;
-*/
-
-/*
-	printf("Thread %2d: [", tid);
-	for (int i = 0; i < 8; i++) {
-		printf("%.1f", __half2float(reg_as_half[i]));
-		if (i < 7) printf(", ");
+	// Start preloading KVs from GMEM to SMEM
+	X17_UNROLL for (usize kv_step = 0; kv_step < GMEM_PRELOAD - 1; ++kv_step) {
+		if (kv_step * KV_PER_STEP < gKV.m_rows()) {
+			cp_async<BLOCK_DIM>(
+				threadIdx.x,
+				gKV.tile_m<KV_PER_STEP>(kv_step),
+				sKV.tile_m<KV_PER_STEP>(kv_step)
+			);
+		}
+		cp_async_commit();
 	}
-	printf("]\n");
-*/
+	// Wait for the first batch of GMEM -> SMEM preloads to complete
+	cp_async_wait<GMEM_PRELOAD - 2>();
+	__syncthreads();
+
+	RMatrix<bf16, 16, 16> r0, r1, r2;
+	RMatrix<bf16, 16, 8> u0, u1;
+	#include "gemm/init.h"
+
+	// Sequential loop over KV
+	X17_NO_UNROLL for (usize kv_step = 0; kv_step < gKV.m_rows() / KV_PER_STEP; ++kv_step) {
+
+	}
 }
 
 int main() {
@@ -122,8 +78,8 @@ int main() {
     cudaMemcpy(d_matrix, h_matrix, MATRIX_SIZE * sizeof(half), cudaMemcpyHostToDevice);
 
     // Launch kernel with 1 warp (32 threads)
-    printf("Register values per thread after ldmatrix:\n");
-    ldmatrix_kernel<<<1, 32>>>(d_matrix);
+    constexpr usize SMEM_SIZE = MATRIX_SIZE * sizeof(u16);
+    attn_kernel<<<1, 32, SMEM_SIZE>>>(d_matrix);
 
     // Wait for kernel to complete
     cudaDeviceSynchronize();

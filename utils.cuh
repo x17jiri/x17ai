@@ -254,6 +254,10 @@ struct Matrix:
 		return MatrixColCount<N>::value();
 	}
 
+	X17_DEVICE usize elems() const {
+		return m_rows() * n_cols();
+	}
+
 	X17_DEVICE constexpr usize stride() const {
 		return STRIDE;
 	}
@@ -262,7 +266,7 @@ struct Matrix:
 		return L;
 	}
 
-	X17_DEVICE Matrix<Data, N, M, ColumnMajor> transpose() const requires(
+	X17_DEVICE Matrix<Data, N, M, ColumnMajor> t() const requires(
 		M >= 0 && N >= 0
 		&& L == RowMajor
 	) {
@@ -299,6 +303,13 @@ struct Matrix:
 				m_tile_idx * M_TILE * STRIDE + n_tile_idx * N_TILE
 			)
 		};
+	}
+
+	template<const isize M_TILE>
+	X17_DEVICE Matrix<Data, M_TILE, N, RowMajor, STRIDE> tile_m(
+		usize m_tile_idx
+	) const requires(M_TILE >= 0 && L == RowMajor && N >= 0) {
+		return tile<M_TILE, N>(m_tile_idx, 0);
 	}
 };
 
