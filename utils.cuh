@@ -140,6 +140,14 @@ struct GPtr {
 		return GPtr(_ptr + offset);
 	}
 
+	X17_DEVICE GPtr with_byte_offset(usize offset) const {
+		return GPtr(
+			static_cast<T *>(
+				static_cast<u8 *>(_ptr) + offset
+			)
+		);
+	}
+
 	X17_DEVICE T const *get() const {
 		return _ptr;
 	}
@@ -153,6 +161,14 @@ struct SPtr {
 
 	X17_DEVICE SPtr with_offset(usize offset) const {
 		return SPtr(_ptr + offset);
+	}
+
+	X17_DEVICE SPtr with_byte_offset(usize offset) const {
+		return SPtr(
+			static_cast<T *>(
+				static_cast<u8 *>(_ptr) + offset
+			)
+		);
 	}
 
 	X17_DEVICE T *get() const {
@@ -423,9 +439,25 @@ X17_DEVICE void ldmatrix(
 	SMatrix<T, 16, 8, RowMajor, STRIDE> const &src,
 	RMatrix<T, 16, 8> &dst
 ) {
-	u32 off = (thread_idx & 15) * STRIDE;
+	u32 byte_offset = (thread_idx & 15) * STRIDE * sizeof(T);
 	sm80::ldmatrix_8x8xu16_x2(
-		src.data.with_offset(off).get(),
+		src.data.with_byte_offset(byte_offset).get(),
+		dst.tiles[0][0].reg, dst.tiles[1][0].reg
+	);
+}
+
+template<typename T, const usize STRIDE>
+requires(sizeof(T) == 2)
+X17_DEVICE void ldmatrix(
+	usize thread_idx,
+	SMatrix<T, 16, 8, ColumnMajor, STRIDE> const &src,
+	RMatrix<T, 16, 8> &dst
+) {
+	u32 byte_offset =
+		((thread_idx & 7) * STRIDE * sizeof(T))
+		+ ((thread_idx & 8) * sizeof(T));
+	sm80::ldmatrix_8x8xu16_x2(
+		src.data.with_byte_offset(byte_offset).get(),
 		dst.tiles[0][0].reg, dst.tiles[1][0].reg
 	);
 }
@@ -437,9 +469,11 @@ X17_DEVICE void ldmatrix(
 	SMatrix<T, 16, 16, RowMajor, STRIDE> const &src,
 	RMatrix<T, 16, 16> &dst
 ) {
-	u32 off = ((thread_idx & 16) / sizeof(T)) + ((thread_idx & 15) * STRIDE);
+	u32 byte_offset =
+		((thread_idx & 15) * STRIDE * sizeof(T))
+		+ ((thread_idx & 16) / 2 * sizeof(T));
 	sm80::ldmatrix_8x8xu16_x4(
-		src.data.with_offset(off).get(),
+		src.data.with_byte_offset(byte_offset).get(),
 		dst.tiles[0][0].reg, dst.tiles[1][0].reg, dst.tiles[0][1].reg, dst.tiles[1][1].reg
 	);
 }
@@ -451,9 +485,11 @@ X17_DEVICE void ldmatrix(
 	SMatrix<T, 16, 16, ColumnMajor, STRIDE> const &src,
 	RMatrix<T, 16, 16> &dst
 ) {
-	u32 off = ((thread_idx & 16) / sizeof(T)) + ((thread_idx & 15) * STRIDE);
+	u32 byte_offset =
+		((thread_idx & 15) * STRIDE * sizeof(T))
+		+ ((thread_idx & 16) / 2 * sizeof(T));
 	sm80::ldmatrix_t_8x8xu16_x4(
-		src.data.with_offset(off).get(),
+		src.data.with_byte_offset(byte_offset).get(),
 		dst.tiles[0][0].reg, dst.tiles[0][1].reg, dst.tiles[1][0].reg, dst.tiles[1][1].reg
 	);
 }
