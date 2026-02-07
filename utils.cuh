@@ -43,6 +43,8 @@ using usize = u32;
 
 using f16 = __half;
 using bf16 = __nv_bfloat16;
+using f32 = float;
+using f64 = double;
 
 X17_DEVICE u32 cast_smem_ptr_to_uint(void const *const ptr) {
 	return static_cast<u32>(__cvta_generic_to_shared(ptr));
@@ -127,6 +129,45 @@ namespace sm80 {
 		} else {
 			asm volatile("cp.async.wait_group %0;\n" : : "n"(N));
 		}
+	}
+
+	X17_DEVICE void mma_bf16_f32(
+		f32       &d0, f32       &d1, f32       &d2, f32       &d3,
+		u32 const &a0, u32 const &a1, u32 const &a2, u32 const &a3,
+		u32 const &b0, u32 const &b1
+	) {
+		asm volatile(
+			"mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32.zero "
+			"{%0,  %1,  %2,  %3},"
+			"{%4,  %5,  %6,  %7},"
+			"{%8,  %9};\n"
+			:
+				"=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
+			:
+				"r"(a0),  "r"(a1),  "r"(a2),  "r"(a3),
+				"r"(b0),  "r"(b1)
+		);
+	}
+
+	X17_DEVICE void mma_bf16_f32(
+		f32       &d0, f32       &d1, f32       &d2, f32       &d3,
+		u32 const &a0, u32 const &a1, u32 const &a2, u32 const &a3,
+		u32 const &b0, u32 const &b1,
+		f32 const &c0, f32 const &c1, f32 const &c2, f32 const &c3
+	) {
+		asm volatile(
+			"mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+			"{%0,  %1,  %2,  %3},"
+			"{%4,  %5,  %6,  %7},"
+			"{%8,  %9},"
+			"{%10, %11, %12, %13};\n"
+			:
+				"=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
+			:
+				"r"(a0),  "r"(a1),  "r"(a2),  "r"(a3),
+				"r"(b0),  "r"(b1),
+				"f"(c0),  "f"(c1),  "f"(c2),  "f"(c3)
+		);
 	}
 }
 
@@ -416,11 +457,18 @@ struct Fragment_8x8_u16 {
 
 template<typename T, const isize M, const isize N>
 requires(
-	sizeof(T) == 2 // u16
+	M > 0 && M % 8 == 0
+	&& N > 0 && N % 8 == 0
+)
+struct RMatrix;
+
+template<typename T, const isize M, const isize N>
+requires(
+	sizeof(T) == 2 // 16-bit
 	&& M > 0 && M % 8 == 0
 	&& N > 0 && N % 8 == 0
 )
-struct RMatrix {
+struct RMatrix<T, M, N> {
 	Fragment_8x8_u16 tiles[M / 8][N / 8];
 
 	X17_DEVICE constexpr usize m_rows() const {
@@ -430,7 +478,76 @@ struct RMatrix {
 	X17_DEVICE constexpr usize n_cols() const {
 		return N;
 	}
+
+	X17_DEVICE constexpr usize elems() const {
+		return M * N;
+	}
+
+	X17_DEVICE void zero_() {
+		X17_UNROLL for (usize j = 0; j < M / 8; j++) {
+			X17_UNROLL for (usize i = 0; i < N / 8; i++) {
+				tiles[j][i].reg = 0;
+			}
+		}
+	}
 };
+
+template<typename T, const isize M, const isize N>
+requires(
+	sizeof(T) == 4 // 32-bit
+	&& M > 0 && M % 8 == 0
+	&& N > 0 && N % 8 == 0
+)
+struct RMatrix<T, M, N> {
+	T tiles[M / 8][N / 8][2];
+
+	X17_DEVICE constexpr usize m_rows() const {
+		return M;
+	}
+
+	X17_DEVICE constexpr usize n_cols() const {
+		return N;
+	}
+
+	X17_DEVICE constexpr usize elems() const {
+		return M * N;
+	}
+
+	X17_DEVICE void zero_() {
+		X17_UNROLL for (usize j = 0; j < M / 8; j++) {
+			X17_UNROLL for (usize i = 0; i < N / 8; i++) {
+				tiles[j][i][0] = 0;
+				tiles[j][i][1] = 0;
+			}
+		}
+	}
+};
+
+X17_DEVICE void acc_gemm(
+	RMatrix<f32, 16, 8> &c,
+	RMatrix<bf16, 16, 16> const &a,
+	RMatrix<bf16, 16, 8> const &b
+) {
+    sm80::mma_bf16_f32(
+		c.tiles[0][0][0], c.tiles[0][0][1], c.tiles[1][0][0], c.tiles[1][0][1],
+		a.tiles[0][0].reg, a.tiles[0][1].reg, a.tiles[1][0].reg, a.tiles[1][1].reg,
+		b.tiles[0][0].reg, b.tiles[1][0].reg,
+		c.tiles[0][0][0], c.tiles[0][0][1], c.tiles[1][0][0], c.tiles[1][0][1]
+	);
+}
+
+
+X17_DEVICE void gemm(
+	RMatrix<f32, 16, 8> &c,
+	RMatrix<bf16, 16, 16> const &a,
+	RMatrix<bf16, 16, 8> const &b
+) {
+    sm80::mma_bf16_f32(
+		c.tiles[0][0][0], c.tiles[0][0][1], c.tiles[1][0][0], c.tiles[1][0][1],
+		a.tiles[0][0].reg, a.tiles[0][1].reg, a.tiles[1][0].reg, a.tiles[1][1].reg,
+		b.tiles[0][0].reg, b.tiles[1][0].reg
+	);
+}
 
 template<typename T, const usize STRIDE>
 requires(sizeof(T) == 2)

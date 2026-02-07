@@ -333,10 +333,10 @@ atom = GemmAtom(
 code = Code()
 # rScores=sK * sQ^T
 code.gemm(
-	"GEMM 1",
+	"rScores",
 	Matrix("sKV", 32, 192, Storage.Shared, Layout.RowMajor),
 	Matrix("sQ", 8, 192, Storage.Shared, Layout.RowMajor).T(),
-	Matrix("rScores", 32, 8, Storage.Register, Layout.ColMajor),
+	Matrix("rScores_f32", 32, 8, Storage.Register, Layout.ColMajor),
 	atom
 )
 code.lines.append("//++a")
@@ -345,7 +345,7 @@ code.lines.append("//++a")
 code.lines.append("//++dist")
 #print("---")
 code.gemm(
-	"GEMM 2",
+	"rO",
 	Matrix("sKV", 32, 128, Storage.Shared, Layout.RowMajor).T(),
 	Matrix("rScores", 32, 8, Storage.Register, Layout.ColMajor),
 	Matrix("rO", 128, 8, Storage.Register, Layout.ColMajor),
@@ -368,8 +368,7 @@ Path("gemm").mkdir(exist_ok=True)
 delay = 0.0
 for section_name in code.sections:
 	section = code.sections[section_name]
-	# normalize section name (convert to lowercase and replace spaces with underscores)
-	normalized_section_name = section_name.lower().replace(" ", "_")
+	normalized_section_name = section_name.replace(" ", "_")
 	with open("gemm/{name}.h".format(name=normalized_section_name), "w") as f:
 		for line in section:
 			f.write(str(line) + "\n")
