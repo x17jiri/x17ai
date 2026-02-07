@@ -455,20 +455,15 @@ struct Fragment_8x8_u16 {
 	}
 };
 
+template<typename T, const isize M, const isize N, const usize SZ = sizeof(T)>
+struct RMatrix_impl;
+
 template<typename T, const isize M, const isize N>
 requires(
 	M > 0 && M % 8 == 0
 	&& N > 0 && N % 8 == 0
 )
-struct RMatrix;
-
-template<typename T, const isize M, const isize N>
-requires(
-	sizeof(T) == 2 // 16-bit
-	&& M > 0 && M % 8 == 0
-	&& N > 0 && N % 8 == 0
-)
-struct RMatrix<T, M, N> {
+struct RMatrix_impl<T, M, N, 2> {
 	Fragment_8x8_u16 tiles[M / 8][N / 8];
 
 	X17_DEVICE constexpr usize m_rows() const {
@@ -494,11 +489,10 @@ struct RMatrix<T, M, N> {
 
 template<typename T, const isize M, const isize N>
 requires(
-	sizeof(T) == 4 // 32-bit
-	&& M > 0 && M % 8 == 0
+	M > 0 && M % 8 == 0
 	&& N > 0 && N % 8 == 0
 )
-struct RMatrix<T, M, N> {
+struct RMatrix_impl<T, M, N, 4> {
 	T tiles[M / 8][N / 8][2];
 
 	X17_DEVICE constexpr usize m_rows() const {
@@ -522,6 +516,14 @@ struct RMatrix<T, M, N> {
 		}
 	}
 };
+
+template<typename T, const isize M, const isize N>
+requires(
+	sizeof(T) == 2 || sizeof(T) == 4
+	&& M > 0 && M % 8 == 0
+	&& N > 0 && N % 8 == 0
+)
+struct RMatrix: RMatrix_impl<T, M, N, sizeof(T)> {};
 
 X17_DEVICE void acc_gemm(
 	RMatrix<f32, 16, 8> &c,
