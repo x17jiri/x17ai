@@ -1,4 +1,5 @@
 #include "utils.cuh"
+#include <vector>
 
 constexpr usize QK_DIM = 192;
 constexpr usize V_DIM = 128;
@@ -13,11 +14,41 @@ constexpr usize GMEM_PRELOAD = 3;
 constexpr usize BLOCK_DIM = Q_PER_BLOCK / Q_PER_WARP * 32;
 
 __global__ void attn_kernel(
+	bf16 *pA, bf16 *pB,
 	GMatrix<bf16, -1, QK_DIM> const &gQ,
 	GMatrix<bf16, -1, QK_DIM> const &gKV,
 	GMatrix<bf16, -1, V_DIM> const &gOut
 ) {
-    extern __shared__ bf16 smem[];
+    __shared__ bf16 smem[256 + 128];
+
+	GMatrix<bf16, 16, 16> gA{pA};
+	GMatrix<bf16, 8, 16> gB{pB};
+
+	SMatrix<bf16, 16, 16> sA{smem};
+	SMatrix<bf16, 8, 16> sB{smem + sA.elems()};
+
+	cp_async<32>(threadIdx.x, gA, sA);
+	cp_async<32>(threadIdx.x, gB, sB);
+	cp_async_commit();
+	cp_async_wait();
+	__syncwarp();
+
+	RMatrix<bf16, 16, 16> rA;
+	ldmatrix(threadIdx.x, sA.t(), rA);
+
+	RMatrix<bf16, 16, 8, ColumnMajor> rB;
+	ldmatrix(threadIdx.x, sB.t(), rB);
+
+	RMatrix<f32, 16, 8, ColumnMajor> rC;
+	rC.zero_();
+
+	acc_gemm(rC, rA, rB);
+
+	printf("Thread %d: c00 = %f, c01 = %f, c10 = %f, c11 = %f\n",
+		threadIdx.x,
+		rC.tiles[0][0].first(), rC.tiles[0][0].second(),
+		rC.tiles[1][0].first(), rC.tiles[1][0].second()
+	);
 
 /*
 	SMatrix<bf16, Q_PER_BLOCK, QK_DIM> sQ{smem};
@@ -76,36 +107,37 @@ __global__ void attn_kernel(
 }
 
 int main() {
-/*
-    // Allocate host memory
-    half* h_matrix = (half*)malloc(MATRIX_SIZE * sizeof(half));
+	std::vector<bf16> A(256);
+	for (int i = 0; i < 256; i++) {
+		A[i] = bf16(float(i));
+	}
 
-    // Initialize with sequential values: 1.0, 2.0, 3.0, ...
-    printf("Input matrix (row-major 8x8):\n");
-    for (int i = 0; i < MATRIX_SIZE; i++) {
-        h_matrix[i] = __float2half((float)(i + 1));
-        printf("%5.1f", __half2float(h_matrix[i]));
-        if ((i + 1) % COLS == 0) printf("\n");
-    }
-    printf("\n");
+	std::vector<bf16> B(128);
+	for (int i = 0; i < 128; i++) {
+		B[i] = bf16(float(i * 100));
+	}
 
-    // Allocate device memory
-    half* d_matrix;
-    cudaMalloc(&d_matrix, MATRIX_SIZE * sizeof(half));
+	bf16 *dA, *dB;
+	cudaMalloc(&dA, A.size() * sizeof(bf16));
+	cudaMalloc(&dB, B.size() * sizeof(bf16));
 
-    // Copy to device
-    cudaMemcpy(d_matrix, h_matrix, MATRIX_SIZE * sizeof(half), cudaMemcpyHostToDevice);
+	cudaMemcpy(dA, A.data(), A.size() * sizeof(bf16), cudaMemcpyHostToDevice);
+	cudaMemcpy(dB, B.data(), B.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 
-    // Launch kernel with 1 warp (32 threads)
-    constexpr usize SMEM_SIZE = MATRIX_SIZE * sizeof(u16);
-    attn_kernel<<<1, 32, SMEM_SIZE>>>(d_matrix);
-	*/
-    attn_kernel<<<1, 32, 0>>>(
+	attn_kernel<<<1, 32>>>(
+		dA, dB,
 		GMatrix<bf16, -1, QK_DIM>{nullptr, 0},
 		GMatrix<bf16, -1, QK_DIM>{nullptr, 0},
 		GMatrix<bf16, -1, V_DIM>{nullptr, 0}
 	);
-		    // Wait for kernel to complete
+
+/*    attn_kernel<<<1, 32, 0>>>(
+		GMatrix<bf16, -1, QK_DIM>{nullptr, 0},
+		GMatrix<bf16, -1, QK_DIM>{nullptr, 0},
+		GMatrix<bf16, -1, V_DIM>{nullptr, 0}
+	);*/
+
+	// Wait for kernel to complete
     cudaDeviceSynchronize();
 
     // Check for errors

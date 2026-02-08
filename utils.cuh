@@ -93,12 +93,10 @@ namespace sm75 {
 	/// `smem_ptr` must be 16-byte aligned.
 	/// `offset * sizeof(T)` must be a multiple of 16.
 	template<typename T>
-	X17_DEVICE T *ldmatrix_swizzle(T *smem_ptr, u32 offset) {
-		offset *= sizeof(T);
-		// 111 000 0000
-		offset ^= ((offset & (7 << 7)) >> 3);
+	X17_DEVICE T *ldmatrix_swizzle(T *smem_ptr, u32 byte_offset) {
+		byte_offset ^= ((byte_offset & (7 << 7)) >> 3);
 		return reinterpret_cast<T *>(
-			reinterpret_cast<u8 *>(smem_ptr) + offset
+			reinterpret_cast<u8 *>(smem_ptr) + byte_offset
 		);
 	}
 }
@@ -122,7 +120,7 @@ namespace sm80 {
 	}
 
 	/// Blocks until all but N previous cp.async.commit_group operations have committed.
-	template<int N>
+	template<int N = 0>
 	X17_DEVICE void cp_async_wait() {
 		if constexpr (N == 0) {
 			asm volatile("cp.async.wait_all;\n" : :);
@@ -220,16 +218,23 @@ struct SPtr {
 template<typename T>
 struct SwizzledSptr {
 	T *_ptr;
-	usize _offset;
+	usize _byte_offset;
 
-	X17_DEVICE SwizzledSptr(T *p, usize offset = 0): _ptr(p), _offset(offset) {}
+	X17_DEVICE SwizzledSptr(T *p, usize byte_offset = 0):
+		_ptr(p),
+		_byte_offset(byte_offset)
+	{}
 
 	X17_DEVICE SwizzledSptr with_offset(usize offset) const {
-		return SwizzledSptr(_ptr, _offset + offset);
+		return SwizzledSptr(_ptr, _byte_offset + offset * sizeof(T));
+	}
+
+	X17_DEVICE SwizzledSptr with_byte_offset(usize byte_offset) const {
+		return SwizzledSptr(_ptr, _byte_offset + byte_offset);
 	}
 
 	X17_DEVICE T *get() const {
-		return sm80::ldmatrix_swizzle(_ptr, _offset);
+		return sm80::ldmatrix_swizzle(_ptr, _byte_offset);
 	}
 };
 
@@ -399,12 +404,14 @@ X17_DEVICE void cp_async(
 	static_assert(BYTES % 16 == 0, "cp.async size must be multiple of 16 bytes");
 
 	constexpr usize ITERATIONS = CP_ASYNC_CNT / BLOCK_DIM;
-	X17_UNROLL for (usize i = 0; i < ITERATIONS; i++) {
-		usize offset = (i * BLOCK_DIM + thread_idx) * (16 / sizeof(T));
-		sm80::cp_async(
-			src.data.with_offset(offset).get(),
-			dst.data.with_offset(offset).get()
-		);
+	if constexpr (ITERATIONS > 0) {
+		X17_UNROLL for (usize i = 0; i < ITERATIONS; i++) {
+			usize offset = (i * BLOCK_DIM + thread_idx) * (16 / sizeof(T));
+			sm80::cp_async(
+				src.data.with_offset(offset).get(),
+				dst.data.with_offset(offset).get()
+			);
+		}
 	}
 	if constexpr (CP_ASYNC_CNT % BLOCK_DIM != 0) {
 		if (thread_idx < CP_ASYNC_CNT % BLOCK_DIM) {
@@ -429,11 +436,11 @@ using sm80::cp_async_wait;
 /// row 1: |  4 |  4 |  5 |  5 |  6 |  6 |  7 |  7 |
 /// ...
 /// row 7: | 28 | 28 | 29 | 29 | 30 | 30 | 31 | 31 |
+template<typename T>
+requires(sizeof(T) == 2)
 struct Fragment_8x8_u16 {
 	u32 reg;
 
-	template<typename T>
-	requires(sizeof(T) == 2)
 	X17_DEVICE T first() const {
 		union {
 			u32 reg;
@@ -443,8 +450,6 @@ struct Fragment_8x8_u16 {
 		return a.halves[0];
 	}
 
-	template<typename T>
-	requires(sizeof(T) == 2)
 	X17_DEVICE T second() const {
 		union {
 			u32 reg;
@@ -452,6 +457,36 @@ struct Fragment_8x8_u16 {
 		} a;
 		a.reg = reg;
 		return a.halves[1];
+	}
+
+	X17_DEVICE void set(T first, T second) {
+		union {
+			u32 reg;
+			T halves[2];
+		} a;
+		a.halves[0] = first;
+		a.halves[1] = second;
+		reg = a.reg;
+	}
+};
+
+template<typename T>
+requires(sizeof(T) == 4)
+struct Fragment_8x8_u32 {
+	T reg0;
+	T reg1;
+
+	X17_DEVICE T first() const {
+		return reg0;
+	}
+
+	X17_DEVICE T second() const {
+		return reg1;
+	}
+
+	X17_DEVICE void set(T first, T second) {
+		reg0 = first;
+		reg1 = second;
 	}
 };
 
@@ -464,7 +499,7 @@ requires(
 	&& N > 0 && N % 8 == 0
 )
 struct RMatrix_impl<T, M, N, 2> {
-	Fragment_8x8_u16 tiles[M / 8][N / 8];
+	Fragment_8x8_u16<T> tiles[M / 8][N / 8];
 
 	X17_DEVICE constexpr usize m_rows() const {
 		return M;
@@ -481,7 +516,7 @@ struct RMatrix_impl<T, M, N, 2> {
 	X17_DEVICE void zero_() {
 		X17_UNROLL for (usize j = 0; j < M / 8; j++) {
 			X17_UNROLL for (usize i = 0; i < N / 8; i++) {
-				tiles[j][i].reg = 0;
+				tiles[j][i].set(T(), T());
 			}
 		}
 	}
@@ -493,7 +528,7 @@ requires(
 	&& N > 0 && N % 8 == 0
 )
 struct RMatrix_impl<T, M, N, 4> {
-	T tiles[M / 8][N / 8][2];
+	Fragment_8x8_u32<T> tiles[M / 8][N / 8];
 
 	X17_DEVICE constexpr usize m_rows() const {
 		return M;
@@ -510,14 +545,13 @@ struct RMatrix_impl<T, M, N, 4> {
 	X17_DEVICE void zero_() {
 		X17_UNROLL for (usize j = 0; j < M / 8; j++) {
 			X17_UNROLL for (usize i = 0; i < N / 8; i++) {
-				tiles[j][i][0] = 0;
-				tiles[j][i][1] = 0;
+				tiles[j][i].set(T(), T());
 			}
 		}
 	}
 };
 
-template<typename T, const isize M, const isize N>
+template<typename T, const isize M, const isize N, const MatrixLayout L = RowMajor>
 requires(
 	sizeof(T) == 2 || sizeof(T) == 4
 	&& M > 0 && M % 8 == 0
@@ -526,15 +560,15 @@ requires(
 struct RMatrix: RMatrix_impl<T, M, N, sizeof(T)> {};
 
 X17_DEVICE void acc_gemm(
-	RMatrix<f32, 16, 8> &c,
+	RMatrix<f32, 16, 8, ColumnMajor> &c,
 	RMatrix<bf16, 16, 16> const &a,
-	RMatrix<bf16, 16, 8> const &b
+	RMatrix<bf16, 16, 8, ColumnMajor> const &b
 ) {
     sm80::mma_bf16_f32(
-		c.tiles[0][0][0], c.tiles[0][0][1], c.tiles[1][0][0], c.tiles[1][0][1],
-		a.tiles[0][0].reg, a.tiles[0][1].reg, a.tiles[1][0].reg, a.tiles[1][1].reg,
+		c.tiles[0][0].reg0, c.tiles[0][0].reg1, c.tiles[1][0].reg0, c.tiles[1][0].reg1,
+		a.tiles[0][0].reg, a.tiles[1][0].reg, a.tiles[0][1].reg, a.tiles[1][1].reg,
 		b.tiles[0][0].reg, b.tiles[1][0].reg,
-		c.tiles[0][0][0], c.tiles[0][0][1], c.tiles[1][0][0], c.tiles[1][0][1]
+		c.tiles[0][0].reg0, c.tiles[0][0].reg1, c.tiles[1][0].reg0, c.tiles[1][0].reg1
 	);
 }
 
@@ -545,8 +579,8 @@ X17_DEVICE void gemm(
 	RMatrix<bf16, 16, 8> const &b
 ) {
     sm80::mma_bf16_f32(
-		c.tiles[0][0][0], c.tiles[0][0][1], c.tiles[1][0][0], c.tiles[1][0][1],
-		a.tiles[0][0].reg, a.tiles[0][1].reg, a.tiles[1][0].reg, a.tiles[1][1].reg,
+		c.tiles[0][0].reg0, c.tiles[0][0].reg1, c.tiles[1][0].reg0, c.tiles[1][0].reg1,
+		a.tiles[0][0].reg, a.tiles[1][0].reg, a.tiles[0][1].reg, a.tiles[1][1].reg,
 		b.tiles[0][0].reg, b.tiles[1][0].reg
 	);
 }
@@ -570,7 +604,7 @@ requires(sizeof(T) == 2)
 X17_DEVICE void ldmatrix(
 	usize thread_idx,
 	SMatrix<T, 16, 8, ColumnMajor, STRIDE> const &src,
-	RMatrix<T, 16, 8> &dst
+	RMatrix<T, 16, 8, ColumnMajor> &dst
 ) {
 	u32 byte_offset =
 		((thread_idx & 7) * STRIDE * sizeof(T))
@@ -586,7 +620,7 @@ requires(sizeof(T) == 2)
 X17_DEVICE void ldmatrix(
 	usize thread_idx,
 	SMatrix<T, 16, 16, RowMajor, STRIDE> const &src,
-	RMatrix<T, 16, 16> &dst
+	RMatrix<T, 16, 16, RowMajor> &dst
 ) {
 	u32 byte_offset =
 		((thread_idx & 15) * STRIDE * sizeof(T))
@@ -602,7 +636,7 @@ requires(sizeof(T) == 2)
 X17_DEVICE void ldmatrix(
 	usize thread_idx,
 	SMatrix<T, 16, 16, ColumnMajor, STRIDE> const &src,
-	RMatrix<T, 16, 16> &dst
+	RMatrix<T, 16, 16, RowMajor> &dst
 ) {
 	u32 byte_offset =
 		((thread_idx & 15) * STRIDE * sizeof(T))
