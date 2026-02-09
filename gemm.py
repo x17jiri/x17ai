@@ -1,5 +1,6 @@
 
 from enum import Enum, auto
+import sys
 
 class Layout(Enum):
 	RowMajor = auto()
@@ -113,7 +114,7 @@ class Tile:
 		))
 
 class GemmAtom:
-	def __init__(self, name, m, n, k, layout_a, layout_b, layout_c):
+	def __init__(self, name, m, n, k, layout_a, layout_b, layout_c, delay):
 		self.name = name
 		self.m = m
 		self.n = n
@@ -121,6 +122,7 @@ class GemmAtom:
 		self.layout_a = layout_a
 		self.layout_b = layout_b
 		self.layout_c = layout_c
+		self.delay = delay
 
 class AtomCall:
 	def __init__(self, atom: GemmAtom, a: Tile, b: Tile, c: Tile):
@@ -171,7 +173,9 @@ class Code:
 		assert k == k2, "Inner dimensions must match"
 		m2 = c.m if not c.transposed else c.n
 		n2 = c.n if not c.transposed else c.m
-		assert m == m2 and n == n2, "Output dimensions must match"
+		assert m == m2 and n == n2, "Output dimensions must match (m={m} n={n} vs m2={m2} n2={n2})".format(
+			m=m, n=n, m2=m2, n2=n2
+		)
 
 		m_steps = m // atom.m
 		n_steps = n // atom.n
@@ -197,27 +201,24 @@ class Code:
 			if m_steps > 1 and k_steps > 1: result.append("")
 		self.lines += result
 
-	def preload(self, a_regs, b_regs):
+	def preload(self, regs):
 		self.preload = []
 		for _ in self.lines: self.preload.append([])
 		assigned = {}
-		next_a = 0
-		next_b = 0
+		next_reg = 0
 		for i in range(len(self.lines)):
 			line = self.lines[i]
 			if not isinstance(line, AtomCall):
-				if line == "//++a":
-					next_a += 1
-				elif line == "//++b":
-					next_b += 1
+				if line == "//++reg":
+					next_reg = (next_reg + 1) % len(regs)
 				continue
 
 			if line.a.matrix.storage == Storage.Shared:
 				if line.a in assigned:
 					line.a = assigned[line.a]
 				else:
-					reg = a_regs[next_a]
-					next_a = (next_a + 1) % len(a_regs)
+					reg = regs[next_reg]
+					next_reg = (next_reg + 1) % len(regs)
 					assigned[line.a] = reg
 					self.preload[i].append(Preload(line.a, reg))
 					line.a = reg
@@ -225,13 +226,13 @@ class Code:
 				if line.b in assigned:
 					line.b = assigned[line.b]
 				else:
-					reg = b_regs[next_b]
-					next_b = (next_b + 1) % len(b_regs)
+					reg = regs[next_reg]
+					next_reg = (next_reg + 1) % len(regs)
 					assigned[line.b] = reg
 					self.preload[i].append(Preload(line.b, reg))
 					line.b = reg
 
-	def schedule_line(self, i, preload_next_loop):
+	def schedule_line(self, i, preload_next_loop, max_dist=100):
 		lines = self.lines
 		p_list  = self.preload[i]
 		self.preload[i] = []
@@ -245,10 +246,10 @@ class Code:
 				if not isinstance(lines[j], AtomCall):
 					new_i = j
 					if lines[j] == "//++dist":
-						p.dist += 1
+						p.dist += 12
 				elif lines[j].a != register and lines[j].b != register:
 					new_i = j
-					p.dist += 1
+					p.dist += lines[j].atom.delay
 				else:
 					break
 				# ...
@@ -256,6 +257,8 @@ class Code:
 					for prev_p in self.preload[i]:
 						if prev_p.tile.matrix.name == mat_name:
 							break;
+
+			new_i = max(i - max_dist, new_i)
 
 			# move line to new_i
 			insertions.append((new_i, p))
@@ -283,7 +286,7 @@ class Code:
 	def loop(self, preload_next_loop):
 		self.lines.append("")
 		self.preload.append(self.preload[0][:])
-		self.schedule_line(len(self.lines)-1, preload_next_loop)
+		self.schedule_line(len(self.lines)-1, preload_next_loop, max_dist=2)
 
 	def finish(self):
 		for i in range(len(self.preload)):
@@ -323,36 +326,40 @@ class Code:
 atom = GemmAtom(
 	"gemm",
 	m=16,
-	n=8,
+	n=16,
 	k=16,
 	layout_a=Layout.RowMajor,
 	layout_b=Layout.ColMajor,
-	layout_c=Layout.ColMajor
+	layout_c=Layout.RowMajor,
+	delay=12*2
 )
 
 code = Code()
-# rScores=sK * sQ^T
+# rScores=sQ * sK^T
 code.gemm(
 	"rScores",
-	Matrix("sKV", 32, 192, Storage.Shared, Layout.RowMajor),
-	Matrix("sQ", 8, 192, Storage.Shared, Layout.RowMajor).T(),
-	Matrix("rScores_f32", 32, 8, Storage.Register, Layout.ColMajor),
+	Matrix("sQ", 16, 192, Storage.Shared, Layout.RowMajor),
+	Matrix("sKV", 16, 192, Storage.Shared, Layout.RowMajor).T(),
+	Matrix("rScores_f32", 16, 16, Storage.Register, Layout.RowMajor),
 	atom
 )
-code.lines.append("//++a")
-code.lines.append("//++a")
-#code.lines.append("//++dist")
+#code.lines.append("//++reg")
+#code.lines.append("//++reg")
+#code.lines.append("//++reg")
+#code.lines.append("//++reg")
+#code.lines.append("//++reg")
+code.lines.append("//++dist")
 code.lines.append("//++dist")
 #print("---")
 code.gemm(
 	"rO",
-	Matrix("sKV", 32, 128, Storage.Shared, Layout.RowMajor).T(),
-	Matrix("rScores", 32, 8, Storage.Register, Layout.ColMajor),
-	Matrix("rO", 128, 8, Storage.Register, Layout.ColMajor),
+	Matrix("rScores", 16, 16, Storage.Register, Layout.RowMajor),
+	Matrix("sKV", 16, 128, Storage.Shared, Layout.RowMajor),
+	Matrix("rO", 16, 128, Storage.Register, Layout.RowMajor),
 	atom
 )
 
-code.preload(["r0", "r1", "r2"], ["u0", "u1"])
+code.preload(["r0", "r1", "r2", "r3"])
 code.schedule()
 code.loop({"sKV": "123"})
 code.finish()
@@ -373,6 +380,12 @@ for section_name in code.sections:
 		for line in section:
 			f.write(str(line) + "\n")
 			if section_name != "Init" and isinstance(line, Preload):
-				delay += max(0, 2-line.dist)
+				delay += max(0, 24-line.dist)
+
+for section_name in code.sections:
+	section = code.sections[section_name]
+	normalized_section_name = section_name.replace(" ", "_")
+	for line in section:
+		sys.stdout.write(str(line) + "\n")
 
 print("delay per loop: {delay}".format(delay=delay))

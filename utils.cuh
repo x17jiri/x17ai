@@ -490,16 +490,25 @@ struct Fragment_8x8_u32 {
 	}
 };
 
-template<typename T, const isize M, const isize N, const usize SZ = sizeof(T)>
+template<
+	typename T,
+	const isize M, const isize N,
+	const usize MAJOR_DIM, const usize MINOR_DIM,
+	const usize SZ = sizeof(T)
+>
 struct RMatrix_impl;
 
-template<typename T, const isize M, const isize N>
+template<
+	typename T,
+	const isize M, const isize N,
+	const usize MAJOR_DIM, const usize MINOR_DIM
+>
 requires(
 	M > 0 && M % 8 == 0
 	&& N > 0 && N % 8 == 0
 )
-struct RMatrix_impl<T, M, N, 2> {
-	Fragment_8x8_u16<T> tiles[M / 8][N / 8];
+struct RMatrix_impl<T, M, N, MAJOR_DIM, MINOR_DIM, 2> {
+	Fragment_8x8_u16<T> tiles[MINOR_DIM / 8][MAJOR_DIM / 8];
 
 	X17_DEVICE constexpr usize m_rows() const {
 		return M;
@@ -522,13 +531,17 @@ struct RMatrix_impl<T, M, N, 2> {
 	}
 };
 
-template<typename T, const isize M, const isize N>
+template<
+	typename T,
+	const isize M, const isize N,
+	const usize MAJOR_DIM, const usize MINOR_DIM
+>
 requires(
 	M > 0 && M % 8 == 0
 	&& N > 0 && N % 8 == 0
 )
-struct RMatrix_impl<T, M, N, 4> {
-	Fragment_8x8_u32<T> tiles[M / 8][N / 8];
+struct RMatrix_impl<T, M, N, MAJOR_DIM, MINOR_DIM, 4> {
+	Fragment_8x8_u32<T> tiles[MINOR_DIM / 8][MAJOR_DIM / 8];
 
 	X17_DEVICE constexpr usize m_rows() const {
 		return M;
@@ -557,12 +570,18 @@ requires(
 	&& M > 0 && M % 8 == 0
 	&& N > 0 && N % 8 == 0
 )
-struct RMatrix: RMatrix_impl<T, M, N, sizeof(T)> {};
+struct RMatrix: RMatrix_impl<
+	T,
+	M, N,
+	(L == RowMajor ? N : M),
+	(L == RowMajor ? M : N),
+	sizeof(T)
+> {};
 
 X17_DEVICE void acc_gemm(
-	RMatrix<f32, 16, 8, ColumnMajor> &c,
+	RMatrix<f32, 16, 16, RowMajor> &c,
 	RMatrix<bf16, 16, 16> const &a,
-	RMatrix<bf16, 16, 8, ColumnMajor> const &b
+	RMatrix<bf16, 16, 16, ColumnMajor> const &b
 ) {
     sm80::mma_bf16_f32(
 		c.tiles[0][0].reg0, c.tiles[0][0].reg1, c.tiles[1][0].reg0, c.tiles[1][0].reg1,
@@ -570,57 +589,20 @@ X17_DEVICE void acc_gemm(
 		b.tiles[0][0].reg, b.tiles[1][0].reg,
 		c.tiles[0][0].reg0, c.tiles[0][0].reg1, c.tiles[1][0].reg0, c.tiles[1][0].reg1
 	);
-}
-
-
-X17_DEVICE void gemm(
-	RMatrix<f32, 16, 8> &c,
-	RMatrix<bf16, 16, 16> const &a,
-	RMatrix<bf16, 16, 8> const &b
-) {
     sm80::mma_bf16_f32(
-		c.tiles[0][0].reg0, c.tiles[0][0].reg1, c.tiles[1][0].reg0, c.tiles[1][0].reg1,
+		c.tiles[0][1].reg0, c.tiles[0][1].reg1, c.tiles[1][1].reg0, c.tiles[1][1].reg1,
 		a.tiles[0][0].reg, a.tiles[1][0].reg, a.tiles[0][1].reg, a.tiles[1][1].reg,
-		b.tiles[0][0].reg, b.tiles[1][0].reg
+		b.tiles[0][1].reg, b.tiles[1][1].reg,
+		c.tiles[0][1].reg0, c.tiles[0][1].reg1, c.tiles[1][1].reg0, c.tiles[1][1].reg1
 	);
 }
 
-template<typename T, const usize STRIDE>
+template<typename T, const usize STRIDE, const MatrixLayout L>
 requires(sizeof(T) == 2)
 X17_DEVICE void ldmatrix(
 	usize thread_idx,
-	SMatrix<T, 16, 8, RowMajor, STRIDE> const &src,
-	RMatrix<T, 16, 8> &dst
-) {
-	u32 byte_offset = (thread_idx & 15) * STRIDE * sizeof(T);
-	sm80::ldmatrix_8x8xu16_x2(
-		src.data.with_byte_offset(byte_offset).get(),
-		dst.tiles[0][0].reg, dst.tiles[1][0].reg
-	);
-}
-
-template<typename T, const usize STRIDE>
-requires(sizeof(T) == 2)
-X17_DEVICE void ldmatrix(
-	usize thread_idx,
-	SMatrix<T, 16, 8, ColumnMajor, STRIDE> const &src,
-	RMatrix<T, 16, 8, ColumnMajor> &dst
-) {
-	u32 byte_offset =
-		((thread_idx & 7) * STRIDE * sizeof(T))
-		+ ((thread_idx & 8) * sizeof(T));
-	sm80::ldmatrix_8x8xu16_x2(
-		src.data.with_byte_offset(byte_offset).get(),
-		dst.tiles[0][0].reg, dst.tiles[1][0].reg
-	);
-}
-
-template<typename T, const usize STRIDE>
-requires(sizeof(T) == 2)
-X17_DEVICE void ldmatrix(
-	usize thread_idx,
-	SMatrix<T, 16, 16, RowMajor, STRIDE> const &src,
-	RMatrix<T, 16, 16, RowMajor> &dst
+	SMatrix<T, 16, 16, L, STRIDE> const &src,
+	RMatrix<T, 16, 16, L> &dst
 ) {
 	u32 byte_offset =
 		((thread_idx & 15) * STRIDE * sizeof(T))
@@ -631,12 +613,12 @@ X17_DEVICE void ldmatrix(
 	);
 }
 
-template<typename T, const usize STRIDE>
-requires(sizeof(T) == 2)
+template<typename T, const usize STRIDE, const MatrixLayout L1, const MatrixLayout L2>
+requires(sizeof(T) == 2 && L1 != L2)
 X17_DEVICE void ldmatrix(
 	usize thread_idx,
-	SMatrix<T, 16, 16, ColumnMajor, STRIDE> const &src,
-	RMatrix<T, 16, 16, RowMajor> &dst
+	SMatrix<T, 16, 16, L1, STRIDE> const &src,
+	RMatrix<T, 16, 16, L2> &dst
 ) {
 	u32 byte_offset =
 		((thread_idx & 15) * STRIDE * sizeof(T))
