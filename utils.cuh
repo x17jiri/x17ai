@@ -393,7 +393,12 @@ template<
 >
 using SMatrix = Matrix<SwizzledSptr<T>, M, N, L, STRIDE>;
 
-template<const usize BLOCK_DIM, const isize M, const isize N, typename T, const usize S1, const usize S2>
+template<
+	const usize BLOCK_DIM,
+	const isize M, const isize N,
+	typename T,
+	const usize S1, const usize S2
+>
 X17_DEVICE void cp_async(
 	usize thread_idx,
 	GMatrix<T, M, N, RowMajor, S1> const &src,
@@ -578,25 +583,6 @@ struct RMatrix: RMatrix_impl<
 	sizeof(T)
 > {};
 
-X17_DEVICE void acc_gemm(
-	RMatrix<f32, 16, 16, RowMajor> &c,
-	RMatrix<bf16, 16, 16> const &a,
-	RMatrix<bf16, 16, 16, ColumnMajor> const &b
-) {
-    sm80::mma_bf16_f32(
-		c.tiles[0][0].reg0, c.tiles[0][0].reg1, c.tiles[1][0].reg0, c.tiles[1][0].reg1,
-		a.tiles[0][0].reg, a.tiles[1][0].reg, a.tiles[0][1].reg, a.tiles[1][1].reg,
-		b.tiles[0][0].reg, b.tiles[1][0].reg,
-		c.tiles[0][0].reg0, c.tiles[0][0].reg1, c.tiles[1][0].reg0, c.tiles[1][0].reg1
-	);
-    sm80::mma_bf16_f32(
-		c.tiles[0][1].reg0, c.tiles[0][1].reg1, c.tiles[1][1].reg0, c.tiles[1][1].reg1,
-		a.tiles[0][0].reg, a.tiles[1][0].reg, a.tiles[0][1].reg, a.tiles[1][1].reg,
-		b.tiles[0][1].reg, b.tiles[1][1].reg,
-		c.tiles[0][1].reg0, c.tiles[0][1].reg1, c.tiles[1][1].reg0, c.tiles[1][1].reg1
-	);
-}
-
 template<typename T, const usize STRIDE, const MatrixLayout L>
 requires(sizeof(T) == 2)
 X17_DEVICE void ldmatrix(
@@ -626,5 +612,43 @@ X17_DEVICE void ldmatrix(
 	sm80::ldmatrix_t_8x8xu16_x4(
 		src.data.with_byte_offset(byte_offset).get(),
 		dst.tiles[0][0].reg, dst.tiles[0][1].reg, dst.tiles[1][0].reg, dst.tiles[1][1].reg
+	);
+}
+
+X17_DEVICE void gemm(
+	RMatrix<f32, 16, 16, RowMajor> &c,
+	RMatrix<bf16, 16, 16, RowMajor> const &a,
+	RMatrix<bf16, 16, 16, ColumnMajor> const &b
+) {
+    sm80::mma_bf16_f32(
+		c.tiles[0][0].reg0, c.tiles[0][0].reg1, c.tiles[1][0].reg0, c.tiles[1][0].reg1,
+		a.tiles[0][0].reg, a.tiles[1][0].reg, a.tiles[0][1].reg, a.tiles[1][1].reg,
+		b.tiles[0][0].reg, b.tiles[1][0].reg,
+		c.tiles[0][0].reg0, c.tiles[0][0].reg1, c.tiles[1][0].reg0, c.tiles[1][0].reg1
+	);
+    sm80::mma_bf16_f32(
+		c.tiles[0][1].reg0, c.tiles[0][1].reg1, c.tiles[1][1].reg0, c.tiles[1][1].reg1,
+		a.tiles[0][0].reg, a.tiles[1][0].reg, a.tiles[0][1].reg, a.tiles[1][1].reg,
+		b.tiles[0][1].reg, b.tiles[1][1].reg,
+		c.tiles[0][1].reg0, c.tiles[0][1].reg1, c.tiles[1][1].reg0, c.tiles[1][1].reg1
+	);
+}
+
+X17_DEVICE void gemm(
+	RMatrix<f32, 16, 16, ColumnMajor> &c,
+	RMatrix<bf16, 16, 16, ColumnMajor> const &a,
+	RMatrix<bf16, 16, 16, RowMajor> const &b
+) {
+	sm80::mma_bf16_f32(
+		c.tiles[0][0].reg0, c.tiles[0][0].reg1, c.tiles[1][0].reg0, c.tiles[1][0].reg1,
+		a.tiles[0][0].reg, a.tiles[1][0].reg, a.tiles[0][1].reg, a.tiles[1][1].reg,
+		b.tiles[0][0].reg, b.tiles[0][1].reg,
+		c.tiles[0][0].reg0, c.tiles[0][0].reg1, c.tiles[1][0].reg0, c.tiles[1][0].reg1
+	);
+	sm80::mma_bf16_f32(
+		c.tiles[1][0].reg0, c.tiles[1][0].reg1, c.tiles[1][1].reg0, c.tiles[1][1].reg1,
+		a.tiles[0][0].reg, a.tiles[1][0].reg, a.tiles[0][1].reg, a.tiles[1][1].reg,
+		b.tiles[1][0].reg, b.tiles[1][1].reg,
+		c.tiles[1][0].reg0, c.tiles[1][0].reg1, c.tiles[1][1].reg0, c.tiles[1][1].reg1
 	);
 }
