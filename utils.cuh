@@ -25,6 +25,7 @@
 /*#endif*/
 
 #define X17_DEVICE __forceinline__ __device__
+#define X17_HOST_DEVICE __forceinline__ __host__ __device__
 
 using u8 = uint8_t;
 using u16 = uint16_t;
@@ -173,7 +174,7 @@ template<typename T>
 struct GPtr {
 	T *_ptr;
 
-	X17_DEVICE GPtr(T *p): _ptr(p) {}
+	X17_HOST_DEVICE GPtr(T *p): _ptr(p) {}
 
 	X17_DEVICE GPtr with_offset(usize offset) const {
 		return GPtr(_ptr + offset);
@@ -290,19 +291,19 @@ struct Matrix:
 	MatrixRowCount<M>,
 	MatrixColCount<N>
 {
-	X17_DEVICE Matrix(Data d) requires(M >= 0 && N >= 0):
+	X17_HOST_DEVICE Matrix(Data d) requires(M >= 0 && N >= 0):
 		MatrixData<Data>{d},
 		MatrixRowCount<M>{},
 		MatrixColCount<N>{}
 	{}
 
-	X17_DEVICE Matrix(Data d, usize m_rows) requires(M < 0 && N >= 0 && L == RowMajor):
+	X17_HOST_DEVICE Matrix(Data d, usize m_rows) requires(M < 0 && N >= 0 && L == RowMajor):
 		MatrixData<Data>{d},
 		MatrixRowCount<M>{m_rows},
 		MatrixColCount<N>{}
 	{}
 
-	X17_DEVICE Matrix(Data d, usize n_cols) requires(M >= 0 && N < 0 && L == ColumnMajor):
+	X17_HOST_DEVICE Matrix(Data d, usize n_cols) requires(M >= 0 && N < 0 && L == ColumnMajor):
 		MatrixData<Data>{d},
 		MatrixRowCount<M>{},
 		MatrixColCount<N>{n_cols}
@@ -368,10 +369,15 @@ struct Matrix:
 	}
 
 	template<const isize M_TILE>
-	X17_DEVICE Matrix<Data, M_TILE, N, RowMajor, STRIDE> tile_m(
-		usize m_tile_idx
-	) const requires(M_TILE >= 0 && L == RowMajor && N >= 0) {
+	X17_DEVICE Matrix<Data, M_TILE, N, L, STRIDE> tile_m(usize m_tile_idx) const
+	requires(M_TILE >= 0 && N >= 0) {
 		return tile<M_TILE, N>(m_tile_idx, 0);
+	}
+
+	template<const isize N_TILE>
+	X17_DEVICE Matrix<Data, M, N_TILE, L, STRIDE> tile_n(usize n_tile_idx) const
+	requires(N_TILE >= 0 && M >= 0) {
+		return tile<M, N_TILE>(0, n_tile_idx);
 	}
 };
 
@@ -615,40 +621,39 @@ X17_DEVICE void ldmatrix(
 	);
 }
 
+// The basic form is:
+//     A: row major, B: column major, C: row major
+//
+// If A is col major, it is transposed.
+// If B is row major, it is transposed.
+// If C's layout is different from A, the result is transposed.
+//
+//  A   | B   | C   | operation
+// -----+-----+-----+----------------
+//  row | col | row | C = A x B
+//  row | col | col | C = (A x B).T = B.T x A.T
+//  row | row | row | C = A x B.T
+//  row | row | col | C = (A x B.T).T = B x A.T
+//  col | col | row | C = (A.T x B).T = B.T x A
+//  col | col | col | C = A.T x B
+//  col | row | row | C = (A.T x B.T).T = B x A
+//  col | row | col | C = A.T x B.T
+template<const MatrixLayout LA, const MatrixLayout LB, const MatrixLayout LC>
 X17_DEVICE void gemm(
-	RMatrix<f32, 16, 16, RowMajor> &c,
-	RMatrix<bf16, 16, 16, RowMajor> const &a,
-	RMatrix<bf16, 16, 16, ColumnMajor> const &b
+	RMatrix<f32, 16, 16, LA> &c,
+	RMatrix<bf16, 16, 16, LB> const &a,
+	RMatrix<bf16, 16, 16, LC> const &b
 ) {
     sm80::mma_bf16_f32(
-		c.tiles[0][0].reg0, c.tiles[0][0].reg1, c.tiles[1][0].reg0, c.tiles[1][0].reg1,
-		a.tiles[0][0].reg, a.tiles[1][0].reg, a.tiles[0][1].reg, a.tiles[1][1].reg,
-		b.tiles[0][0].reg, b.tiles[1][0].reg,
-		c.tiles[0][0].reg0, c.tiles[0][0].reg1, c.tiles[1][0].reg0, c.tiles[1][0].reg1
-	);
-    sm80::mma_bf16_f32(
-		c.tiles[0][1].reg0, c.tiles[0][1].reg1, c.tiles[1][1].reg0, c.tiles[1][1].reg1,
-		a.tiles[0][0].reg, a.tiles[1][0].reg, a.tiles[0][1].reg, a.tiles[1][1].reg,
-		b.tiles[0][1].reg, b.tiles[1][1].reg,
-		c.tiles[0][1].reg0, c.tiles[0][1].reg1, c.tiles[1][1].reg0, c.tiles[1][1].reg1
-	);
-}
-
-X17_DEVICE void gemm(
-	RMatrix<f32, 16, 16, ColumnMajor> &c,
-	RMatrix<bf16, 16, 16, ColumnMajor> const &a,
-	RMatrix<bf16, 16, 16, RowMajor> const &b
-) {
-	sm80::mma_bf16_f32(
 		c.tiles[0][0].reg0, c.tiles[0][0].reg1, c.tiles[1][0].reg0, c.tiles[1][0].reg1,
 		a.tiles[0][0].reg, a.tiles[1][0].reg, a.tiles[0][1].reg, a.tiles[1][1].reg,
 		b.tiles[0][0].reg, b.tiles[0][1].reg,
 		c.tiles[0][0].reg0, c.tiles[0][0].reg1, c.tiles[1][0].reg0, c.tiles[1][0].reg1
 	);
-	sm80::mma_bf16_f32(
-		c.tiles[1][0].reg0, c.tiles[1][0].reg1, c.tiles[1][1].reg0, c.tiles[1][1].reg1,
+    sm80::mma_bf16_f32(
+		c.tiles[0][1].reg0, c.tiles[0][1].reg1, c.tiles[1][1].reg0, c.tiles[1][1].reg1,
 		a.tiles[0][0].reg, a.tiles[1][0].reg, a.tiles[0][1].reg, a.tiles[1][1].reg,
 		b.tiles[1][0].reg, b.tiles[1][1].reg,
-		c.tiles[1][0].reg0, c.tiles[1][0].reg1, c.tiles[1][1].reg0, c.tiles[1][1].reg1
+		c.tiles[0][1].reg0, c.tiles[0][1].reg1, c.tiles[1][1].reg0, c.tiles[1][1].reg1
 	);
 }
