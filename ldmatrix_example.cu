@@ -13,6 +13,39 @@ constexpr usize GEMMS_PER_STEP = 2;
 constexpr usize KV_PER_STEP = (GEMM_TILE * GEMMS_PER_STEP);
 constexpr usize GMEM_PRELOAD = 3;
 
+template<typename T, const usize M, const usize N, const usize BLOCK_DIM>
+requires(sizeof(T) == 2 && M == 16 && N > 0 && N % 16 == 0 && BLOCK_DIM % 32 == 0)
+struct CpAsync {
+	constexpr static usize PER_THREAD = (M * N * sizeof(T) + (16 * BLOCK_DIM - 1)) / (16 * BLOCK_DIM);
+	usize _offset[PER_THREAD];
+
+	X17_DEVICE CpAsync() {
+		usize off = 16 * threadIdx.x;
+		X17_UNROLL for (usize i = 0; i < PER_THREAD; ++i) {
+			usize y = off / (N * sizeof(T) / 16);
+			usize x = off % (N * sizeof(T) / 16);
+			usize off_tile = (x & ~1u) << 8;
+
+			usize add_x = (off & 1) << 7;
+			usize add_y = (y & 8) << 5;
+
+			_offset[i] = off_tile | add_x | add_y;
+
+			// +----------+----------+
+			// |          |          |
+			// |   0      |  128     |
+			// |          |          |
+			// +----------+----------+
+			// |          |          |
+			// |   256    |  384     |
+			// |          |          |
+			// +----------+----------+
+
+			off += BLOCK_DIM;
+		}
+	}
+};
+
 constexpr usize BLOCK_DIM = Q_PER_BLOCK / Q_PER_WARP * 32;
 
 __global__ void attn_kernel(
@@ -23,6 +56,13 @@ __global__ void attn_kernel(
     __shared__ bf16 q_smem[Q_PER_BLOCK * QK_DIM];
 	__shared__ bf16 kv_smem[KV_PER_STEP * GMEM_PRELOAD * QK_DIM];
 
+	CpAsync<bf16, 16, 192, 8*32> cp_async;
+
+	printf("Thread %d: cp_async offsets:", threadIdx.x);
+	X17_UNROLL for (usize i = 0; i < cp_async.PER_THREAD; ++i) {
+		printf(" %u", cp_async._offset[i]);
+	}
+
 /*	GMatrix<bf16, 16, 16, RowMajor, 16> ggQ{gQ.data._ptr};
 	SMatrix<bf16, 16, 16, RowMajor, 16> sQ{q_smem};
 	cp_async<32>(
@@ -30,7 +70,7 @@ __global__ void attn_kernel(
 		ggQ,
 		sQ
 	);*/
-
+/*
 	SMatrix<bf16, Q_PER_BLOCK, QK_DIM> sQ{q_smem};
 	SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, QK_DIM> sKV{kv_smem};
 
@@ -62,7 +102,7 @@ __global__ void attn_kernel(
 	X17_UNROLL for (usize i = 0; i < QK_DIM / 16; ++i) {
 		ldmatrix(threadIdx.x, sQ_warp.tile_n<16>(i), rQ[i]);
 	}
-
+*/
 /*
 	RMatrix<bf16, 16, 16> r0, r1, r2;
 	RMatrix<bf16, 16, 8> u0, u1;
