@@ -172,18 +172,16 @@ namespace sm80 {
 
 template<typename T>
 struct GPtr {
+	using value_type = T;
+
 	T *_ptr;
 
 	X17_HOST_DEVICE GPtr(T *p): _ptr(p) {}
 
-	X17_DEVICE GPtr with_offset(usize offset) const {
-		return GPtr(_ptr + offset);
-	}
-
-	X17_DEVICE GPtr with_byte_offset(usize offset) const {
+	X17_DEVICE GPtr with_byte_offset(size_t offset) const {
 		return GPtr(
-			static_cast<T *>(
-				static_cast<u8 *>(_ptr) + offset
+			reinterpret_cast<T *>(
+				reinterpret_cast<u8 *>(_ptr) + offset
 			)
 		);
 	}
@@ -194,30 +192,9 @@ struct GPtr {
 };
 
 template<typename T>
-struct SPtr {
-	T *_ptr;
-
-	X17_DEVICE SPtr(T *p): _ptr(p) {}
-
-	X17_DEVICE SPtr with_offset(usize offset) const {
-		return SPtr(_ptr + offset);
-	}
-
-	X17_DEVICE SPtr with_byte_offset(usize offset) const {
-		return SPtr(
-			static_cast<T *>(
-				static_cast<u8 *>(_ptr) + offset
-			)
-		);
-	}
-
-	X17_DEVICE T *get() const {
-		return _ptr;
-	}
-};
-
-template<typename T>
 struct SwizzledSptr {
+	using value_type = T;
+
 	T *_ptr;
 	usize _byte_offset;
 
@@ -225,10 +202,6 @@ struct SwizzledSptr {
 		_ptr(p),
 		_byte_offset(byte_offset)
 	{}
-
-	X17_DEVICE SwizzledSptr with_offset(usize offset) const {
-		return SwizzledSptr(_ptr, _byte_offset + offset * sizeof(T));
-	}
 
 	X17_DEVICE SwizzledSptr with_byte_offset(usize byte_offset) const {
 		return SwizzledSptr(_ptr, _byte_offset + byte_offset);
@@ -345,10 +318,18 @@ struct Matrix:
 		&& N >= 0 && N % N_TILE == 0
 	) {
 		return Matrix<Data, M_TILE, N_TILE, L, STRIDE>{
-			MatrixData<Data>::data.with_offset(
+			MatrixData<Data>::data.with_byte_offset(
 				L == RowMajor
-					? m_tile_idx * M_TILE * STRIDE + n_tile_idx * N_TILE
-					: m_tile_idx * M_TILE + n_tile_idx * N_TILE * STRIDE
+					?
+						(
+							m_tile_idx * usize(M_TILE) * usize(STRIDE)
+							+ n_tile_idx * usize(N_TILE)
+						) * usize(sizeof(typename Data::value_type))
+					:
+						(
+							m_tile_idx * usize(M_TILE)
+							+ n_tile_idx * usize(N_TILE) * usize(STRIDE)
+						) * usize(sizeof(typename Data::value_type))
 			)
 		};
 	}
@@ -362,8 +343,11 @@ struct Matrix:
 		&& N >= 0 && N % N_TILE == 0
 	) {
 		return Matrix<Data, M_TILE, N_TILE, RowMajor>{
-			MatrixData<Data>::data.with_offset(
-				m_tile_idx * M_TILE * STRIDE + n_tile_idx * N_TILE
+			MatrixData<Data>::data.with_byte_offset(
+				(
+					m_tile_idx * usize(M_TILE) * usize(STRIDE)
+					+ n_tile_idx * usize(N_TILE)
+				) * usize(sizeof(typename Data::value_type))
 			)
 		};
 	}
@@ -414,23 +398,20 @@ X17_DEVICE void cp_async(
 	constexpr usize CP_ASYNC_CNT = BYTES / 16;
 	static_assert(BYTES % 16 == 0, "cp.async size must be multiple of 16 bytes");
 
+	GPtr<T> gptr = src.data.with_byte_offset(threadIdx.x * usize(16));
+	SwizzledSptr<T> sptr = dst.data.with_byte_offset(threadIdx.x * usize(16));
+
 	constexpr usize ITERATIONS = CP_ASYNC_CNT / BLOCK_DIM;
 	if constexpr (ITERATIONS > 0) {
 		X17_UNROLL for (usize i = 0; i < ITERATIONS; i++) {
-			usize offset = (i * BLOCK_DIM + thread_idx) * (16 / sizeof(T));
-			sm80::cp_async(
-				src.data.with_offset(offset).get(),
-				dst.data.with_offset(offset).get()
-			);
+			sm80::cp_async(gptr.get(), sptr.get());
+			gptr = gptr.with_byte_offset(BLOCK_DIM * usize(16));
+			sptr = sptr.with_byte_offset(BLOCK_DIM * usize(16));
 		}
 	}
 	if constexpr (CP_ASYNC_CNT % BLOCK_DIM != 0) {
 		if (thread_idx < CP_ASYNC_CNT % BLOCK_DIM) {
-			usize offset = (ITERATIONS * BLOCK_DIM + thread_idx) * (16 / sizeof(T));
-			sm80::cp_async(
-				src.data.with_offset(offset).get(),
-				dst.data.with_offset(offset).get()
-			);
+			sm80::cp_async(gptr.get(), sptr.get());
 		}
 	}
 }

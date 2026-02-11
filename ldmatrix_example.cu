@@ -23,6 +23,14 @@ __global__ void attn_kernel(
     __shared__ bf16 q_smem[Q_PER_BLOCK * QK_DIM];
 	__shared__ bf16 kv_smem[KV_PER_STEP * GMEM_PRELOAD * QK_DIM];
 
+/*	GMatrix<bf16, 16, 16, RowMajor, 16> ggQ{gQ.data._ptr};
+	SMatrix<bf16, 16, 16, RowMajor, 16> sQ{q_smem};
+	cp_async<32>(
+		threadIdx.x,
+		ggQ,
+		sQ
+	);*/
+
 	SMatrix<bf16, Q_PER_BLOCK, QK_DIM> sQ{q_smem};
 	SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, QK_DIM> sKV{kv_smem};
 
