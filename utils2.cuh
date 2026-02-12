@@ -233,70 +233,46 @@ requires(
 	&& BLOCK_DIM % WARP_SIZE == 0
 )
 struct CpAsync {
-	constexpr static usize LINES_PER_M_TILE = 16 * N * sizeof(T) / 16;
+	constexpr static usize LINE_BYTES = N * sizeof(T);
+	constexpr static usize SEGMENT_BYTES = 16;
+	constexpr static usize SEGMENTS_PER_LINE = LINE_BYTES / SEGMENT_BYTES;
+	constexpr static usize SEGMENTS_PER_16_LINES = 16 * SEGMENTS_PER_LINE;
 
-	constexpr static usize PRECALC = least_common_multiple(LINES_PER_M_TILE, BLOCK_DIM) / BLOCK_DIM;
+	constexpr static usize PRECALC = least_common_multiple(SEGMENTS_PER_16_LINES, BLOCK_DIM) / BLOCK_DIM;
+	static_assert(PRECALC <= 5, "Precalculation size is too large for register storage");
+
 	usize _offset[PRECALC];
 
 	X17_DEVICE CpAsync() {
-		usize off = threadIdx.x;
+		usize segment = threadIdx.x;
 		X17_UNROLL for (usize i = 0; i < PRECALC; ++i) {
-			// +-----------------------------------+-----------------------------------+
-			// |                                   |                                   |
-			// | -------0-------- -------8-------- | -------32------- -------40------- |
-			// | -------1-------- -------9-------- | -------33------- -------41------- |
-			// | -------2-------- -------10------- | -------34------- -------42------- |
-			// | -------3-------- -------11------- | -------35------- -------43------- |
-			// | -------4-------- -------12------- | -------36------- -------44------- |
-			// | -------5-------- -------13------- | -------37------- -------45------- |
-			// | -------6-------- -------14------- | -------38------- -------46------- |
-			// | -------7-------- -------15------- | -------39------- -------47------- |
-			// |                                   |                                   |
-			// | -------16------- -------24------- | -------48------- -------56------- |
-			// | -------17------- -------25------- | -------49------- -------57------- |
-			// | -------18------- -------26------- | -------50------- -------58------- |
-			// | -------19------- -------27------- | -------51------- -------59------- |
-			// | -------20------- -------28------- | -------52------- -------60------- |
-			// | -------21------- -------29------- | -------53------- -------61------- |
-			// | -------22------- -------30------- | -------54------- -------62------- |
-			// | -------23------- -------31------- | -------55------- -------63------- |
-			// |                                   |                                   |
-			// +-----------------------------------+-----------------------------------+
-
-			usize y = off / (N * sizeof(T) / 16);
-			usize x = off % (N * sizeof(T) / 16);
-			usize off_tile = (x & ~1u) << 8;
-			usize add_x = (off & 1) << 7;
-			usize add_y = (y & 8) << 5;
-			_offset[i] = off_tile | add_x | add_y | ((y & 7) << 4);
-
-			off += BLOCK_DIM;
+			usize y = segment / SEGMENTS_PER_LINE;
+			usize x = segment % SEGMENTS_PER_LINE;
+			usize tile = (y / 16) * SEGMENTS_PER_LINE + x;
+			usize row = y % 16;
+			_offset[i] = (tile * 16 | row) * SEGMENT_BYTES;
+			segment += BLOCK_DIM;
 		}
 	}
 
 	template<const usize M>
 	requires(M > 0 && M % 16 == 0)
 	X17_DEVICE void run(GMatrix<T, M, N> src, SMatrix<T, M, N> dst) {
-		constexpr static usize LINES_TO_COPY = M * N * sizeof(T) / 16;
-		usize off = threadIdx.x * 16;
+		constexpr static usize SEGMENTS_TO_COPY = M * SEGMENTS_PER_LINE;
+		u8 *src_ptr = reinterpret_cast<u8 *>(src._ptr) + threadIdx.x * SEGMENT_BYTES;
 		usize dst_ptr = dst._ptr;
-		X17_UNROLL for (usize i = 0; i < LINES_TO_COPY / BLOCK_DIM; ++i) {
-			sm80::cp_async(
-				reinterpret_cast<u8 *>(src._ptr) + off,
-				dst_ptr + _offset[i % PRECALC]
-			);
-			off += BLOCK_DIM * 16;
+		usize i;
+		X17_UNROLL for (i = 0; i < SEGMENTS_TO_COPY / BLOCK_DIM; ++i) {
+			sm80::cp_async(src_ptr, dst_ptr + _offset[i % PRECALC]);
+
+			src_ptr += BLOCK_DIM * SEGMENT_BYTES;
 			if ((i + 1) % PRECALC == 0) {
-				dst_ptr += PRECALC * BLOCK_DIM * 16;
+				dst_ptr += PRECALC * BLOCK_DIM * SEGMENT_BYTES;
 			}
 		}
-		if constexpr (LINES_TO_COPY % BLOCK_DIM != 0) {
-			if (off < LINES_TO_COPY * 16) {
-				usize i = LINES_TO_COPY / BLOCK_DIM;
-				sm80::cp_async(
-					reinterpret_cast<u8 *>(src._ptr) + off,
-					dst_ptr + _offset[i % PRECALC]
-				);
+		if constexpr (SEGMENTS_TO_COPY % BLOCK_DIM != 0) {
+			if (threadIdx.x < SEGMENTS_TO_COPY % BLOCK_DIM) {
+				sm80::cp_async(src_ptr, dst_ptr + _offset[i % PRECALC]);
 			}
 		}
 	}
