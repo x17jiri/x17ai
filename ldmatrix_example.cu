@@ -1,4 +1,4 @@
-#include "utils.cuh"
+#include "utils2.cuh"
 #include <vector>
 #include <fstream>
 #include <array>
@@ -6,96 +6,53 @@
 constexpr usize QK_DIM = 192;
 constexpr usize V_DIM = 128;
 
-constexpr usize Q_PER_BLOCK = 16;
+constexpr usize WARPS_PER_BLOCK = 8;
+constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
 constexpr usize Q_PER_WARP = 16;
-constexpr usize GEMM_TILE = 16;
-constexpr usize GEMMS_PER_STEP = 2;
-constexpr usize KV_PER_STEP = (GEMM_TILE * GEMMS_PER_STEP);
+constexpr usize Q_PER_BLOCK = Q_PER_WARP * WARPS_PER_BLOCK;
+constexpr usize KV_PER_STEP = 16;
 constexpr usize GMEM_PRELOAD = 3;
 
-template<typename T, const usize M, const usize N, const usize BLOCK_DIM>
-requires(sizeof(T) == 2 && M == 16 && N > 0 && N % 16 == 0 && BLOCK_DIM % 32 == 0)
-struct CpAsync {
-	constexpr static usize PER_THREAD = (M * N * sizeof(T) + (16 * BLOCK_DIM - 1)) / (16 * BLOCK_DIM);
-	usize _offset[PER_THREAD];
-
-	X17_DEVICE CpAsync() {
-		usize off = 16 * threadIdx.x;
-		X17_UNROLL for (usize i = 0; i < PER_THREAD; ++i) {
-			usize y = off / (N * sizeof(T) / 16);
-			usize x = off % (N * sizeof(T) / 16);
-			usize off_tile = (x & ~1u) << 8;
-
-			usize add_x = (off & 1) << 7;
-			usize add_y = (y & 8) << 5;
-
-			_offset[i] = off_tile | add_x | add_y;
-
-			// +----------+----------+
-			// |          |          |
-			// |   0      |  128     |
-			// |          |          |
-			// +----------+----------+
-			// |          |          |
-			// |   256    |  384     |
-			// |          |          |
-			// +----------+----------+
-
-			off += BLOCK_DIM;
-		}
-	}
-};
-
-constexpr usize BLOCK_DIM = Q_PER_BLOCK / Q_PER_WARP * 32;
-
 __global__ void attn_kernel(
-	GMatrix<bf16, -1, QK_DIM> const &gQ,
-	GMatrix<bf16, -1, QK_DIM> const &gKV,
-	GMatrix<bf16, -1, V_DIM> const &gOut
+	bf16 *gQ_ptr,
+	bf16 *gKV_ptr,
+	bf16 *gOut_ptr,
+	usize q_cnt,
+	usize kv_cnt
 ) {
     __shared__ bf16 q_smem[Q_PER_BLOCK * QK_DIM];
 	__shared__ bf16 kv_smem[KV_PER_STEP * GMEM_PRELOAD * QK_DIM];
 
-	CpAsync<bf16, 16, 192, 8*32> cp_async;
+	CpAsync<bf16, QK_DIM, THREADS_PER_BLOCK> cp_async;
 
-	printf("Thread %d: cp_async offsets:", threadIdx.x);
-	X17_UNROLL for (usize i = 0; i < cp_async.PER_THREAD; ++i) {
-		printf(" %u", cp_async._offset[i]);
-	}
+	// Load Q from GMEM to SMEM
+	GMatrixDynSize<bf16, QK_DIM> gQ_full{gQ_ptr, q_cnt};
+	GMatrix<bf16, Q_PER_BLOCK, QK_DIM> gQ_block = gQ_full.tile_m<Q_PER_BLOCK>(blockIdx.x);
+	SMatrix<bf16, Q_PER_BLOCK, QK_DIM> sQ_block{q_smem};
 
-/*	GMatrix<bf16, 16, 16, RowMajor, 16> ggQ{gQ.data._ptr};
-	SMatrix<bf16, 16, 16, RowMajor, 16> sQ{q_smem};
-	cp_async<32>(
-		threadIdx.x,
-		ggQ,
-		sQ
-	);*/
-/*
-	SMatrix<bf16, Q_PER_BLOCK, QK_DIM> sQ{q_smem};
+	cp_async.run(gQ_block, sQ_block);
+
+	SMatrix<bf16, Q_PER_WARP, QK_DIM> sQ_warp = sQ_block.tile_m<Q_PER_WARP>(threadIdx.x / WARP_SIZE);
+
+	// Load KV from GMEM to SMEM
+	GMatrixDynSize<bf16, QK_DIM> gKV_full{gKV_ptr, kv_cnt};
 	SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, QK_DIM> sKV{kv_smem};
-
-	// Preload Q from GMEM to SMEM
-	cp_async<BLOCK_DIM>(
-		threadIdx.x,
-		gQ.tile_m<Q_PER_BLOCK>(blockIdx.x),
-		sQ
-	);
 
 	// Start preloading KVs from GMEM to SMEM
 	X17_UNROLL for (usize preload = 0; preload < GMEM_PRELOAD - 1; ++preload) {
-		if (preload * KV_PER_STEP < gKV.m_rows()) {
-			cp_async<BLOCK_DIM>(
-				threadIdx.x,
-				gKV.tile_m<KV_PER_STEP>(preload),
+		if (preload * KV_PER_STEP < gKV_full.m_rows()) {
+			cp_async.run(
+				gKV_full.tile_m<KV_PER_STEP>(preload),
 				sKV.tile_m<KV_PER_STEP>(preload)
 			);
 		}
-		cp_async_commit();
+		cp_async.commit();
 	}
 	// Wait for the first batch of GMEM -> SMEM preloads to complete
-	cp_async_wait<GMEM_PRELOAD - 2>();
+	cp_async.wait<GMEM_PRELOAD - 2>();
 	__syncthreads();
 
+	/*
 	// Sub-matrix with Qs for this warp
 	std::array<RMatrix<bf16, 16, 16>, QK_DIM / 16> rQ;
 	SMatrix<bf16, Q_PER_WARP, QK_DIM> sQ_warp = sQ.tile_m<Q_PER_WARP>(threadIdx.x / 32);
@@ -183,6 +140,7 @@ __global__ void attn_kernel(
 }
 
 int main() {
+/*
 	constexpr size_t Q_LEN = 4096;
 	constexpr size_t KV_LEN = 4096;
 
@@ -224,7 +182,7 @@ int main() {
 	GMatrix<bf16, -1, V_DIM, RowMajor> out{GPtr<bf16>{out_dev}, Q_LEN};
 
 	attn_kernel<<<1, 32>>>(q, kv, out);
-
+*/
 /*    attn_kernel<<<1, 32, 0>>>(
 		GMatrix<bf16, -1, QK_DIM>{nullptr, 0},
 		GMatrix<bf16, -1, QK_DIM>{nullptr, 0},
