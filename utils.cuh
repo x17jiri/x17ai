@@ -486,7 +486,7 @@ template<
 	typename T,
 	const isize M, const isize N,
 	const usize MAJOR_DIM, const usize MINOR_DIM,
-	const usize SZ = sizeof(T)
+	const usize T_SIZE = sizeof(T)
 >
 struct RMatrix_impl;
 

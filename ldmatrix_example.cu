@@ -3,8 +3,8 @@
 #include <fstream>
 #include <array>
 
-constexpr usize QK_DIM = 192;
-constexpr usize V_DIM = 128;
+constexpr usize QK_DIM = 32;//192;
+constexpr usize V_DIM = 32;//128;
 
 constexpr usize WARPS_PER_BLOCK = 8;
 constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
@@ -14,29 +14,30 @@ constexpr usize KV_PER_STEP = 16;
 constexpr usize GMEM_PRELOAD = 3;
 
 __global__ void attn_kernel(
-	bf16 *gQ_ptr,
-	bf16 *gKV_ptr,
-	bf16 *gOut_ptr,
+	f16 *gQ_ptr,
+	f16 *gKV_ptr,
+	f16 *gOut_ptr,
 	usize q_cnt,
 	usize kv_cnt
 ) {
-    __shared__ bf16 q_smem[Q_PER_BLOCK * QK_DIM];
-	__shared__ bf16 kv_smem[KV_PER_STEP * GMEM_PRELOAD * QK_DIM];
+    __shared__ f16 q_smem[Q_PER_BLOCK * QK_DIM];
+	__shared__ f16 kv_smem[KV_PER_STEP * GMEM_PRELOAD * QK_DIM];
 
-	CpAsync<bf16, QK_DIM, THREADS_PER_BLOCK> cp_async;
+	CpAsync<f16, QK_DIM, THREADS_PER_BLOCK> cp_async;
 
 	// Load Q from GMEM to SMEM
-	GMatrixDynSize<bf16, QK_DIM> gQ_full{gQ_ptr, q_cnt};
-	GMatrix<bf16, Q_PER_BLOCK, QK_DIM> gQ_block = gQ_full.tile_m<Q_PER_BLOCK>(blockIdx.x);
-	SMatrix<bf16, Q_PER_BLOCK, QK_DIM> sQ_block{q_smem};
+	GMatrixDynSize<f16, QK_DIM> gQ_full{gQ_ptr, q_cnt};
+	GMatrix<f16, Q_PER_BLOCK, QK_DIM> gQ_block = gQ_full.tile_m<Q_PER_BLOCK>(blockIdx.x);
+	SMatrix<f16, Q_PER_BLOCK, QK_DIM> sQ_block{q_smem};
 
 	cp_async.run(gQ_block, sQ_block);
 
-	SMatrix<bf16, Q_PER_WARP, QK_DIM> sQ_warp = sQ_block.tile_m<Q_PER_WARP>(threadIdx.x / WARP_SIZE);
+	SMatrix<f16, Q_PER_WARP, QK_DIM> sQ_warp = sQ_block.tile_m<Q_PER_WARP>(threadIdx.x / WARP_SIZE);
 
+/*
 	// Load KV from GMEM to SMEM
-	GMatrixDynSize<bf16, QK_DIM> gKV_full{gKV_ptr, kv_cnt};
-	SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, QK_DIM> sKV{kv_smem};
+	GMatrixDynSize<f16, QK_DIM> gKV_full{gKV_ptr, kv_cnt};
+	SMatrix<f16, KV_PER_STEP * GMEM_PRELOAD, QK_DIM> sKV{kv_smem};
 
 	// Start preloading KVs from GMEM to SMEM
 	X17_UNROLL for (usize preload = 0; preload < GMEM_PRELOAD - 1; ++preload) {
@@ -51,18 +52,36 @@ __global__ void attn_kernel(
 	// Wait for the first batch of GMEM -> SMEM preloads to complete
 	cp_async.wait<GMEM_PRELOAD - 2>();
 	__syncthreads();
+*/
+	cp_async.commit();
+	cp_async.wait();
+	__syncthreads();
+	RMatrix<f16, 16, 16, ColumnMajor> rQ;
+
+	ldmatrix(sQ_warp.tile_n<16>(0), rQ);
+
+	/*
+	if (threadIdx.x < 32) {
+		printf("Thread %d: a00.a = %f, a00.b = %f, a01.a = %f, a01.b = %f, a10.a = %f, a10.b = %f, a11.a = %f, a11.b = %f\n",
+			threadIdx.x,
+			double(rQ.tiles[0][0].first()), double(rQ.tiles[0][0].second()),
+			double(rQ.tiles[0][1].first()), double(rQ.tiles[0][1].second()),
+			double(rQ.tiles[1][0].first()), double(rQ.tiles[1][0].second()),
+			double(rQ.tiles[1][1].first()), double(rQ.tiles[1][1].second())
+		);
+	}*/
 
 	/*
 	// Sub-matrix with Qs for this warp
-	std::array<RMatrix<bf16, 16, 16>, QK_DIM / 16> rQ;
-	SMatrix<bf16, Q_PER_WARP, QK_DIM> sQ_warp = sQ.tile_m<Q_PER_WARP>(threadIdx.x / 32);
+	std::array<RMatrix<f16, 16, 16>, QK_DIM / 16> rQ;
+	SMatrix<f16, Q_PER_WARP, QK_DIM> sQ_warp = sQ.tile_m<Q_PER_WARP>(threadIdx.x / 32);
 	X17_UNROLL for (usize i = 0; i < QK_DIM / 16; ++i) {
 		ldmatrix(threadIdx.x, sQ_warp.tile_n<16>(i), rQ[i]);
 	}
 */
 /*
-	RMatrix<bf16, 16, 16> r0, r1, r2;
-	RMatrix<bf16, 16, 8> u0, u1;
+	RMatrix<f16, 16, 16> r0, r1, r2;
+	RMatrix<f16, 16, 8> u0, u1;
 	#include "gemm/Init.h"
 
 	// Sequential loop over KV
@@ -87,11 +106,11 @@ __global__ void attn_kernel(
 	}
 */
 /*
-	GMatrix<bf16, 16, 16> gA{pA};
-	GMatrix<bf16, 16, 16> gB{pB};
+	GMatrix<f16, 16, 16> gA{pA};
+	GMatrix<f16, 16, 16> gB{pB};
 
-	SMatrix<bf16, 16, 16> sA{smem};
-	SMatrix<bf16, 16, 16> sB{smem + sA.elems()};
+	SMatrix<f16, 16, 16> sA{smem};
+	SMatrix<f16, 16, 16> sB{smem + sA.elems()};
 
 	cp_async<BLOCK_DIM>(threadIdx.x, gA, sA);
 	cp_async<32>(threadIdx.x, gB, sB);
@@ -99,10 +118,10 @@ __global__ void attn_kernel(
 	cp_async_wait();
 	__syncwarp();
 
-	RMatrix<bf16, 16, 16, ColumnMajor> rA;
+	RMatrix<f16, 16, 16, ColumnMajor> rA;
 	ldmatrix(threadIdx.x, sA.t(), rA);
 
-	RMatrix<bf16, 16, 16, RowMajor> rB;
+	RMatrix<f16, 16, 16, RowMajor> rB;
 	ldmatrix(threadIdx.x, sB, rB);
 
 	RMatrix<f32, 16, 16, ColumnMajor> rC;
@@ -140,53 +159,66 @@ __global__ void attn_kernel(
 }
 
 int main() {
-/*
+	bool use_real_data = false;
 	constexpr size_t Q_LEN = 4096;
 	constexpr size_t KV_LEN = 4096;
 
-	// allocate q: bf16 [Q_LEN, QK_DIM]
-	std::vector<bf16> q_data(Q_LEN * QK_DIM);
-	{
+	// allocate q: f16 [Q_LEN, QK_DIM]
+	std::vector<f16> q_data(Q_LEN * QK_DIM);
+	if (use_real_data) {
 		std::ifstream in("q.bin", std::ios::binary);
 		in.read(
 			reinterpret_cast<char*>(q_data.data()),
 			static_cast<std::streamsize>(q_data.size() * sizeof(*q_data.data()))
 		);
+	} else {
+		// Initialize with dummy data for testing
+		for (size_t i = 0; i < q_data.size(); ++i) {
+			q_data[i] = f16(float(i));
+		}
 	}
-	bf16 *q_dev;
-	size_t q_size_bytes = q_data.size() * sizeof(bf16);
+	f16 *q_dev;
+	size_t q_size_bytes = q_data.size() * sizeof(f16);
 	cudaMalloc(&q_dev, q_size_bytes);
 	cudaMemcpy(q_dev, q_data.data(), q_size_bytes, cudaMemcpyHostToDevice);
-	GMatrix<bf16, -1, QK_DIM, RowMajor> q{GPtr<bf16>(q_dev), Q_LEN};
+	GMatrixDynSize<f16, QK_DIM> q{q_dev, Q_LEN};
 
-	// allocate kv: bf16 [KV_LEN, QK_DIM]
-	std::vector<bf16> kv_data(KV_LEN * QK_DIM);
-	{
+	// allocate kv: f16 [KV_LEN, QK_DIM]
+	std::vector<f16> kv_data(KV_LEN * QK_DIM);
+	if (use_real_data) {
 		std::ifstream in("kv.bin", std::ios::binary);
 		in.read(
 			reinterpret_cast<char*>(kv_data.data()),
 			static_cast<std::streamsize>(kv_data.size() * sizeof(*kv_data.data()))
 		);
+	} else {
+		// Initialize with dummy data for testing
+		for (size_t i = 0; i < kv_data.size(); ++i) {
+			kv_data[i] = f16(float(i*100));
+		}
 	}
-	bf16 *kv_dev;
-	size_t kv_size_bytes = kv_data.size() * sizeof(bf16);
+	f16 *kv_dev;
+	size_t kv_size_bytes = kv_data.size() * sizeof(f16);
 	cudaMalloc(&kv_dev, kv_size_bytes);
 	cudaMemcpy(kv_dev, kv_data.data(), kv_size_bytes, cudaMemcpyHostToDevice);
-	GMatrix<bf16, -1, QK_DIM, RowMajor> kv{GPtr<bf16>{kv_dev}, KV_LEN};
+	GMatrixDynSize<f16, QK_DIM> kv{kv_dev, KV_LEN};
 
 	// allocate output: f16 [Q_LEN, V_DIM]
-	std::vector<bf16> out_data(Q_LEN * V_DIM);
-	bf16 *out_dev;
-	size_t out_size_bytes = out_data.size() * sizeof(bf16);
+	std::vector<f16> out_data(Q_LEN * V_DIM);
+	f16 *out_dev;
+	size_t out_size_bytes = out_data.size() * sizeof(f16);
 	cudaMalloc(&out_dev, out_size_bytes);
-	GMatrix<bf16, -1, V_DIM, RowMajor> out{GPtr<bf16>{out_dev}, Q_LEN};
+	GMatrixDynSize<f16, V_DIM> out{out_dev, Q_LEN};
 
-	attn_kernel<<<1, 32>>>(q, kv, out);
-*/
+	cudaFuncSetAttribute(
+		attn_kernel,
+		cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+
+	attn_kernel<<<1, THREADS_PER_BLOCK>>>(q._ptr, kv._ptr, out._ptr, q.m_rows(), kv.m_rows());
 /*    attn_kernel<<<1, 32, 0>>>(
-		GMatrix<bf16, -1, QK_DIM>{nullptr, 0},
-		GMatrix<bf16, -1, QK_DIM>{nullptr, 0},
-		GMatrix<bf16, -1, V_DIM>{nullptr, 0}
+		GMatrix<f16, -1, QK_DIM>{nullptr, 0},
+		GMatrix<f16, -1, QK_DIM>{nullptr, 0},
+		GMatrix<f16, -1, V_DIM>{nullptr, 0}
 	);*/
 
 	// Wait for kernel to complete

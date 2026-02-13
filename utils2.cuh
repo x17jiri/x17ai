@@ -60,27 +60,25 @@ X17_DEVICE u32 cast_smem_ptr_to_uint(void const *const ptr) {
 namespace sm75 {
 	/// `smem_src` must be 16-byte aligned.
 	X17_DEVICE void ldmatrix_8x8xu16_x4(
-		void const *smem_src,
+		u32 smem_src,
 		u32 &dst0, u32 &dst1, u32 &dst2, u32 &dst3
 	) {
-		u32 smem_int_ptr = cast_smem_ptr_to_uint(smem_src);
 		asm volatile (
 			"ldmatrix.sync.aligned.x4.m8n8.shared.b16 {%0, %1, %2, %3}, [%4];\n"
 			: "=r"(dst0), "=r"(dst1), "=r"(dst2), "=r"(dst3)
-			: "r"(smem_int_ptr)
+			: "r"(smem_src)
 		);
 	}
 
 	/// `smem_src` must be 16-byte aligned.
 	X17_DEVICE void ldmatrix_t_8x8xu16_x4(
-		void const *smem_src,
+		u32 smem_src,
 		u32 &dst0, u32 &dst1, u32 &dst2, u32 &dst3
 	) {
-		u32 smem_int_ptr = cast_smem_ptr_to_uint(smem_src);
 		asm volatile (
 			"ldmatrix.sync.aligned.x4.trans.m8n8.shared.b16 {%0, %1, %2, %3}, [%4];\n"
 			: "=r"(dst0), "=r"(dst1), "=r"(dst2), "=r"(dst3)
-			: "r"(smem_int_ptr)
+			: "r"(smem_src)
 		);
 	}
 }
@@ -194,6 +192,11 @@ struct GMatrixDynSize {
 //--------------------------------------------------------------------------------------------------
 
 template<typename T, const usize M, const usize N>
+requires(
+	sizeof(T) == 2 // for `sizeof(T) != 2`, we may want to use another storage layout
+	&& M > 0 && M % 16 == 0
+	&& N > 0 && N % 16 == 0
+)
 struct SMatrix {
 	u32 _ptr;
 
@@ -208,6 +211,16 @@ struct SMatrix {
 	requires(TILE_M > 0 && TILE_M % 16 == 0)
 	X17_DEVICE constexpr SMatrix<T, TILE_M, N> tile_m(usize tile_idx) const {
 		return SMatrix<T, TILE_M, N>{_ptr + TILE_M * N * tile_idx};
+	}
+
+	template<const usize TILE_N>
+	requires(
+		M == 16
+		&& TILE_N > 0 && TILE_N % 16 == 0
+		&& sizeof(T) == 2
+	)
+	X17_DEVICE constexpr SMatrix<T, M, TILE_N> tile_n(usize tile_idx) const {
+		return SMatrix<T, M, TILE_N>{_ptr + TILE_N * M * usize(sizeof(T)) * tile_idx};
 	}
 };
 
@@ -260,14 +273,19 @@ struct CpAsync {
 	X17_DEVICE void run(GMatrix<T, M, N> src, SMatrix<T, M, N> dst) {
 		constexpr static usize SEGMENTS_TO_COPY = M * SEGMENTS_PER_LINE;
 		u8 *src_ptr = reinterpret_cast<u8 *>(src._ptr) + threadIdx.x * SEGMENT_BYTES;
+		u8 *src_origin = reinterpret_cast<u8 *>(src._ptr);
 		usize dst_ptr = dst._ptr;
-		usize i;
-		X17_UNROLL for (i = 0; i < SEGMENTS_TO_COPY / BLOCK_DIM; ++i) {
-			sm80::cp_async(src_ptr, dst_ptr + _offset[i % PRECALC]);
+		usize dst_origin = dst_ptr;
+		usize i = 0;
+		if constexpr (SEGMENTS_TO_COPY / BLOCK_DIM > 0) {
+			X17_UNROLL for (; i < SEGMENTS_TO_COPY / BLOCK_DIM; ++i) {
+				/*printf("Thread %d, storing from %d to %d\n", threadIdx.x, usize(src_ptr - src_origin), dst_ptr + _offset[i % PRECALC] - dst_origin);*/
+				sm80::cp_async(src_ptr, dst_ptr + _offset[i % PRECALC]);
 
-			src_ptr += BLOCK_DIM * SEGMENT_BYTES;
-			if ((i + 1) % PRECALC == 0) {
-				dst_ptr += PRECALC * BLOCK_DIM * SEGMENT_BYTES;
+				src_ptr += BLOCK_DIM * SEGMENT_BYTES;
+				if ((i + 1) % PRECALC == 0) {
+					dst_ptr += PRECALC * BLOCK_DIM * SEGMENT_BYTES;
+				}
 			}
 		}
 		if constexpr (SEGMENTS_TO_COPY % BLOCK_DIM != 0) {
@@ -286,5 +304,206 @@ struct CpAsync {
 		sm80::cp_async_wait<CNT>();
 	}
 };
+
+//--------------------------------------------------------------------------------------------------
+
+enum MatrixLayout {
+	RowMajor,
+	ColumnMajor
+};
+
+//--------------------------------------------------------------------------------------------------
+
+/// A fragment is an 8x8 tile held in registers by the whole warp.
+/// Each thread holds 2 elements.
+///
+/// Which thread holds which matrix element:
+/// row 0: |  0 |  0 |  1 |  1 |  2 |  2 |  3 |  3 |
+/// row 1: |  4 |  4 |  5 |  5 |  6 |  6 |  7 |  7 |
+/// ...
+/// row 7: | 28 | 28 | 29 | 29 | 30 | 30 | 31 | 31 |
+///
+/// For 16-bit type, the two elements are packed into a single 32-bit register.
+template<typename T>
+requires(sizeof(T) == 2)
+struct Fragment_8x8_u16 {
+	u32 reg;
+
+	X17_DEVICE T first() const {
+		union {
+			u32 reg;
+			T halves[2];
+		} a;
+		a.reg = reg;
+		return a.halves[0];
+	}
+
+	X17_DEVICE T second() const {
+		union {
+			u32 reg;
+			T halves[2];
+		} a;
+		a.reg = reg;
+		return a.halves[1];
+	}
+
+	X17_DEVICE void set(T first, T second) {
+		union {
+			u32 reg;
+			T halves[2];
+		} a;
+		a.halves[0] = first;
+		a.halves[1] = second;
+		reg = a.reg;
+	}
+};
+
+template<typename T>
+requires(sizeof(T) == 4)
+struct Fragment_8x8_u32 {
+	T reg0;
+	T reg1;
+
+	X17_DEVICE T first() const {
+		return reg0;
+	}
+
+	X17_DEVICE T second() const {
+		return reg1;
+	}
+
+	X17_DEVICE void set(T first, T second) {
+		reg0 = first;
+		reg1 = second;
+	}
+};
+
+//--------------------------------------------------------------------------------------------------
+
+template<
+	typename T,
+	const isize M, const isize N,
+	const usize MAJOR_DIM, const usize MINOR_DIM,
+	const usize T_SIZE = sizeof(T)
+>
+struct RMatrix_impl;
+
+template<
+	typename T,
+	const isize M, const isize N,
+	const usize MAJOR_DIM, const usize MINOR_DIM
+>
+requires(
+	M > 0 && M % 8 == 0
+	&& N > 0 && N % 8 == 0
+)
+struct RMatrix_impl<T, M, N, MAJOR_DIM, MINOR_DIM, 2> {
+	Fragment_8x8_u16<T> tiles[MINOR_DIM / 8][MAJOR_DIM / 8];
+
+	X17_DEVICE constexpr usize m_rows() const {
+		return M;
+	}
+
+	X17_DEVICE constexpr usize n_cols() const {
+		return N;
+	}
+
+	X17_DEVICE constexpr usize elems() const {
+		return M * N;
+	}
+
+	X17_DEVICE void zero_() {
+		X17_UNROLL for (usize j = 0; j < M / 8; j++) {
+			X17_UNROLL for (usize i = 0; i < N / 8; i++) {
+				tiles[j][i].set(T(), T());
+			}
+		}
+	}
+};
+
+template<
+	typename T,
+	const isize M, const isize N,
+	const usize MAJOR_DIM, const usize MINOR_DIM
+>
+requires(
+	M > 0 && M % 8 == 0
+	&& N > 0 && N % 8 == 0
+)
+struct RMatrix_impl<T, M, N, MAJOR_DIM, MINOR_DIM, 4> {
+	Fragment_8x8_u32<T> tiles[MINOR_DIM / 8][MAJOR_DIM / 8];
+
+	X17_DEVICE constexpr usize m_rows() const {
+		return M;
+	}
+
+	X17_DEVICE constexpr usize n_cols() const {
+		return N;
+	}
+
+	X17_DEVICE constexpr usize elems() const {
+		return M * N;
+	}
+
+	X17_DEVICE void zero_() {
+		X17_UNROLL for (usize j = 0; j < M / 8; j++) {
+			X17_UNROLL for (usize i = 0; i < N / 8; i++) {
+				tiles[j][i].set(T(), T());
+			}
+		}
+	}
+};
+
+template<typename T, const isize M, const isize N, const MatrixLayout L = RowMajor>
+requires(
+	sizeof(T) == 2 || sizeof(T) == 4
+	&& M > 0 && M % 8 == 0
+	&& N > 0 && N % 8 == 0
+)
+struct RMatrix: RMatrix_impl<
+	T,
+	M, N,
+	(L == RowMajor ? N : M),
+	(L == RowMajor ? M : N),
+	sizeof(T)
+> {};
+
+//--------------------------------------------------------------------------------------------------
+
+template<typename T>
+requires(sizeof(T) == 2)
+X17_DEVICE void ldmatrix(SMatrix<T, 16, 16> src, RMatrix<T, 16, 16, RowMajor> &dst) {
+	sm80::ldmatrix_8x8xu16_x4(
+		src._ptr + 16 * (threadIdx.x % WARP_SIZE),
+		dst.tiles[0][0].reg, dst.tiles[1][0].reg, dst.tiles[0][1].reg, dst.tiles[1][1].reg
+	);
+}
+
+template<typename T>
+requires(sizeof(T) == 2)
+X17_DEVICE void ldmatrix(SMatrix<T, 16, 16> src, RMatrix<T, 16, 16, ColumnMajor> &dst) {
+	sm80::ldmatrix_t_8x8xu16_x4(
+		src._ptr + 16 * (threadIdx.x % WARP_SIZE),
+		dst.tiles[0][0].reg, dst.tiles[0][1].reg, dst.tiles[1][0].reg, dst.tiles[1][1].reg
+	);
+}
+
+template<typename T>
+requires(sizeof(T) == 2)
+X17_DEVICE void ldmatrix_t(SMatrix<T, 16, 16> src, RMatrix<T, 16, 16, RowMajor> &dst) {
+	sm80::ldmatrix_t_8x8xu16_x4(
+		src._ptr + 16 * (threadIdx.x % WARP_SIZE),
+		dst.tiles[0][0].reg, dst.tiles[0][1].reg, dst.tiles[1][0].reg, dst.tiles[1][1].reg
+	);
+}
+
+template<typename T>
+requires(sizeof(T) == 2)
+X17_DEVICE void ldmatrix_t(SMatrix<T, 16, 16> src, RMatrix<T, 16, 16, ColumnMajor> &dst) {
+	sm80::ldmatrix_8x8xu16_x4(
+		src._ptr + 16 * (threadIdx.x % WARP_SIZE),
+		dst.tiles[0][0].reg, dst.tiles[1][0].reg, dst.tiles[0][1].reg, dst.tiles[1][1].reg
+	);
+}
 
 //--------------------------------------------------------------------------------------------------
