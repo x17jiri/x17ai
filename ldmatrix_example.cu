@@ -3,7 +3,7 @@
 #include <fstream>
 #include <array>
 
-constexpr usize QK_DIM = 32;//192;
+constexpr usize QK_DIM = 128;//192;
 constexpr usize V_DIM = 32;//128;
 
 constexpr usize WARPS_PER_BLOCK = 8;
@@ -23,14 +23,12 @@ __global__ void attn_kernel(
     __shared__ f16 q_smem[Q_PER_BLOCK * QK_DIM];
 	__shared__ f16 kv_smem[KV_PER_STEP * GMEM_PRELOAD * QK_DIM];
 
-	CpAsync<f16, QK_DIM, THREADS_PER_BLOCK> cp_async;
-
 	// Load Q from GMEM to SMEM
 	GMatrixDynSize<f16, QK_DIM> gQ_full{gQ_ptr, q_cnt};
 	GMatrix<f16, Q_PER_BLOCK, QK_DIM> gQ_block = gQ_full.tile_m<Q_PER_BLOCK>(blockIdx.x);
 	SMatrix<f16, Q_PER_BLOCK, QK_DIM> sQ_block{q_smem};
 
-	cp_async.run(gQ_block, sQ_block);
+	cp_async<THREADS_PER_BLOCK>(gQ_block, sQ_block);
 
 	SMatrix<f16, Q_PER_WARP, QK_DIM> sQ_warp = sQ_block.tile_m<Q_PER_WARP>(threadIdx.x / WARP_SIZE);
 
@@ -53,12 +51,20 @@ __global__ void attn_kernel(
 	cp_async.wait<GMEM_PRELOAD - 2>();
 	__syncthreads();
 */
-	cp_async.commit();
-	cp_async.wait();
+	cp_async_commit();
+	cp_async_wait();
 	__syncthreads();
-	RMatrix<f16, 16, 16, ColumnMajor> rQ;
+	RMatrix<f16, 16, 16, ColumnMajor> rQ[8];
 
-	ldmatrix(sQ_warp.tile_n<16>(0), rQ);
+	ldmatrix(sQ_warp.tile_n<16>(0), rQ[0]);
+	ldmatrix(sQ_warp.tile_n<16>(1), rQ[1]);
+	ldmatrix(sQ_warp.tile_n<16>(2), rQ[2]);
+	ldmatrix(sQ_warp.tile_n<16>(3), rQ[3]);
+	ldmatrix(sQ_warp.tile_n<16>(4), rQ[4]);
+	ldmatrix(sQ_warp.tile_n<16>(5), rQ[5]);
+	ldmatrix(sQ_warp.tile_n<16>(6), rQ[6]);
+	ldmatrix(sQ_warp.tile_n<16>(7), rQ[7]);
+
 
 	/*
 	if (threadIdx.x < 32) {
