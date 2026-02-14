@@ -66,6 +66,16 @@ __global__ void attn_kernel(
 	ldmatrix(sKV.tile_n<16>(1), r1);
 	ldmatrix(sKV.tile_n<16>(2), r2);
 
+	/*if (threadIdx.x < 32) {
+		printf("Thread %d: a00.a = %f, a00.b = %f, a01.a = %f, a01.b = %f, a10.a = %f, a10.b = %f, a11.a = %f, a11.b = %f\n",
+			threadIdx.x,
+			double(r0.sub[0][0].first()), double(r0.sub[0][0].second()),
+			double(r0.sub[0][1].first()), double(r0.sub[0][1].second()),
+			double(r0.sub[1][0].first()), double(r0.sub[1][0].second()),
+			double(r0.sub[1][1].first()), double(r0.sub[1][1].second())
+		);
+	}*/
+
 	Fragment_16x16<f32> rScores_f32;
 	rScores_f32.zero_();
 

@@ -225,7 +225,7 @@ struct SMatrix {
 	X17_DEVICE constexpr SMatrix<T, TILE_M, N, STRIDE> tile_m(usize tile_idx) const {
 		return SMatrix<T, TILE_M, N, STRIDE>{
 			_base_ptr,
-			_off + TILE_M * STRIDE * tile_idx
+			_off + TILE_M * STRIDE * tile_idx * usize(sizeof(T))
 		};
 	}
 
@@ -234,7 +234,7 @@ struct SMatrix {
 	X17_DEVICE constexpr SMatrix<T, M, TILE_N, STRIDE> tile_n(usize tile_idx) const {
 		return SMatrix<T, M, TILE_N, STRIDE>{
 			_base_ptr,
-			_off + TILE_N * usize(sizeof(T)) * tile_idx
+			_off + TILE_N * tile_idx * usize(sizeof(T))
 		};
 	}
 };
@@ -253,7 +253,7 @@ X17_DEVICE void cp_async(GMatrix<T, M, N> src, SMatrix<T, M, N, STRIDE> dst) {
 	u8 *src_ptr = reinterpret_cast<u8 *>(src._ptr) + src_off;
 
 	usize dst_off = sm80::ldmatrix_swizzle(src_off);
-	usize dst_ptr = dst._base_ptr + dst_off;
+	usize dst_ptr = dst._base_ptr + dst._off + dst_off;
 
 	static_assert(BLOCK_DIM * 16 % 1024 == 0, "The swizzle pattern repeats after 1024 bytes. This assumption allows us to simply add a constant offset in the loop and not recalculate the swizzle");
 

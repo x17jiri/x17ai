@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import sys
 
 shape = (4096, 192)
 
@@ -18,7 +19,7 @@ kv = load_bf16_from_file("kv.bin", shape).to(torch.float64)
 
 scores = torch.matmul(q, kv.transpose(-2, -1))
 
-print("scores:", scores)
+print("scores:", scores[:16,:16])
 
 # calculate simple attention (not casual and not scaled)
 #scores = torch.nn.functional.softmax(scores, dim=-1)
