@@ -324,7 +324,7 @@ class Code:
 				self.sections[current].append(line)
 
 atom = GemmAtom(
-	"gemm",
+	"mma_a_bt",
 	m=16,
 	n=16,
 	k=16,
@@ -338,7 +338,7 @@ code = Code()
 # rScores=sQ * sK^T
 code.gemm(
 	"rScores",
-	Matrix("sQ", 16, 192, Storage.Shared, Layout.RowMajor),
+	Matrix("rQ", 16, 192, Storage.Register, Layout.RowMajor),
 	Matrix("sKV", 16, 192, Storage.Shared, Layout.RowMajor).T(),
 	Matrix("rScores_f32", 16, 16, Storage.Register, Layout.RowMajor),
 	atom
