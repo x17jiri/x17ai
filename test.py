@@ -21,6 +21,15 @@ scores = torch.matmul(q, kv.transpose(-2, -1))
 
 print("scores:", scores[:16,:16])
 
+print("kv 0:", kv[:16,:16])
+print("kv 1:", kv[16:32,:16])
+
+o = torch.matmul(scores[:16, :].to(torch.bfloat16).to(torch.float64), kv[:, :128])
+
+print("pytorch:", o[:16,:16])
+
+sys.exit(0)
+
 # calculate simple attention (not casual and not scaled)
 #scores = torch.nn.functional.softmax(scores, dim=-1)
 

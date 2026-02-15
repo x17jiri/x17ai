@@ -2,6 +2,7 @@
 #include <vector>
 #include <fstream>
 #include <array>
+#include "cutlass/util/GPU_Clock.hpp"
 
 constexpr usize QK_DIM = 192;
 constexpr usize V_DIM = 128;
@@ -47,7 +48,7 @@ __global__ void attn_kernel(
 	GMatrixDynSize<bf16, QK_DIM> gKV_full{gKV_ptr, kv_cnt};
 	SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, QK_DIM> sKV_preload{kv_smem};
 
-	X17_UNROLL for (usize preload = 0; preload < GMEM_PRELOAD - 1; ++preload) {
+	X17_UNROLL for (usize preload = 0; preload < GMEM_PRELOAD; ++preload) {
 		if (preload * KV_PER_STEP < gKV_full.m_rows()) {
 			cp_async<THREADS_PER_BLOCK>(
 				gKV_full.tile_m<KV_PER_STEP>(preload),
@@ -57,60 +58,97 @@ __global__ void attn_kernel(
 		cp_async_commit();
 	}
 	// Wait for the first batch of GMEM -> SMEM preloads to complete
-	cp_async_wait<GMEM_PRELOAD - 2>();
+	cp_async_wait<GMEM_PRELOAD - 1>();
 	__syncthreads();
 
+	// Prepare outputs
+	RMatrix<f32, Q_PER_WARP, V_DIM> rOut;
+	rOut.zero_();
+
+	// Start preloading sKV to registers
 	SMatrix<bf16, KV_PER_STEP, QK_DIM> sKV = sKV_preload.tile_m<KV_PER_STEP>(0);
 	Fragment_16x16<bf16> r0, r1, r2;
 	ldmatrix(sKV.tile_n<16>(0), r0);
 	ldmatrix(sKV.tile_n<16>(1), r1);
 	ldmatrix(sKV.tile_n<16>(2), r2);
 
-	/*if (threadIdx.x < 32) {
-		printf("Thread %d: a00.a = %f, a00.b = %f, a01.a = %f, a01.b = %f, a10.a = %f, a10.b = %f, a11.a = %f, a11.b = %f\n",
-			threadIdx.x,
-			double(r0.sub[0][0].first()), double(r0.sub[0][0].second()),
-			double(r0.sub[0][1].first()), double(r0.sub[0][1].second()),
-			double(r0.sub[1][0].first()), double(r0.sub[1][0].second()),
-			double(r0.sub[1][1].first()), double(r0.sub[1][1].second())
-		);
-	}*/
+	// Sequential loop over KV
+	size_t kv_steps = gKV_full.m_rows() / KV_PER_STEP;
+	X17_NO_UNROLL for (size_t kv_step = 0; kv_step < kv_steps; ++kv_step) {
+		// rScores = Q * K.T
+		Fragment_16x16<f32> rScores_f32;
+		rScores_f32.zero_();
+		mma_a_bt(rQ.tiles[0][0], r0, rScores_f32);
+		ldmatrix(sKV.tile_n<16>(3), r0);
+		mma_a_bt(rQ.tiles[0][1], r1, rScores_f32);
+		ldmatrix(sKV.tile_n<16>(4), r1);
+		mma_a_bt(rQ.tiles[0][2], r2, rScores_f32);
+		ldmatrix(sKV.tile_n<16>(5), r2);
+		mma_a_bt(rQ.tiles[0][3], r0, rScores_f32);
+		ldmatrix(sKV.tile_n<16>(6), r0);
+		mma_a_bt(rQ.tiles[0][4], r1, rScores_f32);
+		ldmatrix(sKV.tile_n<16>(7), r1);
+		mma_a_bt(rQ.tiles[0][5], r2, rScores_f32);
+		ldmatrix(sKV.tile_n<16>(8), r2);
+		mma_a_bt(rQ.tiles[0][6], r0, rScores_f32);
+		ldmatrix(sKV.tile_n<16>(9), r0);
+		mma_a_bt(rQ.tiles[0][7], r1, rScores_f32);
+		ldmatrix(sKV.tile_n<16>(10), r1);
+		mma_a_bt(rQ.tiles[0][8], r2, rScores_f32);
+		ldmatrix(sKV.tile_n<16>(11), r2);
+		mma_a_bt(rQ.tiles[0][9], r0, rScores_f32);
+		ldmatrix_t(sKV.tile_n<16>(2), r0);
+		mma_a_bt(rQ.tiles[0][10], r1, rScores_f32);
+		ldmatrix_t(sKV.tile_n<16>(0), r1);
+		mma_a_bt(rQ.tiles[0][11], r2, rScores_f32);
+		ldmatrix_t(sKV.tile_n<16>(1), r2);
 
-	Fragment_16x16<f32> rScores_f32;
-	rScores_f32.zero_();
-
-	mma_a_bt(r0, rQ.tiles[0][0], rScores_f32);
-	ldmatrix(sKV.tile_n<16>(3), r0);
-	mma_a_bt(r1, rQ.tiles[0][1], rScores_f32);
-	ldmatrix(sKV.tile_n<16>(4), r1);
-	mma_a_bt(r2, rQ.tiles[0][2], rScores_f32);
-	ldmatrix(sKV.tile_n<16>(5), r2);
-	mma_a_bt(r0, rQ.tiles[0][3], rScores_f32);
-	ldmatrix(sKV.tile_n<16>(6), r0);
-	mma_a_bt(r1, rQ.tiles[0][4], rScores_f32);
-	ldmatrix(sKV.tile_n<16>(7), r1);
-	mma_a_bt(r2, rQ.tiles[0][5], rScores_f32);
-	ldmatrix(sKV.tile_n<16>(8), r2);
-	mma_a_bt(r0, rQ.tiles[0][6], rScores_f32);
-	ldmatrix(sKV.tile_n<16>(9), r0);
-	mma_a_bt(r1, rQ.tiles[0][7], rScores_f32);
-	ldmatrix(sKV.tile_n<16>(10), r1);
-	mma_a_bt(r2, rQ.tiles[0][8], rScores_f32);
-	ldmatrix(sKV.tile_n<16>(11), r2);
-	mma_a_bt(r0, rQ.tiles[0][9], rScores_f32);
-	mma_a_bt(r1, rQ.tiles[0][10], rScores_f32);
-	mma_a_bt(r2, rQ.tiles[0][11], rScores_f32);
-
-	if (threadIdx.x < 32) {
-		printf("Thread %d: a00.a = %f, a00.b = %f, a01.a = %f, a01.b = %f, a10.a = %f, a10.b = %f, a11.a = %f, a11.b = %f\n",
-			threadIdx.x,
-			double(rScores_f32.sub[0][0].first()), double(rScores_f32.sub[0][0].second()),
-			double(rScores_f32.sub[0][1].first()), double(rScores_f32.sub[0][1].second()),
-			double(rScores_f32.sub[1][0].first()), double(rScores_f32.sub[1][0].second()),
-			double(rScores_f32.sub[1][1].first()), double(rScores_f32.sub[1][1].second())
-		);
+		// rOut += rScores * V
+		Fragment_16x16<bf16> rScores;
+		cast(rScores_f32, rScores);
+		mma_a_bt(rScores, r1, rOut.tiles[0][0]);
+		ldmatrix_t(sKV.tile_n<16>(3), r1);
+		mma_a_bt(rScores, r2, rOut.tiles[0][1]);
+		ldmatrix_t(sKV.tile_n<16>(4), r2);
+		mma_a_bt(rScores, r0, rOut.tiles[0][2]);
+		ldmatrix_t(sKV.tile_n<16>(5), r0);
+		mma_a_bt(rScores, r1, rOut.tiles[0][3]);
+		ldmatrix_t(sKV.tile_n<16>(6), r1);
+		mma_a_bt(rScores, r2, rOut.tiles[0][4]);
+		ldmatrix_t(sKV.tile_n<16>(7), r2);
+		mma_a_bt(rScores, r0, rOut.tiles[0][5]);
+		{
+			__syncthreads();
+			// Preload next KV tile from GMEM
+			if ((kv_step + GMEM_PRELOAD) * KV_PER_STEP < gKV_full.m_rows()) {
+				cp_async<THREADS_PER_BLOCK>(
+					gKV_full.tile_m<KV_PER_STEP>(kv_step + GMEM_PRELOAD),
+					sKV_preload.tile_m<KV_PER_STEP>((kv_step + GMEM_PRELOAD) % GMEM_PRELOAD)
+				);
+			}
+			cp_async_commit();
+			// Wait for the next batch of GMEM -> SMEM preloads to complete
+			cp_async_wait<GMEM_PRELOAD - 1>();
+			__syncthreads();
+			sKV = sKV_preload.tile_m<KV_PER_STEP>((kv_step + 1) % GMEM_PRELOAD);
+		}
+		ldmatrix(sKV.tile_n<16>(0), r0);
+		mma_a_bt(rScores, r1, rOut.tiles[0][6]);
+		ldmatrix(sKV.tile_n<16>(1), r1);
+		mma_a_bt(rScores, r2, rOut.tiles[0][7]);
+		ldmatrix(sKV.tile_n<16>(2), r2);
 	}
 
+	if (threadIdx.x < 32) {
+		auto &t = rOut.tiles[0][0];
+		printf("Thread %d: a00.a = %e, a00.b = %e, a01.a = %e, a01.b = %e, a10.a = %e, a10.b = %e, a11.a = %e, a11.b = %e\n",
+			threadIdx.x,
+			double(t.sub[0][0].first()), double(t.sub[0][0].second()),
+			double(t.sub[0][1].first()), double(t.sub[0][1].second()),
+			double(t.sub[1][0].first()), double(t.sub[1][0].second()),
+			double(t.sub[1][1].first()), double(t.sub[1][1].second())
+		);
+	}
 /*
 	RMatrix<bf16, 16, 16> r0, r1, r2;
 	RMatrix<bf16, 16, 8> u0, u1;
@@ -118,17 +156,6 @@ __global__ void attn_kernel(
 
 	// Sequential loop over KV
 	X17_NO_UNROLL for (usize kv_step = 0; kv_step < gKV.m_rows() / KV_PER_STEP; ++kv_step) {
-		// Preload next KV tile from GMEM
-		usize preload = kv_step + GMEM_PRELOAD - 1;
-		if (preload * KV_PER_STEP < gKV.m_rows()) {
-			preload %= GMEM_PRELOAD;
-			cp_async<BLOCK_DIM>(
-				threadIdx.x,
-				gKV.tile_m<KV_PER_STEP>(preload),
-				sKV.tile_m<KV_PER_STEP>(preload)
-			);
-		}
-		cp_async_commit();
 
 		RMatrix<f32, KV_PER_STEP, Q_PER_WARP> rScores_f32;
 		rScores_f32.zero_();
@@ -266,12 +293,16 @@ int main() {
 		(KV_PER_STEP * GMEM_PRELOAD * QK_DIM)
 	);
 
-	attn_kernel<<<1, THREADS_PER_BLOCK, smem_size>>>(q._ptr, kv._ptr, out._ptr, q.m_rows(), kv.m_rows());
-/*    attn_kernel<<<1, 32, 0>>>(
-		GMatrix<bf16, -1, QK_DIM>{nullptr, 0},
-		GMatrix<bf16, -1, QK_DIM>{nullptr, 0},
-		GMatrix<bf16, -1, V_DIM>{nullptr, 0}
-	);*/
+	GPU_Clock timer;
+	timer.start();
+	for (int i = 0; i < 100; ++i) {
+		attn_kernel<<<4096/Q_PER_BLOCK, THREADS_PER_BLOCK, smem_size>>>(
+			q._ptr, kv._ptr, out._ptr,
+			q.m_rows(), kv.m_rows()
+		);
+	}
+	double cute_time = timer.seconds() / 100;
+	printf("Average kernel time over 100 runs: %f ms\n", cute_time * 1e3);
 
     err = cudaGetLastError();
     if (err != cudaSuccess) {

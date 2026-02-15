@@ -362,6 +362,18 @@ struct Fragment_16x16 {
 	}
 };
 
+template<typename F, typename T>
+X17_DEVICE void cast(Fragment_16x16<F> const &src, Fragment_16x16<T> &dst) {
+	X17_UNROLL for (usize j = 0; j < 2; j++) {
+		X17_UNROLL for (usize i = 0; i < 2; i++) {
+			dst.sub[j][i].set(
+				static_cast<T>(src.sub[j][i].first()),
+				static_cast<T>(src.sub[j][i].second())
+			);
+		}
+	}
+}
+
 //--------------------------------------------------------------------------------------------------
 
 template<typename T, const usize M, const usize N>
