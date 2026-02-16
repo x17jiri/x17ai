@@ -14,21 +14,44 @@ def load_bf16_from_file(path, shape):
     t_bf16 = t_u16.view(torch.bfloat16)  # reinterpret bits
     return t_bf16
 
-q  = load_bf16_from_file("q.bin",  shape).to(torch.float64)
-kv = load_bf16_from_file("kv.bin", shape).to(torch.float64)
+q  = load_bf16_from_file("q.bin",  shape).to(torch.float32)
+kv = load_bf16_from_file("kv.bin", shape).to(torch.float32)
 
 scores = torch.matmul(q, kv.transpose(-2, -1))
 
-print("scores:", scores[:16,:16])
+#print("scores:", scores[:16,:16])
+#print("kv 0:", kv[:16,:16])
+#print("kv 1:", kv[16:32,:16])
 
-print("kv 0:", kv[:16,:16])
-print("kv 1:", kv[16:32,:16])
+o = torch.matmul(scores.to(torch.bfloat16).to(torch.float32), kv[:, :128]).to(torch.bfloat16).to(torch.float32)
 
-o = torch.matmul(scores[:16, :].to(torch.bfloat16).to(torch.float64), kv[:, :128])
+print("pytorch:", o[1568:1568+16,64:64+16])
 
-print("pytorch:", o[:16,:16])
+test_output = load_bf16_from_file("out_cpu.bin", (4096, 128)).to(torch.float32)
 
-sys.exit(0)
+print("my code:", test_output[1568:1568+16,64:64+16])
+
+thr = 1e-4
+mask = (torch.abs(o) > thr) | (torch.abs(test_output) > thr)
+o_filtered = torch.where(mask, o, torch.zeros_like(o))
+t_filtered = torch.where(mask, test_output, torch.zeros_like(test_output))
+abs_diff = torch.abs(o_filtered - t_filtered)
+relative_error = abs_diff / (torch.abs(o_filtered).min(torch.abs(t_filtered)) + 1e-8)
+max_relative_error = torch.max(relative_error)
+max_location = torch.where(relative_error == max_relative_error)
+print("relative_error:", max_relative_error)
+print("max_location:", max_location)
+
+print("out at max: ", o[1573, 75])
+print("tst at max: ", test_output[1573, 75])
+
+#print("out at max: ", o[622, 26])
+#print("tst at max: ", test_output[622, 26])
+
+#print("out at max: ", o[622, 67])
+#print("tst at max: ", test_output[622, 67])
+
+sys.exit(0) ########################################################################################
 
 # calculate simple attention (not casual and not scaled)
 #scores = torch.nn.functional.softmax(scores, dim=-1)

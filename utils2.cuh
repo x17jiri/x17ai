@@ -348,7 +348,17 @@ struct FragmentReg<T, 4> {
 /// The first thread holds the first two columns on row zero,
 /// the second thread holds the next two columns, ...
 template<typename T>
-struct Fragment_8x8: FragmentReg<T> {};
+struct Fragment_8x8: FragmentReg<T> {
+	template<typename U>
+	X17_DEVICE FragmentReg<U> cast_reg() const {
+		FragmentReg<U> result;
+		result.set(
+			static_cast<U>(this->first()),
+			static_cast<U>(this->second())
+		);
+		return result;
+	}
+};
 
 template<typename T>
 struct Fragment_16x16 {
@@ -418,6 +428,95 @@ X17_DEVICE void ldmatrix(SMatrix<T, 16, 16, STRIDE> src, Fragment_16x16<T> &dst)
 		dst.sub[0][0].val, dst.sub[1][0].val, dst.sub[0][1].val, dst.sub[1][1].val
 	);
 }
+
+template<typename T, const usize STRIDE>
+requires(sizeof(T) == 2)
+X17_DEVICE void stmatrix(Fragment_16x16<T> &src, SMatrix<T, 16, 16, STRIDE> dst) {
+	usize tid = threadIdx.x;
+
+	usize thread_off = (tid & 0x1c) * (STRIDE * usize(sizeof(T)) / 4) + (tid & 3) * 4;
+	{
+		usize off = dst._off + thread_off;
+		usize addr = dst._base_ptr + sm80::ldmatrix_swizzle(off);
+		u32 value = src.sub[0][0].val;
+		asm volatile(
+			"\nst.shared.u32 [%0], %1;\n"
+			:
+			: "r"(addr), "r"(value)
+			: "memory"
+		);
+	}
+	thread_off += 16;
+	{
+		usize off = dst._off + thread_off;
+		usize addr = dst._base_ptr + sm80::ldmatrix_swizzle(off);
+		u32 value = src.sub[0][1].val;
+		asm volatile(
+			"\nst.shared.u32 [%0], %1;\n"
+			:
+			: "r"(addr), "r"(value)
+			: "memory"
+		);
+	}
+	thread_off += 8 * STRIDE * sizeof(T);
+	{
+		usize off = dst._off + thread_off;
+		usize addr = dst._base_ptr + sm80::ldmatrix_swizzle(off);
+		u32 value = src.sub[1][1].val;
+		asm volatile(
+			"\nst.shared.u32 [%0], %1;\n"
+			:
+			: "r"(addr), "r"(value)
+			: "memory"
+		);
+	}
+	thread_off -= 16;
+	{
+		usize off = dst._off + thread_off;
+		usize addr = dst._base_ptr + sm80::ldmatrix_swizzle(off);
+		u32 value = src.sub[1][0].val;
+		asm volatile(
+			"\nst.shared.u32 [%0], %1;\n"
+			:
+			: "r"(addr), "r"(value)
+			: "memory"
+		);
+	}
+}
+
+template<typename T, typename U, const usize M, const usize N>
+requires(sizeof(T) == 2)
+X17_DEVICE void stmatrix(RMatrix<U, M, N> const &src, GMatrix<T, M, N> &dst) {
+	usize tid = threadIdx.x;
+	X17_UNROLL for (usize j = 0; j < M / 16; j++) {
+		GMatrix<T, 16, N> dst_tile = dst.tile_m<16>(j);
+		X17_NO_UNROLL for (usize i = 0; i < N / 16; i++) {
+			Fragment_16x16<U> const &src_tile = src.tiles[j][i];
+			usize dst_off = i * 16 * usize(sizeof(T));
+
+			dst_off += (tid & 0x1c) * (dst.stride() * usize(sizeof(T)) / 4) + (tid & 3) * 4;
+			*reinterpret_cast<u32 *>(
+				reinterpret_cast<u8 *>(dst_tile._ptr) + dst_off
+			) = src_tile.sub[0][0].template cast_reg<T>().val;
+
+			dst_off += 16;
+			*reinterpret_cast<u32 *>(
+				reinterpret_cast<u8 *>(dst_tile._ptr) + dst_off
+			) = src_tile.sub[0][1].template cast_reg<T>().val;
+
+			dst_off += 8 * dst.stride() * sizeof(T) - 16;
+			*reinterpret_cast<u32 *>(
+				reinterpret_cast<u8 *>(dst_tile._ptr) + dst_off
+			) = src_tile.sub[1][0].template cast_reg<T>().val;
+
+			dst_off += 16;
+			*reinterpret_cast<u32 *>(
+				reinterpret_cast<u8 *>(dst_tile._ptr) + dst_off
+			) = src_tile.sub[1][1].template cast_reg<T>().val;
+		}
+	}
+}
+
 
 template<typename T, const usize STRIDE>
 requires(sizeof(T) == 2)

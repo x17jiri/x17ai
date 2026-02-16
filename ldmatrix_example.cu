@@ -7,7 +7,7 @@
 constexpr usize QK_DIM = 192;
 constexpr usize V_DIM = 128;
 
-constexpr usize WARPS_PER_BLOCK = 8;
+constexpr usize WARPS_PER_BLOCK = 4;
 constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
 constexpr usize Q_PER_WARP = 16;
 constexpr usize Q_PER_BLOCK = Q_PER_WARP * WARPS_PER_BLOCK;
@@ -48,7 +48,7 @@ __global__ void attn_kernel(
 	GMatrixDynSize<bf16, QK_DIM> gKV_full{gKV_ptr, kv_cnt};
 	SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, QK_DIM> sKV_preload{kv_smem};
 
-	X17_UNROLL for (usize preload = 0; preload < GMEM_PRELOAD; ++preload) {
+	X17_UNROLL for (usize preload = 0; preload < GMEM_PRELOAD - 1; ++preload) {
 		if (preload * KV_PER_STEP < gKV_full.m_rows()) {
 			cp_async<THREADS_PER_BLOCK>(
 				gKV_full.tile_m<KV_PER_STEP>(preload),
@@ -58,7 +58,7 @@ __global__ void attn_kernel(
 		cp_async_commit();
 	}
 	// Wait for the first batch of GMEM -> SMEM preloads to complete
-	cp_async_wait<GMEM_PRELOAD - 1>();
+	cp_async_wait<GMEM_PRELOAD - 2>();
 	__syncthreads();
 
 	// Prepare outputs
@@ -118,17 +118,17 @@ __global__ void attn_kernel(
 		ldmatrix_t(sKV.tile_n<16>(7), r2);
 		mma_a_bt(rScores, r0, rOut.tiles[0][5]);
 		{
-			__syncthreads();
+			//__syncthreads();
 			// Preload next KV tile from GMEM
-			if ((kv_step + GMEM_PRELOAD) * KV_PER_STEP < gKV_full.m_rows()) {
+			if ((kv_step + GMEM_PRELOAD - 1) * KV_PER_STEP < gKV_full.m_rows()) {
 				cp_async<THREADS_PER_BLOCK>(
-					gKV_full.tile_m<KV_PER_STEP>(kv_step + GMEM_PRELOAD),
-					sKV_preload.tile_m<KV_PER_STEP>((kv_step + GMEM_PRELOAD) % GMEM_PRELOAD)
+					gKV_full.tile_m<KV_PER_STEP>(kv_step + GMEM_PRELOAD - 1),
+					sKV_preload.tile_m<KV_PER_STEP>((kv_step + GMEM_PRELOAD - 1) % GMEM_PRELOAD)
 				);
 			}
 			cp_async_commit();
 			// Wait for the next batch of GMEM -> SMEM preloads to complete
-			cp_async_wait<GMEM_PRELOAD - 1>();
+			cp_async_wait<GMEM_PRELOAD - 2>();
 			__syncthreads();
 			sKV = sKV_preload.tile_m<KV_PER_STEP>((kv_step + 1) % GMEM_PRELOAD);
 		}
@@ -139,7 +139,12 @@ __global__ void attn_kernel(
 		ldmatrix(sKV.tile_n<16>(2), r2);
 	}
 
-	if (threadIdx.x < 32) {
+	GMatrixDynSize<bf16, V_DIM> gOut_full{gOut_ptr, q_cnt};
+	GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = gOut_full.tile_m<Q_PER_BLOCK>(blockIdx.x);
+	GMatrix<bf16, Q_PER_WARP, V_DIM> gOut_warp = gOut_block.tile_m<Q_PER_WARP>(threadIdx.x / WARP_SIZE);
+	stmatrix(rOut, gOut_warp);
+
+	/*if (threadIdx.x < 32) {
 		auto &t = rOut.tiles[0][0];
 		printf("Thread %d: a00.a = %e, a00.b = %e, a01.a = %e, a01.b = %e, a10.a = %e, a10.b = %e, a11.a = %e, a11.b = %e\n",
 			threadIdx.x,
@@ -148,73 +153,7 @@ __global__ void attn_kernel(
 			double(t.sub[1][0].first()), double(t.sub[1][0].second()),
 			double(t.sub[1][1].first()), double(t.sub[1][1].second())
 		);
-	}
-/*
-	RMatrix<bf16, 16, 16> r0, r1, r2;
-	RMatrix<bf16, 16, 8> u0, u1;
-	#include "gemm/Init.h"
-
-	// Sequential loop over KV
-	X17_NO_UNROLL for (usize kv_step = 0; kv_step < gKV.m_rows() / KV_PER_STEP; ++kv_step) {
-
-		RMatrix<f32, KV_PER_STEP, Q_PER_WARP> rScores_f32;
-		rScores_f32.zero_();
-		//*** rScores += sKV x sQ.T
-		#include "gemm/rScores.h"
-
-	}
-*/
-/*
-	GMatrix<bf16, 16, 16> gA{pA};
-	GMatrix<bf16, 16, 16> gB{pB};
-
-	SMatrix<bf16, 16, 16> sA{smem};
-	SMatrix<bf16, 16, 16> sB{smem + sA.elems()};
-
-	cp_async<BLOCK_DIM>(threadIdx.x, gA, sA);
-	cp_async<32>(threadIdx.x, gB, sB);
-	cp_async_commit();
-	cp_async_wait();
-	__syncwarp();
-
-	RMatrix<bf16, 16, 16, ColumnMajor> rA;
-	ldmatrix(threadIdx.x, sA.t(), rA);
-
-	RMatrix<bf16, 16, 16, RowMajor> rB;
-	ldmatrix(threadIdx.x, sB, rB);
-
-	RMatrix<f32, 16, 16, ColumnMajor> rC;
-	rC.zero_();
-
-	gemm(rC, rA, rB);
-
-	__syncthreads();
-	printf("Thread %d: a00.a = %f, a00.b = %f, a01.a = %f, a01.b = %f, a10.a = %f, a10.b = %f, a11.a = %f, a11.b = %f\n",
-		threadIdx.x,
-		double(rA.tiles[0][0].first()), double(rA.tiles[0][0].second()),
-		double(rA.tiles[0][1].first()), double(rA.tiles[0][1].second()),
-		double(rA.tiles[1][0].first()), double(rA.tiles[1][0].second()),
-		double(rA.tiles[1][1].first()), double(rA.tiles[1][1].second())
-	);
-
-	__syncthreads();
-	printf("Thread %d: b00.a = %f, b00.b = %f, b01.a = %f, b01.b = %f, b10.a = %f, b10.b = %f, b11.a = %f, b11.b = %f\n",
-		threadIdx.x,
-		double(rB.tiles[0][0].first()), double(rB.tiles[0][0].second()),
-		double(rB.tiles[0][1].first()), double(rB.tiles[0][1].second()),
-		double(rB.tiles[1][0].first()), double(rB.tiles[1][0].second()),
-		double(rB.tiles[1][1].first()), double(rB.tiles[1][1].second())
-	);
-
-	__syncthreads();
-	printf("Thread %d: c00.a = %f, c00.b = %f, c01.a = %f, c01.b = %f, c10.a = %f, c10.b = %f, c11.a = %f, c11.b = %f\n",
-		threadIdx.x,
-		double(rC.tiles[0][0].first()), double(rC.tiles[0][0].second()),
-		double(rC.tiles[0][1].first()), double(rC.tiles[0][1].second()),
-		double(rC.tiles[1][0].first()), double(rC.tiles[1][0].second()),
-		double(rC.tiles[1][1].first()), double(rC.tiles[1][1].second())
-	);
-*/
+	}*/
 }
 
 int main() {
@@ -279,9 +218,9 @@ int main() {
         printf("(2) CUDA Error: %s\n", cudaGetErrorString(err));
     }
 
-	cudaFuncSetAttribute(
+	/*cudaFuncSetAttribute(
 		attn_kernel,
-		cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+		cudaFuncAttributePreferredSharedMemoryCarveout, 100);*/
 
     err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -303,6 +242,16 @@ int main() {
 	}
 	double cute_time = timer.seconds() / 100;
 	printf("Average kernel time over 100 runs: %f ms\n", cute_time * 1e3);
+
+	// write output to file
+	{
+		std::ofstream out_file("out_cpu.bin", std::ios::binary);
+		cudaMemcpy(out_data.data(), out_dev, out_size_bytes, cudaMemcpyDeviceToHost);
+		out_file.write(
+			reinterpret_cast<char*>(out_data.data()),
+			static_cast<std::streamsize>(out_data.size() * sizeof(*out_data.data()))
+		);
+	}
 
     err = cudaGetLastError();
     if (err != cudaSuccess) {
