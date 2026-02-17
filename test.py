@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import sys
 
-shape = (4096, 192)
+shape = (4*4096, 192)
 
 def load_bf16_from_file(path, shape):
     # Read raw 16‑bit data
@@ -13,6 +13,24 @@ def load_bf16_from_file(path, shape):
     t_u16 = torch.from_numpy(arr_u16)
     t_bf16 = t_u16.view(torch.bfloat16)  # reinterpret bits
     return t_bf16
+
+def create_random_bf16_to_file(path, shape):
+    # Generate random float32 data
+    arr_f32 = np.random.randn(*shape).astype(np.float32)
+
+    # Convert to torch tensor and cast to bfloat16
+    t_f32 = torch.from_numpy(arr_f32)
+    t_bf16 = t_f32.to(torch.bfloat16)
+
+    # View as uint16 to get raw bits
+    t_u16 = t_bf16.view(torch.uint16)
+
+    # Convert back to numpy and save
+    arr_u16 = t_u16.numpy()
+    arr_u16.tofile(path)
+
+create_random_bf16_to_file("q.bin", shape)
+create_random_bf16_to_file("kv.bin", shape)
 
 q  = load_bf16_from_file("q.bin",  shape).to(torch.float32)
 kv = load_bf16_from_file("kv.bin", shape).to(torch.float32)
@@ -27,7 +45,7 @@ o = torch.matmul(scores.to(torch.bfloat16).to(torch.float32), kv[:, :128]).to(to
 
 print("pytorch:", o[1568:1568+16,64:64+16])
 
-test_output = load_bf16_from_file("out_cpu.bin", (4096, 128)).to(torch.float32)
+test_output = load_bf16_from_file("out_cpu.bin", (4*4096, 128)).to(torch.float32)
 
 print("my code:", test_output[1568:1568+16,64:64+16])
 

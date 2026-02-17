@@ -12,7 +12,7 @@ constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
 constexpr usize Q_PER_WARP = 16;
 constexpr usize Q_PER_BLOCK = Q_PER_WARP * WARPS_PER_BLOCK;
 constexpr usize KV_PER_STEP = 16;
-constexpr usize GMEM_PRELOAD = 4;
+constexpr usize GMEM_PRELOAD = 8;
 
 __global__ void attn_kernel(
 	bf16 *gQ_ptr,
@@ -158,8 +158,8 @@ __global__ void attn_kernel(
 
 int main() {
 	bool use_real_data = true;
-	constexpr size_t Q_LEN = 4096;
-	constexpr size_t KV_LEN = 4096;
+	constexpr size_t Q_LEN = 4*4096;
+	constexpr size_t KV_LEN = 4*4096;
 
 	// allocate q: bf16 [Q_LEN, QK_DIM]
 	std::vector<bf16> q_data(Q_LEN * QK_DIM);
@@ -235,7 +235,7 @@ int main() {
 	GPU_Clock timer;
 	timer.start();
 	for (int i = 0; i < 100; ++i) {
-		attn_kernel<<<4096/Q_PER_BLOCK, THREADS_PER_BLOCK, smem_size>>>(
+		attn_kernel<<<Q_LEN/Q_PER_BLOCK, THREADS_PER_BLOCK, smem_size>>>(
 			q._ptr, kv._ptr, out._ptr,
 			q.m_rows(), kv.m_rows()
 		);
