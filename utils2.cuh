@@ -200,75 +200,114 @@ struct GMatrixDynSize {
 
 //--------------------------------------------------------------------------------------------------
 
-template<typename T, const usize M, const usize N, const usize STRIDE = N>
-struct SMatrix {
+template<
+	typename T,
+	const usize M,
+	const usize N,
+>
+requires(
+	M > 0 && M % 8 == 0
+	&& N > 0 && N * sizeof(T) % 128 == 0
+)
+struct SMatrixStorage {
 	u32 _base_ptr;
-	u32 _off;
 
-	X17_DEVICE constexpr SMatrix(void *ptr):
-		_base_ptr(cast_smem_ptr_to_uint(ptr)),
-		_off(0)
-	{}
+	X17_DEVICE constexpr SMatrixStorage(void *ptr): _base_ptr(cast_smem_ptr_to_uint(ptr)) {}
 
-	X17_DEVICE constexpr SMatrix(u32 base_ptr, u32 off):
-		_base_ptr(base_ptr),
-		_off(off)
-	{}
+	X17_DEVICE constexpr SMatrixStorage(u32 base_ptr): _base_ptr(base_ptr) {}
+};
+
+template<typename T>
+struct SMatrixTile {
+	using ElemType = T;
+
+	X17_DEVICE constexpr usize m_rows() const { return 8; }
+	X17_DEVICE constexpr usize n_cols() const { return 128 / sizeof(T); }
+	X17_DEVICE constexpr usize elems() const { return m_rows() * n_cols(); }
+};
+
+template<
+	const usize M,
+	const usize N,
+	typename Storage
+>
+requires(
+	M > 0 && M % Tile::m_rows() == 0
+	&& N > 0 && N % Tile::n_cols() == 0
+)
+struct SMatrix {
+
 
 	X17_DEVICE constexpr usize m_rows() const { return M; }
 	X17_DEVICE constexpr usize n_cols() const { return N; }
-	X17_DEVICE constexpr usize stride() const { return STRIDE; }
 	X17_DEVICE constexpr usize elems() const { return M * N; }
 
+	X17_DEVICE constexpr usize m_tiles() const { return M / Tile::m_rows(); }
+	X17_DEVICE constexpr usize n_tiles() const { return N / Tile::n_cols(); }
+
 	template<const usize TILE_M>
-	requires(TILE_M > 0 && M % TILE_M == 0)
-	X17_DEVICE constexpr SMatrix<T, TILE_M, N, STRIDE> tile_m(usize tile_idx) const {
-		return SMatrix<T, TILE_M, N, STRIDE>{
-			_base_ptr,
-			_off + TILE_M * STRIDE * tile_idx * usize(sizeof(T))
+	requires(TILE_M > 0 && M % TILE_M == 0 && TILE_M % Tile::m_rows() == 0)
+	X17_DEVICE constexpr SMatrix<T, TILE_M, N, TILE_STRIDE> tile_m(usize tile_idx) const {
+		return SMatrix<T, TILE_M, N, TILE_STRIDE>{
+			_base_ptr + (
+				(TILE_M / Tile::m_rows())
+				* tile_idx * TILE_STRIDE * Tile::elems() * usize(sizeof(typename Tile::ElemType))
+			)
 		};
 	}
 
 	template<const usize TILE_N>
-	requires(TILE_N > 0 && N % TILE_N == 0)
-	X17_DEVICE constexpr SMatrix<T, M, TILE_N, STRIDE> tile_n(usize tile_idx) const {
-		return SMatrix<T, M, TILE_N, STRIDE>{
-			_base_ptr,
-			_off + TILE_N * tile_idx * usize(sizeof(T))
+	requires(TILE_N > 0 && N % TILE_N == 0 && TILE_N % Tile::n_cols() == 0)
+	X17_DEVICE constexpr SMatrix<T, M, TILE_N, TILE_STRIDE> tile_n(usize tile_idx) const {
+		return SMatrix<T, M, TILE_N, TILE_STRIDE>{
+			_base_ptr + (
+				(TILE_N / Tile::n_cols())
+				* tile_idx * Tile::elems() * usize(sizeof(typename Tile::ElemType))
+			)
 		};
 	}
 };
 
 //--------------------------------------------------------------------------------------------------
 
-template<const usize BLOCK_DIM, typename T, const usize M, const usize N, const usize STRIDE>
-requires(STRIDE == N)
-X17_DEVICE void cp_async(GMatrix<T, M, N> src, SMatrix<T, M, N, STRIDE> dst) {
-	constexpr usize BYTES = sizeof(T) * M * N;
-	constexpr usize CP_ASYNC_CNT = BYTES / 16;
-	static_assert(BYTES % 16 == 0, "cp.async size must be multiple of 16 bytes");
-
+template<
+	const usize BLOCK_DIM,
+	typename U,
+	typename Tile,
+	const usize M,
+	const usize N,
+	const usize TILE_STRIDE
+>
+requires(
+	sizeof(U) <= 16
+	&& std::is_same_v<typename Tile::ElemType, U>
+	&& Tile::m_rows() == 8
+	&& Tile::n_cols() * sizeof(U) == 128
+)
+X17_DEVICE void cp_async(GMatrix<U, M, N> src, SMatrix<Tile, M, N, TILE_STRIDE> dst) {
 	usize tid = threadIdx.x;
-	usize src_off = tid * 16;
+
+	constexpr usize THREADS_PER_TILE = 64;
+	static_assert(BLOCK_DIM % THREADS_PER_TILE == 0, "TODO");
+	constexpr usize TILES_PER_BLOCK = BLOCK_DIM / THREADS_PER_TILE;
+	static_assert(dst.m_tiles() % TILES_PER_BLOCK == 0, "TODO");
+
+	usize src_off = (tid & 7) * 16 + (tid / 8) * src.stride() * sizeof(T);
 	u8 *src_ptr = reinterpret_cast<u8 *>(src._ptr) + src_off;
 
-	usize dst_off = sm80::ldmatrix_swizzle(src_off);
+	usize dst_off = (tid & 7) * 16 + ((tid % TILES_PER_BLOCK) / 8) * 128;
+	dst_off = sm80::ldmatrix_swizzle(dst_off);
+	dst_off += (tid / TILES_PER_BLOCK) * 8 * 128 * TILE_STRIDE;
 	usize dst_ptr = dst._base_ptr + dst._off + dst_off;
 
-	static_assert(BLOCK_DIM * 16 % 1024 == 0, "The swizzle pattern repeats after 1024 bytes. This assumption allows us to simply add a constant offset in the loop and not recalculate the swizzle");
-
-	constexpr usize ITERATIONS = CP_ASYNC_CNT / BLOCK_DIM;
-	if constexpr (ITERATIONS > 0) {
-		X17_UNROLL for (usize i = 0; i < ITERATIONS; i++) {
+	X17_UNROLL for (usize j = 0; j < h; j += 2) {
+		X17_UNROLL for (usize i = 0; i < w; ++i) {
 			sm80::cp_async(src_ptr, dst_ptr);
-			src_ptr += usize(BLOCK_DIM * 16);
-			dst_ptr += usize(BLOCK_DIM * 16);
+			src_ptr += 128;
+			dst_ptr += 8 * 128;
 		}
-	}
-	if constexpr (CP_ASYNC_CNT % BLOCK_DIM != 0) {
-		if (tid < CP_ASYNC_CNT % BLOCK_DIM) {
-			sm80::cp_async(src_ptr, dst_ptr);
-		}
+		src_ptr += 16 * src.stride() * usize(sizeof(T)) - w * 128;
+		dst_ptr += 8 * 128 * TILE_STRIDE;
 	}
 }
 
@@ -417,9 +456,18 @@ struct RMatrix {
 
 //--------------------------------------------------------------------------------------------------
 
-template<typename T, const usize STRIDE>
-requires(sizeof(T) == 2)
-X17_DEVICE void ldmatrix(SMatrix<T, 16, 16, STRIDE> src, Fragment_16x16<T> &dst) {
+template<
+	typename U,
+	typename Tile,
+	const usize M,
+	const usize N,
+	const usize TILE_STRIDE
+>
+requires(
+	sizeof(T) == 2
+	&& std::is_same_v<typename Tile::ElemType, T>
+)
+X17_DEVICE void ldmatrix(SMatrix<Tile, M, N, TILE_STRIDE> src, Fragment_16x16<U> &dst) {
 	usize tid = threadIdx.x;
 	usize thread_off = (tid & 15) * STRIDE * usize(sizeof(T)) + (tid & 16);
 	usize off = src._off + thread_off;
