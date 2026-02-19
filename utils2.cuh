@@ -200,122 +200,6 @@ struct GMatrixDynSize {
 
 //--------------------------------------------------------------------------------------------------
 
-template<
-	typename T,
-	const usize M,
-	const usize N,
->
-requires(
-	M > 0 && M % 8 == 0
-	&& N > 0 && N * sizeof(T) % 128 == 0
-)
-struct SMatrixStorage {
-	u32 _base_ptr;
-
-	X17_DEVICE constexpr SMatrixStorage(void *ptr): _base_ptr(cast_smem_ptr_to_uint(ptr)) {}
-
-	X17_DEVICE constexpr SMatrixStorage(u32 base_ptr): _base_ptr(base_ptr) {}
-};
-
-template<typename T>
-struct SMatrixTile {
-	using ElemType = T;
-
-	X17_DEVICE constexpr usize m_rows() const { return 8; }
-	X17_DEVICE constexpr usize n_cols() const { return 128 / sizeof(T); }
-	X17_DEVICE constexpr usize elems() const { return m_rows() * n_cols(); }
-};
-
-template<
-	const usize M,
-	const usize N,
-	typename Storage
->
-requires(
-	M > 0 && M % Tile::m_rows() == 0
-	&& N > 0 && N % Tile::n_cols() == 0
-)
-struct SMatrix {
-
-
-	X17_DEVICE constexpr usize m_rows() const { return M; }
-	X17_DEVICE constexpr usize n_cols() const { return N; }
-	X17_DEVICE constexpr usize elems() const { return M * N; }
-
-	X17_DEVICE constexpr usize m_tiles() const { return M / Tile::m_rows(); }
-	X17_DEVICE constexpr usize n_tiles() const { return N / Tile::n_cols(); }
-
-	template<const usize TILE_M>
-	requires(TILE_M > 0 && M % TILE_M == 0 && TILE_M % Tile::m_rows() == 0)
-	X17_DEVICE constexpr SMatrix<T, TILE_M, N, TILE_STRIDE> tile_m(usize tile_idx) const {
-		return SMatrix<T, TILE_M, N, TILE_STRIDE>{
-			_base_ptr + (
-				(TILE_M / Tile::m_rows())
-				* tile_idx * TILE_STRIDE * Tile::elems() * usize(sizeof(typename Tile::ElemType))
-			)
-		};
-	}
-
-	template<const usize TILE_N>
-	requires(TILE_N > 0 && N % TILE_N == 0 && TILE_N % Tile::n_cols() == 0)
-	X17_DEVICE constexpr SMatrix<T, M, TILE_N, TILE_STRIDE> tile_n(usize tile_idx) const {
-		return SMatrix<T, M, TILE_N, TILE_STRIDE>{
-			_base_ptr + (
-				(TILE_N / Tile::n_cols())
-				* tile_idx * Tile::elems() * usize(sizeof(typename Tile::ElemType))
-			)
-		};
-	}
-};
-
-//--------------------------------------------------------------------------------------------------
-
-template<
-	const usize BLOCK_DIM,
-	typename U,
-	typename Tile,
-	const usize M,
-	const usize N,
-	const usize TILE_STRIDE
->
-requires(
-	sizeof(U) <= 16
-	&& std::is_same_v<typename Tile::ElemType, U>
-	&& Tile::m_rows() == 8
-	&& Tile::n_cols() * sizeof(U) == 128
-)
-X17_DEVICE void cp_async(GMatrix<U, M, N> src, SMatrix<Tile, M, N, TILE_STRIDE> dst) {
-	usize tid = threadIdx.x;
-
-	constexpr usize THREADS_PER_TILE = 64;
-	static_assert(BLOCK_DIM % THREADS_PER_TILE == 0, "TODO");
-	constexpr usize TILES_PER_BLOCK = BLOCK_DIM / THREADS_PER_TILE;
-	static_assert(dst.m_tiles() % TILES_PER_BLOCK == 0, "TODO");
-
-	usize src_off = (tid & 7) * 16 + (tid / 8) * src.stride() * sizeof(T);
-	u8 *src_ptr = reinterpret_cast<u8 *>(src._ptr) + src_off;
-
-	usize dst_off = (tid & 7) * 16 + ((tid % TILES_PER_BLOCK) / 8) * 128;
-	dst_off = sm80::ldmatrix_swizzle(dst_off);
-	dst_off += (tid / TILES_PER_BLOCK) * 8 * 128 * TILE_STRIDE;
-	usize dst_ptr = dst._base_ptr + dst._off + dst_off;
-
-	X17_UNROLL for (usize j = 0; j < h; j += 2) {
-		X17_UNROLL for (usize i = 0; i < w; ++i) {
-			sm80::cp_async(src_ptr, dst_ptr);
-			src_ptr += 128;
-			dst_ptr += 8 * 128;
-		}
-		src_ptr += 16 * src.stride() * usize(sizeof(T)) - w * 128;
-		dst_ptr += 8 * 128 * TILE_STRIDE;
-	}
-}
-
-using sm80::cp_async_commit;
-using sm80::cp_async_wait;
-
-//--------------------------------------------------------------------------------------------------
-
 template<typename T, const usize T_SIZE = sizeof(T)>
 struct FragmentReg;
 
@@ -457,6 +341,99 @@ struct RMatrix {
 //--------------------------------------------------------------------------------------------------
 
 template<
+	typename T,
+	const usize M,
+	const usize N
+>
+requires(
+	M > 0 && M % 8 == 0
+	&& N > 0 && N * sizeof(T) % 128 == 0
+)
+struct SMatrix {
+	u32 _ptr;
+
+	X17_DEVICE constexpr SMatrix(void *ptr): _ptr(cast_smem_ptr_to_uint(ptr)) {}
+
+	X17_DEVICE constexpr SMatrix(u32 ptr): _ptr(ptr) {}
+
+	X17_DEVICE constexpr usize m_rows() const { return M; }
+	X17_DEVICE constexpr usize n_cols() const { return N; }
+	X17_DEVICE constexpr usize elems() const { return M * N; }
+
+	constexpr static usize ROW_BYTES = N * sizeof(T);
+
+	template<const usize TILE_M>
+	requires(TILE_M > 0 && TILE_M % 8 == 0 && M % TILE_M == 0)
+	X17_DEVICE constexpr SMatrix<T, TILE_M, N> tile_m(usize tile_idx) const {
+		return SMatrix<T, TILE_M, N>{
+			_ptr + (tile_idx * TILE_M * ROW_BYTES)
+		};
+	}
+
+	template<const usize THREADS_PER_BLOCK>
+	X17_DEVICE void cp_async_from(GMatrix<T, M, N> src) const {
+		usize tid = threadIdx.x;
+
+		constexpr usize THREADS_PER_TILE = 64;
+		static_assert(THREADS_PER_BLOCK % THREADS_PER_TILE == 0, "TODO");
+		constexpr usize TILES_PER_BLOCK = THREADS_PER_BLOCK / THREADS_PER_TILE;
+		static_assert((M / 8) % TILES_PER_BLOCK == 0, "TODO");
+
+		usize src_off = (tid % 8) * 16 + (tid / 8) * ROW_BYTES;
+		u8 *src_ptr = reinterpret_cast<u8 *>(src._ptr) + src_off;
+
+		usize dst_off = (tid % 8) * 16 + (tid / 8) * 128;
+		dst_off = sm80::ldmatrix_swizzle(dst_off);
+		dst_off += (tid / TILES_PER_BLOCK) * 8 * (ROW_BYTES - 128);
+		usize dst_ptr = _ptr + dst_off;
+
+		constexpr usize h = M / 8;
+		constexpr usize w = ROW_BYTES / 128;
+		X17_UNROLL for (usize j = 0; j < h; j += TILES_PER_BLOCK) {
+			X17_UNROLL for (usize i = 0; i < w; ++i) {
+				sm80::cp_async(src_ptr, dst_ptr);
+				src_ptr += 128;
+				dst_ptr += 8 * 128;
+			}
+			src_ptr += 8 * TILES_PER_BLOCK * ROW_BYTES - w * 128;
+			dst_ptr += (TILES_PER_BLOCK - 1) * 8 * ROW_BYTES;
+		}
+	}
+
+	/// Both `m_idx` and `n_idx` must be multiples of 16.
+	X17_DEVICE void load_tile_to_fragment(
+		usize m_idx, usize n_idx,
+		Fragment_16x16<T> &dst
+	) const requires(sizeof(T) == 2) {
+		usize tid = threadIdx.x;
+
+		usize a =
+			m_idx * ROW_BYTES
+			+ (n_idx / 64) * (8 * 128)
+			+ (n_idx % 64);
+		usize b = (tid & 15) * 128 + (tid & 16);
+
+		sm80::ldmatrix_8x8xu16_x4(
+			_ptr + a + b,
+			dst.sub[0][0].val, dst.sub[1][0].val, dst.sub[0][1].val, dst.sub[1][1].val
+		);
+	}
+
+	X17_DEVICE void load_to_registers(RMatrix<T, M, N> &dst) const requires(sizeof(T) == 2) {
+		X17_UNROLL for (usize j = 0; j < M / 16; j++) {
+			X17_UNROLL for (usize i = 0; i < N / 16; i++) {
+				load_tile_to_fragment(j * 16, i * 16, dst.tiles[j][i]);
+			}
+		}
+	}
+};
+
+using sm80::cp_async_commit;
+using sm80::cp_async_wait;
+
+//--------------------------------------------------------------------------------------------------
+/*
+template<
 	typename U,
 	typename Tile,
 	const usize M,
@@ -593,7 +570,7 @@ X17_DEVICE void ldmatrix(SMatrix<T, M, N, STRIDE> src, RMatrix<T, M, N> &dst) {
 		}
 	}
 }
-
+*/
 //--------------------------------------------------------------------------------------------------
 
 X17_DEVICE void mma_a_bt(

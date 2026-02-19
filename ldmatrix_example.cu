@@ -31,7 +31,7 @@ __global__ void attn_kernel(
 	GMatrix<bf16, Q_PER_BLOCK, QK_DIM> gQ_block = gQ_full.tile_m<Q_PER_BLOCK>(blockIdx.x);
 	SMatrix<bf16, Q_PER_BLOCK, QK_DIM> sQ_block{q_smem};
 
-	cp_async<THREADS_PER_BLOCK>(gQ_block, sQ_block);
+	sQ_block.cp_async_from<THREADS_PER_BLOCK>(gQ_block);
 
 	SMatrix<bf16, Q_PER_WARP, QK_DIM> sQ_warp = sQ_block.tile_m<Q_PER_WARP>(threadIdx.x / WARP_SIZE);
 
@@ -40,7 +40,7 @@ __global__ void attn_kernel(
 	__syncthreads();
 
 	RMatrix<bf16, 16, QK_DIM> rQ;
-	ldmatrix(sQ_warp, rQ);
+	sQ_warp.load_to_registers(rQ);
 
 	__syncthreads();
 
@@ -50,9 +50,8 @@ __global__ void attn_kernel(
 
 	X17_UNROLL for (usize preload = 0; preload < GMEM_PRELOAD - 1; ++preload) {
 		if (preload * KV_PER_STEP < gKV_full.m_rows()) {
-			cp_async<THREADS_PER_BLOCK>(
-				gKV_full.tile_m<KV_PER_STEP>(preload),
-				sKV_preload.tile_m<KV_PER_STEP>(preload)
+			sKV_preload.tile_m<KV_PER_STEP>(preload).cp_async_from<THREADS_PER_BLOCK>(
+				gKV_full.tile_m<KV_PER_STEP>(preload)
 			);
 		}
 		cp_async_commit();
@@ -68,9 +67,9 @@ __global__ void attn_kernel(
 	// Start preloading sKV to registers
 	SMatrix<bf16, KV_PER_STEP, QK_DIM> sKV = sKV_preload.tile_m<KV_PER_STEP>(0);
 	Fragment_16x16<bf16> r0, r1, r2;
-	ldmatrix(sKV.tile_n<16>(0), r0);
-	ldmatrix(sKV.tile_n<16>(1), r1);
-	ldmatrix(sKV.tile_n<16>(2), r2);
+	sKV.load_tile_to_fragment(0, 0*16, r0);
+	sKV.load_tile_to_fragment(0, 1*16, r1);
+	sKV.load_tile_to_fragment(0, 2*16, r2);
 
 	// Sequential loop over KV
 	size_t kv_steps = gKV_full.m_rows() / KV_PER_STEP;
@@ -79,51 +78,52 @@ __global__ void attn_kernel(
 		Fragment_16x16<f32> rScores_f32;
 		rScores_f32.zero_();
 		mma_a_bt(rQ.tiles[0][0], r0, rScores_f32);
-		ldmatrix(sKV.tile_n<16>(3), r0);
+		sKV.load_tile_to_fragment(0, 3*16, r0);
 		mma_a_bt(rQ.tiles[0][1], r1, rScores_f32);
-		ldmatrix(sKV.tile_n<16>(4), r1);
+		sKV.load_tile_to_fragment(0, 4*16, r1);
 		mma_a_bt(rQ.tiles[0][2], r2, rScores_f32);
-		ldmatrix(sKV.tile_n<16>(5), r2);
+		sKV.load_tile_to_fragment(0, 5*16, r2);
 		mma_a_bt(rQ.tiles[0][3], r0, rScores_f32);
-		ldmatrix(sKV.tile_n<16>(6), r0);
+		sKV.load_tile_to_fragment(0, 6*16, r0);
 		mma_a_bt(rQ.tiles[0][4], r1, rScores_f32);
-		ldmatrix(sKV.tile_n<16>(7), r1);
+		sKV.load_tile_to_fragment(0, 7*16, r1);
 		mma_a_bt(rQ.tiles[0][5], r2, rScores_f32);
-		ldmatrix(sKV.tile_n<16>(8), r2);
+		sKV.load_tile_to_fragment(0, 8*16, r2);
 		mma_a_bt(rQ.tiles[0][6], r0, rScores_f32);
-		ldmatrix(sKV.tile_n<16>(9), r0);
+		sKV.load_tile_to_fragment(0, 9*16, r0);
 		mma_a_bt(rQ.tiles[0][7], r1, rScores_f32);
-		ldmatrix(sKV.tile_n<16>(10), r1);
+		sKV.load_tile_to_fragment(0, 10*16, r1);
 		mma_a_bt(rQ.tiles[0][8], r2, rScores_f32);
-		ldmatrix(sKV.tile_n<16>(11), r2);
+		sKV.load_tile_to_fragment(0, 11*16, r2);
 		mma_a_bt(rQ.tiles[0][9], r0, rScores_f32);
-		ldmatrix_t(sKV.tile_n<16>(2), r0);
+		//ldmatrix_t(sKV.tile_n<16>(2), r0);
 		mma_a_bt(rQ.tiles[0][10], r1, rScores_f32);
-		ldmatrix_t(sKV.tile_n<16>(0), r1);
+		//ldmatrix_t(sKV.tile_n<16>(0), r1);
 		mma_a_bt(rQ.tiles[0][11], r2, rScores_f32);
-		ldmatrix_t(sKV.tile_n<16>(1), r2);
+		//ldmatrix_t(sKV.tile_n<16>(1), r2);
 
 		// rOut += rScores * V
 		Fragment_16x16<bf16> rScores;
 		cast(rScores_f32, rScores);
 		mma_a_bt(rScores, r1, rOut.tiles[0][0]);
-		ldmatrix_t(sKV.tile_n<16>(3), r1);
+		//ldmatrix_t(sKV.tile_n<16>(3), r1);
 		mma_a_bt(rScores, r2, rOut.tiles[0][1]);
-		ldmatrix_t(sKV.tile_n<16>(4), r2);
+		//ldmatrix_t(sKV.tile_n<16>(4), r2);
 		mma_a_bt(rScores, r0, rOut.tiles[0][2]);
-		ldmatrix_t(sKV.tile_n<16>(5), r0);
+		//ldmatrix_t(sKV.tile_n<16>(5), r0);
 		mma_a_bt(rScores, r1, rOut.tiles[0][3]);
-		ldmatrix_t(sKV.tile_n<16>(6), r1);
+		//ldmatrix_t(sKV.tile_n<16>(6), r1);
 		mma_a_bt(rScores, r2, rOut.tiles[0][4]);
-		ldmatrix_t(sKV.tile_n<16>(7), r2);
+		//ldmatrix_t(sKV.tile_n<16>(7), r2);
 		mma_a_bt(rScores, r0, rOut.tiles[0][5]);
 		{
 			//__syncthreads();
 			// Preload next KV tile from GMEM
 			if ((kv_step + GMEM_PRELOAD - 1) * KV_PER_STEP < gKV_full.m_rows()) {
-				cp_async<THREADS_PER_BLOCK>(
-					gKV_full.tile_m<KV_PER_STEP>(kv_step + GMEM_PRELOAD - 1),
-					sKV_preload.tile_m<KV_PER_STEP>((kv_step + GMEM_PRELOAD - 1) % GMEM_PRELOAD)
+				sKV_preload.tile_m<KV_PER_STEP>(
+					(kv_step + GMEM_PRELOAD - 1) % GMEM_PRELOAD
+				).cp_async_from<THREADS_PER_BLOCK>(
+					gKV_full.tile_m<KV_PER_STEP>(kv_step + GMEM_PRELOAD - 1)
 				);
 			}
 			cp_async_commit();
@@ -132,17 +132,17 @@ __global__ void attn_kernel(
 			__syncthreads();
 			sKV = sKV_preload.tile_m<KV_PER_STEP>((kv_step + 1) % GMEM_PRELOAD);
 		}
-		ldmatrix(sKV.tile_n<16>(0), r0);
+		//ldmatrix(sKV.tile_n<16>(0), r0);
 		mma_a_bt(rScores, r1, rOut.tiles[0][6]);
-		ldmatrix(sKV.tile_n<16>(1), r1);
+		//ldmatrix(sKV.tile_n<16>(1), r1);
 		mma_a_bt(rScores, r2, rOut.tiles[0][7]);
-		ldmatrix(sKV.tile_n<16>(2), r2);
+		//ldmatrix(sKV.tile_n<16>(2), r2);
 	}
 
 	GMatrixDynSize<bf16, V_DIM> gOut_full{gOut_ptr, q_cnt};
 	GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = gOut_full.tile_m<Q_PER_BLOCK>(blockIdx.x);
 	GMatrix<bf16, Q_PER_WARP, V_DIM> gOut_warp = gOut_block.tile_m<Q_PER_WARP>(threadIdx.x / WARP_SIZE);
-	stmatrix(rOut, gOut_warp);
+	//stmatrix(rOut, gOut_warp);
 
 	/*if (threadIdx.x < 32) {
 		auto &t = rOut.tiles[0][0];
