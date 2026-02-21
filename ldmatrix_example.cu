@@ -12,7 +12,7 @@ constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
 constexpr usize Q_PER_WARP = 16;
 constexpr usize Q_PER_BLOCK = Q_PER_WARP * WARPS_PER_BLOCK;
 constexpr usize KV_PER_STEP = 16;
-constexpr usize GMEM_PRELOAD = 8;
+constexpr usize GMEM_PRELOAD = 4;
 
 __global__ void attn_kernel(
 	bf16 *gQ_ptr,
@@ -21,7 +21,7 @@ __global__ void attn_kernel(
 	usize q_cnt,
 	usize kv_cnt
 ) {
-    extern __shared__ bf16 *smem;
+	extern __shared__ bf16 *smem;
 
 	bf16 *q_smem = smem; // Q_PER_BLOCK * QK_DIM
 	bf16 *kv_smem = smem; // KV_PER_STEP * GMEM_PRELOAD * QK_DIM
@@ -39,7 +39,7 @@ __global__ void attn_kernel(
 	cp_async_wait<0>();
 	__syncthreads();
 
-	RMatrix<bf16, 16, QK_DIM> rQ;
+	RMatrix<bf16, Q_PER_WARP, QK_DIM> rQ;
 	sQ_warp.load_to_registers(rQ);
 
 	__syncthreads();
@@ -96,28 +96,27 @@ __global__ void attn_kernel(
 		mma_a_bt(rQ.tiles[0][8], r2, rScores_f32);
 		sKV.load_tile_to_fragment(0, 11*16, r2);
 		mma_a_bt(rQ.tiles[0][9], r0, rScores_f32);
-		//ldmatrix_t(sKV.tile_n<16>(2), r0);
+		sKV.load_t_tile_to_fragment(0, 2*16, r0);
 		mma_a_bt(rQ.tiles[0][10], r1, rScores_f32);
-		//ldmatrix_t(sKV.tile_n<16>(0), r1);
+		sKV.load_t_tile_to_fragment(0, 0*16, r1);
 		mma_a_bt(rQ.tiles[0][11], r2, rScores_f32);
-		//ldmatrix_t(sKV.tile_n<16>(1), r2);
+		sKV.load_t_tile_to_fragment(0, 1*16, r2);
 
 		// rOut += rScores * V
 		Fragment_16x16<bf16> rScores;
 		cast(rScores_f32, rScores);
 		mma_a_bt(rScores, r1, rOut.tiles[0][0]);
-		//ldmatrix_t(sKV.tile_n<16>(3), r1);
+		sKV.load_t_tile_to_fragment(0, 3*16, r1);
 		mma_a_bt(rScores, r2, rOut.tiles[0][1]);
-		//ldmatrix_t(sKV.tile_n<16>(4), r2);
+		sKV.load_t_tile_to_fragment(0, 4*16, r2);
 		mma_a_bt(rScores, r0, rOut.tiles[0][2]);
-		//ldmatrix_t(sKV.tile_n<16>(5), r0);
+		sKV.load_t_tile_to_fragment(0, 5*16, r0);
 		mma_a_bt(rScores, r1, rOut.tiles[0][3]);
-		//ldmatrix_t(sKV.tile_n<16>(6), r1);
+		sKV.load_t_tile_to_fragment(0, 6*16, r1);
 		mma_a_bt(rScores, r2, rOut.tiles[0][4]);
-		//ldmatrix_t(sKV.tile_n<16>(7), r2);
+		sKV.load_t_tile_to_fragment(0, 7*16, r2);
 		mma_a_bt(rScores, r0, rOut.tiles[0][5]);
 		{
-			//__syncthreads();
 			// Preload next KV tile from GMEM
 			if ((kv_step + GMEM_PRELOAD - 1) * KV_PER_STEP < gKV_full.m_rows()) {
 				sKV_preload.tile_m<KV_PER_STEP>(
@@ -132,17 +131,17 @@ __global__ void attn_kernel(
 			__syncthreads();
 			sKV = sKV_preload.tile_m<KV_PER_STEP>((kv_step + 1) % GMEM_PRELOAD);
 		}
-		//ldmatrix(sKV.tile_n<16>(0), r0);
+		sKV.load_tile_to_fragment(0, 0*16, r0);
 		mma_a_bt(rScores, r1, rOut.tiles[0][6]);
-		//ldmatrix(sKV.tile_n<16>(1), r1);
+		sKV.load_tile_to_fragment(0, 1*16, r1);
 		mma_a_bt(rScores, r2, rOut.tiles[0][7]);
-		//ldmatrix(sKV.tile_n<16>(2), r2);
+		sKV.load_tile_to_fragment(0, 2*16, r2);
 	}
 
 	GMatrixDynSize<bf16, V_DIM> gOut_full{gOut_ptr, q_cnt};
 	GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = gOut_full.tile_m<Q_PER_BLOCK>(blockIdx.x);
 	GMatrix<bf16, Q_PER_WARP, V_DIM> gOut_warp = gOut_block.tile_m<Q_PER_WARP>(threadIdx.x / WARP_SIZE);
-	//stmatrix(rOut, gOut_warp);
+	rOut.store(gOut_warp);
 
 	/*if (threadIdx.x < 32) {
 		auto &t = rOut.tiles[0][0];
@@ -158,12 +157,12 @@ __global__ void attn_kernel(
 
 int main() {
 	bool use_real_data = true;
-	constexpr size_t Q_LEN = 4*4096;
-	constexpr size_t KV_LEN = 4*4096;
+	constexpr size_t Q_LEN = 400*4096;
+	constexpr size_t KV_LEN = 4096;
 
 	// allocate q: bf16 [Q_LEN, QK_DIM]
 	std::vector<bf16> q_data(Q_LEN * QK_DIM);
-	if (use_real_data) {
+	/*if (use_real_data) {
 		std::ifstream in("q.bin", std::ios::binary);
 		in.read(
 			reinterpret_cast<char*>(q_data.data()),
@@ -174,21 +173,21 @@ int main() {
 		for (size_t i = 0; i < q_data.size(); ++i) {
 			q_data[i] = bf16(float(i));
 		}
-	}
+	}*/
 	bf16 *q_dev;
 	size_t q_size_bytes = q_data.size() * sizeof(bf16);
 	cudaMalloc(&q_dev, q_size_bytes);
 	cudaMemcpy(q_dev, q_data.data(), q_size_bytes, cudaMemcpyHostToDevice);
 	GMatrixDynSize<bf16, QK_DIM> q{q_dev, Q_LEN};
 
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("(1) CUDA Error: %s\n", cudaGetErrorString(err));
-    }
+	cudaError_t err = cudaGetLastError();
+	if (err != cudaSuccess) {
+		printf("(1) CUDA Error: %s\n", cudaGetErrorString(err));
+	}
 
 	// allocate kv: bf16 [KV_LEN, QK_DIM]
 	std::vector<bf16> kv_data(KV_LEN * QK_DIM);
-	if (use_real_data) {
+	/*if (use_real_data) {
 		std::ifstream in("kv.bin", std::ios::binary);
 		in.read(
 			reinterpret_cast<char*>(kv_data.data()),
@@ -199,7 +198,7 @@ int main() {
 		for (size_t i = 0; i < kv_data.size(); ++i) {
 			kv_data[i] = bf16(float(i*100));
 		}
-	}
+	}*/
 	bf16 *kv_dev;
 	size_t kv_size_bytes = kv_data.size() * sizeof(bf16);
 	cudaMalloc(&kv_dev, kv_size_bytes);
@@ -213,35 +212,41 @@ int main() {
 	cudaMalloc(&out_dev, out_size_bytes);
 	GMatrixDynSize<bf16, V_DIM> out{out_dev, Q_LEN};
 
-    err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("(2) CUDA Error: %s\n", cudaGetErrorString(err));
-    }
+	err = cudaGetLastError();
+	if (err != cudaSuccess) {
+		printf("(2) CUDA Error: %s\n", cudaGetErrorString(err));
+	}
 
-	/*cudaFuncSetAttribute(
-		attn_kernel,
-		cudaFuncAttributePreferredSharedMemoryCarveout, 100);*/
-
-    err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("(3) CUDA Error: %s\n", cudaGetErrorString(err));
-    }
+	err = cudaGetLastError();
+	if (err != cudaSuccess) {
+		printf("(3) CUDA Error: %s\n", cudaGetErrorString(err));
+	}
 
 	usize smem_size = sizeof(bf16) * std::max(
 		(Q_PER_BLOCK * QK_DIM),
 		(KV_PER_STEP * GMEM_PRELOAD * QK_DIM)
 	);
+	smem_size = std::max(smem_size, usize(70*1024));
+
+	cudaFuncSetAttribute(
+		attn_kernel,
+		cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+
+	cudaFuncSetAttribute(
+		attn_kernel,
+		cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
 	GPU_Clock timer;
 	timer.start();
-	for (int i = 0; i < 100; ++i) {
+	constexpr int NUM_RUNS = 3;
+	for (int i = 0; i < NUM_RUNS; ++i) {
 		attn_kernel<<<Q_LEN/Q_PER_BLOCK, THREADS_PER_BLOCK, smem_size>>>(
 			q._ptr, kv._ptr, out._ptr,
 			q.m_rows(), kv.m_rows()
 		);
 	}
-	double cute_time = timer.seconds() / 100;
-	printf("Average kernel time over 100 runs: %f ms\n", cute_time * 1e3);
+	double cute_time = timer.seconds() / NUM_RUNS;
+	printf("Average kernel time over %d runs: %f ms\n", NUM_RUNS, cute_time * 1e3);
 
 	// write output to file
 	{
@@ -253,24 +258,24 @@ int main() {
 		);
 	}
 
-    err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("(4) CUDA Error: %s\n", cudaGetErrorString(err));
-    }
+	err = cudaGetLastError();
+	if (err != cudaSuccess) {
+		printf("(4) CUDA Error: %s\n", cudaGetErrorString(err));
+	}
 
 	// Wait for kernel to complete
-    cudaDeviceSynchronize();
+	cudaDeviceSynchronize();
 
-    // Check for errors
-    err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("CUDA Error: %s\n", cudaGetErrorString(err));
-    }
+	// Check for errors
+	err = cudaGetLastError();
+	if (err != cudaSuccess) {
+		printf("CUDA Error: %s\n", cudaGetErrorString(err));
+	}
 
 /*
-    // Cleanup
-    cudaFree(d_matrix);
-    free(h_matrix);
+	// Cleanup
+	cudaFree(d_matrix);
+	free(h_matrix);
 */
-    return 0;
+	return 0;
 }
