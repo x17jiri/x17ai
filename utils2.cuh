@@ -164,13 +164,13 @@ struct GMatrix {
 
 	X17_HOST_DEVICE constexpr GMatrix(T *ptr) : _ptr(ptr) {}
 
-	X17_DEVICE constexpr usize m_rows() const { return M; }
-	X17_DEVICE constexpr usize n_cols() const { return N; }
-	X17_DEVICE constexpr usize stride() const { return N; }
-	X17_DEVICE constexpr usize elems() const { return M * N; }
+	X17_HOST_DEVICE constexpr usize m_rows() const { return M; }
+	X17_HOST_DEVICE constexpr usize n_cols() const { return N; }
+	X17_HOST_DEVICE constexpr usize stride() const { return N; }
+	X17_HOST_DEVICE constexpr usize elems() const { return M * N; }
 
 	template<const usize TILE_M>
-	X17_DEVICE constexpr GMatrix<T, TILE_M, N> tile_m(usize tile_idx) const {
+	X17_HOST_DEVICE constexpr GMatrix<T, TILE_M, N> tile_m(usize tile_idx) const {
 		return GMatrix<T, TILE_M, N>{_ptr + TILE_M * N * tile_idx};
 	}
 };
@@ -182,13 +182,13 @@ struct GMatrixDynSize {
 
 	X17_HOST_DEVICE constexpr GMatrixDynSize(T *ptr, usize m) : _ptr(ptr), _m(m) {}
 
-	X17_DEVICE constexpr usize m_rows() const { return _m; }
-	X17_DEVICE constexpr usize n_cols() const { return N; }
-	X17_DEVICE constexpr usize stride() const { return N; }
-	X17_DEVICE constexpr usize elems() const { return _m * N; }
+	X17_HOST_DEVICE constexpr usize m_rows() const { return _m; }
+	X17_HOST_DEVICE constexpr usize n_cols() const { return N; }
+	X17_HOST_DEVICE constexpr usize stride() const { return N; }
+	X17_HOST_DEVICE constexpr usize elems() const { return _m * N; }
 
 	template<const usize TILE_M>
-	X17_DEVICE constexpr GMatrix<T, TILE_M, N> tile_m(size_t tile_idx) const {
+	X17_HOST_DEVICE constexpr GMatrix<T, TILE_M, N> tile_m(size_t tile_idx) const {
 		return GMatrix<T, TILE_M, N>{
 			reinterpret_cast<T *>(
 				reinterpret_cast<u8 *>(_ptr)
@@ -373,6 +373,21 @@ struct RMatrix {
 
 //--------------------------------------------------------------------------------------------------
 
+X17_HOST_DEVICE constexpr u32 greatest_common_divisor(u32 a, u32 b) {
+	while (b != 0) {
+		u32 temp = b;
+		b = a % b;
+		a = temp;
+	}
+	return a;
+}
+
+X17_HOST_DEVICE constexpr u32 least_common_multiple(u32 a, u32 b) {
+  return a * (b / greatest_common_divisor(a, b));
+}
+
+//--------------------------------------------------------------------------------------------------
+
 template<
 	typename T,
 	const usize M,
@@ -413,37 +428,42 @@ struct SMatrix {
 	}
 
 	template<const usize THREADS_PER_BLOCK>
-	X17_DEVICE void cp_async_from(GMatrix<T, M, N> src) const {
-		usize tid = threadIdx.x;
+	X17_DEVICE void cp_async_from(usize tid, GMatrix<T, M, N> src) const {
+		__builtin_assume(tid < THREADS_PER_BLOCK);
+		constexpr usize BYTES_PER_STEP = THREADS_PER_BLOCK * 16;
+		constexpr usize STEPS = M * ROW_BYTES / BYTES_PER_STEP;
+		static_assert(M * ROW_BYTES % BYTES_PER_STEP == 0, "TODO");
+		static_assert(ROW_BYTES % 128 == 0, "TODO");
+		constexpr usize REPEAT_AFTER = least_common_multiple(8 * ROW_BYTES, BYTES_PER_STEP);
 
-		constexpr usize THREADS_PER_TILE = 64;
-		static_assert(THREADS_PER_BLOCK % THREADS_PER_TILE == 0, "TODO");
-		constexpr usize TILES_PER_BLOCK = THREADS_PER_BLOCK / THREADS_PER_TILE;
-		static_assert((M / 8) % TILES_PER_BLOCK == 0, "TODO");
+		constexpr usize PRECALC = std::min(STEPS, REPEAT_AFTER / BYTES_PER_STEP);
+		usize precalc[PRECALC];
+		for (usize i = 0; i < PRECALC; i++) {
+			usize off = i * BYTES_PER_STEP + tid * 16;
+			usize row = off / ROW_BYTES;
+			usize col = off % ROW_BYTES;
 
-		usize src_off = (tid % 8) * 16 + (tid / 8) * ROW_BYTES;
-		u8 *src_ptr = reinterpret_cast<u8 *>(src._ptr) + src_off;
+			usize outer_row = row / 8;
+			usize outer_col = col / 128;
+			usize inner_row = row % 8;
+			usize inner_col = col % 128;
 
-		usize dst_off = (tid % 8) * 16 + (tid / 8) * 128;
-		dst_off = sm80::ldmatrix_swizzle(dst_off);
-		dst_off += (tid / THREADS_PER_TILE) * 8 * (ROW_BYTES - 128);
-		usize dst_ptr = _ptr + dst_off;
+			precalc[i] =
+				outer_row * 8 * ROW_BYTES
+				+ outer_col * 8 * 128
+				+ sm80::ldmatrix_swizzle(inner_row * 128 + inner_col);
+		}
 
-		constexpr usize h = M / 8;
-		constexpr usize w = ROW_BYTES / 128;
-		X17_UNROLL for (usize j = 0; j < h; j += TILES_PER_BLOCK) {
-			X17_UNROLL for (usize i = 0; i < w; ++i) {
-				sm80::cp_async(src_ptr, dst_ptr);
-				src_ptr += 128;
-				dst_ptr += 8 * 128;
-			}
-			src_ptr += 8 * TILES_PER_BLOCK * ROW_BYTES - w * 128;
-			dst_ptr += (TILES_PER_BLOCK - 1) * 8 * ROW_BYTES;
+		u8 const *src_ptr = reinterpret_cast<u8 *>(src._ptr) + tid * 16;
+		X17_UNROLL for (usize step = 0; step < STEPS; step++) {
+			u32 dst_ptr = _ptr + precalc[step % PRECALC];
+			sm80::cp_async(src_ptr, dst_ptr);
+			src_ptr += BYTES_PER_STEP;
 		}
 	}
 
 	/// Both `m_idx` and `n_idx` must be multiples of 16.
-	X17_DEVICE void load_tile_to_fragment(
+	X17_DEVICE void tile_to_fragment(
 		usize m_idx, usize n_idx,
 		Fragment_16x16<T> &dst
 	) const requires(sizeof(T) == 2) {
@@ -461,7 +481,7 @@ struct SMatrix {
 		);
 	}
 
-	X17_DEVICE void load_t_tile_to_fragment(
+	X17_DEVICE void tile_to_fragment_trans(
 		usize m_idx, usize n_idx,
 		Fragment_16x16<T> &dst
 	) const requires(sizeof(T) == 2) {
@@ -479,10 +499,10 @@ struct SMatrix {
 		);
 	}
 
-	X17_DEVICE void load_to_registers(RMatrix<T, M, N> &dst) const requires(sizeof(T) == 2) {
+	X17_DEVICE void to_registers(RMatrix<T, M, N> &dst) const requires(sizeof(T) == 2) {
 		X17_UNROLL for (usize j = 0; j < M / 16; j++) {
 			X17_UNROLL for (usize i = 0; i < N / 16; i++) {
-				load_tile_to_fragment(j * 16, i * 16, dst.tiles[j][i]);
+				tile_to_fragment(j * 16, i * 16, dst.tiles[j][i]);
 			}
 		}
 	}
