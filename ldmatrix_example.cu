@@ -33,20 +33,19 @@ __global__ void attn_kernel(
 		.tile_m<KV_PER_STEP>(GMEM_PRELOAD - 1)
 		.tile_m<Q_PER_BLOCK>(0);
 	sQ.cp_async_from<THREADS_PER_BLOCK>(threadIdx.x, gQ_block);
-	cp_async_commit();
 
 	// Start preloading KVs from GMEM to SMEM
 	// Don't use the last preload tile yet because it's used to load Q
 	GMatrixDynSize<bf16, QK_DIM> gKV_full{gKV_ptr, kv_cnt};
 	size_t kv_steps = gKV_full.m_rows() / KV_PER_STEP;
 	X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD - 1; ++p) {
+		cp_async_commit();
 		if (p < kv_steps) {
 			preload.tile_m<KV_PER_STEP>(p).cp_async_from<THREADS_PER_BLOCK>(
 				threadIdx.x,
 				gKV_full.tile_m<KV_PER_STEP>(p)
 			);
 		}
-		cp_async_commit();
 	}
 
 	// Prepare outputs
@@ -54,13 +53,14 @@ __global__ void attn_kernel(
 	rOut.zero_();
 
 	// Load Q from SMEM to registers
-	cp_async_wait<GMEM_PRELOAD - 1>();
+	cp_async_wait<GMEM_PRELOAD - 2>();
 	__syncthreads();
 	RMatrix<bf16, Q_PER_WARP, QK_DIM> rQ;
 	sQ.to_registers(rQ);
 
 	// Now that we have Q in registers, use the last preload tile for KV
 	{
+		cp_async_commit();
 		usize p = GMEM_PRELOAD - 1;
 		if (p < kv_steps) {
 			preload.tile_m<KV_PER_STEP>(p).cp_async_from<THREADS_PER_BLOCK>(
@@ -68,7 +68,6 @@ __global__ void attn_kernel(
 				gKV_full.tile_m<KV_PER_STEP>(p)
 			);
 		}
-		//cp_async_commit();
 	}
 
 	// Start preloading sKV from SMEM to registers
@@ -126,11 +125,8 @@ __global__ void attn_kernel(
 		{
 			// Wait for the next batch of GMEM -> SMEM preloads to complete
 			cp_async_commit();
-			cp_async_wait<GMEM_PRELOAD - 2>();
-			//__syncthreads();
-			sKV = preload
-				.tile_m<KV_PER_STEP>((kv_step + 1) % GMEM_PRELOAD)
-				.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE);
+			__syncthreads();
+			cp_async_wait<GMEM_PRELOAD - 3>();
 
 			// Preload next KV tile from GMEM
 			{
@@ -143,6 +139,10 @@ __global__ void attn_kernel(
 				}
 			}
 		}
+		sKV = preload
+			.tile_m<KV_PER_STEP>((kv_step + 1) % GMEM_PRELOAD)
+			.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE);
+
 		mma_a_bt(rScores, r0, rOut.tiles[0][4]);
 		sKV.tile_to_fragment(0, 0*16, r0);
 		mma_a_bt(rScores, r1, rOut.tiles[0][5]);
