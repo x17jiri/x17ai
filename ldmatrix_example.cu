@@ -33,19 +33,20 @@ __global__ void attn_kernel(
 		.tile_m<KV_PER_STEP>(GMEM_PRELOAD - 1)
 		.tile_m<Q_PER_BLOCK>(0);
 	sQ.cp_async_from<THREADS_PER_BLOCK>(threadIdx.x, gQ_block);
+		cp_async_commit();
 
 	// Start preloading KVs from GMEM to SMEM
 	// Don't use the last preload tile yet because it's used to load Q
 	GMatrixDynSize<bf16, QK_DIM> gKV_full{gKV_ptr, kv_cnt};
 	size_t kv_steps = gKV_full.m_rows() / KV_PER_STEP;
 	X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD - 1; ++p) {
-		cp_async_commit();
 		if (p < kv_steps) {
 			preload.tile_m<KV_PER_STEP>(p).cp_async_from<THREADS_PER_BLOCK>(
 				threadIdx.x,
 				gKV_full.tile_m<KV_PER_STEP>(p)
 			);
 		}
+		cp_async_commit();
 	}
 
 	// Prepare outputs
@@ -53,14 +54,13 @@ __global__ void attn_kernel(
 	rOut.zero_();
 
 	// Load Q from SMEM to registers
-	cp_async_wait<GMEM_PRELOAD - 2>();
+	cp_async_wait<GMEM_PRELOAD - 1>();
 	__syncthreads();
 	RMatrix<bf16, Q_PER_WARP, QK_DIM> rQ;
-	sQ.to_registers(rQ);
+	sQ.load_to_registers(rQ);
 
 	// Now that we have Q in registers, use the last preload tile for KV
 	{
-		cp_async_commit();
 		usize p = GMEM_PRELOAD - 1;
 		if (p < kv_steps) {
 			preload.tile_m<KV_PER_STEP>(p).cp_async_from<THREADS_PER_BLOCK>(
@@ -68,34 +68,27 @@ __global__ void attn_kernel(
 				gKV_full.tile_m<KV_PER_STEP>(p)
 			);
 		}
+		cp_async_commit();
 	}
 
 	// Start preloading sKV from SMEM to registers
-	cp_async_wait<GMEM_PRELOAD - 2>();
+	cp_async_wait<GMEM_PRELOAD - 1>();
 	SMatrix<bf16, KV_PER_WARP, QK_DIM> sKV = preload
 		.tile_m<KV_PER_STEP>(0)
 		.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE);
 	Fragment_16x16<bf16> r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11;
-	sKV.tile_to_fragment(0, 0*16, r0);
-	sKV.tile_to_fragment(0, 1*16, r1);
-	sKV.tile_to_fragment(0, 2*16, r2);
-	sKV.tile_to_fragment(0, 3*16, r3);
-	sKV.tile_to_fragment(0, 4*16, r4);
-	sKV.tile_to_fragment(0, 5*16, r5);
-	sKV.tile_to_fragment(0, 6*16, r6);
-	sKV.tile_to_fragment(0, 7*16, r7);
-	sKV.tile_to_fragment(0, 8*16, r8);
-	sKV.tile_to_fragment(0, 9*16, r9);
-	sKV.tile_to_fragment(0, 10*16, r10);
-	sKV.tile_to_fragment(0, 11*16, r11);
-/*	sKV.tile_to_fragment_trans(0, 0*16, r4);
-	sKV.tile_to_fragment_trans(0, 1*16, r5);
-	sKV.tile_to_fragment_trans(0, 2*16, r6);
-	sKV.tile_to_fragment_trans(0, 3*16, r7);
-	sKV.tile_to_fragment_trans(0, 4*16, r4);
-	sKV.tile_to_fragment_trans(0, 5*16, r5);
-	sKV.tile_to_fragment_trans(0, 6*16, r6);
-	sKV.tile_to_fragment_trans(0, 7*16, r7);*/
+	sKV.load_tile_to_fragment(0, 0*16, r0);
+	sKV.load_tile_to_fragment(0, 1*16, r1);
+	sKV.load_tile_to_fragment(0, 2*16, r2);
+	sKV.load_tile_to_fragment(0, 3*16, r3);
+	sKV.load_tile_to_fragment(0, 4*16, r4);
+	sKV.load_tile_to_fragment(0, 5*16, r5);
+	sKV.load_tile_to_fragment(0, 6*16, r6);
+	sKV.load_tile_to_fragment(0, 7*16, r7);
+	sKV.load_tile_to_fragment(0, 8*16, r8);
+	sKV.load_tile_to_fragment(0, 9*16, r9);
+	sKV.load_tile_to_fragment(0, 10*16, r10);
+	sKV.load_tile_to_fragment(0, 11*16, r11);
 
 	// Sequential loop over KV
 	X17_NO_UNROLL for (size_t kv_step = 0; kv_step < kv_steps; ++kv_step) {
@@ -103,70 +96,73 @@ __global__ void attn_kernel(
 		Fragment_16x16<f32> rScores_f32;
 		rScores_f32.zero_();
 		mma_a_bt(rQ.tiles[0][0], r0, rScores_f32);
-		r0.t_();
+		r0.transpose_();
 		mma_a_bt(rQ.tiles[0][1], r1, rScores_f32);
-		r1.t_();
+		r1.transpose_();
 		mma_a_bt(rQ.tiles[0][2], r2, rScores_f32);
-		r2.t_();
+		r2.transpose_();
 		mma_a_bt(rQ.tiles[0][3], r3, rScores_f32);
-		r3.t_();
+		r3.transpose_();
 		mma_a_bt(rQ.tiles[0][4], r4, rScores_f32);
-		r4.t_();
+		r4.transpose_();
 		mma_a_bt(rQ.tiles[0][5], r5, rScores_f32);
-		r5.t_();
+		r5.transpose_();
 		mma_a_bt(rQ.tiles[0][6], r6, rScores_f32);
-		r6.t_();
+		r6.transpose_();
 		mma_a_bt(rQ.tiles[0][7], r7, rScores_f32);
-		r7.t_();
+		r7.transpose_();
 		mma_a_bt(rQ.tiles[0][8], r8, rScores_f32);
 		mma_a_bt(rQ.tiles[0][9], r9, rScores_f32);
 		mma_a_bt(rQ.tiles[0][10], r10, rScores_f32);
 		mma_a_bt(rQ.tiles[0][11], r11, rScores_f32);
+		Fragment_16x16<bf16> rScores;
+		cast(rScores_f32, rScores);
 
 		{
 			// Wait for the next batch of GMEM -> SMEM preloads to complete
-			cp_async_commit();
 			cp_async_wait<GMEM_PRELOAD - 2>();
-			__syncthreads();
+			sKV = preload
+				.tile_m<KV_PER_STEP>((kv_step + 1) % GMEM_PRELOAD)
+				.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE);
 
 			// Preload next KV tile from GMEM
 			{
 				usize p = kv_step + GMEM_PRELOAD;
 				if (p < kv_steps) {
-					preload.tile_m<KV_PER_STEP>(p % GMEM_PRELOAD).cp_async_from<THREADS_PER_BLOCK>(
-						threadIdx.x,
-						gKV_full.tile_m<KV_PER_STEP>(p)
+					preload
+						.tile_m<KV_PER_STEP>(p % GMEM_PRELOAD)
+						.cp_async_from<THREADS_PER_BLOCK>(
+							threadIdx.x,
+							gKV_full
+								.tile_m<KV_PER_STEP>(p)
+								.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE)
 					);
 				}
+				cp_async_commit();
 			}
 		}
-		sKV = preload
-			.tile_m<KV_PER_STEP>((kv_step + 1) % GMEM_PRELOAD)
-			.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE);
 
 		// rOut += rScores * V
-		Fragment_16x16<bf16> rScores;
-		cast(rScores_f32, rScores);
 		mma_a_bt(rScores, r0, rOut.tiles[0][0]);
-		sKV.tile_to_fragment(0, 0*16, r0);
+		sKV.load_tile_to_fragment(0, 0*16, r0);
 		mma_a_bt(rScores, r1, rOut.tiles[0][1]);
-		sKV.tile_to_fragment(0, 1*16, r1);
+		sKV.load_tile_to_fragment(0, 1*16, r1);
 		mma_a_bt(rScores, r2, rOut.tiles[0][2]);
-		sKV.tile_to_fragment(0, 2*16, r2);
+		sKV.load_tile_to_fragment(0, 2*16, r2);
 		mma_a_bt(rScores, r3, rOut.tiles[0][3]);
-		sKV.tile_to_fragment(0, 3*16, r3);
+		sKV.load_tile_to_fragment(0, 3*16, r3);
 		mma_a_bt(rScores, r4, rOut.tiles[0][4]);
-		sKV.tile_to_fragment(0, 4*16, r4);
+		sKV.load_tile_to_fragment(0, 4*16, r4);
 		mma_a_bt(rScores, r5, rOut.tiles[0][5]);
-		sKV.tile_to_fragment(0, 5*16, r5);
+		sKV.load_tile_to_fragment(0, 5*16, r5);
 		mma_a_bt(rScores, r6, rOut.tiles[0][6]);
-		sKV.tile_to_fragment(0, 6*16, r6);
+		sKV.load_tile_to_fragment(0, 6*16, r6);
 		mma_a_bt(rScores, r7, rOut.tiles[0][7]);
-		sKV.tile_to_fragment(0, 7*16, r7);
-		sKV.tile_to_fragment(0, 8*16, r8);
-		sKV.tile_to_fragment(0, 9*16, r9);
-		sKV.tile_to_fragment(0, 10*16, r10);
-		sKV.tile_to_fragment(0, 11*16, r11);
+		sKV.load_tile_to_fragment(0, 7*16, r7);
+		sKV.load_tile_to_fragment(0, 8*16, r8);
+		sKV.load_tile_to_fragment(0, 9*16, r9);
+		sKV.load_tile_to_fragment(0, 10*16, r10);
+		sKV.load_tile_to_fragment(0, 11*16, r11);
 	}
 
 	__syncthreads();

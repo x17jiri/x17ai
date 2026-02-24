@@ -304,7 +304,7 @@ struct Fragment_16x16 {
 		sub[1][1].zero_();
 	}
 
-	X17_DEVICE void t_() {
+	X17_DEVICE void transpose_() {
 		sub[0][0].t_();
 		sub[0][1].t_();
 		sub[1][0].t_();
@@ -508,7 +508,7 @@ struct SMatrix {
 	}
 
 	/// Both `m_idx` and `n_idx` must be multiples of 16.
-	X17_DEVICE void tile_to_fragment(
+	X17_DEVICE void load_tile_to_fragment(
 		usize m_idx, usize n_idx,
 		Fragment_16x16<T> &dst
 	) const requires(sizeof(T) == 2) {
@@ -544,10 +544,10 @@ struct SMatrix {
 		);
 	}
 
-	X17_DEVICE void to_registers(RMatrix<T, M, N> &dst) const requires(sizeof(T) == 2) {
+	X17_DEVICE void load_to_registers(RMatrix<T, M, N> &dst) const requires(sizeof(T) == 2) {
 		X17_UNROLL for (usize j = 0; j < M / 16; j++) {
 			X17_UNROLL for (usize i = 0; i < N / 16; i++) {
-				tile_to_fragment(j * 16, i * 16, dst.tiles[j][i]);
+				load_tile_to_fragment(j * 16, i * 16, dst.tiles[j][i]);
 			}
 		}
 	}
