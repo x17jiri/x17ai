@@ -33,7 +33,7 @@ __global__ void attn_kernel(
 		.tile_m<KV_PER_STEP>(GMEM_PRELOAD - 1)
 		.tile_m<Q_PER_BLOCK>(0);
 	sQ.cp_async_from<THREADS_PER_BLOCK>(threadIdx.x, gQ_block);
-		cp_async_commit();
+	cp_async_commit();
 
 	// Start preloading KVs from GMEM to SMEM
 	// Don't use the last preload tile yet because it's used to load Q
@@ -41,10 +41,15 @@ __global__ void attn_kernel(
 	size_t kv_steps = gKV_full.m_rows() / KV_PER_STEP;
 	X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD - 1; ++p) {
 		if (p < kv_steps) {
-			preload.tile_m<KV_PER_STEP>(p).cp_async_from<THREADS_PER_BLOCK>(
-				threadIdx.x,
-				gKV_full.tile_m<KV_PER_STEP>(p)
-			);
+			preload
+				.tile_m<KV_PER_STEP>(p)
+				.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE)
+				.cp_async_from<WARP_SIZE>(
+					threadIdx.x % WARP_SIZE,
+					gKV_full
+						.tile_m<KV_PER_STEP>(p)
+						.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE)
+				);
 		}
 		cp_async_commit();
 	}
@@ -63,10 +68,15 @@ __global__ void attn_kernel(
 	{
 		usize p = GMEM_PRELOAD - 1;
 		if (p < kv_steps) {
-			preload.tile_m<KV_PER_STEP>(p).cp_async_from<THREADS_PER_BLOCK>(
-				threadIdx.x,
-				gKV_full.tile_m<KV_PER_STEP>(p)
-			);
+			preload
+				.tile_m<KV_PER_STEP>(p)
+				.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE)
+				.cp_async_from<WARP_SIZE>(
+					threadIdx.x % WARP_SIZE,
+					gKV_full
+						.tile_m<KV_PER_STEP>(p)
+						.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE)
+				);
 		}
 		cp_async_commit();
 	}
@@ -131,8 +141,9 @@ __global__ void attn_kernel(
 				if (p < kv_steps) {
 					preload
 						.tile_m<KV_PER_STEP>(p % GMEM_PRELOAD)
-						.cp_async_from<THREADS_PER_BLOCK>(
-							threadIdx.x,
+						.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE)
+						.cp_async_from<WARP_SIZE>(
+							threadIdx.x % WARP_SIZE,
 							gKV_full
 								.tile_m<KV_PER_STEP>(p)
 								.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE)
