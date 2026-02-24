@@ -85,6 +85,12 @@ namespace sm75 {
 	X17_DEVICE u32 ldmatrix_swizzle(u32 byte_offset) {
 		return byte_offset ^ ((byte_offset >> 3) & 0x70);
 	}
+
+	X17_DEVICE void movmatrix(uint32_t src, uint32_t &dst) {
+		asm volatile("movmatrix.sync.aligned.m8n8.trans.b16 %0, %1;\n"
+			: "=r"(dst)
+			:  "r"(src));
+	}
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -281,6 +287,10 @@ struct Fragment_8x8: FragmentReg<T> {
 		);
 		return result;
 	}
+
+	X17_DEVICE void t_() {
+		sm80::movmatrix(this->val, this->val);
+	}
 };
 
 template<typename T>
@@ -292,6 +302,13 @@ struct Fragment_16x16 {
 		sub[0][1].zero_();
 		sub[1][0].zero_();
 		sub[1][1].zero_();
+	}
+
+	X17_DEVICE void t_() {
+		sub[0][0].t_();
+		sub[0][1].t_();
+		sub[1][0].t_();
+		sub[1][1].t_();
 	}
 };
 
@@ -429,6 +446,34 @@ struct SMatrix {
 
 	template<const usize THREADS_PER_BLOCK>
 	X17_DEVICE void cp_async_from(usize tid, GMatrix<T, M, N> src) const {
+/*		__builtin_assume(tid < THREADS_PER_BLOCK);
+
+		constexpr usize THREADS_PER_TILE = 64;
+		static_assert(THREADS_PER_BLOCK % THREADS_PER_TILE == 0, "TODO");
+		constexpr usize TILES_PER_BLOCK = THREADS_PER_BLOCK / THREADS_PER_TILE;
+		static_assert((M / 8) % TILES_PER_BLOCK == 0, "TODO");
+
+		usize src_off = (tid % 8) * 16 + (tid / 8) * ROW_BYTES;
+		u8 *src_ptr = reinterpret_cast<u8 *>(src._ptr) + src_off;
+
+		usize dst_off = (tid % 8) * 16 + (tid / 8) * 128;
+		dst_off = sm80::ldmatrix_swizzle(dst_off);
+		dst_off += (tid / THREADS_PER_TILE) * 8 * (ROW_BYTES - 128);
+		usize dst_ptr = _ptr + dst_off;
+
+		constexpr usize h = M / 16; // TODO : fix
+		constexpr usize w = ROW_BYTES / 128;
+		X17_UNROLL for (usize j = 0; j < h; j += TILES_PER_BLOCK) {
+			X17_UNROLL for (usize i = 0; i < w; ++i) {
+				sm80::cp_async(src_ptr, dst_ptr);
+				src_ptr += 128;
+				dst_ptr += 8 * 128;
+			}
+			src_ptr += 8 * TILES_PER_BLOCK * ROW_BYTES - w * 128;
+			dst_ptr += (TILES_PER_BLOCK - 1) * 8 * ROW_BYTES;
+		}
+		return; // TODO*/
+
 		__builtin_assume(tid < THREADS_PER_BLOCK);
 		constexpr usize BYTES_PER_STEP = THREADS_PER_BLOCK * 16;
 		constexpr usize STEPS = M * ROW_BYTES / BYTES_PER_STEP;
