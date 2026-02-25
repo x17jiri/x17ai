@@ -526,7 +526,7 @@ struct SMatrix {
 		);
 	}
 
-	X17_DEVICE void tile_to_fragment_trans(
+	X17_DEVICE void load_tile_to_fragment_trans(
 		usize m_idx, usize n_idx,
 		Fragment_16x16<T> &dst
 	) const requires(sizeof(T) == 2) {

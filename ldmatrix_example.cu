@@ -55,8 +55,9 @@ __global__ void attn_kernel(
 	}
 
 	// Prepare outputs
-	RMatrix<f32, Q_PER_WARP, V_DIM> rOut;
-	rOut.zero_();
+	Fragment_16x16<f32> rOut0, rOut1, rOut2, rOut3, rOut4, rOut5, rOut6, rOut7;
+	rOut0.zero_(); rOut1.zero_(); rOut2.zero_(); rOut3.zero_();
+	rOut4.zero_(); rOut5.zero_(); rOut6.zero_(); rOut7.zero_();
 
 	// Load Q from SMEM to registers
 	cp_async_wait<GMEM_PRELOAD - 1>();
@@ -86,19 +87,11 @@ __global__ void attn_kernel(
 	SMatrix<bf16, KV_PER_WARP, QK_DIM> sKV = preload
 		.tile_m<KV_PER_STEP>(0)
 		.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE);
-	Fragment_16x16<bf16> r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11;
+	Fragment_16x16<bf16> r0, r1, r2, r3;
 	sKV.load_tile_to_fragment(0, 0*16, r0);
 	sKV.load_tile_to_fragment(0, 1*16, r1);
 	sKV.load_tile_to_fragment(0, 2*16, r2);
 	sKV.load_tile_to_fragment(0, 3*16, r3);
-	sKV.load_tile_to_fragment(0, 4*16, r4);
-	sKV.load_tile_to_fragment(0, 5*16, r5);
-	sKV.load_tile_to_fragment(0, 6*16, r6);
-	sKV.load_tile_to_fragment(0, 7*16, r7);
-	sKV.load_tile_to_fragment(0, 8*16, r8);
-	sKV.load_tile_to_fragment(0, 9*16, r9);
-	sKV.load_tile_to_fragment(0, 10*16, r10);
-	sKV.load_tile_to_fragment(0, 11*16, r11);
 
 	// Sequential loop over KV
 	X17_NO_UNROLL for (size_t kv_step = 0; kv_step < kv_steps; ++kv_step) {
@@ -106,27 +99,42 @@ __global__ void attn_kernel(
 		Fragment_16x16<f32> rScores_f32;
 		rScores_f32.zero_();
 		mma_a_bt(rQ.tiles[0][0], r0, rScores_f32);
-		r0.transpose_();
+		sKV.load_tile_to_fragment(0, 4*16, r0);
 		mma_a_bt(rQ.tiles[0][1], r1, rScores_f32);
-		r1.transpose_();
+		sKV.load_tile_to_fragment(0, 5*16, r1);
 		mma_a_bt(rQ.tiles[0][2], r2, rScores_f32);
-		r2.transpose_();
+		sKV.load_tile_to_fragment(0, 6*16, r2);
 		mma_a_bt(rQ.tiles[0][3], r3, rScores_f32);
-		r3.transpose_();
-		mma_a_bt(rQ.tiles[0][4], r4, rScores_f32);
-		r4.transpose_();
-		mma_a_bt(rQ.tiles[0][5], r5, rScores_f32);
-		r5.transpose_();
-		mma_a_bt(rQ.tiles[0][6], r6, rScores_f32);
-		r6.transpose_();
-		mma_a_bt(rQ.tiles[0][7], r7, rScores_f32);
-		r7.transpose_();
-		mma_a_bt(rQ.tiles[0][8], r8, rScores_f32);
-		mma_a_bt(rQ.tiles[0][9], r9, rScores_f32);
-		mma_a_bt(rQ.tiles[0][10], r10, rScores_f32);
-		mma_a_bt(rQ.tiles[0][11], r11, rScores_f32);
+		sKV.load_tile_to_fragment(0, 7*16, r3);
+		mma_a_bt(rQ.tiles[0][4], r0, rScores_f32);
+		sKV.load_tile_to_fragment(0, 8*16, r0);
+		mma_a_bt(rQ.tiles[0][5], r1, rScores_f32);
+		sKV.load_tile_to_fragment(0, 9*16, r1);
+		mma_a_bt(rQ.tiles[0][6], r2, rScores_f32);
+		sKV.load_tile_to_fragment(0, 10*16, r2);
+		mma_a_bt(rQ.tiles[0][7], r3, rScores_f32);
+		sKV.load_tile_to_fragment(0, 11*16, r3);
+		mma_a_bt(rQ.tiles[0][8], r0, rScores_f32);
+		sKV.load_tile_to_fragment_trans(0, 0*16, r0);
+		mma_a_bt(rQ.tiles[0][9], r1, rScores_f32);
+		sKV.load_tile_to_fragment_trans(0, 1*16, r1);
+		mma_a_bt(rQ.tiles[0][10], r2, rScores_f32);
+		sKV.load_tile_to_fragment_trans(0, 2*16, r2);
+		mma_a_bt(rQ.tiles[0][11], r3, rScores_f32);
+		sKV.load_tile_to_fragment_trans(0, 3*16, r3);
 		Fragment_16x16<bf16> rScores;
 		cast(rScores_f32, rScores);
+
+		// rOut += rScores * V
+		mma_a_bt(rScores, r0, rOut0);
+		sKV.load_tile_to_fragment_trans(0, 4*16, r0);
+		mma_a_bt(rScores, r1, rOut1);
+		sKV.load_tile_to_fragment_trans(0, 5*16, r1);
+		mma_a_bt(rScores, r2, rOut2);
+		sKV.load_tile_to_fragment_trans(0, 6*16, r2);
+		mma_a_bt(rScores, r3, rOut3);
+		sKV.load_tile_to_fragment_trans(0, 7*16, r3);
+		mma_a_bt(rScores, r0, rOut4);
 
 		{
 			// Wait for the next batch of GMEM -> SMEM preloads to complete
@@ -153,35 +161,31 @@ __global__ void attn_kernel(
 			}
 		}
 
-		// rOut += rScores * V
-		mma_a_bt(rScores, r0, rOut.tiles[0][0]);
 		sKV.load_tile_to_fragment(0, 0*16, r0);
-		mma_a_bt(rScores, r1, rOut.tiles[0][1]);
+		mma_a_bt(rScores, r1, rOut5);
 		sKV.load_tile_to_fragment(0, 1*16, r1);
-		mma_a_bt(rScores, r2, rOut.tiles[0][2]);
+		mma_a_bt(rScores, r2, rOut6);
 		sKV.load_tile_to_fragment(0, 2*16, r2);
-		mma_a_bt(rScores, r3, rOut.tiles[0][3]);
+		mma_a_bt(rScores, r3, rOut7);
 		sKV.load_tile_to_fragment(0, 3*16, r3);
-		mma_a_bt(rScores, r4, rOut.tiles[0][4]);
-		sKV.load_tile_to_fragment(0, 4*16, r4);
-		mma_a_bt(rScores, r5, rOut.tiles[0][5]);
-		sKV.load_tile_to_fragment(0, 5*16, r5);
-		mma_a_bt(rScores, r6, rOut.tiles[0][6]);
-		sKV.load_tile_to_fragment(0, 6*16, r6);
-		mma_a_bt(rScores, r7, rOut.tiles[0][7]);
-		sKV.load_tile_to_fragment(0, 7*16, r7);
-		sKV.load_tile_to_fragment(0, 8*16, r8);
-		sKV.load_tile_to_fragment(0, 9*16, r9);
-		sKV.load_tile_to_fragment(0, 10*16, r10);
-		sKV.load_tile_to_fragment(0, 11*16, r11);
 	}
 
 	__syncthreads();
-	rOut.tiles[0][0].sub[threadIdx.x & 1][(threadIdx.x / 2) & 1].set(7, 31415);
 
+	RMatrix<float, Q_PER_WARP, V_DIM> rOut;
+	rOut.tiles[0][0] = rOut0;
+	rOut.tiles[0][1] = rOut1;
+	rOut.tiles[0][2] = rOut2;
+	rOut.tiles[0][3] = rOut3;
+	rOut.tiles[0][4] = rOut4;
+	rOut.tiles[0][5] = rOut5;
+	rOut.tiles[0][6] = rOut6;
+	rOut.tiles[0][7] = rOut7;
 	GMatrixDynSize<bf16, V_DIM> gOut_full{gOut_ptr, q_cnt};
 	GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = gOut_full.tile_m<Q_PER_BLOCK>(blockIdx.x);
-	rOut.store(gOut_block);
+	if (threadIdx.x < 32) {
+		rOut.store(gOut_block);
+	}
 
 	/*if (threadIdx.x < 32) {
 		auto &t = rOut.tiles[0][0];
