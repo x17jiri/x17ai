@@ -483,13 +483,16 @@ struct SMatrix {
 		return; // TODO*/
 
 		__builtin_assume(tid < THREADS_PER_BLOCK);
+		static_assert(ROW_BYTES % 128 == 0, "TODO");
 		constexpr usize BYTES_PER_STEP = THREADS_PER_BLOCK * 16;
 		constexpr usize STEPS = M * ROW_BYTES / BYTES_PER_STEP;
-		static_assert(M * ROW_BYTES % BYTES_PER_STEP == 0, "TODO");
-		static_assert(ROW_BYTES % 128 == 0, "TODO");
+		constexpr usize REMAINING = M * ROW_BYTES % BYTES_PER_STEP;
 		constexpr usize REPEAT_AFTER = least_common_multiple(8 * ROW_BYTES, BYTES_PER_STEP);
 
-		constexpr usize PRECALC = std::min(STEPS, REPEAT_AFTER / BYTES_PER_STEP);
+		constexpr usize PRECALC = std::min(
+			STEPS + (REMAINING > 0 ? 1 : 0),
+			REPEAT_AFTER / BYTES_PER_STEP
+		);
 		usize precalc[PRECALC];
 		for (usize i = 0; i < PRECALC; i++) {
 			usize off = i * BYTES_PER_STEP + tid * 16;
@@ -512,6 +515,14 @@ struct SMatrix {
 			u32 dst_ptr = _ptr + precalc[step % PRECALC];
 			sm80::cp_async(src_ptr, dst_ptr);
 			src_ptr += BYTES_PER_STEP;
+		}
+		static_assert(REMAINING % 16 == 0);
+		if constexpr (REMAINING > 0) {
+			if (tid < REMAINING / 16) {
+				usize step = STEPS;
+				u32 dst_ptr = _ptr + precalc[step % PRECALC];
+				sm80::cp_async(src_ptr, dst_ptr);
+			}
 		}
 	}
 

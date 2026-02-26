@@ -33,9 +33,7 @@ __global__ void attn_kernel(
 	sQ = preload
 		.tile_m<KV_PER_STEP>(GMEM_PRELOAD - 1)
 		.tile_m<Q_PER_BLOCK>(0);
-	if (threadIdx.x < 128) {
-		cp_async_gmem_to_smem<128>(threadIdx.x, gQ_block, sQ);
-	}
+	cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gQ_block, sQ);
 	cp_async_commit();
 
 	// Start preloading KVs from GMEM to SMEM
@@ -78,7 +76,6 @@ __global__ void attn_kernel(
 	smem_tile_to_fragment(sQ, 0, 10*16, rQ10);
 	smem_tile_to_fragment(sQ, 0, 11*16, rQ11);
 
-
 	// Now that we have Q in registers, use the last preload tile for KV
 	{
 		usize p = GMEM_PRELOAD - 1;
@@ -103,6 +100,7 @@ __global__ void attn_kernel(
 		.tile_m<KV_PER_STEP>(0)
 		.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE);
 	Fragment_16x16<bf16> r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11;
+
 	smem_tile_to_fragment(sKV, 0, 0*16, r0);
 	smem_tile_to_fragment(sKV, 0, 1*16, r1);
 	smem_tile_to_fragment(sKV, 0, 2*16, r2);
@@ -185,16 +183,6 @@ __global__ void attn_kernel(
 	}
 
 	__syncthreads();
-
-	Fragment_16x16<bf16> rOut0_, rOut1_, rOut2_, rOut3_, rOut4_, rOut5_, rOut6_, rOut7_;
-	cast(rOut7, rOut7_);
-	cast(rOut6, rOut6_);
-	cast(rOut5, rOut5_);
-	cast(rOut4, rOut4_);
-	cast(rOut3, rOut3_);
-	cast(rOut2, rOut2_);
-	cast(rOut1, rOut1_);
-	cast(rOut0, rOut0_);
 
 	GMatrixDynSize<bf16, V_DIM> gOut_full{gOut_ptr, q_cnt};
 	GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = gOut_full.tile_m<Q_PER_BLOCK>(blockIdx.x);
