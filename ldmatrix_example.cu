@@ -42,7 +42,7 @@ __global__ void attn_kernel(
 	size_t kv_steps = gKV_full.m_rows() / KV_PER_STEP;
 	X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD - 1; ++p) {
 		if (p < kv_steps) {
-			cp_async_from<WARP_SIZE>(
+			cp_async_gmem_to_smem<WARP_SIZE>(
 				threadIdx.x % WARP_SIZE,
 				gKV_full
 					.tile_m<KV_PER_STEP>(p)
@@ -81,7 +81,7 @@ __global__ void attn_kernel(
 	{
 		usize p = GMEM_PRELOAD - 1;
 		if (p < kv_steps) {
-			cp_async_from<WARP_SIZE>(
+			cp_async_gmem_to_smem<WARP_SIZE>(
 				threadIdx.x % WARP_SIZE,
 				gKV_full
 					.tile_m<KV_PER_STEP>(p)
@@ -122,15 +122,15 @@ __global__ void attn_kernel(
 		mma_a_bt(rQ9, r5, rScores_f32); smem_tile_to_fragment(sKV, 0, 5*16, r5);
 		mma_a_bt(rQ8, r4, rScores_f32); smem_tile_to_fragment(sKV, 0, 4*16, r4);
 
-		mma_a_bt(rQ3, r3, rScores_f32); transpose_(r3);
-		mma_a_bt(rQ2, r2, rScores_f32); transpose_(r2);
-		mma_a_bt(rQ1, r1, rScores_f32); transpose_(r1);
-		mma_a_bt(rQ0, r0, rScores_f32); transpose_(r0);
+		mma_a_bt(rQ3, r3, rScores_f32); r3.transpose_();
+		mma_a_bt(rQ2, r2, rScores_f32); r2.transpose_();
+		mma_a_bt(rQ1, r1, rScores_f32); r1.transpose_();
+		mma_a_bt(rQ0, r0, rScores_f32); r0.transpose_();
 
-		mma_a_bt(rQ7, r7, rScores_f32); transpose_(r7);
-		mma_a_bt(rQ6, r6, rScores_f32); transpose_(r6);
-		mma_a_bt(rQ5, r5, rScores_f32); transpose_(r5);
-		mma_a_bt(rQ4, r4, rScores_f32); transpose_(r4);
+		mma_a_bt(rQ7, r7, rScores_f32); r7.transpose_();
+		mma_a_bt(rQ6, r6, rScores_f32); r6.transpose_();
+		mma_a_bt(rQ5, r5, rScores_f32); r5.transpose_();
+		mma_a_bt(rQ4, r4, rScores_f32); r4.transpose_();
 
 		Fragment_16x16<bf16> rScores;
 		cast(rScores_f32, rScores);
@@ -146,14 +146,14 @@ __global__ void attn_kernel(
 			{
 				usize p = kv_step + GMEM_PRELOAD;
 				if (p < kv_steps) {
-					preload
-						.tile_m<KV_PER_STEP>(p % GMEM_PRELOAD)
-						.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE)
-						.cp_async_from<WARP_SIZE>(
-							threadIdx.x % WARP_SIZE,
-							gKV_full
-								.tile_m<KV_PER_STEP>(p)
-								.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE)
+					cp_async_gmem_to_smem<WARP_SIZE>(
+						threadIdx.x % WARP_SIZE,
+						gKV_full
+							.tile_m<KV_PER_STEP>(p)
+							.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE),
+						preload
+							.tile_m<KV_PER_STEP>(p % GMEM_PRELOAD)
+							.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE)
 					);
 				}
 				cp_async_commit();
@@ -187,7 +187,14 @@ __global__ void attn_kernel(
 	GMatrixDynSize<bf16, V_DIM> gOut_full{gOut_ptr, q_cnt};
 	GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = gOut_full.tile_m<Q_PER_BLOCK>(blockIdx.x);
 	if (threadIdx.x < 32) {
-		rOut.store(gOut_block);
+		rOut0.store(gOut_block, 0, 0*16);
+		rOut1.store(gOut_block, 0, 1*16);
+		rOut2.store(gOut_block, 0, 2*16);
+		rOut3.store(gOut_block, 0, 3*16);
+		rOut4.store(gOut_block, 0, 4*16);
+		rOut5.store(gOut_block, 0, 5*16);
+		rOut6.store(gOut_block, 0, 6*16);
+		rOut7.store(gOut_block, 0, 7*16);
 	}
 
 	/*if (threadIdx.x < 32) {

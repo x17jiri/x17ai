@@ -288,7 +288,7 @@ struct Fragment_8x8: FragmentReg<T> {
 		return result;
 	}
 
-	X17_DEVICE void t_() {
+	X17_DEVICE void transpose_() {
 		sm80::movmatrix(this->val, this->val);
 	}
 };
@@ -305,10 +305,38 @@ struct Fragment_16x16 {
 	}
 
 	X17_DEVICE void transpose_() {
-		sub[0][0].t_();
-		sub[0][1].t_();
-		sub[1][0].t_();
-		sub[1][1].t_();
+		sub[0][0].transpose_();
+		sub[0][1].transpose_();
+		sub[1][0].transpose_();
+		sub[1][1].transpose_();
+	}
+
+	template<typename U, const usize M, const usize N>
+	requires(sizeof(U) == 2)
+	X17_DEVICE void store(GMatrix<U, M, N> const &dst, usize m_idx, usize n_idx) const {
+		usize tid = threadIdx.x;
+		GMatrix<U, 16, N> dst_tile = dst.tile_m<16>(m_idx / 16);
+		usize dst_off = n_idx * usize(sizeof(U));
+
+		dst_off += (tid & 0x1c) * (dst.stride() * usize(sizeof(U)) / 4) + (tid & 3) * 4;
+		*reinterpret_cast<u32 *>(
+			reinterpret_cast<u8 *>(dst_tile._ptr) + dst_off
+		) = sub[0][0].template cast_reg<U>().val;
+
+		dst_off += 16;
+		*reinterpret_cast<u32 *>(
+			reinterpret_cast<u8 *>(dst_tile._ptr) + dst_off
+		) = sub[0][1].template cast_reg<U>().val;
+
+		dst_off += 8 * dst.stride() * sizeof(U) - 16;
+		*reinterpret_cast<u32 *>(
+			reinterpret_cast<u8 *>(dst_tile._ptr) + dst_off
+		) = sub[1][0].template cast_reg<U>().val;
+
+		dst_off += 16;
+		*reinterpret_cast<u32 *>(
+			reinterpret_cast<u8 *>(dst_tile._ptr) + dst_off
+		) = sub[1][1].template cast_reg<U>().val;
 	}
 };
 
@@ -322,6 +350,17 @@ X17_DEVICE void cast(Fragment_16x16<F> const &src, Fragment_16x16<T> &dst) {
 			);
 		}
 	}
+}
+
+template<typename T>
+X17_DEVICE void zero_(Fragment_16x16<T> &f) {
+	f.zero_();
+}
+
+template<typename T, typename... U>
+X17_DEVICE void zero_(Fragment_16x16<T> &f, U&... rest) {
+	f.zero_();
+	zero_(rest...);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -350,39 +389,6 @@ struct RMatrix {
 		X17_UNROLL for (usize j = 0; j < M / 16; j++) {
 			X17_UNROLL for (usize i = 0; i < N / 16; i++) {
 				tiles[j][i].zero_();
-			}
-		}
-	}
-
-	template<typename U>
-	requires(sizeof(U) == 2)
-	X17_DEVICE void store(GMatrix<U, M, N> const &dst) const {
-		usize tid = threadIdx.x;
-		X17_UNROLL for (usize j = 0; j < M / 16; j++) {
-			GMatrix<U, 16, N> dst_tile = dst.tile_m<16>(j);
-			X17_NO_UNROLL for (usize i = 0; i < N / 16; i++) {
-				Fragment_16x16<T> const &src_tile = tiles[j][i];
-				usize dst_off = i * 16 * usize(sizeof(U));
-
-				dst_off += (tid & 0x1c) * (dst.stride() * usize(sizeof(U)) / 4) + (tid & 3) * 4;
-				*reinterpret_cast<u32 *>(
-					reinterpret_cast<u8 *>(dst_tile._ptr) + dst_off
-				) = src_tile.sub[0][0].template cast_reg<U>().val;
-
-				dst_off += 16;
-				*reinterpret_cast<u32 *>(
-					reinterpret_cast<u8 *>(dst_tile._ptr) + dst_off
-				) = src_tile.sub[0][1].template cast_reg<U>().val;
-
-				dst_off += 8 * dst.stride() * sizeof(U) - 16;
-				*reinterpret_cast<u32 *>(
-					reinterpret_cast<u8 *>(dst_tile._ptr) + dst_off
-				) = src_tile.sub[1][0].template cast_reg<U>().val;
-
-				dst_off += 16;
-				*reinterpret_cast<u32 *>(
-					reinterpret_cast<u8 *>(dst_tile._ptr) + dst_off
-				) = src_tile.sub[1][1].template cast_reg<U>().val;
 			}
 		}
 	}
@@ -417,6 +423,8 @@ requires(
 struct SMatrix {
 	u32 _ptr;
 	u32 _thread_off[4];
+
+	X17_DEVICE constexpr SMatrix() : _ptr(0), _thread_off{0, 0, 0, 0} {}
 
 	X17_DEVICE constexpr SMatrix(void *ptr): SMatrix(cast_smem_ptr_to_uint(ptr)) {}
 
@@ -552,6 +560,33 @@ struct SMatrix {
 		}
 	}
 };
+
+template<
+	const usize THREADS_PER_BLOCK,
+	typename T,
+	const usize M,
+	const usize N
+>
+X17_DEVICE void cp_async_gmem_to_smem(
+	usize tid,
+	GMatrix<T, M, N> src,
+	SMatrix<T, M, N> dst
+) {
+	dst.template cp_async_from<THREADS_PER_BLOCK>(tid, src);
+}
+
+template<
+	typename T,
+	const usize M,
+	const usize N
+>
+X17_DEVICE void smem_tile_to_fragment(
+	SMatrix<T, M, N> const &src,
+	usize m_idx, usize n_idx,
+	Fragment_16x16<T> &dst
+) {
+	src.load_tile_to_fragment(m_idx, n_idx, dst);
+}
 
 using sm80::cp_async_commit;
 using sm80::cp_async_wait;
