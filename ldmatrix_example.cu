@@ -9,8 +9,8 @@ constexpr usize V_DIM = 128;
 
 constexpr usize Q_PER_WARP = 16;
 constexpr usize KV_PER_WARP = 16;
-constexpr usize GMEM_PRELOAD = 4;
-constexpr usize WARPS_PER_BLOCK = 4;
+constexpr usize GMEM_PRELOAD = 2;
+constexpr usize WARPS_PER_BLOCK = 8;
 constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
 constexpr usize Q_PER_BLOCK = Q_PER_WARP;
 constexpr usize KV_PER_STEP = KV_PER_WARP * WARPS_PER_BLOCK;
@@ -33,7 +33,9 @@ __global__ void attn_kernel(
 	sQ = preload
 		.tile_m<KV_PER_STEP>(GMEM_PRELOAD - 1)
 		.tile_m<Q_PER_BLOCK>(0);
-	cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gQ_block, sQ);
+	if (threadIdx.x < 128) {
+		cp_async_gmem_to_smem<128>(threadIdx.x, gQ_block, sQ);
+	}
 	cp_async_commit();
 
 	// Start preloading KVs from GMEM to SMEM
@@ -100,16 +102,21 @@ __global__ void attn_kernel(
 	sKV = preload
 		.tile_m<KV_PER_STEP>(0)
 		.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE);
-	Fragment_16x16<bf16> r0, r1, r2, r3, r4, r5, r6, r7;
-	smem_tile_to_fragment(sKV, 0, 11*16, r7);
-	smem_tile_to_fragment(sKV, 0, 10*16, r6);
-	smem_tile_to_fragment(sKV, 0, 9*16, r5);
-	smem_tile_to_fragment(sKV, 0, 8*16, r4);
-
-	smem_tile_to_fragment(sKV, 0, 3*16, r3);
-	smem_tile_to_fragment(sKV, 0, 2*16, r2);
-	smem_tile_to_fragment(sKV, 0, 1*16, r1);
+	Fragment_16x16<bf16> r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11;
 	smem_tile_to_fragment(sKV, 0, 0*16, r0);
+	smem_tile_to_fragment(sKV, 0, 1*16, r1);
+	smem_tile_to_fragment(sKV, 0, 2*16, r2);
+	smem_tile_to_fragment(sKV, 0, 3*16, r3);
+
+	smem_tile_to_fragment(sKV, 0, 8*16, r4);
+	smem_tile_to_fragment(sKV, 0, 9*16, r5);
+	smem_tile_to_fragment(sKV, 0, 10*16, r6);
+	smem_tile_to_fragment(sKV, 0, 11*16, r7);
+
+	smem_tile_to_fragment(sKV, 0, 4*16, r8);
+	smem_tile_to_fragment(sKV, 0, 5*16, r9);
+	smem_tile_to_fragment(sKV, 0, 6*16, r10);
+	smem_tile_to_fragment(sKV, 0, 7*16, r11);
 
 	// Sequential loop over KV
 	X17_NO_UNROLL for (size_t kv_step = 0; kv_step < kv_steps; ++kv_step) {
@@ -117,20 +124,20 @@ __global__ void attn_kernel(
 		Fragment_16x16<f32> rScores_f32;
 		rScores_f32.zero_();
 
-		mma_a_bt(rQ11, r7, rScores_f32); smem_tile_to_fragment(sKV, 0, 7*16, r7);
-		mma_a_bt(rQ10, r6, rScores_f32); smem_tile_to_fragment(sKV, 0, 6*16, r6);
-		mma_a_bt(rQ9, r5, rScores_f32); smem_tile_to_fragment(sKV, 0, 5*16, r5);
-		mma_a_bt(rQ8, r4, rScores_f32); smem_tile_to_fragment(sKV, 0, 4*16, r4);
-
-		mma_a_bt(rQ3, r3, rScores_f32); r3.transpose_();
-		mma_a_bt(rQ2, r2, rScores_f32); r2.transpose_();
-		mma_a_bt(rQ1, r1, rScores_f32); r1.transpose_();
 		mma_a_bt(rQ0, r0, rScores_f32); r0.transpose_();
+		mma_a_bt(rQ1, r1, rScores_f32); r1.transpose_();
+		mma_a_bt(rQ2, r2, rScores_f32); r2.transpose_();
+		mma_a_bt(rQ3, r3, rScores_f32); r3.transpose_();
 
-		mma_a_bt(rQ7, r7, rScores_f32); r7.transpose_();
-		mma_a_bt(rQ6, r6, rScores_f32); r6.transpose_();
-		mma_a_bt(rQ5, r5, rScores_f32); r5.transpose_();
 		mma_a_bt(rQ4, r4, rScores_f32); r4.transpose_();
+		mma_a_bt(rQ5, r5, rScores_f32); r5.transpose_();
+		mma_a_bt(rQ6, r6, rScores_f32); r6.transpose_();
+		mma_a_bt(rQ7, r7, rScores_f32); r7.transpose_();
+
+		mma_a_bt(rQ8, r4, rScores_f32);
+		mma_a_bt(rQ9, r5, rScores_f32);
+		mma_a_bt(rQ10, r6, rScores_f32);
+		mma_a_bt(rQ11, r7, rScores_f32);
 
 		Fragment_16x16<bf16> rScores;
 		cast(rScores_f32, rScores);
@@ -161,15 +168,20 @@ __global__ void attn_kernel(
 		}
 
 		// rOut += rScores * V
-		mma_a_bt(rScores, r7, rOut7); smem_tile_to_fragment(sKV, 0, 7*16, r7);
-		mma_a_bt(rScores, r6, rOut6); smem_tile_to_fragment(sKV, 0, 6*16, r6);
-		mma_a_bt(rScores, r5, rOut5); smem_tile_to_fragment(sKV, 0, 5*16, r5);
-		mma_a_bt(rScores, r4, rOut4); smem_tile_to_fragment(sKV, 0, 4*16, r4);
-
-		mma_a_bt(rScores, r3, rOut3); smem_tile_to_fragment(sKV, 0, 3*16, r3);
-		mma_a_bt(rScores, r2, rOut2); smem_tile_to_fragment(sKV, 0, 2*16, r2);
-		mma_a_bt(rScores, r1, rOut1); smem_tile_to_fragment(sKV, 0, 1*16, r1);
 		mma_a_bt(rScores, r0, rOut0); smem_tile_to_fragment(sKV, 0, 0*16, r0);
+		mma_a_bt(rScores, r1, rOut1); smem_tile_to_fragment(sKV, 0, 1*16, r1);
+		mma_a_bt(rScores, r2, rOut2); smem_tile_to_fragment(sKV, 0, 2*16, r2);
+		mma_a_bt(rScores, r3, rOut3); smem_tile_to_fragment(sKV, 0, 3*16, r3);
+
+		mma_a_bt(rScores, r4, rOut4); smem_tile_to_fragment(sKV, 0, 4*16, r4);
+		mma_a_bt(rScores, r5, rOut5); smem_tile_to_fragment(sKV, 0, 5*16, r5);
+		mma_a_bt(rScores, r6, rOut6); smem_tile_to_fragment(sKV, 0, 6*16, r6);
+		mma_a_bt(rScores, r7, rOut7); smem_tile_to_fragment(sKV, 0, 7*16, r7);
+
+		smem_tile_to_fragment(sKV, 0, 8*16, r8);
+		smem_tile_to_fragment(sKV, 0, 9*16, r9);
+		smem_tile_to_fragment(sKV, 0, 10*16, r10);
+		smem_tile_to_fragment(sKV, 0, 11*16, r11);
 	}
 
 	__syncthreads();
