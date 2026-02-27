@@ -165,8 +165,6 @@ attn_kernel(bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr, usize q_cnt, usize kv_c
 		smem_tile_to_fragment(sKV, 0, 9*16, r9);
 		smem_tile_to_fragment(sKV, 0, 10*16, r10);
 		smem_tile_to_fragment(sKV, 0, 11*16, r11);
-
-			break;
 	}
 
 	__syncthreads();
