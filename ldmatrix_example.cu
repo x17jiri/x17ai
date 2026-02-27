@@ -123,48 +123,6 @@ attn_kernel(bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr, usize q_cnt, usize kv_c
 		mma_a_bt(rQ10, r10, rScores_f32);
 		mma_a_bt(rQ11, r11, rScores_f32);
 
-/*		// Debug: write scores from block 0, warp 0, first kv_step
-		if (kv_step == 0 && blockIdx.x == 0 && threadIdx.x < 32) {
-			usize t = threadIdx.x;
-			usize row0 = t / 4;
-			usize row1 = t / 4 + 8;
-			usize col0 = (t % 4) * 2;
-			usize col1 = col0 + 1;
-			printf("Thread %d, row0 = %d, row1 = %d, col0 = %d, col1 = %d\n", t, row0, row1, col0, col1);
-			__syncwarp();
-			printf("Thread %d, rQ0: [%f, %f], [%f, %f], [%f, %f], [%f, %f]\n",
-				t,
-				double(rQ0.sub[0][0].first()), double(rQ0.sub[0][0].second()),
-				double(rQ0.sub[0][1].first()), double(rQ0.sub[0][1].second()),
-				double(rQ0.sub[1][0].first()), double(rQ0.sub[1][0].second()),
-				double(rQ0.sub[1][1].first()), double(rQ0.sub[1][1].second())
-			);
-			__syncwarp();
-			printf("Thread %d, r0: [%f, %f], [%f, %f], [%f, %f], [%f, %f]\n",
-				t,
-				double(r0.sub[0][0].first()), double(r0.sub[0][0].second()),
-				double(r0.sub[0][1].first()), double(r0.sub[0][1].second()),
-				double(r0.sub[1][0].first()), double(r0.sub[1][0].second()),
-				double(r0.sub[1][1].first()), double(r0.sub[1][1].second())
-			);
-			__syncwarp();
-			printf("Thread %d, rScores_f32: [%f, %f], [%f, %f], [%f, %f], [%f, %f]\n",
-				t,
-				double(rScores_f32.sub[0][0].first()), double(rScores_f32.sub[0][0].second()),
-				double(rScores_f32.sub[0][1].first()), double(rScores_f32.sub[0][1].second()),
-				double(rScores_f32.sub[1][0].first()), double(rScores_f32.sub[1][0].second()),
-				double(rScores_f32.sub[1][1].first()), double(rScores_f32.sub[1][1].second())
-			);
-			debug_scores[row0 * 16 + col0]     = rScores_f32.sub[0][0].val0;
-			debug_scores[row0 * 16 + col1]     = rScores_f32.sub[0][0].val1;
-			debug_scores[row1 * 16 + col0]     = rScores_f32.sub[1][0].val0;
-			debug_scores[row1 * 16 + col1]     = rScores_f32.sub[1][0].val1;
-			debug_scores[row0 * 16 + col0 + 8] = rScores_f32.sub[0][1].val0;
-			debug_scores[row0 * 16 + col1 + 8] = rScores_f32.sub[0][1].val1;
-			debug_scores[row1 * 16 + col0 + 8] = rScores_f32.sub[1][1].val0;
-			debug_scores[row1 * 16 + col1 + 8] = rScores_f32.sub[1][1].val1;
-		}       */
-
 		Fragment_16x16<bf16> rScores;
 		cast(rScores_f32, rScores);
 
@@ -207,21 +165,23 @@ attn_kernel(bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr, usize q_cnt, usize kv_c
 		smem_tile_to_fragment(sKV, 0, 9*16, r9);
 		smem_tile_to_fragment(sKV, 0, 10*16, r10);
 		smem_tile_to_fragment(sKV, 0, 11*16, r11);
+
+			break;
 	}
 
 	__syncthreads();
 
 	GMatrixDynSize<bf16, V_DIM> gOut_full {gOut_ptr, q_cnt};
 	GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = gOut_full.tile_m<Q_PER_BLOCK>(blockIdx.x);
-	if (threadIdx.x < 32) {
-		rOut0.store(gOut_block, 0, 0 * 16);
-		rOut1.store(gOut_block, 0, 1 * 16);
-		rOut2.store(gOut_block, 0, 2 * 16);
-		rOut3.store(gOut_block, 0, 3 * 16);
-		rOut4.store(gOut_block, 0, 4 * 16);
-		rOut5.store(gOut_block, 0, 5 * 16);
-		rOut6.store(gOut_block, 0, 6 * 16);
-		rOut7.store(gOut_block, 0, 7 * 16);
+	if (blockIdx.x == 0 && threadIdx.x < 32) {
+		rOut0.store(gOut_block, 0, 0*16);
+		rOut1.store(gOut_block, 0, 1*16);
+		rOut2.store(gOut_block, 0, 2*16);
+		rOut3.store(gOut_block, 0, 3*16);
+		rOut4.store(gOut_block, 0, 4*16);
+		rOut5.store(gOut_block, 0, 5*16);
+		rOut6.store(gOut_block, 0, 6*16);
+		rOut7.store(gOut_block, 0, 7*16);
 	}
 
 	/*if (threadIdx.x < 32) {

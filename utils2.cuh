@@ -287,10 +287,6 @@ struct Fragment_8x8: FragmentReg<T> {
 		);
 		return result;
 	}
-
-	X17_DEVICE void transpose_() {
-		sm80::movmatrix(this->val, this->val);
-	}
 };
 
 template<typename T>
@@ -305,10 +301,11 @@ struct Fragment_16x16 {
 	}
 
 	X17_DEVICE void transpose_() {
-		sub[0][0].transpose_();
-		sub[0][1].transpose_();
-		sub[1][0].transpose_();
-		sub[1][1].transpose_();
+		sm80::movmatrix(sub[0][0].val, sub[0][0].val);
+		Fragment_8x8<T> temp = sub[1][0];
+		sm80::movmatrix(sub[0][1].val, sub[1][0].val);
+		sm80::movmatrix(temp.val     , sub[0][1].val);
+		sm80::movmatrix(sub[1][1].val, sub[1][1].val);
 	}
 
 	template<typename U, const usize M, const usize N>
