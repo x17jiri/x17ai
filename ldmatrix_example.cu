@@ -15,41 +15,32 @@ constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
 constexpr usize Q_PER_BLOCK = Q_PER_WARP;
 constexpr usize KV_PER_STEP = KV_PER_WARP * WARPS_PER_BLOCK;
 
-__global__ void attn_kernel(
-	bf16 *gQ_ptr,
-	bf16 *gKV_ptr,
-	bf16 *gOut_ptr,
-	usize q_cnt,
-	usize kv_cnt
-) {
+__global__ void
+attn_kernel(bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr, usize q_cnt, usize kv_cnt, f32 *debug_scores) {
 	extern __shared__ bf16 *smem;
-	SMatrix<bf16, KV_PER_WARP * WARPS_PER_BLOCK * GMEM_PRELOAD, QK_DIM> preload{smem};
+	SMatrix<bf16, KV_PER_WARP * WARPS_PER_BLOCK * GMEM_PRELOAD, QK_DIM> preload {smem};
 
 	// Load Q from GMEM to SMEM. Use the last preload tile
 	static_assert(Q_PER_BLOCK <= KV_PER_STEP);
-	GMatrixDynSize<bf16, QK_DIM> gQ_full{gQ_ptr, q_cnt};
+	GMatrixDynSize<bf16, QK_DIM> gQ_full {gQ_ptr, q_cnt};
 	GMatrix<bf16, Q_PER_BLOCK, QK_DIM> gQ_block = gQ_full.tile_m<Q_PER_BLOCK>(blockIdx.x);
 	SMatrix<bf16, Q_PER_BLOCK, QK_DIM> sQ;
-	sQ = preload
-		.tile_m<KV_PER_STEP>(GMEM_PRELOAD - 1)
-		.tile_m<Q_PER_BLOCK>(0);
-	cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gQ_block, sQ);
+	sQ = preload.tile_m<KV_PER_STEP>(GMEM_PRELOAD - 1).tile_m<Q_PER_BLOCK>(0);
+	if (threadIdx.x < 128) {
+		cp_async_gmem_to_smem<128>(threadIdx.x, gQ_block, sQ);
+	}
 	cp_async_commit();
 
 	// Start preloading KVs from GMEM to SMEM
 	// Don't use the last preload tile yet because it's used to load Q
-	GMatrixDynSize<bf16, QK_DIM> gKV_full{gKV_ptr, kv_cnt};
+	GMatrixDynSize<bf16, QK_DIM> gKV_full {gKV_ptr, kv_cnt};
 	size_t kv_steps = gKV_full.m_rows() / KV_PER_STEP;
 	X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD - 1; ++p) {
 		if (p < kv_steps) {
 			cp_async_gmem_to_smem<WARP_SIZE>(
 				threadIdx.x % WARP_SIZE,
-				gKV_full
-					.tile_m<KV_PER_STEP>(p)
-					.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE),
-				preload
-					.tile_m<KV_PER_STEP>(p)
-					.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE)
+				gKV_full.tile_m<KV_PER_STEP>(p).tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE),
+				preload.tile_m<KV_PER_STEP>(p).tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE)
 			);
 		}
 		cp_async_commit();
@@ -63,18 +54,18 @@ __global__ void attn_kernel(
 	cp_async_wait<GMEM_PRELOAD - 1>();
 	__syncthreads();
 	Fragment_16x16<bf16> rQ0, rQ1, rQ2, rQ3, rQ4, rQ5, rQ6, rQ7, rQ8, rQ9, rQ10, rQ11;
-	smem_tile_to_fragment(sQ, 0, 0*16, rQ0);
-	smem_tile_to_fragment(sQ, 0, 1*16, rQ1);
-	smem_tile_to_fragment(sQ, 0, 2*16, rQ2);
-	smem_tile_to_fragment(sQ, 0, 3*16, rQ3);
-	smem_tile_to_fragment(sQ, 0, 4*16, rQ4);
-	smem_tile_to_fragment(sQ, 0, 5*16, rQ5);
-	smem_tile_to_fragment(sQ, 0, 6*16, rQ6);
-	smem_tile_to_fragment(sQ, 0, 7*16, rQ7);
-	smem_tile_to_fragment(sQ, 0, 8*16, rQ8);
-	smem_tile_to_fragment(sQ, 0, 9*16, rQ9);
-	smem_tile_to_fragment(sQ, 0, 10*16, rQ10);
-	smem_tile_to_fragment(sQ, 0, 11*16, rQ11);
+	smem_tile_to_fragment(sQ, 0, 0 * 16, rQ0);
+	smem_tile_to_fragment(sQ, 0, 1 * 16, rQ1);
+	smem_tile_to_fragment(sQ, 0, 2 * 16, rQ2);
+	smem_tile_to_fragment(sQ, 0, 3 * 16, rQ3);
+	smem_tile_to_fragment(sQ, 0, 4 * 16, rQ4);
+	smem_tile_to_fragment(sQ, 0, 5 * 16, rQ5);
+	smem_tile_to_fragment(sQ, 0, 6 * 16, rQ6);
+	smem_tile_to_fragment(sQ, 0, 7 * 16, rQ7);
+	smem_tile_to_fragment(sQ, 0, 8 * 16, rQ8);
+	smem_tile_to_fragment(sQ, 0, 9 * 16, rQ9);
+	smem_tile_to_fragment(sQ, 0, 10 * 16, rQ10);
+	smem_tile_to_fragment(sQ, 0, 11 * 16, rQ11);
 
 	// Now that we have Q in registers, use the last preload tile for KV
 	{
@@ -82,12 +73,8 @@ __global__ void attn_kernel(
 		if (p < kv_steps) {
 			cp_async_gmem_to_smem<WARP_SIZE>(
 				threadIdx.x % WARP_SIZE,
-				gKV_full
-					.tile_m<KV_PER_STEP>(p)
-					.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE),
-				preload
-					.tile_m<KV_PER_STEP>(p)
-					.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE)
+				gKV_full.tile_m<KV_PER_STEP>(p).tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE),
+				preload.tile_m<KV_PER_STEP>(p).tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE)
 			);
 		}
 		cp_async_commit();
@@ -95,10 +82,9 @@ __global__ void attn_kernel(
 
 	// Start preloading sKV from SMEM to registers
 	cp_async_wait<GMEM_PRELOAD - 1>();
+	__syncwarp();
 	SMatrix<bf16, KV_PER_WARP, QK_DIM> sKV;
-	sKV = preload
-		.tile_m<KV_PER_STEP>(0)
-		.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE);
+	sKV = preload.tile_m<KV_PER_STEP>(0).tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE);
 	Fragment_16x16<bf16> r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11;
 
 	smem_tile_to_fragment(sKV, 0, 0*16, r0);
@@ -106,15 +92,15 @@ __global__ void attn_kernel(
 	smem_tile_to_fragment(sKV, 0, 2*16, r2);
 	smem_tile_to_fragment(sKV, 0, 3*16, r3);
 
-	smem_tile_to_fragment(sKV, 0, 8*16, r4);
-	smem_tile_to_fragment(sKV, 0, 9*16, r5);
-	smem_tile_to_fragment(sKV, 0, 10*16, r6);
-	smem_tile_to_fragment(sKV, 0, 11*16, r7);
+	smem_tile_to_fragment(sKV, 0, 4*16, r4);
+	smem_tile_to_fragment(sKV, 0, 5*16, r5);
+	smem_tile_to_fragment(sKV, 0, 6*16, r6);
+	smem_tile_to_fragment(sKV, 0, 7*16, r7);
 
-	smem_tile_to_fragment(sKV, 0, 4*16, r8);
-	smem_tile_to_fragment(sKV, 0, 5*16, r9);
-	smem_tile_to_fragment(sKV, 0, 6*16, r10);
-	smem_tile_to_fragment(sKV, 0, 7*16, r11);
+	smem_tile_to_fragment(sKV, 0, 8*16, r8);
+	smem_tile_to_fragment(sKV, 0, 9*16, r9);
+	smem_tile_to_fragment(sKV, 0, 10*16, r10);
+	smem_tile_to_fragment(sKV, 0, 11*16, r11);
 
 	// Sequential loop over KV
 	X17_NO_UNROLL for (size_t kv_step = 0; kv_step < kv_steps; ++kv_step) {
@@ -132,10 +118,52 @@ __global__ void attn_kernel(
 		mma_a_bt(rQ6, r6, rScores_f32); r6.transpose_();
 		mma_a_bt(rQ7, r7, rScores_f32); r7.transpose_();
 
-		mma_a_bt(rQ8, r4, rScores_f32);
-		mma_a_bt(rQ9, r5, rScores_f32);
-		mma_a_bt(rQ10, r6, rScores_f32);
-		mma_a_bt(rQ11, r7, rScores_f32);
+		mma_a_bt(rQ8, r8, rScores_f32);
+		mma_a_bt(rQ9, r9, rScores_f32);
+		mma_a_bt(rQ10, r10, rScores_f32);
+		mma_a_bt(rQ11, r11, rScores_f32);
+
+/*		// Debug: write scores from block 0, warp 0, first kv_step
+		if (kv_step == 0 && blockIdx.x == 0 && threadIdx.x < 32) {
+			usize t = threadIdx.x;
+			usize row0 = t / 4;
+			usize row1 = t / 4 + 8;
+			usize col0 = (t % 4) * 2;
+			usize col1 = col0 + 1;
+			printf("Thread %d, row0 = %d, row1 = %d, col0 = %d, col1 = %d\n", t, row0, row1, col0, col1);
+			__syncwarp();
+			printf("Thread %d, rQ0: [%f, %f], [%f, %f], [%f, %f], [%f, %f]\n",
+				t,
+				double(rQ0.sub[0][0].first()), double(rQ0.sub[0][0].second()),
+				double(rQ0.sub[0][1].first()), double(rQ0.sub[0][1].second()),
+				double(rQ0.sub[1][0].first()), double(rQ0.sub[1][0].second()),
+				double(rQ0.sub[1][1].first()), double(rQ0.sub[1][1].second())
+			);
+			__syncwarp();
+			printf("Thread %d, r0: [%f, %f], [%f, %f], [%f, %f], [%f, %f]\n",
+				t,
+				double(r0.sub[0][0].first()), double(r0.sub[0][0].second()),
+				double(r0.sub[0][1].first()), double(r0.sub[0][1].second()),
+				double(r0.sub[1][0].first()), double(r0.sub[1][0].second()),
+				double(r0.sub[1][1].first()), double(r0.sub[1][1].second())
+			);
+			__syncwarp();
+			printf("Thread %d, rScores_f32: [%f, %f], [%f, %f], [%f, %f], [%f, %f]\n",
+				t,
+				double(rScores_f32.sub[0][0].first()), double(rScores_f32.sub[0][0].second()),
+				double(rScores_f32.sub[0][1].first()), double(rScores_f32.sub[0][1].second()),
+				double(rScores_f32.sub[1][0].first()), double(rScores_f32.sub[1][0].second()),
+				double(rScores_f32.sub[1][1].first()), double(rScores_f32.sub[1][1].second())
+			);
+			debug_scores[row0 * 16 + col0]     = rScores_f32.sub[0][0].val0;
+			debug_scores[row0 * 16 + col1]     = rScores_f32.sub[0][0].val1;
+			debug_scores[row1 * 16 + col0]     = rScores_f32.sub[1][0].val0;
+			debug_scores[row1 * 16 + col1]     = rScores_f32.sub[1][0].val1;
+			debug_scores[row0 * 16 + col0 + 8] = rScores_f32.sub[0][1].val0;
+			debug_scores[row0 * 16 + col1 + 8] = rScores_f32.sub[0][1].val1;
+			debug_scores[row1 * 16 + col0 + 8] = rScores_f32.sub[1][1].val0;
+			debug_scores[row1 * 16 + col1 + 8] = rScores_f32.sub[1][1].val1;
+		}       */
 
 		Fragment_16x16<bf16> rScores;
 		cast(rScores_f32, rScores);
@@ -143,9 +171,9 @@ __global__ void attn_kernel(
 		{
 			// Wait for the next batch of GMEM -> SMEM preloads to complete
 			cp_async_wait<GMEM_PRELOAD - 2>();
-			sKV = preload
-				.tile_m<KV_PER_STEP>((kv_step + 1) % GMEM_PRELOAD)
-				.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE);
+			__syncwarp();
+			sKV = preload.tile_m<KV_PER_STEP>((kv_step + 1) % GMEM_PRELOAD)
+					  .tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE);
 
 			// Preload next KV tile from GMEM
 			{
@@ -153,11 +181,10 @@ __global__ void attn_kernel(
 				if (p < kv_steps) {
 					cp_async_gmem_to_smem<WARP_SIZE>(
 						threadIdx.x % WARP_SIZE,
-						gKV_full
-							.tile_m<KV_PER_STEP>(p)
-							.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE),
-						preload
-							.tile_m<KV_PER_STEP>(p % GMEM_PRELOAD)
+						gKV_full.tile_m<KV_PER_STEP>(p).tile_m<KV_PER_WARP>(
+							threadIdx.x / WARP_SIZE
+						),
+						preload.tile_m<KV_PER_STEP>(p % GMEM_PRELOAD)
 							.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE)
 					);
 				}
@@ -184,17 +211,17 @@ __global__ void attn_kernel(
 
 	__syncthreads();
 
-	GMatrixDynSize<bf16, V_DIM> gOut_full{gOut_ptr, q_cnt};
+	GMatrixDynSize<bf16, V_DIM> gOut_full {gOut_ptr, q_cnt};
 	GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = gOut_full.tile_m<Q_PER_BLOCK>(blockIdx.x);
 	if (threadIdx.x < 32) {
-		rOut0.store(gOut_block, 0, 0*16);
-		rOut1.store(gOut_block, 0, 1*16);
-		rOut2.store(gOut_block, 0, 2*16);
-		rOut3.store(gOut_block, 0, 3*16);
-		rOut4.store(gOut_block, 0, 4*16);
-		rOut5.store(gOut_block, 0, 5*16);
-		rOut6.store(gOut_block, 0, 6*16);
-		rOut7.store(gOut_block, 0, 7*16);
+		rOut0.store(gOut_block, 0, 0 * 16);
+		rOut1.store(gOut_block, 0, 1 * 16);
+		rOut2.store(gOut_block, 0, 2 * 16);
+		rOut3.store(gOut_block, 0, 3 * 16);
+		rOut4.store(gOut_block, 0, 4 * 16);
+		rOut5.store(gOut_block, 0, 5 * 16);
+		rOut6.store(gOut_block, 0, 6 * 16);
+		rOut7.store(gOut_block, 0, 7 * 16);
 	}
 
 	/*if (threadIdx.x < 32) {
@@ -211,12 +238,12 @@ __global__ void attn_kernel(
 
 int main() {
 	bool use_real_data = true;
-	constexpr size_t Q_LEN = 400*4096;
-	constexpr size_t KV_LEN = 4096;
+	constexpr size_t Q_LEN = 1024;
+	constexpr size_t KV_LEN = 1024;
 
 	// allocate q: bf16 [Q_LEN, QK_DIM]
 	std::vector<bf16> q_data(Q_LEN * QK_DIM);
-	/*if (use_real_data) {
+	if (use_real_data) {
 		std::ifstream in("q.bin", std::ios::binary);
 		in.read(
 			reinterpret_cast<char*>(q_data.data()),
@@ -227,12 +254,12 @@ int main() {
 		for (size_t i = 0; i < q_data.size(); ++i) {
 			q_data[i] = bf16(float(i));
 		}
-	}*/
+	}
 	bf16 *q_dev;
 	size_t q_size_bytes = q_data.size() * sizeof(bf16);
 	cudaMalloc(&q_dev, q_size_bytes);
 	cudaMemcpy(q_dev, q_data.data(), q_size_bytes, cudaMemcpyHostToDevice);
-	GMatrixDynSize<bf16, QK_DIM> q{q_dev, Q_LEN};
+	GMatrixDynSize<bf16, QK_DIM> q {q_dev, Q_LEN};
 
 	cudaError_t err = cudaGetLastError();
 	if (err != cudaSuccess) {
@@ -241,7 +268,7 @@ int main() {
 
 	// allocate kv: bf16 [KV_LEN, QK_DIM]
 	std::vector<bf16> kv_data(KV_LEN * QK_DIM);
-	/*if (use_real_data) {
+	if (use_real_data) {
 		std::ifstream in("kv.bin", std::ios::binary);
 		in.read(
 			reinterpret_cast<char*>(kv_data.data()),
@@ -252,19 +279,19 @@ int main() {
 		for (size_t i = 0; i < kv_data.size(); ++i) {
 			kv_data[i] = bf16(float(i*100));
 		}
-	}*/
+	}
 	bf16 *kv_dev;
 	size_t kv_size_bytes = kv_data.size() * sizeof(bf16);
 	cudaMalloc(&kv_dev, kv_size_bytes);
 	cudaMemcpy(kv_dev, kv_data.data(), kv_size_bytes, cudaMemcpyHostToDevice);
-	GMatrixDynSize<bf16, QK_DIM> kv{kv_dev, KV_LEN};
+	GMatrixDynSize<bf16, QK_DIM> kv {kv_dev, KV_LEN};
 
 	// allocate output: bf16 [Q_LEN, V_DIM]
 	std::vector<bf16> out_data(Q_LEN * V_DIM);
 	bf16 *out_dev;
 	size_t out_size_bytes = out_data.size() * sizeof(bf16);
 	cudaMalloc(&out_dev, out_size_bytes);
-	GMatrixDynSize<bf16, V_DIM> out{out_dev, Q_LEN};
+	GMatrixDynSize<bf16, V_DIM> out {out_dev, Q_LEN};
 
 	err = cudaGetLastError();
 	if (err != cudaSuccess) {
@@ -276,29 +303,33 @@ int main() {
 		printf("(3) CUDA Error: %s\n", cudaGetErrorString(err));
 	}
 
-	usize smem_size = sizeof(bf16) * std::max(
-		(Q_PER_BLOCK * QK_DIM),
-		(KV_PER_STEP * GMEM_PRELOAD * QK_DIM)
-	);
-	smem_size = std::max(smem_size, usize(70*1024));
+	// Allocate debug scores buffer
+	f32 *debug_scores_dev;
+	cudaMalloc(&debug_scores_dev, 16 * 16 * sizeof(f32));
+	cudaMemset(debug_scores_dev, 0, 16 * 16 * sizeof(f32));
 
-	cudaFuncSetAttribute(
-		attn_kernel,
-		cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+	usize smem_size =
+		sizeof(bf16) * std::max((Q_PER_BLOCK * QK_DIM), (KV_PER_STEP * GMEM_PRELOAD * QK_DIM));
+	smem_size = std::max(smem_size, usize(70 * 1024));
 
-	cudaFuncSetAttribute(
-		attn_kernel,
-		cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+	cudaFuncSetAttribute(attn_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+
+	cudaFuncSetAttribute(attn_kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
 	GPU_Clock timer;
 	timer.start();
-	constexpr int NUM_RUNS = 2;
+	constexpr int NUM_RUNS = 1;
 	for (int i = 0; i < NUM_RUNS; ++i) {
-		attn_kernel<<<Q_LEN/Q_PER_BLOCK, THREADS_PER_BLOCK, smem_size>>>(
-			q._ptr, kv._ptr, out._ptr,
-			q.m_rows(), kv.m_rows()
+		attn_kernel<<<Q_LEN / Q_PER_BLOCK, THREADS_PER_BLOCK, smem_size>>>(
+			q._ptr,
+			kv._ptr,
+			out._ptr,
+			q.m_rows(),
+			kv.m_rows(),
+			debug_scores_dev
 		);
 	}
+	cudaDeviceSynchronize();
 	double cute_time = timer.seconds() / NUM_RUNS;
 	printf("Average kernel time over %d runs: %f ms\n", NUM_RUNS, cute_time * 1e3);
 
@@ -307,7 +338,7 @@ int main() {
 		std::ofstream out_file("out_cpu.bin", std::ios::binary);
 		cudaMemcpy(out_data.data(), out_dev, out_size_bytes, cudaMemcpyDeviceToHost);
 		out_file.write(
-			reinterpret_cast<char*>(out_data.data()),
+			reinterpret_cast<char *>(out_data.data()),
 			static_cast<std::streamsize>(out_data.size() * sizeof(*out_data.data()))
 		);
 	}
@@ -317,19 +348,36 @@ int main() {
 		printf("(4) CUDA Error: %s\n", cudaGetErrorString(err));
 	}
 
-	// Wait for kernel to complete
-	cudaDeviceSynchronize();
-
-	// Check for errors
-	err = cudaGetLastError();
-	if (err != cudaSuccess) {
-		printf("CUDA Error: %s\n", cudaGetErrorString(err));
+	// Print debug scores (16x16 from block 0, warp 0, kv_step 0)
+	{
+		std::vector<f32> debug_scores(16 * 16);
+		cudaMemcpy(debug_scores.data(), debug_scores_dev, 16 * 16 * sizeof(f32), cudaMemcpyDeviceToHost);
+		printf("\nScores (block 0, warp 0, kv_step 0) [16x16]:\n");
+		for (size_t r = 0; r < 16; r++) {
+			for (size_t c = 0; c < 16; c++) {
+				printf("%10.4f ", double(debug_scores[r * 16 + c]));
+			}
+			printf("\n");
+		}
 	}
 
-/*
-	// Cleanup
-	cudaFree(d_matrix);
-	free(h_matrix);
-*/
+	// Print first 4 rows, first 8 cols
+	printf("\nFirst 4 rows, first 8 cols:\n");
+	for (size_t r = 0; r < 4; r++) {
+		for (size_t c = 0; c < 8; c++) {
+			printf("%12.6e ", double(float(out_data[r * V_DIM + c])));
+		}
+		printf("\n");
+	}
+
+	// Print last 4 rows, last 8 cols
+	printf("\nLast 4 rows, last 8 cols:\n");
+	for (size_t r = Q_LEN - 4; r < Q_LEN; r++) {
+		for (size_t c = V_DIM - 8; c < V_DIM; c++) {
+			printf("%12.6e ", double(float(out_data[r * V_DIM + c])));
+		}
+		printf("\n");
+	}
+
 	return 0;
 }

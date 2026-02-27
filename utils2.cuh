@@ -512,7 +512,8 @@ struct SMatrix {
 
 		u8 const *src_ptr = reinterpret_cast<u8 *>(src._ptr) + tid * 16;
 		X17_UNROLL for (usize step = 0; step < STEPS; step++) {
-			u32 dst_ptr = _ptr + precalc[step % PRECALC];
+			u32 dst_ptr = _ptr + precalc[step % PRECALC]
+				+ usize(step / PRECALC) * usize(REPEAT_AFTER);
 			sm80::cp_async(src_ptr, dst_ptr);
 			src_ptr += BYTES_PER_STEP;
 		}
@@ -520,7 +521,8 @@ struct SMatrix {
 		if constexpr (REMAINING > 0) {
 			if (tid < REMAINING / 16) {
 				usize step = STEPS;
-				u32 dst_ptr = _ptr + precalc[step % PRECALC];
+				u32 dst_ptr = _ptr + precalc[step % PRECALC]
+					+ usize(step / PRECALC) * usize(REPEAT_AFTER);
 				sm80::cp_async(src_ptr, dst_ptr);
 			}
 		}
