@@ -15,6 +15,175 @@ constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
 constexpr usize Q_PER_BLOCK = Q_PER_WARP;
 constexpr usize KV_PER_STEP = KV_PER_WARP * WARPS_PER_BLOCK;
 
+X17_DEVICE void combine_write(
+	Fragment_16x16<f32> (&rOut)[8],
+	SoftmaxStats r_stats,
+	SMatrix<f32, 6 * Q_PER_WARP, V_DIM> sReduce,
+	u32 stats_smem,
+	usize slot
+) {
+	SMatrix<f32, Q_PER_WARP, V_DIM> tile = sReduce.tile_m<Q_PER_WARP>(slot);
+	fragments_to_smem(rOut, tile);
+	r_stats.store_shared(
+		stats_smem + sizeof(f32) * (
+			slot * 2 * WARP_SIZE
+			+ (threadIdx.x % WARP_SIZE) * 2
+		)
+	);
+}
+
+X17_DEVICE void combine_read(
+	Fragment_16x16<f32> (&rOut)[8],
+	SoftmaxStats &r_stats,
+	SMatrix<f32, 6 * Q_PER_WARP, V_DIM> sReduce,
+	u32 stats_smem,
+	usize slot
+) {
+	SMatrix<f32, Q_PER_WARP, V_DIM> tile = sReduce.tile_m<Q_PER_WARP>(slot);
+	SoftmaxStats s_stats;
+	s_stats.load_shared(
+		stats_smem + sizeof(f32) * (
+			slot * 2 * WARP_SIZE
+			+ (threadIdx.x % WARP_SIZE) * 2
+		)
+	);
+	f32 new_max = fmaxf(r_stats.max, s_stats.max);
+	f32 r_rescale = expf(r_stats.max - new_max);
+	f32 s_rescale = expf(s_stats.max - new_max);
+
+	bool is_even = (threadIdx.x % 2) == 0;
+	f32 x_rescale = __shfl_xor_sync(0xffffffff, r_rescale, 1);
+	f32 r_top_rescale = is_even ? r_rescale : x_rescale;
+	f32 r_bot_rescale = is_even ? x_rescale : r_rescale;
+	x_rescale = __shfl_xor_sync(0xffffffff, s_rescale, 1);
+	f32 s_top_rescale = is_even ? s_rescale : x_rescale;
+	f32 s_bot_rescale = is_even ? x_rescale : s_rescale;
+
+	rescale_acc(
+		rOut, r_top_rescale, r_bot_rescale,
+		tile, s_top_rescale, s_bot_rescale
+	);
+
+	r_stats.max = new_max;
+	r_stats.sum = r_stats.sum * r_rescale + s_stats.sum * s_rescale;
+}
+
+/// Online softmax for flash attention.
+X17_DEVICE void online_softmax(
+	Fragment_16x16<f32> &rScores,
+	SoftmaxStats &stats,
+	Fragment_16x16<f32> &rOut0, Fragment_16x16<f32> &rOut1,
+	Fragment_16x16<f32> &rOut2, Fragment_16x16<f32> &rOut3,
+	Fragment_16x16<f32> &rOut4, Fragment_16x16<f32> &rOut5,
+	Fragment_16x16<f32> &rOut6, Fragment_16x16<f32> &rOut7
+) {
+	bool is_even = threadIdx.x % 2 == 0;
+
+	// Step 1: `max` of the owned row
+	f32 new_max;
+	{
+		// Each thread computes local max for its 4 top-row and 4 bottom-row values
+		f32 top_max = fmaxf(
+			fmaxf(rScores.sub[0][0].val0, rScores.sub[0][0].val1),
+			fmaxf(rScores.sub[0][1].val0, rScores.sub[0][1].val1)
+		);
+		f32 bot_max = fmaxf(
+			fmaxf(rScores.sub[1][0].val0, rScores.sub[1][0].val1),
+			fmaxf(rScores.sub[1][1].val0, rScores.sub[1][1].val1)
+		);
+
+		// XOR 1
+		// — thread 0 combines its top with thread 1's top → 8 values for row 0
+		// - thread 1 combines its bottom with thread 0's bottom → 8 values for row 8
+		new_max = is_even ? top_max : bot_max;
+		f32 send_max = is_even ? bot_max : top_max;
+		f32 recv_max = __shfl_xor_sync(0xffffffff, send_max, 1);
+		new_max = fmaxf(new_max, recv_max);
+
+		// XOR 2
+		// — thread 0 combines with thread 2 → complete row (all 16 values)
+		new_max = fmaxf(new_max, stats.max);
+		recv_max = __shfl_xor_sync(0xffffffff, new_max, 2);
+		new_max = fmaxf(new_max, recv_max);
+	}
+
+	// Step 2: Compute rescale factor and rescale output fragments
+	f32 rescale;
+	{
+		rescale = expf(stats.max - new_max);
+
+		// XOR 1 — exchange rescale factors so each thread knows both rows
+		f32 partner_rescale = __shfl_xor_sync(0xffffffff, rescale, 1);
+		f32 top_rescale = is_even ? rescale : partner_rescale;
+		f32 bot_rescale = is_even ? partner_rescale : rescale;
+
+		auto rescale_fragment = [&](Fragment_16x16<f32> &f) {
+			f.sub[0][0].val0 *= top_rescale;
+			f.sub[0][0].val1 *= top_rescale;
+			f.sub[0][1].val0 *= top_rescale;
+			f.sub[0][1].val1 *= top_rescale;
+
+			f.sub[1][0].val0 *= bot_rescale;
+			f.sub[1][0].val1 *= bot_rescale;
+			f.sub[1][1].val0 *= bot_rescale;
+			f.sub[1][1].val1 *= bot_rescale;
+		};
+		rescale_fragment(rOut0);
+		rescale_fragment(rOut1);
+		rescale_fragment(rOut2);
+		rescale_fragment(rOut3);
+		rescale_fragment(rOut4);
+		rescale_fragment(rOut5);
+		rescale_fragment(rOut6);
+		rescale_fragment(rOut7);
+	}
+
+	// Step 3: Replace scores with exp(score - new_max)
+	{
+		// Exchange new_max so each thread has both top and bottom row max
+		f32 partner_new_max = __shfl_xor_sync(0xffffffff, new_max, 1);
+		f32 top_new_max = is_even ? new_max : partner_new_max;
+		f32 bot_new_max = is_even ? partner_new_max : new_max;
+
+		rScores.sub[0][0].val0 = expf(rScores.sub[0][0].val0 - top_new_max);
+		rScores.sub[0][0].val1 = expf(rScores.sub[0][0].val1 - top_new_max);
+		rScores.sub[0][1].val0 = expf(rScores.sub[0][1].val0 - top_new_max);
+		rScores.sub[0][1].val1 = expf(rScores.sub[0][1].val1 - top_new_max);
+
+		rScores.sub[1][0].val0 = expf(rScores.sub[1][0].val0 - bot_new_max);
+		rScores.sub[1][0].val1 = expf(rScores.sub[1][0].val1 - bot_new_max);
+		rScores.sub[1][1].val0 = expf(rScores.sub[1][1].val0 - bot_new_max);
+		rScores.sub[1][1].val1 = expf(rScores.sub[1][1].val1 - bot_new_max);
+	}
+
+	// Step 4: `sum` of the owned row
+	f32 sum_addition;
+	{
+		f32 top_sum = (
+			(rScores.sub[0][0].val0 + rScores.sub[0][0].val1)
+			+ (rScores.sub[0][1].val0 + rScores.sub[0][1].val1)
+		);
+		f32 bot_sum = (
+			(rScores.sub[1][0].val0 + rScores.sub[1][0].val1)
+			+ (rScores.sub[1][1].val0 + rScores.sub[1][1].val1)
+		);
+
+		// XOR 1
+		sum_addition = is_even ? top_sum : bot_sum;
+		f32 send_sum = is_even ? bot_sum : top_sum;
+		f32 recv_sum = __shfl_xor_sync(0xffffffff, send_sum, 1);
+		sum_addition += recv_sum;
+
+		// XOR 2
+		recv_sum = __shfl_xor_sync(0xffffffff, sum_addition, 2);
+		sum_addition += recv_sum;
+	}
+
+	// Update running stats
+	stats.max = new_max;
+	stats.sum = stats.sum * rescale + sum_addition;
+}
+
 __global__ void
 attn_kernel(bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr, usize q_cnt, usize kv_cnt, f32 *debug_scores) {
 	extern __shared__ bf16 *smem;
@@ -48,8 +217,8 @@ attn_kernel(bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr, usize q_cnt, usize kv_c
 	}
 
 	// Prepare outputs
-	Fragment_16x16<f32> rOut0, rOut1, rOut2, rOut3, rOut4, rOut5, rOut6, rOut7;
-	zero_(rOut0, rOut1, rOut2, rOut3, rOut4, rOut5, rOut6, rOut7);
+	Fragment_16x16<f32> rOut[8];
+	zero_(rOut[0], rOut[1], rOut[2], rOut[3], rOut[4], rOut[5], rOut[6], rOut[7]);
 
 	// Load Q from SMEM to registers
 	cp_async_wait<GMEM_PRELOAD - 1>();
@@ -103,6 +272,8 @@ attn_kernel(bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr, usize q_cnt, usize kv_c
 	smem_tile_to_fragment(sKV, 0, 10*16, r10);
 	smem_tile_to_fragment(sKV, 0, 11*16, r11);
 
+	SoftmaxStats r_stats;
+
 	// Sequential loop over KV
 	X17_NO_UNROLL for (size_t kv_step = 0; kv_step < kv_steps; ++kv_step) {
 		// rScores = Q * K.T
@@ -123,6 +294,11 @@ attn_kernel(bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr, usize q_cnt, usize kv_c
 		mma_a_bt(rQ9, r9, rScores_f32);
 		mma_a_bt(rQ10, r10, rScores_f32);
 		mma_a_bt(rQ11, r11, rScores_f32);
+
+		online_softmax(
+			rScores_f32, r_stats,
+			rOut[0], rOut[1], rOut[2], rOut[3], rOut[4], rOut[5], rOut[6], rOut[7]
+		);
 
 		Fragment_16x16<bf16> rScores;
 		cast(rScores_f32, rScores);
@@ -150,15 +326,15 @@ attn_kernel(bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr, usize q_cnt, usize kv_c
 		}
 
 		// rOut += rScores * V
-		mma_a_bt(rScores, r0, rOut0); smem_tile_to_fragment(sKV, 0, 0*16, r0);
-		mma_a_bt(rScores, r1, rOut1); smem_tile_to_fragment(sKV, 0, 1*16, r1);
-		mma_a_bt(rScores, r2, rOut2); smem_tile_to_fragment(sKV, 0, 2*16, r2);
-		mma_a_bt(rScores, r3, rOut3); smem_tile_to_fragment(sKV, 0, 3*16, r3);
+		mma_a_bt(rScores, r0, rOut[0]); smem_tile_to_fragment(sKV, 0, 0*16, r0);
+		mma_a_bt(rScores, r1, rOut[1]); smem_tile_to_fragment(sKV, 0, 1*16, r1);
+		mma_a_bt(rScores, r2, rOut[2]); smem_tile_to_fragment(sKV, 0, 2*16, r2);
+		mma_a_bt(rScores, r3, rOut[3]); smem_tile_to_fragment(sKV, 0, 3*16, r3);
 
-		mma_a_bt(rScores, r4, rOut4); smem_tile_to_fragment(sKV, 0, 4*16, r4);
-		mma_a_bt(rScores, r5, rOut5); smem_tile_to_fragment(sKV, 0, 5*16, r5);
-		mma_a_bt(rScores, r6, rOut6); smem_tile_to_fragment(sKV, 0, 6*16, r6);
-		mma_a_bt(rScores, r7, rOut7); smem_tile_to_fragment(sKV, 0, 7*16, r7);
+		mma_a_bt(rScores, r4, rOut[4]); smem_tile_to_fragment(sKV, 0, 4*16, r4);
+		mma_a_bt(rScores, r5, rOut[5]); smem_tile_to_fragment(sKV, 0, 5*16, r5);
+		mma_a_bt(rScores, r6, rOut[6]); smem_tile_to_fragment(sKV, 0, 6*16, r6);
+		mma_a_bt(rScores, r7, rOut[7]); smem_tile_to_fragment(sKV, 0, 7*16, r7);
 
 		smem_tile_to_fragment(sKV, 0, 8*16, r8);
 		smem_tile_to_fragment(sKV, 0, 9*16, r9);
@@ -167,67 +343,58 @@ attn_kernel(bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr, usize q_cnt, usize kv_c
 	}
 
 	// Cross-warp reduction: tree reduce 8 warps -> warp 0 in 3 rounds.
+	// Each warp has rOut tiles + per-row running_max/running_sum.
+	// When combining two warps, we rescale both by exp(own_max - new_max)
+	// before adding.
+	static_assert(WARPS_PER_BLOCK == 8, "This reduction code assumes 8 warps per block");
 	SMatrix<f32, 6 * Q_PER_WARP, V_DIM> sReduce{smem};
 
-	// Helper lambdas to store/load all 8 output tiles at a given m_idx offset
-	auto store_all_tiles = [&](usize m_idx) {
-		fragment_to_smem_tile(rOut0, sReduce, m_idx, 0*16);
-		fragment_to_smem_tile(rOut1, sReduce, m_idx, 1*16);
-		fragment_to_smem_tile(rOut2, sReduce, m_idx, 2*16);
-		fragment_to_smem_tile(rOut3, sReduce, m_idx, 3*16);
-		fragment_to_smem_tile(rOut4, sReduce, m_idx, 4*16);
-		fragment_to_smem_tile(rOut5, sReduce, m_idx, 5*16);
-		fragment_to_smem_tile(rOut6, sReduce, m_idx, 6*16);
-		fragment_to_smem_tile(rOut7, sReduce, m_idx, 7*16);
-	};
-	auto acc_all_tiles = [&](usize m_idx) {
-		acc_smem_tile_to_fragment(sReduce, m_idx, 0*16, rOut0);
-		acc_smem_tile_to_fragment(sReduce, m_idx, 1*16, rOut1);
-		acc_smem_tile_to_fragment(sReduce, m_idx, 2*16, rOut2);
-		acc_smem_tile_to_fragment(sReduce, m_idx, 3*16, rOut3);
-		acc_smem_tile_to_fragment(sReduce, m_idx, 4*16, rOut4);
-		acc_smem_tile_to_fragment(sReduce, m_idx, 5*16, rOut5);
-		acc_smem_tile_to_fragment(sReduce, m_idx, 6*16, rOut6);
-		acc_smem_tile_to_fragment(sReduce, m_idx, 7*16, rOut7);
-	};
+	u32 stats_smem = sReduce._ptr + sReduce.bytes();
 
-	// Round 1: warps 1,3,5,7 write -> warps 0,2,4,6 read and add
+	// Round 1: warps 1,3,5,7 write to slots 0-3, warps 0,2,4,6 read
+	__syncthreads();
 	if (warp_idx % 2 == 1) {
-		store_all_tiles((warp_idx / 2) * Q_PER_WARP);
+		combine_write(rOut, r_stats, sReduce, stats_smem, warp_idx / 2);
 	}
 	__syncthreads();
 	if (warp_idx % 2 == 0) {
-		acc_all_tiles((warp_idx / 2) * Q_PER_WARP);
+		combine_read(rOut, r_stats, sReduce, stats_smem, warp_idx / 2);
 	}
 
-	// Round 2: warps 2,6 write -> warps 0,4 read and add
+	// Round 2: warps 2,6 write to slots 4,5, warps 0,4 read
 	if (warp_idx % 4 == 2) {
-		store_all_tiles((warp_idx / 4 + 4) * Q_PER_WARP);
+		combine_write(rOut, r_stats, sReduce, stats_smem, 4 + warp_idx / 4);
 	}
 	__syncthreads();
 	if (warp_idx % 4 == 0) {
-		acc_all_tiles((warp_idx / 4 + 4) * Q_PER_WARP);
+		combine_read(rOut, r_stats, sReduce, stats_smem, 4 + warp_idx / 4);
 	}
 
-	// Round 3: warp 4 writes -> warp 0 reads and adds
+	// Round 3: warp 4 writes to slot 0, warp 0 reads
 	if (warp_idx == 4) {
-		store_all_tiles(0);
+		combine_write(rOut, r_stats, sReduce, stats_smem, 0);
 	}
 	__syncthreads();
-	// Warp 0 stores final result to GMEM
 	if (warp_idx == 0) {
-		acc_all_tiles(0);
+		combine_read(rOut, r_stats, sReduce, stats_smem, 0);
+
+		// Normalize: divide each row by its running_sum
+		f32 partner_sum = __shfl_xor_sync(0xffffffff, r_stats.sum, 1);
+		bool is_even = (threadIdx.x % 2) == 0;
+		f32 top_inv_sum = 1.0f / (is_even ? r_stats.sum : partner_sum);
+		f32 bot_inv_sum = 1.0f / (is_even ? partner_sum : r_stats.sum);
+
+		auto normalize = [&](Fragment_16x16<f32> &f) {
+			f.sub[0][0].val0 *= top_inv_sum; f.sub[0][0].val1 *= top_inv_sum;
+			f.sub[0][1].val0 *= top_inv_sum; f.sub[0][1].val1 *= top_inv_sum;
+			f.sub[1][0].val0 *= bot_inv_sum; f.sub[1][0].val1 *= bot_inv_sum;
+			f.sub[1][1].val0 *= bot_inv_sum; f.sub[1][1].val1 *= bot_inv_sum;
+		};
+		for (usize i = 0; i < 8; i++) normalize(rOut[i]);
 
 		GMatrixDynSize<bf16, V_DIM> gOut_full {gOut_ptr, q_cnt};
 		GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = gOut_full.tile_m<Q_PER_BLOCK>(blockIdx.x);
-		rOut0.store(gOut_block, 0, 0*16);
-		rOut1.store(gOut_block, 0, 1*16);
-		rOut2.store(gOut_block, 0, 2*16);
-		rOut3.store(gOut_block, 0, 3*16);
-		rOut4.store(gOut_block, 0, 4*16);
-		rOut5.store(gOut_block, 0, 5*16);
-		rOut6.store(gOut_block, 0, 6*16);
-		rOut7.store(gOut_block, 0, 7*16);
+		for (usize i = 0; i < 8; i++) rOut[i].store(gOut_block, 0, i*16);
 	}
 }
 

@@ -362,6 +362,36 @@ X17_DEVICE void zero_(Fragment_16x16<T> &f, U&... rest) {
 
 //--------------------------------------------------------------------------------------------------
 
+struct SoftmaxStats {
+	f32 sum;
+	f32 max;
+
+	X17_DEVICE SoftmaxStats() {
+		sum = 0.0f;
+		max = -std::numeric_limits<f32>::infinity();
+	}
+
+	X17_DEVICE void store_shared(u32 ptr) const {
+		asm volatile(
+			"st.shared.v2.f32 [%0], {%1, %2};\n"
+			:
+			: "r"(ptr), "f"(sum), "f"(max)
+			: "memory"
+		);
+	}
+
+	X17_DEVICE void load_shared(u32 ptr) {
+		asm volatile(
+			"ld.shared.v2.f32 {%0, %1}, [%2];\n"
+			: "=f"(sum), "=f"(max)
+			: "r"(ptr)
+			: "memory"
+		);
+	}
+};
+
+//--------------------------------------------------------------------------------------------------
+
 template<typename T, const usize M, const usize N>
 requires(
 	M > 0 && M % 16 == 0
@@ -438,6 +468,7 @@ struct SMatrix {
 	X17_DEVICE constexpr usize m_rows() const { return M; }
 	X17_DEVICE constexpr usize n_cols() const { return N; }
 	X17_DEVICE constexpr usize elems() const { return M * N; }
+	X17_DEVICE constexpr usize bytes() const { return M * N * sizeof(T); }
 
 	constexpr static usize ROW_BYTES = N * sizeof(T);
 
@@ -603,73 +634,77 @@ using sm80::cp_async_wait;
 
 //--------------------------------------------------------------------------------------------------
 
-/// Both m_idx and n_idx must be multiples of 16
-template<const usize M, const usize N>
-X17_DEVICE void fragment_to_smem_tile(
-	Fragment_16x16<f32> const &src,
-	SMatrix<f32, M, N> const &dst,
-	usize m_idx, usize n_idx
+template<const usize M, const usize N, const usize K>
+requires(M == 16 && N == K * 16)
+X17_DEVICE void fragments_to_smem(
+	Fragment_16x16<f32> const (&src)[K],
+	SMatrix<f32, M, N> const &dst
 ) {
 	usize tid = threadIdx.x % WARP_SIZE;
-	constexpr usize ROW_BYTES = N * sizeof(f32);
-	u32 base = dst._ptr + m_idx * ROW_BYTES + n_idx * 16 * sizeof(f32);
-	u32 p0 = base + tid * 4 * sizeof(f32);
-	u32 p1 = p0 + WARP_SIZE * 4 * sizeof(f32);
 
-	f32 a = src.sub[0][0].val0;
-	f32 b = src.sub[0][0].val1;
-	f32 c = src.sub[0][1].val0;
-	f32 d = src.sub[0][1].val1;
-	asm volatile(
-		"st.shared.v4.f32 [%0], {%1, %2, %3, %4};\n"
-		:
-		: "r"(p0), "f"(a), "f"(b), "f"(c), "f"(d)
-		: "memory"
-	);
-	a = src.sub[1][0].val0;
-	b = src.sub[1][0].val1;
-	c = src.sub[1][1].val0;
-	d = src.sub[1][1].val1;
-	asm volatile(
-		"st.shared.v4.f32 [%0], {%1, %2, %3, %4};\n"
-		:
-		: "r"(p1), "f"(a), "f"(b), "f"(c), "f"(d)
-		: "memory"
-	);
+	for (usize i = 0; i < K; i++) {
+		u32 base = dst._ptr + i * 16 * sizeof(f32);
+		u32 p0 = base + tid * 4 * sizeof(f32);
+		u32 p1 = p0 + WARP_SIZE * 4 * sizeof(f32);
+
+		f32 a = src[i].sub[0][0].val0;
+		f32 b = src[i].sub[0][0].val1;
+		f32 c = src[i].sub[0][1].val0;
+		f32 d = src[i].sub[0][1].val1;
+		asm volatile(
+			"st.shared.v4.f32 [%0], {%1, %2, %3, %4};\n"
+			:
+			: "r"(p0), "f"(a), "f"(b), "f"(c), "f"(d)
+			: "memory"
+		);
+		a = src[i].sub[1][0].val0;
+		b = src[i].sub[1][0].val1;
+		c = src[i].sub[1][1].val0;
+		d = src[i].sub[1][1].val1;
+		asm volatile(
+			"st.shared.v4.f32 [%0], {%1, %2, %3, %4};\n"
+			:
+			: "r"(p1), "f"(a), "f"(b), "f"(c), "f"(d)
+			: "memory"
+		);
+	}
 }
 
-/// Both m_idx and n_idx must be multiples of 16
-template<const usize M, const usize N>
-X17_DEVICE void acc_smem_tile_to_fragment(
-	SMatrix<f32, M, N> const &src,
-	usize m_idx, usize n_idx,
-	Fragment_16x16<f32> &dst
+/// Calculates `r = r * r_scale + s * s_scale`
+template<const usize M, const usize N, const usize K>
+requires(M == 16 && N == K * 16)
+X17_DEVICE void rescale_acc(
+	Fragment_16x16<f32> (&r)[K],
+	f32 r_top_scale, f32 r_bot_scale,
+	SMatrix<f32, M, N> const &s,
+	f32 s_top_scale, f32 s_bot_scale
 ) {
 	usize tid = threadIdx.x % WARP_SIZE;
-	constexpr usize ROW_BYTES = N * sizeof(f32);
-	u32 base = src._ptr + m_idx * ROW_BYTES + n_idx * 16 * sizeof(f32);
-	u32 p0 = base + tid * 4 * sizeof(f32);
-	u32 p1 = p0 + WARP_SIZE * 4 * sizeof(f32);
+	for (usize i = 0; i < K; i++) {
+		u32 base = s._ptr + i * 16 * sizeof(f32);
+		u32 p0 = base + tid * 4 * sizeof(f32);
+		u32 p1 = p0 + WARP_SIZE * 4 * sizeof(f32);
 
-	f32 a, b, c, d;
-	asm volatile(
-		"ld.shared.v4.f32 {%0, %1, %2, %3}, [%4];\n"
-		: "=f"(a), "=f"(b), "=f"(c), "=f"(d)
-		: "r"(p0)
-	);
-	dst.sub[0][0].val0 += a;
-	dst.sub[0][0].val1 += b;
-	dst.sub[0][1].val0 += c;
-	dst.sub[0][1].val1 += d;
-	asm volatile(
-		"ld.shared.v4.f32 {%0, %1, %2, %3}, [%4];\n"
-		: "=f"(a), "=f"(b), "=f"(c), "=f"(d)
-		: "r"(p1)
-	);
-	dst.sub[1][0].val0 += a;
-	dst.sub[1][0].val1 += b;
-	dst.sub[1][1].val0 += c;
-	dst.sub[1][1].val1 += d;
+		f32 a, b, c, d;
+		asm volatile(
+			"ld.shared.v4.f32 {%0, %1, %2, %3}, [%4];\n"
+			: "=f"(a), "=f"(b), "=f"(c), "=f"(d)
+			: "r"(p0)
+		);
+		r[i].sub[0][0].val0 = (r_top_scale * r[i].sub[0][0].val0) + (s_top_scale * a);
+		r[i].sub[0][0].val1 = (r_top_scale * r[i].sub[0][0].val1) + (s_top_scale * b);
+		r[i].sub[0][1].val0 = (r_top_scale * r[i].sub[0][1].val0) + (s_top_scale * c);
+		r[i].sub[0][1].val1 = (r_top_scale * r[i].sub[0][1].val1) + (s_top_scale * d);
+		asm volatile(
+			"ld.shared.v4.f32 {%0, %1, %2, %3}, [%4];\n"
+			: "=f"(a), "=f"(b), "=f"(c), "=f"(d)
+			: "r"(p1)
+		);
+		r[i].sub[1][0].val0 = (r_bot_scale * r[i].sub[1][0].val0) + (s_bot_scale * a);
+		r[i].sub[1][0].val1 = (r_bot_scale * r[i].sub[1][0].val1) + (s_bot_scale * b);
+		r[i].sub[1][1].val0 = (r_bot_scale * r[i].sub[1][1].val0) + (s_bot_scale * c);
+		r[i].sub[1][1].val1 = (r_bot_scale * r[i].sub[1][1].val1) + (s_bot_scale * d);
+	}
 }
 
 //--------------------------------------------------------------------------------------------------
