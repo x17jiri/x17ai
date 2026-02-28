@@ -602,143 +602,76 @@ using sm80::cp_async_commit;
 using sm80::cp_async_wait;
 
 //--------------------------------------------------------------------------------------------------
-/*
-template<
-	typename U,
-	typename Tile,
-	const usize M,
-	const usize N,
-	const usize TILE_STRIDE
->
-requires(
-	sizeof(T) == 2
-	&& std::is_same_v<typename Tile::ElemType, T>
-)
-X17_DEVICE void ldmatrix(SMatrix<Tile, M, N, TILE_STRIDE> src, Fragment_16x16<U> &dst) {
-	usize tid = threadIdx.x;
-	usize thread_off = (tid & 15) * STRIDE * usize(sizeof(T)) + (tid & 16);
-	usize off = src._off + thread_off;
-	sm80::ldmatrix_8x8xu16_x4(
-		src._base_ptr + sm80::ldmatrix_swizzle(off),
-		dst.sub[0][0].val, dst.sub[1][0].val, dst.sub[0][1].val, dst.sub[1][1].val
+
+/// Both m_idx and n_idx must be multiples of 16
+template<const usize M, const usize N>
+X17_DEVICE void fragment_to_smem_tile(
+	Fragment_16x16<f32> const &src,
+	SMatrix<f32, M, N> const &dst,
+	usize m_idx, usize n_idx
+) {
+	usize tid = threadIdx.x % WARP_SIZE;
+	constexpr usize ROW_BYTES = N * sizeof(f32);
+	u32 base = dst._ptr + m_idx * ROW_BYTES + n_idx * 16 * sizeof(f32);
+	u32 p0 = base + tid * 4 * sizeof(f32);
+	u32 p1 = p0 + WARP_SIZE * 4 * sizeof(f32);
+
+	f32 a = src.sub[0][0].val0;
+	f32 b = src.sub[0][0].val1;
+	f32 c = src.sub[0][1].val0;
+	f32 d = src.sub[0][1].val1;
+	asm volatile(
+		"st.shared.v4.f32 [%0], {%1, %2, %3, %4};\n"
+		:
+		: "r"(p0), "f"(a), "f"(b), "f"(c), "f"(d)
+		: "memory"
+	);
+	a = src.sub[1][0].val0;
+	b = src.sub[1][0].val1;
+	c = src.sub[1][1].val0;
+	d = src.sub[1][1].val1;
+	asm volatile(
+		"st.shared.v4.f32 [%0], {%1, %2, %3, %4};\n"
+		:
+		: "r"(p1), "f"(a), "f"(b), "f"(c), "f"(d)
+		: "memory"
 	);
 }
 
-template<typename T, const usize STRIDE>
-requires(sizeof(T) == 2)
-X17_DEVICE void ldmatrix_t(SMatrix<T, 16, 16, STRIDE> src, Fragment_16x16<T> &dst) {
-	usize tid = threadIdx.x;
-	usize thread_off = (tid & 15) * STRIDE * usize(sizeof(T)) + (tid & 16);
-	usize off = src._off + thread_off;
-	sm80::ldmatrix_t_8x8xu16_x4(
-		src._base_ptr + sm80::ldmatrix_swizzle(off),
-		dst.sub[0][0].val, dst.sub[0][1].val, dst.sub[1][0].val, dst.sub[1][1].val
+/// Both m_idx and n_idx must be multiples of 16
+template<const usize M, const usize N>
+X17_DEVICE void acc_smem_tile_to_fragment(
+	SMatrix<f32, M, N> const &src,
+	usize m_idx, usize n_idx,
+	Fragment_16x16<f32> &dst
+) {
+	usize tid = threadIdx.x % WARP_SIZE;
+	constexpr usize ROW_BYTES = N * sizeof(f32);
+	u32 base = src._ptr + m_idx * ROW_BYTES + n_idx * 16 * sizeof(f32);
+	u32 p0 = base + tid * 4 * sizeof(f32);
+	u32 p1 = p0 + WARP_SIZE * 4 * sizeof(f32);
+
+	f32 a, b, c, d;
+	asm volatile(
+		"ld.shared.v4.f32 {%0, %1, %2, %3}, [%4];\n"
+		: "=f"(a), "=f"(b), "=f"(c), "=f"(d)
+		: "r"(p0)
 	);
-}
-template<typename T, const usize STRIDE>
-requires(sizeof(T) == 2)
-X17_DEVICE void stmatrix(Fragment_16x16<T> &src, SMatrix<T, 16, 16, STRIDE> dst) {
-	usize tid = threadIdx.x;
-
-	usize thread_off = (tid & 0x1c) * (STRIDE * usize(sizeof(T)) / 4) + (tid & 3) * 4;
-	{
-		usize off = dst._off + thread_off;
-		usize addr = dst._base_ptr + sm80::ldmatrix_swizzle(off);
-		u32 value = src.sub[0][0].val;
-		asm volatile(
-			"\nst.shared.u32 [%0], %1;\n"
-			:
-			: "r"(addr), "r"(value)
-			: "memory"
-		);
-	}
-	thread_off += 16;
-	{
-		usize off = dst._off + thread_off;
-		usize addr = dst._base_ptr + sm80::ldmatrix_swizzle(off);
-		u32 value = src.sub[0][1].val;
-		asm volatile(
-			"\nst.shared.u32 [%0], %1;\n"
-			:
-			: "r"(addr), "r"(value)
-			: "memory"
-		);
-	}
-	thread_off += 8 * STRIDE * sizeof(T);
-	{
-		usize off = dst._off + thread_off;
-		usize addr = dst._base_ptr + sm80::ldmatrix_swizzle(off);
-		u32 value = src.sub[1][1].val;
-		asm volatile(
-			"\nst.shared.u32 [%0], %1;\n"
-			:
-			: "r"(addr), "r"(value)
-			: "memory"
-		);
-	}
-	thread_off -= 16;
-	{
-		usize off = dst._off + thread_off;
-		usize addr = dst._base_ptr + sm80::ldmatrix_swizzle(off);
-		u32 value = src.sub[1][0].val;
-		asm volatile(
-			"\nst.shared.u32 [%0], %1;\n"
-			:
-			: "r"(addr), "r"(value)
-			: "memory"
-		);
-	}
+	dst.sub[0][0].val0 += a;
+	dst.sub[0][0].val1 += b;
+	dst.sub[0][1].val0 += c;
+	dst.sub[0][1].val1 += d;
+	asm volatile(
+		"ld.shared.v4.f32 {%0, %1, %2, %3}, [%4];\n"
+		: "=f"(a), "=f"(b), "=f"(c), "=f"(d)
+		: "r"(p1)
+	);
+	dst.sub[1][0].val0 += a;
+	dst.sub[1][0].val1 += b;
+	dst.sub[1][1].val0 += c;
+	dst.sub[1][1].val1 += d;
 }
 
-template<typename T, typename U, const usize M, const usize N>
-requires(sizeof(T) == 2)
-X17_DEVICE void stmatrix(RMatrix<U, M, N> const &src, GMatrix<T, M, N> &dst) {
-	usize tid = threadIdx.x;
-	X17_UNROLL for (usize j = 0; j < M / 16; j++) {
-		GMatrix<T, 16, N> dst_tile = dst.tile_m<16>(j);
-		X17_NO_UNROLL for (usize i = 0; i < N / 16; i++) {
-			Fragment_16x16<U> const &src_tile = src.tiles[j][i];
-			usize dst_off = i * 16 * usize(sizeof(T));
-
-			dst_off += (tid & 0x1c) * (dst.stride() * usize(sizeof(T)) / 4) + (tid & 3) * 4;
-			*reinterpret_cast<u32 *>(
-				reinterpret_cast<u8 *>(dst_tile._ptr) + dst_off
-			) = src_tile.sub[0][0].template cast_reg<T>().val;
-
-			dst_off += 16;
-			*reinterpret_cast<u32 *>(
-				reinterpret_cast<u8 *>(dst_tile._ptr) + dst_off
-			) = src_tile.sub[0][1].template cast_reg<T>().val;
-
-			dst_off += 8 * dst.stride() * sizeof(T) - 16;
-			*reinterpret_cast<u32 *>(
-				reinterpret_cast<u8 *>(dst_tile._ptr) + dst_off
-			) = src_tile.sub[1][0].template cast_reg<T>().val;
-
-			dst_off += 16;
-			*reinterpret_cast<u32 *>(
-				reinterpret_cast<u8 *>(dst_tile._ptr) + dst_off
-			) = src_tile.sub[1][1].template cast_reg<T>().val;
-		}
-	}
-}
-
-template<typename T, const usize M, const usize N, const usize STRIDE>
-requires(
-	sizeof(T) == 2
-	&& M > 0 && M % 16 == 0
-	&& N > 0 && N % 16 == 0
-)
-X17_DEVICE void ldmatrix(SMatrix<T, M, N, STRIDE> src, RMatrix<T, M, N> &dst) {
-	X17_UNROLL for (usize j = 0; j < M / 16; j++) {
-		auto s = src.tile_m<16>(j);
-		auto &d = dst.tiles[j];
-		X17_UNROLL for (usize i = 0; i < N / 16; i++) {
-			ldmatrix(s.tile_n<16>(i), d[i]);
-		}
-	}
-}
-*/
 //--------------------------------------------------------------------------------------------------
 
 X17_DEVICE void mma_a_bt(

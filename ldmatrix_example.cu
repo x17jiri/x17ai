@@ -19,6 +19,7 @@ __global__ void
 attn_kernel(bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr, usize q_cnt, usize kv_cnt, f32 *debug_scores) {
 	extern __shared__ bf16 *smem;
 	SMatrix<bf16, KV_PER_WARP * WARPS_PER_BLOCK * GMEM_PRELOAD, QK_DIM> preload {smem};
+	usize warp_idx = threadIdx.x / WARP_SIZE;
 
 	// Load Q from GMEM to SMEM. Use the last preload tile
 	static_assert(Q_PER_BLOCK <= KV_PER_STEP);
@@ -39,8 +40,8 @@ attn_kernel(bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr, usize q_cnt, usize kv_c
 		if (p < kv_steps) {
 			cp_async_gmem_to_smem<WARP_SIZE>(
 				threadIdx.x % WARP_SIZE,
-				gKV_full.tile_m<KV_PER_STEP>(p).tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE),
-				preload.tile_m<KV_PER_STEP>(p).tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE)
+				gKV_full.tile_m<KV_PER_STEP>(p).tile_m<KV_PER_WARP>(warp_idx),
+				preload.tile_m<KV_PER_STEP>(p).tile_m<KV_PER_WARP>(warp_idx)
 			);
 		}
 		cp_async_commit();
@@ -73,8 +74,8 @@ attn_kernel(bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr, usize q_cnt, usize kv_c
 		if (p < kv_steps) {
 			cp_async_gmem_to_smem<WARP_SIZE>(
 				threadIdx.x % WARP_SIZE,
-				gKV_full.tile_m<KV_PER_STEP>(p).tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE),
-				preload.tile_m<KV_PER_STEP>(p).tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE)
+				gKV_full.tile_m<KV_PER_STEP>(p).tile_m<KV_PER_WARP>(warp_idx),
+				preload.tile_m<KV_PER_STEP>(p).tile_m<KV_PER_WARP>(warp_idx)
 			);
 		}
 		cp_async_commit();
@@ -84,7 +85,7 @@ attn_kernel(bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr, usize q_cnt, usize kv_c
 	cp_async_wait<GMEM_PRELOAD - 1>();
 	__syncwarp();
 	SMatrix<bf16, KV_PER_WARP, QK_DIM> sKV;
-	sKV = preload.tile_m<KV_PER_STEP>(0).tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE);
+	sKV = preload.tile_m<KV_PER_STEP>(0).tile_m<KV_PER_WARP>(warp_idx);
 	Fragment_16x16<bf16> r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11;
 
 	smem_tile_to_fragment(sKV, 0, 0*16, r0);
@@ -130,8 +131,9 @@ attn_kernel(bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr, usize q_cnt, usize kv_c
 			// Wait for the next batch of GMEM -> SMEM preloads to complete
 			cp_async_wait<GMEM_PRELOAD - 2>();
 			__syncwarp();
-			sKV = preload.tile_m<KV_PER_STEP>((kv_step + 1) % GMEM_PRELOAD)
-					  .tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE);
+			sKV = preload
+				.tile_m<KV_PER_STEP>((kv_step + 1) % GMEM_PRELOAD)
+				.tile_m<KV_PER_WARP>(warp_idx);
 
 			// Preload next KV tile from GMEM
 			{
@@ -139,11 +141,8 @@ attn_kernel(bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr, usize q_cnt, usize kv_c
 				if (p < kv_steps) {
 					cp_async_gmem_to_smem<WARP_SIZE>(
 						threadIdx.x % WARP_SIZE,
-						gKV_full.tile_m<KV_PER_STEP>(p).tile_m<KV_PER_WARP>(
-							threadIdx.x / WARP_SIZE
-						),
-						preload.tile_m<KV_PER_STEP>(p % GMEM_PRELOAD)
-							.tile_m<KV_PER_WARP>(threadIdx.x / WARP_SIZE)
+						gKV_full.tile_m<KV_PER_STEP>(p).tile_m<KV_PER_WARP>(warp_idx),
+						preload.tile_m<KV_PER_STEP>(p % GMEM_PRELOAD).tile_m<KV_PER_WARP>(warp_idx)
 					);
 				}
 				cp_async_commit();
@@ -167,11 +166,60 @@ attn_kernel(bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr, usize q_cnt, usize kv_c
 		smem_tile_to_fragment(sKV, 0, 11*16, r11);
 	}
 
-	__syncthreads();
+	// Cross-warp reduction: tree reduce 8 warps -> warp 0 in 3 rounds.
+	SMatrix<f32, 6 * Q_PER_WARP, V_DIM> sReduce{smem};
 
-	GMatrixDynSize<bf16, V_DIM> gOut_full {gOut_ptr, q_cnt};
-	GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = gOut_full.tile_m<Q_PER_BLOCK>(blockIdx.x);
-	if (blockIdx.x == 0 && threadIdx.x < 32) {
+	// Helper lambdas to store/load all 8 output tiles at a given m_idx offset
+	auto store_all_tiles = [&](usize m_idx) {
+		fragment_to_smem_tile(rOut0, sReduce, m_idx, 0*16);
+		fragment_to_smem_tile(rOut1, sReduce, m_idx, 1*16);
+		fragment_to_smem_tile(rOut2, sReduce, m_idx, 2*16);
+		fragment_to_smem_tile(rOut3, sReduce, m_idx, 3*16);
+		fragment_to_smem_tile(rOut4, sReduce, m_idx, 4*16);
+		fragment_to_smem_tile(rOut5, sReduce, m_idx, 5*16);
+		fragment_to_smem_tile(rOut6, sReduce, m_idx, 6*16);
+		fragment_to_smem_tile(rOut7, sReduce, m_idx, 7*16);
+	};
+	auto acc_all_tiles = [&](usize m_idx) {
+		acc_smem_tile_to_fragment(sReduce, m_idx, 0*16, rOut0);
+		acc_smem_tile_to_fragment(sReduce, m_idx, 1*16, rOut1);
+		acc_smem_tile_to_fragment(sReduce, m_idx, 2*16, rOut2);
+		acc_smem_tile_to_fragment(sReduce, m_idx, 3*16, rOut3);
+		acc_smem_tile_to_fragment(sReduce, m_idx, 4*16, rOut4);
+		acc_smem_tile_to_fragment(sReduce, m_idx, 5*16, rOut5);
+		acc_smem_tile_to_fragment(sReduce, m_idx, 6*16, rOut6);
+		acc_smem_tile_to_fragment(sReduce, m_idx, 7*16, rOut7);
+	};
+
+	// Round 1: warps 1,3,5,7 write -> warps 0,2,4,6 read and add
+	if (warp_idx % 2 == 1) {
+		store_all_tiles((warp_idx / 2) * Q_PER_WARP);
+	}
+	__syncthreads();
+	if (warp_idx % 2 == 0) {
+		acc_all_tiles((warp_idx / 2) * Q_PER_WARP);
+	}
+
+	// Round 2: warps 2,6 write -> warps 0,4 read and add
+	if (warp_idx % 4 == 2) {
+		store_all_tiles((warp_idx / 4 + 4) * Q_PER_WARP);
+	}
+	__syncthreads();
+	if (warp_idx % 4 == 0) {
+		acc_all_tiles((warp_idx / 4 + 4) * Q_PER_WARP);
+	}
+
+	// Round 3: warp 4 writes -> warp 0 reads and adds
+	if (warp_idx == 4) {
+		store_all_tiles(0);
+	}
+	__syncthreads();
+	// Warp 0 stores final result to GMEM
+	if (warp_idx == 0) {
+		acc_all_tiles(0);
+
+		GMatrixDynSize<bf16, V_DIM> gOut_full {gOut_ptr, q_cnt};
+		GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = gOut_full.tile_m<Q_PER_BLOCK>(blockIdx.x);
 		rOut0.store(gOut_block, 0, 0*16);
 		rOut1.store(gOut_block, 0, 1*16);
 		rOut2.store(gOut_block, 0, 2*16);
@@ -181,17 +229,6 @@ attn_kernel(bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr, usize q_cnt, usize kv_c
 		rOut6.store(gOut_block, 0, 6*16);
 		rOut7.store(gOut_block, 0, 7*16);
 	}
-
-	/*if (threadIdx.x < 32) {
-		auto &t = rOut.tiles[0][0];
-		printf("Thread %d: a00.a = %e, a00.b = %e, a01.a = %e, a01.b = %e, a10.a = %e, a10.b = %e, a11.a = %e, a11.b = %e\n",
-			threadIdx.x,
-			double(t.sub[0][0].first()), double(t.sub[0][0].second()),
-			double(t.sub[0][1].first()), double(t.sub[0][1].second()),
-			double(t.sub[1][0].first()), double(t.sub[1][0].second()),
-			double(t.sub[1][1].first()), double(t.sub[1][1].second())
-		);
-	}*/
 }
 
 int main() {
