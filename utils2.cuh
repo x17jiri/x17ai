@@ -360,6 +360,13 @@ X17_DEVICE void zero_(Fragment_16x16<T> &f, U&... rest) {
 	zero_(rest...);
 }
 
+template<typename T, const usize K>
+X17_DEVICE void zero_(Fragment_16x16<T> (&arr)[K]) {
+	for (usize i = 0; i < K; i++) {
+		arr[i].zero_();
+	}
+}
+
 //--------------------------------------------------------------------------------------------------
 
 struct SoftmaxStats {

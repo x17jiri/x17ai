@@ -15,67 +15,15 @@ constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
 constexpr usize Q_PER_BLOCK = Q_PER_WARP;
 constexpr usize KV_PER_STEP = KV_PER_WARP * WARPS_PER_BLOCK;
 
-X17_DEVICE void combine_write(
-	Fragment_16x16<f32> (&rOut)[8],
-	SoftmaxStats r_stats,
-	SMatrix<f32, 6 * Q_PER_WARP, V_DIM> sReduce,
-	u32 stats_smem,
-	usize slot
-) {
-	SMatrix<f32, Q_PER_WARP, V_DIM> tile = sReduce.tile_m<Q_PER_WARP>(slot);
-	fragments_to_smem(rOut, tile);
-	r_stats.store_shared(
-		stats_smem + sizeof(f32) * (
-			slot * 2 * WARP_SIZE
-			+ (threadIdx.x % WARP_SIZE) * 2
-		)
-	);
-}
-
-X17_DEVICE void combine_read(
-	Fragment_16x16<f32> (&rOut)[8],
-	SoftmaxStats &r_stats,
-	SMatrix<f32, 6 * Q_PER_WARP, V_DIM> sReduce,
-	u32 stats_smem,
-	usize slot
-) {
-	SMatrix<f32, Q_PER_WARP, V_DIM> tile = sReduce.tile_m<Q_PER_WARP>(slot);
-	SoftmaxStats s_stats;
-	s_stats.load_shared(
-		stats_smem + sizeof(f32) * (
-			slot * 2 * WARP_SIZE
-			+ (threadIdx.x % WARP_SIZE) * 2
-		)
-	);
-	f32 new_max = fmaxf(r_stats.max, s_stats.max);
-	f32 r_rescale = expf(r_stats.max - new_max);
-	f32 s_rescale = expf(s_stats.max - new_max);
-
-	bool is_even = (threadIdx.x % 2) == 0;
-	f32 x_rescale = __shfl_xor_sync(0xffffffff, r_rescale, 1);
-	f32 r_top_rescale = is_even ? r_rescale : x_rescale;
-	f32 r_bot_rescale = is_even ? x_rescale : r_rescale;
-	x_rescale = __shfl_xor_sync(0xffffffff, s_rescale, 1);
-	f32 s_top_rescale = is_even ? s_rescale : x_rescale;
-	f32 s_bot_rescale = is_even ? x_rescale : s_rescale;
-
-	rescale_acc(
-		rOut, r_top_rescale, r_bot_rescale,
-		tile, s_top_rescale, s_bot_rescale
-	);
-
-	r_stats.max = new_max;
-	r_stats.sum = r_stats.sum * r_rescale + s_stats.sum * s_rescale;
-}
+constexpr usize QK_TILES = QK_DIM / 16;
+constexpr usize V_TILES = V_DIM / 16;
 
 /// Online softmax for flash attention.
+template<const usize K>
 X17_DEVICE void online_softmax(
-	Fragment_16x16<f32> &rScores,
 	SoftmaxStats &stats,
-	Fragment_16x16<f32> &rOut0, Fragment_16x16<f32> &rOut1,
-	Fragment_16x16<f32> &rOut2, Fragment_16x16<f32> &rOut3,
-	Fragment_16x16<f32> &rOut4, Fragment_16x16<f32> &rOut5,
-	Fragment_16x16<f32> &rOut6, Fragment_16x16<f32> &rOut7
+	Fragment_16x16<f32> &rScores,
+	Fragment_16x16<f32> (&rOut)[K]
 ) {
 	bool is_even = threadIdx.x % 2 == 0;
 
@@ -117,25 +65,17 @@ X17_DEVICE void online_softmax(
 		f32 top_rescale = is_even ? rescale : partner_rescale;
 		f32 bot_rescale = is_even ? partner_rescale : rescale;
 
-		auto rescale_fragment = [&](Fragment_16x16<f32> &f) {
-			f.sub[0][0].val0 *= top_rescale;
-			f.sub[0][0].val1 *= top_rescale;
-			f.sub[0][1].val0 *= top_rescale;
-			f.sub[0][1].val1 *= top_rescale;
+		for (usize i = 0; i < K; i++) {
+			rOut[i].sub[0][0].val0 *= top_rescale;
+			rOut[i].sub[0][0].val1 *= top_rescale;
+			rOut[i].sub[0][1].val0 *= top_rescale;
+			rOut[i].sub[0][1].val1 *= top_rescale;
 
-			f.sub[1][0].val0 *= bot_rescale;
-			f.sub[1][0].val1 *= bot_rescale;
-			f.sub[1][1].val0 *= bot_rescale;
-			f.sub[1][1].val1 *= bot_rescale;
-		};
-		rescale_fragment(rOut0);
-		rescale_fragment(rOut1);
-		rescale_fragment(rOut2);
-		rescale_fragment(rOut3);
-		rescale_fragment(rOut4);
-		rescale_fragment(rOut5);
-		rescale_fragment(rOut6);
-		rescale_fragment(rOut7);
+			rOut[i].sub[1][0].val0 *= bot_rescale;
+			rOut[i].sub[1][0].val1 *= bot_rescale;
+			rOut[i].sub[1][1].val0 *= bot_rescale;
+			rOut[i].sub[1][1].val1 *= bot_rescale;
+		}
 	}
 
 	// Step 3: Replace scores with exp(score - new_max)
@@ -184,10 +124,71 @@ X17_DEVICE void online_softmax(
 	stats.sum = stats.sum * rescale + sum_addition;
 }
 
+template<const usize Q_PER_WARP, const usize M, const usize N, const usize K>
+requires(M % Q_PER_WARP == 0 && N == K * 16)
+X17_DEVICE void combine_write(
+	Fragment_16x16<f32> (&rOut)[K],
+	SoftmaxStats r_stats,
+	SMatrix<f32, M, N> sReduce,
+	u32 stats_smem,
+	usize slot
+) {
+	SMatrix<f32, Q_PER_WARP, N> tile = sReduce.tile_m<Q_PER_WARP>(slot);
+	fragments_to_smem(rOut, tile);
+	r_stats.store_shared(
+		stats_smem + sizeof(f32) * (
+			slot * 2 * WARP_SIZE
+			+ (threadIdx.x % WARP_SIZE) * 2
+		)
+	);
+}
+
+template<const usize Q_PER_WARP, const usize M, const usize N, const usize K>
+requires(M % Q_PER_WARP == 0 && N == K * 16)
+X17_DEVICE void combine_read(
+	Fragment_16x16<f32> (&rOut)[K],
+	SoftmaxStats &r_stats,
+	SMatrix<f32, M, N> sReduce,
+	u32 stats_smem,
+	usize slot
+) {
+	SMatrix<f32, Q_PER_WARP, V_DIM> tile = sReduce.tile_m<Q_PER_WARP>(slot);
+	SoftmaxStats s_stats;
+	s_stats.load_shared(
+		stats_smem + sizeof(f32) * (
+			slot * 2 * WARP_SIZE
+			+ (threadIdx.x % WARP_SIZE) * 2
+		)
+	);
+	f32 new_max = fmaxf(r_stats.max, s_stats.max);
+	f32 r_rescale = expf(r_stats.max - new_max);
+	f32 s_rescale = expf(s_stats.max - new_max);
+
+	bool is_even = (threadIdx.x % 2) == 0;
+	f32 x_rescale = __shfl_xor_sync(0xffffffff, r_rescale, 1);
+	f32 r_top_rescale = is_even ? r_rescale : x_rescale;
+	f32 r_bot_rescale = is_even ? x_rescale : r_rescale;
+	x_rescale = __shfl_xor_sync(0xffffffff, s_rescale, 1);
+	f32 s_top_rescale = is_even ? s_rescale : x_rescale;
+	f32 s_bot_rescale = is_even ? x_rescale : s_rescale;
+
+	rescale_acc(
+		rOut, r_top_rescale, r_bot_rescale,
+		tile, s_top_rescale, s_bot_rescale
+	);
+
+	r_stats.max = new_max;
+	r_stats.sum = r_stats.sum * r_rescale + s_stats.sum * s_rescale;
+}
+
 __global__ void
-attn_kernel(bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr, usize q_cnt, usize kv_cnt, f32 *debug_scores) {
+attn_kernel(
+	bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr,
+	usize q_cnt, usize kv_cnt,
+	f32 *debug_scores
+) {
 	extern __shared__ bf16 *smem;
-	SMatrix<bf16, KV_PER_WARP * WARPS_PER_BLOCK * GMEM_PRELOAD, QK_DIM> preload {smem};
+	SMatrix<bf16, KV_PER_WARP * WARPS_PER_BLOCK * GMEM_PRELOAD, QK_DIM> preload{smem};
 	usize warp_idx = threadIdx.x / WARP_SIZE;
 
 	// Load Q from GMEM to SMEM. Use the last preload tile
@@ -217,28 +218,18 @@ attn_kernel(bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr, usize q_cnt, usize kv_c
 	}
 
 	// Prepare outputs
-	Fragment_16x16<f32> rOut[8];
-	zero_(rOut[0], rOut[1], rOut[2], rOut[3], rOut[4], rOut[5], rOut[6], rOut[7]);
+	Fragment_16x16<f32> rOut[V_TILES];
+	zero_(rOut);
 
 	// Load Q from SMEM to registers
 	cp_async_wait<GMEM_PRELOAD - 1>();
 	__syncthreads();
-	Fragment_16x16<bf16> rQ0, rQ1, rQ2, rQ3, rQ4, rQ5, rQ6, rQ7, rQ8, rQ9, rQ10, rQ11;
-	smem_tile_to_fragment(sQ, 0, 0 * 16, rQ0);
-	smem_tile_to_fragment(sQ, 0, 1 * 16, rQ1);
-	smem_tile_to_fragment(sQ, 0, 2 * 16, rQ2);
-	smem_tile_to_fragment(sQ, 0, 3 * 16, rQ3);
-	smem_tile_to_fragment(sQ, 0, 4 * 16, rQ4);
-	smem_tile_to_fragment(sQ, 0, 5 * 16, rQ5);
-	smem_tile_to_fragment(sQ, 0, 6 * 16, rQ6);
-	smem_tile_to_fragment(sQ, 0, 7 * 16, rQ7);
-	smem_tile_to_fragment(sQ, 0, 8 * 16, rQ8);
-	smem_tile_to_fragment(sQ, 0, 9 * 16, rQ9);
-	smem_tile_to_fragment(sQ, 0, 10 * 16, rQ10);
-	smem_tile_to_fragment(sQ, 0, 11 * 16, rQ11);
+	Fragment_16x16<bf16> rQ[QK_TILES];
+	X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
+		smem_tile_to_fragment(sQ, 0, i * 16, rQ[i]);
+	}
 
-	// Now that we have Q in registers, use the last preload tile for KV
-	{
+	{ // Now that we have Q in registers, use the last preload tile for KV
 		usize p = GMEM_PRELOAD - 1;
 		if (p < kv_steps) {
 			cp_async_gmem_to_smem<WARP_SIZE>(
@@ -255,55 +246,28 @@ attn_kernel(bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr, usize q_cnt, usize kv_c
 	__syncwarp();
 	SMatrix<bf16, KV_PER_WARP, QK_DIM> sKV;
 	sKV = preload.tile_m<KV_PER_STEP>(0).tile_m<KV_PER_WARP>(warp_idx);
-	Fragment_16x16<bf16> r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11;
-
-	smem_tile_to_fragment(sKV, 0, 0*16, r0);
-	smem_tile_to_fragment(sKV, 0, 1*16, r1);
-	smem_tile_to_fragment(sKV, 0, 2*16, r2);
-	smem_tile_to_fragment(sKV, 0, 3*16, r3);
-
-	smem_tile_to_fragment(sKV, 0, 4*16, r4);
-	smem_tile_to_fragment(sKV, 0, 5*16, r5);
-	smem_tile_to_fragment(sKV, 0, 6*16, r6);
-	smem_tile_to_fragment(sKV, 0, 7*16, r7);
-
-	smem_tile_to_fragment(sKV, 0, 8*16, r8);
-	smem_tile_to_fragment(sKV, 0, 9*16, r9);
-	smem_tile_to_fragment(sKV, 0, 10*16, r10);
-	smem_tile_to_fragment(sKV, 0, 11*16, r11);
-
-	SoftmaxStats r_stats;
+	Fragment_16x16<bf16> rKV[QK_TILES];
+	X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
+		smem_tile_to_fragment(sKV, 0, i * 16, rKV[i]);
+	}
 
 	// Sequential loop over KV
+	SoftmaxStats r_stats;
 	X17_NO_UNROLL for (size_t kv_step = 0; kv_step < kv_steps; ++kv_step) {
 		// rScores = Q * K.T
 		Fragment_16x16<f32> rScores_f32;
 		rScores_f32.zero_();
+		X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
+			mma_a_bt(rQ[i], rKV[i], rScores_f32); rKV[i].transpose_();
+		}
+		X17_UNROLL for (usize i = V_TILES; i < QK_TILES; i++) {
+			mma_a_bt(rQ[i], rKV[i], rScores_f32);
+		}
 
-		mma_a_bt(rQ0, r0, rScores_f32); r0.transpose_();
-		mma_a_bt(rQ1, r1, rScores_f32); r1.transpose_();
-		mma_a_bt(rQ2, r2, rScores_f32); r2.transpose_();
-		mma_a_bt(rQ3, r3, rScores_f32); r3.transpose_();
+		// Softmax
+		online_softmax(r_stats, rScores_f32, rOut);
 
-		mma_a_bt(rQ4, r4, rScores_f32); r4.transpose_();
-		mma_a_bt(rQ5, r5, rScores_f32); r5.transpose_();
-		mma_a_bt(rQ6, r6, rScores_f32); r6.transpose_();
-		mma_a_bt(rQ7, r7, rScores_f32); r7.transpose_();
-
-		mma_a_bt(rQ8, r8, rScores_f32);
-		mma_a_bt(rQ9, r9, rScores_f32);
-		mma_a_bt(rQ10, r10, rScores_f32);
-		mma_a_bt(rQ11, r11, rScores_f32);
-
-		online_softmax(
-			rScores_f32, r_stats,
-			rOut[0], rOut[1], rOut[2], rOut[3], rOut[4], rOut[5], rOut[6], rOut[7]
-		);
-
-		Fragment_16x16<bf16> rScores;
-		cast(rScores_f32, rScores);
-
-		{
+		{ // Get more data from GMEM
 			// Wait for the next batch of GMEM -> SMEM preloads to complete
 			cp_async_wait<GMEM_PRELOAD - 2>();
 			__syncwarp();
@@ -326,57 +290,47 @@ attn_kernel(bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr, usize q_cnt, usize kv_c
 		}
 
 		// rOut += rScores * V
-		mma_a_bt(rScores, r0, rOut[0]); smem_tile_to_fragment(sKV, 0, 0*16, r0);
-		mma_a_bt(rScores, r1, rOut[1]); smem_tile_to_fragment(sKV, 0, 1*16, r1);
-		mma_a_bt(rScores, r2, rOut[2]); smem_tile_to_fragment(sKV, 0, 2*16, r2);
-		mma_a_bt(rScores, r3, rOut[3]); smem_tile_to_fragment(sKV, 0, 3*16, r3);
-
-		mma_a_bt(rScores, r4, rOut[4]); smem_tile_to_fragment(sKV, 0, 4*16, r4);
-		mma_a_bt(rScores, r5, rOut[5]); smem_tile_to_fragment(sKV, 0, 5*16, r5);
-		mma_a_bt(rScores, r6, rOut[6]); smem_tile_to_fragment(sKV, 0, 6*16, r6);
-		mma_a_bt(rScores, r7, rOut[7]); smem_tile_to_fragment(sKV, 0, 7*16, r7);
-
-		smem_tile_to_fragment(sKV, 0, 8*16, r8);
-		smem_tile_to_fragment(sKV, 0, 9*16, r9);
-		smem_tile_to_fragment(sKV, 0, 10*16, r10);
-		smem_tile_to_fragment(sKV, 0, 11*16, r11);
+		Fragment_16x16<bf16> rScores;
+		cast(rScores_f32, rScores);
+		X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
+			mma_a_bt(rScores, rKV[i], rOut[i]); smem_tile_to_fragment(sKV, 0, i * 16, rKV[i]);
+		}
+		X17_UNROLL for (usize i = V_TILES; i < QK_TILES; i++) {
+			smem_tile_to_fragment(sKV, 0, i * 16, rKV[i]);
+		}
 	}
 
 	// Cross-warp reduction: tree reduce 8 warps -> warp 0 in 3 rounds.
-	// Each warp has rOut tiles + per-row running_max/running_sum.
-	// When combining two warps, we rescale both by exp(own_max - new_max)
-	// before adding.
 	static_assert(WARPS_PER_BLOCK == 8, "This reduction code assumes 8 warps per block");
 	SMatrix<f32, 6 * Q_PER_WARP, V_DIM> sReduce{smem};
-
 	u32 stats_smem = sReduce._ptr + sReduce.bytes();
 
 	// Round 1: warps 1,3,5,7 write to slots 0-3, warps 0,2,4,6 read
 	__syncthreads();
 	if (warp_idx % 2 == 1) {
-		combine_write(rOut, r_stats, sReduce, stats_smem, warp_idx / 2);
+		combine_write<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, warp_idx / 2);
 	}
 	__syncthreads();
 	if (warp_idx % 2 == 0) {
-		combine_read(rOut, r_stats, sReduce, stats_smem, warp_idx / 2);
+		combine_read<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, warp_idx / 2);
 	}
 
 	// Round 2: warps 2,6 write to slots 4,5, warps 0,4 read
 	if (warp_idx % 4 == 2) {
-		combine_write(rOut, r_stats, sReduce, stats_smem, 4 + warp_idx / 4);
+		combine_write<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 4 + warp_idx / 4);
 	}
 	__syncthreads();
 	if (warp_idx % 4 == 0) {
-		combine_read(rOut, r_stats, sReduce, stats_smem, 4 + warp_idx / 4);
+		combine_read<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 4 + warp_idx / 4);
 	}
 
 	// Round 3: warp 4 writes to slot 0, warp 0 reads
 	if (warp_idx == 4) {
-		combine_write(rOut, r_stats, sReduce, stats_smem, 0);
+		combine_write<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 0);
 	}
 	__syncthreads();
 	if (warp_idx == 0) {
-		combine_read(rOut, r_stats, sReduce, stats_smem, 0);
+		combine_read<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 0);
 
 		// Normalize: divide each row by its running_sum
 		f32 partner_sum = __shfl_xor_sync(0xffffffff, r_stats.sum, 1);
@@ -384,17 +338,19 @@ attn_kernel(bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr, usize q_cnt, usize kv_c
 		f32 top_inv_sum = 1.0f / (is_even ? r_stats.sum : partner_sum);
 		f32 bot_inv_sum = 1.0f / (is_even ? partner_sum : r_stats.sum);
 
-		auto normalize = [&](Fragment_16x16<f32> &f) {
+		X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
+			auto &f = rOut[i];
 			f.sub[0][0].val0 *= top_inv_sum; f.sub[0][0].val1 *= top_inv_sum;
 			f.sub[0][1].val0 *= top_inv_sum; f.sub[0][1].val1 *= top_inv_sum;
 			f.sub[1][0].val0 *= bot_inv_sum; f.sub[1][0].val1 *= bot_inv_sum;
 			f.sub[1][1].val0 *= bot_inv_sum; f.sub[1][1].val1 *= bot_inv_sum;
-		};
-		for (usize i = 0; i < 8; i++) normalize(rOut[i]);
+		}
 
 		GMatrixDynSize<bf16, V_DIM> gOut_full {gOut_ptr, q_cnt};
 		GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = gOut_full.tile_m<Q_PER_BLOCK>(blockIdx.x);
-		for (usize i = 0; i < 8; i++) rOut[i].store(gOut_block, 0, i*16);
+		X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
+			rOut[i].store(gOut_block, 0, i*16);
+		}
 	}
 }
 
