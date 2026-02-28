@@ -181,6 +181,67 @@ X17_DEVICE void combine_read(
 	r_stats.sum = r_stats.sum * r_rescale + s_stats.sum * s_rescale;
 }
 
+template<const usize K, const usize OUT_DIM, const usize Q_PER_BLOCK>
+requires(Q_PER_BLOCK == 16 && OUT_DIM == K * 16)
+X17_DEVICE void combine_and_store(
+	Fragment_16x16<f32> (&rOut)[K],
+	SoftmaxStats &r_stats,
+	u32 smem,
+	usize warp_idx,
+	GMatrix<bf16, Q_PER_BLOCK, OUT_DIM> gOut_block
+) {
+	// Cross-warp reduction: tree reduce 8 warps -> warp 0 in 3 rounds.
+	static_assert(WARPS_PER_BLOCK == 8, "This reduction code assumes 8 warps per block");
+	SMatrix<f32, 6 * Q_PER_WARP, K * 16> sReduce{smem};
+	u32 stats_smem = sReduce._ptr + sReduce.bytes();
+
+	// Round 1: warps 1,3,5,7 write to slots 0-3, warps 0,2,4,6 read
+	__syncthreads();
+	if (warp_idx % 2 == 1) {
+		combine_write<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, warp_idx / 2);
+	}
+	__syncthreads();
+	if (warp_idx % 2 == 0) {
+		combine_read<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, warp_idx / 2);
+	}
+
+	// Round 2: warps 2,6 write to slots 4,5, warps 0,4 read
+	if (warp_idx % 4 == 2) {
+		combine_write<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 4 + warp_idx / 4);
+	}
+	__syncthreads();
+	if (warp_idx % 4 == 0) {
+		combine_read<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 4 + warp_idx / 4);
+	}
+
+	// Round 3: warp 4 writes to slot 0, warp 0 reads
+	if (warp_idx == 4) {
+		combine_write<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 0);
+	}
+	__syncthreads();
+	if (warp_idx == 0) {
+		combine_read<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 0);
+
+		// Normalize: divide each row by its running_sum
+		f32 partner_sum = __shfl_xor_sync(0xffffffff, r_stats.sum, 1);
+		bool is_even = (threadIdx.x % 2) == 0;
+		f32 top_inv_sum = 1.0f / (is_even ? r_stats.sum : partner_sum);
+		f32 bot_inv_sum = 1.0f / (is_even ? partner_sum : r_stats.sum);
+
+		X17_UNROLL for (usize i = 0; i < K; i++) {
+			auto &f = rOut[i];
+			f.sub[0][0].val0 *= top_inv_sum; f.sub[0][0].val1 *= top_inv_sum;
+			f.sub[0][1].val0 *= top_inv_sum; f.sub[0][1].val1 *= top_inv_sum;
+			f.sub[1][0].val0 *= bot_inv_sum; f.sub[1][0].val1 *= bot_inv_sum;
+			f.sub[1][1].val0 *= bot_inv_sum; f.sub[1][1].val1 *= bot_inv_sum;
+		}
+
+		X17_UNROLL for (usize i = 0; i < K; i++) {
+			rOut[i].store(gOut_block, 0, i*16);
+		}
+	}
+}
+
 __global__ void
 attn_kernel(
 	bf16 *gQ_ptr, bf16 *gKV_ptr, bf16 *gOut_ptr,
@@ -193,7 +254,7 @@ attn_kernel(
 
 	// Load Q from GMEM to SMEM. Use the last preload tile
 	static_assert(Q_PER_BLOCK <= KV_PER_STEP);
-	GMatrixDynSize<bf16, QK_DIM> gQ_full {gQ_ptr, q_cnt};
+	GMatrixDynSize<bf16, QK_DIM> gQ_full{gQ_ptr, q_cnt};
 	GMatrix<bf16, Q_PER_BLOCK, QK_DIM> gQ_block = gQ_full.tile_m<Q_PER_BLOCK>(blockIdx.x);
 	SMatrix<bf16, Q_PER_BLOCK, QK_DIM> sQ;
 	sQ = preload.tile_m<KV_PER_STEP>(GMEM_PRELOAD - 1).tile_m<Q_PER_BLOCK>(0);
@@ -204,7 +265,7 @@ attn_kernel(
 
 	// Start preloading KVs from GMEM to SMEM
 	// Don't use the last preload tile yet because it's used to load Q
-	GMatrixDynSize<bf16, QK_DIM> gKV_full {gKV_ptr, kv_cnt};
+	GMatrixDynSize<bf16, QK_DIM> gKV_full{gKV_ptr, kv_cnt};
 	size_t kv_steps = gKV_full.m_rows() / KV_PER_STEP;
 	X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD - 1; ++p) {
 		if (p < kv_steps) {
@@ -300,58 +361,9 @@ attn_kernel(
 		}
 	}
 
-	// Cross-warp reduction: tree reduce 8 warps -> warp 0 in 3 rounds.
-	static_assert(WARPS_PER_BLOCK == 8, "This reduction code assumes 8 warps per block");
-	SMatrix<f32, 6 * Q_PER_WARP, V_DIM> sReduce{smem};
-	u32 stats_smem = sReduce._ptr + sReduce.bytes();
-
-	// Round 1: warps 1,3,5,7 write to slots 0-3, warps 0,2,4,6 read
-	__syncthreads();
-	if (warp_idx % 2 == 1) {
-		combine_write<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, warp_idx / 2);
-	}
-	__syncthreads();
-	if (warp_idx % 2 == 0) {
-		combine_read<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, warp_idx / 2);
-	}
-
-	// Round 2: warps 2,6 write to slots 4,5, warps 0,4 read
-	if (warp_idx % 4 == 2) {
-		combine_write<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 4 + warp_idx / 4);
-	}
-	__syncthreads();
-	if (warp_idx % 4 == 0) {
-		combine_read<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 4 + warp_idx / 4);
-	}
-
-	// Round 3: warp 4 writes to slot 0, warp 0 reads
-	if (warp_idx == 4) {
-		combine_write<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 0);
-	}
-	__syncthreads();
-	if (warp_idx == 0) {
-		combine_read<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 0);
-
-		// Normalize: divide each row by its running_sum
-		f32 partner_sum = __shfl_xor_sync(0xffffffff, r_stats.sum, 1);
-		bool is_even = (threadIdx.x % 2) == 0;
-		f32 top_inv_sum = 1.0f / (is_even ? r_stats.sum : partner_sum);
-		f32 bot_inv_sum = 1.0f / (is_even ? partner_sum : r_stats.sum);
-
-		X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
-			auto &f = rOut[i];
-			f.sub[0][0].val0 *= top_inv_sum; f.sub[0][0].val1 *= top_inv_sum;
-			f.sub[0][1].val0 *= top_inv_sum; f.sub[0][1].val1 *= top_inv_sum;
-			f.sub[1][0].val0 *= bot_inv_sum; f.sub[1][0].val1 *= bot_inv_sum;
-			f.sub[1][1].val0 *= bot_inv_sum; f.sub[1][1].val1 *= bot_inv_sum;
-		}
-
-		GMatrixDynSize<bf16, V_DIM> gOut_full {gOut_ptr, q_cnt};
-		GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = gOut_full.tile_m<Q_PER_BLOCK>(blockIdx.x);
-		X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
-			rOut[i].store(gOut_block, 0, i*16);
-		}
-	}
+	GMatrixDynSize<bf16, V_DIM> gOut_full{gOut_ptr, q_cnt};
+	GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = gOut_full.tile_m<Q_PER_BLOCK>(blockIdx.x);
+	combine_and_store(rOut, r_stats, preload._ptr, warp_idx, gOut_block);
 }
 
 int main() {
@@ -377,7 +389,7 @@ int main() {
 	size_t q_size_bytes = q_data.size() * sizeof(bf16);
 	cudaMalloc(&q_dev, q_size_bytes);
 	cudaMemcpy(q_dev, q_data.data(), q_size_bytes, cudaMemcpyHostToDevice);
-	GMatrixDynSize<bf16, QK_DIM> q {q_dev, Q_LEN};
+	GMatrixDynSize<bf16, QK_DIM> q{q_dev, Q_LEN};
 
 	cudaError_t err = cudaGetLastError();
 	if (err != cudaSuccess) {
@@ -402,14 +414,14 @@ int main() {
 	size_t kv_size_bytes = kv_data.size() * sizeof(bf16);
 	cudaMalloc(&kv_dev, kv_size_bytes);
 	cudaMemcpy(kv_dev, kv_data.data(), kv_size_bytes, cudaMemcpyHostToDevice);
-	GMatrixDynSize<bf16, QK_DIM> kv {kv_dev, KV_LEN};
+	GMatrixDynSize<bf16, QK_DIM> kv{kv_dev, KV_LEN};
 
 	// allocate output: bf16 [Q_LEN, V_DIM]
 	std::vector<bf16> out_data(Q_LEN * V_DIM);
 	bf16 *out_dev;
 	size_t out_size_bytes = out_data.size() * sizeof(bf16);
 	cudaMalloc(&out_dev, out_size_bytes);
-	GMatrixDynSize<bf16, V_DIM> out {out_dev, Q_LEN};
+	GMatrixDynSize<bf16, V_DIM> out{out_dev, Q_LEN};
 
 	err = cudaGetLastError();
 	if (err != cudaSuccess) {

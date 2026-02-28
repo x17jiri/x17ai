@@ -648,9 +648,10 @@ X17_DEVICE void fragments_to_smem(
 	SMatrix<f32, M, N> const &dst
 ) {
 	usize tid = threadIdx.x % WARP_SIZE;
+	constexpr u32 TILE_STRIDE = 2 * WARP_SIZE * 4 * sizeof(f32); // 1024 bytes per 16x16 f32 tile
 
 	for (usize i = 0; i < K; i++) {
-		u32 base = dst._ptr + i * 16 * sizeof(f32);
+		u32 base = dst._ptr + i * TILE_STRIDE;
 		u32 p0 = base + tid * 4 * sizeof(f32);
 		u32 p1 = p0 + WARP_SIZE * 4 * sizeof(f32);
 
@@ -687,8 +688,9 @@ X17_DEVICE void rescale_acc(
 	f32 s_top_scale, f32 s_bot_scale
 ) {
 	usize tid = threadIdx.x % WARP_SIZE;
+	constexpr u32 TILE_STRIDE = 2 * WARP_SIZE * 4 * sizeof(f32); // 1024 bytes per 16x16 f32 tile
 	for (usize i = 0; i < K; i++) {
-		u32 base = s._ptr + i * 16 * sizeof(f32);
+		u32 base = s._ptr + i * TILE_STRIDE;
 		u32 p0 = base + tid * 4 * sizeof(f32);
 		u32 p1 = p0 + WARP_SIZE * 4 * sizeof(f32);
 
