@@ -88,10 +88,6 @@ namespace sm75 {
 		);
 	}
 
-	X17_DEVICE u32 ldmatrix_swizzle(u32 byte_offset) {
-		return byte_offset ^ ((byte_offset >> 3) & 0x70);
-	}
-
 	X17_DEVICE void movmatrix(uint32_t src, uint32_t &dst) {
 		asm volatile("movmatrix.sync.aligned.m8n8.trans.b16 %0, %1;\n"
 			: "=r"(dst)
@@ -533,21 +529,16 @@ requires(
 )
 struct SMatrix {
 	u32 _ptr;
-	u32 _thread_off[4];
+	u32 _swizzle;
 
-	X17_DEVICE constexpr SMatrix() : _ptr(0), _thread_off{0, 0, 0, 0} {}
+	X17_DEVICE constexpr SMatrix() : _ptr(0), _swizzle(0) {}
 
 	X17_DEVICE constexpr SMatrix(void *ptr): SMatrix(cast_smem_ptr_to_uint(ptr)) {}
 
 	X17_DEVICE constexpr SMatrix(u32 ptr):
-		_ptr(ptr)
-	{
-		usize tid = threadIdx.x;
-		_thread_off[0] = sm80::ldmatrix_swizzle((tid & 7) * 128  +  (tid & 16) + 0);
-		_thread_off[1] = sm80::ldmatrix_swizzle((tid & 7) * 128  +  (tid & 16) + 32);
-		_thread_off[2] = sm80::ldmatrix_swizzle((tid & 7) * 128  +  (tid & 16) + 64);
-		_thread_off[3] = sm80::ldmatrix_swizzle((tid & 7) * 128  +  (tid & 16) + 96);
-	}
+		_ptr(ptr),
+		_swizzle(((threadIdx.x & 7) << 4) ^ (threadIdx.x & 16))
+	{}
 
 	X17_DEVICE constexpr usize m_rows() const { return M; }
 	X17_DEVICE constexpr usize n_cols() const { return N; }
@@ -581,36 +572,28 @@ struct SMatrix {
 		usize col_in_row = (tid % CP_PER_ROW) * 16;  // byte offset within row
 		usize row_in_step = tid / CP_PER_ROW;
 
-		// Source: initial pointer + constant stride per step
-		usize src_stride = src.stride_bytes();
-		u8 const *src_ptr = reinterpret_cast<u8 const *>(src._ptr)
-			+ row_in_step * src_stride + col_in_row;
-		usize src_step = ROWS_PER_STEP * src_stride;
-
-		// Destination SMEM: precompute swizzled offsets (repeats every lcm(8, ROWS_PER_STEP) rows)
-		constexpr usize BYTES_PER_STEP = THREADS_PER_BLOCK * 16;
-		constexpr usize REPEAT_AFTER = least_common_multiple(8 * ROW_BYTES, BYTES_PER_STEP);
-		constexpr usize PRECALC = std::min(STEPS, REPEAT_AFTER / BYTES_PER_STEP);
-
-		usize precalc[PRECALC];
-		for (usize i = 0; i < PRECALC; i++) {
-			usize row = i * ROWS_PER_STEP + row_in_step;
-			usize outer_row = row / 8;
-			usize outer_col = col_in_row / 128;
-			usize inner_row = row % 8;
-			usize inner_col = col_in_row % 128;
-
-			precalc[i] =
-				outer_row * 8 * ROW_BYTES
-				+ outer_col * 8 * 128
-				+ sm80::ldmatrix_swizzle(inner_row * 128 + inner_col);
+		constexpr usize REPEAT_AFTER = least_common_multiple(8, ROWS_PER_STEP) / ROWS_PER_STEP;
+		usize off[REPEAT_AFTER];
+		X17_UNROLL for (usize i = 0; i < REPEAT_AFTER; i++) {
+			off[i] = col_in_row ^ (((i * ROWS_PER_STEP + row_in_step) & 7) << 4);
 		}
 
+		// Source: initial pointer + constant stride per step
+		u8 const *src_ptr =
+			reinterpret_cast<u8 const *>(src._ptr)
+			+ row_in_step * src.stride_bytes()
+			+ col_in_row;
+		usize src_step = ROWS_PER_STEP * src.stride_bytes();
+
+		// Destination SMEM: row-major with per-row XOR swizzle
+		u32 dst_row_off = _ptr + row_in_step * ROW_BYTES;
+		constexpr u32 DST_ROW_STEP = ROWS_PER_STEP * ROW_BYTES;
+
 		X17_UNROLL for (usize step = 0; step < STEPS; step++) {
-			u32 dst_ptr = _ptr + precalc[step % PRECALC]
-				+ usize(step / PRECALC) * usize(REPEAT_AFTER);
+			u32 dst_ptr = dst_row_off + off[step % REPEAT_AFTER];
 			sm80::cp_async(src_ptr, dst_ptr);
 			src_ptr += src_step;
+			dst_row_off += DST_ROW_STEP;
 		}
 	}
 
@@ -620,15 +603,12 @@ struct SMatrix {
 		Fragment_16x16<T> &dst
 	) const requires(sizeof(T) == 2) {
 		usize tid = threadIdx.x;
-
-		usize a =
-			m_idx * ROW_BYTES
-			+ (tid & 8) * ROW_BYTES
-			+ (n_idx / 64) * (8 * 128);
-		usize b = _thread_off[(n_idx % 64) / 16];
+		usize row = m_idx + (tid & 15);
+		usize byte_col = n_idx * sizeof(T);
+		u32 addr = _ptr + (row * ROW_BYTES) + (byte_col ^ _swizzle);
 
 		sm80::ldmatrix_8x8xu16_x4(
-			_ptr + a + b,
+			addr,
 			dst.sub[0][0].val, dst.sub[1][0].val, dst.sub[0][1].val, dst.sub[1][1].val
 		);
 	}
@@ -638,15 +618,12 @@ struct SMatrix {
 		Fragment_16x16<T> &dst
 	) const requires(sizeof(T) == 2) {
 		usize tid = threadIdx.x;
-
-		usize a =
-			m_idx * ROW_BYTES
-			+ (tid & 8) * ROW_BYTES
-			+ (n_idx / 64) * (8 * 128);
-		usize b = _thread_off[(n_idx % 64) / 16];
+		usize row = m_idx + (tid & 15);
+		usize byte_col = n_idx * sizeof(T);
+		u32 addr = _ptr + (row * ROW_BYTES) + (byte_col ^ _swizzle);
 
 		sm80::ldmatrix_8x8xu16_x4(
-			_ptr + a + b,
+			addr,
 			dst.sub[0][0].val, dst.sub[0][1].val, dst.sub[1][0].val, dst.sub[1][1].val
 		);
 	}
