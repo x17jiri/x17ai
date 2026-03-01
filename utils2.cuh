@@ -566,55 +566,39 @@ struct SMatrix {
 
 	template<const usize THREADS_PER_BLOCK>
 	X17_DEVICE void cp_async_from(usize tid, GMatrix<T, M, N> src) const {
-/*		__builtin_assume(tid < THREADS_PER_BLOCK);
-
-		constexpr usize THREADS_PER_TILE = 64;
-		static_assert(THREADS_PER_BLOCK % THREADS_PER_TILE == 0, "TODO");
-		constexpr usize TILES_PER_BLOCK = THREADS_PER_BLOCK / THREADS_PER_TILE;
-		static_assert((M / 8) % TILES_PER_BLOCK == 0, "TODO");
-
-		usize src_off = (tid % 8) * 16 + (tid / 8) * ROW_BYTES;
-		u8 *src_ptr = reinterpret_cast<u8 *>(src._ptr) + src_off;
-
-		usize dst_off = (tid % 8) * 16 + (tid / 8) * 128;
-		dst_off = sm80::ldmatrix_swizzle(dst_off);
-		dst_off += (tid / THREADS_PER_TILE) * 8 * (ROW_BYTES - 128);
-		usize dst_ptr = _ptr + dst_off;
-
-		constexpr usize h = M / 16; // TODO : fix
-		constexpr usize w = ROW_BYTES / 128;
-		X17_UNROLL for (usize j = 0; j < h; j += TILES_PER_BLOCK) {
-			X17_UNROLL for (usize i = 0; i < w; ++i) {
-				sm80::cp_async(src_ptr, dst_ptr);
-				src_ptr += 128;
-				dst_ptr += 8 * 128;
-			}
-			src_ptr += 8 * TILES_PER_BLOCK * ROW_BYTES - w * 128;
-			dst_ptr += (TILES_PER_BLOCK - 1) * 8 * ROW_BYTES;
-		}
-		return; // TODO*/
-
 		__builtin_assume(tid < THREADS_PER_BLOCK);
-		static_assert(ROW_BYTES % 128 == 0, "TODO");
-		constexpr usize BYTES_PER_STEP = THREADS_PER_BLOCK * 16;
-		constexpr usize STEPS = M * ROW_BYTES / BYTES_PER_STEP;
-		constexpr usize REMAINING = M * ROW_BYTES % BYTES_PER_STEP;
-		constexpr usize REPEAT_AFTER = least_common_multiple(8 * ROW_BYTES, BYTES_PER_STEP);
+		static_assert(ROW_BYTES % 128 == 0);
 
-		constexpr usize PRECALC = std::min(
-			STEPS + (REMAINING > 0 ? 1 : 0),
-			REPEAT_AFTER / BYTES_PER_STEP
-		);
+		constexpr usize CP_PER_ROW = ROW_BYTES / 16;
+		static_assert(THREADS_PER_BLOCK % CP_PER_ROW == 0,
+			"THREADS_PER_BLOCK must be a multiple of copies per row");
+		constexpr usize ROWS_PER_STEP = THREADS_PER_BLOCK / CP_PER_ROW;
+		static_assert(M % ROWS_PER_STEP == 0,
+			"M must be a multiple of ROWS_PER_STEP");
+		constexpr usize STEPS = M / ROWS_PER_STEP;
+
+		// Thread's position within a step is fixed
+		usize col_in_row = (tid % CP_PER_ROW) * 16;  // byte offset within row
+		usize row_in_step = tid / CP_PER_ROW;
+
+		// Source: initial pointer + constant stride per step
+		usize src_stride = src.stride_bytes();
+		u8 const *src_ptr = reinterpret_cast<u8 const *>(src._ptr)
+			+ row_in_step * src_stride + col_in_row;
+		usize src_step = ROWS_PER_STEP * src_stride;
+
+		// Destination SMEM: precompute swizzled offsets (repeats every lcm(8, ROWS_PER_STEP) rows)
+		constexpr usize BYTES_PER_STEP = THREADS_PER_BLOCK * 16;
+		constexpr usize REPEAT_AFTER = least_common_multiple(8 * ROW_BYTES, BYTES_PER_STEP);
+		constexpr usize PRECALC = std::min(STEPS, REPEAT_AFTER / BYTES_PER_STEP);
+
 		usize precalc[PRECALC];
 		for (usize i = 0; i < PRECALC; i++) {
-			usize off = i * BYTES_PER_STEP + tid * 16;
-			usize row = off / ROW_BYTES;
-			usize col = off % ROW_BYTES;
-
+			usize row = i * ROWS_PER_STEP + row_in_step;
 			usize outer_row = row / 8;
-			usize outer_col = col / 128;
+			usize outer_col = col_in_row / 128;
 			usize inner_row = row % 8;
-			usize inner_col = col % 128;
+			usize inner_col = col_in_row % 128;
 
 			precalc[i] =
 				outer_row * 8 * ROW_BYTES
@@ -622,29 +606,11 @@ struct SMatrix {
 				+ sm80::ldmatrix_swizzle(inner_row * 128 + inner_col);
 		}
 
-		u8 const *src_base = reinterpret_cast<u8 const *>(src._ptr);
-		usize src_stride_bytes = src.stride_bytes();
 		X17_UNROLL for (usize step = 0; step < STEPS; step++) {
-			usize off = step * BYTES_PER_STEP + tid * 16;
-			usize row = off / ROW_BYTES;
-			usize col = off % ROW_BYTES;
-			u8 const *src_ptr = src_base + row * src_stride_bytes + col;
 			u32 dst_ptr = _ptr + precalc[step % PRECALC]
 				+ usize(step / PRECALC) * usize(REPEAT_AFTER);
 			sm80::cp_async(src_ptr, dst_ptr);
-		}
-		static_assert(REMAINING % 16 == 0);
-		if constexpr (REMAINING > 0) {
-			if (tid < REMAINING / 16) {
-				usize step = STEPS;
-				usize off = step * BYTES_PER_STEP + tid * 16;
-				usize row = off / ROW_BYTES;
-				usize col = off % ROW_BYTES;
-				u8 const *src_ptr = src_base + row * src_stride_bytes + col;
-				u32 dst_ptr = _ptr + precalc[step % PRECALC]
-					+ usize(step / PRECALC) * usize(REPEAT_AFTER);
-				sm80::cp_async(src_ptr, dst_ptr);
-			}
+			src_ptr += src_step;
 		}
 	}
 
