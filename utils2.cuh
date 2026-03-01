@@ -55,6 +55,12 @@ X17_DEVICE u32 cast_smem_ptr_to_uint(void const *const ptr) {
 	return static_cast<u32>(__cvta_generic_to_shared(ptr));
 }
 
+consteval f64 constexpr_sqrt(f64 x) {
+	f64 r = x;
+	for (int i = 0; i < 32; i++) r = 0.5f * (r + x / r);
+	return r;
+}
+
 //--------------------------------------------------------------------------------------------------
 
 namespace sm75 {
@@ -164,20 +170,49 @@ namespace sm80 {
 
 //--------------------------------------------------------------------------------------------------
 
+struct StrideBytes {
+	usize value;
+
+	X17_HOST_DEVICE constexpr StrideBytes(usize value): value(value) {}
+};
+
 template<typename T, const usize M, const usize N>
 struct GMatrix {
 	T *_ptr;
+	StrideBytes _stride_bytes;
 
-	X17_HOST_DEVICE constexpr GMatrix(T *ptr) : _ptr(ptr) {}
+	X17_HOST_DEVICE constexpr GMatrix(T *ptr):
+		_ptr(ptr),
+		_stride_bytes(N * sizeof(T))
+	{}
+	X17_HOST_DEVICE constexpr GMatrix(T *ptr, usize stride):
+		_ptr(ptr),
+		_stride_bytes(StrideBytes(stride * sizeof(T)))
+	{}
+	X17_HOST_DEVICE constexpr GMatrix(T *ptr, StrideBytes stride_bytes):
+		_ptr(ptr),
+		_stride_bytes(stride_bytes)
+	{}
 
 	X17_HOST_DEVICE constexpr usize m_rows() const { return M; }
 	X17_HOST_DEVICE constexpr usize n_cols() const { return N; }
-	X17_HOST_DEVICE constexpr usize stride() const { return N; }
+	X17_HOST_DEVICE constexpr usize stride_bytes() const { return _stride_bytes.value; }
 	X17_HOST_DEVICE constexpr usize elems() const { return M * N; }
 
 	template<const usize TILE_M>
 	X17_HOST_DEVICE constexpr GMatrix<T, TILE_M, N> tile_m(usize tile_idx) const {
-		return GMatrix<T, TILE_M, N>{_ptr + TILE_M * N * tile_idx};
+		return GMatrix<T, TILE_M, N>{
+			reinterpret_cast<T *>(
+				reinterpret_cast<u8 *>(_ptr)
+				+ size_t(TILE_M) * size_t(tile_idx) * size_t(_stride_bytes.value)
+			),
+			_stride_bytes
+		};
+	}
+
+	template<const usize NEW_N>
+	X17_HOST_DEVICE constexpr GMatrix<T, M, NEW_N> slice_n(usize col_offset) const {
+		return GMatrix<T, M, NEW_N>{_ptr + col_offset, _stride_bytes};
 	}
 };
 
@@ -185,12 +220,27 @@ template<typename T, const usize N>
 struct GMatrixDynSize {
 	T *_ptr;
 	usize _m;
+	StrideBytes _stride_bytes;
 
-	X17_HOST_DEVICE constexpr GMatrixDynSize(T *ptr, usize m) : _ptr(ptr), _m(m) {}
+	X17_HOST_DEVICE constexpr GMatrixDynSize(T *ptr, usize m):
+		_ptr(ptr),
+		_m(m),
+		_stride_bytes(N * sizeof(T))
+	{}
+	X17_HOST_DEVICE constexpr GMatrixDynSize(T *ptr, usize m, usize stride):
+		_ptr(ptr),
+		_m(m),
+		_stride_bytes(StrideBytes(stride * sizeof(T)))
+	{}
+	X17_HOST_DEVICE constexpr GMatrixDynSize(T *ptr, usize m, StrideBytes stride_bytes):
+		_ptr(ptr),
+		_m(m),
+		_stride_bytes(stride_bytes)
+	{}
 
 	X17_HOST_DEVICE constexpr usize m_rows() const { return _m; }
 	X17_HOST_DEVICE constexpr usize n_cols() const { return N; }
-	X17_HOST_DEVICE constexpr usize stride() const { return N; }
+	X17_HOST_DEVICE constexpr usize stride_bytes() const { return _stride_bytes.value; }
 	X17_HOST_DEVICE constexpr usize elems() const { return _m * N; }
 
 	template<const usize TILE_M>
@@ -198,9 +248,15 @@ struct GMatrixDynSize {
 		return GMatrix<T, TILE_M, N>{
 			reinterpret_cast<T *>(
 				reinterpret_cast<u8 *>(_ptr)
-				+ size_t(TILE_M) * size_t(N) * size_t(tile_idx) * sizeof(T)
-			)
+				+ size_t(TILE_M) * size_t(tile_idx) * size_t(_stride_bytes.value)
+			),
+			_stride_bytes
 		};
+	}
+
+	template<const usize NEW_N>
+	X17_HOST_DEVICE constexpr GMatrixDynSize<T, NEW_N> slice_n(usize col_offset) const {
+		return GMatrixDynSize<T, NEW_N>{_ptr + col_offset, _m, _stride_bytes};
 	}
 };
 
@@ -287,6 +343,13 @@ struct Fragment_8x8: FragmentReg<T> {
 		);
 		return result;
 	}
+
+	X17_DEVICE void scale_(T scale) {
+		this->set(
+			this->first() * scale,
+			this->second() * scale
+		);
+	}
 };
 
 template<typename T>
@@ -298,6 +361,20 @@ struct Fragment_16x16 {
 		sub[0][1].zero_();
 		sub[1][0].zero_();
 		sub[1][1].zero_();
+	}
+
+	X17_DEVICE void scale_(T scale) {
+		sub[0][0].scale_(scale);
+		sub[0][1].scale_(scale);
+		sub[1][0].scale_(scale);
+		sub[1][1].scale_(scale);
+	}
+
+	X17_DEVICE void scale_(T top, T bot) {
+		sub[0][0].scale_(top);
+		sub[0][1].scale_(top);
+		sub[1][0].scale_(bot);
+		sub[1][1].scale_(bot);
 	}
 
 	X17_DEVICE void transpose_() {
@@ -315,7 +392,7 @@ struct Fragment_16x16 {
 		GMatrix<U, 16, N> dst_tile = dst.tile_m<16>(m_idx / 16);
 		usize dst_off = n_idx * usize(sizeof(U));
 
-		dst_off += (tid & 0x1c) * (dst.stride() * usize(sizeof(U)) / 4) + (tid & 3) * 4;
+		dst_off += (tid & 0x1c) * (dst.stride_bytes() / 4) + (tid & 3) * 4;
 		*reinterpret_cast<u32 *>(
 			reinterpret_cast<u8 *>(dst_tile._ptr) + dst_off
 		) = sub[0][0].template cast_reg<U>().val;
@@ -325,7 +402,7 @@ struct Fragment_16x16 {
 			reinterpret_cast<u8 *>(dst_tile._ptr) + dst_off
 		) = sub[0][1].template cast_reg<U>().val;
 
-		dst_off += 8 * dst.stride() * sizeof(U) - 16;
+		dst_off += 8 * dst.stride_bytes() - 16;
 		*reinterpret_cast<u32 *>(
 			reinterpret_cast<u8 *>(dst_tile._ptr) + dst_off
 		) = sub[1][0].template cast_reg<U>().val;
@@ -545,17 +622,25 @@ struct SMatrix {
 				+ sm80::ldmatrix_swizzle(inner_row * 128 + inner_col);
 		}
 
-		u8 const *src_ptr = reinterpret_cast<u8 *>(src._ptr) + tid * 16;
+		u8 const *src_base = reinterpret_cast<u8 const *>(src._ptr);
+		usize src_stride_bytes = src.stride_bytes();
 		X17_UNROLL for (usize step = 0; step < STEPS; step++) {
+			usize off = step * BYTES_PER_STEP + tid * 16;
+			usize row = off / ROW_BYTES;
+			usize col = off % ROW_BYTES;
+			u8 const *src_ptr = src_base + row * src_stride_bytes + col;
 			u32 dst_ptr = _ptr + precalc[step % PRECALC]
 				+ usize(step / PRECALC) * usize(REPEAT_AFTER);
 			sm80::cp_async(src_ptr, dst_ptr);
-			src_ptr += BYTES_PER_STEP;
 		}
 		static_assert(REMAINING % 16 == 0);
 		if constexpr (REMAINING > 0) {
 			if (tid < REMAINING / 16) {
 				usize step = STEPS;
+				usize off = step * BYTES_PER_STEP + tid * 16;
+				usize row = off / ROW_BYTES;
+				usize col = off % ROW_BYTES;
+				u8 const *src_ptr = src_base + row * src_stride_bytes + col;
 				u32 dst_ptr = _ptr + precalc[step % PRECALC]
 					+ usize(step / PRECALC) * usize(REPEAT_AFTER);
 				sm80::cp_async(src_ptr, dst_ptr);
