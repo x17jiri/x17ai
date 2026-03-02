@@ -529,16 +529,12 @@ requires(
 )
 struct SMatrix {
 	u32 _ptr;
-	u32 _swizzle;
 
-	X17_DEVICE constexpr SMatrix() : _ptr(0), _swizzle(0) {}
+	X17_DEVICE constexpr SMatrix() : _ptr(0) {}
 
 	X17_DEVICE constexpr SMatrix(void *ptr): SMatrix(cast_smem_ptr_to_uint(ptr)) {}
 
-	X17_DEVICE constexpr SMatrix(u32 ptr):
-		_ptr(ptr),
-		_swizzle(((threadIdx.x & 7) << 4) ^ (threadIdx.x & 16))
-	{}
+	X17_DEVICE constexpr SMatrix(u32 ptr): _ptr(ptr) {}
 
 	X17_DEVICE constexpr usize m_rows() const { return M; }
 	X17_DEVICE constexpr usize n_cols() const { return N; }
@@ -561,12 +557,18 @@ struct SMatrix {
 		static_assert(ROW_BYTES % 128 == 0);
 
 		constexpr usize CP_PER_ROW = ROW_BYTES / 16;
-		static_assert(THREADS_PER_BLOCK % CP_PER_ROW == 0,
-			"THREADS_PER_BLOCK must be a multiple of copies per row");
+		static_assert(THREADS_PER_BLOCK % CP_PER_ROW == 0);
 		constexpr usize ROWS_PER_STEP = THREADS_PER_BLOCK / CP_PER_ROW;
-		static_assert(M % ROWS_PER_STEP == 0,
-			"M must be a multiple of ROWS_PER_STEP");
 		constexpr usize STEPS = M / ROWS_PER_STEP;
+
+		if constexpr (STEPS == 0) {
+			if constexpr (M % ROWS_PER_STEP == 0) {
+				return;
+			}
+			if (tid >= (M % ROWS_PER_STEP) * CP_PER_ROW) {
+				return;
+			}
+		}
 
 		// Thread's position within a step is fixed
 		usize col_in_row = (tid % CP_PER_ROW) * 16;  // byte offset within row
@@ -575,25 +577,31 @@ struct SMatrix {
 		constexpr usize REPEAT_AFTER = least_common_multiple(8, ROWS_PER_STEP) / ROWS_PER_STEP;
 		usize off[REPEAT_AFTER];
 		X17_UNROLL for (usize i = 0; i < REPEAT_AFTER; i++) {
-			off[i] = col_in_row ^ (((i * ROWS_PER_STEP + row_in_step) & 7) << 4);
+			usize row = i * ROWS_PER_STEP + row_in_step;
+			off[i] = col_in_row ^ ((row & 7) << 4);
 		}
 
-		// Source: initial pointer + constant stride per step
 		u8 const *src_ptr =
 			reinterpret_cast<u8 const *>(src._ptr)
 			+ row_in_step * src.stride_bytes()
 			+ col_in_row;
 		usize src_step = ROWS_PER_STEP * src.stride_bytes();
 
-		// Destination SMEM: row-major with per-row XOR swizzle
-		u32 dst_row_off = _ptr + row_in_step * ROW_BYTES;
-		constexpr u32 DST_ROW_STEP = ROWS_PER_STEP * ROW_BYTES;
+		usize dst_ptr = _ptr + row_in_step * ROW_BYTES;
+		usize dst_step = ROWS_PER_STEP * ROW_BYTES;
 
-		X17_UNROLL for (usize step = 0; step < STEPS; step++) {
-			u32 dst_ptr = dst_row_off + off[step % REPEAT_AFTER];
-			sm80::cp_async(src_ptr, dst_ptr);
-			src_ptr += src_step;
-			dst_row_off += DST_ROW_STEP;
+		if constexpr (STEPS > 0) {
+			X17_UNROLL for (usize step = 0; step < STEPS; step++) {
+				sm80::cp_async(src_ptr, dst_ptr + off[step % REPEAT_AFTER]);
+				src_ptr += src_step;
+				dst_ptr += dst_step;
+			}
+		}
+		if constexpr (M % ROWS_PER_STEP != 0) {
+			usize step = STEPS;
+			if (tid < (M % ROWS_PER_STEP) * CP_PER_ROW) {
+				sm80::cp_async(src_ptr, dst_ptr + off[step % REPEAT_AFTER]);
+			}
 		}
 	}
 
@@ -604,8 +612,9 @@ struct SMatrix {
 	) const requires(sizeof(T) == 2) {
 		usize tid = threadIdx.x;
 		usize row = m_idx + (tid & 15);
+		usize swizzle = ((threadIdx.x & 7) << 4) ^ (threadIdx.x & 16);
 		usize byte_col = n_idx * sizeof(T);
-		u32 addr = _ptr + (row * ROW_BYTES) + (byte_col ^ _swizzle);
+		u32 addr = _ptr + (row * ROW_BYTES) + (byte_col ^ swizzle);
 
 		sm80::ldmatrix_8x8xu16_x4(
 			addr,
@@ -619,8 +628,9 @@ struct SMatrix {
 	) const requires(sizeof(T) == 2) {
 		usize tid = threadIdx.x;
 		usize row = m_idx + (tid & 15);
+		usize swizzle = ((threadIdx.x & 7) << 4) ^ (threadIdx.x & 16);
 		usize byte_col = n_idx * sizeof(T);
-		u32 addr = _ptr + (row * ROW_BYTES) + (byte_col ^ _swizzle);
+		u32 addr = _ptr + (row * ROW_BYTES) + (byte_col ^ swizzle);
 
 		sm80::ldmatrix_8x8xu16_x4(
 			addr,

@@ -6,8 +6,8 @@
 
 constexpr usize Q_PER_WARP = 16;
 constexpr usize KV_PER_WARP = 16;
-constexpr usize GMEM_PRELOAD = 2;
 constexpr usize WARPS_PER_BLOCK = 8;
+constexpr usize GMEM_PRELOAD = WARPS_PER_BLOCK == 4 ? 4 : 2;
 constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
 constexpr usize Q_PER_BLOCK = Q_PER_WARP;
 constexpr usize KV_PER_STEP = KV_PER_WARP * WARPS_PER_BLOCK;
@@ -196,12 +196,18 @@ X17_DEVICE void combine_and_store(
 	usize warp_idx,
 	GMatrix<bf16, Q_PER_BLOCK, OUT_DIM> gOut_block
 ) {
-	// Cross-warp reduction: tree reduce 8 warps -> warp 0 in 3 rounds.
-	static_assert(WARPS_PER_BLOCK == 8, "This reduction code assumes 8 warps per block");
-	SMatrix<f32, 6 * Q_PER_WARP, K * 16> sReduce{smem};
+	// Cross-warp reduction: tree reduce WARPS_PER_BLOCK warps -> warp 0.
+	// Each round halves the active warp count. Between a read and the next
+	// round's write there is no __syncthreads(), so each round must use
+	// fresh slots to avoid cross-warp races.
+	//   8 warps: 3 rounds, 4+2 = 6 slots  (round 3 reuses slot 0)
+	//   4 warps: 2 rounds, 2+1 = 3 slots
+	static_assert(WARPS_PER_BLOCK == 4 || WARPS_PER_BLOCK == 8);
+	constexpr usize NUM_SLOTS = (WARPS_PER_BLOCK == 8) ? 6 : 3;
+	SMatrix<f32, NUM_SLOTS * Q_PER_WARP, K * 16> sReduce{smem};
 	u32 stats_smem = sReduce._ptr + sReduce.bytes();
 
-	// Round 1: warps 1,3,5,7 write to slots 0-3, warps 0,2,4,6 read
+	// Round 1: odd warps write, even warps read
 	__syncthreads();
 	if (warp_idx % 2 == 1) {
 		combine_write<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, warp_idx / 2);
@@ -211,23 +217,36 @@ X17_DEVICE void combine_and_store(
 		combine_read<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, warp_idx / 2);
 	}
 
-	// Round 2: warps 2,6 write to slots 4,5, warps 0,4 read
-	if (warp_idx % 4 == 2) {
-		combine_write<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 4 + warp_idx / 4);
-	}
-	__syncthreads();
-	if (warp_idx % 4 == 0) {
-		combine_read<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 4 + warp_idx / 4);
+	if constexpr (WARPS_PER_BLOCK == 8) {
+		// Round 2: warps 2,6 write to slots 4,5; warps 0,4 read
+		if (warp_idx % 4 == 2) {
+			combine_write<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 4 + warp_idx / 4);
+		}
+		__syncthreads();
+		if (warp_idx % 4 == 0) {
+			combine_read<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 4 + warp_idx / 4);
+		}
+
+		// Round 3: warp 4 writes to slot 0, warp 0 reads
+		if (warp_idx == 4) {
+			combine_write<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 0);
+		}
+		__syncthreads();
+		if (warp_idx == 0) {
+			combine_read<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 0);
+		}
+	} else {
+		// Round 2: warp 2 writes to slot 2, warp 0 reads
+		if (warp_idx == 2) {
+			combine_write<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 2);
+		}
+		__syncthreads();
+		if (warp_idx == 0) {
+			combine_read<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 2);
+		}
 	}
 
-	// Round 3: warp 4 writes to slot 0, warp 0 reads
-	if (warp_idx == 4) {
-		combine_write<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 0);
-	}
-	__syncthreads();
 	if (warp_idx == 0) {
-		combine_read<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 0);
-
 		// Normalize: divide each row by its running_sum
 		f32 partner_sum = __shfl_xor_sync(0xffffffff, r_stats.sum, 1);
 		bool is_even = (threadIdx.x % 2) == 0;
@@ -277,10 +296,8 @@ attn_kernel(
 	GMatrix<bf16, Q_PER_BLOCK, ROPE_DIM> gQr_block = gQr_full.template tile_m<Q_PER_BLOCK>(blockIdx.x);
 	SMatrix<bf16, Q_PER_BLOCK, ROPE_DIM> sQr;
 	sQr = preload_r.template tile_m<KV_PER_STEP>(GMEM_PRELOAD - 1).template tile_m<Q_PER_BLOCK>(0);
-	if (threadIdx.x < 128) {
-		cp_async_gmem_to_smem<128>(threadIdx.x, gQc_block, sQc);
-		cp_async_gmem_to_smem<128>(threadIdx.x, gQr_block, sQr);
-	}
+	cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gQc_block, sQc);
+	cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gQr_block, sQr);
 	cp_async_commit();
 
 	// Start preloading KVs from GMEM to SMEM
@@ -358,7 +375,7 @@ attn_kernel(
 	X17_NO_UNROLL for (size_t kv_step = 0; kv_pos <= q_start && kv_step < kv_steps; ++kv_step, kv_pos += KV_PER_STEP) {
 		// rScores = Q * K.T
 		Fragment_16x16<f32> rScores_f32;
-		rScores_f32.zero_();
+		zero_(rScores_f32);
 		X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
 			mma_a_bt(rQ[i], rKV[i], rScores_f32); rKV[i].transpose_();
 		}
