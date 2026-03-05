@@ -6,18 +6,20 @@
 #include <vector>
 #include "cutlass/util/GPU_Clock.hpp"
 
-constexpr usize WARPS_PER_BLOCK = 4;
+constexpr usize WARP_M = 32;
+constexpr usize WARP_N = 32;
+constexpr usize WARPS_M = 1;
+constexpr usize WARPS_N = 4;
+constexpr usize M_BLOCK = WARPS_M * WARP_M;
+constexpr usize N_BLOCK = WARPS_N * WARP_N;
+constexpr usize WARPS_PER_BLOCK = WARPS_M * WARPS_N;
 constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
 constexpr usize K_STEP = 64;
 constexpr usize GMEM_PRELOAD = 2;
-
-// Warp tiling: 2x2 warps, each warp owns WARP_M x WARP_N of the output
-constexpr usize WARP_M = 32;
-constexpr usize WARP_N = 64;
-constexpr usize M_BLOCK = 2 * WARP_M;  // 128
-constexpr usize N_BLOCK = 2 * WARP_N;  // 128
 constexpr usize MT = WARP_M / 16;      // m tiles per warp
 constexpr usize NT = WARP_N / 16;      // n tiles per warp
+
+static_assert(WARPS_PER_BLOCK == 4);
 
 // GEMM: C[M,N] = A[M,K] * B^T[N,K]
 // A is [M, K] row-major
@@ -35,40 +37,37 @@ __global__ void gemm_kernel(
 
 	usize tid = threadIdx.x;
 	usize warp_idx = tid / WARP_SIZE;
+	usize lane = tid % WARP_SIZE;
 
-	// 2x2 warp tiling: each warp owns WARP_M x WARP_N
-	usize warp_m = (warp_idx / 2) * WARP_M;
-	usize warp_n = (warp_idx % 2) * WARP_N;
+	// Warp tiling: WARPS_M x WARPS_N layout
+	usize warp_m = (warp_idx / WARPS_N) * WARP_M;
+	usize warp_n = (warp_idx % WARPS_N) * WARP_N;
 
-	// This block's input tiles (full K dimension)
-	GMatrix<bf16, M_BLOCK, K> gA_block{A + blockIdx.x * M_BLOCK * K};
-	GMatrix<bf16, N_BLOCK, K> gB_block{B + blockIdx.y * N_BLOCK * K};
+	// A: load directly from GMEM (no SMEM)
+	GMatrix<bf16, M_BLOCK, K> gA{A + blockIdx.x * M_BLOCK * K};
+
+	// B: each warp gets its own SMEM buffer
+	GMatrix<bf16, WARP_N, K> gB_warp{B + (blockIdx.y * N_BLOCK + warp_n) * K};
 
 	extern __shared__ bf16 smem[];
-	SMatrix<bf16, M_BLOCK * GMEM_PRELOAD, K_STEP> sA_preload{smem};
-	SMatrix<bf16, N_BLOCK * GMEM_PRELOAD, K_STEP> sB_preload{sA_preload._ptr + sA_preload.bytes()};
+	constexpr usize WARP_SMEM_ELEMS = WARP_N * GMEM_PRELOAD * K_STEP;
+	SMatrix<bf16, WARP_N * GMEM_PRELOAD, K_STEP> sB_preload{
+		smem + warp_idx * WARP_SMEM_ELEMS
+	};
 
-	// Load A[M_BLOCK, K_STEP] and B[N_BLOCK, K_STEP] to SMEM
+	// Preload B to per-warp SMEM
 	X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD; ++p) {
 		if (p < K_ITERS) {
-			cp_async_gmem_to_smem<THREADS_PER_BLOCK>(
-				tid,
-				gA_block.template slice_n<K_STEP>(p * K_STEP),
-				sA_preload.template tile_m<M_BLOCK>(p)
-			);
-			cp_async_gmem_to_smem<THREADS_PER_BLOCK>(
-				tid,
-				gB_block.template slice_n<K_STEP>(p * K_STEP),
-				sB_preload.template tile_m<N_BLOCK>(p)
+			sB_preload.template tile_m<WARP_N>(p).template cp_async_from<WARP_SIZE>(
+				lane,
+				gB_warp.template slice_n<K_STEP>(p * K_STEP)
 			);
 			cp_async_commit();
 		}
 	}
 	cp_async_wait<GMEM_PRELOAD - 1>();
-	__syncthreads();
 
-	SMatrix<bf16, M_BLOCK, K_STEP> sA = sA_preload.template tile_m<M_BLOCK>(0);
-	SMatrix<bf16, N_BLOCK, K_STEP> sB = sB_preload.template tile_m<N_BLOCK>(0);
+	SMatrix<bf16, WARP_N, K_STEP> sB = sB_preload.template tile_m<WARP_N>(0);
 
 	// MT x NT accumulators per warp
 	Fragment_16x16<f32> acc[MT][NT];
@@ -76,80 +75,126 @@ __global__ void gemm_kernel(
 		X17_UNROLL for (usize ni = 0; ni < NT; ni++)
 			acc[mi][ni].zero_();
 
-	Fragment_16x16<bf16> a[4][MT], b[4][NT]; // [k_tile][m_or_n_tile]
+	Fragment_16x16<bf16> a0[4][MT], a1[4][MT], b[4][NT];
 
-	// Preload first two k-tiles from SMEM to registers
-	X17_UNROLL for (usize mi = 0; mi < MT; mi++)
-		sA.load_tile_to_fragment(warp_m + mi*16, 0*16, a[0][mi]);
+	// Preload all 4 k-tiles of a0 from GMEM for k=0 (using coalesced load2)
+	X17_UNROLL for (usize mi = 0; mi < MT; mi++) {
+		Fragment_16x16<bf16>::load2(a0[0][mi], a0[1][mi], gA, warp_m + mi*16, 0);
+		Fragment_16x16<bf16>::load2(a0[2][mi], a0[3][mi], gA, warp_m + mi*16, 32);
+	}
+
+	// Preload first two b k-tiles from SMEM
 	X17_UNROLL for (usize ni = 0; ni < NT; ni++)
-		sB.load_tile_to_fragment(warp_n + ni*16, 0*16, b[0][ni]);
-
-	X17_UNROLL for (usize mi = 0; mi < MT; mi++)
-		sA.load_tile_to_fragment(warp_m + mi*16, 1*16, a[1][mi]);
+		sB.load_tile_to_fragment(ni*16, 0*16, b[0][ni]);
 	X17_UNROLL for (usize ni = 0; ni < NT; ni++)
-		sB.load_tile_to_fragment(warp_n + ni*16, 1*16, b[1][ni]);
+		sB.load_tile_to_fragment(ni*16, 1*16, b[1][ni]);
 
-	for (usize k = 0; k < K_ITERS; k++) {
-		// Load k-tiles 2,3 from SMEM
-		X17_UNROLL for (usize mi = 0; mi < MT; mi++)
-			sA.load_tile_to_fragment(warp_m + mi*16, 2*16, a[2][mi]);
-		X17_UNROLL for (usize ni = 0; ni < NT; ni++)
-			sB.load_tile_to_fragment(warp_n + ni*16, 2*16, b[2][ni]);
+	for (usize k = 0; k < K_ITERS; k += 2) {
+		// --- Even iteration: use a0, preload a1 ---
+		{
+			auto (&a)[4][MT] = a0;
+			auto (&a_next)[4][MT] = a1;
 
-		X17_UNROLL for (usize mi = 0; mi < MT; mi++)
-			sA.load_tile_to_fragment(warp_m + mi*16, 3*16, a[3][mi]);
-		X17_UNROLL for (usize ni = 0; ni < NT; ni++)
-			sB.load_tile_to_fragment(warp_n + ni*16, 3*16, b[3][ni]);
+			if (k + 1 < K_ITERS) {
+				usize next_k_off = (k + 1) * K_STEP;
+				X17_UNROLL for (usize mi = 0; mi < MT; mi++) {
+					Fragment_16x16<bf16>::load2(a_next[0][mi], a_next[1][mi], gA, warp_m + mi*16, next_k_off);
+					Fragment_16x16<bf16>::load2(a_next[2][mi], a_next[3][mi], gA, warp_m + mi*16, next_k_off + 32);
+				}
+			}
 
-		// MMA for k-tiles 0,1
-		X17_UNROLL for (usize mi = 0; mi < MT; mi++)
 			X17_UNROLL for (usize ni = 0; ni < NT; ni++)
-				mma_a_bt(a[0][mi], b[0][ni], acc[mi][ni]);
-		X17_UNROLL for (usize mi = 0; mi < MT; mi++)
+				sB.load_tile_to_fragment(ni*16, 2*16, b[2][ni]);
 			X17_UNROLL for (usize ni = 0; ni < NT; ni++)
-				mma_a_bt(a[1][mi], b[1][ni], acc[mi][ni]);
+				sB.load_tile_to_fragment(ni*16, 3*16, b[3][ni]);
 
-		// Ensure all warps finished reading from SMEM before overwriting
-		__syncthreads();
+			X17_UNROLL for (usize mi = 0; mi < MT; mi++)
+				Fragment_16x16<bf16>::shuffle_load2(a[0][mi], a[1][mi]);
+			X17_UNROLL for (usize mi = 0; mi < MT; mi++)
+				X17_UNROLL for (usize ni = 0; ni < NT; ni++)
+					mma_a_bt(a[0][mi], b[0][ni], acc[mi][ni]);
+			X17_UNROLL for (usize mi = 0; mi < MT; mi++)
+				X17_UNROLL for (usize ni = 0; ni < NT; ni++)
+					mma_a_bt(a[1][mi], b[1][ni], acc[mi][ni]);
 
-		usize p = k + GMEM_PRELOAD;
-		if (p < K_ITERS) {
-			cp_async_gmem_to_smem<THREADS_PER_BLOCK>(
-				tid,
-				gA_block.template slice_n<K_STEP>(p * K_STEP),
-				sA_preload.template tile_m<M_BLOCK>(p % GMEM_PRELOAD)
-			);
-			cp_async_gmem_to_smem<THREADS_PER_BLOCK>(
-				tid,
-				gB_block.template slice_n<K_STEP>(p * K_STEP),
-				sB_preload.template tile_m<N_BLOCK>(p % GMEM_PRELOAD)
-			);
+			cp_async_wait<GMEM_PRELOAD - 1>();
+			sB = sB_preload.template tile_m<WARP_N>((k + 1) % GMEM_PRELOAD);
+
+			usize p = k + GMEM_PRELOAD;
+			if (p < K_ITERS) {
+				sB_preload.template tile_m<WARP_N>(p % GMEM_PRELOAD).template cp_async_from<WARP_SIZE>(
+					lane, gB_warp.template slice_n<K_STEP>(p * K_STEP)
+				);
+			}
+			cp_async_commit();
+
+			X17_UNROLL for (usize ni = 0; ni < NT; ni++)
+				sB.load_tile_to_fragment(ni*16, 0*16, b[0][ni]);
+			X17_UNROLL for (usize ni = 0; ni < NT; ni++)
+				sB.load_tile_to_fragment(ni*16, 1*16, b[1][ni]);
+
+			X17_UNROLL for (usize mi = 0; mi < MT; mi++)
+				Fragment_16x16<bf16>::shuffle_load2(a[2][mi], a[3][mi]);
+			X17_UNROLL for (usize mi = 0; mi < MT; mi++)
+				X17_UNROLL for (usize ni = 0; ni < NT; ni++)
+					mma_a_bt(a[2][mi], b[2][ni], acc[mi][ni]);
+			X17_UNROLL for (usize mi = 0; mi < MT; mi++)
+				X17_UNROLL for (usize ni = 0; ni < NT; ni++)
+					mma_a_bt(a[3][mi], b[3][ni], acc[mi][ni]);
 		}
-		cp_async_commit();
 
-		cp_async_wait<GMEM_PRELOAD - 1>();
-		__syncthreads();
-		sA = sA_preload.template tile_m<M_BLOCK>((k + 1) % GMEM_PRELOAD);
-		sB = sB_preload.template tile_m<N_BLOCK>((k + 1) % GMEM_PRELOAD);
+		// --- Odd iteration: use a1, preload a0 ---
+		{
+			auto (&a)[4][MT] = a1;
+			auto (&a_next)[4][MT] = a0;
 
-		// Preload k-tiles 0,1 from next buffer
-		X17_UNROLL for (usize mi = 0; mi < MT; mi++)
-			sA.load_tile_to_fragment(warp_m + mi*16, 0*16, a[0][mi]);
-		X17_UNROLL for (usize ni = 0; ni < NT; ni++)
-			sB.load_tile_to_fragment(warp_n + ni*16, 0*16, b[0][ni]);
+			if (k + 2 < K_ITERS) {
+				usize next_k_off = (k + 2) * K_STEP;
+				X17_UNROLL for (usize mi = 0; mi < MT; mi++) {
+					Fragment_16x16<bf16>::load2(a_next[0][mi], a_next[1][mi], gA, warp_m + mi*16, next_k_off);
+					Fragment_16x16<bf16>::load2(a_next[2][mi], a_next[3][mi], gA, warp_m + mi*16, next_k_off + 32);
+				}
+			}
 
-		X17_UNROLL for (usize mi = 0; mi < MT; mi++)
-			sA.load_tile_to_fragment(warp_m + mi*16, 1*16, a[1][mi]);
-		X17_UNROLL for (usize ni = 0; ni < NT; ni++)
-			sB.load_tile_to_fragment(warp_n + ni*16, 1*16, b[1][ni]);
-
-		// MMA for k-tiles 2,3
-		X17_UNROLL for (usize mi = 0; mi < MT; mi++)
 			X17_UNROLL for (usize ni = 0; ni < NT; ni++)
-				mma_a_bt(a[2][mi], b[2][ni], acc[mi][ni]);
-		X17_UNROLL for (usize mi = 0; mi < MT; mi++)
+				sB.load_tile_to_fragment(ni*16, 2*16, b[2][ni]);
 			X17_UNROLL for (usize ni = 0; ni < NT; ni++)
-				mma_a_bt(a[3][mi], b[3][ni], acc[mi][ni]);
+				sB.load_tile_to_fragment(ni*16, 3*16, b[3][ni]);
+
+			X17_UNROLL for (usize mi = 0; mi < MT; mi++)
+				Fragment_16x16<bf16>::shuffle_load2(a[0][mi], a[1][mi]);
+			X17_UNROLL for (usize mi = 0; mi < MT; mi++)
+				X17_UNROLL for (usize ni = 0; ni < NT; ni++)
+					mma_a_bt(a[0][mi], b[0][ni], acc[mi][ni]);
+			X17_UNROLL for (usize mi = 0; mi < MT; mi++)
+				X17_UNROLL for (usize ni = 0; ni < NT; ni++)
+					mma_a_bt(a[1][mi], b[1][ni], acc[mi][ni]);
+
+			cp_async_wait<GMEM_PRELOAD - 1>();
+			sB = sB_preload.template tile_m<WARP_N>((k + 2) % GMEM_PRELOAD);
+
+			usize p = k + 1 + GMEM_PRELOAD;
+			if (p < K_ITERS) {
+				sB_preload.template tile_m<WARP_N>(p % GMEM_PRELOAD).template cp_async_from<WARP_SIZE>(
+					lane, gB_warp.template slice_n<K_STEP>(p * K_STEP)
+				);
+			}
+			cp_async_commit();
+
+			X17_UNROLL for (usize ni = 0; ni < NT; ni++)
+				sB.load_tile_to_fragment(ni*16, 0*16, b[0][ni]);
+			X17_UNROLL for (usize ni = 0; ni < NT; ni++)
+				sB.load_tile_to_fragment(ni*16, 1*16, b[1][ni]);
+
+			X17_UNROLL for (usize mi = 0; mi < MT; mi++)
+				Fragment_16x16<bf16>::shuffle_load2(a[2][mi], a[3][mi]);
+			X17_UNROLL for (usize mi = 0; mi < MT; mi++)
+				X17_UNROLL for (usize ni = 0; ni < NT; ni++)
+					mma_a_bt(a[2][mi], b[2][ni], acc[mi][ni]);
+			X17_UNROLL for (usize mi = 0; mi < MT; mi++)
+				X17_UNROLL for (usize ni = 0; ni < NT; ni++)
+					mma_a_bt(a[3][mi], b[3][ni], acc[mi][ni]);
+		}
 	}
 
 	// Store: each warp writes its MT x NT tile of 16x16 fragments to GMEM
@@ -197,7 +242,7 @@ int main(int argc, char *argv[]) {
 
 	// Launch
 	dim3 grid(M / M_BLOCK, N / N_BLOCK);
-	usize smem_bytes = (M_BLOCK + N_BLOCK) * GMEM_PRELOAD * K_STEP * sizeof(bf16);
+	usize smem_bytes = WARPS_PER_BLOCK * WARP_N * GMEM_PRELOAD * K_STEP * sizeof(bf16);
 
 	cudaFuncSetAttribute(gemm_kernel<K>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
 	cudaFuncSetAttribute(gemm_kernel<K>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);

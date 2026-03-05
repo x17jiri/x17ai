@@ -408,6 +408,90 @@ struct Fragment_16x16 {
 			reinterpret_cast<u8 *>(dst_tile._ptr) + dst_off
 		) = sub[1][1].template cast_reg<U>().val;
 	}
+
+	/// Loads a 16x16 tile from GMEM directly into MMA-compatible register layout.
+	/// m_idx and n_idx must be multiples of 16.
+	template<const usize M, const usize N>
+	X17_DEVICE void load(GMatrix<T, M, N> const &src, usize m_idx, usize n_idx) requires(sizeof(T) == 2) {
+		usize tid = threadIdx.x;
+		GMatrix<T, 16, N> src_tile = src.template tile_m<16>(m_idx / 16);
+		usize src_off = n_idx * usize(sizeof(T));
+
+		src_off += (tid & 0x1c) * (src.stride_bytes() / 4) + (tid & 3) * 4;
+		sub[0][0].val = __ldg(reinterpret_cast<u32 const *>(
+			reinterpret_cast<u8 const *>(src_tile._ptr) + src_off
+		));
+
+		src_off += 16;
+		sub[0][1].val = __ldg(reinterpret_cast<u32 const *>(
+			reinterpret_cast<u8 const *>(src_tile._ptr) + src_off
+		));
+
+		src_off += 8 * src.stride_bytes() - 16;
+		sub[1][0].val = __ldg(reinterpret_cast<u32 const *>(
+			reinterpret_cast<u8 const *>(src_tile._ptr) + src_off
+		));
+
+		src_off += 16;
+		sub[1][1].val = __ldg(reinterpret_cast<u32 const *>(
+			reinterpret_cast<u8 const *>(src_tile._ptr) + src_off
+		));
+	}
+
+	/// Loads two consecutive 16x16 tiles from GMEM with improved coalescing.
+	/// f0 gets tile at (m_idx, n_idx), f1 gets tile at (m_idx, n_idx + 16).
+	/// Thread mapping: tile = (tid>>2)&1, row_group = tid>>3, col = tid&3.
+	/// Data is in scrambled layout; call shuffle_load2() before use.
+	template<const usize M, const usize N>
+	X17_DEVICE static void load2(
+		Fragment_16x16<T> &f0, Fragment_16x16<T> &f1,
+		GMatrix<T, M, N> const &src, usize m_idx, usize n_idx
+	) requires(sizeof(T) == 2) {
+		usize tid = threadIdx.x % WARP_SIZE;
+		usize tile = (tid >> 2) & 1;
+		usize rg = tid >> 3;
+		usize col = tid & 3;
+
+		GMatrix<T, 16, N> src_tile = src.template tile_m<16>(m_idx / 16);
+		u8 const *ptr = reinterpret_cast<u8 const *>(src_tile._ptr);
+		usize stride = src.stride_bytes();
+		usize base = (n_idx + tile * 16) * usize(sizeof(T)) + col * 4;
+		usize even_off = base + rg * 2 * stride;
+		usize odd_off = even_off + stride;
+		usize bot = 8 * stride;
+
+		// Even rows, top half
+		f0.sub[0][0].val = __ldg(reinterpret_cast<u32 const *>(ptr + even_off));
+		f0.sub[0][1].val = __ldg(reinterpret_cast<u32 const *>(ptr + even_off + 16));
+		// Odd rows, top half
+		f1.sub[0][0].val = __ldg(reinterpret_cast<u32 const *>(ptr + odd_off));
+		f1.sub[0][1].val = __ldg(reinterpret_cast<u32 const *>(ptr + odd_off + 16));
+		// Even rows, bottom half
+		f0.sub[1][0].val = __ldg(reinterpret_cast<u32 const *>(ptr + even_off + bot));
+		f0.sub[1][1].val = __ldg(reinterpret_cast<u32 const *>(ptr + even_off + bot + 16));
+		// Odd rows, bottom half
+		f1.sub[1][0].val = __ldg(reinterpret_cast<u32 const *>(ptr + odd_off + bot));
+		f1.sub[1][1].val = __ldg(reinterpret_cast<u32 const *>(ptr + odd_off + bot + 16));
+	}
+
+	/// Shuffles two fragments loaded by load2() into correct MMA layout.
+	/// After this, f0 = tile 0 data, f1 = tile 1 data.
+	X17_DEVICE static void shuffle_load2(
+		Fragment_16x16<T> &f0, Fragment_16x16<T> &f1
+	) requires(sizeof(T) == 2) {
+		usize tid = threadIdx.x % WARP_SIZE;
+		bool is_tile1 = (tid >> 2) & 1;
+		// bit2=0 threads: f0 has tile0 even rows, f1 has tile0 odd rows → keep f0, replace f1
+		// bit2=1 threads: f0 has tile1 even rows, f1 has tile1 odd rows → replace f0, keep f1
+		X17_UNROLL for (usize h = 0; h < 2; h++) {
+			X17_UNROLL for (usize c = 0; c < 2; c++) {
+				u32 send = is_tile1 ? f0.sub[h][c].val : f1.sub[h][c].val;
+				u32 recv = __shfl_xor_sync(0xffffffff, send, 4);
+				if (is_tile1) f0.sub[h][c].val = recv;
+				else          f1.sub[h][c].val = recv;
+			}
+		}
+	}
 };
 
 template<typename F, typename T>
@@ -525,7 +609,7 @@ template<
 >
 requires(
 	M > 0 && M % 16 == 0
-	&& N > 0 && N * sizeof(T) % 128 == 0
+	&& N * sizeof(T) % 128 == 0
 )
 struct SMatrix {
 	u32 _ptr;
@@ -553,54 +637,56 @@ struct SMatrix {
 
 	template<const usize THREADS_PER_BLOCK>
 	X17_DEVICE void cp_async_from(usize tid, GMatrix<T, M, N> src) const {
-		__builtin_assume(tid < THREADS_PER_BLOCK);
-		static_assert(ROW_BYTES % 128 == 0);
+		if constexpr (N > 0) {
+			__builtin_assume(tid < THREADS_PER_BLOCK);
+			static_assert(ROW_BYTES % 128 == 0);
 
-		constexpr usize CP_PER_ROW = ROW_BYTES / 16;
-		static_assert(THREADS_PER_BLOCK % CP_PER_ROW == 0);
-		constexpr usize ROWS_PER_STEP = THREADS_PER_BLOCK / CP_PER_ROW;
-		constexpr usize STEPS = M / ROWS_PER_STEP;
+			constexpr usize CP_PER_ROW = ROW_BYTES / 16;
+			static_assert(THREADS_PER_BLOCK % CP_PER_ROW == 0);
+			constexpr usize ROWS_PER_STEP = THREADS_PER_BLOCK / CP_PER_ROW;
+			constexpr usize STEPS = M / ROWS_PER_STEP;
 
-		if constexpr (STEPS == 0) {
-			if constexpr (M % ROWS_PER_STEP == 0) {
-				return;
+			if constexpr (STEPS == 0) {
+				if constexpr (M % ROWS_PER_STEP == 0) {
+					return;
+				}
+				if (tid >= (M % ROWS_PER_STEP) * CP_PER_ROW) {
+					return;
+				}
 			}
-			if (tid >= (M % ROWS_PER_STEP) * CP_PER_ROW) {
-				return;
+
+			// Thread's position within a step is fixed
+			usize col_in_row = (tid % CP_PER_ROW) * 16;  // byte offset within row
+			usize row_in_step = tid / CP_PER_ROW;
+
+			constexpr usize REPEAT_AFTER = least_common_multiple(8, ROWS_PER_STEP) / ROWS_PER_STEP;
+			usize off[REPEAT_AFTER];
+			X17_UNROLL for (usize i = 0; i < REPEAT_AFTER; i++) {
+				usize row = i * ROWS_PER_STEP + row_in_step;
+				off[i] = col_in_row ^ ((row & 7) << 4);
 			}
-		}
 
-		// Thread's position within a step is fixed
-		usize col_in_row = (tid % CP_PER_ROW) * 16;  // byte offset within row
-		usize row_in_step = tid / CP_PER_ROW;
+			u8 const *src_ptr =
+				reinterpret_cast<u8 const *>(src._ptr)
+				+ row_in_step * src.stride_bytes()
+				+ col_in_row;
+			usize src_step = ROWS_PER_STEP * src.stride_bytes();
 
-		constexpr usize REPEAT_AFTER = least_common_multiple(8, ROWS_PER_STEP) / ROWS_PER_STEP;
-		usize off[REPEAT_AFTER];
-		X17_UNROLL for (usize i = 0; i < REPEAT_AFTER; i++) {
-			usize row = i * ROWS_PER_STEP + row_in_step;
-			off[i] = col_in_row ^ ((row & 7) << 4);
-		}
+			usize dst_ptr = _ptr + row_in_step * ROW_BYTES;
+			usize dst_step = ROWS_PER_STEP * ROW_BYTES;
 
-		u8 const *src_ptr =
-			reinterpret_cast<u8 const *>(src._ptr)
-			+ row_in_step * src.stride_bytes()
-			+ col_in_row;
-		usize src_step = ROWS_PER_STEP * src.stride_bytes();
-
-		usize dst_ptr = _ptr + row_in_step * ROW_BYTES;
-		usize dst_step = ROWS_PER_STEP * ROW_BYTES;
-
-		if constexpr (STEPS > 0) {
-			X17_UNROLL for (usize step = 0; step < STEPS; step++) {
-				sm80::cp_async(src_ptr, dst_ptr + off[step % REPEAT_AFTER]);
-				src_ptr += src_step;
-				dst_ptr += dst_step;
+			if constexpr (STEPS > 0) {
+				X17_UNROLL for (usize step = 0; step < STEPS; step++) {
+					sm80::cp_async(src_ptr, dst_ptr + off[step % REPEAT_AFTER]);
+					src_ptr += src_step;
+					dst_ptr += dst_step;
+				}
 			}
-		}
-		if constexpr (M % ROWS_PER_STEP != 0) {
-			usize step = STEPS;
-			if (tid < (M % ROWS_PER_STEP) * CP_PER_ROW) {
-				sm80::cp_async(src_ptr, dst_ptr + off[step % REPEAT_AFTER]);
+			if constexpr (M % ROWS_PER_STEP != 0) {
+				usize step = STEPS;
+				if (tid < (M % ROWS_PER_STEP) * CP_PER_ROW) {
+					sm80::cp_async(src_ptr, dst_ptr + off[step % REPEAT_AFTER]);
+				}
 			}
 		}
 	}
@@ -610,41 +696,38 @@ struct SMatrix {
 		usize m_idx, usize n_idx,
 		Fragment_16x16<T> &dst
 	) const requires(sizeof(T) == 2) {
-		usize tid = threadIdx.x;
-		usize row = m_idx + (tid & 15);
-		usize swizzle = ((threadIdx.x & 7) << 4) ^ (threadIdx.x & 16);
-		usize byte_col = n_idx * sizeof(T);
-		u32 addr = _ptr + (row * ROW_BYTES) + (byte_col ^ swizzle);
+		if constexpr (N > 0) {
+			usize tid = threadIdx.x;
+			usize row = m_idx + (tid & 15);
+			usize swizzle = ((threadIdx.x & 7) << 4) ^ (threadIdx.x & 16);
+			usize byte_col = n_idx * sizeof(T);
+			u32 addr = _ptr + (row * ROW_BYTES) + (byte_col ^ swizzle);
 
-		sm80::ldmatrix_8x8xu16_x4(
-			addr,
-			dst.sub[0][0].val, dst.sub[1][0].val, dst.sub[0][1].val, dst.sub[1][1].val
-		);
+			sm80::ldmatrix_8x8xu16_x4(
+				addr,
+				dst.sub[0][0].val, dst.sub[1][0].val, dst.sub[0][1].val, dst.sub[1][1].val
+			);
+		}
 	}
 
 	X17_DEVICE void load_tile_to_fragment_trans(
 		usize m_idx, usize n_idx,
 		Fragment_16x16<T> &dst
 	) const requires(sizeof(T) == 2) {
-		usize tid = threadIdx.x;
-		usize row = m_idx + (tid & 15);
-		usize swizzle = ((threadIdx.x & 7) << 4) ^ (threadIdx.x & 16);
-		usize byte_col = n_idx * sizeof(T);
-		u32 addr = _ptr + (row * ROW_BYTES) + (byte_col ^ swizzle);
+		if constexpr (N > 0) {
+			usize tid = threadIdx.x;
+			usize row = m_idx + (tid & 15);
+			usize swizzle = ((threadIdx.x & 7) << 4) ^ (threadIdx.x & 16);
+			usize byte_col = n_idx * sizeof(T);
+			u32 addr = _ptr + (row * ROW_BYTES) + (byte_col ^ swizzle);
 
-		sm80::ldmatrix_8x8xu16_x4(
-			addr,
-			dst.sub[0][0].val, dst.sub[0][1].val, dst.sub[1][0].val, dst.sub[1][1].val
-		);
-	}
-
-	X17_DEVICE void load_to_registers(RMatrix<T, M, N> &dst) const requires(sizeof(T) == 2) {
-		X17_UNROLL for (usize j = 0; j < M / 16; j++) {
-			X17_UNROLL for (usize i = 0; i < N / 16; i++) {
-				load_tile_to_fragment(j * 16, i * 16, dst.tiles[j][i]);
-			}
+			sm80::ldmatrix_8x8xu16_x4(
+				addr,
+				dst.sub[0][0].val, dst.sub[0][1].val, dst.sub[1][0].val, dst.sub[1][1].val
+			);
 		}
 	}
+
 };
 
 template<

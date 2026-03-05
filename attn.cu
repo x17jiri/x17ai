@@ -2,12 +2,12 @@
 #include <vector>
 #include <fstream>
 #include <array>
-#include "cutlass/util/GPU_Clock.hpp"
+#include <algorithm>
 
 constexpr usize Q_PER_WARP = 16;
 constexpr usize KV_PER_WARP = 16;
-constexpr usize WARPS_PER_BLOCK = 8;
-constexpr usize GMEM_PRELOAD = WARPS_PER_BLOCK == 4 ? 4 : 2;
+constexpr usize WARPS_PER_BLOCK = 4;
+constexpr usize GMEM_PRELOAD = 2;
 constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
 constexpr usize Q_PER_BLOCK = Q_PER_WARP;
 constexpr usize KV_PER_STEP = KV_PER_WARP * WARPS_PER_BLOCK;
@@ -445,7 +445,7 @@ attn_kernel(
 
 int main(int argc, char *argv[]) {
 	constexpr usize V_DIM = 128;
-	constexpr usize ROPE_DIM = 64;
+	constexpr usize ROPE_DIM = 0;
 	constexpr usize QK_DIM = V_DIM + ROPE_DIM;
 	{
 		f32 diff = fabsf(sqrtf(QK_DIM) - f32(constexpr_sqrt(f64(QK_DIM))));
@@ -536,25 +536,55 @@ int main(int argc, char *argv[]) {
 
 	usize smem_size =
 		sizeof(bf16) * KV_PER_STEP * GMEM_PRELOAD * QK_DIM;
-	smem_size = std::max(smem_size, usize(70 * 1024));
+	//smem_size = std::max(smem_size, usize(70 * 1024));
 
 	cudaFuncSetAttribute(attn_kernel<V_DIM, ROPE_DIM, 1>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
 
 	cudaFuncSetAttribute(attn_kernel<V_DIM, ROPE_DIM, 1>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-	GPU_Clock timer;
-	timer.start();
-	constexpr int NUM_RUNS = 1;
-	for (int i = 0; i < NUM_RUNS; ++i) {
+	int WARMUP = use_real_data ? 0 : 50;
+	for (int i = 0; i < WARMUP; ++i) {
 		attn_kernel<V_DIM, ROPE_DIM, 1><<<Q_LEN / Q_PER_BLOCK, THREADS_PER_BLOCK, smem_size>>>(
 			Q_LEN, q_dev,
 			KV_LEN, kvc_dev, kvr_dev,
 			out_dev
 		);
 	}
+
+	int NUM_RUNS = use_real_data ? 1 : 200;
+	std::vector<cudaEvent_t> starts(NUM_RUNS), ends(NUM_RUNS);
+	for (int i = 0; i < NUM_RUNS; ++i) {
+		cudaEventCreate(&starts[i]);
+		cudaEventCreate(&ends[i]);
+	}
+	for (int i = 0; i < NUM_RUNS; ++i) {
+		cudaEventRecord(starts[i]);
+		attn_kernel<V_DIM, ROPE_DIM, 1><<<Q_LEN / Q_PER_BLOCK, THREADS_PER_BLOCK, smem_size>>>(
+			Q_LEN, q_dev,
+			KV_LEN, kvc_dev, kvr_dev,
+			out_dev
+		);
+		cudaEventRecord(ends[i]);
+	}
 	cudaDeviceSynchronize();
-	double cute_time = timer.seconds() / NUM_RUNS;
-	printf("Average kernel time over %d runs: %f ms\n", NUM_RUNS, cute_time * 1e3);
+
+	std::vector<float> times_ms(NUM_RUNS);
+	for (int i = 0; i < NUM_RUNS; ++i) {
+		cudaEventElapsedTime(&times_ms[i], starts[i], ends[i]);
+		cudaEventDestroy(starts[i]);
+		cudaEventDestroy(ends[i]);
+	}
+	std::sort(times_ms.begin(), times_ms.end());
+
+	int mid = NUM_RUNS / 2;
+	float median_ms = times_ms[mid];
+	float min_ms = times_ms[0];
+	printf("Kernel time over %d runs: median %.4f ms  min %.4f ms\n", NUM_RUNS, median_ms, min_ms);
+
+	// TFLOPS: Q@K^T = 2*Q*KV*QK_DIM, attn@V = 2*Q*KV*V_DIM, softmax ~ 5*Q*KV
+	// Causal ≈ half the work
+	double flops_causal = (2.0 * Q_LEN * KV_LEN * QK_DIM + 2.0 * Q_LEN * KV_LEN * V_DIM + 5.0 * Q_LEN * KV_LEN) / 2.0;
+	printf("TFLOPS (causal): %.2f\n", flops_causal / (median_ms * 1e-3) / 1e12);
 
 	// write output to file
 	{
