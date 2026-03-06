@@ -12,6 +12,7 @@
 #include <mma.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <numbers>
 
 /*#if defined(__CUDACC_RTC__) || defined(__clang__)
 	#define X17_UNROLL    _Pragma("unroll")
@@ -48,6 +49,23 @@ using f32 = float;
 using f64 = double;
 
 constexpr usize WARP_SIZE = 32;
+
+//--------------------------------------------------------------------------------------------------
+
+namespace math {
+	namespace fast {
+		template<const f64 SCALE = 1.0>
+		X17_DEVICE f32 exp(f32 x) {
+			constexpr float scale = std::numbers::log2e_v<f64> * SCALE;
+			return exp2f(x * scale);
+		}
+
+		// Single-instruction reciprocal, ≤1 ULP, round-to-nearest
+		X17_DEVICE f32 rcp(f32 x) {
+			return __frcp_rn(x);
+		}
+	}
+}
 
 //--------------------------------------------------------------------------------------------------
 
