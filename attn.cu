@@ -35,6 +35,7 @@ X17_DEVICE void causal_mask_diagonal(Fragment_16x16<f32> &rScores) {
 template<const usize K>
 X17_DEVICE void online_softmax(
 	SoftmaxStats &stats,
+	f32 SCORE_SCALE,
 	Fragment_16x16<f32> &rScores,
 	Fragment_16x16<f32> (&rOut)[K]
 ) {
@@ -69,9 +70,10 @@ X17_DEVICE void online_softmax(
 	}
 
 	// Step 2: Compute rescale factor and rescale output fragments
+	// stats.max and new_max are both UNSCALED (raw dot products)
 	f32 rescale;
 	{
-		rescale = exp2f(stats.max - new_max);
+		rescale = exp2f((stats.max - new_max) * SCORE_SCALE);
 
 		// XOR 1 — exchange rescale factors so each thread knows both rows
 		f32 partner_rescale = __shfl_xor_sync(0xffffffff, rescale, 1);
@@ -83,22 +85,24 @@ X17_DEVICE void online_softmax(
 		}
 	}
 
-	// Step 3: Replace scores with exp(score - new_max)
+	// Step 3: Replace scores with exp2((score - max) * SCORE_SCALE)
+	// Keeping max unscaled ensures score==max gives exactly 0 after subtraction,
+	// so exp2f(0) = 1 regardless of fast-math rounding.
 	{
 		// Exchange new_max so each thread has both top and bottom row max
 		f32 partner_new_max = __shfl_xor_sync(0xffffffff, new_max, 1);
 		f32 top_new_max = is_even ? new_max : partner_new_max;
 		f32 bot_new_max = is_even ? partner_new_max : new_max;
 
-		rScores.sub[0][0].val0 = exp2f(rScores.sub[0][0].val0 - top_new_max);
-		rScores.sub[0][0].val1 = exp2f(rScores.sub[0][0].val1 - top_new_max);
-		rScores.sub[0][1].val0 = exp2f(rScores.sub[0][1].val0 - top_new_max);
-		rScores.sub[0][1].val1 = exp2f(rScores.sub[0][1].val1 - top_new_max);
+		rScores.sub[0][0].val0 = exp2f((rScores.sub[0][0].val0 - top_new_max) * SCORE_SCALE);
+		rScores.sub[0][0].val1 = exp2f((rScores.sub[0][0].val1 - top_new_max) * SCORE_SCALE);
+		rScores.sub[0][1].val0 = exp2f((rScores.sub[0][1].val0 - top_new_max) * SCORE_SCALE);
+		rScores.sub[0][1].val1 = exp2f((rScores.sub[0][1].val1 - top_new_max) * SCORE_SCALE);
 
-		rScores.sub[1][0].val0 = exp2f(rScores.sub[1][0].val0 - bot_new_max);
-		rScores.sub[1][0].val1 = exp2f(rScores.sub[1][0].val1 - bot_new_max);
-		rScores.sub[1][1].val0 = exp2f(rScores.sub[1][1].val0 - bot_new_max);
-		rScores.sub[1][1].val1 = exp2f(rScores.sub[1][1].val1 - bot_new_max);
+		rScores.sub[1][0].val0 = exp2f((rScores.sub[1][0].val0 - bot_new_max) * SCORE_SCALE);
+		rScores.sub[1][0].val1 = exp2f((rScores.sub[1][0].val1 - bot_new_max) * SCORE_SCALE);
+		rScores.sub[1][1].val0 = exp2f((rScores.sub[1][1].val0 - bot_new_max) * SCORE_SCALE);
+		rScores.sub[1][1].val1 = exp2f((rScores.sub[1][1].val1 - bot_new_max) * SCORE_SCALE);
 	}
 
 	// Step 4: `sum` of the owned row
@@ -153,6 +157,7 @@ requires(M % Q_PER_WARP == 0 && N == K * 16)
 X17_DEVICE void combine_read(
 	Fragment_16x16<f32> (&rOut)[K],
 	SoftmaxStats &r_stats,
+	f32 SCORE_SCALE,
 	SMatrix<f32, M, N> sReduce,
 	u32 stats_smem,
 	usize slot
@@ -167,8 +172,9 @@ X17_DEVICE void combine_read(
 	);
 	f32 new_max = fmaxf(r_stats.max, s_stats.max);
 	// Guard against -inf - (-inf) = NaN when both warps are empty (causal masking)
-	f32 r_rescale = (r_stats.max > -INFINITY) ? exp2f(r_stats.max - new_max) : 0.0f;
-	f32 s_rescale = (s_stats.max > -INFINITY) ? exp2f(s_stats.max - new_max) : 0.0f;
+	// stats.max values are UNSCALED; multiply difference by SCORE_SCALE for exp2f
+	f32 r_rescale = (r_stats.max > -INFINITY) ? exp2f((r_stats.max - new_max) * SCORE_SCALE) : 0.0f;
+	f32 s_rescale = (s_stats.max > -INFINITY) ? exp2f((s_stats.max - new_max) * SCORE_SCALE) : 0.0f;
 
 	bool is_even = (threadIdx.x % 2) == 0;
 	f32 x_rescale = __shfl_xor_sync(0xffffffff, r_rescale, 1);
@@ -192,6 +198,7 @@ requires(Q_PER_BLOCK == 16 && OUT_DIM == K * 16)
 X17_DEVICE void combine_and_store(
 	Fragment_16x16<f32> (&rOut)[K],
 	SoftmaxStats &r_stats,
+	f32 SCORE_SCALE,
 	u32 smem,
 	usize warp_idx,
 	GMatrix<bf16, Q_PER_BLOCK, OUT_DIM> gOut_block
@@ -214,7 +221,7 @@ X17_DEVICE void combine_and_store(
 	}
 	__syncthreads();
 	if (warp_idx % 2 == 0) {
-		combine_read<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, warp_idx / 2);
+		combine_read<Q_PER_WARP>(rOut, r_stats, SCORE_SCALE, sReduce, stats_smem, warp_idx / 2);
 	}
 
 	if constexpr (WARPS_PER_BLOCK == 8) {
@@ -224,7 +231,7 @@ X17_DEVICE void combine_and_store(
 		}
 		__syncthreads();
 		if (warp_idx % 4 == 0) {
-			combine_read<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 4 + warp_idx / 4);
+			combine_read<Q_PER_WARP>(rOut, r_stats, SCORE_SCALE, sReduce, stats_smem, 4 + warp_idx / 4);
 		}
 
 		// Round 3: warp 4 writes to slot 0, warp 0 reads
@@ -233,7 +240,7 @@ X17_DEVICE void combine_and_store(
 		}
 		__syncthreads();
 		if (warp_idx == 0) {
-			combine_read<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 0);
+			combine_read<Q_PER_WARP>(rOut, r_stats, SCORE_SCALE, sReduce, stats_smem, 0);
 		}
 	} else {
 		// Round 2: warp 2 writes to slot 2, warp 0 reads
@@ -242,7 +249,7 @@ X17_DEVICE void combine_and_store(
 		}
 		__syncthreads();
 		if (warp_idx == 0) {
-			combine_read<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 2);
+			combine_read<Q_PER_WARP>(rOut, r_stats, SCORE_SCALE, sReduce, stats_smem, 2);
 		}
 	}
 
@@ -250,9 +257,11 @@ X17_DEVICE void combine_and_store(
 		// Normalize: divide each row by its running_sum
 		f32 partner_sum = __shfl_xor_sync(0xffffffff, r_stats.sum, 1);
 		bool is_even = (threadIdx.x % 2) == 0;
-		f32 top_inv_sum = 1.0f / (is_even ? r_stats.sum : partner_sum);
-		f32 bot_inv_sum = 1.0f / (is_even ? partner_sum : r_stats.sum);
-
+		f32 my_sum = r_stats.sum;
+		f32 top_sum = is_even ? my_sum : partner_sum;
+		f32 bot_sum = is_even ? partner_sum : my_sum;
+		f32 top_inv_sum = 1.0f / top_sum;
+		f32 bot_inv_sum = 1.0f / bot_sum;
 		X17_UNROLL for (usize i = 0; i < K; i++) {
 			rOut[i].scale_(top_inv_sum, bot_inv_sum);
 		}
@@ -274,6 +283,10 @@ attn_kernel(
 	constexpr usize V_TILES = V_DIM / 16;
 	constexpr usize ROPE_TILES = ROPE_DIM / 16;
 	constexpr usize QK_TILES = V_TILES + ROPE_TILES;
+
+	// The nominator is needed because our softmax uses `2^x` instead of `e^x`
+	// The denominator is the normal attention scaling factor
+	constexpr f32 SCORE_SCALE = std::numbers::log2e_v<f64> / constexpr_sqrt(f64(QK_DIM));
 
 	constexpr usize Q_STRIDE = QK_DIM * HEAD_SIZE;
 	constexpr usize KVC_STRIDE = V_DIM * HEAD_SIZE;
@@ -383,18 +396,13 @@ attn_kernel(
 			mma_a_bt(rQ[i], rKV[i], rScores_f32);
 		}
 
-		// The nominator is needed because our softmax uses `2^x` instead of `e^x`
-		// The denominator is the normal attention scaling factor
-		constexpr f32 SCORE_SCALE = std::numbers::log2e_v<f64> / constexpr_sqrt(f64(QK_DIM));
-		rScores_f32.scale_(SCORE_SCALE);
-
 		// Causal mask on the diagonal tile
 		if (kv_pos == q_start) {
 			causal_mask_diagonal(rScores_f32);
 		}
 
-		// Softmax (base-2)
-		online_softmax(r_stats, rScores_f32, rOut);
+		// Softmax (base-2) — scores are unscaled; SCORE_SCALE is folded into exp2f via fma
+		online_softmax(r_stats, SCORE_SCALE, rScores_f32, rOut);
 
 		{ // Get more data from GMEM
 			// Wait for the next batch of GMEM -> SMEM preloads to complete
@@ -440,7 +448,7 @@ attn_kernel(
 
 	GMatrixDynSize<bf16, V_DIM> gOut_full{gOut_ptr, q_cnt};
 	GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = gOut_full.template tile_m<Q_PER_BLOCK>(blockIdx.x);
-	combine_and_store(rOut, r_stats, preload_c._ptr, warp_idx, gOut_block);
+	combine_and_store(rOut, r_stats, SCORE_SCALE, preload_c._ptr, warp_idx, gOut_block);
 }
 
 int main(int argc, char *argv[]) {
@@ -551,6 +559,7 @@ int main(int argc, char *argv[]) {
 		);
 	}
 
+	usize NUM_BLOCKS = Q_LEN / Q_PER_BLOCK;
 	int NUM_RUNS = use_real_data ? 1 : 200;
 	std::vector<cudaEvent_t> starts(NUM_RUNS), ends(NUM_RUNS);
 	for (int i = 0; i < NUM_RUNS; ++i) {
@@ -559,7 +568,7 @@ int main(int argc, char *argv[]) {
 	}
 	for (int i = 0; i < NUM_RUNS; ++i) {
 		cudaEventRecord(starts[i]);
-		attn_kernel<V_DIM, ROPE_DIM, 1><<<Q_LEN / Q_PER_BLOCK, THREADS_PER_BLOCK, smem_size>>>(
+		attn_kernel<V_DIM, ROPE_DIM, 1><<<NUM_BLOCKS, THREADS_PER_BLOCK, smem_size>>>(
 			Q_LEN, q_dev,
 			KV_LEN, kvc_dev, kvr_dev,
 			out_dev
