@@ -57,7 +57,10 @@ namespace math {
 		template<const f64 SCALE = 1.0>
 		X17_DEVICE f32 exp(f32 x) {
 			constexpr float scale = std::numbers::log2e_v<f64> * SCALE;
-			return exp2f(x * scale);
+			x *= scale;
+			float result;
+			asm ("ex2.approx.ftz.f32 %0, %1;\n" : "=f"(result) : "f"(x));
+			return result;
 		}
 
 		// Single-instruction reciprocal, ≤1 ULP, round-to-nearest
@@ -399,32 +402,44 @@ struct Fragment_16x16 {
 		sm80::movmatrix(sub[1][1].val, sub[1][1].val);
 	}
 
+	/// Stores a 16x16 tile from MMA registers to GMEM with 32-byte coalesced writes.
+	/// Even-row threads (tid & 4 == 0) write left 8 cols, odd-row threads write right 8 cols.
+	/// Sender picks what to send so only 2 shuffles needed (top + bottom half).
 	template<typename U, const usize M, const usize N>
 	requires(sizeof(U) == 2)
 	X17_DEVICE void store(GMatrix<U, M, N> const &dst, usize m_idx, usize n_idx) const {
-		usize tid = threadIdx.x;
-		GMatrix<U, 16, N> dst_tile = dst.tile_m<16>(m_idx / 16);
-		usize dst_off = n_idx * usize(sizeof(U));
+		usize tid = threadIdx.x % WARP_SIZE;
+		bool is_even = (tid & 4) == 0;
 
-		dst_off += (tid & 0x1c) * (dst.stride_bytes() / 4) + (tid & 3) * 4;
-		*reinterpret_cast<u32 *>(
-			reinterpret_cast<u8 *>(dst_tile._ptr) + dst_off
-		) = sub[0][0].template cast_reg<U>().val;
+		// Cast all sub-fragments to output type
+		u32 my_tl = sub[0][0].template cast_reg<U>().val;
+		u32 my_tr = sub[0][1].template cast_reg<U>().val;
+		u32 my_bl = sub[1][0].template cast_reg<U>().val;
+		u32 my_br = sub[1][1].template cast_reg<U>().val;
 
-		dst_off += 16;
-		*reinterpret_cast<u32 *>(
-			reinterpret_cast<u8 *>(dst_tile._ptr) + dst_off
-		) = sub[0][1].template cast_reg<U>().val;
+		// Sender picks: even threads send tr (partner needs it), odd send tl
+		u32 top_recv = __shfl_xor_sync(0xffffffff, is_even ? my_tr : my_tl, 4);
+		u32 bot_recv = __shfl_xor_sync(0xffffffff, is_even ? my_br : my_bl, 4);
 
-		dst_off += 8 * dst.stride_bytes() - 16;
-		*reinterpret_cast<u32 *>(
-			reinterpret_cast<u8 *>(dst_tile._ptr) + dst_off
-		) = sub[1][0].template cast_reg<U>().val;
+		my_tl = is_even ? my_tl : top_recv;
+		my_tr = is_even ? top_recv : my_tr;
 
-		dst_off += 16;
-		*reinterpret_cast<u32 *>(
-			reinterpret_cast<u8 *>(dst_tile._ptr) + dst_off
-		) = sub[1][1].template cast_reg<U>().val;
+		my_bl = is_even ? my_bl : bot_recv;
+		my_br = is_even ? bot_recv : my_br;
+
+		u8 *top_base = reinterpret_cast<u8 *>(dst.template tile_m<16>(m_idx / 16)._ptr);
+		usize stride = dst.stride_bytes();
+		usize col_off = n_idx * usize(sizeof(U)) + (is_even ? 0 : 16) + (tid & 3) * 4;
+		usize even_row = (tid >> 3) * 2 * stride;
+		usize odd_row = even_row + stride;
+		u8 *bot_base = top_base + 8 * stride;
+
+		// Top half
+		*reinterpret_cast<u32 *>(top_base + even_row + col_off) = my_tl;
+		*reinterpret_cast<u32 *>(top_base + odd_row  + col_off) = my_tr;
+		// Bottom half
+		*reinterpret_cast<u32 *>(bot_base + even_row + col_off) = my_bl;
+		*reinterpret_cast<u32 *>(bot_base + odd_row  + col_off) = my_br;
 	}
 
 	/// Loads a 16x16 tile from GMEM directly into MMA-compatible register layout.
@@ -511,6 +526,141 @@ struct Fragment_16x16 {
 		}
 	}
 };
+
+template<typename U, typename T, const usize M, const usize N>
+requires(sizeof(U) == 2)
+X17_DEVICE void store_x(
+	GMatrix<U, M, N> const &dst,
+	usize m_idx, usize n_idx,
+	Fragment_16x16<T> f0,
+	Fragment_16x16<T> f1
+) {
+	usize tid = threadIdx.x % WARP_SIZE;
+	bool is_even = (tid & 4) == 0;
+
+	u32 my_tl0 = f0.sub[0][0].template cast_reg<U>().val;
+	u32 my_tr0 = f0.sub[0][1].template cast_reg<U>().val;
+	u32 my_bl0 = f0.sub[1][0].template cast_reg<U>().val;
+	u32 my_br0 = f0.sub[1][1].template cast_reg<U>().val;
+
+	u32 top_recv0 = __shfl_xor_sync(0xffffffff, is_even ? my_tr0 : my_tl0, 4);
+	u32 bot_recv0 = __shfl_xor_sync(0xffffffff, is_even ? my_br0 : my_bl0, 4);
+
+	my_tl0 = is_even ? my_tl0 : top_recv0;
+	my_tr0 = is_even ? top_recv0 : my_tr0;
+
+	my_bl0 = is_even ? my_bl0 : bot_recv0;
+	my_br0 = is_even ? bot_recv0 : my_br0;
+
+	//---
+
+	u32 my_tl1 = f1.sub[0][0].template cast_reg<U>().val;
+	u32 my_tr1 = f1.sub[0][1].template cast_reg<U>().val;
+	u32 my_bl1 = f1.sub[1][0].template cast_reg<U>().val;
+	u32 my_br1 = f1.sub[1][1].template cast_reg<U>().val;
+
+	u32 top_recv1 = __shfl_xor_sync(0xffffffff, is_even ? my_tr1 : my_tl1, 4);
+	u32 bot_recv1 = __shfl_xor_sync(0xffffffff, is_even ? my_br1 : my_bl1, 4);
+
+	my_tl1 = is_even ? my_tl1 : top_recv1;
+	my_tr1 = is_even ? top_recv1 : my_tr1;
+
+	my_bl1 = is_even ? my_bl1 : bot_recv1;
+	my_br1 = is_even ? bot_recv1 : my_br1;
+
+	//---
+
+	u32 top_recv2 = __shfl_xor_sync(0xffffffff, (tid & 8) == 0 ? my_tl1 : my_tl0, 8);
+	u32 bot_recv2 = __shfl_xor_sync(0xffffffff, (tid & 8) == 0 ? my_bl1 : my_bl0, 8);
+
+	my_tl0 = (tid & 8) == 0 ? my_tl0 : top_recv2;
+	my_bl0 = (tid & 8) == 0 ? my_bl0 : bot_recv2;
+
+	my_tl1 = (tid & 8) == 0 ? my_tl1 : top_recv2;
+	my_bl1 = (tid & 8) == 0 ? my_bl1 : bot_recv2;
+
+	//---
+
+}
+
+template<typename U, typename T, const usize M, const usize N>
+requires(sizeof(U) == 2)
+X17_DEVICE void store2(
+	GMatrix<U, M, N> const &dst,
+	usize m_idx, usize n_idx,
+	Fragment_16x16<T> const &f0,
+	Fragment_16x16<T> const &f1
+) {
+	usize tid = threadIdx.x % WARP_SIZE;
+	bool bit2 = (tid & 4) != 0;
+	bool bit3 = (tid & 8) != 0;
+	u32 recv;
+
+	u32 tl0 = f0.sub[0][0].template cast_reg<U>().val;
+	u32 tr0 = f0.sub[0][1].template cast_reg<U>().val;
+	u32 bl0 = f0.sub[1][0].template cast_reg<U>().val;
+	u32 br0 = f0.sub[1][1].template cast_reg<U>().val;
+
+	recv = __shfl_xor_sync(0xffffffff, bit2 ? tl0 : tr0, 4);
+	tl0 = bit2 ? recv : tl0;
+	tr0 = bit2 ? tr0 : recv;
+
+	recv = __shfl_xor_sync(0xffffffff, bit2 ? bl0 : br0, 4);
+	bl0 = bit2 ? recv : bl0;
+	br0 = bit2 ? br0 : recv;
+
+	//---
+
+	u32 tl1 = f1.sub[0][0].template cast_reg<U>().val;
+	u32 tr1 = f1.sub[0][1].template cast_reg<U>().val;
+	u32 bl1 = f1.sub[1][0].template cast_reg<U>().val;
+	u32 br1 = f1.sub[1][1].template cast_reg<U>().val;
+
+	recv = __shfl_xor_sync(0xffffffff, bit2 ? tl1 : tr1, 4);
+	tl1 = bit2 ? recv : tl1;
+	tr1 = bit2 ? tr1 : recv;
+
+	recv = __shfl_xor_sync(0xffffffff, bit2 ? bl1 : br1, 4);
+	bl1 = bit2 ? recv : bl1;
+	br1 = bit2 ? br1 : recv;
+
+	//---
+
+	recv = __shfl_xor_sync(0xffffffff, bit3 ? tl0 : tl1, 8);
+	tl0 = bit3 ? recv : tl0;
+	tl1 = bit3 ? tl1 : recv;
+
+	recv = __shfl_xor_sync(0xffffffff, bit3 ? tr0 : tr1, 8);
+	tr0 = bit3 ? recv : tr0;
+	tr1 = bit3 ? tr1 : recv;
+
+	recv = __shfl_xor_sync(0xffffffff, bit3 ? bl0 : bl1, 8);
+	bl0 = bit3 ? recv : bl0;
+	bl1 = bit3 ? bl1 : recv;
+
+	recv = __shfl_xor_sync(0xffffffff, bit3 ? br0 : br1, 8);
+	br0 = bit3 ? recv : br0;
+	br1 = bit3 ? br1 : recv;
+
+	//---
+
+	u8 *top_base = reinterpret_cast<u8 *>(dst.template tile_m<16>(m_idx / 16)._ptr);
+	usize stride = dst.stride_bytes();
+	usize col_off = n_idx * usize(sizeof(U)) + (tid % 16) * 4;
+	usize row_base = (tid / 16) * 4 * stride;
+
+	*reinterpret_cast<u32 *>(top_base + row_base + 0*stride + col_off) = tl0;
+	*reinterpret_cast<u32 *>(top_base + row_base + 1*stride + col_off) = tr0;
+	*reinterpret_cast<u32 *>(top_base + row_base + 2*stride + col_off) = tl1;
+	*reinterpret_cast<u32 *>(top_base + row_base + 3*stride + col_off) = tr1;
+
+	u8 *bot_base = top_base + 8 * stride;
+	*reinterpret_cast<u32 *>(bot_base + row_base + 0*stride + col_off) = bl0;
+	*reinterpret_cast<u32 *>(bot_base + row_base + 1*stride + col_off) = br0;
+	*reinterpret_cast<u32 *>(bot_base + row_base + 2*stride + col_off) = bl1;
+	*reinterpret_cast<u32 *>(bot_base + row_base + 3*stride + col_off) = br1;
+}
+
 
 template<typename F, typename T>
 X17_DEVICE void cast(Fragment_16x16<F> const &src, Fragment_16x16<T> &dst) {

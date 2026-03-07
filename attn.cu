@@ -261,8 +261,8 @@ X17_DEVICE void combine_and_store(
 			rOut[i].scale_(top_inv_sum, bot_inv_sum);
 		}
 
-		X17_UNROLL for (usize i = 0; i < K; i++) {
-			rOut[i].store(gOut_block, 0, i*16);
+		X17_UNROLL for (usize i = 0; i < K; i += 2) {
+			store2(gOut_block, 0, i*16, rOut[i], rOut[i+1]);
 		}
 	}
 }
@@ -286,6 +286,7 @@ attn_kernel(
 	constexpr usize Q_STRIDE = QK_DIM * HEAD_SIZE;
 	constexpr usize KVC_STRIDE = V_DIM * HEAD_SIZE;
 	constexpr usize KVR_STRIDE = ROPE_DIM * HEAD_SIZE;
+
 
 	extern __shared__ bf16 *smem;
 	// Two preload buffers back-to-back: content [256, V_DIM] + rope [256, ROPE_DIM]
@@ -340,8 +341,10 @@ attn_kernel(
 	X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
 		smem_tile_to_fragment(sQc, 0, i * 16, rQ[i]);
 	}
-	X17_UNROLL for (usize i = 0; i < ROPE_TILES; i++) {
-		smem_tile_to_fragment(sQr, 0, i * 16, rQ[V_TILES + i]);
+	if constexpr (ROPE_TILES > 0) {
+		X17_UNROLL for (usize i = 0; i < ROPE_TILES; i++) {
+			smem_tile_to_fragment(sQr, 0, i * 16, rQ[V_TILES + i]);
+		}
 	}
 
 	{ // Now that we have Q in registers, use the last preload tiles for KV
@@ -372,8 +375,10 @@ attn_kernel(
 	X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
 		smem_tile_to_fragment(sKVc, 0, i * 16, rKV[i]);
 	}
-	X17_UNROLL for (usize i = 0; i < ROPE_TILES; i++) {
-		smem_tile_to_fragment(sKVr, 0, i * 16, rKV[V_TILES + i]);
+	if constexpr (ROPE_TILES > 0) {
+		X17_UNROLL for (usize i = 0; i < ROPE_TILES; i++) {
+			smem_tile_to_fragment(sKVr, 0, i * 16, rKV[V_TILES + i]);
+		}
 	}
 
 	// Sequential loop over KV (causal: each warp stops at its diagonal)
@@ -435,8 +440,10 @@ attn_kernel(
 		X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
 			mma_a_bt(rScores, rKV[i], rOut[i]); smem_tile_to_fragment(sKVc, 0, i * 16, rKV[i]);
 		}
-		X17_UNROLL for (usize i = 0; i < ROPE_TILES; i++) {
-			smem_tile_to_fragment(sKVr, 0, i * 16, rKV[V_TILES + i]);
+		if constexpr (ROPE_TILES > 0) {
+			X17_UNROLL for (usize i = 0; i < ROPE_TILES; i++) {
+				smem_tile_to_fragment(sKVr, 0, i * 16, rKV[V_TILES + i]);
+			}
 		}
 	}
 	cp_async_wait<0>();  // drain any outstanding preloads before cross-warp sync
@@ -509,10 +516,14 @@ int main(int argc, char *argv[]) {
 	std::vector<bf16> kvc_data(KV_LEN * V_DIM);
 	std::vector<bf16> kvr_data(KV_LEN * ROPE_DIM);
 	for (size_t r = 0; r < KV_LEN; r++) {
-		for (size_t c = 0; c < V_DIM; c++)
+		for (size_t c = 0; c < V_DIM; c++) {
 			kvc_data[r * V_DIM + c] = kv_data[r * QK_DIM + c];
-		for (size_t c = 0; c < ROPE_DIM; c++)
-			kvr_data[r * ROPE_DIM + c] = kv_data[r * QK_DIM + V_DIM + c];
+		}
+		if constexpr (ROPE_DIM > 0) {
+			for (size_t c = 0; c < ROPE_DIM; c++) {
+				kvr_data[r * ROPE_DIM + c] = kv_data[r * QK_DIM + V_DIM + c];
+			}
+		}
 	}
 	bf16 *kvc_dev, *kvr_dev;
 	cudaMalloc(&kvc_dev, kvc_data.size() * sizeof(bf16));
@@ -605,19 +616,19 @@ int main(int argc, char *argv[]) {
 		printf("(4) CUDA Error: %s\n", cudaGetErrorString(err));
 	}
 
-	// Print first 4 rows, first 8 cols
-	printf("\nFirst 4 rows, first 8 cols:\n");
-	for (size_t r = 0; r < 4; r++) {
+	// Print first 8 rows, first 8 cols
+	printf("\nFirst 8 rows, first 8 cols:\n");
+	for (size_t r = 0; r < 8; r++) {
 		for (size_t c = 0; c < 8; c++) {
 			printf("%12.6e ", double(float(out_data[r * V_DIM + c])));
 		}
 		printf("\n");
 	}
 
-	// Print last 4 rows, last 8 cols
-	printf("\nLast 4 rows, last 8 cols:\n");
-	for (size_t r = Q_LEN - 4; r < Q_LEN; r++) {
-		for (size_t c = V_DIM - 8; c < V_DIM; c++) {
+	// Print last 8 rows, last 8 cols
+	printf("\nLast 8 rows, last 8 cols:\n");
+	for (size_t r = Q_LEN - 8; r < Q_LEN; r++) {
+		for (size_t c = 0; c < V_DIM; c++) {
 			printf("%12.6e ", double(float(out_data[r * V_DIM + c])));
 		}
 		printf("\n");
