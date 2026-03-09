@@ -261,9 +261,7 @@ X17_DEVICE void combine_and_store(
 			rOut[i].scale_(top_inv_sum, bot_inv_sum);
 		}
 
-		X17_UNROLL for (usize i = 0; i < K; i += 2) {
-			store2(gOut_block, 0, i*16, rOut[i], rOut[i+1]);
-		}
+		store(gOut_block, 0, 0, rOut);
 	}
 }
 

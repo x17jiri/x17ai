@@ -441,7 +441,7 @@ struct Fragment_16x16 {
 		*reinterpret_cast<u32 *>(bot_base + even_row + col_off) = my_bl;
 		*reinterpret_cast<u32 *>(bot_base + odd_row  + col_off) = my_br;
 	}
-
+/*
 	/// Loads a 16x16 tile from GMEM directly into MMA-compatible register layout.
 	/// m_idx and n_idx must be multiples of 16.
 	template<const usize M, const usize N>
@@ -470,7 +470,7 @@ struct Fragment_16x16 {
 			reinterpret_cast<u8 const *>(src_tile._ptr) + src_off
 		));
 	}
-
+*/
 	/// Loads two consecutive 16x16 tiles from GMEM with improved coalescing.
 	/// f0 gets tile at (m_idx, n_idx), f1 gets tile at (m_idx, n_idx + 16).
 	/// Thread mapping: tile = (tid>>2)&1, row_group = tid>>3, col = tid&3.
@@ -581,6 +581,225 @@ X17_DEVICE void store_x(
 
 	//---
 
+}
+
+/// Each fragment has 8 columns of 2-byte type, but a thread always has
+/// 2 consecutive values. So let's assume each fragment has 4 double-columns.
+///
+/// We have 4 fragments, so 4x4 = 16 double-columns total.
+///
+/// Let's say the values in the first row are 0, 1, 2, ..., 15, where:
+/// - thread 0 has values 0, 4, 8, 12
+/// - thread 1 has values 1, 5, 9, 13
+/// - ...
+/// Then after this shuffle:
+/// - thread 0 has values 0, 1, 2, 3
+/// - thread 1 has values 4, 5, 6, 7
+/// - ...
+X17_DEVICE void shuffle_4x4(u32 &r0, u32 &r1, u32 &r2, u32 &r3) {
+	usize tid = threadIdx.x % WARP_SIZE;
+
+	u32 u0 = (tid & 1) == 0 ? r0 : r1;
+	u32 u1 = (tid & 1) == 0 ? r1 : r0;
+	u32 u2 = (tid & 1) == 0 ? r2 : r3;
+	u32 u3 = (tid & 1) == 0 ? r3 : r2;
+
+	r0 = u0; r1 = u1; r2 = u2; r3 = u3;
+
+	u0 = (tid & 2) == 0 ? r0 : r2;
+	u2 = (tid & 2) == 0 ? r2 : r0;
+	u1 = (tid & 2) == 0 ? r1 : r3;
+	u3 = (tid & 2) == 0 ? r3 : r1;
+
+	r0 = u0; r1 = u1; r2 = u2; r3 = u3;
+
+	r1 = __shfl_xor_sync(0xffffffff, r1, 1);
+	r2 = __shfl_xor_sync(0xffffffff, r2, 2);
+	r3 = __shfl_xor_sync(0xffffffff, r3, 3);
+
+	u0 = (tid & 1) == 0 ? r0 : r1;
+	u1 = (tid & 1) == 0 ? r1 : r0;
+	u2 = (tid & 1) == 0 ? r2 : r3;
+	u3 = (tid & 1) == 0 ? r3 : r2;
+
+	r0 = u0; r1 = u1; r2 = u2; r3 = u3;
+
+	u0 = (tid & 2) == 0 ? r0 : r2;
+	u2 = (tid & 2) == 0 ? r2 : r0;
+	u1 = (tid & 2) == 0 ? r1 : r3;
+	u3 = (tid & 2) == 0 ? r3 : r1;
+
+	r0 = u0; r1 = u1; r2 = u2; r3 = u3;
+}
+
+/// Stores 4 horizontally-adjacent 8x8 fragments (32 cols × 8 rows) to GMEM.
+/// Uses shuffle_4x4 so each thread holds 16 contiguous bytes, then a single 128-bit store.
+/// 4 threads per row × 16 bytes = 64B coalesced per row.
+template<typename U, typename T, const usize M, const usize N>
+requires(sizeof(U) == 2)
+X17_DEVICE void store_1x4_8x8(
+	GMatrix<U, M, N> const &dst,
+	usize m_idx, usize n_idx,
+	Fragment_8x8<T> const &f0,
+	Fragment_8x8<T> const &f1,
+	Fragment_8x8<T> const &f2,
+	Fragment_8x8<T> const &f3
+) {
+	// Cast to output type (e.g., f32 → bf16)
+	Fragment_8x8<U> g0, g1, g2, g3;
+	g0.val = f0.template cast_reg<U>().val;
+	g1.val = f1.template cast_reg<U>().val;
+	g2.val = f2.template cast_reg<U>().val;
+	g3.val = f3.template cast_reg<U>().val;
+
+	// Rearrange so each thread holds 4 consecutive double-columns
+	shuffle_4x4(g0.val, g1.val, g2.val, g3.val);
+
+	// 128-bit store per thread, 64B coalesced per row
+	usize tid = threadIdx.x % WARP_SIZE;
+	u8 *base = reinterpret_cast<u8 *>(dst._ptr);
+	usize stride = dst.stride_bytes();
+	usize off = (m_idx + tid / 4) * stride + n_idx * usize(sizeof(U)) + (tid % 4) * 16;
+
+	*reinterpret_cast<uint4 *>(base + off) = make_uint4(g0.val, g1.val, g2.val, g3.val);
+}
+
+/// Stores a 16x16 tile (2×2 grid of 8x8 fragments) to GMEM.
+/// Uses shuffle_4x4 so each thread holds 16 contiguous bytes, then a single 128-bit store.
+/// Threads 0,1,4,5,8,9,... write top 8 rows; threads 2,3,6,7,... write bottom 8 rows.
+/// 2 threads per row × 16 bytes = 32B coalesced per row (full row for 16-col bf16).
+template<typename U, typename T, const usize M, const usize N>
+requires(sizeof(U) == 2)
+X17_DEVICE void store_2x2_8x8(
+	GMatrix<U, M, N> const &dst,
+	usize m_idx, usize n_idx,
+	Fragment_8x8<T> const &f0, Fragment_8x8<T> const &f1,
+	Fragment_8x8<T> const &f2, Fragment_8x8<T> const &f3
+) {
+	// Cast to output type (e.g., f32 → bf16)
+	u32 g0 = f0.template cast_reg<U>().val;
+	u32 g1 = f1.template cast_reg<U>().val;
+	u32 g2 = f2.template cast_reg<U>().val;
+	u32 g3 = f3.template cast_reg<U>().val;
+
+	// f0=top-left, f1=top-right, f2=bottom-left, f3=bottom-right
+	// After shuffle_4x4:
+	//   t%4==0: all of tl's row (cols 0-7)   → top row
+	//   t%4==1: all of tr's row (cols 8-15)  → top row
+	//   t%4==2: all of bl's row (cols 0-7)   → bottom row
+	//   t%4==3: all of br's row (cols 8-15)  → bottom row
+	shuffle_4x4(g0, g1, g2, g3);
+
+	usize tid = threadIdx.x % WARP_SIZE;
+	u8 *base = reinterpret_cast<u8 *>(dst._ptr);
+	usize stride = dst.stride_bytes();
+	usize row = (tid & 2) ? (m_idx + 8 + tid / 4) : (m_idx + tid / 4);
+	usize col_off = n_idx * usize(sizeof(U)) + (tid & 1) * 16;
+
+	*reinterpret_cast<uint4 *>(base + row * stride + col_off) = make_uint4(g0, g1, g2, g3);
+}
+
+/// Stores 8 horizontally-adjacent 8x8 fragments (64 cols × 8 rows) to GMEM.
+/// shuffle_4x4 on left (f0-f3) and right (f4-f7) groups independently,
+/// then XOR-4 shuffle merges them so 8 consecutive threads cover one row.
+/// Each thread writes 2 × 16B stores; 8 threads × 16B = 128B coalesced per row.
+template<typename U, typename T, const usize M, const usize N>
+requires(sizeof(U) == 2)
+X17_DEVICE void store_1x8_8x8(
+	GMatrix<U, M, N> const &dst,
+	usize m_idx, usize n_idx,
+	Fragment_8x8<T> const &f0, Fragment_8x8<T> const &f1,
+	Fragment_8x8<T> const &f2, Fragment_8x8<T> const &f3,
+	Fragment_8x8<T> const &f4, Fragment_8x8<T> const &f5,
+	Fragment_8x8<T> const &f6, Fragment_8x8<T> const &f7
+) {
+	// Cast to output type (e.g., f32 → bf16)
+	u32 g0 = f0.template cast_reg<U>().val;
+	u32 g1 = f1.template cast_reg<U>().val;
+	u32 g2 = f2.template cast_reg<U>().val;
+	u32 g3 = f3.template cast_reg<U>().val;
+	u32 g4 = f4.template cast_reg<U>().val;
+	u32 g5 = f5.template cast_reg<U>().val;
+	u32 g6 = f6.template cast_reg<U>().val;
+	u32 g7 = f7.template cast_reg<U>().val;
+
+	// Rearrange left and right groups independently
+	shuffle_4x4(g0, g1, g2, g3);
+	shuffle_4x4(g4, g5, g6, g7);
+
+	// XOR-4 shuffle: swap right group (g4-g7) of bit2=0 threads
+	// with left group (g0-g3) of bit2=1 threads.
+	// This makes 8 consecutive threads cover the same row.
+	usize tid = threadIdx.x % WARP_SIZE;
+	bool bit2 = (tid & 4) != 0;
+	u32 recv;
+
+	recv = __shfl_xor_sync(0xffffffff, bit2 ? g0 : g4, 4);
+	g0 = bit2 ? recv : g0;
+	g4 = bit2 ? g4 : recv;
+
+	recv = __shfl_xor_sync(0xffffffff, bit2 ? g1 : g5, 4);
+	g1 = bit2 ? recv : g1;
+	g5 = bit2 ? g5 : recv;
+
+	recv = __shfl_xor_sync(0xffffffff, bit2 ? g2 : g6, 4);
+	g2 = bit2 ? recv : g2;
+	g6 = bit2 ? g6 : recv;
+
+	recv = __shfl_xor_sync(0xffffffff, bit2 ? g3 : g7, 4);
+	g3 = bit2 ? recv : g3;
+	g7 = bit2 ? g7 : recv;
+
+	// g0-g3 = even row data, g4-g7 = odd row data
+	// 8 consecutive threads × 16B = 128B coalesced per row
+	u8 *base = reinterpret_cast<u8 *>(dst._ptr);
+	usize stride = dst.stride_bytes();
+	usize col_off = n_idx * usize(sizeof(U)) + (tid % 8) * 16;
+	usize even_row = (m_idx + (tid >> 3) * 2) * stride;
+	usize odd_row = even_row + stride;
+
+	*reinterpret_cast<uint4 *>(base + even_row + col_off) = make_uint4(g0, g1, g2, g3);
+	*reinterpret_cast<uint4 *>(base + odd_row  + col_off) = make_uint4(g4, g5, g6, g7);
+}
+
+/// Generic store for an array of K horizontally-adjacent 16x16 tiles.
+/// Dispatches to store_1x8_8x8 (4 tiles), store_1x4_8x8 (2 tiles), store_2x2_8x8 (1 tile).
+template<typename U, typename T, const usize M, const usize N, const usize K>
+requires(sizeof(U) == 2)
+X17_DEVICE void store(
+	GMatrix<U, M, N> const &dst,
+	usize m_idx, usize n_idx,
+	Fragment_16x16<T> const (&tiles)[K]
+) {
+	usize i = 0;
+	if constexpr (K >= 4) {
+		X17_UNROLL for (; i + 4 <= K; i += 4) {
+			store_1x8_8x8(dst, m_idx, n_idx + i*16,
+				tiles[i].sub[0][0], tiles[i].sub[0][1],
+				tiles[i+1].sub[0][0], tiles[i+1].sub[0][1],
+				tiles[i+2].sub[0][0], tiles[i+2].sub[0][1],
+				tiles[i+3].sub[0][0], tiles[i+3].sub[0][1]);
+			store_1x8_8x8(dst, m_idx + 8, n_idx + i*16,
+				tiles[i].sub[1][0], tiles[i].sub[1][1],
+				tiles[i+1].sub[1][0], tiles[i+1].sub[1][1],
+				tiles[i+2].sub[1][0], tiles[i+2].sub[1][1],
+				tiles[i+3].sub[1][0], tiles[i+3].sub[1][1]);
+		}
+	}
+	if constexpr (K % 4 >= 2) {
+		store_1x4_8x8(dst, m_idx, n_idx + i*16,
+			tiles[i].sub[0][0], tiles[i].sub[0][1],
+			tiles[i+1].sub[0][0], tiles[i+1].sub[0][1]);
+		store_1x4_8x8(dst, m_idx + 8, n_idx + i*16,
+			tiles[i].sub[1][0], tiles[i].sub[1][1],
+			tiles[i+1].sub[1][0], tiles[i+1].sub[1][1]);
+		i += 2;
+	}
+	if constexpr (K % 2 == 1) {
+		store_2x2_8x8(dst, m_idx, n_idx + i*16,
+			tiles[i].sub[0][0], tiles[i].sub[0][1],
+			tiles[i].sub[1][0], tiles[i].sub[1][1]);
+	}
 }
 
 template<typename U, typename T, const usize M, const usize N>
