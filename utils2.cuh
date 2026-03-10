@@ -54,17 +54,36 @@ constexpr usize WARP_SIZE = 32;
 
 namespace math {
 	namespace fast {
-		template<const f64 SCALE = 1.0>
-		X17_DEVICE f32 exp(f32 x) {
-			constexpr float scale = std::numbers::log2e_v<f64> * SCALE;
-			x *= scale;
+		/// Our underlying exp and log functions use this base.
+		/// It was chosen to be fast and may change in the future.
+		constexpr f64 b = 2.0;
+
+		/// logb(e) = logb(2.71828...)
+		constexpr f64 logb_e = std::numbers::log2e_v<f64>;
+
+		/// Calculates `b^x` where `b` is our underlying base.
+		/// The underlying base was chosen to be fast and may change in the future.
+		///
+		/// To calculate `B^x` for some other base `B`, use `expb(x * logb(B))`.
+		X17_DEVICE f32 expb(f32 x) {
 			float result;
 			asm ("ex2.approx.ftz.f32 %0, %1;\n" : "=f"(result) : "f"(x));
 			return result;
 		}
 
-		// Single-instruction reciprocal, ≤1 ULP, round-to-nearest
-		X17_DEVICE f32 rcp(f32 x) {
+		/// Calculate `logb(x)` where `b` is our underlying base.
+		/// The underlying base was chosen to be fast and may change in the future.
+		///
+		/// To calculate `logB(x)` for some other base `B`, use `logb(x) / logb(B)`.
+		X17_DEVICE f32 logb(f32 x) {
+			float result;
+			asm ("lg2.approx.ftz.f32 %0, %1;\n" : "=f"(result) : "f"(x));
+			return result;
+		}
+
+		/// Single-instruction reciprocal
+		/// Precision: <= 1 ULP, round-to-nearest
+		X17_DEVICE f32 recip(f32 x) {
 			return __frcp_rn(x);
 		}
 	}
@@ -392,6 +411,17 @@ struct Fragment_16x16 {
 		sub[0][1].scale_(top);
 		sub[1][0].scale_(bot);
 		sub[1][1].scale_(bot);
+	}
+
+	X17_DEVICE void acc_(const Fragment_16x16 &o) {
+		sub[0][0].val0 += o.sub[0][0].val0;
+		sub[0][0].val1 += o.sub[0][0].val1;
+		sub[0][1].val0 += o.sub[0][1].val0;
+		sub[0][1].val1 += o.sub[0][1].val1;
+		sub[1][0].val0 += o.sub[1][0].val0;
+		sub[1][0].val1 += o.sub[1][0].val1;
+		sub[1][1].val0 += o.sub[1][1].val0;
+		sub[1][1].val1 += o.sub[1][1].val1;
 	}
 
 	X17_DEVICE void transpose_() {
@@ -1186,41 +1216,31 @@ X17_DEVICE void fragments_to_smem(
 	}
 }
 
-/// Calculates `r = r * r_scale + s * s_scale`
+/// Loads MMA-layout f32 fragments from shared memory (inverse of fragments_to_smem).
 template<const usize M, const usize N, const usize K>
 requires(M == 16 && N == K * 16)
-X17_DEVICE void rescale_acc(
-	Fragment_16x16<f32> (&r)[K],
-	f32 r_top_scale, f32 r_bot_scale,
-	SMatrix<f32, M, N> const &s,
-	f32 s_top_scale, f32 s_bot_scale
+X17_DEVICE void smem_to_fragments(
+	Fragment_16x16<f32> (&dst)[K],
+	SMatrix<f32, M, N> const &src
 ) {
 	usize tid = threadIdx.x % WARP_SIZE;
 	constexpr u32 TILE_STRIDE = 2 * WARP_SIZE * 4 * sizeof(f32); // 1024 bytes per 16x16 f32 tile
 	for (usize i = 0; i < K; i++) {
-		u32 base = s._ptr + i * TILE_STRIDE;
+		u32 base = src._ptr + i * TILE_STRIDE;
 		u32 p0 = base + tid * 4 * sizeof(f32);
 		u32 p1 = p0 + WARP_SIZE * 4 * sizeof(f32);
-
-		f32 a, b, c, d;
 		asm volatile(
 			"ld.shared.v4.f32 {%0, %1, %2, %3}, [%4];\n"
-			: "=f"(a), "=f"(b), "=f"(c), "=f"(d)
+			: "=f"(dst[i].sub[0][0].val0), "=f"(dst[i].sub[0][0].val1),
+			  "=f"(dst[i].sub[0][1].val0), "=f"(dst[i].sub[0][1].val1)
 			: "r"(p0)
 		);
-		r[i].sub[0][0].val0 = (r_top_scale * r[i].sub[0][0].val0) + (s_top_scale * a);
-		r[i].sub[0][0].val1 = (r_top_scale * r[i].sub[0][0].val1) + (s_top_scale * b);
-		r[i].sub[0][1].val0 = (r_top_scale * r[i].sub[0][1].val0) + (s_top_scale * c);
-		r[i].sub[0][1].val1 = (r_top_scale * r[i].sub[0][1].val1) + (s_top_scale * d);
 		asm volatile(
 			"ld.shared.v4.f32 {%0, %1, %2, %3}, [%4];\n"
-			: "=f"(a), "=f"(b), "=f"(c), "=f"(d)
+			: "=f"(dst[i].sub[1][0].val0), "=f"(dst[i].sub[1][0].val1),
+			  "=f"(dst[i].sub[1][1].val0), "=f"(dst[i].sub[1][1].val1)
 			: "r"(p1)
 		);
-		r[i].sub[1][0].val0 = (r_bot_scale * r[i].sub[1][0].val0) + (s_bot_scale * a);
-		r[i].sub[1][0].val1 = (r_bot_scale * r[i].sub[1][0].val1) + (s_bot_scale * b);
-		r[i].sub[1][1].val0 = (r_bot_scale * r[i].sub[1][1].val0) + (s_bot_scale * c);
-		r[i].sub[1][1].val1 = (r_bot_scale * r[i].sub[1][1].val1) + (s_bot_scale * d);
 	}
 }
 

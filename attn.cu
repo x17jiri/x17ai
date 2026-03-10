@@ -70,9 +70,10 @@ X17_DEVICE void online_softmax(
 
 	// Step 2: Compute rescale factor and rescale output fragments
 	// stats.max and new_max are both UNSCALED (raw dot products)
+	constexpr f32 SCORE_SCALE = math::fast::logb_e * ATN_SCALE;
 	f32 rescale;
 	{
-		rescale = math::fast::exp<ATN_SCALE>(stats.max - new_max);
+		rescale = math::fast::expb((stats.max - new_max) * SCORE_SCALE);
 
 		// XOR 1 — exchange rescale factors so each thread knows both rows
 		f32 partner_rescale = __shfl_xor_sync(0xffffffff, rescale, 1);
@@ -93,15 +94,15 @@ X17_DEVICE void online_softmax(
 		f32 top_new_max = is_even ? new_max : partner_new_max;
 		f32 bot_new_max = is_even ? partner_new_max : new_max;
 
-		rScores.sub[0][0].val0 = math::fast::exp<ATN_SCALE>(rScores.sub[0][0].val0 - top_new_max);
-		rScores.sub[0][0].val1 = math::fast::exp<ATN_SCALE>(rScores.sub[0][0].val1 - top_new_max);
-		rScores.sub[0][1].val0 = math::fast::exp<ATN_SCALE>(rScores.sub[0][1].val0 - top_new_max);
-		rScores.sub[0][1].val1 = math::fast::exp<ATN_SCALE>(rScores.sub[0][1].val1 - top_new_max);
+		rScores.sub[0][0].val0 = math::fast::expb((rScores.sub[0][0].val0 - top_new_max) * SCORE_SCALE);
+		rScores.sub[0][0].val1 = math::fast::expb((rScores.sub[0][0].val1 - top_new_max) * SCORE_SCALE);
+		rScores.sub[0][1].val0 = math::fast::expb((rScores.sub[0][1].val0 - top_new_max) * SCORE_SCALE);
+		rScores.sub[0][1].val1 = math::fast::expb((rScores.sub[0][1].val1 - top_new_max) * SCORE_SCALE);
 
-		rScores.sub[1][0].val0 = math::fast::exp<ATN_SCALE>(rScores.sub[1][0].val0 - bot_new_max);
-		rScores.sub[1][0].val1 = math::fast::exp<ATN_SCALE>(rScores.sub[1][0].val1 - bot_new_max);
-		rScores.sub[1][1].val0 = math::fast::exp<ATN_SCALE>(rScores.sub[1][1].val0 - bot_new_max);
-		rScores.sub[1][1].val1 = math::fast::exp<ATN_SCALE>(rScores.sub[1][1].val1 - bot_new_max);
+		rScores.sub[1][0].val0 = math::fast::expb((rScores.sub[1][0].val0 - bot_new_max) * SCORE_SCALE);
+		rScores.sub[1][0].val1 = math::fast::expb((rScores.sub[1][0].val1 - bot_new_max) * SCORE_SCALE);
+		rScores.sub[1][1].val0 = math::fast::expb((rScores.sub[1][1].val0 - bot_new_max) * SCORE_SCALE);
+		rScores.sub[1][1].val1 = math::fast::expb((rScores.sub[1][1].val1 - bot_new_max) * SCORE_SCALE);
 	}
 
 	// Step 4: `sum` of the owned row
@@ -132,63 +133,6 @@ X17_DEVICE void online_softmax(
 	stats.sum = stats.sum * rescale + sum_addition;
 }
 
-template<const usize Q_PER_WARP, const usize M, const usize N, const usize K>
-requires(M % Q_PER_WARP == 0 && N == K * 16)
-X17_DEVICE void combine_write(
-	Fragment_16x16<f32> (&rOut)[K],
-	SoftmaxStats r_stats,
-	SMatrix<f32, M, N> sReduce,
-	u32 stats_smem,
-	usize slot
-) {
-	SMatrix<f32, Q_PER_WARP, N> tile = sReduce.tile_m<Q_PER_WARP>(slot);
-	fragments_to_smem(rOut, tile);
-	r_stats.store_shared(
-		stats_smem + sizeof(f32) * (
-			slot * 2 * WARP_SIZE
-			+ (threadIdx.x % WARP_SIZE) * 2
-		)
-	);
-}
-
-template<const f64 ATN_SCALE, const usize Q_PER_WARP, const usize M, const usize N, const usize K>
-requires(M % Q_PER_WARP == 0 && N == K * 16)
-X17_DEVICE void combine_read(
-	Fragment_16x16<f32> (&rOut)[K],
-	SoftmaxStats &r_stats,
-	SMatrix<f32, M, N> sReduce,
-	u32 stats_smem,
-	usize slot
-) {
-	SMatrix<f32, Q_PER_WARP, N> tile = sReduce.tile_m<Q_PER_WARP>(slot);
-	SoftmaxStats s_stats;
-	s_stats.load_shared(
-		stats_smem + sizeof(f32) * (
-			slot * 2 * WARP_SIZE
-			+ (threadIdx.x % WARP_SIZE) * 2
-		)
-	);
-	f32 r_rescale = r_stats.max < s_stats.max ? math::fast::exp<ATN_SCALE>(r_stats.max - s_stats.max) : 1.0f;
-	f32 s_rescale = s_stats.max < r_stats.max ? math::fast::exp<ATN_SCALE>(s_stats.max - r_stats.max) : 1.0f;
-	f32 new_max = fmaxf(r_stats.max, s_stats.max);
-
-	bool is_even = (threadIdx.x % 2) == 0;
-	f32 x_rescale = __shfl_xor_sync(0xffffffff, r_rescale, 1);
-	f32 r_top_rescale = is_even ? r_rescale : x_rescale;
-	f32 r_bot_rescale = is_even ? x_rescale : r_rescale;
-	x_rescale = __shfl_xor_sync(0xffffffff, s_rescale, 1);
-	f32 s_top_rescale = is_even ? s_rescale : x_rescale;
-	f32 s_bot_rescale = is_even ? x_rescale : s_rescale;
-
-	rescale_acc(
-		rOut, r_top_rescale, r_bot_rescale,
-		tile, s_top_rescale, s_bot_rescale
-	);
-
-	r_stats.max = new_max;
-	r_stats.sum = r_stats.sum * r_rescale + s_stats.sum * s_rescale;
-}
-
 template<const f64 ATN_SCALE, const usize K, const usize OUT_DIM, const usize Q_PER_BLOCK>
 requires(Q_PER_BLOCK == 16 && OUT_DIM == K * 16)
 X17_DEVICE void combine_and_store(
@@ -198,67 +142,60 @@ X17_DEVICE void combine_and_store(
 	usize warp_idx,
 	GMatrix<bf16, Q_PER_BLOCK, OUT_DIM> gOut_block
 ) {
-	// Cross-warp reduction: tree reduce WARPS_PER_BLOCK warps -> warp 0.
-	// Each round halves the active warp count. Between a read and the next
-	// round's write there is no __syncthreads(), so each round must use
-	// fresh slots to avoid cross-warp races.
-	//   8 warps: 3 rounds, 4+2 = 6 slots  (round 3 reuses slot 0)
-	//   4 warps: 2 rounds, 2+1 = 3 slots
-	static_assert(WARPS_PER_BLOCK == 4 || WARPS_PER_BLOCK == 8);
-	constexpr usize NUM_SLOTS = (WARPS_PER_BLOCK == 8) ? 6 : 3;
-	SMatrix<f32, NUM_SLOTS * Q_PER_WARP, K * 16> sReduce{smem};
+	static_assert(WARPS_PER_BLOCK == 4);
+	constexpr f32 SCORE_SCALE = math::fast::logb_e * ATN_SCALE;
+	usize tid = threadIdx.x % WARP_SIZE;
+	bool is_even = (threadIdx.x % 2) == 0;
+
+	SMatrix<f32, (WARPS_PER_BLOCK - 1) * Q_PER_WARP, K * 16> sReduce{smem};
 	u32 stats_smem = sReduce._ptr + sReduce.bytes();
 
-	// Round 1: odd warps write, even warps read
+	// Step 1: All warps store their stats to smem
+	r_stats.store_shared(stats_smem + threadIdx.x * sizeof(SoftmaxStats));
 	__syncthreads();
-	if (warp_idx % 2 == 1) {
-		combine_write<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, warp_idx / 2);
+
+	// Step 2: Every thread reads all 4 warps' stats for its row, computes global max/sum
+	f32 global_max = -INFINITY;
+	X17_UNROLL for (usize w = 0; w < WARPS_PER_BLOCK; w++) {
+		SoftmaxStats w_stats;
+		w_stats.load_shared(stats_smem + (w * WARP_SIZE + tid) * sizeof(SoftmaxStats));
+		global_max = fmaxf(global_max, w_stats.max);
+	}
+	f32 global_sum = 0.0f;
+	X17_UNROLL for (usize w = 0; w < WARPS_PER_BLOCK; w++) {
+		SoftmaxStats w_stats;
+		w_stats.load_shared(stats_smem + (w * WARP_SIZE + tid) * sizeof(SoftmaxStats));
+		global_sum += w_stats.sum * math::fast::expb((w_stats.max - global_max) * SCORE_SCALE);
+	}
+
+	// Step 3: Each warp rescales its values, folding in normalization
+	// rescale = exp((my_max - global_max) * SCORE_SCALE) / global_sum
+	f32 my_rescale =
+		math::fast::expb((r_stats.max - global_max) * SCORE_SCALE)
+		* math::fast::recip(global_sum);
+	f32 partner_rescale = __shfl_xor_sync(0xffffffff, my_rescale, 1);
+	f32 top_rescale = is_even ? my_rescale : partner_rescale;
+	f32 bot_rescale = is_even ? partner_rescale : my_rescale;
+	X17_UNROLL for (usize i = 0; i < K; i++) {
+		rOut[i].scale_(top_rescale, bot_rescale);
+	}
+
+	// Step 4: Warps 1-3 store their rescaled+normalized values to smem
+	if (warp_idx != 0) {
+		SMatrix<f32, Q_PER_WARP, K * 16> slot = sReduce.template tile_m<Q_PER_WARP>(warp_idx - 1);
+		fragments_to_smem(rOut, slot);
 	}
 	__syncthreads();
-	if (warp_idx % 2 == 0) {
-		combine_read<ATN_SCALE, Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, warp_idx / 2);
-	}
 
-	if constexpr (WARPS_PER_BLOCK == 8) {
-		// Round 2: warps 2,6 write to slots 4,5; warps 0,4 read
-		if (warp_idx % 4 == 2) {
-			combine_write<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 4 + warp_idx / 4);
-		}
-		__syncthreads();
-		if (warp_idx % 4 == 0) {
-			combine_read<ATN_SCALE, Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 4 + warp_idx / 4);
-		}
-
-		// Round 3: warp 4 writes to slot 0, warp 0 reads
-		if (warp_idx == 4) {
-			combine_write<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 0);
-		}
-		__syncthreads();
-		if (warp_idx == 0) {
-			combine_read<ATN_SCALE, Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 0);
-		}
-	} else {
-		// Round 2: warp 2 writes to slot 2, warp 0 reads
-		if (warp_idx == 2) {
-			combine_write<Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 2);
-		}
-		__syncthreads();
-		if (warp_idx == 0) {
-			combine_read<ATN_SCALE, Q_PER_WARP>(rOut, r_stats, sReduce, stats_smem, 2);
-		}
-	}
-
+	// Step 5: Warp 0 accumulates and stores to gmem
 	if (warp_idx == 0) {
-		// Normalize: divide each row by its running_sum
-		f32 partner_sum = __shfl_xor_sync(0xffffffff, r_stats.sum, 1);
-		bool is_even = (threadIdx.x % 2) == 0;
-		f32 my_sum = r_stats.sum;
-		f32 top_sum = is_even ? my_sum : partner_sum;
-		f32 bot_sum = is_even ? partner_sum : my_sum;
-		f32 top_inv_sum = math::fast::rcp(top_sum);
-		f32 bot_inv_sum = math::fast::rcp(bot_sum);
-		X17_UNROLL for (usize i = 0; i < K; i++) {
-			rOut[i].scale_(top_inv_sum, bot_inv_sum);
+		X17_UNROLL for (usize w = 0; w < WARPS_PER_BLOCK - 1; w++) {
+			SMatrix<f32, Q_PER_WARP, K * 16> slot = sReduce.template tile_m<Q_PER_WARP>(w);
+			Fragment_16x16<f32> temp[K];
+			smem_to_fragments(temp, slot);
+			X17_UNROLL for (usize i = 0; i < K; i++) {
+				rOut[i].acc_(temp[i]);
+			}
 		}
 
 		store(gOut_block, 0, 0, rOut);
@@ -286,7 +223,7 @@ attn_kernel(
 	constexpr usize KVR_STRIDE = ROPE_DIM * HEAD_SIZE;
 
 
-	extern __shared__ bf16 *smem;
+	u32 smem = 0;
 	// Two preload buffers back-to-back: content [256, V_DIM] + rope [256, ROPE_DIM]
 	SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, V_DIM> preload_c{smem};
 	SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, ROPE_DIM> preload_r{preload_c._ptr + preload_c.bytes()};
@@ -445,6 +382,7 @@ attn_kernel(
 		}
 	}
 	cp_async_wait<0>();  // drain any outstanding preloads before cross-warp sync
+	__syncthreads();     // ensure all warps' async copies have landed before reusing smem
 
 	GMatrixDynSize<bf16, V_DIM> gOut_full{gOut_ptr, q_cnt};
 	GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = gOut_full.template tile_m<Q_PER_BLOCK>(blockIdx.x);
