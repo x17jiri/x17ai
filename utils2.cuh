@@ -66,7 +66,7 @@ namespace math {
 		///
 		/// To calculate `B^x` for some other base `B`, use `expb(x * logb(B))`.
 		X17_DEVICE f32 expb(f32 x) {
-			float result;
+			f32 result;
 			asm ("ex2.approx.ftz.f32 %0, %1;\n" : "=f"(result) : "f"(x));
 			return result;
 		}
@@ -76,7 +76,7 @@ namespace math {
 		///
 		/// To calculate `logB(x)` for some other base `B`, use `logb(x) / logb(B)`.
 		X17_DEVICE f32 logb(f32 x) {
-			float result;
+			f32 result;
 			asm ("lg2.approx.ftz.f32 %0, %1;\n" : "=f"(result) : "f"(x));
 			return result;
 		}

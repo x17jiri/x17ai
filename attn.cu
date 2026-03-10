@@ -34,6 +34,7 @@ X17_DEVICE void causal_mask_diagonal(Fragment_16x16<f32> &rScores) {
 /// Online softmax for flash attention.
 template<const f64 ATN_SCALE, const usize K>
 X17_DEVICE void online_softmax(
+	usize step,
 	SoftmaxStats &stats,
 	Fragment_16x16<f32> &rScores,
 	Fragment_16x16<f32> (&rOut)[K]
@@ -71,38 +72,47 @@ X17_DEVICE void online_softmax(
 	// Step 2: Compute rescale factor and rescale output fragments
 	// stats.max and new_max are both UNSCALED (raw dot products)
 	constexpr f32 SCORE_SCALE = math::fast::logb_e * ATN_SCALE;
-	f32 rescale;
+	f32 rescale = 1.0f;
 	{
-		rescale = math::fast::expb((stats.max - new_max) * SCORE_SCALE);
+		// (new_max - stats.max) * SCORE_SCALE > RESCALE_THRESHOLD
+		//     new_max - stats.max > RESCALE_THRESHOLD / SCORE_SCALE
+		constexpr f32 RESCALE_THRESHOLD = 5.0;
+		bool needs_rescale = new_max - stats.max > RESCALE_THRESHOLD / SCORE_SCALE;
+		if (__any_sync(0xffffffff, needs_rescale)) {
+			if (step == 0) {
+				new_max += RESCALE_THRESHOLD / SCORE_SCALE;
+				zero_(rOut);
+			} else {
+				rescale = math::fast::expb((stats.max - new_max) * SCORE_SCALE);
 
-		// XOR 1 — exchange rescale factors so each thread knows both rows
-		f32 partner_rescale = __shfl_xor_sync(0xffffffff, rescale, 1);
-		f32 top_rescale = is_even ? rescale : partner_rescale;
-		f32 bot_rescale = is_even ? partner_rescale : rescale;
+				// XOR 1 — exchange rescale factors so each thread knows both rows
+				f32 partner_rescale = __shfl_xor_sync(0xffffffff, rescale, 1);
+				f32 top_rescale = is_even ? rescale : partner_rescale;
+				f32 bot_rescale = is_even ? partner_rescale : rescale;
 
-		for (usize i = 0; i < K; i++) {
-			rOut[i].scale_(top_rescale, bot_rescale);
+				scale_top_(rOut, top_rescale);
+				scale_bottom_(bot_rescale);
+			}
+			stats.max = new_max;
 		}
 	}
 
-	// Step 3: Replace scores with math::fast::exp<ATN_SCALE>(score - max)
-	// Keeping max unscaled ensures score==max gives exactly 0 after subtraction,
-	// so exp(0) = 1 regardless of fast-math rounding.
+	// Step 3: Replace scores exp(score - max)
 	{
-		// Exchange new_max so each thread has both top and bottom row max
-		f32 partner_new_max = __shfl_xor_sync(0xffffffff, new_max, 1);
-		f32 top_new_max = is_even ? new_max : partner_new_max;
-		f32 bot_new_max = is_even ? partner_new_max : new_max;
+		// Exchange max so each thread has both top and bottom row max
+		f32 partner_max = __shfl_xor_sync(0xffffffff, stats.max, 1);
+		f32 top_max = is_even ? stats.max : partner_max;
+		f32 bot_max = is_even ? partner_max : stats.max;
 
-		rScores.sub[0][0].val0 = math::fast::expb((rScores.sub[0][0].val0 - top_new_max) * SCORE_SCALE);
-		rScores.sub[0][0].val1 = math::fast::expb((rScores.sub[0][0].val1 - top_new_max) * SCORE_SCALE);
-		rScores.sub[0][1].val0 = math::fast::expb((rScores.sub[0][1].val0 - top_new_max) * SCORE_SCALE);
-		rScores.sub[0][1].val1 = math::fast::expb((rScores.sub[0][1].val1 - top_new_max) * SCORE_SCALE);
+		rScores.sub[0][0].val0 = math::fast::expb((rScores.sub[0][0].val0 - top_max) * SCORE_SCALE);
+		rScores.sub[0][0].val1 = math::fast::expb((rScores.sub[0][0].val1 - top_max) * SCORE_SCALE);
+		rScores.sub[0][1].val0 = math::fast::expb((rScores.sub[0][1].val0 - top_max) * SCORE_SCALE);
+		rScores.sub[0][1].val1 = math::fast::expb((rScores.sub[0][1].val1 - top_max) * SCORE_SCALE);
 
-		rScores.sub[1][0].val0 = math::fast::expb((rScores.sub[1][0].val0 - bot_new_max) * SCORE_SCALE);
-		rScores.sub[1][0].val1 = math::fast::expb((rScores.sub[1][0].val1 - bot_new_max) * SCORE_SCALE);
-		rScores.sub[1][1].val0 = math::fast::expb((rScores.sub[1][1].val0 - bot_new_max) * SCORE_SCALE);
-		rScores.sub[1][1].val1 = math::fast::expb((rScores.sub[1][1].val1 - bot_new_max) * SCORE_SCALE);
+		rScores.sub[1][0].val0 = math::fast::expb((rScores.sub[1][0].val0 - bot_max) * SCORE_SCALE);
+		rScores.sub[1][0].val1 = math::fast::expb((rScores.sub[1][0].val1 - bot_max) * SCORE_SCALE);
+		rScores.sub[1][1].val0 = math::fast::expb((rScores.sub[1][1].val0 - bot_max) * SCORE_SCALE);
+		rScores.sub[1][1].val1 = math::fast::expb((rScores.sub[1][1].val1 - bot_max) * SCORE_SCALE);
 	}
 
 	// Step 4: `sum` of the owned row
@@ -129,8 +139,7 @@ X17_DEVICE void online_softmax(
 	}
 
 	// Update running stats
-	stats.max = new_max;
-	stats.sum = stats.sum * rescale + sum_addition;
+	stats.sum = math::fma(stats.sum, rescale, sum_addition);
 }
 
 template<const f64 ATN_SCALE, const usize K, const usize OUT_DIM, const usize Q_PER_BLOCK>
@@ -169,10 +178,8 @@ X17_DEVICE void combine_and_store(
 	}
 
 	// Step 3: Each warp rescales its values, folding in normalization
-	// rescale = exp((my_max - global_max) * SCORE_SCALE) / global_sum
-	f32 my_rescale =
-		math::fast::expb((r_stats.max - global_max) * SCORE_SCALE)
-		* math::fast::recip(global_sum);
+	f32 L = math::fma(math::fast::logb(global_sum), f32(1.0 / SCORE_SCALE), global_max);
+	f32 my_rescale = math::fast::expb((r_stats.max - L) * SCORE_SCALE);
 	f32 partner_rescale = __shfl_xor_sync(0xffffffff, my_rescale, 1);
 	f32 top_rescale = is_even ? my_rescale : partner_rescale;
 	f32 bot_rescale = is_even ? partner_rescale : my_rescale;
@@ -199,6 +206,8 @@ X17_DEVICE void combine_and_store(
 		}
 
 		store(gOut_block, 0, 0, rOut);
+
+		// TODO - store L
 	}
 }
 
@@ -265,10 +274,6 @@ attn_kernel(
 		cp_async_commit();
 	}
 
-	// Prepare outputs
-	Fragment_16x16<f32> rOut[V_TILES];
-	zero_(rOut);
-
 	// Load Q from SMEM to registers
 	cp_async_wait<GMEM_PRELOAD - 1>();
 	__syncthreads();
@@ -318,6 +323,10 @@ attn_kernel(
 
 	// Sequential loop over KV (causal: each warp stops at its diagonal)
 	SoftmaxStats r_stats;
+	r_stats.sum = 0.0f;
+	r_stats.max = -std::numeric_limits<f32>::infinity();
+	Fragment_16x16<f32> rOut[V_TILES];
+
 	usize q_start = blockIdx.x * Q_PER_BLOCK;
 	usize kv_pos = warp_idx * KV_PER_WARP;
 	X17_NO_UNROLL for (size_t kv_step = 0; kv_pos <= q_start && kv_step < kv_steps; ++kv_step, kv_pos += KV_PER_STEP) {
@@ -337,7 +346,7 @@ attn_kernel(
 		}
 
 		// Softmax — scores are unscaled; ATN_SCALE is folded into math::fast::exp
-		online_softmax<ATN_SCALE>(r_stats, rScores_f32, rOut);
+		online_softmax<ATN_SCALE>(kv_step, r_stats, rScores_f32, rOut);
 
 		{ // Get more data from GMEM
 			// Wait for the next batch of GMEM -> SMEM preloads to complete
