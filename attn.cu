@@ -34,7 +34,6 @@ X17_DEVICE void causal_mask_diagonal(Fragment_16x16<f32> &rScores) {
 /// Online softmax for flash attention.
 template<const f64 ATN_SCALE, const usize K>
 X17_DEVICE void online_softmax(
-	usize step,
 	SoftmaxStats &stats,
 	Fragment_16x16<f32> &rScores,
 	Fragment_16x16<f32> (&rOut)[K]
@@ -64,7 +63,6 @@ X17_DEVICE void online_softmax(
 
 		// XOR 2
 		// — thread 0 combines with thread 2 → complete row (all 16 values)
-		new_max = fmaxf(new_max, stats.max);
 		recv_max = __shfl_xor_sync(0xffffffff, new_max, 2);
 		new_max = fmaxf(new_max, recv_max);
 	}
@@ -79,10 +77,7 @@ X17_DEVICE void online_softmax(
 		constexpr f32 RESCALE_THRESHOLD = 5.0;
 		bool needs_rescale = new_max - stats.max > RESCALE_THRESHOLD / SCORE_SCALE;
 		if (__any_sync(0xffffffff, needs_rescale)) {
-			if (step == 0) {
-				new_max += RESCALE_THRESHOLD / SCORE_SCALE;
-				zero_(rOut);
-			} else {
+			if (__all_sync(0xffffffff, isfinite(stats.max))) {
 				rescale = math::fast::expb((stats.max - new_max) * SCORE_SCALE);
 
 				// XOR 1 — exchange rescale factors so each thread knows both rows
@@ -92,8 +87,11 @@ X17_DEVICE void online_softmax(
 
 				scale_top_(rOut, top_rescale);
 				scale_bottom_(rOut, bot_rescale);
+			} else {
+				new_max += RESCALE_THRESHOLD / SCORE_SCALE;
+				zero_(rOut);
 			}
-			stats.max = new_max;
+			stats.max = fmaxf(new_max, stats.max);
 		}
 	}
 
@@ -346,7 +344,7 @@ attn_kernel(
 		}
 
 		// Softmax — scores are unscaled; ATN_SCALE is folded into math::fast::exp
-		online_softmax<ATN_SCALE>(kv_step, r_stats, rScores_f32, rOut);
+		online_softmax<ATN_SCALE>(r_stats, rScores_f32, rOut);
 
 		{ // Get more data from GMEM
 			// Wait for the next batch of GMEM -> SMEM preloads to complete
@@ -425,7 +423,7 @@ int main(int argc, char *argv[]) {
 	// allocate q: bf16 [Q_LEN, QK_DIM]
 	std::vector<bf16> q_data(Q_LEN * QK_DIM);
 	if (use_real_data) {
-		std::ifstream in("q.bin", std::ios::binary);
+		std::ifstream in("tmp/q.bin", std::ios::binary);
 		in.read(
 			reinterpret_cast<char*>(q_data.data()),
 			static_cast<std::streamsize>(q_data.size() * sizeof(*q_data.data()))
@@ -449,7 +447,7 @@ int main(int argc, char *argv[]) {
 	// allocate kv rope:    bf16 [KV_LEN, ROPE_DIM]
 	std::vector<bf16> kv_data(KV_LEN * QK_DIM);
 	if (use_real_data) {
-		std::ifstream in("kv.bin", std::ios::binary);
+		std::ifstream in("tmp/kv.bin", std::ios::binary);
 		in.read(
 			reinterpret_cast<char*>(kv_data.data()),
 			static_cast<std::streamsize>(kv_data.size() * sizeof(*kv_data.data()))
@@ -551,7 +549,7 @@ int main(int argc, char *argv[]) {
 
 	// write output to file
 	{
-		std::ofstream out_file("out_cpu.bin", std::ios::binary);
+		std::ofstream out_file("tmp/out_cpu.bin", std::ios::binary);
 		cudaMemcpy(out_data.data(), out_dev, out_size_bytes, cudaMemcpyDeviceToHost);
 		out_file.write(
 			reinterpret_cast<char *>(out_data.data()),
