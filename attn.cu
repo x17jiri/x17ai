@@ -75,7 +75,7 @@ X17_DEVICE void online_softmax(
 	f32 rescale = 1.0f;
 	{
 		// (new_max - stats.max) * SCORE_SCALE > RESCALE_THRESHOLD
-		//     new_max - stats.max > RESCALE_THRESHOLD / SCORE_SCALE
+		//     => new_max - stats.max > RESCALE_THRESHOLD / SCORE_SCALE
 		constexpr f32 RESCALE_THRESHOLD = 5.0;
 		bool needs_rescale = new_max - stats.max > RESCALE_THRESHOLD / SCORE_SCALE;
 		if (__any_sync(0xffffffff, needs_rescale)) {
@@ -91,13 +91,13 @@ X17_DEVICE void online_softmax(
 				f32 bot_rescale = is_even ? partner_rescale : rescale;
 
 				scale_top_(rOut, top_rescale);
-				scale_bottom_(bot_rescale);
+				scale_bottom_(rOut, bot_rescale);
 			}
 			stats.max = new_max;
 		}
 	}
 
-	// Step 3: Replace scores exp(score - max)
+	// Step 3: Replace scores with exp(score - max)
 	{
 		// Exchange max so each thread has both top and bottom row max
 		f32 partner_max = __shfl_xor_sync(0xffffffff, stats.max, 1);
@@ -420,6 +420,7 @@ int main(int argc, char *argv[]) {
 		Q_LEN = 32768;
 		KV_LEN = 32768;
 	}
+	srand(42);
 
 	// allocate q: bf16 [Q_LEN, QK_DIM]
 	std::vector<bf16> q_data(Q_LEN * QK_DIM);
@@ -432,6 +433,7 @@ int main(int argc, char *argv[]) {
 	} else {
 		for (size_t i = 0; i < q_data.size(); ++i) {
 			q_data[i] = bf16(float(i));
+			q_data[i] = bf16(float(rand()) / RAND_MAX * 2.0f - 1.0f);
 		}
 	}
 	bf16 *q_dev;
@@ -455,6 +457,7 @@ int main(int argc, char *argv[]) {
 	} else {
 		for (size_t i = 0; i < kv_data.size(); ++i) {
 			kv_data[i] = bf16(float(i*100));
+			kv_data[i] = bf16(float(rand()) / RAND_MAX * 2.0f - 1.0f);
 		}
 	}
 	// Split interleaved [KV_LEN, QK_DIM] into separate content and rope arrays

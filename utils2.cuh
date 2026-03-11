@@ -87,6 +87,10 @@ namespace math {
 			return __frcp_rn(x);
 		}
 	}
+
+	X17_DEVICE f32 fma(f32 a, f32 b, f32 c) {
+		return __fmaf_rn(a, b, c);
+	}
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -409,6 +413,16 @@ struct Fragment_16x16 {
 	X17_DEVICE void scale_(T top, T bot) {
 		sub[0][0].scale_(top);
 		sub[0][1].scale_(top);
+		sub[1][0].scale_(bot);
+		sub[1][1].scale_(bot);
+	}
+
+	X17_DEVICE void scale_top_(T top) {
+		sub[0][0].scale_(top);
+		sub[0][1].scale_(top);
+	}
+
+	X17_DEVICE void scale_bottom_(T bot) {
 		sub[1][0].scale_(bot);
 		sub[1][1].scale_(bot);
 	}
@@ -938,6 +952,42 @@ template<typename T, const usize K>
 X17_DEVICE void zero_(Fragment_16x16<T> (&arr)[K]) {
 	for (usize i = 0; i < K; i++) {
 		arr[i].zero_();
+	}
+}
+
+template<typename T>
+X17_DEVICE void scale_(Fragment_16x16<T> &f, T s) {
+	f.scale_(s);
+}
+
+template<typename T, const usize K>
+X17_DEVICE void scale_(Fragment_16x16<T> (&arr)[K], T s) {
+	for (usize i = 0; i < K; i++) {
+		arr[i].scale_(s);
+	}
+}
+
+template<typename T>
+X17_DEVICE void scale_top_(Fragment_16x16<T> &f, T s) {
+	f.scale_top_(s);
+}
+
+template<typename T, const usize K>
+X17_DEVICE void scale_top_(Fragment_16x16<T> (&arr)[K], T s) {
+	for (usize i = 0; i < K; i++) {
+		arr[i].scale_top_(s);
+	}
+}
+
+template<typename T>
+X17_DEVICE void scale_bottom_(Fragment_16x16<T> &f, T s) {
+	f.scale_bottom_(s);
+}
+
+template<typename T, const usize K>
+X17_DEVICE void scale_bottom_(Fragment_16x16<T> (&arr)[K], T s) {
+	for (usize i = 0; i < K; i++) {
+		arr[i].scale_bottom_(s);
 	}
 }
 
