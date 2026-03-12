@@ -49,7 +49,7 @@ X17_DEVICE void online_softmax(
 		math::max(rScores.sub[0][0].val0, rScores.sub[0][0].val1),
 		math::max(rScores.sub[0][1].val0, rScores.sub[0][1].val1)
 	);
-	f32 bot_max = math::max(
+	f32 new_bot_max = math::max(
 		math::max(rScores.sub[1][0].val0, rScores.sub[1][0].val1),
 		math::max(rScores.sub[1][1].val0, rScores.sub[1][1].val1)
 	);
@@ -59,7 +59,7 @@ X17_DEVICE void online_softmax(
 	f32 bot_rescale = 1.0f;
 	// (new_max - max) * SCORE_SCALE > 5.0 => new_max - max > 5.0 / SCORE_SCALE
 	constexpr f32 THRESHOLD = 5.0f / (math::fast::logb_2 * SCORE_SCALE);
-	bool needs_rescale = math::max(new_top_max - top.max, bot_max - bot.max) > THRESHOLD;
+	bool needs_rescale = math::max(new_top_max - top.max, new_bot_max - bot.max) > THRESHOLD;
 	if (any_sync(needs_rescale)) {
 		new_top_max = math::max(new_top_max, shfl_xor_sync(new_top_max, 1));
 		new_top_max = math::max(new_top_max, shfl_xor_sync(new_top_max, 2));
@@ -69,7 +69,7 @@ X17_DEVICE void online_softmax(
 
 		bool first_step = all_sync(top.sum == 0.0f && bot.sum == 0.0f);
 		if (first_step) {
-			zero_
+			zero_(rOut);
 			top.max = new_top_max + THRESHOLD;
 			bot.max = new_bot_max + THRESHOLD;
 		} else {
@@ -147,29 +147,39 @@ X17_DEVICE void combine_and_store(
 	);
 	__syncthreads();
 
-	// Step 2: Every thread reads all warps' stats for its row, computes global max/sum
-	f32 global_max = -INFINITY;
+	// Step 2: Every thread reads all warps' stats for its rows, computes global max/sum
+	usize tid = threadIdx.x % WARP_SIZE;
+	f32 w_top_sum[WARPS_PER_BLOCK], w_top_max[WARPS_PER_BLOCK];
+	f32 w_bot_sum[WARPS_PER_BLOCK], w_bot_max[WARPS_PER_BLOCK];
 	X17_UNROLL for (usize w = 0; w < WARPS_PER_BLOCK; w++) {
-		SoftmaxStats w_stats;
-		w_stats.load_shared(stats_smem + (w * WARP_SIZE + tid) * sizeof(SoftmaxStats));
-		global_max = math::max(global_max, w_stats.max);
+		load_shared_4(
+			stats_smem + (w * WARP_SIZE + tid) * (4 * sizeof(f32)),
+			w_top_sum[w], w_top_max[w], w_bot_sum[w], w_bot_max[w]
+		);
 	}
-	f32 global_sum = 0.0f;
+
+	f32 global_top_max = -INFINITY;
+	f32 global_bot_max = -INFINITY;
 	X17_UNROLL for (usize w = 0; w < WARPS_PER_BLOCK; w++) {
-		SoftmaxStats w_stats;
-		w_stats.load_shared(stats_smem + (w * WARP_SIZE + tid) * sizeof(SoftmaxStats));
-		global_sum += w_stats.sum * math::fast::expb((w_stats.max - global_max) * SCORE_SCALE);
+		global_top_max = math::max(global_top_max, w_top_max[w]);
+		global_bot_max = math::max(global_bot_max, w_bot_max[w]);
+	}
+	f32 global_top_sum = 0.0f;
+	f32 global_bot_sum = 0.0f;
+	X17_UNROLL for (usize w = 0; w < WARPS_PER_BLOCK; w++) {
+		global_top_sum += w_top_sum[w] * math::fast::expb((w_top_max[w] - global_top_max) * SCORE_SCALE);
+		global_bot_sum += w_bot_sum[w] * math::fast::expb((w_bot_max[w] - global_bot_max) * SCORE_SCALE);
 	}
 
 	// Step 3: Each warp rescales its values, folding in normalization
-	f32 L = math::fma(math::fast::logb(global_sum), f32(1.0 / SCORE_SCALE), global_max);
-	f32 my_rescale = math::fast::expb((r_stats.max - L) * SCORE_SCALE);
-	f32 partner_rescale = __shfl_xor_sync(0xffffffff, my_rescale, 1);
-	f32 top_rescale = is_even ? my_rescale : partner_rescale;
-	f32 bot_rescale = is_even ? partner_rescale : my_rescale;
-	X17_UNROLL for (usize i = 0; i < K; i++) {
-		rOut[i].scale_(top_rescale, bot_rescale);
-	}
+	f32 top_L = math::fma(math::fast::logb(global_top_sum), f32(1.0 / SCORE_SCALE), global_top_max);
+	f32 bot_L = math::fma(math::fast::logb(global_bot_sum), f32(1.0 / SCORE_SCALE), global_bot_max);
+
+	f32 top_rescale = math::fast::expb((top.max - top_L) * SCORE_SCALE);
+	f32 bot_rescale = math::fast::expb((bot.max - bot_L) * SCORE_SCALE);
+
+	scale_top_(rOut, top_rescale);
+	scale_bottom_(rOut, bot_rescale);
 
 	// Step 4: Warps 1-N store their rescaled+normalized values to smem
 	if (warp_idx != 0) {
@@ -196,7 +206,7 @@ X17_DEVICE void combine_and_store(
 }
 
 template<usize V_DIM, usize ROPE_DIM, usize HEAD_SIZE>
-__global__ void
+__global__ __launch_bounds__(THREADS_PER_BLOCK) void
 attn_kernel(
 	usize q_cnt, bf16 *gQ_ptr,
 	usize kv_cnt, bf16 *gKVc_ptr, bf16 *gKVr_ptr,
@@ -306,9 +316,8 @@ attn_kernel(
 	}
 
 	// Sequential loop over KV (causal: each warp stops at its diagonal)
-	SoftmaxStats r_stats;
-	r_stats.sum = 0.0f;
-	r_stats.max = -std::numeric_limits<f32>::infinity();
+	SoftmaxStats r_top;
+	SoftmaxStats r_bot;
 	Fragment_16x16<f32> rOut[V_TILES];
 
 	usize q_start = blockIdx.x * Q_PER_BLOCK;
@@ -330,7 +339,9 @@ attn_kernel(
 		}
 
 		// Softmax — scores are unscaled; ATN_SCALE is folded into math::fast::exp
-		online_softmax<ATN_SCALE>(r_stats, rScores_f32, rOut);
+		online_softmax<ATN_SCALE>(r_top, r_bot, rScores_f32, rOut);
+		Fragment_16x16<bf16> rScores;
+		cast(rScores_f32, rScores);
 
 		{ // Get more data from GMEM
 			// Wait for the next batch of GMEM -> SMEM preloads to complete
@@ -363,8 +374,6 @@ attn_kernel(
 		}
 
 		// rOut += rScores * V (content tiles only, already transposed)
-		Fragment_16x16<bf16> rScores;
-		cast(rScores_f32, rScores);
 		X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
 			mma_a_bt(rScores, rKV[i], rOut[i]); smem_tile_to_fragment(sKVc, 0, i * 16, rKV[i]);
 		}
@@ -379,7 +388,7 @@ attn_kernel(
 
 	GMatrixDynSize<bf16, V_DIM> gOut_full{gOut_ptr, q_cnt};
 	GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = gOut_full.template tile_m<Q_PER_BLOCK>(blockIdx.x);
-	combine_and_store<ATN_SCALE>(rOut, r_stats, preload_c._ptr, warp_idx, gOut_block);
+	combine_and_store<ATN_SCALE>(rOut, r_top, r_bot, preload_c._ptr, warp_idx, gOut_block);
 }
 
 int main(int argc, char *argv[]) {

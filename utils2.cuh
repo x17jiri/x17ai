@@ -61,6 +61,9 @@ namespace math {
 		/// logb(e) = logb(2.71828...)
 		constexpr f64 logb_e = std::numbers::log2e_v<f64>;
 
+		/// logb(2) = 1.0 since b = 2.0
+		constexpr f64 logb_2 = 1.0;
+
 		/// Calculates `b^x` where `b` is our underlying base.
 		/// The underlying base was chosen to be fast and may change in the future.
 		///
@@ -88,9 +91,44 @@ namespace math {
 		}
 	}
 
+	X17_DEVICE f32 max(f32 a, f32 b) {
+		return fmaxf(a, b);
+	}
+
 	X17_DEVICE f32 fma(f32 a, f32 b, f32 c) {
 		return __fmaf_rn(a, b, c);
 	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+X17_DEVICE bool any_sync(bool predicate) {
+	return __any_sync(0xffffffff, predicate);
+}
+
+X17_DEVICE bool all_sync(bool predicate) {
+	return __all_sync(0xffffffff, predicate);
+}
+
+X17_DEVICE f32 shfl_xor_sync(f32 val, int lane_mask) {
+	return __shfl_xor_sync(0xffffffff, val, lane_mask);
+}
+
+X17_DEVICE void store_shared_4(u32 ptr, f32 a, f32 b, f32 c, f32 d) {
+	asm volatile(
+		"st.shared.v4.f32 [%0], {%1, %2, %3, %4};\n"
+		:
+		: "r"(ptr), "f"(a), "f"(b), "f"(c), "f"(d)
+		: "memory"
+	);
+}
+
+X17_DEVICE void load_shared_4(u32 ptr, f32 &a, f32 &b, f32 &c, f32 &d) {
+	asm volatile(
+		"ld.shared.v4.f32 {%0, %1, %2, %3}, [%4];\n"
+		: "=f"(a), "=f"(b), "=f"(c), "=f"(d)
+		: "r"(ptr)
+	);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1243,25 +1281,15 @@ X17_DEVICE void fragments_to_smem(
 		u32 p0 = base + tid * 4 * sizeof(f32);
 		u32 p1 = p0 + WARP_SIZE * 4 * sizeof(f32);
 
-		f32 a = src[i].sub[0][0].val0;
-		f32 b = src[i].sub[0][0].val1;
-		f32 c = src[i].sub[0][1].val0;
-		f32 d = src[i].sub[0][1].val1;
-		asm volatile(
-			"st.shared.v4.f32 [%0], {%1, %2, %3, %4};\n"
-			:
-			: "r"(p0), "f"(a), "f"(b), "f"(c), "f"(d)
-			: "memory"
+		store_shared_4(
+			p0,
+			src[i].sub[0][0].val0, src[i].sub[0][0].val1,
+			src[i].sub[0][1].val0, src[i].sub[0][1].val1
 		);
-		a = src[i].sub[1][0].val0;
-		b = src[i].sub[1][0].val1;
-		c = src[i].sub[1][1].val0;
-		d = src[i].sub[1][1].val1;
-		asm volatile(
-			"st.shared.v4.f32 [%0], {%1, %2, %3, %4};\n"
-			:
-			: "r"(p1), "f"(a), "f"(b), "f"(c), "f"(d)
-			: "memory"
+		store_shared_4(
+			p1,
+			src[i].sub[1][0].val0, src[i].sub[1][0].val1,
+			src[i].sub[1][1].val0, src[i].sub[1][1].val1
 		);
 	}
 }
@@ -1279,17 +1307,16 @@ X17_DEVICE void smem_to_fragments(
 		u32 base = src._ptr + i * TILE_STRIDE;
 		u32 p0 = base + tid * 4 * sizeof(f32);
 		u32 p1 = p0 + WARP_SIZE * 4 * sizeof(f32);
-		asm volatile(
-			"ld.shared.v4.f32 {%0, %1, %2, %3}, [%4];\n"
-			: "=f"(dst[i].sub[0][0].val0), "=f"(dst[i].sub[0][0].val1),
-			  "=f"(dst[i].sub[0][1].val0), "=f"(dst[i].sub[0][1].val1)
-			: "r"(p0)
+
+		load_shared_4(
+			p0,
+			dst[i].sub[0][0].val0, dst[i].sub[0][0].val1,
+			dst[i].sub[0][1].val0, dst[i].sub[0][1].val1
 		);
-		asm volatile(
-			"ld.shared.v4.f32 {%0, %1, %2, %3}, [%4];\n"
-			: "=f"(dst[i].sub[1][0].val0), "=f"(dst[i].sub[1][0].val1),
-			  "=f"(dst[i].sub[1][1].val0), "=f"(dst[i].sub[1][1].val1)
-			: "r"(p1)
+		load_shared_4(
+			p1,
+			dst[i].sub[1][0].val0, dst[i].sub[1][0].val1,
+			dst[i].sub[1][1].val0, dst[i].sub[1][1].val1
 		);
 	}
 }
