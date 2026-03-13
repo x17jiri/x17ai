@@ -95,6 +95,16 @@ namespace math {
 		return fmaxf(a, b);
 	}
 
+	template<const size_t N>
+	requires(N > 0)
+	X17_DEVICE f32 max(const f32 (&arr)[N]) {
+		f32 result = arr[0];
+		X17_UNROLL for (size_t i = 1; i < N; i++) {
+			result = fmaxf(result, arr[i]);
+		}
+		return result;
+	}
+
 	X17_DEVICE f32 fma(f32 a, f32 b, f32 c) {
 		return __fmaf_rn(a, b, c);
 	}
@@ -1026,6 +1036,13 @@ template<typename T, const usize K>
 X17_DEVICE void scale_bottom_(Fragment_16x16<T> (&arr)[K], T s) {
 	for (usize i = 0; i < K; i++) {
 		arr[i].scale_bottom_(s);
+	}
+}
+
+template<typename T, const usize K>
+X17_DEVICE void acc_(Fragment_16x16<T> (&dst)[K], Fragment_16x16<T> const (&src)[K]) {
+	for (usize i = 0; i < K; i++) {
+		dst[i].acc_(src[i]);
 	}
 }
 
