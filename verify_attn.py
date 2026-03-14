@@ -47,40 +47,37 @@ def load_inputs(q_len, kv_len):
 	return Q, KV
 
 
-def reference_exact(Q, KV, sink=None):
+def reference_exact(Q, KV, sink=-math.inf, gate=1.0):
 	"""Scalable-Softmax causal attention with optional sink token, in f64.
 	SSMax_n(x)_i = n^(x_i) / sum_j n^(x_j), which is equivalent to
 	standard softmax with scores pre-scaled by ln(n).
 	For row i (0-indexed), n = i+1 (causal: attends to positions 0..i).
-	sink: optional [q_len] tensor of raw sink scores (default 0).
+	sink: optional [q_len] tensor of raw sink scores.
+	gate: scalar multiplier applied to the final output.
 	"""
 	q_len = Q.shape[0]
 	kv_len = KV.shape[0]
 	K = KV[:, :QK_DIM].double()   # [kv_len, QK_DIM]
 	V = KV[:, :V_DIM].double()    # [kv_len, V_DIM]
 	scores = Q.double() @ K.T     # [q_len, kv_len]
+	sink = torch.full((q_len, 1), sink, dtype=torch.double)
+	scores = torch.cat([sink, scores], dim=1)  # [q_len, kv_len+1]
 	scores /= math.sqrt(QK_DIM)
-
-	# Append sink column (unscaled, before SSMax) with score = sink_raw / sqrt(d)
-	if sink is None:
-		sink_scores = torch.full((q_len, 1), 0, dtype=torch.float64)
-	else:
-		sink_scores = sink.double().unsqueeze(1) / math.sqrt(QK_DIM)
-	scores_with_sink = torch.cat([sink_scores, scores], dim=1)  # [q_len, kv_len+1]
 
 	# SSMax: multiply ALL scores (including sink) by ln(n) where n = row_index + 2
 	n = torch.arange(2, q_len + 2, dtype=torch.float64).unsqueeze(1)  # [q_len, 1]
-	scores_with_sink *= torch.log(n)
+	scores *= torch.log(n)
 
 	# Causal mask: mask out kv_pos > q_pos (sink column is never masked)
 	sink_mask = torch.zeros(q_len, 1, dtype=torch.bool)
-	causal_mask = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
-	causal_mask = torch.cat([sink_mask, causal_mask], dim=1)
-	scores_with_sink.masked_fill_(causal_mask, float('-inf'))
+	mask = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
+	mask = torch.cat([sink_mask, mask], dim=1)
+	scores.masked_fill_(mask, float('-inf'))
 
-	attn = torch.softmax(scores_with_sink, dim=-1)
+	attn = torch.softmax(scores, dim=-1)
 	# Only the real tokens contribute to output (skip sink at column 0)
 	out = attn[:, 1:] @ V
+	out *= gate
 	return out.to(torch.bfloat16)
 
 
@@ -135,7 +132,7 @@ def verify(q_len, kv_len):
 	Q, KV = load_inputs(q_len, kv_len)
 
 	print("Computing exact reference (f64 softmax)...")
-	ref_exact = reference_exact(Q, KV)
+	ref_exact = reference_exact(Q, KV, sink=-0.3, gate=0.5)
 
 	print(f"\nFirst 4 rows, first 8 cols:")
 	print_matrix(ref_exact[:4, :8].float())

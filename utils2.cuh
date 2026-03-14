@@ -74,21 +74,6 @@ namespace math {
 			return result;
 		}
 
-		template<const f64 x>
-		requires(i32(x) == x)
-		consteval f64 constexpr_expb() {
-			i32 n = i32(x);
-			if (n >= 0) {
-				f64 result = 1.0;
-				for (i32 i = 0; i < n; i++) {
-					result *= b;
-				}
-				return result;
-			} else {
-				return 1.0 / constexpr_expb<-x>();
-			}
-		}
-
 		/// Calculate `logb(x)` where `b` is our underlying base.
 		/// The underlying base was chosen to be fast and may change in the future.
 		///
@@ -153,6 +138,15 @@ X17_DEVICE void load_shared_4(u32 ptr, f32 &a, f32 &b, f32 &c, f32 &d) {
 		"ld.shared.v4.f32 {%0, %1, %2, %3}, [%4];\n"
 		: "=f"(a), "=f"(b), "=f"(c), "=f"(d)
 		: "r"(ptr)
+	);
+}
+
+/// Load two consecutive f32 values from global memory in a single 64-bit transaction.
+X17_DEVICE void load_gmem_2(const f32 *ptr, f32 &a, f32 &b) {
+	asm volatile(
+		"ld.global.v2.f32 {%0, %1}, [%2];\n"
+		: "=f"(a), "=f"(b)
+		: "l"(ptr)
 	);
 }
 

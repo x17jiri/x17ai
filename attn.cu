@@ -29,8 +29,6 @@ X17_DEVICE void causal_mask_diagonal(Fragment_16x16<f32> &rScores) {
 	rScores.sub[1][1].val1 = k + 1 <= q ? rScores.sub[1][1].val1 : NEG_INF;
 }
 
-constexpr f32 RESCALE_THRESHOLD = 5.0 / math::fast::logb_2;
-
 template<const usize K>
 X17_DEVICE void online_softmax(
 	SoftmaxStats &top,
@@ -55,7 +53,8 @@ X17_DEVICE void online_softmax(
 	// Step 2: Rescale outputs if needed
 	f32 top_rescale = 1.0f;
 	f32 bot_rescale = 1.0f;
-	bool needs_rescale = math::max(new_top_max - top.max, new_bot_max - bot.max) > RESCALE_THRESHOLD;
+	constexpr f32 THRESHOLD = 5.0 / math::fast::logb_2;
+	bool needs_rescale = math::max(new_top_max - top.max, new_bot_max - bot.max) > THRESHOLD;
 	if (any_sync(needs_rescale)) {
 		new_top_max = math::max(new_top_max, shfl_xor_sync(new_top_max, 1));
 		new_top_max = math::max(new_top_max, shfl_xor_sync(new_top_max, 2));
@@ -66,17 +65,17 @@ X17_DEVICE void online_softmax(
 		bool first_step = all_sync(top.sum == 0.0f && bot.sum == 0.0f);
 		if (first_step) {
 			zero_(rOut);
-			top.max = new_top_max + RESCALE_THRESHOLD;
-			bot.max = new_bot_max + RESCALE_THRESHOLD;
+			top.max = new_top_max + THRESHOLD;
+			bot.max = new_bot_max + THRESHOLD;
 		} else {
 			new_top_max =
-				new_top_max - top.max > RESCALE_THRESHOLD
-					? new_top_max + RESCALE_THRESHOLD
+				new_top_max - top.max > THRESHOLD
+					? new_top_max + THRESHOLD
 					: top.max;
 
 			new_bot_max =
-				new_bot_max - bot.max > RESCALE_THRESHOLD
-					? new_bot_max + RESCALE_THRESHOLD
+				new_bot_max - bot.max > THRESHOLD
+					? new_bot_max + THRESHOLD
 					: bot.max;
 
 			top_rescale = math::fast::expb(top.max - new_top_max);
@@ -124,6 +123,7 @@ X17_DEVICE void combine_and_store(
 	f32 sink_score,
 	f32 top_score_scale,
 	f32 bot_score_scale,
+	f32 gate,
 	u32 smem,
 	usize warp_idx,
 	GMatrix<bf16, Q_PER_BLOCK, OUT_DIM> gOut_block
@@ -175,12 +175,12 @@ X17_DEVICE void combine_and_store(
 		);
 	}
 
-	// Step 3: Each warp rescales its values, folding in normalization
+	// Step 3: Each warp rescales its values, folding in normalization and gate
 	f32 top_L = math::fast::logb(global_top_sum) + global_top_max;
 	f32 bot_L = math::fast::logb(global_bot_sum) + global_bot_max;
 
-	f32 top_rescale = math::fast::expb(top.max - top_L);
-	f32 bot_rescale = math::fast::expb(bot.max - bot_L);
+	f32 top_rescale = math::fast::expb(top.max - top_L) * gate;
+	f32 bot_rescale = math::fast::expb(bot.max - bot_L) * gate;
 
 	scale_top_(rOut, top_rescale);
 	scale_bottom_(rOut, bot_rescale);
@@ -213,7 +213,7 @@ attn_kernel(
 	usize q_cnt, bf16 *gQ_ptr,
 	usize kv_cnt, bf16 *gKVc_ptr, bf16 *gKVr_ptr,
 	bf16 *gOut_ptr,
-	f32 *sink  // per-row sink score (raw, unscaled). NULL => 0
+	f32 *sink
 ) {
 	constexpr usize QK_DIM = V_DIM + ROPE_DIM;
 	constexpr usize V_TILES = V_DIM / 16;
@@ -318,6 +318,15 @@ attn_kernel(
 	SoftmaxStats r_bot;
 	Fragment_16x16<f32> rOut[V_TILES];
 
+	// Sink: a virtual token with no V contribution - it only adds to the
+	// softmax denominator, stealing probability from real tokens.
+	// sink[0] = raw score, sink[1] = output gate
+	f32 sink_score = -INFINITY;
+	f32 gate = 1.0f;
+	if (sink != nullptr) {
+		load_gmem_2(sink, sink_score, gate);
+	}
+
 	// Scalable-Softmax: score_scale = (1.0 / sqrt(QK_DIM)) * ln(n) * logb(e)
 	//     1.0 / sqrt(QK_DIM) — standard attention scaling
 	//     ln(n)              — SSMax factor (ln(n) = logb(n) / logb(e))
@@ -325,14 +334,10 @@ attn_kernel(
 	// Since we are multiplying and dividing by logb(e), it cancels out, so:
 	//     score_scale = (1.0 / sqrt(QK_DIM)) * logb(n)
 	usize q_start = blockIdx.x * Q_PER_BLOCK;
-	f32 top_n = q_start + (threadIdx.x % WARP_SIZE) / 4 + 2;
-	f32 bot_n = q_start + (threadIdx.x % WARP_SIZE) / 4 + 10;
+	f32 top_n = q_start + (threadIdx.x % WARP_SIZE) / 4 + 1 + 1; // the final `+ 1` is for sink
+	f32 bot_n = q_start + (threadIdx.x % WARP_SIZE) / 4 + 9 + 1;
 	f32 top_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(top_n);
 	f32 bot_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(bot_n);
-
-	// Sink: a virtual token with no V contribution — it only adds to the
-	// softmax denominator, stealing probability from real tokens.
-	f32 sink_score = sink ? *sink : 0.0f;
 
 	usize kv_pos = warp_idx * KV_PER_WARP;
 	X17_NO_UNROLL for (size_t kv_step = 0; kv_pos <= q_start && kv_step < kv_steps; ++kv_step, kv_pos += KV_PER_STEP) {
@@ -404,7 +409,7 @@ attn_kernel(
 
 	GMatrixDynSize<bf16, V_DIM> gOut_full{gOut_ptr, q_cnt};
 	GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = gOut_full.template tile_m<Q_PER_BLOCK>(blockIdx.x);
-	combine_and_store(rOut, r_top, r_bot, sink_score, top_score_scale, bot_score_scale, preload_c._ptr, warp_idx, gOut_block);
+	combine_and_store(rOut, r_top, r_bot, sink_score, top_score_scale, bot_score_scale, gate, preload_c._ptr, warp_idx, gOut_block);
 }
 
 int main(int argc, char *argv[]) {
@@ -515,13 +520,20 @@ int main(int argc, char *argv[]) {
 
 	cudaFuncSetAttribute(attn_kernel<V_DIM, ROPE_DIM, 1>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
+	// Allocate sink+gate buffer: [sink_score, gate]
+	f32 sink_host[2] = { -0.3f, 0.5f };
+	f32 *sink_dev;
+	cudaMalloc(&sink_dev, sizeof(sink_host));
+	cudaMemcpy(sink_dev, sink_host, sizeof(sink_host), cudaMemcpyHostToDevice);
+	f32 *sink_ptr = use_real_data ? sink_dev : nullptr;
+
 	int WARMUP = use_real_data ? 0 : 50;
 	for (int i = 0; i < WARMUP; ++i) {
 		attn_kernel<V_DIM, ROPE_DIM, 1><<<Q_LEN / Q_PER_BLOCK, THREADS_PER_BLOCK, smem_size>>>(
 			Q_LEN, q_dev,
 			KV_LEN, kvc_dev, kvr_dev,
 			out_dev,
-			nullptr
+			sink_ptr
 		);
 	}
 
@@ -538,7 +550,7 @@ int main(int argc, char *argv[]) {
 			Q_LEN, q_dev,
 			KV_LEN, kvc_dev, kvr_dev,
 			out_dev,
-			nullptr
+			sink_ptr
 		);
 		cudaEventRecord(ends[i]);
 	}
