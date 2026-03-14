@@ -47,11 +47,12 @@ def load_inputs(q_len, kv_len):
 	return Q, KV
 
 
-def reference_exact(Q, KV):
-	"""Scalable-Softmax causal attention in f64.
+def reference_exact(Q, KV, sink=None):
+	"""Scalable-Softmax causal attention with optional sink token, in f64.
 	SSMax_n(x)_i = n^(x_i) / sum_j n^(x_j), which is equivalent to
 	standard softmax with scores pre-scaled by ln(n).
 	For row i (0-indexed), n = i+1 (causal: attends to positions 0..i).
+	sink: optional [q_len] tensor of raw sink scores (default 0).
 	"""
 	q_len = Q.shape[0]
 	kv_len = KV.shape[0]
@@ -60,15 +61,26 @@ def reference_exact(Q, KV):
 	scores = Q.double() @ K.T     # [q_len, kv_len]
 	scores /= math.sqrt(QK_DIM)
 
-	# SSMax: multiply each row's scores by ln(n) where n = row_index + 1
-	n = torch.arange(1, q_len + 1, dtype=torch.float64).unsqueeze(1)  # [q_len, 1]
-	scores *= torch.log(n)
+	# Append sink column (unscaled, before SSMax) with score = sink_raw / sqrt(d)
+	if sink is None:
+		sink_scores = torch.full((q_len, 1), 0, dtype=torch.float64)
+	else:
+		sink_scores = sink.double().unsqueeze(1) / math.sqrt(QK_DIM)
+	scores_with_sink = torch.cat([sink_scores, scores], dim=1)  # [q_len, kv_len+1]
 
-	# Causal mask: mask out kv_pos > q_pos
+	# SSMax: multiply ALL scores (including sink) by ln(n) where n = row_index + 2
+	n = torch.arange(2, q_len + 2, dtype=torch.float64).unsqueeze(1)  # [q_len, 1]
+	scores_with_sink *= torch.log(n)
+
+	# Causal mask: mask out kv_pos > q_pos (sink column is never masked)
+	sink_mask = torch.zeros(q_len, 1, dtype=torch.bool)
 	causal_mask = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
-	scores.masked_fill_(causal_mask, float('-inf'))
-	attn = torch.softmax(scores, dim=-1)
-	out = attn @ V
+	causal_mask = torch.cat([sink_mask, causal_mask], dim=1)
+	scores_with_sink.masked_fill_(causal_mask, float('-inf'))
+
+	attn = torch.softmax(scores_with_sink, dim=-1)
+	# Only the real tokens contribute to output (skip sink at column 0)
+	out = attn[:, 1:] @ V
 	return out.to(torch.bfloat16)
 
 

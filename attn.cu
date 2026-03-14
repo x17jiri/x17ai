@@ -29,6 +29,8 @@ X17_DEVICE void causal_mask_diagonal(Fragment_16x16<f32> &rScores) {
 	rScores.sub[1][1].val1 = k + 1 <= q ? rScores.sub[1][1].val1 : NEG_INF;
 }
 
+constexpr f32 RESCALE_THRESHOLD = 5.0 / math::fast::logb_2;
+
 template<const usize K>
 X17_DEVICE void online_softmax(
 	SoftmaxStats &top,
@@ -53,8 +55,7 @@ X17_DEVICE void online_softmax(
 	// Step 2: Rescale outputs if needed
 	f32 top_rescale = 1.0f;
 	f32 bot_rescale = 1.0f;
-	constexpr f32 THRESHOLD = 5.0 / math::fast::logb_2;
-	bool needs_rescale = math::max(new_top_max - top.max, new_bot_max - bot.max) > THRESHOLD;
+	bool needs_rescale = math::max(new_top_max - top.max, new_bot_max - bot.max) > RESCALE_THRESHOLD;
 	if (any_sync(needs_rescale)) {
 		new_top_max = math::max(new_top_max, shfl_xor_sync(new_top_max, 1));
 		new_top_max = math::max(new_top_max, shfl_xor_sync(new_top_max, 2));
@@ -65,17 +66,17 @@ X17_DEVICE void online_softmax(
 		bool first_step = all_sync(top.sum == 0.0f && bot.sum == 0.0f);
 		if (first_step) {
 			zero_(rOut);
-			top.max = new_top_max + THRESHOLD;
-			bot.max = new_bot_max + THRESHOLD;
+			top.max = new_top_max + RESCALE_THRESHOLD;
+			bot.max = new_bot_max + RESCALE_THRESHOLD;
 		} else {
 			new_top_max =
-				new_top_max - top.max > THRESHOLD
-					? new_top_max + THRESHOLD
+				new_top_max - top.max > RESCALE_THRESHOLD
+					? new_top_max + RESCALE_THRESHOLD
 					: top.max;
 
 			new_bot_max =
-				new_bot_max - bot.max > THRESHOLD
-					? new_bot_max + THRESHOLD
+				new_bot_max - bot.max > RESCALE_THRESHOLD
+					? new_bot_max + RESCALE_THRESHOLD
 					: bot.max;
 
 			top_rescale = math::fast::expb(top.max - new_top_max);
@@ -120,6 +121,9 @@ X17_DEVICE void combine_and_store(
 	Fragment_16x16<f32> (&rOut)[K],
 	SoftmaxStats top,
 	SoftmaxStats bot,
+	f32 sink_score,
+	f32 top_score_scale,
+	f32 bot_score_scale,
 	u32 smem,
 	usize warp_idx,
 	GMatrix<bf16, Q_PER_BLOCK, OUT_DIM> gOut_block
@@ -150,11 +154,14 @@ X17_DEVICE void combine_and_store(
 		);
 	}
 
-	f32 global_top_max = math::max(w_bot_max);
-	f32 global_bot_max = math::max(w_bot_max);
+	f32 top_sink_scaled = sink_score * top_score_scale;
+	f32 bot_sink_scaled = sink_score * bot_score_scale;
 
-	f32 global_top_sum = 0.0f;
-	f32 global_bot_sum = 0.0f;
+	f32 global_top_max = math::max(math::max(w_top_max), top_sink_scaled);
+	f32 global_bot_max = math::max(math::max(w_bot_max), bot_sink_scaled);
+
+	f32 global_top_sum = math::fast::expb(top_sink_scaled - global_top_max);
+	f32 global_bot_sum = math::fast::expb(bot_sink_scaled - global_bot_max);
 	X17_UNROLL for (usize w = 0; w < WARPS_PER_BLOCK; w++) {
 		global_top_sum = math::fma(
 			w_top_sum[w],
@@ -205,7 +212,8 @@ __global__ __launch_bounds__(THREADS_PER_BLOCK) void
 attn_kernel(
 	usize q_cnt, bf16 *gQ_ptr,
 	usize kv_cnt, bf16 *gKVc_ptr, bf16 *gKVr_ptr,
-	bf16 *gOut_ptr
+	bf16 *gOut_ptr,
+	f32 *sink  // per-row sink score (raw, unscaled). NULL => 0
 ) {
 	constexpr usize QK_DIM = V_DIM + ROPE_DIM;
 	constexpr usize V_TILES = V_DIM / 16;
@@ -310,18 +318,21 @@ attn_kernel(
 	SoftmaxStats r_bot;
 	Fragment_16x16<f32> rOut[V_TILES];
 
-	usize q_start = blockIdx.x * Q_PER_BLOCK;
-
 	// Scalable-Softmax: score_scale = (1.0 / sqrt(QK_DIM)) * ln(n) * logb(e)
 	//     1.0 / sqrt(QK_DIM) — standard attention scaling
 	//     ln(n)              — SSMax factor (ln(n) = logb(n) / logb(e))
 	//     logb(e)            — so we can use expb instead of exp
 	// Since we are multiplying and dividing by logb(e), it cancels out, so:
 	//     score_scale = (1.0 / sqrt(QK_DIM)) * logb(n)
-	f32 top_n = q_start + (threadIdx.x % WARP_SIZE) / 4 + 1;
-	f32 bot_n = q_start + (threadIdx.x % WARP_SIZE) / 4 + 9;
+	usize q_start = blockIdx.x * Q_PER_BLOCK;
+	f32 top_n = q_start + (threadIdx.x % WARP_SIZE) / 4 + 2;
+	f32 bot_n = q_start + (threadIdx.x % WARP_SIZE) / 4 + 10;
 	f32 top_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(top_n);
 	f32 bot_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(bot_n);
+
+	// Sink: a virtual token with no V contribution — it only adds to the
+	// softmax denominator, stealing probability from real tokens.
+	f32 sink_score = sink ? *sink : 0.0f;
 
 	usize kv_pos = warp_idx * KV_PER_WARP;
 	X17_NO_UNROLL for (size_t kv_step = 0; kv_pos <= q_start && kv_step < kv_steps; ++kv_step, kv_pos += KV_PER_STEP) {
@@ -393,7 +404,7 @@ attn_kernel(
 
 	GMatrixDynSize<bf16, V_DIM> gOut_full{gOut_ptr, q_cnt};
 	GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = gOut_full.template tile_m<Q_PER_BLOCK>(blockIdx.x);
-	combine_and_store(rOut, r_top, r_bot, preload_c._ptr, warp_idx, gOut_block);
+	combine_and_store(rOut, r_top, r_bot, sink_score, top_score_scale, bot_score_scale, preload_c._ptr, warp_idx, gOut_block);
 }
 
 int main(int argc, char *argv[]) {
@@ -509,7 +520,8 @@ int main(int argc, char *argv[]) {
 		attn_kernel<V_DIM, ROPE_DIM, 1><<<Q_LEN / Q_PER_BLOCK, THREADS_PER_BLOCK, smem_size>>>(
 			Q_LEN, q_dev,
 			KV_LEN, kvc_dev, kvr_dev,
-			out_dev
+			out_dev,
+			nullptr
 		);
 	}
 
@@ -525,7 +537,8 @@ int main(int argc, char *argv[]) {
 		attn_kernel<V_DIM, ROPE_DIM, 1><<<NUM_BLOCKS, THREADS_PER_BLOCK, smem_size>>>(
 			Q_LEN, q_dev,
 			KV_LEN, kvc_dev, kvr_dev,
-			out_dev
+			out_dev,
+			nullptr
 		);
 		cudaEventRecord(ends[i]);
 	}
@@ -576,7 +589,7 @@ int main(int argc, char *argv[]) {
 	// Print last 8 rows, last 8 cols
 	printf("\nLast 8 rows, last 8 cols:\n");
 	for (size_t r = Q_LEN - 8; r < Q_LEN; r++) {
-		for (size_t c = 0; c < V_DIM; c++) {
+		for (size_t c = V_DIM - 8; c < V_DIM; c++) {
 			printf("%12.6e ", double(float(out_data[r * V_DIM + c])));
 		}
 		printf("\n");

@@ -74,6 +74,21 @@ namespace math {
 			return result;
 		}
 
+		template<const f64 x>
+		requires(i32(x) == x)
+		consteval f64 constexpr_expb() {
+			i32 n = i32(x);
+			if (n >= 0) {
+				f64 result = 1.0;
+				for (i32 i = 0; i < n; i++) {
+					result *= b;
+				}
+				return result;
+			} else {
+				return 1.0 / constexpr_expb<-x>();
+			}
+		}
+
 		/// Calculate `logb(x)` where `b` is our underlying base.
 		/// The underlying base was chosen to be fast and may change in the future.
 		///
