@@ -13,7 +13,7 @@ import argparse
 import os
 
 QK_DIM = 128
-V_DIM = 128
+V_DIM = 64
 
 import math
 
@@ -39,9 +39,11 @@ def create_inputs(q_len, kv_len):
 	print(f"Created tmp/kv.bin: [{kv_len}, {QK_DIM}] bf16  ({kv_len * QK_DIM * 2} bytes)")
 
 
-def load_inputs(q_len, kv_len):
-	q_raw = np.fromfile("tmp/q.bin", dtype=np.uint16).reshape(q_len, QK_DIM)
-	kv_raw = np.fromfile("tmp/kv.bin", dtype=np.uint16).reshape(kv_len, QK_DIM)
+def load_inputs(q_len, kv_len, large=False):
+	q_file = "tmp/large_q.bin" if large else "tmp/q.bin"
+	kv_file = "tmp/large_kv.bin" if large else "tmp/kv.bin"
+	q_raw = np.fromfile(q_file, dtype=np.uint16).reshape(q_len, QK_DIM)
+	kv_raw = np.fromfile(kv_file, dtype=np.uint16).reshape(kv_len, QK_DIM)
 	Q = torch.from_numpy(q_raw.view(np.int16)).view(torch.bfloat16)
 	KV = torch.from_numpy(kv_raw.view(np.int16)).view(torch.bfloat16)
 	return Q, KV
@@ -84,6 +86,18 @@ def reference_exact(Q, KV, sink=-math.inf, gate=1.0):
 def compare(name, ref_bf16, cuda_bf16, q_len):
 	ref_f = ref_bf16.float()
 	cuda_f = cuda_bf16.float()
+
+	# Count NaN and Inf in CUDA output
+	num_nan = torch.isnan(cuda_f).sum().item()
+	num_inf = torch.isinf(cuda_f).sum().item()
+	if num_nan > 0 or num_inf > 0:
+		print(f"\n*** CUDA output: {num_nan} NaN, {num_inf} Inf out of {cuda_f.numel()} values ***")
+		# Find first NaN/Inf rows
+		nan_mask = torch.isnan(cuda_f) | torch.isinf(cuda_f)
+		bad_rows = nan_mask.any(dim=1).nonzero(as_tuple=False).squeeze(-1)
+		if bad_rows.numel() > 0:
+			print(f"    Bad rows (first 20): {bad_rows[:20].tolist()}")
+
 	diff = (ref_f - cuda_f).abs()
 	ref_np = ref_bf16.view(torch.int16).numpy().view(np.uint16).reshape(q_len, V_DIM)
 	cuda_np = cuda_bf16.view(torch.int16).numpy().view(np.uint16).reshape(q_len, V_DIM)
@@ -128,11 +142,18 @@ def compare(name, ref_bf16, cuda_bf16, q_len):
 			f"cuda={cuda_bf16[r, c].float().item():.6e}")
 
 
-def verify(q_len, kv_len):
-	Q, KV = load_inputs(q_len, kv_len)
+def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5):
+	Q, KV = load_inputs(q_len, kv_len, large=large)
 
-	print("Computing exact reference (f64 softmax)...")
-	ref_exact = reference_exact(Q, KV, sink=-0.3, gate=0.5)
+	if large:
+		sink_arg = -math.inf
+		gate_arg = 1.0
+	else:
+		sink_arg = sink_val
+		gate_arg = gate_val
+
+	print(f"Computing exact reference (f64 softmax) q_len={q_len}, kv_len={kv_len}...")
+	ref_exact = reference_exact(Q, KV, sink=sink_arg, gate=gate_arg)
 
 	print(f"\nFirst 4 rows, first 8 cols:")
 	print_matrix(ref_exact[:4, :8].float())
@@ -161,11 +182,20 @@ if __name__ == "__main__":
 	parser = argparse.ArgumentParser(description="Flash attention verification")
 	parser.add_argument("--create-inputs", action="store_true",
 						help="Generate random tmp/q.bin and tmp/kv.bin")
-	parser.add_argument("--q-len", type=int, default=1024)
-	parser.add_argument("--kv-len", type=int, default=1024)
+	parser.add_argument("--large", action="store_true",
+						help="Use large generated data (tmp/large_q.bin, tmp/large_kv.bin)")
+	parser.add_argument("--q-len", type=int, default=None)
+	parser.add_argument("--kv-len", type=int, default=None)
 	args = parser.parse_args()
 
-	if args.create_inputs:
-		create_inputs(args.q_len, args.kv_len)
+	if args.large:
+		q_len = args.q_len or 32768
+		kv_len = args.kv_len or 32768
 	else:
-		verify(args.q_len, args.kv_len)
+		q_len = args.q_len or 1024
+		kv_len = args.kv_len or 1024
+
+	if args.create_inputs:
+		create_inputs(q_len, kv_len)
+	else:
+		verify(q_len, kv_len, large=args.large)

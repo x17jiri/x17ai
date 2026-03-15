@@ -10,8 +10,10 @@ constexpr usize WARPS_PER_BLOCK = 4;
 constexpr usize GMEM_PRELOAD = 2;
 constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
 //constexpr usize BLOCKS_PER_SM = std::max<usize>(1, 256 / THREADS_PER_BLOCK);
-constexpr usize Q_PER_BLOCK = Q_PER_WARP;
-constexpr usize KV_PER_STEP = KV_PER_WARP * WARPS_PER_BLOCK;
+constexpr usize Q_WARPS = 2;
+constexpr usize Q_PER_BLOCK = Q_PER_WARP * Q_WARPS;
+constexpr usize KV_WARPS = WARPS_PER_BLOCK / Q_WARPS;
+constexpr usize KV_PER_STEP = KV_PER_WARP * KV_WARPS;
 
 X17_DEVICE void causal_mask_diagonal(Fragment_16x16<f32> &rScores) {
 	usize tid = threadIdx.x % WARP_SIZE;
@@ -31,6 +33,7 @@ X17_DEVICE void causal_mask_diagonal(Fragment_16x16<f32> &rScores) {
 
 template<const usize K>
 X17_DEVICE void online_softmax(
+	bool first_step,
 	SoftmaxStats &top,
 	SoftmaxStats &bot,
 	Fragment_16x16<f32> &rScores,
@@ -62,31 +65,26 @@ X17_DEVICE void online_softmax(
 		new_bot_max = math::max(new_bot_max, shfl_xor_sync(new_bot_max, 1));
 		new_bot_max = math::max(new_bot_max, shfl_xor_sync(new_bot_max, 2));
 
-		bool first_step = all_sync(top.sum == 0.0f && bot.sum == 0.0f);
-		if (first_step) {
-			zero_(rOut);
-			top.max = new_top_max + THRESHOLD;
-			bot.max = new_bot_max + THRESHOLD;
-		} else {
-			new_top_max =
-				new_top_max - top.max > THRESHOLD
-					? new_top_max + THRESHOLD
-					: top.max;
+		new_top_max =
+			new_top_max - top.max > THRESHOLD
+				? new_top_max + THRESHOLD
+				: top.max;
 
-			new_bot_max =
-				new_bot_max - bot.max > THRESHOLD
-					? new_bot_max + THRESHOLD
-					: bot.max;
+		new_bot_max =
+			new_bot_max - bot.max > THRESHOLD
+				? new_bot_max + THRESHOLD
+				: bot.max;
 
+		if (!first_step) {
 			top_rescale = math::fast::expb(top.max - new_top_max);
-			bot_rescale = math::fast::expb(bot.max - new_bot_max);
-
 			scale_top_(rOut, top_rescale);
-			scale_bottom_(rOut, bot_rescale);
 
-			top.max = new_top_max;
-			bot.max = new_bot_max;
+			bot_rescale = math::fast::expb(bot.max - new_bot_max);
+			scale_bottom_(rOut, bot_rescale);
 		}
+
+		top.max = new_top_max;
+		bot.max = new_bot_max;
 	}
 
 	// Step 3: Replace scores with expb(score - max)
@@ -114,8 +112,8 @@ X17_DEVICE void online_softmax(
 	bot.sum = math::fma(bot.sum, bot_rescale, bot_add);
 }
 
-template<const usize K, const usize OUT_DIM, const usize Q_PER_BLOCK>
-requires(Q_PER_BLOCK == 16 && OUT_DIM == K * 16)
+template<const usize K, const usize OUT_DIM>
+requires(OUT_DIM == K * 16)
 X17_DEVICE void combine_and_store(
 	Fragment_16x16<f32> (&rOut)[K],
 	SoftmaxStats top,
@@ -125,29 +123,44 @@ X17_DEVICE void combine_and_store(
 	f32 bot_score_scale,
 	f32 gate,
 	u32 smem,
-	usize warp_idx,
+	usize q_warp_idx,
+	usize kv_warp_idx,
 	GMatrix<bf16, Q_PER_BLOCK, OUT_DIM> gOut_block
 ) {
-	// Step 1: All warps store their stats to smem
+	// Reduce across KV_WARPS warps that share the same Q rows.
+	// Each Q-warp group operates independently.
+
+	// Step 1: All warps store their stats to smem (each warp gets its own slot)
 	top.sum += shfl_xor_sync(top.sum, 1);
 	top.sum += shfl_xor_sync(top.sum, 2);
 
 	bot.sum += shfl_xor_sync(bot.sum, 1);
 	bot.sum += shfl_xor_sync(bot.sum, 2);
 
-	SMatrix<f32, (WARPS_PER_BLOCK - 1) * Q_PER_WARP, K * 16> sReduce{smem};
+	// SMEM layout per Q-warp group:
+	//   sReduce: (KV_WARPS-1) * Q_PER_WARP rows × K*16 cols (f32)
+	//   stats:   KV_WARPS * WARP_SIZE * 4 floats
+	constexpr usize REDUCE_BYTES = sizeof(f32) * (KV_WARPS - 1) * Q_PER_WARP * K * 16;
+	constexpr usize STATS_BYTES = KV_WARPS * WARP_SIZE * 4 * sizeof(f32);
+	constexpr usize GROUP_BYTES = REDUCE_BYTES + STATS_BYTES;
+	u32 group_smem = smem + q_warp_idx * GROUP_BYTES;
+
+	SMatrix<f32, (KV_WARPS - 1) * Q_PER_WARP, K * 16> sReduce{group_smem};
 	u32 stats_smem = sReduce._ptr + sReduce.bytes();
+
+	// Use warp-local index within the group for stats storage
+	usize tid = threadIdx.x % WARP_SIZE;
 	store_shared_4(
-		stats_smem + threadIdx.x * (4 * sizeof(f32)),
+		stats_smem + (kv_warp_idx * WARP_SIZE + tid) * (4 * sizeof(f32)),
 		top.sum, top.max, bot.sum, bot.max
 	);
-	__syncthreads();
+	// Sync all warps in this Q-warp group (same barrier ID for all KV warps)
+	bar_sync<KV_WARPS * WARP_SIZE>(q_warp_idx + 1);
 
-	// Step 2: Every thread reads all warps' stats for its rows, computes global max/sum
-	usize tid = threadIdx.x % WARP_SIZE;
-	f32 w_top_sum[WARPS_PER_BLOCK], w_top_max[WARPS_PER_BLOCK];
-	f32 w_bot_sum[WARPS_PER_BLOCK], w_bot_max[WARPS_PER_BLOCK];
-	X17_UNROLL for (usize w = 0; w < WARPS_PER_BLOCK; w++) {
+	// Step 2: Every thread reads all KV_WARPS stats for its rows, computes global max/sum
+	f32 w_top_sum[KV_WARPS], w_top_max[KV_WARPS];
+	f32 w_bot_sum[KV_WARPS], w_bot_max[KV_WARPS];
+	X17_UNROLL for (usize w = 0; w < KV_WARPS; w++) {
 		load_shared_4(
 			stats_smem + (w * WARP_SIZE + tid) * (4 * sizeof(f32)),
 			w_top_sum[w], w_top_max[w], w_bot_sum[w], w_bot_max[w]
@@ -162,7 +175,7 @@ X17_DEVICE void combine_and_store(
 
 	f32 global_top_sum = math::fast::expb(top_sink_scaled - global_top_max);
 	f32 global_bot_sum = math::fast::expb(bot_sink_scaled - global_bot_max);
-	X17_UNROLL for (usize w = 0; w < WARPS_PER_BLOCK; w++) {
+	X17_UNROLL for (usize w = 0; w < KV_WARPS; w++) {
 		global_top_sum = math::fma(
 			w_top_sum[w],
 			math::fast::expb(w_top_max[w] - global_top_max),
@@ -185,138 +198,93 @@ X17_DEVICE void combine_and_store(
 	scale_top_(rOut, top_rescale);
 	scale_bottom_(rOut, bot_rescale);
 
-	// Step 4: Warps 1-N store their rescaled+normalized values to smem
-	if (warp_idx != 0) {
-		SMatrix<f32, Q_PER_WARP, K * 16> slot = sReduce.template tile_m<Q_PER_WARP>(warp_idx - 1);
+	// Step 4: KV warps 1..N store their rescaled+normalized values to smem
+	if (kv_warp_idx != 0) {
+		SMatrix<f32, Q_PER_WARP, K * 16> slot = sReduce.template tile_m<Q_PER_WARP>(kv_warp_idx - 1);
 		fragments_to_smem(rOut, slot);
 	}
-	__syncthreads();
+	bar_sync<KV_WARPS * WARP_SIZE>(q_warp_idx + 1);
 
-	// Step 5: Warp 0 accumulates and stores to gmem
-	if (warp_idx == 0) {
-		X17_UNROLL for (usize w = 0; w < WARPS_PER_BLOCK - 1; w++) {
+	// Step 5: KV warp 0 accumulates and stores to gmem
+	if (kv_warp_idx == 0) {
+		X17_UNROLL for (usize w = 0; w < KV_WARPS - 1; w++) {
 			SMatrix<f32, Q_PER_WARP, K * 16> slot = sReduce.template tile_m<Q_PER_WARP>(w);
 			Fragment_16x16<f32> temp[K];
 			smem_to_fragments(temp, slot);
 			acc_(rOut, temp);
 		}
 
-		store(gOut_block, 0, 0, rOut);
+		store(gOut_block, q_warp_idx * Q_PER_WARP, 0, rOut);
 
 		// TODO - store L
 	}
 }
 
-template<usize V_DIM, usize ROPE_DIM, usize HEAD_SIZE>
+template<usize V_DIM, usize NONROPE_DIM, usize ROPE_DIM, usize HEAD_CNT>
 __global__ __launch_bounds__(THREADS_PER_BLOCK) void
-attn_kernel(
+attn_forward(
 	usize q_cnt, bf16 *gQ_ptr,
-	usize kv_cnt, bf16 *gKVc_ptr, bf16 *gKVr_ptr,
+	usize kv_cnt, bf16 *gKc_ptr, bf16 *gKr_ptr, bf16 *gV_ptr,
 	bf16 *gOut_ptr,
 	f32 *sink
 ) {
-	constexpr usize QK_DIM = V_DIM + ROPE_DIM;
-	constexpr usize V_TILES = V_DIM / 16;
+	static_assert(V_DIM <= NONROPE_DIM, "V_DIM must be <= NONROPE_DIM for interleaved K/V register sharing");
+	constexpr usize QK_DIM = NONROPE_DIM + ROPE_DIM;
+	constexpr usize NONROPE_TILES = NONROPE_DIM / 16;
 	constexpr usize ROPE_TILES = ROPE_DIM / 16;
-	constexpr usize QK_TILES = V_TILES + ROPE_TILES;
+	constexpr usize QK_TILES = NONROPE_TILES + ROPE_TILES;
+	constexpr usize V_TILES = V_DIM / 16;
 
-	constexpr usize Q_STRIDE = QK_DIM * HEAD_SIZE;
-	constexpr usize KVC_STRIDE = V_DIM * HEAD_SIZE;
-	constexpr usize KVR_STRIDE = ROPE_DIM * HEAD_SIZE;
+	constexpr usize Q_STRIDE = QK_DIM * HEAD_CNT;
+	constexpr usize KC_STRIDE = NONROPE_DIM * HEAD_CNT;
+	constexpr usize KR_STRIDE = ROPE_DIM * HEAD_CNT;
+	constexpr usize V_STRIDE = V_DIM * HEAD_CNT;
 
 	u32 smem = 0;
-	// Two preload buffers back-to-back: content [256, V_DIM] + rope [256, ROPE_DIM]
-	SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, V_DIM> preload_c{smem};
-	SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, ROPE_DIM> preload_r{preload_c._ptr + preload_c.bytes()};
-	usize warp_idx = threadIdx.x / WARP_SIZE;
+	SMatrix<bf16, Q_PER_BLOCK, QK_DIM> sQ{smem};
+	SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, QK_DIM> preload_k{sQ._ptr + sQ.bytes()};
+	SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, V_DIM> preload_v{preload_k._ptr + preload_k.bytes()};
+	usize q_warp_idx = (threadIdx.x / WARP_SIZE) % Q_WARPS;
+	usize kv_warp_idx = (threadIdx.x / WARP_SIZE) / Q_WARPS;
 
-	// Load Q from GMEM to SMEM. Use the last preload tiles.
-	static_assert(Q_PER_BLOCK <= KV_PER_STEP);
+	// Load Q from GMEM to SMEM
 	GMatrixDynSize<bf16, QK_DIM> gQ_full{gQ_ptr, q_cnt, Q_STRIDE};
-	auto gQc_full = gQ_full.template slice_n<V_DIM>(0);
-	auto gQr_full = gQ_full.template slice_n<ROPE_DIM>(V_DIM);
-	GMatrix<bf16, Q_PER_BLOCK, V_DIM> gQc_block = gQc_full.template tile_m<Q_PER_BLOCK>(blockIdx.x);
-	SMatrix<bf16, Q_PER_BLOCK, V_DIM> sQc;
-	sQc = preload_c.template tile_m<KV_PER_STEP>(GMEM_PRELOAD - 1).template tile_m<Q_PER_BLOCK>(0);
-	GMatrix<bf16, Q_PER_BLOCK, ROPE_DIM> gQr_block = gQr_full.template tile_m<Q_PER_BLOCK>(blockIdx.x);
-	SMatrix<bf16, Q_PER_BLOCK, ROPE_DIM> sQr;
-	sQr = preload_r.template tile_m<KV_PER_STEP>(GMEM_PRELOAD - 1).template tile_m<Q_PER_BLOCK>(0);
-	cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gQc_block, sQc);
-	cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gQr_block, sQr);
-	cp_async_commit();
+	GMatrix<bf16, Q_PER_BLOCK, QK_DIM> gQ_block = gQ_full.template tile_m<Q_PER_BLOCK>(blockIdx.x);
+	cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gQ_block, sQ);
 
-	// Start preloading KVs from GMEM to SMEM
-	// Don't use the last preload tiles yet because they're used to load Q
-	GMatrixDynSize<bf16, V_DIM> gKVc_full{gKVc_ptr, kv_cnt, KVC_STRIDE};
-	GMatrixDynSize<bf16, ROPE_DIM> gKVr_full{gKVr_ptr, kv_cnt, KVR_STRIDE};
-	size_t kv_steps = gKVc_full.m_rows() / KV_PER_STEP;
-	X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD - 1; ++p) {
+	// TODO: this assumes `kv_cnt >= q_cnt`
+	usize kv_extra = kv_cnt - q_cnt;
+	usize block_q_start = blockIdx.x * Q_PER_BLOCK;
+	usize kv_steps = (kv_extra + block_q_start + Q_PER_BLOCK + KV_PER_STEP - 1) / KV_PER_STEP;
+	kv_steps = std::min(kv_steps, kv_cnt / KV_PER_STEP);
+	usize full_kv_steps = (kv_extra + block_q_start) / KV_PER_STEP;
+	full_kv_steps = std::min(full_kv_steps, kv_cnt / KV_PER_STEP);
+
+	// Start preloading K and V from GMEM to SMEM
+	GMatrixDynSize<bf16, NONROPE_DIM> gKc_full{gKc_ptr, kv_cnt, KC_STRIDE};
+	GMatrixDynSize<bf16, ROPE_DIM> gKr_full{gKr_ptr, kv_cnt, KR_STRIDE};
+	GMatrixDynSize<bf16, V_DIM> gV_full{gV_ptr, kv_cnt, V_STRIDE};
+	X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD; ++p) {
 		if (p < kv_steps) {
-			cp_async_gmem_to_smem<WARP_SIZE>(
-				threadIdx.x % WARP_SIZE,
-				gKVc_full.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(warp_idx),
-				preload_c.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(warp_idx)
+			auto preload_kv = preload_k.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(kv_warp_idx);
+			cp_async_gmem_to_smem<Q_WARPS * WARP_SIZE>(
+				threadIdx.x % (Q_WARPS * WARP_SIZE),
+				gKc_full.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(kv_warp_idx),
+				preload_kv, 0, 0
 			);
-			cp_async_gmem_to_smem<WARP_SIZE>(
-				threadIdx.x % WARP_SIZE,
-				gKVr_full.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(warp_idx),
-				preload_r.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(warp_idx)
+			cp_async_gmem_to_smem<Q_WARPS * WARP_SIZE>(
+				threadIdx.x % (Q_WARPS * WARP_SIZE),
+				gKr_full.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(kv_warp_idx),
+				preload_kv, 0, NONROPE_DIM
+			);
+			cp_async_gmem_to_smem<Q_WARPS * WARP_SIZE>(
+				threadIdx.x % (Q_WARPS * WARP_SIZE),
+				gV_full.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(kv_warp_idx),
+				preload_v.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(kv_warp_idx)
 			);
 		}
 		cp_async_commit();
 	}
-
-	// Load Q from SMEM to registers
-	cp_async_wait<GMEM_PRELOAD - 1>();
-	__syncthreads();
-	Fragment_16x16<bf16> rQ[QK_TILES];
-	X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
-		smem_tile_to_fragment(sQc, 0, i * 16, rQ[i]);
-	}
-	if constexpr (ROPE_TILES > 0) {
-		X17_UNROLL for (usize i = 0; i < ROPE_TILES; i++) {
-			smem_tile_to_fragment(sQr, 0, i * 16, rQ[V_TILES + i]);
-		}
-	}
-
-	{ // Now that we have Q in registers, use the last preload tiles for KV
-		usize p = GMEM_PRELOAD - 1;
-		if (p < kv_steps) {
-			cp_async_gmem_to_smem<WARP_SIZE>(
-				threadIdx.x % WARP_SIZE,
-				gKVc_full.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(warp_idx),
-				preload_c.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(warp_idx)
-			);
-			cp_async_gmem_to_smem<WARP_SIZE>(
-				threadIdx.x % WARP_SIZE,
-				gKVr_full.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(warp_idx),
-				preload_r.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(warp_idx)
-			);
-		}
-		cp_async_commit();
-	}
-
-	// Start preloading sKV from SMEM to registers
-	cp_async_wait<GMEM_PRELOAD - 1>();
-	__syncwarp();
-	SMatrix<bf16, KV_PER_WARP, V_DIM> sKVc;
-	sKVc = preload_c.template tile_m<KV_PER_STEP>(0).template tile_m<KV_PER_WARP>(warp_idx);
-	SMatrix<bf16, KV_PER_WARP, ROPE_DIM> sKVr;
-	sKVr = preload_r.template tile_m<KV_PER_STEP>(0).template tile_m<KV_PER_WARP>(warp_idx);
-	Fragment_16x16<bf16> rKV[QK_TILES];
-	X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
-		smem_tile_to_fragment(sKVc, 0, i * 16, rKV[i]);
-	}
-	if constexpr (ROPE_TILES > 0) {
-		X17_UNROLL for (usize i = 0; i < ROPE_TILES; i++) {
-			smem_tile_to_fragment(sKVr, 0, i * 16, rKV[V_TILES + i]);
-		}
-	}
-
-	// Sequential loop over KV (causal: each warp stops at its diagonal)
-	SoftmaxStats r_top;
-	SoftmaxStats r_bot;
-	Fragment_16x16<f32> rOut[V_TILES];
 
 	// Sink: a virtual token with no V contribution - it only adds to the
 	// softmax denominator, stealing probability from real tokens.
@@ -333,19 +301,55 @@ attn_kernel(
 	//     logb(e)            — so we can use expb instead of exp
 	// Since we are multiplying and dividing by logb(e), it cancels out, so:
 	//     score_scale = (1.0 / sqrt(QK_DIM)) * logb(n)
-	usize q_start = blockIdx.x * Q_PER_BLOCK;
-	f32 top_n = q_start + (threadIdx.x % WARP_SIZE) / 4 + 1 + 1; // the final `+ 1` is for sink
-	f32 bot_n = q_start + (threadIdx.x % WARP_SIZE) / 4 + 9 + 1;
+	usize my_q_start = block_q_start + q_warp_idx * Q_PER_WARP;
+	f32 top_n = my_q_start + (threadIdx.x % WARP_SIZE) / 4 + 1 + 1; // the final `+ 1` is for sink
+	f32 bot_n = my_q_start + (threadIdx.x % WARP_SIZE) / 4 + 9 + 1;
 	f32 top_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(top_n);
 	f32 bot_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(bot_n);
 
-	usize kv_pos = warp_idx * KV_PER_WARP;
-	X17_NO_UNROLL for (size_t kv_step = 0; kv_pos <= q_start && kv_step < kv_steps; ++kv_step, kv_pos += KV_PER_STEP) {
-		// rScores = Q * K.T
+	SoftmaxStats r_top; r_top.max = std::numeric_limits<f32>::lowest(); r_top.sum = 0.0f;
+	SoftmaxStats r_bot; r_bot.max = std::numeric_limits<f32>::lowest(); r_bot.sum = 0.0f;
+	Fragment_16x16<f32> rOut[V_TILES];
+	zero_(rOut);
+
+	cp_async_wait<GMEM_PRELOAD - 1>();
+	__syncthreads();
+
+	// Load Q from SMEM to registers
+	Fragment_16x16<bf16> rQ[QK_TILES];
+	X17_UNROLL for (usize i = 0; i < NONROPE_TILES; i++) {
+		smem_tile_to_fragment(sQ, q_warp_idx * Q_PER_WARP, i * 16, rQ[i]);
+	}
+	if constexpr (ROPE_TILES > 0) {
+		X17_UNROLL for (usize i = 0; i < ROPE_TILES; i++) {
+			smem_tile_to_fragment(sQ, q_warp_idx * Q_PER_WARP, NONROPE_DIM + i * 16, rQ[NONROPE_TILES + i]);
+		}
+	}
+	// Load first Ks from SMEM to registers
+	SMatrix<bf16, KV_PER_WARP, QK_DIM> sK;
+	sK = preload_k.template tile_m<KV_PER_STEP>(0).template tile_m<KV_PER_WARP>(kv_warp_idx);
+	SMatrix<bf16, KV_PER_WARP, V_DIM> sV;
+	sV = preload_v.template tile_m<KV_PER_STEP>(0).template tile_m<KV_PER_WARP>(kv_warp_idx);
+	Fragment_16x16<bf16> rKV[QK_TILES];
+	X17_UNROLL for (usize i = 0; i < NONROPE_TILES; i++) {
+		smem_tile_to_fragment(sK, 0, i * 16, rKV[i]);
+	}
+	if constexpr (ROPE_TILES > 0) {
+		X17_UNROLL for (usize i = 0; i < ROPE_TILES; i++) {
+			smem_tile_to_fragment(sK, 0, NONROPE_DIM + i * 16, rKV[NONROPE_TILES + i]);
+		}
+	}
+
+	// Sequential loop over KV (causal: loop bound uses max_q_start so all
+	// Q warps on a KV row iterate in lockstep for bar_sync)
+	usize kv_step = 0;
+	X17_NO_UNROLL for (; kv_step < kv_steps; ++kv_step) {
+		// rScores = Q * K.T, interleaved with V load (rKV: K -> V)
 		Fragment_16x16<f32> rScores_f32;
 		zero_(rScores_f32);
 		X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
-			mma_a_bt(rQ[i], rKV[i], rScores_f32); rKV[i].transpose_();
+			mma_a_bt(rQ[i], rKV[i], rScores_f32);
+			smem_tile_to_fragment_trans(sV, 0, i * 16, rKV[i]);
 		}
 		X17_UNROLL for (usize i = V_TILES; i < QK_TILES; i++) {
 			mma_a_bt(rQ[i], rKV[i], rScores_f32);
@@ -355,67 +359,85 @@ attn_kernel(
 		scale_top_(rScores_f32, top_score_scale);
 		scale_bottom_(rScores_f32, bot_score_scale);
 
-		// Causal mask on the diagonal tile
-		if (kv_pos == q_start) {
-			causal_mask_diagonal(rScores_f32);
+		// Causal mask: diagonal tile or full mask if past this warp's boundary
+		if (kv_step >= full_kv_steps) {
+			usize kv_pos = kv_step * KV_PER_STEP + kv_warp_idx * KV_PER_WARP;
+			if (kv_pos == kv_extra + my_q_start) {
+				causal_mask_diagonal(rScores_f32);
+			} else if (kv_pos > kv_extra + my_q_start) {
+				fill_(rScores_f32, -INFINITY);
+			}
 		}
-
-		online_softmax(r_top, r_bot, rScores_f32, rOut);
+		online_softmax(kv_step == 0, r_top, r_bot, rScores_f32, rOut);
 		Fragment_16x16<bf16> rScores;
 		cast(rScores_f32, rScores);
 
 		{ // Get more data from GMEM
 			// Wait for the next batch of GMEM -> SMEM preloads to complete
 			cp_async_wait<GMEM_PRELOAD - 2>();
-			__syncwarp();
-			sKVc = preload_c
+			// Sync all Q_WARPS warps on this KV row (named barrier per row, avoiding barrier 0)
+			static_assert(Q_WARPS <= KV_WARPS, "Q_WARPS > KV_WARPS would cause different rows to stop at different steps");
+			bar_sync<Q_WARPS * WARP_SIZE>(kv_warp_idx + 1);
+			sK = preload_k
 				.template tile_m<KV_PER_STEP>((kv_step + 1) % GMEM_PRELOAD)
-				.template tile_m<KV_PER_WARP>(warp_idx);
-			sKVr = preload_r
+				.template tile_m<KV_PER_WARP>(kv_warp_idx);
+			sV = preload_v
 				.template tile_m<KV_PER_STEP>((kv_step + 1) % GMEM_PRELOAD)
-				.template tile_m<KV_PER_WARP>(warp_idx);
+				.template tile_m<KV_PER_WARP>(kv_warp_idx);
 
 			// Preload next KV tiles from GMEM
 			{
 				usize p = kv_step + GMEM_PRELOAD;
 				if (p < kv_steps) {
-					cp_async_gmem_to_smem<WARP_SIZE>(
-						threadIdx.x % WARP_SIZE,
-						gKVc_full.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(warp_idx),
-						preload_c.template tile_m<KV_PER_STEP>(p % GMEM_PRELOAD).template tile_m<KV_PER_WARP>(warp_idx)
+					auto preload_kv = preload_k.template tile_m<KV_PER_STEP>(p % GMEM_PRELOAD).template tile_m<KV_PER_WARP>(kv_warp_idx);
+					cp_async_gmem_to_smem<Q_WARPS * WARP_SIZE>(
+						threadIdx.x % (Q_WARPS * WARP_SIZE),
+						gKc_full.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(kv_warp_idx),
+						preload_kv, 0, 0
 					);
-					cp_async_gmem_to_smem<WARP_SIZE>(
-						threadIdx.x % WARP_SIZE,
-						gKVr_full.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(warp_idx),
-						preload_r.template tile_m<KV_PER_STEP>(p % GMEM_PRELOAD).template tile_m<KV_PER_WARP>(warp_idx)
+					cp_async_gmem_to_smem<Q_WARPS * WARP_SIZE>(
+						threadIdx.x % (Q_WARPS * WARP_SIZE),
+						gKr_full.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(kv_warp_idx),
+						preload_kv, 0, NONROPE_DIM
+					);
+					cp_async_gmem_to_smem<Q_WARPS * WARP_SIZE>(
+						threadIdx.x % (Q_WARPS * WARP_SIZE),
+						gV_full.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(kv_warp_idx),
+						preload_v.template tile_m<KV_PER_STEP>(p % GMEM_PRELOAD).template tile_m<KV_PER_WARP>(kv_warp_idx)
 					);
 				}
 				cp_async_commit();
 			}
 		}
 
-		// rOut += rScores * V (content tiles only, already transposed)
+		// rOut += rScores * V, interleaved with next K load (rKV: V -> K)
 		X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
-			mma_a_bt(rScores, rKV[i], rOut[i]); smem_tile_to_fragment(sKVc, 0, i * 16, rKV[i]);
+			mma_a_bt(rScores, rKV[i], rOut[i]);
+			smem_tile_to_fragment(sK, 0, i * 16, rKV[i]);
+		}
+		// Load remaining K content tiles that weren't covered by V interleaving
+		X17_UNROLL for (usize i = V_TILES; i < NONROPE_TILES; i++) {
+			smem_tile_to_fragment(sK, 0, i * 16, rKV[i]);
 		}
 		if constexpr (ROPE_TILES > 0) {
 			X17_UNROLL for (usize i = 0; i < ROPE_TILES; i++) {
-				smem_tile_to_fragment(sKVr, 0, i * 16, rKV[V_TILES + i]);
+				smem_tile_to_fragment(sK, 0, NONROPE_DIM + i * 16, rKV[NONROPE_TILES + i]);
 			}
 		}
 	}
-	cp_async_wait<0>();  // drain any outstanding preloads before cross-warp sync
-	__syncthreads();     // ensure all warps' async copies have landed before reusing smem
+	cp_async_wait<0>(); // drain any outstanding preloads before cross-warp sync
+	__syncthreads(); // need to sync because combine_and_store() uses SMEM as scratch
 
 	GMatrixDynSize<bf16, V_DIM> gOut_full{gOut_ptr, q_cnt};
 	GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = gOut_full.template tile_m<Q_PER_BLOCK>(blockIdx.x);
-	combine_and_store(rOut, r_top, r_bot, sink_score, top_score_scale, bot_score_scale, gate, preload_c._ptr, warp_idx, gOut_block);
+	combine_and_store(rOut, r_top, r_bot, sink_score, top_score_scale, bot_score_scale, gate, smem, q_warp_idx, kv_warp_idx, gOut_block);
 }
 
 int main(int argc, char *argv[]) {
-	constexpr usize V_DIM = 128;
+	constexpr usize NONROPE_DIM = 128;
+	constexpr usize V_DIM = 64;
 	constexpr usize ROPE_DIM = 0;
-	constexpr usize QK_DIM = V_DIM + ROPE_DIM;
+	constexpr usize QK_DIM = NONROPE_DIM + ROPE_DIM;
 	{
 		f32 diff = fabsf(sqrtf(QK_DIM) - f32(constexpr_sqrt(f64(QK_DIM))));
 		printf("sqrtf=%e, constexpr_sqrt=%e, diff=%e\n",
@@ -431,8 +453,8 @@ int main(int argc, char *argv[]) {
 		Q_LEN = 1024;
 		KV_LEN = 1024;
 	} else {
-		Q_LEN = 32768;
-		KV_LEN = 32768;
+		Q_LEN = 2*32768;
+		KV_LEN = 2*32768;
 	}
 	srand(42);
 
@@ -449,6 +471,10 @@ int main(int argc, char *argv[]) {
 			q_data[i] = bf16(float(i));
 			q_data[i] = bf16(float(rand()) / RAND_MAX * 2.0f - 1.0f);
 		}
+		// Save generated Q for Python verification
+		std::ofstream q_out("tmp/large_q.bin", std::ios::binary);
+		q_out.write(reinterpret_cast<char*>(q_data.data()),
+			static_cast<std::streamsize>(q_data.size() * sizeof(bf16)));
 	}
 	bf16 *q_dev;
 	cudaMalloc(&q_dev, q_data.size() * sizeof(bf16));
@@ -473,27 +499,37 @@ int main(int argc, char *argv[]) {
 			kv_data[i] = bf16(float(i*100));
 			kv_data[i] = bf16(float(rand()) / RAND_MAX * 2.0f - 1.0f);
 		}
+		// Save generated KV for Python verification
+		std::ofstream kv_out("tmp/large_kv.bin", std::ios::binary);
+		kv_out.write(reinterpret_cast<char*>(kv_data.data()),
+			static_cast<std::streamsize>(kv_data.size() * sizeof(bf16)));
 	}
-	// Split interleaved [KV_LEN, QK_DIM] into separate content and rope arrays
-	std::vector<bf16> kvc_data(KV_LEN * V_DIM);
-	std::vector<bf16> kvr_data(KV_LEN * ROPE_DIM);
+	// Split interleaved [KV_LEN, QK_DIM] into separate K content, K rope, and V arrays
+	std::vector<bf16> kc_data(KV_LEN * NONROPE_DIM);
+	std::vector<bf16> kr_data(KV_LEN * ROPE_DIM);
+	std::vector<bf16> v_data(KV_LEN * V_DIM);
 	for (size_t r = 0; r < KV_LEN; r++) {
+		for (size_t c = 0; c < NONROPE_DIM; c++) {
+			kc_data[r * NONROPE_DIM + c] = kv_data[r * QK_DIM + c];
+		}
 		for (size_t c = 0; c < V_DIM; c++) {
-			kvc_data[r * V_DIM + c] = kv_data[r * QK_DIM + c];
+			v_data[r * V_DIM + c] = kv_data[r * QK_DIM + c];
 		}
 		if constexpr (ROPE_DIM > 0) {
 			#pragma nv_diag_suppress 186
 			for (size_t c = 0; c < ROPE_DIM; c++) {
-				kvr_data[r * ROPE_DIM + c] = kv_data[r * QK_DIM + V_DIM + c];
+				kr_data[r * ROPE_DIM + c] = kv_data[r * QK_DIM + NONROPE_DIM + c];
 			}
 			#pragma nv_diag_default 186
 		}
 	}
-	bf16 *kvc_dev, *kvr_dev;
-	cudaMalloc(&kvc_dev, kvc_data.size() * sizeof(bf16));
-	cudaMemcpy(kvc_dev, kvc_data.data(), kvc_data.size() * sizeof(bf16), cudaMemcpyHostToDevice);
-	cudaMalloc(&kvr_dev, kvr_data.size() * sizeof(bf16));
-	cudaMemcpy(kvr_dev, kvr_data.data(), kvr_data.size() * sizeof(bf16), cudaMemcpyHostToDevice);
+	bf16 *kc_dev, *kr_dev, *v_dev;
+	cudaMalloc(&kc_dev, kc_data.size() * sizeof(bf16));
+	cudaMemcpy(kc_dev, kc_data.data(), kc_data.size() * sizeof(bf16), cudaMemcpyHostToDevice);
+	cudaMalloc(&kr_dev, kr_data.size() * sizeof(bf16));
+	cudaMemcpy(kr_dev, kr_data.data(), kr_data.size() * sizeof(bf16), cudaMemcpyHostToDevice);
+	cudaMalloc(&v_dev, v_data.size() * sizeof(bf16));
+	cudaMemcpy(v_dev, v_data.data(), v_data.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 
 	// allocate output: bf16 [Q_LEN, V_DIM]
 	std::vector<bf16> out_data(Q_LEN * V_DIM);
@@ -513,12 +549,14 @@ int main(int argc, char *argv[]) {
 	}
 
 	usize smem_size =
-		sizeof(bf16) * KV_PER_STEP * GMEM_PRELOAD * QK_DIM;
+		sizeof(bf16) * KV_PER_STEP * GMEM_PRELOAD * (QK_DIM + V_DIM)
+		+ sizeof(bf16) * Q_PER_BLOCK * QK_DIM;
+	printf("smem_size = %d bytes\n", smem_size);
 	//smem_size = std::max(smem_size, usize(70 * 1024));
 
-	cudaFuncSetAttribute(attn_kernel<V_DIM, ROPE_DIM, 1>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+	cudaFuncSetAttribute(attn_forward<V_DIM, NONROPE_DIM, ROPE_DIM, 1>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
 
-	cudaFuncSetAttribute(attn_kernel<V_DIM, ROPE_DIM, 1>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+	cudaFuncSetAttribute(attn_forward<V_DIM, NONROPE_DIM, ROPE_DIM, 1>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
 	// Allocate sink+gate buffer: [sink_score, gate]
 	f32 sink_host[2] = { -0.3f, 0.5f };
@@ -527,18 +565,27 @@ int main(int argc, char *argv[]) {
 	cudaMemcpy(sink_dev, sink_host, sizeof(sink_host), cudaMemcpyHostToDevice);
 	f32 *sink_ptr = use_real_data ? sink_dev : nullptr;
 
+	cudaDeviceSynchronize();
+
 	int WARMUP = use_real_data ? 0 : 50;
+	//WARMUP = 0;
 	for (int i = 0; i < WARMUP; ++i) {
-		attn_kernel<V_DIM, ROPE_DIM, 1><<<Q_LEN / Q_PER_BLOCK, THREADS_PER_BLOCK, smem_size>>>(
-			Q_LEN, q_dev,
-			KV_LEN, kvc_dev, kvr_dev,
-			out_dev,
-			sink_ptr
-		);
+		attn_forward
+			<V_DIM, NONROPE_DIM, ROPE_DIM, 1>
+			<<<Q_LEN / Q_PER_BLOCK, THREADS_PER_BLOCK, smem_size>>>
+			(
+				Q_LEN, q_dev,
+				KV_LEN, kc_dev, kr_dev, v_dev,
+				out_dev,
+				sink_ptr
+			);
 	}
+
+	cudaDeviceSynchronize();
 
 	usize NUM_BLOCKS = Q_LEN / Q_PER_BLOCK;
 	int NUM_RUNS = use_real_data ? 1 : 200;
+	//NUM_RUNS = 1;
 	std::vector<cudaEvent_t> starts(NUM_RUNS), ends(NUM_RUNS);
 	for (int i = 0; i < NUM_RUNS; ++i) {
 		cudaEventCreate(&starts[i]);
@@ -546,12 +593,15 @@ int main(int argc, char *argv[]) {
 	}
 	for (int i = 0; i < NUM_RUNS; ++i) {
 		cudaEventRecord(starts[i]);
-		attn_kernel<V_DIM, ROPE_DIM, 1><<<NUM_BLOCKS, THREADS_PER_BLOCK, smem_size>>>(
-			Q_LEN, q_dev,
-			KV_LEN, kvc_dev, kvr_dev,
-			out_dev,
-			sink_ptr
-		);
+		attn_forward
+			<V_DIM, NONROPE_DIM, ROPE_DIM, 1>
+			<<<NUM_BLOCKS, THREADS_PER_BLOCK, smem_size>>>
+			(
+				Q_LEN, q_dev,
+				KV_LEN, kc_dev, kr_dev, v_dev,
+				out_dev,
+				sink_ptr
+			);
 		cudaEventRecord(ends[i]);
 	}
 	cudaDeviceSynchronize();
@@ -608,16 +658,38 @@ int main(int argc, char *argv[]) {
 	}
 
 	// Check for non-finite values
-	bool has_non_finite = false;
+	size_t nan_count = 0;
+	size_t inf_count = 0;
+	std::vector<size_t> nan_rows;
+	std::vector<size_t> inf_rows;
 	for (size_t i = 0; i < out_data.size(); ++i) {
 		float v = float(out_data[i]);
 		if (!isfinite(v)) {
-			has_non_finite = true;
-			break;
+			if (isnan(v)) {
+				nan_count++;
+				nan_rows.push_back(i);
+			} else {
+				inf_count++;
+				inf_rows.push_back(i);
+			}
 		}
 	}
-	if (has_non_finite) {
-		printf("\n*** WARNING: output contains non-finite values (inf or NaN) ***\n");
+	if (inf_count > 0 || nan_count > 0) {
+		printf("\n*** WARNING: output contains %zu infinite values and %zu NaNs ***\n", inf_count, nan_count);
+		if (nan_count > 0) {
+			printf("NaN rows (up to 100): ");
+			for (size_t i = 0; i < std::min(nan_rows.size(), size_t(100)); ++i) {
+				printf("%zu ", nan_rows[i]);
+			}
+			printf("\n");
+		}
+		if (inf_count > 0) {
+			printf("Inf rows (up to 100): ");
+			for (size_t i = 0; i < std::min(inf_rows.size(), size_t(100)); ++i) {
+				printf("%zu ", inf_rows[i]);
+			}
+			printf("\n");
+		}
 	}
 
 	return 0;

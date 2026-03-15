@@ -10,7 +10,7 @@ import math
 import argparse
 
 QK_DIM = 128
-V_DIM = 128
+V_DIM = 64
 
 
 def time_kernel(fn, warmup, iters):
