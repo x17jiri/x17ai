@@ -10,7 +10,7 @@ constexpr usize WARPS_PER_BLOCK = 4;
 constexpr usize GMEM_PRELOAD = 2;
 constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
 //constexpr usize BLOCKS_PER_SM = std::max<usize>(1, 256 / THREADS_PER_BLOCK);
-constexpr usize Q_WARPS = 2;
+constexpr usize Q_WARPS = 1;
 constexpr usize Q_PER_BLOCK = Q_PER_WARP * Q_WARPS;
 constexpr usize KV_WARPS = WARPS_PER_BLOCK / Q_WARPS;
 constexpr usize KV_PER_STEP = KV_PER_WARP * KV_WARPS;
@@ -155,7 +155,11 @@ X17_DEVICE void combine_and_store(
 		top.sum, top.max, bot.sum, bot.max
 	);
 	// Sync all warps in this Q-warp group (same barrier ID for all KV warps)
-	bar_sync<KV_WARPS * WARP_SIZE>(q_warp_idx + 1);
+	if constexpr (Q_WARPS > 0) {
+		bar_sync<KV_WARPS * WARP_SIZE>(q_warp_idx + 1);
+	} else {
+		__syncthreads();
+	}
 
 	// Step 2: Every thread reads all KV_WARPS stats for its rows, computes global max/sum
 	f32 w_top_sum[KV_WARPS], w_top_max[KV_WARPS];
@@ -203,7 +207,11 @@ X17_DEVICE void combine_and_store(
 		SMatrix<f32, Q_PER_WARP, K * 16> slot = sReduce.template tile_m<Q_PER_WARP>(kv_warp_idx - 1);
 		fragments_to_smem(rOut, slot);
 	}
-	bar_sync<KV_WARPS * WARP_SIZE>(q_warp_idx + 1);
+	if constexpr (Q_WARPS > 0) {
+		bar_sync<KV_WARPS * WARP_SIZE>(q_warp_idx + 1);
+	} else {
+		__syncthreads();
+	}
 
 	// Step 5: KV warp 0 accumulates and stores to gmem
 	if (kv_warp_idx == 0) {
@@ -241,11 +249,14 @@ attn_forward(
 	constexpr usize V_STRIDE = V_DIM * HEAD_CNT;
 
 	u32 smem = 0;
-	SMatrix<bf16, Q_PER_BLOCK, QK_DIM> sQ{smem};
-	SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, QK_DIM> preload_k{sQ._ptr + sQ.bytes()};
-	SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, V_DIM> preload_v{preload_k._ptr + preload_k.bytes()};
 	usize q_warp_idx = (threadIdx.x / WARP_SIZE) % Q_WARPS;
 	usize kv_warp_idx = (threadIdx.x / WARP_SIZE) / Q_WARPS;
+	SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, QK_DIM> preload_k{smem};
+	SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, V_DIM> preload_v{preload_k._ptr + preload_k.bytes()};
+	SMatrix<bf16, Q_PER_BLOCK, QK_DIM> sQ =
+		preload_k
+			.template tile_m<KV_PER_STEP>(GMEM_PRELOAD - 1)
+			.template tile_m<Q_PER_BLOCK>(0);
 
 	// Load Q from GMEM to SMEM
 	GMatrixDynSize<bf16, QK_DIM> gQ_full{gQ_ptr, q_cnt, Q_STRIDE};
@@ -261,21 +272,23 @@ attn_forward(
 	full_kv_steps = std::min(full_kv_steps, kv_cnt / KV_PER_STEP);
 
 	// Start preloading K and V from GMEM to SMEM
+	// Don't use the last preload tiles yet because they're used to load Q
 	GMatrixDynSize<bf16, NONROPE_DIM> gKc_full{gKc_ptr, kv_cnt, KC_STRIDE};
 	GMatrixDynSize<bf16, ROPE_DIM> gKr_full{gKr_ptr, kv_cnt, KR_STRIDE};
 	GMatrixDynSize<bf16, V_DIM> gV_full{gV_ptr, kv_cnt, V_STRIDE};
-	X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD; ++p) {
+	X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD - 1; ++p) {
 		if (p < kv_steps) {
-			auto preload_kv = preload_k.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(kv_warp_idx);
 			cp_async_gmem_to_smem<Q_WARPS * WARP_SIZE>(
 				threadIdx.x % (Q_WARPS * WARP_SIZE),
 				gKc_full.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(kv_warp_idx),
-				preload_kv, 0, 0
+				preload_k.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(kv_warp_idx),
+				0, 0
 			);
 			cp_async_gmem_to_smem<Q_WARPS * WARP_SIZE>(
 				threadIdx.x % (Q_WARPS * WARP_SIZE),
 				gKr_full.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(kv_warp_idx),
-				preload_kv, 0, NONROPE_DIM
+				preload_k.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(kv_warp_idx),
+				0, NONROPE_DIM
 			);
 			cp_async_gmem_to_smem<Q_WARPS * WARP_SIZE>(
 				threadIdx.x % (Q_WARPS * WARP_SIZE),
@@ -312,7 +325,7 @@ attn_forward(
 	Fragment_16x16<f32> rOut[V_TILES];
 	zero_(rOut);
 
-	cp_async_wait<GMEM_PRELOAD - 1>();
+	cp_async_wait<GMEM_PRELOAD - 2>();
 	__syncthreads();
 
 	// Load Q from SMEM to registers
@@ -338,6 +351,30 @@ attn_forward(
 		X17_UNROLL for (usize i = 0; i < ROPE_TILES; i++) {
 			smem_tile_to_fragment(sK, 0, NONROPE_DIM + i * 16, rKV[NONROPE_TILES + i]);
 		}
+	}
+
+	{ // Now that we have Q in registers, use the last preload tiles for KV
+		usize p = GMEM_PRELOAD - 1;
+		if (p < kv_steps) {
+			cp_async_gmem_to_smem<Q_WARPS * WARP_SIZE>(
+				threadIdx.x % (Q_WARPS * WARP_SIZE),
+				gKc_full.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(kv_warp_idx),
+				preload_k.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(kv_warp_idx),
+				0, 0
+			);
+			cp_async_gmem_to_smem<Q_WARPS * WARP_SIZE>(
+				threadIdx.x % (Q_WARPS * WARP_SIZE),
+				gKr_full.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(kv_warp_idx),
+				preload_k.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(kv_warp_idx),
+				0, NONROPE_DIM
+			);
+			cp_async_gmem_to_smem<Q_WARPS * WARP_SIZE>(
+				threadIdx.x % (Q_WARPS * WARP_SIZE),
+				gV_full.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(kv_warp_idx),
+				preload_v.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(kv_warp_idx)
+			);
+		}
+		cp_async_commit();
 	}
 
 	// Sequential loop over KV (causal: loop bound uses max_q_start so all
@@ -375,9 +412,11 @@ attn_forward(
 		{ // Get more data from GMEM
 			// Wait for the next batch of GMEM -> SMEM preloads to complete
 			cp_async_wait<GMEM_PRELOAD - 2>();
-			// Sync all Q_WARPS warps on this KV row (named barrier per row, avoiding barrier 0)
-			static_assert(Q_WARPS <= KV_WARPS, "Q_WARPS > KV_WARPS would cause different rows to stop at different steps");
-			bar_sync<Q_WARPS * WARP_SIZE>(kv_warp_idx + 1);
+			if constexpr (Q_WARPS > 0) {
+				bar_sync<Q_WARPS * WARP_SIZE>(kv_warp_idx + 1);
+			} else {
+				__syncwarp();
+			}
 			sK = preload_k
 				.template tile_m<KV_PER_STEP>((kv_step + 1) % GMEM_PRELOAD)
 				.template tile_m<KV_PER_WARP>(kv_warp_idx);
@@ -389,16 +428,17 @@ attn_forward(
 			{
 				usize p = kv_step + GMEM_PRELOAD;
 				if (p < kv_steps) {
-					auto preload_kv = preload_k.template tile_m<KV_PER_STEP>(p % GMEM_PRELOAD).template tile_m<KV_PER_WARP>(kv_warp_idx);
 					cp_async_gmem_to_smem<Q_WARPS * WARP_SIZE>(
 						threadIdx.x % (Q_WARPS * WARP_SIZE),
 						gKc_full.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(kv_warp_idx),
-						preload_kv, 0, 0
+						preload_k.template tile_m<KV_PER_STEP>(p % GMEM_PRELOAD).template tile_m<KV_PER_WARP>(kv_warp_idx),
+						0, 0
 					);
 					cp_async_gmem_to_smem<Q_WARPS * WARP_SIZE>(
 						threadIdx.x % (Q_WARPS * WARP_SIZE),
 						gKr_full.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(kv_warp_idx),
-						preload_kv, 0, NONROPE_DIM
+						preload_k.template tile_m<KV_PER_STEP>(p % GMEM_PRELOAD).template tile_m<KV_PER_WARP>(kv_warp_idx),
+						0, NONROPE_DIM
 					);
 					cp_async_gmem_to_smem<Q_WARPS * WARP_SIZE>(
 						threadIdx.x % (Q_WARPS * WARP_SIZE),
@@ -549,8 +589,7 @@ int main(int argc, char *argv[]) {
 	}
 
 	usize smem_size =
-		sizeof(bf16) * KV_PER_STEP * GMEM_PRELOAD * (QK_DIM + V_DIM)
-		+ sizeof(bf16) * Q_PER_BLOCK * QK_DIM;
+		sizeof(bf16) * KV_PER_STEP * GMEM_PRELOAD * (QK_DIM + V_DIM);
 	printf("smem_size = %d bytes\n", smem_size);
 	//smem_size = std::max(smem_size, usize(70 * 1024));
 
