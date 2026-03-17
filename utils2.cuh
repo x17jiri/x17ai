@@ -89,6 +89,15 @@ namespace math {
 		X17_DEVICE f32 recip(f32 x) {
 			return __frcp_rn(x);
 		}
+
+		/// Gaussian Error Linear Unit (GELU) approximation using `x * sigmoid(1.702 * x)`.
+		X17_DEVICE f32 gelu(f32 x) {
+			constexpr f32 C = 1.702 * logb_e;
+			f32 c = x < 0 ? C : -C;
+			f32 e = expb(c * x);
+			x = x < 0 ? x * e : x;
+			return x * recip(e + 1.0f);
+		}
 	}
 
 	X17_DEVICE f32 max(f32 a, f32 b) {
@@ -112,6 +121,14 @@ namespace math {
 
 //--------------------------------------------------------------------------------------------------
 
+X17_DEVICE void sync_threads() {
+	__syncthreads();
+}
+
+X17_DEVICE void sync_warp() {
+	__syncwarp();
+}
+
 X17_DEVICE bool any_sync(bool predicate) {
 	return __any_sync(0xffffffff, predicate);
 }
@@ -120,7 +137,7 @@ X17_DEVICE bool all_sync(bool predicate) {
 	return __all_sync(0xffffffff, predicate);
 }
 
-X17_DEVICE f32 shfl_xor_sync(f32 val, int lane_mask) {
+X17_DEVICE f32 shuffle_xor_sync(f32 val, int lane_mask) {
 	return __shfl_xor_sync(0xffffffff, val, lane_mask);
 }
 
@@ -226,29 +243,17 @@ namespace sm80 {
 	}
 
 	/// Named barrier sync: syncs exactly THREAD_COUNT threads at barrier `bar_id`.
-	/// bar_id 0 is reserved for __syncthreads(); use 1..15 for custom barriers.
+	/// Entire warps must participate, so THREAD_COUNT must be a multiple of warp size.
+	/// bar_id 0 is reserved for sync_threads(); use 1..15 for custom barriers.
 	/// SM80+ supports 16 named barriers (0-15).
 	template<u32 THREAD_COUNT>
+	requires(THREAD_COUNT % WARP_SIZE == 0)
 	X17_DEVICE void bar_sync(u32 bar_id) {
-		asm volatile("bar.sync %0, %1;" : : "r"(bar_id), "n"(THREAD_COUNT));
-	}
-
-	X17_DEVICE void mma_bf16_f32(
-		f32       &d0, f32       &d1, f32       &d2, f32       &d3,
-		u32 const &a0, u32 const &a1, u32 const &a2, u32 const &a3,
-		u32 const &b0, u32 const &b1
-	) {
-		asm volatile(
-			"\nmma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32.zero "
-			"{%0,  %1,  %2,  %3},"
-			"{%4,  %5,  %6,  %7},"
-			"{%8,  %9};\n"
-			:
-				"=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
-			:
-				"r"(a0),  "r"(a1),  "r"(a2),  "r"(a3),
-				"r"(b0),  "r"(b1)
-		);
+		if constexpr (THREAD_COUNT == WARP_SIZE) {
+			sync_warp();
+		} else {
+			asm volatile("bar.sync %0, %1;" : : "r"(bar_id), "n"(THREAD_COUNT));
+		}
 	}
 
 	X17_DEVICE void mma_bf16_f32(
@@ -517,187 +522,7 @@ struct Fragment_16x16 {
 		sm80::movmatrix(temp.val     , sub[0][1].val);
 		sm80::movmatrix(sub[1][1].val, sub[1][1].val);
 	}
-
-	/// Stores a 16x16 tile from MMA registers to GMEM with 32-byte coalesced writes.
-	/// Even-row threads (tid & 4 == 0) write left 8 cols, odd-row threads write right 8 cols.
-	/// Sender picks what to send so only 2 shuffles needed (top + bottom half).
-	template<typename U, const usize M, const usize N>
-	requires(sizeof(U) == 2)
-	X17_DEVICE void store(GMatrix<U, M, N> const &dst, usize m_idx, usize n_idx) const {
-		usize tid = threadIdx.x % WARP_SIZE;
-		bool is_even = (tid & 4) == 0;
-
-		// Cast all sub-fragments to output type
-		u32 my_tl = sub[0][0].template cast_reg<U>().val;
-		u32 my_tr = sub[0][1].template cast_reg<U>().val;
-		u32 my_bl = sub[1][0].template cast_reg<U>().val;
-		u32 my_br = sub[1][1].template cast_reg<U>().val;
-
-		// Sender picks: even threads send tr (partner needs it), odd send tl
-		u32 top_recv = __shfl_xor_sync(0xffffffff, is_even ? my_tr : my_tl, 4);
-		u32 bot_recv = __shfl_xor_sync(0xffffffff, is_even ? my_br : my_bl, 4);
-
-		my_tl = is_even ? my_tl : top_recv;
-		my_tr = is_even ? top_recv : my_tr;
-
-		my_bl = is_even ? my_bl : bot_recv;
-		my_br = is_even ? bot_recv : my_br;
-
-		u8 *top_base = reinterpret_cast<u8 *>(dst.template tile_m<16>(m_idx / 16)._ptr);
-		usize stride = dst.stride_bytes();
-		usize col_off = n_idx * usize(sizeof(U)) + (is_even ? 0 : 16) + (tid & 3) * 4;
-		usize even_row = (tid >> 3) * 2 * stride;
-		usize odd_row = even_row + stride;
-		u8 *bot_base = top_base + 8 * stride;
-
-		// Top half
-		*reinterpret_cast<u32 *>(top_base + even_row + col_off) = my_tl;
-		*reinterpret_cast<u32 *>(top_base + odd_row  + col_off) = my_tr;
-		// Bottom half
-		*reinterpret_cast<u32 *>(bot_base + even_row + col_off) = my_bl;
-		*reinterpret_cast<u32 *>(bot_base + odd_row  + col_off) = my_br;
-	}
-/*
-	/// Loads a 16x16 tile from GMEM directly into MMA-compatible register layout.
-	/// m_idx and n_idx must be multiples of 16.
-	template<const usize M, const usize N>
-	X17_DEVICE void load(GMatrix<T, M, N> const &src, usize m_idx, usize n_idx) requires(sizeof(T) == 2) {
-		usize tid = threadIdx.x;
-		GMatrix<T, 16, N> src_tile = src.template tile_m<16>(m_idx / 16);
-		usize src_off = n_idx * usize(sizeof(T));
-
-		src_off += (tid & 0x1c) * (src.stride_bytes() / 4) + (tid & 3) * 4;
-		sub[0][0].val = __ldg(reinterpret_cast<u32 const *>(
-			reinterpret_cast<u8 const *>(src_tile._ptr) + src_off
-		));
-
-		src_off += 16;
-		sub[0][1].val = __ldg(reinterpret_cast<u32 const *>(
-			reinterpret_cast<u8 const *>(src_tile._ptr) + src_off
-		));
-
-		src_off += 8 * src.stride_bytes() - 16;
-		sub[1][0].val = __ldg(reinterpret_cast<u32 const *>(
-			reinterpret_cast<u8 const *>(src_tile._ptr) + src_off
-		));
-
-		src_off += 16;
-		sub[1][1].val = __ldg(reinterpret_cast<u32 const *>(
-			reinterpret_cast<u8 const *>(src_tile._ptr) + src_off
-		));
-	}
-*/
-	/// Loads two consecutive 16x16 tiles from GMEM with improved coalescing.
-	/// f0 gets tile at (m_idx, n_idx), f1 gets tile at (m_idx, n_idx + 16).
-	/// Thread mapping: tile = (tid>>2)&1, row_group = tid>>3, col = tid&3.
-	/// Data is in scrambled layout; call shuffle_load2() before use.
-	template<const usize M, const usize N>
-	X17_DEVICE static void load2(
-		Fragment_16x16<T> &f0, Fragment_16x16<T> &f1,
-		GMatrix<T, M, N> const &src, usize m_idx, usize n_idx
-	) requires(sizeof(T) == 2) {
-		usize tid = threadIdx.x % WARP_SIZE;
-		usize tile = (tid >> 2) & 1;
-		usize rg = tid >> 3;
-		usize col = tid & 3;
-
-		GMatrix<T, 16, N> src_tile = src.template tile_m<16>(m_idx / 16);
-		u8 const *ptr = reinterpret_cast<u8 const *>(src_tile._ptr);
-		usize stride = src.stride_bytes();
-		usize base = (n_idx + tile * 16) * usize(sizeof(T)) + col * 4;
-		usize even_off = base + rg * 2 * stride;
-		usize odd_off = even_off + stride;
-		usize bot = 8 * stride;
-
-		// Even rows, top half
-		f0.sub[0][0].val = __ldg(reinterpret_cast<u32 const *>(ptr + even_off));
-		f0.sub[0][1].val = __ldg(reinterpret_cast<u32 const *>(ptr + even_off + 16));
-		// Odd rows, top half
-		f1.sub[0][0].val = __ldg(reinterpret_cast<u32 const *>(ptr + odd_off));
-		f1.sub[0][1].val = __ldg(reinterpret_cast<u32 const *>(ptr + odd_off + 16));
-		// Even rows, bottom half
-		f0.sub[1][0].val = __ldg(reinterpret_cast<u32 const *>(ptr + even_off + bot));
-		f0.sub[1][1].val = __ldg(reinterpret_cast<u32 const *>(ptr + even_off + bot + 16));
-		// Odd rows, bottom half
-		f1.sub[1][0].val = __ldg(reinterpret_cast<u32 const *>(ptr + odd_off + bot));
-		f1.sub[1][1].val = __ldg(reinterpret_cast<u32 const *>(ptr + odd_off + bot + 16));
-	}
-
-	/// Shuffles two fragments loaded by load2() into correct MMA layout.
-	/// After this, f0 = tile 0 data, f1 = tile 1 data.
-	X17_DEVICE static void shuffle_load2(
-		Fragment_16x16<T> &f0, Fragment_16x16<T> &f1
-	) requires(sizeof(T) == 2) {
-		usize tid = threadIdx.x % WARP_SIZE;
-		bool is_tile1 = (tid >> 2) & 1;
-		// bit2=0 threads: f0 has tile0 even rows, f1 has tile0 odd rows → keep f0, replace f1
-		// bit2=1 threads: f0 has tile1 even rows, f1 has tile1 odd rows → replace f0, keep f1
-		X17_UNROLL for (usize h = 0; h < 2; h++) {
-			X17_UNROLL for (usize c = 0; c < 2; c++) {
-				u32 send = is_tile1 ? f0.sub[h][c].val : f1.sub[h][c].val;
-				u32 recv = __shfl_xor_sync(0xffffffff, send, 4);
-				if (is_tile1) f0.sub[h][c].val = recv;
-				else          f1.sub[h][c].val = recv;
-			}
-		}
-	}
 };
-
-template<typename U, typename T, const usize M, const usize N>
-requires(sizeof(U) == 2)
-X17_DEVICE void store_x(
-	GMatrix<U, M, N> const &dst,
-	usize m_idx, usize n_idx,
-	Fragment_16x16<T> f0,
-	Fragment_16x16<T> f1
-) {
-	usize tid = threadIdx.x % WARP_SIZE;
-	bool is_even = (tid & 4) == 0;
-
-	u32 my_tl0 = f0.sub[0][0].template cast_reg<U>().val;
-	u32 my_tr0 = f0.sub[0][1].template cast_reg<U>().val;
-	u32 my_bl0 = f0.sub[1][0].template cast_reg<U>().val;
-	u32 my_br0 = f0.sub[1][1].template cast_reg<U>().val;
-
-	u32 top_recv0 = __shfl_xor_sync(0xffffffff, is_even ? my_tr0 : my_tl0, 4);
-	u32 bot_recv0 = __shfl_xor_sync(0xffffffff, is_even ? my_br0 : my_bl0, 4);
-
-	my_tl0 = is_even ? my_tl0 : top_recv0;
-	my_tr0 = is_even ? top_recv0 : my_tr0;
-
-	my_bl0 = is_even ? my_bl0 : bot_recv0;
-	my_br0 = is_even ? bot_recv0 : my_br0;
-
-	//---
-
-	u32 my_tl1 = f1.sub[0][0].template cast_reg<U>().val;
-	u32 my_tr1 = f1.sub[0][1].template cast_reg<U>().val;
-	u32 my_bl1 = f1.sub[1][0].template cast_reg<U>().val;
-	u32 my_br1 = f1.sub[1][1].template cast_reg<U>().val;
-
-	u32 top_recv1 = __shfl_xor_sync(0xffffffff, is_even ? my_tr1 : my_tl1, 4);
-	u32 bot_recv1 = __shfl_xor_sync(0xffffffff, is_even ? my_br1 : my_bl1, 4);
-
-	my_tl1 = is_even ? my_tl1 : top_recv1;
-	my_tr1 = is_even ? top_recv1 : my_tr1;
-
-	my_bl1 = is_even ? my_bl1 : bot_recv1;
-	my_br1 = is_even ? bot_recv1 : my_br1;
-
-	//---
-
-	u32 top_recv2 = __shfl_xor_sync(0xffffffff, (tid & 8) == 0 ? my_tl1 : my_tl0, 8);
-	u32 bot_recv2 = __shfl_xor_sync(0xffffffff, (tid & 8) == 0 ? my_bl1 : my_bl0, 8);
-
-	my_tl0 = (tid & 8) == 0 ? my_tl0 : top_recv2;
-	my_bl0 = (tid & 8) == 0 ? my_bl0 : bot_recv2;
-
-	my_tl1 = (tid & 8) == 0 ? my_tl1 : top_recv2;
-	my_bl1 = (tid & 8) == 0 ? my_bl1 : bot_recv2;
-
-	//---
-
-}
 
 /// Each fragment has 8 columns of 2-byte type, but a thread always has
 /// 2 consecutive values. So let's assume each fragment has 4 double-columns.
@@ -729,9 +554,9 @@ X17_DEVICE void shuffle_4x4(u32 &r0, u32 &r1, u32 &r2, u32 &r3) {
 
 	r0 = u0; r1 = u1; r2 = u2; r3 = u3;
 
-	r1 = __shfl_xor_sync(0xffffffff, r1, 1);
-	r2 = __shfl_xor_sync(0xffffffff, r2, 2);
-	r3 = __shfl_xor_sync(0xffffffff, r3, 3);
+	r1 = shuffle_xor_sync(r1, 1);
+	r2 = shuffle_xor_sync(r2, 2);
+	r3 = shuffle_xor_sync(r3, 3);
 
 	u0 = (tid & 1) == 0 ? r0 : r1;
 	u1 = (tid & 1) == 0 ? r1 : r0;
@@ -850,19 +675,19 @@ X17_DEVICE void store_1x8_8x8(
 	bool bit2 = (tid & 4) != 0;
 	u32 recv;
 
-	recv = __shfl_xor_sync(0xffffffff, bit2 ? g0 : g4, 4);
+	recv = shuffle_xor_sync(bit2 ? g0 : g4, 4);
 	g0 = bit2 ? recv : g0;
 	g4 = bit2 ? g4 : recv;
 
-	recv = __shfl_xor_sync(0xffffffff, bit2 ? g1 : g5, 4);
+	recv = shuffle_xor_sync(bit2 ? g1 : g5, 4);
 	g1 = bit2 ? recv : g1;
 	g5 = bit2 ? g5 : recv;
 
-	recv = __shfl_xor_sync(0xffffffff, bit2 ? g2 : g6, 4);
+	recv = shuffle_xor_sync(bit2 ? g2 : g6, 4);
 	g2 = bit2 ? recv : g2;
 	g6 = bit2 ? g6 : recv;
 
-	recv = __shfl_xor_sync(0xffffffff, bit2 ? g3 : g7, 4);
+	recv = shuffle_xor_sync(bit2 ? g3 : g7, 4);
 	g3 = bit2 ? recv : g3;
 	g7 = bit2 ? g7 : recv;
 
@@ -871,7 +696,7 @@ X17_DEVICE void store_1x8_8x8(
 	u8 *base = reinterpret_cast<u8 *>(dst._ptr);
 	usize stride = dst.stride_bytes();
 	usize col_off = n_idx * usize(sizeof(U)) + (tid % 8) * 16;
-	usize even_row = (m_idx + (tid >> 3) * 2) * stride;
+	usize even_row = (m_idx + (tid / 8) * 2) * stride;
 	usize odd_row = even_row + stride;
 
 	*reinterpret_cast<uint4 *>(base + even_row + col_off) = make_uint4(g0, g1, g2, g3);
@@ -936,11 +761,11 @@ X17_DEVICE void store2(
 	u32 bl0 = f0.sub[1][0].template cast_reg<U>().val;
 	u32 br0 = f0.sub[1][1].template cast_reg<U>().val;
 
-	recv = __shfl_xor_sync(0xffffffff, bit2 ? tl0 : tr0, 4);
+	recv = shuffle_xor_sync(bit2 ? tl0 : tr0, 4);
 	tl0 = bit2 ? recv : tl0;
 	tr0 = bit2 ? tr0 : recv;
 
-	recv = __shfl_xor_sync(0xffffffff, bit2 ? bl0 : br0, 4);
+	recv = shuffle_xor_sync(bit2 ? bl0 : br0, 4);
 	bl0 = bit2 ? recv : bl0;
 	br0 = bit2 ? br0 : recv;
 
@@ -951,29 +776,29 @@ X17_DEVICE void store2(
 	u32 bl1 = f1.sub[1][0].template cast_reg<U>().val;
 	u32 br1 = f1.sub[1][1].template cast_reg<U>().val;
 
-	recv = __shfl_xor_sync(0xffffffff, bit2 ? tl1 : tr1, 4);
+	recv = shuffle_xor_sync(bit2 ? tl1 : tr1, 4);
 	tl1 = bit2 ? recv : tl1;
 	tr1 = bit2 ? tr1 : recv;
 
-	recv = __shfl_xor_sync(0xffffffff, bit2 ? bl1 : br1, 4);
+	recv = shuffle_xor_sync(bit2 ? bl1 : br1, 4);
 	bl1 = bit2 ? recv : bl1;
 	br1 = bit2 ? br1 : recv;
 
 	//---
 
-	recv = __shfl_xor_sync(0xffffffff, bit3 ? tl0 : tl1, 8);
+	recv = shuffle_xor_sync(bit3 ? tl0 : tl1, 8);
 	tl0 = bit3 ? recv : tl0;
 	tl1 = bit3 ? tl1 : recv;
 
-	recv = __shfl_xor_sync(0xffffffff, bit3 ? tr0 : tr1, 8);
+	recv = shuffle_xor_sync(bit3 ? tr0 : tr1, 8);
 	tr0 = bit3 ? recv : tr0;
 	tr1 = bit3 ? tr1 : recv;
 
-	recv = __shfl_xor_sync(0xffffffff, bit3 ? bl0 : bl1, 8);
+	recv = shuffle_xor_sync(bit3 ? bl0 : bl1, 8);
 	bl0 = bit3 ? recv : bl0;
 	bl1 = bit3 ? bl1 : recv;
 
-	recv = __shfl_xor_sync(0xffffffff, bit3 ? br0 : br1, 8);
+	recv = shuffle_xor_sync(bit3 ? br0 : br1, 8);
 	br0 = bit3 ? recv : br0;
 	br1 = bit3 ? br1 : recv;
 
@@ -1016,7 +841,7 @@ X17_DEVICE void zero_(Fragment_16x16<T> &f) {
 
 template<typename T, const usize K>
 X17_DEVICE void zero_(T (&arr)[K]) {
-	for (usize i = 0; i < K; i++) {
+	X17_UNROLL for (usize i = 0; i < K; i++) {
 		zero_(arr[i]);
 	}
 }
@@ -1033,7 +858,7 @@ X17_DEVICE void fill_(Fragment_16x16<T> &f, T v) {
 
 template<typename T, const usize K>
 X17_DEVICE void fill_(T (&arr)[K], T v) {
-	for (usize i = 0; i < K; i++) {
+	X17_UNROLL for (usize i = 0; i < K; i++) {
 		fill_(arr[i], v);
 	}
 }
@@ -1050,7 +875,7 @@ X17_DEVICE void scale_(Fragment_16x16<T> &f, T s) {
 
 template<typename T, const usize K>
 X17_DEVICE void scale_(T (&arr)[K], T s) {
-	for (usize i = 0; i < K; i++) {
+	X17_UNROLL for (usize i = 0; i < K; i++) {
 		scale_(arr[i], s);
 	}
 }
@@ -1067,7 +892,7 @@ X17_DEVICE void scale_top_(Fragment_16x16<T> &f, T s) {
 
 template<typename T, const usize K>
 X17_DEVICE void scale_top_(Fragment_16x16<T> (&arr)[K], T s) {
-	for (usize i = 0; i < K; i++) {
+	X17_UNROLL for (usize i = 0; i < K; i++) {
 		arr[i].scale_top_(s);
 	}
 }
@@ -1084,7 +909,7 @@ X17_DEVICE void scale_bottom_(Fragment_16x16<T> &f, T s) {
 
 template<typename T, const usize K>
 X17_DEVICE void scale_bottom_(Fragment_16x16<T> (&arr)[K], T s) {
-	for (usize i = 0; i < K; i++) {
+	X17_UNROLL for (usize i = 0; i < K; i++) {
 		arr[i].scale_bottom_(s);
 	}
 }
@@ -1096,7 +921,7 @@ X17_DEVICE void scale_bottom_(T&... args, S s) {
 
 template<typename T, const usize K>
 X17_DEVICE void acc_(Fragment_16x16<T> (&dst)[K], Fragment_16x16<T> const (&src)[K]) {
-	for (usize i = 0; i < K; i++) {
+	X17_UNROLL for (usize i = 0; i < K; i++) {
 		dst[i].acc_(src[i]);
 	}
 }
@@ -1373,7 +1198,7 @@ X17_DEVICE void fragments_to_smem(
 	usize tid = threadIdx.x % WARP_SIZE;
 	constexpr u32 TILE_STRIDE = 2 * WARP_SIZE * 4 * sizeof(f32); // 1024 bytes per 16x16 f32 tile
 
-	for (usize i = 0; i < K; i++) {
+	X17_UNROLL for (usize i = 0; i < K; i++) {
 		u32 base = dst._ptr + i * TILE_STRIDE;
 		u32 p0 = base + tid * 4 * sizeof(f32);
 		u32 p1 = p0 + WARP_SIZE * 4 * sizeof(f32);
@@ -1400,7 +1225,7 @@ X17_DEVICE void smem_to_fragments(
 ) {
 	usize tid = threadIdx.x % WARP_SIZE;
 	constexpr u32 TILE_STRIDE = 2 * WARP_SIZE * 4 * sizeof(f32); // 1024 bytes per 16x16 f32 tile
-	for (usize i = 0; i < K; i++) {
+	X17_UNROLL for (usize i = 0; i < K; i++) {
 		u32 base = src._ptr + i * TILE_STRIDE;
 		u32 p0 = base + tid * 4 * sizeof(f32);
 		u32 p1 = p0 + WARP_SIZE * 4 * sizeof(f32);
