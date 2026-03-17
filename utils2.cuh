@@ -1014,17 +1014,16 @@ X17_DEVICE void zero_(Fragment_16x16<T> &f) {
 	f.zero_();
 }
 
-template<typename T, typename... U>
-X17_DEVICE void zero_(Fragment_16x16<T> &f, U&... rest) {
-	f.zero_();
-	zero_(rest...);
-}
-
 template<typename T, const usize K>
 X17_DEVICE void zero_(T (&arr)[K]) {
 	for (usize i = 0; i < K; i++) {
 		zero_(arr[i]);
 	}
+}
+
+template<typename... T>
+X17_DEVICE void zero_(T&... args) {
+	(zero_(args), ...);
 }
 
 template<typename T>
@@ -1039,6 +1038,11 @@ X17_DEVICE void fill_(T (&arr)[K], T v) {
 	}
 }
 
+template<typename... T, typename S>
+X17_DEVICE void fill_(T&... args, S v) {
+	(fill_(args, v), ...);
+}
+
 template<typename T>
 X17_DEVICE void scale_(Fragment_16x16<T> &f, T s) {
 	f.scale_(s);
@@ -1049,6 +1053,11 @@ X17_DEVICE void scale_(T (&arr)[K], T s) {
 	for (usize i = 0; i < K; i++) {
 		scale_(arr[i], s);
 	}
+}
+
+template<typename... T, typename S>
+X17_DEVICE void scale_(T&... args, S s) {
+	(scale_(args, s), ...);
 }
 
 template<typename T>
@@ -1063,6 +1072,11 @@ X17_DEVICE void scale_top_(Fragment_16x16<T> (&arr)[K], T s) {
 	}
 }
 
+template<typename... T, typename S>
+X17_DEVICE void scale_top_(T&... args, S s) {
+	(scale_top_(args, s), ...);
+}
+
 template<typename T>
 X17_DEVICE void scale_bottom_(Fragment_16x16<T> &f, T s) {
 	f.scale_bottom_(s);
@@ -1073,6 +1087,11 @@ X17_DEVICE void scale_bottom_(Fragment_16x16<T> (&arr)[K], T s) {
 	for (usize i = 0; i < K; i++) {
 		arr[i].scale_bottom_(s);
 	}
+}
+
+template<typename... T, typename S>
+X17_DEVICE void scale_bottom_(T&... args, S s) {
+	(scale_bottom_(args, s), ...);
 }
 
 template<typename T, const usize K>

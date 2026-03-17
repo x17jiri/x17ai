@@ -9,7 +9,7 @@ import torch.nn.functional as F
 import math
 import argparse
 
-QK_DIM = 128
+QK_DIM = 64
 V_DIM = 64
 
 
@@ -31,7 +31,7 @@ def time_kernel(fn, warmup, iters):
     return sorted(s.elapsed_time(e) for s, e in zip(starts, ends))
 
 
-def bench_sdpa(q_len, kv_len, device="cuda", warmup=50, iters=200, dtype=torch.bfloat16, v_dim_override=None):
+def bench_sdpa(q_len, kv_len, device="cuda", warmup=0, iters=1, dtype=torch.bfloat16, v_dim_override=None):
     v_dim = v_dim_override or V_DIM
     torch.manual_seed(42)
 
@@ -96,10 +96,10 @@ def bench_sdpa(q_len, kv_len, device="cuda", warmup=50, iters=200, dtype=torch.b
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Benchmark PyTorch SDPA attention")
-    parser.add_argument("--q-len", type=int, default=32768)
-    parser.add_argument("--kv-len", type=int, default=32768)
-    parser.add_argument("--warmup", type=int, default=50)
-    parser.add_argument("--iters", type=int, default=200)
+    parser.add_argument("--q-len", type=int, default=2*32768)
+    parser.add_argument("--kv-len", type=int, default=2*32768)
+    parser.add_argument("--warmup", type=int, default=0)
+    parser.add_argument("--iters", type=int, default=1)
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -110,7 +110,6 @@ if __name__ == "__main__":
 
     # Also try with V padded to QK_DIM so flash attention backend is eligible
     print("\n" + "=" * 70)
-    print("Re-running with V_DIM padded to QK_DIM (192) to enable flash attention")
+    print("Re-running with V_DIM padded to QK_DIM (",QK_DIM,") to enable flash attention")
     print("=" * 70)
-    bench_sdpa(args.q_len, args.kv_len, warmup=args.warmup, iters=args.iters,
-               v_dim_override=QK_DIM)
+    bench_sdpa(args.q_len, args.kv_len, warmup=args.warmup, iters=args.iters)

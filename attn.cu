@@ -4,17 +4,18 @@
 #include <array>
 #include <algorithm>
 
-constexpr usize Q_PER_WARP = 32;
+constexpr usize Q_PER_WARP = 16;
 constexpr usize Q_FRAGS = Q_PER_WARP / 16;
 constexpr usize KV_PER_WARP = 16;
 constexpr usize WARPS_PER_BLOCK = 4;
 constexpr usize GMEM_PRELOAD = 2;
 constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
 //constexpr usize BLOCKS_PER_SM = std::max<usize>(1, 256 / THREADS_PER_BLOCK);
-constexpr usize Q_WARPS = 1;
+constexpr usize Q_WARPS = 4;
 constexpr usize Q_PER_BLOCK = Q_PER_WARP * Q_WARPS;
 constexpr usize KV_WARPS = WARPS_PER_BLOCK / Q_WARPS;
 constexpr usize KV_PER_STEP = KV_PER_WARP * KV_WARPS;
+constexpr bool SMEM_OVERLAP_Q_WITH_KV = Q_PER_BLOCK <= KV_PER_STEP;
 
 X17_DEVICE void causal_mask_diagonal(Fragment_16x16<f32> &rScores) {
 	usize tid = threadIdx.x % WARP_SIZE;
@@ -116,74 +117,69 @@ X17_DEVICE void online_softmax(
 template<const usize K, const usize OUT_DIM>
 requires(OUT_DIM == K * 16)
 X17_DEVICE void combine_and_store(
-	Fragment_16x16<f32> (&rOut)[Q_FRAGS][K],
-	SoftmaxStats (&r_top)[Q_FRAGS],
-	SoftmaxStats (&r_bot)[Q_FRAGS],
+	Fragment_16x16<f32> (&rOut)[K],
+	SoftmaxStats top,
+	SoftmaxStats bot,
 	f32 sink_score,
-	f32 (&top_score_scale)[Q_FRAGS],
-	f32 (&bot_score_scale)[Q_FRAGS],
+	f32 top_score_scale,
+	f32 bot_score_scale,
 	f32 gate,
 	u32 smem,
 	usize q_warp_idx,
 	usize kv_warp_idx,
 	GMatrix<bf16, Q_PER_BLOCK, OUT_DIM> gOut_block
 ) {
-	// Reduce across KV_WARPS warps that share the same Q rows.
-	// Each Q-warp group operates independently.
-	// All Q_FRAGS fragments are processed in parallel with just 2 barrier syncs.
+	// Complete the row-wise sum reduction within each warp
+	top.sum += shfl_xor_sync(top.sum, 1);
+	top.sum += shfl_xor_sync(top.sum, 2);
 
-	// Step 1: Reduce sums across warp, store stats to smem
-	X17_UNROLL for (usize q = 0; q < Q_FRAGS; q++) {
-		r_top[q].sum += shfl_xor_sync(r_top[q].sum, 1);
-		r_top[q].sum += shfl_xor_sync(r_top[q].sum, 2);
-		r_bot[q].sum += shfl_xor_sync(r_bot[q].sum, 1);
-		r_bot[q].sum += shfl_xor_sync(r_bot[q].sum, 2);
-	}
+	bot.sum += shfl_xor_sync(bot.sum, 1);
+	bot.sum += shfl_xor_sync(bot.sum, 2);
 
-	// SMEM layout per Q-warp group:
-	//   sReduce: (KV_WARPS-1) * Q_PER_WARP rows × K*16 cols (f32)
-	//   stats:   KV_WARPS * WARP_SIZE * Q_FRAGS * 4 floats
-	constexpr usize REDUCE_BYTES = sizeof(f32) * (KV_WARPS - 1) * Q_PER_WARP * K * 16;
-	constexpr usize STATS_BYTES = KV_WARPS * WARP_SIZE * Q_FRAGS * 4 * sizeof(f32);
-	constexpr usize GROUP_BYTES = REDUCE_BYTES + STATS_BYTES;
-	u32 group_smem = smem + q_warp_idx * GROUP_BYTES;
+	f32 top_sink_scaled = sink_score * top_score_scale;
+	f32 bot_sink_scaled = sink_score * bot_score_scale;
 
-	SMatrix<f32, (KV_WARPS - 1) * Q_PER_WARP, K * 16> sReduce{group_smem};
-	u32 stats_smem = sReduce._ptr + sReduce.bytes();
+	f32 global_top_max, global_top_sum;
+	f32 global_bot_max, global_bot_sum;
 
-	usize tid = threadIdx.x % WARP_SIZE;
-	X17_UNROLL for (usize q = 0; q < Q_FRAGS; q++) {
+	if constexpr (KV_WARPS > 1) {
+		// Reduce across KV_WARPS warps that share the same Q rows via SMEM.
+		// Each Q-warp group operates independently.
+
+		// Step 1: All warps store their stats to smem (each warp gets its own slot)
+		// SMEM layout per Q-warp group:
+		//   sReduce: (KV_WARPS-1) * Q_PER_WARP rows × K*16 cols (f32)
+		//   stats:   KV_WARPS * WARP_SIZE * 4 floats
+		constexpr usize REDUCE_BYTES = sizeof(f32) * (KV_WARPS - 1) * Q_PER_WARP * K * 16;
+		constexpr usize STATS_BYTES = KV_WARPS * WARP_SIZE * 4 * sizeof(f32);
+		constexpr usize GROUP_BYTES = REDUCE_BYTES + STATS_BYTES;
+		u32 group_smem = smem + q_warp_idx * GROUP_BYTES;
+
+		SMatrix<f32, (KV_WARPS - 1) * Q_PER_WARP, K * 16> sReduce{group_smem};
+		u32 stats_smem = sReduce._ptr + sReduce.bytes();
+
+		usize tid = threadIdx.x % WARP_SIZE;
 		store_shared_4(
-			stats_smem + ((kv_warp_idx * Q_FRAGS + q) * WARP_SIZE + tid) * (4 * sizeof(f32)),
-			r_top[q].sum, r_top[q].max, r_bot[q].sum, r_bot[q].max
+			stats_smem + (kv_warp_idx * WARP_SIZE + tid) * (4 * sizeof(f32)),
+			top.sum, top.max, bot.sum, bot.max
 		);
-	}
-	// Sync all warps in this Q-warp group
-	if constexpr (Q_WARPS > 1) {
 		bar_sync<KV_WARPS * WARP_SIZE>(q_warp_idx + 1);
-	} else {
-		__syncthreads();
-	}
 
-	// Step 2: Every thread reads all KV_WARPS stats for its rows, computes global max/sum
-	X17_UNROLL for (usize q = 0; q < Q_FRAGS; q++) {
+		// Step 2: Every thread reads all KV_WARPS stats, computes global max/sum
 		f32 w_top_sum[KV_WARPS], w_top_max[KV_WARPS];
 		f32 w_bot_sum[KV_WARPS], w_bot_max[KV_WARPS];
 		X17_UNROLL for (usize w = 0; w < KV_WARPS; w++) {
 			load_shared_4(
-				stats_smem + ((w * Q_FRAGS + q) * WARP_SIZE + tid) * (4 * sizeof(f32)),
+				stats_smem + (w * WARP_SIZE + tid) * (4 * sizeof(f32)),
 				w_top_sum[w], w_top_max[w], w_bot_sum[w], w_bot_max[w]
 			);
 		}
 
-		f32 top_sink_scaled = sink_score * top_score_scale[q];
-		f32 bot_sink_scaled = sink_score * bot_score_scale[q];
+		global_top_max = math::max(math::max(w_top_max), top_sink_scaled);
+		global_bot_max = math::max(math::max(w_bot_max), bot_sink_scaled);
 
-		f32 global_top_max = math::max(math::max(w_top_max), top_sink_scaled);
-		f32 global_bot_max = math::max(math::max(w_bot_max), bot_sink_scaled);
-
-		f32 global_top_sum = math::fast::expb(top_sink_scaled - global_top_max);
-		f32 global_bot_sum = math::fast::expb(bot_sink_scaled - global_bot_max);
+		global_top_sum = math::fast::expb(top_sink_scaled - global_top_max);
+		global_bot_sum = math::fast::expb(bot_sink_scaled - global_bot_max);
 		X17_UNROLL for (usize w = 0; w < KV_WARPS; w++) {
 			global_top_sum = math::fma(
 				w_top_sum[w],
@@ -197,44 +193,63 @@ X17_DEVICE void combine_and_store(
 			);
 		}
 
-		// Step 3: Each warp rescales its values, folding in normalization and gate
+		// Step 3: Rescale, folding in normalization and gate
 		f32 top_L = math::fast::logb(global_top_sum) + global_top_max;
 		f32 bot_L = math::fast::logb(global_bot_sum) + global_bot_max;
 
-		f32 top_rescale = math::fast::expb(r_top[q].max - top_L) * gate;
-		f32 bot_rescale = math::fast::expb(r_bot[q].max - bot_L) * gate;
+		f32 top_rescale = math::fast::expb(top.max - top_L) * gate;
+		f32 bot_rescale = math::fast::expb(bot.max - bot_L) * gate;
 
-		scale_top_(rOut[q], top_rescale);
-		scale_bottom_(rOut[q], bot_rescale);
-	}
+		scale_top_(rOut, top_rescale);
+		scale_bottom_(rOut, bot_rescale);
 
-	// Step 4: KV warps 1..N store their rescaled+normalized values to smem
-	if (kv_warp_idx != 0) {
-		X17_UNROLL for (usize q = 0; q < Q_FRAGS; q++) {
-			SMatrix<f32, 16, K * 16> slot = sReduce.template tile_m<16>((kv_warp_idx - 1) * Q_FRAGS + q);
-			fragments_to_smem(rOut[q], slot);
+		// Step 4: KV warps 1..N store their rescaled+normalized values to smem
+		if (kv_warp_idx != 0) {
+			SMatrix<f32, Q_PER_WARP, K * 16> slot = sReduce.template tile_m<Q_PER_WARP>(kv_warp_idx - 1);
+			fragments_to_smem(rOut, slot);
 		}
-	}
-	if constexpr (Q_WARPS > 1) {
 		bar_sync<KV_WARPS * WARP_SIZE>(q_warp_idx + 1);
-	} else {
-		__syncthreads();
-	}
 
-	// Step 5: KV warp 0 accumulates and stores to gmem
-	if (kv_warp_idx == 0) {
-		X17_UNROLL for (usize q = 0; q < Q_FRAGS; q++) {
+		// Step 5: KV warp 0 accumulates and stores to gmem
+		if (kv_warp_idx == 0) {
 			X17_UNROLL for (usize w = 0; w < KV_WARPS - 1; w++) {
-				SMatrix<f32, 16, K * 16> slot = sReduce.template tile_m<16>(w * Q_FRAGS + q);
+				SMatrix<f32, Q_PER_WARP, K * 16> slot = sReduce.template tile_m<Q_PER_WARP>(w);
 				Fragment_16x16<f32> temp[K];
 				smem_to_fragments(temp, slot);
-				acc_(rOut[q], temp);
+				acc_(rOut, temp);
 			}
-			store(gOut_block, q_warp_idx * Q_PER_WARP + q * 16, 0, rOut[q]);
-		}
 
-		// TODO - store L
+			store(gOut_block, q_warp_idx * Q_PER_WARP, 0, rOut);
+		}
+	} else {
+		// KV_WARPS == 1: no cross-warp reduction needed, just normalize and store
+		global_top_max = math::max(top.max, top_sink_scaled);
+		global_bot_max = math::max(bot.max, bot_sink_scaled);
+
+		global_top_sum = math::fma(
+			top.sum,
+			math::fast::expb(top.max - global_top_max),
+			math::fast::expb(top_sink_scaled - global_top_max)
+		);
+		global_bot_sum = math::fma(
+			bot.sum,
+			math::fast::expb(bot.max - global_bot_max),
+			math::fast::expb(bot_sink_scaled - global_bot_max)
+		);
+
+		f32 top_L = math::fast::logb(global_top_sum) + global_top_max;
+		f32 bot_L = math::fast::logb(global_bot_sum) + global_bot_max;
+
+		f32 top_rescale = math::fast::expb(top.max - top_L) * gate;
+		f32 bot_rescale = math::fast::expb(bot.max - bot_L) * gate;
+
+		scale_top_(rOut, top_rescale);
+		scale_bottom_(rOut, bot_rescale);
+
+		store(gOut_block, q_warp_idx * Q_PER_WARP, 0, rOut);
 	}
+
+	// TODO - store L
 }
 
 template<usize V_DIM, usize NONROPE_DIM, usize ROPE_DIM, usize HEAD_CNT>
@@ -262,10 +277,11 @@ attn_forward(
 	usize kv_warp_idx = (threadIdx.x / WARP_SIZE) / Q_WARPS;
 	SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, QK_DIM> preload_k{smem};
 	SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, V_DIM> preload_v{preload_k._ptr + preload_k.bytes()};
-	SMatrix<bf16, Q_PER_BLOCK, QK_DIM> sQ =
-		preload_k
-			.template tile_m<KV_PER_STEP>(GMEM_PRELOAD - 1)
-			.template tile_m<Q_PER_BLOCK>(0);
+	SMatrix<bf16, Q_PER_BLOCK, QK_DIM> sQ{
+		SMEM_OVERLAP_Q_WITH_KV
+			? preload_k.template tile_m<KV_PER_STEP>(GMEM_PRELOAD - 1)._ptr
+			: preload_v._ptr + preload_v.bytes()
+	};
 
 	// Load Q from GMEM to SMEM
 	GMatrixDynSize<bf16, QK_DIM> gQ_full{gQ_ptr, q_cnt, Q_STRIDE};
@@ -281,11 +297,12 @@ attn_forward(
 	full_kv_steps = std::min(full_kv_steps, kv_steps);
 
 	// Start preloading K and V from GMEM to SMEM
-	// Don't use the last preload tiles yet because they're used to load Q
+	// When Q overlaps KV SMEM, don't use the last preload tile yet (it holds Q)
+	constexpr usize EARLY_PRELOAD = SMEM_OVERLAP_Q_WITH_KV ? GMEM_PRELOAD - 1 : GMEM_PRELOAD;
 	GMatrixDynSize<bf16, NONROPE_DIM> gKc_full{gKc_ptr, kv_cnt, KC_STRIDE};
 	GMatrixDynSize<bf16, ROPE_DIM> gKr_full{gKr_ptr, kv_cnt, KR_STRIDE};
 	GMatrixDynSize<bf16, V_DIM> gV_full{gV_ptr, kv_cnt, V_STRIDE};
-	X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD - 1; ++p) {
+	X17_UNROLL for (usize p = 0; p < EARLY_PRELOAD; ++p) {
 		if (p < kv_steps) {
 			cp_async_gmem_to_smem<Q_WARPS * WARP_SIZE>(
 				threadIdx.x % (Q_WARPS * WARP_SIZE),
@@ -324,32 +341,27 @@ attn_forward(
 	// Since we are multiplying and dividing by logb(e), it cancels out, so:
 	//     score_scale = (1.0 / sqrt(QK_DIM)) * logb(n)
 	usize my_q_start = block_q_start + q_warp_idx * Q_PER_WARP;
-	f32 top_score_scale[Q_FRAGS], bot_score_scale[Q_FRAGS];
-	SoftmaxStats r_top[Q_FRAGS], r_bot[Q_FRAGS];
-	X17_UNROLL for (usize q = 0; q < Q_FRAGS; q++) {
-		f32 top_n = my_q_start + q * 16 + (threadIdx.x % WARP_SIZE) / 4 + 1 + 1; // the final `+ 1` is for sink
-		f32 bot_n = my_q_start + q * 16 + (threadIdx.x % WARP_SIZE) / 4 + 9 + 1;
-		top_score_scale[q] = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(top_n);
-		bot_score_scale[q] = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(bot_n);
-		r_top[q].max = std::numeric_limits<f32>::lowest(); r_top[q].sum = 0.0f;
-		r_bot[q].max = std::numeric_limits<f32>::lowest(); r_bot[q].sum = 0.0f;
-	}
-	Fragment_16x16<f32> rOut[Q_FRAGS][V_TILES];
+	f32 top_n = my_q_start + (threadIdx.x % WARP_SIZE) / 4 + 1 + 1; // the final `+ 1` is for sink
+	f32 bot_n = my_q_start + (threadIdx.x % WARP_SIZE) / 4 + 9 + 1;
+	f32 top_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(top_n);
+	f32 bot_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(bot_n);
+
+	SoftmaxStats r_top; r_top.max = std::numeric_limits<f32>::lowest(); r_top.sum = 0.0f;
+	SoftmaxStats r_bot; r_bot.max = std::numeric_limits<f32>::lowest(); r_bot.sum = 0.0f;
+	Fragment_16x16<f32> rOut[V_TILES];
 	zero_(rOut);
 
-	cp_async_wait<GMEM_PRELOAD - 2>();
+	cp_async_wait<EARLY_PRELOAD - 1>();
 	__syncthreads();
 
 	// Load Q from SMEM to registers
-	Fragment_16x16<bf16> rQ[Q_FRAGS][QK_TILES];
-	X17_UNROLL for (usize q = 0; q < Q_FRAGS; q++) {
-		X17_UNROLL for (usize i = 0; i < NONROPE_TILES; i++) {
-			smem_tile_to_fragment(sQ, q_warp_idx * Q_PER_WARP + q * 16, i * 16, rQ[q][i]);
-		}
-		if constexpr (ROPE_TILES > 0) {
-			X17_UNROLL for (usize i = 0; i < ROPE_TILES; i++) {
-				smem_tile_to_fragment(sQ, q_warp_idx * Q_PER_WARP + q * 16, NONROPE_DIM + i * 16, rQ[q][NONROPE_TILES + i]);
-			}
+	Fragment_16x16<bf16> rQ[QK_TILES];
+	X17_UNROLL for (usize i = 0; i < NONROPE_TILES; i++) {
+		smem_tile_to_fragment(sQ, q_warp_idx * Q_PER_WARP, i * 16, rQ[i]);
+	}
+	if constexpr (ROPE_TILES > 0) {
+		X17_UNROLL for (usize i = 0; i < ROPE_TILES; i++) {
+			smem_tile_to_fragment(sQ, q_warp_idx * Q_PER_WARP, NONROPE_DIM + i * 16, rQ[NONROPE_TILES + i]);
 		}
 	}
 	// Load first Ks from SMEM to registers
@@ -367,7 +379,7 @@ attn_forward(
 		}
 	}
 
-	{ // Now that we have Q in registers, use the last preload tiles for KV
+	if constexpr (SMEM_OVERLAP_Q_WITH_KV) { // Now that Q is in registers, reuse its SMEM for KV
 		usize p = GMEM_PRELOAD - 1;
 		if (p < kv_steps) {
 			cp_async_gmem_to_smem<Q_WARPS * WARP_SIZE>(
@@ -392,53 +404,45 @@ attn_forward(
 	}
 
 	// Sequential loop over KV (causal: loop bound uses max_q_start so all
-	// Q warps on a KV row iterate in lockstep for bar_sync)
 	usize kv_step = 0;
 	X17_NO_UNROLL for (; kv_step < kv_steps; ++kv_step) {
 		// rScores = Q * K.T, interleaved with V load (rKV: K -> V)
-		Fragment_16x16<f32> rScores_f32[Q_FRAGS];
+		Fragment_16x16<f32> rScores_f32;
 		zero_(rScores_f32);
 		X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
-			X17_UNROLL for (usize q = 0; q < Q_FRAGS; q++) {
-				mma_a_bt(rQ[q][i], rKV[i], rScores_f32[q]);
-			}
+			mma_a_bt(rQ[i], rKV[i], rScores_f32);
 			smem_tile_to_fragment_trans(sV, 0, i * 16, rKV[i]);
 		}
 		X17_UNROLL for (usize i = V_TILES; i < QK_TILES; i++) {
-			X17_UNROLL for (usize q = 0; q < Q_FRAGS; q++) {
-				mma_a_bt(rQ[q][i], rKV[i], rScores_f32[q]);
-			}
+			mma_a_bt(rQ[i], rKV[i], rScores_f32);
 		}
 
 		// Scale scores must happen before masking to avoid -inf * 0 == NaN when score_scale == 0
-		X17_UNROLL for (usize q = 0; q < Q_FRAGS; q++) {
-			scale_top_(rScores_f32[q], top_score_scale[q]);
-			scale_bottom_(rScores_f32[q], bot_score_scale[q]);
-		}
+		scale_top_(rScores_f32, top_score_scale);
+		scale_bottom_(rScores_f32, bot_score_scale);
 
 		// Causal mask: diagonal tile or full mask if past this warp's boundary
 		if (kv_step >= full_kv_steps) {
 			usize kv_pos = kv_step * KV_PER_STEP + kv_warp_idx * KV_PER_WARP;
-			X17_UNROLL for (usize q = 0; q < Q_FRAGS; q++) {
-				usize q_boundary = kv_extra + my_q_start + q * 16;
-				if (kv_pos == q_boundary) {
-					causal_mask_diagonal(rScores_f32[q]);
-				} else if (kv_pos > q_boundary) {
-					fill_(rScores_f32[q], -INFINITY);
-				}
+			if (kv_pos == kv_extra + my_q_start) {
+				causal_mask_diagonal(rScores_f32);
+			} else if (kv_pos > kv_extra + my_q_start) {
+				fill_(rScores_f32, -INFINITY);
 			}
 		}
-		Fragment_16x16<bf16> rScores[Q_FRAGS];
-		X17_UNROLL for (usize q = 0; q < Q_FRAGS; q++) {
-			online_softmax(kv_step == 0, r_top[q], r_bot[q], rScores_f32[q], rOut[q]);
-			cast(rScores_f32[q], rScores[q]);
-		}
+		online_softmax(kv_step == 0, r_top, r_bot, rScores_f32, rOut);
+		Fragment_16x16<bf16> rScores;
+		cast(rScores_f32, rScores);
 
 		{ // Get more data from GMEM
 			// Wait for the next batch of GMEM -> SMEM preloads to complete
 			cp_async_wait<GMEM_PRELOAD - 2>();
-			if constexpr (Q_WARPS > 0) {
-				bar_sync<Q_WARPS * WARP_SIZE>(kv_warp_idx + 1);
+			if constexpr (Q_WARPS > 1) {
+				if constexpr (KV_WARPS > 1) {
+					bar_sync<Q_WARPS * WARP_SIZE>(kv_warp_idx + 1);
+				} else {
+					__syncthreads();
+				}
 			} else {
 				__syncwarp();
 			}
@@ -477,9 +481,7 @@ attn_forward(
 
 		// rOut += rScores * V, interleaved with next K load (rKV: V -> K)
 		X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
-			X17_UNROLL for (usize q = 0; q < Q_FRAGS; q++) {
-				mma_a_bt(rScores[q], rKV[i], rOut[q][i]);
-			}
+			mma_a_bt(rScores, rKV[i], rOut[i]);
 			smem_tile_to_fragment(sK, 0, i * 16, rKV[i]);
 		}
 		// Load remaining K content tiles that weren't covered by V interleaving
@@ -616,7 +618,8 @@ int main(int argc, char *argv[]) {
 	}
 
 	usize smem_size =
-		sizeof(bf16) * KV_PER_STEP * GMEM_PRELOAD * (QK_DIM + V_DIM);
+		sizeof(bf16) * KV_PER_STEP * GMEM_PRELOAD * (QK_DIM + V_DIM)
+		+ (SMEM_OVERLAP_Q_WITH_KV ? 0 : sizeof(bf16) * Q_PER_BLOCK * QK_DIM);
 	printf("smem_size = %d bytes\n", smem_size);
 	//smem_size = std::max(smem_size, usize(70 * 1024));
 
@@ -683,7 +686,7 @@ int main(int argc, char *argv[]) {
 	int mid = NUM_RUNS / 2;
 	float median_ms = times_ms[mid];
 	float min_ms = times_ms[0];
-	printf("Kernel time over %d runs: median %.4f ms  min %.4f ms\n", NUM_RUNS, median_ms, min_ms);
+	//printf("Kernel time over %d runs: median %.4f ms  min %.4f ms\n", NUM_RUNS, median_ms, min_ms);
 
 	// TFLOPS: Q@K^T = 2*Q*KV*QK_DIM, attn@V = 2*Q*KV*V_DIM, softmax ~ 5*Q*KV
 	// Causal ≈ half the work
