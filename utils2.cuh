@@ -138,6 +138,7 @@ X17_DEVICE bool all_sync(bool predicate) {
 }
 
 template<typename T>
+requires(sizeof(T) == 4)
 X17_DEVICE T shuffle_xor_sync(T val, int lane_mask) {
 	return __shfl_xor_sync(0xffffffff, val, lane_mask);
 }
@@ -772,9 +773,9 @@ X17_DEVICE void load_1x8_8x8(
 template<typename U, typename T, const usize M, const usize N, const usize K>
 requires(sizeof(U) == 2)
 X17_DEVICE void store(
+	Fragment_16x16<T> const (&tiles)[K],
 	GMatrix<U, M, N> const &dst,
-	usize m_idx, usize n_idx,
-	Fragment_16x16<T> const (&tiles)[K]
+	usize m_idx, usize n_idx
 ) {
 	usize i = 0;
 	if constexpr (K >= 4) {
@@ -1129,6 +1130,7 @@ struct SMatrix {
 
 			// Thread's position within a step is fixed
 			usize col_in_row = at_col * sizeof(T) + (tid % CP_PER_ROW) * 16;
+			usize gmem_col = (tid % CP_PER_ROW) * 16;
 			usize row_in_step = tid / CP_PER_ROW;
 
 			constexpr usize REPEAT_AFTER = least_common_multiple(8, ROWS_PER_STEP) / ROWS_PER_STEP;
@@ -1141,7 +1143,7 @@ struct SMatrix {
 			u8 const *src_ptr =
 				reinterpret_cast<u8 const *>(src._ptr)
 				+ row_in_step * src.stride_bytes()
-				+ col_in_row;
+				+ gmem_col;
 			usize src_step = ROWS_PER_STEP * src.stride_bytes();
 
 			usize dst_ptr = _ptr + (at_row + row_in_step) * ROW_BYTES;
