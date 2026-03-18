@@ -233,6 +233,8 @@ X17_DEVICE void combine_and_store(
 			fragments_to_smem(rOut, slot);
 
 			bar_sync<KV_WARPS * WARP_SIZE>(q_warp_idx + 1);
+
+			return;
 		} else {
 			// KV warp 0 accumulates and stores to gmem
 			bar_sync<KV_WARPS * WARP_SIZE>(q_warp_idx + 1);

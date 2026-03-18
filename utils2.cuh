@@ -137,7 +137,8 @@ X17_DEVICE bool all_sync(bool predicate) {
 	return __all_sync(0xffffffff, predicate);
 }
 
-X17_DEVICE f32 shuffle_xor_sync(f32 val, int lane_mask) {
+template<typename T>
+X17_DEVICE T shuffle_xor_sync(T val, int lane_mask) {
 	return __shfl_xor_sync(0xffffffff, val, lane_mask);
 }
 
@@ -701,6 +702,69 @@ X17_DEVICE void store_1x8_8x8(
 
 	*reinterpret_cast<uint4 *>(base + even_row + col_off) = make_uint4(g0, g1, g2, g3);
 	*reinterpret_cast<uint4 *>(base + odd_row  + col_off) = make_uint4(g4, g5, g6, g7);
+}
+
+/// Loads 8 horizontally-adjacent 8x8 fragments (64 cols × 8 rows) from GMEM.
+/// Inverse of store_1x8_8x8: 128-bit loads, then reverse XOR-4 and shuffle_4x4
+/// (both are self-inverse, so the same operations undo the store's rearrangement).
+template<typename U, typename T, const usize M, const usize N>
+requires(sizeof(U) == 2)
+X17_DEVICE void load_1x8_8x8(
+	GMatrix<U, M, N> const &src,
+	usize m_idx, usize n_idx,
+	Fragment_8x8<T> &f0, Fragment_8x8<T> &f1,
+	Fragment_8x8<T> &f2, Fragment_8x8<T> &f3,
+	Fragment_8x8<T> &f4, Fragment_8x8<T> &f5,
+	Fragment_8x8<T> &f6, Fragment_8x8<T> &f7
+) {
+	// 128-bit load per thread, 8 threads per row, 128B coalesced per row
+	usize tid = threadIdx.x % WARP_SIZE;
+	u8 *base = reinterpret_cast<u8 *>(src._ptr);
+	usize stride = src.stride_bytes();
+	usize col_off = n_idx * usize(sizeof(U)) + (tid % 8) * 16;
+	usize even_row = (m_idx + (tid / 8) * 2) * stride;
+	usize odd_row = even_row + stride;
+
+	uint4 even_data = *reinterpret_cast<uint4 const *>(base + even_row + col_off);
+	uint4 odd_data  = *reinterpret_cast<uint4 const *>(base + odd_row  + col_off);
+
+	u32 g0 = even_data.x, g1 = even_data.y, g2 = even_data.z, g3 = even_data.w;
+	u32 g4 = odd_data.x,  g5 = odd_data.y,  g6 = odd_data.z,  g7 = odd_data.w;
+
+	// Reverse XOR-4 shuffle (self-inverse)
+	bool bit2 = (tid & 4) != 0;
+	u32 recv;
+
+	recv = shuffle_xor_sync(bit2 ? g0 : g4, 4);
+	g0 = bit2 ? recv : g0;
+	g4 = bit2 ? g4 : recv;
+
+	recv = shuffle_xor_sync(bit2 ? g1 : g5, 4);
+	g1 = bit2 ? recv : g1;
+	g5 = bit2 ? g5 : recv;
+
+	recv = shuffle_xor_sync(bit2 ? g2 : g6, 4);
+	g2 = bit2 ? recv : g2;
+	g6 = bit2 ? g6 : recv;
+
+	recv = shuffle_xor_sync(bit2 ? g3 : g7, 4);
+	g3 = bit2 ? recv : g3;
+	g7 = bit2 ? g7 : recv;
+
+	// Reverse shuffle_4x4 on left and right groups (self-inverse)
+	shuffle_4x4(g0, g1, g2, g3);
+	shuffle_4x4(g4, g5, g6, g7);
+
+	// Cast from memory type (e.g., bf16) to fragment type (e.g., f32)
+	FragmentReg<U> r;
+	r.val = g0; f0.set(static_cast<T>(r.first()), static_cast<T>(r.second()));
+	r.val = g1; f1.set(static_cast<T>(r.first()), static_cast<T>(r.second()));
+	r.val = g2; f2.set(static_cast<T>(r.first()), static_cast<T>(r.second()));
+	r.val = g3; f3.set(static_cast<T>(r.first()), static_cast<T>(r.second()));
+	r.val = g4; f4.set(static_cast<T>(r.first()), static_cast<T>(r.second()));
+	r.val = g5; f5.set(static_cast<T>(r.first()), static_cast<T>(r.second()));
+	r.val = g6; f6.set(static_cast<T>(r.first()), static_cast<T>(r.second()));
+	r.val = g7; f7.set(static_cast<T>(r.first()), static_cast<T>(r.second()));
 }
 
 /// Generic store for an array of K horizontally-adjacent 16x16 tiles.
