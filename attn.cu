@@ -17,7 +17,7 @@ constexpr usize KV_PER_WARP = 16;
 constexpr usize KV_PER_STEP = KV_PER_WARP * KV_WARPS;
 
 constexpr usize GMEM_PRELOAD = 2;
-constexpr bool LOAD_Q_DIRECTLY = KV_WARPS == 1;
+constexpr bool LOAD_Q_DIRECTLY = false;//KV_WARPS == 1;
 constexpr bool SMEM_OVERLAP_Q_WITH_KV = Q_PER_BLOCK <= KV_PER_STEP;
 
 X17_DEVICE void causal_mask_diagonal(Fragment_16x16<f32> &rScores) {
@@ -149,13 +149,11 @@ X17_DEVICE void combine_and_store(
 	constexpr usize GROUP_BYTES = REDUCE_BYTES + STATS_BYTES;
 	u32 group_smem = smem + q_warp_idx * GROUP_BYTES;
 	SMatrix<f32, (KV_WARPS - 1) * Q_PER_WARP, K * 16> sReduce{group_smem};
-
+	u32 stats_smem = sReduce._ptr + sReduce.bytes();
+	usize tid = threadIdx.x % WARP_SIZE;
 
 	// Step 1: All warps store their stats to smem (each warp gets its own slot)
 	if constexpr (KV_WARPS > 1) {
-		u32 stats_smem = sReduce._ptr + sReduce.bytes();
-
-		usize tid = threadIdx.x % WARP_SIZE;
 		store_shared_4(
 			stats_smem + (kv_warp_idx * WARP_SIZE + tid) * (4 * sizeof(f32)),
 			top.sum, top.max, bot.sum, bot.max
@@ -228,7 +226,7 @@ X17_DEVICE void combine_and_store(
 	scale_bottom_(rOut, bot_rescale);
 
 	// Step 4: accumulate results
-	if consexpr (KV_WARPS > 1) {
+	if constexpr (KV_WARPS > 1) {
 		if (kv_warp_idx != 0) {
 			// KV warps 1..N store their rescaled+normalized values to smem
 			SMatrix<f32, Q_PER_WARP, K * 16> slot = sReduce.template tile_m<Q_PER_WARP>(kv_warp_idx - 1);
@@ -236,9 +234,9 @@ X17_DEVICE void combine_and_store(
 
 			bar_sync<KV_WARPS * WARP_SIZE>(q_warp_idx + 1);
 		} else {
+			// KV warp 0 accumulates and stores to gmem
 			bar_sync<KV_WARPS * WARP_SIZE>(q_warp_idx + 1);
 
-			// KV warp 0 accumulates and stores to gmem
 			X17_UNROLL for (usize w = 0; w < KV_WARPS - 1; w++) {
 				SMatrix<f32, Q_PER_WARP, K * 16> slot = sReduce.template tile_m<Q_PER_WARP>(w);
 				Fragment_16x16<f32> temp[K];

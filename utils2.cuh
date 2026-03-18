@@ -1010,7 +1010,7 @@ template<
 	const usize N
 >
 requires(
-	M > 0 && M % 16 == 0
+	M >= 0 && M % 16 == 0
 	&& N * sizeof(T) % 128 == 0
 )
 struct SMatrix {
