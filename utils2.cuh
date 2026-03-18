@@ -90,13 +90,13 @@ namespace math {
 			return __frcp_rn(x);
 		}
 
-		/// Gaussian Error Linear Unit (GELU) approximation using `x * sigmoid(1.702 * x)`.
+		/// Gaussian Error Linear Unit (GELU) approximation using `x * sigmoid(1.702 * x)`
 		X17_DEVICE f32 gelu(f32 x) {
-			constexpr f32 C = 1.702 * logb_e;
+			constexpr f32 C = 1.702 * logb_e; // logb(e) because `expb` uses base `b`
 			f32 c = x < 0 ? C : -C;
 			f32 e = expb(c * x);
 			x = x < 0 ? x * e : x;
-			return x * recip(e + 1.0f);
+			return x * recip(1.0f + e);
 		}
 	}
 
@@ -243,7 +243,7 @@ namespace sm80 {
 	}
 
 	/// Named barrier sync: syncs exactly THREAD_COUNT threads at barrier `bar_id`.
-	/// Entire warps must participate, so THREAD_COUNT must be a multiple of warp size.
+	/// Entire warps must participate, so THREAD_COUNT must be a multiple of WARP_SIZE.
 	/// bar_id 0 is reserved for sync_threads(); use 1..15 for custom barriers.
 	/// SM80+ supports 16 named barriers (0-15).
 	template<u32 THREAD_COUNT>
