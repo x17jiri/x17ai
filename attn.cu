@@ -4,7 +4,7 @@
 #include <array>
 #include <algorithm>
 
-// TODO - allow K == V
+#pragma nv_diag_suppress 186
 
 constexpr usize Q_WARPS = 4;
 constexpr usize KV_WARPS = 1;
@@ -17,8 +17,7 @@ constexpr usize KV_PER_WARP = 16;
 constexpr usize KV_PER_STEP = KV_PER_WARP * KV_WARPS;
 
 constexpr usize GMEM_PRELOAD = 2;
-constexpr bool LOAD_Q_DIRECTLY = false;//KV_WARPS == 1;
-constexpr bool SMEM_OVERLAP_Q_WITH_KV = !LOAD_Q_DIRECTLY && Q_PER_BLOCK <= KV_PER_STEP;
+constexpr bool SMEM_OVERLAP_Q_WITH_KV = Q_PER_BLOCK <= KV_PER_STEP;
 
 X17_DEVICE void causal_mask_diagonal(Fragment_16x16<f32> &rScores) {
 	usize tid = threadIdx.x % WARP_SIZE;
@@ -150,14 +149,14 @@ X17_DEVICE void combine_and_store(
 	u32 group_smem = smem + q_warp_idx * GROUP_BYTES;
 	SMatrix<f32, (KV_WARPS - 1) * Q_PER_WARP, K * 16> sReduce{group_smem};
 	u32 stats_smem = sReduce._ptr + sReduce.bytes();
-	usize tid = threadIdx.x % WARP_SIZE;
+	[[maybe_unused]] usize tid = threadIdx.x % WARP_SIZE;
 
 	// Step 1: All warps store their stats to smem (each warp gets its own slot)
 	if constexpr (KV_WARPS > 1) {
 		cp_async_wait<0>(); // make sure no remaining cp_async lands in our scratch
 		sync_threads(); // make sure no threads are reading or writing to SMEM
 
-		store_shared_4(
+		store_shared_4x32b(
 			stats_smem + (kv_warp_idx * WARP_SIZE + tid) * (4 * sizeof(f32)),
 			top.sum, top.max, bot.sum, bot.max
 		);
@@ -179,7 +178,7 @@ X17_DEVICE void combine_and_store(
 		f32 w_top_sum[KV_WARPS], w_top_max[KV_WARPS];
 		f32 w_bot_sum[KV_WARPS], w_bot_max[KV_WARPS];
 		X17_UNROLL for (usize w = 0; w < KV_WARPS; w++) {
-			load_shared_4(
+			load_shared_4x32b(
 				stats_smem + (w * WARP_SIZE + tid) * (4 * sizeof(f32)),
 				w_top_sum[w], w_top_max[w], w_bot_sum[w], w_bot_max[w]
 			);
@@ -232,7 +231,7 @@ X17_DEVICE void combine_and_store(
 	if constexpr (KV_WARPS > 1) {
 		if (kv_warp_idx != 0) {
 			// KV warps 1..N store their rescaled+normalized values to smem
-			SMatrix<f32, Q_PER_WARP, K * 16> slot = sReduce.template tile_m<Q_PER_WARP>(kv_warp_idx - 1);
+			SMatrix<f32, Q_PER_WARP, K * 16> slot = tile_m<Q_PER_WARP>(sReduce, kv_warp_idx - 1);
 			fragments_to_smem(rOut, slot);
 
 			bar_sync<KV_WARPS * WARP_SIZE>(q_warp_idx + 1);
@@ -243,7 +242,7 @@ X17_DEVICE void combine_and_store(
 			bar_sync<KV_WARPS * WARP_SIZE>(q_warp_idx + 1);
 
 			X17_UNROLL for (usize w = 0; w < KV_WARPS - 1; w++) {
-				SMatrix<f32, Q_PER_WARP, K * 16> slot = sReduce.template tile_m<Q_PER_WARP>(w);
+				SMatrix<f32, Q_PER_WARP, K * 16> slot = tile_m<Q_PER_WARP>(sReduce, w);
 				Fragment_16x16<f32> temp[K];
 				smem_to_fragments(temp, slot);
 				acc_(rOut, temp);
@@ -256,7 +255,13 @@ X17_DEVICE void combine_and_store(
 	// TODO - store L
 }
 
-template<usize NONROPE_DIM, usize ROPE_DIM, usize V_DIM, usize PRELOAD_DIM>
+template<
+	const bool K_EQUALS_V,
+	const usize NONROPE_DIM,
+	const usize ROPE_DIM,
+	const usize V_DIM,
+	const usize PRELOAD_DIM
+>
 X17_DEVICE void cp_async_kv(
 	GMatrixDynSize<bf16, NONROPE_DIM> gKc,
 	GMatrixDynSize<bf16, ROPE_DIM> gKr,
@@ -266,26 +271,34 @@ X17_DEVICE void cp_async_kv(
 ) {
 	constexpr usize QK_DIM = NONROPE_DIM + ROPE_DIM;
 	if (p < kv_steps) {
-		auto preload_tile = preload.template tile_m<KV_PER_STEP>(p % GMEM_PRELOAD).template tile_m<KV_PER_WARP>(kv_warp_idx);
+		auto preload_tile = tile_m<KV_PER_WARP>(tile_m<KV_PER_STEP>(preload, p % GMEM_PRELOAD), kv_warp_idx);
 		cp_async_gmem_to_smem<Q_WARPS * WARP_SIZE>(
 			threadIdx.x % (Q_WARPS * WARP_SIZE),
-			gKc.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(kv_warp_idx),
+			tile_m<KV_PER_WARP>(tile_m<KV_PER_STEP>(gKc, p), kv_warp_idx),
 			preload_tile, 0, 0
 		);
 		cp_async_gmem_to_smem<Q_WARPS * WARP_SIZE>(
 			threadIdx.x % (Q_WARPS * WARP_SIZE),
-			gKr.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(kv_warp_idx),
+			tile_m<KV_PER_WARP>(tile_m<KV_PER_STEP>(gKr, p), kv_warp_idx),
 			preload_tile, 0, NONROPE_DIM
 		);
-		cp_async_gmem_to_smem<Q_WARPS * WARP_SIZE>(
-			threadIdx.x % (Q_WARPS * WARP_SIZE),
-			gV.template tile_m<KV_PER_STEP>(p).template tile_m<KV_PER_WARP>(kv_warp_idx),
-			preload_tile, 0, QK_DIM
-		);
+		if constexpr (!K_EQUALS_V) {
+			cp_async_gmem_to_smem<Q_WARPS * WARP_SIZE>(
+				threadIdx.x % (Q_WARPS * WARP_SIZE),
+				tile_m<KV_PER_WARP>(tile_m<KV_PER_STEP>(gV, p), kv_warp_idx),
+				preload_tile, 0, QK_DIM
+			);
+		}
 	}
 }
 
-template<usize V_DIM, usize NONROPE_DIM, usize ROPE_DIM, usize HEAD_CNT>
+template<
+	const usize V_DIM,
+	const usize NONROPE_DIM,
+	const usize ROPE_DIM,
+	const usize HEAD_CNT,
+	bool K_EQUALS_V
+>
 __global__ __launch_bounds__(THREADS_PER_BLOCK) void
 attn_forward(
 	usize q_cnt, bf16 *gQ_ptr,
@@ -299,9 +312,10 @@ attn_forward(
 	constexpr usize ROPE_TILES = ROPE_DIM / 16;
 	constexpr usize QK_TILES = NONROPE_TILES + ROPE_TILES;
 	constexpr usize V_TILES = V_DIM / 16;
-	constexpr usize PRELOAD_DIM = QK_DIM + V_DIM;
-	constexpr usize PRELOAD_TILES = QK_TILES + V_TILES;
+	constexpr usize PRELOAD_DIM = K_EQUALS_V ? QK_DIM : QK_DIM + V_DIM;
+	constexpr usize V_SMEM_COL = K_EQUALS_V ? 0 : QK_DIM;
 
+	// GMEM Matrices
 	constexpr usize KC_STRIDE = NONROPE_DIM * HEAD_CNT;
 	constexpr usize KR_STRIDE = ROPE_DIM * HEAD_CNT;
 	constexpr usize V_STRIDE = V_DIM * HEAD_CNT;
@@ -310,22 +324,23 @@ attn_forward(
 	GMatrixDynSize<bf16, ROPE_DIM> gKr{gKr_ptr, kv_cnt, KR_STRIDE};
 	GMatrixDynSize<bf16, V_DIM> gV{gV_ptr, kv_cnt, V_STRIDE};
 	GMatrixDynSize<bf16, QK_DIM> gQ_full{gQ_ptr, q_cnt, Q_STRIDE};
-	GMatrix<bf16, Q_PER_BLOCK, QK_DIM> gQ_block = gQ_full.template tile_m<Q_PER_BLOCK>(blockIdx.x);
+	GMatrix<bf16, Q_PER_BLOCK, QK_DIM> gQ_block = tile_m<Q_PER_BLOCK>(gQ_full, blockIdx.x);
+	GMatrixDynSize<bf16, V_DIM> gOut_full{gOut_ptr, q_cnt};
+	GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = tile_m<Q_PER_BLOCK>(gOut_full, blockIdx.x);
 
+	// SMEM layout
 	u32 smem = 0;
 	usize q_warp_idx = (threadIdx.x / WARP_SIZE) % Q_WARPS;
 	usize kv_warp_idx = (threadIdx.x / WARP_SIZE) / Q_WARPS;
-	SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, PRELOAD_DIM> preload{smem};
+	SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, PRELOAD_DIM> sPreload{smem};
 	SMatrix<bf16, Q_PER_BLOCK, QK_DIM> sQ{
 		SMEM_OVERLAP_Q_WITH_KV
-			? preload.template tile_m<KV_PER_STEP>(GMEM_PRELOAD - 1)._ptr
-			: preload._ptr + preload.bytes()
+			? tile_m<KV_PER_STEP>(sPreload, GMEM_PRELOAD - 1)._ptr
+			: sPreload._ptr + sPreload.bytes()
 	};
 
 	// Load Q from GMEM to SMEM
-	if constexpr (!LOAD_Q_DIRECTLY) {
-		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gQ_block, sQ);
-	}
+	cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gQ_block, sQ);
 
 	// TODO: this assumes `kv_cnt >= q_cnt`
 	usize kv_extra = kv_cnt - q_cnt;
@@ -339,7 +354,7 @@ attn_forward(
 	// When Q overlaps KV SMEM, don't use the last preload tile yet (it holds Q)
 	constexpr usize EARLY_PRELOAD = SMEM_OVERLAP_Q_WITH_KV ? GMEM_PRELOAD - 1 : GMEM_PRELOAD;
 	X17_UNROLL for (usize p = 0; p < EARLY_PRELOAD; ++p) {
-		cp_async_kv(gKc, gKr, gV, preload, p, kv_warp_idx, kv_steps);
+		cp_async_kv<K_EQUALS_V>(gKc, gKr, gV, sPreload, p, kv_warp_idx, kv_steps);
 		cp_async_commit();
 	}
 
@@ -349,7 +364,7 @@ attn_forward(
 	f32 sink_score = -INFINITY;
 	f32 gate = 1.0f;
 	if (sink != nullptr) {
-		load_gmem_2(sink, sink_score, gate);
+		load_gmem_2x32b(sink, sink_score, gate);
 	}
 
 	// Scalable-Softmax: score_scale = (1.0 / sqrt(QK_DIM)) * ln(n) * logb(e)
@@ -374,38 +389,31 @@ attn_forward(
 
 	// Load Q from SMEM to registers
 	Fragment_16x16<bf16> rQ[QK_TILES];
-	if constexpr (LOAD_Q_DIRECTLY) {
-		load_shuffled(rQ, gQ_block, q_warp_idx * Q_PER_WARP, 0);
-	} else {
-		X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
-			smem_tile_to_fragment(sQ, q_warp_idx * Q_PER_WARP, i * 16, rQ[i]);
-		}
+	X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
+		smem_tile_to_fragment(sQ, q_warp_idx * Q_PER_WARP, i * 16, rQ[i]);
 	}
 	// Load first KV tile from SMEM to registers
 	SMatrix<bf16, KV_PER_WARP, PRELOAD_DIM> sKV;
-	sKV = preload.template tile_m<KV_PER_STEP>(0).template tile_m<KV_PER_WARP>(kv_warp_idx);
+	sKV = tile_m<KV_PER_WARP>(tile_m<KV_PER_STEP>(sPreload, 0), kv_warp_idx);
 	Fragment_16x16<bf16> rKV[QK_TILES];
 	X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
 		smem_tile_to_fragment(sKV, 0, i * 16, rKV[i]);
 	}
 
-	if constexpr (SMEM_OVERLAP_Q_WITH_KV) { // Now that Q is in registers, reuse its SMEM for KV
-		cp_async_kv(gKc, gKr, gV, preload, GMEM_PRELOAD - 1, kv_warp_idx, kv_steps);
+	// Now that Q is in registers, reuse its SMEM for KV
+	if constexpr (SMEM_OVERLAP_Q_WITH_KV) {
+		cp_async_kv<K_EQUALS_V>(gKc, gKr, gV, sPreload, GMEM_PRELOAD - 1, kv_warp_idx, kv_steps);
 		cp_async_commit();
 	}
 
-	if constexpr (LOAD_Q_DIRECTLY) {
-		load_unshuffle(rQ);
-	}
-	// Sequential loop over KV (causal: loop bound uses max_q_start so all
-	usize kv_step = 0;
-	X17_NO_UNROLL for (; kv_step < kv_steps; ++kv_step) {
+	// Sequential loop over KV
+	X17_NO_UNROLL for (usize kv_step = 0; kv_step < kv_steps; ++kv_step) {
 		// rScores = Q * K.T, interleaved with V load (rKV: K -> V)
 		Fragment_16x16<f32> rScores_f32;
 		zero_(rScores_f32);
 		X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
 			mma_a_bt(rQ[i], rKV[i], rScores_f32);
-			smem_tile_to_fragment_trans(sKV, 0, QK_DIM + i * 16, rKV[i]);
+			smem_tile_to_fragment_trans(sKV, 0, V_SMEM_COL + i * 16, rKV[i]);
 		}
 		X17_UNROLL for (usize i = V_TILES; i < QK_TILES; i++) {
 			mma_a_bt(rQ[i], rKV[i], rScores_f32);
@@ -424,6 +432,7 @@ attn_forward(
 				fill_(rScores_f32, -INFINITY);
 			}
 		}
+
 		online_softmax(kv_step == 0, r_top, r_bot, rScores_f32, rOut);
 		Fragment_16x16<bf16> rScores;
 		cast(rScores_f32, rScores);
@@ -436,12 +445,10 @@ attn_forward(
 			} else {
 				sync_threads();
 			}
-			sKV = preload
-				.template tile_m<KV_PER_STEP>((kv_step + 1) % GMEM_PRELOAD)
-				.template tile_m<KV_PER_WARP>(kv_warp_idx);
+			sKV = tile_m<KV_PER_WARP>(tile_m<KV_PER_STEP>(sPreload, (kv_step + 1) % GMEM_PRELOAD), kv_warp_idx);
 
 			// Preload next KV tiles from GMEM
-			cp_async_kv(gKc, gKr, gV, preload, kv_step + GMEM_PRELOAD, kv_warp_idx, kv_steps);
+			cp_async_kv<K_EQUALS_V>(gKc, gKr, gV, sPreload, kv_step + GMEM_PRELOAD, kv_warp_idx, kv_steps);
 			cp_async_commit();
 		}
 
@@ -456,8 +463,6 @@ attn_forward(
 		}
 	}
 
-	GMatrixDynSize<bf16, V_DIM> gOut_full{gOut_ptr, q_cnt};
-	GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = gOut_full.template tile_m<Q_PER_BLOCK>(blockIdx.x);
 	combine_and_store(rOut, r_top, r_bot, sink_score, top_score_scale, bot_score_scale, gate, smem, q_warp_idx, kv_warp_idx, gOut_block);
 }
 
@@ -544,11 +549,9 @@ int main(int argc, char *argv[]) {
 			v_data[r * V_DIM + c] = kv_data[r * QK_DIM + c];
 		}
 		if constexpr (ROPE_DIM > 0) {
-			#pragma nv_diag_suppress 186
 			for (size_t c = 0; c < ROPE_DIM; c++) {
 				kr_data[r * ROPE_DIM + c] = kv_data[r * QK_DIM + NONROPE_DIM + c];
 			}
-			#pragma nv_diag_default 186
 		}
 	}
 	bf16 *kc_dev, *kr_dev, *v_dev;
@@ -576,16 +579,17 @@ int main(int argc, char *argv[]) {
 		printf("(3) CUDA Error: %s\n", cudaGetErrorString(err));
 	}
 
-	constexpr usize PRELOAD_DIM = QK_DIM + V_DIM;
+	constexpr bool K_EQ_V = true;
+	constexpr usize PRELOAD_DIM = K_EQ_V ? QK_DIM : QK_DIM + V_DIM;
 	usize smem_size =
 		sizeof(bf16) * KV_PER_STEP * GMEM_PRELOAD * PRELOAD_DIM
 		+ (SMEM_OVERLAP_Q_WITH_KV ? 0 : sizeof(bf16) * Q_PER_BLOCK * QK_DIM);
 	printf("smem_size = %d bytes\n", smem_size);
 	//smem_size = std::max(smem_size, usize(70 * 1024));
 
-	cudaFuncSetAttribute(attn_forward<V_DIM, NONROPE_DIM, ROPE_DIM, 1>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+	cudaFuncSetAttribute(attn_forward<V_DIM, NONROPE_DIM, ROPE_DIM, 1, K_EQ_V>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
 
-	cudaFuncSetAttribute(attn_forward<V_DIM, NONROPE_DIM, ROPE_DIM, 1>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+	cudaFuncSetAttribute(attn_forward<V_DIM, NONROPE_DIM, ROPE_DIM, 1, K_EQ_V>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
 	// Allocate sink+gate buffer: [sink_score, gate]
 	f32 sink_host[2] = { -0.3f, 0.5f };
@@ -600,7 +604,7 @@ int main(int argc, char *argv[]) {
 	//WARMUP = 0;
 	for (int i = 0; i < WARMUP; ++i) {
 		attn_forward
-			<V_DIM, NONROPE_DIM, ROPE_DIM, 1>
+			<V_DIM, NONROPE_DIM, ROPE_DIM, 1, K_EQ_V>
 			<<<Q_LEN / Q_PER_BLOCK, THREADS_PER_BLOCK, smem_size>>>
 			(
 				Q_LEN, q_dev,
@@ -623,7 +627,7 @@ int main(int argc, char *argv[]) {
 	for (int i = 0; i < NUM_RUNS; ++i) {
 		cudaEventRecord(starts[i]);
 		attn_forward
-			<V_DIM, NONROPE_DIM, ROPE_DIM, 1>
+			<V_DIM, NONROPE_DIM, ROPE_DIM, 1, K_EQ_V>
 			<<<NUM_BLOCKS, THREADS_PER_BLOCK, smem_size>>>
 			(
 				Q_LEN, q_dev,

@@ -143,7 +143,9 @@ X17_DEVICE T shuffle_xor_sync(T val, int lane_mask) {
 	return __shfl_xor_sync(0xffffffff, val, lane_mask);
 }
 
-X17_DEVICE void store_shared_4(u32 ptr, f32 a, f32 b, f32 c, f32 d) {
+template<typename T>
+requires(sizeof(T) == 4)
+X17_DEVICE void store_shared_4x32b(u32 ptr, T a, T b, T c, T d) {
 	asm volatile(
 		"st.shared.v4.f32 [%0], {%1, %2, %3, %4};\n"
 		:
@@ -152,7 +154,9 @@ X17_DEVICE void store_shared_4(u32 ptr, f32 a, f32 b, f32 c, f32 d) {
 	);
 }
 
-X17_DEVICE void load_shared_4(u32 ptr, f32 &a, f32 &b, f32 &c, f32 &d) {
+template<typename T>
+requires(sizeof(T) == 4)
+X17_DEVICE void load_shared_4x32b(u32 ptr, T &a, T &b, T &c, T &d) {
 	asm volatile(
 		"ld.shared.v4.f32 {%0, %1, %2, %3}, [%4];\n"
 		: "=f"(a), "=f"(b), "=f"(c), "=f"(d)
@@ -161,7 +165,9 @@ X17_DEVICE void load_shared_4(u32 ptr, f32 &a, f32 &b, f32 &c, f32 &d) {
 }
 
 /// Load two consecutive f32 values from global memory in a single 64-bit transaction.
-X17_DEVICE void load_gmem_2(const f32 *ptr, f32 &a, f32 &b) {
+template<typename T>
+requires(sizeof(T) == 4)
+X17_DEVICE void load_gmem_2x32b(const T *ptr, T &a, T &b) {
 	asm volatile(
 		"ld.global.v2.f32 {%0, %1}, [%2];\n"
 		: "=f"(a), "=f"(b)
@@ -705,18 +711,18 @@ X17_DEVICE void store_1x8_8x8(
 	*reinterpret_cast<uint4 *>(base + odd_row  + col_off) = make_uint4(g4, g5, g6, g7);
 }
 
-/// Loads 8 horizontally-adjacent 8x8 fragments (64 cols × 8 rows) from GMEM.
-/// Inverse of store_1x8_8x8: 128-bit loads, then reverse XOR-4 and shuffle_4x4
-/// (both are self-inverse, so the same operations undo the store's rearrangement).
-template<typename U, typename T, const usize M, const usize N>
+/// Phase 1 of loading 8 horizontally-adjacent 8x8 fragments (64 cols × 8 rows) from GMEM.
+/// Performs 128-bit coalesced loads only; data remains in shuffled layout in the fragments.
+/// Call load_unshuffle_1x8_8x8 later to rearrange into MMA register layout.
+template<typename U, const usize M, const usize N>
 requires(sizeof(U) == 2)
-X17_DEVICE void load_1x8_8x8(
+X17_DEVICE void load_shuffled_1x8_8x8(
 	GMatrix<U, M, N> const &src,
 	usize m_idx, usize n_idx,
-	Fragment_8x8<T> &f0, Fragment_8x8<T> &f1,
-	Fragment_8x8<T> &f2, Fragment_8x8<T> &f3,
-	Fragment_8x8<T> &f4, Fragment_8x8<T> &f5,
-	Fragment_8x8<T> &f6, Fragment_8x8<T> &f7
+	Fragment_8x8<U> &f0, Fragment_8x8<U> &f1,
+	Fragment_8x8<U> &f2, Fragment_8x8<U> &f3,
+	Fragment_8x8<U> &f4, Fragment_8x8<U> &f5,
+	Fragment_8x8<U> &f6, Fragment_8x8<U> &f7
 ) {
 	// 128-bit load per thread, 8 threads per row, 128B coalesced per row
 	usize tid = threadIdx.x % WARP_SIZE;
@@ -729,43 +735,87 @@ X17_DEVICE void load_1x8_8x8(
 	uint4 even_data = *reinterpret_cast<uint4 const *>(base + even_row + col_off);
 	uint4 odd_data  = *reinterpret_cast<uint4 const *>(base + odd_row  + col_off);
 
-	u32 g0 = even_data.x, g1 = even_data.y, g2 = even_data.z, g3 = even_data.w;
-	u32 g4 = odd_data.x,  g5 = odd_data.y,  g6 = odd_data.z,  g7 = odd_data.w;
+	f0.val = even_data.x; f1.val = even_data.y; f2.val = even_data.z; f3.val = even_data.w;
+	f4.val = odd_data.x;  f5.val = odd_data.y;  f6.val = odd_data.z;  f7.val = odd_data.w;
+}
 
-	// Reverse XOR-4 shuffle (self-inverse)
+/// Phase 2 of loading 8 horizontally-adjacent 8x8 fragments.
+/// Reverses the shuffled layout from load_shuffled_1x8_8x8 back to MMA register layout.
+/// XOR-4 and shuffle_4x4 are self-inverse, so the same operations as store undo the rearrangement.
+template<typename U>
+requires(sizeof(U) == 2)
+X17_DEVICE void load_unshuffle_1x8_8x8(
+	Fragment_8x8<U> &f0, Fragment_8x8<U> &f1,
+	Fragment_8x8<U> &f2, Fragment_8x8<U> &f3,
+	Fragment_8x8<U> &f4, Fragment_8x8<U> &f5,
+	Fragment_8x8<U> &f6, Fragment_8x8<U> &f7
+) {
+	usize tid = threadIdx.x % WARP_SIZE;
 	bool bit2 = (tid & 4) != 0;
 	u32 recv;
 
-	recv = shuffle_xor_sync(bit2 ? g0 : g4, 4);
-	g0 = bit2 ? recv : g0;
-	g4 = bit2 ? g4 : recv;
+	recv = shuffle_xor_sync(bit2 ? f0.val : f4.val, 4);
+	f0.val = bit2 ? recv : f0.val;
+	f4.val = bit2 ? f4.val : recv;
 
-	recv = shuffle_xor_sync(bit2 ? g1 : g5, 4);
-	g1 = bit2 ? recv : g1;
-	g5 = bit2 ? g5 : recv;
+	recv = shuffle_xor_sync(bit2 ? f1.val : f5.val, 4);
+	f1.val = bit2 ? recv : f1.val;
+	f5.val = bit2 ? f5.val : recv;
 
-	recv = shuffle_xor_sync(bit2 ? g2 : g6, 4);
-	g2 = bit2 ? recv : g2;
-	g6 = bit2 ? g6 : recv;
+	recv = shuffle_xor_sync(bit2 ? f2.val : f6.val, 4);
+	f2.val = bit2 ? recv : f2.val;
+	f6.val = bit2 ? f6.val : recv;
 
-	recv = shuffle_xor_sync(bit2 ? g3 : g7, 4);
-	g3 = bit2 ? recv : g3;
-	g7 = bit2 ? g7 : recv;
+	recv = shuffle_xor_sync(bit2 ? f3.val : f7.val, 4);
+	f3.val = bit2 ? recv : f3.val;
+	f7.val = bit2 ? f7.val : recv;
 
-	// Reverse shuffle_4x4 on left and right groups (self-inverse)
-	shuffle_4x4(g0, g1, g2, g3);
-	shuffle_4x4(g4, g5, g6, g7);
+	shuffle_4x4(f0.val, f1.val, f2.val, f3.val);
+	shuffle_4x4(f4.val, f5.val, f6.val, f7.val);
+}
 
-	// Cast from memory type (e.g., bf16) to fragment type (e.g., f32)
-	FragmentReg<U> r;
-	r.val = g0; f0.set(static_cast<T>(r.first()), static_cast<T>(r.second()));
-	r.val = g1; f1.set(static_cast<T>(r.first()), static_cast<T>(r.second()));
-	r.val = g2; f2.set(static_cast<T>(r.first()), static_cast<T>(r.second()));
-	r.val = g3; f3.set(static_cast<T>(r.first()), static_cast<T>(r.second()));
-	r.val = g4; f4.set(static_cast<T>(r.first()), static_cast<T>(r.second()));
-	r.val = g5; f5.set(static_cast<T>(r.first()), static_cast<T>(r.second()));
-	r.val = g6; f6.set(static_cast<T>(r.first()), static_cast<T>(r.second()));
-	r.val = g7; f7.set(static_cast<T>(r.first()), static_cast<T>(r.second()));
+/// Loads K horizontally-adjacent 16x16 tiles from GMEM in shuffled layout.
+/// K must be divisible by 4. Call load_unshuffle() to finalize.
+template<typename U, const usize M, const usize N, const usize K>
+requires(sizeof(U) == 2 && K % 4 == 0)
+X17_DEVICE void load_shuffled(
+	Fragment_16x16<U> (&tiles)[K],
+	GMatrix<U, M, N> const &src,
+	usize m_idx, usize n_idx
+) {
+	X17_UNROLL for (usize i = 0; i < K; i += 4) {
+		load_shuffled_1x8_8x8(src, m_idx, n_idx + i*16,
+			tiles[i].sub[0][0], tiles[i].sub[0][1],
+			tiles[i+1].sub[0][0], tiles[i+1].sub[0][1],
+			tiles[i+2].sub[0][0], tiles[i+2].sub[0][1],
+			tiles[i+3].sub[0][0], tiles[i+3].sub[0][1]);
+		load_shuffled_1x8_8x8(src, m_idx + 8, n_idx + i*16,
+			tiles[i].sub[1][0], tiles[i].sub[1][1],
+			tiles[i+1].sub[1][0], tiles[i+1].sub[1][1],
+			tiles[i+2].sub[1][0], tiles[i+2].sub[1][1],
+			tiles[i+3].sub[1][0], tiles[i+3].sub[1][1]);
+	}
+}
+
+/// Unshuffles K horizontally-adjacent 16x16 tiles previously loaded with load_shuffled().
+/// K must be divisible by 4.
+template<typename U, const usize K>
+requires(sizeof(U) == 2 && K % 4 == 0)
+X17_DEVICE void load_unshuffle(
+	Fragment_16x16<U> (&tiles)[K]
+) {
+	X17_UNROLL for (usize i = 0; i < K; i += 4) {
+		load_unshuffle_1x8_8x8(
+			tiles[i].sub[0][0], tiles[i].sub[0][1],
+			tiles[i+1].sub[0][0], tiles[i+1].sub[0][1],
+			tiles[i+2].sub[0][0], tiles[i+2].sub[0][1],
+			tiles[i+3].sub[0][0], tiles[i+3].sub[0][1]);
+		load_unshuffle_1x8_8x8(
+			tiles[i].sub[1][0], tiles[i].sub[1][1],
+			tiles[i+1].sub[1][0], tiles[i+1].sub[1][1],
+			tiles[i+2].sub[1][0], tiles[i+2].sub[1][1],
+			tiles[i+3].sub[1][0], tiles[i+3].sub[1][1]);
+	}
 }
 
 /// Generic store for an array of K horizontally-adjacent 16x16 tiles.
@@ -1207,6 +1257,14 @@ struct SMatrix {
 
 };
 
+// Standalone tile_m: avoids `.template tile_m<>()` in dependent contexts.
+template<const usize TILE_M, typename Mat>
+X17_HOST_DEVICE constexpr auto tile_m(Mat mat, usize tile_idx)
+	-> decltype(mat.template tile_m<TILE_M>(tile_idx))
+{
+	return mat.template tile_m<TILE_M>(tile_idx);
+}
+
 template<
 	const usize THREADS_PER_BLOCK,
 	typename T,
@@ -1269,12 +1327,12 @@ X17_DEVICE void fragments_to_smem(
 		u32 p0 = base + tid * 4 * sizeof(f32);
 		u32 p1 = p0 + WARP_SIZE * 4 * sizeof(f32);
 
-		store_shared_4(
+		store_shared_4x32b(
 			p0,
 			src[i].sub[0][0].val0, src[i].sub[0][0].val1,
 			src[i].sub[0][1].val0, src[i].sub[0][1].val1
 		);
-		store_shared_4(
+		store_shared_4x32b(
 			p1,
 			src[i].sub[1][0].val0, src[i].sub[1][0].val1,
 			src[i].sub[1][1].val0, src[i].sub[1][1].val1
@@ -1296,12 +1354,12 @@ X17_DEVICE void smem_to_fragments(
 		u32 p0 = base + tid * 4 * sizeof(f32);
 		u32 p1 = p0 + WARP_SIZE * 4 * sizeof(f32);
 
-		load_shared_4(
+		load_shared_4x32b(
 			p0,
 			dst[i].sub[0][0].val0, dst[i].sub[0][0].val1,
 			dst[i].sub[0][1].val0, dst[i].sub[0][1].val1
 		);
-		load_shared_4(
+		load_shared_4x32b(
 			p1,
 			dst[i].sub[1][0].val0, dst[i].sub[1][0].val1,
 			dst[i].sub[1][1].val0, dst[i].sub[1][1].val1
