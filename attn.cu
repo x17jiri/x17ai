@@ -302,10 +302,15 @@ attn_forward(
 	constexpr usize PRELOAD_DIM = QK_DIM + V_DIM;
 	constexpr usize PRELOAD_TILES = QK_TILES + V_TILES;
 
-	constexpr usize Q_STRIDE = QK_DIM * HEAD_CNT;
 	constexpr usize KC_STRIDE = NONROPE_DIM * HEAD_CNT;
 	constexpr usize KR_STRIDE = ROPE_DIM * HEAD_CNT;
 	constexpr usize V_STRIDE = V_DIM * HEAD_CNT;
+	constexpr usize Q_STRIDE = QK_DIM * HEAD_CNT;
+	GMatrixDynSize<bf16, NONROPE_DIM> gKc{gKc_ptr, kv_cnt, KC_STRIDE};
+	GMatrixDynSize<bf16, ROPE_DIM> gKr{gKr_ptr, kv_cnt, KR_STRIDE};
+	GMatrixDynSize<bf16, V_DIM> gV{gV_ptr, kv_cnt, V_STRIDE};
+	GMatrixDynSize<bf16, QK_DIM> gQ_full{gQ_ptr, q_cnt, Q_STRIDE};
+	GMatrix<bf16, Q_PER_BLOCK, QK_DIM> gQ_block = gQ_full.template tile_m<Q_PER_BLOCK>(blockIdx.x);
 
 	u32 smem = 0;
 	usize q_warp_idx = (threadIdx.x / WARP_SIZE) % Q_WARPS;
@@ -318,8 +323,6 @@ attn_forward(
 	};
 
 	// Load Q from GMEM to SMEM
-	GMatrixDynSize<bf16, QK_DIM> gQ_full{gQ_ptr, q_cnt, Q_STRIDE};
-	GMatrix<bf16, Q_PER_BLOCK, QK_DIM> gQ_block = gQ_full.template tile_m<Q_PER_BLOCK>(blockIdx.x);
 	if constexpr (!LOAD_Q_DIRECTLY) {
 		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gQ_block, sQ);
 	}
@@ -335,11 +338,8 @@ attn_forward(
 	// Start preloading K and V from GMEM to SMEM
 	// When Q overlaps KV SMEM, don't use the last preload tile yet (it holds Q)
 	constexpr usize EARLY_PRELOAD = SMEM_OVERLAP_Q_WITH_KV ? GMEM_PRELOAD - 1 : GMEM_PRELOAD;
-	GMatrixDynSize<bf16, NONROPE_DIM> gKc_full{gKc_ptr, kv_cnt, KC_STRIDE};
-	GMatrixDynSize<bf16, ROPE_DIM> gKr_full{gKr_ptr, kv_cnt, KR_STRIDE};
-	GMatrixDynSize<bf16, V_DIM> gV_full{gV_ptr, kv_cnt, V_STRIDE};
 	X17_UNROLL for (usize p = 0; p < EARLY_PRELOAD; ++p) {
-		cp_async_kv(gKc_full, gKr_full, gV_full, preload, p, kv_warp_idx, kv_steps);
+		cp_async_kv(gKc, gKr, gV, preload, p, kv_warp_idx, kv_steps);
 		cp_async_commit();
 	}
 
@@ -390,7 +390,7 @@ attn_forward(
 	}
 
 	if constexpr (SMEM_OVERLAP_Q_WITH_KV) { // Now that Q is in registers, reuse its SMEM for KV
-		cp_async_kv(gKc_full, gKr_full, gV_full, preload, GMEM_PRELOAD - 1, kv_warp_idx, kv_steps);
+		cp_async_kv(gKc, gKr, gV, preload, GMEM_PRELOAD - 1, kv_warp_idx, kv_steps);
 		cp_async_commit();
 	}
 
@@ -441,7 +441,7 @@ attn_forward(
 				.template tile_m<KV_PER_WARP>(kv_warp_idx);
 
 			// Preload next KV tiles from GMEM
-			cp_async_kv(gKc_full, gKr_full, gV_full, preload, kv_step + GMEM_PRELOAD, kv_warp_idx, kv_steps);
+			cp_async_kv(gKc, gKr, gV, preload, kv_step + GMEM_PRELOAD, kv_warp_idx, kv_steps);
 			cp_async_commit();
 		}
 
