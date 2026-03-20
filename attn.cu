@@ -42,7 +42,7 @@ struct Attn {
 	static constexpr usize V_STRIDE = V_DIM * HEAD_CNT;
 	static constexpr usize Q_STRIDE = QK_DIM * HEAD_CNT;
 
-	static constexpr usize SMEM_BYTES =
+	static constexpr usize SMEM_BYTES_FORWARD =
 		SMEM_OVERLAP_Q_WITH_KV
 			?
 				sizeof(bf16) * KV_PER_STEP * PRELOAD_DIM * (GMEM_PRELOAD - 1)
@@ -53,6 +53,19 @@ struct Attn {
 			:
 				sizeof(bf16) * KV_PER_STEP * PRELOAD_DIM * GMEM_PRELOAD
 				+ sizeof(bf16) * Q_PER_BLOCK * QK_DIM;
+
+	// d_q needs: KV preload + Q + dO + O (all loaded simultaneously, persist until SMEM→regs)
+	static constexpr usize SMEM_BYTES_DQ =
+		SMEM_OVERLAP_Q_WITH_KV
+			?
+				sizeof(bf16) * KV_PER_STEP * PRELOAD_DIM * (GMEM_PRELOAD - 1)
+				+ std::max(
+					sizeof(bf16) * KV_PER_STEP * PRELOAD_DIM,
+					sizeof(bf16) * Q_PER_BLOCK * (QK_DIM + 2 * V_DIM)
+				)
+			:
+				sizeof(bf16) * KV_PER_STEP * PRELOAD_DIM * GMEM_PRELOAD
+				+ sizeof(bf16) * Q_PER_BLOCK * (QK_DIM + 2 * V_DIM);
 
 	X17_DEVICE void causal_mask_diagonal(Fragment_16x16<f32> &rScores) {
 		usize tid = threadIdx.x % WARP_SIZE;
@@ -161,7 +174,8 @@ struct Attn {
 		u32 smem,
 		usize q_warp_idx,
 		usize kv_warp_idx,
-		GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block
+		GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block,
+		f32 *gL
 	) {
 		// Complete the row-wise sum reduction within each warp
 		top.sum += shuffle_xor_sync(top.sum, 1);
@@ -284,7 +298,10 @@ struct Attn {
 
 		store(rOut, gOut_block, q_warp_idx * Q_PER_WARP, 0);
 
-		// TODO - store L
+		if ((tid & 1) == 0) {
+			usize base = blockIdx.x * Q_PER_BLOCK + q_warp_idx * Q_PER_WARP;
+			gL[base + tid / 4 + ((tid & 2) * 4)] = ((tid & 2) == 0 ? top_L : bot_L);
+		}
 	}
 
 	X17_DEVICE void cp_async_kv(
@@ -320,6 +337,7 @@ struct Attn {
 		usize q_cnt, bf16 *gQ_ptr,
 		usize kv_cnt, bf16 *gKc_ptr, bf16 *gKr_ptr, bf16 *gV_ptr,
 		bf16 *gOut_ptr,
+		f32 *gL_ptr,
 		f32 *sink
 	) {
 		// GMEM Matrices
@@ -465,7 +483,223 @@ struct Attn {
 			}
 		}
 
-		combine_and_store(rOut, r_top, r_bot, sink_score, top_score_scale, bot_score_scale, gate, smem, q_warp_idx, kv_warp_idx, gOut_block);
+		combine_and_store(rOut, r_top, r_bot, sink_score, top_score_scale, bot_score_scale, gate, smem, q_warp_idx, kv_warp_idx, gOut_block, gL_ptr);
+	}
+
+	X17_DEVICE void d_q(
+		usize q_cnt, bf16 *gQ_ptr,
+		usize kv_cnt, bf16 *gKc_ptr, bf16 *gKr_ptr, bf16 *gV_ptr,
+		bf16 *gOut_ptr, bf16 *gDO_ptr, bf16 *gDQ_ptr,
+		f32 *gL_ptr,
+		f32 *sink
+	) {
+		static_assert(KV_WARPS == 1, "d_q store requires KV_WARPS == 1");
+
+		// GMEM Matrices
+		GMatrixDynSize<bf16, NONROPE_DIM> gKc{gKc_ptr, kv_cnt, KC_STRIDE};
+		GMatrixDynSize<bf16, ROPE_DIM> gKr{gKr_ptr, kv_cnt, KR_STRIDE};
+		GMatrixDynSize<bf16, V_DIM> gV{gV_ptr, kv_cnt, V_STRIDE};
+		GMatrixDynSize<bf16, QK_DIM> gQ_full{gQ_ptr, q_cnt, Q_STRIDE};
+		GMatrix<bf16, Q_PER_BLOCK, QK_DIM> gQ_block = tile_m<Q_PER_BLOCK>(gQ_full, blockIdx.x);
+		GMatrixDynSize<bf16, V_DIM> gOut_full{gOut_ptr, q_cnt};
+		GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = tile_m<Q_PER_BLOCK>(gOut_full, blockIdx.x);
+		GMatrixDynSize<bf16, V_DIM> gDO_full{gDO_ptr, q_cnt};
+		GMatrix<bf16, Q_PER_BLOCK, V_DIM> gDO_block = tile_m<Q_PER_BLOCK>(gDO_full, blockIdx.x);
+		GMatrixDynSize<bf16, QK_DIM> gDQ_full{gDQ_ptr, q_cnt, Q_STRIDE};
+		GMatrix<bf16, Q_PER_BLOCK, QK_DIM> gDQ_block = tile_m<Q_PER_BLOCK>(gDQ_full, blockIdx.x);
+
+		// SMEM layout: KV preload region + Q region + dO region
+		u32 smem = 0;
+		usize q_warp_idx = (threadIdx.x / WARP_SIZE) % Q_WARPS;
+		usize kv_warp_idx = (threadIdx.x / WARP_SIZE) / Q_WARPS;
+		SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, PRELOAD_DIM> sPreload{smem};
+		SMatrix<bf16, Q_PER_BLOCK, QK_DIM> sQ{
+			SMEM_OVERLAP_Q_WITH_KV
+				? tile_m<KV_PER_STEP>(sPreload, GMEM_PRELOAD - 1)._ptr
+				: sPreload._ptr + sPreload.bytes()
+		};
+		SMatrix<bf16, Q_PER_BLOCK, V_DIM> sdO{sQ._ptr + sQ.bytes()};
+		SMatrix<bf16, Q_PER_BLOCK, V_DIM> sO{sdO._ptr + sdO.bytes()};
+
+		// Load Q, dO, O from GMEM to SMEM (no commit — piggyback on first KV commit)
+		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gQ_block, sQ);
+		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gDO_block, sdO);
+		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gOut_block, sO);
+
+		// TODO - should we aassume `kv_cnt == q_cnt` for backward?
+		usize kv_extra = kv_cnt - q_cnt;
+		usize block_q_start = blockIdx.x * Q_PER_BLOCK;
+		usize kv_steps = (kv_extra + block_q_start + Q_PER_BLOCK + KV_PER_STEP - 1) / KV_PER_STEP;
+		kv_steps = std::min(kv_steps, kv_cnt / KV_PER_STEP);
+		usize full_kv_steps = (kv_extra + block_q_start) / KV_PER_STEP;
+		full_kv_steps = std::min(full_kv_steps, kv_steps);
+
+		// Start preloading K and V from GMEM to SMEM  (first commit also commits Q + dO)
+		// When Q overlaps KV SMEM, don't use the last preload tile yet (it holds Q)
+		X17_UNROLL for (usize p = 0; p < EARLY_PRELOAD; ++p) {
+			cp_async_kv(gKc, gKr, gV, sPreload, p, kv_warp_idx, kv_steps);
+			cp_async_commit();
+		}
+
+		// Sink: a virtual token with no V contribution - it only adds to the
+		// softmax denominator, stealing probability from real tokens.
+		// sink[0] = raw score, sink[1] = output gate
+		f32 sink_score = -INFINITY;
+		f32 gate = 1.0f;
+		if (sink != nullptr) {
+			load_gmem_2x32b(sink, sink_score, gate);
+		}
+
+		// Scalable-Softmax: score_scale = (1.0 / sqrt(QK_DIM)) * ln(n) * logb(e)
+		//     1.0 / sqrt(QK_DIM) — standard attention scaling
+		//     ln(n)              — SSMax factor (ln(n) = logb(n) / logb(e))
+		//     logb(e)            — so we can use expb instead of exp
+		// Since we are multiplying and dividing by logb(e), it cancels out, so:
+		//     score_scale = (1.0 / sqrt(QK_DIM)) * logb(n)
+		usize my_q_start = block_q_start + q_warp_idx * Q_PER_WARP;
+		usize tid = threadIdx.x % WARP_SIZE;
+		f32 top_n = my_q_start + tid / 4 + 1 + 1;
+		f32 bot_n = my_q_start + tid / 4 + 9 + 1;
+		f32 top_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(top_n);
+		f32 bot_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(bot_n);
+
+		// Load logsumexp from forward pass
+		f32 top_L = gL_ptr[my_q_start + tid / 4];
+		f32 bot_L = gL_ptr[my_q_start + tid / 4 + 8];
+
+		// dQ accumulator
+		Fragment_16x16<f32> rDQ[QK_TILES];
+		zero_(rDQ);
+
+		cp_async_wait<EARLY_PRELOAD - 1>();
+		sync_threads();
+
+		// Load Q from SMEM to registers
+		Fragment_16x16<bf16> rQ[QK_TILES];
+		X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
+			smem_tile_to_fragment(sQ, q_warp_idx * Q_PER_WARP, i * 16, rQ[i]);
+		}
+		// Load dO from SMEM to registers
+		Fragment_16x16<bf16> rDO[V_TILES];
+		X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
+			smem_tile_to_fragment(sdO, q_warp_idx * Q_PER_WARP, i * 16, rDO[i]);
+		}
+		// Compute D = rowsum(dO ⊙ O) — load O tiles one at a time from SMEM
+		f32 top_D = 0.0f, bot_D = 0.0f;
+		X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
+			Fragment_16x16<bf16> rO;
+			smem_tile_to_fragment(sO, q_warp_idx * Q_PER_WARP, i * 16, rO); // TODO - scheduling
+			top_D += f32(rDO[i].sub[0][0].first()) * f32(rO.sub[0][0].first());
+			top_D += f32(rDO[i].sub[0][0].second()) * f32(rO.sub[0][0].second());
+			top_D += f32(rDO[i].sub[0][1].first()) * f32(rO.sub[0][1].first());
+			top_D += f32(rDO[i].sub[0][1].second()) * f32(rO.sub[0][1].second());
+			bot_D += f32(rDO[i].sub[1][0].first()) * f32(rO.sub[1][0].first());
+			bot_D += f32(rDO[i].sub[1][0].second()) * f32(rO.sub[1][0].second());
+			bot_D += f32(rDO[i].sub[1][1].first()) * f32(rO.sub[1][1].first());
+			bot_D += f32(rDO[i].sub[1][1].second()) * f32(rO.sub[1][1].second());
+		}
+		// Reduce across tid%4 (4 threads per row hold different column groups)
+		top_D += shuffle_xor_sync(top_D, 1);
+		top_D += shuffle_xor_sync(top_D, 2);
+		bot_D += shuffle_xor_sync(bot_D, 1);
+		bot_D += shuffle_xor_sync(bot_D, 2);
+		// Load first KV tile from SMEM to registers
+		SMatrix<bf16, KV_PER_WARP, PRELOAD_DIM> sKV;
+		sKV = tile_m<KV_PER_WARP>(tile_m<KV_PER_STEP>(sPreload, 0), kv_warp_idx);
+		Fragment_16x16<bf16> rKV[QK_TILES];
+		X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
+			smem_tile_to_fragment(sKV, 0, i * 16, rKV[i]);
+		}
+
+		// Now that Q is in registers, reuse its SMEM for KV
+		if constexpr (SMEM_OVERLAP_Q_WITH_KV) {
+			cp_async_kv(gKc, gKr, gV, sPreload, GMEM_PRELOAD - 1, kv_warp_idx, kv_steps);
+			cp_async_commit();
+		}
+
+		// Sequential loop over KV
+		X17_NO_UNROLL for (usize kv_step = 0; kv_step < kv_steps; ++kv_step) {
+			// S = Q * K^T, interleaved with V load (rKV: K -> V)
+			Fragment_16x16<f32> rS;
+			zero_(rS);
+			X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
+				mma_a_bt(rQ[i], rKV[i], rS);
+				smem_tile_to_fragment_trans(sKV, 0, V_SMEM_COL + i * 16, rKV[i]);
+			}
+			X17_UNROLL for (usize i = V_TILES; i < QK_TILES; i++) {
+				mma_a_bt(rQ[i], rKV[i], rS);
+			}
+
+			// Scale scores
+			scale_top_(rS, top_score_scale);
+			scale_bottom_(rS, bot_score_scale);
+
+			// Causal mask
+			if (kv_step >= full_kv_steps) {
+				usize kv_pos = kv_step * KV_PER_STEP + kv_warp_idx * KV_PER_WARP;
+				if (kv_pos == kv_extra + my_q_start) {
+					causal_mask_diagonal(rS);
+				} else if (kv_pos > kv_extra + my_q_start) {
+					fill_(rS, -INFINITY);
+				}
+			}
+
+			// P = expb(S - L)
+			rS.sub[0][0].val0 = math::fast::expb(rS.sub[0][0].val0 - top_L);
+			rS.sub[0][0].val1 = math::fast::expb(rS.sub[0][0].val1 - top_L);
+			rS.sub[0][1].val0 = math::fast::expb(rS.sub[0][1].val0 - top_L);
+			rS.sub[0][1].val1 = math::fast::expb(rS.sub[0][1].val1 - top_L);
+			rS.sub[1][0].val0 = math::fast::expb(rS.sub[1][0].val0 - bot_L);
+			rS.sub[1][0].val1 = math::fast::expb(rS.sub[1][0].val1 - bot_L);
+			rS.sub[1][1].val0 = math::fast::expb(rS.sub[1][1].val0 - bot_L);
+			rS.sub[1][1].val1 = math::fast::expb(rS.sub[1][1].val1 - bot_L);
+
+			// dP = dO * V^T, interleaved with K reload (rKV: V -> K)
+			Fragment_16x16<f32> rDP;
+			zero_(rDP);
+			X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
+				mma_a_bt(rDO[i], rKV[i], rDP);
+				smem_tile_to_fragment(sKV, 0, i * 16, rKV[i]);
+			}
+
+			// TODO: try creating rDS for dS and check if the number of used registers changes
+			// dS = P * (dP - D)  (reuse rDP for dS)
+			rDP.sub[0][0].val0 = rS.sub[0][0].val0 * (rDP.sub[0][0].val0 - top_D);
+			rDP.sub[0][0].val1 = rS.sub[0][0].val1 * (rDP.sub[0][0].val1 - top_D);
+			rDP.sub[0][1].val0 = rS.sub[0][1].val0 * (rDP.sub[0][1].val0 - top_D);
+			rDP.sub[0][1].val1 = rS.sub[0][1].val1 * (rDP.sub[0][1].val1 - top_D);
+			rDP.sub[1][0].val0 = rS.sub[1][0].val0 * (rDP.sub[1][0].val0 - bot_D);
+			rDP.sub[1][0].val1 = rS.sub[1][0].val1 * (rDP.sub[1][0].val1 - bot_D);
+			rDP.sub[1][1].val0 = rS.sub[1][1].val0 * (rDP.sub[1][1].val0 - bot_D);
+			rDP.sub[1][1].val1 = rS.sub[1][1].val1 * (rDP.sub[1][1].val1 - bot_D);
+
+			Fragment_16x16<bf16> rDS;
+			cast(rDP, rDS);
+
+			{ // Get more data from GMEM
+				cp_async_wait<GMEM_PRELOAD - 2>();
+				if constexpr (KV_WARPS > 1) {
+					bar_sync<Q_WARPS * WARP_SIZE>(kv_warp_idx + 1);
+				} else {
+					sync_threads();
+				}
+				sKV = tile_m<KV_PER_WARP>(tile_m<KV_PER_STEP>(sPreload, (kv_step + 1) % GMEM_PRELOAD), kv_warp_idx);
+
+				cp_async_kv(gKc, gKr, gV, sPreload, kv_step + GMEM_PRELOAD, kv_warp_idx, kv_steps);
+				cp_async_commit();
+			}
+
+			// dQ += dS @ K, interleaved with next K load (rKV: K_cur -> K_next)
+			X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
+				mma_a_bt(rDS, rKV[i], rDQ[i]);
+				smem_tile_to_fragment(sKV, 0, i * 16, rKV[i]);
+			}
+		}
+
+		// TODO - we need to use sink and gate
+
+		// Store dQ to GMEM
+		store(rDQ, gDQ_block, q_warp_idx * Q_PER_WARP, 0);
 	}
 };
 
@@ -475,10 +709,24 @@ attn_forward(
 	usize q_cnt, bf16 *gQ_ptr,
 	usize kv_cnt, bf16 *gKc_ptr, bf16 *gKr_ptr, bf16 *gV_ptr,
 	bf16 *gOut_ptr,
+	f32 *gL_ptr,
 	f32 *sink
 ) {
 	auto attn = Attn();
-	attn.forward(q_cnt, gQ_ptr, kv_cnt, gKc_ptr, gKr_ptr, gV_ptr, gOut_ptr, sink);
+	attn.forward(q_cnt, gQ_ptr, kv_cnt, gKc_ptr, gKr_ptr, gV_ptr, gOut_ptr, gL_ptr, sink);
+}
+
+template<typename Attn>
+__global__ __launch_bounds__(Attn::THREADS_PER_BLOCK) void
+attn_d_q(
+	usize q_cnt, bf16 *gQ_ptr,
+	usize kv_cnt, bf16 *gKc_ptr, bf16 *gKr_ptr, bf16 *gV_ptr,
+	bf16 *gOut_ptr, bf16 *gDO_ptr, bf16 *gDQ_ptr,
+	f32 *gL_ptr,
+	f32 *sink
+) {
+	auto attn = Attn();
+	attn.d_q(q_cnt, gQ_ptr, kv_cnt, gKc_ptr, gKr_ptr, gV_ptr, gOut_ptr, gDO_ptr, gDQ_ptr, gL_ptr, sink);
 }
 
 int main(int argc, char *argv[]) {
@@ -584,6 +832,11 @@ int main(int argc, char *argv[]) {
 	cudaMalloc(&out_dev, out_size_bytes);
 	GMatrixDynSize<bf16, V_DIM> out{out_dev, Q_LEN};
 
+	// allocate logsumexp: f32 [Q_LEN]
+	std::vector<f32> L_data(Q_LEN);
+	f32 *L_dev;
+	cudaMalloc(&L_dev, Q_LEN * sizeof(f32));
+
 	err = cudaGetLastError();
 	if (err != cudaSuccess) {
 		printf("(2) CUDA Error: %s\n", cudaGetErrorString(err));
@@ -594,13 +847,14 @@ int main(int argc, char *argv[]) {
 		printf("(3) CUDA Error: %s\n", cudaGetErrorString(err));
 	}
 
-	constexpr bool V_EQ_K = !true;
+	constexpr bool V_EQ_K = true;
 	using A = Attn<1, NONROPE_DIM, ROPE_DIM, V_DIM, 4, 1, V_EQ_K>;
-	usize smem_size = A::SMEM_BYTES;
-	printf("smem_size = %d bytes\n", smem_size);
+	usize smem_size = A::SMEM_BYTES_FORWARD;
+	printf("smem_size = %d bytes (forward), %d bytes (dQ)\n", smem_size, A::SMEM_BYTES_DQ);
 	//smem_size = std::max(smem_size, usize(70 * 1024));
 
 	cudaFuncSetAttribute(attn_forward<A>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+	cudaFuncSetAttribute(attn_d_q<A>, cudaFuncAttributeMaxDynamicSharedMemorySize, A::SMEM_BYTES_DQ);
 
 	cudaFuncSetAttribute(attn_forward<A>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
@@ -622,6 +876,7 @@ int main(int argc, char *argv[]) {
 				Q_LEN, q_dev,
 				KV_LEN, kc_dev, kr_dev, v_dev,
 				out_dev,
+				L_dev,
 				sink_ptr
 			);
 	}
@@ -644,6 +899,7 @@ int main(int argc, char *argv[]) {
 				Q_LEN, q_dev,
 				KV_LEN, kc_dev, kr_dev, v_dev,
 				out_dev,
+				L_dev,
 				sink_ptr
 			);
 		cudaEventRecord(ends[i]);
@@ -675,6 +931,16 @@ int main(int argc, char *argv[]) {
 		out_file.write(
 			reinterpret_cast<char *>(out_data.data()),
 			static_cast<std::streamsize>(out_data.size() * sizeof(*out_data.data()))
+		);
+	}
+
+	// write logsumexp to file
+	{
+		std::ofstream L_file("tmp/L.bin", std::ios::binary);
+		cudaMemcpy(L_data.data(), L_dev, Q_LEN * sizeof(f32), cudaMemcpyDeviceToHost);
+		L_file.write(
+			reinterpret_cast<char *>(L_data.data()),
+			static_cast<std::streamsize>(L_data.size() * sizeof(f32))
 		);
 	}
 
