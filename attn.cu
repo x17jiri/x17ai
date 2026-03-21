@@ -627,11 +627,13 @@ struct Attn {
 		// Sequential loop over KV
 		X17_NO_UNROLL for (usize kv_step = 0; kv_step < kv_steps; ++kv_step) {
 			// S = Q * K^T, interleaved with V load (rKV: K -> V)
+			// NOTE: V loaded NON-transposed (unlike forward) because dP = dO @ V^T
+			// needs B with inner-k = dim (matching dO), not kv.
 			Fragment_16x16<f32> rS;
 			zero_(rS);
 			X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
 				mma_a_bt(rQ[i], rKV[i], rS);
-				smem_tile_to_fragment_trans(sKV, 0, V_SMEM_COL + i * 16, rKV[i]);
+				smem_tile_to_fragment(sKV, 0, V_SMEM_COL + i * 16, rKV[i]);
 			}
 			X17_UNROLL for (usize i = V_TILES; i < QK_TILES; i++) {
 				mma_a_bt(rQ[i], rKV[i], rS);
@@ -663,12 +665,17 @@ struct Attn {
 			rS.sub[1][1].val0 = math::fast::expb(rS.sub[1][1].val0 - bot_L);
 			rS.sub[1][1].val1 = math::fast::expb(rS.sub[1][1].val1 - bot_L);
 
-			// dP = dO * V^T, interleaved with K reload (rKV: V -> K)
+			// dP = dO * V^T, interleaved with K^T reload (rKV: V -> K^T)
+			// K loaded TRANSPOSED because dQ = dS @ K needs B with inner-k = kv.
 			Fragment_16x16<f32> rDP;
 			zero_(rDP);
 			X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
 				mma_a_bt(rDO[i], rKV[i], rDP);
-				smem_tile_to_fragment(sKV, 0, i * 16, rKV[i]);
+				smem_tile_to_fragment_trans(sKV, 0, i * 16, rKV[i]);
+			}
+			// Load remaining K tiles transposed for dQ GEMM
+			X17_UNROLL for (usize i = V_TILES; i < QK_TILES; i++) {
+				smem_tile_to_fragment_trans(sKV, 0, i * 16, rKV[i]);
 			}
 
 			// dS = P * (dP - D)
