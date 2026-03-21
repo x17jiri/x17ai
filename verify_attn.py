@@ -26,17 +26,21 @@ def print_matrix(t):
 
 def create_inputs(q_len, kv_len):
 	rng = np.random.default_rng(42)
-	q_f32 = (rng.standard_normal((q_len, QK_DIM)) * 0.1).astype(np.float32)
-	kv_f32 = (rng.standard_normal((kv_len, QK_DIM)) * 0.1).astype(np.float32)
+	q_f64 = rng.standard_normal((q_len, QK_DIM))
+	kv_f64 = rng.standard_normal((kv_len, QK_DIM))
+	dO_f64 = rng.standard_normal((q_len, V_DIM))
 
 	# Convert to bf16 via torch (proper rounding)
-	q_bf16 = torch.from_numpy(q_f32).to(torch.bfloat16)
-	kv_bf16 = torch.from_numpy(kv_f32).to(torch.bfloat16)
+	q_bf16 = torch.from_numpy(q_f64).to(torch.bfloat16)
+	kv_bf16 = torch.from_numpy(kv_f64).to(torch.bfloat16)
+	dO_bf16 = torch.from_numpy(dO_f64).to(torch.bfloat16)
 
 	q_bf16.view(torch.int16).numpy().view(np.uint16).tofile("tmp/q.bin")
 	kv_bf16.view(torch.int16).numpy().view(np.uint16).tofile("tmp/kv.bin")
+	dO_bf16.view(torch.int16).numpy().view(np.uint16).tofile("tmp/dO.bin")
 	print(f"Created tmp/q.bin:  [{q_len}, {QK_DIM}] bf16  ({q_len * QK_DIM * 2} bytes)")
 	print(f"Created tmp/kv.bin: [{kv_len}, {QK_DIM}] bf16  ({kv_len * QK_DIM * 2} bytes)")
+	print(f"Created tmp/dO.bin: [{q_len}, {V_DIM}] bf16  ({q_len * V_DIM * 2} bytes)")
 
 
 def load_inputs(q_len, kv_len, large=False):
@@ -49,41 +53,45 @@ def load_inputs(q_len, kv_len, large=False):
 	return Q, KV
 
 
-def reference_exact(Q, KV, sink=-math.inf, gate=1.0):
+def load_bf16(path, shape):
+	raw = np.fromfile(path, dtype=np.uint16).reshape(shape)
+	return torch.from_numpy(raw.view(np.int16)).view(torch.bfloat16)
+
+
+def load_f32(path, shape):
+	return torch.from_numpy(np.fromfile(path, dtype=np.float32).reshape(shape))
+
+
+def reference_exact(Q, K, V, sink, gate):
 	"""Scalable-Softmax causal attention with optional sink token, in f64.
-	SSMax_n(x)_i = n^(x_i) / sum_j n^(x_j), which is equivalent to
-	standard softmax with scores pre-scaled by ln(n).
-	For row i (0-indexed), n = i+1 (causal: attends to positions 0..i).
-	sink: optional [q_len] tensor of raw sink scores.
-	gate: scalar multiplier applied to the final output.
+	Q, K, V are f64 tensors. Q may have requires_grad=True.
+	Returns output (f64, with grad_fn if Q requires grad).
 	"""
 	q_len = Q.shape[0]
-	kv_len = KV.shape[0]
-	K = KV[:, :QK_DIM].double()   # [kv_len, QK_DIM]
-	V = KV[:, :V_DIM].double()    # [kv_len, V_DIM]
-	scores = Q.double() @ K.T     # [q_len, kv_len]
-	sink = torch.full((q_len, 1), sink, dtype=torch.double)
-	scores = torch.cat([sink, scores], dim=1)  # [q_len, kv_len+1]
-	scores /= math.sqrt(QK_DIM)
+	kv_len = K.shape[0]
+	scores = Q @ K.T     # [q_len, kv_len]
+	sink_col = torch.full((q_len, 1), sink, dtype=torch.double)
+	scores = torch.cat([sink_col, scores], dim=1)  # [q_len, kv_len+1]
+	scores = scores / math.sqrt(QK_DIM)
 
 	# SSMax: multiply ALL scores (including sink) by ln(n) where n = row_index + 2
 	n = torch.arange(2, q_len + 2, dtype=torch.float64).unsqueeze(1)  # [q_len, 1]
-	scores *= torch.log(n)
+	scores = scores * torch.log(n)
 
 	# Causal mask: mask out kv_pos > q_pos (sink column is never masked)
 	sink_mask = torch.zeros(q_len, 1, dtype=torch.bool)
 	mask = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
 	mask = torch.cat([sink_mask, mask], dim=1)
-	scores.masked_fill_(mask, float('-inf'))
+	scores = scores.masked_fill(mask, float('-inf'))
 
 	attn = torch.softmax(scores, dim=-1)
 	# Only the real tokens contribute to output (skip sink at column 0)
 	out = attn[:, 1:] @ V
-	out *= gate
-	return out.to(torch.bfloat16)
+	out = out * gate
+	return out
 
 
-def compare(name, ref_bf16, cuda_bf16, q_len):
+def compare(name, ref_bf16, cuda_bf16, q_len, dim):
 	ref_f = ref_bf16.float()
 	cuda_f = cuda_bf16.float()
 
@@ -92,17 +100,16 @@ def compare(name, ref_bf16, cuda_bf16, q_len):
 	num_inf = torch.isinf(cuda_f).sum().item()
 	if num_nan > 0 or num_inf > 0:
 		print(f"\n*** CUDA output: {num_nan} NaN, {num_inf} Inf out of {cuda_f.numel()} values ***")
-		# Find first NaN/Inf rows
 		nan_mask = torch.isnan(cuda_f) | torch.isinf(cuda_f)
 		bad_rows = nan_mask.any(dim=1).nonzero(as_tuple=False).squeeze(-1)
 		if bad_rows.numel() > 0:
 			print(f"    Bad rows (first 20): {bad_rows[:20].tolist()}")
 
 	diff = (ref_f - cuda_f).abs()
-	ref_np = ref_bf16.view(torch.int16).numpy().view(np.uint16).reshape(q_len, V_DIM)
-	cuda_np = cuda_bf16.view(torch.int16).numpy().view(np.uint16).reshape(q_len, V_DIM)
+	ref_np = ref_bf16.view(torch.int16).numpy().view(np.uint16).reshape(q_len, dim)
+	cuda_np = cuda_bf16.view(torch.int16).numpy().view(np.uint16).reshape(q_len, dim)
 	exact_match = (ref_np == cuda_np).sum()
-	total = q_len * V_DIM
+	total = q_len * dim
 
 	# Sign flips: both nonzero and opposite signs
 	sign_flip_mask = (ref_f * cuda_f) < 0
@@ -143,24 +150,32 @@ def compare(name, ref_bf16, cuda_bf16, q_len):
 
 
 def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5):
-	Q, KV = load_inputs(q_len, kv_len, large=large)
+	Q_bf16, KV_bf16 = load_inputs(q_len, kv_len, large=large)
 
 	if large:
 		sink_arg = -math.inf
 		gate_arg = 1.0
+		prefix = "tmp/large_"
 	else:
 		sink_arg = sink_val
 		gate_arg = gate_val
+		prefix = "tmp/"
+
+	# Build f64 tensors with requires_grad for autograd
+	Q = Q_bf16.double().requires_grad_(True)
+	K = KV_bf16[:, :QK_DIM].double()
+	V = KV_bf16[:, :V_DIM].double()
 
 	print(f"Computing exact reference (f64 softmax) q_len={q_len}, kv_len={kv_len}...")
-	ref_exact = reference_exact(Q, KV, sink=sink_arg, gate=gate_arg)
+	ref_out = reference_exact(Q, K, V, sink=sink_arg, gate=gate_arg)
+	ref_out_bf16 = ref_out.detach().to(torch.bfloat16)
 
 	print(f"\nFirst 4 rows, first 8 cols:")
-	print_matrix(ref_exact[:4, :8].float())
+	print_matrix(ref_out_bf16[:4, :8].float())
 	print(f"\nLast 4 rows, last 8 cols:")
-	print_matrix(ref_exact[-4:, -8:].float())
+	print_matrix(ref_out_bf16[-4:, -8:].float())
 
-	# Compare with CUDA output if available
+	# Compare forward output with CUDA
 	cuda_path = "tmp/out_cpu.bin"
 	if os.path.exists(cuda_path):
 		cuda_raw = np.fromfile(cuda_path, dtype=np.uint16)
@@ -172,10 +187,40 @@ def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5):
 			return
 
 		cuda_bf16 = torch.from_numpy(cuda_raw.view(np.int16)).view(torch.bfloat16).reshape(q_len, V_DIM)
-
-		compare("Exact f64", ref_exact, cuda_bf16, q_len)
+		compare("Forward (exact f64)", ref_out_bf16, cuda_bf16, q_len, V_DIM)
 	else:
 		print(f"\nNo {cuda_path} found — run the CUDA kernel first to compare.")
+
+	# Backward: compute reference dQ via autograd
+	dO_path = f"{prefix}dO.bin"
+	if not os.path.exists(dO_path):
+		print(f"\nNo {dO_path} found — skipping backward verification.")
+		return
+
+	dO_bf16 = load_bf16(dO_path, (q_len, V_DIM))
+	ref_out.backward(dO_bf16.double())
+	ref_dQ = Q.grad  # f64
+	ref_dQ_bf16 = ref_dQ.to(torch.bfloat16)
+
+	print(f"\n=== Backward verification ===")
+
+	# Verify D = rowsum(dO ⊙ O)
+	D_path = "tmp/D.bin"
+	if os.path.exists(D_path):
+		O_cuda = load_bf16("tmp/out_cpu.bin", (q_len, V_DIM))
+		D_cuda = load_f32(D_path, (q_len,))
+		D_ref = (dO_bf16.float() * O_cuda.float()).sum(dim=-1)
+		diff = (D_ref - D_cuda).abs()
+		exact = (D_ref == D_cuda).sum().item()
+		print(f"\n--- D = rowsum(dO ⊙ O) ---")
+		print(f"Max abs diff:  {diff.max().item():.6e}")
+		print(f"Exact match:   {exact}/{q_len} ({100*exact/q_len:.2f}%)")
+
+	# Verify dQ
+	dQ_path = "tmp/dQ.bin"
+	if os.path.exists(dQ_path):
+		dQ_cuda = load_bf16(dQ_path, (q_len, QK_DIM))
+		compare("dQ (autograd f64)", ref_dQ_bf16, dQ_cuda, q_len, QK_DIM)
 
 
 if __name__ == "__main__":

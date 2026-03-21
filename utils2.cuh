@@ -114,8 +114,8 @@ namespace math {
 		return result;
 	}
 
-	X17_DEVICE f32 fma(f32 a, f32 b, f32 c) {
-		return __fmaf_rn(a, b, c);
+	X17_DEVICE f32 fma(f32 mul1, f32 mul2, f32 add) {
+		return __fmaf_rn(mul1, mul2, add);
 	}
 }
 
