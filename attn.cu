@@ -564,9 +564,15 @@ struct Attn {
 		f32 top_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(top_n);
 		f32 bot_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(bot_n);
 
-		// Load logsumexp from forward pass
-		f32 top_L = gL_ptr[my_q_start + tid / 4]; // TODO - single read
-		f32 bot_L = gL_ptr[my_q_start + tid / 4 + 8];
+		// Load logsumexp from forward pass, adjusted to fold score_scale AND gate into P:
+		//   L' = L - logb(gate * score_scale / logb_e)
+		//   P' = expb(S*score_scale - L') = P * gate * score_scale / logb_e
+		//   D'  = D / gate
+		// so dS = P' * (dP - D') and dQ = sum(dS) @ K — no scaling needed.
+		f32 top_grad_scale = f32(1.0 / math::fast::logb_e) * gate * top_score_scale;
+		f32 bot_grad_scale = f32(1.0 / math::fast::logb_e) * gate * bot_score_scale;
+		f32 top_L = gL_ptr[my_q_start + tid / 4] - math::fast::logb(top_grad_scale);
+		f32 bot_L = gL_ptr[my_q_start + tid / 4 + 8] - math::fast::logb(bot_grad_scale);
 
 		// dQ accumulator
 		Fragment_16x16<f32> rDQ[QK_TILES];
@@ -605,6 +611,10 @@ struct Attn {
 		top_D += shuffle_xor_sync(top_D, 2);
 		bot_D += shuffle_xor_sync(bot_D, 1);
 		bot_D += shuffle_xor_sync(bot_D, 2);
+		// D' = D / gate (since gate is folded into P'', dS = P'' * (dP - D/gate))
+		f32 inv_gate = math::fast::recip(gate);
+		top_D *= inv_gate;
+		bot_D *= inv_gate;
 		// Store D to GMEM (same pattern as L store)
 		if ((tid & 1) == 0) {
 			usize base = block_q_start + q_warp_idx * Q_PER_WARP;
@@ -656,22 +666,21 @@ struct Attn {
 
 			// P = expb(S - L)
 			Fragment_16x16<f32> rP;
-			rP.sub[0][0].val0 = math::fast::expb(rP.sub[0][0].val0 - top_L);
-			rP.sub[0][0].val1 = math::fast::expb(rP.sub[0][0].val1 - top_L);
-			rP.sub[0][1].val0 = math::fast::expb(rP.sub[0][1].val0 - top_L);
-			rP.sub[0][1].val1 = math::fast::expb(rP.sub[0][1].val1 - top_L);
+			rP.sub[0][0].val0 = math::fast::expb(rS.sub[0][0].val0 - top_L);
+			rP.sub[0][0].val1 = math::fast::expb(rS.sub[0][0].val1 - top_L);
+			rP.sub[0][1].val0 = math::fast::expb(rS.sub[0][1].val0 - top_L);
+			rP.sub[0][1].val1 = math::fast::expb(rS.sub[0][1].val1 - top_L);
 
-			rP.sub[1][0].val0 = math::fast::expb(rP.sub[1][0].val0 - bot_L);
-			rP.sub[1][0].val1 = math::fast::expb(rP.sub[1][0].val1 - bot_L);
-			rP.sub[1][1].val0 = math::fast::expb(rP.sub[1][1].val0 - bot_L);
-			rP.sub[1][1].val1 = math::fast::expb(rP.sub[1][1].val1 - bot_L);
+			rP.sub[1][0].val0 = math::fast::expb(rS.sub[1][0].val0 - bot_L);
+			rP.sub[1][0].val1 = math::fast::expb(rS.sub[1][0].val1 - bot_L);
+			rP.sub[1][1].val0 = math::fast::expb(rS.sub[1][1].val0 - bot_L);
+			rP.sub[1][1].val1 = math::fast::expb(rS.sub[1][1].val1 - bot_L);
 
 			// dP = dO * V^T, interleaved with K^T reload (rKV: V -> K^T)
 			// K loaded TRANSPOSED because dQ = dS @ K needs B with inner-k = kv.
 			Fragment_16x16<f32> rDP;
 			zero_(rDP);
 			X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
-				// TODO - we should access V tiles, not K tiles. Does this assume K == V?
 				mma_a_bt(rDO[i], rKV[i], rDP);
 				smem_tile_to_fragment_trans(sKV, 0, i * 16, rKV[i]);
 			}
@@ -680,17 +689,17 @@ struct Attn {
 				smem_tile_to_fragment_trans(sKV, 0, i * 16, rKV[i]);
 			}
 
-			// dS = P * (dP - D)
+			// dS = P'' * (dP - D')  (gate and score_scale/logb_e folded into P'', D' = D/gate)
 			Fragment_16x16<f32> rDS_f32;
-			rDS_f32.sub[0][0].val0 = rP.sub[0][0].val0 * math::fma(gate, rDP.sub[0][0].val0, -top_D);
-			rDS_f32.sub[0][0].val1 = rP.sub[0][0].val1 * math::fma(gate, rDP.sub[0][0].val1, -top_D);
-			rDS_f32.sub[0][1].val0 = rP.sub[0][1].val0 * math::fma(gate, rDP.sub[0][1].val0, -top_D);
-			rDS_f32.sub[0][1].val1 = rP.sub[0][1].val1 * math::fma(gate, rDP.sub[0][1].val1, -top_D);
+			rDS_f32.sub[0][0].val0 = rP.sub[0][0].val0 * (rDP.sub[0][0].val0 - top_D);
+			rDS_f32.sub[0][0].val1 = rP.sub[0][0].val1 * (rDP.sub[0][0].val1 - top_D);
+			rDS_f32.sub[0][1].val0 = rP.sub[0][1].val0 * (rDP.sub[0][1].val0 - top_D);
+			rDS_f32.sub[0][1].val1 = rP.sub[0][1].val1 * (rDP.sub[0][1].val1 - top_D);
 
-			rDS_f32.sub[1][0].val0 = rP.sub[1][0].val0 * math::fma(gate, rDP.sub[1][0].val0, -bot_D);
-			rDS_f32.sub[1][0].val1 = rP.sub[1][0].val1 * math::fma(gate, rDP.sub[1][0].val1, -bot_D);
-			rDS_f32.sub[1][1].val0 = rP.sub[1][1].val0 * math::fma(gate, rDP.sub[1][1].val0, -bot_D);
-			rDS_f32.sub[1][1].val1 = rP.sub[1][1].val1 * math::fma(gate, rDP.sub[1][1].val1, -bot_D);
+			rDS_f32.sub[1][0].val0 = rP.sub[1][0].val0 * (rDP.sub[1][0].val0 - bot_D);
+			rDS_f32.sub[1][0].val1 = rP.sub[1][0].val1 * (rDP.sub[1][0].val1 - bot_D);
+			rDS_f32.sub[1][1].val0 = rP.sub[1][1].val0 * (rDP.sub[1][1].val0 - bot_D);
+			rDS_f32.sub[1][1].val1 = rP.sub[1][1].val1 * (rDP.sub[1][1].val1 - bot_D);
 
 			Fragment_16x16<bf16> rDS;
 			cast(rDS_f32, rDS);
@@ -716,10 +725,6 @@ struct Attn {
 				smem_tile_to_fragment(sKV, 0, i * 16, rKV[i]);
 			}
 		}
-
-		// TODO - fold into top_L, bot_L
-		scale_top_(rDQ, top_score_scale * f32(1.0 / math::fast::logb_e));
-		scale_bottom_(rDQ, bot_score_scale * f32(1.0 / math::fast::logb_e));
 
 		store(rDQ, gDQ_block, q_warp_idx * Q_PER_WARP, 0);
 	}
@@ -994,17 +999,52 @@ int main(int argc, char *argv[]) {
 		);
 	}
 
-	// Run d_q backward kernel
-	attn_d_q<A>
-		<<<NUM_BLOCKS, A::THREADS_PER_BLOCK, A::SMEM_BYTES_DQ>>>
-		(
-			Q_LEN, q_dev,
-			KV_LEN, kc_dev, kr_dev, v_dev,
-			out_dev, dO_dev, dQ_dev,
-			L_dev, D_dev,
-			sink_ptr
-		);
+	// Run d_q backward kernel (with optional benchmarking)
+	for (int i = 0; i < WARMUP; ++i) {
+		attn_d_q<A>
+			<<<NUM_BLOCKS, A::THREADS_PER_BLOCK, A::SMEM_BYTES_DQ>>>
+			(
+				Q_LEN, q_dev,
+				KV_LEN, kc_dev, kr_dev, v_dev,
+				out_dev, dO_dev, dQ_dev,
+				L_dev, D_dev,
+				sink_ptr
+			);
+	}
 	cudaDeviceSynchronize();
+
+	std::vector<cudaEvent_t> dq_starts(NUM_RUNS), dq_ends(NUM_RUNS);
+	for (int i = 0; i < NUM_RUNS; ++i) {
+		cudaEventCreate(&dq_starts[i]);
+		cudaEventCreate(&dq_ends[i]);
+	}
+	for (int i = 0; i < NUM_RUNS; ++i) {
+		cudaEventRecord(dq_starts[i]);
+		attn_d_q<A>
+			<<<NUM_BLOCKS, A::THREADS_PER_BLOCK, A::SMEM_BYTES_DQ>>>
+			(
+				Q_LEN, q_dev,
+				KV_LEN, kc_dev, kr_dev, v_dev,
+				out_dev, dO_dev, dQ_dev,
+				L_dev, D_dev,
+				sink_ptr
+			);
+		cudaEventRecord(dq_ends[i]);
+	}
+	cudaDeviceSynchronize();
+
+	std::vector<float> dq_times_ms(NUM_RUNS);
+	for (int i = 0; i < NUM_RUNS; ++i) {
+		cudaEventElapsedTime(&dq_times_ms[i], dq_starts[i], dq_ends[i]);
+		cudaEventDestroy(dq_starts[i]);
+		cudaEventDestroy(dq_ends[i]);
+	}
+	std::sort(dq_times_ms.begin(), dq_times_ms.end());
+	float dq_median_ms = dq_times_ms[NUM_RUNS / 2];
+
+	// dQ FLOPS: Q@K^T + dO@V^T + dS@K = 2*Q*KV*(QK_DIM + V_DIM + QK_DIM), causal ≈ half
+	double dq_flops_causal = (2.0 * Q_LEN * KV_LEN * (QK_DIM + V_DIM + QK_DIM) + 5.0 * Q_LEN * KV_LEN) / 2.0;
+	printf("TFLOPS dQ (causal): %.2f\n", dq_flops_causal / (dq_median_ms * 1e-3) / 1e12);
 
 	err = cudaGetLastError();
 	if (err != cudaSuccess) {
