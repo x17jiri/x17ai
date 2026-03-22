@@ -565,7 +565,7 @@ struct Attn {
 		f32 bot_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(bot_n);
 
 		// Load logsumexp from forward pass
-		f32 top_L = gL_ptr[my_q_start + tid / 4];
+		f32 top_L = gL_ptr[my_q_start + tid / 4]; // TODO - single read
 		f32 bot_L = gL_ptr[my_q_start + tid / 4 + 8];
 
 		// dQ accumulator
@@ -655,21 +655,23 @@ struct Attn {
 			}
 
 			// P = expb(S - L)
-			rS.sub[0][0].val0 = math::fast::expb(rS.sub[0][0].val0 - top_L);
-			rS.sub[0][0].val1 = math::fast::expb(rS.sub[0][0].val1 - top_L);
-			rS.sub[0][1].val0 = math::fast::expb(rS.sub[0][1].val0 - top_L);
-			rS.sub[0][1].val1 = math::fast::expb(rS.sub[0][1].val1 - top_L);
+			Fragment_16x16<f32> rP;
+			rP.sub[0][0].val0 = math::fast::expb(rP.sub[0][0].val0 - top_L);
+			rP.sub[0][0].val1 = math::fast::expb(rP.sub[0][0].val1 - top_L);
+			rP.sub[0][1].val0 = math::fast::expb(rP.sub[0][1].val0 - top_L);
+			rP.sub[0][1].val1 = math::fast::expb(rP.sub[0][1].val1 - top_L);
 
-			rS.sub[1][0].val0 = math::fast::expb(rS.sub[1][0].val0 - bot_L);
-			rS.sub[1][0].val1 = math::fast::expb(rS.sub[1][0].val1 - bot_L);
-			rS.sub[1][1].val0 = math::fast::expb(rS.sub[1][1].val0 - bot_L);
-			rS.sub[1][1].val1 = math::fast::expb(rS.sub[1][1].val1 - bot_L);
+			rP.sub[1][0].val0 = math::fast::expb(rP.sub[1][0].val0 - bot_L);
+			rP.sub[1][0].val1 = math::fast::expb(rP.sub[1][0].val1 - bot_L);
+			rP.sub[1][1].val0 = math::fast::expb(rP.sub[1][1].val0 - bot_L);
+			rP.sub[1][1].val1 = math::fast::expb(rP.sub[1][1].val1 - bot_L);
 
 			// dP = dO * V^T, interleaved with K^T reload (rKV: V -> K^T)
 			// K loaded TRANSPOSED because dQ = dS @ K needs B with inner-k = kv.
 			Fragment_16x16<f32> rDP;
 			zero_(rDP);
 			X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
+				// TODO - we should access V tiles, not K tiles. Does this assume K == V?
 				mma_a_bt(rDO[i], rKV[i], rDP);
 				smem_tile_to_fragment_trans(sKV, 0, i * 16, rKV[i]);
 			}
@@ -680,15 +682,15 @@ struct Attn {
 
 			// dS = P * (dP - D)
 			Fragment_16x16<f32> rDS_f32;
-			rDS_f32.sub[0][0].val0 = rS.sub[0][0].val0 * math::fma(gate, rDP.sub[0][0].val0, -top_D);
-			rDS_f32.sub[0][0].val1 = rS.sub[0][0].val1 * math::fma(gate, rDP.sub[0][0].val1, -top_D);
-			rDS_f32.sub[0][1].val0 = rS.sub[0][1].val0 * math::fma(gate, rDP.sub[0][1].val0, -top_D);
-			rDS_f32.sub[0][1].val1 = rS.sub[0][1].val1 * math::fma(gate, rDP.sub[0][1].val1, -top_D);
+			rDS_f32.sub[0][0].val0 = rP.sub[0][0].val0 * math::fma(gate, rDP.sub[0][0].val0, -top_D);
+			rDS_f32.sub[0][0].val1 = rP.sub[0][0].val1 * math::fma(gate, rDP.sub[0][0].val1, -top_D);
+			rDS_f32.sub[0][1].val0 = rP.sub[0][1].val0 * math::fma(gate, rDP.sub[0][1].val0, -top_D);
+			rDS_f32.sub[0][1].val1 = rP.sub[0][1].val1 * math::fma(gate, rDP.sub[0][1].val1, -top_D);
 
-			rDS_f32.sub[1][0].val0 = rS.sub[1][0].val0 * math::fma(gate, rDP.sub[1][0].val0, -bot_D);
-			rDS_f32.sub[1][0].val1 = rS.sub[1][0].val1 * math::fma(gate, rDP.sub[1][0].val1, -bot_D);
-			rDS_f32.sub[1][1].val0 = rS.sub[1][1].val0 * math::fma(gate, rDP.sub[1][1].val0, -bot_D);
-			rDS_f32.sub[1][1].val1 = rS.sub[1][1].val1 * math::fma(gate, rDP.sub[1][1].val1, -bot_D);
+			rDS_f32.sub[1][0].val0 = rP.sub[1][0].val0 * math::fma(gate, rDP.sub[1][0].val0, -bot_D);
+			rDS_f32.sub[1][0].val1 = rP.sub[1][0].val1 * math::fma(gate, rDP.sub[1][0].val1, -bot_D);
+			rDS_f32.sub[1][1].val0 = rP.sub[1][1].val0 * math::fma(gate, rDP.sub[1][1].val0, -bot_D);
+			rDS_f32.sub[1][1].val1 = rP.sub[1][1].val1 * math::fma(gate, rDP.sub[1][1].val1, -bot_D);
 
 			Fragment_16x16<bf16> rDS;
 			cast(rDS_f32, rDS);
@@ -715,16 +717,9 @@ struct Attn {
 			}
 		}
 
-		// Scale dQ: missing factors from backward are
-		//   ln(2)        — exp2-based softmax backward vs natural exp
-		//   score_scale  — chain rule through S_scaled = score_scale * Q@K^T
-		// Combined: ln(2) * score_scale = ln(2) * log2(n)/sqrt(d) = ln(n)/sqrt(d)
-		f32 top_dq_scale = top_score_scale / math::fast::logb_e;
-		f32 bot_dq_scale = bot_score_scale / math::fast::logb_e;
-		X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
-			scale_top_(rDQ[i], top_dq_scale);
-			scale_bottom_(rDQ[i], bot_dq_scale);
-		}
+		// TODO - fold into top_L, bot_L
+		scale_top_(rDQ, top_score_scale * f32(1.0 / math::fast::logb_e));
+		scale_bottom_(rDQ, bot_score_scale * f32(1.0 / math::fast::logb_e));
 
 		store(rDQ, gDQ_block, q_warp_idx * Q_PER_WARP, 0);
 	}
