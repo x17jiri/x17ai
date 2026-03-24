@@ -158,14 +158,14 @@ int main(int argc, char *argv[]) {
 	constexpr bool V_EQ_K = true;
 	using AF = Attn_forward<1, NONROPE_DIM, ROPE_DIM, V_DIM, 4, 1, V_EQ_K>;
 	using ADQ = Attn_d_q<AF>;
-	using ADKV = Attn_d_kv<1, NONROPE_DIM, ROPE_DIM, V_DIM, 4, 1, V_EQ_K>;
+	using ADKV = Attn_d_kv<AF>;
 	usize smem_size = AF::SMEM_BYTES;
-	printf("smem_size = %d bytes (forward), %d bytes (dQ), %d bytes (dKV)\n", smem_size, ADQ::SMEM_BYTES, ADKV::SMEM_BYTES_DKV);
+	printf("smem_size = %d bytes (forward), %d bytes (dQ), %d bytes (dKV)\n", smem_size, ADQ::SMEM_BYTES, ADKV::SMEM_BYTES);
 	//smem_size = std::max(smem_size, usize(70 * 1024));
 
 	cudaFuncSetAttribute(attn_forward<AF>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
 	cudaFuncSetAttribute(attn_d_q<ADQ>, cudaFuncAttributeMaxDynamicSharedMemorySize, ADQ::SMEM_BYTES);
-	cudaFuncSetAttribute(attn_d_kv<ADKV>, cudaFuncAttributeMaxDynamicSharedMemorySize, ADKV::SMEM_BYTES_DKV);
+	cudaFuncSetAttribute(attn_d_kv<ADKV>, cudaFuncAttributeMaxDynamicSharedMemorySize, ADKV::SMEM_BYTES);
 
 	cudaFuncSetAttribute(attn_forward<AF>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 

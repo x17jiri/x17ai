@@ -77,6 +77,8 @@ struct Attn_d_q {
 		u32 smem = 0;
 		usize q_warp_idx = (threadIdx.x / WARP_SIZE) % Q_WARPS;
 		usize kv_warp_idx = (threadIdx.x / WARP_SIZE) / Q_WARPS;
+		usize tid = threadIdx.x % WARP_SIZE;
+
 		SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, PRELOAD_DIM> sPreload{smem};
 		SMatrix<bf16, Q_PER_BLOCK, QK_DIM> sQ{
 			SMEM_OVERLAP_Q_WITH_KV
@@ -91,7 +93,7 @@ struct Attn_d_q {
 		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gDO_block, sdO);
 		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gOut_block, sO);
 
-		// TODO - should we aassume `kv_cnt == q_cnt` for backward?
+		// TODO: this assumes `kv_cnt >= q_cnt`
 		usize kv_extra = kv_cnt - q_cnt;
 		usize block_q_start = blockIdx.x * Q_PER_BLOCK;
 		usize kv_steps = (kv_extra + block_q_start + Q_PER_BLOCK + KV_PER_STEP - 1) / KV_PER_STEP;
@@ -122,7 +124,6 @@ struct Attn_d_q {
 		// Since we are multiplying and dividing by logb(e), it cancels out, so:
 		//     score_scale = (1.0 / sqrt(QK_DIM)) * logb(n)
 		usize my_q_start = block_q_start + q_warp_idx * Q_PER_WARP;
-		usize tid = threadIdx.x % WARP_SIZE;
 		f32 top_n = my_q_start + tid / 4 + 1 + 1; // the final `+ 1` is for sink
 		f32 bot_n = my_q_start + tid / 4 + 9 + 1;
 		f32 top_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(top_n);
