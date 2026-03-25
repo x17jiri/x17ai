@@ -6,10 +6,68 @@
 #include <fstream>
 #include <array>
 #include <algorithm>
+#include <cmath>
 
 #pragma nv_diag_suppress 186
 
+__global__ void softplus_test(
+	f32 *x
+) {
+	*x = math::fast::softplus(*x);
+}
+
+static inline f32 softplus_cpu_f32(f32 x) {
+	return std::max(0.0f, x) + logf(1.0f + expf(-std::fabs(x)));
+}
+
+static inline f64 softplus_cpu_f64_log1p(f64 x) {
+	return std::max(0.0, x) + std::log1p(std::exp(-std::fabs(x)));
+}
+
+static inline f32 smooth_cap_f32(f32 x, f32 C = 16.0f) {
+	return x - (softplus_cpu_f32(x - C) - softplus_cpu_f32(-x - C));
+}
+
+static inline f64 smooth_cap_f64(f64 x, f64 C = 16.0) {
+	return x - (softplus_cpu_f64_log1p(x - C) - softplus_cpu_f64_log1p(-x - C));
+}
+
 int main(int argc, char *argv[]) {
+	f64 prev_approx = smooth_cap_f32(-100.0f);
+	f64 prev_reference = smooth_cap_f64(-100.0);
+	for (int i = -1000000; i <= 1000000; i++) {
+		f64 x = i / 10000.0f;
+		f64 approx = smooth_cap_f32(x);
+		f64 reference = smooth_cap_f64(x);
+		if (i > -200000) {
+			if (approx < prev_approx) {
+				printf("approx not monotonic at x=% .4f prev=% .17e cur=% .17e\n",
+					x,
+					prev_approx,
+					approx);
+				return 1;
+			}
+			if (reference < prev_reference) {
+				printf("reference not monotonic at x=% .4f prev=% .17e cur=% .17e\n",
+					x,
+					prev_reference,
+					reference);
+				return 1;
+			}
+		}
+		f64 rel_err = std::fabs((approx - reference) / reference);
+		//if (rel_err > 3e-7) {
+			printf("x=% .3f approx=% .9e ref=% .17e rel_err=% .9e\n",
+				x,
+				approx,
+				reference,
+				rel_err);
+		//}
+		prev_approx = approx;
+		prev_reference = reference;
+	}
+	return 0;
+
 	constexpr usize NONROPE_DIM = 128;
 	constexpr usize V_DIM = 64;
 	constexpr usize ROPE_DIM = 0;

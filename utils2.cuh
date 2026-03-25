@@ -90,13 +90,45 @@ namespace math {
 			return __frcp_rn(x);
 		}
 
-		/// Gaussian Error Linear Unit (GELU) approximation using `x * sigmoid(1.702 * x)`
+		X17_DEVICE f32 sigmoid(f32 x) {
+			return fmaf(0.5f, __tanhf(0.5f * x), 0.5f);
+		}
+
+		X17_DEVICE f32 silu(f32 x, f32 beta = 1.0f) {
+			return fmaf(0.5f * x, __tanhf((beta * 0.5f) * x), 0.5f * x);
+		}
+
+		/// Gaussian Error Linear Unit (GELU) approximation
 		X17_DEVICE f32 gelu(f32 x) {
-			constexpr f32 C = 1.702 * logb_e; // logb(e) because `expb` uses base `b`
-			f32 c = x < 0 ? C : -C;
-			f32 e = expb(c * x);
-			x = x < 0 ? x * e : x;
-			return x * recip(1.0f + e);
+			return silu(x, 1.702f);
+		}
+
+		/// `softplus(x) = log(1 + exp(x))`
+		///
+		/// We use numerically stable variant that doesn't overflow for large x
+		///
+		/// This function doesn't use `log1p`, because CUDA doesn't have a fast approximation.
+		/// This causes imprecision.
+		///
+		/// Imprecision analysis:
+		/// - Around zero, the exp result is comparable to `1.0` so `1.0 + exp` is precise
+		/// - As the magnitude of `x` gets larger (both positive and negative), the `exp` becomes
+		///   much smaller than `1.0` and will eventually get lost, i.e., `1.0 + exp == 1.0`
+		/// - The `log` becomes `0.0` and we return just `x` or `0` depending on sign
+		/// - What this means is we get to the asymptotes a bit sooner
+		X17_DEVICE f32 imprecise_softplus(f32 x, f32 beta = 1.0f) {
+			f32 scale = f32(logb_e) * beta;
+			return fmaxf(0.0f, x) + logb(1.0f + expb(-fabsf(x * scale))) * recip(scale);
+		}
+
+		/// Symmetric smooth cap: clamps x to [-C, +C] with a smooth transition.
+		/// Exact zero at `x == 0`, exponentially sharp transition near +-C.
+		/// Uses `softplus(x-C)` and `softplus(-x-C)` which cancel symmetrically near zero,
+		/// preserving high precision.
+		X17_DEVICE f32 smooth_cap(f32 x, f32 C = 16.0f, f32 beta = 1.0f) {
+			// The imprecise_softplus is ok here. The errors of the two softplus calls cancel out
+			// and we get very high precision
+			return x - (imprecise_softplus(x - C, beta) - imprecise_softplus(-x - C, beta));
 		}
 	}
 
