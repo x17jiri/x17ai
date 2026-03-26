@@ -30,7 +30,7 @@ struct Attn_forward {
 	static constexpr usize ROPE_TILES = ROPE_DIM / 16;
 	static constexpr usize QK_TILES = NONROPE_TILES + ROPE_TILES;
 	static constexpr usize V_TILES = V_DIM / 16;
-	static constexpr usize PRELOAD_DIM = V_EQUALS_K ? QK_DIM : QK_DIM + V_DIM;
+	static constexpr usize PRELOAD_DIM = QK_DIM + (V_EQUALS_K ? 0 : V_DIM);
 	static constexpr usize V_SMEM_COL = V_EQUALS_K ? 0 : QK_DIM;
 
 	static constexpr usize Q_PER_WARP = 16;
@@ -165,6 +165,7 @@ struct Attn_forward {
 		f32 bot_score_scale,
 		f32 gate,
 		u32 smem,
+		usize q_start,
 		usize q_warp_idx,
 		usize kv_warp_idx,
 		GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block,
@@ -292,8 +293,7 @@ struct Attn_forward {
 		store(rOut, gOut_block, q_warp_idx * Q_PER_WARP, 0);
 
 		if (gL_ptr != nullptr && (tid & 1) == 0) {
-			usize base = blockIdx.x * Q_PER_BLOCK + q_warp_idx * Q_PER_WARP;
-			gL_ptr[base + (tid / 4) + ((tid & 2) * 4)] = ((tid & 2) == 0 ? top_L : bot_L);
+			gL_ptr[q_start + (tid / 4) + ((tid & 2) * 4)] = ((tid & 2) == 0 ? top_L : bot_L);
 		}
 	}
 
@@ -334,18 +334,17 @@ struct Attn_forward {
 		f32 *sink
 	) {
 		// GMEM Matrices
+		GMatrixDynSize<bf16, QK_DIM> gQ{gQ_ptr, q_cnt, Q_STRIDE};
 		GMatrixDynSize<bf16, NONROPE_DIM> gKc{gKc_ptr, kv_cnt, KC_STRIDE};
 		GMatrixDynSize<bf16, ROPE_DIM> gKr{gKr_ptr, kv_cnt, KR_STRIDE};
 		GMatrixDynSize<bf16, V_DIM> gV{gV_ptr, kv_cnt, V_STRIDE};
-		GMatrixDynSize<bf16, QK_DIM> gQ_full{gQ_ptr, q_cnt, Q_STRIDE};
-		GMatrix<bf16, Q_PER_BLOCK, QK_DIM> gQ_block = tile_m<Q_PER_BLOCK>(gQ_full, blockIdx.x);
-		GMatrixDynSize<bf16, V_DIM> gOut_full{gOut_ptr, q_cnt};
-		GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = tile_m<Q_PER_BLOCK>(gOut_full, blockIdx.x);
+		GMatrixDynSize<bf16, V_DIM> gOut{gOut_ptr, q_cnt};
 
-		// SMEM layout: KV preload region + Q + dO + O
+		// SMEM layout: K + V preload region; last tile may overlap with Q preload
 		u32 smem = 0;
 		usize q_warp_idx = (threadIdx.x / WARP_SIZE) % Q_WARPS;
 		usize kv_warp_idx = (threadIdx.x / WARP_SIZE) / Q_WARPS;
+		usize tid = threadIdx.x % WARP_SIZE;
 		SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, PRELOAD_DIM> sPreload{smem};
 		SMatrix<bf16, Q_PER_BLOCK, QK_DIM> sQ{
 			SMEM_OVERLAP_Q_WITH_KV
@@ -354,14 +353,17 @@ struct Attn_forward {
 		};
 
 		// Load Q from GMEM to SMEM (no commit — piggyback on first KV commit)
+		usize q_block_idx = blockIdx.x;
+		usize q_block_start = q_block_idx * Q_PER_BLOCK;
+		usize q_start = q_block_start + q_warp_idx * Q_PER_WARP;
+		GMatrix<bf16, Q_PER_BLOCK, QK_DIM> gQ_block = tile_m<Q_PER_BLOCK>(gQ, q_block_idx);
 		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gQ_block, sQ);
 
 		// TODO: this assumes `kv_cnt >= q_cnt`
 		usize kv_extra = kv_cnt - q_cnt;
-		usize block_q_start = blockIdx.x * Q_PER_BLOCK;
-		usize kv_steps = (kv_extra + block_q_start + Q_PER_BLOCK + KV_PER_STEP - 1) / KV_PER_STEP;
+		usize kv_steps = (kv_extra + q_block_start + Q_PER_BLOCK + KV_PER_STEP - 1) / KV_PER_STEP;
 		kv_steps = std::min(kv_steps, kv_cnt / KV_PER_STEP);
-		usize full_kv_steps = (kv_extra + block_q_start) / KV_PER_STEP;
+		usize full_kv_steps = (kv_extra + q_block_start) / KV_PER_STEP;
 		full_kv_steps = std::min(full_kv_steps, kv_steps);
 
 		// Start preloading K and V from GMEM to SMEM  (first commit also commits Q)
@@ -386,10 +388,8 @@ struct Attn_forward {
 		//     logb(e)            — so we can use expb instead of exp
 		// Since we are multiplying and dividing by logb(e), it cancels out, so:
 		//     score_scale = (1.0 / sqrt(QK_DIM)) * logb(n)
-		usize my_q_start = block_q_start + q_warp_idx * Q_PER_WARP;
-		usize tid = threadIdx.x % WARP_SIZE;
-		f32 top_n = my_q_start + tid / 4 + 1 + 1; // the final `+ 1` is for sink
-		f32 bot_n = my_q_start + tid / 4 + 9 + 1;
+		f32 top_n = q_start + tid / 4 + 1 + 1; // the final `+ 1` is for sink
+		f32 bot_n = q_start + tid / 4 + 9 + 1;
 		f32 top_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(top_n);
 		f32 bot_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(bot_n);
 
@@ -406,18 +406,17 @@ struct Attn_forward {
 		X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
 			smem_tile_to_fragment(sQ, q_warp_idx * Q_PER_WARP, i * 16, rQ[i]);
 		}
+		// Now that Q is in registers, reuse its SMEM for KV
+		if constexpr (SMEM_OVERLAP_Q_WITH_KV) {
+			cp_async_kv(gKc, gKr, gV, sPreload, GMEM_PRELOAD - 1, kv_warp_idx, kv_steps);
+			cp_async_commit();
+		}
 		// Load first KV tile from SMEM to registers
 		SMatrix<bf16, KV_PER_WARP, PRELOAD_DIM> sKV;
 		sKV = tile_m<KV_PER_WARP>(tile_m<KV_PER_STEP>(sPreload, 0), kv_warp_idx);
 		Fragment_16x16<bf16> rKV[QK_TILES];
 		X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
 			smem_tile_to_fragment(sKV, 0, i * 16, rKV[i]);
-		}
-
-		// Now that Q is in registers, reuse its SMEM for KV
-		if constexpr (SMEM_OVERLAP_Q_WITH_KV) {
-			cp_async_kv(gKc, gKr, gV, sPreload, GMEM_PRELOAD - 1, kv_warp_idx, kv_steps);
-			cp_async_commit();
 		}
 
 		// Sequential loop over KV
@@ -440,9 +439,9 @@ struct Attn_forward {
 			// Causal mask: diagonal tile or full mask if past this warp's boundary
 			if (kv_step >= full_kv_steps) {
 				usize kv_pos = kv_step * KV_PER_STEP + kv_warp_idx * KV_PER_WARP;
-				if (kv_pos == kv_extra + my_q_start) {
+				if (kv_pos == kv_extra + q_start) {
 					causal_mask_diagonal(rScores_f32);
-				} else if (kv_pos > kv_extra + my_q_start) {
+				} else if (kv_pos > kv_extra + q_start) {
 					fill_(rScores_f32, -INFINITY);
 				}
 			}
@@ -477,7 +476,8 @@ struct Attn_forward {
 			}
 		}
 
-		combine_and_store(rOut, r_top, r_bot, sink_score, top_score_scale, bot_score_scale, gate, smem, q_warp_idx, kv_warp_idx, gOut_block, gL_ptr);
+		GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = tile_m<Q_PER_BLOCK>(gOut, q_block_idx);
+		combine_and_store(rOut, r_top, r_bot, sink_score, top_score_scale, bot_score_scale, gate, smem, q_start, q_warp_idx, kv_warp_idx, gOut_block, gL_ptr);
 	}
 };
 

@@ -1189,7 +1189,7 @@ struct SMatrix {
 	/// at_row and at_col must be multiples of 16.
 	template<const usize THREADS_PER_BLOCK, const usize GM, const usize GN>
 	requires(GM <= M && GN <= N)
-	X17_DEVICE void cp_async_from(usize tid, GMatrix<T, GM, GN> src, usize at_row, usize at_col) const {
+	X17_DEVICE void cp_async_from(usize tid, GMatrix<T, GM, GN> src, usize dst_row, usize dst_col) const {
 		if constexpr (GN > 0 && GM > 0) {
 			__builtin_assume(tid < THREADS_PER_BLOCK);
 
@@ -1211,14 +1211,14 @@ struct SMatrix {
 			}
 
 			// Thread's position within a step is fixed
-			usize col_in_row = at_col * sizeof(T) + (tid % CP_PER_ROW) * 16;
+			usize col_in_row = dst_col * sizeof(T) + (tid % CP_PER_ROW) * 16;
 			usize gmem_col = (tid % CP_PER_ROW) * 16;
 			usize row_in_step = tid / CP_PER_ROW;
 
 			constexpr usize REPEAT_AFTER = least_common_multiple(8, ROWS_PER_STEP) / ROWS_PER_STEP;
 			usize off[REPEAT_AFTER];
 			X17_UNROLL for (usize i = 0; i < REPEAT_AFTER; i++) {
-				usize row = at_row + i * ROWS_PER_STEP + row_in_step;
+				usize row = dst_row + i * ROWS_PER_STEP + row_in_step;
 				off[i] = col_in_row ^ ((row & 7) << 4);
 			}
 
@@ -1228,7 +1228,7 @@ struct SMatrix {
 				+ gmem_col;
 			usize src_step = ROWS_PER_STEP * src.stride_bytes();
 
-			usize dst_ptr = _ptr + (at_row + row_in_step) * ROW_BYTES;
+			usize dst_ptr = _ptr + (dst_row + row_in_step) * ROW_BYTES;
 			usize dst_step = ROWS_PER_STEP * ROW_BYTES;
 
 			if constexpr (STEPS > 0) {

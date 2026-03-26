@@ -23,8 +23,6 @@ struct Attn_d_kv {
 	static constexpr usize QK_TILES = NONROPE_TILES + ROPE_TILES;
 	static constexpr usize V_TILES = V_DIM / 16;
 	static constexpr usize PRELOAD_DIM = QK_DIM + V_DIM; // preload region holds both Q and dO
-	static constexpr usize KV_PRELOAD_DIM = V_EQUALS_K ? QK_DIM : QK_DIM + V_DIM;
-	static constexpr usize V_SMEM_COL = V_EQUALS_K ? 0 : QK_DIM;
 
 	static constexpr usize Q_PER_WARP = 16;
 	static constexpr usize Q_PER_STEP = Q_PER_WARP * Q_WARPS;
@@ -33,8 +31,8 @@ struct Attn_d_kv {
 
 	static constexpr usize WARPS_PER_BLOCK = Q_WARPS * KV_WARPS;
 	static constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
-	static constexpr bool SMEM_OVERLAP_KV_WITH_Q = KV_PER_BLOCK <= Q_PER_STEP;
-	static constexpr usize EARLY_PRELOAD = SMEM_OVERLAP_KV_WITH_Q ? GMEM_PRELOAD - 1 : GMEM_PRELOAD;
+	static constexpr bool SMEM_OVERLAP_K_WITH_Q = KV_PER_BLOCK <= Q_PER_STEP;
+	static constexpr usize EARLY_PRELOAD = SMEM_OVERLAP_K_WITH_Q ? GMEM_PRELOAD - 1 : GMEM_PRELOAD;
 
 	// TODO - other matrices (dO, O, ...) should have their stride
 	static constexpr usize KC_STRIDE = NONROPE_DIM * HEAD_CNT;
@@ -44,16 +42,17 @@ struct Attn_d_kv {
 
 	static constexpr usize SMEM_BYTES =
 		sizeof(bf16) * (
-			SMEM_OVERLAP_KV_WITH_Q
+			(SMEM_OVERLAP_K_WITH_Q
 				?
 					Q_PER_STEP * PRELOAD_DIM * (GMEM_PRELOAD - 1)
 					+ std::max(
 						Q_PER_STEP * PRELOAD_DIM,
-						KV_PER_BLOCK * KV_PRELOAD_DIM
+						KV_PER_BLOCK * QK_DIM
 					)
 				:
 					Q_PER_STEP * PRELOAD_DIM * GMEM_PRELOAD
-					+ KV_PER_BLOCK * KV_PRELOAD_DIM
+					+ KV_PER_BLOCK * QK_DIM
+			) + (V_EQUALS_K ? 0 : KV_PER_BLOCK * V_DIM)
 		);
 
 	X17_DEVICE void causal_mask_diagonal(Fragment_16x16<f32> &rScores) {
@@ -96,81 +95,64 @@ struct Attn_d_kv {
 	}
 
 	X17_DEVICE void run(
-		usize q_cnt, bf16 *gQ_ptr,
-		usize kv_cnt, bf16 *gKc_ptr, bf16 *gKr_ptr, bf16 *gV_ptr,
+		usize seq_len, bf16 *gQ_ptr,
+		bf16 *gKc_ptr, bf16 *gKr_ptr, bf16 *gV_ptr,
 		bf16 *gDO_ptr, bf16 *gDK_ptr, bf16 *gDV_ptr,
 		f32 *gL_ptr, f32 *gD_ptr,
 		f32 *sink
 	) {
 		// GMEM Matrices
-		GMatrixDynSize<bf16, QK_DIM> gQ{gQ_ptr, q_cnt, Q_STRIDE};
-		GMatrixDynSize<bf16, V_DIM> gDO{gDO_ptr, q_cnt};
-		GMatrixDynSize<bf16, NONROPE_DIM> gKc{gKc_ptr, kv_cnt, KC_STRIDE};
-		GMatrixDynSize<bf16, ROPE_DIM> gKr{gKr_ptr, kv_cnt, KR_STRIDE};
-		GMatrixDynSize<bf16, V_DIM> gV{gV_ptr, kv_cnt, V_STRIDE};
-		GMatrixDynSize<bf16, QK_DIM> gDK{gDK_ptr, kv_cnt, Q_STRIDE};
-		GMatrixDynSize<bf16, V_DIM> gDV{gDV_ptr, kv_cnt, V_STRIDE};
+		GMatrixDynSize<bf16, QK_DIM> gQ{gQ_ptr, seq_len, Q_STRIDE};
+		GMatrixDynSize<bf16, NONROPE_DIM> gKc{gKc_ptr, seq_len, KC_STRIDE};
+		GMatrixDynSize<bf16, ROPE_DIM> gKr{gKr_ptr, seq_len, KR_STRIDE};
+		GMatrixDynSize<bf16, V_DIM> gV{gV_ptr, seq_len, V_STRIDE};
+		GMatrixDynSize<bf16, QK_DIM> gDK{gDK_ptr, seq_len};
+		GMatrixDynSize<bf16, V_DIM> gDV{gDV_ptr, seq_len};
+		GMatrixDynSize<bf16, V_DIM> gDO{gDO_ptr, seq_len};
 
-		// SMEM layout: Q+dO preload region + KV block (may overlap last preload tile)
+		// SMEM layout: Q + dO preload region; last tile may overlap with K + V preload
 		u32 smem = 0;
 		usize q_warp_idx = (threadIdx.x / WARP_SIZE) / KV_WARPS;
 		usize kv_warp_idx = (threadIdx.x / WARP_SIZE) % KV_WARPS;
 		usize tid = threadIdx.x % WARP_SIZE;
-
 		SMatrix<bf16, Q_PER_STEP * GMEM_PRELOAD, PRELOAD_DIM> sPreload{smem};
-		SMatrix<bf16, KV_PER_BLOCK, KV_PRELOAD_DIM> sKV{
-			SMEM_OVERLAP_KV_WITH_Q
+		// sK: may overlap with last Q+dO preload tile
+		SMatrix<bf16, KV_PER_BLOCK, QK_DIM> sK{
+			SMEM_OVERLAP_K_WITH_Q
 				? tile_m<Q_PER_STEP>(sPreload, GMEM_PRELOAD - 1)._ptr
 				: sPreload._ptr + sPreload.bytes()
 		};
+		// sV: always after preload (never overlapped), only when V is separate from K
+		SMatrix<bf16, KV_PER_BLOCK, V_DIM> sV{
+			SMEM_OVERLAP_K_WITH_Q
+				? sPreload._ptr + sPreload.bytes()
+				: sK._ptr + sK.bytes()
+		};
 
-		usize kv_block = blockIdx.x;  // which KV tile this block owns
-		usize kv_start = kv_block * KV_PER_BLOCK;
-
-		// Load KV block from GMEM to SMEM (no commit — piggyback on first Q+dO commit)
-		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(
-			threadIdx.x,
-			tile_m<KV_PER_BLOCK>(gKc, kv_block),
-			sKV, 0, 0
-		);
+		// Load KV from GMEM to SMEM (no commit — piggyback on first KV commit)
+		usize kv_block_idx = blockIdx.x;
+		usize kv_block_start = kv_block_idx * KV_PER_BLOCK;
+		usize kv_start = kv_block_start + kv_warp_idx * KV_PER_WARP;
+		GMatrix<bf16, KV_PER_BLOCK, NONROPE_DIM> gKc_block = tile_m<KV_PER_BLOCK>(gKc, kv_block_idx);
+		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gKc_block, sK, 0, 0);
 		if constexpr (ROPE_DIM > 0) {
-			cp_async_gmem_to_smem<THREADS_PER_BLOCK>(
-				threadIdx.x,
-				tile_m<KV_PER_BLOCK>(gKr, kv_block),
-				sKV, 0, NONROPE_DIM
-			);
+			GMatrix<bf16, KV_PER_BLOCK, ROPE_DIM> gKr_block = tile_m<KV_PER_BLOCK>(gKr, kv_block_idx);
+			cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gKr_block, sK, 0, NONROPE_DIM);
 		}
 		if constexpr (!V_EQUALS_K) {
-			cp_async_gmem_to_smem<THREADS_PER_BLOCK>(
-				threadIdx.x,
-				tile_m<KV_PER_BLOCK>(gV, kv_block),
-				sKV, 0, QK_DIM
-			);
+			GMatrix<bf16, KV_PER_BLOCK, V_DIM> gV_block = tile_m<KV_PER_BLOCK>(gV, kv_block_idx);
+			cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gV_block, sV, 0, 0);
 		}
 
-		// TODO: this assumes `kv_cnt >= q_cnt`
-		usize kv_extra = kv_cnt - q_cnt;
+		usize q_skip = kv_block_start / Q_PER_STEP;
+		usize q_steps = (seq_len + Q_PER_STEP - 1) / Q_PER_STEP;
 
-		// Determine Q range to iterate over (reversed causal):
-		// In d_kv, the block owns a KV tile and loops over Q blocks.
-		// Early Q blocks may be partially/fully masked; later ones are all unmasked.
-		// This is the mirror of forward's full_kv_steps / early-exit pattern.
-		//
-		// Late start: skip Q blocks where ALL Q rows < ALL KV rows.
-		// first_q_block = floor((kv_start - kv_extra) / Q_PER_STEP), clamped to 0
-		isize first_q_block_signed = (isize(kv_start) - isize(kv_extra)) / isize(Q_PER_STEP);
-		usize first_q_block = first_q_block_signed < 0 ? 0 : usize(first_q_block_signed);
-		usize total_q_blocks = q_cnt / Q_PER_STEP;
-		usize q_steps = total_q_blocks - first_q_block;
-
-		// Partial masking: the first `partial_q_steps` may need causal checks.
-		// After that, all Q rows > all KV rows in this block, so no masking.
-		// The last KV row maps to q_pos = kv_start + KV_PER_BLOCK - 1 - kv_extra.
-		// A Q block is fully unmasked if q_block_start >= kv_start + KV_PER_BLOCK - kv_extra.
-		usize first_full_q_block = (kv_start + KV_PER_BLOCK - kv_extra + Q_PER_STEP - 1) / Q_PER_STEP;
-		usize partial_q_steps = first_full_q_block > first_q_block
-			? std::min(first_full_q_block - first_q_block, q_steps)
-			: 0;
+		// Start preloading first Q+dO blocks (first commit also commits KV)
+		// When KV overlaps Q+dO SMEM, don't use the last preload tile yet (it holds KV)
+		X17_UNROLL for (usize p = 0; p < EARLY_PRELOAD; ++p) {
+			cp_async_q_do(gQ, gDO, sPreload, q_skip + p, q_steps);
+			cp_async_commit();
+		}
 
 		// Sink and gate
 		f32 sink_score = -INFINITY;
@@ -185,31 +167,25 @@ struct Attn_d_kv {
 		Fragment_16x16<f32> rDV[V_TILES];
 		zero_(rDV);
 
-		// Start preloading first Q+dO blocks (first commit also commits KV)
-		// When KV overlaps Q+dO SMEM, don't use the last preload tile yet (it holds KV)
-		X17_UNROLL for (usize p = 0; p < EARLY_PRELOAD; ++p) {
-			cp_async_q_do(gQ, gDO, sPreload, first_q_block + p, first_q_block + q_steps);
-			cp_async_commit();
-		}
-
 		cp_async_wait<EARLY_PRELOAD - 1>();
 		sync_threads();
 
-		// Load K from SMEM to registers (each kv_warp loads its own 16-row tile)
-		SMatrix<bf16, KV_PER_WARP, KV_PRELOAD_DIM> sKV_warp;
-		sKV_warp = tile_m<KV_PER_WARP>(sKV, kv_warp_idx);
-		Fragment_16x16<bf16> rK[QK_TILES];
-		X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
-			smem_tile_to_fragment(sKV_warp, 0, i * 16, rK[i]);
-		}
+		//=== refactored up to here ===
 
-		// Now that KV is in registers, reuse its SMEM for Q+dO preload
-		if constexpr (SMEM_OVERLAP_KV_WITH_Q) {
-			cp_async_q_do(gQ, gDO, sPreload, first_q_block + GMEM_PRELOAD - 1, first_q_block + q_steps);
+		// Load K from sK into registers (each kv_warp loads its own 16-row tile)
+		// rKV holds K; when V_EQUALS_K, rKV[0..V_TILES-1] is also V
+		// When !V_EQUALS_K, load V from sV (persistent) into rKV when needed
+		SMatrix<bf16, KV_PER_WARP, QK_DIM> sK_warp = tile_m<KV_PER_WARP>(sK, kv_warp_idx);
+		Fragment_16x16<bf16> rKV[QK_TILES];
+		X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
+			smem_tile_to_fragment(sK_warp, 0, i * 16, rKV[i]);
+		}
+		// Now that K is in registers, reuse its SMEM for Q + dO preload
+		if constexpr (SMEM_OVERLAP_K_WITH_Q) {
+			cp_async_q_do(gQ, gDO, sPreload, q_skip + GMEM_PRELOAD - 1, q_steps);
 			cp_async_commit();
 		}
-
-		// Load first Q+dO tile from SMEM to registers
+		// Load first Q + dO tile from SMEM to registers
 		auto sSlot = tile_m<Q_PER_STEP>(sPreload, first_q_block % GMEM_PRELOAD);
 		Fragment_16x16<bf16> rQ[QK_TILES];
 		X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
@@ -217,7 +193,7 @@ struct Attn_d_kv {
 		}
 
 		// Sequential loop over Q
-		X17_NO_UNROLL for (usize q_step = 0; q_step < q_steps; ++q_step) {
+		X17_NO_UNROLL for (usize q_step = q_skip; q_step < q_steps; ++q_step) {
 			usize q_block = first_q_block + q_step;
 			usize q_block_start = q_block * Q_PER_STEP;
 			usize my_q_start = q_block_start + q_warp_idx * Q_PER_WARP;
@@ -226,7 +202,7 @@ struct Attn_d_kv {
 			Fragment_16x16<f32> rS;
 			zero_(rS);
 			X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
-				mma_a_bt(rQ[i], rK[i], rS);
+				mma_a_bt(rQ[i], rKV[i], rS);
 			}
 
 			// Per-Q-row score_scale: score_scale = logb(n) / sqrt(QK_DIM)
@@ -243,7 +219,7 @@ struct Attn_d_kv {
 			// Causal mask: only needed for early Q steps (q_step < partial_q_steps).
 			// After that, all Q rows > all KV rows — no masking needed.
 			if (q_step < partial_q_steps) {
-				isize kv_pos = isize(kv_start + kv_warp_idx * KV_PER_WARP) - isize(kv_extra);
+				isize kv_pos = isize(kv_block_start + kv_warp_idx * KV_PER_WARP) - isize(kv_extra);
 				isize q_pos = isize(my_q_start);
 				if (kv_pos == q_pos) {
 					causal_mask_diagonal(rS);
