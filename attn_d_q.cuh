@@ -103,6 +103,10 @@ struct Attn_d_q {
 			load_gmem_2x32b(sink, sink_score, gate);
 		}
 
+		// ***************** TODO - in forward, we use sink_score and gate at the very end, but here
+		// we use it almost immediately. Figure out some scheduling.
+		// ***************** TODO - also the read of L needs scheduling
+
 		// Scalable-Softmax: score_scale = (1.0 / sqrt(QK_DIM)) * ln(n) * logb(e)
 		//     1.0 / sqrt(QK_DIM) — standard attention scaling
 		//     ln(n)              — SSMax factor (ln(n) = logb(n) / logb(e))
