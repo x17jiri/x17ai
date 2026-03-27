@@ -1,6 +1,6 @@
 #include "attn_forward.cuh"
 #include "attn_d_q.cuh"
-//#include "attn_d_kv.cuh"
+#include "attn_d_kv.cuh"
 
 #include <vector>
 #include <fstream>
@@ -157,16 +157,16 @@ int main(int argc, char *argv[]) {
 	}
 
 	constexpr bool V_EQ_K = true;
-	using AF = Attn_forward<1, NONROPE_DIM, ROPE_DIM, V_DIM, 4, 1, V_EQ_K>;
+	using AF = Attn_forward<1, NONROPE_DIM, ROPE_DIM, V_DIM, V_EQ_K>;
 	using ADQ = Attn_d_q<AF>;
-	//using ADKV = Attn_d_kv<AF>;
+	using ADKV = Attn_d_kv<AF>;
 	usize smem_size = AF::SMEM_BYTES;
-	//printf("smem_size = %d bytes (forward), %d bytes (dQ), %d bytes (dKV)\n", smem_size, ADQ::SMEM_BYTES, ADKV::SMEM_BYTES);
+	printf("smem_size = %d bytes (forward), %d bytes (dQ), %d bytes (dKV)\n", smem_size, ADQ::SMEM_BYTES, ADKV::SMEM_BYTES);
 	//smem_size = std::max(smem_size, usize(70 * 1024));
 
 	cudaFuncSetAttribute(attn_forward<AF>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
 	cudaFuncSetAttribute(attn_d_q<ADQ>, cudaFuncAttributeMaxDynamicSharedMemorySize, ADQ::SMEM_BYTES);
-	//cudaFuncSetAttribute(attn_d_kv<ADKV>, cudaFuncAttributeMaxDynamicSharedMemorySize, ADKV::SMEM_BYTES);
+	cudaFuncSetAttribute(attn_d_kv<ADKV>, cudaFuncAttributeMaxDynamicSharedMemorySize, ADKV::SMEM_BYTES);
 
 	cudaFuncSetAttribute(attn_forward<AF>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
@@ -186,7 +186,7 @@ int main(int argc, char *argv[]) {
 			<<<Q_LEN / AF::Q_PER_BLOCK, AF::THREADS_PER_BLOCK, smem_size>>>
 			(
 				Q_LEN, q_dev,
-				KV_LEN, kc_dev, kr_dev, v_dev,
+				kc_dev, kr_dev, v_dev,
 				out_dev,
 				L_dev,
 				sink_ptr
@@ -209,7 +209,7 @@ int main(int argc, char *argv[]) {
 			<<<NUM_BLOCKS, AF::THREADS_PER_BLOCK, smem_size>>>
 			(
 				Q_LEN, q_dev,
-				KV_LEN, kc_dev, kr_dev, v_dev,
+				kc_dev, kr_dev, v_dev,
 				out_dev,
 				L_dev,
 				sink_ptr
@@ -262,7 +262,7 @@ int main(int argc, char *argv[]) {
 			<<<NUM_BLOCKS, ADQ::THREADS_PER_BLOCK, ADQ::SMEM_BYTES>>>
 			(
 				Q_LEN, q_dev,
-				KV_LEN, kc_dev, kr_dev, v_dev,
+				kc_dev, kr_dev, v_dev,
 				out_dev, dO_dev, dQ_dev,
 				L_dev, D_dev,
 				sink_ptr
@@ -281,7 +281,7 @@ int main(int argc, char *argv[]) {
 			<<<NUM_BLOCKS, ADQ::THREADS_PER_BLOCK, ADQ::SMEM_BYTES>>>
 			(
 				Q_LEN, q_dev,
-				KV_LEN, kc_dev, kr_dev, v_dev,
+				kc_dev, kr_dev, v_dev,
 				out_dev, dO_dev, dQ_dev,
 				L_dev, D_dev,
 				sink_ptr
