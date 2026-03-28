@@ -126,7 +126,6 @@ struct Attn_d_kv {
 		if (sink != nullptr) {
 			load_gmem_2x32b(sink, sink_score, gate);
 		}
-		f32 inv_gate = math::fast::recip(gate);
 		f32 logb_gate = math::fast::logb(gate);
 
 		// dK, dV accumulators
@@ -146,9 +145,9 @@ struct Attn_d_kv {
 		}
 		// Load V from SMEM into registers
 		// When V_EQUALS_K, V starts at col 0; otherwise at col QK_DIM
-		Fragment_16x16<bf16> rVT[V_TILES];
+		Fragment_16x16<bf16> rV[V_TILES];
 		X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
-			smem_tile_to_fragment_trans(sKV_warp, 0, V_SMEM_COL + i * 16, rVT[i]);
+			smem_tile_to_fragment(sKV_warp, 0, V_SMEM_COL + i * 16, rV[i]);
 		}
 		// Load first Q + dO tile from SMEM to registers
 		auto sSlot = tile_m<Q_PER_STEP>(sPreload, q_first_step % GMEM_PRELOAD);
@@ -156,9 +155,9 @@ struct Attn_d_kv {
 		X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
 			smem_tile_to_fragment(sSlot, 0, i * 16, rQ[i]);
 		}
-		Fragment_16x16<bf16> rDOT[V_TILES];
+		Fragment_16x16<bf16> rDO[V_TILES];
 		X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
-			smem_tile_to_fragment_trans(sSlot, 0, QK_DIM + i * 16, rDOT[i]);
+			smem_tile_to_fragment(sSlot, 0, QK_DIM + i * 16, rDO[i]);
 		}
 
 		// Sequential loop over Q
@@ -184,9 +183,9 @@ struct Attn_d_kv {
 			//   P = expb(S*score_scale - L_g) = gate * P_softmax
 			f32 top_L = gL_ptr[q_start + tid / 4] - logb_gate;
 			f32 bot_L = gL_ptr[q_start + tid / 4 + 8] - logb_gate;
-			// Load D from GMEM: D' = D / gate
-			f32 top_D = gD_ptr[q_start + tid / 4] * inv_gate;
-			f32 bot_D = gD_ptr[q_start + tid / 4 + 8] * inv_gate;
+			// Load D' from GMEM. The dQ kernel already stores D' = D / gate.
+			f32 top_D = gD_ptr[q_start + tid / 4];
+			f32 bot_D = gD_ptr[q_start + tid / 4 + 8];
 
 			scale_top_(rS_f32, top_score_scale);
 			scale_bottom_(rS_f32, bot_score_scale);
@@ -212,20 +211,20 @@ struct Attn_d_kv {
 			rP_f32.sub[1][1].val0 = math::fast::expb(rS_f32.sub[1][1].val0 - bot_L);
 			rP_f32.sub[1][1].val1 = math::fast::expb(rS_f32.sub[1][1].val1 - bot_L);
 
-			// dP = dO @ V^T (must compute before rDO is overwritten with next iteration)
+			// dP = dO @ V^T
 			Fragment_16x16<f32> rDP;
 			zero_(rDP);
 			X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
-				mma_a_bt(rVT[i], rDOT[i], rDP);
+				mma_a_bt(rDO[i], rV[i], rDP);
 			}
-			rDP.transpose_();
 
 			// dV += P^T @ dO  (P = gate * P_softmax, no rescale needed)
 			Fragment_16x16<bf16> rP;
 			cast(rP_f32, rP);
 			rP.transpose_();
 			X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
-				mma_a_bt(rP, rDOT[i], rDV[i]);
+				rDO[i].transpose_();
+				mma_a_bt(rP, rDO[i], rDV[i]);
 			}
 
 			// dS = (score_scale / logb_e) * P * (dP - D')
@@ -270,7 +269,7 @@ struct Attn_d_kv {
 				smem_tile_to_fragment(sSlot, 0, i * 16, rQ[i]);
 			}
 			X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
-				smem_tile_to_fragment_trans(sSlot, 0, QK_DIM + i * 16, rDOT[i]);
+				smem_tile_to_fragment(sSlot, 0, QK_DIM + i * 16, rDO[i]);
 			}
 
 			// TODO: sink_score
