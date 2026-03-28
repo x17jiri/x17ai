@@ -142,6 +142,14 @@ int main(int argc, char *argv[]) {
 	bf16 *dQ_dev;
 	cudaMalloc(&dQ_dev, Q_LEN * QK_DIM * sizeof(bf16));
 
+	// allocate dK output: bf16 [KV_LEN, QK_DIM]
+	bf16 *dK_dev;
+	cudaMalloc(&dK_dev, KV_LEN * QK_DIM * sizeof(bf16));
+
+	// allocate dV output: bf16 [KV_LEN, V_DIM]
+	bf16 *dV_dev;
+	cudaMalloc(&dV_dev, KV_LEN * V_DIM * sizeof(bf16));
+
 	// allocate D output: f32 [Q_LEN]
 	f32 *D_dev;
 	cudaMalloc(&D_dev, Q_LEN * sizeof(f32));
@@ -196,6 +204,7 @@ int main(int argc, char *argv[]) {
 	cudaDeviceSynchronize();
 
 	usize NUM_BLOCKS = Q_LEN / AF::Q_PER_BLOCK;
+	usize NUM_KV_BLOCKS = KV_LEN / ADKV::KV_PER_BLOCK;
 	int NUM_RUNS = use_real_data ? 1 : 200;
 	//NUM_RUNS = 1;
 	std::vector<cudaEvent_t> starts(NUM_RUNS), ends(NUM_RUNS);
@@ -324,6 +333,76 @@ int main(int argc, char *argv[]) {
 		std::ofstream f("tmp/D.bin", std::ios::binary);
 		f.write(reinterpret_cast<char*>(D_data.data()),
 			static_cast<std::streamsize>(Q_LEN * sizeof(f32)));
+	}
+
+	// Run d_kv backward kernel
+	for (int i = 0; i < WARMUP; ++i) {
+		attn_d_kv<ADKV>
+			<<<NUM_KV_BLOCKS, ADKV::THREADS_PER_BLOCK, ADKV::SMEM_BYTES>>>
+			(
+				KV_LEN, q_dev,
+				kc_dev, kr_dev, v_dev,
+				dO_dev, dK_dev, dV_dev,
+				L_dev, D_dev,
+				sink_ptr
+			);
+	}
+	cudaDeviceSynchronize();
+
+	std::vector<cudaEvent_t> dkv_starts(NUM_RUNS), dkv_ends(NUM_RUNS);
+	for (int i = 0; i < NUM_RUNS; ++i) {
+		cudaEventCreate(&dkv_starts[i]);
+		cudaEventCreate(&dkv_ends[i]);
+	}
+	for (int i = 0; i < NUM_RUNS; ++i) {
+		cudaEventRecord(dkv_starts[i]);
+		attn_d_kv<ADKV>
+			<<<NUM_KV_BLOCKS, ADKV::THREADS_PER_BLOCK, ADKV::SMEM_BYTES>>>
+			(
+				KV_LEN, q_dev,
+				kc_dev, kr_dev, v_dev,
+				dO_dev, dK_dev, dV_dev,
+				L_dev, D_dev,
+				sink_ptr
+			);
+		cudaEventRecord(dkv_ends[i]);
+	}
+	cudaDeviceSynchronize();
+
+	std::vector<float> dkv_times_ms(NUM_RUNS);
+	for (int i = 0; i < NUM_RUNS; ++i) {
+		cudaEventElapsedTime(&dkv_times_ms[i], dkv_starts[i], dkv_ends[i]);
+		cudaEventDestroy(dkv_starts[i]);
+		cudaEventDestroy(dkv_ends[i]);
+	}
+	std::sort(dkv_times_ms.begin(), dkv_times_ms.end());
+	float dkv_median_ms = dkv_times_ms[NUM_RUNS / 2];
+
+	// dKV FLOPS: Q@K^T + P^T@dO + dS^T@Q = 2*Q*KV*(QK_DIM + V_DIM + QK_DIM), causal ≈ half
+	double dkv_flops_causal = (2.0 * Q_LEN * KV_LEN * (QK_DIM + V_DIM + QK_DIM) + 5.0 * Q_LEN * KV_LEN) / 2.0;
+	printf("TFLOPS dKV (causal): %.2f\n", dkv_flops_causal / (dkv_median_ms * 1e-3) / 1e12);
+
+	err = cudaGetLastError();
+	if (err != cudaSuccess) {
+		printf("(dKV) CUDA Error: %s\n", cudaGetErrorString(err));
+	}
+
+	// write dK to file
+	{
+		std::vector<bf16> dK_data(KV_LEN * QK_DIM);
+		cudaMemcpy(dK_data.data(), dK_dev, dK_data.size() * sizeof(bf16), cudaMemcpyDeviceToHost);
+		std::ofstream f("tmp/dK.bin", std::ios::binary);
+		f.write(reinterpret_cast<char*>(dK_data.data()),
+			static_cast<std::streamsize>(dK_data.size() * sizeof(bf16)));
+	}
+
+	// write dV to file
+	{
+		std::vector<bf16> dV_data(KV_LEN * V_DIM);
+		cudaMemcpy(dV_data.data(), dV_dev, dV_data.size() * sizeof(bf16), cudaMemcpyDeviceToHost);
+		std::ofstream f("tmp/dV.bin", std::ios::binary);
+		f.write(reinterpret_cast<char*>(dV_data.data()),
+			static_cast<std::streamsize>(dV_data.size() * sizeof(bf16)));
 	}
 
 	// write dO to file (for Python verification)

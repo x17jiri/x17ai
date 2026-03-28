@@ -177,6 +177,12 @@ X17_DEVICE T shuffle_xor_sync(T val, int lane_mask) {
 
 template<typename T>
 requires(sizeof(T) == 4)
+X17_DEVICE T shuffle_sync(T val, int src_lane) {
+	return __shfl_sync(0xffffffff, val, src_lane);
+}
+
+template<typename T>
+requires(sizeof(T) == 4)
 X17_DEVICE void store_shared_4x32b(u32 ptr, T a, T b, T c, T d) {
 	asm volatile(
 		"st.shared.v4.f32 [%0], {%1, %2, %3, %4};\n"
@@ -500,6 +506,26 @@ struct Fragment_8x8: FragmentReg<T> {
 			this->second() * scale
 		);
 	}
+
+	X17_DEVICE void transpose_() requires(sizeof(T) == 4) {
+		usize tid = threadIdx.x % WARP_SIZE;
+		usize row = tid / 4;
+		usize col_pair = tid % 4;
+
+		usize src_lane0 = (2 * col_pair + 0) * 4 + (row / 2);
+		usize src_lane1 = (2 * col_pair + 1) * 4 + (row / 2);
+		bool take_second = (row & 1) != 0;
+
+		T src00 = shuffle_sync(this->val0, int(src_lane0));
+		T src01 = shuffle_sync(this->val1, int(src_lane0));
+		T src10 = shuffle_sync(this->val0, int(src_lane1));
+		T src11 = shuffle_sync(this->val1, int(src_lane1));
+
+		this->set(
+			take_second ? src01 : src00,
+			take_second ? src11 : src10
+		);
+	}
 };
 
 template<typename T>
@@ -555,12 +581,22 @@ struct Fragment_16x16 {
 		sub[1][1].val1 += o.sub[1][1].val1;
 	}
 
-	X17_DEVICE void transpose_() {
+	X17_DEVICE void transpose_() requires(sizeof(T) == 2) {
 		sm80::movmatrix(sub[0][0].val, sub[0][0].val);
 		Fragment_8x8<T> temp = sub[1][0];
 		sm80::movmatrix(sub[0][1].val, sub[1][0].val);
 		sm80::movmatrix(temp.val     , sub[0][1].val);
 		sm80::movmatrix(sub[1][1].val, sub[1][1].val);
+	}
+
+	X17_DEVICE void transpose_() requires(sizeof(T) == 4) {
+		sub[0][0].transpose_();
+		sub[1][1].transpose_();
+		Fragment_8x8<T> temp = sub[0][1];
+		sub[0][1] = sub[1][0];
+		sub[1][0] = temp;
+		sub[0][1].transpose_();
+		sub[1][0].transpose_();
 	}
 };
 

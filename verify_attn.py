@@ -163,8 +163,8 @@ def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5):
 
 	# Build f64 tensors with requires_grad for autograd
 	Q = Q_bf16.double().requires_grad_(True)
-	K = KV_bf16[:, :QK_DIM].double()
-	V = KV_bf16[:, :V_DIM].double()
+	K = KV_bf16[:, :QK_DIM].double().requires_grad_(True)
+	V = KV_bf16[:, :V_DIM].double().requires_grad_(True)
 
 	print(f"Computing exact reference (f64 softmax) q_len={q_len}, kv_len={kv_len}...")
 	ref_out = reference_exact(Q, K, V, sink=sink_arg, gate=gate_arg)
@@ -201,6 +201,10 @@ def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5):
 	ref_out.backward(dO_bf16.double())
 	ref_dQ = Q.grad  # f64
 	ref_dQ_bf16 = ref_dQ.to(torch.bfloat16)
+	ref_dK = K.grad  # f64
+	ref_dV = V.grad  # f64
+	ref_dK_bf16 = ref_dK.to(torch.bfloat16)
+	ref_dV_bf16 = ref_dV.to(torch.bfloat16)
 
 	print(f"\n=== Backward verification ===")
 
@@ -209,10 +213,10 @@ def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5):
 	if os.path.exists(D_path):
 		O_cuda = load_bf16("tmp/out_cpu.bin", (q_len, V_DIM))
 		D_cuda = load_f32(D_path, (q_len,))
-		D_ref = (dO_bf16.float() * O_cuda.float()).sum(dim=-1)
+		D_ref = (dO_bf16.float() * O_cuda.float()).sum(dim=-1) / gate_arg
 		diff = (D_ref - D_cuda).abs()
 		exact = (D_ref == D_cuda).sum().item()
-		print(f"\n--- D = rowsum(dO ⊙ O) ---")
+		print(f"\n--- D' = rowsum(dO ⊙ O) / gate ---")
 		print(f"Max abs diff:  {diff.max().item():.6e}")
 		print(f"Exact match:   {exact}/{q_len} ({100*exact/q_len:.2f}%)")
 
@@ -221,6 +225,18 @@ def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5):
 	if os.path.exists(dQ_path):
 		dQ_cuda = load_bf16(dQ_path, (q_len, QK_DIM))
 		compare("dQ (autograd f64)", ref_dQ_bf16, dQ_cuda, q_len, QK_DIM)
+
+	# Verify dK
+	dK_path = "tmp/dK.bin"
+	if os.path.exists(dK_path):
+		dK_cuda = load_bf16(dK_path, (kv_len, QK_DIM))
+		compare("dK (autograd f64)", ref_dK_bf16, dK_cuda, kv_len, QK_DIM)
+
+	# Verify dV
+	dV_path = "tmp/dV.bin"
+	if os.path.exists(dV_path):
+		dV_cuda = load_bf16(dV_path, (kv_len, V_DIM))
+		compare("dV (autograd f64)", ref_dV_bf16, dV_cuda, kv_len, V_DIM)
 
 
 if __name__ == "__main__":

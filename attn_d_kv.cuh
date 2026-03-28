@@ -126,6 +126,8 @@ struct Attn_d_kv {
 		if (sink != nullptr) {
 			load_gmem_2x32b(sink, sink_score, gate);
 		}
+		f32 inv_gate = math::fast::recip(gate);
+		f32 logb_gate = math::fast::logb(gate);
 
 		// dK, dV accumulators
 		Fragment_16x16<f32> rDK[QK_TILES];
@@ -144,9 +146,9 @@ struct Attn_d_kv {
 		}
 		// Load V from SMEM into registers
 		// When V_EQUALS_K, V starts at col 0; otherwise at col QK_DIM
-		Fragment_16x16<bf16> rV[V_TILES];
+		Fragment_16x16<bf16> rVT[V_TILES];
 		X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
-			smem_tile_to_fragment(sKV_warp, 0, V_SMEM_COL + i * 16, rV[i]);
+			smem_tile_to_fragment_trans(sKV_warp, 0, V_SMEM_COL + i * 16, rVT[i]);
 		}
 		// Load first Q + dO tile from SMEM to registers
 		auto sSlot = tile_m<Q_PER_STEP>(sPreload, q_first_step % GMEM_PRELOAD);
@@ -154,9 +156,9 @@ struct Attn_d_kv {
 		X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
 			smem_tile_to_fragment(sSlot, 0, i * 16, rQ[i]);
 		}
-		Fragment_16x16<bf16> rDO[V_TILES];
+		Fragment_16x16<bf16> rDOT[V_TILES];
 		X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
-			smem_tile_to_fragment(sSlot, 0, QK_DIM + i * 16, rDO[i]);
+			smem_tile_to_fragment_trans(sSlot, 0, QK_DIM + i * 16, rDOT[i]);
 		}
 
 		// Sequential loop over Q
@@ -177,6 +179,15 @@ struct Attn_d_kv {
 			f32 top_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(top_n);
 			f32 bot_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(bot_n);
 
+			// Load L from GMEM, adjusted to fold gate into P:
+			//   L_g = L - logb(gate)
+			//   P = expb(S*score_scale - L_g) = gate * P_softmax
+			f32 top_L = gL_ptr[q_start + tid / 4] - logb_gate;
+			f32 bot_L = gL_ptr[q_start + tid / 4 + 8] - logb_gate;
+			// Load D from GMEM: D' = D / gate
+			f32 top_D = gD_ptr[q_start + tid / 4] * inv_gate;
+			f32 bot_D = gD_ptr[q_start + tid / 4 + 8] * inv_gate;
+
 			scale_top_(rS_f32, top_score_scale);
 			scale_bottom_(rS_f32, bot_score_scale);
 
@@ -184,15 +195,12 @@ struct Attn_d_kv {
 			if (q_step - q_first_step < KV_WARPS) {
 				if (q_step - q_first_step == kv_warp_idx) {
 					Attn_forward::causal_mask_diagonal(rS_f32);
-				} else if (q_step - q_first_step > kv_warp_idx) {
+				} else if (q_step - q_first_step < kv_warp_idx) {
 					fill_(rS_f32, -INFINITY);
 				}
 			}
 
-			/*
-			TODO: Need to load L in the loop
-
-			// P = expb(S - L)
+			// P = expb(S*score_scale - L_g) = gate * P_softmax
 			Fragment_16x16<f32> rP_f32;
 			rP_f32.sub[0][0].val0 = math::fast::expb(rS_f32.sub[0][0].val0 - top_L);
 			rP_f32.sub[0][0].val1 = math::fast::expb(rS_f32.sub[0][0].val1 - top_L);
@@ -203,13 +211,47 @@ struct Attn_d_kv {
 			rP_f32.sub[1][0].val1 = math::fast::expb(rS_f32.sub[1][0].val1 - bot_L);
 			rP_f32.sub[1][1].val0 = math::fast::expb(rS_f32.sub[1][1].val0 - bot_L);
 			rP_f32.sub[1][1].val1 = math::fast::expb(rS_f32.sub[1][1].val1 - bot_L);
-			*/
 
 			// dP = dO @ V^T (must compute before rDO is overwritten with next iteration)
 			Fragment_16x16<f32> rDP;
 			zero_(rDP);
 			X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
-				mma_a_bt(rDO[i], rV[i], rDP);
+				mma_a_bt(rVT[i], rDOT[i], rDP);
+			}
+			rDP.transpose_();
+
+			// dV += P^T @ dO  (P = gate * P_softmax, no rescale needed)
+			Fragment_16x16<bf16> rP;
+			cast(rP_f32, rP);
+			rP.transpose_();
+			X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
+				mma_a_bt(rP, rDOT[i], rDV[i]);
+			}
+
+			// dS = (score_scale / logb_e) * P * (dP - D')
+			// P has gate folded in; score_scale/logb_e applied as per-row scalar
+			f32 top_dk_scale = top_score_scale * f32(1.0 / math::fast::logb_e);
+			f32 bot_dk_scale = bot_score_scale * f32(1.0 / math::fast::logb_e);
+			Fragment_16x16<f32> rDS_f32;
+			rDS_f32.sub[0][0].val0 = rP_f32.sub[0][0].val0 * (rDP.sub[0][0].val0 - top_D);
+			rDS_f32.sub[0][0].val1 = rP_f32.sub[0][0].val1 * (rDP.sub[0][0].val1 - top_D);
+			rDS_f32.sub[0][1].val0 = rP_f32.sub[0][1].val0 * (rDP.sub[0][1].val0 - top_D);
+			rDS_f32.sub[0][1].val1 = rP_f32.sub[0][1].val1 * (rDP.sub[0][1].val1 - top_D);
+
+			rDS_f32.sub[1][0].val0 = rP_f32.sub[1][0].val0 * (rDP.sub[1][0].val0 - bot_D);
+			rDS_f32.sub[1][0].val1 = rP_f32.sub[1][0].val1 * (rDP.sub[1][0].val1 - bot_D);
+			rDS_f32.sub[1][1].val0 = rP_f32.sub[1][1].val0 * (rDP.sub[1][1].val0 - bot_D);
+			rDS_f32.sub[1][1].val1 = rP_f32.sub[1][1].val1 * (rDP.sub[1][1].val1 - bot_D);
+			scale_top_(rDS_f32, top_dk_scale);
+			scale_bottom_(rDS_f32, bot_dk_scale);
+
+			// dK += dS^T @ Q — transpose dS, then MMA with each Q tile
+			Fragment_16x16<bf16> rDS;
+			cast(rDS_f32, rDS);
+			rDS.transpose_();
+			X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
+				rQ[i].transpose_();
+				mma_a_bt(rDS, rQ[i], rDK[i]);
 			}
 
 			{ // Get more data from GMEM
@@ -228,19 +270,18 @@ struct Attn_d_kv {
 				smem_tile_to_fragment(sSlot, 0, i * 16, rQ[i]);
 			}
 			X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
-				smem_tile_to_fragment(sSlot, 0, QK_DIM + i * 16, rDO[i]);
+				smem_tile_to_fragment_trans(sSlot, 0, QK_DIM + i * 16, rDOT[i]);
 			}
 
-			// TODO: P, dS computation and dK/dV accumulation
-			(void)rS_f32;
-			(void)rDP;
-			(void)rDK;
-			(void)rDV;
-			(void)gate;
+			// TODO: sink_score
 			(void)sink_score;
 		}
 
-		// TODO: store dK, dV
+		// Store dK, dV to GMEM
+		GMatrix<bf16, KV_PER_BLOCK, QK_DIM> gDK_block = tile_m<KV_PER_BLOCK>(gDK, kv_block_idx);
+		store(rDK, gDK_block, kv_warp_idx * KV_PER_WARP, 0);
+		GMatrix<bf16, KV_PER_BLOCK, V_DIM> gDV_block = tile_m<KV_PER_BLOCK>(gDV, kv_block_idx);
+		store(rDV, gDV_block, kv_warp_idx * KV_PER_WARP, 0);
 	}
 };
 
