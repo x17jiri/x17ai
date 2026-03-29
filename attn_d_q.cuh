@@ -45,6 +45,14 @@ struct Attn_d_q {
 			+ Q_PER_BLOCK * (QK_DIM + 2 * V_DIM)
 		);
 
+	static constexpr size_t mma_count(size_t seq_len) {
+		return (seq_len / 16) * (seq_len / 16) * (QK_TILES + V_TILES + QK_TILES) / 2;
+	}
+
+	static constexpr double flops(size_t seq_len) {
+		return double(mma_count(seq_len)) * 2.0 * 16.0 * 16.0 * 16.0;
+	}
+
 	X17_DEVICE void run(
 		usize seq_len, bf16 *gQ_ptr,
 		bf16 *gKc_ptr, bf16 *gKr_ptr, bf16 *gV_ptr,

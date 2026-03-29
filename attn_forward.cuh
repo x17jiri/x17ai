@@ -71,6 +71,14 @@ struct Attn_forward {
 
 	static constexpr f32 ONLINE_SOFTMAX_THRESHOLD = 5.0 / math::fast::logb_2;
 
+	static constexpr size_t mma_count(size_t seq_len) {
+		return (seq_len / 16) * (seq_len / 16) * (QK_TILES + V_TILES) / 2;
+	}
+
+	static constexpr double flops(size_t seq_len) {
+		return double(mma_count(seq_len)) * 2.0 * 16.0 * 16.0 * 16.0;
+	}
+
 	X17_DEVICE void online_softmax(
 		bool first_step,
 		SoftmaxStats &top,

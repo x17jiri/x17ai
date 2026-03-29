@@ -45,6 +45,14 @@ struct Attn_d_kv {
 		+ sizeof(bf16) * (KV_PER_BLOCK * KV_SMEM_DIM)
 		+ sizeof(f32) * (GMEM_PRELOAD * Q_PER_STEP * 2); // sL + sD
 
+	static constexpr size_t mma_count(size_t seq_len) {
+		return (seq_len / 16) * (seq_len / 16) * (QK_TILES + V_TILES + V_TILES + QK_TILES) / 2;
+	}
+
+	static constexpr double flops(size_t seq_len) {
+		return double(mma_count(seq_len)) * 2.0 * 16.0 * 16.0 * 16.0;
+	}
+
 	static X17_DEVICE void cp_async_q_do_ld(
 		GMatrixDynSize<bf16, QK_DIM> gQ,
 		GMatrixDynSize<bf16, V_DIM> gDO,

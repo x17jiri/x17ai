@@ -243,6 +243,7 @@ int main(int argc, char *argv[]) {
 	// TFLOPS: Q@K^T = 2*Q*KV*QK_DIM, attn@V = 2*Q*KV*V_DIM, softmax ~ 5*Q*KV
 	// Causal ≈ half the work
 	double flops_causal = (2.0 * Q_LEN * KV_LEN * QK_DIM + 2.0 * Q_LEN * KV_LEN * V_DIM + 5.0 * Q_LEN * KV_LEN) / 2.0;
+	flops_causal = AF::flops(Q_LEN);
 	printf("TFLOPS (causal): %.2f\n", flops_causal / (median_ms * 1e-3) / 1e12);
 
 	// write output to file
@@ -310,6 +311,7 @@ int main(int argc, char *argv[]) {
 
 	// dQ FLOPS: Q@K^T + dO@V^T + dS@K = 2*Q*KV*(QK_DIM + V_DIM + QK_DIM), causal ≈ half
 	double dq_flops_causal = (2.0 * Q_LEN * KV_LEN * (QK_DIM + V_DIM + QK_DIM) + 5.0 * Q_LEN * KV_LEN) / 2.0;
+	dq_flops_causal = ADQ::flops(Q_LEN);
 	printf("TFLOPS dQ (causal): %.2f\n", dq_flops_causal / (dq_median_ms * 1e-3) / 1e12);
 
 	err = cudaGetLastError();
@@ -378,8 +380,9 @@ int main(int argc, char *argv[]) {
 	std::sort(dkv_times_ms.begin(), dkv_times_ms.end());
 	float dkv_median_ms = dkv_times_ms[NUM_RUNS / 2];
 
-	// dKV FLOPS: Q@K^T + P^T@dO + dS^T@Q = 2*Q*KV*(QK_DIM + V_DIM + QK_DIM), causal ≈ half
-	double dkv_flops_causal = (2.0 * Q_LEN * KV_LEN * (QK_DIM + V_DIM + QK_DIM) + 5.0 * Q_LEN * KV_LEN) / 2.0;
+	// dKV FLOPS: Q@K^T + dO@V^T + P^T@dO + dS^T@Q = 2*Q*KV*(QK_DIM + V_DIM + V_DIM + QK_DIM), causal ≈ half
+	double dkv_flops_causal = (2.0 * Q_LEN * KV_LEN * (QK_DIM + V_DIM + V_DIM + QK_DIM) + 5.0 * Q_LEN * KV_LEN) / 2.0;
+	dkv_flops_causal = ADKV::flops(Q_LEN);
 	printf("TFLOPS dKV (causal): %.2f\n", dkv_flops_causal / (dkv_median_ms * 1e-3) / 1e12);
 
 	err = cudaGetLastError();
