@@ -94,19 +94,6 @@ struct Attn_d_q {
 			cp_async_commit();
 		}
 
-		// Sink: a virtual token with no V contribution - it only adds to the
-		// softmax denominator, stealing probability from real tokens.
-		// sink[0] = raw score, sink[1] = output gate
-		f32 sink_score = -INFINITY;
-		f32 gate = 1.0f;
-		if (sink != nullptr) {
-			load_gmem_2x32b(sink, sink_score, gate);
-		}
-
-		// ***************** TODO - in forward, we use sink_score and gate at the very end, but here
-		// we use it almost immediately. Figure out some scheduling.
-		// ***************** TODO - also the read of L needs scheduling
-
 		// Scalable-Softmax: score_scale = (1.0 / sqrt(QK_DIM)) * ln(n) * logb(e)
 		//     1.0 / sqrt(QK_DIM) — standard attention scaling
 		//     ln(n)              — SSMax factor (ln(n) = logb(n) / logb(e))
@@ -118,19 +105,21 @@ struct Attn_d_q {
 		f32 top_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(top_n);
 		f32 bot_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(bot_n);
 
-		// Load logsumexp from forward pass, adjusted to fold score_scale AND gate into P:
-		//   L' = L - logb(gate * score_scale / logb_e)
-		//   P' = expb(S*score_scale - L') = P * gate * score_scale / logb_e
-		//   D'  = D / gate
-		// so dS = P' * (dP - D') and dQ = sum(dS) @ K — no scaling needed.
-		f32 top_grad_scale = f32(1.0 / math::fast::logb_e) * gate * top_score_scale;
-		f32 bot_grad_scale = f32(1.0 / math::fast::logb_e) * gate * bot_score_scale;
-		f32 top_L = gL_ptr[q_start + tid / 4] - math::fast::logb(top_grad_scale);
-		f32 bot_L = gL_ptr[q_start + tid / 4 + 8] - math::fast::logb(bot_grad_scale);
+		// Sink: a virtual token with no V contribution - it only adds to the
+		// softmax denominator, stealing probability from real tokens.
+		// sink[0] = raw score, sink[1] = output gate
+		f32 sink_score = -INFINITY;
+		f32 gate = 1.0f;
+		if (sink != nullptr) {
+			load_gmem_2x32b(sink, sink_score, gate);
+		}
+
+		f32 top_L = gL_ptr[q_start + tid / 4];
+		f32 bot_L = gL_ptr[q_start + tid / 4 + 8];
 
 		// dQ accumulator
-		Fragment_16x16<f32> rDQ[QK_TILES];
-		zero_(rDQ);
+		Fragment_16x16<f32> rDQ_f32[QK_TILES];
+		zero_(rDQ_f32);
 
 		cp_async_wait<GMEM_PRELOAD - 1>();
 		sync_threads();
@@ -183,11 +172,19 @@ struct Attn_d_q {
 			gD_ptr[base + (tid / 4) + ((tid & 2) * 4)] = ((tid & 2) == 0 ? top_D : bot_D);
 		}
 
+		// Adjust L to fold score_scale and gate into P:
+		//   L' = L - logb(gate * score_scale / logb_e)
+		//   P' = expb(S*score_scale - L') = P * gate * score_scale / logb_e
+		//   D'  = D / gate
+		// so dS = P' * (dP - D') and dQ = sum(dS) @ K — no scaling needed.
+		f32 top_grad_scale = f32(1.0 / math::fast::logb_e) * gate * top_score_scale;
+		f32 bot_grad_scale = f32(1.0 / math::fast::logb_e) * gate * bot_score_scale;
+		top_L -= math::fast::logb(top_grad_scale);
+		bot_L -= math::fast::logb(bot_grad_scale);
+
 		// Sequential loop over KV
 		X17_NO_UNROLL for (usize kv_step = 0; kv_step < kv_steps; ++kv_step) {
 			// S = Q * K^T, interleaved with V load (rKV: K -> V)
-			// NOTE: V loaded NON-transposed (unlike forward) because dP = dO @ V^T
-			// needs B with inner-k = dim (matching dO), not kv.
 			Fragment_16x16<f32> rS_f32;
 			zero_(rS_f32);
 			X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
@@ -198,8 +195,8 @@ struct Attn_d_q {
 				mma_a_bt(rQ[i], rKV[i], rS_f32);
 			}
 
-			// WARNING: DON'T get tempted to FMA this into the expb below
-			// Scale scores must happen before masking to avoid -inf * 0 == NaN when score_scale == 0
+			// WARNING: DON'T get tempted to FMA this into the expb below because
+			// scale scores must happen before masking to avoid -inf * 0 == NaN when score_scale == 0
 			scale_top_(rS_f32, top_score_scale);
 			scale_bottom_(rS_f32, bot_score_scale);
 
@@ -266,13 +263,13 @@ struct Attn_d_q {
 
 			// dQ += dS * K, interleaved with next K load
 			X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
-				mma_a_bt(rDS, rKV[i], rDQ[i]);
+				mma_a_bt(rDS, rKV[i], rDQ_f32[i]);
 				smem_tile_to_fragment(sKV, 0, i * 16, rKV[i]);
 			}
 		}
 
 		GMatrix<bf16, Q_PER_BLOCK, QK_DIM> gDQ_block = tile_m<Q_PER_BLOCK>(gDQ, blockIdx.x);
-		store(rDQ, gDQ_block, q_warp_idx * Q_PER_WARP, 0);
+		store(rDQ_f32, gDQ_block, q_warp_idx * Q_PER_WARP, 0);
 	}
 };
 

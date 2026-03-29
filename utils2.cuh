@@ -28,6 +28,10 @@
 #define X17_DEVICE __forceinline__ __device__
 #define X17_HOST_DEVICE __forceinline__ __host__ __device__
 
+#ifndef X17_PRECISE_MATH
+#define X17_PRECISE_MATH 0
+#endif
+
 using u8 = uint8_t;
 using u16 = uint16_t;
 using u32 = uint32_t;
@@ -69,9 +73,13 @@ namespace math {
 		///
 		/// To calculate `B^x` for some other base `B`, use `expb(x * logb(B))`.
 		X17_DEVICE f32 expb(f32 x) {
-			f32 result;
-			asm ("ex2.approx.ftz.f32 %0, %1;\n" : "=f"(result) : "f"(x));
-			return result;
+			#if X17_PRECISE_MATH
+				return exp2f(x);
+			#else
+				f32 result;
+				asm ("ex2.approx.ftz.f32 %0, %1;\n" : "=f"(result) : "f"(x));
+				return result;
+			#endif
 		}
 
 		/// Calculate `logb(x)` where `b` is our underlying base.
@@ -79,15 +87,34 @@ namespace math {
 		///
 		/// To calculate `logB(x)` for some other base `B`, use `logb(x) / logb(B)`.
 		X17_DEVICE f32 logb(f32 x) {
-			f32 result;
-			asm ("lg2.approx.ftz.f32 %0, %1;\n" : "=f"(result) : "f"(x));
-			return result;
+			#if X17_PRECISE_MATH
+				return log2f(x);
+			#else
+				f32 result;
+				asm ("lg2.approx.ftz.f32 %0, %1;\n" : "=f"(result) : "f"(x));
+				return result;
+			#endif
 		}
 
-		/// Single-instruction reciprocal
-		/// Precision: <= 1 ULP, round-to-nearest
+		/// Single-instruction reciprocal approximation.
 		X17_DEVICE f32 recip(f32 x) {
-			return __frcp_rn(x);
+			#if X17_PRECISE_MATH
+				return 1.0f / x;
+			#else
+				f32 result;
+				asm ("rcp.approx.ftz.f32 %0, %1;\n" : "=f"(result) : "f"(x));
+				return result;
+			#endif
+		}
+
+		X17_DEVICE f32 divide(f32 numerator, f32 denominator) {
+			#if X17_PRECISE_MATH
+				return numerator / denominator;
+			#else
+				f32 result;
+				asm ("div.approx.ftz.f32 %0, %1, %2;\n" : "=f"(result) : "f"(numerator), "f"(denominator));
+				return result;
+			#endif
 		}
 
 		X17_DEVICE f32 sigmoid(f32 x) {

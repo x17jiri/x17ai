@@ -53,28 +53,30 @@ struct Attn_forward {
 			+ Q_PER_BLOCK * QK_DIM
 		);
 
-	static X17_DEVICE void causal_mask_diagonal(Fragment_16x16<f32> &rS) {
+	static X17_DEVICE void causal_mask_diagonal(Fragment_16x16<f32> &rS_f32) {
 		usize tid = threadIdx.x % WARP_SIZE;
 		usize q = tid / 4;           // 0..7
 		usize k = 2 * (tid % 4);    // 0,2,4,6
 		constexpr f32 NEG_INF = -INFINITY;
 
-		rS.sub[0][1].val0 = NEG_INF;
-		rS.sub[0][1].val1 = NEG_INF;
+		rS_f32.sub[0][1].val0 = NEG_INF;
+		rS_f32.sub[0][1].val1 = NEG_INF;
 
-		rS.sub[0][0].val0 = k <= q ? rS.sub[0][0].val0 : NEG_INF;
-		rS.sub[1][1].val0 = k <= q ? rS.sub[1][1].val0 : NEG_INF;
+		rS_f32.sub[0][0].val0 = k <= q ? rS_f32.sub[0][0].val0 : NEG_INF;
+		rS_f32.sub[1][1].val0 = k <= q ? rS_f32.sub[1][1].val0 : NEG_INF;
 
-		rS.sub[0][0].val1 = k + 1 <= q ? rS.sub[0][0].val1 : NEG_INF;
-		rS.sub[1][1].val1 = k + 1 <= q ? rS.sub[1][1].val1 : NEG_INF;
+		rS_f32.sub[0][0].val1 = k + 1 <= q ? rS_f32.sub[0][0].val1 : NEG_INF;
+		rS_f32.sub[1][1].val1 = k + 1 <= q ? rS_f32.sub[1][1].val1 : NEG_INF;
 	}
+
+	static constexpr f32 ONLINE_SOFTMAX_THRESHOLD = 5.0 / math::fast::logb_2;
 
 	X17_DEVICE void online_softmax(
 		bool first_step,
 		SoftmaxStats &top,
 		SoftmaxStats &bot,
-		Fragment_16x16<f32> &rS,
-		Fragment_16x16<f32> (&rO)[V_TILES]
+		Fragment_16x16<f32> &rS_f32,
+		Fragment_16x16<f32> (&rO_f32)[V_TILES]
 	) {
 		// The `max` in `top` and `bot` is for the entire owned rows.
 		// The `sum` is just the elements owned by the current thread.
@@ -82,19 +84,18 @@ struct Attn_forward {
 
 		// Step 1: `max` of the owned values
 		f32 new_top_max = math::max(
-			math::max(rS.sub[0][0].val0, rS.sub[0][0].val1),
-			math::max(rS.sub[0][1].val0, rS.sub[0][1].val1)
+			math::max(rS_f32.sub[0][0].val0, rS_f32.sub[0][0].val1),
+			math::max(rS_f32.sub[0][1].val0, rS_f32.sub[0][1].val1)
 		);
 		f32 new_bot_max = math::max(
-			math::max(rS.sub[1][0].val0, rS.sub[1][0].val1),
-			math::max(rS.sub[1][1].val0, rS.sub[1][1].val1)
+			math::max(rS_f32.sub[1][0].val0, rS_f32.sub[1][0].val1),
+			math::max(rS_f32.sub[1][1].val0, rS_f32.sub[1][1].val1)
 		);
 
 		// Step 2: Rescale outputs if needed
 		f32 top_rescale = 1.0f;
 		f32 bot_rescale = 1.0f;
-		constexpr f32 THRESHOLD = 5.0 / math::fast::logb_2;
-		bool needs_rescale = math::max(new_top_max - top.max, new_bot_max - bot.max) > THRESHOLD;
+		bool needs_rescale = math::max(new_top_max - top.max, new_bot_max - bot.max) > ONLINE_SOFTMAX_THRESHOLD;
 		if (any_sync(needs_rescale)) {
 			new_top_max = math::max(new_top_max, shuffle_xor_sync(new_top_max, 1));
 			new_top_max = math::max(new_top_max, shuffle_xor_sync(new_top_max, 2));
@@ -103,21 +104,21 @@ struct Attn_forward {
 			new_bot_max = math::max(new_bot_max, shuffle_xor_sync(new_bot_max, 2));
 
 			new_top_max =
-				new_top_max - top.max > THRESHOLD
-					? new_top_max + THRESHOLD
+				new_top_max - top.max > ONLINE_SOFTMAX_THRESHOLD
+					? new_top_max + ONLINE_SOFTMAX_THRESHOLD
 					: top.max;
 
 			new_bot_max =
-				new_bot_max - bot.max > THRESHOLD
-					? new_bot_max + THRESHOLD
+				new_bot_max - bot.max > ONLINE_SOFTMAX_THRESHOLD
+					? new_bot_max + ONLINE_SOFTMAX_THRESHOLD
 					: bot.max;
 
 			if (!first_step) {
 				top_rescale = math::fast::expb(top.max - new_top_max);
-				scale_top_(rO, top_rescale);
+				scale_top_(rO_f32, top_rescale);
 
 				bot_rescale = math::fast::expb(bot.max - new_bot_max);
-				scale_bottom_(rO, bot_rescale);
+				scale_bottom_(rO_f32, bot_rescale);
 			}
 
 			top.max = new_top_max;
@@ -125,37 +126,36 @@ struct Attn_forward {
 		}
 
 		// Step 3: Replace scores with expb(score - max)
-		rS.sub[0][0].val0 = math::fast::expb(rS.sub[0][0].val0 - top.max);
-		rS.sub[0][0].val1 = math::fast::expb(rS.sub[0][0].val1 - top.max);
-		rS.sub[0][1].val0 = math::fast::expb(rS.sub[0][1].val0 - top.max);
-		rS.sub[0][1].val1 = math::fast::expb(rS.sub[0][1].val1 - top.max);
+		rS_f32.sub[0][0].val0 = math::fast::expb(rS_f32.sub[0][0].val0 - top.max);
+		rS_f32.sub[0][0].val1 = math::fast::expb(rS_f32.sub[0][0].val1 - top.max);
+		rS_f32.sub[0][1].val0 = math::fast::expb(rS_f32.sub[0][1].val0 - top.max);
+		rS_f32.sub[0][1].val1 = math::fast::expb(rS_f32.sub[0][1].val1 - top.max);
 
-		rS.sub[1][0].val0 = math::fast::expb(rS.sub[1][0].val0 - bot.max);
-		rS.sub[1][0].val1 = math::fast::expb(rS.sub[1][0].val1 - bot.max);
-		rS.sub[1][1].val0 = math::fast::expb(rS.sub[1][1].val0 - bot.max);
-		rS.sub[1][1].val1 = math::fast::expb(rS.sub[1][1].val1 - bot.max);
+		rS_f32.sub[1][0].val0 = math::fast::expb(rS_f32.sub[1][0].val0 - bot.max);
+		rS_f32.sub[1][0].val1 = math::fast::expb(rS_f32.sub[1][0].val1 - bot.max);
+		rS_f32.sub[1][1].val0 = math::fast::expb(rS_f32.sub[1][1].val0 - bot.max);
+		rS_f32.sub[1][1].val1 = math::fast::expb(rS_f32.sub[1][1].val1 - bot.max);
 
 		// Step 4: `sum` of the owned values
 		f32 top_add = (
-			(rS.sub[0][0].val0 + rS.sub[0][0].val1)
-			+ (rS.sub[0][1].val0 + rS.sub[0][1].val1)
+			(rS_f32.sub[0][0].val0 + rS_f32.sub[0][0].val1)
+			+ (rS_f32.sub[0][1].val0 + rS_f32.sub[0][1].val1)
 		);
 		top.sum = math::fma(top.sum, top_rescale, top_add);
 
 		f32 bot_add = (
-			(rS.sub[1][0].val0 + rS.sub[1][0].val1)
-			+ (rS.sub[1][1].val0 + rS.sub[1][1].val1)
+			(rS_f32.sub[1][0].val0 + rS_f32.sub[1][0].val1)
+			+ (rS_f32.sub[1][1].val0 + rS_f32.sub[1][1].val1)
 		);
 		bot.sum = math::fma(bot.sum, bot_rescale, bot_add);
 	}
 
 	X17_DEVICE void combine_and_store(
-		Fragment_16x16<f32> (&rO)[V_TILES],
+		Fragment_16x16<f32> (&rO_f32)[V_TILES],
 		SoftmaxStats top,
 		SoftmaxStats bot,
-		f32 sink_score,
-		f32 top_score_scale,
-		f32 bot_score_scale,
+		f32 top_sink_scaled,
+		f32 bot_sink_scaled,
 		f32 gate,
 		usize q_start,
 		usize q_warp_idx,
@@ -167,38 +167,23 @@ struct Attn_forward {
 		// Complete the row-wise sum reduction within each warp
 		top.sum += shuffle_xor_sync(top.sum, 1);
 		top.sum += shuffle_xor_sync(top.sum, 2);
+		top.sum += math::fast::expb(top_sink_scaled - top.max);
 
 		bot.sum += shuffle_xor_sync(bot.sum, 1);
 		bot.sum += shuffle_xor_sync(bot.sum, 2);
-
-		f32 top_sink_scaled = sink_score * top_score_scale;
-		f32 bot_sink_scaled = sink_score * bot_score_scale;
-
-		f32 global_top_max = math::max(top.max, top_sink_scaled);
-		f32 global_bot_max = math::max(bot.max, bot_sink_scaled);
-
-		f32 global_top_sum = math::fma(
-			top.sum,
-			math::fast::expb(top.max - global_top_max),
-			math::fast::expb(top_sink_scaled - global_top_max)
-		);
-		f32 global_bot_sum = math::fma(
-			bot.sum,
-			math::fast::expb(bot.max - global_bot_max),
-			math::fast::expb(bot_sink_scaled - global_bot_max)
-		);
+		bot.sum += math::fast::expb(bot_sink_scaled - bot.max);
 
 		// Rescale, folding in normalization and gate
-		f32 top_L = math::fast::logb(global_top_sum) + global_top_max;
-		f32 bot_L = math::fast::logb(global_bot_sum) + global_bot_max;
+		f32 top_L = math::fast::logb(top.sum) + top.max;
+		f32 bot_L = math::fast::logb(bot.sum) + bot.max;
 
-		f32 top_rescale = math::fast::expb(top.max - top_L) * gate;
-		f32 bot_rescale = math::fast::expb(bot.max - bot_L) * gate;
+		f32 top_rescale = math::fast::divide(gate, top.sum);
+		f32 bot_rescale = math::fast::divide(gate, bot.sum);
 
-		scale_top_(rO, top_rescale);
-		scale_bottom_(rO, bot_rescale);
+		scale_top_(rO_f32, top_rescale);
+		scale_bottom_(rO_f32, bot_rescale);
 
-		store(rO, gOut_block, q_warp_idx * Q_PER_WARP, 0);
+		store(rO_f32, gOut_block, q_warp_idx * Q_PER_WARP, 0);
 
 		usize tid = threadIdx.x % WARP_SIZE;
 		if (gL_ptr != nullptr && (tid & 1) == 0) {
@@ -276,15 +261,6 @@ struct Attn_forward {
 			cp_async_commit();
 		}
 
-		// Sink: a virtual token with no V contribution - it only adds to the
-		// softmax denominator, stealing probability from real tokens.
-		// sink[0] = raw score, sink[1] = output gate
-		f32 sink_score = -INFINITY;
-		f32 gate = 1.0f;
-		if (sink != nullptr) {
-			load_gmem_2x32b(sink, sink_score, gate);
-		}
-
 		// Scalable-Softmax: score_scale = (1.0 / sqrt(QK_DIM)) * ln(n) * logb(e)
 		//     1.0 / sqrt(QK_DIM) — standard attention scaling
 		//     ln(n)              — SSMax factor (ln(n) = logb(n) / logb(e))
@@ -296,12 +272,27 @@ struct Attn_forward {
 		f32 top_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(top_n);
 		f32 bot_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(bot_n);
 
-		SoftmaxStats r_top; r_top.max = std::numeric_limits<f32>::lowest(); r_top.sum = 0.0f;
-		SoftmaxStats r_bot; r_bot.max = std::numeric_limits<f32>::lowest(); r_bot.sum = 0.0f;
+		// Sink: a virtual token with no V contribution - it only adds to the
+		// softmax denominator, stealing probability from real tokens.
+		// sink[0] = raw score, sink[1] = output gate
+		f32 sink_score = -INFINITY;
+		f32 gate = 1.0f;
+		if (sink != nullptr) {
+			load_gmem_2x32b(sink, sink_score, gate);
+		}
+		f32 top_sink_scaled = math::max(sink_score * top_score_scale, std::numeric_limits<f32>::lowest());
+		f32 bot_sink_scaled = math::max(sink_score * bot_score_scale, std::numeric_limits<f32>::lowest());
+
+		SoftmaxStats r_top;
+		r_top.max = top_sink_scaled + ONLINE_SOFTMAX_THRESHOLD;
+		r_top.sum = 0.0f;
+		SoftmaxStats r_bot;
+		r_bot.max = bot_sink_scaled + ONLINE_SOFTMAX_THRESHOLD;
+		r_bot.sum = 0.0f;
 
 		// O accumulator
-		Fragment_16x16<f32> rO[V_TILES];
-		zero_(rO);
+		Fragment_16x16<f32> rO_f32[V_TILES];
+		zero_(rO_f32);
 
 		cp_async_wait<GMEM_PRELOAD - 1>();
 		sync_threads();
@@ -346,9 +337,9 @@ struct Attn_forward {
 				}
 			}
 
-			online_softmax(kv_step == 0, r_top, r_bot, rS_f32, rO);
-			Fragment_16x16<bf16> rS;
-			cast(rS_f32, rS);
+			online_softmax(kv_step == 0, r_top, r_bot, rS_f32, rO_f32);
+			Fragment_16x16<bf16> rP;
+			cast(rS_f32, rP);
 
 			{ // Get more data from GMEM
 				// Wait for the next batch of GMEM -> SMEM preloads to complete
@@ -363,7 +354,7 @@ struct Attn_forward {
 
 			// rO += S * V, interleaved with next K load
 			X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
-				mma_a_bt(rS, rKV[i], rO[i]);
+				mma_a_bt(rP, rKV[i], rO_f32[i]);
 				smem_tile_to_fragment(sKV, 0, i * 16, rKV[i]);
 			}
 			// Load remaining K tiles that weren't covered by V interleaving
@@ -373,7 +364,7 @@ struct Attn_forward {
 		}
 
 		GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = tile_m<Q_PER_BLOCK>(gO, q_block_idx);
-		combine_and_store(rO, r_top, r_bot, sink_score, top_score_scale, bot_score_scale, gate, q_start, q_warp_idx, gOut_block, gL_ptr);
+		combine_and_store(rO_f32, r_top, r_bot, top_sink_scaled, bot_sink_scaled, gate, q_start, q_warp_idx, gOut_block, gL_ptr);
 	}
 };
 

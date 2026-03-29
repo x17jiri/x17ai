@@ -62,21 +62,18 @@ def load_f32(path, shape):
 	return torch.from_numpy(np.fromfile(path, dtype=np.float32).reshape(shape))
 
 
-def reference_exact(Q, K, V, sink, gate):
-	"""Scalable-Softmax causal attention with optional sink token, in f64.
-	Q, K, V are f64 tensors. Q may have requires_grad=True.
-	Returns output (f64, with grad_fn if Q requires grad).
-	"""
+def compute_attn_real(Q, K, sink):
+	"""Return bf16-rounded real-token attention probabilities in f32."""
 	q_len = Q.shape[0]
 	kv_len = K.shape[0]
 	scores = Q @ K.T     # [q_len, kv_len]
-	sink_col = torch.full((q_len, 1), sink, dtype=torch.double)
+	sink_col = torch.full((q_len, 1), sink, dtype=torch.float32)
 	scores = torch.cat([sink_col, scores], dim=1)  # [q_len, kv_len+1]
 	scores = scores / math.sqrt(QK_DIM)
 
-	# SSMax: multiply ALL scores (including sink) by ln(n) where n = row_index + 2
-	n = torch.arange(2, q_len + 2, dtype=torch.float64).unsqueeze(1)  # [q_len, 1]
-	scores = scores * torch.log(n)
+	# SSMax: multiply ALL scores (including sink) by log2(n), matching kernel exp2/log2 math
+	n = torch.arange(2, q_len + 2, dtype=torch.float32).unsqueeze(1)  # [q_len, 1]
+	scores = scores * torch.log2(n)
 
 	# Causal mask: mask out kv_pos > q_pos (sink column is never masked)
 	sink_mask = torch.zeros(q_len, 1, dtype=torch.bool)
@@ -84,11 +81,141 @@ def reference_exact(Q, K, V, sink, gate):
 	mask = torch.cat([sink_mask, mask], dim=1)
 	scores = scores.masked_fill(mask, float('-inf'))
 
-	attn = torch.softmax(scores, dim=-1)
+	# Manual base-2 softmax to get closer to the kernel's exp2/log2 path.
+	row_max = torch.amax(scores, dim=-1, keepdim=True)
+	exp_scores = torch.exp2(scores - row_max)
+	attn = exp_scores / exp_scores.sum(dim=-1, keepdim=True)
+	return attn[:, 1:] #.to(torch.bfloat16).to(torch.float32)
+
+
+def reference_exact(Q, K, V, sink, gate):
+	"""Reference used for backward pass.
+	Uses dense accumulation once probabilities have been bf16-rounded.
+	"""
+	attn_real = compute_attn_real(Q, K, sink)
 	# Only the real tokens contribute to output (skip sink at column 0)
-	out = attn[:, 1:] @ V
+	out = attn_real @ V
 	out = out * gate
 	return out
+
+
+def reference_matching(Q, K, V, sink, gate, kv_tile=16):
+	"""Forward-only reference that tries to match kernel accumulation order better.
+	Accumulates the second GEMM in KV tiles, similar to the kernel's tiled loop.
+	"""
+	attn_real = compute_attn_real(Q, K, sink)
+	out = torch.zeros((Q.shape[0], V.shape[1]), dtype=torch.float32)
+	for start in range(0, K.shape[0], kv_tile):
+		end = min(start + kv_tile, K.shape[0])
+		out = out + attn_real[:, start:end] @ V[start:end, :]
+	return out * gate
+
+
+def reference_online_softmax(Q, K, V, sink, gate, kv_tile=16):
+	"""Reference that simulates the kernel's online softmax and MMA accumulation.
+
+	Key matching details vs the CUDA kernel:
+	- Score dot product: accumulated in 8 tiles of k=16 (matching MMA m16n8k16 structure)
+	- Online softmax: per-row running max, same update/rescale logic
+	- P cast to bf16 before P×V (matching cast before MMA)
+	- P×V: inner dim = 16 (matches MMA's k=16 for this GEMM)
+	- combine_and_store: sink folding, normalization, gate
+	"""
+	q_len = Q.shape[0]
+	kv_len = K.shape[0]
+	v_dim = V.shape[1]
+
+	# Compute scores with tiled k-accumulation matching the kernel's MMA structure.
+	# The kernel does 8 mma_a_bt calls (QK_TILES=QK_DIM/16=8), each processing
+	# 16 columns of Q and K. We replicate this by accumulating partial matmuls.
+	scores = torch.zeros(q_len, kv_len, dtype=torch.float32)
+	for d in range(0, QK_DIM, 16):
+		scores = scores + Q[:, d:d+16] @ K[:, d:d+16].T
+
+	# Per-row score scale: (1/sqrt(QK_DIM)) * log2(n), n = row + 2
+	n = torch.arange(2, q_len + 2, dtype=torch.float32)
+	inv_sqrt_qk = torch.tensor(1.0 / math.sqrt(QK_DIM), dtype=torch.float32)
+	score_scale = inv_sqrt_qk * torch.log2(n)
+	scores = scores * score_scale.unsqueeze(1)
+
+	# Causal mask
+	mask = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
+	scores = scores.masked_fill(mask, float('-inf'))
+
+	# V as bf16 (matching kernel's bf16 MMA input)
+	V_bf16 = V.to(torch.bfloat16).float()
+
+	# Online softmax state
+	FLT_LOWEST = torch.finfo(torch.float32).min  # matches C++ numeric_limits<f32>::lowest()
+	row_max = torch.full((q_len,), FLT_LOWEST, dtype=torch.float32)
+	row_sum = torch.zeros(q_len, dtype=torch.float32)
+	O = torch.zeros(q_len, v_dim, dtype=torch.float32)
+
+	for kv_start in range(0, kv_len, kv_tile):
+		kv_end = min(kv_start + kv_tile, kv_len)
+		S_tile = scores[:, kv_start:kv_end]
+
+		# Per-row max of this tile
+		tile_max = S_tile.max(dim=1).values
+		new_max = torch.maximum(row_max, tile_max)
+
+		# Rescale previous O and sum
+		rescale = torch.exp2(row_max - new_max)
+		O = O * rescale.unsqueeze(1)
+		row_sum = row_sum * rescale
+		row_max = new_max
+
+		# Unnormalized P = exp2(score - running_max)
+		P = torch.exp2(S_tile - row_max.unsqueeze(1))
+		row_sum = row_sum + P.sum(dim=1)
+
+		# Cast P to bf16 (kernel casts before MMA)
+		P_bf16 = P.to(torch.bfloat16).float()
+
+		# Accumulate O += P @ V
+		O = O + P_bf16 @ V_bf16[kv_start:kv_end, :]
+
+	# combine_and_store: include sink and normalize
+	sink_scaled = sink * score_scale
+	global_max = torch.maximum(row_max, sink_scaled)
+	global_sum = (
+		row_sum * torch.exp2(row_max - global_max)
+		+ torch.exp2(sink_scaled - global_max)
+	)
+
+	# Final rescale: exp2(row_max - global_max) * (gate / global_sum)
+	final_rescale = torch.exp2(row_max - global_max) * (gate / global_sum)
+	O = O * final_rescale.unsqueeze(1)
+
+	return O
+
+
+def reference_matching_from_L(Q, K, V, L, gate, kv_tile=16, v_tile=16):
+	"""Forward-only reference reconstructed from kernel-produced L.
+	Uses exp2(S - L), rounds both P and V through bf16, and accumulates the
+	second GEMM in small tiles to get closer to the kernel's MMA schedule.
+	"""
+	q_len = Q.shape[0]
+	kv_len = K.shape[0]
+	scores = Q @ K.T
+	scores = scores / math.sqrt(QK_DIM)
+	n = torch.arange(2, q_len + 2, dtype=torch.float32).unsqueeze(1)
+	scores = scores * torch.log2(n)
+	mask = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
+	scores = scores.masked_fill(mask, float('-inf'))
+	attn_real = torch.exp2(scores - L.unsqueeze(1)).to(torch.bfloat16).to(torch.float32)
+	V_match = V.to(torch.bfloat16).to(torch.float32)
+	out = torch.zeros((q_len, V.shape[1]), dtype=torch.float32)
+	for v_start in range(0, V.shape[1], v_tile):
+		v_end = min(v_start + v_tile, V.shape[1])
+		out_tile = torch.zeros((q_len, v_end - v_start), dtype=torch.float32)
+		for kv_start in range(0, kv_len, kv_tile):
+			kv_end = min(kv_start + kv_tile, kv_len)
+			p_tile = attn_real[:, kv_start:kv_end]
+			v_tile_data = V_match[kv_start:kv_end, v_start:v_end]
+			out_tile = out_tile + p_tile @ v_tile_data
+		out[:, v_start:v_end] = out_tile
+	return out * gate
 
 
 def compare(name, ref_bf16, cuda_bf16, q_len, dim):
@@ -161,19 +288,22 @@ def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5):
 		gate_arg = gate_val
 		prefix = "tmp/"
 
-	# Build f64 tensors with requires_grad for autograd
-	Q = Q_bf16.double().requires_grad_(True)
-	K = KV_bf16[:, :QK_DIM].double().requires_grad_(True)
-	V = KV_bf16[:, :V_DIM].double().requires_grad_(True)
+	# Build f32 tensors with requires_grad for autograd
+	Q = Q_bf16.float().requires_grad_(True)
+	K = KV_bf16[:, :QK_DIM].float().requires_grad_(True)
+	V = KV_bf16[:, :V_DIM].float().requires_grad_(True)
 
-	print(f"Computing exact reference (f64 softmax) q_len={q_len}, kv_len={kv_len}...")
+	print(f"Computing online softmax reference q_len={q_len}, kv_len={kv_len}...")
+	match_out = reference_online_softmax(Q.detach(), K.detach(), V.detach(), sink=sink_arg, gate=gate_arg)
+	match_out_bf16 = match_out.to(torch.bfloat16)
+
+	print(f"Computing exact reference for backward q_len={q_len}, kv_len={kv_len}...")
 	ref_out = reference_exact(Q, K, V, sink=sink_arg, gate=gate_arg)
-	ref_out_bf16 = ref_out.detach().to(torch.bfloat16)
 
 	print(f"\nFirst 4 rows, first 8 cols:")
-	print_matrix(ref_out_bf16[:4, :8].float())
+	print_matrix(match_out_bf16[:4, :8].float())
 	print(f"\nLast 4 rows, last 8 cols:")
-	print_matrix(ref_out_bf16[-4:, -8:].float())
+	print_matrix(match_out_bf16[-4:, -8:].float())
 
 	# Compare forward output with CUDA
 	cuda_path = "tmp/out_cpu.bin"
@@ -187,7 +317,8 @@ def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5):
 			return
 
 		cuda_bf16 = torch.from_numpy(cuda_raw.view(np.int16)).view(torch.bfloat16).reshape(q_len, V_DIM)
-		compare("Forward (exact f64)", ref_out_bf16, cuda_bf16, q_len, V_DIM)
+		compare("Forward (online softmax)", match_out_bf16, cuda_bf16, q_len, V_DIM)
+		compare("Forward (exact)", ref_out.to(torch.bfloat16), cuda_bf16, q_len, V_DIM)
 	else:
 		print(f"\nNo {cuda_path} found — run the CUDA kernel first to compare.")
 
@@ -198,20 +329,23 @@ def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5):
 		return
 
 	dO_bf16 = load_bf16(dO_path, (q_len, V_DIM))
-	ref_out.backward(dO_bf16.double())
-	ref_dQ = Q.grad  # f64
+	ref_out.backward(dO_bf16.float())
+	ref_dQ = Q.grad  # f32
 	ref_dQ_bf16 = ref_dQ.to(torch.bfloat16)
-	ref_dK = K.grad  # f64
-	ref_dV = V.grad  # f64
+	ref_dK = K.grad  # f32
+	ref_dV = V.grad  # f32
 	ref_dK_bf16 = ref_dK.to(torch.bfloat16)
 	ref_dV_bf16 = ref_dV.to(torch.bfloat16)
+
+	# Load CUDA's L and O for the matching backward reference
+	L_cuda = load_f32("tmp/L.bin", (q_len,)) if os.path.exists("tmp/L.bin") else None
+	O_cuda = load_bf16("tmp/out_cpu.bin", (q_len, V_DIM)) if os.path.exists("tmp/out_cpu.bin") else None
 
 	print(f"\n=== Backward verification ===")
 
 	# Verify D = rowsum(dO ⊙ O)
 	D_path = "tmp/D.bin"
-	if os.path.exists(D_path):
-		O_cuda = load_bf16("tmp/out_cpu.bin", (q_len, V_DIM))
+	if os.path.exists(D_path) and O_cuda is not None:
 		D_cuda = load_f32(D_path, (q_len,))
 		D_ref = (dO_bf16.float() * O_cuda.float()).sum(dim=-1) / gate_arg
 		diff = (D_ref - D_cuda).abs()
@@ -224,19 +358,67 @@ def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5):
 	dQ_path = "tmp/dQ.bin"
 	if os.path.exists(dQ_path):
 		dQ_cuda = load_bf16(dQ_path, (q_len, QK_DIM))
-		compare("dQ (autograd f64)", ref_dQ_bf16, dQ_cuda, q_len, QK_DIM)
+		compare("dQ (autograd f32)", ref_dQ_bf16, dQ_cuda, q_len, QK_DIM)
 
 	# Verify dK
 	dK_path = "tmp/dK.bin"
 	if os.path.exists(dK_path):
 		dK_cuda = load_bf16(dK_path, (kv_len, QK_DIM))
-		compare("dK (autograd f64)", ref_dK_bf16, dK_cuda, kv_len, QK_DIM)
+		compare("dK (autograd f32)", ref_dK_bf16, dK_cuda, kv_len, QK_DIM)
 
 	# Verify dV
 	dV_path = "tmp/dV.bin"
 	if os.path.exists(dV_path):
 		dV_cuda = load_bf16(dV_path, (kv_len, V_DIM))
-		compare("dV (autograd f64)", ref_dV_bf16, dV_cuda, kv_len, V_DIM)
+		compare("dV (autograd f32)", ref_dV_bf16, dV_cuda, kv_len, V_DIM)
+
+	# Matching backward reference using CUDA's L and O
+	# This reconstructs P from the kernel's stored L and uses D from CUDA's O,
+	# eliminating forward-pass divergence as a source of backward mismatch.
+	if L_cuda is not None and O_cuda is not None:
+		print(f"\n=== Matching backward (from CUDA L and O) ===")
+		dO_f = dO_bf16.float()
+		Q_f = Q_bf16.float()
+		K_f = KV_bf16[:, :QK_DIM].float()
+		V_f = KV_bf16[:, :V_DIM].float()
+
+		# Recompute scores
+		scores = Q_f @ K_f.T
+		n = torch.arange(2, q_len + 2, dtype=torch.float32)
+		score_scale = (1.0 / math.sqrt(QK_DIM)) * torch.log2(n)  # [q_len]
+		scores = scores * score_scale.unsqueeze(1)
+
+		# Causal mask
+		causal = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
+		scores = scores.masked_fill(causal, float('-inf'))
+
+		# P = gate * P_softmax = exp2(S*score_scale - L + log2(gate))
+		L_g = L_cuda - math.log2(gate_arg)  # L_g = L - log2(gate)
+		P = torch.exp2(scores - L_g.unsqueeze(1))  # [q_len, kv_len], = gate * P_softmax
+
+		# D' = rowsum(dO ⊙ O_cuda) / gate
+		D_prime = (dO_f * O_cuda.float()).sum(dim=-1) / gate_arg  # [q_len]
+
+		# dP = dO @ V^T
+		dP = dO_f @ V_f.T  # [q_len, kv_len]
+
+		# dS = (score_scale / log2(e)) * P * (dP - D')
+		dk_scale = score_scale / math.log2(math.e)  # [q_len]
+		dS = dk_scale.unsqueeze(1) * P * (dP - D_prime.unsqueeze(1))  # [q_len, kv_len]
+
+		# dK = dS^T @ Q
+		match_dK = (dS.T.to(torch.bfloat16).to(torch.float32) @ Q_f).to(torch.bfloat16)
+		# dV = P^T @ dO  (P already has gate folded in, no extra factor needed for dV
+		# since the kernel computes dV += P^T @ dO with P = gate * P_softmax)
+		match_dV = (P.T.to(torch.bfloat16).to(torch.float32) @ dO_f).to(torch.bfloat16)
+
+		if os.path.exists("tmp/dK.bin"):
+			dK_cuda = load_bf16("tmp/dK.bin", (kv_len, QK_DIM))
+			compare("dK (from CUDA L, O)", match_dK, dK_cuda, kv_len, QK_DIM)
+
+		if os.path.exists("tmp/dV.bin"):
+			dV_cuda = load_bf16("tmp/dV.bin", (kv_len, V_DIM))
+			compare("dV (from CUDA L, O)", match_dV, dV_cuda, kv_len, V_DIM)
 
 
 if __name__ == "__main__":

@@ -169,7 +169,7 @@ int main(int argc, char *argv[]) {
 	using ADQ = Attn_d_q<AF>;
 	using ADKV = Attn_d_kv<AF>;
 	usize smem_size = AF::SMEM_BYTES;
-	printf("smem_size = %d bytes (forward), %d bytes (dQ), %d bytes (dKV)\n", smem_size, ADQ::SMEM_BYTES, ADKV::SMEM_BYTES);
+	printf("smem_size: forward = %d, dQ = %d, dKV = %d\n", smem_size, ADQ::SMEM_BYTES, ADKV::SMEM_BYTES);
 	//smem_size = std::max(smem_size, usize(70 * 1024));
 
 	cudaFuncSetAttribute(attn_forward<AF>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
