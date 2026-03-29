@@ -41,15 +41,18 @@ struct Attn_d_kv {
 	static constexpr usize Q_STRIDE = QK_DIM * HEAD_CNT;
 
 	static constexpr usize SMEM_BYTES =
-		sizeof(bf16) * (
-			Q_PER_STEP * PRELOAD_DIM * GMEM_PRELOAD
-			+ KV_PER_BLOCK * KV_SMEM_DIM
-		);
+		sizeof(bf16) * (Q_PER_STEP * PRELOAD_DIM * GMEM_PRELOAD)
+		+ sizeof(bf16) * (KV_PER_BLOCK * KV_SMEM_DIM)
+		+ sizeof(f32) * (GMEM_PRELOAD * Q_PER_STEP * 2); // sL + sD
 
-	static X17_DEVICE void cp_async_q_do(
+	static X17_DEVICE void cp_async_q_do_ld(
 		GMatrixDynSize<bf16, QK_DIM> gQ,
 		GMatrixDynSize<bf16, V_DIM> gDO,
+		f32 *gL_ptr,
+		f32 *gD_ptr,
 		SMatrix<bf16, Q_PER_STEP * GMEM_PRELOAD, PRELOAD_DIM> preload,
+		SMatrix_32b<f32, GMEM_PRELOAD, Q_PER_STEP> l_preload,
+		SMatrix_32b<f32, GMEM_PRELOAD, Q_PER_STEP> d_preload,
 		usize p, usize q_steps
 	) {
 		if (p < q_steps) {
@@ -66,6 +69,10 @@ struct Attn_d_kv {
 				tile_m<Q_PER_STEP>(gDO, p),
 				slot, 0, QK_DIM
 			);
+			GMatrix<f32, 1, Q_PER_STEP> gL{gL_ptr + p * Q_PER_STEP};
+			GMatrix<f32, 1, Q_PER_STEP> gD{gD_ptr + p * Q_PER_STEP};
+			cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gL, l_preload, p % GMEM_PRELOAD, 0);
+			cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gD, d_preload, p % GMEM_PRELOAD, 0);
 		}
 	}
 
@@ -87,12 +94,14 @@ struct Attn_d_kv {
 		GMatrixDynSize<bf16, QK_DIM> gDK{gDK_ptr, seq_len};
 		GMatrixDynSize<bf16, V_DIM> gDV{gDV_ptr, seq_len};
 
-		// SMEM layout: Q + dO preload region + KV
+		// SMEM layout: Q + dO preload region + KV + sL + sD
 		u32 smem = 0;
 		usize kv_warp_idx = threadIdx.x / WARP_SIZE;
 		usize tid = threadIdx.x % WARP_SIZE;
 		SMatrix<bf16, Q_PER_STEP * GMEM_PRELOAD, PRELOAD_DIM> sPreload{smem};
 		SMatrix<bf16, KV_PER_BLOCK, KV_SMEM_DIM> sKV{sPreload._ptr + sPreload.bytes()};
+		SMatrix_32b<f32, GMEM_PRELOAD, Q_PER_STEP> sL{sKV._ptr + sKV.bytes()};
+		SMatrix_32b<f32, GMEM_PRELOAD, Q_PER_STEP> sD{sL._ptr + sL.bytes()};
 
 		// Load KV from GMEM to SMEM (no commit — piggyback on first KV commit)
 		usize kv_block_idx = blockIdx.x;
@@ -114,7 +123,7 @@ struct Attn_d_kv {
 
 		// Start preloading first Q+dO blocks (first commit also commits KV)
 		X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD; ++p) {
-			cp_async_q_do(gQ, gDO, sPreload, q_first_step + p, q_steps);
+			cp_async_q_do_ld(gQ, gDO, gL_ptr, gD_ptr, sPreload, sL, sD, q_first_step + p, q_steps);
 			cp_async_commit();
 		}
 
@@ -151,6 +160,8 @@ struct Attn_d_kv {
 		}
 		// Load first Q + dO tile from SMEM to registers
 		auto sSlot = tile_m<Q_PER_STEP>(sPreload, q_first_step % GMEM_PRELOAD);
+		auto sLSlot = tile_m<1>(sL, q_first_step % GMEM_PRELOAD);
+		auto sDSlot = tile_m<1>(sD, q_first_step % GMEM_PRELOAD);
 		Fragment_16x16<bf16> rQ[QK_TILES];
 		X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
 			smem_tile_to_fragment(sSlot, 0, i * 16, rQ[i]);
@@ -178,14 +189,16 @@ struct Attn_d_kv {
 			f32 top_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(top_n);
 			f32 bot_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(bot_n);
 
-			// Load L from GMEM, adjusted to fold gate into P:
+			// Load L and D from SMEM
 			//   L_g = L - logb(gate)
 			//   P = expb(S*score_scale - L_g) = gate * P_softmax
-			f32 top_L = gL_ptr[q_start + tid / 4] - logb_gate;
-			f32 bot_L = gL_ptr[q_start + tid / 4 + 8] - logb_gate;
-			// Load D' from GMEM. The dQ kernel already stores D' = D / gate.
-			f32 top_D = gD_ptr[q_start + tid / 4];
-			f32 bot_D = gD_ptr[q_start + tid / 4 + 8];
+			f32 top_L = load_shared_1x32b<f32>(sLSlot._ptr + (tid / 4) * sizeof(f32));
+			f32 top_D = load_shared_1x32b<f32>(sDSlot._ptr + (tid / 4) * sizeof(f32));
+			f32 bot_L = load_shared_1x32b<f32>(sLSlot._ptr + (tid / 4 + 8) * sizeof(f32));
+			f32 bot_D = load_shared_1x32b<f32>(sDSlot._ptr + (tid / 4 + 8) * sizeof(f32));
+			// Adjust to fold gate into P
+			top_L -= logb_gate;
+			bot_L -= logb_gate;
 
 			scale_top_(rS_f32, top_score_scale);
 			scale_bottom_(rS_f32, bot_score_scale);
@@ -216,6 +229,7 @@ struct Attn_d_kv {
 			zero_(rDP);
 			X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
 				mma_a_bt(rDO[i], rV[i], rDP);
+				rDO[i].transpose_();
 			}
 
 			// dV += P^T @ dO  (P = gate * P_softmax, no rescale needed)
@@ -223,7 +237,6 @@ struct Attn_d_kv {
 			cast(rP_f32, rP);
 			rP.transpose_();
 			X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
-				rDO[i].transpose_();
 				mma_a_bt(rP, rDO[i], rDV[i]);
 			}
 
@@ -258,9 +271,11 @@ struct Attn_d_kv {
 				cp_async_wait<GMEM_PRELOAD - 2>();
 				sync_threads();
 				sSlot = tile_m<Q_PER_STEP>(sPreload, (q_step + 1) % GMEM_PRELOAD);
+				sLSlot = tile_m<1>(sL, (q_step + 1) % GMEM_PRELOAD);
+				sDSlot = tile_m<1>(sD, (q_step + 1) % GMEM_PRELOAD);
 
 				// Preload next Q+dO tiles from GMEM
-				cp_async_q_do(gQ, gDO, sPreload, q_step + GMEM_PRELOAD, q_steps);
+				cp_async_q_do_ld(gQ, gDO, gL_ptr, gD_ptr, sPreload, sL, sD, q_step + GMEM_PRELOAD, q_steps);
 				cp_async_commit();
 			}
 

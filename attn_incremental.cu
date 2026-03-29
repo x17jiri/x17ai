@@ -187,7 +187,7 @@ struct Attn_forward {
 		constexpr usize STATS_BYTES = KV_WARPS * WARP_SIZE * 4 * sizeof(f32);
 		constexpr usize GROUP_BYTES = REDUCE_BYTES + STATS_BYTES;
 		u32 group_smem = smem + q_warp_idx * GROUP_BYTES;
-		SMatrix<f32, (KV_WARPS - 1) * Q_PER_WARP, V_DIM> sReduce{group_smem};
+		SMatrix_32b<f32, (KV_WARPS - 1) * Q_PER_WARP, V_DIM> sReduce{group_smem};
 		u32 stats_smem = sReduce._ptr + sReduce.bytes();
 		[[maybe_unused]] usize tid = threadIdx.x % WARP_SIZE;
 
@@ -271,7 +271,7 @@ struct Attn_forward {
 		if constexpr (KV_WARPS > 1) {
 			if (kv_warp_idx != 0) {
 				// KV warps 1..N store their rescaled+normalized values to smem
-				SMatrix<f32, Q_PER_WARP, V_DIM> slot = tile_m<Q_PER_WARP>(sReduce, kv_warp_idx - 1);
+				SMatrix_32b<f32, Q_PER_WARP, V_DIM> slot = tile_m<Q_PER_WARP>(sReduce, kv_warp_idx - 1);
 				fragments_to_smem(rOut, slot);
 
 				bar_sync<KV_WARPS * WARP_SIZE>(q_warp_idx + 1);
@@ -282,7 +282,7 @@ struct Attn_forward {
 				bar_sync<KV_WARPS * WARP_SIZE>(q_warp_idx + 1);
 
 				X17_UNROLL for (usize w = 0; w < KV_WARPS - 1; w++) {
-					SMatrix<f32, Q_PER_WARP, V_DIM> slot = tile_m<Q_PER_WARP>(sReduce, w);
+					SMatrix_32b<f32, Q_PER_WARP, V_DIM> slot = tile_m<Q_PER_WARP>(sReduce, w);
 					Fragment_16x16<f32> temp[V_TILES];
 					smem_to_fragments(temp, slot);
 					acc_(rOut, temp);

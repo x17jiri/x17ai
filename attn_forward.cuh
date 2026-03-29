@@ -113,11 +113,11 @@ struct Attn_forward {
 					? new_bot_max + ONLINE_SOFTMAX_THRESHOLD
 					: bot.max;
 
-			if (!first_step) {
-				top_rescale = math::fast::expb(top.max - new_top_max);
-				scale_top_(rO_f32, top_rescale);
+			top_rescale = math::fast::expb(top.max - new_top_max);
+			bot_rescale = math::fast::expb(bot.max - new_bot_max);
 
-				bot_rescale = math::fast::expb(bot.max - new_bot_max);
+			if (!first_step) {
+				scale_top_(rO_f32, top_rescale);
 				scale_bottom_(rO_f32, bot_rescale);
 			}
 
@@ -154,8 +154,6 @@ struct Attn_forward {
 		Fragment_16x16<f32> (&rO_f32)[V_TILES],
 		SoftmaxStats top,
 		SoftmaxStats bot,
-		f32 top_sink_scaled,
-		f32 bot_sink_scaled,
 		f32 gate,
 		usize q_start,
 		usize q_warp_idx,
@@ -167,11 +165,9 @@ struct Attn_forward {
 		// Complete the row-wise sum reduction within each warp
 		top.sum += shuffle_xor_sync(top.sum, 1);
 		top.sum += shuffle_xor_sync(top.sum, 2);
-		top.sum += math::fast::expb(top_sink_scaled - top.max);
 
 		bot.sum += shuffle_xor_sync(bot.sum, 1);
 		bot.sum += shuffle_xor_sync(bot.sum, 2);
-		bot.sum += math::fast::expb(bot_sink_scaled - bot.max);
 
 		// Rescale, folding in normalization and gate
 		f32 top_L = math::fast::logb(top.sum) + top.max;
@@ -285,10 +281,10 @@ struct Attn_forward {
 
 		SoftmaxStats r_top;
 		r_top.max = top_sink_scaled + ONLINE_SOFTMAX_THRESHOLD;
-		r_top.sum = 0.0f;
+		r_top.sum = math::fast::expb(-ONLINE_SOFTMAX_THRESHOLD); // TODO - constexpr_expb?
 		SoftmaxStats r_bot;
 		r_bot.max = bot_sink_scaled + ONLINE_SOFTMAX_THRESHOLD;
-		r_bot.sum = 0.0f;
+		r_bot.sum = r_top.sum;
 
 		// O accumulator
 		Fragment_16x16<f32> rO_f32[V_TILES];
@@ -364,7 +360,7 @@ struct Attn_forward {
 		}
 
 		GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = tile_m<Q_PER_BLOCK>(gO, q_block_idx);
-		combine_and_store(rO_f32, r_top, r_bot, top_sink_scaled, bot_sink_scaled, gate, q_start, q_warp_idx, gOut_block, gL_ptr);
+		combine_and_store(rO_f32, r_top, r_bot, gate, q_start, q_warp_idx, gOut_block, gL_ptr);
 	}
 };
 

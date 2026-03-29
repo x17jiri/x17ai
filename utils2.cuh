@@ -221,12 +221,35 @@ X17_DEVICE void store_shared_4x32b(u32 ptr, T a, T b, T c, T d) {
 
 template<typename T>
 requires(sizeof(T) == 4)
+X17_DEVICE void store_shared_1x32b(u32 ptr, T value) {
+	asm volatile(
+		"st.shared.f32 [%0], %1;\n"
+		:
+		: "r"(ptr), "f"(value)
+		: "memory"
+	);
+}
+
+template<typename T>
+requires(sizeof(T) == 4)
 X17_DEVICE void load_shared_4x32b(u32 ptr, T &a, T &b, T &c, T &d) {
 	asm volatile(
 		"ld.shared.v4.f32 {%0, %1, %2, %3}, [%4];\n"
 		: "=f"(a), "=f"(b), "=f"(c), "=f"(d)
 		: "r"(ptr)
 	);
+}
+
+template<typename T>
+requires(sizeof(T) == 4)
+X17_DEVICE T load_shared_1x32b(u32 ptr) {
+	T value;
+	asm volatile(
+		"ld.shared.f32 %0, [%1];\n"
+		: "=f"(value)
+		: "r"(ptr)
+	);
+	return value;
 }
 
 /// Load two consecutive f32 values from global memory in a single 64-bit transaction.
@@ -1220,7 +1243,8 @@ template<
 	const usize N
 >
 requires(
-	M >= 0 && M % 16 == 0
+	sizeof(T) == 2
+	&& M >= 0 && M % 16 == 0
 	&& N * sizeof(T) % 128 == 0
 )
 struct SMatrix {
@@ -1248,8 +1272,8 @@ struct SMatrix {
 	}
 
 	/// Copy from a (possibly smaller) GMEM matrix into a sub-region of this SMEM matrix.
-	/// Data is placed starting at (at_row, at_col) within this SMEM matrix.
-	/// at_row and at_col must be multiples of 16.
+	/// Data is placed starting at (dst_row, dst_col) within this SMEM matrix.
+	/// dst_row and dst_col must be multiples of 16.
 	template<const usize THREADS_PER_BLOCK, const usize GM, const usize GN>
 	requires(GM <= M && GN <= N)
 	X17_DEVICE void cp_async_from(usize tid, GMatrix<T, GM, GN> src, usize dst_row, usize dst_col) const {
@@ -1352,6 +1376,37 @@ struct SMatrix {
 
 };
 
+template<
+	typename T,
+	const usize M,
+	const usize N
+>
+requires(sizeof(T) == 4 && M >= 0)
+struct SMatrix_32b {
+	u32 _ptr;
+
+	X17_DEVICE constexpr SMatrix_32b() : _ptr(0) {}
+
+	X17_DEVICE constexpr SMatrix_32b(void *ptr): SMatrix_32b(cast_smem_ptr_to_uint(ptr)) {}
+
+	X17_DEVICE constexpr SMatrix_32b(u32 ptr): _ptr(ptr) {}
+
+	X17_DEVICE constexpr usize m_rows() const { return M; }
+	X17_DEVICE constexpr usize n_cols() const { return N; }
+	X17_DEVICE constexpr usize elems() const { return M * N; }
+	X17_DEVICE constexpr usize bytes() const { return M * N * sizeof(T); }
+
+	constexpr static usize ROW_BYTES = N * sizeof(T);
+
+	template<const usize TILE_M>
+	requires(TILE_M > 0 && M % TILE_M == 0)
+	X17_DEVICE constexpr SMatrix_32b<T, TILE_M, N> tile_m(usize tile_idx) const {
+		return SMatrix_32b<T, TILE_M, N>{
+			_ptr + (tile_idx * TILE_M * ROW_BYTES)
+		};
+	}
+};
+
 // Standalone tile_m: avoids `.template tile_m<>()` in dependent contexts.
 template<const usize TILE_M, typename Mat>
 X17_HOST_DEVICE constexpr auto tile_m(Mat mat, usize tile_idx)
@@ -1370,10 +1425,35 @@ X17_DEVICE void cp_async_gmem_to_smem(
 	usize tid,
 	GMatrix<T, GM, GN> src,
 	SMatrix<T, SM, SN> dst,
-	usize at_row = 0,
-	usize at_col = 0
+	usize dst_row = 0,
+	usize dst_col = 0
 ) {
-	dst.template cp_async_from<THREADS_PER_BLOCK>(tid, src, at_row, at_col);
+	dst.template cp_async_from<THREADS_PER_BLOCK>(tid, src, dst_row, dst_col);
+}
+
+template<
+	const usize THREADS_PER_BLOCK,
+	typename T,
+	const usize SM,
+	const usize SN,
+	const usize GN
+>
+requires(sizeof(T) == 4 && GN * sizeof(T) % 16 == 0)
+X17_DEVICE void cp_async_gmem_to_smem(
+	usize tid,
+	GMatrix<T, 1, GN> src,
+	SMatrix_32b<T, SM, SN> dst,
+	usize dst_row = 0,
+	usize dst_col = 0
+) {
+	__builtin_assume(tid < THREADS_PER_BLOCK);
+
+	constexpr usize CP_PER_ROW = GN * sizeof(T) / 16;
+	if (tid < CP_PER_ROW) {
+		u8 const *src_ptr = reinterpret_cast<u8 const *>(src._ptr) + tid * sizeof(u128);
+		u32 dst_ptr = dst._ptr + dst_row * dst.ROW_BYTES + dst_col * sizeof(T) + tid * sizeof(u128);
+		sm80::cp_async(reinterpret_cast<u128 const *>(src_ptr), dst_ptr);
+	}
 }
 
 template<
@@ -1412,7 +1492,7 @@ template<const usize M, const usize N, const usize K>
 requires(M == 16 && N == K * 16)
 X17_DEVICE void fragments_to_smem(
 	Fragment_16x16<f32> const (&src)[K],
-	SMatrix<f32, M, N> const &dst
+	SMatrix_32b<f32, M, N> const &dst
 ) {
 	usize tid = threadIdx.x % WARP_SIZE;
 	constexpr u32 TILE_STRIDE = 2 * WARP_SIZE * 4 * sizeof(f32); // 1024 bytes per 16x16 f32 tile
@@ -1440,7 +1520,7 @@ template<const usize M, const usize N, const usize K>
 requires(M == 16 && N == K * 16)
 X17_DEVICE void smem_to_fragments(
 	Fragment_16x16<f32> (&dst)[K],
-	SMatrix<f32, M, N> const &src
+	SMatrix_32b<f32, M, N> const &src
 ) {
 	usize tid = threadIdx.x % WARP_SIZE;
 	constexpr u32 TILE_STRIDE = 2 * WARP_SIZE * 4 * sizeof(f32); // 1024 bytes per 16x16 f32 tile
