@@ -15,6 +15,7 @@ int main(int argc, char *argv[]) {
 	constexpr usize V_DIM = 64;
 	constexpr usize ROPE_DIM = 0;
 	constexpr usize QK_DIM = NONROPE_DIM + ROPE_DIM;
+	constexpr usize WINDOW_SIZE = 128;
 	{
 		f32 diff = fabsf(sqrtf(QK_DIM) - f32(constexpr_sqrt(f64(QK_DIM))));
 		printf("sqrtf=%e, constexpr_sqrt=%e, diff=%e\n",
@@ -165,7 +166,7 @@ int main(int argc, char *argv[]) {
 	}
 
 	constexpr bool V_EQ_K = true;
-	using AF = Attn_forward<1, NONROPE_DIM, ROPE_DIM, V_DIM, V_EQ_K>;
+	using AF = Attn_forward<1, NONROPE_DIM, ROPE_DIM, V_DIM, V_EQ_K, 2, WINDOW_SIZE>;
 	using ADQ = Attn_d_q<AF>;
 	using ADKV = Attn_d_kv<AF>;
 	usize smem_size = AF::SMEM_BYTES;

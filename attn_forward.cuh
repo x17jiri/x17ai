@@ -10,7 +10,8 @@ template<
 	const usize _ROPE_DIM,
 	const usize _V_DIM,
 	const bool _V_EQUALS_K = false,
-	const usize _GMEM_PRELOAD = 2
+	const usize _GMEM_PRELOAD = 2,
+	const usize _WINDOW_SIZE = 0
 >
 struct Attn_forward {
 	// Re-expose template parameters as static constants for dependent types
@@ -20,6 +21,10 @@ struct Attn_forward {
 	static constexpr usize V_DIM = _V_DIM;
 	static constexpr bool V_EQUALS_K = _V_EQUALS_K;
 	static constexpr usize GMEM_PRELOAD = _GMEM_PRELOAD;
+	static constexpr usize WINDOW_SIZE = _WINDOW_SIZE;
+
+	static_assert(WINDOW_SIZE == 0 || WINDOW_SIZE % 16 == 0,
+		"WINDOW_SIZE must be 0 (disabled) or a multiple of 16");
 
 	static_assert(V_DIM <= NONROPE_DIM, "V_DIM must be <= NONROPE_DIM");
 
@@ -67,6 +72,22 @@ struct Attn_forward {
 
 		rS_f32.sub[0][0].val1 = k + 1 <= q ? rS_f32.sub[0][0].val1 : NEG_INF;
 		rS_f32.sub[1][1].val1 = k + 1 <= q ? rS_f32.sub[1][1].val1 : NEG_INF;
+	}
+
+	static X17_DEVICE void window_mask_diagonal(Fragment_16x16<f32> &rS_f32) {
+		usize tid = threadIdx.x % WARP_SIZE;
+		usize q = tid / 4;           // 0..7
+		usize k = 2 * (tid % 4);    // 0,2,4,6
+		constexpr f32 NEG_INF = -INFINITY;
+
+		rS_f32.sub[1][0].val0 = NEG_INF;
+		rS_f32.sub[1][0].val1 = NEG_INF;
+
+		rS_f32.sub[0][0].val0 = k > q ? rS_f32.sub[0][0].val0 : NEG_INF;
+		rS_f32.sub[1][1].val0 = k > q ? rS_f32.sub[1][1].val0 : NEG_INF;
+
+		rS_f32.sub[0][0].val1 = k + 1 > q ? rS_f32.sub[0][0].val1 : NEG_INF;
+		rS_f32.sub[1][1].val1 = k + 1 > q ? rS_f32.sub[1][1].val1 : NEG_INF;
 	}
 
 	static constexpr f32 ONLINE_SOFTMAX_THRESHOLD = 5.0 / math::fast::logb_2;
@@ -259,9 +280,20 @@ struct Attn_forward {
 		usize full_kv_steps = q_block_start / KV_PER_STEP;
 		full_kv_steps = std::min(full_kv_steps, kv_steps);
 
+		// Window: skip KV tiles entirely outside every warp's window.
+		// Uses q_block_start (warp 0) because it has the earliest query position
+		// and therefore needs the furthest-back keys. Later warps need fewer old
+		// keys and their excess tiles are masked per-warp in the loop body.
+		usize kv_first_step = 0;
+		if constexpr (WINDOW_SIZE > 0) {
+			if (q_block_start >= WINDOW_SIZE) {
+				kv_first_step = (q_block_start - WINDOW_SIZE) / KV_PER_STEP;
+			}
+		}
+
 		// Start preloading K and V from GMEM to SMEM (first commit also commits Q)
 		X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD; ++p) {
-			cp_async_kv(gKc, gKr, gV, sPreload, p, kv_steps);
+			cp_async_kv(gKc, gKr, gV, sPreload, kv_first_step + p, kv_steps);
 			cp_async_commit();
 		}
 
@@ -308,14 +340,14 @@ struct Attn_forward {
 		}
 		// Load first KV tile from SMEM to registers
 		SMatrix<bf16, KV_PER_STEP, PRELOAD_DIM> sKV;
-		sKV = tile_m<KV_PER_STEP>(sPreload, 0);
+		sKV = tile_m<KV_PER_STEP>(sPreload, kv_first_step % GMEM_PRELOAD);
 		Fragment_16x16<bf16> rKV[QK_TILES];
 		X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
 			smem_tile_to_fragment(sKV, 0, i * 16, rKV[i]);
 		}
 
 		// Sequential loop over KV
-		X17_NO_UNROLL for (usize kv_step = 0; kv_step < kv_steps; ++kv_step) {
+		X17_NO_UNROLL for (usize kv_step = kv_first_step; kv_step < kv_steps; ++kv_step) {
 			// S = Q * K^T, interleaved with V load (rKV: K -> V)
 			Fragment_16x16<f32> rS_f32;
 			zero_(rS_f32);
@@ -331,6 +363,39 @@ struct Attn_forward {
 			scale_top_(rS_f32, top_score_scale);
 			scale_bottom_(rS_f32, bot_score_scale);
 
+/*
+			usize kv_pos = kv_step * KV_PER_STEP;
+
+			// Window mask: mask keys outside the sliding window
+			if constexpr (WINDOW_SIZE > 0) {
+				if (kv_pos + WINDOW_SIZE <= q_start) {
+					if (kv_pos + WINDOW_SIZE == q_start) {
+						window_mask_diagonal(rS_f32);
+					} else {
+						fill_(rS_f32, -INFINITY);
+					}
+				}
+			}
+
+			// Causal mask: diagonal tile or full mask if past boundary
+			if (kv_pos >= q_block_start) {
+				if (kv_pos == q_start) {
+					causal_mask_diagonal(rS_f32);
+				} else {
+					fill_(rS_f32, -INFINITY);
+				}
+			}
+*/
+			// Window mask: mask keys outside the sliding window
+			if constexpr (WINDOW_SIZE > 0) {
+				usize kv_pos = kv_step * KV_PER_STEP;
+				if (kv_pos + WINDOW_SIZE == q_start) {
+					window_mask_diagonal(rS_f32);
+				} else if (kv_pos + WINDOW_SIZE < q_start) {
+					fill_(rS_f32, -INFINITY);
+				}
+			}
+
 			// Causal mask: diagonal tile or full mask if past boundary
 			if (kv_step >= full_kv_steps) {
 				usize kv_pos = kv_step * KV_PER_STEP;
@@ -341,7 +406,7 @@ struct Attn_forward {
 				}
 			}
 
-			online_softmax(kv_step == 0, r_top, r_bot, rS_f32, rO_f32);
+			online_softmax(kv_step == kv_first_step, r_top, r_bot, rS_f32, rO_f32);
 			Fragment_16x16<bf16> rP;
 			cast(rS_f32, rP);
 

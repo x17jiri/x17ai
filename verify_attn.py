@@ -14,6 +14,7 @@ import os
 
 QK_DIM = 128
 V_DIM = 64
+WINDOW_SIZE = 128
 
 import math
 
@@ -62,8 +63,14 @@ def load_f32(path, shape):
 	return torch.from_numpy(np.fromfile(path, dtype=np.float32).reshape(shape))
 
 
-def compute_attn_real(Q, K, sink):
-	"""Return bf16-rounded real-token attention probabilities in f32."""
+def compute_attn_real(Q, K, sink, window_size=0):
+	"""Return real-token attention probabilities in f32.
+
+	Masking rules for query at position i attending to key at position j:
+	  - Causal:  mask when j > i           (no future tokens)
+	  - Window:  mask when i - j >= W      (at most W tokens back, W = window_size)
+	The sink token is never masked. When window_size == 0, window masking is disabled.
+	"""
 	q_len = Q.shape[0]
 	kv_len = K.shape[0]
 	scores = Q @ K.T     # [q_len, kv_len]
@@ -75,9 +82,18 @@ def compute_attn_real(Q, K, sink):
 	n = torch.arange(2, q_len + 2, dtype=torch.float32).unsqueeze(1)  # [q_len, 1]
 	scores = scores * torch.log2(n)
 
-	# Causal mask: mask out kv_pos > q_pos (sink column is never masked)
+	# Causal mask: mask when j > i (sink column is never masked)
+	causal_mask = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
+
+	# Window mask: mask when i - j >= window_size (keys too far in the past)
+	if window_size > 0:
+		# tril(., diagonal=-W) gives True where row - col >= W
+		window_mask = torch.tril(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=-window_size)
+		mask = causal_mask | window_mask
+	else:
+		mask = causal_mask
+
 	sink_mask = torch.zeros(q_len, 1, dtype=torch.bool)
-	mask = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
 	mask = torch.cat([sink_mask, mask], dim=1)
 	scores = scores.masked_fill(mask, float('-inf'))
 
@@ -85,25 +101,25 @@ def compute_attn_real(Q, K, sink):
 	row_max = torch.amax(scores, dim=-1, keepdim=True)
 	exp_scores = torch.exp2(scores - row_max)
 	attn = exp_scores / exp_scores.sum(dim=-1, keepdim=True)
-	return attn[:, 1:] #.to(torch.bfloat16).to(torch.float32)
+	return attn[:, 1:]
 
 
-def reference_exact(Q, K, V, sink, gate):
+def reference_exact(Q, K, V, sink, gate, window_size=0):
 	"""Reference used for backward pass.
 	Uses dense accumulation once probabilities have been bf16-rounded.
 	"""
-	attn_real = compute_attn_real(Q, K, sink)
+	attn_real = compute_attn_real(Q, K, sink, window_size=window_size)
 	# Only the real tokens contribute to output (skip sink at column 0)
 	out = attn_real @ V
 	out = out * gate
 	return out
 
 
-def reference_matching(Q, K, V, sink, gate, kv_tile=16):
+def reference_matching(Q, K, V, sink, gate, kv_tile=16, window_size=0):
 	"""Forward-only reference that tries to match kernel accumulation order better.
 	Accumulates the second GEMM in KV tiles, similar to the kernel's tiled loop.
 	"""
-	attn_real = compute_attn_real(Q, K, sink)
+	attn_real = compute_attn_real(Q, K, sink, window_size=window_size)
 	out = torch.zeros((Q.shape[0], V.shape[1]), dtype=torch.float32)
 	for start in range(0, K.shape[0], kv_tile):
 		end = min(start + kv_tile, K.shape[0])
@@ -111,7 +127,7 @@ def reference_matching(Q, K, V, sink, gate, kv_tile=16):
 	return out * gate
 
 
-def reference_online_softmax(Q, K, V, sink, gate, kv_tile=16):
+def reference_online_softmax(Q, K, V, sink, gate, kv_tile=16, window_size=0):
 	"""Reference that simulates the kernel's online softmax and MMA accumulation.
 
 	Key matching details vs the CUDA kernel:
@@ -140,6 +156,10 @@ def reference_online_softmax(Q, K, V, sink, gate, kv_tile=16):
 
 	# Causal mask
 	mask = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
+	# Window mask: mask when i - j >= window_size
+	if window_size > 0:
+		window_mask = torch.tril(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=-window_size)
+		mask = mask | window_mask
 	scores = scores.masked_fill(mask, float('-inf'))
 
 	# V as bf16 (matching kernel's bf16 MMA input)
@@ -190,7 +210,7 @@ def reference_online_softmax(Q, K, V, sink, gate, kv_tile=16):
 	return O
 
 
-def reference_matching_from_L(Q, K, V, L, gate, kv_tile=16, v_tile=16):
+def reference_matching_from_L(Q, K, V, L, gate, kv_tile=16, v_tile=16, window_size=0):
 	"""Forward-only reference reconstructed from kernel-produced L.
 	Uses exp2(S - L), rounds both P and V through bf16, and accumulates the
 	second GEMM in small tiles to get closer to the kernel's MMA schedule.
@@ -202,6 +222,9 @@ def reference_matching_from_L(Q, K, V, L, gate, kv_tile=16, v_tile=16):
 	n = torch.arange(2, q_len + 2, dtype=torch.float32).unsqueeze(1)
 	scores = scores * torch.log2(n)
 	mask = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
+	if window_size > 0:
+		window_mask = torch.tril(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=-window_size)
+		mask = mask | window_mask
 	scores = scores.masked_fill(mask, float('-inf'))
 	attn_real = torch.exp2(scores - L.unsqueeze(1)).to(torch.bfloat16).to(torch.float32)
 	V_match = V.to(torch.bfloat16).to(torch.float32)
@@ -276,7 +299,7 @@ def compare(name, ref_bf16, cuda_bf16, q_len, dim):
 			f"cuda={cuda_bf16[r, c].float().item():.6e}")
 
 
-def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5):
+def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5, window_size=WINDOW_SIZE):
 	Q_bf16, KV_bf16 = load_inputs(q_len, kv_len, large=large)
 
 	if large:
@@ -294,11 +317,11 @@ def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5):
 	V = KV_bf16[:, :V_DIM].float().requires_grad_(True)
 
 	print(f"Computing online softmax reference q_len={q_len}, kv_len={kv_len}...")
-	match_out = reference_online_softmax(Q.detach(), K.detach(), V.detach(), sink=sink_arg, gate=gate_arg)
+	match_out = reference_online_softmax(Q.detach(), K.detach(), V.detach(), sink=sink_arg, gate=gate_arg, window_size=window_size)
 	match_out_bf16 = match_out.to(torch.bfloat16)
 
 	print(f"Computing exact reference for backward q_len={q_len}, kv_len={kv_len}...")
-	ref_out = reference_exact(Q, K, V, sink=sink_arg, gate=gate_arg)
+	ref_out = reference_exact(Q, K, V, sink=sink_arg, gate=gate_arg, window_size=window_size)
 
 	print(f"\nFirst 4 rows, first 8 cols:")
 	print_matrix(match_out_bf16[:4, :8].float())
@@ -390,6 +413,9 @@ def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5):
 
 		# Causal mask
 		causal = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
+		if window_size > 0:
+			window = torch.tril(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=-window_size)
+			causal = causal | window
 		scores = scores.masked_fill(causal, float('-inf'))
 
 		# P = gate * P_softmax = exp2(S*score_scale - L + log2(gate))
