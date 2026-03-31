@@ -45,12 +45,17 @@ struct Attn_d_q {
 			+ Q_PER_BLOCK * (QK_DIM + 2 * V_DIM)
 		);
 
-	static constexpr size_t mma_count(size_t seq_len) {
-		return (seq_len / 16) * (seq_len / 16) * (QK_TILES + V_TILES + QK_TILES) / 2;
+	static constexpr size_t mma_count(size_t seq_len, size_t window_size) {
+//		return (seq_len / 16) * (seq_len / 16) * (QK_TILES + V_TILES + QK_TILES) / 2;
+		size_t n = seq_len / 16;
+		size_t w = window_size > 0 ? window_size / 16 : n;
+		w = std::min(w, n);
+		size_t pairs = w * n - w * (w - 1) / 2;
+		return pairs * (QK_TILES + V_TILES + QK_TILES);
 	}
 
-	static constexpr double flops(size_t seq_len) {
-		return double(mma_count(seq_len)) * 2.0 * 16.0 * 16.0 * 16.0;
+	static constexpr double flops(size_t seq_len, size_t window_size) {
+		return double(mma_count(seq_len, window_size)) * 2.0 * 16.0 * 16.0 * 16.0;
 	}
 
 	X17_DEVICE void run(
@@ -118,8 +123,8 @@ struct Attn_d_q {
 		//     score_scale = (1.0 / sqrt(QK_DIM)) * logb(n)
 		f32 top_n = std::min(window_size, q_start + tid / 4 + 1) + f32(std::numbers::e_v<f64> + 1.0);
 		f32 bot_n = std::min(window_size, q_start + tid / 4 + 9) + f32(std::numbers::e_v<f64> + 1.0);
-		f32 top_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(top_n);
-		f32 bot_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(bot_n);
+		f32 top_ssmax_scale = math::fast::logb(top_n);
+		f32 bot_ssmax_scale = math::fast::logb(bot_n);
 
 		// Sink: a virtual token with no V contribution - it only adds to the
 		// softmax denominator, stealing probability from real tokens.
@@ -188,15 +193,15 @@ struct Attn_d_q {
 			gD_ptr[base + (tid / 4) + ((tid & 2) * 4)] = ((tid & 2) == 0 ? top_D : bot_D);
 		}
 
-		// Adjust L to fold score_scale and gate into P:
-		//   L' = L - logb(gate * score_scale / logb_e)
-		//   P' = expb(S*score_scale - L') = P * gate * score_scale / logb_e
-		//   D'  = D / gate
-		// so dS = P' * (dP - D') and dQ = sum(dS) @ K — no scaling needed.
-		f32 top_grad_scale = f32(1.0 / math::fast::logb_e) * gate * top_score_scale;
-		f32 bot_grad_scale = f32(1.0 / math::fast::logb_e) * gate * bot_score_scale;
-		top_L -= math::fast::logb(top_grad_scale);
-		bot_L -= math::fast::logb(bot_grad_scale);
+		// Adjust L to fold gate into P:
+		//   L' = L - logb(gate)
+		//   P' = expb(S - L') = gate * P_softmax
+		//   D' = D / gate
+		// Then the score derivative is:
+		//   d(raw_qk) = P' * (dP - D') * (ssmax_scale / logb_e)
+		//               * soft_cap'(raw_qk / sqrt(QK_DIM)) / sqrt(QK_DIM)
+		top_L -= math::fast::logb(gate);
+		bot_L -= math::fast::logb(gate);
 
 		// Sequential loop over KV
 		X17_NO_UNROLL for (usize kv_step = kv_begin; kv_step < kv_end; ++kv_step) {
@@ -211,10 +216,13 @@ struct Attn_d_q {
 				mma_a_bt(rQ[i], rKV[i], rS_f32);
 			}
 
-			// WARNING: DON'T get tempted to FMA this into the expb below because
-			// scale scores must happen before masking to avoid -inf * 0 == NaN when score_scale == 0
-			scale_top_(rS_f32, top_score_scale);
-			scale_bottom_(rS_f32, bot_score_scale);
+			// Standard attention scaling and tanh soft cap must happen before masking
+			// to avoid -inf * 0 == NaN when a scale becomes 0.
+			scale_(rS_f32, Attn_forward::INV_SQRT_QK);
+			Fragment_16x16<f32> rS_uncapped_f32 = rS_f32;
+			Attn_forward::soft_score_cap_(rS_f32);
+			scale_top_(rS_f32, top_ssmax_scale);
+			scale_bottom_(rS_f32, bot_ssmax_scale);
 
 			// Apply masks
 			if (kv_step < kv_begin_full || kv_step >= kv_end_full) {
@@ -263,7 +271,7 @@ struct Attn_d_q {
 				smem_tile_to_fragment_trans(sKV, 0, i * 16, rKV[i]);
 			}
 
-			// dS = P' * (dP - D')  (gate and score_scale/logb_e folded into P', D' = D/gate)
+			// dS = P' * (dP - D')
 			Fragment_16x16<f32> rDS_f32;
 			rDS_f32.sub[0][0].val0 = rP_f32.sub[0][0].val0 * (rDP.sub[0][0].val0 - top_D);
 			rDS_f32.sub[0][0].val1 = rP_f32.sub[0][0].val1 * (rDP.sub[0][0].val1 - top_D);
@@ -274,6 +282,11 @@ struct Attn_d_q {
 			rDS_f32.sub[1][0].val1 = rP_f32.sub[1][0].val1 * (rDP.sub[1][0].val1 - bot_D);
 			rDS_f32.sub[1][1].val0 = rP_f32.sub[1][1].val0 * (rDP.sub[1][1].val0 - bot_D);
 			rDS_f32.sub[1][1].val1 = rP_f32.sub[1][1].val1 * (rDP.sub[1][1].val1 - bot_D);
+			Attn_forward::apply_soft_score_cap_grad_(rDS_f32, rS_uncapped_f32);
+			f32 top_dscore_scale = top_ssmax_scale * Attn_forward::INV_SQRT_QK * f32(1.0 / math::fast::logb_e);
+			f32 bot_dscore_scale = bot_ssmax_scale * Attn_forward::INV_SQRT_QK * f32(1.0 / math::fast::logb_e);
+			scale_top_(rDS_f32, top_dscore_scale);
+			scale_bottom_(rDS_f32, bot_dscore_scale);
 
 			Fragment_16x16<bf16> rDS;
 			cast(rDS_f32, rDS);

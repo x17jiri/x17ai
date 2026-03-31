@@ -15,7 +15,7 @@ int main(int argc, char *argv[]) {
 	constexpr usize V_DIM = 64;
 	constexpr usize ROPE_DIM = 0;
 	constexpr usize QK_DIM = NONROPE_DIM + ROPE_DIM;
-	constexpr usize WINDOW_SIZE = 256;
+	constexpr usize WINDOW_SIZE = 0;//256;
 	{
 		f32 diff = fabsf(sqrtf(QK_DIM) - f32(constexpr_sqrt(f64(QK_DIM))));
 		printf("sqrtf=%e, constexpr_sqrt=%e, diff=%e\n",
@@ -246,7 +246,7 @@ int main(int argc, char *argv[]) {
 	// TFLOPS: Q@K^T = 2*Q*KV*QK_DIM, attn@V = 2*Q*KV*V_DIM, softmax ~ 5*Q*KV
 	// Causal ≈ half the work
 	double flops_causal = (2.0 * Q_LEN * KV_LEN * QK_DIM + 2.0 * Q_LEN * KV_LEN * V_DIM + 5.0 * Q_LEN * KV_LEN) / 2.0;
-	flops_causal = AF::flops(Q_LEN);
+	flops_causal = AF::flops(Q_LEN, WINDOW_SIZE);
 	printf("TFLOPS (causal): %.2f\n", flops_causal / (median_ms * 1e-3) / 1e12);
 
 	// write output to file
@@ -316,7 +316,7 @@ int main(int argc, char *argv[]) {
 
 	// dQ FLOPS: Q@K^T + dO@V^T + dS@K = 2*Q*KV*(QK_DIM + V_DIM + QK_DIM), causal ≈ half
 	double dq_flops_causal = (2.0 * Q_LEN * KV_LEN * (QK_DIM + V_DIM + QK_DIM) + 5.0 * Q_LEN * KV_LEN) / 2.0;
-	dq_flops_causal = ADQ::flops(Q_LEN);
+	dq_flops_causal = ADQ::flops(Q_LEN, WINDOW_SIZE);
 	printf("TFLOPS dQ (causal): %.2f\n", dq_flops_causal / (dq_median_ms * 1e-3) / 1e12);
 
 	err = cudaGetLastError();
@@ -389,7 +389,7 @@ int main(int argc, char *argv[]) {
 
 	// dKV FLOPS: Q@K^T + dO@V^T + P^T@dO + dS^T@Q = 2*Q*KV*(QK_DIM + V_DIM + V_DIM + QK_DIM), causal ≈ half
 	double dkv_flops_causal = (2.0 * Q_LEN * KV_LEN * (QK_DIM + V_DIM + V_DIM + QK_DIM) + 5.0 * Q_LEN * KV_LEN) / 2.0;
-	dkv_flops_causal = ADKV::flops(Q_LEN);
+	dkv_flops_causal = ADKV::flops(Q_LEN, WINDOW_SIZE);
 	printf("TFLOPS dKV (causal): %.2f\n", dkv_flops_causal / (dkv_median_ms * 1e-3) / 1e12);
 
 	err = cudaGetLastError();

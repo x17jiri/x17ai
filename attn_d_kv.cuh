@@ -45,12 +45,17 @@ struct Attn_d_kv {
 		+ sizeof(bf16) * (KV_PER_BLOCK * KV_SMEM_DIM)
 		+ sizeof(f32) * (GMEM_PRELOAD * Q_PER_STEP * 2); // sL + sD
 
-	static constexpr size_t mma_count(size_t seq_len) {
-		return (seq_len / 16) * (seq_len / 16) * (QK_TILES + V_TILES + V_TILES + QK_TILES) / 2;
+	static constexpr size_t mma_count(size_t seq_len, size_t window_size) {
+		//return (seq_len / 16) * (seq_len / 16) * (QK_TILES + V_TILES + V_TILES + QK_TILES) / 2;
+		size_t n = seq_len / 16;
+		size_t w = window_size > 0 ? window_size / 16 : n;
+		w = std::min(w, n);
+		size_t pairs = w * n - w * (w - 1) / 2;
+		return pairs * (QK_TILES + V_TILES + V_TILES + QK_TILES);
 	}
 
-	static constexpr double flops(size_t seq_len) {
-		return double(mma_count(seq_len)) * 2.0 * 16.0 * 16.0 * 16.0;
+	static constexpr double flops(size_t seq_len, size_t window_size) {
+		return double(mma_count(seq_len, window_size)) * 2.0 * 16.0 * 16.0 * 16.0;
 	}
 
 	static X17_DEVICE void cp_async_q_do_ld(
@@ -115,7 +120,6 @@ struct Attn_d_kv {
 		// Load KV from GMEM to SMEM (no commit — piggyback on first KV commit)
 		usize kv_block_idx = blockIdx.x;
 		usize kv_block_start = kv_block_idx * KV_PER_BLOCK;
-		usize kv_start = kv_block_start + kv_warp_idx * KV_PER_WARP;
 		GMatrix<bf16, KV_PER_BLOCK, NONROPE_DIM> gKc_block = tile_m<KV_PER_BLOCK>(gKc, kv_block_idx);
 		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gKc_block, sKV, 0, 0);
 		if constexpr (ROPE_DIM > 0) {
@@ -212,17 +216,20 @@ struct Attn_d_kv {
 			usize q_start = q_step * Q_PER_STEP;
 			f32 top_n = std::min(window_size, q_start + tid / 4 + 1) + f32(std::numbers::e_v<f64> + 1.0);
 			f32 bot_n = std::min(window_size, q_start + tid / 4 + 9) + f32(std::numbers::e_v<f64> + 1.0);
-			f32 top_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(top_n);
-			f32 bot_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(bot_n);
+			f32 top_ssmax_scale = math::fast::logb(top_n);
+			f32 bot_ssmax_scale = math::fast::logb(bot_n);
 
 			// Adjust L to fold gate into P
 			//   L' = L - logb(gate)
-			//   P = expb(S*score_scale - L') = gate * P_softmax
+			//   P = expb(S - L') = gate * P_softmax
 			top_L -= logb_gate;
 			bot_L -= logb_gate;
 
-			scale_top_(rS_f32, top_score_scale);
-			scale_bottom_(rS_f32, bot_score_scale);
+			scale_(rS_f32, Attn_forward::INV_SQRT_QK);
+			Fragment_16x16<f32> rS_uncapped_f32 = rS_f32;
+			Attn_forward::soft_score_cap_(rS_f32);
+			scale_top_(rS_f32, top_ssmax_scale);
+			scale_bottom_(rS_f32, bot_ssmax_scale);
 
 			// Apply masks
 			if (q_step < q_begin_full || q_step >= q_end_full) {
@@ -246,7 +253,7 @@ struct Attn_d_kv {
 				}
 			}
 
-			// P = expb(S*score_scale - L_g) = gate * P_softmax
+			// P = expb(S - L_g) = gate * P_softmax
 			Fragment_16x16<f32> rP_f32;
 			rP_f32.sub[0][0].val0 = math::fast::expb(rS_f32.sub[0][0].val0 - top_L);
 			rP_f32.sub[0][0].val1 = math::fast::expb(rS_f32.sub[0][0].val1 - top_L);
@@ -274,10 +281,9 @@ struct Attn_d_kv {
 				mma_a_bt(rP, rDO[i], rDV[i]);
 			}
 
-			// dS = (score_scale / logb_e) * P * (dP - D')
-			// P has gate folded in; score_scale/logb_e applied as per-row scalar
-			f32 top_dk_scale = top_score_scale * f32(1.0 / math::fast::logb_e);
-			f32 bot_dk_scale = bot_score_scale * f32(1.0 / math::fast::logb_e);
+			// dS = P * (dP - D') * (ssmax_scale / logb_e)
+			//      * soft_cap'(raw_qk / sqrt(QK_DIM)) / sqrt(QK_DIM)
+			// P has gate folded in.
 			Fragment_16x16<f32> rDS_f32;
 			rDS_f32.sub[0][0].val0 = rP_f32.sub[0][0].val0 * (rDP.sub[0][0].val0 - top_D);
 			rDS_f32.sub[0][0].val1 = rP_f32.sub[0][0].val1 * (rDP.sub[0][0].val1 - top_D);
@@ -288,6 +294,9 @@ struct Attn_d_kv {
 			rDS_f32.sub[1][0].val1 = rP_f32.sub[1][0].val1 * (rDP.sub[1][0].val1 - bot_D);
 			rDS_f32.sub[1][1].val0 = rP_f32.sub[1][1].val0 * (rDP.sub[1][1].val0 - bot_D);
 			rDS_f32.sub[1][1].val1 = rP_f32.sub[1][1].val1 * (rDP.sub[1][1].val1 - bot_D);
+			Attn_forward::apply_soft_score_cap_grad_(rDS_f32, rS_uncapped_f32);
+			f32 top_dk_scale = top_ssmax_scale * Attn_forward::INV_SQRT_QK * f32(1.0 / math::fast::logb_e);
+			f32 bot_dk_scale = bot_ssmax_scale * Attn_forward::INV_SQRT_QK * f32(1.0 / math::fast::logb_e);
 			scale_top_(rDS_f32, top_dk_scale);
 			scale_bottom_(rDS_f32, bot_dk_scale);
 

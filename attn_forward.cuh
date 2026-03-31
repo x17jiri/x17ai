@@ -40,6 +40,8 @@ struct Attn_forward {
 
 	static constexpr usize WARPS_PER_BLOCK = Q_WARPS * KV_WARPS;
 	static constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
+	static constexpr f32 INV_SQRT_QK = f32(1.0 / constexpr_sqrt(f64(QK_DIM)));
+	static constexpr f32 SOFT_SCORE_CAP = 50.0f;
 
 	// TODO - other matrices (dO, O, ...) should have their stride
 	static constexpr usize KC_STRIDE = NONROPE_DIM * HEAD_CNT;
@@ -88,12 +90,61 @@ struct Attn_forward {
 
 	static constexpr f32 ONLINE_SOFTMAX_THRESHOLD = 5.0 / math::fast::logb_2;
 
-	static constexpr size_t mma_count(size_t seq_len) {
-		return (seq_len / 16) * (seq_len / 16) * (QK_TILES + V_TILES) / 2;
+	static X17_DEVICE f32 soft_score_cap(f32 score) {
+		f32 scaled = score * f32(1.0 / SOFT_SCORE_CAP);
+		return SOFT_SCORE_CAP * tanhf(scaled);
 	}
 
-	static constexpr double flops(size_t seq_len) {
-		return double(mma_count(seq_len)) * 2.0 * 16.0 * 16.0 * 16.0;
+	static X17_DEVICE f32 soft_score_cap_grad(f32 score) {
+		f32 t = tanhf(score * f32(1.0 / SOFT_SCORE_CAP));
+		return 1.0f - t * t;
+	}
+
+	static X17_DEVICE void soft_score_cap_(Fragment_16x16<f32> &rS_f32) {
+		rS_f32.sub[0][0].val0 = soft_score_cap(rS_f32.sub[0][0].val0);
+		rS_f32.sub[0][0].val1 = soft_score_cap(rS_f32.sub[0][0].val1);
+		rS_f32.sub[0][1].val0 = soft_score_cap(rS_f32.sub[0][1].val0);
+		rS_f32.sub[0][1].val1 = soft_score_cap(rS_f32.sub[0][1].val1);
+
+		rS_f32.sub[1][0].val0 = soft_score_cap(rS_f32.sub[1][0].val0);
+		rS_f32.sub[1][0].val1 = soft_score_cap(rS_f32.sub[1][0].val1);
+		rS_f32.sub[1][1].val0 = soft_score_cap(rS_f32.sub[1][1].val0);
+		rS_f32.sub[1][1].val1 = soft_score_cap(rS_f32.sub[1][1].val1);
+	}
+
+	static X17_DEVICE void apply_soft_score_cap_grad_(Fragment_16x16<f32> &rDS_f32, const Fragment_16x16<f32> &rS_uncapped_f32) {
+		rDS_f32.sub[0][0].val0 *= soft_score_cap_grad(rS_uncapped_f32.sub[0][0].val0);
+		rDS_f32.sub[0][0].val1 *= soft_score_cap_grad(rS_uncapped_f32.sub[0][0].val1);
+		rDS_f32.sub[0][1].val0 *= soft_score_cap_grad(rS_uncapped_f32.sub[0][1].val0);
+		rDS_f32.sub[0][1].val1 *= soft_score_cap_grad(rS_uncapped_f32.sub[0][1].val1);
+
+		rDS_f32.sub[1][0].val0 *= soft_score_cap_grad(rS_uncapped_f32.sub[1][0].val0);
+		rDS_f32.sub[1][0].val1 *= soft_score_cap_grad(rS_uncapped_f32.sub[1][0].val1);
+		rDS_f32.sub[1][1].val0 *= soft_score_cap_grad(rS_uncapped_f32.sub[1][1].val0);
+		rDS_f32.sub[1][1].val1 *= soft_score_cap_grad(rS_uncapped_f32.sub[1][1].val1);
+	}
+
+	static X17_DEVICE f32 scale_and_soft_cap_sink_score(f32 sink_score, f32 ssmax_scale) {
+		if (!isfinite(sink_score)) {
+			return std::numeric_limits<f32>::lowest();
+		}
+		f32 scaled = sink_score * INV_SQRT_QK;
+		f32 capped = soft_score_cap(scaled);
+		return math::max(capped * ssmax_scale, std::numeric_limits<f32>::lowest());
+	}
+
+	static constexpr size_t mma_count(size_t seq_len, size_t window_size) {
+		seq_len /= 16;
+		window_size = std::min(seq_len, window_size > 0 ? window_size / 16 : seq_len);
+		usize masked = seq_len - window_size;
+		return (
+			seq_len * seq_len * (QK_TILES + V_TILES)
+			- masked * masked * (QK_TILES + V_TILES)
+		) / 2;
+	}
+
+	static constexpr double flops(size_t seq_len, size_t window_size) {
+		return double(mma_count(seq_len, window_size)) * 2.0 * 16.0 * 16.0 * 16.0;
 	}
 
 	X17_DEVICE void online_softmax(
@@ -312,8 +363,8 @@ struct Attn_forward {
 		//     `1` to account for the sink token
 		f32 top_n = std::min(window_size, q_start + tid / 4 + 1) + f32(std::numbers::e_v<f64> + 1.0);
 		f32 bot_n = std::min(window_size, q_start + tid / 4 + 9) + f32(std::numbers::e_v<f64> + 1.0);
-		f32 top_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(top_n);
-		f32 bot_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(bot_n);
+		f32 top_ssmax_scale = math::fast::logb(top_n);
+		f32 bot_ssmax_scale = math::fast::logb(bot_n);
 
 		// Sink: a virtual token with no V contribution - it only adds to the
 		// softmax denominator, stealing probability from real tokens.
@@ -323,8 +374,8 @@ struct Attn_forward {
 		if (sink != nullptr) {
 			load_gmem_2x32b(sink, sink_score, gate);
 		}
-		f32 top_sink_scaled = math::max(sink_score * top_score_scale, std::numeric_limits<f32>::lowest());
-		f32 bot_sink_scaled = math::max(sink_score * bot_score_scale, std::numeric_limits<f32>::lowest());
+		f32 top_sink_scaled = scale_and_soft_cap_sink_score(sink_score, top_ssmax_scale);
+		f32 bot_sink_scaled = scale_and_soft_cap_sink_score(sink_score, bot_ssmax_scale);
 
 		SoftmaxStats r_top;
 		r_top.max = top_sink_scaled + ONLINE_SOFTMAX_THRESHOLD;
@@ -364,11 +415,14 @@ struct Attn_forward {
 			}
 			X17_UNROLL for (usize i = V_TILES; i < QK_TILES; i++) {
 				mma_a_bt(rQ[i], rKV[i], rS_f32);
-			}
+					}
 
-			// Scale scores must happen before masking to avoid -inf * 0 == NaN when score_scale == 0
-			scale_top_(rS_f32, top_score_scale);
-			scale_bottom_(rS_f32, bot_score_scale);
+			// Standard attention scaling and tanh soft cap must happen before masking
+			// to avoid -inf * 0 == NaN when a scale becomes 0.
+			scale_(rS_f32, INV_SQRT_QK);
+			soft_score_cap_(rS_f32);
+			scale_top_(rS_f32, top_ssmax_scale);
+			scale_bottom_(rS_f32, bot_ssmax_scale);
 
 			// Apply masks
 			if (kv_step < kv_begin_full || kv_step >= kv_end_full) {
