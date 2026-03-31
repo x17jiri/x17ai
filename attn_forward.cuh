@@ -10,8 +10,7 @@ template<
 	const usize _ROPE_DIM,
 	const usize _V_DIM,
 	const bool _V_EQUALS_K = false,
-	const usize _GMEM_PRELOAD = 2,
-	const usize _WINDOW_SIZE = 0
+	const usize _GMEM_PRELOAD = 2
 >
 struct Attn_forward {
 	// Re-expose template parameters as static constants for dependent types
@@ -21,10 +20,6 @@ struct Attn_forward {
 	static constexpr usize V_DIM = _V_DIM;
 	static constexpr bool V_EQUALS_K = _V_EQUALS_K;
 	static constexpr usize GMEM_PRELOAD = _GMEM_PRELOAD;
-	static constexpr usize WINDOW_SIZE = _WINDOW_SIZE;
-
-	static_assert(WINDOW_SIZE == 0 || WINDOW_SIZE % 16 == 0,
-		"WINDOW_SIZE must be 0 (disabled) or a multiple of 16");
 
 	static_assert(V_DIM <= NONROPE_DIM, "V_DIM must be <= NONROPE_DIM");
 
@@ -74,6 +69,7 @@ struct Attn_forward {
 		rS_f32.sub[1][1].val1 = k + 1 <= q ? rS_f32.sub[1][1].val1 : NEG_INF;
 	}
 
+	/// This is the exact opposite of the causal mask
 	static X17_DEVICE void window_mask_diagonal(Fragment_16x16<f32> &rS_f32) {
 		usize tid = threadIdx.x % WARP_SIZE;
 		usize q = tid / 4;           // 0..7
@@ -142,11 +138,12 @@ struct Attn_forward {
 					? new_bot_max + ONLINE_SOFTMAX_THRESHOLD
 					: bot.max;
 
-			top_rescale = math::fast::expb(top.max - new_top_max);
-			bot_rescale = math::fast::expb(bot.max - new_bot_max);
 
 			if (!first_step) {
+				top_rescale = math::fast::expb(top.max - new_top_max);
 				scale_top_(rO_f32, top_rescale);
+
+				bot_rescale = math::fast::expb(bot.max - new_bot_max);
 				scale_bottom_(rO_f32, bot_rescale);
 			}
 
@@ -183,6 +180,8 @@ struct Attn_forward {
 		Fragment_16x16<f32> (&rO_f32)[V_TILES],
 		SoftmaxStats top,
 		SoftmaxStats bot,
+		f32 top_sink_scaled,
+		f32 bot_sink_scaled,
 		f32 gate,
 		usize q_start,
 		usize q_warp_idx,
@@ -197,6 +196,14 @@ struct Attn_forward {
 
 		bot.sum += shuffle_xor_sync(bot.sum, 1);
 		bot.sum += shuffle_xor_sync(bot.sum, 2);
+
+		// !! SINK SUM MUST BE ADDED HERE, NOT BEFORE THE LOOP !!
+		// The loop accumulates partial sums across 4 threads per row.
+		// shuffle_xor above reduces them into one total. The sink is a
+		// single scalar — adding it before the loop would count it 4×.
+		// We must add it exactly once, after the reduction.
+		top.sum += math::fast::expb(top_sink_scaled - top.max);
+		bot.sum += math::fast::expb(bot_sink_scaled - bot.max);
 
 		// Rescale, folding in normalization and gate
 		f32 top_L = math::fast::logb(top.sum) + top.max;
@@ -250,7 +257,8 @@ struct Attn_forward {
 		bf16 *gKc_ptr, bf16 *gKr_ptr, bf16 *gV_ptr,
 		bf16 *gOut_ptr,
 		f32 *gL_ptr,
-		f32 *sink
+		f32 *sink,
+		usize window_size
 	) {
 		static_assert(KV_WARPS == 1, "current algorithm doesn't reduce over KV warps");
 
@@ -276,9 +284,9 @@ struct Attn_forward {
 		GMatrix<bf16, Q_PER_BLOCK, QK_DIM> gQ_block = tile_m<Q_PER_BLOCK>(gQ, q_block_idx);
 		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gQ_block, sQ);
 
-		// round window_size up without overflow
+		// round window_size up without overflow (window_size == 0 means disabled)
 		usize max_window_size = std::numeric_limits<usize>::max();
-		usize window_size = WINDOW_SIZE > 0 ? WINDOW_SIZE : max_window_size;
+		window_size = window_size > 0 ? window_size : max_window_size;
 		usize window_steps = std::min((window_size - 1) / KV_PER_STEP + 1, max_window_size / KV_PER_STEP);
 		window_size = window_steps * KV_PER_STEP;
 
@@ -302,8 +310,8 @@ struct Attn_forward {
 		// When calculating `n`, we add:
 		//     `e` to make sure the SSMax scale >= 1
 		//     `1` to account for the sink token
-		f32 top_n = std::min(window_size, q_start + tid / 4 + 1) + f32(std::numbers::e_v + 1.0);
-		f32 bot_n = std::min(window_size, q_start + tid / 4 + 9) + f32(std::numbers::e_v + 1.0);
+		f32 top_n = std::min(window_size, q_start + tid / 4 + 1) + f32(std::numbers::e_v<f64> + 1.0);
+		f32 bot_n = std::min(window_size, q_start + tid / 4 + 9) + f32(std::numbers::e_v<f64> + 1.0);
 		f32 top_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(top_n);
 		f32 bot_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(bot_n);
 
@@ -320,10 +328,10 @@ struct Attn_forward {
 
 		SoftmaxStats r_top;
 		r_top.max = top_sink_scaled + ONLINE_SOFTMAX_THRESHOLD;
-		r_top.sum = math::fast::expb(-ONLINE_SOFTMAX_THRESHOLD); // TODO - constexpr_expb?
+		r_top.sum = 0.0f; // sink sum added in combine_and_store (not here — would be counted 4×)
 		SoftmaxStats r_bot;
 		r_bot.max = bot_sink_scaled + ONLINE_SOFTMAX_THRESHOLD;
-		r_bot.sum = r_top.sum;
+		r_bot.sum = 0.0f;
 
 		// O accumulator
 		Fragment_16x16<f32> rO_f32[V_TILES];
@@ -411,7 +419,7 @@ struct Attn_forward {
 		}
 
 		GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = tile_m<Q_PER_BLOCK>(gO, q_block_idx);
-		combine_and_store(rO_f32, r_top, r_bot, gate, q_start, q_warp_idx, gOut_block, gL_ptr);
+		combine_and_store(rO_f32, r_top, r_bot, top_sink_scaled, bot_sink_scaled, gate, q_start, q_warp_idx, gOut_block, gL_ptr);
 	}
 };
 
@@ -422,8 +430,9 @@ attn_forward(
 	bf16 *gKc_ptr, bf16 *gKr_ptr, bf16 *gV_ptr,
 	bf16 *gOut_ptr,
 	f32 *gL_ptr,
-	f32 *sink
+	f32 *sink,
+	usize window_size
 ) {
 	auto attn_forward = Attn_forward();
-	attn_forward.run(seq_len, gQ_ptr, gKc_ptr, gKr_ptr, gV_ptr, gOut_ptr, gL_ptr, sink);
+	attn_forward.run(seq_len, gQ_ptr, gKc_ptr, gKr_ptr, gV_ptr, gOut_ptr, gL_ptr, sink, window_size);
 }

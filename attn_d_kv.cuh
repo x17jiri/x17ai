@@ -61,9 +61,9 @@ struct Attn_d_kv {
 		SMatrix<bf16, Q_PER_STEP * GMEM_PRELOAD, PRELOAD_DIM> preload,
 		SMatrix_32b<f32, GMEM_PRELOAD, Q_PER_STEP> l_preload,
 		SMatrix_32b<f32, GMEM_PRELOAD, Q_PER_STEP> d_preload,
-		usize p, usize q_steps
+		usize p, usize q_end
 	) {
-		if (p < q_steps) {
+		if (p < q_end) {
 			auto slot = tile_m<Q_PER_STEP>(preload, p % GMEM_PRELOAD);
 			// Load Q into columns [0, QK_DIM)
 			cp_async_gmem_to_smem<THREADS_PER_BLOCK>(
@@ -89,7 +89,8 @@ struct Attn_d_kv {
 		bf16 *gKc_ptr, bf16 *gKr_ptr, bf16 *gV_ptr,
 		bf16 *gDO_ptr, bf16 *gDK_ptr, bf16 *gDV_ptr,
 		f32 *gL_ptr, f32 *gD_ptr,
-		f32 *sink
+		f32 *sink,
+		usize window_size
 	) {
 		static_assert(Q_WARPS == 1, "current algorithm doesn't reduce over Q warps");
 
@@ -126,12 +127,23 @@ struct Attn_d_kv {
 			cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gV_block, sKV, 0, QK_DIM);
 		}
 
-		usize q_first_step = kv_block_start / Q_PER_STEP;
-		usize q_steps = (seq_len + Q_PER_STEP - 1) / Q_PER_STEP;
+		// round window_size up without overflow (window_size == 0 means disabled)
+		usize max_window_size = std::numeric_limits<usize>::max();
+		window_size = window_size > 0 ? window_size : max_window_size;
+		usize window_steps = std::min((window_size - 1) / Q_PER_STEP + 1, max_window_size / Q_PER_STEP);
+		window_size = window_steps * Q_PER_STEP;
+
+		// `q_begin` and `window_steps` are each ≤ USIZE_MAX / Q_PER_STEP, so their sum
+		// plus KV_WARPS can't overflow as long as Q_PER_STEP >= 3.
+		static_assert(Q_PER_STEP >= 3, "Q_PER_STEP >= 3 required to avoid overflow in q_end");
+		usize q_begin = kv_block_start / Q_PER_STEP;
+		usize q_begin_full = q_begin + KV_WARPS;
+		usize q_end_full = q_begin + window_steps;
+		usize q_end = std::min(q_end_full + KV_WARPS, seq_len / Q_PER_STEP);
 
 		// Start preloading first Q+dO blocks (first commit also commits KV)
 		X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD; ++p) {
-			cp_async_q_do_ld(gQ, gDO, gL_ptr, gD_ptr, sPreload, sL, sD, q_first_step + p, q_steps);
+			cp_async_q_do_ld(gQ, gDO, gL_ptr, gD_ptr, sPreload, sL, sD, q_begin + p, q_end);
 			cp_async_commit();
 		}
 
@@ -166,9 +178,9 @@ struct Attn_d_kv {
 			smem_tile_to_fragment(sKV_warp, 0, V_SMEM_COL + i * 16, rV[i]);
 		}
 		// Load first Q + dO tile from SMEM to registers
-		auto sSlot = tile_m<Q_PER_STEP>(sPreload, q_first_step % GMEM_PRELOAD);
-		auto sLSlot = tile_m<1>(sL, q_first_step % GMEM_PRELOAD);
-		auto sDSlot = tile_m<1>(sD, q_first_step % GMEM_PRELOAD);
+		auto sSlot = tile_m<Q_PER_STEP>(sPreload, q_begin % GMEM_PRELOAD);
+		auto sLSlot = tile_m<1>(sL, q_begin % GMEM_PRELOAD);
+		auto sDSlot = tile_m<1>(sD, q_begin % GMEM_PRELOAD);
 		Fragment_16x16<bf16> rQ[QK_TILES];
 		X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
 			smem_tile_to_fragment(sSlot, 0, i * 16, rQ[i]);
@@ -180,7 +192,7 @@ struct Attn_d_kv {
 
 		// Sequential loop over Q
 		f32 logb_gate = math::fast::logb(gate);
-		X17_NO_UNROLL for (usize q_step = q_first_step; q_step < q_steps; ++q_step) {
+		X17_NO_UNROLL for (usize q_step = q_begin; q_step < q_end; ++q_step) {
 			// Load L and D from SMEM
 			f32 top_L = load_shared_1x32b<f32>(sLSlot._ptr + (tid / 4) * sizeof(f32));
 			f32 top_D = load_shared_1x32b<f32>(sDSlot._ptr + (tid / 4) * sizeof(f32));
@@ -196,11 +208,10 @@ struct Attn_d_kv {
 			}
 
 			// Per-Q-row score_scale: score_scale = logb(n) / sqrt(QK_DIM)
-			// where n = q_pos + 2 (1 for 0-index, 1 for sink)
 			// In the MMA fragment layout, tid/4 gives the row within the 8-row sub-tile
 			usize q_start = q_step * Q_PER_STEP;
-			f32 top_n = q_start + tid / 4 + 1 + 1;
-			f32 bot_n = q_start + tid / 4 + 9 + 1;
+			f32 top_n = std::min(window_size, q_start + tid / 4 + 1) + f32(std::numbers::e_v<f64> + 1.0);
+			f32 bot_n = std::min(window_size, q_start + tid / 4 + 9) + f32(std::numbers::e_v<f64> + 1.0);
 			f32 top_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(top_n);
 			f32 bot_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(bot_n);
 
@@ -213,12 +224,25 @@ struct Attn_d_kv {
 			scale_top_(rS_f32, top_score_scale);
 			scale_bottom_(rS_f32, bot_score_scale);
 
-			// Causal mask: only needed for early Q steps
-			if (q_step - q_first_step < KV_WARPS) {
-				if (q_step - q_first_step == kv_warp_idx) {
-					Attn_forward::causal_mask_diagonal(rS_f32);
-				} else if (q_step - q_first_step < kv_warp_idx) {
-					fill_(rS_f32, -INFINITY);
+			// Apply masks
+			if (q_step < q_begin_full || q_step >= q_end_full) {
+				// Causal mask: first KV_WARPS Q steps straddle the causal diagonal
+				if (q_step < q_begin_full) {
+					usize diag_warp = q_step - q_begin;
+					if (kv_warp_idx == diag_warp) {
+						Attn_forward::causal_mask_diagonal(rS_f32);
+					} else if (kv_warp_idx > diag_warp) {
+						fill_(rS_f32, -INFINITY);
+					}
+				}
+				// Window mask: last KV_WARPS Q steps straddle the window boundary
+				if (q_step >= q_end_full) {
+					usize diag_warp = q_step - q_end_full;
+					if (kv_warp_idx == diag_warp) {
+						Attn_forward::window_mask_diagonal(rS_f32);
+					} else if (kv_warp_idx < diag_warp) {
+						fill_(rS_f32, -INFINITY);
+					}
 				}
 			}
 
@@ -276,7 +300,7 @@ struct Attn_d_kv {
 				sDSlot = tile_m<1>(sD, (q_step + 1) % GMEM_PRELOAD);
 
 				// Preload next Q+dO tiles from GMEM
-				cp_async_q_do_ld(gQ, gDO, gL_ptr, gD_ptr, sPreload, sL, sD, q_step + GMEM_PRELOAD, q_steps);
+				cp_async_q_do_ld(gQ, gDO, gL_ptr, gD_ptr, sPreload, sL, sD, q_step + GMEM_PRELOAD, q_end);
 				cp_async_commit();
 			}
 
@@ -310,8 +334,9 @@ attn_d_kv(
 	bf16 *gKc_ptr, bf16 *gKr_ptr, bf16 *gV_ptr,
 	bf16 *gDO_ptr, bf16 *gDK_ptr, bf16 *gDV_ptr,
 	f32 *gL_ptr, f32 *gD_ptr,
-	f32 *sink
+	f32 *sink,
+	usize window_size
 ) {
 	auto attn_d_kv = Attn_d_kv();
-	attn_d_kv.run(seq_len, gQ_ptr, gKc_ptr, gKr_ptr, gV_ptr, gDO_ptr, gDK_ptr, gDV_ptr, gL_ptr, gD_ptr, sink);
+	attn_d_kv.run(seq_len, gQ_ptr, gKc_ptr, gKr_ptr, gV_ptr, gDO_ptr, gDK_ptr, gDV_ptr, gL_ptr, gD_ptr, sink, window_size);
 }

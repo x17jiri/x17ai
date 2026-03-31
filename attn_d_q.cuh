@@ -58,7 +58,8 @@ struct Attn_d_q {
 		bf16 *gKc_ptr, bf16 *gKr_ptr, bf16 *gV_ptr,
 		bf16 *gOut_ptr, bf16 *gDO_ptr, bf16 *gDQ_ptr,
 		f32 *gL_ptr, f32 *gD_ptr,
-		f32 *sink
+		f32 *sink,
+		usize window_size
 	) {
 		static_assert(KV_WARPS == 1, "current algorithm doesn't reduce over KV warps");
 
@@ -83,6 +84,7 @@ struct Attn_d_q {
 		// Load Q, dO, O from GMEM to SMEM (no commit — piggyback on first KV commit)
 		usize q_block_idx = blockIdx.x;
 		usize q_block_start = q_block_idx * Q_PER_BLOCK;
+		usize q_block_end = q_block_start + Q_PER_BLOCK;
 		usize q_start = q_block_start + q_warp_idx * Q_PER_WARP;
 		GMatrix<bf16, Q_PER_BLOCK, QK_DIM> gQ_block = tile_m<Q_PER_BLOCK>(gQ, q_block_idx);
 		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gQ_block, sQ);
@@ -91,14 +93,20 @@ struct Attn_d_q {
 		GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = tile_m<Q_PER_BLOCK>(gO, q_block_idx);
 		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gOut_block, sO);
 
-		usize kv_steps = (q_block_start + Q_PER_BLOCK + KV_PER_STEP - 1) / KV_PER_STEP;
-		kv_steps = std::min(kv_steps, seq_len / KV_PER_STEP);
-		usize full_kv_steps = q_block_start / KV_PER_STEP;
-		full_kv_steps = std::min(full_kv_steps, kv_steps);
+		// round window_size up without overflow (window_size == 0 means disabled)
+		usize max_window_size = std::numeric_limits<usize>::max();
+		window_size = window_size > 0 ? window_size : max_window_size;
+		usize window_steps = std::min((window_size - 1) / KV_PER_STEP + 1, max_window_size / KV_PER_STEP);
+		window_size = window_steps * KV_PER_STEP;
+
+		usize kv_begin = (q_block_start - std::min(q_block_start, window_size)) / KV_PER_STEP;
+		usize kv_begin_full = (q_block_end - std::min(q_block_end, window_size)) / KV_PER_STEP;
+		usize kv_end_full = q_block_start / KV_PER_STEP;
+		usize kv_end = std::min(seq_len, q_block_end + KV_PER_STEP - 1) / KV_PER_STEP;
 
 		// Start preloading K and V from GMEM to SMEM (first commit also commits Q)
 		X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD; ++p) {
-			Attn_forward::cp_async_kv(gKc, gKr, gV, sPreload, p, kv_steps);
+			Attn_forward::cp_async_kv(gKc, gKr, gV, sPreload, kv_begin + p, kv_end);
 			cp_async_commit();
 		}
 
@@ -108,8 +116,8 @@ struct Attn_d_q {
 		//     logb(e)            — so we can use expb instead of exp
 		// Since we are multiplying and dividing by logb(e), it cancels out, so:
 		//     score_scale = (1.0 / sqrt(QK_DIM)) * logb(n)
-		f32 top_n = q_start + tid / 4 + 1 + 1; // the final `+ 1` is for sink
-		f32 bot_n = q_start + tid / 4 + 9 + 1;
+		f32 top_n = std::min(window_size, q_start + tid / 4 + 1) + f32(std::numbers::e_v<f64> + 1.0);
+		f32 bot_n = std::min(window_size, q_start + tid / 4 + 9) + f32(std::numbers::e_v<f64> + 1.0);
 		f32 top_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(top_n);
 		f32 bot_score_scale = f32(1.0 / constexpr_sqrt(f64(QK_DIM))) * math::fast::logb(bot_n);
 
@@ -139,7 +147,7 @@ struct Attn_d_q {
 		}
 		// Load first KV tile from SMEM to registers
 		SMatrix<bf16, KV_PER_STEP, PRELOAD_DIM> sKV;
-		sKV = tile_m<KV_PER_STEP>(sPreload, 0);
+		sKV = tile_m<KV_PER_STEP>(sPreload, kv_begin % GMEM_PRELOAD);
 		Fragment_16x16<bf16> rKV[QK_TILES];
 		X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
 			smem_tile_to_fragment(sKV, 0, i * 16, rKV[i]);
@@ -191,7 +199,7 @@ struct Attn_d_q {
 		bot_L -= math::fast::logb(bot_grad_scale);
 
 		// Sequential loop over KV
-		X17_NO_UNROLL for (usize kv_step = 0; kv_step < kv_steps; ++kv_step) {
+		X17_NO_UNROLL for (usize kv_step = kv_begin; kv_step < kv_end; ++kv_step) {
 			// S = Q * K^T, interleaved with V load (rKV: K -> V)
 			Fragment_16x16<f32> rS_f32;
 			zero_(rS_f32);
@@ -208,13 +216,25 @@ struct Attn_d_q {
 			scale_top_(rS_f32, top_score_scale);
 			scale_bottom_(rS_f32, bot_score_scale);
 
-			// Causal mask: diagonal tile or full mask if past boundary
-			if (kv_step >= full_kv_steps) {
-				usize kv_pos = kv_step * KV_PER_STEP;
-				if (kv_pos == q_start) {
-					Attn_forward::causal_mask_diagonal(rS_f32);
-				} else if (kv_pos > q_start) {
-					fill_(rS_f32, -INFINITY);
+			// Apply masks
+			if (kv_step < kv_begin_full || kv_step >= kv_end_full) {
+				// Window mask: mask keys outside the sliding window
+				if (kv_step < kv_begin_full) {
+					usize diag_warp = Q_WARPS + kv_step - kv_begin_full;
+					if (q_warp_idx == diag_warp) {
+						Attn_forward::window_mask_diagonal(rS_f32);
+					} else if (q_warp_idx > diag_warp) {
+						fill_(rS_f32, -INFINITY);
+					}
+				}
+				// Causal mask: mask future keys
+				if (kv_step >= kv_end_full) {
+					usize diag_warp = kv_step - kv_end_full;
+					if (q_warp_idx == diag_warp) {
+						Attn_forward::causal_mask_diagonal(rS_f32);
+					} else if (q_warp_idx < diag_warp) {
+						fill_(rS_f32, -INFINITY);
+					}
 				}
 			}
 
@@ -265,7 +285,7 @@ struct Attn_d_q {
 				sKV = tile_m<KV_PER_STEP>(sPreload, (kv_step + 1) % GMEM_PRELOAD);
 
 				// Preload next KV tiles from GMEM
-				Attn_forward::cp_async_kv(gKc, gKr, gV, sPreload, kv_step + GMEM_PRELOAD, kv_steps);
+				Attn_forward::cp_async_kv(gKc, gKr, gV, sPreload, kv_step + GMEM_PRELOAD, kv_end);
 				cp_async_commit();
 			}
 
@@ -288,8 +308,9 @@ attn_d_q(
 	bf16 *gKc_ptr, bf16 *gKr_ptr, bf16 *gV_ptr,
 	bf16 *gOut_ptr, bf16 *gDO_ptr, bf16 *gDQ_ptr,
 	f32 *gL_ptr, f32 *gD_ptr,
-	f32 *sink
+	f32 *sink,
+	usize window_size
 ) {
 	auto attn_d_q = Attn_d_q();
-	attn_d_q.run(seq_len, gQ_ptr, gKc_ptr, gKr_ptr, gV_ptr, gOut_ptr, gDO_ptr, gDQ_ptr, gL_ptr, gD_ptr, sink);
+	attn_d_q.run(seq_len, gQ_ptr, gKc_ptr, gKr_ptr, gV_ptr, gOut_ptr, gDO_ptr, gDQ_ptr, gL_ptr, gD_ptr, sink, window_size);
 }

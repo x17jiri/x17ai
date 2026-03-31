@@ -14,9 +14,31 @@ import os
 
 QK_DIM = 128
 V_DIM = 64
-WINDOW_SIZE = 128
+WINDOW_SIZE = 256
 
 import math
+
+
+def ssmax_n(q_len, 	window_size=0):
+	"""Compute SSMax scale factor n for each query position.
+
+	n[i] = min(window_size, i + 1) + (e + 1)
+
+	where:
+	  i + 1       = number of real tokens visible (causal: tokens 0..i)
+	  window_size = caps the visible count when sliding window is enabled
+	  e           = ensures log2(n) >= ~1.89, so SSMax scale >= 1
+	  1           = accounts for the sink token
+
+	When window_size == 0 (disabled), min is a no-op: n[i] = i + 2 + e.
+	"""
+	E_PLUS_1 = math.e + 1.0
+	pos_plus_1 = torch.arange(1, q_len + 1, dtype=torch.float32)
+	if window_size > 0:
+		n = torch.clamp(pos_plus_1, max=float(window_size)) + E_PLUS_1
+	else:
+		n = pos_plus_1 + E_PLUS_1
+	return n
 
 
 def print_matrix(t):
@@ -79,7 +101,7 @@ def compute_attn_real(Q, K, sink, window_size=0):
 	scores = scores / math.sqrt(QK_DIM)
 
 	# SSMax: multiply ALL scores (including sink) by log2(n), matching kernel exp2/log2 math
-	n = torch.arange(2, q_len + 2, dtype=torch.float32).unsqueeze(1)  # [q_len, 1]
+	n = ssmax_n(q_len, window_size).unsqueeze(1)  # [q_len, 1]
 	scores = scores * torch.log2(n)
 
 	# Causal mask: mask when j > i (sink column is never masked)
@@ -148,8 +170,8 @@ def reference_online_softmax(Q, K, V, sink, gate, kv_tile=16, window_size=0):
 	for d in range(0, QK_DIM, 16):
 		scores = scores + Q[:, d:d+16] @ K[:, d:d+16].T
 
-	# Per-row score scale: (1/sqrt(QK_DIM)) * log2(n), n = row + 2
-	n = torch.arange(2, q_len + 2, dtype=torch.float32)
+	# Per-row score scale: (1/sqrt(QK_DIM)) * log2(n)
+	n = ssmax_n(q_len, window_size)
 	inv_sqrt_qk = torch.tensor(1.0 / math.sqrt(QK_DIM), dtype=torch.float32)
 	score_scale = inv_sqrt_qk * torch.log2(n)
 	scores = scores * score_scale.unsqueeze(1)
@@ -219,7 +241,7 @@ def reference_matching_from_L(Q, K, V, L, gate, kv_tile=16, v_tile=16, window_si
 	kv_len = K.shape[0]
 	scores = Q @ K.T
 	scores = scores / math.sqrt(QK_DIM)
-	n = torch.arange(2, q_len + 2, dtype=torch.float32).unsqueeze(1)
+	n = ssmax_n(q_len, window_size).unsqueeze(1)
 	scores = scores * torch.log2(n)
 	mask = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
 	if window_size > 0:
@@ -407,7 +429,7 @@ def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5, window_size=
 
 		# Recompute scores
 		scores = Q_f @ K_f.T
-		n = torch.arange(2, q_len + 2, dtype=torch.float32)
+		n = ssmax_n(q_len, window_size)
 		score_scale = (1.0 / math.sqrt(QK_DIM)) * torch.log2(n)  # [q_len]
 		scores = scores * score_scale.unsqueeze(1)
 

@@ -15,7 +15,7 @@ int main(int argc, char *argv[]) {
 	constexpr usize V_DIM = 64;
 	constexpr usize ROPE_DIM = 0;
 	constexpr usize QK_DIM = NONROPE_DIM + ROPE_DIM;
-	constexpr usize WINDOW_SIZE = 128;
+	constexpr usize WINDOW_SIZE = 256;
 	{
 		f32 diff = fabsf(sqrtf(QK_DIM) - f32(constexpr_sqrt(f64(QK_DIM))));
 		printf("sqrtf=%e, constexpr_sqrt=%e, diff=%e\n",
@@ -166,7 +166,7 @@ int main(int argc, char *argv[]) {
 	}
 
 	constexpr bool V_EQ_K = true;
-	using AF = Attn_forward<1, NONROPE_DIM, ROPE_DIM, V_DIM, V_EQ_K, 2, WINDOW_SIZE>;
+	using AF = Attn_forward<1, NONROPE_DIM, ROPE_DIM, V_DIM, V_EQ_K, 2>;
 	using ADQ = Attn_d_q<AF>;
 	using ADKV = Attn_d_kv<AF>;
 	usize smem_size = AF::SMEM_BYTES;
@@ -198,7 +198,8 @@ int main(int argc, char *argv[]) {
 				kc_dev, kr_dev, v_dev,
 				out_dev,
 				L_dev,
-				sink_ptr
+				sink_ptr,
+				WINDOW_SIZE
 			);
 	}
 
@@ -222,7 +223,8 @@ int main(int argc, char *argv[]) {
 				kc_dev, kr_dev, v_dev,
 				out_dev,
 				L_dev,
-				sink_ptr
+				sink_ptr,
+				WINDOW_SIZE
 			);
 		cudaEventRecord(ends[i]);
 	}
@@ -276,7 +278,8 @@ int main(int argc, char *argv[]) {
 				kc_dev, kr_dev, v_dev,
 				out_dev, dO_dev, dQ_dev,
 				L_dev, D_dev,
-				sink_ptr
+				sink_ptr,
+				WINDOW_SIZE
 			);
 	}
 	cudaDeviceSynchronize();
@@ -295,7 +298,8 @@ int main(int argc, char *argv[]) {
 				kc_dev, kr_dev, v_dev,
 				out_dev, dO_dev, dQ_dev,
 				L_dev, D_dev,
-				sink_ptr
+				sink_ptr,
+				WINDOW_SIZE
 			);
 		cudaEventRecord(dq_ends[i]);
 	}
@@ -347,7 +351,8 @@ int main(int argc, char *argv[]) {
 				kc_dev, kr_dev, v_dev,
 				dO_dev, dK_dev, dV_dev,
 				L_dev, D_dev,
-				sink_ptr
+				sink_ptr,
+				WINDOW_SIZE
 			);
 	}
 	cudaDeviceSynchronize();
@@ -366,7 +371,8 @@ int main(int argc, char *argv[]) {
 				kc_dev, kr_dev, v_dev,
 				dO_dev, dK_dev, dV_dev,
 				L_dev, D_dev,
-				sink_ptr
+				sink_ptr,
+				WINDOW_SIZE
 			);
 		cudaEventRecord(dkv_ends[i]);
 	}
