@@ -46,12 +46,13 @@ struct Attn_d_q {
 		);
 
 	static constexpr size_t mma_count(size_t seq_len, size_t window_size) {
-//		return (seq_len / 16) * (seq_len / 16) * (QK_TILES + V_TILES + QK_TILES) / 2;
-		size_t n = seq_len / 16;
-		size_t w = window_size > 0 ? window_size / 16 : n;
-		w = std::min(w, n);
-		size_t pairs = w * n - w * (w - 1) / 2;
-		return pairs * (QK_TILES + V_TILES + QK_TILES);
+		seq_len /= 16;
+		window_size = std::min(seq_len, window_size > 0 ? window_size / 16 : seq_len);
+		usize masked = seq_len - window_size;
+		return (
+			seq_len * seq_len * (QK_TILES + V_TILES + QK_TILES)
+			- masked * masked * (QK_TILES + V_TILES + QK_TILES)
+		) / 2;
 	}
 
 	static constexpr double flops(size_t seq_len, size_t window_size) {
@@ -121,10 +122,14 @@ struct Attn_d_q {
 		//     logb(e)            — so we can use expb instead of exp
 		// Since we are multiplying and dividing by logb(e), it cancels out, so:
 		//     score_scale = (1.0 / sqrt(QK_DIM)) * logb(n)
+		// When calculating `n`, we add:
+		//     `e` to make sure the SSMax scale >= 1
+		//     `1` to account for the sink token
 		f32 top_n = std::min(window_size, q_start + tid / 4 + 1) + f32(std::numbers::e_v<f64> + 1.0);
 		f32 bot_n = std::min(window_size, q_start + tid / 4 + 9) + f32(std::numbers::e_v<f64> + 1.0);
 		f32 top_ssmax_scale = math::fast::logb(top_n);
 		f32 bot_ssmax_scale = math::fast::logb(bot_n);
+
 		f32 pre_tanh_scale = Attn_forward::PRE_TANH_SCALE * Attn_forward::DOT_PROD_SCALE;
 		f32 top_post_tanh_scale = Attn_forward::POST_TANH_SCALE * top_ssmax_scale;
 		f32 bot_post_tanh_scale = Attn_forward::POST_TANH_SCALE * bot_ssmax_scale;
@@ -138,6 +143,7 @@ struct Attn_d_q {
 			load_gmem_2x32b(sink, sink_score, gate);
 		}
 
+		// TODO - use just one memory read
 		f32 top_L = gL_ptr[q_start + tid / 4];
 		f32 bot_L = gL_ptr[q_start + tid / 4 + 8];
 
@@ -219,7 +225,8 @@ struct Attn_d_q {
 				mma_a_bt(rQ[i], rKV[i], rS_f32);
 			}
 
-			// Tanh score capping happens before masking to avoid -inf * 0 == NaN.
+			// WARNING: DON'T get tempted to FMA this into the expb below because
+			// scaling must happen before masking to avoid -inf * 0 == NaN when scale == 0
 			Fragment_16x16<f32> rS_uncapped_f32 = rS_f32;
 			elemwise_top_(rS_f32, [=](f32 x) {
 				if constexpr (Attn_forward::SCORE_CAP > 0.0f) {

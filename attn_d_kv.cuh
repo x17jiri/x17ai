@@ -46,12 +46,13 @@ struct Attn_d_kv {
 		+ sizeof(f32) * (GMEM_PRELOAD * Q_PER_STEP * 2); // sL + sD
 
 	static constexpr size_t mma_count(size_t seq_len, size_t window_size) {
-		//return (seq_len / 16) * (seq_len / 16) * (QK_TILES + V_TILES + V_TILES + QK_TILES) / 2;
-		size_t n = seq_len / 16;
-		size_t w = window_size > 0 ? window_size / 16 : n;
-		w = std::min(w, n);
-		size_t pairs = w * n - w * (w - 1) / 2;
-		return pairs * (QK_TILES + V_TILES + V_TILES + QK_TILES);
+		seq_len /= 16;
+		window_size = std::min(seq_len, window_size > 0 ? window_size / 16 : seq_len);
+		usize masked = seq_len - window_size;
+		return (
+			seq_len * seq_len * (QK_TILES + V_TILES + V_TILES + QK_TILES)
+			- masked * masked * (QK_TILES + V_TILES + V_TILES + QK_TILES)
+		) / 2;
 	}
 
 	static constexpr double flops(size_t seq_len, size_t window_size) {
@@ -120,6 +121,7 @@ struct Attn_d_kv {
 		// Load KV from GMEM to SMEM (no commit — piggyback on first KV commit)
 		usize kv_block_idx = blockIdx.x;
 		usize kv_block_start = kv_block_idx * KV_PER_BLOCK;
+		usize kv_start = kv_block_start + kv_warp_idx * KV_PER_WARP;
 		GMatrix<bf16, KV_PER_BLOCK, NONROPE_DIM> gKc_block = tile_m<KV_PER_BLOCK>(gKc, kv_block_idx);
 		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gKc_block, sKV, 0, 0);
 		if constexpr (ROPE_DIM > 0) {
@@ -228,6 +230,8 @@ struct Attn_d_kv {
 			top_L -= logb_gate;
 			bot_L -= logb_gate;
 
+			// WARNING: DON'T get tempted to FMA this into the expb below because
+			// scaling must happen before masking to avoid -inf * 0 == NaN when scale == 0
 			Fragment_16x16<f32> rS_uncapped_f32 = rS_f32;
 			elemwise_top_(rS_f32, [=](f32 x) {
 				if constexpr (Attn_forward::SCORE_CAP > 0.0f) {
