@@ -57,6 +57,25 @@ constexpr usize WARP_SIZE = 32;
 //--------------------------------------------------------------------------------------------------
 
 namespace math {
+
+	X17_DEVICE f32 max(f32 a, f32 b) {
+		return fmaxf(a, b);
+	}
+
+	template<const size_t N>
+	requires(N > 0)
+	X17_DEVICE f32 max(const f32 (&arr)[N]) {
+		f32 result = arr[0];
+		X17_UNROLL for (size_t i = 1; i < N; i++) {
+			result = fmaxf(result, arr[i]);
+		}
+		return result;
+	}
+
+	X17_DEVICE f32 fma(f32 mul1, f32 mul2, f32 add) {
+		return __fmaf_rn(mul1, mul2, add);
+	}
+
 	namespace fast {
 		/// Our underlying exp and log functions use this base.
 		/// It was chosen to be fast and may change in the future.
@@ -117,12 +136,38 @@ namespace math {
 			#endif
 		}
 
+		X17_DEVICE f32 tanh(f32 x) {
+			#if X17_PRECISE_MATH
+				return tanhf(x);
+			#else
+				f32 result;
+				asm ("tanh.approx.f32 %0, %1;\n" : "=f"(result) : "f"(x));
+				return result;
+			#endif
+		}
+
+		X17_DEVICE f32 erf(f32 x) {
+			#if X17_PRECISE_MATH
+				return erff(x);
+			#else
+				f32 result;
+				asm ("erf.approx.ftz.f32 %0, %1;\n" : "=f"(result) : "f"(x));
+				return result;
+			#endif
+		}
+
+		X17_DEVICE f32 normal_cdf(f32 x) {
+			// 1.0 / sqrt(2) == sqrt(2) / 2
+			static constexpr f32 RSQRT_2 = std::numbers::sqrt2_v<f32> / 2.0f;
+			return 0.5f * (1.0f + erf(x * RSQRT_2));
+		}
+
 		X17_DEVICE f32 sigmoid(f32 x) {
-			return fmaf(0.5f, __tanhf(0.5f * x), 0.5f);
+			return math::fma(0.5f, math::fast::tanh(0.5f * x), 0.5f);
 		}
 
 		X17_DEVICE f32 silu(f32 x, f32 beta = 1.0f) {
-			return fmaf(0.5f * x, __tanhf((beta * 0.5f) * x), 0.5f * x);
+			return math::fma(0.5f * x, math::fast::tanh((beta * 0.5f) * x), 0.5f * x);
 		}
 
 		/// Gaussian Error Linear Unit (GELU) approximation
@@ -157,24 +202,6 @@ namespace math {
 			// and we get very high precision
 			return x - (imprecise_softplus(x - C, beta) - imprecise_softplus(-x - C, beta));
 		}
-	}
-
-	X17_DEVICE f32 max(f32 a, f32 b) {
-		return fmaxf(a, b);
-	}
-
-	template<const size_t N>
-	requires(N > 0)
-	X17_DEVICE f32 max(const f32 (&arr)[N]) {
-		f32 result = arr[0];
-		X17_UNROLL for (size_t i = 1; i < N; i++) {
-			result = fmaxf(result, arr[i]);
-		}
-		return result;
-	}
-
-	X17_DEVICE f32 fma(f32 mul1, f32 mul2, f32 add) {
-		return __fmaf_rn(mul1, mul2, add);
 	}
 }
 
@@ -557,6 +584,14 @@ struct Fragment_8x8: FragmentReg<T> {
 		);
 	}
 
+	template<typename F>
+	X17_DEVICE void elemwise_(F const &fn) {
+		this->set(
+			fn(this->first()),
+			fn(this->second())
+		);
+	}
+
 	X17_DEVICE void transpose_() requires(sizeof(T) == 4) {
 		usize tid = threadIdx.x % WARP_SIZE;
 		usize row = tid / 4;
@@ -618,6 +653,26 @@ struct Fragment_16x16 {
 	X17_DEVICE void scale_bottom_(T bot) {
 		sub[1][0].scale_(bot);
 		sub[1][1].scale_(bot);
+	}
+
+	template<typename F>
+	X17_DEVICE void elemwise_(F const &fn) {
+		sub[0][0].elemwise_(fn);
+		sub[0][1].elemwise_(fn);
+		sub[1][0].elemwise_(fn);
+		sub[1][1].elemwise_(fn);
+	}
+
+	template<typename F>
+	X17_DEVICE void elemwise_top_(F const &fn) {
+		sub[0][0].elemwise_(fn);
+		sub[0][1].elemwise_(fn);
+	}
+
+	template<typename F>
+	X17_DEVICE void elemwise_bot_(F const &fn) {
+		sub[1][0].elemwise_(fn);
+		sub[1][1].elemwise_(fn);
 	}
 
 	X17_DEVICE void acc_(const Fragment_16x16 &o) {
@@ -1106,6 +1161,18 @@ X17_DEVICE void scale_(Fragment_16x16<T> &f, T s) {
 	f.scale_(s);
 }
 
+template<typename T, typename F>
+X17_DEVICE void elemwise_(Fragment_16x16<T> &f, F const &fn) {
+	f.elemwise_(fn);
+}
+
+template<typename T, const usize K, typename F>
+X17_DEVICE void elemwise_(T (&arr)[K], F const &fn) {
+	X17_UNROLL for (usize i = 0; i < K; i++) {
+		elemwise_(arr[i], fn);
+	}
+}
+
 template<typename T, const usize K>
 X17_DEVICE void scale_(T (&arr)[K], T s) {
 	X17_UNROLL for (usize i = 0; i < K; i++) {
@@ -1123,6 +1190,18 @@ X17_DEVICE void scale_top_(Fragment_16x16<T> &f, T s) {
 	f.scale_top_(s);
 }
 
+template<typename T, typename F>
+X17_DEVICE void elemwise_top_(Fragment_16x16<T> &f, F const &fn) {
+	f.elemwise_top_(fn);
+}
+
+template<typename T, const usize K, typename F>
+X17_DEVICE void elemwise_top_(Fragment_16x16<T> (&arr)[K], F const &fn) {
+	X17_UNROLL for (usize i = 0; i < K; i++) {
+		arr[i].elemwise_top_(fn);
+	}
+}
+
 template<typename T, const usize K>
 X17_DEVICE void scale_top_(Fragment_16x16<T> (&arr)[K], T s) {
 	X17_UNROLL for (usize i = 0; i < K; i++) {
@@ -1138,6 +1217,18 @@ X17_DEVICE void scale_top_(T&... args, S s) {
 template<typename T>
 X17_DEVICE void scale_bottom_(Fragment_16x16<T> &f, T s) {
 	f.scale_bottom_(s);
+}
+
+template<typename T, typename F>
+X17_DEVICE void elemwise_bot_(Fragment_16x16<T> &f, F const &fn) {
+	f.elemwise_bot_(fn);
+}
+
+template<typename T, const usize K, typename F>
+X17_DEVICE void elemwise_bot_(Fragment_16x16<T> (&arr)[K], F const &fn) {
+	X17_UNROLL for (usize i = 0; i < K; i++) {
+		arr[i].elemwise_bot_(fn);
+	}
 }
 
 template<typename T, const usize K>

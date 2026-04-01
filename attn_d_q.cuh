@@ -125,6 +125,9 @@ struct Attn_d_q {
 		f32 bot_n = std::min(window_size, q_start + tid / 4 + 9) + f32(std::numbers::e_v<f64> + 1.0);
 		f32 top_ssmax_scale = math::fast::logb(top_n);
 		f32 bot_ssmax_scale = math::fast::logb(bot_n);
+		f32 pre_tanh_scale = Attn_forward::PRE_TANH_SCALE * Attn_forward::DOT_PROD_SCALE;
+		f32 top_post_tanh_scale = Attn_forward::POST_TANH_SCALE * top_ssmax_scale;
+		f32 bot_post_tanh_scale = Attn_forward::POST_TANH_SCALE * bot_ssmax_scale;
 
 		// Sink: a virtual token with no V contribution - it only adds to the
 		// softmax denominator, stealing probability from real tokens.
@@ -216,13 +219,22 @@ struct Attn_d_q {
 				mma_a_bt(rQ[i], rKV[i], rS_f32);
 			}
 
-			// Standard attention scaling and tanh soft cap must happen before masking
-			// to avoid -inf * 0 == NaN when a scale becomes 0.
-			scale_(rS_f32, Attn_forward::INV_SQRT_QK);
+			// Tanh score capping happens before masking to avoid -inf * 0 == NaN.
 			Fragment_16x16<f32> rS_uncapped_f32 = rS_f32;
-			Attn_forward::soft_score_cap_(rS_f32);
-			scale_top_(rS_f32, top_ssmax_scale);
-			scale_bottom_(rS_f32, bot_ssmax_scale);
+			elemwise_top_(rS_f32, [=](f32 x) {
+				if constexpr (Attn_forward::SCORE_CAP > 0.0f) {
+					return top_post_tanh_scale * math::fast::tanh(pre_tanh_scale * x);
+				} else {
+					return top_post_tanh_scale * pre_tanh_scale * x;
+				}
+			});
+			elemwise_bot_(rS_f32, [=](f32 x) {
+				if constexpr (Attn_forward::SCORE_CAP > 0.0f) {
+					return bot_post_tanh_scale * math::fast::tanh(pre_tanh_scale * x);
+				} else {
+					return bot_post_tanh_scale * pre_tanh_scale * x;
+				}
+			});
 
 			// Apply masks
 			if (kv_step < kv_begin_full || kv_step >= kv_end_full) {
@@ -282,9 +294,9 @@ struct Attn_d_q {
 			rDS_f32.sub[1][0].val1 = rP_f32.sub[1][0].val1 * (rDP.sub[1][0].val1 - bot_D);
 			rDS_f32.sub[1][1].val0 = rP_f32.sub[1][1].val0 * (rDP.sub[1][1].val0 - bot_D);
 			rDS_f32.sub[1][1].val1 = rP_f32.sub[1][1].val1 * (rDP.sub[1][1].val1 - bot_D);
-			Attn_forward::apply_soft_score_cap_grad_(rDS_f32, rS_uncapped_f32);
-			f32 top_dscore_scale = top_ssmax_scale * Attn_forward::INV_SQRT_QK * f32(1.0 / math::fast::logb_e);
-			f32 bot_dscore_scale = bot_ssmax_scale * Attn_forward::INV_SQRT_QK * f32(1.0 / math::fast::logb_e);
+			Attn_forward::apply_soft_score_cap_grad_(rDS_f32, rS_uncapped_f32, top_ssmax_scale, bot_ssmax_scale);
+			f32 top_dscore_scale = top_ssmax_scale * Attn_forward::DOT_PROD_SCALE * f32(1.0 / math::fast::logb_e);
+			f32 bot_dscore_scale = bot_ssmax_scale * Attn_forward::DOT_PROD_SCALE * f32(1.0 / math::fast::logb_e);
 			scale_top_(rDS_f32, top_dscore_scale);
 			scale_bottom_(rDS_f32, bot_dscore_scale);
 

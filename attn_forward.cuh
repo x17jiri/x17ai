@@ -40,8 +40,10 @@ struct Attn_forward {
 
 	static constexpr usize WARPS_PER_BLOCK = Q_WARPS * KV_WARPS;
 	static constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
-	static constexpr f32 INV_SQRT_QK = f32(1.0 / constexpr_sqrt(f64(QK_DIM)));
-	static constexpr f32 SOFT_SCORE_CAP = 50.0f;
+	static constexpr f32 DOT_PROD_SCALE = f32(1.0 / constexpr_sqrt(f64(QK_DIM)));
+	static constexpr f32 SCORE_CAP = 30.0f;
+	static constexpr f32 PRE_TANH_SCALE = SCORE_CAP > 0.0f ? 1.0f / SCORE_CAP : 1.0f;
+	static constexpr f32 POST_TANH_SCALE = SCORE_CAP > 0.0f ? SCORE_CAP : 1.0f;
 
 	// TODO - other matrices (dO, O, ...) should have their stride
 	static constexpr usize KC_STRIDE = NONROPE_DIM * HEAD_CNT;
@@ -57,7 +59,7 @@ struct Attn_forward {
 
 	static X17_DEVICE void causal_mask_diagonal(Fragment_16x16<f32> &rS_f32) {
 		usize tid = threadIdx.x % WARP_SIZE;
-		usize q = tid / 4;           // 0..7
+		usize q = tid / 4;          // 0..7
 		usize k = 2 * (tid % 4);    // 0,2,4,6
 		constexpr f32 NEG_INF = -INFINITY;
 
@@ -74,7 +76,7 @@ struct Attn_forward {
 	/// This is the exact opposite of the causal mask
 	static X17_DEVICE void window_mask_diagonal(Fragment_16x16<f32> &rS_f32) {
 		usize tid = threadIdx.x % WARP_SIZE;
-		usize q = tid / 4;           // 0..7
+		usize q = tid / 4;          // 0..7
 		usize k = 2 * (tid % 4);    // 0,2,4,6
 		constexpr f32 NEG_INF = -INFINITY;
 
@@ -88,31 +90,17 @@ struct Attn_forward {
 		rS_f32.sub[1][1].val1 = k + 1 > q ? rS_f32.sub[1][1].val1 : NEG_INF;
 	}
 
-	static constexpr f32 ONLINE_SOFTMAX_THRESHOLD = 5.0 / math::fast::logb_2;
-
-	static X17_DEVICE f32 soft_score_cap(f32 score) {
-		f32 scaled = score * f32(1.0 / SOFT_SCORE_CAP);
-		return SOFT_SCORE_CAP * tanhf(scaled);
-	}
-
 	static X17_DEVICE f32 soft_score_cap_grad(f32 score) {
-		f32 t = tanhf(score * f32(1.0 / SOFT_SCORE_CAP));
+		f32 t = math::fast::tanh(PRE_TANH_SCALE * DOT_PROD_SCALE * score);
 		return 1.0f - t * t;
 	}
 
-	static X17_DEVICE void soft_score_cap_(Fragment_16x16<f32> &rS_f32) {
-		rS_f32.sub[0][0].val0 = soft_score_cap(rS_f32.sub[0][0].val0);
-		rS_f32.sub[0][0].val1 = soft_score_cap(rS_f32.sub[0][0].val1);
-		rS_f32.sub[0][1].val0 = soft_score_cap(rS_f32.sub[0][1].val0);
-		rS_f32.sub[0][1].val1 = soft_score_cap(rS_f32.sub[0][1].val1);
-
-		rS_f32.sub[1][0].val0 = soft_score_cap(rS_f32.sub[1][0].val0);
-		rS_f32.sub[1][0].val1 = soft_score_cap(rS_f32.sub[1][0].val1);
-		rS_f32.sub[1][1].val0 = soft_score_cap(rS_f32.sub[1][1].val0);
-		rS_f32.sub[1][1].val1 = soft_score_cap(rS_f32.sub[1][1].val1);
-	}
-
-	static X17_DEVICE void apply_soft_score_cap_grad_(Fragment_16x16<f32> &rDS_f32, const Fragment_16x16<f32> &rS_uncapped_f32) {
+	static X17_DEVICE void apply_soft_score_cap_grad_(
+		Fragment_16x16<f32> &rDS_f32,
+		const Fragment_16x16<f32> &rS_uncapped_f32,
+		[[maybe_unused]] f32 top_ssmax_scale,
+		[[maybe_unused]] f32 bot_ssmax_scale
+	) {
 		rDS_f32.sub[0][0].val0 *= soft_score_cap_grad(rS_uncapped_f32.sub[0][0].val0);
 		rDS_f32.sub[0][0].val1 *= soft_score_cap_grad(rS_uncapped_f32.sub[0][0].val1);
 		rDS_f32.sub[0][1].val0 *= soft_score_cap_grad(rS_uncapped_f32.sub[0][1].val0);
@@ -122,15 +110,6 @@ struct Attn_forward {
 		rDS_f32.sub[1][0].val1 *= soft_score_cap_grad(rS_uncapped_f32.sub[1][0].val1);
 		rDS_f32.sub[1][1].val0 *= soft_score_cap_grad(rS_uncapped_f32.sub[1][1].val0);
 		rDS_f32.sub[1][1].val1 *= soft_score_cap_grad(rS_uncapped_f32.sub[1][1].val1);
-	}
-
-	static X17_DEVICE f32 scale_and_soft_cap_sink_score(f32 sink_score, f32 ssmax_scale) {
-		if (!isfinite(sink_score)) {
-			return std::numeric_limits<f32>::lowest();
-		}
-		f32 scaled = sink_score * INV_SQRT_QK;
-		f32 capped = soft_score_cap(scaled);
-		return math::max(capped * ssmax_scale, std::numeric_limits<f32>::lowest());
 	}
 
 	static constexpr size_t mma_count(size_t seq_len, size_t window_size) {
@@ -146,6 +125,8 @@ struct Attn_forward {
 	static constexpr double flops(size_t seq_len, size_t window_size) {
 		return double(mma_count(seq_len, window_size)) * 2.0 * 16.0 * 16.0 * 16.0;
 	}
+
+	static constexpr f32 ONLINE_SOFTMAX_THRESHOLD = 5.0 / math::fast::logb_2;
 
 	X17_DEVICE void online_softmax(
 		bool first_step,
@@ -366,6 +347,10 @@ struct Attn_forward {
 		f32 top_ssmax_scale = math::fast::logb(top_n);
 		f32 bot_ssmax_scale = math::fast::logb(bot_n);
 
+		f32 pre_tanh_scale = PRE_TANH_SCALE * DOT_PROD_SCALE;
+		f32 top_post_tanh_scale = POST_TANH_SCALE * top_ssmax_scale;
+		f32 bot_post_tanh_scale = POST_TANH_SCALE * bot_ssmax_scale;
+
 		// Sink: a virtual token with no V contribution - it only adds to the
 		// softmax denominator, stealing probability from real tokens.
 		// sink[0] = raw score, sink[1] = output gate
@@ -374,8 +359,8 @@ struct Attn_forward {
 		if (sink != nullptr) {
 			load_gmem_2x32b(sink, sink_score, gate);
 		}
-		f32 top_sink_scaled = scale_and_soft_cap_sink_score(sink_score, top_ssmax_scale);
-		f32 bot_sink_scaled = scale_and_soft_cap_sink_score(sink_score, bot_ssmax_scale);
+		f32 top_sink_scaled = math::max(sink_score * top_ssmax_scale, std::numeric_limits<f32>::lowest());
+		f32 bot_sink_scaled = math::max(sink_score * bot_ssmax_scale, std::numeric_limits<f32>::lowest());
 
 		SoftmaxStats r_top;
 		r_top.max = top_sink_scaled + ONLINE_SOFTMAX_THRESHOLD;
@@ -415,14 +400,23 @@ struct Attn_forward {
 			}
 			X17_UNROLL for (usize i = V_TILES; i < QK_TILES; i++) {
 				mma_a_bt(rQ[i], rKV[i], rS_f32);
-					}
+			}
 
-			// Standard attention scaling and tanh soft cap must happen before masking
-			// to avoid -inf * 0 == NaN when a scale becomes 0.
-			scale_(rS_f32, INV_SQRT_QK);
-			soft_score_cap_(rS_f32);
-			scale_top_(rS_f32, top_ssmax_scale);
-			scale_bottom_(rS_f32, bot_ssmax_scale);
+			// Scaling must happen before masking to avoid -inf * 0 == NaN when scale == 0
+			elemwise_top_(rS_f32, [=](f32 x) {
+				if constexpr (SCORE_CAP > 0.0f) {
+					return top_post_tanh_scale * math::fast::tanh(pre_tanh_scale * x);
+				} else {
+					return top_post_tanh_scale * pre_tanh_scale * x;
+				}
+			});
+			elemwise_bot_(rS_f32, [=](f32 x) {
+				if constexpr (SCORE_CAP > 0.0f) {
+					return bot_post_tanh_scale * math::fast::tanh(pre_tanh_scale * x);
+				} else {
+					return bot_post_tanh_scale * pre_tanh_scale * x;
+				}
+			});
 
 			// Apply masks
 			if (kv_step < kv_begin_full || kv_step >= kv_end_full) {

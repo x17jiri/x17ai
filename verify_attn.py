@@ -11,19 +11,23 @@ import numpy as np
 import torch
 import argparse
 import os
+import math
 
 QK_DIM = 128
 V_DIM = 64
-WINDOW_SIZE = 256
-SOFT_SCORE_CAP = 50.0
+# Must match WINDOW_SIZE in attn.cu.
+WINDOW_SIZE = 0
+SOFT_SCORE_CAP = 30.0
+PRE_TANH_SCALE = 1.0 / (math.sqrt(QK_DIM) * SOFT_SCORE_CAP) if SOFT_SCORE_CAP > 0.0 else 1.0 / math.sqrt(QK_DIM)
+POST_TANH_SCALE = SOFT_SCORE_CAP if SOFT_SCORE_CAP > 0.0 else 1.0
 
-import math
 
-
-def soft_score_cap(scores):
+def soft_score_cap(scores, ssmax_scale):
+	if SOFT_SCORE_CAP <= 0.0:
+		return ssmax_scale * scores / math.sqrt(QK_DIM)
 	return torch.where(
 		torch.isfinite(scores),
-		SOFT_SCORE_CAP * torch.tanh(scores / SOFT_SCORE_CAP),
+		POST_TANH_SCALE * torch.tanh(PRE_TANH_SCALE * scores) * ssmax_scale,
 		scores,
 	)
 
@@ -104,15 +108,13 @@ def compute_attn_real(Q, K, sink, window_size=0):
 	"""
 	q_len = Q.shape[0]
 	kv_len = K.shape[0]
-	scores = Q @ K.T     # [q_len, kv_len]
-	sink_col = torch.full((q_len, 1), sink, dtype=torch.float32)
-	scores = torch.cat([sink_col, scores], dim=1)  # [q_len, kv_len+1]
-	scores = scores / math.sqrt(QK_DIM)
-	scores = soft_score_cap(scores)
-
-	# SSMax: multiply ALL capped scores (including sink) by log2(n), matching kernel exp2/log2 math
 	n = ssmax_n(q_len, window_size).unsqueeze(1)  # [q_len, 1]
-	scores = scores * torch.log2(n)
+	ssmax_scale = torch.log2(n)
+	real_scores = soft_score_cap(Q @ K.T, ssmax_scale)
+	sink_col = torch.full((q_len, 1), sink, dtype=torch.float32) * ssmax_scale
+	scores = torch.cat([sink_col, real_scores], dim=1)  # [q_len, kv_len+1]
+
+	# SSMax is applied after tanh, matching the CUDA kernel.
 
 	# Causal mask: mask when j > i (sink column is never masked)
 	causal_mask = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
@@ -180,13 +182,10 @@ def reference_online_softmax(Q, K, V, sink, gate, kv_tile=16, window_size=0):
 	for d in range(0, QK_DIM, 16):
 		scores = scores + Q[:, d:d+16] @ K[:, d:d+16].T
 
-	# Per-row SSMax scale, applied after normal attention scaling and tanh soft cap.
+	# Per-row SSMax scale is applied after tanh.
 	n = ssmax_n(q_len, window_size)
-	inv_sqrt_qk = torch.tensor(1.0 / math.sqrt(QK_DIM), dtype=torch.float32)
-	scores = scores * inv_sqrt_qk
-	scores = soft_score_cap(scores)
 	ssmax_scale = torch.log2(n)
-	scores = scores * ssmax_scale.unsqueeze(1)
+	scores = soft_score_cap(scores, ssmax_scale.unsqueeze(1))
 
 	# Causal mask
 	mask = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
@@ -230,10 +229,7 @@ def reference_online_softmax(Q, K, V, sink, gate, kv_tile=16, window_size=0):
 		O = O + P_bf16 @ V_bf16[kv_start:kv_end, :]
 
 	# combine_and_store: include sink and normalize
-	sink_scaled = torch.full((q_len,), sink, dtype=torch.float32)
-	sink_scaled = sink_scaled * inv_sqrt_qk
-	sink_scaled = soft_score_cap(sink_scaled)
-	sink_scaled = sink_scaled * ssmax_scale
+	sink_scaled = torch.full((q_len,), sink, dtype=torch.float32) * ssmax_scale
 	global_max = torch.maximum(row_max, sink_scaled)
 	global_sum = (
 		row_sum * torch.exp2(row_max - global_max)
@@ -255,10 +251,8 @@ def reference_matching_from_L(Q, K, V, L, gate, kv_tile=16, v_tile=16, window_si
 	q_len = Q.shape[0]
 	kv_len = K.shape[0]
 	scores = Q @ K.T
-	scores = scores / math.sqrt(QK_DIM)
-	scores = soft_score_cap(scores)
 	n = ssmax_n(q_len, window_size).unsqueeze(1)
-	scores = scores * torch.log2(n)
+	scores = soft_score_cap(scores, torch.log2(n))
 	mask = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
 	if window_size > 0:
 		window_mask = torch.tril(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=-window_size)
@@ -446,12 +440,9 @@ def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5, window_size=
 		# Recompute scores
 		scores = Q_f @ K_f.T
 		n = ssmax_n(q_len, window_size)
-		inv_sqrt_qk = 1.0 / math.sqrt(QK_DIM)
-		scores = scores * inv_sqrt_qk
-		uncapped_scores = scores.clone()
-		scores = soft_score_cap(scores)
 		ssmax_scale = torch.log2(n)  # [q_len]
-		scores = scores * ssmax_scale.unsqueeze(1)
+		uncapped_scores = scores.clone()
+		scores = soft_score_cap(scores, ssmax_scale.unsqueeze(1))
 
 		# Causal mask
 		causal = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
@@ -471,9 +462,9 @@ def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5, window_size=
 		dP = dO_f @ V_f.T  # [q_len, kv_len]
 
 		# dS = P * (dP - D') * (ssmax_scale / log2(e))
-		#      * (1 - tanh(uncapped / cap)^2) / sqrt(QK_DIM)
-		cap_grad = 1.0 - torch.tanh(uncapped_scores / SOFT_SCORE_CAP).square()
-		dk_scale = (ssmax_scale * inv_sqrt_qk) / math.log2(math.e)  # [q_len]
+		#      * (1 - tanh(pre_tanh_scale * raw_score)^2) / sqrt(QK_DIM)
+		cap_grad = 1.0 - torch.tanh((PRE_TANH_SCALE / math.sqrt(QK_DIM)) * uncapped_scores).square()
+		dk_scale = (ssmax_scale / math.sqrt(QK_DIM)) / math.log2(math.e)  # [q_len]
 		dS = dk_scale.unsqueeze(1) * cap_grad * P * (dP - D_prime.unsqueeze(1))  # [q_len, kv_len]
 
 		# dK = dS^T @ Q
