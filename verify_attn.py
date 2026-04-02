@@ -17,7 +17,7 @@ QK_DIM = 128
 V_DIM = 64
 # Must match WINDOW_SIZE in attn.cu.
 WINDOW_SIZE = 0
-SOFT_SCORE_CAP = 30.0
+SOFT_SCORE_CAP = 32.0
 PRE_TANH_SCALE = 1.0 / (math.sqrt(QK_DIM) * SOFT_SCORE_CAP) if SOFT_SCORE_CAP > 0.0 else 1.0 / math.sqrt(QK_DIM)
 POST_TANH_SCALE = SOFT_SCORE_CAP if SOFT_SCORE_CAP > 0.0 else 1.0
 
@@ -469,9 +469,15 @@ def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5, window_size=
 
 		# dK = dS^T @ Q
 		match_dK = (dS.T.to(torch.bfloat16).to(torch.float32) @ Q_f).to(torch.bfloat16)
+		# dQ = dS @ K
+		match_dQ = (dS.to(torch.bfloat16).to(torch.float32) @ K_f).to(torch.bfloat16)
 		# dV = P^T @ dO  (P already has gate folded in, no extra factor needed for dV
 		# since the kernel computes dV += P^T @ dO with P = gate * P_softmax)
 		match_dV = (P.T.to(torch.bfloat16).to(torch.float32) @ dO_f).to(torch.bfloat16)
+
+		if os.path.exists("tmp/dQ.bin"):
+			dQ_cuda = load_bf16("tmp/dQ.bin", (q_len, QK_DIM))
+			compare("dQ (from CUDA L, O)", match_dQ, dQ_cuda, q_len, QK_DIM)
 
 		if os.path.exists("tmp/dK.bin"):
 			dK_cuda = load_bf16("tmp/dK.bin", (kv_len, QK_DIM))

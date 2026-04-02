@@ -33,6 +33,10 @@ struct Attn_d_kv {
 
 	static constexpr usize WARPS_PER_BLOCK = Q_WARPS * KV_WARPS;
 	static constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
+	static constexpr f32 DOT_PROD_SCALE = Attn_forward::DOT_PROD_SCALE;
+	static constexpr f32 SCORE_CAP = Attn_forward::SCORE_CAP;
+	static constexpr f32 PRE_TANH_SCALE = Attn_forward::PRE_TANH_SCALE;
+	static constexpr f32 POST_TANH_SCALE = Attn_forward::POST_TANH_SCALE;
 
 	// TODO - other matrices (dO, O, ...) should have their stride
 	static constexpr usize KC_STRIDE = NONROPE_DIM * HEAD_CNT;
@@ -220,9 +224,10 @@ struct Attn_d_kv {
 			f32 bot_n = std::min(window_size, q_start + tid / 4 + 9) + f32(std::numbers::e_v<f64> + 1.0);
 			f32 top_ssmax_scale = math::fast::logb(top_n);
 			f32 bot_ssmax_scale = math::fast::logb(bot_n);
-			f32 pre_tanh_scale = Attn_forward::PRE_TANH_SCALE * Attn_forward::DOT_PROD_SCALE;
-			f32 top_post_tanh_scale = Attn_forward::POST_TANH_SCALE * top_ssmax_scale;
-			f32 bot_post_tanh_scale = Attn_forward::POST_TANH_SCALE * bot_ssmax_scale;
+
+			f32 pre_tanh_scale = PRE_TANH_SCALE * DOT_PROD_SCALE;
+			f32 top_post_tanh_scale = POST_TANH_SCALE * top_ssmax_scale;
+			f32 bot_post_tanh_scale = POST_TANH_SCALE * bot_ssmax_scale;
 
 			// Adjust L to fold gate into P
 			//   L' = L - logb(gate)
@@ -232,21 +237,17 @@ struct Attn_d_kv {
 
 			// WARNING: DON'T get tempted to FMA this into the expb below because
 			// scaling must happen before masking to avoid -inf * 0 == NaN when scale == 0
-			Fragment_16x16<f32> rS_uncapped_f32 = rS_f32;
-			elemwise_top_(rS_f32, [=](f32 x) {
-				if constexpr (Attn_forward::SCORE_CAP > 0.0f) {
-					return top_post_tanh_scale * math::fast::tanh(pre_tanh_scale * x);
-				} else {
-					return top_post_tanh_scale * pre_tanh_scale * x;
-				}
-			});
-			elemwise_bot_(rS_f32, [=](f32 x) {
-				if constexpr (Attn_forward::SCORE_CAP > 0.0f) {
-					return bot_post_tanh_scale * math::fast::tanh(pre_tanh_scale * x);
-				} else {
-					return bot_post_tanh_scale * pre_tanh_scale * x;
-				}
-			});
+			Fragment_16x16<f32> rS_tanh;
+			if constexpr (SCORE_CAP > 0.0f) {
+				scale_(rS_f32, pre_tanh_scale);
+				elemwise_(rS_f32, [=](f32 x) { return math::fast::tanh(x); });
+				rS_tanh = rS_f32;
+				scale_top_(rS_f32, top_post_tanh_scale);
+				scale_bottom_(rS_f32, bot_post_tanh_scale);
+			} else {
+				scale_top_(rS_f32, pre_tanh_scale * top_post_tanh_scale);
+				scale_bottom_(rS_f32, pre_tanh_scale * bot_post_tanh_scale);
+			}
 
 			// Apply masks
 			if (q_step < q_begin_full || q_step >= q_end_full) {
@@ -300,7 +301,6 @@ struct Attn_d_kv {
 
 			// dS = P * (dP - D') * (ssmax_scale / logb_e)
 			//      * soft_cap'(raw_qk / sqrt(QK_DIM)) / sqrt(QK_DIM)
-			// P has gate folded in.
 			Fragment_16x16<f32> rDS_f32;
 			rDS_f32.sub[0][0].val0 = rP_f32.sub[0][0].val0 * (rDP.sub[0][0].val0 - top_D);
 			rDS_f32.sub[0][0].val1 = rP_f32.sub[0][0].val1 * (rDP.sub[0][0].val1 - top_D);
@@ -311,11 +311,15 @@ struct Attn_d_kv {
 			rDS_f32.sub[1][0].val1 = rP_f32.sub[1][0].val1 * (rDP.sub[1][0].val1 - bot_D);
 			rDS_f32.sub[1][1].val0 = rP_f32.sub[1][1].val0 * (rDP.sub[1][1].val0 - bot_D);
 			rDS_f32.sub[1][1].val1 = rP_f32.sub[1][1].val1 * (rDP.sub[1][1].val1 - bot_D);
-			Attn_forward::apply_soft_score_cap_grad_(rDS_f32, rS_uncapped_f32, top_ssmax_scale, bot_ssmax_scale);
-			f32 top_dk_scale = top_ssmax_scale * Attn_forward::DOT_PROD_SCALE * f32(1.0 / math::fast::logb_e);
-			f32 bot_dk_scale = bot_ssmax_scale * Attn_forward::DOT_PROD_SCALE * f32(1.0 / math::fast::logb_e);
+
+			// P already has gate folded in.
+			f32 top_dk_scale = f32(1.0 / math::fast::logb_e) * pre_tanh_scale * top_post_tanh_scale;
+			f32 bot_dk_scale = f32(1.0 / math::fast::logb_e) * pre_tanh_scale * bot_post_tanh_scale;
 			scale_top_(rDS_f32, top_dk_scale);
 			scale_bottom_(rDS_f32, bot_dk_scale);
+			if constexpr (SCORE_CAP > 0.0f) {
+				Attn_forward::apply_d_tanh_(rDS_f32, rS_tanh);
+			}
 
 			{ // Get more data from GMEM
 				// Wait for the next batch of GMEM -> SMEM preloads to complete

@@ -146,6 +146,10 @@ namespace math {
 			#endif
 		}
 
+		X17_DEVICE f32 d_tanh(f32 tanh) {
+			return 1.0f - tanh * tanh;
+		}
+
 		X17_DEVICE f32 erf(f32 x) {
 			#if X17_PRECISE_MATH
 				return erff(x);

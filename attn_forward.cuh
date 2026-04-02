@@ -41,7 +41,7 @@ struct Attn_forward {
 	static constexpr usize WARPS_PER_BLOCK = Q_WARPS * KV_WARPS;
 	static constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
 	static constexpr f32 DOT_PROD_SCALE = f32(1.0 / constexpr_sqrt(f64(QK_DIM)));
-	static constexpr f32 SCORE_CAP = 30.0f;
+	static constexpr f32 SCORE_CAP = 32.0f;
 	static constexpr f32 PRE_TANH_SCALE = SCORE_CAP > 0.0f ? 1.0f / SCORE_CAP : 1.0f;
 	static constexpr f32 POST_TANH_SCALE = SCORE_CAP > 0.0f ? SCORE_CAP : 1.0f;
 
@@ -110,6 +110,21 @@ struct Attn_forward {
 		rDS_f32.sub[1][0].val1 *= soft_score_cap_grad(rS_uncapped_f32.sub[1][0].val1);
 		rDS_f32.sub[1][1].val0 *= soft_score_cap_grad(rS_uncapped_f32.sub[1][1].val0);
 		rDS_f32.sub[1][1].val1 *= soft_score_cap_grad(rS_uncapped_f32.sub[1][1].val1);
+	}
+
+	static X17_DEVICE void apply_d_tanh_(
+		Fragment_16x16<f32> &rDS_f32,
+		const Fragment_16x16<f32> &rS_tanh_f32
+	) {
+		rDS_f32.sub[0][0].val0 *= math::fast::d_tanh(rS_tanh_f32.sub[0][0].val0);
+		rDS_f32.sub[0][0].val1 *= math::fast::d_tanh(rS_tanh_f32.sub[0][0].val1);
+		rDS_f32.sub[0][1].val0 *= math::fast::d_tanh(rS_tanh_f32.sub[0][1].val0);
+		rDS_f32.sub[0][1].val1 *= math::fast::d_tanh(rS_tanh_f32.sub[0][1].val1);
+
+		rDS_f32.sub[1][0].val0 *= math::fast::d_tanh(rS_tanh_f32.sub[1][0].val0);
+		rDS_f32.sub[1][0].val1 *= math::fast::d_tanh(rS_tanh_f32.sub[1][0].val1);
+		rDS_f32.sub[1][1].val0 *= math::fast::d_tanh(rS_tanh_f32.sub[1][1].val0);
+		rDS_f32.sub[1][1].val1 *= math::fast::d_tanh(rS_tanh_f32.sub[1][1].val1);
 	}
 
 	static constexpr size_t mma_count(size_t seq_len, size_t window_size) {
@@ -403,20 +418,15 @@ struct Attn_forward {
 			}
 
 			// Scaling must happen before masking to avoid -inf * 0 == NaN when scale == 0
-			elemwise_top_(rS_f32, [=](f32 x) {
-				if constexpr (SCORE_CAP > 0.0f) {
-					return top_post_tanh_scale * math::fast::tanh(pre_tanh_scale * x);
-				} else {
-					return top_post_tanh_scale * pre_tanh_scale * x;
-				}
-			});
-			elemwise_bot_(rS_f32, [=](f32 x) {
-				if constexpr (SCORE_CAP > 0.0f) {
-					return bot_post_tanh_scale * math::fast::tanh(pre_tanh_scale * x);
-				} else {
-					return bot_post_tanh_scale * pre_tanh_scale * x;
-				}
-			});
+			if constexpr (SCORE_CAP > 0.0f) {
+				scale_(rS_f32, pre_tanh_scale);
+				elemwise_(rS_f32, [=](f32 x) { return math::fast::tanh(x); });
+				scale_top_(rS_f32, top_post_tanh_scale);
+				scale_bottom_(rS_f32, bot_post_tanh_scale);
+			} else {
+				scale_top_(rS_f32, pre_tanh_scale * top_post_tanh_scale);
+				scale_bottom_(rS_f32, pre_tanh_scale * bot_post_tanh_scale);
+			}
 
 			// Apply masks
 			if (kv_step < kv_begin_full || kv_step >= kv_end_full) {
