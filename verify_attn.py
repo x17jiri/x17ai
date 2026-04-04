@@ -17,19 +17,8 @@ QK_DIM = 128
 V_DIM = 64
 # Must match WINDOW_SIZE in attn.cu.
 WINDOW_SIZE = 0
-SOFT_SCORE_CAP = 32.0
-PRE_TANH_SCALE = 1.0 / (math.sqrt(QK_DIM) * SOFT_SCORE_CAP) if SOFT_SCORE_CAP > 0.0 else 1.0 / math.sqrt(QK_DIM)
-POST_TANH_SCALE = SOFT_SCORE_CAP if SOFT_SCORE_CAP > 0.0 else 1.0
+SCORE_SCALE = 1.0 / math.sqrt(QK_DIM)
 
-
-def soft_score_cap(scores, ssmax_scale):
-	if SOFT_SCORE_CAP <= 0.0:
-		return ssmax_scale * scores / math.sqrt(QK_DIM)
-	return torch.where(
-		torch.isfinite(scores),
-		POST_TANH_SCALE * torch.tanh(PRE_TANH_SCALE * scores) * ssmax_scale,
-		scores,
-	)
 
 
 def ssmax_n(q_len, 	window_size=0):
@@ -110,11 +99,9 @@ def compute_attn_real(Q, K, sink, window_size=0):
 	kv_len = K.shape[0]
 	n = ssmax_n(q_len, window_size).unsqueeze(1)  # [q_len, 1]
 	ssmax_scale = torch.log2(n)
-	real_scores = soft_score_cap(Q @ K.T, ssmax_scale)
-	sink_col = torch.full((q_len, 1), sink, dtype=torch.float32) * ssmax_scale
+	real_scores = (Q @ K.T) * (SCORE_SCALE * ssmax_scale)
+	sink_col = torch.full((q_len, 1), sink, dtype=torch.float32) * SCORE_SCALE * ssmax_scale
 	scores = torch.cat([sink_col, real_scores], dim=1)  # [q_len, kv_len+1]
-
-	# SSMax is applied after tanh, matching the CUDA kernel.
 
 	# Causal mask: mask when j > i (sink column is never masked)
 	causal_mask = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
@@ -182,10 +169,10 @@ def reference_online_softmax(Q, K, V, sink, gate, kv_tile=16, window_size=0):
 	for d in range(0, QK_DIM, 16):
 		scores = scores + Q[:, d:d+16] @ K[:, d:d+16].T
 
-	# Per-row SSMax scale is applied after tanh.
+	# Per-row SSMax scale is applied directly to scaled scores.
 	n = ssmax_n(q_len, window_size)
 	ssmax_scale = torch.log2(n)
-	scores = soft_score_cap(scores, ssmax_scale.unsqueeze(1))
+	scores = scores  * SCORE_SCALE * ssmax_scale.unsqueeze(1)
 
 	# Causal mask
 	mask = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
@@ -229,7 +216,7 @@ def reference_online_softmax(Q, K, V, sink, gate, kv_tile=16, window_size=0):
 		O = O + P_bf16 @ V_bf16[kv_start:kv_end, :]
 
 	# combine_and_store: include sink and normalize
-	sink_scaled = torch.full((q_len,), sink, dtype=torch.float32) * ssmax_scale
+	sink_scaled = torch.full((q_len,), sink, dtype=torch.float32) * SCORE_SCALE * ssmax_scale
 	global_max = torch.maximum(row_max, sink_scaled)
 	global_sum = (
 		row_sum * torch.exp2(row_max - global_max)
@@ -252,7 +239,7 @@ def reference_matching_from_L(Q, K, V, L, gate, kv_tile=16, v_tile=16, window_si
 	kv_len = K.shape[0]
 	scores = Q @ K.T
 	n = ssmax_n(q_len, window_size).unsqueeze(1)
-	scores = soft_score_cap(scores, torch.log2(n))
+	scores = scores * SCORE_SCALE * torch.log2(n)
 	mask = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
 	if window_size > 0:
 		window_mask = torch.tril(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=-window_size)
@@ -437,12 +424,13 @@ def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5, window_size=
 		K_f = KV_bf16[:, :QK_DIM].float()
 		V_f = KV_bf16[:, :V_DIM].float()
 
-		# Recompute scores
-		scores = Q_f @ K_f.T
+		# Recompute scores (multiply by combined score_scale in one step to match
+		# the kernel's multiplication order and avoid f32 rounding differences)
 		n = ssmax_n(q_len, window_size)
 		ssmax_scale = torch.log2(n)  # [q_len]
-		uncapped_scores = scores.clone()
-		scores = soft_score_cap(scores, ssmax_scale.unsqueeze(1))
+		score_scale = SCORE_SCALE * ssmax_scale  # [q_len]
+		scores = Q_f @ K_f.T
+		scores = scores * score_scale.unsqueeze(1)
 
 		# Causal mask
 		causal = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
@@ -451,29 +439,40 @@ def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5, window_size=
 			causal = causal | window
 		scores = scores.masked_fill(causal, float('-inf'))
 
-		# P = gate * P_softmax = exp2(S*score_scale - L + log2(gate))
-		L_g = L_cuda - math.log2(gate_arg)  # L_g = L - log2(gate)
-		P = torch.exp2(scores - L_g.unsqueeze(1))  # [q_len, kv_len], = gate * P_softmax
-
 		# D' = rowsum(dO ⊙ O_cuda) / gate
 		D_prime = (dO_f * O_cuda.float()).sum(dim=-1) / gate_arg  # [q_len]
 
 		# dP = dO @ V^T
 		dP = dO_f @ V_f.T  # [q_len, kv_len]
 
-		# dS = P * (dP - D') * (ssmax_scale / log2(e))
-		#      * (1 - tanh(pre_tanh_scale * raw_score)^2) / sqrt(QK_DIM)
-		cap_grad = 1.0 - torch.tanh((PRE_TANH_SCALE / math.sqrt(QK_DIM)) * uncapped_scores).square()
-		dk_scale = (ssmax_scale / math.sqrt(QK_DIM)) / math.log2(math.e)  # [q_len]
-		dS = dk_scale.unsqueeze(1) * cap_grad * P * (dP - D_prime.unsqueeze(1))  # [q_len, kv_len]
+		logb_e = math.log2(math.e)
 
-		# dK = dS^T @ Q
-		match_dK = (dS.T.to(torch.bfloat16).to(torch.float32) @ Q_f).to(torch.bfloat16)
-		# dQ = dS @ K
-		match_dQ = (dS.to(torch.bfloat16).to(torch.float32) @ K_f).to(torch.bfloat16)
-		# dV = P^T @ dO  (P already has gate folded in, no extra factor needed for dV
-		# since the kernel computes dV += P^T @ dO with P = gate * P_softmax)
+		# --- dQ: kernel folds gate * score_scale / logb_e into L ---
+		#   grad_scale = gate * score_scale / logb_e
+		#   L' = L - log2(grad_scale)
+		#   P' = exp2(S*score_scale - L') = P_softmax * grad_scale
+		#   dS_dq = P' * (dP - D')
+		#   dQ = dS_dq @ K   (dS cast to bf16 first)
+		grad_scale = (1.0 / logb_e) * gate_arg * score_scale
+		L_prime = L_cuda - torch.log2(grad_scale)
+		P_prime = torch.exp2(scores - L_prime.unsqueeze(1))
+		dS_dq = P_prime * (dP - D_prime.unsqueeze(1))
+		match_dQ = (dS_dq.to(torch.bfloat16).to(torch.float32) @ K_f).to(torch.bfloat16)
+
+		# --- dK/dV: kernel folds only gate into L ---
+		#   L_g = L - log2(gate)
+		#   P = exp2(S*score_scale - L_g) = gate * P_softmax
+		#   dV = P^T @ dO   (P cast to bf16)
+		#   dS_dkv = P * (dP - D'), then scale by score_scale / logb_e
+		#   dK = dS_dkv^T @ Q   (dS cast to bf16)
+		L_g = L_cuda - math.log2(gate_arg)
+		P = torch.exp2(scores - L_g.unsqueeze(1))
 		match_dV = (P.T.to(torch.bfloat16).to(torch.float32) @ dO_f).to(torch.bfloat16)
+
+		dS_dkv = P * (dP - D_prime.unsqueeze(1))
+		dk_scale = score_scale / logb_e  # [q_len]
+		dS_dkv = dS_dkv * dk_scale.unsqueeze(1)
+		match_dK = (dS_dkv.T.to(torch.bfloat16).to(torch.float32) @ Q_f).to(torch.bfloat16)
 
 		if os.path.exists("tmp/dQ.bin"):
 			dQ_cuda = load_bf16("tmp/dQ.bin", (q_len, QK_DIM))

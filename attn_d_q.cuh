@@ -32,10 +32,7 @@ struct Attn_d_q {
 
 	static constexpr usize WARPS_PER_BLOCK = Q_WARPS * KV_WARPS;
 	static constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
-	static constexpr f32 DOT_PROD_SCALE = Attn_forward::DOT_PROD_SCALE;
-	static constexpr f32 SCORE_CAP = Attn_forward::SCORE_CAP;
-	static constexpr f32 PRE_TANH_SCALE = Attn_forward::PRE_TANH_SCALE;
-	static constexpr f32 POST_TANH_SCALE = Attn_forward::POST_TANH_SCALE;
+	static constexpr f32 SCORE_SCALE = Attn_forward::SCORE_SCALE;
 
 	// TODO - other matrices (dO, O, ...) should have their stride
 	static constexpr usize KC_STRIDE = Attn_forward::KC_STRIDE;
@@ -131,12 +128,8 @@ struct Attn_d_q {
 		//     `1` to account for the sink token
 		f32 top_n = std::min(window_size, q_start + tid / 4 + 1) + f32(std::numbers::e_v<f64> + 1.0);
 		f32 bot_n = std::min(window_size, q_start + tid / 4 + 9) + f32(std::numbers::e_v<f64> + 1.0);
-		f32 top_ssmax_scale = math::fast::logb(top_n);
-		f32 bot_ssmax_scale = math::fast::logb(bot_n);
-
-		f32 pre_tanh_scale = PRE_TANH_SCALE * DOT_PROD_SCALE;
-		f32 top_post_tanh_scale = POST_TANH_SCALE * top_ssmax_scale;
-		f32 bot_post_tanh_scale = POST_TANH_SCALE * bot_ssmax_scale;
+		f32 top_score_scale = SCORE_SCALE * math::fast::logb(top_n);
+		f32 bot_score_scale = SCORE_SCALE * math::fast::logb(bot_n);
 
 		// Sink: a virtual token with no V contribution - it only adds to the
 		// softmax denominator, stealing probability from real tokens.
@@ -206,14 +199,13 @@ struct Attn_d_q {
 			gD_ptr[base + (tid / 4) + ((tid & 2) * 4)] = ((tid & 2) == 0 ? top_D : bot_D);
 		}
 
-		// Adjust L to fold pre_tanh_scale, post_tanh_scale and gate into P:
-		//   L' = L - logb(pre_tanh_scale * post_tanh_scale * gate / logb_e)
-		//   P' = expb(S * (pre_tanh_scale * post_tanh_scale * gate / logb_e) - L')
-		//      = P * (pre_tanh_scale * post_tanh_scale * gate / logb_e)
+		// Adjust L to fold score_scale and gate into P:
+		//   L' = L - logb(gate * score_scale / logb_e)
+		//   P' = expb(S*score_scale - L') = P * gate * score_scale / logb_e
 		//   D'  = D / gate
 		// so dS = P' * (dP - D') and dQ = sum(dS) @ K — no scaling needed.
-		f32 top_grad_scale = f32(1.0 / math::fast::logb_e) * gate * pre_tanh_scale * top_post_tanh_scale;
-		f32 bot_grad_scale = f32(1.0 / math::fast::logb_e) * gate * pre_tanh_scale * bot_post_tanh_scale;
+		f32 top_grad_scale = f32(1.0 / math::fast::logb_e) * gate * top_score_scale;
+		f32 bot_grad_scale = f32(1.0 / math::fast::logb_e) * gate * bot_score_scale;
 		top_L -= math::fast::logb(top_grad_scale);
 		bot_L -= math::fast::logb(bot_grad_scale);
 
@@ -232,17 +224,8 @@ struct Attn_d_q {
 
 			// WARNING: DON'T get tempted to FMA this into the expb below because
 			// scaling must happen before masking to avoid -inf * 0 == NaN when scale == 0
-			Fragment_16x16<f32> rS_tanh;
-			if constexpr (SCORE_CAP > 0.0f) {
-				scale_(rS_f32, pre_tanh_scale);
-				elemwise_(rS_f32, [=](f32 x) { return math::fast::tanh(x); });
-				rS_tanh = rS_f32;
-				scale_top_(rS_f32, top_post_tanh_scale);
-				scale_bottom_(rS_f32, bot_post_tanh_scale);
-			} else {
-				scale_top_(rS_f32, pre_tanh_scale * top_post_tanh_scale);
-				scale_bottom_(rS_f32, pre_tanh_scale * bot_post_tanh_scale);
-			}
+			scale_top_(rS_f32, top_score_scale);
+			scale_bottom_(rS_f32, bot_score_scale);
 
 			// Apply masks
 			if (kv_step < kv_begin_full || kv_step >= kv_end_full) {
@@ -291,7 +274,7 @@ struct Attn_d_q {
 				smem_tile_to_fragment_trans(sKV, 0, i * 16, rKV[i]);
 			}
 
-			// dS = P' * (dP - D') -- (gate and score_scale/logb_e folded into P', D' = D/gate)
+			// dS = P' * (dP - D') # (gate and score_scale/logb_e folded into P', D' = D/gate)
 			Fragment_16x16<f32> rDS_f32;
 			rDS_f32.sub[0][0].val0 = rP_f32.sub[0][0].val0 * (rDP.sub[0][0].val0 - top_D);
 			rDS_f32.sub[0][0].val1 = rP_f32.sub[0][0].val1 * (rDP.sub[0][0].val1 - top_D);
@@ -302,9 +285,6 @@ struct Attn_d_q {
 			rDS_f32.sub[1][0].val1 = rP_f32.sub[1][0].val1 * (rDP.sub[1][0].val1 - bot_D);
 			rDS_f32.sub[1][1].val0 = rP_f32.sub[1][1].val0 * (rDP.sub[1][1].val0 - bot_D);
 			rDS_f32.sub[1][1].val1 = rP_f32.sub[1][1].val1 * (rDP.sub[1][1].val1 - bot_D);
-			if constexpr (SCORE_CAP > 0.0f) {
-				Attn_forward::apply_d_tanh_(rDS_f32, rS_tanh);
-			}
 
 			Fragment_16x16<bf16> rDS;
 			cast(rDS_f32, rDS);
