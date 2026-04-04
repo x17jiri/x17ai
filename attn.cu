@@ -195,7 +195,7 @@ int main(int argc, char *argv[]) {
 			<<<Q_LEN / AF::Q_PER_BLOCK, AF::THREADS_PER_BLOCK, smem_size>>>
 			(
 				Q_LEN, q_dev,
-				kc_dev, kr_dev, v_dev,
+				kc_dev, v_dev,
 				out_dev,
 				L_dev,
 				sink_ptr,
@@ -220,7 +220,7 @@ int main(int argc, char *argv[]) {
 			<<<NUM_BLOCKS, AF::THREADS_PER_BLOCK, smem_size>>>
 			(
 				Q_LEN, q_dev,
-				kc_dev, kr_dev, v_dev,
+				kc_dev, v_dev,
 				out_dev,
 				L_dev,
 				sink_ptr,
@@ -275,7 +275,7 @@ int main(int argc, char *argv[]) {
 			<<<NUM_BLOCKS, ADQ::THREADS_PER_BLOCK, ADQ::SMEM_BYTES>>>
 			(
 				Q_LEN, q_dev,
-				kc_dev, kr_dev, v_dev,
+				kc_dev, v_dev,
 				out_dev, dO_dev, dQ_dev,
 				L_dev, D_dev,
 				sink_ptr,
@@ -295,7 +295,7 @@ int main(int argc, char *argv[]) {
 			<<<NUM_BLOCKS, ADQ::THREADS_PER_BLOCK, ADQ::SMEM_BYTES>>>
 			(
 				Q_LEN, q_dev,
-				kc_dev, kr_dev, v_dev,
+				kc_dev, v_dev,
 				out_dev, dO_dev, dQ_dev,
 				L_dev, D_dev,
 				sink_ptr,
@@ -348,7 +348,7 @@ int main(int argc, char *argv[]) {
 			<<<NUM_KV_BLOCKS, ADKV::THREADS_PER_BLOCK, ADKV::SMEM_BYTES>>>
 			(
 				KV_LEN, q_dev,
-				kc_dev, kr_dev, v_dev,
+				kc_dev, v_dev,
 				dO_dev, dK_dev, dV_dev,
 				L_dev, D_dev,
 				sink_ptr,
@@ -368,7 +368,7 @@ int main(int argc, char *argv[]) {
 			<<<NUM_KV_BLOCKS, ADKV::THREADS_PER_BLOCK, ADKV::SMEM_BYTES>>>
 			(
 				KV_LEN, q_dev,
-				kc_dev, kr_dev, v_dev,
+				kc_dev, v_dev,
 				dO_dev, dK_dev, dV_dev,
 				L_dev, D_dev,
 				sink_ptr,

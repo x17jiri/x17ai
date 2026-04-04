@@ -13,20 +13,16 @@ template<
 	const usize _GMEM_PRELOAD = 2
 >
 struct Attn_forward {
-	// Re-expose template parameters as static constants for dependent types
+	// Expose template parameters needed by dependent kernels.
 	static constexpr usize HEAD_CNT = _HEAD_CNT;
-	static constexpr usize NONROPE_DIM = _NONROPE_DIM;
-	static constexpr usize ROPE_DIM = _ROPE_DIM;
+	static constexpr usize QK_DIM = _NONROPE_DIM + _ROPE_DIM;
 	static constexpr usize V_DIM = _V_DIM;
 	static constexpr bool V_EQUALS_K = _V_EQUALS_K;
 	static constexpr usize GMEM_PRELOAD = _GMEM_PRELOAD;
 
-	static_assert(V_DIM <= NONROPE_DIM, "V_DIM must be <= NONROPE_DIM");
+	static_assert(V_DIM <= QK_DIM, "V_DIM must be <= QK_DIM");
 
-	static constexpr usize QK_DIM = NONROPE_DIM + ROPE_DIM;
-	static constexpr usize NONROPE_TILES = NONROPE_DIM / 16;
-	static constexpr usize ROPE_TILES = ROPE_DIM / 16;
-	static constexpr usize QK_TILES = NONROPE_TILES + ROPE_TILES;
+	static constexpr usize QK_TILES = QK_DIM / 16;
 	static constexpr usize V_TILES = V_DIM / 16;
 	static constexpr usize PRELOAD_DIM = QK_DIM + (V_EQUALS_K ? 0 : V_DIM);
 	static constexpr usize V_SMEM_COL = V_EQUALS_K ? 0 : QK_DIM;
@@ -43,8 +39,7 @@ struct Attn_forward {
 	static constexpr f32 SCORE_SCALE = 1.0 / constexpr_sqrt(f64(QK_DIM));
 
 	// TODO - other matrices (dO, O, ...) should have their stride
-	static constexpr usize KC_STRIDE = NONROPE_DIM * HEAD_CNT;
-	static constexpr usize KR_STRIDE = ROPE_DIM * HEAD_CNT;
+	static constexpr usize K_STRIDE = QK_DIM * HEAD_CNT;
 	static constexpr usize V_STRIDE = V_DIM * HEAD_CNT;
 	static constexpr usize Q_STRIDE = QK_DIM * HEAD_CNT;
 
@@ -231,8 +226,7 @@ struct Attn_forward {
 	}
 
 	static X17_DEVICE void cp_async_kv(
-		GMatrixDynSize<bf16, NONROPE_DIM> gKc,
-		GMatrixDynSize<bf16, ROPE_DIM> gKr,
+		GMatrixDynSize<bf16, QK_DIM> gK,
 		GMatrixDynSize<bf16, V_DIM> gV,
 		SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, PRELOAD_DIM> preload,
 		usize p, usize kv_end
@@ -241,13 +235,8 @@ struct Attn_forward {
 			auto preload_tile = tile_m<KV_PER_STEP>(preload, p % GMEM_PRELOAD);
 			cp_async_gmem_to_smem<THREADS_PER_BLOCK>(
 				threadIdx.x,
-				tile_m<KV_PER_STEP>(gKc, p),
+				tile_m<KV_PER_STEP>(gK, p),
 				preload_tile, 0, 0
-			);
-			cp_async_gmem_to_smem<THREADS_PER_BLOCK>(
-				threadIdx.x,
-				tile_m<KV_PER_STEP>(gKr, p),
-				preload_tile, 0, NONROPE_DIM
 			);
 			if constexpr (!V_EQUALS_K) {
 				cp_async_gmem_to_smem<THREADS_PER_BLOCK>(
@@ -261,7 +250,7 @@ struct Attn_forward {
 
 	X17_DEVICE void run(
 		usize seq_len, bf16 *gQ_ptr,
-		bf16 *gKc_ptr, bf16 *gKr_ptr, bf16 *gV_ptr,
+		bf16 *gK_ptr, bf16 *gV_ptr,
 		bf16 *gOut_ptr,
 		f32 *gL_ptr,
 		f32 *sink,
@@ -271,8 +260,7 @@ struct Attn_forward {
 
 		// GMEM Matrices
 		GMatrixDynSize<bf16, QK_DIM> gQ{gQ_ptr, seq_len, Q_STRIDE};
-		GMatrixDynSize<bf16, NONROPE_DIM> gKc{gKc_ptr, seq_len, KC_STRIDE};
-		GMatrixDynSize<bf16, ROPE_DIM> gKr{gKr_ptr, seq_len, KR_STRIDE};
+		GMatrixDynSize<bf16, QK_DIM> gK{gK_ptr, seq_len, K_STRIDE};
 		GMatrixDynSize<bf16, V_DIM> gV{gV_ptr, seq_len, V_STRIDE};
 		GMatrixDynSize<bf16, V_DIM> gO{gOut_ptr, seq_len};
 
@@ -304,7 +292,7 @@ struct Attn_forward {
 
 		// Start preloading K and V from GMEM to SMEM (first commit also commits Q)
 		X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD; ++p) {
-			cp_async_kv(gKc, gKr, gV, sPreload, kv_begin + p, kv_end);
+			cp_async_kv(gK, gV, sPreload, kv_begin + p, kv_end);
 			cp_async_commit();
 		}
 
@@ -410,7 +398,7 @@ struct Attn_forward {
 				sKV = tile_m<KV_PER_STEP>(sPreload, (kv_step + 1) % GMEM_PRELOAD);
 
 				// Preload next KV tiles from GMEM
-				cp_async_kv(gKc, gKr, gV, sPreload, kv_step + GMEM_PRELOAD, kv_end);
+				cp_async_kv(gK, gV, sPreload, kv_step + GMEM_PRELOAD, kv_end);
 				cp_async_commit();
 			}
 
@@ -434,12 +422,12 @@ template<typename Attn_forward>
 __global__ __launch_bounds__(Attn_forward::THREADS_PER_BLOCK) void
 attn_forward(
 	usize seq_len, bf16 *gQ_ptr,
-	bf16 *gKc_ptr, bf16 *gKr_ptr, bf16 *gV_ptr,
+	bf16 *gK_ptr, bf16 *gV_ptr,
 	bf16 *gOut_ptr,
 	f32 *gL_ptr,
 	f32 *sink,
 	usize window_size
 ) {
 	auto attn_forward = Attn_forward();
-	attn_forward.run(seq_len, gQ_ptr, gKc_ptr, gKr_ptr, gV_ptr, gOut_ptr, gL_ptr, sink, window_size);
+	attn_forward.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gOut_ptr, gL_ptr, sink, window_size);
 }

@@ -7,18 +7,14 @@
 template<typename Attn_forward>
 struct Attn_d_q {
 	static constexpr usize HEAD_CNT = Attn_forward::HEAD_CNT;
-	static constexpr usize NONROPE_DIM = Attn_forward::NONROPE_DIM;
-	static constexpr usize ROPE_DIM = Attn_forward::ROPE_DIM;
+	static constexpr usize QK_DIM = Attn_forward::QK_DIM;
 	static constexpr usize V_DIM = Attn_forward::V_DIM;
 	static constexpr bool V_EQUALS_K = Attn_forward::V_EQUALS_K;
 	static constexpr usize GMEM_PRELOAD = Attn_forward::GMEM_PRELOAD;
 
-	static_assert(V_DIM <= NONROPE_DIM, "V_DIM must be <= NONROPE_DIM");
+	static_assert(V_DIM <= QK_DIM, "V_DIM must be <= QK_DIM");
 
-	static constexpr usize QK_DIM = NONROPE_DIM + ROPE_DIM;
-	static constexpr usize NONROPE_TILES = NONROPE_DIM / 16;
-	static constexpr usize ROPE_TILES = ROPE_DIM / 16;
-	static constexpr usize QK_TILES = NONROPE_TILES + ROPE_TILES;
+	static constexpr usize QK_TILES = QK_DIM / 16;
 	static constexpr usize V_TILES = V_DIM / 16;
 	static constexpr usize PRELOAD_DIM = QK_DIM + (V_EQUALS_K ? 0 : V_DIM);
 	static constexpr usize V_SMEM_COL = V_EQUALS_K ? 0 : QK_DIM;
@@ -35,8 +31,7 @@ struct Attn_d_q {
 	static constexpr f32 SCORE_SCALE = Attn_forward::SCORE_SCALE;
 
 	// TODO - other matrices (dO, O, ...) should have their stride
-	static constexpr usize KC_STRIDE = Attn_forward::KC_STRIDE;
-	static constexpr usize KR_STRIDE = Attn_forward::KR_STRIDE;
+	static constexpr usize K_STRIDE = Attn_forward::K_STRIDE;
 	static constexpr usize V_STRIDE = Attn_forward::V_STRIDE;
 	static constexpr usize Q_STRIDE = Attn_forward::Q_STRIDE;
 
@@ -62,7 +57,7 @@ struct Attn_d_q {
 
 	X17_DEVICE void run(
 		usize seq_len, bf16 *gQ_ptr,
-		bf16 *gKc_ptr, bf16 *gKr_ptr, bf16 *gV_ptr,
+		bf16 *gK_ptr, bf16 *gV_ptr,
 		bf16 *gOut_ptr, bf16 *gDO_ptr, bf16 *gDQ_ptr,
 		f32 *gL_ptr, f32 *gD_ptr,
 		f32 *sink,
@@ -72,8 +67,7 @@ struct Attn_d_q {
 
 		// GMEM Matrices
 		GMatrixDynSize<bf16, QK_DIM> gQ{gQ_ptr, seq_len, Q_STRIDE};
-		GMatrixDynSize<bf16, NONROPE_DIM> gKc{gKc_ptr, seq_len, KC_STRIDE};
-		GMatrixDynSize<bf16, ROPE_DIM> gKr{gKr_ptr, seq_len, KR_STRIDE};
+		GMatrixDynSize<bf16, QK_DIM> gK{gK_ptr, seq_len, K_STRIDE};
 		GMatrixDynSize<bf16, V_DIM> gV{gV_ptr, seq_len, V_STRIDE};
 		GMatrixDynSize<bf16, V_DIM> gO{gOut_ptr, seq_len};
 		GMatrixDynSize<bf16, V_DIM> gDO{gDO_ptr, seq_len};
@@ -113,7 +107,7 @@ struct Attn_d_q {
 
 		// Start preloading K and V from GMEM to SMEM (first commit also commits Q)
 		X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD; ++p) {
-			Attn_forward::cp_async_kv(gKc, gKr, gV, sPreload, kv_begin + p, kv_end);
+			Attn_forward::cp_async_kv(gK, gV, sPreload, kv_begin + p, kv_end);
 			cp_async_commit();
 		}
 
@@ -296,7 +290,7 @@ struct Attn_d_q {
 				sKV = tile_m<KV_PER_STEP>(sPreload, (kv_step + 1) % GMEM_PRELOAD);
 
 				// Preload next KV tiles from GMEM
-				Attn_forward::cp_async_kv(gKc, gKr, gV, sPreload, kv_step + GMEM_PRELOAD, kv_end);
+				Attn_forward::cp_async_kv(gK, gV, sPreload, kv_step + GMEM_PRELOAD, kv_end);
 				cp_async_commit();
 			}
 
@@ -316,12 +310,12 @@ template<typename Attn_d_q>
 __global__ __launch_bounds__(Attn_d_q::THREADS_PER_BLOCK) void
 attn_d_q(
 	usize seq_len, bf16 *gQ_ptr,
-	bf16 *gKc_ptr, bf16 *gKr_ptr, bf16 *gV_ptr,
+	bf16 *gK_ptr, bf16 *gV_ptr,
 	bf16 *gOut_ptr, bf16 *gDO_ptr, bf16 *gDQ_ptr,
 	f32 *gL_ptr, f32 *gD_ptr,
 	f32 *sink,
 	usize window_size
 ) {
 	auto attn_d_q = Attn_d_q();
-	attn_d_q.run(seq_len, gQ_ptr, gKc_ptr, gKr_ptr, gV_ptr, gOut_ptr, gDO_ptr, gDQ_ptr, gL_ptr, gD_ptr, sink, window_size);
+	attn_d_q.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gOut_ptr, gDO_ptr, gDQ_ptr, gL_ptr, gD_ptr, sink, window_size);
 }

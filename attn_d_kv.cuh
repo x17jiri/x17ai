@@ -7,18 +7,14 @@
 template<typename Attn_forward>
 struct Attn_d_kv {
 	static constexpr usize HEAD_CNT = Attn_forward::HEAD_CNT;
-	static constexpr usize NONROPE_DIM = Attn_forward::NONROPE_DIM;
-	static constexpr usize ROPE_DIM = Attn_forward::ROPE_DIM;
+	static constexpr usize QK_DIM = Attn_forward::QK_DIM;
 	static constexpr usize V_DIM = Attn_forward::V_DIM;
 	static constexpr bool V_EQUALS_K = Attn_forward::V_EQUALS_K;
 	static constexpr usize GMEM_PRELOAD = Attn_forward::GMEM_PRELOAD;
 
-	static_assert(V_DIM <= NONROPE_DIM, "V_DIM must be <= NONROPE_DIM");
+	static_assert(V_DIM <= QK_DIM, "V_DIM must be <= QK_DIM");
 
-	static constexpr usize QK_DIM = NONROPE_DIM + ROPE_DIM;
-	static constexpr usize NONROPE_TILES = NONROPE_DIM / 16;
-	static constexpr usize ROPE_TILES = ROPE_DIM / 16;
-	static constexpr usize QK_TILES = NONROPE_TILES + ROPE_TILES;
+	static constexpr usize QK_TILES = QK_DIM / 16;
 	static constexpr usize V_TILES = V_DIM / 16;
 	static constexpr usize PRELOAD_DIM = QK_DIM + V_DIM; // preload region holds both Q and dO
 	static constexpr usize KV_SMEM_DIM = QK_DIM + (V_EQUALS_K ? 0 : V_DIM);
@@ -36,8 +32,7 @@ struct Attn_d_kv {
 	static constexpr f32 SCORE_SCALE = Attn_forward::SCORE_SCALE;
 
 	// TODO - other matrices (dO, O, ...) should have their stride
-	static constexpr usize KC_STRIDE = NONROPE_DIM * HEAD_CNT;
-	static constexpr usize KR_STRIDE = ROPE_DIM * HEAD_CNT;
+	static constexpr usize K_STRIDE = QK_DIM * HEAD_CNT;
 	static constexpr usize V_STRIDE = V_DIM * HEAD_CNT;
 	static constexpr usize Q_STRIDE = QK_DIM * HEAD_CNT;
 
@@ -93,7 +88,7 @@ struct Attn_d_kv {
 
 	X17_DEVICE void run(
 		usize seq_len, bf16 *gQ_ptr,
-		bf16 *gKc_ptr, bf16 *gKr_ptr, bf16 *gV_ptr,
+		bf16 *gK_ptr, bf16 *gV_ptr,
 		bf16 *gDO_ptr, bf16 *gDK_ptr, bf16 *gDV_ptr,
 		f32 *gL_ptr, f32 *gD_ptr,
 		f32 *sink,
@@ -103,8 +98,7 @@ struct Attn_d_kv {
 
 		// GMEM Matrices
 		GMatrixDynSize<bf16, QK_DIM> gQ{gQ_ptr, seq_len, Q_STRIDE};
-		GMatrixDynSize<bf16, NONROPE_DIM> gKc{gKc_ptr, seq_len, KC_STRIDE};
-		GMatrixDynSize<bf16, ROPE_DIM> gKr{gKr_ptr, seq_len, KR_STRIDE};
+		GMatrixDynSize<bf16, QK_DIM> gK{gK_ptr, seq_len, K_STRIDE};
 		GMatrixDynSize<bf16, V_DIM> gV{gV_ptr, seq_len, V_STRIDE};
 		GMatrixDynSize<bf16, V_DIM> gDO{gDO_ptr, seq_len};
 		GMatrixDynSize<bf16, QK_DIM> gDK{gDK_ptr, seq_len};
@@ -119,16 +113,11 @@ struct Attn_d_kv {
 		SMatrix_32b<f32, GMEM_PRELOAD, Q_PER_STEP> sL{sKV._ptr + sKV.bytes()};
 		SMatrix_32b<f32, GMEM_PRELOAD, Q_PER_STEP> sD{sL._ptr + sL.bytes()};
 
-		// Load KV from GMEM to SMEM (no commit — piggyback on first KV commit)
+		// Load K/V from GMEM to SMEM (no commit — piggyback on first KV commit)
 		usize kv_block_idx = blockIdx.x;
 		usize kv_block_start = kv_block_idx * KV_PER_BLOCK;
-		usize kv_start = kv_block_start + kv_warp_idx * KV_PER_WARP;
-		GMatrix<bf16, KV_PER_BLOCK, NONROPE_DIM> gKc_block = tile_m<KV_PER_BLOCK>(gKc, kv_block_idx);
-		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gKc_block, sKV, 0, 0);
-		if constexpr (ROPE_DIM > 0) {
-			GMatrix<bf16, KV_PER_BLOCK, ROPE_DIM> gKr_block = tile_m<KV_PER_BLOCK>(gKr, kv_block_idx);
-			cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gKr_block, sKV, 0, NONROPE_DIM);
-		}
+		GMatrix<bf16, KV_PER_BLOCK, QK_DIM> gK_block = tile_m<KV_PER_BLOCK>(gK, kv_block_idx);
+		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gK_block, sKV, 0, 0);
 		if constexpr (!V_EQUALS_K) {
 			GMatrix<bf16, KV_PER_BLOCK, V_DIM> gV_block = tile_m<KV_PER_BLOCK>(gV, kv_block_idx);
 			cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gV_block, sKV, 0, QK_DIM);
@@ -341,12 +330,12 @@ template<typename Attn_d_kv>
 __global__ __launch_bounds__(Attn_d_kv::THREADS_PER_BLOCK) void
 attn_d_kv(
 	usize seq_len, bf16 *gQ_ptr,
-	bf16 *gKc_ptr, bf16 *gKr_ptr, bf16 *gV_ptr,
+	bf16 *gK_ptr, bf16 *gV_ptr,
 	bf16 *gDO_ptr, bf16 *gDK_ptr, bf16 *gDV_ptr,
 	f32 *gL_ptr, f32 *gD_ptr,
 	f32 *sink,
 	usize window_size
 ) {
 	auto attn_d_kv = Attn_d_kv();
-	attn_d_kv.run(seq_len, gQ_ptr, gKc_ptr, gKr_ptr, gV_ptr, gDO_ptr, gDK_ptr, gDV_ptr, gL_ptr, gD_ptr, sink, window_size);
+	attn_d_kv.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gDO_ptr, gDK_ptr, gDV_ptr, gL_ptr, gD_ptr, sink, window_size);
 }
