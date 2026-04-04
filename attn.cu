@@ -11,6 +11,7 @@
 #pragma nv_diag_suppress 186
 
 int main(int argc, char *argv[]) {
+	constexpr usize HEAD_CNT = 1;
 	constexpr usize NONROPE_DIM = 128;
 	constexpr usize V_DIM = 64;
 	constexpr usize ROPE_DIM = 0;
@@ -166,7 +167,7 @@ int main(int argc, char *argv[]) {
 	}
 
 	constexpr bool V_EQ_K = true;
-	using AF = Attn_forward<1, NONROPE_DIM, ROPE_DIM, V_DIM, V_EQ_K, 2>;
+	using AF = Attn_forward<HEAD_CNT, NONROPE_DIM, ROPE_DIM, V_DIM, V_EQ_K, 2>;
 	using ADQ = Attn_d_q<AF>;
 	using ADKV = Attn_d_kv<AF>;
 	usize smem_size = AF::SMEM_BYTES;

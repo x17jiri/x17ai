@@ -257,11 +257,12 @@ struct Attn_forward {
 		usize window_size
 	) {
 		static_assert(KV_WARPS == 1, "current algorithm doesn't reduce over KV warps");
+		usize i_head = blockIdx.y;
 
 		// GMEM Matrices
-		GMatrixDynSize<bf16, QK_DIM> gQ{gQ_ptr, seq_len, Q_STRIDE};
-		GMatrixDynSize<bf16, QK_DIM> gK{gK_ptr, seq_len, K_STRIDE};
-		GMatrixDynSize<bf16, V_DIM> gV{gV_ptr, seq_len, V_STRIDE};
+		GMatrixDynSize<bf16, QK_DIM> gQ{gQ_ptr + QK_DIM * i_head, seq_len, Q_STRIDE};
+		GMatrixDynSize<bf16, QK_DIM> gK{gK_ptr + QK_DIM * i_head, seq_len, K_STRIDE};
+		GMatrixDynSize<bf16, V_DIM> gV{gV_ptr + V_DIM * i_head, seq_len, V_STRIDE};
 		GMatrixDynSize<bf16, V_DIM> gO{gOut_ptr, seq_len};
 
 		// SMEM layout: KV preload region + Q

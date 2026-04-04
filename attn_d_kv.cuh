@@ -95,11 +95,12 @@ struct Attn_d_kv {
 		usize window_size
 	) {
 		static_assert(Q_WARPS == 1, "current algorithm doesn't reduce over Q warps");
+		usize i_head = blockIdx.y;
 
 		// GMEM Matrices
-		GMatrixDynSize<bf16, QK_DIM> gQ{gQ_ptr, seq_len, Q_STRIDE};
-		GMatrixDynSize<bf16, QK_DIM> gK{gK_ptr, seq_len, K_STRIDE};
-		GMatrixDynSize<bf16, V_DIM> gV{gV_ptr, seq_len, V_STRIDE};
+		GMatrixDynSize<bf16, QK_DIM> gQ{gQ_ptr + QK_DIM * i_head, seq_len, Q_STRIDE};
+		GMatrixDynSize<bf16, QK_DIM> gK{gK_ptr + QK_DIM * i_head, seq_len, K_STRIDE};
+		GMatrixDynSize<bf16, V_DIM> gV{gV_ptr + V_DIM * i_head, seq_len, V_STRIDE};
 		GMatrixDynSize<bf16, V_DIM> gDO{gDO_ptr, seq_len};
 		GMatrixDynSize<bf16, QK_DIM> gDK{gDK_ptr, seq_len};
 		GMatrixDynSize<bf16, V_DIM> gDV{gDV_ptr, seq_len};
