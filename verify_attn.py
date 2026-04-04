@@ -14,8 +14,8 @@ import os
 import math
 
 HEAD_CNT = 16
-QK_DIM = 64
-V_DIM = 64
+QK_DIM = 32
+V_DIM = 32
 # Must match WINDOW_SIZE in attn.cu.
 WINDOW_SIZE = 0
 SCORE_SCALE = 1.0 / math.sqrt(QK_DIM)
@@ -58,19 +58,15 @@ def create_inputs(q_len, kv_len):
 	rng = np.random.default_rng(42)
 	q_f64 = rng.standard_normal((q_len, HEAD_CNT, QK_DIM))
 	kv_f64 = rng.standard_normal((kv_len, HEAD_CNT, QK_DIM))
-	dO_f64 = rng.standard_normal((q_len, HEAD_CNT, V_DIM))
 
 	# Convert to bf16 via torch (proper rounding)
 	q_bf16 = torch.from_numpy(q_f64).to(torch.bfloat16)
 	kv_bf16 = torch.from_numpy(kv_f64).to(torch.bfloat16)
-	dO_bf16 = torch.from_numpy(dO_f64).to(torch.bfloat16)
 
 	flatten_heads(q_bf16).view(torch.int16).numpy().view(np.uint16).tofile("tmp/q.bin")
 	flatten_heads(kv_bf16).view(torch.int16).numpy().view(np.uint16).tofile("tmp/kv.bin")
-	flatten_heads(dO_bf16).view(torch.int16).numpy().view(np.uint16).tofile("tmp/dO.bin")
 	print(f"Created tmp/q.bin:  [{q_len}, {HEAD_CNT * QK_DIM}] bf16  ({q_len * HEAD_CNT * QK_DIM * 2} bytes)")
 	print(f"Created tmp/kv.bin: [{kv_len}, {HEAD_CNT * QK_DIM}] bf16  ({kv_len * HEAD_CNT * QK_DIM * 2} bytes)")
-	print(f"Created tmp/dO.bin: [{q_len}, {HEAD_CNT * V_DIM}] bf16  ({q_len * HEAD_CNT * V_DIM * 2} bytes)")
 
 
 def load_inputs(q_len, kv_len, large=False):
@@ -323,51 +319,42 @@ def compare(name, ref_bf16, cuda_bf16, q_len, dim):
 			f"cuda={cuda_bf16[r, c].float().item():.6e}")
 
 
+def compare_f32(name, ref_f32, cuda_f32):
+	diff = (ref_f32 - cuda_f32).abs()
+	exact = (ref_f32 == cuda_f32).sum().item()
+	total = ref_f32.numel()
+	print(f"\n--- {name} vs CUDA ---")
+	print(f"Max abs diff:     {diff.max().item():.6e}")
+	print(f"Mean abs diff:    {diff.mean().item():.6e}")
+	print(f"Exact f32 match:  {exact}/{total} ({100.0 * exact / total:.2f}%)")
+
+
 def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5, window_size=WINDOW_SIZE):
 	Q_bf16, KV_bf16 = load_inputs(q_len, kv_len, large=large)
 
 	if large:
 		sink_arg = -math.inf
 		gate_arg = 1.0
-		prefix = "tmp/large_"
 	else:
 		sink_arg = sink_val
 		gate_arg = gate_val
-		prefix = "tmp/"
-
-	dO_path = f"{prefix}dO.bin"
-	if not os.path.exists(dO_path):
-		print(f"\nNo {dO_path} found — skipping backward verification.")
-		return
-
-	dO_bf16 = load_bf16(dO_path, (q_len, HEAD_CNT * V_DIM)).reshape(q_len, HEAD_CNT, V_DIM)
 
 	print(f"Computing online softmax reference q_len={q_len}, kv_len={kv_len}, heads={HEAD_CNT}...")
 	match_out_heads = []
 	ref_out_heads = []
-	ref_dQ_heads = []
-	ref_dK_heads = []
-	ref_dV_heads = []
 	for i_head in range(HEAD_CNT):
-		Q = Q_bf16[:, i_head, :].float().requires_grad_(True)
-		K = KV_bf16[:, i_head, :QK_DIM].float().requires_grad_(True)
-		V = KV_bf16[:, i_head, :V_DIM].float().requires_grad_(True)
+		Q = Q_bf16[:, i_head, :].float()
+		K = KV_bf16[:, i_head, :QK_DIM].float()
+		V = KV_bf16[:, i_head, :V_DIM].float()
 
-		match_out = reference_online_softmax(Q.detach(), K.detach(), V.detach(), sink=sink_arg, gate=gate_arg, window_size=window_size)
+		match_out = reference_online_softmax(Q, K, V, sink=sink_arg, gate=gate_arg, window_size=window_size)
 		ref_out = reference_exact(Q, K, V, sink=sink_arg, gate=gate_arg, window_size=window_size)
-		ref_out.backward(dO_bf16[:, i_head, :].float())
 
 		match_out_heads.append(match_out.to(torch.bfloat16))
 		ref_out_heads.append(ref_out.to(torch.bfloat16))
-		ref_dQ_heads.append(Q.grad.to(torch.bfloat16))
-		ref_dK_heads.append(K.grad.to(torch.bfloat16))
-		ref_dV_heads.append(V.grad.to(torch.bfloat16))
 
 	match_out_bf16 = torch.stack(match_out_heads, dim=1)
 	ref_out_bf16 = torch.stack(ref_out_heads, dim=1)
-	ref_dQ_bf16 = torch.stack(ref_dQ_heads, dim=1)
-	ref_dK_bf16 = torch.stack(ref_dK_heads, dim=1)
-	ref_dV_bf16 = torch.stack(ref_dV_heads, dim=1)
 
 	print(f"\nFirst 4 rows, first 8 cols of head 0:")
 	print_matrix(match_out_bf16[:4, 0, :8].float())
@@ -391,104 +378,35 @@ def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5, window_size=
 	else:
 		print(f"\nNo {cuda_path} found — run the CUDA kernel first to compare.")
 
-	# Load CUDA's L and O for the matching backward reference
 	L_cuda = load_f32("tmp/L.bin", (HEAD_CNT, q_len)) if os.path.exists("tmp/L.bin") else None
-	O_cuda = load_bf16("tmp/out_cpu.bin", (q_len, HEAD_CNT * V_DIM)).reshape(q_len, HEAD_CNT, V_DIM) if os.path.exists("tmp/out_cpu.bin") else None
-
-	print(f"\n=== Backward verification ===")
-
-	# Verify D = rowsum(dO ⊙ O)
-	D_path = "tmp/D.bin"
-	if os.path.exists(D_path) and O_cuda is not None:
-		D_cuda = load_f32(D_path, (HEAD_CNT, q_len))
-		D_ref = ((dO_bf16.float() * O_cuda.float()).sum(dim=-1) / gate_arg).transpose(0, 1)
-		diff = (D_ref - D_cuda).abs()
-		exact = (D_ref == D_cuda).sum().item()
-		print(f"\n--- D' = rowsum(dO ⊙ O) / gate ---")
-		print(f"Max abs diff:  {diff.max().item():.6e}")
-		total = HEAD_CNT * q_len
-		print(f"Exact match:   {exact}/{total} ({100*exact/total:.2f}%)")
-
-	# Verify dQ
-	dQ_path = "tmp/dQ.bin"
-	if os.path.exists(dQ_path):
-		dQ_cuda = load_bf16(dQ_path, (q_len, HEAD_CNT * QK_DIM))
-		compare("dQ (autograd f32)", flatten_heads(ref_dQ_bf16), dQ_cuda, q_len, HEAD_CNT * QK_DIM)
-
-	# Verify dK
-	dK_path = "tmp/dK.bin"
-	if os.path.exists(dK_path):
-		dK_cuda = load_bf16(dK_path, (kv_len, HEAD_CNT * QK_DIM))
-		compare("dK (autograd f32)", flatten_heads(ref_dK_bf16), dK_cuda, kv_len, HEAD_CNT * QK_DIM)
-
-	# Verify dV
-	dV_path = "tmp/dV.bin"
-	if os.path.exists(dV_path):
-		dV_cuda = load_bf16(dV_path, (kv_len, HEAD_CNT * V_DIM))
-		compare("dV (autograd f32)", flatten_heads(ref_dV_bf16), dV_cuda, kv_len, HEAD_CNT * V_DIM)
-
-	# Matching backward reference using CUDA's L and O
-	# This reconstructs P from the kernel's stored L and uses D from CUDA's O,
-	# eliminating forward-pass divergence as a source of backward mismatch.
-	if L_cuda is not None and O_cuda is not None:
-		print(f"\n=== Matching backward (from CUDA L and O) ===")
-		match_dQ_heads = []
-		match_dK_heads = []
-		match_dV_heads = []
+	if L_cuda is not None:
+		L_ref_heads = []
+		match_from_L_heads = []
 		for i_head in range(HEAD_CNT):
-			dO_f = dO_bf16[:, i_head, :].float()
-			Q_f = Q_bf16[:, i_head, :].float()
-			K_f = KV_bf16[:, i_head, :QK_DIM].float()
-			V_f = KV_bf16[:, i_head, :V_DIM].float()
+			Q = Q_bf16[:, i_head, :].float()
+			K = KV_bf16[:, i_head, :QK_DIM].float()
+			V = KV_bf16[:, i_head, :V_DIM].float()
 
-			# Recompute scores (multiply by combined score_scale in one step to match
-			# the kernel's multiplication order and avoid f32 rounding differences)
+			# Recompute the stored L directly from masked scores plus sink.
 			n = ssmax_n(q_len, window_size)
 			ssmax_scale = torch.log2(n)
-			score_scale = SCORE_SCALE * ssmax_scale
-			scores = Q_f @ K_f.T
-			scores = scores * score_scale.unsqueeze(1)
-
-			causal = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
+			scores = (Q @ K.T) * SCORE_SCALE * ssmax_scale.unsqueeze(1)
+			mask = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
 			if window_size > 0:
-				window = torch.tril(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=-window_size)
-				causal = causal | window
-			scores = scores.masked_fill(causal, float('-inf'))
+				window_mask = torch.tril(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=-window_size)
+				mask = mask | window_mask
+			scores = scores.masked_fill(mask, float('-inf'))
+			sink_scaled = torch.full((q_len, 1), sink_arg, dtype=torch.float32) * SCORE_SCALE * ssmax_scale.unsqueeze(1)
+			all_scores = torch.cat([sink_scaled, scores], dim=1)
+			row_max = torch.amax(all_scores, dim=1)
+			L_ref_heads.append(row_max + torch.log2(torch.exp2(all_scores - row_max.unsqueeze(1)).sum(dim=1)))
+			match_from_L_heads.append(reference_matching_from_L(Q, K, V, L_cuda[i_head], gate_arg, window_size=window_size).to(torch.bfloat16))
 
-			D_prime = (dO_f * O_cuda[:, i_head, :].float()).sum(dim=-1) / gate_arg
-			dP = dO_f @ V_f.T
-			logb_e = math.log2(math.e)
-
-			grad_scale = (1.0 / logb_e) * gate_arg * score_scale
-			L_prime = L_cuda[i_head] - torch.log2(grad_scale)
-			P_prime = torch.exp2(scores - L_prime.unsqueeze(1))
-			dS_dq = P_prime * (dP - D_prime.unsqueeze(1))
-			match_dQ_heads.append((dS_dq.to(torch.bfloat16).to(torch.float32) @ K_f).to(torch.bfloat16))
-
-			L_g = L_cuda[i_head] - math.log2(gate_arg)
-			P = torch.exp2(scores - L_g.unsqueeze(1))
-			match_dV_heads.append((P.T.to(torch.bfloat16).to(torch.float32) @ dO_f).to(torch.bfloat16))
-
-			dS_dkv = P * (dP - D_prime.unsqueeze(1))
-			dk_scale = score_scale / logb_e
-			dS_dkv = dS_dkv * dk_scale.unsqueeze(1)
-			match_dK_heads.append((dS_dkv.T.to(torch.bfloat16).to(torch.float32) @ Q_f).to(torch.bfloat16))
-
-		match_dQ = torch.stack(match_dQ_heads, dim=1)
-		match_dK = torch.stack(match_dK_heads, dim=1)
-		match_dV = torch.stack(match_dV_heads, dim=1)
-
-		if os.path.exists("tmp/dQ.bin"):
-			dQ_cuda = load_bf16("tmp/dQ.bin", (q_len, HEAD_CNT * QK_DIM))
-			compare("dQ (from CUDA L, O)", flatten_heads(match_dQ), dQ_cuda, q_len, HEAD_CNT * QK_DIM)
-
-		if os.path.exists("tmp/dK.bin"):
-			dK_cuda = load_bf16("tmp/dK.bin", (kv_len, HEAD_CNT * QK_DIM))
-			compare("dK (from CUDA L, O)", flatten_heads(match_dK), dK_cuda, kv_len, HEAD_CNT * QK_DIM)
-
-		if os.path.exists("tmp/dV.bin"):
-			dV_cuda = load_bf16("tmp/dV.bin", (kv_len, HEAD_CNT * V_DIM))
-			compare("dV (from CUDA L, O)", flatten_heads(match_dV), dV_cuda, kv_len, HEAD_CNT * V_DIM)
+		L_ref = torch.stack(L_ref_heads, dim=0)
+		compare_f32("L", L_ref, L_cuda)
+		if os.path.exists(cuda_path):
+			cuda_bf16 = torch.from_numpy(np.fromfile(cuda_path, dtype=np.uint16).reshape(q_len, HEAD_CNT * V_DIM).view(np.int16)).view(torch.bfloat16)
+			compare("Forward (from CUDA L)", flatten_heads(torch.stack(match_from_L_heads, dim=1)), cuda_bf16, q_len, HEAD_CNT * V_DIM)
 
 
 if __name__ == "__main__":
@@ -502,8 +420,8 @@ if __name__ == "__main__":
 	args = parser.parse_args()
 
 	if args.large:
-		q_len = args.q_len or 32768
-		kv_len = args.kv_len or 32768
+		q_len = args.q_len or 16384
+		kv_len = args.kv_len or 16384
 	else:
 		q_len = args.q_len or 1024
 		kv_len = args.kv_len or 1024

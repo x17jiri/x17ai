@@ -6,6 +6,7 @@
 
 template<
 	const usize _HEAD_CNT,
+	const usize _HEADS_PER_KERNEL,
 	const usize _QK_DIM,
 	const usize _V_DIM,
 	const bool _V_EQUALS_K = false,
@@ -14,17 +15,23 @@ template<
 struct Attn_forward {
 	// Expose template parameters needed by dependent kernels.
 	static constexpr usize HEAD_CNT = _HEAD_CNT;
+	static constexpr usize HEADS_PER_KERNEL = _HEADS_PER_KERNEL;
+	static constexpr usize HEAD_GROUP_CNT = HEAD_CNT / HEADS_PER_KERNEL;
 	static constexpr usize QK_DIM = _QK_DIM;
 	static constexpr usize V_DIM = _V_DIM;
 	static constexpr bool V_EQUALS_K = _V_EQUALS_K;
 	static constexpr usize GMEM_PRELOAD = _GMEM_PRELOAD;
 
+	static_assert(HEADS_PER_KERNEL > 0, "HEADS_PER_KERNEL must be > 0");
+	static_assert(HEAD_CNT % HEADS_PER_KERNEL == 0, "HEAD_CNT must be divisible by HEADS_PER_KERNEL");
 	static_assert(V_DIM <= QK_DIM, "V_DIM must be <= QK_DIM");
 
 	static constexpr usize QK_TILES = QK_DIM / 16;
 	static constexpr usize V_TILES = V_DIM / 16;
-	static constexpr usize PRELOAD_DIM = QK_DIM + (V_EQUALS_K ? 0 : V_DIM);
-	static constexpr usize V_SMEM_COL = V_EQUALS_K ? 0 : QK_DIM;
+	static constexpr usize QK_GROUP_DIM = HEADS_PER_KERNEL * QK_DIM;
+	static constexpr usize V_GROUP_DIM = HEADS_PER_KERNEL * V_DIM;
+	static constexpr usize PRELOAD_DIM = QK_GROUP_DIM + (V_EQUALS_K ? 0 : V_GROUP_DIM);
+	static constexpr usize V_SMEM_COL = V_EQUALS_K ? 0 : QK_GROUP_DIM;
 
 	static constexpr usize Q_WARPS = 4;
 	static constexpr usize KV_WARPS = 1;
@@ -46,10 +53,13 @@ struct Attn_forward {
 	static constexpr usize DK_STRIDE = QK_DIM * HEAD_CNT;
 	static constexpr usize DV_STRIDE = V_DIM * HEAD_CNT;
 
+	static_assert((QK_GROUP_DIM * sizeof(bf16)) % 128 == 0, "HEADS_PER_KERNEL must make grouped Q rows 128B aligned");
+	static_assert((PRELOAD_DIM * sizeof(bf16)) % 128 == 0, "HEADS_PER_KERNEL must make grouped KV preload rows 128B aligned");
+
 	static constexpr usize SMEM_BYTES =
 		sizeof(bf16) * (
 			KV_PER_STEP * PRELOAD_DIM * GMEM_PRELOAD
-			+ Q_PER_BLOCK * QK_DIM
+			+ Q_PER_BLOCK * QK_GROUP_DIM
 		);
 
 	static X17_DEVICE void causal_mask_diagonal(Fragment_16x16<f32> &rS_f32) {
@@ -182,55 +192,68 @@ struct Attn_forward {
 	}
 
 	X17_DEVICE void combine_and_store(
-		Fragment_16x16<f32> (&rO_f32)[V_TILES],
-		SoftmaxStats top,
-		SoftmaxStats bot,
-		f32 top_sink_scaled,
-		f32 bot_sink_scaled,
-		f32 gate,
+		Fragment_16x16<f32> (&rO_f32)[HEADS_PER_KERNEL][V_TILES],
+		SoftmaxStats (&top_stats)[HEADS_PER_KERNEL],
+		SoftmaxStats (&bot_stats)[HEADS_PER_KERNEL],
+		f32 (&top_sink_scaled)[HEADS_PER_KERNEL],
+		f32 (&bot_sink_scaled)[HEADS_PER_KERNEL],
+		f32 (&gate)[HEADS_PER_KERNEL],
 		usize q_start,
 		usize q_warp_idx,
-		GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block,
-		f32 *gL_ptr
+		GMatrix<bf16, Q_PER_BLOCK, V_GROUP_DIM> gOut_block,
+		f32 *gL_ptr,
+		usize seq_len,
+		usize i_head_base
 	) {
 		static_assert(KV_WARPS == 1, "current algorithm doesn't reduce over KV warps");
+		Fragment_16x16<bf16> rO[HEADS_PER_KERNEL * V_TILES];
+		f32 top_L[HEADS_PER_KERNEL];
+		f32 bot_L[HEADS_PER_KERNEL];
+		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+			// Complete the row-wise sum reduction within each warp
+			top_stats[h].sum += shuffle_xor_sync(top_stats[h].sum, 1);
+			top_stats[h].sum += shuffle_xor_sync(top_stats[h].sum, 2);
 
-		// Complete the row-wise sum reduction within each warp
-		top.sum += shuffle_xor_sync(top.sum, 1);
-		top.sum += shuffle_xor_sync(top.sum, 2);
+			bot_stats[h].sum += shuffle_xor_sync(bot_stats[h].sum, 1);
+			bot_stats[h].sum += shuffle_xor_sync(bot_stats[h].sum, 2);
 
-		bot.sum += shuffle_xor_sync(bot.sum, 1);
-		bot.sum += shuffle_xor_sync(bot.sum, 2);
+			// !! SINK SUM MUST BE ADDED HERE, NOT BEFORE THE LOOP !!
+			// The loop accumulates partial sums across 4 threads per row.
+			// shuffle_xor above reduces them into one total. The sink is a
+			// single scalar — adding it before the loop would count it 4×.
+			// We must add it exactly once, after the reduction.
+			top_stats[h].sum += math::fast::expb(top_sink_scaled[h] - top_stats[h].max);
+			bot_stats[h].sum += math::fast::expb(bot_sink_scaled[h] - bot_stats[h].max);
 
-		// !! SINK SUM MUST BE ADDED HERE, NOT BEFORE THE LOOP !!
-		// The loop accumulates partial sums across 4 threads per row.
-		// shuffle_xor above reduces them into one total. The sink is a
-		// single scalar — adding it before the loop would count it 4×.
-		// We must add it exactly once, after the reduction.
-		top.sum += math::fast::expb(top_sink_scaled - top.max);
-		bot.sum += math::fast::expb(bot_sink_scaled - bot.max);
+			// Rescale, folding in normalization and gate
+			top_L[h] = math::fast::logb(top_stats[h].sum) + top_stats[h].max;
+			bot_L[h] = math::fast::logb(bot_stats[h].sum) + bot_stats[h].max;
 
-		// Rescale, folding in normalization and gate
-		f32 top_L = math::fast::logb(top.sum) + top.max;
-		f32 bot_L = math::fast::logb(bot.sum) + bot.max;
+			f32 top_rescale = math::fast::divide(gate[h], top_stats[h].sum);
+			f32 bot_rescale = math::fast::divide(gate[h], bot_stats[h].sum);
 
-		f32 top_rescale = math::fast::divide(gate, top.sum);
-		f32 bot_rescale = math::fast::divide(gate, bot.sum);
-
-		scale_top_(rO_f32, top_rescale);
-		scale_bottom_(rO_f32, bot_rescale);
-
-		store(rO_f32, gOut_block, q_warp_idx * Q_PER_WARP, 0);
+			scale_top_(rO_f32[h], top_rescale);
+			scale_bottom_(rO_f32[h], bot_rescale);
+			X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
+				cast(rO_f32[h][i], rO[h * V_TILES + i]);
+			}
+		}
 
 		usize tid = threadIdx.x % WARP_SIZE;
 		if (gL_ptr != nullptr && (tid & 1) == 0) {
-			gL_ptr[q_start + (tid / 4) + ((tid & 2) * 4)] = ((tid & 2) == 0 ? top_L : bot_L);
+			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+				f32 *gL_head_ptr = gL_ptr + seq_len * (i_head_base + h);
+				gL_head_ptr[q_start + (tid / 4) + ((tid & 2) * 4)] =
+					((tid & 2) == 0 ? top_L[h] : bot_L[h]);
+			}
 		}
+
+		store(rO, gOut_block, q_warp_idx * Q_PER_WARP, 0);
 	}
 
 	static X17_DEVICE void cp_async_kv(
-		GMatrixDynSize<bf16, QK_DIM> gK,
-		GMatrixDynSize<bf16, V_DIM> gV,
+		GMatrixDynSize<bf16, QK_GROUP_DIM> gK,
+		GMatrixDynSize<bf16, V_GROUP_DIM> gV,
 		SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, PRELOAD_DIM> preload,
 		usize p, usize kv_end
 	) {
@@ -260,28 +283,28 @@ struct Attn_forward {
 		usize window_size
 	) {
 		static_assert(KV_WARPS == 1, "current algorithm doesn't reduce over KV warps");
-		usize i_head = blockIdx.y;
-		f32 *gL_head_ptr = gL_ptr != nullptr ? gL_ptr + seq_len * i_head : nullptr;
+		usize i_head_group = blockIdx.y;
+		usize i_head_base = i_head_group * HEADS_PER_KERNEL;
 
 		// GMEM Matrices
-		GMatrixDynSize<bf16, QK_DIM> gQ{gQ_ptr + QK_DIM * i_head, seq_len, Q_STRIDE};
-		GMatrixDynSize<bf16, QK_DIM> gK{gK_ptr + QK_DIM * i_head, seq_len, K_STRIDE};
-		GMatrixDynSize<bf16, V_DIM> gV{gV_ptr + V_DIM * i_head, seq_len, V_STRIDE};
-		GMatrixDynSize<bf16, V_DIM> gO{gOut_ptr + V_DIM * i_head, seq_len, O_STRIDE};
+		GMatrixDynSize<bf16, QK_GROUP_DIM> gQ{gQ_ptr + QK_DIM * i_head_base, seq_len, Q_STRIDE};
+		GMatrixDynSize<bf16, QK_GROUP_DIM> gK{gK_ptr + QK_DIM * i_head_base, seq_len, K_STRIDE};
+		GMatrixDynSize<bf16, V_GROUP_DIM> gV{gV_ptr + V_DIM * i_head_base, seq_len, V_STRIDE};
+		GMatrixDynSize<bf16, V_GROUP_DIM> gO{gOut_ptr + V_DIM * i_head_base, seq_len, O_STRIDE};
 
 		// SMEM layout: KV preload region + Q
 		u32 smem = 0;
 		usize q_warp_idx = threadIdx.x / WARP_SIZE;
 		usize tid = threadIdx.x % WARP_SIZE;
 		SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, PRELOAD_DIM> sPreload{smem};
-		SMatrix<bf16, Q_PER_BLOCK, QK_DIM> sQ{sPreload._ptr + sPreload.bytes()};
+		SMatrix<bf16, Q_PER_BLOCK, QK_GROUP_DIM> sQ{sPreload._ptr + sPreload.bytes()};
 
 		// Load Q from GMEM to SMEM (no commit — piggyback on first KV commit)
 		usize q_block_idx = blockIdx.x;
 		usize q_block_start = q_block_idx * Q_PER_BLOCK;
 		usize q_block_end = q_block_start + Q_PER_BLOCK;
 		usize q_start = q_block_start + q_warp_idx * Q_PER_WARP;
-		GMatrix<bf16, Q_PER_BLOCK, QK_DIM> gQ_block = tile_m<Q_PER_BLOCK>(gQ, q_block_idx);
+		GMatrix<bf16, Q_PER_BLOCK, QK_GROUP_DIM> gQ_block = tile_m<Q_PER_BLOCK>(gQ, q_block_idx);
 		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gQ_block, sQ);
 
 		// round window_size up without overflow (window_size == 0 means disabled)
@@ -318,83 +341,112 @@ struct Attn_forward {
 		// Sink: a virtual token with no V contribution - it only adds to the
 		// softmax denominator, stealing probability from real tokens.
 		// sinks_and_gates[2*i_head + 0] = raw score, [2*i_head + 1] = output gate
-		f32 sink_score = -INFINITY;
-		f32 gate = 1.0f;
+		f32 gate[HEADS_PER_KERNEL];
+		f32 top_sink_scaled[HEADS_PER_KERNEL];
+		f32 bot_sink_scaled[HEADS_PER_KERNEL];
 		if (sinks_and_gates != nullptr) {
-			load_gmem_2x32b(sinks_and_gates + 2 * i_head, sink_score, gate);
+			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+				f32 sink_score;
+				load_gmem_2x32b(sinks_and_gates + 2 * (i_head_base + h), sink_score, gate[h]);
+				top_sink_scaled[h] = math::max(sink_score * top_score_scale, std::numeric_limits<f32>::lowest());
+				bot_sink_scaled[h] = math::max(sink_score * bot_score_scale, std::numeric_limits<f32>::lowest());
+			}
+		} else {
+			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+				gate[h] = 1.0f;
+				top_sink_scaled[h] = std::numeric_limits<f32>::lowest();
+				bot_sink_scaled[h] = std::numeric_limits<f32>::lowest();
+			}
 		}
-		f32 top_sink_scaled = math::max(sink_score * top_score_scale, std::numeric_limits<f32>::lowest());
-		f32 bot_sink_scaled = math::max(sink_score * bot_score_scale, std::numeric_limits<f32>::lowest());
 
-		SoftmaxStats r_top;
-		r_top.max = top_sink_scaled + ONLINE_SOFTMAX_THRESHOLD;
-		r_top.sum = 0.0f; // sink sum added in combine_and_store (not here — would be counted 4×)
-		SoftmaxStats r_bot;
-		r_bot.max = bot_sink_scaled + ONLINE_SOFTMAX_THRESHOLD;
-		r_bot.sum = 0.0f;
-
-		// O accumulator
-		Fragment_16x16<f32> rO_f32[V_TILES];
-		zero_(rO_f32);
+		SoftmaxStats top_stats[HEADS_PER_KERNEL];
+		SoftmaxStats bot_stats[HEADS_PER_KERNEL];
+		Fragment_16x16<f32> rO_f32[HEADS_PER_KERNEL][V_TILES];
+		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+			top_stats[h].max = top_sink_scaled[h] + ONLINE_SOFTMAX_THRESHOLD;
+			top_stats[h].sum = 0.0f;
+			bot_stats[h].max = bot_sink_scaled[h] + ONLINE_SOFTMAX_THRESHOLD;
+			bot_stats[h].sum = 0.0f;
+			zero_(rO_f32[h]);
+		}
 
 		cp_async_wait<GMEM_PRELOAD - 1>();
 		sync_threads();
 
 		// Load Q from SMEM to registers
-		Fragment_16x16<bf16> rQ[QK_TILES];
-		X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
-			smem_tile_to_fragment(sQ, q_warp_idx * Q_PER_WARP, i * 16, rQ[i]);
+		Fragment_16x16<bf16> rQ[HEADS_PER_KERNEL][QK_TILES];
+		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+			X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
+				smem_tile_to_fragment(sQ, q_warp_idx * Q_PER_WARP, h * QK_DIM + i * 16, rQ[h][i]);
+			}
 		}
 		// Load first KV tile from SMEM to registers
 		SMatrix<bf16, KV_PER_STEP, PRELOAD_DIM> sKV;
 		sKV = tile_m<KV_PER_STEP>(sPreload, kv_begin % GMEM_PRELOAD);
-		Fragment_16x16<bf16> rKV[QK_TILES];
-		X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
-			smem_tile_to_fragment(sKV, 0, i * 16, rKV[i]);
+		Fragment_16x16<bf16> rKV[HEADS_PER_KERNEL][QK_TILES];
+		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+			X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
+				smem_tile_to_fragment(sKV, 0, h * QK_DIM + i * 16, rKV[h][i]);
+			}
 		}
 
 		// Sequential loop over KV
 		X17_NO_UNROLL for (usize kv_step = kv_begin; kv_step < kv_end; ++kv_step) {
 			// S = Q * K^T, interleaved with V load (rKV: K -> V)
-			Fragment_16x16<f32> rS_f32;
-			zero_(rS_f32);
-			X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
-				mma_a_bt(rQ[i], rKV[i], rS_f32);
-				smem_tile_to_fragment_trans(sKV, 0, V_SMEM_COL + i * 16, rKV[i]);
-			}
-			X17_UNROLL for (usize i = V_TILES; i < QK_TILES; i++) {
-				mma_a_bt(rQ[i], rKV[i], rS_f32);
-			}
+			Fragment_16x16<f32> rS_f32[HEADS_PER_KERNEL];
+			Fragment_16x16<bf16> rP[HEADS_PER_KERNEL];
+			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+				zero_(rS_f32[h]);
+				X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
+					mma_a_bt(rQ[h][i], rKV[h][i], rS_f32[h]);
+					smem_tile_to_fragment_trans(
+						sKV,
+						0,
+						(V_EQUALS_K ? h * QK_DIM : QK_GROUP_DIM + h * V_DIM) + i * 16,
+						rKV[h][i]
+					);
+				}
+				X17_UNROLL for (usize i = V_TILES; i < QK_TILES; i++) {
+					mma_a_bt(rQ[h][i], rKV[h][i], rS_f32[h]);
+				}
 
-			// Scaling must happen before masking to avoid -inf * 0 == NaN when scale == 0
-			scale_top_(rS_f32, top_score_scale);
-			scale_bottom_(rS_f32, bot_score_scale);
+				// Scaling must happen before masking to avoid -inf * 0 == NaN when scale == 0
+				scale_top_(rS_f32[h], top_score_scale);
+				scale_bottom_(rS_f32[h], bot_score_scale);
+			}
 
 			// Apply masks
 			if (kv_step < kv_begin_full || kv_step >= kv_end_full) {
-				// Window mask: mask keys outside the sliding window
 				if (kv_step < kv_begin_full) {
 					usize diag_warp = Q_WARPS + kv_step - kv_begin_full;
 					if (q_warp_idx == diag_warp) {
-						window_mask_diagonal(rS_f32);
+						X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+							window_mask_diagonal(rS_f32[h]);
+						}
 					} else if (q_warp_idx > diag_warp) {
-						fill_(rS_f32, -INFINITY);
+						X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+							fill_(rS_f32[h], -INFINITY);
+						}
 					}
 				}
-				// Causal mask: mask future keys
 				if (kv_step >= kv_end_full) {
 					usize diag_warp = kv_step - kv_end_full;
 					if (q_warp_idx == diag_warp) {
-						causal_mask_diagonal(rS_f32);
+						X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+							causal_mask_diagonal(rS_f32[h]);
+						}
 					} else if (q_warp_idx < diag_warp) {
-						fill_(rS_f32, -INFINITY);
+						X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+							fill_(rS_f32[h], -INFINITY);
+						}
 					}
 				}
 			}
 
-			online_softmax(kv_step == kv_begin, r_top, r_bot, rS_f32, rO_f32);
-			Fragment_16x16<bf16> rP;
-			cast(rS_f32, rP);
+			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+				online_softmax(kv_step == kv_begin, top_stats[h], bot_stats[h], rS_f32[h], rO_f32[h]);
+				cast(rS_f32[h], rP[h]);
+			}
 
 			{ // Get more data from GMEM
 				// Wait for the next batch of GMEM -> SMEM preloads to complete
@@ -408,18 +460,32 @@ struct Attn_forward {
 			}
 
 			// rO += S * V, interleaved with next K load
-			X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
-				mma_a_bt(rP, rKV[i], rO_f32[i]);
-				smem_tile_to_fragment(sKV, 0, i * 16, rKV[i]);
-			}
-			// Load remaining K tiles that weren't covered by V interleaving
-			X17_UNROLL for (usize i = V_TILES; i < QK_TILES; i++) {
-				smem_tile_to_fragment(sKV, 0, i * 16, rKV[i]);
+			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+				X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
+					mma_a_bt(rP[h], rKV[h][i], rO_f32[h][i]);
+					smem_tile_to_fragment(sKV, 0, h * QK_DIM + i * 16, rKV[h][i]);
+				}
+				X17_UNROLL for (usize i = V_TILES; i < QK_TILES; i++) {
+					smem_tile_to_fragment(sKV, 0, h * QK_DIM + i * 16, rKV[h][i]);
+				}
 			}
 		}
 
-		GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = tile_m<Q_PER_BLOCK>(gO, q_block_idx);
-		combine_and_store(rO_f32, r_top, r_bot, top_sink_scaled, bot_sink_scaled, gate, q_start, q_warp_idx, gOut_block, gL_head_ptr);
+		GMatrix<bf16, Q_PER_BLOCK, V_GROUP_DIM> gOut_block = tile_m<Q_PER_BLOCK>(gO, q_block_idx);
+		combine_and_store(
+			rO_f32,
+			top_stats,
+			bot_stats,
+			top_sink_scaled,
+			bot_sink_scaled,
+			gate,
+			q_start,
+			q_warp_idx,
+			gOut_block,
+			gL_ptr,
+			seq_len,
+			i_head_base
+		);
 	}
 };
 
