@@ -31,10 +31,12 @@ struct Attn_d_kv {
 	static constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
 	static constexpr f32 SCORE_SCALE = Attn_forward::SCORE_SCALE;
 
-	// TODO - other matrices (dO, O, ...) should have their stride
-	static constexpr usize K_STRIDE = QK_DIM * HEAD_CNT;
-	static constexpr usize V_STRIDE = V_DIM * HEAD_CNT;
-	static constexpr usize Q_STRIDE = QK_DIM * HEAD_CNT;
+	static constexpr usize Q_STRIDE = Attn_forward::Q_STRIDE;
+	static constexpr usize K_STRIDE = Attn_forward::K_STRIDE;
+	static constexpr usize V_STRIDE = Attn_forward::V_STRIDE;
+	static constexpr usize DO_STRIDE = Attn_forward::DO_STRIDE;
+	static constexpr usize DK_STRIDE = Attn_forward::DK_STRIDE;
+	static constexpr usize DV_STRIDE = Attn_forward::DV_STRIDE;
 
 	static constexpr usize SMEM_BYTES =
 		sizeof(bf16) * (Q_PER_STEP * PRELOAD_DIM * GMEM_PRELOAD)
@@ -91,19 +93,21 @@ struct Attn_d_kv {
 		bf16 *gK_ptr, bf16 *gV_ptr,
 		bf16 *gDO_ptr, bf16 *gDK_ptr, bf16 *gDV_ptr,
 		f32 *gL_ptr, f32 *gD_ptr,
-		f32 *sink,
+		f32 *sinks_and_gates,
 		usize window_size
 	) {
 		static_assert(Q_WARPS == 1, "current algorithm doesn't reduce over Q warps");
 		usize i_head = blockIdx.y;
+		f32 *gL_head_ptr = gL_ptr + seq_len * i_head;
+		f32 *gD_head_ptr = gD_ptr + seq_len * i_head;
 
 		// GMEM Matrices
 		GMatrixDynSize<bf16, QK_DIM> gQ{gQ_ptr + QK_DIM * i_head, seq_len, Q_STRIDE};
 		GMatrixDynSize<bf16, QK_DIM> gK{gK_ptr + QK_DIM * i_head, seq_len, K_STRIDE};
 		GMatrixDynSize<bf16, V_DIM> gV{gV_ptr + V_DIM * i_head, seq_len, V_STRIDE};
-		GMatrixDynSize<bf16, V_DIM> gDO{gDO_ptr, seq_len};
-		GMatrixDynSize<bf16, QK_DIM> gDK{gDK_ptr, seq_len};
-		GMatrixDynSize<bf16, V_DIM> gDV{gDV_ptr, seq_len};
+		GMatrixDynSize<bf16, V_DIM> gDO{gDO_ptr + V_DIM * i_head, seq_len, DO_STRIDE};
+		GMatrixDynSize<bf16, QK_DIM> gDK{gDK_ptr + QK_DIM * i_head, seq_len, DK_STRIDE};
+		GMatrixDynSize<bf16, V_DIM> gDV{gDV_ptr + V_DIM * i_head, seq_len, DV_STRIDE};
 
 		// SMEM layout: Q + dO preload region + KV + sL + sD
 		u32 smem = 0;
@@ -140,17 +144,17 @@ struct Attn_d_kv {
 
 		// Start preloading first Q+dO blocks (first commit also commits KV)
 		X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD; ++p) {
-			cp_async_q_do_ld(gQ, gDO, gL_ptr, gD_ptr, sPreload, sL, sD, q_begin + p, q_end);
+			cp_async_q_do_ld(gQ, gDO, gL_head_ptr, gD_head_ptr, sPreload, sL, sD, q_begin + p, q_end);
 			cp_async_commit();
 		}
 
 		// Sink: a virtual token with no V contribution - it only adds to the
 		// softmax denominator, stealing probability from real tokens.
-		// sink[0] = raw score, sink[1] = output gate
+		// sinks_and_gates[2*i_head + 0] = raw score, [2*i_head + 1] = output gate
 		f32 sink_score = -INFINITY;
 		f32 gate = 1.0f;
-		if (sink != nullptr) {
-			load_gmem_2x32b(sink, sink_score, gate);
+		if (sinks_and_gates != nullptr) {
+			load_gmem_2x32b(sinks_and_gates + 2 * i_head, sink_score, gate);
 		}
 
 		// dK, dV accumulators
@@ -300,7 +304,7 @@ struct Attn_d_kv {
 				sDSlot = tile_m<1>(sD, (q_step + 1) % GMEM_PRELOAD);
 
 				// Preload next Q+dO tiles from GMEM
-				cp_async_q_do_ld(gQ, gDO, gL_ptr, gD_ptr, sPreload, sL, sD, q_step + GMEM_PRELOAD, q_end);
+				cp_async_q_do_ld(gQ, gDO, gL_head_ptr, gD_head_ptr, sPreload, sL, sD, q_step + GMEM_PRELOAD, q_end);
 				cp_async_commit();
 			}
 
@@ -334,9 +338,9 @@ attn_d_kv(
 	bf16 *gK_ptr, bf16 *gV_ptr,
 	bf16 *gDO_ptr, bf16 *gDK_ptr, bf16 *gDV_ptr,
 	f32 *gL_ptr, f32 *gD_ptr,
-	f32 *sink,
+	f32 *sinks_and_gates,
 	usize window_size
 ) {
 	auto attn_d_kv = Attn_d_kv();
-	attn_d_kv.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gDO_ptr, gDK_ptr, gDV_ptr, gL_ptr, gD_ptr, sink, window_size);
+	attn_d_kv.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gDO_ptr, gDK_ptr, gDV_ptr, gL_ptr, gD_ptr, sinks_and_gates, window_size);
 }

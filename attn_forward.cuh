@@ -38,10 +38,14 @@ struct Attn_forward {
 	static constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
 	static constexpr f32 SCORE_SCALE = 1.0 / constexpr_sqrt(f64(QK_DIM));
 
-	// TODO - other matrices (dO, O, ...) should have their stride
+	static constexpr usize Q_STRIDE = QK_DIM * HEAD_CNT;
 	static constexpr usize K_STRIDE = QK_DIM * HEAD_CNT;
 	static constexpr usize V_STRIDE = V_DIM * HEAD_CNT;
-	static constexpr usize Q_STRIDE = QK_DIM * HEAD_CNT;
+	static constexpr usize O_STRIDE = V_DIM * HEAD_CNT;
+	static constexpr usize DO_STRIDE = V_DIM * HEAD_CNT;
+	static constexpr usize DQ_STRIDE = QK_DIM * HEAD_CNT;
+	static constexpr usize DK_STRIDE = QK_DIM * HEAD_CNT;
+	static constexpr usize DV_STRIDE = V_DIM * HEAD_CNT;
 
 	static constexpr usize SMEM_BYTES =
 		sizeof(bf16) * (
@@ -253,17 +257,18 @@ struct Attn_forward {
 		bf16 *gK_ptr, bf16 *gV_ptr,
 		bf16 *gOut_ptr,
 		f32 *gL_ptr,
-		f32 *sink,
+		f32 *sinks_and_gates,
 		usize window_size
 	) {
 		static_assert(KV_WARPS == 1, "current algorithm doesn't reduce over KV warps");
 		usize i_head = blockIdx.y;
+		f32 *gL_head_ptr = gL_ptr != nullptr ? gL_ptr + seq_len * i_head : nullptr;
 
 		// GMEM Matrices
 		GMatrixDynSize<bf16, QK_DIM> gQ{gQ_ptr + QK_DIM * i_head, seq_len, Q_STRIDE};
 		GMatrixDynSize<bf16, QK_DIM> gK{gK_ptr + QK_DIM * i_head, seq_len, K_STRIDE};
 		GMatrixDynSize<bf16, V_DIM> gV{gV_ptr + V_DIM * i_head, seq_len, V_STRIDE};
-		GMatrixDynSize<bf16, V_DIM> gO{gOut_ptr, seq_len};
+		GMatrixDynSize<bf16, V_DIM> gO{gOut_ptr + V_DIM * i_head, seq_len, O_STRIDE};
 
 		// SMEM layout: KV preload region + Q
 		u32 smem = 0;
@@ -313,11 +318,11 @@ struct Attn_forward {
 
 		// Sink: a virtual token with no V contribution - it only adds to the
 		// softmax denominator, stealing probability from real tokens.
-		// sink[0] = raw score, sink[1] = output gate
+		// sinks_and_gates[2*i_head + 0] = raw score, [2*i_head + 1] = output gate
 		f32 sink_score = -INFINITY;
 		f32 gate = 1.0f;
-		if (sink != nullptr) {
-			load_gmem_2x32b(sink, sink_score, gate);
+		if (sinks_and_gates != nullptr) {
+			load_gmem_2x32b(sinks_and_gates + 2 * i_head, sink_score, gate);
 		}
 		f32 top_sink_scaled = math::max(sink_score * top_score_scale, std::numeric_limits<f32>::lowest());
 		f32 bot_sink_scaled = math::max(sink_score * bot_score_scale, std::numeric_limits<f32>::lowest());
@@ -415,7 +420,7 @@ struct Attn_forward {
 		}
 
 		GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = tile_m<Q_PER_BLOCK>(gO, q_block_idx);
-		combine_and_store(rO_f32, r_top, r_bot, top_sink_scaled, bot_sink_scaled, gate, q_start, q_warp_idx, gOut_block, gL_ptr);
+		combine_and_store(rO_f32, r_top, r_bot, top_sink_scaled, bot_sink_scaled, gate, q_start, q_warp_idx, gOut_block, gL_head_ptr);
 	}
 };
 
@@ -426,9 +431,9 @@ attn_forward(
 	bf16 *gK_ptr, bf16 *gV_ptr,
 	bf16 *gOut_ptr,
 	f32 *gL_ptr,
-	f32 *sink,
+	f32 *sinks_and_gates,
 	usize window_size
 ) {
 	auto attn_forward = Attn_forward();
-	attn_forward.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gOut_ptr, gL_ptr, sink, window_size);
+	attn_forward.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gOut_ptr, gL_ptr, sinks_and_gates, window_size);
 }

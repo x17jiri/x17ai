@@ -135,10 +135,10 @@ int main(int argc, char *argv[]) {
 	cudaMalloc(&out_dev, out_size_bytes);
 	GMatrixDynSize<bf16, V_DIM> out{out_dev, Q_LEN};
 
-	// allocate logsumexp: f32 [Q_LEN]
-	std::vector<f32> L_data(Q_LEN);
+	// allocate logsumexp: f32 [HEAD_CNT, Q_LEN]
+	std::vector<f32> L_data(HEAD_CNT * Q_LEN);
 	f32 *L_dev;
-	cudaMalloc(&L_dev, Q_LEN * sizeof(f32));
+	cudaMalloc(&L_dev, L_data.size() * sizeof(f32));
 
 	// allocate dQ output: bf16 [Q_LEN, QK_DIM]
 	bf16 *dQ_dev;
@@ -152,9 +152,9 @@ int main(int argc, char *argv[]) {
 	bf16 *dV_dev;
 	cudaMalloc(&dV_dev, KV_LEN * V_DIM * sizeof(bf16));
 
-	// allocate D output: f32 [Q_LEN]
+	// allocate D output: f32 [HEAD_CNT, Q_LEN]
 	f32 *D_dev;
-	cudaMalloc(&D_dev, Q_LEN * sizeof(f32));
+	cudaMalloc(&D_dev, HEAD_CNT * Q_LEN * sizeof(f32));
 
 	err = cudaGetLastError();
 	if (err != cudaSuccess) {
@@ -180,12 +180,16 @@ int main(int argc, char *argv[]) {
 
 	cudaFuncSetAttribute(attn_forward<AF>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-	// Allocate sink+gate buffer: [sink_score, gate]
-	f32 sink_host[2] = { -0.3f, 0.5f };
-	f32 *sink_dev;
-	cudaMalloc(&sink_dev, sizeof(sink_host));
-	cudaMemcpy(sink_dev, sink_host, sizeof(sink_host), cudaMemcpyHostToDevice);
-	f32 *sink_ptr = use_real_data ? sink_dev : nullptr;
+	// Allocate per-head sink+gate buffer: [sink_score, gate] for each head.
+	std::array<f32, 2 * HEAD_CNT> sinks_and_gates_host{};
+	for (usize i_head = 0; i_head < HEAD_CNT; ++i_head) {
+		sinks_and_gates_host[2 * i_head] = -0.3f;
+		sinks_and_gates_host[2 * i_head + 1] = 0.5f;
+	}
+	f32 *sinks_and_gates_dev;
+	cudaMalloc(&sinks_and_gates_dev, sizeof(sinks_and_gates_host));
+	cudaMemcpy(sinks_and_gates_dev, sinks_and_gates_host.data(), sizeof(sinks_and_gates_host), cudaMemcpyHostToDevice);
+	f32 *sinks_and_gates_ptr = use_real_data ? sinks_and_gates_dev : nullptr;
 
 	cudaDeviceSynchronize();
 
@@ -199,7 +203,7 @@ int main(int argc, char *argv[]) {
 				kc_dev, v_dev,
 				out_dev,
 				L_dev,
-				sink_ptr,
+				sinks_and_gates_ptr,
 				WINDOW_SIZE
 			);
 	}
@@ -224,7 +228,7 @@ int main(int argc, char *argv[]) {
 				kc_dev, v_dev,
 				out_dev,
 				L_dev,
-				sink_ptr,
+				sinks_and_gates_ptr,
 				WINDOW_SIZE
 			);
 		cudaEventRecord(ends[i]);
@@ -263,7 +267,7 @@ int main(int argc, char *argv[]) {
 	// write logsumexp to file
 	{
 		std::ofstream L_file("tmp/L.bin", std::ios::binary);
-		cudaMemcpy(L_data.data(), L_dev, Q_LEN * sizeof(f32), cudaMemcpyDeviceToHost);
+		cudaMemcpy(L_data.data(), L_dev, L_data.size() * sizeof(f32), cudaMemcpyDeviceToHost);
 		L_file.write(
 			reinterpret_cast<char *>(L_data.data()),
 			static_cast<std::streamsize>(L_data.size() * sizeof(f32))
@@ -279,7 +283,7 @@ int main(int argc, char *argv[]) {
 				kc_dev, v_dev,
 				out_dev, dO_dev, dQ_dev,
 				L_dev, D_dev,
-				sink_ptr,
+				sinks_and_gates_ptr,
 				WINDOW_SIZE
 			);
 	}
@@ -299,7 +303,7 @@ int main(int argc, char *argv[]) {
 				kc_dev, v_dev,
 				out_dev, dO_dev, dQ_dev,
 				L_dev, D_dev,
-				sink_ptr,
+				sinks_and_gates_ptr,
 				WINDOW_SIZE
 			);
 		cudaEventRecord(dq_ends[i]);
@@ -336,11 +340,11 @@ int main(int argc, char *argv[]) {
 
 	// write D to file
 	{
-		std::vector<f32> D_data(Q_LEN);
-		cudaMemcpy(D_data.data(), D_dev, Q_LEN * sizeof(f32), cudaMemcpyDeviceToHost);
+		std::vector<f32> D_data(HEAD_CNT * Q_LEN);
+		cudaMemcpy(D_data.data(), D_dev, D_data.size() * sizeof(f32), cudaMemcpyDeviceToHost);
 		std::ofstream f("tmp/D.bin", std::ios::binary);
 		f.write(reinterpret_cast<char*>(D_data.data()),
-			static_cast<std::streamsize>(Q_LEN * sizeof(f32)));
+			static_cast<std::streamsize>(D_data.size() * sizeof(f32)));
 	}
 
 	// Run d_kv backward kernel
@@ -352,7 +356,7 @@ int main(int argc, char *argv[]) {
 				kc_dev, v_dev,
 				dO_dev, dK_dev, dV_dev,
 				L_dev, D_dev,
-				sink_ptr,
+				sinks_and_gates_ptr,
 				WINDOW_SIZE
 			);
 	}
@@ -372,7 +376,7 @@ int main(int argc, char *argv[]) {
 				kc_dev, v_dev,
 				dO_dev, dK_dev, dV_dev,
 				L_dev, D_dev,
-				sink_ptr,
+				sinks_and_gates_ptr,
 				WINDOW_SIZE
 			);
 		cudaEventRecord(dkv_ends[i]);

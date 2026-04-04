@@ -30,16 +30,19 @@ struct Attn_d_q {
 	static constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
 	static constexpr f32 SCORE_SCALE = Attn_forward::SCORE_SCALE;
 
-	// TODO - other matrices (dO, O, ...) should have their stride
+	static constexpr usize Q_STRIDE = Attn_forward::Q_STRIDE;
 	static constexpr usize K_STRIDE = Attn_forward::K_STRIDE;
 	static constexpr usize V_STRIDE = Attn_forward::V_STRIDE;
-	static constexpr usize Q_STRIDE = Attn_forward::Q_STRIDE;
+	static constexpr usize O_STRIDE = Attn_forward::O_STRIDE;
+	static constexpr usize DO_STRIDE = Attn_forward::DO_STRIDE;
+	static constexpr usize DQ_STRIDE = Attn_forward::DQ_STRIDE;
 
 	static constexpr usize SMEM_BYTES =
 		sizeof(bf16) * (
 			KV_PER_STEP * PRELOAD_DIM * GMEM_PRELOAD
 			+ Q_PER_BLOCK * (QK_DIM + 2 * V_DIM)
-		);
+		)
+		+ sizeof(f32) * Q_PER_BLOCK;
 
 	static constexpr size_t mma_count(size_t seq_len, size_t window_size) {
 		seq_len /= 16;
@@ -60,19 +63,21 @@ struct Attn_d_q {
 		bf16 *gK_ptr, bf16 *gV_ptr,
 		bf16 *gOut_ptr, bf16 *gDO_ptr, bf16 *gDQ_ptr,
 		f32 *gL_ptr, f32 *gD_ptr,
-		f32 *sink,
+		f32 *sinks_and_gates,
 		usize window_size
 	) {
 		static_assert(KV_WARPS == 1, "current algorithm doesn't reduce over KV warps");
 		usize i_head = blockIdx.y;
+		f32 *gL_head_ptr = gL_ptr + seq_len * i_head;
+		f32 *gD_head_ptr = gD_ptr + seq_len * i_head;
 
 		// GMEM Matrices
 		GMatrixDynSize<bf16, QK_DIM> gQ{gQ_ptr + QK_DIM * i_head, seq_len, Q_STRIDE};
 		GMatrixDynSize<bf16, QK_DIM> gK{gK_ptr + QK_DIM * i_head, seq_len, K_STRIDE};
 		GMatrixDynSize<bf16, V_DIM> gV{gV_ptr + V_DIM * i_head, seq_len, V_STRIDE};
-		GMatrixDynSize<bf16, V_DIM> gO{gOut_ptr, seq_len};
-		GMatrixDynSize<bf16, V_DIM> gDO{gDO_ptr, seq_len};
-		GMatrixDynSize<bf16, QK_DIM> gDQ{gDQ_ptr, seq_len, Q_STRIDE};
+		GMatrixDynSize<bf16, V_DIM> gO{gOut_ptr + V_DIM * i_head, seq_len, O_STRIDE};
+		GMatrixDynSize<bf16, V_DIM> gDO{gDO_ptr + V_DIM * i_head, seq_len, DO_STRIDE};
+		GMatrixDynSize<bf16, QK_DIM> gDQ{gDQ_ptr + QK_DIM * i_head, seq_len, DQ_STRIDE};
 
 		// SMEM layout: KV preload region + Q + dO + O
 		u32 smem = 0;
@@ -82,8 +87,9 @@ struct Attn_d_q {
 		SMatrix<bf16, Q_PER_BLOCK, QK_DIM> sQ{sPreload._ptr + sPreload.bytes()};
 		SMatrix<bf16, Q_PER_BLOCK, V_DIM> sdO{sQ._ptr + sQ.bytes()};
 		SMatrix<bf16, Q_PER_BLOCK, V_DIM> sO{sdO._ptr + sdO.bytes()};
+		SMatrix_32b<f32, 1, Q_PER_BLOCK> sL{sO._ptr + sO.bytes()};
 
-		// Load Q, dO, O from GMEM to SMEM (no commit — piggyback on first KV commit)
+		// Load Q, dO, O, and L from GMEM to SMEM (no commit — piggyback on first KV commit)
 		usize q_block_idx = blockIdx.x;
 		usize q_block_start = q_block_idx * Q_PER_BLOCK;
 		usize q_block_end = q_block_start + Q_PER_BLOCK;
@@ -94,6 +100,8 @@ struct Attn_d_q {
 		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gDO_block, sdO);
 		GMatrix<bf16, Q_PER_BLOCK, V_DIM> gOut_block = tile_m<Q_PER_BLOCK>(gO, q_block_idx);
 		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gOut_block, sO);
+		GMatrix<f32, 1, Q_PER_BLOCK> gL_block{gL_head_ptr + q_block_start};
+		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gL_block, sL);
 
 		// round window_size up without overflow (window_size == 0 means disabled)
 		usize max_window_size = std::numeric_limits<usize>::max();
@@ -128,16 +136,12 @@ struct Attn_d_q {
 
 		// Sink: a virtual token with no V contribution - it only adds to the
 		// softmax denominator, stealing probability from real tokens.
-		// sink[0] = raw score, sink[1] = output gate
+		// sinks_and_gates[2*i_head + 0] = raw score, [2*i_head + 1] = output gate
 		f32 sink_score = -INFINITY;
 		f32 gate = 1.0f;
-		if (sink != nullptr) {
-			load_gmem_2x32b(sink, sink_score, gate);
+		if (sinks_and_gates != nullptr) {
+			load_gmem_2x32b(sinks_and_gates + 2 * i_head, sink_score, gate);
 		}
-
-		// TODO - use just one memory read
-		f32 top_L = gL_ptr[q_start + tid / 4];
-		f32 bot_L = gL_ptr[q_start + tid / 4 + 8];
 
 		// dQ accumulator
 		Fragment_16x16<f32> rDQ_f32[QK_TILES];
@@ -145,6 +149,9 @@ struct Attn_d_q {
 
 		cp_async_wait<GMEM_PRELOAD - 1>();
 		sync_threads();
+
+		f32 top_L = load_shared_1x32b<f32>(sL._ptr + (q_warp_idx * Q_PER_WARP + tid / 4) * sizeof(f32));
+		f32 bot_L = load_shared_1x32b<f32>(sL._ptr + (q_warp_idx * Q_PER_WARP + tid / 4 + 8) * sizeof(f32));
 
 		// Load Q from SMEM to registers
 		Fragment_16x16<bf16> rQ[QK_TILES];
@@ -191,7 +198,7 @@ struct Attn_d_q {
 		// Store D to GMEM (same pattern as L store)
 		if ((tid & 1) == 0) {
 			usize base = q_block_start + q_warp_idx * Q_PER_WARP;
-			gD_ptr[base + (tid / 4) + ((tid & 2) * 4)] = ((tid & 2) == 0 ? top_D : bot_D);
+			gD_head_ptr[base + (tid / 4) + ((tid & 2) * 4)] = ((tid & 2) == 0 ? top_D : bot_D);
 		}
 
 		// Adjust L to fold score_scale and gate into P:
@@ -314,9 +321,9 @@ attn_d_q(
 	bf16 *gK_ptr, bf16 *gV_ptr,
 	bf16 *gOut_ptr, bf16 *gDO_ptr, bf16 *gDQ_ptr,
 	f32 *gL_ptr, f32 *gD_ptr,
-	f32 *sink,
+	f32 *sinks_and_gates,
 	usize window_size
 ) {
 	auto attn_d_q = Attn_d_q();
-	attn_d_q.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gOut_ptr, gDO_ptr, gDQ_ptr, gL_ptr, gD_ptr, sink, window_size);
+	attn_d_q.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gOut_ptr, gDO_ptr, gDQ_ptr, gL_ptr, gD_ptr, sinks_and_gates, window_size);
 }
