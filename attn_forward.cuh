@@ -6,8 +6,7 @@
 
 template<
 	const usize _HEAD_CNT,
-	const usize _NONROPE_DIM,
-	const usize _ROPE_DIM,
+	const usize _QK_DIM,
 	const usize _V_DIM,
 	const bool _V_EQUALS_K = false,
 	const usize _GMEM_PRELOAD = 2
@@ -15,7 +14,7 @@ template<
 struct Attn_forward {
 	// Expose template parameters needed by dependent kernels.
 	static constexpr usize HEAD_CNT = _HEAD_CNT;
-	static constexpr usize QK_DIM = _NONROPE_DIM + _ROPE_DIM;
+	static constexpr usize QK_DIM = _QK_DIM;
 	static constexpr usize V_DIM = _V_DIM;
 	static constexpr bool V_EQUALS_K = _V_EQUALS_K;
 	static constexpr usize GMEM_PRELOAD = _GMEM_PRELOAD;
