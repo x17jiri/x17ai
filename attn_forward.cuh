@@ -258,7 +258,7 @@ struct Attn_forward {
 		usize p, usize kv_end
 	) {
 		if (p < kv_end) {
-			auto preload_tile = tile_m<KV_PER_STEP>(preload, p % GMEM_PRELOAD);
+			SMatrix<bf16, KV_PER_STEP, PRELOAD_DIM> preload_tile = tile_m<KV_PER_STEP>(preload, p % GMEM_PRELOAD);
 			cp_async_gmem_to_smem<THREADS_PER_BLOCK>(
 				threadIdx.x,
 				tile_m<KV_PER_STEP>(gK, p),
@@ -268,7 +268,7 @@ struct Attn_forward {
 				cp_async_gmem_to_smem<THREADS_PER_BLOCK>(
 					threadIdx.x,
 					tile_m<KV_PER_STEP>(gV, p),
-					preload_tile, 0, QK_DIM
+					preload_tile, 0, V_SMEM_COL
 				);
 			}
 		}
@@ -361,14 +361,16 @@ struct Attn_forward {
 
 		SoftmaxStats top_stats[HEADS_PER_KERNEL];
 		SoftmaxStats bot_stats[HEADS_PER_KERNEL];
-		Fragment_16x16<f32> rO_f32[HEADS_PER_KERNEL][V_TILES];
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 			top_stats[h].max = top_sink_scaled[h] + ONLINE_SOFTMAX_THRESHOLD;
 			top_stats[h].sum = 0.0f;
 			bot_stats[h].max = bot_sink_scaled[h] + ONLINE_SOFTMAX_THRESHOLD;
 			bot_stats[h].sum = 0.0f;
-			zero_(rO_f32[h]);
 		}
+
+		// O accumulator
+		Fragment_16x16<f32> rO_f32[HEADS_PER_KERNEL][V_TILES];
+		zero_(rO_f32);
 
 		cp_async_wait<GMEM_PRELOAD - 1>();
 		sync_threads();
@@ -394,17 +396,11 @@ struct Attn_forward {
 		X17_NO_UNROLL for (usize kv_step = kv_begin; kv_step < kv_end; ++kv_step) {
 			// S = Q * K^T, interleaved with V load (rKV: K -> V)
 			Fragment_16x16<f32> rS_f32[HEADS_PER_KERNEL];
-			Fragment_16x16<bf16> rP[HEADS_PER_KERNEL];
+			zero_(rS_f32);
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-				zero_(rS_f32[h]);
 				X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
 					mma_a_bt(rQ[h][i], rKV[h][i], rS_f32[h]);
-					smem_tile_to_fragment_trans(
-						sKV,
-						0,
-						(V_EQUALS_K ? h * QK_DIM : QK_GROUP_DIM + h * V_DIM) + i * 16,
-						rKV[h][i]
-					);
+					smem_tile_to_fragment_trans(sKV, 0, V_SMEM_COL + h * V_DIM + i * 16, rKV[h][i]);
 				}
 				X17_UNROLL for (usize i = V_TILES; i < QK_TILES; i++) {
 					mma_a_bt(rQ[h][i], rKV[h][i], rS_f32[h]);
@@ -417,6 +413,7 @@ struct Attn_forward {
 
 			// Apply masks
 			if (kv_step < kv_begin_full || kv_step >= kv_end_full) {
+				// Window mask: mask keys outside the sliding window
 				if (kv_step < kv_begin_full) {
 					usize diag_warp = Q_WARPS + kv_step - kv_begin_full;
 					if (q_warp_idx == diag_warp) {
@@ -429,6 +426,7 @@ struct Attn_forward {
 						}
 					}
 				}
+				// Causal mask: mask future keys
 				if (kv_step >= kv_end_full) {
 					usize diag_warp = kv_step - kv_end_full;
 					if (q_warp_idx == diag_warp) {
@@ -443,6 +441,7 @@ struct Attn_forward {
 				}
 			}
 
+			Fragment_16x16<bf16> rP[HEADS_PER_KERNEL];
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 				online_softmax(kv_step == kv_begin, top_stats[h], bot_stats[h], rS_f32[h], rO_f32[h]);
 				cast(rS_f32[h], rP[h]);
@@ -499,6 +498,6 @@ attn_forward(
 	f32 *sinks_and_gates,
 	usize window_size
 ) {
-	auto attn_forward = Attn_forward();
+	Attn_forward attn_forward = Attn_forward();
 	attn_forward.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gOut_ptr, gL_ptr, sinks_and_gates, window_size);
 }

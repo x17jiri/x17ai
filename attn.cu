@@ -1,4 +1,6 @@
 #include "attn_forward.cuh"
+#include "attn_d_q.cuh"
+#include "attn_d_kv.cuh"
 
 #include <vector>
 #include <fstream>
@@ -13,9 +15,10 @@ int main(int argc, char *argv[]) {
 	constexpr usize HEADS_PER_KERNEL = 2;
 	constexpr usize QK_DIM = 32;
 	constexpr usize V_DIM = 32;
+	constexpr bool V_EQ_K = false;
 	constexpr usize Q_PACKED_DIM = HEAD_CNT * QK_DIM;
 	constexpr usize V_PACKED_DIM = HEAD_CNT * V_DIM;
-	constexpr usize WINDOW_SIZE = 0;//256;
+	constexpr usize WINDOW_SIZE = 256;
 	{
 		f32 diff = fabsf(sqrtf(QK_DIM) - f32(constexpr_sqrt(f64(QK_DIM))));
 		printf("sqrtf=%e, constexpr_sqrt=%e, diff=%e\n",
@@ -31,10 +34,17 @@ int main(int argc, char *argv[]) {
 		Q_LEN = 1024;
 		KV_LEN = 1024;
 	} else {
-		Q_LEN = 16384;
-		KV_LEN = 16384;
+		Q_LEN = 2*32768;
+		KV_LEN = 2*32768;
 	}
 	srand(42);
+	{
+		std::ofstream config_file("tmp/attn.config.json", std::ios::binary);
+		config_file << "{\n"
+			<< "  \"V_EQ_K\": " << (V_EQ_K ? "true" : "false") << ",\n"
+			<< "  \"WINDOW_SIZE\": " << WINDOW_SIZE << "\n"
+			<< "}\n";
+	}
 
 	// allocate q: bf16 [Q_LEN, HEAD_CNT * QK_DIM]
 	std::vector<bf16> q_data(Q_LEN * Q_PACKED_DIM);
@@ -49,7 +59,6 @@ int main(int argc, char *argv[]) {
 			q_data[i] = bf16(float(i));
 			q_data[i] = bf16(float(rand()) / RAND_MAX * 2.0f - 1.0f);
 		}
-		// Save generated Q for Python verification
 		std::ofstream q_out("tmp/large_q.bin", std::ios::binary);
 		q_out.write(reinterpret_cast<char*>(q_data.data()),
 			static_cast<std::streamsize>(q_data.size() * sizeof(bf16)));
@@ -63,44 +72,65 @@ int main(int argc, char *argv[]) {
 		printf("(1) CUDA Error: %s\n", cudaGetErrorString(err));
 	}
 
-	// allocate kv content: bf16 [KV_LEN, HEAD_CNT * QK_DIM]
-	std::vector<bf16> kv_data(KV_LEN * Q_PACKED_DIM);
+	// allocate K: bf16 [KV_LEN, HEAD_CNT * QK_DIM]
+	std::vector<bf16> k_data(KV_LEN * Q_PACKED_DIM);
 	if (use_real_data) {
-		std::ifstream in("tmp/kv.bin", std::ios::binary);
+		std::ifstream in("tmp/k.bin", std::ios::binary);
 		in.read(
-			reinterpret_cast<char*>(kv_data.data()),
-			static_cast<std::streamsize>(kv_data.size() * sizeof(*kv_data.data()))
+			reinterpret_cast<char*>(k_data.data()),
+			static_cast<std::streamsize>(k_data.size() * sizeof(*k_data.data()))
 		);
 	} else {
-		for (size_t i = 0; i < kv_data.size(); ++i) {
-			kv_data[i] = bf16(float(i*100));
-			kv_data[i] = bf16(float(rand()) / RAND_MAX * 2.0f - 1.0f);
+		for (size_t i = 0; i < k_data.size(); ++i) {
+			k_data[i] = bf16(float(i * 100));
+			k_data[i] = bf16(float(rand()) / RAND_MAX * 2.0f - 1.0f);
 		}
-		// Save generated KV for Python verification
-		std::ofstream kv_out("tmp/large_kv.bin", std::ios::binary);
-		kv_out.write(reinterpret_cast<char*>(kv_data.data()),
-			static_cast<std::streamsize>(kv_data.size() * sizeof(bf16)));
+		std::ofstream k_out("tmp/large_k.bin", std::ios::binary);
+		k_out.write(reinterpret_cast<char*>(k_data.data()),
+			static_cast<std::streamsize>(k_data.size() * sizeof(bf16)));
 	}
-	// Split packed [KV_LEN, HEAD_CNT * QK_DIM] into separate packed K and V arrays.
-	std::vector<bf16> k_data(KV_LEN * Q_PACKED_DIM);
+
+	// allocate V: bf16 [KV_LEN, HEAD_CNT * V_DIM]
 	std::vector<bf16> v_data(KV_LEN * V_PACKED_DIM);
-	for (size_t r = 0; r < KV_LEN; r++) {
-		for (size_t h = 0; h < HEAD_CNT; h++) {
-			for (size_t c = 0; c < QK_DIM; c++) {
-				k_data[r * Q_PACKED_DIM + h * QK_DIM + c] =
-					kv_data[r * Q_PACKED_DIM + h * QK_DIM + c];
-			}
-			for (size_t c = 0; c < V_DIM; c++) {
-				v_data[r * V_PACKED_DIM + h * V_DIM + c] =
-					kv_data[r * Q_PACKED_DIM + h * QK_DIM + c];
-			}
+	if (use_real_data) {
+		std::ifstream in("tmp/v.bin", std::ios::binary);
+		in.read(
+			reinterpret_cast<char*>(v_data.data()),
+			static_cast<std::streamsize>(v_data.size() * sizeof(*v_data.data()))
+		);
+	} else {
+		for (size_t i = 0; i < v_data.size(); ++i) {
+			v_data[i] = bf16(float(rand()) / RAND_MAX * 2.0f - 1.0f);
 		}
+		std::ofstream v_out("tmp/large_v.bin", std::ios::binary);
+		v_out.write(reinterpret_cast<char*>(v_data.data()),
+			static_cast<std::streamsize>(v_data.size() * sizeof(bf16)));
 	}
 	bf16 *k_dev, *v_dev;
 	cudaMalloc(&k_dev, k_data.size() * sizeof(bf16));
 	cudaMemcpy(k_dev, k_data.data(), k_data.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 	cudaMalloc(&v_dev, v_data.size() * sizeof(bf16));
 	cudaMemcpy(v_dev, v_data.data(), v_data.size() * sizeof(bf16), cudaMemcpyHostToDevice);
+
+	// allocate dO: bf16 [Q_LEN, HEAD_CNT * V_DIM]
+	std::vector<bf16> dO_data(Q_LEN * V_PACKED_DIM);
+	if (use_real_data) {
+		std::ifstream in("tmp/dO.bin", std::ios::binary);
+		in.read(
+			reinterpret_cast<char*>(dO_data.data()),
+			static_cast<std::streamsize>(dO_data.size() * sizeof(*dO_data.data()))
+		);
+	} else {
+		for (size_t i = 0; i < dO_data.size(); ++i) {
+			dO_data[i] = bf16(float(rand()) / RAND_MAX * 2.0f - 1.0f);
+		}
+		std::ofstream dO_out("tmp/large_dO.bin", std::ios::binary);
+		dO_out.write(reinterpret_cast<char*>(dO_data.data()),
+			static_cast<std::streamsize>(dO_data.size() * sizeof(bf16)));
+	}
+	bf16 *dO_dev;
+	cudaMalloc(&dO_dev, dO_data.size() * sizeof(bf16));
+	cudaMemcpy(dO_dev, dO_data.data(), dO_data.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 
 	// allocate output: bf16 [Q_LEN, HEAD_CNT * V_DIM]
 	std::vector<bf16> out_data(Q_LEN * V_PACKED_DIM);
@@ -113,6 +143,22 @@ int main(int argc, char *argv[]) {
 	f32 *L_dev;
 	cudaMalloc(&L_dev, L_data.size() * sizeof(f32));
 
+	// allocate dQ output: bf16 [Q_LEN, HEAD_CNT * QK_DIM]
+	bf16 *dQ_dev;
+	cudaMalloc(&dQ_dev, Q_LEN * Q_PACKED_DIM * sizeof(bf16));
+
+	// allocate dK output: bf16 [KV_LEN, HEAD_CNT * QK_DIM]
+	bf16 *dK_dev;
+	cudaMalloc(&dK_dev, KV_LEN * Q_PACKED_DIM * sizeof(bf16));
+
+	// allocate dV output: bf16 [KV_LEN, HEAD_CNT * V_DIM]
+	bf16 *dV_dev;
+	cudaMalloc(&dV_dev, KV_LEN * V_PACKED_DIM * sizeof(bf16));
+
+	// allocate D output: f32 [HEAD_CNT, Q_LEN]
+	f32 *D_dev;
+	cudaMalloc(&D_dev, HEAD_CNT * Q_LEN * sizeof(f32));
+
 	err = cudaGetLastError();
 	if (err != cudaSuccess) {
 		printf("(2) CUDA Error: %s\n", cudaGetErrorString(err));
@@ -123,13 +169,16 @@ int main(int argc, char *argv[]) {
 		printf("(3) CUDA Error: %s\n", cudaGetErrorString(err));
 	}
 
-	constexpr bool V_EQ_K = true;
 	using AF = Attn_forward<HEAD_CNT, HEADS_PER_KERNEL, QK_DIM, V_DIM, V_EQ_K, 2>;
+	using ADQ = Attn_d_q<AF>;
+	using ADKV = Attn_d_kv<AF>;
 	usize smem_size = AF::SMEM_BYTES;
-	printf("smem_size: forward = %d\n", smem_size);
+	printf("smem_size: forward = %d, dQ = %d, dKV = %d\n", smem_size, ADQ::SMEM_BYTES, ADKV::SMEM_BYTES);
 	//smem_size = std::max(smem_size, usize(70 * 1024));
 
 	cudaFuncSetAttribute(attn_forward<AF>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+	cudaFuncSetAttribute(attn_d_q<ADQ>, cudaFuncAttributeMaxDynamicSharedMemorySize, ADQ::SMEM_BYTES);
+	cudaFuncSetAttribute(attn_d_kv<ADKV>, cudaFuncAttributeMaxDynamicSharedMemorySize, ADKV::SMEM_BYTES);
 
 	cudaFuncSetAttribute(attn_forward<AF>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
@@ -147,6 +196,8 @@ int main(int argc, char *argv[]) {
 	cudaDeviceSynchronize();
 
 	dim3 forward_blocks(Q_LEN / AF::Q_PER_BLOCK, AF::HEAD_GROUP_CNT);
+	dim3 backward_q_blocks(Q_LEN / ADQ::Q_PER_BLOCK, ADQ::HEAD_GROUP_CNT);
+	dim3 backward_kv_blocks(KV_LEN / ADKV::KV_PER_BLOCK, ADKV::HEAD_GROUP_CNT);
 
 	int WARMUP = use_real_data ? 0 : 50;
 	//WARMUP = 0;
@@ -225,6 +276,159 @@ int main(int argc, char *argv[]) {
 			reinterpret_cast<char *>(L_data.data()),
 			static_cast<std::streamsize>(L_data.size() * sizeof(f32))
 		);
+	}
+
+	// Run d_q backward kernel (with optional benchmarking)
+	for (int i = 0; i < WARMUP; ++i) {
+		attn_d_q<ADQ>
+			<<<backward_q_blocks, ADQ::THREADS_PER_BLOCK, ADQ::SMEM_BYTES>>>
+			(
+				Q_LEN, q_dev,
+				k_dev, v_dev,
+				out_dev, dO_dev, dQ_dev,
+				L_dev, D_dev,
+				sinks_and_gates_ptr,
+				WINDOW_SIZE
+			);
+	}
+	cudaDeviceSynchronize();
+
+	std::vector<cudaEvent_t> dq_starts(NUM_RUNS), dq_ends(NUM_RUNS);
+	for (int i = 0; i < NUM_RUNS; ++i) {
+		cudaEventCreate(&dq_starts[i]);
+		cudaEventCreate(&dq_ends[i]);
+	}
+	for (int i = 0; i < NUM_RUNS; ++i) {
+		cudaEventRecord(dq_starts[i]);
+		attn_d_q<ADQ>
+			<<<backward_q_blocks, ADQ::THREADS_PER_BLOCK, ADQ::SMEM_BYTES>>>
+			(
+				Q_LEN, q_dev,
+				k_dev, v_dev,
+				out_dev, dO_dev, dQ_dev,
+				L_dev, D_dev,
+				sinks_and_gates_ptr,
+				WINDOW_SIZE
+			);
+		cudaEventRecord(dq_ends[i]);
+	}
+	cudaDeviceSynchronize();
+
+	std::vector<float> dq_times_ms(NUM_RUNS);
+	for (int i = 0; i < NUM_RUNS; ++i) {
+		cudaEventElapsedTime(&dq_times_ms[i], dq_starts[i], dq_ends[i]);
+		cudaEventDestroy(dq_starts[i]);
+		cudaEventDestroy(dq_ends[i]);
+	}
+	std::sort(dq_times_ms.begin(), dq_times_ms.end());
+	float dq_median_ms = dq_times_ms[NUM_RUNS / 2];
+
+	// dQ FLOPS: Q@K^T + dO@V^T + dS@K = 2*Q*KV*(QK_DIM + V_DIM + QK_DIM), causal ≈ half
+	double dq_flops_causal = (2.0 * Q_LEN * KV_LEN * (QK_DIM + V_DIM + QK_DIM) + 5.0 * Q_LEN * KV_LEN) / 2.0;
+	dq_flops_causal = ADQ::flops(Q_LEN, WINDOW_SIZE) * HEAD_CNT;
+	printf("TFLOPS dQ (causal): %.2f\n", dq_flops_causal / (dq_median_ms * 1e-3) / 1e12);
+
+	err = cudaGetLastError();
+	if (err != cudaSuccess) {
+		printf("(dQ) CUDA Error: %s\n", cudaGetErrorString(err));
+	}
+
+	// write dQ to file
+	{
+		std::vector<bf16> dQ_data(Q_LEN * Q_PACKED_DIM);
+		cudaMemcpy(dQ_data.data(), dQ_dev, dQ_data.size() * sizeof(bf16), cudaMemcpyDeviceToHost);
+		std::ofstream f("tmp/dQ.bin", std::ios::binary);
+		f.write(reinterpret_cast<char*>(dQ_data.data()),
+			static_cast<std::streamsize>(dQ_data.size() * sizeof(bf16)));
+	}
+
+	// write D to file
+	{
+		std::vector<f32> D_data(HEAD_CNT * Q_LEN);
+		cudaMemcpy(D_data.data(), D_dev, D_data.size() * sizeof(f32), cudaMemcpyDeviceToHost);
+		std::ofstream f("tmp/D.bin", std::ios::binary);
+		f.write(reinterpret_cast<char*>(D_data.data()),
+			static_cast<std::streamsize>(D_data.size() * sizeof(f32)));
+	}
+
+	// Run d_kv backward kernel
+	for (int i = 0; i < WARMUP; ++i) {
+		attn_d_kv<ADKV>
+			<<<backward_kv_blocks, ADKV::THREADS_PER_BLOCK, ADKV::SMEM_BYTES>>>
+			(
+				KV_LEN, q_dev,
+				k_dev, v_dev,
+				dO_dev, dK_dev, dV_dev,
+				L_dev, D_dev,
+				sinks_and_gates_ptr,
+				WINDOW_SIZE
+			);
+	}
+	cudaDeviceSynchronize();
+
+	std::vector<cudaEvent_t> dkv_starts(NUM_RUNS), dkv_ends(NUM_RUNS);
+	for (int i = 0; i < NUM_RUNS; ++i) {
+		cudaEventCreate(&dkv_starts[i]);
+		cudaEventCreate(&dkv_ends[i]);
+	}
+	for (int i = 0; i < NUM_RUNS; ++i) {
+		cudaEventRecord(dkv_starts[i]);
+		attn_d_kv<ADKV>
+			<<<backward_kv_blocks, ADKV::THREADS_PER_BLOCK, ADKV::SMEM_BYTES>>>
+			(
+				KV_LEN, q_dev,
+				k_dev, v_dev,
+				dO_dev, dK_dev, dV_dev,
+				L_dev, D_dev,
+				sinks_and_gates_ptr,
+				WINDOW_SIZE
+			);
+		cudaEventRecord(dkv_ends[i]);
+	}
+	cudaDeviceSynchronize();
+
+	std::vector<float> dkv_times_ms(NUM_RUNS);
+	for (int i = 0; i < NUM_RUNS; ++i) {
+		cudaEventElapsedTime(&dkv_times_ms[i], dkv_starts[i], dkv_ends[i]);
+		cudaEventDestroy(dkv_starts[i]);
+		cudaEventDestroy(dkv_ends[i]);
+	}
+	std::sort(dkv_times_ms.begin(), dkv_times_ms.end());
+	float dkv_median_ms = dkv_times_ms[NUM_RUNS / 2];
+
+	// dKV FLOPS: Q@K^T + dO@V^T + P^T@dO + dS^T@Q = 2*Q*KV*(QK_DIM + V_DIM + V_DIM + QK_DIM), causal ≈ half
+	double dkv_flops_causal = (2.0 * Q_LEN * KV_LEN * (QK_DIM + V_DIM + V_DIM + QK_DIM) + 5.0 * Q_LEN * KV_LEN) / 2.0;
+	dkv_flops_causal = ADKV::flops(Q_LEN, WINDOW_SIZE) * HEAD_CNT;
+	printf("TFLOPS dKV (causal): %.2f\n", dkv_flops_causal / (dkv_median_ms * 1e-3) / 1e12);
+
+	err = cudaGetLastError();
+	if (err != cudaSuccess) {
+		printf("(dKV) CUDA Error: %s\n", cudaGetErrorString(err));
+	}
+
+	// write dK to file
+	{
+		std::vector<bf16> dK_data(KV_LEN * Q_PACKED_DIM);
+		cudaMemcpy(dK_data.data(), dK_dev, dK_data.size() * sizeof(bf16), cudaMemcpyDeviceToHost);
+		std::ofstream f("tmp/dK.bin", std::ios::binary);
+		f.write(reinterpret_cast<char*>(dK_data.data()),
+			static_cast<std::streamsize>(dK_data.size() * sizeof(bf16)));
+	}
+
+	// write dV to file
+	{
+		std::vector<bf16> dV_data(KV_LEN * V_PACKED_DIM);
+		cudaMemcpy(dV_data.data(), dV_dev, dV_data.size() * sizeof(bf16), cudaMemcpyDeviceToHost);
+		std::ofstream f("tmp/dV.bin", std::ios::binary);
+		f.write(reinterpret_cast<char*>(dV_data.data()),
+			static_cast<std::streamsize>(dV_data.size() * sizeof(bf16)));
+	}
+
+	// write dO to file (for Python verification)
+	{
+		std::ofstream f(use_real_data ? "tmp/dO.bin" : "tmp/large_dO.bin", std::ios::binary);
+		f.write(reinterpret_cast<char*>(dO_data.data()),
+			static_cast<std::streamsize>(dO_data.size() * sizeof(bf16)));
 	}
 
 	err = cudaGetLastError();
