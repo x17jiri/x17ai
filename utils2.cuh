@@ -1424,14 +1424,16 @@ struct SMatrix {
 		if constexpr (GN > 0 && GM > 0) {
 			__builtin_assume(tid < THREADS_PER_BLOCK);
 
-			constexpr usize GMEM_ROW_BYTES = GN * sizeof(T);
-			static_assert(GMEM_ROW_BYTES % 16 == 0);
-
-			constexpr usize CP_PER_ROW = GMEM_ROW_BYTES / 16;
-			static_assert(THREADS_PER_BLOCK % CP_PER_ROW == 0);
+			constexpr usize ROW_BYTES = GN * sizeof(T);
+			constexpr usize CP_BYTES = 16;
+			constexpr usize CP_PER_ROW = ROW_BYTES / CP_BYTES;
 			constexpr usize ROWS_PER_STEP = THREADS_PER_BLOCK / CP_PER_ROW;
 			constexpr usize STEPS = GM / ROWS_PER_STEP;
 
+			static_assert(CP_BYTES % sizeof(T) == 0);
+			static_assert((GN * sizeof(T)) % CP_BYTES == 0);
+			static_assert((N * sizeof(T)) % CP_BYTES == 0);
+			static_assert(THREADS_PER_BLOCK % CP_PER_ROW == 0);
 			if constexpr (STEPS == 0) {
 				if constexpr (GM % ROWS_PER_STEP == 0) {
 					return;
@@ -1442,13 +1444,13 @@ struct SMatrix {
 			}
 
 			// Thread's position within a step is fixed
-			usize col_in_row = dst_col * sizeof(T) + (tid % CP_PER_ROW) * 16;
-			usize gmem_col = (tid % CP_PER_ROW) * 16;
+			usize col_in_row = dst_col * sizeof(T) + (tid % CP_PER_ROW) * CP_BYTES;
 			usize row_in_step = tid / CP_PER_ROW;
+			usize src_col = (tid % CP_PER_ROW) * CP_BYTES;
 
 			constexpr usize REPEAT_AFTER = least_common_multiple(8, ROWS_PER_STEP) / ROWS_PER_STEP;
 			usize off[REPEAT_AFTER];
-			X17_UNROLL for (usize i = 0; i < REPEAT_AFTER; i++) {
+			X17_UNROLL for (usize i = 0; i < REPEAT_AFTER; ++i) {
 				usize row = dst_row + i * ROWS_PER_STEP + row_in_step;
 				off[i] = col_in_row ^ ((row & 7) << 4);
 			}
@@ -1456,14 +1458,14 @@ struct SMatrix {
 			u8 const *src_ptr =
 				reinterpret_cast<u8 const *>(src._ptr)
 				+ row_in_step * src.stride_bytes()
-				+ gmem_col;
+				+ src_col;
 			usize src_step = ROWS_PER_STEP * src.stride_bytes();
 
 			usize dst_ptr = _ptr + (dst_row + row_in_step) * ROW_BYTES;
 			usize dst_step = ROWS_PER_STEP * ROW_BYTES;
 
 			if constexpr (STEPS > 0) {
-				X17_UNROLL for (usize step = 0; step < STEPS; step++) {
+				X17_UNROLL for (usize step = 0; step < STEPS; ++step) {
 					sm80::cp_async(src_ptr, dst_ptr + off[step % REPEAT_AFTER]);
 					src_ptr += src_step;
 					dst_ptr += dst_step;
@@ -1573,6 +1575,91 @@ X17_DEVICE void cp_async_gmem_to_smem(
 	usize dst_col = 0
 ) {
 	dst.template cp_async_from<THREADS_PER_BLOCK>(tid, src, dst_row, dst_col);
+}
+
+template<
+	const usize THREADS_PER_BLOCK,
+	typename T,
+	const usize SM, const usize SN,
+	const usize GM, const usize GN
+>
+requires(std::has_single_bit(GN * sizeof(T)) && SN <= GN && SM == GM)
+X17_DEVICE void cp_async_gmem_to_smem_modulo(
+	usize tid,
+	GMatrix<T, GM, GN> src,
+	SMatrix<T, SM, SN> dst,
+	usize src_col,
+	usize col_step = 0
+) {
+	if constexpr (SN > 0 && SM > 0) {
+		__builtin_assume(tid < THREADS_PER_BLOCK);
+
+		usize dst_row = 0;
+		usize dst_col = 0;
+
+		constexpr usize ROW_BYTES = SN * sizeof(T);
+		constexpr usize CP_BYTES = sizeof(u128);
+		constexpr usize CP_PER_ROW = ROW_BYTES / CP_BYTES;
+		constexpr usize ROWS_PER_STEP = THREADS_PER_BLOCK / CP_PER_ROW;
+		constexpr usize STEPS = SM / ROWS_PER_STEP;
+		constexpr usize SRC_MASK = (GN * sizeof(T)) - 1;
+
+		static_assert(CP_BYTES % sizeof(T) == 0);
+		static_assert((GN * sizeof(T)) % CP_BYTES == 0);
+		static_assert((SN * sizeof(T)) % CP_BYTES == 0);
+		static_assert(THREADS_PER_BLOCK % CP_PER_ROW == 0);
+
+		if constexpr (STEPS == 0) {
+			if constexpr (SM % ROWS_PER_STEP == 0) {
+				return;
+			}
+			if (tid >= (SM % ROWS_PER_STEP) * CP_PER_ROW) {
+				return;
+			}
+		}
+
+		// Thread's position within a step is fixed
+		usize col_in_row = dst_col * sizeof(T) + (tid % CP_PER_ROW) * CP_BYTES;
+		usize row_in_step = tid / CP_PER_ROW;
+		usize src_col_step = col_step * sizeof(T);
+		usize src_col_offset = (
+			(tid % CP_PER_ROW) * CP_BYTES
+			+ src_col * sizeof(T)
+			+ row_in_step * src_col_step
+		) & SRC_MASK;
+
+		constexpr usize REPEAT_AFTER = least_common_multiple(8, ROWS_PER_STEP) / ROWS_PER_STEP;
+		usize off[REPEAT_AFTER];
+		X17_UNROLL for (usize i = 0; i < REPEAT_AFTER; ++i) {
+			usize row = dst_row + i * ROWS_PER_STEP + row_in_step;
+			off[i] = col_in_row ^ ((row & 7) << 4);
+		}
+
+		u8 const *src_row_ptr =
+			reinterpret_cast<u8 const *>(src._ptr)
+			+ row_in_step * src.stride_bytes();
+		usize src_row_step = ROWS_PER_STEP * src.stride_bytes();
+
+		usize dst_ptr = dst._ptr + (dst_row + row_in_step) * dst.ROW_BYTES;
+		usize dst_step = ROWS_PER_STEP * dst.ROW_BYTES;
+
+		// We wrap only between 16-byte chunks. Within the loop each thread keeps the same
+		// chunk column and only moves down by ROWS_PER_STEP rows, matching cp_async_from.
+		if constexpr (STEPS > 0) {
+			X17_UNROLL for (usize step = 0; step < STEPS; ++step) {
+				sm80::cp_async(src_row_ptr + src_col_offset, dst_ptr + off[step % REPEAT_AFTER]);
+				src_row_ptr += src_row_step;
+				dst_ptr += dst_step;
+				src_col_offset = (src_col_offset + src_col_step) & SRC_MASK;
+			}
+		}
+		if constexpr (SM % ROWS_PER_STEP != 0) {
+			usize step = STEPS;
+			if (tid < (SM % ROWS_PER_STEP) * CP_PER_ROW) {
+				sm80::cp_async(src_row_ptr + src_col_offset, dst_ptr + off[step % REPEAT_AFTER]);
+			}
+		}
+	}
 }
 
 template<
