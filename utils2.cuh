@@ -1424,9 +1424,9 @@ struct SMatrix {
 		if constexpr (GN > 0 && GM > 0) {
 			__builtin_assume(tid < THREADS_PER_BLOCK);
 
-			constexpr usize ROW_BYTES = GN * sizeof(T);
+			constexpr usize SRC_ROW_BYTES = GN * sizeof(T);
 			constexpr usize CP_BYTES = 16;
-			constexpr usize CP_PER_ROW = ROW_BYTES / CP_BYTES;
+			constexpr usize CP_PER_ROW = SRC_ROW_BYTES / CP_BYTES;
 			constexpr usize ROWS_PER_STEP = THREADS_PER_BLOCK / CP_PER_ROW;
 			constexpr usize STEPS = GM / ROWS_PER_STEP;
 
@@ -1588,6 +1588,7 @@ X17_DEVICE void cp_async_gmem_to_smem_modulo(
 	usize tid,
 	GMatrix<T, GM, GN> src,
 	SMatrix<T, SM, SN> dst,
+	usize src_row,
 	usize src_col,
 	usize col_step = 0
 ) {
@@ -1597,9 +1598,9 @@ X17_DEVICE void cp_async_gmem_to_smem_modulo(
 		usize dst_row = 0;
 		usize dst_col = 0;
 
-		constexpr usize ROW_BYTES = SN * sizeof(T);
-		constexpr usize CP_BYTES = sizeof(u128);
-		constexpr usize CP_PER_ROW = ROW_BYTES / CP_BYTES;
+		constexpr usize SRC_ROW_BYTES = SN * sizeof(T);
+		constexpr usize CP_BYTES = 16;
+		constexpr usize CP_PER_ROW = SRC_ROW_BYTES / CP_BYTES;
 		constexpr usize ROWS_PER_STEP = THREADS_PER_BLOCK / CP_PER_ROW;
 		constexpr usize STEPS = SM / ROWS_PER_STEP;
 		constexpr usize SRC_MASK = (GN * sizeof(T)) - 1;
@@ -1621,11 +1622,12 @@ X17_DEVICE void cp_async_gmem_to_smem_modulo(
 		// Thread's position within a step is fixed
 		usize col_in_row = dst_col * sizeof(T) + (tid % CP_PER_ROW) * CP_BYTES;
 		usize row_in_step = tid / CP_PER_ROW;
+		usize src_row_idx = src_row + row_in_step;
 		usize src_col_step = col_step * sizeof(T);
 		usize src_col_offset = (
 			(tid % CP_PER_ROW) * CP_BYTES
 			+ src_col * sizeof(T)
-			+ row_in_step * src_col_step
+			+ src_row_idx * src_col_step
 		) & SRC_MASK;
 
 		constexpr usize REPEAT_AFTER = least_common_multiple(8, ROWS_PER_STEP) / ROWS_PER_STEP;
@@ -1637,7 +1639,7 @@ X17_DEVICE void cp_async_gmem_to_smem_modulo(
 
 		u8 const *src_row_ptr =
 			reinterpret_cast<u8 const *>(src._ptr)
-			+ row_in_step * src.stride_bytes();
+			+ src_row_idx * src.stride_bytes();
 		usize src_row_step = ROWS_PER_STEP * src.stride_bytes();
 
 		usize dst_ptr = dst._ptr + (dst_row + row_in_step) * dst.ROW_BYTES;
@@ -1650,7 +1652,7 @@ X17_DEVICE void cp_async_gmem_to_smem_modulo(
 				sm80::cp_async(src_row_ptr + src_col_offset, dst_ptr + off[step % REPEAT_AFTER]);
 				src_row_ptr += src_row_step;
 				dst_ptr += dst_step;
-				src_col_offset = (src_col_offset + src_col_step) & SRC_MASK;
+				src_col_offset = (src_col_offset + ROWS_PER_STEP * src_col_step) & SRC_MASK;
 			}
 		}
 		if constexpr (SM % ROWS_PER_STEP != 0) {
