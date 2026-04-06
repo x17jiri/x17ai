@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <bit>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <mma.h>
@@ -76,6 +77,36 @@ namespace math {
 		return __fmaf_rn(mul1, mul2, add);
 	}
 
+	consteval f64 constexpr_sqrt(f64 x) {
+		f64 r = x;
+		for (int i = 0; i < 32; i++) r = 0.5f * (r + x / r);
+		return r;
+	}
+
+	/// Compile-time `log2(x)` for positive finite `x`.
+	///
+	/// The algorithm splits `x = m * 2^e` by decoding the IEEE-754 bits, so the
+	/// exponent contributes exactly as `e`. The mantissa term is then evaluated with
+	///
+	///   `ln(m) = 2 * (y + y^3/3 + y^5/5 + ...)`, where `y = (m - 1) / (m + 1)`.
+	///
+	/// Since `m` is normalized into `[1, 2)`, `|y| <= 1/3` and the odd-power series
+	/// converges quickly enough for a small fixed number of terms.
+	consteval f64 constexpr_log2(f64 x) {
+		u64 bits = std::bit_cast<u64>(x);
+		i32 exponent = i32((bits >> 52) & 0x7ffull) - 1023;
+		f64 mantissa = std::bit_cast<f64>((bits & 0x000fffffffffffffull) | 0x3ff0000000000000ull);
+		f64 y = (mantissa - 1.0) / (mantissa + 1.0);
+		f64 y_sq = y * y;
+		f64 term = y;
+		f64 series = 0.0;
+		for (i32 n = 1; n <= 21; n += 2) {
+			series += term / f64(n);
+			term *= y_sq;
+		}
+		return f64(exponent) + 2.0 * std::numbers::log2e_v<f64> * series;
+	}
+
 	namespace fast {
 		/// Our underlying exp and log functions use this base.
 		/// It was chosen to be fast and may change in the future.
@@ -115,6 +146,10 @@ namespace math {
 			#endif
 		}
 
+		consteval f64 constexpr_logb(f64 x) {
+			return constexpr_log2(x) / constexpr_log2(math::fast::b);
+		}
+
 		/// Single-instruction reciprocal approximation.
 		X17_DEVICE f32 recip(f32 x) {
 			#if X17_PRECISE_MATH
@@ -132,6 +167,26 @@ namespace math {
 			#else
 				f32 result;
 				asm ("div.approx.ftz.f32 %0, %1, %2;\n" : "=f"(result) : "f"(numerator), "f"(denominator));
+				return result;
+			#endif
+		}
+
+		X17_DEVICE f32 sin(f32 x) {
+			#if X17_PRECISE_MATH
+				return sinf(x);
+			#else
+				f32 result;
+				asm ("sin.approx.ftz.f32 %0, %1;\n" : "=f"(result) : "f"(x));
+				return result;
+			#endif
+		}
+
+		X17_DEVICE f32 cos(f32 x) {
+			#if X17_PRECISE_MATH
+				return cosf(x);
+			#else
+				f32 result;
+				asm ("cos.approx.ftz.f32 %0, %1;\n" : "=f"(result) : "f"(x));
 				return result;
 			#endif
 		}
@@ -298,12 +353,6 @@ X17_DEVICE void load_gmem_2x32b(const T *ptr, T &a, T &b) {
 
 X17_DEVICE u32 cast_smem_ptr_to_uint(void const *const ptr) {
 	return static_cast<u32>(__cvta_generic_to_shared(ptr));
-}
-
-consteval f64 constexpr_sqrt(f64 x) {
-	f64 r = x;
-	for (int i = 0; i < 32; i++) r = 0.5f * (r + x / r);
-	return r;
 }
 
 //--------------------------------------------------------------------------------------------------

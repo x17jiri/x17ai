@@ -20,9 +20,9 @@ int main(int argc, char *argv[]) {
 	constexpr usize V_PACKED_DIM = HEAD_CNT * V_DIM;
 	constexpr usize WINDOW_SIZE = 256;
 	{
-		f32 diff = fabsf(sqrtf(QK_DIM) - f32(constexpr_sqrt(f64(QK_DIM))));
+		f32 diff = fabsf(sqrtf(QK_DIM) - f32(math::constexpr_sqrt(f64(QK_DIM))));
 		printf("sqrtf=%e, constexpr_sqrt=%e, diff=%e\n",
-			sqrtf(QK_DIM), f32(constexpr_sqrt(f64(QK_DIM))), diff);
+			sqrtf(QK_DIM), f32(math::constexpr_sqrt(f64(QK_DIM))), diff);
 		if (diff > 1e-8f) {
 			return 1;
 		}

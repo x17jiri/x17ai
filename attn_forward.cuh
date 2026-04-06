@@ -42,7 +42,7 @@ struct Attn_forward {
 
 	static constexpr usize WARPS_PER_BLOCK = Q_WARPS * KV_WARPS;
 	static constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
-	static constexpr f32 SCORE_SCALE = 1.0 / constexpr_sqrt(f64(QK_DIM));
+	static constexpr f32 SCORE_SCALE = 1.0 / math::constexpr_sqrt(f64(QK_DIM));
 
 	static constexpr usize Q_STRIDE = QK_DIM * HEAD_CNT;
 	static constexpr usize K_STRIDE = QK_DIM * HEAD_CNT;
