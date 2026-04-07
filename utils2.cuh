@@ -78,8 +78,22 @@ namespace math {
 	}
 
 	consteval f64 constexpr_sqrt(f64 x) {
+		if (x < 0.0) {
+			return std::numeric_limits<f64>::quiet_NaN();
+		}
+
 		f64 r = x;
-		for (int i = 0; i < 32; i++) r = 0.5f * (r + x / r);
+		for (int i = 0; i < 32; i++) {
+			r = 0.5f * (r + x / r);
+		}
+		return r;
+	}
+
+	consteval f64 constexpr_rsqrt(f64 x) {
+		f64 r = 1.0 / constexpr_sqrt(x);
+		for (int i = 0; i < 4; i++) {
+			r = r * (1.5 - 0.5 * x * r * r);
+		}
 		return r;
 	}
 
@@ -230,11 +244,25 @@ namespace math {
 		}
 
 		/// Gaussian Error Linear Unit (GELU)
+		///
+		/// Scales the input by `1.0 / sqrt(FAN_IN)` before applying the GELU formula.
+		/// The scaling constant is folded into the coefficients of the approximation
+		/// and so it is free at runtime.
+		template<const usize FAN_IN = 1>
 		X17_DEVICE f32 gelu(f32 x) {
-			constexpr f64 c = constexpr_sqrt(2.0 / std::numbers::pi_v<f64>);
-			f32 a = f32(c) * x;
-			f32 y = math::fma(a, 0.044715f * (x * x), a);
-			return math::fma(0.5f * x, math::fast::tanh(y), 0.5f * x);
+			constexpr k = constexpr_rsqrt(f64(FAN_IN));
+			constexpr k2 = 1.0 / f64(FAN_IN); // k^2
+			// c * k where c = sqrt(2.0 / pi)
+			constexpr f64 ck = constexpr_rsqrt(f64(FAN_IN) * std::numbers::pi_v<f64> / 2.0);
+			// 0.044715 * c * k^3
+			constexpr f64  ck3 = 0.044715 * ck * k2;
+			f32 y = math::fma(f32(ck3) * x, x * x, f32(ck) * x);
+			return math::fma(f32(0.5 * k) * x, math::fast::tanh(y), f32(0.5 * k) * x);
+		}
+
+		template<const usize FAN_IN = 1>
+		X17_DEVICE f32 geglu(f32 gate, f32 lin) {
+			return gelu<FAN_IN>(gate) * lin;
 		}
 
 		/// `softplus(x) = log(1 + exp(x))`
