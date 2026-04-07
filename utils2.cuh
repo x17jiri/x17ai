@@ -229,9 +229,12 @@ namespace math {
 			return math::fma(0.5f * x, math::fast::tanh((beta * 0.5f) * x), 0.5f * x);
 		}
 
-		/// Gaussian Error Linear Unit (GELU) approximation
+		/// Gaussian Error Linear Unit (GELU)
 		X17_DEVICE f32 gelu(f32 x) {
-			return silu(x, 1.702f);
+			constexpr f64 c = constexpr_sqrt(2.0 / std::numbers::pi_v<f64>);
+			f32 a = f32(c) * x;
+			f32 y = math::fma(a, 0.044715f * (x * x), a);
+			return math::fma(0.5f * x, math::fast::tanh(y), 0.5f * x);
 		}
 
 		/// `softplus(x) = log(1 + exp(x))`
@@ -663,6 +666,10 @@ struct Fragment_8x8: FragmentReg<T> {
 			take_second ? src01 : src00,
 			take_second ? src11 : src10
 		);
+	}
+
+	X17_DEVICE void transpose_() requires(sizeof(T) == 2) {
+		sm80::movmatrix(this->val, this->val);
 	}
 };
 

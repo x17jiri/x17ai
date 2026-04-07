@@ -51,8 +51,20 @@ def load_bf16(path, shape):
 	return torch.from_numpy(raw.view(np.int16)).view(torch.bfloat16)
 
 
-def geglu(x):
-	return x * torch.sigmoid(1.702 * x)
+def bf16_ordered_int(bits):
+	bits_i32 = bits.astype(np.int32)
+	sign = (bits_i32 >> 15) & 1
+	return np.where(sign == 0, bits_i32 + 0x8000, 0x8000 - (bits_i32 & 0x7FFF))
+
+
+def normalize_bf16_zero_sign(bits):
+	normalized = bits.copy()
+	normalized[(normalized & 0x7FFF) == 0] = 0
+	return normalized
+
+
+def gelu(x):
+	return 0.5 * x * (1.0 + torch.tanh(0.7978845608028654 * (x + 0.044715 * x * x * x)))
 
 
 def print_matrix(name, tensor):
@@ -62,19 +74,17 @@ def print_matrix(name, tensor):
 
 
 def verify(a_rows, b_cols):
-	if a_rows % 2 != 0:
-		raise ValueError(f"A_ROWS must be even for GeGLU, got {a_rows}")
 	a_bf16 = load_bf16(INPUT_A_PATH, (a_rows, K))
 	b_t_bf16 = load_bf16(INPUT_B_PATH, (b_cols, K))
 	if not os.path.exists(OUTPUT_PATH):
 		print(f"Missing CUDA output file: {OUTPUT_PATH}")
 		return
 
-	cuda_bf16 = load_bf16(OUTPUT_PATH, (a_rows // 2, b_cols))
+	cuda_bf16 = load_bf16(OUTPUT_PATH, (a_rows, b_cols // 2))
 	a_f32 = a_bf16.float()
 	b_t_f32 = b_t_bf16.float()
 	pre_geglu = a_f32 @ b_t_f32.transpose(0, 1)
-	ref_f32 = geglu(pre_geglu[0::2]) * pre_geglu[1::2]
+	ref_f32 = gelu(pre_geglu[:, 0::2]) * pre_geglu[:, 1::2]
 	ref_bf16 = ref_f32.to(torch.bfloat16)
 	ref = ref_bf16.float()
 	cuda = cuda_bf16.float()
@@ -89,14 +99,32 @@ def verify(a_rows, b_cols):
 	worst_cuda = cuda_bf16[idx[0], idx[1]].float().item()
 	ref_np = ref_bf16.view(torch.int16).numpy().view(np.uint16)
 	cuda_np = cuda_bf16.view(torch.int16).numpy().view(np.uint16)
-	exact_match = int((ref_np == cuda_np).sum())
+	ref_norm = normalize_bf16_zero_sign(ref_np)
+	cuda_norm = normalize_bf16_zero_sign(cuda_np)
+	ref_ord = bf16_ordered_int(ref_np)
+	cuda_ord = bf16_ordered_int(cuda_np)
+	ulp_diff = np.abs(ref_ord - cuda_ord)
+	same_value = ref_np.astype(np.float32)  # placeholder to keep shape only
+	same_value = ref.numpy() == cuda.numpy()
+	bit_mismatch = ref_np != cuda_np
+	zero_sign_only = bit_mismatch & same_value
+	raw_exact_match = int((ref_np == cuda_np).sum())
+	exact_match = int((ref_norm == cuda_norm).sum())
+	one_ulp_or_less = int((ulp_diff <= 1).sum())
+	two_ulp_or_less = int((ulp_diff <= 2).sum())
+	three_ulp_or_less = int((ulp_diff <= 3).sum())
 	total = ref.numel()
 
 	print("\n--- O GEMM + GeGLU vs CUDA ---")
-	print(f"A=[{a_rows}, {K}], B=[{K}, {b_cols}] stored as B^T=[{b_cols}, {K}], out=[{a_rows // 2}, {b_cols}]")
+	print(f"A=[{a_rows}, {K}], B=[{K}, {b_cols}] stored as B^T=[{b_cols}, {K}], out=[{a_rows}, {b_cols // 2}]")
 	print(f"Max abs diff:     {max_abs_diff:.6e}")
 	print(f"Mean abs diff:    {mean_abs_diff:.6e}")
 	print(f"Exact bf16 match: {exact_match}/{total} ({100.0 * exact_match / total:.2f}%)")
+	print(f"Raw exact bits:   {raw_exact_match}/{total} ({100.0 * raw_exact_match / total:.2f}%)")
+	print(f"Signed-zero-only mismatches: {int(zero_sign_only.sum())}")
+	print(f"Within 1 ULP:     {one_ulp_or_less}/{total} ({100.0 * one_ulp_or_less / total:.2f}%)")
+	print(f"Within 2 ULP:     {two_ulp_or_less}/{total} ({100.0 * two_ulp_or_less / total:.2f}%)")
+	print(f"Within 3 ULP:     {three_ulp_or_less}/{total} ({100.0 * three_ulp_or_less / total:.2f}%)")
 	if max_abs_diff > 0.0:
 		print(f"Worst mismatch at [{worst_row}, {worst_col}]: ref={worst_ref:.6e}, cuda={worst_cuda:.6e}")
 
