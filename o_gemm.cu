@@ -16,7 +16,7 @@ constexpr usize N_PER_BLOCK = N_WARPS * N_PER_WARP;
 constexpr usize WARPS_PER_BLOCK = M_WARPS * N_WARPS;
 constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
 constexpr usize K_STEP = 64;
-constexpr usize GMEM_PRELOAD = 4;
+constexpr usize GMEM_PRELOAD = 2;
 constexpr usize M_TILES = M_PER_WARP / 16;
 constexpr usize N_TILES = N_PER_WARP / 16;
 constexpr usize A_ROWS_DEFAULT = 2048;
@@ -59,8 +59,8 @@ X17_DEVICE void cp_async_ab(
 
 X17_DEVICE void geglu(Fragment_8x8<bf16> &o, Fragment_8x8<f32> const &i1, Fragment_8x8<f32> const &i2) {
 	o.set(
-		bf16(math::fast::gelu(i1.val0) * i1.val1),
-		bf16(math::fast::gelu(i2.val0) * i2.val1)
+		bf16(math::fast::geglu<K>(i1.val0, i1.val1)),
+		bf16(math::fast::geglu<K>(i2.val0, i2.val1))
 	);
 	o.transpose_();
 	usize tid = threadIdx.x % WARP_SIZE;
@@ -87,7 +87,7 @@ X17_DEVICE void geglu(Fragment_16x16<bf16> (&o)[N], Fragment_16x16<f32> const (&
 // B is the input matrix stored transposed as [B_COLS, K] row-major so K is contiguous.
 // Neighboring output columns are paired as GeGLU(gelu(even_col) * odd_col).
 template<usize K>
-__global__ void gemm_kernel(
+__global__ __launch_bounds__(THREADS_PER_BLOCK) void gemm_kernel(
 	usize A_ROWS, usize B_COLS,
 	bf16 *A,
 	bf16 *B,
@@ -109,7 +109,7 @@ __global__ void gemm_kernel(
 	SMatrix<bf16, M_PER_BLOCK * GMEM_PRELOAD, K_STEP> sA_preload{smem};
 	SMatrix<bf16, N_PER_BLOCK * GMEM_PRELOAD, K_STEP> sB_preload{sA_preload._ptr + sA_preload.bytes()};
 
-	X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD - 1; ++p) {
+	X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD; ++p) {
 		cp_async_ab(gA_block, gB_block, sA_preload, sB_preload, p, K_ITERS);
 		cp_async_commit();
 	}
@@ -117,37 +117,44 @@ __global__ void gemm_kernel(
 	Fragment_16x16<f32> acc[M_TILES][N_TILES];
 	zero_(acc);
 
-	SMatrix<bf16, M_PER_BLOCK, K_STEP> sA;
-	SMatrix<bf16, N_PER_BLOCK, K_STEP> sB;
-
 	Fragment_16x16<bf16> rA[K_TILES][M_TILES];
 	Fragment_16x16<bf16> rB[K_TILES][N_TILES];
 
-	X17_NO_UNROLL for (usize k_step = 0; k_step < K_ITERS; ++k_step) {
+	SMatrix<bf16, M_PER_BLOCK, K_STEP> sA = tile_m<M_PER_BLOCK>(sA_preload, 0);
+	SMatrix<bf16, N_PER_BLOCK, K_STEP> sB = tile_m<N_PER_BLOCK>(sB_preload, 0);
+
+	cp_async_wait<GMEM_PRELOAD - 1>();
+	sync_threads();
+
+	X17_UNROLL for (usize k_tile = 0; k_tile < K_TILES; ++k_tile) {
+		X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+			smem_tile_to_fragment(sB, warp_n + ni * 16, k_tile * 16, rB[k_tile][ni]);
+		}
+		X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+			smem_tile_to_fragment(sA, warp_m + mi * 16, k_tile * 16, rA[k_tile][mi]);
+		}
+	}
+
+	X17_UNROLL for (usize k_step = 0; k_step < K_ITERS; ++k_step) {
 		{ // Get more data from GMEM
 			cp_async_wait<GMEM_PRELOAD - 2>();
 			sync_threads();
-			sA = tile_m<M_PER_BLOCK>(sA_preload, k_step % GMEM_PRELOAD);
-			sB = tile_m<N_PER_BLOCK>(sB_preload, k_step % GMEM_PRELOAD);
+			sA = tile_m<M_PER_BLOCK>(sA_preload, (k_step + 1) % GMEM_PRELOAD);
+			sB = tile_m<N_PER_BLOCK>(sB_preload, (k_step + 1) % GMEM_PRELOAD);
 
-			X17_UNROLL for (usize k_tile = 0; k_tile < K_TILES; ++k_tile) {
-				X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-					smem_tile_to_fragment(sA, warp_m + mi * 16, k_tile * 16, rA[k_tile][mi]);
-				}
-				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-					smem_tile_to_fragment(sB, warp_n + ni * 16, k_tile * 16, rB[k_tile][ni]);
-				}
-			}
-
-			cp_async_ab(gA_block, gB_block, sA_preload, sB_preload, k_step + GMEM_PRELOAD - 1, K_ITERS);
+			cp_async_ab(gA_block, gB_block, sA_preload, sB_preload, k_step + GMEM_PRELOAD, K_ITERS);
 			cp_async_commit();
 		}
 
 		X17_UNROLL for (usize k_tile = 0; k_tile < K_TILES; ++k_tile) {
-			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+			X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+				X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
 					mma_a_bt(rA[k_tile][mi], rB[k_tile][ni], acc[mi][ni]);
 				}
+				smem_tile_to_fragment(sB, warp_n + ni * 16, k_tile * 16, rB[k_tile][ni]);
+			}
+			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+				smem_tile_to_fragment(sA, warp_m + mi * 16, k_tile * 16, rA[k_tile][mi]);
 			}
 		}
 	}
@@ -171,11 +178,11 @@ int main(int argc, char *argv[]) {
 	if (argc == 3) {
 		A_ROWS = static_cast<usize>(strtoul(argv[1], nullptr, 10));
 		B_COLS = static_cast<usize>(strtoul(argv[2], nullptr, 10));
-	} else if (argc != 1) {
+	} /*else if (argc != 1) {
 		printf("Usage: %s [A_ROWS B_COLS]\n", argv[0]);
 		printf("   or: %s --test-geglu\n", argv[0]);
 		return 1;
-	}
+	}*/
 
 	if (A_ROWS % M_PER_BLOCK != 0 || B_COLS % N_PER_BLOCK != 0) {
 		printf("Expected A_ROWS %% %u == 0 and B_COLS %% %u == 0\n", M_PER_BLOCK, N_PER_BLOCK);

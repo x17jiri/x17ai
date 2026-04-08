@@ -16,7 +16,7 @@ constexpr usize N_PER_BLOCK = N_WARPS * N_PER_WARP;
 constexpr usize WARPS_PER_BLOCK = M_WARPS * N_WARPS;
 constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
 constexpr usize K_STEP = 64;
-constexpr usize GMEM_PRELOAD = 4;
+constexpr usize GMEM_PRELOAD = 2;
 constexpr usize M_TILES = M_PER_WARP / 16;
 constexpr usize N_TILES = N_PER_WARP / 16;
 constexpr usize INPUT_STEP = 16;
@@ -200,7 +200,7 @@ __global__ void gemm_kernel(
 	SMatrix<bf16, M_PER_BLOCK * GMEM_PRELOAD, K_STEP> sA_preload{smem};
 	SMatrix<bf16, N_PER_BLOCK * GMEM_PRELOAD, K_STEP> sB_preload{sA_preload._ptr + sA_preload.bytes()};
 
-	X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD - 1; ++p) {
+	X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD; ++p) {
 		cp_async_ab(gA_block, gB, sA_preload, sB_preload, b_src_row, p, K_ITERS);
 		cp_async_commit();
 	}
@@ -208,37 +208,44 @@ __global__ void gemm_kernel(
 	Fragment_16x16<f32> acc[M_TILES][N_TILES];
 	zero_(acc);
 
-	SMatrix<bf16, M_PER_BLOCK, K_STEP> sA;
-	SMatrix<bf16, N_PER_BLOCK, K_STEP> sB;
-
 	Fragment_16x16<bf16> rA[K_TILES][M_TILES];
 	Fragment_16x16<bf16> rB[K_TILES][N_TILES];
+
+	SMatrix<bf16, M_PER_BLOCK, K_STEP> sA = tile_m<M_PER_BLOCK>(sA_preload, 0);
+	SMatrix<bf16, N_PER_BLOCK, K_STEP> sB = tile_m<N_PER_BLOCK>(sB_preload, 0);
+
+	cp_async_wait<GMEM_PRELOAD - 1>();
+	sync_threads();
+
+	X17_UNROLL for (usize k_tile = 0; k_tile < K_TILES; ++k_tile) {
+		X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+			smem_tile_to_fragment(sB, warp_n + ni * 16, k_tile * 16, rB[k_tile][ni]);
+		}
+		X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+			smem_tile_to_fragment(sA, warp_m + mi * 16, k_tile * 16, rA[k_tile][mi]);
+		}
+	}
 
 	X17_NO_UNROLL for (usize k_step = 0; k_step < K_ITERS; ++k_step) {
 		{ // Get more data from GMEM
 			cp_async_wait<GMEM_PRELOAD - 2>();
 			sync_threads();
-			sA = tile_m<M_PER_BLOCK>(sA_preload, k_step % GMEM_PRELOAD);
-			sB = tile_m<N_PER_BLOCK>(sB_preload, k_step % GMEM_PRELOAD);
+			sA = tile_m<M_PER_BLOCK>(sA_preload, (k_step + 1) % GMEM_PRELOAD);
+			sB = tile_m<N_PER_BLOCK>(sB_preload, (k_step + 1) % GMEM_PRELOAD);
 
-			X17_UNROLL for (usize k_tile = 0; k_tile < K_TILES; ++k_tile) {
-				X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-					smem_tile_to_fragment(sA, warp_m + mi * 16, k_tile * 16, rA[k_tile][mi]);
-				}
-				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-					smem_tile_to_fragment(sB, warp_n + ni * 16, k_tile * 16, rB[k_tile][ni]);
-				}
-			}
-
-			cp_async_ab(gA_block, gB, sA_preload, sB_preload, b_src_row, k_step + GMEM_PRELOAD - 1, K_ITERS);
+			cp_async_ab(gA_block, gB, sA_preload, sB_preload, b_src_row, k_step + GMEM_PRELOAD, K_ITERS);
 			cp_async_commit();
 		}
 
 		X17_UNROLL for (usize k_tile = 0; k_tile < K_TILES; ++k_tile) {
-			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+			X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+				X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
 					mma_a_bt(rA[k_tile][mi], rB[k_tile][ni], acc[mi][ni]);
 				}
+				smem_tile_to_fragment(sB, warp_n + ni * 16, k_tile * 16, rB[k_tile][ni]);
+			}
+			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+				smem_tile_to_fragment(sA, warp_m + mi * 16, k_tile * 16, rA[k_tile][mi]);
 			}
 		}
 	}
@@ -268,10 +275,10 @@ int main(int argc, char *argv[]) {
 	if (argc == 3) {
 		M = static_cast<usize>(strtoul(argv[1], nullptr, 10));
 		N = static_cast<usize>(strtoul(argv[2], nullptr, 10));
-	} else if (argc != 1) {
+	}/* else if (argc != 1) {
 		printf("Usage: %s [A_M B_N]\n", argv[0]);
 		return 1;
-	}
+	}*/
 
 	if (M % M_PER_BLOCK != 0 || N % N_PER_BLOCK != 0 || N % HEAD_DIM != 0) {
 		printf("Expected M %% %u == 0, N %% %u == 0, and N %% %u == 0\n", M_PER_BLOCK, N_PER_BLOCK, HEAD_DIM);
@@ -353,7 +360,7 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	double flops = 2.0 * M * N * B_M;
+	double flops = 2.0 * M * N * A_N;
 	double tflops = flops / elapsed / 1e12;
 	printf("A=[%u, %u], B=[%u, %u] stored as B^T=[%u, %u]\n", M, A_N, B_M, N, N, B_M);
 	printf("Average kernel time over %d runs: %.3f ms\n", NUM_RUNS, elapsed * 1e3);

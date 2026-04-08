@@ -67,7 +67,7 @@ namespace math {
 	requires(N > 0)
 	X17_DEVICE f32 max(const f32 (&arr)[N]) {
 		f32 result = arr[0];
-		X17_UNROLL for (size_t i = 1; i < N; i++) {
+		X17_UNROLL for (size_t i = 1; i < N; ++i) {
 			result = fmaxf(result, arr[i]);
 		}
 		return result;
@@ -83,7 +83,7 @@ namespace math {
 		}
 
 		f64 r = x;
-		for (int i = 0; i < 32; i++) {
+		for (int i = 0; i < 32; ++i) {
 			r = 0.5f * (r + x / r);
 		}
 		return r;
@@ -91,7 +91,7 @@ namespace math {
 
 	consteval f64 constexpr_rsqrt(f64 x) {
 		f64 r = 1.0 / constexpr_sqrt(x);
-		for (int i = 0; i < 4; i++) {
+		for (int i = 0; i < 4; ++i) {
 			r = r * (1.5 - 0.5 * x * r * r);
 		}
 		return r;
@@ -243,15 +243,15 @@ namespace math {
 			return math::fma(0.5f * x, math::fast::tanh((beta * 0.5f) * x), 0.5f * x);
 		}
 
-		/// Gaussian Error Linear Unit (GELU)
+		/// Gaussian Error Linear Unit
 		///
 		/// Scales the input by `1.0 / sqrt(FAN_IN)` before applying the GELU formula.
 		/// The scaling constant is folded into the coefficients of the approximation
 		/// and so it is free at runtime.
 		template<const usize FAN_IN = 1>
 		X17_DEVICE f32 gelu(f32 x) {
-			constexpr k = constexpr_rsqrt(f64(FAN_IN));
-			constexpr k2 = 1.0 / f64(FAN_IN); // k^2
+			constexpr f64 k = constexpr_rsqrt(f64(FAN_IN));
+			constexpr f64	 k2 = 1.0 / f64(FAN_IN); // k^2
 			// c * k where c = sqrt(2.0 / pi)
 			constexpr f64 ck = constexpr_rsqrt(f64(FAN_IN) * std::numbers::pi_v<f64> / 2.0);
 			// 0.044715 * c * k^3
@@ -260,9 +260,9 @@ namespace math {
 			return math::fma(f32(0.5 * k) * x, math::fast::tanh(y), f32(0.5 * k) * x);
 		}
 
-		template<const usize FAN_IN = 1>
+		template<const usize GATE_FAN_IN = 1>
 		X17_DEVICE f32 geglu(f32 gate, f32 lin) {
-			return gelu<FAN_IN>(gate) * lin;
+			return gelu<GATE_FAN_IN>(gate) * lin;
 		}
 
 		/// `softplus(x) = log(1 + exp(x))`
@@ -1200,8 +1200,8 @@ X17_DEVICE void store2(
 
 template<typename F, typename T>
 X17_DEVICE void cast(Fragment_16x16<F> const &src, Fragment_16x16<T> &dst) {
-	X17_UNROLL for (usize j = 0; j < 2; j++) {
-		X17_UNROLL for (usize i = 0; i < 2; i++) {
+	X17_UNROLL for (usize j = 0; j < 2; ++j) {
+		X17_UNROLL for (usize i = 0; i < 2; ++i) {
 			dst.sub[j][i].set(
 				static_cast<T>(src.sub[j][i].first()),
 				static_cast<T>(src.sub[j][i].second())
@@ -1217,7 +1217,7 @@ X17_DEVICE void zero_(Fragment_16x16<T> &f) {
 
 template<typename T, const usize K>
 X17_DEVICE void zero_(T (&arr)[K]) {
-	X17_UNROLL for (usize i = 0; i < K; i++) {
+	X17_UNROLL for (usize i = 0; i < K; ++i) {
 		zero_(arr[i]);
 	}
 }
@@ -1234,7 +1234,7 @@ X17_DEVICE void fill_(Fragment_16x16<T> &f, T v) {
 
 template<typename T, const usize K>
 X17_DEVICE void fill_(T (&arr)[K], T v) {
-	X17_UNROLL for (usize i = 0; i < K; i++) {
+	X17_UNROLL for (usize i = 0; i < K; ++i) {
 		fill_(arr[i], v);
 	}
 }
@@ -1256,14 +1256,14 @@ X17_DEVICE void elemwise_(Fragment_16x16<T> &f, F const &fn) {
 
 template<typename T, const usize K, typename F>
 X17_DEVICE void elemwise_(T (&arr)[K], F const &fn) {
-	X17_UNROLL for (usize i = 0; i < K; i++) {
+	X17_UNROLL for (usize i = 0; i < K; ++i) {
 		elemwise_(arr[i], fn);
 	}
 }
 
 template<typename T, const usize K>
 X17_DEVICE void scale_(T (&arr)[K], T s) {
-	X17_UNROLL for (usize i = 0; i < K; i++) {
+	X17_UNROLL for (usize i = 0; i < K; ++i) {
 		scale_(arr[i], s);
 	}
 }
@@ -1285,14 +1285,14 @@ X17_DEVICE void elemwise_top_(Fragment_16x16<T> &f, F const &fn) {
 
 template<typename T, const usize K, typename F>
 X17_DEVICE void elemwise_top_(Fragment_16x16<T> (&arr)[K], F const &fn) {
-	X17_UNROLL for (usize i = 0; i < K; i++) {
+	X17_UNROLL for (usize i = 0; i < K; ++i) {
 		arr[i].elemwise_top_(fn);
 	}
 }
 
 template<typename T, const usize K>
 X17_DEVICE void scale_top_(Fragment_16x16<T> (&arr)[K], T s) {
-	X17_UNROLL for (usize i = 0; i < K; i++) {
+	X17_UNROLL for (usize i = 0; i < K; ++i) {
 		arr[i].scale_top_(s);
 	}
 }
@@ -1314,14 +1314,14 @@ X17_DEVICE void elemwise_bot_(Fragment_16x16<T> &f, F const &fn) {
 
 template<typename T, const usize K, typename F>
 X17_DEVICE void elemwise_bot_(Fragment_16x16<T> (&arr)[K], F const &fn) {
-	X17_UNROLL for (usize i = 0; i < K; i++) {
+	X17_UNROLL for (usize i = 0; i < K; ++i) {
 		arr[i].elemwise_bot_(fn);
 	}
 }
 
 template<typename T, const usize K>
 X17_DEVICE void scale_bottom_(Fragment_16x16<T> (&arr)[K], T s) {
-	X17_UNROLL for (usize i = 0; i < K; i++) {
+	X17_UNROLL for (usize i = 0; i < K; ++i) {
 		arr[i].scale_bottom_(s);
 	}
 }
@@ -1333,7 +1333,7 @@ X17_DEVICE void scale_bottom_(T&... args, S s) {
 
 template<typename T, const usize K>
 X17_DEVICE void acc_(Fragment_16x16<T> (&dst)[K], Fragment_16x16<T> const (&src)[K]) {
-	X17_UNROLL for (usize i = 0; i < K; i++) {
+	X17_UNROLL for (usize i = 0; i < K; ++i) {
 		dst[i].acc_(src[i]);
 	}
 }
@@ -1391,8 +1391,8 @@ struct RMatrix {
 	}
 
 	X17_DEVICE void zero_() {
-		X17_UNROLL for (usize j = 0; j < M / 16; j++) {
-			X17_UNROLL for (usize i = 0; i < N / 16; i++) {
+		X17_UNROLL for (usize j = 0; j < M / 16; ++j) {
+			X17_UNROLL for (usize i = 0; i < N / 16; ++i) {
 				tiles[j][i].zero_();
 			}
 		}
@@ -1765,7 +1765,7 @@ X17_DEVICE void fragments_to_smem(
 	usize tid = threadIdx.x % WARP_SIZE;
 	constexpr u32 TILE_STRIDE = 2 * WARP_SIZE * 4 * sizeof(f32); // 1024 bytes per 16x16 f32 tile
 
-	X17_UNROLL for (usize i = 0; i < K; i++) {
+	X17_UNROLL for (usize i = 0; i < K; ++i) {
 		u32 base = dst._ptr + i * TILE_STRIDE;
 		u32 p0 = base + tid * 4 * sizeof(f32);
 		u32 p1 = p0 + WARP_SIZE * 4 * sizeof(f32);
@@ -1792,7 +1792,7 @@ X17_DEVICE void smem_to_fragments(
 ) {
 	usize tid = threadIdx.x % WARP_SIZE;
 	constexpr u32 TILE_STRIDE = 2 * WARP_SIZE * 4 * sizeof(f32); // 1024 bytes per 16x16 f32 tile
-	X17_UNROLL for (usize i = 0; i < K; i++) {
+	X17_UNROLL for (usize i = 0; i < K; ++i) {
 		u32 base = src._ptr + i * TILE_STRIDE;
 		u32 p0 = base + tid * 4 * sizeof(f32);
 		u32 p1 = p0 + WARP_SIZE * 4 * sizeof(f32);
@@ -1817,13 +1817,13 @@ X17_DEVICE void mma_a_bt(
 	Fragment_16x16<bf16> const &b,
 	Fragment_16x16<f32> &c
 ) {
-    sm80::mma_bf16_f32(
+	sm80::mma_bf16_f32(
 		c.sub[0][0].val0, c.sub[0][0].val1, c.sub[1][0].val0, c.sub[1][0].val1,
 		a.sub[0][0].val , a.sub[1][0].val , a.sub[0][1].val , a.sub[1][1].val ,
 		b.sub[0][0].val , b.sub[0][1].val ,
 		c.sub[0][0].val0, c.sub[0][0].val1, c.sub[1][0].val0, c.sub[1][0].val1
 	);
-    sm80::mma_bf16_f32(
+	sm80::mma_bf16_f32(
 		c.sub[0][1].val0, c.sub[0][1].val1, c.sub[1][1].val0, c.sub[1][1].val1,
 		a.sub[0][0].val , a.sub[1][0].val , a.sub[0][1].val , a.sub[1][1].val ,
 		b.sub[1][0].val , b.sub[1][1].val ,
