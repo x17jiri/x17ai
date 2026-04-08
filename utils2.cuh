@@ -77,24 +77,42 @@ namespace math {
 		return __fmaf_rn(mul1, mul2, add);
 	}
 
-	consteval f64 constexpr_sqrt(f64 x) {
-		if (x < 0.0) {
-			return std::numeric_limits<f64>::quiet_NaN();
-		}
-
+	constexpr f64 __constexpr_sqrt(f64 x) {
 		f64 r = x;
 		for (int i = 0; i < 32; ++i) {
-			r = 0.5f * (r + x / r);
+			r = 0.5 * (r + x / r);
 		}
 		return r;
 	}
 
-	consteval f64 constexpr_rsqrt(f64 x) {
-		f64 r = 1.0 / constexpr_sqrt(x);
-		for (int i = 0; i < 4; ++i) {
-			r = r * (1.5 - 0.5 * x * r * r);
+	constexpr f64 constexpr_rsqrt(f64 x) {
+		f64 v = 1.0 / __constexpr_sqrt(x);
+		f64 t = x * v * v;
+
+		f64 above = t >= 1.0 ? v : 2.0 * v;
+		f64 below = t <= 1.0 ? v : 0.5 * v;
+		bool stop = (above == v) && (below == v);
+
+		while (!stop) {
+			v = (0.5 * above) + (0.5 * below);
+			t = x * v * v;
+
+			f64 new_above = t >= 1.0 ? v : above;
+			f64 new_below = t <= 1.0 ? v : below;
+
+			stop = (new_above == above) && (new_below == below);
+
+			above = new_above;
+			below = new_below;
 		}
-		return r;
+
+		f64 above_err = x * above * above - 1.0;
+		f64 below_err = 1.0 - x * below * below;
+		if (above_err > below_err) {
+			return below;
+		} else {
+			return above;
+		}
 	}
 
 	/// Compile-time `log2(x)` for positive finite `x`.
