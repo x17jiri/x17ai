@@ -279,7 +279,7 @@ struct Attn_forward {
 		bf16 *gK_ptr, bf16 *gV_ptr,
 		bf16 *gOut_ptr,
 		f32 *gL_ptr,
-		f32 *sinks_and_gates,
+		f32 *head_params,
 		usize window_size
 	) {
 		static_assert(KV_WARPS == 1, "current algorithm doesn't reduce over KV warps");
@@ -335,25 +335,37 @@ struct Attn_forward {
 		//     `1` to account for the sink token
 		f32 top_n = std::min(window_size, q_start + tid / 4 + 1) + f32(std::numbers::e_v<f64> + 1.0);
 		f32 bot_n = std::min(window_size, q_start + tid / 4 + 9) + f32(std::numbers::e_v<f64> + 1.0);
-		f32 top_score_scale = SCORE_SCALE * math::fast::logb(top_n);
-		f32 bot_score_scale = SCORE_SCALE * math::fast::logb(bot_n);
+		f32 base_top_score_scale = SCORE_SCALE * math::fast::logb(top_n);
+		f32 base_bot_score_scale = SCORE_SCALE * math::fast::logb(bot_n);
 
 		// Sink: a virtual token with no V contribution - it only adds to the
 		// softmax denominator, stealing probability from real tokens.
-		// sinks_and_gates[2*i_head + 0] = raw score, [2*i_head + 1] = output gate
+		// head_params[4*i_head + 0] = sink score
+		// head_params[4*i_head + 1] = output gate
+		// head_params[4*i_head + 2] = temperature
+		// head_params[4*i_head + 3] = unused padding
 		f32 gate[HEADS_PER_KERNEL];
 		f32 top_sink_scaled[HEADS_PER_KERNEL];
 		f32 bot_sink_scaled[HEADS_PER_KERNEL];
-		if (sinks_and_gates != nullptr) {
+		f32 top_score_scale[HEADS_PER_KERNEL];
+		f32 bot_score_scale[HEADS_PER_KERNEL];
+		if (head_params != nullptr) {
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 				f32 sink_score;
-				load_gmem_2x32b(sinks_and_gates + 2 * (i_head_base + h), sink_score, gate[h]);
-				top_sink_scaled[h] = math::max(sink_score * top_score_scale, std::numeric_limits<f32>::lowest());
-				bot_sink_scaled[h] = math::max(sink_score * bot_score_scale, std::numeric_limits<f32>::lowest());
+				f32 temperature;
+				f32 unused;
+				f32 const *p = head_params + 4 * (i_head_base + h);
+				load_gmem_4x32b(p, sink_score, gate[h], temperature, unused);
+				top_score_scale[h] = temperature * base_top_score_scale;
+				bot_score_scale[h] = temperature * base_bot_score_scale;
+				top_sink_scaled[h] = math::max(sink_score * top_score_scale[h], std::numeric_limits<f32>::lowest());
+				bot_sink_scaled[h] = math::max(sink_score * bot_score_scale[h], std::numeric_limits<f32>::lowest());
 			}
 		} else {
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 				gate[h] = 1.0f;
+				top_score_scale[h] = base_top_score_scale;
+				bot_score_scale[h] = base_bot_score_scale;
 				top_sink_scaled[h] = std::numeric_limits<f32>::lowest();
 				bot_sink_scaled[h] = std::numeric_limits<f32>::lowest();
 			}
@@ -407,8 +419,8 @@ struct Attn_forward {
 				}
 
 				// Scaling must happen before masking to avoid -inf * 0 == NaN when scale == 0
-				scale_top_(rS_f32[h], top_score_scale);
-				scale_bottom_(rS_f32[h], bot_score_scale);
+				scale_top_(rS_f32[h], top_score_scale[h]);
+				scale_bottom_(rS_f32[h], bot_score_scale[h]);
 			}
 
 			// Apply masks
@@ -495,9 +507,9 @@ attn_forward(
 	bf16 *gK_ptr, bf16 *gV_ptr,
 	bf16 *gOut_ptr,
 	f32 *gL_ptr,
-	f32 *sinks_and_gates,
+	f32 *head_params,
 	usize window_size
 ) {
 	Attn_forward attn_forward = Attn_forward();
-	attn_forward.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gOut_ptr, gL_ptr, sinks_and_gates, window_size);
+	attn_forward.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gOut_ptr, gL_ptr, head_params, window_size);
 }

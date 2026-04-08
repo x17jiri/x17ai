@@ -380,6 +380,16 @@ X17_DEVICE void load_gmem_2x32b(const T *ptr, T &a, T &b) {
 	);
 }
 
+template<typename T>
+requires(sizeof(T) == 4)
+X17_DEVICE void load_gmem_4x32b(const T *ptr, T &a, T &b, T &c, T &d) {
+	asm volatile(
+		"ld.global.v4.f32 {%0, %1, %2, %3}, [%4];\n"
+		: "=f"(a), "=f"(b), "=f"(c), "=f"(d)
+		: "l"(ptr)
+	);
+}
+
 //--------------------------------------------------------------------------------------------------
 
 X17_DEVICE u32 cast_smem_ptr_to_uint(void const *const ptr) {
