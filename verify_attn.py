@@ -20,6 +20,7 @@ V_DIM = 32
 DEFAULT_V_EQ_K = True
 DEFAULT_WINDOW_SIZE = 256
 ATTN_CONFIG_PATH = "tmp/attn.config.json"
+HEAD_PARAMS_PATH = "bin/head_params.bin"
 
 
 def load_attn_config():
@@ -35,6 +36,26 @@ def load_attn_config():
 
 V_EQ_K, WINDOW_SIZE = load_attn_config()
 SCORE_SCALE = 1.0 / math.sqrt(QK_DIM)
+
+
+def make_head_params(sink, gate, temperature):
+	head_params = torch.zeros((HEAD_CNT, 4), dtype=torch.float32)
+	head_params[:, 0] = sink
+	head_params[:, 1] = gate
+	head_params[:, 2] = temperature
+	return head_params
+
+
+def load_head_params(path=HEAD_PARAMS_PATH):
+	if not os.path.exists(path):
+		return None
+	raw = np.fromfile(path, dtype=np.float32)
+	expected = HEAD_CNT * 4
+	if raw.size != expected:
+		raise ValueError(
+			f"{path} has {raw.size} float32 values, expected {expected} ({HEAD_CNT}x4)"
+		)
+	return torch.from_numpy(raw.reshape(HEAD_CNT, 4))
 
 
 
@@ -118,7 +139,7 @@ def load_f32(path, shape):
 	return torch.from_numpy(np.fromfile(path, dtype=np.float32).reshape(shape))
 
 
-def compute_attn_real(Q, K, sink, window_size=0):
+def compute_attn_real(Q, K, sink, temperature=1.0, window_size=0):
 	"""Return real-token attention probabilities in f32.
 
 	Masking rules for query at position i attending to key at position j:
@@ -130,8 +151,9 @@ def compute_attn_real(Q, K, sink, window_size=0):
 	kv_len = K.shape[0]
 	n = ssmax_n(q_len, window_size).unsqueeze(1)  # [q_len, 1]
 	ssmax_scale = torch.log2(n)
-	real_scores = (Q @ K.T) * (SCORE_SCALE * ssmax_scale)
-	sink_col = torch.full((q_len, 1), sink, dtype=torch.float32) * SCORE_SCALE * ssmax_scale
+	score_scale = (SCORE_SCALE * temperature) * ssmax_scale
+	real_scores = (Q @ K.T) * score_scale
+	sink_col = torch.full((q_len, 1), sink, dtype=torch.float32) * score_scale
 	scores = torch.cat([sink_col, real_scores], dim=1)  # [q_len, kv_len+1]
 
 	# Causal mask: mask when j > i (sink column is never masked)
@@ -156,22 +178,22 @@ def compute_attn_real(Q, K, sink, window_size=0):
 	return attn[:, 1:]
 
 
-def reference_exact(Q, K, V, sink, gate, window_size=0):
+def reference_exact(Q, K, V, sink, gate, temperature=1.0, window_size=0):
 	"""Reference used for backward pass.
 	Uses dense accumulation once probabilities have been bf16-rounded.
 	"""
-	attn_real = compute_attn_real(Q, K, sink, window_size=window_size)
+	attn_real = compute_attn_real(Q, K, sink, temperature=temperature, window_size=window_size)
 	# Only the real tokens contribute to output (skip sink at column 0)
 	out = attn_real @ V
 	out = out * gate
 	return out
 
 
-def reference_matching(Q, K, V, sink, gate, kv_tile=16, window_size=0):
+def reference_matching(Q, K, V, sink, gate, temperature=1.0, kv_tile=16, window_size=0):
 	"""Forward-only reference that tries to match kernel accumulation order better.
 	Accumulates the second GEMM in KV tiles, similar to the kernel's tiled loop.
 	"""
-	attn_real = compute_attn_real(Q, K, sink, window_size=window_size)
+	attn_real = compute_attn_real(Q, K, sink, temperature=temperature, window_size=window_size)
 	out = torch.zeros((Q.shape[0], V.shape[1]), dtype=torch.float32)
 	for start in range(0, K.shape[0], kv_tile):
 		end = min(start + kv_tile, K.shape[0])
@@ -179,7 +201,7 @@ def reference_matching(Q, K, V, sink, gate, kv_tile=16, window_size=0):
 	return out * gate
 
 
-def reference_online_softmax(Q, K, V, sink, gate, kv_tile=16, window_size=0):
+def reference_online_softmax(Q, K, V, sink, gate, temperature=1.0, kv_tile=16, window_size=0):
 	"""Reference that simulates the kernel's online softmax and MMA accumulation.
 
 	Key matching details vs the CUDA kernel:
@@ -203,7 +225,8 @@ def reference_online_softmax(Q, K, V, sink, gate, kv_tile=16, window_size=0):
 	# Per-row SSMax scale is applied directly to scaled scores.
 	n = ssmax_n(q_len, window_size)
 	ssmax_scale = torch.log2(n)
-	scores = scores  * SCORE_SCALE * ssmax_scale.unsqueeze(1)
+	score_scale = (SCORE_SCALE * temperature) * ssmax_scale
+	scores = scores * score_scale.unsqueeze(1)
 
 	# Causal mask
 	mask = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
@@ -247,7 +270,7 @@ def reference_online_softmax(Q, K, V, sink, gate, kv_tile=16, window_size=0):
 		O = O + P_bf16 @ V_bf16[kv_start:kv_end, :]
 
 	# combine_and_store: include sink and normalize
-	sink_scaled = torch.full((q_len,), sink, dtype=torch.float32) * SCORE_SCALE * ssmax_scale
+	sink_scaled = torch.full((q_len,), sink, dtype=torch.float32) * score_scale
 	global_max = torch.maximum(row_max, sink_scaled)
 	global_sum = (
 		row_sum * torch.exp2(row_max - global_max)
@@ -261,7 +284,7 @@ def reference_online_softmax(Q, K, V, sink, gate, kv_tile=16, window_size=0):
 	return O
 
 
-def reference_matching_from_L(Q, K, V, L, gate, kv_tile=16, v_tile=16, window_size=0):
+def reference_matching_from_L(Q, K, V, L, gate, temperature=1.0, kv_tile=16, v_tile=16, window_size=0):
 	"""Forward-only reference reconstructed from kernel-produced L.
 	Uses exp2(S - L), rounds both P and V through bf16, and accumulates the
 	second GEMM in small tiles to get closer to the kernel's MMA schedule.
@@ -270,7 +293,7 @@ def reference_matching_from_L(Q, K, V, L, gate, kv_tile=16, v_tile=16, window_si
 	kv_len = K.shape[0]
 	scores = Q @ K.T
 	n = ssmax_n(q_len, window_size).unsqueeze(1)
-	scores = scores * SCORE_SCALE * torch.log2(n)
+	scores = scores * (SCORE_SCALE * temperature) * torch.log2(n)
 	mask = torch.triu(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=1)
 	if window_size > 0:
 		window_mask = torch.tril(torch.ones(q_len, kv_len, dtype=torch.bool), diagonal=-window_size)
@@ -349,18 +372,19 @@ def compare(name, ref_bf16, cuda_bf16, q_len, dim):
 			f"cuda={cuda_bf16[r, c].float().item():.6e}")
 
 
-def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5, window_size=None):
+def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5, temperature_val=1.0, window_size=None):
 	if window_size is None:
 		window_size = WINDOW_SIZE
 	Q_bf16, K_bf16, V_bf16 = load_inputs(q_len, kv_len, large=large)
 
 	if large:
-		sink_arg = -math.inf
-		gate_arg = 1.0
+		head_params = make_head_params(-math.inf, 1.0, 1.0)
 		prefix = "tmp/large_"
 	else:
-		sink_arg = sink_val
-		gate_arg = gate_val
+		head_params = load_head_params()
+		if head_params is None:
+			print(f"Warning: {HEAD_PARAMS_PATH} not found, using default head params.")
+			head_params = make_head_params(sink_val, gate_val, temperature_val)
 		prefix = "tmp/"
 
 	dO_path = f"{prefix}dO.bin"
@@ -377,12 +401,23 @@ def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5, window_size=
 	ref_dK_heads = []
 	ref_dV_heads = []
 	for i_head in range(HEAD_CNT):
+		sink_arg = float(head_params[i_head, 0].item())
+		gate_arg = float(head_params[i_head, 1].item())
+		temperature_arg = float(head_params[i_head, 2].item())
 		Q = Q_bf16[:, i_head, :].float().requires_grad_(True)
 		K = K_bf16[:, i_head, :QK_DIM].float().requires_grad_(True)
 		V = V_bf16[:, i_head, :V_DIM].float().requires_grad_(True)
 
-		match_out = reference_online_softmax(Q.detach(), K.detach(), V.detach(), sink=sink_arg, gate=gate_arg, window_size=window_size)
-		ref_out = reference_exact(Q, K, V, sink=sink_arg, gate=gate_arg, window_size=window_size)
+		match_out = reference_online_softmax(
+			Q.detach(), K.detach(), V.detach(),
+			sink=sink_arg, gate=gate_arg, temperature=temperature_arg,
+			window_size=window_size,
+		)
+		ref_out = reference_exact(
+			Q, K, V,
+			sink=sink_arg, gate=gate_arg, temperature=temperature_arg,
+			window_size=window_size,
+		)
 		ref_out.backward(dO_bf16[:, i_head, :].float())
 
 		match_out_heads.append(match_out.to(torch.bfloat16))
@@ -429,7 +464,8 @@ def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5, window_size=
 	D_path = "tmp/D.bin"
 	if os.path.exists(D_path) and O_cuda is not None:
 		D_cuda = load_f32(D_path, (HEAD_CNT, q_len))
-		D_ref = ((dO_bf16.float() * O_cuda.float()).sum(dim=-1) / gate_arg).transpose(0, 1)
+		gate = head_params[:, 1].view(1, HEAD_CNT)
+		D_ref = ((dO_bf16.float() * O_cuda.float()).sum(dim=-1) / gate).transpose(0, 1)
 		diff = (D_ref - D_cuda).abs()
 		exact = (D_ref == D_cuda).sum().item()
 		print(f"\n--- D' = rowsum(dO ⊙ O) / gate ---")
@@ -468,12 +504,15 @@ def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5, window_size=
 			Q_f = Q_bf16[:, i_head, :].float()
 			K_f = K_bf16[:, i_head, :QK_DIM].float()
 			V_f = V_bf16[:, i_head, :V_DIM].float()
+			sink_arg = float(head_params[i_head, 0].item())
+			gate_arg = float(head_params[i_head, 1].item())
+			temperature_arg = float(head_params[i_head, 2].item())
 
 			# Recompute scores (multiply by combined score_scale in one step to match
 			# the kernel's multiplication order and avoid f32 rounding differences)
 			n = ssmax_n(q_len, window_size)
 			ssmax_scale = torch.log2(n)
-			score_scale = SCORE_SCALE * ssmax_scale
+			score_scale = (SCORE_SCALE * temperature_arg) * ssmax_scale
 			scores = Q_f @ K_f.T
 			scores = scores * score_scale.unsqueeze(1)
 

@@ -6,6 +6,9 @@
 #include <fstream>
 #include <array>
 #include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <filesystem>
 #include <cmath>
 
 #pragma nv_diag_suppress 186
@@ -20,13 +23,32 @@ int main(int argc, char *argv[]) {
 	constexpr usize V_PACKED_DIM = HEAD_CNT * V_DIM;
 	constexpr usize WINDOW_SIZE = 256;
 	{
-		f32 diff = fabsf(sqrtf(QK_DIM) - f32(math::constexpr_sqrt(f64(QK_DIM))));
-		printf("sqrtf=%e, constexpr_sqrt=%e, diff=%e\n",
-			sqrtf(QK_DIM), f32(math::constexpr_sqrt(f64(QK_DIM))), diff);
-		if (diff > 1e-8f) {
+		f64 ref = std::sqrt(1.0 / QK_DIM);
+		f64 my = math::constexpr_rsqrt(f64(QK_DIM));
+		f64 diff = std::abs(ref - my);
+		printf("sqrt=%.30e, constexpr_rsqrt=%.30e, diff=%.30e\n", ref, my, diff);
+		if (diff > 1e-10) {
 			return 1;
 		}
 	}
+/*	{
+		f64 ref = 1.0/std::sqrt(std::numeric_limits<f64>::min());
+		f64 my = math::constexpr_rsqrt(std::numeric_limits<f64>::min());
+		f64 diff = std::abs(ref - my);
+		printf("sqrt=%.30e, constexpr_rsqrt=%.30e, diff=%.30e\n", ref, my, diff);
+		if (diff > 1e-10) {
+			return 1;
+		}
+	}
+	{
+		f64 ref = 1.0/std::sqrt(std::numeric_limits<f64>::max());
+		f64 my = math::constexpr_rsqrt(std::numeric_limits<f64>::max());
+		f64 diff = std::abs(ref - my);
+		printf("rsqrt=%.30e, constexpr_rsqrt=%.30e, diff=%.30e, x = %.30e\n", ref, my, diff, std::numeric_limits<f64>::max());
+		if (diff > 1e-10) {
+			return 1;
+		}
+	}*/
 	bool use_real_data = argc <= 1;
 	usize Q_LEN, KV_LEN;
 
@@ -187,8 +209,16 @@ int main(int argc, char *argv[]) {
 	for (usize i_head = 0; i_head < HEAD_CNT; ++i_head) {
 		head_params_host[4 * i_head] = -0.3f;
 		head_params_host[4 * i_head + 1] = 0.5f;
-		head_params_host[4 * i_head + 2] = 1.0f;
+		head_params_host[4 * i_head + 2] = 1.0f + i_head * 0.1f;
 		head_params_host[4 * i_head + 3] = 0.0f;
+	}
+	std::filesystem::create_directories("bin");
+	{
+		std::ofstream head_params_file("bin/head_params.bin", std::ios::binary);
+		head_params_file.write(
+			reinterpret_cast<char *>(head_params_host.data()),
+			static_cast<std::streamsize>(head_params_host.size() * sizeof(f32))
+		);
 	}
 	f32 *head_params_dev;
 	cudaMalloc(&head_params_dev, sizeof(head_params_host));
@@ -373,7 +403,7 @@ int main(int argc, char *argv[]) {
 				k_dev, v_dev,
 				dO_dev, dK_dev, dV_dev,
 				L_dev, D_dev,
-				sinks_and_gates_ptr,
+				head_params_ptr,
 				WINDOW_SIZE
 			);
 	}
@@ -393,7 +423,7 @@ int main(int argc, char *argv[]) {
 				k_dev, v_dev,
 				dO_dev, dK_dev, dV_dev,
 				L_dev, D_dev,
-				sinks_and_gates_ptr,
+				head_params_ptr,
 				WINDOW_SIZE
 			);
 		cudaEventRecord(dkv_ends[i]);

@@ -108,7 +108,7 @@ struct Attn_d_kv {
 		bf16 *gK_ptr, bf16 *gV_ptr,
 		bf16 *gDO_ptr, bf16 *gDK_ptr, bf16 *gDV_ptr,
 		f32 *gL_ptr, f32 *gD_ptr,
-		f32 *sinks_and_gates,
+		f32 *head_params,
 		usize window_size
 	) {
 		static_assert(Q_WARPS == 1, "current algorithm doesn't reduce over Q warps");
@@ -162,21 +162,6 @@ struct Attn_d_kv {
 			cp_async_commit();
 		}
 
-		// Sink: a virtual token with no V contribution - it only adds to the
-		// softmax denominator, stealing probability from real tokens.
-		// sinks_and_gates[2*i_head + 0] = raw score, [2*i_head + 1] = output gate
-		f32 gate[HEADS_PER_KERNEL];
-		if (sinks_and_gates != nullptr) {
-			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-				f32 sink_score;
-				load_gmem_2x32b(sinks_and_gates + 2 * (i_head_base + h), sink_score, gate[h]);
-			}
-		} else {
-			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-				gate[h] = 1.0f;
-			}
-		}
-
 		// dK, dV accumulators
 		Fragment_16x16<f32> rDK_f32[HEADS_PER_KERNEL][QK_TILES];
 		zero_(rDK_f32);
@@ -219,6 +204,27 @@ struct Attn_d_kv {
 			}
 		}
 
+		// Sink: a virtual token with no V contribution - it only adds to the
+		// softmax denominator, stealing probability from real tokens.
+		// head_params[4*i_head + 0] = sink score
+		// head_params[4*i_head + 1] = output gate
+		// head_params[4*i_head + 2] = temperature
+		// head_params[4*i_head + 3] = unused padding
+		f32 gate[HEADS_PER_KERNEL];
+		f32 temperature[HEADS_PER_KERNEL];
+		if (head_params != nullptr) {
+			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+				f32 sink_score;
+				f32 unused;
+				load_gmem_4x32b(head_params + 4 * (i_head_base + h), sink_score, gate[h], temperature[h], unused);
+			}
+		} else {
+			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+				gate[h] = 1.0f;
+				temperature[h] = 1.0f;
+			}
+		}
+
 		// Sequential loop over Q
 		f32 logb_gate[HEADS_PER_KERNEL];
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
@@ -254,14 +260,20 @@ struct Attn_d_kv {
 			usize q_start = q_step * Q_PER_STEP;
 			f32 top_n = std::min(window_size, q_start + tid / 4 + 1) + f32(std::numbers::e_v<f64> + 1.0);
 			f32 bot_n = std::min(window_size, q_start + tid / 4 + 9) + f32(std::numbers::e_v<f64> + 1.0);
-			f32 top_score_scale = SCORE_SCALE * math::fast::logb(top_n);
-			f32 bot_score_scale = SCORE_SCALE * math::fast::logb(bot_n);
+			f32 base_top_score_scale = SCORE_SCALE * math::fast::logb(top_n);
+			f32 base_bot_score_scale = SCORE_SCALE * math::fast::logb(bot_n);
+			f32 top_score_scale[HEADS_PER_KERNEL];
+			f32 bot_score_scale[HEADS_PER_KERNEL];
+			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+				top_score_scale[h] = temperature[h] * base_top_score_scale;
+				bot_score_scale[h] = temperature[h] * base_bot_score_scale;
+			}
 
 			// WARNING: DON'T get tempted to FMA this into the expb below because
 			// scaling must happen before masking to avoid -inf * 0 == NaN when scale == 0
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-				scale_top_(rS_f32[h], top_score_scale);
-				scale_bottom_(rS_f32[h], bot_score_scale);
+				scale_top_(rS_f32[h], top_score_scale[h]);
+				scale_bottom_(rS_f32[h], bot_score_scale[h]);
 			}
 
 			// Apply masks
@@ -343,8 +355,8 @@ struct Attn_d_kv {
 				rDS_f32.sub[1][1].val1 = rP_f32.sub[1][1].val1 * (rDP.sub[1][1].val1 - bot_D[h]);
 
 				// P already has gate folded in.
-				f32 top_dk_scale = top_score_scale * f32(1.0 / math::fast::logb_e);
-				f32 bot_dk_scale = bot_score_scale * f32(1.0 / math::fast::logb_e);
+				f32 top_dk_scale = top_score_scale[h] * f32(1.0 / math::fast::logb_e);
+				f32 bot_dk_scale = bot_score_scale[h] * f32(1.0 / math::fast::logb_e);
 				scale_top_(rDS_f32, top_dk_scale);
 				scale_bottom_(rDS_f32, bot_dk_scale);
 
@@ -404,9 +416,9 @@ attn_d_kv(
 	bf16 *gK_ptr, bf16 *gV_ptr,
 	bf16 *gDO_ptr, bf16 *gDK_ptr, bf16 *gDV_ptr,
 	f32 *gL_ptr, f32 *gD_ptr,
-	f32 *sinks_and_gates,
+	f32 *head_params,
 	usize window_size
 ) {
 	Attn_d_kv attn_d_kv = Attn_d_kv();
-	attn_d_kv.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gDO_ptr, gDK_ptr, gDV_ptr, gL_ptr, gD_ptr, sinks_and_gates, window_size);
+	attn_d_kv.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gDO_ptr, gDK_ptr, gDV_ptr, gL_ptr, gD_ptr, head_params, window_size);
 }
