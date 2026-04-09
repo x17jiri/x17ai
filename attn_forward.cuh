@@ -42,7 +42,7 @@ struct Attn_forward {
 
 	static constexpr usize WARPS_PER_BLOCK = Q_WARPS * KV_WARPS;
 	static constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
-	static constexpr f32 SCORE_SCALE = 1.0 / math::constexpr_sqrt(f64(QK_DIM));
+	static constexpr f32 SCORE_SCALE = math::constexpr_rsqrt(f64(QK_DIM));
 
 	static constexpr usize Q_STRIDE = QK_DIM * HEAD_CNT;
 	static constexpr usize K_STRIDE = QK_DIM * HEAD_CNT;
@@ -60,7 +60,8 @@ struct Attn_forward {
 		sizeof(bf16) * (
 			KV_PER_STEP * PRELOAD_DIM * GMEM_PRELOAD
 			+ Q_PER_BLOCK * QK_GROUP_DIM
-		);
+		)
+		+ sizeof(f32) * HEADS_PER_KERNEL * 4;
 
 	static X17_DEVICE void causal_mask_diagonal(Fragment_16x16<f32> &rS_f32) {
 		usize tid = threadIdx.x % WARP_SIZE;
@@ -292,20 +293,28 @@ struct Attn_forward {
 		GMatrixDynSize<bf16, V_GROUP_DIM> gV{gV_ptr + V_DIM * i_head_base, seq_len, V_STRIDE};
 		GMatrixDynSize<bf16, V_GROUP_DIM> gO{gOut_ptr + V_DIM * i_head_base, seq_len, O_STRIDE};
 
-		// SMEM layout: KV preload region + Q
+		// SMEM layout: KV preload region + Q + per-head params
 		u32 smem = 0;
 		usize q_warp_idx = threadIdx.x / WARP_SIZE;
 		usize tid = threadIdx.x % WARP_SIZE;
 		SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, PRELOAD_DIM> sPreload{smem};
 		SMatrix<bf16, Q_PER_BLOCK, QK_GROUP_DIM> sQ{sPreload._ptr + sPreload.bytes()};
+		SMatrix_32b<f32, HEADS_PER_KERNEL, 4> sHeadParams{sQ._ptr + sQ.bytes()};
 
-		// Load Q from GMEM to SMEM (no commit — piggyback on first KV commit)
+		// Load Q and head params from GMEM to SMEM (no commit — piggyback on first KV commit)
 		usize q_block_idx = blockIdx.x;
 		usize q_block_start = q_block_idx * Q_PER_BLOCK;
 		usize q_block_end = q_block_start + Q_PER_BLOCK;
 		usize q_start = q_block_start + q_warp_idx * Q_PER_WARP;
 		GMatrix<bf16, Q_PER_BLOCK, QK_GROUP_DIM> gQ_block = tile_m<Q_PER_BLOCK>(gQ, q_block_idx);
 		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gQ_block, sQ);
+		if (head_params != nullptr) {
+			if (threadIdx.x < HEADS_PER_KERNEL) {
+				f32 const *gHeadParam = head_params + 4 * (i_head_base + threadIdx.x);
+				u32 sHeadParam = sHeadParams._ptr + threadIdx.x * sHeadParams.ROW_BYTES;
+				sm80::cp_async(gHeadParam, sHeadParam);
+			}
+		}
 
 		// round window_size up without overflow (window_size == 0 means disabled)
 		usize max_window_size = std::numeric_limits<usize>::max();
@@ -338,48 +347,6 @@ struct Attn_forward {
 		f32 base_top_score_scale = SCORE_SCALE * math::fast::logb(top_n);
 		f32 base_bot_score_scale = SCORE_SCALE * math::fast::logb(bot_n);
 
-		// Sink: a virtual token with no V contribution - it only adds to the
-		// softmax denominator, stealing probability from real tokens.
-		// head_params[4*i_head + 0] = sink score
-		// head_params[4*i_head + 1] = output gate
-		// head_params[4*i_head + 2] = temperature
-		// head_params[4*i_head + 3] = unused padding
-		f32 gate[HEADS_PER_KERNEL];
-		f32 top_sink_scaled[HEADS_PER_KERNEL];
-		f32 bot_sink_scaled[HEADS_PER_KERNEL];
-		f32 top_score_scale[HEADS_PER_KERNEL];
-		f32 bot_score_scale[HEADS_PER_KERNEL];
-		if (head_params != nullptr) {
-			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-				f32 sink_score;
-				f32 temperature;
-				f32 unused;
-				f32 const *p = head_params + 4 * (i_head_base + h);
-				load_gmem_4x32b(p, sink_score, gate[h], temperature, unused);
-				top_score_scale[h] = temperature * base_top_score_scale;
-				bot_score_scale[h] = temperature * base_bot_score_scale;
-				top_sink_scaled[h] = math::max(sink_score * top_score_scale[h], std::numeric_limits<f32>::lowest());
-				bot_sink_scaled[h] = math::max(sink_score * bot_score_scale[h], std::numeric_limits<f32>::lowest());
-			}
-		} else {
-			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-				gate[h] = 1.0f;
-				top_score_scale[h] = base_top_score_scale;
-				bot_score_scale[h] = base_bot_score_scale;
-				top_sink_scaled[h] = std::numeric_limits<f32>::lowest();
-				bot_sink_scaled[h] = std::numeric_limits<f32>::lowest();
-			}
-		}
-
-		SoftmaxStats top_stats[HEADS_PER_KERNEL];
-		SoftmaxStats bot_stats[HEADS_PER_KERNEL];
-		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-			top_stats[h].max = top_sink_scaled[h] + ONLINE_SOFTMAX_THRESHOLD;
-			top_stats[h].sum = 0.0f;
-			bot_stats[h].max = bot_sink_scaled[h] + ONLINE_SOFTMAX_THRESHOLD;
-			bot_stats[h].sum = 0.0f;
-		}
-
 		// O accumulator
 		Fragment_16x16<f32> rO_f32[HEADS_PER_KERNEL][V_TILES];
 		zero_(rO_f32);
@@ -402,6 +369,46 @@ struct Attn_forward {
 			X17_UNROLL for (usize i = 0; i < QK_TILES; i++) {
 				smem_tile_to_fragment(sKV, 0, h * QK_DIM + i * 16, rKV[h][i]);
 			}
+		}
+
+		// Sink: a virtual token with no V contribution - it only adds to the
+		// softmax denominator, stealing probability from real tokens.
+		// head_params[4*i_head + 0] = sink score
+		// head_params[4*i_head + 1] = output gate
+		// head_params[4*i_head + 2] = temperature
+		// head_params[4*i_head + 3] = unused padding
+		f32 gate[HEADS_PER_KERNEL];
+		f32 top_sink_scaled[HEADS_PER_KERNEL];
+		f32 bot_sink_scaled[HEADS_PER_KERNEL];
+		f32 top_score_scale[HEADS_PER_KERNEL];
+		f32 bot_score_scale[HEADS_PER_KERNEL];
+		if (head_params != nullptr) {
+			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+				u32 head_param_ptr = sHeadParams._ptr + h * sHeadParams.ROW_BYTES;
+				f32 sink_score, temperature, unused;
+				load_shared_4x32b<f32>(head_param_ptr, sink_score, gate[h], temperature, unused);
+				top_score_scale[h] = temperature * base_top_score_scale;
+				bot_score_scale[h] = temperature * base_bot_score_scale;
+				top_sink_scaled[h] = math::max(sink_score * top_score_scale[h], std::numeric_limits<f32>::lowest());
+				bot_sink_scaled[h] = math::max(sink_score * bot_score_scale[h], std::numeric_limits<f32>::lowest());
+			}
+		} else {
+			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+				gate[h] = 1.0f;
+				top_score_scale[h] = base_top_score_scale;
+				bot_score_scale[h] = base_bot_score_scale;
+				top_sink_scaled[h] = std::numeric_limits<f32>::lowest();
+				bot_sink_scaled[h] = std::numeric_limits<f32>::lowest();
+			}
+		}
+
+		SoftmaxStats top_stats[HEADS_PER_KERNEL];
+		SoftmaxStats bot_stats[HEADS_PER_KERNEL];
+		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+			top_stats[h].max = top_sink_scaled[h] + ONLINE_SOFTMAX_THRESHOLD;
+			top_stats[h].sum = 0.0f;
+			bot_stats[h].max = bot_sink_scaled[h] + ONLINE_SOFTMAX_THRESHOLD;
+			bot_stats[h].sum = 0.0f;
 		}
 
 		// Sequential loop over KV

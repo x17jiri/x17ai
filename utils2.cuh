@@ -77,25 +77,16 @@ namespace math {
 		return __fmaf_rn(mul1, mul2, add);
 	}
 
-	constexpr f64 __constexpr_sqrt(f64 x) {
-		f64 r = x;
-		for (int i = 0; i < 32; ++i) {
-			r = 0.5 * (r + x / r);
-		}
-		return r;
-	}
-
 	constexpr f64 constexpr_rsqrt(f64 x) {
-		f64 v = 1.0 / __constexpr_sqrt(x);
-		f64 t = x * v * v;
+		if (x < 0.0) { return std::numeric_limits<f64>::quiet_NaN(); }
+		if (x == 0.0) { return std::numeric_limits<f64>::infinity(); }
 
-		f64 above = t >= 1.0 ? v : 2.0 * v;
-		f64 below = t <= 1.0 ? v : 0.5 * v;
-		bool stop = (above == v) && (below == v);
-
+		f64 above = std::numeric_limits<f64>::max();
+		f64 below = 0.0;
+		bool stop = false;
 		while (!stop) {
-			v = (0.5 * above) + (0.5 * below);
-			t = x * v * v;
+			f64 v = (0.5 * above) + (0.5 * below);
+			f64 t = x * v * v;
 
 			f64 new_above = t >= 1.0 ? v : above;
 			f64 new_below = t <= 1.0 ? v : below;
