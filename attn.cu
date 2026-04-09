@@ -204,12 +204,12 @@ int main(int argc, char *argv[]) {
 
 	cudaFuncSetAttribute(attn_forward<AF>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-	// Forward head params: [sink_score, gate, temperature, unused] for each head.
+	// Per-head params: [gate, temperature, sink_score, unused] for each head.
 	std::array<f32, 4 * HEAD_CNT> head_params_host{};
 	for (usize i_head = 0; i_head < HEAD_CNT; ++i_head) {
-		head_params_host[4 * i_head] = -0.3f;
-		head_params_host[4 * i_head + 1] = 0.5f;
-		head_params_host[4 * i_head + 2] = 1.0f + i_head * 0.1f;
+		head_params_host[4 * i_head] = 0.5f;
+		head_params_host[4 * i_head + 1] = 1.0f + i_head * 0.1f;
+		head_params_host[4 * i_head + 2] = -0.3f;
 		head_params_host[4 * i_head + 3] = 0.0f;
 	}
 	std::filesystem::create_directories("bin");
@@ -224,17 +224,6 @@ int main(int argc, char *argv[]) {
 	cudaMalloc(&head_params_dev, sizeof(head_params_host));
 	cudaMemcpy(head_params_dev, head_params_host.data(), sizeof(head_params_host), cudaMemcpyHostToDevice);
 	f32 *head_params_ptr = use_real_data ? head_params_dev : nullptr;
-
-	// Backward kernels still use the old [sink_score, gate] layout for now.
-	std::array<f32, 2 * HEAD_CNT> sinks_and_gates_host{};
-	for (usize i_head = 0; i_head < HEAD_CNT; ++i_head) {
-		sinks_and_gates_host[2 * i_head] = head_params_host[4 * i_head];
-		sinks_and_gates_host[2 * i_head + 1] = head_params_host[4 * i_head + 1];
-	}
-	f32 *sinks_and_gates_dev;
-	cudaMalloc(&sinks_and_gates_dev, sizeof(sinks_and_gates_host));
-	cudaMemcpy(sinks_and_gates_dev, sinks_and_gates_host.data(), sizeof(sinks_and_gates_host), cudaMemcpyHostToDevice);
-	f32 *sinks_and_gates_ptr = use_real_data ? sinks_and_gates_dev : nullptr;
 
 	cudaDeviceSynchronize();
 
@@ -330,7 +319,7 @@ int main(int argc, char *argv[]) {
 				k_dev, v_dev,
 				out_dev, dO_dev, dQ_dev,
 				L_dev, D_dev,
-				sinks_and_gates_ptr,
+				head_params_ptr,
 				WINDOW_SIZE
 			);
 	}
@@ -350,7 +339,7 @@ int main(int argc, char *argv[]) {
 				k_dev, v_dev,
 				out_dev, dO_dev, dQ_dev,
 				L_dev, D_dev,
-				sinks_and_gates_ptr,
+				head_params_ptr,
 				WINDOW_SIZE
 			);
 		cudaEventRecord(dq_ends[i]);

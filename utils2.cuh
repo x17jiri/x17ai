@@ -368,6 +368,16 @@ X17_DEVICE void load_shared_4x32b(u32 ptr, T &a, T &b, T &c, T &d) {
 
 template<typename T>
 requires(sizeof(T) == 4)
+X17_DEVICE void load_shared_2x32b(u32 ptr, T &a, T &b) {
+	asm volatile(
+		"ld.shared.v2.f32 {%0, %1}, [%2];\n"
+		: "=f"(a), "=f"(b)
+		: "r"(ptr)
+	);
+}
+
+template<typename T>
+requires(sizeof(T) == 4)
 X17_DEVICE T load_shared_1x32b(u32 ptr) {
 	T value;
 	asm volatile(
@@ -378,6 +388,7 @@ X17_DEVICE T load_shared_1x32b(u32 ptr) {
 	return value;
 }
 
+/*
 /// Load two consecutive f32 values from global memory in a single 64-bit transaction.
 template<typename T>
 requires(sizeof(T) == 4)
@@ -398,6 +409,7 @@ X17_DEVICE void load_gmem_4x32b(const T *ptr, T &a, T &b, T &c, T &d) {
 		: "l"(ptr)
 	);
 }
+*/
 
 //--------------------------------------------------------------------------------------------------
 

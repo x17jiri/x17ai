@@ -40,9 +40,9 @@ SCORE_SCALE = 1.0 / math.sqrt(QK_DIM)
 
 def make_head_params(sink, gate, temperature):
 	head_params = torch.zeros((HEAD_CNT, 4), dtype=torch.float32)
-	head_params[:, 0] = sink
-	head_params[:, 1] = gate
-	head_params[:, 2] = temperature
+	head_params[:, 0] = gate
+	head_params[:, 1] = temperature
+	head_params[:, 2] = sink
 	return head_params
 
 
@@ -401,9 +401,9 @@ def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5, temperature_
 	ref_dK_heads = []
 	ref_dV_heads = []
 	for i_head in range(HEAD_CNT):
-		sink_arg = float(head_params[i_head, 0].item())
-		gate_arg = float(head_params[i_head, 1].item())
-		temperature_arg = float(head_params[i_head, 2].item())
+		gate_arg = float(head_params[i_head, 0].item())
+		temperature_arg = float(head_params[i_head, 1].item())
+		sink_arg = float(head_params[i_head, 2].item())
 		Q = Q_bf16[:, i_head, :].float().requires_grad_(True)
 		K = K_bf16[:, i_head, :QK_DIM].float().requires_grad_(True)
 		V = V_bf16[:, i_head, :V_DIM].float().requires_grad_(True)
@@ -464,7 +464,7 @@ def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5, temperature_
 	D_path = "tmp/D.bin"
 	if os.path.exists(D_path) and O_cuda is not None:
 		D_cuda = load_f32(D_path, (HEAD_CNT, q_len))
-		gate = head_params[:, 1].view(1, HEAD_CNT)
+		gate = head_params[:, 0].view(1, HEAD_CNT)
 		D_ref = ((dO_bf16.float() * O_cuda.float()).sum(dim=-1) / gate).transpose(0, 1)
 		diff = (D_ref - D_cuda).abs()
 		exact = (D_ref == D_cuda).sum().item()
@@ -504,9 +504,9 @@ def verify(q_len, kv_len, large=False, sink_val=-0.3, gate_val=0.5, temperature_
 			Q_f = Q_bf16[:, i_head, :].float()
 			K_f = K_bf16[:, i_head, :QK_DIM].float()
 			V_f = V_bf16[:, i_head, :V_DIM].float()
-			sink_arg = float(head_params[i_head, 0].item())
-			gate_arg = float(head_params[i_head, 1].item())
-			temperature_arg = float(head_params[i_head, 2].item())
+			gate_arg = float(head_params[i_head, 0].item())
+			temperature_arg = float(head_params[i_head, 1].item())
+			sink_arg = float(head_params[i_head, 2].item())
 
 			# Recompute scores (multiply by combined score_scale in one step to match
 			# the kernel's multiplication order and avoid f32 rounding differences)

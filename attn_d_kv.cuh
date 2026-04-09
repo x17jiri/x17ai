@@ -51,7 +51,7 @@ struct Attn_d_kv {
 	static constexpr usize SMEM_BYTES =
 		sizeof(bf16) * (Q_PER_STEP * PRELOAD_DIM * GMEM_PRELOAD)
 		+ sizeof(bf16) * (KV_PER_BLOCK * KV_SMEM_DIM)
-		+ sizeof(f32) * (HEADS_PER_KERNEL * GMEM_PRELOAD * Q_PER_STEP * 2); // sL + sD
+		+ sizeof(f32) * (HEADS_PER_KERNEL * GMEM_PRELOAD * Q_PER_STEP * 2 + HEADS_PER_KERNEL * 4); // sL + sD + head_params
 
 	static constexpr size_t mma_count(size_t seq_len, size_t window_size) {
 		seq_len /= 16;
@@ -131,6 +131,7 @@ struct Attn_d_kv {
 		SMatrix<bf16, KV_PER_BLOCK, KV_SMEM_DIM> sKV{sPreload._ptr + sPreload.bytes()};
 		SMatrix_32b<f32, HEADS_PER_KERNEL * GMEM_PRELOAD, Q_PER_STEP> sL{sKV._ptr + sKV.bytes()};
 		SMatrix_32b<f32, HEADS_PER_KERNEL * GMEM_PRELOAD, Q_PER_STEP> sD{sL._ptr + sL.bytes()};
+		SMatrix_32b<f32, HEADS_PER_KERNEL, 4> sHeadParams{sD._ptr + sD.bytes()};
 
 		// Load K/V from GMEM to SMEM (no commit — piggyback on first KV commit)
 		usize kv_block_idx = blockIdx.x;
@@ -140,6 +141,13 @@ struct Attn_d_kv {
 		if constexpr (!V_EQUALS_K) {
 			GMatrix<bf16, KV_PER_BLOCK, V_GROUP_DIM> gV_block = tile_m<KV_PER_BLOCK>(gV, kv_block_idx);
 			cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gV_block, sKV, 0, QK_GROUP_DIM);
+		}
+		if (head_params != nullptr) {
+			if (threadIdx.x < HEADS_PER_KERNEL) {
+				f32 const *gHeadParam = head_params + 4 * (i_head_base + threadIdx.x);
+				u32 sHeadParam = sHeadParams._ptr + threadIdx.x * sHeadParams.ROW_BYTES;
+				sm80::cp_async(gHeadParam, sHeadParam);
+			}
 		}
 
 		// round window_size up without overflow (window_size == 0 means disabled)
@@ -214,9 +222,8 @@ struct Attn_d_kv {
 		f32 temperature[HEADS_PER_KERNEL];
 		if (head_params != nullptr) {
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-				f32 sink_score;
-				f32 unused;
-				load_gmem_4x32b(head_params + 4 * (i_head_base + h), sink_score, gate[h], temperature[h], unused);
+				u32 head_param_ptr = sHeadParams._ptr + h * sHeadParams.ROW_BYTES;
+				load_shared_2x32b<f32>(head_param_ptr, gate[h], temperature[h]);
 			}
 		} else {
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {

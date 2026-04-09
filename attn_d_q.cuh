@@ -52,7 +52,7 @@ struct Attn_d_q {
 			KV_PER_STEP * PRELOAD_DIM * GMEM_PRELOAD
 			+ Q_PER_BLOCK * (QK_GROUP_DIM + 2 * V_GROUP_DIM)
 		)
-		+ sizeof(f32) * HEADS_PER_KERNEL * Q_PER_BLOCK;
+		+ sizeof(f32) * (HEADS_PER_KERNEL * Q_PER_BLOCK + HEADS_PER_KERNEL * 4);
 
 	static constexpr size_t mma_count(size_t seq_len, size_t window_size) {
 		seq_len /= 16;
@@ -73,7 +73,7 @@ struct Attn_d_q {
 		bf16 *gK_ptr, bf16 *gV_ptr,
 		bf16 *gOut_ptr, bf16 *gDO_ptr, bf16 *gDQ_ptr,
 		f32 *gL_ptr, f32 *gD_ptr,
-		f32 *sinks_and_gates,
+		f32 *head_params,
 		usize window_size
 	) {
 		static_assert(KV_WARPS == 1, "current algorithm doesn't reduce over KV warps");
@@ -97,6 +97,7 @@ struct Attn_d_q {
 		SMatrix<bf16, Q_PER_BLOCK, V_GROUP_DIM> sdO{sQ._ptr + sQ.bytes()};
 		SMatrix<bf16, Q_PER_BLOCK, V_GROUP_DIM> sO{sdO._ptr + sdO.bytes()};
 		SMatrix_32b<f32, HEADS_PER_KERNEL, Q_PER_BLOCK> sL{sO._ptr + sO.bytes()};
+		SMatrix_32b<f32, HEADS_PER_KERNEL, 4> sHeadParams{sL._ptr + sL.bytes()};
 
 		// Load Q, dO, O, and L from GMEM to SMEM (no commit — piggyback on first KV commit)
 		usize q_block_idx = blockIdx.x;
@@ -112,6 +113,13 @@ struct Attn_d_q {
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 			GMatrix<f32, 1, Q_PER_BLOCK> gL_block{gL_ptr + seq_len * (i_head_base + h) + q_block_start};
 			cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gL_block, sL, h, 0);
+		}
+		if (head_params != nullptr) {
+			if (threadIdx.x < HEADS_PER_KERNEL) {
+				f32 const *gHeadParam = head_params + 4 * (i_head_base + threadIdx.x);
+				u32 sHeadParam = sHeadParams._ptr + threadIdx.x * sHeadParams.ROW_BYTES;
+				sm80::cp_async(gHeadParam, sHeadParam);
+			}
 		}
 
 		// round window_size up without overflow (window_size == 0 means disabled)
@@ -142,23 +150,8 @@ struct Attn_d_q {
 		//     `1` to account for the sink token
 		f32 top_n = std::min(window_size, q_start + tid / 4 + 1) + f32(std::numbers::e_v<f64> + 1.0);
 		f32 bot_n = std::min(window_size, q_start + tid / 4 + 9) + f32(std::numbers::e_v<f64> + 1.0);
-		f32 top_score_scale = SCORE_SCALE * math::fast::logb(top_n);
-		f32 bot_score_scale = SCORE_SCALE * math::fast::logb(bot_n);
-
-		// Sink: a virtual token with no V contribution - it only adds to the
-		// softmax denominator, stealing probability from real tokens.
-		// sinks_and_gates[2*i_head + 0] = raw score, [2*i_head + 1] = output gate
-		f32 gate[HEADS_PER_KERNEL];
-		if (sinks_and_gates != nullptr) {
-			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-				f32 sink_score;
-				load_gmem_2x32b(sinks_and_gates + 2 * (i_head_base + h), sink_score, gate[h]);
-			}
-		} else {
-			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-				gate[h] = 1.0f;
-			}
-		}
+		f32 base_top_score_scale = SCORE_SCALE * math::fast::logb(top_n);
+		f32 base_bot_score_scale = SCORE_SCALE * math::fast::logb(bot_n);
 
 		// dQ accumulator
 		Fragment_16x16<f32> rDQ_f32[HEADS_PER_KERNEL][QK_TILES];
@@ -166,14 +159,6 @@ struct Attn_d_q {
 
 		cp_async_wait<GMEM_PRELOAD - 1>();
 		sync_threads();
-
-		f32 top_L[HEADS_PER_KERNEL];
-		f32 bot_L[HEADS_PER_KERNEL];
-		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-			u32 l_ptr = sL._ptr + h * sL.ROW_BYTES;
-			top_L[h] = load_shared_1x32b<f32>(l_ptr + (q_warp_idx * Q_PER_WARP + tid / 4) * sizeof(f32));
-			bot_L[h] = load_shared_1x32b<f32>(l_ptr + (q_warp_idx * Q_PER_WARP + tid / 4 + 8) * sizeof(f32));
-		}
 
 		// Load Q from SMEM to registers
 		Fragment_16x16<bf16> rQ[HEADS_PER_KERNEL][QK_TILES];
@@ -198,6 +183,40 @@ struct Attn_d_q {
 				smem_tile_to_fragment(sdO, q_warp_idx * Q_PER_WARP, h * V_DIM + i * 16, rDO[h][i]);
 			}
 		}
+
+		// Sink: a virtual token with no V contribution - it only adds to the
+		// softmax denominator, stealing probability from real tokens.
+		// head_params[4*i_head + 0] = output gate
+		// head_params[4*i_head + 1] = temperature
+		// head_params[4*i_head + 2] = sink score
+		// head_params[4*i_head + 3] = unused padding
+		f32 gate[HEADS_PER_KERNEL];
+		f32 top_score_scale[HEADS_PER_KERNEL];
+		f32 bot_score_scale[HEADS_PER_KERNEL];
+		if (head_params != nullptr) {
+			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+				u32 head_param_ptr = sHeadParams._ptr + h * sHeadParams.ROW_BYTES;
+				f32 temperature;
+				load_shared_2x32b<f32>(head_param_ptr, gate[h], temperature);
+				top_score_scale[h] = temperature * base_top_score_scale;
+				bot_score_scale[h] = temperature * base_bot_score_scale;
+			}
+		} else {
+			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+				gate[h] = 1.0f;
+				top_score_scale[h] = base_top_score_scale;
+				bot_score_scale[h] = base_bot_score_scale;
+			}
+		}
+
+		f32 top_L[HEADS_PER_KERNEL];
+		f32 bot_L[HEADS_PER_KERNEL];
+		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+			u32 l_ptr = sL._ptr + h * sL.ROW_BYTES;
+			top_L[h] = load_shared_1x32b<f32>(l_ptr + (q_warp_idx * Q_PER_WARP + tid / 4) * sizeof(f32));
+			bot_L[h] = load_shared_1x32b<f32>(l_ptr + (q_warp_idx * Q_PER_WARP + tid / 4 + 8) * sizeof(f32));
+		}
+
 		// Compute D = rowsum(dO ⊙ O) — load O tiles one at a time from SMEM
 		f32 top_D[HEADS_PER_KERNEL];
 		f32 bot_D[HEADS_PER_KERNEL];
@@ -243,8 +262,8 @@ struct Attn_d_q {
 		//   D'  = D / gate
 		// so dS = P' * (dP - D') and dQ = sum(dS) @ K — no scaling needed.
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-			f32 top_grad_scale = f32(1.0 / math::fast::logb_e) * top_score_scale * gate[h];
-			f32 bot_grad_scale = f32(1.0 / math::fast::logb_e) * bot_score_scale * gate[h];
+			f32 top_grad_scale = f32(1.0 / math::fast::logb_e) * top_score_scale[h] * gate[h];
+			f32 bot_grad_scale = f32(1.0 / math::fast::logb_e) * bot_score_scale[h] * gate[h];
 			top_L[h] -= math::fast::logb(top_grad_scale);
 			bot_L[h] -= math::fast::logb(bot_grad_scale);
 		}
@@ -270,8 +289,8 @@ struct Attn_d_q {
 
 				// WARNING: DON'T get tempted to FMA this into the expb below because
 				// scaling must happen before masking to avoid -inf * 0 == NaN when scale == 0
-				scale_top_(rS_f32[h], top_score_scale);
-				scale_bottom_(rS_f32[h], bot_score_scale);
+				scale_top_(rS_f32[h], top_score_scale[h]);
+				scale_bottom_(rS_f32[h], bot_score_scale[h]);
 			}
 
 			// Apply masks
@@ -383,9 +402,9 @@ attn_d_q(
 	bf16 *gK_ptr, bf16 *gV_ptr,
 	bf16 *gOut_ptr, bf16 *gDO_ptr, bf16 *gDQ_ptr,
 	f32 *gL_ptr, f32 *gD_ptr,
-	f32 *sinks_and_gates,
+	f32 *head_params,
 	usize window_size
 ) {
 	Attn_d_q attn_d_q = Attn_d_q();
-	attn_d_q.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gOut_ptr, gDO_ptr, gDQ_ptr, gL_ptr, gD_ptr, sinks_and_gates, window_size);
+	attn_d_q.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gOut_ptr, gDO_ptr, gDQ_ptr, gL_ptr, gD_ptr, head_params, window_size);
 }

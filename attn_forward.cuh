@@ -373,9 +373,9 @@ struct Attn_forward {
 
 		// Sink: a virtual token with no V contribution - it only adds to the
 		// softmax denominator, stealing probability from real tokens.
-		// head_params[4*i_head + 0] = sink score
-		// head_params[4*i_head + 1] = output gate
-		// head_params[4*i_head + 2] = temperature
+		// head_params[4*i_head + 0] = output gate
+		// head_params[4*i_head + 1] = temperature
+		// head_params[4*i_head + 2] = sink score
 		// head_params[4*i_head + 3] = unused padding
 		f32 gate[HEADS_PER_KERNEL];
 		f32 top_sink_scaled[HEADS_PER_KERNEL];
@@ -385,8 +385,8 @@ struct Attn_forward {
 		if (head_params != nullptr) {
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 				u32 head_param_ptr = sHeadParams._ptr + h * sHeadParams.ROW_BYTES;
-				f32 sink_score, temperature, unused;
-				load_shared_4x32b<f32>(head_param_ptr, sink_score, gate[h], temperature, unused);
+				f32 temperature, sink_score, unused;
+				load_shared_4x32b<f32>(head_param_ptr, gate[h], temperature, sink_score, unused);
 				top_score_scale[h] = temperature * base_top_score_scale;
 				bot_score_scale[h] = temperature * base_bot_score_scale;
 				top_sink_scaled[h] = math::max(sink_score * top_score_scale[h], std::numeric_limits<f32>::lowest());
