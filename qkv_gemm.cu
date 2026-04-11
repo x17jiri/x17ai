@@ -82,23 +82,23 @@ X17_DEVICE void rope_rotate_pair(Fragment_8x8<f32> &frag, f32 c, f32 s) {
 
 template<usize N_TILE_CNT>
 X17_DEVICE void apply_rope(
-	Fragment_16x16<f32> (&acc)[M_TILES][N_TILE_CNT],
-	usize block_m,
-	usize warp_m
+	Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILES],
+	usize block_n,
+	usize warp_n
 ) {
 	constexpr usize GROUP_TILE_CNT = HEAD_DIM / 16;
-	constexpr usize GROUP_CNT = N_PER_WARP / HEAD_DIM;
+	constexpr usize GROUP_CNT = M_PER_WARP / HEAD_DIM;
 	constexpr usize ROPE_TILE_CNT = ROPE_DIM / 16;
 	usize tid = threadIdx.x % WARP_SIZE;
 	usize row_in_half = tid / 4;
 	usize pair_in_quad = tid % 4;
 
-	X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-		usize top_row = block_m + warp_m + mi * 16 + row_in_half;
+	X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
+		usize top_row = block_n + warp_n + ni * 16 + row_in_half;
 		usize bot_row = top_row + 8;
 		X17_UNROLL for (usize group = 0; group < GROUP_CNT; ++group) {
 			X17_UNROLL for (usize tile = 0; tile < ROPE_TILE_CNT; ++tile) {
-				Fragment_16x16<f32> &frag = acc[mi][group * GROUP_TILE_CNT + tile];
+				Fragment_16x16<f32> &frag = acc[ni][group * GROUP_TILE_CNT + tile];
 				usize pair_base = tile * 8;
 
 				f32 left_freq_recip = math::fast::expb(ROPE_LOG_SCALE * f32(pair_base + pair_in_quad));
@@ -130,18 +130,18 @@ X17_DEVICE void apply_rope(
 
 template<usize N_TILE_CNT>
 X17_DEVICE void l2_norm(
-	Fragment_16x16<f32> (&acc)[M_TILES][N_TILE_CNT]
+	Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILES]
 ) {
 	constexpr usize GROUP_TILE_CNT = HEAD_DIM / 16;
-	constexpr usize GROUP_CNT = N_PER_WARP / HEAD_DIM;
+	constexpr usize GROUP_CNT = M_PER_WARP / HEAD_DIM;
 
-	X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+	X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
 		X17_UNROLL for (usize group = 0; group < GROUP_CNT; ++group) {
 			f32 top_sum_sq = 0.0f;
 			f32 bot_sum_sq = 0.0f;
 
 			X17_UNROLL for (usize tile = 0; tile < GROUP_TILE_CNT; ++tile) {
-				Fragment_16x16<f32> &frag = acc[mi][group * GROUP_TILE_CNT + tile];
+				Fragment_16x16<f32> &frag = acc[ni][group * GROUP_TILE_CNT + tile];
 				top_sum_sq = math::fma(frag.sub[0][0].val0, frag.sub[0][0].val0, top_sum_sq);
 				top_sum_sq = math::fma(frag.sub[0][0].val1, frag.sub[0][0].val1, top_sum_sq);
 				top_sum_sq = math::fma(frag.sub[0][1].val0, frag.sub[0][1].val0, top_sum_sq);
@@ -162,7 +162,7 @@ X17_DEVICE void l2_norm(
 			f32 bot_inv_norm = bot_sum_sq > 0.0f ? math::fast::recip(sqrtf(bot_sum_sq)) : 0.0f;
 
 			X17_UNROLL for (usize tile = 0; tile < GROUP_TILE_CNT; ++tile) {
-				acc[mi][group * GROUP_TILE_CNT + tile].scale_(top_inv_norm, bot_inv_norm);
+				acc[ni][group * GROUP_TILE_CNT + tile].scale_(top_inv_norm, bot_inv_norm);
 			}
 		}
 	}
@@ -189,7 +189,7 @@ __global__ void gemm_kernel(
 	usize warp_idx = tid / WARP_SIZE;
 	usize warp_m = (warp_idx / N_WARPS) * M_PER_WARP;
 	usize warp_n = (warp_idx % N_WARPS) * N_PER_WARP;
-	usize block_m = blockIdx.x * M_PER_BLOCK;
+	usize block_n = blockIdx.y * N_PER_BLOCK;
 
 	GMatrixDynSize<bf16, A_COLS> gA{A, A_ROWS};
 	GMatrix<bf16, M_PER_BLOCK, A_COLS> gA_block = tile_m<M_PER_BLOCK>(gA, blockIdx.x);
@@ -205,8 +205,8 @@ __global__ void gemm_kernel(
 		cp_async_commit();
 	}
 
-	Fragment_16x16<f32> acc[M_TILES][N_TILES];
-	zero_(acc);
+	Fragment_16x16<f32> acc_t[N_TILES][M_TILES];
+	zero_(acc_t);
 
 	Fragment_16x16<bf16> rA[K_TILES][M_TILES];
 	Fragment_16x16<bf16> rB[K_TILES][N_TILES];
@@ -226,7 +226,7 @@ __global__ void gemm_kernel(
 		}
 	}
 
-	X17_NO_UNROLL for (usize k_step = 0; k_step < K_ITERS; ++k_step) {
+	X17_UNROLL for (usize k_step = 0; k_step < K_ITERS; ++k_step) {
 		{ // Get more data from GMEM
 			cp_async_wait<GMEM_PRELOAD - 2>();
 			sync_threads();
@@ -238,25 +238,25 @@ __global__ void gemm_kernel(
 		}
 
 		X17_UNROLL for (usize k_tile = 0; k_tile < K_TILES; ++k_tile) {
-			X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-				X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-					mma_a_bt(rA[k_tile][mi], rB[k_tile][ni], acc[mi][ni]);
-				}
-				smem_tile_to_fragment(sB, warp_n + ni * 16, k_tile * 16, rB[k_tile][ni]);
-			}
 			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+					mma_a_bt(rB[k_tile][ni], rA[k_tile][mi], acc_t[ni][mi]);
+				}
 				smem_tile_to_fragment(sA, warp_m + mi * 16, k_tile * 16, rA[k_tile][mi]);
+			}
+			X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+				smem_tile_to_fragment(sB, warp_n + ni * 16, k_tile * 16, rB[k_tile][ni]);
 			}
 		}
 	}
 
-	l2_norm(acc);
-	apply_rope(acc, block_m, warp_m);
+	l2_norm(acc_t);
+	apply_rope(acc_t, block_n, warp_n);
 
-	bf16 *c_ptr = C + blockIdx.x * M_PER_BLOCK * B_COLS + blockIdx.y * N_PER_BLOCK;
-	GMatrix<bf16, M_PER_BLOCK, N_PER_BLOCK> gC_block{c_ptr, B_COLS};
-	X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-		store(acc[mi], gC_block, warp_m + mi * 16, warp_n);
+	bf16 *c_ptr = C + blockIdx.y * N_PER_BLOCK * A_ROWS + blockIdx.x * M_PER_BLOCK;
+	GMatrix<bf16, N_PER_BLOCK, M_PER_BLOCK> gC_block{c_ptr, A_ROWS};
+	X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+		store(acc_t[ni], gC_block, warp_n + ni * 16, warp_m);
 	}
 }
 
@@ -362,7 +362,7 @@ int main(int argc, char *argv[]) {
 
 	double flops = 2.0 * M * N * A_N;
 	double tflops = flops / elapsed / 1e12;
-	printf("A=[%u, %u], B=[%u, %u] stored as B^T=[%u, %u]\n", M, A_N, B_M, N, N, B_M);
+	printf("A=[%u, %u], B=[%u, %u] stored as B^T=[%u, %u], out=[%u, %u]\n", M, A_N, B_M, N, N, B_M, N, M);
 	printf("Average kernel time over %d runs: %.3f ms\n", NUM_RUNS, elapsed * 1e3);
 	printf("%.2f TFLOPS\n", tflops);
 
@@ -377,7 +377,7 @@ int main(int argc, char *argv[]) {
 	printf("\nFirst 4x4 (GPU):\n");
 	for (usize m = 0; m < 4; m++) {
 		for (usize n = 0; n < 4; n++)
-			printf(" %10.4f", float(h_C[m * N + n]));
+			printf(" %10.4f", float(h_C[m * M + n]));
 		printf("\n");
 	}
 

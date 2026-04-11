@@ -1,0 +1,7 @@
+{
+	"n_inputs": 32768,
+	"d_model": 1024,
+	"n_heads": 32,
+	"head_size": 32,
+	"qkv_fan_in": 256,
+}

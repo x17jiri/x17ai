@@ -108,10 +108,17 @@ def apply_rope(chunk, cos_table, sin_table):
 
 def reference_chunk(a_f32, b_f32_chunk, row_start, cos_table, sin_table):
 	b_shifted = shift_b_rows(b_f32_chunk, row_start)
-	chunk = a_f32 @ b_shifted.T
-	norm = torch.linalg.vector_norm(chunk, ord=2, dim=1, keepdim=True)
-	chunk = chunk / norm.clamp_min(1e-30)
-	return apply_rope(chunk, cos_table, sin_table)
+	chunk = (a_f32 @ b_shifted.T).transpose(0, 1)
+	result = torch.empty_like(chunk)
+	cos_slice = cos_table[row_start:row_start + chunk.shape[0]]
+	sin_slice = sin_table[row_start:row_start + chunk.shape[0]]
+	for m_start in range(0, chunk.shape[1], HEAD_DIM):
+		m_end = min(m_start + HEAD_DIM, chunk.shape[1])
+		block = chunk[:, m_start:m_end]
+		norm = torch.linalg.vector_norm(block, ord=2, dim=1, keepdim=True)
+		block = block / norm.clamp_min(1e-30)
+		result[:, m_start:m_end] = apply_rope(block, cos_slice, sin_slice)
+	return result
 
 
 
@@ -141,11 +148,11 @@ def verify(m, n):
 		print(f"Missing CUDA output file: {cuda_path}")
 		return
 
-	cuda_bf16 = load_bf16(cuda_path, (m, n))
+	cuda_bf16 = load_bf16(cuda_path, (n, m))
 	a_f32 = a_bf16.float()
 	b_f32 = b_bf16.float()
 	cuda_f32 = cuda_bf16.float()
-	cos_table, sin_table = make_rope_tables(m)
+	cos_table, sin_table = make_rope_tables(n)
 
 	num_nan = torch.isnan(cuda_f32).sum().item()
 	num_inf = torch.isinf(cuda_f32).sum().item()
@@ -170,7 +177,7 @@ def verify(m, n):
 		n_end = min(n_start + HEAD_DIM, n)
 		ref_chunk_f32 = reference_chunk(a_f32, b_f32[n_start:n_end], n_start, cos_table, sin_table)
 		ref_chunk_bf16 = ref_chunk_f32.to(torch.bfloat16)
-		cuda_chunk_bf16 = cuda_bf16[:, n_start:n_end]
+		cuda_chunk_bf16 = cuda_bf16[n_start:n_end, :]
 		ref_chunk_f = ref_chunk_bf16.float()
 		cuda_chunk_f = cuda_chunk_bf16.float()
 		if ref_preview is None:
@@ -181,8 +188,8 @@ def verify(m, n):
 		chunk_max = diff.max().item()
 		if chunk_max > max_abs_diff:
 			idx = (diff == diff.max()).nonzero(as_tuple=False)[0]
-			worst_row = idx[0].item()
-			worst_col = n_start + idx[1].item()
+			worst_row = n_start + idx[0].item()
+			worst_col = idx[1].item()
 			worst_ref = ref_chunk_bf16[idx[0], idx[1]].float().item()
 			worst_cuda = cuda_chunk_bf16[idx[0], idx[1]].float().item()
 			max_abs_diff = chunk_max
@@ -213,6 +220,7 @@ def verify(m, n):
 
 	print(f"\n--- GEMM + L2 norm + RoPE vs CUDA ---")
 	print(f"A=[{m}, {A_N}], B=[{B_M}, {n}] stored as B^T=[{n}, {B_M}], INPUT_STEP={INPUT_STEP}")
+	print(f"Output=[{n}, {m}]")
 	print(f"Max abs diff:     {max_abs_diff:.6e}")
 	print(f"Mean abs diff:    {mean_abs_diff:.6e}")
 	print(f"Max pct diff:     {', '.join(pct_strs)}")

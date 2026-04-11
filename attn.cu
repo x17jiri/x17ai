@@ -18,10 +18,10 @@ int main(int argc, char *argv[]) {
 	constexpr usize HEADS_PER_KERNEL = 2;
 	constexpr usize QK_DIM = 32;
 	constexpr usize V_DIM = 32;
-	constexpr bool V_EQ_K = false;
+	constexpr bool V_EQ_K = true;
 	constexpr usize Q_PACKED_DIM = HEAD_CNT * QK_DIM;
 	constexpr usize V_PACKED_DIM = HEAD_CNT * V_DIM;
-	constexpr usize WINDOW_SIZE = 256;
+	constexpr usize WINDOW_SIZE = 0;//256;
 	{
 		f64 ref = std::sqrt(1.0 / QK_DIM);
 		f64 my = math::constexpr_rsqrt(f64(QK_DIM));
