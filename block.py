@@ -45,8 +45,18 @@ def store_tensor(tensor: torch.Tensor, file_name: str) -> None:
 	data = tensor.contiguous().cpu()
 	with path.open("wb") as output_file:
 		output_file.write(data.view(torch.int16).numpy().tobytes())
-	rows, cols = data.shape
-	print(f"Created {path}: [{rows}, {cols}] bfloat16")
+	shape_str = ", ".join(str(dim) for dim in data.shape)
+	print(f"Created {path}: [{shape_str}] bfloat16")
+
+
+def store_f32_tensor(tensor: torch.Tensor, file_name: str) -> None:
+	path = tensor_path(file_name)
+	path.parent.mkdir(parents=True, exist_ok=True)
+	data = tensor.contiguous().cpu().to(torch.float32)
+	with path.open("wb") as output_file:
+		output_file.write(data.numpy().tobytes())
+	shape_str = ", ".join(str(dim) for dim in data.shape)
+	print(f"Created {path}: [{shape_str}] float32")
 
 
 def create_inputs(config: dict) -> None:
@@ -62,8 +72,14 @@ def create_inputs(config: dict) -> None:
 	generator.manual_seed(42)
 	inputs = torch.randn((n_inputs, d_model), dtype=torch.float32, device=device, generator=generator).to(torch.bfloat16)
 	qkv_weights = torch.randn((qkv_weights_rows, qkv_fan_in), dtype=torch.float32, device=device, generator=generator).to(torch.bfloat16)
+	head_params = torch.zeros((n_heads, 4), dtype=torch.float32, device=device)
+	head_params[:, 0] = 1.0 # gate
+	head_params[:, 1] = 1.0 # temperature
+	head_params[:, 2] = 0.0 # sink score
+	head_params[:, 3] = 0.0 # unused
 	store_tensor(inputs, "inputs.bin")
 	store_tensor(qkv_weights, "qkv_weights.bin")
+	store_f32_tensor(head_params, "head_params.bin")
 
 
 def expand_qkv_weights(qkv_weights: torch.Tensor, d_model: int, n_heads: int) -> torch.Tensor:
@@ -91,6 +107,25 @@ def qkv_proj(inputs: torch.Tensor, qkv_weights: torch.Tensor, config: dict) -> t
 	return torch.matmul(inputs, expanded_qkv_weights.transpose(0, 1)).to(torch.bfloat16)
 
 
+def l2_norm_last_dim(tensor: torch.Tensor) -> torch.Tensor:
+	tensor_f32 = tensor.to(torch.float32)
+	norm = torch.linalg.vector_norm(tensor_f32, ord=2, dim=-1, keepdim=True)
+	return (tensor_f32 / norm.clamp_min(1e-30)).to(torch.bfloat16)
+
+
+def split_qkv(qkv: torch.Tensor, config: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+	n_inputs = int(config["n_inputs"])
+	n_heads = int(config["n_heads"])
+	head_size = int(config["head_size"])
+	qkv_cols = n_heads * head_size
+
+	q = qkv[:, :qkv_cols].reshape(n_inputs, n_heads, head_size)
+	k = qkv[:, qkv_cols:2 * qkv_cols].reshape(n_inputs, n_heads, head_size)
+	v = qkv[:, 2 * qkv_cols:3 * qkv_cols].reshape(n_inputs, n_heads, head_size)
+
+	return l2_norm_last_dim(q), l2_norm_last_dim(k), l2_norm_last_dim(v)
+
+
 def run_block(config: dict) -> None:
 	n_inputs = int(config["n_inputs"])
 	d_model = int(config["d_model"])
@@ -102,12 +137,19 @@ def run_block(config: dict) -> None:
 	inputs = load_tensor("inputs.bin", n_inputs, d_model)
 	qkv_weights = load_tensor("qkv_weights.bin", qkv_weights_rows, qkv_fan_in)
 	qkv = qkv_proj(inputs, qkv_weights, config)
+	q, k, v = split_qkv(qkv, config)
 
 	print("inputs shape:", inputs.shape)
 	print("qkv_weights shape:", qkv_weights.shape)
 	print("qkv shape:", qkv.shape)
+	print("q shape:", q.shape)
+	print("k shape:", k.shape)
+	print("v shape:", v.shape)
 
 	store_tensor(qkv, "qkv.bin")
+	store_tensor(q, "q.bin")
+	store_tensor(k, "k.bin")
+	store_tensor(v, "v.bin")
 
 
 def main() -> None:
