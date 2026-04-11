@@ -19,10 +19,9 @@ constexpr usize K_STEP = 64;
 constexpr usize GMEM_PRELOAD = 2;
 constexpr usize M_TILES = M_PER_WARP / 16;
 constexpr usize N_TILES = N_PER_WARP / 16;
-constexpr usize A_ROWS_DEFAULT = 4096;
-constexpr usize K = 1024;
+constexpr usize A_ROWS_DEFAULT = 1024;
+constexpr usize K = 2048;
 constexpr usize B_COLS_DEFAULT = 32768;
-constexpr usize OUT_M_PER_BLOCK = M_PER_BLOCK / 2;
 
 static_assert(WARPS_PER_BLOCK == 4);
 static_assert(K_STEP % 16 == 0);
@@ -57,42 +56,25 @@ X17_DEVICE void cp_async_ab(
 	}
 }
 
-X17_DEVICE void geglu(Fragment_8x8<bf16> &o, Fragment_8x8<f32> const &i1, Fragment_8x8<f32> const &i2) {
-	o.set(
-		bf16(math::fast::geglu<K>(i1.val0, i1.val1)),
-		bf16(math::fast::geglu<K>(i2.val0, i2.val1))
-	);
-	o.transpose_();
-	usize tid = threadIdx.x % WARP_SIZE;
-	o.val = shuffle_sync(o.val, (tid & 12) * 2 + (tid & 16) / 4 + (tid & ~28));
-	o.transpose_();
+X17_DEVICE f32 sum_squares_4(f32 a, f32 b, f32 c, f32 d) {
+	f32 sum = 0.0f;
+	sum = math::fma(a, a, sum);
+	sum = math::fma(b, b, sum);
+	sum = math::fma(c, c, sum);
+	sum = math::fma(d, d, sum);
+	return sum;
 }
 
-X17_DEVICE void geglu(Fragment_16x16<bf16> &o, Fragment_16x16<f32> const &i1, Fragment_16x16<f32> const &i2) {
-	geglu(o.sub[0][0], i1.sub[0][0], i1.sub[0][1]);
-	geglu(o.sub[0][1], i2.sub[0][0], i2.sub[0][1]);
-	geglu(o.sub[1][0], i1.sub[1][0], i1.sub[1][1]);
-	geglu(o.sub[1][1], i2.sub[1][0], i2.sub[1][1]);
-}
-
-template<usize N>
-X17_DEVICE void geglu(Fragment_16x16<bf16> (&o)[N], Fragment_16x16<f32> const (&i)[2 * N]) {
-	X17_UNROLL for (usize tile = 0; tile < N; ++tile) {
-		geglu(o[tile], i[2 * tile], i[2 * tile + 1]);
-	}
-}
-
-// GEMM: C[B_COLS, A_ROWS/2] = GeGLU((A[A_ROWS, K] @ B[K, B_COLS])^T)
+// GEMM: C[B_COLS, A_ROWS] = (A[A_ROWS, K] @ B[K, B_COLS])^T
 // A is the weight matrix [A_ROWS, K] row-major.
 // B is the input matrix stored transposed as [B_COLS, K] row-major so K is contiguous.
-// After transposing the matmul output to [B_COLS, A_ROWS], GeGLU reduces adjacent
-// values along the contiguous A_ROWS dimension, producing [B_COLS, A_ROWS/2].
 template<usize K>
 __global__ __launch_bounds__(THREADS_PER_BLOCK) void gemm_kernel(
 	usize A_ROWS, usize B_COLS,
 	bf16 *A,
 	bf16 *B,
-	bf16 *C
+	bf16 *C,
+	f32 *L2
 ) {
 	constexpr usize K_ITERS = K / K_STEP;
 	constexpr usize K_TILES = K_STEP / 16;
@@ -160,22 +142,37 @@ __global__ __launch_bounds__(THREADS_PER_BLOCK) void gemm_kernel(
 		}
 	}
 
-	Fragment_16x16<bf16> out[N_TILES];
+	bf16 *c_ptr = C + blockIdx.y * N_PER_BLOCK * A_ROWS + blockIdx.x * M_PER_BLOCK;
+	GMatrix<bf16, N_PER_BLOCK, M_PER_BLOCK> gC_block{c_ptr, A_ROWS};
 	X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-		geglu(out[ni], acc_t[ni][0], acc_t[ni][1]);
+		store(acc_t[ni], gC_block, warp_n + ni * 16, warp_m);
 	}
 
-	usize out_cols = A_ROWS / 2;
-	bf16 *c_ptr = C + blockIdx.y * N_PER_BLOCK * out_cols + blockIdx.x * OUT_M_PER_BLOCK;
-	GMatrix<bf16, N_PER_BLOCK, OUT_M_PER_BLOCK> gC_block{c_ptr, out_cols};
-	X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-		store_2x2_8x8(
-			gC_block,
-			warp_n + ni * 16,
-			warp_m / 2,
-			out[ni].sub[0][0], out[ni].sub[0][1],
-			out[ni].sub[1][0], out[ni].sub[1][1]
-		);
+	if (L2 != nullptr) {
+		usize lane_id = tid % WARP_SIZE;
+		usize row_in_tile = lane_id / 4;
+		usize row_base = blockIdx.y * N_PER_BLOCK + warp_n;
+		X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+			f32 top_sum_squared = 0.0f;
+			f32 bot_sum_squared = 0.0f;
+			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+				auto const &tile = acc_t[ni][mi];
+				top_sum_squared += sum_squares_4(
+					tile.sub[0][0].val0,
+					tile.sub[0][0].val1,
+					tile.sub[0][1].val0,
+					tile.sub[0][1].val1
+				);
+				bot_sum_squared += sum_squares_4(
+					tile.sub[1][0].val0,
+					tile.sub[1][0].val1,
+					tile.sub[1][1].val0,
+					tile.sub[1][1].val1
+				);
+			}
+			atomicAdd(L2 + row_base + ni * 16 + row_in_tile, top_sum_squared);
+			atomicAdd(L2 + row_base + ni * 16 + row_in_tile + 8, bot_sum_squared);
+		}
 	}
 }
 
@@ -197,7 +194,7 @@ int main(int argc, char *argv[]) {
 	}
 
 	{
-		std::ofstream config_file("tmp/o_gemm.config.json", std::ios::binary);
+		std::ofstream config_file("tmp/f_gemm.config.json", std::ios::binary);
 		config_file << "{\n"
 			<< "  \"A_ROWS\": " << A_ROWS << ",\n"
 			<< "  \"K\": " << K << ",\n"
@@ -205,39 +202,43 @@ int main(int argc, char *argv[]) {
 			<< "}\n";
 	}
 
-	std::vector<bf16> h_A(A_ROWS * K), h_B(B_COLS * K), h_C(B_COLS * (A_ROWS / 2));
-	std::ifstream a_in("tmp/o_a.bin", std::ios::binary);
+	std::vector<bf16> h_A(A_ROWS * K), h_B(B_COLS * K), h_C(A_ROWS * B_COLS);
+	std::vector<f32> h_L2(B_COLS);
+	std::ifstream a_in("tmp/f_a.bin", std::ios::binary);
 	if (!a_in) {
-		printf("Failed to open tmp/o_a.bin\n");
+		printf("Failed to open tmp/f_a.bin\n");
 		return 1;
 	}
 	if (!a_in.read(
 		reinterpret_cast<char *>(h_A.data()),
 		static_cast<std::streamsize>(h_A.size() * sizeof(bf16))
 	)) {
-		printf("Failed to read tmp/o_a.bin as A=[%u, %u]\n", A_ROWS, K);
+		printf("Failed to read tmp/f_a.bin as A=[%u, %u]\n", A_ROWS, K);
 		return 1;
 	}
 
-	std::ifstream b_in("tmp/o_b.bin", std::ios::binary);
+	std::ifstream b_in("tmp/f_b.bin", std::ios::binary);
 	if (!b_in) {
-		printf("Failed to open tmp/o_b.bin\n");
+		printf("Failed to open tmp/f_b.bin\n");
 		return 1;
 	}
 	if (!b_in.read(
 		reinterpret_cast<char *>(h_B.data()),
 		static_cast<std::streamsize>(h_B.size() * sizeof(bf16))
 	)) {
-		printf("Failed to read tmp/o_b.bin as B^T=[%u, %u]\n", B_COLS, K);
+		printf("Failed to read tmp/f_b.bin as B^T=[%u, %u]\n", B_COLS, K);
 		return 1;
 	}
 
 	bf16 *d_A, *d_B, *d_C;
+	f32 *d_L2;
 	cudaMalloc(&d_A, A_ROWS * K * sizeof(bf16));
 	cudaMalloc(&d_B, B_COLS * K * sizeof(bf16));
-	cudaMalloc(&d_C, B_COLS * (A_ROWS / 2) * sizeof(bf16));
+	cudaMalloc(&d_C, A_ROWS * B_COLS * sizeof(bf16));
+	cudaMalloc(&d_L2, B_COLS * sizeof(f32));
 	cudaMemcpy(d_A, h_A.data(), A_ROWS * K * sizeof(bf16), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_B, h_B.data(), B_COLS * K * sizeof(bf16), cudaMemcpyHostToDevice);
+	cudaMemset(d_L2, 0, B_COLS * sizeof(f32));
 
 	dim3 grid(A_ROWS / M_PER_BLOCK, B_COLS / N_PER_BLOCK);
 	usize smem_bytes = GMEM_PRELOAD * K_STEP * (M_PER_BLOCK + N_PER_BLOCK) * sizeof(bf16);
@@ -247,7 +248,7 @@ int main(int argc, char *argv[]) {
 
 	int warmup = argc == 1 ? 0 : 50;
 	for (int i = 0; i < warmup; ++i) {
-		gemm_kernel<K><<<grid, THREADS_PER_BLOCK, smem_bytes>>>(A_ROWS, B_COLS, d_A, d_B, d_C);
+		gemm_kernel<K><<<grid, THREADS_PER_BLOCK, smem_bytes>>>(A_ROWS, B_COLS, d_A, d_B, d_C, d_L2);
 	}
 	cudaDeviceSynchronize();
 
@@ -255,10 +256,14 @@ int main(int argc, char *argv[]) {
 	timer.start();
 	int NUM_RUNS = argc == 1 ? 1 : 100;
 	for (int i = 0; i < NUM_RUNS; ++i) {
-		gemm_kernel<K><<<grid, THREADS_PER_BLOCK, smem_bytes>>>(A_ROWS, B_COLS, d_A, d_B, d_C);
+		gemm_kernel<K><<<grid, THREADS_PER_BLOCK, smem_bytes>>>(A_ROWS, B_COLS, d_A, d_B, d_C, d_L2);
 	}
 	cudaDeviceSynchronize();
 	double elapsed = timer.seconds() / NUM_RUNS;
+
+	cudaMemset(d_L2, 0, B_COLS * sizeof(f32));
+	gemm_kernel<K><<<grid, THREADS_PER_BLOCK, smem_bytes>>>(A_ROWS, B_COLS, d_A, d_B, d_C, d_L2);
+	cudaDeviceSynchronize();
 
 	cudaError_t err = cudaGetLastError();
 	if (err != cudaSuccess) {
@@ -268,27 +273,39 @@ int main(int argc, char *argv[]) {
 
 	double flops = 2.0 * A_ROWS * B_COLS * K;
 	double tflops = flops / elapsed / 1e12;
-	printf("A=[%u, %u], B=[%u, %u] stored as B^T=[%u, %u], out=[%u, %u]\n", A_ROWS, K, K, B_COLS, B_COLS, K, B_COLS, A_ROWS / 2);
+	printf("A=[%u, %u], B=[%u, %u] stored as B^T=[%u, %u], out=[%u, %u]\n", A_ROWS, K, K, B_COLS, B_COLS, K, B_COLS, A_ROWS);
 	printf("Average kernel time over %d runs: %.3f ms\n", NUM_RUNS, elapsed * 1e3);
 	printf("%.2f TFLOPS\n", tflops);
 
-	cudaMemcpy(h_C.data(), d_C, B_COLS * (A_ROWS / 2) * sizeof(bf16), cudaMemcpyDeviceToHost);
+	cudaMemcpy(h_C.data(), d_C, A_ROWS * B_COLS * sizeof(bf16), cudaMemcpyDeviceToHost);
+	cudaMemcpy(h_L2.data(), d_L2, B_COLS * sizeof(f32), cudaMemcpyDeviceToHost);
 
-	std::ofstream out_file("tmp/o_out_cpu.bin", std::ios::binary);
+	std::ofstream out_file("tmp/f_out_cpu.bin", std::ios::binary);
 	out_file.write(
 		reinterpret_cast<char *>(h_C.data()),
 		static_cast<std::streamsize>(h_C.size() * sizeof(bf16))
+	);
+	std::ofstream l2_file("tmp/f_L2.bin", std::ios::binary);
+	l2_file.write(
+		reinterpret_cast<char *>(h_L2.data()),
+		static_cast<std::streamsize>(h_L2.size() * sizeof(f32))
 	);
 
 	printf("\nFirst 4x4 (GPU):\n");
 	for (usize m = 0; m < 4; m++) {
 		for (usize n = 0; n < 4; n++)
-			printf(" %10.4f", float(h_C[m * (A_ROWS / 2) + n]));
+			printf(" %10.4f", float(h_C[m * A_ROWS + n]));
 		printf("\n");
 	}
+	printf("\nFirst 4 L2 values:\n");
+	for (usize m = 0; m < 4 && m < B_COLS; ++m) {
+		printf(" %12.6f", h_L2[m]);
+	}
+	printf("\n");
 
 	cudaFree(d_A);
 	cudaFree(d_B);
 	cudaFree(d_C);
+	cudaFree(d_L2);
 	return 0;
 }

@@ -19,9 +19,9 @@ constexpr usize K_STEP = 64;
 constexpr usize GMEM_PRELOAD = 2;
 constexpr usize M_TILES = M_PER_WARP / 16;
 constexpr usize N_TILES = N_PER_WARP / 16;
-constexpr usize INPUT_STEP = 16;
+constexpr usize INPUT_STEP = 32;
 constexpr usize A_M_DEFAULT = 4096;
-constexpr usize A_N = 256;
+constexpr usize A_N = 512;
 constexpr usize B_M = 1024;
 constexpr usize B_N_DEFAULT = 32768;
 

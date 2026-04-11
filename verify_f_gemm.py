@@ -7,13 +7,14 @@ import os
 import numpy as np
 import torch
 
-DEFAULT_A_ROWS = 4096
-DEFAULT_K = 1024
+DEFAULT_A_ROWS = 1024
+DEFAULT_K = 2048
 DEFAULT_B_COLS = 32768
-CONFIG_PATH = "tmp/o_gemm.config.json"
-INPUT_A_PATH = "tmp/o_a.bin"
-INPUT_B_PATH = "tmp/o_b.bin"
-OUTPUT_PATH = "tmp/o_out_cpu.bin"
+CONFIG_PATH = "tmp/f_gemm.config.json"
+INPUT_A_PATH = "tmp/f_a.bin"
+INPUT_B_PATH = "tmp/f_b.bin"
+OUTPUT_PATH = "tmp/f_out_cpu.bin"
+L2_PATH = "tmp/f_L2.bin"
 
 
 def load_config():
@@ -51,22 +52,9 @@ def load_bf16(path, shape):
 	return torch.from_numpy(raw.view(np.int16)).view(torch.bfloat16)
 
 
-def bf16_ordered_int(bits):
-	bits_i32 = bits.astype(np.int32)
-	sign = (bits_i32 >> 15) & 1
-	return np.where(sign == 0, bits_i32 + 0x8000, 0x8000 - (bits_i32 & 0x7FFF))
-
-
-def normalize_bf16_zero_sign(bits):
-	normalized = bits.copy()
-	normalized[(normalized & 0x7FFF) == 0] = 0
-	return normalized
-
-
-def gelu(x):
-	gate_fan_in = K
-	x = x / torch.sqrt(torch.tensor(gate_fan_in).to(x.dtype))
-	return 0.5 * x * (1.0 + torch.tanh(0.7978845608028654 * (x + 0.044715 * x * x * x)))
+def load_f32(path, shape):
+	raw = np.fromfile(path, dtype=np.float32).reshape(shape)
+	return torch.from_numpy(raw.copy())
 
 
 def print_matrix(name, tensor):
@@ -82,14 +70,16 @@ def verify(a_rows, b_cols):
 		print(f"Missing CUDA output file: {OUTPUT_PATH}")
 		return
 
-	cuda_bf16 = load_bf16(OUTPUT_PATH, (b_cols, a_rows // 2))
+	cuda_bf16 = load_bf16(OUTPUT_PATH, (b_cols, a_rows))
 	a_f32 = a_bf16.float()
 	b_t_f32 = b_t_bf16.float()
-	pre_geglu = (a_f32 @ b_t_f32.transpose(0, 1)).transpose(0, 1)
-	ref_f32 = gelu(pre_geglu[:, 0::2]) * pre_geglu[:, 1::2]
-	ref_bf16 = ref_f32.to(torch.bfloat16)
+	print(f"a = {a_f32.shape}")
+	print(f"b^T = {b_t_f32.shape}")
+	ref_bf16 = (a_f32 @ b_t_f32.transpose(0, 1)).to(torch.bfloat16).transpose(0, 1)
+	print(f"ref = {ref_bf16.shape}")
 	ref = ref_bf16.float()
 	cuda = cuda_bf16.float()
+	print(f"cuda = {cuda.shape}")
 
 	diff = (ref - cuda).abs()
 	max_abs_diff = diff.max().item()
@@ -101,42 +91,51 @@ def verify(a_rows, b_cols):
 	worst_cuda = cuda_bf16[idx[0], idx[1]].float().item()
 	ref_np = ref_bf16.view(torch.int16).numpy().view(np.uint16)
 	cuda_np = cuda_bf16.view(torch.int16).numpy().view(np.uint16)
-	ref_norm = normalize_bf16_zero_sign(ref_np)
-	cuda_norm = normalize_bf16_zero_sign(cuda_np)
-	ref_ord = bf16_ordered_int(ref_np)
-	cuda_ord = bf16_ordered_int(cuda_np)
-	ulp_diff = np.abs(ref_ord - cuda_ord)
-	same_value = ref_np.astype(np.float32)  # placeholder to keep shape only
-	same_value = ref.numpy() == cuda.numpy()
-	bit_mismatch = ref_np != cuda_np
-	zero_sign_only = bit_mismatch & same_value
-	raw_exact_match = int((ref_np == cuda_np).sum())
-	exact_match = int((ref_norm == cuda_norm).sum())
-	one_ulp_or_less = int((ulp_diff <= 1).sum())
-	two_ulp_or_less = int((ulp_diff <= 2).sum())
-	three_ulp_or_less = int((ulp_diff <= 3).sum())
+	exact_match = int((ref_np == cuda_np).sum())
 	total = ref.numel()
 
-	print("\n--- O GEMM + GeGLU vs CUDA ---")
-	print(f"A=[{a_rows}, {K}], B=[{K}, {b_cols}] stored as B^T=[{b_cols}, {K}], out=[{b_cols}, {a_rows // 2}]")
+	print("\n--- F GEMM vs CUDA ---")
+	print(f"A=[{a_rows}, {K}], B=[{K}, {b_cols}] stored as B^T=[{b_cols}, {K}], out=[{b_cols}, {a_rows}]")
 	print(f"Max abs diff:     {max_abs_diff:.6e}")
 	print(f"Mean abs diff:    {mean_abs_diff:.6e}")
 	print(f"Exact bf16 match: {exact_match}/{total} ({100.0 * exact_match / total:.2f}%)")
-	print(f"Raw exact bits:   {raw_exact_match}/{total} ({100.0 * raw_exact_match / total:.2f}%)")
-	print(f"Signed-zero-only mismatches: {int(zero_sign_only.sum())}")
-	print(f"Within 1 ULP:     {one_ulp_or_less}/{total} ({100.0 * one_ulp_or_less / total:.2f}%)")
-	print(f"Within 2 ULP:     {two_ulp_or_less}/{total} ({100.0 * two_ulp_or_less / total:.2f}%)")
-	print(f"Within 3 ULP:     {three_ulp_or_less}/{total} ({100.0 * three_ulp_or_less / total:.2f}%)")
 	if max_abs_diff > 0.0:
 		print(f"Worst mismatch at [{worst_row}, {worst_col}]: ref={worst_ref:.6e}, cuda={worst_cuda:.6e}")
 
 	print_matrix("First 4x4 (CUDA)", cuda[:4, :4])
 	print_matrix("First 4x4 (ref bf16)", ref[:4, :4])
 
+	if os.path.exists(L2_PATH):
+		cuda_l2 = load_f32(L2_PATH, (b_cols,))
+		ref_l2 = (a_f32 @ b_t_f32.transpose(0, 1)).square().sum(dim=0)
+		l2_diff = (ref_l2 - cuda_l2).abs()
+		l2_max_abs_diff = l2_diff.max().item()
+		l2_mean_abs_diff = l2_diff.mean().item()
+		l2_idx = int(torch.argmax(l2_diff).item())
+		l2_exact_match = int((ref_l2 == cuda_l2).sum().item())
+		l2_exact_bf16_match = int((ref_l2.to(torch.bfloat16) == cuda_l2.to(torch.bfloat16)).sum().item())
+		l2_rel_diff = l2_diff / ref_l2.abs().clamp_min(1.0)
+		l2_max_rel_diff = l2_rel_diff.max().item()
+		l2_close = torch.isclose(ref_l2, cuda_l2, rtol=1e-5, atol=512.0)
+		l2_close_match = int(l2_close.sum().item())
+		print("\n--- F GEMM L2 vs CUDA ---")
+		print(f"Max abs diff:     {l2_max_abs_diff:.6e}")
+		print(f"Mean abs diff:    {l2_mean_abs_diff:.6e}")
+		print(f"Exact f32 match:  {l2_exact_match}/{b_cols} ({100.0 * l2_exact_match / b_cols:.2f}%)")
+		print(f"Exact bf16 match: {l2_exact_bf16_match}/{b_cols} ({100.0 * l2_exact_bf16_match / b_cols:.2f}%)")
+		print(f"Max rel diff:     {l2_max_rel_diff:.6e}")
+		print(f"Rows within tol:  {l2_close_match}/{b_cols} ({100.0 * l2_close_match / b_cols:.2f}%)")
+		if l2_max_abs_diff > 0.0:
+			print(f"Worst mismatch at row {l2_idx}: ref={ref_l2[l2_idx].item():.6e}, cuda={cuda_l2[l2_idx].item():.6e}")
+		print("\nFirst 4 L2 values (CUDA):")
+		print("".join(f" {cuda_l2[i].item():12.6f}" for i in range(min(4, b_cols))))
+		print("First 4 L2 values (ref):")
+		print("".join(f" {ref_l2[i].item():12.6f}" for i in range(min(4, b_cols))))
+
 
 if __name__ == "__main__":
-	parser = argparse.ArgumentParser(description="Output projection GEMM verification")
-	parser.add_argument("--create-inputs", action="store_true", help="Generate random O projection inputs in tmp/")
+	parser = argparse.ArgumentParser(description="Full-width GEMM verification")
+	parser.add_argument("--create-inputs", action="store_true", help="Generate random F GEMM inputs in tmp/")
 	parser.add_argument("--m", type=int, default=None)
 	parser.add_argument("--n", type=int, default=None)
 	args = parser.parse_args()
