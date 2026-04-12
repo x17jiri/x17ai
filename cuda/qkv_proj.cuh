@@ -4,6 +4,7 @@ template<
 	const usize A_ROWS,
 	const usize A_COLS,
 	const usize B_ROWS,
+	const usize N_HEADS,
 	const usize HEAD_DIM,
 	const usize ROPE_DIM,
 	const f64 ROPE_BASE
@@ -21,7 +22,7 @@ struct QKVProj {
 	static constexpr usize GMEM_PRELOAD = 2;
 	static constexpr usize M_TILES = M_PER_WARP / 16;
 	static constexpr usize N_TILES = N_PER_WARP / 16;
-	static constexpr usize INPUT_STEP = 32;
+	static constexpr usize INPUT_STEP = B_ROWS / N_HEADS;
 	static constexpr usize SMEM_BYTES = GMEM_PRELOAD * K_STEP * (M_PER_BLOCK + N_PER_BLOCK) * sizeof(bf16);
 
 	static constexpr f32 ROPE_LOG_SCALE = -2.0 * math::fast::constexpr_logb(ROPE_BASE) / f64(ROPE_DIM);
@@ -33,17 +34,19 @@ struct QKVProj {
 	static_assert(N_PER_WARP % HEAD_DIM == 0);
 	static_assert(ROPE_DIM <= HEAD_DIM);
 	static_assert(ROPE_DIM % 16 == 0);
+	static_assert(B_ROWS % N_HEADS == 0);
 	static_assert((INPUT_STEP * sizeof(bf16)) % 16 == 0);
 	static_assert(A_COLS <= B_ROWS);
 	static_assert(A_COLS % K_STEP == 0);
+	static_assert(M_PER_BLOCK % N_HEADS == 0);
 	static_assert((B_ROWS * sizeof(bf16)) % 16 == 0);
 
 	X17_DEVICE void cp_async_ab(
 		GMatrix<bf16, M_PER_BLOCK, A_COLS> gA_block,
-		GMatrix<bf16, N_PER_BLOCK, B_ROWS> gB,
+		GMatrix<bf16, N_PER_BLOCK, B_ROWS> gB_block,
 		SMatrix<bf16, M_PER_BLOCK * GMEM_PRELOAD, K_STEP> sA_preload,
 		SMatrix<bf16, N_PER_BLOCK * GMEM_PRELOAD, K_STEP> sB_preload,
-		usize b_src_row,
+		usize first_b_col,
 		usize p,
 		usize k_end
 	) {
@@ -57,11 +60,11 @@ struct QKVProj {
 			);
 			cp_async_gmem_to_smem_modulo<THREADS_PER_BLOCK>(
 				threadIdx.x,
-				gB,
+				gB_block,
 				sB_tile,
-				b_src_row,
-				p * K_STEP,
-				INPUT_STEP
+				0,
+				first_b_col + p * K_STEP,
+				0
 			);
 		}
 	}
@@ -171,26 +174,26 @@ struct QKVProj {
 	X17_DEVICE void run(bf16 *A, bf16 *B, bf16 *C) {
 		static_assert(A_COLS % K_STEP == 0);
 		static_assert(A_COLS <= B_ROWS);
-		constexpr usize K_ITERS = A_COLS / K_STEP;
+		constexpr usize K_ITERS = (A_COLS + (M_PER_BLOCK - 1)*INPUT_STEP + K_STEP - 1) / K_STEP;
 		constexpr usize K_TILES = K_STEP / 16;
 
 		usize tid = threadIdx.x;
 		usize warp_idx = tid / WARP_SIZE;
 		usize warp_m = (warp_idx / N_WARPS) * M_PER_WARP;
 		usize warp_n = (warp_idx % N_WARPS) * N_PER_WARP;
-		usize block_n = blockIdx.y * N_PER_BLOCK;
 
 		GMatrixDynSize<bf16, A_COLS> gA{A, A_ROWS};
+		GMatrixDynSize<bf16, B_ROWS> gB{B, /*B_COLS*/ 1000 /* TODO */};
 		GMatrix<bf16, M_PER_BLOCK, A_COLS> gA_block = tile_m<M_PER_BLOCK>(gA, blockIdx.x);
-		GMatrix<bf16, N_PER_BLOCK, B_ROWS> gB{B, B_ROWS};
-		usize b_src_row = blockIdx.y * N_PER_BLOCK;
+		GMatrix<bf16, N_PER_BLOCK, B_ROWS> gB_block = tile_m<N_PER_BLOCK>(gB, blockIdx.y);
+		usize first_b_col = 0;
 
 		u32 smem = 0;
 		SMatrix<bf16, M_PER_BLOCK * GMEM_PRELOAD, K_STEP> sA_preload{smem};
 		SMatrix<bf16, N_PER_BLOCK * GMEM_PRELOAD, K_STEP> sB_preload{sA_preload._ptr + sA_preload.bytes()};
 
 		X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD; ++p) {
-			cp_async_ab(gA_block, gB, sA_preload, sB_preload, b_src_row, p, K_ITERS);
+			cp_async_ab(gA_block, gB_block, sA_preload, sB_preload, first_b_col, p, K_ITERS);
 			cp_async_commit();
 		}
 
@@ -222,7 +225,7 @@ struct QKVProj {
 				sA = tile_m<M_PER_BLOCK>(sA_preload, (k_step + 1) % GMEM_PRELOAD);
 				sB = tile_m<N_PER_BLOCK>(sB_preload, (k_step + 1) % GMEM_PRELOAD);
 
-				cp_async_ab(gA_block, gB, sA_preload, sB_preload, b_src_row, k_step + GMEM_PRELOAD, K_ITERS);
+				cp_async_ab(gA_block, gB_block, sA_preload, sB_preload, first_b_col, k_step + GMEM_PRELOAD, K_ITERS);
 				cp_async_commit();
 			}
 

@@ -51,6 +51,7 @@ int main(int argc, char *argv[]) {
 		A_ROWS, A_COLS,
 		B_ROWS,
 		config::n_heads,
+		config::head_dim,
 		config::rope_dim, config::rope_base
 	>;
 
