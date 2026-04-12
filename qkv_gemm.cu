@@ -1,355 +1,100 @@
-#include "utils2.cuh"
-#include <cstdio>
-#include <cstdlib>
-#include <cmath>
-#include <cstring>
-#include <fstream>
-#include <vector>
+#include "cuda/qkv_proj.cuh"
+#include "block.config.hpp"
 #include "cutlass/util/GPU_Clock.hpp"
 
-constexpr usize M_WARPS = 2;
-constexpr usize N_WARPS = 2;
-constexpr usize M_PER_WARP = 32;
-constexpr usize N_PER_WARP = 64;
-constexpr usize M_PER_BLOCK = M_WARPS * M_PER_WARP;
-constexpr usize N_PER_BLOCK = N_WARPS * N_PER_WARP;
-constexpr usize WARPS_PER_BLOCK = M_WARPS * N_WARPS;
-constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
-constexpr usize K_STEP = 64;
-constexpr usize GMEM_PRELOAD = 2;
-constexpr usize M_TILES = M_PER_WARP / 16;
-constexpr usize N_TILES = N_PER_WARP / 16;
-constexpr usize INPUT_STEP = 32;
-constexpr usize A_M_DEFAULT = 4096;
-constexpr usize A_N = 512;
-constexpr usize B_M = 1024;
-constexpr usize B_N_DEFAULT = 32768;
+#include <vector>
+#include <fstream>
 
-constexpr usize HEAD_DIM = 32;
-constexpr usize ROPE_DIM = HEAD_DIM;
-constexpr f32 ROPE_BASE = 10000.0f;
-constexpr f32 ROPE_LOG_SCALE = -2.0 * math::fast::constexpr_logb(f64(ROPE_BASE)) / f64(ROPE_DIM);
-
-static_assert(WARPS_PER_BLOCK == 4);
-static_assert(K_STEP % 16 == 0);
-static_assert(HEAD_DIM <= N_PER_WARP);
-static_assert(HEAD_DIM % 16 == 0);
-static_assert(N_PER_WARP % HEAD_DIM == 0);
-static_assert(ROPE_DIM <= HEAD_DIM);
-static_assert(ROPE_DIM % 16 == 0);
-static_assert((INPUT_STEP * sizeof(bf16)) % 16 == 0);
-static_assert(A_N <= B_M);
-static_assert(A_N % K_STEP == 0);
-static_assert((B_M * sizeof(bf16)) % 16 == 0);
-
-template<usize A_COLS, usize B_ROWS>
-X17_DEVICE void cp_async_ab(
-	GMatrix<bf16, M_PER_BLOCK, A_COLS> gA_block,
-	GMatrix<bf16, N_PER_BLOCK, B_ROWS> gB,
-	SMatrix<bf16, M_PER_BLOCK * GMEM_PRELOAD, K_STEP> sA_preload,
-	SMatrix<bf16, N_PER_BLOCK * GMEM_PRELOAD, K_STEP> sB_preload,
-	usize b_src_row,
-	usize p,
-	usize k_end
-) {
-	if (p < k_end) {
-		SMatrix<bf16, M_PER_BLOCK, K_STEP> sA_tile = tile_m<M_PER_BLOCK>(sA_preload, p % GMEM_PRELOAD);
-		SMatrix<bf16, N_PER_BLOCK, K_STEP> sB_tile = tile_m<N_PER_BLOCK>(sB_preload, p % GMEM_PRELOAD);
-		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(
-			threadIdx.x,
-			gA_block.template slice_n<K_STEP>(p * K_STEP),
-			sA_tile
-		);
-		cp_async_gmem_to_smem_modulo<THREADS_PER_BLOCK>(
-			threadIdx.x,
-			gB,
-			sB_tile,
-			b_src_row,
-			p * K_STEP,
-			INPUT_STEP
-		);
+std::vector<bf16> load_tensor(std::string const &filename, usize rows, usize cols) {
+	std::vector<bf16> data(rows * cols);
+	std::ifstream a_in(filename, std::ios::binary);
+	if (!a_in) {
+		printf("Failed to open %s\n", filename.c_str());
+		return {};
 	}
+	if (!a_in.read(
+		reinterpret_cast<char *>(data.data()),
+		static_cast<std::streamsize>(data.size() * sizeof(bf16))
+	)) {
+		printf("Failed to read %s as [%u, %u]\n", filename.c_str(), rows, cols);
+		return {};
+	}
+	return data;
 }
 
-X17_DEVICE void rope_rotate_pair(Fragment_8x8<f32> &frag, f32 c, f32 s) {
-	f32 even = frag.first();
-	f32 odd = frag.second();
-	frag.set(
-		math::fma(-odd, s, even * c),
-		math::fma(even, s, odd * c)
-	);
-}
-
-template<usize N_TILE_CNT>
-X17_DEVICE void apply_rope(
-	Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILES],
-	usize block_n,
-	usize warp_n
+void store_tensor(
+	std::string const &filename,
+	std::vector<bf16> const &data,
+	[[maybe_unused]] usize rows, [[maybe_unused]] usize cols
 ) {
-	constexpr usize GROUP_TILE_CNT = HEAD_DIM / 16;
-	constexpr usize GROUP_CNT = M_PER_WARP / HEAD_DIM;
-	constexpr usize ROPE_TILE_CNT = ROPE_DIM / 16;
-	usize tid = threadIdx.x % WARP_SIZE;
-	usize row_in_half = tid / 4;
-	usize pair_in_quad = tid % 4;
-
-	X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
-		usize top_row = block_n + warp_n + ni * 16 + row_in_half;
-		usize bot_row = top_row + 8;
-		X17_UNROLL for (usize group = 0; group < GROUP_CNT; ++group) {
-			X17_UNROLL for (usize tile = 0; tile < ROPE_TILE_CNT; ++tile) {
-				Fragment_16x16<f32> &frag = acc[ni][group * GROUP_TILE_CNT + tile];
-				usize pair_base = tile * 8;
-
-				f32 left_freq_recip = math::fast::expb(ROPE_LOG_SCALE * f32(pair_base + pair_in_quad));
-				f32 right_freq_recip = math::fast::expb(ROPE_LOG_SCALE * f32(pair_base + 4 + pair_in_quad));
-
-				f32 top_left_theta = f32(top_row) * left_freq_recip;
-				f32 top_right_theta = f32(top_row) * right_freq_recip;
-				f32 bot_left_theta = f32(bot_row) * left_freq_recip;
-				f32 bot_right_theta = f32(bot_row) * right_freq_recip;
-
-				f32 top_left_cos = math::fast::cos(top_left_theta);
-				f32 top_left_sin = math::fast::sin(top_left_theta);
-				f32 top_right_cos = math::fast::cos(top_right_theta);
-				f32 top_right_sin = math::fast::sin(top_right_theta);
-
-				f32 bot_left_cos = math::fast::cos(bot_left_theta);
-				f32 bot_left_sin = math::fast::sin(bot_left_theta);
-				f32 bot_right_cos = math::fast::cos(bot_right_theta);
-				f32 bot_right_sin = math::fast::sin(bot_right_theta);
-
-				rope_rotate_pair(frag.sub[0][0], top_left_cos, top_left_sin);
-				rope_rotate_pair(frag.sub[0][1], top_right_cos, top_right_sin);
-				rope_rotate_pair(frag.sub[1][0], bot_left_cos, bot_left_sin);
-				rope_rotate_pair(frag.sub[1][1], bot_right_cos, bot_right_sin);
-			}
-		}
+	std::ofstream out(filename, std::ios::binary);
+	if (!out) {
+		printf("Failed to open %s for writing\n", filename.c_str());
+		return;
 	}
-}
-
-template<usize N_TILE_CNT>
-X17_DEVICE void l2_norm(
-	Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILES]
-) {
-	constexpr usize GROUP_TILE_CNT = HEAD_DIM / 16;
-	constexpr usize GROUP_CNT = M_PER_WARP / HEAD_DIM;
-
-	X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
-		X17_UNROLL for (usize group = 0; group < GROUP_CNT; ++group) {
-			f32 top_sum_sq = 0.0f;
-			f32 bot_sum_sq = 0.0f;
-
-			X17_UNROLL for (usize tile = 0; tile < GROUP_TILE_CNT; ++tile) {
-				Fragment_16x16<f32> &frag = acc[ni][group * GROUP_TILE_CNT + tile];
-				top_sum_sq = math::fma(frag.sub[0][0].val0, frag.sub[0][0].val0, top_sum_sq);
-				top_sum_sq = math::fma(frag.sub[0][0].val1, frag.sub[0][0].val1, top_sum_sq);
-				top_sum_sq = math::fma(frag.sub[0][1].val0, frag.sub[0][1].val0, top_sum_sq);
-				top_sum_sq = math::fma(frag.sub[0][1].val1, frag.sub[0][1].val1, top_sum_sq);
-
-				bot_sum_sq = math::fma(frag.sub[1][0].val0, frag.sub[1][0].val0, bot_sum_sq);
-				bot_sum_sq = math::fma(frag.sub[1][0].val1, frag.sub[1][0].val1, bot_sum_sq);
-				bot_sum_sq = math::fma(frag.sub[1][1].val0, frag.sub[1][1].val0, bot_sum_sq);
-				bot_sum_sq = math::fma(frag.sub[1][1].val1, frag.sub[1][1].val1, bot_sum_sq);
-			}
-
-			top_sum_sq += shuffle_xor_sync(top_sum_sq, 1);
-			top_sum_sq += shuffle_xor_sync(top_sum_sq, 2);
-			bot_sum_sq += shuffle_xor_sync(bot_sum_sq, 1);
-			bot_sum_sq += shuffle_xor_sync(bot_sum_sq, 2);
-
-			f32 top_inv_norm = top_sum_sq > 0.0f ? math::fast::recip(sqrtf(top_sum_sq)) : 0.0f;
-			f32 bot_inv_norm = bot_sum_sq > 0.0f ? math::fast::recip(sqrtf(bot_sum_sq)) : 0.0f;
-
-			X17_UNROLL for (usize tile = 0; tile < GROUP_TILE_CNT; ++tile) {
-				acc[ni][group * GROUP_TILE_CNT + tile].scale_(top_inv_norm, bot_inv_norm);
-			}
-		}
+	if (!out.write(
+		reinterpret_cast<const char *>(data.data()),
+		static_cast<std::streamsize>(data.size() * sizeof(bf16))
+	)) {
+		printf("Failed to write data to %s\n", filename.c_str());
 	}
-}
-
-// GEMM: C[A_M,B_N] = A[A_M,A_N] * windowed(B[B_M,B_N])
-// A is the weight matrix [A_M, A_N] row-major.
-// B is the input matrix stored transposed as [B_N, B_M] row-major so B_M is contiguous.
-// Each output column reads A_N values from the corresponding B row, starting at
-// (output_col * INPUT_STEP) modulo B_M.
-template<usize A_COLS, usize B_ROWS>
-__global__ void gemm_kernel(
-	usize A_ROWS, usize B_COLS,
-	bf16 *A,
-	bf16 *B,
-	bf16 *C
-) {
-	static_assert(A_COLS % K_STEP == 0);
-	static_assert(A_COLS <= B_ROWS);
-	constexpr usize K_ITERS = A_COLS / K_STEP;
-	constexpr usize K_TILES = K_STEP / 16;
-
-	usize tid = threadIdx.x;
-	usize warp_idx = tid / WARP_SIZE;
-	usize warp_m = (warp_idx / N_WARPS) * M_PER_WARP;
-	usize warp_n = (warp_idx % N_WARPS) * N_PER_WARP;
-	usize block_n = blockIdx.y * N_PER_BLOCK;
-
-	GMatrixDynSize<bf16, A_COLS> gA{A, A_ROWS};
-	GMatrix<bf16, M_PER_BLOCK, A_COLS> gA_block = tile_m<M_PER_BLOCK>(gA, blockIdx.x);
-	GMatrix<bf16, N_PER_BLOCK, B_ROWS> gB{B, B_ROWS};
-	usize b_src_row = blockIdx.y * N_PER_BLOCK;
-
-	u32 smem = 0;
-	SMatrix<bf16, M_PER_BLOCK * GMEM_PRELOAD, K_STEP> sA_preload{smem};
-	SMatrix<bf16, N_PER_BLOCK * GMEM_PRELOAD, K_STEP> sB_preload{sA_preload._ptr + sA_preload.bytes()};
-
-	X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD; ++p) {
-		cp_async_ab(gA_block, gB, sA_preload, sB_preload, b_src_row, p, K_ITERS);
-		cp_async_commit();
-	}
-
-	Fragment_16x16<f32> acc_t[N_TILES][M_TILES];
-	zero_(acc_t);
-
-	Fragment_16x16<bf16> rA[K_TILES][M_TILES];
-	Fragment_16x16<bf16> rB[K_TILES][N_TILES];
-
-	SMatrix<bf16, M_PER_BLOCK, K_STEP> sA = tile_m<M_PER_BLOCK>(sA_preload, 0);
-	SMatrix<bf16, N_PER_BLOCK, K_STEP> sB = tile_m<N_PER_BLOCK>(sB_preload, 0);
-
-	cp_async_wait<GMEM_PRELOAD - 1>();
-	sync_threads();
-
-	X17_UNROLL for (usize k_tile = 0; k_tile < K_TILES; ++k_tile) {
-		X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-			smem_tile_to_fragment(sB, warp_n + ni * 16, k_tile * 16, rB[k_tile][ni]);
-		}
-		X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-			smem_tile_to_fragment(sA, warp_m + mi * 16, k_tile * 16, rA[k_tile][mi]);
-		}
-	}
-
-	X17_UNROLL for (usize k_step = 0; k_step < K_ITERS; ++k_step) {
-		{ // Get more data from GMEM
-			cp_async_wait<GMEM_PRELOAD - 2>();
-			sync_threads();
-			sA = tile_m<M_PER_BLOCK>(sA_preload, (k_step + 1) % GMEM_PRELOAD);
-			sB = tile_m<N_PER_BLOCK>(sB_preload, (k_step + 1) % GMEM_PRELOAD);
-
-			cp_async_ab(gA_block, gB, sA_preload, sB_preload, b_src_row, k_step + GMEM_PRELOAD, K_ITERS);
-			cp_async_commit();
-		}
-
-		X17_UNROLL for (usize k_tile = 0; k_tile < K_TILES; ++k_tile) {
-			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-					mma_a_bt(rB[k_tile][ni], rA[k_tile][mi], acc_t[ni][mi]);
-				}
-				smem_tile_to_fragment(sA, warp_m + mi * 16, k_tile * 16, rA[k_tile][mi]);
-			}
-			X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-				smem_tile_to_fragment(sB, warp_n + ni * 16, k_tile * 16, rB[k_tile][ni]);
-			}
-		}
-	}
-
-	l2_norm(acc_t);
-	apply_rope(acc_t, block_n, warp_n);
-
-	bf16 *c_ptr = C + blockIdx.y * N_PER_BLOCK * A_ROWS + blockIdx.x * M_PER_BLOCK;
-	GMatrix<bf16, N_PER_BLOCK, M_PER_BLOCK> gC_block{c_ptr, A_ROWS};
-	X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-		store(acc_t[ni], gC_block, warp_n + ni * 16, warp_m);
-	}
+	printf("Wrote output to %s\n", filename.c_str());
 }
 
 int main(int argc, char *argv[]) {
-	{
-		f64 ref_logb = log(f64(ROPE_BASE)) / log(math::fast::b);
-		f64 diff = fabs(ref_logb - math::fast::constexpr_logb(f64(ROPE_BASE)));
-		printf("logb=%e, constexpr_logb=%e, diff=%e\n",
-			ref_logb, math::fast::constexpr_logb(f64(ROPE_BASE)), diff);
-		if (diff > 1e-12) {
-			return 1;
-		}
-	}
-	usize M = A_M_DEFAULT;
-	usize N = B_N_DEFAULT;
-	if (argc == 3) {
-		M = static_cast<usize>(strtoul(argv[1], nullptr, 10));
-		N = static_cast<usize>(strtoul(argv[2], nullptr, 10));
-	}/* else if (argc != 1) {
-		printf("Usage: %s [A_M B_N]\n", argv[0]);
-		return 1;
-	}*/
+	constexpr usize A_ROWS = 3 * config::n_heads * config::head_dim;
+	constexpr usize A_COLS = config::qkv_fan_in;
+	constexpr usize B_ROWS = config::d_model;
+	usize B_COLS = config::n_inputs;
 
-	if (M % M_PER_BLOCK != 0 || N % N_PER_BLOCK != 0 || N % HEAD_DIM != 0) {
-		printf("Expected M %% %u == 0, N %% %u == 0, and N %% %u == 0\n", M_PER_BLOCK, N_PER_BLOCK, HEAD_DIM);
-		return 1;
-	}
+	using Proj = QKVProj<
+		A_ROWS, A_COLS,
+		B_ROWS,
+		config::n_heads,
+		config::rope_dim, config::rope_base
+	>;
 
-	{
-		std::ofstream config_file("tmp/gemm.config.json", std::ios::binary);
-		config_file << "{\n"
-			<< "  \"A_M\": " << M << ",\n"
-			<< "  \"A_N\": " << A_N << ",\n"
-			<< "  \"B_M\": " << B_M << ",\n"
-			<< "  \"B_N\": " << N << ",\n"
-			<< "  \"HEAD_DIM\": " << HEAD_DIM << ",\n"
-			<< "  \"INPUT_STEP\": " << INPUT_STEP << ",\n"
-			<< "  \"ROPE_DIM\": " << ROPE_DIM << ",\n"
-			<< "  \"ROPE_BASE\": " << ROPE_BASE << "\n"
-			<< "}\n";
-	}
+	constexpr usize C_ROWS = A_ROWS;
+	usize C_COLS = B_COLS;
 
-	std::vector<bf16> h_A(M * A_N), h_B(N * B_M), h_C(M * N);
-	std::ifstream a_in("tmp/a.bin", std::ios::binary);
-	if (!a_in) {
-		printf("Failed to open tmp/a.bin\n");
-		return 1;
-	}
-	if (!a_in.read(
-		reinterpret_cast<char *>(h_A.data()),
-		static_cast<std::streamsize>(h_A.size() * sizeof(bf16))
-	)) {
-		printf("Failed to read tmp/a.bin as A=[%u, %u]\n", M, A_N);
+	if (
+		C_ROWS % Proj::M_PER_BLOCK != 0 ||
+		C_COLS % Proj::N_PER_BLOCK != 0
+	) {
+		printf("Expected M %% %u == 0 and N %% %u == 0\n", Proj::M_PER_BLOCK, Proj::N_PER_BLOCK);
 		return 1;
 	}
 
-	std::ifstream b_in("tmp/b.bin", std::ios::binary);
-	if (!b_in) {
-		printf("Failed to open tmp/b.bin\n");
+	std::vector<bf16> h_A = load_tensor("tmp/block_torch/qkv_weights.bin", A_ROWS, A_COLS);
+	std::vector<bf16> h_B = load_tensor("tmp/block_torch/inputs.bin", B_COLS, B_ROWS);
+	if (h_A.empty() || h_B.empty()) {
 		return 1;
 	}
-	if (!b_in.read(
-		reinterpret_cast<char *>(h_B.data()),
-		static_cast<std::streamsize>(h_B.size() * sizeof(bf16))
-	)) {
-		printf("Failed to read tmp/b.bin as B^T=[%u, %u]\n", N, B_M);
-		return 1;
-	}
+	std::vector<bf16> h_C(C_ROWS * C_COLS);
 
 	bf16 *d_A, *d_B, *d_C;
-	cudaMalloc(&d_A, M * A_N * sizeof(bf16));
-	cudaMalloc(&d_B, N * B_M * sizeof(bf16));
-	cudaMalloc(&d_C, M * N * sizeof(bf16));
-	cudaMemcpy(d_A, h_A.data(), M * A_N * sizeof(bf16), cudaMemcpyHostToDevice);
-	cudaMemcpy(d_B, h_B.data(), N * B_M * sizeof(bf16), cudaMemcpyHostToDevice);
+	cudaMalloc(&d_A, h_A.size() * sizeof(bf16));
+	cudaMalloc(&d_B, h_B.size() * sizeof(bf16));
+	cudaMalloc(&d_C, h_C.size() * sizeof(bf16));
+	cudaMemcpy(d_A, h_A.data(), h_A.size() * sizeof(bf16), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_B, h_B.data(), h_B.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 
-	dim3 grid(M / M_PER_BLOCK, N / N_PER_BLOCK);
-	usize smem_bytes = GMEM_PRELOAD * K_STEP * (M_PER_BLOCK + N_PER_BLOCK) * sizeof(bf16);
+	dim3 grid(C_ROWS / Proj::M_PER_BLOCK, C_COLS / Proj::N_PER_BLOCK);
 
-	cudaFuncSetAttribute(gemm_kernel<A_N, B_M>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
-	cudaFuncSetAttribute(gemm_kernel<A_N, B_M>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+	cudaFuncSetAttribute(qkv_proj<Proj>, cudaFuncAttributeMaxDynamicSharedMemorySize, Proj::SMEM_BYTES);
+	cudaFuncSetAttribute(qkv_proj<Proj>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-	int warmup = argc == 1 ? 0 : 50;
+	int warmup = 30;
 	for (int i = 0; i < warmup; ++i) {
-		gemm_kernel<A_N, B_M><<<grid, THREADS_PER_BLOCK, smem_bytes>>>(M, N, d_A, d_B, d_C);
+		qkv_proj<Proj><<<grid, Proj::THREADS_PER_BLOCK, Proj::SMEM_BYTES>>>(d_A, d_B, d_C);
 	}
 	cudaDeviceSynchronize();
 
 	GPU_Clock timer;
 	timer.start();
-	int NUM_RUNS = argc == 1 ? 1 : 100;
+	int NUM_RUNS = 100;
 	for (int i = 0; i < NUM_RUNS; ++i) {
-		gemm_kernel<A_N, B_M><<<grid, THREADS_PER_BLOCK, smem_bytes>>>(M, N, d_A, d_B, d_C);
+		qkv_proj<Proj><<<grid, Proj::THREADS_PER_BLOCK, Proj::SMEM_BYTES>>>(d_A, d_B, d_C);
 	}
 	cudaDeviceSynchronize();
 	double elapsed = timer.seconds() / NUM_RUNS;
@@ -360,26 +105,17 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	double flops = 2.0 * M * N * A_N;
-	double tflops = flops / elapsed / 1e12;
-	printf("A=[%u, %u], B=[%u, %u] stored as B^T=[%u, %u], out=[%u, %u]\n", M, A_N, B_M, N, N, B_M, N, M);
+	double strict_flops = 2.0 * A_ROWS * A_COLS * B_COLS;
+	double logical_flops = 2.0 * A_ROWS * B_ROWS * B_COLS;
+	double strict_tflops = strict_flops / elapsed / 1e12;
+	double logical_tflops = logical_flops / elapsed / 1e12;
 	printf("Average kernel time over %d runs: %.3f ms\n", NUM_RUNS, elapsed * 1e3);
-	printf("%.2f TFLOPS\n", tflops);
+	printf("Strict TFLOPS (compact A): %.2f\n", strict_tflops);
+	printf("Logical TFLOPS (full d_model): %.2f\n", logical_tflops);
 
-	cudaMemcpy(h_C.data(), d_C, M * N * sizeof(bf16), cudaMemcpyDeviceToHost);
+	cudaMemcpy(h_C.data(), d_C, h_C.size() * sizeof(bf16), cudaMemcpyDeviceToHost);
 
-	std::ofstream out_file("tmp/out_cpu.bin", std::ios::binary);
-	out_file.write(
-		reinterpret_cast<char *>(h_C.data()),
-		static_cast<std::streamsize>(h_C.size() * sizeof(bf16))
-	);
-
-	printf("\nFirst 4x4 (GPU):\n");
-	for (usize m = 0; m < 4; m++) {
-		for (usize n = 0; n < 4; n++)
-			printf(" %10.4f", float(h_C[m * M + n]));
-		printf("\n");
-	}
+	store_tensor("tmp/block_cuda/qkv.bin", h_C, C_ROWS, C_COLS);
 
 	cudaFree(d_A);
 	cudaFree(d_B);

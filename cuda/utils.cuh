@@ -1455,7 +1455,7 @@ template<
 requires(
 	sizeof(T) == 2
 	&& M >= 0 && M % 16 == 0
-	&& N * sizeof(T) % 128 == 0
+//	&& N * sizeof(T) % 128 == 0
 )
 struct SMatrix {
 	u32 _ptr;

@@ -6,7 +6,7 @@ template<
 	const usize B_ROWS,
 	const usize HEAD_DIM,
 	const usize ROPE_DIM,
-	const usize ROPE_BASE
+	const f64 ROPE_BASE
 >
 struct QKVProj {
 	static constexpr usize M_WARPS = 2;
@@ -22,8 +22,9 @@ struct QKVProj {
 	static constexpr usize M_TILES = M_PER_WARP / 16;
 	static constexpr usize N_TILES = N_PER_WARP / 16;
 	static constexpr usize INPUT_STEP = 32;
+	static constexpr usize SMEM_BYTES = GMEM_PRELOAD * K_STEP * (M_PER_BLOCK + N_PER_BLOCK) * sizeof(bf16);
 
-	static constexpr f32 ROPE_LOG_SCALE = -2.0 * math::fast::constexpr_logb(f64(ROPE_BASE)) / f64(ROPE_DIM);
+	static constexpr f32 ROPE_LOG_SCALE = -2.0 * math::fast::constexpr_logb(ROPE_BASE) / f64(ROPE_DIM);
 
 	static_assert(WARPS_PER_BLOCK == 4);
 	static_assert(K_STEP % 16 == 0);
@@ -33,11 +34,10 @@ struct QKVProj {
 	static_assert(ROPE_DIM <= HEAD_DIM);
 	static_assert(ROPE_DIM % 16 == 0);
 	static_assert((INPUT_STEP * sizeof(bf16)) % 16 == 0);
-	static_assert(A_N <= B_M);
-	static_assert(A_N % K_STEP == 0);
-	static_assert((B_M * sizeof(bf16)) % 16 == 0);
+	static_assert(A_COLS <= B_ROWS);
+	static_assert(A_COLS % K_STEP == 0);
+	static_assert((B_ROWS * sizeof(bf16)) % 16 == 0);
 
-	template<usize A_COLS, usize B_ROWS>
 	X17_DEVICE void cp_async_ab(
 		GMatrix<bf16, M_PER_BLOCK, A_COLS> gA_block,
 		GMatrix<bf16, N_PER_BLOCK, B_ROWS> gB,
@@ -163,12 +163,11 @@ struct QKVProj {
 		}
 	}
 
-	// GEMM: C[A_M,B_N] = A[A_M,A_N] * windowed(B[B_M,B_N])
-	// A is the weight matrix [A_M, A_N] row-major.
-	// B is the input matrix stored transposed as [B_N, B_M] row-major so B_M is contiguous.
-	// Each output column reads A_N values from the corresponding B row, starting at
-	// (output_col * INPUT_STEP) modulo B_M.
-	template<usize A_COLS, usize B_ROWS>
+	// GEMM: C[A_ROWS,B_COLS] = A[A_ROWS,A_COLS] * windowed(B[B_ROWS,B_COLS])
+	// A is the weight matrix [A_ROWS, A_COLS] row-major.
+	// B is the input matrix stored transposed as [B_COLS, B_ROWS] row-major so B_ROWS is contiguous.
+	// Each output column reads A_COLS values from the corresponding B row, starting at
+	// (output_col * INPUT_STEP) modulo B_ROWS.
 	X17_DEVICE void run(bf16 *A, bf16 *B, bf16 *C) {
 		static_assert(A_COLS % K_STEP == 0);
 		static_assert(A_COLS <= B_ROWS);
@@ -240,8 +239,8 @@ struct QKVProj {
 			}
 		}
 
-		l2_norm(acc_t);
-		apply_rope(acc_t, block_n, warp_n);
+		//l2_norm(acc_t);
+		//apply_rope(acc_t, block_n, warp_n);
 
 		bf16 *c_ptr = C + blockIdx.y * N_PER_BLOCK * A_ROWS + blockIdx.x * M_PER_BLOCK;
 		GMatrix<bf16, N_PER_BLOCK, M_PER_BLOCK> gC_block{c_ptr, A_ROWS};
