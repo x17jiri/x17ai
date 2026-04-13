@@ -334,13 +334,20 @@ X17_DEVICE T shuffle_sync(T val, int src_lane) {
 	return __shfl_sync(0xffffffff, val, src_lane);
 }
 
-template<typename T>
-requires(sizeof(T) == 4)
-X17_DEVICE void store_shared_4x32b(u32 ptr, T a, T b, T c, T d) {
+X17_DEVICE void store_shared_4x32b(u32 ptr, f32 a, f32 b, f32 c, f32 d) {
 	asm volatile(
 		"st.shared.v4.f32 [%0], {%1, %2, %3, %4};\n"
 		:
 		: "r"(ptr), "f"(a), "f"(b), "f"(c), "f"(d)
+		: "memory"
+	);
+}
+
+X17_DEVICE void store_shared_4x32b(u32 ptr, u32 a, u32 b, u32 c, u32 d) {
+	asm volatile(
+		"st.shared.v4.b32 [%0], {%1, %2, %3, %4};\n"
+		:
+		: "r"(ptr), "r"(a), "r"(b), "r"(c), "r"(d)
 		: "memory"
 	);
 }

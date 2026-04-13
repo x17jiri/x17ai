@@ -18,7 +18,7 @@ struct QKVProj {
 	static constexpr usize N_PER_BLOCK = N_WARPS * N_PER_WARP;
 	static constexpr usize WARPS_PER_BLOCK = M_WARPS * N_WARPS;
 	static constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
-	static constexpr usize K_STEP = 64;
+	static constexpr usize K_STEP = 32;
 	static constexpr usize GMEM_PRELOAD = 2;
 	static constexpr usize M_TILES = M_PER_WARP / 16;
 	static constexpr usize N_TILES = N_PER_WARP / 16;
@@ -53,11 +53,92 @@ struct QKVProj {
 		if (p < k_end) {
 			SMatrix<bf16, M_PER_BLOCK, K_STEP> sA_tile = tile_m<M_PER_BLOCK>(sA_preload, p % GMEM_PRELOAD);
 			SMatrix<bf16, N_PER_BLOCK, K_STEP> sB_tile = tile_m<N_PER_BLOCK>(sB_preload, p % GMEM_PRELOAD);
-			cp_async_gmem_to_smem<THREADS_PER_BLOCK>(
-				threadIdx.x,
-				gA_block.template slice_n<K_STEP>(p * K_STEP),
-				sA_tile
-			);
+
+			{
+				auto src = gA_block.template slice_n<K_STEP>(p * K_STEP);
+				auto dst = sA_tile;
+				static constexpr usize GM = src.m_rows();
+				static constexpr usize GN = src.n_cols();
+				static constexpr usize M = dst.m_rows();
+				static constexpr usize N = dst.n_cols();
+				static constexpr usize ROW_BYTES = dst.ROW_BYTES;
+				using T = bf16;
+				usize tid = threadIdx.x;
+				usize dst_row = 0;
+				usize dst_col = 0;
+
+				constexpr usize SRC_ROW_BYTES = GN * sizeof(T);
+				constexpr usize CP_BYTES = 16;
+				constexpr usize CP_PER_ROW = SRC_ROW_BYTES / CP_BYTES;
+				constexpr usize ROWS_PER_STEP = THREADS_PER_BLOCK / CP_PER_ROW;
+				constexpr usize STEPS = GM / ROWS_PER_STEP;
+
+				static_assert(CP_BYTES % sizeof(T) == 0);
+				static_assert((GN * sizeof(T)) % CP_BYTES == 0);
+				static_assert((N * sizeof(T)) % CP_BYTES == 0);
+				static_assert(THREADS_PER_BLOCK % CP_PER_ROW == 0);
+				if constexpr (STEPS == 0) {
+					if constexpr (GM % ROWS_PER_STEP == 0) {
+						return;
+					}
+					if (tid >= (GM % ROWS_PER_STEP) * CP_PER_ROW) {
+						return;
+					}
+				}
+
+				// Thread's position within a step is fixed
+				usize off_in_row = dst_col * sizeof(T) + (tid % CP_PER_ROW) * CP_BYTES;
+				usize col_in_row = off_in_row / sizeof(T);
+				usize row_in_step = tid / CP_PER_ROW;
+				usize src_col = (tid % CP_PER_ROW) * CP_BYTES;
+
+				constexpr usize REPEAT_AFTER = least_common_multiple(8, ROWS_PER_STEP) / ROWS_PER_STEP;
+				usize off[REPEAT_AFTER];
+				X17_UNROLL for (usize i = 0; i < REPEAT_AFTER; ++i) {
+					usize row = dst_row + i * ROWS_PER_STEP + row_in_step;
+					off[i] = off_in_row ^ ((row & 7) << 4);
+				}
+
+				usize first_col = row_in_step * INPUT_STEP;
+				usize first_col_step = ROWS_PER_STEP * INPUT_STEP;
+
+				u8 const *src_ptr =
+					reinterpret_cast<u8 const *>(src._ptr)
+					+ row_in_step * src.stride_bytes()
+					+ src_col
+					- first_col * sizeof(T);
+				usize src_step =
+					ROWS_PER_STEP * src.stride_bytes()
+					- first_col_step * sizeof(T);
+
+				usize dst_ptr = dst._ptr + (dst_row + row_in_step) * ROW_BYTES;
+				usize dst_step = ROWS_PER_STEP * ROW_BYTES;
+
+				if constexpr (STEPS > 0) {
+					X17_UNROLL for (usize step = 0; step < STEPS; ++step) {
+						u32 dst_ptr_swizzled = dst_ptr + off[step % REPEAT_AFTER];
+						if (usize(p * K_STEP + col_in_row - first_col) < A_COLS) {
+							sm80::cp_async(src_ptr, dst_ptr_swizzled);
+						} else {
+							store_shared_4x32b(dst_ptr_swizzled, 0.0f, 0.0f, 0.0f, 0.0f);
+						}
+						first_col += first_col_step;
+						src_ptr += src_step;
+						dst_ptr += dst_step;
+					}
+				}
+				if constexpr (GM % ROWS_PER_STEP != 0) {
+					usize step = STEPS;
+					if (tid < (GM % ROWS_PER_STEP) * CP_PER_ROW) {
+						u32 dst_ptr_swizzled = dst_ptr + off[step % REPEAT_AFTER];
+						if (usize(p * K_STEP + col_in_row - first_col) < A_COLS) {
+							sm80::cp_async(src_ptr, dst_ptr_swizzled);
+						} else {
+							store_shared_4x32b(dst_ptr_swizzled, 0.0f, 0.0f, 0.0f, 0.0f);
+						}
+					}
+				}
+			}
 			cp_async_gmem_to_smem_modulo<THREADS_PER_BLOCK>(
 				threadIdx.x,
 				gB_block,

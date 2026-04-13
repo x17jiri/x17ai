@@ -107,12 +107,12 @@ int main(int argc, char *argv[]) {
 	}
 
 	double strict_flops = 2.0 * A_ROWS * A_COLS * B_COLS;
-	double logical_flops = 2.0 * A_ROWS * B_ROWS * B_COLS;
+	double fake_flops = 2.0 * A_ROWS * B_ROWS * B_COLS;
 	double strict_tflops = strict_flops / elapsed / 1e12;
-	double logical_tflops = logical_flops / elapsed / 1e12;
+	double fake_tflops = fake_flops / elapsed / 1e12;
 	printf("Average kernel time over %d runs: %.3f ms\n", NUM_RUNS, elapsed * 1e3);
 	printf("Strict TFLOPS (compact A): %.2f\n", strict_tflops);
-	printf("Logical TFLOPS (full d_model): %.2f\n", logical_tflops);
+	printf("Fake TFLOPS (full d_model): %.2f\n", fake_tflops);
 
 	cudaMemcpy(h_C.data(), d_C, h_C.size() * sizeof(bf16), cudaMemcpyDeviceToHost);
 
