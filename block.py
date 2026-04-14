@@ -143,11 +143,11 @@ def qkv_proj(inputs: torch.Tensor, qkv_weights: torch.Tensor, config: dict) -> t
 	k = qkv[:, qkv_cols:2 * qkv_cols].reshape(n_inputs, n_heads, head_dim)
 	v = qkv[:, 2 * qkv_cols:3 * qkv_cols].reshape(n_inputs, n_heads, head_dim)
 
-	# q = l2_norm_last_dim(q, l2_norm_eps)
-	# k = l2_norm_last_dim(k, l2_norm_eps)
-	# v = l2_norm_last_dim(v, l2_norm_eps)
-	# q = apply_rope(q, rope_base)
-	# k = apply_rope(k, rope_base)
+	q = l2_norm_last_dim(q, l2_norm_eps)
+	k = l2_norm_last_dim(k, l2_norm_eps)
+	v = l2_norm_last_dim(v, l2_norm_eps)
+	q = apply_rope(q, rope_base)
+	k = apply_rope(k, rope_base)
 	return q, k, v
 
 

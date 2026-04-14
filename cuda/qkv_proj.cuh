@@ -7,6 +7,7 @@ template<
 	const usize N_HEADS,
 	const usize HEAD_DIM,
 	const usize ROPE_DIM,
+	const f64 L2_NORM_EPS,
 	const f64 ROPE_BASE
 >
 struct QKVProj {
@@ -18,12 +19,15 @@ struct QKVProj {
 	static constexpr usize N_PER_BLOCK = N_WARPS * N_PER_WARP;
 	static constexpr usize WARPS_PER_BLOCK = M_WARPS * N_WARPS;
 	static constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
-	static constexpr usize K_STEP = 32;
+	static constexpr usize K_STEP = 64;
+	static constexpr usize K_TILES = K_STEP / 16;
 	static constexpr usize GMEM_PRELOAD = 2;
 	static constexpr usize M_TILES = M_PER_WARP / 16;
 	static constexpr usize N_TILES = N_PER_WARP / 16;
 	static constexpr usize INPUT_STEP = B_ROWS / N_HEADS;
 	static constexpr usize SMEM_BYTES = GMEM_PRELOAD * K_STEP * (M_PER_BLOCK + N_PER_BLOCK) * sizeof(bf16);
+
+	static constexpr usize K_ITERS = B_ROWS / K_STEP;
 
 	static constexpr f32 ROPE_LOG_SCALE = -2.0 * math::fast::constexpr_logb(ROPE_BASE) / f64(ROPE_DIM);
 
@@ -35,6 +39,7 @@ struct QKVProj {
 	static_assert(ROPE_DIM <= HEAD_DIM);
 	static_assert(ROPE_DIM % 16 == 0);
 	static_assert(B_ROWS % N_HEADS == 0);
+	static_assert(B_ROWS % K_STEP == 0);
 	static_assert((INPUT_STEP * sizeof(bf16)) % 16 == 0);
 	static_assert(A_COLS <= B_ROWS);
 	static_assert(A_COLS % K_STEP == 0);
@@ -102,49 +107,53 @@ struct QKVProj {
 				usize first_col = row_in_step * INPUT_STEP;
 				usize first_col_step = ROWS_PER_STEP * INPUT_STEP;
 
-				u8 const *src_ptr =
+				u8 const * first_src_ptr =
 					reinterpret_cast<u8 const *>(src._ptr)
 					+ row_in_step * src.stride_bytes()
-					+ src_col
-					- first_col * sizeof(T);
-				usize src_step =
-					ROWS_PER_STEP * src.stride_bytes()
-					- first_col_step * sizeof(T);
+					+ src_col;
+				usize src_step = ROWS_PER_STEP * src.stride_bytes();
 
-				usize dst_ptr = dst._ptr + (dst_row + row_in_step) * ROW_BYTES;
-				usize dst_step = ROWS_PER_STEP * ROW_BYTES;
+				u32 first_dst_ptr = dst._ptr + (dst_row + row_in_step) * ROW_BYTES;
+				u32 dst_step = ROWS_PER_STEP * ROW_BYTES;
 
 				if constexpr (STEPS > 0) {
 					X17_UNROLL for (usize step = 0; step < STEPS; ++step) {
+						u8 const * src_ptr = first_src_ptr + step * src_step;
+						u32 dst_ptr = first_dst_ptr + step * dst_step;
 						u32 dst_ptr_swizzled = dst_ptr + off[step % REPEAT_AFTER];
 						if (usize(p * K_STEP + col_in_row - first_col) < A_COLS) {
-							sm80::cp_async(src_ptr, dst_ptr_swizzled);
+							sm80::cp_async(src_ptr - first_col * sizeof(T), dst_ptr_swizzled);
+						} else if (usize(p * K_STEP + col_in_row + B_ROWS - first_col) < A_COLS) {
+							sm80::cp_async(src_ptr + (B_ROWS - first_col) * sizeof(T), dst_ptr_swizzled);
 						} else {
 							store_shared_4x32b(dst_ptr_swizzled, 0.0f, 0.0f, 0.0f, 0.0f);
 						}
-						first_col += first_col_step;
-						src_ptr += src_step;
-						dst_ptr += dst_step;
+						first_col = (first_col + first_col_step) % B_ROWS;
 					}
 				}
 				if constexpr (GM % ROWS_PER_STEP != 0) {
 					usize step = STEPS;
 					if (tid < (GM % ROWS_PER_STEP) * CP_PER_ROW) {
+						u8 const *src_ptr = first_src_ptr + step * src_step;
+						u32 const dst_ptr = first_dst_ptr + step * dst_step;
 						u32 dst_ptr_swizzled = dst_ptr + off[step % REPEAT_AFTER];
 						if (usize(p * K_STEP + col_in_row - first_col) < A_COLS) {
-							sm80::cp_async(src_ptr, dst_ptr_swizzled);
+							sm80::cp_async(src_ptr - first_col * sizeof(T), dst_ptr_swizzled);
+						} else if (usize(p * K_STEP + col_in_row + B_ROWS - first_col) < A_COLS) {
+							sm80::cp_async(src_ptr + (B_ROWS - first_col) * sizeof(T), dst_ptr_swizzled);
 						} else {
 							store_shared_4x32b(dst_ptr_swizzled, 0.0f, 0.0f, 0.0f, 0.0f);
 						}
 					}
 				}
 			}
-			cp_async_gmem_to_smem_modulo<THREADS_PER_BLOCK>(
+			cp_async_gmem_to_smem<THREADS_PER_BLOCK, N_PER_BLOCK, K_STEP>(
 				threadIdx.x,
-				gB_block,
+				gB_block.template slice_n<K_STEP>(first_b_col + p * K_STEP),
 				sB_tile,
 				0,
-				first_b_col + p * K_STEP,
+				0,
+				0,
 				0
 			);
 		}
@@ -162,12 +171,15 @@ struct QKVProj {
 	template<usize N_TILE_CNT>
 	X17_DEVICE void apply_rope(
 		Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILES],
+		usize block_m,
 		usize block_n,
+		usize warp_m,
 		usize warp_n
 	) {
 		constexpr usize GROUP_TILE_CNT = HEAD_DIM / 16;
 		constexpr usize GROUP_CNT = M_PER_WARP / HEAD_DIM;
 		constexpr usize ROPE_TILE_CNT = ROPE_DIM / 16;
+		constexpr usize QK_COLS = 2 * N_HEADS * HEAD_DIM;
 		usize tid = threadIdx.x % WARP_SIZE;
 		usize row_in_half = tid / 4;
 		usize pair_in_quad = tid % 4;
@@ -176,6 +188,10 @@ struct QKVProj {
 			usize top_row = block_n + warp_n + ni * 16 + row_in_half;
 			usize bot_row = top_row + 8;
 			X17_UNROLL for (usize group = 0; group < GROUP_CNT; ++group) {
+				usize group_col = block_m + warp_m + group * HEAD_DIM;
+				if (group_col >= QK_COLS) {
+					continue;
+				}
 				X17_UNROLL for (usize tile = 0; tile < ROPE_TILE_CNT; ++tile) {
 					Fragment_16x16<f32> &frag = acc[ni][group * GROUP_TILE_CNT + tile];
 					usize pair_base = tile * 8;
@@ -213,6 +229,7 @@ struct QKVProj {
 	) {
 		constexpr usize GROUP_TILE_CNT = HEAD_DIM / 16;
 		constexpr usize GROUP_CNT = M_PER_WARP / HEAD_DIM;
+		constexpr f32 EPS = f32(L2_NORM_EPS);
 
 		X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
 			X17_UNROLL for (usize group = 0; group < GROUP_CNT; ++group) {
@@ -237,8 +254,8 @@ struct QKVProj {
 				bot_sum_sq += shuffle_xor_sync(bot_sum_sq, 1);
 				bot_sum_sq += shuffle_xor_sync(bot_sum_sq, 2);
 
-				f32 top_inv_norm = top_sum_sq > 0.0f ? math::fast::recip(sqrtf(top_sum_sq)) : 0.0f;
-				f32 bot_inv_norm = bot_sum_sq > 0.0f ? math::fast::recip(sqrtf(bot_sum_sq)) : 0.0f;
+				f32 top_inv_norm = math::fast::recip(sqrtf(top_sum_sq) + EPS);
+				f32 bot_inv_norm = math::fast::recip(sqrtf(bot_sum_sq) + EPS);
 
 				X17_UNROLL for (usize tile = 0; tile < GROUP_TILE_CNT; ++tile) {
 					acc[ni][group * GROUP_TILE_CNT + tile].scale_(top_inv_norm, bot_inv_norm);
@@ -250,16 +267,112 @@ struct QKVProj {
 	// GEMM: C[A_ROWS,B_COLS] = A[A_ROWS,A_COLS] * windowed(B[B_ROWS,B_COLS])
 	// A is the weight matrix [A_ROWS, A_COLS] row-major.
 	// B is the input matrix stored transposed as [B_COLS, B_ROWS] row-major so B_ROWS is contiguous.
-	// Each output column reads A_COLS values from the corresponding B row, starting at
-	// (output_col * INPUT_STEP) modulo B_ROWS.
+	// B preload now reads contiguous K windows from left to right.
+	// The row-dependent logical shift is intended to live on the A-preload side.
+	X17_DEVICE void dump_preload(
+		bf16 *A,
+		bf16 *B,
+		bf16 *A_dump,
+		bf16 *B_dump,
+		usize first_b_col,
+		usize p,
+		bool direct_b,
+		bool trans_b_dump
+	) {
+		GMatrix<bf16, M_PER_BLOCK, A_COLS> gA_block{A, A_COLS};
+		GMatrix<bf16, N_PER_BLOCK, B_ROWS> gB_block{B, B_ROWS};
+
+		u32 smem = 0;
+		SMatrix<bf16, M_PER_BLOCK * GMEM_PRELOAD, K_STEP> sA_preload{smem};
+		SMatrix<bf16, N_PER_BLOCK * GMEM_PRELOAD, K_STEP> sB_preload{sA_preload._ptr + sA_preload.bytes()};
+
+		cp_async_ab(gA_block, gB_block, sA_preload, sB_preload, first_b_col, p, p + 1);
+		cp_async_commit();
+		cp_async_wait<0>();
+		sync_threads();
+
+		SMatrix<bf16, M_PER_BLOCK, K_STEP> sA = tile_m<M_PER_BLOCK>(sA_preload, p % GMEM_PRELOAD);
+		SMatrix<bf16, N_PER_BLOCK, K_STEP> sB = tile_m<N_PER_BLOCK>(sB_preload, p % GMEM_PRELOAD);
+		if (direct_b) {
+			cp_async_gmem_to_smem<THREADS_PER_BLOCK, N_PER_BLOCK, K_STEP>(
+				threadIdx.x,
+				gB_block.template slice_n<K_STEP>(first_b_col + p * K_STEP),
+				sB,
+				0,
+				0,
+				0,
+				0
+			);
+			cp_async_commit();
+			cp_async_wait<0>();
+			sync_threads();
+		}
+		GMatrix<bf16, M_PER_BLOCK, K_STEP> gA_dump{A_dump};
+		GMatrix<bf16, N_PER_BLOCK, K_STEP> gB_dump{B_dump};
+
+		constexpr usize K_TILE_COLS = K_STEP / 16;
+		usize warp_idx = threadIdx.x / WARP_SIZE;
+
+		Fragment_16x16<bf16> tiles[K_TILE_COLS];
+
+		{
+			constexpr usize CP_BYTES = 16;
+			constexpr usize CP_PER_ROW = (K_STEP * sizeof(bf16)) / CP_BYTES;
+			constexpr usize CHUNK_ELEMS = CP_BYTES / sizeof(bf16);
+			constexpr usize TOTAL_CHUNKS = M_PER_BLOCK * CP_PER_ROW;
+
+			for (usize chunk_idx = threadIdx.x; chunk_idx < TOTAL_CHUNKS; chunk_idx += THREADS_PER_BLOCK) {
+				usize row = chunk_idx / CP_PER_ROW;
+				usize chunk = chunk_idx % CP_PER_ROW;
+				u32 src_ptr = sA._ptr + row * sA.ROW_BYTES + ((chunk * CP_BYTES) ^ ((row & 7) << 4));
+				u32 a0, a1, a2, a3;
+				load_shared_4x32b(src_ptr, a0, a1, a2, a3);
+
+				u32 *dst_ptr = reinterpret_cast<u32 *>(gA_dump._ptr + row * K_STEP + chunk * CHUNK_ELEMS);
+				dst_ptr[0] = a0;
+				dst_ptr[1] = a1;
+				dst_ptr[2] = a2;
+				dst_ptr[3] = a3;
+			}
+		}
+
+		if (trans_b_dump) {
+			for (usize tile_m = warp_idx; tile_m < N_PER_BLOCK / 16; tile_m += WARPS_PER_BLOCK) {
+				X17_UNROLL for (usize ni = 0; ni < K_TILE_COLS; ++ni) {
+					smem_tile_to_fragment_trans(sB, tile_m * 16, ni * 16, tiles[ni]);
+				}
+				store(tiles, gB_dump, tile_m * 16, 0);
+			}
+		} else {
+			constexpr usize CP_BYTES = 16;
+			constexpr usize CP_PER_ROW = (K_STEP * sizeof(bf16)) / CP_BYTES;
+			constexpr usize CHUNK_ELEMS = CP_BYTES / sizeof(bf16);
+			constexpr usize TOTAL_CHUNKS = N_PER_BLOCK * CP_PER_ROW;
+
+			for (usize chunk_idx = threadIdx.x; chunk_idx < TOTAL_CHUNKS; chunk_idx += THREADS_PER_BLOCK) {
+				usize row = chunk_idx / CP_PER_ROW;
+				usize chunk = chunk_idx % CP_PER_ROW;
+				u32 src_ptr = sB._ptr + row * sB.ROW_BYTES + ((chunk * CP_BYTES) ^ ((row & 7) << 4));
+				u32 a0, a1, a2, a3;
+				load_shared_4x32b(src_ptr, a0, a1, a2, a3);
+
+				u32 *dst_ptr = reinterpret_cast<u32 *>(gB_dump._ptr + row * K_STEP + chunk * CHUNK_ELEMS);
+				dst_ptr[0] = a0;
+				dst_ptr[1] = a1;
+				dst_ptr[2] = a2;
+				dst_ptr[3] = a3;
+			}
+		}
+	}
+
 	X17_DEVICE void run(bf16 *A, bf16 *B, bf16 *C) {
 		static_assert(A_COLS % K_STEP == 0);
 		static_assert(A_COLS <= B_ROWS);
-		constexpr usize K_ITERS = (A_COLS + (M_PER_BLOCK - 1)*INPUT_STEP + K_STEP - 1) / K_STEP;
-		constexpr usize K_TILES = K_STEP / 16;
 
 		usize tid = threadIdx.x;
 		usize warp_idx = tid / WARP_SIZE;
+		usize block_m = blockIdx.x * M_PER_BLOCK;
+		usize block_n = blockIdx.y * N_PER_BLOCK;
 		usize warp_m = (warp_idx / N_WARPS) * M_PER_WARP;
 		usize warp_n = (warp_idx % N_WARPS) * N_PER_WARP;
 
@@ -323,8 +436,8 @@ struct QKVProj {
 			}
 		}
 
-		//l2_norm(acc_t);
-		//apply_rope(acc_t, block_n, warp_n);
+		l2_norm(acc_t);
+		apply_rope(acc_t, block_m, block_n, warp_m, warp_n);
 
 		bf16 *c_ptr = C + blockIdx.y * N_PER_BLOCK * A_ROWS + blockIdx.x * M_PER_BLOCK;
 		GMatrix<bf16, N_PER_BLOCK, M_PER_BLOCK> gC_block{c_ptr, A_ROWS};
@@ -338,4 +451,19 @@ template<typename QKVProj>
 __global__ __launch_bounds__(QKVProj::THREADS_PER_BLOCK) void qkv_proj(bf16 *A, bf16 *B, bf16 *C) {
 	QKVProj qkv_proj = QKVProj();
 	qkv_proj.run(A, B, C);
+}
+
+template<typename QKVProj>
+__global__ __launch_bounds__(QKVProj::THREADS_PER_BLOCK) void qkv_proj_dump_preload(
+	bf16 *A,
+	bf16 *B,
+	bf16 *A_dump,
+	bf16 *B_dump,
+	usize first_b_col,
+	usize p,
+	bool direct_b,
+	bool trans_b_dump
+) {
+	QKVProj qkv_proj = QKVProj();
+	qkv_proj.dump_preload(A, B, A_dump, B_dump, first_b_col, p, direct_b, trans_b_dump);
 }

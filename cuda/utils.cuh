@@ -373,6 +373,14 @@ X17_DEVICE void load_shared_4x32b(u32 ptr, T &a, T &b, T &c, T &d) {
 	);
 }
 
+X17_DEVICE void load_shared_4x32b(u32 ptr, u32 &a, u32 &b, u32 &c, u32 &d) {
+	asm volatile(
+		"ld.shared.v4.b32 {%0, %1, %2, %3}, [%4];\n"
+		: "=r"(a), "=r"(b), "=r"(c), "=r"(d)
+		: "r"(ptr)
+	);
+}
+
 template<typename T>
 requires(sizeof(T) == 4)
 X17_DEVICE void load_shared_2x32b(u32 ptr, T &a, T &b) {
@@ -1491,27 +1499,34 @@ struct SMatrix {
 	/// Copy from a (possibly smaller) GMEM matrix into a sub-region of this SMEM matrix.
 	/// Data is placed starting at (dst_row, dst_col) within this SMEM matrix.
 	/// dst_row and dst_col must be multiples of 16.
-	template<const usize THREADS_PER_BLOCK, const usize GM, const usize GN>
-	requires(GM <= M && GN <= N)
-	X17_DEVICE void cp_async_from(usize tid, GMatrix<T, GM, GN> src, usize dst_row, usize dst_col) const {
-		if constexpr (GN > 0 && GM > 0) {
+	template<const usize THREADS_PER_BLOCK, const usize WIDTH, const usize HEIGHT, const usize GM, const usize GN>
+	requires(WIDTH <= GN && HEIGHT <= GM && WIDTH <= N && HEIGHT <= M)
+	X17_DEVICE void cp_async_from(
+		usize tid,
+		GMatrix<T, GM, GN> src,
+		usize src_row,
+		usize src_col,
+		usize dst_row,
+		usize dst_col
+	) const {
+		if constexpr (WIDTH > 0 && HEIGHT > 0) {
 			__builtin_assume(tid < THREADS_PER_BLOCK);
 
-			constexpr usize SRC_ROW_BYTES = GN * sizeof(T);
+			constexpr usize SRC_ROW_BYTES = WIDTH * sizeof(T);
 			constexpr usize CP_BYTES = 16;
 			constexpr usize CP_PER_ROW = SRC_ROW_BYTES / CP_BYTES;
 			constexpr usize ROWS_PER_STEP = THREADS_PER_BLOCK / CP_PER_ROW;
-			constexpr usize STEPS = GM / ROWS_PER_STEP;
+			constexpr usize STEPS = HEIGHT / ROWS_PER_STEP;
 
 			static_assert(CP_BYTES % sizeof(T) == 0);
-			static_assert((GN * sizeof(T)) % CP_BYTES == 0);
+			static_assert((WIDTH * sizeof(T)) % CP_BYTES == 0);
 			static_assert((N * sizeof(T)) % CP_BYTES == 0);
 			static_assert(THREADS_PER_BLOCK % CP_PER_ROW == 0);
 			if constexpr (STEPS == 0) {
-				if constexpr (GM % ROWS_PER_STEP == 0) {
+				if constexpr (HEIGHT % ROWS_PER_STEP == 0) {
 					return;
 				}
-				if (tid >= (GM % ROWS_PER_STEP) * CP_PER_ROW) {
+				if (tid >= (HEIGHT % ROWS_PER_STEP) * CP_PER_ROW) {
 					return;
 				}
 			}
@@ -1519,7 +1534,7 @@ struct SMatrix {
 			// Thread's position within a step is fixed
 			usize col_in_row = dst_col * sizeof(T) + (tid % CP_PER_ROW) * CP_BYTES;
 			usize row_in_step = tid / CP_PER_ROW;
-			usize src_col = (tid % CP_PER_ROW) * CP_BYTES;
+			usize src_col_in_row = src_col * sizeof(T) + (tid % CP_PER_ROW) * CP_BYTES;
 
 			constexpr usize REPEAT_AFTER = least_common_multiple(8, ROWS_PER_STEP) / ROWS_PER_STEP;
 			usize off[REPEAT_AFTER];
@@ -1530,8 +1545,8 @@ struct SMatrix {
 
 			u8 const *src_ptr =
 				reinterpret_cast<u8 const *>(src._ptr)
-				+ row_in_step * src.stride_bytes()
-				+ src_col;
+				+ (src_row + row_in_step) * src.stride_bytes()
+				+ src_col_in_row;
 			usize src_step = ROWS_PER_STEP * src.stride_bytes();
 
 			usize dst_ptr = _ptr + (dst_row + row_in_step) * ROW_BYTES;
@@ -1544,9 +1559,9 @@ struct SMatrix {
 					dst_ptr += dst_step;
 				}
 			}
-			if constexpr (GM % ROWS_PER_STEP != 0) {
+			if constexpr (HEIGHT % ROWS_PER_STEP != 0) {
 				usize step = STEPS;
-				if (tid < (GM % ROWS_PER_STEP) * CP_PER_ROW) {
+				if (tid < (HEIGHT % ROWS_PER_STEP) * CP_PER_ROW) {
 					sm80::cp_async(src_ptr, dst_ptr + off[step % REPEAT_AFTER]);
 				}
 			}
@@ -1634,8 +1649,24 @@ X17_HOST_DEVICE constexpr auto tile_m(Mat mat, usize tile_idx)
 	return mat.template tile_m<TILE_M>(tile_idx);
 }
 
+/// If a call of this function is failing to compile,
+/// it is likely it hasn't been updated for the new header.
+/// The old header was:
+///     usize tid, GMatrix<T, GM, GN> src, usize dst_row, usize dst_col
+///
+/// Newly we also have src_row, src_col
+///
+/// Additionally, the old version didn't have WIDTH and HEIGHT template parameters. The are to copy
+/// was inferred from GN and GM.
+///
+/// So:
+///     cp_async_gmem_to_smem<THREADS>(tid, src, dst, dst_row, dst_col)
+/// Will be replaced with:
+///     cp_async_gmem_to_smem<THREADS, SRC_COLS, SRC_ROWS>(tid, src, dst, 0, 9, dst_row, dst_col)
 template<
 	const usize THREADS_PER_BLOCK,
+	const usize HEIGHT,
+	const usize WIDTH,
 	typename T,
 	const usize SM, const usize SN,
 	const usize GM, const usize GN
@@ -1644,10 +1675,16 @@ X17_DEVICE void cp_async_gmem_to_smem(
 	usize tid,
 	GMatrix<T, GM, GN> src,
 	SMatrix<T, SM, SN> dst,
-	usize dst_row = 0,
-	usize dst_col = 0
+	usize src_row,
+	usize src_col,
+	usize dst_row,
+	usize dst_col
 ) {
-	dst.template cp_async_from<THREADS_PER_BLOCK>(tid, src, dst_row, dst_col);
+	dst.template cp_async_from<THREADS_PER_BLOCK, WIDTH, HEIGHT>(
+		tid, src,
+		src_row, src_col,
+		dst_row, dst_col
+	);
 }
 
 template<
