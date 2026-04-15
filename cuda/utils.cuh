@@ -1648,21 +1648,6 @@ X17_HOST_DEVICE constexpr auto tile_m(Mat mat, usize tile_idx)
 {
 	return mat.template tile_m<TILE_M>(tile_idx);
 }
-
-/// If a call of this function is failing to compile,
-/// it is likely it hasn't been updated for the new header.
-/// The old header was:
-///     usize tid, GMatrix<T, GM, GN> src, usize dst_row, usize dst_col
-///
-/// Newly we also have src_row, src_col
-///
-/// Additionally, the old version didn't have WIDTH and HEIGHT template parameters. The are to copy
-/// was inferred from GN and GM.
-///
-/// So:
-///     cp_async_gmem_to_smem<THREADS>(tid, src, dst, dst_row, dst_col)
-/// Will be replaced with:
-///     cp_async_gmem_to_smem<THREADS, SRC_COLS, SRC_ROWS>(tid, src, dst, 0, 9, dst_row, dst_col)
 template<
 	const usize THREADS_PER_BLOCK,
 	const usize HEIGHT,

@@ -168,6 +168,19 @@ struct QKVProj {
 		);
 	}
 
+	X17_DEVICE f32 gelu(f32 x) {
+		static constexpr f32 CK = f32(math::constexpr_rsqrt(std::numbers::pi_v<f64> / 2.0));
+		static constexpr f32 CK3 = f32(0.044715 * math::constexpr_rsqrt(std::numbers::pi_v<f64> / 2.0));
+		f32 y = math::fma(CK3 * x, x * x, CK * x);
+		return math::fma(0.5f * x, math::fast::tanh(y), 0.5f * x);
+	}
+
+	X17_DEVICE void gate_gelu_pair(Fragment_8x8<f32> &frag, f32 weight0, f32 weight1) {
+		f32 x0 = frag.first() * weight0;
+		f32 x1 = frag.second() * weight1;
+		frag.set(gelu(x0), gelu(x1));
+	}
+
 	template<usize N_TILE_CNT>
 	X17_DEVICE void apply_rope(
 		Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILES],
@@ -218,6 +231,47 @@ struct QKVProj {
 					rope_rotate_pair(frag.sub[0][1], top_right_cos, top_right_sin);
 					rope_rotate_pair(frag.sub[1][0], bot_left_cos, bot_left_sin);
 					rope_rotate_pair(frag.sub[1][1], bot_right_cos, bot_right_sin);
+				}
+			}
+		}
+	}
+
+	template<usize N_TILE_CNT>
+	X17_DEVICE void apply_g_weight_and_gelu(
+		Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILES],
+		bf16 const *g_weights,
+		usize block_m,
+		usize warp_m
+	) {
+		constexpr usize GROUP_TILE_CNT = HEAD_DIM / 16;
+		constexpr usize GROUP_CNT = M_PER_WARP / HEAD_DIM;
+		constexpr usize G_COL_BEGIN = 3 * N_HEADS * HEAD_DIM;
+		constexpr usize G_COL_END = 4 * N_HEADS * HEAD_DIM;
+		usize tid = threadIdx.x % WARP_SIZE;
+		usize pair_in_quad = tid % 4;
+
+		X17_UNROLL for (usize group = 0; group < GROUP_CNT; ++group) {
+			usize group_col = block_m + warp_m + group * HEAD_DIM;
+			if (group_col < G_COL_BEGIN || group_col >= G_COL_END) {
+				continue;
+			}
+
+			usize head_idx = (group_col - G_COL_BEGIN) / HEAD_DIM;
+			X17_UNROLL for (usize tile = 0; tile < GROUP_TILE_CNT; ++tile) {
+				usize left_col = tile * 16 + 2 * pair_in_quad;
+				usize right_col = left_col + 8;
+
+				f32 left_w0 = static_cast<f32>(g_weights[head_idx * HEAD_DIM + left_col + 0]);
+				f32 left_w1 = static_cast<f32>(g_weights[head_idx * HEAD_DIM + left_col + 1]);
+				f32 right_w0 = static_cast<f32>(g_weights[head_idx * HEAD_DIM + right_col + 0]);
+				f32 right_w1 = static_cast<f32>(g_weights[head_idx * HEAD_DIM + right_col + 1]);
+
+				X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
+					Fragment_16x16<f32> &frag = acc[ni][group * GROUP_TILE_CNT + tile];
+					gate_gelu_pair(frag.sub[0][0], left_w0, left_w1);
+					gate_gelu_pair(frag.sub[1][0], left_w0, left_w1);
+					gate_gelu_pair(frag.sub[0][1], right_w0, right_w1);
+					gate_gelu_pair(frag.sub[1][1], right_w0, right_w1);
 				}
 			}
 		}
@@ -365,7 +419,7 @@ struct QKVProj {
 		}
 	}
 
-	X17_DEVICE void run(bf16 *A, bf16 *B, bf16 *C) {
+	X17_DEVICE void run(bf16 *A, bf16 *B, bf16 const *g_weights, bf16 *C) {
 		static_assert(A_COLS % K_STEP == 0);
 		static_assert(A_COLS <= B_ROWS);
 
@@ -438,6 +492,7 @@ struct QKVProj {
 
 		l2_norm(acc_t);
 		apply_rope(acc_t, block_m, block_n, warp_m, warp_n);
+		apply_g_weight_and_gelu(acc_t, g_weights, block_m, warp_m);
 
 		bf16 *c_ptr = C + blockIdx.y * N_PER_BLOCK * A_ROWS + blockIdx.x * M_PER_BLOCK;
 		GMatrix<bf16, N_PER_BLOCK, M_PER_BLOCK> gC_block{c_ptr, A_ROWS};
@@ -448,9 +503,9 @@ struct QKVProj {
 };
 
 template<typename QKVProj>
-__global__ __launch_bounds__(QKVProj::THREADS_PER_BLOCK) void qkv_proj(bf16 *A, bf16 *B, bf16 *C) {
+__global__ __launch_bounds__(QKVProj::THREADS_PER_BLOCK) void qkv_proj(bf16 *A, bf16 *B, bf16 const *g_weights, bf16 *C) {
 	QKVProj qkv_proj = QKVProj();
-	qkv_proj.run(A, B, C);
+	qkv_proj.run(A, B, g_weights, C);
 }
 
 template<typename QKVProj>
