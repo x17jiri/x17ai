@@ -12,7 +12,7 @@
    becomes:
    `cp_async_gmem_to_smem<THREADS, SRC_COLS, SRC_ROWS>(tid, src, dst, 0, 9, dst_row, dst_col)`
 
-2. `head_params.bin` layout from `block.py` is now `[temperature, sink_score]` per head.
+2. `head_params.bin` layout from `block.py` is now just `[temperature]` per head.
    The previous 4-value layout `[gate, temperature, sink score, unused]` is no longer written by the Python generator.
    Any legacy consumer that still assumes 4 floats per head needs to be updated before using this file.
 

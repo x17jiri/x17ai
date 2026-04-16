@@ -67,7 +67,7 @@ def ssmax_n(q_len, 	window_size=0):
 	where:
 	  i + 1       = number of real tokens visible (causal: tokens 0..i)
 	  window_size = caps the visible count when sliding window is enabled
-	  e           = ensures log2(n) >= ~1.89, so SSMax scale >= 1
+	  e           = ensures ln(n) >= 1
 	  1           = accounts for the sink token
 
 	When window_size == 0 (disabled), min is a no-op: n[i] = i + 2 + e.
