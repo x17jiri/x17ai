@@ -64,7 +64,7 @@ struct QKVProj {
 				auto dst = sA_tile;
 				static constexpr usize GM = src.m_rows();
 				static constexpr usize GN = src.n_cols();
-				static constexpr usize M = dst.m_rows();
+				[[maybe_unused]] static constexpr usize M = dst.m_rows();
 				static constexpr usize N = dst.n_cols();
 				static constexpr usize ROW_BYTES = dst.ROW_BYTES;
 				using T = bf16;
@@ -192,7 +192,7 @@ struct QKVProj {
 		constexpr usize GROUP_TILE_CNT = HEAD_DIM / 16;
 		constexpr usize GROUP_CNT = M_PER_WARP / HEAD_DIM;
 		constexpr usize ROPE_TILE_CNT = ROPE_DIM / 16;
-		constexpr usize QK_COLS = 2 * N_HEADS * HEAD_DIM;
+		constexpr usize QK_COLS = N_HEADS * HEAD_DIM;
 		usize tid = threadIdx.x % WARP_SIZE;
 		usize row_in_half = tid / 4;
 		usize pair_in_quad = tid % 4;
@@ -202,7 +202,7 @@ struct QKVProj {
 			usize bot_row = top_row + 8;
 			X17_UNROLL for (usize group = 0; group < GROUP_CNT; ++group) {
 				usize group_col = block_m + warp_m + group * HEAD_DIM;
-				if (group_col >= QK_COLS) {
+				if (group_col < QK_COLS || group_col >= 2*QK_COLS) {
 					continue;
 				}
 				X17_UNROLL for (usize tile = 0; tile < ROPE_TILE_CNT; ++tile) {
@@ -318,107 +318,6 @@ struct QKVProj {
 		}
 	}
 
-	// GEMM: C[A_ROWS,B_COLS] = A[A_ROWS,A_COLS] * windowed(B[B_ROWS,B_COLS])
-	// A is the weight matrix [A_ROWS, A_COLS] row-major.
-	// B is the input matrix stored transposed as [B_COLS, B_ROWS] row-major so B_ROWS is contiguous.
-	// B preload now reads contiguous K windows from left to right.
-	// The row-dependent logical shift is intended to live on the A-preload side.
-	X17_DEVICE void dump_preload(
-		bf16 *A,
-		bf16 *B,
-		bf16 *A_dump,
-		bf16 *B_dump,
-		usize first_b_col,
-		usize p,
-		bool direct_b,
-		bool trans_b_dump
-	) {
-		GMatrix<bf16, M_PER_BLOCK, A_COLS> gA_block{A, A_COLS};
-		GMatrix<bf16, N_PER_BLOCK, B_ROWS> gB_block{B, B_ROWS};
-
-		u32 smem = 0;
-		SMatrix<bf16, M_PER_BLOCK * GMEM_PRELOAD, K_STEP> sA_preload{smem};
-		SMatrix<bf16, N_PER_BLOCK * GMEM_PRELOAD, K_STEP> sB_preload{sA_preload._ptr + sA_preload.bytes()};
-
-		cp_async_ab(gA_block, gB_block, sA_preload, sB_preload, first_b_col, p, p + 1);
-		cp_async_commit();
-		cp_async_wait<0>();
-		sync_threads();
-
-		SMatrix<bf16, M_PER_BLOCK, K_STEP> sA = tile_m<M_PER_BLOCK>(sA_preload, p % GMEM_PRELOAD);
-		SMatrix<bf16, N_PER_BLOCK, K_STEP> sB = tile_m<N_PER_BLOCK>(sB_preload, p % GMEM_PRELOAD);
-		if (direct_b) {
-			cp_async_gmem_to_smem<THREADS_PER_BLOCK, N_PER_BLOCK, K_STEP>(
-				threadIdx.x,
-				gB_block.template slice_n<K_STEP>(first_b_col + p * K_STEP),
-				sB,
-				0,
-				0,
-				0,
-				0
-			);
-			cp_async_commit();
-			cp_async_wait<0>();
-			sync_threads();
-		}
-		GMatrix<bf16, M_PER_BLOCK, K_STEP> gA_dump{A_dump};
-		GMatrix<bf16, N_PER_BLOCK, K_STEP> gB_dump{B_dump};
-
-		constexpr usize K_TILE_COLS = K_STEP / 16;
-		usize warp_idx = threadIdx.x / WARP_SIZE;
-
-		Fragment_16x16<bf16> tiles[K_TILE_COLS];
-
-		{
-			constexpr usize CP_BYTES = 16;
-			constexpr usize CP_PER_ROW = (K_STEP * sizeof(bf16)) / CP_BYTES;
-			constexpr usize CHUNK_ELEMS = CP_BYTES / sizeof(bf16);
-			constexpr usize TOTAL_CHUNKS = M_PER_BLOCK * CP_PER_ROW;
-
-			for (usize chunk_idx = threadIdx.x; chunk_idx < TOTAL_CHUNKS; chunk_idx += THREADS_PER_BLOCK) {
-				usize row = chunk_idx / CP_PER_ROW;
-				usize chunk = chunk_idx % CP_PER_ROW;
-				u32 src_ptr = sA._ptr + row * sA.ROW_BYTES + ((chunk * CP_BYTES) ^ ((row & 7) << 4));
-				u32 a0, a1, a2, a3;
-				load_shared_4x32b(src_ptr, a0, a1, a2, a3);
-
-				u32 *dst_ptr = reinterpret_cast<u32 *>(gA_dump._ptr + row * K_STEP + chunk * CHUNK_ELEMS);
-				dst_ptr[0] = a0;
-				dst_ptr[1] = a1;
-				dst_ptr[2] = a2;
-				dst_ptr[3] = a3;
-			}
-		}
-
-		if (trans_b_dump) {
-			for (usize tile_m = warp_idx; tile_m < N_PER_BLOCK / 16; tile_m += WARPS_PER_BLOCK) {
-				X17_UNROLL for (usize ni = 0; ni < K_TILE_COLS; ++ni) {
-					smem_tile_to_fragment_trans(sB, tile_m * 16, ni * 16, tiles[ni]);
-				}
-				store(tiles, gB_dump, tile_m * 16, 0);
-			}
-		} else {
-			constexpr usize CP_BYTES = 16;
-			constexpr usize CP_PER_ROW = (K_STEP * sizeof(bf16)) / CP_BYTES;
-			constexpr usize CHUNK_ELEMS = CP_BYTES / sizeof(bf16);
-			constexpr usize TOTAL_CHUNKS = N_PER_BLOCK * CP_PER_ROW;
-
-			for (usize chunk_idx = threadIdx.x; chunk_idx < TOTAL_CHUNKS; chunk_idx += THREADS_PER_BLOCK) {
-				usize row = chunk_idx / CP_PER_ROW;
-				usize chunk = chunk_idx % CP_PER_ROW;
-				u32 src_ptr = sB._ptr + row * sB.ROW_BYTES + ((chunk * CP_BYTES) ^ ((row & 7) << 4));
-				u32 a0, a1, a2, a3;
-				load_shared_4x32b(src_ptr, a0, a1, a2, a3);
-
-				u32 *dst_ptr = reinterpret_cast<u32 *>(gB_dump._ptr + row * K_STEP + chunk * CHUNK_ELEMS);
-				dst_ptr[0] = a0;
-				dst_ptr[1] = a1;
-				dst_ptr[2] = a2;
-				dst_ptr[3] = a3;
-			}
-		}
-	}
-
 	X17_DEVICE void run(bf16 *A, bf16 *B, bf16 const *g_weights, bf16 *C) {
 		static_assert(A_COLS % K_STEP == 0);
 		static_assert(A_COLS <= B_ROWS);
@@ -506,19 +405,4 @@ template<typename QKVProj>
 __global__ __launch_bounds__(QKVProj::THREADS_PER_BLOCK) void qkv_proj(bf16 *A, bf16 *B, bf16 const *g_weights, bf16 *C) {
 	QKVProj qkv_proj = QKVProj();
 	qkv_proj.run(A, B, g_weights, C);
-}
-
-template<typename QKVProj>
-__global__ __launch_bounds__(QKVProj::THREADS_PER_BLOCK) void qkv_proj_dump_preload(
-	bf16 *A,
-	bf16 *B,
-	bf16 *A_dump,
-	bf16 *B_dump,
-	usize first_b_col,
-	usize p,
-	bool direct_b,
-	bool trans_b_dump
-) {
-	QKVProj qkv_proj = QKVProj();
-	qkv_proj.dump_preload(A, B, A_dump, B_dump, first_b_col, p, direct_b, trans_b_dump);
 }

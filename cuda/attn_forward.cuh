@@ -371,6 +371,9 @@ struct Attn_forward {
 			}
 		}
 
+		// `tempertature` is used because all Q, K, V are normalized with L2 norm and so without
+		// scaling, all the inputs to softmax would be between -1 and +1
+
 		// Sink: a virtual token with no V contribution - it only adds to the
 		// softmax denominator, stealing probability from real tokens.
 		// head_params[4*i_head + 0] = output gate

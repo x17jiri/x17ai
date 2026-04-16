@@ -78,15 +78,16 @@ namespace math {
 	}
 
 	constexpr f64 constexpr_rsqrt(f64 x) {
-		if (x < 0.0) { return std::numeric_limits<f64>::quiet_NaN(); }
+		if (x < 0.0 || x != x) { return std::numeric_limits<f64>::quiet_NaN(); }
 		if (x == 0.0) { return std::numeric_limits<f64>::infinity(); }
+		if (x == std::numeric_limits<f64>::infinity()) { return 0.0; }
 
 		f64 above = std::numeric_limits<f64>::max();
 		f64 below = 0.0;
 		bool stop = false;
 		while (!stop) {
 			f64 v = (0.5 * above) + (0.5 * below);
-			f64 t = x * v * v;
+			f64 t = (x * v) * v;
 
 			f64 new_above = t >= 1.0 ? v : above;
 			f64 new_below = t <= 1.0 ? v : below;
@@ -97,8 +98,8 @@ namespace math {
 			below = new_below;
 		}
 
-		f64 above_err = x * above * above - 1.0;
-		f64 below_err = 1.0 - x * below * below;
+		f64 above_err = ((x * above) * above) - 1.0;
+		f64 below_err = 1.0 - ((x * below) * below);
 		if (above_err > below_err) {
 			return below;
 		} else {
@@ -260,7 +261,7 @@ namespace math {
 		template<const usize FAN_IN = 1>
 		X17_DEVICE f32 gelu(f32 x) {
 			constexpr f64 k = constexpr_rsqrt(f64(FAN_IN));
-			constexpr f64	 k2 = 1.0 / f64(FAN_IN); // k^2
+			constexpr f64 k2 = 1.0 / f64(FAN_IN); // k^2
 			// c * k where c = sqrt(2.0 / pi)
 			constexpr f64 ck = constexpr_rsqrt(f64(FAN_IN) * std::numbers::pi_v<f64> / 2.0);
 			// 0.044715 * c * k^3
