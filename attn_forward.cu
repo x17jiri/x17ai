@@ -43,8 +43,9 @@ int main() {
 	std::vector<bf16> h_Q = load_tensor("tmp/block_torch/q.bin", SEQ_LEN, PACKED_DIM);
 	std::vector<bf16> h_K = load_tensor("tmp/block_torch/k.bin", SEQ_LEN, PACKED_DIM);
 	std::vector<bf16> h_V = load_tensor("tmp/block_torch/v.bin", SEQ_LEN, PACKED_DIM);
+	std::vector<bf16> h_sinks = load_tensor("tmp/block_torch/sinks.bin", HEAD_CNT, QK_DIM);
 	std::vector<f32> h_head_params = load_f32_tensor("tmp/block_torch/head_params.bin", HEAD_CNT, 1);
-	if (h_Q.empty() || h_K.empty() || h_V.empty() || h_head_params.empty()) {
+	if (h_Q.empty() || h_K.empty() || h_V.empty() || h_sinks.empty() || h_head_params.empty()) {
 		return 1;
 	}
 
@@ -54,6 +55,7 @@ int main() {
 	bf16 *d_Q = nullptr;
 	bf16 *d_K = nullptr;
 	bf16 *d_V = nullptr;
+	bf16 *d_sinks = nullptr;
 	bf16 *d_out = nullptr;
 	f32 *d_L = nullptr;
 	f32 *d_head_params = nullptr;
@@ -61,6 +63,7 @@ int main() {
 	cudaMalloc(&d_Q, h_Q.size() * sizeof(bf16));
 	cudaMalloc(&d_K, h_K.size() * sizeof(bf16));
 	cudaMalloc(&d_V, h_V.size() * sizeof(bf16));
+	cudaMalloc(&d_sinks, h_sinks.size() * sizeof(bf16));
 	cudaMalloc(&d_out, h_out.size() * sizeof(bf16));
 	cudaMalloc(&d_L, h_L.size() * sizeof(f32));
 	cudaMalloc(&d_head_params, h_head_params.size() * sizeof(f32));
@@ -68,6 +71,7 @@ int main() {
 	cudaMemcpy(d_Q, h_Q.data(), h_Q.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_K, h_K.data(), h_K.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_V, h_V.data(), h_V.size() * sizeof(bf16), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_sinks, h_sinks.data(), h_sinks.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_head_params, h_head_params.data(), h_head_params.size() * sizeof(f32), cudaMemcpyHostToDevice);
 
 	cudaFuncSetAttribute(attn_forward<AF>, cudaFuncAttributeMaxDynamicSharedMemorySize, AF::SMEM_BYTES);
@@ -83,6 +87,7 @@ int main() {
 				d_Q,
 				d_K,
 				d_V,
+				d_sinks,
 				d_out,
 				d_L,
 				d_head_params,
@@ -105,6 +110,7 @@ int main() {
 				d_Q,
 				d_K,
 				d_V,
+				d_sinks,
 				d_out,
 				d_L,
 				d_head_params,
@@ -138,9 +144,12 @@ int main() {
 	std::filesystem::create_directories("tmp/block_cuda");
 	store_tensor("tmp/block_cuda/attn_out.bin", h_out, SEQ_LEN, PACKED_DIM);
 
+	printf("Used SMEM per kernel: %d\n", AF::SMEM_BYTES);
+
 	cudaFree(d_Q);
 	cudaFree(d_K);
 	cudaFree(d_V);
+	cudaFree(d_sinks);
 	cudaFree(d_out);
 	cudaFree(d_L);
 	cudaFree(d_head_params);

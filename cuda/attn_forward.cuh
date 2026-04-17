@@ -109,6 +109,51 @@ struct Attn_forward {
 		return double(mma_count(seq_len, window_size)) * 2.0 * 16.0 * 16.0 * 16.0;
 	}
 
+	static X17_DEVICE f32 dot_bf16_vectors(bf16 const *lhs, bf16 const *rhs) {
+		f32 sum = 0.0f;
+		X17_UNROLL for (usize i = 0; i < QK_DIM; ++i) {
+			sum = math::fma(static_cast<f32>(lhs[i]), static_cast<f32>(rhs[i]), sum);
+		}
+		return sum;
+	}
+
+	X17_DEVICE void load_sink_scores(
+		f32 (&top_sink_scaled)[HEADS_PER_KERNEL],
+		f32 (&bot_sink_scaled)[HEADS_PER_KERNEL],
+		GMatrixDynSize<bf16, QK_GROUP_DIM> gQ,
+		bf16 const *gSinks_ptr,
+		usize i_head_base,
+		usize q_start,
+		usize tid,
+		f32 const (&top_score_scale)[HEADS_PER_KERNEL],
+		f32 const (&bot_score_scale)[HEADS_PER_KERNEL]
+	) {
+		constexpr f32 DISABLED_SINK = std::numeric_limits<f32>::lowest();
+		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
+			top_sink_scaled[h] = DISABLED_SINK;
+			bot_sink_scaled[h] = DISABLED_SINK;
+		}
+
+		if (gSinks_ptr != nullptr && (tid & 3u) == 0u) {
+			usize row_in_half = tid / 4;
+			usize top_row = q_start + row_in_half;
+			usize bot_row = top_row + 8;
+			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
+				bf16 const *sink_ptr = gSinks_ptr + (i_head_base + h) * QK_DIM;
+				bf16 const *top_q_ptr = gQ._ptr + top_row * Q_STRIDE + h * QK_DIM;
+				bf16 const *bot_q_ptr = gQ._ptr + bot_row * Q_STRIDE + h * QK_DIM;
+				top_sink_scaled[h] = dot_bf16_vectors(top_q_ptr, sink_ptr) * top_score_scale[h];
+				bot_sink_scaled[h] = dot_bf16_vectors(bot_q_ptr, sink_ptr) * bot_score_scale[h];
+			}
+		}
+
+		int row_leader = int(tid & ~3u);
+		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
+			top_sink_scaled[h] = shuffle_sync(top_sink_scaled[h], row_leader);
+			bot_sink_scaled[h] = shuffle_sync(bot_sink_scaled[h], row_leader);
+		}
+	}
+
 	static constexpr f32 ONLINE_SOFTMAX_THRESHOLD = 5.0 / math::fast::logb_2;
 
 	X17_DEVICE void online_softmax(
@@ -272,6 +317,7 @@ struct Attn_forward {
 	X17_DEVICE void run(
 		usize seq_len, bf16 *gQ_ptr,
 		bf16 *gK_ptr, bf16 *gV_ptr,
+		bf16 const *gSinks_ptr,
 		bf16 *gOut_ptr,
 		f32 *gL_ptr,
 		f32 *head_params,
@@ -368,9 +414,7 @@ struct Attn_forward {
 		// `tempertature` is used because Q and K are normalized with L2 norm and so without
 		// scaling, all the inputs to softmax would be between -1 and +1
 
-		// block.py now provides one temperature per head.
-		// Sink and gate stay disabled in this forward-only comparison path.
-		f32 gate[HEADS_PER_KERNEL];
+		// block.py provides one temperature per head and a separate sink vector per head.
 		f32 top_sink_scaled[HEADS_PER_KERNEL];
 		f32 bot_sink_scaled[HEADS_PER_KERNEL];
 		f32 top_score_scale[HEADS_PER_KERNEL];
@@ -378,12 +422,20 @@ struct Attn_forward {
 		f32 head_temperature[HEADS_PER_KERNEL];
 		load_shared_Nx32b(sHeadParams._ptr + sizeof(f32) * (i_head_base % 4), head_temperature);
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-			gate[h] = 1.0f;
 			top_score_scale[h] = head_temperature[h] * top_ssmax;
 			bot_score_scale[h] = head_temperature[h] * bot_ssmax;
-			top_sink_scaled[h] = std::numeric_limits<f32>::lowest();
-			bot_sink_scaled[h] = std::numeric_limits<f32>::lowest();
 		}
+		load_sink_scores(
+			top_sink_scaled,
+			bot_sink_scaled,
+			gQ,
+			gSinks_ptr,
+			i_head_base,
+			q_start,
+			tid,
+			top_score_scale,
+			bot_score_scale
+		);
 
 		SoftmaxStats top_stats[HEADS_PER_KERNEL];
 		SoftmaxStats bot_stats[HEADS_PER_KERNEL];
@@ -479,7 +531,6 @@ struct Attn_forward {
 			bot_stats,
 			top_sink_scaled,
 			bot_sink_scaled,
-			gate,
 			q_start,
 			q_warp_idx,
 			gOut_block,
@@ -495,11 +546,12 @@ __global__ __launch_bounds__(Attn_forward::THREADS_PER_BLOCK) void
 attn_forward(
 	usize seq_len, bf16 *gQ_ptr,
 	bf16 *gK_ptr, bf16 *gV_ptr,
+	bf16 const *gSinks_ptr,
 	bf16 *gOut_ptr,
 	f32 *gL_ptr,
 	f32 *head_params,
 	usize window_size
 ) {
 	Attn_forward attn_forward = Attn_forward();
-	attn_forward.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gOut_ptr, gL_ptr, head_params, window_size);
+	attn_forward.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gSinks_ptr, gOut_ptr, gL_ptr, head_params, window_size);
 }
