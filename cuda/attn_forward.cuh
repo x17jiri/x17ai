@@ -1,6 +1,6 @@
 #pragma once
 
-#include "utils2.cuh"
+#include "utils.cuh"
 
 #pragma nv_diag_suppress 186
 
@@ -42,7 +42,6 @@ struct Attn_forward {
 
 	static constexpr usize WARPS_PER_BLOCK = Q_WARPS * KV_WARPS;
 	static constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
-	static constexpr f32 SCORE_SCALE = math::constexpr_rsqrt(f64(QK_DIM));
 
 	static constexpr usize Q_STRIDE = QK_DIM * HEAD_CNT;
 	static constexpr usize K_STRIDE = QK_DIM * HEAD_CNT;
@@ -61,7 +60,7 @@ struct Attn_forward {
 			KV_PER_STEP * PRELOAD_DIM * GMEM_PRELOAD
 			+ Q_PER_BLOCK * QK_GROUP_DIM
 		)
-		+ sizeof(f32) * HEADS_PER_KERNEL * 4;
+		+ sizeof(f32) * 4; // head_params
 
 	static X17_DEVICE void causal_mask_diagonal(Fragment_16x16<f32> &rS_f32) {
 		usize tid = threadIdx.x % WARP_SIZE;
@@ -198,7 +197,6 @@ struct Attn_forward {
 		SoftmaxStats (&bot_stats)[HEADS_PER_KERNEL],
 		f32 (&top_sink_scaled)[HEADS_PER_KERNEL],
 		f32 (&bot_sink_scaled)[HEADS_PER_KERNEL],
-		f32 (&gate)[HEADS_PER_KERNEL],
 		usize q_start,
 		usize q_warp_idx,
 		GMatrix<bf16, Q_PER_BLOCK, V_GROUP_DIM> gOut_block,
@@ -226,12 +224,12 @@ struct Attn_forward {
 			top_stats[h].sum += math::fast::expb(top_sink_scaled[h] - top_stats[h].max);
 			bot_stats[h].sum += math::fast::expb(bot_sink_scaled[h] - bot_stats[h].max);
 
-			// Rescale, folding in normalization and gate
+			// Rescale, folding in normalization
 			top_L[h] = math::fast::logb(top_stats[h].sum) + top_stats[h].max;
 			bot_L[h] = math::fast::logb(bot_stats[h].sum) + bot_stats[h].max;
 
-			f32 top_rescale = math::fast::divide(gate[h], top_stats[h].sum);
-			f32 bot_rescale = math::fast::divide(gate[h], bot_stats[h].sum);
+			f32 top_rescale = math::fast::recip(top_stats[h].sum);
+			f32 bot_rescale = math::fast::recip(bot_stats[h].sum);
 
 			scale_top_(rO_f32[h], top_rescale);
 			scale_bottom_(rO_f32[h], bot_rescale);
@@ -260,16 +258,12 @@ struct Attn_forward {
 	) {
 		if (p < kv_end) {
 			SMatrix<bf16, KV_PER_STEP, PRELOAD_DIM> preload_tile = tile_m<KV_PER_STEP>(preload, p % GMEM_PRELOAD);
-			cp_async_gmem_to_smem<THREADS_PER_BLOCK>(
-				threadIdx.x,
-				tile_m<KV_PER_STEP>(gK, p),
-				preload_tile, 0, 0
+			cp_async_gmem_to_smem<THREADS_PER_BLOCK, KV_PER_STEP, QK_GROUP_DIM>(
+				threadIdx.x, tile_m<KV_PER_STEP>(gK, p), preload_tile, 0, 0, 0, 0
 			);
 			if constexpr (!V_EQUALS_K) {
-				cp_async_gmem_to_smem<THREADS_PER_BLOCK>(
-					threadIdx.x,
-					tile_m<KV_PER_STEP>(gV, p),
-					preload_tile, 0, V_SMEM_COL
+				cp_async_gmem_to_smem<THREADS_PER_BLOCK, KV_PER_STEP, V_GROUP_DIM>(
+					threadIdx.x, tile_m<KV_PER_STEP>(gV, p), preload_tile, 0, 0, 0, V_SMEM_COL
 				);
 			}
 		}
@@ -299,21 +293,22 @@ struct Attn_forward {
 		usize tid = threadIdx.x % WARP_SIZE;
 		SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, PRELOAD_DIM> sPreload{smem};
 		SMatrix<bf16, Q_PER_BLOCK, QK_GROUP_DIM> sQ{sPreload._ptr + sPreload.bytes()};
-		SMatrix_32b<f32, HEADS_PER_KERNEL, 4> sHeadParams{sQ._ptr + sQ.bytes()};
+		SMatrix_32b<f32, 1, 4> sHeadParams{sQ._ptr + sQ.bytes()};
 
-		// Load Q and head params from GMEM to SMEM (no commit — piggyback on first KV commit)
+		// Load Q from GMEM to SMEM (committed with the first KV preload).
+		// Head temperatures are a single f32 per head, so load them directly.
 		usize q_block_idx = blockIdx.x;
 		usize q_block_start = q_block_idx * Q_PER_BLOCK;
 		usize q_block_end = q_block_start + Q_PER_BLOCK;
 		usize q_start = q_block_start + q_warp_idx * Q_PER_WARP;
 		GMatrix<bf16, Q_PER_BLOCK, QK_GROUP_DIM> gQ_block = tile_m<Q_PER_BLOCK>(gQ, q_block_idx);
-		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, gQ_block, sQ);
-		if (head_params != nullptr) {
-			if (threadIdx.x < HEADS_PER_KERNEL) {
-				f32 const *gHeadParam = head_params + 4 * (i_head_base + threadIdx.x);
-				u32 sHeadParam = sHeadParams._ptr + threadIdx.x * sHeadParams.ROW_BYTES;
-				sm80::cp_async(gHeadParam, sHeadParam);
-			}
+		cp_async_gmem_to_smem<THREADS_PER_BLOCK, Q_PER_BLOCK, QK_GROUP_DIM>(
+			threadIdx.x, gQ_block, sQ, 0, 0, 0, 0
+		);
+		if (threadIdx.x == 0) {
+			static_assert(std::has_single_bit(HEADS_PER_KERNEL));
+			static_assert(HEADS_PER_KERNEL <= 4);
+			sm80::cp_async(head_params + (i_head_base & ~3u), sHeadParams._ptr);
 		}
 
 		// round window_size up without overflow (window_size == 0 means disabled)
@@ -333,19 +328,18 @@ struct Attn_forward {
 			cp_async_commit();
 		}
 
-		// Scalable-Softmax: score_scale = (1.0 / sqrt(QK_DIM)) * ln(n) * logb(e)
-		//     1.0 / sqrt(QK_DIM) — standard attention scaling
+		// Scalable-Softmax: score_scale = ln(n) * logb(e)
 		//     ln(n)              — SSMax factor (ln(n) = logb(n) / logb(e))
 		//     logb(e)            — so we can use expb instead of exp
 		// Since we are multiplying and dividing by logb(e), it cancels out, so:
-		//     score_scale = (1.0 / sqrt(QK_DIM)) * logb(n)
+		//     score_scale = logb(n)
 		// When calculating `n`, we add:
 		//     `e` to make sure the SSMax scale >= 1
 		//     `1` to account for the sink token
 		f32 top_n = std::min(window_size, q_start + tid / 4 + 1) + f32(std::numbers::e_v<f64> + 1.0);
 		f32 bot_n = std::min(window_size, q_start + tid / 4 + 9) + f32(std::numbers::e_v<f64> + 1.0);
-		f32 base_top_score_scale = SCORE_SCALE * math::fast::logb(top_n);
-		f32 base_bot_score_scale = SCORE_SCALE * math::fast::logb(bot_n);
+		f32 top_ssmax = math::fast::logb(top_n);
+		f32 bot_ssmax = math::fast::logb(bot_n);
 
 		// O accumulator
 		Fragment_16x16<f32> rO_f32[HEADS_PER_KERNEL][V_TILES];
@@ -371,38 +365,24 @@ struct Attn_forward {
 			}
 		}
 
-		// `tempertature` is used because all Q, K, V are normalized with L2 norm and so without
+		// `tempertature` is used because Q and K are normalized with L2 norm and so without
 		// scaling, all the inputs to softmax would be between -1 and +1
 
-		// Sink: a virtual token with no V contribution - it only adds to the
-		// softmax denominator, stealing probability from real tokens.
-		// head_params[4*i_head + 0] = output gate
-		// head_params[4*i_head + 1] = temperature
-		// head_params[4*i_head + 2] = sink score
-		// head_params[4*i_head + 3] = unused padding
+		// block.py now provides one temperature per head.
+		// Sink and gate stay disabled in this forward-only comparison path.
 		f32 gate[HEADS_PER_KERNEL];
 		f32 top_sink_scaled[HEADS_PER_KERNEL];
 		f32 bot_sink_scaled[HEADS_PER_KERNEL];
 		f32 top_score_scale[HEADS_PER_KERNEL];
 		f32 bot_score_scale[HEADS_PER_KERNEL];
-		if (head_params != nullptr) {
-			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-				u32 head_param_ptr = sHeadParams._ptr + h * sHeadParams.ROW_BYTES;
-				f32 temperature, sink_score, unused;
-				load_shared_4x32b<f32>(head_param_ptr, gate[h], temperature, sink_score, unused);
-				top_score_scale[h] = temperature * base_top_score_scale;
-				bot_score_scale[h] = temperature * base_bot_score_scale;
-				top_sink_scaled[h] = math::max(sink_score * top_score_scale[h], std::numeric_limits<f32>::lowest());
-				bot_sink_scaled[h] = math::max(sink_score * bot_score_scale[h], std::numeric_limits<f32>::lowest());
-			}
-		} else {
-			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-				gate[h] = 1.0f;
-				top_score_scale[h] = base_top_score_scale;
-				bot_score_scale[h] = base_bot_score_scale;
-				top_sink_scaled[h] = std::numeric_limits<f32>::lowest();
-				bot_sink_scaled[h] = std::numeric_limits<f32>::lowest();
-			}
+		f32 head_temperature[HEADS_PER_KERNEL];
+		load_shared_Nx32b(sHeadParams._ptr + sizeof(f32) * (i_head_base % 4), head_temperature);
+		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+			gate[h] = 1.0f;
+			top_score_scale[h] = head_temperature[h] * top_ssmax;
+			bot_score_scale[h] = head_temperature[h] * bot_ssmax;
+			top_sink_scaled[h] = std::numeric_limits<f32>::lowest();
+			bot_sink_scaled[h] = std::numeric_limits<f32>::lowest();
 		}
 
 		SoftmaxStats top_stats[HEADS_PER_KERNEL];

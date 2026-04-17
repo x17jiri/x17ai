@@ -1,7 +1,8 @@
 #include "cuda/qkv_proj.cuh"
 #include "block.config.hpp"
-#include "cutlass/util/GPU_Clock.hpp"
 #include "utils2.cuh"
+
+#include <algorithm>
 
 int main(int argc, char *argv[]) {
 	constexpr usize A_ROWS = 4 * config::n_heads * config::head_dim;
@@ -62,14 +63,18 @@ int main(int argc, char *argv[]) {
 	}
 	cudaDeviceSynchronize();
 
-	GPU_Clock timer;
-	timer.start();
 	int NUM_RUNS = 100;
+	std::vector<cudaEvent_t> starts(NUM_RUNS), ends(NUM_RUNS);
 	for (int i = 0; i < NUM_RUNS; ++i) {
+		cudaEventCreate(&starts[i]);
+		cudaEventCreate(&ends[i]);
+	}
+	for (int i = 0; i < NUM_RUNS; ++i) {
+		cudaEventRecord(starts[i]);
 		qkv_proj<Proj><<<grid, Proj::THREADS_PER_BLOCK, Proj::SMEM_BYTES>>>(d_A, d_B, d_G, d_C);
+		cudaEventRecord(ends[i]);
 	}
 	cudaDeviceSynchronize();
-	double elapsed = timer.seconds() / NUM_RUNS;
 
 	cudaError_t err = cudaGetLastError();
 	if (err != cudaSuccess) {
@@ -77,11 +82,21 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
+	std::vector<float> times_ms(NUM_RUNS);
+	for (int i = 0; i < NUM_RUNS; ++i) {
+		cudaEventElapsedTime(&times_ms[i], starts[i], ends[i]);
+		cudaEventDestroy(starts[i]);
+		cudaEventDestroy(ends[i]);
+	}
+	std::sort(times_ms.begin(), times_ms.end());
+
+	float median_ms = times_ms[NUM_RUNS / 2];
+	float min_ms = times_ms[0];
 	double strict_flops = 2.0 * A_ROWS * A_COLS * B_COLS;
 	double fake_flops = 2.0 * A_ROWS * B_ROWS * B_COLS;
-	double strict_tflops = strict_flops / elapsed / 1e12;
-	double fake_tflops = fake_flops / elapsed / 1e12;
-	printf("Average kernel time over %d runs: %.3f ms\n", NUM_RUNS, elapsed * 1e3);
+	double strict_tflops = strict_flops / (median_ms * 1e-3) / 1e12;
+	double fake_tflops = fake_flops / (median_ms * 1e-3) / 1e12;
+	printf("Kernel time over %d runs: median %.3f ms  min %.3f ms\n", NUM_RUNS, median_ms, min_ms);
 	printf("Strict TFLOPS (compact A): %.2f\n", strict_tflops);
 	printf("Fake TFLOPS (full d_model): %.2f\n", fake_tflops);
 

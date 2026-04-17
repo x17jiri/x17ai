@@ -404,7 +404,31 @@ X17_DEVICE T load_shared_1x32b(u32 ptr) {
 	return value;
 }
 
-/*
+template<const usize N, typename T>
+requires(sizeof(T) == 4 && (N == 1 || N == 2 || N == 4))
+X17_DEVICE void load_shared_Nx32b(u32 ptr, T (&values)[N]) {
+	if constexpr (N == 1) {
+		values[0] = load_shared_1x32b<T>(ptr);
+	} else if constexpr (N == 2) {
+		load_shared_2x32b(ptr, values[0], values[1]);
+	} else {
+		load_shared_4x32b(ptr, values[0], values[1], values[2], values[3]);
+	}
+}
+
+/// Load one f32 value from global memory in a single 32-bit transaction.
+template<typename T>
+requires(sizeof(T) == 4)
+X17_DEVICE T load_gmem_1x32b(const T *ptr) {
+	T value;
+	asm volatile(
+		"ld.global.f32 %0, [%1];\n"
+		: "=f"(value)
+		: "l"(ptr)
+	);
+	return value;
+}
+
 /// Load two consecutive f32 values from global memory in a single 64-bit transaction.
 template<typename T>
 requires(sizeof(T) == 4)
@@ -425,7 +449,18 @@ X17_DEVICE void load_gmem_4x32b(const T *ptr, T &a, T &b, T &c, T &d) {
 		: "l"(ptr)
 	);
 }
-*/
+
+template<const usize N, typename T>
+requires(sizeof(T) == 4 && (N == 1 || N == 2 || N == 4))
+X17_DEVICE void load_gmem_Nx32b(const T *ptr, T (&values)[N]) {
+	if constexpr (N == 1) {
+		values[0] = load_gmem_1x32b(ptr);
+	} else if constexpr (N == 2) {
+		load_gmem_2x32b(ptr, values[0], values[1]);
+	} else {
+		load_gmem_4x32b(ptr, values[0], values[1], values[2], values[3]);
+	}
+}
 
 //--------------------------------------------------------------------------------------------------
 
