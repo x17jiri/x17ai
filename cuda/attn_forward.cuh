@@ -229,18 +229,16 @@ struct Attn_forward {
 				new_top_max - top.max > ONLINE_SOFTMAX_THRESHOLD
 					? new_top_max + ONLINE_SOFTMAX_THRESHOLD
 					: top.max;
-
 			new_bot_max =
 				new_bot_max - bot.max > ONLINE_SOFTMAX_THRESHOLD
 					? new_bot_max + ONLINE_SOFTMAX_THRESHOLD
 					: bot.max;
 
+			top_rescale = math::fast::expb(top.max - new_top_max);
+			bot_rescale = math::fast::expb(bot.max - new_bot_max);
 
 			if (!first_step) {
-				top_rescale = math::fast::expb(top.max - new_top_max);
 				scale_top_(rO_f32, top_rescale);
-
-				bot_rescale = math::fast::expb(bot.max - new_bot_max);
 				scale_bottom_(rO_f32, bot_rescale);
 			}
 
