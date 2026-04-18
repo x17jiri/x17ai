@@ -1,11 +1,11 @@
 {
-	"n_inputs": 32768,
+	"n_inputs": 16384,
 	"d_model": 1024,
 	"n_heads": 32,
 	"head_dim": 32,
 	"rope_dim": 32,
 	"qkv_fan_in": 256,
-	"window_size": 256,
+	"window_size": 0, //256,
 	"l2_norm_eps": 1e-30,
 	"rope_base": 10000.0,
 }

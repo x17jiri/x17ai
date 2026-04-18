@@ -28,8 +28,7 @@ struct QKVProj {
 	static constexpr usize SMEM_BYTES = GMEM_PRELOAD * K_STEP * (M_PER_BLOCK + N_PER_BLOCK) * sizeof(bf16);
 
 	static constexpr usize K_ITERS = B_ROWS / K_STEP;
-
-	static constexpr f32 ROPE_LOG_SCALE = -2.0 * math::fast::constexpr_logb(ROPE_BASE) / f64(ROPE_DIM);
+	static constexpr usize PACKED_DIM = N_HEADS * HEAD_DIM;
 
 	static_assert(WARPS_PER_BLOCK == 4);
 	static_assert(K_STEP % 16 == 0);
@@ -43,6 +42,7 @@ struct QKVProj {
 	static_assert((INPUT_STEP * sizeof(bf16)) % 16 == 0);
 	static_assert(A_COLS <= B_ROWS);
 	static_assert(A_COLS % K_STEP == 0);
+	static_assert(A_ROWS == 3 * PACKED_DIM);
 	static_assert(M_PER_BLOCK % N_HEADS == 0);
 	static_assert((B_ROWS * sizeof(bf16)) % 16 == 0);
 
@@ -151,34 +151,9 @@ struct QKVProj {
 				threadIdx.x,
 				gB_block.template slice_n<K_STEP>(first_b_col + p * K_STEP),
 				sB_tile,
-				0,
-				0,
-				0,
-				0
+				0, 0, 0, 0
 			);
 		}
-	}
-
-	X17_DEVICE void rope_rotate_pair(Fragment_8x8<f32> &frag, f32 c, f32 s) {
-		f32 even = frag.first();
-		f32 odd = frag.second();
-		frag.set(
-			math::fma(-odd, s, even * c),
-			math::fma(even, s, odd * c)
-		);
-	}
-
-	X17_DEVICE f32 gelu(f32 x) {
-		static constexpr f32 CK = f32(math::constexpr_rsqrt(std::numbers::pi_v<f64> / 2.0));
-		static constexpr f32 CK3 = f32(0.044715 * math::constexpr_rsqrt(std::numbers::pi_v<f64> / 2.0));
-		f32 y = math::fma(CK3 * x, x * x, CK * x);
-		return math::fma(0.5f * x, math::fast::tanh(y), 0.5f * x);
-	}
-
-	X17_DEVICE void gate_gelu_pair(Fragment_8x8<f32> &frag, f32 weight0, f32 weight1) {
-		f32 x0 = frag.first() * weight0;
-		f32 x1 = frag.second() * weight1;
-		frag.set(gelu(x0), gelu(x1));
 	}
 
 	template<usize N_TILE_CNT>
@@ -193,85 +168,18 @@ struct QKVProj {
 		constexpr usize GROUP_CNT = M_PER_WARP / HEAD_DIM;
 		constexpr usize ROPE_TILE_CNT = ROPE_DIM / 16;
 		constexpr usize QK_COLS = N_HEADS * HEAD_DIM;
-		usize tid = threadIdx.x % WARP_SIZE;
-		usize row_in_half = tid / 4;
-		usize pair_in_quad = tid % 4;
-
-		X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
-			usize top_row = block_n + warp_n + ni * 16 + row_in_half;
-			usize bot_row = top_row + 8;
-			X17_UNROLL for (usize group = 0; group < GROUP_CNT; ++group) {
-				usize group_col = block_m + warp_m + group * HEAD_DIM;
-				if (group_col < QK_COLS || group_col >= 2*QK_COLS) {
-					continue;
-				}
-				X17_UNROLL for (usize tile = 0; tile < ROPE_TILE_CNT; ++tile) {
-					Fragment_16x16<f32> &frag = acc[ni][group * GROUP_TILE_CNT + tile];
-					usize pair_base = tile * 8;
-
-					f32 left_freq_recip = math::fast::expb(ROPE_LOG_SCALE * f32(pair_base + pair_in_quad));
-					f32 right_freq_recip = math::fast::expb(ROPE_LOG_SCALE * f32(pair_base + 4 + pair_in_quad));
-
-					f32 top_left_theta = f32(top_row) * left_freq_recip;
-					f32 top_right_theta = f32(top_row) * right_freq_recip;
-					f32 bot_left_theta = f32(bot_row) * left_freq_recip;
-					f32 bot_right_theta = f32(bot_row) * right_freq_recip;
-
-					f32 top_left_cos = math::fast::cos(top_left_theta);
-					f32 top_left_sin = math::fast::sin(top_left_theta);
-					f32 top_right_cos = math::fast::cos(top_right_theta);
-					f32 top_right_sin = math::fast::sin(top_right_theta);
-
-					f32 bot_left_cos = math::fast::cos(bot_left_theta);
-					f32 bot_left_sin = math::fast::sin(bot_left_theta);
-					f32 bot_right_cos = math::fast::cos(bot_right_theta);
-					f32 bot_right_sin = math::fast::sin(bot_right_theta);
-
-					rope_rotate_pair(frag.sub[0][0], top_left_cos, top_left_sin);
-					rope_rotate_pair(frag.sub[0][1], top_right_cos, top_right_sin);
-					rope_rotate_pair(frag.sub[1][0], bot_left_cos, bot_left_sin);
-					rope_rotate_pair(frag.sub[1][1], bot_right_cos, bot_right_sin);
-				}
-			}
-		}
-	}
-
-	template<usize N_TILE_CNT>
-	X17_DEVICE void apply_g_weight_and_gelu(
-		Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILES],
-		bf16 const *g_weights,
-		usize block_m,
-		usize warp_m
-	) {
-		constexpr usize GROUP_TILE_CNT = HEAD_DIM / 16;
-		constexpr usize GROUP_CNT = M_PER_WARP / HEAD_DIM;
-		constexpr usize G_COL_BEGIN = 3 * N_HEADS * HEAD_DIM;
-		constexpr usize G_COL_END = 4 * N_HEADS * HEAD_DIM;
-		usize tid = threadIdx.x % WARP_SIZE;
-		usize pair_in_quad = tid % 4;
 
 		X17_UNROLL for (usize group = 0; group < GROUP_CNT; ++group) {
 			usize group_col = block_m + warp_m + group * HEAD_DIM;
-			if (group_col < G_COL_BEGIN || group_col >= G_COL_END) {
+			if (group_col >= QK_COLS) {
 				continue;
 			}
-
-			usize head_idx = (group_col - G_COL_BEGIN) / HEAD_DIM;
-			X17_UNROLL for (usize tile = 0; tile < GROUP_TILE_CNT; ++tile) {
-				usize left_col = tile * 16 + 2 * pair_in_quad;
-				usize right_col = left_col + 8;
-
-				f32 left_w0 = static_cast<f32>(g_weights[head_idx * HEAD_DIM + left_col + 0]);
-				f32 left_w1 = static_cast<f32>(g_weights[head_idx * HEAD_DIM + left_col + 1]);
-				f32 right_w0 = static_cast<f32>(g_weights[head_idx * HEAD_DIM + right_col + 0]);
-				f32 right_w1 = static_cast<f32>(g_weights[head_idx * HEAD_DIM + right_col + 1]);
-
-				X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
+			X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
+				X17_UNROLL for (usize tile = 0; tile < ROPE_TILE_CNT; ++tile) {
 					Fragment_16x16<f32> &frag = acc[ni][group * GROUP_TILE_CNT + tile];
-					gate_gelu_pair(frag.sub[0][0], left_w0, left_w1);
-					gate_gelu_pair(frag.sub[1][0], left_w0, left_w1);
-					gate_gelu_pair(frag.sub[0][1], right_w0, right_w1);
-					gate_gelu_pair(frag.sub[1][1], right_w0, right_w1);
+					Fragment_16x16<f32> coefs;
+					rope_coefs<ROPE_DIM, ROPE_BASE>(coefs, block_n + warp_n + ni * 16, tile * 16);
+					apply_rope_(frag, coefs);
 				}
 			}
 		}
@@ -318,7 +226,7 @@ struct QKVProj {
 		}
 	}
 
-	X17_DEVICE void run(bf16 *A, bf16 *B, bf16 const *g_weights, bf16 *C) {
+	X17_DEVICE void run(bf16 *A, bf16 *B, bf16 *C) {
 		static_assert(A_COLS % K_STEP == 0);
 		static_assert(A_COLS <= B_ROWS);
 
@@ -391,7 +299,6 @@ struct QKVProj {
 
 		l2_norm(acc_t);
 		apply_rope(acc_t, block_m, block_n, warp_m, warp_n);
-		apply_g_weight_and_gelu(acc_t, g_weights, block_m, warp_m);
 
 		bf16 *c_ptr = C + blockIdx.y * N_PER_BLOCK * A_ROWS + blockIdx.x * M_PER_BLOCK;
 		GMatrix<bf16, N_PER_BLOCK, M_PER_BLOCK> gC_block{c_ptr, A_ROWS};
@@ -402,7 +309,7 @@ struct QKVProj {
 };
 
 template<typename QKVProj>
-__global__ __launch_bounds__(QKVProj::THREADS_PER_BLOCK) void qkv_proj(bf16 *A, bf16 *B, bf16 const *g_weights, bf16 *C) {
+__global__ __launch_bounds__(QKVProj::THREADS_PER_BLOCK) void qkv_proj(bf16 *A, bf16 *B, bf16 *C) {
 	QKVProj qkv_proj = QKVProj();
-	qkv_proj.run(A, B, g_weights, C);
+	qkv_proj.run(A, B, C);
 }
