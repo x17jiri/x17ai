@@ -6,6 +6,7 @@
 
 int main(int argc, char *argv[]) {
 	constexpr usize A_ROWS = 3 * config::n_heads * config::head_dim;
+	constexpr usize QK_ROWS = 2 * config::n_heads * config::head_dim;
 	constexpr usize A_COLS = config::qkv_fan_in;
 	constexpr usize B_ROWS = config::d_model;
 	usize B_COLS = config::n_inputs;
@@ -35,17 +36,20 @@ int main(int argc, char *argv[]) {
 
 	std::vector<bf16> h_A = load_tensor("tmp/block_torch/qkv_weights.bin", A_ROWS, A_COLS);
 	std::vector<bf16> h_B = load_tensor("tmp/block_torch/inputs.bin", B_COLS, B_ROWS);
-	if (h_A.empty() || h_B.empty()) {
+	std::vector<bf16> h_S = load_tensor("tmp/block_torch/qk_norm_scales.bin", 1, QK_ROWS);
+	if (h_A.empty() || h_B.empty() || h_S.empty()) {
 		return 1;
 	}
 	std::vector<bf16> h_C(C_ROWS * C_COLS);
 
-	bf16 *d_A, *d_B, *d_C;
+	bf16 *d_A, *d_B, *d_S, *d_C;
 	cudaMalloc(&d_A, h_A.size() * sizeof(bf16));
 	cudaMalloc(&d_B, h_B.size() * sizeof(bf16));
+	cudaMalloc(&d_S, h_S.size() * sizeof(bf16));
 	cudaMalloc(&d_C, h_C.size() * sizeof(bf16));
 	cudaMemcpy(d_A, h_A.data(), h_A.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_B, h_B.data(), h_B.size() * sizeof(bf16), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_S, h_S.data(), h_S.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 
 	dim3 grid(C_ROWS / Proj::M_PER_BLOCK, C_COLS / Proj::N_PER_BLOCK);
 
@@ -54,7 +58,7 @@ int main(int argc, char *argv[]) {
 
 	int warmup = 30;
 	for (int i = 0; i < warmup; ++i) {
-		qkv_proj<Proj><<<grid, Proj::THREADS_PER_BLOCK, Proj::SMEM_BYTES>>>(d_A, d_B, d_C);
+		qkv_proj<Proj><<<grid, Proj::THREADS_PER_BLOCK, Proj::SMEM_BYTES>>>(d_A, d_B, d_S, d_C);
 	}
 	cudaDeviceSynchronize();
 
@@ -66,7 +70,7 @@ int main(int argc, char *argv[]) {
 	}
 	for (int i = 0; i < NUM_RUNS; ++i) {
 		cudaEventRecord(starts[i]);
-		qkv_proj<Proj><<<grid, Proj::THREADS_PER_BLOCK, Proj::SMEM_BYTES>>>(d_A, d_B, d_C);
+		qkv_proj<Proj><<<grid, Proj::THREADS_PER_BLOCK, Proj::SMEM_BYTES>>>(d_A, d_B, d_S, d_C);
 		cudaEventRecord(ends[i]);
 	}
 	cudaDeviceSynchronize();
@@ -97,10 +101,11 @@ int main(int argc, char *argv[]) {
 
 	cudaMemcpy(h_C.data(), d_C, h_C.size() * sizeof(bf16), cudaMemcpyDeviceToHost);
 
-	store_tensor("tmp/block_cuda/kvq.bin", h_C, C_ROWS, C_COLS);
+	store_tensor("tmp/block_cuda/qkv.bin", h_C, C_ROWS, C_COLS);
 
 	cudaFree(d_A);
 	cudaFree(d_B);
+	cudaFree(d_S);
 	cudaFree(d_C);
 	return 0;
 }

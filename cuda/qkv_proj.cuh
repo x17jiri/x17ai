@@ -32,6 +32,7 @@ struct QKVProj {
 
 	static_assert(WARPS_PER_BLOCK == 4);
 	static_assert(K_STEP % 16 == 0);
+	static_assert(M_PER_WARP % HEAD_DIM == 0);
 	static_assert(HEAD_DIM <= N_PER_WARP);
 	static_assert(HEAD_DIM % 16 == 0);
 	static_assert(N_PER_WARP % HEAD_DIM == 0);
@@ -43,8 +44,80 @@ struct QKVProj {
 	static_assert(A_COLS <= B_ROWS);
 	static_assert(A_COLS % K_STEP == 0);
 	static_assert(A_ROWS == 3 * PACKED_DIM);
+	static_assert(PACKED_DIM % M_PER_WARP == 0);
 	static_assert(M_PER_BLOCK % N_HEADS == 0);
 	static_assert((B_ROWS * sizeof(bf16)) % 16 == 0);
+
+	X17_DEVICE void scale_pair(Fragment_8x8<f32> &frag, f32 first_scale, f32 second_scale) {
+		frag.set(
+			frag.first() * first_scale,
+			frag.second() * second_scale
+		);
+	}
+
+	X17_DEVICE bool is_q(usize block_m, usize warp_m) {
+		usize warp_col = block_m + warp_m;
+		return warp_col < PACKED_DIM;
+	}
+
+	X17_DEVICE bool is_k(usize block_m, usize warp_m) {
+		usize warp_col = block_m + warp_m;
+		return warp_col >= PACKED_DIM && warp_col < 2 * PACKED_DIM;
+	}
+
+	X17_DEVICE bool is_v(usize block_m, usize warp_m) {
+		usize warp_col = block_m + warp_m;
+		return warp_col >= 2 * PACKED_DIM;
+	}
+
+	template<usize N_TILE_CNT>
+	X17_DEVICE void apply_norm_scales(
+		Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILES],
+		bf16 const *gQKNormScale_ptr,
+		usize block_m,
+		usize warp_m
+	) {
+		usize pair_in_quad = threadIdx.x % 4;
+
+		X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+			usize col_base = block_m + warp_m + mi * 16;
+			usize left_col = col_base + pair_in_quad * 2;
+			usize right_col = left_col + 8;
+
+			union {
+				u32 packed;
+				bf16 values[2];
+			} left_scale, right_scale;
+
+			left_scale.packed = __float_as_uint(load_gmem_1x32b(reinterpret_cast<f32 const *>(gQKNormScale_ptr + left_col)));
+			right_scale.packed = __float_as_uint(load_gmem_1x32b(reinterpret_cast<f32 const *>(gQKNormScale_ptr + right_col)));
+
+			f32 left0 = f32(left_scale.values[0]);
+			f32 left1 = f32(left_scale.values[1]);
+			f32 right0 = f32(right_scale.values[0]);
+			f32 right1 = f32(right_scale.values[1]);
+
+			X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
+				Fragment_16x16<f32> &frag = acc[ni][mi];
+				scale_pair(frag.sub[0][0], left0, left1);
+				scale_pair(frag.sub[1][0], left0, left1);
+				scale_pair(frag.sub[0][1], right0, right1);
+				scale_pair(frag.sub[1][1], right0, right1);
+			}
+		}
+	}
+
+	template<usize N_TILE_CNT>
+	X17_DEVICE void scale_v_to_preserve_variance(
+		Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILES]
+	) {
+		constexpr f32 V_SCALE = math::constexpr_rsqrt(f64(A_COLS));
+		X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
+			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+				acc[ni][mi].scale_(V_SCALE);
+			}
+		}
+	}
 
 	X17_DEVICE void cp_async_ab(
 		GMatrix<bf16, M_PER_BLOCK, A_COLS> gA_block,
@@ -159,25 +232,18 @@ struct QKVProj {
 	template<usize N_TILE_CNT>
 	X17_DEVICE void apply_rope(
 		Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILES],
-		usize block_m,
 		usize block_n,
-		usize warp_m,
 		usize warp_n
 	) {
 		constexpr usize GROUP_TILE_CNT = HEAD_DIM / 16;
 		constexpr usize GROUP_CNT = M_PER_WARP / HEAD_DIM;
 		constexpr usize ROPE_TILE_CNT = ROPE_DIM / 16;
-		constexpr usize QK_COLS = N_HEADS * HEAD_DIM;
 
-		X17_UNROLL for (usize group = 0; group < GROUP_CNT; ++group) {
-			usize group_col = block_m + warp_m + group * HEAD_DIM;
-			if (group_col >= QK_COLS) {
-				continue;
-			}
-			X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
-				X17_UNROLL for (usize tile = 0; tile < ROPE_TILE_CNT; ++tile) {
+		X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
+			X17_UNROLL for (usize tile = 0; tile < ROPE_TILE_CNT; ++tile) {
+				Fragment_16x16<f32> coefs;
+				X17_UNROLL for (usize group = 0; group < GROUP_CNT; ++group) {
 					Fragment_16x16<f32> &frag = acc[ni][group * GROUP_TILE_CNT + tile];
-					Fragment_16x16<f32> coefs;
 					rope_coefs<ROPE_DIM, ROPE_BASE>(coefs, block_n + warp_n + ni * 16, tile * 16);
 					apply_rope_(frag, coefs);
 				}
@@ -226,7 +292,7 @@ struct QKVProj {
 		}
 	}
 
-	X17_DEVICE void run(bf16 *A, bf16 *B, bf16 *C) {
+	X17_DEVICE void run(bf16 *A, bf16 *B, bf16 const *gQKNormScale_ptr, bf16 *C) {
 		static_assert(A_COLS % K_STEP == 0);
 		static_assert(A_COLS <= B_ROWS);
 
@@ -297,8 +363,15 @@ struct QKVProj {
 			}
 		}
 
-		l2_norm(acc_t);
-		apply_rope(acc_t, block_m, block_n, warp_m, warp_n);
+		if (is_v(block_m, warp_m)) {
+			scale_v_to_preserve_variance(acc_t);
+		} else {
+			l2_norm(acc_t);
+			apply_norm_scales(acc_t, gQKNormScale_ptr, block_m, warp_m);
+			if (is_k(block_m, warp_m)) {
+				apply_rope(acc_t, block_n, warp_n);
+			}
+		}
 
 		bf16 *c_ptr = C + blockIdx.y * N_PER_BLOCK * A_ROWS + blockIdx.x * M_PER_BLOCK;
 		GMatrix<bf16, N_PER_BLOCK, M_PER_BLOCK> gC_block{c_ptr, A_ROWS};
@@ -309,7 +382,7 @@ struct QKVProj {
 };
 
 template<typename QKVProj>
-__global__ __launch_bounds__(QKVProj::THREADS_PER_BLOCK) void qkv_proj(bf16 *A, bf16 *B, bf16 *C) {
+__global__ __launch_bounds__(QKVProj::THREADS_PER_BLOCK) void qkv_proj(bf16 *A, bf16 *B, bf16 const *gQKNormScale_ptr, bf16 *C) {
 	QKVProj qkv_proj = QKVProj();
-	qkv_proj.run(A, B, C);
+	qkv_proj.run(A, B, gQKNormScale_ptr, C);
 }

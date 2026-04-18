@@ -59,15 +59,18 @@ def create_inputs(config: dict) -> None:
 	head_dim = int(config["head_dim"])
 	qkv_fan_in = int(config["qkv_fan_in"])
 	l2_norm_eps = float(config["l2_norm_eps"])
-	qkv_weights_rows = 3 * n_heads * head_dim
+	qkv_rows = 3 * n_heads * head_dim
+	qk_rows = 2 * n_heads * head_dim
 
 	generator = torch.Generator(device=my_device)
 	generator.manual_seed(42)
 	inputs = torch.randn((n_inputs, d_model), generator=generator)
-	qkv_weights = torch.randn((qkv_weights_rows, qkv_fan_in), generator=generator)
+	qkv_weights = torch.randn((qkv_rows, qkv_fan_in), generator=generator)
+	qk_norm_scales = torch.full((1, qk_rows), math.sqrt(head_dim))
 	sinks = l2_norm_last_dim(torch.randn((n_heads, head_dim), generator=generator), l2_norm_eps)
 	store_tensor(inputs, "inputs.bin")
 	store_tensor(qkv_weights, "qkv_weights.bin")
+	store_tensor(qk_norm_scales, "qk_norm_scales.bin")
 	store_tensor(sinks, "sinks.bin")
 
 def expand_qkv_weights(qkv_weights: torch.Tensor, d_model: int, n_heads: int) -> torch.Tensor:
@@ -128,10 +131,16 @@ def apply_rope_rows(tensor: torch.Tensor, positions: torch.Tensor, rope_base: fl
 	result[..., 1::2] = even * sin + odd * cos
 	return result
 
-def qkv_proj(inputs: torch.Tensor, qkv_weights: torch.Tensor, config: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def qkv_proj(
+	inputs: torch.Tensor,
+	qkv_weights: torch.Tensor,
+	qk_norm_scales: torch.Tensor,
+	config: dict,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 	n_inputs = int(config["n_inputs"])
 	n_heads = int(config["n_heads"])
 	head_dim = int(config["head_dim"])
+	qkv_fan_in = int(config["qkv_fan_in"])
 	l2_norm_eps = float(config["l2_norm_eps"])
 	rope_base = float(config["rope_base"])
 	d_model = int(config["d_model"])
@@ -143,13 +152,18 @@ def qkv_proj(inputs: torch.Tensor, qkv_weights: torch.Tensor, config: dict) -> t
 	qkv = torch.matmul(inputs, expanded_qkv_weights.transpose(0, 1))
 	qkv_cols = n_heads * head_dim
 
-	k = qkv[:, :qkv_cols].reshape(n_inputs, n_heads, head_dim)
-	v = qkv[:, qkv_cols:2 * qkv_cols].reshape(n_inputs, n_heads, head_dim)
-	q = qkv[:, 2 * qkv_cols:3 * qkv_cols].reshape(n_inputs, n_heads, head_dim)
+	q = qkv[:, :qkv_cols].reshape(n_inputs, n_heads, head_dim)
+	k = qkv[:, qkv_cols:2 * qkv_cols].reshape(n_inputs, n_heads, head_dim)
+	v = qkv[:, 2 * qkv_cols:3 * qkv_cols].reshape(n_inputs, n_heads, head_dim)
 
-	q = l2_norm_last_dim(q, l2_norm_eps)
-	k = l2_norm_last_dim(k, l2_norm_eps)
-	v = l2_norm_last_dim(v, l2_norm_eps)
+	qk_parts = [q, k]
+	qk_scales = qk_norm_scales.reshape(1, 2, n_heads, head_dim)
+	v_scale = 1.0 / math.sqrt(qkv_fan_in)
+	for idx in range(len(qk_parts)):
+		qk_parts[idx] = l2_norm_last_dim(qk_parts[idx], l2_norm_eps)
+		qk_parts[idx] = qk_parts[idx] * qk_scales[:, idx]
+	q, k = qk_parts
+	v = v * v_scale
 	#q = apply_rope(q, rope_base)
 	k = apply_rope(k, rope_base)
 	return q, k, v
@@ -329,12 +343,12 @@ def attn_matching(
 		out[:, h, :] = attn_one_head_online(q[:, h, :], k[:, h, :], v[:, h, :], sinks[h], window_size, rope_base)
 	return out
 
-def join_kvq(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+def join_qkv(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
 	return torch.cat(
 		(
+			q.reshape(q.shape[0], -1),
 			k.reshape(k.shape[0], -1),
 			v.reshape(v.shape[0], -1),
-			q.reshape(q.shape[0], -1),
 		),
 		dim=1,
 	)
@@ -345,20 +359,22 @@ def run_block(config: dict) -> None:
 	n_heads = int(config["n_heads"])
 	head_dim = int(config["head_dim"])
 	qkv_fan_in = int(config["qkv_fan_in"])
-	qkv_weights_rows = 3 * n_heads * head_dim
+	qkv_rows = 3 * n_heads * head_dim
+	qk_rows = 2 * n_heads * head_dim
 	window_size = int(config["window_size"])
 	rope_base = float(config["rope_base"])
 
 	inputs = load_tensor("inputs.bin", n_inputs, d_model)
-	qkv_weights = load_tensor("qkv_weights.bin", qkv_weights_rows, qkv_fan_in)
+	qkv_weights = load_tensor("qkv_weights.bin", qkv_rows, qkv_fan_in)
+	qk_norm_scales = load_tensor("qk_norm_scales.bin", 1, qk_rows)
 	sinks = load_tensor("sinks.bin", n_heads, head_dim)
-	q, k, v = qkv_proj(inputs, qkv_weights, config)
+	q, k, v = qkv_proj(inputs, qkv_weights, qk_norm_scales, config)
 	attn_out = attn(q, k, v, sinks, window_size, rope_base)
 	#attn_match = attn_matching(q, k, v, sinks, window_size, rope_base)
-	kvq = join_kvq(q, k, v)
+	qkv = join_qkv(q, k, v)
 
 	print("inputs shape:", inputs.shape)
-	print("kvq shape:", kvq.shape)
+	print("qkv shape:", qkv.shape)
 	print("q shape:", q.shape)
 	print("k shape:", k.shape)
 	print("v shape:", v.shape)
@@ -371,7 +387,7 @@ def run_block(config: dict) -> None:
 	store_tensor(v, "v.bin")
 	store_tensor(attn_out, "attn_out.bin")
 	#store_tensor(attn_match, "attn_matching.bin")
-	store_tensor(kvq, "kvq.bin")
+	store_tensor(qkv, "qkv.bin")
 
 def main() -> None:
 	parser = argparse.ArgumentParser()
