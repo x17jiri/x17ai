@@ -108,10 +108,13 @@ struct QKVProj {
 	}
 
 	template<usize N_TILE_CNT>
-	X17_DEVICE void scale_v_to_preserve_variance(
-		Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILES]
-	) {
-		constexpr f32 V_SCALE = math::constexpr_rsqrt(f64(A_COLS));
+	X17_DEVICE void scale_v(Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILES]) {
+		// The input vector is L2-normalized before this kernel, so each component has
+		// variance approximately 1 / B_ROWS.
+		// Each output sums A_COLS such components, so its variance is approximately
+		// A_COLS / B_ROWS.
+		// We multiply by sqrt(B_ROWS / A_COLS) to bring the output variance to 1.
+		constexpr f32 V_SCALE = math::constexpr_sqrt(f64(B_ROWS) / f64(A_COLS));
 		X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
 			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
 				acc[ni][mi].scale_(V_SCALE);
@@ -364,7 +367,7 @@ struct QKVProj {
 		}
 
 		if (is_v(block_m, warp_m)) {
-			scale_v_to_preserve_variance(acc_t);
+			scale_v(acc_t);
 		} else {
 			l2_norm(acc_t);
 			apply_norm_scales(acc_t, gQKNormScale_ptr, block_m, warp_m);

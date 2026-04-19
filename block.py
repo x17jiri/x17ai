@@ -66,7 +66,7 @@ def create_inputs(config: dict) -> None:
 	generator.manual_seed(42)
 	inputs = torch.randn((n_inputs, d_model), generator=generator)
 	qkv_weights = torch.randn((qkv_rows, qkv_fan_in), generator=generator)
-	qk_norm_scales = torch.full((1, qk_rows), math.sqrt(head_dim))
+	qk_norm_scales = torch.full((1, qk_rows), 1.0)
 	sinks = l2_norm_last_dim(torch.randn((n_heads, head_dim), generator=generator), l2_norm_eps)
 	store_tensor(inputs, "inputs.bin")
 	store_tensor(qkv_weights, "qkv_weights.bin")
