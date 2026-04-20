@@ -150,6 +150,7 @@ struct Attn_forward {
 
 	X17_DEVICE void load_sink_scores(
 		f32 const *gSinkScore_ptr,
+		usize seq_len,
 		usize q_start,
 		usize i_head_base,
 		f32 (&top_sink_score)[HEADS_PER_KERNEL],
@@ -162,8 +163,8 @@ struct Attn_forward {
 
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
 			// TODO - load with just one instruction, but wait until we get correctness right
-			top_sink_score[h] = load_gmem_1x32b(gSinkScore_ptr + top_row * HEAD_CNT + i_head_base + h);
-			bot_sink_score[h] = load_gmem_1x32b(gSinkScore_ptr + bot_row * HEAD_CNT + i_head_base + h);
+			top_sink_score[h] = load_gmem_1x32b(gSinkScore_ptr + (i_head_base + h) * seq_len + top_row);
+			bot_sink_score[h] = load_gmem_1x32b(gSinkScore_ptr + (i_head_base + h) * seq_len + bot_row);
 		}
 	}
 
@@ -384,7 +385,7 @@ struct Attn_forward {
 		// Sink scores were precomputed during qkv_proj from the unrotated Q path.
 		f32 top_sink_score[HEADS_PER_KERNEL];
 		f32 bot_sink_score[HEADS_PER_KERNEL];
-		load_sink_scores(gSinkScore_ptr, q_start, i_head_base, top_sink_score, bot_sink_score);
+		load_sink_scores(gSinkScore_ptr, seq_len, q_start, i_head_base, top_sink_score, bot_sink_score);
 
 
 		// round window_size up without overflow (window_size == 0 means disabled)

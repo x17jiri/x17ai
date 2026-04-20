@@ -60,18 +60,19 @@ def create_inputs(config: dict) -> None:
 	qkv_fan_in = int(config["qkv_fan_in"])
 	l2_norm_eps = float(config["l2_norm_eps"])
 	qkv_rows = 3 * n_heads * head_dim
-	qk_rows = 2 * n_heads * head_dim
+	q_rows = n_heads * head_dim
 
 	generator = torch.Generator(device=my_device)
 	generator.manual_seed(42)
 	inputs = torch.randn((n_inputs, d_model), generator=generator)
 	qkv_weights = torch.randn((qkv_rows, qkv_fan_in), generator=generator)
-	qk_norm_scales = torch.full((1, qk_rows), math.sqrt(head_dim))
-	sinks = l2_norm_last_dim(torch.randn((n_heads, head_dim), generator=generator), l2_norm_eps)
+	qk_norm_scales = torch.full((1, q_rows), 1.0)
+	sink_k = torch.randn((n_heads, head_dim), generator=generator)
+	sink_k = l2_norm_last_dim(sink_k, l2_norm_eps)
 	store_tensor(inputs, "inputs.bin")
 	store_tensor(qkv_weights, "qkv_weights.bin")
 	store_tensor(qk_norm_scales, "qk_norm_scales.bin")
-	store_tensor(sinks, "sinks.bin")
+	store_tensor(sink_k, "sinks.bin")
 
 def expand_qkv_weights(qkv_weights: torch.Tensor, d_model: int, n_heads: int) -> torch.Tensor:
 	if d_model % n_heads != 0:
@@ -131,7 +132,12 @@ def apply_rope_rows(tensor: torch.Tensor, positions: torch.Tensor, rope_base: fl
 	result[..., 1::2] = even * sin + odd * cos
 	return result
 
+def quantize_(tensor: torch.Tensor) -> torch.Tensor:
+	return tensor.to(torch.bfloat16).to(torch.float32)
+
 def calculate_sink_scores(q: torch.Tensor, sinks: torch.Tensor) -> torch.Tensor:
+	# sink score calculation is part of the qkv kernel. It has access to precise q, but it loads
+	# sinks from global memory in bf16
 	#q = q.to(torch.bfloat16).to(torch.float32)
 	sinks = sinks.to(torch.bfloat16).to(torch.float32)
 	return torch.einsum("qhd,hd->qh", q, sinks)
@@ -161,13 +167,11 @@ def qkv_proj(
 	k = qkv[:, qkv_cols:2 * qkv_cols].reshape(n_inputs, n_heads, head_dim)
 	v = qkv[:, 2 * qkv_cols:3 * qkv_cols].reshape(n_inputs, n_heads, head_dim)
 
-	qk_parts = [q, k]
-	qk_scales = qk_norm_scales.reshape(1, 2, n_heads, head_dim)
-	v_scale = 1.0 / math.sqrt(qkv_fan_in)
-	for idx in range(len(qk_parts)):
-		qk_parts[idx] = l2_norm_last_dim(qk_parts[idx], l2_norm_eps)
-		qk_parts[idx] = qk_parts[idx] * qk_scales[:, idx]
-	q, k = qk_parts
+	q_scales = qk_norm_scales.reshape(1, n_heads, head_dim)
+	v_scale = math.sqrt(d_model / qkv_fan_in)
+	q = l2_norm_last_dim(q, l2_norm_eps)
+	q = q * q_scales
+	k = l2_norm_last_dim(k, l2_norm_eps)
 	sink_scores = calculate_sink_scores(q, sinks)
 	v = v * v_scale
 	q = apply_rope(q, rope_base)
@@ -208,6 +212,7 @@ def attn_one_head(
 	v = v.to(torch.bfloat16).to(torch.float32)
 	sink_scores = sink_scores.to(torch.float32).unsqueeze(1)
 	real_scores = torch.matmul(q, k.transpose(0, 1))
+#	real_scores = quantize_(real_scores)
 	scale = ssmax(seq_len, window_size).unsqueeze(1)
 	scores = torch.cat((sink_scores, real_scores), dim=1) * scale
 	real_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=0)
@@ -251,12 +256,12 @@ def run_block(config: dict) -> None:
 	head_dim = int(config["head_dim"])
 	qkv_fan_in = int(config["qkv_fan_in"])
 	qkv_rows = 3 * n_heads * head_dim
-	qk_rows = 2 * n_heads * head_dim
+	q_rows = n_heads * head_dim
 	window_size = int(config["window_size"])
 
 	inputs = load_tensor("inputs.bin", n_inputs, d_model)
 	qkv_weights = load_tensor("qkv_weights.bin", qkv_rows, qkv_fan_in)
-	qk_norm_scales = load_tensor("qk_norm_scales.bin", 1, qk_rows)
+	qk_norm_scales = load_tensor("qk_norm_scales.bin", 1, q_rows)
 	sinks = load_tensor("sinks.bin", n_heads, head_dim)
 	q, k, v, sink_scores = qkv_proj(inputs, qkv_weights, qk_norm_scales, sinks, config)
 	attn_out = attn(q, k, v, sink_scores, window_size)
@@ -276,7 +281,7 @@ def run_block(config: dict) -> None:
 	store_tensor(q, "q.bin")
 	store_tensor(k, "k.bin")
 	store_tensor(v, "v.bin")
-	store_f32_tensor(sink_scores, "sink_scores.bin")
+	store_f32_tensor(sink_scores.transpose(0, 1), "sink_scores.bin")
 	store_tensor(attn_out, "attn_out.bin")
 	#store_tensor(attn_match, "attn_matching.bin")
 	store_tensor(qkv, "qkv.bin")

@@ -7,7 +7,7 @@
 
 int main(int argc, char *argv[]) {
 	constexpr usize A_ROWS = 3 * config::n_heads * config::head_dim;
-	constexpr usize QK_ROWS = 2 * config::n_heads * config::head_dim;
+	constexpr usize Q_ROWS = config::n_heads * config::head_dim;
 	constexpr usize A_COLS = config::qkv_fan_in;
 	constexpr usize B_ROWS = config::d_model;
 	usize B_COLS = config::n_inputs;
@@ -37,12 +37,15 @@ int main(int argc, char *argv[]) {
 
 	std::vector<bf16> h_A = load_tensor("tmp/block_torch/qkv_weights.bin", A_ROWS, A_COLS);
 	std::vector<bf16> h_B = load_tensor("tmp/block_torch/inputs.bin", B_COLS, B_ROWS);
-	std::vector<bf16> h_S = load_tensor("tmp/block_torch/qk_norm_scales.bin", 1, QK_ROWS);
+	std::vector<bf16> h_S = load_tensor("tmp/block_torch/qk_norm_scales.bin", 1, Q_ROWS);
 	std::vector<bf16> h_sink = load_tensor("tmp/block_torch/sinks.bin", config::n_heads, config::head_dim);
 	if (h_A.empty() || h_B.empty() || h_S.empty() || h_sink.empty()) {
 		return 1;
 	}
 	std::vector<bf16> h_C(C_ROWS * C_COLS);
+	std::vector<bf16> h_Q(B_COLS * Q_ROWS);
+	std::vector<bf16> h_K(B_COLS * Q_ROWS);
+	std::vector<bf16> h_V(B_COLS * Q_ROWS);
 	std::vector<f32> h_sink_scores(B_COLS * config::n_heads);
 
 	bf16 *d_A, *d_B, *d_S, *d_sink, *d_C;
@@ -65,7 +68,7 @@ int main(int argc, char *argv[]) {
 
 	int warmup = 30;
 	for (int i = 0; i < warmup; ++i) {
-		qkv_proj<Proj><<<grid, Proj::THREADS_PER_BLOCK, Proj::SMEM_BYTES>>>(d_A, d_B, d_S, d_sink, d_C, d_sink_scores);
+		qkv_proj<Proj><<<grid, Proj::THREADS_PER_BLOCK, Proj::SMEM_BYTES>>>(d_A, d_B, d_S, d_sink, d_C, d_sink_scores, B_COLS);
 	}
 	cudaDeviceSynchronize();
 
@@ -77,7 +80,7 @@ int main(int argc, char *argv[]) {
 	}
 	for (int i = 0; i < NUM_RUNS; ++i) {
 		cudaEventRecord(starts[i]);
-		qkv_proj<Proj><<<grid, Proj::THREADS_PER_BLOCK, Proj::SMEM_BYTES>>>(d_A, d_B, d_S, d_sink, d_C, d_sink_scores);
+		qkv_proj<Proj><<<grid, Proj::THREADS_PER_BLOCK, Proj::SMEM_BYTES>>>(d_A, d_B, d_S, d_sink, d_C, d_sink_scores, B_COLS);
 		cudaEventRecord(ends[i]);
 	}
 	cudaDeviceSynchronize();
@@ -108,10 +111,22 @@ int main(int argc, char *argv[]) {
 
 	cudaMemcpy(h_C.data(), d_C, h_C.size() * sizeof(bf16), cudaMemcpyDeviceToHost);
 	cudaMemcpy(h_sink_scores.data(), d_sink_scores, h_sink_scores.size() * sizeof(f32), cudaMemcpyDeviceToHost);
+	for (usize row = 0; row < B_COLS; ++row) {
+		bf16 const *src_row = h_C.data() + row * A_ROWS;
+		bf16 *q_row = h_Q.data() + row * Q_ROWS;
+		bf16 *k_row = h_K.data() + row * Q_ROWS;
+		bf16 *v_row = h_V.data() + row * Q_ROWS;
+		std::copy_n(src_row, Q_ROWS, q_row);
+		std::copy_n(src_row + Q_ROWS, Q_ROWS, k_row);
+		std::copy_n(src_row + 2 * Q_ROWS, Q_ROWS, v_row);
+	}
 
 	std::filesystem::create_directories("tmp/block_cuda");
+	store_tensor("tmp/block_cuda/q.bin", h_Q, B_COLS, Q_ROWS);
+	store_tensor("tmp/block_cuda/k.bin", h_K, B_COLS, Q_ROWS);
+	store_tensor("tmp/block_cuda/v.bin", h_V, B_COLS, Q_ROWS);
 	store_tensor("tmp/block_cuda/qkv.bin", h_C, C_ROWS, C_COLS);
-	store_f32_tensor("tmp/block_cuda/sink_scores.bin", h_sink_scores, B_COLS, config::n_heads);
+	store_f32_tensor("tmp/block_cuda/sink_scores.bin", h_sink_scores, config::n_heads, B_COLS);
 
 	cudaFree(d_A);
 	cudaFree(d_B);

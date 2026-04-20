@@ -1487,6 +1487,20 @@ X17_DEVICE void acc_(Fragment_16x16<T> (&dst)[K], Fragment_16x16<T> const (&src)
 	}
 }
 
+X17_DEVICE void quantize_(Fragment_16x16<f32> &f) {
+	auto round_bf16 = [](f32 value) {
+		return f32(__float2bfloat16_rn(value));
+	};
+	f.elemwise_(round_bf16);
+}
+
+template<const usize K>
+X17_DEVICE void quantize_(Fragment_16x16<f32> (&arr)[K]) {
+	X17_UNROLL for (usize i = 0; i < K; ++i) {
+		quantize_(arr[i]);
+	}
+}
+
 //--------------------------------------------------------------------------------------------------
 
 struct SoftmaxStats {

@@ -77,6 +77,7 @@ struct QKVProj {
 		Fragment_16x16<f32> const (&acc)[N_TILE_CNT][M_TILES],
 		bf16 const *gSinkK_ptr,
 		f32 *gSinkScore_ptr,
+		usize seq_len,
 		usize block_m,
 		usize block_n,
 		usize warp_m,
@@ -140,15 +141,15 @@ struct QKVProj {
 				X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
 					usize top_row = block_n + warp_n + ni * 16 + row_in_half;
 					usize bot_row = top_row + 8;
-					gSinkScore_ptr[top_row * N_HEADS + head_idx] = top[ni];
-					gSinkScore_ptr[bot_row * N_HEADS + head_idx] = bot[ni];
+					gSinkScore_ptr[head_idx * seq_len + top_row] = top[ni];
+					gSinkScore_ptr[head_idx * seq_len + bot_row] = bot[ni];
 				}
 			}
 		}
 	}
 
 	template<usize N_TILE_CNT>
-	X17_DEVICE void apply_norm_scales(
+	X17_DEVICE void apply_q_norm_scales(
 		Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILES],
 		bf16 const *gQKNormScale_ptr,
 		usize block_m,
@@ -185,10 +186,13 @@ struct QKVProj {
 	}
 
 	template<usize N_TILE_CNT>
-	X17_DEVICE void scale_v_to_preserve_variance(
-		Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILES]
-	) {
-		constexpr f32 V_SCALE = math::constexpr_rsqrt(f64(A_COLS));
+	X17_DEVICE void scale_v(Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILES]) {
+		// The input vector is L2-normalized before this kernel, so each component has
+		// variance approximately 1 / B_ROWS.
+		// Each output sums A_COLS such components, so its variance is approximately
+		// A_COLS / B_ROWS.
+		// We multiply by sqrt(B_ROWS / A_COLS) to bring the output variance to 1.
+		constexpr f32 V_SCALE = f32(math::constexpr_rsqrt(f64(A_COLS) / f64(B_ROWS)));
 		X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
 			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
 				acc[ni][mi].scale_(V_SCALE);
@@ -371,7 +375,8 @@ struct QKVProj {
 		bf16 const *gQKNormScale_ptr,
 		bf16 const *gSinkK_ptr,
 		bf16 *C,
-		f32 *gSinkScore_ptr
+		f32 *gSinkScore_ptr,
+		usize seq_len
 	) {
 		static_assert(A_COLS % K_STEP == 0);
 		static_assert(A_COLS <= B_ROWS);
@@ -384,7 +389,7 @@ struct QKVProj {
 		usize warp_n = (warp_idx % N_WARPS) * N_PER_WARP;
 
 		GMatrixDynSize<bf16, A_COLS> gA{A, A_ROWS};
-		GMatrixDynSize<bf16, B_ROWS> gB{B, /*B_COLS*/ 1000 /* TODO */};
+		GMatrixDynSize<bf16, B_ROWS> gB{B, seq_len};
 		GMatrix<bf16, M_PER_BLOCK, A_COLS> gA_block = tile_m<M_PER_BLOCK>(gA, blockIdx.x);
 		GMatrix<bf16, N_PER_BLOCK, B_ROWS> gB_block = tile_m<N_PER_BLOCK>(gB, blockIdx.y);
 		usize first_b_col = 0;
@@ -444,12 +449,12 @@ struct QKVProj {
 		}
 
 		if (is_v(block_m, warp_m)) {
-			scale_v_to_preserve_variance(acc_t);
+			scale_v(acc_t);
 		} else {
 			l2_norm(acc_t);
-			apply_norm_scales(acc_t, gQKNormScale_ptr, block_m, warp_m);
 			if (is_q(block_m, warp_m)) {
-				store_sink_scores(acc_t, gSinkK_ptr, gSinkScore_ptr, block_m, block_n, warp_m, warp_n);
+				apply_q_norm_scales(acc_t, gQKNormScale_ptr, block_m, warp_m);
+				store_sink_scores(acc_t, gSinkK_ptr, gSinkScore_ptr, seq_len, block_m, block_n, warp_m, warp_n);
 			}
 			apply_rope(acc_t, block_n, warp_n);
 		}
@@ -469,8 +474,9 @@ __global__ __launch_bounds__(QKVProj::THREADS_PER_BLOCK) void qkv_proj(
 	bf16 const *gQKNormScale_ptr,
 	bf16 const *gSinkK_ptr,
 	bf16 *C,
-	f32 *gSinkScore_ptr
+	f32 *gSinkScore_ptr,
+	usize seq_len
 ) {
 	QKVProj qkv_proj = QKVProj();
-	qkv_proj.run(A, B, gQKNormScale_ptr, gSinkK_ptr, C, gSinkScore_ptr);
+	qkv_proj.run(A, B, gQKNormScale_ptr, gSinkK_ptr, C, gSinkScore_ptr, seq_len);
 }

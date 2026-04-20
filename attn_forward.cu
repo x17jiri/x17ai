@@ -26,7 +26,7 @@ int main() {
 	std::vector<bf16> h_Q = load_tensor("tmp/block_torch/q.bin", SEQ_LEN, PACKED_DIM);
 	std::vector<bf16> h_K = load_tensor("tmp/block_torch/k.bin", SEQ_LEN, PACKED_DIM);
 	std::vector<bf16> h_V = load_tensor("tmp/block_torch/v.bin", SEQ_LEN, PACKED_DIM);
-	std::vector<f32> h_sink_scores = load_f32_tensor("tmp/block_torch/sink_scores.bin", SEQ_LEN, HEAD_CNT);
+	std::vector<f32> h_sink_scores = load_f32_tensor("tmp/block_torch/sink_scores.bin", HEAD_CNT, SEQ_LEN);
 	if (h_Q.empty() || h_K.empty() || h_V.empty() || h_sink_scores.empty()) {
 		return 1;
 	}
