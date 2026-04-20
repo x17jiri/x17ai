@@ -4,15 +4,36 @@
 
 #pragma nv_diag_suppress 186
 
+// =============================================================================
+// Fused FlashAttention-style forward kernel (SM80, bf16, tensor-core MMA).
+//
+// Computes causal sliding-window attention with:
+//   - Attention sinks (StreamingLLM): token 0's key is always attended to;
+//     the token is handled separately since it lives outside the sliding window.
+//   - Scalable-Softmax (SSMax): per-query temperature = ln(e + n_tokens).
+//   - Online softmax with lazy rescaling for numerical stability.
+//   - A token does NOT attend to itself
+//
+// Grid: (ceil(seq_len / Q_PER_BLOCK), HEAD_GROUP_CNT)
+// Block: WARPS_PER_BLOCK * 32 threads
+//
+// Memory pipeline is double-buffered by default (controlled by GMEM_PRELOAD).
+// =============================================================================
+
+// Template parameters:
+//   _HEAD_CNT        – total number of attention heads
+//   _HEADS_PER_KERNEL– heads processed together in one threadblock. The SMatrix class needs
+//                      the number of columns to be multiple of 64. This multiplier is useful
+//                      for tiny heads with QK_DIM < 64
+//   _QK_DIM          – dimension of Q and K vectors per head
+//   _V_DIM           – dimension of V vectors per head
+//   _V_EQUALS_K      – when true, V is a prefix of K (V_DIM must be <= QK_DIM)
 template<
 	const usize _HEAD_CNT,
 	const usize _HEADS_PER_KERNEL,
 	const usize _QK_DIM,
 	const usize _V_DIM,
-	const usize _ROPE_DIM,
-	const f64 _ROPE_BASE,
-	const bool _V_EQUALS_K = false,
-	const usize _GMEM_PRELOAD = 2
+	const bool _V_EQUALS_K = false
 >
 struct Attn_forward {
 	// Expose template parameters needed by dependent kernels.
@@ -21,21 +42,16 @@ struct Attn_forward {
 	static constexpr usize HEAD_GROUP_CNT = HEAD_CNT / HEADS_PER_KERNEL;
 	static constexpr usize QK_DIM = _QK_DIM;
 	static constexpr usize V_DIM = _V_DIM;
-	static constexpr usize ROPE_DIM = _ROPE_DIM;
-	static constexpr f64 ROPE_BASE = _ROPE_BASE;
 	static constexpr bool V_EQUALS_K = _V_EQUALS_K;
-	static constexpr usize GMEM_PRELOAD = _GMEM_PRELOAD;
+	static constexpr usize GMEM_PRELOAD = 2;
 
 	static_assert(HEADS_PER_KERNEL > 0, "HEADS_PER_KERNEL must be > 0");
 	static_assert(HEAD_CNT % HEADS_PER_KERNEL == 0, "HEAD_CNT must be divisible by HEADS_PER_KERNEL");
 	static_assert(V_DIM <= QK_DIM, "V_DIM must be <= QK_DIM");
-	static_assert(ROPE_DIM > 0, "ROPE_DIM must be > 0");
-	static_assert(ROPE_DIM <= QK_DIM, "ROPE_DIM must be <= QK_DIM");
 
 	static constexpr usize QK_TILES = QK_DIM / 16;
 	static constexpr usize V_TILES = V_DIM / 16;
 	static constexpr usize QK_GROUP_DIM = HEADS_PER_KERNEL * QK_DIM;
-	static constexpr usize SINK_VALUES_PER_HEAD = QK_DIM / 4;
 	static constexpr usize V_GROUP_DIM = HEADS_PER_KERNEL * V_DIM;
 	static constexpr usize PRELOAD_DIM = QK_GROUP_DIM + (V_EQUALS_K ? 0 : V_GROUP_DIM);
 	static constexpr usize V_SMEM_COL = V_EQUALS_K ? 0 : QK_GROUP_DIM;
@@ -61,7 +77,6 @@ struct Attn_forward {
 
 	static_assert((QK_GROUP_DIM * sizeof(bf16)) % 128 == 0, "HEADS_PER_KERNEL must make grouped Q rows 128B aligned");
 	static_assert((PRELOAD_DIM * sizeof(bf16)) % 128 == 0, "HEADS_PER_KERNEL must make grouped KV preload rows 128B aligned");
-	static_assert(ROPE_DIM % 16 == 0, "ROPE_DIM must be divisible by 16");
 
 	static constexpr usize SMEM_BYTES =
 		sizeof(bf16) * (
@@ -69,6 +84,23 @@ struct Attn_forward {
 			+ Q_PER_BLOCK * QK_GROUP_DIM
 		);
 
+	// Mask the upper-triangular part of a 16x16 score tile (current key and future keys).
+	// A token does NOT attend to itself so the diagonal is masked as well.
+	//
+	// MMA 16x16 fragment layout — each thread owns 4 elements:
+	//   q rows: {tid/4, tid/4 + 8}          ("top" and "bot" halves)
+	//   k cols: {2*(tid%4), 2*(tid%4)+1, 2*(tid%4)+8, 2*(tid%4)+9}
+	//
+	// Mapped to sub[qi][ki].val{0,1}:
+	//   sub[0][0] = (q,   k  ), (q,   k+1)  — top-left 8x8
+	//   sub[0][1] = (q,   k+8), (q,   k+9)  — top-right 8x8
+	//   sub[1][0] = (q+8, k  ), (q+8, k+1)  — bot-left 8x8
+	//   sub[1][1] = (q+8, k+8), (q+8, k+9)  — bot-right 8x8
+	//
+	// For causal masking (q_global <= k_global → mask):
+	//   - top-right 8x8 is entirely masked (q < 8, k >= 8)
+	//   - top-left and bot-right diagonals: element-wise comparison
+	//   - bot-left 8x8 is entirely unmasked (q >= 8, k < 8)
 	static X17_DEVICE void causal_mask_diagonal(Fragment_16x16<f32> &rS_f32) {
 		usize tid = threadIdx.x % WARP_SIZE;
 		usize q = tid / 4;          // 0..7
@@ -78,11 +110,11 @@ struct Attn_forward {
 		rS_f32.sub[0][1].val0 = NEG_INF;
 		rS_f32.sub[0][1].val1 = NEG_INF;
 
-		rS_f32.sub[0][0].val0 = k <= q ? rS_f32.sub[0][0].val0 : NEG_INF;
-		rS_f32.sub[1][1].val0 = k <= q ? rS_f32.sub[1][1].val0 : NEG_INF;
+		rS_f32.sub[0][0].val0 = k < q ? rS_f32.sub[0][0].val0 : NEG_INF;
+		rS_f32.sub[1][1].val0 = k < q ? rS_f32.sub[1][1].val0 : NEG_INF;
 
-		rS_f32.sub[0][0].val1 = k + 1 <= q ? rS_f32.sub[0][0].val1 : NEG_INF;
-		rS_f32.sub[1][1].val1 = k + 1 <= q ? rS_f32.sub[1][1].val1 : NEG_INF;
+		rS_f32.sub[0][0].val1 = k + 1 < q ? rS_f32.sub[0][0].val1 : NEG_INF;
+		rS_f32.sub[1][1].val1 = k + 1 < q ? rS_f32.sub[1][1].val1 : NEG_INF;
 	}
 
 	/// This is the exact opposite of the causal mask
@@ -95,11 +127,11 @@ struct Attn_forward {
 		rS_f32.sub[1][0].val0 = NEG_INF;
 		rS_f32.sub[1][0].val1 = NEG_INF;
 
-		rS_f32.sub[0][0].val0 = k > q ? rS_f32.sub[0][0].val0 : NEG_INF;
-		rS_f32.sub[1][1].val0 = k > q ? rS_f32.sub[1][1].val0 : NEG_INF;
+		rS_f32.sub[0][0].val0 = k >= q ? rS_f32.sub[0][0].val0 : NEG_INF;
+		rS_f32.sub[1][1].val0 = k >= q ? rS_f32.sub[1][1].val0 : NEG_INF;
 
-		rS_f32.sub[0][0].val1 = k + 1 > q ? rS_f32.sub[0][0].val1 : NEG_INF;
-		rS_f32.sub[1][1].val1 = k + 1 > q ? rS_f32.sub[1][1].val1 : NEG_INF;
+		rS_f32.sub[0][0].val1 = k + 1 >= q ? rS_f32.sub[0][0].val1 : NEG_INF;
+		rS_f32.sub[1][1].val1 = k + 1 >= q ? rS_f32.sub[1][1].val1 : NEG_INF;
 	}
 
 	static constexpr size_t mma_count(size_t seq_len, size_t window_size) {
@@ -116,7 +148,26 @@ struct Attn_forward {
 		return double(mma_count(seq_len, window_size)) * 2.0 * 16.0 * 16.0 * 16.0;
 	}
 
-	X17_DEVICE void load_sink_k(
+	X17_DEVICE void load_sink_scores(
+		f32 const *gSinkScore_ptr,
+		usize q_start,
+		usize i_head_base,
+		f32 (&top_sink_score)[HEADS_PER_KERNEL],
+		f32 (&bot_sink_score)[HEADS_PER_KERNEL]
+	) {
+		usize tid = threadIdx.x % WARP_SIZE;
+		usize row_in_half = tid / 4;
+		usize top_row = q_start + row_in_half;
+		usize bot_row = top_row + 8;
+
+		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
+			// TODO - load with just one instruction, but wait until we get correctness right
+			top_sink_score[h] = load_gmem_1x32b(gSinkScore_ptr + top_row * HEAD_CNT + i_head_base + h);
+			bot_sink_score[h] = load_gmem_1x32b(gSinkScore_ptr + bot_row * HEAD_CNT + i_head_base + h);
+		}
+	}
+
+	X17_DEVICE void load_sink_v(
 		bf16 const *gSinkK_ptr,
 		usize i_head_base,
 		bf16 (&rSinkK)[QK_GROUP_DIM / 4]
@@ -138,63 +189,16 @@ struct Attn_forward {
 		}
 	}
 
-	X17_DEVICE void calculate_sink_scores(
-		Fragment_16x16<bf16> const (&rQ)[HEADS_PER_KERNEL][QK_TILES],
-		bf16 const (&rSinkK)[QK_GROUP_DIM / 4],
-		f32 top_temperature,
-		f32 bot_temperature,
-		f32 (&top_sink_score)[HEADS_PER_KERNEL],
-		f32 (&bot_sink_score)[HEADS_PER_KERNEL]
-	) {
-		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
-			f32 top = 0.0f;
-			f32 bot = 0.0f;
-			X17_UNROLL for (usize i = 0; i < QK_TILES; ++i) {
-				usize base = h * SINK_VALUES_PER_HEAD + i * 4;
-				f32 sink00 = f32(rSinkK[base + 0]);
-				f32 sink01 = f32(rSinkK[base + 1]);
-				f32 sink10 = f32(rSinkK[base + 2]);
-				f32 sink11 = f32(rSinkK[base + 3]);
-
-				top = math::fma(f32(rQ[h][i].sub[0][0].first()), sink00, top);
-				top = math::fma(f32(rQ[h][i].sub[0][0].second()), sink01, top);
-				top = math::fma(f32(rQ[h][i].sub[0][1].first()), sink10, top);
-				top = math::fma(f32(rQ[h][i].sub[0][1].second()), sink11, top);
-
-				bot = math::fma(f32(rQ[h][i].sub[1][0].first()), sink00, bot);
-				bot = math::fma(f32(rQ[h][i].sub[1][0].second()), sink01, bot);
-				bot = math::fma(f32(rQ[h][i].sub[1][1].first()), sink10, bot);
-				bot = math::fma(f32(rQ[h][i].sub[1][1].second()), sink11, bot);
-			}
-			top += shuffle_xor_sync(top, 1);
-			top += shuffle_xor_sync(top, 2);
-			bot += shuffle_xor_sync(bot, 1);
-			bot += shuffle_xor_sync(bot, 2);
-
-			top_sink_score[h] = top * top_temperature;
-			bot_sink_score[h] = bot * bot_temperature;
-		}
-	}
-
-	X17_DEVICE void apply_rope_to_q(
-		Fragment_16x16<bf16> (&rQ)[HEADS_PER_KERNEL][QK_TILES],
-		usize q_start
-	) {
-		constexpr usize ROPE_TILES = ROPE_DIM / 16;
-
-		X17_UNROLL for (usize tile = 0; tile < ROPE_TILES; ++tile) {
-			Fragment_16x16<f32> coefs;
-			rope_coefs<ROPE_DIM, ROPE_BASE>(coefs, q_start, tile * 16);
-			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
-				apply_rope_(rQ[h][tile], coefs);
-			}
-		}
-	}
-
+	// Lazy-rescale threshold for online softmax
+	//
+	// Standard online softmax rescales O and sum every time a new max appears.
+	// That's expensive (touches all V_TILES of rO). Instead, we only rescale
+	// when the new max exceeds the current max by more than this threshold.
+	//
+	// When rescaling happens, we also add the threshold to the new max to create some headroom.
 	static constexpr f32 ONLINE_SOFTMAX_THRESHOLD = 5.0 / math::fast::logb_2;
 
 	X17_DEVICE void online_softmax(
-		bool first_step,
 		SoftmaxStats &top,
 		SoftmaxStats &bot,
 		Fragment_16x16<f32> &rS_f32,
@@ -237,10 +241,8 @@ struct Attn_forward {
 			top_rescale = math::fast::expb(top.max - new_top_max);
 			bot_rescale = math::fast::expb(bot.max - new_bot_max);
 
-			if (!first_step) {
-				scale_top_(rO_f32, top_rescale);
-				scale_bottom_(rO_f32, bot_rescale);
-			}
+			scale_top_(rO_f32, top_rescale);
+			scale_bottom_(rO_f32, bot_rescale);
 
 			top.max = new_top_max;
 			bot.max = new_bot_max;
@@ -308,6 +310,11 @@ struct Attn_forward {
 			}
 		}
 
+		// Store log-sum-exp (L) values to GMEM for the backward pass.
+		// Each Q row is owned by 4 threads. We split the work as follows:
+		//    - tid % 4 == 0: write L for "top"
+		//    - tid % 4 == 2: write L for "bot"
+		//    - otherwise: don't write anything
 		usize tid = threadIdx.x % WARP_SIZE;
 		if (gL_ptr != nullptr && (tid & 1) == 0) {
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
@@ -342,7 +349,7 @@ struct Attn_forward {
 	X17_DEVICE void run(
 		usize seq_len, bf16 *gQ_ptr,
 		bf16 *gK_ptr, bf16 *gV_ptr,
-		bf16 const *gSinkK_ptr,
+		f32 const *gSinkScore_ptr,
 		bf16 *gOut_ptr,
 		f32 *gL_ptr,
 		usize window_size
@@ -373,8 +380,12 @@ struct Attn_forward {
 		cp_async_gmem_to_smem<THREADS_PER_BLOCK, Q_PER_BLOCK, QK_GROUP_DIM>(
 			threadIdx.x, gQ_block, sQ, 0, 0, 0, 0
 		);
-		bf16 rSinkK[QK_GROUP_DIM / 4];
-		load_sink_k(gSinkK_ptr, i_head_base, rSinkK);
+
+		// Sink scores were precomputed during qkv_proj from the unrotated Q path.
+		f32 top_sink_score[HEADS_PER_KERNEL];
+		f32 bot_sink_score[HEADS_PER_KERNEL];
+		load_sink_scores(gSinkScore_ptr, q_start, i_head_base, top_sink_score, bot_sink_score);
+
 
 		// round window_size up without overflow (window_size == 0 means disabled)
 		usize max_window_size = std::numeric_limits<usize>::max();
@@ -382,6 +393,11 @@ struct Attn_forward {
 		usize window_steps = std::min((window_size - 1) / KV_PER_STEP + 1, max_window_size / KV_PER_STEP);
 		window_size = window_steps * KV_PER_STEP;
 
+		// Sliding-window + causal iteration boundaries (in KV_PER_STEP units).
+		// The Q block attends to a trapezoidal region of KV:
+		//
+		//      |--- window edge ---|--- fully unmasked ---|--- causal edge ---|
+		//   kv_begin         kv_begin_full           kv_end_full            kv_end
 		usize kv_begin = (q_block_start - std::min(q_block_start, window_size)) / KV_PER_STEP;
 		usize kv_begin_full = (q_block_end - std::min(q_block_end, window_size)) / KV_PER_STEP;
 		usize kv_end_full = q_block_start / KV_PER_STEP;
@@ -393,16 +409,23 @@ struct Attn_forward {
 			cp_async_commit();
 		}
 
-		// Scalable-Softmax: temperature = ln(n) * logb(e)
-		//     ln(n)              — SSMax factor (ln(n) = logb(n) / logb(e))
-		//     logb(e)            — so we can use expb instead of exp
+		// Note: Q and K are L2-normalized before they enter this kernel, so
+		// `dot(Q, K)` already has variance of pproximately 1. Therefore we do NOT use
+		// the usual attention scaling factor `1 / sqrt(QK_DIM)` here.
+
+		// Scalable-Softmax adds temperature based on the number of tokens:
+		//     temperature = ln(n) * logb(e), where
+		//         `ln(n) = logb(n) / logb(e)` -> SSMax factor
+		//         `* logb(e)` —> needed so we can later use expb instead of exp
 		// Since we are multiplying and dividing by logb(e), it cancels out, so:
 		//     temperature = logb(n)
-		// When calculating `n`, we add:
-		//     `e` to make sure the SSMax scale >= 1
-		//     `1` to account for the sink token
-		f32 top_n = std::min(window_size, q_start + tid / 4 + 1) + f32(std::numbers::e_v<f64> + 1.0);
-		f32 bot_n = std::min(window_size, q_start + tid / 4 + 9) + f32(std::numbers::e_v<f64> + 1.0);
+		// Each Q attends to:
+		//     - at most `window_size` previous tokens
+		//     - sink token
+		//     - it does NOT attent to itself
+		// When calculating `n`, we add `e` to make sure the temperature > 1
+		f32 top_n = std::min(window_size, q_start + tid / 4 + 0) + f32(std::numbers::e_v<f64> + 1.0);
+		f32 bot_n = std::min(window_size, q_start + tid / 4 + 8) + f32(std::numbers::e_v<f64> + 1.0);
 		f32 top_temperature = math::fast::logb(top_n);
 		f32 bot_temperature = math::fast::logb(bot_n);
 
@@ -421,6 +444,9 @@ struct Attn_forward {
 			}
 		}
 		// Load first KV tile from SMEM to registers
+		// `rKV` holds K tiles during S = Q * K^T, then gets overwritten
+		// with V tiles for O += P * V within the same loop iteration. The interleaved
+		// MMA + SMEM load pattern hides the load latency.
 		SMatrix<bf16, KV_PER_STEP, PRELOAD_DIM> sKV;
 		sKV = tile_m<KV_PER_STEP>(sPreload, kv_begin % GMEM_PRELOAD);
 		Fragment_16x16<bf16> rKV[HEADS_PER_KERNEL][QK_TILES];
@@ -430,22 +456,25 @@ struct Attn_forward {
 			}
 		}
 
-		f32 top_sink_score[HEADS_PER_KERNEL];
-		f32 bot_sink_score[HEADS_PER_KERNEL];
-		calculate_sink_scores(
-			rQ, rSinkK, top_temperature, bot_temperature,
-			top_sink_score, bot_sink_score
-		);
-		apply_rope_to_q(rQ, q_start);
-
+		// Initialize online softmax stats with the sink token's contribution.
+		//
+		// The sink token is not part of the KV loop, so we seed the stats:
+		//   max = sink_score + THRESHOLD
+		//   sum = expb(sink_score - max) = expb(-THRESHOLD)
+		//
+		// Why `+ THRESHOLD` in max? This "headroom" is used to reduce the number of rescales.
+		//
+		// Why `* 0.25` in sum? In the MMA fragment layout, 4 threads share each
+		// Q row. Each thread independently accumulates a partial sum and combine_and_store()
+		// sums all 4 partials. The sink contributes only once to the real sum,
+		// so each thread's copy must be 1/4 of the value.
 		SoftmaxStats top_stats[HEADS_PER_KERNEL];
 		SoftmaxStats bot_stats[HEADS_PER_KERNEL];
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-			// The loop accumulates partial sums across 4 threads per row.
-			// Then in combine_and_store(), we reduce them into one total.
-			// So the sum needs to be divided by 4.
-			f32 sum = math::fast::expb(-ONLINE_SOFTMAX_THRESHOLD) * 0.25;
+			top_sink_score[h] *= top_temperature;
+			bot_sink_score[h] *= bot_temperature;
 
+			f32 sum = math::fast::expb(-ONLINE_SOFTMAX_THRESHOLD) * 0.25;
 			top_stats[h].max = top_sink_score[h] + ONLINE_SOFTMAX_THRESHOLD;
 			top_stats[h].sum = sum;
 			bot_stats[h].max = bot_sink_score[h] + ONLINE_SOFTMAX_THRESHOLD;
@@ -503,7 +532,7 @@ struct Attn_forward {
 
 			Fragment_16x16<bf16> rP[HEADS_PER_KERNEL];
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-				online_softmax(kv_step == kv_begin, top_stats[h], bot_stats[h], rS_f32[h], rO_f32[h]);
+				online_softmax(top_stats[h], bot_stats[h], rS_f32[h], rO_f32[h]);
 				cast(rS_f32[h], rP[h]);
 			}
 
@@ -550,11 +579,11 @@ __global__ __launch_bounds__(Attn_forward::THREADS_PER_BLOCK) void
 attn_forward(
 	usize seq_len, bf16 *gQ_ptr,
 	bf16 *gK_ptr, bf16 *gV_ptr,
-	bf16 const *gSinkK_ptr,
+	f32 const *gSinkScore_ptr,
 	bf16 *gOut_ptr,
 	f32 *gL_ptr,
 	usize window_size
 ) {
 	Attn_forward attn_forward = Attn_forward();
-	attn_forward.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gSinkK_ptr, gOut_ptr, gL_ptr, window_size);
+	attn_forward.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gSinkScore_ptr, gOut_ptr, gL_ptr, window_size);
 }
