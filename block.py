@@ -65,11 +65,13 @@ def create_inputs(config: dict) -> None:
 	generator = torch.Generator(device=my_device)
 	generator.manual_seed(42)
 	inputs = torch.randn((n_inputs, d_model), generator=generator)
+	inputs_l2 = l2_norm_last_dim(inputs, l2_norm_eps)
 	qkv_weights = torch.randn((qkv_rows, qkv_fan_in), generator=generator)
 	qk_norm_scales = torch.full((1, q_rows), 1.0)
 	sink_k = torch.randn((n_heads, head_dim), generator=generator)
 	sink_k = l2_norm_last_dim(sink_k, l2_norm_eps)
 	store_tensor(inputs, "inputs.bin")
+	store_tensor(inputs_l2, "inputs_l2.bin")
 	store_tensor(qkv_weights, "qkv_weights.bin")
 	store_tensor(qk_norm_scales, "qk_norm_scales.bin")
 	store_tensor(sink_k, "sinks.bin")
@@ -259,7 +261,7 @@ def run_block(config: dict) -> None:
 	q_rows = n_heads * head_dim
 	window_size = int(config["window_size"])
 
-	inputs = load_tensor("inputs.bin", n_inputs, d_model)
+	inputs = load_tensor("inputs_l2.bin", n_inputs, d_model)
 	qkv_weights = load_tensor("qkv_weights.bin", qkv_rows, qkv_fan_in)
 	qk_norm_scales = load_tensor("qk_norm_scales.bin", 1, q_rows)
 	sinks = load_tensor("sinks.bin", n_heads, head_dim)
