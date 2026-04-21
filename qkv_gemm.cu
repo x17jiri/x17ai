@@ -126,7 +126,7 @@ int main(int argc, char *argv[]) {
 	store_tensor("tmp/block_cuda/k.bin", h_K, B_COLS, Q_ROWS);
 	store_tensor("tmp/block_cuda/v.bin", h_V, B_COLS, Q_ROWS);
 	store_tensor("tmp/block_cuda/qkv.bin", h_C, C_ROWS, C_COLS);
-	store_f32_tensor("tmp/block_cuda/sink_scores.bin", h_sink_scores, config::n_heads, B_COLS);
+	store_f32_tensor("tmp/block_cuda/sink_scores_f32.bin", h_sink_scores, config::n_heads, B_COLS);
 
 	cudaFree(d_A);
 	cudaFree(d_B);

@@ -67,7 +67,7 @@ def create_inputs(config: dict) -> None:
 	inputs = torch.randn((n_inputs, d_model), generator=generator)
 	inputs_l2 = l2_norm_last_dim(inputs, l2_norm_eps)
 	qkv_weights = torch.randn((qkv_rows, qkv_fan_in), generator=generator)
-	qk_norm_scales = torch.full((1, q_rows), 1.0)
+	qk_norm_scales = torch.full((1, q_rows), math.sqrt(head_dim))
 	sink_k = torch.randn((n_heads, head_dim), generator=generator)
 	sink_k = l2_norm_last_dim(sink_k, l2_norm_eps)
 	store_tensor(inputs, "inputs.bin")
@@ -169,15 +169,18 @@ def qkv_proj(
 	k = qkv[:, qkv_cols:2 * qkv_cols].reshape(n_inputs, n_heads, head_dim)
 	v = qkv[:, 2 * qkv_cols:3 * qkv_cols].reshape(n_inputs, n_heads, head_dim)
 
-	q_scales = qk_norm_scales.reshape(1, n_heads, head_dim)
-	v_scale = math.sqrt(d_model / qkv_fan_in)
 	q = l2_norm_last_dim(q, l2_norm_eps)
-	q = q * q_scales
 	k = l2_norm_last_dim(k, l2_norm_eps)
-	sink_scores = calculate_sink_scores(q, sinks)
-	v = v * v_scale
 	q = apply_rope(q, rope_base)
 	k = apply_rope(k, rope_base)
+
+	q_scales = qk_norm_scales.reshape(1, n_heads, head_dim)
+	q = q * q_scales
+
+	v_scale = math.sqrt(d_model / qkv_fan_in)
+	v = v * v_scale
+
+	sink_scores = calculate_sink_scores(q, sinks)
 	return q, k, v, sink_scores
 
 def ssmax(q_len, window_size=0):
@@ -207,6 +210,7 @@ def attn_one_head(
 	v: torch.Tensor,
 	sink_scores: torch.Tensor,
 	window_size: int,
+	score_file_name: str | None = None,
 ) -> torch.Tensor:
 	seq_len = q.shape[0]
 	q = q.to(torch.bfloat16).to(torch.float32)
@@ -215,6 +219,8 @@ def attn_one_head(
 	sink_scores = sink_scores.to(torch.float32).unsqueeze(1)
 	real_scores = torch.matmul(q, k.transpose(0, 1))
 #	real_scores = quantize_(real_scores)
+	if score_file_name is not None:
+		store_f32_tensor(real_scores, score_file_name)
 	scale = ssmax(seq_len, window_size).unsqueeze(1)
 	scores = torch.cat((sink_scores, real_scores), dim=1) * scale
 	real_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=0)
@@ -226,6 +232,7 @@ def attn_one_head(
 	sink_mask = torch.zeros(seq_len, 1, dtype=torch.bool)
 	scores = scores.masked_fill(torch.cat((sink_mask, real_mask), dim=1), float("-inf"))
 	softmax = torch.softmax(scores, dim=1).to(torch.bfloat16).to(torch.float32)
+	del scores
 	return softmax[:, 1:] @ v
 
 def attn(
@@ -238,7 +245,14 @@ def attn(
 	_, n_heads, _ = q.shape
 	out = torch.empty_like(v)
 	for h in range(n_heads):
-		out[:, h, :] = attn_one_head(q[:, h, :], k[:, h, :], v[:, h, :], sink_scores[:, h], window_size)
+		out[:, h, :] = attn_one_head(
+			q[:, h, :],
+			k[:, h, :],
+			v[:, h, :],
+			sink_scores[:, h],
+			window_size,
+			f"scores_{h}_f32.bin" if h < 2 else None,
+		)
 	return out
 
 def join_qkv(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
@@ -280,10 +294,15 @@ def run_block(config: dict) -> None:
 	print("attn_out shape:", attn_out.shape)
 	#print("attn_match shape:", attn_match.shape)
 
+	store_f32_tensor(q, "q_f32.bin")
+	store_f32_tensor(k, "k_f32.bin")
+	store_f32_tensor(v, "v_f32.bin")
+
 	store_tensor(q, "q.bin")
 	store_tensor(k, "k.bin")
 	store_tensor(v, "v.bin")
-	store_f32_tensor(sink_scores.transpose(0, 1), "sink_scores.bin")
+
+	store_f32_tensor(sink_scores.transpose(0, 1), "sink_scores_f32.bin")
 	store_tensor(attn_out, "attn_out.bin")
 	#store_tensor(attn_match, "attn_matching.bin")
 	store_tensor(qkv, "qkv.bin")
