@@ -34,6 +34,7 @@ template<
 	const usize _QK_DIM,
 	const usize _V_DIM,
 	const f64 _V_SCALE = 1.0,
+	const f64 _SINK_V_SCALE = 1.0,
 	const bool _V_EQUALS_K = false
 >
 struct Attn_forward {
@@ -44,13 +45,14 @@ struct Attn_forward {
 	static constexpr usize QK_DIM = _QK_DIM;
 	static constexpr usize V_DIM = _V_DIM;
 	static constexpr f64 V_SCALE = _V_SCALE;
+	static constexpr f64 SINK_V_SCALE = _SINK_V_SCALE;
 	static constexpr bool V_EQUALS_K = _V_EQUALS_K;
 	static constexpr usize GMEM_PRELOAD = 2;
 
 	// This is not the standard attention scaling which is `1.0 / sqrt(QK_DIM)`, because
 	// our inputs are L2 normalized. To get unit variance of scores, we need to multiply
 	// by the sqrt, not divide
-	static constexpr f64 TEMPERATURE = math::constexpr_sqrt(QK_DIM);
+	static constexpr f64 BASE_TEMPERATURE = math::constexpr_sqrt(QK_DIM);
 
 	static_assert(HEADS_PER_KERNEL > 0, "HEADS_PER_KERNEL must be > 0");
 	static_assert(HEAD_CNT % HEADS_PER_KERNEL == 0, "HEAD_CNT must be divisible by HEADS_PER_KERNEL");
@@ -419,25 +421,23 @@ struct Attn_forward {
 			cp_async_commit();
 		}
 
-		// Note: Q and K are L2-normalized before they enter this kernel, so
-		// `dot(Q, K)` already has variance of pproximately 1. Therefore we do NOT use
-		// the usual attention scaling factor `1 / sqrt(QK_DIM)` here.
-
-		// Scalable-Softmax adds temperature based on the number of tokens:
-		//     temperature = ln(n) * logb(e), where
-		//         `ln(n) = logb(n) / logb(e)` -> SSMax factor
-		//         `* logb(e)` —> needed so we can later use expb instead of exp
-		// Since we are multiplying and dividing by logb(e), it cancels out, so:
-		//     temperature = logb(n)
-		// Each Q attends to:
-		//     - at most `window_size` previous tokens
-		//     - sink token
-		//     - it does NOT attent to itself
-		// When calculating `n`, we add `e` to make sure the temperature > 1
-		f32 top_n = std::min(window_size, q_start + tid / 4 + 0) + f32(std::numbers::e_v<f64> + 1.0);
-		f32 bot_n = std::min(window_size, q_start + tid / 4 + 8) + f32(std::numbers::e_v<f64> + 1.0);
-		f32 top_temperature = f32(TEMPERATURE) * math::fast::logb(top_n);
-		f32 bot_temperature = f32(TEMPERATURE) * math::fast::logb(bot_n);
+		// Temperature is composed of these factors:
+		//     - BASE_TEMPERATURE: used to fix the variance of the dot products
+		//     - logb(e): used so we can replace `exp` with `expb` in softmax
+		//     - ssmax = ln(n) = logb(n) / logb(e): Scalable Softmax
+		//         - Where `n = number of attended tokens + e_approx`
+		//         - Each Q attends to:
+		//             - at most `window_size` previous tokens
+		//             - sink token
+		//             - NOT self
+		//         - `e_approx` is integer approximation of `e` and is used to ensure `ssmax >= 1`
+		// Since we're multiplying and dividing by logb(e), it cancels out, so:
+		//     temperature = BASE_TEMPERATURE * logb(n)
+		u32 e_approx = 3;
+		u32 top_n = std::min(window_size + 1 + e_approx, q_start + tid / 4 + (0 + 1 + e_approx));
+		u32 bot_n = std::min(window_size + 1 + e_approx, q_start + tid / 4 + (8 + 1 + e_approx));
+		f32 top_temperature = f32(BASE_TEMPERATURE) * math::fast::logb(f32(top_n));
+		f32 bot_temperature = f32(BASE_TEMPERATURE) * math::fast::logb(f32(bot_n));
 
 		cp_async_wait<GMEM_PRELOAD - 1>();
 		sync_threads();
@@ -474,7 +474,7 @@ struct Attn_forward {
 		// Q row. Each thread independently accumulates a partial sum and combine_and_store()
 		// sums all 4 partials. The sink contributes only once to the real sum,
 		// so each thread's copy must be 1/4 of the value.
-		f32 initial_scale = math::fast::expb(-ONLINE_SOFTMAX_THRESHOLD);
+		f32 initial_scale = math::constexpr_expb(-ONLINE_SOFTMAX_THRESHOLD);
 		SoftmaxStats top_stats[HEADS_PER_KERNEL];
 		SoftmaxStats bot_stats[HEADS_PER_KERNEL];
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
@@ -490,7 +490,7 @@ struct Attn_forward {
 
 		// O accumulator
 		Fragment_16x16<f32> rO_f32[HEADS_PER_KERNEL][V_TILES];
-		initial_scale /= f32(V_SCALE);
+		initial_scale = math::constexpr_expb(-ONLINE_SOFTMAX_THRESHOLD) * SINK_V_SCALE / V_SCALE;
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
 			X17_UNROLL for (usize i = 0; i < V_TILES; ++i) {
 				rO_f32[h][i].sub[0][0].val0 = initial_scale * f32(rSinkV[h * QK_DIM / 4 + i * 4 + 0]);

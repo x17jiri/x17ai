@@ -11,13 +11,14 @@ int main() {
 	constexpr usize V_DIM = config::head_dim;
 	constexpr bool V_EQUALS_K = false;
 	constexpr f64 V_SCALE = math::constexpr_sqrt(f64(config::d_model) / f64(config::qkv_fan_in));
+	constexpr f64 SINK_V_SCALE = 1.0;
 	constexpr usize SEQ_LEN = config::n_inputs;
 	constexpr usize HEAD_CNT = config::n_heads;
 	constexpr usize PACKED_DIM = HEAD_CNT * V_DIM;
 
 	static_assert(config::d_model == config::n_heads * config::head_dim);
 
-	using AF = Attn_forward<HEAD_CNT, HEADS_PER_KERNEL, QK_DIM, V_DIM, V_SCALE, V_EQUALS_K>;
+	using AF = Attn_forward<HEAD_CNT, HEADS_PER_KERNEL, QK_DIM, V_DIM, V_SCALE, SINK_V_SCALE, V_EQUALS_K>;
 	printf("sqrt 2 = %e, %e, %e, %d\n",
 		math::constexpr_sqrt(2.0),
 		M_SQRT2,
