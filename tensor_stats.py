@@ -79,7 +79,7 @@ def main() -> None:
 	parser = argparse.ArgumentParser(description="Plot histogram statistics for a tensor .bin file")
 	parser.add_argument("tensor_file", help="Tensor .bin file to inspect")
 	parser.add_argument("--dtype", choices=["bf16", "f32"], default=None, help="Tensor element type")
-	parser.add_argument("--bins", type=int, default=200, help="Histogram bin count")
+	parser.add_argument("--bins", type=int, default=150, help="Histogram bin count")
 	parser.add_argument("--title", default=None, help="Plot title")
 	parser.add_argument("--output", default=None, help="Optional output .png path")
 	args = parser.parse_args()

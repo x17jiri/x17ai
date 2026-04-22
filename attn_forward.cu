@@ -10,13 +10,20 @@ int main() {
 	constexpr usize QK_DIM = config::head_dim;
 	constexpr usize V_DIM = config::head_dim;
 	constexpr bool V_EQUALS_K = false;
+	constexpr f64 V_SCALE = math::constexpr_sqrt(f64(config::d_model) / f64(config::qkv_fan_in));
 	constexpr usize SEQ_LEN = config::n_inputs;
 	constexpr usize HEAD_CNT = config::n_heads;
 	constexpr usize PACKED_DIM = HEAD_CNT * V_DIM;
 
 	static_assert(config::d_model == config::n_heads * config::head_dim);
 
-	using AF = Attn_forward<HEAD_CNT, HEADS_PER_KERNEL, QK_DIM, V_DIM, V_EQUALS_K>;
+	using AF = Attn_forward<HEAD_CNT, HEADS_PER_KERNEL, QK_DIM, V_DIM, V_SCALE, V_EQUALS_K>;
+	printf("sqrt 2 = %e, %e, %e, %d\n",
+		math::constexpr_sqrt(2.0),
+		M_SQRT2,
+		math::constexpr_sqrt(2.0) - M_SQRT2,
+		math::constexpr_sqrt(2.0) == M_SQRT2
+	);
 
 	if (SEQ_LEN % AF::Q_PER_BLOCK != 0) {
 		printf("Expected n_inputs %% %u == 0\n", AF::Q_PER_BLOCK);
@@ -26,8 +33,9 @@ int main() {
 	std::vector<bf16> h_Q = load_tensor("tmp/block_torch/q.bin", SEQ_LEN, PACKED_DIM);
 	std::vector<bf16> h_K = load_tensor("tmp/block_torch/k.bin", SEQ_LEN, PACKED_DIM);
 	std::vector<bf16> h_V = load_tensor("tmp/block_torch/v.bin", SEQ_LEN, PACKED_DIM);
+	std::vector<bf16> h_sink_v = load_tensor("tmp/block_torch/sinks_v.bin", HEAD_CNT, V_DIM);
 	std::vector<f32> h_sink_scores = load_f32_tensor("tmp/block_torch/sink_scores_f32.bin", HEAD_CNT, SEQ_LEN);
-	if (h_Q.empty() || h_K.empty() || h_V.empty() || h_sink_scores.empty()) {
+	if (h_Q.empty() || h_K.empty() || h_V.empty() || h_sink_v.empty() || h_sink_scores.empty()) {
 		return 1;
 	}
 
@@ -37,6 +45,7 @@ int main() {
 	bf16 *d_Q = nullptr;
 	bf16 *d_K = nullptr;
 	bf16 *d_V = nullptr;
+	bf16 *d_sink_v = nullptr;
 	f32 *d_sink_scores = nullptr;
 	bf16 *d_out = nullptr;
 	f32 *d_L = nullptr;
@@ -44,6 +53,7 @@ int main() {
 	cudaMalloc(&d_Q, h_Q.size() * sizeof(bf16));
 	cudaMalloc(&d_K, h_K.size() * sizeof(bf16));
 	cudaMalloc(&d_V, h_V.size() * sizeof(bf16));
+	cudaMalloc(&d_sink_v, h_sink_v.size() * sizeof(bf16));
 	cudaMalloc(&d_sink_scores, h_sink_scores.size() * sizeof(f32));
 	cudaMalloc(&d_out, h_out.size() * sizeof(bf16));
 	cudaMalloc(&d_L, h_L.size() * sizeof(f32));
@@ -51,6 +61,7 @@ int main() {
 	cudaMemcpy(d_Q, h_Q.data(), h_Q.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_K, h_K.data(), h_K.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_V, h_V.data(), h_V.size() * sizeof(bf16), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_sink_v, h_sink_v.data(), h_sink_v.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_sink_scores, h_sink_scores.data(), h_sink_scores.size() * sizeof(f32), cudaMemcpyHostToDevice);
 
 	cudaFuncSetAttribute(attn_forward<AF>, cudaFuncAttributeMaxDynamicSharedMemorySize, AF::SMEM_BYTES);
@@ -66,6 +77,7 @@ int main() {
 				d_Q,
 				d_K,
 				d_V,
+				d_sink_v,
 				d_sink_scores,
 				d_out,
 				d_L,
@@ -88,6 +100,7 @@ int main() {
 				d_Q,
 				d_K,
 				d_V,
+				d_sink_v,
 				d_sink_scores,
 				d_out,
 				d_L,
@@ -126,6 +139,7 @@ int main() {
 	cudaFree(d_Q);
 	cudaFree(d_K);
 	cudaFree(d_V);
+	cudaFree(d_sink_v);
 	cudaFree(d_sink_scores);
 	cudaFree(d_out);
 	cudaFree(d_L);

@@ -67,14 +67,16 @@ def create_inputs(config: dict) -> None:
 	inputs = torch.randn((n_inputs, d_model), generator=generator)
 	inputs_l2 = l2_norm_last_dim(inputs, l2_norm_eps)
 	qkv_weights = torch.randn((qkv_rows, qkv_fan_in), generator=generator)
-	qk_norm_scales = torch.full((1, q_rows), math.sqrt(head_dim))
+	qk_norm_scales = torch.full((1, q_rows), 1.0)
 	sink_k = torch.randn((n_heads, head_dim), generator=generator)
 	sink_k = l2_norm_last_dim(sink_k, l2_norm_eps)
+	sinks_v = torch.randn((n_heads, head_dim), generator=generator)
 	store_tensor(inputs, "inputs.bin")
 	store_tensor(inputs_l2, "inputs_l2.bin")
 	store_tensor(qkv_weights, "qkv_weights.bin")
 	store_tensor(qk_norm_scales, "qk_norm_scales.bin")
-	store_tensor(sink_k, "sinks.bin")
+	store_tensor(sink_k, "sinks_k.bin")
+	store_tensor(sinks_v, "sinks_v.bin")
 
 def expand_qkv_weights(qkv_weights: torch.Tensor, d_model: int, n_heads: int) -> torch.Tensor:
 	if d_model % n_heads != 0:
@@ -137,18 +139,18 @@ def apply_rope_rows(tensor: torch.Tensor, positions: torch.Tensor, rope_base: fl
 def quantize_(tensor: torch.Tensor) -> torch.Tensor:
 	return tensor.to(torch.bfloat16).to(torch.float32)
 
-def calculate_sink_scores(q: torch.Tensor, sinks: torch.Tensor) -> torch.Tensor:
+def calculate_sink_scores(q: torch.Tensor, sinks_k: torch.Tensor) -> torch.Tensor:
 	# sink score calculation is part of the qkv kernel. It has access to precise q, but it loads
-	# sinks from global memory in bf16
+	# sinks_k from global memory in bf16
 	#q = q.to(torch.bfloat16).to(torch.float32)
-	sinks = sinks.to(torch.bfloat16).to(torch.float32)
-	return torch.einsum("qhd,hd->qh", q, sinks)
+	sinks_k = sinks_k.to(torch.bfloat16).to(torch.float32)
+	return torch.einsum("qhd,hd->qh", q, sinks_k)
 
 def qkv_proj(
 	inputs: torch.Tensor,
 	qkv_weights: torch.Tensor,
 	qk_norm_scales: torch.Tensor,
-	sinks: torch.Tensor,
+	sinks_k: torch.Tensor,
 	config: dict,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 	n_inputs = int(config["n_inputs"])
@@ -177,10 +179,10 @@ def qkv_proj(
 	q_scales = qk_norm_scales.reshape(1, n_heads, head_dim)
 	q = q * q_scales
 
-	v_scale = math.sqrt(d_model / qkv_fan_in)
-	v = v * v_scale
+#	v_scale = math.sqrt(d_model / qkv_fan_in)
+#	v = v * v_scale
 
-	sink_scores = calculate_sink_scores(q, sinks)
+	sink_scores = calculate_sink_scores(q, sinks_k)
 	return q, k, v, sink_scores
 
 def ssmax(q_len, window_size=0):
@@ -209,19 +211,23 @@ def attn_one_head(
 	k: torch.Tensor,
 	v: torch.Tensor,
 	sink_scores: torch.Tensor,
+	sink_v: torch.Tensor,
 	window_size: int,
-	score_file_name: str | None = None,
+	score_file_name: str | None,
+	v_scale
 ) -> torch.Tensor:
 	seq_len = q.shape[0]
 	q = q.to(torch.bfloat16).to(torch.float32)
 	k = k.to(torch.bfloat16).to(torch.float32)
-	v = v.to(torch.bfloat16).to(torch.float32)
+	v = v.to(torch.bfloat16).to(torch.float32) * v_scale
+	sink_v = sink_v.to(torch.bfloat16).to(torch.float32)
+	TEMPERATURE = math.sqrt(q.shape[1])
 	sink_scores = sink_scores.to(torch.float32).unsqueeze(1)
 	real_scores = torch.matmul(q, k.transpose(0, 1))
 #	real_scores = quantize_(real_scores)
 	if score_file_name is not None:
 		store_f32_tensor(real_scores, score_file_name)
-	scale = ssmax(seq_len, window_size).unsqueeze(1)
+	scale = ssmax(seq_len, window_size).unsqueeze(1) * TEMPERATURE
 	scores = torch.cat((sink_scores, real_scores), dim=1) * scale
 	real_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=0)
 	if window_size > 0:
@@ -233,14 +239,18 @@ def attn_one_head(
 	scores = scores.masked_fill(torch.cat((sink_mask, real_mask), dim=1), float("-inf"))
 	softmax = torch.softmax(scores, dim=1).to(torch.bfloat16).to(torch.float32)
 	del scores
-	return softmax[:, 1:] @ v
+	sink_out = softmax[:, :1] * sink_v.unsqueeze(0)
+	real_out = softmax[:, 1:] @ v
+	return sink_out + real_out
 
 def attn(
 	q: torch.Tensor,
 	k: torch.Tensor,
 	v: torch.Tensor,
 	sink_scores: torch.Tensor,
+	sinks_v: torch.Tensor,
 	window_size: int,
+	v_scale
 ) -> torch.Tensor:
 	_, n_heads, _ = q.shape
 	out = torch.empty_like(v)
@@ -250,8 +260,10 @@ def attn(
 			k[:, h, :],
 			v[:, h, :],
 			sink_scores[:, h],
+			sinks_v[h, :],
 			window_size,
 			f"scores_{h}_f32.bin" if h < 2 else None,
+			v_scale
 		)
 	return out
 
@@ -278,10 +290,12 @@ def run_block(config: dict) -> None:
 	inputs = load_tensor("inputs_l2.bin", n_inputs, d_model)
 	qkv_weights = load_tensor("qkv_weights.bin", qkv_rows, qkv_fan_in)
 	qk_norm_scales = load_tensor("qk_norm_scales.bin", 1, q_rows)
-	sinks = load_tensor("sinks.bin", n_heads, head_dim)
-	q, k, v, sink_scores = qkv_proj(inputs, qkv_weights, qk_norm_scales, sinks, config)
-	attn_out = attn(q, k, v, sink_scores, window_size)
-	#attn_match = attn_matching(q, k, v, sinks, window_size, rope_base)
+	sinks_k = load_tensor("sinks_k.bin", n_heads, head_dim)
+	sinks_v = load_tensor("sinks_v.bin", n_heads, head_dim)
+	q, k, v, sink_scores = qkv_proj(inputs, qkv_weights, qk_norm_scales, sinks_k, config)
+	v_scale = math.sqrt(d_model / qkv_fan_in)
+	attn_out = attn(q, k, v, sink_scores, sinks_v, window_size, v_scale)
+	#attn_match = attn_matching(q, k, v, sinks_k, window_size, rope_base)
 	qkv = join_qkv(q, k, v)
 
 	print("inputs shape:", inputs.shape)
@@ -289,7 +303,8 @@ def run_block(config: dict) -> None:
 	print("q shape:", q.shape)
 	print("k shape:", k.shape)
 	print("v shape:", v.shape)
-	print("sinks shape:", sinks.shape)
+	print("sinks_k shape:", sinks_k.shape)
+	print("sinks_v shape:", sinks_v.shape)
 	print("sink_scores shape:", sink_scores.shape)
 	print("attn_out shape:", attn_out.shape)
 	#print("attn_match shape:", attn_match.shape)

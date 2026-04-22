@@ -27,6 +27,16 @@ struct QKVProj {
 	static constexpr usize INPUT_STEP = B_ROWS / N_HEADS;
 	static constexpr usize SMEM_BYTES = GMEM_PRELOAD * K_STEP * (M_PER_BLOCK + N_PER_BLOCK) * sizeof(bf16);
 
+	/// This constant tells us how much we need to scale the `v` output to get unit variance.
+	///
+	/// The input vector is L2-normalized before this kernel, so each component has
+	/// variance approximately 1 / B_ROWS.
+	/// Each output sums A_COLS such components, so its variance is approximately
+	/// A_COLS / B_ROWS.
+	///
+	/// We need to multiply by sqrt(B_ROWS / A_COLS) to bring the output variance to 1.
+	constexpr f32 V_SCALE = f32(math::constexpr_sqrt(f64(B_ROWS) / f64(A_COLS)));
+
 	static constexpr usize K_ITERS = B_ROWS / K_STEP;
 	static constexpr usize PACKED_DIM = N_HEADS * HEAD_DIM;
 	static constexpr usize GROUP_TILE_CNT = HEAD_DIM / 16;
@@ -185,21 +195,6 @@ struct QKVProj {
 		}
 	}
 
-	template<usize N_TILE_CNT>
-	X17_DEVICE void scale_v(Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILES]) {
-		// The input vector is L2-normalized before this kernel, so each component has
-		// variance approximately 1 / B_ROWS.
-		// Each output sums A_COLS such components, so its variance is approximately
-		// A_COLS / B_ROWS.
-		// We multiply by sqrt(B_ROWS / A_COLS) to bring the output variance to 1.
-		constexpr f32 V_SCALE = f32(math::constexpr_rsqrt(f64(A_COLS) / f64(B_ROWS)));
-		X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
-			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-				acc[ni][mi].scale_(V_SCALE);
-			}
-		}
-	}
-
 	X17_DEVICE void cp_async_ab(
 		GMatrix<bf16, M_PER_BLOCK, A_COLS> gA_block,
 		GMatrix<bf16, N_PER_BLOCK, B_ROWS> gB_block,
@@ -331,11 +326,7 @@ struct QKVProj {
 	}
 
 	template<usize N_TILE_CNT>
-	X17_DEVICE void l2_norm(
-		Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILES]
-	) {
-		constexpr f32 EPS = f32(L2_NORM_EPS);
-
+	X17_DEVICE void l2_norm(Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILES]) {
 		X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
 			X17_UNROLL for (usize group = 0; group < GROUP_CNT; ++group) {
 				f32 top_sum_sq = 0.0f;
@@ -359,11 +350,13 @@ struct QKVProj {
 				bot_sum_sq += shuffle_xor_sync(bot_sum_sq, 1);
 				bot_sum_sq += shuffle_xor_sync(bot_sum_sq, 2);
 
-				f32 top_inv_norm = math::fast::recip(sqrtf(top_sum_sq) + EPS);
-				f32 bot_inv_norm = math::fast::recip(sqrtf(bot_sum_sq) + EPS);
+				f32 top_inv_norm = math::fast::rsqrt(top_sum_sq + L2_NORM_EPS);
+				f32 bot_inv_norm = math::fast::rsqrt(bot_sum_sq + L2_NORM_EPS);
 
 				X17_UNROLL for (usize tile = 0; tile < GROUP_TILE_CNT; ++tile) {
-					acc[ni][group * GROUP_TILE_CNT + tile].scale_(top_inv_norm, bot_inv_norm);
+					Fragment_16x16<f32> &frag = acc[ni][group * GROUP_TILE_CNT + tile];
+					frag.scale_top_(top_inv_norm);
+					frag.scale_bottom_(bot_inv_norm);
 				}
 			}
 		}
@@ -448,9 +441,7 @@ struct QKVProj {
 			}
 		}
 
-		if (is_v(block_m, warp_m)) {
-			scale_v(acc_t);
-		} else {
+		if (!is_v(block_m, warp_m)) {
 			l2_norm(acc_t);
 			if (is_q(block_m, warp_m)) {
 				apply_q_norm_scales(acc_t, gQKNormScale_ptr, block_m, warp_m);
@@ -462,7 +453,26 @@ struct QKVProj {
 		bf16 *c_ptr = C + blockIdx.y * N_PER_BLOCK * A_ROWS + blockIdx.x * M_PER_BLOCK;
 		GMatrix<bf16, N_PER_BLOCK, M_PER_BLOCK> gC_block{c_ptr, A_ROWS};
 		X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-			store(acc_t[ni], gC_block, warp_n + ni * 16, warp_m);
+			Fragment_16x16<bf16> acc_bf16[M_TILES];
+			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+				acc_bf16[mi].sub[0][0].set(
+					__float2bfloat16_rn(acc_t[ni][mi].sub[0][0].val0),
+					__float2bfloat16_rn(acc_t[ni][mi].sub[0][0].val1)
+				);
+				acc_bf16[mi].sub[0][1].set(
+					__float2bfloat16_rn(acc_t[ni][mi].sub[0][1].val0),
+					__float2bfloat16_rn(acc_t[ni][mi].sub[0][1].val1)
+				);
+				acc_bf16[mi].sub[1][0].set(
+					__float2bfloat16_rn(acc_t[ni][mi].sub[1][0].val0),
+					__float2bfloat16_rn(acc_t[ni][mi].sub[1][0].val1)
+				);
+				acc_bf16[mi].sub[1][1].set(
+					__float2bfloat16_rn(acc_t[ni][mi].sub[1][1].val0),
+					__float2bfloat16_rn(acc_t[ni][mi].sub[1][1].val1)
+				);
+			}
+			store(acc_bf16, gC_block, warp_n + ni * 16, warp_m);
 		}
 	}
 };

@@ -33,6 +33,7 @@ template<
 	const usize _HEADS_PER_KERNEL,
 	const usize _QK_DIM,
 	const usize _V_DIM,
+	const f64 _V_SCALE = 1.0,
 	const bool _V_EQUALS_K = false
 >
 struct Attn_forward {
@@ -42,8 +43,14 @@ struct Attn_forward {
 	static constexpr usize HEAD_GROUP_CNT = HEAD_CNT / HEADS_PER_KERNEL;
 	static constexpr usize QK_DIM = _QK_DIM;
 	static constexpr usize V_DIM = _V_DIM;
+	static constexpr f64 V_SCALE = _V_SCALE;
 	static constexpr bool V_EQUALS_K = _V_EQUALS_K;
 	static constexpr usize GMEM_PRELOAD = 2;
+
+	// This is not the standard attention scaling which is `1.0 / sqrt(QK_DIM)`, because
+	// our inputs are L2 normalized. To get unit variance of scores, we need to multiply
+	// by the sqrt, not divide
+	static constexpr f64 TEMPERATURE = math::constexpr_sqrt(QK_DIM);
 
 	static_assert(HEADS_PER_KERNEL > 0, "HEADS_PER_KERNEL must be > 0");
 	static_assert(HEAD_CNT % HEADS_PER_KERNEL == 0, "HEAD_CNT must be divisible by HEADS_PER_KERNEL");
@@ -169,12 +176,12 @@ struct Attn_forward {
 	}
 
 	X17_DEVICE void load_sink_v(
-		bf16 const *gSinkK_ptr,
+		bf16 const *gSinkV_ptr,
 		usize i_head_base,
-		bf16 (&rSinkK)[QK_GROUP_DIM / 4]
+		bf16 (&rSinkV)[QK_GROUP_DIM / 4]
 	) {
 		usize pair_in_quad = threadIdx.x % 4;
-		bf16 const *sink_ptr = gSinkK_ptr + i_head_base * QK_DIM;
+		bf16 const *sink_ptr = gSinkV_ptr + i_head_base * QK_DIM;
 		constexpr usize LOAD_CNT = QK_GROUP_DIM / 8;
 		X17_UNROLL for (usize i = 0; i < LOAD_CNT; ++i) {
 			usize src_col = i * 8 + pair_in_quad * 2;
@@ -185,8 +192,8 @@ struct Attn_forward {
 				bf16 values[2];
 			} sink_pair;
 			sink_pair.packed = packed;
-			rSinkK[2 * i + 0] = sink_pair.values[0];
-			rSinkK[2 * i + 1] = sink_pair.values[1];
+			rSinkV[2 * i + 0] = sink_pair.values[0];
+			rSinkV[2 * i + 1] = sink_pair.values[1];
 		}
 	}
 
@@ -301,8 +308,8 @@ struct Attn_forward {
 			top_L[h] = math::fast::logb(top_stats[h].sum) + top_stats[h].max;
 			bot_L[h] = math::fast::logb(bot_stats[h].sum) + bot_stats[h].max;
 
-			f32 top_rescale = math::fast::recip(top_stats[h].sum);
-			f32 bot_rescale = math::fast::recip(bot_stats[h].sum);
+			f32 top_rescale = math::fast::divide(f32(V_SCALE), top_stats[h].sum);
+			f32 bot_rescale = math::fast::divide(f32(V_SCALE), bot_stats[h].sum);
 
 			scale_top_(rO_f32[h], top_rescale);
 			scale_bottom_(rO_f32[h], bot_rescale);
@@ -350,6 +357,7 @@ struct Attn_forward {
 	X17_DEVICE void run(
 		usize seq_len, bf16 *gQ_ptr,
 		bf16 *gK_ptr, bf16 *gV_ptr,
+		bf16 const *gSinkV_ptr,
 		f32 const *gSinkScore_ptr,
 		bf16 *gOut_ptr,
 		f32 *gL_ptr,
@@ -381,12 +389,13 @@ struct Attn_forward {
 		cp_async_gmem_to_smem<THREADS_PER_BLOCK, Q_PER_BLOCK, QK_GROUP_DIM>(
 			threadIdx.x, gQ_block, sQ, 0, 0, 0, 0
 		);
+		bf16 rSinkV[QK_GROUP_DIM / 4];
+		load_sink_v(gSinkV_ptr, i_head_base, rSinkV);
 
 		// Sink scores were precomputed during qkv_proj from the unrotated Q path.
 		f32 top_sink_score[HEADS_PER_KERNEL];
 		f32 bot_sink_score[HEADS_PER_KERNEL];
 		load_sink_scores(gSinkScore_ptr, seq_len, q_start, i_head_base, top_sink_score, bot_sink_score);
-
 
 		// round window_size up without overflow (window_size == 0 means disabled)
 		usize max_window_size = std::numeric_limits<usize>::max();
@@ -427,12 +436,8 @@ struct Attn_forward {
 		// When calculating `n`, we add `e` to make sure the temperature > 1
 		f32 top_n = std::min(window_size, q_start + tid / 4 + 0) + f32(std::numbers::e_v<f64> + 1.0);
 		f32 bot_n = std::min(window_size, q_start + tid / 4 + 8) + f32(std::numbers::e_v<f64> + 1.0);
-		f32 top_temperature = math::fast::logb(top_n);
-		f32 bot_temperature = math::fast::logb(bot_n);
-
-		// O accumulator
-		Fragment_16x16<f32> rO_f32[HEADS_PER_KERNEL][V_TILES];
-		zero_(rO_f32);
+		f32 top_temperature = f32(TEMPERATURE) * math::fast::logb(top_n);
+		f32 bot_temperature = f32(TEMPERATURE) * math::fast::logb(bot_n);
 
 		cp_async_wait<GMEM_PRELOAD - 1>();
 		sync_threads();
@@ -469,17 +474,35 @@ struct Attn_forward {
 		// Q row. Each thread independently accumulates a partial sum and combine_and_store()
 		// sums all 4 partials. The sink contributes only once to the real sum,
 		// so each thread's copy must be 1/4 of the value.
+		f32 initial_scale = math::fast::expb(-ONLINE_SOFTMAX_THRESHOLD);
 		SoftmaxStats top_stats[HEADS_PER_KERNEL];
 		SoftmaxStats bot_stats[HEADS_PER_KERNEL];
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 			top_sink_score[h] *= top_temperature;
 			bot_sink_score[h] *= bot_temperature;
 
-			f32 sum = math::fast::expb(-ONLINE_SOFTMAX_THRESHOLD) * 0.25;
+			f32 sum = initial_scale * 0.25;
 			top_stats[h].max = top_sink_score[h] + ONLINE_SOFTMAX_THRESHOLD;
 			top_stats[h].sum = sum;
 			bot_stats[h].max = bot_sink_score[h] + ONLINE_SOFTMAX_THRESHOLD;
 			bot_stats[h].sum = sum;
+		}
+
+		// O accumulator
+		Fragment_16x16<f32> rO_f32[HEADS_PER_KERNEL][V_TILES];
+		initial_scale /= f32(V_SCALE);
+		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
+			X17_UNROLL for (usize i = 0; i < V_TILES; ++i) {
+				rO_f32[h][i].sub[0][0].val0 = initial_scale * f32(rSinkV[h * QK_DIM / 4 + i * 4 + 0]);
+				rO_f32[h][i].sub[0][0].val1 = initial_scale * f32(rSinkV[h * QK_DIM / 4 + i * 4 + 1]);
+				rO_f32[h][i].sub[0][1].val0 = initial_scale * f32(rSinkV[h * QK_DIM / 4 + i * 4 + 2]);
+				rO_f32[h][i].sub[0][1].val1 = initial_scale * f32(rSinkV[h * QK_DIM / 4 + i * 4 + 3]);
+
+				rO_f32[h][i].sub[1][0].val0 = rO_f32[h][i].sub[0][0].val0;
+				rO_f32[h][i].sub[1][0].val1 = rO_f32[h][i].sub[0][0].val1;
+				rO_f32[h][i].sub[1][1].val0 = rO_f32[h][i].sub[0][1].val0;
+				rO_f32[h][i].sub[1][1].val1 = rO_f32[h][i].sub[0][1].val1;
+			}
 		}
 
 		// Sequential loop over KV
@@ -580,11 +603,12 @@ __global__ __launch_bounds__(Attn_forward::THREADS_PER_BLOCK) void
 attn_forward(
 	usize seq_len, bf16 *gQ_ptr,
 	bf16 *gK_ptr, bf16 *gV_ptr,
+	bf16 const *gSinkV_ptr,
 	f32 const *gSinkScore_ptr,
 	bf16 *gOut_ptr,
 	f32 *gL_ptr,
 	usize window_size
 ) {
 	Attn_forward attn_forward = Attn_forward();
-	attn_forward.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gSinkScore_ptr, gOut_ptr, gL_ptr, window_size);
+	attn_forward.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gSinkV_ptr, gSinkScore_ptr, gOut_ptr, gL_ptr, window_size);
 }

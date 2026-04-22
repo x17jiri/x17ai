@@ -107,6 +107,36 @@ namespace math {
 		}
 	}
 
+	constexpr f64 constexpr_sqrt(f64 x) {
+		if (x < 0.0 || x != x) { return std::numeric_limits<f64>::quiet_NaN(); }
+		if (x == 0.0) { return 0.0; }
+		if (x == std::numeric_limits<f64>::infinity()) { return x; }
+
+		f64 above = std::max(x, 1.0);
+		f64 below = 0.0;
+		bool stop = false;
+		while (!stop) {
+			f64 v = (0.5 * above) + (0.5 * below);
+			f64 t = x / v;
+
+			f64 new_above = t <= v ? v : above;
+			f64 new_below = t >= v ? v : below;
+
+			stop = (new_above == above) && (new_below == below);
+
+			above = new_above;
+			below = new_below;
+		}
+
+		f64 above_err = (above * above) - x;
+		f64 below_err = x - (below * below);
+		if (above_err > below_err) {
+			return below;
+		} else {
+			return above;
+		}
+	}
+
 	/// Compile-time `log2(x)` for positive finite `x`.
 	///
 	/// The algorithm splits `x = m * 2^e` by decoding the IEEE-754 bits, so the
@@ -221,6 +251,26 @@ namespace math {
 			#else
 				f32 result;
 				asm ("tanh.approx.f32 %0, %1;\n" : "=f"(result) : "f"(x));
+				return result;
+			#endif
+		}
+
+		X17_DEVICE f32 sqrt(f32 x) {
+			#if X17_PRECISE_MATH
+				return sqrtf(x);
+			#else
+				f32 result;
+				asm ("sqrt.approx.ftz.f32 %0, %1;\n" : "=f"(result) : "f"(x));
+				return result;
+			#endif
+		}
+
+		X17_DEVICE f32 rsqrt(f32 x) {
+			#if X17_PRECISE_MATH
+				return rsqrtf(x);
+			#else
+				f32 result;
+				asm ("rsqrt.approx.ftz.f32 %0, %1;\n" : "=f"(result) : "f"(x));
 				return result;
 			#endif
 		}
