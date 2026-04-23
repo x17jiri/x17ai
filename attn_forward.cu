@@ -10,7 +10,7 @@ int main() {
 	constexpr usize QK_DIM = config::head_dim;
 	constexpr usize V_DIM = config::head_dim;
 	constexpr bool V_EQUALS_K = false;
-	constexpr f64 V_SCALE = math::constexpr_sqrt(f64(config::d_model) / f64(config::qkv_fan_in));
+	constexpr f64 V_SCALE = 1.0 * math::constexpr_sqrt(f64(config::d_model) / f64(config::qkv_fan_in));
 	constexpr f64 SINK_V_SCALE = 1.0;
 	constexpr usize SEQ_LEN = config::n_inputs;
 	constexpr usize HEAD_CNT = config::n_heads;
@@ -25,6 +25,9 @@ int main() {
 		math::constexpr_sqrt(2.0) - M_SQRT2,
 		math::constexpr_sqrt(2.0) == M_SQRT2
 	);
+	constexpr f64 ONLINE_SOFTMAX_THRESHOLD = AF::ONLINE_SOFTMAX_THRESHOLD;
+	constexpr f64 EXPB = math::fast::constexpr_expb(-ONLINE_SOFTMAX_THRESHOLD);
+	printf("T = %e, expb(T) = %e\n", ONLINE_SOFTMAX_THRESHOLD, EXPB);
 
 	if (SEQ_LEN % AF::Q_PER_BLOCK != 0) {
 		printf("Expected n_inputs %% %u == 0\n", AF::Q_PER_BLOCK);

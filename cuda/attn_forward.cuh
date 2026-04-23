@@ -474,7 +474,7 @@ struct Attn_forward {
 		// Q row. Each thread independently accumulates a partial sum and combine_and_store()
 		// sums all 4 partials. The sink contributes only once to the real sum,
 		// so each thread's copy must be 1/4 of the value.
-		f32 initial_scale = math::constexpr_expb(-ONLINE_SOFTMAX_THRESHOLD);
+		f32 initial_scale = math::fast::constexpr_expb(-ONLINE_SOFTMAX_THRESHOLD);
 		SoftmaxStats top_stats[HEADS_PER_KERNEL];
 		SoftmaxStats bot_stats[HEADS_PER_KERNEL];
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
@@ -490,7 +490,7 @@ struct Attn_forward {
 
 		// O accumulator
 		Fragment_16x16<f32> rO_f32[HEADS_PER_KERNEL][V_TILES];
-		initial_scale = math::constexpr_expb(-ONLINE_SOFTMAX_THRESHOLD) * SINK_V_SCALE / V_SCALE;
+		initial_scale = math::fast::constexpr_expb(-ONLINE_SOFTMAX_THRESHOLD) * SINK_V_SCALE / V_SCALE;
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
 			X17_UNROLL for (usize i = 0; i < V_TILES; ++i) {
 				rO_f32[h][i].sub[0][0].val0 = initial_scale * f32(rSinkV[h * QK_DIM / 4 + i * 4 + 0]);

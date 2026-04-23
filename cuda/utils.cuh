@@ -204,6 +204,21 @@ namespace math {
 			return constexpr_log2(x) / constexpr_log2(math::fast::b);
 		}
 
+		consteval f64 constexpr_expb(f64 x) {
+			i64 exponent = i64(x);
+			if (x != f64(exponent)) {
+				throw "constexpr_expb only supports integer exponents";
+			}
+
+			f64 factor = exponent >= 0 ? b : (1.0 / b);
+			f64 result = 1.0;
+			i64 steps = exponent >= 0 ? exponent : -exponent;
+			for (i64 i = 0; i < steps; ++i) {
+				result *= factor;
+			}
+			return result;
+		}
+
 		/// Single-instruction reciprocal approximation.
 		X17_DEVICE f32 recip(f32 x) {
 			#if X17_PRECISE_MATH
