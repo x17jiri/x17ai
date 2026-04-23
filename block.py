@@ -173,37 +173,34 @@ def qkv_proj(
 
 	q = l2_norm_last_dim(q, l2_norm_eps)
 	k = l2_norm_last_dim(k, l2_norm_eps)
-	q = apply_rope(q, rope_base)
-	k = apply_rope(k, rope_base)
 
 	q_scales = qk_norm_scales.reshape(1, n_heads, head_dim)
 	q = q * q_scales
 
-#	v_scale = math.sqrt(d_model / qkv_fan_in)
-#	v = v * v_scale
-
 	sink_scores = calculate_sink_scores(q, sinks_k)
+	q = apply_rope(q, rope_base)
+	k = apply_rope(k, rope_base)
 	return q, k, v, sink_scores
 
 def ssmax(q_len, window_size=0):
 	"""Compute SSMax scale factor n for each query position.
 
-	n[i] = min(window_size, i) + (e + 1)
+	n[i] = min(window_size, i) + (1 + e_approx)
 
 	where:
 	  i           = number of real tokens visible (causal: tokens 0..i-1)
 	  window_size = caps the visible count when sliding window is enabled
-	  e           = ensures ln(n) >= 1
+	  e_approx    = integer approximation of e used by the CUDA kernel
 	  1           = accounts for the sink token
 
-	When window_size == 0 (disabled), min is a no-op: n[i] = i + 1 + e.
+	When window_size == 0 (disabled), min is a no-op: n[i] = i + 1 + e_approx.
 	"""
-	E_PLUS_1 = math.e + 1.0
-	visible_real_tokens = torch.arange(q_len)
+	E_APPROX_PLUS_1 = 4.0
+	visible_real_tokens = torch.arange(q_len, dtype=torch.float32)
 	if window_size > 0:
-		n = torch.clamp(visible_real_tokens, max=float(window_size)) + E_PLUS_1
+		n = torch.clamp(visible_real_tokens, max=float(window_size)) + E_APPROX_PLUS_1
 	else:
-		n = visible_real_tokens + E_PLUS_1
+		n = visible_real_tokens + E_APPROX_PLUS_1
 	return torch.log(n)
 
 def attn_one_head(
@@ -214,12 +211,16 @@ def attn_one_head(
 	sink_v: torch.Tensor,
 	window_size: int,
 	score_file_name: str | None,
-	v_scale
+	config: dict,
+	v_scale: float,
 ) -> torch.Tensor:
 	seq_len = q.shape[0]
+	d_model = int(config["d_model"])
+	qkv_fan_in = int(config["qkv_fan_in"])
+	v_scale_fix = math.sqrt(d_model / qkv_fan_in)
 	q = q.to(torch.bfloat16).to(torch.float32)
 	k = k.to(torch.bfloat16).to(torch.float32)
-	v = v.to(torch.bfloat16).to(torch.float32) * v_scale
+	v = v.to(torch.bfloat16).to(torch.float32)
 	sink_v = sink_v.to(torch.bfloat16).to(torch.float32)
 	TEMPERATURE = math.sqrt(q.shape[1])
 	sink_scores = sink_scores.to(torch.float32).unsqueeze(1)
@@ -229,6 +230,7 @@ def attn_one_head(
 		store_f32_tensor(real_scores, score_file_name)
 	scale = ssmax(seq_len, window_size).unsqueeze(1) * TEMPERATURE
 	scores = torch.cat((sink_scores, real_scores), dim=1) * scale
+	values = torch.cat((sink_v.unsqueeze(0) * v_scale, v * (v_scale * v_scale_fix)), dim=0)
 	real_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=0)
 	if window_size > 0:
 		real_mask = real_mask | torch.tril(
@@ -239,9 +241,7 @@ def attn_one_head(
 	scores = scores.masked_fill(torch.cat((sink_mask, real_mask), dim=1), float("-inf"))
 	softmax = torch.softmax(scores, dim=1).to(torch.bfloat16).to(torch.float32)
 	del scores
-	sink_out = softmax[:, :1] * sink_v.unsqueeze(0)
-	real_out = softmax[:, 1:] @ v
-	return sink_out + real_out
+	return softmax @ values
 
 def attn(
 	q: torch.Tensor,
@@ -250,7 +250,8 @@ def attn(
 	sink_scores: torch.Tensor,
 	sinks_v: torch.Tensor,
 	window_size: int,
-	v_scale
+	config: dict,
+	v_scale: float,
 ) -> torch.Tensor:
 	_, n_heads, _ = q.shape
 	out = torch.empty_like(v)
@@ -262,8 +263,9 @@ def attn(
 			sink_scores[:, h],
 			sinks_v[h, :],
 			window_size,
-			f"scores_{h}_f32.bin" if h < 2 else None,
-			v_scale
+			f"scores_{h}_f32.bin" if h < 1 else None,
+			config,
+			v_scale,
 		)
 	return out
 
@@ -293,8 +295,8 @@ def run_block(config: dict) -> None:
 	sinks_k = load_tensor("sinks_k.bin", n_heads, head_dim)
 	sinks_v = load_tensor("sinks_v.bin", n_heads, head_dim)
 	q, k, v, sink_scores = qkv_proj(inputs, qkv_weights, qk_norm_scales, sinks_k, config)
-	v_scale = math.sqrt(d_model / qkv_fan_in)
-	attn_out = attn(q, k, v, sink_scores, sinks_v, window_size, v_scale)
+	v_scale = 1.5
+	attn_out = attn(q, k, v, sink_scores, sinks_v, window_size, config, v_scale)
 	#attn_match = attn_matching(q, k, v, sinks_k, window_size, rope_base)
 	qkv = join_qkv(q, k, v)
 

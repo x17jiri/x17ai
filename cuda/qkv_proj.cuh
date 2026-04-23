@@ -27,16 +27,6 @@ struct QKVProj {
 	static constexpr usize INPUT_STEP = B_ROWS / N_HEADS;
 	static constexpr usize SMEM_BYTES = GMEM_PRELOAD * K_STEP * (M_PER_BLOCK + N_PER_BLOCK) * sizeof(bf16);
 
-	/// This constant tells us how much we need to scale the `v` output to get unit variance.
-	///
-	/// The input vector is L2-normalized before this kernel, so each component has
-	/// variance approximately 1 / B_ROWS.
-	/// Each output sums A_COLS such components, so its variance is approximately
-	/// A_COLS / B_ROWS.
-	///
-	/// We need to multiply by sqrt(B_ROWS / A_COLS) to bring the output variance to 1.
-	constexpr f32 V_SCALE = f32(math::constexpr_sqrt(f64(B_ROWS) / f64(A_COLS)));
-
 	static constexpr usize K_ITERS = B_ROWS / K_STEP;
 	static constexpr usize PACKED_DIM = N_HEADS * HEAD_DIM;
 	static constexpr usize GROUP_TILE_CNT = HEAD_DIM / 16;

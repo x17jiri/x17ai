@@ -10,8 +10,8 @@ int main() {
 	constexpr usize QK_DIM = config::head_dim;
 	constexpr usize V_DIM = config::head_dim;
 	constexpr bool V_EQUALS_K = false;
-	constexpr f64 V_SCALE = 1.0 * math::constexpr_sqrt(f64(config::d_model) / f64(config::qkv_fan_in));
-	constexpr f64 SINK_V_SCALE = 1.0;
+	constexpr f64 V_SCALE = 1.5 * math::constexpr_sqrt(f64(config::d_model) / f64(config::qkv_fan_in));
+	constexpr f64 SINK_V_SCALE = 1.5;
 	constexpr usize SEQ_LEN = config::n_inputs;
 	constexpr usize HEAD_CNT = config::n_heads;
 	constexpr usize PACKED_DIM = HEAD_CNT * V_DIM;
