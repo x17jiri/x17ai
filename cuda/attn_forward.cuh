@@ -13,8 +13,9 @@
 //   - Scalable-Softmax (SSMax): per-query temperature = ln(e + n_tokens).
 //   - Online softmax with lazy rescaling for numerical stability.
 //   - A token does NOT attend to itself
+//   - Output zig-zag gating
 //
-// Grid: (ceil(seq_len / Q_PER_BLOCK), HEAD_GROUP_CNT)
+// Grid: (seq_len / Q_PER_BLOCK, HEAD_GROUP_CNT)
 // Block: WARPS_PER_BLOCK * 32 threads
 //
 // Memory pipeline is double-buffered by default (controlled by GMEM_PRELOAD).
@@ -329,9 +330,6 @@ struct Attn_forward {
 		f32 bot_L[HEADS_PER_KERNEL];
 		usize tid = threadIdx.x % WARP_SIZE;
 
-		cp_async_wait<0>();
-		sync_threads();
-
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 			// Complete the row-wise sum reduction within each warp
 			top_stats[h].sum += shuffle_xor_sync(top_stats[h].sum, 1);
@@ -552,9 +550,9 @@ struct Attn_forward {
 				rO_f32[h][i].sub[1][1].val1 = rO_f32[h][i].sub[0][1].val1;
 			}
 		}
-		bool g_prefetched = false;
 
 		// Sequential loop over KV
+		usize g_prefetched = 0;
 		X17_NO_UNROLL for (usize kv_step = kv_begin; kv_step < kv_end; ++kv_step) {
 			// S = Q * K^T, interleaved with V load (rKV: K -> V)
 			Fragment_16x16<f32> rS_f32[HEADS_PER_KERNEL];
@@ -621,9 +619,11 @@ struct Attn_forward {
 				usize next_kv = kv_step + GMEM_PRELOAD;
 				if (next_kv < kv_end) {
 					cp_async_kv(gK, gV, sPreload, next_kv, kv_end);
-				} else if (!g_prefetched && next_kv == kv_end) {
-					cp_async_g(gG_block, sG);
-					g_prefetched = true;
+				} else {
+					if (g_prefetched == 0) {
+						cp_async_g(gG_block, sG);
+					}
+					++g_prefetched;
 				}
 				cp_async_commit();
 			}
@@ -640,9 +640,10 @@ struct Attn_forward {
 			}
 		}
 
-		if (!g_prefetched) {
-			cp_async_g(gG_block, sG);
-			cp_async_commit();
+		// If 1, we didn't do another loop after `cp_async_g` and so we need to wait
+		if (g_prefetched == 1) {
+			cp_async_wait<0>();
+			sync_threads();
 		}
 
 		GMatrix<bf16, Q_PER_BLOCK, V_GROUP_DIM> gOut_block = tile_m<Q_PER_BLOCK>(gO, q_block_idx);
