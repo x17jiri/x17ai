@@ -33,8 +33,8 @@ template<
 	const usize _HEADS_PER_KERNEL,
 	const usize _QK_DIM,
 	const usize _V_DIM,
-	const f64 _V_SCALE = 1.0,
-	const f64 _SINK_V_SCALE = 1.0,
+	const usize _D_MODEL,
+	const usize _QKV_FAN_IN,
 	const bool _V_EQUALS_K = false
 >
 struct Attn_forward {
@@ -44,8 +44,8 @@ struct Attn_forward {
 	static constexpr usize HEAD_GROUP_CNT = HEAD_CNT / HEADS_PER_KERNEL;
 	static constexpr usize QK_DIM = _QK_DIM;
 	static constexpr usize V_DIM = _V_DIM;
-	static constexpr f64 V_SCALE = _V_SCALE;
-	static constexpr f64 SINK_V_SCALE = _SINK_V_SCALE;
+	static constexpr usize D_MODEL = _D_MODEL;
+	static constexpr usize QKV_FAN_IN = _QKV_FAN_IN;
 	static constexpr bool V_EQUALS_K = _V_EQUALS_K;
 	static constexpr usize GMEM_PRELOAD = 2;
 
@@ -53,6 +53,9 @@ struct Attn_forward {
 	// our inputs are L2 normalized. To get unit variance of scores, we need to multiply
 	// by the sqrt, not divide
 	static constexpr f64 BASE_TEMPERATURE = math::constexpr_sqrt(QK_DIM);
+
+	static constexpr f64 V_SCALE = math::constexpr_sqrt(f64(D_MODEL) / f64(QKV_FAN_IN));
+	static constexpr f64 V_SCALE_FIX = 1.5;
 
 	static_assert(HEADS_PER_KERNEL > 0, "HEADS_PER_KERNEL must be > 0");
 	static_assert(HEAD_CNT % HEADS_PER_KERNEL == 0, "HEAD_CNT must be divisible by HEADS_PER_KERNEL");
@@ -78,6 +81,7 @@ struct Attn_forward {
 	static constexpr usize Q_STRIDE = QK_DIM * HEAD_CNT;
 	static constexpr usize K_STRIDE = QK_DIM * HEAD_CNT;
 	static constexpr usize V_STRIDE = V_DIM * HEAD_CNT;
+	static constexpr usize G_STRIDE = V_DIM * HEAD_CNT;
 	static constexpr usize O_STRIDE = V_DIM * HEAD_CNT;
 	static constexpr usize DO_STRIDE = V_DIM * HEAD_CNT;
 	static constexpr usize DQ_STRIDE = QK_DIM * HEAD_CNT;
@@ -283,12 +287,37 @@ struct Attn_forward {
 		bot.sum = math::fma(bot.sum, bot_rescale, bot_add);
 	}
 
+	static X17_DEVICE void zig_zag_geglu(
+		Fragment_8x8<f32> &out,
+		Fragment_8x8<bf16> const &g
+	) {
+		f32 out0 = out.first();
+		f32 out1 = out.second();
+		f32 g0 = f32(V_SCALE) * f32(g.first());
+		f32 g1 = f32(V_SCALE) * f32(g.second());
+		out.set(
+			math::fast::geglu(g0, out0),
+			math::fast::geglu(out1, g1)
+		);
+	}
+
+	static X17_DEVICE void zig_zag_geglu(
+		Fragment_16x16<f32> &out,
+		Fragment_16x16<bf16> const &g
+	) {
+		zig_zag_geglu(out.sub[0][0], g.sub[0][0]);
+		zig_zag_geglu(out.sub[0][1], g.sub[0][1]);
+		zig_zag_geglu(out.sub[1][0], g.sub[1][0]);
+		zig_zag_geglu(out.sub[1][1], g.sub[1][1]);
+	}
+
 	X17_DEVICE void combine_and_store(
 		Fragment_16x16<f32> (&rO_f32)[HEADS_PER_KERNEL][V_TILES],
 		SoftmaxStats (&top_stats)[HEADS_PER_KERNEL],
 		SoftmaxStats (&bot_stats)[HEADS_PER_KERNEL],
 		usize q_start,
 		usize q_warp_idx,
+		SMatrix<bf16, Q_PER_BLOCK, V_GROUP_DIM> sG,
 		GMatrix<bf16, Q_PER_BLOCK, V_GROUP_DIM> gOut_block,
 		f32 *gL_ptr,
 		usize seq_len,
@@ -298,6 +327,11 @@ struct Attn_forward {
 		Fragment_16x16<bf16> rO[HEADS_PER_KERNEL * V_TILES];
 		f32 top_L[HEADS_PER_KERNEL];
 		f32 bot_L[HEADS_PER_KERNEL];
+		usize tid = threadIdx.x % WARP_SIZE;
+
+		cp_async_wait<0>();
+		sync_threads();
+
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 			// Complete the row-wise sum reduction within each warp
 			top_stats[h].sum += shuffle_xor_sync(top_stats[h].sum, 1);
@@ -310,12 +344,15 @@ struct Attn_forward {
 			top_L[h] = math::fast::logb(top_stats[h].sum) + top_stats[h].max;
 			bot_L[h] = math::fast::logb(bot_stats[h].sum) + bot_stats[h].max;
 
-			f32 top_rescale = math::fast::divide(f32(V_SCALE), top_stats[h].sum);
-			f32 bot_rescale = math::fast::divide(f32(V_SCALE), bot_stats[h].sum);
+			f32 top_rescale = math::fast::divide(f32(V_SCALE * V_SCALE_FIX), top_stats[h].sum);
+			f32 bot_rescale = math::fast::divide(f32(V_SCALE * V_SCALE_FIX), bot_stats[h].sum);
 
 			scale_top_(rO_f32[h], top_rescale);
 			scale_bottom_(rO_f32[h], bot_rescale);
 			X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
+				Fragment_16x16<bf16> rG;
+				smem_tile_to_fragment(sG, q_warp_idx * Q_PER_WARP, h * V_DIM + i * 16, rG);
+				zig_zag_geglu(rO_f32[h][i], rG);
 				cast(rO_f32[h][i], rO[h * V_TILES + i]);
 			}
 		}
@@ -325,7 +362,6 @@ struct Attn_forward {
 		//    - tid % 4 == 0: write L for "top"
 		//    - tid % 4 == 2: write L for "bot"
 		//    - otherwise: don't write anything
-		usize tid = threadIdx.x % WARP_SIZE;
 		if (gL_ptr != nullptr && (tid & 1) == 0) {
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 				f32 *gL_head_ptr = gL_ptr + seq_len * (i_head_base + h);
@@ -356,9 +392,18 @@ struct Attn_forward {
 		}
 	}
 
+	static X17_DEVICE void cp_async_g(
+		GMatrix<bf16, Q_PER_BLOCK, V_GROUP_DIM> gG_block,
+		SMatrix<bf16, Q_PER_BLOCK, V_GROUP_DIM> sG
+	) {
+		cp_async_gmem_to_smem<THREADS_PER_BLOCK, Q_PER_BLOCK, V_GROUP_DIM>(
+			threadIdx.x, gG_block, sG, 0, 0, 0, 0
+		);
+	}
+
 	X17_DEVICE void run(
 		usize seq_len, bf16 *gQ_ptr,
-		bf16 *gK_ptr, bf16 *gV_ptr,
+		bf16 *gK_ptr, bf16 *gV_ptr, bf16 *gG_ptr,
 		bf16 const *gSinkV_ptr,
 		f32 const *gSinkScore_ptr,
 		bf16 *gOut_ptr,
@@ -373,6 +418,7 @@ struct Attn_forward {
 		GMatrixDynSize<bf16, QK_GROUP_DIM> gQ{gQ_ptr + QK_DIM * i_head_base, seq_len, Q_STRIDE};
 		GMatrixDynSize<bf16, QK_GROUP_DIM> gK{gK_ptr + QK_DIM * i_head_base, seq_len, K_STRIDE};
 		GMatrixDynSize<bf16, V_GROUP_DIM> gV{gV_ptr + V_DIM * i_head_base, seq_len, V_STRIDE};
+		GMatrixDynSize<bf16, V_GROUP_DIM> gG{gG_ptr + V_DIM * i_head_base, seq_len, G_STRIDE};
 		GMatrixDynSize<bf16, V_GROUP_DIM> gO{gOut_ptr + V_DIM * i_head_base, seq_len, O_STRIDE};
 
 		// SMEM layout: KV preload region + Q
@@ -381,6 +427,7 @@ struct Attn_forward {
 		usize tid = threadIdx.x % WARP_SIZE;
 		SMatrix<bf16, KV_PER_STEP * GMEM_PRELOAD, PRELOAD_DIM> sPreload{smem};
 		SMatrix<bf16, Q_PER_BLOCK, QK_GROUP_DIM> sQ{sPreload._ptr + sPreload.bytes()};
+		SMatrix<bf16, Q_PER_BLOCK, V_GROUP_DIM> sG{sQ._ptr};
 
 		// Load Q from GMEM to SMEM (committed with the first KV preload).
 		usize q_block_idx = blockIdx.x;
@@ -388,6 +435,7 @@ struct Attn_forward {
 		usize q_block_end = q_block_start + Q_PER_BLOCK;
 		usize q_start = q_block_start + q_warp_idx * Q_PER_WARP;
 		GMatrix<bf16, Q_PER_BLOCK, QK_GROUP_DIM> gQ_block = tile_m<Q_PER_BLOCK>(gQ, q_block_idx);
+		GMatrix<bf16, Q_PER_BLOCK, V_GROUP_DIM> gG_block = tile_m<Q_PER_BLOCK>(gG, q_block_idx);
 		cp_async_gmem_to_smem<THREADS_PER_BLOCK, Q_PER_BLOCK, QK_GROUP_DIM>(
 			threadIdx.x, gQ_block, sQ, 0, 0, 0, 0
 		);
@@ -490,7 +538,7 @@ struct Attn_forward {
 
 		// O accumulator
 		Fragment_16x16<f32> rO_f32[HEADS_PER_KERNEL][V_TILES];
-		initial_scale = math::fast::constexpr_expb(-ONLINE_SOFTMAX_THRESHOLD) * SINK_V_SCALE / V_SCALE;
+		initial_scale = math::fast::constexpr_expb(-ONLINE_SOFTMAX_THRESHOLD) / V_SCALE;
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
 			X17_UNROLL for (usize i = 0; i < V_TILES; ++i) {
 				rO_f32[h][i].sub[0][0].val0 = initial_scale * f32(rSinkV[h * QK_DIM / 4 + i * 4 + 0]);
@@ -504,6 +552,7 @@ struct Attn_forward {
 				rO_f32[h][i].sub[1][1].val1 = rO_f32[h][i].sub[0][1].val1;
 			}
 		}
+		bool g_prefetched = false;
 
 		// Sequential loop over KV
 		X17_NO_UNROLL for (usize kv_step = kv_begin; kv_step < kv_end; ++kv_step) {
@@ -566,8 +615,16 @@ struct Attn_forward {
 				sync_threads();
 				sKV = tile_m<KV_PER_STEP>(sPreload, (kv_step + 1) % GMEM_PRELOAD);
 
-				// Preload next KV tiles from GMEM
-				cp_async_kv(gK, gV, sPreload, kv_step + GMEM_PRELOAD, kv_end);
+				// Preload next KV tiles from GMEM. Once the KV pipeline reaches its end,
+				// reuse the now-dead Q staging area to start pulling in the per-row G tile
+				// for the post-attention fused op.
+				usize next_kv = kv_step + GMEM_PRELOAD;
+				if (next_kv < kv_end) {
+					cp_async_kv(gK, gV, sPreload, next_kv, kv_end);
+				} else if (!g_prefetched && next_kv == kv_end) {
+					cp_async_g(gG_block, sG);
+					g_prefetched = true;
+				}
 				cp_async_commit();
 			}
 
@@ -583,6 +640,11 @@ struct Attn_forward {
 			}
 		}
 
+		if (!g_prefetched) {
+			cp_async_g(gG_block, sG);
+			cp_async_commit();
+		}
+
 		GMatrix<bf16, Q_PER_BLOCK, V_GROUP_DIM> gOut_block = tile_m<Q_PER_BLOCK>(gO, q_block_idx);
 		combine_and_store(
 			rO_f32,
@@ -590,6 +652,7 @@ struct Attn_forward {
 			bot_stats,
 			q_start,
 			q_warp_idx,
+			sG,
 			gOut_block,
 			gL_ptr,
 			seq_len,
@@ -602,7 +665,7 @@ template<typename Attn_forward>
 __global__ __launch_bounds__(Attn_forward::THREADS_PER_BLOCK) void
 attn_forward(
 	usize seq_len, bf16 *gQ_ptr,
-	bf16 *gK_ptr, bf16 *gV_ptr,
+	bf16 *gK_ptr, bf16 *gV_ptr, bf16 *gG_ptr,
 	bf16 const *gSinkV_ptr,
 	f32 const *gSinkScore_ptr,
 	bf16 *gOut_ptr,
@@ -610,5 +673,5 @@ attn_forward(
 	usize window_size
 ) {
 	Attn_forward attn_forward = Attn_forward();
-	attn_forward.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gSinkV_ptr, gSinkScore_ptr, gOut_ptr, gL_ptr, window_size);
+	attn_forward.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gG_ptr, gSinkV_ptr, gSinkScore_ptr, gOut_ptr, gL_ptr, window_size);
 }

@@ -24,7 +24,7 @@ struct QKVProj {
 	static constexpr usize GMEM_PRELOAD = 2;
 	static constexpr usize M_TILES = M_PER_WARP / 16;
 	static constexpr usize N_TILES = N_PER_WARP / 16;
-	static constexpr usize INPUT_STEP = B_ROWS / N_HEADS;
+	static constexpr usize INPUT_STEP = B_ROWS / HEAD_DIM;
 	static constexpr usize SMEM_BYTES = GMEM_PRELOAD * K_STEP * (M_PER_BLOCK + N_PER_BLOCK) * sizeof(bf16);
 
 	static constexpr usize K_ITERS = B_ROWS / K_STEP;
@@ -40,12 +40,11 @@ struct QKVProj {
 	static_assert(N_PER_WARP % HEAD_DIM == 0);
 	static_assert(ROPE_DIM <= HEAD_DIM);
 	static_assert(ROPE_DIM % 16 == 0);
-	static_assert(B_ROWS % N_HEADS == 0);
+	static_assert(B_ROWS % HEAD_DIM == 0);
 	static_assert(B_ROWS % K_STEP == 0);
 	static_assert((INPUT_STEP * sizeof(bf16)) % 16 == 0);
 	static_assert(A_COLS <= B_ROWS);
 	static_assert(A_COLS % K_STEP == 0);
-	static_assert(A_ROWS == 3 * PACKED_DIM);
 	static_assert(PACKED_DIM % M_PER_WARP == 0);
 	static_assert(M_PER_BLOCK % N_HEADS == 0);
 	static_assert((B_ROWS * sizeof(bf16)) % 16 == 0);
@@ -67,9 +66,9 @@ struct QKVProj {
 		return warp_col >= PACKED_DIM && warp_col < 2 * PACKED_DIM;
 	}
 
-	X17_DEVICE bool is_v(usize block_m, usize warp_m) {
+	X17_DEVICE bool is_q_or_k(usize block_m, usize warp_m) {
 		usize warp_col = block_m + warp_m;
-		return warp_col >= 2 * PACKED_DIM;
+		return warp_col < 2 * PACKED_DIM;
 	}
 
 	template<usize N_TILE_CNT>
@@ -431,7 +430,7 @@ struct QKVProj {
 			}
 		}
 
-		if (!is_v(block_m, warp_m)) {
+		if (is_q_or_k(block_m, warp_m)) {
 			l2_norm(acc_t);
 			if (is_q(block_m, warp_m)) {
 				apply_q_norm_scales(acc_t, gQKNormScale_ptr, block_m, warp_m);

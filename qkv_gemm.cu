@@ -6,7 +6,7 @@
 #include <filesystem>
 
 int main(int argc, char *argv[]) {
-	constexpr usize A_ROWS = 3 * config::n_heads * config::head_dim;
+	constexpr usize A_ROWS = 4 * config::n_heads * config::head_dim;
 	constexpr usize Q_ROWS = config::n_heads * config::head_dim;
 	constexpr usize A_COLS = config::qkv_fan_in;
 	constexpr usize B_ROWS = config::d_model;
@@ -46,6 +46,7 @@ int main(int argc, char *argv[]) {
 	std::vector<bf16> h_Q(B_COLS * Q_ROWS);
 	std::vector<bf16> h_K(B_COLS * Q_ROWS);
 	std::vector<bf16> h_V(B_COLS * Q_ROWS);
+	std::vector<bf16> h_G(B_COLS * Q_ROWS);
 	std::vector<f32> h_sink_scores(B_COLS * config::n_heads);
 
 	bf16 *d_A, *d_B, *d_S, *d_sink, *d_C;
@@ -116,16 +117,19 @@ int main(int argc, char *argv[]) {
 		bf16 *q_row = h_Q.data() + row * Q_ROWS;
 		bf16 *k_row = h_K.data() + row * Q_ROWS;
 		bf16 *v_row = h_V.data() + row * Q_ROWS;
-		std::copy_n(src_row, Q_ROWS, q_row);
-		std::copy_n(src_row + Q_ROWS, Q_ROWS, k_row);
+		bf16 *g_row = h_G.data() + row * Q_ROWS;
+		std::copy_n(src_row + 0 * Q_ROWS, Q_ROWS, q_row);
+		std::copy_n(src_row + 1 * Q_ROWS, Q_ROWS, k_row);
 		std::copy_n(src_row + 2 * Q_ROWS, Q_ROWS, v_row);
+		std::copy_n(src_row + 3 * Q_ROWS, Q_ROWS, g_row);
 	}
 
 	std::filesystem::create_directories("tmp/block_cuda");
 	store_tensor("tmp/block_cuda/q.bin", h_Q, B_COLS, Q_ROWS);
 	store_tensor("tmp/block_cuda/k.bin", h_K, B_COLS, Q_ROWS);
 	store_tensor("tmp/block_cuda/v.bin", h_V, B_COLS, Q_ROWS);
-	store_tensor("tmp/block_cuda/qkv.bin", h_C, C_ROWS, C_COLS);
+	store_tensor("tmp/block_cuda/g.bin", h_G, B_COLS, Q_ROWS);
+	store_tensor("tmp/block_cuda/qkvg.bin", h_C, C_ROWS, C_COLS);
 	store_f32_tensor("tmp/block_cuda/sink_scores_f32.bin", h_sink_scores, config::n_heads, B_COLS);
 
 	cudaFree(d_A);
