@@ -44,7 +44,12 @@ GEGLU_SCALE = math.sqrt(1.53 * 1.53 / O_PROJ_INPUT_ROWS)
 # - q and k are then L2-normalized per head; with qk_norm_scales = 1, each coordinate has
 #   variance about 1 / HEAD_DIM, and RoPE preserves that variance.
 #
-# - v and g keep the raw projection variance until later explicit scaling by V_SCALE.
+# - v and g are not L2-normalized, so their raw projection variance stays at
+#   QKV_FAN_IN / D_MODEL.
+#
+# - We therefore choose `V_SCALE = sqrt(D_MODEL / QKV_FAN_IN)` so that
+#   Var(v * V_SCALE) ~= (QKV_FAN_IN / D_MODEL) * (D_MODEL / QKV_FAN_IN) = 1,
+#   and the same correction makes `g * V_SCALE` unit-variance as well.
 #
 # - sink_scores = dot(q, sinks_k) has variance about 1 / HEAD_DIM because both inputs are
 #   per-head unit vectors after L2 normalization.
@@ -72,18 +77,18 @@ GEGLU_SCALE = math.sqrt(1.53 * 1.53 / O_PROJ_INPUT_ROWS)
 #   variance about 1: `attn_out_pregate` by the choice of `V_SCALE_FIX`, and `g * V_SCALE`
 #   because Var(g) ~= QKV_FAN_IN / D_MODEL and V_SCALE^2 = D_MODEL / QKV_FAN_IN.
 #
-# - For independent unit-variance inputs, the unscaled tanh-GeGLU used here has variance about
-#   0.422, so `1 / sqrt(Var(GeGLU)) ~= 1.54`. This is why `GEGLU_SCALE` uses the matching
-#   constant `1.53 / sqrt(O_PROJ_INPUT_ROWS)`.
-#
-# - Therefore each coordinate of `attn_out` has variance about 1 / O_PROJ_INPUT_ROWS.
+# - For independent unit-variance inputs, exact version of GeGLU would have variance
+#   `1/3 + 1/(2*pi*sqrt(3))` ~ 0.4252. We use tanh approximation which is close enoguh.
+#   `1 / sqrt(0.4252) ~= 1.53`, which is the constant used in `GEGLU_SCALE` to get the GeGLU output
+#   to a variance of 1. Then we divide by `O_PROJ_INPUT_ROWS`, so each coordinate of `attn_out` has
+#   variance about `1 / O_PROJ_INPUT_ROWS`
 #
 # - `f_pregate = inputs_l2 @ f_weights^T` has variance about 1 because it is a dense projection
 #   from a unit-norm input with unit-variance weights. After the same pairwise GeGLU and
-#   `GEGLU_SCALE`, each coordinate of `f` also has variance about 1 / O_PROJ_INPUT_ROWS.
+#   `GEGLU_SCALE`, each coordinate of `f` also has variance about `1 / O_PROJ_INPUT_ROWS`.
 #
 # - `o` is a dense projection of `concat(attn_out, f)`, whose 4096 input coordinates each have
-#   variance about 1 / O_PROJ_INPUT_ROWS. With unit-variance `o_weights`, each coordinate of
+#   variance about `1 / O_PROJ_INPUT_ROWS`. With unit-variance `o_weights`, each coordinate of
 #   `o` therefore has variance about 1.
 
 def tensor_path(name: str) -> Path:
