@@ -87,6 +87,24 @@ def format_index(flat_index: int, shape: tuple[int, ...]) -> str:
 	return ", ".join(str(coord) for coord in coords)
 
 
+def worst_pct_diff(
+	a: torch.Tensor,
+	b: torch.Tensor,
+	finite_mask: torch.Tensor,
+	min_mag: float,
+) -> tuple[int, float] | None:
+	a_abs = a.abs()
+	b_abs = b.abs()
+	mask = finite_mask & (a_abs > min_mag) & (b_abs > min_mag)
+	if not mask.any():
+		return None
+	hi = torch.maximum(a_abs, b_abs)
+	lo = torch.minimum(a_abs, b_abs)
+	pct_diff = torch.where(mask, (hi / lo - 1.0) * 100.0, torch.full_like(hi, -1.0))
+	flat_idx = int(pct_diff.reshape(-1).argmax().item())
+	return flat_idx, pct_diff.reshape(-1)[flat_idx].item()
+
+
 def max_pct_strs(a_abs: torch.Tensor, b_abs: torch.Tensor, finite_mask: torch.Tensor) -> list[str]:
 	pct_strs = []
 	for min_mag in [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1]:
@@ -129,6 +147,7 @@ def verify_bf16(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
 	b_ord = bf16_ordered_int(b_bits)
 	ulp_diff = (a_ord - b_ord).abs()
 	same_value = a == b
+	finite_mask = torch.isfinite(a) & torch.isfinite(b)
 	bit_mismatch = a_bits != b_bits
 	zero_sign_only = bit_mismatch & same_value
 	raw_exact_match = int((a_bits == b_bits).sum().item())
@@ -138,7 +157,8 @@ def verify_bf16(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
 	three_ulp_or_less = int((ulp_diff <= 3).sum().item())
 	a_abs = a.abs()
 	b_abs = b.abs()
-	pct_strs = max_pct_strs(a_abs, b_abs, torch.ones_like(a, dtype=torch.bool))
+	pct_strs = max_pct_strs(a_abs, b_abs, finite_mask)
+	worst_pct_over_point_one = worst_pct_diff(a, b, finite_mask, 1e-1)
 	total = a.numel()
 
 	print("\n--- BF16 Tensor Compare ---")
@@ -156,7 +176,15 @@ def verify_bf16(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
 	print(f"Within 2 ULP:     {two_ulp_or_less}/{total} ({100.0 * two_ulp_or_less / total:.2f}%)")
 	print(f"Within 3 ULP:     {three_ulp_or_less}/{total} ({100.0 * three_ulp_or_less / total:.2f}%)")
 	if max_abs_diff > 0.0:
-		print(f"Worst mismatch at [{format_index(flat_idx, shape)}]: ref={worst_ref:.6e}, other={worst_cuda:.6e}")
+		print(f"Worst abs mismatch at [{format_index(flat_idx, shape)}]: ref={worst_ref:.6e}, other={worst_cuda:.6e}")
+	if worst_pct_over_point_one is not None:
+		worst_pct_idx, worst_pct_value = worst_pct_over_point_one
+		worst_pct_ref = a_bf16.reshape(-1)[worst_pct_idx].float().item()
+		worst_pct_other = b_bf16.reshape(-1)[worst_pct_idx].float().item()
+		print(
+			f"Worst pct mismatch (MIN_MAG > 1e-1) at [{format_index(worst_pct_idx, shape)}]: "
+			f"ref={worst_pct_ref:.6e}, other={worst_pct_other:.6e}, pct={worst_pct_value:.9f}%"
+		)
 
 
 def verify_f32(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
@@ -196,6 +224,7 @@ def verify_f32(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
 	a_abs = a.abs()
 	b_abs = b.abs()
 	pct_strs = max_pct_strs(a_abs, b_abs, finite_mask)
+	worst_pct_over_point_one = worst_pct_diff(a, b, finite_mask, 1e-1)
 	total = a.numel()
 
 	print("\n--- F32 Tensor Compare ---")
@@ -215,7 +244,15 @@ def verify_f32(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
 	print(summarize_nonfinite("A non-finite", a))
 	print(summarize_nonfinite("B non-finite", b))
 	if flat_idx is not None and max_abs_diff > 0.0:
-		print(f"Worst mismatch at [{format_index(flat_idx, shape)}]: ref={worst_ref:.6e}, other={worst_other:.6e}")
+		print(f"Worst abs mismatch at [{format_index(flat_idx, shape)}]: ref={worst_ref:.6e}, other={worst_other:.6e}")
+	if worst_pct_over_point_one is not None:
+		worst_pct_idx, worst_pct_value = worst_pct_over_point_one
+		worst_pct_ref = a.reshape(-1)[worst_pct_idx].item()
+		worst_pct_other = b.reshape(-1)[worst_pct_idx].item()
+		print(
+			f"Worst pct mismatch (MIN_MAG > 1e-1) at [{format_index(worst_pct_idx, shape)}]: "
+			f"ref={worst_pct_ref:.6e}, other={worst_pct_other:.6e}, pct={worst_pct_value:.9f}%"
+		)
 
 
 def verify(file_a: str, file_b: str, shape: tuple[int, ...], dtype: str) -> None:
