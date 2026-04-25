@@ -19,4 +19,8 @@ python tensor_stats.py tmp/block_torch/attn_out.bin tmp/block_torch/attn_out.bin
 python tensor_stats.py tmp/block_torch/attn_out_pregate.bin tmp/block_torch/attn_out_pregate.bin.var
 python tensor_stats.py tmp/block_torch/attn_out.bin tmp/block_torch/attn_out.bin.var --overlay tmp/block_torch/f.bin --overlay-var tmp/block_torch/f.bin.var
 
+./nvcc.sh f_gemm.cu && tmp/f_gemm
+python verify_tensor.py tmp/block_torch/f.bin tmp/block_cuda/f.bin
+python tensor_stats.py tmp/block_torch/f.bin tmp/block_torch/f.bin.var
+
 paste <(cat /sys/class/thermal/thermal_zone*/type) <(cat /sys/class/thermal/thermal_zone*/temp) | column -s $'\t' -t | sed 's/\(.\)..$/.\1°C/'
