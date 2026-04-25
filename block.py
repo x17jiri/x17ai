@@ -28,8 +28,63 @@ L2_NORM_EPS = float(config["l2_norm_eps"])
 ROPE_BASE = float(config["rope_base"])
 QKV_ROWS = 4 * N_HEADS * HEAD_DIM
 Q_ROWS = N_HEADS * HEAD_DIM
+F_PROJ_ROWS = 6 * N_HEADS * HEAD_DIM
+F_ROWS = F_PROJ_ROWS // 2
+O_PROJ_INPUT_ROWS = Q_ROWS + F_ROWS
 V_SCALE = math.sqrt(D_MODEL / QKV_FAN_IN)
 V_SCALE_FIX = 1.5
+GEGLU_SCALE = math.sqrt(1.53 * 1.53 / O_PROJ_INPUT_ROWS)
+
+# Expected variances at initialization (after `create_inputs()`):
+#
+# - Each row of `inputs_l2` has unit norm, so each coordinate contributes variance about 1 / D_MODEL.
+#
+# - Raw projected q/k/v/g coordinates therefore have variance about QKV_FAN_IN / D_MODEL.
+#
+# - q and k are then L2-normalized per head; with qk_norm_scales = 1, each coordinate has
+#   variance about 1 / HEAD_DIM, and RoPE preserves that variance.
+#
+# - v and g keep the raw projection variance until later explicit scaling by V_SCALE.
+#
+# - sink_scores = dot(q, sinks_k) has variance about 1 / HEAD_DIM because both inputs are
+#   per-head unit vectors after L2 normalization.
+#
+# - real_scores = q @ k^T also has variance about 1 / HEAD_DIM before masking.
+#
+# - TEMPERATURE = sqrt(HEAD_DIM), so sink_scores * TEMPERATURE, real_scores * TEMPERATURE,
+#   and the concatenated `scores` tensor before SSMax all have variance about 1.
+#
+# - sink_v is drawn directly from N(0, 1), so each coordinate has variance about 1.
+#
+# - The sink row of `values` is sink_v * V_SCALE_FIX, so its variance is about V_SCALE_FIX^2.
+#
+# - The real-token rows of `values` are v * (V_SCALE_FIX * V_SCALE). Since
+#   Var(v) ~= QKV_FAN_IN / D_MODEL and V_SCALE^2 = D_MODEL / QKV_FAN_IN,
+#   those rows also have variance about V_SCALE_FIX^2.
+#
+# - Therefore the concatenated `values` tensor fed into attention has variance about
+#   V_SCALE_FIX^2.
+#
+# - V_SCALE_FIX was chosen empirically to get the variance of `attn_out_pregate` to around 1.
+#   The same value works regardless of sequence length thanks to SSMax.
+#
+# - In `attn_out = zig_zag_geglu(attn_out_pregate, g * V_SCALE)`, both GeGLU inputs have
+#   variance about 1: `attn_out_pregate` by the choice of `V_SCALE_FIX`, and `g * V_SCALE`
+#   because Var(g) ~= QKV_FAN_IN / D_MODEL and V_SCALE^2 = D_MODEL / QKV_FAN_IN.
+#
+# - For independent unit-variance inputs, the unscaled tanh-GeGLU used here has variance about
+#   0.422, so `1 / sqrt(Var(GeGLU)) ~= 1.54`. This is why `GEGLU_SCALE` uses the matching
+#   constant `1.53 / sqrt(O_PROJ_INPUT_ROWS)`.
+#
+# - Therefore each coordinate of `attn_out` has variance about 1 / O_PROJ_INPUT_ROWS.
+#
+# - `f_pregate = inputs_l2 @ f_weights^T` has variance about 1 because it is a dense projection
+#   from a unit-norm input with unit-variance weights. After the same pairwise GeGLU and
+#   `GEGLU_SCALE`, each coordinate of `f` also has variance about 1 / O_PROJ_INPUT_ROWS.
+#
+# - `o` is a dense projection of `concat(attn_out, f)`, whose 4096 input coordinates each have
+#   variance about 1 / O_PROJ_INPUT_ROWS. With unit-variance `o_weights`, each coordinate of
+#   `o` therefore has variance about 1.
 
 def tensor_path(name: str) -> Path:
 	return TENSOR_DIR / name
@@ -70,6 +125,8 @@ def create_inputs() -> None:
 	inputs = torch.randn((N_INPUTS, D_MODEL), generator=generator)
 	inputs_l2 = l2_norm_last_dim(inputs, L2_NORM_EPS)
 	qkv_weights = torch.randn((QKV_ROWS, QKV_FAN_IN), generator=generator)
+	f_weights = torch.randn((F_PROJ_ROWS, D_MODEL), generator=generator)
+	o_weights = torch.randn((D_MODEL, O_PROJ_INPUT_ROWS), generator=generator)
 	qk_norm_scales = torch.full((1, Q_ROWS), 1.0)
 	sink_k = torch.randn((N_HEADS, HEAD_DIM), generator=generator)
 	sink_k = l2_norm_last_dim(sink_k, L2_NORM_EPS)
@@ -77,6 +134,8 @@ def create_inputs() -> None:
 	store_tensor(inputs, "inputs.bin")
 	store_tensor(inputs_l2, "inputs_l2.bin")
 	store_tensor(qkv_weights, "qkv_weights.bin")
+	store_tensor(f_weights, "f_weights.bin")
+	store_tensor(o_weights, "o_weights.bin")
 	store_tensor(qk_norm_scales, "qk_norm_scales.bin")
 	store_tensor(sink_k, "sinks_k.bin")
 	store_tensor(sinks_v, "sinks_v.bin")
@@ -153,8 +212,8 @@ def geglu(gate: torch.Tensor, lin: torch.Tensor) -> torch.Tensor:
 
 def zig_zag_geglu(attn_out: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
 	out = torch.empty_like(attn_out)
-	out[..., 0::2] = geglu(g[..., 0::2], attn_out[..., 0::2])
-	out[..., 1::2] = geglu(attn_out[..., 1::2], g[..., 1::2])
+	out[..., 0::2] = geglu(g[..., 0::2], attn_out[..., 0::2]) * GEGLU_SCALE
+	out[..., 1::2] = geglu(attn_out[..., 1::2], g[..., 1::2]) * GEGLU_SCALE
 	return out
 
 def calculate_sink_scores(q: torch.Tensor, sinks_k: torch.Tensor) -> torch.Tensor:
@@ -230,10 +289,10 @@ def attn_one_head(
 	sink_scores = sink_scores.to(torch.float32).unsqueeze(1)
 	real_scores = torch.matmul(q, k.transpose(0, 1))
 #	real_scores = quantize_(real_scores)
+	scores = torch.cat((sink_scores, real_scores), dim=1)
 	if score_file_name is not None:
-		store_f32_tensor(real_scores, score_file_name)
-	scale = ssmax(seq_len, WINDOW_SIZE).unsqueeze(1) * TEMPERATURE
-	scores = torch.cat((sink_scores, real_scores), dim=1) * scale
+		store_f32_tensor(real_scores * TEMPERATURE, score_file_name)
+	scores *= ssmax(seq_len, WINDOW_SIZE).unsqueeze(1) * TEMPERATURE
 	values = torch.cat((sink_v.unsqueeze(0) * V_SCALE_FIX, v * (V_SCALE_FIX * V_SCALE)), dim=0)
 	real_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=0)
 	if WINDOW_SIZE > 0:
@@ -278,15 +337,56 @@ def join_qkvg(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, g: torch.Tensor
 		dim=1,
 	)
 
+def pairwise_geglu(tensor: torch.Tensor) -> torch.Tensor:
+	if tensor.shape[-1] % 2 != 0:
+		raise ValueError(f"Expected even projection width for GeGLU, got {tensor.shape[-1]}")
+	return geglu(tensor[..., 0::2], tensor[..., 1::2]) * GEGLU_SCALE
+
+def f_proj_pregate(inputs: torch.Tensor, f_weights: torch.Tensor) -> torch.Tensor:
+	if inputs.shape[-1] != D_MODEL:
+		raise ValueError(f"Expected input width {D_MODEL}, got {inputs.shape[-1]}")
+	if f_weights.shape != (F_PROJ_ROWS, D_MODEL):
+		raise ValueError(f"Expected f_weights shape {(F_PROJ_ROWS, D_MODEL)}, got {tuple(f_weights.shape)}")
+	return torch.matmul(inputs, f_weights.transpose(0, 1))
+
+def f_proj(inputs: torch.Tensor, f_weights: torch.Tensor) -> torch.Tensor:
+	return pairwise_geglu(f_proj_pregate(inputs, f_weights))
+
+def o_proj(attn_out: torch.Tensor, o_weights: torch.Tensor, f: torch.Tensor) -> torch.Tensor:
+	flat_attn_out = attn_out.reshape(attn_out.shape[0], -1)
+	if flat_attn_out.shape[1] != Q_ROWS:
+		raise ValueError(
+			f"Expected flattened attn_out width {Q_ROWS}, got {flat_attn_out.shape[1]}"
+		)
+	if f.ndim != 2:
+		raise ValueError(f"Expected f to be rank-2, got rank {f.ndim}")
+	if f.shape[0] != flat_attn_out.shape[0]:
+		raise ValueError(
+			f"Expected f batch size {flat_attn_out.shape[0]}, got {f.shape[0]}"
+		)
+	if f.shape[1] != F_ROWS:
+		raise ValueError(f"Expected f width {F_ROWS}, got {f.shape[1]}")
+	o_proj_input = torch.cat((flat_attn_out, f), dim=1)
+	if o_weights.shape != (D_MODEL, o_proj_input.shape[1]):
+		raise ValueError(
+			f"Expected o_weights shape {(D_MODEL, o_proj_input.shape[1])}, got {tuple(o_weights.shape)}"
+		)
+	return torch.matmul(o_proj_input, o_weights.transpose(0, 1))
+
 def run_block() -> None:
 	inputs = load_tensor("inputs_l2.bin", N_INPUTS, D_MODEL)
 	qkv_weights = load_tensor("qkv_weights.bin", QKV_ROWS, QKV_FAN_IN)
+	f_weights = load_tensor("f_weights.bin", F_PROJ_ROWS, D_MODEL)
+	o_weights = load_tensor("o_weights.bin", D_MODEL, O_PROJ_INPUT_ROWS)
 	qk_norm_scales = load_tensor("qk_norm_scales.bin", 1, Q_ROWS)
 	sinks_k = load_tensor("sinks_k.bin", N_HEADS, HEAD_DIM)
 	sinks_v = load_tensor("sinks_v.bin", N_HEADS, HEAD_DIM)
 	q, k, v, g, sink_scores = qkv_proj(inputs, qkv_weights, qk_norm_scales, sinks_k)
-	attn_out = attn(q, k, v, sink_scores, sinks_v)
-	attn_out = zig_zag_geglu(attn_out, g * V_SCALE)
+	attn_out_pregate = attn(q, k, v, sink_scores, sinks_v)
+	attn_out = zig_zag_geglu(attn_out_pregate, g * V_SCALE)
+	f_pregate = f_proj_pregate(inputs, f_weights)
+	f = pairwise_geglu(f_pregate)
+	o = o_proj(attn_out, o_weights, f)
 	#attn_match = attn_matching(q, k, v, sinks_k, window_size, rope_base)
 	qkvg = join_qkvg(q, k, v, g)
 
@@ -299,12 +399,16 @@ def run_block() -> None:
 	print("sinks_v shape:", sinks_v.shape)
 	print("sink_scores shape:", sink_scores.shape)
 	print("attn_out shape:", attn_out.shape)
+	print("f_pregate shape:", f_pregate.shape)
+	print("f shape:", f.shape)
+	print("o shape:", o.shape)
 	#print("attn_match shape:", attn_match.shape)
 
 	store_f32_tensor(q, "q_f32.bin")
 	store_f32_tensor(k, "k_f32.bin")
 	store_f32_tensor(v, "v_f32.bin")
 	store_f32_tensor(g, "g_f32.bin")
+	store_f32_tensor(g * V_SCALE, "g_scaled_f32.bin")
 
 	store_tensor(q, "q.bin")
 	store_tensor(k, "k.bin")
@@ -312,7 +416,11 @@ def run_block() -> None:
 	store_tensor(g, "g.bin")
 
 	store_f32_tensor(sink_scores.transpose(0, 1), "sink_scores_f32.bin")
+	store_tensor(attn_out_pregate, "attn_out_pregate.bin")
 	store_tensor(attn_out, "attn_out.bin")
+	store_tensor(f_pregate, "f_pregate.bin")
+	store_tensor(f, "f.bin")
+	store_tensor(o, "o.bin")
 	#store_tensor(attn_match, "attn_matching.bin")
 	store_tensor(qkvg, "qkvg.bin")
 

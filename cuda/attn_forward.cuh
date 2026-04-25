@@ -288,7 +288,7 @@ struct Attn_forward {
 		bot.sum = math::fma(bot.sum, bot_rescale, bot_add);
 	}
 
-	static X17_DEVICE void zig_zag_geglu(
+	static X17_DEVICE void zig_zag_geglu_(
 		Fragment_8x8<f32> &out,
 		Fragment_8x8<bf16> const &g
 	) {
@@ -297,19 +297,19 @@ struct Attn_forward {
 		f32 g0 = f32(V_SCALE) * f32(g.first());
 		f32 g1 = f32(V_SCALE) * f32(g.second());
 		out.set(
-			math::fast::geglu(g0, out0),
-			math::fast::geglu(out1, g1)
+			math::fast::geglu<1.5>(g0, out0),
+			math::fast::geglu<1.5>(out1, g1)
 		);
 	}
 
-	static X17_DEVICE void zig_zag_geglu(
+	static X17_DEVICE void zig_zag_geglu_(
 		Fragment_16x16<f32> &out,
 		Fragment_16x16<bf16> const &g
 	) {
-		zig_zag_geglu(out.sub[0][0], g.sub[0][0]);
-		zig_zag_geglu(out.sub[0][1], g.sub[0][1]);
-		zig_zag_geglu(out.sub[1][0], g.sub[1][0]);
-		zig_zag_geglu(out.sub[1][1], g.sub[1][1]);
+		zig_zag_geglu_(out.sub[0][0], g.sub[0][0]);
+		zig_zag_geglu_(out.sub[0][1], g.sub[0][1]);
+		zig_zag_geglu_(out.sub[1][0], g.sub[1][0]);
+		zig_zag_geglu_(out.sub[1][1], g.sub[1][1]);
 	}
 
 	X17_DEVICE void combine_and_store(
@@ -350,7 +350,7 @@ struct Attn_forward {
 			X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
 				Fragment_16x16<bf16> rG;
 				smem_tile_to_fragment(sG, q_warp_idx * Q_PER_WARP, h * V_DIM + i * 16, rG);
-				zig_zag_geglu(rO_f32[h][i], rG);
+				zig_zag_geglu_(rO_f32[h][i], rG);
 				cast(rO_f32[h][i], rO[h * V_TILES + i]);
 			}
 		}
@@ -552,7 +552,6 @@ struct Attn_forward {
 		}
 
 		// Sequential loop over KV
-		usize g_prefetched = 0;
 		X17_NO_UNROLL for (usize kv_step = kv_begin; kv_step < kv_end; ++kv_step) {
 			// S = Q * K^T, interleaved with V load (rKV: K -> V)
 			Fragment_16x16<f32> rS_f32[HEADS_PER_KERNEL];
@@ -619,11 +618,11 @@ struct Attn_forward {
 				usize next_kv = kv_step + GMEM_PRELOAD;
 				if (next_kv < kv_end) {
 					cp_async_kv(gK, gV, sPreload, next_kv, kv_end);
-				} else {
-					if (g_prefetched == 0) {
-						cp_async_g(gG_block, sG);
-					}
-					++g_prefetched;
+				} else if (next_kv == kv_end) {
+					constexpr usize MIN_KV_STEPS = Q_PER_BLOCK / KV_PER_STEP;
+					static_assert(MIN_KV_STEPS >= GMEM_PRELOAD, "without this, next_kv == kv_end will never be true");
+					static_assert(GMEM_PRELOAD > 1, "we need one more iteration after cp_async_g to call wait and sync");
+					cp_async_g(gG_block, sG);
 				}
 				cp_async_commit();
 			}
@@ -638,12 +637,6 @@ struct Attn_forward {
 					smem_tile_to_fragment(sKV, 0, h * QK_DIM + i * 16, rKV[h][i]);
 				}
 			}
-		}
-
-		// If 1, we didn't do another loop after `cp_async_g` and so we need to wait
-		if (g_prefetched == 1) {
-			cp_async_wait<0>();
-			sync_threads();
 		}
 
 		GMatrix<bf16, Q_PER_BLOCK, V_GROUP_DIM> gOut_block = tile_m<Q_PER_BLOCK>(gO, q_block_idx);

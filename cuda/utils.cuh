@@ -323,7 +323,7 @@ namespace math {
 		/// Scales the input by `1.0 / sqrt(FAN_IN)` before applying the GELU formula.
 		/// The scaling constant is folded into the coefficients of the approximation
 		/// and so it is free at runtime.
-		template<const usize FAN_IN = 1>
+		template<const f64 OUT_SCALE = 1.0, const usize FAN_IN = 1>
 		X17_DEVICE f32 gelu(f32 x) {
 			constexpr f64 k = constexpr_rsqrt(f64(FAN_IN));
 			constexpr f64 k2 = 1.0 / f64(FAN_IN); // k^2
@@ -332,12 +332,15 @@ namespace math {
 			// 0.044715 * c * k^3
 			constexpr f64  ck3 = 0.044715 * ck * k2;
 			f32 y = math::fma(f32(ck3) * x, x * x, f32(ck) * x);
-			return math::fma(f32(0.5 * k) * x, math::fast::tanh(y), f32(0.5 * k) * x);
+			return math::fma(
+				f32(0.5 * OUT_SCALE * k) * x,
+				math::fast::tanh(y),
+				f32(0.5 * OUT_SCALE * k) * x);
 		}
 
-		template<const usize GATE_FAN_IN = 1>
+		template<const f64 OUT_SCALE = 1.0, const usize GATE_FAN_IN = 1>
 		X17_DEVICE f32 geglu(f32 gate, f32 lin) {
-			return gelu<GATE_FAN_IN>(gate) * lin;
+			return gelu<OUT_SCALE, GATE_FAN_IN>(gate) * lin;
 		}
 
 		/// `softplus(x) = log(1 + exp(x))`
