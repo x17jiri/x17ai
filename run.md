@@ -23,4 +23,8 @@ python tensor_stats.py tmp/block_torch/attn_out.bin tmp/block_torch/attn_out.bin
 python verify_tensor.py tmp/block_torch/f.bin tmp/block_cuda/f.bin
 python tensor_stats.py tmp/block_torch/f.bin tmp/block_torch/f.bin.var
 
+./nvcc.sh o_gemm.cu && tmp/o_gemm
+python verify_tensor.py tmp/block_torch/o.bin tmp/block_cuda/o.bin
+python tensor_stats.py tmp/block_torch/o.bin tmp/block_torch/o.bin.var
+
 paste <(cat /sys/class/thermal/thermal_zone*/type) <(cat /sys/class/thermal/thermal_zone*/temp) | column -s $'\t' -t | sed 's/\(.\)..$/.\1°C/'
