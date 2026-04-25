@@ -1,5 +1,5 @@
 digraph Variances {
-	rankdir=LR;
+	rankdir=TB;
 	newrank=true;
 	splines=true;
 	nodesep=0.45;
@@ -39,14 +39,14 @@ digraph Variances {
 
 	g_scale [label="* V_SCALE", fillcolor="#f4cccc", color="#aa4444"];
 	zig_zag_geglu [label="zig-zag GeGLU"];
-	attn_geglu_scale [label="* GEGLU_SCALE", fillcolor="#f4cccc", color="#aa4444"];
+	attn_geglu_scale [label="* ATTN_GEGLU_SCALE\n= 1.53 / sqrt(2 * Q_ROWS)", fillcolor="#f4cccc", color="#aa4444"];
 
 	init_f_weights [label="randn f_weights", fillcolor="#d9ead3"];
 	f_proj [label="F projection"];
 	f_pairwise_geglu [label="pairwise GeGLU"];
-	f_geglu_scale [label="* GEGLU_SCALE", fillcolor="#f4cccc", color="#aa4444"];
+	f_geglu_scale [label="* F_GEGLU_SCALE\n= 1.53 / sqrt(2 * F_ROWS)", fillcolor="#f4cccc", color="#aa4444"];
 
-	concat_o_input [label="concat(attn_out, f)"];
+	concat_o_input [label="concat(attn_out, f)\nbranch totals: 0.5 + 0.5"];
 	init_o_weights [label="randn o_weights", fillcolor="#d9ead3"];
 	o_proj [label="O projection"];
 	store_o [label="store o.bin", fillcolor="#d9ead3"];
@@ -89,14 +89,14 @@ digraph Variances {
 
 	g_scale -> zig_zag_geglu [label="g_scaled (1)"];
 	zig_zag_geglu -> attn_geglu_scale [label="attn_geglu (~0.425)"];
-	attn_geglu_scale -> concat_o_input [label="attn_out (1 / O_PROJ_INPUT_ROWS)"];
+	attn_geglu_scale -> concat_o_input [label="attn_out (1 / (2 * Q_ROWS))"];
 
 	init_f_weights -> f_proj [label="f_weights (1)"];
 	f_proj -> f_pairwise_geglu [label="f_pregate (1)"];
 	f_pairwise_geglu -> f_geglu_scale [label="f_geglu (~0.425)"];
-	f_geglu_scale -> concat_o_input [label="f (1 / O_PROJ_INPUT_ROWS)"];
+	f_geglu_scale -> concat_o_input [label="f (1 / (2 * F_ROWS))"];
 
-	concat_o_input -> o_proj [label="o_input (1 / O_PROJ_INPUT_ROWS)"];
+	concat_o_input -> o_proj [label="o_input (attn: 1 / (2 * Q_ROWS), f: 1 / (2 * F_ROWS))"];
 	init_o_weights -> o_proj [label="o_weights (1)"];
 	o_proj -> store_o [label="o (1)"];
 }

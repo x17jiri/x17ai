@@ -15,10 +15,11 @@ int main() {
 	constexpr usize PACKED_DIM = HEAD_CNT * V_DIM;
 	constexpr usize D_MODEL = config::d_model;
 	constexpr usize QKV_FAN_IN = config::qkv_fan_in;
+	constexpr usize O_PROJ_CONTRIBS = D_MODEL;
 
 	static_assert(config::d_model == config::n_heads * config::head_dim);
 
-	using AF = Attn_forward<HEAD_CNT, HEADS_PER_KERNEL, QK_DIM, V_DIM, D_MODEL, QKV_FAN_IN, V_EQUALS_K>;
+	using AF = AttnForward<HEAD_CNT, HEADS_PER_KERNEL, QK_DIM, V_DIM, D_MODEL, QKV_FAN_IN, O_PROJ_CONTRIBS, V_EQUALS_K>;
 	printf("sqrt 2 = %e, %e, %e, %d\n",
 		math::constexpr_sqrt(2.0),
 		M_SQRT2,

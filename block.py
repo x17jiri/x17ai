@@ -33,7 +33,8 @@ F_ROWS = F_PROJ_ROWS // 2
 O_PROJ_INPUT_ROWS = Q_ROWS + F_ROWS
 V_SCALE = math.sqrt(D_MODEL / QKV_FAN_IN)
 V_SCALE_FIX = 1.5
-GEGLU_SCALE = math.sqrt(1.53 * 1.53 / O_PROJ_INPUT_ROWS)
+ATTN_GEGLU_SCALE = math.sqrt(1.53 * 1.53 / (2 * Q_ROWS))
+F_GEGLU_SCALE = math.sqrt(1.53 * 1.53 / (2 * F_ROWS))
 
 # Expected variances at initialization (after `create_inputs()`):
 #
@@ -80,17 +81,25 @@ GEGLU_SCALE = math.sqrt(1.53 * 1.53 / O_PROJ_INPUT_ROWS)
 #
 # - For independent unit-variance inputs, exact version of GeGLU would have variance
 #   `1/3 + 1/(2*pi*sqrt(3))` ~ 0.4252. We use tanh approximation, which is close enough.
-#   `1 / sqrt(0.4252) ~= 1.53`, which is the constant used in `GEGLU_SCALE` to get the GeGLU output
-#   to a variance of 1. Then we divide by `O_PROJ_INPUT_ROWS`, so each coordinate of `attn_out` has
-#   variance about `1 / O_PROJ_INPUT_ROWS`
+#   `1 / sqrt(0.4252) ~= 1.53`, which brings a unit-input GeGLU back to variance about 1.
+#
+# - We then split the branch output scales to reflect how many inputs each branch contributes to
+#   the final projection while keeping the final output variance near 1:
+#   `ATTN_GEGLU_SCALE = 1.53 / sqrt(2 * Q_ROWS)` and
+#   `F_GEGLU_SCALE = 1.53 / sqrt(2 * F_ROWS)`.
+#
+# - Therefore each coordinate of `attn_out` has variance about `1 / (2 * Q_ROWS)`, so the context
+#   branch contributes total variance about `Q_ROWS * (1 / (2 * Q_ROWS)) = 0.5` to the output
+#   projection.
 #
 # - `f_pregate = inputs_l2 @ f_weights^T` has variance about 1 because it is a dense projection
 #   from a unit-norm input with unit-variance weights. After the same pairwise GeGLU and
-#   `GEGLU_SCALE`, each coordinate of `f` also has variance about `1 / O_PROJ_INPUT_ROWS`.
+#   `F_GEGLU_SCALE`, each coordinate of `f` has variance about `1 / (2 * F_ROWS)`, so the forward
+#   branch also contributes total variance about `F_ROWS * (1 / (2 * F_ROWS)) = 0.5`.
 #
-# - `o` is a dense projection of `concat(attn_out, f)`, whose O_PROJ_INPUT_ROWS input coordinates
-#   each have variance about `1 / O_PROJ_INPUT_ROWS`. With unit-variance `o_weights`,
-#   each coordinate of `o` therefore has variance about 1.
+# - `o` is a dense projection of `concat(attn_out, f)`. With unit-variance `o_weights`, each
+#   coordinate of `o` therefore has variance about 1 because the context branch contributes about
+#   0.5 and the forward branch contributes about 0.5.
 
 def tensor_path(name: str) -> Path:
 	return TENSOR_DIR / name
@@ -107,21 +116,35 @@ def load_f32_tensor(tensor: str, rows: int, cols: int) -> torch.Tensor:
 	data = torch.frombuffer(bytearray(raw), dtype=torch.float32)
 	return data.reshape(rows, cols).to(my_device)
 
-def store_tensor(tensor: torch.Tensor, file_name: str) -> None:
+def variance_path(path: Path) -> Path:
+	return path.with_name(f"{path.name}.var")
+
+def store_expected_variance(path: Path, expected_variance: float | None) -> None:
+	var_path = variance_path(path)
+	if expected_variance is None:
+		if var_path.exists():
+			var_path.unlink()
+		return
+	var_path.write_text(f"{expected_variance:.17g}\n", encoding="ascii")
+	print(f"Created {var_path}: variance={expected_variance:.6e}")
+
+def store_tensor(tensor: torch.Tensor, file_name: str, expected_variance: float | None = None) -> None:
 	path = tensor_path(file_name)
 	path.parent.mkdir(parents=True, exist_ok=True)
 	data = tensor.contiguous().to(torch.bfloat16).cpu()
 	with path.open("wb") as output_file:
 		output_file.write(data.view(torch.int16).numpy().tobytes())
+	store_expected_variance(path, expected_variance)
 	shape_str = ", ".join(str(dim) for dim in data.shape)
 	print(f"Created {path}: [{shape_str}] bfloat16")
 
-def store_f32_tensor(tensor: torch.Tensor, file_name: str) -> None:
+def store_f32_tensor(tensor: torch.Tensor, file_name: str, expected_variance: float | None = None) -> None:
 	path = tensor_path(file_name)
 	path.parent.mkdir(parents=True, exist_ok=True)
 	data = tensor.contiguous().cpu().to(torch.float32)
 	with path.open("wb") as output_file:
 		output_file.write(data.numpy().tobytes())
+	store_expected_variance(path, expected_variance)
 	shape_str = ", ".join(str(dim) for dim in data.shape)
 	print(f"Created {path}: [{shape_str}] float32")
 
@@ -137,14 +160,14 @@ def create_inputs() -> None:
 	sink_k = torch.randn((N_HEADS, HEAD_DIM), generator=generator)
 	sink_k = l2_norm_last_dim(sink_k, L2_NORM_EPS)
 	sinks_v = torch.randn((N_HEADS, HEAD_DIM), generator=generator)
-	store_tensor(inputs, "inputs.bin")
-	store_tensor(inputs_l2, "inputs_l2.bin")
-	store_tensor(qkv_weights, "qkv_weights.bin")
-	store_tensor(f_weights, "f_weights.bin")
-	store_tensor(o_weights, "o_weights.bin")
-	store_tensor(qk_norm_scales, "qk_norm_scales.bin")
-	store_tensor(sink_k, "sinks_k.bin")
-	store_tensor(sinks_v, "sinks_v.bin")
+	store_tensor(inputs, "inputs.bin", expected_variance=1.0)
+	store_tensor(inputs_l2, "inputs_l2.bin", expected_variance=1.0 / D_MODEL)
+	store_tensor(qkv_weights, "qkv_weights.bin", expected_variance=1.0)
+	store_tensor(f_weights, "f_weights.bin", expected_variance=1.0)
+	store_tensor(o_weights, "o_weights.bin", expected_variance=1.0)
+	store_tensor(qk_norm_scales, "qk_norm_scales.bin", expected_variance=0.0)
+	store_tensor(sink_k, "sinks_k.bin", expected_variance=1.0 / HEAD_DIM)
+	store_tensor(sinks_v, "sinks_v.bin", expected_variance=1.0)
 
 def expand_qkv_weights(qkv_weights: torch.Tensor) -> torch.Tensor:
 	if D_MODEL % HEAD_DIM != 0:
@@ -218,8 +241,8 @@ def geglu(gate: torch.Tensor, lin: torch.Tensor) -> torch.Tensor:
 
 def zig_zag_geglu(attn_out: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
 	out = torch.empty_like(attn_out)
-	out[..., 0::2] = geglu(g[..., 0::2], attn_out[..., 0::2]) * GEGLU_SCALE
-	out[..., 1::2] = geglu(attn_out[..., 1::2], g[..., 1::2]) * GEGLU_SCALE
+	out[..., 0::2] = geglu(g[..., 0::2], attn_out[..., 0::2]) * ATTN_GEGLU_SCALE
+	out[..., 1::2] = geglu(attn_out[..., 1::2], g[..., 1::2]) * ATTN_GEGLU_SCALE
 	return out
 
 def calculate_sink_scores(q: torch.Tensor, sinks_k: torch.Tensor) -> torch.Tensor:
@@ -297,7 +320,7 @@ def attn_one_head(
 #	real_scores = quantize_(real_scores)
 	scores = torch.cat((sink_scores, real_scores), dim=1)
 	if score_file_name is not None:
-		store_f32_tensor(real_scores * TEMPERATURE, score_file_name)
+		store_f32_tensor(real_scores * TEMPERATURE, score_file_name, expected_variance=1.0)
 	scores *= ssmax(seq_len, WINDOW_SIZE).unsqueeze(1) * TEMPERATURE
 	values = torch.cat((sink_v.unsqueeze(0) * V_SCALE_FIX, v * (V_SCALE_FIX * V_SCALE)), dim=0)
 	real_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=0)
@@ -343,10 +366,10 @@ def join_qkvg(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, g: torch.Tensor
 		dim=1,
 	)
 
-def pairwise_geglu(tensor: torch.Tensor) -> torch.Tensor:
+def pairwise_geglu(tensor: torch.Tensor, output_scale: float) -> torch.Tensor:
 	if tensor.shape[-1] % 2 != 0:
 		raise ValueError(f"Expected even projection width for GeGLU, got {tensor.shape[-1]}")
-	return geglu(tensor[..., 0::2], tensor[..., 1::2]) * GEGLU_SCALE
+	return geglu(tensor[..., 0::2], tensor[..., 1::2]) * output_scale
 
 def f_proj_pregate(inputs: torch.Tensor, f_weights: torch.Tensor) -> torch.Tensor:
 	if inputs.shape[-1] != D_MODEL:
@@ -356,7 +379,7 @@ def f_proj_pregate(inputs: torch.Tensor, f_weights: torch.Tensor) -> torch.Tenso
 	return torch.matmul(inputs, f_weights.transpose(0, 1))
 
 def f_proj(inputs: torch.Tensor, f_weights: torch.Tensor) -> torch.Tensor:
-	return pairwise_geglu(f_proj_pregate(inputs, f_weights))
+	return pairwise_geglu(f_proj_pregate(inputs, f_weights), F_GEGLU_SCALE)
 
 def o_proj(attn_out: torch.Tensor, o_weights: torch.Tensor, f: torch.Tensor) -> torch.Tensor:
 	flat_attn_out = attn_out.reshape(attn_out.shape[0], -1)
@@ -391,7 +414,7 @@ def run_block() -> None:
 	attn_out_pregate = attn(q, k, v, sink_scores, sinks_v)
 	attn_out = zig_zag_geglu(attn_out_pregate, g * V_SCALE)
 	f_pregate = f_proj_pregate(inputs, f_weights)
-	f = pairwise_geglu(f_pregate)
+	f = pairwise_geglu(f_pregate, F_GEGLU_SCALE)
 	o = o_proj(attn_out, o_weights, f)
 	#attn_match = attn_matching(q, k, v, sinks_k, window_size, rope_base)
 	qkvg = join_qkvg(q, k, v, g)
@@ -410,23 +433,23 @@ def run_block() -> None:
 	print("o shape:", o.shape)
 	#print("attn_match shape:", attn_match.shape)
 
-	store_f32_tensor(q, "q_f32.bin")
-	store_f32_tensor(k, "k_f32.bin")
-	store_f32_tensor(v, "v_f32.bin")
-	store_f32_tensor(g, "g_f32.bin")
-	store_f32_tensor(g * V_SCALE, "g_scaled_f32.bin")
+	store_f32_tensor(q, "q_f32.bin", expected_variance=1.0 / HEAD_DIM)
+	store_f32_tensor(k, "k_f32.bin", expected_variance=1.0 / HEAD_DIM)
+	store_f32_tensor(v, "v_f32.bin", expected_variance=QKV_FAN_IN / D_MODEL)
+	store_f32_tensor(g, "g_f32.bin", expected_variance=QKV_FAN_IN / D_MODEL)
+	store_f32_tensor(g * V_SCALE, "g_scaled_f32.bin", expected_variance=1.0)
 
-	store_tensor(q, "q.bin")
-	store_tensor(k, "k.bin")
-	store_tensor(v, "v.bin")
-	store_tensor(g, "g.bin")
+	store_tensor(q, "q.bin", expected_variance=1.0 / HEAD_DIM)
+	store_tensor(k, "k.bin", expected_variance=1.0 / HEAD_DIM)
+	store_tensor(v, "v.bin", expected_variance=QKV_FAN_IN / D_MODEL)
+	store_tensor(g, "g.bin", expected_variance=QKV_FAN_IN / D_MODEL)
 
-	store_f32_tensor(sink_scores.transpose(0, 1), "sink_scores_f32.bin")
-	store_tensor(attn_out_pregate, "attn_out_pregate.bin")
-	store_tensor(attn_out, "attn_out.bin")
-	store_tensor(f_pregate, "f_pregate.bin")
-	store_tensor(f, "f.bin")
-	store_tensor(o, "o.bin")
+	store_f32_tensor(sink_scores.transpose(0, 1), "sink_scores_f32.bin", expected_variance=1.0 / HEAD_DIM)
+	store_tensor(attn_out_pregate, "attn_out_pregate.bin", expected_variance=1.0)
+	store_tensor(attn_out, "attn_out.bin", expected_variance=1.0 / (2 * Q_ROWS))
+	store_tensor(f_pregate, "f_pregate.bin", expected_variance=1.0)
+	store_tensor(f, "f.bin", expected_variance=1.0 / (2 * F_ROWS))
+	store_tensor(o, "o.bin", expected_variance=1.0)
 	#store_tensor(attn_match, "attn_matching.bin")
 	store_tensor(qkvg, "qkvg.bin")
 

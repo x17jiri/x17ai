@@ -22,13 +22,16 @@
 // =============================================================================
 
 // Template parameters:
-//   _HEAD_CNT        – total number of attention heads
-//   _HEADS_PER_KERNEL– heads processed together in one threadblock. The SMatrix class needs
-//                      the number of columns to be multiple of 64. This multiplier is useful
-//                      for tiny heads with QK_DIM < 64
-//   _QK_DIM          – dimension of Q and K vectors per head
-//   _V_DIM           – dimension of V vectors per head
-//   _V_EQUALS_K      – when true, V is a prefix of K (V_DIM must be <= QK_DIM)
+//   _HEAD_CNT         - total number of attention heads
+//   _HEADS_PER_KERNEL - heads processed together in one threadblock. The SMatrix class needs
+//                       the number of columns to be multiple of 64. This multiplier is useful
+//                       for tiny heads with QK_DIM < 64
+//   _QK_DIM           - dimension of Q and K vectors per head
+//   _V_DIM            - dimension of V vectors per head
+//   _D_MODEL          - model width used to derive V_SCALE
+//   _QKV_FAN_IN       - fan-in of the qkv projection used to derive V_SCALE
+//   _O_PROJ_CONTRIBS  - number of final-projection inputs contributed by this branch; used to normalize GeGLU
+//   _V_EQUALS_K       - when true, V is a prefix of K (V_DIM must be <= QK_DIM)
 template<
 	const usize _HEAD_CNT,
 	const usize _HEADS_PER_KERNEL,
@@ -36,9 +39,10 @@ template<
 	const usize _V_DIM,
 	const usize _D_MODEL,
 	const usize _QKV_FAN_IN,
+	const usize _O_PROJ_CONTRIBS,
 	const bool _V_EQUALS_K = false
 >
-struct Attn_forward {
+struct AttnForward {
 	// Expose template parameters needed by dependent kernels.
 	static constexpr usize HEAD_CNT = _HEAD_CNT;
 	static constexpr usize HEADS_PER_KERNEL = _HEADS_PER_KERNEL;
@@ -47,6 +51,7 @@ struct Attn_forward {
 	static constexpr usize V_DIM = _V_DIM;
 	static constexpr usize D_MODEL = _D_MODEL;
 	static constexpr usize QKV_FAN_IN = _QKV_FAN_IN;
+	static constexpr usize O_PROJ_CONTRIBS = _O_PROJ_CONTRIBS;
 	static constexpr bool V_EQUALS_K = _V_EQUALS_K;
 	static constexpr usize GMEM_PRELOAD = 2;
 
@@ -57,10 +62,12 @@ struct Attn_forward {
 
 	static constexpr f64 V_SCALE = math::constexpr_sqrt(f64(D_MODEL) / f64(QKV_FAN_IN));
 	static constexpr f64 V_SCALE_FIX = 1.5;
+	static constexpr f64 GEGLU_SCALE = 1.53 * math::constexpr_rsqrt(2.0 * f64(O_PROJ_CONTRIBS));
 
 	static_assert(HEADS_PER_KERNEL > 0, "HEADS_PER_KERNEL must be > 0");
 	static_assert(HEAD_CNT % HEADS_PER_KERNEL == 0, "HEAD_CNT must be divisible by HEADS_PER_KERNEL");
 	static_assert(V_DIM <= QK_DIM, "V_DIM must be <= QK_DIM");
+	static_assert(O_PROJ_CONTRIBS > 0, "O_PROJ_CONTRIBS must be > 0");
 
 	static constexpr usize QK_TILES = QK_DIM / 16;
 	static constexpr usize V_TILES = V_DIM / 16;
@@ -297,8 +304,8 @@ struct Attn_forward {
 		f32 g0 = f32(V_SCALE) * f32(g.first());
 		f32 g1 = f32(V_SCALE) * f32(g.second());
 		out.set(
-			math::fast::geglu<1.5>(g0, out0),
-			math::fast::geglu<1.5>(out1, g1)
+			math::fast::geglu<GEGLU_SCALE>(g0, out0),
+			math::fast::geglu<GEGLU_SCALE>(out1, g1)
 		);
 	}
 
@@ -655,8 +662,8 @@ struct Attn_forward {
 	}
 };
 
-template<typename Attn_forward>
-__global__ __launch_bounds__(Attn_forward::THREADS_PER_BLOCK) void
+template<typename AttnForward>
+__global__ __launch_bounds__(AttnForward::THREADS_PER_BLOCK) void
 attn_forward(
 	usize seq_len, bf16 *gQ_ptr,
 	bf16 *gK_ptr, bf16 *gV_ptr, bf16 *gG_ptr,
@@ -666,6 +673,6 @@ attn_forward(
 	f32 *gL_ptr,
 	usize window_size
 ) {
-	Attn_forward attn_forward = Attn_forward();
+	AttnForward attn_forward = AttnForward();
 	attn_forward.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gG_ptr, gSinkV_ptr, gSinkScore_ptr, gOut_ptr, gL_ptr, window_size);
 }
