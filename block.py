@@ -72,13 +72,14 @@ GEGLU_SCALE = math.sqrt(1.53 * 1.53 / O_PROJ_INPUT_ROWS)
 #
 # - V_SCALE_FIX was chosen empirically to get the variance of `attn_out_pregate` to around 1.
 #   The same value works regardless of sequence length thanks to SSMax.
+#   You can run `python ssmax_stats.py` to plot the variance of `attn_out_pregate` depending on position.
 #
 # - In `attn_out = zig_zag_geglu(attn_out_pregate, g * V_SCALE)`, both GeGLU inputs have
 #   variance about 1: `attn_out_pregate` by the choice of `V_SCALE_FIX`, and `g * V_SCALE`
 #   because Var(g) ~= QKV_FAN_IN / D_MODEL and V_SCALE^2 = D_MODEL / QKV_FAN_IN.
 #
 # - For independent unit-variance inputs, exact version of GeGLU would have variance
-#   `1/3 + 1/(2*pi*sqrt(3))` ~ 0.4252. We use tanh approximation which is close enoguh.
+#   `1/3 + 1/(2*pi*sqrt(3))` ~ 0.4252. We use tanh approximation, which is close enough.
 #   `1 / sqrt(0.4252) ~= 1.53`, which is the constant used in `GEGLU_SCALE` to get the GeGLU output
 #   to a variance of 1. Then we divide by `O_PROJ_INPUT_ROWS`, so each coordinate of `attn_out` has
 #   variance about `1 / O_PROJ_INPUT_ROWS`
@@ -87,9 +88,9 @@ GEGLU_SCALE = math.sqrt(1.53 * 1.53 / O_PROJ_INPUT_ROWS)
 #   from a unit-norm input with unit-variance weights. After the same pairwise GeGLU and
 #   `GEGLU_SCALE`, each coordinate of `f` also has variance about `1 / O_PROJ_INPUT_ROWS`.
 #
-# - `o` is a dense projection of `concat(attn_out, f)`, whose 4096 input coordinates each have
-#   variance about `1 / O_PROJ_INPUT_ROWS`. With unit-variance `o_weights`, each coordinate of
-#   `o` therefore has variance about 1.
+# - `o` is a dense projection of `concat(attn_out, f)`, whose O_PROJ_INPUT_ROWS input coordinates
+#   each have variance about `1 / O_PROJ_INPUT_ROWS`. With unit-variance `o_weights`,
+#   each coordinate of `o` therefore has variance about 1.
 
 def tensor_path(name: str) -> Path:
 	return TENSOR_DIR / name

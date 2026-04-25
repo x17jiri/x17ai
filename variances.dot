@@ -1,0 +1,102 @@
+digraph Variances {
+	rankdir=LR;
+	newrank=true;
+	splines=true;
+	nodesep=0.45;
+	ranksep=0.85;
+	graph [fontname="Helvetica"];
+	node [shape=box, style="rounded,filled", fillcolor="#f3f3f3", color="#444444", fontname="Helvetica"];
+	edge [color="#555555", fontname="Helvetica", arrowsize=0.8];
+
+	legend_scale [shape=note, fillcolor="#f4cccc", color="#aa4444", label="red = scaling operation"];
+
+	init_inputs [label="randn inputs", fillcolor="#d9ead3"];
+	inputs_l2_norm [label="l2_norm_last_dim"];
+	init_qkv_weights [label="randn qkv_weights", fillcolor="#d9ead3"];
+	qkvg_proj [label="QKVG projection"];
+	q_l2_norm [label="q L2 norm"];
+	k_l2_norm [label="k L2 norm"];
+	init_qk_norm [label="fill qk_norm_scales = 1", fillcolor="#d9ead3"];
+	q_scale [label="* qk_norm_scales", fillcolor="#f4cccc", color="#aa4444"];
+	init_sinks_k [label="randn sinks_k", fillcolor="#d9ead3"];
+	sinks_k_l2 [label="l2_norm_last_dim"];
+	sink_score_dot [label="dot(q, sinks_k)"];
+	q_rope [label="RoPE(q)"];
+	k_rope [label="RoPE(k)"];
+	real_score_matmul [label="q @ k^T"];
+	concat_scores [label="concat sink/real scores"];
+	temperature_scale [label="* TEMPERATURE", fillcolor="#f4cccc", color="#aa4444"];
+	ssmax_scale [label="SSMAX", fillcolor="#f4cccc", color="#aa4444"];
+	mask_scores [label="causal/window mask"];
+	softmax_op [label="softmax"];
+
+	init_sinks_v [label="randn sinks_v", fillcolor="#d9ead3"];
+	sink_v_fix [label="* V_SCALE_FIX", fillcolor="#f4cccc", color="#aa4444"];
+	v_scale [label="* V_SCALE", fillcolor="#f4cccc", color="#aa4444"];
+	v_fix [label="* V_SCALE_FIX", fillcolor="#f4cccc", color="#aa4444"];
+	concat_values [label="concat sink/real values"];
+	weighted_sum [label="softmax @ values"];
+
+	g_scale [label="* V_SCALE", fillcolor="#f4cccc", color="#aa4444"];
+	zig_zag_geglu [label="zig-zag GeGLU"];
+	attn_geglu_scale [label="* GEGLU_SCALE", fillcolor="#f4cccc", color="#aa4444"];
+
+	init_f_weights [label="randn f_weights", fillcolor="#d9ead3"];
+	f_proj [label="F projection"];
+	f_pairwise_geglu [label="pairwise GeGLU"];
+	f_geglu_scale [label="* GEGLU_SCALE", fillcolor="#f4cccc", color="#aa4444"];
+
+	concat_o_input [label="concat(attn_out, f)"];
+	init_o_weights [label="randn o_weights", fillcolor="#d9ead3"];
+	o_proj [label="O projection"];
+	store_o [label="store o.bin", fillcolor="#d9ead3"];
+
+	init_inputs -> inputs_l2_norm [label="inputs (1)"];
+	inputs_l2_norm -> qkvg_proj [label="inputs_l2 (1 / D_MODEL)"];
+	inputs_l2_norm -> f_proj [label="inputs_l2 (1 / D_MODEL)"];
+	init_qkv_weights -> qkvg_proj [label="qkv_weights (1)"];
+
+	qkvg_proj -> q_l2_norm [label="q_raw (QKV_FAN_IN / D_MODEL)"];
+	qkvg_proj -> k_l2_norm [label="k_raw (QKV_FAN_IN / D_MODEL)"];
+	qkvg_proj -> v_scale [label="v (QKV_FAN_IN / D_MODEL)"];
+	qkvg_proj -> g_scale [label="g (QKV_FAN_IN / D_MODEL)"];
+
+	q_l2_norm -> q_scale [label="q_l2 (1 / HEAD_DIM)"];
+	init_qk_norm -> q_scale [label="qk_norm_scales (0)"];
+	q_scale -> sink_score_dot [label="q_scaled (1 / HEAD_DIM)"];
+	q_scale -> q_rope [label="q_scaled (1 / HEAD_DIM)"];
+
+	init_sinks_k -> sinks_k_l2 [label="sinks_k_raw (1)"];
+	sinks_k_l2 -> sink_score_dot [label="sinks_k (1 / HEAD_DIM)"];
+	k_l2_norm -> k_rope [label="k_l2 (1 / HEAD_DIM)"];
+
+	q_rope -> real_score_matmul [label="q (1 / HEAD_DIM)"];
+	k_rope -> real_score_matmul [label="k (1 / HEAD_DIM)"];
+	sink_score_dot -> concat_scores [label="sink_scores (1 / HEAD_DIM)"];
+	real_score_matmul -> concat_scores [label="real_scores (1 / HEAD_DIM)"];
+	concat_scores -> temperature_scale [label="scores (1 / HEAD_DIM)"];
+	temperature_scale -> ssmax_scale [label="scores_temperature (1)"];
+	ssmax_scale -> mask_scores [label="scores_ssmax (depends on position)"];
+	mask_scores -> softmax_op [label="scores_masked (depends on position)"];
+	softmax_op -> weighted_sum [label="softmax (depends on position)"];
+
+	init_sinks_v -> sink_v_fix [label="sinks_v (1)"];
+	sink_v_fix -> concat_values [label="sink_values (V_SCALE_FIX^2)"];
+	v_scale -> v_fix [label="v_scaled (1)"];
+	v_fix -> concat_values [label="real_values (V_SCALE_FIX^2)"];
+	concat_values -> weighted_sum [label="values (V_SCALE_FIX^2)"];
+	weighted_sum -> zig_zag_geglu [label="attn_out_pregate (~1)"];
+
+	g_scale -> zig_zag_geglu [label="g_scaled (1)"];
+	zig_zag_geglu -> attn_geglu_scale [label="attn_geglu (~0.425)"];
+	attn_geglu_scale -> concat_o_input [label="attn_out (1 / O_PROJ_INPUT_ROWS)"];
+
+	init_f_weights -> f_proj [label="f_weights (1)"];
+	f_proj -> f_pairwise_geglu [label="f_pregate (1)"];
+	f_pairwise_geglu -> f_geglu_scale [label="f_geglu (~0.425)"];
+	f_geglu_scale -> concat_o_input [label="f (1 / O_PROJ_INPUT_ROWS)"];
+
+	concat_o_input -> o_proj [label="o_input (1 / O_PROJ_INPUT_ROWS)"];
+	init_o_weights -> o_proj [label="o_weights (1)"];
+	o_proj -> store_o [label="o (1)"];
+}
