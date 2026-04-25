@@ -376,6 +376,8 @@ def f_proj_pregate(inputs: torch.Tensor, f_weights: torch.Tensor) -> torch.Tenso
 		raise ValueError(f"Expected input width {D_MODEL}, got {inputs.shape[-1]}")
 	if f_weights.shape != (F_PROJ_ROWS, D_MODEL):
 		raise ValueError(f"Expected f_weights shape {(F_PROJ_ROWS, D_MODEL)}, got {tuple(f_weights.shape)}")
+	inputs = quantize_(inputs)
+	f_weights = quantize_(f_weights)
 	return torch.matmul(inputs, f_weights.transpose(0, 1))
 
 def f_proj(inputs: torch.Tensor, f_weights: torch.Tensor) -> torch.Tensor:
@@ -395,11 +397,14 @@ def o_proj(attn_out: torch.Tensor, o_weights: torch.Tensor, f: torch.Tensor) -> 
 		)
 	if f.shape[1] != F_ROWS:
 		raise ValueError(f"Expected f width {F_ROWS}, got {f.shape[1]}")
+	flat_attn_out = quantize_(flat_attn_out)
+	f = quantize_(f)
 	o_proj_input = torch.cat((flat_attn_out, f), dim=1)
 	if o_weights.shape != (D_MODEL, o_proj_input.shape[1]):
 		raise ValueError(
 			f"Expected o_weights shape {(D_MODEL, o_proj_input.shape[1])}, got {tuple(o_weights.shape)}"
 		)
+	o_weights = quantize_(o_weights)
 	return torch.matmul(o_proj_input, o_weights.transpose(0, 1))
 
 def run_block() -> None:

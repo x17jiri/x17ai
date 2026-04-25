@@ -7,6 +7,10 @@ from pathlib import Path
 import torch
 
 
+PCT_BUCKET_MIN_MAGNITUDES = [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
+PCT_BUCKET_LABELS = "1e-6,     1e-5,     1e-4,     1e-3,     1e-2,     1e-1"
+
+
 def load_bf16(path: str, shape: tuple[int, ...] | None = None) -> torch.Tensor:
 	raw = Path(path).read_bytes()
 	data = torch.frombuffer(bytearray(raw), dtype=torch.int16).view(torch.bfloat16)
@@ -87,15 +91,33 @@ def format_index(flat_index: int, shape: tuple[int, ...]) -> str:
 	return ", ".join(str(coord) for coord in coords)
 
 
+def variance_one_renorm_scales(
+	a: torch.Tensor,
+	b: torch.Tensor,
+	finite_mask: torch.Tensor,
+) -> tuple[float, float] | None:
+	if not finite_mask.any():
+		return None
+	a_scale = a[finite_mask].std(unbiased=False).item()
+	b_scale = b[finite_mask].std(unbiased=False).item()
+	if not math.isfinite(a_scale) or not math.isfinite(b_scale) or a_scale <= 0.0 or b_scale <= 0.0:
+		return None
+	return a_scale, b_scale
+
+
 def worst_pct_diff(
 	a: torch.Tensor,
 	b: torch.Tensor,
 	finite_mask: torch.Tensor,
 	min_mag: float,
+	renorm_scales: tuple[float, float] | None,
 ) -> tuple[int, float] | None:
+	if renorm_scales is None:
+		return None
+	a_scale, b_scale = renorm_scales
 	a_abs = a.abs()
 	b_abs = b.abs()
-	mask = finite_mask & (a_abs > min_mag) & (b_abs > min_mag)
+	mask = finite_mask & (a_abs > min_mag * a_scale) & (b_abs > min_mag * b_scale)
 	if not mask.any():
 		return None
 	hi = torch.maximum(a_abs, b_abs)
@@ -105,17 +127,25 @@ def worst_pct_diff(
 	return flat_idx, pct_diff.reshape(-1)[flat_idx].item()
 
 
-def max_pct_strs(a_abs: torch.Tensor, b_abs: torch.Tensor, finite_mask: torch.Tensor) -> list[str]:
+def max_pct_strs(
+	a_abs: torch.Tensor,
+	b_abs: torch.Tensor,
+	finite_mask: torch.Tensor,
+	renorm_scales: tuple[float, float] | None,
+) -> list[str]:
 	pct_strs = []
-	for min_mag in [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1]:
-		mask = finite_mask & (a_abs > min_mag) & (b_abs > min_mag)
+	if renorm_scales is None:
+		return ["n/a"] * len(PCT_BUCKET_MIN_MAGNITUDES)
+	a_scale, b_scale = renorm_scales
+	for min_mag in PCT_BUCKET_MIN_MAGNITUDES:
+		mask = finite_mask & (a_abs > min_mag * a_scale) & (b_abs > min_mag * b_scale)
 		if mask.any():
 			hi = torch.maximum(a_abs[mask], b_abs[mask])
 			lo = torch.minimum(a_abs[mask], b_abs[mask])
 			max_pct = ((hi / lo).max().item() - 1.0) * 100.0
+			pct_strs.append(f"{max_pct:.4f}%")
 		else:
-			max_pct = 0.0
-		pct_strs.append(f"{max_pct:.4f}%")
+			pct_strs.append("n/a")
 	return pct_strs
 
 
@@ -124,6 +154,14 @@ def summarize_nonfinite(name: str, tensor: torch.Tensor) -> str:
 	posinf_count = int(torch.isposinf(tensor).sum().item())
 	neginf_count = int(torch.isneginf(tensor).sum().item())
 	return f"{name}: nan={nan_count}, +inf={posinf_count}, -inf={neginf_count}"
+
+
+def print_ulp_summary(ulp_diff: torch.Tensor, total: int, max_ulp: int = 16) -> None:
+	for ulp in range(1, max_ulp + 1):
+		within_ulp = int((ulp_diff <= ulp).sum().item())
+		print(f"Within {ulp:2d} ULP:     {within_ulp}/{total} ({100.0 * within_ulp / total:.2f}%)")
+		if within_ulp == total:
+			break
 
 
 def verify_bf16(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
@@ -152,13 +190,11 @@ def verify_bf16(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
 	zero_sign_only = bit_mismatch & same_value
 	raw_exact_match = int((a_bits == b_bits).sum().item())
 	exact_match = int((a_norm == b_norm).sum().item())
-	one_ulp_or_less = int((ulp_diff <= 1).sum().item())
-	two_ulp_or_less = int((ulp_diff <= 2).sum().item())
-	three_ulp_or_less = int((ulp_diff <= 3).sum().item())
 	a_abs = a.abs()
 	b_abs = b.abs()
-	pct_strs = max_pct_strs(a_abs, b_abs, finite_mask)
-	worst_pct_over_point_one = worst_pct_diff(a, b, finite_mask, 1e-1)
+	renorm_scales = variance_one_renorm_scales(a, b, finite_mask)
+	pct_strs = max_pct_strs(a_abs, b_abs, finite_mask, renorm_scales)
+	worst_pct_over_point_one = worst_pct_diff(a, b, finite_mask, 1e-1, renorm_scales)
 	total = a.numel()
 
 	print("\n--- BF16 Tensor Compare ---")
@@ -168,13 +204,12 @@ def verify_bf16(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
 	print(f"Max abs diff:     {max_abs_diff:.6e}")
 	print(f"Mean abs diff:    {mean_abs_diff:.6e}")
 	print(f"Max pct diff:     {', '.join(pct_strs)}")
-	print(f"  (MIN_MAG:       1e-6,     1e-5,     1e-4,     1e-3,     1e-2,     1e-1)")
+	print("  (MIN_MAG after scaling each tensor to variance 1:")
+	print(f"               {PCT_BUCKET_LABELS})")
 	print(f"Exact bf16 match: {exact_match}/{total} ({100.0 * exact_match / total:.2f}%)")
 	print(f"Raw exact bits:   {raw_exact_match}/{total} ({100.0 * raw_exact_match / total:.2f}%)")
 	print(f"Signed-zero-only mismatches: {int(zero_sign_only.sum().item())}")
-	print(f"Within 1 ULP:     {one_ulp_or_less}/{total} ({100.0 * one_ulp_or_less / total:.2f}%)")
-	print(f"Within 2 ULP:     {two_ulp_or_less}/{total} ({100.0 * two_ulp_or_less / total:.2f}%)")
-	print(f"Within 3 ULP:     {three_ulp_or_less}/{total} ({100.0 * three_ulp_or_less / total:.2f}%)")
+	print_ulp_summary(ulp_diff, total)
 	if max_abs_diff > 0.0:
 		print(f"Worst abs mismatch at [{format_index(flat_idx, shape)}]: ref={worst_ref:.6e}, other={worst_cuda:.6e}")
 	if worst_pct_over_point_one is not None:
@@ -182,7 +217,7 @@ def verify_bf16(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
 		worst_pct_ref = a_bf16.reshape(-1)[worst_pct_idx].float().item()
 		worst_pct_other = b_bf16.reshape(-1)[worst_pct_idx].float().item()
 		print(
-			f"Worst pct mismatch (MIN_MAG > 1e-1) at [{format_index(worst_pct_idx, shape)}]: "
+			f"Worst pct mismatch (variance-1 MIN_MAG > 1e-1) at [{format_index(worst_pct_idx, shape)}]: "
 			f"ref={worst_pct_ref:.6e}, other={worst_pct_other:.6e}, pct={worst_pct_value:.9f}%"
 		)
 
@@ -218,13 +253,11 @@ def verify_f32(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
 	zero_sign_only = bit_mismatch & same_value
 	raw_exact_match = int((a_bits == b_bits).sum().item())
 	exact_match = int(same_value.sum().item())
-	one_ulp_or_less = int((ulp_diff <= 1).sum().item())
-	two_ulp_or_less = int((ulp_diff <= 2).sum().item())
-	three_ulp_or_less = int((ulp_diff <= 3).sum().item())
 	a_abs = a.abs()
 	b_abs = b.abs()
-	pct_strs = max_pct_strs(a_abs, b_abs, finite_mask)
-	worst_pct_over_point_one = worst_pct_diff(a, b, finite_mask, 1e-1)
+	renorm_scales = variance_one_renorm_scales(a, b, finite_mask)
+	pct_strs = max_pct_strs(a_abs, b_abs, finite_mask, renorm_scales)
+	worst_pct_over_point_one = worst_pct_diff(a, b, finite_mask, 1e-1, renorm_scales)
 	total = a.numel()
 
 	print("\n--- F32 Tensor Compare ---")
@@ -234,13 +267,12 @@ def verify_f32(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
 	print(f"Max abs diff:     {max_abs_diff:.6e}")
 	print(f"Mean abs diff:    {mean_abs_diff:.6e}")
 	print(f"Max pct diff:     {', '.join(pct_strs)}")
-	print(f"  (MIN_MAG:       1e-6,     1e-5,     1e-4,     1e-3,     1e-2,     1e-1)")
+	print("  (MIN_MAG after scaling each tensor to variance 1:")
+	print(f"               {PCT_BUCKET_LABELS})")
 	print(f"Exact f32 match:  {exact_match}/{total} ({100.0 * exact_match / total:.2f}%)")
 	print(f"Raw exact bits:   {raw_exact_match}/{total} ({100.0 * raw_exact_match / total:.2f}%)")
 	print(f"Signed-zero-only mismatches: {int(zero_sign_only.sum().item())}")
-	print(f"Within 1 ULP:     {one_ulp_or_less}/{total} ({100.0 * one_ulp_or_less / total:.2f}%)")
-	print(f"Within 2 ULP:     {two_ulp_or_less}/{total} ({100.0 * two_ulp_or_less / total:.2f}%)")
-	print(f"Within 3 ULP:     {three_ulp_or_less}/{total} ({100.0 * three_ulp_or_less / total:.2f}%)")
+	print_ulp_summary(ulp_diff, total)
 	print(summarize_nonfinite("A non-finite", a))
 	print(summarize_nonfinite("B non-finite", b))
 	if flat_idx is not None and max_abs_diff > 0.0:
@@ -250,7 +282,7 @@ def verify_f32(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
 		worst_pct_ref = a.reshape(-1)[worst_pct_idx].item()
 		worst_pct_other = b.reshape(-1)[worst_pct_idx].item()
 		print(
-			f"Worst pct mismatch (MIN_MAG > 1e-1) at [{format_index(worst_pct_idx, shape)}]: "
+			f"Worst pct mismatch (variance-1 MIN_MAG > 1e-1) at [{format_index(worst_pct_idx, shape)}]: "
 			f"ref={worst_pct_ref:.6e}, other={worst_pct_other:.6e}, pct={worst_pct_value:.9f}%"
 		)
 
