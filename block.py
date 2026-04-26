@@ -280,7 +280,7 @@ def qkv_proj(
 	k = apply_rope(k, ROPE_BASE)
 	return q, k, v, g, sink_scores
 
-def ssmax(q_len, window_size=0):
+def ssmax_n(q_len, window_size=0):
 	"""Compute SSMax scale factor n for each query position.
 
 	n[i] = min(window_size, i) + (1 + e_approx)
@@ -299,7 +299,7 @@ def ssmax(q_len, window_size=0):
 		n = torch.clamp(visible_real_tokens, max=float(window_size)) + E_APPROX_PLUS_1
 	else:
 		n = visible_real_tokens + E_APPROX_PLUS_1
-	return torch.log(n)
+	return n.unsqueeze(1)
 
 def attn_one_head(
 	q: torch.Tensor,
@@ -308,32 +308,48 @@ def attn_one_head(
 	sink_scores: torch.Tensor,
 	sink_v: torch.Tensor,
 	score_file_name: str | None,
-) -> torch.Tensor:
+	prob_file_name: str | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
 	seq_len = q.shape[0]
-	q = q.to(torch.bfloat16).to(torch.float32)
-	k = k.to(torch.bfloat16).to(torch.float32)
-	v = v.to(torch.bfloat16).to(torch.float32)
-	sink_v = sink_v.to(torch.bfloat16).to(torch.float32)
-	TEMPERATURE = math.sqrt(q.shape[1])
-	sink_scores = sink_scores.to(torch.float32).unsqueeze(1)
-	real_scores = torch.matmul(q, k.transpose(0, 1))
-#	real_scores = quantize_(real_scores)
-	scores = torch.cat((sink_scores, real_scores), dim=1)
-	if score_file_name is not None:
-		store_f32_tensor(real_scores * TEMPERATURE, score_file_name, expected_variance=1.0)
-	scores *= ssmax(seq_len, WINDOW_SIZE).unsqueeze(1) * TEMPERATURE
-	values = torch.cat((sink_v.unsqueeze(0) * V_SCALE_FIX, v * (V_SCALE_FIX * V_SCALE)), dim=0)
-	real_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=0)
+	QK_DIM = q.shape[1]
+
+	q = quantize_(q)
+	k = quantize_(k)
+	v = quantize_(v) * (V_SCALE * V_SCALE_FIX)
+
+	sink_scores = sink_scores.unsqueeze(1)
+	sink_v = quantize_(sink_v.unsqueeze(0)) * V_SCALE_FIX
+
+	S = q @ k.transpose(0, 1)
+
+	BASE_TEMPERATURE = math.sqrt(QK_DIM)
+	temperature = BASE_TEMPERATURE * torch.log(ssmax_n(seq_len, WINDOW_SIZE))
+
+	mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=0)
 	if WINDOW_SIZE > 0:
-		real_mask = real_mask | torch.tril(
+		mask = mask | torch.tril(
 			torch.ones(seq_len, seq_len, dtype=torch.bool),
-			diagonal=-(WINDOW_SIZE + 1),
+			diagonal = -(WINDOW_SIZE + 1),
 		)
-	sink_mask = torch.zeros(seq_len, 1, dtype=torch.bool)
-	scores = scores.masked_fill(torch.cat((sink_mask, real_mask), dim=1), float("-inf"))
-	softmax = torch.softmax(scores, dim=1).to(torch.bfloat16).to(torch.float32)
-	del scores
-	return softmax @ values
+	S = S.masked_fill(mask, float("-inf"))
+	S = torch.cat((sink_scores, S), dim=1)
+
+	S *= temperature
+	max = S.amax(dim=1, keepdim=True)
+	S -= max
+	P = torch.exp(S)
+	sum = P.sum(dim=1, keepdim=True)
+
+	P = torch.cat((P[:, :1], quantize_(P[:, 1:])), dim=1)
+	v = torch.cat((sink_v, v), dim=0)
+
+	o = P @ v
+
+	sum_recip = torch.reciprocal(sum)
+	o *= sum_recip
+
+	LOG2_E = 1.0 / math.log(2.0)
+	return o, max.squeeze(1) * LOG2_E
 
 def attn(
 	q: torch.Tensor,
@@ -341,19 +357,21 @@ def attn(
 	v: torch.Tensor,
 	sink_scores: torch.Tensor,
 	sinks_v: torch.Tensor,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
 	_, n_heads, _ = q.shape
 	out = torch.empty_like(v)
+	max_values = torch.empty((q.shape[0], n_heads), dtype=torch.float32)
 	for h in range(n_heads):
-		out[:, h, :] = attn_one_head(
+		out[:, h, :], max_values[:, h] = attn_one_head(
 			q[:, h, :],
 			k[:, h, :],
 			v[:, h, :],
 			sink_scores[:, h],
 			sinks_v[h, :],
 			f"scores_{h}_f32.bin" if h < 1 else None,
+			f"attn_probs_{h}.bin" if h < 1 else None,
 		)
-	return out
+	return out, max_values
 
 def join_qkvg(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
 	return torch.cat(
@@ -416,8 +434,9 @@ def run_block() -> None:
 	sinks_k = load_tensor("sinks_k.bin", N_HEADS, HEAD_DIM)
 	sinks_v = load_tensor("sinks_v.bin", N_HEADS, HEAD_DIM)
 	q, k, v, g, sink_scores = qkv_proj(inputs, qkv_weights, qk_norm_scales, sinks_k)
-	attn_out_pregate = attn(q, k, v, sink_scores, sinks_v)
-	attn_out = zig_zag_geglu(attn_out_pregate, g * V_SCALE)
+	attn_out_pregate, attn_maxes = attn(q, k, v, sink_scores, sinks_v)
+	g_bf16 = quantize_(g)
+	attn_out = zig_zag_geglu(attn_out_pregate, g_bf16 * V_SCALE)
 	f_pregate = f_proj_pregate(inputs, f_weights)
 	f = pairwise_geglu(f_pregate, F_GEGLU_SCALE)
 	o = o_proj(attn_out, o_weights, f)
@@ -432,6 +451,7 @@ def run_block() -> None:
 	print("sinks_k shape:", sinks_k.shape)
 	print("sinks_v shape:", sinks_v.shape)
 	print("sink_scores shape:", sink_scores.shape)
+	print("attn_maxes shape:", attn_maxes.shape)
 	print("attn_out shape:", attn_out.shape)
 	print("f_pregate shape:", f_pregate.shape)
 	print("f shape:", f.shape)
@@ -442,7 +462,7 @@ def run_block() -> None:
 	store_f32_tensor(k, "k_f32.bin", expected_variance=1.0 / HEAD_DIM)
 	store_f32_tensor(v, "v_f32.bin", expected_variance=QKV_FAN_IN / D_MODEL)
 	store_f32_tensor(g, "g_f32.bin", expected_variance=QKV_FAN_IN / D_MODEL)
-	store_f32_tensor(g * V_SCALE, "g_scaled_f32.bin", expected_variance=1.0)
+	store_f32_tensor(g_bf16 * V_SCALE, "g_scaled_f32.bin", expected_variance=1.0)
 
 	store_tensor(q, "q.bin", expected_variance=1.0 / HEAD_DIM)
 	store_tensor(k, "k.bin", expected_variance=1.0 / HEAD_DIM)
@@ -450,6 +470,7 @@ def run_block() -> None:
 	store_tensor(g, "g.bin", expected_variance=QKV_FAN_IN / D_MODEL)
 
 	store_f32_tensor(sink_scores.transpose(0, 1), "sink_scores_f32.bin", expected_variance=1.0 / HEAD_DIM)
+	store_f32_tensor(attn_maxes.transpose(0, 1), "attn_maxes_f32.bin")
 	store_tensor(attn_out_pregate, "attn_out_pregate.bin", expected_variance=1.0)
 	store_tensor(attn_out, "attn_out.bin", expected_variance=1.0 / (2 * Q_ROWS))
 	store_tensor(f_pregate, "f_pregate.bin", expected_variance=1.0)

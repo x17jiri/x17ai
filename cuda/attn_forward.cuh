@@ -189,6 +189,25 @@ struct AttnForward {
 		}
 	}
 
+	X17_DEVICE void load_max_scores(
+		f32 const *gMax_ptr,
+		usize seq_len,
+		usize q_start,
+		usize i_head_base,
+		f32 (&top_max)[HEADS_PER_KERNEL],
+		f32 (&bot_max)[HEADS_PER_KERNEL]
+	) {
+		usize tid = threadIdx.x % WARP_SIZE;
+		usize row_in_half = tid / 4;
+		usize top_row = q_start + row_in_half;
+		usize bot_row = top_row + 8;
+
+		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
+			top_max[h] = load_gmem_1x32b(gMax_ptr + (i_head_base + h) * seq_len + top_row);
+			bot_max[h] = load_gmem_1x32b(gMax_ptr + (i_head_base + h) * seq_len + bot_row);
+		}
+	}
+
 	X17_DEVICE void load_sink_v(
 		bf16 const *gSinkV_ptr,
 		usize i_head_base,
@@ -411,6 +430,7 @@ struct AttnForward {
 		bf16 *gK_ptr, bf16 *gV_ptr, bf16 *gG_ptr,
 		bf16 const *gSinkV_ptr,
 		f32 const *gSinkScore_ptr,
+		f32 const *gMax_ptr,
 		bf16 *gOut_ptr,
 		f32 *gL_ptr,
 		usize window_size
@@ -558,6 +578,39 @@ struct AttnForward {
 			}
 		}
 
+		if (gMax_ptr != nullptr) {
+			f32 top_max[HEADS_PER_KERNEL];
+			f32 bot_max[HEADS_PER_KERNEL];
+			load_max_scores(gMax_ptr, seq_len, q_start, i_head_base, top_max, bot_max);
+
+			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
+				f32 top_seed = math::fast::expb(top_sink_score[h] - top_max[h]);
+				f32 bot_seed = math::fast::expb(bot_sink_score[h] - bot_max[h]);
+
+				top_stats[h].max = top_max[h];
+				top_stats[h].sum = top_seed * 0.25f;
+				bot_stats[h].max = bot_max[h];
+				bot_stats[h].sum = bot_seed * 0.25f;
+
+				X17_UNROLL for (usize i = 0; i < V_TILES; ++i) {
+					f32 sink0 = f32(rSinkV[h * QK_DIM / 4 + i * 4 + 0]) / V_SCALE;
+					f32 sink1 = f32(rSinkV[h * QK_DIM / 4 + i * 4 + 1]) / V_SCALE;
+					f32 sink2 = f32(rSinkV[h * QK_DIM / 4 + i * 4 + 2]) / V_SCALE;
+					f32 sink3 = f32(rSinkV[h * QK_DIM / 4 + i * 4 + 3]) / V_SCALE;
+
+					rO_f32[h][i].sub[0][0].val0 = top_seed * sink0;
+					rO_f32[h][i].sub[0][0].val1 = top_seed * sink1;
+					rO_f32[h][i].sub[0][1].val0 = top_seed * sink2;
+					rO_f32[h][i].sub[0][1].val1 = top_seed * sink3;
+
+					rO_f32[h][i].sub[1][0].val0 = bot_seed * sink0;
+					rO_f32[h][i].sub[1][0].val1 = bot_seed * sink1;
+					rO_f32[h][i].sub[1][1].val0 = bot_seed * sink2;
+					rO_f32[h][i].sub[1][1].val1 = bot_seed * sink3;
+				}
+			}
+		}
+
 		// Sequential loop over KV
 		X17_NO_UNROLL for (usize kv_step = kv_begin; kv_step < kv_end; ++kv_step) {
 			// S = Q * K^T, interleaved with V load (rKV: K -> V)
@@ -669,10 +722,11 @@ attn_forward(
 	bf16 *gK_ptr, bf16 *gV_ptr, bf16 *gG_ptr,
 	bf16 const *gSinkV_ptr,
 	f32 const *gSinkScore_ptr,
+	f32 const *gMax_ptr,
 	bf16 *gOut_ptr,
 	f32 *gL_ptr,
 	usize window_size
 ) {
 	AttnForward attn_forward = AttnForward();
-	attn_forward.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gG_ptr, gSinkV_ptr, gSinkScore_ptr, gOut_ptr, gL_ptr, window_size);
+	attn_forward.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gG_ptr, gSinkV_ptr, gSinkScore_ptr, gMax_ptr, gOut_ptr, gL_ptr, window_size);
 }

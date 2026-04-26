@@ -41,6 +41,14 @@ int main() {
 	std::vector<bf16> h_G = load_tensor("tmp/block_torch/g.bin", SEQ_LEN, PACKED_DIM);
 	std::vector<bf16> h_sink_v = load_tensor("tmp/block_torch/sinks_v.bin", HEAD_CNT, V_DIM);
 	std::vector<f32> h_sink_scores = load_f32_tensor("tmp/block_torch/sink_scores_f32.bin", HEAD_CNT, SEQ_LEN);
+	std::vector<f32> h_maxes;
+	if (0 && std::filesystem::exists("tmp/block_torch/attn_maxes_f32.bin")) {
+		h_maxes = load_f32_tensor("tmp/block_torch/attn_maxes_f32.bin", HEAD_CNT, SEQ_LEN);
+		if (h_maxes.empty()) {
+			return 1;
+		}
+		printf("Loaded precomputed attention maxes\n");
+	}
 	if (h_Q.empty() || h_K.empty() || h_V.empty() || h_G.empty() || h_sink_v.empty() || h_sink_scores.empty()) {
 		return 1;
 	}
@@ -54,6 +62,7 @@ int main() {
 	bf16 *d_G = nullptr;
 	bf16 *d_sink_v = nullptr;
 	f32 *d_sink_scores = nullptr;
+	f32 *d_maxes = nullptr;
 	bf16 *d_out = nullptr;
 	f32 *d_L = nullptr;
 
@@ -63,6 +72,9 @@ int main() {
 	cudaMalloc(&d_G, h_G.size() * sizeof(bf16));
 	cudaMalloc(&d_sink_v, h_sink_v.size() * sizeof(bf16));
 	cudaMalloc(&d_sink_scores, h_sink_scores.size() * sizeof(f32));
+	if (!h_maxes.empty()) {
+		cudaMalloc(&d_maxes, h_maxes.size() * sizeof(f32));
+	}
 	cudaMalloc(&d_out, h_out.size() * sizeof(bf16));
 	cudaMalloc(&d_L, h_L.size() * sizeof(f32));
 
@@ -72,6 +84,9 @@ int main() {
 	cudaMemcpy(d_G, h_G.data(), h_G.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_sink_v, h_sink_v.data(), h_sink_v.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_sink_scores, h_sink_scores.data(), h_sink_scores.size() * sizeof(f32), cudaMemcpyHostToDevice);
+	if (d_maxes != nullptr) {
+		cudaMemcpy(d_maxes, h_maxes.data(), h_maxes.size() * sizeof(f32), cudaMemcpyHostToDevice);
+	}
 
 	cudaFuncSetAttribute(attn_forward<AF>, cudaFuncAttributeMaxDynamicSharedMemorySize, AF::SMEM_BYTES);
 	cudaFuncSetAttribute(attn_forward<AF>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
@@ -89,6 +104,7 @@ int main() {
 				d_G,
 				d_sink_v,
 				d_sink_scores,
+				d_maxes,
 				d_out,
 				d_L,
 				config::window_size
@@ -113,6 +129,7 @@ int main() {
 				d_G,
 				d_sink_v,
 				d_sink_scores,
+				d_maxes,
 				d_out,
 				d_L,
 				config::window_size
@@ -153,6 +170,7 @@ int main() {
 	cudaFree(d_G);
 	cudaFree(d_sink_v);
 	cudaFree(d_sink_scores);
+	cudaFree(d_maxes);
 	cudaFree(d_out);
 	cudaFree(d_L);
 	return 0;

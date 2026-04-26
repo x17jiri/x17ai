@@ -13,7 +13,8 @@ python tensor_stats.py tmp/block_torch/v.bin tmp/block_torch/v.bin.var
 python tensor_stats.py tmp/block_torch/g.bin tmp/block_torch/g.bin.var
 
 ./nvcc.sh attn_forward.cu && tmp/attn_forward
-python verify_tensor.py tmp/block_torch/attn_out.bin tmp/block_cuda/attn_out.bin
+python verify_tensor.py tmp/block_torch/attn_out.bin tmp/block_cuda/attn_out.bin --shape 16384 32 32
+python verify_tensor.py tmp/block_torch/attn_out_pregate.bin tmp/block_cuda/attn_out_pregate.bin --shape 16384 32 32
 
 python tensor_stats.py tmp/block_torch/attn_out.bin tmp/block_torch/attn_out.bin.var
 python tensor_stats.py tmp/block_torch/attn_out_pregate.bin tmp/block_torch/attn_out_pregate.bin.var
