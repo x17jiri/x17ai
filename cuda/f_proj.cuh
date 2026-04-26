@@ -5,15 +5,14 @@
 #pragma nv_diag_suppress 186
 
 template<
-	const usize _F_PROJ_ROWS,
+	const usize _F_WIDTH,
 	const usize _D_MODEL
 >
 struct FProj {
-	static constexpr usize F_PROJ_ROWS = _F_PROJ_ROWS;
 	static constexpr usize D_MODEL = _D_MODEL;
-	static constexpr usize F_ROWS = F_PROJ_ROWS / 2;
-
-	static constexpr usize A_ROWS = F_PROJ_ROWS;
+	static constexpr usize F_WIDTH = _F_WIDTH;
+	static constexpr usize F_PROJ_OUTPUTS = 2 * F_WIDTH;
+	static constexpr usize A_ROWS = F_PROJ_OUTPUTS;
 	static constexpr usize K = D_MODEL;
 
 	static constexpr usize M_WARPS = 2;
@@ -29,14 +28,13 @@ struct FProj {
 	static constexpr usize M_TILES = M_PER_WARP / 16;
 	static constexpr usize N_TILES = N_PER_WARP / 16;
 	static constexpr usize OUT_M_PER_BLOCK = M_PER_BLOCK / 2;
-	static constexpr f64 GEGLU_SCALE = 1.53 * math::constexpr_rsqrt(2.0 * f64(F_ROWS));
+	static constexpr f64 GEGLU_SCALE = 1.53 * math::constexpr_rsqrt(2.0 * f64(F_WIDTH));
 
 	static constexpr usize SMEM_BYTES =
 		GMEM_PRELOAD * K_STEP * (M_PER_BLOCK + N_PER_BLOCK) * sizeof(bf16);
 
 	static_assert(WARPS_PER_BLOCK == 4, "current kernel layout expects 4 warps");
-	static_assert(F_PROJ_ROWS % 2 == 0, "F_PROJ_ROWS must be even");
-	static_assert(F_PROJ_ROWS % M_PER_BLOCK == 0, "F_PROJ_ROWS must be divisible by M_PER_BLOCK");
+	static_assert(F_PROJ_OUTPUTS % M_PER_BLOCK == 0, "F_PROJ_OUTPUTS must be divisible by M_PER_BLOCK");
 	static_assert(K_STEP % 16 == 0, "K_STEP must be divisible by 16");
 	static_assert(K % K_STEP == 0, "D_MODEL must be divisible by K_STEP");
 	static_assert(K % 16 == 0, "D_MODEL must be divisible by 16");
@@ -177,8 +175,8 @@ struct FProj {
 			geglu(out[ni], acc_t[ni][0], acc_t[ni][1]);
 		}
 
-		bf16 *c_ptr = C + blockIdx.y * N_PER_BLOCK * F_ROWS + blockIdx.x * OUT_M_PER_BLOCK;
-		GMatrix<bf16, N_PER_BLOCK, OUT_M_PER_BLOCK> gC_block{c_ptr, F_ROWS};
+		bf16 *c_ptr = C + blockIdx.y * N_PER_BLOCK * F_WIDTH + blockIdx.x * OUT_M_PER_BLOCK;
+		GMatrix<bf16, N_PER_BLOCK, OUT_M_PER_BLOCK> gC_block{c_ptr, F_WIDTH};
 		X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
 			store_2x2_8x8(
 				gC_block,

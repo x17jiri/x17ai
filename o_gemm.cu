@@ -8,12 +8,11 @@
 int main() {
 	constexpr usize SEQ_LEN = config::n_inputs;
 	constexpr usize D_MODEL = config::d_model;
-	constexpr usize ATTN_ROWS = config::n_heads * config::head_dim;
-	constexpr usize F_PROJ_ROWS = 6 * config::n_heads * config::head_dim;
-	constexpr usize F_ROWS = F_PROJ_ROWS / 2;
-	constexpr usize O_PROJ_INPUT_ROWS = ATTN_ROWS + F_ROWS;
+	constexpr usize ATTN_WIDTH = config::n_heads * config::head_dim;
+	constexpr usize F_WIDTH = config::f_width;
+	constexpr usize O_PROJ_INPUT_ROWS = ATTN_WIDTH + F_WIDTH;
 
-	static_assert(config::d_model == ATTN_ROWS);
+	static_assert(config::d_model == ATTN_WIDTH);
 
 	using OP = OProj<D_MODEL, O_PROJ_INPUT_ROWS>;
 
@@ -23,8 +22,8 @@ int main() {
 	}
 
 	std::vector<bf16> h_weights = load_tensor("tmp/block_torch/o_weights.bin", D_MODEL, O_PROJ_INPUT_ROWS);
-	std::vector<bf16> h_attn_out = load_tensor("tmp/block_torch/attn_out.bin", SEQ_LEN, ATTN_ROWS);
-	std::vector<bf16> h_f = load_tensor("tmp/block_torch/f.bin", SEQ_LEN, F_ROWS);
+	std::vector<bf16> h_attn_out = load_tensor("tmp/block_torch/attn_out.bin", SEQ_LEN, ATTN_WIDTH);
+	std::vector<bf16> h_f = load_tensor("tmp/block_torch/f.bin", SEQ_LEN, F_WIDTH);
 	if (h_weights.empty() || h_attn_out.empty() || h_f.empty()) {
 		return 1;
 	}
@@ -32,8 +31,8 @@ int main() {
 	std::vector<bf16> h_inputs(SEQ_LEN * O_PROJ_INPUT_ROWS);
 	for (usize row = 0; row < SEQ_LEN; ++row) {
 		bf16 *dst = h_inputs.data() + row * O_PROJ_INPUT_ROWS;
-		std::copy_n(h_attn_out.data() + row * ATTN_ROWS, ATTN_ROWS, dst);
-		std::copy_n(h_f.data() + row * F_ROWS, F_ROWS, dst + ATTN_ROWS);
+		std::copy_n(h_attn_out.data() + row * ATTN_WIDTH, ATTN_WIDTH, dst);
+		std::copy_n(h_f.data() + row * F_WIDTH, F_WIDTH, dst + ATTN_WIDTH);
 	}
 
 	std::vector<bf16> h_out(SEQ_LEN * D_MODEL);

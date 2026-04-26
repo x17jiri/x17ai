@@ -8,25 +8,25 @@
 int main() {
 	constexpr usize SEQ_LEN = config::n_inputs;
 	constexpr usize D_MODEL = config::d_model;
-	constexpr usize F_PROJ_ROWS = 6 * config::n_heads * config::head_dim;
-	constexpr usize F_ROWS = F_PROJ_ROWS / 2;
+	constexpr usize F_WIDTH = config::f_width;
+	constexpr usize F_PROJ_OUTPUTS = 2 * F_WIDTH;
 
 	static_assert(config::d_model == config::n_heads * config::head_dim);
 
-	using FP = FProj<F_PROJ_ROWS, D_MODEL>;
+	using FP = FProj<F_WIDTH, D_MODEL>;
 
 	if (SEQ_LEN % FP::N_PER_BLOCK != 0) {
 		printf("Expected n_inputs %% %u == 0\n", FP::N_PER_BLOCK);
 		return 1;
 	}
 
-	std::vector<bf16> h_weights = load_tensor("tmp/block_torch/f_weights.bin", F_PROJ_ROWS, D_MODEL);
+	std::vector<bf16> h_weights = load_tensor("tmp/block_torch/f_weights.bin", F_PROJ_OUTPUTS, D_MODEL);
 	std::vector<bf16> h_inputs = load_tensor("tmp/block_torch/inputs_l2.bin", SEQ_LEN, D_MODEL);
 	if (h_weights.empty() || h_inputs.empty()) {
 		return 1;
 	}
 
-	std::vector<bf16> h_out(SEQ_LEN * F_ROWS);
+	std::vector<bf16> h_out(SEQ_LEN * F_WIDTH);
 
 	bf16 *d_weights = nullptr;
 	bf16 *d_inputs = nullptr;
@@ -42,7 +42,7 @@ int main() {
 	cudaFuncSetAttribute(f_proj<FP>, cudaFuncAttributeMaxDynamicSharedMemorySize, FP::SMEM_BYTES);
 	cudaFuncSetAttribute(f_proj<FP>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-	dim3 grid(F_PROJ_ROWS / FP::M_PER_BLOCK, SEQ_LEN / FP::N_PER_BLOCK);
+	dim3 grid(F_PROJ_OUTPUTS / FP::M_PER_BLOCK, SEQ_LEN / FP::N_PER_BLOCK);
 
 	int warmup = 50;
 	for (int i = 0; i < warmup; ++i) {
@@ -95,7 +95,7 @@ int main() {
 
 	cudaMemcpy(h_out.data(), d_out, h_out.size() * sizeof(bf16), cudaMemcpyDeviceToHost);
 	std::filesystem::create_directories("tmp/block_cuda");
-	store_tensor("tmp/block_cuda/f.bin", h_out, SEQ_LEN, F_ROWS);
+	store_tensor("tmp/block_cuda/f.bin", h_out, SEQ_LEN, F_WIDTH);
 
 	printf("Used SMEM per kernel: %u\n", FP::SMEM_BYTES);
 
