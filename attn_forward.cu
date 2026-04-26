@@ -42,7 +42,7 @@ int main() {
 	std::vector<bf16> h_sink_v = load_tensor("tmp/block_torch/sinks_v.bin", HEAD_CNT, V_DIM);
 	std::vector<f32> h_sink_scores = load_f32_tensor("tmp/block_torch/sink_scores_f32.bin", HEAD_CNT, SEQ_LEN);
 	std::vector<f32> h_maxes;
-	if (0 && std::filesystem::exists("tmp/block_torch/attn_maxes_f32.bin")) {
+	if (1 && std::filesystem::exists("tmp/block_torch/attn_maxes_f32.bin")) {
 		h_maxes = load_f32_tensor("tmp/block_torch/attn_maxes_f32.bin", HEAD_CNT, SEQ_LEN);
 		if (h_maxes.empty()) {
 			return 1;
