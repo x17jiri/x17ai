@@ -26,7 +26,7 @@ def load_bf16(path: Path) -> torch.Tensor:
 
 def infer_q_len_from_attn_out(path: Path) -> int:
 	element_count = path.stat().st_size // 2
-	row_width = block.Q_ROWS
+	row_width = block.ATTN_WIDTH
 	if element_count % row_width != 0:
 		raise ValueError(
 			f"Expected {path} to contain rows of width {row_width}, got {element_count} bf16 values"
@@ -35,7 +35,7 @@ def infer_q_len_from_attn_out(path: Path) -> int:
 
 
 def read_attn_out_rows(handle, row_start: int, row_count: int) -> torch.Tensor:
-	row_width = block.Q_ROWS
+	row_width = block.ATTN_WIDTH
 	byte_offset = row_start * row_width * 2
 	handle.seek(byte_offset)
 	raw = handle.read(row_count * row_width * 2)
