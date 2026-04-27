@@ -6,6 +6,11 @@
 #include <filesystem>
 
 int main(int argc, char *argv[]) {
+	HarnessCliOptions cli;
+	if (!parse_harness_cli_args(argc, argv, false, cli)) {
+		return 1;
+	}
+
 	constexpr usize A_ROWS = 4 * config::n_heads * config::head_dim;
 	constexpr usize Q_ROWS = config::n_heads * config::head_dim;
 	constexpr usize A_COLS = config::qkv_fan_in;
@@ -35,10 +40,10 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	std::vector<bf16> h_A = load_tensor("tmp/block_torch/qkv_weights.bin", A_ROWS, A_COLS);
-	std::vector<bf16> h_B = load_tensor("tmp/block_torch/inputs_l2.bin", B_COLS, B_ROWS);
-	std::vector<bf16> h_S = load_tensor("tmp/block_torch/qk_norm_scales.bin", 1, Q_ROWS);
-	std::vector<bf16> h_sink = load_tensor("tmp/block_torch/sinks_k.bin", config::n_heads, config::head_dim);
+	std::vector<bf16> h_A = load_tensor(torch_tensor_path("qkv_weights.bin"), A_ROWS, A_COLS);
+	std::vector<bf16> h_B = load_tensor(torch_tensor_path("inputs_l2.bin"), B_COLS, B_ROWS);
+	std::vector<bf16> h_S = load_tensor(torch_tensor_path("qk_norm_scales.bin"), 1, Q_ROWS);
+	std::vector<bf16> h_sink = load_tensor(torch_tensor_path("sinks_k.bin"), config::n_heads, config::head_dim);
 	if (h_A.empty() || h_B.empty() || h_S.empty() || h_sink.empty()) {
 		return 1;
 	}

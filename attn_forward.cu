@@ -5,7 +5,15 @@
 #include <algorithm>
 #include <filesystem>
 
-int main() {
+int main(int argc, char *argv[]) {
+	HarnessCliOptions cli;
+	if (!parse_harness_cli_args(argc, argv, true, cli)) {
+		return 1;
+	}
+	if (cli.use_torch_maxes) {
+		printf("Using torch attention maxes\n");
+	}
+
 	constexpr usize HEADS_PER_KERNEL = 2;
 	constexpr usize QK_DIM = config::head_dim;
 	constexpr usize V_DIM = config::head_dim;
@@ -35,19 +43,21 @@ int main() {
 		return 1;
 	}
 
-	std::vector<bf16> h_Q = load_tensor("tmp/block_torch/q.bin", SEQ_LEN, PACKED_DIM);
-	std::vector<bf16> h_K = load_tensor("tmp/block_torch/k.bin", SEQ_LEN, PACKED_DIM);
-	std::vector<bf16> h_V = load_tensor("tmp/block_torch/v.bin", SEQ_LEN, PACKED_DIM);
-	std::vector<bf16> h_G = load_tensor("tmp/block_torch/g.bin", SEQ_LEN, PACKED_DIM);
-	std::vector<bf16> h_sink_v = load_tensor("tmp/block_torch/sinks_v.bin", HEAD_CNT, V_DIM);
-	std::vector<f32> h_sink_scores = load_f32_tensor("tmp/block_torch/sink_scores_f32.bin", HEAD_CNT, SEQ_LEN);
+	std::vector<bf16> h_Q = load_tensor(tensor_path(cli.input_dir, "q.bin"), SEQ_LEN, PACKED_DIM);
+	std::vector<bf16> h_K = load_tensor(tensor_path(cli.input_dir, "k.bin"), SEQ_LEN, PACKED_DIM);
+	std::vector<bf16> h_V = load_tensor(tensor_path(cli.input_dir, "v.bin"), SEQ_LEN, PACKED_DIM);
+	std::vector<bf16> h_G = load_tensor(tensor_path(cli.input_dir, "g.bin"), SEQ_LEN, PACKED_DIM);
+	std::vector<bf16> h_sink_v = load_tensor(torch_tensor_path("sinks_v.bin"), HEAD_CNT, V_DIM);
+	std::vector<f32> h_sink_scores = load_f32_tensor(tensor_path(cli.input_dir, "sink_scores_f32.bin"), HEAD_CNT, SEQ_LEN);
 	std::vector<f32> h_maxes;
-	if (1 && std::filesystem::exists("tmp/block_torch/attn_maxes_f32.bin")) {
-		h_maxes = load_f32_tensor("tmp/block_torch/attn_maxes_f32.bin", HEAD_CNT, SEQ_LEN);
+	if (cli.use_torch_maxes && std::filesystem::exists(torch_tensor_path("attn_maxes_f32.bin"))) {
+		h_maxes = load_f32_tensor(torch_tensor_path("attn_maxes_f32.bin"), HEAD_CNT, SEQ_LEN);
 		if (h_maxes.empty()) {
 			return 1;
 		}
 		printf("Loaded precomputed attention maxes\n");
+	} else if (cli.use_torch_maxes) {
+		printf("Torch attention maxes requested but %s does not exist\n", torch_tensor_path("attn_maxes_f32.bin").c_str());
 	}
 	if (h_Q.empty() || h_K.empty() || h_V.empty() || h_G.empty() || h_sink_v.empty() || h_sink_scores.empty()) {
 		return 1;

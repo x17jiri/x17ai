@@ -5,7 +5,12 @@
 #include <algorithm>
 #include <filesystem>
 
-int main() {
+int main(int argc, char *argv[]) {
+	HarnessCliOptions cli;
+	if (!parse_harness_cli_args(argc, argv, false, cli)) {
+		return 1;
+	}
+
 	constexpr usize SEQ_LEN = config::n_inputs;
 	constexpr usize D_MODEL = config::d_model;
 	constexpr usize F_WIDTH = config::f_width;
@@ -20,8 +25,8 @@ int main() {
 		return 1;
 	}
 
-	std::vector<bf16> h_weights = load_tensor("tmp/block_torch/f_weights.bin", F_PROJ_OUTPUTS, D_MODEL);
-	std::vector<bf16> h_inputs = load_tensor("tmp/block_torch/inputs_l2.bin", SEQ_LEN, D_MODEL);
+	std::vector<bf16> h_weights = load_tensor(torch_tensor_path("f_weights.bin"), F_PROJ_OUTPUTS, D_MODEL);
+	std::vector<bf16> h_inputs = load_tensor(torch_tensor_path("inputs_l2.bin"), SEQ_LEN, D_MODEL);
 	if (h_weights.empty() || h_inputs.empty()) {
 		return 1;
 	}

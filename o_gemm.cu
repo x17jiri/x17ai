@@ -5,7 +5,12 @@
 #include <algorithm>
 #include <filesystem>
 
-int main() {
+int main(int argc, char *argv[]) {
+	HarnessCliOptions cli;
+	if (!parse_harness_cli_args(argc, argv, false, cli)) {
+		return 1;
+	}
+
 	constexpr usize SEQ_LEN = config::n_inputs;
 	constexpr usize D_MODEL = config::d_model;
 	constexpr usize ATTN_WIDTH = config::n_heads * config::head_dim;
@@ -21,9 +26,9 @@ int main() {
 		return 1;
 	}
 
-	std::vector<bf16> h_weights = load_tensor("tmp/block_torch/o_weights.bin", D_MODEL, O_PROJ_INPUT_ROWS);
-	std::vector<bf16> h_attn_out = load_tensor("tmp/block_torch/attn_out.bin", SEQ_LEN, ATTN_WIDTH);
-	std::vector<bf16> h_f = load_tensor("tmp/block_torch/f.bin", SEQ_LEN, F_WIDTH);
+	std::vector<bf16> h_weights = load_tensor(torch_tensor_path("o_weights.bin"), D_MODEL, O_PROJ_INPUT_ROWS);
+	std::vector<bf16> h_attn_out = load_tensor(tensor_path(cli.input_dir, "attn_out.bin"), SEQ_LEN, ATTN_WIDTH);
+	std::vector<bf16> h_f = load_tensor(tensor_path(cli.input_dir, "f.bin"), SEQ_LEN, F_WIDTH);
 	if (h_weights.empty() || h_attn_out.empty() || h_f.empty()) {
 		return 1;
 	}

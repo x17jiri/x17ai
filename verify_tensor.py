@@ -273,6 +273,8 @@ def verify_bf16(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
 	print(f"Signed-zero-only mismatches: {int(zero_sign_only.sum().item())}")
 	print(f"Sign-flipped values: {sign_flip_count}, largest magnitude: {largest_sign_flip_mag:.6e}")
 	print_ulp_summary(ulp_diff, total, a, b, shape)
+	print(summarize_nonfinite("A non-finite", a))
+	print(summarize_nonfinite("B non-finite", b))
 	if max_abs_diff > 0.0:
 		print(f"Worst abs mismatch at [{format_index(flat_idx, shape)}]: ref={worst_ref:.6e}, other={worst_cuda:.6e}")
 	print_worst_pct_summary(a, b, finite_mask, shape, renorm_scales)

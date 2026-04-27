@@ -1,3 +1,5 @@
+# QKV Proj
+
 ./nvcc.sh qkv_gemm.cu && tmp/qkv_gemm
 python verify_tensor.py tmp/block_torch/sink_scores_f32.bin tmp/block_cuda/sink_scores_f32.bin
 python verify_tensor.py tmp/block_torch/qkvg.bin tmp/block_cuda/qkvg.bin --shape 16384 4 1024
@@ -12,7 +14,7 @@ python tensor_stats.py tmp/block_torch/k.bin tmp/block_torch/k.bin.var
 python tensor_stats.py tmp/block_torch/v.bin tmp/block_torch/v.bin.var
 python tensor_stats.py tmp/block_torch/g.bin tmp/block_torch/g.bin.var
 
----
+# Attn Forward
 
 ./nvcc.sh attn_forward.cu && tmp/attn_forward
 python verify_tensor.py tmp/block_torch/attn_out.bin tmp/block_cuda/attn_out.bin --shape 16384 32 32
@@ -22,18 +24,34 @@ python tensor_stats.py tmp/block_torch/attn_out.bin tmp/block_torch/attn_out.bin
 python tensor_stats.py tmp/block_torch/attn_out_pregate.bin tmp/block_torch/attn_out_pregate.bin.var
 python tensor_stats.py tmp/block_torch/attn_out.bin tmp/block_torch/attn_out.bin.var --overlay tmp/block_torch/f.bin --overlay-var tmp/block_torch/f.bin.var
 
----
+## Attn Forward - use maxes from torch to eliminate online softmax errors
+./nvcc.sh attn_forward.cu && tmp/attn_forward --use-torch-maxes
+
+# F Proj
 
 ./nvcc.sh f_gemm.cu && tmp/f_gemm
 python verify_tensor.py tmp/block_torch/f.bin tmp/block_cuda/f.bin
 python tensor_stats.py tmp/block_torch/f.bin tmp/block_torch/f.bin.var
 
----
+# O Proj
 
 ./nvcc.sh o_gemm.cu && tmp/o_gemm
 python verify_tensor.py tmp/block_torch/o.bin tmp/block_cuda/o.bin
 python tensor_stats.py tmp/block_torch/o.bin tmp/block_torch/o.bin.var
 
----
+# Chained run using CUDA outputs as inputs for later kernels.
+
+- Model parameters and block-entry tensors still load from tmp/block_torch.
+
+./nvcc.sh qkv_gemm.cu && tmp/qkv_gemm
+./nvcc.sh attn_forward.cu && tmp/attn_forward --cuda-inputs
+./nvcc.sh f_gemm.cu && tmp/f_gemm --cuda-inputs
+./nvcc.sh o_gemm.cu && tmp/o_gemm --cuda-inputs
+python verify_tensor.py tmp/block_torch/o.bin tmp/block_cuda/o.bin
+
+- It is still possible to use maxes from torch to get closer match
+./nvcc.sh attn_forward.cu && tmp/attn_forward --cuda-inputs --use-torch-maxes
+
+# Check CPU Temperature
 
 paste <(cat /sys/class/thermal/thermal_zone*/type) <(cat /sys/class/thermal/thermal_zone*/temp) | column -s $'\t' -t | sed 's/\(.\)..$/.\1°C/'
