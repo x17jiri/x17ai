@@ -91,8 +91,8 @@ def create_inputs() -> None:
 
 	# randn init
 	inputs = new_randn(N_INPUTS, D_MODEL, generator=generator)
-	qkv_weights = new_randn(QKV_ROWS, QKV_FAN_IN, generator=generator)
-	f_weights = new_randn(F_PROJ_OUTPUTS, D_MODEL, generator=generator)
+	qkvg_weights = new_randn(QKVG_ROWS, SPARSE_FAN_IN, generator=generator)
+	f_weights = new_randn(F_PROJ_OUTPUTS, SPARSE_FAN_IN, generator=generator)
 	w_attn = new_randn(D_MODEL, ATTN_WIDTH, generator=generator)
 	w_ffn = new_randn(D_MODEL, F_WIDTH, generator=generator)
 	sink_k = new_randn(N_HEADS, HEAD_DIM, generator=generator)
@@ -106,7 +106,7 @@ def create_inputs() -> None:
 
 	store_tensor(inputs, "inputs.bin", expected_variance=1.0)
 	store_tensor(inputs_l2, "inputs_l2.bin", expected_variance=1.0 / D_MODEL)
-	store_tensor(qkv_weights, "qkv_weights.bin", expected_variance=1.0)
+	store_tensor(qkvg_weights, "qkvg_weights.bin", expected_variance=1.0)
 	store_tensor(f_weights, "f_weights.bin", expected_variance=1.0)
 	store_tensor(w_attn, "w_attn.bin", expected_variance=1.0)
 	store_tensor(w_ffn, "w_ffn.bin", expected_variance=1.0)
@@ -114,17 +114,16 @@ def create_inputs() -> None:
 	store_tensor(sink_k, "sinks_k.bin", expected_variance=1.0 / HEAD_DIM)
 	store_tensor(sinks_v, "sinks_v.bin", expected_variance=1.0)
 
-def expand_qkv_weights(qkv_weights: torch.Tensor) -> torch.Tensor:
-	assert not qkv_weights.requires_grad
-	assert D_MODEL % HEAD_DIM == 0
-
-	step = D_MODEL // HEAD_DIM
-	expanded = torch.zeros((qkv_weights.shape[0], D_MODEL))
-	cols = torch.arange(qkv_weights.shape[1], dtype=torch.int64)
-	for row in range(qkv_weights.shape[0]):
-		indices = (cols + row * step) % D_MODEL
-		expanded[row, indices] = qkv_weights[row]
-	return expanded
+def sparse_weights(w: torch.Tensor, d_input, repeat_after) -> torch.Tensor:
+	d_output = w.shape[0]
+	fan_in = w.shape[1]
+	step = d_input // repeat_after
+	sparse = torch.zeros((d_output, d_input))
+	cols = torch.arange(fan_in, dtype=torch.int64)
+	for row in range(d_output):
+		indices = (cols + row * step) % d_input
+		sparse[row, indices] = w[row]
+	return sparse
 
 def apply_rope(tensor: torch.Tensor, rope_base: float) -> torch.Tensor:
 	head_dim = tensor.shape[-1]
@@ -193,28 +192,25 @@ def zig_zag_geglu(attn_out: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
 	return out
 
 def calculate_sink_scores(q: torch.Tensor, sinks_k: torch.Tensor) -> torch.Tensor:
-	# sink score calculation is part of the qkv kernel. It has access to precise q, but it loads
+	# sink score calculation is part of the qkvg kernel. It has access to precise q, but it loads
 	# sinks_k from global memory in bf16
 	#q = q.to(torch.bfloat16).to(torch.float32)
 	sinks_k = sinks_k.to(torch.bfloat16).to(torch.float32)
 	return torch.einsum("qhd,hd->qh", q, sinks_k)
 
-def qkv_proj(
+def qkvg_proj(
 	inputs: torch.Tensor,
-	qkv_weights: torch.Tensor,
+	qkvg_weights: torch.Tensor,
 	qk_norm_scales: torch.Tensor,
 	sinks_k: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-	expanded_qkv_weights = expand_qkv_weights(qkv_weights)
-	print(f"qkv_weights shape: {qkv_weights.shape}")
-	print(f"Expanded qkv_weights shape: {expanded_qkv_weights.shape[0]} x {expanded_qkv_weights.shape[1]}")
-	qkv = torch.matmul(inputs, expanded_qkv_weights.transpose(0, 1))
-	qkv_cols = HEAD_DIM * N_HEADS
+	qkvg = torch.matmul(inputs, qkvg_weights.transpose(0, 1))
+	qkvg_cols = HEAD_DIM * N_HEADS
 
-	q = qkv[:, 0 * qkv_cols:1 * qkv_cols].reshape(N_INPUTS, N_HEADS, HEAD_DIM)
-	k = qkv[:, 1 * qkv_cols:2 * qkv_cols].reshape(N_INPUTS, N_HEADS, HEAD_DIM)
-	v = qkv[:, 2 * qkv_cols:3 * qkv_cols].reshape(N_INPUTS, N_HEADS, HEAD_DIM)
-	g = qkv[:, 3 * qkv_cols:4 * qkv_cols].reshape(N_INPUTS, N_HEADS, HEAD_DIM)
+	q = qkvg[:, 0 * qkvg_cols:1 * qkvg_cols].reshape(N_INPUTS, N_HEADS, HEAD_DIM)
+	k = qkvg[:, 1 * qkvg_cols:2 * qkvg_cols].reshape(N_INPUTS, N_HEADS, HEAD_DIM)
+	v = qkvg[:, 2 * qkvg_cols:3 * qkvg_cols].reshape(N_INPUTS, N_HEADS, HEAD_DIM)
+	g = qkvg[:, 3 * qkvg_cols:4 * qkvg_cols].reshape(N_INPUTS, N_HEADS, HEAD_DIM)
 
 	q = l2_norm(q)
 	k = l2_norm(k)
@@ -377,22 +373,25 @@ def o_proj_ffn(f: torch.Tensor, w_ffn: torch.Tensor) -> torch.Tensor:
 
 def run_block() -> None:
 	inputs = load_tensor("inputs_l2.bin", N_INPUTS, D_MODEL)
-	qkv_weights = load_tensor("qkv_weights.bin", QKV_ROWS, QKV_FAN_IN)
-	f_weights = load_tensor("f_weights.bin", F_PROJ_OUTPUTS, D_MODEL)
+	qkvg_weights = load_tensor("qkvg_weights.bin", QKVG_ROWS, SPARSE_FAN_IN)
+	f_weights = load_tensor("f_weights.bin", F_PROJ_OUTPUTS, SPARSE_FAN_IN)
 	w_attn = load_tensor("w_attn.bin", D_MODEL, ATTN_WIDTH)
 	w_ffn = load_tensor("w_ffn.bin", D_MODEL, F_WIDTH)
 	qk_norm_scales = load_tensor("qk_norm_scales.bin", 1, HEAD_DIM * N_HEADS)
 	sinks_k = load_tensor("sinks_k.bin", N_HEADS, HEAD_DIM)
 	sinks_v = load_tensor("sinks_v.bin", N_HEADS, HEAD_DIM)
-	q, k, v, g, sink_scores = qkv_proj(inputs, qkv_weights, qk_norm_scales, sinks_k)
-	attn_out_pregate, attn_maxes = attn(q, k, v, sink_scores, sinks_v)
-	g_bf16 = quantize_(g)
-	attn_out = zig_zag_geglu(attn_out_pregate, g_bf16 * V_SCALE)
-	f_pregate = f_proj_pregate(inputs, f_weights)
-	f = pairwise_geglu(f_pregate, F_GEGLU_SCALE)
-	o_attn = o_proj_attn(attn_out, w_attn)
-	o_ffn = o_proj_ffn(f, w_ffn)
+
+	qkvg_weights = sparse_weights(qkvg_weights, D_MODEL, HEAD_DIM);
+	q, k, v, g, sink_scores = qkvg_proj(inputs, qkvg_weights, qk_norm_scales, sinks_k)
 	qkvg = join_qkvg(q, k, v, g)
+	attn_out_pregate, attn_maxes = attn(q, k, v, sink_scores, sinks_v)
+	attn_out = zig_zag_geglu(attn_out_pregate, quantize_(g) * V_SCALE)
+	o_attn = o_proj_attn(attn_out, w_attn)
+
+	f_weights = sparse_weights(f_weights, D_MODEL, HEAD_DIM)
+	f_pregate = f_proj_pregate(inputs, f_weights) * V_SCALE
+	f = pairwise_geglu(f_pregate, F_GEGLU_SCALE)
+	o_ffn = o_proj_ffn(f, w_ffn)
 
 	print("inputs shape:", inputs.shape)
 	print("qkvg shape:", qkvg.shape)
@@ -412,14 +411,14 @@ def run_block() -> None:
 
 	store_f32_tensor(q, "q_f32.bin", expected_variance=1.0 / HEAD_DIM)
 	store_f32_tensor(k, "k_f32.bin", expected_variance=1.0 / HEAD_DIM)
-	store_f32_tensor(v, "v_f32.bin", expected_variance=QKV_FAN_IN / D_MODEL)
-	store_f32_tensor(g, "g_f32.bin", expected_variance=QKV_FAN_IN / D_MODEL)
-	store_f32_tensor(g_bf16 * V_SCALE, "g_scaled_f32.bin", expected_variance=1.0)
+	store_f32_tensor(v, "v_f32.bin", expected_variance=SPARSE_FAN_IN / D_MODEL)
+	store_f32_tensor(g, "g_f32.bin", expected_variance=SPARSE_FAN_IN / D_MODEL)
+#	store_f32_tensor(g_bf16 * V_SCALE, "g_scaled_f32.bin", expected_variance=1.0)
 
 	store_tensor(q, "q.bin", expected_variance=1.0 / HEAD_DIM)
 	store_tensor(k, "k.bin", expected_variance=1.0 / HEAD_DIM)
-	store_tensor(v, "v.bin", expected_variance=QKV_FAN_IN / D_MODEL)
-	store_tensor(g, "g.bin", expected_variance=QKV_FAN_IN / D_MODEL)
+	store_tensor(v, "v.bin", expected_variance=SPARSE_FAN_IN / D_MODEL)
+	store_tensor(g, "g.bin", expected_variance=SPARSE_FAN_IN / D_MODEL)
 
 	store_f32_tensor(sink_scores.transpose(0, 1), "sink_scores_f32.bin", expected_variance=1.0 / HEAD_DIM)
 	store_f32_tensor(attn_maxes.transpose(0, 1), "attn_maxes_f32.bin")
