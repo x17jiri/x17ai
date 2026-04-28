@@ -30,7 +30,6 @@
 //   _V_DIM            - dimension of V vectors per head
 //   _D_MODEL          - model width used to derive V_SCALE
 //   _QKV_FAN_IN       - fan-in of the qkv projection used to derive V_SCALE
-//   _O_PROJ_CONTRIBS  - number of final-projection inputs contributed by this branch; used to normalize GeGLU
 //   _V_EQUALS_K       - when true, V is a prefix of K (V_DIM must be <= QK_DIM)
 template<
 	const usize _HEAD_CNT,
@@ -39,7 +38,6 @@ template<
 	const usize _V_DIM,
 	const usize _D_MODEL,
 	const usize _QKV_FAN_IN,
-	const usize _O_PROJ_CONTRIBS,
 	const bool _V_EQUALS_K = false
 >
 struct AttnForward {
@@ -51,7 +49,6 @@ struct AttnForward {
 	static constexpr usize V_DIM = _V_DIM;
 	static constexpr usize D_MODEL = _D_MODEL;
 	static constexpr usize QKV_FAN_IN = _QKV_FAN_IN;
-	static constexpr usize O_PROJ_CONTRIBS = _O_PROJ_CONTRIBS;
 	static constexpr bool V_EQUALS_K = _V_EQUALS_K;
 	static constexpr usize GMEM_PRELOAD = 2;
 
@@ -62,12 +59,11 @@ struct AttnForward {
 
 	static constexpr f64 V_SCALE = math::constexpr_sqrt(f64(D_MODEL) / f64(QKV_FAN_IN));
 	static constexpr f64 V_SCALE_FIX = 1.5;
-	static constexpr f64 GEGLU_SCALE = 1.53 * math::constexpr_rsqrt(2.0 * f64(O_PROJ_CONTRIBS));
+	static constexpr f64 GEGLU_SCALE = 1.53 * math::constexpr_rsqrt(V_DIM * HEAD_CNT);
 
 	static_assert(HEADS_PER_KERNEL > 0, "HEADS_PER_KERNEL must be > 0");
 	static_assert(HEAD_CNT % HEADS_PER_KERNEL == 0, "HEAD_CNT must be divisible by HEADS_PER_KERNEL");
 	static_assert(V_DIM <= QK_DIM, "V_DIM must be <= QK_DIM");
-	static_assert(O_PROJ_CONTRIBS > 0, "O_PROJ_CONTRIBS must be > 0");
 
 	static constexpr usize QK_TILES = QK_DIM / 16;
 	static constexpr usize V_TILES = V_DIM / 16;
@@ -315,27 +311,31 @@ struct AttnForward {
 	}
 
 	static X17_DEVICE void zig_zag_geglu_(
-		Fragment_8x8<f32> &out,
+		Fragment_8x8<f32> &o,
 		Fragment_8x8<bf16> const &g
 	) {
-		f32 out0 = out.first();
-		f32 out1 = out.second();
-		f32 g0 = f32(V_SCALE) * f32(g.first());
-		f32 g1 = f32(V_SCALE) * f32(g.second());
-		out.set(
-			math::fast::geglu<GEGLU_SCALE>(g0, out0),
-			math::fast::geglu<GEGLU_SCALE>(out1, g1)
+		f32 o0 = o.first();
+		f32 o1 = o.second();
+		f32 g0 = g.first();
+		f32 g1 = g.second();
+		if constexpr (V_SCALE != 1.0) {
+			g0 *= f32(V_SCALE);
+			g1 *= f32(V_SCALE);
+		}
+		o.set(
+			math::fast::geglu<GEGLU_SCALE>(g0, o0),
+			math::fast::geglu<GEGLU_SCALE>(o1, g1)
 		);
 	}
 
 	static X17_DEVICE void zig_zag_geglu_(
-		Fragment_16x16<f32> &out,
+		Fragment_16x16<f32> &o,
 		Fragment_16x16<bf16> const &g
 	) {
-		zig_zag_geglu_(out.sub[0][0], g.sub[0][0]);
-		zig_zag_geglu_(out.sub[0][1], g.sub[0][1]);
-		zig_zag_geglu_(out.sub[1][0], g.sub[1][0]);
-		zig_zag_geglu_(out.sub[1][1], g.sub[1][1]);
+		zig_zag_geglu_(o.sub[0][0], g.sub[0][0]);
+		zig_zag_geglu_(o.sub[0][1], g.sub[0][1]);
+		zig_zag_geglu_(o.sub[1][0], g.sub[1][0]);
+		zig_zag_geglu_(o.sub[1][1], g.sub[1][1]);
 	}
 
 	X17_DEVICE void combine_and_store(
