@@ -1,4 +1,4 @@
-#include "cuda/o_proj.cuh"
+#include "cuda/gemm.cuh"
 #include "block.config.hpp"
 #include "utils2.cuh"
 
@@ -14,56 +14,46 @@ int main(int argc, char *argv[]) {
 	constexpr usize SEQ_LEN = config::n_inputs;
 	constexpr usize D_MODEL = config::d_model;
 	constexpr usize ATTN_WIDTH = config::n_heads * config::head_dim;
-	constexpr usize F_WIDTH = config::f_width;
-	constexpr usize O_PROJ_INPUT_ROWS = ATTN_WIDTH + F_WIDTH;
 
 	static_assert(config::d_model == ATTN_WIDTH);
 
-	using OP = OProj<D_MODEL, O_PROJ_INPUT_ROWS>;
+	using OP = Gemm<ATTN_WIDTH, D_MODEL>;
 
 	if (SEQ_LEN % OP::N_PER_BLOCK != 0) {
 		printf("Expected n_inputs %% %u == 0\n", OP::N_PER_BLOCK);
 		return 1;
 	}
 
-	std::vector<bf16> h_weights = load_tensor(torch_tensor_path("o_weights.bin"), D_MODEL, O_PROJ_INPUT_ROWS);
+	std::vector<bf16> h_weights = load_tensor(torch_tensor_path("w_attn.bin"), D_MODEL, ATTN_WIDTH);
 	std::vector<bf16> h_attn_out = load_tensor(tensor_path(cli.input_dir, "attn_out.bin"), SEQ_LEN, ATTN_WIDTH);
-	std::vector<bf16> h_f = load_tensor(tensor_path(cli.input_dir, "f.bin"), SEQ_LEN, F_WIDTH);
-	if (h_weights.empty() || h_attn_out.empty() || h_f.empty()) {
+	if (h_weights.empty() || h_attn_out.empty()) {
 		return 1;
-	}
-
-	std::vector<bf16> h_inputs(SEQ_LEN * O_PROJ_INPUT_ROWS);
-	for (usize row = 0; row < SEQ_LEN; ++row) {
-		bf16 *dst = h_inputs.data() + row * O_PROJ_INPUT_ROWS;
-		std::copy_n(h_attn_out.data() + row * ATTN_WIDTH, ATTN_WIDTH, dst);
-		std::copy_n(h_f.data() + row * F_WIDTH, F_WIDTH, dst + ATTN_WIDTH);
 	}
 
 	std::vector<bf16> h_out(SEQ_LEN * D_MODEL);
 
 	bf16 *d_weights = nullptr;
-	bf16 *d_inputs = nullptr;
+	bf16 *d_attn_out = nullptr;
 	bf16 *d_out = nullptr;
 
 	cudaMalloc(&d_weights, h_weights.size() * sizeof(bf16));
-	cudaMalloc(&d_inputs, h_inputs.size() * sizeof(bf16));
+	cudaMalloc(&d_attn_out, h_attn_out.size() * sizeof(bf16));
 	cudaMalloc(&d_out, h_out.size() * sizeof(bf16));
 
 	cudaMemcpy(d_weights, h_weights.data(), h_weights.size() * sizeof(bf16), cudaMemcpyHostToDevice);
-	cudaMemcpy(d_inputs, h_inputs.data(), h_inputs.size() * sizeof(bf16), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_attn_out, h_attn_out.data(), h_attn_out.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 
-	cudaFuncSetAttribute(o_proj<OP>, cudaFuncAttributeMaxDynamicSharedMemorySize, OP::SMEM_BYTES);
-	cudaFuncSetAttribute(o_proj<OP>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+	cudaFuncSetAttribute(gemm<OP>, cudaFuncAttributeMaxDynamicSharedMemorySize, OP::SMEM_BYTES);
+	cudaFuncSetAttribute(gemm<OP>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
 	dim3 grid(D_MODEL / OP::M_PER_BLOCK, SEQ_LEN / OP::N_PER_BLOCK);
 
 	int warmup = 50;
 	for (int i = 0; i < warmup; ++i) {
-		o_proj<OP><<<grid, OP::THREADS_PER_BLOCK, OP::SMEM_BYTES>>>(
+		gemm<OP><<<grid, OP::THREADS_PER_BLOCK, OP::SMEM_BYTES>>>(
 			SEQ_LEN,
 			d_weights,
-			d_inputs,
+			d_attn_out,
 			d_out
 		);
 	}
@@ -77,10 +67,10 @@ int main(int argc, char *argv[]) {
 	}
 	for (int i = 0; i < num_runs; ++i) {
 		cudaEventRecord(starts[i]);
-		o_proj<OP><<<grid, OP::THREADS_PER_BLOCK, OP::SMEM_BYTES>>>(
+		gemm<OP><<<grid, OP::THREADS_PER_BLOCK, OP::SMEM_BYTES>>>(
 			SEQ_LEN,
 			d_weights,
-			d_inputs,
+			d_attn_out,
 			d_out
 		);
 		cudaEventRecord(ends[i]);
@@ -109,12 +99,12 @@ int main(int argc, char *argv[]) {
 
 	cudaMemcpy(h_out.data(), d_out, h_out.size() * sizeof(bf16), cudaMemcpyDeviceToHost);
 	std::filesystem::create_directories("tmp/block_cuda");
-	store_tensor("tmp/block_cuda/o.bin", h_out, SEQ_LEN, D_MODEL);
+	store_tensor("tmp/block_cuda/o_attn.bin", h_out, SEQ_LEN, D_MODEL);
 
 	printf("Used SMEM per kernel: %u\n", OP::SMEM_BYTES);
 
 	cudaFree(d_weights);
-	cudaFree(d_inputs);
+	cudaFree(d_attn_out);
 	cudaFree(d_out);
 	return 0;
 }

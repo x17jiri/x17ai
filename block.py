@@ -55,23 +55,22 @@ from block_utils import *
 #   `1/3 + 1/(2*pi*sqrt(3))` ~ 0.4252. We use tanh approximation, which is close enough.
 #   `1 / sqrt(0.4252) ~= 1.53`, which brings a unit-input GeGLU back to variance about 1.
 #
-# - We then split the branch output scales to reflect how many inputs each branch contributes to
-#   the final projection while keeping the final output variance near 1:
-#   `ATTN_GEGLU_SCALE = 1.53 / sqrt(2 * ATTN_WIDTH)` and
-#   `F_GEGLU_SCALE = 1.53 / sqrt(2 * F_WIDTH)`.
+# - We scale each GeGLU branch so its own output projection has variance about 1:
+#   `ATTN_GEGLU_SCALE = 1.53 / sqrt(ATTN_WIDTH)` and
+#   `F_GEGLU_SCALE = 1.53 / sqrt(F_WIDTH)`.
 #
-# - Therefore each coordinate of `attn_out` has variance about `1 / (2 * ATTN_WIDTH)`, so the context
-#   branch contributes total variance about `ATTN_WIDTH * (1 / (2 * ATTN_WIDTH)) = 0.5` to the output
-#   projection.
+# - Therefore each coordinate of `attn_out` has variance about `1 / ATTN_WIDTH`, so the attention
+#   output projection contributes total variance about `ATTN_WIDTH * (1 / ATTN_WIDTH) = 1`.
 #
 # - `f_pregate = inputs_l2 @ f_weights^T` has variance about 1 because it is a dense projection
 #   from a unit-norm input with unit-variance weights. After the same pairwise GeGLU and
-#   `F_GEGLU_SCALE`, each coordinate of `f` has variance about `1 / (2 * F_WIDTH)`, so the forward
-#   branch also contributes total variance about `F_WIDTH * (1 / (2 * F_WIDTH)) = 0.5`.
+#   `F_GEGLU_SCALE`, each coordinate of `f` has variance about `1 / F_WIDTH`, so the forward
+#   output projection also contributes total variance about `F_WIDTH * (1 / F_WIDTH) = 1`.
 #
-# - `o` is a dense projection of `concat(attn_out, f)`. With unit-variance `o_weights`, each
-#   coordinate of `o` therefore has variance about 1 because the context branch contributes about
-#   0.5 and the forward branch contributes about 0.5.
+# - The output projection is now split into two dense projections: `o_attn` from attention and
+#   `o_ffn` from the FFN branch. With unit-variance `w_attn` and `w_ffn`, each branch output has
+#   variance about 1. A later sum of the two branches would therefore have variance about 2 when
+#   they are approximately independent.
 
 def quantize_(tensor: torch.Tensor) -> torch.Tensor:
 	return tensor.to(torch.bfloat16).to(torch.float32)
@@ -94,7 +93,8 @@ def create_inputs() -> None:
 	inputs = new_randn(N_INPUTS, D_MODEL, generator=generator)
 	qkv_weights = new_randn(QKV_ROWS, QKV_FAN_IN, generator=generator)
 	f_weights = new_randn(F_PROJ_OUTPUTS, D_MODEL, generator=generator)
-	o_weights = new_randn(D_MODEL, O_PROJ_INPUTS, generator=generator)
+	w_attn = new_randn(D_MODEL, ATTN_WIDTH, generator=generator)
+	w_ffn = new_randn(D_MODEL, F_WIDTH, generator=generator)
 	sink_k = new_randn(N_HEADS, HEAD_DIM, generator=generator)
 	sinks_v = new_randn(N_HEADS, HEAD_DIM, generator=generator)
 
@@ -108,7 +108,8 @@ def create_inputs() -> None:
 	store_tensor(inputs_l2, "inputs_l2.bin", expected_variance=1.0 / D_MODEL)
 	store_tensor(qkv_weights, "qkv_weights.bin", expected_variance=1.0)
 	store_tensor(f_weights, "f_weights.bin", expected_variance=1.0)
-	store_tensor(o_weights, "o_weights.bin", expected_variance=1.0)
+	store_tensor(w_attn, "w_attn.bin", expected_variance=1.0)
+	store_tensor(w_ffn, "w_ffn.bin", expected_variance=1.0)
 	store_tensor(qk_norm_scales, "qk_norm_scales.bin", expected_variance=0.0)
 	store_tensor(sink_k, "sinks_k.bin", expected_variance=1.0 / HEAD_DIM)
 	store_tensor(sinks_v, "sinks_v.bin", expected_variance=1.0)
@@ -347,35 +348,39 @@ def f_proj_pregate(inputs: torch.Tensor, f_weights: torch.Tensor) -> torch.Tenso
 def f_proj(inputs: torch.Tensor, f_weights: torch.Tensor) -> torch.Tensor:
 	return pairwise_geglu(f_proj_pregate(inputs, f_weights), F_GEGLU_SCALE)
 
-def o_proj(attn_out: torch.Tensor, o_weights: torch.Tensor, f: torch.Tensor) -> torch.Tensor:
+def o_proj_attn(attn_out: torch.Tensor, w_attn: torch.Tensor) -> torch.Tensor:
 	flat_attn_out = attn_out.reshape(attn_out.shape[0], -1)
 	if flat_attn_out.shape[1] != ATTN_WIDTH:
 		raise ValueError(
 			f"Expected flattened attn_out width {ATTN_WIDTH}, got {flat_attn_out.shape[1]}"
 		)
+	if w_attn.shape != (D_MODEL, ATTN_WIDTH):
+		raise ValueError(
+			f"Expected w_attn shape {(D_MODEL, ATTN_WIDTH)}, got {tuple(w_attn.shape)}"
+		)
+	flat_attn_out = quantize_(flat_attn_out)
+	w_attn = quantize_(w_attn)
+	return torch.matmul(flat_attn_out, w_attn.transpose(0, 1))
+
+def o_proj_ffn(f: torch.Tensor, w_ffn: torch.Tensor) -> torch.Tensor:
 	if f.ndim != 2:
 		raise ValueError(f"Expected f to be rank-2, got rank {f.ndim}")
-	if f.shape[0] != flat_attn_out.shape[0]:
-		raise ValueError(
-			f"Expected f batch size {flat_attn_out.shape[0]}, got {f.shape[0]}"
-		)
 	if f.shape[1] != F_WIDTH:
 		raise ValueError(f"Expected f width {F_WIDTH}, got {f.shape[1]}")
-	flat_attn_out = quantize_(flat_attn_out)
-	f = quantize_(f)
-	o_proj_input = torch.cat((flat_attn_out, f), dim=1)
-	if o_weights.shape != (D_MODEL, o_proj_input.shape[1]):
+	if w_ffn.shape != (D_MODEL, F_WIDTH):
 		raise ValueError(
-			f"Expected o_weights shape {(D_MODEL, o_proj_input.shape[1])}, got {tuple(o_weights.shape)}"
+			f"Expected w_ffn shape {(D_MODEL, F_WIDTH)}, got {tuple(w_ffn.shape)}"
 		)
-	o_weights = quantize_(o_weights)
-	return torch.matmul(o_proj_input, o_weights.transpose(0, 1))
+	f = quantize_(f)
+	w_ffn = quantize_(w_ffn)
+	return torch.matmul(f, w_ffn.transpose(0, 1))
 
 def run_block() -> None:
 	inputs = load_tensor("inputs_l2.bin", N_INPUTS, D_MODEL)
 	qkv_weights = load_tensor("qkv_weights.bin", QKV_ROWS, QKV_FAN_IN)
 	f_weights = load_tensor("f_weights.bin", F_PROJ_OUTPUTS, D_MODEL)
-	o_weights = load_tensor("o_weights.bin", D_MODEL, O_PROJ_INPUTS)
+	w_attn = load_tensor("w_attn.bin", D_MODEL, ATTN_WIDTH)
+	w_ffn = load_tensor("w_ffn.bin", D_MODEL, F_WIDTH)
 	qk_norm_scales = load_tensor("qk_norm_scales.bin", 1, HEAD_DIM * N_HEADS)
 	sinks_k = load_tensor("sinks_k.bin", N_HEADS, HEAD_DIM)
 	sinks_v = load_tensor("sinks_v.bin", N_HEADS, HEAD_DIM)
@@ -385,8 +390,8 @@ def run_block() -> None:
 	attn_out = zig_zag_geglu(attn_out_pregate, g_bf16 * V_SCALE)
 	f_pregate = f_proj_pregate(inputs, f_weights)
 	f = pairwise_geglu(f_pregate, F_GEGLU_SCALE)
-	o = o_proj(attn_out, o_weights, f)
-	#attn_match = attn_matching(q, k, v, sinks_k, window_size, rope_base)
+	o_attn = o_proj_attn(attn_out, w_attn)
+	o_ffn = o_proj_ffn(f, w_ffn)
 	qkvg = join_qkvg(q, k, v, g)
 
 	print("inputs shape:", inputs.shape)
@@ -401,7 +406,8 @@ def run_block() -> None:
 	print("attn_out shape:", attn_out.shape)
 	print("f_pregate shape:", f_pregate.shape)
 	print("f shape:", f.shape)
-	print("o shape:", o.shape)
+	print("o_attn shape:", o_attn.shape)
+	print("o_ffn shape:", o_ffn.shape)
 	#print("attn_match shape:", attn_match.shape)
 
 	store_f32_tensor(q, "q_f32.bin", expected_variance=1.0 / HEAD_DIM)
@@ -418,10 +424,11 @@ def run_block() -> None:
 	store_f32_tensor(sink_scores.transpose(0, 1), "sink_scores_f32.bin", expected_variance=1.0 / HEAD_DIM)
 	store_f32_tensor(attn_maxes.transpose(0, 1), "attn_maxes_f32.bin")
 	store_tensor(attn_out_pregate, "attn_out_pregate.bin", expected_variance=1.0)
-	store_tensor(attn_out, "attn_out.bin", expected_variance=1.0 / (2 * ATTN_WIDTH))
+	store_tensor(attn_out, "attn_out.bin", expected_variance=1.0 / ATTN_WIDTH)
 	store_tensor(f_pregate, "f_pregate.bin", expected_variance=1.0)
-	store_tensor(f, "f.bin", expected_variance=1.0 / (2 * F_WIDTH))
-	store_tensor(o, "o.bin", expected_variance=1.0)
+	store_tensor(f, "f.bin", expected_variance=1.0 / F_WIDTH)
+	store_tensor(o_attn, "o_attn.bin", expected_variance=1.0)
+	store_tensor(o_ffn, "o_ffn.bin", expected_variance=1.0)
 	#store_tensor(attn_match, "attn_matching.bin")
 	store_tensor(qkvg, "qkvg.bin")
 

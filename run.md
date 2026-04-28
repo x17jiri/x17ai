@@ -1,6 +1,6 @@
 # QKV Proj
 
-./nvcc.sh qkv_gemm.cu && tmp/qkv_gemm
+./nvcc.sh qkv_proj.cu && tmp/qkv_proj
 python verify_tensor.py tmp/block_torch/sink_scores_f32.bin tmp/block_cuda/sink_scores_f32.bin
 python verify_tensor.py tmp/block_torch/qkvg.bin tmp/block_cuda/qkvg.bin --shape 16384 4 1024
 python verify_tensor.py tmp/block_torch/q.bin tmp/block_cuda/q.bin --shape 16384 1024
@@ -29,24 +29,28 @@ python tensor_stats.py tmp/block_torch/attn_out.bin tmp/block_torch/attn_out.bin
 
 # F Proj
 
-./nvcc.sh f_gemm.cu && tmp/f_gemm
+./nvcc.sh f_proj.cu && tmp/f_proj
 python verify_tensor.py tmp/block_torch/f.bin tmp/block_cuda/f.bin
 python tensor_stats.py tmp/block_torch/f.bin tmp/block_torch/f.bin.var
 
 # O Proj
 
-./nvcc.sh o_gemm.cu && tmp/o_gemm
-python verify_tensor.py tmp/block_torch/o.bin tmp/block_cuda/o.bin
-python tensor_stats.py tmp/block_torch/o.bin tmp/block_torch/o.bin.var
+./nvcc.sh o_proj_attn.cu && tmp/o_proj_attn
+python verify_tensor.py tmp/block_torch/o_attn.bin tmp/block_cuda/o_attn.bin
+python tensor_stats.py tmp/block_torch/o_attn.bin tmp/block_torch/o_attn.bin.var
+
+./nvcc.sh o_proj_ffn.cu && tmp/o_proj_ffn
+python verify_tensor.py tmp/block_torch/o_ffn.bin tmp/block_cuda/o_ffn.bin
+python tensor_stats.py tmp/block_torch/o_ffn.bin tmp/block_torch/o_ffn.bin.var
 
 # Chained run using CUDA outputs as inputs for later kernels.
 
 - Model parameters and block-entry tensors still load from tmp/block_torch.
 
-./nvcc.sh qkv_gemm.cu && tmp/qkv_gemm
+./nvcc.sh qkv_proj.cu && tmp/qkv_proj
 ./nvcc.sh attn_forward.cu && tmp/attn_forward --cuda-inputs
-./nvcc.sh f_gemm.cu && tmp/f_gemm --cuda-inputs
-./nvcc.sh o_gemm.cu && tmp/o_gemm --cuda-inputs
+./nvcc.sh f_proj.cu && tmp/f_proj --cuda-inputs
+./nvcc.sh o_proj.cu && tmp/o_proj --cuda-inputs
 python verify_tensor.py tmp/block_torch/o.bin tmp/block_cuda/o.bin
 
 - It is still possible to use maxes from torch to get closer match
