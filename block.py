@@ -19,9 +19,9 @@ from block_utils import *
 # - v and g are not L2-normalized, so their raw projection variance stays at
 #   QKV_FAN_IN / D_MODEL.
 #
-# - We therefore choose `V_SCALE = sqrt(D_MODEL / QKV_FAN_IN)` so that
-#   Var(v * V_SCALE) ~= (QKV_FAN_IN / D_MODEL) * (D_MODEL / QKV_FAN_IN) = 1,
-#   and the same correction makes `g * V_SCALE` unit-variance as well.
+# - We therefore choose `SPARSE_SCALE = sqrt(D_MODEL / QKV_FAN_IN)` so that
+#   Var(v * SPARSE_SCALE) ~= (QKV_FAN_IN / D_MODEL) * (D_MODEL / QKV_FAN_IN) = 1,
+#   and the same correction makes `g * SPARSE_SCALE` unit-variance as well.
 #
 # - sink_scores = dot(q, sinks_k) has variance about 1 / HEAD_DIM because both inputs are
 #   per-head unit vectors after L2 normalization.
@@ -35,8 +35,8 @@ from block_utils import *
 #
 # - The sink row of `values` is sink_v * V_SCALE_FIX, so its variance is about V_SCALE_FIX^2.
 #
-# - The real-token rows of `values` are v * (V_SCALE_FIX * V_SCALE). Since
-#   Var(v) ~= QKV_FAN_IN / D_MODEL and V_SCALE^2 = D_MODEL / QKV_FAN_IN,
+# - The real-token rows of `values` are v * (V_SCALE_FIX * SPARSE_SCALE). Since
+#   Var(v) ~= QKV_FAN_IN / D_MODEL and SPARSE_SCALE^2 = D_MODEL / QKV_FAN_IN,
 #   those rows also have variance about V_SCALE_FIX^2.
 #
 # - Therefore the concatenated `values` tensor fed into attention has variance about
@@ -47,9 +47,9 @@ from block_utils import *
 #   You can run `python ssmax_stats.py` to plot the variance of `attn_out_pregate`
 #   depending on position and verify that there is no visible drift.
 #
-# - In `attn_out = zig_zag_geglu(attn_out_pregate, g * V_SCALE)`, both GeGLU inputs have
-#   variance about 1: `attn_out_pregate` by the choice of `V_SCALE_FIX`, and `g * V_SCALE`
-#   because Var(g) ~= QKV_FAN_IN / D_MODEL and V_SCALE^2 = D_MODEL / QKV_FAN_IN.
+# - In `attn_out = zig_zag_geglu(attn_out_pregate, g * SPARSE_SCALE)`, both GeGLU inputs have
+#   variance about 1: `attn_out_pregate` by the choice of `V_SCALE_FIX`, and `g * SPARSE_SCALE`
+#   because Var(g) ~= QKV_FAN_IN / D_MODEL and SPARSE_SCALE^2 = D_MODEL / QKV_FAN_IN.
 #
 # - For independent unit-variance inputs, exact version of GeGLU would have variance
 #   `1/3 + 1/(2*pi*sqrt(3))` ~ 0.4252. We use tanh approximation, which is close enough.
@@ -258,7 +258,7 @@ def attn_one_head(
 
 	q = quantize_(q)
 	k = quantize_(k)
-	v = quantize_(v) * (V_SCALE * V_SCALE_FIX)
+	v = quantize_(v) * (SPARSE_SCALE * V_SCALE_FIX)
 
 	sink_scores = sink_scores.unsqueeze(1)
 	sink_v = quantize_(sink_v.unsqueeze(0)) * V_SCALE_FIX
@@ -385,11 +385,11 @@ def run_block() -> None:
 	q, k, v, g, sink_scores = qkvg_proj(inputs, qkvg_weights, qk_norm_scales, sinks_k)
 	qkvg = join_qkvg(q, k, v, g)
 	attn_out_pregate, attn_maxes = attn(q, k, v, sink_scores, sinks_v)
-	attn_out = zig_zag_geglu(attn_out_pregate, quantize_(g) * V_SCALE)
+	attn_out = zig_zag_geglu(attn_out_pregate, quantize_(g) * SPARSE_SCALE)
 	o_attn = o_proj_attn(attn_out, w_attn)
 
 	f_weights = sparse_weights(f_weights, D_MODEL, HEAD_DIM)
-	f_pregate = f_proj_pregate(inputs, f_weights) * V_SCALE
+	f_pregate = f_proj_pregate(inputs, f_weights) * SPARSE_SCALE
 	f = pairwise_geglu(f_pregate, F_GEGLU_SCALE)
 	o_ffn = o_proj_ffn(f, w_ffn)
 
@@ -413,7 +413,7 @@ def run_block() -> None:
 	store_f32_tensor(k, "k_f32.bin", expected_variance=1.0 / HEAD_DIM)
 	store_f32_tensor(v, "v_f32.bin", expected_variance=SPARSE_FAN_IN / D_MODEL)
 	store_f32_tensor(g, "g_f32.bin", expected_variance=SPARSE_FAN_IN / D_MODEL)
-#	store_f32_tensor(g_bf16 * V_SCALE, "g_scaled_f32.bin", expected_variance=1.0)
+#	store_f32_tensor(g_bf16 * SPARSE_SCALE, "g_scaled_f32.bin", expected_variance=1.0)
 
 	store_tensor(q, "q.bin", expected_variance=1.0 / HEAD_DIM)
 	store_tensor(k, "k.bin", expected_variance=1.0 / HEAD_DIM)

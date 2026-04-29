@@ -10,7 +10,7 @@ template<
 	const f64 L2_NORM_EPS,
 	const f64 ROPE_BASE
 >
-struct QKVProj {
+struct SparseGemm {
 	static constexpr usize M_WARPS = 2;
 	static constexpr usize N_WARPS = 2;
 	static constexpr usize M_PER_WARP = 32;

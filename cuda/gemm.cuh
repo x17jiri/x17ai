@@ -4,23 +4,14 @@
 
 #pragma nv_diag_suppress 186
 
-enum class GemmEpilogue {
-	None,
-	GeGLU,
-};
-
-template<
-	const usize _D_IN,
-	const usize _D_OUT,
-	const GemmEpilogue EPILOGUE = GemmEpilogue::None
->
+template<const usize _D_IN, const usize _D_OUT>
 struct Gemm {
 	static constexpr usize D_IN = _D_IN;
 	static constexpr usize D_OUT = _D_OUT;
+	static constexpr f64 SPARSE_SCALE = 1.0;
 
-	static constexpr usize M = EPILOGUE == GemmEpilogue::GeGLU ? 2 * D_OUT : D_OUT;
+	static constexpr usize M = D_OUT;
 	static constexpr usize K = D_IN;
-	static constexpr f64 GEGLU_SCALE = 1.53 * math::constexpr_rsqrt(f64(D_OUT));
 
 	static constexpr usize M_WARPS = 2;
 	static constexpr usize N_WARPS = 2;
@@ -31,6 +22,8 @@ struct Gemm {
 	static constexpr usize WARPS_PER_BLOCK = M_WARPS * N_WARPS;
 	static constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
 	static constexpr usize K_STEP = 64;
+	static constexpr usize K_TILES = K_STEP / 16;
+	static constexpr usize K_ITERS = K / K_STEP;
 	static constexpr usize GMEM_PRELOAD = 2;
 	static constexpr usize M_TILES = M_PER_WARP / 16;
 	static constexpr usize N_TILES = N_PER_WARP / 16;
@@ -76,15 +69,24 @@ struct Gemm {
 		}
 	}
 
+	X17_DEVICE usize warp_m() {
+		usize tid = threadIdx.x;
+		usize warp_idx = tid / WARP_SIZE;
+		return (warp_idx / N_WARPS) * M_PER_WARP;
+	}
+
+	X17_DEVICE usize warp_n() {
+		usize tid = threadIdx.x;
+		usize warp_idx = tid / WARP_SIZE;
+		return (warp_idx % N_WARPS) * N_PER_WARP;
+	}
+
 	X17_DEVICE void run(
 		usize seq_len,
 		bf16 *A,
 		bf16 *B,
-		bf16 *C
+		Fragment_16x16<f32> (&acc_t)[N_TILES][M_TILES]
 	) {
-		constexpr usize K_ITERS = K / K_STEP;
-		constexpr usize K_TILES = K_STEP / 16;
-
 		usize tid = threadIdx.x;
 		usize warp_idx = tid / WARP_SIZE;
 		usize warp_m = (warp_idx / N_WARPS) * M_PER_WARP;
@@ -103,7 +105,6 @@ struct Gemm {
 			cp_async_commit();
 		}
 
-		Fragment_16x16<f32> acc_t[N_TILES][M_TILES];
 		zero_(acc_t);
 
 		Fragment_16x16<bf16> rA[K_TILES][M_TILES];
@@ -147,70 +148,80 @@ struct Gemm {
 				}
 			}
 		}
-
-		if constexpr (EPILOGUE == GemmEpilogue::None) {
-			bf16 *c_ptr = C + blockIdx.y * N_PER_BLOCK * D_OUT + blockIdx.x * M_PER_BLOCK;
-			GMatrix<bf16, N_PER_BLOCK, M_PER_BLOCK> gC_block{c_ptr, D_OUT};
-			X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-				store(acc_t[ni], gC_block, warp_n + ni * 16, warp_m);
-			}
-		} else {
-			static_assert(EPILOGUE == GemmEpilogue::GeGLU);
-
-			Fragment_16x16<bf16> out[N_TILES];
-			X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-				geglu(out[ni], acc_t[ni][0], acc_t[ni][1]);
-			}
-
-			bf16 *c_ptr = C + blockIdx.y * N_PER_BLOCK * D_OUT + blockIdx.x * (M_PER_BLOCK/2);
-			GMatrix<bf16, N_PER_BLOCK, (M_PER_BLOCK/2)> gC_block{c_ptr, D_OUT};
-			X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-				store_2x2_8x8(
-					gC_block,
-					warp_n + ni * 16,
-					warp_m / 2,
-					out[ni].sub[0][0], out[ni].sub[0][1],
-					out[ni].sub[1][0], out[ni].sub[1][1]
-				);
-			}
-		}
-	}
-
-	static X17_DEVICE void geglu(
-		Fragment_8x8<bf16> &o,
-		Fragment_8x8<f32> const &i1,
-		Fragment_8x8<f32> const &i2
-	) {
-		o.set(
-			bf16(math::fast::geglu<GEGLU_SCALE>(i1.val0, i1.val1)),
-			bf16(math::fast::geglu<GEGLU_SCALE>(i2.val0, i2.val1))
-		);
-		o.transpose_();
-		usize tid = threadIdx.x % WARP_SIZE;
-		o.val = shuffle_sync(o.val, (tid & 12) * 2 + (tid & 16) / 4 + (tid & ~28));
-		o.transpose_();
-	}
-
-	static X17_DEVICE void geglu(
-		Fragment_16x16<bf16> &o,
-		Fragment_16x16<f32> const &i1,
-		Fragment_16x16<f32> const &i2
-	) {
-		geglu(o.sub[0][0], i1.sub[0][0], i1.sub[0][1]);
-		geglu(o.sub[0][1], i2.sub[0][0], i2.sub[0][1]);
-		geglu(o.sub[1][0], i1.sub[1][0], i1.sub[1][1]);
-		geglu(o.sub[1][1], i2.sub[1][0], i2.sub[1][1]);
 	}
 };
 
 template<typename Gemm>
-__global__ __launch_bounds__(Gemm::THREADS_PER_BLOCK) void
-gemm(
-	usize seq_len,
-	bf16 *gA_ptr,
-	bf16 *gB_ptr,
-	bf16 *gC_ptr
+X17_DEVICE void gemm_epilogue(
+	usize warp_m, usize warp_n,
+	Fragment_16x16<f32> (&acc_t)[Gemm::N_TILES][Gemm::M_TILES],
+	bf16 *C
 ) {
-	Gemm o_proj_op = Gemm();
-	o_proj_op.run(seq_len, gA_ptr, gB_ptr, gC_ptr);
+	bf16 *c_ptr =
+		C
+		+ blockIdx.y * Gemm::N_PER_BLOCK * Gemm::D_OUT
+		+ blockIdx.x * Gemm::M_PER_BLOCK;
+	GMatrix<bf16, Gemm::N_PER_BLOCK, Gemm::M_PER_BLOCK> gC_block{c_ptr, Gemm::D_OUT};
+	X17_UNROLL for (usize ni = 0; ni < Gemm::N_TILES; ++ni) {
+		store(acc_t[ni], gC_block, warp_n + ni * 16, warp_m);
+	}
+}
+
+template<typename Gemm>
+X17_DEVICE void gemm_geglu_epilogue(
+	usize warp_m, usize warp_n,
+	Fragment_16x16<f32> (&acc_t)[Gemm::N_TILES][Gemm::M_TILES],
+	bf16 *C
+) {
+	constexpr usize D_OUT = Gemm::D_OUT / 2;
+	static_assert(Gemm::D_OUT % 2 == 0);
+	constexpr f64 GEGLU_SCALE = 1.53 * math::constexpr_rsqrt(f64(D_OUT));
+
+	if constexpr (Gemm::SPARSE_SCALE != 1.0) {
+		X17_UNROLL for (usize ni = 0; ni < Gemm::N_TILES; ++ni) {
+			X17_UNROLL for (usize mi = 0; mi < Gemm::M_TILES; ++mi) {
+				scale_(acc_t[ni][mi], f32(Gemm::SPARSE_SCALE));
+			}
+		}
+	}
+
+	Fragment_16x16<bf16> out[Gemm::N_TILES];
+	X17_UNROLL for (usize ni = 0; ni < Gemm::N_TILES; ++ni) {
+		geglu<GEGLU_SCALE>(out[ni], acc_t[ni][0], acc_t[ni][1]);
+	}
+
+	bf16 *c_ptr =
+		C
+		+ blockIdx.y * Gemm::N_PER_BLOCK * D_OUT
+		+ blockIdx.x * (Gemm::M_PER_BLOCK/2);
+	GMatrix<bf16, Gemm::N_PER_BLOCK, (Gemm::M_PER_BLOCK/2)> gC_block{c_ptr, D_OUT};
+	X17_UNROLL for (usize ni = 0; ni < Gemm::N_TILES; ++ni) {
+		store_2x2_8x8(
+			gC_block,
+			warp_n + ni * 16,
+			warp_m / 2,
+			out[ni].sub[0][0], out[ni].sub[0][1],
+			out[ni].sub[1][0], out[ni].sub[1][1]
+		);
+	}
+}
+
+template<typename Gemm>
+__global__ __launch_bounds__(Gemm::THREADS_PER_BLOCK)
+void gemm(usize seq_len, bf16 *A, bf16 *B, bf16 *C) {
+	Gemm gemm = Gemm();
+	Fragment_16x16<f32> acc_t[Gemm::N_TILES][Gemm::M_TILES];
+	gemm.run(seq_len, A, B, acc_t);
+
+	gemm_epilogue<Gemm>(gemm.warp_m(), gemm.warp_n(), acc_t, C);
+}
+
+template<typename Gemm>
+__global__ __launch_bounds__(Gemm::THREADS_PER_BLOCK)
+void gemm_geglu(usize seq_len, bf16 *A, bf16 *B, bf16 *C ) {
+	Gemm gemm = Gemm();
+	Fragment_16x16<f32> acc_t[Gemm::N_TILES][Gemm::M_TILES];
+	gemm.run(seq_len, A, B, acc_t);
+
+	gemm_geglu_epilogue<Gemm>(gemm.warp_m(), gemm.warp_n(), acc_t, C);
 }

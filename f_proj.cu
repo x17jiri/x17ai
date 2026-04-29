@@ -1,4 +1,5 @@
 #include "cuda/gemm.cuh"
+#include "cuda/sparse_gemm.cuh"
 #include "block.config.hpp"
 #include "utils2.cuh"
 
@@ -18,14 +19,14 @@ int main(int argc, char *argv[]) {
 
 	static_assert(config::d_model == config::n_heads * config::head_dim);
 
-	using FP = Gemm<D_MODEL, F_WIDTH, GemmEpilogue::GeGLU>;
+	using FP = SparseGemm<D_MODEL, 2*F_WIDTH, config::qkv_fan_in, config::head_dim>;
 
 	if (SEQ_LEN % FP::N_PER_BLOCK != 0) {
 		printf("Expected n_inputs %% %u == 0\n", FP::N_PER_BLOCK);
 		return 1;
 	}
 
-	std::vector<bf16> h_weights = load_tensor(torch_tensor_path("f_weights.bin"), F_PROJ_OUTPUTS, D_MODEL);
+	std::vector<bf16> h_weights = load_tensor(torch_tensor_path("f_weights.bin"), F_WIDTH, D_MODEL);
 	std::vector<bf16> h_inputs = load_tensor(torch_tensor_path("inputs_l2.bin"), SEQ_LEN, D_MODEL);
 	if (h_weights.empty() || h_inputs.empty()) {
 		return 1;
@@ -44,14 +45,14 @@ int main(int argc, char *argv[]) {
 	cudaMemcpy(d_weights, h_weights.data(), h_weights.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_inputs, h_inputs.data(), h_inputs.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 
-	cudaFuncSetAttribute(gemm<FP>, cudaFuncAttributeMaxDynamicSharedMemorySize, FP::SMEM_BYTES);
-	cudaFuncSetAttribute(gemm<FP>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+	cudaFuncSetAttribute(gemm_geglu<FP>, cudaFuncAttributeMaxDynamicSharedMemorySize, FP::SMEM_BYTES);
+	cudaFuncSetAttribute(gemm_geglu<FP>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
 	dim3 grid(F_PROJ_OUTPUTS / FP::M_PER_BLOCK, SEQ_LEN / FP::N_PER_BLOCK);
 
 	int warmup = 50;
 	for (int i = 0; i < warmup; ++i) {
-		gemm<FP><<<grid, FP::THREADS_PER_BLOCK, FP::SMEM_BYTES>>>(
+		gemm_geglu<FP><<<grid, FP::THREADS_PER_BLOCK, FP::SMEM_BYTES>>>(
 			SEQ_LEN,
 			d_weights,
 			d_inputs,
@@ -68,7 +69,7 @@ int main(int argc, char *argv[]) {
 	}
 	for (int i = 0; i < num_runs; ++i) {
 		cudaEventRecord(starts[i]);
-		gemm<FP><<<grid, FP::THREADS_PER_BLOCK, FP::SMEM_BYTES>>>(
+		gemm_geglu<FP><<<grid, FP::THREADS_PER_BLOCK, FP::SMEM_BYTES>>>(
 			SEQ_LEN,
 			d_weights,
 			d_inputs,

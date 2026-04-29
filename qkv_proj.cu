@@ -17,7 +17,7 @@ int main(int argc, char *argv[]) {
 	constexpr usize B_ROWS = config::d_model;
 	usize B_COLS = config::n_inputs;
 
-	using Proj = QKVProj<
+	using Proj = SparseGemm<
 		A_ROWS, A_COLS,
 		B_ROWS,
 		config::n_heads,

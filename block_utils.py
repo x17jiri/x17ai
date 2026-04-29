@@ -25,7 +25,7 @@ ROPE_BASE = float(config["rope_base"])
 QKVG_ROWS = 4 * N_HEADS * HEAD_DIM
 ATTN_WIDTH = N_HEADS * HEAD_DIM
 F_PROJ_OUTPUTS = 2 * F_WIDTH
-V_SCALE = math.sqrt(D_MODEL / SPARSE_FAN_IN)
+SPARSE_SCALE = math.sqrt(D_MODEL / SPARSE_FAN_IN)
 V_SCALE_FIX = 1.5
 # Each split projection should see unit total input variance, so each coordinate of the
 # GeGLU output should contribute variance about 1 / branch_width.

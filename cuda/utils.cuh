@@ -1569,6 +1569,34 @@ X17_DEVICE void quantize_(Fragment_16x16<f32> (&arr)[K]) {
 	}
 }
 
+template<const f64 SCALE>
+X17_DEVICE void geglu(
+	Fragment_8x8<bf16> &o,
+	Fragment_8x8<f32> const &i1,
+	Fragment_8x8<f32> const &i2
+) {
+	o.set(
+		bf16(math::fast::geglu<SCALE>(i1.val0, i1.val1)),
+		bf16(math::fast::geglu<SCALE>(i2.val0, i2.val1))
+	);
+	o.transpose_();
+	usize tid = threadIdx.x % WARP_SIZE;
+	o.val = shuffle_sync(o.val, (tid & 12) * 2 + (tid & 16) / 4 + (tid & ~28));
+	o.transpose_();
+}
+
+template<const f64 SCALE>
+X17_DEVICE void geglu(
+	Fragment_16x16<bf16> &o,
+	Fragment_16x16<f32> const &i1,
+	Fragment_16x16<f32> const &i2
+) {
+	geglu<SCALE>(o.sub[0][0], i1.sub[0][0], i1.sub[0][1]);
+	geglu<SCALE>(o.sub[0][1], i2.sub[0][0], i2.sub[0][1]);
+	geglu<SCALE>(o.sub[1][0], i1.sub[1][0], i1.sub[1][1]);
+	geglu<SCALE>(o.sub[1][1], i2.sub[1][0], i2.sub[1][1]);
+}
+
 //--------------------------------------------------------------------------------------------------
 
 struct SoftmaxStats {
