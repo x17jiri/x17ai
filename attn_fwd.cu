@@ -1,4 +1,4 @@
-#include "cuda/attn_forward.cuh"
+#include "cuda/attn_fwd.cuh"
 #include "block.config.hpp"
 #include "utils2.cuh"
 

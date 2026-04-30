@@ -91,7 +91,7 @@ struct DenseMatMul {
 		usize warp_m = (warp_idx / N_WARPS) * M_PER_WARP;
 		usize warp_n = (warp_idx % N_WARPS) * N_PER_WARP;
 		GMatrixDynSize<bf16, K> gA{A, M};
-		GMatrixDynSize<bf16, K> gB{B, -1};
+		GMatrixDynSize<bf16, K> gB{B, usize(-1)};
 		GMatrix<bf16, M_PER_BLOCK, K> gA_block = tile_m<M_PER_BLOCK>(gA, blockIdx.x);
 		GMatrix<bf16, N_PER_BLOCK, K> gB_block = tile_m<N_PER_BLOCK>(gB, blockIdx.y);
 

@@ -16,7 +16,7 @@ python tensor_stats.py tmp/block_torch/g.bin tmp/block_torch/g.bin.var
 
 # Attn Forward
 
-./nvcc.sh attn_forward.cu && tmp/attn_forward
+./nvcc.sh attn_fwd.cu && tmp/attn_fwd
 python verify_tensor.py tmp/block_torch/attn_out.bin tmp/block_cuda/attn_out.bin --shape 16384 32 32
 python verify_tensor.py tmp/block_torch/attn_out_pregate.bin tmp/block_cuda/attn_out_pregate.bin --shape 16384 32 32
 
@@ -25,7 +25,7 @@ python tensor_stats.py tmp/block_torch/attn_out_pregate.bin tmp/block_torch/attn
 python tensor_stats.py tmp/block_torch/attn_out.bin tmp/block_torch/attn_out.bin.var --overlay tmp/block_torch/f.bin --overlay-var tmp/block_torch/f.bin.var
 
 ## Attn Forward - use maxes from torch to eliminate online softmax errors
-./nvcc.sh attn_forward.cu && tmp/attn_forward --use-torch-maxes
+./nvcc.sh attn_fwd.cu && tmp/attn_fwd --use-torch-maxes
 
 # F Proj
 
@@ -48,14 +48,14 @@ python tensor_stats.py tmp/block_torch/o_ffn.bin tmp/block_torch/o_ffn.bin.var
 - Model parameters and block-entry tensors still load from tmp/block_torch.
 
 ./nvcc.sh qkvg_fwd.cu && tmp/qkvg_fwd
-./nvcc.sh attn_forward.cu && tmp/attn_forward --cuda-inputs
+./nvcc.sh attn_fwd.cu && tmp/attn_fwd --cuda-inputs
 ./nvcc.sh f_proj.cu && tmp/f_proj --cuda-inputs
 ./nvcc.sh o_proj.cu && tmp/o_proj --cuda-inputs
 python verify_tensor.py tmp/block_torch/o.bin tmp/block_cuda/o.bin
 
 - It is still possible to use maxes from torch to get closer match
 
-./nvcc.sh attn_forward.cu && tmp/attn_forward --cuda-inputs --use-torch-maxes
+./nvcc.sh attn_fwd.cu && tmp/attn_fwd --cuda-inputs --use-torch-maxes
 
 # Check CPU Temperature
 

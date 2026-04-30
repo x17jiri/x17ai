@@ -1,4 +1,4 @@
-#include "cuda/gemm.cuh"
+#include "cuda/dense_matmul.cuh"
 #include "block.config.hpp"
 #include "utils2.cuh"
 
@@ -17,7 +17,7 @@ int main(int argc, char *argv[]) {
 
 	static_assert(config::d_model == ATTN_WIDTH);
 
-	using OP = Gemm<ATTN_WIDTH, D_MODEL>;
+	using OP = DenseMatMul<ATTN_WIDTH, D_MODEL>;
 
 	if (SEQ_LEN % OP::N_PER_BLOCK != 0) {
 		printf("Expected n_inputs %% %u == 0\n", OP::N_PER_BLOCK);
@@ -51,7 +51,6 @@ int main(int argc, char *argv[]) {
 	int warmup = 50;
 	for (int i = 0; i < warmup; ++i) {
 		matmul<OP><<<grid, OP::THREADS_PER_BLOCK, OP::SMEM_BYTES>>>(
-			SEQ_LEN,
 			d_weights,
 			d_attn_out,
 			d_out
@@ -68,7 +67,6 @@ int main(int argc, char *argv[]) {
 	for (int i = 0; i < num_runs; ++i) {
 		cudaEventRecord(starts[i]);
 		matmul<OP><<<grid, OP::THREADS_PER_BLOCK, OP::SMEM_BYTES>>>(
-			SEQ_LEN,
 			d_weights,
 			d_attn_out,
 			d_out
