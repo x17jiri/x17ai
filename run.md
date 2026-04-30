@@ -1,6 +1,6 @@
-# QKV Proj
+# QKVG Proj
 
-./nvcc.sh qkv_proj.cu && tmp/qkv_proj
+./nvcc.sh qkvg_proj.cu && tmp/qkvg_proj
 python verify_tensor.py tmp/block_torch/sink_scores_f32.bin tmp/block_cuda/sink_scores_f32.bin
 python verify_tensor.py tmp/block_torch/qkvg.bin tmp/block_cuda/qkvg.bin --shape 16384 4 1024
 python verify_tensor.py tmp/block_torch/q.bin tmp/block_cuda/q.bin --shape 16384 1024
@@ -47,13 +47,14 @@ python tensor_stats.py tmp/block_torch/o_ffn.bin tmp/block_torch/o_ffn.bin.var
 
 - Model parameters and block-entry tensors still load from tmp/block_torch.
 
-./nvcc.sh qkv_proj.cu && tmp/qkv_proj
+./nvcc.sh qkvg_proj.cu && tmp/qkvg_proj
 ./nvcc.sh attn_forward.cu && tmp/attn_forward --cuda-inputs
 ./nvcc.sh f_proj.cu && tmp/f_proj --cuda-inputs
 ./nvcc.sh o_proj.cu && tmp/o_proj --cuda-inputs
 python verify_tensor.py tmp/block_torch/o.bin tmp/block_cuda/o.bin
 
 - It is still possible to use maxes from torch to get closer match
+
 ./nvcc.sh attn_forward.cu && tmp/attn_forward --cuda-inputs --use-torch-maxes
 
 # Check CPU Temperature

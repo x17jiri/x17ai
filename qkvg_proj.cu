@@ -1,4 +1,5 @@
-#include "cuda/qkv_proj.cuh"
+#include "cuda/sparse_gemm.cuh"
+#include "cuda/qkvg_proj.cuh"
 #include "block.config.hpp"
 #include "utils2.cuh"
 
@@ -11,26 +12,28 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	constexpr usize A_ROWS = 4 * config::n_heads * config::head_dim;
-	constexpr usize Q_ROWS = config::n_heads * config::head_dim;
-	constexpr usize A_COLS = config::qkv_fan_in;
-	constexpr usize B_ROWS = config::d_model;
-	usize B_COLS = config::n_inputs;
-
-	using Proj = SparseGemm<
-		A_ROWS, A_COLS,
-		B_ROWS,
+	using Gemm = SparseGemm<
+		config::d_model,
+		4 * config::n_heads * config::head_dim,
+		config::qkv_fan_in,
+		config::head_dim
+	>;
+	using Proj = QKVGProj<
+		Gemm,
 		config::n_heads,
 		config::head_dim,
-		config::rope_dim,
 		config::l2_norm_eps,
+		config::rope_dim,
 		config::rope_base
 	>;
 
-	printf("K_ITERS = %d\n", Proj::K_ITERS);
-
+	constexpr usize A_ROWS = Gemm::D_OUT;
+	constexpr usize A_COLS = Gemm::FAN_IN;
+	constexpr usize B_ROWS = Gemm::D_IN;
+	constexpr usize B_COLS = config::n_inputs;
 	constexpr usize C_ROWS = A_ROWS;
-	usize C_COLS = B_COLS;
+	constexpr usize C_COLS = B_COLS;
+	constexpr usize Q_ROWS = config::n_heads * config::head_dim;
 
 	if (
 		C_ROWS % Proj::M_PER_BLOCK != 0 ||
@@ -69,12 +72,15 @@ int main(int argc, char *argv[]) {
 
 	dim3 grid(C_ROWS / Proj::M_PER_BLOCK, C_COLS / Proj::N_PER_BLOCK);
 
-	cudaFuncSetAttribute(qkv_proj<Proj>, cudaFuncAttributeMaxDynamicSharedMemorySize, Proj::SMEM_BYTES);
-	cudaFuncSetAttribute(qkv_proj<Proj>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+	cudaFuncSetAttribute(qkvg_proj<Proj>, cudaFuncAttributeMaxDynamicSharedMemorySize, Proj::SMEM_BYTES);
+	cudaFuncSetAttribute(qkvg_proj<Proj>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
 	int warmup = 30;
 	for (int i = 0; i < warmup; ++i) {
-		qkv_proj<Proj><<<grid, Proj::THREADS_PER_BLOCK, Proj::SMEM_BYTES>>>(d_A, d_B, d_S, d_sink, d_C, d_sink_scores, B_COLS);
+		qkvg_proj<Proj><<<grid, Proj::THREADS_PER_BLOCK, Proj::SMEM_BYTES>>>(
+			d_A, d_B, d_C,
+			B_COLS, d_S, d_sink, d_sink_scores
+		);
 	}
 	cudaDeviceSynchronize();
 
@@ -86,7 +92,10 @@ int main(int argc, char *argv[]) {
 	}
 	for (int i = 0; i < NUM_RUNS; ++i) {
 		cudaEventRecord(starts[i]);
-		qkv_proj<Proj><<<grid, Proj::THREADS_PER_BLOCK, Proj::SMEM_BYTES>>>(d_A, d_B, d_S, d_sink, d_C, d_sink_scores, B_COLS);
+		qkvg_proj<Proj><<<grid, Proj::THREADS_PER_BLOCK, Proj::SMEM_BYTES>>>(
+			d_A, d_B, d_C,
+			B_COLS, d_S, d_sink, d_sink_scores
+		);
 		cudaEventRecord(ends[i]);
 	}
 	cudaDeviceSynchronize();

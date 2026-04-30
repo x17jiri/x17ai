@@ -69,13 +69,13 @@ struct Gemm {
 		}
 	}
 
-	X17_DEVICE usize warp_m() {
+	X17_DEVICE usize warp_m() const {
 		usize tid = threadIdx.x;
 		usize warp_idx = tid / WARP_SIZE;
 		return (warp_idx / N_WARPS) * M_PER_WARP;
 	}
 
-	X17_DEVICE usize warp_n() {
+	X17_DEVICE usize warp_n() const {
 		usize tid = threadIdx.x;
 		usize warp_idx = tid / WARP_SIZE;
 		return (warp_idx % N_WARPS) * N_PER_WARP;
@@ -153,10 +153,12 @@ struct Gemm {
 
 template<typename Gemm>
 X17_DEVICE void gemm_epilogue(
-	usize warp_m, usize warp_n,
+	Gemm const &gemm,
 	Fragment_16x16<f32> (&acc_t)[Gemm::N_TILES][Gemm::M_TILES],
 	bf16 *C
 ) {
+	usize warp_m = gemm.warp_m();
+	usize warp_n = gemm.warp_n();
 	bf16 *c_ptr =
 		C
 		+ blockIdx.y * Gemm::N_PER_BLOCK * Gemm::D_OUT
@@ -169,7 +171,7 @@ X17_DEVICE void gemm_epilogue(
 
 template<typename Gemm>
 X17_DEVICE void gemm_geglu_epilogue(
-	usize warp_m, usize warp_n,
+	Gemm const &gemm,
 	Fragment_16x16<f32> (&acc_t)[Gemm::N_TILES][Gemm::M_TILES],
 	bf16 *C
 ) {
@@ -190,6 +192,8 @@ X17_DEVICE void gemm_geglu_epilogue(
 		geglu<GEGLU_SCALE>(out[ni], acc_t[ni][0], acc_t[ni][1]);
 	}
 
+	usize warp_m = gemm.warp_m();
+	usize warp_n = gemm.warp_n();
 	bf16 *c_ptr =
 		C
 		+ blockIdx.y * Gemm::N_PER_BLOCK * D_OUT
@@ -212,16 +216,14 @@ void gemm(usize seq_len, bf16 *A, bf16 *B, bf16 *C) {
 	Gemm gemm = Gemm();
 	Fragment_16x16<f32> acc_t[Gemm::N_TILES][Gemm::M_TILES];
 	gemm.run(seq_len, A, B, acc_t);
-
-	gemm_epilogue<Gemm>(gemm.warp_m(), gemm.warp_n(), acc_t, C);
+	gemm_epilogue(gemm, acc_t, C);
 }
 
 template<typename Gemm>
 __global__ __launch_bounds__(Gemm::THREADS_PER_BLOCK)
-void gemm_geglu(usize seq_len, bf16 *A, bf16 *B, bf16 *C ) {
+void gemm_geglu(usize seq_len, bf16 *A, bf16 *B, bf16 *C) {
 	Gemm gemm = Gemm();
 	Fragment_16x16<f32> acc_t[Gemm::N_TILES][Gemm::M_TILES];
 	gemm.run(seq_len, A, B, acc_t);
-
-	gemm_geglu_epilogue<Gemm>(gemm.warp_m(), gemm.warp_n(), acc_t, C);
+	gemm_geglu_epilogue(gemm, acc_t, C);
 }

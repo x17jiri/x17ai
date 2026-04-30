@@ -163,13 +163,13 @@ struct SparseGemm {
 		}
 	}
 
-	X17_DEVICE usize warp_m() {
+	X17_DEVICE usize warp_m() const {
 		usize tid = threadIdx.x;
 		usize warp_idx = tid / WARP_SIZE;
 		return (warp_idx / N_WARPS) * M_PER_WARP;
 	}
 
-	X17_DEVICE usize warp_n() {
+	X17_DEVICE usize warp_n() const {
 		usize tid = threadIdx.x;
 		usize warp_idx = tid / WARP_SIZE;
 		return (warp_idx % N_WARPS) * N_PER_WARP;
