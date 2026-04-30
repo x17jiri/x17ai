@@ -5,29 +5,29 @@
 #pragma nv_diag_suppress 186
 
 template<
-	typename _Gemm,
+	typename _MatMul,
 	const usize N_HEAD,
 	const usize D_HEAD,
 	const f64 L2_NORM_EPS,
 	const usize ROPE_DIM,
 	const f64 ROPE_BASE
 >
-struct QKVGProj {
-	using Gemm = _Gemm;
+struct QKVGFwd {
+	using MatMul = _MatMul;
 
-	static constexpr usize M = Gemm::M;
-	static constexpr usize N = Gemm::N;
-	static constexpr usize M_WARPS = Gemm::M_WARPS;
-	static constexpr usize N_WARPS = Gemm::N_WARPS;
-	static constexpr usize M_PER_WARP = Gemm::M_PER_WARP;
-	static constexpr usize N_PER_WARP = Gemm::N_PER_WARP;
-	static constexpr usize M_PER_BLOCK = Gemm::M_PER_BLOCK;
-	static constexpr usize N_PER_BLOCK = Gemm::N_PER_BLOCK;
-	static constexpr usize M_TILES = Gemm::M_TILES;
-	static constexpr usize N_TILES = Gemm::N_TILES;
+	static constexpr usize M = MatMul::M;
+	static constexpr usize N = MatMul::N;
+	static constexpr usize M_WARPS = MatMul::M_WARPS;
+	static constexpr usize N_WARPS = MatMul::N_WARPS;
+	static constexpr usize M_PER_WARP = MatMul::M_PER_WARP;
+	static constexpr usize N_PER_WARP = MatMul::N_PER_WARP;
+	static constexpr usize M_PER_BLOCK = MatMul::M_PER_BLOCK;
+	static constexpr usize N_PER_BLOCK = MatMul::N_PER_BLOCK;
+	static constexpr usize M_TILES = MatMul::M_TILES;
+	static constexpr usize N_TILES = MatMul::N_TILES;
 
-	static constexpr usize THREADS_PER_BLOCK = Gemm::THREADS_PER_BLOCK;
-	static constexpr usize SMEM_BYTES = Gemm::SMEM_BYTES;
+	static constexpr usize THREADS_PER_BLOCK = MatMul::THREADS_PER_BLOCK;
+	static constexpr usize SMEM_BYTES = MatMul::SMEM_BYTES;
 
 	static constexpr usize SEGMENT_SIZE = N_HEAD * D_HEAD;
 	static constexpr usize GROUP_CNT = M_PER_WARP / D_HEAD;
@@ -207,27 +207,26 @@ struct QKVGProj {
 		X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
 			X17_UNROLL for (usize tile = 0; tile < ROPE_TILE_CNT; ++tile) {
 				Fragment_16x16<f32> coefs;
+				rope_coefs<ROPE_DIM, ROPE_BASE>(coefs, block_n + warp_n + ni * 16, tile * 16);
 				X17_UNROLL for (usize group = 0; group < GROUP_CNT; ++group) {
 					Fragment_16x16<f32> &frag = acc[ni][group * GROUP_TILE_CNT + tile];
-					rope_coefs<ROPE_DIM, ROPE_BASE>(coefs, block_n + warp_n + ni * 16, tile * 16);
 					apply_rope_(frag, coefs);
 				}
 			}
 		}
 	}
 
-	X17_DEVICE void run_gemm(
-		usize seq_len,
+	X17_DEVICE void run_matmul(
 		bf16 *A,
 		bf16 *B,
 		Fragment_16x16<f32> (&acc_t)[N_TILES][M_TILES]
 	) {
-		Gemm gemm = Gemm();
-		gemm.run(seq_len, A, B, acc_t);
+		MatMul matmul = MatMul();
+		matmul.run(A, B, acc_t);
 	}
 
 	X17_DEVICE void run_epilogue(
-		Fragment_16x16<f32> (&acc_t)[Gemm::N_TILES][Gemm::M_TILES],
+		Fragment_16x16<f32> (&acc_t)[MatMul::N_TILES][MatMul::M_TILES],
 		bf16 *C,
 
 		usize seq_len,
@@ -273,13 +272,15 @@ struct QKVGProj {
 					__float2bfloat16_rn(acc_t[ni][mi].sub[1][1].val1)
 				);
 			}
+
+			// TODO - this is matmul epilogue
 			store(acc_bf16, gC_block, warp_n + ni * 16, warp_m);
 		}
 	}
 };
 
-template<typename QKVGProj>
-__global__ __launch_bounds__(QKVGProj::THREADS_PER_BLOCK) void qkvg_proj(
+template<typename QKVGFwd>
+__global__ __launch_bounds__(QKVGFwd::THREADS_PER_BLOCK) void qkvg_fwd(
 	bf16 *A,
 	bf16 *B,
 	bf16 *C,
@@ -288,10 +289,10 @@ __global__ __launch_bounds__(QKVGProj::THREADS_PER_BLOCK) void qkvg_proj(
 	bf16 const *gSinkK_ptr,
 	f32 *gSinkScore_ptr
 ) {
-	QKVGProj qkvg_proj = QKVGProj();
-	Fragment_16x16<f32> acc_t[QKVGProj::N_TILES][QKVGProj::M_TILES];
-	qkvg_proj.run_gemm(seq_len, A, B, acc_t);
-	qkvg_proj.run_epilogue(
+	QKVGFwd qkvg_fwd = QKVGFwd();
+	Fragment_16x16<f32> acc_t[QKVGFwd::N_TILES][QKVGFwd::M_TILES];
+	qkvg_fwd.run_matmul(A, B, acc_t);
+	qkvg_fwd.run_epilogue(
 		acc_t, C,
 		seq_len, gQKNormScale_ptr, gSinkK_ptr, gSinkScore_ptr
 	);

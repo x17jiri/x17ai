@@ -69,8 +69,7 @@ from block_utils import *
 #
 # - The output projection is now split into two dense projections: `o_attn` from attention and
 #   `o_ffn` from the FFN branch. With unit-variance `w_attn` and `w_ffn`, each branch output has
-#   variance about 1. A later sum of the two branches would therefore have variance about 2 when
-#   they are approximately independent.
+#   variance about 1.
 
 def quantize_(tensor: torch.Tensor) -> torch.Tensor:
 	return tensor.to(torch.bfloat16).to(torch.float32)

@@ -19,7 +19,7 @@ int main(int argc, char *argv[]) {
 
 	static_assert(config::d_model == config::n_heads * config::head_dim);
 
-	using FP = SparseGemm<D_MODEL, 2*F_WIDTH, config::qkv_fan_in, config::head_dim>;
+	using FP = SparseMatMul<D_MODEL, 2*F_WIDTH, config::qkv_fan_in, config::head_dim>;
 
 	if (SEQ_LEN % FP::N_PER_BLOCK != 0) {
 		printf("Expected n_inputs %% %u == 0\n", FP::N_PER_BLOCK);
@@ -45,14 +45,14 @@ int main(int argc, char *argv[]) {
 	cudaMemcpy(d_weights, h_weights.data(), h_weights.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_inputs, h_inputs.data(), h_inputs.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 
-	cudaFuncSetAttribute(gemm_geglu<FP>, cudaFuncAttributeMaxDynamicSharedMemorySize, FP::SMEM_BYTES);
-	cudaFuncSetAttribute(gemm_geglu<FP>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+	cudaFuncSetAttribute(matmul_geglu<FP>, cudaFuncAttributeMaxDynamicSharedMemorySize, FP::SMEM_BYTES);
+	cudaFuncSetAttribute(matmul_geglu<FP>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
 	dim3 grid(F_PROJ_OUTPUTS / FP::M_PER_BLOCK, SEQ_LEN / FP::N_PER_BLOCK);
 
 	int warmup = 50;
 	for (int i = 0; i < warmup; ++i) {
-		gemm_geglu<FP><<<grid, FP::THREADS_PER_BLOCK, FP::SMEM_BYTES>>>(
+		matmul_geglu<FP><<<grid, FP::THREADS_PER_BLOCK, FP::SMEM_BYTES>>>(
 			SEQ_LEN,
 			d_weights,
 			d_inputs,
@@ -69,7 +69,7 @@ int main(int argc, char *argv[]) {
 	}
 	for (int i = 0; i < num_runs; ++i) {
 		cudaEventRecord(starts[i]);
-		gemm_geglu<FP><<<grid, FP::THREADS_PER_BLOCK, FP::SMEM_BYTES>>>(
+		matmul_geglu<FP><<<grid, FP::THREADS_PER_BLOCK, FP::SMEM_BYTES>>>(
 			SEQ_LEN,
 			d_weights,
 			d_inputs,

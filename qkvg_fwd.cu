@@ -1,5 +1,5 @@
-#include "cuda/sparse_gemm.cuh"
-#include "cuda/qkvg_proj.cuh"
+#include "cuda/sparse_matmul.cuh"
+#include "cuda/qkvg_fwd.cuh"
 #include "block.config.hpp"
 #include "utils2.cuh"
 
@@ -12,14 +12,14 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	using Gemm = SparseGemm<
+	using MatMul = SparseMatMul<
 		config::d_model,
 		4 * config::n_heads * config::head_dim,
 		config::qkv_fan_in,
 		config::head_dim
 	>;
-	using Proj = QKVGProj<
-		Gemm,
+	using Fwd = QKVGFwd<
+		MatMul,
 		config::n_heads,
 		config::head_dim,
 		config::l2_norm_eps,
@@ -27,19 +27,19 @@ int main(int argc, char *argv[]) {
 		config::rope_base
 	>;
 
-	constexpr usize A_ROWS = Gemm::D_OUT;
-	constexpr usize A_COLS = Gemm::FAN_IN;
-	constexpr usize B_ROWS = Gemm::D_IN;
+	constexpr usize A_ROWS = MatMul::D_OUT;
+	constexpr usize A_COLS = MatMul::FAN_IN;
+	constexpr usize B_ROWS = MatMul::D_IN;
 	constexpr usize B_COLS = config::n_inputs;
 	constexpr usize C_ROWS = A_ROWS;
 	constexpr usize C_COLS = B_COLS;
 	constexpr usize Q_ROWS = config::n_heads * config::head_dim;
 
 	if (
-		C_ROWS % Proj::M_PER_BLOCK != 0 ||
-		C_COLS % Proj::N_PER_BLOCK != 0
+		C_ROWS % Fwd::M_PER_BLOCK != 0 ||
+		C_COLS % Fwd::N_PER_BLOCK != 0
 	) {
-		printf("Expected M %% %u == 0 and N %% %u == 0\n", Proj::M_PER_BLOCK, Proj::N_PER_BLOCK);
+		printf("Expected M %% %u == 0 and N %% %u == 0\n", Fwd::M_PER_BLOCK, Fwd::N_PER_BLOCK);
 		return 1;
 	}
 
@@ -70,14 +70,14 @@ int main(int argc, char *argv[]) {
 	cudaMemcpy(d_S, h_S.data(), h_S.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_sink, h_sink.data(), h_sink.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 
-	dim3 grid(C_ROWS / Proj::M_PER_BLOCK, C_COLS / Proj::N_PER_BLOCK);
+	dim3 grid(C_ROWS / Fwd::M_PER_BLOCK, C_COLS / Fwd::N_PER_BLOCK);
 
-	cudaFuncSetAttribute(qkvg_proj<Proj>, cudaFuncAttributeMaxDynamicSharedMemorySize, Proj::SMEM_BYTES);
-	cudaFuncSetAttribute(qkvg_proj<Proj>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+	cudaFuncSetAttribute(qkvg_fwd<Fwd>, cudaFuncAttributeMaxDynamicSharedMemorySize, Fwd::SMEM_BYTES);
+	cudaFuncSetAttribute(qkvg_fwd<Fwd>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
 	int warmup = 30;
 	for (int i = 0; i < warmup; ++i) {
-		qkvg_proj<Proj><<<grid, Proj::THREADS_PER_BLOCK, Proj::SMEM_BYTES>>>(
+		qkvg_fwd<Fwd><<<grid, Fwd::THREADS_PER_BLOCK, Fwd::SMEM_BYTES>>>(
 			d_A, d_B, d_C,
 			B_COLS, d_S, d_sink, d_sink_scores
 		);
@@ -92,7 +92,7 @@ int main(int argc, char *argv[]) {
 	}
 	for (int i = 0; i < NUM_RUNS; ++i) {
 		cudaEventRecord(starts[i]);
-		qkvg_proj<Proj><<<grid, Proj::THREADS_PER_BLOCK, Proj::SMEM_BYTES>>>(
+		qkvg_fwd<Fwd><<<grid, Fwd::THREADS_PER_BLOCK, Fwd::SMEM_BYTES>>>(
 			d_A, d_B, d_C,
 			B_COLS, d_S, d_sink, d_sink_scores
 		);

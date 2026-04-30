@@ -5,7 +5,7 @@
 #pragma nv_diag_suppress 186
 
 template<const usize _D_IN, const usize _D_OUT, const usize _FAN_IN, const usize _CYCLE>
-struct SparseGemm {
+struct SparseMatMul {
 	static constexpr usize D_IN = _D_IN;
 	static constexpr usize D_OUT = _D_OUT;
 	static constexpr usize FAN_IN = _FAN_IN; // A_COLS
@@ -176,7 +176,6 @@ struct SparseGemm {
 	}
 
 	X17_DEVICE void run(
-		usize seq_len,
 		bf16 *A,
 		bf16 *B,
 		Fragment_16x16<f32> (&acc_t)[N_TILES][M_TILES]
@@ -187,7 +186,7 @@ struct SparseGemm {
 		usize warp_n = (warp_idx % N_WARPS) * N_PER_WARP;
 
 		GMatrixDynSize<bf16, FAN_IN> gA{A, M};
-		GMatrixDynSize<bf16, K> gB{B, seq_len};
+		GMatrixDynSize<bf16, K> gB{B, usize(-1)};
 		GMatrix<bf16, M_PER_BLOCK, FAN_IN> gA_block = tile_m<M_PER_BLOCK>(gA, blockIdx.x);
 		GMatrix<bf16, N_PER_BLOCK, K> gB_block = tile_m<N_PER_BLOCK>(gB, blockIdx.y);
 		usize first_b_col = 0;

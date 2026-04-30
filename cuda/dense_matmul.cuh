@@ -5,7 +5,7 @@
 #pragma nv_diag_suppress 186
 
 template<const usize _D_IN, const usize _D_OUT>
-struct Gemm {
+struct DenseMatMul {
 	static constexpr usize D_IN = _D_IN;
 	static constexpr usize D_OUT = _D_OUT;
 	static constexpr f64 SPARSE_SCALE = 1.0;
@@ -82,7 +82,6 @@ struct Gemm {
 	}
 
 	X17_DEVICE void run(
-		usize seq_len,
 		bf16 *A,
 		bf16 *B,
 		Fragment_16x16<f32> (&acc_t)[N_TILES][M_TILES]
@@ -92,7 +91,7 @@ struct Gemm {
 		usize warp_m = (warp_idx / N_WARPS) * M_PER_WARP;
 		usize warp_n = (warp_idx % N_WARPS) * N_PER_WARP;
 		GMatrixDynSize<bf16, K> gA{A, M};
-		GMatrixDynSize<bf16, K> gB{B, seq_len};
+		GMatrixDynSize<bf16, K> gB{B, -1};
 		GMatrix<bf16, M_PER_BLOCK, K> gA_block = tile_m<M_PER_BLOCK>(gA, blockIdx.x);
 		GMatrix<bf16, N_PER_BLOCK, K> gB_block = tile_m<N_PER_BLOCK>(gB, blockIdx.y);
 
@@ -151,55 +150,55 @@ struct Gemm {
 	}
 };
 
-template<typename Gemm>
-X17_DEVICE void gemm_epilogue(
-	Gemm const &gemm,
-	Fragment_16x16<f32> (&acc_t)[Gemm::N_TILES][Gemm::M_TILES],
+template<typename MatMul>
+X17_DEVICE void matmul_epilogue(
+	MatMul const &matmul,
+	Fragment_16x16<f32> (&acc_t)[MatMul::N_TILES][MatMul::M_TILES],
 	bf16 *C
 ) {
-	usize warp_m = gemm.warp_m();
-	usize warp_n = gemm.warp_n();
+	usize warp_m = matmul.warp_m();
+	usize warp_n = matmul.warp_n();
 	bf16 *c_ptr =
 		C
-		+ blockIdx.y * Gemm::N_PER_BLOCK * Gemm::D_OUT
-		+ blockIdx.x * Gemm::M_PER_BLOCK;
-	GMatrix<bf16, Gemm::N_PER_BLOCK, Gemm::M_PER_BLOCK> gC_block{c_ptr, Gemm::D_OUT};
-	X17_UNROLL for (usize ni = 0; ni < Gemm::N_TILES; ++ni) {
+		+ blockIdx.y * MatMul::N_PER_BLOCK * MatMul::D_OUT
+		+ blockIdx.x * MatMul::M_PER_BLOCK;
+	GMatrix<bf16, MatMul::N_PER_BLOCK, MatMul::M_PER_BLOCK> gC_block{c_ptr, MatMul::D_OUT};
+	X17_UNROLL for (usize ni = 0; ni < MatMul::N_TILES; ++ni) {
 		store(acc_t[ni], gC_block, warp_n + ni * 16, warp_m);
 	}
 }
 
-template<typename Gemm>
-X17_DEVICE void gemm_geglu_epilogue(
-	Gemm const &gemm,
-	Fragment_16x16<f32> (&acc_t)[Gemm::N_TILES][Gemm::M_TILES],
+template<typename MatMul>
+X17_DEVICE void matmul_geglu_epilogue(
+	MatMul const &matmul,
+	Fragment_16x16<f32> (&acc_t)[MatMul::N_TILES][MatMul::M_TILES],
 	bf16 *C
 ) {
-	constexpr usize D_OUT = Gemm::D_OUT / 2;
-	static_assert(Gemm::D_OUT % 2 == 0);
+	constexpr usize D_OUT = MatMul::D_OUT / 2;
+	static_assert(MatMul::D_OUT % 2 == 0);
 	constexpr f64 GEGLU_SCALE = 1.53 * math::constexpr_rsqrt(f64(D_OUT));
 
-	if constexpr (Gemm::SPARSE_SCALE != 1.0) {
-		X17_UNROLL for (usize ni = 0; ni < Gemm::N_TILES; ++ni) {
-			X17_UNROLL for (usize mi = 0; mi < Gemm::M_TILES; ++mi) {
-				scale_(acc_t[ni][mi], f32(Gemm::SPARSE_SCALE));
+	if constexpr (MatMul::SPARSE_SCALE != 1.0) {
+		X17_UNROLL for (usize ni = 0; ni < MatMul::N_TILES; ++ni) {
+			X17_UNROLL for (usize mi = 0; mi < MatMul::M_TILES; ++mi) {
+				scale_(acc_t[ni][mi], f32(MatMul::SPARSE_SCALE));
 			}
 		}
 	}
 
-	Fragment_16x16<bf16> out[Gemm::N_TILES];
-	X17_UNROLL for (usize ni = 0; ni < Gemm::N_TILES; ++ni) {
+	Fragment_16x16<bf16> out[MatMul::N_TILES];
+	X17_UNROLL for (usize ni = 0; ni < MatMul::N_TILES; ++ni) {
 		geglu<GEGLU_SCALE>(out[ni], acc_t[ni][0], acc_t[ni][1]);
 	}
 
-	usize warp_m = gemm.warp_m();
-	usize warp_n = gemm.warp_n();
+	usize warp_m = matmul.warp_m();
+	usize warp_n = matmul.warp_n();
 	bf16 *c_ptr =
 		C
-		+ blockIdx.y * Gemm::N_PER_BLOCK * D_OUT
-		+ blockIdx.x * (Gemm::M_PER_BLOCK/2);
-	GMatrix<bf16, Gemm::N_PER_BLOCK, (Gemm::M_PER_BLOCK/2)> gC_block{c_ptr, D_OUT};
-	X17_UNROLL for (usize ni = 0; ni < Gemm::N_TILES; ++ni) {
+		+ blockIdx.y * MatMul::N_PER_BLOCK * D_OUT
+		+ blockIdx.x * (MatMul::M_PER_BLOCK/2);
+	GMatrix<bf16, MatMul::N_PER_BLOCK, (MatMul::M_PER_BLOCK/2)> gC_block{c_ptr, D_OUT};
+	X17_UNROLL for (usize ni = 0; ni < MatMul::N_TILES; ++ni) {
 		store_2x2_8x8(
 			gC_block,
 			warp_n + ni * 16,
@@ -210,20 +209,20 @@ X17_DEVICE void gemm_geglu_epilogue(
 	}
 }
 
-template<typename Gemm>
-__global__ __launch_bounds__(Gemm::THREADS_PER_BLOCK)
-void gemm(usize seq_len, bf16 *A, bf16 *B, bf16 *C) {
-	Gemm gemm = Gemm();
-	Fragment_16x16<f32> acc_t[Gemm::N_TILES][Gemm::M_TILES];
-	gemm.run(seq_len, A, B, acc_t);
-	gemm_epilogue(gemm, acc_t, C);
+template<typename MatMul>
+__global__ __launch_bounds__(MatMul::THREADS_PER_BLOCK)
+void matmul(bf16 *A, bf16 *B, bf16 *C) {
+	MatMul mm = MatMul();
+	Fragment_16x16<f32> acc_t[MatMul::N_TILES][MatMul::M_TILES];
+	mm.run(A, B, acc_t);
+	matmul_epilogue(mm, acc_t, C);
 }
 
-template<typename Gemm>
-__global__ __launch_bounds__(Gemm::THREADS_PER_BLOCK)
-void gemm_geglu(usize seq_len, bf16 *A, bf16 *B, bf16 *C) {
-	Gemm gemm = Gemm();
-	Fragment_16x16<f32> acc_t[Gemm::N_TILES][Gemm::M_TILES];
-	gemm.run(seq_len, A, B, acc_t);
-	gemm_geglu_epilogue(gemm, acc_t, C);
+template<typename MatMul>
+__global__ __launch_bounds__(MatMul::THREADS_PER_BLOCK)
+void matmul_geglu(bf16 *A, bf16 *B, bf16 *C) {
+	MatMul mm = MatMul();
+	Fragment_16x16<f32> acc_t[MatMul::N_TILES][MatMul::M_TILES];
+	mm.run(A, B, acc_t);
+	matmul_geglu_epilogue(mm, acc_t, C);
 }

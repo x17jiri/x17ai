@@ -41,14 +41,14 @@ int main(int argc, char *argv[]) {
 	cudaMemcpy(d_weights, h_weights.data(), h_weights.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_f, h_f.data(), h_f.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 
-	cudaFuncSetAttribute(gemm<OP>, cudaFuncAttributeMaxDynamicSharedMemorySize, OP::SMEM_BYTES);
-	cudaFuncSetAttribute(gemm<OP>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+	cudaFuncSetAttribute(matmul<OP>, cudaFuncAttributeMaxDynamicSharedMemorySize, OP::SMEM_BYTES);
+	cudaFuncSetAttribute(matmul<OP>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
 	dim3 grid(D_MODEL / OP::M_PER_BLOCK, SEQ_LEN / OP::N_PER_BLOCK);
 
 	int warmup = 50;
 	for (int i = 0; i < warmup; ++i) {
-		gemm<OP><<<grid, OP::THREADS_PER_BLOCK, OP::SMEM_BYTES>>>(
+		matmul<OP><<<grid, OP::THREADS_PER_BLOCK, OP::SMEM_BYTES>>>(
 			SEQ_LEN,
 			d_weights,
 			d_f,
@@ -65,7 +65,7 @@ int main(int argc, char *argv[]) {
 	}
 	for (int i = 0; i < num_runs; ++i) {
 		cudaEventRecord(starts[i]);
-		gemm<OP><<<grid, OP::THREADS_PER_BLOCK, OP::SMEM_BYTES>>>(
+		matmul<OP><<<grid, OP::THREADS_PER_BLOCK, OP::SMEM_BYTES>>>(
 			SEQ_LEN,
 			d_weights,
 			d_f,
