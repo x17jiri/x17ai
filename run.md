@@ -49,6 +49,11 @@ python tensor_stats.py tmp/block_torch/o_ffn.bin tmp/block_torch/o_ffn.bin.var
 ./nvcc.sh o_ffn_dx.cu && tmp/o_ffn_dx
 python verify_tensor.py tmp/block_torch/d_f.bin tmp/block_cuda/d_f.bin
 
+# FFN O Proj Weight Grad
+
+./nvcc.sh o_ffn_dw.cu && tmp/o_ffn_dw
+python verify_tensor.py tmp/block_torch/d_w_ffn.bin tmp/block_cuda/d_w_ffn.bin --shape 1024 2048
+
 # Chained run using CUDA outputs as inputs for later kernels.
 
 - Model parameters and block-entry tensors still load from tmp/block_torch.

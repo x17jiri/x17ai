@@ -4,12 +4,12 @@
 
 #pragma nv_diag_suppress 186
 
-template<const usize _K, const usize _M> // K == D_IN, M == D_OUT
+template<const usize D_IN, const usize D_OUT>
 struct DenseMatMul {
 	static constexpr f64 SPARSE_SCALE = 1.0;
 
-	static constexpr usize M = _M;
-	static constexpr usize K = _K;
+	static constexpr usize M = D_OUT;
+	static constexpr usize K = D_IN;
 
 	static constexpr usize M_WARPS = 2;
 	static constexpr usize N_WARPS = 2;

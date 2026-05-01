@@ -374,13 +374,16 @@ def o_proj_ffn_backward(
 	f: torch.Tensor,
 	w_ffn: torch.Tensor,
 	d_o_ffn: torch.Tensor,
-) -> torch.Tensor:
+	) -> tuple[torch.Tensor, torch.Tensor]:
 	f_leaf = f.detach().clone().requires_grad_(True)
-	o_ffn = o_proj_ffn(f_leaf, w_ffn)
+	w_ffn_leaf = w_ffn.detach().clone().requires_grad_(True)
+	o_ffn = o_proj_ffn(f_leaf, w_ffn_leaf)
 	o_ffn.backward(d_o_ffn)
 	if f_leaf.grad is None:
 		raise RuntimeError("Expected gradient for f after o_proj_ffn backward")
-	return f_leaf.grad
+	if w_ffn_leaf.grad is None:
+		raise RuntimeError("Expected gradient for w_ffn after o_proj_ffn backward")
+	return f_leaf.grad, w_ffn_leaf.grad
 
 def run_block() -> None:
 	inputs = load_tensor("inputs_l2.bin", N_INPUTS, D_MODEL)
@@ -406,7 +409,7 @@ def run_block() -> None:
 	grad_generator = torch.Generator(device=my_device)
 	grad_generator.manual_seed(123)
 	d_o_ffn = quantize_(new_randn(N_INPUTS, D_MODEL, generator=grad_generator))
-	d_f = o_proj_ffn_backward(f, w_ffn, d_o_ffn)
+	d_f, d_w_ffn = o_proj_ffn_backward(f, w_ffn, d_o_ffn)
 
 	print("inputs shape:", inputs.shape)
 	print("qkvg shape:", qkvg.shape)
@@ -422,6 +425,7 @@ def run_block() -> None:
 	print("f shape:", f.shape)
 	print("d_o_ffn shape:", d_o_ffn.shape)
 	print("d_f shape:", d_f.shape)
+	print("d_w_ffn shape:", d_w_ffn.shape)
 	print("o_attn shape:", o_attn.shape)
 	print("o_ffn shape:", o_ffn.shape)
 	#print("attn_match shape:", attn_match.shape)
@@ -445,6 +449,7 @@ def run_block() -> None:
 	store_tensor(f, "f.bin", expected_variance=1.0 / F_WIDTH)
 	store_tensor(d_o_ffn, "d_o_ffn.bin", expected_variance=1.0)
 	store_tensor(d_f, "d_f.bin")
+	store_tensor(d_w_ffn, "d_w_ffn.bin")
 	store_tensor(o_attn, "o_attn.bin", expected_variance=1.0)
 	store_tensor(o_ffn, "o_ffn.bin", expected_variance=1.0)
 	#store_tensor(attn_match, "attn_matching.bin")
