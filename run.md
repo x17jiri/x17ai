@@ -18,7 +18,6 @@ python tensor_stats.py tmp/block_torch/g.bin tmp/block_torch/g.bin.var
 
 ./nvcc.sh attn_fwd.cu && tmp/attn_fwd
 python verify_tensor.py tmp/block_torch/attn_out.bin tmp/block_cuda/attn_out.bin --shape 16384 32 32
-python verify_tensor.py tmp/block_torch/attn_out_pregate.bin tmp/block_cuda/attn_out_pregate.bin --shape 16384 32 32
 
 python tensor_stats.py tmp/block_torch/attn_out.bin tmp/block_torch/attn_out.bin.var
 python tensor_stats.py tmp/block_torch/attn_out_pregate.bin tmp/block_torch/attn_out_pregate.bin.var
@@ -27,21 +26,28 @@ python tensor_stats.py tmp/block_torch/attn_out.bin tmp/block_torch/attn_out.bin
 ## Attn Forward - use maxes from torch to eliminate online softmax errors
 ./nvcc.sh attn_fwd.cu && tmp/attn_fwd --use-torch-maxes
 
-# F Proj
+# Attn O Proj Forward
 
-./nvcc.sh f_proj.cu && tmp/f_proj
-python verify_tensor.py tmp/block_torch/f.bin tmp/block_cuda/f.bin
-python tensor_stats.py tmp/block_torch/f.bin tmp/block_torch/f.bin.var
-
-# O Proj
-
-./nvcc.sh o_proj_attn.cu && tmp/o_proj_attn
+./nvcc.sh o_attn_fwd.cu && tmp/o_attn_fwd
 python verify_tensor.py tmp/block_torch/o_attn.bin tmp/block_cuda/o_attn.bin
 python tensor_stats.py tmp/block_torch/o_attn.bin tmp/block_torch/o_attn.bin.var
 
-./nvcc.sh o_proj_ffn.cu && tmp/o_proj_ffn
+# FFN Forward
+
+./nvcc.sh ffn_fwd.cu && tmp/ffn_fwd
+python verify_tensor.py tmp/block_torch/f.bin tmp/block_cuda/f.bin
+python tensor_stats.py tmp/block_torch/f.bin tmp/block_torch/f.bin.var
+
+# FFN O Proj Forward
+
+./nvcc.sh o_ffn_fwd.cu && tmp/o_ffn_fwd
 python verify_tensor.py tmp/block_torch/o_ffn.bin tmp/block_cuda/o_ffn.bin
 python tensor_stats.py tmp/block_torch/o_ffn.bin tmp/block_torch/o_ffn.bin.var
+
+# FFN O Proj Backward
+
+./nvcc.sh o_ffn_dx.cu && tmp/o_ffn_dx
+python verify_tensor.py tmp/block_torch/d_f.bin tmp/block_cuda/d_f.bin
 
 # Chained run using CUDA outputs as inputs for later kernels.
 
@@ -49,9 +55,12 @@ python tensor_stats.py tmp/block_torch/o_ffn.bin tmp/block_torch/o_ffn.bin.var
 
 ./nvcc.sh qkvg_fwd.cu && tmp/qkvg_fwd
 ./nvcc.sh attn_fwd.cu && tmp/attn_fwd --cuda-inputs
-./nvcc.sh f_proj.cu && tmp/f_proj --cuda-inputs
-./nvcc.sh o_proj.cu && tmp/o_proj --cuda-inputs
-python verify_tensor.py tmp/block_torch/o.bin tmp/block_cuda/o.bin
+./nvcc.sh o_attn_fwd.cu && tmp/o_attn_fwd --cuda-inputs
+python verify_tensor.py tmp/block_torch/o_attn.bin tmp/block_cuda/o_attn.bin
+
+./nvcc.sh ffn_fwd.cu && tmp/ffn_fwd
+./nvcc.sh o_ffn_fwd.cu && tmp/o_ffn_fwd --cuda-inputs
+python verify_tensor.py tmp/block_torch/o_ffn.bin tmp/block_cuda/o_ffn.bin
 
 - It is still possible to use maxes from torch to get closer match
 

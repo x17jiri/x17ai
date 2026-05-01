@@ -1,5 +1,5 @@
-#include "cuda/gemm.cuh"
-#include "cuda/sparse_gemm.cuh"
+#include "cuda/dense_matmul.cuh"
+#include "cuda/sparse_matmul.cuh"
 #include "block.config.hpp"
 #include "utils2.cuh"
 
@@ -53,7 +53,6 @@ int main(int argc, char *argv[]) {
 	int warmup = 50;
 	for (int i = 0; i < warmup; ++i) {
 		matmul_geglu<FP><<<grid, FP::THREADS_PER_BLOCK, FP::SMEM_BYTES>>>(
-			SEQ_LEN,
 			d_weights,
 			d_inputs,
 			d_out
@@ -70,7 +69,6 @@ int main(int argc, char *argv[]) {
 	for (int i = 0; i < num_runs; ++i) {
 		cudaEventRecord(starts[i]);
 		matmul_geglu<FP><<<grid, FP::THREADS_PER_BLOCK, FP::SMEM_BYTES>>>(
-			SEQ_LEN,
 			d_weights,
 			d_inputs,
 			d_out
