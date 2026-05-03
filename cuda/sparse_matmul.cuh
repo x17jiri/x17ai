@@ -71,8 +71,8 @@ struct SparseMatMul {
 				auto dst = sA_tile;
 				static constexpr usize GM = src.m_rows();
 				static constexpr usize GN = src.n_cols();
-				[[maybe_unused]] static constexpr usize M = dst.m_rows();
-				static constexpr usize N = dst.n_cols();
+				[[maybe_unused]] static constexpr usize DST_ROWS = dst.m_rows();
+				static constexpr usize DST_COLS = dst.n_cols();
 				static constexpr usize ROW_BYTES = dst.ROW_BYTES;
 				using T = bf16;
 				usize tid = threadIdx.x;
@@ -87,7 +87,7 @@ struct SparseMatMul {
 
 				static_assert(CP_BYTES % sizeof(T) == 0);
 				static_assert((GN * sizeof(T)) % CP_BYTES == 0);
-				static_assert((N * sizeof(T)) % CP_BYTES == 0);
+				static_assert((DST_COLS * sizeof(T)) % CP_BYTES == 0);
 				static_assert(THREADS_PER_BLOCK % CP_PER_ROW == 0);
 				if constexpr (STEPS == 0) {
 					if constexpr (GM % ROWS_PER_STEP == 0) {
