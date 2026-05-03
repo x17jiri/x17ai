@@ -13,7 +13,7 @@
 //   - Scalable-Softmax (SSMax): per-query temperature = ln(e + n_tokens).
 //   - Online softmax with lazy rescaling for numerical stability.
 //   - A token does NOT attend to itself
-//   - Output zig-zag gating
+	//   - Output gating using pretransformed g/gg inputs
 //
 // Grid: (seq_len / Q_PER_BLOCK, HEAD_GROUP_CNT)
 // Block: WARPS_PER_BLOCK * 32 threads
@@ -314,17 +314,9 @@ struct AttnForward {
 		Fragment_8x8<f32> &o,
 		Fragment_8x8<bf16> const &g
 	) {
-		f32 o0 = o.first();
-		f32 o1 = o.second();
-		f32 g0 = g.first();
-		f32 g1 = g.second();
-		if constexpr (V_SCALE != 1.0) {
-			g0 *= f32(V_SCALE);
-			g1 *= f32(V_SCALE);
-		}
 		o.set(
-			math::fast::geglu<GEGLU_SCALE>(g0, o0),
-			math::fast::geglu<GEGLU_SCALE>(o1, g1)
+			o.first() * f32(g.first()), // the qkvg kernel calculates the gelu() of g.first()
+			math::fast::gelu<GEGLU_SCALE>(o.second()) * f32(g.second())
 		);
 	}
 

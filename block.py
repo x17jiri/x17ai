@@ -184,12 +184,6 @@ def gelu_tanh_approx(x: torch.Tensor) -> torch.Tensor:
 def geglu(gate: torch.Tensor, lin: torch.Tensor) -> torch.Tensor:
 	return gelu_tanh_approx(gate) * lin
 
-def zig_zag_geglu(attn_out: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
-	out = torch.empty_like(attn_out)
-	out[..., 0::2] = geglu(g[..., 0::2], attn_out[..., 0::2]) * ATTN_GEGLU_SCALE
-	out[..., 1::2] = geglu(attn_out[..., 1::2], g[..., 1::2]) * ATTN_GEGLU_SCALE
-	return out
-
 def calculate_sink_scores(q: torch.Tensor, sinks_k: torch.Tensor) -> torch.Tensor:
 	# sink score calculation is part of the qkvg kernel. It has access to precise q, but it loads
 	# sinks_k from global memory in bf16
@@ -397,9 +391,15 @@ def run_block() -> None:
 
 	qkvg_weights = sparse_weights(qkvg_weights, D_MODEL, HEAD_DIM);
 	q, k, v, g, sink_scores = qkvg_proj(inputs, qkvg_weights, qk_norm_scales, sinks_k)
-	qkvg = join_qkvg(q, k, v, g)
 	attn_out_pregate, attn_maxes = attn(q, k, v, sink_scores, sinks_v)
-	attn_out = zig_zag_geglu(attn_out_pregate, quantize_(g) * SPARSE_SCALE)
+
+	aa = attn_out_pregate.clone()
+	g[..., 0::2] = gelu_tanh_approx(g[..., 0::2] * SPARSE_SCALE) * ATTN_GEGLU_SCALE
+	g[..., 1::2] = g[..., 1::2] * SPARSE_SCALE
+	aa[..., 1::2] = gelu_tanh_approx(aa[..., 1::2]) * ATTN_GEGLU_SCALE
+
+	qkvg = join_qkvg(q, k, v, g)
+	attn_out = aa * quantize_(g)
 	o_attn = o_proj_attn(attn_out, w_attn)
 
 	f_weights = sparse_weights(f_weights, D_MODEL, HEAD_DIM)
@@ -433,13 +433,13 @@ def run_block() -> None:
 	store_f32_tensor(q, "q_f32.bin", expected_variance=1.0 / HEAD_DIM)
 	store_f32_tensor(k, "k_f32.bin", expected_variance=1.0 / HEAD_DIM)
 	store_f32_tensor(v, "v_f32.bin", expected_variance=SPARSE_FAN_IN / D_MODEL)
-	store_f32_tensor(g, "g_f32.bin", expected_variance=SPARSE_FAN_IN / D_MODEL)
+	store_f32_tensor(g, "g_f32.bin")
 #	store_f32_tensor(g_bf16 * SPARSE_SCALE, "g_scaled_f32.bin", expected_variance=1.0)
 
 	store_tensor(q, "q.bin", expected_variance=1.0 / HEAD_DIM)
 	store_tensor(k, "k.bin", expected_variance=1.0 / HEAD_DIM)
 	store_tensor(v, "v.bin", expected_variance=SPARSE_FAN_IN / D_MODEL)
-	store_tensor(g, "g.bin", expected_variance=SPARSE_FAN_IN / D_MODEL)
+	store_tensor(g, "g.bin")
 
 	store_f32_tensor(sink_scores.transpose(0, 1), "sink_scores_f32.bin", expected_variance=1.0 / HEAD_DIM)
 	store_f32_tensor(attn_maxes.transpose(0, 1), "attn_maxes_f32.bin")
@@ -452,7 +452,6 @@ def run_block() -> None:
 	store_tensor(d_w_ffn, "d_w_ffn.bin")
 	store_tensor(o_attn, "o_attn.bin", expected_variance=1.0)
 	store_tensor(o_ffn, "o_ffn.bin", expected_variance=1.0)
-	#store_tensor(attn_match, "attn_matching.bin")
 	store_tensor(qkvg, "qkvg.bin")
 
 def main() -> None:

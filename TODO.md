@@ -9,3 +9,5 @@
 -
 	Assert seq_len is multiple of 64.
 	Will need to use the incremental kernel for the rest of the sequence if not.
+
+- Optimizers: Lion - https://arxiv.org/pdf/2302.06675

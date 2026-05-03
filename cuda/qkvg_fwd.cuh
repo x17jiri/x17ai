@@ -32,6 +32,7 @@ struct QKVGFwd {
 	static constexpr usize SEGMENT_SIZE = N_HEAD * D_HEAD;
 	static constexpr usize GROUP_CNT = M_PER_WARP / D_HEAD;
 	static constexpr usize GROUP_TILE_CNT = D_HEAD / 16;
+	static constexpr f64 ATTN_GEGLU_SCALE = 1.53 * math::constexpr_rsqrt(f64(SEGMENT_SIZE));
 
 	static_assert(ROPE_DIM <= D_HEAD);
 	static_assert(ROPE_DIM % 16 == 0);
@@ -44,6 +45,33 @@ struct QKVGFwd {
 	X17_DEVICE bool is_q(usize block_m, usize warp_m) {
 		usize warp_col = block_m + warp_m;
 		return warp_col < SEGMENT_SIZE;
+	}
+
+	X17_DEVICE bool is_g(usize block_m, usize warp_m) {
+		usize warp_col = block_m + warp_m;
+		return warp_col >= 3 * SEGMENT_SIZE;
+	}
+
+	static X17_DEVICE void prepare_g_output(Fragment_8x8<f32> &g) {
+		f32 even = g.first();
+		f32 odd = g.second();
+		g.set(
+			math::fast::gelu<ATTN_GEGLU_SCALE>(even * f32(MatMul::SPARSE_SCALE)),
+			odd * f32(MatMul::SPARSE_SCALE)
+		);
+	}
+
+	template<usize N_TILE_CNT>
+	X17_DEVICE void prepare_g_output(Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILES]) {
+		X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+			X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
+				Fragment_16x16<f32> &g = acc[ni][mi];
+				prepare_g_output(g.sub[0][0]);
+				prepare_g_output(g.sub[0][1]);
+				prepare_g_output(g.sub[1][0]);
+				prepare_g_output(g.sub[1][1]);
+			}
+		}
 	}
 
 	template<usize N_TILE_CNT>
@@ -248,6 +276,8 @@ struct QKVGFwd {
 				store_sink_scores(acc_t, gSinkK_ptr, gSinkScore_ptr, seq_len, block_m, block_n, warp_m, warp_n);
 			}
 			apply_rope(acc_t, block_n, warp_n);
+		} else if (is_g(block_m, warp_m)) {
+			prepare_g_output(acc_t);
 		}
 
 		bf16 *c_ptr = C + blockIdx.y * N_PER_BLOCK * M + blockIdx.x * M_PER_BLOCK;

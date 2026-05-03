@@ -12,7 +12,7 @@ python tensor_stats.py tmp/block_torch/sink_scores_f32.bin tmp/block_torch/sink_
 python tensor_stats.py tmp/block_torch/q.bin tmp/block_torch/q.bin.var
 python tensor_stats.py tmp/block_torch/k.bin tmp/block_torch/k.bin.var
 python tensor_stats.py tmp/block_torch/v.bin tmp/block_torch/v.bin.var
-python tensor_stats.py tmp/block_torch/g.bin tmp/block_torch/g.bin.var
+python tensor_stats.py tmp/block_torch/g.bin
 
 # Attn Forward
 
