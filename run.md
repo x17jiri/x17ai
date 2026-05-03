@@ -36,6 +36,7 @@ python tensor_stats.py tmp/block_torch/o_attn.bin tmp/block_torch/o_attn.bin.var
 
 ./nvcc.sh ffn_fwd.cu && tmp/ffn_fwd
 python verify_tensor.py tmp/block_torch/f.bin tmp/block_cuda/f.bin
+python verify_tensor.py tmp/block_torch/f_backvec.bin tmp/block_cuda/f_backvec.bin
 python tensor_stats.py tmp/block_torch/f.bin tmp/block_torch/f.bin.var
 
 # FFN O Proj Forward

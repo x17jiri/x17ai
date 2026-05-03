@@ -161,6 +161,11 @@ namespace math {
 		return f64(exponent) + 2.0 * std::numbers::log2e_v<f64> * series;
 	}
 
+	struct UnaryResult {
+		f32 val;
+		f32 dVal;
+	};
+
 	namespace fast {
 		/// Our underlying exp and log functions use this base.
 		/// It was chosen to be fast and may change in the future.
@@ -260,14 +265,18 @@ namespace math {
 			#endif
 		}
 
-		X17_DEVICE f32 tanh(f32 x) {
+		X17_DEVICE UnaryResult tanh(f32 x) {
+			f32 val;
 			#if X17_PRECISE_MATH
-				return tanhf(x);
+				val = tanhf(x);
 			#else
-				f32 result;
-				asm ("tanh.approx.f32 %0, %1;\n" : "=f"(result) : "f"(x));
-				return result;
+				asm ("tanh.approx.f32 %0, %1;\n" : "=f"(val) : "f"(x));
 			#endif
+			f32 dVal = -math::fma(val, val, -1.0);
+			return UnaryResult {
+				.val = val,
+				.dVal = dVal
+			};
 		}
 
 		X17_DEVICE f32 sqrt(f32 x) {
@@ -290,10 +299,6 @@ namespace math {
 			#endif
 		}
 
-		X17_DEVICE f32 d_tanh(f32 tanh) {
-			return 1.0f - tanh * tanh;
-		}
-
 		X17_DEVICE f32 erf(f32 x) {
 			#if X17_PRECISE_MATH
 				return erff(x);
@@ -311,11 +316,11 @@ namespace math {
 		}
 
 		X17_DEVICE f32 sigmoid(f32 x) {
-			return math::fma(0.5f, math::fast::tanh(0.5f * x), 0.5f);
+			return math::fma(0.5f, math::fast::tanh(0.5f * x).val, 0.5f);
 		}
 
 		X17_DEVICE f32 silu(f32 x, f32 beta = 1.0f) {
-			return math::fma(0.5f * x, math::fast::tanh((beta * 0.5f) * x), 0.5f * x);
+			return math::fma(0.5f * x, math::fast::tanh((beta * 0.5f) * x).val, 0.5f * x);
 		}
 
 		/// Gaussian Error Linear Unit
@@ -324,23 +329,20 @@ namespace math {
 		/// The scaling constant is folded into the coefficients of the approximation
 		/// and so it is free at runtime.
 		template<const f64 OUT_SCALE = 1.0, const usize FAN_IN = 1>
-		X17_DEVICE f32 gelu(f32 x) {
+		X17_DEVICE UnaryResult gelu(f32 x) {
 			constexpr f64 k = constexpr_rsqrt(f64(FAN_IN));
 			constexpr f64 k2 = 1.0 / f64(FAN_IN); // k^2
-			// c * k where c = sqrt(2.0 / pi)
 			constexpr f64 ck = constexpr_rsqrt(f64(FAN_IN) * std::numbers::pi_v<f64> / 2.0);
-			// 0.044715 * c * k^3
-			constexpr f64  ck3 = 0.044715 * ck * k2;
-			f32 y = math::fma(f32(ck3) * x, x * x, f32(ck) * x);
-			return math::fma(
-				f32(0.5 * OUT_SCALE * k) * x,
-				math::fast::tanh(y),
-				f32(0.5 * OUT_SCALE * k) * x);
-		}
-
-		template<const f64 OUT_SCALE = 1.0, const usize GATE_FAN_IN = 1>
-		X17_DEVICE f32 geglu(f32 gate, f32 lin) {
-			return gelu<OUT_SCALE, GATE_FAN_IN>(gate) * lin;
+			constexpr f64 ck3 = 0.044715 * ck * k2;
+			constexpr f64 Y_SCALE = 0.5 * OUT_SCALE * k;
+			f32 x2 = x * x;
+			f32 s = math::fma(f32(ck3) * x, x2, f32(ck) * x);
+			auto t = math::fast::tanh(s);
+			f32 x_ds_dx = math::fma(f32(3.0 * ck3) * x, x2, f32(ck) * x);
+			return UnaryResult {
+				.val = math::fma(f32(Y_SCALE) * x, t.val, f32(Y_SCALE) * x),
+				.dVal = math::fma(f32(Y_SCALE) * t.dVal, x_ds_dx, math::fma(f32(Y_SCALE), t.val, f32(Y_SCALE)))
+			};
 		}
 
 		/// `softplus(x) = log(1 + exp(x))`
@@ -1569,15 +1571,33 @@ X17_DEVICE void quantize_(Fragment_16x16<f32> (&arr)[K]) {
 	}
 }
 
-template<const f64 SCALE>
-X17_DEVICE void geglu(
-	Fragment_8x8<bf16> &o,
-	Fragment_8x8<f32> const &i1,
-	Fragment_8x8<f32> const &i2
+template<const f64 OUT_SCALE>
+X17_DEVICE void geglu_(
+	Fragment_8x8<f32> &i1,
+	Fragment_8x8<f32> &i2,
+	Fragment_8x8<bf16> &o
 ) {
+	f32 gate1 = i1.first();
+	f32 lin1 = i1.second();
+
+	f32 gate2 = i2.first();
+	f32 lin2 = i2.second();
+
+	auto g1 = math::fast::gelu<OUT_SCALE>(gate1);
+	auto g2 = math::fast::gelu<OUT_SCALE>(gate2);
+
+	i1.set(
+		lin1 * g1.dVal,
+		g1.val
+	);
+	i2.set(
+		lin2 * g2.dVal,
+		g2.val
+	);
+
 	o.set(
-		bf16(math::fast::geglu<SCALE>(i1.val0, i1.val1)),
-		bf16(math::fast::geglu<SCALE>(i2.val0, i2.val1))
+		g1.val * lin1,
+		g2.val * lin2
 	);
 	o.transpose_();
 	usize tid = threadIdx.x % WARP_SIZE;
@@ -1585,16 +1605,18 @@ X17_DEVICE void geglu(
 	o.transpose_();
 }
 
-template<const f64 SCALE>
-X17_DEVICE void geglu(
-	Fragment_16x16<bf16> &o,
-	Fragment_16x16<f32> const &i1,
-	Fragment_16x16<f32> const &i2
+/// Calculates GeGLU of consecutive values and stores the result to `o`.
+/// The content of `i1`, `i2` is replace with backward multipliers.
+template<const f64 OUT_SCALE>
+X17_DEVICE void geglu_(
+	Fragment_16x16<f32> &i1,
+	Fragment_16x16<f32> &i2,
+	Fragment_16x16<bf16> &o
 ) {
-	geglu<SCALE>(o.sub[0][0], i1.sub[0][0], i1.sub[0][1]);
-	geglu<SCALE>(o.sub[0][1], i2.sub[0][0], i2.sub[0][1]);
-	geglu<SCALE>(o.sub[1][0], i1.sub[1][0], i1.sub[1][1]);
-	geglu<SCALE>(o.sub[1][1], i2.sub[1][0], i2.sub[1][1]);
+	geglu_<OUT_SCALE>(i1.sub[0][0], i1.sub[0][1], o.sub[0][0]);
+	geglu_<OUT_SCALE>(i2.sub[0][0], i2.sub[0][1], o.sub[0][1]);
+	geglu_<OUT_SCALE>(i1.sub[1][0], i1.sub[1][1], o.sub[1][0]);
+	geglu_<OUT_SCALE>(i2.sub[1][0], i2.sub[1][1], o.sub[1][1]);
 }
 
 //--------------------------------------------------------------------------------------------------

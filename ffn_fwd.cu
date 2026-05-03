@@ -33,14 +33,17 @@ int main(int argc, char *argv[]) {
 	}
 
 	std::vector<bf16> h_out(SEQ_LEN * F_WIDTH);
+	std::vector<bf16> h_backvec(SEQ_LEN * F_PROJ_OUTPUTS);
 
 	bf16 *d_weights = nullptr;
 	bf16 *d_inputs = nullptr;
 	bf16 *d_out = nullptr;
+	bf16 *d_backvec = nullptr;
 
 	cudaMalloc(&d_weights, h_weights.size() * sizeof(bf16));
 	cudaMalloc(&d_inputs, h_inputs.size() * sizeof(bf16));
 	cudaMalloc(&d_out, h_out.size() * sizeof(bf16));
+	cudaMalloc(&d_backvec, h_backvec.size() * sizeof(bf16));
 
 	cudaMemcpy(d_weights, h_weights.data(), h_weights.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_inputs, h_inputs.data(), h_inputs.size() * sizeof(bf16), cudaMemcpyHostToDevice);
@@ -55,7 +58,8 @@ int main(int argc, char *argv[]) {
 		matmul_geglu<FP><<<grid, FP::THREADS_PER_BLOCK, FP::SMEM_BYTES>>>(
 			d_weights,
 			d_inputs,
-			d_out
+			d_out,
+			d_backvec
 		);
 	}
 	cudaDeviceSynchronize();
@@ -71,7 +75,8 @@ int main(int argc, char *argv[]) {
 		matmul_geglu<FP><<<grid, FP::THREADS_PER_BLOCK, FP::SMEM_BYTES>>>(
 			d_weights,
 			d_inputs,
-			d_out
+			d_out,
+			d_backvec
 		);
 		cudaEventRecord(ends[i]);
 	}
@@ -98,13 +103,16 @@ int main(int argc, char *argv[]) {
 	printf("TFLOPS: %.2f\n", tflops);
 
 	cudaMemcpy(h_out.data(), d_out, h_out.size() * sizeof(bf16), cudaMemcpyDeviceToHost);
+	cudaMemcpy(h_backvec.data(), d_backvec, h_backvec.size() * sizeof(bf16), cudaMemcpyDeviceToHost);
 	std::filesystem::create_directories("tmp/block_cuda");
 	store_tensor("tmp/block_cuda/f.bin", h_out, SEQ_LEN, F_WIDTH);
+	store_tensor("tmp/block_cuda/f_backvec.bin", h_backvec, SEQ_LEN, F_PROJ_OUTPUTS);
 
 	printf("Used SMEM per kernel: %u\n", FP::SMEM_BYTES);
 
 	cudaFree(d_weights);
 	cudaFree(d_inputs);
 	cudaFree(d_out);
+	cudaFree(d_backvec);
 	return 0;
 }

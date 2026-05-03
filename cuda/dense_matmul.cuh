@@ -88,7 +88,7 @@ struct DenseMatMul {
 		usize warp_idx = tid / WARP_SIZE;
 		usize warp_m = (warp_idx / N_WARPS) * M_PER_WARP;
 		usize warp_n = (warp_idx % N_WARPS) * N_PER_WARP;
-		GMatrixDynSize<bf16, K> gA{A, usize(-1)};
+		GMatrix<bf16, M, K> gA{A};
 		GMatrixDynSize<bf16, K> gB{B, usize(-1)};
 		GMatrix<bf16, M_PER_BLOCK, K> gA_block = tile_m<M_PER_BLOCK>(gA, blockIdx.x);
 		GMatrix<bf16, N_PER_BLOCK, K> gB_block = tile_m<N_PER_BLOCK>(gB, blockIdx.y);
@@ -172,7 +172,8 @@ template<typename MatMul>
 X17_DEVICE void matmul_geglu_epilogue(
 	MatMul const &matmul,
 	Fragment_16x16<f32> (&acc_t)[MatMul::N_TILES][MatMul::M_TILES],
-	bf16 *C
+	bf16 *C,
+	bf16 *C_backvec
 ) {
 	constexpr usize D_OUT = MatMul::M / 2;
 	static_assert(MatMul::M % 2 == 0);
@@ -188,7 +189,7 @@ X17_DEVICE void matmul_geglu_epilogue(
 
 	Fragment_16x16<bf16> out[MatMul::N_TILES];
 	X17_UNROLL for (usize ni = 0; ni < MatMul::N_TILES; ++ni) {
-		geglu<GEGLU_SCALE>(out[ni], acc_t[ni][0], acc_t[ni][1]);
+		geglu_<GEGLU_SCALE>(acc_t[ni][0], acc_t[ni][1], out[ni]);
 	}
 
 	usize warp_m = matmul.warp_m();
@@ -207,6 +208,17 @@ X17_DEVICE void matmul_geglu_epilogue(
 			out[ni].sub[1][0], out[ni].sub[1][1]
 		);
 	}
+
+	if (C_backvec != nullptr) {
+		bf16 *backvec_ptr =
+			C_backvec
+			+ blockIdx.y * MatMul::N_PER_BLOCK * MatMul::M
+			+ blockIdx.x * MatMul::M_PER_BLOCK;
+		GMatrix<bf16, MatMul::N_PER_BLOCK, MatMul::M_PER_BLOCK> gBackvec_block{backvec_ptr, MatMul::M};
+		X17_UNROLL for (usize ni = 0; ni < MatMul::N_TILES; ++ni) {
+			store(acc_t[ni], gBackvec_block, warp_n + ni * 16, warp_m);
+		}
+	}
 }
 
 template<typename MatMul>
@@ -220,9 +232,9 @@ void matmul(bf16 *A, bf16 *B, bf16 *C) {
 
 template<typename MatMul>
 __global__ __launch_bounds__(MatMul::THREADS_PER_BLOCK)
-void matmul_geglu(bf16 *A, bf16 *B, bf16 *C) {
+void matmul_geglu(bf16 *A, bf16 *B, bf16 *C, bf16 *C_backvec) {
 	MatMul mm = MatMul();
 	Fragment_16x16<f32> acc_t[MatMul::N_TILES][MatMul::M_TILES];
 	mm.run(A, B, acc_t);
-	matmul_geglu_epilogue(mm, acc_t, C);
+	matmul_geglu_epilogue(mm, acc_t, C, C_backvec);
 }

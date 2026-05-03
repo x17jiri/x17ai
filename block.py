@@ -181,6 +181,15 @@ def gelu_tanh_approx(x: torch.Tensor) -> torch.Tensor:
 	y = ck3 * x * x * x + ck * x
 	return 0.5 * x * torch.tanh(y) + 0.5 * x
 
+def d_gelu_tanh_approx(x: torch.Tensor) -> torch.Tensor:
+	ck = math.sqrt(2.0 / math.pi)
+	ck3 = 0.044715 * ck
+	x2 = x * x
+	y = ck3 * x * x2 + ck * x
+	tanh_y = torch.tanh(y)
+	dy_dx = 3.0 * ck3 * x2 + ck
+	return 0.5 * (1.0 + tanh_y + x * (1.0 - tanh_y * tanh_y) * dy_dx)
+
 def geglu(gate: torch.Tensor, lin: torch.Tensor) -> torch.Tensor:
 	return gelu_tanh_approx(gate) * lin
 
@@ -325,6 +334,16 @@ def pairwise_geglu(tensor: torch.Tensor, output_scale: float) -> torch.Tensor:
 		raise ValueError(f"Expected even projection width for GeGLU, got {tensor.shape[-1]}")
 	return geglu(tensor[..., 0::2], tensor[..., 1::2]) * output_scale
 
+def pairwise_geglu_backward_multipliers(tensor: torch.Tensor, output_scale: float) -> torch.Tensor:
+	if tensor.shape[-1] % 2 != 0:
+		raise ValueError(f"Expected even projection width for GeGLU, got {tensor.shape[-1]}")
+	gate = tensor[..., 0::2]
+	lin = tensor[..., 1::2]
+	backvec = torch.empty_like(tensor)
+	backvec[..., 0::2] = lin * d_gelu_tanh_approx(gate) * output_scale
+	backvec[..., 1::2] = gelu_tanh_approx(gate) * output_scale
+	return backvec
+
 def f_proj_pregate(inputs: torch.Tensor, f_weights: torch.Tensor) -> torch.Tensor:
 	if inputs.shape[-1] != D_MODEL:
 		raise ValueError(f"Expected input width {D_MODEL}, got {inputs.shape[-1]}")
@@ -405,6 +424,7 @@ def run_block() -> None:
 	f_weights = sparse_weights(f_weights, D_MODEL, HEAD_DIM)
 	f_pregate = f_proj_pregate(inputs, f_weights) * SPARSE_SCALE
 	f = pairwise_geglu(f_pregate, F_GEGLU_SCALE)
+	f_backvec = pairwise_geglu_backward_multipliers(f_pregate, F_GEGLU_SCALE)
 	o_ffn = o_proj_ffn(f, w_ffn)
 	grad_generator = torch.Generator(device=my_device)
 	grad_generator.manual_seed(123)
@@ -423,6 +443,7 @@ def run_block() -> None:
 	print("attn_out shape:", attn_out.shape)
 	print("f_pregate shape:", f_pregate.shape)
 	print("f shape:", f.shape)
+	print("f_backvec shape:", f_backvec.shape)
 	print("d_o_ffn shape:", d_o_ffn.shape)
 	print("d_f shape:", d_f.shape)
 	print("d_w_ffn shape:", d_w_ffn.shape)
@@ -447,6 +468,7 @@ def run_block() -> None:
 	store_tensor(attn_out, "attn_out.bin", expected_variance=1.0 / ATTN_WIDTH)
 	store_tensor(f_pregate, "f_pregate.bin", expected_variance=1.0)
 	store_tensor(f, "f.bin", expected_variance=1.0 / F_WIDTH)
+	store_tensor(f_backvec, "f_backvec.bin")
 	store_tensor(d_o_ffn, "d_o_ffn.bin", expected_variance=1.0)
 	store_tensor(d_f, "d_f.bin")
 	store_tensor(d_w_ffn, "d_w_ffn.bin")
