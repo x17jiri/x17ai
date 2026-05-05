@@ -151,11 +151,11 @@ struct DenseMatMul_dx {
 	}
 };
 
-template<typename MatMul>
-__global__ __launch_bounds__(MatMul::THREADS_PER_BLOCK)
+template<typename Gemm>
+__global__ __launch_bounds__(Gemm::THREADS_PER_BLOCK)
 void matmul_dx(bf16 *A, bf16 *B, bf16 *C) {
-	MatMul mm = MatMul();
-	Fragment_16x16<f32> acc_t[MatMul::N_TILES][MatMul::M_TILES];
+	Gemm mm = Gemm();
+	Fragment_16x16<f32> acc_t[Gemm::N_TILES][Gemm::M_TILES];
 	mm.run(A, B, acc_t);
 	matmul_epilogue(mm, acc_t, C);
 }

@@ -3,7 +3,7 @@
 #include "utils.cuh"
 
 #pragma nv_diag_suppress 186
-
+/*
 template<
 	const usize D_IN,
 	const usize D_OUT,
@@ -188,7 +188,7 @@ struct BaseMatMul {
 		return (warp_idx % N_WARPS) * N_PER_WARP;
 	}
 
-	typename<Epilogue>
+	template<typename Epilogue>
 	X17_DEVICE void run(
 		bf16 *A,
 		bf16 *B,
@@ -216,7 +216,7 @@ struct BaseMatMul {
 			cp_async_commit();
 		}
 
-		Fragment_16x16<f32> acc_t[MatMul::N_TILES][MatMul::M_TILES];
+		Fragment_16x16<f32> acc_t[N_TILES][M_TILES];
 		zero_(acc_t);
 
 		Fragment_16x16<bf16> rA[K_TILES][M_TILES];
@@ -350,7 +350,127 @@ struct MatMulGeGluEpilogue {
 		}
 	}
 };
+*/
 
+template<
+	const usize _GM, const usize _GN, // size of the input matrix in GMEM
+	const usize _M, const usize _N, // size of preloaded tile
+	const usize _GMEM_PRELOAD = 2 // number of preloaded tiles
+>
+struct MatrixLoader {
+	static constexpr usize GM = _GM;
+	static constexpr usize GN = _GN;
+	static constexpr usize M = _M;
+	static constexpr usize N = _N;
+	static constexpr usize GMEM_PRELOAD = _GMEM_PRELOAD;
+
+	static_assert(GM % 16 == 0);
+	static_assert(GN % 16 == 0);
+	static_assert(M % 16 == 0);
+	static_assert(N % 16 == 0);
+
+	static constexpr usize SMEM_BYTES = M * N * GMEM_PRELOAD * sizeof(bf16);
+
+	using GInput = GMatrix<bf16, GM, GN>;
+	using SPreload = SMatrix<bf16, M * GMEM_PRELOAD, N>;
+
+	GInput gInput;
+	SPreload sPreload;
+
+	X17_DEVICE MatrixLoader(bf16 *gmem_addr):
+		gInput(gmem_addr),
+		sPreload()
+	{}
+
+	X17_DEVICE void set_smem_addr(usize smem_addr) {
+		sPreload._ptr = smem_addr;
+	}
+
+	/// `cp_async` a tile with size [M, N] at position [M*m, N*n] into SMEM.
+	/// `step` may be a global K-step; the shared-memory ring slot is selected
+	/// modulo `GMEM_PRELOAD`.
+	template<const usize THREADS_PER_BLOCK>
+	X17_DEVICE void cp_async(usize step, usize m, usize n) {
+		cp_async_gmem_to_smem<THREADS_PER_BLOCK, M, N>(
+			threadIdx.x,
+			gInput.template tile_m<M>(m).slice_n<N>(N*n),
+			sPreload.template tile_m<M>(step % GMEM_PRELOAD),
+			0, 0, 0, 0
+		);
+	}
+
+	/// Load fragment at tile coordinates [m, n] from the SMEM ring buffer.
+	X17_DEVICE void load_fragment(usize step, usize m, usize n, Fragment_16x16<bf16> &frag) {
+		auto s = sPreload.tile_m<M>(step % GMEM_PRELOAD);
+		smem_tile_to_fragment(s, m*16, n*16, frag);
+	}
+
+	X17_DEVICE void load_fragment_trans(usize step, usize m, usize n, Fragment_16x16<bf16> &frag) {
+		auto s = sPreload.tile_m<M>(step % GMEM_PRELOAD);
+		smem_tile_to_fragment_trans(s, m*16, n*16, frag);
+	}
+};
+
+template<
+	const usize _GM, const usize _GN,
+	const usize _M, const usize _N,
+	const usize _GMEM_PRELOAD = 2
+>
+struct MatrixTransLoader {
+	static constexpr usize GM = _GM;
+	static constexpr usize GN = _GN;
+	static constexpr usize M = _M;
+	static constexpr usize N = _N;
+	static constexpr usize GMEM_PRELOAD = _GMEM_PRELOAD;
+
+	static constexpr usize SMEM_BYTES = M * N * GMEM_PRELOAD * sizeof(bf16);
+
+	MatrixLoader<GN, GM, N, M, GMEM_PRELOAD> loader;
+
+	X17_DEVICE MatrixTransLoader(bf16 *gmem_addr):
+		loader(gmem_addr)
+	{}
+
+	X17_DEVICE void set_smem_addr(usize smem_addr) {
+		loader.set_smem_addr(smem_addr);
+	}
+
+	template<const usize THREADS_PER_BLOCK>
+	X17_DEVICE void cp_async(usize step, usize m, usize n) {
+		loader.template cp_async<THREADS_PER_BLOCK>(step, n, m);
+	}
+
+	X17_DEVICE void load_fragment(usize step, usize m, usize n, Fragment_16x16<bf16> &frag) {
+		loader.load_fragment_trans(step, n, m, frag);
+	}
+
+	X17_DEVICE void load_fragment_trans(usize step, usize m, usize n, Fragment_16x16<bf16> &frag) {
+		loader.load_fragment(step, n, m, frag);
+	}
+};
+
+template<const usize GN>
+struct MatrixWriter {
+	bf16 *gPtr;
+
+	X17_DEVICE MatrixWriter(bf16 *p):
+		gPtr(p)
+	{}
+
+	template<const usize M_TILES, const usize N_TILES>
+	X17_DEVICE void write(
+		usize row, usize col,
+		Fragment_16x16<f32> (&acc)[M_TILES][N_TILES]
+	) {
+		bf16 *p = gPtr + row * GN + col;
+		GMatrix<bf16, 16*M_TILES, 16*N_TILES> gC_block{p, GN};
+		X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+			store(acc[mi], gC_block, mi * 16, 0);
+		}
+	}
+};
+
+/*
 template<typename MatMul>
 __global__ __launch_bounds__(MatMul::THREADS_PER_BLOCK)
 void matmul(bf16 *A, bf16 *B, bf16 *C) {
@@ -363,4 +483,139 @@ __global__ __launch_bounds__(MatMul::THREADS_PER_BLOCK)
 void matmul_geglu(bf16 *A, bf16 *B, bf16 *C, bf16 *C_backvec) {
 	MatMul mm = MatMul();
 	mm.run(A, B, MatMulGeGluEpilogue<MatMul>(C, C_backvec));
+}
+*/
+
+template<typename _ALoader, typename _BLoader, typename _CWriter>
+struct Gemm {
+	using ALoader = _ALoader;
+	using BLoader = _BLoader;
+	using CWriter = _CWriter;
+
+	static constexpr usize M_PER_BLOCK = ALoader::M;
+	static constexpr usize N_PER_BLOCK = BLoader::N;
+	static constexpr usize K_STEP = ALoader::N;
+	static_assert(BLoader::M == K_STEP);
+
+	static constexpr usize M_WARPS = 2;
+	static constexpr usize N_WARPS = 2;
+	static constexpr usize WARPS_PER_BLOCK = M_WARPS * N_WARPS;
+	static constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
+	static constexpr usize M_PER_WARP = M_PER_BLOCK / M_WARPS;
+	static constexpr usize N_PER_WARP = N_PER_BLOCK / N_WARPS;
+
+	static constexpr usize M_TILES = M_PER_WARP / 16;
+	static constexpr usize N_TILES = N_PER_WARP / 16;
+	static constexpr usize K_TILES = K_STEP / 16;
+	static_assert(M_TILES * M_WARPS * 16 == M_PER_BLOCK);
+	static_assert(N_TILES * N_WARPS * 16 == N_PER_BLOCK);
+
+	static constexpr usize SMEM_BYTES = ALoader::SMEM_BYTES + BLoader::SMEM_BYTES;
+	static constexpr usize GMEM_PRELOAD = ALoader::GMEM_PRELOAD;
+	static_assert(BLoader::GMEM_PRELOAD == GMEM_PRELOAD);
+
+	X17_DEVICE void run(
+		ALoader &A,
+		BLoader &B,
+		CWriter &C
+	) {
+		usize K_ITERS = std::min<usize>(ALoader::GN, BLoader::GM) / K_STEP;
+
+		usize block_m = blockIdx.x;
+		usize block_n = blockIdx.y;
+		usize tid = threadIdx.x;
+		usize warp_idx = tid / WARP_SIZE;
+		usize warp_m = (warp_idx / N_WARPS);
+		usize warp_n = (warp_idx % N_WARPS);
+
+		A.set_smem_addr(0);
+		B.set_smem_addr(ALoader::SMEM_BYTES);
+
+		X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD; ++p) {
+			if (p < K_ITERS) {
+				A.template cp_async<THREADS_PER_BLOCK>(p, block_m, p);
+				B.template cp_async<THREADS_PER_BLOCK>(p, p, block_n);
+			}
+			cp_async_commit();
+		}
+
+		Fragment_16x16<bf16> rA[M_TILES][K_TILES];
+		Fragment_16x16<bf16> rBT[K_TILES][N_TILES];
+		Fragment_16x16<f32> acc[N_TILES][M_TILES];
+		zero_(acc);
+
+		cp_async_wait<GMEM_PRELOAD - 1>();
+		sync_threads();
+
+		X17_UNROLL for (usize ki = 0; ki < K_TILES; ++ki) {
+			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+				A.load_fragment(
+					0,
+					warp_m * M_TILES + mi,
+					ki,
+					rA[mi][ki]
+				);
+			}
+			X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+				B.load_fragment_trans(
+					0,
+					ki,
+					warp_n * N_TILES + ni,
+					rBT[ki][ni]
+				);
+			}
+		}
+
+		X17_UNROLL for (usize k_step = 0; k_step < K_ITERS; ++k_step) {
+			{ // Get more data from GMEM
+				cp_async_wait<GMEM_PRELOAD - 2>();
+				sync_threads();
+
+				usize p = k_step + GMEM_PRELOAD;
+				if (p < K_ITERS) {
+					A.template cp_async<THREADS_PER_BLOCK>(p, block_m, p);
+					B.template cp_async<THREADS_PER_BLOCK>(p, p, block_n);
+				}
+				cp_async_commit();
+			}
+
+			X17_UNROLL for (usize ki = 0; ki < K_TILES; ++ki) {
+				X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+					X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+						mma_a_bt(rBT[ki][ni], rA[mi][ki], acc[ni][mi]);
+					}
+					A.load_fragment(
+						k_step + 1,
+						warp_m * M_TILES + mi,
+						ki,
+						rA[mi][ki]
+					);
+				}
+				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+					B.load_fragment_trans(
+						k_step + 1,
+						ki,
+						warp_n * N_TILES + ni,
+						rBT[ki][ni]
+					);
+				}
+			}
+		}
+
+		C.write(
+			block_n * N_PER_BLOCK + warp_n * N_PER_WARP,
+			block_m * M_PER_BLOCK + warp_m * M_PER_WARP,
+			acc
+		);
+	}
+};
+
+template<typename Gemm>
+__global__ __launch_bounds__(Gemm::THREADS_PER_BLOCK)
+void gemm(bf16 *A, bf16 *B, bf16 *C) {
+	auto a_loader = Gemm::ALoader(A);
+	auto b_loader = Gemm::BLoader(B);
+	auto c_writer = Gemm::CWriter(C);
+	auto mm = Gemm();
+	mm.run(a_loader, b_loader, c_writer);
 }

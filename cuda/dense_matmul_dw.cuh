@@ -150,31 +150,31 @@ struct DenseMatMul_dw {
 	}
 };
 
-template<typename MatMul>
+template<typename Gemm>
 X17_DEVICE void matmul_dw_epilogue(
-	MatMul const &matmul,
-	Fragment_16x16<f32> (&acc_t)[MatMul::N_TILES][MatMul::M_TILES],
+	Gemm const &matmul,
+	Fragment_16x16<f32> (&acc_t)[Gemm::N_TILES][Gemm::M_TILES],
 	bf16 *C
 ) {
-	constexpr usize D_IN = MatMul::M;
+	constexpr usize D_IN = Gemm::M;
 
 	usize warp_m = matmul.warp_m();
 	usize warp_n = matmul.warp_n();
 	bf16 *c_ptr =
 		C
-		+ blockIdx.y * MatMul::N_PER_BLOCK * D_IN
-		+ blockIdx.x * MatMul::M_PER_BLOCK;
-	GMatrix<bf16, MatMul::N_PER_BLOCK, MatMul::M_PER_BLOCK> gC_block{c_ptr, D_IN};
-	X17_UNROLL for (usize ni = 0; ni < MatMul::N_TILES; ++ni) {
+		+ blockIdx.y * Gemm::N_PER_BLOCK * D_IN
+		+ blockIdx.x * Gemm::M_PER_BLOCK;
+	GMatrix<bf16, Gemm::N_PER_BLOCK, Gemm::M_PER_BLOCK> gC_block{c_ptr, D_IN};
+	X17_UNROLL for (usize ni = 0; ni < Gemm::N_TILES; ++ni) {
 		store(acc_t[ni], gC_block, warp_n + ni * 16, warp_m);
 	}
 }
 
-template<typename MatMul>
-__global__ __launch_bounds__(MatMul::THREADS_PER_BLOCK)
+template<typename Gemm>
+__global__ __launch_bounds__(Gemm::THREADS_PER_BLOCK)
 void matmul_dw(usize seq_len, bf16 *A, bf16 *B, bf16 *C) {
-	MatMul mm = MatMul();
-	Fragment_16x16<f32> acc_t[MatMul::N_TILES][MatMul::M_TILES];
+	Gemm mm = Gemm();
+	Fragment_16x16<f32> acc_t[Gemm::N_TILES][Gemm::M_TILES];
 	mm.run(seq_len, A, B, acc_t);
 	matmul_dw_epilogue(mm, acc_t, C);
 }
