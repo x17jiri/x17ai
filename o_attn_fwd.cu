@@ -14,7 +14,7 @@ using ALoader = MatrixLoader<
 >;
 using BLoader = MatrixTransLoader<
 	config::n_heads * config::head_dim, config::n_inputs,
-	64, 128
+	64, 64
 >;
 using CWriter = MatrixWriter<config::d_model>;
 

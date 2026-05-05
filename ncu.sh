@@ -18,7 +18,7 @@ set -x
 	--launch-count 1 \
 	-o "${OUT_FILE}" \
 	-f \
-	"${TARGET}" x
+	"${TARGET}"
 
 /usr/local/cuda-12.6/bin/ncu \
 	--import "${OUT_FILE}" \
