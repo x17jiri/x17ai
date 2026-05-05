@@ -7,14 +7,13 @@
 #include <algorithm>
 #include <filesystem>
 
+constexpr usize SEQ_LEN = config::n_inputs;
+constexpr usize D_MODEL = config::d_model;
+constexpr usize ATTN_WIDTH = config::n_heads * config::head_dim;
 
-using ALoader = MatrixLoader<
-	config::d_model, config::n_heads * config::head_dim,
-	128, 64
->;
+using ALoader = MatrixLoader<ATTN_WIDTH, 128, 64>;
 using BLoader = MatrixTransLoader<
-	config::n_heads * config::head_dim, config::n_inputs,
-	64, 64
+	MatrixLoader<ATTN_WIDTH, 64, 64>
 >;
 using CWriter = MatrixWriter<config::d_model>;
 
@@ -26,13 +25,8 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	constexpr usize SEQ_LEN = config::n_inputs;
-	constexpr usize D_MODEL = config::d_model;
-	constexpr usize ATTN_WIDTH = config::n_heads * config::head_dim;
 
 	static_assert(config::d_model == ATTN_WIDTH);
-
-//	using MatMul = DenseMatMul<ATTN_WIDTH, D_MODEL>;
 
 	if (SEQ_LEN % MyGemm::N_PER_BLOCK != 0) {
 		printf("Expected n_inputs %% %u == 0\n", MyGemm::N_PER_BLOCK);
@@ -66,8 +60,8 @@ int main(int argc, char *argv[]) {
 	int warmup = 50;
 	for (int i = 0; i < warmup; ++i) {
 		gemm<MyGemm><<<grid, MyGemm::THREADS_PER_BLOCK, MyGemm::SMEM_BYTES>>>(
-			d_weights,
-			d_attn_out,
+			d_weights, D_MODEL,
+			d_attn_out, SEQ_LEN,
 			d_out
 		);
 	}
@@ -82,8 +76,8 @@ int main(int argc, char *argv[]) {
 	for (int i = 0; i < num_runs; ++i) {
 		cudaEventRecord(starts[i]);
 		gemm<MyGemm><<<grid, MyGemm::THREADS_PER_BLOCK, MyGemm::SMEM_BYTES>>>(
-			d_weights,
-			d_attn_out,
+			d_weights, D_MODEL,
+			d_attn_out, SEQ_LEN,
 			d_out
 		);
 		cudaEventRecord(ends[i]);
