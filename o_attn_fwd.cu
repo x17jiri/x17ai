@@ -10,11 +10,11 @@
 
 using ALoader = MatrixLoader<
 	config::d_model, config::n_heads * config::head_dim,
-	64, 128
+	128, 64
 >;
 using BLoader = MatrixTransLoader<
 	config::n_heads * config::head_dim, config::n_inputs,
-	128, 64
+	64, 128
 >;
 using CWriter = MatrixWriter<config::d_model>;
 
