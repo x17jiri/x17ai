@@ -371,6 +371,160 @@ struct MatrixLoader {
 	}
 };
 
+template<
+	const usize _GN, // number of columns of the input matrix in GMEM
+	const usize FAN_IN, const usize CYCLE,
+	const usize _M, const usize _N, // size of preload tile
+	const usize _GMEM_PRELOAD = 2 // number of preload tiles
+>
+struct SparseMatrixLoader {
+	static constexpr usize M = _M;
+	static constexpr usize N = _N;
+	static constexpr usize GMEM_PRELOAD = _GMEM_PRELOAD;
+
+	static_assert(_GN % N == 0);
+	static_assert(M % 16 == 0);
+	static_assert(N % 16 == 0);
+
+	static constexpr usize INPUT_STEP = _GN / CYCLE;
+	static constexpr usize GROUP_TILE_CNT = CYCLE / 16;
+	static constexpr usize GROUP_CNT = M / CYCLE;
+	static_assert(FAN_IN < _GN);
+	static_assert(INPUT_STEP % 16 == 0);
+	static_assert(_GN % CYCLE == 0);
+	static_assert(M % CYCLE == 0);
+	static_assert(CYCLE <= N);
+	static_assert(CYCLE % 16 == 0);
+
+	static constexpr usize SMEM_BYTES = M * N * GMEM_PRELOAD * sizeof(bf16);
+
+	using GInput = GMatrixDynSize<bf16, _GN>;
+	using SPreload = SMatrix<bf16, M * GMEM_PRELOAD, N>;
+
+	GInput gInput;
+	SPreload sPreload;
+
+	X17_DEVICE usize m_rows() const { return gInput.m_rows(); }
+	X17_DEVICE usize n_cols() const { return gInput.n_cols(); }
+
+	X17_DEVICE SparseMatrixLoader(bf16 *gmem_addr, usize m_rows):
+		gInput(gmem_addr, m_rows),
+		sPreload()
+	{}
+
+	template<const u32 CAP>
+	X17_DEVICE void alloc_smem(SMemAllocator<CAP> &smem_alloc) {
+		sPreload._ptr = smem_alloc.alloc(SMEM_BYTES);
+	}
+
+	/// `cp_async` a tile with size [M, N] at position [M*m, N*n] into SMEM.
+	/// `step` may be a global K-step; the shared-memory ring slot is selected
+	/// modulo `GMEM_PRELOAD`.
+	template<const usize THREADS_PER_BLOCK>
+	X17_DEVICE void cp_async(usize p, usize m, usize n) {
+		static_assert(N % CYCLE == 0, "current implementation assume we don't start in the middle of a cycle");
+
+		using T = bf16;
+		GMatrix<T, M, FAN_IN> src = gInput.template tile_m<M>(m);
+		SMatrix<T, M, N> dst = sPreload.template tile_m<M>(p % GMEM_PRELOAD);
+		static constexpr usize GM = src.m_rows();
+		static constexpr usize GN = src.n_cols();
+		[[maybe_unused]] static constexpr usize DST_ROWS = dst.m_rows();
+		static constexpr usize DST_COLS = dst.n_cols();
+		static constexpr usize ROW_BYTES = dst.ROW_BYTES;
+		usize tid = threadIdx.x;
+		usize dst_row = 0;
+		usize dst_col = 0;
+
+		constexpr usize SRC_ROW_BYTES = GN * sizeof(T);
+		constexpr usize CP_BYTES = 16;
+		constexpr usize CP_PER_ROW = SRC_ROW_BYTES / CP_BYTES;
+		constexpr usize ROWS_PER_STEP = THREADS_PER_BLOCK / CP_PER_ROW;
+		constexpr usize STEPS = GM / ROWS_PER_STEP;
+
+		static_assert(CP_BYTES % sizeof(T) == 0);
+		static_assert((GN * sizeof(T)) % CP_BYTES == 0);
+		static_assert((DST_COLS * sizeof(T)) % CP_BYTES == 0);
+		static_assert(THREADS_PER_BLOCK % CP_PER_ROW == 0);
+		if constexpr (STEPS == 0) {
+			if constexpr (GM % ROWS_PER_STEP == 0) {
+				return;
+			}
+			if (tid >= (GM % ROWS_PER_STEP) * CP_PER_ROW) {
+				return;
+			}
+		}
+
+		// Thread's position within a step is fixed
+		usize off_in_row = dst_col * sizeof(T) + (tid % CP_PER_ROW) * CP_BYTES;
+		usize col_in_row = off_in_row / sizeof(T);
+		usize row_in_step = tid / CP_PER_ROW;
+		usize src_col = (tid % CP_PER_ROW) * CP_BYTES;
+
+		constexpr usize REPEAT_AFTER = least_common_multiple(8, ROWS_PER_STEP) / ROWS_PER_STEP;
+		usize off[REPEAT_AFTER];
+		X17_UNROLL for (usize i = 0; i < REPEAT_AFTER; ++i) {
+			usize row = dst_row + i * ROWS_PER_STEP + row_in_step;
+			off[i] = off_in_row ^ ((row & 7) << 4);
+		}
+
+		usize first_col = row_in_step * INPUT_STEP;
+		usize first_col_step = ROWS_PER_STEP * INPUT_STEP;
+
+		u8 const * first_src_ptr =
+			reinterpret_cast<u8 const *>(src._ptr)
+			+ p * N * sizeof(T)
+			+ row_in_step * src.stride_bytes()
+			+ src_col;
+		usize src_step = ROWS_PER_STEP * src.stride_bytes();
+
+		u32 first_dst_ptr = dst._ptr + (dst_row + row_in_step) * ROW_BYTES;
+		u32 dst_step = ROWS_PER_STEP * ROW_BYTES;
+
+		if constexpr (STEPS > 0) {
+			X17_UNROLL for (usize step = 0; step < STEPS; ++step) {
+				u8 const * src_ptr = first_src_ptr + step * src_step;
+				u32 dst_ptr = first_dst_ptr + step * dst_step;
+				u32 dst_ptr_swizzled = dst_ptr + off[step % REPEAT_AFTER];
+				if (usize(p * N + col_in_row - first_col) < FAN_IN) {
+					sm80::cp_async(src_ptr - first_col * sizeof(T), dst_ptr_swizzled);
+				} else if (usize(p * N + col_in_row + GN - first_col) < FAN_IN) {
+					sm80::cp_async(src_ptr + (GN - first_col) * sizeof(T), dst_ptr_swizzled);
+				} else {
+					store_shared_4x32b(dst_ptr_swizzled, 0.0f, 0.0f, 0.0f, 0.0f);
+				}
+				first_col = (first_col + first_col_step) % GN;
+			}
+		}
+		if constexpr (GM % ROWS_PER_STEP != 0) {
+			usize step = STEPS;
+			if (tid < (GM % ROWS_PER_STEP) * CP_PER_ROW) {
+				u8 const *src_ptr = first_src_ptr + step * src_step;
+				u32 const dst_ptr = first_dst_ptr + step * dst_step;
+				u32 dst_ptr_swizzled = dst_ptr + off[step % REPEAT_AFTER];
+				if (usize(p * N + col_in_row - first_col) < FAN_IN) {
+					sm80::cp_async(src_ptr - first_col * sizeof(T), dst_ptr_swizzled);
+				} else if (usize(p * N + col_in_row + GN - first_col) < FAN_IN) {
+					sm80::cp_async(src_ptr + (GN - first_col) * sizeof(T), dst_ptr_swizzled);
+				} else {
+					store_shared_4x32b(dst_ptr_swizzled, 0.0f, 0.0f, 0.0f, 0.0f);
+				}
+			}
+		}
+	}
+
+	/// Load fragment at tile coordinates [m, n] from the SMEM ring buffer.
+	X17_DEVICE void load_fragment(usize step, usize m, usize n, Fragment_16x16<bf16> &frag) {
+		auto s = sPreload.tile_m<M>(step % GMEM_PRELOAD);
+		smem_tile_to_fragment(s, m*16, n*16, frag);
+	}
+
+	X17_DEVICE void load_fragment_trans(usize step, usize m, usize n, Fragment_16x16<bf16> &frag) {
+		auto s = sPreload.tile_m<M>(step % GMEM_PRELOAD);
+		smem_tile_to_fragment_trans(s, m*16, n*16, frag);
+	}
+};
+
 template<typename MatrixLoader>
 struct MatrixTransLoader {
 	static constexpr usize M = MatrixLoader::N;
@@ -434,7 +588,7 @@ struct MatrixGeGluWriter {
 	bf16 *gC;
 	bf16 *gC_backvec;
 
-	X17_DEVICE MatrixWriter(bf16 *gC, bf16 *gC_backvec):
+	X17_DEVICE MatrixGeGluWriter(bf16 *gC, bf16 *gC_backvec):
 		gC(gC),
 		gC_backvec(gC_backvec)
 	{}
@@ -456,13 +610,13 @@ struct MatrixGeGluWriter {
 		Fragment_16x16<bf16> out[M_TILES][N_TILES / 2];
 		X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
 			X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-				geglu_<GEGLU_SCALE>(acc[mi][2*ni], acc_t[mi][2*ni+1], out[mi][ni]);
+				geglu_<OUTPUT_SCALE>(acc[mi][2*ni], acc[mi][2*ni+1], out[mi][ni]);
 			}
 		}
 
 		GMatrix<bf16, 16*M_TILES, 8*N_TILES> C(gC, GN);
 		X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-			store(acc[mi], C, row + 16*mi, col);
+			store(acc[mi], C, row + 16*mi, col/2);
 		}
 
 		/*
@@ -489,7 +643,7 @@ struct Gemm {
 	static constexpr usize M_PER_BLOCK = ALoader::M;
 	static constexpr usize N_PER_BLOCK = BLoader::N;
 	static constexpr usize K_STEP = ALoader::N;
-//	static_assert(BLoader::M == K_STEP);
+	static_assert(BLoader::M == K_STEP);
 
 	static constexpr usize M_WARPS = 2;
 	static constexpr usize N_WARPS = 2;

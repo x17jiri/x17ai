@@ -1,5 +1,4 @@
-//#include "cuda/dense_matmul.cuh"
-#include "cuda/base_matmul.cuh"
+#include "cuda/gemm.cuh"
 
 #include "block.config.hpp"
 #include "utils2.cuh"
