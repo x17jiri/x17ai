@@ -1587,8 +1587,8 @@ X17_DEVICE void geglu_and_backward_(
 	f32 gate2 = i2.first();
 	f32 lin2 = i2.second();
 
-	auto g1 = math::fast::gelu<INP_SCALE_2, OUT_SCALE_2>(gate1);
-	auto g2 = math::fast::gelu<INP_SCALE_2, OUT_SCALE_2>(gate2);
+	auto g1 = math::fast::gelu<INP_SCALE_2, INP_SCALE_2 * OUT_SCALE_2>(gate1);
+	auto g2 = math::fast::gelu<INP_SCALE_2, INP_SCALE_2 * OUT_SCALE_2>(gate2);
 
 	i1.set(
 		lin1 * g1.dVal,
@@ -1599,10 +1599,9 @@ X17_DEVICE void geglu_and_backward_(
 		g2.val
 	);
 
-	constexpr f64 INPUT_SCALE = math::constexpr_sqrt(INP_SCALE_2);
 	o.set(
-		g1.val * f32(INPUT_SCALE) * lin1,
-		g2.val * f32(INPUT_SCALE) * lin2
+		g1.val * lin1,
+		g2.val * lin2
 	);
 	o.transpose_();
 	usize tid = threadIdx.x % WARP_SIZE;
@@ -1623,6 +1622,8 @@ X17_DEVICE void geglu_and_backward_(
 	geglu_and_backward_<INP_SCALE_2, OUT_SCALE_2>(i1.sub[1][0], i1.sub[1][1], o.sub[1][0]);
 	geglu_and_backward_<INP_SCALE_2, OUT_SCALE_2>(i2.sub[1][0], i2.sub[1][1], o.sub[1][1]);
 }
+
+//--------------------------------------------------------------------------------------------------
 
 struct SoftmaxStats {
 	f32 sum;
