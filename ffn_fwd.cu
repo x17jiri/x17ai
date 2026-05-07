@@ -44,13 +44,14 @@ namespace FfnFwd {
 		bf16 *out,
 		bf16 *grad
 	) {
-		Kernel().run(
-			WeightLoader(w, 2*config::f_width),
-			InputLoader(inp, n_inputs),
-			Write(out, grad)
-		);
+		auto a = WeightLoader(w, 2*config::f_width);
+		auto b = InputLoader(inp, n_inputs);
+		auto o = Writer(out, grad);
+		Kernel().run(a, b, o);
 	}
 }
+
+using namespace FfnFwd;
 
 int main(int argc, char *argv[]) {
 	HarnessCliOptions cli;
@@ -60,12 +61,12 @@ int main(int argc, char *argv[]) {
 
 	static_assert(config::d_model == config::n_heads * config::head_dim);
 
-	if (SEQ_LEN % MyGemm::N_PER_BLOCK != 0) {
-		printf("Expected n_inputs %% %u == 0\n", MyGemm::N_PER_BLOCK);
+	if (SEQ_LEN % Kernel::N_PER_BLOCK != 0) {
+		printf("Expected n_inputs %% %u == 0\n", Kernel::N_PER_BLOCK);
 		return 1;
 	}
-	if (F_PROJ_OUTPUTS % MyGemm::M_PER_BLOCK != 0) {
-		printf("Expected 2 * f_width %% %u == 0\n", MyGemm::M_PER_BLOCK);
+	if (F_PROJ_OUTPUTS % Kernel::M_PER_BLOCK != 0) {
+		printf("Expected 2 * f_width %% %u == 0\n", Kernel::M_PER_BLOCK);
 		return 1;
 	}
 
@@ -91,16 +92,15 @@ int main(int argc, char *argv[]) {
 	cudaMemcpy(d_weights, h_weights.data(), h_weights.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_inputs, h_inputs.data(), h_inputs.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 
-	cudaFuncSetAttribute(gemm2<MyGemm>, cudaFuncAttributeMaxDynamicSharedMemorySize, MyGemm::SMEM_BYTES);
-	cudaFuncSetAttribute(gemm2<MyGemm>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+	cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, Kernel::SMEM_BYTES);
+	cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-	dim3 grid(F_PROJ_OUTPUTS / MyGemm::M_PER_BLOCK, SEQ_LEN / MyGemm::N_PER_BLOCK);
+	dim3 grid(F_PROJ_OUTPUTS / Kernel::M_PER_BLOCK, SEQ_LEN / Kernel::N_PER_BLOCK);
 
 	int warmup = 50;
 	for (int i = 0; i < warmup; ++i) {
-		gemm2<MyGemm><<<grid, MyGemm::THREADS_PER_BLOCK, MyGemm::SMEM_BYTES>>>(
+		kernel<<<grid, Kernel::THREADS_PER_BLOCK, Kernel::SMEM_BYTES>>>(
 			d_weights,
-			F_PROJ_OUTPUTS,
 			d_inputs,
 			SEQ_LEN,
 			d_out,
@@ -117,9 +117,8 @@ int main(int argc, char *argv[]) {
 	}
 	for (int i = 0; i < num_runs; ++i) {
 		cudaEventRecord(starts[i]);
-		gemm2<MyGemm><<<grid, MyGemm::THREADS_PER_BLOCK, MyGemm::SMEM_BYTES>>>(
+		kernel<<<grid, Kernel::THREADS_PER_BLOCK, Kernel::SMEM_BYTES>>>(
 			d_weights,
-			F_PROJ_OUTPUTS,
 			d_inputs,
 			SEQ_LEN,
 			d_out,
@@ -155,7 +154,7 @@ int main(int argc, char *argv[]) {
 	store_tensor("tmp/block_cuda/f.bin", h_out, SEQ_LEN, F_WIDTH);
 	store_tensor("tmp/block_cuda/f_backvec.bin", h_backvec, SEQ_LEN, F_PROJ_OUTPUTS);
 
-	printf("Used SMEM per kernel: %u\n", MyGemm::SMEM_BYTES);
+	printf("Used SMEM per kernel: %u\n", Kernel::SMEM_BYTES);
 
 	cudaFree(d_weights);
 	cudaFree(d_inputs);

@@ -274,7 +274,7 @@ struct MatrixWriter {
 	) {
 		GMatrix<bf16, 16*M_TILES, 16*N_TILES> C(gC, c_stride);
 		X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-			store(acc[mi], gC_block, row + 16*mi, col);
+			store(acc[mi], C, row + 16*mi, col);
 		}
 	}
 };
@@ -290,8 +290,8 @@ struct MatrixGeGluWriter {
 	// OUT_SCALE_2 = 1.53 * 1.53 / GN
 	static constexpr f64 OUT_SCALE_2 =
 		1.0 / (
-			(f64(GM) * 3.0)
-			+ f64(GM) * 0.5 * std::numbers::inv_pi_v<f64> * std::numbers::inv_sqrt3_v<f64>
+			(f64(GN) / 3.0)
+			+ f64(GN) * 0.5 * std::numbers::inv_pi_v<f64> * std::numbers::inv_sqrt3_v<f64>
 		);
 
 	X17_DEVICE MatrixGeGluWriter(bf16 *gC, bf16 *gGrad):
@@ -364,7 +364,7 @@ struct Gemm {
 
 	static constexpr usize SMEM_BYTES = ALoader::SMEM_BYTES + BLoader::SMEM_BYTES;
 	static constexpr usize GMEM_PRELOAD = ALoader::GMEM_PRELOAD;
-	static_assert(BLoader::GMEM_PRELOAD == GMEM_PRELOAD);
+	static_assert(ALoader::GMEM_PRELOAD == BLoader::GMEM_PRELOAD);
 
 	X17_DEVICE void run(
 		ALoader &A,
