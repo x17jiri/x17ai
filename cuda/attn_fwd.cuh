@@ -59,7 +59,7 @@ struct AttnForward {
 
 	static constexpr f64 V_SCALE = math::constexpr_sqrt(f64(D_MODEL) / f64(QKV_FAN_IN));
 	static constexpr f64 V_SCALE_FIX = 1.5;
-	static constexpr f64 GEGLU_SCALE = 1.53 * math::constexpr_rsqrt(V_DIM * HEAD_CNT);
+	static constexpr f64 GEGLU_SCALE = 1.53 * math::constexpr_inv_sqrt(V_DIM * HEAD_CNT);
 
 	static_assert(HEADS_PER_KERNEL > 0, "HEADS_PER_KERNEL must be > 0");
 	static_assert(HEAD_CNT % HEADS_PER_KERNEL == 0, "HEAD_CNT must be divisible by HEADS_PER_KERNEL");

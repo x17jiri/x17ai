@@ -24,27 +24,27 @@ int main(int argc, char *argv[]) {
 	constexpr usize WINDOW_SIZE = 0;//256;
 	{
 		f64 ref = std::sqrt(1.0 / QK_DIM);
-		f64 my = math::constexpr_rsqrt(f64(QK_DIM));
+		f64 my = math::constexpr_inv_sqrt(f64(QK_DIM));
 		f64 diff = std::abs(ref - my);
-		printf("sqrt=%.30e, constexpr_rsqrt=%.30e, diff=%.30e\n", ref, my, diff);
+		printf("sqrt=%.30e, constexpr_inv_sqrt=%.30e, diff=%.30e\n", ref, my, diff);
 		if (diff > 1e-10) {
 			return 1;
 		}
 	}
 /*	{
 		f64 ref = 1.0/std::sqrt(std::numeric_limits<f64>::min());
-		f64 my = math::constexpr_rsqrt(std::numeric_limits<f64>::min());
+		f64 my = math::constexpr_inv_sqrt(std::numeric_limits<f64>::min());
 		f64 diff = std::abs(ref - my);
-		printf("sqrt=%.30e, constexpr_rsqrt=%.30e, diff=%.30e\n", ref, my, diff);
+		printf("sqrt=%.30e, constexpr_inv_sqrt=%.30e, diff=%.30e\n", ref, my, diff);
 		if (diff > 1e-10) {
 			return 1;
 		}
 	}
 	{
 		f64 ref = 1.0/std::sqrt(std::numeric_limits<f64>::max());
-		f64 my = math::constexpr_rsqrt(std::numeric_limits<f64>::max());
+		f64 my = math::constexpr_inv_sqrt(std::numeric_limits<f64>::max());
 		f64 diff = std::abs(ref - my);
-		printf("rsqrt=%.30e, constexpr_rsqrt=%.30e, diff=%.30e, x = %.30e\n", ref, my, diff, std::numeric_limits<f64>::max());
+		printf("rsqrt=%.30e, constexpr_inv_sqrt=%.30e, diff=%.30e, x = %.30e\n", ref, my, diff, std::numeric_limits<f64>::max());
 		if (diff > 1e-10) {
 			return 1;
 		}

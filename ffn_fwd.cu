@@ -11,13 +11,46 @@ constexpr usize D_MODEL = config::d_model;
 constexpr usize F_WIDTH = config::f_width;
 constexpr usize F_PROJ_OUTPUTS = 2 * F_WIDTH;
 
-using ALoader = SparseMatrixLoader<D_MODEL, config::qkv_fan_in, config::head_dim, 64, 64>;
-using BLoader = MatrixTransLoader<
-	MatrixLoader<D_MODEL, 128, 64>
->;
-using CWriter = MatrixGeGluWriter<F_WIDTH, D_MODEL, config::qkv_fan_in>;
+namespace FfnFwd {
+	using WeightLoader =
+		SparseMatrixLoader<
+			config::d_model, // d_input,
+			config::qkv_fan_in,
+			config::head_dim, // cycle
+			64, 64 // tile size
+		>;
 
-using MyGemm = Gemm<ALoader, BLoader, CWriter>;
+	using InputLoader =
+		MatrixTransLoader<
+			MatrixLoader<
+				config::d_model, // d_input
+				128, 64 // tile size
+			>
+		>;
+
+	using Writer =
+		MatrixGeGluWriter<
+			config::f_width, // d_output
+			config::d_model, // d_input
+			config::qkv_fan_in
+		>;
+
+	using Kernel = Gemm<WeightLoader, InputLoader, Writer>;
+
+	X17_KERNEL(Kernel::THREADS_PER_BLOCK)
+	void kernel(
+		bf16 *w,
+		bf16 *inp, usize n_inputs,
+		bf16 *out,
+		bf16 *grad
+	) {
+		Kernel().run(
+			WeightLoader(w, 2*config::f_width),
+			InputLoader(inp, n_inputs),
+			Write(out, grad)
+		);
+	}
+}
 
 int main(int argc, char *argv[]) {
 	HarnessCliOptions cli;

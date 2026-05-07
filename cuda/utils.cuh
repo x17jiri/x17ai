@@ -28,6 +28,7 @@
 
 #define X17_DEVICE __forceinline__ __device__
 #define X17_HOST_DEVICE __forceinline__ __host__ __device__
+#define X17_KERNEL(LAUNCH_BOUNDS) __global__ __launch_bounds__(LAUNCH_BOUNDS)
 
 #ifndef X17_PRECISE_MATH
 #define X17_PRECISE_MATH 0
@@ -77,7 +78,7 @@ namespace math {
 		return __fmaf_rn(mul1, mul2, add);
 	}
 
-	constexpr f64 constexpr_rsqrt(f64 x) {
+	constexpr f64 constexpr_inv_sqrt(f64 x) {
 		if (x < 0.0 || x != x) { return std::numeric_limits<f64>::quiet_NaN(); }
 		if (x == 0.0) { return std::numeric_limits<f64>::infinity(); }
 		if (x == std::numeric_limits<f64>::infinity()) { return 0.0; }
@@ -328,20 +329,23 @@ namespace math {
 		/// Scales the input by `1.0 / sqrt(FAN_IN)` before applying the GELU formula.
 		/// The scaling constant is folded into the coefficients of the approximation
 		/// and so it is free at runtime.
-		template<const f64 OUT_SCALE = 1.0, const usize FAN_IN = 1>
+		template<const f64 INP_SCALE_2 = 1.0, const f64 OUT_SCALE_2 = 1.0>
 		X17_DEVICE UnaryResult gelu(f32 x) {
-			constexpr f64 k = constexpr_rsqrt(f64(FAN_IN));
-			constexpr f64 k2 = 1.0 / f64(FAN_IN); // k^2
-			constexpr f64 ck = constexpr_rsqrt(f64(FAN_IN) * std::numbers::pi_v<f64> / 2.0);
+			constexpr f64 k = constexpr_sqrt(INP_SCALE_2);
+			constexpr f64 k2 = INP_SCALE_2;
+			constexpr f64 ck = constexpr_sqrt(INP_SCALE_2 * 2.0 * std::numbers::inv_pi_v<f64>);
 			constexpr f64 ck3 = 0.044715 * ck * k2;
-			constexpr f64 Y_SCALE = 0.5 * OUT_SCALE * k;
+			constexpr f64 Y_SCALE = 0.5 * constexpr_sqrt(OUT_SCALE_2) * k;
 			f32 x2 = x * x;
 			f32 s = math::fma(f32(ck3) * x, x2, f32(ck) * x);
 			auto t = math::fast::tanh(s);
 			f32 x_ds_dx = math::fma(f32(3.0 * ck3) * x, x2, f32(ck) * x);
 			return UnaryResult {
 				.val = math::fma(f32(Y_SCALE) * x, t.val, f32(Y_SCALE) * x),
-				.dVal = math::fma(f32(Y_SCALE) * t.dVal, x_ds_dx, math::fma(f32(Y_SCALE), t.val, f32(Y_SCALE)))
+				.dVal = math::fma(
+					f32(Y_SCALE) * t.dVal, x_ds_dx,
+					math::fma(f32(Y_SCALE), t.val, f32(Y_SCALE))
+				)
 			};
 		}
 
@@ -1571,8 +1575,8 @@ X17_DEVICE void quantize_(Fragment_16x16<f32> (&arr)[K]) {
 	}
 }
 
-template<const f64 OUT_SCALE>
-X17_DEVICE void geglu_(
+template<const f64 INP_SCALE_2 = 1.0, const f64 OUT_SCALE_2 = 1.0>
+X17_DEVICE void geglu_and_backward_(
 	Fragment_8x8<f32> &i1,
 	Fragment_8x8<f32> &i2,
 	Fragment_8x8<bf16> &o
@@ -1583,8 +1587,8 @@ X17_DEVICE void geglu_(
 	f32 gate2 = i2.first();
 	f32 lin2 = i2.second();
 
-	auto g1 = math::fast::gelu<OUT_SCALE>(gate1);
-	auto g2 = math::fast::gelu<OUT_SCALE>(gate2);
+	auto g1 = math::fast::gelu<INP_SCALE_2, INP_SCALE_2 * OUT_SCALE_2>(gate1);
+	auto g2 = math::fast::gelu<INP_SCALE_2, INP_SCALE_2 * OUT_SCALE_2>(gate2);
 
 	i1.set(
 		lin1 * g1.dVal,

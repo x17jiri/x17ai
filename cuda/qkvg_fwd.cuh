@@ -32,7 +32,7 @@ struct QKVGFwd {
 	static constexpr usize SEGMENT_SIZE = N_HEAD * D_HEAD;
 	static constexpr usize GROUP_CNT = M_PER_WARP / D_HEAD;
 	static constexpr usize GROUP_TILE_CNT = D_HEAD / 16;
-	static constexpr f64 ATTN_GEGLU_SCALE = 1.53 * math::constexpr_rsqrt(f64(SEGMENT_SIZE));
+	static constexpr f64 ATTN_GEGLU_SCALE = 1.53 * math::constexpr_inv_sqrt(f64(SEGMENT_SIZE));
 
 	static_assert(ROPE_DIM <= D_HEAD);
 	static_assert(ROPE_DIM % 16 == 0);
