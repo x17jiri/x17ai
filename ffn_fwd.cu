@@ -1,10 +1,23 @@
-#include "cuda/dense_matmul.cuh"
-#include "cuda/sparse_matmul.cuh"
+#include "cuda/gemm.cuh"
+
 #include "block.config.hpp"
 #include "utils2.cuh"
 
 #include <algorithm>
 #include <filesystem>
+
+constexpr usize SEQ_LEN = config::n_inputs;
+constexpr usize D_MODEL = config::d_model;
+constexpr usize F_WIDTH = config::f_width;
+constexpr usize F_PROJ_OUTPUTS = 2 * F_WIDTH;
+
+using ALoader = SparseMatrixLoader<D_MODEL, config::qkv_fan_in, config::head_dim, 64, 64>;
+using BLoader = MatrixTransLoader<
+	MatrixLoader<D_MODEL, 128, 64>
+>;
+using CWriter = MatrixGeGluWriter<F_WIDTH, D_MODEL, config::qkv_fan_in>;
+
+using MyGemm = Gemm<ALoader, BLoader, CWriter>;
 
 int main(int argc, char *argv[]) {
 	HarnessCliOptions cli;
@@ -12,21 +25,18 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	constexpr usize SEQ_LEN = config::n_inputs;
-	constexpr usize D_MODEL = config::d_model;
-	constexpr usize F_WIDTH = config::f_width;
-	constexpr usize F_PROJ_OUTPUTS = 2 * F_WIDTH;
-
 	static_assert(config::d_model == config::n_heads * config::head_dim);
 
-	using FP = SparseMatMul<D_MODEL, 2*F_WIDTH, config::qkv_fan_in, config::head_dim>;
-
-	if (SEQ_LEN % FP::N_PER_BLOCK != 0) {
-		printf("Expected n_inputs %% %u == 0\n", FP::N_PER_BLOCK);
+	if (SEQ_LEN % MyGemm::N_PER_BLOCK != 0) {
+		printf("Expected n_inputs %% %u == 0\n", MyGemm::N_PER_BLOCK);
+		return 1;
+	}
+	if (F_PROJ_OUTPUTS % MyGemm::M_PER_BLOCK != 0) {
+		printf("Expected 2 * f_width %% %u == 0\n", MyGemm::M_PER_BLOCK);
 		return 1;
 	}
 
-	std::vector<bf16> h_weights = load_tensor(torch_tensor_path("f_weights.bin"), F_WIDTH, D_MODEL);
+	std::vector<bf16> h_weights = load_tensor(torch_tensor_path("f_weights.bin"), F_PROJ_OUTPUTS, config::qkv_fan_in);
 	std::vector<bf16> h_inputs = load_tensor(torch_tensor_path("inputs_l2.bin"), SEQ_LEN, D_MODEL);
 	if (h_weights.empty() || h_inputs.empty()) {
 		return 1;
@@ -48,16 +58,18 @@ int main(int argc, char *argv[]) {
 	cudaMemcpy(d_weights, h_weights.data(), h_weights.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_inputs, h_inputs.data(), h_inputs.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 
-	cudaFuncSetAttribute(matmul_geglu<FP>, cudaFuncAttributeMaxDynamicSharedMemorySize, FP::SMEM_BYTES);
-	cudaFuncSetAttribute(matmul_geglu<FP>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+	cudaFuncSetAttribute(gemm2<MyGemm>, cudaFuncAttributeMaxDynamicSharedMemorySize, MyGemm::SMEM_BYTES);
+	cudaFuncSetAttribute(gemm2<MyGemm>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-	dim3 grid(F_PROJ_OUTPUTS / FP::M_PER_BLOCK, SEQ_LEN / FP::N_PER_BLOCK);
+	dim3 grid(F_PROJ_OUTPUTS / MyGemm::M_PER_BLOCK, SEQ_LEN / MyGemm::N_PER_BLOCK);
 
 	int warmup = 50;
 	for (int i = 0; i < warmup; ++i) {
-		matmul_geglu<FP><<<grid, FP::THREADS_PER_BLOCK, FP::SMEM_BYTES>>>(
+		gemm2<MyGemm><<<grid, MyGemm::THREADS_PER_BLOCK, MyGemm::SMEM_BYTES>>>(
 			d_weights,
+			F_PROJ_OUTPUTS,
 			d_inputs,
+			SEQ_LEN,
 			d_out,
 			d_backvec
 		);
@@ -72,9 +84,11 @@ int main(int argc, char *argv[]) {
 	}
 	for (int i = 0; i < num_runs; ++i) {
 		cudaEventRecord(starts[i]);
-		matmul_geglu<FP><<<grid, FP::THREADS_PER_BLOCK, FP::SMEM_BYTES>>>(
+		gemm2<MyGemm><<<grid, MyGemm::THREADS_PER_BLOCK, MyGemm::SMEM_BYTES>>>(
 			d_weights,
+			F_PROJ_OUTPUTS,
 			d_inputs,
+			SEQ_LEN,
 			d_out,
 			d_backvec
 		);
@@ -98,7 +112,7 @@ int main(int argc, char *argv[]) {
 
 	float median_ms = times_ms[num_runs / 2];
 	float min_ms = times_ms[0];
-	double tflops = FP::flops(SEQ_LEN) / (median_ms * 1e-3) / 1e12;
+	double tflops = 2.0 * F_PROJ_OUTPUTS * D_MODEL * SEQ_LEN / (median_ms * 1e-3) / 1e12;
 	printf("Kernel time over %d runs: median %.3f ms  min %.3f ms\n", num_runs, median_ms, min_ms);
 	printf("TFLOPS: %.2f\n", tflops);
 
@@ -108,7 +122,7 @@ int main(int argc, char *argv[]) {
 	store_tensor("tmp/block_cuda/f.bin", h_out, SEQ_LEN, F_WIDTH);
 	store_tensor("tmp/block_cuda/f_backvec.bin", h_backvec, SEQ_LEN, F_PROJ_OUTPUTS);
 
-	printf("Used SMEM per kernel: %u\n", FP::SMEM_BYTES);
+	printf("Used SMEM per kernel: %u\n", MyGemm::SMEM_BYTES);
 
 	cudaFree(d_weights);
 	cudaFree(d_inputs);
