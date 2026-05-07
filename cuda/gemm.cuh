@@ -443,7 +443,7 @@ struct SparseMatrixLoader {
 		constexpr usize REPEAT_AFTER = least_common_multiple(8, ROWS_PER_STEP) / ROWS_PER_STEP;
 		usize swizzle[REPEAT_AFTER];
 		X17_UNROLL for (usize i = 0; i < REPEAT_AFTER; ++i) {
-			usize row = dst_row + i * ROWS_PER_STEP + row_in_step;
+			usize row = i * ROWS_PER_STEP + row_in_step;
 			swizzle[i] = off_in_row ^ ((row & 7) << 4);
 		}
 
@@ -452,7 +452,7 @@ struct SparseMatrixLoader {
 		// data actually starts is different for each row.
 		usize off = p * (N*sizeof(T)) + off_in_row;
 		usize data_off = usize(row_in_step * (INPUT_STEP*sizeof(T))) % usize(GN*sizeof(T));
-		constexpr usize DATA_SIZE * FAN_IN*sizeof(T);
+		constexpr usize DATA_SIZE = FAN_IN*sizeof(T);
 
 		u8 const *src_row_ptr = reinterpret_cast<u8 *>(src._ptr) + row_in_step * SRC_ROW_BYTES;
 		u32 dst_row_ptr = dst._ptr + row_in_step * DST_ROW_BYTES;
@@ -482,9 +482,9 @@ struct SparseMatrixLoader {
 				data_off = (data_off + usize(ROWS_PER_STEP * INPUT_STEP*sizeof(T))) % usize(GN*sizeof(T));
 			}
 		}
-		if constexpr (GM % ROWS_PER_STEP != 0) {
+		if constexpr (M % ROWS_PER_STEP != 0) {
 			usize step = STEPS;
-			if (tid < (GM % ROWS_PER_STEP) * CP_PER_ROW) {
+			if (tid < (M % ROWS_PER_STEP) * CP_PER_ROW) {
 				u32 dst_ptr = dst_row_ptr + swizzle[step % REPEAT_AFTER];
 				usize t1 = off - data_off;
 				usize t2 = t1 + GN*sizeof(T);
