@@ -378,6 +378,7 @@ template<
 	const usize _GMEM_PRELOAD = 2 // number of preload tiles
 >
 struct SparseMatrixLoader {
+	static constexpr usize GN = _GN;
 	static constexpr usize M = _M;
 	static constexpr usize N = _N;
 	static constexpr usize GMEM_PRELOAD = _GMEM_PRELOAD;
@@ -417,97 +418,82 @@ struct SparseMatrixLoader {
 		sPreload._ptr = smem_alloc.alloc(SMEM_BYTES);
 	}
 
-	/// `cp_async` a tile with size [M, N] at position [M*m, N*n] into SMEM.
-	/// `step` may be a global K-step; the shared-memory ring slot is selected
-	/// modulo `GMEM_PRELOAD`.
 	template<const usize THREADS_PER_BLOCK>
 	X17_DEVICE void cp_async(usize p, usize m, usize n) {
-		static_assert(N % CYCLE == 0, "current implementation assume we don't start in the middle of a cycle");
+		static_assert(N % CYCLE == 0, "current implementation assumes we don't start in the middle of a cycle");
 
 		using T = bf16;
 		GMatrix<T, M, FAN_IN> src = gInput.template tile_m<M>(m);
 		SMatrix<T, M, N> dst = sPreload.template tile_m<M>(p % GMEM_PRELOAD);
-		static constexpr usize GM = src.m_rows();
-		static constexpr usize GN = src.n_cols();
-		[[maybe_unused]] static constexpr usize DST_ROWS = dst.m_rows();
-		static constexpr usize DST_COLS = dst.n_cols();
-		static constexpr usize ROW_BYTES = dst.ROW_BYTES;
-		usize tid = threadIdx.x;
-		usize dst_row = 0;
-		usize dst_col = 0;
 
-		constexpr usize SRC_ROW_BYTES = GN * sizeof(T);
+		usize SRC_ROW_BYTES = src.stride_bytes();
+		constexpr usize DST_ROW_BYTES = N*sizeof(T);
 		constexpr usize CP_BYTES = 16;
-		constexpr usize CP_PER_ROW = SRC_ROW_BYTES / CP_BYTES;
+		constexpr usize CP_PER_ROW = DST_ROW_BYTES / CP_BYTES;
 		constexpr usize ROWS_PER_STEP = THREADS_PER_BLOCK / CP_PER_ROW;
-		constexpr usize STEPS = GM / ROWS_PER_STEP;
+		constexpr usize STEPS = M / ROWS_PER_STEP;
 
-		static_assert(CP_BYTES % sizeof(T) == 0);
-		static_assert((GN * sizeof(T)) % CP_BYTES == 0);
-		static_assert((DST_COLS * sizeof(T)) % CP_BYTES == 0);
 		static_assert(THREADS_PER_BLOCK % CP_PER_ROW == 0);
-		if constexpr (STEPS == 0) {
-			if constexpr (GM % ROWS_PER_STEP == 0) {
-				return;
-			}
-			if (tid >= (GM % ROWS_PER_STEP) * CP_PER_ROW) {
-				return;
-			}
-		}
 
 		// Thread's position within a step is fixed
-		usize off_in_row = dst_col * sizeof(T) + (tid % CP_PER_ROW) * CP_BYTES;
-		usize col_in_row = off_in_row / sizeof(T);
+		usize tid = threadIdx.x;
 		usize row_in_step = tid / CP_PER_ROW;
-		usize src_col = (tid % CP_PER_ROW) * CP_BYTES;
+		usize off_in_row = (tid % CP_PER_ROW) * CP_BYTES;
 
 		constexpr usize REPEAT_AFTER = least_common_multiple(8, ROWS_PER_STEP) / ROWS_PER_STEP;
-		usize off[REPEAT_AFTER];
+		usize swizzle[REPEAT_AFTER];
 		X17_UNROLL for (usize i = 0; i < REPEAT_AFTER; ++i) {
 			usize row = dst_row + i * ROWS_PER_STEP + row_in_step;
-			off[i] = off_in_row ^ ((row & 7) << 4);
+			swizzle[i] = off_in_row ^ ((row & 7) << 4);
 		}
 
-		usize first_col = row_in_step * INPUT_STEP;
-		usize first_col_step = ROWS_PER_STEP * INPUT_STEP;
+		// off = column offset in the expanded matrix; off < GN*sizeof(T)
+		// We stay at this offset the whole time, but the data_off, i.e., the offset where
+		// data actually starts is different for each row.
+		usize off = p * (N*sizeof(T)) + off_in_row;
+		usize data_off = usize(row_in_step * (INPUT_STEP*sizeof(T))) % usize(GN*sizeof(T));
+		constexpr usize DATA_SIZE * FAN_IN*sizeof(T);
 
-		u8 const * first_src_ptr =
-			reinterpret_cast<u8 const *>(src._ptr)
-			+ p * N * sizeof(T)
-			+ row_in_step * src.stride_bytes()
-			+ src_col;
-		usize src_step = ROWS_PER_STEP * src.stride_bytes();
+		u8 const *src_row_ptr = reinterpret_cast<u8 *>(src._ptr) + row_in_step * SRC_ROW_BYTES;
+		u32 dst_row_ptr = dst._ptr + row_in_step * DST_ROW_BYTES;
 
-		u32 first_dst_ptr = dst._ptr + (dst_row + row_in_step) * ROW_BYTES;
-		u32 dst_step = ROWS_PER_STEP * ROW_BYTES;
-
+		// for step in 0 ..< STEPS:
+		//     if off in (data_off ..< data_off + DATA_SIZE):
+		//         read the non-expanded matrix at: off - data_off
+		//     else if off + GN*sizeof(T) in (data_off ..< data_off + DATA_SIZE):
+		//         read the non-expanded matrix at: off + GN*sizeof(T) - data_off
+		//     else:
+		//         zero
+		//     data_off = (data_off + ROWS_PER_STEP * INPUT_STEP*sizeof(T)) % (GN*sizeof(T))
 		if constexpr (STEPS > 0) {
 			X17_UNROLL for (usize step = 0; step < STEPS; ++step) {
-				u8 const * src_ptr = first_src_ptr + step * src_step;
-				u32 dst_ptr = first_dst_ptr + step * dst_step;
-				u32 dst_ptr_swizzled = dst_ptr + off[step % REPEAT_AFTER];
-				if (usize(p * N + col_in_row - first_col) < FAN_IN) {
-					sm80::cp_async(src_ptr - first_col * sizeof(T), dst_ptr_swizzled);
-				} else if (usize(p * N + col_in_row + GN - first_col) < FAN_IN) {
-					sm80::cp_async(src_ptr + (GN - first_col) * sizeof(T), dst_ptr_swizzled);
+				u32 dst_ptr = dst_row_ptr + swizzle[step % REPEAT_AFTER];
+				usize t1 = off - data_off;
+				usize t2 = t1 + GN*sizeof(T);
+				if (t1 < DATA_SIZE) {
+					sm80::cp_async(src_row_ptr + t1, dst_ptr);
+				} else if (t2 < DATA_SIZE) {
+					sm80::cp_async(src_row_ptr + t2, dst_ptr);
 				} else {
-					store_shared_4x32b(dst_ptr_swizzled, 0.0f, 0.0f, 0.0f, 0.0f);
+					store_shared_4x32b(dst_ptr, 0.0f, 0.0f, 0.0f, 0.0f);
 				}
-				first_col = (first_col + first_col_step) % GN;
+				src_row_ptr += ROWS_PER_STEP * SRC_ROW_BYTES;
+				dst_row_ptr += ROWS_PER_STEP * DST_ROW_BYTES;
+				data_off = (data_off + usize(ROWS_PER_STEP * INPUT_STEP*sizeof(T))) % usize(GN*sizeof(T));
 			}
 		}
 		if constexpr (GM % ROWS_PER_STEP != 0) {
 			usize step = STEPS;
 			if (tid < (GM % ROWS_PER_STEP) * CP_PER_ROW) {
-				u8 const *src_ptr = first_src_ptr + step * src_step;
-				u32 const dst_ptr = first_dst_ptr + step * dst_step;
-				u32 dst_ptr_swizzled = dst_ptr + off[step % REPEAT_AFTER];
-				if (usize(p * N + col_in_row - first_col) < FAN_IN) {
-					sm80::cp_async(src_ptr - first_col * sizeof(T), dst_ptr_swizzled);
-				} else if (usize(p * N + col_in_row + GN - first_col) < FAN_IN) {
-					sm80::cp_async(src_ptr + (GN - first_col) * sizeof(T), dst_ptr_swizzled);
+				u32 dst_ptr = dst_row_ptr + swizzle[step % REPEAT_AFTER];
+				usize t1 = off - data_off;
+				usize t2 = t1 + GN*sizeof(T);
+				if (t1 < DATA_SIZE) {
+					sm80::cp_async(src_row_ptr + t1, dst_ptr);
+				} else if (t2 < DATA_SIZE) {
+					sm80::cp_async(src_row_ptr + t2, dst_ptr);
 				} else {
-					store_shared_4x32b(dst_ptr_swizzled, 0.0f, 0.0f, 0.0f, 0.0f);
+					store_shared_4x32b(dst_ptr, 0.0f, 0.0f, 0.0f, 0.0f);
 				}
 			}
 		}
