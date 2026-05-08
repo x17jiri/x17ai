@@ -10,13 +10,39 @@ constexpr usize SEQ_LEN = config::n_inputs;
 constexpr usize D_MODEL = config::d_model;
 constexpr usize ATTN_WIDTH = config::n_heads * config::head_dim;
 
-using ALoader = MatrixLoader<ATTN_WIDTH, 128, 64>;
-using BLoader = MatrixTransLoader<
-	MatrixLoader<ATTN_WIDTH, 64, 64>
->;
-using CWriter = MatrixWriter<config::d_model>;
+namespace OAttnFwd {
+	using WeightLoader =
+		MatrixLoader<
+			ATTN_WIDTH,
+			128, 64
+		>;
 
-using MyGemm = Gemm<ALoader, BLoader, CWriter>;
+	using InputLoader =
+		MatrixTransLoader<
+			MatrixLoader<
+				ATTN_WIDTH,
+				64, 64
+			>
+		>;
+
+	using Writer = MatrixWriter<config::d_model>;
+
+	using Kernel = Gemm<WeightLoader, InputLoader, Writer>;
+
+	X17_KERNEL(Kernel::THREADS_PER_BLOCK)
+	void kernel(
+		bf16 *w,
+		bf16 *inp, usize n_inputs,
+		bf16 *out
+	) {
+		auto a = WeightLoader(w, config::d_model);
+		auto b = InputLoader(inp, n_inputs);
+		auto o = Writer(out);
+		Kernel().run(a, b, o);
+	}
+}
+
+using namespace OAttnFwd;
 
 int main(int argc, char *argv[]) {
 	HarnessCliOptions cli;
@@ -27,8 +53,12 @@ int main(int argc, char *argv[]) {
 
 	static_assert(config::d_model == ATTN_WIDTH);
 
-	if (SEQ_LEN % MyGemm::N_PER_BLOCK != 0) {
-		printf("Expected n_inputs %% %u == 0\n", MyGemm::N_PER_BLOCK);
+	if (SEQ_LEN % Kernel::N_PER_BLOCK != 0) {
+		printf("Expected n_inputs %% %u == 0\n", Kernel::N_PER_BLOCK);
+		return 1;
+	}
+	if (D_MODEL % Kernel::M_PER_BLOCK != 0) {
+		printf("Expected d_model %% %u == 0\n", Kernel::M_PER_BLOCK);
 		return 1;
 	}
 
@@ -51,16 +81,17 @@ int main(int argc, char *argv[]) {
 	cudaMemcpy(d_weights, h_weights.data(), h_weights.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_attn_out, h_attn_out.data(), h_attn_out.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 
-	cudaFuncSetAttribute(gemm<MyGemm>, cudaFuncAttributeMaxDynamicSharedMemorySize, MyGemm::SMEM_BYTES);
-	cudaFuncSetAttribute(gemm<MyGemm>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+	cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, Kernel::SMEM_BYTES);
+	cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-	dim3 grid(D_MODEL / MyGemm::M_PER_BLOCK, SEQ_LEN / MyGemm::N_PER_BLOCK);
+	dim3 grid(D_MODEL / Kernel::M_PER_BLOCK, SEQ_LEN / Kernel::N_PER_BLOCK);
 
 	int warmup = 50;
 	for (int i = 0; i < warmup; ++i) {
-		gemm<MyGemm><<<grid, MyGemm::THREADS_PER_BLOCK, MyGemm::SMEM_BYTES>>>(
-			d_weights, D_MODEL,
-			d_attn_out, SEQ_LEN,
+		kernel<<<grid, Kernel::THREADS_PER_BLOCK, Kernel::SMEM_BYTES>>>(
+			d_weights,
+			d_attn_out,
+			SEQ_LEN,
 			d_out
 		);
 	}
@@ -74,9 +105,10 @@ int main(int argc, char *argv[]) {
 	}
 	for (int i = 0; i < num_runs; ++i) {
 		cudaEventRecord(starts[i]);
-		gemm<MyGemm><<<grid, MyGemm::THREADS_PER_BLOCK, MyGemm::SMEM_BYTES>>>(
-			d_weights, D_MODEL,
-			d_attn_out, SEQ_LEN,
+		kernel<<<grid, Kernel::THREADS_PER_BLOCK, Kernel::SMEM_BYTES>>>(
+			d_weights,
+			d_attn_out,
+			SEQ_LEN,
 			d_out
 		);
 		cudaEventRecord(ends[i]);
@@ -99,7 +131,6 @@ int main(int argc, char *argv[]) {
 
 	float median_ms = times_ms[num_runs / 2];
 	float min_ms = times_ms[0];
-	//double tflops = MyGemm::flops(D_MODEL, SEQ_LEN) / (median_ms * 1e-3) / 1e12;
 	double tflops = 2.0 * config::d_model * config::n_heads * config::head_dim * config::n_inputs / (median_ms * 1e-3) / 1e12;
 	printf("Kernel time over %d runs: median %.3f ms  min %.3f ms\n", num_runs, median_ms, min_ms);
 	printf("TFLOPS: %.2f\n", tflops);
@@ -108,7 +139,7 @@ int main(int argc, char *argv[]) {
 	std::filesystem::create_directories("tmp/block_cuda");
 	store_tensor("tmp/block_cuda/o_attn.bin", h_out, SEQ_LEN, D_MODEL);
 
-	printf("Used SMEM per kernel: %u\n", MyGemm::SMEM_BYTES);
+	printf("Used SMEM per kernel: %u\n", Kernel::SMEM_BYTES);
 
 	cudaFree(d_weights);
 	cudaFree(d_attn_out);

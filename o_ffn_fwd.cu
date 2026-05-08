@@ -1,9 +1,47 @@
-#include "cuda/dense_matmul.cuh"
+#include "cuda/gemm.cuh"
 #include "block.config.hpp"
 #include "utils2.cuh"
 
 #include <algorithm>
 #include <filesystem>
+
+constexpr usize SEQ_LEN = config::n_inputs;
+constexpr usize D_MODEL = config::d_model;
+constexpr usize F_WIDTH = config::f_width;
+
+namespace OFfnFwd {
+	using WeightLoader =
+		MatrixLoader<
+			config::f_width,
+			128, 64
+		>;
+
+	using InputLoader =
+		MatrixTransLoader<
+			MatrixLoader<
+				config::f_width,
+				64, 64
+			>
+		>;
+
+	using Writer = MatrixWriter<config::d_model>;
+
+	using Kernel = Gemm<WeightLoader, InputLoader, Writer>;
+
+	X17_KERNEL(Kernel::THREADS_PER_BLOCK)
+	void kernel(
+		bf16 *w,
+		bf16 *inp, usize n_inputs,
+		bf16 *out
+	) {
+		auto a = WeightLoader(w, config::d_model);
+		auto b = InputLoader(inp, n_inputs);
+		auto o = Writer(out);
+		Kernel().run(a, b, o);
+	}
+}
+
+using namespace OFfnFwd;
 
 int main(int argc, char *argv[]) {
 	HarnessCliOptions cli;
@@ -11,14 +49,12 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	constexpr usize SEQ_LEN = config::n_inputs;
-	constexpr usize D_MODEL = config::d_model;
-	constexpr usize F_WIDTH = config::f_width;
-
-	using MatMul = DenseMatMul<F_WIDTH, D_MODEL>;
-
-	if (SEQ_LEN % MatMul::N_PER_BLOCK != 0) {
-		printf("Expected n_inputs %% %u == 0\n", MatMul::N_PER_BLOCK);
+	if (SEQ_LEN % Kernel::N_PER_BLOCK != 0) {
+		printf("Expected n_inputs %% %u == 0\n", Kernel::N_PER_BLOCK);
+		return 1;
+	}
+	if (D_MODEL % Kernel::M_PER_BLOCK != 0) {
+		printf("Expected d_model %% %u == 0\n", Kernel::M_PER_BLOCK);
 		return 1;
 	}
 
@@ -41,16 +77,17 @@ int main(int argc, char *argv[]) {
 	cudaMemcpy(d_weights, h_weights.data(), h_weights.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_f, h_f.data(), h_f.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 
-	cudaFuncSetAttribute(matmul<MatMul>, cudaFuncAttributeMaxDynamicSharedMemorySize, MatMul::SMEM_BYTES);
-	cudaFuncSetAttribute(matmul<MatMul>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+	cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, Kernel::SMEM_BYTES);
+	cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-	dim3 grid(D_MODEL / MatMul::M_PER_BLOCK, SEQ_LEN / MatMul::N_PER_BLOCK);
+	dim3 grid(D_MODEL / Kernel::M_PER_BLOCK, SEQ_LEN / Kernel::N_PER_BLOCK);
 
 	int warmup = 50;
 	for (int i = 0; i < warmup; ++i) {
-		matmul<MatMul><<<grid, MatMul::THREADS_PER_BLOCK, MatMul::SMEM_BYTES>>>(
+		kernel<<<grid, Kernel::THREADS_PER_BLOCK, Kernel::SMEM_BYTES>>>(
 			d_weights,
 			d_f,
+			SEQ_LEN,
 			d_out
 		);
 	}
@@ -64,9 +101,10 @@ int main(int argc, char *argv[]) {
 	}
 	for (int i = 0; i < num_runs; ++i) {
 		cudaEventRecord(starts[i]);
-		matmul<MatMul><<<grid, MatMul::THREADS_PER_BLOCK, MatMul::SMEM_BYTES>>>(
+		kernel<<<grid, Kernel::THREADS_PER_BLOCK, Kernel::SMEM_BYTES>>>(
 			d_weights,
 			d_f,
+			SEQ_LEN,
 			d_out
 		);
 		cudaEventRecord(ends[i]);
@@ -89,7 +127,7 @@ int main(int argc, char *argv[]) {
 
 	float median_ms = times_ms[num_runs / 2];
 	float min_ms = times_ms[0];
-	double tflops = MatMul::flops(SEQ_LEN) / (median_ms * 1e-3) / 1e12;
+	double tflops = 2.0 * D_MODEL * F_WIDTH * SEQ_LEN / (median_ms * 1e-3) / 1e12;
 	printf("Kernel time over %d runs: median %.3f ms  min %.3f ms\n", num_runs, median_ms, min_ms);
 	printf("TFLOPS: %.2f\n", tflops);
 
@@ -97,7 +135,7 @@ int main(int argc, char *argv[]) {
 	std::filesystem::create_directories("tmp/block_cuda");
 	store_tensor("tmp/block_cuda/o_ffn.bin", h_out, SEQ_LEN, D_MODEL);
 
-	printf("Used SMEM per kernel: %u\n", OP::SMEM_BYTES);
+	printf("Used SMEM per kernel: %u\n", Kernel::SMEM_BYTES);
 
 	cudaFree(d_weights);
 	cudaFree(d_f);

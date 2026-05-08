@@ -5,66 +5,69 @@
 #pragma nv_diag_suppress 186
 
 template<
-	typename _MatMul,
+	const usize GN,
+	const usize D_IN,
+	const usize FAN_IN,
 	const usize N_HEAD,
 	const usize D_HEAD,
 	const f64 L2_NORM_EPS,
 	const usize ROPE_DIM,
 	const f64 ROPE_BASE
 >
-struct QKVGFwd {
-	using MatMul = _MatMul;
-
-	static constexpr usize M = MatMul::M;
-	static constexpr usize N = MatMul::N;
-	static constexpr usize M_WARPS = MatMul::M_WARPS;
-	static constexpr usize N_WARPS = MatMul::N_WARPS;
-	static constexpr usize M_PER_WARP = MatMul::M_PER_WARP;
-	static constexpr usize N_PER_WARP = MatMul::N_PER_WARP;
-	static constexpr usize M_PER_BLOCK = MatMul::M_PER_BLOCK;
-	static constexpr usize N_PER_BLOCK = MatMul::N_PER_BLOCK;
-	static constexpr usize M_TILES = MatMul::M_TILES;
-	static constexpr usize N_TILES = MatMul::N_TILES;
-
-	static constexpr usize THREADS_PER_BLOCK = MatMul::THREADS_PER_BLOCK;
-	static constexpr usize SMEM_BYTES = MatMul::SMEM_BYTES;
+struct MatrixQKVGWriter {
+	bf16 *gC;
+	usize c_stride;
+	usize seq_len;
+	bf16 const *gQKNormScale_ptr;
+	bf16 const *gSinkK_ptr;
+	f32 *gSinkScore_ptr;
 
 	static constexpr usize SEGMENT_SIZE = N_HEAD * D_HEAD;
-	static constexpr usize GROUP_CNT = M_PER_WARP / D_HEAD;
-	static constexpr usize GROUP_TILE_CNT = D_HEAD / 16;
-	static constexpr f64 ATTN_GEGLU_SCALE = 1.53 * math::constexpr_inv_sqrt(f64(SEGMENT_SIZE));
+	static constexpr f64 SPARSE_SCALE_2 = f64(D_IN) / f64(FAN_IN);
+	static constexpr f64 G_OUT_SCALE_2 = 1.0 / f64(SEGMENT_SIZE);
 
+	static_assert(GN == 4 * SEGMENT_SIZE);
 	static_assert(ROPE_DIM <= D_HEAD);
 	static_assert(ROPE_DIM % 16 == 0);
 
-	X17_DEVICE bool is_q_or_k(usize block_m, usize warp_m) {
-		usize warp_col = block_m + warp_m;
-		return warp_col < 2 * SEGMENT_SIZE;
+	X17_DEVICE MatrixQKVGWriter(
+		bf16 *gC,
+		usize seq_len,
+		bf16 const *gQKNormScale_ptr,
+		bf16 const *gSinkK_ptr,
+		f32 *gSinkScore_ptr
+	):
+		gC(gC),
+		c_stride(GN),
+		seq_len(seq_len),
+		gQKNormScale_ptr(gQKNormScale_ptr),
+		gSinkK_ptr(gSinkK_ptr),
+		gSinkScore_ptr(gSinkScore_ptr)
+	{}
+
+	X17_DEVICE static bool is_q_or_k(usize col) {
+		return col < 2 * SEGMENT_SIZE;
 	}
 
-	X17_DEVICE bool is_q(usize block_m, usize warp_m) {
-		usize warp_col = block_m + warp_m;
-		return warp_col < SEGMENT_SIZE;
+	X17_DEVICE static bool is_q(usize col) {
+		return col < SEGMENT_SIZE;
 	}
 
-	X17_DEVICE bool is_g(usize block_m, usize warp_m) {
-		usize warp_col = block_m + warp_m;
-		return warp_col >= 3 * SEGMENT_SIZE;
+	X17_DEVICE static bool is_g(usize col) {
+		return col >= 3 * SEGMENT_SIZE;
 	}
 
 	static X17_DEVICE void prepare_g_output(Fragment_8x8<f32> &g) {
-		f32 even = g.first();
-		f32 odd = g.second();
 		g.set(
-			math::fast::gelu<ATTN_GEGLU_SCALE>(even * f32(MatMul::SPARSE_SCALE)),
-			odd * f32(MatMul::SPARSE_SCALE)
+			math::fast::gelu<SPARSE_SCALE_2, G_OUT_SCALE_2>(g.first()).val,
+			g.second()
 		);
 	}
 
-	template<usize N_TILE_CNT>
-	X17_DEVICE void prepare_g_output(Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILES]) {
-		X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-			X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
+	template<const usize N_TILE_CNT, const usize M_TILE_CNT>
+	X17_DEVICE static void prepare_g_output(Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILE_CNT]) {
+		X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
+			X17_UNROLL for (usize mi = 0; mi < M_TILE_CNT; ++mi) {
 				Fragment_16x16<f32> &g = acc[ni][mi];
 				prepare_g_output(g.sub[0][0]);
 				prepare_g_output(g.sub[0][1]);
@@ -74,8 +77,12 @@ struct QKVGFwd {
 		}
 	}
 
-	template<usize N_TILE_CNT>
-	X17_DEVICE void l2_norm(Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILES]) {
+	template<const usize N_TILE_CNT, const usize M_TILE_CNT>
+	X17_DEVICE static void l2_norm(Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILE_CNT]) {
+		static constexpr usize GROUP_TILE_CNT = D_HEAD / 16;
+		static constexpr usize GROUP_CNT = (M_TILE_CNT * 16) / D_HEAD;
+		static_assert((M_TILE_CNT * 16) % D_HEAD == 0);
+
 		X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
 			X17_UNROLL for (usize group = 0; group < GROUP_CNT; ++group) {
 				f32 top_sum_sq = 0.0f;
@@ -111,17 +118,16 @@ struct QKVGFwd {
 		}
 	}
 
-	template<usize N_TILE_CNT>
-	X17_DEVICE void apply_q_norm_scales(
-		Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILES],
+	template<const usize N_TILE_CNT, const usize M_TILE_CNT>
+	X17_DEVICE static void apply_q_norm_scales(
+		Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILE_CNT],
 		bf16 const *gQKNormScale_ptr,
-		usize block_m,
-		usize warp_m
+		usize col
 	) {
 		usize pair_in_quad = threadIdx.x % 4;
 
-		X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-			usize col_base = block_m + warp_m + mi * 16;
+		X17_UNROLL for (usize mi = 0; mi < M_TILE_CNT; ++mi) {
+			usize col_base = col + mi * 16;
 			usize left_col = col_base + pair_in_quad * 2;
 			usize right_col = left_col + 8;
 
@@ -148,21 +154,23 @@ struct QKVGFwd {
 		}
 	}
 
-	template<usize N_TILE_CNT>
-	X17_DEVICE void store_sink_scores(
-		Fragment_16x16<f32> const (&acc)[N_TILE_CNT][M_TILES],
+	template<const usize N_TILE_CNT, const usize M_TILE_CNT>
+	X17_DEVICE static void store_sink_scores(
+		Fragment_16x16<f32> const (&acc)[N_TILE_CNT][M_TILE_CNT],
 		bf16 const *gSinkK_ptr,
 		f32 *gSinkScore_ptr,
 		usize seq_len,
-		usize block_m,
-		usize block_n,
-		usize warp_m,
-		usize warp_n
+		usize row,
+		usize col
 	) {
+		static constexpr usize GROUP_TILE_CNT = D_HEAD / 16;
+		static constexpr usize GROUP_CNT = (M_TILE_CNT * 16) / D_HEAD;
+		static_assert((M_TILE_CNT * 16) % D_HEAD == 0);
+
 		usize tid = threadIdx.x % WARP_SIZE;
 		usize pair_in_quad = tid % 4;
 		usize row_in_half = tid / 4;
-		usize head_base = (block_m + warp_m) / D_HEAD;
+		usize head_base = col / D_HEAD;
 
 		X17_UNROLL for (usize group = 0; group < GROUP_CNT; ++group) {
 			usize head_idx = head_base + group;
@@ -215,7 +223,7 @@ struct QKVGFwd {
 
 			if (pair_in_quad == 0) {
 				X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
-					usize top_row = block_n + warp_n + ni * 16 + row_in_half;
+					usize top_row = row + ni * 16 + row_in_half;
 					usize bot_row = top_row + 8;
 					gSinkScore_ptr[head_idx * seq_len + top_row] = top[ni];
 					gSinkScore_ptr[head_idx * seq_len + bot_row] = bot[ni];
@@ -224,18 +232,20 @@ struct QKVGFwd {
 		}
 	}
 
-	template<usize N_TILE_CNT>
-	X17_DEVICE void apply_rope(
-		Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILES],
-		usize block_n,
-		usize warp_n
+	template<const usize N_TILE_CNT, const usize M_TILE_CNT>
+	X17_DEVICE static void apply_rope(
+		Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILE_CNT],
+		usize row
 	) {
+		static constexpr usize GROUP_TILE_CNT = D_HEAD / 16;
+		static constexpr usize GROUP_CNT = (M_TILE_CNT * 16) / D_HEAD;
+		static_assert((M_TILE_CNT * 16) % D_HEAD == 0);
 		constexpr usize ROPE_TILE_CNT = ROPE_DIM / 16;
 
 		X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
 			X17_UNROLL for (usize tile = 0; tile < ROPE_TILE_CNT; ++tile) {
 				Fragment_16x16<f32> coefs;
-				rope_coefs<ROPE_DIM, ROPE_BASE>(coefs, block_n + warp_n + ni * 16, tile * 16);
+				rope_coefs<ROPE_DIM, ROPE_BASE>(coefs, row + ni * 16, tile * 16);
 				X17_UNROLL for (usize group = 0; group < GROUP_CNT; ++group) {
 					Fragment_16x16<f32> &frag = acc[ni][group * GROUP_TILE_CNT + tile];
 					apply_rope_(frag, coefs);
@@ -244,86 +254,49 @@ struct QKVGFwd {
 		}
 	}
 
-	X17_DEVICE void run_matmul(
-		bf16 *A,
-		bf16 *B,
-		Fragment_16x16<f32> (&acc_t)[N_TILES][M_TILES]
+	template<const usize N_TILE_CNT, const usize M_TILE_CNT>
+	X17_DEVICE void write(
+		usize row,
+		usize col,
+		Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILE_CNT]
 	) {
-		MatMul matmul = MatMul();
-		matmul.run(A, B, acc_t);
-	}
+		static_assert((M_TILE_CNT * 16) % D_HEAD == 0);
+		static_assert(SEGMENT_SIZE % (M_TILE_CNT * 16) == 0);
 
-	X17_DEVICE void run_epilogue(
-		Fragment_16x16<f32> (&acc_t)[MatMul::N_TILES][MatMul::M_TILES],
-		bf16 *C,
-
-		usize seq_len,
-		bf16 const *gQKNormScale_ptr,
-		bf16 const *gSinkK_ptr,
-		f32 *gSinkScore_ptr
-	) {
-		usize tid = threadIdx.x;
-		usize warp_idx = tid / WARP_SIZE;
-		usize block_m = blockIdx.x * M_PER_BLOCK;
-		usize block_n = blockIdx.y * N_PER_BLOCK;
-		usize warp_m = (warp_idx / N_WARPS) * M_PER_WARP;
-		usize warp_n = (warp_idx % N_WARPS) * N_PER_WARP;
-
-		if (is_q_or_k(block_m, warp_m)) {
-			l2_norm(acc_t);
-			if (is_q(block_m, warp_m)) {
-				apply_q_norm_scales(acc_t, gQKNormScale_ptr, block_m, warp_m);
-				store_sink_scores(acc_t, gSinkK_ptr, gSinkScore_ptr, seq_len, block_m, block_n, warp_m, warp_n);
+		if (is_q_or_k(col)) {
+			l2_norm(acc);
+			if (is_q(col)) {
+				apply_q_norm_scales(acc, gQKNormScale_ptr, col);
+				store_sink_scores(acc, gSinkK_ptr, gSinkScore_ptr, seq_len, row, col);
 			}
-			apply_rope(acc_t, block_n, warp_n);
-		} else if (is_g(block_m, warp_m)) {
-			prepare_g_output(acc_t);
+			apply_rope(acc, row);
+		} else if (is_g(col)) {
+			prepare_g_output(acc);
 		}
 
-		bf16 *c_ptr = C + blockIdx.y * N_PER_BLOCK * M + blockIdx.x * M_PER_BLOCK;
-		GMatrix<bf16, N_PER_BLOCK, M_PER_BLOCK> gC_block{c_ptr, M};
-		X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-			Fragment_16x16<bf16> acc_bf16[M_TILES];
-			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+		GMatrix<bf16, 16 * N_TILE_CNT, 16 * M_TILE_CNT> gC_block{gC, c_stride};
+		X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
+			Fragment_16x16<bf16> acc_bf16[M_TILE_CNT];
+			X17_UNROLL for (usize mi = 0; mi < M_TILE_CNT; ++mi) {
 				acc_bf16[mi].sub[0][0].set(
-					__float2bfloat16_rn(acc_t[ni][mi].sub[0][0].val0),
-					__float2bfloat16_rn(acc_t[ni][mi].sub[0][0].val1)
+					__float2bfloat16_rn(acc[ni][mi].sub[0][0].val0),
+					__float2bfloat16_rn(acc[ni][mi].sub[0][0].val1)
 				);
 				acc_bf16[mi].sub[0][1].set(
-					__float2bfloat16_rn(acc_t[ni][mi].sub[0][1].val0),
-					__float2bfloat16_rn(acc_t[ni][mi].sub[0][1].val1)
+					__float2bfloat16_rn(acc[ni][mi].sub[0][1].val0),
+					__float2bfloat16_rn(acc[ni][mi].sub[0][1].val1)
 				);
 				acc_bf16[mi].sub[1][0].set(
-					__float2bfloat16_rn(acc_t[ni][mi].sub[1][0].val0),
-					__float2bfloat16_rn(acc_t[ni][mi].sub[1][0].val1)
+					__float2bfloat16_rn(acc[ni][mi].sub[1][0].val0),
+					__float2bfloat16_rn(acc[ni][mi].sub[1][0].val1)
 				);
 				acc_bf16[mi].sub[1][1].set(
-					__float2bfloat16_rn(acc_t[ni][mi].sub[1][1].val0),
-					__float2bfloat16_rn(acc_t[ni][mi].sub[1][1].val1)
+					__float2bfloat16_rn(acc[ni][mi].sub[1][1].val0),
+					__float2bfloat16_rn(acc[ni][mi].sub[1][1].val1)
 				);
 			}
 
-			// TODO - this is matmul epilogue
-			store(acc_bf16, gC_block, warp_n + ni * 16, warp_m);
+			store(acc_bf16, gC_block, row + ni * 16, col);
 		}
 	}
 };
-
-template<typename QKVGFwd>
-__global__ __launch_bounds__(QKVGFwd::THREADS_PER_BLOCK) void qkvg_fwd(
-	bf16 *A,
-	bf16 *B,
-	bf16 *C,
-	usize seq_len,
-	bf16 const *gQKNormScale_ptr,
-	bf16 const *gSinkK_ptr,
-	f32 *gSinkScore_ptr
-) {
-	QKVGFwd qkvg_fwd = QKVGFwd();
-	Fragment_16x16<f32> acc_t[QKVGFwd::N_TILES][QKVGFwd::M_TILES];
-	qkvg_fwd.run_matmul(A, B, acc_t);
-	qkvg_fwd.run_epilogue(
-		acc_t, C,
-		seq_len, gQKNormScale_ptr, gSinkK_ptr, gSinkScore_ptr
-	);
-}

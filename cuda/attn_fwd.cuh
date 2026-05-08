@@ -28,8 +28,8 @@
 //                       for tiny heads with QK_DIM < 64
 //   _QK_DIM           - dimension of Q and K vectors per head
 //   _V_DIM            - dimension of V vectors per head
-//   _D_MODEL          - model width used to derive V_SCALE
-//   _QKV_FAN_IN       - fan-in of the qkv projection used to derive V_SCALE
+//   _D_MODEL          - model width used to derive SPARSE_SCALE
+//   _QKV_FAN_IN       - fan-in of the qkv projection used to derive SPARSE_SCALE
 //   _V_EQUALS_K       - when true, V is a prefix of K (V_DIM must be <= QK_DIM)
 template<
 	const usize _HEAD_CNT,
@@ -57,9 +57,10 @@ struct AttnForward {
 	// by the sqrt, not divide
 	static constexpr f64 BASE_TEMPERATURE = math::constexpr_sqrt(QK_DIM);
 
-	static constexpr f64 V_SCALE = math::constexpr_sqrt(f64(D_MODEL) / f64(QKV_FAN_IN));
+	static constexpr f64 SPARSE_SCALE_2 = f64(D_MODEL) / f64(QKV_FAN_IN);
+	static constexpr f64 SPARSE_SCALE = math::constexpr_sqrt(SPARSE_SCALE_2);
 	static constexpr f64 V_SCALE_FIX = 1.5;
-	static constexpr f64 GEGLU_SCALE = 1.53 * math::constexpr_inv_sqrt(V_DIM * HEAD_CNT);
+	static constexpr f64 G_OUT_SCALE_2 = 1.0 / f64(V_DIM * HEAD_CNT);
 
 	static_assert(HEADS_PER_KERNEL > 0, "HEADS_PER_KERNEL must be > 0");
 	static_assert(HEAD_CNT % HEADS_PER_KERNEL == 0, "HEAD_CNT must be divisible by HEADS_PER_KERNEL");
@@ -315,8 +316,8 @@ struct AttnForward {
 		Fragment_8x8<bf16> const &g
 	) {
 		o.set(
-			o.first() * f32(g.first()), // the qkvg kernel calculates the gelu() of g.first()
-			math::fast::gelu<GEGLU_SCALE>(o.second()) * f32(g.second())
+			f32(g.first()) * o.first(), // the qkvg kernel calculates the gelu() of g.first()
+			math::fast::gelu<1.0, SPARSE_SCALE_2 * G_OUT_SCALE_2>(o.second()).val * f32(g.second())
 		);
 	}
 
@@ -360,8 +361,8 @@ struct AttnForward {
 			top_L[h] = math::fast::logb(top_stats[h].sum) + top_stats[h].max;
 			bot_L[h] = math::fast::logb(bot_stats[h].sum) + bot_stats[h].max;
 
-			f32 top_rescale = math::fast::divide(f32(V_SCALE * V_SCALE_FIX), top_stats[h].sum);
-			f32 bot_rescale = math::fast::divide(f32(V_SCALE * V_SCALE_FIX), bot_stats[h].sum);
+			f32 top_rescale = math::fast::divide(f32(SPARSE_SCALE * V_SCALE_FIX), top_stats[h].sum);
+			f32 bot_rescale = math::fast::divide(f32(SPARSE_SCALE * V_SCALE_FIX), bot_stats[h].sum);
 
 			scale_top_(rO_f32[h], top_rescale);
 			scale_bottom_(rO_f32[h], bot_rescale);
@@ -555,7 +556,7 @@ struct AttnForward {
 
 		// O accumulator
 		Fragment_16x16<f32> rO_f32[HEADS_PER_KERNEL][V_TILES];
-		initial_scale = math::fast::constexpr_expb(-ONLINE_SOFTMAX_THRESHOLD) / V_SCALE;
+		initial_scale = math::fast::constexpr_expb(-ONLINE_SOFTMAX_THRESHOLD) / SPARSE_SCALE;
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
 			X17_UNROLL for (usize i = 0; i < V_TILES; ++i) {
 				rO_f32[h][i].sub[0][0].val0 = initial_scale * f32(rSinkV[h * QK_DIM / 4 + i * 4 + 0]);
@@ -585,10 +586,10 @@ struct AttnForward {
 				bot_stats[h].sum = bot_seed * 0.25f;
 
 				X17_UNROLL for (usize i = 0; i < V_TILES; ++i) {
-					f32 sink0 = f32(rSinkV[h * QK_DIM / 4 + i * 4 + 0]) / V_SCALE;
-					f32 sink1 = f32(rSinkV[h * QK_DIM / 4 + i * 4 + 1]) / V_SCALE;
-					f32 sink2 = f32(rSinkV[h * QK_DIM / 4 + i * 4 + 2]) / V_SCALE;
-					f32 sink3 = f32(rSinkV[h * QK_DIM / 4 + i * 4 + 3]) / V_SCALE;
+					f32 sink0 = f32(rSinkV[h * QK_DIM / 4 + i * 4 + 0]) / SPARSE_SCALE;
+					f32 sink1 = f32(rSinkV[h * QK_DIM / 4 + i * 4 + 1]) / SPARSE_SCALE;
+					f32 sink2 = f32(rSinkV[h * QK_DIM / 4 + i * 4 + 2]) / SPARSE_SCALE;
+					f32 sink3 = f32(rSinkV[h * QK_DIM / 4 + i * 4 + 3]) / SPARSE_SCALE;
 
 					rO_f32[h][i].sub[0][0].val0 = top_seed * sink0;
 					rO_f32[h][i].sub[0][0].val1 = top_seed * sink1;

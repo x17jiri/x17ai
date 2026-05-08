@@ -52,12 +52,13 @@ from block_utils import *
 #   because Var(g) ~= QKV_FAN_IN / D_MODEL and SPARSE_SCALE^2 = D_MODEL / QKV_FAN_IN.
 #
 # - For independent unit-variance inputs, exact version of GeGLU would have variance
-#   `1/3 + 1/(2*pi*sqrt(3))` ~ 0.4252. We use tanh approximation, which is close enough.
-#   `1 / sqrt(0.4252) ~= 1.53`, which brings a unit-input GeGLU back to variance about 1.
+#   `1/3 + 1/(2*pi*sqrt(3))` ~ 0.4252. We use the same variance-fix expression as CUDA:
+#   `GELU_VAR_FIX_2 = 1 / (1/3 + 1/(2*pi*sqrt(3)))`,
+#   `GELU_VAR_FIX = sqrt(GELU_VAR_FIX_2)`.
 #
 # - We scale each GeGLU branch so its own output projection has variance about 1:
-#   `ATTN_GEGLU_SCALE = 1.53 / sqrt(ATTN_WIDTH)` and
-#   `F_GEGLU_SCALE = 1.53 / sqrt(F_WIDTH)`.
+#   `ATTN_GEGLU_SCALE = GELU_VAR_FIX / sqrt(ATTN_WIDTH)` and
+#   `F_GEGLU_SCALE = GELU_VAR_FIX / sqrt(F_WIDTH)`.
 #
 # - Therefore each coordinate of `attn_out` has variance about `1 / ATTN_WIDTH`, so the attention
 #   output projection contributes total variance about `ATTN_WIDTH * (1 / ATTN_WIDTH) = 1`.
@@ -334,14 +335,20 @@ def pairwise_geglu(tensor: torch.Tensor, output_scale: float) -> torch.Tensor:
 		raise ValueError(f"Expected even projection width for GeGLU, got {tensor.shape[-1]}")
 	return geglu(tensor[..., 0::2], tensor[..., 1::2]) * output_scale
 
-def pairwise_geglu_backward_multipliers(tensor: torch.Tensor, output_scale: float) -> torch.Tensor:
+def pairwise_geglu_backward_multipliers(
+	tensor: torch.Tensor,
+	input_scale: float,
+	output_scale: float,
+	) -> torch.Tensor:
 	if tensor.shape[-1] % 2 != 0:
 		raise ValueError(f"Expected even projection width for GeGLU, got {tensor.shape[-1]}")
 	gate = tensor[..., 0::2]
 	lin = tensor[..., 1::2]
+	# Store d(GeGLU) / d(raw pregate) so multiplying by d_out feeds directly into the input GEMM backward.
+	scaled_gate = gate * input_scale
 	backvec = torch.empty_like(tensor)
-	backvec[..., 0::2] = lin * d_gelu_tanh_approx(gate) * output_scale
-	backvec[..., 1::2] = gelu_tanh_approx(gate) * output_scale
+	backvec[..., 0::2] = lin * d_gelu_tanh_approx(scaled_gate) * output_scale * input_scale * input_scale
+	backvec[..., 1::2] = gelu_tanh_approx(scaled_gate) * output_scale * input_scale
 	return backvec
 
 def f_proj_pregate(inputs: torch.Tensor, f_weights: torch.Tensor) -> torch.Tensor:
@@ -414,17 +421,18 @@ def run_block() -> None:
 
 	aa = attn_out_pregate.clone()
 	g[..., 0::2] = gelu_tanh_approx(g[..., 0::2] * SPARSE_SCALE) * ATTN_GEGLU_SCALE
-	g[..., 1::2] = g[..., 1::2] * SPARSE_SCALE
+	g[..., 1::2] = quantize_(g[..., 1::2]) * SPARSE_SCALE
 	aa[..., 1::2] = gelu_tanh_approx(aa[..., 1::2]) * ATTN_GEGLU_SCALE
 
 	qkvg = join_qkvg(q, k, v, g)
-	attn_out = aa * quantize_(g)
+	attn_out = aa * g
 	o_attn = o_proj_attn(attn_out, w_attn)
 
 	f_weights = sparse_weights(f_weights, D_MODEL, HEAD_DIM)
-	f_pregate = f_proj_pregate(inputs, f_weights) * SPARSE_SCALE
+	f_pregate_raw = f_proj_pregate(inputs, f_weights)
+	f_pregate = f_pregate_raw * SPARSE_SCALE
 	f = pairwise_geglu(f_pregate, F_GEGLU_SCALE)
-	f_backvec = pairwise_geglu_backward_multipliers(f_pregate, F_GEGLU_SCALE)
+	f_backvec = pairwise_geglu_backward_multipliers(f_pregate_raw, SPARSE_SCALE, F_GEGLU_SCALE)
 	o_ffn = o_proj_ffn(f, w_ffn)
 	grad_generator = torch.Generator(device=my_device)
 	grad_generator.manual_seed(123)

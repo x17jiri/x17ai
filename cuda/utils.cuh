@@ -324,18 +324,32 @@ namespace math {
 			return math::fma(0.5f * x, math::fast::tanh((beta * 0.5f) * x).val, 0.5f * x);
 		}
 
+		// If gelu is applied to random input with normal distribution and unit variance,
+		// it blocks about half of the values and so the output variance drops.
+		// This multiplier restores it back to 1.
+		constexpr f64 GELU_VAR_FIX_2 =
+			1.0 / (
+				(1.0 / 3.0)
+				+ (1.0 / 2.0) * std::numbers::inv_pi_v<f64> * std::numbers::inv_sqrt3_v<f64>
+			);
+
 		/// Gaussian Error Linear Unit
 		///
-		/// Scales the input by `1.0 / sqrt(FAN_IN)` before applying the GELU formula.
-		/// The scaling constant is folded into the coefficients of the approximation
-		/// and so it is free at runtime.
-		template<const f64 INP_SCALE_2 = 1.0, const f64 OUT_SCALE_2 = 1.0>
+		/// The input is scaled by sqrt(INP_SCALE_2)
+		/// The output is scaled by sqrt(OUT_SCALE_2 * VAR_FIX_2)
+		///
+		/// The scaling is folded into other constants at compile time and so is "for free"
+		template<
+			const f64 INP_SCALE_2 = 1.0,
+			const f64 OUT_SCALE_2 = 1.0,
+			const f64 VAR_FIX_2 = GELU_VAR_FIX_2
+		>
 		X17_DEVICE UnaryResult gelu(f32 x) {
 			constexpr f64 k = constexpr_sqrt(INP_SCALE_2);
 			constexpr f64 k2 = INP_SCALE_2;
 			constexpr f64 ck = constexpr_sqrt(INP_SCALE_2 * 2.0 * std::numbers::inv_pi_v<f64>);
 			constexpr f64 ck3 = 0.044715 * ck * k2;
-			constexpr f64 Y_SCALE = 0.5 * constexpr_sqrt(OUT_SCALE_2) * k;
+			constexpr f64 Y_SCALE = 0.5 * constexpr_sqrt(OUT_SCALE_2 * GELU_VAR_FIX_2) * k;
 			f32 x2 = x * x;
 			f32 s = math::fma(f32(ck3) * x, x2, f32(ck) * x);
 			auto t = math::fast::tanh(s);
@@ -1575,7 +1589,11 @@ X17_DEVICE void quantize_(Fragment_16x16<f32> (&arr)[K]) {
 	}
 }
 
-template<const f64 INP_SCALE_2 = 1.0, const f64 OUT_SCALE_2 = 1.0>
+template<
+	const f64 INP_SCALE_2 = 1.0,
+	const f64 OUT_SCALE_2 = 1.0,
+	const f64 VAR_FIX_2 = math::fast::GELU_VAR_FIX_2
+>
 X17_DEVICE void geglu_and_backward_(
 	Fragment_8x8<f32> &i1,
 	Fragment_8x8<f32> &i2,
@@ -1587,8 +1605,8 @@ X17_DEVICE void geglu_and_backward_(
 	f32 gate2 = i2.first();
 	f32 lin2 = i2.second();
 
-	auto g1 = math::fast::gelu<INP_SCALE_2, INP_SCALE_2 * OUT_SCALE_2>(gate1);
-	auto g2 = math::fast::gelu<INP_SCALE_2, INP_SCALE_2 * OUT_SCALE_2>(gate2);
+	auto g1 = math::fast::gelu<INP_SCALE_2, INP_SCALE_2 * OUT_SCALE_2, VAR_FIX_2>(gate1);
+	auto g2 = math::fast::gelu<INP_SCALE_2, INP_SCALE_2 * OUT_SCALE_2, VAR_FIX_2>(gate2);
 
 	i1.set(
 		lin1 * g1.dVal,
@@ -1611,16 +1629,20 @@ X17_DEVICE void geglu_and_backward_(
 
 /// Calculates GeGLU of consecutive values and stores the result to `o`.
 /// The content of `i1`, `i2` is replace with backward multipliers.
-template<const f64 INP_SCALE_2 = 1.0, const f64 OUT_SCALE_2 = 1.0>
+template<
+	const f64 INP_SCALE_2 = 1.0,
+	const f64 OUT_SCALE_2 = 1.0,
+	const f64 VAR_FIX_2 = math::fast::GELU_VAR_FIX_2
+>
 X17_DEVICE void geglu_and_backward_(
 	Fragment_16x16<f32> &i1,
 	Fragment_16x16<f32> &i2,
 	Fragment_16x16<bf16> &o
 ) {
-	geglu_and_backward_<INP_SCALE_2, OUT_SCALE_2>(i1.sub[0][0], i1.sub[0][1], o.sub[0][0]);
-	geglu_and_backward_<INP_SCALE_2, OUT_SCALE_2>(i2.sub[0][0], i2.sub[0][1], o.sub[0][1]);
-	geglu_and_backward_<INP_SCALE_2, OUT_SCALE_2>(i1.sub[1][0], i1.sub[1][1], o.sub[1][0]);
-	geglu_and_backward_<INP_SCALE_2, OUT_SCALE_2>(i2.sub[1][0], i2.sub[1][1], o.sub[1][1]);
+	geglu_and_backward_<INP_SCALE_2, OUT_SCALE_2, VAR_FIX_2>(i1.sub[0][0], i1.sub[0][1], o.sub[0][0]);
+	geglu_and_backward_<INP_SCALE_2, OUT_SCALE_2, VAR_FIX_2>(i2.sub[0][0], i2.sub[0][1], o.sub[0][1]);
+	geglu_and_backward_<INP_SCALE_2, OUT_SCALE_2, VAR_FIX_2>(i1.sub[1][0], i1.sub[1][1], o.sub[1][0]);
+	geglu_and_backward_<INP_SCALE_2, OUT_SCALE_2, VAR_FIX_2>(i2.sub[1][0], i2.sub[1][1], o.sub[1][1]);
 }
 
 //--------------------------------------------------------------------------------------------------

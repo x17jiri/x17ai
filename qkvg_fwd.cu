@@ -1,4 +1,4 @@
-#include "cuda/sparse_matmul.cuh"
+#include "cuda/gemm.cuh"
 #include "cuda/qkvg_fwd.cuh"
 #include "block.config.hpp"
 #include "utils2.cuh"
@@ -6,56 +6,87 @@
 #include <algorithm>
 #include <filesystem>
 
+constexpr usize SEQ_LEN = config::n_inputs;
+constexpr usize D_MODEL = config::d_model;
+constexpr usize Q_ROWS = config::n_heads * config::head_dim;
+constexpr usize QKVG_ROWS = 4 * Q_ROWS;
+
+namespace QkvgFwd {
+	using WeightLoader =
+		SparseMatrixLoader<
+			config::d_model,
+			config::qkv_fan_in,
+			config::head_dim,
+			64, 64
+		>;
+
+	using InputLoader =
+		MatrixTransLoader<
+			MatrixLoader<
+				config::d_model,
+				128, 64
+			>
+		>;
+
+	using Writer =
+		MatrixQKVGWriter<
+			QKVG_ROWS,
+			config::d_model,
+			config::qkv_fan_in,
+			config::n_heads,
+			config::head_dim,
+			config::l2_norm_eps,
+			config::rope_dim,
+			config::rope_base
+		>;
+
+	using Kernel = Gemm<WeightLoader, InputLoader, Writer>;
+
+	X17_KERNEL(Kernel::THREADS_PER_BLOCK)
+	void kernel(
+		bf16 *w,
+		bf16 *inp, usize n_inputs,
+		bf16 *out,
+		bf16 const *qk_norm_scales,
+		bf16 const *sink_k,
+		f32 *sink_scores
+	) {
+		auto a = WeightLoader(w, QKVG_ROWS);
+		auto b = InputLoader(inp, n_inputs);
+		auto o = Writer(out, n_inputs, qk_norm_scales, sink_k, sink_scores);
+		Kernel().run(a, b, o);
+	}
+}
+
+using namespace QkvgFwd;
+
 int main(int argc, char *argv[]) {
 	HarnessCliOptions cli;
 	if (!parse_harness_cli_args(argc, argv, false, cli)) {
 		return 1;
 	}
 
-	using MatMul = SparseMatMul<
-		config::d_model,
-		4 * config::n_heads * config::head_dim,
-		config::qkv_fan_in,
-		config::head_dim
-	>;
-	using Fwd = QKVGFwd<
-		MatMul,
-		config::n_heads,
-		config::head_dim,
-		config::l2_norm_eps,
-		config::rope_dim,
-		config::rope_base
-	>;
-
-	constexpr usize A_ROWS = MatMul::D_OUT;
-	constexpr usize A_COLS = MatMul::FAN_IN;
-	constexpr usize B_ROWS = MatMul::D_IN;
-	constexpr usize B_COLS = config::n_inputs;
-	constexpr usize C_ROWS = A_ROWS;
-	constexpr usize C_COLS = B_COLS;
-	constexpr usize Q_ROWS = config::n_heads * config::head_dim;
-
 	if (
-		C_ROWS % Fwd::M_PER_BLOCK != 0 ||
-		C_COLS % Fwd::N_PER_BLOCK != 0
+		QKVG_ROWS % Kernel::M_PER_BLOCK != 0 ||
+		SEQ_LEN % Kernel::N_PER_BLOCK != 0
 	) {
-		printf("Expected M %% %u == 0 and N %% %u == 0\n", Fwd::M_PER_BLOCK, Fwd::N_PER_BLOCK);
+		printf("Expected M %% %u == 0 and N %% %u == 0\n", Kernel::M_PER_BLOCK, Kernel::N_PER_BLOCK);
 		return 1;
 	}
 
-	std::vector<bf16> h_A = load_tensor(torch_tensor_path("qkv_weights.bin"), A_ROWS, A_COLS);
-	std::vector<bf16> h_B = load_tensor(torch_tensor_path("inputs_l2.bin"), B_COLS, B_ROWS);
+	std::vector<bf16> h_A = load_tensor(torch_tensor_path("qkvg_weights.bin"), QKVG_ROWS, config::qkv_fan_in);
+	std::vector<bf16> h_B = load_tensor(torch_tensor_path("inputs_l2.bin"), SEQ_LEN, D_MODEL);
 	std::vector<bf16> h_S = load_tensor(torch_tensor_path("qk_norm_scales.bin"), 1, Q_ROWS);
 	std::vector<bf16> h_sink = load_tensor(torch_tensor_path("sinks_k.bin"), config::n_heads, config::head_dim);
 	if (h_A.empty() || h_B.empty() || h_S.empty() || h_sink.empty()) {
 		return 1;
 	}
-	std::vector<bf16> h_C(C_ROWS * C_COLS);
-	std::vector<bf16> h_Q(B_COLS * Q_ROWS);
-	std::vector<bf16> h_K(B_COLS * Q_ROWS);
-	std::vector<bf16> h_V(B_COLS * Q_ROWS);
-	std::vector<bf16> h_G(B_COLS * Q_ROWS);
-	std::vector<f32> h_sink_scores(B_COLS * config::n_heads);
+	std::vector<bf16> h_C(SEQ_LEN * QKVG_ROWS);
+	std::vector<bf16> h_Q(SEQ_LEN * Q_ROWS);
+	std::vector<bf16> h_K(SEQ_LEN * Q_ROWS);
+	std::vector<bf16> h_V(SEQ_LEN * Q_ROWS);
+	std::vector<bf16> h_G(SEQ_LEN * Q_ROWS);
+	std::vector<f32> h_sink_scores(SEQ_LEN * config::n_heads);
 
 	bf16 *d_A, *d_B, *d_S, *d_sink, *d_C;
 	f32 *d_sink_scores;
@@ -70,16 +101,21 @@ int main(int argc, char *argv[]) {
 	cudaMemcpy(d_S, h_S.data(), h_S.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_sink, h_sink.data(), h_sink.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 
-	dim3 grid(C_ROWS / Fwd::M_PER_BLOCK, C_COLS / Fwd::N_PER_BLOCK);
+	dim3 grid(QKVG_ROWS / Kernel::M_PER_BLOCK, SEQ_LEN / Kernel::N_PER_BLOCK);
 
-	cudaFuncSetAttribute(qkvg_fwd<Fwd>, cudaFuncAttributeMaxDynamicSharedMemorySize, Fwd::SMEM_BYTES);
-	cudaFuncSetAttribute(qkvg_fwd<Fwd>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+	cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, Kernel::SMEM_BYTES);
+	cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
 	int warmup = 30;
 	for (int i = 0; i < warmup; ++i) {
-		qkvg_fwd<Fwd><<<grid, Fwd::THREADS_PER_BLOCK, Fwd::SMEM_BYTES>>>(
-			d_A, d_B, d_C,
-			B_COLS, d_S, d_sink, d_sink_scores
+		kernel<<<grid, Kernel::THREADS_PER_BLOCK, Kernel::SMEM_BYTES>>>(
+			d_A,
+			d_B,
+			SEQ_LEN,
+			d_C,
+			d_S,
+			d_sink,
+			d_sink_scores
 		);
 	}
 	cudaDeviceSynchronize();
@@ -92,9 +128,14 @@ int main(int argc, char *argv[]) {
 	}
 	for (int i = 0; i < NUM_RUNS; ++i) {
 		cudaEventRecord(starts[i]);
-		qkvg_fwd<Fwd><<<grid, Fwd::THREADS_PER_BLOCK, Fwd::SMEM_BYTES>>>(
-			d_A, d_B, d_C,
-			B_COLS, d_S, d_sink, d_sink_scores
+		kernel<<<grid, Kernel::THREADS_PER_BLOCK, Kernel::SMEM_BYTES>>>(
+			d_A,
+			d_B,
+			SEQ_LEN,
+			d_C,
+			d_S,
+			d_sink,
+			d_sink_scores
 		);
 		cudaEventRecord(ends[i]);
 	}
@@ -116,8 +157,8 @@ int main(int argc, char *argv[]) {
 
 	float median_ms = times_ms[NUM_RUNS / 2];
 	float min_ms = times_ms[0];
-	double strict_flops = 2.0 * A_ROWS * A_COLS * B_COLS;
-	double fake_flops = 2.0 * A_ROWS * B_ROWS * B_COLS;
+	double strict_flops = 2.0 * QKVG_ROWS * config::qkv_fan_in * SEQ_LEN;
+	double fake_flops = 2.0 * QKVG_ROWS * D_MODEL * SEQ_LEN;
 	double strict_tflops = strict_flops / (median_ms * 1e-3) / 1e12;
 	double fake_tflops = fake_flops / (median_ms * 1e-3) / 1e12;
 	printf("Kernel time over %d runs: median %.3f ms  min %.3f ms\n", NUM_RUNS, median_ms, min_ms);
@@ -126,8 +167,8 @@ int main(int argc, char *argv[]) {
 
 	cudaMemcpy(h_C.data(), d_C, h_C.size() * sizeof(bf16), cudaMemcpyDeviceToHost);
 	cudaMemcpy(h_sink_scores.data(), d_sink_scores, h_sink_scores.size() * sizeof(f32), cudaMemcpyDeviceToHost);
-	for (usize row = 0; row < B_COLS; ++row) {
-		bf16 const *src_row = h_C.data() + row * A_ROWS;
+	for (usize row = 0; row < SEQ_LEN; ++row) {
+		bf16 const *src_row = h_C.data() + row * QKVG_ROWS;
 		bf16 *q_row = h_Q.data() + row * Q_ROWS;
 		bf16 *k_row = h_K.data() + row * Q_ROWS;
 		bf16 *v_row = h_V.data() + row * Q_ROWS;
@@ -139,12 +180,12 @@ int main(int argc, char *argv[]) {
 	}
 
 	std::filesystem::create_directories("tmp/block_cuda");
-	store_tensor("tmp/block_cuda/q.bin", h_Q, B_COLS, Q_ROWS);
-	store_tensor("tmp/block_cuda/k.bin", h_K, B_COLS, Q_ROWS);
-	store_tensor("tmp/block_cuda/v.bin", h_V, B_COLS, Q_ROWS);
-	store_tensor("tmp/block_cuda/g.bin", h_G, B_COLS, Q_ROWS);
-	store_tensor("tmp/block_cuda/qkvg.bin", h_C, C_ROWS, C_COLS);
-	store_f32_tensor("tmp/block_cuda/sink_scores_f32.bin", h_sink_scores, config::n_heads, B_COLS);
+	store_tensor("tmp/block_cuda/q.bin", h_Q, SEQ_LEN, Q_ROWS);
+	store_tensor("tmp/block_cuda/k.bin", h_K, SEQ_LEN, Q_ROWS);
+	store_tensor("tmp/block_cuda/v.bin", h_V, SEQ_LEN, Q_ROWS);
+	store_tensor("tmp/block_cuda/g.bin", h_G, SEQ_LEN, Q_ROWS);
+	store_tensor("tmp/block_cuda/qkvg.bin", h_C, SEQ_LEN, QKVG_ROWS);
+	store_f32_tensor("tmp/block_cuda/sink_scores_f32.bin", h_sink_scores, config::n_heads, SEQ_LEN);
 
 	cudaFree(d_A);
 	cudaFree(d_B);

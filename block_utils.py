@@ -27,10 +27,17 @@ ATTN_WIDTH = N_HEADS * HEAD_DIM
 F_PROJ_OUTPUTS = 2 * F_WIDTH
 SPARSE_SCALE = math.sqrt(D_MODEL / SPARSE_FAN_IN)
 V_SCALE_FIX = 1.5
+
+GELU_VAR_FIX_2 = 1.0 / (
+	(1.0 / 3.0)
+	+ (0.5 / math.pi) * (1.0 / math.sqrt(3.0))
+)
+GELU_VAR_FIX = math.sqrt(GELU_VAR_FIX_2)
+
 # Each split projection should see unit total input variance, so each coordinate of the
 # GeGLU output should contribute variance about 1 / branch_width.
-ATTN_GEGLU_SCALE = math.sqrt(1.53 * 1.53 / ATTN_WIDTH)
-F_GEGLU_SCALE = math.sqrt(1.53 * 1.53 / F_WIDTH)
+ATTN_GEGLU_SCALE = math.sqrt(GELU_VAR_FIX_2 / ATTN_WIDTH)
+F_GEGLU_SCALE = math.sqrt(GELU_VAR_FIX_2 / F_WIDTH)
 
 def tensor_path(name: str) -> Path:
 	return TENSOR_DIR / name

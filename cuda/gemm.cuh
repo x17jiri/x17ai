@@ -286,13 +286,8 @@ struct MatrixGeGluWriter {
 	usize c_stride;
 	usize g_stride;
 
-	static constexpr f64 INP_SCALE_2 = f64(D_IN) / f64(FAN_IN);
-	// OUT_SCALE_2 = 1.53 * 1.53 / GN
-	static constexpr f64 OUT_SCALE_2 =
-		1.0 / (
-			(f64(GN) / 3.0)
-			+ f64(GN) * 0.5 * std::numbers::inv_pi_v<f64> * std::numbers::inv_sqrt3_v<f64>
-		);
+	static constexpr f64 SPARSE_SCALE_2 = f64(D_IN) / f64(FAN_IN);
+	static constexpr f64 OUT_SCALE_2 = 1.0 / f64(GN);
 
 	X17_DEVICE MatrixGeGluWriter(bf16 *gC, bf16 *gGrad):
 		gC(gC),
@@ -314,7 +309,7 @@ struct MatrixGeGluWriter {
 			GMatrix<bf16, 16 * M_TILES, 32> G(gGrad, g_stride);
 			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
 				X17_UNROLL for (usize ni = 0; ni < N_TILES/2; ++ni) {
-					geglu_and_backward_<INP_SCALE_2, OUT_SCALE_2>(
+					geglu_and_backward_<SPARSE_SCALE_2, OUT_SCALE_2>(
 						acc[mi][2*ni+0],
 						acc[mi][2*ni+1],
 						out[mi][ni]
@@ -326,7 +321,7 @@ struct MatrixGeGluWriter {
 		} else {
 			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
 				X17_UNROLL for (usize ni = 0; ni < N_TILES/2; ++ni) {
-					geglu_and_backward_<INP_SCALE_2, OUT_SCALE_2>(
+					geglu_and_backward_<SPARSE_SCALE_2, OUT_SCALE_2>(
 						acc[mi][2*ni+0],
 						acc[mi][2*ni+1],
 						out[mi][ni]
