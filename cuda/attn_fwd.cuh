@@ -315,10 +315,17 @@ struct AttnForward {
 		Fragment_8x8<f32> &o,
 		Fragment_8x8<bf16> const &g
 	) {
-		o.set(
-			f32(g.first()) * o.first(), // the qkvg kernel calculates the gelu() of g.first()
-			math::fast::gelu<1.0, SPARSE_SCALE_2 * G_OUT_SCALE_2>(o.second()).val * f32(g.second())
-		);
+		f32 gate1 = g.first(); // the qkvg kernel calculates the gelu() of g.first()
+		f32 lin1 = o.first();
+
+		f32 lin2 = g.second();
+		f32 gate2 =
+			math::fast::gelu<
+				SPARSE_SCALE_2 * V_SCALE_FIX_2,
+				G_OUT_SCALE_2 * SPARSE_SCALE_2
+			>(o.second()).val;
+
+		o.set(gate1 * lin1, gate2 * lin2);
 	}
 
 	static X17_DEVICE void zig_zag_geglu_(
@@ -361,8 +368,8 @@ struct AttnForward {
 			top_L[h] = math::fast::logb(top_stats[h].sum) + top_stats[h].max;
 			bot_L[h] = math::fast::logb(bot_stats[h].sum) + bot_stats[h].max;
 
-			f32 top_rescale = math::fast::divide(f32(SPARSE_SCALE * V_SCALE_FIX), top_stats[h].sum);
-			f32 bot_rescale = math::fast::divide(f32(SPARSE_SCALE * V_SCALE_FIX), bot_stats[h].sum);
+			f32 top_rescale = math::fast::recip(top_stats[h].sum);
+			f32 bot_rescale = math::fast::recip(bot_stats[h].sum);
 
 			scale_top_(rO_f32[h], top_rescale);
 			scale_bottom_(rO_f32[h], bot_rescale);

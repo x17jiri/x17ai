@@ -58,10 +58,13 @@ struct MatrixQKVGWriter {
 	}
 
 	static X17_DEVICE void prepare_g_output(Fragment_8x8<f32> &g) {
-		g.set(
-			math::fast::gelu<SPARSE_SCALE_2, G_OUT_SCALE_2>(g.first()).val,
-			g.second()
-		);
+		f32 gelu =
+			math::fast::gelu<
+				SPARSE_SCALE_2,
+				G_OUT_SCALE_2 * SPARSE_SCALE_2 * V_SCALE_FIX_2
+			>(g.first()).val;
+		f32 raw = g.second();
+		g.set(gelu, raw);
 	}
 
 	template<const usize N_TILE_CNT, const usize M_TILE_CNT>
