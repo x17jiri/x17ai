@@ -9,4 +9,5 @@
 	"window_size": 256,
 	"l2_norm_eps": 1e-30,
 	"rope_base": 10000.0,
+	"v_scale_fix": 1.5,
 }

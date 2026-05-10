@@ -11,38 +11,26 @@ template<
 	const usize N_HEAD,
 	const usize D_HEAD,
 	const f64 L2_NORM_EPS,
-	const usize ROPE_DIM,
-	const f64 ROPE_BASE
+	const f64 V_SCALE_FIX
 >
 struct MatrixQKVGWriter {
 	bf16 *gC;
 	usize c_stride;
-	usize seq_len;
 	bf16 const *gQKNormScale_ptr;
-	bf16 const *gSinkK_ptr;
-	f32 *gSinkScore_ptr;
 
 	static constexpr usize SEGMENT_SIZE = N_HEAD * D_HEAD;
 	static constexpr f64 SPARSE_SCALE_2 = f64(D_IN) / f64(FAN_IN);
 	static constexpr f64 G_OUT_SCALE_2 = 1.0 / f64(SEGMENT_SIZE);
 
 	static_assert(GN == 4 * SEGMENT_SIZE);
-	static_assert(ROPE_DIM <= D_HEAD);
-	static_assert(ROPE_DIM % 16 == 0);
 
 	X17_DEVICE MatrixQKVGWriter(
 		bf16 *gC,
-		usize seq_len,
-		bf16 const *gQKNormScale_ptr,
-		bf16 const *gSinkK_ptr,
-		f32 *gSinkScore_ptr
+		bf16 const *gQKNormScale_ptr
 	):
 		gC(gC),
 		c_stride(GN),
-		seq_len(seq_len),
-		gQKNormScale_ptr(gQKNormScale_ptr),
-		gSinkK_ptr(gSinkK_ptr),
-		gSinkScore_ptr(gSinkScore_ptr)
+		gQKNormScale_ptr(gQKNormScale_ptr)
 	{}
 
 	X17_DEVICE static bool is_q_or_k(usize col) {
@@ -61,7 +49,7 @@ struct MatrixQKVGWriter {
 		f32 gelu =
 			math::fast::gelu<
 				SPARSE_SCALE_2,
-				G_OUT_SCALE_2 * SPARSE_SCALE_2 * V_SCALE_FIX_2
+				G_OUT_SCALE_2 * SPARSE_SCALE_2 * (V_SCALE_FIX * V_SCALE_FIX)
 			>(g.first()).val;
 		f32 raw = g.second();
 		g.set(gelu, raw);
@@ -158,106 +146,6 @@ struct MatrixQKVGWriter {
 	}
 
 	template<const usize N_TILE_CNT, const usize M_TILE_CNT>
-	X17_DEVICE static void store_sink_scores(
-		Fragment_16x16<f32> const (&acc)[N_TILE_CNT][M_TILE_CNT],
-		bf16 const *gSinkK_ptr,
-		f32 *gSinkScore_ptr,
-		usize seq_len,
-		usize row,
-		usize col
-	) {
-		static constexpr usize GROUP_TILE_CNT = D_HEAD / 16;
-		static constexpr usize GROUP_CNT = (M_TILE_CNT * 16) / D_HEAD;
-		static_assert((M_TILE_CNT * 16) % D_HEAD == 0);
-
-		usize tid = threadIdx.x % WARP_SIZE;
-		usize pair_in_quad = tid % 4;
-		usize row_in_half = tid / 4;
-		usize head_base = col / D_HEAD;
-
-		X17_UNROLL for (usize group = 0; group < GROUP_CNT; ++group) {
-			usize head_idx = head_base + group;
-			bf16 const *sink_ptr = gSinkK_ptr + head_idx * D_HEAD;
-			f32 top[N_TILE_CNT];
-			f32 bot[N_TILE_CNT];
-			X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
-				top[ni] = 0.0f;
-				bot[ni] = 0.0f;
-			}
-
-			X17_UNROLL for (usize tile = 0; tile < GROUP_TILE_CNT; ++tile) {
-				usize col_base = group * GROUP_TILE_CNT * 16 + tile * 16;
-				usize left_col = col_base + pair_in_quad * 2;
-				usize right_col = left_col + 8;
-
-				union {
-					u32 packed;
-					bf16 values[2];
-				} left_sink, right_sink;
-
-				left_sink.packed = __float_as_uint(load_gmem_1x32b(reinterpret_cast<f32 const *>(sink_ptr + left_col)));
-				right_sink.packed = __float_as_uint(load_gmem_1x32b(reinterpret_cast<f32 const *>(sink_ptr + right_col)));
-
-				f32 left0 = f32(left_sink.values[0]);
-				f32 left1 = f32(left_sink.values[1]);
-				f32 right0 = f32(right_sink.values[0]);
-				f32 right1 = f32(right_sink.values[1]);
-
-				X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
-					Fragment_16x16<f32> const &frag = acc[ni][group * GROUP_TILE_CNT + tile];
-					top[ni] = math::fma(frag.sub[0][0].first(), left0, top[ni]);
-					top[ni] = math::fma(frag.sub[0][0].second(), left1, top[ni]);
-					top[ni] = math::fma(frag.sub[0][1].first(), right0, top[ni]);
-					top[ni] = math::fma(frag.sub[0][1].second(), right1, top[ni]);
-
-					bot[ni] = math::fma(frag.sub[1][0].first(), left0, bot[ni]);
-					bot[ni] = math::fma(frag.sub[1][0].second(), left1, bot[ni]);
-					bot[ni] = math::fma(frag.sub[1][1].first(), right0, bot[ni]);
-					bot[ni] = math::fma(frag.sub[1][1].second(), right1, bot[ni]);
-				}
-			}
-
-			X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
-				top[ni] += shuffle_xor_sync(top[ni], 1);
-				top[ni] += shuffle_xor_sync(top[ni], 2);
-				bot[ni] += shuffle_xor_sync(bot[ni], 1);
-				bot[ni] += shuffle_xor_sync(bot[ni], 2);
-			}
-
-			if (pair_in_quad == 0) {
-				X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
-					usize top_row = row + ni * 16 + row_in_half;
-					usize bot_row = top_row + 8;
-					gSinkScore_ptr[head_idx * seq_len + top_row] = top[ni];
-					gSinkScore_ptr[head_idx * seq_len + bot_row] = bot[ni];
-				}
-			}
-		}
-	}
-
-	template<const usize N_TILE_CNT, const usize M_TILE_CNT>
-	X17_DEVICE static void apply_rope(
-		Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILE_CNT],
-		usize row
-	) {
-		static constexpr usize GROUP_TILE_CNT = D_HEAD / 16;
-		static constexpr usize GROUP_CNT = (M_TILE_CNT * 16) / D_HEAD;
-		static_assert((M_TILE_CNT * 16) % D_HEAD == 0);
-		constexpr usize ROPE_TILE_CNT = ROPE_DIM / 16;
-
-		X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
-			X17_UNROLL for (usize tile = 0; tile < ROPE_TILE_CNT; ++tile) {
-				Fragment_16x16<f32> coefs;
-				rope_coefs<ROPE_DIM, ROPE_BASE>(coefs, row + ni * 16, tile * 16);
-				X17_UNROLL for (usize group = 0; group < GROUP_CNT; ++group) {
-					Fragment_16x16<f32> &frag = acc[ni][group * GROUP_TILE_CNT + tile];
-					apply_rope_(frag, coefs);
-				}
-			}
-		}
-	}
-
-	template<const usize N_TILE_CNT, const usize M_TILE_CNT>
 	X17_DEVICE void write(
 		usize row,
 		usize col,
@@ -270,9 +158,7 @@ struct MatrixQKVGWriter {
 			l2_norm(acc);
 			if (is_q(col)) {
 				apply_q_norm_scales(acc, gQKNormScale_ptr, col);
-				store_sink_scores(acc, gSinkK_ptr, gSinkScore_ptr, seq_len, row, col);
 			}
-			apply_rope(acc, row);
 		} else if (is_g(col)) {
 			prepare_g_output(acc);
 		}

@@ -38,6 +38,7 @@ template<
 	const usize _V_DIM,
 	const usize _D_MODEL,
 	const usize _QKV_FAN_IN,
+	const f64 V_SCALE_FIX,
 	const bool _V_EQUALS_K = false
 >
 struct AttnForward {
@@ -59,7 +60,7 @@ struct AttnForward {
 
 	static constexpr f64 SPARSE_SCALE_2 = f64(D_MODEL) / f64(QKV_FAN_IN);
 	static constexpr f64 SPARSE_SCALE = math::constexpr_sqrt(SPARSE_SCALE_2);
-	static constexpr f64 V_SCALE_FIX = 1.5;
+	static constexpr f64 V_SCALE_FIX_2 = V_SCALE_FIX * V_SCALE_FIX;
 	static constexpr f64 G_OUT_SCALE_2 = 1.0 / f64(V_DIM * HEAD_CNT);
 
 	static_assert(HEADS_PER_KERNEL > 0, "HEADS_PER_KERNEL must be > 0");
@@ -166,23 +167,37 @@ struct AttnForward {
 		return double(mma_count(seq_len, window_size)) * 2.0 * 16.0 * 16.0 * 16.0;
 	}
 
-	X17_DEVICE void load_sink_scores(
-		f32 const *gSinkScore_ptr,
-		usize seq_len,
-		usize q_start,
-		usize i_head_base,
+	X17_DEVICE void calculate_sink_scores(
+		Fragment_16x16<bf16> const (&rQ)[HEADS_PER_KERNEL][QK_TILES],
+		bf16 const (&rSinkK)[QK_GROUP_DIM / 4],
 		f32 (&top_sink_score)[HEADS_PER_KERNEL],
 		f32 (&bot_sink_score)[HEADS_PER_KERNEL]
 	) {
-		usize tid = threadIdx.x % WARP_SIZE;
-		usize row_in_half = tid / 4;
-		usize top_row = q_start + row_in_half;
-		usize bot_row = top_row + 8;
-
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
-			// TODO - load with just one instruction, but wait until we get correctness right
-			top_sink_score[h] = load_gmem_1x32b(gSinkScore_ptr + (i_head_base + h) * seq_len + top_row);
-			bot_sink_score[h] = load_gmem_1x32b(gSinkScore_ptr + (i_head_base + h) * seq_len + bot_row);
+			f32 top = 0.0f;
+			f32 bot = 0.0f;
+			X17_UNROLL for (usize i = 0; i < QK_TILES; ++i) {
+				Fragment_16x16<bf16> const &q = rQ[h][i];
+				usize sink_idx = h * (QK_DIM / 4) + i * 4;
+
+				top = math::fma(f32(q.sub[0][0].first()),  f32(rSinkK[sink_idx + 0]), top);
+				top = math::fma(f32(q.sub[0][0].second()), f32(rSinkK[sink_idx + 1]), top);
+				top = math::fma(f32(q.sub[0][1].first()),  f32(rSinkK[sink_idx + 2]), top);
+				top = math::fma(f32(q.sub[0][1].second()), f32(rSinkK[sink_idx + 3]), top);
+
+				bot = math::fma(f32(q.sub[1][0].first()),  f32(rSinkK[sink_idx + 0]), bot);
+				bot = math::fma(f32(q.sub[1][0].second()), f32(rSinkK[sink_idx + 1]), bot);
+				bot = math::fma(f32(q.sub[1][1].first()),  f32(rSinkK[sink_idx + 2]), bot);
+				bot = math::fma(f32(q.sub[1][1].second()), f32(rSinkK[sink_idx + 3]), bot);
+			}
+
+			top += shuffle_xor_sync(top, 1);
+			top += shuffle_xor_sync(top, 2);
+			bot += shuffle_xor_sync(bot, 1);
+			bot += shuffle_xor_sync(bot, 2);
+
+			top_sink_score[h] = top;
+			bot_sink_score[h] = bot;
 		}
 	}
 
@@ -205,13 +220,13 @@ struct AttnForward {
 		}
 	}
 
-	X17_DEVICE void load_sink_v(
-		bf16 const *gSinkV_ptr,
+	X17_DEVICE void load_sink_kv(
+		bf16 const *gSinkKV_ptr,
 		usize i_head_base,
-		bf16 (&rSinkV)[QK_GROUP_DIM / 4]
+		bf16 (&rSinkKV)[QK_GROUP_DIM / 4]
 	) {
 		usize pair_in_quad = threadIdx.x % 4;
-		bf16 const *sink_ptr = gSinkV_ptr + i_head_base * QK_DIM;
+		bf16 const *sink_ptr = gSinkKV_ptr + i_head_base * QK_DIM;
 		constexpr usize LOAD_CNT = QK_GROUP_DIM / 8;
 		X17_UNROLL for (usize i = 0; i < LOAD_CNT; ++i) {
 			usize src_col = i * 8 + pair_in_quad * 2;
@@ -222,8 +237,8 @@ struct AttnForward {
 				bf16 values[2];
 			} sink_pair;
 			sink_pair.packed = packed;
-			rSinkV[2 * i + 0] = sink_pair.values[0];
-			rSinkV[2 * i + 1] = sink_pair.values[1];
+			rSinkKV[2 * i + 0] = sink_pair.values[0];
+			rSinkKV[2 * i + 1] = sink_pair.values[1];
 		}
 	}
 
@@ -428,8 +443,8 @@ struct AttnForward {
 	X17_DEVICE void run(
 		usize seq_len, bf16 *gQ_ptr,
 		bf16 *gK_ptr, bf16 *gV_ptr, bf16 *gG_ptr,
+		bf16 const *gSinkK_ptr,
 		bf16 const *gSinkV_ptr,
-		f32 const *gSinkScore_ptr,
 		f32 const *gMax_ptr,
 		bf16 *gOut_ptr,
 		f32 *gL_ptr,
@@ -464,13 +479,10 @@ struct AttnForward {
 		cp_async_gmem_to_smem<THREADS_PER_BLOCK, Q_PER_BLOCK, QK_GROUP_DIM>(
 			threadIdx.x, gQ_block, sQ, 0, 0, 0, 0
 		);
+		bf16 rSinkK[QK_GROUP_DIM / 4];
+		load_sink_kv(gSinkK_ptr, i_head_base, rSinkK);
 		bf16 rSinkV[QK_GROUP_DIM / 4];
-		load_sink_v(gSinkV_ptr, i_head_base, rSinkV);
-
-		// Sink scores were precomputed during qkv_proj from the unrotated Q path.
-		f32 top_sink_score[HEADS_PER_KERNEL];
-		f32 bot_sink_score[HEADS_PER_KERNEL];
-		load_sink_scores(gSinkScore_ptr, seq_len, q_start, i_head_base, top_sink_score, bot_sink_score);
+		load_sink_kv(gSinkV_ptr, i_head_base, rSinkV);
 
 		// round window_size up without overflow (window_size == 0 means disabled)
 		usize max_window_size = std::numeric_limits<usize>::max();
@@ -534,6 +546,10 @@ struct AttnForward {
 				smem_tile_to_fragment(sKV, 0, h * QK_DIM + i * 16, rKV[h][i]);
 			}
 		}
+
+		f32 top_sink_score[HEADS_PER_KERNEL];
+		f32 bot_sink_score[HEADS_PER_KERNEL];
+		calculate_sink_scores(rQ, rSinkK, top_sink_score, bot_sink_score);
 
 		// Initialize online softmax stats with the sink token's contribution.
 		//
@@ -720,13 +736,13 @@ __global__ __launch_bounds__(AttnForward::THREADS_PER_BLOCK) void
 attn_forward(
 	usize seq_len, bf16 *gQ_ptr,
 	bf16 *gK_ptr, bf16 *gV_ptr, bf16 *gG_ptr,
+	bf16 const *gSinkK_ptr,
 	bf16 const *gSinkV_ptr,
-	f32 const *gSinkScore_ptr,
 	f32 const *gMax_ptr,
 	bf16 *gOut_ptr,
 	f32 *gL_ptr,
 	usize window_size
 ) {
 	AttnForward attn_forward = AttnForward();
-	attn_forward.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gG_ptr, gSinkV_ptr, gSinkScore_ptr, gMax_ptr, gOut_ptr, gL_ptr, window_size);
+	attn_forward.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gG_ptr, gSinkK_ptr, gSinkV_ptr, gMax_ptr, gOut_ptr, gL_ptr, window_size);
 }

@@ -1,14 +1,12 @@
 # QKVG Fwd
 
 ./nvcc.sh qkvg_fwd.cu && tmp/qkvg_fwd
-python verify_tensor.py tmp/block_torch/sink_scores_f32.bin tmp/block_cuda/sink_scores_f32.bin
 python verify_tensor.py tmp/block_torch/qkvg.bin tmp/block_cuda/qkvg.bin --shape 16384 4 1024
 python verify_tensor.py tmp/block_torch/q.bin tmp/block_cuda/q.bin --shape 16384 1024
 python verify_tensor.py tmp/block_torch/k.bin tmp/block_cuda/k.bin --shape 16384 1024
 python verify_tensor.py tmp/block_torch/v.bin tmp/block_cuda/v.bin --shape 16384 1024
 python verify_tensor.py tmp/block_torch/g.bin tmp/block_cuda/g.bin --shape 16384 1024
 
-python tensor_stats.py tmp/block_torch/sink_scores_f32.bin tmp/block_torch/sink_scores_f32.bin.var
 python tensor_stats.py tmp/block_torch/q.bin tmp/block_torch/q.bin.var
 python tensor_stats.py tmp/block_torch/k.bin tmp/block_torch/k.bin.var
 python tensor_stats.py tmp/block_torch/v.bin tmp/block_torch/v.bin.var

@@ -26,7 +26,13 @@ int main(int argc, char *argv[]) {
 
 	static_assert(config::d_model == config::n_heads * config::head_dim);
 
-	using AF = AttnForward<HEAD_CNT, HEADS_PER_KERNEL, QK_DIM, V_DIM, D_MODEL, QKV_FAN_IN, V_EQUALS_K>;
+	using AF = AttnForward<
+		HEAD_CNT,
+		HEADS_PER_KERNEL,
+		QK_DIM, V_DIM, D_MODEL, QKV_FAN_IN,
+		config::v_scale_fix,
+		V_EQUALS_K
+	>;
 	printf("sqrt 2 = %e, %e, %e, %d\n",
 		math::constexpr_sqrt(2.0),
 		M_SQRT2,
@@ -47,7 +53,7 @@ int main(int argc, char *argv[]) {
 	std::vector<bf16> h_V = load_tensor(tensor_path(cli.input_dir, "v.bin"), SEQ_LEN, PACKED_DIM);
 	std::vector<bf16> h_G = load_tensor(tensor_path(cli.input_dir, "g.bin"), SEQ_LEN, PACKED_DIM);
 	std::vector<bf16> h_sink_v = load_tensor(torch_tensor_path("sinks_v.bin"), HEAD_CNT, V_DIM);
-	std::vector<f32> h_sink_scores = load_f32_tensor(tensor_path(cli.input_dir, "sink_scores_f32.bin"), HEAD_CNT, SEQ_LEN);
+	std::vector<bf16> h_sink_k = load_tensor(torch_tensor_path("sinks_k.bin"), HEAD_CNT, QK_DIM);
 	std::vector<f32> h_maxes;
 	if (cli.use_torch_maxes && std::filesystem::exists(torch_tensor_path("attn_maxes_f32.bin"))) {
 		h_maxes = load_f32_tensor(torch_tensor_path("attn_maxes_f32.bin"), HEAD_CNT, SEQ_LEN);
@@ -58,7 +64,7 @@ int main(int argc, char *argv[]) {
 	} else if (cli.use_torch_maxes) {
 		printf("Torch attention maxes requested but %s does not exist\n", torch_tensor_path("attn_maxes_f32.bin").c_str());
 	}
-	if (h_Q.empty() || h_K.empty() || h_V.empty() || h_G.empty() || h_sink_v.empty() || h_sink_scores.empty()) {
+	if (h_Q.empty() || h_K.empty() || h_V.empty() || h_G.empty() || h_sink_v.empty() || h_sink_k.empty()) {
 		return 1;
 	}
 
@@ -70,7 +76,7 @@ int main(int argc, char *argv[]) {
 	bf16 *d_V = nullptr;
 	bf16 *d_G = nullptr;
 	bf16 *d_sink_v = nullptr;
-	f32 *d_sink_scores = nullptr;
+	bf16 *d_sink_k = nullptr;
 	f32 *d_maxes = nullptr;
 	bf16 *d_out = nullptr;
 	f32 *d_L = nullptr;
@@ -80,7 +86,7 @@ int main(int argc, char *argv[]) {
 	cudaMalloc(&d_V, h_V.size() * sizeof(bf16));
 	cudaMalloc(&d_G, h_G.size() * sizeof(bf16));
 	cudaMalloc(&d_sink_v, h_sink_v.size() * sizeof(bf16));
-	cudaMalloc(&d_sink_scores, h_sink_scores.size() * sizeof(f32));
+	cudaMalloc(&d_sink_k, h_sink_k.size() * sizeof(bf16));
 	if (!h_maxes.empty()) {
 		cudaMalloc(&d_maxes, h_maxes.size() * sizeof(f32));
 	}
@@ -92,7 +98,7 @@ int main(int argc, char *argv[]) {
 	cudaMemcpy(d_V, h_V.data(), h_V.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_G, h_G.data(), h_G.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_sink_v, h_sink_v.data(), h_sink_v.size() * sizeof(bf16), cudaMemcpyHostToDevice);
-	cudaMemcpy(d_sink_scores, h_sink_scores.data(), h_sink_scores.size() * sizeof(f32), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_sink_k, h_sink_k.data(), h_sink_k.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 	if (d_maxes != nullptr) {
 		cudaMemcpy(d_maxes, h_maxes.data(), h_maxes.size() * sizeof(f32), cudaMemcpyHostToDevice);
 	}
@@ -111,8 +117,8 @@ int main(int argc, char *argv[]) {
 				d_K,
 				d_V,
 				d_G,
+				d_sink_k,
 				d_sink_v,
-				d_sink_scores,
 				d_maxes,
 				d_out,
 				d_L,
@@ -136,8 +142,8 @@ int main(int argc, char *argv[]) {
 				d_K,
 				d_V,
 				d_G,
+				d_sink_k,
 				d_sink_v,
-				d_sink_scores,
 				d_maxes,
 				d_out,
 				d_L,
@@ -178,7 +184,7 @@ int main(int argc, char *argv[]) {
 	cudaFree(d_V);
 	cudaFree(d_G);
 	cudaFree(d_sink_v);
-	cudaFree(d_sink_scores);
+	cudaFree(d_sink_k);
 	cudaFree(d_maxes);
 	cudaFree(d_out);
 	cudaFree(d_L);
