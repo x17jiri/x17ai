@@ -30,28 +30,39 @@ python tensor_stats.py tmp/block_torch/attn_out.bin tmp/block_torch/attn_out.bin
 python verify_tensor.py tmp/block_torch/o_attn.bin tmp/block_cuda/o_attn.bin
 python tensor_stats.py tmp/block_torch/o_attn.bin tmp/block_torch/o_attn.bin.var
 
-# FFN Forward
+# FFN F Forward
 
-./nvcc.sh ffn_fwd.cu && tmp/ffn_fwd
-python verify_tensor.py tmp/block_torch/f.bin tmp/block_cuda/f.bin
-python verify_tensor.py tmp/block_torch/f_backvec.bin tmp/block_cuda/f_backvec.bin
-python tensor_stats.py tmp/block_torch/f.bin tmp/block_torch/f.bin.var
+./nvcc.sh ffn_f_fwd.cu && tmp/ffn_f_fwd
+python verify_tensor.py tmp/block_torch/ffn_f.bin tmp/block_cuda/ffn_f.bin
+python tensor_stats.py tmp/block_torch/ffn_f.bin tmp/block_torch/ffn_f.bin.var
 
-# FFN O Proj Forward
+# FFN O Forward
 
-./nvcc.sh o_ffn_fwd.cu && tmp/o_ffn_fwd
-python verify_tensor.py tmp/block_torch/o_ffn.bin tmp/block_cuda/o_ffn.bin
-python tensor_stats.py tmp/block_torch/o_ffn.bin tmp/block_torch/o_ffn.bin.var
+./nvcc.sh ffn_y_fwd.cu && tmp/ffn_y_fwd
+python verify_tensor.py tmp/block_torch/ffn_y.bin tmp/block_cuda/ffn_y.bin
+python tensor_stats.py tmp/block_torch/ffn_y.bin tmp/block_torch/ffn_y.bin.var
 
-# FFN O Proj Backward
+# FFN O Backward
 
-./nvcc.sh o_ffn_dx.cu && tmp/o_ffn_dx
-python verify_tensor.py tmp/block_torch/d_f.bin tmp/block_cuda/d_f.bin
+./nvcc.sh ffn_d_f.cu && tmp/ffn_d_f
+python verify_tensor.py tmp/block_torch/ffn_d_f.bin tmp/block_cuda/ffn_d_f.bin
 
-# FFN O Proj Weight Grad
+./nvcc.sh ffn_d_y_weights.cu && tmp/ffn_d_y_weights
+python verify_tensor.py tmp/block_torch/ffn_d_y_weights.bin tmp/block_cuda/ffn_d_y_weights.bin --shape 1024 2048
 
-./nvcc.sh o_ffn_dw.cu && tmp/o_ffn_dw
-python verify_tensor.py tmp/block_torch/d_w_ffn.bin tmp/block_cuda/d_w_ffn.bin --shape 1024 2048
+# FFN Input Backward
+
+- `ffn_d_x.cu` consumes `ffn_d_f.bin` and `ffn_f_backvec.bin`.
+- `block.py` now emits `ffn_f_backvec.bin` alongside the other FFN reference tensors, so the default run uses `tmp/block_torch` directly.
+
+./nvcc.sh ffn_d_x.cu && tmp/ffn_d_x
+python verify_tensor.py tmp/block_torch/ffn_d_x.bin tmp/block_cuda/ffn_d_x.bin --shape 16384 1024
+
+- For a chained CUDA-only intermediate path, generate CUDA `ffn_f_backvec.bin` and `ffn_d_f.bin` first:
+
+./nvcc.sh ffn_f_fwd.cu && tmp/ffn_f_fwd
+./nvcc.sh ffn_d_f.cu && tmp/ffn_d_f
+tmp/ffn_d_x --cuda-inputs
 
 # Chained run using CUDA outputs as inputs for later kernels.
 
@@ -62,9 +73,9 @@ python verify_tensor.py tmp/block_torch/d_w_ffn.bin tmp/block_cuda/d_w_ffn.bin -
 ./nvcc.sh o_attn_fwd.cu && tmp/o_attn_fwd --cuda-inputs
 python verify_tensor.py tmp/block_torch/o_attn.bin tmp/block_cuda/o_attn.bin
 
-./nvcc.sh ffn_fwd.cu && tmp/ffn_fwd
-./nvcc.sh o_ffn_fwd.cu && tmp/o_ffn_fwd --cuda-inputs
-python verify_tensor.py tmp/block_torch/o_ffn.bin tmp/block_cuda/o_ffn.bin
+./nvcc.sh ffn_f_fwd.cu && tmp/ffn_f_fwd
+./nvcc.sh ffn_y_fwd.cu && tmp/ffn_y_fwd --cuda-inputs
+python verify_tensor.py tmp/block_torch/ffn_y.bin tmp/block_cuda/ffn_y.bin
 
 - It is still possible to use maxes from torch to get closer match
 

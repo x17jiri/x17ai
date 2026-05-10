@@ -90,6 +90,8 @@ def l2_norm(tensor: torch.Tensor, eps: float = L2_NORM_EPS) -> torch.Tensor:
 def create_inputs() -> None:
 	generator = torch.Generator(device=my_device)
 	generator.manual_seed(42)
+	grad_generator = torch.Generator(device=my_device)
+	grad_generator.manual_seed(123)
 
 	# randn init
 	inputs = new_randn(N_INPUTS, D_MODEL, generator=generator)
@@ -99,6 +101,7 @@ def create_inputs() -> None:
 	w_ffn = new_randn(D_MODEL, F_WIDTH, generator=generator)
 	sink_k = new_randn(N_HEADS, HEAD_DIM, generator=generator)
 	sinks_v = new_randn(N_HEADS, HEAD_DIM, generator=generator)
+	d_out = quantize_(new_randn(N_INPUTS, D_MODEL, generator=grad_generator))
 
 	# constant value init
 	qk_norm_scales = new_ones(1, HEAD_DIM * N_HEADS)
@@ -109,9 +112,10 @@ def create_inputs() -> None:
 	store_tensor(inputs, "inputs.bin", expected_variance=1.0)
 	store_tensor(inputs_l2, "inputs_l2.bin", expected_variance=1.0 / D_MODEL)
 	store_tensor(qkvg_weights, "qkvg_weights.bin", expected_variance=1.0)
-	store_tensor(f_weights, "f_weights.bin", expected_variance=1.0)
+	store_tensor(f_weights, "ffn_f_weights.bin", expected_variance=1.0)
 	store_tensor(w_attn, "w_attn.bin", expected_variance=1.0)
-	store_tensor(w_ffn, "w_ffn.bin", expected_variance=1.0)
+	store_tensor(w_ffn, "ffn_y_weights.bin", expected_variance=1.0)
+	store_tensor(d_out, "d_out.bin", expected_variance=1.0)
 	store_tensor(qk_norm_scales, "qk_norm_scales.bin", expected_variance=0.0)
 	store_tensor(sink_k, "sinks_k.bin", expected_variance=1.0 / HEAD_DIM)
 	store_tensor(sinks_v, "sinks_v.bin", expected_variance=1.0)
@@ -120,8 +124,8 @@ def sparse_weights(w: torch.Tensor, d_input, repeat_after) -> torch.Tensor:
 	d_output = w.shape[0]
 	fan_in = w.shape[1]
 	step = d_input // repeat_after
-	sparse = torch.zeros((d_output, d_input))
-	cols = torch.arange(fan_in, dtype=torch.int64)
+	sparse = torch.zeros((d_output, d_input), dtype=w.dtype, device=w.device)
+	cols = torch.arange(fan_in, dtype=torch.int64, device=w.device)
 	for row in range(d_output):
 		indices = (cols + row * step) % d_input
 		sparse[row, indices] = w[row]
@@ -135,7 +139,7 @@ def gelu(x: torch.Tensor) -> torch.Tensor:
 
 #---------------------------------------------------------------------------------------------------
 
-def ffn_fwd(inputs: torch.Tensor, f_weights: torch.Tensor) -> torch.Tensor:
+def ffn_f_fwd(inputs: torch.Tensor, f_weights: torch.Tensor) -> torch.Tensor:
 	assert(f_weights.shape[0] == 2*F_WIDTH)
 	inputs = quantize_(inputs)
 	f_weights = quantize_(f_weights)
@@ -146,12 +150,12 @@ def ffn_fwd(inputs: torch.Tensor, f_weights: torch.Tensor) -> torch.Tensor:
 
 	gate = gate * SPARSE_SCALE
 	lin = lin * SPARSE_SCALE
-	warn_if_variance_is_unexpected("ffn_fwd: gate * SPARSE_SCALE", gate, 1.0)
-	warn_if_variance_is_unexpected("ffn_fwd: lin * SPARSE_SCALE", lin, 1.0)
+	warn_if_variance_is_unexpected("ffn_f_fwd: gate * SPARSE_SCALE", gate, 1.0)
+	warn_if_variance_is_unexpected("ffn_f_fwd: lin * SPARSE_SCALE", lin, 1.0)
 
 	return gelu(gate) * lin * OUT_SCALE
 
-def o_ffn_fwd(f: torch.Tensor, w_ffn: torch.Tensor) -> torch.Tensor:
+def ffn_y_fwd(f: torch.Tensor, w_ffn: torch.Tensor) -> torch.Tensor:
 	f = quantize_(f)
 	w_ffn = quantize_(w_ffn)
 	return torch.matmul(f, w_ffn.transpose(0, 1))
@@ -321,82 +325,100 @@ def o_proj_attn(attn_out: torch.Tensor, w_attn: torch.Tensor) -> torch.Tensor:
 	w_attn = quantize_(w_attn)
 	return torch.matmul(flat_attn_out, w_attn.transpose(0, 1))
 
-def _run_block() -> None:
-	inputs = load_tensor("inputs_l2.bin", N_INPUTS, D_MODEL)
-	qkvg_weights = load_tensor("qkvg_weights.bin", QKVG_ROWS, SPARSE_FAN_IN)
-	f_weights = load_tensor("f_weights.bin", F_PROJ_OUTPUTS, SPARSE_FAN_IN)
-	w_attn = load_tensor("w_attn.bin", D_MODEL, ATTN_WIDTH)
-	w_ffn = load_tensor("w_ffn.bin", D_MODEL, F_WIDTH)
-	qk_norm_scales = load_tensor("qk_norm_scales.bin", 1, HEAD_DIM * N_HEADS)
-	sinks_k = load_tensor("sinks_k.bin", N_HEADS, HEAD_DIM)
-	sinks_v = load_tensor("sinks_v.bin", N_HEADS, HEAD_DIM)
+#---------------------------------------------------------------------------------------------------
 
-#	attn_out, attn_maxes = attn(q, k, v, g, sinks_k, sinks_v)
-#	o_attn = o_proj_attn(attn_out, w_attn)
+def run_ffn() -> None:
+	x = load_tensor("inputs_l2.bin", N_INPUTS, D_MODEL)
+	f_weights = load_tensor("ffn_f_weights.bin", F_PROJ_OUTPUTS, SPARSE_FAN_IN)
+	y_weights = load_tensor("ffn_y_weights.bin", D_MODEL, F_WIDTH)
+	d_y = load_tensor("d_out.bin", N_INPUTS, D_MODEL)
 
-	f_weights = sparse_weights(f_weights, D_MODEL, HEAD_DIM)
-	f_pregate_raw = f_proj_pregate(inputs, f_weights)
-	f_pregate = f_pregate_raw * SPARSE_SCALE
-	f = pairwise_geglu(f_pregate, F_GEGLU_SCALE)
-	f_backvec = pairwise_geglu_backward_multipliers(f_pregate_raw, SPARSE_SCALE, F_GEGLU_SCALE)
-	o_ffn = o_proj_ffn(f, w_ffn)
-	grad_generator = torch.Generator(device=my_device)
-	grad_generator.manual_seed(123)
-	d_o_ffn = quantize_(new_randn(N_INPUTS, D_MODEL, generator=grad_generator))
-	d_f, d_w_ffn = o_proj_ffn_backward(f, w_ffn, d_o_ffn)
+	x.requires_grad_(True)
+	f_weights.requires_grad_(True)
+	y_weights.requires_grad_(True)
 
-	print("inputs shape:", inputs.shape)
-	print("qkvg shape:", qkvg.shape)
-	print("q shape:", q.shape)
-	print("k shape:", k.shape)
-	print("v shape:", v.shape)
-	print("sinks_k shape:", sinks_k.shape)
-	print("sinks_v shape:", sinks_v.shape)
-#	print("attn_maxes shape:", attn_maxes.shape)
-#	print("attn_out shape:", attn_out.shape)
-	print("f_pregate shape:", f_pregate.shape)
-	print("f shape:", f.shape)
-	print("f_backvec shape:", f_backvec.shape)
-	print("d_o_ffn shape:", d_o_ffn.shape)
-	print("d_f shape:", d_f.shape)
-	print("d_w_ffn shape:", d_w_ffn.shape)
-#	print("o_attn shape:", o_attn.shape)
-	print("o_ffn shape:", o_ffn.shape)
-	#print("attn_match shape:", attn_match.shape)
+	f_full_weights = sparse_weights(f_weights, D_MODEL, HEAD_DIM)
+	t = torch.matmul(quantize_(x.detach()), quantize_(f_full_weights.detach()).transpose(0, 1))
+	gate_scaled = (t[..., 0::2] * SPARSE_SCALE).detach().requires_grad_(True)
+	lin_scaled = t[..., 1::2] * SPARSE_SCALE
+	out_scale = GELU_VAR_FIX * math.sqrt(1.0 / F_WIDTH)
+	local_f = gelu(gate_scaled) * lin_scaled * out_scale
+	torch.autograd.backward(local_f, torch.ones_like(local_f))
+	assert gate_scaled.grad is not None
+	backvec = torch.empty_like(t)
+	backvec[..., 0::2] = gate_scaled.grad.detach() * SPARSE_SCALE
+	backvec[..., 1::2] = gelu(gate_scaled.detach()) * (SPARSE_SCALE * out_scale)
 
-#	store_f32_tensor(attn_maxes.transpose(0, 1), "attn_maxes_f32.bin")
-#	store_tensor(attn_out, "attn_out.bin", expected_variance=1.0 / ATTN_WIDTH)
-	store_tensor(f_pregate, "f_pregate.bin", expected_variance=1.0)
-	store_tensor(f, "f.bin", expected_variance=1.0 / F_WIDTH)
-	store_tensor(f_backvec, "f_backvec.bin")
-	store_tensor(d_o_ffn, "d_o_ffn.bin", expected_variance=1.0)
-	store_tensor(d_f, "d_f.bin")
-	store_tensor(d_w_ffn, "d_w_ffn.bin")
-#	store_tensor(o_attn, "o_attn.bin", expected_variance=1.0)
-	store_tensor(o_ffn, "o_ffn.bin", expected_variance=1.0)
+	f = ffn_f_fwd(x, f_full_weights)
+	f.retain_grad()
+
+	y = ffn_y_fwd(f, y_weights)
+
+	torch.autograd.backward(y, d_y)
+	assert f.grad is not None
+	assert y_weights.grad is not None
+	assert f_weights.grad is not None
+	assert x.grad is not None
+
+	store_tensor(f, "ffn_f.bin", expected_variance=1.0 / F_WIDTH)
+	store_tensor(backvec, "ffn_f_backvec.bin")
+	store_tensor(y, "ffn_y.bin", expected_variance=1.0)
+	store_tensor(f.grad, "ffn_d_f.bin")
+	store_tensor(y_weights.grad, "ffn_d_y_weights.bin")
+	store_tensor(f_weights.grad, "ffn_d_f_weights.bin")
+	store_tensor(x.grad, "ffn_d_x.bin")
+
+#---------------------------------------------------------------------------------------------------
 
 def run_block() -> None:
+
+	run_ffn()
+	return
 
 	#-- Params
 
 	inputs = load_tensor("inputs_l2.bin", N_INPUTS, D_MODEL)
 	qkvg_weights = load_tensor("qkvg_weights.bin", QKVG_ROWS, SPARSE_FAN_IN)
-	f_weights = load_tensor("f_weights.bin", F_PROJ_OUTPUTS, SPARSE_FAN_IN)
+	f_weights = load_tensor("ffn_f_weights.bin", F_PROJ_OUTPUTS, SPARSE_FAN_IN)
 	w_attn = load_tensor("w_attn.bin", D_MODEL, ATTN_WIDTH)
-	w_ffn = load_tensor("w_ffn.bin", D_MODEL, F_WIDTH)
+	w_ffn = load_tensor("ffn_y_weights.bin", D_MODEL, F_WIDTH)
+	d_out = load_tensor("d_out.bin", N_INPUTS, D_MODEL)
 	qk_norm_scales = load_tensor("qk_norm_scales.bin", 1, HEAD_DIM * N_HEADS)
 	sinks_k = load_tensor("sinks_k.bin", N_HEADS, HEAD_DIM)
 	sinks_v = load_tensor("sinks_v.bin", N_HEADS, HEAD_DIM)
 
 	#-- FFN
 
-	f_weights = sparse_weights(f_weights, D_MODEL, HEAD_DIM)
-	f = ffn_fwd(inputs, f_weights);
-	o_ffn = o_ffn_fwd(f, w_ffn)
+	ffn_inputs = inputs.detach().clone().requires_grad_(True)
+	compact_f_weights = f_weights.detach().clone().requires_grad_(True)
+	ffn_w_ffn = w_ffn.detach().clone().requires_grad_(True)
+
+	dense_f_weights = sparse_weights(compact_f_weights, D_MODEL, HEAD_DIM)
+	f = ffn_f_fwd(ffn_inputs, dense_f_weights)
+	f.retain_grad()
+	o_ffn = ffn_y_fwd(f, ffn_w_ffn)
+
+	torch.autograd.backward(o_ffn, d_out)
+	assert f.grad is not None
+	assert ffn_inputs.grad is not None
+	assert ffn_w_ffn.grad is not None
+	assert compact_f_weights.grad is not None
+
+	d_f = f.grad.detach()
+	d_inputs_l2_ffn = ffn_inputs.grad.detach()
+	d_w_ffn = ffn_w_ffn.grad.detach()
+	d_f_weights = compact_f_weights.grad.detach()
+	f = f.detach()
+	o_ffn = o_ffn.detach()
 
 	if True:
 		store_tensor(f, "f.bin", expected_variance=1.0 / F_WIDTH)
 		store_tensor(o_ffn, "o_ffn.bin", expected_variance=1.0)
+		store_tensor(d_out, "d_o_ffn.bin", expected_variance=1.0)
+		store_tensor(d_f, "d_f.bin")
+		store_tensor(d_inputs_l2_ffn, "d_inputs_l2_ffn.bin")
+		store_tensor(d_w_ffn, "d_w_ffn.bin")
+		store_tensor(d_f_weights, "d_f_weights.bin")
 
 	#-- Attn
 
@@ -404,6 +426,7 @@ def run_block() -> None:
 	q, k, v, g = qkvg_proj(inputs, qkvg_weights, qk_norm_scales)
 	qkvg = join_qkvg(q, k, v, g)
 	attn_out, attn_maxes = attn(q, k, v, g, sinks_k, sinks_v)
+	o_attn = o_proj_attn(attn_out, w_attn)
 
 	if True:
 		store_f32_tensor(q, "q_f32.bin", expected_variance=1.0 / HEAD_DIM)
@@ -415,10 +438,14 @@ def run_block() -> None:
 		store_tensor(k, "k.bin", expected_variance=1.0 / HEAD_DIM)
 		store_tensor(v, "v.bin", expected_variance=SPARSE_FAN_IN / D_MODEL)
 		store_tensor(g, "g.bin")
+
+		store_tensor(qkvg, "qkvg.bin")
+
 		store_f32_tensor(attn_maxes.transpose(0, 1), "attn_maxes_f32.bin")
 		store_tensor(attn_out, "attn_out.bin", expected_variance=1.0 / ATTN_WIDTH)
 
-		store_tensor(qkvg, "qkvg.bin")
+		store_tensor(o_attn, "o_attn.bin", expected_variance=1.0)
+
 
 def main() -> None:
 	parser = argparse.ArgumentParser()

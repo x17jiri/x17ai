@@ -1,5 +1,4 @@
 #include "cuda/gemm.cuh"
-
 #include "block.config.hpp"
 #include "utils2.cuh"
 
@@ -9,49 +8,42 @@
 constexpr usize SEQ_LEN = config::n_inputs;
 constexpr usize D_MODEL = config::d_model;
 constexpr usize F_WIDTH = config::f_width;
-constexpr usize F_PROJ_OUTPUTS = 2 * F_WIDTH;
 
-namespace FfnFwd {
+namespace Ffn_d_f {
 	using WeightLoader =
-		SparseMatrixLoader<
-			config::d_model, // d_input,
-			config::qkv_fan_in,
-			config::head_dim, // cycle
-			64, 64 // tile size
+		MatrixTransLoader<
+			MatrixLoader<
+				config::f_width,
+				64, 128
+			>
 		>;
 
 	using InputLoader =
 		MatrixTransLoader<
 			MatrixLoader<
-				config::d_model, // d_input
-				128, 64 // tile size
+				config::d_model,
+				64, 64
 			>
 		>;
 
-	using Writer =
-		MatrixGeGluWriter<
-			config::f_width, // d_output
-			config::d_model, // d_input
-			config::qkv_fan_in
-		>;
+	using Writer = MatrixWriter<config::f_width>;
 
 	using Kernel = Gemm<WeightLoader, InputLoader, Writer>;
 
 	X17_KERNEL(Kernel::THREADS_PER_BLOCK)
 	void kernel(
 		bf16 *w,
-		bf16 *inp, usize n_inputs,
-		bf16 *out,
-		bf16 *grad
+		bf16 *d_out, usize n_inputs,
+		bf16 *d_f
 	) {
-		auto a = WeightLoader(w, 2*config::f_width);
-		auto b = InputLoader(inp, n_inputs);
-		auto o = Writer(out, grad);
+		auto a = WeightLoader(w, config::d_model);
+		auto b = InputLoader(d_out, n_inputs);
+		auto o = Writer(d_f);
 		Kernel().run(a, b, o);
 	}
 }
 
-using namespace FfnFwd;
+using namespace Ffn_d_f;
 
 int main(int argc, char *argv[]) {
 	HarnessCliOptions cli;
@@ -59,52 +51,50 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	static_assert(config::d_model == config::n_heads * config::head_dim);
-
 	if (SEQ_LEN % Kernel::N_PER_BLOCK != 0) {
 		printf("Expected n_inputs %% %u == 0\n", Kernel::N_PER_BLOCK);
 		return 1;
 	}
-	if (F_PROJ_OUTPUTS % Kernel::M_PER_BLOCK != 0) {
-		printf("Expected 2 * f_width %% %u == 0\n", Kernel::M_PER_BLOCK);
+	if (F_WIDTH % Kernel::M_PER_BLOCK != 0) {
+		printf("Expected f_width %% %u == 0\n", Kernel::M_PER_BLOCK);
+		return 1;
+	}
+	if (D_MODEL % Kernel::K_STEP != 0) {
+		printf("Expected d_model %% %u == 0\n", Kernel::K_STEP);
 		return 1;
 	}
 
-	std::vector<bf16> h_weights = load_tensor(torch_tensor_path("f_weights.bin"), F_PROJ_OUTPUTS, config::qkv_fan_in);
-	std::vector<bf16> h_inputs = load_tensor(torch_tensor_path("inputs_l2.bin"), SEQ_LEN, D_MODEL);
-	if (h_weights.empty() || h_inputs.empty()) {
+	std::vector<bf16> h_weights = load_tensor(torch_tensor_path("ffn_y_weights.bin"), D_MODEL, F_WIDTH);
+	std::vector<bf16> h_d_out = load_tensor(torch_tensor_path("d_out.bin"), SEQ_LEN, D_MODEL);
+	if (h_weights.empty() || h_d_out.empty()) {
 		return 1;
 	}
 
 	std::vector<bf16> h_out(SEQ_LEN * F_WIDTH);
-	std::vector<bf16> h_backvec(SEQ_LEN * F_PROJ_OUTPUTS);
 
 	bf16 *d_weights = nullptr;
-	bf16 *d_inputs = nullptr;
+	bf16 *d_d_out = nullptr;
 	bf16 *d_out = nullptr;
-	bf16 *d_backvec = nullptr;
 
 	cudaMalloc(&d_weights, h_weights.size() * sizeof(bf16));
-	cudaMalloc(&d_inputs, h_inputs.size() * sizeof(bf16));
+	cudaMalloc(&d_d_out, h_d_out.size() * sizeof(bf16));
 	cudaMalloc(&d_out, h_out.size() * sizeof(bf16));
-	cudaMalloc(&d_backvec, h_backvec.size() * sizeof(bf16));
 
 	cudaMemcpy(d_weights, h_weights.data(), h_weights.size() * sizeof(bf16), cudaMemcpyHostToDevice);
-	cudaMemcpy(d_inputs, h_inputs.data(), h_inputs.size() * sizeof(bf16), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_d_out, h_d_out.data(), h_d_out.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 
 	cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, Kernel::SMEM_BYTES);
 	cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-	dim3 grid(F_PROJ_OUTPUTS / Kernel::M_PER_BLOCK, SEQ_LEN / Kernel::N_PER_BLOCK);
+	dim3 grid(F_WIDTH / Kernel::M_PER_BLOCK, SEQ_LEN / Kernel::N_PER_BLOCK);
 
 	int warmup = 50;
 	for (int i = 0; i < warmup; ++i) {
 		kernel<<<grid, Kernel::THREADS_PER_BLOCK, Kernel::SMEM_BYTES>>>(
 			d_weights,
-			d_inputs,
+			d_d_out,
 			SEQ_LEN,
-			d_out,
-			d_backvec
+			d_out
 		);
 	}
 	cudaDeviceSynchronize();
@@ -119,10 +109,9 @@ int main(int argc, char *argv[]) {
 		cudaEventRecord(starts[i]);
 		kernel<<<grid, Kernel::THREADS_PER_BLOCK, Kernel::SMEM_BYTES>>>(
 			d_weights,
-			d_inputs,
+			d_d_out,
 			SEQ_LEN,
-			d_out,
-			d_backvec
+			d_out
 		);
 		cudaEventRecord(ends[i]);
 	}
@@ -144,21 +133,18 @@ int main(int argc, char *argv[]) {
 
 	float median_ms = times_ms[num_runs / 2];
 	float min_ms = times_ms[0];
-	double tflops = 2.0 * F_PROJ_OUTPUTS * D_MODEL * SEQ_LEN / (median_ms * 1e-3) / 1e12;
+	double tflops = 2.0 * F_WIDTH * D_MODEL * SEQ_LEN / (median_ms * 1e-3) / 1e12;
 	printf("Kernel time over %d runs: median %.3f ms  min %.3f ms\n", num_runs, median_ms, min_ms);
 	printf("TFLOPS: %.2f\n", tflops);
 
 	cudaMemcpy(h_out.data(), d_out, h_out.size() * sizeof(bf16), cudaMemcpyDeviceToHost);
-	cudaMemcpy(h_backvec.data(), d_backvec, h_backvec.size() * sizeof(bf16), cudaMemcpyDeviceToHost);
 	std::filesystem::create_directories("tmp/block_cuda");
-	store_tensor("tmp/block_cuda/f.bin", h_out, SEQ_LEN, F_WIDTH);
-	store_tensor("tmp/block_cuda/f_backvec.bin", h_backvec, SEQ_LEN, F_PROJ_OUTPUTS);
+	store_tensor("tmp/block_cuda/ffn_d_f.bin", h_out, SEQ_LEN, F_WIDTH);
 
 	printf("Used SMEM per kernel: %u\n", Kernel::SMEM_BYTES);
 
 	cudaFree(d_weights);
-	cudaFree(d_inputs);
+	cudaFree(d_d_out);
 	cudaFree(d_out);
-	cudaFree(d_backvec);
 	return 0;
 }
