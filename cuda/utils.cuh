@@ -63,13 +63,13 @@ struct Round_cast;
 
 template<>
 struct Round_cast<bf16, f32> {
-	static bf16 cast(f32 x) {
+	X17_DEVICE static bf16 cast(f32 x) {
 		return __float2bfloat16_rn(x);
 	}
 };
 
 template<typename To, typename From>
-To round_cast(From x) {
+X17_DEVICE To round_cast(From x) {
 	return Round_cast<To, From>::cast(x);
 }
 
@@ -577,6 +577,18 @@ X17_DEVICE u32 cast_smem_ptr_to_uint(void const *const ptr) {
 
 namespace sm75 {
 	/// `smem_src` must be 16-byte aligned.
+	X17_DEVICE void ldmatrix_8x8xu16_x2(
+		u32 smem_src,
+		u32 &dst0, u32 &dst1
+	) {
+		asm volatile (
+			"\nldmatrix.sync.aligned.x2.m8n8.shared.b16 {%0, %1}, [%2];\n"
+			: "=r"(dst0), "=r"(dst1)
+			: "r"(smem_src)
+		);
+	}
+
+	/// `smem_src` must be 16-byte aligned.
 	X17_DEVICE void ldmatrix_8x8xu16_x4(
 		u32 smem_src,
 		u32 &dst0, u32 &dst1, u32 &dst2, u32 &dst3
@@ -978,6 +990,11 @@ struct Fragment_16x16 {
 		sub[0][1].transpose_();
 		sub[1][0].transpose_();
 	}
+};
+
+template<typename T>
+struct Fragment_16x8 {
+	Fragment_8x8<T> sub[2];
 };
 
 /// Each fragment has 8 columns of 2-byte type, but a thread always has
@@ -1805,6 +1822,25 @@ struct SMatrix {
 		}
 	}
 
+	/// `m_idx` must be a multiple of 16 and `n_idx` must be a multiple of 8.
+	X17_DEVICE void load_tile_to_fragment(
+		usize m_idx, usize n_idx,
+		Fragment_16x8<T> &dst
+	) const requires(sizeof(T) == 2) {
+		if constexpr (N > 0) {
+			usize tid = threadIdx.x;
+			usize row = m_idx + (tid & 15);
+			usize swizzle = ((threadIdx.x & 7) << 4) ^ (threadIdx.x & 16);
+			usize byte_col = n_idx * sizeof(T);
+			u32 addr = _ptr + (row * ROW_BYTES) + (byte_col ^ swizzle);
+
+			sm80::ldmatrix_8x8xu16_x2(
+				addr,
+				dst.sub[0].val, dst.sub[1].val
+			);
+		}
+	}
+
 	/// Loads a 16x16 tile from SMEM, transposed, into MMA registers.
 	/// Uses ldmatrix.trans to transpose each 8x8 sub-tile during load,
 	/// plus swaps off-diagonal destinations for a full 16x16 transpose.
@@ -2011,6 +2047,19 @@ X17_DEVICE void smem_tile_to_fragment(
 	SMatrix<T, M, N> const &src,
 	usize m_idx, usize n_idx,
 	Fragment_16x16<T> &dst
+) {
+	src.load_tile_to_fragment(m_idx, n_idx, dst);
+}
+
+template<
+	typename T,
+	const usize M,
+	const usize N
+>
+X17_DEVICE void smem_tile_to_fragment(
+	SMatrix<T, M, N> const &src,
+	usize m_idx, usize n_idx,
+	Fragment_16x8<T> &dst
 ) {
 	src.load_tile_to_fragment(m_idx, n_idx, dst);
 }

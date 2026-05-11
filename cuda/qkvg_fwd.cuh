@@ -37,7 +37,7 @@ struct MatrixQKVGWriter: MatrixWriter<GN> {
 	}
 
 	X17_DEVICE static bool is_g(usize col) {
-	static_assert(GN == 4 * SEGMENT_SIZE);
+		static_assert(GN == 4 * SEGMENT_SIZE);
 		return col >= 3 * SEGMENT_SIZE;
 	}
 
@@ -65,7 +65,7 @@ struct MatrixQKVGWriter: MatrixWriter<GN> {
 	}
 
 	template<const usize M_TILES, const usize N_TILES>
-	X17_DEVICE static void l2_norm(Fragment_16x16<f32> (&acc)[M_TILES][N_TILES]) {
+	X17_DEVICE static void l2_norm_(Fragment_16x16<f32> (&acc)[M_TILES][N_TILES]) {
 		static constexpr usize GROUP_TILE_CNT = D_HEAD / 16;
 		static constexpr usize GROUP_CNT = (N_TILES * 16) / D_HEAD;
 		static_assert((N_TILES * 16) % D_HEAD == 0);
@@ -106,7 +106,7 @@ struct MatrixQKVGWriter: MatrixWriter<GN> {
 	}
 
 	template<const usize M_TILES, const usize N_TILES>
-	X17_DEVICE static void apply_q_norm_scales(
+	X17_DEVICE static void apply_q_norm_scales_(
 		Fragment_16x16<f32> (&acc)[M_TILES][N_TILES],
 		bf16 const *gQKNormScale_ptr,
 		usize col
@@ -150,14 +150,14 @@ struct MatrixQKVGWriter: MatrixWriter<GN> {
 		static_assert(SEGMENT_SIZE % (N_TILES * 16) == 0);
 
 		if (is_q_or_k(col)) {
-			l2_norm(acc);
+			l2_norm_(acc);
 			if (is_q(col)) {
-				apply_q_norm_scales(acc, gQKNormScale_ptr, col);
+				apply_q_norm_scales_(acc, gQKNormScale_ptr, col);
 			}
 		} else if (is_g(col)) {
 			prepare_g_output_(acc);
 		}
 
-		MatrixWrite<GN>::write(row, col, acc);
+		MatrixWriter<GN>::write(row, col, acc);
 	}
 };

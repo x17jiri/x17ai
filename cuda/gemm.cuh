@@ -161,7 +161,7 @@ struct SparseMatrixLoader {
 		// off = column offset in the expanded matrix; off < GN*sizeof(T)
 		// We stay at this offset the whole time, but the data_off, i.e., the offset where
 		// data actually starts is different for each row.
-		usize off = p * (N*sizeof(T)) + off_in_row;
+		usize off = n * (N*sizeof(T)) + off_in_row;
 		usize data_off = usize(row_in_step * (INPUT_STEP*sizeof(T))) % usize(GN*sizeof(T));
 		constexpr usize DATA_SIZE = FAN_IN*sizeof(T);
 
@@ -331,6 +331,92 @@ struct MatrixGeGluWriter {
 				store(out[mi], C, row + 16*mi, col/2);
 			}
 		}
+	}
+};
+
+template<
+	const usize _GN,
+	const usize _M,
+	const usize _N,
+	const usize _GMEM_PRELOAD = 2
+>
+struct GeGluBackwardLoader {
+	static constexpr usize GN = _GN;
+	static constexpr usize M = _M;
+	static constexpr usize N = _N;
+	static constexpr usize DF_GN = GN / 2;
+	static constexpr usize DF_TILE_N = N / 2;
+	static constexpr usize GMEM_PRELOAD = _GMEM_PRELOAD;
+
+	static_assert(GN % N == 0);
+	static_assert(DF_GN % DF_TILE_N == 0);
+	static_assert(M % 16 == 0);
+	static_assert(N % 32 == 0);
+
+	static constexpr usize BACKVEC_SMEM_BYTES = N * M * GMEM_PRELOAD * sizeof(bf16);
+	static constexpr usize DF_SMEM_BYTES = M * DF_TILE_N * GMEM_PRELOAD * sizeof(bf16);
+	static constexpr usize SMEM_BYTES = BACKVEC_SMEM_BYTES + DF_SMEM_BYTES;
+
+	using GBackvec = GMatrixDynSize<bf16, GN>;
+	using GDf = GMatrixDynSize<bf16, DF_GN>;
+	using SBackvec = SMatrix<bf16, M * GMEM_PRELOAD, N>;
+	using SDf = SMatrix<bf16, M, DF_TILE_N * GMEM_PRELOAD>;
+
+	GBackvec gBackvec;
+	GDf gDf;
+	SBackvec sBackvec;
+	SDf sDf;
+
+	X17_DEVICE usize m_rows() const { return gBackvec.m_rows(); }
+	X17_DEVICE usize n_cols() const { return gBackvec.n_cols(); }
+
+	X17_DEVICE GeGluBackwardLoader(bf16 *d_f, bf16 *backvec, usize m_rows):
+		gBackvec(backvec, m_rows),
+		gDf(d_f, m_rows),
+		sBackvec(),
+		sDf()
+	{}
+
+	template<const u32 CAP>
+	X17_DEVICE void alloc_smem(SMemAllocator<CAP> &smem_alloc) {
+		sBackvec._ptr = smem_alloc.alloc(BACKVEC_SMEM_BYTES);
+		sDf._ptr = smem_alloc.alloc(DF_SMEM_BYTES);
+	}
+
+	template<const usize THREADS_PER_BLOCK>
+	X17_DEVICE void cp_async(usize step, usize m, usize n) {
+		cp_async_gmem_to_smem<THREADS_PER_BLOCK, M, N>(
+			threadIdx.x,
+			gBackvec.template tile_m<M>(m).template slice_n<N>(n * N),
+			sBackvec.template tile_m<M>(step % GMEM_PRELOAD),
+			0, 0, 0, 0
+		);
+		cp_async_gmem_to_smem<THREADS_PER_BLOCK, M, DF_TILE_N>(
+			threadIdx.x,
+			gDf.template tile_m<M>(m).template slice_n<DF_TILE_N>(n * DF_TILE_N),
+			sDf,
+			0, 0, 0, (step % GMEM_PRELOAD) * DF_TILE_N
+		);
+	}
+
+	X17_DEVICE void load_fragment(usize step, usize m, usize n, Fragment_16x16<bf16> &frag) {
+		auto backvec_tile = sBackvec.template tile_m<M>(step % GMEM_PRELOAD);
+		smem_tile_to_fragment(backvec_tile, m * 16, n * 16, frag);
+
+		Fragment_16x8<bf16> d_f_tile;
+		usize slot_col = (step % GMEM_PRELOAD) * DF_TILE_N;
+		usize d_f_tile_col = slot_col + n * 8;
+		smem_tile_to_fragment(sDf, m * 16, d_f_tile_col, d_f_tile);
+
+		Fragment_8x8<bf16> d_f_top = d_f_tile.sub[0];
+		Fragment_8x8<bf16> d_f_bot = d_f_tile.sub[1];
+		geglu_backward_(d_f_top, frag.sub[0][0], frag.sub[0][1]);
+		geglu_backward_(d_f_bot, frag.sub[1][0], frag.sub[1][1]);
+	}
+
+	X17_DEVICE void load_fragment_trans(usize step, usize m, usize n, Fragment_16x16<bf16> &frag) {
+		load_fragment(step, m, n, frag);
+		frag.transpose_();
 	}
 };
 

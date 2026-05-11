@@ -50,6 +50,9 @@ python verify_tensor.py tmp/block_torch/ffn_d_f.bin tmp/block_cuda/ffn_d_f.bin
 ./nvcc.sh ffn_d_y_weights.cu && tmp/ffn_d_y_weights
 python verify_tensor.py tmp/block_torch/ffn_d_y_weights.bin tmp/block_cuda/ffn_d_y_weights.bin --shape 1024 2048
 
+./nvcc.sh ffn_d_f_weights.cu && tmp/ffn_d_f_weights
+python verify_tensor.py tmp/block_torch/ffn_d_f_weights.bin tmp/block_cuda/ffn_d_f_weights.bin --shape 4096 512
+
 # FFN Input Backward
 
 - `ffn_d_x.cu` consumes `ffn_d_f.bin` and `ffn_f_backvec.bin`.
