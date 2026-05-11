@@ -53,6 +53,7 @@ python verify_tensor.py tmp/block_torch/ffn_d_y_weights.bin tmp/block_cuda/ffn_d
 # FFN Input Backward
 
 - `ffn_d_x.cu` consumes `ffn_d_f.bin` and `ffn_f_backvec.bin`.
+- It fuses `ffn_d_f` with the cached GeGLU backvec on the GPU during the GEMM preload path; there is no host-side `ffn_d_t` materialization.
 - `block.py` now emits `ffn_f_backvec.bin` alongside the other FFN reference tensors, so the default run uses `tmp/block_torch` directly.
 
 ./nvcc.sh ffn_d_x.cu && tmp/ffn_d_x

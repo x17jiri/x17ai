@@ -234,8 +234,9 @@ struct MatrixTransLoader {
 	X17_DEVICE usize m_rows() const { return loader.n_cols(); }
 	X17_DEVICE usize n_cols() const { return loader.m_rows(); }
 
-	X17_DEVICE MatrixTransLoader(bf16 *gmem_addr, usize m_rows):
-		loader(gmem_addr, m_rows)
+	template<typename... Args>
+	X17_DEVICE MatrixTransLoader(Args... args):
+		loader(args...)
 	{}
 
 	template<const u32 CAP>
@@ -309,7 +310,7 @@ struct MatrixGeGluWriter {
 			GMatrix<bf16, 16 * M_TILES, 32> G(gGrad, g_stride);
 			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
 				X17_UNROLL for (usize ni = 0; ni < N_TILES/2; ++ni) {
-					geglu_and_backward_<SPARSE_SCALE_2, OUT_SCALE_2>(
+					geglu_and_backvec_<SPARSE_SCALE_2, OUT_SCALE_2>(
 						acc[mi][2*ni+0],
 						acc[mi][2*ni+1],
 						out[mi][ni]
@@ -321,7 +322,7 @@ struct MatrixGeGluWriter {
 		} else {
 			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
 				X17_UNROLL for (usize ni = 0; ni < N_TILES/2; ++ni) {
-					geglu_and_backward_<SPARSE_SCALE_2, OUT_SCALE_2>(
+					geglu_and_backvec_<SPARSE_SCALE_2, OUT_SCALE_2>(
 						acc[mi][2*ni+0],
 						acc[mi][2*ni+1],
 						out[mi][ni]

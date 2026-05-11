@@ -1594,7 +1594,7 @@ template<
 	const f64 OUT_SCALE_2 = 1.0,
 	const f64 VAR_FIX_2 = math::fast::GELU_VAR_FIX_2
 >
-X17_DEVICE void geglu_and_backward_(
+X17_DEVICE void geglu_and_backvec_(
 	Fragment_8x8<f32> &i1,
 	Fragment_8x8<f32> &i2,
 	Fragment_8x8<bf16> &o
@@ -1621,10 +1621,31 @@ X17_DEVICE void geglu_and_backward_(
 		g1.val * lin1,
 		g2.val * lin2
 	);
+
+	usize tid = threadIdx.x;
 	o.transpose_();
-	usize tid = threadIdx.x % WARP_SIZE;
-	o.val = shuffle_sync(o.val, (tid & 12) * 2 + (tid & 16) / 4 + (tid & ~28));
+	o.val = shuffle_sync(o.val, (tid & 12) * 2 + (tid & 16) / 4 + (tid & 3));
 	o.transpose_();
+}
+
+X17_DEVICE void geglu_backward_(
+	Fragment_8x8<bf16> &d_o,
+	Fragment_8x8<bf16> &backvec1,
+	Fragment_8x8<bf16> &backvec2
+) {
+	usize tid = threadIdx.x;
+	d_o.transpose_();
+	d_o.val = shuffle_sync(d_o.val, (tid & 24) / 2 + (tid & 4) * 4 + (tid & 3));
+	d_o.transpose_();
+
+	backvec1.set(
+		__float2bfloat16_rn(f32(backvec1.first()) * f32(d_o.first())),
+		__float2bfloat16_rn(f32(backvec1.second()) * f32(d_o.first()))
+	);
+	backvec2.set(
+		__float2bfloat16_rn(f32(backvec2.first()) * f32(d_o.second())),
+		__float2bfloat16_rn(f32(backvec2.second()) * f32(d_o.second()))
+	);
 }
 
 /// Calculates GeGLU of consecutive values and stores the result to `o`.
@@ -1634,15 +1655,15 @@ template<
 	const f64 OUT_SCALE_2 = 1.0,
 	const f64 VAR_FIX_2 = math::fast::GELU_VAR_FIX_2
 >
-X17_DEVICE void geglu_and_backward_(
+X17_DEVICE void geglu_and_backvec_(
 	Fragment_16x16<f32> &i1,
 	Fragment_16x16<f32> &i2,
 	Fragment_16x16<bf16> &o
 ) {
-	geglu_and_backward_<INP_SCALE_2, OUT_SCALE_2, VAR_FIX_2>(i1.sub[0][0], i1.sub[0][1], o.sub[0][0]);
-	geglu_and_backward_<INP_SCALE_2, OUT_SCALE_2, VAR_FIX_2>(i2.sub[0][0], i2.sub[0][1], o.sub[0][1]);
-	geglu_and_backward_<INP_SCALE_2, OUT_SCALE_2, VAR_FIX_2>(i1.sub[1][0], i1.sub[1][1], o.sub[1][0]);
-	geglu_and_backward_<INP_SCALE_2, OUT_SCALE_2, VAR_FIX_2>(i2.sub[1][0], i2.sub[1][1], o.sub[1][1]);
+	geglu_and_backvec_<INP_SCALE_2, OUT_SCALE_2, VAR_FIX_2>(i1.sub[0][0], i1.sub[0][1], o.sub[0][0]);
+	geglu_and_backvec_<INP_SCALE_2, OUT_SCALE_2, VAR_FIX_2>(i2.sub[0][0], i2.sub[0][1], o.sub[0][1]);
+	geglu_and_backvec_<INP_SCALE_2, OUT_SCALE_2, VAR_FIX_2>(i1.sub[1][0], i1.sub[1][1], o.sub[1][0]);
+	geglu_and_backvec_<INP_SCALE_2, OUT_SCALE_2, VAR_FIX_2>(i2.sub[1][0], i2.sub[1][1], o.sub[1][1]);
 }
 
 //--------------------------------------------------------------------------------------------------
