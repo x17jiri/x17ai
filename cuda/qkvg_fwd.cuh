@@ -13,23 +13,18 @@ template<
 	const f64 L2_NORM_EPS,
 	const f64 V_SCALE_FIX
 >
-struct MatrixQKVGWriter {
-	bf16 *gC;
-	usize c_stride;
+struct MatrixQKVGWriter: MatrixWriter<GN> {
 	bf16 const *gQKNormScale_ptr;
 
 	static constexpr usize SEGMENT_SIZE = N_HEAD * D_HEAD;
 	static constexpr f64 SPARSE_SCALE_2 = f64(D_IN) / f64(FAN_IN);
 	static constexpr f64 G_OUT_SCALE_2 = 1.0 / f64(SEGMENT_SIZE);
 
-	static_assert(GN == 4 * SEGMENT_SIZE);
-
 	X17_DEVICE MatrixQKVGWriter(
 		bf16 *gC,
 		bf16 const *gQKNormScale_ptr
 	):
-		gC(gC),
-		c_stride(GN),
+		MatrixWriter<GN>(gC),
 		gQKNormScale_ptr(gQKNormScale_ptr)
 	{}
 
@@ -42,10 +37,11 @@ struct MatrixQKVGWriter {
 	}
 
 	X17_DEVICE static bool is_g(usize col) {
+	static_assert(GN == 4 * SEGMENT_SIZE);
 		return col >= 3 * SEGMENT_SIZE;
 	}
 
-	static X17_DEVICE void prepare_g_output(Fragment_8x8<f32> &g) {
+	static X17_DEVICE void prepare_g_output_(Fragment_8x8<f32> &g) {
 		f32 gelu =
 			math::fast::gelu<
 				SPARSE_SCALE_2,
@@ -55,32 +51,32 @@ struct MatrixQKVGWriter {
 		g.set(gelu, raw);
 	}
 
-	template<const usize N_TILE_CNT, const usize M_TILE_CNT>
-	X17_DEVICE static void prepare_g_output(Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILE_CNT]) {
-		X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
-			X17_UNROLL for (usize mi = 0; mi < M_TILE_CNT; ++mi) {
-				Fragment_16x16<f32> &g = acc[ni][mi];
-				prepare_g_output(g.sub[0][0]);
-				prepare_g_output(g.sub[0][1]);
-				prepare_g_output(g.sub[1][0]);
-				prepare_g_output(g.sub[1][1]);
+	template<const usize M_TILES, const usize N_TILES>
+	X17_DEVICE static void prepare_g_output_(Fragment_16x16<f32> (&acc)[M_TILES][N_TILES]) {
+		X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+			X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+				Fragment_16x16<f32> &g = acc[mi][ni];
+				prepare_g_output_(g.sub[0][0]);
+				prepare_g_output_(g.sub[0][1]);
+				prepare_g_output_(g.sub[1][0]);
+				prepare_g_output_(g.sub[1][1]);
 			}
 		}
 	}
 
-	template<const usize N_TILE_CNT, const usize M_TILE_CNT>
-	X17_DEVICE static void l2_norm(Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILE_CNT]) {
+	template<const usize M_TILES, const usize N_TILES>
+	X17_DEVICE static void l2_norm(Fragment_16x16<f32> (&acc)[M_TILES][N_TILES]) {
 		static constexpr usize GROUP_TILE_CNT = D_HEAD / 16;
-		static constexpr usize GROUP_CNT = (M_TILE_CNT * 16) / D_HEAD;
-		static_assert((M_TILE_CNT * 16) % D_HEAD == 0);
+		static constexpr usize GROUP_CNT = (N_TILES * 16) / D_HEAD;
+		static_assert((N_TILES * 16) % D_HEAD == 0);
 
-		X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
+		X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
 			X17_UNROLL for (usize group = 0; group < GROUP_CNT; ++group) {
 				f32 top_sum_sq = 0.0f;
 				f32 bot_sum_sq = 0.0f;
 
 				X17_UNROLL for (usize tile = 0; tile < GROUP_TILE_CNT; ++tile) {
-					Fragment_16x16<f32> &frag = acc[ni][group * GROUP_TILE_CNT + tile];
+					Fragment_16x16<f32> &frag = acc[mi][group * GROUP_TILE_CNT + tile];
 					top_sum_sq = math::fma(frag.sub[0][0].val0, frag.sub[0][0].val0, top_sum_sq);
 					top_sum_sq = math::fma(frag.sub[0][0].val1, frag.sub[0][0].val1, top_sum_sq);
 					top_sum_sq = math::fma(frag.sub[0][1].val0, frag.sub[0][1].val0, top_sum_sq);
@@ -101,7 +97,7 @@ struct MatrixQKVGWriter {
 				f32 bot_inv_norm = math::fast::rsqrt(bot_sum_sq + L2_NORM_EPS);
 
 				X17_UNROLL for (usize tile = 0; tile < GROUP_TILE_CNT; ++tile) {
-					Fragment_16x16<f32> &frag = acc[ni][group * GROUP_TILE_CNT + tile];
+					Fragment_16x16<f32> &frag = acc[mi][group * GROUP_TILE_CNT + tile];
 					frag.scale_top_(top_inv_norm);
 					frag.scale_bottom_(bot_inv_norm);
 				}
@@ -109,16 +105,16 @@ struct MatrixQKVGWriter {
 		}
 	}
 
-	template<const usize N_TILE_CNT, const usize M_TILE_CNT>
+	template<const usize M_TILES, const usize N_TILES>
 	X17_DEVICE static void apply_q_norm_scales(
-		Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILE_CNT],
+		Fragment_16x16<f32> (&acc)[M_TILES][N_TILES],
 		bf16 const *gQKNormScale_ptr,
 		usize col
 	) {
 		usize pair_in_quad = threadIdx.x % 4;
 
-		X17_UNROLL for (usize mi = 0; mi < M_TILE_CNT; ++mi) {
-			usize col_base = col + mi * 16;
+		X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+			usize col_base = col + ni * 16;
 			usize left_col = col_base + pair_in_quad * 2;
 			usize right_col = left_col + 8;
 
@@ -135,8 +131,8 @@ struct MatrixQKVGWriter {
 			f32 right0 = f32(right_scale.values[0]);
 			f32 right1 = f32(right_scale.values[1]);
 
-			X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
-				Fragment_16x16<f32> &frag = acc[ni][mi];
+			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+				Fragment_16x16<f32> &frag = acc[mi][ni];
 				frag.sub[0][0].set(frag.sub[0][0].first() * left0, frag.sub[0][0].second() * left1);
 				frag.sub[1][0].set(frag.sub[1][0].first() * left0, frag.sub[1][0].second() * left1);
 				frag.sub[0][1].set(frag.sub[0][1].first() * right0, frag.sub[0][1].second() * right1);
@@ -145,14 +141,13 @@ struct MatrixQKVGWriter {
 		}
 	}
 
-	template<const usize N_TILE_CNT, const usize M_TILE_CNT>
+	template<const usize M_TILES, const usize N_TILES>
 	X17_DEVICE void write(
-		usize row,
-		usize col,
-		Fragment_16x16<f32> (&acc)[N_TILE_CNT][M_TILE_CNT]
+		usize row, usize col,
+		Fragment_16x16<f32> (&acc)[M_TILES][N_TILES]
 	) {
-		static_assert((M_TILE_CNT * 16) % D_HEAD == 0);
-		static_assert(SEGMENT_SIZE % (M_TILE_CNT * 16) == 0);
+		static_assert((N_TILES * 16) % D_HEAD == 0);
+		static_assert(SEGMENT_SIZE % (N_TILES * 16) == 0);
 
 		if (is_q_or_k(col)) {
 			l2_norm(acc);
@@ -160,32 +155,9 @@ struct MatrixQKVGWriter {
 				apply_q_norm_scales(acc, gQKNormScale_ptr, col);
 			}
 		} else if (is_g(col)) {
-			prepare_g_output(acc);
+			prepare_g_output_(acc);
 		}
 
-		GMatrix<bf16, 16 * N_TILE_CNT, 16 * M_TILE_CNT> gC_block{gC, c_stride};
-		X17_UNROLL for (usize ni = 0; ni < N_TILE_CNT; ++ni) {
-			Fragment_16x16<bf16> acc_bf16[M_TILE_CNT];
-			X17_UNROLL for (usize mi = 0; mi < M_TILE_CNT; ++mi) {
-				acc_bf16[mi].sub[0][0].set(
-					__float2bfloat16_rn(acc[ni][mi].sub[0][0].val0),
-					__float2bfloat16_rn(acc[ni][mi].sub[0][0].val1)
-				);
-				acc_bf16[mi].sub[0][1].set(
-					__float2bfloat16_rn(acc[ni][mi].sub[0][1].val0),
-					__float2bfloat16_rn(acc[ni][mi].sub[0][1].val1)
-				);
-				acc_bf16[mi].sub[1][0].set(
-					__float2bfloat16_rn(acc[ni][mi].sub[1][0].val0),
-					__float2bfloat16_rn(acc[ni][mi].sub[1][0].val1)
-				);
-				acc_bf16[mi].sub[1][1].set(
-					__float2bfloat16_rn(acc[ni][mi].sub[1][1].val0),
-					__float2bfloat16_rn(acc[ni][mi].sub[1][1].val1)
-				);
-			}
-
-			store(acc_bf16, gC_block, row + ni * 16, col);
-		}
+		MatrixWrite<GN>::write(row, col, acc);
 	}
 };

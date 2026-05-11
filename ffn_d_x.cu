@@ -45,8 +45,8 @@ namespace Ffn_d_x {
 
 		static_assert(GN % N == 0);
 		static_assert(DF_GN % DF_TILE_N == 0);
-		static_assert(M % 32 == 0);
-		static_assert(N % 16 == 0);
+		static_assert(M % 16 == 0);
+		static_assert(N % 32 == 0);
 
 		static constexpr usize BACKVEC_SMEM_BYTES = N * M * GMEM_PRELOAD * sizeof(bf16);
 		static constexpr usize DF_SMEM_BYTES = M * DF_TILE_N * GMEM_PRELOAD * sizeof(bf16);

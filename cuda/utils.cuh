@@ -58,6 +58,23 @@ constexpr usize WARP_SIZE = 32;
 
 //--------------------------------------------------------------------------------------------------
 
+template<typename To, typename From>
+struct Round_cast;
+
+template<>
+struct Round_cast<bf16, f32> {
+	static bf16 cast(f32 x) {
+		return __float2bfloat16_rn(x);
+	}
+};
+
+template<typename To, typename From>
+To round_cast(From x) {
+	return Round_cast<To, From>::cast(x);
+}
+
+//--------------------------------------------------------------------------------------------------
+
 namespace math {
 
 	X17_DEVICE f32 max(f32 a, f32 b) {
@@ -963,73 +980,6 @@ struct Fragment_16x16 {
 	}
 };
 
-/// Fill a 16x16 fragment with RoPE coefficients encoded as `(cos, sin)` pairs.
-/// `first_col` is the first rotary column within the head, not a packed global column.
-template<const usize ROPE_DIM, const f64 ROPE_BASE = 10000.0>
-X17_DEVICE void rope_coefs(Fragment_16x16<f32> &out, usize first_row, usize first_col) {
-	static_assert(ROPE_DIM % 2 == 0, "ROPE_DIM must be even");
-	static_assert(ROPE_DIM % 16 == 0, "currently we work with entire fragments");
-	constexpr f64 ROPE_LOG_SCALE = -2.0 * math::fast::constexpr_logb(ROPE_BASE) / f64(ROPE_DIM);
-	usize tid = threadIdx.x % WARP_SIZE;
-	usize row_in_half = tid / 4;
-	usize pair_in_quad = tid % 4;
-
-	usize left_pair = first_col / 2 + pair_in_quad;
-	usize right_pair = left_pair + 4;
-
-	f32 left_freq_recip = math::fast::expb(f32(ROPE_LOG_SCALE) * f32(left_pair));
-	f32 right_freq_recip = math::fast::expb(f32(ROPE_LOG_SCALE) * f32(right_pair));
-
-	f32 top_row = f32(first_row + row_in_half);
-	f32 bot_row = f32(first_row + row_in_half + 8);
-
-	f32 top_left_theta = top_row * left_freq_recip;
-	f32 top_right_theta = top_row * right_freq_recip;
-	f32 bot_left_theta = bot_row * left_freq_recip;
-	f32 bot_right_theta = bot_row * right_freq_recip;
-
-	out.sub[0][0].set(math::fast::cos(top_left_theta), math::fast::sin(top_left_theta));
-	out.sub[0][1].set(math::fast::cos(top_right_theta), math::fast::sin(top_right_theta));
-	out.sub[1][0].set(math::fast::cos(bot_left_theta), math::fast::sin(bot_left_theta));
-	out.sub[1][1].set(math::fast::cos(bot_right_theta), math::fast::sin(bot_right_theta));
-}
-
-X17_DEVICE void apply_rope_(Fragment_16x16<f32> &frag, Fragment_16x16<f32> const &coefs) {
-	auto rotate = [](Fragment_8x8<f32> &dst, Fragment_8x8<f32> const &coef) {
-		f32 even = dst.first();
-		f32 odd = dst.second();
-		f32 c = coef.first();
-		f32 s = coef.second();
-		dst.set(
-			math::fma(-odd, s, even * c),
-			math::fma(even, s, odd * c)
-		);
-	};
-
-	rotate(frag.sub[0][0], coefs.sub[0][0]);
-	rotate(frag.sub[0][1], coefs.sub[0][1]);
-	rotate(frag.sub[1][0], coefs.sub[1][0]);
-	rotate(frag.sub[1][1], coefs.sub[1][1]);
-}
-
-X17_DEVICE void apply_rope_(Fragment_16x16<bf16> &frag, Fragment_16x16<f32> const &coefs) {
-	auto rotate = [](Fragment_8x8<bf16> &dst, Fragment_8x8<f32> const &coef) {
-		f32 even = f32(dst.first());
-		f32 odd = f32(dst.second());
-		f32 c = coef.first();
-		f32 s = coef.second();
-		dst.set(
-			__float2bfloat16_rn(math::fma(-odd, s, even * c)),
-			__float2bfloat16_rn(math::fma(even, s, odd * c))
-		);
-	};
-
-	rotate(frag.sub[0][0], coefs.sub[0][0]);
-	rotate(frag.sub[0][1], coefs.sub[0][1]);
-	rotate(frag.sub[1][0], coefs.sub[1][0]);
-	rotate(frag.sub[1][1], coefs.sub[1][1]);
-}
-
 /// Each fragment has 8 columns of 2-byte type, but a thread always has
 /// 2 consecutive values. So let's assume each fragment has 4 double-columns.
 ///
@@ -1440,8 +1390,8 @@ X17_DEVICE void cast(Fragment_16x16<F> const &src, Fragment_16x16<T> &dst) {
 	X17_UNROLL for (usize j = 0; j < 2; ++j) {
 		X17_UNROLL for (usize i = 0; i < 2; ++i) {
 			dst.sub[j][i].set(
-				static_cast<T>(src.sub[j][i].first()),
-				static_cast<T>(src.sub[j][i].second())
+				round_cast<T>(src.sub[j][i].first()),
+				round_cast<T>(src.sub[j][i].second())
 			);
 		}
 	}
@@ -1575,20 +1525,6 @@ X17_DEVICE void acc_(Fragment_16x16<T> (&dst)[K], Fragment_16x16<T> const (&src)
 	}
 }
 
-X17_DEVICE void quantize_(Fragment_16x16<f32> &f) {
-	auto round_bf16 = [](f32 value) {
-		return f32(__float2bfloat16_rn(value));
-	};
-	f.elemwise_(round_bf16);
-}
-
-template<const usize K>
-X17_DEVICE void quantize_(Fragment_16x16<f32> (&arr)[K]) {
-	X17_UNROLL for (usize i = 0; i < K; ++i) {
-		quantize_(arr[i]);
-	}
-}
-
 template<
 	const f64 INP_SCALE_2 = 1.0,
 	const f64 OUT_SCALE_2 = 1.0,
@@ -1639,12 +1575,12 @@ X17_DEVICE void geglu_backward_(
 	d_o.transpose_();
 
 	backvec1.set(
-		__float2bfloat16_rn(f32(backvec1.first()) * f32(d_o.first())),
-		__float2bfloat16_rn(f32(backvec1.second()) * f32(d_o.first()))
+		round_cast<bf16>(f32(backvec1.first()) * f32(d_o.first())),
+		round_cast<bf16>(f32(backvec1.second()) * f32(d_o.first()))
 	);
 	backvec2.set(
-		__float2bfloat16_rn(f32(backvec2.first()) * f32(d_o.second())),
-		__float2bfloat16_rn(f32(backvec2.second()) * f32(d_o.second()))
+		round_cast<bf16>(f32(backvec2.first()) * f32(d_o.second())),
+		round_cast<bf16>(f32(backvec2.second()) * f32(d_o.second()))
 	);
 }
 
