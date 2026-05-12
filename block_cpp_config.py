@@ -16,10 +16,23 @@ def load_config() -> dict:
 
 
 def constexpr_name(key: str) -> str:
-	return key.lower()
+	return key
+
+
+def constexpr_expr_decl(key: str, value: dict[str, object]) -> str:
+	name = constexpr_name(key)
+	type_name = value.get("type")
+	expr = value.get("expr")
+	if not isinstance(type_name, str):
+		raise TypeError(f"Config expression {key!r} is missing string field 'type'")
+	if not isinstance(expr, str):
+		raise TypeError(f"Config expression {key!r} is missing string field 'expr'")
+	return f"inline constexpr {type_name} {name} = {expr};"
 
 
 def constexpr_decl(key: str, value: object) -> str:
+	if isinstance(value, dict):
+		return constexpr_expr_decl(key, value)
 	name = constexpr_name(key)
 	if isinstance(value, bool):
 		value_str = "true" if value else "false"

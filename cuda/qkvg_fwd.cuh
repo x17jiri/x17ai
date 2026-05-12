@@ -8,17 +8,19 @@ template<
 	const usize GN,
 	const usize D_IN,
 	const usize FAN_IN,
-	const usize N_HEAD,
-	const usize D_HEAD,
+	const usize N_HEADS,
+	const usize QK_DIM,
+	const usize VG_DIM,
 	const f64 L2_NORM_EPS,
 	const f64 V_SCALE_FIX
 >
 struct MatrixQKVGWriter: MatrixWriter<GN> {
 	bf16 const *gQKNormScale_ptr;
 
-	static constexpr usize SEGMENT_SIZE = N_HEAD * D_HEAD;
+	static constexpr usize QK_SEGMENT_SIZE = N_HEADS * QK_DIM;
+	static constexpr usize VG_SEGMENT_SIZE = N_HEADS * VG_DIM;
 	static constexpr f64 SPARSE_SCALE_2 = f64(D_IN) / f64(FAN_IN);
-	static constexpr f64 G_OUT_SCALE_2 = 1.0 / f64(SEGMENT_SIZE);
+	static constexpr f64 G_OUT_SCALE_2 = 1.0 / f64(VG_SEGMENT_SIZE);
 
 	X17_DEVICE MatrixQKVGWriter(
 		bf16 *gC,
@@ -29,16 +31,15 @@ struct MatrixQKVGWriter: MatrixWriter<GN> {
 	{}
 
 	X17_DEVICE static bool is_q_or_k(usize col) {
-		return col < 2 * SEGMENT_SIZE;
+		return col < (2 * QK_SEGMENT_SIZE);
 	}
 
 	X17_DEVICE static bool is_q(usize col) {
-		return col < SEGMENT_SIZE;
+		return col < QK_SEGMENT_SIZE;
 	}
 
 	X17_DEVICE static bool is_g(usize col) {
-		static_assert(GN == 4 * SEGMENT_SIZE);
-		return col >= 3 * SEGMENT_SIZE;
+		return col >= (2*QK_SEGMENT_SIZE + VG_SEGMENT_SIZE);
 	}
 
 	static X17_DEVICE void prepare_g_output_(Fragment_8x8<f32> &g) {
@@ -64,7 +65,7 @@ struct MatrixQKVGWriter: MatrixWriter<GN> {
 		}
 	}
 
-	template<const usize M_TILES, const usize N_TILES>
+	template<const usize D_HEAD, const usize M_TILES, const usize N_TILES>
 	X17_DEVICE static void l2_norm_(Fragment_16x16<f32> (&acc)[M_TILES][N_TILES]) {
 		static constexpr usize GROUP_TILE_CNT = D_HEAD / 16;
 		static constexpr usize GROUP_CNT = (N_TILES * 16) / D_HEAD;
@@ -146,11 +147,13 @@ struct MatrixQKVGWriter: MatrixWriter<GN> {
 		usize row, usize col,
 		Fragment_16x16<f32> (&acc)[M_TILES][N_TILES]
 	) {
-		static_assert((N_TILES * 16) % D_HEAD == 0);
-		static_assert(SEGMENT_SIZE % (N_TILES * 16) == 0);
+		static_assert((N_TILES * 16) % QK_DIM == 0);
+		static_assert((N_TILES * 16) % VG_DIM == 0);
+		static_assert(QK_SEGMENT_SIZE % (N_TILES * 16) == 0);
+		static_assert(VG_SEGMENT_SIZE % (N_TILES * 16) == 0);
 
 		if (is_q_or_k(col)) {
-			l2_norm_(acc);
+			l2_norm_<QK_DIM>(acc);
 			if (is_q(col)) {
 				apply_q_norm_scales_(acc, gQKNormScale_ptr, col);
 			}

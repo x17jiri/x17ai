@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <filesystem>
 
+using namespace config;
+
 int main(int argc, char *argv[]) {
 	HarnessCliOptions cli;
 	if (!parse_harness_cli_args(argc, argv, true, cli)) {
@@ -15,22 +17,13 @@ int main(int argc, char *argv[]) {
 	}
 
 	constexpr usize HEADS_PER_KERNEL = 2;
-	constexpr usize QK_DIM = config::head_dim;
-	constexpr usize V_DIM = config::head_dim;
 	constexpr bool V_EQUALS_K = false;
-	constexpr usize SEQ_LEN = config::n_inputs;
-	constexpr usize HEAD_CNT = config::n_heads;
-	constexpr usize PACKED_DIM = HEAD_CNT * V_DIM;
-	constexpr usize D_MODEL = config::d_model;
-	constexpr usize QKV_FAN_IN = config::qkv_fan_in;
-
-	static_assert(config::d_model == config::n_heads * config::head_dim);
 
 	using AF = AttnForward<
-		HEAD_CNT,
+		N_HEADS,
 		HEADS_PER_KERNEL,
-		QK_DIM, V_DIM, D_MODEL, QKV_FAN_IN,
-		config::v_scale_fix,
+		QK_DIM, VG_DIM, D_MODEL, SPARSE_FAN_IN,
+		V_SCALE_FIX,
 		V_EQUALS_K
 	>;
 	printf("sqrt 2 = %e, %e, %e, %d\n",
@@ -43,20 +36,20 @@ int main(int argc, char *argv[]) {
 	constexpr f64 EXPB = math::fast::constexpr_expb(-ONLINE_SOFTMAX_THRESHOLD);
 	printf("T = %e, expb(T) = %e\n", ONLINE_SOFTMAX_THRESHOLD, EXPB);
 
-	if (SEQ_LEN % AF::Q_PER_BLOCK != 0) {
+	if (seq_len % AF::Q_PER_BLOCK != 0) {
 		printf("Expected n_inputs %% %u == 0\n", AF::Q_PER_BLOCK);
 		return 1;
 	}
 
-	std::vector<bf16> h_Q = load_tensor(tensor_path(cli.input_dir, "q.bin"), SEQ_LEN, PACKED_DIM);
-	std::vector<bf16> h_K = load_tensor(tensor_path(cli.input_dir, "k.bin"), SEQ_LEN, PACKED_DIM);
-	std::vector<bf16> h_V = load_tensor(tensor_path(cli.input_dir, "v.bin"), SEQ_LEN, PACKED_DIM);
-	std::vector<bf16> h_G = load_tensor(tensor_path(cli.input_dir, "g.bin"), SEQ_LEN, PACKED_DIM);
-	std::vector<bf16> h_sink_v = load_tensor(torch_tensor_path("sinks_v.bin"), HEAD_CNT, V_DIM);
-	std::vector<bf16> h_sink_k = load_tensor(torch_tensor_path("sinks_k.bin"), HEAD_CNT, QK_DIM);
+	std::vector<bf16> h_Q = load_tensor(tensor_path(cli.input_dir, "q.bin"), seq_len, QK_SEGMENT_SIZE);
+	std::vector<bf16> h_K = load_tensor(tensor_path(cli.input_dir, "k.bin"), seq_len, QK_SEGMENT_SIZE);
+	std::vector<bf16> h_V = load_tensor(tensor_path(cli.input_dir, "v.bin"), seq_len, VG_SEGMENT_SIZE);
+	std::vector<bf16> h_G = load_tensor(tensor_path(cli.input_dir, "g.bin"), seq_len, VG_SEGMENT_SIZE);
+	std::vector<bf16> h_sink_k = load_tensor(torch_tensor_path("sinks_k.bin"), N_HEADS, QK_DIM);
+	std::vector<bf16> h_sink_v = load_tensor(torch_tensor_path("sinks_v.bin"), N_HEADS, VG_DIM);
 	std::vector<f32> h_maxes;
 	if (cli.use_torch_maxes && std::filesystem::exists(torch_tensor_path("attn_maxes_f32.bin"))) {
-		h_maxes = load_f32_tensor(torch_tensor_path("attn_maxes_f32.bin"), HEAD_CNT, SEQ_LEN);
+		h_maxes = load_f32_tensor(torch_tensor_path("attn_maxes_f32.bin"), N_HEADS, seq_len);
 		if (h_maxes.empty()) {
 			return 1;
 		}
@@ -68,8 +61,8 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	std::vector<bf16> h_out(SEQ_LEN * PACKED_DIM);
-	std::vector<f32> h_L(HEAD_CNT * SEQ_LEN);
+	std::vector<bf16> h_out(seq_len * VG_SEGMENT_SIZE);
+	std::vector<f32> h_L(N_HEADS * seq_len);
 
 	bf16 *d_Q = nullptr;
 	bf16 *d_K = nullptr;
@@ -106,13 +99,13 @@ int main(int argc, char *argv[]) {
 	cudaFuncSetAttribute(attn_forward<AF>, cudaFuncAttributeMaxDynamicSharedMemorySize, AF::SMEM_BYTES);
 	cudaFuncSetAttribute(attn_forward<AF>, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-	dim3 grid(SEQ_LEN / AF::Q_PER_BLOCK, AF::HEAD_GROUP_CNT);
+	dim3 grid(seq_len / AF::Q_PER_BLOCK, AF::HEAD_GROUP_CNT);
 
 	int warmup = 50;
 	for (int i = 0; i < warmup; ++i) {
 		attn_forward<AF>
 			<<<grid, AF::THREADS_PER_BLOCK, AF::SMEM_BYTES>>>(
-				SEQ_LEN,
+				seq_len,
 				d_Q,
 				d_K,
 				d_V,
@@ -122,7 +115,7 @@ int main(int argc, char *argv[]) {
 				d_maxes,
 				d_out,
 				d_L,
-				config::window_size
+				WINDOW_SIZE
 			);
 	}
 	cudaDeviceSynchronize();
@@ -137,7 +130,7 @@ int main(int argc, char *argv[]) {
 		cudaEventRecord(starts[i]);
 		attn_forward<AF>
 			<<<grid, AF::THREADS_PER_BLOCK, AF::SMEM_BYTES>>>(
-				SEQ_LEN,
+				seq_len,
 				d_Q,
 				d_K,
 				d_V,
@@ -147,7 +140,7 @@ int main(int argc, char *argv[]) {
 				d_maxes,
 				d_out,
 				d_L,
-				config::window_size
+				WINDOW_SIZE
 			);
 		cudaEventRecord(ends[i]);
 	}
@@ -169,13 +162,13 @@ int main(int argc, char *argv[]) {
 
 	float median_ms = times_ms[num_runs / 2];
 	float min_ms = times_ms[0];
-	double tflops = AF::flops(SEQ_LEN, config::window_size) * HEAD_CNT / (median_ms * 1e-3) / 1e12;
+	double tflops = AF::flops(seq_len, WINDOW_SIZE) * N_HEADS / (median_ms * 1e-3) / 1e12;
 	printf("Kernel time over %d runs: median %.3f ms  min %.3f ms\n", num_runs, median_ms, min_ms);
 	printf("TFLOPS: %.2f\n", tflops);
 
 	cudaMemcpy(h_out.data(), d_out, h_out.size() * sizeof(bf16), cudaMemcpyDeviceToHost);
 	std::filesystem::create_directories("tmp/block_cuda");
-	store_tensor("tmp/block_cuda/attn_out.bin", h_out, SEQ_LEN, PACKED_DIM);
+	store_tensor("tmp/block_cuda/attn_out.bin", h_out, seq_len, VG_SEGMENT_SIZE);
 
 	printf("Used SMEM per kernel: %d\n", AF::SMEM_BYTES);
 

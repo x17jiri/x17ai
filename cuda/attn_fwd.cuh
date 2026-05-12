@@ -21,21 +21,11 @@
 // Memory pipeline is double-buffered by default (controlled by GMEM_PRELOAD).
 // =============================================================================
 
-// Template parameters:
-//   _HEAD_CNT         - total number of attention heads
-//   _HEADS_PER_KERNEL - heads processed together in one threadblock. The SMatrix class needs
-//                       the number of columns to be multiple of 64. This multiplier is useful
-//                       for tiny heads with QK_DIM < 64
-//   _QK_DIM           - dimension of Q and K vectors per head
-//   _V_DIM            - dimension of V vectors per head
-//   _D_MODEL          - model width used to derive SPARSE_SCALE
-//   _QKV_FAN_IN       - fan-in of the qkv projection used to derive SPARSE_SCALE
-//   _V_EQUALS_K       - when true, V is a prefix of K (V_DIM must be <= QK_DIM)
 template<
 	const usize _HEAD_CNT,
 	const usize _HEADS_PER_KERNEL,
 	const usize _QK_DIM,
-	const usize _V_DIM,
+	const usize _VG_DIM,
 	const usize _D_MODEL,
 	const usize _QKV_FAN_IN,
 	const f64 V_SCALE_FIX,
@@ -47,7 +37,7 @@ struct AttnForward {
 	static constexpr usize HEADS_PER_KERNEL = _HEADS_PER_KERNEL;
 	static constexpr usize HEAD_GROUP_CNT = HEAD_CNT / HEADS_PER_KERNEL;
 	static constexpr usize QK_DIM = _QK_DIM;
-	static constexpr usize V_DIM = _V_DIM;
+	static constexpr usize VG_DIM = _VG_DIM;
 	static constexpr usize D_MODEL = _D_MODEL;
 	static constexpr usize QKV_FAN_IN = _QKV_FAN_IN;
 	static constexpr bool V_EQUALS_K = _V_EQUALS_K;
@@ -61,16 +51,16 @@ struct AttnForward {
 	static constexpr f64 SPARSE_SCALE_2 = f64(D_MODEL) / f64(QKV_FAN_IN);
 	static constexpr f64 SPARSE_SCALE = math::constexpr_sqrt(SPARSE_SCALE_2);
 	static constexpr f64 V_SCALE_FIX_2 = V_SCALE_FIX * V_SCALE_FIX;
-	static constexpr f64 G_OUT_SCALE_2 = 1.0 / f64(V_DIM * HEAD_CNT);
+	static constexpr f64 G_OUT_SCALE_2 = 1.0 / f64(VG_DIM * HEAD_CNT);
 
 	static_assert(HEADS_PER_KERNEL > 0, "HEADS_PER_KERNEL must be > 0");
 	static_assert(HEAD_CNT % HEADS_PER_KERNEL == 0, "HEAD_CNT must be divisible by HEADS_PER_KERNEL");
-	static_assert(V_DIM <= QK_DIM, "V_DIM must be <= QK_DIM");
+	static_assert(VG_DIM <= QK_DIM, "VG_DIM must be <= QK_DIM");
 
 	static constexpr usize QK_TILES = QK_DIM / 16;
-	static constexpr usize V_TILES = V_DIM / 16;
+	static constexpr usize VG_TILES = VG_DIM / 16;
 	static constexpr usize QK_GROUP_DIM = HEADS_PER_KERNEL * QK_DIM;
-	static constexpr usize V_GROUP_DIM = HEADS_PER_KERNEL * V_DIM;
+	static constexpr usize V_GROUP_DIM = HEADS_PER_KERNEL * VG_DIM;
 	static constexpr usize PRELOAD_DIM = QK_GROUP_DIM + (V_EQUALS_K ? 0 : V_GROUP_DIM);
 	static constexpr usize V_SMEM_COL = V_EQUALS_K ? 0 : QK_GROUP_DIM;
 
@@ -86,13 +76,13 @@ struct AttnForward {
 
 	static constexpr usize Q_STRIDE = QK_DIM * HEAD_CNT;
 	static constexpr usize K_STRIDE = QK_DIM * HEAD_CNT;
-	static constexpr usize V_STRIDE = V_DIM * HEAD_CNT;
-	static constexpr usize G_STRIDE = V_DIM * HEAD_CNT;
-	static constexpr usize O_STRIDE = V_DIM * HEAD_CNT;
-	static constexpr usize DO_STRIDE = V_DIM * HEAD_CNT;
+	static constexpr usize V_STRIDE = VG_DIM * HEAD_CNT;
+	static constexpr usize G_STRIDE = VG_DIM * HEAD_CNT;
+	static constexpr usize O_STRIDE = VG_DIM * HEAD_CNT;
+	static constexpr usize DO_STRIDE = VG_DIM * HEAD_CNT;
 	static constexpr usize DQ_STRIDE = QK_DIM * HEAD_CNT;
 	static constexpr usize DK_STRIDE = QK_DIM * HEAD_CNT;
-	static constexpr usize DV_STRIDE = V_DIM * HEAD_CNT;
+	static constexpr usize DV_STRIDE = VG_DIM * HEAD_CNT;
 
 	static_assert((QK_GROUP_DIM * sizeof(bf16)) % 128 == 0, "HEADS_PER_KERNEL must make grouped Q rows 128B aligned");
 	static_assert((PRELOAD_DIM * sizeof(bf16)) % 128 == 0, "HEADS_PER_KERNEL must make grouped KV preload rows 128B aligned");
@@ -158,8 +148,8 @@ struct AttnForward {
 		window_size = std::min(seq_len, window_size > 0 ? window_size / 16 : seq_len);
 		usize masked = seq_len - window_size;
 		return (
-			seq_len * seq_len * (QK_TILES + V_TILES)
-			- masked * masked * (QK_TILES + V_TILES)
+			seq_len * seq_len * (QK_TILES + VG_TILES)
+			- masked * masked * (QK_TILES + VG_TILES)
 		) / 2;
 	}
 
@@ -245,7 +235,7 @@ struct AttnForward {
 	// Lazy-rescale threshold for online softmax
 	//
 	// Standard online softmax rescales O and sum every time a new max appears.
-	// That's expensive (touches all V_TILES of rO). Instead, we only rescale
+	// That's expensive (touches all VG_TILES of rO). Instead, we only rescale
 	// when the new max exceeds the current max by more than this threshold.
 	//
 	// When rescaling happens, we also add the threshold to the new max to create some headroom.
@@ -255,7 +245,7 @@ struct AttnForward {
 		SoftmaxStats &top,
 		SoftmaxStats &bot,
 		Fragment_16x16<f32> &rS_f32,
-		Fragment_16x16<f32> (&rO_f32)[V_TILES]
+		Fragment_16x16<f32> (&rO_f32)[VG_TILES]
 	) {
 		// The `max` in `top` and `bot` is for the entire owned rows.
 		// The `sum` is just the elements owned by the current thread.
@@ -354,7 +344,7 @@ struct AttnForward {
 	}
 
 	X17_DEVICE void combine_and_store(
-		Fragment_16x16<f32> (&rO_f32)[HEADS_PER_KERNEL][V_TILES],
+		Fragment_16x16<f32> (&rO_f32)[HEADS_PER_KERNEL][VG_TILES],
 		SoftmaxStats (&top_stats)[HEADS_PER_KERNEL],
 		SoftmaxStats (&bot_stats)[HEADS_PER_KERNEL],
 		usize q_start,
@@ -366,7 +356,7 @@ struct AttnForward {
 		usize i_head_base
 	) {
 		static_assert(KV_WARPS == 1, "current algorithm doesn't reduce over KV warps");
-		Fragment_16x16<bf16> rO[HEADS_PER_KERNEL * V_TILES];
+		Fragment_16x16<bf16> rO[HEADS_PER_KERNEL * VG_TILES];
 		f32 top_L[HEADS_PER_KERNEL];
 		f32 bot_L[HEADS_PER_KERNEL];
 		usize tid = threadIdx.x % WARP_SIZE;
@@ -388,11 +378,11 @@ struct AttnForward {
 
 			scale_top_(rO_f32[h], top_rescale);
 			scale_bottom_(rO_f32[h], bot_rescale);
-			X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
+			X17_UNROLL for (usize i = 0; i < VG_TILES; i++) {
 				Fragment_16x16<bf16> rG;
-				smem_tile_to_fragment(sG, q_warp_idx * Q_PER_WARP, h * V_DIM + i * 16, rG);
+				smem_tile_to_fragment(sG, q_warp_idx * Q_PER_WARP, h * VG_DIM + i * 16, rG);
 				zig_zag_geglu_(rO_f32[h][i], rG);
-				cast(rO_f32[h][i], rO[h * V_TILES + i]);
+				cast(rO_f32[h][i], rO[h * VG_TILES + i]);
 			}
 		}
 
@@ -457,9 +447,9 @@ struct AttnForward {
 		// GMEM Matrices
 		GMatrixDynSize<bf16, QK_GROUP_DIM> gQ{gQ_ptr + QK_DIM * i_head_base, seq_len, Q_STRIDE};
 		GMatrixDynSize<bf16, QK_GROUP_DIM> gK{gK_ptr + QK_DIM * i_head_base, seq_len, K_STRIDE};
-		GMatrixDynSize<bf16, V_GROUP_DIM> gV{gV_ptr + V_DIM * i_head_base, seq_len, V_STRIDE};
-		GMatrixDynSize<bf16, V_GROUP_DIM> gG{gG_ptr + V_DIM * i_head_base, seq_len, G_STRIDE};
-		GMatrixDynSize<bf16, V_GROUP_DIM> gO{gOut_ptr + V_DIM * i_head_base, seq_len, O_STRIDE};
+		GMatrixDynSize<bf16, V_GROUP_DIM> gV{gV_ptr + VG_DIM * i_head_base, seq_len, V_STRIDE};
+		GMatrixDynSize<bf16, V_GROUP_DIM> gG{gG_ptr + VG_DIM * i_head_base, seq_len, G_STRIDE};
+		GMatrixDynSize<bf16, V_GROUP_DIM> gO{gOut_ptr + VG_DIM * i_head_base, seq_len, O_STRIDE};
 
 		// SMEM layout: KV preload region + Q
 		u32 smem = 0;
@@ -578,10 +568,10 @@ struct AttnForward {
 		}
 
 		// O accumulator
-		Fragment_16x16<f32> rO_f32[HEADS_PER_KERNEL][V_TILES];
+		Fragment_16x16<f32> rO_f32[HEADS_PER_KERNEL][VG_TILES];
 		initial_scale = math::fast::constexpr_expb(-ONLINE_SOFTMAX_THRESHOLD) / SPARSE_SCALE;
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
-			X17_UNROLL for (usize i = 0; i < V_TILES; ++i) {
+			X17_UNROLL for (usize i = 0; i < VG_TILES; ++i) {
 				rO_f32[h][i].sub[0][0].val0 = initial_scale * f32(rSinkV[h * QK_DIM / 4 + i * 4 + 0]);
 				rO_f32[h][i].sub[0][0].val1 = initial_scale * f32(rSinkV[h * QK_DIM / 4 + i * 4 + 1]);
 				rO_f32[h][i].sub[0][1].val0 = initial_scale * f32(rSinkV[h * QK_DIM / 4 + i * 4 + 2]);
@@ -608,7 +598,7 @@ struct AttnForward {
 				bot_stats[h].max = bot_max[h];
 				bot_stats[h].sum = bot_seed * 0.25f;
 
-				X17_UNROLL for (usize i = 0; i < V_TILES; ++i) {
+				X17_UNROLL for (usize i = 0; i < VG_TILES; ++i) {
 					f32 sink0 = f32(rSinkV[h * QK_DIM / 4 + i * 4 + 0]) / SPARSE_SCALE;
 					f32 sink1 = f32(rSinkV[h * QK_DIM / 4 + i * 4 + 1]) / SPARSE_SCALE;
 					f32 sink2 = f32(rSinkV[h * QK_DIM / 4 + i * 4 + 2]) / SPARSE_SCALE;
@@ -633,11 +623,11 @@ struct AttnForward {
 			Fragment_16x16<f32> rS_f32[HEADS_PER_KERNEL];
 			zero_(rS_f32);
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-				X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
+				X17_UNROLL for (usize i = 0; i < VG_TILES; i++) {
 					mma_a_bt(rQ[h][i], rKV[h][i], rS_f32[h]);
-					smem_tile_to_fragment_trans(sKV, 0, V_SMEM_COL + h * V_DIM + i * 16, rKV[h][i]);
+					smem_tile_to_fragment_trans(sKV, 0, V_SMEM_COL + h * VG_DIM + i * 16, rKV[h][i]);
 				}
-				X17_UNROLL for (usize i = V_TILES; i < QK_TILES; i++) {
+				X17_UNROLL for (usize i = VG_TILES; i < QK_TILES; i++) {
 					mma_a_bt(rQ[h][i], rKV[h][i], rS_f32[h]);
 				}
 
@@ -705,11 +695,11 @@ struct AttnForward {
 
 			// rO += S * V, interleaved with next K load
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-				X17_UNROLL for (usize i = 0; i < V_TILES; i++) {
+				X17_UNROLL for (usize i = 0; i < VG_TILES; i++) {
 					mma_a_bt(rP[h], rKV[h][i], rO_f32[h][i]);
 					smem_tile_to_fragment(sKV, 0, h * QK_DIM + i * 16, rKV[h][i]);
 				}
-				X17_UNROLL for (usize i = V_TILES; i < QK_TILES; i++) {
+				X17_UNROLL for (usize i = VG_TILES; i < QK_TILES; i++) {
 					smem_tile_to_fragment(sKV, 0, h * QK_DIM + i * 16, rKV[h][i]);
 				}
 			}

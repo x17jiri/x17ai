@@ -1,4 +1,6 @@
-# QKVG Fwd
+# Attn
+
+## Attn - QKVG Fwd
 
 ./nvcc.sh qkvg_fwd.cu && tmp/qkvg_fwd
 python verify_tensor.py tmp/block_torch/qkvg.bin tmp/block_cuda/qkvg.bin --shape 16384 4 1024
@@ -12,7 +14,7 @@ python tensor_stats.py tmp/block_torch/k.bin tmp/block_torch/k.bin.var
 python tensor_stats.py tmp/block_torch/v.bin tmp/block_torch/v.bin.var
 python tensor_stats.py tmp/block_torch/g.bin
 
-# Attn Forward
+## Attn - A Fwd
 
 ./nvcc.sh attn_fwd.cu && tmp/attn_fwd
 python verify_tensor.py tmp/block_torch/attn_out.bin tmp/block_cuda/attn_out.bin --shape 16384 32 32
@@ -21,28 +23,30 @@ python tensor_stats.py tmp/block_torch/attn_out.bin tmp/block_torch/attn_out.bin
 python tensor_stats.py tmp/block_torch/attn_out_pregate.bin tmp/block_torch/attn_out_pregate.bin.var
 python tensor_stats.py tmp/block_torch/attn_out.bin tmp/block_torch/attn_out.bin.var --overlay tmp/block_torch/f.bin --overlay-var tmp/block_torch/f.bin.var
 
-## Attn Forward - use maxes from torch to eliminate online softmax errors
+### Attn Forward - use maxes from torch to eliminate online softmax errors
 ./nvcc.sh attn_fwd.cu && tmp/attn_fwd --use-torch-maxes
 
-# Attn O Proj Forward
+## Attn - Y Fwd
 
-./nvcc.sh o_attn_fwd.cu && tmp/o_attn_fwd
+./nvcc.sh attn_y.cu && tmp/attn_y
 python verify_tensor.py tmp/block_torch/o_attn.bin tmp/block_cuda/o_attn.bin
 python tensor_stats.py tmp/block_torch/o_attn.bin tmp/block_torch/o_attn.bin.var
 
-# FFN F Forward
+# FFN
+
+## FFN F Forward
 
 ./nvcc.sh ffn_f_fwd.cu && tmp/ffn_f_fwd
 python verify_tensor.py tmp/block_torch/ffn_f.bin tmp/block_cuda/ffn_f.bin
 python tensor_stats.py tmp/block_torch/ffn_f.bin tmp/block_torch/ffn_f.bin.var
 
-# FFN O Forward
+## FFN O Forward
 
 ./nvcc.sh ffn_y_fwd.cu && tmp/ffn_y_fwd
 python verify_tensor.py tmp/block_torch/ffn_y.bin tmp/block_cuda/ffn_y.bin
 python tensor_stats.py tmp/block_torch/ffn_y.bin tmp/block_torch/ffn_y.bin.var
 
-# FFN O Backward
+## FFN O Backward
 
 ./nvcc.sh ffn_d_f.cu && tmp/ffn_d_f
 python verify_tensor.py tmp/block_torch/ffn_d_f.bin tmp/block_cuda/ffn_d_f.bin
@@ -53,7 +57,7 @@ python verify_tensor.py tmp/block_torch/ffn_d_y_weights.bin tmp/block_cuda/ffn_d
 ./nvcc.sh ffn_d_f_weights.cu && tmp/ffn_d_f_weights
 python verify_tensor.py tmp/block_torch/ffn_d_f_weights.bin tmp/block_cuda/ffn_d_f_weights.bin --shape 4096 512
 
-# FFN Input Backward
+## FFN Input Backward
 
 - `ffn_d_x.cu` consumes `ffn_d_f.bin` and `ffn_f_backvec.bin`.
 - It fuses `ffn_d_f` with the cached GeGLU backvec on the GPU during the GEMM preload path; there is no host-side `ffn_d_t` materialization.
@@ -74,7 +78,7 @@ tmp/ffn_d_x --cuda-inputs
 
 ./nvcc.sh qkvg_fwd.cu && tmp/qkvg_fwd
 ./nvcc.sh attn_fwd.cu && tmp/attn_fwd --cuda-inputs
-./nvcc.sh o_attn_fwd.cu && tmp/o_attn_fwd --cuda-inputs
+./nvcc.sh attn_y.cu && tmp/attn_y --cuda-inputs
 python verify_tensor.py tmp/block_torch/o_attn.bin tmp/block_cuda/o_attn.bin
 
 ./nvcc.sh ffn_f_fwd.cu && tmp/ffn_f_fwd

@@ -280,6 +280,68 @@ struct MatrixWriter {
 	}
 };
 
+/// This is used for implementing backward pass for sparse weight matrices.
+/// It writes only the weights that belong to the sparse matrix
+template<const usize GN, const usize _FAN_IN, const usize CYCLE>
+struct SparseMatrixWriter {
+	bf16 *gC;
+
+	static constexpr usize INPUT_STEP = GN / CYCLE;
+
+	static_assert(GN % 16 == 0);
+	static_assert(_FAN_IN % 16 == 0);
+	static_assert(INPUT_STEP % 16 == 0);
+
+	X17_DEVICE SparseMatrixWriter(bf16 *gC):
+		gC(gC)
+	{}
+
+	X17_DEVICE void write_8x8(
+		usize proj_row_base,
+		usize dense_col_base,
+		Fragment_8x8<f32> const &frag
+	) {
+		usize lane = threadIdx.x % WARP_SIZE;
+		usize local_row = lane / 4;
+		usize local_col_pair = lane % 4;
+
+		usize proj_row = proj_row_base + local_row;
+		usize dense_col = dense_col_base + 2 * local_col_pair;
+		usize dense_col_start = (proj_row * INPUT_STEP) % GN;
+		usize compact_col = (dense_col + GN - dense_col_start) % GN;
+		if (compact_col >= _FAN_IN) {
+			return;
+		}
+
+		usize out_idx = proj_row * _FAN_IN + compact_col;
+		FragmentReg<bf16> packed;
+		packed.set(
+			round_cast<bf16>(frag.first()),
+			round_cast<bf16>(frag.second())
+		);
+		reinterpret_cast<u32 *>(gC)[out_idx / 2] = packed.val;
+	}
+
+	template<const usize ROW_TILES, const usize COL_TILES>
+	X17_DEVICE void write(
+		usize row, usize col,
+		Fragment_16x16<f32> (&acc)[ROW_TILES][COL_TILES]
+	) {
+		X17_UNROLL for (usize row_tile = 0; row_tile < ROW_TILES; ++row_tile) {
+			usize proj_row = row + 16 * row_tile;
+			X17_UNROLL for (usize col_tile = 0; col_tile < COL_TILES; ++col_tile) {
+				usize dense_col = col + 16 * col_tile;
+				auto const &tile = acc[row_tile][col_tile];
+
+				write_8x8(proj_row + 0, dense_col + 0, tile.sub[0][0]);
+				write_8x8(proj_row + 0, dense_col + 8, tile.sub[0][1]);
+				write_8x8(proj_row + 8, dense_col + 0, tile.sub[1][0]);
+				write_8x8(proj_row + 8, dense_col + 8, tile.sub[1][1]);
+			}
+		}
+	}
+};
+
 template<const usize GN, const usize D_IN, const usize FAN_IN = D_IN>
 struct MatrixGeGluWriter {
 	bf16 *gC;
