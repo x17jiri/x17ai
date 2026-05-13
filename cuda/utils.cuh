@@ -1621,12 +1621,28 @@ X17_DEVICE void geglu_and_backvec_(
 
 //--------------------------------------------------------------------------------------------------
 
+X17_DEVICE f32 f8_to_f32(u8 x) {
+	u32 nosign = u32(x) & 0x7Fu;
+
+	u32 subnormal = __float_as_uint(
+		__uint_as_float(nosign | 0x46800000u) - __uint_as_float(0x46800000u)
+	);
+
+	u32 normal = u32(nosign << 20) + 0x3C000000u;
+
+	u32 sign = u32(x & 0x80u) << 24;
+	u32 exp = u32(x) & 0x78u;
+	u32 value = sign ^ (exp == 0 ? subnormal : normal);
+	return __uint_as_float(value);
+}
+
 X17_DEVICE bf16 f8_to_bf16(u8 x) {
-	u16 sign = u16(x & 0x80u) << 8;
-	return
-		(x & 0x78u) == 0
-			? __ushort_as_bfloat16(sign)
-			: __ushort_as_bfloat16((sign | u16(u16(x & 0x7Fu) << 4)) + 0x3C00u);
+	union {
+		f32 value;
+		struct { u16 low; bf16 high; } parts;
+	} t;
+	t.value = f8_to_f32(x);
+	return t.parts.high;
 }
 
 /// makes sure that 4 bytes read from memory are treated as little endian
