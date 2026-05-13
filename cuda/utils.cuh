@@ -1621,6 +1621,62 @@ X17_DEVICE void geglu_and_backvec_(
 
 //--------------------------------------------------------------------------------------------------
 
+X17_DEVICE bf16 f8_to_bf16(u8 x) {
+	u16 sign = u16(x & 0x80u) << 8;
+	return
+		(x & 0x78u) == 0
+			? __ushort_as_bfloat16(sign)
+			: __ushort_as_bfloat16((sign | u16(u16(x & 0x7Fu) << 4)) + 0x3C00u);
+}
+
+/// makes sure that 4 bytes read from memory are treated as little endian
+X17_HOST_DEVICE constexpr u32 from_le32(u32 val) {
+	#if defined(__CUDA_ARCH__)
+		return val;
+	#elif defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+		return __builtin_bswap32(val);
+	#else
+		return val;
+	#endif
+}
+
+X17_DEVICE void unpack_f8_fragment(
+	Fragment_8x8<bf16> const &packed,
+	Fragment_8x8<bf16> &o1, Fragment_8x8<bf16> &o2
+) {
+	u32 v = from_le32(packed.val);
+	o1.set(
+		f8_to_bf16(v),
+		f8_to_bf16(v >> 8)
+	);
+	o2.set(
+		f8_to_bf16(v >> 16),
+		f8_to_bf16(v >> 24)
+	);
+
+	usize tid = threadIdx.x;
+
+	bool low = (tid & 1) == 0;
+	u32 send = low ? o2.val : o1.val;
+	u32 recv = shuffle_xor_sync(send, 1);
+	if (low) {
+		o2.val = recv;
+	} else {
+		o1.val = recv;
+	}
+
+	low = (tid & 2) == 0;
+	send = low ? o2.val : o1.val;
+	recv = shuffle_xor_sync(send, 2);
+	if (low) {
+		o2.val = recv;
+	} else {
+		o1.val = recv;
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
 struct SoftmaxStats {
 	f32 sum;
 	f32 max;
