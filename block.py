@@ -115,6 +115,7 @@ def create_inputs() -> None:
 	store_tensor(f_weights, "ffn_f_weights.bin", expected_variance=1.0)
 	store_tensor(w_attn, "w_attn.bin", expected_variance=1.0)
 	store_tensor(w_ffn, "ffn_y_weights.bin", expected_variance=1.0)
+	store_tensor(w_ffn, "ffn_y_weights_f8.bin", expected_variance=1.0)
 	store_tensor(d_out, "d_out.bin", expected_variance=1.0)
 	store_tensor(qk_norm_scales, "qk_norm_scales.bin", expected_variance=0.0)
 	store_tensor(sink_k, "sinks_k.bin", expected_variance=1.0 / HEAD_DIM)

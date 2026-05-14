@@ -595,7 +595,8 @@ struct Gemm {
 		B.alloc_smem(smem_alloc);
 		smem_alloc.finish();
 
-		X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD; ++p) {
+		X17_UNROLL
+		for (usize p = 0; p < GMEM_PRELOAD; ++p) {
 			if (p < K_ITERS) {
 				A.template cp_async<THREADS_PER_BLOCK>(p, block_m, p);
 				B.template cp_async<THREADS_PER_BLOCK>(p, p, block_n);
@@ -603,15 +604,16 @@ struct Gemm {
 			cp_async_commit();
 		}
 
-		Fragment_16x16<bf16> rA[M_TILES][K_TILES];
-		Fragment_16x16<bf16> rBT[K_TILES][N_TILES];
+		constexpr usize K_PART = K_TILES / 2;
+		Fragment_16x16<bf16> rA[M_TILES][K_PART];
+		Fragment_16x16<bf16> rBT[K_PART][N_TILES];
 		Fragment_16x16<f32> acc[N_TILES][M_TILES];
 		zero_(acc);
 
 		cp_async_wait<GMEM_PRELOAD - 1>();
 		sync_threads();
 
-		X17_UNROLL for (usize ki = 0; ki < K_TILES; ++ki) {
+		X17_UNROLL for (usize ki = 0; ki < K_PART; ++ki) {
 			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
 				A.load_fragment(0, warp_m * M_TILES + mi, ki, rA[mi][ki]);
 			}
@@ -620,7 +622,43 @@ struct Gemm {
 			}
 		}
 
-		X17_UNROLL for (usize k_step = 0; k_step < K_ITERS; ++k_step) {
+		for (usize k_step = 0; k_step < K_ITERS; ++k_step) {
+			X17_UNROLL for (usize ki = 0; ki < K_PART; ++ki) {
+				X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+					X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+						mma_a_bt(rBT[ki][ni], rA[mi][ki], acc[ni][mi]);
+					}
+					A.load_fragment(k_step, warp_m * M_TILES + mi, 1*K_PART + ki, rA[mi][ki]);
+				}
+				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+					B.load_fragment_trans(k_step, 1*K_PART + ki, warp_n * N_TILES + ni, rBT[ki][ni]);
+				}
+			}
+
+/*			X17_UNROLL for (usize ki = 0; ki < K_PART; ++ki) {
+				X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+					X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+						mma_a_bt(rBT[ki][ni], rA[mi][ki], acc[ni][mi]);
+					}
+					A.load_fragment(k_step, warp_m * M_TILES + mi, 2*K_PART + ki, rA[mi][ki]);
+				}
+				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+					B.load_fragment_trans(k_step, 2*K_PART + ki, warp_n * N_TILES + ni, rBT[ki][ni]);
+				}
+			}
+
+			X17_UNROLL for (usize ki = 0; ki < K_PART; ++ki) {
+				X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+					X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+						mma_a_bt(rBT[ki][ni], rA[mi][ki], acc[ni][mi]);
+					}
+					A.load_fragment(k_step, warp_m * M_TILES + mi, 3*K_PART + ki, rA[mi][ki]);
+				}
+				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+					B.load_fragment_trans(k_step, 3*K_PART + ki, warp_n * N_TILES + ni, rBT[ki][ni]);
+				}
+			}*/
+
 			{ // Get more data from GMEM
 				cp_async_wait<GMEM_PRELOAD - 2>();
 				sync_threads();
@@ -633,7 +671,7 @@ struct Gemm {
 				cp_async_commit();
 			}
 
-			X17_UNROLL for (usize ki = 0; ki < K_TILES; ++ki) {
+			X17_UNROLL for (usize ki = 0; ki < K_PART; ++ki) {
 				X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
 					X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
 						mma_a_bt(rBT[ki][ni], rA[mi][ki], acc[ni][mi]);

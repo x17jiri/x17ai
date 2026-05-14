@@ -12,21 +12,33 @@ torch.set_default_device(my_device)
 torch.set_default_dtype(torch.float32)
 
 config = load_jsonc(CONFIG_PATH)
-N_INPUTS = int(config["n_inputs"])
-D_MODEL = int(config["d_model"])
-N_HEADS = int(config["n_heads"])
-HEAD_DIM = int(config["head_dim"])
-ROPE_DIM = int(config["rope_dim"])
-SPARSE_FAN_IN = int(config["qkv_fan_in"])
-F_WIDTH = int(config["f_width"])
-WINDOW_SIZE = int(config["window_size"])
-L2_NORM_EPS = float(config["l2_norm_eps"])
-ROPE_BASE = float(config["rope_base"])
+
+def config_value(*names: str, default=None):
+	for name in names:
+		if name in config:
+			return config[name]
+	if default is not None:
+		return default
+	raise KeyError(f"Missing config value, tried: {', '.join(names)}")
+
+N_INPUTS = int(config_value("n_inputs", "seq_len"))
+D_MODEL = int(config_value("d_model", "D_MODEL"))
+N_HEADS = int(config_value("n_heads", "N_HEADS"))
+HEAD_DIM = int(config_value("head_dim", "QK_DIM"))
+VG_DIM = int(config_value("VG_DIM", "head_dim", "QK_DIM"))
+if VG_DIM != HEAD_DIM:
+	raise ValueError("block.py currently assumes QK_DIM == VG_DIM")
+ROPE_DIM = int(config_value("rope_dim", default=HEAD_DIM))
+SPARSE_FAN_IN = int(config_value("qkv_fan_in", "SPARSE_FAN_IN"))
+F_WIDTH = int(config_value("f_width", "F_WIDTH"))
+WINDOW_SIZE = int(config_value("window_size", "WINDOW_SIZE"))
+L2_NORM_EPS = float(config_value("l2_norm_eps", "L2_NORM_EPS"))
+ROPE_BASE = float(config_value("rope_base", "ROPE_BASE", default=10000.0))
 QKVG_ROWS = 4 * N_HEADS * HEAD_DIM
 ATTN_WIDTH = N_HEADS * HEAD_DIM
 F_PROJ_OUTPUTS = 2 * F_WIDTH
 SPARSE_SCALE = math.sqrt(D_MODEL / SPARSE_FAN_IN)
-V_SCALE_FIX = 1.5
+V_SCALE_FIX = float(config_value("V_SCALE_FIX", default=1.5))
 
 GELU_VAR_FIX_2 = 1.0 / (
 	(1.0 / 3.0)
@@ -42,17 +54,82 @@ F_GEGLU_SCALE = math.sqrt(GELU_VAR_FIX_2 / F_WIDTH)
 def tensor_path(name: str) -> Path:
 	return TENSOR_DIR / name
 
+F8_DTYPE = getattr(torch, "float8_e4m3fn", None)
+
+def tensor_storage_dtype(file_name: str) -> torch.dtype:
+	if file_name.endswith("_f32.bin"):
+		return torch.float32
+	if file_name.endswith("_f8.bin"):
+		if F8_DTYPE is None:
+			raise RuntimeError("This PyTorch build does not support float8_e4m3fn")
+		return F8_DTYPE
+	return torch.bfloat16
+
+def tensor_storage_name(dtype: torch.dtype) -> str:
+	if dtype == torch.float32:
+		return "float32"
+	if dtype == torch.bfloat16:
+		return "bfloat16"
+	if F8_DTYPE is not None and dtype == F8_DTYPE:
+		return "float8_e4m3fn"
+	raise ValueError(f"Unsupported tensor storage dtype: {dtype}")
+
+def load_tensor_with_dtype(path: Path, rows: int, cols: int, dtype: torch.dtype) -> torch.Tensor:
+	raw = path.read_bytes()
+	if dtype == torch.float32:
+		data = torch.frombuffer(bytearray(raw), dtype=torch.float32)
+		return data.reshape(rows, cols).to(my_device)
+	if dtype == torch.bfloat16:
+		data = torch.frombuffer(bytearray(raw), dtype=torch.int16)
+		return data.view(torch.bfloat16).reshape(rows, cols).to(my_device).to(torch.float32)
+	if F8_DTYPE is not None and dtype == F8_DTYPE:
+		data = torch.frombuffer(bytearray(raw), dtype=torch.uint8)
+		return data.view(F8_DTYPE).reshape(rows, cols).to(my_device).to(torch.float32)
+	raise ValueError(f"Unsupported tensor storage dtype: {dtype}")
+
+def store_tensor_with_dtype(
+	tensor: torch.Tensor,
+	file_name: str,
+	dtype: torch.dtype,
+	expected_variance: float | None = None,
+) -> None:
+	path = tensor_path(file_name)
+	path.parent.mkdir(parents=True, exist_ok=True)
+	data = tensor.detach().contiguous().cpu()
+	if dtype == torch.float32:
+		stored = data.to(torch.float32)
+		raw = stored.numpy().tobytes()
+		warn_tensor = stored
+	elif dtype == torch.bfloat16:
+		stored = data.to(torch.bfloat16)
+		raw = stored.view(torch.int16).numpy().tobytes()
+		warn_tensor = stored
+	elif F8_DTYPE is not None and dtype == F8_DTYPE:
+		stored = data.to(F8_DTYPE)
+		raw = stored.view(torch.uint8).numpy().tobytes()
+		warn_tensor = stored.to(torch.float32)
+	else:
+		raise ValueError(f"Unsupported tensor storage dtype: {dtype}")
+	with path.open("wb") as output_file:
+		output_file.write(raw)
+	store_expected_variance(path, expected_variance)
+	warn_if_variance_is_unexpected(path, warn_tensor, expected_variance)
+	shape_str = ", ".join(str(dim) for dim in stored.shape)
+	print(f"Created {path}: [{shape_str}] {tensor_storage_name(dtype)}")
+
 def load_tensor(tensor: str, rows: int, cols: int) -> torch.Tensor:
 	path = tensor_path(tensor)
-	raw = path.read_bytes()
-	data = torch.frombuffer(bytearray(raw), dtype=torch.int16)
-	return data.view(torch.bfloat16).reshape(rows, cols).to(my_device).to(torch.float32)
+	return load_tensor_with_dtype(path, rows, cols, tensor_storage_dtype(tensor))
 
 def load_f32_tensor(tensor: str, rows: int, cols: int) -> torch.Tensor:
 	path = tensor_path(tensor)
-	raw = path.read_bytes()
-	data = torch.frombuffer(bytearray(raw), dtype=torch.float32)
-	return data.reshape(rows, cols).to(my_device)
+	return load_tensor_with_dtype(path, rows, cols, torch.float32)
+
+def load_f8_tensor(tensor: str, rows: int, cols: int) -> torch.Tensor:
+	if F8_DTYPE is None:
+		raise RuntimeError("This PyTorch build does not support float8_e4m3fn")
+	path = tensor_path(tensor)
+	return load_tensor_with_dtype(path, rows, cols, F8_DTYPE)
 
 def variance_path(path: Path) -> Path:
 	return path.with_name(f"{path.name}.var")
@@ -94,23 +171,12 @@ def store_expected_variance(path: Path, expected_variance: float | None) -> None
 	print(f"Created {var_path}: variance={expected_variance:.6e}")
 
 def store_tensor(tensor: torch.Tensor, file_name: str, expected_variance: float | None = None) -> None:
-	path = tensor_path(file_name)
-	path.parent.mkdir(parents=True, exist_ok=True)
-	data = tensor.contiguous().to(torch.bfloat16).cpu()
-	with path.open("wb") as output_file:
-		output_file.write(data.view(torch.int16).numpy().tobytes())
-	store_expected_variance(path, expected_variance)
-	warn_if_variance_is_unexpected(path, data, expected_variance)
-	shape_str = ", ".join(str(dim) for dim in data.shape)
-	print(f"Created {path}: [{shape_str}] bfloat16")
+	store_tensor_with_dtype(tensor, file_name, tensor_storage_dtype(file_name), expected_variance)
 
 def store_f32_tensor(tensor: torch.Tensor, file_name: str, expected_variance: float | None = None) -> None:
-	path = tensor_path(file_name)
-	path.parent.mkdir(parents=True, exist_ok=True)
-	data = tensor.contiguous().cpu().to(torch.float32)
-	with path.open("wb") as output_file:
-		output_file.write(data.numpy().tobytes())
-	store_expected_variance(path, expected_variance)
-	warn_if_variance_is_unexpected(path, data, expected_variance)
-	shape_str = ", ".join(str(dim) for dim in data.shape)
-	print(f"Created {path}: [{shape_str}] float32")
+	store_tensor_with_dtype(tensor, file_name, torch.float32, expected_variance)
+
+def store_f8_tensor(tensor: torch.Tensor, file_name: str, expected_variance: float | None = None) -> None:
+	if F8_DTYPE is None:
+		raise RuntimeError("This PyTorch build does not support float8_e4m3fn")
+	store_tensor_with_dtype(tensor, file_name, F8_DTYPE, expected_variance)

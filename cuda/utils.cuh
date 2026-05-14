@@ -15,16 +15,13 @@
 #include <stdint.h>
 #include <numbers>
 
-/*#if defined(__CUDACC_RTC__) || defined(__clang__)
+#if defined(__CUDACC__) || defined(_NVHPC_CUDA)
 	#define X17_UNROLL    _Pragma("unroll")
 	#define X17_NO_UNROLL _Pragma("unroll 1")
-#elif defined(__CUDA_ARCH__) || defined(_NVHPC_CUDA)
-	#define X17_UNROLL    #pragma unroll
-	#define X17_NO_UNROLL #pragma unroll 1
-#else*/
+#else
 	#define X17_UNROLL
 	#define X17_NO_UNROLL
-/*#endif*/
+#endif
 
 #define X17_DEVICE __forceinline__ __device__
 #define X17_HOST_DEVICE __forceinline__ __host__ __device__
@@ -1621,6 +1618,7 @@ X17_DEVICE void geglu_and_backvec_(
 
 //--------------------------------------------------------------------------------------------------
 
+/// This intentionally ignores NaN and Inf
 X17_DEVICE f32 f8_to_f32(u8 x) {
 	u32 nosign = u32(x) & 0x7Fu;
 
@@ -1636,13 +1634,22 @@ X17_DEVICE f32 f8_to_f32(u8 x) {
 	return __uint_as_float(value);
 }
 
+/// This intentionally ignores NaN and Inf
 X17_DEVICE bf16 f8_to_bf16(u8 x) {
+	return __ushort_as_bfloat16(x);
+	u16 sign = u16(x & 0x80u) << 8;
+	return
+		(x & 0x78u) == 0
+			? __ushort_as_bfloat16(sign)
+			: __ushort_as_bfloat16((sign | u16(u16(x & 0x7Fu) << 4)) + 0x3C00u);
+/*
 	union {
 		f32 value;
 		struct { u16 low; bf16 high; } parts;
 	} t;
 	t.value = f8_to_f32(x);
 	return t.parts.high;
+*/
 }
 
 /// makes sure that 4 bytes read from memory are treated as little endian
@@ -1777,7 +1784,7 @@ template<
 requires(
 	sizeof(T) == 2
 	&& M >= 0 && M % 16 == 0
-//	&& N * sizeof(T) % 128 == 0
+	&& N * sizeof(T) % 128 == 0
 )
 struct SMatrix {
 	u32 _ptr;

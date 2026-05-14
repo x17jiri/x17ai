@@ -40,7 +40,7 @@ python tensor_stats.py tmp/block_torch/o_attn.bin tmp/block_torch/o_attn.bin.var
 python verify_tensor.py tmp/block_torch/ffn_f.bin tmp/block_cuda/ffn_f.bin
 python tensor_stats.py tmp/block_torch/ffn_f.bin tmp/block_torch/ffn_f.bin.var
 
-## FFN O Forward
+## FFN Y Forward
 
 ./nvcc.sh ffn_y_fwd.cu && tmp/ffn_y_fwd
 python verify_tensor.py tmp/block_torch/ffn_y.bin tmp/block_cuda/ffn_y.bin

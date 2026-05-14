@@ -82,6 +82,28 @@ std::vector<bf16> load_tensor(std::string const &filename, usize rows, usize col
 	return data;
 }
 
+std::vector<bf16> load_f8_tensor(std::string const &filename, usize rows, usize cols) {
+	if (cols % 2 != 0) {
+		printf("Expected even number of f8 columns in %s, got %u\n", filename.c_str(), cols);
+		return {};
+	}
+	printf("Loading input from %s\n", filename.c_str());
+	std::vector<bf16> data(rows * (cols / 2));
+	std::ifstream a_in(filename, std::ios::binary);
+	if (!a_in) {
+		printf("Failed to open %s\n", filename.c_str());
+		return {};
+	}
+	if (!a_in.read(
+		reinterpret_cast<char *>(data.data()),
+		static_cast<std::streamsize>(data.size() * sizeof(bf16))
+	)) {
+		printf("Failed to read %s as packed f8 [%u, %u]\n", filename.c_str(), rows, cols);
+		return {};
+	}
+	return data;
+}
+
 std::vector<f32> load_f32_tensor(std::string const &filename, usize rows, usize cols) {
 	printf("Loading input from %s\n", filename.c_str());
 	std::vector<f32> data(rows * cols);
