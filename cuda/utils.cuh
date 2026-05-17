@@ -55,6 +55,25 @@ constexpr usize WARP_SIZE = 32;
 
 //--------------------------------------------------------------------------------------------------
 
+template<const usize CAP>
+struct SMemAllocator {
+	u32 _ptr;
+
+	X17_DEVICE SMemAllocator(): _ptr(0) {}
+
+	X17_DEVICE u32 alloc(usize size) {
+		u32 result = _ptr;
+		_ptr += size;
+		return result;
+	}
+
+	X17_DEVICE void finish() {
+		// TODO: assert _ptr == CAP
+	}
+};
+
+//--------------------------------------------------------------------------------------------------
+
 template<typename To, typename From>
 struct Round_cast;
 
@@ -814,6 +833,12 @@ struct GMatrixDynSize {
 
 template<typename T, const usize T_SIZE = sizeof(T)>
 struct FragmentReg;
+
+template<typename T>
+requires(sizeof(T) == 1)
+struct FragmentReg<T, 1> {
+	u32 val;
+};
 
 template<typename T>
 requires(sizeof(T) == 2)

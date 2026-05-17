@@ -4,9 +4,7 @@
 namespace b8 {
 	template<typename T>
 	requires(sizeof(T) == 1)
-	struct Fragment_8x16 {
-		u32 val;
-	};
+	struct Fragment_8x16: FragmentReg<T> {};
 
 	template<typename T>
 	requires(sizeof(T) == 1)
@@ -38,6 +36,109 @@ namespace b8 {
 	struct Fragment_32x32 {
 		Fragment_16x32<T> v16x32[2];
 	};
+
+	/// Stores 4 horizontally-adjacent 8x16 fragments (64 cols × 8 rows) to GMEM.
+	/// Uses shuffle_4x4 so each thread holds 16 contiguous bytes, then a single 128-bit store.
+	/// Rows are written at stride 2 starting from m_idx, so callers use m_idx + 0 for even rows
+	/// and m_idx + 1 for odd rows of a 16-row block.
+	template<typename U, const usize M, const usize N>
+	requires(sizeof(U) == 1)
+	X17_DEVICE void store_1x4_8x16(
+		GMatrix<U, M, N> const &dst,
+		usize m_idx, usize n_idx,
+		u32 f0, u32 f1, u32 f2, u32 f3
+	) {
+		shuffle_4x4(f0, f1, f2, f3);
+
+		usize tid = threadIdx.x % WARP_SIZE;
+		u8 *base = reinterpret_cast<u8 *>(dst._ptr);
+		usize stride = dst.stride_bytes();
+		usize row = m_idx + ((tid / 2) & (((WARP_SIZE - 1) / 2) ^ 1));
+		usize col_off = n_idx * usize(sizeof(U)) + (tid % 4) * 16;
+
+		*reinterpret_cast<uint4 *>(base + row * stride + col_off) = make_uint4(f0, f1, f2, f3);
+	}
+
+	/// Stores a 16x32 tile (2×2 grid of 8x16 fragments) to GMEM.
+	/// Uses shuffle_4x4 so each thread holds 16 contiguous bytes, then a single 128-bit store.
+	/// Threads 0,1,4,5,8,9,... write even rows; threads 2,3,6,7,... write odd rows.
+	/// 2 threads per row × 16B = 32B coalesced per row.
+	template<typename U, const usize M, const usize N>
+	requires(sizeof(U) == 1)
+	X17_DEVICE void store_2x2_8x16(
+		GMatrix<U, M, N> const &dst,
+		usize m_idx, usize n_idx,
+		u32 f0, u32 f1,
+		u32 f2, u32 f3
+	) {
+		shuffle_4x4(f0, f1, f2, f3);
+
+		usize tid = threadIdx.x;
+		u8 *base = reinterpret_cast<u8 *>(dst._ptr);
+		usize stride = dst.stride_bytes();
+		usize row = m_idx + ((tid % WARP_SIZE) / 2);
+		usize col_off = n_idx * usize(sizeof(U)) + (tid % 2) * 16;
+
+		*reinterpret_cast<uint4 *>(base + row * stride + col_off) = make_uint4(f0, f1, f2, f3);
+	}
+
+	template<typename U, typename T, const usize M, const usize N, const usize K>
+	requires(sizeof(U) == 1)
+	X17_DEVICE void store(
+		Fragment_32x32<T> const (&tiles)[K],
+		GMatrix<U, M, N> const &dst,
+		usize m_idx, usize n_idx
+	) {
+		usize i = 0;
+		if constexpr (K >= 2) {
+			X17_UNROLL for (; i + 2 <= K; i += 2) {
+				store_1x4_8x16(
+					dst, m_idx + 0, n_idx + i*32,
+					tiles[i+0].v16x32[0].h16x16[0].v8x16[0].val,
+					tiles[i+0].v16x32[0].h16x16[1].v8x16[0].val,
+					tiles[i+1].v16x32[0].h16x16[0].v8x16[0].val,
+					tiles[i+1].v16x32[0].h16x16[1].v8x16[0].val
+				);
+				store_1x4_8x16(
+					dst, m_idx + 1, n_idx + i*32,
+					tiles[i+0].v16x32[0].h16x16[0].v8x16[1].val,
+					tiles[i+0].v16x32[0].h16x16[1].v8x16[1].val,
+					tiles[i+1].v16x32[0].h16x16[0].v8x16[1].val,
+					tiles[i+1].v16x32[0].h16x16[1].v8x16[1].val
+				);
+				store_1x4_8x16(
+					dst, m_idx + 16, n_idx + i*32,
+					tiles[i+0].v16x32[1].h16x16[0].v8x16[0].val,
+					tiles[i+0].v16x32[1].h16x16[1].v8x16[0].val,
+					tiles[i+1].v16x32[1].h16x16[0].v8x16[0].val,
+					tiles[i+1].v16x32[1].h16x16[1].v8x16[0].val
+				);
+				store_1x4_8x16(
+					dst, m_idx + 17, n_idx + i*32,
+					tiles[i+0].v16x32[1].h16x16[0].v8x16[1].val,
+					tiles[i+0].v16x32[1].h16x16[1].v8x16[1].val,
+					tiles[i+1].v16x32[1].h16x16[0].v8x16[1].val,
+					tiles[i+1].v16x32[1].h16x16[1].v8x16[1].val
+				);
+			}
+		}
+		if constexpr (K % 2 == 1) {
+			store_2x2_8x16(
+				dst, m_idx + 0, n_idx + i*32,
+				tiles[i].v16x32[0].h16x16[0].v8x16[0].val,
+				tiles[i].v16x32[0].h16x16[1].v8x16[0].val,
+				tiles[i].v16x32[0].h16x16[0].v8x16[1].val,
+				tiles[i].v16x32[0].h16x16[1].v8x16[1].val
+			);
+			store_2x2_8x16(
+				dst, m_idx + 16, n_idx + i*32,
+				tiles[i].v16x32[1].h16x16[0].v8x16[0].val,
+				tiles[i].v16x32[1].h16x16[1].v8x16[0].val,
+				tiles[i].v16x32[1].h16x16[0].v8x16[1].val,
+				tiles[i].v16x32[1].h16x16[1].v8x16[1].val
+			);
+		}
+	}
 
 	template<
 		typename T,
@@ -147,7 +248,7 @@ namespace b8 {
 		) const {
 			if constexpr (N > 0) {
 				usize tid = threadIdx.x;
-				usize row = m_idx + (((tid & 7) << 1) | ((tid & 8) >> 3) | (tid & 16));
+				usize row = m_idx + (((tid & 15) << 1) | ((tid & 16) >> 4));
 				usize swizzle = (tid & 7) << 4;
 				usize col_off = n_idx * sizeof(T);
 				u32 addr = _ptr + (row * ROW_BYTES) + (col_off ^ swizzle);
@@ -155,19 +256,18 @@ namespace b8 {
 				sm80::ldmatrix_8x8xu16_x4(
 					addr,
 					dst.v16x32[0].h16x16[0].v8x16[0].val,
-					dst.v16x32[0].h16x16[0].v8x16[1].val,
 					dst.v16x32[1].h16x16[0].v8x16[0].val,
+					dst.v16x32[0].h16x16[0].v8x16[1].val,
 					dst.v16x32[1].h16x16[0].v8x16[1].val
 				);
 
-				col_off += 16;
-				addr = _ptr + (row * ROW_BYTES) + (col_off ^ swizzle);
+				addr ^= 16;
 
 				sm80::ldmatrix_8x8xu16_x4(
 					addr,
 					dst.v16x32[0].h16x16[1].v8x16[0].val,
-					dst.v16x32[0].h16x16[1].v8x16[1].val,
 					dst.v16x32[1].h16x16[1].v8x16[0].val,
+					dst.v16x32[0].h16x16[1].v8x16[1].val,
 					dst.v16x32[1].h16x16[1].v8x16[1].val
 				);
 			}
@@ -180,7 +280,7 @@ namespace b8 {
 		) const {
 			if constexpr (N > 0) {
 				usize tid = threadIdx.x;
-				usize row = m_idx + (((tid & 7) << 1) | ((tid & 8) >> 3) | (tid & 16));
+				usize row = m_idx + (((tid & 15) << 1) | ((tid & 16) >> 4));
 				usize swizzle = (tid & 7) << 4;
 				usize col_off = n_idx * sizeof(T);
 				u32 addr = _ptr + (row * ROW_BYTES) + (col_off ^ swizzle);
@@ -188,21 +288,20 @@ namespace b8 {
 				sm80::ldmatrix_t_8x8xu16_x4(
 					addr,
 					dst.v16x32[0].h16x16[0].v8x16[0].val,
-					dst.v16x32[0].h16x16[0].v8x16[1].val,
 					dst.v16x32[0].h16x16[1].v8x16[0].val,
+					dst.v16x32[0].h16x16[0].v8x16[1].val,
 					dst.v16x32[0].h16x16[1].v8x16[1].val
 				);
 				dst.v16x32[0].h16x16[0].transpose_2x2();
 				dst.v16x32[0].h16x16[1].transpose_2x2();
 
-				col_off += 16;
-				addr = _ptr + (row * ROW_BYTES) + (col_off ^ swizzle);
+				addr ^= 16;
 
 				sm80::ldmatrix_t_8x8xu16_x4(
 					addr,
 					dst.v16x32[1].h16x16[0].v8x16[0].val,
-					dst.v16x32[1].h16x16[0].v8x16[1].val,
 					dst.v16x32[1].h16x16[1].v8x16[0].val,
+					dst.v16x32[1].h16x16[0].v8x16[1].val,
 					dst.v16x32[1].h16x16[1].v8x16[1].val
 				);
 				dst.v16x32[1].h16x16[0].transpose_2x2();

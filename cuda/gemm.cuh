@@ -4,23 +4,6 @@
 
 #pragma nv_diag_suppress 186
 
-template<const usize CAP>
-struct SMemAllocator {
-	u32 _ptr;
-
-	X17_DEVICE SMemAllocator(): _ptr(0) {}
-
-	X17_DEVICE u32 alloc(usize size) {
-		u32 result = _ptr;
-		_ptr += size;
-		return result;
-	}
-
-	X17_DEVICE void finish() {
-		// TODO: assert _ptr == CAP
-	}
-};
-
 template<
 	const usize _GN, // number of columns of the input matrix in GMEM
 	const usize _M, const usize _N, // size of preload tile
@@ -78,72 +61,6 @@ struct MatrixLoader {
 	X17_DEVICE void load_fragment_trans(usize step, usize m, usize n, Fragment_16x16<bf16> &frag) {
 		auto s = sPreload.tile_m<M>(step % GMEM_PRELOAD);
 		smem_tile_to_fragment_trans(s, m*16, n*16, frag);
-	}
-};
-
-template<
-	const usize _GN, // number of columns in the decoded matrix
-	const usize _M, const usize _N, // size of decoded preload tile
-	const usize _GMEM_PRELOAD = 2 // number of preload tiles
->
-struct MatrixF8Loader {
-	static constexpr usize GN = _GN;
-	static constexpr usize M = _M;
-	static constexpr usize N = _N;
-	static constexpr usize GMEM_PRELOAD = _GMEM_PRELOAD;
-	static constexpr usize PACKED_GN = GN / 2;
-	static constexpr usize PACKED_N = N / 2;
-
-	static_assert(_GN % N == 0);
-	static_assert(M % 16 == 0);
-	static_assert(N % 16 == 0);
-	static_assert(GN % 2 == 0);
-	static_assert(N % 2 == 0);
-
-	static constexpr usize SMEM_BYTES = M * PACKED_N * GMEM_PRELOAD * sizeof(bf16);
-
-	using GInput = GMatrixDynSize<bf16, PACKED_GN>;
-	using SPreload = SMatrix<bf16, M * GMEM_PRELOAD, PACKED_N>;
-
-	GInput gInput;
-	SPreload sPreload;
-
-	X17_DEVICE usize m_rows() const { return gInput.m_rows(); }
-	X17_DEVICE usize n_cols() const { return GN; }
-
-	X17_DEVICE MatrixF8Loader(bf16 *gmem_addr, usize m_rows):
-		gInput(gmem_addr, m_rows),
-		sPreload()
-	{}
-
-	template<const u32 CAP>
-	X17_DEVICE void alloc_smem(SMemAllocator<CAP> &smem_alloc) {
-		sPreload._ptr = smem_alloc.alloc(SMEM_BYTES);
-	}
-
-	/// `cp_async` a packed tile with decoded logical size [M, N] at position [M*m, N*n].
-	template<const usize THREADS_PER_BLOCK>
-	X17_DEVICE void cp_async(usize step, usize m, usize n) {
-		cp_async_gmem_to_smem<THREADS_PER_BLOCK, M, PACKED_N>(
-			threadIdx.x,
-			gInput.template tile_m<M>(m).slice_n<PACKED_N>(PACKED_N * n),
-			sPreload.template tile_m<M>(step % GMEM_PRELOAD),
-			0, 0, 0, 0
-		);
-	}
-
-	/// Load and decode fragment at tile coordinates [m, n] from the SMEM ring buffer.
-	X17_DEVICE void load_fragment(usize step, usize m, usize n, Fragment_16x16<bf16> &frag) {
-		auto s = sPreload.tile_m<M>(step % GMEM_PRELOAD);
-		Fragment_16x8<bf16> packed;
-		smem_tile_to_fragment(s, m*16, n*8, packed);
-		unpack_f8_fragment(packed.sub[0], frag.sub[0][0], frag.sub[0][1]);
-		unpack_f8_fragment(packed.sub[1], frag.sub[1][0], frag.sub[1][1]);
-	}
-
-	X17_DEVICE void load_fragment_trans(usize step, usize m, usize n, Fragment_16x16<bf16> &frag) {
-		load_fragment(step, m, n, frag);
-		frag.transpose_();
 	}
 };
 
@@ -634,30 +551,6 @@ struct Gemm {
 					B.load_fragment_trans(k_step, 1*K_PART + ki, warp_n * N_TILES + ni, rBT[ki][ni]);
 				}
 			}
-
-/*			X17_UNROLL for (usize ki = 0; ki < K_PART; ++ki) {
-				X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-					X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-						mma_a_bt(rBT[ki][ni], rA[mi][ki], acc[ni][mi]);
-					}
-					A.load_fragment(k_step, warp_m * M_TILES + mi, 2*K_PART + ki, rA[mi][ki]);
-				}
-				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-					B.load_fragment_trans(k_step, 2*K_PART + ki, warp_n * N_TILES + ni, rBT[ki][ni]);
-				}
-			}
-
-			X17_UNROLL for (usize ki = 0; ki < K_PART; ++ki) {
-				X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-					X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-						mma_a_bt(rBT[ki][ni], rA[mi][ki], acc[ni][mi]);
-					}
-					A.load_fragment(k_step, warp_m * M_TILES + mi, 3*K_PART + ki, rA[mi][ki]);
-				}
-				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-					B.load_fragment_trans(k_step, 3*K_PART + ki, warp_n * N_TILES + ni, rBT[ki][ni]);
-				}
-			}*/
 
 			{ // Get more data from GMEM
 				cp_async_wait<GMEM_PRELOAD - 2>();
