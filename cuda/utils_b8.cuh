@@ -1,4 +1,5 @@
 #include "utils.cuh"
+#include "utils_b32.cuh"
 
 namespace b8 {
 	template<typename T>
@@ -10,8 +11,7 @@ namespace b8 {
 	template<typename T>
 	requires(sizeof(T) == 1)
 	struct Fragment_16x16 {
-		Fragment_8x16<T> even_row;
-		Fragment_8x16<t> odd_row;
+		Fragment_8x16<T> v8x16[2];
 
 		/// Before:
 		///     even = [0, 1, 2, 3]
@@ -20,25 +20,23 @@ namespace b8 {
 		///     even = [0, 4, 2, 6]
 		///     odd  = [1, 5, 3, 7]
 		X17_DEVICE void transpose_2x2() {
-			u32 e = even_row.val;
-			u32 o = odd_row.val;
-			even_row.val = __byte_perm(e, o, 0x6240);
-			odd_row.val  = __byte_perm(e, o, 0x7351);
+			u32 even = v8x16[0].val;
+			u32 odd = v8x16[1].val;
+			v8x16[0].val = __byte_perm(even, odd, 0x6240);
+			v8x16[1].val  = __byte_perm(even, odd, 0x7351);
 		}
 	};
 
 	template<typename T>
 	requires(sizeof(T) == 1)
 	struct Fragment_16x32 {
-		Fragment_16x16<T> left;
-		Fragment_16x16<t> right;
+		Fragment_16x16<T> h16x16[2];
 	};
 
 	template<typename T>
 	requires(sizeof(T) == 1)
 	struct Fragment_32x32 {
-		Fragment_16x32<T> top;
-		Fragment_16x32<t> bot;
+		Fragment_16x32<T> v16x32[2];
 	};
 
 	template<
@@ -133,7 +131,6 @@ namespace b8 {
 					}
 				}
 				if constexpr (HEIGHT % ROWS_PER_STEP != 0) {
-					usize step = STEPS;
 					if (tid < (HEIGHT % ROWS_PER_STEP) * CP_PER_ROW) {
 						usize swizzle = (row & 14) << 3;
 						usize off = col_in_row ^ swizzle;
@@ -147,31 +144,31 @@ namespace b8 {
 		X17_DEVICE void tile_to_fragment(
 			usize m_idx, usize n_idx,
 			Fragment_32x32<T> &dst
-		) const requires(sizeof(T) == 2) {
+		) const {
 			if constexpr (N > 0) {
 				usize tid = threadIdx.x;
 				usize row = m_idx + (((tid & 7) << 1) | ((tid & 8) >> 3) | (tid & 16));
-				usize swizzle = (tid & 14) << 3;
+				usize swizzle = (tid & 7) << 4;
 				usize col_off = n_idx * sizeof(T);
 				u32 addr = _ptr + (row * ROW_BYTES) + (col_off ^ swizzle);
 
 				sm80::ldmatrix_8x8xu16_x4(
 					addr,
-					dst.top.left.even_row,
-					dst.top.left.odd_row,
-					dst.bot.left.even_row,
-					dst.bot.left.odd_row
+					dst.v16x32[0].h16x16[0].v8x16[0].val,
+					dst.v16x32[0].h16x16[0].v8x16[1].val,
+					dst.v16x32[1].h16x16[0].v8x16[0].val,
+					dst.v16x32[1].h16x16[0].v8x16[1].val
 				);
 
-				usize col_off += 16;
-				u32 addr = _ptr + (row * ROW_BYTES) + (col_off ^ swizzle);
+				col_off += 16;
+				addr = _ptr + (row * ROW_BYTES) + (col_off ^ swizzle);
 
 				sm80::ldmatrix_8x8xu16_x4(
 					addr,
-					dst.top.right.even_row,
-					dst.top.right.odd_row,
-					dst.bot.right.even_row,
-					dst.bot.right.odd_row
+					dst.v16x32[0].h16x16[1].v8x16[0].val,
+					dst.v16x32[0].h16x16[1].v8x16[1].val,
+					dst.v16x32[1].h16x16[1].v8x16[0].val,
+					dst.v16x32[1].h16x16[1].v8x16[1].val
 				);
 			}
 		}
@@ -179,46 +176,45 @@ namespace b8 {
 		/// Both `m_idx` and `n_idx` must be multiples of 32
 		X17_DEVICE void tile_to_fragment_trans(
 			usize m_idx, usize n_idx,
-			Fragment_16x16<T> &dst
-		) const requires(sizeof(T) == 2) {
+			Fragment_32x32<T> &dst
+		) const {
 			if constexpr (N > 0) {
 				usize tid = threadIdx.x;
 				usize row = m_idx + (((tid & 7) << 1) | ((tid & 8) >> 3) | (tid & 16));
-				usize swizzle = (tid & 14) << 3;
+				usize swizzle = (tid & 7) << 4;
 				usize col_off = n_idx * sizeof(T);
-				u32 row_addr = _ptr + (row * ROW_BYTES);
-				u32 addr = row_addr + (col_off ^ swizzle);
+				u32 addr = _ptr + (row * ROW_BYTES) + (col_off ^ swizzle);
 
 				sm80::ldmatrix_t_8x8xu16_x4(
 					addr,
-					dst.top.left.even_row,
-					dst.top.left.odd_row,
-					dst.bot.left.even_row,
-					dst.bot.left.odd_row
+					dst.v16x32[0].h16x16[0].v8x16[0].val,
+					dst.v16x32[0].h16x16[0].v8x16[1].val,
+					dst.v16x32[0].h16x16[1].v8x16[0].val,
+					dst.v16x32[0].h16x16[1].v8x16[1].val
 				);
-				dst.top.left.transpose_2x2();
-				dst.bot.left.transpose_2x2();
+				dst.v16x32[0].h16x16[0].transpose_2x2();
+				dst.v16x32[0].h16x16[1].transpose_2x2();
 
 				col_off += 16;
-				addr = row_addr + (col_off ^ swizzle);
+				addr = _ptr + (row * ROW_BYTES) + (col_off ^ swizzle);
 
 				sm80::ldmatrix_t_8x8xu16_x4(
 					addr,
-					dst.top.right.even_row,
-					dst.top.right.odd_row,
-					dst.bot.right.even_row,
-					dst.bot.right.odd_row
+					dst.v16x32[1].h16x16[0].v8x16[0].val,
+					dst.v16x32[1].h16x16[0].v8x16[1].val,
+					dst.v16x32[1].h16x16[1].v8x16[0].val,
+					dst.v16x32[1].h16x16[1].v8x16[1].val
 				);
-				dst.top.right.transpose_2x2();
-				dst.bot.right.transpose_2x2();
+				dst.v16x32[1].h16x16[0].transpose_2x2();
+				dst.v16x32[1].h16x16[1].transpose_2x2();
 			}
 		}
-	}
+	};
 
 	X17_DEVICE void mma_a_bt(
 		Fragment_16x32<i8> const &a,
 		Fragment_16x32<i8> const &b,
-		Fragment_16x16<i32> &c
+		b32::Fragment_16x16<i32> &c
 	) {
 		X17_UNROLL for (int j = 0; j < 2; ++j) {
 			sm80::mma_i8_i32(
@@ -246,9 +242,9 @@ namespace b8 {
 	X17_DEVICE void mma_a_bt(
 		Fragment_32x32<i8> const &a,
 		Fragment_32x32<i8> const &b,
-		Fragment_32x32<i32> &c
+		b32::Fragment_32x32<i32> &c
 	) {
-		X17_UNROLL for (int j = 0; j < 4; ++j) {
+		X17_UNROLL for (int j = 0; j < 2; ++j) {
 			X17_UNROLL for (int i = 0; i < 2; ++i) {
 				mma_a_bt(a.v16x32[j], b.v16x32[i], c.v16x32[j].h16x16[i]);
 			}

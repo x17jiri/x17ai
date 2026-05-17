@@ -66,14 +66,14 @@ struct Round_cast<bf16, f32> {
 };
 
 template<>
-struct Round_cast<f32, s8> {
+struct Round_cast<f32, i8> {
 	X17_DEVICE static bf16 cast(f32 x) {
 		return __int2float_rz(x);
 	}
 };
 
 template<>
-struct Round_cast<bf16, s8> {
+struct Round_cast<bf16, i8> {
 	X17_DEVICE static bf16 cast(f32 x) {
 		return  __float2bfloat16_rn(
 			__int2float_rz(x)
@@ -709,11 +709,11 @@ namespace sm80 {
 			"{%8,  %9},"
 			"{%10, %11, %12, %13};\n"
 			:
-				"=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
+				"=r"(d0), "=r"(d1), "=r"(d2), "=r"(d3)
 			:
 				"r"(a0),  "r"(a1),  "r"(a2),  "r"(a3),
 				"r"(b0),  "r"(b1),
-				"f"(c0),  "f"(c1),  "f"(c2),  "f"(c3)
+				"r"(c0),  "r"(c1),  "r"(c2),  "r"(c3)
 		);
 	}
 }
