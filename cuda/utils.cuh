@@ -1070,7 +1070,7 @@ struct Fragment_16x8 {
 /// - thread 1 has values 4, 5, 6, 7
 /// - ...
 X17_DEVICE void shuffle_4x4(u32 &r0, u32 &r1, u32 &r2, u32 &r3) {
-	usize tid = threadIdx.x % WARP_SIZE;
+	usize tid = threadIdx.x;
 
 	u32 u0 = (tid & 1) == 0 ? r0 : r1;
 	u32 u1 = (tid & 1) == 0 ? r1 : r0;

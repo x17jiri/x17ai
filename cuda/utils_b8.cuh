@@ -2,6 +2,11 @@
 #include "utils_b32.cuh"
 
 namespace b8 {
+	using FixedI8 = i8;
+
+	constexpr i32 FIXED_I8_FRAC_BITS = 3;
+	constexpr i32 FIXED_I8_SCALE = 1 << FIXED_I8_FRAC_BITS;
+
 	template<typename T>
 	requires(sizeof(T) == 1)
 	struct Fragment_8x16: FragmentReg<T> {};

@@ -13,6 +13,8 @@ namespace b8 {
 	>
 	requires(sizeof(T) == 1)
 	struct MatrixLoader {
+		using Elem = T;
+
 		static constexpr usize GN = _GN;
 		static constexpr usize M = _M;
 		static constexpr usize N = _N;
@@ -49,7 +51,6 @@ namespace b8 {
 		template<const usize THREADS_PER_BLOCK>
 		X17_DEVICE void cp_async(usize step, usize m, usize n) {
 			auto slot = sPreload.template tile_m<M>(step % GMEM_PRELOAD);
-			gInput.template tile_m<M>(m).slice_n<N>(N*n),
 			GMatrix<T, M, N> src = gInput.template tile_m<M>(m).slice_n<N>(N*n);
 			slot.template cp_async_from<THREADS_PER_BLOCK>(
 				threadIdx.x,
@@ -73,6 +74,8 @@ namespace b8 {
 
 	template<typename Loader>
 	struct MatrixTransLoader {
+		using Elem = typename Loader::Elem;
+
 		static constexpr usize M = Loader::N;
 		static constexpr usize N = Loader::M;
 		static constexpr usize GMEM_PRELOAD = Loader::GMEM_PRELOAD;
@@ -98,12 +101,95 @@ namespace b8 {
 			loader.template cp_async<THREADS_PER_BLOCK>(step, n, m);
 		}
 
-		X17_DEVICE void load_fragment(usize step, usize m, usize n, Fragment_32x32<T> &frag) {
+		X17_DEVICE void load_fragment(usize step, usize m, usize n, Fragment_32x32<Elem> &frag) {
 			loader.load_fragment_trans(step, n, m, frag);
 		}
 
-		X17_DEVICE void load_fragment_trans(usize step, usize m, usize n, Fragment_32x32<T> &frag) {
+		X17_DEVICE void load_fragment_trans(usize step, usize m, usize n, Fragment_32x32<Elem> &frag) {
 			loader.load_fragment(step, n, m, frag);
+		}
+	};
+
+	template<typename T, const usize GN>
+	requires(sizeof(T) == 1)
+	struct MatrixWriter {
+		T *gC;
+		usize c_stride;
+
+		X17_DEVICE MatrixWriter(T *gC):
+			gC(gC),
+			c_stride(GN)
+		{}
+
+		template<const usize M_TILES, const usize N_TILES>
+		X17_DEVICE void write(
+			usize row, usize col,
+			Fragment_32x32<T> (&acc)[M_TILES][N_TILES]
+		) {
+			GMatrix<T, 32 * M_TILES, 32 * N_TILES> C(gC, c_stride);
+			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+				store(acc[mi], C, row + 32 * mi, col);
+			}
+		}
+	};
+
+	template<const usize GN, const f64 SCALE>
+	struct FixedI8MatrixWriter: MatrixWriter<FixedI8, GN> {
+
+		X17_DEVICE FixedI8MatrixWriter(FixedI8 *gC):
+			MatrixWriter<FixedI8, GN>(gC)
+		{}
+
+		i8 conv_one(i32 inp) {
+			f32 val_f = f32(inp) * f32(SCALE / FIXED_I8_SCALE);
+			i32 val_i = __float2int_rn(val_f);
+			i8 val = val_i < -127 || val_i > +127 ? -128 : val; // TODO - inefficient
+			return val;
+		}
+
+		void conv(b32::Fragment_16x16<i32> const &inp, Fragment_16x16<i8> &out) {
+			union {
+				u32 value;
+				struct {
+					i8 top_0, top_1, bot_0, bot_1;
+				} packed;
+			} left, right;
+
+			left.top_0 = conv_one(inp.v8x16[0].h8x8[0].val0);
+			left.top_1 = conv_one(inp.v8x16[0].h8x8[0].val1);
+			left.bot_0 = conv_one(inp.v8x16[1].h8x8[0].val0);
+			left.bot_1 = conv_one(inp.v8x16[1].h8x8[0].val1);
+
+			right.top_0 = conv_one(inp.v8x16[0].h8x8[1].val0);
+			right.top_1 = conv_one(inp.v8x16[0].h8x8[1].val1);
+			right.bot_0 = conv_one(inp.v8x16[1].h8x8[1].val0);
+			right.bot_1 = conv_one(inp.v8x16[1].h8x8[1].val1);
+
+			// TODO - shuffle
+		}
+
+		void conv(b32::Fragment_32x32<i32> const &inp, Fragment_32x32<i8> &out) {
+			X17_UNROLL for (usize j = 0; j < 2; ++j) {
+				X17_UNROLL for (usize i = 0; i < 2; ++i) {
+					conv(inp.v16x32[j].h16x16[i], out.v16x32[j].h16x16[i]);
+				}
+			}
+		}
+
+		template<const usize M_TILES, const usize N_TILES>
+		X17_DEVICE void write(
+			usize row, usize col,
+			b32::Fragment_32x32<i32> (&acc)[M_TILES][N_TILES]
+		) {
+			Fragment_32x32<FixedI8> t[M_TILES][N_TILES];
+
+			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+					conv(acc[mi][ni], t[mi][ni]);
+				}
+			}
+
+			MatrixWriter<FixedI8, GN>::write(row, col, t);
 		}
 	};
 }
