@@ -245,7 +245,7 @@ namespace b8 {
 			Fragment_32x32<T> &dst
 		) const {
 			usize tid = threadIdx.x;
-			usize row = m_idx + (((tid & 15) << 1) | ((tid & 16) >> 4));
+			usize row = m_idx | (((tid & 15) << 1) | ((tid & 16) >> 4));
 			usize swizzle = (tid & 7) << 4;
 			usize col_off = n_idx * sizeof(T);
 			u32 addr = _ptr + (row * ROW_BYTES) + (col_off ^ swizzle);
@@ -253,8 +253,8 @@ namespace b8 {
 			sm80::ldmatrix_8x8xu16_x4(
 				addr,
 				dst.v16x32[0].h16x16[0].v8x16[0].val,
-				dst.v16x32[1].h16x16[0].v8x16[0].val,
 				dst.v16x32[0].h16x16[0].v8x16[1].val,
+				dst.v16x32[1].h16x16[0].v8x16[0].val,
 				dst.v16x32[1].h16x16[0].v8x16[1].val
 			);
 
@@ -263,8 +263,8 @@ namespace b8 {
 			sm80::ldmatrix_8x8xu16_x4(
 				addr,
 				dst.v16x32[0].h16x16[1].v8x16[0].val,
-				dst.v16x32[1].h16x16[1].v8x16[0].val,
 				dst.v16x32[0].h16x16[1].v8x16[1].val,
+				dst.v16x32[1].h16x16[1].v8x16[0].val,
 				dst.v16x32[1].h16x16[1].v8x16[1].val
 			);
 		}
@@ -275,7 +275,7 @@ namespace b8 {
 			Fragment_32x32<T> &dst
 		) const {
 			usize tid = threadIdx.x;
-			usize row = m_idx + (((tid & 15) << 1) | ((tid & 16) >> 4));
+			usize row = m_idx | (((tid & 15) << 1) | ((tid & 16) >> 4));
 			usize swizzle = (tid & 7) << 4;
 			usize col_off = n_idx * sizeof(T);
 			u32 addr = _ptr + (row * ROW_BYTES) + (col_off ^ swizzle);
@@ -404,7 +404,7 @@ namespace b8 {
 			Fragment_32x32<T> &dst
 		) const {
 			usize tid = threadIdx.x;
-			usize row = m_idx + (tid & 31);
+			usize row = m_idx | (tid & 31);
 			usize swizzle = (tid & 7) << 4;
 			usize col_off = n_idx * sizeof(T);
 			u32 addr = _ptr + (row * ROW_BYTES) + (col_off ^ swizzle);
@@ -412,18 +412,20 @@ namespace b8 {
 			sm80::ldmatrix_8x8xu16_x4(
 				addr,
 				dst.v16x32[0].h16x16[0].v8x16[0].val,
-				dst.v16x32[1].h16x16[0].v8x16[0].val,
 				dst.v16x32[0].h16x16[0].v8x16[1].val,
+				dst.v16x32[1].h16x16[0].v8x16[0].val,
 				dst.v16x32[1].h16x16[0].v8x16[1].val
 			);
 
+			// This assumes not only that `m_ix` and `n_idx` are multiples of 32,
+			// but also the initial address `dst._ptr` needs to be a multiple of 32.
 			addr ^= 16;
 
 			sm80::ldmatrix_8x8xu16_x4(
 				addr,
 				dst.v16x32[0].h16x16[1].v8x16[0].val,
-				dst.v16x32[1].h16x16[1].v8x16[0].val,
 				dst.v16x32[0].h16x16[1].v8x16[1].val,
+				dst.v16x32[1].h16x16[1].v8x16[0].val,
 				dst.v16x32[1].h16x16[1].v8x16[1].val
 			);
 		}
