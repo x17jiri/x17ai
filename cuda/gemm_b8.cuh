@@ -12,7 +12,7 @@ namespace b8 {
 		const usize _GMEM_PRELOAD = 2
 	>
 	requires(sizeof(T) == 1)
-	struct MatrixLoader {
+	struct MatrixLoaderEvenOdd {
 		using Elem = T;
 
 		static constexpr usize GN = _GN;
@@ -27,7 +27,7 @@ namespace b8 {
 		static constexpr usize SMEM_BYTES = M * N * GMEM_PRELOAD * sizeof(T);
 
 		using GInput = GMatrixDynSize<T, GN>;
-		using SPreload = SMatrix<T, M * GMEM_PRELOAD, N>;
+		using SPreload = SMatrixEvenOdd<T, M * GMEM_PRELOAD, N>;
 
 		GInput gInput;
 		SPreload sPreload;
@@ -35,7 +35,7 @@ namespace b8 {
 		X17_DEVICE usize m_rows() const { return gInput.m_rows(); }
 		X17_DEVICE usize n_cols() const { return gInput.n_cols(); }
 
-		X17_DEVICE MatrixLoader(T *gmem_addr, usize m_rows):
+		X17_DEVICE MatrixLoaderEvenOdd(T *gmem_addr, usize m_rows):
 			gInput(gmem_addr, m_rows),
 			sPreload()
 		{}
@@ -50,25 +50,25 @@ namespace b8 {
 		/// modulo `GMEM_PRELOAD`.
 		template<const usize THREADS_PER_BLOCK>
 		X17_DEVICE void cp_async(usize step, usize m, usize n) {
-			auto slot = sPreload.template tile_m<M>(step % GMEM_PRELOAD);
 			GMatrix<T, M, N> src = gInput.template tile_m<M>(m).slice_n<N>(N*n);
-			slot.template cp_async_from<THREADS_PER_BLOCK>(
+			sPreload.template cp_async_from<THREADS_PER_BLOCK, M, N>(
 				threadIdx.x,
 				src,
-				0, 0, 0, 0
+				M * (step % GMEM_PRELOAD), 0,
+				0, 0
 			);
 		}
 
 		/// Load a 32x32 fragment at tile coordinates [m, n] from the SMEM ring buffer.
 		X17_DEVICE void load_fragment(usize step, usize m, usize n, Fragment_32x32<T> &frag) {
-			auto slot = sPreload.template tile_m<M>(step % GMEM_PRELOAD);
-			slot.tile_to_fragment(32*m, 32*n, frag);
+			usize first_row = M * (step % GMEM_PRELOAD);
+			sPreload.tile_to_fragment(first_row + 32*m, 32*n, frag);
 		}
 
 		/// Load a transposed 32x32 fragment at tile coordinates [m, n] from the SMEM ring buffer.
 		X17_DEVICE void load_fragment_trans(usize step, usize m, usize n, Fragment_32x32<T> &frag) {
-			auto slot = sPreload.template tile_m<M>(step % GMEM_PRELOAD);
-			slot.tile_to_fragment_trans(32*m, 32*n, frag);
+			usize first_row = M * (step % GMEM_PRELOAD);
+			sPreload.tile_to_fragment_trans(first_row + 32*m, 32*n, frag);
 		}
 	};
 
@@ -112,11 +112,11 @@ namespace b8 {
 
 	template<typename T, const usize GN>
 	requires(sizeof(T) == 1)
-	struct MatrixWriter {
+	struct MatrixWriterEvenOdd {
 		T *gC;
 		usize c_stride;
 
-		X17_DEVICE MatrixWriter(T *gC):
+		X17_DEVICE MatrixWriterEvenOdd(T *gC):
 			gC(gC),
 			c_stride(GN)
 		{}
@@ -128,47 +128,64 @@ namespace b8 {
 		) {
 			GMatrix<T, 32 * M_TILES, 32 * N_TILES> C(gC, c_stride);
 			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-				store(acc[mi], C, row + 32 * mi, col);
+				store_even_odd(acc[mi], C, row + 32 * mi, col);
 			}
 		}
 	};
 
 	template<const usize GN, const f64 SCALE>
-	struct FixedI8MatrixWriter: MatrixWriter<FixedI8, GN> {
+	struct FixedI8MatrixWriterEvenOdd: MatrixWriterEvenOdd<FixedI8, GN> {
 
-		X17_DEVICE FixedI8MatrixWriter(FixedI8 *gC):
-			MatrixWriter<FixedI8, GN>(gC)
+		X17_DEVICE FixedI8MatrixWriterEvenOdd(FixedI8 *gC):
+			MatrixWriterEvenOdd<FixedI8, GN>(gC)
 		{}
 
-		i8 conv_one(i32 inp) {
+		static X17_DEVICE i8 conv_one(i32 inp) {
 			f32 val_f = f32(inp) * f32(SCALE / FIXED_I8_SCALE);
 			i32 val_i = __float2int_rn(val_f);
-			i8 val = val_i < -127 || val_i > +127 ? -128 : val; // TODO - inefficient
+			i8 val = val_i < -127 || val_i > +127 ? -128 : val_i; // TODO - inefficient
 			return val;
 		}
 
-		void conv(b32::Fragment_16x16<i32> const &inp, Fragment_16x16<i8> &out) {
+		X17_DEVICE void conv(b32::Fragment_16x16<i32> const &inp, Fragment_16x16<i8> &out) {
 			union {
 				u32 value;
 				struct {
-					i8 top_0, top_1, bot_0, bot_1;
+					i8 even_0, even_1, odd_0, odd_1;
 				} packed;
 			} left, right;
 
-			left.top_0 = conv_one(inp.v8x16[0].h8x8[0].val0);
-			left.top_1 = conv_one(inp.v8x16[0].h8x8[0].val1);
-			left.bot_0 = conv_one(inp.v8x16[1].h8x8[0].val0);
-			left.bot_1 = conv_one(inp.v8x16[1].h8x8[0].val1);
+			left.packed.even_0 = conv_one(inp.v8x16[0].h8x8[0].val0);
+			left.packed.even_1 = conv_one(inp.v8x16[0].h8x8[0].val1);
+			left.packed.odd_0 = conv_one(inp.v8x16[1].h8x8[0].val0);
+			left.packed.odd_1 = conv_one(inp.v8x16[1].h8x8[0].val1);
 
-			right.top_0 = conv_one(inp.v8x16[0].h8x8[1].val0);
-			right.top_1 = conv_one(inp.v8x16[0].h8x8[1].val1);
-			right.bot_0 = conv_one(inp.v8x16[1].h8x8[1].val0);
-			right.bot_1 = conv_one(inp.v8x16[1].h8x8[1].val1);
+			right.packed.even_0 = conv_one(inp.v8x16[0].h8x8[1].val0);
+			right.packed.even_1 = conv_one(inp.v8x16[0].h8x8[1].val1);
+			right.packed.odd_0 = conv_one(inp.v8x16[1].h8x8[1].val0);
+			right.packed.odd_1 = conv_one(inp.v8x16[1].h8x8[1].val1);
 
-			// TODO - shuffle
+			usize tid = threadIdx.x;
+			u32 u0 = left.value;
+			u32 u1 = right.value;
+
+			u0 = shuffle_xor_sync(u0, 2);
+
+			u32 v0 = (tid & 2) == 0 ? u1 : u0;
+			u32 v1 = (tid & 2) == 0 ? u0 : u1;
+
+			v0 = shuffle_xor_sync(v0, 3);
+
+			u32 w0 = (tid & 1) == 0 ? v1 : v0;
+			u32 w1 = (tid & 1) == 0 ? v0 : v1;
+
+			w0 = shuffle_xor_sync(w0, 1);
+
+			out.v8x16[0].val = __byte_perm(w0, w1, 0x5410);
+			out.v8x16[1].val = __byte_perm(w0, w1, 0x7632);
 		}
 
-		void conv(b32::Fragment_32x32<i32> const &inp, Fragment_32x32<i8> &out) {
+		X17_DEVICE void conv(b32::Fragment_32x32<i32> const &inp, Fragment_32x32<i8> &out) {
 			X17_UNROLL for (usize j = 0; j < 2; ++j) {
 				X17_UNROLL for (usize i = 0; i < 2; ++i) {
 					conv(inp.v16x32[j].h16x16[i], out.v16x32[j].h16x16[i]);
@@ -189,7 +206,7 @@ namespace b8 {
 				}
 			}
 
-			MatrixWriter<FixedI8, GN>::write(row, col, t);
+			MatrixWriterEvenOdd<FixedI8, GN>::write(row, col, t);
 		}
 	};
 }
