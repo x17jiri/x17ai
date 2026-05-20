@@ -59,6 +59,8 @@ F8_DTYPE = getattr(torch, "float8_e4m3fn", None)
 def tensor_storage_dtype(file_name: str) -> torch.dtype:
 	if file_name.endswith("_f32.bin"):
 		return torch.float32
+	if file_name.endswith("_i8.bin"):
+		return torch.int8
 	if file_name.endswith("_f8.bin"):
 		if F8_DTYPE is None:
 			raise RuntimeError("This PyTorch build does not support float8_e4m3fn")
@@ -70,6 +72,8 @@ def tensor_storage_name(dtype: torch.dtype) -> str:
 		return "float32"
 	if dtype == torch.bfloat16:
 		return "bfloat16"
+	if dtype == torch.int8:
+		return "int8"
 	if F8_DTYPE is not None and dtype == F8_DTYPE:
 		return "float8_e4m3fn"
 	raise ValueError(f"Unsupported tensor storage dtype: {dtype}")
@@ -78,6 +82,9 @@ def load_tensor_with_dtype(path: Path, rows: int, cols: int, dtype: torch.dtype)
 	raw = path.read_bytes()
 	if dtype == torch.float32:
 		data = torch.frombuffer(bytearray(raw), dtype=torch.float32)
+		return data.reshape(rows, cols).to(my_device)
+	if dtype == torch.int8:
+		data = torch.frombuffer(bytearray(raw), dtype=torch.int8)
 		return data.reshape(rows, cols).to(my_device)
 	if dtype == torch.bfloat16:
 		data = torch.frombuffer(bytearray(raw), dtype=torch.int16)
@@ -100,6 +107,13 @@ def store_tensor_with_dtype(
 		stored = data.to(torch.float32)
 		raw = stored.numpy().tobytes()
 		warn_tensor = stored
+	elif dtype == torch.int8:
+		if data.dtype.is_floating_point:
+			stored = torch.clamp(torch.round(data), -128, 127).to(torch.int8)
+		else:
+			stored = torch.clamp(data.to(torch.int32), -128, 127).to(torch.int8)
+		raw = stored.numpy().tobytes()
+		warn_tensor = stored.to(torch.float32)
 	elif dtype == torch.bfloat16:
 		stored = data.to(torch.bfloat16)
 		raw = stored.view(torch.int16).numpy().tobytes()
@@ -130,6 +144,10 @@ def load_f8_tensor(tensor: str, rows: int, cols: int) -> torch.Tensor:
 		raise RuntimeError("This PyTorch build does not support float8_e4m3fn")
 	path = tensor_path(tensor)
 	return load_tensor_with_dtype(path, rows, cols, F8_DTYPE)
+
+def load_i8_tensor(tensor: str, rows: int, cols: int) -> torch.Tensor:
+	path = tensor_path(tensor)
+	return load_tensor_with_dtype(path, rows, cols, torch.int8)
 
 def variance_path(path: Path) -> Path:
 	return path.with_name(f"{path.name}.var")
@@ -180,3 +198,6 @@ def store_f8_tensor(tensor: torch.Tensor, file_name: str, expected_variance: flo
 	if F8_DTYPE is None:
 		raise RuntimeError("This PyTorch build does not support float8_e4m3fn")
 	store_tensor_with_dtype(tensor, file_name, F8_DTYPE, expected_variance)
+
+def store_i8_tensor(tensor: torch.Tensor, file_name: str, expected_variance: float | None = None) -> None:
+	store_tensor_with_dtype(tensor, file_name, torch.int8, expected_variance)

@@ -77,6 +77,12 @@ from block_utils import *
 def quantize_(tensor: torch.Tensor) -> torch.Tensor:
 	return tensor.to(torch.bfloat16).to(torch.float32)
 
+def quantize_i8(tensor: torch.Tensor) -> torch.Tensor:
+	return torch.round(torch.clamp(tensor * 8.0, -127.0, +127.0)).to(torch.int8)
+
+def unquantize_i8(tensor: torch.Tensor) -> torch.Tensor:
+	return tensor.to(torch.float32) / 8.0
+
 def new_randn(*shape, generator):
 	return torch.randn(shape, generator=generator)
 
@@ -99,6 +105,7 @@ def create_inputs() -> None:
 	f_weights = new_randn(F_PROJ_OUTPUTS, SPARSE_FAN_IN, generator=generator)
 	w_attn = new_randn(D_MODEL, ATTN_WIDTH, generator=generator)
 	w_ffn = new_randn(D_MODEL, F_WIDTH, generator=generator)
+	ffn_f_i8 = new_randn(N_INPUTS, F_WIDTH, generator=generator)
 	sink_k = new_randn(N_HEADS, HEAD_DIM, generator=generator)
 	sinks_v = new_randn(N_HEADS, HEAD_DIM, generator=generator)
 	d_out = quantize_(new_randn(N_INPUTS, D_MODEL, generator=grad_generator))
@@ -115,6 +122,8 @@ def create_inputs() -> None:
 	store_tensor(f_weights, "ffn_f_weights.bin", expected_variance=1.0)
 	store_tensor(w_attn, "w_attn.bin", expected_variance=1.0)
 	store_tensor(w_ffn, "ffn_y_weights.bin", expected_variance=1.0)
+	store_tensor(ffn_f_i8, "ffn_f_i8.bin", expected_variance=1.0)
+	store_tensor(w_ffn, "ffn_d_y_weights_i8.bin", expected_variance=1.0)
 	store_tensor(w_ffn, "ffn_y_weights_f8.bin", expected_variance=1.0)
 	store_tensor(d_out, "d_out.bin", expected_variance=1.0)
 	store_tensor(qk_norm_scales, "qk_norm_scales.bin", expected_variance=0.0)
@@ -160,6 +169,15 @@ def ffn_y_fwd(f: torch.Tensor, w_ffn: torch.Tensor) -> torch.Tensor:
 	f = quantize_(f)
 	w_ffn = quantize_(w_ffn)
 	return torch.matmul(f, w_ffn.transpose(0, 1))
+
+def ffn_y_fwd_i8(f_i8: torch.Tensor, w_ffn_i8: torch.Tensor) -> torch.Tensor:
+	assert f_i8.dtype == torch.int8
+	assert w_ffn_i8.dtype == torch.int8
+
+	f = unquantize_i8(f_i8)
+	w_ffn = unquantize_i8(w_ffn_i8)
+	y = torch.matmul(f, w_ffn.transpose(0, 1))
+	return quantize_i8(y)
 
 #---------------------------------------------------------------------------------------------------
 
@@ -332,6 +350,8 @@ def run_ffn() -> None:
 	x = load_tensor("inputs_l2.bin", N_INPUTS, D_MODEL)
 	f_weights = load_tensor("ffn_f_weights.bin", F_PROJ_OUTPUTS, SPARSE_FAN_IN)
 	y_weights = load_tensor("ffn_y_weights.bin", D_MODEL, F_WIDTH)
+	f_i8 = load_i8_tensor("ffn_f_i8.bin", N_INPUTS, F_WIDTH)
+	y_weights_i8 = load_i8_tensor("ffn_d_y_weights_i8.bin", D_MODEL, F_WIDTH)
 	d_y = load_tensor("d_out.bin", N_INPUTS, D_MODEL)
 
 	x.requires_grad_(True)
@@ -354,6 +374,7 @@ def run_ffn() -> None:
 	f.retain_grad()
 
 	y = ffn_y_fwd(f, y_weights)
+	y_i8 = ffn_y_fwd_i8(f_i8, y_weights_i8)
 
 	torch.autograd.backward(y, d_y)
 	assert f.grad is not None
@@ -362,6 +383,7 @@ def run_ffn() -> None:
 	assert x.grad is not None
 
 	store_tensor(f, "ffn_f.bin", expected_variance=1.0 / F_WIDTH)
+	store_tensor(y_i8, "ffn_y_i8.bin")
 	store_tensor(backvec, "ffn_f_backvec.bin")
 	store_tensor(y, "ffn_y.bin", expected_variance=1.0)
 	store_tensor(f.grad, "ffn_d_f.bin")

@@ -122,6 +122,24 @@ std::vector<f32> load_f32_tensor(std::string const &filename, usize rows, usize 
 	return data;
 }
 
+std::vector<i8> load_i8_tensor(std::string const &filename, usize rows, usize cols) {
+	printf("Loading input from %s\n", filename.c_str());
+	std::vector<i8> data(rows * cols);
+	std::ifstream a_in(filename, std::ios::binary);
+	if (!a_in) {
+		printf("Failed to open %s\n", filename.c_str());
+		return {};
+	}
+	if (!a_in.read(
+		reinterpret_cast<char *>(data.data()),
+		static_cast<std::streamsize>(data.size() * sizeof(i8))
+	)) {
+		printf("Failed to read %s as [%u, %u]\n", filename.c_str(), rows, cols);
+		return {};
+	}
+	return data;
+}
+
 void store_tensor(
 	std::string const &filename,
 	std::vector<bf16> const &data,
@@ -135,6 +153,25 @@ void store_tensor(
 	if (!out.write(
 		reinterpret_cast<const char *>(data.data()),
 		static_cast<std::streamsize>(data.size() * sizeof(bf16))
+	)) {
+		printf("Failed to write data to %s\n", filename.c_str());
+	}
+	printf("Wrote output to %s\n", filename.c_str());
+}
+
+void store_i8_tensor(
+	std::string const &filename,
+	std::vector<i8> const &data,
+	[[maybe_unused]] usize rows, [[maybe_unused]] usize cols
+) {
+	std::ofstream out(filename, std::ios::binary);
+	if (!out) {
+		printf("Failed to open %s for writing\n", filename.c_str());
+		return;
+	}
+	if (!out.write(
+		reinterpret_cast<const char *>(data.data()),
+		static_cast<std::streamsize>(data.size() * sizeof(i8))
 	)) {
 		printf("Failed to write data to %s\n", filename.c_str());
 	}
