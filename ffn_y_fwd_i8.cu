@@ -9,25 +9,25 @@
 using namespace config;
 
 namespace Ffn_y_fwd {
-	using WeightLoader =
+	using InputLoader =
 		b8::MatrixLoader<
 			b8::FixedI8,
 			F_WIDTH,
-			128, 128
+			64, 128
 		>;
 
-	using InputLoader =
+		using WeightLoader =
 		b8::MatrixTransLoader<
-			b8::MatrixLoaderEvenOdd<
+			b8::MatrixLoader<
 				b8::FixedI8,
 				F_WIDTH,
-				64, 128
+				128, 128
 			>
 		>;
 
-	using Writer = b8::FixedI8MatrixWriterEvenOdd<D_MODEL, 1.0>;
+	using Writer = b8::FixedI8MatrixWriter<D_MODEL, math::constexpr_inv_sqrt(F_WIDTH)>;
 
-	using Kernel = b8::Gemm<WeightLoader, InputLoader, Writer>;
+	using Kernel = b8::Gemm<InputLoader, WeightLoader, Writer>;
 
 	X17_KERNEL(Kernel::THREADS_PER_BLOCK)
 	void kernel(
@@ -35,8 +35,8 @@ namespace Ffn_y_fwd {
 		b8::FixedI8 *inp, usize n_inputs,
 		b8::FixedI8 *out
 	) {
-		auto a = WeightLoader(w, D_MODEL);
-		auto b = InputLoader(inp, n_inputs);
+		auto a = InputLoader(inp, n_inputs);
+		auto b = WeightLoader(w, D_MODEL);
 		auto o = Writer(out);
 		Kernel().run(a, b, o);
 	}
@@ -50,16 +50,16 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	if (seq_len % Kernel::N_PER_BLOCK != 0) {
-		printf("Expected n_inputs %% %u == 0\n", Kernel::N_PER_BLOCK);
+	if (seq_len % Kernel::M_PER_BLOCK != 0) {
+		printf("Expected n_inputs %% %u == 0\n", Kernel::M_PER_BLOCK);
 		return 1;
 	}
-	if (D_MODEL % Kernel::M_PER_BLOCK != 0) {
-		printf("Expected d_model %% %u == 0\n", Kernel::M_PER_BLOCK);
+	if (D_MODEL % Kernel::N_PER_BLOCK != 0) {
+		printf("Expected d_model %% %u == 0\n", Kernel::N_PER_BLOCK);
 		return 1;
 	}
 
-	std::vector<b8::FixedI8> h_weights = load_i8_tensor(torch_tensor_path("ffn_d_y_weights_i8.bin"), D_MODEL, F_WIDTH);
+	std::vector<b8::FixedI8> h_weights = load_i8_tensor(torch_tensor_path("ffn_y_weights_i8.bin"), D_MODEL, F_WIDTH);
 	std::vector<b8::FixedI8> h_f = load_i8_tensor(tensor_path(cli.input_dir, "ffn_f_i8.bin"), seq_len, F_WIDTH);
 	if (h_weights.empty() || h_f.empty()) {
 		return 1;
@@ -81,7 +81,7 @@ int main(int argc, char *argv[]) {
 	cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, Kernel::SMEM_BYTES);
 	cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-	dim3 grid(D_MODEL / Kernel::M_PER_BLOCK, seq_len / Kernel::N_PER_BLOCK);
+	dim3 grid(seq_len / Kernel::M_PER_BLOCK, D_MODEL / Kernel::N_PER_BLOCK);
 
 	int warmup = 50;
 	for (int i = 0; i < warmup; ++i) {

@@ -46,8 +46,6 @@ namespace b8 {
 
 	/// Stores 4 horizontally-adjacent 8x16 fragments (64 cols × 8 rows) to GMEM.
 	/// Uses shuffle_4x4 so each thread holds 16 contiguous bytes, then a single 128-bit store.
-	/// Rows are written at stride 2 starting from m_idx, so callers use m_idx + 0 for even rows
-	/// and m_idx + 1 for odd rows of a 16-row block.
 	template<typename U, const usize M, const usize N>
 	requires(sizeof(U) == 1)
 	X17_DEVICE void store_1x4_8x16(
@@ -60,7 +58,7 @@ namespace b8 {
 		usize tid = threadIdx.x % WARP_SIZE;
 		u8 *base = reinterpret_cast<u8 *>(dst._ptr);
 		usize stride = dst.stride_bytes();
-		usize row = m_idx + ((tid / 2) & (((WARP_SIZE - 1) / 2) ^ 1));
+		usize row = m_idx + (tid / 4);
 		usize col_off = n_idx * usize(sizeof(U)) + (tid % 4) * 16;
 
 		*reinterpret_cast<uint4 *>(base + row * stride + col_off) = make_uint4(f0, f1, f2, f3);
@@ -81,7 +79,7 @@ namespace b8 {
 		usize tid = threadIdx.x % WARP_SIZE;
 		u8 *base = reinterpret_cast<u8 *>(dst._ptr);
 		usize stride = dst.stride_bytes();
-		usize row = m_idx + (tid / 2);
+		usize row = m_idx + (tid / 4) + (tid & 2 ? 8 : 0);
 		usize col_off = n_idx * usize(sizeof(U)) + (tid % 2) * 16;
 
 		*reinterpret_cast<uint4 *>(base + row * stride + col_off) = make_uint4(f0, f1, f2, f3);
@@ -89,7 +87,7 @@ namespace b8 {
 
 	template<typename U, typename T, const usize M, const usize N, const usize K>
 	requires(sizeof(U) == 1)
-	X17_DEVICE void store_even_odd(
+	X17_DEVICE void store(
 		Fragment_32x32<T> const (&tiles)[K],
 		GMatrix<U, M, N> const &dst,
 		usize m_idx, usize n_idx
@@ -105,7 +103,7 @@ namespace b8 {
 					tiles[i+1].v16x32[0].h16x16[1].v8x16[0].val
 				);
 				store_1x4_8x16(
-					dst, m_idx + 1, n_idx + i*32,
+					dst, m_idx + 8, n_idx + i*32,
 					tiles[i+0].v16x32[0].h16x16[0].v8x16[1].val,
 					tiles[i+0].v16x32[0].h16x16[1].v8x16[1].val,
 					tiles[i+1].v16x32[0].h16x16[0].v8x16[1].val,
@@ -119,7 +117,7 @@ namespace b8 {
 					tiles[i+1].v16x32[1].h16x16[1].v8x16[0].val
 				);
 				store_1x4_8x16(
-					dst, m_idx + 17, n_idx + i*32,
+					dst, m_idx + 24, n_idx + i*32,
 					tiles[i+0].v16x32[1].h16x16[0].v8x16[1].val,
 					tiles[i+0].v16x32[1].h16x16[1].v8x16[1].val,
 					tiles[i+1].v16x32[1].h16x16[0].v8x16[1].val,
@@ -173,15 +171,15 @@ namespace b8 {
 		template<
 			const usize THREADS_PER_BLOCK,
 			const usize HEIGHT, const usize WIDTH,
-			const usize GM, const usize GN
+			const usize GN
 		>
 		requires(
-			WIDTH <= GN && HEIGHT <= GM
-			&& WIDTH <= N && HEIGHT <= M
+			WIDTH <= GN && WIDTH <= N
+			&& HEIGHT <= M
 		)
 		X17_DEVICE void cp_async_from(
 			usize tid,
-			GMatrix<T, GM, GN> src,
+			GMatrixDynSize<T, GN> src,
 			usize src_row,
 			usize src_col,
 			usize dst_row,
@@ -332,15 +330,15 @@ namespace b8 {
 		template<
 			const usize THREADS_PER_BLOCK,
 			const usize HEIGHT, const usize WIDTH,
-			const usize GM, const usize GN
+			const usize GN
 		>
 		requires(
-			WIDTH <= GN && HEIGHT <= GM
-			&& WIDTH <= N && HEIGHT <= M
+			WIDTH <= GN && WIDTH <= N
+			&& HEIGHT <= M
 		)
 		X17_DEVICE void cp_async_from(
 			usize tid,
-			GMatrix<T, GM, GN> src,
+			GMatrixDynSize<T, GN> src,
 			usize src_row,
 			usize src_col,
 			usize dst_row,
@@ -417,7 +415,7 @@ namespace b8 {
 				dst.v16x32[1].h16x16[0].v8x16[1].val
 			);
 
-			// This assumes not only that `m_ix` and `n_idx` are multiples of 32,
+			// This assumes not only that `m_idx` and `n_idx` are multiples of 32,
 			// but also the initial address `dst._ptr` needs to be a multiple of 32.
 			addr ^= 16;
 

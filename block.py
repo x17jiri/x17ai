@@ -75,13 +75,7 @@ from block_utils import *
 #---------------------------------------------------------------------------------------------------
 
 def quantize_(tensor: torch.Tensor) -> torch.Tensor:
-	return tensor.to(torch.bfloat16).to(torch.float32)
-
-def quantize_i8(tensor: torch.Tensor) -> torch.Tensor:
-	return torch.round(torch.clamp(tensor * 8.0, -127.0, +127.0)).to(torch.int8)
-
-def unquantize_i8(tensor: torch.Tensor) -> torch.Tensor:
-	return tensor.to(torch.float32) / 8.0
+	return tensor.to(torch.bfloat16).to(my_dtype)
 
 def new_randn(*shape, generator):
 	return torch.randn(shape, generator=generator)
@@ -123,7 +117,7 @@ def create_inputs() -> None:
 	store_tensor(w_attn, "w_attn.bin", expected_variance=1.0)
 	store_tensor(w_ffn, "ffn_y_weights.bin", expected_variance=1.0)
 	store_tensor(ffn_f_i8, "ffn_f_i8.bin", expected_variance=1.0)
-	store_tensor(w_ffn, "ffn_d_y_weights_i8.bin", expected_variance=1.0)
+	store_tensor(w_ffn, "ffn_y_weights_i8.bin", expected_variance=1.0)
 	store_tensor(w_ffn, "ffn_y_weights_f8.bin", expected_variance=1.0)
 	store_tensor(d_out, "d_out.bin", expected_variance=1.0)
 	store_tensor(qk_norm_scales, "qk_norm_scales.bin", expected_variance=0.0)
@@ -166,18 +160,9 @@ def ffn_f_fwd(inputs: torch.Tensor, f_weights: torch.Tensor) -> torch.Tensor:
 	return gelu(gate) * lin * OUT_SCALE
 
 def ffn_y_fwd(f: torch.Tensor, w_ffn: torch.Tensor) -> torch.Tensor:
-	f = quantize_(f)
-	w_ffn = quantize_(w_ffn)
-	return torch.matmul(f, w_ffn.transpose(0, 1))
-
-def ffn_y_fwd_i8(f_i8: torch.Tensor, w_ffn_i8: torch.Tensor) -> torch.Tensor:
-	assert f_i8.dtype == torch.int8
-	assert w_ffn_i8.dtype == torch.int8
-
-	f = unquantize_i8(f_i8)
-	w_ffn = unquantize_i8(w_ffn_i8)
-	y = torch.matmul(f, w_ffn.transpose(0, 1))
-	return quantize_i8(y)
+	FAN_IN = torch.tensor(w_ffn.shape[1])
+	SCALE = torch.rsqrt(FAN_IN);
+	return torch.matmul(f, w_ffn.transpose(0, 1)) * SCALE
 
 #---------------------------------------------------------------------------------------------------
 
@@ -235,7 +220,7 @@ def ssmax_n(q_len, window_size=0):
 	When window_size == 0 (disabled), min is a no-op: n[i] = i + 1 + e_approx.
 	"""
 	E_APPROX_PLUS_1 = 4.0
-	visible_real_tokens = torch.arange(q_len, dtype=torch.float32)
+	visible_real_tokens = torch.arange(q_len, dtype=my_dtype)
 	if window_size > 0:
 		n = torch.clamp(visible_real_tokens, max=float(window_size)) + E_APPROX_PLUS_1
 	else:
@@ -350,8 +335,8 @@ def run_ffn() -> None:
 	x = load_tensor("inputs_l2.bin", N_INPUTS, D_MODEL)
 	f_weights = load_tensor("ffn_f_weights.bin", F_PROJ_OUTPUTS, SPARSE_FAN_IN)
 	y_weights = load_tensor("ffn_y_weights.bin", D_MODEL, F_WIDTH)
-	f_i8 = load_i8_tensor("ffn_f_i8.bin", N_INPUTS, F_WIDTH)
-	y_weights_i8 = load_i8_tensor("ffn_d_y_weights_i8.bin", D_MODEL, F_WIDTH)
+	f_i8 = load_tensor("ffn_f_i8.bin", N_INPUTS, F_WIDTH)
+	y_weights_i8 = load_tensor("ffn_y_weights_i8.bin", D_MODEL, F_WIDTH)
 	d_y = load_tensor("d_out.bin", N_INPUTS, D_MODEL)
 
 	x.requires_grad_(True)
@@ -373,23 +358,28 @@ def run_ffn() -> None:
 	f = ffn_f_fwd(x, f_full_weights)
 	f.retain_grad()
 
-	y = ffn_y_fwd(f, y_weights)
-	y_i8 = ffn_y_fwd_i8(f_i8, y_weights_i8)
+	print("f_i8 = ", f_i8)
+	print("y_weights_i8 = ", y_weights_i8)
 
-	torch.autograd.backward(y, d_y)
-	assert f.grad is not None
-	assert y_weights.grad is not None
-	assert f_weights.grad is not None
-	assert x.grad is not None
+#	y = ffn_y_fwd(f, y_weights)
+	y_i8 = ffn_y_fwd(f_i8, y_weights_i8)
 
-	store_tensor(f, "ffn_f.bin", expected_variance=1.0 / F_WIDTH)
+#	torch.autograd.backward(y, d_y)
+#	assert f.grad is not None
+#	assert y_weights.grad is not None
+#	assert f_weights.grad is not None
+#	assert x.grad is not None
+
+#	store_tensor(f, "ffn_f.bin", expected_variance=1.0 / F_WIDTH)
 	store_tensor(y_i8, "ffn_y_i8.bin")
-	store_tensor(backvec, "ffn_f_backvec.bin")
-	store_tensor(y, "ffn_y.bin", expected_variance=1.0)
-	store_tensor(f.grad, "ffn_d_f.bin")
-	store_tensor(y_weights.grad, "ffn_d_y_weights.bin")
-	store_tensor(f_weights.grad, "ffn_d_f_weights.bin")
-	store_tensor(x.grad, "ffn_d_x.bin")
+#	store_tensor(backvec, "ffn_f_backvec.bin")
+#	store_tensor(y, "ffn_y.bin", expected_variance=1.0)
+#	store_tensor(f.grad, "ffn_d_f.bin")
+#	store_tensor(y_weights.grad, "ffn_d_y_weights.bin")
+#	store_tensor(f_weights.grad, "ffn_d_f_weights.bin")
+#	store_tensor(x.grad, "ffn_d_x.bin")
+
+	print("y_i8 = ", y_i8)
 
 #---------------------------------------------------------------------------------------------------
 

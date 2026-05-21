@@ -788,29 +788,23 @@ struct GMatrix {
 template<typename T, const usize N>
 struct GMatrixDynSize {
 	T *_ptr;
-	usize _m;
 	StrideBytes _stride_bytes;
 
-	X17_HOST_DEVICE constexpr GMatrixDynSize(T *ptr, usize m):
+	X17_HOST_DEVICE constexpr GMatrixDynSize(T *ptr):
 		_ptr(ptr),
-		_m(m),
 		_stride_bytes(N * sizeof(T))
 	{}
-	X17_HOST_DEVICE constexpr GMatrixDynSize(T *ptr, usize m, usize stride):
+	X17_HOST_DEVICE constexpr GMatrixDynSize(T *ptr, usize stride):
 		_ptr(ptr),
-		_m(m),
 		_stride_bytes(StrideBytes(stride * sizeof(T)))
 	{}
-	X17_HOST_DEVICE constexpr GMatrixDynSize(T *ptr, usize m, StrideBytes stride_bytes):
+	X17_HOST_DEVICE constexpr GMatrixDynSize(T *ptr, StrideBytes stride_bytes):
 		_ptr(ptr),
-		_m(m),
 		_stride_bytes(stride_bytes)
 	{}
 
-	X17_HOST_DEVICE constexpr usize m_rows() const { return _m; }
 	X17_HOST_DEVICE constexpr usize n_cols() const { return N; }
 	X17_HOST_DEVICE constexpr usize stride_bytes() const { return _stride_bytes.value; }
-	X17_HOST_DEVICE constexpr usize elems() const { return _m * N; }
 
 	template<const usize TILE_M>
 	X17_HOST_DEVICE constexpr GMatrix<T, TILE_M, N> tile_m(size_t tile_idx) const {
@@ -825,7 +819,7 @@ struct GMatrixDynSize {
 
 	template<const usize NEW_N>
 	X17_HOST_DEVICE constexpr GMatrixDynSize<T, NEW_N> slice_n(usize col_offset) const {
-		return GMatrixDynSize<T, NEW_N>{_ptr + col_offset, _m, _stride_bytes};
+		return GMatrixDynSize<T, NEW_N>{_ptr + col_offset, _stride_bytes};
 	}
 };
 

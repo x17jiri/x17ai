@@ -9,7 +9,8 @@ TENSOR_DIR = ROOT / "tmp" / "block_torch"
 
 my_device = torch.device("cpu") # or torch.device("cuda")
 torch.set_default_device(my_device)
-torch.set_default_dtype(torch.float32)
+my_dtype = torch.float64
+torch.set_default_dtype(my_dtype)
 
 config = load_jsonc(CONFIG_PATH)
 
@@ -82,16 +83,18 @@ def load_tensor_with_dtype(path: Path, rows: int, cols: int, dtype: torch.dtype)
 	raw = path.read_bytes()
 	if dtype == torch.float32:
 		data = torch.frombuffer(bytearray(raw), dtype=torch.float32)
-		return data.reshape(rows, cols).to(my_device)
+		return data.reshape(rows, cols).to(my_device).to(my_dtype)
 	if dtype == torch.int8:
 		data = torch.frombuffer(bytearray(raw), dtype=torch.int8)
-		return data.reshape(rows, cols).to(my_device)
+		scaled = data.to(torch.float32) / 8.0
+		data = torch.where(data == -128, torch.full_like(scaled, math.nan), scaled)
+		return data.reshape(rows, cols).to(my_device).to(my_dtype)
 	if dtype == torch.bfloat16:
 		data = torch.frombuffer(bytearray(raw), dtype=torch.int16)
-		return data.view(torch.bfloat16).reshape(rows, cols).to(my_device).to(torch.float32)
+		return data.view(torch.bfloat16).reshape(rows, cols).to(my_device).to(my_dtype)
 	if F8_DTYPE is not None and dtype == F8_DTYPE:
 		data = torch.frombuffer(bytearray(raw), dtype=torch.uint8)
-		return data.view(F8_DTYPE).reshape(rows, cols).to(my_device).to(torch.float32)
+		return data.view(F8_DTYPE).reshape(rows, cols).to(my_device).to(my_dtype)
 	raise ValueError(f"Unsupported tensor storage dtype: {dtype}")
 
 def store_tensor_with_dtype(
@@ -108,12 +111,9 @@ def store_tensor_with_dtype(
 		raw = stored.numpy().tobytes()
 		warn_tensor = stored
 	elif dtype == torch.int8:
-		if data.dtype.is_floating_point:
-			stored = torch.clamp(torch.round(data), -128, 127).to(torch.int8)
-		else:
-			stored = torch.clamp(data.to(torch.int32), -128, 127).to(torch.int8)
+		warn_tensor = data.to(data.to(torch.float32))
+		stored = torch.clamp(torch.round(warn_tensor * 8.0), -127.0, +127.0).to(torch.int8)
 		raw = stored.numpy().tobytes()
-		warn_tensor = stored.to(torch.float32)
 	elif dtype == torch.bfloat16:
 		stored = data.to(torch.bfloat16)
 		raw = stored.view(torch.int16).numpy().tobytes()
@@ -159,7 +159,7 @@ VARIANCE_WARNING_ZERO_ABS = 1e-6
 def warn_if_variance_is_unexpected(path: Path, tensor: torch.Tensor, expected_variance: float | None) -> None:
 	if expected_variance is None:
 		return
-	actual_variance = tensor.to(torch.float32).var(unbiased=False).item()
+	actual_variance = tensor.to(torch.float64).var(unbiased=False).item()
 	if expected_variance == 0.0:
 		if abs(actual_variance) > VARIANCE_WARNING_ZERO_ABS:
 			print(

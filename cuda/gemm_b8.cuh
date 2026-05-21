@@ -29,14 +29,16 @@ namespace b8 {
 		using GInput = GMatrixDynSize<T, GN>;
 		using SPreload = SMatrix<T, M * GMEM_PRELOAD, N>;
 
+		usize _m_rows;
 		GInput gInput;
 		SPreload sPreload;
 
-		X17_DEVICE usize m_rows() const { return gInput.m_rows(); }
-		X17_DEVICE usize n_cols() const { return gInput.n_cols(); }
+		X17_DEVICE usize m_rows() const { return _m_rows; }
+		X17_DEVICE usize n_cols() const { return GN; }
 
 		X17_DEVICE MatrixLoader(T *gmem_addr, usize m_rows):
-			gInput(gmem_addr, m_rows),
+			_m_rows(m_rows),
+			gInput(gmem_addr),
 			sPreload()
 		{}
 
@@ -50,11 +52,10 @@ namespace b8 {
 		/// modulo `GMEM_PRELOAD`.
 		template<const usize THREADS_PER_BLOCK>
 		X17_DEVICE void cp_async(usize step, usize m, usize n) {
-			GMatrix<T, M, N> src = gInput.template tile_m<M>(m).slice_n<N>(N*n);
 			sPreload.template cp_async_from<THREADS_PER_BLOCK, M, N>(
 				threadIdx.x,
-				src,
-				0, 0,
+				gInput,
+				M * m, N * n,
 				M * (step % GMEM_PRELOAD), 0
 			);
 		}
@@ -90,14 +91,16 @@ namespace b8 {
 		using GInput = GMatrixDynSize<T, GN>;
 		using SPreload = SMatrixEvenOdd<T, M * GMEM_PRELOAD, N>;
 
+		usize _m_rows;
 		GInput gInput;
 		SPreload sPreload;
 
-		X17_DEVICE usize m_rows() const { return gInput.m_rows(); }
-		X17_DEVICE usize n_cols() const { return gInput.n_cols(); }
+		X17_DEVICE usize m_rows() const { return _m_rows; }
+		X17_DEVICE usize n_cols() const { return GN; }
 
 		X17_DEVICE MatrixLoaderEvenOdd(T *gmem_addr, usize m_rows):
-			gInput(gmem_addr, m_rows),
+			_m_rows(m_rows),
+			gInput(gmem_addr),
 			sPreload()
 		{}
 
@@ -111,11 +114,10 @@ namespace b8 {
 		/// modulo `GMEM_PRELOAD`.
 		template<const usize THREADS_PER_BLOCK>
 		X17_DEVICE void cp_async(usize step, usize m, usize n) {
-			GMatrix<T, M, N> src = gInput.template tile_m<M>(m).slice_n<N>(N*n);
 			sPreload.template cp_async_from<THREADS_PER_BLOCK, M, N>(
 				threadIdx.x,
-				src,
-				0, 0,
+				gInput,
+				M * m, N * n,
 				M * (step % GMEM_PRELOAD), 0
 			);
 		}
@@ -173,11 +175,11 @@ namespace b8 {
 
 	template<typename T, const usize GN>
 	requires(sizeof(T) == 1)
-	struct MatrixWriterEvenOdd {
+	struct MatrixWriter {
 		T *gC;
 		usize c_stride;
 
-		X17_DEVICE MatrixWriterEvenOdd(T *gC):
+		X17_DEVICE MatrixWriter(T *gC):
 			gC(gC),
 			c_stride(GN)
 		{}
@@ -189,16 +191,16 @@ namespace b8 {
 		) {
 			GMatrix<T, 32 * M_TILES, 32 * N_TILES> C(gC, c_stride);
 			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-				store_even_odd(acc[mi], C, row + 32 * mi, col);
+				store(acc[mi], C, row + 32 * mi, col);
 			}
 		}
 	};
 
 	template<const usize GN, const f64 SCALE>
-	struct FixedI8MatrixWriterEvenOdd: MatrixWriterEvenOdd<FixedI8, GN> {
+	struct FixedI8MatrixWriter: MatrixWriter<FixedI8, GN> {
 
-		X17_DEVICE FixedI8MatrixWriterEvenOdd(FixedI8 *gC):
-			MatrixWriterEvenOdd<FixedI8, GN>(gC)
+		X17_DEVICE FixedI8MatrixWriter(FixedI8 *gC):
+			MatrixWriter<FixedI8, GN>(gC)
 		{}
 
 		static X17_DEVICE i8 conv_one(i32 inp) {
@@ -266,7 +268,7 @@ namespace b8 {
 				}
 			}
 
-			MatrixWriterEvenOdd<FixedI8, GN>::write(row, col, t);
+			MatrixWriter<FixedI8, GN>::write(row, col, t);
 		}
 	};
 
@@ -326,16 +328,15 @@ namespace b8 {
 				cp_async_commit();
 			}
 
-			constexpr usize K_PART = K_TILES / 2;
-			Fragment_32x32<FixedI8> rA[M_TILES][K_PART];
-			Fragment_32x32<FixedI8> rBT[K_PART][N_TILES];
-			b32::Fragment_32x32<i32> acc[N_TILES][M_TILES];
+			Fragment_32x32<FixedI8> rA[M_TILES][K_TILES];
+			Fragment_32x32<FixedI8> rBT[K_TILES][N_TILES];
+			b32::Fragment_32x32<i32> acc[M_TILES][N_TILES];
 			zero_(acc);
 
 			cp_async_wait<GMEM_PRELOAD - 1>();
 			sync_threads();
 
-			X17_UNROLL for (usize ki = 0; ki < K_PART; ++ki) {
+			X17_UNROLL for (usize ki = 0; ki < K_TILES; ++ki) {
 				X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
 					A.load_fragment(0, warp_m * M_TILES + mi, ki, rA[mi][ki]);
 				}
@@ -345,18 +346,6 @@ namespace b8 {
 			}
 
 			for (usize k_step = 0; k_step < K_ITERS; ++k_step) {
-				X17_UNROLL for (usize ki = 0; ki < K_PART; ++ki) {
-					X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-						X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-							mma_a_bt(rBT[ki][ni], rA[mi][ki], acc[ni][mi]);
-						}
-						A.load_fragment(k_step, warp_m * M_TILES + mi, 1*K_PART + ki, rA[mi][ki]);
-					}
-					X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-						B.load_fragment_trans(k_step, 1*K_PART + ki, warp_n * N_TILES + ni, rBT[ki][ni]);
-					}
-				}
-
 				{ // Get more data from GMEM
 					cp_async_wait<GMEM_PRELOAD - 2>();
 					sync_threads();
@@ -369,10 +358,10 @@ namespace b8 {
 					cp_async_commit();
 				}
 
-				X17_UNROLL for (usize ki = 0; ki < K_PART; ++ki) {
+				X17_UNROLL for (usize ki = 0; ki < K_TILES; ++ki) {
 					X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
 						X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-							mma_a_bt(rBT[ki][ni], rA[mi][ki], acc[ni][mi]);
+							mma_a_bt(rA[mi][ki], rBT[ki][ni], acc[mi][ni]);
 						}
 						A.load_fragment(k_step + 1, warp_m * M_TILES + mi, ki, rA[mi][ki]);
 					}
@@ -383,8 +372,8 @@ namespace b8 {
 			}
 
 			C.write(
-				block_n * N_PER_BLOCK + warp_n * N_PER_WARP,
 				block_m * M_PER_BLOCK + warp_m * M_PER_WARP,
+				block_n * N_PER_BLOCK + warp_n * N_PER_WARP,
 				acc
 			);
 		}

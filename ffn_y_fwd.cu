@@ -1,6 +1,7 @@
 #include "cuda/gemm.cuh"
 #include "block.config.hpp"
 #include "utils2.cuh"
+#include "cuda/utils_b8.cuh"
 
 #include <algorithm>
 #include <filesystem>
