@@ -9,6 +9,9 @@ namespace b8 {
 		typename T,
 		const usize _GN,
 		const usize _M, const usize _N,
+		const usize _FAN_IN = _GN,
+		const usize _STEP = 0,
+		const usize _CNT_PER_STEP = 0,
 		const usize _GMEM_PRELOAD = 2
 	>
 	requires(sizeof(T) == 1)
@@ -18,6 +21,9 @@ namespace b8 {
 		static constexpr usize GN = _GN;
 		static constexpr usize M = _M;
 		static constexpr usize N = _N;
+		static constexpr usize FAN_IN = _FAN_IN;
+		static constexpr usize STEP = _STEP;
+		static constexpr usize CNT_PER_STEP = _CNT_PER_STEP;
 		static constexpr usize GMEM_PRELOAD = _GMEM_PRELOAD;
 
 		static_assert(GN % N == 0);
@@ -34,7 +40,7 @@ namespace b8 {
 		SPreload sPreload;
 
 		X17_DEVICE usize m_rows() const { return _m_rows; }
-		X17_DEVICE usize n_cols() const { return GN; }
+		X17_DEVICE usize n_cols() const { return FAN_IN; }
 
 		X17_DEVICE MatrixLoader(T *gmem_addr, usize m_rows):
 			_m_rows(m_rows),
@@ -52,10 +58,16 @@ namespace b8 {
 		/// modulo `GMEM_PRELOAD`.
 		template<const usize THREADS_PER_BLOCK>
 		X17_DEVICE void cp_async(usize step, usize m, usize n) {
-			sPreload.template cp_async_from<THREADS_PER_BLOCK, M, N>(
+			constexpr bool GMEM_COL_MODULO = STEP > 0 && CNT_PER_STEP > 0;
+			usize n_shift = 0;
+			if constexpr (GMEM_COL_MODULO) {
+				static_assert(CNT_PER_STEP % M == 0);
+				n_shift = m / (CNT_PER_STEP / M) * STEP;
+			}
+			sPreload.template cp_async_from<THREADS_PER_BLOCK, M, N, GN, GMEM_COL_MODULO>(
 				threadIdx.x,
 				gInput,
-				M * m, N * n,
+				M * m, N * n + n_shift,
 				M * (step % GMEM_PRELOAD), 0
 			);
 		}
@@ -299,6 +311,14 @@ namespace b8 {
 		static constexpr usize SMEM_BYTES = ALoader::SMEM_BYTES + BLoader::SMEM_BYTES;
 		static constexpr usize GMEM_PRELOAD = ALoader::GMEM_PRELOAD;
 		static_assert(ALoader::GMEM_PRELOAD == BLoader::GMEM_PRELOAD);
+
+		X17_HOST_DEVICE static bool has_full_output_tiles(usize output_rows, usize output_cols) {
+			return output_rows % M_PER_BLOCK == 0 && output_cols % N_PER_BLOCK == 0;
+		}
+
+		X17_HOST_DEVICE static dim3 output_grid(usize output_rows, usize output_cols) {
+			return dim3(output_rows / M_PER_BLOCK, output_cols / N_PER_BLOCK);
+		}
 
 		X17_DEVICE void run(
 			ALoader &A,

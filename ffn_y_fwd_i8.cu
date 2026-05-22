@@ -13,7 +13,10 @@ namespace Ffn_y_fwd {
 		b8::MatrixLoader<
 			b8::FixedI8,
 			F_WIDTH,
-			64, 128
+			64, 128,
+
+			// TODO
+			256, 128
 		>;
 
 		using WeightLoader =
@@ -50,16 +53,18 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	if (seq_len % Kernel::M_PER_BLOCK != 0) {
-		printf("Expected n_inputs %% %u == 0\n", Kernel::M_PER_BLOCK);
-		return 1;
-	}
-	if (D_MODEL % Kernel::N_PER_BLOCK != 0) {
-		printf("Expected d_model %% %u == 0\n", Kernel::N_PER_BLOCK);
+	if (!Kernel::has_full_output_tiles(seq_len, D_MODEL)) {
+		printf(
+			"Expected output shape [%u, %u] to align with block shape [%u, %u]\n",
+			seq_len,
+			D_MODEL,
+			Kernel::M_PER_BLOCK,
+			Kernel::N_PER_BLOCK
+		);
 		return 1;
 	}
 
-	std::vector<b8::FixedI8> h_weights = load_i8_tensor(torch_tensor_path("ffn_y_weights_i8.bin"), D_MODEL, F_WIDTH);
+	std::vector<b8::FixedI8> h_weights = load_i8_tensor(torch_tensor_path("ffn_y_weights_tmp_i8.bin"), D_MODEL, 256); // F_WIDTH); TODO
 	std::vector<b8::FixedI8> h_f = load_i8_tensor(tensor_path(cli.input_dir, "ffn_f_i8.bin"), seq_len, F_WIDTH);
 	if (h_weights.empty() || h_f.empty()) {
 		return 1;
@@ -81,7 +86,7 @@ int main(int argc, char *argv[]) {
 	cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, Kernel::SMEM_BYTES);
 	cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-	dim3 grid(seq_len / Kernel::M_PER_BLOCK, D_MODEL / Kernel::N_PER_BLOCK);
+	dim3 grid = Kernel::output_grid(seq_len, D_MODEL);
 
 	int warmup = 50;
 	for (int i = 0; i < warmup; ++i) {

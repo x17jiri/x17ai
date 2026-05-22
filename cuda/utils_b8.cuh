@@ -171,7 +171,8 @@ namespace b8 {
 		template<
 			const usize THREADS_PER_BLOCK,
 			const usize HEIGHT, const usize WIDTH,
-			const usize GN
+			const usize GN,
+			const bool GMEM_COL_MODULO = true
 		>
 		requires(
 			WIDTH <= GN && WIDTH <= N
@@ -208,6 +209,9 @@ namespace b8 {
 				usize col_in_row = dst_col * sizeof(T) + (tid % CP_PER_ROW) * CP_BYTES;
 				usize row_in_step = tid / CP_PER_ROW;
 				usize src_col_in_row = src_col * sizeof(T) + (tid % CP_PER_ROW) * CP_BYTES;
+				if constexpr (GMEM_COL_MODULO) {
+					src_col_in_row %= GN * sizeof(T);
+				}
 
 				u8 const *src_ptr =
 					reinterpret_cast<u8 const *>(src._ptr)
@@ -330,7 +334,8 @@ namespace b8 {
 		template<
 			const usize THREADS_PER_BLOCK,
 			const usize HEIGHT, const usize WIDTH,
-			const usize GN
+			const usize GN,
+			const bool GMEM_COL_MODULO = true
 		>
 		requires(
 			WIDTH <= GN && WIDTH <= N
@@ -367,6 +372,9 @@ namespace b8 {
 				usize col_in_row = dst_col * sizeof(T) + (tid % CP_PER_ROW) * CP_BYTES;
 				usize row_in_step = tid / CP_PER_ROW;
 				usize src_col_in_row = src_col * sizeof(T) + (tid % CP_PER_ROW) * CP_BYTES;
+				if constexpr (GMEM_COL_MODULO) {
+					src_col_in_row %= GN * sizeof(T);
+				}
 
 				u8 const *src_ptr =
 					reinterpret_cast<u8 const *>(src._ptr)

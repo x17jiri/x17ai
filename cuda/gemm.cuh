@@ -493,6 +493,14 @@ struct Gemm {
 	static constexpr usize GMEM_PRELOAD = ALoader::GMEM_PRELOAD;
 	static_assert(ALoader::GMEM_PRELOAD == BLoader::GMEM_PRELOAD);
 
+	X17_HOST_DEVICE static bool has_full_output_tiles(usize output_rows, usize output_cols) {
+		return output_rows % N_PER_BLOCK == 0 && output_cols % M_PER_BLOCK == 0;
+	}
+
+	X17_HOST_DEVICE static dim3 output_grid(usize output_rows, usize output_cols) {
+		return dim3(output_cols / M_PER_BLOCK, output_rows / N_PER_BLOCK);
+	}
+
 	X17_DEVICE void run(
 		ALoader &A,
 		BLoader &B,

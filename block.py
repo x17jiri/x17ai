@@ -96,9 +96,10 @@ def create_inputs() -> None:
 	# randn init
 	inputs = new_randn(N_INPUTS, D_MODEL, generator=generator)
 	qkvg_weights = new_randn(QKVG_ROWS, SPARSE_FAN_IN, generator=generator)
-	f_weights = new_randn(F_PROJ_OUTPUTS, SPARSE_FAN_IN, generator=generator)
+	ffn_f_weights = new_randn(F_PROJ_OUTPUTS, SPARSE_FAN_IN, generator=generator)
 	w_attn = new_randn(D_MODEL, ATTN_WIDTH, generator=generator)
-	w_ffn = new_randn(D_MODEL, F_WIDTH, generator=generator)
+	ffn_y_weights = new_randn(D_MODEL, F_WIDTH, generator=generator)
+	ffn_y_weights_tmp = new_randn(D_MODEL, 256, generator=generator)
 	ffn_f_i8 = new_randn(N_INPUTS, F_WIDTH, generator=generator)
 	sink_k = new_randn(N_HEADS, HEAD_DIM, generator=generator)
 	sinks_v = new_randn(N_HEADS, HEAD_DIM, generator=generator)
@@ -113,25 +114,31 @@ def create_inputs() -> None:
 	store_tensor(inputs, "inputs.bin", expected_variance=1.0)
 	store_tensor(inputs_l2, "inputs_l2.bin", expected_variance=1.0 / D_MODEL)
 	store_tensor(qkvg_weights, "qkvg_weights.bin", expected_variance=1.0)
-	store_tensor(f_weights, "ffn_f_weights.bin", expected_variance=1.0)
+	store_tensor(ffn_f_weights, "ffn_f_weights.bin", expected_variance=1.0)
+	store_tensor(ffn_f_weights, "ffn_f_weights_i8.bin", expected_variance=1.0)
 	store_tensor(w_attn, "w_attn.bin", expected_variance=1.0)
-	store_tensor(w_ffn, "ffn_y_weights.bin", expected_variance=1.0)
 	store_tensor(ffn_f_i8, "ffn_f_i8.bin", expected_variance=1.0)
-	store_tensor(w_ffn, "ffn_y_weights_i8.bin", expected_variance=1.0)
-	store_tensor(w_ffn, "ffn_y_weights_f8.bin", expected_variance=1.0)
+	store_tensor(ffn_y_weights, "ffn_y_weights.bin", expected_variance=1.0)
+	store_tensor(ffn_y_weights, "ffn_y_weights_i8.bin", expected_variance=1.0)
+	store_tensor(ffn_y_weights, "ffn_y_weights_f8.bin", expected_variance=1.0)
+	store_tensor(ffn_y_weights_tmp, "ffn_y_weights_tmp_i8.bin", expected_variance=1.0)
 	store_tensor(d_out, "d_out.bin", expected_variance=1.0)
 	store_tensor(qk_norm_scales, "qk_norm_scales.bin", expected_variance=0.0)
 	store_tensor(sink_k, "sinks_k.bin", expected_variance=1.0 / HEAD_DIM)
 	store_tensor(sinks_v, "sinks_v.bin", expected_variance=1.0)
 
-def sparse_weights(w: torch.Tensor, d_input, repeat_after) -> torch.Tensor:
+def sparse_weights(w: torch.Tensor, d_input, steps) -> torch.Tensor:
 	d_output = w.shape[0]
 	fan_in = w.shape[1]
-	step = d_input // repeat_after
+	step = d_input // steps
+	rows_per_step = d_output // steps
+	assert d_input % steps == 0
+	assert d_output % steps == 0
 	sparse = torch.zeros((d_output, d_input), dtype=w.dtype, device=w.device)
 	cols = torch.arange(fan_in, dtype=torch.int64, device=w.device)
 	for row in range(d_output):
-		indices = (cols + row * step) % d_input
+		indices = (cols + (row // rows_per_step) * step) % d_input
+		#print("row = ", row, "idx = ", indices[0])
 		sparse[row, indices] = w[row]
 	return sparse
 
@@ -159,10 +166,10 @@ def ffn_f_fwd(inputs: torch.Tensor, f_weights: torch.Tensor) -> torch.Tensor:
 
 	return gelu(gate) * lin * OUT_SCALE
 
-def ffn_y_fwd(f: torch.Tensor, w_ffn: torch.Tensor) -> torch.Tensor:
-	FAN_IN = torch.tensor(w_ffn.shape[1])
+def ffn_y_fwd(f: torch.Tensor, ffn_y_weights: torch.Tensor) -> torch.Tensor:
+	FAN_IN = torch.tensor(ffn_y_weights.shape[1])
 	SCALE = torch.rsqrt(FAN_IN);
-	return torch.matmul(f, w_ffn.transpose(0, 1)) * SCALE
+	return torch.matmul(f, ffn_y_weights.transpose(0, 1)) * SCALE
 
 #---------------------------------------------------------------------------------------------------
 
@@ -337,6 +344,7 @@ def run_ffn() -> None:
 	y_weights = load_tensor("ffn_y_weights.bin", D_MODEL, F_WIDTH)
 	f_i8 = load_tensor("ffn_f_i8.bin", N_INPUTS, F_WIDTH)
 	y_weights_i8 = load_tensor("ffn_y_weights_i8.bin", D_MODEL, F_WIDTH)
+	y_weights_tmp_i8 = load_tensor("ffn_y_weights_tmp_i8.bin", D_MODEL, 256)
 	d_y = load_tensor("d_out.bin", N_INPUTS, D_MODEL)
 
 	x.requires_grad_(True)
@@ -358,11 +366,8 @@ def run_ffn() -> None:
 	f = ffn_f_fwd(x, f_full_weights)
 	f.retain_grad()
 
-	print("f_i8 = ", f_i8)
-	print("y_weights_i8 = ", y_weights_i8)
-
-#	y = ffn_y_fwd(f, y_weights)
-	y_i8 = ffn_y_fwd(f_i8, y_weights_i8)
+	y_weights_i8 = sparse_weights(y_weights_tmp_i8, F_WIDTH, 8);
+	y = ffn_y_fwd(f_i8, y_weights_i8)
 
 #	torch.autograd.backward(y, d_y)
 #	assert f.grad is not None
@@ -371,15 +376,13 @@ def run_ffn() -> None:
 #	assert x.grad is not None
 
 #	store_tensor(f, "ffn_f.bin", expected_variance=1.0 / F_WIDTH)
-	store_tensor(y_i8, "ffn_y_i8.bin")
+	store_tensor(y, "ffn_y_i8.bin")
 #	store_tensor(backvec, "ffn_f_backvec.bin")
 #	store_tensor(y, "ffn_y.bin", expected_variance=1.0)
 #	store_tensor(f.grad, "ffn_d_f.bin")
 #	store_tensor(y_weights.grad, "ffn_d_y_weights.bin")
 #	store_tensor(f_weights.grad, "ffn_d_f_weights.bin")
 #	store_tensor(x.grad, "ffn_d_x.bin")
-
-	print("y_i8 = ", y_i8)
 
 #---------------------------------------------------------------------------------------------------
 
@@ -394,7 +397,7 @@ def run_block() -> None:
 	qkvg_weights = load_tensor("qkvg_weights.bin", QKVG_ROWS, SPARSE_FAN_IN)
 	f_weights = load_tensor("ffn_f_weights.bin", F_PROJ_OUTPUTS, SPARSE_FAN_IN)
 	w_attn = load_tensor("w_attn.bin", D_MODEL, ATTN_WIDTH)
-	w_ffn = load_tensor("ffn_y_weights.bin", D_MODEL, F_WIDTH)
+	ffn_y_weights = load_tensor("ffn_y_weights.bin", D_MODEL, F_WIDTH)
 	d_out = load_tensor("d_out.bin", N_INPUTS, D_MODEL)
 	qk_norm_scales = load_tensor("qk_norm_scales.bin", 1, HEAD_DIM * N_HEADS)
 	sinks_k = load_tensor("sinks_k.bin", N_HEADS, HEAD_DIM)
@@ -404,22 +407,22 @@ def run_block() -> None:
 
 	ffn_inputs = inputs.detach().clone().requires_grad_(True)
 	compact_f_weights = f_weights.detach().clone().requires_grad_(True)
-	ffn_w_ffn = w_ffn.detach().clone().requires_grad_(True)
+	ffn_y_weights = ffn_y_weights.detach().clone().requires_grad_(True)
 
 	dense_f_weights = sparse_weights(compact_f_weights, D_MODEL, HEAD_DIM)
 	f = ffn_f_fwd(ffn_inputs, dense_f_weights)
 	f.retain_grad()
-	o_ffn = ffn_y_fwd(f, ffn_w_ffn)
+	o_ffn = ffn_y_fwd(f, ffn_y_weights)
 
 	torch.autograd.backward(o_ffn, d_out)
 	assert f.grad is not None
 	assert ffn_inputs.grad is not None
-	assert ffn_w_ffn.grad is not None
+	assert ffn_y_weights.grad is not None
 	assert compact_f_weights.grad is not None
 
 	d_f = f.grad.detach()
 	d_inputs_l2_ffn = ffn_inputs.grad.detach()
-	d_w_ffn = ffn_w_ffn.grad.detach()
+	d_w_ffn = ffn_y_weights.grad.detach()
 	d_f_weights = compact_f_weights.grad.detach()
 	f = f.detach()
 	o_ffn = o_ffn.detach()
