@@ -8,10 +8,9 @@ namespace b8 {
 	template<
 		typename T,
 		const usize _GN,
-		const usize _M, const usize _N,
+		const usize _M, const usize _K,
 		const usize _FAN_IN = _GN,
-		const usize _STEP = 0,
-		const usize _CNT_PER_STEP = 0,
+		const usize _D_OUT = 0,
 		const usize _GMEM_PRELOAD = 2
 	>
 	requires(sizeof(T) == 1)
@@ -20,20 +19,22 @@ namespace b8 {
 
 		static constexpr usize GN = _GN;
 		static constexpr usize M = _M;
-		static constexpr usize N = _N;
+		static constexpr usize K = _K;
 		static constexpr usize FAN_IN = _FAN_IN;
-		static constexpr usize STEP = _STEP;
-		static constexpr usize CNT_PER_STEP = _CNT_PER_STEP;
+		static constexpr usize STEP = FAN_IN < GN ? FAN_IN / 2 : 0;
+		static constexpr usize STEPS = FAN_IN < GN ? GN / STEP : 1;
+		static constexpr usize CNT_PER_STEP = _D_OUT / STEPS;
 		static constexpr usize GMEM_PRELOAD = _GMEM_PRELOAD;
 
-		static_assert(GN % N == 0);
+		static_assert(GN % K == 0);
 		static_assert(M % 32 == 0);
-		static_assert(N % 32 == 0);
+		static_assert(K % 32 == 0);
+		static_assert(FAN_IN % 32 == 0);
 
-		static constexpr usize SMEM_BYTES = M * N * GMEM_PRELOAD * sizeof(T);
+		static constexpr usize SMEM_BYTES = M * K * GMEM_PRELOAD * sizeof(T);
 
 		using GInput = GMatrixDynSize<T, GN>;
-		using SPreload = SMatrix<T, M * GMEM_PRELOAD, N>;
+		using SPreload = SMatrix<T, M * GMEM_PRELOAD, K>;
 
 		usize _m_rows;
 		GInput gInput;
@@ -53,36 +54,37 @@ namespace b8 {
 			sPreload._ptr = smem_alloc.alloc(SMEM_BYTES);
 		}
 
-		/// `cp_async` a tile with size [M, N] at position [M*m, N*n] into SMEM.
+		/// `cp_async` a tile with size [M, K] at position [m, k] into SMEM.
 		/// `step` may be a global K-step; the shared-memory ring slot is selected
 		/// modulo `GMEM_PRELOAD`.
 		template<const usize THREADS_PER_BLOCK>
-		X17_DEVICE void cp_async(usize step, usize m, usize n) {
-			constexpr bool GMEM_COL_MODULO = STEP > 0 && CNT_PER_STEP > 0;
-			usize n_shift = 0;
+		X17_DEVICE void cp_async(usize step, usize m, usize k, usize other_n) {
+			constexpr bool GMEM_COL_MODULO = STEPS > 1;
+			usize k_shift = 0;
 			if constexpr (GMEM_COL_MODULO) {
+				static_assert(CNT_PER_STEP * STEPS == _D_OUT);
 				static_assert(CNT_PER_STEP % M == 0);
-				n_shift = m / (CNT_PER_STEP / M) * STEP;
+				k_shift = other_n / CNT_PER_STEP * STEP;
 			}
-			sPreload.template cp_async_from<THREADS_PER_BLOCK, M, N, GN, GMEM_COL_MODULO>(
+			sPreload.template cp_async_from<THREADS_PER_BLOCK, M, K, GN, GMEM_COL_MODULO>(
 				threadIdx.x,
 				gInput,
-				M * m, N * n + n_shift,
+				m, k + k_shift,
 				M * (step % GMEM_PRELOAD), 0
 			);
 		}
 
-		/// Load a 32x32 fragment at tile coordinates [m, n] from the SMEM ring buffer.
-		X17_DEVICE void load_fragment(usize step, usize m, usize n, Fragment_32x32<T> &frag) {
+		/// Load a 32x32 fragment at tile coordinates [m, k] from the SMEM ring buffer.
+		X17_DEVICE void load_fragment(usize step, usize m, usize k, Fragment_32x32<T> &frag) {
 			usize first_row = M * (step % GMEM_PRELOAD);
-			sPreload.tile_to_fragment(first_row + 32*m, 32*n, frag);
+			sPreload.tile_to_fragment(first_row + 32*m, 32*k, frag);
 		}
 	};
 
 	template<
 		typename T,
 		const usize _GN,
-		const usize _M, const usize _N,
+		const usize _M, const usize _K,
 		const usize _GMEM_PRELOAD = 2
 	>
 	requires(sizeof(T) == 1)
@@ -91,17 +93,17 @@ namespace b8 {
 
 		static constexpr usize GN = _GN;
 		static constexpr usize M = _M;
-		static constexpr usize N = _N;
+		static constexpr usize K = _K;
 		static constexpr usize GMEM_PRELOAD = _GMEM_PRELOAD;
 
-		static_assert(GN % N == 0);
+		static_assert(GN % K == 0);
 		static_assert(M % 32 == 0);
-		static_assert(N % 32 == 0);
+		static_assert(K % 32 == 0);
 
-		static constexpr usize SMEM_BYTES = M * N * GMEM_PRELOAD * sizeof(T);
+		static constexpr usize SMEM_BYTES = M * K * GMEM_PRELOAD * sizeof(T);
 
 		using GInput = GMatrixDynSize<T, GN>;
-		using SPreload = SMatrixEvenOdd<T, M * GMEM_PRELOAD, N>;
+		using SPreload = SMatrixEvenOdd<T, M * GMEM_PRELOAD, K>;
 
 		usize _m_rows;
 		GInput gInput;
@@ -121,29 +123,29 @@ namespace b8 {
 			sPreload._ptr = smem_alloc.alloc(SMEM_BYTES);
 		}
 
-		/// `cp_async` a tile with size [M, N] at position [M*m, N*n] into SMEM.
+		/// `cp_async` a tile with size [M, K] at position [M*m, K*k] into SMEM.
 		/// `step` may be a global K-step; the shared-memory ring slot is selected
 		/// modulo `GMEM_PRELOAD`.
 		template<const usize THREADS_PER_BLOCK>
-		X17_DEVICE void cp_async(usize step, usize m, usize n) {
-			sPreload.template cp_async_from<THREADS_PER_BLOCK, M, N>(
+		X17_DEVICE void cp_async(usize step, usize m, usize k, usize other_n) {
+			sPreload.template cp_async_from<THREADS_PER_BLOCK, M, K>(
 				threadIdx.x,
 				gInput,
-				M * m, N * n,
+				M * m, K * k,
 				M * (step % GMEM_PRELOAD), 0
 			);
 		}
 
-		/// Load a 32x32 fragment at tile coordinates [m, n] from the SMEM ring buffer.
-		X17_DEVICE void load_fragment(usize step, usize m, usize n, Fragment_32x32<T> &frag) {
+		/// Load a 32x32 fragment at tile coordinates [m, k] from the SMEM ring buffer.
+		X17_DEVICE void load_fragment(usize step, usize m, usize k, Fragment_32x32<T> &frag) {
 			usize first_row = M * (step % GMEM_PRELOAD);
-			sPreload.tile_to_fragment(first_row + 32*m, 32*n, frag);
+			sPreload.tile_to_fragment(first_row + 32*m, 32*k, frag);
 		}
 
-		/// Load a transposed 32x32 fragment at tile coordinates [m, n] from the SMEM ring buffer.
-		X17_DEVICE void load_fragment_trans(usize step, usize m, usize n, Fragment_32x32<T> &frag) {
+		/// Load a transposed 32x32 fragment at tile coordinates [m, k] from the SMEM ring buffer.
+		X17_DEVICE void load_fragment_trans(usize step, usize m, usize k, Fragment_32x32<T> &frag) {
 			usize first_row = M * (step % GMEM_PRELOAD);
-			sPreload.tile_to_fragment_trans(first_row + 32*m, 32*n, frag);
+			sPreload.tile_to_fragment_trans(first_row + 32*m, 32*k, frag);
 		}
 	};
 
@@ -151,8 +153,8 @@ namespace b8 {
 	struct MatrixTransLoader {
 		using Elem = typename Loader::Elem;
 
-		static constexpr usize M = Loader::N;
-		static constexpr usize N = Loader::M;
+		static constexpr usize M = Loader::K;
+		static constexpr usize K = Loader::M;
 		static constexpr usize GMEM_PRELOAD = Loader::GMEM_PRELOAD;
 		static constexpr usize SMEM_BYTES = Loader::SMEM_BYTES;
 
@@ -172,16 +174,16 @@ namespace b8 {
 		}
 
 		template<const usize THREADS_PER_BLOCK>
-		X17_DEVICE void cp_async(usize step, usize m, usize n) {
-			loader.template cp_async<THREADS_PER_BLOCK>(step, n, m);
+		X17_DEVICE void cp_async(usize step, usize m, usize k, usize other_n) {
+			loader.template cp_async<THREADS_PER_BLOCK>(step, k, m, other_n);
 		}
 
-		X17_DEVICE void load_fragment(usize step, usize m, usize n, Fragment_32x32<Elem> &frag) {
-			loader.load_fragment_trans(step, n, m, frag);
+		X17_DEVICE void load_fragment(usize step, usize m, usize k, Fragment_32x32<Elem> &frag) {
+			loader.load_fragment_trans(step, k, m, frag);
 		}
 
-		X17_DEVICE void load_fragment_trans(usize step, usize m, usize n, Fragment_32x32<Elem> &frag) {
-			loader.load_fragment(step, n, m, frag);
+		X17_DEVICE void load_fragment_trans(usize step, usize m, usize k, Fragment_32x32<Elem> &frag) {
+			loader.load_fragment(step, k, m, frag);
 		}
 	};
 
@@ -291,8 +293,8 @@ namespace b8 {
 		using Writer = _Writer;
 
 		static constexpr usize M_PER_BLOCK = ALoader::M;
-		static constexpr usize N_PER_BLOCK = BLoader::N;
-		static constexpr usize K_STEP = ALoader::N;
+		static constexpr usize N_PER_BLOCK = BLoader::K;
+		static constexpr usize K_STEP = ALoader::K;
 		static_assert(BLoader::M == K_STEP);
 
 		static constexpr usize M_WARPS = 2;
@@ -342,8 +344,8 @@ namespace b8 {
 			X17_UNROLL
 			for (usize p = 0; p < GMEM_PRELOAD; ++p) {
 				if (p < K_ITERS) {
-					A.template cp_async<THREADS_PER_BLOCK>(p, block_m, p);
-					B.template cp_async<THREADS_PER_BLOCK>(p, p, block_n);
+					A.template cp_async<THREADS_PER_BLOCK>(p, M_PER_BLOCK*block_m, K_STEP*p, N_PER_BLOCK*block_n);
+					B.template cp_async<THREADS_PER_BLOCK>(p, K_STEP*p, N_PER_BLOCK*block_n, M_PER_BLOCK*block_m);
 				}
 				cp_async_commit();
 			}
@@ -372,8 +374,8 @@ namespace b8 {
 
 					usize p = k_step + GMEM_PRELOAD;
 					if (p < K_ITERS) {
-						A.template cp_async<THREADS_PER_BLOCK>(p, block_m, p);
-						B.template cp_async<THREADS_PER_BLOCK>(p, p, block_n);
+						A.template cp_async<THREADS_PER_BLOCK>(p, M_PER_BLOCK*block_m, K_STEP*p, N_PER_BLOCK*block_n);
+						B.template cp_async<THREADS_PER_BLOCK>(p, K_STEP*p, N_PER_BLOCK*block_n, M_PER_BLOCK*block_m);
 					}
 					cp_async_commit();
 				}

@@ -37,7 +37,6 @@ L2_NORM_EPS = float(config_value("l2_norm_eps", "L2_NORM_EPS"))
 ROPE_BASE = float(config_value("rope_base", "ROPE_BASE", default=10000.0))
 QKVG_ROWS = 4 * N_HEADS * HEAD_DIM
 ATTN_WIDTH = N_HEADS * HEAD_DIM
-F_PROJ_OUTPUTS = 2 * F_WIDTH
 SPARSE_SCALE = math.sqrt(D_MODEL / SPARSE_FAN_IN)
 V_SCALE_FIX = float(config_value("V_SCALE_FIX", default=1.5))
 
