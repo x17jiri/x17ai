@@ -227,19 +227,19 @@ namespace b8 {
 			union {
 				u32 value;
 				struct {
-					i8 even_0, even_1, odd_0, odd_1;
+					i8 top_0, top_1, bot_0, bot_1;
 				} packed;
 			} left, right;
 
-			left.packed.even_0 = conv_one(inp.v8x16[0].h8x8[0].val0);
-			left.packed.even_1 = conv_one(inp.v8x16[0].h8x8[0].val1);
-			left.packed.odd_0 = conv_one(inp.v8x16[1].h8x8[0].val0);
-			left.packed.odd_1 = conv_one(inp.v8x16[1].h8x8[0].val1);
+			left.packed.top_0 = conv_one(inp.v8x16[0].h8x8[0].val0);
+			left.packed.top_1 = conv_one(inp.v8x16[0].h8x8[0].val1);
+			left.packed.bot_0 = conv_one(inp.v8x16[1].h8x8[0].val0);
+			left.packed.bot_1 = conv_one(inp.v8x16[1].h8x8[0].val1);
 
-			right.packed.even_0 = conv_one(inp.v8x16[0].h8x8[1].val0);
-			right.packed.even_1 = conv_one(inp.v8x16[0].h8x8[1].val1);
-			right.packed.odd_0 = conv_one(inp.v8x16[1].h8x8[1].val0);
-			right.packed.odd_1 = conv_one(inp.v8x16[1].h8x8[1].val1);
+			right.packed.top_0 = conv_one(inp.v8x16[0].h8x8[1].val0);
+			right.packed.top_1 = conv_one(inp.v8x16[0].h8x8[1].val1);
+			right.packed.bot_0 = conv_one(inp.v8x16[1].h8x8[1].val0);
+			right.packed.bot_1 = conv_one(inp.v8x16[1].h8x8[1].val1);
 
 			usize tid = threadIdx.x;
 			u32 u0 = left.value;
@@ -283,6 +283,92 @@ namespace b8 {
 			}
 
 			MatrixWriter<FixedI8, GN>::write(row, col, t);
+		}
+	};
+
+	template<const usize GN, const usize FAN_IN>
+	struct FixedI8MatrixGeGluWriter: MatrixWriter<FixedI8, GN> {
+
+		X17_DEVICE FixedI8MatrixGeGluWriter(FixedI8 *gC):
+			MatrixWriter<FixedI8, GN>(gC)
+		{}
+
+		X17_DEVICE i8 geglu(b32::Fragment_8x8<i32> frag) {
+			constexpr f64 S1 = 1.0 / FAN_IN;
+			constexpr f64 S2 = 1.0 / (FAN_IN * FIXED_I8_SCALE * FIXED_I8_SCALE);
+			f32 gate = math::fast::gelu<S2, S1, 1.0>(f32(frag.val0)).val;
+			f32 lin = f32(frag.val1);
+			f32 val_f = fmaxf(-127.0f, fminf(+127.0f, gate * lin));
+			return __float2int_rn(val_f);
+		}
+
+		template<const usize M_TILES, const usize N_TILES>
+		X17_DEVICE void write(
+			usize row, usize col,
+			b32::Fragment_32x32<i32> (&acc)[M_TILES][N_TILES]
+		) {
+			static_assert(N_TILES % 2 == 0);
+
+			union {
+				struct {
+					i8 a, b, c, d;
+				} packed;
+				u32 value;
+			} u1, u2, u3, u4, v1, v2, v3, v4;
+
+			Fragment_32x32<FixedI8> t[M_TILES][N_TILES/2];
+			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+					u1.packed.a = geglu(acc[mi][ni].v16x32[0].h16x16[0].v8x16[0].h8x8[0]);
+					u1.packed.b = geglu(acc[mi][ni].v16x32[0].h16x16[0].v8x16[1].h8x8[0]);
+					u1.packed.c = geglu(acc[mi][ni].v16x32[1].h16x16[0].v8x16[0].h8x8[0]);
+					u1.packed.d = geglu(acc[mi][ni].v16x32[1].h16x16[0].v8x16[1].h8x8[0]);
+
+					u2.packed.a = geglu(acc[mi][ni].v16x32[0].h16x16[0].v8x16[0].h8x8[1]);
+					u2.packed.b = geglu(acc[mi][ni].v16x32[0].h16x16[0].v8x16[1].h8x8[1]);
+					u2.packed.c = geglu(acc[mi][ni].v16x32[1].h16x16[0].v8x16[0].h8x8[1]);
+					u2.packed.d = geglu(acc[mi][ni].v16x32[1].h16x16[0].v8x16[1].h8x8[1]);
+
+					u3.packed.a = geglu(acc[mi][ni].v16x32[0].h16x16[1].v8x16[0].h8x8[0]);
+					u3.packed.b = geglu(acc[mi][ni].v16x32[0].h16x16[1].v8x16[1].h8x8[0]);
+					u3.packed.c = geglu(acc[mi][ni].v16x32[1].h16x16[1].v8x16[0].h8x8[0]);
+					u3.packed.d = geglu(acc[mi][ni].v16x32[1].h16x16[1].v8x16[1].h8x8[0]);
+
+					u4.packed.a = geglu(acc[mi][ni].v16x32[0].h16x16[1].v8x16[0].h8x8[1]);
+					u4.packed.b = geglu(acc[mi][ni].v16x32[0].h16x16[1].v8x16[1].h8x8[1]);
+					u4.packed.c = geglu(acc[mi][ni].v16x32[1].h16x16[1].v8x16[0].h8x8[1]);
+					u4.packed.d = geglu(acc[mi][ni].v16x32[1].h16x16[1].v8x16[1].h8x8[1]);
+
+					shuffle_4x4(u1.value, u2.value, u3.value, u4.value);
+
+					v1.packed.a = u1.packed.a;
+					v1.packed.b = u2.packed.a;
+					v1.packed.c = u3.packed.a;
+					v1.packed.d = u4.packed.a;
+
+					v2.packed.a = u1.packed.b;
+					v2.packed.b = u2.packed.b;
+					v2.packed.c = u3.packed.b;
+					v2.packed.d = u4.packed.b;
+
+					v3.packed.a = u1.packed.c;
+					v3.packed.b = u2.packed.c;
+					v3.packed.c = u3.packed.c;
+					v3.packed.d = u4.packed.c;
+
+					v4.packed.a = u1.packed.d;
+					v4.packed.b = u2.packed.d;
+					v4.packed.c = u3.packed.d;
+					v4.packed.d = u4.packed.d;
+
+					t[mi][ni/2].v16x32[0].h16x16[ni%2].v8x16[0].val = v1.value;
+					t[mi][ni/2].v16x32[0].h16x16[ni%2].v8x16[1].val = v2.value;
+					t[mi][ni/2].v16x32[1].h16x16[ni%2].v8x16[0].val = v3.value;
+					t[mi][ni/2].v16x32[1].h16x16[ni%2].v8x16[1].val = v4.value;
+				}
+			}
+
+			MatrixWriter<FixedI8, GN>::write(row, col / 2, t);
 		}
 	};
 

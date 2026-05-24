@@ -60,28 +60,6 @@ def gelu(x: torch.Tensor) -> torch.Tensor:
 
 #---------------------------------------------------------------------------------------------------
 
-def ffn_f_fwd(inputs: torch.Tensor, f_weights: torch.Tensor) -> torch.Tensor:
-	assert(f_weights.shape[0] == 2*F_WIDTH)
-	inputs = quantize_(inputs)
-	f_weights = quantize_(f_weights)
-	t = torch.matmul(inputs, f_weights.transpose(0, 1))
-	gate = t[..., 0::2]
-	lin = t[..., 1::2]
-	OUT_SCALE = GELU_VAR_FIX * math.sqrt(1.0 / F_WIDTH)
-
-	gate = gate * SPARSE_SCALE
-	lin = lin * SPARSE_SCALE
-	warn_if_variance_is_unexpected("ffn_f_fwd: gate * SPARSE_SCALE", gate, 1.0)
-	warn_if_variance_is_unexpected("ffn_f_fwd: lin * SPARSE_SCALE", lin, 1.0)
-
-	return gelu(gate) * lin * OUT_SCALE
-
-def ffn_y_fwd(f: torch.Tensor, ffn_y_weights: torch.Tensor, fan_in: int | None = None) -> torch.Tensor:
-	if fan_in is None:
-		fan_in = ffn_y_weights.shape[1]
-	SCALE = torch.rsqrt(torch.tensor(float(fan_in)))
-	return torch.matmul(f, ffn_y_weights.transpose(0, 1)) * SCALE
-
 def run_ffn() -> None:
 	x = load_tensor("x_i8.bin", N_INPUTS, D_MODEL)
 	f_weights = load_tensor("ffn_f_weights_i8.bin", 2*F_WIDTH, SPARSE_FAN_IN)
