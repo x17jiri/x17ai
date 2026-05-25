@@ -294,8 +294,22 @@ namespace b8 {
 		{}
 
 		X17_DEVICE i8 geglu(b32::Fragment_8x8<i32> frag) {
-			constexpr f64 INP_SCALE_2 = 1.0 / (FAN_IN * FIXED_I8_SCALE * FIXED_I8_SCALE * FIXED_I8_SCALE * FIXED_I8_SCALE);
-			constexpr f64 OUT_SCALE_2 = 1.0 / (FAN_IN * FIXED_I8_SCALE * FIXED_I8_SCALE);
+			// `frag.val0` and `frag.val1` are raw accumulators of `sum(FixedI8 * FixedI8)`.
+			// Each `FixedI8` is scaled by FIXED_I8_SCALE, so `FixedI8 * FixedI8` is scaled
+			// by `FIXED_I8_SCALE^2`. We need to divide the inputs by this value.
+			// We also need to divide by `sqrt(FAN_IN)` so the inputs have unit variance.
+			//
+			// `math::fast::gelu` expects squared scale factors, hence the `_2` suffix:
+			// - `INP_SCALE_2` => gate scale `1 / (FIXED_I8_SCALE^2 * sqrt(FAN_IN))`
+			//                 = `1 / sqrt(FAN_IN * FIXED_I8_SCALE^4)`
+			// - `OUT_SCALE_2` is logically the scale of the `lin` input, but we apply it to the
+			//   GELU output instead. That lets GELU fold the multiply into its constants, so the
+			//   scale is effectively free at runtime. This scale factor
+			//   is the same as `INP_SCALE_2` followed by a multiplication by `FIXED_I8_SCALE`
+			//   which converts the final value into `FixedI8` again.
+			constexpr f64 FIXED_I8_SCALE_2 = FIXED_I8_SCALE * FIXED_I8_SCALE;
+			constexpr f64 INP_SCALE_2 = 1.0 / (FAN_IN * FIXED_I8_SCALE_2 * FIXED_I8_SCALE_2);
+			constexpr f64 OUT_SCALE_2 = 1.0 / (FAN_IN * FIXED_I8_SCALE_2);
 			f32 gate = math::fast::gelu<INP_SCALE_2, OUT_SCALE_2, 1.0>(f32(frag.val0)).val;
 			f32 lin = f32(frag.val1);
 			f32 val_f = fmaxf(-127.0f, fminf(+127.0f, gate * lin));

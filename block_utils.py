@@ -22,21 +22,19 @@ def config_value(*names: str, default=None):
 		return default
 	raise KeyError(f"Missing config value, tried: {', '.join(names)}")
 
-N_INPUTS = int(config_value("n_inputs", "seq_len"))
-D_MODEL = int(config_value("d_model", "D_MODEL"))
-N_HEADS = int(config_value("n_heads", "N_HEADS"))
-HEAD_DIM = int(config_value("head_dim", "QK_DIM"))
-VG_DIM = int(config_value("VG_DIM", "head_dim", "QK_DIM"))
-if VG_DIM != HEAD_DIM:
+N_INPUTS = int(config_value("seq_len"))
+D_MODEL = int(config_value("D_MODEL"))
+N_HEADS = int(config_value("N_HEADS"))
+QK_DIM = int(config_value("QK_DIM"))
+VG_DIM = int(config_value("VG_DIM"))
+if VG_DIM != QK_DIM:
 	raise ValueError("block.py currently assumes QK_DIM == VG_DIM")
-ROPE_DIM = int(config_value("rope_dim", default=HEAD_DIM))
-SPARSE_FAN_IN = int(config_value("qkv_fan_in", "SPARSE_FAN_IN"))
-F_WIDTH = int(config_value("f_width", "F_WIDTH"))
-WINDOW_SIZE = int(config_value("window_size", "WINDOW_SIZE"))
-L2_NORM_EPS = float(config_value("l2_norm_eps", "L2_NORM_EPS"))
-ROPE_BASE = float(config_value("rope_base", "ROPE_BASE", default=10000.0))
-QKVG_ROWS = 4 * N_HEADS * HEAD_DIM
-ATTN_WIDTH = N_HEADS * HEAD_DIM
+HEAD_DIM = QK_DIM
+SPARSE_FAN_IN = int(config_value("SPARSE_FAN_IN"))
+F_WIDTH = int(config_value("F_WIDTH"))
+WINDOW_SIZE = int(config_value("WINDOW_SIZE"))
+L2_NORM_EPS = float(config_value("L2_NORM_EPS"))
+
 SPARSE_SCALE = math.sqrt(D_MODEL / SPARSE_FAN_IN)
 V_SCALE_FIX = float(config_value("V_SCALE_FIX", default=1.5))
 
@@ -48,6 +46,7 @@ GELU_VAR_FIX = math.sqrt(GELU_VAR_FIX_2)
 
 # Each split projection should see unit total input variance, so each coordinate of the
 # GeGLU output should contribute variance about 1 / branch_width.
+ATTN_WIDTH = N_HEADS * VG_DIM
 ATTN_GEGLU_SCALE = math.sqrt(GELU_VAR_FIX_2 / ATTN_WIDTH)
 F_GEGLU_SCALE = math.sqrt(GELU_VAR_FIX_2 / F_WIDTH)
 
