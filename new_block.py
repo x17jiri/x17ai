@@ -76,7 +76,10 @@ def run_ffn() -> None:
 	f_lin = f_pregate[..., 1::2]
 	f = gelu(f_gate) * f_lin
 
-	y = torch.matmul(f, y_weights.transpose(0, 1)) * torch.rsqrt(torch.tensor(F_WIDTH)) * GELU_VAR_FIX
+	# TODO - add quantize function
+	f_i8 = torch.clamp(torch.round(f * 8.0), -127.0, +127.0) / 8.0
+
+	y = torch.matmul(f_i8, y_weights.transpose(0, 1)) * torch.rsqrt(torch.tensor(F_WIDTH)) * GELU_VAR_FIX
 
 	store_tensor(f_pregate, "ffn_f_pregate.bin", expected_variance=1.0)
 	store_tensor(f_pregate, "ffn_f_pregate_i8.bin")

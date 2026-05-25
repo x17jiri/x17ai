@@ -24,16 +24,30 @@ def load_f32(path: str) -> torch.Tensor:
 	return torch.frombuffer(bytearray(raw), dtype=torch.float32)
 
 
+def load_i8(path: str) -> torch.Tensor:
+	raw = Path(path).read_bytes()
+	data = torch.frombuffer(bytearray(raw), dtype=torch.int8)
+	scaled = data.to(torch.float32) / 8.0
+	return torch.where(data == -128, torch.full_like(scaled, math.nan), scaled)
+
+
 def load_tensor(path: str, dtype: str) -> torch.Tensor:
 	if dtype == "bf16":
 		return load_bf16(path).to(torch.float32)
 	if dtype == "f32":
 		return load_f32(path)
+	if dtype == "i8":
+		return load_i8(path)
 	raise ValueError(f"Unsupported dtype: {dtype}")
 
 
 def infer_dtype_from_path(path: str) -> str:
-	return "f32" if "_f32" in Path(path).stem else "bf16"
+	stem = Path(path).stem
+	if "_f32" in stem:
+		return "f32"
+	if "_i8" in stem:
+		return "i8"
+	return "bf16"
 
 
 def default_output_path(input_path: str) -> Path:
@@ -49,6 +63,10 @@ def read_expected_variance(path: str) -> float:
 
 def standard_normal_pdf(x: torch.Tensor) -> torch.Tensor:
 	return torch.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+
+def standard_normal_cdf(x: torch.Tensor) -> torch.Tensor:
+	return 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
 
 
 def normalize_values(values: torch.Tensor, reference_variance: float) -> torch.Tensor:
@@ -68,6 +86,34 @@ def summarize_values(values: torch.Tensor) -> tuple[float, float, float]:
 	return mean, std, var
 
 
+def plotted_quantization_step(dtype: str, reference_variance: float) -> float | None:
+	if dtype != "i8":
+		return None
+	step = 1.0 / 8.0
+	if reference_variance > 0.0:
+		step /= math.sqrt(reference_variance)
+	return step
+
+
+def discrete_density(values: torch.Tensor, step: float) -> tuple[torch.Tensor, torch.Tensor]:
+	centers, counts = torch.unique(values, sorted=True, return_counts=True)
+	density = counts.to(torch.float32) / (values.numel() * step)
+	return centers.to(torch.float32), density
+
+
+def discrete_reference_density(centers: torch.Tensor, step: float) -> torch.Tensor:
+	half_step = 0.5 * step
+	mass = standard_normal_cdf(centers + half_step) - standard_normal_cdf(centers - half_step)
+	return mass / step
+
+
+def reference_centers(x_min: float, x_max: float, step: float) -> torch.Tensor:
+	start = math.floor(x_min / step) * step
+	stop = math.ceil(x_max / step) * step
+	count = int(round((stop - start) / step)) + 1
+	return start + step * torch.arange(count, dtype=torch.float32)
+
+
 def load_tensor_summary(tensor_file: str, dtype: str, var_file: str | None) -> dict[str, object]:
 	tensor = load_tensor(tensor_file, dtype).reshape(-1)
 	finite = finite_values(tensor)
@@ -78,6 +124,7 @@ def load_tensor_summary(tensor_file: str, dtype: str, var_file: str | None) -> d
 	if var_file is not None:
 		reference_variance = read_expected_variance(var_file)
 	plotted_values = normalize_values(finite, reference_variance)
+	plotted_step = plotted_quantization_step(dtype, reference_variance)
 	mean, std, var = summarize_values(finite)
 	plotted_mean, plotted_std, plotted_var = summarize_values(plotted_values)
 	return {
@@ -91,6 +138,7 @@ def load_tensor_summary(tensor_file: str, dtype: str, var_file: str | None) -> d
 		"var": var,
 		"reference_variance": reference_variance,
 		"plotted_values": plotted_values,
+		"plotted_step": plotted_step,
 		"plotted_mean": plotted_mean,
 		"plotted_std": plotted_std,
 		"plotted_var": plotted_var,
@@ -113,7 +161,7 @@ def print_tensor_summary(prefix: str, summary: dict[str, object]) -> None:
 
 
 def plot_tensor_stats(
-	series: list[tuple[str, torch.Tensor]],
+	series: list[tuple[str, torch.Tensor, float | None]],
 	bins: int,
 	title: str,
 	show_standard_normal: bool,
@@ -126,29 +174,70 @@ def plot_tensor_stats(
 	x = torch.linspace(x_min, x_max, 512)
 
 	colors = ["#4C72B0", "#55A868", "#C44E52", "#8172B3"]
+	all_discrete = all(step is not None for _, _, step in series)
+	shared_step = None
+	if all_discrete:
+		first_step = series[0][2]
+		assert first_step is not None
+		if all(abs(step - first_step) < 1e-12 for _, _, step in series):
+			shared_step = first_step
 	if len(series) == 1:
-		label, values = series[0]
-		ax.hist(values.numpy(), bins=bins, density=True, alpha=0.65, color=colors[0], label=label)
-	else:
-		for idx, (label, values) in enumerate(series):
-			ax.hist(
-				values.numpy(),
-				bins=bins,
-				density=True,
-				histtype="step",
-				linewidth=2.0,
-				color=colors[idx % len(colors)],
+		label, values, step = series[0]
+		if step is None:
+			ax.hist(values.numpy(), bins=bins, density=True, alpha=0.65, color=colors[0], label=label)
+		else:
+			centers, density = discrete_density(values, step)
+			ax.bar(
+				centers.numpy(),
+				density.numpy(),
+				width=0.9 * step,
+				alpha=0.65,
+				color=colors[0],
+				align="center",
 				label=label,
 			)
+	else:
+		for idx, (label, values, step) in enumerate(series):
+			if step is None:
+				ax.hist(
+					values.numpy(),
+					bins=bins,
+					density=True,
+					histtype="step",
+					linewidth=2.0,
+					color=colors[idx % len(colors)],
+					label=label,
+				)
+			else:
+				centers, density = discrete_density(values, step)
+				ax.plot(
+					centers.numpy(),
+					density.numpy(),
+					drawstyle="steps-mid",
+					linewidth=2.0,
+					color=colors[idx % len(colors)],
+					label=label,
+				)
 	if show_standard_normal:
-		y = standard_normal_pdf(x)
-		ax.plot(
-			x.numpy(),
-			y.numpy(),
-			color="#DD8452",
-			linewidth=2.0,
-			label="N(0, 1)",
-		)
+		if shared_step is not None:
+			centers = reference_centers(x_min, x_max, shared_step)
+			y = discrete_reference_density(centers, shared_step)
+			ax.plot(
+				centers.numpy(),
+				y.numpy(),
+				color="#DD8452",
+				linewidth=2.0,
+				label="N(0, 1) avg/bin",
+			)
+		else:
+			y = standard_normal_pdf(x)
+			ax.plot(
+				x.numpy(),
+				y.numpy(),
+				color="#DD8452",
+				linewidth=2.0,
+				label="N(0, 1)",
+			)
 	elif show_zero_reference:
 		ax.axvline(0.0, color="#C44E52", linewidth=2.0, label="expected variance = 0")
 	ax.set_title(title)
@@ -165,10 +254,10 @@ def main() -> None:
 	parser = argparse.ArgumentParser(description="Plot histogram statistics for a tensor .bin file")
 	parser.add_argument("tensor_file", help="Tensor .bin file to inspect")
 	parser.add_argument("var_file", nargs="?", default=None, help="Optional .var file containing the expected variance")
-	parser.add_argument("--dtype", choices=["bf16", "f32"], default=None, help="Tensor element type")
+	parser.add_argument("--dtype", choices=["bf16", "f32", "i8"], default=None, help="Tensor element type")
 	parser.add_argument("--overlay", default=None, help="Optional second tensor .bin file to overlay")
 	parser.add_argument("--overlay-var", default=None, help="Optional .var file for the overlay tensor")
-	parser.add_argument("--overlay-dtype", choices=["bf16", "f32"], default=None, help="Overlay tensor element type")
+	parser.add_argument("--overlay-dtype", choices=["bf16", "f32", "i8"], default=None, help="Overlay tensor element type")
 	parser.add_argument("--bins", type=int, default=150, help="Histogram bin count")
 	parser.add_argument("--title", default=None, help="Plot title")
 	parser.add_argument("--output", default=None, help="Optional output .png path")
@@ -201,7 +290,7 @@ def main() -> None:
 		label = summary["name"]
 		if summary["reference_variance"] > 0.0:
 			label = f"{label} (norm_var={summary['plotted_var']:.4f})"
-		series.append((label, summary["plotted_values"]))
+		series.append((label, summary["plotted_values"], summary["plotted_step"]))
 
 	if args.overlay is None:
 		if primary["reference_variance"] > 0.0:

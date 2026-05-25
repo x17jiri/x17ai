@@ -43,6 +43,7 @@ def verify_i8(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
 
 	total = a.numel()
 	exact_match = int((a == b).sum().item())
+	mismatch_count = total - exact_match
 	diff = (a.to(torch.int16) - b.to(torch.int16)).abs()
 	max_abs_diff = int(diff.max().item())
 	min_a = int(a.min().item())
@@ -52,6 +53,8 @@ def verify_i8(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
 
 	out_of_range_a = int(((a < -126) | (a > 126)).sum().item())
 	out_of_range_b = int(((b < -126) | (b > 126)).sum().item())
+	outside_100_a = int(((a < -100) | (a > 100)).sum().item())
+	outside_100_b = int(((b < -100) | (b > 100)).sum().item())
 
 	print("\n--- I8 Tensor Compare ---")
 	print(f"A: {file_a}")
@@ -59,8 +62,10 @@ def verify_i8(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
 	print(f"Shape: {format_shape(shape)}")
 	print(f"A min/max:      {min_a} / {max_a}")
 	print(f"B min/max:      {min_b} / {max_b}")
-	print(f"Exact i8 match: {exact_match}/{total} ({100.0 * exact_match / total:.2f}%)")
+	print(f"Mismatched i8:  {mismatch_count}/{total} ({100.0 * mismatch_count / total:.2f}%)")
 	print(f"Max abs diff:   {max_abs_diff}")
+	print(f"A outside [-100, +100]: {outside_100_a}")
+	print(f"B outside [-100, +100]: {outside_100_b}")
 	print(f"A outside [-126, +126]: {out_of_range_a}")
 	print(f"B outside [-126, +126]: {out_of_range_b}")
 

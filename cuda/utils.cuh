@@ -398,7 +398,7 @@ namespace math {
 			constexpr f64 k2 = INP_SCALE_2;
 			constexpr f64 ck = constexpr_sqrt(INP_SCALE_2 * 2.0 * std::numbers::inv_pi_v<f64>);
 			constexpr f64 ck3 = 0.044715 * ck * k2;
-			constexpr f64 Y_SCALE = 0.5 * constexpr_sqrt(OUT_SCALE_2 * GELU_VAR_FIX_2) * k;
+			constexpr f64 Y_SCALE = 0.5 * constexpr_sqrt(OUT_SCALE_2 * VAR_FIX_2) * k;
 			f32 x2 = x * x;
 			f32 s = math::fma(f32(ck3) * x, x2, f32(ck) * x);
 			auto t = math::fast::tanh(s);

@@ -10,12 +10,6 @@ using namespace config;
 
 namespace Ffn_f_fwd {
 	static constexpr usize F_PROJ_OUTPUTS = 2 * F_WIDTH;
-	static constexpr usize STEP = SPARSE_FAN_IN / 2;
-	static constexpr usize STEPS = D_MODEL / STEP;
-
-	static_assert(SPARSE_FAN_IN % 2 == 0);
-	static_assert(D_MODEL % STEP == 0);
-	static_assert(F_PROJ_OUTPUTS % STEPS == 0);
 
 	using InputLoader =
 		b8::MatrixLoader<
@@ -23,8 +17,7 @@ namespace Ffn_f_fwd {
 			D_MODEL,
 			64, 128,
 			SPARSE_FAN_IN,
-			F_PROJ_OUTPUTS,
-			2
+			F_PROJ_OUTPUTS
 		>;
 
 	using WeightLoader =
