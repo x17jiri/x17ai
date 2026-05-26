@@ -217,10 +217,53 @@ namespace b8 {
 			MatrixWriter<FixedI8, GN>(gC)
 		{}
 
+		static X17_DEVICE i8 conv_one_f32(f32 inp) {
+			inp = fmaxf(-127.0f, fminf(+127.0f, inp));
+			return __float2int_rn(inp);
+		}
+
 		static X17_DEVICE i8 conv_one(i32 inp) {
 			f32 val_f = f32(inp) * f32(SCALE / FIXED_I8_SCALE);
 			val_f = fmaxf(-127.0f, fminf(+127.0f, val_f));
 			return __float2int_rn(val_f);
+		}
+
+		X17_DEVICE void conv(b32::Fragment_16x16<f32> const &inp, Fragment_16x16<i8> &out) {
+			union {
+				u32 value;
+				struct {
+					i8 top_0, top_1, bot_0, bot_1;
+				} packed;
+			} left, right;
+
+			left.packed.top_0 = conv_one_f32(inp.v8x16[0].h8x8[0].val0);
+			left.packed.top_1 = conv_one_f32(inp.v8x16[0].h8x8[0].val1);
+			left.packed.bot_0 = conv_one_f32(inp.v8x16[1].h8x8[0].val0);
+			left.packed.bot_1 = conv_one_f32(inp.v8x16[1].h8x8[0].val1);
+
+			right.packed.top_0 = conv_one_f32(inp.v8x16[0].h8x8[1].val0);
+			right.packed.top_1 = conv_one_f32(inp.v8x16[0].h8x8[1].val1);
+			right.packed.bot_0 = conv_one_f32(inp.v8x16[1].h8x8[1].val0);
+			right.packed.bot_1 = conv_one_f32(inp.v8x16[1].h8x8[1].val1);
+
+			usize tid = threadIdx.x;
+			u32 u0 = left.value;
+			u32 u1 = right.value;
+
+			u0 = shuffle_xor_sync(u0, 2);
+
+			u32 v0 = (tid & 2) == 0 ? u1 : u0;
+			u32 v1 = (tid & 2) == 0 ? u0 : u1;
+
+			v0 = shuffle_xor_sync(v0, 3);
+
+			u32 w0 = (tid & 1) == 0 ? v1 : v0;
+			u32 w1 = (tid & 1) == 0 ? v0 : v1;
+
+			w0 = shuffle_xor_sync(w0, 1);
+
+			out.v8x16[0].val = __byte_perm(w0, w1, 0x5410);
+			out.v8x16[1].val = __byte_perm(w0, w1, 0x7632);
 		}
 
 		X17_DEVICE void conv(b32::Fragment_16x16<i32> const &inp, Fragment_16x16<i8> &out) {
@@ -261,12 +304,36 @@ namespace b8 {
 			out.v8x16[1].val = __byte_perm(w0, w1, 0x7632);
 		}
 
+		X17_DEVICE void conv(b32::Fragment_32x32<f32> const &inp, Fragment_32x32<i8> &out) {
+			X17_UNROLL for (usize j = 0; j < 2; ++j) {
+				X17_UNROLL for (usize i = 0; i < 2; ++i) {
+					conv(inp.v16x32[j].h16x16[i], out.v16x32[j].h16x16[i]);
+				}
+			}
+		}
+
 		X17_DEVICE void conv(b32::Fragment_32x32<i32> const &inp, Fragment_32x32<i8> &out) {
 			X17_UNROLL for (usize j = 0; j < 2; ++j) {
 				X17_UNROLL for (usize i = 0; i < 2; ++i) {
 					conv(inp.v16x32[j].h16x16[i], out.v16x32[j].h16x16[i]);
 				}
 			}
+		}
+
+		template<const usize M_TILES, const usize N_TILES>
+		X17_DEVICE void write(
+			usize row, usize col,
+			b32::Fragment_32x32<f32> (&acc)[M_TILES][N_TILES]
+		) {
+			Fragment_32x32<FixedI8> t[M_TILES][N_TILES];
+
+			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+					conv(acc[mi][ni], t[mi][ni]);
+				}
+			}
+
+			MatrixWriter<FixedI8, GN>::write(row, col, t);
 		}
 
 		template<const usize M_TILES, const usize N_TILES>

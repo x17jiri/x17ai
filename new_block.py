@@ -128,6 +128,7 @@ def run_attn() -> None:
 
 	q = rms_norm(q)
 	k = rms_norm(k)
+	kv = torch.cat((k, v), dim=2)
 
 	store_tensor(q, "q.bin", expected_variance=1.0)
 	store_tensor(q, "q_i8.bin")
