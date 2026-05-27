@@ -23,6 +23,7 @@ def create_inputs() -> None:
 	generator.manual_seed(42)
 
 	x = new_randn(N_INPUTS, D_MODEL, generator=generator)
+	qk_norm_scales = new_ones(1, HEAD_DIM * N_HEADS) * 1.3
 	attn_q_weights = new_randn(N_HEADS*HEAD_DIM, SPARSE_FAN_IN, generator=generator)
 	attn_kv_weights = new_randn(2*N_HEADS*HEAD_DIM, SPARSE_FAN_IN, generator=generator)
 	attn_g_weights = new_randn(N_HEADS*HEAD_DIM, SPARSE_FAN_IN, generator=generator)
@@ -31,6 +32,8 @@ def create_inputs() -> None:
 
 	store_tensor(x, "x.bin", expected_variance=1.0)
 	store_tensor(x, "x_i8.bin")
+	store_tensor(qk_norm_scales, "qk_norm_scales.bin", expected_variance=0.0)
+	store_tensor(qk_norm_scales, "qk_norm_scales_i8.bin")
 	store_tensor(attn_q_weights, "attn_q_weights.bin", expected_variance=1.0)
 	store_tensor(attn_q_weights, "attn_q_weights_i8.bin")
 	store_tensor(attn_kv_weights, "attn_kv_weights.bin", expected_variance=1.0)
@@ -107,6 +110,7 @@ def run_ffn() -> None:
 
 def run_attn() -> None:
 	x = load_tensor("x_i8.bin", N_INPUTS, D_MODEL)
+	qk_norm_scales = load_tensor("qk_norm_scales.bin", 1, HEAD_DIM * N_HEADS)
 	q_weights = load_tensor("attn_q_weights_i8.bin", N_HEADS*HEAD_DIM, SPARSE_FAN_IN)
 	kv_weights = load_tensor("attn_kv_weights_i8.bin", 2*N_HEADS*HEAD_DIM, SPARSE_FAN_IN)
 	g_weights = load_tensor("attn_g_weights_i8.bin", N_HEADS*HEAD_DIM, SPARSE_FAN_IN)
@@ -127,6 +131,7 @@ def run_attn() -> None:
 	g = g.reshape(N_INPUTS, N_HEADS, VG_DIM)
 
 	q = rms_norm(q)
+	q = q * qk_norm_scales.reshape(1, N_HEADS, HEAD_DIM)
 	k = rms_norm(k)
 	kv = torch.cat((k, v), dim=2)
 
