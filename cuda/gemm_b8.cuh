@@ -198,6 +198,17 @@ namespace b8 {
 			c_stride(GN)
 		{}
 
+		template<const usize M_PER_BLOCK, usize N_PER_BLOCK>
+		X17_HOST_DEVICE static constexpr usize smem_bytes() {
+			return 0;
+		}
+
+		template<const usize M_PER_BLOCK, usize N_PER_BLOCK, const u32 CAP>
+		X17_DEVICE void alloc_smem(SMemAllocator<CAP> &smem_alloc) {}
+
+		template<const usize M_PER_BLOCK, usize N_PER_BLOCK, const usize THREADS_PER_BLOCK>
+		X17_DEVICE void cp_async(usize row, usize col) {}
+
 		template<const usize M_TILES, const usize N_TILES>
 		X17_DEVICE void write(
 			usize row, usize col,
@@ -427,7 +438,10 @@ namespace b8 {
 		static_assert(M_TILES * M_WARPS * 32 == M_PER_BLOCK);
 		static_assert(N_TILES * N_WARPS * 32 == N_PER_BLOCK);
 
-		static constexpr usize SMEM_BYTES = ALoader::SMEM_BYTES + BLoader::SMEM_BYTES;
+		static constexpr usize SMEM_BYTES =
+			ALoader::SMEM_BYTES
+			+ BLoader::SMEM_BYTES
+			+ Writer::template smem_bytes<M_PER_BLOCK, N_PER_BLOCK>();
 		static constexpr usize GMEM_PRELOAD = ALoader::GMEM_PRELOAD;
 		static_assert(ALoader::GMEM_PRELOAD == BLoader::GMEM_PRELOAD);
 
@@ -456,10 +470,13 @@ namespace b8 {
 			SMemAllocator<SMEM_BYTES> smem_alloc;
 			A.alloc_smem(smem_alloc);
 			B.alloc_smem(smem_alloc);
+			C.template alloc_smem<M_PER_BLOCK, N_PER_BLOCK>(smem_alloc);
 			smem_alloc.finish();
 
-			X17_UNROLL
-			for (usize p = 0; p < GMEM_PRELOAD; ++p) {
+			usize output_row = block_m * M_PER_BLOCK + warp_m * M_PER_WARP;
+			usize output_col = block_n * N_PER_BLOCK + warp_n * N_PER_WARP;
+			C.template cp_async<M_PER_BLOCK, N_PER_BLOCK, THREADS_PER_BLOCK>(output_row, output_col);
+			X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD; ++p) {
 				if (p < K_ITERS) {
 					A.template cp_async<THREADS_PER_BLOCK>(p, M_PER_BLOCK*block_m, K_STEP*p, N_PER_BLOCK*block_n);
 					B.template cp_async<THREADS_PER_BLOCK>(p, K_STEP*p, N_PER_BLOCK*block_n, M_PER_BLOCK*block_m);
@@ -510,11 +527,7 @@ namespace b8 {
 				}
 			}
 
-			C.write(
-				block_m * M_PER_BLOCK + warp_m * M_PER_WARP,
-				block_n * N_PER_BLOCK + warp_n * N_PER_WARP,
-				acc
-			);
+			C.write(output_row, output_col, acc);
 		}
 	};
 }

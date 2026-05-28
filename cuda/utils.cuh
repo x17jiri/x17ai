@@ -127,36 +127,6 @@ namespace math {
 		return __fmaf_rn(mul1, mul2, add);
 	}
 
-	constexpr f64 constexpr_inv_sqrt(f64 x) {
-		if (x < 0.0 || x != x) { return std::numeric_limits<f64>::quiet_NaN(); }
-		if (x == 0.0) { return std::numeric_limits<f64>::infinity(); }
-		if (x == std::numeric_limits<f64>::infinity()) { return 0.0; }
-
-		f64 above = std::numeric_limits<f64>::max();
-		f64 below = 0.0;
-		bool stop = false;
-		while (!stop) {
-			f64 v = (0.5 * above) + (0.5 * below);
-			f64 t = (x * v) * v;
-
-			f64 new_above = t >= 1.0 ? v : above;
-			f64 new_below = t <= 1.0 ? v : below;
-
-			stop = (new_above == above) && (new_below == below);
-
-			above = new_above;
-			below = new_below;
-		}
-
-		f64 above_err = ((x * above) * above) - 1.0;
-		f64 below_err = 1.0 - ((x * below) * below);
-		if (above_err > below_err) {
-			return below;
-		} else {
-			return above;
-		}
-	}
-
 	constexpr f64 constexpr_sqrt(f64 x) {
 		if (x < 0.0 || x != x) { return std::numeric_limits<f64>::quiet_NaN(); }
 		if (x == 0.0) { return 0.0; }
@@ -180,6 +150,37 @@ namespace math {
 
 		f64 above_err = (above * above) - x;
 		f64 below_err = x - (below * below);
+		if (above_err > below_err) {
+			return below;
+		} else {
+			return above;
+		}
+	}
+
+	constexpr f64 constexpr_inv_sqrt(f64 x) {
+		if (x < 0.0 || x != x) { return std::numeric_limits<f64>::quiet_NaN(); }
+		if (x == 0.0) { return std::numeric_limits<f64>::infinity(); }
+		if (x == std::numeric_limits<f64>::infinity()) { return 0.0; }
+
+		f64 above = 2.0 / constexpr_sqrt(x);
+		f64 below = 0.0;
+		bool stop = false;
+		while (!stop) {
+			f64 v = (0.5 * above) + (0.5 * below);
+
+			f64 t = (x * v) * v;
+
+			f64 new_above = t >= 1.0 ? v : above;
+			f64 new_below = t <= 1.0 ? v : below;
+
+			stop = (new_above == above) && (new_below == below);
+
+			above = new_above;
+			below = new_below;
+		}
+
+		f64 above_err = ((x * above) * above) - 1.0;
+		f64 below_err = 1.0 - ((x * below) * below);
 		if (above_err > below_err) {
 			return below;
 		} else {
@@ -1999,6 +2000,18 @@ struct SMatrix {
 
 };
 
+template<typename T, const usize N>
+struct SVector {
+	u32 _ptr;
+
+	X17_DEVICE constexpr SVector() : _ptr(0) {}
+	X17_DEVICE constexpr SVector(void *ptr): SVector(cast_smem_ptr_to_uint(ptr)) {}
+	X17_DEVICE constexpr SVector(u32 ptr): _ptr(ptr) {}
+
+	X17_DEVICE constexpr usize elems() const { return N; }
+	X17_DEVICE constexpr usize bytes() const { return N * sizeof(T); }
+};
+
 template<
 	typename T,
 	const usize M,
@@ -2169,6 +2182,30 @@ X17_DEVICE void cp_async_gmem_to_smem(
 	if (tid < CP_PER_ROW) {
 		u8 const *src_ptr = reinterpret_cast<u8 const *>(src._ptr) + tid * sizeof(u128);
 		u32 dst_ptr = dst._ptr + dst_row * dst.ROW_BYTES + dst_col * sizeof(T) + tid * sizeof(u128);
+		sm80::cp_async(reinterpret_cast<u128 const *>(src_ptr), dst_ptr);
+	}
+}
+
+template<
+	const usize THREADS_PER_BLOCK,
+	typename T,
+	const usize SN
+>
+X17_DEVICE void cp_async_gmem_to_smem(
+	usize tid,
+	T const *src,
+	SVector<T, SN> dst
+) {
+	__builtin_assume(tid < THREADS_PER_BLOCK);
+
+	constexpr usize CP_BYTES = sizeof(u128);
+	constexpr usize CP_COUNT = (SN * sizeof(T)) / CP_BYTES;
+	static_assert((SN * sizeof(T)) % CP_BYTES == 0);
+	static_assert(CP_COUNT <= THREADS_PER_BLOCK);
+
+	if (tid < CP_COUNT) {
+		u8 const *src_ptr = reinterpret_cast<u8 const *>(src) + tid * CP_BYTES;
+		u32 dst_ptr = dst._ptr + tid * CP_BYTES;
 		sm80::cp_async(reinterpret_cast<u128 const *>(src_ptr), dst_ptr);
 	}
 }
