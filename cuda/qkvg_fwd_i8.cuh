@@ -83,7 +83,10 @@ struct QKVGMatrixWriter: QKVGBaseMatrixWriter<PROJ_OUTPUTS, SPARSE_FAN_IN> {
 		// q, k
 		X17_UNROLL for (usize hi = 0; hi < HEADS; ++hi) {
 			X17_UNROLL for (usize ni = 0; ni < K_TILES; ++ni) {
-				// TODO TODO TODO - load scales for current hi,ni - exactly 8 values, so 16 bytes
+
+				bf16 norm_scales[8];
+				// TODO TODO TODO - load norm_scales for current hi,ni - exactly 8 values, so 16 bytes
+
 				X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
 					auto &inp32x32 = acc[mi][hi*KV_TILES + ni];
 					auto &out32x32 = t[mi][hi*KV_TILES + ni];
@@ -101,14 +104,18 @@ struct QKVGMatrixWriter: QKVGBaseMatrixWriter<PROJ_OUTPUTS, SPARSE_FAN_IN> {
 					X17_UNROLL for (usize j = 0; j < 4; ++j) {
 						sum[j] += shuffle_xor_sync(sum[j], 1);
 						sum[j] += shuffle_xor_sync(sum[j], 2);
-						// TODO TODO TODO - apply scale
 						f32 k_scale =
 							math::fast::rsqrt(sum[j])
 							* f32(b8::FIXED_I8_SCALE * math::constexpr_sqrt(HEAD_DIM));
 						X17_UNROLL for (usize i = 0; i < 4; ++i) {
 							auto &out = out32x32.v16x32[j/2].h16x16[i/2].v8x16[j%2].h8x8[i%2];
-							out.val0 *= k_scale;
-							out.val1 *= k_scale;
+							if constexpr (HAS_NORM_SCALE) {
+								out.val0 *= k_scale * f32(norm_scales[2 * i]);
+								out.val1 *= k_scale * f32(norm_scales[2 * i + 1]);
+							} else {
+								out.val0 *= k_scale;
+								out.val1 *= k_scale;
+							}
 						}
 					}
 				}
