@@ -25,11 +25,7 @@ def config_value(*names: str, default=None):
 N_INPUTS = int(config_value("seq_len"))
 D_MODEL = int(config_value("D_MODEL"))
 N_HEADS = int(config_value("N_HEADS"))
-QK_DIM = int(config_value("QK_DIM"))
-VG_DIM = int(config_value("VG_DIM"))
-if VG_DIM != QK_DIM:
-	raise ValueError("block.py currently assumes QK_DIM == VG_DIM")
-HEAD_DIM = QK_DIM
+HEAD_DIM = int(config_value("HEAD_DIM"))
 SPARSE_FAN_IN = int(config_value("SPARSE_FAN_IN"))
 F_WIDTH = int(config_value("F_WIDTH"))
 WINDOW_SIZE = int(config_value("WINDOW_SIZE"))
@@ -46,7 +42,7 @@ GELU_VAR_FIX = math.sqrt(GELU_VAR_FIX_2)
 
 # Each split projection should see unit total input variance, so each coordinate of the
 # GeGLU output should contribute variance about 1 / branch_width.
-ATTN_WIDTH = N_HEADS * VG_DIM
+ATTN_WIDTH = N_HEADS * HEAD_DIM
 ATTN_GEGLU_SCALE = math.sqrt(GELU_VAR_FIX_2 / ATTN_WIDTH)
 F_GEGLU_SCALE = math.sqrt(GELU_VAR_FIX_2 / F_WIDTH)
 

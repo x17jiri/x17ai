@@ -40,6 +40,8 @@ def format_shape(shape: tuple[int, ...]) -> str:
 def verify_i8(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
 	a = load_i8(file_a, shape)
 	b = load_i8(file_b, shape)
+	a_f64 = a.to(torch.float64)
+	b_f64 = b.to(torch.float64)
 
 	total = a.numel()
 	exact_match = int((a == b).sum().item())
@@ -50,6 +52,10 @@ def verify_i8(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
 	max_a = int(a.max().item())
 	min_b = int(b.min().item())
 	max_b = int(b.max().item())
+	mean_a = a_f64.mean().item()
+	var_a = a_f64.var(unbiased=False).item()
+	mean_b = b_f64.mean().item()
+	var_b = b_f64.var(unbiased=False).item()
 
 	out_of_range_a = int(((a < -126) | (a > 126)).sum().item())
 	out_of_range_b = int(((b < -126) | (b > 126)).sum().item())
@@ -62,6 +68,8 @@ def verify_i8(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
 	print(f"Shape: {format_shape(shape)}")
 	print(f"A min/max:      {min_a} / {max_a}")
 	print(f"B min/max:      {min_b} / {max_b}")
+	print(f"A mean/var:     {mean_a:.6e} / {var_a:.6e}")
+	print(f"B mean/var:     {mean_b:.6e} / {var_b:.6e}")
 	print(f"Mismatched i8:  {mismatch_count}/{total} ({100.0 * mismatch_count / total:.2f}%)")
 	print(f"Max abs diff:   {max_abs_diff}")
 	print(f"A outside [-100, +100]: {outside_100_a}")

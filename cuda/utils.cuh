@@ -521,6 +521,25 @@ X17_DEVICE void load_shared_4x32b(u32 ptr, u32 &a, u32 &b, u32 &c, u32 &d) {
 }
 
 template<typename T>
+requires(sizeof(T) == 2)
+X17_DEVICE void load_shared_2x16b(u32 ptr, T &a, T &b) {
+	u32 word;
+	asm volatile(
+		"ld.shared.f32 %0, [%1];\n"
+		: "=r"(word)
+		: "r"(ptr)
+	);
+
+	union {
+		u32 val;
+		T halves[2];
+	} u;
+	u.val = word;
+	a = u.halves[0];
+	b = u.halves[1];
+}
+
+template<typename T>
 requires(sizeof(T) == 4)
 X17_DEVICE void load_shared_2x32b(u32 ptr, T &a, T &b) {
 	asm volatile(

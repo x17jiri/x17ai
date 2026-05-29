@@ -30,7 +30,7 @@ namespace Attn_kv_fwd {
 			>
 		>;
 
-	using Writer = QKVGMatrixWriter<HEAD_DIM, KV_PROJ_OUTPUTS, SPARSE_FAN_IN>;
+	using Writer = KVMatrixWriter<HEAD_DIM, KV_PROJ_OUTPUTS, SPARSE_FAN_IN>;
 
 	using Kernel = b8::Gemm<InputLoader, WeightLoader, Writer>;
 

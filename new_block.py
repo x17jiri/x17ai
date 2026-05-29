@@ -23,7 +23,12 @@ def create_inputs() -> None:
 	generator.manual_seed(42)
 
 	x = new_randn(N_INPUTS, D_MODEL, generator=generator)
-	qk_norm_scales = new_ones(1, HEAD_DIM * N_HEADS) * 1.3
+
+	if 0:
+		qk_norm_scales = new_ones(1, HEAD_DIM * N_HEADS)
+	else:
+		qk_norm_scales = new_randn(1, HEAD_DIM * N_HEADS, generator=generator)
+
 	attn_q_weights = new_randn(N_HEADS*HEAD_DIM, SPARSE_FAN_IN, generator=generator)
 	attn_kv_weights = new_randn(2*N_HEADS*HEAD_DIM, SPARSE_FAN_IN, generator=generator)
 	attn_g_weights = new_randn(N_HEADS*HEAD_DIM, SPARSE_FAN_IN, generator=generator)
@@ -128,19 +133,22 @@ def run_attn() -> None:
 	kv = kv.reshape(N_INPUTS, N_HEADS, 2*HEAD_DIM)
 	k = kv[..., :HEAD_DIM]
 	v = kv[..., HEAD_DIM:]
-	g = g.reshape(N_INPUTS, N_HEADS, VG_DIM)
+	g = g.reshape(N_INPUTS, N_HEADS, HEAD_DIM)
 
 	q = rms_norm(q)
 	q = q * qk_norm_scales.reshape(1, N_HEADS, HEAD_DIM)
 	k = rms_norm(k)
+	g = gelu(g)
 	kv = torch.cat((k, v), dim=2)
+	qg = torch.stack((q, g), dim=2).reshape(N_INPUTS, 2 * N_HEADS * HEAD_DIM)
 
 	store_tensor(q, "q.bin", expected_variance=1.0)
 	store_tensor(q, "q_i8.bin")
 	store_tensor(kv, "kv.bin", expected_variance=1.0)
 	store_tensor(kv, "kv_i8.bin")
-	store_tensor(g, "g.bin", expected_variance=1.0)
+	store_tensor(g, "g.bin", expected_variance=1.0 / GELU_VAR_FIX_2)
 	store_tensor(g, "g_i8.bin")
+	store_i8_tensor(qg, "qg_i8.bin")
 
 #---------------------------------------------------------------------------------------------------
 
