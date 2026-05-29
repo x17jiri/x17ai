@@ -22,47 +22,46 @@ def create_inputs() -> None:
 	generator = torch.Generator(device=my_device)
 	generator.manual_seed(42)
 
-	x = new_randn(N_INPUTS, D_MODEL, generator=generator)
+	x = new_randn(N_INPUTS, MODEL_DIM, generator=generator)
 
 	if 0:
 		qk_norm_scales = new_ones(1, HEAD_DIM * N_HEADS)
 	else:
 		qk_norm_scales = new_randn(1, HEAD_DIM * N_HEADS, generator=generator)
 
-	attn_q_weights = new_randn(N_HEADS*HEAD_DIM, SPARSE_FAN_IN, generator=generator)
-	attn_kv_weights = new_randn(2*N_HEADS*HEAD_DIM, SPARSE_FAN_IN, generator=generator)
-	attn_g_weights = new_randn(N_HEADS*HEAD_DIM, SPARSE_FAN_IN, generator=generator)
-	ffn_f_weights = new_randn(2*F_WIDTH, SPARSE_FAN_IN, generator=generator)
-	ffn_y_weights = new_randn(D_MODEL, F_WIDTH, generator=generator)
+#	attn_q_weights = new_randn(N_HEADS*HEAD_DIM, SPARSE_FAN_IN, generator=generator)
+#	attn_kv_weights = new_randn(2*N_HEADS*HEAD_DIM, SPARSE_FAN_IN, generator=generator)
+#	attn_g_weights = new_randn(N_HEADS*HEAD_DIM, SPARSE_FAN_IN, generator=generator)
+	ffn_f_weights = new_randn(2*F_WIDTH, MODEL_DIM, generator=generator)
+	ffn_y_weights = new_randn(2*MODEL_DIM, Y_SPARSE_FAN_IN, generator=generator)
 
 	store_tensor(x, "x.bin", expected_variance=1.0)
 	store_tensor(x, "x_i8.bin")
 	store_tensor(qk_norm_scales, "qk_norm_scales.bin", expected_variance=0.0)
 	store_tensor(qk_norm_scales, "qk_norm_scales_i8.bin")
-	store_tensor(attn_q_weights, "attn_q_weights.bin", expected_variance=1.0)
-	store_tensor(attn_q_weights, "attn_q_weights_i8.bin")
-	store_tensor(attn_kv_weights, "attn_kv_weights.bin", expected_variance=1.0)
-	store_tensor(attn_kv_weights, "attn_kv_weights_i8.bin")
-	store_tensor(attn_g_weights, "attn_g_weights.bin", expected_variance=1.0)
-	store_tensor(attn_g_weights, "attn_g_weights_i8.bin")
+#	store_tensor(attn_q_weights, "attn_q_weights.bin", expected_variance=1.0)
+#	store_tensor(attn_q_weights, "attn_q_weights_i8.bin")
+#	store_tensor(attn_kv_weights, "attn_kv_weights.bin", expected_variance=1.0)
+#	store_tensor(attn_kv_weights, "attn_kv_weights_i8.bin")
+#	store_tensor(attn_g_weights, "attn_g_weights.bin", expected_variance=1.0)
+#	store_tensor(attn_g_weights, "attn_g_weights_i8.bin")
 	store_tensor(ffn_f_weights, "ffn_f_weights.bin", expected_variance=1.0)
 	store_tensor(ffn_f_weights, "ffn_f_weights_i8.bin")
 	store_tensor(ffn_y_weights, "ffn_y_weights.bin", expected_variance=1.0)
 	store_tensor(ffn_y_weights, "ffn_y_weights_i8.bin")
 
-def expand_weights(w: torch.Tensor, D_INP) -> torch.Tensor:
-	D_OUT = w.shape[0]
-	FAN_IN = w.shape[1]
+def expand_sparse_weights(w: torch.Tensor, d_inp: int, block_size: int, step: int) -> torch.Tensor:
+	d_out = w.shape[0]
+	fan_in = w.shape[1]
 
-	assert FAN_IN < D_INP
-	STEP = FAN_IN // 2
-	STEPS = D_INP // STEP
-	CNT_PER_STEP = D_OUT // STEPS
+	assert fan_in <= d_inp
+	assert block_size >= 128
 
-	expanded = torch.zeros((D_OUT, D_INP), dtype=w.dtype, device=w.device)
-	cols = torch.arange(FAN_IN, dtype=torch.int64, device=w.device)
-	for row in range(D_OUT):
-		indices = (cols + (row // CNT_PER_STEP) * STEP) % D_INP
+	expanded = torch.zeros((d_out, d_inp), dtype=w.dtype, device=w.device)
+	cols = torch.arange(fan_in, dtype=torch.int64, device=w.device)
+	for row in range(d_out):
+		block_idx = row // block_size
+		indices = (cols + block_idx * step) % d_inp
 		expanded[row, indices] = w[row]
 	return expanded
 
@@ -83,46 +82,65 @@ def gelu(x: torch.Tensor) -> torch.Tensor:
 	y = ck3 * x * x * x + ck * x
 	return 0.5 * x * torch.tanh(y) + 0.5 * x
 
+def geglu(x: torch.Tensor) -> torch.Tensor:
+	gate = x[..., 0::2]
+	lin = x[..., 1::2]
+	return gelu(gate) * lin
+
+def gated_residual(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+	assert y.shape[-1] == 2 * x.shape[-1]
+	gate = torch.sigmoid(y[..., 0::2])
+	output = y[..., 1::2]
+	return (1.0 - gate) * x + gate * output
+
 #---------------------------------------------------------------------------------------------------
 
 def run_ffn() -> None:
-	x = load_tensor("x_i8.bin", N_INPUTS, D_MODEL)
-	f_weights = load_tensor("ffn_f_weights_i8.bin", 2*F_WIDTH, SPARSE_FAN_IN)
-	y_weights = load_tensor("ffn_y_weights_i8.bin", D_MODEL, F_WIDTH)
+	x = load_tensor("x_i8.bin", N_INPUTS, MODEL_DIM)
+	f_weights = load_tensor("ffn_f_weights_i8.bin", 2*F_WIDTH, MODEL_DIM)
+	y_weights = load_tensor("ffn_y_weights_i8.bin", 2*MODEL_DIM, Y_SPARSE_FAN_IN)
 
 	x.requires_grad_(True)
 	f_weights.requires_grad_(True)
 	y_weights.requires_grad_(True)
 
-	f_weights = expand_weights(f_weights, D_MODEL)
+	y_weights = expand_sparse_weights(y_weights, F_WIDTH, Y_SPARSE_BLOCK, Y_SPARSE_STEP)
 
-	f_pregate = torch.matmul(x, f_weights.transpose(0, 1)) * torch.rsqrt(torch.tensor(SPARSE_FAN_IN))
-	f_gate = f_pregate[..., 0::2]
-	f_lin = f_pregate[..., 1::2]
-	f = gelu(f_gate) * f_lin
+	f_pregate = (
+		torch.matmul(x, f_weights.transpose(0, 1))
+		* torch.rsqrt(torch.tensor(float(MODEL_DIM)))
+	)
+	f = geglu(f_pregate)
 
 	f = quantize(f)
-	y = torch.matmul(f, y_weights.transpose(0, 1)) * torch.rsqrt(torch.tensor(F_WIDTH)) * GELU_VAR_FIX
+	y_pregate = (
+		torch.matmul(f, y_weights.transpose(0, 1))
+		* torch.rsqrt(torch.tensor(float(Y_SPARSE_FAN_IN)))
+		* GELU_VAR_FIX
+	)
+	y = gated_residual(x, y_pregate)
 
 	store_tensor(f_pregate, "ffn_f_pregate.bin", expected_variance=1.0)
 	store_tensor(f_pregate, "ffn_f_pregate_i8.bin")
+	store_tensor(y_pregate, "ffn_y_pregate.bin", expected_variance=1.0)
+	store_tensor(y_pregate, "ffn_y_pregate_i8.bin")
 	store_tensor(f, "ffn_f.bin", expected_variance=1.0 / GELU_VAR_FIX_2)
 	store_tensor(f, "ffn_f_i8.bin")
-	store_tensor(y, "ffn_y.bin", expected_variance=1.0)
+	store_tensor(y, "ffn_y.bin")
 	store_tensor(y, "ffn_y_i8.bin")
 
 #---------------------------------------------------------------------------------------------------
 
 def run_attn() -> None:
-	x = load_tensor("x_i8.bin", N_INPUTS, D_MODEL)
+	x = load_tensor("x_i8.bin", N_INPUTS, MODEL_DIM)
 	qk_norm_scales = load_tensor("qk_norm_scales.bin", 1, HEAD_DIM * N_HEADS)
 	q_weights = load_tensor("attn_q_weights_i8.bin", N_HEADS*HEAD_DIM, SPARSE_FAN_IN)
 	kv_weights = load_tensor("attn_kv_weights_i8.bin", 2*N_HEADS*HEAD_DIM, SPARSE_FAN_IN)
 	g_weights = load_tensor("attn_g_weights_i8.bin", N_HEADS*HEAD_DIM, SPARSE_FAN_IN)
 
-	q_weights = expand_weights(q_weights, D_MODEL)
-	kv_weights = expand_weights(kv_weights, D_MODEL)
-	g_weights = expand_weights(g_weights, D_MODEL)
+	q_weights = expand_weights(q_weights, MODEL_DIM)
+	kv_weights = expand_weights(kv_weights, MODEL_DIM)
+	g_weights = expand_weights(g_weights, MODEL_DIM)
 	scale = torch.rsqrt(torch.tensor(float(SPARSE_FAN_IN)))
 
 	q = torch.matmul(x, q_weights.transpose(0, 1)) * scale
@@ -154,7 +172,7 @@ def run_attn() -> None:
 
 def run_block() -> None:
 	run_ffn()
-	run_attn()
+	#run_attn()
 
 def main() -> None:
 	parser = argparse.ArgumentParser()

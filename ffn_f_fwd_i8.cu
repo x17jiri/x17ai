@@ -14,22 +14,20 @@ namespace Ffn_f_fwd {
 	using InputLoader =
 		b8::MatrixLoader<
 			b8::FixedI8,
-			D_MODEL,
-			64, 128,
-			SPARSE_FAN_IN,
-			F_PROJ_OUTPUTS
+				MODEL_DIM,
+				64, 128
 		>;
 
 	using WeightLoader =
 		b8::MatrixTransLoader<
 			b8::MatrixLoader<
 				b8::FixedI8,
-				SPARSE_FAN_IN,
+					MODEL_DIM,
 				128, 128
 			>
 		>;
 
-	using Writer = b8::FixedI8MatrixGeGluWriter<F_WIDTH, SPARSE_FAN_IN>;
+		using Writer = b8::FixedI8MatrixGeGluWriter<F_WIDTH, MODEL_DIM>;
 
 	static_assert(InputLoader::GMEM_PRELOAD == 2);
 	static_assert(WeightLoader::GMEM_PRELOAD == 2);
@@ -72,12 +70,12 @@ int main(int argc, char *argv[]) {
 	std::vector<b8::FixedI8> h_weights = load_i8_tensor(
 		torch_tensor_path("ffn_f_weights_i8.bin"),
 		F_PROJ_OUTPUTS,
-		SPARSE_FAN_IN
+		MODEL_DIM
 	);
 	std::vector<b8::FixedI8> h_inputs = load_i8_tensor(
 		tensor_path(cli.input_dir, "x_i8.bin"),
 		seq_len,
-		D_MODEL
+		MODEL_DIM
 	);
 	if (h_weights.empty() || h_inputs.empty()) {
 		return 1;
@@ -152,7 +150,7 @@ int main(int argc, char *argv[]) {
 
 	float median_ms = times_ms[num_runs / 2];
 	float min_ms = times_ms[0];
-	double tflops = 2.0 * F_PROJ_OUTPUTS * SPARSE_FAN_IN * seq_len / (median_ms * 1e-3) / 1e12;
+	double tflops = 2.0 * F_PROJ_OUTPUTS * MODEL_DIM * seq_len / (median_ms * 1e-3) / 1e12;
 	printf("Kernel time over %d runs: median %.3f ms  min %.3f ms\n", num_runs, median_ms, min_ms);
 	printf("TFLOPS: %.2f\n", tflops);
 

@@ -14,25 +14,23 @@ torch.set_default_dtype(my_dtype)
 
 config = load_jsonc(CONFIG_PATH)
 
-def config_value(*names: str, default=None):
-	for name in names:
-		if name in config:
-			return config[name]
-	if default is not None:
-		return default
+def config_value(name: str):
+	if name in config:
+		return config[name]
 	raise KeyError(f"Missing config value, tried: {', '.join(names)}")
 
 N_INPUTS = int(config_value("seq_len"))
-D_MODEL = int(config_value("D_MODEL"))
+MODEL_DIM = int(config_value("MODEL_DIM"))
 N_HEADS = int(config_value("N_HEADS"))
 HEAD_DIM = int(config_value("HEAD_DIM"))
-SPARSE_FAN_IN = int(config_value("SPARSE_FAN_IN"))
 F_WIDTH = int(config_value("F_WIDTH"))
+Y_SPARSE_FAN_IN = int(config_value("Y_SPARSE_FAN_IN"))
+Y_SPARSE_STEP = int(config_value("Y_SPARSE_STEP"))
+Y_SPARSE_BLOCK = int(config_value("Y_SPARSE_BLOCK"))
 WINDOW_SIZE = int(config_value("WINDOW_SIZE"))
 L2_NORM_EPS = float(config_value("L2_NORM_EPS"))
 
-SPARSE_SCALE = math.sqrt(D_MODEL / SPARSE_FAN_IN)
-V_SCALE_FIX = float(config_value("V_SCALE_FIX", default=1.5))
+V_SCALE_FIX = float(config_value("V_SCALE_FIX"))
 
 GELU_VAR_FIX_2 = 1.0 / (
 	(1.0 / 3.0)
