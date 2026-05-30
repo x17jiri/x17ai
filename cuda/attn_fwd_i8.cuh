@@ -1,0 +1,665 @@
+#pragma once
+
+#include "utils.cuh"
+#include "utils_b8.cuh"
+
+using b8::FixedI8;
+
+#pragma nv_diag_suppress 186
+
+// =============================================================================
+// Fused FlashAttention-style forward kernel (SM80, bf16, tensor-core MMA).
+//
+// Computes causal sliding-window attention with:
+//   - Attention sinks (StreamingLLM): token 0's key is always attended to;
+//     the token is handled separately since it lives outside the sliding window.
+//   - Scalable-Softmax (SSMax): per-query temperature = ln(e + n_tokens).
+//   - Online softmax with lazy rescaling for numerical stability.
+//   - A token does NOT attend to itself
+//
+// Grid: (seq_len / Q_PER_BLOCK, HEAD_GROUP_CNT)
+// Block: WARPS_PER_BLOCK * 32 threads
+//
+// Memory pipeline is double-buffered by default (controlled by GMEM_PRELOAD).
+// =============================================================================
+
+template<
+	const usize _N_HEADS,
+	const usize _HEADS_PER_KERNEL,
+	const usize _HEAD_DIM,
+	const usize _MODEL_DIM,
+	const f64 V_SCALE_FIX,
+	const usize Q_STRIDE,
+	const usize KV_STRIDE,
+	const usize O_STRIDE
+>
+struct AttnForward {
+	// Expose template parameters needed by dependent kernels.
+	static constexpr usize N_HEADS = _N_HEADS;
+	static constexpr usize HEADS_PER_KERNEL = _HEADS_PER_KERNEL;
+	static constexpr usize HEAD_GROUP_CNT = HEAD_CNT / HEADS_PER_KERNEL;
+	static constexpr usize HEAD_DIM = _HEAD_DIM;
+	static constexpr usize MODEL_DIM = _MODEL_DIM;
+	static constexpr usize GMEM_PRELOAD = 2;
+
+	static constexpr f64 BASE_TEMPERATURE = math::constexpr_inv_sqrt(HEAD_DIM);
+
+	static_assert(HEADS_PER_KERNEL > 0, "HEADS_PER_KERNEL must be > 0");
+	static_assert(HEAD_CNT % HEADS_PER_KERNEL == 0, "HEAD_CNT must be divisible by HEADS_PER_KERNEL");
+	static_assert(VG_DIM <= QK_DIM, "VG_DIM must be <= QK_DIM");
+
+	static constexpr usize HEAD_TILES = HEAD_DIM / 32;
+	static constexpr usize HEAD_GROUP_DIM = HEADS_PER_KERNEL * HEAD_DIM;
+	static constexpr usize PRELOAD_DIM = 2 * HEAD_GROUP_DIM;
+
+	static constexpr usize Q_WARPS = 4;
+	static constexpr usize KV_WARPS = 1;
+	static constexpr usize Q_PER_WARP = 32;
+	static constexpr usize Q_PER_BLOCK = Q_PER_WARP * Q_WARPS;
+	static constexpr usize KV_PER_WARP = 32;
+	static constexpr usize KV_PER_STEP = KV_PER_WARP * KV_WARPS;
+
+	static constexpr usize WARPS_PER_BLOCK = Q_WARPS * KV_WARPS;
+	static constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
+
+	static constexpr usize SMEM_BYTES =
+		KV_PER_STEP * PRELOAD_DIM * GMEM_PRELOAD
+		+ Q_PER_BLOCK * HEAD_GROUP_DIM;
+
+	// Mask the upper-triangular part of a 16x16 score tile (current key and future keys).
+	// A token does NOT attend to itself so the diagonal is masked as well.
+	//
+	// MMA 16x16 fragment layout — each thread owns 4 elements:
+	//   q rows: {tid/4, tid/4 + 8}          ("top" and "bot" halves)
+	//   k cols: {2*(tid%4), 2*(tid%4)+1, 2*(tid%4)+8, 2*(tid%4)+9}
+	//
+	// Mapped to sub[qi][ki].val{0,1}:
+	//   sub[0][0] = (q,   k  ), (q,   k+1)  — top-left 8x8
+	//   sub[0][1] = (q,   k+8), (q,   k+9)  — top-right 8x8
+	//   sub[1][0] = (q+8, k  ), (q+8, k+1)  — bot-left 8x8
+	//   sub[1][1] = (q+8, k+8), (q+8, k+9)  — bot-right 8x8
+	//
+	// For causal masking (q_global <= k_global → mask):
+	//   - top-right 8x8 is entirely masked (q < 8, k >= 8)
+	//   - top-left and bot-right diagonals: element-wise comparison
+	//   - bot-left 8x8 is entirely unmasked (q >= 8, k < 8)
+	static X17_DEVICE void causal_mask_diagonal(Fragment_16x16<f32> &rS_f32) {
+		usize tid = threadIdx.x % WARP_SIZE;
+		usize q = tid / 4;          // 0..7
+		usize k = 2 * (tid % 4);    // 0,2,4,6
+		constexpr f32 NEG_INF = -INFINITY;
+
+		rS_f32.sub[0][1].val0 = NEG_INF;
+		rS_f32.sub[0][1].val1 = NEG_INF;
+
+		rS_f32.sub[0][0].val0 = k < q ? rS_f32.sub[0][0].val0 : NEG_INF;
+		rS_f32.sub[1][1].val0 = k < q ? rS_f32.sub[1][1].val0 : NEG_INF;
+
+		rS_f32.sub[0][0].val1 = k + 1 < q ? rS_f32.sub[0][0].val1 : NEG_INF;
+		rS_f32.sub[1][1].val1 = k + 1 < q ? rS_f32.sub[1][1].val1 : NEG_INF;
+	}
+
+	/// This is the exact opposite of the causal mask
+	static X17_DEVICE void window_mask_diagonal(Fragment_16x16<f32> &rS_f32) {
+		usize tid = threadIdx.x % WARP_SIZE;
+		usize q = tid / 4;          // 0..7
+		usize k = 2 * (tid % 4);    // 0,2,4,6
+		constexpr f32 NEG_INF = -INFINITY;
+
+		rS_f32.sub[1][0].val0 = NEG_INF;
+		rS_f32.sub[1][0].val1 = NEG_INF;
+
+		rS_f32.sub[0][0].val0 = k >= q ? rS_f32.sub[0][0].val0 : NEG_INF;
+		rS_f32.sub[1][1].val0 = k >= q ? rS_f32.sub[1][1].val0 : NEG_INF;
+
+		rS_f32.sub[0][0].val1 = k + 1 >= q ? rS_f32.sub[0][0].val1 : NEG_INF;
+		rS_f32.sub[1][1].val1 = k + 1 >= q ? rS_f32.sub[1][1].val1 : NEG_INF;
+	}
+
+	static constexpr size_t mma_count(size_t seq_len, size_t window_size) {
+		seq_len /= 16;
+		window_size = std::min(seq_len, window_size > 0 ? window_size / 16 : seq_len);
+		usize masked = seq_len - window_size;
+		return (
+			seq_len * seq_len * (QK_TILES + VG_TILES)
+			- masked * masked * (QK_TILES + VG_TILES)
+		) / 2;
+	}
+
+	static constexpr double flops(size_t seq_len, size_t window_size) {
+		return double(mma_count(seq_len, window_size)) * 2.0 * 16.0 * 16.0 * 16.0;
+	}
+
+	X17_DEVICE void calculate_sink_scores(
+		b8::Fragment_32x32<FixedI8> const (&rQ)[HEADS_PER_KERNEL][HEAD_TILES],
+		u32 const (&rSinkK)[HEAD_GROUP_DIM / 16],
+		i32 (&sink_score)[4][HEADS_PER_KERNEL]
+	) {
+		X17_UNROLL for (usize j = 0; j < 4; ++j) {
+			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
+				i32 acc = 0;
+				X17_UNROLL for (usize i = 0; i < HEAD_TILES; ++i) {
+					b8::Fragment_32x32<FixedI8> const &q = rQ[h][i];
+					usize sink_idx = h * (HEAD_DIM / 16) + i * 2;
+
+					u32 sink_left = rSinkK[sink_idx + 0];
+					acc = __dp4a(
+						static_cast<i32>(q.v16x32[j/2].h16x16[0].v8x16[j%2].val),
+						static_cast<i32>(sink_left),
+						acc
+					);
+
+					u32 sink_right = rSinkK[sink_idx + 1];
+					acc = __dp4a(
+						static_cast<i32>(q.v16x32[j/2].h16x16[1].v8x16[j%2].val),
+						static_cast<i32>(sink_right),
+						acc
+					);
+				}
+
+				acc += shuffle_xor_sync(acc, 1);
+				acc += shuffle_xor_sync(acc, 2);
+
+				sink_score[j][h] = acc;
+			}
+		}
+	}
+
+	X17_DEVICE void load_max_scores(
+		f32 const *gMax_ptr,
+		usize seq_len,
+		usize q_start,
+		usize i_head_base,
+		f32 (&top_max)[HEADS_PER_KERNEL],
+		f32 (&bot_max)[HEADS_PER_KERNEL]
+	) {
+		usize tid = threadIdx.x % WARP_SIZE;
+		usize row_in_half = tid / 4;
+		usize top_row = q_start + row_in_half;
+		usize bot_row = top_row + 8;
+
+		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
+			top_max[h] = load_gmem_1x32b(gMax_ptr + (i_head_base + h) * seq_len + top_row);
+			bot_max[h] = load_gmem_1x32b(gMax_ptr + (i_head_base + h) * seq_len + bot_row);
+		}
+	}
+
+	X17_DEVICE void load_sink_kv(
+		FixedI8 const *gSinkKV_ptr,
+		usize i_head_base,
+		u32 (&rSinkKV)[HEAD_GROUP_DIM / 4 / 4]
+	) {
+		usize group_lane = threadIdx.x % 4;
+		FixedI8 const *sink_ptr = gSinkKV_ptr + i_head_base * HEAD_DIM;
+		constexpr usize LOAD_CNT = HEAD_GROUP_DIM / 16;
+		X17_UNROLL for (usize i = 0; i < LOAD_CNT; ++i) {
+			usize src_col = i * 16 + group_lane * 4;
+			rSinkKV[i] = load_gmem_1x32b(reinterpret_cast<u32 const *>(sink_ptr + src_col));
+		}
+	}
+
+	// Lazy-rescale threshold for online softmax
+	//
+	// Standard online softmax rescales O and sum every time a new max appears.
+	// That's expensive (touches all VG_TILES of rO). Instead, we only rescale
+	// when the new max exceeds the current max by more than this threshold.
+	//
+	// When rescaling happens, we also add the threshold to the new max to create some headroom.
+	static constexpr f32 ONLINE_SOFTMAX_THRESHOLD = 5.0 / math::fast::logb_2;
+
+	X17_DEVICE void online_softmax(
+		SoftmaxStats &top,
+		SoftmaxStats &bot,
+		Fragment_16x16<f32> &rS_f32,
+		Fragment_16x16<f32> (&rO_f32)[VG_TILES]
+	) {
+		// The `max` in `top` and `bot` is for the entire owned rows.
+		// The `sum` is just the elements owned by the current thread.
+		// Complete sum is calculated in combine_and_store().
+
+		// Step 1: `max` of the owned values
+		f32 new_top_max = math::max(
+			math::max(rS_f32.sub[0][0].val0, rS_f32.sub[0][0].val1),
+			math::max(rS_f32.sub[0][1].val0, rS_f32.sub[0][1].val1)
+		);
+		f32 new_bot_max = math::max(
+			math::max(rS_f32.sub[1][0].val0, rS_f32.sub[1][0].val1),
+			math::max(rS_f32.sub[1][1].val0, rS_f32.sub[1][1].val1)
+		);
+
+		// Step 2: Rescale outputs if needed
+		f32 top_rescale = 1.0f;
+		f32 bot_rescale = 1.0f;
+		bool needs_rescale = math::max(new_top_max - top.max, new_bot_max - bot.max) > ONLINE_SOFTMAX_THRESHOLD;
+		if (any_sync(needs_rescale)) {
+			new_top_max = math::max(new_top_max, shuffle_xor_sync(new_top_max, 1));
+			new_top_max = math::max(new_top_max, shuffle_xor_sync(new_top_max, 2));
+
+			new_bot_max = math::max(new_bot_max, shuffle_xor_sync(new_bot_max, 1));
+			new_bot_max = math::max(new_bot_max, shuffle_xor_sync(new_bot_max, 2));
+
+			new_top_max =
+				new_top_max - top.max > ONLINE_SOFTMAX_THRESHOLD
+					? new_top_max + ONLINE_SOFTMAX_THRESHOLD
+					: top.max;
+			new_bot_max =
+				new_bot_max - bot.max > ONLINE_SOFTMAX_THRESHOLD
+					? new_bot_max + ONLINE_SOFTMAX_THRESHOLD
+					: bot.max;
+
+			top_rescale = math::fast::expb(top.max - new_top_max);
+			bot_rescale = math::fast::expb(bot.max - new_bot_max);
+
+			scale_top_(rO_f32, top_rescale);
+			scale_bottom_(rO_f32, bot_rescale);
+
+			top.max = new_top_max;
+			bot.max = new_bot_max;
+		}
+
+		// Step 3: Replace scores with expb(score - max)
+		rS_f32.sub[0][0].val0 = math::fast::expb(rS_f32.sub[0][0].val0 - top.max);
+		rS_f32.sub[0][0].val1 = math::fast::expb(rS_f32.sub[0][0].val1 - top.max);
+		rS_f32.sub[0][1].val0 = math::fast::expb(rS_f32.sub[0][1].val0 - top.max);
+		rS_f32.sub[0][1].val1 = math::fast::expb(rS_f32.sub[0][1].val1 - top.max);
+
+		rS_f32.sub[1][0].val0 = math::fast::expb(rS_f32.sub[1][0].val0 - bot.max);
+		rS_f32.sub[1][0].val1 = math::fast::expb(rS_f32.sub[1][0].val1 - bot.max);
+		rS_f32.sub[1][1].val0 = math::fast::expb(rS_f32.sub[1][1].val0 - bot.max);
+		rS_f32.sub[1][1].val1 = math::fast::expb(rS_f32.sub[1][1].val1 - bot.max);
+
+		// Step 4: `sum` of the owned values
+		f32 top_add = (
+			(rS_f32.sub[0][0].val0 + rS_f32.sub[0][0].val1)
+			+ (rS_f32.sub[0][1].val0 + rS_f32.sub[0][1].val1)
+		);
+		top.sum = math::fma(top.sum, top_rescale, top_add);
+
+		f32 bot_add = (
+			(rS_f32.sub[1][0].val0 + rS_f32.sub[1][0].val1)
+			+ (rS_f32.sub[1][1].val0 + rS_f32.sub[1][1].val1)
+		);
+		bot.sum = math::fma(bot.sum, bot_rescale, bot_add);
+	}
+
+	X17_DEVICE void combine_and_store(
+		Fragment_16x16<f32> (&rO_f32)[HEADS_PER_KERNEL][VG_TILES],
+		SoftmaxStats (&top_stats)[HEADS_PER_KERNEL],
+		SoftmaxStats (&bot_stats)[HEADS_PER_KERNEL],
+		usize q_start,
+		usize q_warp_idx,
+		SMatrix<bf16, Q_PER_BLOCK, V_GROUP_DIM> sG,
+		GMatrix<bf16, Q_PER_BLOCK, V_GROUP_DIM> gOut_block,
+		f32 *gL_ptr,
+		usize seq_len,
+		usize i_head_base
+	) {
+		static_assert(KV_WARPS == 1, "current algorithm doesn't reduce over KV warps");
+		Fragment_16x16<bf16> rO[HEADS_PER_KERNEL * VG_TILES];
+		f32 top_L[HEADS_PER_KERNEL];
+		f32 bot_L[HEADS_PER_KERNEL];
+		usize tid = threadIdx.x % WARP_SIZE;
+
+		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+			// Complete the row-wise sum reduction within each warp
+			top_stats[h].sum += shuffle_xor_sync(top_stats[h].sum, 1);
+			top_stats[h].sum += shuffle_xor_sync(top_stats[h].sum, 2);
+
+			bot_stats[h].sum += shuffle_xor_sync(bot_stats[h].sum, 1);
+			bot_stats[h].sum += shuffle_xor_sync(bot_stats[h].sum, 2);
+
+			// Rescale, folding in normalization
+			top_L[h] = math::fast::logb(top_stats[h].sum) + top_stats[h].max;
+			bot_L[h] = math::fast::logb(bot_stats[h].sum) + bot_stats[h].max;
+
+			f32 top_rescale = math::fast::recip(top_stats[h].sum);
+			f32 bot_rescale = math::fast::recip(bot_stats[h].sum);
+
+			scale_top_(rO_f32[h], top_rescale);
+			scale_bottom_(rO_f32[h], bot_rescale);
+			X17_UNROLL for (usize i = 0; i < VG_TILES; i++) {
+				Fragment_16x16<bf16> rG;
+				smem_tile_to_fragment(sG, q_warp_idx * Q_PER_WARP, h * VG_DIM + i * 16, rG);
+				zig_zag_geglu_(rO_f32[h][i], rG);
+				cast(rO_f32[h][i], rO[h * VG_TILES + i]);
+			}
+		}
+
+		// Store log-sum-exp (L) values to GMEM for the backward pass.
+		// Each Q row is owned by 4 threads. We split the work as follows:
+		//    - tid % 4 == 0: write L for "top"
+		//    - tid % 4 == 2: write L for "bot"
+		//    - otherwise: don't write anything
+		if (gL_ptr != nullptr && (tid & 1) == 0) {
+			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+				f32 *gL_head_ptr = gL_ptr + seq_len * (i_head_base + h);
+				gL_head_ptr[q_start + (tid / 4) + ((tid & 2) * 4)] =
+					((tid & 2) == 0 ? top_L[h] : bot_L[h]);
+			}
+		}
+
+		store(rO, gOut_block, q_warp_idx * Q_PER_WARP, 0);
+	}
+
+	static X17_DEVICE void cp_async_kv(
+		GMatrixDynSize<FixedI8, 2 * HEAD_GROUP_DIM> gKV,
+		b8::SMatrix<FixedI8, KV_PER_STEP * GMEM_PRELOAD, PRELOAD_DIM> preload,
+		usize p, usize kv_end
+	) {
+		if (p < kv_end) {
+			auto preload_tile = tile_m<KV_PER_STEP>(preload, p % GMEM_PRELOAD);
+			preload_tile.template cp_async_from<THREADS_PER_BLOCK, KV_PER_STEP, PRELOAD_DIM>(
+				threadIdx.x, gKV, p * KV_PER_STEP, 0, 0, 0
+			);
+		}
+	}
+
+	static X17_DEVICE void cp_async_g(
+		GMatrix<bf16, Q_PER_BLOCK, V_GROUP_DIM> gG_block,
+		SMatrix<bf16, Q_PER_BLOCK, V_GROUP_DIM> sG
+	) {
+		cp_async_gmem_to_smem<THREADS_PER_BLOCK, Q_PER_BLOCK, V_GROUP_DIM>(
+			threadIdx.x, gG_block, sG, 0, 0, 0, 0
+		);
+	}
+
+	X17_DEVICE void run(
+		usize seq_len, FixedI8 *gQ_ptr, FixedI8 *gKV_ptr,
+		FixedI8 const *gSinkK_ptr,
+		FixedI8 const *gSinkV_ptr,
+		f32 const *gMax_ptr,
+		FixedI8 *gOut_ptr,
+		f32 *gL_ptr,
+		usize window_size
+	) {
+		static_assert(KV_WARPS == 1, "current algorithm doesn't reduce over KV warps");
+		usize i_head_group = blockIdx.y;
+		usize i_head_base = i_head_group * HEADS_PER_KERNEL;
+
+		// GMEM Matrices
+		GMatrixDynSize<FixedI8, HEAD_GROUP_DIM> gQ{gQ_ptr + HEAD_DIM * i_head_base, seq_len, Q_STRIDE};
+		GMatrixDynSize<FixedI8, 2*HEAD_GROUP_DIM> gKV{gKV_ptr + 2*HEAD_DIM * i_head_base, seq_len, KV_STRIDE};
+		GMatrixDynSize<FixedI8, HEAD_GROUP_DIM> gO{gOut_ptr + HEAD_DIM * i_head_base, seq_len, O_STRIDE};
+
+		// SMEM layout: KV preload region + Q
+		u32 smem = 0;
+		usize q_warp_idx = threadIdx.x / WARP_SIZE;
+		usize tid = threadIdx.x % WARP_SIZE;
+		b8::SMatrix<FixedI8, KV_PER_STEP * GMEM_PRELOAD, PRELOAD_DIM> sPreload{smem};
+		b8::SMatrix<FixedI8, Q_PER_BLOCK, HEAD_GROUP_DIM> sQ{sPreload._ptr + sPreload.bytes()};
+
+		// Load Q from GMEM to SMEM (committed with the first KV preload).
+		usize q_block_idx = blockIdx.x;
+		usize q_block_start = q_block_idx * Q_PER_BLOCK;
+		usize q_block_end = q_block_start + Q_PER_BLOCK;
+		usize q_start = q_block_start + q_warp_idx * Q_PER_WARP;
+		GMatrix<FixedI8, Q_PER_BLOCK, HEAD_GROUP_DIM> gQ_block = tile_m<Q_PER_BLOCK>(gQ, q_block_idx);
+		cp_async_gmem_to_smem<THREADS_PER_BLOCK, Q_PER_BLOCK, QK_GROUP_DIM>(
+			threadIdx.x, gQ_block, sQ, 0, 0, 0, 0
+		);
+		u32 rSinkK[HEAD_GROUP_DIM / 4 / 4];
+		load_sink_kv(gSinkK_ptr, i_head_base, rSinkK);
+		u32 rSinkV[HEAD_GROUP_DIM / 4 / 4];
+		load_sink_kv(gSinkV_ptr, i_head_base, rSinkV);
+
+		// round window_size up without overflow (window_size == 0 means disabled)
+		usize max_window_size = std::numeric_limits<usize>::max();
+		window_size = window_size > 0 ? window_size : max_window_size;
+		usize window_steps = std::min((window_size - 1) / KV_PER_STEP + 1, max_window_size / KV_PER_STEP);
+		window_size = window_steps * KV_PER_STEP;
+
+		// Sliding-window + causal iteration boundaries (in KV_PER_STEP units).
+		// The Q block attends to a trapezoidal region of KV:
+		//
+		//      |--- window edge ---|--- fully unmasked ---|--- causal edge ---|
+		//   kv_begin         kv_begin_full           kv_end_full            kv_end
+		usize kv_begin = (q_block_start - std::min(q_block_start, window_size)) / KV_PER_STEP;
+		usize kv_begin_full = (q_block_end - std::min(q_block_end, window_size)) / KV_PER_STEP;
+		usize kv_end_full = q_block_start / KV_PER_STEP;
+		usize kv_end = std::min(seq_len, q_block_end + KV_PER_STEP - 1) / KV_PER_STEP;
+
+		// Start preloading K and V from GMEM to SMEM (first commit also commits Q)
+		X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD; ++p) {
+			cp_async_kv(gKV, sPreload, kv_begin + p, kv_end);
+			cp_async_commit();
+		}
+
+		// Temperature is composed of these factors:
+		//     - BASE_TEMPERATURE: used to fix the variance of the dot products
+		//     - logb(e): used so we can replace `exp` with `expb` in softmax
+		//     - ssmax = ln(n) = logb(n) / logb(e): Scalable Softmax
+		//         - Where `n = number of attended tokens + e_approx`
+		//         - Each Q attends to:
+		//             - at most `window_size` previous tokens
+		//             - sink token
+		//             - NOT self
+		//         - `e_approx` is integer approximation of `e` and is used to ensure `ssmax >= 1`
+		// Since we're multiplying and dividing by logb(e), it cancels out, so:
+		//     temperature = BASE_TEMPERATURE * logb(n)
+		u32 e_approx = 3;
+		u32 top_n = std::min(window_size + 1 + e_approx, q_start + tid / 4 + (0 + 1 + e_approx));
+		u32 bot_n = std::min(window_size + 1 + e_approx, q_start + tid / 4 + (8 + 1 + e_approx));
+		f32 top_temperature = f32(BASE_TEMPERATURE) * math::fast::logb(f32(top_n));
+		f32 bot_temperature = f32(BASE_TEMPERATURE) * math::fast::logb(f32(bot_n));
+
+		cp_async_wait<GMEM_PRELOAD - 1>();
+		sync_threads();
+
+		// Load Q from SMEM to registers in the native i8 MMA layout.
+		b8::Fragment_32x32<FixedI8> rQ[HEADS_PER_KERNEL][HEAD_TILES];
+		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+			X17_UNROLL for (usize i = 0; i < HEAD_TILES; i++) {
+				sQ.tile_to_fragment(q_warp_idx * Q_PER_WARP, h * HEAD_DIM + i * 32, rQ[h][i]);
+			}
+		}
+		// Load first KV tile from SMEM to registers
+		// `rKV` holds K tiles during S = Q * K^T, then gets overwritten
+		// with V tiles for O += P * V within the same loop iteration. The interleaved
+		// MMA + SMEM load pattern hides the load latency.
+		b8::SMatrix<FixedI8, KV_PER_STEP, PRELOAD_DIM> sKV;
+		sKV = tile_m<KV_PER_STEP>(sPreload, kv_begin % GMEM_PRELOAD);
+		b8::Fragment_32x32<FixedI8> rKV[HEADS_PER_KERNEL][HEAD_TILES];
+		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+			X17_UNROLL for (usize i = 0; i < HEAD_TILES; i++) {
+				sKV.tile_to_fragment(0, 2 * h * HEAD_DIM + i * 32, rKV[h][i]);
+			}
+		}
+
+		i32 sink_score[4][HEADS_PER_KERNEL];
+		calculate_sink_scores(rQ, rSinkK, sink_score);
+
+		// Initialize online softmax stats with the sink token's contribution.
+		//
+		// The sink token is not part of the KV loop, so we seed the stats:
+		//   max = sink_score + THRESHOLD
+		//   sum = expb(sink_score - max) = expb(-THRESHOLD)
+		//
+		// Why `+ THRESHOLD` in max? This "headroom" is used to reduce the number of rescales.
+		//
+		// Why `* 0.25` in sum? In the MMA fragment layout, 4 threads share each
+		// Q row. Each thread independently accumulates a partial sum and combine_and_store()
+		// sums all 4 partials. The sink contributes only once to the real sum,
+		// so each thread's copy must be 1/4 of the value.
+		f32 initial_scale = math::fast::constexpr_expb(-ONLINE_SOFTMAX_THRESHOLD);
+		SoftmaxStats top_stats[HEADS_PER_KERNEL];
+		SoftmaxStats bot_stats[HEADS_PER_KERNEL];
+		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+			top_sink_score[h] *= top_temperature;
+			bot_sink_score[h] *= bot_temperature;
+
+			f32 sum = initial_scale * 0.25;
+			top_stats[h].max = top_sink_score[h] + ONLINE_SOFTMAX_THRESHOLD;
+			top_stats[h].sum = sum;
+			bot_stats[h].max = bot_sink_score[h] + ONLINE_SOFTMAX_THRESHOLD;
+			bot_stats[h].sum = sum;
+		}
+
+		// O accumulator
+		Fragment_16x16<f32> rO_f32[HEADS_PER_KERNEL][VG_TILES];
+		initial_scale = math::fast::constexpr_expb(-ONLINE_SOFTMAX_THRESHOLD) / SPARSE_SCALE;
+		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
+			X17_UNROLL for (usize i = 0; i < VG_TILES; ++i) {
+				rO_f32[h][i].sub[0][0].val0 = initial_scale * f32(rSinkV[h * QK_DIM / 4 + i * 4 + 0]);
+				rO_f32[h][i].sub[0][0].val1 = initial_scale * f32(rSinkV[h * QK_DIM / 4 + i * 4 + 1]);
+				rO_f32[h][i].sub[0][1].val0 = initial_scale * f32(rSinkV[h * QK_DIM / 4 + i * 4 + 2]);
+				rO_f32[h][i].sub[0][1].val1 = initial_scale * f32(rSinkV[h * QK_DIM / 4 + i * 4 + 3]);
+
+				rO_f32[h][i].sub[1][0].val0 = rO_f32[h][i].sub[0][0].val0;
+				rO_f32[h][i].sub[1][0].val1 = rO_f32[h][i].sub[0][0].val1;
+				rO_f32[h][i].sub[1][1].val0 = rO_f32[h][i].sub[0][1].val0;
+				rO_f32[h][i].sub[1][1].val1 = rO_f32[h][i].sub[0][1].val1;
+			}
+		}
+
+		if (gMax_ptr != nullptr) {
+			f32 top_max[HEADS_PER_KERNEL];
+			f32 bot_max[HEADS_PER_KERNEL];
+			load_max_scores(gMax_ptr, seq_len, q_start, i_head_base, top_max, bot_max);
+
+			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
+				f32 top_seed = math::fast::expb(top_sink_score[h] - top_max[h]);
+				f32 bot_seed = math::fast::expb(bot_sink_score[h] - bot_max[h]);
+
+				top_stats[h].max = top_max[h];
+				top_stats[h].sum = top_seed * 0.25f;
+				bot_stats[h].max = bot_max[h];
+				bot_stats[h].sum = bot_seed * 0.25f;
+
+				X17_UNROLL for (usize i = 0; i < VG_TILES; ++i) {
+					f32 sink0 = f32(rSinkV[h * QK_DIM / 4 + i * 4 + 0]) / SPARSE_SCALE;
+					f32 sink1 = f32(rSinkV[h * QK_DIM / 4 + i * 4 + 1]) / SPARSE_SCALE;
+					f32 sink2 = f32(rSinkV[h * QK_DIM / 4 + i * 4 + 2]) / SPARSE_SCALE;
+					f32 sink3 = f32(rSinkV[h * QK_DIM / 4 + i * 4 + 3]) / SPARSE_SCALE;
+
+					rO_f32[h][i].sub[0][0].val0 = top_seed * sink0;
+					rO_f32[h][i].sub[0][0].val1 = top_seed * sink1;
+					rO_f32[h][i].sub[0][1].val0 = top_seed * sink2;
+					rO_f32[h][i].sub[0][1].val1 = top_seed * sink3;
+
+					rO_f32[h][i].sub[1][0].val0 = bot_seed * sink0;
+					rO_f32[h][i].sub[1][0].val1 = bot_seed * sink1;
+					rO_f32[h][i].sub[1][1].val0 = bot_seed * sink2;
+					rO_f32[h][i].sub[1][1].val1 = bot_seed * sink3;
+				}
+			}
+		}
+
+		// Sequential loop over KV
+		X17_NO_UNROLL for (usize kv_step = kv_begin; kv_step < kv_end; ++kv_step) {
+			// S = Q * K^T, interleaved with V load (rKV: K -> V)
+			Fragment_16x16<f32> rS_f32[HEADS_PER_KERNEL];
+			zero_(rS_f32);
+			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+				X17_UNROLL for (usize i = 0; i < VG_TILES; i++) {
+					mma_a_bt(rQ[h][i], rKV[h][i], rS_f32[h]);
+					smem_tile_to_fragment_trans(sKV, 0, V_SMEM_COL + h * VG_DIM + i * 16, rKV[h][i]);
+				}
+				X17_UNROLL for (usize i = VG_TILES; i < QK_TILES; i++) {
+					mma_a_bt(rQ[h][i], rKV[h][i], rS_f32[h]);
+				}
+
+				// Scaling must happen before masking to avoid -inf * 0 == NaN when scale == 0
+				scale_top_(rS_f32[h], top_temperature);
+				scale_bottom_(rS_f32[h], bot_temperature);
+			}
+
+			// Apply masks
+			if (kv_step < kv_begin_full || kv_step >= kv_end_full) {
+				// Window mask: mask keys outside the sliding window
+				if (kv_step < kv_begin_full) {
+					usize diag_warp = Q_WARPS + kv_step - kv_begin_full;
+					if (q_warp_idx == diag_warp) {
+						X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+							window_mask_diagonal(rS_f32[h]);
+						}
+					} else if (q_warp_idx > diag_warp) {
+						X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+							fill_(rS_f32[h], -INFINITY);
+						}
+					}
+				}
+				// Causal mask: mask future keys
+				if (kv_step >= kv_end_full) {
+					usize diag_warp = kv_step - kv_end_full;
+					if (q_warp_idx == diag_warp) {
+						X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+							causal_mask_diagonal(rS_f32[h]);
+						}
+					} else if (q_warp_idx < diag_warp) {
+						X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+							fill_(rS_f32[h], -INFINITY);
+						}
+					}
+				}
+			}
+
+			Fragment_16x16<bf16> rP[HEADS_PER_KERNEL];
+			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+				online_softmax(top_stats[h], bot_stats[h], rS_f32[h], rO_f32[h]);
+				cast(rS_f32[h], rP[h]);
+			}
+
+			{ // Get more data from GMEM
+				// Wait for the next batch of GMEM -> SMEM preloads to complete
+				cp_async_wait<GMEM_PRELOAD - 2>();
+				sync_threads();
+				sKV = tile_m<KV_PER_STEP>(sPreload, (kv_step + 1) % GMEM_PRELOAD);
+
+				// Preload next KV tiles from GMEM. Once the KV pipeline reaches its end,
+				// reuse the now-dead Q staging area to start pulling in the per-row G tile
+				// for the post-attention fused op.
+				usize next_kv = kv_step + GMEM_PRELOAD;
+				if (next_kv < kv_end) {
+					cp_async_kv(gKV, sPreload, next_kv, kv_end);
+				} else if (next_kv == kv_end) {
+					constexpr usize MIN_KV_STEPS = Q_PER_BLOCK / KV_PER_STEP;
+					static_assert(MIN_KV_STEPS >= GMEM_PRELOAD, "without this, next_kv == kv_end will never be true");
+					static_assert(GMEM_PRELOAD > 1, "we need one more iteration after cp_async_g to call wait and sync");
+					cp_async_g(gG_block, sG);
+				}
+				cp_async_commit();
+			}
+
+			// rO += S * V, interleaved with next K load
+			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
+				X17_UNROLL for (usize i = 0; i < VG_TILES; i++) {
+					mma_a_bt(rP[h], rKV[h][i], rO_f32[h][i]);
+					smem_tile_to_fragment(sKV, 0, h * QK_DIM + i * 16, rKV[h][i]);
+				}
+				X17_UNROLL for (usize i = VG_TILES; i < QK_TILES; i++) {
+					smem_tile_to_fragment(sKV, 0, h * QK_DIM + i * 16, rKV[h][i]);
+				}
+			}
+		}
+
+		GMatrix<bf16, Q_PER_BLOCK, V_GROUP_DIM> gOut_block = tile_m<Q_PER_BLOCK>(gO, q_block_idx);
+		combine_and_store(
+			rO_f32,
+			top_stats,
+			bot_stats,
+			q_start,
+			q_warp_idx,
+			sG,
+			gOut_block,
+			gL_ptr,
+			seq_len,
+			i_head_base
+		);
+	}
+};
+
+template<typename AttnForward>
+__global__ __launch_bounds__(AttnForward::THREADS_PER_BLOCK) void
+attn_forward(
+	usize seq_len, bf16 *gQ_ptr,
+	bf16 *gK_ptr, bf16 *gV_ptr, bf16 *gG_ptr,
+	bf16 const *gSinkK_ptr,
+	bf16 const *gSinkV_ptr,
+	f32 const *gMax_ptr,
+	bf16 *gOut_ptr,
+	f32 *gL_ptr,
+	usize window_size
+) {
+	AttnForward attn_forward = AttnForward();
+	attn_forward.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gG_ptr, gSinkK_ptr, gSinkV_ptr, gMax_ptr, gOut_ptr, gL_ptr, window_size);
+}
