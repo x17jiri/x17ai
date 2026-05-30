@@ -3,6 +3,7 @@
 #include "utils_b8.cuh"
 
 #pragma nv_diag_suppress 186
+#pragma nv_diag_suppress 179
 
 namespace b8 {
 	template<
@@ -10,7 +11,9 @@ namespace b8 {
 		const usize _GN,
 		const usize _M, const usize _K,
 		const usize _FAN_IN = _GN,
-		const usize _D_OUT = 0,
+		const usize _STEP = 0,
+		const usize _BLOCK = 0,
+		const bool _MODULO = false,
 		const usize _GMEM_PRELOAD = 2
 	>
 	requires(sizeof(T) == 1)
@@ -21,15 +24,19 @@ namespace b8 {
 		static constexpr usize M = _M;
 		static constexpr usize K = _K;
 		static constexpr usize FAN_IN = _FAN_IN;
-		static constexpr usize STEP = FAN_IN < GN ? FAN_IN / 2 : 0;
-		static constexpr usize STEPS = FAN_IN < GN ? GN / STEP : 1;
-		static constexpr usize CNT_PER_STEP = _D_OUT / STEPS;
+		static constexpr usize STEP = _STEP;
+		static constexpr usize BLOCK = _BLOCK;
+		static constexpr bool MODULO = _MODULO;
 		static constexpr usize GMEM_PRELOAD = _GMEM_PRELOAD;
 
+		static_assert(FAN_IN <= GN);
 		static_assert(GN % K == 0);
 		static_assert(M % 32 == 0);
 		static_assert(K % 32 == 0);
 		static_assert(FAN_IN % 32 == 0);
+		static_assert(STEP == 0 || (GN % STEP == 0));
+		static_assert(STEP == 0 || (BLOCK > 0));
+		static_assert(STEP == 0 || (BLOCK % M == 0));
 
 		static constexpr usize SMEM_BYTES = M * K * GMEM_PRELOAD * sizeof(T);
 
@@ -55,18 +62,13 @@ namespace b8 {
 		}
 
 		/// `cp_async` a tile with size [M, K] at position [m, k] into SMEM.
-		/// `step` may be a global K-step; the shared-memory ring slot is selected
-		/// modulo `GMEM_PRELOAD`.
 		template<const usize THREADS_PER_BLOCK>
 		X17_DEVICE void cp_async(usize step, usize m, usize k, usize other_n) {
-			constexpr bool GMEM_COL_MODULO = STEPS > 1;
 			usize k_shift = 0;
-			if constexpr (GMEM_COL_MODULO) {
-				static_assert(CNT_PER_STEP * STEPS == _D_OUT);
-				static_assert(CNT_PER_STEP % M == 0);
-				k_shift = other_n / CNT_PER_STEP * STEP;
+			if constexpr (BLOCK > 0) {
+				k_shift = (other_n / BLOCK) * STEP;
 			}
-			sPreload.template cp_async_from<THREADS_PER_BLOCK, M, K, GN, GMEM_COL_MODULO>(
+			sPreload.template cp_async_from<THREADS_PER_BLOCK, M, K, GN, MODULO>(
 				threadIdx.x,
 				gInput,
 				m, k + k_shift,
@@ -187,9 +189,19 @@ namespace b8 {
 		}
 	};
 
-	template<typename T, const usize GN>
+	template<
+		typename T,
+		const usize _GN,
+		const usize _M_PER_BLOCK = 0,
+		const usize _N_PER_BLOCK = 0
+	>
 	requires(sizeof(T) == 1)
 	struct MatrixWriter {
+		static constexpr usize GN = _GN;
+		static constexpr usize M_PER_BLOCK = _M_PER_BLOCK;
+		static constexpr usize N_PER_BLOCK = _N_PER_BLOCK;
+		static constexpr usize SMEM_BYTES = 0;
+
 		T *gC;
 		usize c_stride;
 
@@ -198,15 +210,10 @@ namespace b8 {
 			c_stride(GN)
 		{}
 
-		template<const usize M_PER_BLOCK, usize N_PER_BLOCK>
-		X17_HOST_DEVICE static constexpr usize smem_bytes() {
-			return 0;
-		}
-
-		template<const usize M_PER_BLOCK, usize N_PER_BLOCK, const u32 CAP>
+		template<const u32 CAP>
 		X17_DEVICE void alloc_smem(SMemAllocator<CAP> &smem_alloc) {}
 
-		template<const usize M_PER_BLOCK, usize N_PER_BLOCK, const usize THREADS_PER_BLOCK>
+		template<const usize THREADS_PER_BLOCK>
 		X17_DEVICE void cp_async(usize row, usize col) {}
 
 		template<const usize M_TILES, const usize N_TILES>
@@ -221,35 +228,31 @@ namespace b8 {
 		}
 	};
 
-	template<const usize GN, const f64 SCALE>
-	struct FixedI8MatrixWriter: MatrixWriter<FixedI8, GN> {
+	template<const usize GN, const usize M_PER_BLOCK, const usize N_PER_BLOCK, const f64 SCALE>
+	struct FixedI8MatrixWriter: MatrixWriter<FixedI8, GN, M_PER_BLOCK, N_PER_BLOCK> {
+		using Base = MatrixWriter<FixedI8, GN, M_PER_BLOCK, N_PER_BLOCK>;
 
 		X17_DEVICE FixedI8MatrixWriter(FixedI8 *gC):
-			MatrixWriter<FixedI8, GN>(gC)
+			Base(gC)
 		{}
 
-		static X17_DEVICE i8 conv_one(f32 inp) {
-			inp = fmaxf(-127.0f, fminf(+127.0f, inp));
-			return __float2int_rn(inp);
-		}
-
-		X17_DEVICE void conv(b32::Fragment_16x16<f32> const &inp, Fragment_16x16<i8> &out) {
+		X17_DEVICE void conv(b32::Fragment_16x16<f32> const &inp, Fragment_16x16<FixedI8> &out) {
 			union {
 				u32 value;
 				struct {
-					i8 top_0, top_1, bot_0, bot_1;
+					FixedI8 top_0, top_1, bot_0, bot_1;
 				} packed;
 			} left, right;
 
-			left.packed.top_0 = conv_one(inp.v8x16[0].h8x8[0].val0);
-			left.packed.top_1 = conv_one(inp.v8x16[0].h8x8[0].val1);
-			left.packed.bot_0 = conv_one(inp.v8x16[1].h8x8[0].val0);
-			left.packed.bot_1 = conv_one(inp.v8x16[1].h8x8[0].val1);
+			left.packed.top_0 = to_fixedi8(inp.v8x16[0].h8x8[0].val0);
+			left.packed.top_1 = to_fixedi8(inp.v8x16[0].h8x8[0].val1);
+			left.packed.bot_0 = to_fixedi8(inp.v8x16[1].h8x8[0].val0);
+			left.packed.bot_1 = to_fixedi8(inp.v8x16[1].h8x8[0].val1);
 
-			right.packed.top_0 = conv_one(inp.v8x16[0].h8x8[1].val0);
-			right.packed.top_1 = conv_one(inp.v8x16[0].h8x8[1].val1);
-			right.packed.bot_0 = conv_one(inp.v8x16[1].h8x8[1].val0);
-			right.packed.bot_1 = conv_one(inp.v8x16[1].h8x8[1].val1);
+			right.packed.top_0 = to_fixedi8(inp.v8x16[0].h8x8[1].val0);
+			right.packed.top_1 = to_fixedi8(inp.v8x16[0].h8x8[1].val1);
+			right.packed.bot_0 = to_fixedi8(inp.v8x16[1].h8x8[1].val0);
+			right.packed.bot_1 = to_fixedi8(inp.v8x16[1].h8x8[1].val1);
 
 			usize tid = threadIdx.x;
 			u32 u0 = left.value;
@@ -271,7 +274,7 @@ namespace b8 {
 			out.v8x16[1].val = __byte_perm(w0, w1, 0x7632);
 		}
 
-		X17_DEVICE void conv(b32::Fragment_32x32<f32> const &inp, Fragment_32x32<i8> &out) {
+		X17_DEVICE void conv(b32::Fragment_32x32<f32> const &inp, Fragment_32x32<FixedI8> &out) {
 			X17_UNROLL for (usize j = 0; j < 2; ++j) {
 				X17_UNROLL for (usize i = 0; i < 2; ++i) {
 					conv(inp.v16x32[j].h16x16[i], out.v16x32[j].h16x16[i]);
@@ -292,7 +295,7 @@ namespace b8 {
 				}
 			}
 
-			MatrixWriter<FixedI8, GN>::write(row, col, t);
+			Base::write(row, col, t);
 		}
 
 		template<const usize M_TILES, const usize N_TILES>
@@ -310,18 +313,19 @@ namespace b8 {
 				}
 			}
 
-			MatrixWriter<FixedI8, GN>::write(row, col, t);
+			Base::write(row, col, t);
 		}
 	};
 
-	template<const usize GN, const usize FAN_IN>
-	struct FixedI8MatrixGeGluWriter: MatrixWriter<FixedI8, GN> {
+	template<const usize GN, const usize M_PER_BLOCK, const usize N_PER_BLOCK, const usize FAN_IN>
+	struct FixedI8MatrixGeGluWriter: MatrixWriter<FixedI8, GN, M_PER_BLOCK, N_PER_BLOCK> {
+		using Base = MatrixWriter<FixedI8, GN, M_PER_BLOCK, N_PER_BLOCK>;
 
 		X17_DEVICE FixedI8MatrixGeGluWriter(FixedI8 *gC):
-			MatrixWriter<FixedI8, GN>(gC)
+			Base(gC)
 		{}
 
-		X17_DEVICE i8 geglu(b32::Fragment_8x8<i32> frag) {
+		X17_DEVICE FixedI8 geglu(b32::Fragment_8x8<i32> frag) {
 			// `frag.val0` and `frag.val1` are raw accumulators of `sum(FixedI8 * FixedI8)`.
 			// Each `FixedI8` is scaled by FIXED_I8_SCALE, so `FixedI8 * FixedI8` is scaled
 			// by `FIXED_I8_SCALE^2`. We need to divide the inputs by this value.
@@ -340,8 +344,7 @@ namespace b8 {
 			constexpr f64 OUT_SCALE_2 = 1.0 / (FAN_IN * FIXED_I8_SCALE_2);
 			f32 gate = math::fast::gelu<INP_SCALE_2, OUT_SCALE_2, 1.0>(f32(frag.val0)).val;
 			f32 lin = f32(frag.val1);
-			f32 val_f = fmaxf(-127.0f, fminf(+127.0f, gate * lin));
-			return __float2int_rn(val_f);
+			return to_fixedi8(gate * lin);
 		}
 
 		template<const usize M_TILES, const usize N_TILES>
@@ -353,7 +356,7 @@ namespace b8 {
 
 			union {
 				struct {
-					i8 a, b, c, d;
+					FixedI8 a, b, c, d;
 				} packed;
 				u32 value;
 			} u1, u2, u3, u4, v1, v2, v3, v4;
@@ -410,56 +413,44 @@ namespace b8 {
 				}
 			}
 
-			MatrixWriter<FixedI8, GN>::write(row, col / 2, t);
+			Base::write(row, col / 2, t);
 		}
 	};
 
-	template<const usize GN, const usize FAN_IN>
-	struct FixedI8MatrixResidualWriter: MatrixWriter<FixedI8, GN> {
-		using Base = MatrixWriter<FixedI8, GN>;
+	template<const usize GN, const usize M_PER_BLOCK, const usize N_PER_BLOCK, const usize FAN_IN>
+	struct FixedI8MatrixResidualWriter: MatrixWriter<FixedI8, GN, M_PER_BLOCK, N_PER_BLOCK> {
+		using Base = MatrixWriter<FixedI8, GN, M_PER_BLOCK, N_PER_BLOCK>;
 		using GResidual = GMatrixDynSize<FixedI8, GN>;
+		using SResidual = SMatrix<FixedI8, M_PER_BLOCK, N_PER_BLOCK>;
+
+		static constexpr usize SMEM_BYTES = M_PER_BLOCK * N_PER_BLOCK * sizeof(FixedI8);
+
+		static_assert(N_PER_BLOCK % 2 == 0);
 
 		GResidual gResidual;
-		u32 sResidual;
+		SResidual sResidual;
 		usize residualRow0;
 		usize residualCol0;
-		usize residualRowBytes;
 
 		X17_DEVICE FixedI8MatrixResidualWriter(FixedI8 *gC, FixedI8 *gResidual):
 			Base(gC),
 			gResidual(gResidual),
-			sResidual(0),
+			sResidual(),
 			residualRow0(0),
-			residualCol0(0),
-			residualRowBytes(0)
+			residualCol0(0)
 		{}
 
-		template<const usize M_PER_BLOCK, const usize N_PER_BLOCK>
-		X17_HOST_DEVICE static constexpr usize smem_cols() {
-			static_assert(N_PER_BLOCK % 2 == 0);
-			// Keep byte rows 128-bit aligned for cp.async + ldmatrix.
-			return N_PER_BLOCK;
-		}
-
-		template<const usize M_PER_BLOCK, const usize N_PER_BLOCK>
-		X17_HOST_DEVICE static constexpr usize smem_bytes() {
-			return M_PER_BLOCK * smem_cols<M_PER_BLOCK, N_PER_BLOCK>() * sizeof(FixedI8);
-		}
-
-		template<const usize M_PER_BLOCK, const usize N_PER_BLOCK, const u32 CAP>
+		template<const u32 CAP>
 		X17_DEVICE void alloc_smem(SMemAllocator<CAP> &smem_alloc) {
-			sResidual = smem_alloc.alloc(smem_bytes<M_PER_BLOCK, N_PER_BLOCK>());
+			sResidual._ptr = smem_alloc.alloc(SMEM_BYTES);
 		}
 
-		template<const usize M_PER_BLOCK, const usize N_PER_BLOCK, const usize THREADS_PER_BLOCK>
+		template<const usize THREADS_PER_BLOCK>
 		X17_DEVICE void cp_async(usize row, usize col) {
-			constexpr usize SMEM_COLS = smem_cols<M_PER_BLOCK, N_PER_BLOCK>();
 			residualRow0 = (row / M_PER_BLOCK) * M_PER_BLOCK;
 			residualCol0 = (col / N_PER_BLOCK) * (N_PER_BLOCK / 2);
-			residualRowBytes = SMEM_COLS * sizeof(FixedI8);
 
-			SMatrix<FixedI8, M_PER_BLOCK, SMEM_COLS> sResidualTile(sResidual);
-			sResidualTile.template cp_async_from<THREADS_PER_BLOCK, M_PER_BLOCK, N_PER_BLOCK / 2, GN>(
+			sResidual.template cp_async_from<THREADS_PER_BLOCK, M_PER_BLOCK, N_PER_BLOCK / 2, GN>(
 				threadIdx.x,
 				gResidual,
 				residualRow0,
@@ -469,12 +460,7 @@ namespace b8 {
 			);
 		}
 
-		static X17_DEVICE i8 conv_one(f32 inp) {
-			inp = fmaxf(-127.0f, fminf(+127.0f, inp));
-			return __float2int_rn(inp);
-		}
-
-		X17_DEVICE i8 residual_gate(b32::Fragment_8x8<i32> frag, i8 residual) {
+		X17_DEVICE FixedI8 residual_gate(b32::Fragment_8x8<i32> frag, FixedI8 residual) {
 			constexpr f64 SCALE = math::constexpr_sqrt(math::fast::GELU_VAR_FIX_2 / f64(FAN_IN));
 			constexpr f64 RAW_TO_REAL = SCALE / (f64(FIXED_I8_SCALE) * f64(FIXED_I8_SCALE));
 			constexpr f64 RAW_TO_FIXED = SCALE / f64(FIXED_I8_SCALE);
@@ -483,37 +469,7 @@ namespace b8 {
 			f32 residual_f = f32(residual);
 			f32 output_f = f32(frag.val1) * f32(RAW_TO_FIXED);
 			f32 val_f = math::fma(gate, output_f - residual_f, residual_f);
-			return conv_one(val_f);
-		}
-
-		X17_DEVICE void load_residual_fragment(
-			usize row,
-			usize col,
-			Fragment_32x32<FixedI8> &dst
-		) {
-			usize tid = threadIdx.x;
-			usize smem_row = row | (tid & 31);
-			usize swizzle = (tid & 7) << 4;
-			usize col_off = col * sizeof(FixedI8);
-			u32 addr = sResidual + (smem_row * residualRowBytes) + (col_off ^ swizzle);
-
-			sm80::ldmatrix_8x8xu16_x4(
-				addr,
-				dst.v16x32[0].h16x16[0].v8x16[0].val,
-				dst.v16x32[0].h16x16[0].v8x16[1].val,
-				dst.v16x32[1].h16x16[0].v8x16[0].val,
-				dst.v16x32[1].h16x16[0].v8x16[1].val
-			);
-
-			addr ^= 16;
-
-			sm80::ldmatrix_8x8xu16_x4(
-				addr,
-				dst.v16x32[0].h16x16[1].v8x16[0].val,
-				dst.v16x32[0].h16x16[1].v8x16[1].val,
-				dst.v16x32[1].h16x16[1].v8x16[0].val,
-				dst.v16x32[1].h16x16[1].v8x16[1].val
-			);
+			return to_fixedi8(val_f);
 		}
 
 		template<const usize M_TILES, const usize N_TILES>
@@ -525,10 +481,10 @@ namespace b8 {
 
 			union Packed4 {
 				struct {
-					i8 a, b, c, d;
+					FixedI8 a, b, c, d;
 				} packed;
 				u32 value;
-			} u1, u2, u3, u4, v1, v2, v3, v4, r1, r2, r3, r4;
+			} u1, u2, u3, u4, v1, v2, v3, v4, r1, r2, r3, r4, s1, s2, s3, s4;
 
 			Fragment_32x32<FixedI8> residual[M_TILES][N_TILES/2];
 			Fragment_32x32<FixedI8> t[M_TILES][N_TILES/2];
@@ -537,7 +493,7 @@ namespace b8 {
 
 			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
 				X17_UNROLL for (usize no = 0; no < N_TILES / 2; ++no) {
-					load_residual_fragment(local_row + 32 * mi, local_col + 32 * no, residual[mi][no]);
+					sResidual.tile_to_fragment(local_row + 32 * mi, local_col + 32 * no, residual[mi][no]);
 				}
 			}
 
@@ -546,30 +502,55 @@ namespace b8 {
 					auto &inp32x32 = acc[mi][ni];
 					auto &res32x32 = residual[mi][ni / 2];
 
+					// Residual fragments are loaded in the final stored layout.
+					// Reconstruct the pre-store 8x8 packing so each residual byte lines up
+					// with the corresponding gate/output accumulator pair.
 					r1.value = res32x32.v16x32[0].h16x16[ni % 2].v8x16[0].val;
 					r2.value = res32x32.v16x32[0].h16x16[ni % 2].v8x16[1].val;
 					r3.value = res32x32.v16x32[1].h16x16[ni % 2].v8x16[0].val;
 					r4.value = res32x32.v16x32[1].h16x16[ni % 2].v8x16[1].val;
 
-					u1.packed.a = residual_gate(inp32x32.v16x32[0].h16x16[0].v8x16[0].h8x8[0], r1.packed.a);
-					u1.packed.b = residual_gate(inp32x32.v16x32[0].h16x16[0].v8x16[1].h8x8[0], r2.packed.a);
-					u1.packed.c = residual_gate(inp32x32.v16x32[1].h16x16[0].v8x16[0].h8x8[0], r3.packed.a);
-					u1.packed.d = residual_gate(inp32x32.v16x32[1].h16x16[0].v8x16[1].h8x8[0], r4.packed.a);
+					s1.packed.a = r1.packed.a;
+					s1.packed.b = r2.packed.a;
+					s1.packed.c = r3.packed.a;
+					s1.packed.d = r4.packed.a;
 
-					u2.packed.a = residual_gate(inp32x32.v16x32[0].h16x16[0].v8x16[0].h8x8[1], r1.packed.b);
-					u2.packed.b = residual_gate(inp32x32.v16x32[0].h16x16[0].v8x16[1].h8x8[1], r2.packed.b);
-					u2.packed.c = residual_gate(inp32x32.v16x32[1].h16x16[0].v8x16[0].h8x8[1], r3.packed.b);
-					u2.packed.d = residual_gate(inp32x32.v16x32[1].h16x16[0].v8x16[1].h8x8[1], r4.packed.b);
+					s2.packed.a = r1.packed.b;
+					s2.packed.b = r2.packed.b;
+					s2.packed.c = r3.packed.b;
+					s2.packed.d = r4.packed.b;
 
-					u3.packed.a = residual_gate(inp32x32.v16x32[0].h16x16[1].v8x16[0].h8x8[0], r1.packed.c);
-					u3.packed.b = residual_gate(inp32x32.v16x32[0].h16x16[1].v8x16[1].h8x8[0], r2.packed.c);
-					u3.packed.c = residual_gate(inp32x32.v16x32[1].h16x16[1].v8x16[0].h8x8[0], r3.packed.c);
-					u3.packed.d = residual_gate(inp32x32.v16x32[1].h16x16[1].v8x16[1].h8x8[0], r4.packed.c);
+					s3.packed.a = r1.packed.c;
+					s3.packed.b = r2.packed.c;
+					s3.packed.c = r3.packed.c;
+					s3.packed.d = r4.packed.c;
 
-					u4.packed.a = residual_gate(inp32x32.v16x32[0].h16x16[1].v8x16[0].h8x8[1], r1.packed.d);
-					u4.packed.b = residual_gate(inp32x32.v16x32[0].h16x16[1].v8x16[1].h8x8[1], r2.packed.d);
-					u4.packed.c = residual_gate(inp32x32.v16x32[1].h16x16[1].v8x16[0].h8x8[1], r3.packed.d);
-					u4.packed.d = residual_gate(inp32x32.v16x32[1].h16x16[1].v8x16[1].h8x8[1], r4.packed.d);
+					s4.packed.a = r1.packed.d;
+					s4.packed.b = r2.packed.d;
+					s4.packed.c = r3.packed.d;
+					s4.packed.d = r4.packed.d;
+
+					shuffle_4x4(s1.value, s2.value, s3.value, s4.value);
+
+					u1.packed.a = residual_gate(inp32x32.v16x32[0].h16x16[0].v8x16[0].h8x8[0], s1.packed.a);
+					u1.packed.b = residual_gate(inp32x32.v16x32[0].h16x16[0].v8x16[1].h8x8[0], s1.packed.b);
+					u1.packed.c = residual_gate(inp32x32.v16x32[1].h16x16[0].v8x16[0].h8x8[0], s1.packed.c);
+					u1.packed.d = residual_gate(inp32x32.v16x32[1].h16x16[0].v8x16[1].h8x8[0], s1.packed.d);
+
+					u2.packed.a = residual_gate(inp32x32.v16x32[0].h16x16[0].v8x16[0].h8x8[1], s2.packed.a);
+					u2.packed.b = residual_gate(inp32x32.v16x32[0].h16x16[0].v8x16[1].h8x8[1], s2.packed.b);
+					u2.packed.c = residual_gate(inp32x32.v16x32[1].h16x16[0].v8x16[0].h8x8[1], s2.packed.c);
+					u2.packed.d = residual_gate(inp32x32.v16x32[1].h16x16[0].v8x16[1].h8x8[1], s2.packed.d);
+
+					u3.packed.a = residual_gate(inp32x32.v16x32[0].h16x16[1].v8x16[0].h8x8[0], s3.packed.a);
+					u3.packed.b = residual_gate(inp32x32.v16x32[0].h16x16[1].v8x16[1].h8x8[0], s3.packed.b);
+					u3.packed.c = residual_gate(inp32x32.v16x32[1].h16x16[1].v8x16[0].h8x8[0], s3.packed.c);
+					u3.packed.d = residual_gate(inp32x32.v16x32[1].h16x16[1].v8x16[1].h8x8[0], s3.packed.d);
+
+					u4.packed.a = residual_gate(inp32x32.v16x32[0].h16x16[1].v8x16[0].h8x8[1], s4.packed.a);
+					u4.packed.b = residual_gate(inp32x32.v16x32[0].h16x16[1].v8x16[1].h8x8[1], s4.packed.b);
+					u4.packed.c = residual_gate(inp32x32.v16x32[1].h16x16[1].v8x16[0].h8x8[1], s4.packed.c);
+					u4.packed.d = residual_gate(inp32x32.v16x32[1].h16x16[1].v8x16[1].h8x8[1], s4.packed.d);
 
 					shuffle_4x4(u1.value, u2.value, u3.value, u4.value);
 
@@ -625,13 +606,16 @@ namespace b8 {
 		static constexpr usize M_TILES = M_PER_WARP / 32;
 		static constexpr usize N_TILES = N_PER_WARP / 32;
 		static constexpr usize K_TILES = K_STEP / 32;
+		static_assert(Writer::M_PER_BLOCK == M_PER_BLOCK);
+		static_assert(Writer::N_PER_BLOCK == N_PER_BLOCK);
 		static_assert(M_TILES * M_WARPS * 32 == M_PER_BLOCK);
 		static_assert(N_TILES * N_WARPS * 32 == N_PER_BLOCK);
 
 		static constexpr usize SMEM_BYTES =
-			ALoader::SMEM_BYTES
-			+ BLoader::SMEM_BYTES
-			+ Writer::template smem_bytes<M_PER_BLOCK, N_PER_BLOCK>();
+			std::max<usize>(
+				ALoader::SMEM_BYTES + BLoader::SMEM_BYTES,
+				Writer::SMEM_BYTES
+			);
 		static constexpr usize GMEM_PRELOAD = ALoader::GMEM_PRELOAD;
 		static_assert(ALoader::GMEM_PRELOAD == BLoader::GMEM_PRELOAD);
 
@@ -660,12 +644,11 @@ namespace b8 {
 			SMemAllocator<SMEM_BYTES> smem_alloc;
 			A.alloc_smem(smem_alloc);
 			B.alloc_smem(smem_alloc);
-			C.template alloc_smem<M_PER_BLOCK, N_PER_BLOCK>(smem_alloc);
+			smem_alloc.finish();
+			SMemAllocator<SMEM_BYTES> smem_alloc2;
+			C.alloc_smem(smem_alloc2);
 			smem_alloc.finish();
 
-			usize output_row = block_m * M_PER_BLOCK + warp_m * M_PER_WARP;
-			usize output_col = block_n * N_PER_BLOCK + warp_n * N_PER_WARP;
-			C.template cp_async<M_PER_BLOCK, N_PER_BLOCK, THREADS_PER_BLOCK>(output_row, output_col);
 			X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD; ++p) {
 				if (p < K_ITERS) {
 					A.template cp_async<THREADS_PER_BLOCK>(p, M_PER_BLOCK*block_m, K_STEP*p, N_PER_BLOCK*block_n);
@@ -691,6 +674,8 @@ namespace b8 {
 				}
 			}
 
+			usize output_row = block_m * M_PER_BLOCK + warp_m * M_PER_WARP;
+			usize output_col = block_n * N_PER_BLOCK + warp_n * N_PER_WARP;
 			for (usize k_step = 0; k_step < K_ITERS; ++k_step) {
 				{ // Get more data from GMEM
 					cp_async_wait<GMEM_PRELOAD - 2>();
@@ -700,6 +685,10 @@ namespace b8 {
 					if (p < K_ITERS) {
 						A.template cp_async<THREADS_PER_BLOCK>(p, M_PER_BLOCK*block_m, K_STEP*p, N_PER_BLOCK*block_n);
 						B.template cp_async<THREADS_PER_BLOCK>(p, K_STEP*p, N_PER_BLOCK*block_n, M_PER_BLOCK*block_m);
+					} else if (k_step + 1 >= K_ITERS) {
+						if constexpr (Writer::SMEM_BYTES > 0) {
+							C.template cp_async<THREADS_PER_BLOCK>(output_row, output_col);
+						}
 					}
 					cp_async_commit();
 				}
@@ -717,6 +706,10 @@ namespace b8 {
 				}
 			}
 
+			if constexpr (Writer::SMEM_BYTES > 0) {
+				cp_async_wait<0>();
+				sync_threads();
+			}
 			C.write(output_row, output_col, acc);
 		}
 	};

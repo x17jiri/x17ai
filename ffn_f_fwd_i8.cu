@@ -14,20 +14,25 @@ namespace Ffn_f_fwd {
 	using InputLoader =
 		b8::MatrixLoader<
 			b8::FixedI8,
-				MODEL_DIM,
-				64, 128
+			MODEL_DIM,
+			64, 128
 		>;
 
 	using WeightLoader =
 		b8::MatrixTransLoader<
 			b8::MatrixLoader<
 				b8::FixedI8,
-					MODEL_DIM,
+				MODEL_DIM,
 				128, 128
 			>
 		>;
 
-		using Writer = b8::FixedI8MatrixGeGluWriter<F_WIDTH, MODEL_DIM>;
+	using Writer = b8::FixedI8MatrixGeGluWriter<
+		F_WIDTH,
+		InputLoader::M,
+		WeightLoader::K,
+		MODEL_DIM
+	>;
 
 	static_assert(InputLoader::GMEM_PRELOAD == 2);
 	static_assert(WeightLoader::GMEM_PRELOAD == 2);

@@ -128,59 +128,53 @@ namespace qkvg_helpers {
 	}
 }
 
-template<const usize PROJ_OUTPUTS, const usize SPARSE_FAN_IN>
-using QKVGBaseMatrixWriter =
-	b8::FixedI8MatrixWriter<
-		PROJ_OUTPUTS,
-		math::constexpr_inv_sqrt(SPARSE_FAN_IN)
-	>;
-
 template<
 	const usize HEAD_DIM,
 	const usize PROJ_OUTPUTS,
-	const usize SPARSE_FAN_IN
+	const usize M_PER_BLOCK,
+	const usize N_PER_BLOCK
 >
-struct QGMatrixWriter: QKVGBaseMatrixWriter<PROJ_OUTPUTS, SPARSE_FAN_IN> {
-	using Base = QKVGBaseMatrixWriter<PROJ_OUTPUTS, SPARSE_FAN_IN>;
+struct QMatrixWriter: b8::FixedI8MatrixWriter<
+	PROJ_OUTPUTS,
+	M_PER_BLOCK,
+	N_PER_BLOCK,
+	math::constexpr_inv_sqrt(f64(config::MODEL_DIM))
+> {
+	using Base = b8::FixedI8MatrixWriter<
+		PROJ_OUTPUTS,
+		M_PER_BLOCK,
+		N_PER_BLOCK,
+		math::constexpr_inv_sqrt(f64(config::MODEL_DIM))
+	>;
+	using SNormScales = SVector<bf16, N_PER_BLOCK>;
 
 	static_assert(HEAD_DIM % 32 == 0);
 	static_assert(PROJ_OUTPUTS % HEAD_DIM == 0);
+	static constexpr usize SMEM_BYTES = N_PER_BLOCK * sizeof(bf16);
 
 	bf16 const *g_norm_scales;
-	u32 s_norm_scales;
+	SNormScales s_norm_scales;
 	usize norm_scale_col0;
 
-	X17_DEVICE QGMatrixWriter(
+	X17_DEVICE QMatrixWriter(
 		b8::FixedI8 *gC,
 		bf16 const *norm_scales
 	):
 		Base(gC),
 		g_norm_scales(norm_scales),
-		s_norm_scales(0),
+		s_norm_scales(),
 		norm_scale_col0(0)
 	{}
 
-	template<const usize M_PER_BLOCK, const usize N_PER_BLOCK>
-	X17_HOST_DEVICE static constexpr usize smem_cols() {
-		return N_PER_BLOCK / 2;
-	}
-
-	template<const usize M_PER_BLOCK, const usize N_PER_BLOCK>
-	X17_HOST_DEVICE static constexpr usize smem_bytes() {
-		return smem_cols<M_PER_BLOCK, N_PER_BLOCK>() * sizeof(bf16);
-	}
-
-	template<const usize M_PER_BLOCK, const usize N_PER_BLOCK, const u32 CAP>
+	template<const u32 CAP>
 	X17_DEVICE void alloc_smem(SMemAllocator<CAP> &smem_alloc) {
-		s_norm_scales = smem_alloc.alloc(smem_bytes<M_PER_BLOCK, N_PER_BLOCK>());
+		s_norm_scales._ptr = smem_alloc.alloc(SMEM_BYTES);
 	}
 
-	template<const usize M_PER_BLOCK, const usize N_PER_BLOCK, const usize THREADS_PER_BLOCK>
+	template<const usize THREADS_PER_BLOCK>
 	X17_DEVICE void cp_async(usize row, usize col) {
-		norm_scale_col0 = (col / N_PER_BLOCK) * N_PER_BLOCK / 2;
-		constexpr usize COLS = smem_cols<M_PER_BLOCK, N_PER_BLOCK>();
-		SVector<bf16, COLS> smem(s_norm_scales);
-		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, g_norm_scales + norm_scale_col0, smem);
+		norm_scale_col0 = (col / N_PER_BLOCK) * N_PER_BLOCK;
+		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, g_norm_scales + norm_scale_col0, s_norm_scales);
 	}
 
 	template<const usize M_TILES, const usize N_TILES>
@@ -190,33 +184,18 @@ struct QGMatrixWriter: QKVGBaseMatrixWriter<PROJ_OUTPUTS, SPARSE_FAN_IN> {
 	) {
 		b32::Fragment_32x32<f32> t[M_TILES][N_TILES];
 
-		constexpr usize K_TILES = HEAD_DIM / 32;
-		constexpr usize V_TILES = HEAD_DIM / 32;
-		constexpr usize KV_TILES = K_TILES + V_TILES;
-		constexpr usize HEADS = N_TILES / KV_TILES;
-		static_assert(N_TILES % KV_TILES == 0);
+		constexpr usize Q_TILES = HEAD_DIM / 32;
+		constexpr usize HEADS = N_TILES / Q_TILES;
+		static_assert(N_TILES % Q_TILES == 0);
 
-		// q
 		constexpr f64 QK_SCALE = math::constexpr_sqrt(f64(HEAD_DIM)) * f64(b8::FIXED_I8_SCALE);
 		X17_UNROLL for (usize hi = 0; hi < HEADS; ++hi) {
-			u32 norm_scales_col = ((col / 2) - norm_scale_col0) + (hi * K_TILES * 32);
-			qkvg_helpers::l2_norm<QK_SCALE, true, K_TILES>(
+			u32 norm_scales_col = (col - norm_scale_col0) + (hi * Q_TILES * 32);
+			qkvg_helpers::l2_norm<QK_SCALE, true, Q_TILES>(
 				acc,
 				t,
-				hi * KV_TILES,
-				s_norm_scales + (norm_scales_col * sizeof(bf16))
-			);
-		}
-
-		// g
-		constexpr f64 FIXED_I8_SCALE_2 = f64(b8::FIXED_I8_SCALE) * f64(b8::FIXED_I8_SCALE);
-		constexpr f64 G_INP_SCALE_2 = 1.0 / (f64(SPARSE_FAN_IN) * FIXED_I8_SCALE_2 * FIXED_I8_SCALE_2);
-		constexpr f64 G_OUT_SCALE_2 = FIXED_I8_SCALE_2;
-		X17_UNROLL for (usize hi = 0; hi < HEADS; ++hi) {
-			qkvg_helpers::gelu_output<G_INP_SCALE_2, G_OUT_SCALE_2, V_TILES>(
-				acc,
-				t,
-				hi * KV_TILES + K_TILES
+				hi * Q_TILES,
+				s_norm_scales._ptr + (norm_scales_col * sizeof(bf16))
 			);
 		}
 
@@ -227,10 +206,21 @@ struct QGMatrixWriter: QKVGBaseMatrixWriter<PROJ_OUTPUTS, SPARSE_FAN_IN> {
 template<
 	const usize HEAD_DIM,
 	const usize PROJ_OUTPUTS,
-	const usize SPARSE_FAN_IN
+	const usize M_PER_BLOCK,
+	const usize N_PER_BLOCK
 >
-struct KVMatrixWriter: QKVGBaseMatrixWriter<PROJ_OUTPUTS, SPARSE_FAN_IN> {
-	using Base = QKVGBaseMatrixWriter<PROJ_OUTPUTS, SPARSE_FAN_IN>;
+struct KVMatrixWriter: b8::FixedI8MatrixWriter<
+	PROJ_OUTPUTS,
+	M_PER_BLOCK,
+	N_PER_BLOCK,
+	math::constexpr_inv_sqrt(f64(config::MODEL_DIM))
+> {
+	using Base = b8::FixedI8MatrixWriter<
+		PROJ_OUTPUTS,
+		M_PER_BLOCK,
+		N_PER_BLOCK,
+		math::constexpr_inv_sqrt(f64(config::MODEL_DIM))
+	>;
 
 	static_assert(HEAD_DIM % 32 == 0);
 	static_assert(PROJ_OUTPUTS % HEAD_DIM == 0);
@@ -239,20 +229,18 @@ struct KVMatrixWriter: QKVGBaseMatrixWriter<PROJ_OUTPUTS, SPARSE_FAN_IN> {
 		Base(gC)
 	{}
 
-	template<const usize M_PER_BLOCK, const usize N_PER_BLOCK>
 	X17_HOST_DEVICE static constexpr usize smem_cols() {
 		return 0;
 	}
 
-	template<const usize M_PER_BLOCK, const usize N_PER_BLOCK>
 	X17_HOST_DEVICE static constexpr usize smem_bytes() {
 		return 0;
 	}
 
-	template<const usize M_PER_BLOCK, const usize N_PER_BLOCK, const u32 CAP>
+	template<const u32 CAP>
 	X17_DEVICE void alloc_smem(SMemAllocator<CAP> &smem_alloc) {}
 
-	template<const usize M_PER_BLOCK, const usize N_PER_BLOCK, const usize THREADS_PER_BLOCK>
+	template<const usize THREADS_PER_BLOCK>
 	X17_DEVICE void cp_async(usize row, usize col) {}
 
 	template<const usize M_TILES, const usize N_TILES>
@@ -280,7 +268,7 @@ struct KVMatrixWriter: QKVGBaseMatrixWriter<PROJ_OUTPUTS, SPARSE_FAN_IN> {
 		}
 
 		// v
-		constexpr f64 VG_SCALE = math::constexpr_inv_sqrt(SPARSE_FAN_IN) / f64(b8::FIXED_I8_SCALE);
+		constexpr f64 VG_SCALE = math::constexpr_inv_sqrt(f64(config::MODEL_DIM)) / f64(b8::FIXED_I8_SCALE);
 		X17_UNROLL for (usize hi = 0; hi < HEADS; ++hi) {
 			qkvg_helpers::raw_output<VG_SCALE, V_TILES>(
 				acc,

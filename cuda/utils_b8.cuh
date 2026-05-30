@@ -438,8 +438,8 @@ namespace b8 {
 	};
 
 	X17_DEVICE void mma_a_bt(
-		Fragment_16x32<i8> const &a,
-		Fragment_16x32<i8> const &b,
+		Fragment_16x32<FixedI8> const &a,
+		Fragment_16x32<FixedI8> const &b,
 		b32::Fragment_16x16<i32> &c
 	) {
 		X17_UNROLL for (int j = 0; j < 2; ++j) {
@@ -466,8 +466,8 @@ namespace b8 {
 	}
 
 	X17_DEVICE void mma_a_bt(
-		Fragment_32x32<i8> const &a,
-		Fragment_32x32<i8> const &b,
+		Fragment_32x32<FixedI8> const &a,
+		Fragment_32x32<FixedI8> const &b,
 		b32::Fragment_32x32<i32> &c
 	) {
 		X17_UNROLL for (int j = 0; j < 2; ++j) {
@@ -475,5 +475,21 @@ namespace b8 {
 				mma_a_bt(a.v16x32[j], b.v16x32[i], c.v16x32[j].h16x16[i]);
 			}
 		}
+	}
+
+	template<typename T>
+	struct ToFixedI8;
+
+	template<>
+	struct ToFixedI8<f32> {
+		static X17_DEVICE FixedI8 conv_one(f32 inp) {
+			f32 clamped = fmaxf(-127.0f, fminf(+127.0f, inp));
+			return __float2int_rn(clamped);
+		}
+	};
+
+	template<typename T>
+	X17_DEVICE FixedI8 to_fixedi8(T inp) {
+		return ToFixedI8<T>::conv_one(inp);
 	}
 }

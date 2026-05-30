@@ -9,23 +9,36 @@
 using namespace config;
 
 namespace Ffn_y_fwd {
+	static constexpr usize Y_PROJ_OUTPUTS = 2 * MODEL_DIM;
+
+	static_assert((Y_PROJ_OUTPUTS / Y_SPARSE_BLOCK - 1) * Y_SPARSE_STEP + Y_SPARSE_FAN_IN == F_WIDTH);
+
 	using InputLoader =
 		b8::MatrixLoader<
 			b8::FixedI8,
 			F_WIDTH,
-			64, 128
+			64, 128,
+			Y_SPARSE_FAN_IN,
+			Y_SPARSE_STEP,
+			Y_SPARSE_BLOCK,
+			false
 		>;
 
-		using WeightLoader =
+	using WeightLoader =
 		b8::MatrixTransLoader<
 			b8::MatrixLoader<
 				b8::FixedI8,
-				F_WIDTH,
+				Y_SPARSE_FAN_IN,
 				128, 128
 			>
 		>;
 
-	using Writer = b8::FixedI8MatrixWriter<D_MODEL, math::constexpr_sqrt(math::fast::GELU_VAR_FIX_2 / F_WIDTH)>;
+	using Writer = b8::FixedI8MatrixResidualWriter<
+		MODEL_DIM,
+		InputLoader::M,
+		WeightLoader::K,
+		Y_SPARSE_FAN_IN
+	>;
 
 	using Kernel = b8::Gemm<InputLoader, WeightLoader, Writer>;
 
@@ -33,11 +46,12 @@ namespace Ffn_y_fwd {
 	void kernel(
 		b8::FixedI8 *w,
 		b8::FixedI8 *inp, usize n_inputs,
+		b8::FixedI8 *residual,
 		b8::FixedI8 *out
 	) {
 		auto a = InputLoader(inp, n_inputs);
-		auto b = WeightLoader(w, D_MODEL);
-		auto o = Writer(out);
+		auto b = WeightLoader(w, Y_PROJ_OUTPUTS);
+		auto o = Writer(out, residual);
 		Kernel().run(a, b, o);
 	}
 }
@@ -50,40 +64,48 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	if (!Kernel::has_full_output_tiles(seq_len, D_MODEL)) {
+	if (!Kernel::has_full_output_tiles(seq_len, Y_PROJ_OUTPUTS)) {
 		printf(
-			"Expected output shape [%u, %u] to align with block shape [%u, %u]\n",
+			"Expected pregate output shape [%u, %u] to align with block shape [%u, %u]\n",
 			seq_len,
-			D_MODEL,
+			Y_PROJ_OUTPUTS,
 			Kernel::M_PER_BLOCK,
 			Kernel::N_PER_BLOCK
 		);
 		return 1;
 	}
 
-	std::vector<b8::FixedI8> h_weights = load_i8_tensor(torch_tensor_path("ffn_y_weights_i8.bin"), D_MODEL, F_WIDTH);
+	std::vector<b8::FixedI8> h_weights_compact = load_i8_tensor(
+		torch_tensor_path("ffn_y_weights_i8.bin"),
+		Y_PROJ_OUTPUTS,
+		Y_SPARSE_FAN_IN
+	);
 	std::vector<b8::FixedI8> h_f = load_i8_tensor(tensor_path(cli.input_dir, "ffn_f_i8.bin"), seq_len, F_WIDTH);
-	if (h_weights.empty() || h_f.empty()) {
+	std::vector<b8::FixedI8> h_x = load_i8_tensor(tensor_path(cli.input_dir, "x_i8.bin"), seq_len, MODEL_DIM);
+	if (h_weights_compact.empty() || h_f.empty() || h_x.empty()) {
 		return 1;
 	}
 
-	std::vector<b8::FixedI8> h_out(seq_len * D_MODEL);
+	std::vector<b8::FixedI8> h_out(seq_len * MODEL_DIM);
 
 	b8::FixedI8 *d_weights = nullptr;
 	b8::FixedI8 *d_f = nullptr;
+	b8::FixedI8 *d_x = nullptr;
 	b8::FixedI8 *d_out = nullptr;
 
-	cudaMalloc(&d_weights, h_weights.size() * sizeof(b8::FixedI8));
+	cudaMalloc(&d_weights, h_weights_compact.size() * sizeof(b8::FixedI8));
 	cudaMalloc(&d_f, h_f.size() * sizeof(b8::FixedI8));
+	cudaMalloc(&d_x, h_x.size() * sizeof(b8::FixedI8));
 	cudaMalloc(&d_out, h_out.size() * sizeof(b8::FixedI8));
 
-	cudaMemcpy(d_weights, h_weights.data(), h_weights.size() * sizeof(b8::FixedI8), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_weights, h_weights_compact.data(), h_weights_compact.size() * sizeof(b8::FixedI8), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_f, h_f.data(), h_f.size() * sizeof(b8::FixedI8), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_x, h_x.data(), h_x.size() * sizeof(b8::FixedI8), cudaMemcpyHostToDevice);
 
 	cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, Kernel::SMEM_BYTES);
 	cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-	dim3 grid = Kernel::output_grid(seq_len, D_MODEL);
+	dim3 grid = Kernel::output_grid(seq_len, Y_PROJ_OUTPUTS);
 
 	int warmup = 50;
 	for (int i = 0; i < warmup; ++i) {
@@ -91,6 +113,7 @@ int main(int argc, char *argv[]) {
 			d_weights,
 			d_f,
 			seq_len,
+			d_x,
 			d_out
 		);
 	}
@@ -115,6 +138,7 @@ int main(int argc, char *argv[]) {
 			d_weights,
 			d_f,
 			seq_len,
+			d_x,
 			d_out
 		);
 		cudaEventRecord(ends[i]);
@@ -137,18 +161,19 @@ int main(int argc, char *argv[]) {
 
 	float median_ms = times_ms[num_runs / 2];
 	float min_ms = times_ms[0];
-	double tflops = 2.0 * D_MODEL * F_WIDTH * seq_len / (median_ms * 1e-3) / 1e12;
+	double tflops = 2.0 * Y_PROJ_OUTPUTS * Y_SPARSE_FAN_IN * seq_len / (median_ms * 1e-3) / 1e12;
 	printf("Kernel time over %d runs: median %.3f ms  min %.3f ms\n", num_runs, median_ms, min_ms);
 	printf("TFLOPS: %.2f\n", tflops);
 
 	cudaMemcpy(h_out.data(), d_out, h_out.size() * sizeof(b8::FixedI8), cudaMemcpyDeviceToHost);
 	std::filesystem::create_directories("tmp/block_cuda");
-	store_i8_tensor("tmp/block_cuda/ffn_y_i8.bin", h_out, seq_len, D_MODEL);
+	store_i8_tensor("tmp/block_cuda/ffn_y_i8.bin", h_out, seq_len, MODEL_DIM);
 
 	printf("Used SMEM per kernel: %u\n", Kernel::SMEM_BYTES);
 
 	cudaFree(d_weights);
 	cudaFree(d_f);
+	cudaFree(d_x);
 	cudaFree(d_out);
 	return 0;
 }
