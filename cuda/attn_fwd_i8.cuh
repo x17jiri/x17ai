@@ -83,6 +83,7 @@ X17_DEVICE void cast(b8::Fragment_16x16<FixedI8> const &src, Fragment_16x16<bf16
 	cast(tmp, dst);
 }
 
+template<bool SHUFFLE = true>
 X17_DEVICE void cast(b32::Fragment_16x16<f32> const &src, b8::Fragment_16x16<FixedI8> &dst) {
 	union {
 		u32 tuple4;
@@ -101,24 +102,39 @@ X17_DEVICE void cast(b32::Fragment_16x16<f32> const &src, b8::Fragment_16x16<Fix
 	right.packed.bot0 = b8::to_fixedi8(src.v8x16[1].h8x8[1].val0);
 	right.packed.bot1 = b8::to_fixedi8(src.v8x16[1].h8x8[1].val1);
 
-	usize tid = threadIdx.x;
-	u32 l = left.tuple4;
-	u32 r = right.tuple4;
+	if constexpr (SHUFFLE) {
+		usize tid = threadIdx.x;
+		u32 l = left.tuple4;
+		u32 r = right.tuple4;
 
-	l = shuffle_xor_sync(l, 2);
+		l = shuffle_xor_sync(l, 2);
 
-	u32 left_or_right = (tid & 2) == 0 ? r : l;
-	u32 right_or_left = (tid & 2) == 0 ? l : r;
+		u32 left_or_right = (tid & 2) == 0 ? r : l;
+		u32 right_or_left = (tid & 2) == 0 ? l : r;
 
-	left_or_right = shuffle_xor_sync(left_or_right, 3);
+		left_or_right = shuffle_xor_sync(left_or_right, 3);
 
-	u32 top = (tid & 1) == 0 ? right_or_left : left_or_right;
-	u32 bot = (tid & 1) == 0 ? left_or_right : right_or_left;
+		u32 top = (tid & 1) == 0 ? right_or_left : left_or_right;
+		u32 bot = (tid & 1) == 0 ? left_or_right : right_or_left;
 
-	top = shuffle_xor_sync(top, 1);
+		top = shuffle_xor_sync(top, 1);
 
-	dst.v8x16[0].val = __byte_perm(top, bot, 0x5410);
-	dst.v8x16[1].val = __byte_perm(top, bot, 0x7632);
+		dst.v8x16[0].val = __byte_perm(top, bot, 0x5410);
+		dst.v8x16[1].val = __byte_perm(top, bot, 0x7632);
+	} else {
+		union {
+			u32 tuple4;
+			u16 tuple2[2];
+		} top, bot;
+
+		top.tuple2[0] = left.tuple4 & 0xFFFFu;
+		top.tuple2[1] = right.tuple4 & 0xFFFFu;
+		bot.tuple2[0] = (left.tuple4 >> 16) & 0xFFFFu;
+		bot.tuple2[1] = (right.tuple4 >> 16) & 0xFFFFu;
+
+		dst.v8x16[0].val = top.tuple4;
+		dst.v8x16[1].val = bot.tuple4;
+	}
 }
 
 template<bool SHUFFLE = true>
@@ -128,9 +144,10 @@ X17_DEVICE void cast(b8::Fragment_16x32<FixedI8> const &src, b32::Fragment_16x32
 	}
 }
 
+template<bool SHUFFLE = true>
 X17_DEVICE void cast(b32::Fragment_16x32<f32> const &src, b8::Fragment_16x32<FixedI8> &dst) {
 	X17_UNROLL for (usize i = 0; i < 2; ++i) {
-		cast(src.h16x16[i], dst.h16x16[i]);
+		cast<SHUFFLE>(src.h16x16[i], dst.h16x16[i]);
 	}
 }
 
@@ -141,9 +158,10 @@ X17_DEVICE void cast(b8::Fragment_32x32<FixedI8> const &src, b32::Fragment_32x32
 	}
 }
 
+template<bool SHUFFLE = true>
 X17_DEVICE void cast(b32::Fragment_32x32<f32> const &src, b8::Fragment_32x32<FixedI8> &dst) {
 	X17_UNROLL for (usize j = 0; j < 2; ++j) {
-		cast(src.v16x32[j], dst.v16x32[j]);
+		cast<SHUFFLE>(src.v16x32[j], dst.v16x32[j]);
 	}
 }
 
@@ -277,6 +295,7 @@ struct AttnForward {
 		u32 const (&rSinkK)[HEAD_GROUP_DIM / 16],
 		i32 (&sink_score)[OWNED_ROWS][HEADS_PER_KERNEL]
 	) {
+		static_assert(OWNED_ROWS == 2);
 		X17_UNROLL for (usize j = 0; j < OWNED_ROWS; ++j) {
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
 				i32 acc = 0;
@@ -397,8 +416,8 @@ struct AttnForward {
 
 			X17_UNROLL for (usize i = 0; i < HEAD_TILES; ++i) {
 				X17_UNROLL for (usize j = 0; j < 2; ++j) {
-					scale_(rO_f32[i].h16x16[j].v8x16[0], top_rescale);
-					scale_(rO_f32[i].h16x16[j].v8x16[1], bot_rescale);
+					b32::scale_(rO_f32[i].h16x16[j].v8x16[0], top_rescale);
+					b32::scale_(rO_f32[i].h16x16[j].v8x16[1], bot_rescale);
 				}
 			}
 
@@ -432,45 +451,46 @@ struct AttnForward {
 	}
 
 	X17_DEVICE void combine_and_store(
-		Fragment_16x16<f32> (&rO_f32)[HEADS_PER_KERNEL][VG_TILES],
-		SoftmaxStats (&top_stats)[HEADS_PER_KERNEL],
-		SoftmaxStats (&bot_stats)[HEADS_PER_KERNEL],
+		b32::Fragment_16x32<f32> (&rO_f32)[HEADS_PER_KERNEL][HEAD_TILES],
+		SoftmaxStats (&stats)[HEADS_PER_KERNEL][OWNED_ROWS],
 		usize q_start,
 		usize q_warp_idx,
-		SMatrix<bf16, Q_PER_BLOCK, V_GROUP_DIM> sG,
-		GMatrix<bf16, Q_PER_BLOCK, V_GROUP_DIM> gOut_block,
+		GMatrix<FixedI8, Q_PER_BLOCK, HEAD_GROUP_DIM> gOut_block,
 		f32 *gL_ptr,
 		usize seq_len,
 		usize i_head_base
 	) {
 		static_assert(KV_WARPS == 1, "current algorithm doesn't reduce over KV warps");
-		Fragment_16x16<bf16> rO[HEADS_PER_KERNEL * VG_TILES];
+		static_assert(OWNED_ROWS == 2);
+		b8::Fragment_16x32<FixedI8> rO[HEADS_PER_KERNEL * HEAD_TILES];
 		f32 top_L[HEADS_PER_KERNEL];
 		f32 bot_L[HEADS_PER_KERNEL];
 		usize tid = threadIdx.x % WARP_SIZE;
 
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-			// Complete the row-wise sum reduction within each warp
-			top_stats[h].sum += shuffle_xor_sync(top_stats[h].sum, 1);
-			top_stats[h].sum += shuffle_xor_sync(top_stats[h].sum, 2);
+			SoftmaxStats &top_stats = stats[h][0];
+			SoftmaxStats &bot_stats = stats[h][1];
 
-			bot_stats[h].sum += shuffle_xor_sync(bot_stats[h].sum, 1);
-			bot_stats[h].sum += shuffle_xor_sync(bot_stats[h].sum, 2);
+			// Complete the row-wise sum reduction within each warp
+			top_stats.sum += shuffle_xor_sync(top_stats.sum, 1);
+			top_stats.sum += shuffle_xor_sync(top_stats.sum, 2);
+
+			bot_stats.sum += shuffle_xor_sync(bot_stats.sum, 1);
+			bot_stats.sum += shuffle_xor_sync(bot_stats.sum, 2);
 
 			// Rescale, folding in normalization
-			top_L[h] = math::fast::logb(top_stats[h].sum) + top_stats[h].max;
-			bot_L[h] = math::fast::logb(bot_stats[h].sum) + bot_stats[h].max;
+			top_L[h] = math::fast::logb(top_stats.sum) + top_stats.max;
+			bot_L[h] = math::fast::logb(bot_stats.sum) + bot_stats.max;
 
-			f32 top_rescale = math::fast::recip(top_stats[h].sum);
-			f32 bot_rescale = math::fast::recip(bot_stats[h].sum);
+			f32 top_rescale = math::fast::recip(top_stats.sum);
+			f32 bot_rescale = math::fast::recip(bot_stats.sum);
 
-			scale_top_(rO_f32[h], top_rescale);
-			scale_bottom_(rO_f32[h], bot_rescale);
-			X17_UNROLL for (usize i = 0; i < VG_TILES; i++) {
-				Fragment_16x16<bf16> rG;
-				smem_tile_to_fragment(sG, q_warp_idx * Q_PER_WARP, h * VG_DIM + i * 16, rG);
-				zig_zag_geglu_(rO_f32[h][i], rG);
-				cast(rO_f32[h][i], rO[h * VG_TILES + i]);
+			X17_UNROLL for (usize i = 0; i < HEAD_TILES; ++i) {
+				X17_UNROLL for (usize j = 0; j < 2; ++j) {
+					b32::scale_(rO_f32[h][i].h16x16[j].v8x16[0], top_rescale);
+					b32::scale_(rO_f32[h][i].h16x16[j].v8x16[1], bot_rescale);
+				}
+				cast<false>(rO_f32[h][i], rO[h * HEAD_TILES + i]);
 			}
 		}
 
@@ -487,7 +507,7 @@ struct AttnForward {
 			}
 		}
 
-		store(rO, gOut_block, q_warp_idx * Q_PER_WARP, 0);
+		b8::store(rO, gOut_block, q_warp_idx * Q_PER_WARP, 0);
 	}
 
 	static X17_DEVICE void cp_async_kv(
@@ -574,6 +594,8 @@ struct AttnForward {
 		//             - sink token
 		//             - NOT self
 		//         - `e_approx` is integer approximation of `e` and is used to ensure `ssmax >= 1`
+		//     - 1.0 / FIXED_I8_SCALE^2: because both inputs to the dot product
+		//       are scaled up by FIXED_I8_SCALE
 		// Since we're multiplying and dividing by logb(e), it cancels out, so:
 		//     temperature = BASE_TEMPERATURE * logb(n) / FIXED_I8_SCALE^2
 		u32 e_approx = 3;
@@ -768,14 +790,12 @@ struct AttnForward {
 			}
 		}
 
-		GMatrix<bf16, Q_PER_BLOCK, V_GROUP_DIM> gOut_block = tile_m<Q_PER_BLOCK>(gO, q_block_idx);
+		GMatrix<FixedI8, Q_PER_BLOCK, HEAD_GROUP_DIM> gOut_block = tile_m<Q_PER_BLOCK>(gO, q_block_idx);
 		combine_and_store(
 			rO_f32,
-			top_stats,
-			bot_stats,
+			stats,
 			q_start,
 			q_warp_idx,
-			sG,
 			gOut_block,
 			gL_ptr,
 			seq_len,
@@ -787,15 +807,15 @@ struct AttnForward {
 template<typename AttnForward>
 __global__ __launch_bounds__(AttnForward::THREADS_PER_BLOCK) void
 attn_forward(
-	usize seq_len, bf16 *gQ_ptr,
-	bf16 *gK_ptr, bf16 *gV_ptr, bf16 *gG_ptr,
-	bf16 const *gSinkK_ptr,
-	bf16 const *gSinkV_ptr,
+	usize seq_len, FixedI8 *gQ_ptr,
+	FixedI8 *gKV_ptr,
+	FixedI8 const *gSinkK_ptr,
+	FixedI8 const *gSinkV_ptr,
 	f32 const *gMax_ptr,
-	bf16 *gOut_ptr,
+	FixedI8 *gOut_ptr,
 	f32 *gL_ptr,
 	usize window_size
 ) {
 	AttnForward attn_forward = AttnForward();
-	attn_forward.run(seq_len, gQ_ptr, gK_ptr, gV_ptr, gG_ptr, gSinkK_ptr, gSinkV_ptr, gMax_ptr, gOut_ptr, gL_ptr, window_size);
+	attn_forward.run(seq_len, gQ_ptr, gKV_ptr, gSinkK_ptr, gSinkV_ptr, gMax_ptr, gOut_ptr, gL_ptr, window_size);
 }

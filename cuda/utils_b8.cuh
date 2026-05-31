@@ -88,6 +88,43 @@ namespace b8 {
 	template<typename U, typename T, const usize M, const usize N, const usize K>
 	requires(sizeof(U) == 1)
 	X17_DEVICE void store(
+		Fragment_16x32<T> const (&tiles)[K],
+		GMatrix<U, M, N> const &dst,
+		usize m_idx, usize n_idx
+	) {
+		usize i = 0;
+		if constexpr (K >= 2) {
+			X17_UNROLL for (; i + 2 <= K; i += 2) {
+				store_1x4_8x16(
+					dst, m_idx + 0, n_idx + i*32,
+					tiles[i+0].h16x16[0].v8x16[0].val,
+					tiles[i+0].h16x16[1].v8x16[0].val,
+					tiles[i+1].h16x16[0].v8x16[0].val,
+					tiles[i+1].h16x16[1].v8x16[0].val
+				);
+				store_1x4_8x16(
+					dst, m_idx + 8, n_idx + i*32,
+					tiles[i+0].h16x16[0].v8x16[1].val,
+					tiles[i+0].h16x16[1].v8x16[1].val,
+					tiles[i+1].h16x16[0].v8x16[1].val,
+					tiles[i+1].h16x16[1].v8x16[1].val
+				);
+			}
+		}
+		if constexpr (K % 2 == 1) {
+			store_2x2_8x16(
+				dst, m_idx + 0, n_idx + i*32,
+				tiles[i].h16x16[0].v8x16[0].val,
+				tiles[i].h16x16[1].v8x16[0].val,
+				tiles[i].h16x16[0].v8x16[1].val,
+				tiles[i].h16x16[1].v8x16[1].val
+			);
+		}
+	}
+
+	template<typename U, typename T, const usize M, const usize N, const usize K>
+	requires(sizeof(U) == 1)
+	X17_DEVICE void store(
 		Fragment_32x32<T> const (&tiles)[K],
 		GMatrix<U, M, N> const &dst,
 		usize m_idx, usize n_idx
