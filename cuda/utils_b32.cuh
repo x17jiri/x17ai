@@ -57,6 +57,32 @@ namespace b32 {
 		::zero_(f.v16x32);
 	}
 
+	template<typename T>
+	X17_DEVICE void scale_(Fragment_8x8<T> &f, T s) {
+		f.val0 *= s;
+		f.val1 *= s;
+	}
+
+	template<typename T>
+	X17_DEVICE void scale_(Fragment_8x16<T> &f, T s) {
+		::scale_(f.h8x8, s);
+	}
+
+	template<typename T>
+	X17_DEVICE void scale_(Fragment_16x16<T> &f, T s) {
+		::scale_(f.v8x16, s);
+	}
+
+	template<typename T>
+	X17_DEVICE void scale_(Fragment_16x32<T> &f, T s) {
+		::scale_(f.h16x16, s);
+	}
+
+	template<typename T>
+	X17_DEVICE void scale_(Fragment_32x32<T> &f, T s) {
+		::scale_(f.v16x32, s);
+	}
+
 	template<const f64 SCALE = 1.0>
 	X17_DEVICE void cast(Fragment_8x8<i32> const &src, Fragment_8x8<f32> &dst) {
 		if constexpr (SCALE == 1.0) {

@@ -7,6 +7,113 @@ using b8::FixedI8;
 
 #pragma nv_diag_suppress 186
 
+X17_DEVICE void cast(b8::Fragment_16x16<FixedI8> const &src, b32::Fragment_16x16<f32> &dst) {
+	union {
+		u32 tuple4;
+		u16 tuple2[2];
+		FixedI8 val[4];
+	} top, bot, left, right, l, r;
+
+	top.tuple4 = src.v8x16[0].val;
+	bot.tuple4 = src.v8x16[1].val;
+
+	left.tuple2[0] = top.tuple2[0];
+	left.tuple2[1] = bot.tuple2[0];
+	right.tuple2[0] = top.tuple2[1];
+	right.tuple2[1] = bot.tuple2[1];
+
+	usize tid = threadIdx.x;
+	left.tuple4 = shuffle_xor_sync(left.tuple4, 1);
+
+	l.tuple4 = (tid & 1) == 0 ? right.tuple4 : left.tuple4;
+	r.tuple4 = (tid & 1) == 0 ? left.tuple4 : right.tuple4;
+
+	l.tuple4 = shuffle_xor_sync(l.tuple4, 3);
+
+	left.tuple4 = (tid & 2) == 0 ? r.tuple4 : l.tuple4;
+	right.tuple4 = (tid & 2) == 0 ? l.tuple4 : r.tuple4;
+
+	left.tuple4 = shuffle_xor_sync(left.tuple4, 2);
+
+	f32 top0 = left.val[0];
+	f32 top1 = left.val[1];
+
+	f32 top8 = right.val[0];
+	f32 top9 = right.val[1];
+
+	f32 bot0 = left.val[2];
+	f32 bot1 = left.val[3];
+
+	f32 bot8 = right.val[2];
+	f32 bot9 = right.val[3];
+
+	dst.v8x16[0].h8x8[0].val0 = top0;
+	dst.v8x16[0].h8x8[0].val1 = top1;
+
+	dst.v8x16[0].h8x8[1].val0 = top8;
+	dst.v8x16[0].h8x8[1].val1 = top9;
+
+	dst.v8x16[1].h8x8[0].val0 = bot0;
+	dst.v8x16[1].h8x8[0].val1 = bot1;
+
+	dst.v8x16[1].h8x8[1].val0 = bot8;
+	dst.v8x16[1].h8x8[1].val1 = bot9;
+}
+
+X17_DEVICE void cast(b32::Fragment_16x16<f32> const &src, b8::Fragment_16x16<FixedI8> &dst) {
+	union {
+		u32 tuple4;
+		struct {
+			FixedI8 top0, top1, bot0, bot1;
+		} packed;
+	} left, right;
+
+	left.packed.top0 = b8::to_fixedi8(src.v8x16[0].h8x8[0].val0);
+	left.packed.top1 = b8::to_fixedi8(src.v8x16[0].h8x8[0].val1);
+	left.packed.bot0 = b8::to_fixedi8(src.v8x16[1].h8x8[0].val0);
+	left.packed.bot1 = b8::to_fixedi8(src.v8x16[1].h8x8[0].val1);
+
+	right.packed.top0 = b8::to_fixedi8(src.v8x16[0].h8x8[1].val0);
+	right.packed.top1 = b8::to_fixedi8(src.v8x16[0].h8x8[1].val1);
+	right.packed.bot0 = b8::to_fixedi8(src.v8x16[1].h8x8[1].val0);
+	right.packed.bot1 = b8::to_fixedi8(src.v8x16[1].h8x8[1].val1);
+
+	usize tid = threadIdx.x;
+	u32 l = left.tuple4;
+	u32 r = right.tuple4;
+
+	l = shuffle_xor_sync(l, 2);
+
+	u32 left_or_right = (tid & 2) == 0 ? r : l;
+	u32 right_or_left = (tid & 2) == 0 ? l : r;
+
+	left_or_right = shuffle_xor_sync(left_or_right, 3);
+
+	u32 top = (tid & 1) == 0 ? right_or_left : left_or_right;
+	u32 bot = (tid & 1) == 0 ? left_or_right : right_or_left;
+
+	top = shuffle_xor_sync(top, 1);
+
+	dst.v8x16[0].val = __byte_perm(top, bot, 0x5410);
+	dst.v8x16[1].val = __byte_perm(top, bot, 0x7632);
+}
+
+X17_DEVICE void cast(b8::Fragment_32x32<FixedI8> const &src, b32::Fragment_32x32<f32> &dst) {
+	X17_UNROLL for (usize j = 0; j < 2; ++j) {
+		X17_UNROLL for (usize i = 0; i < 2; ++i) {
+			cast(src.v16x32[j].h16x16[i], dst.v16x32[j].h16x16[i]);
+		}
+	}
+}
+
+X17_DEVICE void cast(b32::Fragment_32x32<f32> const &src, b8::Fragment_32x32<FixedI8> &dst) {
+	X17_UNROLL for (usize j = 0; j < 2; ++j) {
+		X17_UNROLL for (usize i = 0; i < 2; ++i) {
+			cast(src.v16x32[j].h16x16[i], dst.v16x32[j].h16x16[i]);
+		}
+	}
+}
+
 // =============================================================================
 // Fused FlashAttention-style forward kernel (SM80, bf16, tensor-core MMA).
 //
@@ -435,12 +542,14 @@ struct AttnForward {
 		//             - NOT self
 		//         - `e_approx` is integer approximation of `e` and is used to ensure `ssmax >= 1`
 		// Since we're multiplying and dividing by logb(e), it cancels out, so:
-		//     temperature = BASE_TEMPERATURE * logb(n)
+		//     temperature = BASE_TEMPERATURE * logb(n) / FIXED_I8_SCALE^2
 		u32 e_approx = 3;
-		u32 top_n = std::min(window_size + 1 + e_approx, q_start + tid / 4 + (0 + 1 + e_approx));
-		u32 bot_n = std::min(window_size + 1 + e_approx, q_start + tid / 4 + (8 + 1 + e_approx));
-		f32 top_temperature = f32(BASE_TEMPERATURE) * math::fast::logb(f32(top_n));
-		f32 bot_temperature = f32(BASE_TEMPERATURE) * math::fast::logb(f32(bot_n));
+		constexpr f64 FIXED_I8_SCALE_2 = f64(b8::FIXED_I8_SCALE) * f64(b8::FIXED_I8_SCALE);
+		f32 row_temperature[4];
+		X17_UNROLL for (usize row = 0; row < 4; ++row) {
+			u32 n = std::min(window_size + 1 + e_approx, q_start + tid / 4 + (8*row + 1 + e_approx));
+			row_temperature[row] = f32(BASE_TEMPERATURE / FIXED_I8_SCALE_2) * math::fast::logb(f32(n));
+		}
 
 		cp_async_wait<GMEM_PRELOAD - 1>();
 		sync_threads();
@@ -465,9 +574,6 @@ struct AttnForward {
 			}
 		}
 
-		i32 sink_score[4][HEADS_PER_KERNEL];
-		calculate_sink_scores(rQ, rSinkK, sink_score);
-
 		// Initialize online softmax stats with the sink token's contribution.
 		//
 		// The sink token is not part of the KV loop, so we seed the stats:
@@ -480,38 +586,39 @@ struct AttnForward {
 		// Q row. Each thread independently accumulates a partial sum and combine_and_store()
 		// sums all 4 partials. The sink contributes only once to the real sum,
 		// so each thread's copy must be 1/4 of the value.
+		f32 sink_score[4][HEADS_PER_KERNEL];
+		i32 sink_score_i32[4][HEADS_PER_KERNEL];
+		calculate_sink_scores(rQ, rSinkK, sink_score_i32);
+
 		f32 initial_scale = math::fast::constexpr_expb(-ONLINE_SOFTMAX_THRESHOLD);
-		SoftmaxStats top_stats[HEADS_PER_KERNEL];
-		SoftmaxStats bot_stats[HEADS_PER_KERNEL];
+		SoftmaxStats stats[4][HEADS_PER_KERNEL];
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-			top_sink_score[h] *= top_temperature;
-			bot_sink_score[h] *= bot_temperature;
-
 			f32 sum = initial_scale * 0.25;
-			top_stats[h].max = top_sink_score[h] + ONLINE_SOFTMAX_THRESHOLD;
-			top_stats[h].sum = sum;
-			bot_stats[h].max = bot_sink_score[h] + ONLINE_SOFTMAX_THRESHOLD;
-			bot_stats[h].sum = sum;
-		}
-
-		// O accumulator
-		Fragment_16x16<f32> rO_f32[HEADS_PER_KERNEL][VG_TILES];
-		initial_scale = math::fast::constexpr_expb(-ONLINE_SOFTMAX_THRESHOLD) / SPARSE_SCALE;
-		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
-			X17_UNROLL for (usize i = 0; i < VG_TILES; ++i) {
-				rO_f32[h][i].sub[0][0].val0 = initial_scale * f32(rSinkV[h * QK_DIM / 4 + i * 4 + 0]);
-				rO_f32[h][i].sub[0][0].val1 = initial_scale * f32(rSinkV[h * QK_DIM / 4 + i * 4 + 1]);
-				rO_f32[h][i].sub[0][1].val0 = initial_scale * f32(rSinkV[h * QK_DIM / 4 + i * 4 + 2]);
-				rO_f32[h][i].sub[0][1].val1 = initial_scale * f32(rSinkV[h * QK_DIM / 4 + i * 4 + 3]);
-
-				rO_f32[h][i].sub[1][0].val0 = rO_f32[h][i].sub[0][0].val0;
-				rO_f32[h][i].sub[1][0].val1 = rO_f32[h][i].sub[0][0].val1;
-				rO_f32[h][i].sub[1][1].val0 = rO_f32[h][i].sub[0][1].val0;
-				rO_f32[h][i].sub[1][1].val1 = rO_f32[h][i].sub[0][1].val1;
+			X17_UNROLL for (usize row = 0; row < 4; ++row) {
+				sink_score[row][h] = f32(sink_score_i32[row][h]) * row_temperature[row];
+				stats[row][h].max = sink_score[row][h] + ONLINE_SOFTMAX_THRESHOLD;
+				stats[row][h].sum = sum;
 			}
 		}
 
-		if (gMax_ptr != nullptr) {
+		// O accumulator
+		b32::Fragment_32x32<f32> rO_f32[HEADS_PER_KERNEL][HEAD_TILES];
+		initial_scale = math::fast::constexpr_expb(-ONLINE_SOFTMAX_THRESHOLD);
+		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
+			X17_UNROLL for (usize i = 0; i < HEAD_TILES; ++i) {
+				u32 packed0 = rSinkV[(h * HEAD_TILES + i) * 2 + 0];
+				u32 packed1 = rSinkV[(h * HEAD_TILES + i) * 2 + 1];
+				b8::Fragment_32x32<FixedI8> sink_v_i8;
+				X17_UNROLL for (usize j = 0; j < 4; ++j) {
+					sink_v_i8.v16x32[j/2].h16x16[0].v8x16[j%2].val = packed0;
+					sink_v_i8.v16x32[j/2].h16x16[1].v8x16[j%2].val = packed1;
+				}
+				cast(sink_v_i8, rO_f32[h][i]);
+				b32::scale_(rO_f32[h][i], initial_scale);
+			}
+		}
+
+		/*if (gMax_ptr != nullptr) {
 			f32 top_max[HEADS_PER_KERNEL];
 			f32 bot_max[HEADS_PER_KERNEL];
 			load_max_scores(gMax_ptr, seq_len, q_start, i_head_base, top_max, bot_max);
@@ -542,25 +649,26 @@ struct AttnForward {
 					rO_f32[h][i].sub[1][1].val1 = bot_seed * sink3;
 				}
 			}
-		}
+		}*/
 
 		// Sequential loop over KV
 		X17_NO_UNROLL for (usize kv_step = kv_begin; kv_step < kv_end; ++kv_step) {
 			// S = Q * K^T, interleaved with V load (rKV: K -> V)
-			Fragment_16x16<f32> rS_f32[HEADS_PER_KERNEL];
-			zero_(rS_f32);
+			b32::Fragment_32x32<f32> rS_f32[HEADS_PER_KERNEL];
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-				X17_UNROLL for (usize i = 0; i < VG_TILES; i++) {
-					mma_a_bt(rQ[h][i], rKV[h][i], rS_f32[h]);
-					smem_tile_to_fragment_trans(sKV, 0, V_SMEM_COL + h * VG_DIM + i * 16, rKV[h][i]);
+				b32::Fragment_32x32<i32> rS_i32;
+				zero_(rS_i32);
+				X17_UNROLL for (usize i = 0; i < HEAD_TILES; i++) {
+					mma_a_bt(rQ[h][i], rKV[h][i], rS_i32[h]);
+					sKV.tile_to_fragment_trans(0, ((2 * h + 1) * HEAD_TILES + i) * 32, rKV[h][i]);
 				}
-				X17_UNROLL for (usize i = VG_TILES; i < QK_TILES; i++) {
-					mma_a_bt(rQ[h][i], rKV[h][i], rS_f32[h]);
-				}
+				b32::cast(rS_i32, rS_f32[h]);
 
-				// Scaling must happen before masking to avoid -inf * 0 == NaN when scale == 0
-				scale_top_(rS_f32[h], top_temperature);
-				scale_bottom_(rS_f32[h], bot_temperature);
+				// Scaling must happen before masking to avoid -inf * 0 == NaN when scale == 0.
+				X17_UNROLL for (usize row = 0; row < 4; ++row) {
+					scale_(rS_f32[h].v16x32[row/2].h16x16[0].v8x16[row%2], row_temperature[row]);
+					scale_(rS_f32[h].v16x32[row/2].h16x16[1].v8x16[row%2], row_temperature[row]);
+				}
 			}
 
 			// Apply masks
@@ -593,7 +701,7 @@ struct AttnForward {
 				}
 			}
 
-			Fragment_16x16<bf16> rP[HEADS_PER_KERNEL];
+			b16::Fragment_32x32<bf16> rP[HEADS_PER_KERNEL];
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 				online_softmax(top_stats[h], bot_stats[h], rS_f32[h], rO_f32[h]);
 				cast(rS_f32[h], rP[h]);
@@ -609,14 +717,7 @@ struct AttnForward {
 				// reuse the now-dead Q staging area to start pulling in the per-row G tile
 				// for the post-attention fused op.
 				usize next_kv = kv_step + GMEM_PRELOAD;
-				if (next_kv < kv_end) {
-					cp_async_kv(gKV, sPreload, next_kv, kv_end);
-				} else if (next_kv == kv_end) {
-					constexpr usize MIN_KV_STEPS = Q_PER_BLOCK / KV_PER_STEP;
-					static_assert(MIN_KV_STEPS >= GMEM_PRELOAD, "without this, next_kv == kv_end will never be true");
-					static_assert(GMEM_PRELOAD > 1, "we need one more iteration after cp_async_g to call wait and sync");
-					cp_async_g(gG_block, sG);
-				}
+				cp_async_kv(gKV, sPreload, next_kv, kv_end);
 				cp_async_commit();
 			}
 
