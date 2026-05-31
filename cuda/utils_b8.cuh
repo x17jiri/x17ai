@@ -404,6 +404,26 @@ namespace b8 {
 			}
 		}
 
+		/// `m_idx` must be a multiple of 16 and `n_idx` must be a multiple of 32
+		X17_DEVICE void tile_to_fragment(
+			usize m_idx, usize n_idx,
+			Fragment_16x32<T> &dst
+		) const {
+			usize tid = threadIdx.x;
+			usize row = m_idx + (tid & 15);
+			usize swizzle = ((tid & 7) << 4) ^ (tid & 16);
+			usize col_off = n_idx * sizeof(T);
+			u32 addr = _ptr + (row * ROW_BYTES) + (col_off ^ swizzle);
+
+			sm80::ldmatrix_8x8xu16_x4(
+				addr,
+				dst.h16x16[0].v8x16[0].val,
+				dst.h16x16[0].v8x16[1].val,
+				dst.h16x16[1].v8x16[0].val,
+				dst.h16x16[1].v8x16[1].val
+			);
+		}
+
 		/// Both `m_idx` and `n_idx` must be multiples of 32
 		X17_DEVICE void tile_to_fragment(
 			usize m_idx, usize n_idx,

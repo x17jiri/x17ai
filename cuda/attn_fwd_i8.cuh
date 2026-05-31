@@ -7,12 +7,14 @@ using b8::FixedI8;
 
 #pragma nv_diag_suppress 186
 
+template<bool SHUFFLE = true>
 X17_DEVICE void cast(b8::Fragment_16x16<FixedI8> const &src, b32::Fragment_16x16<f32> &dst) {
-	union {
+	union Packed4 {
 		u32 tuple4;
 		u16 tuple2[2];
 		FixedI8 val[4];
-	} top, bot, left, right, l, r;
+	};
+	Packed4 top, bot, left, right;
 
 	top.tuple4 = src.v8x16[0].val;
 	bot.tuple4 = src.v8x16[1].val;
@@ -22,18 +24,21 @@ X17_DEVICE void cast(b8::Fragment_16x16<FixedI8> const &src, b32::Fragment_16x16
 	right.tuple2[0] = top.tuple2[1];
 	right.tuple2[1] = bot.tuple2[1];
 
-	usize tid = threadIdx.x;
-	left.tuple4 = shuffle_xor_sync(left.tuple4, 1);
+	if constexpr (SHUFFLE) {
+		Packed4 l, r;
+		usize tid = threadIdx.x;
+		left.tuple4 = shuffle_xor_sync(left.tuple4, 1);
 
-	l.tuple4 = (tid & 1) == 0 ? right.tuple4 : left.tuple4;
-	r.tuple4 = (tid & 1) == 0 ? left.tuple4 : right.tuple4;
+		l.tuple4 = (tid & 1) == 0 ? right.tuple4 : left.tuple4;
+		r.tuple4 = (tid & 1) == 0 ? left.tuple4 : right.tuple4;
 
-	l.tuple4 = shuffle_xor_sync(l.tuple4, 3);
+		l.tuple4 = shuffle_xor_sync(l.tuple4, 3);
 
-	left.tuple4 = (tid & 2) == 0 ? r.tuple4 : l.tuple4;
-	right.tuple4 = (tid & 2) == 0 ? l.tuple4 : r.tuple4;
+		left.tuple4 = (tid & 2) == 0 ? r.tuple4 : l.tuple4;
+		right.tuple4 = (tid & 2) == 0 ? l.tuple4 : r.tuple4;
 
-	left.tuple4 = shuffle_xor_sync(left.tuple4, 2);
+		left.tuple4 = shuffle_xor_sync(left.tuple4, 2);
+	}
 
 	f32 top0 = left.val[0];
 	f32 top1 = left.val[1];
@@ -58,6 +63,24 @@ X17_DEVICE void cast(b8::Fragment_16x16<FixedI8> const &src, b32::Fragment_16x16
 
 	dst.v8x16[1].h8x8[1].val0 = bot8;
 	dst.v8x16[1].h8x8[1].val1 = bot9;
+}
+
+X17_DEVICE void cast(b32::Fragment_16x16<f32> const &src, Fragment_16x16<bf16> &dst) {
+	X17_UNROLL for (usize row = 0; row < 2; ++row) {
+		X17_UNROLL for (usize col = 0; col < 2; ++col) {
+			dst.sub[row][col].set(
+				round_cast<bf16>(src.v8x16[row].h8x8[col].val0),
+				round_cast<bf16>(src.v8x16[row].h8x8[col].val1)
+			);
+		}
+	}
+}
+
+template<bool SHUFFLE = true>
+X17_DEVICE void cast(b8::Fragment_16x16<FixedI8> const &src, Fragment_16x16<bf16> &dst) {
+	b32::Fragment_16x16<f32> tmp;
+	cast<SHUFFLE>(src, tmp);
+	cast(tmp, dst);
 }
 
 X17_DEVICE void cast(b32::Fragment_16x16<f32> const &src, b8::Fragment_16x16<FixedI8> &dst) {
@@ -98,19 +121,29 @@ X17_DEVICE void cast(b32::Fragment_16x16<f32> const &src, b8::Fragment_16x16<Fix
 	dst.v8x16[1].val = __byte_perm(top, bot, 0x7632);
 }
 
+template<bool SHUFFLE = true>
+X17_DEVICE void cast(b8::Fragment_16x32<FixedI8> const &src, b32::Fragment_16x32<f32> &dst) {
+	X17_UNROLL for (usize i = 0; i < 2; ++i) {
+		cast<SHUFFLE>(src.h16x16[i], dst.h16x16[i]);
+	}
+}
+
+X17_DEVICE void cast(b32::Fragment_16x32<f32> const &src, b8::Fragment_16x32<FixedI8> &dst) {
+	X17_UNROLL for (usize i = 0; i < 2; ++i) {
+		cast(src.h16x16[i], dst.h16x16[i]);
+	}
+}
+
+template<bool SHUFFLE = true>
 X17_DEVICE void cast(b8::Fragment_32x32<FixedI8> const &src, b32::Fragment_32x32<f32> &dst) {
 	X17_UNROLL for (usize j = 0; j < 2; ++j) {
-		X17_UNROLL for (usize i = 0; i < 2; ++i) {
-			cast(src.v16x32[j].h16x16[i], dst.v16x32[j].h16x16[i]);
-		}
+		cast<SHUFFLE>(src.v16x32[j], dst.v16x32[j]);
 	}
 }
 
 X17_DEVICE void cast(b32::Fragment_32x32<f32> const &src, b8::Fragment_32x32<FixedI8> &dst) {
 	X17_UNROLL for (usize j = 0; j < 2; ++j) {
-		X17_UNROLL for (usize i = 0; i < 2; ++i) {
-			cast(src.v16x32[j].h16x16[i], dst.v16x32[j].h16x16[i]);
-		}
+		cast(src.v16x32[j], dst.v16x32[j]);
 	}
 }
 
@@ -161,13 +194,15 @@ struct AttnForward {
 
 	static constexpr usize Q_WARPS = 4;
 	static constexpr usize KV_WARPS = 1;
-	static constexpr usize Q_PER_WARP = 32;
+	static constexpr usize Q_PER_WARP = 16;
 	static constexpr usize Q_PER_BLOCK = Q_PER_WARP * Q_WARPS;
-	static constexpr usize KV_PER_WARP = 32;
+	static constexpr usize KV_PER_WARP = 16;
 	static constexpr usize KV_PER_STEP = KV_PER_WARP * KV_WARPS;
 
 	static constexpr usize WARPS_PER_BLOCK = Q_WARPS * KV_WARPS;
 	static constexpr usize THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
+
+	static constexpr usize OWNED_ROWS = Q_PER_WARP / 8;
 
 	static constexpr usize SMEM_BYTES =
 		KV_PER_STEP * PRELOAD_DIM * GMEM_PRELOAD
@@ -238,27 +273,27 @@ struct AttnForward {
 	}
 
 	X17_DEVICE void calculate_sink_scores(
-		b8::Fragment_32x32<FixedI8> const (&rQ)[HEADS_PER_KERNEL][HEAD_TILES],
+		b8::Fragment_16x32<FixedI8> const (&rQ)[HEADS_PER_KERNEL][HEAD_TILES],
 		u32 const (&rSinkK)[HEAD_GROUP_DIM / 16],
-		i32 (&sink_score)[4][HEADS_PER_KERNEL]
+		i32 (&sink_score)[OWNED_ROWS][HEADS_PER_KERNEL]
 	) {
-		X17_UNROLL for (usize j = 0; j < 4; ++j) {
+		X17_UNROLL for (usize j = 0; j < OWNED_ROWS; ++j) {
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
 				i32 acc = 0;
 				X17_UNROLL for (usize i = 0; i < HEAD_TILES; ++i) {
-					b8::Fragment_32x32<FixedI8> const &q = rQ[h][i];
+					b8::Fragment_16x32<FixedI8> const &q = rQ[h][i];
 					usize sink_idx = h * (HEAD_DIM / 16) + i * 2;
 
 					u32 sink_left = rSinkK[sink_idx + 0];
 					acc = __dp4a(
-						static_cast<i32>(q.v16x32[j/2].h16x16[0].v8x16[j%2].val),
+						static_cast<i32>(q.h16x16[0].v8x16[j].val),
 						static_cast<i32>(sink_left),
 						acc
 					);
 
 					u32 sink_right = rSinkK[sink_idx + 1];
 					acc = __dp4a(
-						static_cast<i32>(q.v16x32[j/2].h16x16[1].v8x16[j%2].val),
+						static_cast<i32>(q.h16x16[1].v8x16[j].val),
 						static_cast<i32>(sink_right),
 						acc
 					);
@@ -272,7 +307,7 @@ struct AttnForward {
 		}
 	}
 
-	X17_DEVICE void load_max_scores(
+/*	X17_DEVICE void load_max_scores(
 		f32 const *gMax_ptr,
 		usize seq_len,
 		usize q_start,
@@ -289,7 +324,7 @@ struct AttnForward {
 			top_max[h] = load_gmem_1x32b(gMax_ptr + (i_head_base + h) * seq_len + top_row);
 			bot_max[h] = load_gmem_1x32b(gMax_ptr + (i_head_base + h) * seq_len + bot_row);
 		}
-	}
+	}*/
 
 	X17_DEVICE void load_sink_kv(
 		FixedI8 const *gSinkKV_ptr,
@@ -315,23 +350,26 @@ struct AttnForward {
 	static constexpr f32 ONLINE_SOFTMAX_THRESHOLD = 5.0 / math::fast::logb_2;
 
 	X17_DEVICE void online_softmax(
-		SoftmaxStats &top,
-		SoftmaxStats &bot,
-		Fragment_16x16<f32> &rS_f32,
-		Fragment_16x16<f32> (&rO_f32)[VG_TILES]
+		SoftmaxStats (&stats)[OWNED_ROWS],
+		b32::Fragment_16x16<f32> &rS_f32,
+		b32::Fragment_16x32<f32> (&rO_f32)[HEAD_TILES]
 	) {
-		// The `max` in `top` and `bot` is for the entire owned rows.
+		static_assert(OWNED_ROWS == 2);
+		SoftmaxStats &top = stats[0];
+		SoftmaxStats &bot = stats[1];
+
+		// The `max` is for the entire owned row.
 		// The `sum` is just the elements owned by the current thread.
 		// Complete sum is calculated in combine_and_store().
 
 		// Step 1: `max` of the owned values
 		f32 new_top_max = math::max(
-			math::max(rS_f32.sub[0][0].val0, rS_f32.sub[0][0].val1),
-			math::max(rS_f32.sub[0][1].val0, rS_f32.sub[0][1].val1)
+			math::max(rS_f32.v8x16[0].h8x8[0].val0, rS_f32.v8x16[0].h8x8[0].val1),
+			math::max(rS_f32.v8x16[0].h8x8[1].val0, rS_f32.v8x16[0].h8x8[1].val1)
 		);
 		f32 new_bot_max = math::max(
-			math::max(rS_f32.sub[1][0].val0, rS_f32.sub[1][0].val1),
-			math::max(rS_f32.sub[1][1].val0, rS_f32.sub[1][1].val1)
+			math::max(rS_f32.v8x16[1].h8x8[0].val0, rS_f32.v8x16[1].h8x8[0].val1),
+			math::max(rS_f32.v8x16[1].h8x8[1].val0, rS_f32.v8x16[1].h8x8[1].val1)
 		);
 
 		// Step 2: Rescale outputs if needed
@@ -357,34 +395,38 @@ struct AttnForward {
 			top_rescale = math::fast::expb(top.max - new_top_max);
 			bot_rescale = math::fast::expb(bot.max - new_bot_max);
 
-			scale_top_(rO_f32, top_rescale);
-			scale_bottom_(rO_f32, bot_rescale);
+			X17_UNROLL for (usize i = 0; i < HEAD_TILES; ++i) {
+				X17_UNROLL for (usize j = 0; j < 2; ++j) {
+					scale_(rO_f32[i].h16x16[j].v8x16[0], top_rescale);
+					scale_(rO_f32[i].h16x16[j].v8x16[1], bot_rescale);
+				}
+			}
 
 			top.max = new_top_max;
 			bot.max = new_bot_max;
 		}
 
 		// Step 3: Replace scores with expb(score - max)
-		rS_f32.sub[0][0].val0 = math::fast::expb(rS_f32.sub[0][0].val0 - top.max);
-		rS_f32.sub[0][0].val1 = math::fast::expb(rS_f32.sub[0][0].val1 - top.max);
-		rS_f32.sub[0][1].val0 = math::fast::expb(rS_f32.sub[0][1].val0 - top.max);
-		rS_f32.sub[0][1].val1 = math::fast::expb(rS_f32.sub[0][1].val1 - top.max);
+		rS_f32.v8x16[0].h8x8[0].val0 = math::fast::expb(rS_f32.v8x16[0].h8x8[0].val0 - top.max);
+		rS_f32.v8x16[0].h8x8[0].val1 = math::fast::expb(rS_f32.v8x16[0].h8x8[0].val1 - top.max);
+		rS_f32.v8x16[0].h8x8[1].val0 = math::fast::expb(rS_f32.v8x16[0].h8x8[1].val0 - top.max);
+		rS_f32.v8x16[0].h8x8[1].val1 = math::fast::expb(rS_f32.v8x16[0].h8x8[1].val1 - top.max);
 
-		rS_f32.sub[1][0].val0 = math::fast::expb(rS_f32.sub[1][0].val0 - bot.max);
-		rS_f32.sub[1][0].val1 = math::fast::expb(rS_f32.sub[1][0].val1 - bot.max);
-		rS_f32.sub[1][1].val0 = math::fast::expb(rS_f32.sub[1][1].val0 - bot.max);
-		rS_f32.sub[1][1].val1 = math::fast::expb(rS_f32.sub[1][1].val1 - bot.max);
+		rS_f32.v8x16[1].h8x8[0].val0 = math::fast::expb(rS_f32.v8x16[1].h8x8[0].val0 - bot.max);
+		rS_f32.v8x16[1].h8x8[0].val1 = math::fast::expb(rS_f32.v8x16[1].h8x8[0].val1 - bot.max);
+		rS_f32.v8x16[1].h8x8[1].val0 = math::fast::expb(rS_f32.v8x16[1].h8x8[1].val0 - bot.max);
+		rS_f32.v8x16[1].h8x8[1].val1 = math::fast::expb(rS_f32.v8x16[1].h8x8[1].val1 - bot.max);
 
 		// Step 4: `sum` of the owned values
 		f32 top_add = (
-			(rS_f32.sub[0][0].val0 + rS_f32.sub[0][0].val1)
-			+ (rS_f32.sub[0][1].val0 + rS_f32.sub[0][1].val1)
+			(rS_f32.v8x16[0].h8x8[0].val0 + rS_f32.v8x16[0].h8x8[0].val1)
+			+ (rS_f32.v8x16[0].h8x8[1].val0 + rS_f32.v8x16[0].h8x8[1].val1)
 		);
 		top.sum = math::fma(top.sum, top_rescale, top_add);
 
 		f32 bot_add = (
-			(rS_f32.sub[1][0].val0 + rS_f32.sub[1][0].val1)
-			+ (rS_f32.sub[1][1].val0 + rS_f32.sub[1][1].val1)
+			(rS_f32.v8x16[1].h8x8[0].val0 + rS_f32.v8x16[1].h8x8[0].val1)
+			+ (rS_f32.v8x16[1].h8x8[1].val0 + rS_f32.v8x16[1].h8x8[1].val1)
 		);
 		bot.sum = math::fma(bot.sum, bot_rescale, bot_add);
 	}
@@ -459,15 +501,6 @@ struct AttnForward {
 				threadIdx.x, gKV, p * KV_PER_STEP, 0, 0, 0
 			);
 		}
-	}
-
-	static X17_DEVICE void cp_async_g(
-		GMatrix<bf16, Q_PER_BLOCK, V_GROUP_DIM> gG_block,
-		SMatrix<bf16, Q_PER_BLOCK, V_GROUP_DIM> sG
-	) {
-		cp_async_gmem_to_smem<THREADS_PER_BLOCK, Q_PER_BLOCK, V_GROUP_DIM>(
-			threadIdx.x, gG_block, sG, 0, 0, 0, 0
-		);
 	}
 
 	X17_DEVICE void run(
@@ -545,8 +578,8 @@ struct AttnForward {
 		//     temperature = BASE_TEMPERATURE * logb(n) / FIXED_I8_SCALE^2
 		u32 e_approx = 3;
 		constexpr f64 FIXED_I8_SCALE_2 = f64(b8::FIXED_I8_SCALE) * f64(b8::FIXED_I8_SCALE);
-		f32 row_temperature[4];
-		X17_UNROLL for (usize row = 0; row < 4; ++row) {
+		f32 row_temperature[OWNED_ROWS];
+		X17_UNROLL for (usize row = 0; row < OWNED_ROWS; ++row) {
 			u32 n = std::min(window_size + 1 + e_approx, q_start + tid / 4 + (8*row + 1 + e_approx));
 			row_temperature[row] = f32(BASE_TEMPERATURE / FIXED_I8_SCALE_2) * math::fast::logb(f32(n));
 		}
@@ -555,7 +588,7 @@ struct AttnForward {
 		sync_threads();
 
 		// Load Q from SMEM to registers in the native i8 MMA layout.
-		b8::Fragment_32x32<FixedI8> rQ[HEADS_PER_KERNEL][HEAD_TILES];
+		b8::Fragment_16x32<FixedI8> rQ[HEADS_PER_KERNEL][HEAD_TILES];
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 			X17_UNROLL for (usize i = 0; i < HEAD_TILES; i++) {
 				sQ.tile_to_fragment(q_warp_idx * Q_PER_WARP, h * HEAD_DIM + i * 32, rQ[h][i]);
@@ -567,7 +600,7 @@ struct AttnForward {
 		// MMA + SMEM load pattern hides the load latency.
 		b8::SMatrix<FixedI8, KV_PER_STEP, PRELOAD_DIM> sKV;
 		sKV = tile_m<KV_PER_STEP>(sPreload, kv_begin % GMEM_PRELOAD);
-		b8::Fragment_32x32<FixedI8> rKV[HEADS_PER_KERNEL][HEAD_TILES];
+		b8::Fragment_16x32<FixedI8> rKV[HEADS_PER_KERNEL][HEAD_TILES];
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 			X17_UNROLL for (usize i = 0; i < HEAD_TILES; i++) {
 				sKV.tile_to_fragment(0, 2 * h * HEAD_DIM + i * 32, rKV[h][i]);
@@ -586,34 +619,34 @@ struct AttnForward {
 		// Q row. Each thread independently accumulates a partial sum and combine_and_store()
 		// sums all 4 partials. The sink contributes only once to the real sum,
 		// so each thread's copy must be 1/4 of the value.
-		f32 sink_score[4][HEADS_PER_KERNEL];
-		i32 sink_score_i32[4][HEADS_PER_KERNEL];
+		f32 sink_score[OWNED_ROWS][HEADS_PER_KERNEL];
+		i32 sink_score_i32[OWNED_ROWS][HEADS_PER_KERNEL];
 		calculate_sink_scores(rQ, rSinkK, sink_score_i32);
 
 		f32 initial_scale = math::fast::constexpr_expb(-ONLINE_SOFTMAX_THRESHOLD);
-		SoftmaxStats stats[4][HEADS_PER_KERNEL];
+		SoftmaxStats stats[HEADS_PER_KERNEL][OWNED_ROWS];
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 			f32 sum = initial_scale * 0.25;
-			X17_UNROLL for (usize row = 0; row < 4; ++row) {
+			X17_UNROLL for (usize row = 0; row < OWNED_ROWS; ++row) {
 				sink_score[row][h] = f32(sink_score_i32[row][h]) * row_temperature[row];
-				stats[row][h].max = sink_score[row][h] + ONLINE_SOFTMAX_THRESHOLD;
-				stats[row][h].sum = sum;
+				stats[h][row].max = sink_score[row][h] + ONLINE_SOFTMAX_THRESHOLD;
+				stats[h][row].sum = sum;
 			}
 		}
 
 		// O accumulator
-		b32::Fragment_32x32<f32> rO_f32[HEADS_PER_KERNEL][HEAD_TILES];
+		b32::Fragment_16x32<f32> rO_f32[HEADS_PER_KERNEL][HEAD_TILES];
 		initial_scale = math::fast::constexpr_expb(-ONLINE_SOFTMAX_THRESHOLD);
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
 			X17_UNROLL for (usize i = 0; i < HEAD_TILES; ++i) {
 				u32 packed0 = rSinkV[(h * HEAD_TILES + i) * 2 + 0];
 				u32 packed1 = rSinkV[(h * HEAD_TILES + i) * 2 + 1];
-				b8::Fragment_32x32<FixedI8> sink_v_i8;
-				X17_UNROLL for (usize j = 0; j < 4; ++j) {
-					sink_v_i8.v16x32[j/2].h16x16[0].v8x16[j%2].val = packed0;
-					sink_v_i8.v16x32[j/2].h16x16[1].v8x16[j%2].val = packed1;
+				b8::Fragment_16x32<FixedI8> sink_v_i8;
+				X17_UNROLL for (usize j = 0; j < OWNED_ROWS; ++j) {
+					sink_v_i8.h16x16[0].v8x16[j].val = packed0;
+					sink_v_i8.h16x16[1].v8x16[j].val = packed1;
 				}
-				cast(sink_v_i8, rO_f32[h][i]);
+				cast<false>(sink_v_i8, rO_f32[h][i]);
 				b32::scale_(rO_f32[h][i], initial_scale);
 			}
 		}
@@ -654,20 +687,19 @@ struct AttnForward {
 		// Sequential loop over KV
 		X17_NO_UNROLL for (usize kv_step = kv_begin; kv_step < kv_end; ++kv_step) {
 			// S = Q * K^T, interleaved with V load (rKV: K -> V)
-			b32::Fragment_32x32<f32> rS_f32[HEADS_PER_KERNEL];
+			b32::Fragment_16x16<f32> rS_f32[HEADS_PER_KERNEL];
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-				b32::Fragment_32x32<i32> rS_i32;
+				b32::Fragment_16x16<i32> rS_i32;
 				zero_(rS_i32);
 				X17_UNROLL for (usize i = 0; i < HEAD_TILES; i++) {
-					mma_a_bt(rQ[h][i], rKV[h][i], rS_i32[h]);
-					sKV.tile_to_fragment_trans(0, ((2 * h + 1) * HEAD_TILES + i) * 32, rKV[h][i]);
+					mma_a_bt(rQ[h][i], rKV[h][i], rS_i32);
+					sKV.tile_to_fragment(0, ((2 * h + 1) * HEAD_TILES + i) * 32, rKV[h][i]);
 				}
 				b32::cast(rS_i32, rS_f32[h]);
 
 				// Scaling must happen before masking to avoid -inf * 0 == NaN when scale == 0.
-				X17_UNROLL for (usize row = 0; row < 4; ++row) {
-					scale_(rS_f32[h].v16x32[row/2].h16x16[0].v8x16[row%2], row_temperature[row]);
-					scale_(rS_f32[h].v16x32[row/2].h16x16[1].v8x16[row%2], row_temperature[row]);
+				X17_UNROLL for (usize row = 0; row < OWNED_ROWS; ++row) {
+					scale_(rS_f32[h].v8x16[row], row_temperature[row]);
 				}
 			}
 
@@ -701,9 +733,9 @@ struct AttnForward {
 				}
 			}
 
-			b16::Fragment_32x32<bf16> rP[HEADS_PER_KERNEL];
+			Fragment_16x16<bf16> rP[HEADS_PER_KERNEL];
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-				online_softmax(top_stats[h], bot_stats[h], rS_f32[h], rO_f32[h]);
+				online_softmax(stats[h], rS_f32[h], rO_f32[h]);
 				cast(rS_f32[h], rP[h]);
 			}
 
@@ -721,14 +753,17 @@ struct AttnForward {
 				cp_async_commit();
 			}
 
-			// rO += S * V, interleaved with next K load
+
+			// rO += P * V, interleaved with next K load
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-				X17_UNROLL for (usize i = 0; i < VG_TILES; i++) {
-					mma_a_bt(rP[h], rKV[h][i], rO_f32[h][i]);
-					smem_tile_to_fragment(sKV, 0, h * QK_DIM + i * 16, rKV[h][i]);
-				}
-				X17_UNROLL for (usize i = VG_TILES; i < QK_TILES; i++) {
-					smem_tile_to_fragment(sKV, 0, h * QK_DIM + i * 16, rKV[h][i]);
+				X17_UNROLL for (usize i = 0; i < HEAD_TILES; i++) {
+					X17_UNROLL for (usize j = 0; j < 2; ++j) {
+						Fragment_16x16<bf16> rV;
+						cast<false>(rKV[h][i].h16x16[j], rV);
+						rV.transpose_();
+						mma_a_bt(rP[h], rV, rO_f32[h][i].h16x16[j]);
+					}
+					sKV.tile_to_fragment(0, ((2 * h) * HEAD_TILES + i) * 32, rKV[h][i]);
 				}
 			}
 		}
