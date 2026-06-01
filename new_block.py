@@ -30,7 +30,7 @@ def create_inputs() -> None:
 	qk_norm_scales = new_ones(1, HEAD_DIM * N_HEADS)
 	attn_temperature = new_ones(N_HEADS, 1)
 
-	TEST = True
+	TEST = False
 	if TEST:
 		qk_norm_scales = new_randn(1, HEAD_DIM * N_HEADS, generator=generator)
 		attn_temperature = 0.5 + torch.rand((N_HEADS, 1), generator=generator)
@@ -263,6 +263,7 @@ def run_attn() -> None:
 	store_tensor(kv, "kv_i8.bin")
 	store_tensor(attn_maxes.transpose(0, 1), "attn_maxes_f32.bin")
 	store_tensor(attn_out, "attn_out.bin", expected_variance=1.0)
+	store_tensor(attn_out, "attn_out_i8.bin")
 
 #---------------------------------------------------------------------------------------------------
 

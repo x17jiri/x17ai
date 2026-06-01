@@ -7,164 +7,6 @@ using b8::FixedI8;
 
 #pragma nv_diag_suppress 186
 
-template<bool SHUFFLE = true>
-X17_DEVICE void cast(b8::Fragment_16x16<FixedI8> const &src, b32::Fragment_16x16<f32> &dst) {
-	union Packed4 {
-		u32 tuple4;
-		u16 tuple2[2];
-		FixedI8 val[4];
-	};
-	Packed4 top, bot, left, right;
-
-	top.tuple4 = src.v8x16[0].val;
-	bot.tuple4 = src.v8x16[1].val;
-
-	left.tuple2[0] = top.tuple2[0];
-	left.tuple2[1] = bot.tuple2[0];
-	right.tuple2[0] = top.tuple2[1];
-	right.tuple2[1] = bot.tuple2[1];
-
-	if constexpr (SHUFFLE) {
-		Packed4 l, r;
-		usize tid = threadIdx.x;
-		left.tuple4 = shuffle_xor_sync(left.tuple4, 1);
-
-		l.tuple4 = (tid & 1) == 0 ? right.tuple4 : left.tuple4;
-		r.tuple4 = (tid & 1) == 0 ? left.tuple4 : right.tuple4;
-
-		l.tuple4 = shuffle_xor_sync(l.tuple4, 3);
-
-		left.tuple4 = (tid & 2) == 0 ? r.tuple4 : l.tuple4;
-		right.tuple4 = (tid & 2) == 0 ? l.tuple4 : r.tuple4;
-
-		left.tuple4 = shuffle_xor_sync(left.tuple4, 2);
-	}
-
-	f32 top0 = left.val[0];
-	f32 top1 = left.val[1];
-
-	f32 top8 = right.val[0];
-	f32 top9 = right.val[1];
-
-	f32 bot0 = left.val[2];
-	f32 bot1 = left.val[3];
-
-	f32 bot8 = right.val[2];
-	f32 bot9 = right.val[3];
-
-	dst.v8x16[0].h8x8[0].val0 = top0;
-	dst.v8x16[0].h8x8[0].val1 = top1;
-
-	dst.v8x16[0].h8x8[1].val0 = top8;
-	dst.v8x16[0].h8x8[1].val1 = top9;
-
-	dst.v8x16[1].h8x8[0].val0 = bot0;
-	dst.v8x16[1].h8x8[0].val1 = bot1;
-
-	dst.v8x16[1].h8x8[1].val0 = bot8;
-	dst.v8x16[1].h8x8[1].val1 = bot9;
-}
-
-X17_DEVICE void cast(b32::Fragment_16x16<f32> const &src, Fragment_16x16<bf16> &dst) {
-	X17_UNROLL for (usize row = 0; row < 2; ++row) {
-		X17_UNROLL for (usize col = 0; col < 2; ++col) {
-			dst.sub[row][col].set(
-				round_cast<bf16>(src.v8x16[row].h8x8[col].val0),
-				round_cast<bf16>(src.v8x16[row].h8x8[col].val1)
-			);
-		}
-	}
-}
-
-template<bool SHUFFLE = true>
-X17_DEVICE void cast(b8::Fragment_16x16<FixedI8> const &src, Fragment_16x16<bf16> &dst) {
-	b32::Fragment_16x16<f32> tmp;
-	cast<SHUFFLE>(src, tmp);
-	cast(tmp, dst);
-}
-
-template<bool SHUFFLE = true>
-X17_DEVICE void cast(b32::Fragment_16x16<f32> const &src, b8::Fragment_16x16<FixedI8> &dst) {
-	union {
-		u32 tuple4;
-		struct {
-			FixedI8 top0, top1, bot0, bot1;
-		} packed;
-	} left, right;
-
-	left.packed.top0 = b8::to_fixedi8(src.v8x16[0].h8x8[0].val0);
-	left.packed.top1 = b8::to_fixedi8(src.v8x16[0].h8x8[0].val1);
-	left.packed.bot0 = b8::to_fixedi8(src.v8x16[1].h8x8[0].val0);
-	left.packed.bot1 = b8::to_fixedi8(src.v8x16[1].h8x8[0].val1);
-
-	right.packed.top0 = b8::to_fixedi8(src.v8x16[0].h8x8[1].val0);
-	right.packed.top1 = b8::to_fixedi8(src.v8x16[0].h8x8[1].val1);
-	right.packed.bot0 = b8::to_fixedi8(src.v8x16[1].h8x8[1].val0);
-	right.packed.bot1 = b8::to_fixedi8(src.v8x16[1].h8x8[1].val1);
-
-	if constexpr (SHUFFLE) {
-		usize tid = threadIdx.x;
-		u32 l = left.tuple4;
-		u32 r = right.tuple4;
-
-		l = shuffle_xor_sync(l, 2);
-
-		u32 left_or_right = (tid & 2) == 0 ? r : l;
-		u32 right_or_left = (tid & 2) == 0 ? l : r;
-
-		left_or_right = shuffle_xor_sync(left_or_right, 3);
-
-		u32 top = (tid & 1) == 0 ? right_or_left : left_or_right;
-		u32 bot = (tid & 1) == 0 ? left_or_right : right_or_left;
-
-		top = shuffle_xor_sync(top, 1);
-
-		dst.v8x16[0].val = __byte_perm(top, bot, 0x5410);
-		dst.v8x16[1].val = __byte_perm(top, bot, 0x7632);
-	} else {
-		union {
-			u32 tuple4;
-			u16 tuple2[2];
-		} top, bot;
-
-		top.tuple2[0] = left.tuple4 & 0xFFFFu;
-		top.tuple2[1] = right.tuple4 & 0xFFFFu;
-		bot.tuple2[0] = (left.tuple4 >> 16) & 0xFFFFu;
-		bot.tuple2[1] = (right.tuple4 >> 16) & 0xFFFFu;
-
-		dst.v8x16[0].val = top.tuple4;
-		dst.v8x16[1].val = bot.tuple4;
-	}
-}
-
-template<bool SHUFFLE = true>
-X17_DEVICE void cast(b8::Fragment_16x32<FixedI8> const &src, b32::Fragment_16x32<f32> &dst) {
-	X17_UNROLL for (usize i = 0; i < 2; ++i) {
-		cast<SHUFFLE>(src.h16x16[i], dst.h16x16[i]);
-	}
-}
-
-template<bool SHUFFLE = true>
-X17_DEVICE void cast(b32::Fragment_16x32<f32> const &src, b8::Fragment_16x32<FixedI8> &dst) {
-	X17_UNROLL for (usize i = 0; i < 2; ++i) {
-		cast<SHUFFLE>(src.h16x16[i], dst.h16x16[i]);
-	}
-}
-
-template<bool SHUFFLE = true>
-X17_DEVICE void cast(b8::Fragment_32x32<FixedI8> const &src, b32::Fragment_32x32<f32> &dst) {
-	X17_UNROLL for (usize j = 0; j < 2; ++j) {
-		cast<SHUFFLE>(src.v16x32[j], dst.v16x32[j]);
-	}
-}
-
-template<bool SHUFFLE = true>
-X17_DEVICE void cast(b32::Fragment_32x32<f32> const &src, b8::Fragment_32x32<FixedI8> &dst) {
-	X17_UNROLL for (usize j = 0; j < 2; ++j) {
-		cast<SHUFFLE>(src.v16x32[j], dst.v16x32[j]);
-	}
-}
-
 // =============================================================================
 // Fused FlashAttention-style forward kernel (SM80, bf16, tensor-core MMA).
 //
@@ -181,6 +23,15 @@ X17_DEVICE void cast(b32::Fragment_32x32<f32> const &src, b8::Fragment_32x32<Fix
 // Memory pipeline is double-buffered by default (controlled by GMEM_PRELOAD).
 // =============================================================================
 
+//--------------------------------------------------------------------------------------------------
+
+struct SoftmaxStats {
+	f32 sum;
+	f32 max;
+};
+
+//--------------------------------------------------------------------------------------------------
+
 template<
 	const usize _N_HEADS,
 	const usize _HEADS_PER_KERNEL,
@@ -195,16 +46,21 @@ struct AttnForward {
 	// Expose template parameters needed by dependent kernels.
 	static constexpr usize N_HEADS = _N_HEADS;
 	static constexpr usize HEADS_PER_KERNEL = _HEADS_PER_KERNEL;
-	static constexpr usize HEAD_GROUP_CNT = HEAD_CNT / HEADS_PER_KERNEL;
 	static constexpr usize HEAD_DIM = _HEAD_DIM;
 	static constexpr usize MODEL_DIM = _MODEL_DIM;
+
+	static constexpr usize HEAD_GROUP_CNT = N_HEADS / HEADS_PER_KERNEL;
 	static constexpr usize GMEM_PRELOAD = 2;
 
 	static constexpr f64 BASE_TEMPERATURE = math::constexpr_inv_sqrt(HEAD_DIM);
 
 	static_assert(HEADS_PER_KERNEL > 0, "HEADS_PER_KERNEL must be > 0");
-	static_assert(HEAD_CNT % HEADS_PER_KERNEL == 0, "HEAD_CNT must be divisible by HEADS_PER_KERNEL");
-	static_assert(VG_DIM <= QK_DIM, "VG_DIM must be <= QK_DIM");
+	static_assert(N_HEADS % HEADS_PER_KERNEL == 0, "N_HEADS must be divisible by HEADS_PER_KERNEL");
+	static_assert(HEAD_DIM % 32 == 0, "HEAD_DIM must be divisible by 32");
+	static_assert(
+		(HEADS_PER_KERNEL * HEAD_DIM * sizeof(FixedI8)) % 128 == 0,
+		"HEADS_PER_KERNEL must make grouped i8 rows 128B aligned"
+	);
 
 	static constexpr usize HEAD_TILES = HEAD_DIM / 32;
 	static constexpr usize HEAD_GROUP_DIM = HEADS_PER_KERNEL * HEAD_DIM;
@@ -243,51 +99,65 @@ struct AttnForward {
 	//   - top-right 8x8 is entirely masked (q < 8, k >= 8)
 	//   - top-left and bot-right diagonals: element-wise comparison
 	//   - bot-left 8x8 is entirely unmasked (q >= 8, k < 8)
-	static X17_DEVICE void causal_mask_diagonal(Fragment_16x16<f32> &rS_f32) {
+	static X17_DEVICE void causal_mask_diagonal(b32::Fragment_16x16<f32> &rS_f32) {
 		usize tid = threadIdx.x % WARP_SIZE;
 		usize q = tid / 4;          // 0..7
 		usize k = 2 * (tid % 4);    // 0,2,4,6
 		constexpr f32 NEG_INF = -INFINITY;
 
-		rS_f32.sub[0][1].val0 = NEG_INF;
-		rS_f32.sub[0][1].val1 = NEG_INF;
+		rS_f32.v8x16[0].h8x8[1].val0 = NEG_INF;
+		rS_f32.v8x16[0].h8x8[1].val1 = NEG_INF;
 
-		rS_f32.sub[0][0].val0 = k < q ? rS_f32.sub[0][0].val0 : NEG_INF;
-		rS_f32.sub[1][1].val0 = k < q ? rS_f32.sub[1][1].val0 : NEG_INF;
+		rS_f32.v8x16[0].h8x8[0].val0 = k < q ? rS_f32.v8x16[0].h8x8[0].val0 : NEG_INF;
+		rS_f32.v8x16[1].h8x8[1].val0 = k < q ? rS_f32.v8x16[1].h8x8[1].val0 : NEG_INF;
 
-		rS_f32.sub[0][0].val1 = k + 1 < q ? rS_f32.sub[0][0].val1 : NEG_INF;
-		rS_f32.sub[1][1].val1 = k + 1 < q ? rS_f32.sub[1][1].val1 : NEG_INF;
+		rS_f32.v8x16[0].h8x8[0].val1 = k + 1 < q ? rS_f32.v8x16[0].h8x8[0].val1 : NEG_INF;
+		rS_f32.v8x16[1].h8x8[1].val1 = k + 1 < q ? rS_f32.v8x16[1].h8x8[1].val1 : NEG_INF;
 	}
 
 	/// This is the exact opposite of the causal mask
-	static X17_DEVICE void window_mask_diagonal(Fragment_16x16<f32> &rS_f32) {
+	static X17_DEVICE void window_mask_diagonal(b32::Fragment_16x16<f32> &rS_f32) {
 		usize tid = threadIdx.x % WARP_SIZE;
 		usize q = tid / 4;          // 0..7
 		usize k = 2 * (tid % 4);    // 0,2,4,6
 		constexpr f32 NEG_INF = -INFINITY;
 
-		rS_f32.sub[1][0].val0 = NEG_INF;
-		rS_f32.sub[1][0].val1 = NEG_INF;
+		rS_f32.v8x16[1].h8x8[0].val0 = NEG_INF;
+		rS_f32.v8x16[1].h8x8[0].val1 = NEG_INF;
 
-		rS_f32.sub[0][0].val0 = k >= q ? rS_f32.sub[0][0].val0 : NEG_INF;
-		rS_f32.sub[1][1].val0 = k >= q ? rS_f32.sub[1][1].val0 : NEG_INF;
+		rS_f32.v8x16[0].h8x8[0].val0 = k >= q ? rS_f32.v8x16[0].h8x8[0].val0 : NEG_INF;
+		rS_f32.v8x16[1].h8x8[1].val0 = k >= q ? rS_f32.v8x16[1].h8x8[1].val0 : NEG_INF;
 
-		rS_f32.sub[0][0].val1 = k + 1 >= q ? rS_f32.sub[0][0].val1 : NEG_INF;
-		rS_f32.sub[1][1].val1 = k + 1 >= q ? rS_f32.sub[1][1].val1 : NEG_INF;
+		rS_f32.v8x16[0].h8x8[0].val1 = k + 1 >= q ? rS_f32.v8x16[0].h8x8[0].val1 : NEG_INF;
+		rS_f32.v8x16[1].h8x8[1].val1 = k + 1 >= q ? rS_f32.v8x16[1].h8x8[1].val1 : NEG_INF;
 	}
 
 	static constexpr size_t mma_count(size_t seq_len, size_t window_size) {
 		seq_len /= 16;
 		window_size = std::min(seq_len, window_size > 0 ? window_size / 16 : seq_len);
 		usize masked = seq_len - window_size;
+		// Count equivalent 16x16x16 MMA ops so flops() can keep using 2 * 16^3.
+		// Per visible 16x16 score tile:
+		//   - Q * K^T uses HEAD_TILES i8 MMAs with k = 32 => 2 * HEAD_TILES equivalents
+		//   - P * V uses 2 bf16 MMAs per 16x32 V tile => 2 * HEAD_TILES equivalents
+		constexpr size_t MMA_EQUIVS_PER_SCORE_TILE = 4 * HEAD_TILES;
 		return (
-			seq_len * seq_len * (QK_TILES + VG_TILES)
-			- masked * masked * (QK_TILES + VG_TILES)
+			seq_len * seq_len * MMA_EQUIVS_PER_SCORE_TILE
+			- masked * masked * MMA_EQUIVS_PER_SCORE_TILE
 		) / 2;
 	}
 
 	static constexpr double flops(size_t seq_len, size_t window_size) {
 		return double(mma_count(seq_len, window_size)) * 2.0 * 16.0 * 16.0 * 16.0;
+	}
+
+	static X17_DEVICE void fill_(b32::Fragment_16x16<f32> &frag, f32 value) {
+		X17_UNROLL for (usize row = 0; row < 2; ++row) {
+			X17_UNROLL for (usize col = 0; col < 2; ++col) {
+				frag.v8x16[row].h8x8[col].val0 = value;
+				frag.v8x16[row].h8x8[col].val1 = value;
+			}
+		}
 	}
 
 	X17_DEVICE void calculate_sink_scores(
@@ -355,14 +225,14 @@ struct AttnForward {
 		constexpr usize LOAD_CNT = HEAD_GROUP_DIM / 16;
 		X17_UNROLL for (usize i = 0; i < LOAD_CNT; ++i) {
 			usize src_col = i * 16 + group_lane * 4;
-			rSinkKV[i] = load_gmem_1x32b(reinterpret_cast<u32 const *>(sink_ptr + src_col));
+			rSinkKV[i] = *reinterpret_cast<u32 const *>(sink_ptr + src_col);
 		}
 	}
 
 	// Lazy-rescale threshold for online softmax
 	//
 	// Standard online softmax rescales O and sum every time a new max appears.
-	// That's expensive (touches all VG_TILES of rO). Instead, we only rescale
+	// That's expensive (touches all HEAD_TILES of rO). Instead, we only rescale
 	// when the new max exceeds the current max by more than this threshold.
 	//
 	// When rescaling happens, we also add the threshold to the new max to create some headroom.
@@ -516,7 +386,7 @@ struct AttnForward {
 		usize p, usize kv_end
 	) {
 		if (p < kv_end) {
-			auto preload_tile = tile_m<KV_PER_STEP>(preload, p % GMEM_PRELOAD);
+			auto preload_tile = preload.template tile_m<KV_PER_STEP>(p % GMEM_PRELOAD);
 			preload_tile.template cp_async_from<THREADS_PER_BLOCK, KV_PER_STEP, PRELOAD_DIM>(
 				threadIdx.x, gKV, p * KV_PER_STEP, 0, 0, 0
 			);
@@ -537,9 +407,9 @@ struct AttnForward {
 		usize i_head_base = i_head_group * HEADS_PER_KERNEL;
 
 		// GMEM Matrices
-		GMatrixDynSize<FixedI8, HEAD_GROUP_DIM> gQ{gQ_ptr + HEAD_DIM * i_head_base, seq_len, Q_STRIDE};
-		GMatrixDynSize<FixedI8, 2*HEAD_GROUP_DIM> gKV{gKV_ptr + 2*HEAD_DIM * i_head_base, seq_len, KV_STRIDE};
-		GMatrixDynSize<FixedI8, HEAD_GROUP_DIM> gO{gOut_ptr + HEAD_DIM * i_head_base, seq_len, O_STRIDE};
+		GMatrixDynSize<FixedI8, HEAD_GROUP_DIM> gQ{gQ_ptr + HEAD_DIM * i_head_base, Q_STRIDE};
+		GMatrixDynSize<FixedI8, 2*HEAD_GROUP_DIM> gKV{gKV_ptr + 2*HEAD_DIM * i_head_base, KV_STRIDE};
+		GMatrixDynSize<FixedI8, HEAD_GROUP_DIM> gO{gOut_ptr + HEAD_DIM * i_head_base, O_STRIDE};
 
 		// SMEM layout: KV preload region + Q
 		u32 smem = 0;
@@ -553,9 +423,8 @@ struct AttnForward {
 		usize q_block_start = q_block_idx * Q_PER_BLOCK;
 		usize q_block_end = q_block_start + Q_PER_BLOCK;
 		usize q_start = q_block_start + q_warp_idx * Q_PER_WARP;
-		GMatrix<FixedI8, Q_PER_BLOCK, HEAD_GROUP_DIM> gQ_block = tile_m<Q_PER_BLOCK>(gQ, q_block_idx);
-		cp_async_gmem_to_smem<THREADS_PER_BLOCK, Q_PER_BLOCK, QK_GROUP_DIM>(
-			threadIdx.x, gQ_block, sQ, 0, 0, 0, 0
+		sQ.template cp_async_from<THREADS_PER_BLOCK, Q_PER_BLOCK, HEAD_GROUP_DIM>(
+			threadIdx.x, gQ, q_block_start, 0, 0, 0
 		);
 		u32 rSinkK[HEAD_GROUP_DIM / 4 / 4];
 		load_sink_kv(gSinkK_ptr, i_head_base, rSinkK);
@@ -621,7 +490,7 @@ struct AttnForward {
 		// with V tiles for O += P * V within the same loop iteration. The interleaved
 		// MMA + SMEM load pattern hides the load latency.
 		b8::SMatrix<FixedI8, KV_PER_STEP, PRELOAD_DIM> sKV;
-		sKV = tile_m<KV_PER_STEP>(sPreload, kv_begin % GMEM_PRELOAD);
+		sKV = sPreload.template tile_m<KV_PER_STEP>(kv_begin % GMEM_PRELOAD);
 		b8::Fragment_16x32<FixedI8> rKV[HEADS_PER_KERNEL][HEAD_TILES];
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 			X17_UNROLL for (usize i = 0; i < HEAD_TILES; i++) {
@@ -687,7 +556,7 @@ struct AttnForward {
 				bot_stats[h].max = bot_max[h];
 				bot_stats[h].sum = bot_seed * 0.25f;
 
-				X17_UNROLL for (usize i = 0; i < VG_TILES; ++i) {
+				X17_UNROLL for (usize i = 0; i < HEAD_TILES; ++i) {
 					f32 sink0 = f32(rSinkV[h * QK_DIM / 4 + i * 4 + 0]) / SPARSE_SCALE;
 					f32 sink1 = f32(rSinkV[h * QK_DIM / 4 + i * 4 + 1]) / SPARSE_SCALE;
 					f32 sink2 = f32(rSinkV[h * QK_DIM / 4 + i * 4 + 2]) / SPARSE_SCALE;
@@ -721,7 +590,7 @@ struct AttnForward {
 
 				// Scaling must happen before masking to avoid -inf * 0 == NaN when scale == 0.
 				X17_UNROLL for (usize row = 0; row < OWNED_ROWS; ++row) {
-					scale_(rS_f32[h].v8x16[row], row_temperature[row]);
+					b32::scale_(rS_f32[h].v8x16[row], row_temperature[row]);
 				}
 			}
 
@@ -755,7 +624,7 @@ struct AttnForward {
 				}
 			}
 
-			Fragment_16x16<bf16> rP[HEADS_PER_KERNEL];
+			b16::Fragment_16x16<bf16> rP[HEADS_PER_KERNEL];
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 				online_softmax(stats[h], rS_f32[h], rO_f32[h]);
 				cast(rS_f32[h], rP[h]);
@@ -765,7 +634,7 @@ struct AttnForward {
 				// Wait for the next batch of GMEM -> SMEM preloads to complete
 				cp_async_wait<GMEM_PRELOAD - 2>();
 				sync_threads();
-				sKV = tile_m<KV_PER_STEP>(sPreload, (kv_step + 1) % GMEM_PRELOAD);
+				sKV = sPreload.tile_m<KV_PER_STEP>((kv_step + 1) % GMEM_PRELOAD);
 
 				// Preload next KV tiles from GMEM. Once the KV pipeline reaches its end,
 				// reuse the now-dead Q staging area to start pulling in the per-row G tile
@@ -780,7 +649,7 @@ struct AttnForward {
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 				X17_UNROLL for (usize i = 0; i < HEAD_TILES; i++) {
 					X17_UNROLL for (usize j = 0; j < 2; ++j) {
-						Fragment_16x16<bf16> rV;
+						b16::Fragment_16x16<bf16> rV;
 						cast<false>(rKV[h][i].h16x16[j], rV);
 						rV.transpose_();
 						mma_a_bt(rP[h], rV, rO_f32[h][i].h16x16[j]);
@@ -790,7 +659,7 @@ struct AttnForward {
 			}
 		}
 
-		GMatrix<FixedI8, Q_PER_BLOCK, HEAD_GROUP_DIM> gOut_block = tile_m<Q_PER_BLOCK>(gO, q_block_idx);
+		GMatrix<FixedI8, Q_PER_BLOCK, HEAD_GROUP_DIM> gOut_block = gO.template tile_m<Q_PER_BLOCK>(q_block_idx);
 		combine_and_store(
 			rO_f32,
 			stats,

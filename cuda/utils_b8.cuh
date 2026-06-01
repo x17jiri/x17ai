@@ -11,7 +11,9 @@ namespace b8 {
 
 	template<typename T>
 	requires(sizeof(T) == 1)
-	struct Fragment_8x16: FragmentReg<T> {};
+	struct Fragment_8x16 {
+		u32 val;
+	};
 
 	template<typename T>
 	requires(sizeof(T) == 1)
@@ -202,6 +204,14 @@ namespace b8 {
 
 		constexpr static usize ROW_BYTES = N * sizeof(T);
 
+		template<const usize TILE_M>
+		requires(TILE_M > 0 && M % TILE_M == 0)
+		X17_DEVICE constexpr SMatrixEvenOdd<T, TILE_M, N> tile_m(usize tile_idx) const {
+			return SMatrixEvenOdd<T, TILE_M, N>{
+				_ptr + (tile_idx * TILE_M * ROW_BYTES)
+			};
+		}
+
 		/// Copy from a sub-region of a GMEM matrix into a sub-region of this SMEM matrix.
 		/// Data is placed starting at (dst_row, dst_col) within this SMEM matrix.
 		/// dst_row and dst_col must be multiples of 32
@@ -364,6 +374,14 @@ namespace b8 {
 		X17_DEVICE constexpr usize bytes() const { return M * N * sizeof(T); }
 
 		constexpr static usize ROW_BYTES = N * sizeof(T);
+
+		template<const usize TILE_M>
+		requires(TILE_M > 0 && M % TILE_M == 0)
+		X17_DEVICE constexpr SMatrix<T, TILE_M, N> tile_m(usize tile_idx) const {
+			return SMatrix<T, TILE_M, N>{
+				_ptr + (tile_idx * TILE_M * ROW_BYTES)
+			};
+		}
 
 		/// Copy from a sub-region of a GMEM matrix into a sub-region of this SMEM matrix.
 		/// Data is placed starting at (dst_row, dst_col) within this SMEM matrix.
