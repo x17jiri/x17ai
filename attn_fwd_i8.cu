@@ -30,16 +30,6 @@ int main(int argc, char *argv[]) {
 		PACKED_DIM
 	>;
 
-	printf("sqrt 2 = %e, %e, %e, %d\n",
-		math::constexpr_sqrt(2.0),
-		M_SQRT2,
-		math::constexpr_sqrt(2.0) - M_SQRT2,
-		math::constexpr_sqrt(2.0) == M_SQRT2
-	);
-	constexpr f64 ONLINE_SOFTMAX_THRESHOLD = AF::ONLINE_SOFTMAX_THRESHOLD;
-	constexpr f64 EXPB = math::fast::constexpr_expb(-ONLINE_SOFTMAX_THRESHOLD);
-	printf("T = %e, expb(T) = %e\n", ONLINE_SOFTMAX_THRESHOLD, EXPB);
-
 	if (seq_len % AF::Q_PER_BLOCK != 0) {
 		printf("Expected seq_len %% %u == 0\n", AF::Q_PER_BLOCK);
 		return 1;
