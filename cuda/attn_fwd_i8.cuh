@@ -380,15 +380,17 @@ struct AttnForward {
 		b8::store(rO, gOut_block, q_warp_idx * Q_PER_WARP, 0);
 	}
 
-	static X17_DEVICE void cp_async_kv(
+	static X17_DEVICE void async_load_kv(
 		GMatrixDynSize<FixedI8, 2 * HEAD_GROUP_DIM> gKV,
 		b8::SMatrix<FixedI8, KV_PER_STEP * GMEM_PRELOAD, PRELOAD_DIM> preload,
 		usize p, usize kv_end
 	) {
 		if (p < kv_end) {
-			auto preload_tile = preload.template tile_m<KV_PER_STEP>(p % GMEM_PRELOAD);
-			preload_tile.template cp_async_from<THREADS_PER_BLOCK, KV_PER_STEP, PRELOAD_DIM>(
-				threadIdx.x, gKV, p * KV_PER_STEP, 0, 0, 0
+			auto preload_tile = tile_m<KV_PER_STEP>(preload, p % GMEM_PRELOAD);
+			async_load<THREADS_PER_BLOCK, KV_PER_STEP, PRELOAD_DIM>(
+				threadIdx.x,
+				gKV, p * KV_PER_STEP, 0,
+				preload_tile, 0, 0
 			);
 		}
 	}
@@ -423,8 +425,10 @@ struct AttnForward {
 		usize q_block_start = q_block_idx * Q_PER_BLOCK;
 		usize q_block_end = q_block_start + Q_PER_BLOCK;
 		usize q_start = q_block_start + q_warp_idx * Q_PER_WARP;
-		sQ.template cp_async_from<THREADS_PER_BLOCK, Q_PER_BLOCK, HEAD_GROUP_DIM>(
-			threadIdx.x, gQ, q_block_start, 0, 0, 0
+		async_load<THREADS_PER_BLOCK, Q_PER_BLOCK, HEAD_GROUP_DIM>(
+			threadIdx.x,
+			gQ, q_block_start, 0,
+			sQ, 0, 0
 		);
 		u32 rSinkK[HEAD_GROUP_DIM / 4 / 4];
 		load_sink_kv(gSinkK_ptr, i_head_base, rSinkK);
@@ -449,8 +453,8 @@ struct AttnForward {
 
 		// Start preloading K and V from GMEM to SMEM (first commit also commits Q)
 		X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD; ++p) {
-			cp_async_kv(gKV, sPreload, kv_begin + p, kv_end);
-			cp_async_commit();
+			async_load_kv(gKV, sPreload, kv_begin + p, kv_end);
+			async_load_commit();
 		}
 
 		// Temperature is composed of these factors:
@@ -475,26 +479,26 @@ struct AttnForward {
 			row_temperature[row] = f32(BASE_TEMPERATURE / FIXED_I8_SCALE_2) * math::fast::logb(f32(n));
 		}
 
-		cp_async_wait<GMEM_PRELOAD - 1>();
+		async_load_wait<GMEM_PRELOAD - 1>();
 		sync_threads();
 
 		// Load Q from SMEM to registers in the native i8 MMA layout.
 		b8::Fragment_16x32<FixedI8> rQ[HEADS_PER_KERNEL][HEAD_TILES];
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 			X17_UNROLL for (usize i = 0; i < HEAD_TILES; i++) {
-				sQ.tile_to_fragment(q_warp_idx * Q_PER_WARP, h * HEAD_DIM + i * 32, rQ[h][i]);
+				load_tile(sQ, q_warp_idx * Q_PER_WARP, h * HEAD_DIM + i * 32, rQ[h][i]);
 			}
 		}
 		// Load first KV tile from SMEM to registers
 		// `rKV` holds K tiles during S = Q * K^T, then gets overwritten
 		// with V tiles for O += P * V within the same loop iteration. The interleaved
 		// MMA + SMEM load pattern hides the load latency.
-		b8::SMatrix<FixedI8, KV_PER_STEP, PRELOAD_DIM> sKV;
-		sKV = sPreload.template tile_m<KV_PER_STEP>(kv_begin % GMEM_PRELOAD);
+		b8::SMatrix<FixedI8, KV_PER_STEP, PRELOAD_DIM> sKV =
+			tile_m<KV_PER_STEP>(sPreload, kv_begin % GMEM_PRELOAD);
 		b8::Fragment_16x32<FixedI8> rKV[HEADS_PER_KERNEL][HEAD_TILES];
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 			X17_UNROLL for (usize i = 0; i < HEAD_TILES; i++) {
-				sKV.tile_to_fragment(0, 2 * h * HEAD_DIM + i * 32, rKV[h][i]);
+				load_tile(sKV, 0, 2 * h * HEAD_DIM + i * 32, rKV[h][i]);
 			}
 		}
 
@@ -538,7 +542,7 @@ struct AttnForward {
 					sink_v_i8.h16x16[1].v8x16[j].val = packed1;
 				}
 				cast<false>(sink_v_i8, rO_f32[h][i]);
-				b32::scale_(rO_f32[h][i], initial_scale);
+				scale_(rO_f32[h][i], initial_scale);
 			}
 		}
 
@@ -584,13 +588,13 @@ struct AttnForward {
 				zero_(rS_i32);
 				X17_UNROLL for (usize i = 0; i < HEAD_TILES; i++) {
 					mma_a_bt(rQ[h][i], rKV[h][i], rS_i32);
-					sKV.tile_to_fragment(0, ((2 * h + 1) * HEAD_TILES + i) * 32, rKV[h][i]);
+					load_tile(sKV, 0, ((2 * h + 1) * HEAD_TILES + i) * 32, rKV[h][i]);
 				}
-				b32::cast(rS_i32, rS_f32[h]);
+				cast(rS_i32, rS_f32[h]);
 
 				// Scaling must happen before masking to avoid -inf * 0 == NaN when scale == 0.
 				X17_UNROLL for (usize row = 0; row < OWNED_ROWS; ++row) {
-					b32::scale_(rS_f32[h].v8x16[row], row_temperature[row]);
+					scale_(rS_f32[h].v8x16[row], row_temperature[row]);
 				}
 			}
 
@@ -632,16 +636,16 @@ struct AttnForward {
 
 			{ // Get more data from GMEM
 				// Wait for the next batch of GMEM -> SMEM preloads to complete
-				cp_async_wait<GMEM_PRELOAD - 2>();
+				async_load_wait<GMEM_PRELOAD - 2>();
 				sync_threads();
-				sKV = sPreload.tile_m<KV_PER_STEP>((kv_step + 1) % GMEM_PRELOAD);
+				sKV = tile_m<KV_PER_STEP>(sPreload, (kv_step + 1) % GMEM_PRELOAD);
 
 				// Preload next KV tiles from GMEM. Once the KV pipeline reaches its end,
 				// reuse the now-dead Q staging area to start pulling in the per-row G tile
 				// for the post-attention fused op.
 				usize next_kv = kv_step + GMEM_PRELOAD;
-				cp_async_kv(gKV, sPreload, next_kv, kv_end);
-				cp_async_commit();
+				async_load_kv(gKV, sPreload, next_kv, kv_end);
+				async_load_commit();
 			}
 
 
@@ -654,7 +658,7 @@ struct AttnForward {
 						rV.transpose_();
 						mma_a_bt(rP[h], rV, rO_f32[h][i].h16x16[j]);
 					}
-					sKV.tile_to_fragment(0, ((2 * h) * HEAD_TILES + i) * 32, rKV[h][i]);
+					load_tile(sKV, 0, ((2 * h) * HEAD_TILES + i) * 32, rKV[h][i]);
 				}
 			}
 		}

@@ -374,143 +374,152 @@ namespace b8 {
 		X17_DEVICE constexpr usize bytes() const { return M * N * sizeof(T); }
 
 		constexpr static usize ROW_BYTES = N * sizeof(T);
+	};
 
-		template<const usize TILE_M>
-		requires(TILE_M > 0 && M % TILE_M == 0)
-		X17_DEVICE constexpr SMatrix<T, TILE_M, N> tile_m(usize tile_idx) const {
-			return SMatrix<T, TILE_M, N>{
-				_ptr + (tile_idx * TILE_M * ROW_BYTES)
-			};
-		}
+	template<
+		const usize TILE_M,
+		typename T, const usize M, const usize N
+	>
+	requires(TILE_M > 0 && M % TILE_M == 0)
+	X17_DEVICE constexpr SMatrix<T, TILE_M, N> tile_m(SMatrix<T, M, N> src, usize tile_idx) {
+		using Src = SMatrix<T, M, N>;
+		using Dst = SMatrix<T, TILE_M, N>;
+		return Dst{
+			src._ptr + (tile_idx * TILE_M * Src::ROW_BYTES)
+		};
+	}
 
-		/// Copy from a sub-region of a GMEM matrix into a sub-region of this SMEM matrix.
-		/// Data is placed starting at (dst_row, dst_col) within this SMEM matrix.
-		/// dst_row and dst_col must be multiples of 32
-		template<
-			const usize THREADS_PER_BLOCK,
-			const usize HEIGHT, const usize WIDTH,
-			const usize GN,
-			const bool GMEM_COL_MODULO = true
-		>
-		requires(
-			WIDTH <= GN && WIDTH <= N
-			&& HEIGHT <= M
-		)
-		X17_DEVICE void cp_async_from(
-			usize tid,
-			GMatrixDynSize<T, GN> src,
-			usize src_row,
-			usize src_col,
-			usize dst_row,
-			usize dst_col
-		) const {
-			if constexpr (WIDTH > 0 && HEIGHT > 0) {
-				__builtin_assume(tid < THREADS_PER_BLOCK);
+	/// Copy from a sub-region of a GMEM matrix into a sub-region of this SMEM matrix.
+	/// Data is placed starting at (dst_row, dst_col) within this SMEM matrix.
+	/// dst_row and dst_col must be multiples of 32
+	template<
+		const usize THREADS_PER_BLOCK,
+		const usize HEIGHT, const usize WIDTH,
+		typename T, const usize M, const usize N,
+		const usize GN,
+		const bool GMEM_COL_MODULO = true
+	>
+	requires(
+		WIDTH <= GN && WIDTH <= N
+		&& HEIGHT <= M
+	)
+	X17_DEVICE void async_load(
+		usize tid,
+		GMatrixDynSize<T, GN> src, usize src_row, usize src_col,
+		SMatrix<T, M, N> dst, usize dst_row, usize dst_col
+	) {
+		using Src = GMatrixDynSize<T, GN>;
+		using Dst = SMatrix<T, M, N>;
+		if constexpr (WIDTH > 0 && HEIGHT > 0) {
+			__builtin_assume(tid < THREADS_PER_BLOCK);
 
-				constexpr usize SRC_ROW_BYTES = WIDTH * sizeof(T);
-				constexpr usize CP_BYTES = 16;
-				constexpr usize CP_PER_ROW = SRC_ROW_BYTES / CP_BYTES;
-				constexpr usize ROWS_PER_STEP = THREADS_PER_BLOCK / CP_PER_ROW;
-				constexpr usize STEPS = HEIGHT / ROWS_PER_STEP;
+			constexpr usize SRC_ROW_BYTES = WIDTH * sizeof(T);
+			constexpr usize CP_BYTES = 16;
+			constexpr usize CP_PER_ROW = SRC_ROW_BYTES / CP_BYTES;
+			constexpr usize ROWS_PER_STEP = THREADS_PER_BLOCK / CP_PER_ROW;
+			constexpr usize STEPS = HEIGHT / ROWS_PER_STEP;
 
-				static_assert(CP_BYTES % sizeof(T) == 0);
-				static_assert((WIDTH * sizeof(T)) % CP_BYTES == 0);
-				static_assert((N * sizeof(T)) % CP_BYTES == 0);
-				static_assert(THREADS_PER_BLOCK % CP_PER_ROW == 0);
-				if constexpr (STEPS == 0) {
-					if (tid >= (HEIGHT % ROWS_PER_STEP) * CP_PER_ROW) {
-						return;
-					}
+			static_assert(CP_BYTES % sizeof(T) == 0);
+			static_assert((WIDTH * sizeof(T)) % CP_BYTES == 0);
+			static_assert((N * sizeof(T)) % CP_BYTES == 0);
+			static_assert(THREADS_PER_BLOCK % CP_PER_ROW == 0);
+			if constexpr (STEPS == 0) {
+				if (tid >= (HEIGHT % ROWS_PER_STEP) * CP_PER_ROW) {
+					return;
 				}
+			}
 
-				// Thread's position within a step is fixed
-				usize col_in_row = dst_col * sizeof(T) + (tid % CP_PER_ROW) * CP_BYTES;
-				usize row_in_step = tid / CP_PER_ROW;
-				usize src_col_in_row = src_col * sizeof(T) + (tid % CP_PER_ROW) * CP_BYTES;
-				if constexpr (GMEM_COL_MODULO) {
-					src_col_in_row %= GN * sizeof(T);
+			// Thread's position within a step is fixed
+			usize col_in_row = dst_col * sizeof(T) + (tid % CP_PER_ROW) * CP_BYTES;
+			usize row_in_step = tid / CP_PER_ROW;
+			usize src_col_in_row = src_col * sizeof(T) + (tid % CP_PER_ROW) * CP_BYTES;
+			if constexpr (GMEM_COL_MODULO) {
+				src_col_in_row %= GN * sizeof(T);
+			}
+
+			u8 const *src_ptr =
+				reinterpret_cast<u8 const *>(src._ptr)
+				+ (src_row + row_in_step) * src.stride_bytes()
+				+ src_col_in_row;
+
+			usize dst_ptr = dst._ptr + (dst_row + row_in_step) * Dst::ROW_BYTES;
+
+			usize row = row_in_step;
+			if constexpr (STEPS > 0) {
+				X17_UNROLL for (usize step = 0; step < STEPS; ++step) {
+					usize swizzle = (row & 7) << 4;
+					usize off = col_in_row ^ swizzle;
+					sm80::cp_async(src_ptr, dst_ptr + off);
+					src_ptr += ROWS_PER_STEP * src.stride_bytes();
+					dst_ptr += ROWS_PER_STEP * Dst::ROW_BYTES;
+					row += ROWS_PER_STEP;
 				}
-
-				u8 const *src_ptr =
-					reinterpret_cast<u8 const *>(src._ptr)
-					+ (src_row + row_in_step) * src.stride_bytes()
-					+ src_col_in_row;
-
-				usize dst_ptr = _ptr + (dst_row + row_in_step) * ROW_BYTES;
-
-				usize row = row_in_step;
-				if constexpr (STEPS > 0) {
-					X17_UNROLL for (usize step = 0; step < STEPS; ++step) {
-						usize swizzle = (row & 7) << 4;
-						usize off = col_in_row ^ swizzle;
-						sm80::cp_async(src_ptr, dst_ptr + off);
-						src_ptr += ROWS_PER_STEP * src.stride_bytes();
-						dst_ptr += ROWS_PER_STEP * ROW_BYTES;
-						row += ROWS_PER_STEP;
-					}
-				}
-				if constexpr (HEIGHT % ROWS_PER_STEP != 0) {
-					if (tid < (HEIGHT % ROWS_PER_STEP) * CP_PER_ROW) {
-						usize swizzle = (row & 7) << 4;
-						usize off = col_in_row ^ swizzle;
-						sm80::cp_async(src_ptr, dst_ptr + off);
-					}
+			}
+			if constexpr (HEIGHT % ROWS_PER_STEP != 0) {
+				if (tid < (HEIGHT % ROWS_PER_STEP) * CP_PER_ROW) {
+					usize swizzle = (row & 7) << 4;
+					usize off = col_in_row ^ swizzle;
+					sm80::cp_async(src_ptr, dst_ptr + off);
 				}
 			}
 		}
+	}
 
-		/// `m_idx` must be a multiple of 16 and `n_idx` must be a multiple of 32
-		X17_DEVICE void tile_to_fragment(
-			usize m_idx, usize n_idx,
-			Fragment_16x32<T> &dst
-		) const {
-			usize tid = threadIdx.x;
-			usize row = m_idx + (tid & 15);
-			usize swizzle = ((tid & 7) << 4) ^ (tid & 16);
-			usize col_off = n_idx * sizeof(T);
-			u32 addr = _ptr + (row * ROW_BYTES) + (col_off ^ swizzle);
+	/// `m_idx` must be a multiple of 16 and `n_idx` must be a multiple of 32
+	template<typename T, const usize M, const usize N>
+	X17_DEVICE void load_tile(
+		SMatrix<T, M, N> src, usize m_idx, usize n_idx,
+		Fragment_16x32<T> &dst
+	) {
+		using Src = SMatrix<T, M, N>;
+		usize tid = threadIdx.x;
+		usize row = m_idx + (tid & 15);
+		usize swizzle = ((tid & 7) << 4) ^ (tid & 16);
+		usize col_off = n_idx * sizeof(T);
+		u32 addr = src._ptr + (row * Src::ROW_BYTES) + (col_off ^ swizzle);
 
-			sm80::ldmatrix_8x8xu16_x4(
-				addr,
-				dst.h16x16[0].v8x16[0].val,
-				dst.h16x16[0].v8x16[1].val,
-				dst.h16x16[1].v8x16[0].val,
-				dst.h16x16[1].v8x16[1].val
-			);
-		}
+		sm80::ldmatrix_8x8xu16_x4(
+			addr,
+			dst.h16x16[0].v8x16[0].val,
+			dst.h16x16[0].v8x16[1].val,
+			dst.h16x16[1].v8x16[0].val,
+			dst.h16x16[1].v8x16[1].val
+		);
+	}
 
-		/// Both `m_idx` and `n_idx` must be multiples of 32
-		X17_DEVICE void tile_to_fragment(
-			usize m_idx, usize n_idx,
-			Fragment_32x32<T> &dst
-		) const {
-			usize tid = threadIdx.x;
-			usize row = m_idx | (tid & 31);
-			usize swizzle = (tid & 7) << 4;
-			usize col_off = n_idx * sizeof(T);
-			u32 addr = _ptr + (row * ROW_BYTES) + (col_off ^ swizzle);
+	/// Both `m_idx` and `n_idx` must be multiples of 32
+	template<typename T, const usize M, const usize N>
+	X17_DEVICE void load_tile(
+		SMatrix<T, M, N> src, usize m_idx, usize n_idx,
+		Fragment_32x32<T> &dst
+	) {
+		using Src = SMatrix<T, M, N>;
+		usize tid = threadIdx.x;
+		usize row = m_idx | (tid & 31);
+		usize swizzle = (tid & 7) << 4;
+		usize col_off = n_idx * sizeof(T);
+		u32 addr = src._ptr + (row * Src::ROW_BYTES) + (col_off ^ swizzle);
 
-			sm80::ldmatrix_8x8xu16_x4(
-				addr,
-				dst.v16x32[0].h16x16[0].v8x16[0].val,
-				dst.v16x32[0].h16x16[0].v8x16[1].val,
-				dst.v16x32[1].h16x16[0].v8x16[0].val,
-				dst.v16x32[1].h16x16[0].v8x16[1].val
-			);
+		sm80::ldmatrix_8x8xu16_x4(
+			addr,
+			dst.v16x32[0].h16x16[0].v8x16[0].val,
+			dst.v16x32[0].h16x16[0].v8x16[1].val,
+			dst.v16x32[1].h16x16[0].v8x16[0].val,
+			dst.v16x32[1].h16x16[0].v8x16[1].val
+		);
 
-			// This assumes not only that `m_idx` and `n_idx` are multiples of 32,
-			// but also the initial address `dst._ptr` needs to be a multiple of 32.
-			addr ^= 16;
+		// This assumes not only that `m_idx` and `n_idx` are multiples of 32,
+		// but also the initial address `dst._ptr` needs to be a multiple of 32.
+		addr ^= 16;
 
-			sm80::ldmatrix_8x8xu16_x4(
-				addr,
-				dst.v16x32[0].h16x16[1].v8x16[0].val,
-				dst.v16x32[0].h16x16[1].v8x16[1].val,
-				dst.v16x32[1].h16x16[1].v8x16[0].val,
-				dst.v16x32[1].h16x16[1].v8x16[1].val
-			);
-		}
-	};
+		sm80::ldmatrix_8x8xu16_x4(
+			addr,
+			dst.v16x32[0].h16x16[1].v8x16[0].val,
+			dst.v16x32[0].h16x16[1].v8x16[1].val,
+			dst.v16x32[1].h16x16[1].v8x16[0].val,
+			dst.v16x32[1].h16x16[1].v8x16[1].val
+		);
+	}
 
 	X17_DEVICE void mma_a_bt(
 		Fragment_16x32<FixedI8> const &a,

@@ -986,8 +986,15 @@ struct SVector {
 	}
 };
 
-using sm80::cp_async_commit;
-using sm80::cp_async_wait;
+X17_DEVICE void async_load_commit() {
+	sm80::cp_async_commit();
+}
+
+template<int N = 0>
+X17_DEVICE void async_load_wait() {
+	sm80::cp_async_wait<N>();
+}
+
 using sm80::bar_sync;
 
 //--------------------------------------------------------------------------------------------------

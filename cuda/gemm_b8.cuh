@@ -654,7 +654,7 @@ namespace b8 {
 					A.template cp_async<THREADS_PER_BLOCK>(p, M_PER_BLOCK*block_m, K_STEP*p, N_PER_BLOCK*block_n);
 					B.template cp_async<THREADS_PER_BLOCK>(p, K_STEP*p, N_PER_BLOCK*block_n, M_PER_BLOCK*block_m);
 				}
-				cp_async_commit();
+				async_load_commit();
 			}
 
 			Fragment_32x32<FixedI8> rA[M_TILES][K_TILES];
@@ -690,7 +690,7 @@ namespace b8 {
 							C.template cp_async<THREADS_PER_BLOCK>(output_row, output_col);
 						}
 					}
-					cp_async_commit();
+					async_load_commit();
 				}
 
 				X17_UNROLL for (usize ki = 0; ki < K_TILES; ++ki) {
