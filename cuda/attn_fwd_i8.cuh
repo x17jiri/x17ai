@@ -336,8 +336,8 @@ struct AttnForward {
 			top_L[h] = math::fast::logb(top_stats.sum) + top_stats.max;
 			bot_L[h] = math::fast::logb(bot_stats.sum) + bot_stats.max;
 
-			f32 top_rescale = math::fast::recip(top_stats.sum);
-			f32 bot_rescale = math::fast::recip(bot_stats.sum);
+			f32 top_rescale = math::fast::recip(top_stats.sum) * (1.0f / 255.0f);
+			f32 bot_rescale = math::fast::recip(bot_stats.sum) * (1.0f / 255.0f);
 
 			X17_UNROLL for (usize i = 0; i < HEAD_TILES; ++i) {
 				X17_UNROLL for (usize j = 0; j < 2; ++j) {
@@ -522,6 +522,7 @@ struct AttnForward {
 					sink_v_i8.h16x16[1].v8x16[j].val = packed1;
 				}
 				cast<false>(sink_v_i8, rO_f32[h][i]);
+				scale_(rO_f32[h][i], 255.0f);
 			}
 		}
 
@@ -617,17 +618,17 @@ struct AttnForward {
 				} t;
 
 				// TODO - round
-				t.split[0] = u8(__float2int_rz(rS_f32[h].v8x16[0].h8x8[0].val0 * 255.0));
-				t.split[1] = u8(__float2int_rz(rS_f32[h].v8x16[0].h8x8[1].val0 * 255.0));
-				t.split[2] = u8(__float2int_rz(rS_f32[h].v8x16[0].h8x8[0].val1 * 255.0));
-				t.split[3] = u8(__float2int_rz(rS_f32[h].v8x16[0].h8x8[1].val1 * 255.0));
+				t.split[0] = u8(__float2int_rn(rS_f32[h].v8x16[0].h8x8[0].val0 * 255.0));
+				t.split[1] = u8(__float2int_rn(rS_f32[h].v8x16[0].h8x8[1].val0 * 255.0));
+				t.split[2] = u8(__float2int_rn(rS_f32[h].v8x16[0].h8x8[0].val1 * 255.0));
+				t.split[3] = u8(__float2int_rn(rS_f32[h].v8x16[0].h8x8[1].val1 * 255.0));
 
 				rP[h].v8x16[0].val = t.packed;
 
-				t.split[0] = u8(__float2int_rz(rS_f32[h].v8x16[1].h8x8[0].val0 * 255.0));
-				t.split[1] = u8(__float2int_rz(rS_f32[h].v8x16[1].h8x8[1].val0 * 255.0));
-				t.split[2] = u8(__float2int_rz(rS_f32[h].v8x16[1].h8x8[0].val1 * 255.0));
-				t.split[3] = u8(__float2int_rz(rS_f32[h].v8x16[1].h8x8[1].val1 * 255.0));
+				t.split[0] = u8(__float2int_rn(rS_f32[h].v8x16[1].h8x8[0].val0 * 255.0));
+				t.split[1] = u8(__float2int_rn(rS_f32[h].v8x16[1].h8x8[1].val0 * 255.0));
+				t.split[2] = u8(__float2int_rn(rS_f32[h].v8x16[1].h8x8[0].val1 * 255.0));
+				t.split[3] = u8(__float2int_rn(rS_f32[h].v8x16[1].h8x8[1].val1 * 255.0));
 
 				rP[h].v8x16[1].val = t.packed;
 			}
@@ -659,26 +660,10 @@ struct AttnForward {
 
 						b32::Fragment_16x16<f32> &o = rO_f32[h][i].h16x16[j];
 						X17_UNROLL for (usize jj = 0; jj < 2; ++jj) {
-							o.v8x16[jj].h8x8[0].val0 =
-								math::fma(
-									t.v8x16[jj].h8x8[0].val0, 1.0/256.0,
-									o.v8x16[jj].h8x8[0].val0
-								);
-							o.v8x16[jj].h8x8[0].val1 =
-								math::fma(
-									t.v8x16[jj].h8x8[1].val0, 1.0/256.0,
-									o.v8x16[jj].h8x8[1].val0
-								);
-							o.v8x16[jj].h8x8[1].val0 =
-								math::fma(
-									t.v8x16[jj].h8x8[0].val1, 1.0/256.0,
-									o.v8x16[jj].h8x8[0].val1
-								);
-							o.v8x16[jj].h8x8[1].val1 =
-								math::fma(
-									t.v8x16[jj].h8x8[1].val1, 1.0/256.0,
-									o.v8x16[jj].h8x8[1].val1
-								);
+							o.v8x16[jj].h8x8[0].val0 += t.v8x16[jj].h8x8[0].val0;
+							o.v8x16[jj].h8x8[0].val1 += t.v8x16[jj].h8x8[1].val0;
+							o.v8x16[jj].h8x8[1].val0 += t.v8x16[jj].h8x8[0].val1;
+							o.v8x16[jj].h8x8[1].val1 += t.v8x16[jj].h8x8[1].val1;
 						}
 					}
 					load_tile(sKV, 0, ((2 * h) * HEAD_TILES + i) * 32, rKV[h][i]);
