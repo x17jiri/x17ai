@@ -12,6 +12,9 @@ from block_utils import *
 def quantize(a):
 	return torch.clamp(torch.round(a * 8.0), -127.0, +127.0) / 8.0
 
+def quantize_i8_codes(a: torch.Tensor) -> torch.Tensor:
+	return torch.clamp(torch.round(a * 8.0), -127.0, +127.0).to(torch.int32)
+
 def new_randn(*shape, generator):
 	return torch.randn(shape, generator=generator)
 
@@ -162,12 +165,15 @@ def attn_one_head(
 	sink_k: torch.Tensor,
 	sink_v: torch.Tensor,
 	temperature_scale: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 	seq_len = q.shape[0]
 	QK_DIM = q.shape[1]
 
 	k = torch.cat((sink_k.unsqueeze(0), k), dim=0)
 	v = torch.cat((sink_v.unsqueeze(0), v), dim=0)
+	q_i32 = quantize_i8_codes(q)
+	k_i32 = quantize_i8_codes(k)
+	bare_scores_i32 = torch.matmul(q_i32, k_i32.transpose(0, 1))
 
 	S = q @ k.transpose(0, 1)
 
@@ -182,6 +188,8 @@ def attn_one_head(
 		)
 	mask = torch.zeros(seq_len, seq_len + 1, dtype=torch.bool)
 	mask[:, 1:] = real_mask
+	bare_scores_i32 = bare_scores_i32.masked_fill(mask, torch.iinfo(torch.int32).min)
+	bare_max = bare_scores_i32.amax(dim=1)
 	S = S.masked_fill(mask, float("-inf"))
 
 	S *= temperature
@@ -198,7 +206,7 @@ def attn_one_head(
 	o *= sum_recip
 
 	LOG2_E = 1.0 / math.log(2.0)
-	return o, max.squeeze(1) * LOG2_E
+	return o, max.squeeze(1) * LOG2_E, bare_max
 
 def attn(
 	q: torch.Tensor,
@@ -207,7 +215,7 @@ def attn(
 	sinks_k: torch.Tensor,
 	sinks_v: torch.Tensor,
 	attn_temperature: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 	_, n_heads, _ = q.shape
 	head_results = [
 		attn_one_head(
@@ -220,9 +228,10 @@ def attn(
 		)
 		for h in range(n_heads)
 	]
-	out = torch.stack([head_out for head_out, _ in head_results], dim=1)
-	max_values = torch.stack([head_max for _, head_max in head_results], dim=1)
-	return out, max_values
+	out = torch.stack([head_out for head_out, _, _ in head_results], dim=1)
+	max_values = torch.stack([head_max for _, head_max, _ in head_results], dim=1)
+	bare_max_values = torch.stack([head_max_i32 for _, _, head_max_i32 in head_results], dim=1)
+	return out, max_values, bare_max_values
 
 def run_attn() -> None:
 	x = load_tensor("x_i8.bin", N_INPUTS, MODEL_DIM)
@@ -251,7 +260,7 @@ def run_attn() -> None:
 	q_i8 = quantize(q)
 	k_i8 = quantize(k)
 	v_i8 = quantize(v)
-	attn_out, attn_maxes = attn(q_i8, k_i8, v_i8, sinks_k, sinks_v, attn_temperature)
+	attn_out, attn_maxes, attn_maxes_i32 = attn(q_i8, k_i8, v_i8, sinks_k, sinks_v, attn_temperature)
 
 	store_tensor(q, "q.bin", expected_variance=1.0)
 	store_tensor(q, "q_i8.bin")
@@ -262,6 +271,7 @@ def run_attn() -> None:
 	store_tensor(kv, "kv.bin", expected_variance=1.0)
 	store_tensor(kv, "kv_i8.bin")
 	store_tensor(attn_maxes.transpose(0, 1), "attn_maxes_f32.bin")
+	store_i32_tensor(attn_maxes_i32.transpose(0, 1), "attn_maxes_i32.bin")
 	store_tensor(attn_out, "attn_out.bin", expected_variance=1.0)
 	store_tensor(attn_out, "attn_out_i8.bin")
 

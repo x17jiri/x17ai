@@ -63,6 +63,8 @@ def tensor_storage_dtype(file_name: str) -> torch.dtype:
 def tensor_storage_name(dtype: torch.dtype) -> str:
 	if dtype == torch.float32:
 		return "float32"
+	if dtype == torch.int32:
+		return "int32"
 	if dtype == torch.bfloat16:
 		return "bfloat16"
 	if dtype == torch.int8:
@@ -102,6 +104,10 @@ def store_tensor_with_dtype(
 		stored = data.to(torch.float32)
 		raw = stored.numpy().tobytes()
 		warn_tensor = stored
+	elif dtype == torch.int32:
+		stored = data.to(torch.int32)
+		raw = stored.numpy().tobytes()
+		warn_tensor = stored.to(torch.float32)
 	elif dtype == torch.int8:
 		warn_tensor = data.to(data.to(torch.float32))
 		stored = torch.clamp(torch.round(warn_tensor * 8.0), -127.0, +127.0).to(torch.int8)
@@ -193,3 +199,6 @@ def store_f8_tensor(tensor: torch.Tensor, file_name: str, expected_variance: flo
 
 def store_i8_tensor(tensor: torch.Tensor, file_name: str, expected_variance: float | None = None) -> None:
 	store_tensor_with_dtype(tensor, file_name, torch.int8, expected_variance)
+
+def store_i32_tensor(tensor: torch.Tensor, file_name: str, expected_variance: float | None = None) -> None:
+	store_tensor_with_dtype(tensor, file_name, torch.int32, expected_variance)
