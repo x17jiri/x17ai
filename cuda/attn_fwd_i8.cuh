@@ -92,19 +92,15 @@ struct AttnForward {
 
 		constexpr f32 NEG_INF = -INFINITY;
 
-		f32 top0 = k1 < q1 ? rS_f32.v8x16[0].h8x8[0].get0() : NEG_INF;
-		f32 top1 = k2 < q1 ? rS_f32.v8x16[0].h8x8[0].get1() : NEG_INF;
-		f32 top2 = k3 < q1 ? rS_f32.v8x16[0].h8x8[1].get0() : NEG_INF;
-		f32 top3 = k4 < q1 ? rS_f32.v8x16[0].h8x8[1].get1() : NEG_INF;
-		rS_f32.v8x16[0].h8x8[0].set(top0, top1);
-		rS_f32.v8x16[0].h8x8[1].set(top2, top3);
+		rS_f32.v8x16[0].h8x8[0].val0 = k1 < q1 ? rS_f32.v8x16[0].h8x8[0].val0 : NEG_INF;
+		rS_f32.v8x16[0].h8x8[0].val1 = k2 < q1 ? rS_f32.v8x16[0].h8x8[0].val1 : NEG_INF;
+		rS_f32.v8x16[0].h8x8[1].val0 = k3 < q1 ? rS_f32.v8x16[0].h8x8[1].val0 : NEG_INF;
+		rS_f32.v8x16[0].h8x8[1].val1 = k4 < q1 ? rS_f32.v8x16[0].h8x8[1].val1 : NEG_INF;
 
-		f32 bot0 = k1 < q2 ? rS_f32.v8x16[1].h8x8[0].get0() : NEG_INF;
-		f32 bot1 = k2 < q2 ? rS_f32.v8x16[1].h8x8[0].get1() : NEG_INF;
-		f32 bot2 = k3 < q2 ? rS_f32.v8x16[1].h8x8[1].get0() : NEG_INF;
-		f32 bot3 = k4 < q2 ? rS_f32.v8x16[1].h8x8[1].get1() : NEG_INF;
-		rS_f32.v8x16[1].h8x8[0].set(bot0, bot1);
-		rS_f32.v8x16[1].h8x8[1].set(bot2, bot3);
+		rS_f32.v8x16[1].h8x8[0].val0 = k1 < q2 ? rS_f32.v8x16[1].h8x8[0].val0 : NEG_INF;
+		rS_f32.v8x16[1].h8x8[0].val1 = k2 < q2 ? rS_f32.v8x16[1].h8x8[0].val1 : NEG_INF;
+		rS_f32.v8x16[1].h8x8[1].val0 = k3 < q2 ? rS_f32.v8x16[1].h8x8[1].val0 : NEG_INF;
+		rS_f32.v8x16[1].h8x8[1].val1 = k4 < q2 ? rS_f32.v8x16[1].h8x8[1].val1 : NEG_INF;
 	}
 
 	/// This is the exact opposite of the causal mask
@@ -121,19 +117,15 @@ struct AttnForward {
 
 		constexpr f32 NEG_INF = -INFINITY;
 
-		f32 top0 = k1 >= q1 ? rS_f32.v8x16[0].h8x8[0].get0() : NEG_INF;
-		f32 top1 = k2 >= q1 ? rS_f32.v8x16[0].h8x8[0].get1() : NEG_INF;
-		f32 top2 = k3 >= q1 ? rS_f32.v8x16[0].h8x8[1].get0() : NEG_INF;
-		f32 top3 = k4 >= q1 ? rS_f32.v8x16[0].h8x8[1].get1() : NEG_INF;
-		rS_f32.v8x16[0].h8x8[0].set(top0, top1);
-		rS_f32.v8x16[0].h8x8[1].set(top2, top3);
+		rS_f32.v8x16[0].h8x8[0].val0 = k1 >= q1 ? rS_f32.v8x16[0].h8x8[0].val0 : NEG_INF;
+		rS_f32.v8x16[0].h8x8[0].val1 = k2 >= q1 ? rS_f32.v8x16[0].h8x8[0].val1 : NEG_INF;
+		rS_f32.v8x16[0].h8x8[1].val0 = k3 >= q1 ? rS_f32.v8x16[0].h8x8[1].val0 : NEG_INF;
+		rS_f32.v8x16[0].h8x8[1].val1 = k4 >= q1 ? rS_f32.v8x16[0].h8x8[1].val1 : NEG_INF;
 
-		f32 bot0 = k1 >= q2 ? rS_f32.v8x16[1].h8x8[0].get0() : NEG_INF;
-		f32 bot1 = k2 >= q2 ? rS_f32.v8x16[1].h8x8[0].get1() : NEG_INF;
-		f32 bot2 = k3 >= q2 ? rS_f32.v8x16[1].h8x8[1].get0() : NEG_INF;
-		f32 bot3 = k4 >= q2 ? rS_f32.v8x16[1].h8x8[1].get1() : NEG_INF;
-		rS_f32.v8x16[1].h8x8[0].set(bot0, bot1);
-		rS_f32.v8x16[1].h8x8[1].set(bot2, bot3);
+		rS_f32.v8x16[1].h8x8[0].val0 = k1 >= q2 ? rS_f32.v8x16[1].h8x8[0].val0 : NEG_INF;
+		rS_f32.v8x16[1].h8x8[0].val1 = k2 >= q2 ? rS_f32.v8x16[1].h8x8[0].val1 : NEG_INF;
+		rS_f32.v8x16[1].h8x8[1].val0 = k3 >= q2 ? rS_f32.v8x16[1].h8x8[1].val0 : NEG_INF;
+		rS_f32.v8x16[1].h8x8[1].val1 = k4 >= q2 ? rS_f32.v8x16[1].h8x8[1].val1 : NEG_INF;
 	}
 
 	static constexpr size_t mma_count(size_t seq_len, size_t window_size) {
@@ -191,6 +183,15 @@ struct AttnForward {
 		}
 	}
 
+	template<typename T>
+	X17_DEVICE void logicalize_score_columns(b32::Fragment_16x16<T> &frag) {
+		X17_UNROLL for (usize row = 0; row < 2; ++row) {
+			T tmp = frag.v8x16[row].h8x8[0].val1;
+			frag.v8x16[row].h8x8[0].val1 = frag.v8x16[row].h8x8[1].val0;
+			frag.v8x16[row].h8x8[1].val0 = tmp;
+		}
+	}
+
 	X17_DEVICE void load_sink_kv(
 		FixedI8 const *gSinkKV_ptr,
 		usize i_head_base,
@@ -220,13 +221,13 @@ struct AttnForward {
 
 		// Step 1: `max` of the owned values
 		f32 new_top_max = math::max(
-			math::max(rS_f32.v8x16[0].h8x8[0].get0(), rS_f32.v8x16[0].h8x8[0].get1()),
-			math::max(rS_f32.v8x16[0].h8x8[1].get0(), rS_f32.v8x16[0].h8x8[1].get1())
+			math::max(rS_f32.v8x16[0].h8x8[0].val0, rS_f32.v8x16[0].h8x8[0].val1),
+			math::max(rS_f32.v8x16[0].h8x8[1].val0, rS_f32.v8x16[0].h8x8[1].val1)
 		);
 
 		f32 new_bot_max = math::max(
-			math::max(rS_f32.v8x16[1].h8x8[0].get0(), rS_f32.v8x16[1].h8x8[0].get1()),
-			math::max(rS_f32.v8x16[1].h8x8[1].get0(), rS_f32.v8x16[1].h8x8[1].get1())
+			math::max(rS_f32.v8x16[1].h8x8[0].val0, rS_f32.v8x16[1].h8x8[0].val1),
+			math::max(rS_f32.v8x16[1].h8x8[1].val0, rS_f32.v8x16[1].h8x8[1].val1)
 		);
 
 		// Step 2: Rescale outputs if needed
@@ -256,30 +257,26 @@ struct AttnForward {
 		}
 
 		// Step 3: Replace scores with expb(score - max)
-		f32 top0 = math::fast::expb(rS_f32.v8x16[0].h8x8[0].get0() - top.max);
-		f32 top1 = math::fast::expb(rS_f32.v8x16[0].h8x8[0].get1() - top.max);
-		f32 top2 = math::fast::expb(rS_f32.v8x16[0].h8x8[1].get0() - top.max);
-		f32 top3 = math::fast::expb(rS_f32.v8x16[0].h8x8[1].get1() - top.max);
-		rS_f32.v8x16[0].h8x8[0].set(top0, top1);
-		rS_f32.v8x16[0].h8x8[1].set(top2, top3);
+		rS_f32.v8x16[0].h8x8[0].val0 = math::fast::expb(rS_f32.v8x16[0].h8x8[0].val0 - top.max);
+		rS_f32.v8x16[0].h8x8[0].val1 = math::fast::expb(rS_f32.v8x16[0].h8x8[0].val1 - top.max);
+		rS_f32.v8x16[0].h8x8[1].val0 = math::fast::expb(rS_f32.v8x16[0].h8x8[1].val0 - top.max);
+		rS_f32.v8x16[0].h8x8[1].val1 = math::fast::expb(rS_f32.v8x16[0].h8x8[1].val1 - top.max);
 
-		f32 bot0 = math::fast::expb(rS_f32.v8x16[1].h8x8[0].get0() - bot.max);
-		f32 bot1 = math::fast::expb(rS_f32.v8x16[1].h8x8[0].get1() - bot.max);
-		f32 bot2 = math::fast::expb(rS_f32.v8x16[1].h8x8[1].get0() - bot.max);
-		f32 bot3 = math::fast::expb(rS_f32.v8x16[1].h8x8[1].get1() - bot.max);
-		rS_f32.v8x16[1].h8x8[0].set(bot0, bot1);
-		rS_f32.v8x16[1].h8x8[1].set(bot2, bot3);
+		rS_f32.v8x16[1].h8x8[0].val0 = math::fast::expb(rS_f32.v8x16[1].h8x8[0].val0 - bot.max);
+		rS_f32.v8x16[1].h8x8[0].val1 = math::fast::expb(rS_f32.v8x16[1].h8x8[0].val1 - bot.max);
+		rS_f32.v8x16[1].h8x8[1].val0 = math::fast::expb(rS_f32.v8x16[1].h8x8[1].val0 - bot.max);
+		rS_f32.v8x16[1].h8x8[1].val1 = math::fast::expb(rS_f32.v8x16[1].h8x8[1].val1 - bot.max);
 
 		// Step 4: `sum` of the owned values
 		f32 top_add = (
-			(rS_f32.v8x16[0].h8x8[0].get0() + rS_f32.v8x16[0].h8x8[0].get1())
-			+ (rS_f32.v8x16[0].h8x8[1].get0() + rS_f32.v8x16[0].h8x8[1].get1())
+			(rS_f32.v8x16[0].h8x8[0].val0 + rS_f32.v8x16[0].h8x8[0].val1)
+			+ (rS_f32.v8x16[0].h8x8[1].val0 + rS_f32.v8x16[0].h8x8[1].val1)
 		);
 		top.sum = math::fma(top.sum, top_rescale, top_add);
 
 		f32 bot_add = (
-			(rS_f32.v8x16[1].h8x8[0].get0() + rS_f32.v8x16[1].h8x8[0].get1())
-			+ (rS_f32.v8x16[1].h8x8[1].get0() + rS_f32.v8x16[1].h8x8[1].get1())
+			(rS_f32.v8x16[1].h8x8[0].val0 + rS_f32.v8x16[1].h8x8[0].val1)
+			+ (rS_f32.v8x16[1].h8x8[1].val0 + rS_f32.v8x16[1].h8x8[1].val1)
 		);
 		bot.sum = math::fma(bot.sum, bot_rescale, bot_add);
 	}
@@ -519,7 +516,7 @@ struct AttnForward {
 					mma_a_bt(rQ[h][i], rKV[h][i], rS_i32);
 					load_tile_pretrans(sKV, 0, ((2 * h + 1) * HEAD_TILES + i) * 32, rKV[h][i]);
 				}
-				fix_even_odd_columns_(rS_i32);
+				logicalize_score_columns(rS_i32);
 				cast(rS_i32, rS_f32[h]);
 
 				// Scaling must happen before masking to avoid -inf * 0 == NaN when scale == 0.
@@ -562,10 +559,7 @@ struct AttnForward {
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 				online_softmax(stats[h], rS_f32[h], rO_f32[h]);
 
-				scale_(rS_f32[h], 255.0f);
-				cast(rS_f32[h], rP[h]);
-
-/*				union {
+				union {
 					u8 split[4];
 					u32 packed;
 				} t;
@@ -583,7 +577,7 @@ struct AttnForward {
 				t.split[2] = u8(__float2int_rn(rS_f32[h].v8x16[1].h8x8[1].val0 * 255.0));
 				t.split[3] = u8(__float2int_rn(rS_f32[h].v8x16[1].h8x8[1].val1 * 255.0));
 
-				rP[h].v8x16[1].val = t.packed;*/
+				rP[h].v8x16[1].val = t.packed;
 			}
 
 			{ // Get more data from GMEM
@@ -608,11 +602,13 @@ struct AttnForward {
 						zero_(t);
 						mma_a_bt(rP[h], rKV[h][i].h16x16[j], t);
 
-						b32::Fragment_16x16<f32> t2;
-						cast(t, t2);
-						fix_even_odd_columns_(t2);
-
-						acc_(rO_f32[h][i].h16x16[j], t2);
+						b32::Fragment_16x16<f32> &o = rO_f32[h][i].h16x16[j];
+						X17_UNROLL for (usize jj = 0; jj < 2; ++jj) {
+							o.v8x16[jj].h8x8[0].val0 += t.v8x16[jj].h8x8[0].val0;
+							o.v8x16[jj].h8x8[0].val1 += t.v8x16[jj].h8x8[1].val0;
+							o.v8x16[jj].h8x8[1].val0 += t.v8x16[jj].h8x8[0].val1;
+							o.v8x16[jj].h8x8[1].val1 += t.v8x16[jj].h8x8[1].val1;
+						}
 					}
 					load_tile(sKV, 0, ((2 * h) * HEAD_TILES + i) * 32, rKV[h][i]);
 				}

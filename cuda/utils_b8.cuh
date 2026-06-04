@@ -12,21 +12,7 @@ namespace b8 {
 	template<typename T>
 	requires(sizeof(T) == 1)
 	struct Fragment_8x16 {
-		union Union {
-			T val[4];
-			u32 data;
-		};
-
 		u32 val;
-
-		X17_DEVICE void set(T v0, T v1, T v2, T v3) {
-			Union tmp;
-			tmp.val[0] = v0;
-			tmp.val[1] = v1;
-			tmp.val[2] = v2;
-			tmp.val[3] = v3;
-			val = tmp.data;
-		}
 	};
 
 	template<typename T>
@@ -603,10 +589,10 @@ namespace b8 {
 	) {
 		X17_UNROLL for (int j = 0; j < 2; ++j) {
 			sm80::mma_i8_i32(
-				c.v8x16[0].h8x8[j].data0,
-				c.v8x16[0].h8x8[j].data1,
-				c.v8x16[1].h8x8[j].data0,
-				c.v8x16[1].h8x8[j].data1,
+				c.v8x16[0].h8x8[j].val0,
+				c.v8x16[0].h8x8[j].val1,
+				c.v8x16[1].h8x8[j].val0,
+				c.v8x16[1].h8x8[j].val1,
 
 				a.h16x16[0].v8x16[0].val,
 				a.h16x16[0].v8x16[1].val,
@@ -616,10 +602,10 @@ namespace b8 {
 				b.h16x16[0].v8x16[j].val,
 				b.h16x16[1].v8x16[j].val,
 
-				c.v8x16[0].h8x8[j].data0,
-				c.v8x16[0].h8x8[j].data1,
-				c.v8x16[1].h8x8[j].data0,
-				c.v8x16[1].h8x8[j].data1
+				c.v8x16[0].h8x8[j].val0,
+				c.v8x16[0].h8x8[j].val1,
+				c.v8x16[1].h8x8[j].val0,
+				c.v8x16[1].h8x8[j].val1
 			);
 		}
 	}
@@ -643,20 +629,20 @@ namespace b8 {
 	) {
 		X17_UNROLL for (int j = 0; j < 2; ++j) {
 			sm80::mma_u8_i8_i32(
-				c.v8x16[0].h8x8[j].data0,
-				c.v8x16[0].h8x8[j].data1,
-				c.v8x16[1].h8x8[j].data0,
-				c.v8x16[1].h8x8[j].data1,
+				c.v8x16[0].h8x8[j].val0,
+				c.v8x16[0].h8x8[j].val1,
+				c.v8x16[1].h8x8[j].val0,
+				c.v8x16[1].h8x8[j].val1,
 
 				a.v8x16[0].val,
 				a.v8x16[1].val,
 
 				b.v8x16[j].val,
 
-				c.v8x16[0].h8x8[j].data0,
-				c.v8x16[0].h8x8[j].data1,
-				c.v8x16[1].h8x8[j].data0,
-				c.v8x16[1].h8x8[j].data1
+				c.v8x16[0].h8x8[j].val0,
+				c.v8x16[0].h8x8[j].val1,
+				c.v8x16[1].h8x8[j].val0,
+				c.v8x16[1].h8x8[j].val1
 			);
 		}
 	}
@@ -677,3 +663,4 @@ namespace b8 {
 		return ToFixedI8<T>::conv_one(inp);
 	}
 }
+	
