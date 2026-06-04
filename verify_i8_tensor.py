@@ -48,6 +48,7 @@ def verify_i8(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
 	mismatch_count = total - exact_match
 	diff = (a.to(torch.int16) - b.to(torch.int16)).abs()
 	max_abs_diff = int(diff.max().item())
+	diff_counts = torch.bincount(diff.flatten().to(torch.int64), minlength=11)
 	min_a = int(a.min().item())
 	max_a = int(a.max().item())
 	min_b = int(b.min().item())
@@ -72,6 +73,10 @@ def verify_i8(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
 	print(f"B mean/var:     {mean_b:.6e} / {var_b:.6e}")
 	print(f"Mismatched i8:  {mismatch_count}/{total} ({100.0 * mismatch_count / total:.2f}%)")
 	print(f"Max abs diff:   {max_abs_diff}")
+	for abs_diff in range(1, 1+max_abs_diff):
+		count = int(diff_counts[abs_diff].item())
+		if count != 0:
+			print(f"Abs diff == {abs_diff}: {count}/{total} ({100.0 * count / total:.2f}%)")
 	print(f"A outside [-100, +100]: {outside_100_a}")
 	print(f"B outside [-100, +100]: {outside_100_b}")
 	print(f"A outside [-126, +126]: {out_of_range_a}")

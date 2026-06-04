@@ -13,69 +13,51 @@ X17_DEVICE void cast(b32::Fragment_16x16<f32> const &src, b16::Fragment_16x16<bf
 	X17_UNROLL for (usize row = 0; row < 2; ++row) {
 		X17_UNROLL for (usize col = 0; col < 2; ++col) {
 			dst.sub[row][col].set(
-				round_cast<bf16>(src.v8x16[row].h8x8[col].val0),
-				round_cast<bf16>(src.v8x16[row].h8x8[col].val1)
+				round_cast<bf16>(src.v8x16[row].h8x8[col].get0()),
+				round_cast<bf16>(src.v8x16[row].h8x8[col].get1())
 			);
 		}
 	}
 }
 
+X17_DEVICE void cast(b32::Fragment_16x16<i32> const &src, b32::Fragment_16x16<f32> &dst) {
+	X17_UNROLL for (usize row = 0; row < 2; ++row) {
+		X17_UNROLL for (usize col = 0; col < 2; ++col) {
+			dst.v8x16[row].h8x8[col].set(
+				round_cast<f32>(src.v8x16[row].h8x8[col].get0()),
+				round_cast<f32>(src.v8x16[row].h8x8[col].get1())
+			);
+		}
+	}
+}
+
+X17_DEVICE void cast(b32::Fragment_16x16<f32> const &src, b8::Fragment_16x16<u8> &dst) {
+	X17_UNROLL for (usize row = 0; row < 2; ++row) {
+		dst.v8x16[row].set(
+			round_cast<u8>(src.v8x16[row].h8x8[0].get0()),
+			round_cast<u8>(src.v8x16[row].h8x8[0].get1()),
+			round_cast<u8>(src.v8x16[row].h8x8[1].get0()),
+			round_cast<u8>(src.v8x16[row].h8x8[1].get1())
+		);
+	}
+}
+
 template<bool SHUFFLE = true>
 X17_DEVICE void cast(b8::Fragment_16x16<FixedI8> const &src, b32::Fragment_16x16<f32> &dst) {
+	static_assert(SHUFFLE == false);
 	union Packed4 {
 		u32 tuple4;
 		u16 tuple2[2];
 		FixedI8 val[4];
 	};
-	Packed4 top, bot, left, right;
-
+	Packed4 top, bot;
 	top.tuple4 = src.v8x16[0].val;
 	bot.tuple4 = src.v8x16[1].val;
 
-	left.tuple2[0] = top.tuple2[0];
-	left.tuple2[1] = bot.tuple2[0];
-	right.tuple2[0] = top.tuple2[1];
-	right.tuple2[1] = bot.tuple2[1];
-
-	if constexpr (SHUFFLE) {
-		Packed4 l, r;
-		usize tid = threadIdx.x;
-		left.tuple4 = shuffle_xor_sync(left.tuple4, 1);
-
-		l.tuple4 = (tid & 1) == 0 ? right.tuple4 : left.tuple4;
-		r.tuple4 = (tid & 1) == 0 ? left.tuple4 : right.tuple4;
-
-		l.tuple4 = shuffle_xor_sync(l.tuple4, 3);
-
-		left.tuple4 = (tid & 2) == 0 ? r.tuple4 : l.tuple4;
-		right.tuple4 = (tid & 2) == 0 ? l.tuple4 : r.tuple4;
-
-		left.tuple4 = shuffle_xor_sync(left.tuple4, 2);
-	}
-
-	f32 top0 = left.val[0];
-	f32 top1 = left.val[1];
-
-	f32 top8 = right.val[0];
-	f32 top9 = right.val[1];
-
-	f32 bot0 = left.val[2];
-	f32 bot1 = left.val[3];
-
-	f32 bot8 = right.val[2];
-	f32 bot9 = right.val[3];
-
-	dst.v8x16[0].h8x8[0].val0 = top0;
-	dst.v8x16[0].h8x8[0].val1 = top1;
-
-	dst.v8x16[0].h8x8[1].val0 = top8;
-	dst.v8x16[0].h8x8[1].val1 = top9;
-
-	dst.v8x16[1].h8x8[0].val0 = bot0;
-	dst.v8x16[1].h8x8[0].val1 = bot1;
-
-	dst.v8x16[1].h8x8[1].val0 = bot8;
-	dst.v8x16[1].h8x8[1].val1 = bot9;
+	dst.v8x16[0].h8x8[0].set(top.val[0], top.val[1]);
+	dst.v8x16[0].h8x8[1].set(top.val[2], top.val[3]);
+	dst.v8x16[1].h8x8[0].set(bot.val[0], bot.val[1]);
+	dst.v8x16[1].h8x8[1].set(bot.val[2], bot.val[3]);
 }
 
 template<bool SHUFFLE = true>
@@ -87,56 +69,26 @@ X17_DEVICE void cast(b8::Fragment_16x16<FixedI8> const &src, b16::Fragment_16x16
 
 template<bool SHUFFLE = true>
 X17_DEVICE void cast(b32::Fragment_16x16<f32> const &src, b8::Fragment_16x16<FixedI8> &dst) {
-	union {
+	static_assert(SHUFFLE == false);
+	union Packed4 {
 		u32 tuple4;
-		struct {
-			FixedI8 top0, top1, bot0, bot1;
-		} packed;
-	} left, right;
+		u16 tuple2[2];
+		FixedI8 val[4];
+	};
+	Packed4 top, bot;
 
-	left.packed.top0 = b8::to_fixedi8(src.v8x16[0].h8x8[0].val0);
-	left.packed.top1 = b8::to_fixedi8(src.v8x16[0].h8x8[0].val1);
-	left.packed.bot0 = b8::to_fixedi8(src.v8x16[1].h8x8[0].val0);
-	left.packed.bot1 = b8::to_fixedi8(src.v8x16[1].h8x8[0].val1);
+	top.val[0] = b8::to_fixedi8(src.v8x16[0].h8x8[0].get0());
+	top.val[1] = b8::to_fixedi8(src.v8x16[0].h8x8[0].get1());
+	top.val[2] = b8::to_fixedi8(src.v8x16[0].h8x8[1].get0());
+	top.val[3] = b8::to_fixedi8(src.v8x16[0].h8x8[1].get1());
 
-	right.packed.top0 = b8::to_fixedi8(src.v8x16[0].h8x8[1].val0);
-	right.packed.top1 = b8::to_fixedi8(src.v8x16[0].h8x8[1].val1);
-	right.packed.bot0 = b8::to_fixedi8(src.v8x16[1].h8x8[1].val0);
-	right.packed.bot1 = b8::to_fixedi8(src.v8x16[1].h8x8[1].val1);
+	bot.val[0] = b8::to_fixedi8(src.v8x16[1].h8x8[0].get0());
+	bot.val[1] = b8::to_fixedi8(src.v8x16[1].h8x8[0].get1());
+	bot.val[2] = b8::to_fixedi8(src.v8x16[1].h8x8[1].get0());
+	bot.val[3] = b8::to_fixedi8(src.v8x16[1].h8x8[1].get1());
 
-	if constexpr (SHUFFLE) {
-		usize tid = threadIdx.x;
-		u32 l = left.tuple4;
-		u32 r = right.tuple4;
-
-		l = shuffle_xor_sync(l, 2);
-
-		u32 left_or_right = (tid & 2) == 0 ? r : l;
-		u32 right_or_left = (tid & 2) == 0 ? l : r;
-
-		left_or_right = shuffle_xor_sync(left_or_right, 3);
-
-		u32 top = (tid & 1) == 0 ? right_or_left : left_or_right;
-		u32 bot = (tid & 1) == 0 ? left_or_right : right_or_left;
-
-		top = shuffle_xor_sync(top, 1);
-
-		dst.v8x16[0].val = __byte_perm(top, bot, 0x5410);
-		dst.v8x16[1].val = __byte_perm(top, bot, 0x7632);
-	} else {
-		union {
-			u32 tuple4;
-			u16 tuple2[2];
-		} top, bot;
-
-		top.tuple2[0] = left.tuple4 & 0xFFFFu;
-		top.tuple2[1] = right.tuple4 & 0xFFFFu;
-		bot.tuple2[0] = (left.tuple4 >> 16) & 0xFFFFu;
-		bot.tuple2[1] = (right.tuple4 >> 16) & 0xFFFFu;
-
-		dst.v8x16[0].val = top.tuple4;
-		dst.v8x16[1].val = bot.tuple4;
-	}
+	dst.v8x16[0].val = top.tuple4;
+	dst.v8x16[1].val = bot.tuple4;
 }
 
 template<bool SHUFFLE = true>
@@ -175,20 +127,20 @@ X17_DEVICE void mma_a_bt(
 	b32::Fragment_16x16<f32> &c
 ) {
 	sm80::mma_bf16_f32(
-		c.v8x16[0].h8x8[0].val0, c.v8x16[0].h8x8[0].val1,
-		c.v8x16[1].h8x8[0].val0, c.v8x16[1].h8x8[0].val1,
+		c.v8x16[0].h8x8[0].data0, c.v8x16[0].h8x8[0].data1,
+		c.v8x16[1].h8x8[0].data0, c.v8x16[1].h8x8[0].data1,
 		a.sub[0][0].val, a.sub[1][0].val, a.sub[0][1].val, a.sub[1][1].val,
 		b.sub[0][0].val, b.sub[0][1].val,
-		c.v8x16[0].h8x8[0].val0, c.v8x16[0].h8x8[0].val1,
-		c.v8x16[1].h8x8[0].val0, c.v8x16[1].h8x8[0].val1
+		c.v8x16[0].h8x8[0].data0, c.v8x16[0].h8x8[0].data1,
+		c.v8x16[1].h8x8[0].data0, c.v8x16[1].h8x8[0].data1
 	);
 	sm80::mma_bf16_f32(
-		c.v8x16[0].h8x8[1].val0, c.v8x16[0].h8x8[1].val1,
-		c.v8x16[1].h8x8[1].val0, c.v8x16[1].h8x8[1].val1,
+		c.v8x16[0].h8x8[1].data0, c.v8x16[0].h8x8[1].data1,
+		c.v8x16[1].h8x8[1].data0, c.v8x16[1].h8x8[1].data1,
 		a.sub[0][0].val, a.sub[1][0].val, a.sub[0][1].val, a.sub[1][1].val,
 		b.sub[1][0].val, b.sub[1][1].val,
-		c.v8x16[0].h8x8[1].val0, c.v8x16[0].h8x8[1].val1,
-		c.v8x16[1].h8x8[1].val0, c.v8x16[1].h8x8[1].val1
+		c.v8x16[0].h8x8[1].data0, c.v8x16[0].h8x8[1].data1,
+		c.v8x16[1].h8x8[1].data0, c.v8x16[1].h8x8[1].data1
 	);
 }
 

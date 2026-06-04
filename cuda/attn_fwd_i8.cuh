@@ -23,14 +23,10 @@ using b8::FixedI8;
 // Memory pipeline is double-buffered by default (controlled by GMEM_PRELOAD).
 // =============================================================================
 
-//--------------------------------------------------------------------------------------------------
-
 struct SoftmaxStats {
 	f32 sum;
 	f32 max;
 };
-
-//--------------------------------------------------------------------------------------------------
 
 template<
 	const usize _N_HEADS,
@@ -84,52 +80,68 @@ struct AttnForward {
 
 	// Mask the upper-triangular part of a 16x16 score tile (current key and future keys).
 	// A token does NOT attend to itself so the diagonal is masked as well.
-	//
-	// MMA 16x16 fragment layout — each thread owns 4 elements:
-	//   q rows: {tid/4, tid/4 + 8}          ("top" and "bot" halves)
-	//   k cols: {2*(tid%4), 2*(tid%4)+1, 2*(tid%4)+8, 2*(tid%4)+9}
-	//
-	// Mapped to sub[qi][ki].val{0,1}:
-	//   sub[0][0] = (q,   k  ), (q,   k+1)  — top-left 8x8
-	//   sub[0][1] = (q,   k+8), (q,   k+9)  — top-right 8x8
-	//   sub[1][0] = (q+8, k  ), (q+8, k+1)  — bot-left 8x8
-	//   sub[1][1] = (q+8, k+8), (q+8, k+9)  — bot-right 8x8
-	//
-	// For causal masking (q_global <= k_global → mask):
-	//   - top-right 8x8 is entirely masked (q < 8, k >= 8)
-	//   - top-left and bot-right diagonals: element-wise comparison
-	//   - bot-left 8x8 is entirely unmasked (q >= 8, k < 8)
 	static X17_DEVICE void causal_mask_diagonal(b32::Fragment_16x16<f32> &rS_f32) {
 		usize tid = threadIdx.x % WARP_SIZE;
-		usize q = tid / 4;          // 0..7
-		usize k = 2 * (tid % 4);    // 0,2,4,6
+
+		usize q1 = tid / 4; // 0..7
+		usize q2 = q1 + 8;  // 8..15
+
+		usize k1 = 4 * (tid % 4); // 0,4,8,12
+		usize k2 = k1 + 1;        // 1,5,9,13
+		usize k3 = k1 + 2;        // 2,6,10,14
+		usize k4 = k1 + 3;        // 3,7,11,15
+
 		constexpr f32 NEG_INF = -INFINITY;
 
-		rS_f32.v8x16[0].h8x8[1].val0 = NEG_INF;
-		rS_f32.v8x16[0].h8x8[1].val1 = NEG_INF;
+		rS_f32.v8x16[0].h8x8[0].set(
+			k1 < q1 ? rS_f32.v8x16[0].h8x8[0].get0() : NEG_INF,
+			k2 < q1 ? rS_f32.v8x16[0].h8x8[0].get1() : NEG_INF
+		);
+		rS_f32.v8x16[0].h8x8[1].set(
+			k3 < q1 ? rS_f32.v8x16[0].h8x8[1].get0() : NEG_INF,
+			k4 < q1 ? rS_f32.v8x16[0].h8x8[1].get1() : NEG_INF
+		);
 
-		rS_f32.v8x16[0].h8x8[0].val0 = k < q ? rS_f32.v8x16[0].h8x8[0].val0 : NEG_INF;
-		rS_f32.v8x16[1].h8x8[1].val0 = k < q ? rS_f32.v8x16[1].h8x8[1].val0 : NEG_INF;
-
-		rS_f32.v8x16[0].h8x8[0].val1 = k + 1 < q ? rS_f32.v8x16[0].h8x8[0].val1 : NEG_INF;
-		rS_f32.v8x16[1].h8x8[1].val1 = k + 1 < q ? rS_f32.v8x16[1].h8x8[1].val1 : NEG_INF;
+		rS_f32.v8x16[1].h8x8[0].set(
+			k1 < q2 ? rS_f32.v8x16[1].h8x8[0].get0() : NEG_INF,
+			k2 < q2 ? rS_f32.v8x16[1].h8x8[0].get1() : NEG_INF
+		);
+		rS_f32.v8x16[1].h8x8[1].set(
+			k3 < q2 ? rS_f32.v8x16[1].h8x8[1].get0() : NEG_INF,
+			k4 < q2 ? rS_f32.v8x16[1].h8x8[1].get1() : NEG_INF
+		);
 	}
 
-	/// This is the exact opposite of the causal mask
 	static X17_DEVICE void window_mask_diagonal(b32::Fragment_16x16<f32> &rS_f32) {
 		usize tid = threadIdx.x % WARP_SIZE;
-		usize q = tid / 4;          // 0..7
-		usize k = 2 * (tid % 4);    // 0,2,4,6
+
+		usize q1 = tid / 4; // 0..7
+		usize q2 = q1 + 8;  // 8..15
+
+		usize k1 = 4 * (tid % 4); // 0,4,8,12
+		usize k2 = k1 + 1;        // 1,5,9,13
+		usize k3 = k1 + 2;        // 2,6,10,14
+		usize k4 = k1 + 3;        // 3,7,11,15
+
 		constexpr f32 NEG_INF = -INFINITY;
 
-		rS_f32.v8x16[1].h8x8[0].val0 = NEG_INF;
-		rS_f32.v8x16[1].h8x8[0].val1 = NEG_INF;
+		rS_f32.v8x16[0].h8x8[0].set(
+			k1 >= q1 ? rS_f32.v8x16[0].h8x8[0].get0() : NEG_INF,
+			k2 >= q1 ? rS_f32.v8x16[0].h8x8[0].get1() : NEG_INF
+		);
+		rS_f32.v8x16[0].h8x8[1].set(
+			k3 >= q1 ? rS_f32.v8x16[0].h8x8[1].get0() : NEG_INF,
+			k4 >= q1 ? rS_f32.v8x16[0].h8x8[1].get1() : NEG_INF
+		);
 
-		rS_f32.v8x16[0].h8x8[0].val0 = k >= q ? rS_f32.v8x16[0].h8x8[0].val0 : NEG_INF;
-		rS_f32.v8x16[1].h8x8[1].val0 = k >= q ? rS_f32.v8x16[1].h8x8[1].val0 : NEG_INF;
-
-		rS_f32.v8x16[0].h8x8[0].val1 = k + 1 >= q ? rS_f32.v8x16[0].h8x8[0].val1 : NEG_INF;
-		rS_f32.v8x16[1].h8x8[1].val1 = k + 1 >= q ? rS_f32.v8x16[1].h8x8[1].val1 : NEG_INF;
+		rS_f32.v8x16[1].h8x8[0].set(
+			k1 >= q2 ? rS_f32.v8x16[1].h8x8[0].get0() : NEG_INF,
+			k2 >= q2 ? rS_f32.v8x16[1].h8x8[0].get1() : NEG_INF
+		);
+		rS_f32.v8x16[1].h8x8[1].set(
+			k3 >= q2 ? rS_f32.v8x16[1].h8x8[1].get0() : NEG_INF,
+			k4 >= q2 ? rS_f32.v8x16[1].h8x8[1].get1() : NEG_INF
+		);
 	}
 
 	static constexpr size_t mma_count(size_t seq_len, size_t window_size) {
@@ -151,23 +163,14 @@ struct AttnForward {
 		return double(mma_count(seq_len, window_size)) * 2.0 * 16.0 * 16.0 * 16.0;
 	}
 
-	static X17_DEVICE void fill_(b32::Fragment_16x16<f32> &frag, f32 value) {
-		X17_UNROLL for (usize row = 0; row < 2; ++row) {
-			X17_UNROLL for (usize col = 0; col < 2; ++col) {
-				frag.v8x16[row].h8x8[col].val0 = value;
-				frag.v8x16[row].h8x8[col].val1 = value;
-			}
-		}
-	}
-
 	X17_DEVICE void calculate_sink_scores(
 		b8::Fragment_16x32<FixedI8> const (&rQ)[HEADS_PER_KERNEL][HEAD_TILES],
 		u32 const (&rSinkK)[HEAD_GROUP_DIM / 16],
 		i32 (&sink_score)[HEADS_PER_KERNEL][OWNED_ROWS]
 	) {
 		static_assert(OWNED_ROWS == 2);
-		X17_UNROLL for (usize j = 0; j < OWNED_ROWS; ++j) {
-			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
+		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
+			X17_UNROLL for (usize j = 0; j < OWNED_ROWS; ++j) {
 				i32 acc = 0;
 				X17_UNROLL for (usize i = 0; i < HEAD_TILES; ++i) {
 					b8::Fragment_16x32<FixedI8> const &q = rQ[h][i];
@@ -196,67 +199,6 @@ struct AttnForward {
 		}
 	}
 
-	X17_DEVICE void load_max_scores(
-		i32 const *gMax_ptr,
-		usize seq_len,
-		usize q_start,
-		usize i_head_base,
-		f32 const (&row_temperature)[OWNED_ROWS],
-		f32 (&top_max)[HEADS_PER_KERNEL],
-		f32 (&bot_max)[HEADS_PER_KERNEL]
-	) {
-		static_assert(OWNED_ROWS == 2);
-		usize tid = threadIdx.x % WARP_SIZE;
-		usize row_in_half = tid / 4;
-		usize top_row = q_start + row_in_half;
-		usize bot_row = top_row + 8;
-
-		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
-			top_max[h] = f32(gMax_ptr[(i_head_base + h) * seq_len + top_row]);
-			bot_max[h] = f32(gMax_ptr[(i_head_base + h) * seq_len + bot_row]);
-		}
-	}
-
-	X17_DEVICE void dump_score_tile(
-		b32::Fragment_16x16<i32> const &rS_i32,
-		i32 *gScore_ptr,
-		usize seq_len,
-		usize q_start,
-		usize kv_col_start
-	) {
-		if (gScore_ptr == nullptr) {
-			return;
-		}
-
-		usize tid = threadIdx.x % WARP_SIZE;
-		usize row_idx = tid / 4;
-		usize col_idx = 2 * (tid % 4);
-		usize top_row = q_start + row_idx;
-		usize bot_row = top_row + 8;
-		usize col0 = kv_col_start + col_idx;
-
-		i32 *top_ptr = gScore_ptr + top_row * seq_len + col0;
-		top_ptr[0] = rS_i32.v8x16[0].h8x8[0].val0;
-		top_ptr[1] = rS_i32.v8x16[0].h8x8[1].val0;
-		top_ptr[8] = rS_i32.v8x16[0].h8x8[0].val1;
-		top_ptr[9] = rS_i32.v8x16[0].h8x8[1].val1;
-
-		i32 *bot_ptr = gScore_ptr + bot_row * seq_len + col0;
-		bot_ptr[0] = rS_i32.v8x16[1].h8x8[0].val0;
-		bot_ptr[1] = rS_i32.v8x16[1].h8x8[1].val0;
-		bot_ptr[8] = rS_i32.v8x16[1].h8x8[0].val1;
-		bot_ptr[9] = rS_i32.v8x16[1].h8x8[1].val1;
-	}
-
-	template<typename T>
-	X17_DEVICE void logicalize_score_columns(b32::Fragment_16x16<T> &frag) {
-		X17_UNROLL for (usize row = 0; row < 2; ++row) {
-			T tmp = frag.v8x16[row].h8x8[0].val1;
-			frag.v8x16[row].h8x8[0].val1 = frag.v8x16[row].h8x8[1].val0;
-			frag.v8x16[row].h8x8[1].val0 = tmp;
-		}
-	}
-
 	X17_DEVICE void load_sink_kv(
 		FixedI8 const *gSinkKV_ptr,
 		usize i_head_base,
@@ -274,8 +216,7 @@ struct AttnForward {
 	X17_DEVICE void online_softmax(
 		SoftmaxStats (&stats)[OWNED_ROWS],
 		b32::Fragment_16x16<f32> &rS_f32,
-		b32::Fragment_16x32<f32> (&rO_f32)[HEAD_TILES],
-		usize h
+		b32::Fragment_16x32<f32> (&rO_f32)[HEAD_TILES]
 	) {
 		static_assert(OWNED_ROWS == 2);
 		SoftmaxStats &top = stats[0];
@@ -287,66 +228,70 @@ struct AttnForward {
 
 		// Step 1: `max` of the owned values
 		f32 new_top_max = math::max(
-			math::max(rS_f32.v8x16[0].h8x8[0].val0, rS_f32.v8x16[0].h8x8[0].val1),
-			math::max(rS_f32.v8x16[0].h8x8[1].val0, rS_f32.v8x16[0].h8x8[1].val1)
+			math::max(rS_f32.v8x16[0].h8x8[0].get0(), rS_f32.v8x16[0].h8x8[0].get1()),
+			math::max(rS_f32.v8x16[0].h8x8[1].get0(), rS_f32.v8x16[0].h8x8[1].get1())
 		);
-		new_top_max = math::max(new_top_max, shuffle_xor_sync(new_top_max, 1));
-		new_top_max = math::max(new_top_max, shuffle_xor_sync(new_top_max, 2));
 
 		f32 new_bot_max = math::max(
-			math::max(rS_f32.v8x16[1].h8x8[0].val0, rS_f32.v8x16[1].h8x8[0].val1),
-			math::max(rS_f32.v8x16[1].h8x8[1].val0, rS_f32.v8x16[1].h8x8[1].val1)
+			math::max(rS_f32.v8x16[1].h8x8[0].get0(), rS_f32.v8x16[1].h8x8[0].get1()),
+			math::max(rS_f32.v8x16[1].h8x8[1].get0(), rS_f32.v8x16[1].h8x8[1].get1())
 		);
-		new_bot_max = math::max(new_bot_max, shuffle_xor_sync(new_bot_max, 1));
-		new_bot_max = math::max(new_bot_max, shuffle_xor_sync(new_bot_max, 2));
 
 		// Step 2: Rescale outputs if needed
 		f32 top_rescale = 1.0f;
 		f32 bot_rescale = 1.0f;
-		if (new_top_max > top.max) {
-			printf("******************* rescaling *****************: new_top_max = %e, top_max = %e, tid.x=%d, tid.y=%d, tid.z=%d, bid.x=%d, bid.y=%d, bid.z=%d; h = %d\n",
-				new_top_max, top.max, threadIdx.x, threadIdx.y, threadIdx.z, blockIdx.x, blockIdx.y, blockIdx.z, h
-			);
+		bool top_needs_rescale = new_top_max > top.max || new_bot_max > bot.max;
+		if (any_sync(top_needs_rescale)) {
+			new_top_max = math::max(new_top_max, shuffle_xor_sync(new_top_max, 1));
+			new_top_max = math::max(new_top_max, shuffle_xor_sync(new_top_max, 2));
+			new_top_max = math::max(new_top_max, top.max);
+
+			new_bot_max = math::max(new_bot_max, shuffle_xor_sync(new_bot_max, 1));
+			new_bot_max = math::max(new_bot_max, shuffle_xor_sync(new_bot_max, 2));
+			new_bot_max = math::max(new_bot_max, bot.max);
 
 			top_rescale = math::fast::expb(top.max - new_top_max);
-			top.max = new_top_max;
+			bot_rescale = math::fast::expb(bot.max - new_bot_max);
 			X17_UNROLL for (usize i = 0; i < HEAD_TILES; ++i) {
 				X17_UNROLL for (usize j = 0; j < 2; ++j) {
 					scale_(rO_f32[i].h16x16[j].v8x16[0], top_rescale);
-				}
-			}
-		}
-		if (new_bot_max > bot.max) {
-			bot_rescale = math::fast::expb(bot.max - new_bot_max);
-			bot.max = new_bot_max;
-			X17_UNROLL for (usize i = 0; i < HEAD_TILES; ++i) {
-				X17_UNROLL for (usize j = 0; j < 2; ++j) {
 					scale_(rO_f32[i].h16x16[j].v8x16[1], bot_rescale);
 				}
 			}
+
+			top.max = new_top_max;
+			bot.max = new_bot_max;
 		}
 
 		// Step 3: Replace scores with expb(score - max)
-		rS_f32.v8x16[0].h8x8[0].val0 = math::fast::expb(rS_f32.v8x16[0].h8x8[0].val0 - top.max);
-		rS_f32.v8x16[0].h8x8[0].val1 = math::fast::expb(rS_f32.v8x16[0].h8x8[0].val1 - top.max);
-		rS_f32.v8x16[0].h8x8[1].val0 = math::fast::expb(rS_f32.v8x16[0].h8x8[1].val0 - top.max);
-		rS_f32.v8x16[0].h8x8[1].val1 = math::fast::expb(rS_f32.v8x16[0].h8x8[1].val1 - top.max);
+		rS_f32.v8x16[0].h8x8[0].set(
+			math::fast::expb(rS_f32.v8x16[0].h8x8[0].get0() - top.max),
+			math::fast::expb(rS_f32.v8x16[0].h8x8[0].get1() - top.max)
+		);
+		rS_f32.v8x16[0].h8x8[1].set(
+			math::fast::expb(rS_f32.v8x16[0].h8x8[1].get0() - top.max),
+			math::fast::expb(rS_f32.v8x16[0].h8x8[1].get1() - top.max)
+		);
 
-		rS_f32.v8x16[1].h8x8[0].val0 = math::fast::expb(rS_f32.v8x16[1].h8x8[0].val0 - bot.max);
-		rS_f32.v8x16[1].h8x8[0].val1 = math::fast::expb(rS_f32.v8x16[1].h8x8[0].val1 - bot.max);
-		rS_f32.v8x16[1].h8x8[1].val0 = math::fast::expb(rS_f32.v8x16[1].h8x8[1].val0 - bot.max);
-		rS_f32.v8x16[1].h8x8[1].val1 = math::fast::expb(rS_f32.v8x16[1].h8x8[1].val1 - bot.max);
+		rS_f32.v8x16[1].h8x8[0].set(
+			math::fast::expb(rS_f32.v8x16[1].h8x8[0].get0() - bot.max),
+			math::fast::expb(rS_f32.v8x16[1].h8x8[0].get1() - bot.max)
+		);
+		rS_f32.v8x16[1].h8x8[1].set(
+			math::fast::expb(rS_f32.v8x16[1].h8x8[1].get0() - bot.max),
+			math::fast::expb(rS_f32.v8x16[1].h8x8[1].get1() - bot.max)
+		);
 
 		// Step 4: `sum` of the owned values
 		f32 top_add = (
-			(rS_f32.v8x16[0].h8x8[0].val0 + rS_f32.v8x16[0].h8x8[0].val1)
-			+ (rS_f32.v8x16[0].h8x8[1].val0 + rS_f32.v8x16[0].h8x8[1].val1)
+			(rS_f32.v8x16[0].h8x8[0].get0() + rS_f32.v8x16[0].h8x8[0].get1())
+			+ (rS_f32.v8x16[0].h8x8[1].get0() + rS_f32.v8x16[0].h8x8[1].get1())
 		);
 		top.sum = math::fma(top.sum, top_rescale, top_add);
 
 		f32 bot_add = (
-			(rS_f32.v8x16[1].h8x8[0].val0 + rS_f32.v8x16[1].h8x8[0].val1)
-			+ (rS_f32.v8x16[1].h8x8[1].val0 + rS_f32.v8x16[1].h8x8[1].val1)
+			(rS_f32.v8x16[1].h8x8[0].get0() + rS_f32.v8x16[1].h8x8[0].get1())
+			+ (rS_f32.v8x16[1].h8x8[1].get0() + rS_f32.v8x16[1].h8x8[1].get1())
 		);
 		bot.sum = math::fma(bot.sum, bot_rescale, bot_add);
 	}
@@ -431,13 +376,11 @@ struct AttnForward {
 		FixedI8 const *gSinkK_ptr,
 		FixedI8 const *gSinkV_ptr,
 		i32 const *gMax_ptr,
-		i32 *gScore_ptr,
 		FixedI8 *gOut_ptr,
 		f32 *gL_ptr,
 		usize window_size
 	) {
 		static_assert(KV_WARPS == 1, "current algorithm doesn't reduce over KV warps");
-		constexpr usize SCORE_DUMP_HEAD = 62;
 		usize i_head_group = blockIdx.y;
 		usize i_head_base = i_head_group * HEADS_PER_KERNEL;
 
@@ -504,10 +447,10 @@ struct AttnForward {
 		//       are scaled up by FIXED_I8_SCALE
 		// Since we're multiplying and dividing by logb(e), it cancels out, so:
 		//     temperature = BASE_TEMPERATURE * logb(n) / FIXED_I8_SCALE^2
-		u32 e_approx = 3;
-		constexpr f64 FIXED_I8_SCALE_2 = f64(b8::FIXED_I8_SCALE) * f64(b8::FIXED_I8_SCALE);
 		f32 row_temperature[OWNED_ROWS];
 		X17_UNROLL for (usize row = 0; row < OWNED_ROWS; ++row) {
+			u32 e_approx = 3;
+			constexpr f64 FIXED_I8_SCALE_2 = f64(b8::FIXED_I8_SCALE) * f64(b8::FIXED_I8_SCALE);
 			u32 n = std::min(window_size + 1 + e_approx, q_start + tid / 4 + (8*row + 1 + e_approx));
 			row_temperature[row] = f32(BASE_TEMPERATURE / FIXED_I8_SCALE_2) * math::fast::logb(f32(n));
 		}
@@ -551,43 +494,21 @@ struct AttnForward {
 
 		f32 top_max[HEADS_PER_KERNEL];
 		f32 bot_max[HEADS_PER_KERNEL];
-		if (gMax_ptr != nullptr) {
-			load_max_scores(gMax_ptr, seq_len, q_start, i_head_base, row_temperature, top_max, bot_max);
-		}
 
 		SoftmaxStats stats[HEADS_PER_KERNEL][OWNED_ROWS];
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-			if (threadIdx.x==82 && blockIdx.x==91) {
-				printf("loaded: top_max=%e, bot_max = %e, tid.x=%d, tid.y=%d, tid.z=%d, bid.x=%d, bid.y=%d, bid.z=%d; h = %d\n",
-					top_max[h], bot_max[h], threadIdx.x, threadIdx.y, threadIdx.z, blockIdx.x, blockIdx.y, blockIdx.z, h
-				);
-			}
 			top_max[h] *= row_temperature[0];
 			bot_max[h] *= row_temperature[1];
-			if (threadIdx.x==82 && blockIdx.x==91) {
-				printf("w/temp: top_max=%e, bot_max = %e, tid.x=%d, tid.y=%d, tid.z=%d, bid.x=%d, bid.y=%d, bid.z=%d; h = %d\n",
-					top_max[h], bot_max[h], threadIdx.x, threadIdx.y, threadIdx.z, blockIdx.x, blockIdx.y, blockIdx.z, h
-				);
-			}
 			X17_UNROLL for (usize row = 0; row < OWNED_ROWS; ++row) {
 				sink_score[h][row] = f32(sink_score_i32[h][row]) * row_temperature[row];
-
-				if (gMax_ptr != nullptr) {
-					f32 row_max = row == 0 ? top_max[h] : bot_max[h];
-					stats[h][row].max = row_max;
-					stats[h][row].sum = math::fast::expb(sink_score[h][row] - row_max) * 0.25f;
-				} else {
-					stats[h][row].max = sink_score[h][row];
-					stats[h][row].sum = 0.25f;
-				}
+				stats[h][row].max = sink_score[h][row];
+				stats[h][row].sum = 0.25f;
 			}
 		}
 
 		// O accumulator
 		b32::Fragment_16x32<f32> rO_f32[HEADS_PER_KERNEL][HEAD_TILES];
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; ++h) {
-			f32 top_seed = gMax_ptr != nullptr ? math::fast::expb(sink_score[h][0] - top_max[h]) : 1.0f;
-			f32 bot_seed = gMax_ptr != nullptr ? math::fast::expb(sink_score[h][1] - bot_max[h]) : 1.0f;
 			X17_UNROLL for (usize i = 0; i < HEAD_TILES; ++i) {
 				u32 packed0 = rSinkV[(h * HEAD_TILES + i) * 2 + 0];
 				u32 packed1 = rSinkV[(h * HEAD_TILES + i) * 2 + 1];
@@ -598,8 +519,8 @@ struct AttnForward {
 				}
 				cast<false>(sink_v_i8, rO_f32[h][i]);
 				X17_UNROLL for (usize j = 0; j < 2; ++j) {
-					b32::scale_(rO_f32[h][i].h16x16[j].v8x16[0], top_seed * 255.0f);
-					b32::scale_(rO_f32[h][i].h16x16[j].v8x16[1], bot_seed * 255.0f);
+					scale_(rO_f32[h][i].h16x16[j].v8x16[0], 255.0f);
+					scale_(rO_f32[h][i].h16x16[j].v8x16[1], 255.0f);
 				}
 			}
 		}
@@ -615,10 +536,7 @@ struct AttnForward {
 					mma_a_bt(rQ[h][i], rKV[h][i], rS_i32);
 					load_tile_pretrans(sKV, 0, ((2 * h + 1) * HEAD_TILES + i) * 32, rKV[h][i]);
 				}
-				if (i_head_base + h == SCORE_DUMP_HEAD) {
-					dump_score_tile(rS_i32, gScore_ptr, seq_len, q_start, kv_step * KV_PER_STEP);
-				}
-				logicalize_score_columns(rS_i32);
+				fix_even_odd_columns_(rS_i32);
 				cast(rS_i32, rS_f32[h]);
 
 				// Scaling must happen before masking to avoid -inf * 0 == NaN when scale == 0.
@@ -659,9 +577,12 @@ struct AttnForward {
 
 			b8::Fragment_16x16<u8> rP[HEADS_PER_KERNEL];
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
-				online_softmax(stats[h], rS_f32[h], rO_f32[h], h);
+				online_softmax(stats[h], rS_f32[h], rO_f32[h]);
 
-				union {
+				scale_(rS_f32[h], 255.0f);
+				cast(rS_f32[h], rP[h]);
+
+/*				union {
 					u8 split[4];
 					u32 packed;
 				} t;
@@ -679,7 +600,7 @@ struct AttnForward {
 				t.split[2] = u8(__float2int_rn(rS_f32[h].v8x16[1].h8x8[1].val0 * 255.0));
 				t.split[3] = u8(__float2int_rn(rS_f32[h].v8x16[1].h8x8[1].val1 * 255.0));
 
-				rP[h].v8x16[1].val = t.packed;
+				rP[h].v8x16[1].val = t.packed;*/
 			}
 
 			{ // Get more data from GMEM
@@ -706,14 +627,11 @@ struct AttnForward {
 						b32::Fragment_16x16<i32> t;
 						zero_(t);
 						mma_a_bt(rP[h], rKV[h][i].h16x16[j], t);
+						b32::Fragment_16x16<f32> t2;
+						cast(t, t2);
+						fix_even_odd_columns_(t2);
 
-						b32::Fragment_16x16<f32> &o = rO_f32[h][i].h16x16[j];
-						X17_UNROLL for (usize jj = 0; jj < 2; ++jj) {
-							o.v8x16[jj].h8x8[0].val0 += t.v8x16[jj].h8x8[0].val0;
-							o.v8x16[jj].h8x8[0].val1 += t.v8x16[jj].h8x8[1].val0;
-							o.v8x16[jj].h8x8[1].val0 += t.v8x16[jj].h8x8[0].val1;
-							o.v8x16[jj].h8x8[1].val1 += t.v8x16[jj].h8x8[1].val1;
-						}
+						acc_(rO_f32[h][i].h16x16[j], t2);;
 					}
 					load_tile(sKV, 0, ((2 * h) * HEAD_TILES + i) * 32, rKV[h][i]);
 				}
@@ -742,11 +660,10 @@ attn_forward(
 	FixedI8 const *gSinkK_ptr,
 	FixedI8 const *gSinkV_ptr,
 	i32 const *gMax_ptr,
-	i32 *gScore_ptr,
 	FixedI8 *gOut_ptr,
 	f32 *gL_ptr,
 	usize window_size
 ) {
 	AttnForward attn_forward = AttnForward();
-	attn_forward.run(seq_len, gQ_ptr, gKV_ptr, gSinkK_ptr, gSinkV_ptr, gMax_ptr, gScore_ptr, gOut_ptr, gL_ptr, window_size);
+	attn_forward.run(seq_len, gQ_ptr, gKV_ptr, gSinkK_ptr, gSinkV_ptr, gMax_ptr, gOut_ptr, gL_ptr, window_size);
 }

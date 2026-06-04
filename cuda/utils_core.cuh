@@ -86,17 +86,38 @@ struct Round_cast<bf16, f32> {
 
 template<>
 struct Round_cast<f32, i8> {
-	X17_DEVICE static bf16 cast(f32 x) {
+	X17_DEVICE static f32 cast(i8 x) {
 		return __int2float_rz(x);
 	}
 };
 
 template<>
 struct Round_cast<bf16, i8> {
-	X17_DEVICE static bf16 cast(f32 x) {
-		return  __float2bfloat16_rn(
+	X17_DEVICE static bf16 cast(i8 x) {
+		return __float2bfloat16_rn(
 			__int2float_rz(x)
 		);
+	}
+};
+
+template<>
+struct Round_cast<f32, i32> {
+	X17_DEVICE static f32 cast(i32 x) {
+		return __int2float_rn(x);
+	}
+};
+
+template<>
+struct Round_cast<f32, u8> {
+	X17_DEVICE static f32 cast(u8 x) {
+		return __int2float_rn(x);
+	}
+};
+
+template<>
+struct Round_cast<u8, f32> {
+	X17_DEVICE static u8 cast(f32 x) {
+		return __float2int_rn(x);
 	}
 };
 
@@ -715,10 +736,10 @@ namespace sm80 {
 	}
 
 	X17_DEVICE void mma_bf16_f32(
-		f32       &d0, f32       &d1, f32       &d2, f32       &d3,
+		u32       &d0, u32       &d1, u32       &d2, u32       &d3,
 		u32 const &a0, u32 const &a1, u32 const &a2, u32 const &a3,
 		u32 const &b0, u32 const &b1,
-		f32 const &c0, f32 const &c1, f32 const &c2, f32 const &c3
+		u32 const &c0, u32 const &c1, u32 const &c2, u32 const &c3
 	) {
 		asm volatile(
 			"\nmma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
@@ -727,19 +748,19 @@ namespace sm80 {
 			"{%8,  %9},"
 			"{%10, %11, %12, %13};\n"
 			:
-				"=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
+				"=r"(d0), "=r"(d1), "=r"(d2), "=r"(d3)
 			:
 				"r"(a0),  "r"(a1),  "r"(a2),  "r"(a3),
 				"r"(b0),  "r"(b1),
-				"f"(c0),  "f"(c1),  "f"(c2),  "f"(c3)
+				"r"(c0),  "r"(c1),  "r"(c2),  "r"(c3)
 		);
 	}
 
 	X17_DEVICE void mma_i8_i32(
-		i32       &d0, i32       &d1, i32       &d2, i32       &d3,
+		u32       &d0, u32       &d1, u32       &d2, u32       &d3,
 		u32 const &a0, u32 const &a1, u32 const &a2, u32 const &a3,
 		u32 const &b0, u32 const &b1,
-		i32 const &c0, i32 const &c1, i32 const &c2, i32 const &c3
+		u32 const &c0, u32 const &c1, u32 const &c2, u32 const &c3
 	) {
 		asm volatile(
 			"\nmma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
@@ -757,10 +778,10 @@ namespace sm80 {
 	}
 
 	X17_DEVICE void mma_u8_i8_i32(
-		i32       &d0, i32       &d1, i32       &d2, i32       &d3,
+		u32       &d0, u32       &d1, u32       &d2, u32       &d3,
 		u32 const &a0, u32 const &a1,
 		u32 const &b0,
-		i32 const &c0, i32 const &c1, i32 const &c2, i32 const &c3
+		u32 const &c0, u32 const &c1, u32 const &c2, u32 const &c3
 	) {
 		asm volatile(
 			"\nmma.sync.aligned.m16n8k16.row.col.s32.u8.s8.s32 "
