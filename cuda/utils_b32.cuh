@@ -6,27 +6,43 @@ namespace b32 {
 	template<typename T>
 	requires(sizeof(T) == 4)
 	struct Fragment_8x8 {
-		T val0, val1;
+		union Union {
+			T value;
+			u32 data;
+		};
+
+		u32 data0, data1;
 
 		X17_DEVICE T get0() const {
-			return val0;
+			Union tmp;
+			tmp.data = data0;
+			return tmp.value;
 		}
 
 		X17_DEVICE T get1() const {
-			return val1;
+			Union tmp;
+			tmp.data = data1;
+			return tmp.value;
 		}
 
 		X17_DEVICE void set0(T new_value) {
-			val0 = new_value;
+			Union tmp;
+			tmp.value = new_value;
+			data0 = tmp.data;
 		}
 
 		X17_DEVICE void set1(T new_value) {
-			val1 = new_value;
+			Union tmp;
+			tmp.value = new_value;
+			data1 = tmp.data;
 		}
 
 		X17_DEVICE void set(T value0, T value1) {
-			val0 = value0;
-			val1 = value1;
+			Union tmp;
+			tmp.value = value0;
+			data0 = tmp.data;
+			tmp.value = value1;
+			data1 = tmp.data;
 		}
 	};
 
@@ -54,10 +70,58 @@ namespace b32 {
 		Fragment_16x32<T> v16x32[2];
 	};
 
+	//----------------------------------------------------------------------------------------------
+
+	/// Example for thread 0:
+	/// - after using EvenOdd matrix as `B` in MMA, we hold columns: 0, 2, 1, 3
+	/// - after this function, it is reordered to: 0, 1, 2, 3
+	/// This is useful when we later want to convert to b8 fragment without shuffle.
+	/// However it is still not the normal b32 order: 0, 1, 8, 9
+	template<typename T>
+	X17_DEVICE void fix_even_odd_columns_(Fragment_16x16<T> &frag) {
+		X17_UNROLL for (usize row = 0; row < 2; ++row) {
+			u32 tmp = frag.v8x16[row].h8x8[0].data1;
+			frag.v8x16[row].h8x8[0].data1 = frag.v8x16[row].h8x8[1].data0;
+			frag.v8x16[row].h8x8[1].data0 = tmp;
+		}
+	}
+
+	//----------------------------------------------------------------------------------------------
+
+	template<typename T>
+	X17_DEVICE void fill_(Fragment_8x8<T> &f, T value) {
+		f.set(value, value);
+	}
+
+	template<typename T>
+	X17_DEVICE void fill_(Fragment_8x16<T> &f, T value) {
+		fill_(f.h8x8[0], value);
+		fill_(f.h8x8[1], value);
+	}
+
+	template<typename T>
+	X17_DEVICE void fill_(Fragment_16x16<T> &f, T value) {
+		fill_(f.v8x16[0], value);
+		fill_(f.v8x16[1], value);
+	}
+
+	template<typename T>
+	X17_DEVICE void fill_(Fragment_16x32<T> &f, T value) {
+		fill_(f.h16x16[0], value);
+		fill_(f.h16x16[1], value);
+	}
+
+	template<typename T>
+	X17_DEVICE void fill_(Fragment_32x32<T> &f, T value) {
+		fill_(f.v16x32[0], value);
+		fill_(f.v16x32[1], value);
+	}
+
+	//----------------------------------------------------------------------------------------------
+
 	template<typename T>
 	X17_DEVICE void zero_(Fragment_8x8<T> &f) {
-		f.val0 = 0;
-		f.val1 = 0;
+		fill_(f, T());
 	}
 
 	template<typename T>
@@ -84,40 +148,11 @@ namespace b32 {
 		zero_(f.v16x32[1]);
 	}
 
-	template<typename T>
-	X17_DEVICE void fill_(Fragment_8x8<T> &f, T v) {
-		f.val0 = v;
-		f.val1 = v;
-	}
-
-	template<typename T>
-	X17_DEVICE void fill_(Fragment_8x16<T> &f, T v) {
-		fill_(f.h8x8[0], v);
-		fill_(f.h8x8[1], v);
-	}
-
-	template<typename T>
-	X17_DEVICE void fill_(Fragment_16x16<T> &f, T v) {
-		fill_(f.v8x16[0], v);
-		fill_(f.v8x16[1], v);
-	}
-
-	template<typename T>
-	X17_DEVICE void fill_(Fragment_16x32<T> &f, T v) {
-		fill_(f.h16x16[0], v);
-		fill_(f.h16x16[1], v);
-	}
-
-	template<typename T>
-	X17_DEVICE void fill_(Fragment_32x32<T> &f, T v) {
-		fill_(f.v16x32[0], v);
-		fill_(f.v16x32[1], v);
-	}
+	//----------------------------------------------------------------------------------------------
 
 	template<typename T>
 	X17_DEVICE void scale_(Fragment_8x8<T> &f, T s) {
-		f.val0 *= s;
-		f.val1 *= s;
+		f.set(f.get0() * s, f.get1() * s);
 	}
 
 	template<typename T>
@@ -144,14 +179,46 @@ namespace b32 {
 		scale_(f.v16x32[1], s);
 	}
 
+	//----------------------------------------------------------------------------------------------
+
+	template<typename T>
+	X17_DEVICE void acc_(Fragment_8x8<T> &dst, Fragment_8x8<T> const &a) {
+		dst.set(dst.get0() + a.get0(), dst.get1() + a.get1());
+	}
+
+	template<typename T>
+	X17_DEVICE void acc_(Fragment_8x16<T> &dst, Fragment_8x16<T> const &a) {
+		acc_(dst.h8x8[0], a.h8x8[0]);
+		acc_(dst.h8x8[1], a.h8x8[1]);
+	}
+
+	template<typename T>
+	X17_DEVICE void acc_(Fragment_16x16<T> &dst, Fragment_16x16<T> const &a) {
+		acc_(dst.v8x16[0], a.v8x16[0]);
+		acc_(dst.v8x16[1], a.v8x16[1]);
+	}
+
+	template<typename T>
+	X17_DEVICE void acc_(Fragment_16x32<T> &dst, Fragment_16x32<T> const &a) {
+		acc_(dst.h16x16[0], a.h16x16[0]);
+		acc_(dst.h16x16[1], a.h16x16[1]);
+	}
+
+	template<typename T>
+	X17_DEVICE void acc_(Fragment_32x32<T> &dst, Fragment_32x32<T> const &a) {
+		acc_(dst.v16x32[0], a.v16x32[0]);
+		acc_(dst.v16x32[1], a.v16x32[1]);
+	}
+
+	//----------------------------------------------------------------------------------------------
+
 	template<const f64 SCALE = 1.0>
 	X17_DEVICE void cast(Fragment_8x8<i32> const &src, Fragment_8x8<f32> &dst) {
 		if constexpr (SCALE == 1.0) {
-			dst.val0 = f32(src.val0);
-			dst.val1 = f32(src.val1);
+			dst.data0 = src.data0;
+			dst.data1 = src.data1;
 		} else {
-			dst.val0 = f32(src.val0) * f32(SCALE);
-			dst.val1 = f32(src.val1) * f32(SCALE);
+			dst.set(src.get0() * f32(SCALE), src.get1() * f32(SCALE));
 		}
 	}
 
@@ -178,6 +245,8 @@ namespace b32 {
 		cast<SCALE>(src.v16x32[0], dst.v16x32[0]);
 		cast<SCALE>(src.v16x32[1], dst.v16x32[1]);
 	}
+
+	//----------------------------------------------------------------------------------------------
 
 	template<
 		typename T,
@@ -265,5 +334,7 @@ namespace b32 {
 			);
 		}
 	}
+
+	//----------------------------------------------------------------------------------------------
 
 }
