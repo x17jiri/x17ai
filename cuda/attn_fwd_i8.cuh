@@ -107,7 +107,7 @@ struct AttnForward {
 		rS_f32.v8x16[1].h8x8[1].set(bot2, bot3);
 	}
 
-	// This is the exact opposite of the causal mask
+	/// This is the exact opposite of the causal mask
 	static X17_DEVICE void window_mask_diagonal(b32::Fragment_16x16<f32> &rS_f32) {
 		usize tid = threadIdx.x % WARP_SIZE;
 
@@ -592,7 +592,7 @@ struct AttnForward {
 				sync_threads();
 				sKV = tile_m<KV_PER_STEP>(sPreload, (kv_step + 1) % GMEM_PRELOAD);
 
-				// Preload next KV tiles from GMEM.
+				// Preload next KV tiles from GMEM
 				usize next_kv = kv_step + GMEM_PRELOAD;
 				async_load_kv(gKV, sPreload, next_kv, kv_end);
 				async_load_commit();
@@ -607,6 +607,7 @@ struct AttnForward {
 						b32::Fragment_16x16<i32> t;
 						zero_(t);
 						mma_a_bt(rP[h], rKV[h][i].h16x16[j], t);
+
 						b32::Fragment_16x16<f32> t2;
 						cast(t, t2);
 						fix_even_odd_columns_(t2);
