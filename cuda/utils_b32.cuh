@@ -28,21 +28,21 @@ namespace b32 {
 		X17_DEVICE void set0(T new_value) {
 			Union tmp;
 			tmp.value = new_value;
-			data0 = tmp.value;
+			data0 = tmp.data;
 		}
 
 		X17_DEVICE void set1(T new_value) {
 			Union tmp;
 			tmp.value = new_value;
-			data1 = tmp.value;
+			data1 = tmp.data;
 		}
 
 		X17_DEVICE void set(T value0, T value1) {
 			Union tmp;
 			tmp.value = value0;
-			data0 = tmp.value;
+			data0 = tmp.data;
 			tmp.value = value1;
-			data1 = tmp.value;
+			data1 = tmp.data;
 		}
 	};
 

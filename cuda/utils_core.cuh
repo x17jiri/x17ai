@@ -110,7 +110,7 @@ struct Round_cast<f32, i32> {
 template<>
 struct Round_cast<f32, u8> {
 	X17_DEVICE static f32 cast(u8 x) {
-		return __int2float_rn(x);
+		return __int2float_rz(x);
 	}
 };
 
