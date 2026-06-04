@@ -59,6 +59,11 @@ int main(int argc, char *argv[]) {
 		N_HEADS,
 		HEAD_DIM
 	);
+	std::vector<f32> h_attn_temperature = load_f32_tensor(
+		torch_tensor_path("attn_temperature_f32.bin"),
+		N_HEADS,
+		1
+	);
 	std::vector<i32> h_maxes;
 	if (cli.use_torch_maxes && std::filesystem::exists(torch_tensor_path("attn_maxes_i32.bin"))) {
 		h_maxes = load_i32_tensor(torch_tensor_path("attn_maxes_i32.bin"), N_HEADS, seq_len);
@@ -69,7 +74,7 @@ int main(int argc, char *argv[]) {
 	} else if (cli.use_torch_maxes) {
 		printf("Torch attention maxes requested but %s does not exist\n", torch_tensor_path("attn_maxes_i32.bin").c_str());
 	}
-	if (h_Q.empty() || h_KV.empty() || h_sink_k.empty() || h_sink_v.empty()) {
+	if (h_Q.empty() || h_KV.empty() || h_sink_k.empty() || h_sink_v.empty() || h_attn_temperature.empty()) {
 		return 1;
 	}
 
@@ -81,6 +86,7 @@ int main(int argc, char *argv[]) {
 	b8::FixedI8 *d_KV = nullptr;
 	b8::FixedI8 *d_sink_k = nullptr;
 	b8::FixedI8 *d_sink_v = nullptr;
+	f32 *d_attn_temperature = nullptr;
 	i32 *d_maxes = nullptr;
 	b8::FixedI8 *d_out = nullptr;
 	f32 *d_L = nullptr;
@@ -89,6 +95,7 @@ int main(int argc, char *argv[]) {
 	cudaMalloc(&d_KV, h_KV.size() * sizeof(b8::FixedI8));
 	cudaMalloc(&d_sink_k, h_sink_k.size() * sizeof(b8::FixedI8));
 	cudaMalloc(&d_sink_v, h_sink_v.size() * sizeof(b8::FixedI8));
+	cudaMalloc(&d_attn_temperature, h_attn_temperature.size() * sizeof(f32));
 	if (!h_maxes.empty()) {
 		cudaMalloc(&d_maxes, h_maxes.size() * sizeof(i32));
 	}
@@ -99,6 +106,7 @@ int main(int argc, char *argv[]) {
 	cudaMemcpy(d_KV, h_KV.data(), h_KV.size() * sizeof(b8::FixedI8), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_sink_k, h_sink_k.data(), h_sink_k.size() * sizeof(b8::FixedI8), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_sink_v, h_sink_v.data(), h_sink_v.size() * sizeof(b8::FixedI8), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_attn_temperature, h_attn_temperature.data(), h_attn_temperature.size() * sizeof(f32), cudaMemcpyHostToDevice);
 	if (d_maxes != nullptr) {
 		cudaMemcpy(d_maxes, h_maxes.data(), h_maxes.size() * sizeof(i32), cudaMemcpyHostToDevice);
 	}
@@ -117,6 +125,7 @@ int main(int argc, char *argv[]) {
 				d_KV,
 				d_sink_k,
 				d_sink_v,
+				d_attn_temperature,
 				d_maxes,
 				d_out,
 				d_L,
@@ -146,6 +155,7 @@ int main(int argc, char *argv[]) {
 				d_KV,
 				d_sink_k,
 				d_sink_v,
+				d_attn_temperature,
 				d_maxes,
 				d_out,
 				d_L,
@@ -194,6 +204,7 @@ int main(int argc, char *argv[]) {
 	cudaFree(d_KV);
 	cudaFree(d_sink_k);
 	cudaFree(d_sink_v);
+	cudaFree(d_attn_temperature);
 	cudaFree(d_maxes);
 	cudaFree(d_out);
 	cudaFree(d_L);

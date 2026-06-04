@@ -363,6 +363,7 @@ struct AttnForward {
 		usize seq_len, FixedI8 *gQ_ptr, FixedI8 *gKV_ptr,
 		FixedI8 const *gSinkK_ptr,
 		FixedI8 const *gSinkV_ptr,
+		f32 const *gAttnTemperature_ptr,
 		i32 const *gMax_ptr,
 		FixedI8 *gOut_ptr,
 		f32 *gL_ptr,
@@ -443,6 +444,9 @@ struct AttnForward {
 			row_temperature[row] = f32(BASE_TEMPERATURE / FIXED_I8_SCALE_2) * math::fast::logb(f32(n));
 		}
 
+		f32 head_temperature[HEADS_PER_KERNEL];
+		load_gmem_Nx32b(gAttnTemperature_ptr + i_head_base, head_temperature);
+
 		async_load_wait<GMEM_PRELOAD - 1>();
 		sync_threads();
 
@@ -480,10 +484,13 @@ struct AttnForward {
 		i32 sink_score_i32[HEADS_PER_KERNEL][OWNED_ROWS];
 		calculate_sink_scores(rQ, rSinkK, sink_score_i32);
 
+
+		f32 temperature[HEADS_PER_KERNEL][OWNED_ROWS];
 		SoftmaxStats stats[HEADS_PER_KERNEL][OWNED_ROWS];
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 			X17_UNROLL for (usize row = 0; row < OWNED_ROWS; ++row) {
-				sink_score[h][row] = f32(sink_score_i32[h][row]) * row_temperature[row];
+				temperature[h][row] = row_temperature[row] * head_temperature[h];
+				sink_score[h][row] = f32(sink_score_i32[h][row]) * temperature[h][row];
 				stats[h][row].max = sink_score[h][row];
 				stats[h][row].sum = 0.25f;
 			}
@@ -524,7 +531,7 @@ struct AttnForward {
 
 				// Scaling must happen before masking to avoid -inf * 0 == NaN when scale == 0.
 				X17_UNROLL for (usize row = 0; row < OWNED_ROWS; ++row) {
-					scale_(rS_f32[h].v8x16[row], row_temperature[row]);
+					scale_(rS_f32[h].v8x16[row], temperature[h][row]);
 				}
 			}
 
@@ -564,26 +571,6 @@ struct AttnForward {
 
 				scale_(rS_f32[h], 255.0f);
 				cast(rS_f32[h], rP[h]);
-
-/*				union {
-					u8 split[4];
-					u32 packed;
-				} t;
-
-				// TODO - round
-				t.split[0] = u8(__float2int_rn(rS_f32[h].v8x16[0].h8x8[0].val0 * 255.0));
-				t.split[1] = u8(__float2int_rn(rS_f32[h].v8x16[0].h8x8[0].val1 * 255.0));
-				t.split[2] = u8(__float2int_rn(rS_f32[h].v8x16[0].h8x8[1].val0 * 255.0));
-				t.split[3] = u8(__float2int_rn(rS_f32[h].v8x16[0].h8x8[1].val1 * 255.0));
-
-				rP[h].v8x16[0].val = t.packed;
-
-				t.split[0] = u8(__float2int_rn(rS_f32[h].v8x16[1].h8x8[0].val0 * 255.0));
-				t.split[1] = u8(__float2int_rn(rS_f32[h].v8x16[1].h8x8[0].val1 * 255.0));
-				t.split[2] = u8(__float2int_rn(rS_f32[h].v8x16[1].h8x8[1].val0 * 255.0));
-				t.split[3] = u8(__float2int_rn(rS_f32[h].v8x16[1].h8x8[1].val1 * 255.0));
-
-				rP[h].v8x16[1].val = t.packed;*/
 			}
 
 			{ // Get more data from GMEM
@@ -612,7 +599,7 @@ struct AttnForward {
 						cast(t, t2);
 						fix_even_odd_columns_(t2);
 
-						acc_(rO_f32[h][i].h16x16[j], t2);
+						acc_(rO_f32[h][i].h16x16[j], t2); // TODO: fma
 					}
 					load_tile(sKV, 0, ((2 * h) * HEAD_TILES + i) * 32, rKV[h][i]);
 				}
@@ -640,11 +627,12 @@ attn_forward(
 	FixedI8 *gKV_ptr,
 	FixedI8 const *gSinkK_ptr,
 	FixedI8 const *gSinkV_ptr,
+	f32 const *gAttnTemperature_ptr,
 	i32 const *gMax_ptr,
 	FixedI8 *gOut_ptr,
 	f32 *gL_ptr,
 	usize window_size
 ) {
 	AttnForward attn_forward = AttnForward();
-	attn_forward.run(seq_len, gQ_ptr, gKV_ptr, gSinkK_ptr, gSinkV_ptr, gMax_ptr, gOut_ptr, gL_ptr, window_size);
+	attn_forward.run(seq_len, gQ_ptr, gKV_ptr, gSinkK_ptr, gSinkV_ptr, gAttnTemperature_ptr, gMax_ptr, gOut_ptr, gL_ptr, window_size);
 }

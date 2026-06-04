@@ -390,43 +390,6 @@ namespace b8 {
 		);
 	}
 
-/*	/// Both `m_idx` and `n_idx` must be multiples of 32
-	template<typename T, const usize M, const usize N>
-	X17_DEVICE void load_tile_trans(
-		SMatrixEvenOdd<T, M, N> src, usize m_idx, usize n_idx,
-		Fragment_32x32<T> &dst
-	) {
-		using Src = SMatrixEvenOdd<T, M, N>;
-
-		usize tid = threadIdx.x;
-		usize row = m_idx | (((tid & 15) << 1) | ((tid & 16) >> 4));
-		usize swizzle = (tid & 7) << 4;
-		usize col_off = n_idx * sizeof(T);
-		u32 addr = src._ptr + (row * Src::ROW_BYTES) + (col_off ^ swizzle);
-
-		sm80::ldmatrix_t_8x8xu16_x4(
-			addr,
-			dst.v16x32[0].h16x16[0].v8x16[0].data,
-			dst.v16x32[0].h16x16[1].v8x16[0].data,
-			dst.v16x32[0].h16x16[0].v8x16[1].data,
-			dst.v16x32[0].h16x16[1].v8x16[1].data
-		);
-		dst.v16x32[0].h16x16[0].finish_trans_load_();
-		dst.v16x32[0].h16x16[1].finish_trans_load_();
-
-		addr ^= 16;
-
-		sm80::ldmatrix_t_8x8xu16_x4(
-			addr,
-			dst.v16x32[1].h16x16[0].v8x16[0].data,
-			dst.v16x32[1].h16x16[1].v8x16[0].data,
-			dst.v16x32[1].h16x16[0].v8x16[1].data,
-			dst.v16x32[1].h16x16[1].v8x16[1].data
-		);
-		dst.v16x32[1].h16x16[0].finish_trans_load_();
-		dst.v16x32[1].h16x16[1].finish_trans_load_();
-	}*/
-
 	template<typename T, const usize M, const usize N>
 	requires(
 		sizeof(T) == 1
