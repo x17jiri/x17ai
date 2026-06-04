@@ -51,8 +51,8 @@ X17_DEVICE void cast(b8::Fragment_16x16<FixedI8> const &src, b32::Fragment_16x16
 		FixedI8 val[4];
 	};
 	Packed4 top, bot;
-	top.tuple4 = src.v8x16[0].val;
-	bot.tuple4 = src.v8x16[1].val;
+	top.tuple4 = src.v8x16[0].data;
+	bot.tuple4 = src.v8x16[1].data;
 
 	dst.v8x16[0].h8x8[0].set(top.val[0], top.val[1]);
 	dst.v8x16[0].h8x8[1].set(top.val[2], top.val[3]);
@@ -87,8 +87,8 @@ X17_DEVICE void cast(b32::Fragment_16x16<f32> const &src, b8::Fragment_16x16<Fix
 	bot.val[2] = b8::to_fixedi8(src.v8x16[1].h8x8[1].get0());
 	bot.val[3] = b8::to_fixedi8(src.v8x16[1].h8x8[1].get1());
 
-	dst.v8x16[0].val = top.tuple4;
-	dst.v8x16[1].val = bot.tuple4;
+	dst.v8x16[0].data = top.tuple4;
+	dst.v8x16[1].data = bot.tuple4;
 }
 
 template<bool SHUFFLE = true>

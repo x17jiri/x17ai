@@ -11,13 +11,13 @@ namespace b8 {
 
 	template<typename T>
 	requires(sizeof(T) == 1)
-	struct Fragment_8x16 {
+	union Fragment_8x16 {
 		union Union {
 			T val[4];
 			u32 data;
 		};
 
-		u32 val;
+		u32 data;
 
 		X17_DEVICE void set(T v0, T v1, T v2, T v3) {
 			Union tmp;
@@ -25,7 +25,7 @@ namespace b8 {
 			tmp.val[1] = v1;
 			tmp.val[2] = v2;
 			tmp.val[3] = v3;
-			val = tmp.data;
+			data = tmp.data;
 		}
 	};
 
@@ -41,10 +41,10 @@ namespace b8 {
 		///     even = [0, 4, 2, 6]
 		///     odd  = [1, 5, 3, 7]
 		X17_DEVICE void finish_trans_load_() {
-			u32 even = v8x16[0].val;
-			u32 odd = v8x16[1].val;
-			v8x16[0].val = __byte_perm(even, odd, 0x6240);
-			v8x16[1].val  = __byte_perm(even, odd, 0x7351);
+			u32 even = v8x16[0].data;
+			u32 odd = v8x16[1].data;
+			v8x16[0].data = __byte_perm(even, odd, 0x6240);
+			v8x16[1].data  = __byte_perm(even, odd, 0x7351);
 		}
 	};
 
@@ -113,27 +113,27 @@ namespace b8 {
 			X17_UNROLL for (; i + 2 <= K; i += 2) {
 				store_1x4_8x16(
 					dst, m_idx + 0, n_idx + i*32,
-					tiles[i+0].h16x16[0].v8x16[0].val,
-					tiles[i+0].h16x16[1].v8x16[0].val,
-					tiles[i+1].h16x16[0].v8x16[0].val,
-					tiles[i+1].h16x16[1].v8x16[0].val
+					tiles[i+0].h16x16[0].v8x16[0].data,
+					tiles[i+0].h16x16[1].v8x16[0].data,
+					tiles[i+1].h16x16[0].v8x16[0].data,
+					tiles[i+1].h16x16[1].v8x16[0].data
 				);
 				store_1x4_8x16(
 					dst, m_idx + 8, n_idx + i*32,
-					tiles[i+0].h16x16[0].v8x16[1].val,
-					tiles[i+0].h16x16[1].v8x16[1].val,
-					tiles[i+1].h16x16[0].v8x16[1].val,
-					tiles[i+1].h16x16[1].v8x16[1].val
+					tiles[i+0].h16x16[0].v8x16[1].data,
+					tiles[i+0].h16x16[1].v8x16[1].data,
+					tiles[i+1].h16x16[0].v8x16[1].data,
+					tiles[i+1].h16x16[1].v8x16[1].data
 				);
 			}
 		}
 		if constexpr (K % 2 == 1) {
 			store_2x2_8x16(
 				dst, m_idx + 0, n_idx + i*32,
-				tiles[i].h16x16[0].v8x16[0].val,
-				tiles[i].h16x16[1].v8x16[0].val,
-				tiles[i].h16x16[0].v8x16[1].val,
-				tiles[i].h16x16[1].v8x16[1].val
+				tiles[i].h16x16[0].v8x16[0].data,
+				tiles[i].h16x16[1].v8x16[0].data,
+				tiles[i].h16x16[0].v8x16[1].data,
+				tiles[i].h16x16[1].v8x16[1].data
 			);
 		}
 	}
@@ -150,48 +150,48 @@ namespace b8 {
 			X17_UNROLL for (; i + 2 <= K; i += 2) {
 				store_1x4_8x16(
 					dst, m_idx + 0, n_idx + i*32,
-					tiles[i+0].v16x32[0].h16x16[0].v8x16[0].val,
-					tiles[i+0].v16x32[0].h16x16[1].v8x16[0].val,
-					tiles[i+1].v16x32[0].h16x16[0].v8x16[0].val,
-					tiles[i+1].v16x32[0].h16x16[1].v8x16[0].val
+					tiles[i+0].v16x32[0].h16x16[0].v8x16[0].data,
+					tiles[i+0].v16x32[0].h16x16[1].v8x16[0].data,
+					tiles[i+1].v16x32[0].h16x16[0].v8x16[0].data,
+					tiles[i+1].v16x32[0].h16x16[1].v8x16[0].data
 				);
 				store_1x4_8x16(
 					dst, m_idx + 8, n_idx + i*32,
-					tiles[i+0].v16x32[0].h16x16[0].v8x16[1].val,
-					tiles[i+0].v16x32[0].h16x16[1].v8x16[1].val,
-					tiles[i+1].v16x32[0].h16x16[0].v8x16[1].val,
-					tiles[i+1].v16x32[0].h16x16[1].v8x16[1].val
+					tiles[i+0].v16x32[0].h16x16[0].v8x16[1].data,
+					tiles[i+0].v16x32[0].h16x16[1].v8x16[1].data,
+					tiles[i+1].v16x32[0].h16x16[0].v8x16[1].data,
+					tiles[i+1].v16x32[0].h16x16[1].v8x16[1].data
 				);
 				store_1x4_8x16(
 					dst, m_idx + 16, n_idx + i*32,
-					tiles[i+0].v16x32[1].h16x16[0].v8x16[0].val,
-					tiles[i+0].v16x32[1].h16x16[1].v8x16[0].val,
-					tiles[i+1].v16x32[1].h16x16[0].v8x16[0].val,
-					tiles[i+1].v16x32[1].h16x16[1].v8x16[0].val
+					tiles[i+0].v16x32[1].h16x16[0].v8x16[0].data,
+					tiles[i+0].v16x32[1].h16x16[1].v8x16[0].data,
+					tiles[i+1].v16x32[1].h16x16[0].v8x16[0].data,
+					tiles[i+1].v16x32[1].h16x16[1].v8x16[0].data
 				);
 				store_1x4_8x16(
 					dst, m_idx + 24, n_idx + i*32,
-					tiles[i+0].v16x32[1].h16x16[0].v8x16[1].val,
-					tiles[i+0].v16x32[1].h16x16[1].v8x16[1].val,
-					tiles[i+1].v16x32[1].h16x16[0].v8x16[1].val,
-					tiles[i+1].v16x32[1].h16x16[1].v8x16[1].val
+					tiles[i+0].v16x32[1].h16x16[0].v8x16[1].data,
+					tiles[i+0].v16x32[1].h16x16[1].v8x16[1].data,
+					tiles[i+1].v16x32[1].h16x16[0].v8x16[1].data,
+					tiles[i+1].v16x32[1].h16x16[1].v8x16[1].data
 				);
 			}
 		}
 		if constexpr (K % 2 == 1) {
 			store_2x2_8x16(
 				dst, m_idx + 0, n_idx + i*32,
-				tiles[i].v16x32[0].h16x16[0].v8x16[0].val,
-				tiles[i].v16x32[0].h16x16[1].v8x16[0].val,
-				tiles[i].v16x32[0].h16x16[0].v8x16[1].val,
-				tiles[i].v16x32[0].h16x16[1].v8x16[1].val
+				tiles[i].v16x32[0].h16x16[0].v8x16[0].data,
+				tiles[i].v16x32[0].h16x16[1].v8x16[0].data,
+				tiles[i].v16x32[0].h16x16[0].v8x16[1].data,
+				tiles[i].v16x32[0].h16x16[1].v8x16[1].data
 			);
 			store_2x2_8x16(
 				dst, m_idx + 16, n_idx + i*32,
-				tiles[i].v16x32[1].h16x16[0].v8x16[0].val,
-				tiles[i].v16x32[1].h16x16[1].v8x16[0].val,
-				tiles[i].v16x32[1].h16x16[0].v8x16[1].val,
-				tiles[i].v16x32[1].h16x16[1].v8x16[1].val
+				tiles[i].v16x32[1].h16x16[0].v8x16[0].data,
+				tiles[i].v16x32[1].h16x16[1].v8x16[0].data,
+				tiles[i].v16x32[1].h16x16[0].v8x16[1].data,
+				tiles[i].v16x32[1].h16x16[1].v8x16[1].data
 			);
 		}
 	}
@@ -324,20 +324,20 @@ namespace b8 {
 
 		sm80::ldmatrix_8x8xu16_x4(
 			addr,
-			dst.v16x32[0].h16x16[0].v8x16[0].val,
-			dst.v16x32[0].h16x16[0].v8x16[1].val,
-			dst.v16x32[1].h16x16[0].v8x16[0].val,
-			dst.v16x32[1].h16x16[0].v8x16[1].val
+			dst.v16x32[0].h16x16[0].v8x16[0].data,
+			dst.v16x32[0].h16x16[0].v8x16[1].data,
+			dst.v16x32[1].h16x16[0].v8x16[0].data,
+			dst.v16x32[1].h16x16[0].v8x16[1].data
 		);
 
 		addr ^= 16;
 
 		sm80::ldmatrix_8x8xu16_x4(
 			addr,
-			dst.v16x32[0].h16x16[1].v8x16[0].val,
-			dst.v16x32[0].h16x16[1].v8x16[1].val,
-			dst.v16x32[1].h16x16[1].v8x16[0].val,
-			dst.v16x32[1].h16x16[1].v8x16[1].val
+			dst.v16x32[0].h16x16[1].v8x16[0].data,
+			dst.v16x32[0].h16x16[1].v8x16[1].data,
+			dst.v16x32[1].h16x16[1].v8x16[0].data,
+			dst.v16x32[1].h16x16[1].v8x16[1].data
 		);
 	}
 
@@ -357,10 +357,10 @@ namespace b8 {
 
 		sm80::ldmatrix_8x8xu16_x4(
 			addr,
-			dst.h16x16[0].v8x16[0].val,
-			dst.h16x16[0].v8x16[1].val,
-			dst.h16x16[1].v8x16[0].val,
-			dst.h16x16[1].v8x16[1].val
+			dst.h16x16[0].v8x16[0].data,
+			dst.h16x16[0].v8x16[1].data,
+			dst.h16x16[1].v8x16[0].data,
+			dst.h16x16[1].v8x16[1].data
 		);
 	}
 
@@ -383,10 +383,10 @@ namespace b8 {
 
 		sm80::ldmatrix_t_8x8xu16_x4(
 			addr,
-			dst.h16x16[0].v8x16[0].val,
-			dst.h16x16[0].v8x16[1].val,
-			dst.h16x16[1].v8x16[0].val,
-			dst.h16x16[1].v8x16[1].val
+			dst.h16x16[0].v8x16[0].data,
+			dst.h16x16[0].v8x16[1].data,
+			dst.h16x16[1].v8x16[0].data,
+			dst.h16x16[1].v8x16[1].data
 		);
 	}
 
@@ -406,10 +406,10 @@ namespace b8 {
 
 		sm80::ldmatrix_t_8x8xu16_x4(
 			addr,
-			dst.v16x32[0].h16x16[0].v8x16[0].val,
-			dst.v16x32[0].h16x16[1].v8x16[0].val,
-			dst.v16x32[0].h16x16[0].v8x16[1].val,
-			dst.v16x32[0].h16x16[1].v8x16[1].val
+			dst.v16x32[0].h16x16[0].v8x16[0].data,
+			dst.v16x32[0].h16x16[1].v8x16[0].data,
+			dst.v16x32[0].h16x16[0].v8x16[1].data,
+			dst.v16x32[0].h16x16[1].v8x16[1].data
 		);
 		dst.v16x32[0].h16x16[0].finish_trans_load_();
 		dst.v16x32[0].h16x16[1].finish_trans_load_();
@@ -418,10 +418,10 @@ namespace b8 {
 
 		sm80::ldmatrix_t_8x8xu16_x4(
 			addr,
-			dst.v16x32[1].h16x16[0].v8x16[0].val,
-			dst.v16x32[1].h16x16[1].v8x16[0].val,
-			dst.v16x32[1].h16x16[0].v8x16[1].val,
-			dst.v16x32[1].h16x16[1].v8x16[1].val
+			dst.v16x32[1].h16x16[0].v8x16[0].data,
+			dst.v16x32[1].h16x16[1].v8x16[0].data,
+			dst.v16x32[1].h16x16[0].v8x16[1].data,
+			dst.v16x32[1].h16x16[1].v8x16[1].data
 		);
 		dst.v16x32[1].h16x16[0].finish_trans_load_();
 		dst.v16x32[1].h16x16[1].finish_trans_load_();
@@ -554,10 +554,10 @@ namespace b8 {
 
 		sm80::ldmatrix_8x8xu16_x4(
 			addr,
-			dst.h16x16[0].v8x16[0].val,
-			dst.h16x16[0].v8x16[1].val,
-			dst.h16x16[1].v8x16[0].val,
-			dst.h16x16[1].v8x16[1].val
+			dst.h16x16[0].v8x16[0].data,
+			dst.h16x16[0].v8x16[1].data,
+			dst.h16x16[1].v8x16[0].data,
+			dst.h16x16[1].v8x16[1].data
 		);
 	}
 
@@ -577,10 +577,10 @@ namespace b8 {
 
 		sm80::ldmatrix_8x8xu16_x4(
 			addr,
-			dst.v16x32[0].h16x16[0].v8x16[0].val,
-			dst.v16x32[0].h16x16[0].v8x16[1].val,
-			dst.v16x32[1].h16x16[0].v8x16[0].val,
-			dst.v16x32[1].h16x16[0].v8x16[1].val
+			dst.v16x32[0].h16x16[0].v8x16[0].data,
+			dst.v16x32[0].h16x16[0].v8x16[1].data,
+			dst.v16x32[1].h16x16[0].v8x16[0].data,
+			dst.v16x32[1].h16x16[0].v8x16[1].data
 		);
 
 		// This assumes not only that `m_idx` and `n_idx` are multiples of 32,
@@ -589,10 +589,10 @@ namespace b8 {
 
 		sm80::ldmatrix_8x8xu16_x4(
 			addr,
-			dst.v16x32[0].h16x16[1].v8x16[0].val,
-			dst.v16x32[0].h16x16[1].v8x16[1].val,
-			dst.v16x32[1].h16x16[1].v8x16[0].val,
-			dst.v16x32[1].h16x16[1].v8x16[1].val
+			dst.v16x32[0].h16x16[1].v8x16[0].data,
+			dst.v16x32[0].h16x16[1].v8x16[1].data,
+			dst.v16x32[1].h16x16[1].v8x16[0].data,
+			dst.v16x32[1].h16x16[1].v8x16[1].data
 		);
 	}
 
@@ -608,13 +608,13 @@ namespace b8 {
 				c.v8x16[1].h8x8[j].data0,
 				c.v8x16[1].h8x8[j].data1,
 
-				a.h16x16[0].v8x16[0].val,
-				a.h16x16[0].v8x16[1].val,
-				a.h16x16[1].v8x16[0].val,
-				a.h16x16[1].v8x16[1].val,
+				a.h16x16[0].v8x16[0].data,
+				a.h16x16[0].v8x16[1].data,
+				a.h16x16[1].v8x16[0].data,
+				a.h16x16[1].v8x16[1].data,
 
-				b.h16x16[0].v8x16[j].val,
-				b.h16x16[1].v8x16[j].val,
+				b.h16x16[0].v8x16[j].data,
+				b.h16x16[1].v8x16[j].data,
 
 				c.v8x16[0].h8x8[j].data0,
 				c.v8x16[0].h8x8[j].data1,
@@ -648,10 +648,10 @@ namespace b8 {
 				c.v8x16[1].h8x8[j].data0,
 				c.v8x16[1].h8x8[j].data1,
 
-				a.v8x16[0].val,
-				a.v8x16[1].val,
+				a.v8x16[0].data,
+				a.v8x16[1].data,
 
-				b.v8x16[j].val,
+				b.v8x16[j].data,
 
 				c.v8x16[0].h8x8[j].data0,
 				c.v8x16[0].h8x8[j].data1,

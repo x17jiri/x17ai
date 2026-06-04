@@ -170,14 +170,14 @@ struct AttnForward {
 
 					u32 sink_left = rSinkK[sink_idx + 0];
 					acc = __dp4a(
-						static_cast<i32>(q.h16x16[0].v8x16[j].val),
+						static_cast<i32>(q.h16x16[0].v8x16[j].data),
 						static_cast<i32>(sink_left),
 						acc
 					);
 
 					u32 sink_right = rSinkK[sink_idx + 1];
 					acc = __dp4a(
-						static_cast<i32>(q.h16x16[1].v8x16[j].val),
+						static_cast<i32>(q.h16x16[1].v8x16[j].data),
 						static_cast<i32>(sink_right),
 						acc
 					);
@@ -497,8 +497,8 @@ struct AttnForward {
 				u32 packed1 = rSinkV[(h * HEAD_TILES + i) * 2 + 1];
 				b8::Fragment_16x32<FixedI8> sink_v_i8;
 				X17_UNROLL for (usize j = 0; j < OWNED_ROWS; ++j) {
-					sink_v_i8.h16x16[0].v8x16[j].val = packed0;
-					sink_v_i8.h16x16[1].v8x16[j].val = packed1;
+					sink_v_i8.h16x16[0].v8x16[j].data = packed0;
+					sink_v_i8.h16x16[1].v8x16[j].data = packed1;
 				}
 				cast<false>(sink_v_i8, rO_f32[h][i]);
 				X17_UNROLL for (usize j = 0; j < 2; ++j) {
