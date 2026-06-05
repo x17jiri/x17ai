@@ -316,15 +316,15 @@ struct AttnForward {
 			top_L[h] = math::fast::logb(top_stats.sum) + top_stats.max;
 			bot_L[h] = math::fast::logb(bot_stats.sum) + bot_stats.max;
 
-			f32 top_rescale = math::fast::recip(top_stats.sum) * (1.0f / 255.0f);
-			f32 bot_rescale = math::fast::recip(bot_stats.sum) * (1.0f / 255.0f);
+			f32 top_rescale = math::fast::divide(1.0f / 255.0f, top_stats.sum);
+			f32 bot_rescale = math::fast::divide(1.0f / 255.0f, bot_stats.sum);
 
 			X17_UNROLL for (usize i = 0; i < HEAD_TILES; ++i) {
 				X17_UNROLL for (usize j = 0; j < 2; ++j) {
 					b32::scale_(rO_f32[h][i].h16x16[j].v8x16[0], top_rescale);
 					b32::scale_(rO_f32[h][i].h16x16[j].v8x16[1], bot_rescale);
 				}
-				cast<false>(rO_f32[h][i], rO[h * HEAD_TILES + i]);
+				round_clamp_cast<false>(rO_f32[h][i], rO[h * HEAD_TILES + i]);
 			}
 		}
 
@@ -444,6 +444,7 @@ struct AttnForward {
 			row_temperature[row] = f32(BASE_TEMPERATURE / FIXED_I8_SCALE_2) * math::fast::logb(f32(n));
 		}
 
+		// Per-head temperature parameter
 		f32 head_temperature[HEADS_PER_KERNEL];
 		load_gmem_Nx32b(gAttnTemperature_ptr + i_head_base, head_temperature);
 
@@ -483,7 +484,6 @@ struct AttnForward {
 		f32 sink_score[HEADS_PER_KERNEL][OWNED_ROWS];
 		i32 sink_score_i32[HEADS_PER_KERNEL][OWNED_ROWS];
 		calculate_sink_scores(rQ, rSinkK, sink_score_i32);
-
 
 		f32 temperature[HEADS_PER_KERNEL][OWNED_ROWS];
 		SoftmaxStats stats[HEADS_PER_KERNEL][OWNED_ROWS];
@@ -568,9 +568,7 @@ struct AttnForward {
 			b8::Fragment_16x16<u8> rP[HEADS_PER_KERNEL];
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 				online_softmax(stats[h], rS_f32[h], rO_f32[h]);
-
-				scale_(rS_f32[h], 255.0f);
-				cast(rS_f32[h], rP[h]);
+				trunc_cast<255.5>(rS_f32[h], rP[h]);
 			}
 
 			{ // Get more data from GMEM
@@ -599,7 +597,7 @@ struct AttnForward {
 						cast(t, t2);
 						fix_even_odd_columns_(t2);
 
-						acc_(rO_f32[h][i].h16x16[j], t2); // TODO: fma
+						acc_(rO_f32[h][i].h16x16[j], t2);
 					}
 					load_tile(sKV, 0, ((2 * h) * HEAD_TILES + i) * 32, rKV[h][i]);
 				}
