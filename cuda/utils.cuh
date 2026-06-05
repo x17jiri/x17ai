@@ -52,6 +52,27 @@ X17_DEVICE void trunc_cast(b32::Fragment_16x16<f32> const &src, b8::Fragment_16x
 	}
 }
 
+template<const f64 SCALE = 1.0>
+X17_DEVICE void round_cast(b32::Fragment_16x16<f32> const &src, b8::Fragment_16x16<u8> &dst) {
+	X17_UNROLL for (usize row = 0; row < 2; ++row) {
+		if constexpr (SCALE == 1.0) {
+			dst.v8x16[row].set(
+				__float2int_rn(src.v8x16[row].h8x8[0].get0()),
+				__float2int_rn(src.v8x16[row].h8x8[0].get1()),
+				__float2int_rn(src.v8x16[row].h8x8[1].get0()),
+				__float2int_rn(src.v8x16[row].h8x8[1].get1())
+			);
+		} else {
+			dst.v8x16[row].set(
+				__float2int_rz(math::fma(src.v8x16[row].h8x8[0].get0(), f32(SCALE), 0.5f)),
+				__float2int_rz(math::fma(src.v8x16[row].h8x8[0].get1(), f32(SCALE), 0.5f)),
+				__float2int_rz(math::fma(src.v8x16[row].h8x8[1].get0(), f32(SCALE), 0.5f)),
+				__float2int_rz(math::fma(src.v8x16[row].h8x8[1].get1(), f32(SCALE), 0.5f))
+			);
+		}
+	}
+}
+
 template<bool SHUFFLE = true>
 X17_DEVICE void cast(b8::Fragment_16x16<FixedI8> const &src, b32::Fragment_16x16<f32> &dst) {
 	static_assert(SHUFFLE == false);

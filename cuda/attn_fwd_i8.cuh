@@ -205,6 +205,9 @@ struct AttnForward {
 		}
 	}
 
+	// Scale all probabilities up by 255.0 so we can use u8 tensor cores.
+	static constexpr f32 PROB_SCALE = 255.0;
+
 	X17_DEVICE void online_softmax(
 		SoftmaxStats (&stats)[OWNED_ROWS],
 		b32::Fragment_16x16<f32> &rS_f32,
@@ -256,17 +259,23 @@ struct AttnForward {
 		}
 
 		// Step 3: Replace scores with expb(score - max)
-		f32 top0 = math::fast::expb(rS_f32.v8x16[0].h8x8[0].get0() - top.max);
-		f32 top1 = math::fast::expb(rS_f32.v8x16[0].h8x8[0].get1() - top.max);
-		f32 top2 = math::fast::expb(rS_f32.v8x16[0].h8x8[1].get0() - top.max);
-		f32 top3 = math::fast::expb(rS_f32.v8x16[0].h8x8[1].get1() - top.max);
+		// I tried to fold the PROB_SCALE into the exp:
+		// - using `exp(value - (max - log(SCALE)))`
+		//     - this was a bit faster than the current implementation, but it could cause
+		//       precision problems because `log(SCALE)` can be much smaller than `value` and `max`
+		// - using `exp((value - max) + log(SCALE))`
+		//     - this was actually slower than the current `exp(value - max) * SCALE`
+		f32 top0 = math::fast::expb(rS_f32.v8x16[0].h8x8[0].get0() - top.max) * PROB_SCALE;
+		f32 top1 = math::fast::expb(rS_f32.v8x16[0].h8x8[0].get1() - top.max) * PROB_SCALE;
+		f32 top2 = math::fast::expb(rS_f32.v8x16[0].h8x8[1].get0() - top.max) * PROB_SCALE;
+		f32 top3 = math::fast::expb(rS_f32.v8x16[0].h8x8[1].get1() - top.max) * PROB_SCALE;
 		rS_f32.v8x16[0].h8x8[0].set(top0, top1);
 		rS_f32.v8x16[0].h8x8[1].set(top2, top3);
 
-		f32 bot0 = math::fast::expb(rS_f32.v8x16[1].h8x8[0].get0() - bot.max);
-		f32 bot1 = math::fast::expb(rS_f32.v8x16[1].h8x8[0].get1() - bot.max);
-		f32 bot2 = math::fast::expb(rS_f32.v8x16[1].h8x8[1].get0() - bot.max);
-		f32 bot3 = math::fast::expb(rS_f32.v8x16[1].h8x8[1].get1() - bot.max);
+		f32 bot0 = math::fast::expb(rS_f32.v8x16[1].h8x8[0].get0() - bot.max) * PROB_SCALE;
+		f32 bot1 = math::fast::expb(rS_f32.v8x16[1].h8x8[0].get1() - bot.max) * PROB_SCALE;
+		f32 bot2 = math::fast::expb(rS_f32.v8x16[1].h8x8[1].get0() - bot.max) * PROB_SCALE;
+		f32 bot3 = math::fast::expb(rS_f32.v8x16[1].h8x8[1].get1() - bot.max) * PROB_SCALE;
 		rS_f32.v8x16[1].h8x8[0].set(bot0, bot1);
 		rS_f32.v8x16[1].h8x8[1].set(bot2, bot3);
 
@@ -316,8 +325,8 @@ struct AttnForward {
 			top_L[h] = math::fast::logb(top_stats.sum) + top_stats.max;
 			bot_L[h] = math::fast::logb(bot_stats.sum) + bot_stats.max;
 
-			f32 top_rescale = math::fast::divide(1.0f / 255.0f, top_stats.sum);
-			f32 bot_rescale = math::fast::divide(1.0f / 255.0f, bot_stats.sum);
+			f32 top_rescale = math::fast::recip(top_stats.sum);
+			f32 bot_rescale = math::fast::recip(bot_stats.sum);
 
 			X17_UNROLL for (usize i = 0; i < HEAD_TILES; ++i) {
 				X17_UNROLL for (usize j = 0; j < 2; ++j) {
@@ -492,7 +501,7 @@ struct AttnForward {
 				temperature[h][row] = row_temperature[row] * head_temperature[h];
 				sink_score[h][row] = f32(sink_score_i32[h][row]) * temperature[h][row];
 				stats[h][row].max = sink_score[h][row];
-				stats[h][row].sum = 0.25f;
+				stats[h][row].sum = 0.25f * PROB_SCALE;
 			}
 		}
 
@@ -509,8 +518,8 @@ struct AttnForward {
 				}
 				cast<false>(sink_v_i8, rO_f32[h][i]);
 				X17_UNROLL for (usize j = 0; j < 2; ++j) {
-					scale_(rO_f32[h][i].h16x16[j].v8x16[0], 255.0f);
-					scale_(rO_f32[h][i].h16x16[j].v8x16[1], 255.0f);
+					scale_(rO_f32[h][i].h16x16[j].v8x16[0], PROB_SCALE);
+					scale_(rO_f32[h][i].h16x16[j].v8x16[1], PROB_SCALE);
 				}
 			}
 		}
@@ -568,7 +577,7 @@ struct AttnForward {
 			b8::Fragment_16x16<u8> rP[HEADS_PER_KERNEL];
 			X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 				online_softmax(stats[h], rS_f32[h], rO_f32[h]);
-				trunc_cast<255.5>(rS_f32[h], rP[h]);
+				round_cast(rS_f32[h], rP[h]);
 			}
 
 			{ // Get more data from GMEM
