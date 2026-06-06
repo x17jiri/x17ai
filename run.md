@@ -1,3 +1,35 @@
+# Attn i8
+
+## Attn - QKV Fwd
+
+./nvcc.sh attn_q_fwd_i8.cu && tmp/attn_q_fwd_i8
+python verify_i8_tensor.py tmp/block_torch/q_i8.bin tmp/block_cuda/q_i8.bin --shape 16384 64 1 32
+
+python tensor_stats.py tmp/block_torch/q_i8.bin
+
+./nvcc.sh attn_kv_fwd_i8.cu && tmp/attn_kv_fwd_i8
+python verify_i8_tensor.py tmp/block_torch/kv_i8.bin tmp/block_cuda/kv_i8.bin --shape 16384 64 2 32
+
+python tensor_stats.py tmp/block_torch/kv_i8.bin
+python tensor_stats.py tmp/block_torch/k_i8.bin
+python tensor_stats.py tmp/block_torch/v_i8.bin
+
+## Attn - A Fwd
+
+./nvcc.sh attn_fwd_i8.cu && tmp/attn_fwd_i8
+python verify_i8_tensor.py tmp/block_torch/attn_out_i8.bin tmp/block_cuda/attn_out_i8.bin --shape 16384 64 1 32
+
+python tensor_stats.py tmp/block_torch/attn_out_i8.bin tmp/block_torch/attn_out.bin.var
+
+## FFN - Y Fwd
+
+./nvcc.sh ffn_y_fwd_i8.cu && tmp/ffn_y_fwd_i8
+python verify_i8_tensor.py tmp/block_torch/ffn_y_i8.bin tmp/block_cuda/ffn_y_i8.bin
+
+python tensor_stats.py tmp/block_torch/ffn_y.bin
+
+# FFN i8
+
 # Attn
 
 ## Attn - QKVG Fwd
@@ -25,6 +57,11 @@ python verify_i8_tensor.py tmp/block_torch/q_i8.bin tmp/block_cuda/q_i8.bin --sh
 python tensor_stats.py tmp/block_torch/q_i8.bin
 
 ## Attn - A Fwd
+
+./nvcc.sh attn_fwd_i8.cu && tmp/attn_fwd_i8
+python verify_i8_tensor.py tmp/block_torch/attn_out_i8.bin tmp/block_cuda/attn_out_i8.bin --shape 16384 64 1 32
+
+python tensor_stats.py tmp/block_torch/attn_out_i8.bin tmp/block_torch/attn_out.bin.var
 
 ./nvcc.sh attn_fwd.cu && tmp/attn_fwd
 python verify_tensor.py tmp/block_torch/attn_out.bin tmp/block_cuda/attn_out.bin --shape 16384 32 32
@@ -59,10 +96,6 @@ python tensor_stats.py tmp/block_torch/ffn_f_i8.bin
 ./nvcc.sh ffn_y_fwd.cu && tmp/ffn_y_fwd
 python verify_tensor.py tmp/block_torch/ffn_y.bin tmp/block_cuda/ffn_y.bin
 python tensor_stats.py tmp/block_torch/ffn_y.bin tmp/block_torch/ffn_y.bin.var
-
-./nvcc.sh ffn_y_fwd_i8.cu && tmp/ffn_y_fwd_i8
-python verify_i8_tensor.py tmp/block_torch/ffn_y_i8.bin tmp/block_cuda/ffn_y_i8.bin
-python tensor_stats.py tmp/block_torch/ffn_y.bin
 
 ## FFN O Backward
 

@@ -17,16 +17,13 @@ config = load_jsonc(CONFIG_PATH)
 def config_value(name: str):
 	if name in config:
 		return config[name]
-	raise KeyError(f"Missing config value, tried: {', '.join(names)}")
+	raise KeyError(f"Missing config value, tried: {name}")
 
 N_INPUTS = int(config_value("seq_len"))
 MODEL_DIM = int(config_value("MODEL_DIM"))
 N_HEADS = int(config_value("N_HEADS"))
 HEAD_DIM = int(config_value("HEAD_DIM"))
 F_WIDTH = int(config_value("F_WIDTH"))
-Y_SPARSE_FAN_IN = int(config_value("Y_SPARSE_FAN_IN"))
-Y_SPARSE_STEP = int(config_value("Y_SPARSE_STEP"))
-Y_SPARSE_BLOCK = int(config_value("Y_SPARSE_BLOCK"))
 WINDOW_SIZE = int(config_value("WINDOW_SIZE"))
 L2_NORM_EPS = float(config_value("L2_NORM_EPS"))
 

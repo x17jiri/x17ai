@@ -325,8 +325,8 @@ struct AttnForward {
 			top_L[h] = math::fast::logb(top_stats.sum) + top_stats.max;
 			bot_L[h] = math::fast::logb(bot_stats.sum) + bot_stats.max;
 
-			f32 top_rescale = math::fast::recip(top_stats.sum);
-			f32 bot_rescale = math::fast::recip(bot_stats.sum);
+			f32 top_rescale = math::fast::divide(f32(V_SCALE_FIX), top_stats.sum);
+			f32 bot_rescale = math::fast::divide(f32(V_SCALE_FIX), bot_stats.sum);
 
 			X17_UNROLL for (usize i = 0; i < HEAD_TILES; ++i) {
 				X17_UNROLL for (usize j = 0; j < 2; ++j) {
@@ -516,11 +516,7 @@ struct AttnForward {
 					sink_v_i8.h16x16[0].v8x16[j].data = packed0;
 					sink_v_i8.h16x16[1].v8x16[j].data = packed1;
 				}
-				cast<false>(sink_v_i8, rO_f32[h][i]);
-				X17_UNROLL for (usize j = 0; j < 2; ++j) {
-					scale_(rO_f32[h][i].h16x16[j].v8x16[0], PROB_SCALE);
-					scale_(rO_f32[h][i].h16x16[j].v8x16[1], PROB_SCALE);
-				}
+				cast<false, PROB_SCALE>(sink_v_i8, rO_f32[h][i]);
 			}
 		}
 

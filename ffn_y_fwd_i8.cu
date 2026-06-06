@@ -11,33 +11,28 @@ using namespace config;
 namespace Ffn_y_fwd {
 	static constexpr usize Y_PROJ_OUTPUTS = 2 * MODEL_DIM;
 
-	static_assert((Y_PROJ_OUTPUTS / Y_SPARSE_BLOCK - 1) * Y_SPARSE_STEP + Y_SPARSE_FAN_IN == F_WIDTH);
-
 	using InputLoader =
 		b8::MatrixLoader<
 			b8::FixedI8,
 			F_WIDTH,
-			64, 128,
-			Y_SPARSE_FAN_IN,
-			Y_SPARSE_STEP,
-			Y_SPARSE_BLOCK,
-			false
+			64, 128
 		>;
 
 	using WeightLoader =
 		b8::MatrixTransLoader<
 			b8::MatrixLoader<
 				b8::FixedI8,
-				Y_SPARSE_FAN_IN,
+				F_WIDTH,
 				128, 128
 			>
 		>;
 
+	static constexpr f64 Y_SCALE = math::constexpr_sqrt(math::fast::GELU_VAR_FIX_2 / f64(F_WIDTH));
 	using Writer = b8::FixedI8MatrixResidualWriter<
 		MODEL_DIM,
 		InputLoader::M,
 		WeightLoader::K,
-		Y_SPARSE_FAN_IN
+		Y_SCALE
 	>;
 
 	using Kernel = b8::Gemm<InputLoader, WeightLoader, Writer>;
@@ -78,7 +73,7 @@ int main(int argc, char *argv[]) {
 	std::vector<b8::FixedI8> h_weights_compact = load_i8_tensor(
 		torch_tensor_path("ffn_y_weights_i8.bin"),
 		Y_PROJ_OUTPUTS,
-		Y_SPARSE_FAN_IN
+		F_WIDTH
 	);
 	std::vector<b8::FixedI8> h_f = load_i8_tensor(tensor_path(cli.input_dir, "ffn_f_i8.bin"), seq_len, F_WIDTH);
 	std::vector<b8::FixedI8> h_x = load_i8_tensor(tensor_path(cli.input_dir, "x_i8.bin"), seq_len, MODEL_DIM);
@@ -161,7 +156,7 @@ int main(int argc, char *argv[]) {
 
 	float median_ms = times_ms[num_runs / 2];
 	float min_ms = times_ms[0];
-	double tflops = 2.0 * Y_PROJ_OUTPUTS * Y_SPARSE_FAN_IN * seq_len / (median_ms * 1e-3) / 1e12;
+	double tflops = 2.0 * Y_PROJ_OUTPUTS * F_WIDTH * seq_len / (median_ms * 1e-3) / 1e12;
 	printf("Kernel time over %d runs: median %.3f ms  min %.3f ms\n", num_runs, median_ms, min_ms);
 	printf("TFLOPS: %.2f\n", tflops);
 

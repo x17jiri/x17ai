@@ -30,18 +30,22 @@ def create_inputs() -> None:
 	sinks_k = rms_norm(new_randn(N_HEADS, HEAD_DIM, generator=generator))
 	sinks_v = new_randn(N_HEADS, HEAD_DIM, generator=generator)
 
-	qk_norm_scales = new_ones(1, HEAD_DIM * N_HEADS)
+	q_norm_scales = new_ones(1, HEAD_DIM * N_HEADS)
+	k_norm_scales = new_ones(1, HEAD_DIM * N_HEADS)
 	attn_temperature = new_ones(N_HEADS, 1)
 
 	TEST = True
 	if TEST:
-		qk_norm_scales = new_randn(1, HEAD_DIM * N_HEADS, generator=generator)
+		q_norm_scales = new_randn(1, HEAD_DIM * N_HEADS, generator=generator)
+		k_norm_scales = new_randn(1, HEAD_DIM * N_HEADS, generator=generator)
 		attn_temperature = 0.5 + torch.rand((N_HEADS, 1), generator=generator)
+
+	sinks_k = sinks_k * k_norm_scales.reshape(N_HEADS, HEAD_DIM)
 
 	attn_q_weights = new_randn(N_HEADS*HEAD_DIM, MODEL_DIM, generator=generator)
 	attn_kv_weights = new_randn(2*N_HEADS*HEAD_DIM, MODEL_DIM, generator=generator)
 	ffn_f_weights = new_randn(2*F_WIDTH, MODEL_DIM, generator=generator)
-	ffn_y_weights = new_randn(2*MODEL_DIM, Y_SPARSE_FAN_IN, generator=generator)
+	ffn_y_weights = new_randn(2*MODEL_DIM, F_WIDTH, generator=generator)
 
 	store_tensor(x, "x.bin", expected_variance=1.0)
 	store_tensor(x, "x_i8.bin")
@@ -49,8 +53,10 @@ def create_inputs() -> None:
 	store_tensor(sinks_k, "sinks_k_i8.bin")
 	store_tensor(sinks_v, "sinks_v.bin", expected_variance=1.0)
 	store_tensor(sinks_v, "sinks_v_i8.bin")
-	store_tensor(qk_norm_scales, "qk_norm_scales.bin", expected_variance=0.0)
-	store_tensor(qk_norm_scales, "qk_norm_scales_i8.bin")
+	store_tensor(q_norm_scales, "q_norm_scales.bin", expected_variance=0.0)
+	store_tensor(q_norm_scales, "q_norm_scales_i8.bin")
+	store_tensor(k_norm_scales, "k_norm_scales.bin", expected_variance=0.0)
+	store_tensor(k_norm_scales, "k_norm_scales_i8.bin")
 	store_tensor(attn_temperature, "attn_temperature_f32.bin", expected_variance=0.0)
 	store_tensor(attn_q_weights, "attn_q_weights.bin", expected_variance=1.0)
 	store_tensor(attn_q_weights, "attn_q_weights_i8.bin")
@@ -60,23 +66,6 @@ def create_inputs() -> None:
 	store_tensor(ffn_f_weights, "ffn_f_weights_i8.bin")
 	store_tensor(ffn_y_weights, "ffn_y_weights.bin", expected_variance=1.0)
 	store_tensor(ffn_y_weights, "ffn_y_weights_i8.bin")
-
-def expand_sparse_weights(w: torch.Tensor, d_inp: int, block_size: int, step: int) -> torch.Tensor:
-	d_out = w.shape[0]
-	fan_in = w.shape[1]
-
-	assert fan_in <= d_inp
-	assert block_size >= 128
-
-	expanded = torch.zeros((d_out, d_inp), dtype=w.dtype, device=w.device)
-	cols = torch.arange(fan_in, dtype=torch.int64, device=w.device)
-	for row in range(d_out):
-		block_idx = row // block_size
-		indices = (cols + block_idx * step) % d_inp
-		expanded[row, indices] = w[row]
-	return expanded
-
-#---------------------------------------------------------------------------------------------------
 
 def rms_norm(tensor: torch.Tensor, eps: float = L2_NORM_EPS) -> torch.Tensor:
 	mean_sq = torch.mean(tensor * tensor, dim=-1, keepdim=True)
@@ -93,24 +82,36 @@ def geglu(x: torch.Tensor) -> torch.Tensor:
 	lin = x[..., 1::2]
 	return gelu(gate) * lin
 
+def exp4(x):
+	return torch.exp2(2.0 * x)
+
+def log4(x):
+	return torch.log2(x) / 2.0
+
+def sigmoid_base4(x: torch.Tensor) -> torch.Tensor:
+	return torch.reciprocal(1.0 + exp4(-x))
+
+def softplus_base4(x: torch.Tensor) -> torch.Tensor:
+	return log4(1.0 + exp4(x))
+
 def gated_residual(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 	assert y.shape[-1] == 2 * x.shape[-1]
-	gate = torch.sigmoid(y[..., 0::2])
+	gate = y[..., 0::2]
+	old_weight = sigmoid_base4(-gate)
+	new_weight = softplus_base4(gate)
 	output = y[..., 1::2]
-	return (1.0 - gate) * x + gate * output
+	return old_weight * x + new_weight * output
 
 #---------------------------------------------------------------------------------------------------
 
 def run_ffn() -> None:
 	x = load_tensor("x_i8.bin", N_INPUTS, MODEL_DIM)
 	f_weights = load_tensor("ffn_f_weights_i8.bin", 2*F_WIDTH, MODEL_DIM)
-	y_weights = load_tensor("ffn_y_weights_i8.bin", 2*MODEL_DIM, Y_SPARSE_FAN_IN)
+	y_weights = load_tensor("ffn_y_weights_i8.bin", 2*MODEL_DIM, F_WIDTH)
 
 	x.requires_grad_(True)
 	f_weights.requires_grad_(True)
 	y_weights.requires_grad_(True)
-
-	y_weights = expand_sparse_weights(y_weights, F_WIDTH, Y_SPARSE_BLOCK, Y_SPARSE_STEP)
 
 	f_pregate = (
 		torch.matmul(x, f_weights.transpose(0, 1))
@@ -121,7 +122,7 @@ def run_ffn() -> None:
 	f_i8 = quantize(f)
 	y_pregate = (
 		torch.matmul(f_i8, y_weights.transpose(0, 1))
-		* torch.rsqrt(torch.tensor(float(Y_SPARSE_FAN_IN)))
+		* torch.rsqrt(torch.tensor(float(F_WIDTH)))
 		* GELU_VAR_FIX
 	)
 	y = gated_residual(x, y_pregate)
@@ -238,7 +239,8 @@ def run_attn() -> None:
 	sinks_k = load_tensor("sinks_k_i8.bin", N_HEADS, HEAD_DIM)
 	sinks_v = load_tensor("sinks_v_i8.bin", N_HEADS, HEAD_DIM)
 	attn_temperature = load_tensor("attn_temperature_f32.bin", N_HEADS, 1)
-	qk_norm_scales = load_tensor("qk_norm_scales.bin", 1, HEAD_DIM * N_HEADS)
+	q_norm_scales = load_tensor("q_norm_scales.bin", 1, HEAD_DIM * N_HEADS)
+	k_norm_scales = load_tensor("k_norm_scales.bin", 1, HEAD_DIM * N_HEADS)
 	q_weights = load_tensor("attn_q_weights_i8.bin", N_HEADS*HEAD_DIM, MODEL_DIM)
 	kv_weights = load_tensor("attn_kv_weights_i8.bin", 2*N_HEADS*HEAD_DIM, MODEL_DIM)
 
@@ -252,16 +254,17 @@ def run_attn() -> None:
 	v = kv[..., HEAD_DIM:]
 
 	q = rms_norm(q)
-	q = q * qk_norm_scales.reshape(1, N_HEADS, HEAD_DIM)
+	q = q * q_norm_scales.reshape(1, N_HEADS, HEAD_DIM)
 
 	k = rms_norm(k)
+	k = k * k_norm_scales.reshape(1, N_HEADS, HEAD_DIM)
 	kv = torch.cat((k, v), dim=2)
 
 	q_i8 = quantize(q)
 	k_i8 = quantize(k)
 	v_i8 = quantize(v)
 	kv_i8 = torch.cat((k_i8, v_i8), dim=2)
-	attn_out, attn_maxes, attn_maxes_i32 = attn(q_i8, k_i8, v_i8, sinks_k, sinks_v, attn_temperature)
+#	attn_out, attn_maxes, attn_maxes_i32 = attn(q_i8, k_i8, v_i8, sinks_k, sinks_v, attn_temperature)
 
 	store_tensor(q, "q.bin", expected_variance=1.0)
 	store_tensor(q_i8, "q_i8.bin")
@@ -271,10 +274,10 @@ def run_attn() -> None:
 	store_tensor(v_i8, "v_i8.bin")
 	store_tensor(kv, "kv.bin", expected_variance=1.0)
 	store_tensor(kv_i8, "kv_i8.bin")
-	store_tensor(attn_maxes.transpose(0, 1), "attn_maxes_f32.bin")
-	store_i32_tensor(attn_maxes_i32.transpose(0, 1), "attn_maxes_i32.bin")
-	store_tensor(attn_out, "attn_out.bin", expected_variance=1.0)
-	store_tensor(attn_out, "attn_out_i8.bin")
+#	store_tensor(attn_maxes.transpose(0, 1), "attn_maxes_f32.bin")
+#	store_i32_tensor(attn_maxes_i32.transpose(0, 1), "attn_maxes_i32.bin")
+#	store_tensor(attn_out, "attn_out.bin", expected_variance=1.0)
+#	store_tensor(attn_out, "attn_out_i8.bin")
 
 #---------------------------------------------------------------------------------------------------
 

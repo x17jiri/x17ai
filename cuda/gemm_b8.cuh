@@ -61,25 +61,25 @@ namespace b8 {
 			sPreload._ptr = smem_alloc.alloc(SMEM_BYTES);
 		}
 
-		/// `cp_async` a tile with size [M, K] at position [m, k] into SMEM.
+		/// `async_load` a tile with size [M, K] at position [m, k] into SMEM.
 		template<const usize THREADS_PER_BLOCK>
-		X17_DEVICE void cp_async(usize step, usize m, usize k, usize other_n) {
+		X17_DEVICE void async_load(usize step, usize m, usize k, usize other_n) {
 			usize k_shift = 0;
 			if constexpr (BLOCK > 0) {
 				k_shift = (other_n / BLOCK) * STEP;
 			}
-			sPreload.template cp_async_from<THREADS_PER_BLOCK, M, K, GN, MODULO>(
+			static_assert(MODULO == false, "TODO - b8::async_load() already has template param for this. Just need to pass it");
+			b8::async_load<THREADS_PER_BLOCK, M, K>(
 				threadIdx.x,
-				gInput,
-				m, k + k_shift,
-				M * (step % GMEM_PRELOAD), 0
+				gInput, m, k + k_shift,
+				sPreload, M * (step % GMEM_PRELOAD), 0
 			);
 		}
 
 		/// Load a 32x32 fragment at tile coordinates [m, k] from the SMEM ring buffer.
 		X17_DEVICE void load_fragment(usize step, usize m, usize k, Fragment_32x32<T> &frag) {
 			usize first_row = M * (step % GMEM_PRELOAD);
-			sPreload.tile_to_fragment(first_row + 32*m, 32*k, frag);
+			load_tile(sPreload, first_row + 32*m, 32*k, frag);
 		}
 	};
 
@@ -125,29 +125,29 @@ namespace b8 {
 			sPreload._ptr = smem_alloc.alloc(SMEM_BYTES);
 		}
 
-		/// `cp_async` a tile with size [M, K] at position [M*m, K*k] into SMEM.
+		/// `async_load` a tile with size [M, K] at position [M*m, K*k] into SMEM.
 		/// `step` may be a global K-step; the shared-memory ring slot is selected
 		/// modulo `GMEM_PRELOAD`.
 		template<const usize THREADS_PER_BLOCK>
-		X17_DEVICE void cp_async(usize step, usize m, usize k, usize other_n) {
-			sPreload.template cp_async_from<THREADS_PER_BLOCK, M, K>(
+		X17_DEVICE void async_load(usize step, usize m, usize k, usize other_n) {
+			async_load<THREADS_PER_BLOCK, M, K>(
 				threadIdx.x,
-				gInput,
-				M * m, K * k,
-				M * (step % GMEM_PRELOAD), 0
+				gInput, M * m, K * k,
+				sPreload, M * (step % GMEM_PRELOAD), 0
 			);
 		}
 
 		/// Load a 32x32 fragment at tile coordinates [m, k] from the SMEM ring buffer.
 		X17_DEVICE void load_fragment(usize step, usize m, usize k, Fragment_32x32<T> &frag) {
 			usize first_row = M * (step % GMEM_PRELOAD);
-			sPreload.tile_to_fragment(first_row + 32*m, 32*k, frag);
+			load_tile(sPreload, first_row + 32*m, 32*k, frag);
 		}
 
 		/// Load a transposed 32x32 fragment at tile coordinates [m, k] from the SMEM ring buffer.
 		X17_DEVICE void load_fragment_trans(usize step, usize m, usize k, Fragment_32x32<T> &frag) {
 			usize first_row = M * (step % GMEM_PRELOAD);
-			sPreload.tile_to_fragment_trans(first_row + 32*m, 32*k, frag);
+			load_tile_pretrans(sPreload, first_row + 32*m, 32*k, frag);
+			frag.finish_trans_load_();
 		}
 	};
 
@@ -176,8 +176,8 @@ namespace b8 {
 		}
 
 		template<const usize THREADS_PER_BLOCK>
-		X17_DEVICE void cp_async(usize step, usize m, usize k, usize other_n) {
-			loader.template cp_async<THREADS_PER_BLOCK>(step, k, m, other_n);
+		X17_DEVICE void async_load(usize step, usize m, usize k, usize other_n) {
+			loader.template async_load<THREADS_PER_BLOCK>(step, k, m, other_n);
 		}
 
 		X17_DEVICE void load_fragment(usize step, usize m, usize k, Fragment_32x32<Elem> &frag) {
@@ -214,7 +214,7 @@ namespace b8 {
 		X17_DEVICE void alloc_smem(SMemAllocator<CAP> &smem_alloc) {}
 
 		template<const usize THREADS_PER_BLOCK>
-		X17_DEVICE void cp_async(usize row, usize col) {}
+		X17_DEVICE void async_load(usize row, usize col) {}
 
 		template<const usize M_TILES, const usize N_TILES>
 		X17_DEVICE void write(
@@ -244,15 +244,15 @@ namespace b8 {
 				} packed;
 			} left, right;
 
-			left.packed.top_0 = to_fixedi8(inp.v8x16[0].h8x8[0].val0);
-			left.packed.top_1 = to_fixedi8(inp.v8x16[0].h8x8[0].val1);
-			left.packed.bot_0 = to_fixedi8(inp.v8x16[1].h8x8[0].val0);
-			left.packed.bot_1 = to_fixedi8(inp.v8x16[1].h8x8[0].val1);
+			left.packed.top_0 = to_fixedi8(inp.v8x16[0].h8x8[0].get0());
+			left.packed.top_1 = to_fixedi8(inp.v8x16[0].h8x8[0].get1());
+			left.packed.bot_0 = to_fixedi8(inp.v8x16[1].h8x8[0].get0());
+			left.packed.bot_1 = to_fixedi8(inp.v8x16[1].h8x8[0].get1());
 
-			right.packed.top_0 = to_fixedi8(inp.v8x16[0].h8x8[1].val0);
-			right.packed.top_1 = to_fixedi8(inp.v8x16[0].h8x8[1].val1);
-			right.packed.bot_0 = to_fixedi8(inp.v8x16[1].h8x8[1].val0);
-			right.packed.bot_1 = to_fixedi8(inp.v8x16[1].h8x8[1].val1);
+			right.packed.top_0 = to_fixedi8(inp.v8x16[0].h8x8[1].get0());
+			right.packed.top_1 = to_fixedi8(inp.v8x16[0].h8x8[1].get1());
+			right.packed.bot_0 = to_fixedi8(inp.v8x16[1].h8x8[1].get0());
+			right.packed.bot_1 = to_fixedi8(inp.v8x16[1].h8x8[1].get1());
 
 			usize tid = threadIdx.x;
 			u32 u0 = left.value;
@@ -270,8 +270,8 @@ namespace b8 {
 
 			w0 = shuffle_xor_sync(w0, 1);
 
-			out.v8x16[0].val = __byte_perm(w0, w1, 0x5410);
-			out.v8x16[1].val = __byte_perm(w0, w1, 0x7632);
+			out.v8x16[0].data = __byte_perm(w0, w1, 0x5410);
+			out.v8x16[1].data = __byte_perm(w0, w1, 0x7632);
 		}
 
 		X17_DEVICE void conv(b32::Fragment_32x32<f32> const &inp, Fragment_32x32<FixedI8> &out) {
@@ -342,8 +342,8 @@ namespace b8 {
 			constexpr f64 FIXED_I8_SCALE_2 = FIXED_I8_SCALE * FIXED_I8_SCALE;
 			constexpr f64 INP_SCALE_2 = 1.0 / (FAN_IN * FIXED_I8_SCALE_2 * FIXED_I8_SCALE_2);
 			constexpr f64 OUT_SCALE_2 = 1.0 / (FAN_IN * FIXED_I8_SCALE_2);
-			f32 gate = math::fast::gelu<INP_SCALE_2, OUT_SCALE_2, 1.0>(f32(frag.val0)).val;
-			f32 lin = f32(frag.val1);
+			f32 gate = math::fast::gelu<INP_SCALE_2, OUT_SCALE_2, 1.0>(f32(frag.get0())).val;
+			f32 lin = f32(frag.get1());
 			return to_fixedi8(gate * lin);
 		}
 
@@ -417,7 +417,7 @@ namespace b8 {
 		}
 	};
 
-	template<const usize GN, const usize M_PER_BLOCK, const usize N_PER_BLOCK, const usize FAN_IN>
+	template<const usize GN, const usize M_PER_BLOCK, const usize N_PER_BLOCK, const f64 SCALE>
 	struct FixedI8MatrixResidualWriter: MatrixWriter<FixedI8, GN, M_PER_BLOCK, N_PER_BLOCK> {
 		using Base = MatrixWriter<FixedI8, GN, M_PER_BLOCK, N_PER_BLOCK>;
 		using GResidual = GMatrixDynSize<FixedI8, GN>;
@@ -446,29 +446,27 @@ namespace b8 {
 		}
 
 		template<const usize THREADS_PER_BLOCK>
-		X17_DEVICE void cp_async(usize row, usize col) {
+		X17_DEVICE void async_load(usize row, usize col) {
 			residualRow0 = (row / M_PER_BLOCK) * M_PER_BLOCK;
 			residualCol0 = (col / N_PER_BLOCK) * (N_PER_BLOCK / 2);
 
-			sResidual.template cp_async_from<THREADS_PER_BLOCK, M_PER_BLOCK, N_PER_BLOCK / 2, GN>(
+			b8::async_load<THREADS_PER_BLOCK, M_PER_BLOCK, N_PER_BLOCK / 2>(
 				threadIdx.x,
-				gResidual,
-				residualRow0,
-				residualCol0,
-				0,
-				0
+				gResidual, residualRow0, residualCol0,
+				sResidual, 0, 0
 			);
 		}
 
 		X17_DEVICE FixedI8 residual_gate(b32::Fragment_8x8<i32> frag, FixedI8 residual) {
-			constexpr f64 SCALE = math::constexpr_sqrt(math::fast::GELU_VAR_FIX_2 / f64(FAN_IN));
 			constexpr f64 RAW_TO_REAL = SCALE / (f64(FIXED_I8_SCALE) * f64(FIXED_I8_SCALE));
 			constexpr f64 RAW_TO_FIXED = SCALE / f64(FIXED_I8_SCALE);
 
-			f32 gate = math::fast::sigmoid(f32(frag.val0) * f32(RAW_TO_REAL));
+			f32 gate = f32(frag.get0()) * f32(RAW_TO_REAL);
+			f32 old_weight = math::fast::sigmoid_base4(-gate);
+			f32 new_weight = math::fast::imprecise_softplus_base4(gate);
 			f32 residual_f = f32(residual);
-			f32 output_f = f32(frag.val1) * f32(RAW_TO_FIXED);
-			f32 val_f = math::fma(gate, output_f - residual_f, residual_f);
+			f32 output_f = f32(frag.get1()) * f32(RAW_TO_FIXED);
+			f32 val_f = math::fma(new_weight, output_f, old_weight * residual_f);
 			return to_fixedi8(val_f);
 		}
 
@@ -483,7 +481,7 @@ namespace b8 {
 				struct {
 					FixedI8 a, b, c, d;
 				} packed;
-				u32 value;
+				u32 data;
 			} u1, u2, u3, u4, v1, v2, v3, v4, r1, r2, r3, r4, s1, s2, s3, s4;
 
 			Fragment_32x32<FixedI8> residual[M_TILES][N_TILES/2];
@@ -493,7 +491,7 @@ namespace b8 {
 
 			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
 				X17_UNROLL for (usize no = 0; no < N_TILES / 2; ++no) {
-					sResidual.tile_to_fragment(local_row + 32 * mi, local_col + 32 * no, residual[mi][no]);
+					load_tile(sResidual, local_row + 32 * mi, local_col + 32 * no, residual[mi][no]);
 				}
 			}
 
@@ -505,10 +503,10 @@ namespace b8 {
 					// Residual fragments are loaded in the final stored layout.
 					// Reconstruct the pre-store 8x8 packing so each residual byte lines up
 					// with the corresponding gate/output accumulator pair.
-					r1.value = res32x32.v16x32[0].h16x16[ni % 2].v8x16[0].val;
-					r2.value = res32x32.v16x32[0].h16x16[ni % 2].v8x16[1].val;
-					r3.value = res32x32.v16x32[1].h16x16[ni % 2].v8x16[0].val;
-					r4.value = res32x32.v16x32[1].h16x16[ni % 2].v8x16[1].val;
+					r1.data = res32x32.v16x32[0].h16x16[ni % 2].v8x16[0].data;
+					r2.data = res32x32.v16x32[0].h16x16[ni % 2].v8x16[1].data;
+					r3.data = res32x32.v16x32[1].h16x16[ni % 2].v8x16[0].data;
+					r4.data = res32x32.v16x32[1].h16x16[ni % 2].v8x16[1].data;
 
 					s1.packed.a = r1.packed.a;
 					s1.packed.b = r2.packed.a;
@@ -530,7 +528,7 @@ namespace b8 {
 					s4.packed.c = r3.packed.d;
 					s4.packed.d = r4.packed.d;
 
-					shuffle_4x4(s1.value, s2.value, s3.value, s4.value);
+					shuffle_4x4(s1.data, s2.data, s3.data, s4.data);
 
 					u1.packed.a = residual_gate(inp32x32.v16x32[0].h16x16[0].v8x16[0].h8x8[0], s1.packed.a);
 					u1.packed.b = residual_gate(inp32x32.v16x32[0].h16x16[0].v8x16[1].h8x8[0], s1.packed.b);
@@ -552,7 +550,7 @@ namespace b8 {
 					u4.packed.c = residual_gate(inp32x32.v16x32[1].h16x16[1].v8x16[0].h8x8[1], s4.packed.c);
 					u4.packed.d = residual_gate(inp32x32.v16x32[1].h16x16[1].v8x16[1].h8x8[1], s4.packed.d);
 
-					shuffle_4x4(u1.value, u2.value, u3.value, u4.value);
+					shuffle_4x4(u1.data, u2.data, u3.data, u4.data);
 
 					v1.packed.a = u1.packed.a;
 					v1.packed.b = u2.packed.a;
@@ -574,10 +572,10 @@ namespace b8 {
 					v4.packed.c = u3.packed.d;
 					v4.packed.d = u4.packed.d;
 
-					t[mi][ni/2].v16x32[0].h16x16[ni%2].v8x16[0].val = v1.value;
-					t[mi][ni/2].v16x32[0].h16x16[ni%2].v8x16[1].val = v2.value;
-					t[mi][ni/2].v16x32[1].h16x16[ni%2].v8x16[0].val = v3.value;
-					t[mi][ni/2].v16x32[1].h16x16[ni%2].v8x16[1].val = v4.value;
+					t[mi][ni/2].v16x32[0].h16x16[ni%2].v8x16[0].data = v1.data;
+					t[mi][ni/2].v16x32[0].h16x16[ni%2].v8x16[1].data = v2.data;
+					t[mi][ni/2].v16x32[1].h16x16[ni%2].v8x16[0].data = v3.data;
+					t[mi][ni/2].v16x32[1].h16x16[ni%2].v8x16[1].data = v4.data;
 				}
 			}
 
@@ -651,8 +649,8 @@ namespace b8 {
 
 			X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD; ++p) {
 				if (p < K_ITERS) {
-					A.template cp_async<THREADS_PER_BLOCK>(p, M_PER_BLOCK*block_m, K_STEP*p, N_PER_BLOCK*block_n);
-					B.template cp_async<THREADS_PER_BLOCK>(p, K_STEP*p, N_PER_BLOCK*block_n, M_PER_BLOCK*block_m);
+					A.template async_load<THREADS_PER_BLOCK>(p, M_PER_BLOCK*block_m, K_STEP*p, N_PER_BLOCK*block_n);
+					B.template async_load<THREADS_PER_BLOCK>(p, K_STEP*p, N_PER_BLOCK*block_n, M_PER_BLOCK*block_m);
 				}
 				async_load_commit();
 			}
@@ -660,9 +658,13 @@ namespace b8 {
 			Fragment_32x32<FixedI8> rA[M_TILES][K_TILES];
 			Fragment_32x32<FixedI8> rBT[K_TILES][N_TILES];
 			b32::Fragment_32x32<i32> acc[M_TILES][N_TILES];
-			zero_(acc);
+			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+					zero_(acc[mi][ni]);
+				}
+			}
 
-			cp_async_wait<GMEM_PRELOAD - 1>();
+			async_load_wait<GMEM_PRELOAD - 1>();
 			sync_threads();
 
 			X17_UNROLL for (usize ki = 0; ki < K_TILES; ++ki) {
@@ -678,16 +680,16 @@ namespace b8 {
 			usize output_col = block_n * N_PER_BLOCK + warp_n * N_PER_WARP;
 			for (usize k_step = 0; k_step < K_ITERS; ++k_step) {
 				{ // Get more data from GMEM
-					cp_async_wait<GMEM_PRELOAD - 2>();
+					async_load_wait<GMEM_PRELOAD - 2>();
 					sync_threads();
 
 					usize p = k_step + GMEM_PRELOAD;
 					if (p < K_ITERS) {
-						A.template cp_async<THREADS_PER_BLOCK>(p, M_PER_BLOCK*block_m, K_STEP*p, N_PER_BLOCK*block_n);
-						B.template cp_async<THREADS_PER_BLOCK>(p, K_STEP*p, N_PER_BLOCK*block_n, M_PER_BLOCK*block_m);
+						A.template async_load<THREADS_PER_BLOCK>(p, M_PER_BLOCK*block_m, K_STEP*p, N_PER_BLOCK*block_n);
+						B.template async_load<THREADS_PER_BLOCK>(p, K_STEP*p, N_PER_BLOCK*block_n, M_PER_BLOCK*block_m);
 					} else if (k_step + 1 >= K_ITERS) {
 						if constexpr (Writer::SMEM_BYTES > 0) {
-							C.template cp_async<THREADS_PER_BLOCK>(output_row, output_col);
+							C.template async_load<THREADS_PER_BLOCK>(output_row, output_col);
 						}
 					}
 					async_load_commit();
@@ -707,7 +709,7 @@ namespace b8 {
 			}
 
 			if constexpr (Writer::SMEM_BYTES > 0) {
-				cp_async_wait<0>();
+				async_load_wait<0>();
 				sync_threads();
 			}
 			C.write(output_row, output_col, acc);

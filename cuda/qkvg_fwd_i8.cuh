@@ -38,10 +38,10 @@ namespace qkvg_helpers {
 					X17_UNROLL for (usize i = 0; i < 4; ++i) {
 						auto &inp = inp32x32.v16x32[j/2].h16x16[i/2].v8x16[j%2].h8x8[i%2];
 						auto &out = out32x32.v16x32[j/2].h16x16[i/2].v8x16[j%2].h8x8[i%2];
-						out.val0 = f32(inp.val0);
-						out.val1 = f32(inp.val1);
-						sum[j] = math::fma(out.val0, out.val0, sum[j]);
-						sum[j] = math::fma(out.val1, out.val1, sum[j]);
+						out.set0(f32(inp.get0()));
+						out.set1(f32(inp.get1()));
+						sum[j] = math::fma(out.get0(), out.get0(), sum[j]);
+						sum[j] = math::fma(out.get1(), out.get1(), sum[j]);
 					}
 				}
 			}
@@ -57,11 +57,11 @@ namespace qkvg_helpers {
 					X17_UNROLL for (usize i = 0; i < 4; ++i) {
 						auto &out = out32x32.v16x32[j/2].h16x16[i/2].v8x16[j%2].h8x8[i%2];
 						if constexpr (USE_DYN_SCALE) {
-							out.val0 *= scale[j] * f32(dyn_scales0[4*ni + i]);
-							out.val1 *= scale[j] * f32(dyn_scales1[4*ni + i]);
+							out.set0(out.get0() * scale[j] * f32(dyn_scales0[4*ni + i]));
+							out.set1(out.get1() * scale[j] * f32(dyn_scales1[4*ni + i]));
 						} else {
-							out.val0 *= scale[j];
-							out.val1 *= scale[j];
+							out.set0(out.get0() * scale[j]);
+							out.set1(out.get1() * scale[j]);
 						}
 					}
 				}
@@ -89,8 +89,8 @@ namespace qkvg_helpers {
 					X17_UNROLL for (usize i = 0; i < 4; ++i) {
 						auto &inp = inp32x32.v16x32[j/2].h16x16[i/2].v8x16[j%2].h8x8[i%2];
 						auto &out = out32x32.v16x32[j/2].h16x16[i/2].v8x16[j%2].h8x8[i%2];
-						out.val0 = f32(inp.val0) * f32(SCALE);
-						out.val1 = f32(inp.val1) * f32(SCALE);
+						out.set0(f32(inp.get0()) * f32(SCALE));
+						out.set1(f32(inp.get1()) * f32(SCALE));
 					}
 				}
 			}
@@ -119,8 +119,8 @@ namespace qkvg_helpers {
 					X17_UNROLL for (usize i = 0; i < 4; ++i) {
 						auto &inp = inp32x32.v16x32[j/2].h16x16[i/2].v8x16[j%2].h8x8[i%2];
 						auto &out = out32x32.v16x32[j/2].h16x16[i/2].v8x16[j%2].h8x8[i%2];
-						out.val0 = math::fast::gelu<INP_SCALE_2, OUT_SCALE_2, 1.0>(f32(inp.val0)).val;
-						out.val1 = math::fast::gelu<INP_SCALE_2, OUT_SCALE_2, 1.0>(f32(inp.val1)).val;
+						out.set0(math::fast::gelu<INP_SCALE_2, OUT_SCALE_2, 1.0>(f32(inp.get0())).val);
+						out.set1(math::fast::gelu<INP_SCALE_2, OUT_SCALE_2, 1.0>(f32(inp.get1())).val);
 					}
 				}
 			}
@@ -150,6 +150,7 @@ struct QMatrixWriter: b8::FixedI8MatrixWriter<
 
 	static_assert(HEAD_DIM % 32 == 0);
 	static_assert(PROJ_OUTPUTS % HEAD_DIM == 0);
+	static_assert(N_PER_BLOCK % HEAD_DIM == 0);
 	static constexpr usize SMEM_BYTES = N_PER_BLOCK * sizeof(bf16);
 
 	bf16 const *g_norm_scales;
@@ -172,9 +173,9 @@ struct QMatrixWriter: b8::FixedI8MatrixWriter<
 	}
 
 	template<const usize THREADS_PER_BLOCK>
-	X17_DEVICE void cp_async(usize row, usize col) {
+	X17_DEVICE void async_load(usize row, usize col) {
 		norm_scale_col0 = (col / N_PER_BLOCK) * N_PER_BLOCK;
-		cp_async_gmem_to_smem<THREADS_PER_BLOCK>(threadIdx.x, g_norm_scales + norm_scale_col0, s_norm_scales);
+		s_norm_scales.template cp_async_from<THREADS_PER_BLOCK>(threadIdx.x, g_norm_scales + norm_scale_col0);
 	}
 
 	template<const usize M_TILES, const usize N_TILES>
@@ -221,27 +222,37 @@ struct KVMatrixWriter: b8::FixedI8MatrixWriter<
 		N_PER_BLOCK,
 		math::constexpr_inv_sqrt(f64(config::MODEL_DIM))
 	>;
+	using SNormScales = SVector<bf16, N_PER_BLOCK / 2>;
 
 	static_assert(HEAD_DIM % 32 == 0);
 	static_assert(PROJ_OUTPUTS % HEAD_DIM == 0);
+	static_assert(N_PER_BLOCK % (2 * HEAD_DIM) == 0);
+	static constexpr usize SMEM_BYTES = (N_PER_BLOCK / 2) * sizeof(bf16);
 
-	X17_DEVICE KVMatrixWriter(b8::FixedI8 *gC):
-		Base(gC)
+	bf16 const *g_k_norm_scales;
+	SNormScales s_k_norm_scales;
+	usize k_norm_scale_col0;
+
+	X17_DEVICE KVMatrixWriter(
+		b8::FixedI8 *gC,
+		bf16 const *k_norm_scales
+	):
+		Base(gC),
+		g_k_norm_scales(k_norm_scales),
+		s_k_norm_scales(),
+		k_norm_scale_col0(0)
 	{}
 
-	X17_HOST_DEVICE static constexpr usize smem_cols() {
-		return 0;
-	}
-
-	X17_HOST_DEVICE static constexpr usize smem_bytes() {
-		return 0;
-	}
-
 	template<const u32 CAP>
-	X17_DEVICE void alloc_smem(SMemAllocator<CAP> &smem_alloc) {}
+	X17_DEVICE void alloc_smem(SMemAllocator<CAP> &smem_alloc) {
+		s_k_norm_scales._ptr = smem_alloc.alloc(SMEM_BYTES);
+	}
 
 	template<const usize THREADS_PER_BLOCK>
-	X17_DEVICE void cp_async(usize row, usize col) {}
+	X17_DEVICE void async_load(usize row, usize col) {
+		k_norm_scale_col0 = ((col / N_PER_BLOCK) * N_PER_BLOCK) / 2;
+		s_k_norm_scales.template cp_async_from<THREADS_PER_BLOCK>(threadIdx.x, g_k_norm_scales + k_norm_scale_col0);
+	}
 
 	template<const usize M_TILES, const usize N_TILES>
 	X17_DEVICE void write(
@@ -259,11 +270,13 @@ struct KVMatrixWriter: b8::FixedI8MatrixWriter<
 		// k
 		constexpr f64 QK_SCALE = math::constexpr_sqrt(f64(HEAD_DIM)) * f64(b8::FIXED_I8_SCALE);
 		X17_UNROLL for (usize hi = 0; hi < HEADS; ++hi) {
-			qkvg_helpers::l2_norm<QK_SCALE, false, K_TILES>(
+			usize head_col = col + hi * KV_TILES * 32;
+			usize k_norm_scale_col = head_col / 2 - k_norm_scale_col0;
+			qkvg_helpers::l2_norm<QK_SCALE, true, K_TILES>(
 				acc,
 				t,
 				hi * KV_TILES,
-				0
+				s_k_norm_scales._ptr + (k_norm_scale_col * sizeof(bf16))
 			);
 		}
 

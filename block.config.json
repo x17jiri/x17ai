@@ -4,16 +4,10 @@
 	"HEAD_DIM": 32,
 	"N_HEADS": 64,
 
-	"Y_SPARSE_FAN_IN": 512,
-	"Y_SPARSE_STEP": 512,
-	"Y_SPARSE_BLOCK": 1024,
-
-	"W_SPARSE_FAN_IN": 1024,
-
 	"F_WIDTH": 2048,
 	"WINDOW_SIZE": 0,
 	"L2_NORM_EPS": 1e-30,
-	"V_SCALE_FIX": 1.5,
+	"V_SCALE_FIX": 1.6,
 
 	"QK_SEGMENT_SIZE": { "type": "usize", "expr": "N_HEADS * HEAD_DIM" },
 	"VG_SEGMENT_SIZE": { "type": "usize", "expr": "N_HEADS * HEAD_DIM" },
