@@ -2,20 +2,19 @@
 #include "utils2.cuh"
 #include "cuda/utils_b8.cuh"
 #include "cuda/gemm_b8.cuh"
-#include "cuda/qkvg_fwd_i8.cuh"
 
 #include <algorithm>
 #include <filesystem>
 
 using namespace config;
 
-namespace Attn_q_fwd {
-	static constexpr usize Q_PROJ_OUTPUTS = ATTN_WIDTH;
+namespace Attn_y_fwd {
+	static constexpr usize Y_PROJ_OUTPUTS = 2 * MODEL_DIM;
 
 	using InputLoader =
 		b8::MatrixLoader<
 			b8::FixedI8,
-			MODEL_DIM,
+			ATTN_WIDTH,
 			64, 128
 		>;
 
@@ -23,16 +22,17 @@ namespace Attn_q_fwd {
 		b8::MatrixTransLoader<
 			b8::MatrixLoader<
 				b8::FixedI8,
-				MODEL_DIM,
+				ATTN_WIDTH,
 				128, 128
 			>
 		>;
 
-	using Writer = b8::FixedI8MatrixWriter<
-		Q_PROJ_OUTPUTS,
+	static constexpr f64 Y_SCALE = math::constexpr_sqrt(math::fast::GELU_VAR_FIX_2 / f64(ATTN_WIDTH));
+	using Writer = b8::FixedI8MatrixResidualWriter<
+		MODEL_DIM,
 		InputLoader::M,
 		WeightLoader::K,
-		math::constexpr_inv_sqrt(f64(config::MODEL_DIM))
+		Y_SCALE
 	>;
 
 	using Kernel = b8::Gemm<InputLoader, WeightLoader, Writer>;
@@ -41,16 +41,17 @@ namespace Attn_q_fwd {
 	void kernel(
 		b8::FixedI8 *w,
 		b8::FixedI8 *inp, usize n_inputs,
+		b8::FixedI8 *residual,
 		b8::FixedI8 *out
 	) {
 		auto a = InputLoader(inp, n_inputs);
-		auto b = WeightLoader(w, Q_PROJ_OUTPUTS);
-		auto o = Writer(out);
+		auto b = WeightLoader(w, Y_PROJ_OUTPUTS);
+		auto o = Writer(out, residual);
 		Kernel().run(a, b, o);
 	}
 }
 
-using namespace Attn_q_fwd;
+using namespace Attn_y_fwd;
 
 int main(int argc, char *argv[]) {
 	HarnessCliOptions cli;
@@ -58,60 +59,56 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	if (!Kernel::has_full_output_tiles(seq_len, Q_PROJ_OUTPUTS)) {
+	if (!Kernel::has_full_output_tiles(seq_len, Y_PROJ_OUTPUTS)) {
 		printf(
-			"Expected Q output shape [%u, %u] to align with block shape [%u, %u]\n",
+			"Expected pregate output shape [%u, %u] to align with block shape [%u, %u]\n",
 			seq_len,
-			Q_PROJ_OUTPUTS,
+			Y_PROJ_OUTPUTS,
 			Kernel::M_PER_BLOCK,
 			Kernel::N_PER_BLOCK
 		);
 		return 1;
 	}
 
-	std::vector<b8::FixedI8> h_weights = load_i8_tensor(
-		torch_tensor_path("attn_q_weights_i8.bin"),
-		Q_PROJ_OUTPUTS,
-		MODEL_DIM
+	std::vector<b8::FixedI8> h_weights_compact = load_i8_tensor(
+		torch_tensor_path("attn_y_weights_i8.bin"),
+		Y_PROJ_OUTPUTS,
+		ATTN_WIDTH
 	);
-	std::vector<bf16> h_q_norm_scales = load_tensor(
-		torch_tensor_path("q_norm_scales.bin"),
-		1,
-		Q_PROJ_OUTPUTS
-	);
-	std::vector<b8::FixedI8> h_inputs = load_i8_tensor(
-		tensor_path(cli.input_dir, "x_i8.bin"),
-		seq_len,
-		MODEL_DIM
-	);
-	if (h_weights.empty() || h_q_norm_scales.empty() || h_inputs.empty()) {
+	std::vector<b8::FixedI8> h_f = load_i8_tensor(tensor_path(cli.input_dir, "attn_out_i8.bin"), seq_len, ATTN_WIDTH);
+	std::vector<b8::FixedI8> h_x = load_i8_tensor(tensor_path(cli.input_dir, "x_i8.bin"), seq_len, MODEL_DIM);
+	if (h_weights_compact.empty() || h_f.empty() || h_x.empty()) {
 		return 1;
 	}
 
-	std::vector<b8::FixedI8> h_out(seq_len * Q_PROJ_OUTPUTS);
+	std::vector<b8::FixedI8> h_out(seq_len * MODEL_DIM);
 
 	b8::FixedI8 *d_weights = nullptr;
-	b8::FixedI8 *d_inputs = nullptr;
+	b8::FixedI8 *d_f = nullptr;
+	b8::FixedI8 *d_x = nullptr;
 	b8::FixedI8 *d_out = nullptr;
 
-	cudaMalloc(&d_weights, h_weights.size() * sizeof(b8::FixedI8));
-	cudaMalloc(&d_inputs, h_inputs.size() * sizeof(b8::FixedI8));
+	cudaMalloc(&d_weights, h_weights_compact.size() * sizeof(b8::FixedI8));
+	cudaMalloc(&d_f, h_f.size() * sizeof(b8::FixedI8));
+	cudaMalloc(&d_x, h_x.size() * sizeof(b8::FixedI8));
 	cudaMalloc(&d_out, h_out.size() * sizeof(b8::FixedI8));
 
-	cudaMemcpy(d_weights, h_weights.data(), h_weights.size() * sizeof(b8::FixedI8), cudaMemcpyHostToDevice);
-	cudaMemcpy(d_inputs, h_inputs.data(), h_inputs.size() * sizeof(b8::FixedI8), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_weights, h_weights_compact.data(), h_weights_compact.size() * sizeof(b8::FixedI8), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_f, h_f.data(), h_f.size() * sizeof(b8::FixedI8), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_x, h_x.data(), h_x.size() * sizeof(b8::FixedI8), cudaMemcpyHostToDevice);
 
 	cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, Kernel::SMEM_BYTES);
 	cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-	dim3 grid = Kernel::output_grid(seq_len, Q_PROJ_OUTPUTS);
+	dim3 grid = Kernel::output_grid(seq_len, Y_PROJ_OUTPUTS);
 
 	int warmup = 50;
 	for (int i = 0; i < warmup; ++i) {
 		kernel<<<grid, Kernel::THREADS_PER_BLOCK, Kernel::SMEM_BYTES>>>(
 			d_weights,
-			d_inputs,
+			d_f,
 			seq_len,
+			d_x,
 			d_out
 		);
 	}
@@ -130,11 +127,13 @@ int main(int argc, char *argv[]) {
 		cudaEventCreate(&ends[i]);
 	}
 	for (int i = 0; i < num_runs; ++i) {
+		//printf("run i = %d: %s\n", i, cudaGetErrorString(cudaGetLastError()));
 		cudaEventRecord(starts[i]);
 		kernel<<<grid, Kernel::THREADS_PER_BLOCK, Kernel::SMEM_BYTES>>>(
 			d_weights,
-			d_inputs,
+			d_f,
 			seq_len,
+			d_x,
 			d_out
 		);
 		cudaEventRecord(ends[i]);
@@ -157,18 +156,19 @@ int main(int argc, char *argv[]) {
 
 	float median_ms = times_ms[num_runs / 2];
 	float min_ms = times_ms[0];
-	double tflops = 2.0 * Q_PROJ_OUTPUTS * MODEL_DIM * seq_len / (median_ms * 1e-3) / 1e12;
+	double tflops = 2.0 * Y_PROJ_OUTPUTS * ATTN_WIDTH * seq_len / (median_ms * 1e-3) / 1e12;
 	printf("Kernel time over %d runs: median %.3f ms  min %.3f ms\n", num_runs, median_ms, min_ms);
 	printf("TFLOPS: %.2f\n", tflops);
 
 	cudaMemcpy(h_out.data(), d_out, h_out.size() * sizeof(b8::FixedI8), cudaMemcpyDeviceToHost);
 	std::filesystem::create_directories("tmp/block_cuda");
-	store_i8_tensor("tmp/block_cuda/q_i8.bin", h_out, seq_len, Q_PROJ_OUTPUTS);
+	store_i8_tensor("tmp/block_cuda/attn_y_i8.bin", h_out, seq_len, MODEL_DIM);
 
 	printf("Used SMEM per kernel: %u\n", Kernel::SMEM_BYTES);
 
 	cudaFree(d_weights);
-	cudaFree(d_inputs);
+	cudaFree(d_f);
+	cudaFree(d_x);
 	cudaFree(d_out);
 	return 0;
 }

@@ -28,7 +28,6 @@ int main(int argc, char *argv[]) {
 		HEADS_PER_KERNEL,
 		HEAD_DIM,
 		MODEL_DIM,
-		V_SCALE_FIX,
 		PACKED_DIM,
 		KV_PACKED_DIM,
 		PACKED_DIM

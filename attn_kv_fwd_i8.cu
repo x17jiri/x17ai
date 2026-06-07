@@ -28,11 +28,11 @@ namespace Attn_kv_fwd {
 			>
 		>;
 
-	using Writer = KVMatrixWriter<
-		HEAD_DIM,
+	using Writer = b8::FixedI8MatrixWriter<
 		KV_PROJ_OUTPUTS,
 		InputLoader::M,
-		WeightLoader::K
+		WeightLoader::K,
+		math::constexpr_inv_sqrt(f64(config::MODEL_DIM))
 	>;
 
 	using Kernel = b8::Gemm<InputLoader, WeightLoader, Writer>;
@@ -41,12 +41,11 @@ namespace Attn_kv_fwd {
 	void kernel(
 		b8::FixedI8 *w,
 		b8::FixedI8 *inp, usize n_inputs,
-		b8::FixedI8 *out,
-		bf16 const *k_norm_scales
+		b8::FixedI8 *out
 	) {
 		auto a = InputLoader(inp, n_inputs);
 		auto b = WeightLoader(w, KV_PROJ_OUTPUTS);
-		auto o = Writer(out, k_norm_scales);
+		auto o = Writer(out);
 		Kernel().run(a, b, o);
 	}
 }
@@ -75,17 +74,12 @@ int main(int argc, char *argv[]) {
 		KV_PROJ_OUTPUTS,
 		MODEL_DIM
 	);
-	std::vector<bf16> h_k_norm_scales = load_tensor(
-		torch_tensor_path("k_norm_scales.bin"),
-		1,
-		ATTN_WIDTH
-	);
 	std::vector<b8::FixedI8> h_inputs = load_i8_tensor(
 		tensor_path(cli.input_dir, "x_i8.bin"),
 		seq_len,
 		MODEL_DIM
 	);
-	if (h_weights.empty() || h_k_norm_scales.empty() || h_inputs.empty()) {
+	if (h_weights.empty() || h_inputs.empty()) {
 		return 1;
 	}
 
@@ -94,16 +88,13 @@ int main(int argc, char *argv[]) {
 	b8::FixedI8 *d_weights = nullptr;
 	b8::FixedI8 *d_inputs = nullptr;
 	b8::FixedI8 *d_out = nullptr;
-	bf16 *d_k_norm_scales = nullptr;
 
 	cudaMalloc(&d_weights, h_weights.size() * sizeof(b8::FixedI8));
 	cudaMalloc(&d_inputs, h_inputs.size() * sizeof(b8::FixedI8));
 	cudaMalloc(&d_out, h_out.size() * sizeof(b8::FixedI8));
-	cudaMalloc(&d_k_norm_scales, h_k_norm_scales.size() * sizeof(bf16));
 
 	cudaMemcpy(d_weights, h_weights.data(), h_weights.size() * sizeof(b8::FixedI8), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_inputs, h_inputs.data(), h_inputs.size() * sizeof(b8::FixedI8), cudaMemcpyHostToDevice);
-	cudaMemcpy(d_k_norm_scales, h_k_norm_scales.data(), h_k_norm_scales.size() * sizeof(bf16), cudaMemcpyHostToDevice);
 
 	cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, Kernel::SMEM_BYTES);
 	cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
@@ -116,8 +107,7 @@ int main(int argc, char *argv[]) {
 			d_weights,
 			d_inputs,
 			seq_len,
-			d_out,
-			d_k_norm_scales
+			d_out
 		);
 	}
 
@@ -140,8 +130,7 @@ int main(int argc, char *argv[]) {
 			d_weights,
 			d_inputs,
 			seq_len,
-			d_out,
-			d_k_norm_scales
+			d_out
 		);
 		cudaEventRecord(ends[i]);
 	}
@@ -176,6 +165,5 @@ int main(int argc, char *argv[]) {
 	cudaFree(d_weights);
 	cudaFree(d_inputs);
 	cudaFree(d_out);
-	cudaFree(d_k_norm_scales);
 	return 0;
 }

@@ -30,44 +30,41 @@ def create_inputs() -> None:
 	sinks_k = rms_norm(new_randn(N_HEADS, HEAD_DIM, generator=generator))
 	sinks_v = new_randn(N_HEADS, HEAD_DIM, generator=generator)
 
-	q_norm_scales = new_ones(1, HEAD_DIM * N_HEADS)
-	k_norm_scales = new_ones(1, HEAD_DIM * N_HEADS)
 	attn_temperature = new_ones(N_HEADS, 1)
 
 	TEST = True
 	if TEST:
-		q_norm_scales = new_randn(1, HEAD_DIM * N_HEADS, generator=generator)
-		k_norm_scales = new_randn(1, HEAD_DIM * N_HEADS, generator=generator)
 		attn_temperature = 0.5 + torch.rand((N_HEADS, 1), generator=generator)
 
-	sinks_k = sinks_k * k_norm_scales.reshape(N_HEADS, HEAD_DIM)
-
 	attn_q_weights = new_randn(N_HEADS*HEAD_DIM, MODEL_DIM, generator=generator)
-	attn_kv_weights = new_randn(2*N_HEADS*HEAD_DIM, MODEL_DIM, generator=generator)
+	attn_kv_weights = new_randn(N_HEADS, 2, HEAD_DIM, MODEL_DIM, generator=generator)
 	attn_y_weights = new_randn(2*MODEL_DIM, ATTN_WIDTH, generator=generator)
+
+	attn_k_weights = attn_kv_weights[:, 0, :, :]
+	attn_v_weights = attn_kv_weights[:, 1, :, :]
+	attn_v_weights *= V_SCALE_FIX
+
 	ffn_f_weights = new_randn(2*F_WIDTH, MODEL_DIM, generator=generator)
 	ffn_y_weights = new_randn(2*MODEL_DIM, F_WIDTH, generator=generator)
 
-	store_tensor(x, "x.bin", expected_variance=1.0)
+	store_tensor(x, "x_f32.bin", expected_variance=1.0)
 	store_tensor(x, "x_i8.bin")
-	store_tensor(sinks_k, "sinks_k.bin", expected_variance=1.0)
+	store_tensor(sinks_k, "sinks_k_f32.bin", expected_variance=1.0)
 	store_tensor(sinks_k, "sinks_k_i8.bin")
-	store_tensor(sinks_v, "sinks_v.bin", expected_variance=1.0)
+	store_tensor(sinks_v, "sinks_v_f32.bin", expected_variance=1.0)
 	store_tensor(sinks_v, "sinks_v_i8.bin")
-	store_tensor(q_norm_scales, "q_norm_scales.bin", expected_variance=0.0)
-	store_tensor(q_norm_scales, "q_norm_scales_i8.bin")
-	store_tensor(k_norm_scales, "k_norm_scales.bin", expected_variance=0.0)
-	store_tensor(k_norm_scales, "k_norm_scales_i8.bin")
 	store_tensor(attn_temperature, "attn_temperature_f32.bin", expected_variance=0.0)
-	store_tensor(attn_q_weights, "attn_q_weights.bin", expected_variance=1.0)
+	store_tensor(attn_q_weights, "attn_q_weights_f32.bin", expected_variance=1.0)
 	store_tensor(attn_q_weights, "attn_q_weights_i8.bin")
-	store_tensor(attn_kv_weights, "attn_kv_weights.bin", expected_variance=1.0)
+	store_tensor(attn_kv_weights, "attn_k_weights_f32.bin", expected_variance=1.0)
+	store_tensor(attn_kv_weights, "attn_v_weights_f32.bin", expected_variance=V_SCALE_FIX*V_SCALE_FIX)
+	store_tensor(attn_kv_weights, "attn_kv_weights_f32.bin", expected_variance=1.0)
 	store_tensor(attn_kv_weights, "attn_kv_weights_i8.bin")
-	store_tensor(attn_y_weights, "attn_y_weights.bin", expected_variance=1.0)
+	store_tensor(attn_y_weights, "attn_y_weights_f32.bin", expected_variance=1.0)
 	store_tensor(attn_y_weights, "attn_y_weights_i8.bin")
-	store_tensor(ffn_f_weights, "ffn_f_weights.bin", expected_variance=1.0)
+	store_tensor(ffn_f_weights, "ffn_f_weights_f32.bin", expected_variance=1.0)
 	store_tensor(ffn_f_weights, "ffn_f_weights_i8.bin")
-	store_tensor(ffn_y_weights, "ffn_y_weights.bin", expected_variance=1.0)
+	store_tensor(ffn_y_weights, "ffn_y_weights_f32.bin", expected_variance=1.0)
 	store_tensor(ffn_y_weights, "ffn_y_weights_i8.bin")
 
 def rms_norm(tensor: torch.Tensor, eps: float = L2_NORM_EPS) -> torch.Tensor:
@@ -242,8 +239,6 @@ def run_attn() -> None:
 	sinks_k = load_tensor("sinks_k_i8.bin", N_HEADS, HEAD_DIM)
 	sinks_v = load_tensor("sinks_v_i8.bin", N_HEADS, HEAD_DIM)
 	attn_temperature = load_tensor("attn_temperature_f32.bin", N_HEADS, 1)
-	q_norm_scales = load_tensor("q_norm_scales.bin", 1, HEAD_DIM * N_HEADS)
-	k_norm_scales = load_tensor("k_norm_scales.bin", 1, HEAD_DIM * N_HEADS)
 	q_weights = load_tensor("attn_q_weights_i8.bin", N_HEADS*HEAD_DIM, MODEL_DIM)
 	kv_weights = load_tensor("attn_kv_weights_i8.bin", 2*N_HEADS*HEAD_DIM, MODEL_DIM)
 	y_weights = load_tensor("attn_y_weights_i8.bin", 2*MODEL_DIM, ATTN_WIDTH)
@@ -254,25 +249,19 @@ def run_attn() -> None:
 
 	q = q.reshape(N_INPUTS, N_HEADS, HEAD_DIM)
 	kv = kv.reshape(N_INPUTS, N_HEADS, 2*HEAD_DIM)
+
+	q_i8 = quantize(q)
+	kv_i8 = quantize(kv)
+
 	k = kv[..., :HEAD_DIM]
 	v = kv[..., HEAD_DIM:]
 
-	q = rms_norm(q)
-	q = q * q_norm_scales.reshape(1, N_HEADS, HEAD_DIM)
-
-	k = rms_norm(k)
-	k = k * k_norm_scales.reshape(1, N_HEADS, HEAD_DIM)
-	kv = torch.cat((k, v), dim=2)
-
-	q_i8 = quantize(q)
-	k_i8 = quantize(k)
-	v_i8 = quantize(v)
-	kv_i8 = torch.cat((k_i8, v_i8), dim=2)
+	k_i8 = kv_i8[..., :HEAD_DIM]
+	v_i8 = kv_i8[..., HEAD_DIM:]
 
 	RUN_ATTN = True
 	if RUN_ATTN:
 		attn_out, attn_maxes, attn_maxes_i32 = attn(q_i8, k_i8, v_i8, sinks_k, sinks_v, attn_temperature)
-		attn_out *= V_SCALE_FIX
 		attn_out_flat = attn_out.reshape(N_INPUTS, ATTN_WIDTH)
 		attn_out_i8 = quantize(attn_out_flat)
 		attn_y_pregate = (
@@ -281,22 +270,22 @@ def run_attn() -> None:
 		)
 		attn_y = gated_residual(x, attn_y_pregate)
 
-	store_tensor(q, "q.bin", expected_variance=1.0)
+	store_tensor(q, "q_f32.bin", expected_variance=1.0)
 	store_tensor(q_i8, "q_i8.bin")
-	store_tensor(k, "k.bin", expected_variance=1.0)
+	store_tensor(k, "k_f32.bin", expected_variance=1.0)
 	store_tensor(k_i8, "k_i8.bin")
-	store_tensor(v, "v.bin", expected_variance=1.0)
+	store_tensor(v, "v_f21.bin", expected_variance=1.0)
 	store_tensor(v_i8, "v_i8.bin")
-	store_tensor(kv, "kv.bin", expected_variance=1.0)
+	store_tensor(kv, "kv_f32.bin", expected_variance=1.0)
 	store_tensor(kv_i8, "kv_i8.bin")
 	if RUN_ATTN:
 		store_tensor(attn_maxes.transpose(0, 1), "attn_maxes_f32.bin")
 		store_i32_tensor(attn_maxes_i32.transpose(0, 1), "attn_maxes_i32.bin")
-		store_tensor(attn_out, "attn_out.bin", expected_variance=1.0)
+		store_tensor(attn_out, "attn_out_f32.bin", expected_variance=1.0)
 		store_tensor(attn_out_i8, "attn_out_i8.bin")
-		store_tensor(attn_y_pregate, "attn_y_pregate.bin", expected_variance=1.0)
+		store_tensor(attn_y_pregate, "attn_y_pregate_f32.bin", expected_variance=1.0)
 		store_tensor(attn_y_pregate, "attn_y_pregate_i8.bin")
-		store_tensor(attn_y, "attn_y.bin")
+		store_tensor(attn_y, "attn_y_f32.bin")
 		store_tensor(attn_y, "attn_y_i8.bin")
 
 #---------------------------------------------------------------------------------------------------
