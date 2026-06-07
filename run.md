@@ -21,6 +21,15 @@ python verify_i8_tensor.py tmp/block_torch/attn_out_i8.bin tmp/block_cuda/attn_o
 
 python tensor_stats.py tmp/block_torch/attn_out_i8.bin tmp/block_torch/attn_out.bin.var
 
+## Attn - Y Fwd
+
+./nvcc.sh attn_y_fwd_i8.cu && tmp/attn_y_fwd_i8
+python verify_i8_tensor.py tmp/block_torch/attn_y_i8.bin tmp/block_cuda/attn_y_i8.bin
+
+python tensor_stats.py tmp/block_torch/ffn_y.bin
+
+# FFN i8
+
 ## FFN - Y Fwd
 
 ./nvcc.sh ffn_y_fwd_i8.cu && tmp/ffn_y_fwd_i8
@@ -28,7 +37,6 @@ python verify_i8_tensor.py tmp/block_torch/ffn_y_i8.bin tmp/block_cuda/ffn_y_i8.
 
 python tensor_stats.py tmp/block_torch/ffn_y.bin
 
-# FFN i8
 
 # Attn
 

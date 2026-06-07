@@ -244,15 +244,15 @@ namespace b8 {
 				} packed;
 			} left, right;
 
-			left.packed.top_0 = to_fixedi8(inp.v8x16[0].h8x8[0].get0());
-			left.packed.top_1 = to_fixedi8(inp.v8x16[0].h8x8[0].get1());
-			left.packed.bot_0 = to_fixedi8(inp.v8x16[1].h8x8[0].get0());
-			left.packed.bot_1 = to_fixedi8(inp.v8x16[1].h8x8[0].get1());
+			left.packed.top_0 = f32_to_fixedi8(inp.v8x16[0].h8x8[0].get0());
+			left.packed.top_1 = f32_to_fixedi8(inp.v8x16[0].h8x8[0].get1());
+			left.packed.bot_0 = f32_to_fixedi8(inp.v8x16[1].h8x8[0].get0());
+			left.packed.bot_1 = f32_to_fixedi8(inp.v8x16[1].h8x8[0].get1());
 
-			right.packed.top_0 = to_fixedi8(inp.v8x16[0].h8x8[1].get0());
-			right.packed.top_1 = to_fixedi8(inp.v8x16[0].h8x8[1].get1());
-			right.packed.bot_0 = to_fixedi8(inp.v8x16[1].h8x8[1].get0());
-			right.packed.bot_1 = to_fixedi8(inp.v8x16[1].h8x8[1].get1());
+			right.packed.top_0 = f32_to_fixedi8(inp.v8x16[0].h8x8[1].get0());
+			right.packed.top_1 = f32_to_fixedi8(inp.v8x16[0].h8x8[1].get1());
+			right.packed.bot_0 = f32_to_fixedi8(inp.v8x16[1].h8x8[1].get0());
+			right.packed.bot_1 = f32_to_fixedi8(inp.v8x16[1].h8x8[1].get1());
 
 			usize tid = threadIdx.x;
 			u32 u0 = left.value;
@@ -344,7 +344,7 @@ namespace b8 {
 			constexpr f64 OUT_SCALE_2 = 1.0 / (FAN_IN * FIXED_I8_SCALE_2);
 			f32 gate = math::fast::gelu<INP_SCALE_2, OUT_SCALE_2, 1.0>(f32(frag.get0())).val;
 			f32 lin = f32(frag.get1());
-			return to_fixedi8(gate * lin);
+			return f32_to_fixedi8(gate * lin);
 		}
 
 		template<const usize M_TILES, const usize N_TILES>
@@ -467,7 +467,7 @@ namespace b8 {
 			f32 residual_f = f32(residual);
 			f32 output_f = f32(frag.get1()) * f32(RAW_TO_FIXED);
 			f32 val_f = math::fma(new_weight, output_f, old_weight * residual_f);
-			return to_fixedi8(val_f);
+			return f32_to_fixedi8(val_f);
 		}
 
 		template<const usize M_TILES, const usize N_TILES>

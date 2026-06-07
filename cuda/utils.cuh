@@ -119,15 +119,15 @@ X17_DEVICE void round_clamp_cast(b32::Fragment_16x16<f32> const &src, b8::Fragme
 	};
 	Packed4 top, bot;
 
-	top.val[0] = b8::to_fixedi8(src.v8x16[0].h8x8[0].get0());
-	top.val[1] = b8::to_fixedi8(src.v8x16[0].h8x8[0].get1());
-	top.val[2] = b8::to_fixedi8(src.v8x16[0].h8x8[1].get0());
-	top.val[3] = b8::to_fixedi8(src.v8x16[0].h8x8[1].get1());
+	top.val[0] = b8::f32_to_fixedi8(src.v8x16[0].h8x8[0].get0());
+	top.val[1] = b8::f32_to_fixedi8(src.v8x16[0].h8x8[0].get1());
+	top.val[2] = b8::f32_to_fixedi8(src.v8x16[0].h8x8[1].get0());
+	top.val[3] = b8::f32_to_fixedi8(src.v8x16[0].h8x8[1].get1());
 
-	bot.val[0] = b8::to_fixedi8(src.v8x16[1].h8x8[0].get0());
-	bot.val[1] = b8::to_fixedi8(src.v8x16[1].h8x8[0].get1());
-	bot.val[2] = b8::to_fixedi8(src.v8x16[1].h8x8[1].get0());
-	bot.val[3] = b8::to_fixedi8(src.v8x16[1].h8x8[1].get1());
+	bot.val[0] = b8::f32_to_fixedi8(src.v8x16[1].h8x8[0].get0());
+	bot.val[1] = b8::f32_to_fixedi8(src.v8x16[1].h8x8[0].get1());
+	bot.val[2] = b8::f32_to_fixedi8(src.v8x16[1].h8x8[1].get0());
+	bot.val[3] = b8::f32_to_fixedi8(src.v8x16[1].h8x8[1].get1());
 
 	dst.v8x16[0].data = top.tuple4;
 	dst.v8x16[1].data = bot.tuple4;

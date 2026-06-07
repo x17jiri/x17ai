@@ -624,19 +624,37 @@ namespace b8 {
 		}
 	}
 
-	template<typename T>
-	struct ToFixedI8;
+	//----------------------------------------------------------------------------------------------
 
-	template<>
-	struct ToFixedI8<f32> {
-		static X17_DEVICE FixedI8 conv_one(f32 inp) {
-			f32 clamped = fmaxf(-127.0f, fminf(+127.0f, inp));
-			return __float2int_rn(clamped);
-		}
+	X17_DEVICE FixedI8 f32_to_fixedi8(f32 inp) {
+		f32 clamped = fmaxf(-127.0f, fminf(+127.0f, inp));
+		return __float2int_rn(clamped);
+	}
+
+	using E4m3 = u8;
+
+	X17_DEVICE E4m3 f32_to_e4m3(f32 inp) {
+		u32 tmp = __float_as_uint(inp);
+		u32 sign = (tmp >> 24) & 0x80u;
+		u32 rest = tmp & 0x7FFFFFFFu;
+
+		u32 min = (120u << 23) + (0xfu << 19);
+		u32 max = (135u << 23) + (0xcu << 19);
+
+		u32 rounded = (rest + ((1u << 19) - (120u << 23))) >> 20;
+		u32 clamped = rest > max ? 0x7eu : rounded;
+		return rest < min ? 0 : (sign | clamped);
 	};
 
-	template<typename T>
-	X17_DEVICE FixedI8 to_fixedi8(T inp) {
-		return ToFixedI8<T>::conv_one(inp);
+	/// This function can only read values produced by `f32_to_e4m3()`. So:
+	/// - no nan, inf, sub-normals
+	/// - max value 0x7e
+	X17_DEVICE bf16 e4m3_to_bf16(E4m3 inp) {
+		u16 sign = u16(u16(inp) & 0x80u) << 8;
+		u16 rest = u16(u16(inp) & 0x7Fu) << 4;
+		u16 value = u16(sign | rest) + u16(120u << 7);
+		return rest == 0 ? bf16(0.0) : __ushort_as_bfloat16(value);
 	}
+
+	//----------------------------------------------------------------------------------------------
 }
