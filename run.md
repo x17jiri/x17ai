@@ -28,6 +28,10 @@ python verify_i8_tensor.py tmp/block_torch/attn_y_i8.bin tmp/block_cuda/attn_y_i
 
 python tensor_stats.py tmp/block_torch/ffn_y.bin
 
+./nvcc.sh attn_y_fwd_fp8.cu && tmp/attn_y_fwd_fp8
+python verify_tensor.py tmp/block_torch/o_attn.bin tmp/block_cuda/o_attn.bin
+python tensor_stats.py tmp/block_torch/o_attn.bin tmp/block_torch/o_attn.bin.var
+
 # FFN i8
 
 ## FFN - Y Fwd

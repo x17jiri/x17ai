@@ -619,138 +619,95 @@ namespace b16 {
 				_ptr + (tile_idx * TILE_M * ROW_BYTES)
 			};
 		}
-
-		/// Copy from a (possibly smaller) GMEM matrix into a sub-region of this SMEM matrix.
-		/// Data is placed starting at (dst_row, dst_col) within this SMEM matrix.
-		/// dst_row and dst_col must be multiples of 16.
-		template<const usize THREADS_PER_BLOCK, const usize WIDTH, const usize HEIGHT, const usize GM, const usize GN>
-		requires(WIDTH <= GN && HEIGHT <= GM && WIDTH <= N && HEIGHT <= M)
-		X17_DEVICE void cp_async_from(
-			usize tid,
-			GMatrix<T, GM, GN> src,
-			usize src_row,
-			usize src_col,
-			usize dst_row,
-			usize dst_col
-		) const {
-			if constexpr (WIDTH > 0 && HEIGHT > 0) {
-				__builtin_assume(tid < THREADS_PER_BLOCK);
-
-				constexpr usize SRC_ROW_BYTES = WIDTH * sizeof(T);
-				constexpr usize CP_BYTES = 16;
-				constexpr usize CP_PER_ROW = SRC_ROW_BYTES / CP_BYTES;
-				constexpr usize ROWS_PER_STEP = THREADS_PER_BLOCK / CP_PER_ROW;
-				constexpr usize STEPS = HEIGHT / ROWS_PER_STEP;
-
-				static_assert(CP_BYTES % sizeof(T) == 0);
-				static_assert((WIDTH * sizeof(T)) % CP_BYTES == 0);
-				static_assert((N * sizeof(T)) % CP_BYTES == 0);
-				static_assert(THREADS_PER_BLOCK % CP_PER_ROW == 0);
-				if constexpr (STEPS == 0) {
-					if constexpr (HEIGHT % ROWS_PER_STEP == 0) {
-						return;
-					}
-					if (tid >= (HEIGHT % ROWS_PER_STEP) * CP_PER_ROW) {
-						return;
-					}
-				}
-
-				// Thread's position within a step is fixed
-				usize col_in_row = dst_col * sizeof(T) + (tid % CP_PER_ROW) * CP_BYTES;
-				usize row_in_step = tid / CP_PER_ROW;
-				usize src_col_in_row = src_col * sizeof(T) + (tid % CP_PER_ROW) * CP_BYTES;
-
-				constexpr usize REPEAT_AFTER = least_common_multiple(8, ROWS_PER_STEP) / ROWS_PER_STEP;
-				usize off[REPEAT_AFTER];
-				X17_UNROLL for (usize i = 0; i < REPEAT_AFTER; ++i) {
-					usize row = dst_row + i * ROWS_PER_STEP + row_in_step;
-					off[i] = col_in_row ^ ((row & 7) << 4);
-				}
-
-				u8 const *src_ptr =
-					reinterpret_cast<u8 const *>(src._ptr)
-					+ (src_row + row_in_step) * src.stride_bytes()
-					+ src_col_in_row;
-				usize src_step = ROWS_PER_STEP * src.stride_bytes();
-
-				usize dst_ptr = _ptr + (dst_row + row_in_step) * ROW_BYTES;
-				usize dst_step = ROWS_PER_STEP * ROW_BYTES;
-
-				if constexpr (STEPS > 0) {
-					X17_UNROLL for (usize step = 0; step < STEPS; ++step) {
-						sm80::cp_async(src_ptr, dst_ptr + off[step % REPEAT_AFTER]);
-						src_ptr += src_step;
-						dst_ptr += dst_step;
-					}
-				}
-				if constexpr (HEIGHT % ROWS_PER_STEP != 0) {
-					usize step = STEPS;
-					if (tid < (HEIGHT % ROWS_PER_STEP) * CP_PER_ROW) {
-						sm80::cp_async(src_ptr, dst_ptr + off[step % REPEAT_AFTER]);
-					}
-				}
-			}
-		}
-
-		/// Both `m_idx` and `n_idx` must be multiples of 16.
-		X17_DEVICE void load_tile_to_fragment(
-			usize m_idx, usize n_idx,
-			Fragment_16x16<T> &dst
-		) const requires(sizeof(T) == 2) {
-			if constexpr (N > 0) {
-				usize tid = threadIdx.x;
-				usize row = m_idx + (tid & 15);
-				usize swizzle = ((threadIdx.x & 7) << 4) ^ (threadIdx.x & 16);
-				usize byte_col = n_idx * sizeof(T);
-				u32 addr = _ptr + (row * ROW_BYTES) + (byte_col ^ swizzle);
-
-				sm80::ldmatrix_8x8xu16_x4(
-					addr,
-					dst.sub[0][0].val, dst.sub[1][0].val, dst.sub[0][1].val, dst.sub[1][1].val
-				);
-			}
-		}
-
-		/// `m_idx` must be a multiple of 16 and `n_idx` must be a multiple of 8.
-		X17_DEVICE void load_tile_to_fragment(
-			usize m_idx, usize n_idx,
-			Fragment_16x8<T> &dst
-		) const requires(sizeof(T) == 2) {
-			if constexpr (N > 0) {
-				usize tid = threadIdx.x;
-				usize row = m_idx + (tid & 15);
-				usize swizzle = ((threadIdx.x & 7) << 4) ^ (threadIdx.x & 16);
-				usize byte_col = n_idx * sizeof(T);
-				u32 addr = _ptr + (row * ROW_BYTES) + (byte_col ^ swizzle);
-
-				sm80::ldmatrix_8x8xu16_x2(
-					addr,
-					dst.sub[0].val, dst.sub[1].val
-				);
-			}
-		}
-
-		/// Loads a 16x16 tile from SMEM, transposed, into MMA registers.
-		/// Uses ldmatrix.trans to transpose each 8x8 sub-tile during load,
-		/// plus swaps off-diagonal destinations for a full 16x16 transpose.
-		X17_DEVICE void load_tile_to_fragment_trans(
-			usize m_idx, usize n_idx,
-			Fragment_16x16<T> &dst
-		) const requires(sizeof(T) == 2) {
-			if constexpr (N > 0) {
-				usize tid = threadIdx.x;
-				usize row = m_idx + (tid & 15);
-				usize swizzle = ((threadIdx.x & 7) << 4) ^ (threadIdx.x & 16);
-				usize byte_col = n_idx * sizeof(T);
-				u32 addr = _ptr + (row * ROW_BYTES) + (byte_col ^ swizzle);
-
-				sm80::ldmatrix_t_8x8xu16_x4(
-					addr,
-					dst.sub[0][0].val, dst.sub[0][1].val, dst.sub[1][0].val, dst.sub[1][1].val
-				);
-			}
-		}
-
 	};
 
+	template<
+		usize THREADS_PER_BLOCK,
+		usize HEIGHT, usize WIDTH,
+		typename T, usize M, usize N,
+		usize GN
+	>
+	requires(
+		WIDTH <= GN && WIDTH <= N
+		&& HEIGHT <= M
+	)
+	X17_DEVICE void async_load(
+		usize tid,
+		GMatrixDynSize<T, GN> src, usize src_row, usize src_col,
+		SMatrix<T, M, N> dst, usize dst_row, usize dst_col
+	) {
+		// `b8` SMatrix uses the same swizzle, so we can use its loader
+		GMatrixDynSize<u8, 2*GN> b8_src(reinterpret_cast<u8 *>(src._ptr), src._stride_bytes);
+		b8::SMatrix<u8, M, 2*N> b8_dst(dst._ptr);
+		b8::async_load<THREADS_PER_BLOCK, HEIGHT, WIDTH>(
+			tid,
+			b8_src, src_row, src_col,
+			b8_dst, dst_row, 2*dst_col
+		);
+	}
+
+	/// Both `m_idx` and `n_idx` must be multiples of 16.
+	template<typename T, usize M, usize N>
+	X17_DEVICE void load_fragment(
+		SMatrix<T, M, N> src, usize m_idx, usize n_idx,
+		Fragment_16x16<T> &dst
+	) {
+		using Src = SMatrix<T, M, N>;
+		if constexpr (N > 0) {
+			usize tid = threadIdx.x;
+			usize row = m_idx + (tid & 15);
+			usize swizzle = ((threadIdx.x & 7) << 4) ^ (threadIdx.x & 16);
+			usize byte_col = n_idx * sizeof(T);
+			u32 addr = src._ptr + (row * Src::ROW_BYTES) + (byte_col ^ swizzle);
+
+			sm80::ldmatrix_8x8xu16_x4(
+				addr,
+				dst.sub[0][0].val, dst.sub[1][0].val, dst.sub[0][1].val, dst.sub[1][1].val
+			);
+		}
+	}
+
+	/// `m_idx` must be a multiple of 16 and `n_idx` must be a multiple of 8.
+	template<typename T, usize M, usize N>
+	X17_DEVICE void load_fragment(
+		SMatrix<T, M, N> src, usize m_idx, usize n_idx,
+		Fragment_16x8<T> &dst
+	) {
+		using Src = SMatrix<T, M, N>;
+		if constexpr (N > 0) {
+			usize tid = threadIdx.x;
+			usize row = m_idx + (tid & 15);
+			usize swizzle = ((threadIdx.x & 7) << 4) ^ (threadIdx.x & 16);
+			usize byte_col = n_idx * sizeof(T);
+			u32 addr = src._ptr + (row * Src::ROW_BYTES) + (byte_col ^ swizzle);
+
+			sm80::ldmatrix_8x8xu16_x2(
+				addr,
+				dst.sub[0].val, dst.sub[1].val
+			);
+		}
+	}
+
+	/// Loads a 16x16 tile from SMEM, transposed, into MMA registers.
+	/// Uses ldmatrix.trans to transpose each 8x8 sub-tile during load,
+	/// plus swaps off-diagonal destinations for a full 16x16 transpose.
+	template<typename T, usize M, usize N>
+	X17_DEVICE void load_fragment_trans(
+		SMatrix<T, M, N> src, usize m_idx, usize n_idx,
+		Fragment_16x16<T> &dst
+	) {
+		using Src = SMatrix<T, M, N>;
+		if constexpr (N > 0) {
+			usize tid = threadIdx.x;
+			usize row = m_idx + (tid & 15);
+			usize swizzle = ((threadIdx.x & 7) << 4) ^ (threadIdx.x & 16);
+			usize byte_col = n_idx * sizeof(T);
+			u32 addr = src._ptr + (row * Src::ROW_BYTES) + (byte_col ^ swizzle);
+
+			sm80::ldmatrix_t_8x8xu16_x4(
+				addr,
+				dst.sub[0][0].val, dst.sub[0][1].val, dst.sub[1][0].val, dst.sub[1][1].val
+			);
+		}
+	}
 }

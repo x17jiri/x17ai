@@ -44,6 +44,7 @@ def create_inputs() -> None:
 
 	attn_q_weights = new_randn(N_HEADS*HEAD_DIM, MODEL_DIM, generator=generator)
 	attn_kv_weights = new_randn(2*N_HEADS*HEAD_DIM, MODEL_DIM, generator=generator)
+	attn_y_weights = new_randn(2*MODEL_DIM, ATTN_WIDTH, generator=generator)
 	ffn_f_weights = new_randn(2*F_WIDTH, MODEL_DIM, generator=generator)
 	ffn_y_weights = new_randn(2*MODEL_DIM, F_WIDTH, generator=generator)
 
@@ -62,6 +63,8 @@ def create_inputs() -> None:
 	store_tensor(attn_q_weights, "attn_q_weights_i8.bin")
 	store_tensor(attn_kv_weights, "attn_kv_weights.bin", expected_variance=1.0)
 	store_tensor(attn_kv_weights, "attn_kv_weights_i8.bin")
+	store_tensor(attn_y_weights, "attn_y_weights.bin", expected_variance=1.0)
+	store_tensor(attn_y_weights, "attn_y_weights_i8.bin")
 	store_tensor(ffn_f_weights, "ffn_f_weights.bin", expected_variance=1.0)
 	store_tensor(ffn_f_weights, "ffn_f_weights_i8.bin")
 	store_tensor(ffn_y_weights, "ffn_y_weights.bin", expected_variance=1.0)
@@ -243,6 +246,7 @@ def run_attn() -> None:
 	k_norm_scales = load_tensor("k_norm_scales.bin", 1, HEAD_DIM * N_HEADS)
 	q_weights = load_tensor("attn_q_weights_i8.bin", N_HEADS*HEAD_DIM, MODEL_DIM)
 	kv_weights = load_tensor("attn_kv_weights_i8.bin", 2*N_HEADS*HEAD_DIM, MODEL_DIM)
+	y_weights = load_tensor("attn_y_weights_i8.bin", 2*MODEL_DIM, ATTN_WIDTH)
 
 	scale = torch.rsqrt(torch.tensor(float(MODEL_DIM)))
 	q = torch.matmul(x, q_weights.transpose(0, 1)) * scale
@@ -268,6 +272,14 @@ def run_attn() -> None:
 	RUN_ATTN = True
 	if RUN_ATTN:
 		attn_out, attn_maxes, attn_maxes_i32 = attn(q_i8, k_i8, v_i8, sinks_k, sinks_v, attn_temperature)
+		attn_out *= V_SCALE_FIX
+		attn_out_flat = attn_out.reshape(N_INPUTS, ATTN_WIDTH)
+		attn_out_i8 = quantize(attn_out_flat)
+		attn_y_pregate = (
+			torch.matmul(attn_out_i8, y_weights.transpose(0, 1))
+			* torch.rsqrt(torch.tensor(float(ATTN_WIDTH)))
+		)
+		attn_y = gated_residual(x, attn_y_pregate)
 
 	store_tensor(q, "q.bin", expected_variance=1.0)
 	store_tensor(q_i8, "q_i8.bin")
@@ -281,7 +293,11 @@ def run_attn() -> None:
 		store_tensor(attn_maxes.transpose(0, 1), "attn_maxes_f32.bin")
 		store_i32_tensor(attn_maxes_i32.transpose(0, 1), "attn_maxes_i32.bin")
 		store_tensor(attn_out, "attn_out.bin", expected_variance=1.0)
-		store_tensor(attn_out, "attn_out_i8.bin")
+		store_tensor(attn_out_i8, "attn_out_i8.bin")
+		store_tensor(attn_y_pregate, "attn_y_pregate.bin", expected_variance=1.0)
+		store_tensor(attn_y_pregate, "attn_y_pregate_i8.bin")
+		store_tensor(attn_y, "attn_y.bin")
+		store_tensor(attn_y, "attn_y_i8.bin")
 
 #---------------------------------------------------------------------------------------------------
 

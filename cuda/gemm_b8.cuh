@@ -8,13 +8,9 @@
 namespace b8 {
 	template<
 		typename T,
-		const usize _GN,
-		const usize _M, const usize _K,
-		const usize _FAN_IN = _GN,
-		const usize _STEP = 0,
-		const usize _BLOCK = 0,
-		const bool _MODULO = false,
-		const usize _GMEM_PRELOAD = 2
+		const usize _GN, // number of columns of the input matrix in GMEM
+		const usize _M, const usize _K, // size of preload tile
+		const usize _GMEM_PRELOAD = 2 // number of preload tiles
 	>
 	requires(sizeof(T) == 1)
 	struct MatrixLoader {
@@ -23,20 +19,11 @@ namespace b8 {
 		static constexpr usize GN = _GN;
 		static constexpr usize M = _M;
 		static constexpr usize K = _K;
-		static constexpr usize FAN_IN = _FAN_IN;
-		static constexpr usize STEP = _STEP;
-		static constexpr usize BLOCK = _BLOCK;
-		static constexpr bool MODULO = _MODULO;
 		static constexpr usize GMEM_PRELOAD = _GMEM_PRELOAD;
 
-		static_assert(FAN_IN <= GN);
 		static_assert(GN % K == 0);
 		static_assert(M % 32 == 0);
 		static_assert(K % 32 == 0);
-		static_assert(FAN_IN % 32 == 0);
-		static_assert(STEP == 0 || (GN % STEP == 0));
-		static_assert(STEP == 0 || (BLOCK > 0));
-		static_assert(STEP == 0 || (BLOCK % M == 0));
 
 		static constexpr usize SMEM_BYTES = M * K * GMEM_PRELOAD * sizeof(T);
 
@@ -48,7 +35,7 @@ namespace b8 {
 		SPreload sPreload;
 
 		X17_DEVICE usize m_rows() const { return _m_rows; }
-		X17_DEVICE usize n_cols() const { return FAN_IN; }
+		X17_DEVICE usize n_cols() const { return GN; }
 
 		X17_DEVICE MatrixLoader(T *gmem_addr, usize m_rows):
 			_m_rows(m_rows),
@@ -63,23 +50,18 @@ namespace b8 {
 
 		/// `async_load` a tile with size [M, K] at position [m, k] into SMEM.
 		template<const usize THREADS_PER_BLOCK>
-		X17_DEVICE void async_load(usize step, usize m, usize k, usize other_n) {
-			usize k_shift = 0;
-			if constexpr (BLOCK > 0) {
-				k_shift = (other_n / BLOCK) * STEP;
-			}
-			static_assert(MODULO == false, "TODO - b8::async_load() already has template param for this. Just need to pass it");
+		X17_DEVICE void async_load(usize step, usize m, usize k) {
 			b8::async_load<THREADS_PER_BLOCK, M, K>(
 				threadIdx.x,
-				gInput, m, k + k_shift,
+				gInput, m, k,
 				sPreload, M * (step % GMEM_PRELOAD), 0
 			);
 		}
 
-		/// Load a 32x32 fragment at tile coordinates [m, k] from the SMEM ring buffer.
+		/// Load a fragment at tile coordinates [m, k] from the SMEM ring buffer.
 		X17_DEVICE void load_fragment(usize step, usize m, usize k, Fragment_32x32<T> &frag) {
 			usize first_row = M * (step % GMEM_PRELOAD);
-			load_tile(sPreload, first_row + 32*m, 32*k, frag);
+			b8::load_fragment(sPreload, first_row + 32*m, 32*k, frag);
 		}
 	};
 
@@ -129,7 +111,7 @@ namespace b8 {
 		/// `step` may be a global K-step; the shared-memory ring slot is selected
 		/// modulo `GMEM_PRELOAD`.
 		template<const usize THREADS_PER_BLOCK>
-		X17_DEVICE void async_load(usize step, usize m, usize k, usize other_n) {
+		X17_DEVICE void async_load(usize step, usize m, usize k) {
 			async_load<THREADS_PER_BLOCK, M, K>(
 				threadIdx.x,
 				gInput, M * m, K * k,
@@ -140,13 +122,13 @@ namespace b8 {
 		/// Load a 32x32 fragment at tile coordinates [m, k] from the SMEM ring buffer.
 		X17_DEVICE void load_fragment(usize step, usize m, usize k, Fragment_32x32<T> &frag) {
 			usize first_row = M * (step % GMEM_PRELOAD);
-			load_tile(sPreload, first_row + 32*m, 32*k, frag);
+			b8::load_fragment(sPreload, first_row + 32*m, 32*k, frag);
 		}
 
 		/// Load a transposed 32x32 fragment at tile coordinates [m, k] from the SMEM ring buffer.
 		X17_DEVICE void load_fragment_trans(usize step, usize m, usize k, Fragment_32x32<T> &frag) {
 			usize first_row = M * (step % GMEM_PRELOAD);
-			load_tile_pretrans(sPreload, first_row + 32*m, 32*k, frag);
+			b8::load_fragment_pretrans(sPreload, first_row + 32*m, 32*k, frag);
 			frag.finish_trans_load_();
 		}
 	};
@@ -176,8 +158,8 @@ namespace b8 {
 		}
 
 		template<const usize THREADS_PER_BLOCK>
-		X17_DEVICE void async_load(usize step, usize m, usize k, usize other_n) {
-			loader.template async_load<THREADS_PER_BLOCK>(step, k, m, other_n);
+		X17_DEVICE void async_load(usize step, usize m, usize k) {
+			loader.template async_load<THREADS_PER_BLOCK>(step, k, m);
 		}
 
 		X17_DEVICE void load_fragment(usize step, usize m, usize k, Fragment_32x32<Elem> &frag) {
@@ -221,9 +203,9 @@ namespace b8 {
 			usize row, usize col,
 			Fragment_32x32<T> (&acc)[M_TILES][N_TILES]
 		) {
-			GMatrix<T, 32 * M_TILES, 32 * N_TILES> C(gC, c_stride);
+			GMatrix<T, 32*M_TILES, 32*N_TILES> C(gC, c_stride);
 			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-				store(acc[mi], C, row + 32 * mi, col);
+				store(acc[mi], C, row + 32*mi, col);
 			}
 		}
 	};
@@ -491,7 +473,7 @@ namespace b8 {
 
 			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
 				X17_UNROLL for (usize no = 0; no < N_TILES / 2; ++no) {
-					load_tile(sResidual, local_row + 32 * mi, local_col + 32 * no, residual[mi][no]);
+					b8::load_fragment(sResidual, local_row + 32 * mi, local_col + 32 * no, residual[mi][no]);
 				}
 			}
 
@@ -649,8 +631,8 @@ namespace b8 {
 
 			X17_UNROLL for (usize p = 0; p < GMEM_PRELOAD; ++p) {
 				if (p < K_ITERS) {
-					A.template async_load<THREADS_PER_BLOCK>(p, M_PER_BLOCK*block_m, K_STEP*p, N_PER_BLOCK*block_n);
-					B.template async_load<THREADS_PER_BLOCK>(p, K_STEP*p, N_PER_BLOCK*block_n, M_PER_BLOCK*block_m);
+					A.template async_load<THREADS_PER_BLOCK>(p, M_PER_BLOCK*block_m, K_STEP*p);
+					B.template async_load<THREADS_PER_BLOCK>(p, K_STEP*p, N_PER_BLOCK*block_n);
 				}
 				async_load_commit();
 			}
@@ -685,8 +667,8 @@ namespace b8 {
 
 					usize p = k_step + GMEM_PRELOAD;
 					if (p < K_ITERS) {
-						A.template async_load<THREADS_PER_BLOCK>(p, M_PER_BLOCK*block_m, K_STEP*p, N_PER_BLOCK*block_n);
-						B.template async_load<THREADS_PER_BLOCK>(p, K_STEP*p, N_PER_BLOCK*block_n, M_PER_BLOCK*block_m);
+						A.template async_load<THREADS_PER_BLOCK>(p, M_PER_BLOCK*block_m, K_STEP*p);
+						B.template async_load<THREADS_PER_BLOCK>(p, K_STEP*p, N_PER_BLOCK*block_n);
 					} else if (k_step + 1 >= K_ITERS) {
 						if constexpr (Writer::SMEM_BYTES > 0) {
 							C.template async_load<THREADS_PER_BLOCK>(output_row, output_col);

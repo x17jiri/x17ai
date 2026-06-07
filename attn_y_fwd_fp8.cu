@@ -1,4 +1,4 @@
-#include "cuda/gemm.cuh"
+#include "cuda/gemm_b16.cuh"
 
 #include "block.config.hpp"
 #include "utils2.cuh"
@@ -9,23 +9,29 @@
 using namespace config;
 
 namespace OAttnFwd {
-	using WeightLoader =
-		MatrixLoader<
-			VG_SEGMENT_SIZE,
-			128, 64
-		>;
-
 	using InputLoader =
-		MatrixTransLoader<
-			MatrixLoader<
-				VG_SEGMENT_SIZE,
-				64, 64
+		b16::MatrixTransLoader<
+			b16::MatrixLoader<
+				bf16,
+				ATTN_WIDTH,
+				64, 128
 			>
 		>;
 
-	using Writer = MatrixWriter<D_MODEL>;
+	using WeightLoader =
+		b16::MatrixLoader<
+			bf16,
+			ATTN_WIDTH,
+			64, 64
+		>;
 
-	using Kernel = Gemm<WeightLoader, InputLoader, Writer>;
+	using Writer = b16::Bf16MatrixWriter<
+		MODEL_DIM,
+		InputLoader::M,
+		WeightLoader::K
+	>;
+
+	using Kernel = b16::Gemm<InputLoader, WeightLoader, Writer>;
 
 	X17_KERNEL(Kernel::THREADS_PER_BLOCK)
 	void kernel(
@@ -33,8 +39,8 @@ namespace OAttnFwd {
 		bf16 *inp, usize n_inputs,
 		bf16 *out
 	) {
-		auto a = WeightLoader(w, D_MODEL);
-		auto b = InputLoader(inp, n_inputs);
+		auto a = InputLoader(inp, n_inputs);
+		auto b = WeightLoader(w, MODEL_DIM);
 		auto o = Writer(out);
 		Kernel().run(a, b, o);
 	}
@@ -52,18 +58,18 @@ int main(int argc, char *argv[]) {
 		printf("Expected n_inputs %% %u == 0\n", Kernel::N_PER_BLOCK);
 		return 1;
 	}
-	if (D_MODEL % Kernel::M_PER_BLOCK != 0) {
+	if (MODEL_DIM % Kernel::M_PER_BLOCK != 0) {
 		printf("Expected d_model %% %u == 0\n", Kernel::M_PER_BLOCK);
 		return 1;
 	}
 
-	std::vector<bf16> h_weights = load_tensor(torch_tensor_path("w_attn.bin"), D_MODEL, VG_SEGMENT_SIZE);
-	std::vector<bf16> h_attn_out = load_tensor(tensor_path(cli.input_dir, "attn_out.bin"), seq_len, VG_SEGMENT_SIZE);
+	std::vector<bf16> h_weights = load_tensor(torch_tensor_path("attn_y_weights.bin"), MODEL_DIM, ATTN_WIDTH);
+	std::vector<bf16> h_attn_out = load_tensor(tensor_path(cli.input_dir, "attn_out.bin"), seq_len, ATTN_WIDTH);
 	if (h_weights.empty() || h_attn_out.empty()) {
 		return 1;
 	}
 
-	std::vector<bf16> h_out(seq_len * D_MODEL);
+	std::vector<bf16> h_out(seq_len * MODEL_DIM);
 
 	bf16 *d_weights = nullptr;
 	bf16 *d_attn_out = nullptr;
@@ -79,7 +85,7 @@ int main(int argc, char *argv[]) {
 	cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, Kernel::SMEM_BYTES);
 	cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
 
-	dim3 grid(D_MODEL / Kernel::M_PER_BLOCK, seq_len / Kernel::N_PER_BLOCK);
+	dim3 grid(MODEL_DIM / Kernel::M_PER_BLOCK, seq_len / Kernel::N_PER_BLOCK);
 
 	int warmup = 50;
 	for (int i = 0; i < warmup; ++i) {
@@ -126,13 +132,13 @@ int main(int argc, char *argv[]) {
 
 	float median_ms = times_ms[num_runs / 2];
 	float min_ms = times_ms[0];
-	double tflops = 2.0 * D_MODEL * VG_SEGMENT_SIZE * seq_len / (median_ms * 1e-3) / 1e12;
+	double tflops = 2.0 * MODEL_DIM * ATTN_WIDTH * seq_len / (median_ms * 1e-3) / 1e12;
 	printf("Kernel time over %d runs: median %.3f ms  min %.3f ms\n", num_runs, median_ms, min_ms);
 	printf("TFLOPS: %.2f\n", tflops);
 
 	cudaMemcpy(h_out.data(), d_out, h_out.size() * sizeof(bf16), cudaMemcpyDeviceToHost);
 	std::filesystem::create_directories("tmp/block_cuda");
-	store_tensor("tmp/block_cuda/o_attn.bin", h_out, seq_len, D_MODEL);
+	store_tensor("tmp/block_cuda/o_attn.bin", h_out, seq_len, MODEL_DIM);
 
 	printf("Used SMEM per kernel: %u\n", Kernel::SMEM_BYTES);
 

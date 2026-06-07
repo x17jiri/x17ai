@@ -7,9 +7,7 @@
 	"F_WIDTH": 2048,
 	"WINDOW_SIZE": 0,
 	"L2_NORM_EPS": 1e-30,
-	"V_SCALE_FIX": 1.6,
+	"V_SCALE_FIX": 1.0,
 
-	"QK_SEGMENT_SIZE": { "type": "usize", "expr": "N_HEADS * HEAD_DIM" },
-	"VG_SEGMENT_SIZE": { "type": "usize", "expr": "N_HEADS * HEAD_DIM" },
-	"QKVG_ROWS":       { "type": "usize", "expr": "2*QK_SEGMENT_SIZE + 2*VG_SEGMENT_SIZE" },
+	"ATTN_WIDTH": { "type": "usize", "expr": "N_HEADS*HEAD_DIM" },
 }

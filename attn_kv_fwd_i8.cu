@@ -10,7 +10,7 @@
 using namespace config;
 
 namespace Attn_kv_fwd {
-	static constexpr usize KV_PROJ_OUTPUTS = QK_SEGMENT_SIZE + VG_SEGMENT_SIZE;
+	static constexpr usize KV_PROJ_OUTPUTS = 2 * ATTN_WIDTH;
 
 	using InputLoader =
 		b8::MatrixLoader<
@@ -78,7 +78,7 @@ int main(int argc, char *argv[]) {
 	std::vector<bf16> h_k_norm_scales = load_tensor(
 		torch_tensor_path("k_norm_scales.bin"),
 		1,
-		QK_SEGMENT_SIZE
+		ATTN_WIDTH
 	);
 	std::vector<b8::FixedI8> h_inputs = load_i8_tensor(
 		tensor_path(cli.input_dir, "x_i8.bin"),

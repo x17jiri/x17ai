@@ -310,7 +310,7 @@ namespace b8 {
 
 	/// Both `m_idx` and `n_idx` must be multiples of 32
 	template<typename T, const usize M, const usize N>
-	X17_DEVICE void load_tile(
+	X17_DEVICE void load_fragment(
 		SMatrixEvenOdd<T, M, N> src, usize m_idx, usize n_idx,
 		Fragment_32x32<T> &dst
 	) {
@@ -343,7 +343,7 @@ namespace b8 {
 
 	/// `m_idx` must be a multiple of 16 and `n_idx` must be a multiple of 32
 	template<typename T, const usize M, const usize N>
-	X17_DEVICE void load_tile(
+	X17_DEVICE void load_fragment(
 		SMatrixEvenOdd<T, M, N> src, usize m_idx, usize n_idx,
 		Fragment_16x32<T> &dst
 	) {
@@ -369,7 +369,7 @@ namespace b8 {
 	/// Each 16x16 tile is pre-transposed. To finish the transpose,
 	/// you still need to call `dst.h16x16[*].finish_trans_load_()`
 	template<typename T, const usize M, const usize N>
-	X17_DEVICE void load_tile_pretrans(
+	X17_DEVICE void load_fragment_pretrans(
 		SMatrixEvenOdd<T, M, N> src, usize m_idx, usize n_idx,
 		Fragment_16x32<T> &dst
 	) {
@@ -428,7 +428,7 @@ namespace b8 {
 
 	/// Copy from a sub-region of a GMEM matrix into a sub-region of this SMEM matrix.
 	/// Data is placed starting at (dst_row, dst_col) within this SMEM matrix.
-	/// dst_row and dst_col must be multiples of 32
+	/// dst_row must be a multiple of 8, dst_col must be a multiple of 32
 	template<
 		const usize THREADS_PER_BLOCK,
 		const usize HEIGHT, const usize WIDTH,
@@ -504,7 +504,7 @@ namespace b8 {
 
 	/// `m_idx` must be a multiple of 16 and `n_idx` must be a multiple of 32
 	template<typename T, const usize M, const usize N>
-	X17_DEVICE void load_tile(
+	X17_DEVICE void load_fragment(
 		SMatrix<T, M, N> src, usize m_idx, usize n_idx,
 		Fragment_16x32<T> &dst
 	) {
@@ -526,7 +526,7 @@ namespace b8 {
 
 	/// Both `m_idx` and `n_idx` must be multiples of 32
 	template<typename T, const usize M, const usize N>
-	X17_DEVICE void load_tile(
+	X17_DEVICE void load_fragment(
 		SMatrix<T, M, N> src, usize m_idx, usize n_idx,
 		Fragment_32x32<T> &dst
 	) {

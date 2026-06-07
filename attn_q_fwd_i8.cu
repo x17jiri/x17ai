@@ -10,7 +10,7 @@
 using namespace config;
 
 namespace Attn_q_fwd {
-	static constexpr usize Q_PROJ_OUTPUTS = QK_SEGMENT_SIZE;
+	static constexpr usize Q_PROJ_OUTPUTS = ATTN_WIDTH;
 
 	using InputLoader =
 		b8::MatrixLoader<

@@ -464,7 +464,7 @@ struct AttnForward {
 		b8::Fragment_16x32<FixedI8> rQ[HEADS_PER_KERNEL][HEAD_TILES];
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 			X17_UNROLL for (usize i = 0; i < HEAD_TILES; i++) {
-				load_tile(sQ, q_warp_idx * Q_PER_WARP, h * HEAD_DIM + i * 32, rQ[h][i]);
+				load_fragment(sQ, q_warp_idx * Q_PER_WARP, h * HEAD_DIM + i * 32, rQ[h][i]);
 			}
 		}
 		// Load first KV tile from SMEM to registers
@@ -476,7 +476,7 @@ struct AttnForward {
 		b8::Fragment_16x32<FixedI8> rKV[HEADS_PER_KERNEL][HEAD_TILES];
 		X17_UNROLL for (usize h = 0; h < HEADS_PER_KERNEL; h++) {
 			X17_UNROLL for (usize i = 0; i < HEAD_TILES; i++) {
-				load_tile(sKV, 0, 2 * h * HEAD_DIM + i * 32, rKV[h][i]);
+				load_fragment(sKV, 0, 2 * h * HEAD_DIM + i * 32, rKV[h][i]);
 			}
 		}
 
@@ -529,7 +529,7 @@ struct AttnForward {
 				zero_(rS_i32);
 				X17_UNROLL for (usize i = 0; i < HEAD_TILES; i++) {
 					mma_a_bt(rQ[h][i], rKV[h][i], rS_i32);
-					load_tile_pretrans(sKV, 0, ((2 * h + 1) * HEAD_TILES + i) * 32, rKV[h][i]);
+					load_fragment_pretrans(sKV, 0, ((2 * h + 1) * HEAD_TILES + i) * 32, rKV[h][i]);
 				}
 				fix_even_odd_columns_(rS_i32);
 				cast(rS_i32, rS_f32[h]);
@@ -604,7 +604,7 @@ struct AttnForward {
 
 						acc_(rO_f32[h][i].h16x16[j], t2);
 					}
-					load_tile(sKV, 0, ((2 * h) * HEAD_TILES + i) * 32, rKV[h][i]);
+					load_fragment(sKV, 0, ((2 * h) * HEAD_TILES + i) * 32, rKV[h][i]);
 				}
 			}
 		}
