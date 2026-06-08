@@ -196,6 +196,25 @@ void store_i8_tensor(
 	printf("Wrote output to %s\n", filename.c_str());
 }
 
+void store_f8_tensor(
+	std::string const &filename,
+	std::vector<u8> const &data,
+	[[maybe_unused]] usize rows, [[maybe_unused]] usize cols
+) {
+	std::ofstream out(filename, std::ios::binary);
+	if (!out) {
+		printf("Failed to open %s for writing\n", filename.c_str());
+		return;
+	}
+	if (!out.write(
+		reinterpret_cast<const char *>(data.data()),
+		static_cast<std::streamsize>(data.size() * sizeof(u8))
+	)) {
+		printf("Failed to write data to %s\n", filename.c_str());
+	}
+	printf("Wrote output to %s\n", filename.c_str());
+}
+
 void store_f32_tensor(
 	std::string const &filename,
 	std::vector<f32> const &data,

@@ -27,7 +27,7 @@ namespace Ffn_f_fwd {
 			>
 		>;
 
-	using Writer = b8::FixedI8MatrixGeGluWriter<
+	using Writer = b8::E4m3MatrixGeGluWriter<
 		F_WIDTH,
 		InputLoader::M,
 		WeightLoader::K,
@@ -44,7 +44,7 @@ namespace Ffn_f_fwd {
 	void kernel(
 		b8::FixedI8 *w,
 		b8::FixedI8 *inp, usize n_inputs,
-		b8::FixedI8 *out
+		b8::E4m3 *out
 	) {
 		auto a = InputLoader(inp, n_inputs);
 		auto b = WeightLoader(w, F_PROJ_OUTPUTS);
@@ -86,15 +86,15 @@ int main(int argc, char *argv[]) {
 		return 1;
 	}
 
-	std::vector<b8::FixedI8> h_out(seq_len * F_WIDTH);
+	std::vector<b8::E4m3> h_out(seq_len * F_WIDTH);
 
 	b8::FixedI8 *d_weights = nullptr;
 	b8::FixedI8 *d_inputs = nullptr;
-	b8::FixedI8 *d_out = nullptr;
+	b8::E4m3 *d_out = nullptr;
 
 	cudaMalloc(&d_weights, h_weights.size() * sizeof(b8::FixedI8));
 	cudaMalloc(&d_inputs, h_inputs.size() * sizeof(b8::FixedI8));
-	cudaMalloc(&d_out, h_out.size() * sizeof(b8::FixedI8));
+	cudaMalloc(&d_out, h_out.size() * sizeof(b8::E4m3));
 
 	cudaMemcpy(d_weights, h_weights.data(), h_weights.size() * sizeof(b8::FixedI8), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_inputs, h_inputs.data(), h_inputs.size() * sizeof(b8::FixedI8), cudaMemcpyHostToDevice);
@@ -159,9 +159,9 @@ int main(int argc, char *argv[]) {
 	printf("Kernel time over %d runs: median %.3f ms  min %.3f ms\n", num_runs, median_ms, min_ms);
 	printf("TFLOPS: %.2f\n", tflops);
 
-	cudaMemcpy(h_out.data(), d_out, h_out.size() * sizeof(b8::FixedI8), cudaMemcpyDeviceToHost);
+	cudaMemcpy(h_out.data(), d_out, h_out.size() * sizeof(b8::E4m3), cudaMemcpyDeviceToHost);
 	std::filesystem::create_directories("tmp/block_cuda");
-	store_i8_tensor("tmp/block_cuda/ffn_f_i8.bin", h_out, seq_len, F_WIDTH);
+	store_f8_tensor("tmp/block_cuda/ffn_f_f8.bin", h_out, seq_len, F_WIDTH);
 
 	printf("Used SMEM per kernel: %u\n", Kernel::SMEM_BYTES);
 

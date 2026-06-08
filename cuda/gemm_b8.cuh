@@ -300,14 +300,14 @@ namespace b8 {
 	};
 
 	template<const usize GN, const usize M_PER_BLOCK, const usize N_PER_BLOCK, const usize FAN_IN>
-	struct FixedI8MatrixGeGluWriter: MatrixWriter<FixedI8, GN, M_PER_BLOCK, N_PER_BLOCK> {
-		using Base = MatrixWriter<FixedI8, GN, M_PER_BLOCK, N_PER_BLOCK>;
+	struct E4m3MatrixGeGluWriter: MatrixWriter<E4m3, GN, M_PER_BLOCK, N_PER_BLOCK> {
+		using Base = MatrixWriter<E4m3, GN, M_PER_BLOCK, N_PER_BLOCK>;
 
-		X17_DEVICE FixedI8MatrixGeGluWriter(FixedI8 *gC):
+		X17_DEVICE E4m3MatrixGeGluWriter(E4m3 *gC):
 			Base(gC)
 		{}
 
-		X17_DEVICE FixedI8 geglu(b32::Fragment_8x8<i32> frag) {
+		X17_DEVICE E4m3 geglu(b32::Fragment_8x8<i32> frag) {
 			// `frag.val0` and `frag.val1` are raw accumulators of `sum(FixedI8 * FixedI8)`.
 			// Each `FixedI8` is scaled by FIXED_I8_SCALE, so `FixedI8 * FixedI8` is scaled
 			// by `FIXED_I8_SCALE^2`. We need to divide the inputs by this value.
@@ -318,15 +318,13 @@ namespace b8 {
 			//                 = `1 / sqrt(FAN_IN * FIXED_I8_SCALE^4)`
 			// - `OUT_SCALE_2` is logically the scale of the `lin` input, but we apply it to the
 			//   GELU output instead. That lets GELU fold the multiply into its constants, so the
-			//   scale is effectively free at runtime. This scale factor
-			//   is the same as `INP_SCALE_2` followed by a multiplication by `FIXED_I8_SCALE`
-			//   which converts the final value into `FixedI8` again.
+			//   scale is effectively free at runtime.
 			constexpr f64 FIXED_I8_SCALE_2 = FIXED_I8_SCALE * FIXED_I8_SCALE;
 			constexpr f64 INP_SCALE_2 = 1.0 / (FAN_IN * FIXED_I8_SCALE_2 * FIXED_I8_SCALE_2);
-			constexpr f64 OUT_SCALE_2 = 1.0 / (FAN_IN * FIXED_I8_SCALE_2);
+			constexpr f64 OUT_SCALE_2 = INP_SCALE_2;
 			f32 gate = math::fast::gelu<INP_SCALE_2, OUT_SCALE_2, 1.0>(f32(frag.get0())).val;
 			f32 lin = f32(frag.get1());
-			return f32_to_fixedi8(gate * lin);
+			return f32_to_e4m3(gate * lin);
 		}
 
 		template<const usize M_TILES, const usize N_TILES>
@@ -338,12 +336,12 @@ namespace b8 {
 
 			union {
 				struct {
-					FixedI8 a, b, c, d;
+					E4m3 a, b, c, d;
 				} packed;
 				u32 value;
 			} u1, u2, u3, u4, v1, v2, v3, v4;
 
-			Fragment_32x32<FixedI8> t[M_TILES][N_TILES/2];
+			Fragment_32x32<E4m3> t[M_TILES][N_TILES/2];
 			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
 				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
 					u1.packed.a = geglu(acc[mi][ni].v16x32[0].h16x16[0].v8x16[0].h8x8[0]);

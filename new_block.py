@@ -261,7 +261,7 @@ def run_attn() -> None:
 	v_i8 = quantize(v)
 	kv_i8 = torch.cat((k_i8, v_i8), dim=2)
 
-	RUN_ATTN = True
+	RUN_ATTN = False
 	if RUN_ATTN:
 		attn_out, attn_maxes, attn_maxes_i32 = attn(q_i8, k_i8, v_i8, sinks_k, sinks_v, attn_temperature)
 		attn_out_flat = attn_out.reshape(N_INPUTS, ATTN_WIDTH)
@@ -277,7 +277,7 @@ def run_attn() -> None:
 	store_tensor(k, "k_f32.bin", expected_variance=1.0)
 	store_tensor(k_i8, "k_i8.bin")
 	store_tensor(k_rrms.squeeze(-1), "k_rrms_f32.bin")
-	store_tensor(v, "v_f21.bin", expected_variance=1.0)
+	store_tensor(v, "v_f32.bin", expected_variance=1.0)
 	store_tensor(v_i8, "v_i8.bin")
 	store_tensor(kv, "kv_f32.bin", expected_variance=1.0)
 	store_tensor(kv_i8, "kv_i8.bin")

@@ -36,8 +36,42 @@ def load_f32_bits(path: str, shape: tuple[int, ...] | None = None) -> torch.Tens
 	return data
 
 
+def f8_e4m3fn_lut() -> torch.Tensor:
+	values: list[float] = []
+	for code in range(256):
+		sign = -1.0 if (code & 0x80) else 1.0
+		exp = (code >> 3) & 0x0F
+		mant = code & 0x07
+		if exp == 0 and mant == 0:
+			values.append(math.copysign(0.0, sign))
+		elif exp == 0:
+			values.append(sign * math.ldexp(mant / 8.0, -6))
+		elif exp == 0x0F and mant == 0x07:
+			values.append(math.nan)
+		else:
+			values.append(sign * math.ldexp(1.0 + mant / 8.0, exp - 7))
+	return torch.tensor(values, dtype=torch.float32)
+
+
+def load_f8_bits(path: str, shape: tuple[int, ...] | None = None) -> torch.Tensor:
+	raw = Path(path).read_bytes()
+	data = torch.frombuffer(bytearray(raw), dtype=torch.uint8)
+	if shape is not None:
+		return data.reshape(shape)
+	return data
+
+
+def load_f8(path: str, shape: tuple[int, ...] | None = None) -> torch.Tensor:
+	bits = load_f8_bits(path, shape)
+	return f8_e4m3fn_lut()[bits.to(torch.long)]
+
+
 def infer_dtype_from_paths(*paths: str) -> str:
-	return "f32" if any("_f32" in Path(path).stem for path in paths) else "bf16"
+	if any("_f32" in Path(path).stem for path in paths):
+		return "f32"
+	if any("_f8" in Path(path).stem for path in paths):
+		return "f8"
+	return "bf16"
 
 
 def normalize_bf16_zero_sign(bits: torch.Tensor) -> torch.Tensor:
@@ -57,6 +91,12 @@ def f32_ordered_int(bits: torch.Tensor) -> torch.Tensor:
 	bits_i64 = bits.to(torch.int64) & 0xFFFFFFFF
 	sign = (bits_i64 >> 31) & 1
 	return torch.where(sign == 0, bits_i64 + 0x80000000, 0x80000000 - (bits_i64 & 0x7FFFFFFF))
+
+
+def f8_ordered_int(bits: torch.Tensor) -> torch.Tensor:
+	bits_i32 = bits.to(torch.int32)
+	sign = (bits_i32 >> 7) & 1
+	return torch.where(sign == 0, bits_i32 + 0x80, 0x80 - (bits_i32 & 0x7F))
 
 
 def infer_shape(file_a: str, file_b: str, shape_args: list[int] | None, bytes_per_elem: int) -> tuple[int, ...]:
@@ -339,11 +379,78 @@ def verify_f32(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
 	print_worst_pct_summary(a, b, finite_mask, shape, renorm_scales)
 
 
+def verify_f8(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
+	a_bits = load_f8_bits(file_a, shape)
+	b_bits = load_f8_bits(file_b, shape)
+	a = load_f8(file_a, shape)
+	b = load_f8(file_b, shape)
+
+	finite_mask = torch.isfinite(a) & torch.isfinite(b)
+	diff = (a - b).abs()
+	if finite_mask.any():
+		finite_diff = diff[finite_mask]
+		max_abs_diff = finite_diff.max().item()
+		mean_abs_diff = finite_diff.mean().item()
+		masked_diff = torch.where(finite_mask, diff, torch.full_like(diff, -1.0))
+		flat_idx = int(masked_diff.reshape(-1).argmax().item())
+		worst_ref = a.reshape(-1)[flat_idx].item()
+		worst_other = b.reshape(-1)[flat_idx].item()
+	else:
+		max_abs_diff = math.nan
+		mean_abs_diff = math.nan
+		flat_idx = None
+		worst_ref = math.nan
+		worst_other = math.nan
+
+	a_ord = f8_ordered_int(a_bits)
+	b_ord = f8_ordered_int(b_bits)
+	ulp_diff = (a_ord - b_ord).abs()
+	same_value = (a == b) | (torch.isnan(a) & torch.isnan(b))
+	bit_mismatch = a_bits != b_bits
+	zero_sign_only = bit_mismatch & (a == 0) & (b == 0)
+	raw_exact_match = int((a_bits == b_bits).sum().item())
+	exact_match = int(same_value.sum().item())
+	a_abs = a.abs()
+	b_abs = b.abs()
+	renorm_scales = variance_one_renorm_scales(a, b, finite_mask)
+	pct_strs = max_pct_strs(a_abs, b_abs, finite_mask, renorm_scales)
+	sign_flip_count, largest_sign_flip_mag = sign_flip_summary(a, b)
+	total = a.numel()
+
+	print("\n--- F8 E4M3FN Tensor Compare ---")
+	print(f"A: {file_a}")
+	print(f"B: {file_b}")
+	print(f"Shape: [{', '.join(str(dim) for dim in shape)}]")
+	print(f"Max abs diff:     {max_abs_diff:.6e}")
+	print(f"Mean abs diff:    {mean_abs_diff:.6e}")
+	print(f"Max pct diff:     {', '.join(pct_strs)}")
+	print("  (MIN_MAG after scaling each tensor to variance 1:")
+	print(f"               {PCT_BUCKET_LABELS})")
+	print(f"Exact f8 value match: {exact_match}/{total} ({100.0 * exact_match / total:.2f}%)")
+	print(f"Raw exact bytes:       {raw_exact_match}/{total} ({100.0 * raw_exact_match / total:.2f}%)")
+	print(f"Signed-zero-only mismatches: {int(zero_sign_only.sum().item())}")
+	print(f"Sign-flipped values: {sign_flip_count}, largest magnitude: {largest_sign_flip_mag:.6e}")
+	print_ulp_summary(ulp_diff, total, a, b, shape)
+	print(summarize_nonfinite("A non-finite", a))
+	print(summarize_nonfinite("B non-finite", b))
+	if flat_idx is not None and max_abs_diff > 0.0:
+		worst_ref_bits = int(a_bits.reshape(-1)[flat_idx].item())
+		worst_other_bits = int(b_bits.reshape(-1)[flat_idx].item())
+		print(
+			f"Worst abs mismatch at [{format_index(flat_idx, shape)}]: "
+			f"ref={worst_ref:.6e} (0x{worst_ref_bits:02x}), "
+			f"other={worst_other:.6e} (0x{worst_other_bits:02x})"
+		)
+	print_worst_pct_summary(a, b, finite_mask, shape, renorm_scales)
+
+
 def verify(file_a: str, file_b: str, shape: tuple[int, ...], dtype: str) -> None:
 	if dtype == "bf16":
 		verify_bf16(file_a, file_b, shape)
 	elif dtype == "f32":
 		verify_f32(file_a, file_b, shape)
+	elif dtype == "f8":
+		verify_f8(file_a, file_b, shape)
 	else:
 		raise ValueError(f"Unsupported dtype: {dtype}")
 
@@ -352,12 +459,12 @@ def main() -> None:
 	parser = argparse.ArgumentParser(description="Compare two tensor .bin files")
 	parser.add_argument("file_a", help="Reference tensor .bin file")
 	parser.add_argument("file_b", help="Other tensor .bin file")
-	parser.add_argument("--dtype", choices=["bf16", "f32"], default=None, help="Tensor element type")
+	parser.add_argument("--dtype", choices=["bf16", "f32", "f8"], default=None, help="Tensor element type")
 	parser.add_argument("--shape", type=int, nargs="+", default=None, help="Optional tensor shape")
 	args = parser.parse_args()
 
 	dtype = args.dtype or infer_dtype_from_paths(args.file_a, args.file_b)
-	bytes_per_elem = 2 if dtype == "bf16" else 4
+	bytes_per_elem = {"bf16": 2, "f32": 4, "f8": 1}[dtype]
 	shape = infer_shape(args.file_a, args.file_b, args.shape, bytes_per_elem)
 	verify(args.file_a, args.file_b, shape, dtype)
 
