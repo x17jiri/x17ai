@@ -27,7 +27,7 @@ namespace Attn_y_fwd {
 			>
 		>;
 
-	static constexpr f64 Y_SCALE = math::constexpr_sqrt(math::fast::GELU_VAR_FIX_2 / f64(ATTN_WIDTH));
+	static constexpr f64 Y_SCALE = math::constexpr_inv_sqrt(f64(ATTN_WIDTH));
 	using Writer = b8::FixedI8MatrixResidualWriter<
 		MODEL_DIM,
 		InputLoader::M,

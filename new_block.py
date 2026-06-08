@@ -43,6 +43,7 @@ def create_inputs() -> None:
 	attn_k_weights = attn_kv_weights[:, 0, :, :]
 	attn_v_weights = attn_kv_weights[:, 1, :, :]
 	attn_v_weights *= V_SCALE_FIX
+	sinks_v *= V_SCALE_FIX
 
 	ffn_f_weights = new_randn(2*F_WIDTH, MODEL_DIM, generator=generator)
 	ffn_y_weights = new_randn(2*MODEL_DIM, F_WIDTH, generator=generator)
@@ -132,6 +133,7 @@ def run_ffn() -> None:
 	store_tensor(y_pregate, "ffn_y_pregate.bin", expected_variance=1.0)
 	store_tensor(y_pregate, "ffn_y_pregate_i8.bin")
 	store_tensor(f, "ffn_f.bin", expected_variance=1.0 / GELU_VAR_FIX_2)
+	store_tensor(f, "ffn_f_f8.bin")
 	store_tensor(f, "ffn_f_i8.bin")
 	store_tensor(y, "ffn_y.bin")
 	store_tensor(y, "ffn_y_i8.bin")

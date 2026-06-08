@@ -388,10 +388,10 @@ namespace b8 {
 					v4.packed.c = u3.packed.d;
 					v4.packed.d = u4.packed.d;
 
-					t[mi][ni/2].v16x32[0].h16x16[ni%2].v8x16[0].val = v1.value;
-					t[mi][ni/2].v16x32[0].h16x16[ni%2].v8x16[1].val = v2.value;
-					t[mi][ni/2].v16x32[1].h16x16[ni%2].v8x16[0].val = v3.value;
-					t[mi][ni/2].v16x32[1].h16x16[ni%2].v8x16[1].val = v4.value;
+					t[mi][ni/2].v16x32[0].h16x16[ni%2].v8x16[0].data = v1.value;
+					t[mi][ni/2].v16x32[0].h16x16[ni%2].v8x16[1].data = v2.value;
+					t[mi][ni/2].v16x32[1].h16x16[ni%2].v8x16[0].data = v3.value;
+					t[mi][ni/2].v16x32[1].h16x16[ni%2].v8x16[1].data = v4.value;
 				}
 			}
 
