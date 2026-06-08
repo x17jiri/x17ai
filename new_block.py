@@ -27,7 +27,7 @@ def create_inputs() -> None:
 
 	x = new_randn(N_INPUTS, MODEL_DIM, generator=generator)
 
-	sinks_k = rms_norm(new_randn(N_HEADS, HEAD_DIM, generator=generator))
+	sinks_k, _ = rms_norm(new_randn(N_HEADS, HEAD_DIM, generator=generator))
 	sinks_v = new_randn(N_HEADS, HEAD_DIM, generator=generator)
 
 	attn_temperature = new_ones(N_HEADS, 1)
@@ -56,8 +56,8 @@ def create_inputs() -> None:
 	store_tensor(attn_temperature, "attn_temperature_f32.bin", expected_variance=0.0)
 	store_tensor(attn_q_weights, "attn_q_weights_f32.bin", expected_variance=1.0)
 	store_tensor(attn_q_weights, "attn_q_weights_i8.bin")
-	store_tensor(attn_kv_weights, "attn_k_weights_f32.bin", expected_variance=1.0)
-	store_tensor(attn_kv_weights, "attn_v_weights_f32.bin", expected_variance=V_SCALE_FIX*V_SCALE_FIX)
+	store_tensor(attn_k_weights, "attn_k_weights_f32.bin", expected_variance=1.0)
+	store_tensor(attn_v_weights, "attn_v_weights_f32.bin", expected_variance=V_SCALE_FIX*V_SCALE_FIX)
 	store_tensor(attn_kv_weights, "attn_kv_weights_f32.bin", expected_variance=1.0)
 	store_tensor(attn_kv_weights, "attn_kv_weights_i8.bin")
 	store_tensor(attn_y_weights, "attn_y_weights_f32.bin", expected_variance=1.0)
@@ -67,9 +67,9 @@ def create_inputs() -> None:
 	store_tensor(ffn_y_weights, "ffn_y_weights_f32.bin", expected_variance=1.0)
 	store_tensor(ffn_y_weights, "ffn_y_weights_i8.bin")
 
-def rms_norm(tensor: torch.Tensor, eps: float = L2_NORM_EPS) -> torch.Tensor:
-	mean_sq = torch.mean(tensor * tensor, dim=-1, keepdim=True)
-	return tensor / torch.sqrt(mean_sq + eps)
+def rms_norm(tensor: torch.Tensor, eps: float = L2_NORM_EPS) -> tuple[torch.Tensor, torch.Tensor]:
+	rrms = torch.rsqrt(torch.mean(tensor * tensor, dim=-1, keepdim=True) + eps)
+	return tensor * rrms, rrms
 
 def gelu(x: torch.Tensor) -> torch.Tensor:
 	ck = math.sqrt(2.0 / math.pi)
@@ -248,16 +248,16 @@ def run_attn() -> None:
 	kv = torch.matmul(x, kv_weights.transpose(0, 1)) * scale
 
 	q = q.reshape(N_INPUTS, N_HEADS, HEAD_DIM)
+
 	kv = kv.reshape(N_INPUTS, N_HEADS, 2*HEAD_DIM)
+	k, k_rrms = rms_norm(kv[..., :HEAD_DIM])
+	v = kv[..., HEAD_DIM:]
+	kv = torch.cat((k, v), dim=2)
 
 	q_i8 = quantize(q)
-	kv_i8 = quantize(kv)
-
-	k = kv[..., :HEAD_DIM]
-	v = kv[..., HEAD_DIM:]
-
-	k_i8 = kv_i8[..., :HEAD_DIM]
-	v_i8 = kv_i8[..., HEAD_DIM:]
+	k_i8 = quantize(k)
+	v_i8 = quantize(v)
+	kv_i8 = torch.cat((k_i8, v_i8), dim=2)
 
 	RUN_ATTN = True
 	if RUN_ATTN:
@@ -274,6 +274,7 @@ def run_attn() -> None:
 	store_tensor(q_i8, "q_i8.bin")
 	store_tensor(k, "k_f32.bin", expected_variance=1.0)
 	store_tensor(k_i8, "k_i8.bin")
+	store_tensor(k_rrms.squeeze(-1), "k_rrms_f32.bin")
 	store_tensor(v, "v_f21.bin", expected_variance=1.0)
 	store_tensor(v_i8, "v_i8.bin")
 	store_tensor(kv, "kv_f32.bin", expected_variance=1.0)

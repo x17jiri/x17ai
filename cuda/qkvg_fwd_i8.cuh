@@ -8,6 +8,8 @@ namespace qkvg_helpers {
 	// and stores the result to `out[..][pos .. pos+W_TILES]`
 	template<
 		const f64 SCALE, const bool USE_DYN_SCALE,
+		const bool STORE_RRMS,
+		const usize RRMS_COLS,
 		const usize W_TILES,
 		const usize M_TILES, const usize N_TILES
 	>
@@ -15,7 +17,9 @@ namespace qkvg_helpers {
 		b32::Fragment_32x32<i32> (&acc)[M_TILES][N_TILES],
 		b32::Fragment_32x32<f32> (&out)[M_TILES][N_TILES],
 		usize pos,
-		u32 dyn_scales_ptr
+		u32 dyn_scales_ptr,
+		f32 (&rrms)[4 * M_TILES][RRMS_COLS],
+		usize rrms_col = 0
 	) {
 		bf16 dyn_scales0[4 * N_TILES];
 		bf16 dyn_scales1[4 * N_TILES];
@@ -50,6 +54,16 @@ namespace qkvg_helpers {
 				sum[j] += shuffle_xor_sync(sum[j], 1);
 				sum[j] += shuffle_xor_sync(sum[j], 2);
 				scale[j] = math::fast::rsqrt(sum[j]) * f32(SCALE);
+				if constexpr (STORE_RRMS) {
+					constexpr f64 FIXED_I8_SCALE_2 = f64(b8::FIXED_I8_SCALE) * f64(b8::FIXED_I8_SCALE);
+					constexpr f64 RAW_SUM_TO_REAL_MEAN =
+						1.0 / (f64(W_TILES * 32) * f64(config::MODEL_DIM) * FIXED_I8_SCALE_2 * FIXED_I8_SCALE_2);
+					usize lane = threadIdx.x % WARP_SIZE;
+					if ((lane % 4) == 0) {
+						rrms[4 * mi + j][rrms_col] =
+							math::fast::rsqrt(sum[j] * f32(RAW_SUM_TO_REAL_MEAN) + f32(config::L2_NORM_EPS));
+					}
+				}
 			}
 			X17_UNROLL for (usize ni = pos; ni < pos + W_TILES; ++ni) {
 				auto &out32x32 = out[mi][ni];
@@ -184,6 +198,7 @@ struct QMatrixWriter: b8::FixedI8MatrixWriter<
 		b32::Fragment_32x32<i32> (&acc)[M_TILES][N_TILES]
 	) {
 		b32::Fragment_32x32<f32> t[M_TILES][N_TILES];
+		f32 unused_rrms[4 * M_TILES][1];
 
 		constexpr usize Q_TILES = HEAD_DIM / 32;
 		constexpr usize HEADS = N_TILES / Q_TILES;
@@ -192,11 +207,12 @@ struct QMatrixWriter: b8::FixedI8MatrixWriter<
 		constexpr f64 QK_SCALE = math::constexpr_sqrt(f64(HEAD_DIM)) * f64(b8::FIXED_I8_SCALE);
 		X17_UNROLL for (usize hi = 0; hi < HEADS; ++hi) {
 			u32 norm_scales_col = (col - norm_scale_col0) + (hi * Q_TILES * 32);
-			qkvg_helpers::l2_norm<QK_SCALE, true, Q_TILES>(
+			qkvg_helpers::l2_norm<QK_SCALE, true, false, 1, Q_TILES>(
 				acc,
 				t,
 				hi * Q_TILES,
-				s_norm_scales._ptr + (norm_scales_col * sizeof(bf16))
+				s_norm_scales._ptr + (norm_scales_col * sizeof(bf16)),
+				unused_rrms
 			);
 		}
 
@@ -222,37 +238,19 @@ struct KVMatrixWriter: b8::FixedI8MatrixWriter<
 		N_PER_BLOCK,
 		math::constexpr_inv_sqrt(f64(config::MODEL_DIM))
 	>;
-	using SNormScales = SVector<bf16, N_PER_BLOCK / 2>;
-
 	static_assert(HEAD_DIM % 32 == 0);
 	static_assert(PROJ_OUTPUTS % HEAD_DIM == 0);
 	static_assert(N_PER_BLOCK % (2 * HEAD_DIM) == 0);
-	static constexpr usize SMEM_BYTES = (N_PER_BLOCK / 2) * sizeof(bf16);
 
-	bf16 const *g_k_norm_scales;
-	SNormScales s_k_norm_scales;
-	usize k_norm_scale_col0;
+	f32 *g_rrms_ptr;
 
 	X17_DEVICE KVMatrixWriter(
 		b8::FixedI8 *gC,
-		bf16 const *k_norm_scales
+		f32 *g_rrms_ptr
 	):
 		Base(gC),
-		g_k_norm_scales(k_norm_scales),
-		s_k_norm_scales(),
-		k_norm_scale_col0(0)
+		g_rrms_ptr(g_rrms_ptr)
 	{}
-
-	template<const u32 CAP>
-	X17_DEVICE void alloc_smem(SMemAllocator<CAP> &smem_alloc) {
-		s_k_norm_scales._ptr = smem_alloc.alloc(SMEM_BYTES);
-	}
-
-	template<const usize THREADS_PER_BLOCK>
-	X17_DEVICE void async_load(usize row, usize col) {
-		k_norm_scale_col0 = ((col / N_PER_BLOCK) * N_PER_BLOCK) / 2;
-		s_k_norm_scales.template cp_async_from<THREADS_PER_BLOCK>(threadIdx.x, g_k_norm_scales + k_norm_scale_col0);
-	}
 
 	template<const usize M_TILES, const usize N_TILES>
 	X17_DEVICE void write(
@@ -266,17 +264,18 @@ struct KVMatrixWriter: b8::FixedI8MatrixWriter<
 		constexpr usize KV_TILES = K_TILES + V_TILES;
 		constexpr usize HEADS = N_TILES / KV_TILES;
 		static_assert(N_TILES % KV_TILES == 0);
+		f32 rrms[4 * M_TILES][HEADS];
 
 		// k
 		constexpr f64 QK_SCALE = math::constexpr_sqrt(f64(HEAD_DIM)) * f64(b8::FIXED_I8_SCALE);
 		X17_UNROLL for (usize hi = 0; hi < HEADS; ++hi) {
-			usize head_col = col + hi * KV_TILES * 32;
-			usize k_norm_scale_col = head_col / 2 - k_norm_scale_col0;
-			qkvg_helpers::l2_norm<QK_SCALE, true, K_TILES>(
+			qkvg_helpers::l2_norm<QK_SCALE, false, true, HEADS, K_TILES>(
 				acc,
 				t,
 				hi * KV_TILES,
-				s_k_norm_scales._ptr + (k_norm_scale_col * sizeof(bf16))
+				0,
+				rrms,
+				hi
 			);
 		}
 
@@ -288,6 +287,15 @@ struct KVMatrixWriter: b8::FixedI8MatrixWriter<
 				t,
 				hi * KV_TILES + K_TILES
 			);
+		}
+
+		usize lane = threadIdx.x % WARP_SIZE;
+		if ((lane % 4) == 0) {
+			usize head0 = col / (2 * HEAD_DIM);
+			X17_UNROLL for (usize ri = 0; ri < 4 * M_TILES; ++ri) {
+				usize rrms_row = row + 8 * ri + lane / 4;
+				store_gmem_Nx32b(g_rrms_ptr + head0 + (rrms_row * config::N_HEADS), rrms[ri]);
+			}
 		}
 
 		Base::write(row, col, t);

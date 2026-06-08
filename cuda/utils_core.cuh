@@ -652,6 +652,53 @@ X17_DEVICE void load_gmem_Nx32b(const T *ptr, T (&values)[N]) {
 	}
 }
 
+/// Store one f32 value to global memory in a single 32-bit transaction.
+template<typename T>
+requires(sizeof(T) == 4)
+X17_DEVICE void store_gmem_1x32b(T *ptr, T value) {
+	asm volatile(
+		"st.global.f32 [%0], %1;\n"
+		:
+		: "l"(ptr), "f"(value)
+		: "memory"
+	);
+}
+
+/// Store two consecutive f32 values to global memory in a single 64-bit transaction.
+template<typename T>
+requires(sizeof(T) == 4)
+X17_DEVICE void store_gmem_2x32b(T *ptr, T a, T b) {
+	asm volatile(
+		"st.global.v2.f32 [%0], {%1, %2};\n"
+		:
+		: "l"(ptr), "f"(a), "f"(b)
+		: "memory"
+	);
+}
+
+template<typename T>
+requires(sizeof(T) == 4)
+X17_DEVICE void store_gmem_4x32b(T *ptr, T a, T b, T c, T d) {
+	asm volatile(
+		"st.global.v4.f32 [%0], {%1, %2, %3, %4};\n"
+		:
+		: "l"(ptr), "f"(a), "f"(b), "f"(c), "f"(d)
+		: "memory"
+	);
+}
+
+template<const usize N, typename T>
+requires(sizeof(T) == 4 && (N == 1 || N == 2 || N == 4))
+X17_DEVICE void store_gmem_Nx32b(T *ptr, T const (&values)[N]) {
+	if constexpr (N == 1) {
+		store_gmem_1x32b(ptr, values[0]);
+	} else if constexpr (N == 2) {
+		store_gmem_2x32b(ptr, values[0], values[1]);
+	} else {
+		store_gmem_4x32b(ptr, values[0], values[1], values[2], values[3]);
+	}
+}
+
 //--------------------------------------------------------------------------------------------------
 
 X17_DEVICE u32 cast_smem_ptr_to_uint(void const *const ptr) {

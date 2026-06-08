@@ -28,11 +28,11 @@ namespace Attn_kv_fwd {
 			>
 		>;
 
-	using Writer = b8::FixedI8MatrixWriter<
+	using Writer = KVMatrixWriter<
+		HEAD_DIM,
 		KV_PROJ_OUTPUTS,
 		InputLoader::M,
-		WeightLoader::K,
-		math::constexpr_inv_sqrt(f64(config::MODEL_DIM))
+		WeightLoader::K
 	>;
 
 	using Kernel = b8::Gemm<InputLoader, WeightLoader, Writer>;
@@ -41,11 +41,12 @@ namespace Attn_kv_fwd {
 	void kernel(
 		b8::FixedI8 *w,
 		b8::FixedI8 *inp, usize n_inputs,
-		b8::FixedI8 *out
+		b8::FixedI8 *out,
+		f32 *rrms
 	) {
 		auto a = InputLoader(inp, n_inputs);
 		auto b = WeightLoader(w, KV_PROJ_OUTPUTS);
-		auto o = Writer(out);
+		auto o = Writer(out, rrms);
 		Kernel().run(a, b, o);
 	}
 }
@@ -84,14 +85,17 @@ int main(int argc, char *argv[]) {
 	}
 
 	std::vector<b8::FixedI8> h_out(seq_len * KV_PROJ_OUTPUTS);
+	std::vector<f32> h_rrms(seq_len * N_HEADS);
 
 	b8::FixedI8 *d_weights = nullptr;
 	b8::FixedI8 *d_inputs = nullptr;
 	b8::FixedI8 *d_out = nullptr;
+	f32 *d_rrms = nullptr;
 
 	cudaMalloc(&d_weights, h_weights.size() * sizeof(b8::FixedI8));
 	cudaMalloc(&d_inputs, h_inputs.size() * sizeof(b8::FixedI8));
 	cudaMalloc(&d_out, h_out.size() * sizeof(b8::FixedI8));
+	cudaMalloc(&d_rrms, h_rrms.size() * sizeof(f32));
 
 	cudaMemcpy(d_weights, h_weights.data(), h_weights.size() * sizeof(b8::FixedI8), cudaMemcpyHostToDevice);
 	cudaMemcpy(d_inputs, h_inputs.data(), h_inputs.size() * sizeof(b8::FixedI8), cudaMemcpyHostToDevice);
@@ -107,7 +111,8 @@ int main(int argc, char *argv[]) {
 			d_weights,
 			d_inputs,
 			seq_len,
-			d_out
+			d_out,
+			d_rrms
 		);
 	}
 
@@ -130,7 +135,8 @@ int main(int argc, char *argv[]) {
 			d_weights,
 			d_inputs,
 			seq_len,
-			d_out
+			d_out,
+			d_rrms
 		);
 		cudaEventRecord(ends[i]);
 	}
@@ -157,13 +163,16 @@ int main(int argc, char *argv[]) {
 	printf("TFLOPS: %.2f\n", tflops);
 
 	cudaMemcpy(h_out.data(), d_out, h_out.size() * sizeof(b8::FixedI8), cudaMemcpyDeviceToHost);
+	cudaMemcpy(h_rrms.data(), d_rrms, h_rrms.size() * sizeof(f32), cudaMemcpyDeviceToHost);
 	std::filesystem::create_directories("tmp/block_cuda");
 	store_i8_tensor("tmp/block_cuda/kv_i8.bin", h_out, seq_len, KV_PROJ_OUTPUTS);
+	store_f32_tensor("tmp/block_cuda/k_rrms_f32.bin", h_rrms, seq_len, N_HEADS);
 
 	printf("Used SMEM per kernel: %u\n", Kernel::SMEM_BYTES);
 
 	cudaFree(d_weights);
 	cudaFree(d_inputs);
 	cudaFree(d_out);
+	cudaFree(d_rrms);
 	return 0;
 }
