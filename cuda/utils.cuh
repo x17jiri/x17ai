@@ -31,6 +31,37 @@ X17_DEVICE void cast(b32::Fragment_16x16<i32> const &src, b32::Fragment_16x16<f3
 	}
 }
 
+template<bool SHUFFLE_COLUMNS>
+X17_DEVICE void cast(b8::Fragment_16x16<b8::E4m3> const &src, b16::Fragment_16x16<bf16> &dst) {
+	static_assert(SHUFFLE_COLUMNS == false);
+	union Packed4 {
+		u32 tuple4;
+		b8::E4m3 val[4];
+	};
+	Packed4 top, bot;
+	top.tuple4 = src.v8x16[0].data;
+	bot.tuple4 = src.v8x16[1].data;
+
+	dst.sub[0][0].set(b8::e4m3_to_bf16(top.val[0]), b8::e4m3_to_bf16(top.val[1]));
+	dst.sub[0][1].set(b8::e4m3_to_bf16(top.val[2]), b8::e4m3_to_bf16(top.val[3]));
+	dst.sub[1][0].set(b8::e4m3_to_bf16(bot.val[0]), b8::e4m3_to_bf16(bot.val[1]));
+	dst.sub[1][1].set(b8::e4m3_to_bf16(bot.val[2]), b8::e4m3_to_bf16(bot.val[3]));
+}
+
+template<bool SHUFFLE_COLUMNS>
+X17_DEVICE void cast(b8::Fragment_16x32<b8::E4m3> const &src, b16::Fragment_16x32<bf16> &dst) {
+	X17_UNROLL for (usize i = 0; i < 2; ++i) {
+		cast<SHUFFLE_COLUMNS>(src.h16x16[i], dst.h16x16[i]);
+	}
+}
+
+template<bool SHUFFLE_COLUMNS>
+X17_DEVICE void cast(b8::Fragment_32x32<b8::E4m3> const &src, b16::Fragment_32x32<bf16> &dst) {
+	X17_UNROLL for (usize i = 0; i < 2; ++i) {
+		cast<SHUFFLE_COLUMNS>(src.v16x32[i], dst.v16x32[i]);
+	}
+}
+
 template<const f64 SCALE = 1.0>
 X17_DEVICE void trunc_cast(b32::Fragment_16x16<f32> const &src, b8::Fragment_16x16<u8> &dst) {
 	X17_UNROLL for (usize row = 0; row < 2; ++row) {
@@ -63,9 +94,9 @@ X17_DEVICE void round_cast(b32::Fragment_16x16<f32> const &src, b8::Fragment_16x
 	}
 }
 
-template<bool SHUFFLE, f32 SCALE = 1.0f>
+template<bool SHUFFLE_COLUMNS, f32 SCALE = 1.0f>
 X17_DEVICE void cast(b8::Fragment_16x16<FixedI8> const &src, b32::Fragment_16x16<f32> &dst) {
-	static_assert(SHUFFLE == false);
+	static_assert(SHUFFLE_COLUMNS == false);
 	union Packed4 {
 		u32 tuple4;
 		u16 tuple2[2];
@@ -102,16 +133,30 @@ X17_DEVICE void cast(b8::Fragment_16x16<FixedI8> const &src, b32::Fragment_16x16
 	}
 }
 
-template<bool SHUFFLE>
+template<bool SHUFFLE_COLUMNS>
 X17_DEVICE void cast(b8::Fragment_16x16<FixedI8> const &src, b16::Fragment_16x16<bf16> &dst) {
 	b32::Fragment_16x16<f32> tmp;
-	cast<SHUFFLE>(src, tmp);
+	cast<SHUFFLE_COLUMNS>(src, tmp);
 	cast(tmp, dst);
 }
 
-template<bool SHUFFLE>
+template<bool SHUFFLE_COLUMNS>
+X17_DEVICE void cast(b8::Fragment_16x32<FixedI8> const &src, b16::Fragment_16x32<bf16> &dst) {
+	X17_UNROLL for (usize i = 0; i < 2; ++i) {
+		cast<SHUFFLE_COLUMNS>(src.h16x16[i], dst.h16x16[i]);
+	}
+}
+
+template<bool SHUFFLE_COLUMNS>
+X17_DEVICE void cast(b8::Fragment_32x32<FixedI8> const &src, b16::Fragment_32x32<bf16> &dst) {
+	X17_UNROLL for (usize i = 0; i < 2; ++i) {
+		cast<SHUFFLE_COLUMNS>(src.v16x32[i], dst.v16x32[i]);
+	}
+}
+
+template<bool SHUFFLE_COLUMNS>
 X17_DEVICE void round_clamp_cast(b32::Fragment_16x16<f32> const &src, b8::Fragment_16x16<FixedI8> &dst) {
-	static_assert(SHUFFLE == false);
+	static_assert(SHUFFLE_COLUMNS == false);
 	union Packed4 {
 		u32 tuple4;
 		u16 tuple2[2];
@@ -133,31 +178,43 @@ X17_DEVICE void round_clamp_cast(b32::Fragment_16x16<f32> const &src, b8::Fragme
 	dst.v8x16[1].data = bot.tuple4;
 }
 
-template<bool SHUFFLE, f32 SCALE = 1.0f>
+template<bool SHUFFLE_COLUMNS, f32 SCALE = 1.0f>
 X17_DEVICE void cast(b8::Fragment_16x32<FixedI8> const &src, b32::Fragment_16x32<f32> &dst) {
 	X17_UNROLL for (usize i = 0; i < 2; ++i) {
-		cast<SHUFFLE, SCALE>(src.h16x16[i], dst.h16x16[i]);
+		cast<SHUFFLE_COLUMNS, SCALE>(src.h16x16[i], dst.h16x16[i]);
 	}
 }
 
-template<bool SHUFFLE>
+template<bool SHUFFLE_COLUMNS>
 X17_DEVICE void round_clamp_cast(b32::Fragment_16x32<f32> const &src, b8::Fragment_16x32<FixedI8> &dst) {
 	X17_UNROLL for (usize i = 0; i < 2; ++i) {
-		round_clamp_cast<SHUFFLE>(src.h16x16[i], dst.h16x16[i]);
+		round_clamp_cast<SHUFFLE_COLUMNS>(src.h16x16[i], dst.h16x16[i]);
 	}
 }
 
-template<bool SHUFFLE, f32 SCALE = 1.0f>
+template<bool SHUFFLE_COLUMNS, f32 SCALE = 1.0f>
 X17_DEVICE void cast(b8::Fragment_32x32<FixedI8> const &src, b32::Fragment_32x32<f32> &dst) {
 	X17_UNROLL for (usize j = 0; j < 2; ++j) {
-		cast<SHUFFLE, SCALE>(src.v16x32[j], dst.v16x32[j]);
+		cast<SHUFFLE_COLUMNS, SCALE>(src.v16x32[j], dst.v16x32[j]);
 	}
 }
 
-template<bool SHUFFLE>
+template<bool SHUFFLE_COLUMNS>
 X17_DEVICE void round_clamp_cast(b32::Fragment_32x32<f32> const &src, b8::Fragment_32x32<FixedI8> &dst) {
 	X17_UNROLL for (usize j = 0; j < 2; ++j) {
-		round_clamp_cast<SHUFFLE>(src.v16x32[j], dst.v16x32[j]);
+		round_clamp_cast<SHUFFLE_COLUMNS>(src.v16x32[j], dst.v16x32[j]);
+	}
+}
+
+X17_DEVICE void cast(b32::Fragment_16x32<f32> const &src, b16::Fragment_16x32<bf16> &dst) {
+	X17_UNROLL for (usize i = 0; i < 2; ++i) {
+		cast(src.h16x16[i], dst.h16x16[i]);
+	}
+}
+
+X17_DEVICE void cast(b32::Fragment_32x32<f32> const &src, b16::Fragment_32x32<bf16> &dst) {
+	X17_UNROLL for (usize i = 0; i < 2; ++i) {
+		cast(src.v16x32[i], dst.v16x32[i]);
 	}
 }
 
@@ -184,6 +241,19 @@ X17_DEVICE void mma_a_bt(
 		c.v8x16[0].h8x8[1].data0, c.v8x16[0].h8x8[1].data1,
 		c.v8x16[1].h8x8[1].data0, c.v8x16[1].h8x8[1].data1
 	);
+}
+
+X17_DEVICE void mma_a_bt(
+	b16::Fragment_32x32<bf16> const &a,
+	b16::Fragment_32x32<bf16> const &b,
+	b32::Fragment_32x32<f32> &c
+) {
+	X17_UNROLL for (usize mi = 0; mi < 2; ++mi) {
+		X17_UNROLL for (usize ni = 0; ni < 2; ++ni) {
+			mma_a_bt(a.v16x32[mi].h16x16[0], b.v16x32[ni].h16x16[0], c.v16x32[mi].h16x16[ni]);
+			mma_a_bt(a.v16x32[mi].h16x16[1], b.v16x32[ni].h16x16[1], c.v16x32[mi].h16x16[ni]);
+		}
+	}
 }
 
 //--------------------------------------------------------------------------------------------------

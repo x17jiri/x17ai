@@ -104,6 +104,24 @@ std::vector<bf16> load_f8_tensor(std::string const &filename, usize rows, usize 
 	return data;
 }
 
+std::vector<b8::E4m3> load_e4m3_tensor(std::string const &filename, usize rows, usize cols) {
+	printf("Loading input from %s\n", filename.c_str());
+	std::vector<b8::E4m3> data(rows * cols);
+	std::ifstream a_in(filename, std::ios::binary);
+	if (!a_in) {
+		printf("Failed to open %s\n", filename.c_str());
+		return {};
+	}
+	if (!a_in.read(
+		reinterpret_cast<char *>(data.data()),
+		static_cast<std::streamsize>(data.size() * sizeof(b8::E4m3))
+	)) {
+		printf("Failed to read %s as e4m3 [%u, %u]\n", filename.c_str(), rows, cols);
+		return {};
+	}
+	return data;
+}
+
 std::vector<f32> load_f32_tensor(std::string const &filename, usize rows, usize cols) {
 	printf("Loading input from %s\n", filename.c_str());
 	std::vector<f32> data(rows * cols);

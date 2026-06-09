@@ -437,23 +437,32 @@ namespace b8 {
 			);
 		}
 
-		X17_DEVICE FixedI8 residual_gate(b32::Fragment_8x8<i32> frag, FixedI8 residual) {
-			constexpr f64 RAW_TO_REAL = SCALE / (f64(FIXED_I8_SCALE) * f64(FIXED_I8_SCALE));
-			constexpr f64 RAW_TO_FIXED = SCALE / f64(FIXED_I8_SCALE);
+		template<typename A>
+		X17_DEVICE FixedI8 residual_gate(b32::Fragment_8x8<A> frag, FixedI8 residual) {
+			f32 gate = f32(frag.get0());
 
-			f32 gate = f32(frag.get0()) * f32(RAW_TO_REAL);
-			f32 old_weight = math::fast::sigmoid_base4(-gate);
-			f32 new_weight = math::fast::imprecise_softplus_base4(gate);
+			f32 old_weight =
+				math::fast::sigmoid_base4<
+					-SCALE
+				>(gate);
+
+			f32 new_weight =
+				math::fast::imprecise_softplus_base4<
+					SCALE,
+					SCALE * FIXED_I8_SCALE
+				>(gate);
+
 			f32 residual_f = f32(residual);
-			f32 output_f = f32(frag.get1()) * f32(RAW_TO_FIXED);
+			f32 output_f = f32(frag.get1());
+
 			f32 val_f = math::fma(new_weight, output_f, old_weight * residual_f);
 			return f32_to_fixedi8(val_f);
 		}
 
-		template<const usize M_TILES, const usize N_TILES>
+		template<const usize M_TILES, const usize N_TILES, typename A>
 		X17_DEVICE void write(
 			usize row, usize col,
-			b32::Fragment_32x32<i32> (&acc)[M_TILES][N_TILES]
+			b32::Fragment_32x32<A> (&acc)[M_TILES][N_TILES]
 		) {
 			static_assert(N_TILES % 2 == 0);
 

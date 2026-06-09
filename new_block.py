@@ -15,6 +15,9 @@ def quantize(a):
 def quantize_i8_codes(a: torch.Tensor) -> torch.Tensor:
 	return torch.clamp(torch.round(a * 8.0), -127.0, +127.0).to(torch.int32)
 
+def quantize_e4m3(a):
+	return e4m3_ftz(a).to(F8_DTYPE).to(my_dtype)
+
 def new_randn(*shape, generator):
 	return torch.randn(shape, generator=generator)
 
@@ -52,7 +55,7 @@ def create_inputs() -> None:
 	store_tensor(x, "x_i8.bin")
 	store_tensor(sinks_k, "sinks_k_f32.bin", expected_variance=1.0)
 	store_tensor(sinks_k, "sinks_k_i8.bin")
-	store_tensor(sinks_v, "sinks_v_f32.bin", expected_variance=1.0)
+	store_tensor(sinks_v, "sinks_v_f32.bin", expected_variance=V_SCALE_FIX*V_SCALE_FIX)
 	store_tensor(sinks_v, "sinks_v_i8.bin")
 	store_tensor(attn_temperature, "attn_temperature_f32.bin", expected_variance=0.0)
 	store_tensor(attn_q_weights, "attn_q_weights_f32.bin", expected_variance=1.0)
@@ -120,9 +123,9 @@ def run_ffn() -> None:
 	)
 	f = geglu(f_pregate)
 
-	f_i8 = quantize(f)
+	f_f8 = quantize_e4m3(f)
 	y_pregate = (
-		torch.matmul(f_i8, y_weights.transpose(0, 1))
+		torch.matmul(f_f8, y_weights.transpose(0, 1))
 		* torch.rsqrt(torch.tensor(float(F_WIDTH)))
 		* GELU_VAR_FIX
 	)
@@ -133,8 +136,7 @@ def run_ffn() -> None:
 	store_tensor(y_pregate, "ffn_y_pregate.bin", expected_variance=1.0)
 	store_tensor(y_pregate, "ffn_y_pregate_i8.bin")
 	store_tensor(f, "ffn_f.bin", expected_variance=1.0 / GELU_VAR_FIX_2)
-	store_tensor(f, "ffn_f_f8.bin")
-	store_tensor(f, "ffn_f_i8.bin")
+	store_tensor(f_f8, "ffn_f_f8.bin")
 	store_tensor(y, "ffn_y.bin")
 	store_tensor(y, "ffn_y_i8.bin")
 

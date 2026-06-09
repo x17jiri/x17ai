@@ -394,8 +394,14 @@ namespace math {
 			return math::fma(0.5f, math::fast::tanh(0.5f * x).val, 0.5f);
 		}
 
+		template<f64 INP_SCALE = 1.0, f64 OUT_SCALE = 1.0>
 		X17_DEVICE f32 sigmoid_base4(f32 x) {
-			return math::fma(0.5f, math::fast::tanh(std::numbers::ln2_v<f32> * x).val, 0.5f);
+			return
+				math::fma(
+					f32(0.5 * OUT_SCALE),
+					math::fast::tanh(f32(std::numbers::ln2_v<f64> * INP_SCALE) * x).val,
+					f32(0.5 * OUT_SCALE)
+				);
 		}
 
 		X17_DEVICE f32 silu(f32 x, f32 beta = 1.0f) {
@@ -459,9 +465,21 @@ namespace math {
 			return fmaxf(0.0f, x) + logb(1.0f + expb(-fabsf(x * scale))) * recip(scale);
 		}
 
-		X17_DEVICE f32 imprecise_softplus_base4(f32 x, f32 beta = 1.0f) {
-			f32 scale = f32(logb_4) * beta;
-			return fmaxf(0.0f, x) + logb(1.0f + expb(-fabsf(x * scale))) * recip(scale);
+		template<f64 INP_SCALE = 1.0, f64 OUT_SCALE = 1.0>
+		X17_DEVICE f32 imprecise_softplus_base4(f32 x) {
+			constexpr f32 inp_scale = INP_SCALE * logb_4;
+			constexpr f32 out_scale = OUT_SCALE / logb_4;
+			f32 line;
+			if constexpr (f32(INP_SCALE * OUT_SCALE) != 1.0) {
+				line = fmaxf(0.0f, x) * f32(INP_SCALE * OUT_SCALE);
+			} else {
+				line = fmaxf(0.0f, x);
+			}
+			return fma(
+				logb(1.0f + expb(-fabsf(x * inp_scale))),
+				out_scale,
+				line
+			);
 		}
 
 		/// Symmetric smooth cap: clamps x to [-C, +C] with a smooth transition.

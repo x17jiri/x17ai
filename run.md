@@ -42,7 +42,7 @@ python tensor_stats.py tmp/block_torch/ffn_f.bin tmp/block_torch/ffn_f.bin.var
 
 ## FFN - Y Fwd
 
-./nvcc.sh ffn_y_fwd_i8.cu && tmp/ffn_y_fwd_i8
+./nvcc.sh ffn_y_fwd_f8.cu && tmp/ffn_y_fwd_f8
 python verify_i8_tensor.py tmp/block_torch/ffn_y_i8.bin tmp/block_cuda/ffn_y_i8.bin
 
 python tensor_stats.py tmp/block_torch/ffn_y.bin

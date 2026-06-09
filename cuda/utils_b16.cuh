@@ -229,6 +229,16 @@ namespace b16 {
 		Fragment_8x8<T> sub[2];
 	};
 
+	template<typename T>
+	struct Fragment_16x32 {
+		Fragment_16x16<T> h16x16[2];
+	};
+
+	template<typename T>
+	struct Fragment_32x32 {
+		Fragment_16x32<T> v16x32[2];
+	};
+
 	/// Stores 4 horizontally-adjacent 8x8 fragments (32 cols × 8 rows) to GMEM.
 	/// Uses shuffle_4x4 so each thread holds 16 contiguous bytes, then a single 128-bit store.
 	/// 4 threads per row × 16 bytes = 64B coalesced per row.
@@ -508,6 +518,29 @@ namespace b16 {
 
 	template<typename U, typename T, const usize M, const usize N>
 	requires(sizeof(U) == 2)
+	X17_DEVICE void store(
+		Fragment_32x32<T> const &tile,
+		GMatrix<U, M, N> const &dst,
+		usize m_idx, usize n_idx
+	) {
+		store(tile.v16x32[0].h16x16, dst, m_idx, n_idx);
+		store(tile.v16x32[1].h16x16, dst, m_idx + 16, n_idx);
+	}
+
+	template<typename U, typename T, const usize M, const usize N, const usize K>
+	requires(sizeof(U) == 2)
+	X17_DEVICE void store(
+		Fragment_32x32<T> const (&tiles)[K],
+		GMatrix<U, M, N> const &dst,
+		usize m_idx, usize n_idx
+	) {
+		X17_UNROLL for (usize i = 0; i < K; ++i) {
+			store(tiles[i], dst, m_idx, n_idx + 32*i);
+		}
+	}
+
+	template<typename U, typename T, const usize M, const usize N>
+	requires(sizeof(U) == 2)
 	X17_DEVICE void store2(
 		GMatrix<U, M, N> const &dst,
 		usize m_idx, usize n_idx,
@@ -709,5 +742,27 @@ namespace b16 {
 				dst.sub[0][0].val, dst.sub[0][1].val, dst.sub[1][0].val, dst.sub[1][1].val
 			);
 		}
+	}
+
+	template<typename T, usize M, usize N>
+	X17_DEVICE void load_fragment(
+		SMatrix<T, M, N> src, usize m_idx, usize n_idx,
+		Fragment_32x32<T> &dst
+	) {
+		load_fragment(src, m_idx,      n_idx,      dst.v16x32[0].h16x16[0]);
+		load_fragment(src, m_idx,      n_idx + 16, dst.v16x32[0].h16x16[1]);
+		load_fragment(src, m_idx + 16, n_idx,      dst.v16x32[1].h16x16[0]);
+		load_fragment(src, m_idx + 16, n_idx + 16, dst.v16x32[1].h16x16[1]);
+	}
+
+	template<typename T, usize M, usize N>
+	X17_DEVICE void load_fragment_trans(
+		SMatrix<T, M, N> src, usize m_idx, usize n_idx,
+		Fragment_32x32<T> &dst
+	) {
+		load_fragment_trans(src, m_idx,      n_idx,      dst.v16x32[0].h16x16[0]);
+		load_fragment_trans(src, m_idx + 16, n_idx,      dst.v16x32[0].h16x16[1]);
+		load_fragment_trans(src, m_idx,      n_idx + 16, dst.v16x32[1].h16x16[0]);
+		load_fragment_trans(src, m_idx + 16, n_idx + 16, dst.v16x32[1].h16x16[1]);
 	}
 }

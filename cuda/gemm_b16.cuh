@@ -21,8 +21,8 @@ namespace b16 {
 		static constexpr usize GMEM_PRELOAD = _GMEM_PRELOAD;
 
 		static_assert(GN % K == 0);
-		static_assert(M % 16 == 0);
-		static_assert(K % 16 == 0);
+		static_assert(M % 32 == 0);
+		static_assert(K % 32 == 0);
 
 		static constexpr usize SMEM_BYTES = M * K * GMEM_PRELOAD * sizeof(T);
 
@@ -58,14 +58,129 @@ namespace b16 {
 		}
 
 		/// Load a fragment at tile coordinates [m, k] from the SMEM ring buffer.
-		X17_DEVICE void load_fragment(usize step, usize m, usize k, Fragment_16x16<T> &frag) {
+		X17_DEVICE void load_fragment(usize step, usize m, usize k, Fragment_32x32<T> &frag) {
 			usize first_row = M * (step % GMEM_PRELOAD);
-			b16::load_fragment(sPreload, first_row + 16*m, 16*k, frag);
+			b16::load_fragment(sPreload, first_row + 32*m, 32*k, frag);
 		}
 
-		X17_DEVICE void load_fragment_trans(usize step, usize m, usize k, Fragment_16x16<T> &frag) {
+		X17_DEVICE void load_fragment_trans(usize step, usize m, usize k, Fragment_32x32<T> &frag) {
 			usize first_row = M * (step % GMEM_PRELOAD);
-			b16::load_fragment_trans(sPreload, first_row + 16*m, 16*k, frag);
+			b16::load_fragment_trans(sPreload, first_row + 32*m, 32*k, frag);
+		}
+	};
+
+	template<
+		const usize _GN,
+		const usize _M, const usize _K,
+		const usize _GMEM_PRELOAD = 2
+	>
+	struct E4m3MatrixLoader {
+		using Elem = bf16;
+
+		static constexpr usize GN = _GN;
+		static constexpr usize M = _M;
+		static constexpr usize K = _K;
+		static constexpr usize GMEM_PRELOAD = _GMEM_PRELOAD;
+
+		static_assert(GN % K == 0);
+		static_assert(M % 32 == 0);
+		static_assert(K * GMEM_PRELOAD * sizeof(b8::E4m3) % 128 == 0);
+
+		static constexpr usize SMEM_BYTES = M * K * GMEM_PRELOAD * sizeof(b8::E4m3);
+
+		using GInput = GMatrixDynSize<b8::E4m3, GN>;
+		using SPreload = b8::SMatrix<b8::E4m3, M, K * GMEM_PRELOAD>;
+
+		usize _m_rows;
+		GInput gInput;
+		SPreload sPreload;
+
+		X17_DEVICE usize m_rows() const { return _m_rows; }
+		X17_DEVICE usize n_cols() const { return GN; }
+
+		X17_DEVICE E4m3MatrixLoader(b8::E4m3 *gmem_addr, usize m_rows):
+			_m_rows(m_rows),
+			gInput(gmem_addr),
+			sPreload()
+		{}
+
+		template<const u32 CAP>
+		X17_DEVICE void alloc_smem(SMemAllocator<CAP> &smem_alloc) {
+			sPreload._ptr = smem_alloc.alloc(SMEM_BYTES);
+		}
+
+		template<const usize THREADS_PER_BLOCK>
+		X17_DEVICE void async_load(usize step, usize m, usize k) {
+			b8::async_load<THREADS_PER_BLOCK, M, K>(
+				threadIdx.x,
+				gInput, m, k,
+				sPreload, 0, K * (step % GMEM_PRELOAD)
+			);
+		}
+
+		X17_DEVICE void load_fragment(usize step, usize m, usize k, Fragment_32x32<bf16> &frag) {
+			usize first_col = K * (step % GMEM_PRELOAD);
+			b8::Fragment_32x32<b8::E4m3> e4m3_frag;
+			b8::load_fragment(sPreload, 32*m, first_col + 32*k, e4m3_frag);
+			cast<false>(e4m3_frag, frag);
+		}
+
+	};
+
+	template<
+		const usize _GN,
+		const usize _M, const usize _K,
+		const usize _GMEM_PRELOAD = 2
+	>
+	struct FixedI8MatrixLoader {
+		using Elem = bf16;
+
+		static constexpr usize GN = _GN;
+		static constexpr usize M = _M;
+		static constexpr usize K = _K;
+		static constexpr usize GMEM_PRELOAD = _GMEM_PRELOAD;
+
+		static_assert(GN % K == 0);
+		static_assert(M % 32 == 0);
+		static_assert(K * GMEM_PRELOAD * sizeof(b8::FixedI8) % 128 == 0);
+
+		static constexpr usize SMEM_BYTES = M * K * GMEM_PRELOAD * sizeof(b8::FixedI8);
+
+		using GInput = GMatrixDynSize<b8::FixedI8, GN>;
+		using SPreload = b8::SMatrix<b8::FixedI8, M, K * GMEM_PRELOAD>;
+
+		usize _m_rows;
+		GInput gInput;
+		SPreload sPreload;
+
+		X17_DEVICE usize m_rows() const { return _m_rows; }
+		X17_DEVICE usize n_cols() const { return GN; }
+
+		X17_DEVICE FixedI8MatrixLoader(b8::FixedI8 *gmem_addr, usize m_rows):
+			_m_rows(m_rows),
+			gInput(gmem_addr),
+			sPreload()
+		{}
+
+		template<const u32 CAP>
+		X17_DEVICE void alloc_smem(SMemAllocator<CAP> &smem_alloc) {
+			sPreload._ptr = smem_alloc.alloc(SMEM_BYTES);
+		}
+
+		template<const usize THREADS_PER_BLOCK>
+		X17_DEVICE void async_load(usize step, usize m, usize k) {
+			b8::async_load<THREADS_PER_BLOCK, M, K>(
+				threadIdx.x,
+				gInput, m, k,
+				sPreload, 0, K * (step % GMEM_PRELOAD)
+			);
+		}
+
+		X17_DEVICE void load_fragment(usize step, usize m, usize k, Fragment_32x32<bf16> &frag) {
+			usize first_col = K * (step % GMEM_PRELOAD);
+			b8::Fragment_32x32<b8::FixedI8> fixed_i8_frag;
+			b8::load_fragment(sPreload, 32*m, first_col + 32*k, fixed_i8_frag);
+			cast<false>(fixed_i8_frag, frag);
 		}
 	};
 
@@ -98,11 +213,11 @@ namespace b16 {
 			loader.template async_load<THREADS_PER_BLOCK>(step, k, m);
 		}
 
-		X17_DEVICE void load_fragment(usize step, usize m, usize k, Fragment_16x16<Elem> &frag) {
+		X17_DEVICE void load_fragment(usize step, usize m, usize k, Fragment_32x32<Elem> &frag) {
 			loader.load_fragment_trans(step, k, m, frag);
 		}
 
-		X17_DEVICE void load_fragment_trans(usize step, usize m, usize k, Fragment_16x16<Elem> &frag) {
+		X17_DEVICE void load_fragment_trans(usize step, usize m, usize k, Fragment_32x32<Elem> &frag) {
 			loader.load_fragment(step, k, m, frag);
 		}
 	};
@@ -137,16 +252,20 @@ namespace b16 {
 		template<const usize M_TILES, const usize N_TILES>
 		X17_DEVICE void write(
 			usize row, usize col,
-			Fragment_16x16<T> (&acc)[M_TILES][N_TILES]
+			Fragment_32x32<T> (&acc)[M_TILES][N_TILES]
 		) {
-			GMatrix<bf16, 16*M_TILES, 16*N_TILES> C(gC, c_stride);
+			GMatrix<T, 32*M_TILES, 32*N_TILES> C(gC, c_stride);
 			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-				store(acc[mi], C, row + 16*mi, col);
+				store(acc[mi], C, row + 32*mi, col);
 			}
 		}
 	};
 
-	template<const usize GN, const usize M_PER_BLOCK, const usize N_PER_BLOCK>
+	template<
+		usize GN,
+		usize M_PER_BLOCK, usize N_PER_BLOCK,
+		f64 SCALE = 1.0
+	>
 	struct Bf16MatrixWriter: MatrixWriter<bf16, GN, M_PER_BLOCK, N_PER_BLOCK> {
 		using Base = MatrixWriter<bf16, GN, M_PER_BLOCK, N_PER_BLOCK>;
 
@@ -157,12 +276,15 @@ namespace b16 {
 		template<const usize M_TILES, const usize N_TILES>
 		X17_DEVICE void write(
 			usize row, usize col,
-			b32::Fragment_16x16<f32> (&acc)[M_TILES][N_TILES]
+			b32::Fragment_32x32<f32> (&acc)[M_TILES][N_TILES]
 		) {
-			Fragment_16x16<bf16> t[M_TILES][N_TILES];
+			Fragment_32x32<bf16> t[M_TILES][N_TILES];
 
 			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
 				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+					if constexpr (SCALE != 1.0) {
+						scale_(acc[mi][ni], f32(SCALE));
+					}
 					cast(acc[mi][ni], t[mi][ni]);
 				}
 			}
@@ -329,13 +451,13 @@ namespace b16 {
 		static constexpr usize M_PER_WARP = M_PER_BLOCK / M_WARPS;
 		static constexpr usize N_PER_WARP = N_PER_BLOCK / N_WARPS;
 
-		static constexpr usize M_TILES = M_PER_WARP / 16;
-		static constexpr usize N_TILES = N_PER_WARP / 16;
-		static constexpr usize K_TILES = K_STEP / 16;
+		static constexpr usize M_TILES = M_PER_WARP / 32;
+		static constexpr usize N_TILES = N_PER_WARP / 32;
+		static constexpr usize K_TILES = K_STEP / 32;
 		static_assert(Writer::M_PER_BLOCK == M_PER_BLOCK);
 		static_assert(Writer::N_PER_BLOCK == N_PER_BLOCK);
-		static_assert(M_TILES * M_WARPS * 16 == M_PER_BLOCK);
-		static_assert(N_TILES * N_WARPS * 16 == N_PER_BLOCK);
+		static_assert(M_TILES * M_WARPS * 32 == M_PER_BLOCK);
+		static_assert(N_TILES * N_WARPS * 32 == N_PER_BLOCK);
 
 		static constexpr usize SMEM_BYTES =
 			std::max<usize>(
@@ -383,9 +505,9 @@ namespace b16 {
 				async_load_commit();
 			}
 
-			Fragment_16x16<bf16> rA[M_TILES][K_TILES];
-			Fragment_16x16<bf16> rBT[K_TILES][N_TILES];
-			b32::Fragment_16x16<f32> acc[M_TILES][N_TILES];
+			Fragment_32x32<bf16> rA[M_TILES][K_TILES];
+			Fragment_32x32<bf16> rBT[K_TILES][N_TILES];
+			b32::Fragment_32x32<f32> acc[M_TILES][N_TILES];
 			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
 				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
 					zero_(acc[mi][ni]);

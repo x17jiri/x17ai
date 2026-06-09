@@ -88,6 +88,19 @@ def load_tensor_with_dtype(path: Path, rows: int, cols: int, dtype: torch.dtype)
 		return data.view(F8_DTYPE).reshape(rows, cols).to(my_device).to(my_dtype)
 	raise ValueError(f"Unsupported tensor storage dtype: {dtype}")
 
+def e4m3_ftz(tensor):
+	# This number would be rounded to 2**-6, which is the smallest normal e4m3 value
+	threshold = (1.0 + 15.0 / 16.0) * 2.0**-7
+
+	# Flush sub-normals to zero
+	tensor = torch.where(
+		tensor.abs() < threshold,
+		torch.zeros_like(tensor),
+		tensor,
+	)
+
+	return tensor
+
 def store_tensor_with_dtype(
 	tensor: torch.Tensor,
 	file_name: str,
@@ -114,6 +127,7 @@ def store_tensor_with_dtype(
 		raw = stored.view(torch.int16).numpy().tobytes()
 		warn_tensor = stored
 	elif F8_DTYPE is not None and dtype == F8_DTYPE:
+		data = e4m3_ftz(data)
 		stored = data.to(F8_DTYPE)
 		raw = stored.view(torch.uint8).numpy().tobytes()
 		warn_tensor = stored.to(torch.float32)
