@@ -8,6 +8,7 @@
 use std::ptr::NonNull;
 use std::rc::Rc;
 
+use crate::dtype::DType;
 use crate::{DeviceAllocError, ErrPack, TensorOpError};
 
 use super::cuda_shim::CudaStream;
@@ -64,6 +65,21 @@ impl Device for CudaDevice {
 	) -> Result<(), ErrPack<TensorOpError>> {
 		unsafe { self.stream.download_data(src, dst, 0, bytes) }
 	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct GemmKernelConfig {
+	a_cols: usize,
+	a_trans: bool,
+	a_dtype: DType,
+
+	b_cols: usize,
+	b_trans: bool,
+	b_dtype: DType,
+
+	c_dtype: DType,
+	c_scale: f64,
 }
 
 //--------------------------------------------------------------------------------------------------
