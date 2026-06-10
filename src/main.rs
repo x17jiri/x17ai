@@ -15,18 +15,30 @@
 #![feature(thin_box)]
 #![feature(box_into_inner)]
 
-use x17ai::device::cpu::CPUDevice;
-use x17ai::literal::TensorLiteral2D;
-use x17ai::tensor::Tensor;
+use x17ai::device::cuda::{
+	generate_gemm_kernel,
+	GemmEpilogue,
+	GemmInput,
+	GemmKernelConfig,
+};
+use x17ai::dtype::DType;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-	let device = CPUDevice::new();
-	let literal = TensorLiteral2D::<f32>::new(&[
-		[1.0, 2.0, 3.0],
-		[4.0, 5.0, 6.0],
-	]);
-	let tensor = Tensor::new(&literal, device)?;
+	let config = GemmKernelConfig {
+		a: GemmInput {
+			dtype: DType::Int8,
+			cols: 2048,
+			trans: false,
+		},
+		b: GemmInput {
+			dtype: DType::Int8,
+			cols: 2048,
+			trans: true,
+		},
+		epilogue: GemmEpilogue::Scale(1.0 / f64::sqrt(2048.0)),
+		c_dtype: DType::Int8,
+	};
 
-//	println!("{tensor}");
+	println!("{}", generate_gemm_kernel(&config));
 	Ok(())
 }

@@ -46,16 +46,40 @@ def tensor_path(name: str) -> Path:
 
 F8_DTYPE = getattr(torch, "float8_e4m3fn", None)
 
+TENSOR_FILE_EXTENSIONS = {".bin", ".safetensors"}
+TENSOR_STORAGE_DTYPE_TAGS = {
+	"f32": torch.float32,
+	"i32": torch.int32,
+	"bf16": torch.bfloat16,
+	"i8": torch.int8,
+	"f8": F8_DTYPE,
+}
+
+def tensor_file_extension(file_name: str) -> str:
+	extension = Path(file_name).suffix
+	if extension not in TENSOR_FILE_EXTENSIONS:
+		supported = ", ".join(sorted(TENSOR_FILE_EXTENSIONS))
+		raise ValueError(f"Unsupported tensor file extension {extension!r} in {file_name!r}; expected one of: {supported}")
+	return extension
+
+def tensor_storage_dtype_tag(file_name: str) -> str:
+	extension = tensor_file_extension(file_name)
+	stem = Path(file_name).stem
+	base_name, separator, tag = stem.rpartition("_")
+	if not separator or not base_name or tag not in TENSOR_STORAGE_DTYPE_TAGS:
+		supported = ", ".join(f"_{tag}{extension}" for tag in TENSOR_STORAGE_DTYPE_TAGS)
+		raise ValueError(f"Tensor file name must end with a dtype tag before the extension ({supported}): {file_name!r}")
+	return tag
+
 def tensor_storage_dtype(file_name: str) -> torch.dtype:
-	if file_name.endswith("_f32.bin"):
-		return torch.float32
-	if file_name.endswith("_i8.bin"):
-		return torch.int8
-	if file_name.endswith("_f8.bin"):
+	tag = tensor_storage_dtype_tag(file_name)
+	if tag == "f8":
 		if F8_DTYPE is None:
 			raise RuntimeError("This PyTorch build does not support float8_e4m3fn")
-		return F8_DTYPE
-	return torch.bfloat16
+	dtype = TENSOR_STORAGE_DTYPE_TAGS[tag]
+	if dtype is None:
+		raise ValueError(f"Unsupported tensor storage dtype tag: {tag}")
+	return dtype
 
 def tensor_storage_name(dtype: torch.dtype) -> str:
 	if dtype == torch.float32:
@@ -70,23 +94,34 @@ def tensor_storage_name(dtype: torch.dtype) -> str:
 		return "float8_e4m3fn"
 	raise ValueError(f"Unsupported tensor storage dtype: {dtype}")
 
+def safetensors_tensor_name(file_name: str) -> str:
+	stem = Path(file_name).stem
+	base_name, _, _ = stem.rpartition("_")
+	return base_name
+
 def load_tensor_with_dtype(path: Path, rows: int, cols: int, dtype: torch.dtype) -> torch.Tensor:
 	raw = path.read_bytes()
 	if dtype == torch.float32:
 		data = torch.frombuffer(bytearray(raw), dtype=torch.float32)
-		return data.reshape(rows, cols).to(my_device).to(my_dtype)
+		return load_stored_tensor(data, rows, cols, dtype)
 	if dtype == torch.int8:
 		data = torch.frombuffer(bytearray(raw), dtype=torch.int8)
-		scaled = data.to(torch.float32) / 8.0
-		data = torch.where(data == -128, torch.full_like(scaled, math.nan), scaled)
-		return data.reshape(rows, cols).to(my_device).to(my_dtype)
+		return load_stored_tensor(data, rows, cols, dtype)
 	if dtype == torch.bfloat16:
 		data = torch.frombuffer(bytearray(raw), dtype=torch.int16)
-		return data.view(torch.bfloat16).reshape(rows, cols).to(my_device).to(my_dtype)
+		return load_stored_tensor(data.view(torch.bfloat16), rows, cols, dtype)
 	if F8_DTYPE is not None and dtype == F8_DTYPE:
 		data = torch.frombuffer(bytearray(raw), dtype=torch.uint8)
-		return data.view(F8_DTYPE).reshape(rows, cols).to(my_device).to(my_dtype)
+		return load_stored_tensor(data.view(F8_DTYPE), rows, cols, dtype)
 	raise ValueError(f"Unsupported tensor storage dtype: {dtype}")
+
+def load_stored_tensor(data: torch.Tensor, rows: int, cols: int, dtype: torch.dtype) -> torch.Tensor:
+	if data.dtype != dtype:
+		raise ValueError(f"Expected stored tensor dtype {tensor_storage_name(dtype)}, got {data.dtype}")
+	if dtype == torch.int8:
+		scaled = data.to(torch.float32) / 8.0
+		data = torch.where(data == -128, torch.full_like(scaled, math.nan), scaled)
+	return data.reshape(rows, cols).to(my_device).to(my_dtype)
 
 def e4m3_ftz(tensor):
 	# This number would be rounded to 2**-6, which is the smallest normal e4m3 value
@@ -107,8 +142,15 @@ def store_tensor_with_dtype(
 	dtype: torch.dtype,
 	expected_variance: float | None = None,
 ) -> None:
+	expected_dtype = tensor_storage_dtype(file_name)
+	if dtype != expected_dtype:
+		raise ValueError(
+			f"Tensor file name {file_name!r} declares {tensor_storage_name(expected_dtype)}, "
+			f"but store call requested {tensor_storage_name(dtype)}"
+		)
 	path = tensor_path(file_name)
 	path.parent.mkdir(parents=True, exist_ok=True)
+	extension = tensor_file_extension(file_name)
 	data = tensor.detach().contiguous().cpu()
 	if dtype == torch.float32:
 		stored = data.to(torch.float32)
@@ -133,8 +175,13 @@ def store_tensor_with_dtype(
 		warn_tensor = stored.to(torch.float32)
 	else:
 		raise ValueError(f"Unsupported tensor storage dtype: {dtype}")
-	with path.open("wb") as output_file:
-		output_file.write(raw)
+	if extension == ".safetensors":
+		from safetensors.torch import save_file
+
+		save_file({safetensors_tensor_name(file_name): stored}, str(path))
+	else:
+		with path.open("wb") as output_file:
+			output_file.write(raw)
 	store_expected_variance(path, expected_variance)
 	warn_if_variance_is_unexpected(path, warn_tensor, expected_variance)
 	shape_str = ", ".join(str(dim) for dim in stored.shape)
@@ -142,7 +189,16 @@ def store_tensor_with_dtype(
 
 def load_tensor(tensor: str, rows: int, cols: int) -> torch.Tensor:
 	path = tensor_path(tensor)
-	return load_tensor_with_dtype(path, rows, cols, tensor_storage_dtype(tensor))
+	dtype = tensor_storage_dtype(tensor)
+	if tensor_file_extension(tensor) == ".safetensors":
+		from safetensors.torch import load_file
+
+		tensors = load_file(str(path), device="cpu")
+		if len(tensors) != 1:
+			raise ValueError(f"Expected exactly one tensor in {path}, found {len(tensors)}")
+		stored = next(iter(tensors.values())).contiguous()
+		return load_stored_tensor(stored, rows, cols, dtype)
+	return load_tensor_with_dtype(path, rows, cols, dtype)
 
 def load_f32_tensor(tensor: str, rows: int, cols: int) -> torch.Tensor:
 	path = tensor_path(tensor)

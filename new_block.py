@@ -53,6 +53,7 @@ def create_inputs() -> None:
 
 	store_tensor(x, "x_f32.bin", expected_variance=1.0)
 	store_tensor(x, "x_i8.bin")
+	store_tensor(x, "x_i8.safetensors")
 	store_tensor(sinks_k, "sinks_k_f32.bin", expected_variance=1.0)
 	store_tensor(sinks_k, "sinks_k_i8.bin")
 	store_tensor(sinks_v, "sinks_v_f32.bin", expected_variance=V_SCALE_FIX*V_SCALE_FIX)
@@ -131,13 +132,13 @@ def run_ffn() -> None:
 	)
 	y = gated_residual(x, y_pregate)
 
-	store_tensor(f_pregate, "ffn_f_pregate.bin", expected_variance=1.0)
+	store_tensor(f_pregate, "ffn_f_pregate_bf16.bin", expected_variance=1.0)
 	store_tensor(f_pregate, "ffn_f_pregate_i8.bin")
-	store_tensor(y_pregate, "ffn_y_pregate.bin", expected_variance=1.0)
+	store_tensor(y_pregate, "ffn_y_pregate_bf16.bin", expected_variance=1.0)
 	store_tensor(y_pregate, "ffn_y_pregate_i8.bin")
-	store_tensor(f, "ffn_f.bin", expected_variance=1.0 / GELU_VAR_FIX_2)
+	store_tensor(f, "ffn_f_bf16.bin", expected_variance=1.0 / GELU_VAR_FIX_2)
 	store_tensor(f_f8, "ffn_f_f8.bin")
-	store_tensor(y, "ffn_y.bin")
+	store_tensor(y, "ffn_y_bf16.bin")
 	store_tensor(y, "ffn_y_i8.bin")
 
 #---------------------------------------------------------------------------------------------------
