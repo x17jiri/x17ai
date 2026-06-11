@@ -15,6 +15,8 @@
 #![feature(thin_box)]
 #![feature(box_into_inner)]
 
+use std::num::NonZeroUsize;
+
 use x17ai::device::cuda::{
 	generate_gemm_kernel,
 	GemmEpilogue,
@@ -29,11 +31,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 		a: GemmInput {
 			dtype: DType::Int8,
 			cols: 2048,
+			rows: None,
 			trans: false,
 		},
 		b: GemmInput {
 			dtype: DType::Int8,
 			cols: 2048,
+			rows: NonZeroUsize::new(2048),
 			trans: true,
 		},
 		epilogue: GemmEpilogue::Scale(Scale {

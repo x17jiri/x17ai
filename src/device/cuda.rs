@@ -107,6 +107,7 @@ pub enum GemmEpilogue {
 pub struct GemmInput {
 	pub dtype: DType,
 	pub cols: usize,
+	pub rows: Option<NonZeroUsize>,
 	pub trans: bool,
 }
 
@@ -126,8 +127,8 @@ struct GemmKernelTemplate<'a> {
 	init_name: &'a str,
 	destroy_name: &'a str,
 	a_cols: usize,
-	b_rows: usize,
-	scale_val: &'a str,
+	b_rows: Option<usize>,
+	scale_val: String,
 	scale_dscr: &'a str,
 }
 
@@ -160,14 +161,15 @@ pub fn generate_gemm_kernel(config: &GemmKernelConfig) -> String {
 	}
 
 	let scale_val = scale.value;
+	let b_rows = config.b.rows.map(NonZeroUsize::get);
 	let template = GemmKernelTemplate {
 		namespace_name: "X17GeneratedGemm",
 		launcher_name: "x17ai_kernel_launch",
 		init_name: "x17ai_kernel_init",
 		destroy_name: "x17ai_kernel_destroy",
 		a_cols: config.a.cols,
-		b_rows: config.b.rows,
-		scale_val: &format!("{scale_val:.17e}"),
+		b_rows,
+		scale_val: format!("{scale_val:.17e}"),
 		scale_dscr: scale.description.as_ref(),
 	};
 

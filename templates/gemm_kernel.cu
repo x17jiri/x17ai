@@ -41,6 +41,12 @@ namespace {{namespace_name}} {
 		b8::FixedI8 *b, usize b_rows,
 		b8::FixedI8 *c
 	) {
+		{% match b_rows -%}
+		{% when Some with (rows) %}
+		b_rows = {{rows}};
+		{% when None -%}
+		{% endmatch %}
+
 		auto a_loader = InputLoader(a, a_rows);
 		auto b_loader = WeightLoader(b, b_rows);
 		auto c_writer = Writer(c, b_rows);
@@ -82,14 +88,13 @@ extern "C" {
 	) {
 		dim3 grid = Kernel::output_grid(a_rows, b_rows);
 		kernel<<<grid, Kernel::THREADS_PER_BLOCK, Kernel::SMEM_BYTES>>>(
-			a,
-			b,
-			a_rows,
+			a, a_rows,
+			b, b_rows,
 			c
 		);
 
 		// TODO: is calling cudaGetLastError() efficient?
-		// Could I get the code some other way?
+		// Could I get the error code some other way?
 		cudaError_t err = cudaGetLastError();
 
 		static_assert(cudaSuccess == 0);
