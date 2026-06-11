@@ -1,5 +1,4 @@
-
-use std::{ptr::NonNull};
+use std::ptr::NonNull;
 
 use crate::{DeviceAllocError, ErrPack, TensorOpError};
 

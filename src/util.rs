@@ -7,8 +7,8 @@
 
 use std::convert::Infallible;
 
-pub mod intrusive_rc;
 pub mod ffi_buffer;
+pub mod intrusive_rc;
 
 //--------------------------------------------------------------------------------------------------
 

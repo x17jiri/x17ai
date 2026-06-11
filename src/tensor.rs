@@ -5,7 +5,7 @@
 //
 //------------------------------------------------------------------------------
 
-use std::hint::{cold_path};
+use std::hint::cold_path;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
@@ -25,7 +25,7 @@ pub struct Tensor {
 
 	device: Rc<dyn Device>,
 
-	shape: Box<[usize]>
+	shape: Box<[usize]>,
 }
 
 impl Tensor {
@@ -63,7 +63,7 @@ impl Tensor {
 			result.device.upload_data(
 				NonNull::from_ref(literal.data()).cast(),
 				result.device_ptr,
-				literal.data().len()
+				literal.data().len(),
 			)?;
 		}
 		Ok(result)

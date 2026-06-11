@@ -173,13 +173,11 @@ namespace b8 {
 
 	template<
 		typename T,
-		const usize _GN,
 		const usize _M_PER_BLOCK = 0,
 		const usize _N_PER_BLOCK = 0
 	>
 	requires(sizeof(T) == 1)
 	struct MatrixWriter {
-		static constexpr usize GN = _GN;
 		static constexpr usize M_PER_BLOCK = _M_PER_BLOCK;
 		static constexpr usize N_PER_BLOCK = _N_PER_BLOCK;
 		static constexpr usize SMEM_BYTES = 0;
@@ -187,9 +185,9 @@ namespace b8 {
 		T *gC;
 		usize c_stride;
 
-		X17_DEVICE MatrixWriter(T *gC):
+		X17_DEVICE MatrixWriter(T *gC, usize c_stride):
 			gC(gC),
-			c_stride(GN)
+			c_stride(c_stride)
 		{}
 
 		template<const u32 CAP>
@@ -210,12 +208,12 @@ namespace b8 {
 		}
 	};
 
-	template<const usize GN, const usize M_PER_BLOCK, const usize N_PER_BLOCK, const f64 SCALE>
-	struct FixedI8MatrixWriter: MatrixWriter<FixedI8, GN, M_PER_BLOCK, N_PER_BLOCK> {
-		using Base = MatrixWriter<FixedI8, GN, M_PER_BLOCK, N_PER_BLOCK>;
+	template<usize M_PER_BLOCK, usize N_PER_BLOCK, f64 SCALE>
+	struct FixedI8MatrixWriter: MatrixWriter<FixedI8, M_PER_BLOCK, N_PER_BLOCK> {
+		using Base = MatrixWriter<FixedI8, M_PER_BLOCK, N_PER_BLOCK>;
 
-		X17_DEVICE FixedI8MatrixWriter(FixedI8 *gC):
-			Base(gC)
+		X17_DEVICE FixedI8MatrixWriter(FixedI8 *gC, usize c_stride):
+			Base(gC, c_stride)
 		{}
 
 		X17_DEVICE void conv(b32::Fragment_16x16<f32> const &inp, Fragment_16x16<FixedI8> &out) {
@@ -299,12 +297,12 @@ namespace b8 {
 		}
 	};
 
-	template<const usize GN, const usize M_PER_BLOCK, const usize N_PER_BLOCK, const usize FAN_IN>
-	struct E4m3MatrixGeGluWriter: MatrixWriter<E4m3, GN, M_PER_BLOCK, N_PER_BLOCK> {
-		using Base = MatrixWriter<E4m3, GN, M_PER_BLOCK, N_PER_BLOCK>;
+	template<usize M_PER_BLOCK, usize N_PER_BLOCK, usize FAN_IN>
+	struct E4m3MatrixGeGluWriter: MatrixWriter<E4m3, M_PER_BLOCK, N_PER_BLOCK> {
+		using Base = MatrixWriter<E4m3, M_PER_BLOCK, N_PER_BLOCK>;
 
-		X17_DEVICE E4m3MatrixGeGluWriter(E4m3 *gC):
-			Base(gC)
+		X17_DEVICE E4m3MatrixGeGluWriter(E4m3 *gC, usize c_stride):
+			Base(gC, c_stride)
 		{}
 
 		X17_DEVICE E4m3 geglu(b32::Fragment_8x8<i32> frag) {
@@ -397,9 +395,9 @@ namespace b8 {
 		}
 	};
 
-	template<const usize GN, const usize M_PER_BLOCK, const usize N_PER_BLOCK, const f64 SCALE>
-	struct FixedI8MatrixResidualWriter: MatrixWriter<FixedI8, GN, M_PER_BLOCK, N_PER_BLOCK> {
-		using Base = MatrixWriter<FixedI8, GN, M_PER_BLOCK, N_PER_BLOCK>;
+	template<usize GN, usize M_PER_BLOCK, usize N_PER_BLOCK, f64 SCALE>
+	struct FixedI8MatrixResidualWriter: MatrixWriter<FixedI8, M_PER_BLOCK, N_PER_BLOCK> {
+		using Base = MatrixWriter<FixedI8, M_PER_BLOCK, N_PER_BLOCK>;
 		using GResidual = GMatrixDynSize<FixedI8, GN>;
 		using SResidual = SMatrix<FixedI8, M_PER_BLOCK, N_PER_BLOCK>;
 
@@ -413,7 +411,7 @@ namespace b8 {
 		usize residualCol0;
 
 		X17_DEVICE FixedI8MatrixResidualWriter(FixedI8 *gC, FixedI8 *gResidual):
-			Base(gC),
+			Base(gC, GN),
 			gResidual(gResidual),
 			sResidual(),
 			residualRow0(0),

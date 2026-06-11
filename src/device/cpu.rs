@@ -5,7 +5,8 @@
 //
 //------------------------------------------------------------------------------
 
-use std::{hint::cold_path, ptr::NonNull};
+use std::hint::cold_path;
+use std::ptr::NonNull;
 use std::rc::Rc;
 
 use crate::{DeviceAllocError, ErrPack, TensorOpError};
@@ -58,8 +59,7 @@ impl Device for CPUDevice {
 		let underlying_elems = bytes.div_ceil(size_of::<UnderlyingElement>());
 		unsafe {
 			let layout =
-				std::alloc::Layout::array::<UnderlyingElement>(underlying_elems)
-					.unwrap_unchecked();
+				std::alloc::Layout::array::<UnderlyingElement>(underlying_elems).unwrap_unchecked();
 			let memory = device_ptr.as_ptr::<u8>();
 			std::alloc::dealloc(memory, layout);
 		}

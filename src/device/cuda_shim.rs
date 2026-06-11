@@ -37,10 +37,8 @@ unsafe extern "C" {
 
 	fn x17ai_cuda_close_context(ctx: *mut CudaContextHandle, err: FfiBuffer) -> c_int;
 
-	fn x17ai_cuda_open_stream(
-		ctx: *mut CudaContextHandle,
-		err: FfiBuffer,
-	) -> *mut CudaStreamHandle;
+	fn x17ai_cuda_open_stream(ctx: *mut CudaContextHandle, err: FfiBuffer)
+	-> *mut CudaStreamHandle;
 
 	fn x17ai_cuda_close_stream(stream: *mut CudaStreamHandle, err: FfiBuffer) -> c_int;
 

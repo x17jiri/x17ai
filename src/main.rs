@@ -17,13 +17,7 @@
 
 use std::num::NonZeroUsize;
 
-use x17ai::device::cuda::{
-	generate_gemm_kernel,
-	GemmEpilogue,
-	GemmInput,
-	GemmKernelConfig,
-	Scale,
-};
+use x17ai::device::cuda::{GemmEpilogue, GemmInput, GemmKernel, GemmKernelConfig, Scale};
 use x17ai::dtype::DType;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -47,6 +41,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 		c_dtype: DType::Int8,
 	};
 
-	println!("{}", generate_gemm_kernel(&config));
+	let kernel = GemmKernel::new("attn_q_fwd", &config)?;
+	println!("source: {}", kernel.source_path.display());
+	println!("library: {}", kernel.library_path.display());
 	Ok(())
 }

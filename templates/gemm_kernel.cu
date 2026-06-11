@@ -7,7 +7,7 @@
 #include "../../cuda/utils.cuh"
 #include "../../cuda/gemm_b8.cuh"
 
-namespace {{namespace_name}} {
+namespace {
 	static constexpr usize A_COLS = {{a_cols}};
 	static constexpr usize B_COLS = A_COLS;
 
@@ -54,10 +54,8 @@ namespace {{namespace_name}} {
 	}
 }
 
-using namespace {{namespace_name}};
-
 extern "C" {
-	usize {{init_name}}() {
+	usize x17ai_kernel_init() {
 		cudaError_t err = cudaFuncSetAttribute(
 			kernel,
 			cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -77,11 +75,11 @@ extern "C" {
 		return usize(err);
 	}
 
-	usize {{destroy_name}}() {
+	usize x17ai_kernel_deinit() {
 		return 0;
 	}
 
-	usize {{launcher_name}}(
+	usize x17ai_kernel_launch(
 		b8::FixedI8 *a, usize a_rows,
 		b8::FixedI8 *b, usize b_rows,
 		b8::FixedI8 *c

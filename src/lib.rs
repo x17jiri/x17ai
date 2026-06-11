@@ -107,9 +107,9 @@ use std::convert::Infallible;
 
 pub mod device;
 pub mod dtype;
+pub mod literal;
 pub mod shape;
 pub mod tensor;
-pub mod literal;
 pub mod util;
 
 #[derive(Copy, Clone, Debug)]
@@ -140,7 +140,7 @@ impl From<ShapeOverflowError> for ErrPack<TensorOpError> {
 	fn from(_: ShapeOverflowError) -> ErrPack<TensorOpError> {
 		ErrPack {
 			code: TensorOpError::ShapeOverflow,
-			extra: None
+			extra: None,
 		}
 	}
 }
@@ -155,7 +155,7 @@ impl From<DeviceAllocError> for ErrPack<TensorOpError> {
 	fn from(_: DeviceAllocError) -> ErrPack<TensorOpError> {
 		ErrPack {
 			code: TensorOpError::DeviceAlloc,
-			extra: None
+			extra: None,
 		}
 	}
 }
@@ -170,7 +170,7 @@ impl From<dtype::UnsupportedDTypeError> for ErrPack<TensorOpError> {
 	fn from(_: dtype::UnsupportedDTypeError) -> ErrPack<TensorOpError> {
 		ErrPack {
 			code: TensorOpError::UnsupportedDType,
-			extra: None
+			extra: None,
 		}
 	}
 }
@@ -182,7 +182,7 @@ impl From<std::io::Error> for ErrPack<TensorOpError> {
 			extra: Some(Box::new(ErrExtra {
 				message: "failed to read tensor file".into(),
 				nested: Some(Box::new(err)),
-			}))
+			})),
 		}
 	}
 }
@@ -194,7 +194,7 @@ impl From<safetensors::SafeTensorError> for ErrPack<TensorOpError> {
 			extra: Some(Box::new(ErrExtra {
 				message: "invalid safetensors file".into(),
 				nested: Some(Box::new(err)),
-			}))
+			})),
 		}
 	}
 }
@@ -207,10 +207,7 @@ impl From<AllocError> for TensorOpError {
 
 impl From<AllocError> for ErrPack<TensorOpError> {
 	fn from(_: AllocError) -> ErrPack<TensorOpError> {
-		ErrPack {
-			code: TensorOpError::Alloc,
-			extra: None
-		}
+		ErrPack { code: TensorOpError::Alloc, extra: None }
 	}
 }
 

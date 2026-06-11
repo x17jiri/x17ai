@@ -1,8 +1,7 @@
-
 use std::hint::{cold_path, likely};
 
-use crate::{dtype::DType, ShapeOverflowError};
-
+use crate::ShapeOverflowError;
+use crate::dtype::DType;
 
 #[derive(Clone, Copy)]
 pub struct ShapeHelper<'a> {

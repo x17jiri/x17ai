@@ -1,6 +1,5 @@
 use crate::dtype::{DType, HasDType};
 
-
 pub trait TensorLiteral {
 	fn dtype(&self) -> DType;
 	fn shape(&self) -> &[usize];
