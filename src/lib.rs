@@ -99,6 +99,7 @@
 #![allow(clippy::collapsible_else_if)]
 #![allow(clippy::single_match_else)]
 #![allow(clippy::manual_is_multiple_of)]
+#![allow(clippy::manual_let_else)]
 
 use std::alloc::AllocError;
 use std::borrow::Cow;

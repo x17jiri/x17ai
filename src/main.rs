@@ -20,6 +20,7 @@ use x17ai::device::cuda::{
 	GemmEpilogue,
 	GemmInput,
 	GemmKernelConfig,
+	Scale,
 };
 use x17ai::dtype::DType;
 
@@ -35,7 +36,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			cols: 2048,
 			trans: true,
 		},
-		epilogue: GemmEpilogue::Scale(1.0 / f64::sqrt(2048.0)),
+		epilogue: GemmEpilogue::Scale(Scale {
+			value: 1.0 / f64::sqrt(2048.0),
+			description: "1 / sqrt(2048)".into(),
+		}),
 		c_dtype: DType::Int8,
 	};
 

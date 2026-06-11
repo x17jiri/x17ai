@@ -5,6 +5,8 @@
 //
 //------------------------------------------------------------------------------
 
+use std::borrow::Cow;
+use std::num::NonZeroUsize;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
@@ -71,27 +73,32 @@ impl Device for CudaDevice {
 
 //--------------------------------------------------------------------------------------------------
 
+pub struct Scale {
+	pub value: f64,
+	pub description: Cow<'static, str>,
+}
+
 pub struct RMSNormEpulogue {
 	pub head_dim: usize,
 	pub sep_dim: usize,
 
-	pub head_scale: f64,
-	pub sep_scale: f64,
+	pub head_scale: Scale,
+	pub sep_scale: Scale,
 }
 
 pub struct ResidualEpilogue {
-	pub old_scale: f64,
-	pub new_scale: f64,
-	pub out_scale: f64,
+	pub old_scale: Scale,
+	pub new_scale: Scale,
+	pub out_scale: Scale,
 }
 
 pub struct GeGluEpilogue {
-	pub inp_scale: f64,
-	pub out_scale: f64,
+	pub inp_scale: Scale,
+	pub out_scale: Scale,
 }
 
 pub enum GemmEpilogue {
-	Scale(f64),
+	Scale(Scale),
 	RMSNorm(RMSNormEpulogue),
 	Residual(ResidualEpilogue),
 	GeGlu(GeGluEpilogue),
@@ -113,12 +120,15 @@ pub struct GemmKernelConfig {
 
 #[derive(Template)]
 #[template(escape = "none", path = "gemm_kernel.cu")]
-struct GemmKernelTemplate {
-	namespace_name: &'static str,
-	launcher_name: &'static str,
+struct GemmKernelTemplate<'a> {
+	namespace_name: &'a str,
+	launcher_name: &'a str,
+	init_name: &'a str,
+	destroy_name: &'a str,
 	a_cols: usize,
-	c_cols: usize,
-	scale: String,
+	b_rows: usize,
+	scale_val: &'a str,
+	scale_dscr: &'a str,
 }
 
 pub fn generate_gemm_kernel(config: &GemmKernelConfig) -> String {
@@ -141,20 +151,24 @@ pub fn generate_gemm_kernel(config: &GemmKernelConfig) -> String {
 		todo!("support empty GEMM dimensions");
 	}
 
-	let scale = match config.epilogue {
+	let scale = match &config.epilogue {
 		GemmEpilogue::Scale(scale) => scale,
 		_ => todo!("support GEMM epilogues other than scale"),
 	};
-	if !scale.is_finite() {
+	if !scale.value.is_finite() {
 		todo!("support non-finite GEMM scale values");
 	}
 
+	let scale_val = scale.value;
 	let template = GemmKernelTemplate {
 		namespace_name: "X17GeneratedGemm",
-		launcher_name: "x17ai_gemm_i8_launch",
+		launcher_name: "x17ai_kernel_launch",
+		init_name: "x17ai_kernel_init",
+		destroy_name: "x17ai_kernel_destroy",
 		a_cols: config.a.cols,
-		c_cols: config.b.cols,
-		scale: format!("{scale:.17e}"),
+		b_rows: config.b.rows,
+		scale_val: &format!("{scale_val:.17e}"),
+		scale_dscr: scale.description.as_ref(),
 	};
 
 	template.render().unwrap_or_else(|_| todo!("render GEMM kernel template"))

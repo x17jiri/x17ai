@@ -4,14 +4,12 @@
 //
 //------------------------------------------------------------------------------
 
-#include "block.config.hpp"
-#include "utils2.cuh"
-#include "cuda/utils_b8.cuh"
-#include "cuda/gemm_b8.cuh"
+#include "../../cuda/utils.cuh"
+#include "../../cuda/gemm_b8.cuh"
 
 namespace {{namespace_name}} {
 	static constexpr usize A_COLS = {{a_cols}};
-	static constexpr usize C_COLS = {{c_cols}};
+	static constexpr usize B_COLS = A_COLS;
 
 	using InputLoader =
 		b8::MatrixLoader<
@@ -24,72 +22,77 @@ namespace {{namespace_name}} {
 		b8::MatrixTransLoader<
 			b8::MatrixLoader<
 				b8::FixedI8,
-				A_COLS,
+				B_COLS,
 				128, 128
 			>
 		>;
 
 	using Writer = b8::FixedI8MatrixWriter<
-		C_COLS,
 		InputLoader::M,
 		WeightLoader::K,
-		{{scale}}
+		{{scale_val}} // {{scale_dscr}}
 	>;
 
 	using Kernel = b8::Gemm<InputLoader, WeightLoader, Writer>;
 
 	X17_KERNEL(Kernel::THREADS_PER_BLOCK)
 	void kernel(
-		b8::FixedI8 *a,
-		b8::FixedI8 *b,
-		usize a_rows,
+		b8::FixedI8 *a, usize a_rows,
+		b8::FixedI8 *b, usize b_rows,
 		b8::FixedI8 *c
 	) {
 		auto a_loader = InputLoader(a, a_rows);
-		auto b_loader = WeightLoader(b, C_COLS);
-		auto c_writer = Writer(c);
+		auto b_loader = WeightLoader(b, b_rows);
+		auto c_writer = Writer(c, b_rows);
 		Kernel().run(a_loader, b_loader, c_writer);
 	}
 }
 
-extern "C" int {{launcher_name}}(
-	b8::FixedI8 *a,
-	b8::FixedI8 *b,
-	usize a_rows,
-	b8::FixedI8 *c
-) {
-	using namespace {{namespace_name}};
+using namespace {{namespace_name}};
 
-	cudaError_t err = cudaFuncSetAttribute(
-		kernel,
-		cudaFuncAttributeMaxDynamicSharedMemorySize,
-		Kernel::SMEM_BYTES
-	);
-	if (err != cudaSuccess) {
-		return int(err);
+extern "C" {
+	usize {{init_name}}() {
+		cudaError_t err = cudaFuncSetAttribute(
+			kernel,
+			cudaFuncAttributeMaxDynamicSharedMemorySize,
+			Kernel::SMEM_BYTES
+		);
+		if (err != cudaSuccess) {
+			return int(err);
+		}
+
+		err = cudaFuncSetAttribute(
+			kernel,
+			cudaFuncAttributePreferredSharedMemoryCarveout,
+			100
+		);
+
+		static_assert(cudaSuccess == 0);
+		return usize(err);
 	}
 
-	err = cudaFuncSetAttribute(
-		kernel,
-		cudaFuncAttributePreferredSharedMemoryCarveout,
-		100
-	);
-	if (err != cudaSuccess) {
-		return int(err);
+	usize {{destroy_name}}() {
+		return 0;
 	}
 
-	dim3 grid = Kernel::output_grid(a_rows, C_COLS);
-	kernel<<<grid, Kernel::THREADS_PER_BLOCK, Kernel::SMEM_BYTES>>>(
-		a,
-		b,
-		a_rows,
-		c
-	);
+	usize {{launcher_name}}(
+		b8::FixedI8 *a, usize a_rows,
+		b8::FixedI8 *b, usize b_rows,
+		b8::FixedI8 *c
+	) {
+		dim3 grid = Kernel::output_grid(a_rows, b_rows);
+		kernel<<<grid, Kernel::THREADS_PER_BLOCK, Kernel::SMEM_BYTES>>>(
+			a,
+			b,
+			a_rows,
+			c
+		);
 
-	err = cudaGetLastError();
-	if (err != cudaSuccess) {
-		return int(err);
+		// TODO: is calling cudaGetLastError() efficient?
+		// Could I get the code some other way?
+		cudaError_t err = cudaGetLastError();
+
+		static_assert(cudaSuccess == 0);
+		return usize(err);
 	}
-
-	return 0;
 }
