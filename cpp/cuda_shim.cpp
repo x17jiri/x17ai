@@ -308,6 +308,13 @@ extern "C" {
 		}
 	}
 
+	void *x17ai_cuda_context_ptr(CudaContextHandle *context) noexcept {
+		assert_no_context();
+		assert(cuda_initialized.load(std::memory_order_acquire));
+		assert(context != nullptr);
+		return static_cast<void *>(context->context);
+	}
+
 	CudaStreamHandle *x17ai_cuda_open_stream(CudaContextHandle *ctx, FfiBuffer err) noexcept {
 		try {
 			assert_no_context();

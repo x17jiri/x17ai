@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let q = Tensor::new_empty(&[n_inputs, q_proj_outputs], DType::Int8, device.clone())?;
 	let kernel_config = attn_q_kernel_config(model_dim, q_proj_outputs)?;
 	let mut diagnostics = Diagnostics::new();
-	let kernel = match GemmKernel::new("attn_q_fwd", &kernel_config, &mut diagnostics) {
+	let kernel = match GemmKernel::new(device.as_ref(), "attn_q_fwd", &kernel_config, &mut diagnostics) {
 		Ok(kernel) => {
 			print_diagnostics(&diagnostics);
 			kernel

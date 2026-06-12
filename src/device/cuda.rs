@@ -181,7 +181,9 @@ pub fn generate_gemm_kernel(config: &GemmKernelConfig) -> String {
 
 //--------------------------------------------------------------------------------------------------
 
-type KernelLifecycleFn = unsafe extern "C" fn() -> usize;
+type KernelInitFn = unsafe extern "C" fn(*mut c_void) -> usize;
+
+type KernelDeinitFn = unsafe extern "C" fn() -> usize;
 
 type KernelLaunchFn = unsafe extern "C" fn(
 	*mut CudaStreamHandle,
@@ -219,11 +221,12 @@ pub struct GemmKernel {
 
 	_library: DynamicLibrary,
 	launch_fn: KernelLaunchFn,
-	deinit_fn: KernelLifecycleFn,
+	deinit_fn: KernelDeinitFn,
 }
 
 impl GemmKernel {
 	pub fn new(
+		device: &CudaDevice,
 		kernel_name: impl AsRef<str>,
 		config: &GemmKernelConfig,
 		diag: &mut Diagnostics,
@@ -283,7 +286,7 @@ impl GemmKernel {
 			},
 		};
 		let init_fn = match library.get_symbol("x17ai_kernel_init") {
-			Ok(sym) => unsafe { std::mem::transmute::<*mut c_void, KernelLifecycleFn>(sym) },
+			Ok(sym) => unsafe { std::mem::transmute::<*mut c_void, KernelInitFn>(sym) },
 			Err(msg) => {
 				cold_path();
 				diag.add_error(msg);
@@ -291,7 +294,7 @@ impl GemmKernel {
 			},
 		};
 		let deinit_fn = match library.get_symbol("x17ai_kernel_deinit") {
-			Ok(sym) => unsafe { std::mem::transmute::<*mut c_void, KernelLifecycleFn>(sym) },
+			Ok(sym) => unsafe { std::mem::transmute::<*mut c_void, KernelDeinitFn>(sym) },
 			Err(msg) => {
 				cold_path();
 				diag.add_error(msg);
@@ -307,7 +310,7 @@ impl GemmKernel {
 			},
 		};
 
-		let err = unsafe { init_fn() };
+		let err = unsafe { init_fn(device.stream.cuda_context()) };
 		if err != 0 {
 			cold_path();
 			diag.add_error(format!("x17ai_kernel_init failed with CUDA error code {err}"));

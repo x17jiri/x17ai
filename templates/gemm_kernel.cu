@@ -12,6 +12,20 @@
 #include <nvrtc.h>
 
 namespace {
+	usize check_no_context() {
+		#ifndef NDEBUG
+		CUcontext current_ctx = nullptr;
+		CUresult err = cuCtxGetCurrent(&current_ctx);
+		if (err != CUDA_SUCCESS) {
+			return usize(err);
+		}
+		if (current_ctx != nullptr) {
+			return usize(CUDA_ERROR_INVALID_CONTEXT);
+		}
+		#endif
+		return 0;
+	}
+
 	static constexpr usize A_COLS = {{a_cols}};
 	static constexpr usize B_COLS = A_COLS;
 
@@ -59,24 +73,54 @@ namespace {
 }
 
 extern "C" {
-	usize x17ai_kernel_init() {
+	usize x17ai_kernel_init(CUcontext cuda_context) {
+		if (cuda_context == nullptr) {
+			return usize(CUDA_ERROR_INVALID_CONTEXT);
+		}
+
+		usize result = check_no_context();
+		if (result != 0) {
+			return result;
+		}
+
+		CUresult ctx_err = cuCtxPushCurrent(cuda_context);
+		if (ctx_err != CUDA_SUCCESS) {
+			return usize(ctx_err);
+		}
+
 		cudaError_t err = cudaFuncSetAttribute(
 			kernel,
 			cudaFuncAttributeMaxDynamicSharedMemorySize,
 			Kernel::SMEM_BYTES
 		);
 		if (err != cudaSuccess) {
-			return int(err);
+			result = usize(err);
 		}
 
-		err = cudaFuncSetAttribute(
-			kernel,
-			cudaFuncAttributePreferredSharedMemoryCarveout,
-			100
-		);
+		if (result == 0) {
+			err = cudaFuncSetAttribute(
+				kernel,
+				cudaFuncAttributePreferredSharedMemoryCarveout,
+				100
+			);
+			result = usize(err);
+		}
+
+		CUcontext popped_ctx = nullptr;
+		ctx_err = cuCtxPopCurrent(&popped_ctx);
+		if (result == 0 && ctx_err != CUDA_SUCCESS) {
+			result = usize(ctx_err);
+		}
+		if (result == 0 && popped_ctx != cuda_context) {
+			result = usize(CUDA_ERROR_INVALID_CONTEXT);
+		}
+		if (result == 0) {
+			result = check_no_context();
+		}
 
 		static_assert(cudaSuccess == 0);
-		return usize(err);
+		static_assert(CUDA_SUCCESS == 0);
+		return result;
 	}
 
 	usize x17ai_kernel_deinit() {
@@ -91,6 +135,11 @@ extern "C" {
 		b8::FixedI8 *b, usize b_rows,
 		b8::FixedI8 *c
 	) {
+		usize result = check_no_context();
+		if (result != 0) {
+			return 5000 + result;
+		}
+
 		dim3 grid = Kernel::output_grid(a_rows, b_rows);
 		kernel<<<grid, Kernel::THREADS_PER_BLOCK, Kernel::SMEM_BYTES, reinterpret_cast<cudaStream_t>(cuda_stream)>>>(
 			a, a_rows,
@@ -100,9 +149,14 @@ extern "C" {
 
 		// TODO: is calling cudaGetLastError() efficient?
 		// Could I get the error code some other way?
-		cudaError_t err = cudaGetLastError();
+		result = check_no_context();
+		if (result != 0) {
+			return 8000 + result;
+		}
+
+		result = cudaGetLastError();
 
 		static_assert(cudaSuccess == 0);
-		return usize(err);
+		return result;
 	}
 }

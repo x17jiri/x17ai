@@ -6,7 +6,7 @@
 //------------------------------------------------------------------------------
 
 use std::borrow::Cow;
-use std::ffi::c_int;
+use std::ffi::{c_int, c_void};
 use std::hint::cold_path;
 use std::ptr::NonNull;
 
@@ -36,6 +36,8 @@ unsafe extern "C" {
 	fn x17ai_cuda_open_context(device_id: usize, err: FfiBuffer) -> *mut CudaContextHandle;
 
 	fn x17ai_cuda_close_context(ctx: *mut CudaContextHandle, err: FfiBuffer) -> c_int;
+
+	fn x17ai_cuda_context_ptr(ctx: *mut CudaContextHandle) -> *mut c_void;
 
 	fn x17ai_cuda_open_stream(ctx: *mut CudaContextHandle, err: FfiBuffer)
 	-> *mut CudaStreamHandle;
@@ -221,6 +223,10 @@ impl CudaStream {
 
 	pub fn handle(&self) -> *mut CudaStreamHandle{
 		self.stream.as_ptr()
+	}
+
+	pub fn cuda_context(&self) -> *mut c_void {
+		unsafe { x17ai_cuda_context_ptr(self.ctx.as_ptr()) }
 	}
 }
 
