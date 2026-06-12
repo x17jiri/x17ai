@@ -6,30 +6,63 @@ from pathlib import Path
 import torch
 
 
-def load_i8(path: str, shape: tuple[int, ...] | None = None) -> torch.Tensor:
-	raw = Path(path).read_bytes()
+def load_i8(path: str | Path, shape: tuple[int, ...] | None = None) -> torch.Tensor:
+	path = Path(path)
+	if path.suffix == ".safetensors":
+		from safetensors.torch import load_file
+
+		tensors = load_file(str(path), device="cpu")
+		if len(tensors) != 1:
+			raise ValueError(f"Expected exactly one tensor in {path}, found {len(tensors)}")
+		data = next(iter(tensors.values())).contiguous()
+		if data.dtype != torch.int8:
+			raise ValueError(f"Expected {path} to contain int8 tensor, got {data.dtype}")
+		if shape is not None:
+			return data.reshape(shape)
+		return data
+
+	raw = path.read_bytes()
 	data = torch.frombuffer(bytearray(raw), dtype=torch.int8)
 	if shape is not None:
 		return data.reshape(shape)
 	return data
 
 
-def infer_shape(file_a: str, file_b: str, shape_args: list[int] | None) -> tuple[int, ...]:
-	bytes_a = Path(file_a).stat().st_size
-	bytes_b = Path(file_b).stat().st_size
-	if bytes_a != bytes_b:
-		raise ValueError(f"File sizes differ: {file_a}={bytes_a} bytes, {file_b}={bytes_b} bytes")
+def elem_count(shape: tuple[int, ...]) -> int:
+	count = 1
+	for dim in shape:
+		count *= dim
+	return count
 
-	elem_count = bytes_a
+
+def file_shape(path: str) -> tuple[int, ...]:
+	path_obj = Path(path)
+	if path_obj.suffix == ".safetensors":
+		return tuple(load_i8(path_obj).shape)
+	return (path_obj.stat().st_size,)
+
+
+def infer_shape(file_a: str, file_b: str, shape_args: list[int] | None) -> tuple[int, ...]:
+	shape_a = file_shape(file_a)
+	shape_b = file_shape(file_b)
+	elems_a = elem_count(shape_a)
+	elems_b = elem_count(shape_b)
+	if elems_a != elems_b:
+		raise ValueError(f"Element counts differ: {file_a}={elems_a}, {file_b}={elems_b}")
+
 	if shape_args is None:
-		return (elem_count,)
+		if shape_a == shape_b:
+			return shape_a
+		if Path(file_a).suffix == ".safetensors":
+			return shape_a
+		if Path(file_b).suffix == ".safetensors":
+			return shape_b
+		return (elems_a,)
 
 	shape = tuple(shape_args)
-	shape_elems = 1
-	for dim in shape:
-		shape_elems *= dim
-	if shape_elems != elem_count:
-		raise ValueError(f"Provided shape {shape} has {shape_elems} elements, file has {elem_count}")
+	shape_elems = elem_count(shape)
+	if shape_elems != elems_a:
+		raise ValueError(f"Provided shape {shape} has {shape_elems} elements, files have {elems_a}")
 	return shape
 
 
@@ -84,9 +117,9 @@ def verify_i8(file_a: str, file_b: str, shape: tuple[int, ...]) -> None:
 
 
 def main() -> None:
-	parser = argparse.ArgumentParser(description="Compare two int8 tensor .bin files")
-	parser.add_argument("file_a", help="Reference tensor .bin file")
-	parser.add_argument("file_b", help="Other tensor .bin file")
+	parser = argparse.ArgumentParser(description="Compare two int8 tensor .bin or .safetensors files")
+	parser.add_argument("file_a", help="Reference tensor file")
+	parser.add_argument("file_b", help="Other tensor file")
 	parser.add_argument("--shape", type=int, nargs="+", default=None, help="Optional tensor shape")
 	args = parser.parse_args()
 
