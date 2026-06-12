@@ -105,6 +105,8 @@ use std::alloc::AllocError;
 use std::borrow::Cow;
 use std::convert::Infallible;
 
+use crate::tensor::Tensor;
+
 pub mod device;
 pub mod dtype;
 pub mod literal;
@@ -119,6 +121,9 @@ pub struct ShapeOverflowError;
 pub struct DeviceAllocError;
 
 #[derive(Copy, Clone, Debug)]
+pub struct KernelGeneratorError;
+
+#[derive(Copy, Clone, Debug)]
 pub enum TensorOpError {
 	ShapeOverflow,
 	Alloc,
@@ -127,7 +132,20 @@ pub enum TensorOpError {
 	IOError,
 	InvalidSafeTensors,
 	Device,
+	KernelGenerator,
 	Other,
+}
+
+impl TensorOpError {
+	pub fn new_io_error(message: String) -> ErrPack<Self> {
+		ErrPack {
+			code: Self::IOError,
+			extra: Some(Box::new(ErrExtra {
+				message: message.into(),
+				nested: None,
+			}))
+		}
+	}
 }
 
 impl From<ShapeOverflowError> for TensorOpError {

@@ -17,9 +17,10 @@ use std::rc::Rc;
 
 use askama::Template;
 
+use crate::device::cuda_shim::CudaStreamHandle;
 use crate::dtype::DType;
 use crate::util::dyn_loader::DynamicLibrary;
-use crate::{DeviceAllocError, ErrExtra, ErrPack, TensorOpError};
+use crate::{DeviceAllocError, ErrExtra, ErrPack, KernelGeneratorError, TensorOpError};
 
 use super::cuda_shim::CudaStream;
 use super::{Device, DevicePtr};
@@ -39,6 +40,10 @@ impl CudaDevice {
 	pub fn new_named(device_id: usize, name: String) -> Result<Rc<Self>, ErrPack<TensorOpError>> {
 		let stream = CudaStream::new(device_id)?;
 		Ok(Rc::new(Self { name, stream }))
+	}
+
+	pub fn synchronize(&self) -> Result<(), ErrPack<TensorOpError>> {
+		self.stream.synchronize()
 	}
 }
 
@@ -178,8 +183,33 @@ pub fn generate_gemm_kernel(config: &GemmKernelConfig) -> String {
 
 type KernelLifecycleFn = unsafe extern "C" fn() -> usize;
 
-type KernelLaunchFn =
-	unsafe extern "C" fn(*mut c_void, usize, *mut c_void, usize, *mut c_void) -> usize;
+type KernelLaunchFn = unsafe extern "C" fn(
+	*mut CudaStreamHandle,
+	*mut c_void, usize,
+	*mut c_void, usize,
+	*mut c_void
+) -> usize;
+
+pub struct Diagnostic {
+	pub is_error: bool,
+	pub message: String,
+}
+
+pub struct Diagnostics {
+	pub list: Vec<Diagnostic>,
+	pub err_count: usize,
+}
+
+impl Diagnostics {
+	pub fn new() -> Diagnostics {
+		Self { list: Vec::new(), err_count: 0 }
+	}
+
+	pub fn add_error(&mut self, message: String) {
+		self.err_count += 1;
+		self.list.push(Diagnostic { is_error: true, message });
+	}
+}
 
 #[derive(Debug)]
 pub struct GemmKernel {
@@ -196,7 +226,8 @@ impl GemmKernel {
 	pub fn new(
 		kernel_name: impl AsRef<str>,
 		config: &GemmKernelConfig,
-	) -> Result<Self, ErrPack<TensorOpError>> {
+		diag: &mut Diagnostics,
+	) -> Result<Self, KernelGeneratorError> {
 		let kernel_name = kernel_name.as_ref();
 		if kernel_name.is_empty()
 			|| kernel_name == "."
@@ -205,7 +236,8 @@ impl GemmKernel {
 			|| kernel_name.contains('\\')
 		{
 			cold_path();
-			return Err(gemm_kernel_error(format!("invalid GEMM kernel name {kernel_name:?}")));
+			diag.add_error(format!("invalid GEMM kernel name {kernel_name:?}"));
+			return Err(KernelGeneratorError);
 		}
 
 		let source = generate_gemm_kernel(config);
@@ -222,10 +254,10 @@ impl GemmKernel {
 			Err(err) => {
 				cold_path();
 				let kernel_dir = kernel_dir.display();
-				return Err(gemm_kernel_io_error(
-					format!("failed to create kernel cache directory {kernel_dir}"),
-					err,
+				diag.add_error(format!(
+					"failed to create kernel cache directory {kernel_dir}: {err}"
 				));
+				return Err(KernelGeneratorError);
 			},
 		};
 		match fs::write(&source_path, source) {
@@ -233,50 +265,53 @@ impl GemmKernel {
 			Err(err) => {
 				cold_path();
 				let source_path = source_path.display();
-				return Err(gemm_kernel_io_error(
-					format!("failed to write generated CUDA source {source_path}"),
-					err,
+				diag.add_error(format!(
+					"failed to write generated CUDA source {source_path}: {err}"
 				));
+				return Err(KernelGeneratorError);
 			},
 		};
 
-		compile_gemm_kernel(nvcc_path, &working_dir, &source_path, &library_path)?;
+		compile_gemm_kernel(nvcc_path, &working_dir, &source_path, &library_path, diag)?;
 
 		let library = match DynamicLibrary::open(&library_path) {
 			Ok(lib) => lib,
 			Err(msg) => {
 				cold_path();
-				return Err(gemm_kernel_error(msg));
+				diag.add_error(msg);
+				return Err(KernelGeneratorError);
 			},
 		};
 		let init_fn = match library.get_symbol("x17ai_kernel_init") {
 			Ok(sym) => unsafe { std::mem::transmute::<*mut c_void, KernelLifecycleFn>(sym) },
 			Err(msg) => {
 				cold_path();
-				return Err(gemm_kernel_error(msg));
+				diag.add_error(msg);
+				return Err(KernelGeneratorError);
 			},
 		};
 		let deinit_fn = match library.get_symbol("x17ai_kernel_deinit") {
 			Ok(sym) => unsafe { std::mem::transmute::<*mut c_void, KernelLifecycleFn>(sym) },
 			Err(msg) => {
 				cold_path();
-				return Err(gemm_kernel_error(msg));
+				diag.add_error(msg);
+				return Err(KernelGeneratorError);
 			},
 		};
 		let launch_fn = match library.get_symbol("x17ai_kernel_launch") {
 			Ok(sym) => unsafe { std::mem::transmute::<*mut c_void, KernelLaunchFn>(sym) },
 			Err(msg) => {
 				cold_path();
-				return Err(gemm_kernel_error(msg));
+				diag.add_error(msg);
+				return Err(KernelGeneratorError);
 			},
 		};
 
 		let err = unsafe { init_fn() };
 		if err != 0 {
 			cold_path();
-			return Err(gemm_kernel_error(format!(
-				"x17ai_kernel_init failed with CUDA error code {err}"
-			)));
+			diag.add_error(format!("x17ai_kernel_init failed with CUDA error code {err}"));
+			return Err(KernelGeneratorError);
 		}
 
 		Ok(Self {
@@ -294,26 +329,28 @@ impl GemmKernel {
 	/// The device pointers must point to valid CUDA buffers with layouts expected by this kernel.
 	pub unsafe fn run(
 		&self,
-		a: DevicePtr,
-		a_rows: usize,
-		b: DevicePtr,
-		b_rows: usize,
+		device: &CudaDevice,
+		a: DevicePtr, a_rows: usize,
+		b: DevicePtr, b_rows: usize,
 		c: DevicePtr,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let err = unsafe {
 			(self.launch_fn)(
-				a.as_ptr::<c_void>(),
-				a_rows,
-				b.as_ptr::<c_void>(),
-				b_rows,
+				device.stream.handle(),
+				a.as_ptr::<c_void>(), a_rows,
+				b.as_ptr::<c_void>(), b_rows,
 				c.as_ptr::<c_void>(),
 			)
 		};
 		if err != 0 {
 			cold_path();
-			return Err(gemm_kernel_error(format!(
-				"x17ai_kernel_launch failed with CUDA error code {err}"
-			)));
+			return Err(ErrPack {
+				code: TensorOpError::Device,
+				extra: Some(Box::new(ErrExtra {
+					message: format!("x17ai_kernel_launch failed with CUDA error code {err}").into(),
+					nested: None,
+				})),
+			});
 		}
 		Ok(())
 	}
@@ -333,7 +370,8 @@ fn compile_gemm_kernel(
 	working_dir: &Path,
 	source_path: &Path,
 	library_path: &Path,
-) -> Result<(), ErrPack<TensorOpError>> {
+	diag: &mut Diagnostics,
+) -> Result<(), KernelGeneratorError> {
 	let output = Command::new(nvcc_path)
 		.current_dir(working_dir)
 		.arg("-arch=sm_86")
@@ -364,46 +402,26 @@ fn compile_gemm_kernel(
 		Ok(o) => o,
 		Err(err) => {
 			cold_path();
-			return Err(gemm_kernel_io_error("failed to run nvcc", err));
+			diag.add_error(format!("failed to run nvcc: {err}"));
+			return Err(KernelGeneratorError);
 		},
 	};
 
 	if !output.status.success() {
 		let stdout = String::from_utf8_lossy(&output.stdout);
 		let stderr = String::from_utf8_lossy(&output.stderr);
-		return Err(gemm_kernel_error(format!(
+		diag.add_error(format!(
 			"nvcc failed while compiling {} to {} (status: {})\nstdout:\n{}\nstderr:\n{}",
 			source_path.display(),
 			library_path.display(),
 			output.status,
 			stdout,
 			stderr,
-		)));
+		));
+		return Err(KernelGeneratorError);
 	}
 
 	Ok(())
-}
-
-//--------------------------------------------------------------------------------------------------
-
-fn gemm_kernel_error(message: impl Into<Cow<'static, str>>) -> ErrPack<TensorOpError> {
-	ErrPack {
-		code: TensorOpError::Device,
-		extra: Some(Box::new(ErrExtra { message: message.into(), nested: None })),
-	}
-}
-
-fn gemm_kernel_io_error(
-	message: impl Into<Cow<'static, str>>,
-	err: std::io::Error,
-) -> ErrPack<TensorOpError> {
-	ErrPack {
-		code: TensorOpError::IOError,
-		extra: Some(Box::new(ErrExtra {
-			message: message.into(),
-			nested: Some(Box::new(err)),
-		})),
-	}
 }
 
 //--------------------------------------------------------------------------------------------------

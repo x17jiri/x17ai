@@ -5,12 +5,12 @@
 //
 //------------------------------------------------------------------------------
 
-use std::borrow::Cow;
 use std::hint::cold_path;
 use std::path::Path;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
+use crate::device::cpu::CPUDevice;
 use crate::device::{Device, DevicePtr};
 use crate::dtype::{DType, UnsupportedDTypeError};
 use crate::literal::TensorLiteral;
@@ -57,6 +57,23 @@ impl Tensor {
 
 	pub fn device_ptr(&self) -> DevicePtr {
 		self.device_ptr
+	}
+
+	#[inline(never)]
+	pub fn to_cpu(self) -> Result<Self, ErrPack<TensorOpError>> {
+		if self.device_is_cpu {
+			return Ok(self);
+		}
+
+		let result = Self::new_empty(self.shape(), self.dtype, CPUDevice::new())?;
+		unsafe {
+			self.device.download_data(
+				self.device_ptr,
+				NonNull::new_unchecked(result.device_ptr.as_ptr::<u8>()),
+				self.bytes(),
+			)?;
+		}
+		Ok(result)
 	}
 
 	#[inline(never)]
@@ -169,44 +186,35 @@ impl Tensor {
 		filename: impl AsRef<Path>,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let path = filename.as_ref();
-		if let Some(parent) = path.parent() {
-			if !parent.as_os_str().is_empty() {
-				std::fs::create_dir_all(parent).map_err(|err| {
-					tensor_io_error(
-						format!("failed to create tensor output directory {}", parent.display()),
-						err,
-					)
-				})?;
+		if let Some(parent) = path.parent() && !parent.as_os_str().is_empty() {
+			match std::fs::create_dir_all(parent) {
+				Ok(()) => {},
+				Err(err) => {
+					return Err(TensorOpError::new_io_error(format!(
+						"failed to create tensor output directory {}: {err}",
+						parent.display()
+					)));
+				},
 			}
 		}
 
-		if self.device_is_cpu {
-			let data = if self.bytes() == 0 {
-				&[]
-			} else {
-				unsafe { std::slice::from_raw_parts(self.device_ptr.as_ptr::<u8>(), self.bytes()) }
-			};
-			self.save_safetensors_data(path, data)
+		if !self.device_is_cpu {
+			return Err(ErrPack {
+				code: TensorOpError::Device,
+				extra: Some(Box::new(ErrExtra {
+					message: "save_safetensors_file requires a CPU tensor; call to_cpu() first".into(),
+					nested: None,
+				})),
+			});
+		}
+
+		let data = if self.bytes() == 0 {
+			&[]
 		} else {
-			let mut data = vec![0_u8; self.bytes()];
-			unsafe {
-				self.device.download_data(
-					self.device_ptr,
-					NonNull::new_unchecked(data.as_mut_ptr()),
-					self.bytes(),
-				)?;
-			}
-			self.save_safetensors_data(path, &data)
-		}
-	}
-
-	fn save_safetensors_data(
-		&self,
-		path: &Path,
-		data: &[u8],
-	) -> Result<(), ErrPack<TensorOpError>> {
+			unsafe { std::slice::from_raw_parts(self.device_ptr.as_ptr::<u8>(), self.bytes()) }
+		};
 		let view = safetensors::tensor::TensorView::new(
-			safetensors_dtype(self.dtype),
+			self.dtype.into(),
 			self.shape.to_vec(),
 			data,
 		)?;
@@ -218,27 +226,5 @@ impl Tensor {
 impl Drop for Tensor {
 	fn drop(&mut self) {
 		unsafe { self.device.drop_buffer(self.device_ptr, self.bytes) };
-	}
-}
-
-fn safetensors_dtype(dtype: DType) -> safetensors::tensor::Dtype {
-	match dtype {
-		DType::E4m3 => safetensors::tensor::Dtype::F8_E4M3,
-		DType::Int8 => safetensors::tensor::Dtype::I8,
-		DType::Bf16 => safetensors::tensor::Dtype::BF16,
-		DType::F32 => safetensors::tensor::Dtype::F32,
-	}
-}
-
-fn tensor_io_error(
-	message: impl Into<Cow<'static, str>>,
-	err: std::io::Error,
-) -> ErrPack<TensorOpError> {
-	ErrPack {
-		code: TensorOpError::IOError,
-		extra: Some(Box::new(ErrExtra {
-			message: message.into(),
-			nested: Some(Box::new(err)),
-		})),
 	}
 }

@@ -152,10 +152,7 @@ struct CudaContextHandle {
 	CUcontext context;
 };
 
-struct CudaStreamHandle {
-	CUcontext context;
-	CUstream stream;
-};
+struct CudaStreamHandle;
 struct CudaModuleHandle;
 struct CudaKernelHandle;
 struct CudaDeviceData;
@@ -170,6 +167,16 @@ inline CudaDeviceData *from_dev_ptr(CUdeviceptr ptr) noexcept {
 	static_assert(sizeof(uintptr_t) >= sizeof(CUdeviceptr));
 	static_assert(sizeof(CudaDeviceData *) >= sizeof(CUdeviceptr));
 	return reinterpret_cast<CudaDeviceData *>(uintptr_t(U(ptr)));
+}
+
+inline void assert_no_context() {
+	#ifndef NDEBUG
+	CUcontext pctx;
+	cuCtxGetCurrent(&pctx);
+	if (pctx != nullptr) {
+		throw "we have context!";
+	}
+	#endif
 }
 
 extern "C" {
@@ -303,6 +310,7 @@ extern "C" {
 
 	CudaStreamHandle *x17ai_cuda_open_stream(CudaContextHandle *ctx, FfiBuffer err) noexcept {
 		try {
+			assert_no_context();
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(ctx != nullptr);
 			CUresult e;
@@ -328,10 +336,8 @@ extern "C" {
 				return nullptr;
 			}
 
-			auto result = std::make_unique<CudaStreamHandle>();
-			result->context = ctx->context;
-			result->stream = cu_stream;
-			return result.release();
+			assert_no_context();
+			return reinterpret_cast<CudaStreamHandle *>(cu_stream);
 		} catch (std::exception const &e) {
 			err.write("x17ai_cuda_open_stream(): exception thrown: ", e.what());
 			return nullptr;
@@ -343,25 +349,19 @@ extern "C" {
 
 	int x17ai_cuda_close_stream(CudaStreamHandle *stream, FfiBuffer err) noexcept {
 		try {
+			assert_no_context();
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(stream != nullptr);
-			auto handle = std::unique_ptr<CudaStreamHandle>(stream);
+			CUstream cu_stream = reinterpret_cast<CUstream>(stream);
 			CUresult e;
 
-			e = cuCtxPushCurrent(handle->context);
-			if (e != CUDA_SUCCESS) [[unlikely]] {
-				err.write("x17ai_cuda_close_stream(): cuCtxPushCurrent() failed: ", e);
-				return -1;
-			}
-
-			e = cuStreamDestroy(handle->stream);
-			CUcontext popped_ctx;
-			[[maybe_unused]] auto _e = cuCtxPopCurrent(&popped_ctx);
-
+			e = cuStreamDestroy(cu_stream);
 			if (e != CUDA_SUCCESS) [[unlikely]] {
 				err.write("x17ai_cuda_close_stream(): cuStreamDestroy() failed: ", e);
 				return -1;
 			}
+
+			assert_no_context();
 			return 0;
 		} catch (std::exception const &e) {
 			err.write("x17ai_cuda_close_stream(): exception thrown: ", e.what());
@@ -372,30 +372,51 @@ extern "C" {
 		}
 	}
 
-	CudaDeviceData *x17ai_cuda_alloc(CudaStreamHandle *stream, usize bytes, FfiBuffer err) noexcept {
+	int x17ai_cuda_synchronize(CudaStreamHandle *stream, FfiBuffer err) noexcept {
 		try {
+			assert_no_context();
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(stream != nullptr);
+			CUstream cu_stream = reinterpret_cast<CUstream>(stream);
 			CUresult e;
 
-			e = cuCtxPushCurrent(stream->context);
+			e = cuStreamSynchronize(cu_stream);
+
 			if (e != CUDA_SUCCESS) [[unlikely]] {
-				err.write("x17ai_cuda_alloc(): cuCtxPushCurrent() failed: ", e);
-				return nullptr;
+				err.write("x17ai_cuda_synchronize(): cuStreamSynchronize() failed: ", e);
+				return -1;
 			}
 
-			CUdeviceptr memory = 0;
-			e = cuMemAlloc(&memory, bytes);
-			CUcontext popped_ctx;
-			[[maybe_unused]] auto _e = cuCtxPopCurrent(&popped_ctx);
+			assert_no_context();
+			return 0;
+		} catch (std::exception const &e) {
+			err.write("x17ai_cuda_synchronize(): exception thrown: ", e.what());
+			return -1;
+		} catch (...) {
+			err.write("x17ai_cuda_synchronize(): unknown exception thrown");
+			return -1;
+		}
+	}
 
+	CudaDeviceData *x17ai_cuda_alloc(CudaStreamHandle *stream, usize bytes, FfiBuffer err) noexcept {
+		try {
+			assert_no_context();
+			assert(cuda_initialized.load(std::memory_order_acquire));
+			assert(stream != nullptr);
+			CUstream cu_stream = reinterpret_cast<CUstream>(stream);
+			CUresult e;
+
+			CUdeviceptr memory = 0;
+			e = cuMemAllocAsync(&memory, bytes, cu_stream);
 			if (e != CUDA_SUCCESS) [[unlikely]] {
-				err.write("x17ai_cuda_alloc(): cuMemAlloc() failed: ", e);
+				err.write("x17ai_cuda_alloc(): cuMemAllocAsync() failed: ", e);
 				return nullptr;
 			}
 			if (memory == 0) [[unlikely]] {
-				err.write("x17ai_cuda_alloc(): cuMemAlloc() returned null pointer");
+				err.write("x17ai_cuda_alloc(): cuMemAllocAsync() returned null pointer");
 			}
+
+			assert_no_context();
 			return from_dev_ptr(memory);
 		} catch (std::exception const &e) {
 			err.write("x17ai_cuda_alloc(): exception thrown: ", e.what());
@@ -408,24 +429,19 @@ extern "C" {
 
 	int x17ai_cuda_free(CudaStreamHandle *stream, CudaDeviceData *ptr, FfiBuffer err) noexcept {
 		try {
+			assert_no_context();
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(stream != nullptr);
+			CUstream cu_stream = reinterpret_cast<CUstream>(stream);
 			CUresult e;
 
-			e = cuCtxPushCurrent(stream->context);
+			e = cuMemFreeAsync(to_dev_ptr(ptr), cu_stream);
 			if (e != CUDA_SUCCESS) [[unlikely]] {
-				err.write("x17ai_cuda_free(): cuCtxPushCurrent() failed: ", e);
+				err.write("x17ai_cuda_free(): cuMemFreeAsync() failed: ", e);
 				return -1;
 			}
 
-			e = cuMemFree(to_dev_ptr(ptr));
-			CUcontext popped_ctx;
-			[[maybe_unused]] auto _e = cuCtxPopCurrent(&popped_ctx);
-
-			if (e != CUDA_SUCCESS) [[unlikely]] {
-				err.write("x17ai_cuda_free(): cuMemFree() failed: ", e);
-				return -1;
-			}
+			assert_no_context();
 			return 0;
 		} catch (std::exception const &e) {
 			err.write("x17ai_cuda_free(): exception thrown: ", e.what());
@@ -445,29 +461,25 @@ extern "C" {
 		FfiBuffer err
 	) noexcept {
 		try {
+			assert_no_context();
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(stream != nullptr);
 			assert(src != nullptr);
+			CUstream cu_stream = reinterpret_cast<CUstream>(stream);
 			CUresult e;
 
-			e = cuCtxPushCurrent(stream->context);
-			if (e != CUDA_SUCCESS) [[unlikely]] {
-				err.write("x17ai_cuda_upload_data(): cuCtxPushCurrent() failed: ", e);
-				return -1;
-			}
-
-			e = cuMemcpyHtoD(
+			e = cuMemcpyHtoDAsync(
 				to_dev_ptr(dst) + offset_bytes,
 				src,
-				size_bytes
+				size_bytes,
+				cu_stream
 			);
-			CUcontext popped_ctx;
-			[[maybe_unused]] auto _e = cuCtxPopCurrent(&popped_ctx);
-
 			if (e != CUDA_SUCCESS) [[unlikely]] {
-				err.write("x17ai_cuda_upload_data(): cuMemcpyHtoD() failed: ", e);
+				err.write("x17ai_cuda_upload_data(): cuMemcpyHtoDAsync() failed: ", e);
 				return -1;
 			}
+
+			assert_no_context();
 			return 0;
 		} catch (std::exception const &e) {
 			err.write("x17ai_cuda_upload_data(): exception thrown: ", e.what());
@@ -487,29 +499,25 @@ extern "C" {
 		FfiBuffer err
 	) noexcept {
 		try {
+			assert_no_context();
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(stream != nullptr);
 			assert(dst != nullptr);
+			CUstream cu_stream = reinterpret_cast<CUstream>(stream);
 			CUresult e;
 
-			e = cuCtxPushCurrent(stream->context);
-			if (e != CUDA_SUCCESS) [[unlikely]] {
-				err.write("x17ai_cuda_download_data(): cuCtxPushCurrent() failed: ", e);
-				return -1;
-			}
-
-			e = cuMemcpyDtoH(
+			e = cuMemcpyDtoHAsync(
 				dst,
 				to_dev_ptr(src) + offset_bytes,
-				size_bytes
+				size_bytes,
+				cu_stream
 			);
-			CUcontext popped_ctx;
-			[[maybe_unused]] auto _e = cuCtxPopCurrent(&popped_ctx);
-
 			if (e != CUDA_SUCCESS) [[unlikely]] {
-				err.write("x17ai_cuda_download_data(): cuMemcpyDtoH() failed: ", e);
+				err.write("x17ai_cuda_download_data(): cuMemcpyDtoHAsync() failed: ", e);
 				return -1;
 			}
+
+			assert_no_context();
 			return 0;
 		} catch (std::exception const &e) {
 			err.write("x17ai_cuda_download_data(): exception thrown: ", e.what());

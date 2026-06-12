@@ -22,13 +22,13 @@ use std::rc::Rc;
 
 use x17ai::device::Device;
 use x17ai::device::cuda::{
-	CudaDevice, GemmEpilogue, GemmInput, GemmKernel, GemmKernelConfig, Scale,
+	CudaDevice, Diagnostics, GemmEpilogue, GemmInput, GemmKernel, GemmKernelConfig, Scale,
 };
 use x17ai::dtype::DType;
 use x17ai::tensor::Tensor;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-	let device: Rc<dyn Device> = CudaDevice::new(0)?;
+	let device = CudaDevice::new(0)?;
 
 	let x = Tensor::from_safetensors_file(tensor_path("x_i8.safetensors"), device.clone())?;
 	let q_weights = Tensor::from_safetensors_file(
@@ -37,10 +37,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	)?;
 	let (n_inputs, model_dim, q_proj_outputs) = validate_attn_q_inputs(&x, &q_weights)?;
 
-	let q = Tensor::new_empty(&[n_inputs, q_proj_outputs], DType::Int8, device)?;
-	let kernel = GemmKernel::new("attn_q_fwd", &attn_q_kernel_config(model_dim, q_proj_outputs)?)?;
+	let q = Tensor::new_empty(&[n_inputs, q_proj_outputs], DType::Int8, device.clone())?;
+	let kernel_config = attn_q_kernel_config(model_dim, q_proj_outputs)?;
+	let mut diagnostics = Diagnostics::new();
+	let kernel = match GemmKernel::new("attn_q_fwd", &kernel_config, &mut diagnostics) {
+		Ok(kernel) => {
+			print_diagnostics(&diagnostics);
+			kernel
+		},
+		Err(_) => {
+			print_diagnostics(&diagnostics);
+			return Err(other_error(format!(
+				"failed to generate attn_q_fwd kernel; {} error(s)",
+				diagnostics.err_count
+			)).into());
+		},
+	};
+	println!("HERE 0");
 	unsafe {
 		kernel.run(
+			device.as_ref(),
 			x.device_ptr(),
 			n_inputs,
 			q_weights.device_ptr(),
@@ -48,6 +64,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			q.device_ptr(),
 		)?;
 	}
+	println!("HERE 1");
+	let q = q.to_cpu()?;
+	println!("HERE 2");
+	device.synchronize()?;
+	println!("HERE 3");
 	q.save_safetensors_file(output_path("q_i8.safetensors"))?;
 
 	println!("loaded x: {:?} {:?}, {} bytes on CUDA", x.shape(), x.dtype(), x.bytes());
@@ -57,7 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 		q_weights.dtype(),
 		q_weights.bytes()
 	);
-	println!("allocated q: {:?} {:?}, {} bytes on CUDA", q.shape(), q.dtype(), q.bytes());
+	println!("allocated q: {:?} {:?}, {} bytes copied to CPU", q.shape(), q.dtype(), q.bytes());
 	println!(
 		"attn_q dimensions: n_inputs={n_inputs}, model_dim={model_dim}, q_proj_outputs={q_proj_outputs}"
 	);
@@ -75,6 +96,16 @@ fn tensor_path(file_name: &str) -> PathBuf {
 
 fn output_path(file_name: &str) -> PathBuf {
 	Path::new("tmp").join("block_rust").join(file_name)
+}
+
+fn print_diagnostics(diagnostics: &Diagnostics) {
+	for diagnostic in &diagnostics.list {
+		if diagnostic.is_error {
+			eprintln!("kernel error: {}", diagnostic.message);
+		} else {
+			println!("kernel diagnostic: {}", diagnostic.message);
+		}
+	}
 }
 
 fn validate_attn_q_inputs(
@@ -113,26 +144,22 @@ fn validate_attn_q_inputs(
 			"expected non-empty attn_q tensors, got x={:?}, attn_q_weights={:?}",
 			x.shape(),
 			q_weights.shape()
-		))
-		.into());
+		)).into());
 	}
 	if weights_cols != model_dim {
 		return Err(invalid_data(format!(
 			"expected attn_q_weights second dimension to match x model dim; got {weights_cols} vs {model_dim}"
-		))
-		.into());
+		)).into());
 	}
 	if n_inputs % 64 != 0 {
 		return Err(invalid_data(format!(
 			"expected x rows to be a multiple of 64 for this kernel, got {n_inputs}"
-		))
-		.into());
+		)).into());
 	}
 	if q_proj_outputs % 128 != 0 {
 		return Err(invalid_data(format!(
 			"expected attn_q output columns to be a multiple of 128 for this kernel, got {q_proj_outputs}"
-		))
-		.into());
+		)).into());
 	}
 
 	Ok((n_inputs, model_dim, q_proj_outputs))
@@ -169,4 +196,8 @@ fn attn_q_kernel_config(
 
 fn invalid_data(message: String) -> Error {
 	Error::new(ErrorKind::InvalidData, message)
+}
+
+fn other_error(message: String) -> Error {
+	Error::new(ErrorKind::Other, message)
 }

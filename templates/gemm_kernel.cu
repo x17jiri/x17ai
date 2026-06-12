@@ -7,6 +7,10 @@
 #include "../../cuda/utils.cuh"
 #include "../../cuda/gemm_b8.cuh"
 
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include <nvrtc.h>
+
 namespace {
 	static constexpr usize A_COLS = {{a_cols}};
 	static constexpr usize B_COLS = A_COLS;
@@ -79,13 +83,16 @@ extern "C" {
 		return 0;
 	}
 
+	struct CudaStreamHandle;
+
 	usize x17ai_kernel_launch(
+		CudaStreamHandle *cuda_stream,
 		b8::FixedI8 *a, usize a_rows,
 		b8::FixedI8 *b, usize b_rows,
 		b8::FixedI8 *c
 	) {
 		dim3 grid = Kernel::output_grid(a_rows, b_rows);
-		kernel<<<grid, Kernel::THREADS_PER_BLOCK, Kernel::SMEM_BYTES>>>(
+		kernel<<<grid, Kernel::THREADS_PER_BLOCK, Kernel::SMEM_BYTES, reinterpret_cast<cudaStream_t>(cuda_stream)>>>(
 			a, a_rows,
 			b, b_rows,
 			c

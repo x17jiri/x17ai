@@ -42,6 +42,8 @@ unsafe extern "C" {
 
 	fn x17ai_cuda_close_stream(stream: *mut CudaStreamHandle, err: FfiBuffer) -> c_int;
 
+	fn x17ai_cuda_synchronize(stream: *mut CudaStreamHandle, err: FfiBuffer) -> c_int;
+
 	fn x17ai_cuda_alloc(
 		stream: *mut CudaStreamHandle,
 		bytes: usize,
@@ -137,6 +139,16 @@ impl CudaStream {
 		Ok(DevicePtr::new(ptr.as_ptr().cast()))
 	}
 
+	pub fn synchronize(&self) -> Result<(), ErrPack<TensorOpError>> {
+		let mut err = CudaError { msg: Vec::new() };
+		let result = unsafe { x17ai_cuda_synchronize(self.stream.as_ptr(), FfiBuffer::new(&mut err.msg)) };
+		if result != 0 {
+			cold_path();
+			return Err(err.into());
+		}
+		Ok(())
+	}
+
 	/// # Safety
 	///
 	/// The pointer must be a valid pointer returned by `alloc`.
@@ -205,6 +217,10 @@ impl CudaStream {
 			return Err(err.into());
 		}
 		Ok(())
+	}
+
+	pub fn handle(&self) -> *mut CudaStreamHandle{
+		self.stream.as_ptr()
 	}
 }
 

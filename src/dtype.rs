@@ -24,6 +24,17 @@ impl HasDType for f32 {
 	const dtype: DType = DType::F32;
 }
 
+impl From<DType> for safetensors::tensor::Dtype {
+	fn from(value: DType) -> Self {
+		match value {
+			DType::E4m3 => safetensors::tensor::Dtype::F8_E4M3,
+			DType::Int8 => safetensors::tensor::Dtype::I8,
+			DType::Bf16 => safetensors::tensor::Dtype::BF16,
+			DType::F32 => safetensors::tensor::Dtype::F32,
+		}
+	}
+}
+
 impl TryFrom<safetensors::tensor::Dtype> for DType {
 	type Error = UnsupportedDTypeError;
 
