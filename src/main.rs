@@ -15,34 +15,158 @@
 #![feature(thin_box)]
 #![feature(box_into_inner)]
 
+use std::io::{Error, ErrorKind};
 use std::num::NonZeroUsize;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
-use x17ai::device::cuda::{GemmEpilogue, GemmInput, GemmKernel, GemmKernelConfig, Scale};
+use x17ai::device::Device;
+use x17ai::device::cuda::{
+	CudaDevice, GemmEpilogue, GemmInput, GemmKernel, GemmKernelConfig, Scale,
+};
 use x17ai::dtype::DType;
+use x17ai::tensor::Tensor;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-	let config = GemmKernelConfig {
+	let device: Rc<dyn Device> = CudaDevice::new(0)?;
+
+	let x = Tensor::from_safetensors_file(tensor_path("x_i8.safetensors"), device.clone())?;
+	let q_weights = Tensor::from_safetensors_file(
+		tensor_path("attn_q_weights_i8.safetensors"),
+		device.clone(),
+	)?;
+	let (n_inputs, model_dim, q_proj_outputs) = validate_attn_q_inputs(&x, &q_weights)?;
+
+	let q = Tensor::new_empty(&[n_inputs, q_proj_outputs], DType::Int8, device)?;
+	let kernel = GemmKernel::new("attn_q_fwd", &attn_q_kernel_config(model_dim, q_proj_outputs)?)?;
+	unsafe {
+		kernel.run(
+			x.device_ptr(),
+			n_inputs,
+			q_weights.device_ptr(),
+			q_proj_outputs,
+			q.device_ptr(),
+		)?;
+	}
+	q.save_safetensors_file(output_path("q_i8.safetensors"))?;
+
+	println!("loaded x: {:?} {:?}, {} bytes on CUDA", x.shape(), x.dtype(), x.bytes());
+	println!(
+		"loaded attn_q_weights: {:?} {:?}, {} bytes on CUDA",
+		q_weights.shape(),
+		q_weights.dtype(),
+		q_weights.bytes()
+	);
+	println!("allocated q: {:?} {:?}, {} bytes on CUDA", q.shape(), q.dtype(), q.bytes());
+	println!(
+		"attn_q dimensions: n_inputs={n_inputs}, model_dim={model_dim}, q_proj_outputs={q_proj_outputs}"
+	);
+	println!("kernel source: {}", kernel.source_path.display());
+	println!("kernel library: {}", kernel.library_path.display());
+	println!("launched attn_q_fwd");
+	println!("stored {}", output_path("q_i8.safetensors").display());
+
+	Ok(())
+}
+
+fn tensor_path(file_name: &str) -> PathBuf {
+	Path::new("tmp").join("block_torch").join(file_name)
+}
+
+fn output_path(file_name: &str) -> PathBuf {
+	Path::new("tmp").join("block_rust").join(file_name)
+}
+
+fn validate_attn_q_inputs(
+	x: &Tensor,
+	q_weights: &Tensor,
+) -> Result<(usize, usize, usize), Box<dyn std::error::Error>> {
+	if x.dtype() != DType::Int8 {
+		return Err(invalid_data(format!("expected x dtype i8, got {}", x.dtype())).into());
+	}
+	if q_weights.dtype() != DType::Int8 {
+		return Err(invalid_data(format!(
+			"expected attn_q_weights dtype i8, got {}",
+			q_weights.dtype()
+		))
+		.into());
+	}
+	if x.shape().len() != 2 {
+		return Err(
+			invalid_data(format!("expected x to be rank 2, got shape {:?}", x.shape())).into()
+		);
+	}
+	if q_weights.shape().len() != 2 {
+		return Err(invalid_data(format!(
+			"expected attn_q_weights to be rank 2, got shape {:?}",
+			q_weights.shape()
+		))
+		.into());
+	}
+
+	let n_inputs = x.shape()[0];
+	let model_dim = x.shape()[1];
+	let q_proj_outputs = q_weights.shape()[0];
+	let weights_cols = q_weights.shape()[1];
+	if n_inputs == 0 || model_dim == 0 || q_proj_outputs == 0 {
+		return Err(invalid_data(format!(
+			"expected non-empty attn_q tensors, got x={:?}, attn_q_weights={:?}",
+			x.shape(),
+			q_weights.shape()
+		))
+		.into());
+	}
+	if weights_cols != model_dim {
+		return Err(invalid_data(format!(
+			"expected attn_q_weights second dimension to match x model dim; got {weights_cols} vs {model_dim}"
+		))
+		.into());
+	}
+	if n_inputs % 64 != 0 {
+		return Err(invalid_data(format!(
+			"expected x rows to be a multiple of 64 for this kernel, got {n_inputs}"
+		))
+		.into());
+	}
+	if q_proj_outputs % 128 != 0 {
+		return Err(invalid_data(format!(
+			"expected attn_q output columns to be a multiple of 128 for this kernel, got {q_proj_outputs}"
+		))
+		.into());
+	}
+
+	Ok((n_inputs, model_dim, q_proj_outputs))
+}
+
+fn attn_q_kernel_config(
+	model_dim: usize,
+	q_proj_outputs: usize,
+) -> Result<GemmKernelConfig, Box<dyn std::error::Error>> {
+	let Some(q_proj_outputs) = NonZeroUsize::new(q_proj_outputs) else {
+		return Err(invalid_data("expected non-zero q projection output count".to_owned()).into());
+	};
+
+	Ok(GemmKernelConfig {
 		a: GemmInput {
 			dtype: DType::Int8,
-			cols: 2048,
+			cols: model_dim,
 			rows: None,
 			trans: false,
 		},
 		b: GemmInput {
 			dtype: DType::Int8,
-			cols: 2048,
-			rows: NonZeroUsize::new(2048),
+			cols: model_dim,
+			rows: Some(q_proj_outputs),
 			trans: true,
 		},
 		epilogue: GemmEpilogue::Scale(Scale {
-			value: 1.0 / f64::sqrt(2048.0),
-			description: "1 / sqrt(2048)".into(),
+			value: 1.0 / f64::sqrt(model_dim as f64),
+			description: format!("1 / sqrt({model_dim})").into(),
 		}),
 		c_dtype: DType::Int8,
-	};
+	})
+}
 
-	let kernel = GemmKernel::new("attn_q_fwd", &config)?;
-	println!("source: {}", kernel.source_path.display());
-	println!("library: {}", kernel.library_path.display());
-	Ok(())
+fn invalid_data(message: String) -> Error {
+	Error::new(ErrorKind::InvalidData, message)
 }

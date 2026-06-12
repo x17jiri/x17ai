@@ -61,6 +61,7 @@ def create_inputs() -> None:
 	store_tensor(attn_temperature, "attn_temperature_f32.bin", expected_variance=0.0)
 	store_tensor(attn_q_weights, "attn_q_weights_f32.bin", expected_variance=1.0)
 	store_tensor(attn_q_weights, "attn_q_weights_i8.bin")
+	store_tensor(attn_q_weights, "attn_q_weights_i8.safetensors")
 	store_tensor(attn_k_weights, "attn_k_weights_f32.bin", expected_variance=1.0)
 	store_tensor(attn_v_weights, "attn_v_weights_f32.bin", expected_variance=V_SCALE_FIX*V_SCALE_FIX)
 	store_tensor(attn_kv_weights, "attn_kv_weights_f32.bin", expected_variance=1.0)
@@ -277,6 +278,7 @@ def run_attn() -> None:
 
 	store_tensor(q, "q_f32.bin", expected_variance=1.0)
 	store_tensor(q_i8, "q_i8.bin")
+	store_tensor(q_i8, "q_i8.safetensors")
 	store_tensor(k, "k_f32.bin", expected_variance=1.0)
 	store_tensor(k_i8, "k_i8.bin")
 	store_tensor(k_rrms.squeeze(-1), "k_rrms_f32.bin")

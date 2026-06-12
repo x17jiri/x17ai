@@ -6,10 +6,10 @@
 //------------------------------------------------------------------------------
 
 use std::borrow::Cow;
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ffi::c_void;
 use std::fs;
+use std::hint::cold_path;
 use std::num::NonZeroUsize;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr::NonNull;
@@ -18,6 +18,7 @@ use std::rc::Rc;
 use askama::Template;
 
 use crate::dtype::DType;
+use crate::util::dyn_loader::DynamicLibrary;
 use crate::{DeviceAllocError, ErrExtra, ErrPack, TensorOpError};
 
 use super::cuda_shim::CudaStream;
@@ -175,18 +176,10 @@ pub fn generate_gemm_kernel(config: &GemmKernelConfig) -> String {
 
 //--------------------------------------------------------------------------------------------------
 
-const RTLD_NOW: c_int = 2;
-const RTLD_LOCAL: c_int = 0;
+type KernelLifecycleFn = unsafe extern "C" fn() -> usize;
 
-#[link(name = "dl")]
-unsafe extern "C" {
-	fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
-	fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-	fn dlclose(handle: *mut c_void) -> c_int;
-	fn dlerror() -> *const c_char;
-}
-
-//--------------------------------------------------------------------------------------------------
+type KernelLaunchFn =
+	unsafe extern "C" fn(*mut c_void, usize, *mut c_void, usize, *mut c_void) -> usize;
 
 #[derive(Debug)]
 pub struct GemmKernel {
@@ -195,8 +188,8 @@ pub struct GemmKernel {
 	pub library_path: PathBuf,
 
 	_library: DynamicLibrary,
-	deinit: KernelLifecycleFn,
-	launch: KernelLaunchFn,
+	launch_fn: KernelLaunchFn,
+	deinit_fn: KernelLifecycleFn,
 }
 
 impl GemmKernel {
@@ -205,41 +198,94 @@ impl GemmKernel {
 		config: &GemmKernelConfig,
 	) -> Result<Self, ErrPack<TensorOpError>> {
 		let kernel_name = kernel_name.as_ref();
-		validate_kernel_name(kernel_name)?;
+		if kernel_name.is_empty()
+			|| kernel_name == "."
+			|| kernel_name == ".."
+			|| kernel_name.contains('/')
+			|| kernel_name.contains('\\')
+		{
+			cold_path();
+			return Err(gemm_kernel_error(format!("invalid GEMM kernel name {kernel_name:?}")));
+		}
 
 		let source = generate_gemm_kernel(config);
-		let kernel_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("cache").join("kernels");
+
+		const nvcc_path: &str = "/usr/local/cuda-12.6/bin/nvcc";
+		let working_dir = Path::new(".");
+
+		let kernel_dir = working_dir.join("cache").join("kernels");
 		let source_path = kernel_dir.join(format!("{kernel_name}.cu"));
 		let library_path = kernel_dir.join(format!("{kernel_name}.so"));
 
-		fs::create_dir_all(&kernel_dir).map_err(|err| {
-			gemm_kernel_io_error(
-				format!("failed to create kernel cache directory {}", kernel_dir.display()),
-				err,
-			)
-		})?;
-		fs::write(&source_path, source).map_err(|err| {
-			gemm_kernel_io_error(
-				format!("failed to write generated CUDA source {}", source_path.display()),
-				err,
-			)
-		})?;
+		match fs::create_dir_all(&kernel_dir) {
+			Ok(()) => {},
+			Err(err) => {
+				cold_path();
+				let kernel_dir = kernel_dir.display();
+				return Err(gemm_kernel_io_error(
+					format!("failed to create kernel cache directory {kernel_dir}"),
+					err,
+				));
+			},
+		};
+		match fs::write(&source_path, source) {
+			Ok(()) => {},
+			Err(err) => {
+				cold_path();
+				let source_path = source_path.display();
+				return Err(gemm_kernel_io_error(
+					format!("failed to write generated CUDA source {source_path}"),
+					err,
+				));
+			},
+		};
 
-		compile_gemm_kernel(&source_path, &library_path)?;
+		compile_gemm_kernel(nvcc_path, &working_dir, &source_path, &library_path)?;
 
-		let library = DynamicLibrary::open(&library_path)?;
-		let init = library.lifecycle_fn("x17ai_kernel_init")?;
-		let deinit = library.lifecycle_fn("x17ai_kernel_deinit")?;
-		let launch = library.launch_fn("x17ai_kernel_launch")?;
-		call_kernel_lifecycle("x17ai_kernel_init", init)?;
+		let library = match DynamicLibrary::open(&library_path) {
+			Ok(lib) => lib,
+			Err(msg) => {
+				cold_path();
+				return Err(gemm_kernel_error(msg));
+			},
+		};
+		let init_fn = match library.get_symbol("x17ai_kernel_init") {
+			Ok(sym) => unsafe { std::mem::transmute::<*mut c_void, KernelLifecycleFn>(sym) },
+			Err(msg) => {
+				cold_path();
+				return Err(gemm_kernel_error(msg));
+			},
+		};
+		let deinit_fn = match library.get_symbol("x17ai_kernel_deinit") {
+			Ok(sym) => unsafe { std::mem::transmute::<*mut c_void, KernelLifecycleFn>(sym) },
+			Err(msg) => {
+				cold_path();
+				return Err(gemm_kernel_error(msg));
+			},
+		};
+		let launch_fn = match library.get_symbol("x17ai_kernel_launch") {
+			Ok(sym) => unsafe { std::mem::transmute::<*mut c_void, KernelLaunchFn>(sym) },
+			Err(msg) => {
+				cold_path();
+				return Err(gemm_kernel_error(msg));
+			},
+		};
+
+		let err = unsafe { init_fn() };
+		if err != 0 {
+			cold_path();
+			return Err(gemm_kernel_error(format!(
+				"x17ai_kernel_init failed with CUDA error code {err}"
+			)));
+		}
 
 		Ok(Self {
 			name: kernel_name.to_owned(),
 			source_path,
 			library_path,
 			_library: library,
-			deinit,
-			launch,
+			deinit_fn,
+			launch_fn,
 		})
 	}
 
@@ -255,119 +301,41 @@ impl GemmKernel {
 		c: DevicePtr,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		let err = unsafe {
-			(self.launch)(
-				a.as_ptr::<c_void>(), a_rows,
-				b.as_ptr::<c_void>(), b_rows,
+			(self.launch_fn)(
+				a.as_ptr::<c_void>(),
+				a_rows,
+				b.as_ptr::<c_void>(),
+				b_rows,
 				c.as_ptr::<c_void>(),
 			)
 		};
 		if err != 0 {
+			cold_path();
 			return Err(gemm_kernel_error(format!(
 				"x17ai_kernel_launch failed with CUDA error code {err}"
 			)));
 		}
-
 		Ok(())
 	}
 }
 
 impl Drop for GemmKernel {
 	fn drop(&mut self) {
-		let err = unsafe { (self.deinit)() };
+		let err = unsafe { (self.deinit_fn)() };
 		if err != 0 {
 			log::error!("x17ai_kernel_deinit failed with CUDA error code {err}");
 		}
 	}
 }
 
-type KernelLifecycleFn = unsafe extern "C" fn() -> usize;
-type KernelLaunchFn =
-	unsafe extern "C" fn(*mut c_void, usize, *mut c_void, usize, *mut c_void) -> usize;
-
-#[derive(Debug)]
-struct DynamicLibrary {
-	handle: NonNull<c_void>,
-}
-
-impl DynamicLibrary {
-	fn open(path: &Path) -> Result<Self, ErrPack<TensorOpError>> {
-		let path_cstr = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-			gemm_kernel_error(format!(
-				"failed to load CUDA kernel library {}; path contains an interior NUL byte",
-				path.display()
-			))
-		})?;
-
-		clear_dlerror();
-		let handle = unsafe { dlopen(path_cstr.as_ptr(), RTLD_NOW | RTLD_LOCAL) };
-		let Some(handle) = NonNull::new(handle) else {
-			return Err(gemm_kernel_dl_error(format!(
-				"failed to load CUDA kernel library {}",
-				path.display()
-			)));
-		};
-
-		Ok(Self { handle })
-	}
-
-	fn lifecycle_fn(&self, symbol_name: &str) -> Result<KernelLifecycleFn, ErrPack<TensorOpError>> {
-		let symbol = self.symbol_ptr(symbol_name)?;
-		Ok(unsafe { std::mem::transmute::<*mut c_void, KernelLifecycleFn>(symbol) })
-	}
-
-	fn launch_fn(&self, symbol_name: &str) -> Result<KernelLaunchFn, ErrPack<TensorOpError>> {
-		let symbol = self.symbol_ptr(symbol_name)?;
-		Ok(unsafe { std::mem::transmute::<*mut c_void, KernelLaunchFn>(symbol) })
-	}
-
-	fn symbol_ptr(&self, symbol_name: &str) -> Result<*mut c_void, ErrPack<TensorOpError>> {
-		let symbol_cstr = CString::new(symbol_name).map_err(|_| {
-			gemm_kernel_error(format!(
-				"failed to load CUDA kernel symbol {symbol_name:?}; symbol contains an interior NUL byte"
-			))
-		})?;
-
-		clear_dlerror();
-		let symbol = unsafe { dlsym(self.handle.as_ptr(), symbol_cstr.as_ptr()) };
-		if symbol.is_null() {
-			return Err(gemm_kernel_dl_error(format!(
-				"failed to load CUDA kernel symbol {symbol_name:?}"
-			)));
-		}
-
-		Ok(symbol)
-	}
-}
-
-impl Drop for DynamicLibrary {
-	fn drop(&mut self) {
-		unsafe {
-			dlclose(self.handle.as_ptr());
-		}
-	}
-}
-
-fn validate_kernel_name(kernel_name: &str) -> Result<(), ErrPack<TensorOpError>> {
-	if kernel_name.is_empty()
-		|| kernel_name == "."
-		|| kernel_name == ".."
-		|| kernel_name.contains('/')
-		|| kernel_name.contains('\\')
-	{
-		return Err(gemm_kernel_error(format!("invalid GEMM kernel name {kernel_name:?}")));
-	}
-
-	Ok(())
-}
-
 fn compile_gemm_kernel(
+	nvcc_path: &str,
+	working_dir: &Path,
 	source_path: &Path,
 	library_path: &Path,
 ) -> Result<(), ErrPack<TensorOpError>> {
-	const NVCC: &str = "/usr/local/cuda-12.6/bin/nvcc";
-
-	let output = Command::new(NVCC)
-		.current_dir(env!("CARGO_MANIFEST_DIR"))
+	let output = Command::new(nvcc_path)
+		.current_dir(working_dir)
 		.arg("-arch=sm_86")
 		.arg("-std=c++20")
 		.arg("-Xptxas=-v")
@@ -391,8 +359,14 @@ fn compile_gemm_kernel(
 		.arg("-lineinfo")
 		.arg("-o")
 		.arg(library_path)
-		.output()
-		.map_err(|err| gemm_kernel_io_error("failed to run nvcc", err))?;
+		.output();
+	let output = match output {
+		Ok(o) => o,
+		Err(err) => {
+			cold_path();
+			return Err(gemm_kernel_io_error("failed to run nvcc", err));
+		},
+	};
 
 	if !output.status.success() {
 		let stdout = String::from_utf8_lossy(&output.stdout);
@@ -410,16 +384,7 @@ fn compile_gemm_kernel(
 	Ok(())
 }
 
-fn call_kernel_lifecycle(
-	symbol_name: &str,
-	symbol: KernelLifecycleFn,
-) -> Result<(), ErrPack<TensorOpError>> {
-	let err = unsafe { symbol() };
-	if err != 0 {
-		return Err(gemm_kernel_error(format!("{symbol_name} failed with CUDA error code {err}")));
-	}
-	Ok(())
-}
+//--------------------------------------------------------------------------------------------------
 
 fn gemm_kernel_error(message: impl Into<Cow<'static, str>>) -> ErrPack<TensorOpError> {
 	ErrPack {
@@ -428,33 +393,6 @@ fn gemm_kernel_error(message: impl Into<Cow<'static, str>>) -> ErrPack<TensorOpE
 	}
 }
 
-fn gemm_kernel_dl_error(message: impl Into<String>) -> ErrPack<TensorOpError> {
-	let mut message = message.into();
-	let detail = unsafe { dlerror_message() };
-	if let Some(detail) = detail {
-		message.push_str(": ");
-		message.push_str(&detail);
-	}
-
-	gemm_kernel_error(message)
-}
-
-fn clear_dlerror() {
-	unsafe {
-		dlerror();
-	}
-}
-
-unsafe fn dlerror_message() -> Option<String> {
-	let err = unsafe { dlerror() };
-	if err.is_null() {
-		None
-	} else {
-		Some(unsafe { CStr::from_ptr(err) }.to_string_lossy().into_owned())
-	}
-}
-
-//--------------------------------------------------------------------------------------------------
 fn gemm_kernel_io_error(
 	message: impl Into<Cow<'static, str>>,
 	err: std::io::Error,

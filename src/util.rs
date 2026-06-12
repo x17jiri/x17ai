@@ -7,6 +7,7 @@
 
 use std::convert::Infallible;
 
+pub mod dyn_loader;
 pub mod ffi_buffer;
 pub mod intrusive_rc;
 
