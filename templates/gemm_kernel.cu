@@ -61,6 +61,7 @@ namespace {
 	) {
 		{% match b_rows -%}
 		{% when Some with (rows) %}
+		// override b_rows with the known value so the compiler can do constant folding
 		b_rows = {{rows}};
 		{% when None -%}
 		{% endmatch %}
@@ -70,6 +71,8 @@ namespace {
 		auto c_writer = Writer(c, b_rows);
 		Kernel().run(a_loader, b_loader, c_writer);
 	}
+
+	CUfunction kernel_function = nullptr;
 }
 
 extern "C" {
@@ -106,6 +109,16 @@ extern "C" {
 			result = usize(err);
 		}
 
+		if (result == 0) {
+			cudaFunction_t cuda_function = nullptr;
+			err = cudaGetFuncBySymbol(&cuda_function, reinterpret_cast<const void *>(kernel));
+			if (err != cudaSuccess) {
+				result = usize(err);
+			} else {
+				kernel_function = reinterpret_cast<CUfunction>(cuda_function);
+			}
+		}
+
 		CUcontext popped_ctx = nullptr;
 		ctx_err = cuCtxPopCurrent(&popped_ctx);
 		if (result == 0 && ctx_err != CUDA_SUCCESS) {
@@ -124,6 +137,7 @@ extern "C" {
 	}
 
 	usize x17ai_kernel_deinit() {
+		kernel_function = nullptr;
 		return 0;
 	}
 
@@ -139,24 +153,32 @@ extern "C" {
 		if (result != 0) {
 			return 5000 + result;
 		}
+		if (kernel_function == nullptr) {
+			return usize(CUDA_ERROR_INVALID_HANDLE);
+		}
 
 		dim3 grid = Kernel::output_grid(a_rows, b_rows);
-		kernel<<<grid, Kernel::THREADS_PER_BLOCK, Kernel::SMEM_BYTES, reinterpret_cast<cudaStream_t>(cuda_stream)>>>(
-			a, a_rows,
-			b, b_rows,
-			c
+		void *params[] = {
+			&a, &a_rows,
+			&b, &b_rows,
+			&c,
+		};
+		CUresult launch_err = cuLaunchKernel(
+			kernel_function,
+			grid.x, grid.y, grid.z,
+			Kernel::THREADS_PER_BLOCK, 1, 1,
+			Kernel::SMEM_BYTES,
+			reinterpret_cast<CUstream>(cuda_stream),
+			params,
+			nullptr
 		);
 
-		// TODO: is calling cudaGetLastError() efficient?
-		// Could I get the error code some other way?
 		result = check_no_context();
 		if (result != 0) {
 			return 8000 + result;
 		}
 
-		result = cudaGetLastError();
-
-		static_assert(cudaSuccess == 0);
-		return result;
+		static_assert(CUDA_SUCCESS == 0);
+		return usize(launch_err);
 	}
 }
