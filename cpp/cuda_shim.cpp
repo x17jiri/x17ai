@@ -1,21 +1,16 @@
 #include <cuda.h>
-#include <cuda_runtime.h>
-#include <nvrtc.h>
-
 #include <atomic>
 #include <memory>
 #include <sstream>
 #include <stdio.h>
-#include <string>
-#include <string_view>
 #include <unordered_map>
 #include <cassert>
 #include <span>
-
+#include <vector>
 #include <dlfcn.h>
+#include <utility>
 
-#define FMT_HEADER_ONLY
-#include <fmt/core.h>
+#include "ffi.hpp"
 
 #define X17_INLINE gnu::always_inline
 #define X17_NO_INLINE gnu::noinline
@@ -41,152 +36,6 @@ using isize = std::common_type_t<
 
 static std::atomic<bool> cuda_initialized = false;
 static std::mutex cuda_init_mutex;
-
-struct FfiSpan {
-	u8 *ptr;
-	size_t len;
-};
-
-struct FfiBufferVMT {
-	FfiSpan (*span)(void *self) noexcept;
-	FfiSpan (*buf_span)(void *self) noexcept;
-	FfiSpan (*extend)(void *self, size_t additional) noexcept;
-	void (*clear)(void *self) noexcept;
-	void (*set_len)(void *self, size_t new_len) noexcept;
-};
-
-struct FfiBuffer {
-	void *instance;
-	FfiBufferVMT const *vmt;
-
-	inline std::span<char> span() noexcept {
-		FfiSpan s = vmt->span(instance);
-		return std::span(reinterpret_cast<char *>(s.ptr), s.len);
-	}
-
-	inline std::span<char> buf_span() noexcept {
-		FfiSpan s = vmt->buf_span(instance);
-		return std::span(reinterpret_cast<char *>(s.ptr), s.len);
-	}
-
-	inline std::span<char> extend(size_t additional) noexcept {
-		FfiSpan s = vmt->extend(instance, additional);
-		return std::span(reinterpret_cast<char *>(s.ptr), s.len);
-	}
-
-	bool write() noexcept {
-		return true;
-	}
-
-	bool write(std::string_view str) noexcept {
-		size_t len = str.size();
-		std::span buf = extend(len);
-		if (buf.size() != len) [[unlikely]] {
-			return false;
-		}
-		std::copy(str.begin(), str.end(), buf.data());
-		return true;
-	}
-
-	bool write(int value) noexcept {
-		return write(fmt::to_string(value));
-	}
-
-	bool write(CUresult e) noexcept {
-		const char *err_str = nullptr;
-		if (cuGetErrorString(e, &err_str) == CUDA_SUCCESS) [[likely]] {
-			return write(err_str);
-		} else {
-			return write("Unknown CUDA error code ", int(e));
-		}
-	}
-
-	bool write(nvrtcResult e) noexcept {
-		return write(nvrtcGetErrorString(e));
-	}
-
-	template<typename A, typename B, typename... CS>
-	bool write(A const &a, B const &b, CS const &... cs) noexcept {
-		if (!write(a)) {
-			return false;
-		}
-		return write(b, cs...);
-	}
-
-	void clear() noexcept {
-		vmt->clear(instance);
-	}
-
-	void set_len(size_t new_len) noexcept {
-		vmt->set_len(instance, new_len);
-	}
-};
-
-struct DiagnosticBuffer {
-	std::string message;
-
-	DiagnosticBuffer():
-		message()
-	{}
-
-	bool write() noexcept {
-		return true;
-	}
-
-	bool write(std::string_view str) noexcept {
-		try {
-			message.append(str);
-			return true;
-		} catch (...) {
-			return false;
-		}
-	}
-
-	bool write(int value) noexcept {
-		try {
-			return write(fmt::to_string(value));
-		} catch (...) {
-			return false;
-		}
-	}
-
-	bool write(CUresult e) noexcept {
-		const char *err_str = nullptr;
-		if (cuGetErrorString(e, &err_str) == CUDA_SUCCESS) [[likely]] {
-			return write(err_str);
-		} else {
-			return write("Unknown CUDA error code ", int(e));
-		}
-	}
-
-	bool write(nvrtcResult e) noexcept {
-		return write(nvrtcGetErrorString(e));
-	}
-
-	template<typename A, typename B, typename... CS>
-	bool write(A const &a, B const &b, CS const &... cs) noexcept {
-		if (!write(a)) {
-			return false;
-		}
-		return write(b, cs...);
-	}
-};
-
-template<typename... TS>
-std::unique_ptr<DiagnosticBuffer> new_diag(TS const &... ts) noexcept {
-	std::unique_ptr<DiagnosticBuffer> result;
-	try {
-		result = std::make_unique<DiagnosticBuffer>();
-		result->write(ts...);
-	} catch (...) {}
-	return result;
-}
-
-// #[repr(C)]
-// pub struct CudaCapability {
-// 	pub major: usize,
-// 	pub minor: usize,
-// }
 
 struct CudaCapability {
 	usize major;
@@ -215,9 +64,14 @@ struct CudaContextHandle {
 };
 
 struct CudaStreamHandle;
-struct CudaModuleHandle;
-struct CudaKernelHandle;
 struct CudaDeviceData;
+
+struct CudaTimerHandle {
+	CUcontext context;
+	CUstream stream;
+	CUevent start;
+	CUevent end;
+};
 
 inline CUdeviceptr to_dev_ptr(CudaDeviceData *ptr) noexcept {
 	using U = std::make_unsigned_t<CUdeviceptr>;
@@ -231,61 +85,31 @@ inline CudaDeviceData *from_dev_ptr(CUdeviceptr ptr) noexcept {
 	return reinterpret_cast<CudaDeviceData *>(uintptr_t(U(ptr)));
 }
 
-inline void assert_no_context() {
-	#ifndef NDEBUG
-	CUcontext pctx;
-	cuCtxGetCurrent(&pctx);
-	if (pctx != nullptr) {
-		throw "we have context!";
+inline void destroy_timer_events(CudaTimerHandle *timer) noexcept {
+	if (timer->end != nullptr) {
+		[[maybe_unused]] CUresult ignored = cuEventDestroy(timer->end);
+		timer->end = nullptr;
 	}
-	#endif
+	if (timer->start != nullptr) {
+		[[maybe_unused]] CUresult ignored = cuEventDestroy(timer->start);
+		timer->start = nullptr;
+	}
 }
 
-template<typename T>
-struct PtrResult {
-	T *value;
-	DiagnosticBuffer *diagnostic;
-
-	PtrResult(T *val):
-		value(val),
-		diagnostic(nullptr)
-	{}
-
-	PtrResult(std::unique_ptr<DiagnosticBuffer> diag):
-		value(nullptr),
-		diagnostic(diag.release())
-	{}
-};
-
-struct UsizeResult {
-	size_t value;
-	DiagnosticBuffer *diagnostic;
-
-	UsizeResult():
-		value(0),
-		diagnostic(nullptr)
-	{}
-
-	UsizeResult(size_t val, std::unique_ptr<DiagnosticBuffer> diag):
-		value(val == 0 ? size_t(-1) : val),
-		diagnostic(diag.release())
-	{}
-
-	UsizeResult(std::unique_ptr<DiagnosticBuffer> diag):
-		value(-1),
-		diagnostic(diag.release())
-	{}
-};
-
 extern "C" {
-	void x17ai_copy_diagnostic(DiagnosticBuffer *diag, FfiBuffer err) noexcept {
+	void x17ai_move_diagnostic(DiagnosticBuffer *diag, FfiBuffer err) noexcept {
 		if (diag == nullptr) {
 			return;
 		}
 
 		try {
-			auto diag_owner = std::unique_ptr<DiagnosticBuffer>(diag);
-			auto const &message = diag_owner->message;
+			std::unique_ptr<AllocatedDiagnosticBuffer> owner;
+			if (diag->is_allocated) {
+				owner = std::unique_ptr<AllocatedDiagnosticBuffer>(
+					static_cast<AllocatedDiagnosticBuffer *>(diag)
+				);
+			}
+			auto const &message = diag->message;
 			err.write(std::string_view(message.data(), message.size()));
 		} catch (...) {}
 	}
@@ -302,19 +126,27 @@ extern "C" {
 				if (!cuda_initialized.load(std::memory_order_relaxed)) {
 					e = cuInit(0);
 					if (e != CUDA_SUCCESS) [[unlikely]] {
-						return new_diag("x17ai_cuda_open_context(): cuInit() failed: ", e);
+						return X17AI_DIAG(
+							"x17ai_cuda_open_context(): cuInit() failed.",
+							"x17ai_cuda_open_context(): cuInit() failed with cuda error: ", e
+						);
 					}
 					cuda_initialized.store(true, std::memory_order_release);
 				}
 			}
 
 			if (!std::in_range<int>(device_id)) [[unlikely]] {
-				return new_diag("x17ai_cuda_open_context(): CUDA device ID out of range");
+				return X17AI_STATIC_DIAG(
+					"x17ai_cuda_open_context(): CUDA device ID out of range"
+				);
 			}
 
 			e = cuDeviceGet(&result->device, int(unsigned(device_id)));
 			if (e != CUDA_SUCCESS) [[unlikely]] {
-				return new_diag("x17ai_cuda_open_context(): cuDeviceGet() failed: ", e);
+				return X17AI_DIAG(
+					"x17ai_cuda_open_context(): cuDeviceGet() failed.",
+					"x17ai_cuda_open_context(): cuDeviceGet() failed with cuda error: ", e
+				);
 			}
 
 			int major = 0;
@@ -324,10 +156,15 @@ extern "C" {
 				result->device
 			);
 			if (e != CUDA_SUCCESS) [[unlikely]] {
-				return new_diag("x17ai_cuda_open_context(): cuDeviceGetAttribute(MAJOR) failed: ", e);
+				return X17AI_DIAG(
+					"x17ai_cuda_open_context(): cuDeviceGetAttribute(MAJOR) failed.",
+					"x17ai_cuda_open_context(): cuDeviceGetAttribute(MAJOR) failed with cuda error: ", e
+				);
 			}
 			if (!std::in_range<usize>(major)) [[unlikely]] {
-				return new_diag("x17ai_cuda_open_context(): compute capability major version out of range");
+				return X17AI_STATIC_DIAG(
+					"x17ai_cuda_open_context(): compute capability major version out of range"
+				);
 			}
 			result->capability.major = usize(major);
 
@@ -338,10 +175,15 @@ extern "C" {
 				result->device
 			);
 			if (e != CUDA_SUCCESS) [[unlikely]] {
-				return new_diag("x17ai_cuda_open_context(): cuDeviceGetAttribute(MINOR) failed: ", e);
+				return X17AI_DIAG(
+					"x17ai_cuda_open_context(): cuDeviceGetAttribute(MINOR) failed.",
+					"x17ai_cuda_open_context(): cuDeviceGetAttribute(MINOR) failed with cuda error: ", e
+				);
 			}
 			if (!std::in_range<usize>(minor)) [[unlikely]] {
-				return new_diag("x17ai_cuda_open_context(): compute capability minor version out of range");
+				return X17AI_STATIC_DIAG(
+					"x17ai_cuda_open_context(): compute capability minor version out of range"
+				);
 			}
 			result->capability.minor = usize(minor);
 
@@ -352,59 +194,63 @@ extern "C" {
 				result->device
 			);
 			if (e != CUDA_SUCCESS) [[unlikely]] {
-				return new_diag("x17ai_cuda_open_context(): cuDeviceGetAttribute(WARP_SIZE) failed: ", e);
+				return X17AI_DIAG(
+					"x17ai_cuda_open_context(): cuDeviceGetAttribute(WARP_SIZE) failed.",
+					"x17ai_cuda_open_context(): cuDeviceGetAttribute(WARP_SIZE) failed with cuda error: ", e
+				);
 			}
 			if (!std::in_range<usize>(warp_size)) [[unlikely]] {
-				return new_diag("x17ai_cuda_open_context(): warp size out of range");
+				return X17AI_STATIC_DIAG("x17ai_cuda_open_context(): warp size out of range");
 			}
 			result->warp_size = usize(warp_size);
 			if (!std::has_single_bit(result->warp_size)) [[unlikely]] {
-				return new_diag("x17ai_cuda_open_context(): warp size is not a power of two");
+				return X17AI_STATIC_DIAG(
+					"x17ai_cuda_open_context(): warp size is not a power of two"
+				);
 			}
 
 			e = cuDevicePrimaryCtxRetain(&result->context, result->device);
 			if (e != CUDA_SUCCESS) [[unlikely]] {
-				return new_diag("x17ai_cuda_open_context(): cuDevicePrimaryCtxRetain() failed: ", e);
+				return X17AI_DIAG(
+					"x17ai_cuda_open_context(): cuDevicePrimaryCtxRetain() failed.",
+					"x17ai_cuda_open_context(): cuDevicePrimaryCtxRetain() failed with cuda error: ", e
+				);
 			}
 			if (result->context == nullptr) [[unlikely]] {
-				return new_diag("x17ai_cuda_open_context(): cuDevicePrimaryCtxRetain() returned nullptr");
+				return X17AI_STATIC_DIAG(
+					"x17ai_cuda_open_context(): cuDevicePrimaryCtxRetain() returned nullptr"
+				);
 			}
 
 			return result.release();
-		} catch (std::exception const &e) {
-			return new_diag("x17ai_cuda_open_context(): exception thrown: ", e.what());
-		} catch (...) {
-			return new_diag("x17ai_cuda_open_context(): unknown exception thrown");
-		}
+		} X17AI_CATCH_ERRORS("x17ai_cuda_open_context()")
 	}
 
-	UsizeResult x17ai_cuda_close_context(CudaContextHandle *context) noexcept {
+	DiagnosticBuffer *x17ai_cuda_close_context(CudaContextHandle *context) noexcept {
 		try {
+			assert_no_context("x17ai_cuda_close_context(): before cuDevicePrimaryCtxRelease()");
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(context != nullptr);
 			if (context->refcnt_munus_one > 0) {
 				--context->refcnt_munus_one;
-				return UsizeResult();
+				return nullptr;
 			}
 			auto ctx = std::unique_ptr<CudaContextHandle>(context);
 			CUresult e;
 
 			e = cuDevicePrimaryCtxRelease(ctx->device);
 			if (e != CUDA_SUCCESS) [[unlikely]] {
-				return UsizeResult(e,
-					new_diag("x17ai_cuda_close_context(): cuDevicePrimaryCtxRelease() failed: ", e)
+				return X17AI_DIAG(
+					"x17ai_cuda_close_context(): cuDevicePrimaryCtxRelease() failed.",
+					"x17ai_cuda_close_context(): cuDevicePrimaryCtxRelease() failed with cuda error: ", e
 				);
 			}
-			return UsizeResult();
-		} catch (std::exception const &e) {
-			return new_diag("x17ai_cuda_close_context(): exception thrown: ", e.what());
-		} catch (...) {
-			return new_diag("x17ai_cuda_close_context(): unknown exception thrown");
-		}
+			assert_no_context("x17ai_cuda_close_context(): after cuDevicePrimaryCtxRelease()");
+			return nullptr;
+		} X17AI_CATCH_ERRORS("x17ai_cuda_close_context()")
 	}
 
 	void *x17ai_cuda_context_ptr(CudaContextHandle *context) noexcept {
-		assert_no_context();
 		assert(cuda_initialized.load(std::memory_order_acquire));
 		assert(context != nullptr);
 		return static_cast<void *>(context->context);
@@ -412,41 +258,47 @@ extern "C" {
 
 	PtrResult<CudaStreamHandle> x17ai_cuda_open_stream(CudaContextHandle *ctx) noexcept {
 		try {
-			assert_no_context();
+			assert_no_context("x17ai_cuda_open_stream(): before cuCtxPushCurrent()");
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(ctx != nullptr);
 			CUresult e;
 
 			e = cuCtxPushCurrent(ctx->context);
 			if (e != CUDA_SUCCESS) [[unlikely]] {
-				return new_diag("x17ai_cuda_open_stream(): cuCtxPushCurrent() failed: ", e);
+				return X17AI_DIAG(
+					"x17ai_cuda_open_stream(): cuCtxPushCurrent() failed.",
+					"x17ai_cuda_open_stream(): cuCtxPushCurrent() failed with cuda error: ", e
+				);
 			}
 
 			CUstream cu_stream;
 			e = cuStreamCreate(&cu_stream, CU_STREAM_NON_BLOCKING);
 
 			CUcontext popped_ctx;
+			// Ignore `_e`. I think `pop` at this point shouldn't fail.
+			// If we ever decide to handle this error, we need to free the stream we just created.
 			[[maybe_unused]] auto _e = cuCtxPopCurrent(&popped_ctx);
 
 			if (e != CUDA_SUCCESS) [[unlikely]] {
-				return new_diag("x17ai_cuda_open_stream(): cuStreamCreate() failed: ", e);
+				return X17AI_DIAG(
+					"x17ai_cuda_open_stream(): cuStreamCreate() failed.",
+					"x17ai_cuda_open_stream(): cuStreamCreate() failed with cuda error: ", e
+				);
 			}
 			if (cu_stream == nullptr) [[unlikely]] {
-				return new_diag("x17ai_cuda_open_stream(): cuStreamCreate() returned nullptr");
+				return X17AI_STATIC_DIAG(
+					"x17ai_cuda_open_stream(): cuStreamCreate() returned nullptr"
+				);
 			}
 
-			assert_no_context();
+			assert_no_context("x17ai_cuda_open_stream(): after cuCtxPopCurrent()");
 			return reinterpret_cast<CudaStreamHandle *>(cu_stream);
-		} catch (std::exception const &e) {
-			return new_diag("x17ai_cuda_open_stream(): exception thrown: ", e.what());
-		} catch (...) {
-			return new_diag("x17ai_cuda_open_stream(): unknown exception thrown");
-		}
+		} X17AI_CATCH_ERRORS("x17ai_cuda_open_stream()")
 	}
 
-	UsizeResult x17ai_cuda_close_stream(CudaStreamHandle *stream) noexcept {
+	DiagnosticBuffer *x17ai_cuda_close_stream(CudaStreamHandle *stream) noexcept {
 		try {
-			assert_no_context();
+			assert_no_context("x17ai_cuda_close_stream(): before cuStreamDestroy()");
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(stream != nullptr);
 			CUstream cu_stream = reinterpret_cast<CUstream>(stream);
@@ -454,23 +306,20 @@ extern "C" {
 
 			e = cuStreamDestroy(cu_stream);
 			if (e != CUDA_SUCCESS) [[unlikely]] {
-				return UsizeResult(e,
-					new_diag("x17ai_cuda_close_stream(): cuStreamDestroy() failed: ", e)
+				return X17AI_DIAG(
+					"x17ai_cuda_close_stream(): cuStreamDestroy() failed.",
+					"x17ai_cuda_close_stream(): cuStreamDestroy() failed with cuda error: ", e
 				);
 			}
 
-			assert_no_context();
-			return UsizeResult();
-		} catch (std::exception const &e) {
-			return new_diag("x17ai_cuda_close_stream(): exception thrown: ", e.what());
-		} catch (...) {
-			return new_diag("x17ai_cuda_close_stream(): unknown exception thrown");
-		}
+			assert_no_context("x17ai_cuda_close_stream(): after cuStreamDestroy()");
+			return nullptr;
+		} X17AI_CATCH_ERRORS("x17ai_cuda_close_stream()")
 	}
 
-	UsizeResult x17ai_cuda_synchronize(CudaStreamHandle *stream) noexcept {
+	DiagnosticBuffer *x17ai_cuda_synchronize(CudaStreamHandle *stream) noexcept {
 		try {
-			assert_no_context();
+			assert_no_context("x17ai_cuda_synchronize(): before cuStreamSynchronize()");
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(stream != nullptr);
 			CUstream cu_stream = reinterpret_cast<CUstream>(stream);
@@ -479,23 +328,242 @@ extern "C" {
 			e = cuStreamSynchronize(cu_stream);
 
 			if (e != CUDA_SUCCESS) [[unlikely]] {
-				return UsizeResult(e,
-					new_diag("x17ai_cuda_synchronize(): cuStreamSynchronize() failed: ", e)
+				return X17AI_DIAG(
+					"x17ai_cuda_synchronize(): cuStreamSynchronize() failed.",
+					"x17ai_cuda_synchronize(): cuStreamSynchronize() failed with cuda error: ", e
 				);
 			}
 
-			assert_no_context();
-			return UsizeResult();
-		} catch (std::exception const &e) {
-			return new_diag("x17ai_cuda_synchronize(): exception thrown: ", e.what());
-		} catch (...) {
-			return new_diag("x17ai_cuda_synchronize(): unknown exception thrown");
-		}
+			assert_no_context("x17ai_cuda_synchronize(): after cuStreamSynchronize()");
+			return nullptr;
+		} X17AI_CATCH_ERRORS("x17ai_cuda_synchronize()")
+	}
+
+	PtrResult<CudaTimerHandle> x17ai_cuda_create_timer(CudaContextHandle *context, CudaStreamHandle *stream) noexcept {
+		try {
+			assert_no_context("x17ai_cuda_create_timer(): before cuCtxPushCurrent()");
+			assert(cuda_initialized.load(std::memory_order_acquire));
+			assert(context != nullptr);
+			assert(stream != nullptr);
+			CUcontext cu_context = context->context;
+			CUstream cu_stream = reinterpret_cast<CUstream>(stream);
+
+			auto result = std::make_unique<CudaTimerHandle>();
+			result->context =cu_context;
+			result->stream = cu_stream;
+			result->start = nullptr;
+			result->end = nullptr;
+
+			CUresult e = cuCtxPushCurrent(cu_context);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				return X17AI_DIAG(
+					"x17ai_cuda_create_timer(): cuCtxPushCurrent() failed.",
+					"x17ai_cuda_create_timer(): cuCtxPushCurrent() failed with cuda error: ", e
+				);
+			}
+
+			DiagnosticBuffer *diagnostic = nullptr;
+			e = cuEventCreate(&result->start, CU_EVENT_DEFAULT);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				diagnostic = X17AI_DIAG(
+					"x17ai_cuda_create_timer(): cuEventCreate(start) failed.",
+					"x17ai_cuda_create_timer(): cuEventCreate(start) failed with cuda error: ", e
+				);
+			}
+
+			if (diagnostic == nullptr) {
+				e = cuEventCreate(&result->end, CU_EVENT_DEFAULT);
+				if (e != CUDA_SUCCESS) [[unlikely]] {
+					diagnostic = X17AI_DIAG(
+						"x17ai_cuda_create_timer(): cuEventCreate(end) failed.",
+						"x17ai_cuda_create_timer(): cuEventCreate(end) failed with cuda error: ", e
+					);
+				}
+			}
+
+			if (diagnostic != nullptr) {
+				destroy_timer_events(result.get());
+			}
+
+			CUcontext popped_ctx = nullptr;
+			CUresult pop_err = cuCtxPopCurrent(&popped_ctx);
+			if (pop_err != CUDA_SUCCESS) [[unlikely]] {
+				if (diagnostic == nullptr) {
+					destroy_timer_events(result.get());
+					diagnostic = X17AI_DIAG(
+						"x17ai_cuda_create_timer(): cuCtxPopCurrent() failed.",
+						"x17ai_cuda_create_timer(): cuCtxPopCurrent() failed with cuda error: ", pop_err
+					);
+				}
+				return diagnostic;
+			}
+			if (diagnostic != nullptr) {
+				return diagnostic;
+			}
+			if (popped_ctx != cu_context) [[unlikely]] {
+				destroy_timer_events(result.get());
+				return X17AI_STATIC_DIAG(
+					"x17ai_cuda_create_timer(): popped unexpected CUDA context"
+				);
+			}
+
+			assert_no_context("x17ai_cuda_create_timer(): after cuCtxPopCurrent()");
+			return result.release();
+		} X17AI_CATCH_ERRORS("x17ai_cuda_create_timer()")
+	}
+
+	DiagnosticBuffer *x17ai_cuda_destroy_timer(CudaTimerHandle *timer) noexcept {
+		try {
+			assert_no_context("x17ai_cuda_destroy_timer(): before cuCtxPushCurrent()");
+			assert(cuda_initialized.load(std::memory_order_acquire));
+			assert(timer != nullptr);
+			auto timer_owner = std::unique_ptr<CudaTimerHandle>(timer);
+
+			CUresult e = cuCtxPushCurrent(timer->context);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				return X17AI_DIAG(
+					"x17ai_cuda_destroy_timer(): cuCtxPushCurrent() failed.",
+					"x17ai_cuda_destroy_timer(): cuCtxPushCurrent() failed with cuda error: ", e
+				);
+			}
+
+			DiagnosticBuffer *diagnostic = nullptr;
+			if (timer->end != nullptr) {
+				e = cuEventDestroy(timer->end);
+				timer->end = nullptr;
+				if (e != CUDA_SUCCESS) [[unlikely]] {
+					diagnostic = X17AI_DIAG(
+						"x17ai_cuda_destroy_timer(): cuEventDestroy(end) failed.",
+						"x17ai_cuda_destroy_timer(): cuEventDestroy(end) failed with cuda error: ", e
+					);
+				}
+			}
+			if (timer->start != nullptr) {
+				e = cuEventDestroy(timer->start);
+				timer->start = nullptr;
+				if (e != CUDA_SUCCESS && diagnostic == nullptr) [[unlikely]] {
+					diagnostic = X17AI_DIAG(
+						"x17ai_cuda_destroy_timer(): cuEventDestroy(start) failed.",
+						"x17ai_cuda_destroy_timer(): cuEventDestroy(start) failed with cuda error: ", e
+					);
+				}
+			}
+
+			CUcontext popped_ctx = nullptr;
+			CUresult pop_err = cuCtxPopCurrent(&popped_ctx);
+			if (diagnostic != nullptr) {
+				return diagnostic;
+			}
+			if (pop_err != CUDA_SUCCESS) [[unlikely]] {
+				return X17AI_DIAG(
+					"x17ai_cuda_destroy_timer(): cuCtxPopCurrent() failed.",
+					"x17ai_cuda_destroy_timer(): cuCtxPopCurrent() failed with cuda error: ", pop_err
+				);
+			}
+			if (popped_ctx != timer->context) [[unlikely]] {
+				return X17AI_STATIC_DIAG(
+					"x17ai_cuda_destroy_timer(): popped unexpected CUDA context"
+				);
+			}
+
+			assert_no_context("x17ai_cuda_destroy_timer(): after cuCtxPopCurrent()");
+			return nullptr;
+		} X17AI_CATCH_ERRORS("x17ai_cuda_destroy_timer()")
+	}
+
+	DiagnosticBuffer *x17ai_cuda_timer_start(CudaTimerHandle *timer) noexcept {
+		try {
+			assert_no_context("x17ai_cuda_timer_start(): before cuEventRecord()");
+			assert(cuda_initialized.load(std::memory_order_acquire));
+			assert(timer != nullptr);
+
+			CUresult e = cuEventRecord(timer->start, timer->stream);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				return X17AI_DIAG(
+					"x17ai_cuda_timer_start(): cuEventRecord() failed.",
+					"x17ai_cuda_timer_start(): cuEventRecord() failed with cuda error: ", e
+				);
+			}
+
+			assert_no_context("x17ai_cuda_timer_start(): after cuEventRecord()");
+			return nullptr;
+		} X17AI_CATCH_ERRORS("x17ai_cuda_timer_start()")
+	}
+
+	DiagnosticBuffer *x17ai_cuda_timer_stop(CudaTimerHandle *timer) noexcept {
+		try {
+			assert_no_context("x17ai_cuda_timer_stop(): before cuEventRecord()");
+			assert(cuda_initialized.load(std::memory_order_acquire));
+			assert(timer != nullptr);
+
+			CUresult e = cuEventRecord(timer->end, timer->stream);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				return X17AI_DIAG(
+					"x17ai_cuda_timer_stop(): cuEventRecord() failed.",
+					"x17ai_cuda_timer_stop(): cuEventRecord() failed with cuda error: ", e
+				);
+			}
+
+			assert_no_context("x17ai_cuda_timer_stop(): after cuEventRecord()");
+			return nullptr;
+		} X17AI_CATCH_ERRORS("x17ai_cuda_timer_stop()")
+	}
+
+	DiagnosticBuffer *x17ai_cuda_timer_elapsed_seconds(
+		CudaTimerHandle *timer,
+		f64 *seconds
+	) noexcept {
+		try {
+			assert_no_context("x17ai_cuda_timer_elapsed_seconds(): before cuCtxPushCurrent()");
+			assert(cuda_initialized.load(std::memory_order_acquire));
+			assert(timer != nullptr);
+			assert(seconds != nullptr);
+
+			CUresult e = cuCtxPushCurrent(timer->context);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				return X17AI_DIAG(
+					"x17ai_cuda_timer_elapsed_seconds(): cuCtxPushCurrent() failed.",
+					"x17ai_cuda_timer_elapsed_seconds(): cuCtxPushCurrent() failed with cuda error: ", e
+				);
+			}
+
+			DiagnosticBuffer *diagnostic = nullptr;
+			f32 ms = 0.0;
+			e = cuEventElapsedTime(&ms, timer->start, timer->end);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				diagnostic = X17AI_DIAG(
+					"x17ai_cuda_timer_elapsed_seconds(): cuEventElapsedTime() failed.",
+					"x17ai_cuda_timer_elapsed_seconds(): cuEventElapsedTime() failed with cuda error: ", e
+				);
+			}
+
+			CUcontext popped_ctx = nullptr;
+			CUresult pop_err = cuCtxPopCurrent(&popped_ctx);
+			if (diagnostic != nullptr) {
+				return diagnostic;
+			}
+			if (pop_err != CUDA_SUCCESS) [[unlikely]] {
+				return X17AI_DIAG(
+					"x17ai_cuda_timer_elapsed_seconds(): cuCtxPopCurrent() failed.",
+					"x17ai_cuda_timer_elapsed_seconds(): cuCtxPopCurrent() failed with cuda error: ", pop_err
+				);
+			}
+			if (popped_ctx != timer->context) [[unlikely]] {
+				return X17AI_STATIC_DIAG(
+					"x17ai_cuda_timer_elapsed_seconds(): popped unexpected CUDA context"
+				);
+			}
+
+			assert_no_context("x17ai_cuda_timer_elapsed_seconds(): after cuCtxPopCurrent()");
+
+			*seconds = f64(ms) / 1000.0;
+			return nullptr;
+		} X17AI_CATCH_ERRORS("x17ai_cuda_timer_elapsed_seconds()")
 	}
 
 	PtrResult<CudaDeviceData> x17ai_cuda_alloc(CudaStreamHandle *stream, usize bytes) noexcept {
 		try {
-			assert_no_context();
+			assert_no_context("x17ai_cuda_alloc(): before cuMemAllocAsync()");
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(stream != nullptr);
 			CUstream cu_stream = reinterpret_cast<CUstream>(stream);
@@ -504,24 +572,25 @@ extern "C" {
 			CUdeviceptr memory = 0;
 			e = cuMemAllocAsync(&memory, bytes, cu_stream);
 			if (e != CUDA_SUCCESS) [[unlikely]] {
-				return new_diag("x17ai_cuda_alloc(): cuMemAllocAsync() failed: ", e);
+				return X17AI_DIAG(
+					"x17ai_cuda_alloc(): cuMemAllocAsync() failed.",
+					"x17ai_cuda_alloc(): cuMemAllocAsync() failed with cuda error: ", e
+				);
 			}
 			if (memory == 0) [[unlikely]] {
-				return new_diag("x17ai_cuda_alloc(): cuMemAllocAsync() returned null pointer");
+				return X17AI_STATIC_DIAG(
+					"x17ai_cuda_alloc(): cuMemAllocAsync() returned null pointer"
+				);
 			}
 
-			assert_no_context();
+			assert_no_context("x17ai_cuda_alloc(): after cuMemAllocAsync()");
 			return from_dev_ptr(memory);
-		} catch (std::exception const &e) {
-			return new_diag("x17ai_cuda_alloc(): exception thrown: ", e.what());
-		} catch (...) {
-			return new_diag("x17ai_cuda_alloc(): unknown exception thrown");
-		}
+		} X17AI_CATCH_ERRORS("x17ai_cuda_alloc()")
 	}
 
-	UsizeResult x17ai_cuda_free(CudaStreamHandle *stream, CudaDeviceData *ptr) noexcept {
+	DiagnosticBuffer *x17ai_cuda_free(CudaStreamHandle *stream, CudaDeviceData *ptr) noexcept {
 		try {
-			assert_no_context();
+			assert_no_context("x17ai_cuda_free(): before cuMemFreeAsync()");
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(stream != nullptr);
 			CUstream cu_stream = reinterpret_cast<CUstream>(stream);
@@ -529,21 +598,18 @@ extern "C" {
 
 			e = cuMemFreeAsync(to_dev_ptr(ptr), cu_stream);
 			if (e != CUDA_SUCCESS) [[unlikely]] {
-				return UsizeResult(e,
-					new_diag("x17ai_cuda_free(): cuMemFreeAsync() failed: ", e)
+				return X17AI_DIAG(
+					"x17ai_cuda_free(): cuMemFreeAsync() failed.",
+					"x17ai_cuda_free(): cuMemFreeAsync() failed with cuda error: ", e
 				);
 			}
 
-			assert_no_context();
-			return UsizeResult();
-		} catch (std::exception const &e) {
-			return new_diag("x17ai_cuda_free(): exception thrown: ", e.what());
-		} catch (...) {
-			return new_diag("x17ai_cuda_free(): unknown exception thrown");
-		}
+			assert_no_context("x17ai_cuda_free(): after cuMemFreeAsync()");
+			return nullptr;
+		} X17AI_CATCH_ERRORS("x17ai_cuda_free()")
 	}
 
-	UsizeResult x17ai_cuda_upload_data(
+	DiagnosticBuffer *x17ai_cuda_upload_data(
 		CudaStreamHandle *stream,
 		u8 const *src,
 		CudaDeviceData *dst,
@@ -551,7 +617,7 @@ extern "C" {
 		usize size_bytes
 	) noexcept {
 		try {
-			assert_no_context();
+			assert_no_context("x17ai_cuda_upload_data(): before cuMemcpyHtoDAsync()");
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(stream != nullptr);
 			assert(src != nullptr);
@@ -565,21 +631,18 @@ extern "C" {
 				cu_stream
 			);
 			if (e != CUDA_SUCCESS) [[unlikely]] {
-				return UsizeResult(e,
-					new_diag("x17ai_cuda_upload_data(): cuMemcpyHtoDAsync() failed: ", e)
+				return X17AI_DIAG(
+					"x17ai_cuda_upload_data(): cuMemcpyHtoDAsync() failed.",
+					"x17ai_cuda_upload_data(): cuMemcpyHtoDAsync() failed with cuda error: ", e
 				);
 			}
 
-			assert_no_context();
-			return UsizeResult();
-		} catch (std::exception const &e) {
-			return new_diag("x17ai_cuda_upload_data(): exception thrown: ", e.what());
-		} catch (...) {
-			return new_diag("x17ai_cuda_upload_data(): unknown exception thrown");
-		}
+			assert_no_context("x17ai_cuda_upload_data(): after cuMemcpyHtoDAsync()");
+			return nullptr;
+		} X17AI_CATCH_ERRORS("x17ai_cuda_upload_data()")
 	}
 
-	UsizeResult x17ai_cuda_download_data(
+	DiagnosticBuffer *x17ai_cuda_download_data(
 		CudaStreamHandle *stream,
 		CudaDeviceData *src,
 		u8 *dst,
@@ -587,7 +650,7 @@ extern "C" {
 		usize size_bytes
 	) noexcept {
 		try {
-			assert_no_context();
+			assert_no_context("x17ai_cuda_download_data(): before cuMemcpyDtoHAsync()");
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(stream != nullptr);
 			assert(dst != nullptr);
@@ -601,17 +664,14 @@ extern "C" {
 				cu_stream
 			);
 			if (e != CUDA_SUCCESS) [[unlikely]] {
-				return UsizeResult(e,
-					new_diag("x17ai_cuda_download_data(): cuMemcpyDtoHAsync() failed: ", e)
+				return X17AI_DIAG(
+					"x17ai_cuda_download_data(): cuMemcpyDtoHAsync() failed.",
+					"x17ai_cuda_download_data(): cuMemcpyDtoHAsync() failed with cuda error: ", e
 				);
 			}
 
-			assert_no_context();
-			return UsizeResult();
-		} catch (std::exception const &e) {
-			return new_diag("x17ai_cuda_download_data(): exception thrown: ", e.what());
-		} catch (...) {
-			return new_diag("x17ai_cuda_download_data(): unknown exception thrown");
-		}
+			assert_no_context("x17ai_cuda_download_data(): after cuMemcpyDtoHAsync()");
+			return nullptr;
+		} X17AI_CATCH_ERRORS("x17ai_cuda_download_data()")
 	}
 }

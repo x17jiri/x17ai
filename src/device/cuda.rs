@@ -17,12 +17,12 @@ use std::rc::Rc;
 
 use askama::Template;
 
-use crate::device::cuda_shim::CudaStreamHandle;
+use crate::device::cuda_shim::{CudaStreamHandle, CudaTimerHandle, DiagnosticBuffer, diagnostic_to_string};
 use crate::dtype::DType;
 use crate::util::dyn_loader::DynamicLibrary;
 use crate::{DeviceAllocError, ErrExtra, ErrPack, KernelGeneratorError, TensorOpError};
 
-use super::cuda_shim::CudaStream;
+use super::cuda_shim::{CudaEventTimer, CudaStream};
 use super::{Device, DevicePtr};
 
 //--------------------------------------------------------------------------------------------------
@@ -76,6 +76,32 @@ impl Device for CudaDevice {
 		bytes: usize,
 	) -> Result<(), ErrPack<TensorOpError>> {
 		unsafe { self.stream.download_data(src, dst, 0, bytes) }
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct CudaTimer<'a> {
+	_device: &'a CudaDevice,
+	timer: CudaEventTimer,
+}
+
+impl<'a> CudaTimer<'a> {
+	pub fn new(device: &'a CudaDevice) -> Result<Self, ErrPack<TensorOpError>> {
+		let timer = CudaEventTimer::new(&device.stream)?;
+		Ok(Self { _device: device, timer })
+	}
+
+	pub fn start(&self) -> Result<(), ErrPack<TensorOpError>> {
+		self.timer.start()
+	}
+
+	pub fn stop(&self) -> Result<(), ErrPack<TensorOpError>> {
+		self.timer.stop()
+	}
+
+	pub fn elapsed_seconds(&self) -> Result<f64, ErrPack<TensorOpError>> {
+		self.timer.elapsed_seconds()
 	}
 }
 
@@ -181,16 +207,16 @@ pub fn generate_gemm_kernel(config: &GemmKernelConfig) -> String {
 
 //--------------------------------------------------------------------------------------------------
 
-type KernelInitFn = unsafe extern "C" fn(*mut c_void) -> usize;
+type KernelInitFn = unsafe extern "C" fn(*mut c_void) -> *mut DiagnosticBuffer;
 
-type KernelDeinitFn = unsafe extern "C" fn() -> usize;
+type KernelDeinitFn = unsafe extern "C" fn() -> *mut DiagnosticBuffer;
 
 type KernelLaunchFn = unsafe extern "C" fn(
 	*mut CudaStreamHandle,
 	*mut c_void, usize,
 	*mut c_void, usize,
 	*mut c_void
-) -> usize;
+) -> *mut DiagnosticBuffer;
 
 pub struct Diagnostic {
 	pub is_error: bool,
@@ -310,10 +336,13 @@ impl GemmKernel {
 			},
 		};
 
-		let err = unsafe { init_fn(device.stream.cuda_context()) };
-		if err != 0 {
+		let diagnostic = unsafe { init_fn(device.stream.cuda_context()) };
+		if !diagnostic.is_null() {
 			cold_path();
-			diag.add_error(format!("x17ai_kernel_init failed with CUDA error code {err}"));
+			diag.add_error(diagnostic_to_string(
+				diagnostic,
+				"x17ai_kernel_init failed without diagnostic",
+			));
 			return Err(KernelGeneratorError);
 		}
 
@@ -337,7 +366,7 @@ impl GemmKernel {
 		b: DevicePtr, b_rows: usize,
 		c: DevicePtr,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		let err = unsafe {
+		let diagnostic = unsafe {
 			(self.launch_fn)(
 				device.stream.handle(),
 				a.as_ptr::<c_void>(), a_rows,
@@ -345,12 +374,15 @@ impl GemmKernel {
 				c.as_ptr::<c_void>(),
 			)
 		};
-		if err != 0 {
+		if !diagnostic.is_null() {
 			cold_path();
 			return Err(ErrPack {
 				code: TensorOpError::Device,
 				extra: Some(Box::new(ErrExtra {
-					message: format!("x17ai_kernel_launch failed with CUDA error code {err}").into(),
+					message: diagnostic_to_string(
+						diagnostic,
+						"x17ai_kernel_launch failed without diagnostic",
+					).into(),
 					nested: None,
 				})),
 			});
@@ -361,9 +393,12 @@ impl GemmKernel {
 
 impl Drop for GemmKernel {
 	fn drop(&mut self) {
-		let err = unsafe { (self.deinit_fn)() };
-		if err != 0 {
-			log::error!("x17ai_kernel_deinit failed with CUDA error code {err}");
+		let diagnostic = unsafe { (self.deinit_fn)() };
+		if !diagnostic.is_null() {
+			log::error!(
+				"{}",
+				diagnostic_to_string(diagnostic, "x17ai_kernel_deinit failed without diagnostic")
+			);
 		}
 	}
 }

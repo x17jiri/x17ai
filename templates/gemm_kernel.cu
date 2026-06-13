@@ -11,21 +11,11 @@
 #include <cuda_runtime.h>
 #include <nvrtc.h>
 
-namespace {
-	usize check_no_context() {
-		#ifndef NDEBUG
-		CUcontext current_ctx = nullptr;
-		CUresult err = cuCtxGetCurrent(&current_ctx);
-		if (err != CUDA_SUCCESS) {
-			return usize(err);
-		}
-		if (current_ctx != nullptr) {
-			return usize(CUDA_ERROR_INVALID_CONTEXT);
-		}
-		#endif
-		return 0;
-	}
+#include <exception>
 
+#include "../../cpp/ffi.hpp"
+
+namespace {
 	static constexpr usize A_COLS = {{a_cols}};
 	static constexpr usize B_COLS = A_COLS;
 
@@ -76,109 +66,172 @@ namespace {
 }
 
 extern "C" {
-	usize x17ai_kernel_init(CUcontext cuda_context) {
-		if (cuda_context == nullptr) {
-			return usize(CUDA_ERROR_INVALID_CONTEXT);
-		}
+	DiagnosticBuffer *x17ai_kernel_init(CUcontext cuda_context) noexcept {
+		bool context_pushed = false;
+		try {
+			assert_no_context("x17ai_kernel_init(): before cuCtxPushCurrent()");
 
-		usize result = check_no_context();
-		if (result != 0) {
-			return result;
-		}
-
-		CUresult ctx_err = cuCtxPushCurrent(cuda_context);
-		if (ctx_err != CUDA_SUCCESS) {
-			return usize(ctx_err);
-		}
-
-		cudaError_t err = cudaFuncSetAttribute(
-			kernel,
-			cudaFuncAttributeMaxDynamicSharedMemorySize,
-			Kernel::SMEM_BYTES
-		);
-		if (err != cudaSuccess) {
-			result = usize(err);
-		}
-
-		if (result == 0) {
-			err = cudaFuncSetAttribute(
-				kernel,
-				cudaFuncAttributePreferredSharedMemoryCarveout,
-				100
-			);
-			result = usize(err);
-		}
-
-		if (result == 0) {
-			cudaFunction_t cuda_function = nullptr;
-			err = cudaGetFuncBySymbol(&cuda_function, reinterpret_cast<const void *>(kernel));
-			if (err != cudaSuccess) {
-				result = usize(err);
-			} else {
-				kernel_function = reinterpret_cast<CUfunction>(cuda_function);
+			if (cuda_context == nullptr) {
+				return X17AI_STATIC_DIAG("x17ai_kernel_init(): CUDA context is null");
 			}
-		}
 
-		CUcontext popped_ctx = nullptr;
-		ctx_err = cuCtxPopCurrent(&popped_ctx);
-		if (result == 0 && ctx_err != CUDA_SUCCESS) {
-			result = usize(ctx_err);
-		}
-		if (result == 0 && popped_ctx != cuda_context) {
-			result = usize(CUDA_ERROR_INVALID_CONTEXT);
-		}
-		if (result == 0) {
-			result = check_no_context();
-		}
+			CUresult ctx_err = cuCtxPushCurrent(cuda_context);
+			if (ctx_err != CUDA_SUCCESS) [[unlikely]] {
+				return X17AI_DIAG(
+					"x17ai_kernel_init(): cuCtxPushCurrent() failed.",
+					"x17ai_kernel_init(): cuCtxPushCurrent() failed with cuda error: ", ctx_err
+				);
+			}
+			context_pushed = true;
 
-		static_assert(cudaSuccess == 0);
-		static_assert(CUDA_SUCCESS == 0);
-		return result;
+			DiagnosticBuffer *diagnostic = nullptr;
+			cudaFunction_t cuda_function = nullptr;
+			cudaError_t err = cudaGetFuncBySymbol(
+				&cuda_function,
+				reinterpret_cast<const void *>(kernel)
+			);
+			if (err != cudaSuccess) [[unlikely]] {
+				diagnostic = X17AI_DIAG(
+					"x17ai_kernel_init(): cudaGetFuncBySymbol() failed.",
+					"x17ai_kernel_init(): cudaGetFuncBySymbol() failed with cuda error: ",
+					cudaGetErrorString(err)
+				);
+			}
+
+			CUfunction local_kernel_function = reinterpret_cast<CUfunction>(cuda_function);
+			if (diagnostic == nullptr) {
+				ctx_err = cuFuncSetAttribute(
+					local_kernel_function,
+					CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+					Kernel::SMEM_BYTES
+				);
+				if (ctx_err != CUDA_SUCCESS) [[unlikely]] {
+					diagnostic = X17AI_DIAG(
+						"x17ai_kernel_init(): cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES) failed.",
+						"x17ai_kernel_init(): cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES) failed with cuda error: ", ctx_err
+					);
+				}
+			}
+
+			if (diagnostic == nullptr) {
+				ctx_err = cuFuncSetAttribute(
+					local_kernel_function,
+					CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT,
+					100
+				);
+				if (ctx_err != CUDA_SUCCESS) [[unlikely]] {
+					diagnostic = X17AI_DIAG(
+						"x17ai_kernel_init(): cuFuncSetAttribute(PREFERRED_SHARED_MEMORY_CARVEOUT) failed.",
+						"x17ai_kernel_init(): cuFuncSetAttribute(PREFERRED_SHARED_MEMORY_CARVEOUT) failed with cuda error: ", ctx_err
+					);
+				}
+			}
+
+			if (diagnostic == nullptr) {
+				kernel_function = local_kernel_function;
+			}
+
+			CUcontext popped_ctx = nullptr;
+			ctx_err = cuCtxPopCurrent(&popped_ctx);
+			context_pushed = false;
+			if (diagnostic != nullptr) {
+				return diagnostic;
+			}
+			if (ctx_err != CUDA_SUCCESS) [[unlikely]] {
+				return X17AI_DIAG(
+					"x17ai_kernel_init(): cuCtxPopCurrent() failed.",
+					"x17ai_kernel_init(): cuCtxPopCurrent() failed with cuda error: ", ctx_err
+				);
+			}
+			if (popped_ctx != cuda_context) {
+				return X17AI_STATIC_DIAG("x17ai_kernel_init(): popped unexpected CUDA context");
+			}
+
+			assert_no_context("x17ai_kernel_init(): after cuCtxPopCurrent()");
+			return nullptr;
+		} catch (ContextQueryError const &e) {
+			if (context_pushed) {
+				CUcontext popped_ctx = nullptr;
+				[[maybe_unused]] CUresult ignored = cuCtxPopCurrent(&popped_ctx);
+			}
+			return X17AI_DIAG(
+				"x17ai_kernel_init(): CUDA context query failed.",
+				"x17ai_kernel_init(): CUDA context query failed at ", e.where,
+				" with cuda error: ", e.error
+			);
+		} catch (NonNullContextError const &e) {
+			if (context_pushed) {
+				CUcontext popped_ctx = nullptr;
+				[[maybe_unused]] CUresult ignored = cuCtxPopCurrent(&popped_ctx);
+			}
+			return X17AI_DIAG(
+				"x17ai_kernel_init(): unexpected CUDA context.",
+				"x17ai_kernel_init(): unexpected CUDA context at ", e.where
+			);
+		} catch (std::exception const &e) {
+			if (context_pushed) {
+				CUcontext popped_ctx = nullptr;
+				[[maybe_unused]] CUresult ignored = cuCtxPopCurrent(&popped_ctx);
+			}
+			return X17AI_DIAG(
+				"x17ai_kernel_init(): exception thrown.",
+				"x17ai_kernel_init(): exception thrown: ", e.what()
+			);
+		} catch (...) {
+			if (context_pushed) {
+				CUcontext popped_ctx = nullptr;
+				[[maybe_unused]] CUresult ignored = cuCtxPopCurrent(&popped_ctx);
+			}
+			return X17AI_STATIC_DIAG("x17ai_kernel_init(): unknown exception thrown");
+		}
 	}
 
-	usize x17ai_kernel_deinit() {
-		kernel_function = nullptr;
-		return 0;
+	DiagnosticBuffer *x17ai_kernel_deinit() noexcept {
+		try {
+			assert_no_context("x17ai_kernel_deinit(): entry");
+			kernel_function = nullptr;
+			return nullptr;
+		} X17AI_CATCH_ERRORS("x17ai_kernel_deinit()")
 	}
 
 	struct CudaStreamHandle;
 
-	usize x17ai_kernel_launch(
+	DiagnosticBuffer *x17ai_kernel_launch(
 		CudaStreamHandle *cuda_stream,
 		b8::FixedI8 *a, usize a_rows,
 		b8::FixedI8 *b, usize b_rows,
 		b8::FixedI8 *c
-	) {
-		usize result = check_no_context();
-		if (result != 0) {
-			return 5000 + result;
-		}
-		if (kernel_function == nullptr) {
-			return usize(CUDA_ERROR_INVALID_HANDLE);
-		}
+	) noexcept {
+		try {
+			assert_no_context("x17ai_kernel_launch(): before cuLaunchKernel()");
+			if (kernel_function == nullptr) {
+				return X17AI_STATIC_DIAG("x17ai_kernel_launch(): kernel function is null");
+			}
 
-		dim3 grid = Kernel::output_grid(a_rows, b_rows);
-		void *params[] = {
-			&a, &a_rows,
-			&b, &b_rows,
-			&c,
-		};
-		CUresult launch_err = cuLaunchKernel(
-			kernel_function,
-			grid.x, grid.y, grid.z,
-			Kernel::THREADS_PER_BLOCK, 1, 1,
-			Kernel::SMEM_BYTES,
-			reinterpret_cast<CUstream>(cuda_stream),
-			params,
-			nullptr
-		);
+			dim3 grid = Kernel::output_grid(a_rows, b_rows);
+			void *params[] = {
+				&a, &a_rows,
+				&b, &b_rows,
+				&c,
+			};
+			CUresult launch_err = cuLaunchKernel(
+				kernel_function,
+				grid.x, grid.y, grid.z,
+				Kernel::THREADS_PER_BLOCK, 1, 1,
+				Kernel::SMEM_BYTES,
+				reinterpret_cast<CUstream>(cuda_stream),
+				params,
+				nullptr
+			);
+			if (launch_err != CUDA_SUCCESS) [[unlikely]] {
+				return X17AI_DIAG(
+					"x17ai_kernel_launch(): cuLaunchKernel() failed.",
+					"x17ai_kernel_launch(): cuLaunchKernel() failed with cuda error: ", launch_err
+				);
+			}
 
-		result = check_no_context();
-		if (result != 0) {
-			return 8000 + result;
-		}
-
-		static_assert(CUDA_SUCCESS == 0);
-		return usize(launch_err);
+			assert_no_context("x17ai_kernel_launch(): after cuLaunchKernel()");
+			return nullptr;
+		} X17AI_CATCH_ERRORS("x17ai_kernel_launch()");
 	}
 }

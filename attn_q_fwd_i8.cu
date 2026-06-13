@@ -29,7 +29,6 @@ namespace Attn_q_fwd {
 		>;
 
 	using Writer = b8::FixedI8MatrixWriter<
-		Q_PROJ_OUTPUTS,
 		InputLoader::M,
 		WeightLoader::K,
 		math::constexpr_inv_sqrt(f64(config::MODEL_DIM))
@@ -45,7 +44,7 @@ namespace Attn_q_fwd {
 	) {
 		auto a = InputLoader(inp, n_inputs);
 		auto b = WeightLoader(w, Q_PROJ_OUTPUTS);
-		auto o = Writer(out);
+		auto o = Writer(out, Q_PROJ_OUTPUTS);
 		Kernel().run(a, b, o);
 	}
 }

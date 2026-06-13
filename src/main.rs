@@ -22,7 +22,7 @@ use std::rc::Rc;
 
 use x17ai::device::Device;
 use x17ai::device::cuda::{
-	CudaDevice, Diagnostics, GemmEpilogue, GemmInput, GemmKernel, GemmKernelConfig, Scale,
+	CudaDevice, CudaTimer, Diagnostics, GemmEpilogue, GemmInput, GemmKernel, GemmKernelConfig, Scale,
 };
 use x17ai::dtype::DType;
 use x17ai::tensor::Tensor;
@@ -53,7 +53,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			)).into());
 		},
 	};
+	for warmup in 0..10 {
+		unsafe {
+			kernel.run(
+				device.as_ref(),
+				x.device_ptr(),
+				n_inputs,
+				q_weights.device_ptr(),
+				q_proj_outputs,
+				q.device_ptr(),
+			)?;
+		}
+	}
 	println!("HERE 0");
+	let kernel_timer = CudaTimer::new(device.as_ref())?;
+	kernel_timer.start()?;
 	unsafe {
 		kernel.run(
 			device.as_ref(),
@@ -64,10 +78,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			q.device_ptr(),
 		)?;
 	}
-	println!("HERE 1");
+	kernel_timer.stop()?;
 	let q = q.to_cpu()?;
 	println!("HERE 2");
 	device.synchronize()?;
+	let kernel_seconds = kernel_timer.elapsed_seconds()?;
 	println!("HERE 3");
 	q.save_safetensors_file(output_path("q_i8.safetensors"))?;
 
@@ -84,7 +99,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	);
 	println!("kernel source: {}", kernel.source_path.display());
 	println!("kernel library: {}", kernel.library_path.display());
-	println!("launched attn_q_fwd");
+	let kernel_ms = kernel_seconds * 1000.0;
+	println!("launched attn_q_fwd in {kernel_ms:.4} ms");
 	println!("stored {}", output_path("q_i8.safetensors").display());
 
 	Ok(())

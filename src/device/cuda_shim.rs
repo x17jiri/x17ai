@@ -11,6 +11,7 @@ use std::hint::cold_path;
 use std::ptr::NonNull;
 
 use crate::device::DevicePtr;
+use crate::tensor::Tensor;
 use crate::util::ffi_buffer::FfiBuffer;
 use crate::{ErrExtra, ErrPack, TensorOpError};
 
@@ -33,6 +34,11 @@ pub struct CudaDeviceData {
 }
 
 #[repr(C)]
+pub struct CudaTimerHandle {
+	_private: [u8; 0],
+}
+
+#[repr(C)]
 pub struct DiagnosticBuffer {
 	_private: [u8; 0],
 }
@@ -43,26 +49,36 @@ struct PtrResult<T> {
 	diagnostic: *mut DiagnosticBuffer,
 }
 
-#[repr(C)]
-struct UsizeResult {
-	value: usize,
-	diagnostic: *mut DiagnosticBuffer,
-}
-
 unsafe extern "C" {
-	fn x17ai_copy_diagnostic(diag: *mut DiagnosticBuffer, err: FfiBuffer);
+	fn x17ai_move_diagnostic(diag: *mut DiagnosticBuffer, err: FfiBuffer);
 
 	fn x17ai_cuda_open_context(device_id: usize) -> PtrResult<CudaContextHandle>;
 
-	fn x17ai_cuda_close_context(ctx: *mut CudaContextHandle) -> UsizeResult;
+	fn x17ai_cuda_close_context(ctx: *mut CudaContextHandle) -> *mut DiagnosticBuffer;
 
 	fn x17ai_cuda_context_ptr(ctx: *mut CudaContextHandle) -> *mut c_void;
 
 	fn x17ai_cuda_open_stream(ctx: *mut CudaContextHandle) -> PtrResult<CudaStreamHandle>;
 
-	fn x17ai_cuda_close_stream(stream: *mut CudaStreamHandle) -> UsizeResult;
+	fn x17ai_cuda_close_stream(stream: *mut CudaStreamHandle) -> *mut DiagnosticBuffer;
 
-	fn x17ai_cuda_synchronize(stream: *mut CudaStreamHandle) -> UsizeResult;
+	fn x17ai_cuda_synchronize(stream: *mut CudaStreamHandle) -> *mut DiagnosticBuffer;
+
+	fn x17ai_cuda_create_timer(
+		ctx: *mut CudaContextHandle,
+		stream: *mut CudaStreamHandle
+	) -> PtrResult<CudaTimerHandle>;
+
+	fn x17ai_cuda_destroy_timer(timer: *mut CudaTimerHandle) -> *mut DiagnosticBuffer;
+
+	fn x17ai_cuda_timer_start(timer: *mut CudaTimerHandle) -> *mut DiagnosticBuffer;
+
+	fn x17ai_cuda_timer_stop(timer: *mut CudaTimerHandle) -> *mut DiagnosticBuffer;
+
+	fn x17ai_cuda_timer_elapsed_seconds(
+		timer: *mut CudaTimerHandle,
+		ms: *mut f64,
+	) -> *mut DiagnosticBuffer;
 
 	fn x17ai_cuda_alloc(
 		stream: *mut CudaStreamHandle,
@@ -72,7 +88,7 @@ unsafe extern "C" {
 	fn x17ai_cuda_free(
 		stream: *mut CudaStreamHandle,
 		ptr: *mut CudaDeviceData,
-	) -> UsizeResult;
+	) -> *mut DiagnosticBuffer;
 
 	fn x17ai_cuda_upload_data(
 		stream: *mut CudaStreamHandle,
@@ -80,7 +96,7 @@ unsafe extern "C" {
 		dst: *mut CudaDeviceData,
 		offset_bytes: usize,
 		size_bytes: usize,
-	) -> UsizeResult;
+	) -> *mut DiagnosticBuffer;
 
 	fn x17ai_cuda_download_data(
 		stream: *mut CudaStreamHandle,
@@ -88,83 +104,64 @@ unsafe extern "C" {
 		dst: *mut u8,
 		offset_bytes: usize,
 		size_bytes: usize,
-	) -> UsizeResult;
+	) -> *mut DiagnosticBuffer;
 }
 
 //--------------------------------------------------------------------------------------------------
 
-#[derive(Clone)]
-pub struct CudaError {
-	pub msg: Vec<u8>,
-}
-
-impl From<CudaError> for ErrPack<TensorOpError> {
-	#[inline(never)]
-	#[cold]
-	fn from(err: CudaError) -> Self {
-		Self {
-			code: TensorOpError::Device,
-			extra: Some(Box::new(ErrExtra {
-				message: Cow::from(String::from_utf8_lossy(&err.msg).into_owned()),
-				nested: None,
-			})),
-		}
-	}
-}
-
+#[allow(clippy::needless_pass_by_value)]
 #[inline(never)]
-#[cold]
 fn ptr_result_to_error<T>(result: PtrResult<T>) -> ErrPack<TensorOpError> {
 	diagnostic_to_error(result.diagnostic, "CUDA operation failed without diagnostic")
 }
 
 #[inline(never)]
-#[cold]
-fn usize_result_to_error(result: UsizeResult) -> ErrPack<TensorOpError> {
-	diagnostic_to_error(
-		result.diagnostic,
-		&format!("CUDA operation failed without diagnostic; status {}", result.value),
-	)
+fn diagnostic_to_error(diagnostic: *mut DiagnosticBuffer, fallback: &str) -> ErrPack<TensorOpError> {
+	ErrPack::<TensorOpError> {
+		code: TensorOpError::Device,
+		extra: Some(Box::new(ErrExtra {
+			message: diagnostic_to_string(diagnostic, fallback).into(),
+			nested: None,
+		})),
+	}
+}
+
+pub(super) fn diagnostic_to_string(diagnostic: *mut DiagnosticBuffer, fallback: &str) -> String {
+	let mut msg = Vec::new();
+	unsafe {
+		x17ai_move_diagnostic(diagnostic, FfiBuffer::new(&mut msg));
+	}
+	if msg.is_empty() {
+		fallback.to_owned()
+	} else {
+		String::from_utf8_lossy(&msg).into_owned()
+	}
 }
 
 #[inline(never)]
-#[cold]
-fn usize_result_to_error_with_nested(
-	result: UsizeResult,
+fn diagnostic_to_error_with_nested(
+	diagnostic: *mut DiagnosticBuffer,
 	nested: ErrPack<TensorOpError>,
 ) -> ErrPack<TensorOpError> {
-	let mut result = usize_result_to_error(result);
+	let mut result = diagnostic_to_error(diagnostic, "CUDA operation failed without diagnostic");
+	let nested = Box::new(nested);
 	if let Some(extra) = &mut result.extra {
-		extra.nested = Some(Box::new(nested));
+		extra.nested = Some(nested);
 	} else {
 		result.extra = Some(Box::new(ErrExtra {
 			message: "CUDA operation failed without diagnostic".into(),
-			nested: Some(Box::new(nested)),
+			nested: Some(nested),
 		}));
 	}
 	result
 }
 
 #[inline(never)]
-#[cold]
-fn diagnostic_to_error(diagnostic: *mut DiagnosticBuffer, fallback: &str) -> ErrPack<TensorOpError> {
-	let mut err = CudaError { msg: Vec::new() };
-	unsafe {
-		x17ai_copy_diagnostic(diagnostic, FfiBuffer::new(&mut err.msg));
-	}
-	if err.msg.is_empty() {
-		err.msg.extend_from_slice(fallback.as_bytes());
-	}
-	err.into()
-}
-
-#[inline(never)]
-#[cold]
 fn discard_diagnostic(diag: *mut DiagnosticBuffer) {
 	if !diag.is_null() {
 		let mut msg = Vec::new();
 		unsafe {
-			x17ai_copy_diagnostic(diag, FfiBuffer::new(&mut msg));
+			x17ai_move_diagnostic(diag, FfiBuffer::new(&mut msg));
 		}
 	}
 }
@@ -190,10 +187,10 @@ impl CudaStream {
 			cold_path();
 			let result = ptr_result_to_error(stream_result);
 			let result2 = unsafe { x17ai_cuda_close_context(ctx.as_ptr()) };
-			if result2.value != 0 {
-				return Err(usize_result_to_error_with_nested(result2, result));
+			if !result2.is_null() {
+				cold_path();
+				return Err(diagnostic_to_error_with_nested(result2, result));
 			}
-			debug_assert!(result2.diagnostic.is_null());
 			return Err(result);
 		};
 		debug_assert!(stream_result.diagnostic.is_null());
@@ -216,12 +213,14 @@ impl CudaStream {
 	}
 
 	pub fn synchronize(&self) -> Result<(), ErrPack<TensorOpError>> {
-		let result = unsafe { x17ai_cuda_synchronize(self.stream.as_ptr()) };
-		if result.value != 0 {
+		let diagnostic = unsafe { x17ai_cuda_synchronize(self.stream.as_ptr()) };
+		if !diagnostic.is_null() {
 			cold_path();
-			return Err(usize_result_to_error(result));
+			return Err(diagnostic_to_error(
+				diagnostic,
+				"x17ai_cuda_synchronize() failed without diagnostic",
+			));
 		}
-		debug_assert!(result.diagnostic.is_null());
 		Ok(())
 	}
 
@@ -229,12 +228,12 @@ impl CudaStream {
 	///
 	/// The pointer must be a valid pointer returned by `alloc`.
 	pub unsafe fn free(&self, ptr: DevicePtr) {
-		let result = unsafe {
+		let diagnostic = unsafe {
 			x17ai_cuda_free(self.stream.as_ptr(), ptr.as_ptr::<CudaDeviceData>())
 		};
-		if result.value != 0 {
+		if !diagnostic.is_null() {
 			cold_path();
-			discard_diagnostic(result.diagnostic);
+			discard_diagnostic(diagnostic);
 		}
 	}
 
@@ -248,7 +247,7 @@ impl CudaStream {
 		offset_bytes: usize,
 		size_bytes: usize,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		let result = unsafe {
+		let diagnostic = unsafe {
 			x17ai_cuda_upload_data(
 				self.stream.as_ptr(),
 				src.as_ptr(),
@@ -257,11 +256,13 @@ impl CudaStream {
 				size_bytes,
 			)
 		};
-		if result.value != 0 {
+		if !diagnostic.is_null() {
 			cold_path();
-			return Err(usize_result_to_error(result));
+			return Err(diagnostic_to_error(
+				diagnostic,
+				"x17ai_cuda_upload_data() failed without diagnostic",
+			));
 		}
-		debug_assert!(result.diagnostic.is_null());
 		Ok(())
 	}
 
@@ -275,7 +276,7 @@ impl CudaStream {
 		offset_bytes: usize,
 		size_bytes: usize,
 	) -> Result<(), ErrPack<TensorOpError>> {
-		let result = unsafe {
+		let diagnostic = unsafe {
 			x17ai_cuda_download_data(
 				self.stream.as_ptr(),
 				src.as_ptr::<CudaDeviceData>(),
@@ -284,15 +285,17 @@ impl CudaStream {
 				size_bytes,
 			)
 		};
-		if result.value != 0 {
+		if !diagnostic.is_null() {
 			cold_path();
-			return Err(usize_result_to_error(result));
+			return Err(diagnostic_to_error(
+				diagnostic,
+				"x17ai_cuda_download_data() failed without diagnostic",
+			));
 		}
-		debug_assert!(result.diagnostic.is_null());
 		Ok(())
 	}
 
-	pub fn handle(&self) -> *mut CudaStreamHandle{
+	pub fn handle(&self) -> *mut CudaStreamHandle {
 		self.stream.as_ptr()
 	}
 
@@ -304,18 +307,88 @@ impl CudaStream {
 impl Drop for CudaStream {
 	fn drop(&mut self) {
 		unsafe {
-			let result = x17ai_cuda_close_stream(self.stream.as_ptr());
-			if result.value != 0 {
+			let diagnostic = x17ai_cuda_close_stream(self.stream.as_ptr());
+			if !diagnostic.is_null() {
 				cold_path();
-				discard_diagnostic(result.diagnostic);
+				discard_diagnostic(diagnostic);
 			}
 
-			let result = x17ai_cuda_close_context(self.ctx.as_ptr());
-			if result.value != 0 {
+			let diagnostic = x17ai_cuda_close_context(self.ctx.as_ptr());
+			if !diagnostic.is_null() {
 				cold_path();
-				discard_diagnostic(result.diagnostic);
+				discard_diagnostic(diagnostic);
 			}
 		};
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct CudaEventTimer {
+	timer: NonNull<CudaTimerHandle>,
+}
+
+impl CudaEventTimer {
+	pub fn new(stream: &CudaStream) -> Result<Self, ErrPack<TensorOpError>> {
+		let timer_result = unsafe {
+			x17ai_cuda_create_timer(stream.ctx.as_ptr(), stream.stream.as_ptr())
+		};
+		let Some(timer) = NonNull::new(timer_result.value) else {
+			cold_path();
+			return Err(ptr_result_to_error(timer_result));
+		};
+		debug_assert!(timer_result.diagnostic.is_null());
+
+		Ok(Self { timer })
+	}
+
+	pub fn start(&self) -> Result<(), ErrPack<TensorOpError>> {
+		let diagnostic = unsafe { x17ai_cuda_timer_start(self.timer.as_ptr()) };
+		if !diagnostic.is_null() {
+			cold_path();
+			return Err(diagnostic_to_error(
+				diagnostic,
+				"x17ai_cuda_timer_start() failed without diagnostic",
+			));
+		}
+		Ok(())
+	}
+
+	pub fn stop(&self) -> Result<(), ErrPack<TensorOpError>> {
+		let diagnostic = unsafe { x17ai_cuda_timer_stop(self.timer.as_ptr()) };
+		if !diagnostic.is_null() {
+			cold_path();
+			return Err(diagnostic_to_error(
+				diagnostic,
+				"x17ai_cuda_timer_stop() failed without diagnostic",
+			));
+		}
+		Ok(())
+	}
+
+	pub fn elapsed_seconds(&self) -> Result<f64, ErrPack<TensorOpError>> {
+		let mut seconds = 0.0;
+		let diagnostic = unsafe {
+			x17ai_cuda_timer_elapsed_seconds(self.timer.as_ptr(), &mut seconds)
+		};
+		if !diagnostic.is_null() {
+			cold_path();
+			return Err(diagnostic_to_error(
+				diagnostic,
+				"x17ai_cuda_timer_elapsed_seconds() failed without diagnostic",
+			));
+		}
+		Ok(seconds)
+	}
+}
+
+impl Drop for CudaEventTimer {
+	fn drop(&mut self) {
+		let diagnostic = unsafe { x17ai_cuda_destroy_timer(self.timer.as_ptr()) };
+		if !diagnostic.is_null() {
+			cold_path();
+			discard_diagnostic(diagnostic);
+		}
 	}
 }
 

@@ -149,13 +149,11 @@ template<
 	const usize N_PER_BLOCK
 >
 struct QMatrixWriter: b8::FixedI8MatrixWriter<
-	PROJ_OUTPUTS,
 	M_PER_BLOCK,
 	N_PER_BLOCK,
 	math::constexpr_inv_sqrt(f64(config::MODEL_DIM))
 > {
 	using Base = b8::FixedI8MatrixWriter<
-		PROJ_OUTPUTS,
 		M_PER_BLOCK,
 		N_PER_BLOCK,
 		math::constexpr_inv_sqrt(f64(config::MODEL_DIM))
@@ -175,7 +173,7 @@ struct QMatrixWriter: b8::FixedI8MatrixWriter<
 		b8::FixedI8 *gC,
 		bf16 const *norm_scales
 	):
-		Base(gC),
+		Base(gC, PROJ_OUTPUTS),
 		g_norm_scales(norm_scales),
 		s_norm_scales(),
 		norm_scale_col0(0)
@@ -219,7 +217,7 @@ struct QMatrixWriter: b8::FixedI8MatrixWriter<
 		Base::write(row, col, t);
 	}
 };
-
+/*
 template<
 	const usize HEAD_DIM,
 	const usize PROJ_OUTPUTS,
@@ -301,3 +299,4 @@ struct KVMatrixWriter: b8::FixedI8MatrixWriter<
 		Base::write(row, col, t);
 	}
 };
+*/
