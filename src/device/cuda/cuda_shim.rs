@@ -5,8 +5,10 @@
 //
 //------------------------------------------------------------------------------
 
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{c_char, c_void, CString};
 use std::hint::cold_path;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 use std::ptr::NonNull;
 
 use crate::device::DevicePtr;
@@ -116,7 +118,7 @@ unsafe extern "C" {
 
 	fn x17ai_cuda_load_module(
 		ctx: *mut CudaContextHandle,
-		ptx: *const c_char,
+		cubin_path: *const c_char,
 	) -> PtrResult<CudaModuleHandle>;
 
 	fn x17ai_cuda_del_module(module: *mut CudaModuleHandle) -> *mut DiagnosticBuffer;
@@ -124,7 +126,16 @@ unsafe extern "C" {
 	fn x17ai_cuda_get_kernel(
 		module: *mut CudaModuleHandle,
 		name: *const c_char,
+		max_dynamic_smem_bytes: usize,
 	) -> PtrResult<CudaKernelHandle>;
+
+	fn x17ai_cuda_launch_kernel(
+		stream: *mut CudaStreamHandle, kernel: *mut CudaKernelHandle,
+		grid_x: usize, grid_y: usize, grid_z: usize,
+		block_x: usize, block_y: usize, block_z: usize,
+		shared_mem_bytes: usize,
+		args: *mut *mut c_void,
+	) -> *mut DiagnosticBuffer;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -323,12 +334,22 @@ impl CudaStream {
 		unsafe { x17ai_cuda_context_ptr(self.ctx.as_ptr()) }
 	}
 
-	pub fn load_module_from_ptx(
+	pub fn load_module_from_cubin(
 		&self,
-		ptx: &CStr,
+		cubin_path: &Path,
 	) -> Result<CudaModule, ErrPack<TensorOpError>> {
+		let Ok(cubin_path) = CString::new(cubin_path.as_os_str().as_bytes()) else {
+			cold_path();
+			return Err(ErrPack {
+				code: TensorOpError::Device,
+				extra: Some(Box::new(ErrExtra {
+					message: "CUDA cubin path contains an interior NUL byte".into(),
+					nested: None,
+				})),
+			});
+		};
 		let module_result = unsafe {
-			x17ai_cuda_load_module(self.ctx.as_ptr(), ptx.as_ptr())
+			x17ai_cuda_load_module(self.ctx.as_ptr(), cubin_path.as_ptr())
 		};
 		let Some(module) = NonNull::new(module_result.value) else {
 			cold_path();
@@ -365,7 +386,11 @@ pub struct CudaModule {
 }
 
 impl CudaModule {
-	pub fn get_kernel(self, name: &str) -> Result<CudaKernel, ErrPack<TensorOpError>> {
+	pub fn get_kernel(
+		self,
+		name: &str,
+		max_dynamic_smem_bytes: usize,
+	) -> Result<CudaKernel, ErrPack<TensorOpError>> {
 		let Ok(name) = CString::new(name) else {
 			cold_path();
 			return Err(ErrPack {
@@ -378,7 +403,11 @@ impl CudaModule {
 		};
 
 		let kernel_result = unsafe {
-			x17ai_cuda_get_kernel(self.handle.as_ptr(), name.as_ptr())
+			x17ai_cuda_get_kernel(
+				self.handle.as_ptr(),
+				name.as_ptr(),
+				max_dynamic_smem_bytes,
+			)
 		};
 		let Some(kernel) = NonNull::new(kernel_result.value) else {
 			cold_path();
@@ -408,6 +437,37 @@ pub struct CudaKernel {
 impl CudaKernel {
 	pub fn handle(&self) -> *mut CudaKernelHandle {
 		self.handle.as_ptr()
+	}
+
+	/// # Safety
+	///
+	/// `args` must contain one pointer per kernel parameter. Each pointer must point to a host
+	/// value with the exact type and layout expected by the loaded CUDA kernel.
+	pub unsafe fn launch(
+		&self,
+		stream: &CudaStream,
+		grid_dim: [usize; 3],
+		block_dim: [usize; 3],
+		shared_mem_bytes: usize,
+		args: &mut [*mut c_void],
+	) -> Result<(), ErrPack<TensorOpError>> {
+		let diagnostic = unsafe {
+			x17ai_cuda_launch_kernel(
+				stream.stream.as_ptr(), self.handle.as_ptr(),
+				grid_dim[0], grid_dim[1], grid_dim[2],
+				block_dim[0], block_dim[1], block_dim[2],
+				shared_mem_bytes,
+				args.as_mut_ptr(),
+			)
+		};
+		if !diagnostic.is_null() {
+			cold_path();
+			return Err(diagnostic_to_error(
+				diagnostic,
+				"x17ai_cuda_launch_kernel() failed without diagnostic",
+			));
+		}
+		Ok(())
 	}
 }
 

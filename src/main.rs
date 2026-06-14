@@ -47,6 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	println!("generated GEMM kernel files in {}", kernel.dir_path.display());
 	println!("common source: {}", kernel.common_path.display());
 	println!("kernel source: {}", kernel.kernel_path.display());
+	println!("kernel ptx: {}", kernel.ptx_path.display());
 	println!("kernel cubin: {}", kernel.cubin_path.display());
 	println!("metadata source: {}", kernel.meta_path.display());
 	println!("metadata executable: {}", kernel.meta_exe_path.display());

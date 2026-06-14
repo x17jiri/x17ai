@@ -679,13 +679,13 @@ extern "C" {
 
 	PtrResult<CudaModuleHandle> x17ai_cuda_load_module(
 		CudaContextHandle *ctx,
-		char const *ptx
+		char const *cubin_path
 	) noexcept {
 		try {
 			assert_no_context("x17ai_cuda_load_module(): before cuCtxPushCurrent()");
 			assert(cuda_initialized.load(std::memory_order_acquire));
 			assert(ctx != nullptr);
-			assert(ptx != nullptr);
+			assert(cubin_path != nullptr);
 			CUresult e;
 
 			e = cuCtxPushCurrent(ctx->context);
@@ -698,11 +698,11 @@ extern "C" {
 
 			CUmodule module = nullptr;
 			DiagnosticBuffer *diagnostic = nullptr;
-			e = cuModuleLoadDataEx(&module, ptx, 0, nullptr, nullptr);
+			e = cuModuleLoad(&module, cubin_path);
 			if (e != CUDA_SUCCESS) [[unlikely]] {
 				diagnostic = X17AI_DIAG(
-					"x17ai_cuda_load_module(): cuModuleLoadDataEx() failed.",
-					"x17ai_cuda_load_module(): cuModuleLoadDataEx() failed with cuda error: ", e
+					"x17ai_cuda_load_module(): cuModuleLoad() failed.",
+					"x17ai_cuda_load_module(): cuModuleLoad() failed with cuda error: ", e
 				);
 			}
 
@@ -730,7 +730,7 @@ extern "C" {
 			}
 			if (module == nullptr) [[unlikely]] {
 				return X17AI_STATIC_DIAG(
-					"x17ai_cuda_load_module(): cuModuleLoadDataEx() returned nullptr"
+					"x17ai_cuda_load_module(): cuModuleLoad() returned nullptr"
 				);
 			}
 
@@ -759,7 +759,8 @@ extern "C" {
 
 	PtrResult<CudaKernelHandle> x17ai_cuda_get_kernel(
 		CudaModuleHandle *mod,
-		char const *name
+		char const *name,
+		usize max_dynamic_smem_bytes
 	) noexcept {
 		try {
 			assert_no_context("x17ai_cuda_get_kernel(): before cuModuleGetFunction()");
@@ -780,8 +781,108 @@ extern "C" {
 					"x17ai_cuda_get_kernel(): cuModuleGetFunction() returned nullptr"
 				);
 			}
+
+			if (!std::in_range<int>(max_dynamic_smem_bytes)) [[unlikely]] {
+				return X17AI_STATIC_DIAG(
+					"x17ai_cuda_get_kernel(): max dynamic shared memory size is out of range"
+				);
+			}
+			e = cuFuncSetAttribute(
+				kernel,
+				CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+				int(max_dynamic_smem_bytes)
+			);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				return X17AI_DIAG(
+					"x17ai_cuda_get_kernel(): cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES) failed.",
+					"x17ai_cuda_get_kernel(): cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES) failed with cuda error: ", e
+				);
+			}
+
+			e = cuFuncSetAttribute(
+				kernel,
+				CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT,
+				100
+			);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				return X17AI_DIAG(
+					"x17ai_cuda_get_kernel(): cuFuncSetAttribute(PREFERRED_SHARED_MEMORY_CARVEOUT) failed.",
+					"x17ai_cuda_get_kernel(): cuFuncSetAttribute(PREFERRED_SHARED_MEMORY_CARVEOUT) failed with cuda error: ", e
+				);
+			}
+
 			assert_no_context("x17ai_cuda_get_kernel(): after cuModuleGetFunction()");
 			return reinterpret_cast<CudaKernelHandle *>(kernel);
 		} X17AI_CATCH_ERRORS("x17ai_cuda_get_kernel()")
+	}
+
+	DiagnosticBuffer *x17ai_cuda_launch_kernel(
+		CudaStreamHandle *stream, CudaKernelHandle *kernel,
+		usize grid_x, usize grid_y, usize grid_z,
+		usize block_x, usize block_y, usize block_z,
+		usize shared_mem_bytes,
+		void **args
+	) noexcept {
+		try {
+			assert_no_context("x17ai_cuda_launch_kernel(): before cuLaunchKernel()");
+			assert(cuda_initialized.load(std::memory_order_acquire));
+			assert(stream != nullptr);
+			assert(kernel != nullptr);
+
+			if (grid_x == 0 || grid_y == 0 || grid_z == 0) [[unlikely]] {
+				return X17AI_STATIC_DIAG(
+					"x17ai_cuda_launch_kernel(): grid dimensions must be non-zero"
+				);
+			}
+			if (block_x == 0 || block_y == 0 || block_z == 0) [[unlikely]] {
+				return X17AI_STATIC_DIAG(
+					"x17ai_cuda_launch_kernel(): block dimensions must be non-zero"
+				);
+			}
+			if (
+				!std::in_range<u32>(grid_x)
+				|| !std::in_range<u32>(grid_y)
+				|| !std::in_range<u32>(grid_z)
+			) [[unlikely]] {
+				return X17AI_STATIC_DIAG(
+					"x17ai_cuda_launch_kernel(): grid dimensions are out of range"
+				);
+			}
+			if (
+				!std::in_range<u32>(block_x)
+				|| !std::in_range<u32>(block_y)
+				|| !std::in_range<u32>(block_z)
+			) [[unlikely]] {
+				return X17AI_STATIC_DIAG(
+					"x17ai_cuda_launch_kernel(): block dimensions are out of range"
+				);
+			}
+			if (!std::in_range<u32>(shared_mem_bytes)) [[unlikely]] {
+				return X17AI_STATIC_DIAG(
+					"x17ai_cuda_launch_kernel(): shared memory size is out of range"
+				);
+			}
+
+			CUstream cu_stream = reinterpret_cast<CUstream>(stream);
+			CUfunction cu_kernel = reinterpret_cast<CUfunction>(kernel);
+			CUresult e = cuLaunchKernel(
+				cu_kernel,
+				u32(grid_x), u32(grid_y), u32(grid_z),
+				u32(block_x), u32(block_y), u32(block_z),
+				u32(shared_mem_bytes),
+				cu_stream,
+				args,
+				nullptr
+			);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				return X17AI_DIAG(
+					"x17ai_cuda_launch_kernel(): cuLaunchKernel() failed.",
+					"x17ai_cuda_launch_kernel(): cuLaunchKernel() failed with cuda error: ", e
+				);
+			}
+
+			assert_no_context("x17ai_cuda_launch_kernel(): after cuLaunchKernel()");
+			return nullptr;
+		} X17AI_CATCH_ERRORS("x17ai_cuda_launch_kernel()")
 	}
 }

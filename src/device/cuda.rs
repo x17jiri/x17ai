@@ -199,12 +199,13 @@ pub struct GemmKernel {
 	pub dir_path: PathBuf,
 	pub common_path: PathBuf,
 	pub kernel_path: PathBuf,
+	pub ptx_path: PathBuf,
 	pub cubin_path: PathBuf,
 	pub meta_path: PathBuf,
 	pub meta_exe_path: PathBuf,
 	pub meta_json_path: PathBuf,
 	pub device: Rc<CudaDevice>,
-	pub launcher: Rc<dyn GemmKernelLauncher>
+	pub launcher: Box<dyn GemmKernelLauncher>
 }
 
 impl GemmKernel {
@@ -230,6 +231,7 @@ impl GemmKernel {
 		let dir_path = Path::new("cache").join("kernels").join(kernel_name);
 		let common_path = dir_path.join("common.cuh");
 		let kernel_path = dir_path.join("kernel.cu");
+		let ptx_path = dir_path.join("kernel.ptx");
 		let cubin_path = dir_path.join("kernel.cubin");
 		let meta_path = dir_path.join("meta.cu");
 		let meta_exe_path = dir_path.join("meta");
@@ -251,21 +253,35 @@ impl GemmKernel {
 		Self::write_generated_file(&kernel_path, sources.kernel, diag)?;
 		Self::write_generated_file(&meta_path, sources.meta, diag)?;
 
+		Self::compile_kernel_ptx(&dir_path, diag)?;
 		Self::compile_kernel_cubin(&dir_path, diag)?;
 		Self::compile_meta_exe(&dir_path, diag)?;
 		Self::run_meta_exe(&dir_path, &meta_json_path, diag)?;
+		let launcher = match BasicGemmKernelLauncher::new(
+			device.as_ref(),
+			&cubin_path,
+			&meta_json_path
+		) {
+			Ok(launcher) => launcher,
+			Err(err) => {
+				cold_path();
+				diag.add_error(format!("failed to load generated GEMM kernel: {err}"));
+				return Err(KernelGeneratorError);
+			},
+		};
 
 		Ok(Self {
 			name: kernel_name.to_owned(),
 			dir_path,
 			common_path,
 			kernel_path,
+			ptx_path,
 			cubin_path,
 			meta_path,
 			meta_exe_path,
 			meta_json_path,
 			device,
-			launcher: Rc::new(BasicGemmKernelLauncher),
+			launcher: Box::new(launcher),
 		})
 	}
 
@@ -344,23 +360,43 @@ impl GemmKernel {
 		}
 	}
 
+	fn compile_kernel_ptx(
+		dir_path: &Path,
+		diag: &mut Diagnostics,
+	) -> Result<(), KernelGeneratorError> {
+		let mut command = Self::nvcc_command("compute_86");
+		command
+			.current_dir(dir_path)
+			.arg("-ptx")
+			.arg("kernel.cu")
+			.arg("-lineinfo")
+			.arg("-o")
+			.arg("kernel.ptx");
+
+		Self::run_checked_command(
+			&mut command,
+			"nvcc failed while compiling kernel.cu to kernel.ptx",
+			diag,
+		)?;
+		Ok(())
+	}
+
 	fn compile_kernel_cubin(
 		dir_path: &Path,
 		diag: &mut Diagnostics,
 	) -> Result<(), KernelGeneratorError> {
-		let mut command = Self::nvcc_command();
+		let mut command = Self::nvcc_command("sm_86");
 		command
 			.current_dir(dir_path)
 			.arg("-Xptxas=-v")
 			.arg("--cubin")
-			.arg("kernel.cu")
-			.arg("-lineinfo")
+			.arg("kernel.ptx")
 			.arg("-o")
 			.arg("kernel.cubin");
 
 		Self::run_checked_command(
 			&mut command,
-			"nvcc failed while compiling kernel.cu to kernel.cubin",
+			"nvcc failed while compiling kernel.ptx to kernel.cubin",
 			diag,
 		)?;
 		Ok(())
@@ -370,7 +406,7 @@ impl GemmKernel {
 		dir_path: &Path,
 		diag: &mut Diagnostics,
 	) -> Result<(), KernelGeneratorError> {
-		let mut command = Self::nvcc_command();
+		let mut command = Self::nvcc_command("sm_86");
 		command
 			.current_dir(dir_path)
 			.arg("meta.cu")
@@ -411,12 +447,12 @@ impl GemmKernel {
 		}
 	}
 
-	fn nvcc_command() -> Command {
+	fn nvcc_command(arch: &str) -> Command {
 		const NVCC_PATH: &str = "/usr/local/cuda-12.6/bin/nvcc";
 
 		let mut command = Command::new(NVCC_PATH);
 		command
-			.arg("-arch=sm_86")
+			.arg(format!("-arch={arch}"))
 			.arg("-std=c++20")
 			.arg("--ftz=true")
 			.arg("--prec-div=false")
