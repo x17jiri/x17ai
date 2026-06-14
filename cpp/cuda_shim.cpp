@@ -64,6 +64,8 @@ struct CudaContextHandle {
 };
 
 struct CudaStreamHandle;
+struct CudaModuleHandle;
+struct CudaKernelHandle;
 struct CudaDeviceData;
 
 struct CudaTimerHandle {
@@ -673,5 +675,113 @@ extern "C" {
 			assert_no_context("x17ai_cuda_download_data(): after cuMemcpyDtoHAsync()");
 			return nullptr;
 		} X17AI_CATCH_ERRORS("x17ai_cuda_download_data()")
+	}
+
+	PtrResult<CudaModuleHandle> x17ai_cuda_load_module(
+		CudaContextHandle *ctx,
+		char const *ptx
+	) noexcept {
+		try {
+			assert_no_context("x17ai_cuda_load_module(): before cuCtxPushCurrent()");
+			assert(cuda_initialized.load(std::memory_order_acquire));
+			assert(ctx != nullptr);
+			assert(ptx != nullptr);
+			CUresult e;
+
+			e = cuCtxPushCurrent(ctx->context);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				return X17AI_DIAG(
+					"x17ai_cuda_load_module(): cuCtxPushCurrent() failed.",
+					"x17ai_cuda_load_module(): cuCtxPushCurrent() failed with cuda error: ", e
+				);
+			}
+
+			CUmodule module = nullptr;
+			DiagnosticBuffer *diagnostic = nullptr;
+			e = cuModuleLoadDataEx(&module, ptx, 0, nullptr, nullptr);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				diagnostic = X17AI_DIAG(
+					"x17ai_cuda_load_module(): cuModuleLoadDataEx() failed.",
+					"x17ai_cuda_load_module(): cuModuleLoadDataEx() failed with cuda error: ", e
+				);
+			}
+
+			CUcontext popped_ctx = nullptr;
+			CUresult pop_err = cuCtxPopCurrent(&popped_ctx);
+			if (pop_err != CUDA_SUCCESS) [[unlikely]] {
+				if (module != nullptr) {
+					[[maybe_unused]] CUresult ignored = cuModuleUnload(module);
+				}
+				if (diagnostic == nullptr) {
+					diagnostic = X17AI_DIAG(
+						"x17ai_cuda_load_module(): cuCtxPopCurrent() failed.",
+						"x17ai_cuda_load_module(): cuCtxPopCurrent() failed with cuda error: ", pop_err
+					);
+				}
+				return diagnostic;
+			}
+			if (diagnostic != nullptr) {
+				return diagnostic;
+			}
+			if (popped_ctx != ctx->context) [[unlikely]] {
+				return X17AI_STATIC_DIAG(
+					"x17ai_cuda_load_module(): popped unexpected CUDA context"
+				);
+			}
+			if (module == nullptr) [[unlikely]] {
+				return X17AI_STATIC_DIAG(
+					"x17ai_cuda_load_module(): cuModuleLoadDataEx() returned nullptr"
+				);
+			}
+
+			assert_no_context("x17ai_cuda_load_module(): after cuCtxPopCurrent()");
+			return reinterpret_cast<CudaModuleHandle *>(module);
+		} X17AI_CATCH_ERRORS("x17ai_cuda_load_module()")
+	}
+
+	DiagnosticBuffer *x17ai_cuda_del_module(CudaModuleHandle *mod) noexcept {
+		try {
+			assert_no_context("x17ai_cuda_del_module(): before cuModuleUnload()");
+			assert(cuda_initialized.load(std::memory_order_acquire));
+			assert(mod != nullptr);
+			CUmodule module = reinterpret_cast<CUmodule>(mod);
+			CUresult e = cuModuleUnload(module);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				return X17AI_DIAG(
+					"x17ai_cuda_del_module(): cuModuleUnload() failed.",
+					"x17ai_cuda_del_module(): cuModuleUnload() failed with cuda error: ", e
+				);
+			}
+			assert_no_context("x17ai_cuda_del_module(): after cuModuleUnload()");
+			return nullptr;
+		} X17AI_CATCH_ERRORS("x17ai_cuda_del_module()")
+	}
+
+	PtrResult<CudaKernelHandle> x17ai_cuda_get_kernel(
+		CudaModuleHandle *mod,
+		char const *name
+	) noexcept {
+		try {
+			assert_no_context("x17ai_cuda_get_kernel(): before cuModuleGetFunction()");
+			assert(cuda_initialized.load(std::memory_order_acquire));
+			assert(mod != nullptr);
+			assert(name != nullptr);
+			CUmodule module = reinterpret_cast<CUmodule>(mod);
+			CUfunction kernel = nullptr;
+			CUresult e = cuModuleGetFunction(&kernel, module, name);
+			if (e != CUDA_SUCCESS) [[unlikely]] {
+				return X17AI_DIAG(
+					"x17ai_cuda_get_kernel(): cuModuleGetFunction() failed.",
+					"x17ai_cuda_get_kernel(): cuModuleGetFunction() failed with cuda error: ", e
+				);
+			}
+			if (kernel == nullptr) [[unlikely]] {
+				return X17AI_STATIC_DIAG(
+					"x17ai_cuda_get_kernel(): cuModuleGetFunction() returned nullptr"
+				);
+			}
+			assert_no_context("x17ai_cuda_get_kernel(): after cuModuleGetFunction()");
+			return reinterpret_cast<CudaKernelHandle *>(kernel);
+		} X17AI_CATCH_ERRORS("x17ai_cuda_get_kernel()")
 	}
 }

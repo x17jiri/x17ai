@@ -6,24 +6,26 @@
 //------------------------------------------------------------------------------
 
 use std::borrow::Cow;
-use std::ffi::c_void;
 use std::fs;
 use std::hint::cold_path;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 use std::ptr::NonNull;
 use std::rc::Rc;
 
 use askama::Template;
 
-use crate::device::cuda_shim::{CudaStreamHandle, CudaTimerHandle, DiagnosticBuffer, diagnostic_to_string};
+use cuda_shim::{CudaEventTimer, CudaStream};
+use crate::device::cuda::basic_gemm::{BasicGemmCommonTemplate, BasicGemmKernelLauncher, BasicGemmKernelTemplate, BasicGemmMetaTemplate};
 use crate::dtype::DType;
-use crate::util::dyn_loader::DynamicLibrary;
-use crate::{DeviceAllocError, ErrExtra, ErrPack, KernelGeneratorError, TensorOpError};
+use crate::tensor::Tensor;
+use crate::{DeviceAllocError, ErrPack, KernelGeneratorError, TensorOpError};
 
-use super::cuda_shim::{CudaEventTimer, CudaStream};
 use super::{Device, DevicePtr};
+
+pub mod cuda_shim;
+pub mod basic_gemm;
 
 //--------------------------------------------------------------------------------------------------
 
@@ -153,15 +155,318 @@ pub struct GemmKernelConfig {
 	pub c_dtype: DType,
 }
 
-#[derive(Template)]
-#[template(escape = "none", path = "gemm_kernel.cu")]
-struct GemmKernelTemplate<'a> {
-	a_cols: usize,
-	b_rows: Option<usize>,
-	scale_val: String,
-	scale_dscr: &'a str,
+pub struct Diagnostic {
+	pub is_error: bool,
+	pub message: String,
 }
 
+pub struct Diagnostics {
+	pub list: Vec<Diagnostic>,
+	pub err_count: usize,
+}
+
+impl Diagnostics {
+	pub fn new() -> Self {
+		Self { list: Vec::new(), err_count: 0 }
+	}
+
+	pub fn add_error(&mut self, message: String) {
+		self.err_count += 1;
+		self.list.push(Diagnostic { is_error: true, message });
+	}
+}
+
+impl Default for Diagnostics {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
+pub struct GemmSources {
+	pub common: String,
+	pub kernel: String,
+	pub meta: String,
+}
+
+pub trait GemmKernelLauncher {
+	fn launch(
+		&self, device: &CudaDevice, a: &Tensor, b: &Tensor, c: &Tensor
+	) -> Result<(), ErrPack<TensorOpError>>;
+}
+
+pub struct GemmKernel {
+	pub name: String,
+	pub dir_path: PathBuf,
+	pub common_path: PathBuf,
+	pub kernel_path: PathBuf,
+	pub cubin_path: PathBuf,
+	pub meta_path: PathBuf,
+	pub meta_exe_path: PathBuf,
+	pub meta_json_path: PathBuf,
+	pub device: Rc<CudaDevice>,
+	pub launcher: Rc<dyn GemmKernelLauncher>
+}
+
+impl GemmKernel {
+	pub fn new(
+		device: Rc<CudaDevice>,
+		kernel_name: impl AsRef<str>,
+		config: &GemmKernelConfig,
+		diag: &mut Diagnostics,
+	) -> Result<Self, KernelGeneratorError> {
+		let kernel_name = kernel_name.as_ref();
+		if kernel_name.is_empty()
+			|| kernel_name == "."
+			|| kernel_name == ".."
+			|| kernel_name.contains('/')
+			|| kernel_name.contains('\\')
+		{
+			cold_path();
+			diag.add_error(format!("invalid GEMM kernel name {kernel_name:?}"));
+			return Err(KernelGeneratorError);
+		}
+
+		let sources = Self::generate_sources(config);
+		let dir_path = Path::new("cache").join("kernels").join(kernel_name);
+		let common_path = dir_path.join("common.cuh");
+		let kernel_path = dir_path.join("kernel.cu");
+		let cubin_path = dir_path.join("kernel.cubin");
+		let meta_path = dir_path.join("meta.cu");
+		let meta_exe_path = dir_path.join("meta");
+		let meta_json_path = dir_path.join("meta.json");
+
+		match fs::create_dir_all(&dir_path) {
+			Ok(()) => {},
+			Err(err) => {
+				cold_path();
+				diag.add_error(format!(
+					"failed to create kernel cache directory {}: {err}",
+					dir_path.display(),
+				));
+				return Err(KernelGeneratorError);
+			},
+		}
+
+		Self::write_generated_file(&common_path, sources.common, diag)?;
+		Self::write_generated_file(&kernel_path, sources.kernel, diag)?;
+		Self::write_generated_file(&meta_path, sources.meta, diag)?;
+
+		Self::compile_kernel_cubin(&dir_path, diag)?;
+		Self::compile_meta_exe(&dir_path, diag)?;
+		Self::run_meta_exe(&dir_path, &meta_json_path, diag)?;
+
+		Ok(Self {
+			name: kernel_name.to_owned(),
+			dir_path,
+			common_path,
+			kernel_path,
+			cubin_path,
+			meta_path,
+			meta_exe_path,
+			meta_json_path,
+			device,
+			launcher: Rc::new(BasicGemmKernelLauncher),
+		})
+	}
+
+	#[inline]
+	pub fn run(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+		self.launcher.launch(&self.device, a, b, c)
+	}
+
+	fn generate_sources(config: &GemmKernelConfig) -> GemmSources {
+		if config.a.dtype != DType::Int8 {
+			todo!("support GEMM inputs other than i8");
+		}
+		if config.b.dtype != DType::Int8 {
+			todo!("support GEMM weights other than i8");
+		}
+		if config.c_dtype != DType::Int8 {
+			todo!("support GEMM outputs other than i8");
+		}
+		if config.a.trans {
+			todo!("support transposed GEMM input A");
+		}
+		if !config.b.trans {
+			todo!("support non-transposed GEMM input B");
+		}
+		if config.a.cols == 0 || config.b.cols == 0 {
+			todo!("support empty GEMM dimensions");
+		}
+
+		let scale = match &config.epilogue {
+			GemmEpilogue::Scale(scale) => scale,
+			_ => todo!("support GEMM epilogues other than scale"),
+		};
+		if !scale.value.is_finite() {
+			todo!("support non-finite GEMM scale values");
+		}
+
+		let Some(b_rows) = config.b.rows.map(std::num::NonZeroUsize::get) else {
+			todo!("support GEMM outputs with runtime column count");
+		};
+		let b_rows = Some(b_rows);
+		let scale_val = scale.value;
+
+		let common = BasicGemmCommonTemplate {
+			a_cols: config.a.cols,
+			b_rows,
+			scale_val: format!("{scale_val:.17e}"),
+			scale_dscr: scale.description.as_ref(),
+		};
+		let kernel = BasicGemmKernelTemplate {
+			b_rows,
+		};
+		let meta = BasicGemmMetaTemplate;
+
+		GemmSources {
+			common: common.render().unwrap_or_else(|_| todo!("render GEMM common template")),
+			kernel: kernel.render().unwrap_or_else(|_| todo!("render GEMM kernel template")),
+			meta: meta.render().unwrap_or_else(|_| todo!("render GEMM metadata template")),
+		}
+	}
+
+	fn write_generated_file(
+		path: &Path,
+		source: String,
+		diag: &mut Diagnostics,
+	) -> Result<(), KernelGeneratorError> {
+		match fs::write(path, source) {
+			Ok(()) => Ok(()),
+			Err(err) => {
+				cold_path();
+				diag.add_error(format!(
+					"failed to write generated CUDA source {}: {err}",
+					path.display(),
+				));
+				Err(KernelGeneratorError)
+			},
+		}
+	}
+
+	fn compile_kernel_cubin(
+		dir_path: &Path,
+		diag: &mut Diagnostics,
+	) -> Result<(), KernelGeneratorError> {
+		let mut command = Self::nvcc_command();
+		command
+			.current_dir(dir_path)
+			.arg("-Xptxas=-v")
+			.arg("--cubin")
+			.arg("kernel.cu")
+			.arg("-lineinfo")
+			.arg("-o")
+			.arg("kernel.cubin");
+
+		Self::run_checked_command(
+			&mut command,
+			"nvcc failed while compiling kernel.cu to kernel.cubin",
+			diag,
+		)?;
+		Ok(())
+	}
+
+	fn compile_meta_exe(
+		dir_path: &Path,
+		diag: &mut Diagnostics,
+	) -> Result<(), KernelGeneratorError> {
+		let mut command = Self::nvcc_command();
+		command
+			.current_dir(dir_path)
+			.arg("meta.cu")
+			.arg("-o")
+			.arg("meta");
+
+		Self::run_checked_command(
+			&mut command,
+			"nvcc failed while compiling meta.cu to meta",
+			diag,
+		)?;
+		Ok(())
+	}
+
+	fn run_meta_exe(
+		dir_path: &Path,
+		meta_json_path: &Path,
+		diag: &mut Diagnostics,
+	) -> Result<(), KernelGeneratorError> {
+		let mut command = Command::new("./meta");
+		command.current_dir(dir_path);
+		let output = Self::run_checked_command(
+			&mut command,
+			"failed to run GEMM metadata executable",
+			diag,
+		)?;
+
+		match fs::write(meta_json_path, output.stdout) {
+			Ok(()) => Ok(()),
+			Err(err) => {
+				cold_path();
+				diag.add_error(format!(
+					"failed to write generated GEMM metadata {}: {err}",
+					meta_json_path.display(),
+				));
+				Err(KernelGeneratorError)
+			},
+		}
+	}
+
+	fn nvcc_command() -> Command {
+		const NVCC_PATH: &str = "/usr/local/cuda-12.6/bin/nvcc";
+
+		let mut command = Command::new(NVCC_PATH);
+		command
+			.arg("-arch=sm_86")
+			.arg("-std=c++20")
+			.arg("--ftz=true")
+			.arg("--prec-div=false")
+			.arg("--fmad=true")
+			.arg("--use_fast_math")
+			.arg("-I")
+			.arg("/home/spock/prog/cutlass/tools/util/include/")
+			.arg("-I")
+			.arg("/home/spock/prog/cutlass/include/")
+			.arg("-DX17_PRECISE_MATH=0")
+			.arg("--expt-relaxed-constexpr")
+			.arg("-maxrregcount=255")
+			.arg("-O3");
+		command
+	}
+
+	fn run_checked_command(
+		command: &mut Command,
+		context: &str,
+		diag: &mut Diagnostics,
+	) -> Result<Output, KernelGeneratorError> {
+		let command_text = format!("{command:?}");
+		let output = match command.output() {
+			Ok(output) => output,
+			Err(err) => {
+				cold_path();
+				diag.add_error(format!("{context}: failed to start {command_text}: {err}"));
+				return Err(KernelGeneratorError);
+			},
+		};
+
+		if !output.status.success() {
+			cold_path();
+			let stdout = String::from_utf8_lossy(&output.stdout);
+			let stderr = String::from_utf8_lossy(&output.stderr);
+			diag.add_error(format!(
+				"{context} (status: {})\ncommand: {}\nstdout:\n{}\nstderr:\n{}",
+				output.status,
+				command_text,
+				stdout,
+				stderr,
+			));
+			return Err(KernelGeneratorError);
+		}
+
+		Ok(output)
+	}
+}
+
+/*
 pub fn generate_gemm_kernel(config: &GemmKernelConfig) -> String {
 	if config.a.dtype != DType::Int8 {
 		todo!("support GEMM inputs other than i8");
@@ -195,7 +500,7 @@ pub fn generate_gemm_kernel(config: &GemmKernelConfig) -> String {
 		todo!("support GEMM outputs with runtime column count");
 	};
 	let b_rows = Some(b_rows_val);
-	let template = GemmKernelTemplate {
+	let template = basic_gemm::BasicGemmCommonTemplate {
 		a_cols: config.a.cols,
 		b_rows,
 		scale_val: format!("{scale_val:.17e}"),
@@ -218,39 +523,19 @@ type KernelLaunchFn = unsafe extern "C" fn(
 	*mut c_void
 ) -> *mut DiagnosticBuffer;
 
-pub struct Diagnostic {
-	pub is_error: bool,
-	pub message: String,
-}
-
-pub struct Diagnostics {
-	pub list: Vec<Diagnostic>,
-	pub err_count: usize,
-}
-
-impl Diagnostics {
-	pub fn new() -> Diagnostics {
-		Self { list: Vec::new(), err_count: 0 }
-	}
-
-	pub fn add_error(&mut self, message: String) {
-		self.err_count += 1;
-		self.list.push(Diagnostic { is_error: true, message });
-	}
-}
-
 #[derive(Debug)]
-pub struct GemmKernel {
+pub struct GemmKernel_old {
 	pub name: String,
 	pub source_path: PathBuf,
 	pub library_path: PathBuf,
 
+	a_cols: usize,
 	_library: DynamicLibrary,
 	launch_fn: KernelLaunchFn,
 	deinit_fn: KernelDeinitFn,
 }
 
-impl GemmKernel {
+impl GemmKernel_old {
 	pub fn new(
 		device: &CudaDevice,
 		kernel_name: impl AsRef<str>,
@@ -350,10 +635,19 @@ impl GemmKernel {
 			name: kernel_name.to_owned(),
 			source_path,
 			library_path,
+			a_cols: config.a.cols,
 			_library: library,
 			deinit_fn,
 			launch_fn,
 		})
+	}
+
+	pub fn n_ops(&self, a_rows: usize, b_rows: usize) -> usize {
+		a_rows
+			.checked_mul(b_rows)
+			.and_then(|v| v.checked_mul(self.a_cols))
+			.and_then(|v| v.checked_mul(2))
+			.expect("GEMM operation count overflow")
 	}
 
 	/// # Safety
@@ -391,7 +685,7 @@ impl GemmKernel {
 	}
 }
 
-impl Drop for GemmKernel {
+impl Drop for GemmKernel_old {
 	fn drop(&mut self) {
 		let diagnostic = unsafe { (self.deinit_fn)() };
 		if !diagnostic.is_null() {
@@ -416,7 +710,7 @@ fn compile_gemm_kernel(
 		.arg("-std=c++20")
 		.arg("-Xptxas=-v")
 		.arg("--ftz=true")
-		.arg("--prec-div=true")
+		.arg("--prec-div=false")
 		.arg("--fmad=true")
 		.arg("--use_fast_math")
 		.arg("-I")
@@ -463,3 +757,4 @@ fn compile_gemm_kernel(
 }
 
 //--------------------------------------------------------------------------------------------------
+*/

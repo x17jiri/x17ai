@@ -5,13 +5,11 @@
 //
 //------------------------------------------------------------------------------
 
-use std::borrow::Cow;
-use std::ffi::c_void;
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::hint::cold_path;
 use std::ptr::NonNull;
 
 use crate::device::DevicePtr;
-use crate::tensor::Tensor;
 use crate::util::ffi_buffer::FfiBuffer;
 use crate::{ErrExtra, ErrPack, TensorOpError};
 
@@ -35,6 +33,16 @@ pub struct CudaDeviceData {
 
 #[repr(C)]
 pub struct CudaTimerHandle {
+	_private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct CudaModuleHandle {
+	_private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct CudaKernelHandle {
 	_private: [u8; 0],
 }
 
@@ -105,6 +113,18 @@ unsafe extern "C" {
 		offset_bytes: usize,
 		size_bytes: usize,
 	) -> *mut DiagnosticBuffer;
+
+	fn x17ai_cuda_load_module(
+		ctx: *mut CudaContextHandle,
+		ptx: *const c_char,
+	) -> PtrResult<CudaModuleHandle>;
+
+	fn x17ai_cuda_del_module(module: *mut CudaModuleHandle) -> *mut DiagnosticBuffer;
+
+	fn x17ai_cuda_get_kernel(
+		module: *mut CudaModuleHandle,
+		name: *const c_char,
+	) -> PtrResult<CudaKernelHandle>;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -302,6 +322,22 @@ impl CudaStream {
 	pub fn cuda_context(&self) -> *mut c_void {
 		unsafe { x17ai_cuda_context_ptr(self.ctx.as_ptr()) }
 	}
+
+	pub fn load_module_from_ptx(
+		&self,
+		ptx: &CStr,
+	) -> Result<CudaModule, ErrPack<TensorOpError>> {
+		let module_result = unsafe {
+			x17ai_cuda_load_module(self.ctx.as_ptr(), ptx.as_ptr())
+		};
+		let Some(module) = NonNull::new(module_result.value) else {
+			cold_path();
+			return Err(ptr_result_to_error(module_result));
+		};
+		debug_assert!(module_result.diagnostic.is_null());
+
+		Ok(CudaModule { handle: module })
+	}
 }
 
 impl Drop for CudaStream {
@@ -319,6 +355,59 @@ impl Drop for CudaStream {
 				discard_diagnostic(diagnostic);
 			}
 		};
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
+pub struct CudaModule {
+	handle: NonNull<CudaModuleHandle>,
+}
+
+impl CudaModule {
+	pub fn get_kernel(self, name: &str) -> Result<CudaKernel, ErrPack<TensorOpError>> {
+		let Ok(name) = CString::new(name) else {
+			cold_path();
+			return Err(ErrPack {
+				code: TensorOpError::Device,
+				extra: Some(Box::new(ErrExtra {
+					message: "CUDA kernel name contains an interior NUL byte".into(),
+					nested: None,
+				})),
+			});
+		};
+
+		let kernel_result = unsafe {
+			x17ai_cuda_get_kernel(self.handle.as_ptr(), name.as_ptr())
+		};
+		let Some(kernel) = NonNull::new(kernel_result.value) else {
+			cold_path();
+			return Err(ptr_result_to_error(kernel_result));
+		};
+		debug_assert!(kernel_result.diagnostic.is_null());
+
+		Ok(CudaKernel { _module: self, handle: kernel })
+	}
+}
+
+impl Drop for CudaModule {
+	fn drop(&mut self) {
+		let diagnostic = unsafe { x17ai_cuda_del_module(self.handle.as_ptr()) };
+		if !diagnostic.is_null() {
+			cold_path();
+			discard_diagnostic(diagnostic);
+		}
+	}
+}
+
+pub struct CudaKernel {
+	_module: CudaModule,
+	handle: NonNull<CudaKernelHandle>,
+}
+
+impl CudaKernel {
+	pub fn handle(&self) -> *mut CudaKernelHandle {
+		self.handle.as_ptr()
 	}
 }
 

@@ -4,7 +4,6 @@ use crate::{DeviceAllocError, ErrPack, TensorOpError};
 
 pub mod cpu;
 pub mod cuda;
-pub mod cuda_shim;
 
 #[repr(transparent)]
 #[derive(Copy, Clone, PartialEq, Eq)]
