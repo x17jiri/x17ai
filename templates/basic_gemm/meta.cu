@@ -9,8 +9,14 @@
 
 int main() {
 	printf("{\n");
-	printf("\t\"A_COLS\": %zu,\n", usize(A_COLS));
-	printf("\t\"B_ROWS\": %zu,\n", usize(B_ROWS));
+	printf("\t\"A_COLS\": %zu,\n", usize({{a_cols}}));
+
+	{% match b_rows -%}
+	{% when Some with (rows) %}
+	printf("\t\"B_ROWS\": %zu,\n", usize({{rows}}));
+	{% when None -%}
+	{% endmatch %}
+
 	printf("\t\"THREADS_PER_BLOCK\": %zu,\n", usize(Kernel::THREADS_PER_BLOCK));
 	printf("\t\"SMEM_BYTES\": %zu,\n", usize(Kernel::SMEM_BYTES));
 	printf("\t\"M_PER_BLOCK\": %zu,\n", usize(Kernel::M_PER_BLOCK));

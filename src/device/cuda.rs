@@ -192,6 +192,8 @@ pub trait GemmKernelLauncher {
 	fn launch(
 		&self, device: &CudaDevice, a: &Tensor, b: &Tensor, c: &Tensor
 	) -> Result<(), ErrPack<TensorOpError>>;
+
+	fn n_ops(&self, a: &Tensor, b: &Tensor) -> f64;
 }
 
 pub struct GemmKernel {
@@ -290,6 +292,11 @@ impl GemmKernel {
 		self.launcher.launch(&self.device, a, b, c)
 	}
 
+	#[inline]
+	pub fn n_ops(&self, a: &Tensor, b: &Tensor) -> f64 {
+		self.launcher.n_ops(a, b)
+	}
+
 	fn generate_sources(config: &GemmKernelConfig) -> GemmSources {
 		if config.a.dtype != DType::Int8 {
 			todo!("support GEMM inputs other than i8");
@@ -318,7 +325,7 @@ impl GemmKernel {
 			todo!("support non-finite GEMM scale values");
 		}
 
-		let Some(b_rows) = config.b.rows.map(std::num::NonZeroUsize::get) else {
+		let Some(b_rows) = config.b.rows else {
 			todo!("support GEMM outputs with runtime column count");
 		};
 		let b_rows = Some(b_rows);
@@ -331,9 +338,13 @@ impl GemmKernel {
 			scale_dscr: scale.description.as_ref(),
 		};
 		let kernel = BasicGemmKernelTemplate {
+			a_cols: config.a.cols,
 			b_rows,
 		};
-		let meta = BasicGemmMetaTemplate;
+		let meta = BasicGemmMetaTemplate {
+			a_cols: config.a.cols,
+			b_rows,
+		};
 
 		GemmSources {
 			common: common.render().unwrap_or_else(|_| todo!("render GEMM common template")),
@@ -501,296 +512,3 @@ impl GemmKernel {
 		Ok(output)
 	}
 }
-
-/*
-pub fn generate_gemm_kernel(config: &GemmKernelConfig) -> String {
-	if config.a.dtype != DType::Int8 {
-		todo!("support GEMM inputs other than i8");
-	}
-	if config.b.dtype != DType::Int8 {
-		todo!("support GEMM weights other than i8");
-	}
-	if config.c_dtype != DType::Int8 {
-		todo!("support GEMM outputs other than i8");
-	}
-	if config.a.trans {
-		todo!("support transposed GEMM input A");
-	}
-	if !config.b.trans {
-		todo!("support non-transposed GEMM input B");
-	}
-	if config.a.cols == 0 || config.b.cols == 0 {
-		todo!("support empty GEMM dimensions");
-	}
-
-	let scale = match &config.epilogue {
-		GemmEpilogue::Scale(scale) => scale,
-		_ => todo!("support GEMM epilogues other than scale"),
-	};
-	if !scale.value.is_finite() {
-		todo!("support non-finite GEMM scale values");
-	}
-
-	let scale_val = scale.value;
-	let Some(b_rows_val) = config.b.rows.map(NonZeroUsize::get) else {
-		todo!("support GEMM outputs with runtime column count");
-	};
-	let b_rows = Some(b_rows_val);
-	let template = basic_gemm::BasicGemmCommonTemplate {
-		a_cols: config.a.cols,
-		b_rows,
-		scale_val: format!("{scale_val:.17e}"),
-		scale_dscr: scale.description.as_ref(),
-	};
-
-	template.render().unwrap_or_else(|_| todo!("render GEMM kernel template"))
-}
-
-//--------------------------------------------------------------------------------------------------
-
-type KernelInitFn = unsafe extern "C" fn(*mut c_void) -> *mut DiagnosticBuffer;
-
-type KernelDeinitFn = unsafe extern "C" fn() -> *mut DiagnosticBuffer;
-
-type KernelLaunchFn = unsafe extern "C" fn(
-	*mut CudaStreamHandle,
-	*mut c_void, usize,
-	*mut c_void, usize,
-	*mut c_void
-) -> *mut DiagnosticBuffer;
-
-#[derive(Debug)]
-pub struct GemmKernel_old {
-	pub name: String,
-	pub source_path: PathBuf,
-	pub library_path: PathBuf,
-
-	a_cols: usize,
-	_library: DynamicLibrary,
-	launch_fn: KernelLaunchFn,
-	deinit_fn: KernelDeinitFn,
-}
-
-impl GemmKernel_old {
-	pub fn new(
-		device: &CudaDevice,
-		kernel_name: impl AsRef<str>,
-		config: &GemmKernelConfig,
-		diag: &mut Diagnostics,
-	) -> Result<Self, KernelGeneratorError> {
-		let kernel_name = kernel_name.as_ref();
-		if kernel_name.is_empty()
-			|| kernel_name == "."
-			|| kernel_name == ".."
-			|| kernel_name.contains('/')
-			|| kernel_name.contains('\\')
-		{
-			cold_path();
-			diag.add_error(format!("invalid GEMM kernel name {kernel_name:?}"));
-			return Err(KernelGeneratorError);
-		}
-
-		let source = generate_gemm_kernel(config);
-
-		const nvcc_path: &str = "/usr/local/cuda-12.6/bin/nvcc";
-		let working_dir = Path::new(".");
-
-		let kernel_dir = working_dir.join("cache").join("kernels");
-		let source_path = kernel_dir.join(format!("{kernel_name}.cu"));
-		let library_path = kernel_dir.join(format!("{kernel_name}.so"));
-
-		match fs::create_dir_all(&kernel_dir) {
-			Ok(()) => {},
-			Err(err) => {
-				cold_path();
-				let kernel_dir = kernel_dir.display();
-				diag.add_error(format!(
-					"failed to create kernel cache directory {kernel_dir}: {err}"
-				));
-				return Err(KernelGeneratorError);
-			},
-		};
-		match fs::write(&source_path, source) {
-			Ok(()) => {},
-			Err(err) => {
-				cold_path();
-				let source_path = source_path.display();
-				diag.add_error(format!(
-					"failed to write generated CUDA source {source_path}: {err}"
-				));
-				return Err(KernelGeneratorError);
-			},
-		};
-
-		compile_gemm_kernel(nvcc_path, &working_dir, &source_path, &library_path, diag)?;
-
-		let library = match DynamicLibrary::open(&library_path) {
-			Ok(lib) => lib,
-			Err(msg) => {
-				cold_path();
-				diag.add_error(msg);
-				return Err(KernelGeneratorError);
-			},
-		};
-		let init_fn = match library.get_symbol("x17ai_kernel_init") {
-			Ok(sym) => unsafe { std::mem::transmute::<*mut c_void, KernelInitFn>(sym) },
-			Err(msg) => {
-				cold_path();
-				diag.add_error(msg);
-				return Err(KernelGeneratorError);
-			},
-		};
-		let deinit_fn = match library.get_symbol("x17ai_kernel_deinit") {
-			Ok(sym) => unsafe { std::mem::transmute::<*mut c_void, KernelDeinitFn>(sym) },
-			Err(msg) => {
-				cold_path();
-				diag.add_error(msg);
-				return Err(KernelGeneratorError);
-			},
-		};
-		let launch_fn = match library.get_symbol("x17ai_kernel_launch") {
-			Ok(sym) => unsafe { std::mem::transmute::<*mut c_void, KernelLaunchFn>(sym) },
-			Err(msg) => {
-				cold_path();
-				diag.add_error(msg);
-				return Err(KernelGeneratorError);
-			},
-		};
-
-		let diagnostic = unsafe { init_fn(device.stream.cuda_context()) };
-		if !diagnostic.is_null() {
-			cold_path();
-			diag.add_error(diagnostic_to_string(
-				diagnostic,
-				"x17ai_kernel_init failed without diagnostic",
-			));
-			return Err(KernelGeneratorError);
-		}
-
-		Ok(Self {
-			name: kernel_name.to_owned(),
-			source_path,
-			library_path,
-			a_cols: config.a.cols,
-			_library: library,
-			deinit_fn,
-			launch_fn,
-		})
-	}
-
-	pub fn n_ops(&self, a_rows: usize, b_rows: usize) -> usize {
-		a_rows
-			.checked_mul(b_rows)
-			.and_then(|v| v.checked_mul(self.a_cols))
-			.and_then(|v| v.checked_mul(2))
-			.expect("GEMM operation count overflow")
-	}
-
-	/// # Safety
-	///
-	/// The device pointers must point to valid CUDA buffers with layouts expected by this kernel.
-	pub unsafe fn run(
-		&self,
-		device: &CudaDevice,
-		a: DevicePtr, a_rows: usize,
-		b: DevicePtr, b_rows: usize,
-		c: DevicePtr,
-	) -> Result<(), ErrPack<TensorOpError>> {
-		let diagnostic = unsafe {
-			(self.launch_fn)(
-				device.stream.handle(),
-				a.as_ptr::<c_void>(), a_rows,
-				b.as_ptr::<c_void>(), b_rows,
-				c.as_ptr::<c_void>(),
-			)
-		};
-		if !diagnostic.is_null() {
-			cold_path();
-			return Err(ErrPack {
-				code: TensorOpError::Device,
-				extra: Some(Box::new(ErrExtra {
-					message: diagnostic_to_string(
-						diagnostic,
-						"x17ai_kernel_launch failed without diagnostic",
-					).into(),
-					nested: None,
-				})),
-			});
-		}
-		Ok(())
-	}
-}
-
-impl Drop for GemmKernel_old {
-	fn drop(&mut self) {
-		let diagnostic = unsafe { (self.deinit_fn)() };
-		if !diagnostic.is_null() {
-			log::error!(
-				"{}",
-				diagnostic_to_string(diagnostic, "x17ai_kernel_deinit failed without diagnostic")
-			);
-		}
-	}
-}
-
-fn compile_gemm_kernel(
-	nvcc_path: &str,
-	working_dir: &Path,
-	source_path: &Path,
-	library_path: &Path,
-	diag: &mut Diagnostics,
-) -> Result<(), KernelGeneratorError> {
-	let output = Command::new(nvcc_path)
-		.current_dir(working_dir)
-		.arg("-arch=sm_86")
-		.arg("-std=c++20")
-		.arg("-Xptxas=-v")
-		.arg("--ftz=true")
-		.arg("--prec-div=false")
-		.arg("--fmad=true")
-		.arg("--use_fast_math")
-		.arg("-I")
-		.arg("/home/spock/prog/cutlass/tools/util/include/")
-		.arg("-I")
-		.arg("/home/spock/prog/cutlass/include/")
-		.arg("-DX17_PRECISE_MATH=0")
-		.arg("--expt-relaxed-constexpr")
-		.arg("-maxrregcount=255")
-		.arg("-O3")
-		.arg("-shared")
-		.arg("-Xcompiler")
-		.arg("-fPIC")
-		.arg("-cudart=shared")
-		.arg(source_path)
-		.arg("-lineinfo")
-		.arg("-o")
-		.arg(library_path)
-		.output();
-	let output = match output {
-		Ok(o) => o,
-		Err(err) => {
-			cold_path();
-			diag.add_error(format!("failed to run nvcc: {err}"));
-			return Err(KernelGeneratorError);
-		},
-	};
-
-	if !output.status.success() {
-		let stdout = String::from_utf8_lossy(&output.stdout);
-		let stderr = String::from_utf8_lossy(&output.stderr);
-		diag.add_error(format!(
-			"nvcc failed while compiling {} to {} (status: {})\nstdout:\n{}\nstderr:\n{}",
-			source_path.display(),
-			library_path.display(),
-			output.status,
-			stdout,
-			stderr,
-		));
-		return Err(KernelGeneratorError);
-	}
-
-	Ok(())
-}
-
-//--------------------------------------------------------------------------------------------------
-*/

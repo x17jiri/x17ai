@@ -14,8 +14,8 @@ void kernel(
 ) {
 	{% match b_rows -%}
 	{% when Some with (rows) %}
-	// override b_rows with the known value ({{rows}}) so the compiler can do constant folding
-	b_rows = B_ROWS;
+	// override b_rows with the known value so the compiler can do constant folding
+	b_rows = {{rows}};
 	{% when None -%}
 	{% endmatch %}
 

@@ -760,7 +760,7 @@ extern "C" {
 	PtrResult<CudaKernelHandle> x17ai_cuda_get_kernel(
 		CudaModuleHandle *mod,
 		char const *name,
-		usize max_dynamic_smem_bytes
+		usize smem_size
 	) noexcept {
 		try {
 			assert_no_context("x17ai_cuda_get_kernel(): before cuModuleGetFunction()");
@@ -782,7 +782,7 @@ extern "C" {
 				);
 			}
 
-			if (!std::in_range<int>(max_dynamic_smem_bytes)) [[unlikely]] {
+			if (!std::in_range<int>(smem_size)) [[unlikely]] {
 				return X17AI_STATIC_DIAG(
 					"x17ai_cuda_get_kernel(): max dynamic shared memory size is out of range"
 				);
@@ -790,7 +790,7 @@ extern "C" {
 			e = cuFuncSetAttribute(
 				kernel,
 				CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-				int(max_dynamic_smem_bytes)
+				int(unsigned(smem_size))
 			);
 			if (e != CUDA_SUCCESS) [[unlikely]] {
 				return X17AI_DIAG(
@@ -829,29 +829,19 @@ extern "C" {
 			assert(stream != nullptr);
 			assert(kernel != nullptr);
 
-			if (grid_x == 0 || grid_y == 0 || grid_z == 0) [[unlikely]] {
-				return X17AI_STATIC_DIAG(
-					"x17ai_cuda_launch_kernel(): grid dimensions must be non-zero"
-				);
-			}
-			if (block_x == 0 || block_y == 0 || block_z == 0) [[unlikely]] {
-				return X17AI_STATIC_DIAG(
-					"x17ai_cuda_launch_kernel(): block dimensions must be non-zero"
-				);
-			}
 			if (
-				!std::in_range<u32>(grid_x)
-				|| !std::in_range<u32>(grid_y)
-				|| !std::in_range<u32>(grid_z)
+				(grid_x < 1 || !std::in_range<u32>(grid_x))
+				|| (grid_y < 1 || !std::in_range<u32>(grid_y))
+				|| (grid_z < 1 || !std::in_range<u32>(grid_z))
 			) [[unlikely]] {
 				return X17AI_STATIC_DIAG(
 					"x17ai_cuda_launch_kernel(): grid dimensions are out of range"
 				);
 			}
 			if (
-				!std::in_range<u32>(block_x)
-				|| !std::in_range<u32>(block_y)
-				|| !std::in_range<u32>(block_z)
+				(block_x < 1 || !std::in_range<u32>(block_x))
+				|| (block_y < 1 || !std::in_range<u32>(block_y))
+				|| (block_z < 1 || !std::in_range<u32>(block_z))
 			) [[unlikely]] {
 				return X17AI_STATIC_DIAG(
 					"x17ai_cuda_launch_kernel(): block dimensions are out of range"

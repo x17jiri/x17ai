@@ -29,32 +29,6 @@ use x17ai::tensor::Tensor;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let device = CudaDevice::new(0)?;
-	let kernel_config = attn_q_kernel_config(4096, 2048)?;
-	let mut diagnostics = Diagnostics::new();
-	let kernel = match GemmKernel::new(device.clone(), "attn_q_fwd", &kernel_config, &mut diagnostics) {
-		Ok(kernel) => {
-			print_diagnostics(&diagnostics);
-			kernel
-		},
-		Err(_) => {
-			print_diagnostics(&diagnostics);
-			return Err(other_error(format!(
-				"failed to generate attn_q_fwd kernel files; {} error(s)",
-				diagnostics.err_count
-			)).into());
-		},
-	};
-	println!("generated GEMM kernel files in {}", kernel.dir_path.display());
-	println!("common source: {}", kernel.common_path.display());
-	println!("kernel source: {}", kernel.kernel_path.display());
-	println!("kernel ptx: {}", kernel.ptx_path.display());
-	println!("kernel cubin: {}", kernel.cubin_path.display());
-	println!("metadata source: {}", kernel.meta_path.display());
-	println!("metadata executable: {}", kernel.meta_exe_path.display());
-	println!("metadata json: {}", kernel.meta_json_path.display());
-
-/*
-	let device = CudaDevice::new(0)?;
 
 	let x = Tensor::from_safetensors_file(tensor_path("x_i8.safetensors"), device.clone())?;
 	let q_weights = Tensor::from_safetensors_file(
@@ -66,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let q = Tensor::new_empty(&[n_inputs, q_proj_outputs], DType::Int8, device.clone())?;
 	let kernel_config = attn_q_kernel_config(model_dim, q_proj_outputs)?;
 	let mut diagnostics = Diagnostics::new();
-	let kernel = match GemmKernel::new(device.as_ref(), "attn_q_fwd", &kernel_config, &mut diagnostics) {
+	let kernel = match GemmKernel::new(device.clone(), "attn_q_fwd", &kernel_config, &mut diagnostics) {
 		Ok(kernel) => {
 			print_diagnostics(&diagnostics);
 			kernel
@@ -79,25 +53,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			)).into());
 		},
 	};
-	println!("HERE 0");
+
 	let kernel_timer = CudaTimer::new(device.as_ref())?;
 	kernel_timer.start()?;
-	unsafe {
-		kernel.run(
-			device.as_ref(),
-			x.device_ptr(),
-			n_inputs,
-			q_weights.device_ptr(),
-			q_proj_outputs,
-			q.device_ptr(),
-		)?;
-	}
+	kernel.run(&x, &q_weights, &q)?;
 	kernel_timer.stop()?;
 	let q = q.to_cpu()?;
-	println!("HERE 2");
 	device.synchronize()?;
 	let kernel_seconds = kernel_timer.elapsed_seconds()?;
-	println!("HERE 3");
 	q.save_safetensors_file(output_path("q_i8.safetensors"))?;
 
 	println!("loaded x: {:?} {:?}, {} bytes on CUDA", x.shape(), x.dtype(), x.bytes());
@@ -111,13 +74,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	println!(
 		"attn_q dimensions: n_inputs={n_inputs}, model_dim={model_dim}, q_proj_outputs={q_proj_outputs}"
 	);
-	println!("kernel source: {}", kernel.source_path.display());
-	println!("kernel library: {}", kernel.library_path.display());
+	println!("generated GEMM kernel files in {}", kernel.dir_path.display());
+	println!("common source: {}", kernel.common_path.display());
+	println!("kernel source: {}", kernel.kernel_path.display());
+	println!("kernel ptx: {}", kernel.ptx_path.display());
+	println!("kernel cubin: {}", kernel.cubin_path.display());
+	println!("metadata source: {}", kernel.meta_path.display());
+	println!("metadata executable: {}", kernel.meta_exe_path.display());
+	println!("metadata json: {}", kernel.meta_json_path.display());
 	let kernel_ms = kernel_seconds * 1000.0;
-	let kernel_tflops = kernel.n_ops(n_inputs, q_proj_outputs) as f64 / kernel_seconds / 1.0e12;
+	let kernel_tflops = kernel.n_ops(&x, &q_weights) / kernel_seconds / 1.0e12;
 	println!("launched attn_q_fwd in {kernel_ms:.4} ms, {kernel_tflops:.3} TFLOPS");
 	println!("stored {}", output_path("q_i8.safetensors").display());
-*/
+
 	Ok(())
 }
 

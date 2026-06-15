@@ -105,8 +105,6 @@ use std::alloc::AllocError;
 use std::borrow::Cow;
 use std::convert::Infallible;
 
-use crate::tensor::Tensor;
-
 pub mod device;
 pub mod dtype;
 pub mod literal;

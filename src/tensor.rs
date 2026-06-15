@@ -15,7 +15,10 @@ use crate::device::{Device, DevicePtr};
 use crate::dtype::{DType, UnsupportedDTypeError};
 use crate::literal::TensorLiteral;
 use crate::shape::ShapeHelper;
+use crate::tensor::dim_index::DimIndex;
 use crate::{DeviceAllocError, ErrExtra, ErrPack, ShapeOverflowError, TensorOpError};
+
+pub mod dim_index;
 
 pub struct Tensor {
 	dtype: DType,
@@ -41,6 +44,13 @@ impl Tensor {
 
 	pub fn shape(&self) -> &[usize] {
 		&self.shape
+	}
+
+	pub fn size<D: DimIndex>(&self, dim: D) -> usize {
+		match dim.resolve_index(self.shape.len()) {
+			Ok(d) => unsafe { *self.shape.get_unchecked(d) },
+			Err(_) => 1,
+		}
 	}
 
 	pub fn elems(&self) -> usize {

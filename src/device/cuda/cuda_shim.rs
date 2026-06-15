@@ -126,7 +126,7 @@ unsafe extern "C" {
 	fn x17ai_cuda_get_kernel(
 		module: *mut CudaModuleHandle,
 		name: *const c_char,
-		max_dynamic_smem_bytes: usize,
+		smem_size: usize,
 	) -> PtrResult<CudaKernelHandle>;
 
 	fn x17ai_cuda_launch_kernel(
@@ -389,7 +389,7 @@ impl CudaModule {
 	pub fn get_kernel(
 		self,
 		name: &str,
-		max_dynamic_smem_bytes: usize,
+		smem_size: usize,
 	) -> Result<CudaKernel, ErrPack<TensorOpError>> {
 		let Ok(name) = CString::new(name) else {
 			cold_path();
@@ -406,7 +406,7 @@ impl CudaModule {
 			x17ai_cuda_get_kernel(
 				self.handle.as_ptr(),
 				name.as_ptr(),
-				max_dynamic_smem_bytes,
+				smem_size,
 			)
 		};
 		let Some(kernel) = NonNull::new(kernel_result.value) else {
@@ -518,7 +518,7 @@ impl CudaEventTimer {
 	pub fn elapsed_seconds(&self) -> Result<f64, ErrPack<TensorOpError>> {
 		let mut seconds = 0.0;
 		let diagnostic = unsafe {
-			x17ai_cuda_timer_elapsed_seconds(self.timer.as_ptr(), &mut seconds)
+			x17ai_cuda_timer_elapsed_seconds(self.timer.as_ptr(), &raw mut seconds)
 		};
 		if !diagnostic.is_null() {
 			cold_path();

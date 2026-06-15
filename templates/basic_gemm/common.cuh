@@ -10,11 +10,6 @@
 namespace {
 	static constexpr usize A_COLS = {{a_cols}};
 	static constexpr usize B_COLS = A_COLS;
-	{% match b_rows -%}
-	{% when Some with (rows) %}
-	static constexpr usize B_ROWS = {{rows}};
-	{% when None -%}
-	{% endmatch %}
 
 	using InputLoader =
 		b8::MatrixLoader<
