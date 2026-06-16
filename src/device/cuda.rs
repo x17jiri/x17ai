@@ -183,9 +183,25 @@ impl Default for Diagnostics {
 	}
 }
 
+#[derive(Clone, Copy)]
+pub enum GemmKernelExtraArgs<'a> {
+	None,
+	RMSNorm {
+		rrms: &'a Tensor,
+	},
+}
+
+#[derive(Clone, Copy)]
+pub struct GemmKernelArgs<'a> {
+	pub a: &'a Tensor,
+	pub b: &'a Tensor,
+	pub c: &'a Tensor,
+	pub extra: GemmKernelExtraArgs<'a>,
+}
+
 pub trait GemmKernelLauncher {
 	fn launch(
-		&self, device: &CudaDevice, a: &Tensor, b: &Tensor, c: &Tensor
+		&self, device: &CudaDevice, args: GemmKernelArgs<'_>
 	) -> Result<(), ErrPack<TensorOpError>>;
 
 	fn n_ops(&self, a: &Tensor, b: &Tensor) -> f64;
@@ -279,8 +295,8 @@ impl GemmKernel {
 	}
 
 	#[inline]
-	pub fn run(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
-		self.launcher.launch(&self.device, a, b, c)
+	pub fn run(&self, args: GemmKernelArgs<'_>) -> Result<(), ErrPack<TensorOpError>> {
+		self.launcher.launch(&self.device, args)
 	}
 
 	#[inline]
@@ -333,6 +349,7 @@ impl GemmKernel {
 		let meta = BasicGemmMetaTemplate {
 			a_cols: config.a.cols,
 			b_rows,
+			writer: &writer,
 		};
 
 		Self::write_generated_file(
@@ -411,7 +428,7 @@ impl GemmKernel {
 					eps_val: Self::format_cpp_f64(epilogue.eps),
 					head_scale_val: Self::format_cpp_f64(head_scale),
 					head_scale_dscr: format!(
-						"{} * sqrt({})",
+						"({}) * sqrt({})",
 						epilogue.head_scale.description.as_ref(),
 						epilogue.head_dim,
 					),

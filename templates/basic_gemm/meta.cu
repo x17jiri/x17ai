@@ -20,6 +20,9 @@ int main() {
 	printf("\t\"THREADS_PER_BLOCK\": %zu,\n", usize(Kernel::THREADS_PER_BLOCK));
 	printf("\t\"SMEM_BYTES\": %zu,\n", usize(Kernel::SMEM_BYTES));
 	printf("\t\"M_PER_BLOCK\": %zu,\n", usize(Kernel::M_PER_BLOCK));
-	printf("\t\"N_PER_BLOCK\": %zu\n", usize(Kernel::N_PER_BLOCK));
+	printf("\t\"N_PER_BLOCK\": %zu,\n", usize(Kernel::N_PER_BLOCK));
+	printf("\t\"HEAD_DIM\": %zu,\n", usize({{writer.head_dim}}));
+	printf("\t\"SEP_DIM\": %zu,\n", usize({{writer.sep_dim}}));
+	printf("\t\"HAS_RRMS_OUTPUT\": {% if writer.has_rrms_output %}true{% else %}false{% endif %}\n");
 	printf("}\n");
 }

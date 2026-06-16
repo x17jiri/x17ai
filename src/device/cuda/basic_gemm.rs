@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::device::Device;
 use crate::device::cuda::cuda_shim::CudaKernel;
-use crate::device::cuda::{CudaDevice, GemmKernelLauncher};
+use crate::device::cuda::{CudaDevice, GemmKernelArgs, GemmKernelExtraArgs, GemmKernelLauncher};
 use crate::dtype::DType;
 use crate::tensor::Tensor;
 use crate::{ErrExtra, ErrPack, TensorOpError};
@@ -44,9 +44,10 @@ pub struct BasicGemmKernelTemplate<'a> {
 
 #[derive(Template)]
 #[template(escape = "none", path = "basic_gemm/meta.cu")]
-pub struct BasicGemmMetaTemplate {
+pub struct BasicGemmMetaTemplate<'a> {
 	pub a_cols: usize,
 	pub b_rows: Option<NonZeroUsize>,
+	pub writer: &'a BasicGemmWriterTemplate,
 }
 
 #[derive(Deserialize)]
@@ -57,6 +58,9 @@ pub struct BasicGemmMetadata {
 	pub SMEM_BYTES: usize,
 	pub M_PER_BLOCK: usize,
 	pub N_PER_BLOCK: usize,
+	pub HEAD_DIM: usize,
+	pub SEP_DIM: usize,
+	pub HAS_RRMS_OUTPUT: bool,
 }
 
 pub struct BasicGemmKernelLauncher {
@@ -104,6 +108,7 @@ impl BasicGemmKernelLauncher {
 			|| metadata.THREADS_PER_BLOCK == 0
 			|| metadata.M_PER_BLOCK == 0
 			|| metadata.N_PER_BLOCK == 0
+			|| (metadata.HAS_RRMS_OUTPUT && metadata.HEAD_DIM == 0)
 		{
 			cold_path();
 			let file = config_path.to_string_lossy();
@@ -126,8 +131,12 @@ impl BasicGemmKernelLauncher {
 
 impl GemmKernelLauncher for BasicGemmKernelLauncher {
 	fn launch(
-		&self, device: &CudaDevice, a: &Tensor, b: &Tensor, c: &Tensor
+		&self, device: &CudaDevice, args: GemmKernelArgs<'_>
 	) -> Result<(), ErrPack<TensorOpError>> {
+		let a = args.a;
+		let b = args.b;
+		let c = args.c;
+
 		if !a.is_on_device(device) || !b.is_on_device(device) || !c.is_on_device(device) {
 			cold_path();
 			let dev: &dyn Device = device;
@@ -214,28 +223,104 @@ impl GemmKernelLauncher for BasicGemmKernelLauncher {
 		let mut b_ptr = unsafe { b.device_ptr().as_ptr::<c_void>() };
 		let mut b_rows_arg = b_rows;
 		let mut c_ptr = unsafe { c.device_ptr().as_ptr::<c_void>() };
-		let mut args = [
-			(&raw mut a_ptr).cast::<c_void>(),
-			(&raw mut a_rows_arg).cast::<c_void>(),
-			(&raw mut b_ptr).cast::<c_void>(),
-			(&raw mut b_rows_arg).cast::<c_void>(),
-			(&raw mut c_ptr).cast::<c_void>(),
-		];
 
-		unsafe {
-			self.kernel.launch(
-				&device.stream,
-				[grid_x, grid_y, 1],
-				[self.metadata.THREADS_PER_BLOCK, 1, 1],
-				self.metadata.SMEM_BYTES,
-				&mut args,
-			)
+		match (self.metadata.HAS_RRMS_OUTPUT, args.extra) {
+			(false, GemmKernelExtraArgs::None) => {
+				let mut raw_args = [
+					(&raw mut a_ptr).cast::<c_void>(),
+					(&raw mut a_rows_arg).cast::<c_void>(),
+					(&raw mut b_ptr).cast::<c_void>(),
+					(&raw mut b_rows_arg).cast::<c_void>(),
+					(&raw mut c_ptr).cast::<c_void>(),
+				];
+				unsafe {
+					self.kernel.launch(
+						&device.stream,
+						[grid_x, grid_y, 1],
+						[self.metadata.THREADS_PER_BLOCK, 1, 1],
+						self.metadata.SMEM_BYTES,
+						&mut raw_args,
+					)
+				}
+			},
+			(true, GemmKernelExtraArgs::RMSNorm { rrms }) => {
+				self.validate_rrms(device, rrms, a_rows, b_rows)?;
+				let mut rrms_ptr = unsafe { rrms.device_ptr().as_ptr::<c_void>() };
+				let mut raw_args = [
+					(&raw mut a_ptr).cast::<c_void>(),
+					(&raw mut a_rows_arg).cast::<c_void>(),
+					(&raw mut b_ptr).cast::<c_void>(),
+					(&raw mut b_rows_arg).cast::<c_void>(),
+					(&raw mut c_ptr).cast::<c_void>(),
+					(&raw mut rrms_ptr).cast::<c_void>(),
+				];
+				unsafe {
+					self.kernel.launch(
+						&device.stream,
+						[grid_x, grid_y, 1],
+						[self.metadata.THREADS_PER_BLOCK, 1, 1],
+						self.metadata.SMEM_BYTES,
+						&mut raw_args,
+					)
+				}
+			},
+			(true, GemmKernelExtraArgs::None) => {
+				cold_path();
+				Err(gemm_launch_error("basic GEMM kernel requires RMSNorm rrms output"))
+			},
+			(false, GemmKernelExtraArgs::RMSNorm { .. }) => {
+				cold_path();
+				Err(gemm_launch_error("basic GEMM kernel does not take RMSNorm rrms output"))
+			},
 		}
 	}
 
 	fn n_ops(&self, a: &Tensor, b: &Tensor) -> f64 {
 		#![allow(clippy::cast_precision_loss)]
 		2.0 * (a.size(-2) as f64) * (a.size(-1) as f64) * (b.size(-2) as f64)
+	}
+}
+
+impl BasicGemmKernelLauncher {
+	fn validate_rrms(
+		&self,
+		device: &CudaDevice,
+		rrms: &Tensor,
+		a_rows: usize,
+		b_rows: usize,
+	) -> Result<(), ErrPack<TensorOpError>> {
+		if !rrms.is_on_device(device) {
+			cold_path();
+			let dev: &dyn Device = device;
+			let dev_name = dev.name();
+			return Err(gemm_launch_error(format!("RMSNorm rrms output needs to be on device {dev_name}")));
+		}
+		if rrms.dtype() != DType::F32 {
+			cold_path();
+			return Err(gemm_launch_error(format!(
+				"RMSNorm rrms output must be f32, got {}",
+				rrms.dtype()
+			)));
+		}
+
+		let chunk = self.metadata.HEAD_DIM + self.metadata.SEP_DIM;
+		if chunk == 0 || b_rows % chunk != 0 {
+			cold_path();
+			return Err(gemm_launch_error(format!(
+				"RMSNorm metadata dimensions [{}, {}] do not divide b rows {b_rows}",
+				self.metadata.HEAD_DIM,
+				self.metadata.SEP_DIM,
+			)));
+		}
+		let rrms_cols = b_rows / chunk;
+		let rrms_shape = rrms.shape();
+		if rrms_shape != [a_rows, rrms_cols] {
+			cold_path();
+			return Err(gemm_launch_error(format!(
+				"RMSNorm rrms output has shape {rrms_shape:?}, expected [{a_rows}, {rrms_cols}]"
+			)));
+		}
+		Ok(())
 	}
 }
 
