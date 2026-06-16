@@ -65,6 +65,13 @@ impl Tensor {
 		self.device_is_cpu
 	}
 
+	#[inline]
+	pub fn is_on_device(&self, device: &dyn Device) -> bool {
+		let device = device as *const dyn Device as *const ();
+		let my_device = self.device.as_ref() as *const dyn Device as *const ();
+		my_device == device
+	}
+
 	pub fn device_ptr(&self) -> DevicePtr {
 		self.device_ptr
 	}

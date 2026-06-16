@@ -5,26 +5,41 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 use serde::Deserialize;
 
+use crate::device::Device;
 use crate::device::cuda::cuda_shim::CudaKernel;
 use crate::device::cuda::{CudaDevice, GemmKernelLauncher};
 use crate::dtype::DType;
 use crate::tensor::Tensor;
 use crate::{ErrExtra, ErrPack, TensorOpError};
 
+pub struct BasicGemmWriterTemplate {
+	pub use_l2_norm: bool,
+	pub scale_val: String,
+	pub scale_dscr: String,
+	pub head_dim: usize,
+	pub sep_dim: usize,
+	pub eps_val: String,
+	pub head_scale_val: String,
+	pub head_scale_dscr: String,
+	pub sep_scale_val: String,
+	pub sep_scale_dscr: String,
+	pub has_rrms_output: bool,
+}
+
 #[derive(Template)]
 #[template(escape = "none", path = "basic_gemm/common.cuh")]
 pub struct BasicGemmCommonTemplate<'a> {
 	pub a_cols: usize,
 	pub b_rows: Option<NonZeroUsize>,
-	pub scale_val: String,
-	pub scale_dscr: &'a str,
+	pub writer: &'a BasicGemmWriterTemplate,
 }
 
 #[derive(Template)]
 #[template(escape = "none", path = "basic_gemm/kernel.cu")]
-pub struct BasicGemmKernelTemplate {
+pub struct BasicGemmKernelTemplate<'a> {
 	pub a_cols: usize,
 	pub b_rows: Option<NonZeroUsize>,
+	pub writer: &'a BasicGemmWriterTemplate,
 }
 
 #[derive(Template)]
@@ -113,10 +128,11 @@ impl GemmKernelLauncher for BasicGemmKernelLauncher {
 	fn launch(
 		&self, device: &CudaDevice, a: &Tensor, b: &Tensor, c: &Tensor
 	) -> Result<(), ErrPack<TensorOpError>> {
-		// TODO: we really want to check that the a, b and c devices are all identical to `device`
-		if a.is_on_cpu() || b.is_on_cpu() || c.is_on_cpu() {
+		if !a.is_on_device(device) || !b.is_on_device(device) || !c.is_on_device(device) {
 			cold_path();
-			return Err(gemm_launch_error("basic GEMM input a is on CPU"));
+			let dev: &dyn Device = device;
+			let dev_name = dev.name();
+			return Err(gemm_launch_error(format!("all input tensors need to be on device {dev_name}")));
 		}
 
 		// TODO - we want to support other types. Need to be able to check them

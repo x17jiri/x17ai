@@ -251,13 +251,14 @@ def run_attn() -> None:
 
 	scale = torch.rsqrt(torch.tensor(float(MODEL_DIM)))
 	q = torch.matmul(x, q_weights.transpose(0, 1)) * scale
-	kv = torch.matmul(x, kv_weights.transpose(0, 1)) * scale
+	kv = torch.matmul(x, kv_weights.transpose(0, 1))
 
 	q = q.reshape(N_INPUTS, N_HEADS, HEAD_DIM)
 
 	kv = kv.reshape(N_INPUTS, N_HEADS, 2*HEAD_DIM)
 	k, k_rrms = rms_norm(kv[..., :HEAD_DIM])
-	v = kv[..., HEAD_DIM:]
+	k_rrms /= 8.0 # The CUDA output is actually scaled by `FIXED_I8_SCALE`. Need to keep that in mind
+	v = kv[..., HEAD_DIM:] * scale
 	kv = torch.cat((k, v), dim=2)
 
 	q_i8 = quantize(q)

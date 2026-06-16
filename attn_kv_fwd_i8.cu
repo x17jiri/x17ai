@@ -2,7 +2,6 @@
 #include "utils2.cuh"
 #include "cuda/utils_b8.cuh"
 #include "cuda/gemm_b8.cuh"
-#include "cuda/qkvg_fwd_i8.cuh"
 
 #include <algorithm>
 #include <filesystem>
@@ -28,9 +27,11 @@ namespace Attn_kv_fwd {
 			>
 		>;
 
-	using Writer = KVMatrixWriter<
+	using Writer = b8::L2NormMatrixWriter<
 		HEAD_DIM,
-		KV_PROJ_OUTPUTS,
+		HEAD_DIM,
+		L2_NORM_EPS, math::constexpr_sqrt(f64(HEAD_DIM)),
+		math::constexpr_inv_sqrt(f64(config::MODEL_DIM)),
 		InputLoader::M,
 		WeightLoader::K
 	>;
@@ -46,7 +47,7 @@ namespace Attn_kv_fwd {
 	) {
 		auto a = InputLoader(inp, n_inputs);
 		auto b = WeightLoader(w, KV_PROJ_OUTPUTS);
-		auto o = Writer(out, rrms);
+		auto o = Writer(out, KV_PROJ_OUTPUTS, rrms);
 		Kernel().run(a, b, o);
 	}
 }

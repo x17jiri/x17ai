@@ -22,10 +22,15 @@ use std::rc::Rc;
 
 use x17ai::device::Device;
 use x17ai::device::cuda::{
-	CudaDevice, CudaTimer, Diagnostics, GemmEpilogue, GemmInput, GemmKernel, GemmKernelConfig, Scale,
+	CudaDevice, CudaTimer, Diagnostics, GemmEpilogue, GemmInput, GemmKernel, GemmKernelConfig,
+	RMSNormEpilogue, Scale,
 };
 use x17ai::dtype::DType;
 use x17ai::tensor::Tensor;
+
+const HEAD_DIM: usize = 32;
+const N_HEADS: usize = 64;
+const L2_NORM_EPS: f64 = 1.0 / (1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let device = CudaDevice::new(0)?;
@@ -49,6 +54,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			print_diagnostics(&diagnostics);
 			return Err(other_error(format!(
 				"failed to generate attn_q_fwd kernel; {} error(s)",
+				diagnostics.err_count
+			)).into());
+		},
+	};
+
+	let kv_proj_outputs = 2 * N_HEADS * HEAD_DIM;
+	let kv_kernel_config = attn_kv_kernel_config(model_dim, kv_proj_outputs, HEAD_DIM)?;
+	let mut diagnostics = Diagnostics::new();
+	let kv_kernel = match GemmKernel::new(device.clone(), "attn_kv_fwd", &kv_kernel_config, &mut diagnostics) {
+		Ok(kernel) => {
+			print_diagnostics(&diagnostics);
+			kernel
+		},
+		Err(_) => {
+			print_diagnostics(&diagnostics);
+			return Err(other_error(format!(
+				"failed to generate attn_kv_fwd kernel; {} error(s)",
 				diagnostics.err_count
 			)).into());
 		},
@@ -82,6 +104,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	println!("metadata source: {}", kernel.meta_path.display());
 	println!("metadata executable: {}", kernel.meta_exe_path.display());
 	println!("metadata json: {}", kernel.meta_json_path.display());
+	println!("generated KV GEMM kernel files in {}", kv_kernel.dir_path.display());
+	println!("kv common source: {}", kv_kernel.common_path.display());
+	println!("kv kernel source: {}", kv_kernel.kernel_path.display());
+	println!("kv kernel ptx: {}", kv_kernel.ptx_path.display());
+	println!("kv kernel cubin: {}", kv_kernel.cubin_path.display());
+	println!("kv metadata source: {}", kv_kernel.meta_path.display());
+	println!("kv metadata executable: {}", kv_kernel.meta_exe_path.display());
+	println!("kv metadata json: {}", kv_kernel.meta_json_path.display());
 	let kernel_ms = kernel_seconds * 1000.0;
 	let kernel_tflops = kernel.n_ops(&x, &q_weights) / kernel_seconds / 1.0e12;
 	println!("launched attn_q_fwd in {kernel_ms:.4} ms, {kernel_tflops:.3} TFLOPS");
@@ -189,6 +219,45 @@ fn attn_q_kernel_config(
 		epilogue: GemmEpilogue::Scale(Scale {
 			value: 1.0 / f64::sqrt(model_dim as f64),
 			description: format!("1 / sqrt({model_dim})").into(),
+		}),
+		c_dtype: DType::Int8,
+	})
+}
+
+fn attn_kv_kernel_config(
+	model_dim: usize,
+	kv_proj_outputs: usize,
+	head_dim: usize,
+) -> Result<GemmKernelConfig, Box<dyn std::error::Error>> {
+	let Some(kv_proj_outputs) = NonZeroUsize::new(kv_proj_outputs) else {
+		return Err(invalid_data("expected non-zero kv projection output count".to_owned()).into());
+	};
+
+	Ok(GemmKernelConfig {
+		a: GemmInput {
+			dtype: DType::Int8,
+			cols: model_dim,
+			rows: None,
+			trans: false,
+		},
+		b: GemmInput {
+			dtype: DType::Int8,
+			cols: model_dim,
+			rows: Some(kv_proj_outputs),
+			trans: true,
+		},
+		epilogue: GemmEpilogue::RMSNorm(RMSNormEpilogue {
+			eps: L2_NORM_EPS,
+			head_dim,
+			sep_dim: head_dim,
+			head_scale: Scale {
+				value: 1.0,
+				description: "1".into(),
+			},
+			sep_scale: Scale {
+				value: 1.0 / f64::sqrt(model_dim as f64),
+				description: format!("1 / sqrt({model_dim})").into(),
+			},
 		}),
 		c_dtype: DType::Int8,
 	})

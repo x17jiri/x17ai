@@ -10,7 +10,8 @@ extern "C" X17_KERNEL(Kernel::THREADS_PER_BLOCK)
 void kernel(
 	b8::FixedI8 *a, usize a_rows,
 	b8::FixedI8 *b, usize b_rows,
-	b8::FixedI8 *c
+	b8::FixedI8 *c{% if writer.has_rrms_output %},
+	f32 *rrms{% endif %}
 ) {
 	{% match b_rows -%}
 	{% when Some with (rows) %}
@@ -21,6 +22,6 @@ void kernel(
 
 	auto a_loader = InputLoader(a, a_rows);
 	auto b_loader = WeightLoader(b, b_rows);
-	auto c_writer = Writer(c, b_rows);
+	auto c_writer = Writer(c, b_rows{% if writer.has_rrms_output %}, rrms{% endif %});
 	Kernel().run(a_loader, b_loader, c_writer);
 }

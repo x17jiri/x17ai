@@ -17,7 +17,7 @@ use std::rc::Rc;
 use askama::Template;
 
 use cuda_shim::{CudaEventTimer, CudaStream};
-use crate::device::cuda::basic_gemm::{BasicGemmCommonTemplate, BasicGemmKernelLauncher, BasicGemmKernelTemplate, BasicGemmMetaTemplate};
+use crate::device::cuda::basic_gemm::{BasicGemmCommonTemplate, BasicGemmKernelLauncher, BasicGemmKernelTemplate, BasicGemmMetaTemplate, BasicGemmWriterTemplate};
 use crate::dtype::DType;
 use crate::tensor::Tensor;
 use crate::{DeviceAllocError, ErrPack, KernelGeneratorError, TensorOpError};
@@ -114,7 +114,8 @@ pub struct Scale {
 	pub description: Cow<'static, str>,
 }
 
-pub struct RMSNormEpulogue {
+pub struct RMSNormEpilogue {
+	pub eps: f64,
 	pub head_dim: usize,
 	pub sep_dim: usize,
 
@@ -135,7 +136,7 @@ pub struct GeGluEpilogue {
 
 pub enum GemmEpilogue {
 	Scale(Scale),
-	RMSNorm(RMSNormEpulogue),
+	RMSNorm(RMSNormEpilogue),
 	Residual(ResidualEpilogue),
 	GeGlu(GeGluEpilogue),
 }
@@ -182,12 +183,6 @@ impl Default for Diagnostics {
 	}
 }
 
-pub struct GemmSources {
-	pub common: String,
-	pub kernel: String,
-	pub meta: String,
-}
-
 pub trait GemmKernelLauncher {
 	fn launch(
 		&self, device: &CudaDevice, a: &Tensor, b: &Tensor, c: &Tensor
@@ -229,16 +224,7 @@ impl GemmKernel {
 			return Err(KernelGeneratorError);
 		}
 
-		let sources = Self::generate_sources(config);
 		let dir_path = Path::new("cache").join("kernels").join(kernel_name);
-		let common_path = dir_path.join("common.cuh");
-		let kernel_path = dir_path.join("kernel.cu");
-		let ptx_path = dir_path.join("kernel.ptx");
-		let cubin_path = dir_path.join("kernel.cubin");
-		let meta_path = dir_path.join("meta.cu");
-		let meta_exe_path = dir_path.join("meta");
-		let meta_json_path = dir_path.join("meta.json");
-
 		match fs::create_dir_all(&dir_path) {
 			Ok(()) => {},
 			Err(err) => {
@@ -251,14 +237,19 @@ impl GemmKernel {
 			},
 		}
 
-		Self::write_generated_file(&common_path, sources.common, diag)?;
-		Self::write_generated_file(&kernel_path, sources.kernel, diag)?;
-		Self::write_generated_file(&meta_path, sources.meta, diag)?;
+		let common_path = dir_path.join("common.cuh");
+		let kernel_path = dir_path.join("kernel.cu");
+		let ptx_path = dir_path.join("kernel.ptx");
+		let cubin_path = dir_path.join("kernel.cubin");
+		let meta_path = dir_path.join("meta.cu");
+		let meta_exe_path = dir_path.join("meta");
+		let meta_json_path = dir_path.join("meta.json");
 
-		Self::compile_kernel_ptx(&dir_path, diag)?;
-		Self::compile_kernel_cubin(&dir_path, diag)?;
-		Self::compile_meta_exe(&dir_path, diag)?;
-		Self::run_meta_exe(&dir_path, &meta_json_path, diag)?;
+		Self::generate_sources(config, &common_path, &kernel_path, &meta_path, diag)?;
+		Self::compile_kernel_ptx(&dir_path, &kernel_path, &ptx_path, diag)?;
+		Self::compile_kernel_cubin(&dir_path, &ptx_path, &cubin_path, diag)?;
+		Self::compile_meta_exe(&dir_path, &meta_path, &meta_exe_path, diag)?;
+		Self::run_meta_exe(&dir_path, &meta_exe_path, &meta_json_path, diag)?;
 		let launcher = match BasicGemmKernelLauncher::new(
 			device.as_ref(),
 			&cubin_path,
@@ -297,7 +288,13 @@ impl GemmKernel {
 		self.launcher.n_ops(a, b)
 	}
 
-	fn generate_sources(config: &GemmKernelConfig) -> GemmSources {
+	fn generate_sources(
+		config: &GemmKernelConfig,
+		common_path: &Path,
+		kernel_path: &Path,
+		meta_path: &Path,
+		diag: &mut Diagnostics,
+	) -> Result<(), KernelGeneratorError> {
 		if config.a.dtype != DType::Int8 {
 			todo!("support GEMM inputs other than i8");
 		}
@@ -317,40 +314,119 @@ impl GemmKernel {
 			todo!("support empty GEMM dimensions");
 		}
 
-		let scale = match &config.epilogue {
-			GemmEpilogue::Scale(scale) => scale,
-			_ => todo!("support GEMM epilogues other than scale"),
-		};
-		if !scale.value.is_finite() {
-			todo!("support non-finite GEMM scale values");
-		}
-
 		let Some(b_rows) = config.b.rows else {
 			todo!("support GEMM outputs with runtime column count");
 		};
 		let b_rows = Some(b_rows);
-		let scale_val = scale.value;
+		let writer = Self::generate_writer_template(config, b_rows);
 
 		let common = BasicGemmCommonTemplate {
 			a_cols: config.a.cols,
 			b_rows,
-			scale_val: format!("{scale_val:.17e}"),
-			scale_dscr: scale.description.as_ref(),
+			writer: &writer,
 		};
 		let kernel = BasicGemmKernelTemplate {
 			a_cols: config.a.cols,
 			b_rows,
+			writer: &writer,
 		};
 		let meta = BasicGemmMetaTemplate {
 			a_cols: config.a.cols,
 			b_rows,
 		};
 
-		GemmSources {
-			common: common.render().unwrap_or_else(|_| todo!("render GEMM common template")),
-			kernel: kernel.render().unwrap_or_else(|_| todo!("render GEMM kernel template")),
-			meta: meta.render().unwrap_or_else(|_| todo!("render GEMM metadata template")),
+		Self::write_generated_file(
+			common_path,
+			common.render().unwrap_or_else(|_| todo!("render GEMM common template")),
+			diag,
+		)?;
+		Self::write_generated_file(
+			kernel_path,
+			kernel.render().unwrap_or_else(|_| todo!("render GEMM kernel template")),
+			diag,
+		)?;
+		Self::write_generated_file(
+			meta_path,
+			meta.render().unwrap_or_else(|_| todo!("render GEMM metadata template")),
+			diag,
+		)?;
+		Ok(())
+	}
+
+	fn generate_writer_template(
+		config: &GemmKernelConfig,
+		b_rows: Option<NonZeroUsize>,
+	) -> BasicGemmWriterTemplate {
+		match &config.epilogue {
+			GemmEpilogue::Scale(scale) => {
+				if !scale.value.is_finite() {
+					todo!("support non-finite GEMM scale values");
+				}
+
+				BasicGemmWriterTemplate {
+					use_l2_norm: false,
+					scale_val: Self::format_cpp_f64(scale.value),
+					scale_dscr: scale.description.as_ref().to_owned(),
+					head_dim: 0,
+					sep_dim: 0,
+					eps_val: String::new(),
+					head_scale_val: String::new(),
+					head_scale_dscr: String::new(),
+					sep_scale_val: String::new(),
+					sep_scale_dscr: String::new(),
+					has_rrms_output: false,
+				}
+			},
+			GemmEpilogue::RMSNorm(epilogue) => {
+				if !epilogue.eps.is_finite() || epilogue.eps < 0.0 {
+					todo!("support invalid RMSNorm eps values");
+				}
+				if epilogue.head_dim == 0 || epilogue.sep_dim == 0 {
+					todo!("support empty RMSNorm GEMM epilogue dimensions");
+				}
+				if epilogue.head_dim != epilogue.sep_dim {
+					todo!("support RMSNorm GEMM epilogues where head_dim != sep_dim");
+				}
+				if epilogue.head_dim % 32 != 0 || epilogue.sep_dim % 32 != 0 {
+					todo!("support RMSNorm GEMM epilogue dimensions that are not multiples of 32");
+				}
+				if !epilogue.head_scale.value.is_finite() || !epilogue.sep_scale.value.is_finite() {
+					todo!("support non-finite RMSNorm GEMM scale values");
+				}
+				let Some(b_rows) = b_rows else {
+					todo!("support RMSNorm GEMM outputs with runtime column count");
+				};
+				let chunk = epilogue.head_dim + epilogue.sep_dim;
+				if b_rows.get() % chunk != 0 {
+					todo!("support RMSNorm GEMM output columns that are not divisible by head_dim + sep_dim");
+				}
+
+				let head_scale = epilogue.head_scale.value * f64::sqrt(epilogue.head_dim as f64);
+				BasicGemmWriterTemplate {
+					use_l2_norm: true,
+					scale_val: String::new(),
+					scale_dscr: String::new(),
+					head_dim: epilogue.head_dim,
+					sep_dim: epilogue.sep_dim,
+					eps_val: Self::format_cpp_f64(epilogue.eps),
+					head_scale_val: Self::format_cpp_f64(head_scale),
+					head_scale_dscr: format!(
+						"{} * sqrt({})",
+						epilogue.head_scale.description.as_ref(),
+						epilogue.head_dim,
+					),
+					sep_scale_val: Self::format_cpp_f64(epilogue.sep_scale.value),
+					sep_scale_dscr: epilogue.sep_scale.description.as_ref().to_owned(),
+					has_rrms_output: true,
+				}
+			},
+			GemmEpilogue::Residual(_) => todo!("support residual GEMM epilogues"),
+			GemmEpilogue::GeGlu(_) => todo!("support GeGLU GEMM epilogues"),
 		}
+	}
+
+	fn format_cpp_f64(value: f64) -> String {
+		format!("{value:.17e}")
 	}
 
 	fn write_generated_file(
@@ -372,76 +448,91 @@ impl GemmKernel {
 	}
 
 	fn compile_kernel_ptx(
-		dir_path: &Path,
+		_dir_path: &Path,
+		kernel_path: &Path,
+		ptx_path: &Path,
 		diag: &mut Diagnostics,
 	) -> Result<(), KernelGeneratorError> {
 		let mut command = Self::nvcc_command("compute_86");
 		command
-			.current_dir(dir_path)
 			.arg("-ptx")
-			.arg("kernel.cu")
+			.arg(kernel_path)
 			.arg("-lineinfo")
 			.arg("-o")
-			.arg("kernel.ptx");
+			.arg(ptx_path);
 
 		Self::run_checked_command(
 			&mut command,
-			"nvcc failed while compiling kernel.cu to kernel.ptx",
+			&format!(
+				"nvcc failed while compiling {} to {}",
+				kernel_path.display(),
+				ptx_path.display(),
+			),
 			diag,
 		)?;
 		Ok(())
 	}
 
 	fn compile_kernel_cubin(
-		dir_path: &Path,
+		_dir_path: &Path,
+		ptx_path: &Path,
+		cubin_path: &Path,
 		diag: &mut Diagnostics,
 	) -> Result<(), KernelGeneratorError> {
 		let mut command = Self::nvcc_command("sm_86");
 		command
-			.current_dir(dir_path)
 			.arg("-Xptxas=-v")
 			.arg("--cubin")
-			.arg("kernel.ptx")
+			.arg(ptx_path)
 			.arg("-o")
-			.arg("kernel.cubin");
+			.arg(cubin_path);
 
 		Self::run_checked_command(
 			&mut command,
-			"nvcc failed while compiling kernel.ptx to kernel.cubin",
+			&format!(
+				"nvcc failed while compiling {} to {}",
+				ptx_path.display(),
+				cubin_path.display(),
+			),
 			diag,
 		)?;
 		Ok(())
 	}
 
 	fn compile_meta_exe(
-		dir_path: &Path,
+		_dir_path: &Path,
+		meta_path: &Path,
+		meta_exe_path: &Path,
 		diag: &mut Diagnostics,
 	) -> Result<(), KernelGeneratorError> {
 		let mut command = Self::nvcc_command("sm_86");
 		command
-			.current_dir(dir_path)
-			.arg("meta.cu")
+			.arg(meta_path)
 			.arg("-o")
-			.arg("meta");
+			.arg(meta_exe_path);
 
 		Self::run_checked_command(
 			&mut command,
-			"nvcc failed while compiling meta.cu to meta",
+			&format!(
+				"nvcc failed while compiling {} to {}",
+				meta_path.display(),
+				meta_exe_path.display(),
+			),
 			diag,
 		)?;
 		Ok(())
 	}
 
 	fn run_meta_exe(
-		dir_path: &Path,
+		_dir_path: &Path,
+		meta_exe_path: &Path,
 		meta_json_path: &Path,
 		diag: &mut Diagnostics,
 	) -> Result<(), KernelGeneratorError> {
-		let mut command = Command::new("./meta");
-		command.current_dir(dir_path);
+		let mut command = Command::new(meta_exe_path);
 		let output = Self::run_checked_command(
 			&mut command,
-			"failed to run GEMM metadata executable",
+			&format!("failed to run GEMM metadata executable {}", meta_exe_path.display()),
 			diag,
 		)?;
 

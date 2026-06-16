@@ -27,11 +27,23 @@ namespace {
 			>
 		>;
 
-	using Writer = b8::FixedI8MatrixWriter<
-		InputLoader::M,
-		WeightLoader::K,
-		{{scale_val}} // {{scale_dscr}}
+	{% if writer.use_l2_norm %}
+	using Writer = b8::L2NormMatrixWriter<
+		{{writer.head_dim}}, // HEAD_DIM
+		{{writer.sep_dim}}, // SEP_DIM
+		{{writer.eps_val}}, // EPS
+		{{writer.head_scale_val}}, // HEAD_SCALE = {{writer.head_scale_dscr}}
+		{{writer.sep_scale_val}}, // SEP_SCALE = {{writer.sep_scale_dscr}}
+		InputLoader::M, // M_PER_BLOCK
+		WeightLoader::K // N_PER_BLOCK
 	>;
+	{% else %}
+	using Writer = b8::FixedI8MatrixWriter<
+		InputLoader::M, // M_PER_BLOCK
+		WeightLoader::K, // N_PER_BLOCK
+		{{writer.scale_val}} // SCALE = {{writer.scale_dscr}}
+	>;
+	{% endif %}
 
 	using Kernel = b8::Gemm<InputLoader, WeightLoader, Writer>;
 }
