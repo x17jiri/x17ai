@@ -38,11 +38,20 @@ namespace {
 		WeightLoader::K // N_PER_BLOCK
 	>;
 	{% else %}
+	{% if writer.use_geglu %}
+	using Writer = b8::E4m3MatrixGeGluWriter<
+		InputLoader::M, // M_PER_BLOCK
+		WeightLoader::K, // N_PER_BLOCK
+		{{writer.geglu_inp_scale_val}}, // INP_SCALE = {{writer.geglu_inp_scale_dscr}}
+		{{writer.geglu_out_scale_val}} // OUT_SCALE = {{writer.geglu_out_scale_dscr}}
+	>;
+	{% else %}
 	using Writer = b8::FixedI8MatrixWriter<
 		InputLoader::M, // M_PER_BLOCK
 		WeightLoader::K, // N_PER_BLOCK
 		{{writer.scale_val}} // SCALE = {{writer.scale_dscr}}
 	>;
+	{% endif %}
 	{% endif %}
 
 	using Kernel = b8::Gemm<InputLoader, WeightLoader, Writer>;

@@ -22,14 +22,15 @@ use std::rc::Rc;
 
 use x17ai::device::Device;
 use x17ai::device::cuda::{
-	CudaDevice, CudaTimer, Diagnostics, GemmEpilogue, GemmInput, GemmKernel, GemmKernelArgs,
-	GemmKernelConfig, GemmKernelExtraArgs, RMSNormEpilogue, Scale,
+	CudaDevice, CudaTimer, Diagnostics, GeGluEpilogue, GemmEpilogue, GemmInput, GemmKernel,
+	GemmKernelArgs, GemmKernelConfig, GemmKernelExtraArgs, RMSNormEpilogue, Scale,
 };
 use x17ai::dtype::DType;
 use x17ai::tensor::Tensor;
 
 const HEAD_DIM: usize = 32;
 const N_HEADS: usize = 64;
+const F_WIDTH: usize = 2048;
 const L2_NORM_EPS: f64 = 1.0 / (1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -77,6 +78,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 			print_diagnostics(&diagnostics);
 			return Err(other_error(format!(
 				"failed to generate attn_kv_fwd kernel; {} error(s)",
+				diagnostics.err_count
+			)).into());
+		},
+	};
+
+	let ffn_f_kernel_config = ffn_f_kernel_config(model_dim, F_WIDTH)?;
+	let mut diagnostics = Diagnostics::new();
+	let ffn_f_kernel = match GemmKernel::new(device.clone(), "ffn_f_fwd", &ffn_f_kernel_config, &mut diagnostics) {
+		Ok(kernel) => {
+			print_diagnostics(&diagnostics);
+			kernel
+		},
+		Err(_) => {
+			print_diagnostics(&diagnostics);
+			return Err(other_error(format!(
+				"failed to generate ffn_f_fwd kernel; {} error(s)",
 				diagnostics.err_count
 			)).into());
 		},
@@ -150,6 +167,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	println!("kv metadata source: {}", kv_kernel.meta_path.display());
 	println!("kv metadata executable: {}", kv_kernel.meta_exe_path.display());
 	println!("kv metadata json: {}", kv_kernel.meta_json_path.display());
+	println!("generated FFN GeGLU GEMM kernel files in {}", ffn_f_kernel.dir_path.display());
+	println!("ffn_f common source: {}", ffn_f_kernel.common_path.display());
+	println!("ffn_f kernel source: {}", ffn_f_kernel.kernel_path.display());
+	println!("ffn_f kernel ptx: {}", ffn_f_kernel.ptx_path.display());
+	println!("ffn_f kernel cubin: {}", ffn_f_kernel.cubin_path.display());
+	println!("ffn_f metadata source: {}", ffn_f_kernel.meta_path.display());
+	println!("ffn_f metadata executable: {}", ffn_f_kernel.meta_exe_path.display());
+	println!("ffn_f metadata json: {}", ffn_f_kernel.meta_json_path.display());
 	let kernel_ms = kernel_seconds * 1000.0;
 	let kernel_tflops = kernel.n_ops(&x, &q_weights) / kernel_seconds / 1.0e12;
 	println!("launched attn_q_fwd in {kernel_ms:.4} ms, {kernel_tflops:.3} TFLOPS");
@@ -348,6 +373,42 @@ fn attn_kv_kernel_config(
 			},
 		}),
 		c_dtype: DType::Int8,
+	})
+}
+
+fn ffn_f_kernel_config(
+	model_dim: usize,
+	f_width: usize,
+) -> Result<GemmKernelConfig, Box<dyn std::error::Error>> {
+	let f_proj_outputs = 2 * f_width;
+	let Some(f_proj_outputs) = NonZeroUsize::new(f_proj_outputs) else {
+		return Err(invalid_data("expected non-zero FFN projection output count".to_owned()).into());
+	};
+
+	Ok(GemmKernelConfig {
+		a: GemmInput {
+			dtype: DType::Int8,
+			cols: model_dim,
+			rows: None,
+			trans: false,
+		},
+		b: GemmInput {
+			dtype: DType::Int8,
+			cols: model_dim,
+			rows: Some(f_proj_outputs),
+			trans: true,
+		},
+		epilogue: GemmEpilogue::GeGlu(GeGluEpilogue {
+			inp_scale: Scale {
+				value: 1.0 / f64::sqrt(model_dim as f64),
+				description: format!("1 / sqrt({model_dim})").into(),
+			},
+			out_scale: Scale {
+				value: 1.0 / f64::sqrt(model_dim as f64),
+				description: format!("1 / sqrt({model_dim})").into(),
+			},
+		}),
+		c_dtype: DType::E4m3,
 	})
 }
 

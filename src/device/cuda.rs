@@ -17,7 +17,10 @@ use std::rc::Rc;
 use askama::Template;
 
 use cuda_shim::{CudaEventTimer, CudaStream};
-use crate::device::cuda::basic_gemm::{BasicGemmCommonTemplate, BasicGemmKernelLauncher, BasicGemmKernelTemplate, BasicGemmMetaTemplate, BasicGemmWriterTemplate};
+use crate::device::cuda::basic_gemm::{
+	BasicGemmCommonTemplate, BasicGemmKernelLauncher, BasicGemmKernelTemplate,
+	BasicGemmLaunchInfo, BasicGemmMetaTemplate, BasicGemmWriterTemplate,
+};
 use crate::dtype::DType;
 use crate::tensor::Tensor;
 use crate::{DeviceAllocError, ErrPack, KernelGeneratorError, TensorOpError};
@@ -266,10 +269,12 @@ impl GemmKernel {
 		Self::compile_kernel_cubin(&dir_path, &ptx_path, &cubin_path, diag)?;
 		Self::compile_meta_exe(&dir_path, &meta_path, &meta_exe_path, diag)?;
 		Self::run_meta_exe(&dir_path, &meta_exe_path, &meta_json_path, diag)?;
+		let launch_info = Self::generate_launch_info(config);
 		let launcher = match BasicGemmKernelLauncher::new(
 			device.as_ref(),
 			&cubin_path,
-			&meta_json_path
+			&meta_json_path,
+			launch_info,
 		) {
 			Ok(launcher) => launcher,
 			Err(err) => {
@@ -317,8 +322,15 @@ impl GemmKernel {
 		if config.b.dtype != DType::Int8 {
 			todo!("support GEMM weights other than i8");
 		}
-		if config.c_dtype != DType::Int8 {
-			todo!("support GEMM outputs other than i8");
+		match &config.epilogue {
+			GemmEpilogue::GeGlu(_) if config.c_dtype == DType::E4m3 => {},
+			GemmEpilogue::GeGlu(_) => {
+				todo!("support GeGLU GEMM outputs other than e4m3");
+			},
+			_ if config.c_dtype == DType::Int8 => {},
+			_ => {
+				todo!("support GEMM outputs other than i8");
+			},
 		}
 		if config.a.trans {
 			todo!("support transposed GEMM input A");
@@ -346,11 +358,7 @@ impl GemmKernel {
 			b_rows,
 			writer: &writer,
 		};
-		let meta = BasicGemmMetaTemplate {
-			a_cols: config.a.cols,
-			b_rows,
-			writer: &writer,
-		};
+		let meta = BasicGemmMetaTemplate {};
 
 		Self::write_generated_file(
 			common_path,
@@ -370,6 +378,21 @@ impl GemmKernel {
 		Ok(())
 	}
 
+	fn generate_launch_info(config: &GemmKernelConfig) -> BasicGemmLaunchInfo {
+		let writer = Self::generate_writer_template(config, config.b.rows);
+		BasicGemmLaunchInfo {
+			a_cols: config.a.cols,
+			b_rows: config.b.rows,
+			output_cols_divisor: writer.output_cols_divisor,
+			head_dim: writer.head_dim,
+			sep_dim: writer.sep_dim,
+			has_rrms_output: writer.has_rrms_output,
+			a_dtype: config.a.dtype,
+			b_dtype: config.b.dtype,
+			c_dtype: config.c_dtype,
+		}
+	}
+
 	fn generate_writer_template(
 		config: &GemmKernelConfig,
 		b_rows: Option<NonZeroUsize>,
@@ -382,6 +405,10 @@ impl GemmKernel {
 
 				BasicGemmWriterTemplate {
 					use_l2_norm: false,
+					use_geglu: false,
+					c_type: "b8::FixedI8",
+					c_stride_expr: "b_rows",
+					output_cols_divisor: 1,
 					scale_val: Self::format_cpp_f64(scale.value),
 					scale_dscr: scale.description.as_ref().to_owned(),
 					head_dim: 0,
@@ -391,6 +418,10 @@ impl GemmKernel {
 					head_scale_dscr: String::new(),
 					sep_scale_val: String::new(),
 					sep_scale_dscr: String::new(),
+					geglu_inp_scale_val: String::new(),
+					geglu_inp_scale_dscr: String::new(),
+					geglu_out_scale_val: String::new(),
+					geglu_out_scale_dscr: String::new(),
 					has_rrms_output: false,
 				}
 			},
@@ -421,6 +452,10 @@ impl GemmKernel {
 				let head_scale = epilogue.head_scale.value * f64::sqrt(epilogue.head_dim as f64);
 				BasicGemmWriterTemplate {
 					use_l2_norm: true,
+					use_geglu: false,
+					c_type: "b8::FixedI8",
+					c_stride_expr: "b_rows",
+					output_cols_divisor: 1,
 					scale_val: String::new(),
 					scale_dscr: String::new(),
 					head_dim: epilogue.head_dim,
@@ -434,11 +469,50 @@ impl GemmKernel {
 					),
 					sep_scale_val: Self::format_cpp_f64(epilogue.sep_scale.value),
 					sep_scale_dscr: epilogue.sep_scale.description.as_ref().to_owned(),
+					geglu_inp_scale_val: String::new(),
+					geglu_inp_scale_dscr: String::new(),
+					geglu_out_scale_val: String::new(),
+					geglu_out_scale_dscr: String::new(),
 					has_rrms_output: true,
 				}
 			},
 			GemmEpilogue::Residual(_) => todo!("support residual GEMM epilogues"),
-			GemmEpilogue::GeGlu(_) => todo!("support GeGLU GEMM epilogues"),
+			GemmEpilogue::GeGlu(epilogue) => {
+				if !epilogue.inp_scale.value.is_finite() || epilogue.inp_scale.value <= 0.0 {
+					todo!("support invalid GeGLU input scale values");
+				}
+				if !epilogue.out_scale.value.is_finite() || epilogue.out_scale.value <= 0.0 {
+					todo!("support invalid GeGLU output scale values");
+				}
+				let Some(b_rows) = b_rows else {
+					todo!("support GeGLU GEMM outputs with runtime column count");
+				};
+				if b_rows.get() % 2 != 0 {
+					todo!("support GeGLU GEMM outputs with odd pregate column count");
+				}
+
+				BasicGemmWriterTemplate {
+					use_l2_norm: false,
+					use_geglu: true,
+					c_type: "b8::E4m3",
+					c_stride_expr: "b_rows / 2",
+					output_cols_divisor: 2,
+					scale_val: String::new(),
+					scale_dscr: String::new(),
+					head_dim: 0,
+					sep_dim: 0,
+					eps_val: String::new(),
+					head_scale_val: String::new(),
+					head_scale_dscr: String::new(),
+					sep_scale_val: String::new(),
+					sep_scale_dscr: String::new(),
+					geglu_inp_scale_val: Self::format_cpp_f64(epilogue.inp_scale.value),
+					geglu_inp_scale_dscr: epilogue.inp_scale.description.as_ref().to_owned(),
+					geglu_out_scale_val: Self::format_cpp_f64(epilogue.out_scale.value),
+					geglu_out_scale_dscr: epilogue.out_scale.description.as_ref().to_owned(),
+					has_rrms_output: false,
+				}
+			},
 		}
 	}
 

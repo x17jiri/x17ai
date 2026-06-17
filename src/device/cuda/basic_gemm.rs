@@ -14,6 +14,10 @@ use crate::{ErrExtra, ErrPack, TensorOpError};
 
 pub struct BasicGemmWriterTemplate {
 	pub use_l2_norm: bool,
+	pub use_geglu: bool,
+	pub c_type: &'static str,
+	pub c_stride_expr: &'static str,
+	pub output_cols_divisor: usize,
 	pub scale_val: String,
 	pub scale_dscr: String,
 	pub head_dim: usize,
@@ -23,6 +27,10 @@ pub struct BasicGemmWriterTemplate {
 	pub head_scale_dscr: String,
 	pub sep_scale_val: String,
 	pub sep_scale_dscr: String,
+	pub geglu_inp_scale_val: String,
+	pub geglu_inp_scale_dscr: String,
+	pub geglu_out_scale_val: String,
+	pub geglu_out_scale_dscr: String,
 	pub has_rrms_output: bool,
 }
 
@@ -44,35 +52,40 @@ pub struct BasicGemmKernelTemplate<'a> {
 
 #[derive(Template)]
 #[template(escape = "none", path = "basic_gemm/meta.cu")]
-pub struct BasicGemmMetaTemplate<'a> {
-	pub a_cols: usize,
-	pub b_rows: Option<NonZeroUsize>,
-	pub writer: &'a BasicGemmWriterTemplate,
-}
+pub struct BasicGemmMetaTemplate {}
 
 #[derive(Deserialize)]
 pub struct BasicGemmMetadata {
-	pub A_COLS: usize,
-	pub B_ROWS: Option<NonZeroUsize>,
 	pub THREADS_PER_BLOCK: usize,
 	pub SMEM_BYTES: usize,
 	pub M_PER_BLOCK: usize,
 	pub N_PER_BLOCK: usize,
-	pub HEAD_DIM: usize,
-	pub SEP_DIM: usize,
-	pub HAS_RRMS_OUTPUT: bool,
+}
+
+pub struct BasicGemmLaunchInfo {
+	pub a_cols: usize,
+	pub b_rows: Option<NonZeroUsize>,
+	pub output_cols_divisor: usize,
+	pub head_dim: usize,
+	pub sep_dim: usize,
+	pub has_rrms_output: bool,
+	pub a_dtype: DType,
+	pub b_dtype: DType,
+	pub c_dtype: DType,
 }
 
 pub struct BasicGemmKernelLauncher {
 	pub metadata: BasicGemmMetadata,
 	pub kernel: CudaKernel,
+	pub launch_info: BasicGemmLaunchInfo,
 }
 
 impl BasicGemmKernelLauncher {
 	pub fn new(
 		device: &CudaDevice,
 		cubin_path: &Path,
-		config_path: &Path
+		config_path: &Path,
+		launch_info: BasicGemmLaunchInfo,
 	) -> Result<Self, ErrPack<TensorOpError>> {
 		let config = match std::fs::read_to_string(config_path) {
 			Ok(s) => s,
@@ -104,11 +117,13 @@ impl BasicGemmKernelLauncher {
 			},
 		};
 
-		if metadata.A_COLS == 0
-			|| metadata.THREADS_PER_BLOCK == 0
+		if metadata.THREADS_PER_BLOCK == 0
 			|| metadata.M_PER_BLOCK == 0
 			|| metadata.N_PER_BLOCK == 0
-			|| (metadata.HAS_RRMS_OUTPUT && metadata.HEAD_DIM == 0)
+			|| launch_info.a_cols == 0
+			|| launch_info.output_cols_divisor == 0
+			|| metadata.N_PER_BLOCK % launch_info.output_cols_divisor != 0
+			|| (launch_info.has_rrms_output && launch_info.head_dim == 0)
 		{
 			cold_path();
 			let file = config_path.to_string_lossy();
@@ -125,7 +140,45 @@ impl BasicGemmKernelLauncher {
 			.load_module_from_cubin(cubin_path)?
 			.get_kernel("kernel", metadata.SMEM_BYTES)?;
 
-		Ok(Self { metadata, kernel })
+		Ok(Self { metadata, kernel, launch_info })
+	}
+
+	fn matrix_shape<'a>(
+		tensor_name: &'static str,
+		tensor: &'a Tensor,
+		expected_shape: [Option<usize>; 2],
+		expected_device: &CudaDevice,
+		expected_dtype: DType,
+	) -> Result<[usize; 2], ErrPack<TensorOpError>> {
+		let shape = tensor.shape();
+		let &[rows, cols] = shape else {
+			cold_path();
+			return Err(gemm_launch_error(format!(
+				"GEMM input {tensor_name} must be 2D, got shape {shape:?}"
+			)));
+		};
+		if rows == 0 || cols == 0 {
+			cold_path();
+			return Err(gemm_launch_error(format!(
+				"GEMM input {tensor_name} has zero size {shape:?}"
+			)));
+		}
+		let dtype = tensor.dtype();
+		if  dtype != expected_dtype {
+			cold_path();
+			return Err(gemm_launch_error(format!(
+				"Invalid dtype. Expected {expected_dtype}, got {dtype}"
+			)));
+		}
+		if !tensor.is_on_device(expected_device) {
+			cold_path();
+			let dev: &dyn Device = expected_device;
+			let dev_name = dev.name();
+			return Err(gemm_launch_error(format!(
+				"GEMM input {tensor_name} is not on device {dev_name}"
+			)));
+		}
+		Ok([rows, cols])
 	}
 }
 
@@ -137,82 +190,59 @@ impl GemmKernelLauncher for BasicGemmKernelLauncher {
 		let b = args.b;
 		let c = args.c;
 
-		if !a.is_on_device(device) || !b.is_on_device(device) || !c.is_on_device(device) {
-			cold_path();
-			let dev: &dyn Device = device;
-			let dev_name = dev.name();
-			return Err(gemm_launch_error(format!("all input tensors need to be on device {dev_name}")));
-		}
+		let [a_rows, a_cols] = Self::matrix_shape(
+			"a", a, [None, Some(self.launch_info.a_cols)],
+			device, self.launch_info.a_dtype
+		)?;
+		let [b_rows, b_cols] = Self::matrix_shape(
+			"c", b, [self.launch_info.b_rows, Some(self.launch_info.a_cols)],
+			device, self.launch_info.b_dtype
+		)?;
+		let [c_rows, c_cols] = Self::matrix_shape(
+			"c", c, [Some(a_rows / divisor), Some(b_rows)],
+			device, self.launch_info.c_dtype
+		)?;
 
-		// TODO - we want to support other types. Need to be able to check them
-		if a.dtype() != DType::Int8 || b.dtype() != DType::Int8 || c.dtype() != DType::Int8 {
-			cold_path();
-			return Err(gemm_launch_error(format!(
-				"basic GEMM inputs a must be i8, got {}",
-				a.dtype()
-			)));
-		}
-
-		let a_shape = a.shape();
-		let &[a_rows, a_cols] = a_shape else {
-			cold_path();
-			return Err(gemm_launch_error(format!(
-				"basic GEMM input a must be 2D, got shape {a_shape:?}"
-			)));
-		};
-		let b_shape = b.shape();
-		let &[b_rows, b_cols] = b_shape else {
-			cold_path();
-			return Err(gemm_launch_error(format!(
-				"basic GEMM input b must be 2D, got shape {b_shape:?}"
-			)));
-		};
-		let c_shape = c.shape();
-		let &[c_rows, c_cols] = c_shape else {
-			cold_path();
-			return Err(gemm_launch_error(format!(
-				"basic GEMM output c must be 2D, got shape {c_shape:?}"
-			)));
-		};
-
-		if a_rows == 0 || b_rows == 0 {
-			cold_path();
-			return Err(gemm_launch_error("basic GEMM does not support zero size tensors"));
-		}
-		if a_cols != self.metadata.A_COLS {
+		if a_cols != self.launch_info.a_cols {
 			cold_path();
 			return Err(gemm_launch_error(format!(
 				"basic GEMM input a has {} columns, but kernel was compiled for {}",
 				a_cols,
-				self.metadata.A_COLS
+				self.launch_info.a_cols
 			)));
 		}
-		if b_cols != self.metadata.A_COLS {
+		if b_cols != self.launch_info.a_cols {
 			cold_path();
 			return Err(gemm_launch_error(format!(
 				"basic GEMM input b has {} columns, but kernel was compiled for {}",
 				b_cols,
-				self.metadata.A_COLS
+				self.launch_info.a_cols
 			)));
 		}
-		if let Some(B_ROWS) = self.metadata.B_ROWS && b_rows != B_ROWS.get() {
+		if let Some(B_ROWS) = self.launch_info.b_rows && b_rows != B_ROWS.get() {
 			cold_path();
 			return Err(gemm_launch_error(format!(
 				"basic GEMM input b has {b_rows} rows, but kernel was compiled for {B_ROWS}",
 			)));
 		}
-		if c_rows != a_rows || c_cols != b_rows {
+
+		// TODO - assume M_PER_BLOCK and N_PER_BLOCK are powers of 2, which mean division is shift
+		let c_cols_pre_epilogue = b_rows;
+		if c_rows % self.metadata.M_PER_BLOCK != 0
+			|| c_cols_pre_epilogue % self.metadata.N_PER_BLOCK != 0 {
 			cold_path();
 			return Err(gemm_launch_error(format!(
-				"basic GEMM output c has shape {c_shape:?}, expected [{a_rows}, {b_rows}]",
+				"basic GEMM output shape [{c_rows}, {c_cols_pre_epilogue}] must be divisible by tile shape [{}, {}]",
+				self.metadata.M_PER_BLOCK, self.metadata.N_PER_BLOCK
 			)));
 		}
 
-		if c_rows % self.metadata.M_PER_BLOCK != 0 || c_cols % self.metadata.N_PER_BLOCK != 0{
+		if c_rows != a_rows
+			|| c_cols * self.launch_info.output_cols_divisor != c_cols_pre_epilogue {
 			cold_path();
+			let expected_c_cols = c_cols_pre_epilogue / self.launch_info.output_cols_divisor;
 			return Err(gemm_launch_error(format!(
-				"basic GEMM output shape [{c_rows}, {c_cols}] must be divisible by tile shape [{}, {}]",
-				self.metadata.M_PER_BLOCK, self.metadata.N_PER_BLOCK
+				"basic GEMM output c has shape [{c_rows}, {c_cols}], expected [{a_rows}, {expected_c_cols}]",
 			)));
 		}
 
@@ -224,7 +254,7 @@ impl GemmKernelLauncher for BasicGemmKernelLauncher {
 		let mut b_rows_arg = b_rows;
 		let mut c_ptr = unsafe { c.device_ptr().as_ptr::<c_void>() };
 
-		match (self.metadata.HAS_RRMS_OUTPUT, args.extra) {
+		match (self.launch_info.has_rrms_output, args.extra) {
 			(false, GemmKernelExtraArgs::None) => {
 				let mut raw_args = [
 					(&raw mut a_ptr).cast::<c_void>(),
@@ -303,13 +333,13 @@ impl BasicGemmKernelLauncher {
 			)));
 		}
 
-		let chunk = self.metadata.HEAD_DIM + self.metadata.SEP_DIM;
+		let chunk = self.launch_info.head_dim + self.launch_info.sep_dim;
 		if chunk == 0 || b_rows % chunk != 0 {
 			cold_path();
 			return Err(gemm_launch_error(format!(
 				"RMSNorm metadata dimensions [{}, {}] do not divide b rows {b_rows}",
-				self.metadata.HEAD_DIM,
-				self.metadata.SEP_DIM,
+				self.launch_info.head_dim,
+				self.launch_info.sep_dim,
 			)));
 		}
 		let rrms_cols = b_rows / chunk;

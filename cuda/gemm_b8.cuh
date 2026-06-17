@@ -297,7 +297,7 @@ namespace b8 {
 		}
 	};
 
-	template<usize M_PER_BLOCK, usize N_PER_BLOCK, usize FAN_IN>
+	template<usize M_PER_BLOCK, usize N_PER_BLOCK, f64 INP_SCALE, f64 OUT_SCALE>
 	struct E4m3MatrixGeGluWriter: MatrixWriter<E4m3, M_PER_BLOCK, N_PER_BLOCK> {
 		using Base = MatrixWriter<E4m3, M_PER_BLOCK, N_PER_BLOCK>;
 
@@ -308,19 +308,18 @@ namespace b8 {
 		X17_DEVICE E4m3 geglu(b32::Fragment_8x8<i32> frag) {
 			// `frag.val0` and `frag.val1` are raw accumulators of `sum(FixedI8 * FixedI8)`.
 			// Each `FixedI8` is scaled by FIXED_I8_SCALE, so `FixedI8 * FixedI8` is scaled
-			// by `FIXED_I8_SCALE^2`. We need to divide the inputs by this value.
-			// We also need to divide by `sqrt(FAN_IN)` so the inputs have unit variance.
+			// by `FIXED_I8_SCALE^2`. We need to divide the inputs by this value and
+			// apply the configured real-value scales.
 			//
 			// `math::fast::gelu` expects squared scale factors, hence the `_2` suffix:
-			// - `INP_SCALE_2` => gate scale `1 / (FIXED_I8_SCALE^2 * sqrt(FAN_IN))`
-			//                 = `1 / sqrt(FAN_IN * FIXED_I8_SCALE^4)`
-			// - `OUT_SCALE_2` is logically the scale of the `lin` input, but we apply it to the
-			//   GELU output instead. That lets GELU fold the multiply into its constants, so the
-			//   scale is effectively free at runtime.
+			// - `GEGLU_INP_SCALE_2` is the squared scale of the gate input
+			// - `GEGLU_OUT_SCALE_2` is logically the squared scale of the `lin` input, but we
+			//   apply it to the GELU output instead. That lets GELU fold the multiply into its
+			//   constants, so the scale is effectively free at runtime.
 			constexpr f64 FIXED_I8_SCALE_2 = FIXED_I8_SCALE * FIXED_I8_SCALE;
-			constexpr f64 INP_SCALE_2 = 1.0 / (FAN_IN * FIXED_I8_SCALE_2 * FIXED_I8_SCALE_2);
-			constexpr f64 OUT_SCALE_2 = INP_SCALE_2;
-			f32 gate = math::fast::gelu<INP_SCALE_2, OUT_SCALE_2, 1.0>(f32(frag.get0())).val;
+			constexpr f64 GEGLU_INP_SCALE_2 = (INP_SCALE * INP_SCALE) / (FIXED_I8_SCALE_2 * FIXED_I8_SCALE_2);
+			constexpr f64 GEGLU_OUT_SCALE_2 = (OUT_SCALE * OUT_SCALE) / (FIXED_I8_SCALE_2 * FIXED_I8_SCALE_2);
+			f32 gate = math::fast::gelu<GEGLU_INP_SCALE_2, GEGLU_OUT_SCALE_2, 1.0>(f32(frag.get0())).val;
 			f32 lin = f32(frag.get1());
 			return f32_to_e4m3(gate * lin);
 		}
