@@ -10,7 +10,7 @@ use std::{borrow::Cow, fs, hint::cold_path, marker::PhantomData, num::NonZeroUsi
 use askama::Template;
 use serde::Deserialize;
 
-use crate::{ErrExtra, ErrPack, KernelGeneratorError, TensorOpError, device::cuda::{CudaDevice, Diagnostics, basic_gemm::{BasicGemmCommonTemplate, BasicGemmKernelTemplate, BasicGemmMetaTemplate, BasicGemmWriterTemplate}, cuda_shim::CudaKernel}, dtype::DType, tensor::Tensor};
+use crate::{ErrExtra, ErrPack, KernelGeneratorError, TensorOpError, device::{Device, cuda::{CudaDevice, Diagnostics, basic_gemm::{BasicGemmCommonTemplate, BasicGemmKernelTemplate, BasicGemmMetaTemplate, BasicGemmWriterTemplate}, cuda_shim::CudaKernel, gemm}}, dtype::DType, tensor::Tensor};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -108,11 +108,36 @@ pub struct RMSNormExtraArgs<'a> {
 	rrms: &'a Tensor,
 }
 
+#[derive(Clone, Copy)]
+pub struct GemmArgs<'a, Epilogue: GemmEpilogue> {
+	pub a: &'a Tensor,
+	pub b: &'a Tensor,
+	pub c: &'a Tensor,
+	pub extra: Epilogue::ExtraArgs<'a>,
+}
+
 //--------------------------------------------------------------------------------------------------
 
-pub trait GemmEpilogue {
+pub trait GemmLauncherFactory<Epilogue: GemmEpilogue>: Sized {
+	fn new(
+		device: Rc<CudaDevice>,
+		gemm_config: &GemmConfig,
+		epilogue_config: &Epilogue::Config,
+		cubin_path: &Path,
+		config_path: &Path,
+		diag: &mut Diagnostics,
+	) -> Result<Self, KernelGeneratorError>;
+}
+
+pub trait GemmLauncher<Epilogue: GemmEpilogue>: Sized {
+	fn launch(&self, args: GemmArgs<Epilogue>) -> Result<(), ErrPack<TensorOpError>>;
+}
+
+pub trait GemmEpilogue: Sized {
 	type Config: EpilogueConfig;
+	type LauncherFactory: GemmLauncherFactory<Self>;
 	type ExtraArgs<'a>;
+	type Launcher: GemmLauncher<Self>;
 }
 
 pub struct ScaleEpilogue;
@@ -122,32 +147,30 @@ pub struct GeGluEpilogue;
 
 impl GemmEpilogue for ScaleEpilogue {
 	type Config = ScaleConfig;
+	type LauncherFactory = BasicGemmLauncher;
 	type ExtraArgs<'a> = NoExtraArgs<'a>;
+	type Launcher = BasicGemmLauncher;
 }
 
 impl GemmEpilogue for RMSNormEpilogue {
 	type Config = RMSNormConfig;
+	type LauncherFactory = RMSNormGemmLauncher;
 	type ExtraArgs<'a> = RMSNormExtraArgs<'a>;
+	type Launcher = RMSNormGemmLauncher;
 }
 
 impl GemmEpilogue for ResidualEpilogue {
 	type Config = ResidualConfig;
+	type LauncherFactory = BasicGemmLauncher;
 	type ExtraArgs<'a> = NoExtraArgs<'a>;
+	type Launcher = BasicGemmLauncher;
 }
 
 impl GemmEpilogue for GeGluEpilogue {
 	type Config = GeGluConfig;
+	type LauncherFactory = BasicGemmLauncher;
 	type ExtraArgs<'a> = NoExtraArgs<'a>;
-}
-
-//--------------------------------------------------------------------------------------------------
-
-#[derive(Clone, Copy)]
-pub struct GemmArgs<'a, Epilogue: GemmEpilogue> {
-	pub a: &'a Tensor,
-	pub b: &'a Tensor,
-	pub c: &'a Tensor,
-	pub extra: Epilogue::ExtraArgs<'a>,
+	type Launcher = BasicGemmLauncher;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -162,7 +185,7 @@ pub struct GemmKernel<Epilogue: GemmEpilogue> {
 	pub meta_path: PathBuf,
 	pub meta_exe_path: PathBuf,
 	pub meta_json_path: PathBuf,
-	pub lanuncher: GemmLauncher<Epilogue>,
+	pub launcher: Epilogue::LauncherFactory,
 }
 
 impl<Epilogue: GemmEpilogue> GemmKernel<Epilogue> {
@@ -216,6 +239,11 @@ impl<Epilogue: GemmEpilogue> GemmKernel<Epilogue> {
 		Self::compile_meta_exe(&dir_path, &meta_path, &meta_exe_path, diag)?;
 		Self::run_meta_exe(&dir_path, &meta_exe_path, &meta_json_path, diag)?;
 
+		let launcher = Epilogue::LauncherFactory::new(
+			device, gemm_config, epilogue_config,
+			&cubin_path, &meta_json_path, diag
+		)?;
+
 		Ok(Self {
 			name: kernel_name.to_owned(),
 			dir_path,
@@ -226,21 +254,20 @@ impl<Epilogue: GemmEpilogue> GemmKernel<Epilogue> {
 			meta_path,
 			meta_exe_path,
 			meta_json_path,
-			lanuncher: GemmLauncher::new(
-				device, gemm_config, epilogue_config,
-				&cubin_path, &meta_json_path, diag
-			)?,
+			launcher,
 		})
 	}
 
 	pub fn launch<'a>(
 		&'a self, args: GemmArgs<'a, Epilogue>
 	) -> Result<(), ErrPack<TensorOpError>> {
-		self.lanuncher.launch(args)
+		self.launcher.launch(args)
 	}
 
 	pub fn n_ops(&self, a: &Tensor, b: &Tensor) -> f64 {
-		self.lanuncher.n_ops(a, b)
+		// TODO: This assumes that `b` is transposed and `a` is not
+		#![allow(clippy::cast_precision_loss)]
+		2.0 * (a.size(-2) as f64) * (a.size(-1) as f64) * (b.size(-2) as f64)
 	}
 
 	fn generate_sources(
@@ -632,13 +659,10 @@ pub struct GemmLauncherMetadata {
 	pub N_PER_BLOCK: usize,
 }
 
-pub struct GemmLauncher<Epilogue: GemmEpilogue> {
+pub struct BasicGemmLauncher {
 	pub a_cols: usize,
 	pub b_rows: Option<NonZeroUsize>,
-	pub output_cols_divisor: usize,
-	pub head_dim: usize,
-	pub sep_dim: usize,
-	pub has_rrms_output: bool,
+
 	pub a_dtype: DType,
 	pub b_dtype: DType,
 	pub c_dtype: DType,
@@ -646,15 +670,12 @@ pub struct GemmLauncher<Epilogue: GemmEpilogue> {
 	pub metadata: GemmLauncherMetadata,
 	pub device: Rc<CudaDevice>,
 	pub kernel: CudaKernel,
-
-	pub phantom: PhantomData<Epilogue>
 }
 
-impl<Epilogue: GemmEpilogue> GemmLauncher<Epilogue> {
+impl BasicGemmLauncher {
 	pub fn new(
 		device: Rc<CudaDevice>,
 		gemm_config: &GemmConfig,
-		epilogue_config: &Epilogue::Config,
 		cubin_path: &Path,
 		config_path: &Path,
 		diag: &mut Diagnostics,
@@ -682,10 +703,6 @@ impl<Epilogue: GemmEpilogue> GemmLauncher<Epilogue> {
 		if metadata.THREADS_PER_BLOCK == 0
 			|| metadata.M_PER_BLOCK == 0
 			|| metadata.N_PER_BLOCK == 0
-			|| launch_info.a_cols == 0
-			|| launch_info.output_cols_divisor == 0
-			|| metadata.N_PER_BLOCK % launch_info.output_cols_divisor != 0
-			|| (launch_info.has_rrms_output && launch_info.head_dim == 0)
 		{
 			cold_path();
 			let file = config_path.to_string_lossy();
@@ -693,11 +710,21 @@ impl<Epilogue: GemmEpilogue> GemmLauncher<Epilogue> {
 			return Err(KernelGeneratorError);
 		}
 
-		let kernel = device.stream
-			.load_module_from_cubin(cubin_path)?
-			.get_kernel("kernel", metadata.SMEM_BYTES)?;
+		let module = device.stream.load_module_from_cubin(cubin_path, diag)?;
+		let kernel = module.get_kernel("kernel", metadata.SMEM_BYTES, diag)?;
 
-		Ok(Self { metadata, kernel, launch_info })
+		Ok(Self {
+			a_cols: gemm_config.a.cols,
+			b_rows: gemm_config.b.rows,
+
+			a_dtype: gemm_config.a.dtype,
+			b_dtype: gemm_config.b.dtype,
+			c_dtype: gemm_config.c_dtype,
+
+			metadata,
+			device,
+			kernel,
+		})
 	}
 
 	fn matrix_shape<'a>(
@@ -750,13 +777,7 @@ impl<Epilogue: GemmEpilogue> GemmLauncher<Epilogue> {
 		Ok([rows, cols])
 	}
 
-	fn launch<'a>(
-		&'a self, args: GemmArgs<'a, Epilogue>
-	) -> Result<(), ErrPack<TensorOpError>> {
-		let a = args.a;
-		let b = args.b;
-		let c = args.c;
-
+	fn launch(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let [a_rows, _a_cols] = Self::matrix_shape(
 			"a", a, [None, Some(self.launch_info.a_cols)],
 			device, self.launch_info.a_dtype
@@ -841,14 +862,9 @@ impl<Epilogue: GemmEpilogue> GemmLauncher<Epilogue> {
 			},
 		}
 	}
-
-	fn n_ops(&self, a: &Tensor, b: &Tensor) -> f64 {
-		#![allow(clippy::cast_precision_loss)]
-		2.0 * (a.size(-2) as f64) * (a.size(-1) as f64) * (b.size(-2) as f64)
-	}
 }
 
-impl GemmLauncher {
+impl GemmLauncherFactory {
 	fn validate_rrms(
 		&self,
 		device: &CudaDevice,
@@ -888,6 +904,45 @@ impl GemmLauncher {
 			)));
 		}
 		Ok(())
+	}
+}
+
+impl GemmLauncherFactory<ScaleEpilogue> for BasicGemmLauncher {
+	fn new(
+		device: Rc<CudaDevice>,
+		gemm_config: &GemmConfig,
+		_epilogue_config: &ScaleConfig,
+		cubin_path: &Path,
+		config_path: &Path,
+		diag: &mut Diagnostics,
+	) -> Result<Self, KernelGeneratorError> {
+		BasicGemmLauncher::new(device, gemm_config, cubin_path, config_path, diag)
+	}
+}
+
+impl GemmLauncherFactory<ResidualEpilogue> for BasicGemmLauncher {
+	fn new(
+		device: Rc<CudaDevice>,
+		gemm_config: &GemmConfig,
+		_epilogue_config: &ResidualConfig,
+		cubin_path: &Path,
+		config_path: &Path,
+		diag: &mut Diagnostics,
+	) -> Result<Self, KernelGeneratorError> {
+		BasicGemmLauncher::new(device, gemm_config, cubin_path, config_path, diag)
+	}
+}
+
+impl GemmLauncherFactory<GeGluEpilogue> for BasicGemmLauncher {
+	fn new(
+		device: Rc<CudaDevice>,
+		gemm_config: &GemmConfig,
+		_epilogue_config: &GeGluConfig,
+		cubin_path: &Path,
+		config_path: &Path,
+		diag: &mut Diagnostics,
+	) -> Result<Self, KernelGeneratorError> {
+		BasicGemmLauncher::new(device, gemm_config, cubin_path, config_path, diag)
 	}
 }
 
