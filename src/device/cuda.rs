@@ -29,6 +29,7 @@ use super::{Device, DevicePtr};
 
 pub mod cuda_shim;
 pub mod basic_gemm;
+pub mod gemm;
 
 //--------------------------------------------------------------------------------------------------
 

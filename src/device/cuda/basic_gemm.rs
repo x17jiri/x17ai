@@ -54,6 +54,8 @@ pub struct BasicGemmKernelTemplate<'a> {
 #[template(escape = "none", path = "basic_gemm/meta.cu")]
 pub struct BasicGemmMetaTemplate {}
 
+// This struct should only contain items where the source of truth naturally is the C++ CUDA code.
+// We don't want to mirror these values in Rust and so will transfer them via the meta.json file.
 #[derive(Deserialize)]
 pub struct BasicGemmMetadata {
 	pub THREADS_PER_BLOCK: usize,
@@ -163,6 +165,18 @@ impl BasicGemmKernelLauncher {
 				"GEMM input {tensor_name} has zero size {shape:?}"
 			)));
 		}
+		if let Some(expected_rows) = expected_shape[0] && rows != expected_rows {
+			cold_path();
+			return Err(gemm_launch_error(format!(
+				"GEMM input {tensor_name} has {rows} rows, but should have {expected_rows}"
+			)));
+		}
+		if let Some(expected_cols) = expected_shape[1] && cols != expected_cols {
+			cold_path();
+			return Err(gemm_launch_error(format!(
+				"GEMM input {tensor_name} has {cols} columns, but should have {expected_cols}"
+			)));
+		}
 		let dtype = tensor.dtype();
 		if  dtype != expected_dtype {
 			cold_path();
@@ -190,64 +204,34 @@ impl GemmKernelLauncher for BasicGemmKernelLauncher {
 		let b = args.b;
 		let c = args.c;
 
-		let [a_rows, a_cols] = Self::matrix_shape(
+		let [a_rows, _a_cols] = Self::matrix_shape(
 			"a", a, [None, Some(self.launch_info.a_cols)],
 			device, self.launch_info.a_dtype
 		)?;
-		let [b_rows, b_cols] = Self::matrix_shape(
-			"c", b, [self.launch_info.b_rows, Some(self.launch_info.a_cols)],
+		let [b_rows, _b_cols] = Self::matrix_shape(
+			"b", b, [self.launch_info.b_rows.map(NonZeroUsize::get), Some(self.launch_info.a_cols)],
 			device, self.launch_info.b_dtype
 		)?;
 		let [c_rows, c_cols] = Self::matrix_shape(
-			"c", c, [Some(a_rows / divisor), Some(b_rows)],
+			"c", c, [Some(a_rows), Some(b_rows / self.launch_info.output_cols_divisor)],
 			device, self.launch_info.c_dtype
 		)?;
+		// TODO: `b_rows / self.launch_info.output_cols_divisor` silently truncates if `b_rows`
+		// is not divisible by the divisor.
+		// Then `c_raw_cols` is reconstructed from the truncated value.
 
-		if a_cols != self.launch_info.a_cols {
+		// TODO - assume M_PER_BLOCK and N_PER_BLOCK are powers of 2
+		let c_raw_cols = c_cols * self.launch_info.output_cols_divisor;
+		if c_rows % self.metadata.M_PER_BLOCK != 0 || c_raw_cols % self.metadata.N_PER_BLOCK != 0 {
 			cold_path();
 			return Err(gemm_launch_error(format!(
-				"basic GEMM input a has {} columns, but kernel was compiled for {}",
-				a_cols,
-				self.launch_info.a_cols
-			)));
-		}
-		if b_cols != self.launch_info.a_cols {
-			cold_path();
-			return Err(gemm_launch_error(format!(
-				"basic GEMM input b has {} columns, but kernel was compiled for {}",
-				b_cols,
-				self.launch_info.a_cols
-			)));
-		}
-		if let Some(B_ROWS) = self.launch_info.b_rows && b_rows != B_ROWS.get() {
-			cold_path();
-			return Err(gemm_launch_error(format!(
-				"basic GEMM input b has {b_rows} rows, but kernel was compiled for {B_ROWS}",
-			)));
-		}
-
-		// TODO - assume M_PER_BLOCK and N_PER_BLOCK are powers of 2, which mean division is shift
-		let c_cols_pre_epilogue = b_rows;
-		if c_rows % self.metadata.M_PER_BLOCK != 0
-			|| c_cols_pre_epilogue % self.metadata.N_PER_BLOCK != 0 {
-			cold_path();
-			return Err(gemm_launch_error(format!(
-				"basic GEMM output shape [{c_rows}, {c_cols_pre_epilogue}] must be divisible by tile shape [{}, {}]",
+				"GEMM output shape [{c_rows}, {c_raw_cols}] must be divisible by tile shape [{}, {}]",
 				self.metadata.M_PER_BLOCK, self.metadata.N_PER_BLOCK
 			)));
 		}
 
-		if c_rows != a_rows
-			|| c_cols * self.launch_info.output_cols_divisor != c_cols_pre_epilogue {
-			cold_path();
-			let expected_c_cols = c_cols_pre_epilogue / self.launch_info.output_cols_divisor;
-			return Err(gemm_launch_error(format!(
-				"basic GEMM output c has shape [{c_rows}, {c_cols}], expected [{a_rows}, {expected_c_cols}]",
-			)));
-		}
-
-		let grid_x = a_rows / self.metadata.M_PER_BLOCK;
-		let grid_y = b_rows / self.metadata.N_PER_BLOCK;
+		let grid_x = c_rows / self.metadata.M_PER_BLOCK;
+		let grid_y = c_raw_cols / self.metadata.N_PER_BLOCK;
 		let mut a_ptr = unsafe { a.device_ptr().as_ptr::<c_void>() };
 		let mut a_rows_arg = a_rows;
 		let mut b_ptr = unsafe { b.device_ptr().as_ptr::<c_void>() };
