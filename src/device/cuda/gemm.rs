@@ -11,7 +11,6 @@ use std::hint::cold_path;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 use std::rc::Rc;
 
 use askama::Template;
@@ -23,7 +22,7 @@ use crate::device::Device;
 use crate::dtype::DType;
 use crate::tensor::Tensor;
 
-use super::{CudaDevice, cuda_shim::CudaKernel};
+use super::{CudaDevice, cuda_shim::CudaKernel, kernel_build};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -125,9 +124,9 @@ impl EpilogueConfig for RMSNormConfig {
 
 		let chunk = self.head_dim + self.sep_dim;
 		if !chunk.is_power_of_two() {
-			todo!("assume in `rrms_cols = b_rows >> chunk.trailing_zeros()`");
+			todo!("assumed in `rrms_cols = b_rows >> chunk.trailing_zeros()`");
 		}
-		// Note: Other HEAD_DIM and SEP_DIM constraints depeend on N_PER_WARP,
+		// Note: Other HEAD_DIM and SEP_DIM constraints depend on N_PER_WARP,
 		// which is unknown at this point. We could get it from meta.json after the compilation,
 		// but the compilation will fail if the constraints are not met.
 
@@ -358,10 +357,10 @@ impl<Epilogue: GemmEpilogue> GemmKernel<Epilogue> {
 			&common_path, &kernel_path, &meta_path,
 			diag
 		)?;
-		Self::compile_kernel_ptx(&dir_path, &kernel_path, &ptx_path, diag)?;
-		Self::compile_kernel_cubin(&dir_path, &ptx_path, &cubin_path, diag)?;
-		Self::compile_meta_exe(&dir_path, &meta_path, &meta_exe_path, diag)?;
-		Self::run_meta_exe(&dir_path, &meta_exe_path, &meta_json_path, diag)?;
+		kernel_build::compile_kernel_ptx(&dir_path, &kernel_path, &ptx_path, diag)?;
+		kernel_build::compile_kernel_cubin(&dir_path, &ptx_path, &cubin_path, diag)?;
+		kernel_build::compile_meta_exe(&dir_path, &meta_path, &meta_exe_path, diag)?;
+		kernel_build::run_meta_exe(&dir_path, &meta_exe_path, &meta_json_path, diag)?;
 
 		// TODO - if we have c_rows/c_cols, assert they are multiple of M_PER_BLOCK/N_PER_BLOCK
 
@@ -434,7 +433,7 @@ impl<Epilogue: GemmEpilogue> GemmKernel<Epilogue> {
 			b_rows,
 			writer: &writer_template,
 		};
-		Self::write_generated_file(
+		kernel_build::write_generated_file(
 			common_path,
 			common.render().unwrap_or_else(|_| todo!("render GEMM common template")),
 			diag,
@@ -445,194 +444,20 @@ impl<Epilogue: GemmEpilogue> GemmKernel<Epilogue> {
 			b_rows,
 			writer: &writer_template,
 		};
-		Self::write_generated_file(
+		kernel_build::write_generated_file(
 			kernel_path,
 			kernel.render().unwrap_or_else(|_| todo!("render GEMM kernel template")),
 			diag,
 		)?;
 
 		let meta = BasicGemmMetaTemplate {};
-		Self::write_generated_file(
+		kernel_build::write_generated_file(
 			meta_path,
 			meta.render().unwrap_or_else(|_| todo!("render GEMM metadata template")),
 			diag,
 		)?;
 
 		Ok(())
-	}
-
-	fn write_generated_file(
-		path: &Path,
-		source: String,
-		diag: &mut Diagnostics,
-	) -> Result<(), KernelGeneratorError> {
-		match std::fs::write(path, source) {
-			Ok(()) => Ok(()),
-			Err(err) => {
-				cold_path();
-				diag.add_error(format!(
-					"failed to write generated CUDA source {}: {err}",
-					path.display(),
-				));
-				Err(KernelGeneratorError)
-			},
-		}
-	}
-
-	fn compile_kernel_ptx(
-		_dir_path: &Path,
-		kernel_path: &Path,
-		ptx_path: &Path,
-		diag: &mut Diagnostics,
-	) -> Result<(), KernelGeneratorError> {
-		let mut command = Self::nvcc_command("compute_86");
-		command
-			.arg("-ptx")
-			.arg(kernel_path)
-			.arg("-lineinfo")
-			.arg("-o")
-			.arg(ptx_path);
-
-		Self::run_checked_command(
-			&mut command,
-			&format!(
-				"nvcc failed while compiling {} to {}",
-				kernel_path.display(),
-				ptx_path.display(),
-			),
-			diag,
-		)?;
-		Ok(())
-	}
-
-	fn compile_kernel_cubin(
-		_dir_path: &Path,
-		ptx_path: &Path,
-		cubin_path: &Path,
-		diag: &mut Diagnostics,
-	) -> Result<(), KernelGeneratorError> {
-		let mut command = Self::nvcc_command("sm_86");
-		command
-			.arg("-Xptxas=-v")
-			.arg("--cubin")
-			.arg(ptx_path)
-			.arg("-o")
-			.arg(cubin_path);
-
-		Self::run_checked_command(
-			&mut command,
-			&format!(
-				"nvcc failed while compiling {} to {}",
-				ptx_path.display(),
-				cubin_path.display(),
-			),
-			diag,
-		)?;
-		Ok(())
-	}
-
-	fn compile_meta_exe(
-		_dir_path: &Path,
-		meta_path: &Path,
-		meta_exe_path: &Path,
-		diag: &mut Diagnostics,
-	) -> Result<(), KernelGeneratorError> {
-		let mut command = Self::nvcc_command("sm_86");
-		command
-			.arg(meta_path)
-			.arg("-o")
-			.arg(meta_exe_path);
-
-		Self::run_checked_command(
-			&mut command,
-			&format!(
-				"nvcc failed while compiling {} to {}",
-				meta_path.display(),
-				meta_exe_path.display(),
-			),
-			diag,
-		)?;
-		Ok(())
-	}
-
-	fn run_meta_exe(
-		_dir_path: &Path,
-		meta_exe_path: &Path,
-		meta_json_path: &Path,
-		diag: &mut Diagnostics,
-	) -> Result<(), KernelGeneratorError> {
-		let mut command = Command::new(meta_exe_path);
-		let output = Self::run_checked_command(
-			&mut command,
-			&format!("failed to run GEMM metadata executable {}", meta_exe_path.display()),
-			diag,
-		)?;
-
-		match std::fs::write(meta_json_path, output.stdout) {
-			Ok(()) => Ok(()),
-			Err(err) => {
-				cold_path();
-				diag.add_error(format!(
-					"failed to write generated GEMM metadata {}: {err}",
-					meta_json_path.display(),
-				));
-				Err(KernelGeneratorError)
-			},
-		}
-	}
-
-	fn nvcc_command(arch: &str) -> Command {
-		const NVCC_PATH: &str = "/usr/local/cuda-12.6/bin/nvcc";
-
-		let mut command = Command::new(NVCC_PATH);
-		command
-			.arg(format!("-arch={arch}"))
-			.arg("-std=c++20")
-			.arg("--ftz=true")
-			.arg("--prec-div=false")
-			.arg("--fmad=true")
-			.arg("--use_fast_math")
-			.arg("-I")
-			.arg("/home/spock/prog/cutlass/tools/util/include/")
-			.arg("-I")
-			.arg("/home/spock/prog/cutlass/include/")
-			.arg("-DX17_PRECISE_MATH=0")
-			.arg("--expt-relaxed-constexpr")
-			.arg("-maxrregcount=255")
-			.arg("-O3");
-		command
-	}
-
-	fn run_checked_command(
-		command: &mut Command,
-		context: &str,
-		diag: &mut Diagnostics,
-	) -> Result<Output, KernelGeneratorError> {
-		let command_text = format!("{command:?}");
-		let output = match command.output() {
-			Ok(output) => output,
-			Err(err) => {
-				cold_path();
-				diag.add_error(format!("{context}: failed to start {command_text}: {err}"));
-				return Err(KernelGeneratorError);
-			},
-		};
-
-		if !output.status.success() {
-			cold_path();
-			let stdout = String::from_utf8_lossy(&output.stdout);
-			let stderr = String::from_utf8_lossy(&output.stderr);
-			diag.add_error(format!(
-				"{context} (status: {})\ncommand: {}\nstdout:\n{}\nstderr:\n{}",
-				output.status,
-				command_text,
-				stdout,
-				stderr,
-			));
-			return Err(KernelGeneratorError);
-		}
-
-		Ok(output)
 	}
 }
 

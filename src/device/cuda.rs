@@ -14,8 +14,10 @@ use crate::{DeviceAllocError, ErrPack, TensorOpError};
 use super::{Device, DevicePtr};
 
 pub mod cuda_shim;
+pub mod attn;
 pub mod gemm;
 pub mod gemm_templates;
+mod kernel_build;
 
 //--------------------------------------------------------------------------------------------------
 

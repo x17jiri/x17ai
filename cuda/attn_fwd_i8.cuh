@@ -31,7 +31,6 @@ template<
 	const usize _N_HEADS,
 	const usize _HEADS_PER_KERNEL,
 	const usize _HEAD_DIM,
-	const usize _MODEL_DIM,
 	const usize Q_STRIDE,
 	const usize KV_STRIDE,
 	const usize O_STRIDE
@@ -41,7 +40,6 @@ struct AttnForward {
 	static constexpr usize N_HEADS = _N_HEADS;
 	static constexpr usize HEADS_PER_KERNEL = _HEADS_PER_KERNEL;
 	static constexpr usize HEAD_DIM = _HEAD_DIM;
-	static constexpr usize MODEL_DIM = _MODEL_DIM;
 
 	static constexpr usize HEAD_GROUP_CNT = N_HEADS / HEADS_PER_KERNEL;
 	static constexpr usize GMEM_PRELOAD = 2;
