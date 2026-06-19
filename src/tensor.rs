@@ -46,6 +46,30 @@ impl Tensor {
 		&self.shape
 	}
 
+	#[inline(never)]
+	pub fn reshape(mut self, shape: &[usize]) -> Result<Self, ErrPack<TensorOpError>> {
+		let Ok(shape_helper) = ShapeHelper::new(self.dtype, shape) else {
+			cold_path();
+			return Err(ShapeOverflowError.into());
+		};
+		if shape_helper.elems() != self.elems || shape_helper.bytes() != self.bytes {
+			cold_path();
+			return Err(ErrPack {
+				code: TensorOpError::Other,
+				extra: Some(Box::new(ErrExtra {
+					message: format!(
+						"cannot reshape tensor with shape {:?} to {:?}",
+						self.shape,
+						shape,
+					).into(),
+					nested: None,
+				})),
+			});
+		}
+		self.shape = shape.into();
+		Ok(self)
+	}
+
 	pub fn size<D: DimIndex>(&self, dim: D) -> usize {
 		match dim.resolve_index(self.shape.len()) {
 			Ok(d) => unsafe { *self.shape.get_unchecked(d) },

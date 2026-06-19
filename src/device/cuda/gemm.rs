@@ -5,12 +5,25 @@
 //
 //------------------------------------------------------------------------------
 
-use std::{borrow::Cow, fs, hint::cold_path, marker::PhantomData, num::NonZeroUsize, path::{Path, PathBuf}, process::{Command, Output}, rc::Rc};
+use std::borrow::Cow;
+use std::ffi::c_void;
+use std::hint::cold_path;
+use std::marker::PhantomData;
+use std::num::NonZeroUsize;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::rc::Rc;
 
 use askama::Template;
 use serde::Deserialize;
 
-use crate::{ErrExtra, ErrPack, KernelGeneratorError, TensorOpError, device::{Device, cuda::{CudaDevice, Diagnostics, basic_gemm::{BasicGemmCommonTemplate, BasicGemmKernelTemplate, BasicGemmMetaTemplate, BasicGemmWriterTemplate}, cuda_shim::CudaKernel, gemm}}, dtype::DType, tensor::Tensor};
+use crate::device::cuda::gemm_templates::{BasicGemmCommonTemplate, BasicGemmKernelTemplate, BasicGemmMetaTemplate, BasicGemmWriterTemplate};
+use crate::{Diagnostics, ErrExtra, ErrPack, KernelGeneratorError, TensorOpError};
+use crate::device::Device;
+use crate::dtype::DType;
+use crate::tensor::Tensor;
+
+use super::{CudaDevice, cuda_shim::CudaKernel};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -56,39 +69,156 @@ pub struct GemmConfig {
 	pub c_dtype: DType,
 }
 
-pub enum EpilogueConfigEnum<'a> {
-	Scale(&'a ScaleConfig),
-	RMSNorm(&'a RMSNormConfig),
-	Residual(&'a ResidualConfig),
-	GeGlu(&'a GeGluConfig),
-}
-
 pub trait EpilogueConfig {
-	fn to_config_enum<'a>(&'a self) -> EpilogueConfigEnum<'a>;
+	fn is_c_dtype_allowed(&self, c_dtype: DType) -> bool;
+	fn writer_template(&self, b_rows: Option<NonZeroUsize>) -> BasicGemmWriterTemplate;
 }
 
 impl EpilogueConfig for ScaleConfig {
-	fn to_config_enum<'a>(&'a self) -> EpilogueConfigEnum<'a> {
-		EpilogueConfigEnum::Scale(self)
+	fn is_c_dtype_allowed(&self, c_dtype: DType) -> bool {
+		c_dtype == DType::Int8
+	}
+
+	fn writer_template(&self, _b_rows: Option<NonZeroUsize>) -> BasicGemmWriterTemplate {
+		if !self.0.value.is_finite() {
+			todo!("support non-finite GEMM scale values");
+		}
+
+		BasicGemmWriterTemplate {
+			use_l2_norm: false,
+			use_geglu: false,
+			c_type: "b8::FixedI8",
+			c_stride_expr: "b_rows",
+			scale_val: format_cpp_f64(self.0.value),
+			scale_dscr: self.0.description.as_ref().to_owned(),
+			head_dim: 0,
+			sep_dim: 0,
+			eps_val: String::new(),
+			head_scale_val: String::new(),
+			head_scale_dscr: String::new(),
+			sep_scale_val: String::new(),
+			sep_scale_dscr: String::new(),
+			geglu_inp_scale_val: String::new(),
+			geglu_inp_scale_dscr: String::new(),
+			geglu_out_scale_val: String::new(),
+			geglu_out_scale_dscr: String::new(),
+			has_rrms_output: false,
+		}
 	}
 }
 
 impl EpilogueConfig for RMSNormConfig {
-	fn to_config_enum<'a>(&'a self) -> EpilogueConfigEnum<'a> {
-		EpilogueConfigEnum::RMSNorm(self)
+	fn is_c_dtype_allowed(&self, c_dtype: DType) -> bool {
+		c_dtype == DType::Int8
+	}
+
+	fn writer_template(&self, b_rows: Option<NonZeroUsize>) -> BasicGemmWriterTemplate {
+		if !self.eps.is_finite() || self.eps < 0.0 {
+			todo!("support invalid RMSNorm eps values");
+		}
+		if self.head_dim == 0 || self.sep_dim == 0 {
+			todo!("support empty RMSNorm GEMM epilogue dimensions");
+		}
+		if self.head_dim != self.sep_dim {
+			todo!("support RMSNorm GEMM epilogues where head_dim != sep_dim");
+		}
+		if self.head_dim % 32 != 0 || self.sep_dim % 32 != 0 {
+			todo!("support RMSNorm GEMM epilogue dimensions that are not multiples of 32");
+		}
+		if !self.head_scale.value.is_finite() || !self.sep_scale.value.is_finite() {
+			todo!("support non-finite RMSNorm GEMM scale values");
+		}
+		let Some(b_rows) = b_rows else {
+			todo!("support RMSNorm GEMM outputs with runtime column count");
+		};
+		let chunk = self.head_dim + self.sep_dim;
+		if b_rows.get() % chunk != 0 {
+			todo!("support RMSNorm GEMM output columns that are not divisible by head_dim + sep_dim");
+		}
+
+		#[allow(clippy::cast_precision_loss)]
+		let head_scale = self.head_scale.value * f64::sqrt(self.head_dim as f64);
+		BasicGemmWriterTemplate {
+			use_l2_norm: true,
+			use_geglu: false,
+			c_type: "b8::FixedI8",
+			c_stride_expr: "b_rows",
+			scale_val: String::new(),
+			scale_dscr: String::new(),
+			head_dim: self.head_dim,
+			sep_dim: self.sep_dim,
+			eps_val: format_cpp_f64(self.eps),
+			head_scale_val: format_cpp_f64(head_scale),
+			head_scale_dscr: format!(
+				"({}) * sqrt({})",
+				self.head_scale.description.as_ref(),
+				self.head_dim,
+			),
+			sep_scale_val: format_cpp_f64(self.sep_scale.value),
+			sep_scale_dscr: self.sep_scale.description.as_ref().to_owned(),
+			geglu_inp_scale_val: String::new(),
+			geglu_inp_scale_dscr: String::new(),
+			geglu_out_scale_val: String::new(),
+			geglu_out_scale_dscr: String::new(),
+			has_rrms_output: true,
+		}
 	}
 }
 
 impl EpilogueConfig for ResidualConfig {
-	fn to_config_enum<'a>(&'a self) -> EpilogueConfigEnum<'a> {
-		EpilogueConfigEnum::Residual(self)
+	fn is_c_dtype_allowed(&self, c_dtype: DType) -> bool {
+		c_dtype == DType::Int8
+	}
+
+	fn writer_template(&self, _b_rows: Option<NonZeroUsize>) -> BasicGemmWriterTemplate {
+		todo!("support residual GEMM epilogues")
 	}
 }
 
 impl EpilogueConfig for GeGluConfig {
-	fn to_config_enum<'a>(&'a self) -> EpilogueConfigEnum<'a> {
-		EpilogueConfigEnum::GeGlu(self)
+	fn is_c_dtype_allowed(&self, c_dtype: DType) -> bool {
+		c_dtype == DType::E4m3
 	}
+
+	fn writer_template(&self, b_rows: Option<NonZeroUsize>) -> BasicGemmWriterTemplate {
+		if !self.inp_scale.value.is_finite() || self.inp_scale.value <= 0.0 {
+			todo!("support invalid GeGLU input scale values");
+		}
+		if !self.out_scale.value.is_finite() || self.out_scale.value <= 0.0 {
+			todo!("support invalid GeGLU output scale values");
+		}
+		let Some(b_rows) = b_rows else {
+			todo!("support GeGLU GEMM outputs with runtime column count");
+		};
+		if b_rows.get() % 2 != 0 {
+			todo!("support GeGLU GEMM outputs with odd pregate column count");
+		}
+
+		BasicGemmWriterTemplate {
+			use_l2_norm: false,
+			use_geglu: true,
+			c_type: "b8::E4m3",
+			c_stride_expr: "b_rows / 2",
+			scale_val: String::new(),
+			scale_dscr: String::new(),
+			head_dim: 0,
+			sep_dim: 0,
+			eps_val: String::new(),
+			head_scale_val: String::new(),
+			head_scale_dscr: String::new(),
+			sep_scale_val: String::new(),
+			sep_scale_dscr: String::new(),
+			geglu_inp_scale_val: format_cpp_f64(self.inp_scale.value),
+			geglu_inp_scale_dscr: self.inp_scale.description.as_ref().to_owned(),
+			geglu_out_scale_val: format_cpp_f64(self.out_scale.value),
+			geglu_out_scale_dscr: self.out_scale.description.as_ref().to_owned(),
+			has_rrms_output: false,
+		}
+	}
+}
+
+fn format_cpp_f64(value: f64) -> String {
+	format!("{value:.17e}")
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -105,7 +235,13 @@ impl<'a> NoExtraArgs<'a> {
 }
 
 pub struct RMSNormExtraArgs<'a> {
-	rrms: &'a Tensor,
+	pub rrms: &'a Tensor,
+}
+
+impl<'a> RMSNormExtraArgs<'a> {
+	pub fn new(rrms: &'a Tensor) -> Self {
+		Self { rrms }
+	}
 }
 
 #[derive(Clone, Copy)]
@@ -118,7 +254,7 @@ pub struct GemmArgs<'a, Epilogue: GemmEpilogue> {
 
 //--------------------------------------------------------------------------------------------------
 
-pub trait GemmLauncherFactory<Epilogue: GemmEpilogue>: Sized {
+pub trait GemmLauncher<Epilogue: GemmEpilogue>: Sized {
 	fn new(
 		device: Rc<CudaDevice>,
 		gemm_config: &GemmConfig,
@@ -127,17 +263,14 @@ pub trait GemmLauncherFactory<Epilogue: GemmEpilogue>: Sized {
 		config_path: &Path,
 		diag: &mut Diagnostics,
 	) -> Result<Self, KernelGeneratorError>;
-}
 
-pub trait GemmLauncher<Epilogue: GemmEpilogue>: Sized {
 	fn launch(&self, args: GemmArgs<Epilogue>) -> Result<(), ErrPack<TensorOpError>>;
 }
 
 pub trait GemmEpilogue: Sized {
 	type Config: EpilogueConfig;
-	type LauncherFactory: GemmLauncherFactory<Self>;
-	type ExtraArgs<'a>;
 	type Launcher: GemmLauncher<Self>;
+	type ExtraArgs<'a>;
 }
 
 pub struct ScaleEpilogue;
@@ -147,30 +280,26 @@ pub struct GeGluEpilogue;
 
 impl GemmEpilogue for ScaleEpilogue {
 	type Config = ScaleConfig;
-	type LauncherFactory = BasicGemmLauncher;
-	type ExtraArgs<'a> = NoExtraArgs<'a>;
 	type Launcher = BasicGemmLauncher;
+	type ExtraArgs<'a> = NoExtraArgs<'a>;
 }
 
 impl GemmEpilogue for RMSNormEpilogue {
 	type Config = RMSNormConfig;
-	type LauncherFactory = RMSNormGemmLauncher;
-	type ExtraArgs<'a> = RMSNormExtraArgs<'a>;
 	type Launcher = RMSNormGemmLauncher;
+	type ExtraArgs<'a> = RMSNormExtraArgs<'a>;
 }
 
 impl GemmEpilogue for ResidualEpilogue {
 	type Config = ResidualConfig;
-	type LauncherFactory = BasicGemmLauncher;
-	type ExtraArgs<'a> = NoExtraArgs<'a>;
 	type Launcher = BasicGemmLauncher;
+	type ExtraArgs<'a> = NoExtraArgs<'a>;
 }
 
 impl GemmEpilogue for GeGluEpilogue {
 	type Config = GeGluConfig;
-	type LauncherFactory = BasicGemmLauncher;
+	type Launcher = GeGluGemmLauncher;
 	type ExtraArgs<'a> = NoExtraArgs<'a>;
-	type Launcher = BasicGemmLauncher;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -185,7 +314,7 @@ pub struct GemmKernel<Epilogue: GemmEpilogue> {
 	pub meta_path: PathBuf,
 	pub meta_exe_path: PathBuf,
 	pub meta_json_path: PathBuf,
-	pub launcher: Epilogue::LauncherFactory,
+	pub launcher: Epilogue::Launcher,
 }
 
 impl<Epilogue: GemmEpilogue> GemmKernel<Epilogue> {
@@ -209,7 +338,7 @@ impl<Epilogue: GemmEpilogue> GemmKernel<Epilogue> {
 		}
 
 		let dir_path = Path::new("cache").join("kernels").join(kernel_name);
-		match fs::create_dir_all(&dir_path) {
+		match std::fs::create_dir_all(&dir_path) {
 			Ok(()) => {},
 			Err(err) => {
 				cold_path();
@@ -230,7 +359,7 @@ impl<Epilogue: GemmEpilogue> GemmKernel<Epilogue> {
 		let meta_json_path = dir_path.join("meta.json");
 
 		Self::generate_sources(
-			gemm_config, epilogue_config.to_config_enum(),
+			gemm_config, epilogue_config,
 			&common_path, &kernel_path, &meta_path,
 			diag
 		)?;
@@ -239,7 +368,7 @@ impl<Epilogue: GemmEpilogue> GemmKernel<Epilogue> {
 		Self::compile_meta_exe(&dir_path, &meta_path, &meta_exe_path, diag)?;
 		Self::run_meta_exe(&dir_path, &meta_exe_path, &meta_json_path, diag)?;
 
-		let launcher = Epilogue::LauncherFactory::new(
+		let launcher = Epilogue::Launcher::new(
 			device, gemm_config, epilogue_config,
 			&cubin_path, &meta_json_path, diag
 		)?;
@@ -272,7 +401,7 @@ impl<Epilogue: GemmEpilogue> GemmKernel<Epilogue> {
 
 	fn generate_sources(
 		gemm_config: &GemmConfig,
-		epilogue_config: EpilogueConfigEnum,
+		epilogue_config: &dyn EpilogueConfig,
 		common_path: &Path,
 		kernel_path: &Path,
 		meta_path: &Path,
@@ -284,15 +413,8 @@ impl<Epilogue: GemmEpilogue> GemmKernel<Epilogue> {
 		if gemm_config.b.dtype != DType::Int8 {
 			todo!("support GEMM weights other than i8");
 		}
-		match epilogue_config {
-			EpilogueConfigEnum::GeGlu(_) if gemm_config.c_dtype == DType::E4m3 => {},
-			EpilogueConfigEnum::GeGlu(_) => {
-				todo!("support GeGLU GEMM outputs other than e4m3");
-			},
-			_ if gemm_config.c_dtype == DType::Int8 => {},
-			_ => {
-				todo!("support GEMM outputs other than i8");
-			},
+		if !epilogue_config.is_c_dtype_allowed(gemm_config.c_dtype) {
+			todo!("support GEMM output dtype incompatible with epilogue");
 		}
 		if gemm_config.a.trans {
 			todo!("support transposed GEMM input A");
@@ -308,168 +430,38 @@ impl<Epilogue: GemmEpilogue> GemmKernel<Epilogue> {
 			todo!("support GEMM outputs with runtime column count");
 		};
 		let b_rows = Some(b_rows);
-		let writer = Self::generate_writer_template(epilogue_config, b_rows);
+		let writer_template = epilogue_config.writer_template(b_rows);
 
 		let common = BasicGemmCommonTemplate {
 			a_cols: gemm_config.a.cols,
 			b_rows,
-			writer: &writer,
+			writer: &writer_template,
 		};
-		let kernel = BasicGemmKernelTemplate {
-			a_cols: gemm_config.a.cols,
-			b_rows,
-			writer: &writer,
-		};
-		let meta = BasicGemmMetaTemplate {};
-
 		Self::write_generated_file(
 			common_path,
 			common.render().unwrap_or_else(|_| todo!("render GEMM common template")),
 			diag,
 		)?;
+
+		let kernel = BasicGemmKernelTemplate {
+			a_cols: gemm_config.a.cols,
+			b_rows,
+			writer: &writer_template,
+		};
 		Self::write_generated_file(
 			kernel_path,
 			kernel.render().unwrap_or_else(|_| todo!("render GEMM kernel template")),
 			diag,
 		)?;
+
+		let meta = BasicGemmMetaTemplate {};
 		Self::write_generated_file(
 			meta_path,
 			meta.render().unwrap_or_else(|_| todo!("render GEMM metadata template")),
 			diag,
 		)?;
+
 		Ok(())
-	}
-
-	// TODO: We could add `fn writer_template(...)` to the `EpilogueConfig` trait
-	// and get rid of this huge function
-	#[allow(clippy::too_many_lines)]
-	#[allow(clippy::needless_pass_by_value)]
-	fn generate_writer_template<'e>(
-		epilogue_config: EpilogueConfigEnum<'e>,
-		b_rows: Option<NonZeroUsize>,
-	) -> BasicGemmWriterTemplate {
-		match epilogue_config {
-			EpilogueConfigEnum::Scale(scale) => {
-				if !scale.0.value.is_finite() {
-					todo!("support non-finite GEMM scale values");
-				}
-
-				BasicGemmWriterTemplate {
-					use_l2_norm: false,
-					use_geglu: false,
-					c_type: "b8::FixedI8",
-					c_stride_expr: "b_rows",
-					output_cols_divisor: 1,
-					scale_val: Self::format_cpp_f64(scale.0.value),
-					scale_dscr: scale.0.description.as_ref().to_owned(),
-					head_dim: 0,
-					sep_dim: 0,
-					eps_val: String::new(),
-					head_scale_val: String::new(),
-					head_scale_dscr: String::new(),
-					sep_scale_val: String::new(),
-					sep_scale_dscr: String::new(),
-					geglu_inp_scale_val: String::new(),
-					geglu_inp_scale_dscr: String::new(),
-					geglu_out_scale_val: String::new(),
-					geglu_out_scale_dscr: String::new(),
-					has_rrms_output: false,
-				}
-			},
-			EpilogueConfigEnum::RMSNorm(rms_norm) => {
-				if !rms_norm.eps.is_finite() || rms_norm.eps < 0.0 {
-					todo!("support invalid RMSNorm eps values");
-				}
-				if rms_norm.head_dim == 0 || rms_norm.sep_dim == 0 {
-					todo!("support empty RMSNorm GEMM epilogue dimensions");
-				}
-				if rms_norm.head_dim != rms_norm.sep_dim {
-					todo!("support RMSNorm GEMM epilogues where head_dim != sep_dim");
-				}
-				if rms_norm.head_dim % 32 != 0 || rms_norm.sep_dim % 32 != 0 {
-					todo!("support RMSNorm GEMM epilogue dimensions that are not multiples of 32");
-				}
-				if !rms_norm.head_scale.value.is_finite() || !rms_norm.sep_scale.value.is_finite() {
-					todo!("support non-finite RMSNorm GEMM scale values");
-				}
-				let Some(b_rows) = b_rows else {
-					todo!("support RMSNorm GEMM outputs with runtime column count");
-				};
-				let chunk = rms_norm.head_dim + rms_norm.sep_dim;
-				if b_rows.get() % chunk != 0 {
-					todo!("support RMSNorm GEMM output columns that are not divisible by head_dim + sep_dim");
-				}
-
-				#[allow(clippy::cast_precision_loss)]
-				let head_scale = rms_norm.head_scale.value * f64::sqrt(rms_norm.head_dim as f64);
-				BasicGemmWriterTemplate {
-					use_l2_norm: true,
-					use_geglu: false,
-					c_type: "b8::FixedI8",
-					c_stride_expr: "b_rows",
-					output_cols_divisor: 1,
-					scale_val: String::new(),
-					scale_dscr: String::new(),
-					head_dim: rms_norm.head_dim,
-					sep_dim: rms_norm.sep_dim,
-					eps_val: Self::format_cpp_f64(rms_norm.eps),
-					head_scale_val: Self::format_cpp_f64(head_scale),
-					head_scale_dscr: format!(
-						"({}) * sqrt({})",
-						rms_norm.head_scale.description.as_ref(),
-						rms_norm.head_dim,
-					),
-					sep_scale_val: Self::format_cpp_f64(rms_norm.sep_scale.value),
-					sep_scale_dscr: rms_norm.sep_scale.description.as_ref().to_owned(),
-					geglu_inp_scale_val: String::new(),
-					geglu_inp_scale_dscr: String::new(),
-					geglu_out_scale_val: String::new(),
-					geglu_out_scale_dscr: String::new(),
-					has_rrms_output: true,
-				}
-			},
-			EpilogueConfigEnum::Residual(_) => todo!("support residual GEMM epilogues"),
-			EpilogueConfigEnum::GeGlu(geglu) => {
-				if !geglu.inp_scale.value.is_finite() || geglu.inp_scale.value <= 0.0 {
-					todo!("support invalid GeGLU input scale values");
-				}
-				if !geglu.out_scale.value.is_finite() || geglu.out_scale.value <= 0.0 {
-					todo!("support invalid GeGLU output scale values");
-				}
-				let Some(b_rows) = b_rows else {
-					todo!("support GeGLU GEMM outputs with runtime column count");
-				};
-				if b_rows.get() % 2 != 0 {
-					todo!("support GeGLU GEMM outputs with odd pregate column count");
-				}
-
-				BasicGemmWriterTemplate {
-					use_l2_norm: false,
-					use_geglu: true,
-					c_type: "b8::E4m3",
-					c_stride_expr: "b_rows / 2",
-					output_cols_divisor: 2,
-					scale_val: String::new(),
-					scale_dscr: String::new(),
-					head_dim: 0,
-					sep_dim: 0,
-					eps_val: String::new(),
-					head_scale_val: String::new(),
-					head_scale_dscr: String::new(),
-					sep_scale_val: String::new(),
-					sep_scale_dscr: String::new(),
-					geglu_inp_scale_val: Self::format_cpp_f64(geglu.inp_scale.value),
-					geglu_inp_scale_dscr: geglu.inp_scale.description.as_ref().to_owned(),
-					geglu_out_scale_val: Self::format_cpp_f64(geglu.out_scale.value),
-					geglu_out_scale_dscr: geglu.out_scale.description.as_ref().to_owned(),
-					has_rrms_output: false,
-				}
-			},
-		}
-	}
-
-	fn format_cpp_f64(value: f64) -> String {
-		format!("{value:.17e}")
 	}
 
 	fn write_generated_file(
@@ -477,7 +469,7 @@ impl<Epilogue: GemmEpilogue> GemmKernel<Epilogue> {
 		source: String,
 		diag: &mut Diagnostics,
 	) -> Result<(), KernelGeneratorError> {
-		match fs::write(path, source) {
+		match std::fs::write(path, source) {
 			Ok(()) => Ok(()),
 			Err(err) => {
 				cold_path();
@@ -579,7 +571,7 @@ impl<Epilogue: GemmEpilogue> GemmKernel<Epilogue> {
 			diag,
 		)?;
 
-		match fs::write(meta_json_path, output.stdout) {
+		match std::fs::write(meta_json_path, output.stdout) {
 			Ok(()) => Ok(()),
 			Err(err) => {
 				cold_path();
@@ -685,7 +677,7 @@ impl BasicGemmLauncher {
 			Err(err) => {
 				cold_path();
 				let file = config_path.to_string_lossy();
-				diag.add_error(format!("Error reading file {file}"));
+				diag.add_error(format!("Error reading file {file}: {err}"));
 				return Err(KernelGeneratorError);
 			},
 		};
@@ -695,7 +687,7 @@ impl BasicGemmLauncher {
 			Err(err) => {
 				cold_path();
 				let file = config_path.to_string_lossy();
-				diag.add_error(format!("Failed to parse JSON data from {file}"));
+				diag.add_error(format!("Failed to parse JSON data from {file}: {err}"));
 				return Err(KernelGeneratorError);
 			},
 		};
@@ -710,8 +702,28 @@ impl BasicGemmLauncher {
 			return Err(KernelGeneratorError);
 		}
 
-		let module = device.stream.load_module_from_cubin(cubin_path, diag)?;
-		let kernel = module.get_kernel("kernel", metadata.SMEM_BYTES, diag)?;
+		let module = match device.stream.load_module_from_cubin(cubin_path) {
+			Ok(module) => module,
+			Err(err) => {
+				cold_path();
+				diag.add_error(format!(
+					"failed to load generated GEMM CUDA module {}: {err}",
+					cubin_path.display()
+				));
+				return Err(KernelGeneratorError);
+			},
+		};
+		let kernel = match module.get_kernel("kernel", metadata.SMEM_BYTES) {
+			Ok(kernel) => kernel,
+			Err(err) => {
+				cold_path();
+				diag.add_error(format!(
+					"failed to load generated GEMM CUDA kernel \"kernel\" from {}: {err}",
+					cubin_path.display()
+				));
+				return Err(KernelGeneratorError);
+			},
+		};
 
 		Ok(Self {
 			a_cols: gemm_config.a.cols,
@@ -777,137 +789,57 @@ impl BasicGemmLauncher {
 		Ok([rows, cols])
 	}
 
-	fn launch(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
+	fn launch_gemm(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
 		let [a_rows, _a_cols] = Self::matrix_shape(
-			"a", a, [None, Some(self.launch_info.a_cols)],
-			device, self.launch_info.a_dtype
+			"a", a, [None, Some(self.a_cols)],
+			&self.device, self.a_dtype
 		)?;
 		let [b_rows, _b_cols] = Self::matrix_shape(
-			"b", b, [self.launch_info.b_rows.map(NonZeroUsize::get), Some(self.launch_info.a_cols)],
-			device, self.launch_info.b_dtype
+			"b", b, [self.b_rows.map(NonZeroUsize::get), Some(self.a_cols)],
+			&self.device, self.b_dtype
 		)?;
 		let [c_rows, c_cols] = Self::matrix_shape(
-			"c", c, [Some(a_rows), Some(b_rows / self.launch_info.output_cols_divisor)],
-			device, self.launch_info.c_dtype
+			"c", c, [Some(a_rows), Some(b_rows)],
+			&self.device, self.c_dtype
 		)?;
-		// TODO: `b_rows / self.launch_info.output_cols_divisor` silently truncates if `b_rows`
-		// is not divisible by the divisor.
-		// Then `c_raw_cols` is reconstructed from the truncated value.
 
 		// TODO - assume M_PER_BLOCK and N_PER_BLOCK are powers of 2
-		let c_raw_cols = c_cols * self.launch_info.output_cols_divisor;
-		if c_rows % self.metadata.M_PER_BLOCK != 0 || c_raw_cols % self.metadata.N_PER_BLOCK != 0 {
+		if c_rows % self.metadata.M_PER_BLOCK != 0 || c_cols % self.metadata.N_PER_BLOCK != 0 {
 			cold_path();
 			return Err(gemm_launch_error(format!(
-				"GEMM output shape [{c_rows}, {c_raw_cols}] must be divisible by tile shape [{}, {}]",
+				"GEMM output shape [{c_rows}, {c_cols}] must be divisible by tile shape [{}, {}]",
 				self.metadata.M_PER_BLOCK, self.metadata.N_PER_BLOCK
 			)));
 		}
 
 		let grid_x = c_rows / self.metadata.M_PER_BLOCK;
-		let grid_y = c_raw_cols / self.metadata.N_PER_BLOCK;
+		let grid_y = c_cols / self.metadata.N_PER_BLOCK;
 		let mut a_ptr = unsafe { a.device_ptr().as_ptr::<c_void>() };
 		let mut a_rows_arg = a_rows;
 		let mut b_ptr = unsafe { b.device_ptr().as_ptr::<c_void>() };
 		let mut b_rows_arg = b_rows;
 		let mut c_ptr = unsafe { c.device_ptr().as_ptr::<c_void>() };
 
-		match (self.launch_info.has_rrms_output, args.extra) {
-			(false, GemmKernelExtraArgs::None) => {
-				let mut raw_args = [
-					(&raw mut a_ptr).cast::<c_void>(),
-					(&raw mut a_rows_arg).cast::<c_void>(),
-					(&raw mut b_ptr).cast::<c_void>(),
-					(&raw mut b_rows_arg).cast::<c_void>(),
-					(&raw mut c_ptr).cast::<c_void>(),
-				];
-				unsafe {
-					self.kernel.launch(
-						&device.stream,
-						[grid_x, grid_y, 1],
-						[self.metadata.THREADS_PER_BLOCK, 1, 1],
-						self.metadata.SMEM_BYTES,
-						&mut raw_args,
-					)
-				}
-			},
-			(true, GemmKernelExtraArgs::RMSNorm { rrms }) => {
-				self.validate_rrms(device, rrms, a_rows, b_rows)?;
-				let mut rrms_ptr = unsafe { rrms.device_ptr().as_ptr::<c_void>() };
-				let mut raw_args = [
-					(&raw mut a_ptr).cast::<c_void>(),
-					(&raw mut a_rows_arg).cast::<c_void>(),
-					(&raw mut b_ptr).cast::<c_void>(),
-					(&raw mut b_rows_arg).cast::<c_void>(),
-					(&raw mut c_ptr).cast::<c_void>(),
-					(&raw mut rrms_ptr).cast::<c_void>(),
-				];
-				unsafe {
-					self.kernel.launch(
-						&device.stream,
-						[grid_x, grid_y, 1],
-						[self.metadata.THREADS_PER_BLOCK, 1, 1],
-						self.metadata.SMEM_BYTES,
-						&mut raw_args,
-					)
-				}
-			},
-			(true, GemmKernelExtraArgs::None) => {
-				cold_path();
-				Err(gemm_launch_error("basic GEMM kernel requires RMSNorm rrms output"))
-			},
-			(false, GemmKernelExtraArgs::RMSNorm { .. }) => {
-				cold_path();
-				Err(gemm_launch_error("basic GEMM kernel does not take RMSNorm rrms output"))
-			},
+		let mut raw_args = [
+			(&raw mut a_ptr).cast::<c_void>(),
+			(&raw mut a_rows_arg).cast::<c_void>(),
+			(&raw mut b_ptr).cast::<c_void>(),
+			(&raw mut b_rows_arg).cast::<c_void>(),
+			(&raw mut c_ptr).cast::<c_void>(),
+		];
+		unsafe {
+			self.kernel.launch(
+				&self.device.stream,
+				[grid_x, grid_y, 1],
+				[self.metadata.THREADS_PER_BLOCK, 1, 1],
+				self.metadata.SMEM_BYTES,
+				&mut raw_args,
+			)
 		}
 	}
 }
 
-impl GemmLauncherFactory {
-	fn validate_rrms(
-		&self,
-		device: &CudaDevice,
-		rrms: &Tensor,
-		a_rows: usize,
-		b_rows: usize,
-	) -> Result<(), ErrPack<TensorOpError>> {
-		if !rrms.is_on_device(device) {
-			cold_path();
-			let dev: &dyn Device = device;
-			let dev_name = dev.name();
-			return Err(gemm_launch_error(format!("RMSNorm rrms output needs to be on device {dev_name}")));
-		}
-		if rrms.dtype() != DType::F32 {
-			cold_path();
-			return Err(gemm_launch_error(format!(
-				"RMSNorm rrms output must be f32, got {}",
-				rrms.dtype()
-			)));
-		}
-
-		let chunk = self.launch_info.head_dim + self.launch_info.sep_dim;
-		if chunk == 0 || b_rows % chunk != 0 {
-			cold_path();
-			return Err(gemm_launch_error(format!(
-				"RMSNorm metadata dimensions [{}, {}] do not divide b rows {b_rows}",
-				self.launch_info.head_dim,
-				self.launch_info.sep_dim,
-			)));
-		}
-		let rrms_cols = b_rows / chunk;
-		let rrms_shape = rrms.shape();
-		if rrms_shape != [a_rows, rrms_cols] {
-			cold_path();
-			return Err(gemm_launch_error(format!(
-				"RMSNorm rrms output has shape {rrms_shape:?}, expected [{a_rows}, {rrms_cols}]"
-			)));
-		}
-		Ok(())
-	}
-}
-
-impl GemmLauncherFactory<ScaleEpilogue> for BasicGemmLauncher {
+impl GemmLauncher<ScaleEpilogue> for BasicGemmLauncher {
 	fn new(
 		device: Rc<CudaDevice>,
 		gemm_config: &GemmConfig,
@@ -916,11 +848,15 @@ impl GemmLauncherFactory<ScaleEpilogue> for BasicGemmLauncher {
 		config_path: &Path,
 		diag: &mut Diagnostics,
 	) -> Result<Self, KernelGeneratorError> {
-		BasicGemmLauncher::new(device, gemm_config, cubin_path, config_path, diag)
+		Self::new(device, gemm_config, cubin_path, config_path, diag)
+	}
+
+	fn launch(&self, args: GemmArgs<ScaleEpilogue>) -> Result<(), ErrPack<TensorOpError>> {
+		self.launch_gemm(args.a, args.b, args.c)
 	}
 }
 
-impl GemmLauncherFactory<ResidualEpilogue> for BasicGemmLauncher {
+impl GemmLauncher<ResidualEpilogue> for BasicGemmLauncher {
 	fn new(
 		device: Rc<CudaDevice>,
 		gemm_config: &GemmConfig,
@@ -929,11 +865,19 @@ impl GemmLauncherFactory<ResidualEpilogue> for BasicGemmLauncher {
 		config_path: &Path,
 		diag: &mut Diagnostics,
 	) -> Result<Self, KernelGeneratorError> {
-		BasicGemmLauncher::new(device, gemm_config, cubin_path, config_path, diag)
+		Self::new(device, gemm_config, cubin_path, config_path, diag)
+	}
+
+	fn launch(&self, args: GemmArgs<ResidualEpilogue>) -> Result<(), ErrPack<TensorOpError>> {
+		self.launch_gemm(args.a, args.b, args.c)
 	}
 }
 
-impl GemmLauncherFactory<GeGluEpilogue> for BasicGemmLauncher {
+pub struct GeGluGemmLauncher {
+	basic: BasicGemmLauncher,
+}
+
+impl GemmLauncher<GeGluEpilogue> for GeGluGemmLauncher {
 	fn new(
 		device: Rc<CudaDevice>,
 		gemm_config: &GemmConfig,
@@ -942,7 +886,157 @@ impl GemmLauncherFactory<GeGluEpilogue> for BasicGemmLauncher {
 		config_path: &Path,
 		diag: &mut Diagnostics,
 	) -> Result<Self, KernelGeneratorError> {
-		BasicGemmLauncher::new(device, gemm_config, cubin_path, config_path, diag)
+		let basic = BasicGemmLauncher::new(device, gemm_config, cubin_path, config_path, diag)?;
+		Ok(Self { basic })
+	}
+
+	fn launch(&self, args: GemmArgs<GeGluEpilogue>) -> Result<(), ErrPack<TensorOpError>> {
+		let basic = &self.basic;
+		let GemmArgs {a, b, c, extra: _} = args;
+
+		let [a_rows, _a_cols] = BasicGemmLauncher::matrix_shape(
+			"a", a, [None, Some(basic.a_cols)],
+			&basic.device, basic.a_dtype
+		)?;
+		let [b_rows, _b_cols] = BasicGemmLauncher::matrix_shape(
+			"b", b, [basic.b_rows.map(NonZeroUsize::get), Some(basic.a_cols)],
+			&basic.device, basic.b_dtype
+		)?;
+		if b_rows % 2 != 0 {
+			cold_path();
+			return Err(gemm_launch_error(format!(
+				"GeGLU GEMM requires an even raw output column count, got {b_rows}"
+			)));
+		}
+		let [c_rows, _c_cols] = BasicGemmLauncher::matrix_shape(
+			"c", c, [Some(a_rows), Some(b_rows / 2)],
+			&basic.device, basic.c_dtype
+		)?;
+
+		// TODO - assume M_PER_BLOCK and N_PER_BLOCK are powers of 2
+		if c_rows % basic.metadata.M_PER_BLOCK != 0 || b_rows % basic.metadata.N_PER_BLOCK != 0 {
+			cold_path();
+			return Err(gemm_launch_error(format!(
+				"GeGLU GEMM raw output shape [{c_rows}, {b_rows}] must be divisible by tile shape [{}, {}]",
+				basic.metadata.M_PER_BLOCK, basic.metadata.N_PER_BLOCK
+			)));
+		}
+
+		let grid_x = c_rows / basic.metadata.M_PER_BLOCK;
+		let grid_y = b_rows / basic.metadata.N_PER_BLOCK;
+		let mut a_ptr = unsafe { a.device_ptr().as_ptr::<c_void>() };
+		let mut a_rows_arg = a_rows;
+		let mut b_ptr = unsafe { b.device_ptr().as_ptr::<c_void>() };
+		let mut b_rows_arg = b_rows;
+		let mut c_ptr = unsafe { c.device_ptr().as_ptr::<c_void>() };
+
+		let mut raw_args = [
+			(&raw mut a_ptr).cast::<c_void>(),
+			(&raw mut a_rows_arg).cast::<c_void>(),
+			(&raw mut b_ptr).cast::<c_void>(),
+			(&raw mut b_rows_arg).cast::<c_void>(),
+			(&raw mut c_ptr).cast::<c_void>(),
+		];
+		unsafe {
+			basic.kernel.launch(
+				&basic.device.stream,
+				[grid_x, grid_y, 1],
+				[basic.metadata.THREADS_PER_BLOCK, 1, 1],
+				basic.metadata.SMEM_BYTES,
+				&mut raw_args,
+			)
+		}
+	}
+}
+
+pub struct RMSNormGemmLauncher {
+	basic: BasicGemmLauncher,
+	head_dim: usize,
+	sep_dim: usize,
+}
+
+impl GemmLauncher<RMSNormEpilogue> for RMSNormGemmLauncher {
+	fn new(
+		device: Rc<CudaDevice>,
+		gemm_config: &GemmConfig,
+		epilogue_config: &RMSNormConfig,
+		cubin_path: &Path,
+		config_path: &Path,
+		diag: &mut Diagnostics,
+	) -> Result<Self, KernelGeneratorError> {
+		let basic = BasicGemmLauncher::new(device, gemm_config, cubin_path, config_path, diag)?;
+		Ok(Self {
+			basic,
+			head_dim: epilogue_config.head_dim,
+			sep_dim: epilogue_config.sep_dim,
+		})
+	}
+
+	fn launch(&self, args: GemmArgs<RMSNormEpilogue>) -> Result<(), ErrPack<TensorOpError>> {
+		let Self {basic, head_dim, sep_dim} = &self;
+		let GemmArgs {a, b, c, extra: RMSNormExtraArgs { rrms }} = args;
+
+		let [a_rows, _a_cols] = BasicGemmLauncher::matrix_shape(
+			"a", a, [None, Some(basic.a_cols)],
+			&basic.device, basic.a_dtype
+		)?;
+		let [b_rows, _b_cols] = BasicGemmLauncher::matrix_shape(
+			"b", b, [basic.b_rows.map(NonZeroUsize::get), Some(basic.a_cols)],
+			&basic.device, basic.b_dtype
+		)?;
+		let [c_rows, c_cols] = BasicGemmLauncher::matrix_shape(
+			"c", c, [Some(a_rows), Some(b_rows)],
+			&basic.device, basic.c_dtype
+		)?;
+
+		// TODO - assume M_PER_BLOCK and N_PER_BLOCK are powers of 2
+		if c_rows % basic.metadata.M_PER_BLOCK != 0 || c_cols % basic.metadata.N_PER_BLOCK != 0 {
+			cold_path();
+			return Err(gemm_launch_error(format!(
+				"GEMM output shape [{c_rows}, {c_cols}] must be divisible by tile shape [{}, {}]",
+				basic.metadata.M_PER_BLOCK, basic.metadata.N_PER_BLOCK
+			)));
+		}
+
+		let chunk = head_dim + sep_dim;
+		if chunk == 0 || b_rows % chunk != 0 {
+			cold_path();
+			return Err(gemm_launch_error(format!(
+				"RMSNorm metadata dimensions [{head_dim}, {sep_dim}] do not divide b rows {b_rows}",
+			)));
+		}
+		let rrms_cols = b_rows / chunk;
+		BasicGemmLauncher::matrix_shape(
+			"rrms", rrms, [Some(a_rows), Some(rrms_cols)],
+			&basic.device, DType::F32
+		)?;
+
+		let grid_x = c_rows / basic.metadata.M_PER_BLOCK;
+		let grid_y = c_cols / basic.metadata.N_PER_BLOCK;
+		let mut a_ptr = unsafe { a.device_ptr().as_ptr::<c_void>() };
+		let mut a_rows_arg = a_rows;
+		let mut b_ptr = unsafe { b.device_ptr().as_ptr::<c_void>() };
+		let mut b_rows_arg = b_rows;
+		let mut c_ptr = unsafe { c.device_ptr().as_ptr::<c_void>() };
+		let mut rrms_ptr = unsafe { rrms.device_ptr().as_ptr::<c_void>() };
+
+		let mut raw_args = [
+			(&raw mut a_ptr).cast::<c_void>(),
+			(&raw mut a_rows_arg).cast::<c_void>(),
+			(&raw mut b_ptr).cast::<c_void>(),
+			(&raw mut b_rows_arg).cast::<c_void>(),
+			(&raw mut c_ptr).cast::<c_void>(),
+			(&raw mut rrms_ptr).cast::<c_void>(),
+		];
+		unsafe {
+			basic.kernel.launch(
+				&basic.device.stream,
+				[grid_x, grid_y, 1],
+				[basic.metadata.THREADS_PER_BLOCK, 1, 1],
+				basic.metadata.SMEM_BYTES,
+				&mut raw_args,
+			)
+		}
 	}
 }
 

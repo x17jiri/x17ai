@@ -10,30 +10,56 @@ import torch
 PCT_BUCKET_MIN_MAGNITUDES = [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
 PCT_BUCKET_LABELS = "1e-6,     1e-5,     1e-4,     1e-3,     1e-2,     1e-1"
 WORST_PCT_REPORT_BUCKETS = [(1e-1, "1e-1"), (1e-2, "1e-2"), (1e-3, "1e-3")]
+F8_DTYPE = getattr(torch, "float8_e4m3fn", None)
+
+
+def load_safetensor(path: str | Path) -> torch.Tensor:
+	from safetensors.torch import load_file
+
+	path = Path(path)
+	tensors = load_file(str(path), device="cpu")
+	if len(tensors) != 1:
+		raise ValueError(f"Expected exactly one tensor in {path}, found {len(tensors)}")
+	return next(iter(tensors.values())).contiguous()
+
+
+def reshape_if_needed(data: torch.Tensor, shape: tuple[int, ...] | None) -> torch.Tensor:
+	if shape is not None:
+		return data.reshape(shape)
+	return data
+
+
+def ensure_dtype(path: str | Path, data: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+	if data.dtype != dtype:
+		raise ValueError(f"Expected {path} to contain {dtype} tensor, got {data.dtype}")
+	return data
 
 
 def load_bf16(path: str, shape: tuple[int, ...] | None = None) -> torch.Tensor:
+	if Path(path).suffix == ".safetensors":
+		data = ensure_dtype(path, load_safetensor(path), torch.bfloat16)
+		return reshape_if_needed(data, shape)
 	raw = Path(path).read_bytes()
 	data = torch.frombuffer(bytearray(raw), dtype=torch.int16).view(torch.bfloat16)
-	if shape is not None:
-		return data.reshape(shape)
-	return data
+	return reshape_if_needed(data, shape)
 
 
 def load_f32(path: str, shape: tuple[int, ...] | None = None) -> torch.Tensor:
+	if Path(path).suffix == ".safetensors":
+		data = ensure_dtype(path, load_safetensor(path), torch.float32)
+		return reshape_if_needed(data, shape)
 	raw = Path(path).read_bytes()
 	data = torch.frombuffer(bytearray(raw), dtype=torch.float32)
-	if shape is not None:
-		return data.reshape(shape)
-	return data
+	return reshape_if_needed(data, shape)
 
 
 def load_f32_bits(path: str, shape: tuple[int, ...] | None = None) -> torch.Tensor:
+	if Path(path).suffix == ".safetensors":
+		data = ensure_dtype(path, load_safetensor(path), torch.float32)
+		return reshape_if_needed(data.view(torch.int32), shape)
 	raw = Path(path).read_bytes()
 	data = torch.frombuffer(bytearray(raw), dtype=torch.int32)
-	if shape is not None:
-		return data.reshape(shape)
-	return data
+	return reshape_if_needed(data, shape)
 
 
 def f8_e4m3fn_lut() -> torch.Tensor:
@@ -54,11 +80,14 @@ def f8_e4m3fn_lut() -> torch.Tensor:
 
 
 def load_f8_bits(path: str, shape: tuple[int, ...] | None = None) -> torch.Tensor:
+	if Path(path).suffix == ".safetensors":
+		if F8_DTYPE is None:
+			raise RuntimeError("This PyTorch build does not support float8_e4m3fn")
+		data = ensure_dtype(path, load_safetensor(path), F8_DTYPE)
+		return reshape_if_needed(data.view(torch.uint8), shape)
 	raw = Path(path).read_bytes()
 	data = torch.frombuffer(bytearray(raw), dtype=torch.uint8)
-	if shape is not None:
-		return data.reshape(shape)
-	return data
+	return reshape_if_needed(data, shape)
 
 
 def load_f8(path: str, shape: tuple[int, ...] | None = None) -> torch.Tensor:
@@ -99,24 +128,62 @@ def f8_ordered_int(bits: torch.Tensor) -> torch.Tensor:
 	return torch.where(sign == 0, bits_i32 + 0x80, 0x80 - (bits_i32 & 0x7F))
 
 
-def infer_shape(file_a: str, file_b: str, shape_args: list[int] | None, bytes_per_elem: int) -> tuple[int, ...]:
-	bytes_a = Path(file_a).stat().st_size
-	bytes_b = Path(file_b).stat().st_size
-	if bytes_a != bytes_b:
-		raise ValueError(f"File sizes differ: {file_a}={bytes_a} bytes, {file_b}={bytes_b} bytes")
-	if bytes_a % bytes_per_elem != 0:
-		raise ValueError(
-			f"Expected file size to be divisible by element size {bytes_per_elem} bytes, got {bytes_a}"
-		)
-	elem_count = bytes_a // bytes_per_elem
-	if shape_args is None:
-		return (elem_count,)
-	shape = tuple(shape_args)
-	shape_elems = 1
+def elem_count(shape: tuple[int, ...]) -> int:
+	count = 1
 	for dim in shape:
-		shape_elems *= dim
-	if shape_elems != elem_count:
-		raise ValueError(f"Provided shape {shape} has {shape_elems} elements, file has {elem_count}")
+		count *= dim
+	return count
+
+
+def file_shape(path: str, dtype: str, bytes_per_elem: int) -> tuple[int, ...]:
+	path_obj = Path(path)
+	if path_obj.suffix == ".safetensors":
+		data = load_safetensor(path_obj)
+		if dtype == "bf16":
+			ensure_dtype(path_obj, data, torch.bfloat16)
+		elif dtype == "f32":
+			ensure_dtype(path_obj, data, torch.float32)
+		elif dtype == "f8":
+			if F8_DTYPE is None:
+				raise RuntimeError("This PyTorch build does not support float8_e4m3fn")
+			ensure_dtype(path_obj, data, F8_DTYPE)
+		else:
+			raise ValueError(f"Unsupported dtype: {dtype}")
+		return tuple(data.shape)
+
+	bytes_size = path_obj.stat().st_size
+	if bytes_size % bytes_per_elem != 0:
+		raise ValueError(
+			f"Expected file size to be divisible by element size {bytes_per_elem} bytes, got {bytes_size}"
+		)
+	return (bytes_size // bytes_per_elem,)
+
+
+def infer_shape(file_a: str, file_b: str, shape_args: list[int] | None, dtype: str, bytes_per_elem: int) -> tuple[int, ...]:
+	shape_a = file_shape(file_a, dtype, bytes_per_elem)
+	shape_b = file_shape(file_b, dtype, bytes_per_elem)
+	elems_a = elem_count(shape_a)
+	elems_b = elem_count(shape_b)
+	if elems_a != elems_b:
+		raise ValueError(f"Element counts differ: {file_a}={elems_a}, {file_b}={elems_b}")
+
+	if shape_args is None:
+		if shape_a == shape_b:
+			return shape_a
+		a_is_safe = Path(file_a).suffix == ".safetensors"
+		b_is_safe = Path(file_b).suffix == ".safetensors"
+		if a_is_safe and b_is_safe:
+			raise ValueError(f"SafeTensor shapes differ: {file_a}={shape_a}, {file_b}={shape_b}")
+		if a_is_safe:
+			return shape_a
+		if b_is_safe:
+			return shape_b
+		return (elems_a,)
+
+	shape = tuple(shape_args)
+	shape_elems = elem_count(shape)
+	if shape_elems != elems_a:
+		raise ValueError(f"Provided shape {shape} has {shape_elems} elements, files have {elems_a}")
 	return shape
 
 
@@ -456,16 +523,16 @@ def verify(file_a: str, file_b: str, shape: tuple[int, ...], dtype: str) -> None
 
 
 def main() -> None:
-	parser = argparse.ArgumentParser(description="Compare two tensor .bin files")
-	parser.add_argument("file_a", help="Reference tensor .bin file")
-	parser.add_argument("file_b", help="Other tensor .bin file")
+	parser = argparse.ArgumentParser(description="Compare two tensor .bin or .safetensors files")
+	parser.add_argument("file_a", help="Reference tensor file")
+	parser.add_argument("file_b", help="Other tensor file")
 	parser.add_argument("--dtype", choices=["bf16", "f32", "f8"], default=None, help="Tensor element type")
 	parser.add_argument("--shape", type=int, nargs="+", default=None, help="Optional tensor shape")
 	args = parser.parse_args()
 
 	dtype = args.dtype or infer_dtype_from_paths(args.file_a, args.file_b)
 	bytes_per_elem = {"bf16": 2, "f32": 4, "f8": 1}[dtype]
-	shape = infer_shape(args.file_a, args.file_b, args.shape, bytes_per_elem)
+	shape = infer_shape(args.file_a, args.file_b, args.shape, dtype, bytes_per_elem)
 	verify(args.file_a, args.file_b, shape, dtype)
 
 

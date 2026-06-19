@@ -271,3 +271,30 @@ impl<Code: Copy + std::fmt::Debug> std::fmt::Display for ErrPack<Code> {
 		write!(f, ")")
 	}
 }
+
+pub struct Diagnostic {
+	pub is_error: bool,
+	pub message: String,
+}
+
+pub struct Diagnostics {
+	pub list: Vec<Diagnostic>,
+	pub err_count: usize,
+}
+
+impl Diagnostics {
+	pub fn new() -> Self {
+		Self { list: Vec::new(), err_count: 0 }
+	}
+
+	pub fn add_error(&mut self, message: String) {
+		self.err_count += 1;
+		self.list.push(Diagnostic { is_error: true, message });
+	}
+}
+
+impl Default for Diagnostics {
+	fn default() -> Self {
+		Self::new()
+	}
+}

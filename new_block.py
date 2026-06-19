@@ -71,6 +71,7 @@ def create_inputs() -> None:
 	store_tensor(attn_y_weights, "attn_y_weights_i8.bin")
 	store_tensor(ffn_f_weights, "ffn_f_weights_f32.bin", expected_variance=1.0)
 	store_tensor(ffn_f_weights, "ffn_f_weights_i8.bin")
+	store_tensor(ffn_f_weights, "ffn_f_weights_i8.safetensors")
 	store_tensor(ffn_y_weights, "ffn_y_weights_f32.bin", expected_variance=1.0)
 	store_tensor(ffn_y_weights, "ffn_y_weights_i8.bin")
 
@@ -140,6 +141,7 @@ def run_ffn() -> None:
 	store_tensor(y_pregate, "ffn_y_pregate_i8.bin")
 	store_tensor(f, "ffn_f_bf16.bin", expected_variance=1.0 / GELU_VAR_FIX_2)
 	store_tensor(f_f8, "ffn_f_f8.bin")
+	store_tensor(f_f8, "ffn_f_f8.safetensors")
 	store_tensor(y, "ffn_y_bf16.bin")
 	store_tensor(y, "ffn_y_i8.bin")
 
