@@ -71,7 +71,8 @@ pub struct GemmConfig {
 
 pub trait EpilogueConfig {
 	fn is_c_dtype_allowed(&self, c_dtype: DType) -> bool;
-	fn writer_template(&self, b_rows: Option<NonZeroUsize>) -> BasicGemmWriterTemplate;
+
+	fn writer_template(&self, c_cols: Option<NonZeroUsize>) -> BasicGemmWriterTemplate;
 }
 
 impl EpilogueConfig for ScaleConfig {
@@ -79,9 +80,9 @@ impl EpilogueConfig for ScaleConfig {
 		c_dtype == DType::Int8
 	}
 
-	fn writer_template(&self, _b_rows: Option<NonZeroUsize>) -> BasicGemmWriterTemplate {
+	fn writer_template(&self, _c_cols: Option<NonZeroUsize>) -> BasicGemmWriterTemplate {
 		if !self.0.value.is_finite() {
-			todo!("support non-finite GEMM scale values");
+			todo!("error for invalid values");
 		}
 
 		BasicGemmWriterTemplate {
@@ -112,29 +113,23 @@ impl EpilogueConfig for RMSNormConfig {
 		c_dtype == DType::Int8
 	}
 
-	fn writer_template(&self, b_rows: Option<NonZeroUsize>) -> BasicGemmWriterTemplate {
-		if !self.eps.is_finite() || self.eps < 0.0 {
-			todo!("support invalid RMSNorm eps values");
+	fn writer_template(&self, _c_cols: Option<NonZeroUsize>) -> BasicGemmWriterTemplate {
+		if !self.eps.is_finite() || self.eps < 0.0
+			|| !self.head_scale.value.is_finite() || !self.sep_scale.value.is_finite() {
+			todo!("error for invalid values");
 		}
-		if self.head_dim == 0 || self.sep_dim == 0 {
-			todo!("support empty RMSNorm GEMM epilogue dimensions");
-		}
-		if self.head_dim != self.sep_dim {
-			todo!("support RMSNorm GEMM epilogues where head_dim != sep_dim");
-		}
+
 		if self.head_dim % 32 != 0 || self.sep_dim % 32 != 0 {
 			todo!("support RMSNorm GEMM epilogue dimensions that are not multiples of 32");
 		}
-		if !self.head_scale.value.is_finite() || !self.sep_scale.value.is_finite() {
-			todo!("support non-finite RMSNorm GEMM scale values");
-		}
-		let Some(b_rows) = b_rows else {
-			todo!("support RMSNorm GEMM outputs with runtime column count");
-		};
+
 		let chunk = self.head_dim + self.sep_dim;
-		if b_rows.get() % chunk != 0 {
-			todo!("support RMSNorm GEMM output columns that are not divisible by head_dim + sep_dim");
+		if !chunk.is_power_of_two() {
+			todo!("assume in `rrms_cols = b_rows >> chunk.trailing_zeros()`");
 		}
+		// Note: Other HEAD_DIM and SEP_DIM constraints depeend on N_PER_WARP,
+		// which is unknown at this point. We could get it from meta.json after the compilation,
+		// but the compilation will fail if the constraints are not met.
 
 		#[allow(clippy::cast_precision_loss)]
 		let head_scale = self.head_scale.value * f64::sqrt(self.head_dim as f64);
@@ -170,7 +165,7 @@ impl EpilogueConfig for ResidualConfig {
 		c_dtype == DType::Int8
 	}
 
-	fn writer_template(&self, _b_rows: Option<NonZeroUsize>) -> BasicGemmWriterTemplate {
+	fn writer_template(&self, _c_cols: Option<NonZeroUsize>) -> BasicGemmWriterTemplate {
 		todo!("support residual GEMM epilogues")
 	}
 }
@@ -180,17 +175,17 @@ impl EpilogueConfig for GeGluConfig {
 		c_dtype == DType::E4m3
 	}
 
-	fn writer_template(&self, b_rows: Option<NonZeroUsize>) -> BasicGemmWriterTemplate {
+	fn writer_template(&self, c_cols: Option<NonZeroUsize>) -> BasicGemmWriterTemplate {
 		if !self.inp_scale.value.is_finite() || self.inp_scale.value <= 0.0 {
 			todo!("support invalid GeGLU input scale values");
 		}
 		if !self.out_scale.value.is_finite() || self.out_scale.value <= 0.0 {
 			todo!("support invalid GeGLU output scale values");
 		}
-		let Some(b_rows) = b_rows else {
+		let Some(c_cols) = c_cols else {
 			todo!("support GeGLU GEMM outputs with runtime column count");
 		};
-		if b_rows.get() % 2 != 0 {
+		if c_cols.get() % 2 != 0 {
 			todo!("support GeGLU GEMM outputs with odd pregate column count");
 		}
 
@@ -367,6 +362,8 @@ impl<Epilogue: GemmEpilogue> GemmKernel<Epilogue> {
 		Self::compile_kernel_cubin(&dir_path, &ptx_path, &cubin_path, diag)?;
 		Self::compile_meta_exe(&dir_path, &meta_path, &meta_exe_path, diag)?;
 		Self::run_meta_exe(&dir_path, &meta_exe_path, &meta_json_path, diag)?;
+
+		// TODO - if we have c_rows/c_cols, assert they are multiple of M_PER_BLOCK/N_PER_BLOCK
 
 		let launcher = Epilogue::Launcher::new(
 			device, gemm_config, epilogue_config,
@@ -693,8 +690,8 @@ impl BasicGemmLauncher {
 		};
 
 		if metadata.THREADS_PER_BLOCK == 0
-			|| metadata.M_PER_BLOCK == 0
-			|| metadata.N_PER_BLOCK == 0
+			|| !metadata.M_PER_BLOCK.is_power_of_two() // Note: this also ensures != 0
+			|| !metadata.N_PER_BLOCK.is_power_of_two()
 		{
 			cold_path();
 			let file = config_path.to_string_lossy();
@@ -803,8 +800,10 @@ impl BasicGemmLauncher {
 			&self.device, self.c_dtype
 		)?;
 
-		// TODO - assume M_PER_BLOCK and N_PER_BLOCK are powers of 2
-		if c_rows % self.metadata.M_PER_BLOCK != 0 || c_cols % self.metadata.N_PER_BLOCK != 0 {
+		debug_assert!(self.metadata.M_PER_BLOCK.is_power_of_two());
+		debug_assert!(self.metadata.N_PER_BLOCK.is_power_of_two());
+		if c_rows & (self.metadata.M_PER_BLOCK - 1) != 0
+			|| c_cols & (self.metadata.N_PER_BLOCK - 1) != 0 {
 			cold_path();
 			return Err(gemm_launch_error(format!(
 				"GEMM output shape [{c_rows}, {c_cols}] must be divisible by tile shape [{}, {}]",
@@ -812,14 +811,15 @@ impl BasicGemmLauncher {
 			)));
 		}
 
-		let grid_x = c_rows / self.metadata.M_PER_BLOCK;
-		let grid_y = c_cols / self.metadata.N_PER_BLOCK;
+		let grid_x = c_rows >> self.metadata.M_PER_BLOCK.trailing_zeros();
+		let grid_y = c_cols >> self.metadata.N_PER_BLOCK.trailing_zeros();
 		let mut a_ptr = unsafe { a.device_ptr().as_ptr::<c_void>() };
 		let mut a_rows_arg = a_rows;
 		let mut b_ptr = unsafe { b.device_ptr().as_ptr::<c_void>() };
 		let mut b_rows_arg = b_rows;
 		let mut c_ptr = unsafe { c.device_ptr().as_ptr::<c_void>() };
 
+		// TODO - use struct instead of array of pointers
 		let mut raw_args = [
 			(&raw mut a_ptr).cast::<c_void>(),
 			(&raw mut a_rows_arg).cast::<c_void>(),
@@ -908,13 +908,15 @@ impl GemmLauncher<GeGluEpilogue> for GeGluGemmLauncher {
 				"GeGLU GEMM requires an even raw output column count, got {b_rows}"
 			)));
 		}
-		let [c_rows, _c_cols] = BasicGemmLauncher::matrix_shape(
+		let [c_rows, c_cols] = BasicGemmLauncher::matrix_shape(
 			"c", c, [Some(a_rows), Some(b_rows / 2)],
 			&basic.device, basic.c_dtype
 		)?;
 
-		// TODO - assume M_PER_BLOCK and N_PER_BLOCK are powers of 2
-		if c_rows % basic.metadata.M_PER_BLOCK != 0 || b_rows % basic.metadata.N_PER_BLOCK != 0 {
+		debug_assert!(basic.metadata.M_PER_BLOCK.is_power_of_two());
+		debug_assert!(basic.metadata.N_PER_BLOCK.is_power_of_two());
+		if c_rows & (basic.metadata.M_PER_BLOCK - 1) != 0
+			|| c_cols & (basic.metadata.N_PER_BLOCK - 1) != 0 {
 			cold_path();
 			return Err(gemm_launch_error(format!(
 				"GeGLU GEMM raw output shape [{c_rows}, {b_rows}] must be divisible by tile shape [{}, {}]",
@@ -922,14 +924,15 @@ impl GemmLauncher<GeGluEpilogue> for GeGluGemmLauncher {
 			)));
 		}
 
-		let grid_x = c_rows / basic.metadata.M_PER_BLOCK;
-		let grid_y = b_rows / basic.metadata.N_PER_BLOCK;
+		let grid_x = c_rows >> basic.metadata.M_PER_BLOCK.trailing_zeros();
+		let grid_y = c_cols >> basic.metadata.N_PER_BLOCK.trailing_zeros();
 		let mut a_ptr = unsafe { a.device_ptr().as_ptr::<c_void>() };
 		let mut a_rows_arg = a_rows;
 		let mut b_ptr = unsafe { b.device_ptr().as_ptr::<c_void>() };
 		let mut b_rows_arg = b_rows;
 		let mut c_ptr = unsafe { c.device_ptr().as_ptr::<c_void>() };
 
+		// TODO - use struct instead of array of pointers
 		let mut raw_args = [
 			(&raw mut a_ptr).cast::<c_void>(),
 			(&raw mut a_rows_arg).cast::<c_void>(),
@@ -989,8 +992,10 @@ impl GemmLauncher<RMSNormEpilogue> for RMSNormGemmLauncher {
 			&basic.device, basic.c_dtype
 		)?;
 
-		// TODO - assume M_PER_BLOCK and N_PER_BLOCK are powers of 2
-		if c_rows % basic.metadata.M_PER_BLOCK != 0 || c_cols % basic.metadata.N_PER_BLOCK != 0 {
+		debug_assert!(basic.metadata.M_PER_BLOCK.is_power_of_two());
+		debug_assert!(basic.metadata.N_PER_BLOCK.is_power_of_two());
+		if c_rows & (basic.metadata.M_PER_BLOCK - 1) != 0
+			|| c_cols & (basic.metadata.N_PER_BLOCK - 1) != 0 {
 			cold_path();
 			return Err(gemm_launch_error(format!(
 				"GEMM output shape [{c_rows}, {c_cols}] must be divisible by tile shape [{}, {}]",
@@ -999,20 +1004,15 @@ impl GemmLauncher<RMSNormEpilogue> for RMSNormGemmLauncher {
 		}
 
 		let chunk = head_dim + sep_dim;
-		if chunk == 0 || b_rows % chunk != 0 {
-			cold_path();
-			return Err(gemm_launch_error(format!(
-				"RMSNorm metadata dimensions [{head_dim}, {sep_dim}] do not divide b rows {b_rows}",
-			)));
-		}
-		let rrms_cols = b_rows / chunk;
+		debug_assert!(chunk.is_power_of_two());
+		let rrms_cols = b_rows >> chunk.trailing_zeros();
 		BasicGemmLauncher::matrix_shape(
 			"rrms", rrms, [Some(a_rows), Some(rrms_cols)],
 			&basic.device, DType::F32
 		)?;
 
-		let grid_x = c_rows / basic.metadata.M_PER_BLOCK;
-		let grid_y = c_cols / basic.metadata.N_PER_BLOCK;
+		let grid_x = c_rows >> basic.metadata.M_PER_BLOCK.trailing_zeros();
+		let grid_y = c_cols >> basic.metadata.N_PER_BLOCK.trailing_zeros();
 		let mut a_ptr = unsafe { a.device_ptr().as_ptr::<c_void>() };
 		let mut a_rows_arg = a_rows;
 		let mut b_ptr = unsafe { b.device_ptr().as_ptr::<c_void>() };
@@ -1020,6 +1020,7 @@ impl GemmLauncher<RMSNormEpilogue> for RMSNormGemmLauncher {
 		let mut c_ptr = unsafe { c.device_ptr().as_ptr::<c_void>() };
 		let mut rrms_ptr = unsafe { rrms.device_ptr().as_ptr::<c_void>() };
 
+		// TODO - use struct instead of array of pointers
 		let mut raw_args = [
 			(&raw mut a_ptr).cast::<c_void>(),
 			(&raw mut a_rows_arg).cast::<c_void>(),
