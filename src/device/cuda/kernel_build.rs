@@ -185,6 +185,15 @@ pub(super) fn load_cubin_kernel(
 			return Err(KernelGeneratorError);
 		},
 	};
+	if kernel.has_spills() {
+		diag.add_warning(format!(
+			"generated CUDA kernel `{kernel_name}` from `{}` uses local memory; possible spills: local_size_bytes={}, num_regs={}, max_threads_per_block={}",
+			cubin_path.display(),
+			kernel.attrs.local_size_bytes,
+			kernel.attrs.num_regs,
+			kernel.attrs.max_threads_per_block,
+		));
+	}
 	Ok(kernel)
 }
 

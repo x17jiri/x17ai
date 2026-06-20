@@ -49,6 +49,20 @@ pub struct CudaKernelHandle {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CudaKernelAttrs {
+	pub max_threads_per_block: i32,
+	pub static_shared_size_bytes: i32,
+	pub const_size_bytes: i32,
+	pub local_size_bytes: i32,
+	pub num_regs: i32,
+	pub ptx_version: i32,
+	pub binary_version: i32,
+	pub max_dynamic_shared_size_bytes: i32,
+	pub preferred_shared_memory_carveout: i32,
+}
+
+#[repr(C)]
 pub struct DiagnosticBuffer {
 	_private: [u8; 0],
 }
@@ -128,6 +142,11 @@ unsafe extern "C" {
 		name: *const c_char,
 		smem_size: usize,
 	) -> PtrResult<CudaKernelHandle>;
+
+	fn x17ai_cuda_read_kernel_attrs(
+		kernel: *mut CudaKernelHandle,
+		attrs: *mut CudaKernelAttrs,
+	) -> *mut DiagnosticBuffer;
 
 	fn x17ai_cuda_launch_kernel(
 		stream: *mut CudaStreamHandle, kernel: *mut CudaKernelHandle,
@@ -397,7 +416,19 @@ impl CudaModule {
 		};
 		debug_assert!(kernel_result.diagnostic.is_null());
 
-		Ok(CudaKernel { _module: self, handle: kernel })
+		let mut attrs = CudaKernelAttrs::default();
+		let diagnostic = unsafe {
+			x17ai_cuda_read_kernel_attrs(kernel.as_ptr(), &raw mut attrs)
+		};
+		if !diagnostic.is_null() {
+			cold_path();
+			return Err(diagnostic_to_error(
+				diagnostic,
+				"x17ai_cuda_read_kernel_attrs() failed without diagnostic",
+			));
+		}
+
+		Ok(CudaKernel { _module: self, handle: kernel, attrs })
 	}
 }
 
@@ -414,11 +445,16 @@ impl Drop for CudaModule {
 pub struct CudaKernel {
 	_module: CudaModule,
 	handle: NonNull<CudaKernelHandle>,
+	pub attrs: CudaKernelAttrs,
 }
 
 impl CudaKernel {
 	pub fn handle(&self) -> *mut CudaKernelHandle {
 		self.handle.as_ptr()
+	}
+
+	pub fn has_spills(&self) -> bool {
+		self.attrs.local_size_bytes != 0
 	}
 
 	/// # Safety

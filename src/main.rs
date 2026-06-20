@@ -524,7 +524,7 @@ fn print_diagnostics(diagnostics: &Diagnostics) {
 		if diagnostic.is_error {
 			eprintln!("kernel error: {}", diagnostic.message);
 		} else {
-			println!("kernel diagnostic: {}", diagnostic.message);
+			println!("kernel warning: {}", diagnostic.message);
 		}
 	}
 }

@@ -68,6 +68,18 @@ struct CudaModuleHandle;
 struct CudaKernelHandle;
 struct CudaDeviceData;
 
+struct CudaKernelAttrs {
+	i32 max_threads_per_block;
+	i32 static_shared_size_bytes;
+	i32 const_size_bytes;
+	i32 local_size_bytes;
+	i32 num_regs;
+	i32 ptx_version;
+	i32 binary_version;
+	i32 max_dynamic_shared_size_bytes;
+	i32 preferred_shared_memory_carveout;
+};
+
 struct CudaTimerHandle {
 	CUcontext context;
 	CUstream stream;
@@ -85,6 +97,82 @@ inline CudaDeviceData *from_dev_ptr(CUdeviceptr ptr) noexcept {
 	static_assert(sizeof(uintptr_t) >= sizeof(CUdeviceptr));
 	static_assert(sizeof(CudaDeviceData *) >= sizeof(CUdeviceptr));
 	return reinterpret_cast<CudaDeviceData *>(uintptr_t(U(ptr)));
+}
+
+inline DiagnosticBuffer *read_kernel_attr(
+	CUfunction kernel,
+	CUfunction_attribute attr,
+	char const *attr_name,
+	i32 *dst
+) noexcept {
+	int value = 0;
+	CUresult e = cuFuncGetAttribute(&value, attr, kernel);
+	if (e != CUDA_SUCCESS) [[unlikely]] {
+		return X17AI_DIAG(
+			"x17ai_cuda_read_kernel_attrs(): cuFuncGetAttribute() failed.",
+			"x17ai_cuda_read_kernel_attrs(): cuFuncGetAttribute(", attr_name, ") failed with cuda error: ", e
+		);
+	}
+	*dst = value;
+	return nullptr;
+}
+
+inline DiagnosticBuffer *read_kernel_attrs(CUfunction kernel, CudaKernelAttrs *attrs) noexcept {
+	if (auto diag = read_kernel_attr(
+		kernel, CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+		"MAX_THREADS_PER_BLOCK", &attrs->max_threads_per_block
+	)) [[unlikely]] {
+		return diag;
+	}
+	if (auto diag = read_kernel_attr(
+		kernel, CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
+		"SHARED_SIZE_BYTES", &attrs->static_shared_size_bytes
+	)) [[unlikely]] {
+		return diag;
+	}
+	if (auto diag = read_kernel_attr(
+		kernel, CU_FUNC_ATTRIBUTE_CONST_SIZE_BYTES,
+		"CONST_SIZE_BYTES", &attrs->const_size_bytes
+	)) [[unlikely]] {
+		return diag;
+	}
+	if (auto diag = read_kernel_attr(
+		kernel, CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES,
+		"LOCAL_SIZE_BYTES", &attrs->local_size_bytes
+	)) [[unlikely]] {
+		return diag;
+	}
+	if (auto diag = read_kernel_attr(
+		kernel, CU_FUNC_ATTRIBUTE_NUM_REGS,
+		"NUM_REGS", &attrs->num_regs
+	)) [[unlikely]] {
+		return diag;
+	}
+	if (auto diag = read_kernel_attr(
+		kernel, CU_FUNC_ATTRIBUTE_PTX_VERSION,
+		"PTX_VERSION", &attrs->ptx_version
+	)) [[unlikely]] {
+		return diag;
+	}
+	if (auto diag = read_kernel_attr(
+		kernel, CU_FUNC_ATTRIBUTE_BINARY_VERSION,
+		"BINARY_VERSION", &attrs->binary_version
+	)) [[unlikely]] {
+		return diag;
+	}
+	if (auto diag = read_kernel_attr(
+		kernel, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+		"MAX_DYNAMIC_SHARED_SIZE_BYTES", &attrs->max_dynamic_shared_size_bytes
+	)) [[unlikely]] {
+		return diag;
+	}
+	if (auto diag = read_kernel_attr(
+		kernel, CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT,
+		"PREFERRED_SHARED_MEMORY_CARVEOUT", &attrs->preferred_shared_memory_carveout
+	)) [[unlikely]] {
+		return diag;
+	}
+	return nullptr;
 }
 
 inline void destroy_timer_events(CudaTimerHandle *timer) noexcept {
@@ -814,6 +902,28 @@ extern "C" {
 			assert_no_context("x17ai_cuda_get_kernel(): after cuModuleGetFunction()");
 			return reinterpret_cast<CudaKernelHandle *>(kernel);
 		} X17AI_CATCH_ERRORS("x17ai_cuda_get_kernel()")
+	}
+
+	DiagnosticBuffer *x17ai_cuda_read_kernel_attrs(
+		CudaKernelHandle *kernel,
+		CudaKernelAttrs *attrs
+	) noexcept {
+		try {
+			assert_no_context("x17ai_cuda_read_kernel_attrs(): before cuFuncGetAttribute()");
+			assert(cuda_initialized.load(std::memory_order_acquire));
+			assert(kernel != nullptr);
+			assert(attrs != nullptr);
+
+			CUfunction cu_kernel = reinterpret_cast<CUfunction>(kernel);
+			CudaKernelAttrs result{};
+			if (DiagnosticBuffer *diag = read_kernel_attrs(cu_kernel, &result)) [[unlikely]] {
+				return diag;
+			}
+			*attrs = result;
+
+			assert_no_context("x17ai_cuda_read_kernel_attrs(): after cuFuncGetAttribute()");
+			return nullptr;
+		} X17AI_CATCH_ERRORS("x17ai_cuda_read_kernel_attrs()")
 	}
 
 	DiagnosticBuffer *x17ai_cuda_launch_kernel(

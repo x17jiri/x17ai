@@ -299,6 +299,10 @@ impl Diagnostics {
 		self.err_count += 1;
 		self.list.push(Diagnostic { is_error: true, message });
 	}
+
+	pub fn add_warning(&mut self, message: String) {
+		self.list.push(Diagnostic { is_error: false, message });
+	}
 }
 
 impl Default for Diagnostics {
