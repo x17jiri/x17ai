@@ -646,15 +646,17 @@ impl GemmLauncher<GeGluEpilogue> for GeGluGemmLauncher {
 				"GeGLU GEMM requires an even raw output column count, got {b_rows}"
 			)));
 		}
-		let [c_rows, c_cols] = tensor_check::matrix_shape(
+		let [c_rows, _c_cols] = tensor_check::matrix_shape(
 			"GEMM", "c", c, [Some(a_rows), Some(b_rows / 2)],
 			&basic.device, basic.c_dtype
 		)?;
 
 		debug_assert!(basic.metadata.M_PER_BLOCK.is_power_of_two());
 		debug_assert!(basic.metadata.N_PER_BLOCK.is_power_of_two());
+		debug_assert!(basic.metadata.N_PER_BLOCK > 1);
+		let raw_c_cols = b_rows;
 		if c_rows & (basic.metadata.M_PER_BLOCK - 1) != 0
-			|| c_cols & (basic.metadata.N_PER_BLOCK - 1) != 0 {
+			|| raw_c_cols & (basic.metadata.N_PER_BLOCK - 1) != 0 {
 			cold_path();
 			return Err(ErrPack::new(TensorOpError::Other, format!(
 				"GeGLU GEMM raw output shape [{c_rows}, {b_rows}] must be divisible by tile shape [{}, {}]",
@@ -663,7 +665,7 @@ impl GemmLauncher<GeGluEpilogue> for GeGluGemmLauncher {
 		}
 
 		let grid_x = c_rows >> basic.metadata.M_PER_BLOCK.trailing_zeros();
-		let grid_y = c_cols >> basic.metadata.N_PER_BLOCK.trailing_zeros();
+		let grid_y = raw_c_cols >> basic.metadata.N_PER_BLOCK.trailing_zeros();
 		let mut a_ptr = unsafe { a.device_ptr().as_ptr::<c_void>() };
 		let mut a_rows_arg = a_rows;
 		let mut b_ptr = unsafe { b.device_ptr().as_ptr::<c_void>() };
