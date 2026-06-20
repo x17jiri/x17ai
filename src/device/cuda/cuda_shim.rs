@@ -13,7 +13,7 @@ use std::ptr::NonNull;
 
 use crate::device::DevicePtr;
 use crate::util::ffi_buffer::FfiBuffer;
-use crate::{ErrExtra, ErrPack, TensorOpError};
+use crate::{ErrPack, TensorOpError};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -148,13 +148,7 @@ fn ptr_result_to_error<T>(result: PtrResult<T>) -> ErrPack<TensorOpError> {
 
 #[inline(never)]
 fn diagnostic_to_error(diagnostic: *mut DiagnosticBuffer, fallback: &str) -> ErrPack<TensorOpError> {
-	ErrPack::<TensorOpError> {
-		code: TensorOpError::Device,
-		extra: Some(Box::new(ErrExtra {
-			message: diagnostic_to_string(diagnostic, fallback).into(),
-			nested: None,
-		})),
-	}
+	ErrPack::new(TensorOpError::Device, diagnostic_to_string(diagnostic, fallback))
 }
 
 pub(super) fn diagnostic_to_string(diagnostic: *mut DiagnosticBuffer, fallback: &str) -> String {
@@ -174,17 +168,11 @@ fn diagnostic_to_error_with_nested(
 	diagnostic: *mut DiagnosticBuffer,
 	nested: ErrPack<TensorOpError>,
 ) -> ErrPack<TensorOpError> {
-	let mut result = diagnostic_to_error(diagnostic, "CUDA operation failed without diagnostic");
-	let nested = Box::new(nested);
-	if let Some(extra) = &mut result.extra {
-		extra.nested = Some(nested);
-	} else {
-		result.extra = Some(Box::new(ErrExtra {
-			message: "CUDA operation failed without diagnostic".into(),
-			nested: Some(nested),
-		}));
-	}
-	result
+	ErrPack::new_with_nested(
+		TensorOpError::Device,
+		diagnostic_to_string(diagnostic, "CUDA operation failed without diagnostic"),
+		nested,
+	)
 }
 
 #[inline(never)]
@@ -340,13 +328,10 @@ impl CudaStream {
 	) -> Result<CudaModule, ErrPack<TensorOpError>> {
 		let Ok(cubin_path) = CString::new(cubin_path.as_os_str().as_bytes()) else {
 			cold_path();
-			return Err(ErrPack {
-				code: TensorOpError::Device,
-				extra: Some(Box::new(ErrExtra {
-					message: "CUDA cubin path contains an interior NUL byte".into(),
-					nested: None,
-				})),
-			});
+			return Err(ErrPack::new(
+				TensorOpError::Device,
+				"CUDA cubin path contains an interior NUL byte",
+			));
 		};
 		let module_result = unsafe {
 			x17ai_cuda_load_module(self.ctx.as_ptr(), cubin_path.as_ptr())
@@ -393,13 +378,10 @@ impl CudaModule {
 	) -> Result<CudaKernel, ErrPack<TensorOpError>> {
 		let Ok(name) = CString::new(name) else {
 			cold_path();
-			return Err(ErrPack {
-				code: TensorOpError::Device,
-				extra: Some(Box::new(ErrExtra {
-					message: "CUDA kernel name contains an interior NUL byte".into(),
-					nested: None,
-				})),
-			});
+			return Err(ErrPack::new(
+				TensorOpError::Device,
+				"CUDA kernel name contains an interior NUL byte",
+			));
 		};
 
 		let kernel_result = unsafe {

@@ -18,6 +18,7 @@ pub mod attn;
 pub mod gemm;
 pub mod gemm_templates;
 mod kernel_build;
+mod tensor_check;
 
 //--------------------------------------------------------------------------------------------------
 

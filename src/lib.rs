@@ -136,13 +136,7 @@ pub enum TensorOpError {
 
 impl TensorOpError {
 	pub fn new_io_error(message: String) -> ErrPack<Self> {
-		ErrPack {
-			code: Self::IOError,
-			extra: Some(Box::new(ErrExtra {
-				message: message.into(),
-				nested: None,
-			}))
-		}
+		ErrPack::new(Self::IOError, message)
 	}
 }
 
@@ -193,25 +187,13 @@ impl From<dtype::UnsupportedDTypeError> for ErrPack<TensorOpError> {
 
 impl From<std::io::Error> for ErrPack<TensorOpError> {
 	fn from(err: std::io::Error) -> ErrPack<TensorOpError> {
-		ErrPack {
-			code: TensorOpError::IOError,
-			extra: Some(Box::new(ErrExtra {
-				message: "failed to read tensor file".into(),
-				nested: Some(Box::new(err)),
-			})),
-		}
+		ErrPack::new_with_nested(TensorOpError::IOError, "failed to read tensor file", err)
 	}
 }
 
 impl From<safetensors::SafeTensorError> for ErrPack<TensorOpError> {
 	fn from(err: safetensors::SafeTensorError) -> ErrPack<TensorOpError> {
-		ErrPack {
-			code: TensorOpError::InvalidSafeTensors,
-			extra: Some(Box::new(ErrExtra {
-				message: "invalid safetensors file".into(),
-				nested: Some(Box::new(err)),
-			})),
-		}
+		ErrPack::new_with_nested(TensorOpError::InvalidSafeTensors, "invalid safetensors file", err)
 	}
 }
 
@@ -237,6 +219,32 @@ pub struct ErrExtra {
 pub struct ErrPack<Code: Copy + std::fmt::Debug> {
 	pub code: Code,
 	pub extra: Option<Box<ErrExtra>>,
+}
+
+impl<Code: Copy + std::fmt::Debug> ErrPack<Code> {
+	pub fn new(code: Code, message: impl Into<Cow<'static, str>>) -> Self {
+		Self {
+			code,
+			extra: Some(Box::new(ErrExtra {
+				message: message.into(),
+				nested: None,
+			})),
+		}
+	}
+
+	pub fn new_with_nested(
+		code: Code,
+		message: impl Into<Cow<'static, str>>,
+		nested: impl std::error::Error + Send + Sync + 'static,
+	) -> Self {
+		Self {
+			code,
+			extra: Some(Box::new(ErrExtra {
+				message: message.into(),
+				nested: Some(Box::new(nested)),
+			})),
+		}
+	}
 }
 
 #[cold]

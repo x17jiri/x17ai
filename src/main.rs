@@ -20,7 +20,7 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use x17ai::device::cuda::{CudaDevice, CudaTimer, gemm};
+use x17ai::device::cuda::{CudaDevice, CudaTimer, attn, gemm};
 use x17ai::dtype::DType;
 use x17ai::tensor::Tensor;
 use x17ai::Diagnostics;
@@ -28,6 +28,7 @@ use x17ai::Diagnostics;
 const HEAD_DIM: usize = 32;
 const N_HEADS: usize = 64;
 const F_WIDTH: usize = 2048;
+const WINDOW_SIZE: usize = 0;
 const L2_NORM_EPS: f64 = 1.0 / (1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -46,6 +47,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 		tensor_path("ffn_f_weights_i8.safetensors"),
 		device.clone(),
 	)?;
+	let sinks_k = Tensor::from_safetensors_file(
+		tensor_path("sinks_k_i8.safetensors"),
+		device.clone(),
+	)?;
+	let sinks_v = Tensor::from_safetensors_file(
+		tensor_path("sinks_v_i8.safetensors"),
+		device.clone(),
+	)?;
+	let attn_temperature = Tensor::from_safetensors_file(
+		tensor_path("attn_temperature_f32.safetensors"),
+		device.clone(),
+	)?;
 	let (n_inputs, model_dim, q_proj_outputs) = validate_attn_q_inputs(&x, &q_weights)?;
 	let kv_proj_outputs = validate_attn_kv_inputs(&x, &kv_weights, model_dim)?;
 	let ffn_f_proj_outputs = validate_ffn_f_inputs(&x, &ffn_f_weights, model_dim)?;
@@ -54,6 +67,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let q = Tensor::new_empty(&[n_inputs, q_proj_outputs], DType::Int8, device.clone())?;
 	let kv = Tensor::new_empty(&[n_inputs, kv_proj_outputs], DType::Int8, device.clone())?;
 	let k_rrms = Tensor::new_empty(&[n_inputs, N_HEADS], DType::F32, device.clone())?;
+	let attn_out = Tensor::new_empty(&[n_inputs, q_proj_outputs], DType::Int8, device.clone())?;
+	let attn_l = Tensor::new_empty(&[N_HEADS, n_inputs], DType::F32, device.clone())?;
 	let ffn_f = Tensor::new_empty(&[n_inputs, F_WIDTH], DType::E4m3, device.clone())?;
 
 	let mut q_diagnostics = Diagnostics::new();
@@ -92,6 +107,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	};
 
 	let mut ffn_f_diagnostics = Diagnostics::new();
+	let mut attn_diagnostics = Diagnostics::new();
+	let attn_kernel = match create_attn_kernel(
+		device.clone(),
+		q_proj_outputs,
+		kv_proj_outputs,
+		q_proj_outputs,
+		&mut attn_diagnostics,
+	) {
+		Ok(kernel) => {
+			print_diagnostics(&attn_diagnostics);
+			kernel
+		},
+		Err(err) => {
+			print_diagnostics(&attn_diagnostics);
+			return Err(err);
+		},
+	};
+
 	let ffn_f_kernel = match create_ffn_f_kernel(
 		device.clone(),
 		model_dim,
@@ -128,6 +161,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	})?;
 	kv_timer.stop()?;
 
+	let attn_timer = CudaTimer::new(device.as_ref())?;
+	attn_timer.start()?;
+	attn_kernel.launch(attn::AttnKernelArgs {
+		q: &q,
+		kv: &kv,
+		sink_k: &sinks_k,
+		sink_v: &sinks_v,
+		attn_temperature: &attn_temperature,
+		out: &attn_out,
+		l: Some(&attn_l),
+		window_size: WINDOW_SIZE,
+	})?;
+	attn_timer.stop()?;
+
 	let ffn_f_timer = CudaTimer::new(device.as_ref())?;
 	ffn_f_timer.start()?;
 	ffn_f_kernel.launch(gemm::GemmArgs {
@@ -141,15 +188,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let q = q.to_cpu()?;
 	let kv = kv.to_cpu()?.reshape(&[n_inputs, N_HEADS, 2, HEAD_DIM])?;
 	let k_rrms = k_rrms.to_cpu()?;
+	let attn_out = attn_out.to_cpu()?;
+	let attn_l = attn_l.to_cpu()?;
 	let ffn_f = ffn_f.to_cpu()?;
 	device.synchronize()?;
 	let q_kernel_seconds = q_timer.elapsed_seconds()?;
 	let kv_kernel_seconds = kv_timer.elapsed_seconds()?;
+	let attn_kernel_seconds = attn_timer.elapsed_seconds()?;
 	let ffn_f_kernel_seconds = ffn_f_timer.elapsed_seconds()?;
 
 	q.save_safetensors_file(output_path("q_i8.safetensors"))?;
 	kv.save_safetensors_file(output_path("kv_i8.safetensors"))?;
 	k_rrms.save_safetensors_file(output_path("k_rrms_f32.safetensors"))?;
+	attn_out.save_safetensors_file(output_path("attn_out_i8.safetensors"))?;
+	attn_l.save_safetensors_file(output_path("attn_l_f32.safetensors"))?;
 	ffn_f.save_safetensors_file(output_path("ffn_f_f8.safetensors"))?;
 
 	println!("loaded x: {:?} {:?}, {} bytes on CUDA", x.shape(), x.dtype(), x.bytes());
@@ -171,6 +223,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 		ffn_f_weights.dtype(),
 		ffn_f_weights.bytes()
 	);
+	println!(
+		"loaded sinks_k: {:?} {:?}, {} bytes on CUDA",
+		sinks_k.shape(),
+		sinks_k.dtype(),
+		sinks_k.bytes()
+	);
+	println!(
+		"loaded sinks_v: {:?} {:?}, {} bytes on CUDA",
+		sinks_v.shape(),
+		sinks_v.dtype(),
+		sinks_v.bytes()
+	);
+	println!(
+		"loaded attn_temperature: {:?} {:?}, {} bytes on CUDA",
+		attn_temperature.shape(),
+		attn_temperature.dtype(),
+		attn_temperature.bytes()
+	);
 	println!("allocated q: {:?} {:?}, {} bytes copied to CPU", q.shape(), q.dtype(), q.bytes());
 	println!("allocated kv: {:?} {:?}, {} bytes copied to CPU", kv.shape(), kv.dtype(), kv.bytes());
 	println!(
@@ -178,6 +248,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 		k_rrms.shape(),
 		k_rrms.dtype(),
 		k_rrms.bytes()
+	);
+	println!(
+		"allocated attn_out: {:?} {:?}, {} bytes copied to CPU",
+		attn_out.shape(),
+		attn_out.dtype(),
+		attn_out.bytes()
+	);
+	println!(
+		"allocated attn_l: {:?} {:?}, {} bytes copied to CPU",
+		attn_l.shape(),
+		attn_l.dtype(),
+		attn_l.bytes()
 	);
 	println!(
 		"allocated ffn_f: {:?} {:?}, {} bytes copied to CPU",
@@ -218,18 +300,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	println!("ffn_f metadata source: {}", ffn_f_kernel.meta_path.display());
 	println!("ffn_f metadata executable: {}", ffn_f_kernel.meta_exe_path.display());
 	println!("ffn_f metadata json: {}", ffn_f_kernel.meta_json_path.display());
+	println!("generated attention kernel files in {}", attn_kernel.dir_path.display());
+	println!("attention common source: {}", attn_kernel.common_path.display());
+	println!("attention kernel source: {}", attn_kernel.kernel_path.display());
+	println!("attention kernel ptx: {}", attn_kernel.ptx_path.display());
+	println!("attention kernel cubin: {}", attn_kernel.cubin_path.display());
+	println!("attention metadata source: {}", attn_kernel.meta_path.display());
+	println!("attention metadata executable: {}", attn_kernel.meta_exe_path.display());
+	println!("attention metadata json: {}", attn_kernel.meta_json_path.display());
 	let q_kernel_ms = q_kernel_seconds * 1000.0;
 	let q_kernel_tflops = attn_q_kernel.n_ops(&x, &q_weights) / q_kernel_seconds / 1.0e12;
 	println!("launched attn_q_fwd in {q_kernel_ms:.4} ms, {q_kernel_tflops:.3} TFLOPS");
 	let kv_kernel_ms = kv_kernel_seconds * 1000.0;
 	let kv_kernel_tflops = attn_kv_kernel.n_ops(&x, &kv_weights) / kv_kernel_seconds / 1.0e12;
 	println!("launched attn_kv_fwd in {kv_kernel_ms:.4} ms, {kv_kernel_tflops:.3} TFLOPS");
+	let attn_kernel_ms = attn_kernel_seconds * 1000.0;
+	let attn_kernel_tflops = attn_kernel.n_ops(n_inputs, WINDOW_SIZE) / attn_kernel_seconds / 1.0e12;
+	println!("launched attn_fwd_i8 in {attn_kernel_ms:.4} ms, {attn_kernel_tflops:.3} TFLOPS");
 	let ffn_f_kernel_ms = ffn_f_kernel_seconds * 1000.0;
 	let ffn_f_kernel_tflops = ffn_f_kernel.n_ops(&x, &ffn_f_weights) / ffn_f_kernel_seconds / 1.0e12;
 	println!("launched ffn_f_fwd in {ffn_f_kernel_ms:.4} ms, {ffn_f_kernel_tflops:.3} TFLOPS");
 	println!("stored {}", output_path("q_i8.safetensors").display());
 	println!("stored {}", output_path("kv_i8.safetensors").display());
 	println!("stored {}", output_path("k_rrms_f32.safetensors").display());
+	println!("stored {}", output_path("attn_out_i8.safetensors").display());
+	println!("stored {}", output_path("attn_l_f32.safetensors").display());
 	println!("stored {}", output_path("ffn_f_f8.safetensors").display());
 
 	Ok(())
@@ -330,6 +425,36 @@ fn create_attn_kv_kernel(
 		Ok(kernel) => Ok(kernel),
 		Err(_) => Err(other_error(format!(
 			"failed to generate attn_kv_fwd kernel; {} error(s)",
+			diagnostics.err_count
+		)).into()),
+	}
+}
+
+fn create_attn_kernel(
+	device: Rc<CudaDevice>,
+	q_stride: usize,
+	kv_stride: usize,
+	o_stride: usize,
+	diagnostics: &mut Diagnostics,
+) -> Result<attn::AttnKernel, Box<dyn std::error::Error>> {
+	let config = attn::AttnKernelConfig {
+		dtype: DType::Int8,
+		n_heads: N_HEADS,
+		head_dim: HEAD_DIM,
+		q_stride,
+		kv_stride,
+		o_stride,
+	};
+
+	match attn::AttnKernel::new(
+		device,
+		"attn_fwd_i8",
+		config,
+		diagnostics,
+	) {
+		Ok(kernel) => Ok(kernel),
+		Err(_) => Err(other_error(format!(
+			"failed to generate attn_fwd_i8 kernel; {} error(s)",
 			diagnostics.err_count
 		)).into()),
 	}

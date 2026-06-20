@@ -14,7 +14,6 @@ void kernel(
 	FixedI8 const *sink_k,
 	FixedI8 const *sink_v,
 	f32 const *attn_temperature,
-	i32 const *maxes,
 	FixedI8 *out,
 	f32 *l,
 	usize window_size
@@ -27,7 +26,6 @@ void kernel(
 		sink_k,
 		sink_v,
 		attn_temperature,
-		maxes,
 		out,
 		l,
 		window_size

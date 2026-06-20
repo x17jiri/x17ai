@@ -16,7 +16,7 @@ use crate::dtype::{DType, UnsupportedDTypeError};
 use crate::literal::TensorLiteral;
 use crate::shape::ShapeHelper;
 use crate::tensor::dim_index::DimIndex;
-use crate::{DeviceAllocError, ErrExtra, ErrPack, ShapeOverflowError, TensorOpError};
+use crate::{DeviceAllocError, ErrPack, ShapeOverflowError, TensorOpError};
 
 pub mod dim_index;
 
@@ -54,17 +54,11 @@ impl Tensor {
 		};
 		if shape_helper.elems() != self.elems || shape_helper.bytes() != self.bytes {
 			cold_path();
-			return Err(ErrPack {
-				code: TensorOpError::Other,
-				extra: Some(Box::new(ErrExtra {
-					message: format!(
-						"cannot reshape tensor with shape {:?} to {:?}",
-						self.shape,
-						shape,
-					).into(),
-					nested: None,
-				})),
-			});
+			return Err(ErrPack::new(TensorOpError::Other, format!(
+				"cannot reshape tensor with shape {:?} to {:?}",
+				self.shape,
+				shape,
+			)));
 		}
 		self.shape = shape.into();
 		Ok(self)
@@ -169,23 +163,17 @@ impl Tensor {
 		let mut tensors = safetensors.tensors();
 		if tensors.len() != 1 {
 			cold_path();
-			return Err(ErrPack {
-				code: TensorOpError::InvalidSafeTensors,
-				extra: Some(Box::new(ErrExtra {
-					message: format!("expected exactly one tensor, found {}", tensors.len()).into(),
-					nested: None,
-				})),
-			});
+			return Err(ErrPack::new(
+				TensorOpError::InvalidSafeTensors,
+				format!("expected exactly one tensor, found {}", tensors.len()),
+			));
 		}
 		let Some((_name, view)) = tensors.pop() else {
 			cold_path();
-			return Err(ErrPack {
-				code: TensorOpError::InvalidSafeTensors,
-				extra: Some(Box::new(ErrExtra {
-					message: "expected exactly one tensor, found 0".into(),
-					nested: None,
-				})),
-			});
+			return Err(ErrPack::new(
+				TensorOpError::InvalidSafeTensors,
+				"expected exactly one tensor, found 0",
+			));
 		};
 		Self::from_safetensors_view(&view, device)
 	}
@@ -240,13 +228,10 @@ impl Tensor {
 		}
 
 		if !self.device_is_cpu {
-			return Err(ErrPack {
-				code: TensorOpError::Device,
-				extra: Some(Box::new(ErrExtra {
-					message: "save_safetensors_file requires a CPU tensor; call to_cpu() first".into(),
-					nested: None,
-				})),
-			});
+			return Err(ErrPack::new(
+				TensorOpError::Device,
+				"save_safetensors_file requires a CPU tensor; call to_cpu() first",
+			));
 		}
 
 		let data = if self.bytes() == 0 {

@@ -56,9 +56,12 @@ def create_inputs() -> None:
 	store_tensor(x, "x_i8.safetensors")
 	store_tensor(sinks_k, "sinks_k_f32.bin", expected_variance=1.0)
 	store_tensor(sinks_k, "sinks_k_i8.bin")
+	store_tensor(sinks_k, "sinks_k_i8.safetensors")
 	store_tensor(sinks_v, "sinks_v_f32.bin", expected_variance=V_SCALE_FIX*V_SCALE_FIX)
 	store_tensor(sinks_v, "sinks_v_i8.bin")
+	store_tensor(sinks_v, "sinks_v_i8.safetensors")
 	store_tensor(attn_temperature, "attn_temperature_f32.bin", expected_variance=0.0)
+	store_tensor(attn_temperature, "attn_temperature_f32.safetensors")
 	store_tensor(attn_q_weights, "attn_q_weights_f32.bin", expected_variance=1.0)
 	store_tensor(attn_q_weights, "attn_q_weights_i8.bin")
 	store_tensor(attn_q_weights, "attn_q_weights_i8.safetensors")
@@ -269,7 +272,7 @@ def run_attn() -> None:
 	v_i8 = quantize(v)
 	kv_i8 = torch.cat((k_i8, v_i8), dim=2)
 
-	RUN_ATTN = False
+	RUN_ATTN = True
 	if RUN_ATTN:
 		attn_out, attn_maxes, attn_maxes_i32 = attn(q_i8, k_i8, v_i8, sinks_k, sinks_v, attn_temperature)
 		attn_out_flat = attn_out.reshape(N_INPUTS, ATTN_WIDTH)

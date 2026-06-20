@@ -9,7 +9,11 @@ use std::hint::cold_path;
 use std::path::Path;
 use std::process::{Command, Output};
 
+use serde::de::DeserializeOwned;
+
 use crate::{Diagnostics, KernelGeneratorError};
+
+use super::cuda_shim::{CudaKernel, CudaStream};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -32,7 +36,6 @@ pub(super) fn write_generated_file(
 }
 
 pub(super) fn compile_kernel_ptx(
-	_dir_path: &Path,
 	kernel_path: &Path,
 	ptx_path: &Path,
 	diag: &mut Diagnostics,
@@ -58,7 +61,6 @@ pub(super) fn compile_kernel_ptx(
 }
 
 pub(super) fn compile_kernel_cubin(
-	_dir_path: &Path,
 	ptx_path: &Path,
 	cubin_path: &Path,
 	diag: &mut Diagnostics,
@@ -84,7 +86,6 @@ pub(super) fn compile_kernel_cubin(
 }
 
 pub(super) fn compile_meta_exe(
-	_dir_path: &Path,
 	meta_path: &Path,
 	meta_exe_path: &Path,
 	diag: &mut Diagnostics,
@@ -108,7 +109,6 @@ pub(super) fn compile_meta_exe(
 }
 
 pub(super) fn run_meta_exe(
-	_dir_path: &Path,
 	meta_exe_path: &Path,
 	meta_json_path: &Path,
 	diag: &mut Diagnostics,
@@ -131,6 +131,61 @@ pub(super) fn run_meta_exe(
 			Err(KernelGeneratorError)
 		},
 	}
+}
+
+pub(super) fn read_metadata_json<T: DeserializeOwned>(
+	metadata_path: &Path,
+	diag: &mut Diagnostics,
+) -> Result<T, KernelGeneratorError> {
+	let metadata_json = match std::fs::read_to_string(metadata_path) {
+		Ok(s) => s,
+		Err(err) => {
+			cold_path();
+			let file = metadata_path.to_string_lossy();
+			diag.add_error(format!("Error reading file {file}: {err}"));
+			return Err(KernelGeneratorError);
+		},
+	};
+
+	match serde_json::from_str::<T>(&metadata_json) {
+		Ok(m) => Ok(m),
+		Err(err) => {
+			cold_path();
+			let file = metadata_path.to_string_lossy();
+			diag.add_error(format!("Failed to parse JSON data from {file}: {err}"));
+			Err(KernelGeneratorError)
+		},
+	}
+}
+
+pub(super) fn load_cubin_kernel(
+	stream: &CudaStream,
+	cubin_path: &Path,
+	kernel_name: &str,
+	smem_size: usize,
+	diag: &mut Diagnostics,
+) -> Result<CudaKernel, KernelGeneratorError> {
+	let module = match stream.load_module_from_cubin(cubin_path) {
+		Ok(module) => module,
+		Err(err) => {
+			cold_path();
+			let cubin_path = cubin_path.display();
+			diag.add_error(format!("failed to load generated CUDA module `{cubin_path}`: {err}"));
+			return Err(KernelGeneratorError);
+		},
+	};
+	let kernel = match module.get_kernel(kernel_name, smem_size) {
+		Ok(kernel) => kernel,
+		Err(err) => {
+			cold_path();
+			let cubin_path = cubin_path.display();
+			diag.add_error(format!(
+				"failed to load generated CUDA kernel `{kernel_name:?}` from `{cubin_path}`: {err}"
+			));
+			return Err(KernelGeneratorError);
+		},
+	};
+	Ok(kernel)
 }
 
 pub(super) fn nvcc_command(arch: &str) -> Command {

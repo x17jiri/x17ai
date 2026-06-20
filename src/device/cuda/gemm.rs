@@ -17,12 +17,11 @@ use askama::Template;
 use serde::Deserialize;
 
 use crate::device::cuda::gemm_templates::{BasicGemmCommonTemplate, BasicGemmKernelTemplate, BasicGemmMetaTemplate, BasicGemmWriterTemplate};
-use crate::{Diagnostics, ErrExtra, ErrPack, KernelGeneratorError, TensorOpError};
-use crate::device::Device;
+use crate::{Diagnostics, ErrPack, KernelGeneratorError, TensorOpError};
 use crate::dtype::DType;
 use crate::tensor::Tensor;
 
-use super::{CudaDevice, cuda_shim::CudaKernel, kernel_build};
+use super::{CudaDevice, cuda_shim::CudaKernel, kernel_build, tensor_check};
 
 //--------------------------------------------------------------------------------------------------
 
@@ -357,10 +356,10 @@ impl<Epilogue: GemmEpilogue> GemmKernel<Epilogue> {
 			&common_path, &kernel_path, &meta_path,
 			diag
 		)?;
-		kernel_build::compile_kernel_ptx(&dir_path, &kernel_path, &ptx_path, diag)?;
-		kernel_build::compile_kernel_cubin(&dir_path, &ptx_path, &cubin_path, diag)?;
-		kernel_build::compile_meta_exe(&dir_path, &meta_path, &meta_exe_path, diag)?;
-		kernel_build::run_meta_exe(&dir_path, &meta_exe_path, &meta_json_path, diag)?;
+		kernel_build::compile_kernel_ptx(&kernel_path, &ptx_path, diag)?;
+		kernel_build::compile_kernel_cubin(&ptx_path, &cubin_path, diag)?;
+		kernel_build::compile_meta_exe(&meta_path, &meta_exe_path, diag)?;
+		kernel_build::run_meta_exe(&meta_exe_path, &meta_json_path, diag)?;
 
 		// TODO - if we have c_rows/c_cols, assert they are multiple of M_PER_BLOCK/N_PER_BLOCK
 
@@ -491,61 +490,25 @@ impl BasicGemmLauncher {
 		device: Rc<CudaDevice>,
 		gemm_config: &GemmConfig,
 		cubin_path: &Path,
-		config_path: &Path,
+		metadata_path: &Path,
 		diag: &mut Diagnostics,
 	) -> Result<Self, KernelGeneratorError> {
-		let config = match std::fs::read_to_string(config_path) {
-			Ok(s) => s,
-			Err(err) => {
-				cold_path();
-				let file = config_path.to_string_lossy();
-				diag.add_error(format!("Error reading file {file}: {err}"));
-				return Err(KernelGeneratorError);
-			},
-		};
-
-		let metadata = match serde_json::from_str::<GemmLauncherMetadata>(&config) {
-			Ok(m) => m,
-			Err(err) => {
-				cold_path();
-				let file = config_path.to_string_lossy();
-				diag.add_error(format!("Failed to parse JSON data from {file}: {err}"));
-				return Err(KernelGeneratorError);
-			},
-		};
-
+		let metadata = kernel_build::read_metadata_json::<GemmLauncherMetadata>(
+			metadata_path, diag
+		)?;
 		if metadata.THREADS_PER_BLOCK == 0
 			|| !metadata.M_PER_BLOCK.is_power_of_two() // Note: this also ensures != 0
 			|| !metadata.N_PER_BLOCK.is_power_of_two()
 		{
 			cold_path();
-			let file = config_path.to_string_lossy();
+			let file = metadata_path.to_string_lossy();
 			diag.add_error(format!("Invalid JSON metadata in {file}"));
 			return Err(KernelGeneratorError);
 		}
 
-		let module = match device.stream.load_module_from_cubin(cubin_path) {
-			Ok(module) => module,
-			Err(err) => {
-				cold_path();
-				diag.add_error(format!(
-					"failed to load generated GEMM CUDA module {}: {err}",
-					cubin_path.display()
-				));
-				return Err(KernelGeneratorError);
-			},
-		};
-		let kernel = match module.get_kernel("kernel", metadata.SMEM_BYTES) {
-			Ok(kernel) => kernel,
-			Err(err) => {
-				cold_path();
-				diag.add_error(format!(
-					"failed to load generated GEMM CUDA kernel \"kernel\" from {}: {err}",
-					cubin_path.display()
-				));
-				return Err(KernelGeneratorError);
-			},
-		};
+		let kernel = kernel_build::load_cubin_kernel(
+			&device.stream, cubin_path, "kernel", metadata.SMEM_BYTES, diag,
+		)?;
 
 		Ok(Self {
 			a_cols: gemm_config.a.cols,
@@ -561,67 +524,17 @@ impl BasicGemmLauncher {
 		})
 	}
 
-	fn matrix_shape<'a>(
-		tensor_name: &'static str,
-		tensor: &'a Tensor,
-		expected_shape: [Option<usize>; 2],
-		expected_device: &CudaDevice,
-		expected_dtype: DType,
-	) -> Result<[usize; 2], ErrPack<TensorOpError>> {
-		let shape = tensor.shape();
-		let &[rows, cols] = shape else {
-			cold_path();
-			return Err(gemm_launch_error(format!(
-				"GEMM input {tensor_name} must be 2D, got shape {shape:?}"
-			)));
-		};
-		if rows == 0 || cols == 0 {
-			cold_path();
-			return Err(gemm_launch_error(format!(
-				"GEMM input {tensor_name} has zero size {shape:?}"
-			)));
-		}
-		if let Some(expected_rows) = expected_shape[0] && rows != expected_rows {
-			cold_path();
-			return Err(gemm_launch_error(format!(
-				"GEMM input {tensor_name} has {rows} rows, but should have {expected_rows}"
-			)));
-		}
-		if let Some(expected_cols) = expected_shape[1] && cols != expected_cols {
-			cold_path();
-			return Err(gemm_launch_error(format!(
-				"GEMM input {tensor_name} has {cols} columns, but should have {expected_cols}"
-			)));
-		}
-		let dtype = tensor.dtype();
-		if  dtype != expected_dtype {
-			cold_path();
-			return Err(gemm_launch_error(format!(
-				"Invalid dtype. Expected {expected_dtype}, got {dtype}"
-			)));
-		}
-		if !tensor.is_on_device(expected_device) {
-			cold_path();
-			let dev: &dyn Device = expected_device;
-			let dev_name = dev.name();
-			return Err(gemm_launch_error(format!(
-				"GEMM input {tensor_name} is not on device {dev_name}"
-			)));
-		}
-		Ok([rows, cols])
-	}
-
 	fn launch_gemm(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<(), ErrPack<TensorOpError>> {
-		let [a_rows, _a_cols] = Self::matrix_shape(
-			"a", a, [None, Some(self.a_cols)],
+		let [a_rows, _a_cols] = tensor_check::matrix_shape(
+			"GEMM", "a", a, [None, Some(self.a_cols)],
 			&self.device, self.a_dtype
 		)?;
-		let [b_rows, _b_cols] = Self::matrix_shape(
-			"b", b, [self.b_rows.map(NonZeroUsize::get), Some(self.a_cols)],
+		let [b_rows, _b_cols] = tensor_check::matrix_shape(
+			"GEMM", "b", b, [self.b_rows.map(NonZeroUsize::get), Some(self.a_cols)],
 			&self.device, self.b_dtype
 		)?;
-		let [c_rows, c_cols] = Self::matrix_shape(
-			"c", c, [Some(a_rows), Some(b_rows)],
+		let [c_rows, c_cols] = tensor_check::matrix_shape(
+			"GEMM", "c", c, [Some(a_rows), Some(b_rows)],
 			&self.device, self.c_dtype
 		)?;
 
@@ -630,7 +543,7 @@ impl BasicGemmLauncher {
 		if c_rows & (self.metadata.M_PER_BLOCK - 1) != 0
 			|| c_cols & (self.metadata.N_PER_BLOCK - 1) != 0 {
 			cold_path();
-			return Err(gemm_launch_error(format!(
+			return Err(ErrPack::new(TensorOpError::Other, format!(
 				"GEMM output shape [{c_rows}, {c_cols}] must be divisible by tile shape [{}, {}]",
 				self.metadata.M_PER_BLOCK, self.metadata.N_PER_BLOCK
 			)));
@@ -719,22 +632,22 @@ impl GemmLauncher<GeGluEpilogue> for GeGluGemmLauncher {
 		let basic = &self.basic;
 		let GemmArgs {a, b, c, extra: _} = args;
 
-		let [a_rows, _a_cols] = BasicGemmLauncher::matrix_shape(
-			"a", a, [None, Some(basic.a_cols)],
+		let [a_rows, _a_cols] = tensor_check::matrix_shape(
+			"GEMM", "a", a, [None, Some(basic.a_cols)],
 			&basic.device, basic.a_dtype
 		)?;
-		let [b_rows, _b_cols] = BasicGemmLauncher::matrix_shape(
-			"b", b, [basic.b_rows.map(NonZeroUsize::get), Some(basic.a_cols)],
+		let [b_rows, _b_cols] = tensor_check::matrix_shape(
+			"GEMM", "b", b, [basic.b_rows.map(NonZeroUsize::get), Some(basic.a_cols)],
 			&basic.device, basic.b_dtype
 		)?;
 		if b_rows % 2 != 0 {
 			cold_path();
-			return Err(gemm_launch_error(format!(
+			return Err(ErrPack::new(TensorOpError::Other, format!(
 				"GeGLU GEMM requires an even raw output column count, got {b_rows}"
 			)));
 		}
-		let [c_rows, c_cols] = BasicGemmLauncher::matrix_shape(
-			"c", c, [Some(a_rows), Some(b_rows / 2)],
+		let [c_rows, c_cols] = tensor_check::matrix_shape(
+			"GEMM", "c", c, [Some(a_rows), Some(b_rows / 2)],
 			&basic.device, basic.c_dtype
 		)?;
 
@@ -743,7 +656,7 @@ impl GemmLauncher<GeGluEpilogue> for GeGluGemmLauncher {
 		if c_rows & (basic.metadata.M_PER_BLOCK - 1) != 0
 			|| c_cols & (basic.metadata.N_PER_BLOCK - 1) != 0 {
 			cold_path();
-			return Err(gemm_launch_error(format!(
+			return Err(ErrPack::new(TensorOpError::Other, format!(
 				"GeGLU GEMM raw output shape [{c_rows}, {b_rows}] must be divisible by tile shape [{}, {}]",
 				basic.metadata.M_PER_BLOCK, basic.metadata.N_PER_BLOCK
 			)));
@@ -804,16 +717,16 @@ impl GemmLauncher<RMSNormEpilogue> for RMSNormGemmLauncher {
 		let Self {basic, head_dim, sep_dim} = &self;
 		let GemmArgs {a, b, c, extra: RMSNormExtraArgs { rrms }} = args;
 
-		let [a_rows, _a_cols] = BasicGemmLauncher::matrix_shape(
-			"a", a, [None, Some(basic.a_cols)],
+		let [a_rows, _a_cols] = tensor_check::matrix_shape(
+			"GEMM", "a", a, [None, Some(basic.a_cols)],
 			&basic.device, basic.a_dtype
 		)?;
-		let [b_rows, _b_cols] = BasicGemmLauncher::matrix_shape(
-			"b", b, [basic.b_rows.map(NonZeroUsize::get), Some(basic.a_cols)],
+		let [b_rows, _b_cols] = tensor_check::matrix_shape(
+			"GEMM", "b", b, [basic.b_rows.map(NonZeroUsize::get), Some(basic.a_cols)],
 			&basic.device, basic.b_dtype
 		)?;
-		let [c_rows, c_cols] = BasicGemmLauncher::matrix_shape(
-			"c", c, [Some(a_rows), Some(b_rows)],
+		let [c_rows, c_cols] = tensor_check::matrix_shape(
+			"GEMM", "c", c, [Some(a_rows), Some(b_rows)],
 			&basic.device, basic.c_dtype
 		)?;
 
@@ -822,7 +735,7 @@ impl GemmLauncher<RMSNormEpilogue> for RMSNormGemmLauncher {
 		if c_rows & (basic.metadata.M_PER_BLOCK - 1) != 0
 			|| c_cols & (basic.metadata.N_PER_BLOCK - 1) != 0 {
 			cold_path();
-			return Err(gemm_launch_error(format!(
+			return Err(ErrPack::new(TensorOpError::Other, format!(
 				"GEMM output shape [{c_rows}, {c_cols}] must be divisible by tile shape [{}, {}]",
 				basic.metadata.M_PER_BLOCK, basic.metadata.N_PER_BLOCK
 			)));
@@ -831,8 +744,8 @@ impl GemmLauncher<RMSNormEpilogue> for RMSNormGemmLauncher {
 		let chunk = head_dim + sep_dim;
 		debug_assert!(chunk.is_power_of_two());
 		let rrms_cols = b_rows >> chunk.trailing_zeros();
-		BasicGemmLauncher::matrix_shape(
-			"rrms", rrms, [Some(a_rows), Some(rrms_cols)],
+		tensor_check::matrix_shape(
+			"GEMM", "rrms", rrms, [Some(a_rows), Some(rrms_cols)],
 			&basic.device, DType::F32
 		)?;
 
@@ -863,16 +776,6 @@ impl GemmLauncher<RMSNormEpilogue> for RMSNormGemmLauncher {
 				&mut raw_args,
 			)
 		}
-	}
-}
-
-fn gemm_launch_error(message: impl Into<String>) -> ErrPack<TensorOpError> {
-	ErrPack {
-		code: TensorOpError::Other,
-		extra: Some(Box::new(ErrExtra {
-			message: message.into().into(),
-			nested: None,
-		})),
 	}
 }
 

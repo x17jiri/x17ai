@@ -370,7 +370,6 @@ struct AttnForward {
 		FixedI8 const *gSinkK_ptr,
 		FixedI8 const *gSinkV_ptr,
 		f32 const *gAttnTemperature_ptr,
-		i32 const *gMax_ptr,
 		FixedI8 *gOut_ptr,
 		f32 *gL_ptr,
 		usize window_size
@@ -628,11 +627,10 @@ attn_forward(
 	FixedI8 const *gSinkK_ptr,
 	FixedI8 const *gSinkV_ptr,
 	f32 const *gAttnTemperature_ptr,
-	i32 const *gMax_ptr,
 	FixedI8 *gOut_ptr,
 	f32 *gL_ptr,
 	usize window_size
 ) {
 	AttnForward attn_forward = AttnForward();
-	attn_forward.run(seq_len, gQ_ptr, gKV_ptr, gSinkK_ptr, gSinkV_ptr, gAttnTemperature_ptr, gMax_ptr, gOut_ptr, gL_ptr, window_size);
+	attn_forward.run(seq_len, gQ_ptr, gKV_ptr, gSinkK_ptr, gSinkV_ptr, gAttnTemperature_ptr, gOut_ptr, gL_ptr, window_size);
 }

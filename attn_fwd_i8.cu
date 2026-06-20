@@ -27,7 +27,6 @@ int main(int argc, char *argv[]) {
 		N_HEADS,
 		HEADS_PER_KERNEL,
 		HEAD_DIM,
-		MODEL_DIM,
 		PACKED_DIM,
 		KV_PACKED_DIM,
 		PACKED_DIM
@@ -125,7 +124,6 @@ int main(int argc, char *argv[]) {
 				d_sink_k,
 				d_sink_v,
 				d_attn_temperature,
-				d_maxes,
 				d_out,
 				d_L,
 				WINDOW_SIZE
@@ -155,7 +153,6 @@ int main(int argc, char *argv[]) {
 				d_sink_k,
 				d_sink_v,
 				d_attn_temperature,
-				d_maxes,
 				d_out,
 				d_L,
 				WINDOW_SIZE
