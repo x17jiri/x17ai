@@ -11,7 +11,8 @@ void kernel(
 	b8::FixedI8 *a, usize a_rows,
 	b8::FixedI8 *b, usize b_rows,
 	{{writer.c_type}} *c{% if writer.has_rrms_output %},
-	f32 *rrms{% endif %}
+	f32 *rrms{% endif %}{% if writer.has_residual_input %},
+	b8::FixedI8 *residual{% endif %}
 ) {
 	{% match b_rows -%}
 	{% when Some with (rows) %}
@@ -22,6 +23,10 @@ void kernel(
 
 	auto a_loader = InputLoader(a, a_rows);
 	auto b_loader = WeightLoader(b, b_rows);
+	{% if writer.has_residual_input %}
+	auto c_writer = Writer(c, residual, {{writer.c_stride_expr}});
+	{% else %}
 	auto c_writer = Writer(c, {{writer.c_stride_expr}}{% if writer.has_rrms_output %}, rrms{% endif %});
+	{% endif %}
 	Kernel().run(a_loader, b_loader, c_writer);
 }

@@ -29,7 +29,6 @@ namespace Ffn_y_fwd {
 
 	static constexpr f64 Y_SCALE = math::constexpr_sqrt(math::fast::GELU_VAR_FIX_2 / f64(F_WIDTH));
 	using Writer = b8::FixedI8MatrixResidualWriter<
-		MODEL_DIM,
 		InputLoader::M,
 		WeightLoader::K,
 		Y_SCALE
@@ -46,7 +45,7 @@ namespace Ffn_y_fwd {
 	) {
 		auto a = InputLoader(inp, n_inputs);
 		auto b = WeightLoader(w, Y_PROJ_OUTPUTS);
-		auto o = Writer(out, residual);
+		auto o = Writer(out, residual, MODEL_DIM);
 		Kernel().run(a, b, o);
 	}
 }

@@ -42,9 +42,7 @@ pub struct RMSNormConfig {
 }
 
 pub struct ResidualConfig {
-	pub old_scale: Scale,
-	pub new_scale: Scale,
-	pub out_scale: Scale,
+	pub scale: Scale,
 }
 
 pub struct GeGluConfig {
@@ -86,6 +84,7 @@ impl EpilogueConfig for ScaleConfig {
 		BasicGemmWriterTemplate {
 			use_l2_norm: false,
 			use_geglu: false,
+			use_residual: false,
 			c_type: "b8::FixedI8",
 			c_stride_expr: "b_rows",
 			scale_val: format_cpp_f64(self.0.value),
@@ -102,6 +101,7 @@ impl EpilogueConfig for ScaleConfig {
 			geglu_out_scale_val: String::new(),
 			geglu_out_scale_dscr: String::new(),
 			has_rrms_output: false,
+			has_residual_input: false,
 		}
 	}
 }
@@ -134,6 +134,7 @@ impl EpilogueConfig for RMSNormConfig {
 		BasicGemmWriterTemplate {
 			use_l2_norm: true,
 			use_geglu: false,
+			use_residual: false,
 			c_type: "b8::FixedI8",
 			c_stride_expr: "b_rows",
 			scale_val: String::new(),
@@ -154,6 +155,7 @@ impl EpilogueConfig for RMSNormConfig {
 			geglu_out_scale_val: String::new(),
 			geglu_out_scale_dscr: String::new(),
 			has_rrms_output: true,
+			has_residual_input: false,
 		}
 	}
 }
@@ -163,8 +165,39 @@ impl EpilogueConfig for ResidualConfig {
 		c_dtype == DType::Int8
 	}
 
-	fn writer_template(&self, _c_cols: Option<NonZeroUsize>) -> BasicGemmWriterTemplate {
-		todo!("support residual GEMM epilogues")
+	fn writer_template(&self, c_cols: Option<NonZeroUsize>) -> BasicGemmWriterTemplate {
+		if !self.scale.value.is_finite() || self.scale.value <= 0.0 {
+			todo!("support invalid residual GEMM scale values");
+		}
+		let Some(c_cols) = c_cols else {
+			todo!("support residual GEMM outputs with runtime column count");
+		};
+		if c_cols.get() % 2 != 0 {
+			todo!("support residual GEMM outputs with odd pregate column count");
+		}
+
+		BasicGemmWriterTemplate {
+			use_l2_norm: false,
+			use_geglu: false,
+			use_residual: true,
+			c_type: "b8::FixedI8",
+			c_stride_expr: "b_rows / 2",
+			scale_val: format_cpp_f64(self.scale.value),
+			scale_dscr: self.scale.description.as_ref().to_owned(),
+			head_dim: 0,
+			sep_dim: 0,
+			eps_val: String::new(),
+			head_scale_val: String::new(),
+			head_scale_dscr: String::new(),
+			sep_scale_val: String::new(),
+			sep_scale_dscr: String::new(),
+			geglu_inp_scale_val: String::new(),
+			geglu_inp_scale_dscr: String::new(),
+			geglu_out_scale_val: String::new(),
+			geglu_out_scale_dscr: String::new(),
+			has_rrms_output: false,
+			has_residual_input: true,
+		}
 	}
 }
 
@@ -190,6 +223,7 @@ impl EpilogueConfig for GeGluConfig {
 		BasicGemmWriterTemplate {
 			use_l2_norm: false,
 			use_geglu: true,
+			use_residual: false,
 			c_type: "b8::E4m3",
 			c_stride_expr: "b_rows / 2",
 			scale_val: String::new(),
@@ -206,6 +240,7 @@ impl EpilogueConfig for GeGluConfig {
 			geglu_out_scale_val: format_cpp_f64(self.out_scale.value),
 			geglu_out_scale_dscr: self.out_scale.description.as_ref().to_owned(),
 			has_rrms_output: false,
+			has_residual_input: false,
 		}
 	}
 }
@@ -234,6 +269,16 @@ pub struct RMSNormExtraArgs<'a> {
 impl<'a> RMSNormExtraArgs<'a> {
 	pub fn new(rrms: &'a Tensor) -> Self {
 		Self { rrms }
+	}
+}
+
+pub struct ResidualExtraArgs<'a> {
+	pub residual: &'a Tensor,
+}
+
+impl<'a> ResidualExtraArgs<'a> {
+	pub fn new(residual: &'a Tensor) -> Self {
+		Self { residual }
 	}
 }
 
@@ -285,8 +330,8 @@ impl GemmEpilogue for RMSNormEpilogue {
 
 impl GemmEpilogue for ResidualEpilogue {
 	type Config = ResidualConfig;
-	type Launcher = BasicGemmLauncher;
-	type ExtraArgs<'a> = NoExtraArgs<'a>;
+	type Launcher = ResidualGemmLauncher;
+	type ExtraArgs<'a> = ResidualExtraArgs<'a>;
 }
 
 impl GemmEpilogue for GeGluEpilogue {
@@ -594,7 +639,11 @@ impl GemmLauncher<ScaleEpilogue> for BasicGemmLauncher {
 	}
 }
 
-impl GemmLauncher<ResidualEpilogue> for BasicGemmLauncher {
+pub struct ResidualGemmLauncher {
+	_basic: BasicGemmLauncher,
+}
+
+impl GemmLauncher<ResidualEpilogue> for ResidualGemmLauncher {
 	fn new(
 		device: Rc<CudaDevice>,
 		gemm_config: &GemmConfig,
@@ -603,11 +652,14 @@ impl GemmLauncher<ResidualEpilogue> for BasicGemmLauncher {
 		config_path: &Path,
 		diag: &mut Diagnostics,
 	) -> Result<Self, KernelGeneratorError> {
-		Self::new(device, gemm_config, cubin_path, config_path, diag)
+		let basic = BasicGemmLauncher::new(device, gemm_config, cubin_path, config_path, diag)?;
+		Ok(Self { _basic: basic })
 	}
 
 	fn launch(&self, args: GemmArgs<ResidualEpilogue>) -> Result<(), ErrPack<TensorOpError>> {
-		self.launch_gemm(args.a, args.b, args.c)
+		let _ = self;
+		let _ = args;
+		todo!("support residual GEMM launches")
 	}
 }
 

@@ -14,6 +14,7 @@ use askama::Template;
 pub struct BasicGemmWriterTemplate {
 	pub use_l2_norm: bool,
 	pub use_geglu: bool,
+	pub use_residual: bool,
 	pub c_type: &'static str,
 	pub c_stride_expr: &'static str,
 	pub scale_val: String,
@@ -30,6 +31,7 @@ pub struct BasicGemmWriterTemplate {
 	pub geglu_out_scale_val: String,
 	pub geglu_out_scale_dscr: String,
 	pub has_rrms_output: bool,
+	pub has_residual_input: bool,
 }
 
 #[derive(Template)]

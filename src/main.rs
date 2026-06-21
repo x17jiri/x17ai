@@ -27,7 +27,9 @@ use x17ai::Diagnostics;
 
 const HEAD_DIM: usize = 32;
 const N_HEADS: usize = 64;
+const ATTN_WIDTH: usize = N_HEADS * HEAD_DIM;
 const F_WIDTH: usize = 2048;
+const FIXED_I8_SCALE: f64 = 8.0;
 const WINDOW_SIZE: usize = 0;
 const L2_NORM_EPS: f64 = 1.0 / (1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0);
 
@@ -137,6 +139,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 		},
 		Err(err) => {
 			print_diagnostics(&ffn_f_diagnostics);
+			return Err(err);
+		},
+	};
+
+	let mut attn_y_diagnostics = Diagnostics::new();
+	let attn_y_kernel = match create_attn_y_kernel(
+		device.clone(),
+		model_dim,
+		ATTN_WIDTH,
+		&mut attn_y_diagnostics,
+	) {
+		Ok(kernel) => {
+			print_diagnostics(&attn_y_diagnostics);
+			kernel
+		},
+		Err(err) => {
+			print_diagnostics(&attn_y_diagnostics);
 			return Err(err);
 		},
 	};
@@ -300,6 +319,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	println!("ffn_f metadata source: {}", ffn_f_kernel.meta_path.display());
 	println!("ffn_f metadata executable: {}", ffn_f_kernel.meta_exe_path.display());
 	println!("ffn_f metadata json: {}", ffn_f_kernel.meta_json_path.display());
+	println!("generated ATTN Y GEMM kernel files in {}", attn_y_kernel.dir_path.display());
+	println!("attn_y common source: {}", attn_y_kernel.common_path.display());
+	println!("attn_y kernel source: {}", attn_y_kernel.kernel_path.display());
+	println!("attn_y kernel ptx: {}", attn_y_kernel.ptx_path.display());
+	println!("attn_y kernel cubin: {}", attn_y_kernel.cubin_path.display());
+	println!("attn_y metadata source: {}", attn_y_kernel.meta_path.display());
+	println!("attn_y metadata executable: {}", attn_y_kernel.meta_exe_path.display());
+	println!("attn_y metadata json: {}", attn_y_kernel.meta_json_path.display());
 	println!("generated attention kernel files in {}", attn_kernel.dir_path.display());
 	println!("attention common source: {}", attn_kernel.common_path.display());
 	println!("attention kernel source: {}", attn_kernel.kernel_path.display());
@@ -455,6 +482,54 @@ fn create_attn_kernel(
 		Ok(kernel) => Ok(kernel),
 		Err(_) => Err(other_error(format!(
 			"failed to generate attn_fwd_i8 kernel; {} error(s)",
+			diagnostics.err_count
+		)).into()),
+	}
+}
+
+fn create_attn_y_kernel(
+	device: Rc<CudaDevice>,
+	model_dim: usize,
+	attn_width: usize,
+	diagnostics: &mut Diagnostics,
+) -> Result<gemm::GemmKernel<gemm::ResidualEpilogue>, Box<dyn std::error::Error>> {
+	let Some(y_proj_outputs) = NonZeroUsize::new(2 * model_dim) else {
+		return Err(invalid_data("expected non-zero attention Y raw projection output count".to_owned()).into());
+	};
+
+	let gemm_config = gemm::GemmConfig {
+		a: gemm::GemmInputConfig {
+			dtype: DType::Int8,
+			cols: attn_width,
+			rows: None,
+			trans: false,
+		},
+		b: gemm::GemmInputConfig {
+			dtype: DType::Int8,
+			cols: attn_width,
+			rows: Some(y_proj_outputs),
+			trans: true,
+		},
+		c_dtype: DType::Int8,
+	};
+	let scale = 1.0 / (f64::sqrt(attn_width as f64) * FIXED_I8_SCALE * FIXED_I8_SCALE);
+	let residual_config = gemm::ResidualConfig {
+		scale: gemm::Scale {
+			value: scale,
+			description: format!("1 / (sqrt({attn_width}) * {FIXED_I8_SCALE} * {FIXED_I8_SCALE})").into(),
+		},
+	};
+
+	match gemm::GemmKernel::<gemm::ResidualEpilogue>::new(
+		device,
+		"attn_y_fwd",
+		&gemm_config,
+		&residual_config,
+		diagnostics,
+	) {
+		Ok(kernel) => Ok(kernel),
+		Err(_) => Err(other_error(format!(
+			"failed to generate attn_y_fwd kernel; {} error(s)",
 			diagnostics.err_count
 		)).into()),
 	}

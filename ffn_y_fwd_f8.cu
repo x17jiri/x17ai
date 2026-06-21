@@ -29,7 +29,6 @@ namespace Ffn_y_fwd_f8 {
 	>;
 
 	using Writer = b8::FixedI8MatrixResidualWriter<
-		MODEL_DIM,
 		InputLoader::M,
 		WeightLoader::K,
 		OUTPUT_SCALE
@@ -46,7 +45,7 @@ namespace Ffn_y_fwd_f8 {
 	) {
 		auto a = InputLoader(inp, n_inputs);
 		auto b = WeightLoader(w, Y_PROJ_OUTPUTS);
-		auto o = Writer(out, residual);
+		auto o = Writer(out, residual, MODEL_DIM);
 		Kernel().run(a, b, o);
 	}
 }

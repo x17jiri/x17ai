@@ -394,10 +394,10 @@ namespace b8 {
 		}
 	};
 
-	template<usize GN, usize M_PER_BLOCK, usize N_PER_BLOCK, f64 SCALE>
+	template<usize M_PER_BLOCK, usize N_PER_BLOCK, f64 SCALE>
 	struct FixedI8MatrixResidualWriter: MatrixWriter<FixedI8, M_PER_BLOCK, N_PER_BLOCK> {
 		using Base = MatrixWriter<FixedI8, M_PER_BLOCK, N_PER_BLOCK>;
-		using GResidual = GMatrixDynSize<FixedI8, GN>;
+		using GResidual = GMatrixDynSize<FixedI8, N_PER_BLOCK / 2>;
 		using SResidual = SMatrix<FixedI8, M_PER_BLOCK, N_PER_BLOCK>;
 
 		static constexpr usize SMEM_BYTES = M_PER_BLOCK * N_PER_BLOCK * sizeof(FixedI8);
@@ -409,9 +409,9 @@ namespace b8 {
 		usize residualRow0;
 		usize residualCol0;
 
-		X17_DEVICE FixedI8MatrixResidualWriter(FixedI8 *gC, FixedI8 *gResidual):
-			Base(gC, GN),
-			gResidual(gResidual),
+		X17_DEVICE FixedI8MatrixResidualWriter(FixedI8 *gC, FixedI8 *gResidual, usize c_stride):
+			Base(gC, c_stride),
+			gResidual(gResidual, c_stride),
 			sResidual(),
 			residualRow0(0),
 			residualCol0(0)

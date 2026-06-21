@@ -46,11 +46,19 @@ namespace {
 		{{writer.geglu_out_scale_val}} // OUT_SCALE = {{writer.geglu_out_scale_dscr}}
 	>;
 	{% else %}
+	{% if writer.use_residual %}
+	using Writer = b8::FixedI8MatrixResidualWriter<
+		InputLoader::M, // M_PER_BLOCK
+		WeightLoader::K, // N_PER_BLOCK
+		{{writer.scale_val}} // SCALE = {{writer.scale_dscr}}
+	>;
+	{% else %}
 	using Writer = b8::FixedI8MatrixWriter<
 		InputLoader::M, // M_PER_BLOCK
 		WeightLoader::K, // N_PER_BLOCK
 		{{writer.scale_val}} // SCALE = {{writer.scale_dscr}}
 	>;
+	{% endif %}
 	{% endif %}
 	{% endif %}
 

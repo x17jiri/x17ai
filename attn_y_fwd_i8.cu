@@ -32,7 +32,6 @@ namespace Attn_y_fwd {
 		/ (f64(b8::FIXED_I8_SCALE) * f64(b8::FIXED_I8_SCALE));
 
 	using Writer = b8::FixedI8MatrixResidualWriter<
-		MODEL_DIM,
 		InputLoader::M,
 		WeightLoader::K,
 		OUTPUT_SCALE
@@ -49,7 +48,7 @@ namespace Attn_y_fwd {
 	) {
 		auto a = InputLoader(inp, n_inputs);
 		auto b = WeightLoader(w, Y_PROJ_OUTPUTS);
-		auto o = Writer(out, residual);
+		auto o = Writer(out, residual, MODEL_DIM);
 		Kernel().run(a, b, o);
 	}
 }
