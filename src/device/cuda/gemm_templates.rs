@@ -39,6 +39,9 @@ pub struct BasicGemmWriterTemplate {
 pub struct BasicGemmCommonTemplate<'a> {
 	pub a_cols: usize,
 	pub b_rows: Option<NonZeroUsize>,
+	pub use_b16_gemm: bool,
+	pub a_loader: &'static str,
+	pub b_loader: &'static str,
 	pub writer: &'a BasicGemmWriterTemplate,
 }
 
@@ -47,6 +50,8 @@ pub struct BasicGemmCommonTemplate<'a> {
 pub struct BasicGemmKernelTemplate<'a> {
 	pub a_cols: usize,
 	pub b_rows: Option<NonZeroUsize>,
+	pub a_cpp_type: &'static str,
+	pub b_cpp_type: &'static str,
 	pub writer: &'a BasicGemmWriterTemplate,
 }
 

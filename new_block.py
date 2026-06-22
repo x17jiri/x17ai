@@ -78,6 +78,7 @@ def create_inputs() -> None:
 	store_tensor(ffn_f_weights, "ffn_f_weights_i8.safetensors")
 	store_tensor(ffn_y_weights, "ffn_y_weights_f32.bin", expected_variance=1.0)
 	store_tensor(ffn_y_weights, "ffn_y_weights_i8.bin")
+	store_tensor(ffn_y_weights, "ffn_y_weights_i8.safetensors")
 
 def rms_norm(tensor: torch.Tensor, eps: float = L2_NORM_EPS) -> tuple[torch.Tensor, torch.Tensor]:
 	rrms = torch.rsqrt(torch.mean(tensor * tensor, dim=-1, keepdim=True) + eps)
@@ -148,6 +149,7 @@ def run_ffn() -> None:
 	store_tensor(f_f8, "ffn_f_f8.safetensors")
 	store_tensor(y, "ffn_y_bf16.bin")
 	store_tensor(y, "ffn_y_i8.bin")
+	store_tensor(y, "ffn_y_i8.safetensors")
 
 #---------------------------------------------------------------------------------------------------
 
@@ -273,7 +275,7 @@ def run_attn() -> None:
 	v_i8 = quantize(v)
 	kv_i8 = torch.cat((k_i8, v_i8), dim=2)
 
-	RUN_ATTN = True
+	RUN_ATTN = False
 	if RUN_ATTN:
 		attn_out, attn_maxes, attn_maxes_i32 = attn(q_i8, k_i8, v_i8, sinks_k, sinks_v, attn_temperature)
 		attn_out_flat = attn_out.reshape(N_INPUTS, ATTN_WIDTH)

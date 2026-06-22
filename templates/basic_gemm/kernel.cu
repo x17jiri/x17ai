@@ -8,8 +8,8 @@
 
 extern "C" X17_KERNEL(Kernel::THREADS_PER_BLOCK)
 void kernel(
-	b8::FixedI8 *a, usize a_rows,
-	b8::FixedI8 *b, usize b_rows,
+	{{a_cpp_type}} *a, usize a_rows,
+	{{b_cpp_type}} *b, usize b_rows,
 	{{writer.c_type}} *c{% if writer.has_rrms_output %},
 	f32 *rrms{% endif %}{% if writer.has_residual_input %},
 	b8::FixedI8 *residual{% endif %}

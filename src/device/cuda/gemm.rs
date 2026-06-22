@@ -447,12 +447,6 @@ impl<Epilogue: GemmEpilogue> GemmKernel<Epilogue> {
 		meta_path: &Path,
 		diag: &mut Diagnostics,
 	) -> Result<(), KernelGeneratorError> {
-		if gemm_config.a.dtype != DType::Int8 {
-			todo!("support GEMM inputs other than i8");
-		}
-		if gemm_config.b.dtype != DType::Int8 {
-			todo!("support GEMM weights other than i8");
-		}
 		if !epilogue_config.is_c_dtype_allowed(gemm_config.c_dtype) {
 			todo!("support GEMM output dtype incompatible with epilogue");
 		}
@@ -470,11 +464,25 @@ impl<Epilogue: GemmEpilogue> GemmKernel<Epilogue> {
 			todo!("support GEMM outputs with runtime column count");
 		};
 		let b_rows = Some(b_rows);
+
+		let (a_cpp_type, a_loader) = match gemm_config.a.dtype {
+			DType::Int8 => ("b8::FixedI8", "FixedI8MatrixLoader"),
+			DType::E4m3 => ("b8::E4m3", "E4m3MatrixLoader"),
+			_ => todo!("support this GEMM input A dtype"),
+		};
+		let (b_cpp_type, b_loader) = match gemm_config.b.dtype {
+			DType::Int8 => ("b8::FixedI8", "FixedI8MatrixLoader"),
+			DType::E4m3 => ("b8::E4m3", "E4m3MatrixLoader"),
+			_ => todo!("support this GEMM input B dtype"),
+		};
 		let writer_template = epilogue_config.writer_template(b_rows);
 
 		let common = BasicGemmCommonTemplate {
 			a_cols: gemm_config.a.cols,
 			b_rows,
+			use_b16_gemm: gemm_config.a.dtype == DType::E4m3 || gemm_config.b.dtype == DType::E4m3,
+			a_loader,
+			b_loader,
 			writer: &writer_template,
 		};
 		kernel_build::write_generated_file(
@@ -486,6 +494,8 @@ impl<Epilogue: GemmEpilogue> GemmKernel<Epilogue> {
 		let kernel = BasicGemmKernelTemplate {
 			a_cols: gemm_config.a.cols,
 			b_rows,
+			a_cpp_type,
+			b_cpp_type,
 			writer: &writer_template,
 		};
 		kernel_build::write_generated_file(

@@ -6,24 +6,30 @@
 
 #include "../../../cuda/utils.cuh"
 #include "../../../cuda/gemm_b8.cuh"
+#include "../../../cuda/gemm_b16.cuh"
 
 namespace {
 	static constexpr usize A_COLS = {{a_cols}};
 	static constexpr usize B_COLS = A_COLS;
+	{% if use_b16_gemm %}
+	namespace gemm_namespace = b16;
+	static constexpr usize K_STEP = 64;
+	{% else %}
+	namespace gemm_namespace = b8;
+	static constexpr usize K_STEP = 128;
+	{% endif %}
 
 	using InputLoader =
-		b8::MatrixLoader<
-			b8::FixedI8,
+		gemm_namespace::{{a_loader}}<
 			A_COLS,
-			64, 128
+			64, K_STEP
 		>;
 
 	using WeightLoader =
-		b8::MatrixTransLoader<
-			b8::MatrixLoader<
-				b8::FixedI8,
+		gemm_namespace::MatrixTransLoader<
+			gemm_namespace::{{b_loader}}<
 				B_COLS,
-				128, 128
+				128, K_STEP
 			>
 		>;
 
@@ -62,5 +68,5 @@ namespace {
 	{% endif %}
 	{% endif %}
 
-	using Kernel = b8::Gemm<InputLoader, WeightLoader, Writer>;
+	using Kernel = gemm_namespace::Gemm<InputLoader, WeightLoader, Writer>;
 }

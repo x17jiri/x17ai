@@ -66,6 +66,13 @@ namespace b8 {
 	};
 
 	template<
+		const usize GN,
+		const usize M, const usize K,
+		const usize GMEM_PRELOAD = 2
+	>
+	using FixedI8MatrixLoader = MatrixLoader<FixedI8, GN, M, K, GMEM_PRELOAD>;
+
+	template<
 		typename T,
 		const usize _GN,
 		const usize _M, const usize _K,
