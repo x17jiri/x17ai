@@ -640,7 +640,7 @@ impl GemmLauncher<ScaleEpilogue> for BasicGemmLauncher {
 }
 
 pub struct ResidualGemmLauncher {
-	_basic: BasicGemmLauncher,
+	basic: BasicGemmLauncher,
 }
 
 impl GemmLauncher<ResidualEpilogue> for ResidualGemmLauncher {
@@ -653,13 +653,77 @@ impl GemmLauncher<ResidualEpilogue> for ResidualGemmLauncher {
 		diag: &mut Diagnostics,
 	) -> Result<Self, KernelGeneratorError> {
 		let basic = BasicGemmLauncher::new(device, gemm_config, cubin_path, config_path, diag)?;
-		Ok(Self { _basic: basic })
+		Ok(Self { basic })
 	}
 
 	fn launch(&self, args: GemmArgs<ResidualEpilogue>) -> Result<(), ErrPack<TensorOpError>> {
-		let _ = self;
-		let _ = args;
-		todo!("support residual GEMM launches")
+		let basic = &self.basic;
+		let GemmArgs {a, b, c, extra: ResidualExtraArgs { residual }} = args;
+
+		let [a_rows, _a_cols] = tensor_check::matrix_shape(
+			"Residual GEMM", "a", a, [None, Some(basic.a_cols)],
+			&basic.device, basic.a_dtype
+		)?;
+		let [b_rows, _b_cols] = tensor_check::matrix_shape(
+			"Residual GEMM", "b", b, [basic.b_rows.map(NonZeroUsize::get), Some(basic.a_cols)],
+			&basic.device, basic.b_dtype
+		)?;
+		if b_rows % 2 != 0 {
+			cold_path();
+			return Err(ErrPack::new(TensorOpError::Other, format!(
+				"Residual GEMM requires an even raw output column count, got {b_rows}"
+			)));
+		}
+		let output_cols = b_rows / 2;
+		let [c_rows, _c_cols] = tensor_check::matrix_shape(
+			"Residual GEMM", "c", c, [Some(a_rows), Some(output_cols)],
+			&basic.device, basic.c_dtype
+		)?;
+		tensor_check::matrix_shape(
+			"Residual GEMM", "residual", residual, [Some(a_rows), Some(output_cols)],
+			&basic.device, DType::Int8
+		)?;
+
+		debug_assert!(basic.metadata.M_PER_BLOCK.is_power_of_two());
+		debug_assert!(basic.metadata.N_PER_BLOCK.is_power_of_two());
+		debug_assert!(basic.metadata.N_PER_BLOCK > 1);
+		let raw_c_cols = b_rows;
+		if c_rows & (basic.metadata.M_PER_BLOCK - 1) != 0
+			|| raw_c_cols & (basic.metadata.N_PER_BLOCK - 1) != 0 {
+			cold_path();
+			return Err(ErrPack::new(TensorOpError::Other, format!(
+				"Residual GEMM raw output shape [{c_rows}, {b_rows}] must be divisible by tile shape [{}, {}]",
+				basic.metadata.M_PER_BLOCK, basic.metadata.N_PER_BLOCK
+			)));
+		}
+
+		let grid_x = c_rows >> basic.metadata.M_PER_BLOCK.trailing_zeros();
+		let grid_y = raw_c_cols >> basic.metadata.N_PER_BLOCK.trailing_zeros();
+		let mut a_ptr = unsafe { a.device_ptr().as_ptr::<c_void>() };
+		let mut a_rows_arg = a_rows;
+		let mut b_ptr = unsafe { b.device_ptr().as_ptr::<c_void>() };
+		let mut b_rows_arg = b_rows;
+		let mut c_ptr = unsafe { c.device_ptr().as_ptr::<c_void>() };
+		let mut residual_ptr = unsafe { residual.device_ptr().as_ptr::<c_void>() };
+
+		// TODO - use struct instead of array of pointers
+		let mut raw_args = [
+			(&raw mut a_ptr).cast::<c_void>(),
+			(&raw mut a_rows_arg).cast::<c_void>(),
+			(&raw mut b_ptr).cast::<c_void>(),
+			(&raw mut b_rows_arg).cast::<c_void>(),
+			(&raw mut c_ptr).cast::<c_void>(),
+			(&raw mut residual_ptr).cast::<c_void>(),
+		];
+		unsafe {
+			basic.kernel.launch(
+				&basic.device.stream,
+				[grid_x, grid_y, 1],
+				[basic.metadata.THREADS_PER_BLOCK, 1, 1],
+				basic.metadata.SMEM_BYTES,
+				&mut raw_args,
+			)
+		}
 	}
 }
 
@@ -698,8 +762,9 @@ impl GemmLauncher<GeGluEpilogue> for GeGluGemmLauncher {
 				"GeGLU GEMM requires an even raw output column count, got {b_rows}"
 			)));
 		}
+		let output_cols = b_rows / 2;
 		let [c_rows, _c_cols] = tensor_check::matrix_shape(
-			"GEMM", "c", c, [Some(a_rows), Some(b_rows / 2)],
+			"GEMM", "c", c, [Some(a_rows), Some(output_cols)],
 			&basic.device, basic.c_dtype
 		)?;
 

@@ -49,6 +49,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 		tensor_path("ffn_f_weights_i8.safetensors"),
 		device.clone(),
 	)?;
+	let attn_y_weights = Tensor::from_safetensors_file(
+		tensor_path("attn_y_weights_i8.safetensors"),
+		device.clone(),
+	)?;
 	let sinks_k = Tensor::from_safetensors_file(
 		tensor_path("sinks_k_i8.safetensors"),
 		device.clone(),
@@ -64,6 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let (n_inputs, model_dim, q_proj_outputs) = validate_attn_q_inputs(&x, &q_weights)?;
 	let kv_proj_outputs = validate_attn_kv_inputs(&x, &kv_weights, model_dim)?;
 	let ffn_f_proj_outputs = validate_ffn_f_inputs(&x, &ffn_f_weights, model_dim)?;
+	let attn_y_proj_outputs = validate_attn_y_inputs(&attn_y_weights, model_dim, ATTN_WIDTH)?;
 	let kv_weights = kv_weights.reshape(&[kv_proj_outputs, model_dim])?;
 
 	let q = Tensor::new_empty(&[n_inputs, q_proj_outputs], DType::Int8, device.clone())?;
@@ -71,6 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let k_rrms = Tensor::new_empty(&[n_inputs, N_HEADS], DType::F32, device.clone())?;
 	let attn_out = Tensor::new_empty(&[n_inputs, q_proj_outputs], DType::Int8, device.clone())?;
 	let attn_l = Tensor::new_empty(&[N_HEADS, n_inputs], DType::F32, device.clone())?;
+	let attn_y = Tensor::new_empty(&[n_inputs, model_dim], DType::Int8, device.clone())?;
 	let ffn_f = Tensor::new_empty(&[n_inputs, F_WIDTH], DType::E4m3, device.clone())?;
 
 	let mut q_diagnostics = Diagnostics::new();
@@ -194,6 +200,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	})?;
 	attn_timer.stop()?;
 
+	let attn_y_timer = CudaTimer::new(device.as_ref())?;
+	attn_y_timer.start()?;
+	attn_y_kernel.launch(gemm::GemmArgs {
+		a: &attn_out,
+		b: &attn_y_weights,
+		c: &attn_y,
+		extra: gemm::ResidualExtraArgs::new(&x),
+	})?;
+	attn_y_timer.stop()?;
+
 	let ffn_f_timer = CudaTimer::new(device.as_ref())?;
 	ffn_f_timer.start()?;
 	ffn_f_kernel.launch(gemm::GemmArgs {
@@ -209,11 +225,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let k_rrms = k_rrms.to_cpu()?;
 	let attn_out = attn_out.to_cpu()?;
 	let attn_l = attn_l.to_cpu()?;
+	let attn_y = attn_y.to_cpu()?;
 	let ffn_f = ffn_f.to_cpu()?;
 	device.synchronize()?;
 	let q_kernel_seconds = q_timer.elapsed_seconds()?;
 	let kv_kernel_seconds = kv_timer.elapsed_seconds()?;
 	let attn_kernel_seconds = attn_timer.elapsed_seconds()?;
+	let attn_y_kernel_seconds = attn_y_timer.elapsed_seconds()?;
 	let ffn_f_kernel_seconds = ffn_f_timer.elapsed_seconds()?;
 
 	q.save_safetensors_file(output_path("q_i8.safetensors"))?;
@@ -221,6 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	k_rrms.save_safetensors_file(output_path("k_rrms_f32.safetensors"))?;
 	attn_out.save_safetensors_file(output_path("attn_out_i8.safetensors"))?;
 	attn_l.save_safetensors_file(output_path("attn_l_f32.safetensors"))?;
+	attn_y.save_safetensors_file(output_path("attn_y_i8.safetensors"))?;
 	ffn_f.save_safetensors_file(output_path("ffn_f_f8.safetensors"))?;
 
 	println!("loaded x: {:?} {:?}, {} bytes on CUDA", x.shape(), x.dtype(), x.bytes());
@@ -241,6 +260,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 		ffn_f_weights.shape(),
 		ffn_f_weights.dtype(),
 		ffn_f_weights.bytes()
+	);
+	println!(
+		"loaded attn_y_weights: {:?} {:?}, {} bytes on CUDA",
+		attn_y_weights.shape(),
+		attn_y_weights.dtype(),
+		attn_y_weights.bytes()
 	);
 	println!(
 		"loaded sinks_k: {:?} {:?}, {} bytes on CUDA",
@@ -281,6 +306,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 		attn_l.bytes()
 	);
 	println!(
+		"allocated attn_y: {:?} {:?}, {} bytes copied to CPU",
+		attn_y.shape(),
+		attn_y.dtype(),
+		attn_y.bytes()
+	);
+	println!(
 		"allocated ffn_f: {:?} {:?}, {} bytes copied to CPU",
 		ffn_f.shape(),
 		ffn_f.dtype(),
@@ -294,6 +325,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	);
 	println!(
 		"ffn_f dimensions: n_inputs={n_inputs}, model_dim={model_dim}, ffn_f_proj_outputs={ffn_f_proj_outputs}"
+	);
+	println!(
+		"attn_y dimensions: n_inputs={n_inputs}, attn_width={ATTN_WIDTH}, model_dim={model_dim}, attn_y_proj_outputs={attn_y_proj_outputs}"
 	);
 	println!("generated GEMM kernel files in {}", attn_q_kernel.dir_path.display());
 	println!("common source: {}", attn_q_kernel.common_path.display());
@@ -344,6 +378,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let attn_kernel_ms = attn_kernel_seconds * 1000.0;
 	let attn_kernel_tflops = attn_kernel.n_ops(n_inputs, WINDOW_SIZE) / attn_kernel_seconds / 1.0e12;
 	println!("launched attn_fwd_i8 in {attn_kernel_ms:.4} ms, {attn_kernel_tflops:.3} TFLOPS");
+	let attn_y_kernel_ms = attn_y_kernel_seconds * 1000.0;
+	let attn_y_kernel_tflops = attn_y_kernel.n_ops(&attn_out, &attn_y_weights) / attn_y_kernel_seconds / 1.0e12;
+	println!("launched attn_y_fwd in {attn_y_kernel_ms:.4} ms, {attn_y_kernel_tflops:.3} TFLOPS");
 	let ffn_f_kernel_ms = ffn_f_kernel_seconds * 1000.0;
 	let ffn_f_kernel_tflops = ffn_f_kernel.n_ops(&x, &ffn_f_weights) / ffn_f_kernel_seconds / 1.0e12;
 	println!("launched ffn_f_fwd in {ffn_f_kernel_ms:.4} ms, {ffn_f_kernel_tflops:.3} TFLOPS");
@@ -352,6 +389,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	println!("stored {}", output_path("k_rrms_f32.safetensors").display());
 	println!("stored {}", output_path("attn_out_i8.safetensors").display());
 	println!("stored {}", output_path("attn_l_f32.safetensors").display());
+	println!("stored {}", output_path("attn_y_i8.safetensors").display());
 	println!("stored {}", output_path("ffn_f_f8.safetensors").display());
 
 	Ok(())
@@ -713,6 +751,46 @@ fn validate_attn_kv_inputs(
 		)).into());
 	}
 	Ok(kv_proj_outputs)
+}
+
+fn validate_attn_y_inputs(
+	attn_y_weights: &Tensor,
+	model_dim: usize,
+	attn_width: usize,
+) -> Result<usize, Box<dyn std::error::Error>> {
+	if attn_y_weights.dtype() != DType::Int8 {
+		return Err(invalid_data(format!(
+			"expected attn_y_weights dtype i8, got {}",
+			attn_y_weights.dtype()
+		)).into());
+	}
+	if attn_y_weights.shape().len() != 2 {
+		return Err(invalid_data(format!(
+			"expected attn_y_weights to be rank 2, got shape {:?}",
+			attn_y_weights.shape()
+		)).into());
+	}
+
+	let attn_y_proj_outputs = attn_y_weights.shape()[0];
+	let weights_cols = attn_y_weights.shape()[1];
+	if weights_cols != attn_width {
+		return Err(invalid_data(format!(
+			"expected attn_y_weights second dimension to match attention width; got {weights_cols} vs {attn_width}"
+		)).into());
+	}
+
+	let expected_outputs = 2 * model_dim;
+	if attn_y_proj_outputs != expected_outputs {
+		return Err(invalid_data(format!(
+			"expected attn_y_weights first dimension to be {expected_outputs}, got {attn_y_proj_outputs}"
+		)).into());
+	}
+	if attn_y_proj_outputs % 128 != 0 {
+		return Err(invalid_data(format!(
+			"expected attn_y raw output columns to be a multiple of 128 for this kernel, got {attn_y_proj_outputs}"
+		)).into());
+	}
+	Ok(attn_y_proj_outputs)
 }
 
 fn validate_ffn_f_inputs(

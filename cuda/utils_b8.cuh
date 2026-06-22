@@ -434,7 +434,7 @@ namespace b8 {
 		const usize HEIGHT, const usize WIDTH,
 		typename T, const usize M, const usize N,
 		const usize GN,
-		const bool GMEM_COL_MODULO = true
+		const bool GMEM_COL_MODULO = false
 	>
 	requires(
 		WIDTH <= GN && WIDTH <= N

@@ -38,12 +38,12 @@ int main(int argc, char *argv[]) {
 	}
 
 	std::vector<b8::FixedI8> h_Q = load_i8_tensor(
-		tensor_path(cli.input_dir, "q_i8.bin"),
+		torch_tensor_path("q_i8.bin"),
 		seq_len,
 		PACKED_DIM
 	);
 	std::vector<b8::FixedI8> h_KV = load_i8_tensor(
-		tensor_path(cli.input_dir, "kv_i8.bin"),
+		torch_tensor_path("kv_i8.bin"),
 		seq_len,
 		KV_PACKED_DIM
 	);

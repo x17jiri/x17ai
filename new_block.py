@@ -72,6 +72,7 @@ def create_inputs() -> None:
 	store_tensor(attn_kv_weights, "attn_kv_weights_i8.safetensors")
 	store_tensor(attn_y_weights, "attn_y_weights_f32.bin", expected_variance=1.0)
 	store_tensor(attn_y_weights, "attn_y_weights_i8.bin")
+	store_tensor(attn_y_weights, "attn_y_weights_i8.safetensors")
 	store_tensor(ffn_f_weights, "ffn_f_weights_f32.bin", expected_variance=1.0)
 	store_tensor(ffn_f_weights, "ffn_f_weights_i8.bin")
 	store_tensor(ffn_f_weights, "ffn_f_weights_i8.safetensors")
@@ -304,6 +305,7 @@ def run_attn() -> None:
 		store_tensor(attn_y_pregate, "attn_y_pregate_i8.bin")
 		store_tensor(attn_y, "attn_y_f32.bin")
 		store_tensor(attn_y, "attn_y_i8.bin")
+		store_tensor(attn_y, "attn_y_i8.safetensors")
 
 #---------------------------------------------------------------------------------------------------
 
