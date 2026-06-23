@@ -34,7 +34,7 @@ namespace {
 		>;
 
 	{% if writer.use_l2_norm %}
-	using Writer = b8::RMSNormMatrixWriter<
+	using Writer = b8::L2NormMatrixWriter<
 		{{writer.store_type}},
 		{{writer.head_dim}}, // HEAD_DIM
 		{{writer.sep_dim}}, // SEP_DIM

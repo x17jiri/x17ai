@@ -178,45 +178,21 @@ namespace b8 {
 		}
 	};
 
-	template<typename T>
-	requires(sizeof(T) == 1)
-	struct MatrixWriter {
-		using Elem = T;
+	template<typename Derived, typename Elem_>
+	struct MatrixStore {
+		using Elem = Elem_;
+		static_assert(sizeof(Elem) == 1);
 
-		T *gC;
+		Elem *gC;
 		usize c_stride;
 
-		X17_DEVICE MatrixWriter(T *gC, usize c_stride):
+		X17_DEVICE MatrixStore(Elem *gC, usize c_stride):
 			gC(gC),
 			c_stride(c_stride)
 		{}
 
-		template<const usize M_TILES, const usize N_TILES>
-		X17_DEVICE void write(
-			usize row, usize col,
-			Fragment_32x32<T> (&acc)[M_TILES][N_TILES]
-		) {
-			GMatrix<T, 32*M_TILES, 32*N_TILES> C(gC, c_stride);
-			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-				store(acc[mi], C, row + 32*mi, col);
-			}
-		}
-	};
-
-	struct Int8Store: MatrixWriter<FixedI8> {
-		using Base = MatrixWriter<FixedI8>;
-		using Elem = FixedI8;
-		using Base::write;
-
-		X17_DEVICE Int8Store(FixedI8 *gC, usize c_stride):
-			Base(gC, c_stride)
-		{}
-
-		X17_DEVICE static Elem convert(f32 value) {
-			return f32_to_fixedi8(value);
-		}
-
-		X17_DEVICE void conv(b32::Fragment_16x16<f32> const &inp, Fragment_16x16<FixedI8> &out) {
+		template<typename T>
+		X17_DEVICE void conv(b32::Fragment_16x16<T> const &inp, Fragment_16x16<Elem> &out) {
 			union {
 				u32 value;
 				struct {
@@ -224,15 +200,15 @@ namespace b8 {
 				} packed;
 			} left, right;
 
-			left.packed.top_0 = convert(inp.v8x16[0].h8x8[0].get0());
-			left.packed.top_1 = convert(inp.v8x16[0].h8x8[0].get1());
-			left.packed.bot_0 = convert(inp.v8x16[1].h8x8[0].get0());
-			left.packed.bot_1 = convert(inp.v8x16[1].h8x8[0].get1());
+			left.packed.top_0 = Derived::convert(inp.v8x16[0].h8x8[0].get0());
+			left.packed.top_1 = Derived::convert(inp.v8x16[0].h8x8[0].get1());
+			left.packed.bot_0 = Derived::convert(inp.v8x16[1].h8x8[0].get0());
+			left.packed.bot_1 = Derived::convert(inp.v8x16[1].h8x8[0].get1());
 
-			right.packed.top_0 = convert(inp.v8x16[0].h8x8[1].get0());
-			right.packed.top_1 = convert(inp.v8x16[0].h8x8[1].get1());
-			right.packed.bot_0 = convert(inp.v8x16[1].h8x8[1].get0());
-			right.packed.bot_1 = convert(inp.v8x16[1].h8x8[1].get1());
+			right.packed.top_0 = Derived::convert(inp.v8x16[0].h8x8[1].get0());
+			right.packed.top_1 = Derived::convert(inp.v8x16[0].h8x8[1].get1());
+			right.packed.bot_0 = Derived::convert(inp.v8x16[1].h8x8[1].get0());
+			right.packed.bot_1 = Derived::convert(inp.v8x16[1].h8x8[1].get1());
 
 			usize tid = threadIdx.x;
 			u32 u0 = left.value;
@@ -254,7 +230,8 @@ namespace b8 {
 			out.v8x16[1].data = __byte_perm(w0, w1, 0x7632);
 		}
 
-		X17_DEVICE void conv(b32::Fragment_32x32<f32> const &inp, Fragment_32x32<FixedI8> &out) {
+		template<typename T>
+		X17_DEVICE void conv(b32::Fragment_32x32<T> const &inp, Fragment_32x32<Elem> &out) {
 			X17_UNROLL for (usize j = 0; j < 2; ++j) {
 				X17_UNROLL for (usize i = 0; i < 2; ++i) {
 					conv(inp.v16x32[j].h16x16[i], out.v16x32[j].h16x16[i]);
@@ -262,109 +239,63 @@ namespace b8 {
 			}
 		}
 
-		template<const usize M_TILES, const usize N_TILES>
-		X17_DEVICE void write(
+		template<typename T, usize N_TILES>
+		requires(sizeof(T) == 4)
+		X17_DEVICE void conv_store(
 			usize row, usize col,
-			b32::Fragment_32x32<f32> (&acc)[M_TILES][N_TILES]
+			b32::Fragment_32x32<T> (&acc)[N_TILES]
 		) {
-			Fragment_32x32<FixedI8> t[M_TILES][N_TILES];
-
-			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-					conv(acc[mi][ni], t[mi][ni]);
-				}
+			Fragment_32x32<Elem> t[N_TILES];
+			X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
+				conv(acc[ni], t[ni]);
 			}
+			direct_store(row, col, t);
+		}
 
-			Base::write(row, col, t);
+		template<usize N_TILES>
+		X17_DEVICE void direct_store(
+			usize row, usize col,
+			Fragment_32x32<Elem> (&acc)[N_TILES]
+		) {
+			GMatrix<Elem, 32, 32*N_TILES> C(gC, c_stride);
+			b8::store(acc, C, row, col);
 		}
 	};
 
-	struct E4m3Store: MatrixWriter<E4m3> {
-		using Base = MatrixWriter<E4m3>;
-		using Elem = E4m3;
-		using Base::write;
+	struct Int8Store: MatrixStore<Int8Store, FixedI8> {
+		using Base = MatrixStore<Int8Store, FixedI8>;
 
-		X17_DEVICE E4m3Store(E4m3 *gC, usize c_stride):
-			Base(gC, c_stride)
-		{}
+		using Base::Elem;
+		using Base::Base;
+		using Base::conv_store;
+		using Base::direct_store;
 
-		X17_DEVICE static Elem convert(f32 value) {
+		X17_DEVICE static FixedI8 convert(f32 value) {
+			return f32_to_fixedi8(value);
+		}
+	};
+
+	struct E4m3Store: MatrixStore<E4m3Store, E4m3> {
+		using Base = MatrixStore<E4m3Store, E4m3>;
+
+		using Base::Elem;
+		using Base::Base;
+		using Base::conv_store;
+		using Base::direct_store;
+
+		X17_DEVICE static E4m3 convert(f32 value) {
 			return f32_to_e4m3(value);
-		}
-
-		X17_DEVICE void conv(b32::Fragment_16x16<f32> const &inp, Fragment_16x16<E4m3> &out) {
-			union {
-				u32 value;
-				struct {
-					E4m3 top_0, top_1, bot_0, bot_1;
-				} packed;
-			} left, right;
-
-			left.packed.top_0 = convert(inp.v8x16[0].h8x8[0].get0());
-			left.packed.top_1 = convert(inp.v8x16[0].h8x8[0].get1());
-			left.packed.bot_0 = convert(inp.v8x16[1].h8x8[0].get0());
-			left.packed.bot_1 = convert(inp.v8x16[1].h8x8[0].get1());
-
-			right.packed.top_0 = convert(inp.v8x16[0].h8x8[1].get0());
-			right.packed.top_1 = convert(inp.v8x16[0].h8x8[1].get1());
-			right.packed.bot_0 = convert(inp.v8x16[1].h8x8[1].get0());
-			right.packed.bot_1 = convert(inp.v8x16[1].h8x8[1].get1());
-
-			usize tid = threadIdx.x;
-			u32 u0 = left.value;
-			u32 u1 = right.value;
-
-			u0 = shuffle_xor_sync(u0, 2);
-
-			u32 v0 = (tid & 2) == 0 ? u1 : u0;
-			u32 v1 = (tid & 2) == 0 ? u0 : u1;
-
-			v0 = shuffle_xor_sync(v0, 3);
-
-			u32 w0 = (tid & 1) == 0 ? v1 : v0;
-			u32 w1 = (tid & 1) == 0 ? v0 : v1;
-
-			w0 = shuffle_xor_sync(w0, 1);
-
-			out.v8x16[0].data = __byte_perm(w0, w1, 0x5410);
-			out.v8x16[1].data = __byte_perm(w0, w1, 0x7632);
-		}
-
-		X17_DEVICE void conv(b32::Fragment_32x32<f32> const &inp, Fragment_32x32<E4m3> &out) {
-			X17_UNROLL for (usize j = 0; j < 2; ++j) {
-				X17_UNROLL for (usize i = 0; i < 2; ++i) {
-					conv(inp.v16x32[j].h16x16[i], out.v16x32[j].h16x16[i]);
-				}
-			}
-		}
-
-		template<const usize M_TILES, const usize N_TILES>
-		X17_DEVICE void write(
-			usize row, usize col,
-			b32::Fragment_32x32<f32> (&acc)[M_TILES][N_TILES]
-		) {
-			Fragment_32x32<E4m3> t[M_TILES][N_TILES];
-
-			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-					conv(acc[mi][ni], t[mi][ni]);
-				}
-			}
-
-			Base::write(row, col, t);
 		}
 	};
 
 	template<typename Store, usize _M_PER_BLOCK, usize _N_PER_BLOCK, f64 SCALE>
-	struct ScaledMatrixWriter {
+	struct ScaledMatrixWriter: Store {
 		static constexpr usize M_PER_BLOCK = _M_PER_BLOCK;
 		static constexpr usize N_PER_BLOCK = _N_PER_BLOCK;
 		static constexpr usize SMEM_BYTES = 0;
 
-		Store store;
-
 		X17_DEVICE ScaledMatrixWriter(typename Store::Elem *gC, usize c_stride):
-			store(gC, c_stride)
+			Store(gC, c_stride)
 		{}
 
 		template<const u32 CAP>
@@ -378,17 +309,17 @@ namespace b8 {
 			usize row, usize col,
 			b32::Fragment_32x32<f32> (&acc)[M_TILES][N_TILES]
 		) {
-			if constexpr (SCALE == 1.0) {
-				store.write(row, col, acc);
-			} else {
-				b32::Fragment_32x32<f32> t[M_TILES][N_TILES];
-				X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+				if constexpr (SCALE != 1.0) {
+					Store::conv_store(row + 32*mi, col, acc);
+				} else {
+					b32::Fragment_32x32<f32> t[N_TILES];
 					X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-						t[mi][ni] = acc[mi][ni];
+						t[ni] = acc[mi][ni];
 						b32::scale_(t[mi][ni], f32(SCALE));
 					}
+					Store::conv_store(row + 32*mi, col, t);
 				}
-				store.write(row, col, t);
 			}
 		}
 
@@ -397,28 +328,24 @@ namespace b8 {
 			usize row, usize col,
 			b32::Fragment_32x32<i32> (&acc)[M_TILES][N_TILES]
 		) {
-			b32::Fragment_32x32<f32> t[M_TILES][N_TILES];
-
 			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+				b32::Fragment_32x32<f32> t[N_TILES];
 				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-					b32::cast<SCALE / FIXED_I8_SCALE>(acc[mi][ni], t[mi][ni]);
+					b32::cast<SCALE / FIXED_I8_SCALE>(acc[mi][ni], t[ni]);
 				}
+				Store::conv_store(row + 32*mi, col, t);
 			}
-
-			store.write(row, col, t);
 		}
 	};
 
 	template<typename Store, usize _M_PER_BLOCK, usize _N_PER_BLOCK, f64 INP_SCALE, f64 OUT_SCALE>
-	struct GeGluMatrixWriter {
+	struct GeGluMatrixWriter: Store {
 		static constexpr usize M_PER_BLOCK = _M_PER_BLOCK;
 		static constexpr usize N_PER_BLOCK = _N_PER_BLOCK;
 		static constexpr usize SMEM_BYTES = 0;
 
-		Store store;
-
 		X17_DEVICE GeGluMatrixWriter(typename Store::Elem *gC, usize c_stride):
-			store(gC, c_stride)
+			Store(gC, c_stride)
 		{}
 
 		template<const u32 CAP>
@@ -460,8 +387,8 @@ namespace b8 {
 				u32 value;
 			} u1, u2, u3, u4, v1, v2, v3, v4;
 
-			Fragment_32x32<typename Store::Elem> t[M_TILES][N_TILES/2];
 			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+				Fragment_32x32<typename Store::Elem> t[N_TILES/2];
 				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
 					u1.packed.a = geglu(acc[mi][ni].v16x32[0].h16x16[0].v8x16[0].h8x8[0]);
 					u1.packed.b = geglu(acc[mi][ni].v16x32[0].h16x16[0].v8x16[1].h8x8[0]);
@@ -505,19 +432,18 @@ namespace b8 {
 					v4.packed.c = u3.packed.d;
 					v4.packed.d = u4.packed.d;
 
-					t[mi][ni/2].v16x32[0].h16x16[ni%2].v8x16[0].data = v1.value;
-					t[mi][ni/2].v16x32[0].h16x16[ni%2].v8x16[1].data = v2.value;
-					t[mi][ni/2].v16x32[1].h16x16[ni%2].v8x16[0].data = v3.value;
-					t[mi][ni/2].v16x32[1].h16x16[ni%2].v8x16[1].data = v4.value;
+					t[ni/2].v16x32[0].h16x16[ni%2].v8x16[0].data = v1.value;
+					t[ni/2].v16x32[0].h16x16[ni%2].v8x16[1].data = v2.value;
+					t[ni/2].v16x32[1].h16x16[ni%2].v8x16[0].data = v3.value;
+					t[ni/2].v16x32[1].h16x16[ni%2].v8x16[1].data = v4.value;
 				}
+				Store::direct_store(row + 32*mi, col / 2, t);
 			}
-
-			store.write(row, col / 2, t);
 		}
 	};
 
 	template<typename Store, usize _M_PER_BLOCK, usize _N_PER_BLOCK, f64 SCALE>
-	struct ResidualMatrixWriter {
+	struct ResidualMatrixWriter: Store {
 		using GResidual = GMatrixDynSize<FixedI8, _N_PER_BLOCK / 2>;
 		using SResidual = SMatrix<FixedI8, _M_PER_BLOCK, _N_PER_BLOCK>;
 
@@ -527,14 +453,13 @@ namespace b8 {
 
 		static_assert(_N_PER_BLOCK % 2 == 0);
 
-		Store store;
 		GResidual gResidual;
 		SResidual sResidual;
 		usize residualRow0;
 		usize residualCol0;
 
 		X17_DEVICE ResidualMatrixWriter(typename Store::Elem *gC, FixedI8 *gResidual, usize c_stride):
-			store(gC, c_stride),
+			Store(gC, c_stride),
 			gResidual(gResidual, c_stride),
 			sResidual(),
 			residualRow0(0),
@@ -600,21 +525,19 @@ namespace b8 {
 				u32 data;
 			} r1, r2, r3, r4, s1, s2, s3, s4;
 
-			Fragment_32x32<FixedI8> residual[M_TILES][N_TILES/2];
-			Fragment_32x32<typename Store::Elem> t[M_TILES][N_TILES/2];
 			usize local_row = row - residualRow0;
 			usize local_col = (col / 2) - residualCol0;
 
 			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-				X17_UNROLL for (usize no = 0; no < N_TILES / 2; ++no) {
-					b8::load_fragment(sResidual, local_row + 32 * mi, local_col + 32 * no, residual[mi][no]);
+				Fragment_32x32<FixedI8> residual[N_TILES/2];
+				X17_UNROLL for (usize ni = 0; ni < N_TILES / 2; ++ni) {
+					b8::load_fragment(sResidual, local_row + 32 * mi, local_col + 32 * ni, residual[ni]);
 				}
-			}
 
-			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
+				Fragment_32x32<typename Store::Elem> t[N_TILES/2];
 				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
 					auto &inp32x32 = acc[mi][ni];
-					auto &res32x32 = residual[mi][ni / 2];
+					auto &res32x32 = residual[ni / 2];
 
 					// Residual fragments are loaded in the final stored layout.
 					// Reconstruct the pre-store 8x8 packing so each residual byte lines up
@@ -688,25 +611,15 @@ namespace b8 {
 					v4.packed.c = u3.packed.d;
 					v4.packed.d = u4.packed.d;
 
-					t[mi][ni/2].v16x32[0].h16x16[ni%2].v8x16[0].data = v1.data;
-					t[mi][ni/2].v16x32[0].h16x16[ni%2].v8x16[1].data = v2.data;
-					t[mi][ni/2].v16x32[1].h16x16[ni%2].v8x16[0].data = v3.data;
-					t[mi][ni/2].v16x32[1].h16x16[ni%2].v8x16[1].data = v4.data;
+					t[ni/2].v16x32[0].h16x16[ni%2].v8x16[0].data = v1.data;
+					t[ni/2].v16x32[0].h16x16[ni%2].v8x16[1].data = v2.data;
+					t[ni/2].v16x32[1].h16x16[ni%2].v8x16[0].data = v3.data;
+					t[ni/2].v16x32[1].h16x16[ni%2].v8x16[1].data = v4.data;
 				}
+				Store::direct_store(row + 32*mi, col / 2, t);
 			}
-
-			store.write(row, col / 2, t);
 		}
 	};
-
-	template<usize M_PER_BLOCK, usize N_PER_BLOCK, f64 SCALE>
-	using FixedI8MatrixWriter = ScaledMatrixWriter<Int8Store, M_PER_BLOCK, N_PER_BLOCK, SCALE>;
-
-	template<usize M_PER_BLOCK, usize N_PER_BLOCK, f64 INP_SCALE, f64 OUT_SCALE>
-	using E4m3MatrixGeGluWriter = GeGluMatrixWriter<E4m3Store, M_PER_BLOCK, N_PER_BLOCK, INP_SCALE, OUT_SCALE>;
-
-	template<usize M_PER_BLOCK, usize N_PER_BLOCK, f64 SCALE>
-	using FixedI8MatrixResidualWriter = ResidualMatrixWriter<Int8Store, M_PER_BLOCK, N_PER_BLOCK, SCALE>;
 
 	template<typename _ALoader, typename _BLoader, typename _Writer>
 	struct Gemm {
@@ -954,7 +867,7 @@ namespace b8 {
 		usize _M_PER_BLOCK,
 		usize _N_PER_BLOCK
 	>
-	struct RMSNormMatrixWriter {
+	struct L2NormMatrixWriter: Store {
 		static constexpr usize M_PER_BLOCK = _M_PER_BLOCK;
 		static constexpr usize N_PER_BLOCK = _N_PER_BLOCK;
 		static constexpr usize SMEM_BYTES = 0;
@@ -964,16 +877,15 @@ namespace b8 {
 		static_assert(HEAD_DIM == SEP_DIM);
 		static_assert(_N_PER_BLOCK % (HEAD_DIM + SEP_DIM) == 0);
 
-		Store store;
 		f32 *g_rrms_ptr;
 		usize rrms_cols;
 
-		X17_DEVICE RMSNormMatrixWriter(
+		X17_DEVICE L2NormMatrixWriter(
 			typename Store::Elem *gC,
 			usize c_stride,
 			f32 *g_rrms_ptr
 		):
-			store(gC, c_stride),
+			Store(gC, c_stride),
 			g_rrms_ptr(g_rrms_ptr),
 			rrms_cols(c_stride / (HEAD_DIM + SEP_DIM))
 		{}
@@ -1030,22 +942,9 @@ namespace b8 {
 				}
 			}
 
-			store.write(row, col, t);
+			for (usize mi = 0; mi < M_TILES; ++mi) {
+				Store::conv_store(row + 32*mi, col, t[mi]);
+			}
 		}
 	};
-
-	template<
-		usize HEAD_DIM,
-		usize SEP_DIM,
-		f64 EPS, f64 HEAD_SCALE,
-		f64 SEP_SCALE,
-		usize M_PER_BLOCK,
-		usize N_PER_BLOCK
-	>
-	using L2NormMatrixWriter = RMSNormMatrixWriter<
-		Int8Store,
-		HEAD_DIM, SEP_DIM,
-		EPS, HEAD_SCALE, SEP_SCALE,
-		M_PER_BLOCK, N_PER_BLOCK
-	>;
 }

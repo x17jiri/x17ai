@@ -28,7 +28,8 @@ namespace Ffn_y_fwd_f8 {
 			>
 	>;
 
-	using Writer = b8::FixedI8MatrixResidualWriter<
+	using Writer = b8::ResidualMatrixWriter<
+		b8::Int8Store,
 		InputLoader::M,
 		WeightLoader::K,
 		OUTPUT_SCALE
