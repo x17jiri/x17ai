@@ -68,7 +68,7 @@ pub struct GemmConfig {
 pub trait EpilogueConfig {
 	fn is_c_dtype_allowed(&self, c_dtype: DType) -> bool;
 
-	fn writer_template(&self, c_cols: Option<NonZeroUsize>) -> BasicGemmWriterTemplate;
+	fn writer_template(&self, c_cols: Option<NonZeroUsize>, c_dtype: DType) -> BasicGemmWriterTemplate;
 }
 
 impl EpilogueConfig for ScaleConfig {
@@ -76,7 +76,7 @@ impl EpilogueConfig for ScaleConfig {
 		c_dtype == DType::Int8
 	}
 
-	fn writer_template(&self, _c_cols: Option<NonZeroUsize>) -> BasicGemmWriterTemplate {
+	fn writer_template(&self, _c_cols: Option<NonZeroUsize>, _c_dtype: DType) -> BasicGemmWriterTemplate {
 		if !self.0.value.is_finite() {
 			todo!("error for invalid values");
 		}
@@ -86,6 +86,7 @@ impl EpilogueConfig for ScaleConfig {
 			use_geglu: false,
 			use_residual: false,
 			c_type: "b8::FixedI8",
+			store_type: "b8::Int8Store",
 			c_stride_expr: "b_rows",
 			scale_val: format_cpp_f64(self.0.value),
 			scale_dscr: self.0.description.as_ref().to_owned(),
@@ -111,7 +112,7 @@ impl EpilogueConfig for RMSNormConfig {
 		c_dtype == DType::Int8
 	}
 
-	fn writer_template(&self, _c_cols: Option<NonZeroUsize>) -> BasicGemmWriterTemplate {
+	fn writer_template(&self, _c_cols: Option<NonZeroUsize>, _c_dtype: DType) -> BasicGemmWriterTemplate {
 		if !self.eps.is_finite() || self.eps < 0.0
 			|| !self.head_scale.value.is_finite() || !self.sep_scale.value.is_finite() {
 			todo!("error for invalid values");
@@ -136,6 +137,7 @@ impl EpilogueConfig for RMSNormConfig {
 			use_geglu: false,
 			use_residual: false,
 			c_type: "b8::FixedI8",
+			store_type: "b8::Int8Store",
 			c_stride_expr: "b_rows",
 			scale_val: String::new(),
 			scale_dscr: String::new(),
@@ -162,10 +164,10 @@ impl EpilogueConfig for RMSNormConfig {
 
 impl EpilogueConfig for ResidualConfig {
 	fn is_c_dtype_allowed(&self, c_dtype: DType) -> bool {
-		c_dtype == DType::Int8
+		c_dtype == DType::Int8 || c_dtype == DType::E4m3
 	}
 
-	fn writer_template(&self, c_cols: Option<NonZeroUsize>) -> BasicGemmWriterTemplate {
+	fn writer_template(&self, c_cols: Option<NonZeroUsize>, c_dtype: DType) -> BasicGemmWriterTemplate {
 		if !self.scale.value.is_finite() || self.scale.value <= 0.0 {
 			todo!("support invalid residual GEMM scale values");
 		}
@@ -175,12 +177,18 @@ impl EpilogueConfig for ResidualConfig {
 		if c_cols.get() % 2 != 0 {
 			todo!("support residual GEMM outputs with odd pregate column count");
 		}
+		let (c_type, store_type) = match c_dtype {
+			DType::Int8 => ("b8::FixedI8", "b8::Int8Store"),
+			DType::E4m3 => ("b8::E4m3", "b8::E4m3Store"),
+			_ => todo!("support this residual GEMM output dtype"),
+		};
 
 		BasicGemmWriterTemplate {
 			use_l2_norm: false,
 			use_geglu: false,
 			use_residual: true,
-			c_type: "b8::FixedI8",
+			c_type,
+			store_type,
 			c_stride_expr: "b_rows / 2",
 			scale_val: format_cpp_f64(self.scale.value),
 			scale_dscr: self.scale.description.as_ref().to_owned(),
@@ -206,7 +214,7 @@ impl EpilogueConfig for GeGluConfig {
 		c_dtype == DType::E4m3
 	}
 
-	fn writer_template(&self, c_cols: Option<NonZeroUsize>) -> BasicGemmWriterTemplate {
+	fn writer_template(&self, c_cols: Option<NonZeroUsize>, _c_dtype: DType) -> BasicGemmWriterTemplate {
 		if !self.inp_scale.value.is_finite() || self.inp_scale.value <= 0.0 {
 			todo!("support invalid GeGLU input scale values");
 		}
@@ -225,6 +233,7 @@ impl EpilogueConfig for GeGluConfig {
 			use_geglu: true,
 			use_residual: false,
 			c_type: "b8::E4m3",
+			store_type: "b8::E4m3Store",
 			c_stride_expr: "b_rows / 2",
 			scale_val: String::new(),
 			scale_dscr: String::new(),
@@ -475,7 +484,7 @@ impl<Epilogue: GemmEpilogue> GemmKernel<Epilogue> {
 			DType::E4m3 => ("b8::E4m3", "E4m3MatrixLoader"),
 			_ => todo!("support this GEMM input B dtype"),
 		};
-		let writer_template = epilogue_config.writer_template(b_rows);
+		let writer_template = epilogue_config.writer_template(b_rows, gemm_config.c_dtype);
 
 		let common = BasicGemmCommonTemplate {
 			a_cols: gemm_config.a.cols,

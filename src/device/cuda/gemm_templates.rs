@@ -16,6 +16,7 @@ pub struct BasicGemmWriterTemplate {
 	pub use_geglu: bool,
 	pub use_residual: bool,
 	pub c_type: &'static str,
+	pub store_type: &'static str,
 	pub c_stride_expr: &'static str,
 	pub scale_val: String,
 	pub scale_dscr: String,

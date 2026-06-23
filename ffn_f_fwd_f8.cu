@@ -27,11 +27,12 @@ namespace Ffn_f_fwd {
 			>
 		>;
 
-	using Writer = b8::E4m3MatrixGeGluWriter<
-		F_WIDTH,
+	using Writer = b8::GeGluMatrixWriter<
+		b8::E4m3Store,
 		InputLoader::M,
 		WeightLoader::K,
-		MODEL_DIM
+		math::constexpr_inv_sqrt(f64(MODEL_DIM)),
+		math::constexpr_inv_sqrt(f64(MODEL_DIM))
 	>;
 
 	static_assert(InputLoader::GMEM_PRELOAD == 2);
@@ -48,7 +49,7 @@ namespace Ffn_f_fwd {
 	) {
 		auto a = InputLoader(inp, n_inputs);
 		auto b = WeightLoader(w, F_PROJ_OUTPUTS);
-		auto o = Writer(out);
+		auto o = Writer(out, F_WIDTH);
 		Kernel().run(a, b, o);
 	}
 }

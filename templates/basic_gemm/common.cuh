@@ -34,7 +34,8 @@ namespace {
 		>;
 
 	{% if writer.use_l2_norm %}
-	using Writer = b8::L2NormMatrixWriter<
+	using Writer = b8::RMSNormMatrixWriter<
+		{{writer.store_type}},
 		{{writer.head_dim}}, // HEAD_DIM
 		{{writer.sep_dim}}, // SEP_DIM
 		{{writer.eps_val}}, // EPS
@@ -45,7 +46,8 @@ namespace {
 	>;
 	{% else %}
 	{% if writer.use_geglu %}
-	using Writer = b8::E4m3MatrixGeGluWriter<
+	using Writer = b8::GeGluMatrixWriter<
+		{{writer.store_type}},
 		InputLoader::M, // M_PER_BLOCK
 		WeightLoader::K, // N_PER_BLOCK
 		{{writer.geglu_inp_scale_val}}, // INP_SCALE = {{writer.geglu_inp_scale_dscr}}
@@ -53,13 +55,15 @@ namespace {
 	>;
 	{% else %}
 	{% if writer.use_residual %}
-	using Writer = b8::FixedI8MatrixResidualWriter<
+	using Writer = b8::ResidualMatrixWriter<
+		{{writer.store_type}},
 		InputLoader::M, // M_PER_BLOCK
 		WeightLoader::K, // N_PER_BLOCK
 		{{writer.scale_val}} // SCALE = {{writer.scale_dscr}}
 	>;
 	{% else %}
-	using Writer = b8::FixedI8MatrixWriter<
+	using Writer = b8::ScaledMatrixWriter<
+		{{writer.store_type}},
 		InputLoader::M, // M_PER_BLOCK
 		WeightLoader::K, // N_PER_BLOCK
 		{{writer.scale_val}} // SCALE = {{writer.scale_dscr}}
