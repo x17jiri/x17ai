@@ -115,6 +115,11 @@ def gated_residual(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 	output = y[..., 1::2]
 	return old_weight * x + new_weight * output
 
+def store_cached_safetensors(bin_name: str, safetensors_name: str, rows: int, cols: int) -> None:
+	if not tensor_path(bin_name).exists():
+		return
+	store_tensor(load_tensor(bin_name, rows, cols), safetensors_name)
+
 #---------------------------------------------------------------------------------------------------
 
 def run_ffn() -> None:
@@ -181,7 +186,7 @@ def attn_one_head(
 	sink_k: torch.Tensor,
 	sink_v: torch.Tensor,
 	temperature_scale: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 	seq_len = q.shape[0]
 	QK_DIM = q.shape[1]
 
@@ -213,6 +218,8 @@ def attn_one_head(
 	S -= max
 	P = torch.exp(S)
 	sum = P.sum(dim=1, keepdim=True)
+	LOG2_E = 1.0 / math.log(2.0)
+	l = (torch.log(sum) + max).squeeze(1) * LOG2_E + math.log2(255.0)
 
 	P = torch.cat((P[:, :1], quantize(P[:, 1:])), dim=1)
 
@@ -221,8 +228,7 @@ def attn_one_head(
 	sum_recip = torch.reciprocal(sum)
 	o *= sum_recip
 
-	LOG2_E = 1.0 / math.log(2.0)
-	return o, max.squeeze(1) * LOG2_E, bare_max
+	return o, l, max.squeeze(1) * LOG2_E, bare_max
 
 def attn(
 	q: torch.Tensor,
@@ -231,7 +237,7 @@ def attn(
 	sinks_k: torch.Tensor,
 	sinks_v: torch.Tensor,
 	attn_temperature: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 	_, n_heads, _ = q.shape
 	head_results = [
 		attn_one_head(
@@ -244,12 +250,13 @@ def attn(
 		)
 		for h in range(n_heads)
 	]
-	out = torch.stack([head_out for head_out, _, _ in head_results], dim=1)
-	max_values = torch.stack([head_max for _, head_max, _ in head_results], dim=1)
-	bare_max_values = torch.stack([head_max_i32 for _, _, head_max_i32 in head_results], dim=1)
-	return out, max_values, bare_max_values
+	out = torch.stack([head_out for head_out, _, _, _ in head_results], dim=1)
+	l_values = torch.stack([head_l for _, head_l, _, _ in head_results], dim=1)
+	max_values = torch.stack([head_max for _, _, head_max, _ in head_results], dim=1)
+	bare_max_values = torch.stack([head_max_i32 for _, _, _, head_max_i32 in head_results], dim=1)
+	return out, l_values, max_values, bare_max_values
 
-def run_attn() -> None:
+def run_attn(run_full_attention: bool) -> None:
 	x = load_tensor("x_i8.bin", N_INPUTS, MODEL_DIM)
 	sinks_k = load_tensor("sinks_k_i8.bin", N_HEADS, HEAD_DIM)
 	sinks_v = load_tensor("sinks_v_i8.bin", N_HEADS, HEAD_DIM)
@@ -275,9 +282,8 @@ def run_attn() -> None:
 	v_i8 = quantize(v)
 	kv_i8 = torch.cat((k_i8, v_i8), dim=2)
 
-	RUN_ATTN = False
-	if RUN_ATTN:
-		attn_out, attn_maxes, attn_maxes_i32 = attn(q_i8, k_i8, v_i8, sinks_k, sinks_v, attn_temperature)
+	if run_full_attention:
+		attn_out, attn_l, attn_maxes, attn_maxes_i32 = attn(q_i8, k_i8, v_i8, sinks_k, sinks_v, attn_temperature)
 		attn_out_flat = attn_out.reshape(N_INPUTS, ATTN_WIDTH)
 		attn_out_i8 = quantize(attn_out_flat)
 		attn_y_pregate = (
@@ -298,32 +304,44 @@ def run_attn() -> None:
 	store_tensor(kv, "kv_f32.bin", expected_variance=1.0)
 	store_tensor(kv_i8, "kv_i8.bin")
 	store_tensor(kv_i8, "kv_i8.safetensors")
-	if RUN_ATTN:
+	if run_full_attention:
 		store_tensor(attn_maxes.transpose(0, 1), "attn_maxes_f32.bin")
 		store_i32_tensor(attn_maxes_i32.transpose(0, 1), "attn_maxes_i32.bin")
+		store_tensor(attn_l.transpose(0, 1), "attn_l_f32.bin")
+		store_tensor(attn_l.transpose(0, 1), "attn_l_f32.safetensors")
 		store_tensor(attn_out, "attn_out_f32.bin", expected_variance=1.0)
 		store_tensor(attn_out_i8, "attn_out_i8.bin")
+		store_tensor(attn_out_i8, "attn_out_i8.safetensors")
 		store_tensor(attn_y_pregate, "attn_y_pregate_f32.bin", expected_variance=1.0)
 		store_tensor(attn_y_pregate, "attn_y_pregate_i8.bin")
 		store_tensor(attn_y, "attn_y_f32.bin")
 		store_tensor(attn_y, "attn_y_i8.bin")
 		store_tensor(attn_y, "attn_y_i8.safetensors")
+	else:
+		store_cached_safetensors("attn_out_i8.bin", "attn_out_i8.safetensors", N_INPUTS, ATTN_WIDTH)
+		store_cached_safetensors("attn_l_f32.bin", "attn_l_f32.safetensors", N_HEADS, N_INPUTS)
+		store_cached_safetensors("attn_y_i8.bin", "attn_y_i8.safetensors", N_INPUTS, MODEL_DIM)
 
 #---------------------------------------------------------------------------------------------------
 
-def run_block() -> None:
+def run_block(run_full_attention: bool) -> None:
 	run_ffn()
-	run_attn()
+	run_attn(run_full_attention)
 
 def main() -> None:
 	parser = argparse.ArgumentParser()
 	parser.add_argument("--create-inputs", action="store_true")
+	parser.add_argument(
+		"--skip-attn",
+		action="store_true",
+		help="skip the expensive full attention reference tensors",
+	)
 	args = parser.parse_args()
 
 	if args.create_inputs:
 		create_inputs()
 
-	run_block()
+	run_block(run_full_attention=not args.skip_attn)
 
 if __name__ == "__main__":
 	main()

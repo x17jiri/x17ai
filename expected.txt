@@ -1,0 +1,174 @@
+
+
+--- I8 Tensor Compare ---
+A: tmp/block_torch/q_i8.safetensors
+B: tmp/block_rust/q_i8.safetensors
+Shape: [16384, 64, 32]
+A min/max:      -47 / 44
+B min/max:      -47 / 44
+A mean/var:     -7.706583e-04 / 6.426495e+01
+B mean/var:     -7.706583e-04 / 6.426495e+01
+Mismatched i8:  0/33554432 (0.00%)
+Max abs diff:   0
+A outside [-100, +100]: 0
+B outside [-100, +100]: 0
+A outside [-126, +126]: 0
+B outside [-126, +126]: 0
+
+--- I8 Tensor Compare ---
+A: tmp/block_torch/kv_i8.safetensors
+B: tmp/block_rust/kv_i8.safetensors
+Shape: [16384, 64, 64]
+A min/max:      -57 / 56
+B min/max:      -57 / 56
+A mean/var:     -1.544461e-03 / 8.622969e+01
+B mean/var:     -1.544356e-03 / 8.622969e+01
+Mismatched i8:  17/67108864 (0.00%)
+Max abs diff:   1
+Abs diff == 1: 17/67108864 (0.00%)
+A outside [-100, +100]: 0
+B outside [-100, +100]: 0
+A outside [-126, +126]: 0
+B outside [-126, +126]: 0
+
+--- F32 Tensor Compare ---
+A: tmp/block_torch/k_rrms_f32.safetensors
+B: tmp/block_rust/k_rrms_f32.safetensors
+Shape: [16384, 64]
+Max abs diff:     6.984919e-10
+Mean abs diff:    9.465317e-11
+Max pct diff:     0.0000%, 0.0000%, 0.0000%, 0.0000%, 0.0000%, 0.0000%
+  (MIN_MAG after scaling each tensor to variance 1:
+               1e-6,     1e-5,     1e-4,     1e-3,     1e-2,     1e-1)
+Exact f32 match:  634729/1048576 (60.53%)
+Raw exact bits:   634729/1048576 (60.53%)
+Signed-zero-only mismatches: 0
+Sign-flipped values: 0, largest magnitude: 0.000000e+00
+Within  1 ULP:     1038063/1048576 (99.00%)  example miss [120, 37]: ref=3.890147e-03, other=3.890146e-03, ulp=3
+Within  2 ULP:     1048564/1048576 (100.00%)  example miss [120, 37]: ref=3.890147e-03, other=3.890146e-03, ulp=3
+Within  3 ULP:     1048576/1048576 (100.00%)
+A non-finite: nan=0, +inf=0, -inf=0
+B non-finite: nan=0, +inf=0, -inf=0
+Worst abs mismatch at [120, 37]: ref=3.890147e-03, other=3.890146e-03
+Worst pct mismatch (variance-1 MIN_MAG > 1e-1) at [29, 7]: ref=2.597814e-03, other=2.597814e-03, pct=0.000023842%
+Worst pct mismatch (variance-1 MIN_MAG > 1e-2) at [29, 7]: ref=2.597814e-03, other=2.597814e-03, pct=0.000023842%
+Worst pct mismatch (variance-1 MIN_MAG > 1e-3) at [29, 7]: ref=2.597814e-03, other=2.597814e-03, pct=0.000023842%
+
+--- I8 Tensor Compare ---
+A: tmp/block_torch/attn_out_i8.safetensors
+B: tmp/block_rust/attn_out_i8.safetensors
+Shape: [16384, 2048]
+A min/max:      -51 / 53
+B min/max:      -51 / 53
+A mean/var:     -1.747519e-03 / 4.501151e+01
+B mean/var:     -1.945496e-03 / 4.497738e+01
+Mismatched i8:  11508204/33554432 (34.30%)
+Max abs diff:   5
+Abs diff == 1: 11086126/33554432 (33.04%)
+Abs diff == 2: 415342/33554432 (1.24%)
+Abs diff == 3: 6688/33554432 (0.02%)
+Abs diff == 4: 47/33554432 (0.00%)
+Abs diff == 5: 1/33554432 (0.00%)
+A outside [-100, +100]: 0
+B outside [-100, +100]: 0
+A outside [-126, +126]: 0
+B outside [-126, +126]: 0
+
+--- F32 Tensor Compare ---
+A: tmp/block_torch/attn_l_f32.safetensors
+B: tmp/block_rust/attn_l_f32.safetensors
+Shape: [64, 16384]
+Max abs diff:     8.109512e-01
+Mean abs diff:    6.296995e-06
+Max pct diff:     1.0321%, 1.0321%, 1.0321%, 1.0321%, 1.0321%, 1.0321%
+  (MIN_MAG after scaling each tensor to variance 1:
+               1e-6,     1e-5,     1e-4,     1e-3,     1e-2,     1e-1)
+Exact f32 match:  379839/1048576 (36.22%)
+Raw exact bits:   379839/1048576 (36.22%)
+Signed-zero-only mismatches: 0
+Sign-flipped values: 0, largest magnitude: 0.000000e+00
+Within  1 ULP:     948597/1048576 (90.47%)  example miss [61, 12738]: ref=7.938081e+01, other=7.856986e+01, ulp=106293
+Within  2 ULP:     1043692/1048576 (99.53%)  example miss [61, 12738]: ref=7.938081e+01, other=7.856986e+01, ulp=106293
+Within  3 ULP:     1046705/1048576 (99.82%)  example miss [61, 12738]: ref=7.938081e+01, other=7.856986e+01, ulp=106293
+Within  4 ULP:     1046903/1048576 (99.84%)  example miss [61, 12738]: ref=7.938081e+01, other=7.856986e+01, ulp=106293
+Within  5 ULP:     1047053/1048576 (99.85%)  example miss [61, 12738]: ref=7.938081e+01, other=7.856986e+01, ulp=106293
+Within  6 ULP:     1047158/1048576 (99.86%)  example miss [61, 12738]: ref=7.938081e+01, other=7.856986e+01, ulp=106293
+Within  7 ULP:     1047244/1048576 (99.87%)  example miss [61, 12738]: ref=7.938081e+01, other=7.856986e+01, ulp=106293
+Within  8 ULP:     1047310/1048576 (99.88%)  example miss [61, 12738]: ref=7.938081e+01, other=7.856986e+01, ulp=106293
+Within  9 ULP:     1047381/1048576 (99.89%)  example miss [61, 12738]: ref=7.938081e+01, other=7.856986e+01, ulp=106293
+Within 10 ULP:     1047442/1048576 (99.89%)  example miss [61, 12738]: ref=7.938081e+01, other=7.856986e+01, ulp=106293
+A non-finite: nan=0, +inf=0, -inf=0
+B non-finite: nan=0, +inf=0, -inf=0
+Worst abs mismatch at [61, 12738]: ref=7.938081e+01, other=7.856986e+01
+Worst pct mismatch (variance-1 MIN_MAG > 1e-1) at [61, 12738]: ref=7.938081e+01, other=7.856986e+01, pct=1.032137871%
+Worst pct mismatch (variance-1 MIN_MAG > 1e-2) at [61, 12738]: ref=7.938081e+01, other=7.856986e+01, pct=1.032137871%
+Worst pct mismatch (variance-1 MIN_MAG > 1e-3) at [61, 12738]: ref=7.938081e+01, other=7.856986e+01, pct=1.032137871%
+
+--- I8 Tensor Compare ---
+A: tmp/block_torch/attn_y_i8.safetensors
+B: tmp/block_rust/attn_y_i8.safetensors
+Shape: [16384, 2048]
+A min/max:      -83 / 86
+B min/max:      -81 / 84
+A mean/var:     5.677044e-04 / 4.504603e+01
+B mean/var:     6.942749e-04 / 4.501312e+01
+Mismatched i8:  11632534/33554432 (34.67%)
+Max abs diff:   10
+Abs diff == 1: 10507140/33554432 (31.31%)
+Abs diff == 2: 987698/33554432 (2.94%)
+Abs diff == 3: 119214/33554432 (0.36%)
+Abs diff == 4: 15907/33554432 (0.05%)
+Abs diff == 5: 2193/33554432 (0.01%)
+Abs diff == 6: 332/33554432 (0.00%)
+Abs diff == 7: 41/33554432 (0.00%)
+Abs diff == 8: 5/33554432 (0.00%)
+Abs diff == 9: 3/33554432 (0.00%)
+Abs diff == 10: 1/33554432 (0.00%)
+A outside [-100, +100]: 0
+B outside [-100, +100]: 0
+A outside [-126, +126]: 0
+B outside [-126, +126]: 0
+
+--- F8 E4M3FN Tensor Compare ---
+A: tmp/block_torch/ffn_f_f8.safetensors
+B: tmp/block_rust/ffn_f_f8.safetensors
+Shape: [16384, 2048]
+Max abs diff:     2.500000e-01
+Mean abs diff:    7.012277e-07
+Max pct diff:     12.5000%, 12.5000%, 12.5000%, 12.5000%, 12.5000%, 12.5000%
+  (MIN_MAG after scaling each tensor to variance 1:
+               1e-6,     1e-5,     1e-4,     1e-3,     1e-2,     1e-1)
+Exact f8 value match: 33552771/33554432 (100.00%)
+Raw exact bytes:       33552771/33554432 (100.00%)
+Signed-zero-only mismatches: 0
+Sign-flipped values: 0, largest magnitude: 0.000000e+00
+Within  1 ULP:     33554404/33554432 (100.00%)  example miss [1689, 960]: ref=-1.562500e-02, other=0.000000e+00, ulp=8
+Within  2 ULP:     33554404/33554432 (100.00%)  example miss [1689, 960]: ref=-1.562500e-02, other=0.000000e+00, ulp=8
+Within  3 ULP:     33554404/33554432 (100.00%)  example miss [1689, 960]: ref=-1.562500e-02, other=0.000000e+00, ulp=8
+Within  4 ULP:     33554404/33554432 (100.00%)  example miss [1689, 960]: ref=-1.562500e-02, other=0.000000e+00, ulp=8
+Within  5 ULP:     33554404/33554432 (100.00%)  example miss [1689, 960]: ref=-1.562500e-02, other=0.000000e+00, ulp=8
+Within  6 ULP:     33554404/33554432 (100.00%)  example miss [1689, 960]: ref=-1.562500e-02, other=0.000000e+00, ulp=8
+Within  7 ULP:     33554404/33554432 (100.00%)  example miss [1689, 960]: ref=-1.562500e-02, other=0.000000e+00, ulp=8
+Within  8 ULP:     33554432/33554432 (100.00%)
+A non-finite: nan=0, +inf=0, -inf=0
+B non-finite: nan=0, +inf=0, -inf=0
+Worst abs mismatch at [2310, 1033]: ref=2.750000e+00 (0x43), other=2.500000e+00 (0x42)
+Worst pct mismatch (variance-1 MIN_MAG > 1e-1) at [68, 796]: ref=-1.406250e-01, other=-1.250000e-01, pct=12.500000000%
+Worst pct mismatch (variance-1 MIN_MAG > 1e-2) at [54, 683]: ref=-7.031250e-02, other=-6.250000e-02, pct=12.500000000%
+Worst pct mismatch (variance-1 MIN_MAG > 1e-3) at [54, 683]: ref=-7.031250e-02, other=-6.250000e-02, pct=12.500000000%
+
+--- I8 Tensor Compare ---
+A: tmp/block_torch/ffn_y_i8.safetensors
+B: tmp/block_rust/ffn_y_i8.safetensors
+Shape: [16384, 2048]
+A min/max:      -117 / 127
+B min/max:      -117 / 127
+A mean/var:     -4.128814e-03 / 6.624684e+01
+B mean/var:     -4.123986e-03 / 6.624678e+01
+Mismatched i8:  8996/33554432 (0.03%)
+Max abs diff:   1
+Abs diff == 1: 8996/33554432 (0.03%)
+A outside [-100, +100]: 30
+B outside [-100, +100]: 30
+A outside [-126, +126]: 2
+B outside [-126, +126]: 2
