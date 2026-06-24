@@ -70,7 +70,7 @@ namespace b8 {
 		const usize M, const usize K,
 		const usize GMEM_PRELOAD = 2
 	>
-	using FixedI8MatrixLoader = MatrixLoader<FixedI8, GN, M, K, GMEM_PRELOAD>;
+	using I8MatrixLoader = MatrixLoader<i8, GN, M, K, GMEM_PRELOAD>;
 
 	template<
 		typename T,
@@ -196,7 +196,7 @@ namespace b8 {
 			union {
 				u32 value;
 				struct {
-					FixedI8 top_0, top_1, bot_0, bot_1;
+					Elem top_0, top_1, bot_0, bot_1;
 				} packed;
 			} left, right;
 
@@ -262,15 +262,15 @@ namespace b8 {
 		}
 	};
 
-	struct Int8Store: MatrixStore<Int8Store, FixedI8> {
-		using Base = MatrixStore<Int8Store, FixedI8>;
+	struct I8Store: MatrixStore<I8Store, i8> {
+		using Base = MatrixStore<I8Store, i8>;
 
 		using Base::Elem;
 		using Base::Base;
 		using Base::conv_store;
 		using Base::direct_store;
 
-		X17_DEVICE static FixedI8 convert(f32 value) {
+		X17_DEVICE static i8 convert(f32 value) {
 			return f32_to_fixedi8(value);
 		}
 	};
@@ -310,13 +310,13 @@ namespace b8 {
 			b32::Fragment_32x32<f32> (&acc)[M_TILES][N_TILES]
 		) {
 			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
-				if constexpr (SCALE != 1.0) {
+				if constexpr (SCALE == 1.0) {
 					Store::conv_store(row + 32*mi, col, acc);
 				} else {
 					b32::Fragment_32x32<f32> t[N_TILES];
 					X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
 						t[ni] = acc[mi][ni];
-						b32::scale_(t[mi][ni], f32(SCALE));
+						b32::scale_(t[ni], f32(SCALE));
 					}
 					Store::conv_store(row + 32*mi, col, t);
 				}
@@ -331,7 +331,7 @@ namespace b8 {
 			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
 				b32::Fragment_32x32<f32> t[N_TILES];
 				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
-					b32::cast<SCALE / FIXED_I8_SCALE>(acc[mi][ni], t[ni]);
+					b32::cast<SCALE>(acc[mi][ni], t[ni]);
 				}
 				Store::conv_store(row + 32*mi, col, t);
 			}
@@ -355,20 +355,18 @@ namespace b8 {
 		X17_DEVICE void async_load(usize row, usize col) {}
 
 		X17_DEVICE typename Store::Elem geglu(b32::Fragment_8x8<i32> frag) {
-			// `frag.val0` and `frag.val1` are raw accumulators of `sum(FixedI8 * FixedI8)`.
-			// Each `FixedI8` is scaled by FIXED_I8_SCALE, so `FixedI8 * FixedI8` is scaled
-			// by `FIXED_I8_SCALE^2`. We need to divide the inputs by this value and
-			// apply the configured real-value scales.
-			//
 			// `math::fast::gelu` expects squared scale factors, hence the `_2` suffix:
-			// - `GEGLU_INP_SCALE_2` is the squared scale of the gate input
-			// - `GEGLU_OUT_SCALE_2` is logically the squared scale of the `lin` input, but we
+			// - `INP_SCALE_2` is the squared scale of the gate input
+			// - `OUT_SCALE_2` is logically the squared scale of the `lin` input, but we
 			//   apply it to the GELU output instead. That lets GELU fold the multiply into its
 			//   constants, so the scale is effectively free at runtime.
-			constexpr f64 FIXED_I8_SCALE_2 = FIXED_I8_SCALE * FIXED_I8_SCALE;
-			constexpr f64 GEGLU_INP_SCALE_2 = (INP_SCALE * INP_SCALE) / (FIXED_I8_SCALE_2 * FIXED_I8_SCALE_2);
-			constexpr f64 GEGLU_OUT_SCALE_2 = (OUT_SCALE * OUT_SCALE) / (FIXED_I8_SCALE_2 * FIXED_I8_SCALE_2);
-			f32 gate = math::fast::gelu<GEGLU_INP_SCALE_2, GEGLU_OUT_SCALE_2, 1.0>(f32(frag.get0())).val;
+			constexpr f64 INP_SCALE_2 = INP_SCALE * INP_SCALE;
+			constexpr f64 OUT_SCALE_2 = OUT_SCALE * OUT_SCALE;
+			f32 gate = math::fast::gelu<
+				INP_SCALE_2,
+				INP_SCALE_2 * OUT_SCALE_2,
+				1.0
+			>(f32(frag.get0())).val;
 			f32 lin = f32(frag.get1());
 			return Store::convert(gate * lin);
 		}
@@ -442,7 +440,7 @@ namespace b8 {
 		}
 	};
 
-	template<typename Store, usize _M_PER_BLOCK, usize _N_PER_BLOCK, f64 SCALE>
+	template<typename Store, usize _M_PER_BLOCK, usize _N_PER_BLOCK, f64 INP_SCALE, f64  OUT_SCALE>
 	struct ResidualMatrixWriter: Store {
 		using GResidual = GMatrixDynSize<FixedI8, _N_PER_BLOCK / 2>;
 		using SResidual = SMatrix<FixedI8, _M_PER_BLOCK, _N_PER_BLOCK>;
@@ -489,19 +487,21 @@ namespace b8 {
 
 			f32 old_weight =
 				math::fast::sigmoid_base4<
-					-SCALE
+					-INP_SCALE,
+					1.0 / FIXED_I8_SCALE
 				>(gate);
 
 			f32 new_weight =
 				math::fast::imprecise_softplus_base4<
-					SCALE,
-					SCALE * FIXED_I8_SCALE
+					INP_SCALE,
+					INP_SCALE * OUT_SCALE
 				>(gate);
 
-			f32 residual_f = f32(residual);
-			f32 output_f = f32(frag.get1());
+			f32 old_val = f32(residual);
+			f32 new_val = f32(frag.get1());
+			f32 val = math::fma(new_weight, new_val, old_weight * old_val);
 
-			return Store::convert(math::fma(new_weight, output_f, old_weight * residual_f));
+			return Store::convert(val);
 		}
 
 		template<const usize M_TILES, const usize N_TILES, typename A>
@@ -693,8 +693,8 @@ namespace b8 {
 				async_load_commit();
 			}
 
-			Fragment_32x32<FixedI8> rA[M_TILES][K_TILES];
-			Fragment_32x32<FixedI8> rBT[K_TILES][N_TILES];
+			Fragment_32x32<i8> rA[M_TILES][K_TILES];
+			Fragment_32x32<i8> rBT[K_TILES][N_TILES];
 			b32::Fragment_32x32<i32> acc[M_TILES][N_TILES];
 			X17_UNROLL for (usize mi = 0; mi < M_TILES; ++mi) {
 				X17_UNROLL for (usize ni = 0; ni < N_TILES; ++ni) {
@@ -911,7 +911,7 @@ namespace b8 {
 			f32 rrms[4 * M_TILES][HEADS];
 
 			// k
-			constexpr f64 K_SCALE = HEAD_SCALE * f64(FIXED_I8_SCALE);
+			constexpr f64 K_SCALE = HEAD_SCALE;
 			X17_UNROLL for (usize hi = 0; hi < HEADS; ++hi) {
 				kv_helpers::l2_norm<K_SCALE, false, EPS, true, HEADS, K_TILES>(
 					acc,
@@ -924,7 +924,7 @@ namespace b8 {
 			}
 
 			// v
-			constexpr f64 V_SCALE = SEP_SCALE / f64(FIXED_I8_SCALE);
+			constexpr f64 V_SCALE = SEP_SCALE;
 			X17_UNROLL for (usize hi = 0; hi < HEADS; ++hi) {
 				kv_helpers::raw_output<V_SCALE, V_TILES>(
 					acc,

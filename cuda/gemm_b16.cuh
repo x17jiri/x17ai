@@ -132,7 +132,7 @@ namespace b16 {
 		const usize _M, const usize _K,
 		const usize _GMEM_PRELOAD = 2
 	>
-	struct FixedI8MatrixLoader {
+	struct I8MatrixLoader {
 		using Elem = bf16;
 
 		static constexpr usize GN = _GN;
@@ -142,12 +142,12 @@ namespace b16 {
 
 		static_assert(GN % K == 0);
 		static_assert(M % 32 == 0);
-		static_assert(K * GMEM_PRELOAD * sizeof(b8::FixedI8) % 128 == 0);
+		static_assert(K * GMEM_PRELOAD * sizeof(i8) % 128 == 0);
 
-		static constexpr usize SMEM_BYTES = M * K * GMEM_PRELOAD * sizeof(b8::FixedI8);
+		static constexpr usize SMEM_BYTES = M * K * GMEM_PRELOAD * sizeof(i8);
 
-		using GInput = GMatrixDynSize<b8::FixedI8, GN>;
-		using SPreload = b8::SMatrix<b8::FixedI8, M, K * GMEM_PRELOAD>;
+		using GInput = GMatrixDynSize<i8, GN>;
+		using SPreload = b8::SMatrix<i8, M, K * GMEM_PRELOAD>;
 
 		usize _m_rows;
 		GInput gInput;
@@ -156,7 +156,7 @@ namespace b16 {
 		X17_DEVICE usize m_rows() const { return _m_rows; }
 		X17_DEVICE usize n_cols() const { return GN; }
 
-		X17_DEVICE FixedI8MatrixLoader(b8::FixedI8 *gmem_addr, usize m_rows):
+		X17_DEVICE I8MatrixLoader(i8 *gmem_addr, usize m_rows):
 			_m_rows(m_rows),
 			gInput(gmem_addr),
 			sPreload()
@@ -178,7 +178,7 @@ namespace b16 {
 
 		X17_DEVICE void load_fragment(usize step, usize m, usize k, Fragment_32x32<bf16> &frag) {
 			usize first_col = K * (step % GMEM_PRELOAD);
-			b8::Fragment_32x32<b8::FixedI8> fixed_i8_frag;
+			b8::Fragment_32x32<i8> fixed_i8_frag;
 			b8::load_fragment(sPreload, 32*m, first_col + 32*k, fixed_i8_frag);
 			cast<false>(fixed_i8_frag, frag);
 		}

@@ -24,6 +24,7 @@ use x17ai::device::cuda::{CudaDevice, CudaTimer, attn, gemm};
 use x17ai::dtype::DType;
 use x17ai::tensor::Tensor;
 use x17ai::Diagnostics;
+use x17ai::util::InvSqrt;
 
 const HEAD_DIM: usize = 32;
 const N_HEADS: usize = 64;
@@ -81,9 +82,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let k_rrms = Tensor::new_empty(&[n_inputs, N_HEADS], DType::F32, device.clone())?;
 	let attn_out = Tensor::new_empty(&[n_inputs, q_proj_outputs], DType::Int8, device.clone())?;
 	let attn_l = Tensor::new_empty(&[N_HEADS, n_inputs], DType::F32, device.clone())?;
-	let attn_y = Tensor::new_empty(&[n_inputs, model_dim], DType::Int8, device.clone())?;
+	let attn_y = Tensor::new_empty(&[n_inputs, model_dim], DType::E4m3, device.clone())?;
 	let ffn_f = Tensor::new_empty(&[n_inputs, F_WIDTH], DType::E4m3, device.clone())?;
-	let ffn_y = Tensor::new_empty(&[n_inputs, model_dim], DType::Int8, device.clone())?;
+	let ffn_y = Tensor::new_empty(&[n_inputs, model_dim], DType::E4m3, device.clone())?;
 
 	let mut q_diagnostics = Diagnostics::new();
 	let attn_q_kernel = match create_attn_q_kernel(
@@ -274,9 +275,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	k_rrms.save_safetensors_file(output_path("k_rrms_f32.safetensors"))?;
 	attn_out.save_safetensors_file(output_path("attn_out_i8.safetensors"))?;
 	attn_l.save_safetensors_file(output_path("attn_l_f32.safetensors"))?;
-	attn_y.save_safetensors_file(output_path("attn_y_i8.safetensors"))?;
+	attn_y.save_safetensors_file(output_path("attn_y_f8.safetensors"))?;
 	ffn_f.save_safetensors_file(output_path("ffn_f_f8.safetensors"))?;
-	ffn_y.save_safetensors_file(output_path("ffn_y_i8.safetensors"))?;
+	ffn_y.save_safetensors_file(output_path("ffn_y_f8.safetensors"))?;
 
 	println!("loaded x: {:?} {:?}, {} bytes on CUDA", x.shape(), x.dtype(), x.bytes());
 	println!(
@@ -451,9 +452,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	println!("stored {}", output_path("k_rrms_f32.safetensors").display());
 	println!("stored {}", output_path("attn_out_i8.safetensors").display());
 	println!("stored {}", output_path("attn_l_f32.safetensors").display());
-	println!("stored {}", output_path("attn_y_i8.safetensors").display());
+	println!("stored {}", output_path("attn_y_f8.safetensors").display());
 	println!("stored {}", output_path("ffn_f_f8.safetensors").display());
-	println!("stored {}", output_path("ffn_y_i8.safetensors").display());
+	println!("stored {}", output_path("ffn_y_f8.safetensors").display());
 
 	Ok(())
 }
@@ -483,10 +484,16 @@ fn create_attn_q_kernel(
 		},
 		c_dtype: DType::Int8,
 	};
-	let scale_config = gemm::ScaleConfig(gemm::Scale {
-		value: 1.0 / f64::sqrt(model_dim as f64),
-		description: format!("1 / sqrt({model_dim})").into(),
-	});
+	let scale_config = gemm::ScaleConfig {
+		inp_scale: gemm::Scale {
+			value: f64::inv_sqrt(model_dim as f64) / (FIXED_I8_SCALE * FIXED_I8_SCALE),
+			description: format!("inv_sqrt({model_dim}) / FIXED_I8_SCALE**2").into(),
+		},
+		out_scale: gemm::Scale {
+			value: FIXED_I8_SCALE,
+			description: "FIXED_I8_SCALE".into(),
+		},
+	};
 
 	match gemm::GemmKernel::<gemm::ScaleEpilogue>::new(
 		device,
@@ -533,13 +540,13 @@ fn create_attn_kv_kernel(
 		eps: L2_NORM_EPS,
 		head_dim,
 		sep_dim: head_dim,
-		head_scale: gemm::Scale {
-			value: 1.0,
-			description: "1".into(),
+		inp_scale: gemm::Scale {
+			value: f64::inv_sqrt(model_dim as f64) / (FIXED_I8_SCALE * FIXED_I8_SCALE),
+			description: format!("inv_sqrt({model_dim}) / FIXED_I8_SCALE**2").into(),
 		},
-		sep_scale: gemm::Scale {
-			value: 1.0 / f64::sqrt(model_dim as f64),
-			description: format!("1 / sqrt({model_dim})").into(),
+		out_scale: gemm::Scale {
+			value: FIXED_I8_SCALE,
+			description: "FIXED_I8_SCALE".into(),
 		},
 	};
 
@@ -611,13 +618,16 @@ fn create_attn_y_kernel(
 			rows: Some(y_proj_outputs),
 			trans: true,
 		},
-		c_dtype: DType::Int8,
+		c_dtype: DType::E4m3,
 	};
-	let scale = 1.0 / (f64::sqrt(attn_width as f64) * FIXED_I8_SCALE * FIXED_I8_SCALE);
 	let residual_config = gemm::ResidualConfig {
-		scale: gemm::Scale {
-			value: scale,
-			description: format!("1 / (sqrt({attn_width}) * {FIXED_I8_SCALE} * {FIXED_I8_SCALE})").into(),
+		inp_scale: gemm::Scale {
+			value: f64::inv_sqrt(attn_width as f64) / (FIXED_I8_SCALE * FIXED_I8_SCALE),
+			description: format!("inv_sqrt({attn_width}) / {FIXED_I8_SCALE}**2").into(),
+		},
+		out_scale: gemm::Scale {
+			value: 1.0,
+			description: "1.0".into(),
 		},
 	};
 
@@ -663,12 +673,12 @@ fn create_ffn_f_kernel(
 	};
 	let geglu_config = gemm::GeGluConfig {
 		inp_scale: gemm::Scale {
-			value: 1.0 / f64::sqrt(model_dim as f64),
-			description: format!("1 / sqrt({model_dim})").into(),
+			value: f64::inv_sqrt(model_dim as f64) / (FIXED_I8_SCALE * FIXED_I8_SCALE),
+			description: format!("inv_sqrt({model_dim}) / FIXED_I8_SCALE**2").into(),
 		},
 		out_scale: gemm::Scale {
-			value: 1.0 / f64::sqrt(model_dim as f64),
-			description: format!("1 / sqrt({model_dim})").into(),
+			value: 1.0,
+			description: "1.0".into(),
 		},
 	};
 
@@ -710,15 +720,17 @@ fn create_ffn_y_kernel(
 			rows: Some(y_proj_outputs),
 			trans: true,
 		},
-		c_dtype: DType::Int8,
+		c_dtype: DType::E4m3,
 	};
-	let gelu_var_fix_2 =
-		1.0 / ((1.0 / 3.0) + (0.5 / std::f64::consts::PI) * (1.0 / f64::sqrt(3.0)));
-	let scale = f64::sqrt(gelu_var_fix_2 / f_width as f64) / FIXED_I8_SCALE;
+	let gelu_var_fix_2 = 1.0 / ((1.0 / 3.0) + (0.5 / std::f64::consts::PI) * (1.0 / f64::sqrt(3.0)));
 	let residual_config = gemm::ResidualConfig {
-		scale: gemm::Scale {
-			value: scale,
+		inp_scale: gemm::Scale {
+			value: f64::sqrt(gelu_var_fix_2 / f_width as f64) / FIXED_I8_SCALE,
 			description: format!("sqrt(GELU_VAR_FIX_2 / {f_width}) / {FIXED_I8_SCALE}").into(),
+		},
+		out_scale: gemm::Scale {
+			value: 1.0,
+			description: "1.0".into(),
 		},
 	};
 

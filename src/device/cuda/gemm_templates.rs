@@ -11,6 +11,7 @@ use askama::Template;
 
 //--------------------------------------------------------------------------------------------------
 
+#[allow(clippy::struct_excessive_bools)]
 pub struct BasicGemmWriterTemplate {
 	pub use_l2_norm: bool,
 	pub use_geglu: bool,
@@ -18,8 +19,6 @@ pub struct BasicGemmWriterTemplate {
 	pub c_type: &'static str,
 	pub store_type: &'static str,
 	pub c_stride_expr: &'static str,
-	pub scale_val: String,
-	pub scale_dscr: String,
 	pub head_dim: usize,
 	pub sep_dim: usize,
 	pub eps_val: String,
@@ -27,10 +26,10 @@ pub struct BasicGemmWriterTemplate {
 	pub head_scale_dscr: String,
 	pub sep_scale_val: String,
 	pub sep_scale_dscr: String,
-	pub geglu_inp_scale_val: String,
-	pub geglu_inp_scale_dscr: String,
-	pub geglu_out_scale_val: String,
-	pub geglu_out_scale_dscr: String,
+	pub inp_scale_val: String,
+	pub inp_scale_dscr: String,
+	pub out_scale_val: String,
+	pub out_scale_dscr: String,
 	pub has_rrms_output: bool,
 	pub has_residual_input: bool,
 }

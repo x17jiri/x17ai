@@ -155,6 +155,7 @@ def run_ffn() -> None:
 	store_tensor(y, "ffn_y_bf16.bin")
 	store_tensor(y, "ffn_y_i8.bin")
 	store_tensor(y, "ffn_y_i8.safetensors")
+	store_tensor(y, "ffn_y_f8.safetensors")
 
 #---------------------------------------------------------------------------------------------------
 
@@ -317,6 +318,7 @@ def run_attn(run_full_attention: bool) -> None:
 		store_tensor(attn_y, "attn_y_f32.bin")
 		store_tensor(attn_y, "attn_y_i8.bin")
 		store_tensor(attn_y, "attn_y_i8.safetensors")
+		store_tensor(attn_y, "attn_y_f8.safetensors")
 	else:
 		store_cached_safetensors("attn_out_i8.bin", "attn_out_i8.safetensors", N_INPUTS, ATTN_WIDTH)
 		store_cached_safetensors("attn_l_f32.bin", "attn_l_f32.safetensors", N_HEADS, N_INPUTS)

@@ -13,6 +13,18 @@ pub mod intrusive_rc;
 
 //--------------------------------------------------------------------------------------------------
 
+pub trait InvSqrt {
+	fn inv_sqrt(self) -> Self;
+}
+
+impl InvSqrt for f64 {
+	fn inv_sqrt(self) -> Self {
+		self.sqrt().recip()
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+
 pub trait LossyFrom<T> {
 	fn lossy_from(value: T) -> Self;
 }

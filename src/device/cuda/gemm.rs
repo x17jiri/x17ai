@@ -30,19 +30,23 @@ pub struct Scale {
 	pub description: Cow<'static, str>,
 }
 
-pub struct ScaleConfig(pub Scale);
+pub struct ScaleConfig {
+	pub inp_scale: Scale,
+	pub out_scale: Scale,
+}
 
 pub struct RMSNormConfig {
 	pub eps: f64,
 	pub head_dim: usize,
 	pub sep_dim: usize,
 
-	pub head_scale: Scale,
-	pub sep_scale: Scale,
+	pub inp_scale: Scale,
+	pub out_scale: Scale,
 }
 
 pub struct ResidualConfig {
-	pub scale: Scale,
+	pub inp_scale: Scale,
+	pub out_scale: Scale,
 }
 
 pub struct GeGluConfig {
@@ -77,7 +81,7 @@ impl EpilogueConfig for ScaleConfig {
 	}
 
 	fn writer_template(&self, _c_cols: Option<NonZeroUsize>, _c_dtype: DType) -> BasicGemmWriterTemplate {
-		if !self.0.value.is_finite() {
+		if !self.inp_scale.value.is_finite() || !self.out_scale.value.is_finite() {
 			todo!("error for invalid values");
 		}
 
@@ -85,11 +89,9 @@ impl EpilogueConfig for ScaleConfig {
 			use_l2_norm: false,
 			use_geglu: false,
 			use_residual: false,
-			c_type: "b8::FixedI8",
-			store_type: "b8::Int8Store",
+			c_type: "i8",
+			store_type: "b8::I8Store",
 			c_stride_expr: "b_rows",
-			scale_val: format_cpp_f64(self.0.value),
-			scale_dscr: self.0.description.as_ref().to_owned(),
 			head_dim: 0,
 			sep_dim: 0,
 			eps_val: String::new(),
@@ -97,10 +99,10 @@ impl EpilogueConfig for ScaleConfig {
 			head_scale_dscr: String::new(),
 			sep_scale_val: String::new(),
 			sep_scale_dscr: String::new(),
-			geglu_inp_scale_val: String::new(),
-			geglu_inp_scale_dscr: String::new(),
-			geglu_out_scale_val: String::new(),
-			geglu_out_scale_dscr: String::new(),
+			inp_scale_val: format_cpp_f64(self.inp_scale.value),
+			inp_scale_dscr: self.inp_scale.description.as_ref().to_owned(),
+			out_scale_val: format_cpp_f64(self.out_scale.value),
+			out_scale_dscr: self.out_scale.description.as_ref().to_owned(),
 			has_rrms_output: false,
 			has_residual_input: false,
 		}
@@ -114,7 +116,7 @@ impl EpilogueConfig for RMSNormConfig {
 
 	fn writer_template(&self, _c_cols: Option<NonZeroUsize>, _c_dtype: DType) -> BasicGemmWriterTemplate {
 		if !self.eps.is_finite() || self.eps < 0.0
-			|| !self.head_scale.value.is_finite() || !self.sep_scale.value.is_finite() {
+			|| !self.inp_scale.value.is_finite() || !self.out_scale.value.is_finite() {
 			todo!("error for invalid values");
 		}
 
@@ -131,31 +133,32 @@ impl EpilogueConfig for RMSNormConfig {
 		// but the compilation will fail if the constraints are not met.
 
 		#[allow(clippy::cast_precision_loss)]
-		let head_scale = self.head_scale.value * f64::sqrt(self.head_dim as f64);
 		BasicGemmWriterTemplate {
 			use_l2_norm: true,
 			use_geglu: false,
 			use_residual: false,
-			c_type: "b8::FixedI8",
-			store_type: "b8::Int8Store",
+			c_type: "i8",
+			store_type: "b8::I8Store",
 			c_stride_expr: "b_rows",
-			scale_val: String::new(),
-			scale_dscr: String::new(),
 			head_dim: self.head_dim,
 			sep_dim: self.sep_dim,
 			eps_val: format_cpp_f64(self.eps),
-			head_scale_val: format_cpp_f64(head_scale),
+			head_scale_val: format_cpp_f64(self.out_scale.value * f64::sqrt(self.head_dim as f64)),
 			head_scale_dscr: format!(
 				"({}) * sqrt({})",
-				self.head_scale.description.as_ref(),
+				self.out_scale.description.as_ref(),
 				self.head_dim,
 			),
-			sep_scale_val: format_cpp_f64(self.sep_scale.value),
-			sep_scale_dscr: self.sep_scale.description.as_ref().to_owned(),
-			geglu_inp_scale_val: String::new(),
-			geglu_inp_scale_dscr: String::new(),
-			geglu_out_scale_val: String::new(),
-			geglu_out_scale_dscr: String::new(),
+			sep_scale_val: format_cpp_f64(self.inp_scale.value * self.out_scale.value),
+			sep_scale_dscr: format!(
+				"({}) * ({})",
+				self.inp_scale.description.as_ref(),
+				self.out_scale.description.as_ref(),
+			),
+			inp_scale_val: String::new(),
+			inp_scale_dscr: String::new(),
+			out_scale_val: String::new(),
+			out_scale_dscr: String::new(),
 			has_rrms_output: true,
 			has_residual_input: false,
 		}
@@ -168,7 +171,8 @@ impl EpilogueConfig for ResidualConfig {
 	}
 
 	fn writer_template(&self, c_cols: Option<NonZeroUsize>, c_dtype: DType) -> BasicGemmWriterTemplate {
-		if !self.scale.value.is_finite() || self.scale.value <= 0.0 {
+		if !self.inp_scale.value.is_finite() || self.inp_scale.value <= 0.0
+			|| !self.out_scale.value.is_finite() || self.out_scale.value <= 0.0 {
 			todo!("support invalid residual GEMM scale values");
 		}
 		let Some(c_cols) = c_cols else {
@@ -178,7 +182,7 @@ impl EpilogueConfig for ResidualConfig {
 			todo!("support residual GEMM outputs with odd pregate column count");
 		}
 		let (c_type, store_type) = match c_dtype {
-			DType::Int8 => ("b8::FixedI8", "b8::Int8Store"),
+			DType::Int8 => ("i8", "b8::I8Store"),
 			DType::E4m3 => ("b8::E4m3", "b8::E4m3Store"),
 			_ => todo!("support this residual GEMM output dtype"),
 		};
@@ -190,8 +194,6 @@ impl EpilogueConfig for ResidualConfig {
 			c_type,
 			store_type,
 			c_stride_expr: "b_rows / 2",
-			scale_val: format_cpp_f64(self.scale.value),
-			scale_dscr: self.scale.description.as_ref().to_owned(),
 			head_dim: 0,
 			sep_dim: 0,
 			eps_val: String::new(),
@@ -199,10 +201,10 @@ impl EpilogueConfig for ResidualConfig {
 			head_scale_dscr: String::new(),
 			sep_scale_val: String::new(),
 			sep_scale_dscr: String::new(),
-			geglu_inp_scale_val: String::new(),
-			geglu_inp_scale_dscr: String::new(),
-			geglu_out_scale_val: String::new(),
-			geglu_out_scale_dscr: String::new(),
+			inp_scale_val: format_cpp_f64(self.inp_scale.value),
+			inp_scale_dscr: self.inp_scale.description.as_ref().to_owned(),
+			out_scale_val: format_cpp_f64(self.out_scale.value),
+			out_scale_dscr: self.out_scale.description.as_ref().to_owned(),
 			has_rrms_output: false,
 			has_residual_input: true,
 		}
@@ -235,8 +237,6 @@ impl EpilogueConfig for GeGluConfig {
 			c_type: "b8::E4m3",
 			store_type: "b8::E4m3Store",
 			c_stride_expr: "b_rows / 2",
-			scale_val: String::new(),
-			scale_dscr: String::new(),
 			head_dim: 0,
 			sep_dim: 0,
 			eps_val: String::new(),
@@ -244,10 +244,10 @@ impl EpilogueConfig for GeGluConfig {
 			head_scale_dscr: String::new(),
 			sep_scale_val: String::new(),
 			sep_scale_dscr: String::new(),
-			geglu_inp_scale_val: format_cpp_f64(self.inp_scale.value),
-			geglu_inp_scale_dscr: self.inp_scale.description.as_ref().to_owned(),
-			geglu_out_scale_val: format_cpp_f64(self.out_scale.value),
-			geglu_out_scale_dscr: self.out_scale.description.as_ref().to_owned(),
+			inp_scale_val: format_cpp_f64(self.inp_scale.value),
+			inp_scale_dscr: self.inp_scale.description.as_ref().to_owned(),
+			out_scale_val: format_cpp_f64(self.out_scale.value),
+			out_scale_dscr: self.out_scale.description.as_ref().to_owned(),
 			has_rrms_output: false,
 			has_residual_input: false,
 		}
@@ -475,12 +475,12 @@ impl<Epilogue: GemmEpilogue> GemmKernel<Epilogue> {
 		let b_rows = Some(b_rows);
 
 		let (a_cpp_type, a_loader) = match gemm_config.a.dtype {
-			DType::Int8 => ("b8::FixedI8", "FixedI8MatrixLoader"),
+			DType::Int8 => ("i8", "I8MatrixLoader"),
 			DType::E4m3 => ("b8::E4m3", "E4m3MatrixLoader"),
 			_ => todo!("support this GEMM input A dtype"),
 		};
 		let (b_cpp_type, b_loader) = match gemm_config.b.dtype {
-			DType::Int8 => ("b8::FixedI8", "FixedI8MatrixLoader"),
+			DType::Int8 => ("i8", "I8MatrixLoader"),
 			DType::E4m3 => ("b8::E4m3", "E4m3MatrixLoader"),
 			_ => todo!("support this GEMM input B dtype"),
 		};
