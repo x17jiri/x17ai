@@ -279,182 +279,107 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	ffn_f.save_safetensors_file(output_path("ffn_f_f8.safetensors"))?;
 	ffn_y.save_safetensors_file(output_path("ffn_y_f8.safetensors"))?;
 
-	println!("loaded x: {:?} {:?}, {} bytes on CUDA", x.shape(), x.dtype(), x.bytes());
+	println!("loaded:");
+	println!("\tx: {:?} {:?}, {} bytes", x.shape(), x.dtype(), x.bytes());
 	println!(
-		"loaded attn_q_weights: {:?} {:?}, {} bytes on CUDA",
+		"\tattn_q_weights: {:?} {:?}, {} bytes",
 		q_weights.shape(),
 		q_weights.dtype(),
 		q_weights.bytes()
 	);
 	println!(
-		"loaded attn_kv_weights: {:?} {:?}, {} bytes on CUDA",
+		"\tattn_kv_weights: {:?} {:?}, {} bytes",
 		kv_weights.shape(),
 		kv_weights.dtype(),
 		kv_weights.bytes()
 	);
 	println!(
-		"loaded ffn_f_weights: {:?} {:?}, {} bytes on CUDA",
+		"\tffn_f_weights: {:?} {:?}, {} bytes",
 		ffn_f_weights.shape(),
 		ffn_f_weights.dtype(),
 		ffn_f_weights.bytes()
 	);
 	println!(
-		"loaded ffn_y_weights: {:?} {:?}, {} bytes on CUDA",
+		"\tffn_y_weights: {:?} {:?}, {} bytes",
 		ffn_y_weights.shape(),
 		ffn_y_weights.dtype(),
 		ffn_y_weights.bytes()
 	);
 	println!(
-		"loaded attn_y_weights: {:?} {:?}, {} bytes on CUDA",
+		"\tattn_y_weights: {:?} {:?}, {} bytes",
 		attn_y_weights.shape(),
 		attn_y_weights.dtype(),
 		attn_y_weights.bytes()
 	);
 	println!(
-		"loaded sinks_k: {:?} {:?}, {} bytes on CUDA",
+		"\tsinks_k: {:?} {:?}, {} bytes",
 		sinks_k.shape(),
 		sinks_k.dtype(),
 		sinks_k.bytes()
 	);
 	println!(
-		"loaded sinks_v: {:?} {:?}, {} bytes on CUDA",
+		"\tsinks_v: {:?} {:?}, {} bytes",
 		sinks_v.shape(),
 		sinks_v.dtype(),
 		sinks_v.bytes()
 	);
 	println!(
-		"loaded attn_temperature: {:?} {:?}, {} bytes on CUDA",
+		"\tattn_temperature: {:?} {:?}, {} bytes",
 		attn_temperature.shape(),
 		attn_temperature.dtype(),
 		attn_temperature.bytes()
 	);
-	println!("allocated q: {:?} {:?}, {} bytes copied to CPU", q.shape(), q.dtype(), q.bytes());
-	println!("allocated kv: {:?} {:?}, {} bytes copied to CPU", kv.shape(), kv.dtype(), kv.bytes());
+	println!("dimensions:");
 	println!(
-		"allocated k_rrms: {:?} {:?}, {} bytes copied to CPU",
-		k_rrms.shape(),
-		k_rrms.dtype(),
-		k_rrms.bytes()
+		"\tattn_q: n_inputs={n_inputs}, model_dim={model_dim}, q_proj_outputs={q_proj_outputs}"
 	);
 	println!(
-		"allocated attn_out: {:?} {:?}, {} bytes copied to CPU",
-		attn_out.shape(),
-		attn_out.dtype(),
-		attn_out.bytes()
+		"\tattn_kv: n_inputs={n_inputs}, model_dim={model_dim}, kv_proj_outputs={kv_proj_outputs}"
 	);
 	println!(
-		"allocated attn_l: {:?} {:?}, {} bytes copied to CPU",
-		attn_l.shape(),
-		attn_l.dtype(),
-		attn_l.bytes()
+		"\tffn_f: n_inputs={n_inputs}, model_dim={model_dim}, ffn_f_proj_outputs={ffn_f_proj_outputs}"
 	);
 	println!(
-		"allocated attn_y: {:?} {:?}, {} bytes copied to CPU",
-		attn_y.shape(),
-		attn_y.dtype(),
-		attn_y.bytes()
+		"\tffn_y: n_inputs={n_inputs}, f_width={F_WIDTH}, model_dim={model_dim}, ffn_y_proj_outputs={ffn_y_proj_outputs}"
 	);
 	println!(
-		"allocated ffn_f: {:?} {:?}, {} bytes copied to CPU",
-		ffn_f.shape(),
-		ffn_f.dtype(),
-		ffn_f.bytes()
+		"\tattn_y: n_inputs={n_inputs}, attn_width={ATTN_WIDTH}, model_dim={model_dim}, attn_y_proj_outputs={attn_y_proj_outputs}"
 	);
-	println!(
-		"allocated ffn_y: {:?} {:?}, {} bytes copied to CPU",
-		ffn_y.shape(),
-		ffn_y.dtype(),
-		ffn_y.bytes()
-	);
-	println!(
-		"attn_q dimensions: n_inputs={n_inputs}, model_dim={model_dim}, q_proj_outputs={q_proj_outputs}"
-	);
-	println!(
-		"attn_kv dimensions: n_inputs={n_inputs}, model_dim={model_dim}, kv_proj_outputs={kv_proj_outputs}"
-	);
-	println!(
-		"ffn_f dimensions: n_inputs={n_inputs}, model_dim={model_dim}, ffn_f_proj_outputs={ffn_f_proj_outputs}"
-	);
-	println!(
-		"ffn_y dimensions: n_inputs={n_inputs}, f_width={F_WIDTH}, model_dim={model_dim}, ffn_y_proj_outputs={ffn_y_proj_outputs}"
-	);
-	println!(
-		"attn_y dimensions: n_inputs={n_inputs}, attn_width={ATTN_WIDTH}, model_dim={model_dim}, attn_y_proj_outputs={attn_y_proj_outputs}"
-	);
-	println!("generated GEMM kernel files in {}", attn_q_kernel.dir_path.display());
-	println!("common source: {}", attn_q_kernel.common_path.display());
-	println!("kernel source: {}", attn_q_kernel.kernel_path.display());
-	println!("kernel ptx: {}", attn_q_kernel.ptx_path.display());
-	println!("kernel cubin: {}", attn_q_kernel.cubin_path.display());
-	println!("metadata source: {}", attn_q_kernel.meta_path.display());
-	println!("metadata executable: {}", attn_q_kernel.meta_exe_path.display());
-	println!("metadata json: {}", attn_q_kernel.meta_json_path.display());
-	println!("generated KV GEMM kernel files in {}", attn_kv_kernel.dir_path.display());
-	println!("kv common source: {}", attn_kv_kernel.common_path.display());
-	println!("kv kernel source: {}", attn_kv_kernel.kernel_path.display());
-	println!("kv kernel ptx: {}", attn_kv_kernel.ptx_path.display());
-	println!("kv kernel cubin: {}", attn_kv_kernel.cubin_path.display());
-	println!("kv metadata source: {}", attn_kv_kernel.meta_path.display());
-	println!("kv metadata executable: {}", attn_kv_kernel.meta_exe_path.display());
-	println!("kv metadata json: {}", attn_kv_kernel.meta_json_path.display());
-	println!("generated FFN F GEMM kernel files in {}", ffn_f_kernel.dir_path.display());
-	println!("ffn_f common source: {}", ffn_f_kernel.common_path.display());
-	println!("ffn_f kernel source: {}", ffn_f_kernel.kernel_path.display());
-	println!("ffn_f kernel ptx: {}", ffn_f_kernel.ptx_path.display());
-	println!("ffn_f kernel cubin: {}", ffn_f_kernel.cubin_path.display());
-	println!("ffn_f metadata source: {}", ffn_f_kernel.meta_path.display());
-	println!("ffn_f metadata executable: {}", ffn_f_kernel.meta_exe_path.display());
-	println!("ffn_f metadata json: {}", ffn_f_kernel.meta_json_path.display());
-	println!("generated FFN Y GEMM kernel files in {}", ffn_y_kernel.dir_path.display());
-	println!("ffn_y common source: {}", ffn_y_kernel.common_path.display());
-	println!("ffn_y kernel source: {}", ffn_y_kernel.kernel_path.display());
-	println!("ffn_y kernel ptx: {}", ffn_y_kernel.ptx_path.display());
-	println!("ffn_y kernel cubin: {}", ffn_y_kernel.cubin_path.display());
-	println!("ffn_y metadata source: {}", ffn_y_kernel.meta_path.display());
-	println!("ffn_y metadata executable: {}", ffn_y_kernel.meta_exe_path.display());
-	println!("ffn_y metadata json: {}", ffn_y_kernel.meta_json_path.display());
-	println!("generated ATTN Y GEMM kernel files in {}", attn_y_kernel.dir_path.display());
-	println!("attn_y common source: {}", attn_y_kernel.common_path.display());
-	println!("attn_y kernel source: {}", attn_y_kernel.kernel_path.display());
-	println!("attn_y kernel ptx: {}", attn_y_kernel.ptx_path.display());
-	println!("attn_y kernel cubin: {}", attn_y_kernel.cubin_path.display());
-	println!("attn_y metadata source: {}", attn_y_kernel.meta_path.display());
-	println!("attn_y metadata executable: {}", attn_y_kernel.meta_exe_path.display());
-	println!("attn_y metadata json: {}", attn_y_kernel.meta_json_path.display());
-	println!("generated attention kernel files in {}", attn_kernel.dir_path.display());
-	println!("attention common source: {}", attn_kernel.common_path.display());
-	println!("attention kernel source: {}", attn_kernel.kernel_path.display());
-	println!("attention kernel ptx: {}", attn_kernel.ptx_path.display());
-	println!("attention kernel cubin: {}", attn_kernel.cubin_path.display());
-	println!("attention metadata source: {}", attn_kernel.meta_path.display());
-	println!("attention metadata executable: {}", attn_kernel.meta_exe_path.display());
-	println!("attention metadata json: {}", attn_kernel.meta_json_path.display());
+	println!("generated:");
+	println!("\tGEMM kernel files in {}", attn_q_kernel.dir_path.display());
+	println!("\tKV GEMM kernel files in {}", attn_kv_kernel.dir_path.display());
+	println!("\tFFN F GEMM kernel files in {}", ffn_f_kernel.dir_path.display());
+	println!("\tFFN Y GEMM kernel files in {}", ffn_y_kernel.dir_path.display());
+	println!("\tATTN Y GEMM kernel files in {}", attn_y_kernel.dir_path.display());
+	println!("\tattention kernel files in {}", attn_kernel.dir_path.display());
+	println!("launched:");
 	let q_kernel_ms = q_kernel_seconds * 1000.0;
 	let q_kernel_tflops = attn_q_kernel.n_ops(&x, &q_weights) / q_kernel_seconds / 1.0e12;
-	println!("launched attn_q_fwd in {q_kernel_ms:.4} ms, {q_kernel_tflops:.3} TFLOPS");
+	println!("\tattn_q_fwd in {q_kernel_ms:.4} ms, {q_kernel_tflops:.3} TFLOPS");
 	let kv_kernel_ms = kv_kernel_seconds * 1000.0;
 	let kv_kernel_tflops = attn_kv_kernel.n_ops(&x, &kv_weights) / kv_kernel_seconds / 1.0e12;
-	println!("launched attn_kv_fwd in {kv_kernel_ms:.4} ms, {kv_kernel_tflops:.3} TFLOPS");
+	println!("\tattn_kv_fwd in {kv_kernel_ms:.4} ms, {kv_kernel_tflops:.3} TFLOPS");
 	let attn_kernel_ms = attn_kernel_seconds * 1000.0;
 	let attn_kernel_tflops = attn_kernel.n_ops(n_inputs, WINDOW_SIZE) / attn_kernel_seconds / 1.0e12;
-	println!("launched attn_fwd_i8 in {attn_kernel_ms:.4} ms, {attn_kernel_tflops:.3} TFLOPS");
+	println!("\tattn_fwd_i8 in {attn_kernel_ms:.4} ms, {attn_kernel_tflops:.3} TFLOPS");
 	let attn_y_kernel_ms = attn_y_kernel_seconds * 1000.0;
 	let attn_y_kernel_tflops = attn_y_kernel.n_ops(&attn_out, &attn_y_weights) / attn_y_kernel_seconds / 1.0e12;
-	println!("launched attn_y_fwd in {attn_y_kernel_ms:.4} ms, {attn_y_kernel_tflops:.3} TFLOPS");
+	println!("\tattn_y_fwd in {attn_y_kernel_ms:.4} ms, {attn_y_kernel_tflops:.3} TFLOPS");
 	let ffn_f_kernel_ms = ffn_f_kernel_seconds * 1000.0;
 	let ffn_f_kernel_tflops = ffn_f_kernel.n_ops(&x, &ffn_f_weights) / ffn_f_kernel_seconds / 1.0e12;
-	println!("launched ffn_f_fwd in {ffn_f_kernel_ms:.4} ms, {ffn_f_kernel_tflops:.3} TFLOPS");
+	println!("\tffn_f_fwd in {ffn_f_kernel_ms:.4} ms, {ffn_f_kernel_tflops:.3} TFLOPS");
 	let ffn_y_kernel_ms = ffn_y_kernel_seconds * 1000.0;
 	let ffn_y_kernel_tflops = ffn_y_kernel.n_ops(&ffn_f, &ffn_y_weights) / ffn_y_kernel_seconds / 1.0e12;
-	println!("launched ffn_y_fwd_f8 in {ffn_y_kernel_ms:.4} ms, {ffn_y_kernel_tflops:.3} TFLOPS");
-	println!("stored {}", output_path("q_i8.safetensors").display());
-	println!("stored {}", output_path("kv_i8.safetensors").display());
-	println!("stored {}", output_path("k_rrms_f32.safetensors").display());
-	println!("stored {}", output_path("attn_out_i8.safetensors").display());
-	println!("stored {}", output_path("attn_l_f32.safetensors").display());
-	println!("stored {}", output_path("attn_y_f8.safetensors").display());
-	println!("stored {}", output_path("ffn_f_f8.safetensors").display());
-	println!("stored {}", output_path("ffn_y_f8.safetensors").display());
+	println!("\tffn_y_fwd_f8 in {ffn_y_kernel_ms:.4} ms, {ffn_y_kernel_tflops:.3} TFLOPS");
+	println!("stored:");
+	println!("\t{}", output_path("q_i8.safetensors").display());
+	println!("\t{}", output_path("kv_i8.safetensors").display());
+	println!("\t{}", output_path("k_rrms_f32.safetensors").display());
+	println!("\t{}", output_path("attn_out_i8.safetensors").display());
+	println!("\t{}", output_path("attn_l_f32.safetensors").display());
+	println!("\t{}", output_path("attn_y_f8.safetensors").display());
+	println!("\t{}", output_path("ffn_f_f8.safetensors").display());
+	println!("\t{}", output_path("ffn_y_f8.safetensors").display());
 
 	Ok(())
 }
